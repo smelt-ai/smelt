@@ -1,5 +1,5 @@
 //! 会话目录单测：投影与 attention 直接喂状态；事件流、缓存、换代、各调用的线格式用
-//! `UnixStream::pair()` 上的假运行时。
+//! `RuntimeStream::pair()` 上的假运行时。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
@@ -662,7 +662,7 @@ struct FakeRuntime {
     /// 收到的全部首帧请求。
     requests: Mutex<Vec<Value>>,
     /// event_subscribe 连接的服务端。
-    subscriptions: Mutex<Vec<UnixStream>>,
+    subscriptions: Mutex<Vec<RuntimeStream>>,
     /// Control 方法 → 结果。没登记的回 method_not_found。
     results: Mutex<HashMap<String, Value>>,
 }
@@ -684,14 +684,14 @@ impl FakeRuntime {
     fn client(self: &Arc<Self>) -> RuntimeClient {
         let runtime = Arc::clone(self);
         RuntimeClient::new(move || {
-            let (client, server) = UnixStream::pair()?;
+            let (client, server) = RuntimeStream::pair()?;
             let runtime = Arc::clone(&runtime);
             std::thread::spawn(move || runtime.serve(server));
             Ok(client)
         })
     }
 
-    fn serve(&self, server: UnixStream) {
+    fn serve(&self, server: RuntimeStream) {
         let mut line = String::new();
         if BufReader::new(&server).read_line(&mut line).is_err() || line.is_empty() {
             return;

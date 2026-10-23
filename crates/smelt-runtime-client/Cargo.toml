@@ -23,3 +23,7 @@ base64 = "0.22"
 # （debug 也一样，手机上没有源码目录可读）。
 tungstenite = "0.29"
 rust-embed = { version = "8", features = ["debug-embed"] }
+
+# Windows 上 std 没有 UnixStream，连接流换成系统 AF_UNIX 的这个封装（见 stream 模块）。
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1.2"

@@ -25,7 +25,6 @@ mod view;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -41,7 +40,7 @@ use smelt_model::session_control::parse_conversation_submit_response;
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use smelt_runtime_client::protocol::write_json_line;
-use smelt_runtime_client::{RequestError, RuntimeClient};
+use smelt_runtime_client::{RequestError, RuntimeClient, RuntimeStream};
 
 use crate::api::conversation::{
     ConversationEntry, ConversationEvent, ConversationEventKind, ElicitationTextInput, ImageData,
@@ -524,7 +523,7 @@ struct WatchState {
     /// 刚从别的状态回到 Connected：退避等待立即结束。
     reconnected: bool,
     /// 正在读的 watch 连接，留一份给别的线程 shutdown 打断阻塞的读。
-    conn: Option<UnixStream>,
+    conn: Option<RuntimeStream>,
     /// 手里的连续窗口（实时尾部 + 翻出来的更早页），线格式。
     snapshot: Option<ConversationSnapshot>,
     /// 收到过运行时的实时数据。之前的窗口只是离线缓存。
@@ -853,7 +852,7 @@ impl Watch {
         end
     }
 
-    fn read_frames(&self, client: &RuntimeClient, stream: UnixStream) -> StreamEnd {
+    fn read_frames(&self, client: &RuntimeClient, stream: RuntimeStream) -> StreamEnd {
         let mut reader = BufReader::new(stream);
         let mut mirror = FrameMirror::default();
         let mut awaiting_full = false;

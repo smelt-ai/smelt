@@ -14,7 +14,7 @@ pub(crate) fn local() -> RuntimeClient {
 /// 就是连不上，由调用方按断线处理。
 pub(crate) fn connect_terminal(
     runtime: &Runtime,
-) -> std::io::Result<std::os::unix::net::UnixStream> {
+) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
     if runtime.is_local() {
         crate::terminal::connect_daemon()
     } else {
@@ -444,7 +444,7 @@ struct LazyRemoteConnector {
 }
 
 impl smelt_runtime_client::Connector for LazyRemoteConnector {
-    fn connect(&self) -> std::io::Result<std::os::unix::net::UnixStream> {
+    fn connect(&self) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
         let connector = {
             let mut route = self.route.lock();
             match route.connector.as_ref() {
@@ -1118,7 +1118,7 @@ mod tests {
     ) -> RuntimeClient {
         use std::io::{BufRead, Write};
         RuntimeClient::new(move || {
-            let (client, server) = std::os::unix::net::UnixStream::pair()?;
+            let (client, server) = smelt_runtime_client::RuntimeStream::pair()?;
             let respond = respond.clone();
             std::thread::spawn(move || {
                 let mut line = String::new();
@@ -1318,7 +1318,7 @@ mod tests {
     fn runtime_replying(lines: &'static [&'static str]) -> RuntimeClient {
         use std::io::{BufRead, Write};
         RuntimeClient::new(move || {
-            let (client, server) = std::os::unix::net::UnixStream::pair()?;
+            let (client, server) = smelt_runtime_client::RuntimeStream::pair()?;
             std::thread::spawn(move || {
                 let mut line = String::new();
                 std::io::BufReader::new(server.try_clone().unwrap())

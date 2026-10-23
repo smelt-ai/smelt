@@ -7,7 +7,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
@@ -25,11 +24,18 @@ use alacritty_terminal::term::{
     viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 type SearchMatch = (Point, Point);
 type SearchResult = (u64, String, i32, Vec<SearchMatch>);
-type HandshakeResult = (BufReader<UnixStream>, TermSize, usize, Option<String>, bool);
+type HandshakeResult = (
+    BufReader<RuntimeStream>,
+    TermSize,
+    usize,
+    Option<String>,
+    bool,
+);
 
 /// 深浅色模式：进程内只有一套主题（设置页全局切换），用一个原子量足够，不必给
 /// 每个 Terminal/EventProxy 各传一份——见 `set_dark_mode`（main.rs 在
@@ -361,12 +367,12 @@ struct TerminalWriter {
     consumed: Arc<AtomicU64>,
     /// 已经有一个 `Ack` 在写队列里，后来的确认只需更新 `consumed`。
     ack_queued: Arc<AtomicBool>,
-    shutdown: Arc<UnixStream>,
+    shutdown: Arc<RuntimeStream>,
     closed: Arc<AtomicBool>,
 }
 
 impl TerminalWriter {
-    fn start(mut stream: UnixStream) -> std::io::Result<Self> {
+    fn start(mut stream: RuntimeStream) -> std::io::Result<Self> {
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         let shutdown = Arc::new(stream.try_clone()?);
         let (tx, rx) = smol::channel::bounded(TERMINAL_WRITE_QUEUE_CAPACITY);
@@ -1219,7 +1225,7 @@ static CONNECT_MANAGED_ENSURED: AtomicBool = AtomicBool::new(false);
 /// 连不上则拉起 `~/.smelt/bin/smeltd`（独立进程组）再重试。
 ///
 /// **这里绝不删 sock 文件。**（僵尸 sock 由 smeltd bind 方清理，见 smeltd。）
-pub(crate) fn connect_daemon() -> std::io::Result<UnixStream> {
+pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
     let path = sock_path();
 
     // 已有守护：进程内只 ensure 一次。
@@ -1345,7 +1351,7 @@ fn probe_daemon() -> DaemonProbe {
 /// 某个连接线程失活时，不能无限占住 executor worker，也不能让重试任务无限堆积。
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn connect_daemon_control() -> std::io::Result<UnixStream> {
+fn connect_daemon_control() -> std::io::Result<RuntimeStream> {
     local_runtime().connect_with_timeout(DAEMON_CONTROL_TIMEOUT)
 }
 
@@ -1518,7 +1524,7 @@ fn is_successor_daemon(before: Option<&DaemonInfo>, now: Option<&DaemonInfo>) ->
 
 /// 旧守护写完升级回执就会退出，并关掉这条连接。
 /// 读到 EOF、对端重置，都是它已经走了。到 `timeout` 还没关，返回 false。
-fn read_until_peer_closes(reader: &mut BufReader<UnixStream>, timeout: Duration) -> bool {
+fn read_until_peer_closes(reader: &mut BufReader<RuntimeStream>, timeout: Duration) -> bool {
     let _ = reader.get_ref().set_read_timeout(Some(timeout));
     let mut line = String::new();
     match reader.read_line(&mut line) {
@@ -2043,7 +2049,7 @@ fn term_config() -> Config {
 
 /// 客户端 → 守护的帧：`[type:u8][len:u32 BE][payload]`。type 0=输入，1=resize，
 /// 2=输出确认（已处理的累计字节数，u64 BE）。
-fn write_frame(w: &mut UnixStream, ty: u8, payload: &[u8]) -> std::io::Result<()> {
+fn write_frame(w: &mut RuntimeStream, ty: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(ty);
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -2569,7 +2575,7 @@ impl Terminal {
     /// 的历史字节数（新建会话是 0），供 spawn() 的读线程划一条"重放 / 实时"边界，
     /// 见那边的用法。拆成独立函数是为了测试能注入假守护。
     fn handshake_on(
-        mut writer: UnixStream,
+        mut writer: RuntimeStream,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
@@ -3718,7 +3724,7 @@ mod damage_gate_tests {
 
 /// 验证 EventProxy 会把 PtyWrite / ColorRequest 这类「终端该怎么回应」的事件真的
 /// 写回去，不用起真实 shell/PTY——直接喂原始转义序列给 alacritty 的 Processor，
-/// 用 UnixStream::pair() 在另一头当"假守护"读回应帧即可，快且不 flaky。
+/// 用 RuntimeStream::pair() 在另一头当"假守护"读回应帧即可，快且不 flaky。
 #[cfg(test)]
 mod open_request_tests {
     use super::open_request;
@@ -3769,7 +3775,7 @@ mod successor_daemon_tests {
 
     #[test]
     fn peer_close_is_observed_before_the_deadline() {
-        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        let (ours, theirs) = RuntimeStream::pair().expect("socketpair");
         let mut reader = BufReader::new(ours);
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
@@ -3786,7 +3792,7 @@ mod successor_daemon_tests {
 
     #[test]
     fn open_peer_waits_out_the_deadline() {
-        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        let (ours, theirs) = RuntimeStream::pair().expect("socketpair");
         let mut reader = BufReader::new(ours);
         let started = Instant::now();
         assert!(!read_until_peer_closes(
@@ -3977,11 +3983,11 @@ mod handshake_timeout_tests {
     /// 复现启动卡死/崩溃链的第一环：守护接受了连接但一字不回（僵死、半退出、
     /// upgrade 交接卡住都会这样）。握手在 GUI 主线程同步跑，read_line 没有超时
     /// 就是永久 beachball。修复后应在 HANDSHAKE_READ_TIMEOUT 内返回 Err。
-    /// 用 UnixStream::pair 当假守护：对端只收不回，且保持存活（drop 会变成 EOF，
+    /// 用 RuntimeStream::pair 当假守护：对端只收不回，且保持存活（drop 会变成 EOF，
     /// 测的就不是"不回话"了）。
     #[test]
     fn handshake_times_out_against_mute_daemon() {
-        let (ours, theirs) = UnixStream::pair().expect("pair 失败");
+        let (ours, theirs) = RuntimeStream::pair().expect("pair 失败");
         let (tx, rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
             let r = Terminal::handshake_on(ours, 24, 80, None, "mute-daemon-test", None, true);
@@ -3996,7 +4002,7 @@ mod handshake_timeout_tests {
 
     #[test]
     fn handshake_rejects_attach_only_missing_session_response() {
-        let (ours, mut theirs) = UnixStream::pair().expect("pair 失败");
+        let (ours, mut theirs) = RuntimeStream::pair().expect("pair 失败");
         thread::spawn(move || {
             let mut request = String::new();
             BufReader::new(theirs.try_clone().unwrap())
@@ -4029,7 +4035,7 @@ mod handshake_timeout_tests {
 
     #[test]
     fn handshake_reads_daemon_color_request_capability() {
-        let (ours, mut theirs) = UnixStream::pair().expect("pair 失败");
+        let (ours, mut theirs) = RuntimeStream::pair().expect("pair 失败");
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
             let mut request = String::new();
@@ -4066,7 +4072,7 @@ mod handshake_timeout_tests {
     /// 专属 writer 线程。
     #[test]
     fn writer_queue_returns_without_waiting_for_mute_daemon() {
-        let (mut daemon_side, client_side) = UnixStream::pair().expect("pair 失败");
+        let (mut daemon_side, client_side) = RuntimeStream::pair().expect("pair 失败");
 
         // 假守护线程不 join：断言窗口（2s）远小于其存活时长，进程退出时兜底清理。
         thread::spawn(move || {
@@ -4231,8 +4237,8 @@ mod managed_daemon_ensure_tests {
 mod event_proxy_answers_tests {
     use super::*;
 
-    fn make_proxy() -> (EventProxy, UnixStream) {
-        let (probe, sock) = UnixStream::pair().expect("pair 失败");
+    fn make_proxy() -> (EventProxy, RuntimeStream) {
+        let (probe, sock) = RuntimeStream::pair().expect("pair 失败");
         probe
             .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
@@ -4251,7 +4257,7 @@ mod event_proxy_answers_tests {
     }
 
     /// 读一帧 [type:u8][len:u32 BE][payload] 并返回 (type, payload 字符串)。
-    fn read_frame(probe: &mut UnixStream) -> (u8, String) {
+    fn read_frame(probe: &mut RuntimeStream) -> (u8, String) {
         let mut header = [0u8; 5];
         probe
             .read_exact(&mut header)
@@ -4432,7 +4438,7 @@ mod bell_notification_tests {
 
     #[test]
     fn bell_uses_its_own_notification_slot() {
-        let (sock, _peer) = UnixStream::pair().expect("创建 socket pair");
+        let (sock, _peer) = RuntimeStream::pair().expect("创建 socket pair");
         let bell_notify = Arc::new(Mutex::new(None));
         let proxy = EventProxy {
             bell_notify: Arc::clone(&bell_notify),
@@ -4460,8 +4466,8 @@ mod resize_tests {
     use super::*;
     use std::io::{ErrorKind, Read};
 
-    fn make_terminal_with_peer(rows: usize, cols: usize) -> (Terminal, UnixStream) {
-        let (peer, sock) = UnixStream::pair().expect("pair 失败");
+    fn make_terminal_with_peer(rows: usize, cols: usize) -> (Terminal, RuntimeStream) {
+        let (peer, sock) = RuntimeStream::pair().expect("pair 失败");
         peer.set_read_timeout(Some(Duration::from_millis(200)))
             .expect("设置读超时失败");
         let writer = TerminalWriter::start(sock).expect("writer 启动失败");
@@ -4508,7 +4514,7 @@ mod resize_tests {
         )
     }
 
-    fn read_resize(peer: &mut UnixStream) -> [u32; 4] {
+    fn read_resize(peer: &mut RuntimeStream) -> [u32; 4] {
         let mut header = [0u8; 5];
         peer.read_exact(&mut header).expect("应收到 resize 帧");
         assert_eq!(header[0], 1, "应为 type=1 resize 帧");
@@ -4522,7 +4528,7 @@ mod resize_tests {
         })
     }
 
-    fn assert_no_frame(peer: &mut UnixStream) {
+    fn assert_no_frame(peer: &mut RuntimeStream) {
         let mut byte = [0u8; 1];
         match peer.read(&mut byte) {
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {}
@@ -4623,14 +4629,14 @@ mod color_override_tests {
 mod attachment_cleanup_tests {
     use super::TerminalWriter;
     use super::{TERMINAL_FRAME_MAX_BYTES, TERMINAL_WRITE_QUEUE_MAX_BYTES};
+    use smelt_runtime_client::RuntimeStream;
     use std::io::Read;
-    use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
     use std::time::Duration;
 
     #[test]
     fn closing_writer_closes_peer_stream() {
-        let (writer, mut peer) = UnixStream::pair().expect("pair 失败");
+        let (writer, mut peer) = RuntimeStream::pair().expect("pair 失败");
         peer.set_read_timeout(Some(Duration::from_secs(1)))
             .expect("设置读超时失败");
 
@@ -4643,7 +4649,7 @@ mod attachment_cleanup_tests {
 
     #[test]
     fn large_input_is_chunked_across_queue_budget() {
-        let (mut peer, writer_side) = UnixStream::pair().expect("pair 失败");
+        let (mut peer, writer_side) = RuntimeStream::pair().expect("pair 失败");
         let writer = TerminalWriter::start(writer_side).expect("writer 启动失败");
         let expected = TERMINAL_WRITE_QUEUE_MAX_BYTES + TERMINAL_FRAME_MAX_BYTES / 2 + 17;
         let payload = vec![0x5a; expected];
@@ -4688,10 +4694,10 @@ mod attachment_cleanup_tests {
 mod search_resync_tests {
     use super::*;
 
-    /// 搭一个不连守护的 Terminal：假 UnixStream 写端 + 直接构造的 Term。
+    /// 搭一个不连守护的 Terminal：假 RuntimeStream 写端 + 直接构造的 Term。
     /// 专测搜索坐标——不 spawn shell，无时序依赖，不 flaky。
     fn make_terminal(rows: usize, cols: usize) -> Terminal {
-        let (_probe, sock) = UnixStream::pair().expect("pair 失败");
+        let (_probe, sock) = RuntimeStream::pair().expect("pair 失败");
         let writer =
             TerminalWriter::start(sock.try_clone().expect("clone 失败")).expect("writer 启动失败");
         let (search_result_tx, search_result_rx) = smol::channel::unbounded();

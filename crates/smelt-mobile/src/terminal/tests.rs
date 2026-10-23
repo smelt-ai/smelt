@@ -1,11 +1,11 @@
-//! 终端单测：假运行时在 `UnixStream::pair()` 上按 wire 格式回包，假连接源控制运行时代号。
+//! 终端单测：假运行时在 `RuntimeStream::pair()` 上按 wire 格式回包，假连接源控制运行时代号。
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
+use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::control::ControlResponse;
 use smelt_runtime_client::protocol::write_json_line;
 
@@ -28,7 +28,8 @@ const GEOMETRY: TerminalGeometry = TerminalGeometry {
 };
 
 /// 一条 watch 连接的服务端：第几次附着（从 0 起）、首帧、读端（可能已缓冲了首帧之后的字节）、写端。
-type WatchHandler = Box<dyn Fn(usize, Value, BufReader<UnixStream>, UnixStream) + Send + Sync>;
+type WatchHandler =
+    Box<dyn Fn(usize, Value, BufReader<RuntimeStream>, RuntimeStream) + Send + Sync>;
 
 struct FakeRuntime {
     online: AtomicBool,
@@ -42,7 +43,7 @@ struct FakeRuntime {
 
 impl FakeRuntime {
     fn new(
-        watch: impl Fn(usize, Value, BufReader<UnixStream>, UnixStream) + Send + Sync + 'static,
+        watch: impl Fn(usize, Value, BufReader<RuntimeStream>, RuntimeStream) + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
             online: AtomicBool::new(true),
@@ -75,14 +76,14 @@ impl FakeRuntime {
                     "连不上运行时（超时）",
                 ));
             }
-            let (client, server) = UnixStream::pair()?;
+            let (client, server) = RuntimeStream::pair()?;
             let runtime = Arc::clone(&runtime);
             std::thread::spawn(move || runtime.serve(server));
             Ok(client)
         })
     }
 
-    fn serve(&self, server: UnixStream) {
+    fn serve(&self, server: RuntimeStream) {
         let writer = server.try_clone().unwrap();
         let mut reader = BufReader::new(server);
         let mut line = String::new();
@@ -136,7 +137,7 @@ fn describe_result() -> Value {
 }
 
 /// 写头行和关键帧。
-fn send_header(writer: &UnixStream, cols: u32, rows: u32, replay: &[u8], history_lines: u64) {
+fn send_header(writer: &RuntimeStream, cols: u32, rows: u32, replay: &[u8], history_lines: u64) {
     let header = json!({
         "cols": cols,
         "rows": rows,
@@ -150,7 +151,7 @@ fn send_header(writer: &UnixStream, cols: u32, rows: u32, replay: &[u8], history
 }
 
 /// 一直读到客户端断开，读到的字节返回。
-fn read_until_eof(mut reader: BufReader<UnixStream>) -> Vec<u8> {
+fn read_until_eof(mut reader: BufReader<RuntimeStream>) -> Vec<u8> {
     let mut rest = Vec::new();
     let _ = reader.read_to_end(&mut rest);
     rest
@@ -340,7 +341,7 @@ fn setup(runtime: &Arc<FakeRuntime>) -> (TerminalHub, Arc<FakeSource>) {
 }
 
 /// 附着后发头行与空关键帧，然后挂着直到客户端断开。
-fn idle_watch(_: usize, _: Value, reader: BufReader<UnixStream>, writer: UnixStream) {
+fn idle_watch(_: usize, _: Value, reader: BufReader<RuntimeStream>, writer: RuntimeStream) {
     send_header(&writer, 80, 24, b"", 0);
     read_until_eof(reader);
 }
