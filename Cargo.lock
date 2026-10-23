@@ -10862,7 +10862,7 @@ dependencies = [
 
 [[package]]
 name = "smelt"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
@@ -10913,7 +10913,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-acp-view"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "agent-client-protocol",
  "base64 0.22.1",
@@ -10935,7 +10935,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-client"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -10962,7 +10962,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-client-store"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -10973,7 +10973,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-core"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
@@ -11010,7 +11010,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-event-bus"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "serde_json",
  "smelt-event-protocol",
@@ -11018,7 +11018,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-event-protocol"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11026,7 +11026,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-git"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "sha2 0.10.9",
  "smelt-core",
@@ -11036,7 +11036,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-iroh"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -11056,7 +11056,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-model"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
@@ -11078,14 +11078,14 @@ dependencies = [
 
 [[package]]
 name = "smelt-pairing"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "url",
 ]
 
 [[package]]
 name = "smelt-paths"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "dirs 5.0.1",
  "libc",
@@ -11093,7 +11093,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-runtime-client"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "base64 0.22.1",
  "rust-embed",
@@ -11107,7 +11107,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-store"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -11116,7 +11116,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-sys"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11130,7 +11130,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-ui"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "chrono",
  "gpui-base",
@@ -11177,7 +11177,7 @@ dependencies = [
 
 [[package]]
 name = "smeltd"
-version = "0.9.0-rc.5"
+version = "0.9.1"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",

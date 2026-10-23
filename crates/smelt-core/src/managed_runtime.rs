@@ -591,9 +591,13 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn bun_mirror_serves_the_same_release_file() {
+        // 从右边取两段：文件名，再是版本目录。闭包做不到「返回值借用参数」
+        // （两个生命周期对不上），函数签名可以。
+        fn tail(url: &str) -> Vec<&str> {
+            url.rsplitn(3, '/').take(2).collect()
+        }
         let (url, _) = BUN_DOWNLOAD;
         let mirror = bun_mirror_url();
-        let tail = |url: &str| url.rsplitn(3, '/').take(2).collect::<Vec<_>>();
         assert_eq!(tail(&mirror), tail(url), "版本目录和文件名都要一致");
     }
 }
