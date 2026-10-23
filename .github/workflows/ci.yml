@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # 按改动路径决定跑哪些 job。只改文档时三个都跳过，由 ci-ok 汇总成通过。
+  # 按改动路径决定跑哪些 job。只改文档时全部跳过，由 ci-ok 汇总成通过。
   # 手动触发（workflow_dispatch）时全部跑。
   changes:
     runs-on: ubuntu-latest
@@ -118,6 +118,43 @@ jobs:
             not test(damage_gate_tests)
             and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
           '
+
+  # Windows 桌面端（docs/windows-support.md 第 1 步）：只编桌面端和它连远程运行时要用的
+  # crate，smeltd 不在 Windows 上编。在 Windows runner 上原生编译，不交叉编译。
+  #
+  # 施工期间不在 ci-ok 里：桌面端在 Windows 上编过之前这里会红，不能卡住别的 PR。编过后
+  # 加进 ci-ok 的 needs，转为必需检查。
+  windows:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 只读不写：仓库缓存上限 10GB，main 上 macOS 那份已经 2GB+。转为必需检查时再决定
+      # 要不要在 main 上存一份 Windows 的。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      # --keep-going：一个 crate 编不过时继续编不依赖它的那些，一次拿到尽量全的报错。
+      - name: Check desktop
+        run: cargo check -p smelt --all-targets --keep-going
+
+      # 下面的测试和上面的检查互不依赖：桌面端编不过时也照跑，看连接这几个 crate 的结果。
+      - name: Install cargo-nextest
+        if: ${{ !cancelled() }}
+        uses: taiki-e/install-action@nextest
+
+      # 连接流和 iroh 桥接在 Windows 上换了实现（D1），测试要在这里真跑一遍。
+      - name: Run tests
+        if: ${{ !cancelled() }}
+        run: cargo nextest run -p smelt-runtime-client -p smelt-iroh -p smelt-client
 
   mobile:
     needs: changes
