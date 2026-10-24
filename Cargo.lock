@@ -10872,6 +10872,7 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "dirs 5.0.1",
+ "embed-resource",
  "futures-util",
  "gpui-base",
  "gpui-component",

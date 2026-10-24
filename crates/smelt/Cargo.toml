@@ -93,3 +93,8 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # 代码都在 Unix 上；Windows 的 `cargo check --all-targets` 不该把它编进来。
 [target.'cfg(unix)'.dev-dependencies]
 smelt-core = { path = "../smelt-core" }
+
+# 构建脚本编给主机。图标只在 Windows 目标上嵌（见 build.rs），清单不在这里，
+# gpui-pre 的 windows-manifest 已经嵌了一份。
+[build-dependencies]
+embed-resource = "=3.0.12"

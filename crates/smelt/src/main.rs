@@ -1,3 +1,7 @@
+#![cfg_attr(
+    all(windows, not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 //! smelt 工作台 —— 基于 gpui-component 的桌面窗口。
 //!
 //! Workspace 管理多个会话（终端或 ACP 对话）：左侧会话列表切换 / 新建 / 关闭，

@@ -148,10 +148,11 @@ jobs:
         if: ${{ !cancelled() }}
         uses: taiki-e/install-action@nextest
 
-      # 连接流和 iroh 桥接在 Windows 上换了实现（D1），测试要在这里真跑一遍。
+      # 连接流、路径、客户端库在 Windows 上换了实现，单测在这里真跑一遍。
+      # smelt 二进制自己的测试仍假设本机运行时和 macOS 界面，这里用上面的 check 守编译。
       - name: Run tests
         if: ${{ !cancelled() }}
-        run: cargo nextest run -p smelt-runtime-client -p smelt-iroh -p smelt-client
+        run: cargo nextest run -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client
 
   mobile:
     needs: changes
