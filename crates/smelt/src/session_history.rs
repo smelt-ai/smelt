@@ -576,8 +576,13 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                             .on_click(move |_ev, _window, cx| {
                                                                 ws.update(cx, |this, cx| {
                                                                     // 历史页读的是本机运行时的存档。
+                                                                    let Some(runtime) =
+                                                                        crate::runtimes::Runtime::local()
+                                                                    else {
+                                                                        return;
+                                                                    };
                                                                     this.set_history_custom_title(
-                                                                        &crate::runtimes::Runtime::local(),
+                                                                        &runtime,
                                                                         agent,
                                                                         reset_profile_id.clone(),
                                                                         reset_cwd.clone(),
@@ -1296,7 +1301,10 @@ impl Workspace {
                     ));
                     return;
                 };
-                let request = build_history_handoff_request(&source, &detail, target);
+                let Some(request) = build_history_handoff_request(&source, &detail, target)
+                else {
+                    return;
+                };
                 this.add_acp_handoff_session(request, window, cx);
             });
         })
@@ -1390,7 +1398,7 @@ fn build_history_handoff_request(
     source: &HistoryMigrationSource,
     detail: &SessionDetail,
     target: acp_view::AcpHandoffTarget,
-) -> acp_view::AcpHandoffRequest {
+) -> Option<acp_view::AcpHandoffRequest> {
     use smelt_model::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
 
     let context = HandoffContext {
@@ -1403,8 +1411,11 @@ fn build_history_handoff_request(
     };
     let prompt = build_handoff_prompt(&context);
 
-    acp_view::AcpHandoffRequest {
-        runtime: crate::runtimes::Runtime::local(),
+    let Some(runtime) = crate::runtimes::Runtime::local() else {
+        return None;
+    };
+    Some(acp_view::AcpHandoffRequest {
+        runtime,
         launch_prep: None,
         source: Some(acp_view::AcpForkOrigin {
             session_id: source.resume_id.clone(),
@@ -1427,7 +1438,7 @@ fn build_history_handoff_request(
         fork_session_id: None,
         fork_cut: None,
         conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1435,9 +1446,11 @@ mod tests {
     // 不用 `use super::*;`：本文件后半段引入了 gpui/gpui_component 的 glob 导入，
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
+    #[cfg(unix)]
+    use super::{HistoryMigrationSource, build_history_handoff_request};
     use super::{
-        HistoryListSnapshot, HistoryMigrationSource, HistorySourceTab, SessionDetail,
-        SessionSummary, Turn, build_history_handoff_request, current_profile_launch,
+        HistoryListSnapshot, HistorySourceTab, SessionDetail, SessionSummary, Turn,
+        current_profile_launch,
         handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
         history_source_tabs, tabs_with_sessions,
     };
@@ -1569,6 +1582,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn history_migration_request_carries_source_identity_and_no_inherited_config() {
         let detail = SessionDetail {
@@ -1596,7 +1610,8 @@ mod tests {
             profile_label: None,
         };
 
-        let request = build_history_handoff_request(&source, &detail, target);
+        let request = build_history_handoff_request(&source, &detail, target)
+            .expect("历史迁移测试在有本机运行时的平台上跑");
         let origin = request
             .source
             .expect("创建时要知道源会话，才能跳过本机定义继承");

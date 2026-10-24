@@ -815,18 +815,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !smelt_client::runtime::local_runtime_supported() {
+            return;
+        }
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
                 .spawn(async {
                     #[cfg(unix)]
                     {
-                        let _ = crate::terminal::ensure_managed_daemon_current();
-                        crate::terminal::ensure_daemon_running();
+                        let _ = crate::local_daemon::ensure_managed_daemon_current();
+                        crate::local_daemon::ensure_daemon_running();
                     }
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.start_space_catalog_load(crate::runtimes::Runtime::local(), window, cx)
+                let Some(runtime) = crate::runtimes::Runtime::local() else {
+                    return;
+                };
+                this.start_space_catalog_load(runtime, window, cx)
             });
         })
         .detach();
@@ -1139,8 +1145,8 @@ impl Workspace {
             menu: menu.clone(),
             active_session: persisted_active_position(
                 self.active_session,
-                &self.local.restore_pending,
-                self.local.sessions_restored,
+                &space.restore_pending,
+                space.sessions_restored,
             ),
             active_session_id: self
                 .sessions
@@ -1265,7 +1271,14 @@ impl Workspace {
                 self.enqueue_ws_snapshot(&key, job, epoch, cx);
             }
         }
-        self.local.write_queue.wait_for_drain()
+        match self.space_mut(&crate::RuntimeKey::Local) {
+            Some(space) => space.write_queue.wait_for_drain(),
+            None => {
+                let (tx, rx) = smol::channel::bounded(1);
+                let _ = tx.send_blocking(());
+                rx
+            }
+        }
     }
 }
 
@@ -1299,7 +1312,12 @@ mod workspace_snapshot_write_queue_tests {
 
     fn job(name: &str) -> SnapshotJob {
         SnapshotJob {
-            runtime: crate::runtimes::Runtime::local(),
+            runtime: crate::runtimes::Runtime::new(
+                crate::runtimes::RuntimeKey::Local,
+                smelt_runtime_client::RuntimeClient::new(|| {
+                    Err(std::io::Error::other("snapshot test"))
+                }),
+            ),
             ui: None,
             document: serde_json::json!(name),
             catalog: Default::default(),

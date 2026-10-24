@@ -1175,8 +1175,13 @@ impl Workspace {
         kind: smelt_model::pi_plugin_catalog::PiPluginKind,
         cx: &mut Context<Self>,
     ) {
+        let Some(runtime) = crate::runtimes::runtime(self.pi_library_runtime(), cx) else {
+            self.pi_plugin_error = Some("先配对一台远程机器，再导入插件".to_string());
+            cx.notify();
+            return;
+        };
         self.open_dir_picker(
-            crate::runtimes::Runtime::local(),
+            runtime,
             crate::dir_picker::DirPickerPurpose::PluginImport { kind },
             cx,
         );

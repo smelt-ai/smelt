@@ -647,7 +647,10 @@ impl Workspace {
         // ---- 运行时标题行：挂了远程运行时才分段 ----
         // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
         // 「打开项目」就在上面。
-        let runtime_sections = !self.remote_spaces.is_empty();
+        let runtime_sections = self
+            .spaces
+            .iter()
+            .any(|space| !space.runtime.is_local());
         // 折起的机器分段挂上组里最要紧的状态：在跑、在等你，折起来也看得见。
         let mut runtime_alerts: std::collections::HashMap<RuntimeKey, AgentStatus> =
             Default::default();
@@ -681,7 +684,7 @@ impl Workspace {
             )
         };
         let mut headers_left: std::collections::VecDeque<crate::runtimes::Runtime> =
-            if self.remote_spaces.is_empty() {
+            if !runtime_sections {
                 Default::default()
             } else {
                 self.space_keys()
@@ -1797,9 +1800,13 @@ impl Workspace {
             {
                 self.update_available() || self.daemon_outdated == Some(true)
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(unix, not(target_os = "macos")))]
             {
                 self.daemon_outdated == Some(true)
+            }
+            #[cfg(not(unix))]
+            {
+                false
             }
         };
 

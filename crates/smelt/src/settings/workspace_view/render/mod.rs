@@ -222,6 +222,17 @@ fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut
     });
 }
 
+fn settings_section_available(section: &SettingsSection) -> bool {
+    smelt_client::runtime::local_runtime_supported()
+        || !matches!(
+            section,
+            SettingsSection::AgentRuntime
+                | SettingsSection::AgentLaunch
+                | SettingsSection::AgentWorkspace
+                | SettingsSection::MaintenanceDaemon
+        )
+}
+
 fn section_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -229,6 +240,11 @@ fn section_page(
     cx: &App,
 ) -> SettingPage {
     // 这几页改的是本机运行时上的配置（引擎、启动项、对话命令、CLI）。
+    let selected = if settings_section_available(selected) {
+        selected
+    } else {
+        &SettingsSection::AppearanceTheme
+    };
     let local_runtime_only = matches!(
         selected,
         SettingsSection::AgentRuntime
@@ -247,7 +263,10 @@ fn section_page(
         SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
         #[cfg(target_os = "macos")]
         SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),
+        #[cfg(unix)]
         SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
+        #[cfg(not(unix))]
+        SettingsSection::MaintenanceDaemon => appearance::theme_page(entity, snapshot, cx),
         SettingsSection::MaintenanceStorage => maintenance::storage_page(cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
     };

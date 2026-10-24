@@ -17,6 +17,7 @@ pub(super) fn update_page(
         .group(update_group(entity, snapshot, cx))
 }
 
+#[cfg(unix)]
 pub(super) fn daemon_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -477,6 +478,7 @@ fn update_group(
     }))
 }
 
+#[cfg(unix)]
 fn daemon_group(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,

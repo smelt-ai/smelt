@@ -36,6 +36,8 @@ mod provider_quota;
 mod resizable_split;
 mod runtime_call;
 mod runtime_events;
+#[cfg(unix)]
+mod local_daemon;
 mod runtime_space;
 mod runtimes;
 mod tool_panel;
@@ -2497,10 +2499,9 @@ struct Workspace {
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
     /// 已消失时回退到活动会话所在组（见 active_project_root）。
     active_project: Option<ProjectRef>,
-    /// 本机运行时在侧栏里的那一份：项目、置顶、折叠、目录同步、冷启动恢复。
-    local: crate::runtime_space::RuntimeSpace,
-    /// 添加过的远程运行时各一份，顺序同运行时登记表。
-    remote_spaces: Vec<crate::runtime_space::RuntimeSpace>,
+    /// 侧栏里的运行时空间。有本机运行时时本机在前，然后是配对的远程机器。
+    /// 没有本机运行时（Windows 第 1 步）就只有远程机器，不放一个离线的本机空间。
+    spaces: Vec<crate::runtime_space::RuntimeSpace>,
     /// 侧栏「对话」里被折叠起来的智能体（存定义 id）。
     collapsed_agents: HashSet<String>,
     /// 会话列表分组方式（默认按项目）。
@@ -2784,18 +2785,25 @@ struct Workspace {
 
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
+    /// 本机守护是否落后于磁盘上的 smeltd。没有本机运行时这些字段不存在。
+    #[cfg(unix)]
     daemon_outdated: Option<bool>,
     /// 最近一次无缝升级的结果提示（设置页守护分区显示；None = 没试过）。
+    #[cfg(unix)]
     daemon_upgrade_msg: Option<String>,
     /// 无缝升级进行中（按钮置灰防连点）。
+    #[cfg(unix)]
     daemon_upgrading: bool,
     /// 检测到守护已过期、但有 agent 正在跑，升级挂起等空闲：true = 待升级。
     /// 空闲后（或用户手动点升级）会清掉，转成真正的 `upgrade_daemon_seamless`。
+    #[cfg(unix)]
     daemon_upgrade_pending: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
-    daemon_info: Option<terminal::DaemonInfo>,
+    #[cfg(unix)]
+    daemon_info: Option<local_daemon::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
+    #[cfg(unix)]
     show_daemon_restart_confirm: bool,
     /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
     /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的游离会话、忘了关的临时会话都会
@@ -3093,21 +3101,21 @@ impl Workspace {
             next_workspace_menu_source_revision: AtomicU64::new(1),
             close_confirm: None,
             desktop: None,
-            local: {
-                let mut space = space_with_ui(crate::runtimes::Runtime::local());
-                space.projects = projects;
-                space.restore_pending = restore_pending;
-                space
+            spaces: {
+                let mut spaces = Vec::new();
+                if let Some(local) = crate::runtimes::Runtime::local() {
+                    let mut space = space_with_ui(local);
+                    space.projects = projects;
+                    space.restore_pending = restore_pending;
+                    spaces.push(space);
+                }
+                if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
+                    for remote in &hub.remotes {
+                        spaces.push(space_with_ui(remote.runtime.clone()));
+                    }
+                }
+                spaces
             },
-            remote_spaces: cx
-                .try_global::<crate::runtimes::RuntimeHub>()
-                .map(|hub| {
-                    hub.remotes
-                        .iter()
-                        .map(|remote| space_with_ui(remote.runtime.clone()))
-                        .collect()
-                })
-                .unwrap_or_default(),
             active_project: None,
             collapsed_agents: saved
                 .as_ref()
@@ -3240,11 +3248,17 @@ impl Workspace {
             git_writes: HashMap::new(),
             provider_quota_refresh_tx: None,
 
+            #[cfg(unix)]
             daemon_outdated: None,
+            #[cfg(unix)]
             daemon_upgrade_msg: None,
+            #[cfg(unix)]
             daemon_upgrading: false,
+            #[cfg(unix)]
             daemon_upgrade_pending: false,
+            #[cfg(unix)]
             daemon_info: None,
+            #[cfg(unix)]
             show_daemon_restart_confirm: false,
             session_manager_open: false,
             session_manager_list: None,
@@ -3296,13 +3310,21 @@ impl Workspace {
                 ws.recover_update_at_launch(true, cx);
             }
         }
-        ws.start_workspace_catalog_load(window, cx);
-        for space in &ws.remote_spaces {
-            let runtime = space.runtime.clone();
+        if smelt_client::runtime::local_runtime_supported() {
+            ws.start_workspace_catalog_load(window, cx);
+        }
+        let remote_runtimes: Vec<_> = ws
+            .spaces
+            .iter()
+            .filter(|space| !space.runtime.is_local())
+            .map(|space| space.runtime.clone())
+            .collect();
+        for runtime in remote_runtimes {
             cx.defer_in(window, move |this, window, cx| {
                 this.start_space_catalog_load(runtime, window, cx)
             });
         }
+        ws.ensure_pi_library_runtime(cx);
         ws._runtime_hub_sub = Some(
             cx.observe_global_in::<crate::runtimes::RuntimeHub>(window, |this, window, cx| {
                 this.sync_remote_spaces(window, cx)
@@ -3394,7 +3416,10 @@ impl Workspace {
     fn reconcile_remote_catalog_projection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 工作区目录还没到时不知道哪些会话会被恢复，这时投影远程目录会把同一场会话
         // 再投一份。目录到了以后会补做一次。
-        if !self.local.catalog_loaded {
+        if self
+            .space(&RuntimeKey::Local)
+            .is_none_or(|space| !space.catalog_loaded)
+        {
             return;
         }
         let Some(global) = cx.try_global::<RemoteSessionCatalogGlobal>() else {
@@ -3521,7 +3546,7 @@ impl Workspace {
             .collect::<HashSet<_>>();
         // 正在恢复的存档会话已经拿了这些 id，只是还没插进 `sessions`。不计进来就会
         // 把同一场对话再投影一份，两个视图抢同一个 smeltd 会话。
-        let pending = crate::pending_restore_session_ids(&self.local.restore_pending);
+        let pending = self.all_pending_restore_session_ids();
         let mut changed = false;
         let titled = records
             .iter()
@@ -3578,6 +3603,9 @@ impl Workspace {
             .resume_id
             .map(agent_client_protocol::schema::v1::SessionId::new);
         let cwd = Some(record.cwd.clone());
+        let Some(runtime) = crate::runtimes::Runtime::local() else {
+            return;
+        };
         if !smelt_model::session_control::is_agent_conversation(
             None,
             agent_definition_id.as_deref(),
@@ -3589,7 +3617,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::Runtime::local(),
+                    runtime,
                     launch_prep: None,
                     agent,
                     launch: record.launch,
@@ -3682,7 +3710,7 @@ impl Workspace {
             })
             .collect::<HashSet<_>>();
         // 和 ACP 那边同理：存档里还在排队恢复的终端也已经报了这些 id。
-        let pending_restore = crate::pending_restore_session_ids(&self.local.restore_pending);
+        let pending_restore = self.all_pending_restore_session_ids();
         for record in records {
             if existing.contains(&record.id) || pending_restore.contains(&record.id) {
                 continue;
@@ -3699,15 +3727,19 @@ impl Workspace {
             {
                 continue;
             }
+            let Some(runtime) = crate::runtimes::Runtime::local() else {
+                return;
+            };
             self.remember_session_project(&RuntimeKey::Local, Some(record.cwd.as_str()));
             let (tx, rx) = smol::channel::bounded(1);
+            let runtime_bg = runtime.clone();
             let cwd_bg = record.cwd.clone();
             let sid_bg = record.id.clone();
             std::thread::Builder::new()
                 .name("smelt-remote-term-reattach".into())
                 .spawn(move || {
                     let r = terminal::Terminal::reattach(
-                        &crate::runtimes::Runtime::local(),
+                        &runtime_bg,
                         24,
                         80,
                         Some(&cwd_bg),
@@ -3720,6 +3752,7 @@ impl Workspace {
             let cwd = record.cwd.clone();
             let sid = record.id.clone();
             let window_handle = self.window_handle;
+            let runtime_ui = runtime;
             cx.spawn(async move |this, cx| {
                 let result = match rx.recv().await {
                     Ok(r) => r,
@@ -3763,7 +3796,7 @@ impl Workspace {
                         let view = cx.new(|cx| {
                             TerminalView::from_terminal(
                                 cx,
-                                crate::runtimes::Runtime::local(),
+                                runtime_ui,
                                 terminal,
                                 Some(cwd),
                                 sid,
@@ -4570,7 +4603,7 @@ fn app_key_bindings() -> Vec<KeyBinding> {
 
 fn main() {
     #[cfg(target_os = "macos")]
-    if let Some(code) = terminal::maybe_run_install_app(std::env::args()) {
+    if let Some(code) = local_daemon::maybe_run_install_app(std::env::args()) {
         std::process::exit(code);
     }
     if let Some(code) = cli::maybe_run(std::env::args()) {
@@ -4744,32 +4777,36 @@ fn main() {
         cx.set_global(settings::AcpRuntimeState::default());
         // hook 配置和 helper 必须作为一个版本单元升级：先把 App 内最新版同步到稳定
         // managed 路径，再改写各 provider 的 hook 命令。失败时保留旧 helper，不阻塞 GUI。
-        if let Err(error) = settings::sync_bundled_smelt_notify() {
+        if smelt_client::runtime::local_runtime_supported()
+            && let Err(error) = settings::sync_bundled_smelt_notify()
+        {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         cx.set_global(settings::AgentHosts::default());
-        settings::attach_agent_host(RuntimeKey::Local, runtimes::local(), cx, |cx| {
-            if settings::agent_host_settings(&RuntimeKey::Local, cx).hooks_enabled {
-                settings::reconcile_agent_hooks(cx);
-            }
-            // 运行时已经连上：请它照端点刷新 Pi 里标记为「自动」的自定义 provider
-            // 的模型目录。用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型
-            // 不该要他再来点一次。放后台跑。
-            cx.background_executor()
-                .spawn(async {
-                    use smelt_runtime_client::protocol::control::EmptyParams;
-                    let timeout = std::time::Duration::from_secs(300);
-                    if let Err(error) = runtime_call::call::<
-                        smelt_model::control_api::PiProvidersRefreshAuto,
-                    >(EmptyParams::default(), timeout)
-                    {
-                        eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
-                    }
-                })
-                .detach();
-        });
+        if let Some(local) = runtimes::local() {
+            settings::attach_agent_host(RuntimeKey::Local, local, cx, |cx| {
+                if settings::agent_host_settings(&RuntimeKey::Local, cx).hooks_enabled {
+                    settings::reconcile_agent_hooks(cx);
+                }
+                // 运行时已经连上：请它照端点刷新 Pi 里标记为「自动」的自定义 provider
+                // 的模型目录。用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型
+                // 不该要他再来点一次。放后台跑。
+                cx.background_executor()
+                    .spawn(async {
+                        use smelt_runtime_client::protocol::control::EmptyParams;
+                        let timeout = std::time::Duration::from_secs(300);
+                        if let Err(error) = runtime_call::call::<
+                            smelt_model::control_api::PiProvidersRefreshAuto,
+                        >(EmptyParams::default(), timeout)
+                        {
+                            eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
+                        }
+                    })
+                    .detach();
+            });
+        }
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
         // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求、项目文件

@@ -106,7 +106,7 @@ impl Workspace {
             // 可能仍按旧存档活动项把刚跳到的会话覆盖掉。
             self.active_session_revision = self.active_session_revision.wrapping_add(1);
         }
-        if should_defer_notification_session_jump(self.local.sessions_restored, target_found) {
+        if should_defer_notification_session_jump(self.sessions_restore_settled(), target_found) {
             self.pending_notification_session_id = Some(session_id);
         }
     }

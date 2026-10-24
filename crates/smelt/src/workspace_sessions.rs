@@ -51,7 +51,7 @@ impl Workspace {
             // 一次性闸门在 maybe_auto_resume 里：桌面已经拉起过或拉失败过就不再重试，
             // 和点开时的行为一致。
             Some(view) => view.update(cx, |view, cx| view.maybe_auto_resume(window, cx)),
-            None if !self.local.sessions_restored
+            None if !self.sessions_restore_settled()
                 && !self.pending_conversation_wakes.contains(&session_id) =>
             {
                 self.pending_conversation_wakes.push(session_id);
@@ -121,8 +121,8 @@ impl Workspace {
                 if runtime_bg.is_local() {
                     #[cfg(unix)]
                     {
-                        let _ = terminal::ensure_managed_daemon_current();
-                        terminal::ensure_daemon_running();
+                        let _ = crate::local_daemon::ensure_managed_daemon_current();
+                        crate::local_daemon::ensure_daemon_running();
                     }
                 }
                 // ACP 占位只有收到这道闸门后才会在 UI 线程创建；否则当前活动会话
@@ -1350,12 +1350,15 @@ impl Workspace {
                 cx,
             );
         }
+        let Some(runtime) = crate::runtimes::Runtime::local() else {
+            return;
+        };
         let view_profile_id = profile_id;
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::Runtime::local(),
+                    runtime,
                     launch_prep: Some(acp_view::LaunchPrep {
                         agent_definition_id: agent_definition_id.clone(),
                         restore: false,
@@ -1418,8 +1421,11 @@ impl Workspace {
             }
         }
         // 历史页读的是本机运行时的会话存档。
+        let Some(runtime) = crate::runtimes::Runtime::local() else {
+            return;
+        };
         self.add_session_with_launch(
-            crate::runtimes::Runtime::local(),
+            runtime,
             Some(cwd),
             Some(settings::LaunchEntry {
                 label: format!("{} TUI", agent.short_label()),
@@ -1697,10 +1703,19 @@ impl Workspace {
 
     /// 「+」新建会话：继承当前会话的运行时和活动终端的目录。
     pub(crate) fn new_tab(&mut self, cx: &mut Context<Self>) {
-        let runtime = self
-            .cur()
-            .map(|s| s.runtime(cx))
-            .unwrap_or_else(crate::runtimes::Runtime::local);
+        let runtime = match self.cur().map(|s| s.runtime(cx)) {
+            Some(runtime) => runtime,
+            None => match self.runtime_for_open_project(cx) {
+                Some(runtime) => runtime,
+                None => {
+                    self.open_settings_section(
+                        crate::settings::SettingsSection::CollaborationRemote,
+                        cx,
+                    );
+                    return;
+                }
+            },
+        };
         let cwd = self.cur().and_then(|s| s.cwd(cx)).or_else(|| {
             // 本机才能拿桌面进程的当前目录兜底；远程运行时交给它的默认目录。
             runtime.is_local().then(current_dir).flatten()
@@ -1972,7 +1987,35 @@ impl Workspace {
     /// 「打开项目」：在运行时那台机器上选一个目录，加进项目列表。**不自动建会话**——
     /// 打开项目只是把它放上工作台，要开终端还是开对话由分组行的「+」决定。
     pub(crate) fn open_project(&mut self, cx: &mut Context<Self>) {
-        self.open_project_on(crate::runtimes::Runtime::local(), cx);
+        if let Some(runtime) = self.runtime_for_open_project(cx) {
+            self.open_project_on(runtime, cx);
+            return;
+        }
+        self.open_settings_section(crate::settings::SettingsSection::CollaborationRemote, cx);
+    }
+
+    /// 打开项目落在哪台机器上。有本机运行时就用本机。没有时用当前会话所在的、已经连上的
+    /// 远程机器，否则用第一台在线的远程机器。一台都没连上就返回 `None`，调用方去配对。
+    fn runtime_for_open_project(&self, cx: &gpui::App) -> Option<crate::runtimes::Runtime> {
+        if let Some(local) = crate::runtimes::Runtime::local() {
+            return Some(local);
+        }
+        let active = self
+            .sessions
+            .get(self.active_session)
+            .map(|session| session.runtime(cx).key().clone());
+        let mut keys: Vec<crate::runtimes::RuntimeKey> = active.into_iter().collect();
+        for key in self.space_keys() {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        keys.into_iter().find_map(|key| {
+            if !crate::runtimes::runtime_online(&key, cx) {
+                return None;
+            }
+            crate::runtimes::runtime(&key, cx)
+        })
     }
 
     /// 在某个运行时上打开项目（侧栏运行时标题行的「+」）。
@@ -2408,7 +2451,7 @@ impl Workspace {
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
                     // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
-                    if should_auto_resume_active_acp(self.local.sessions_restored) {
+                    if should_auto_resume_active_acp(self.session_restore_settled(ix, cx)) {
                         v.maybe_auto_resume(window, cx);
                     }
                     if !route_has_overlay {
@@ -2657,8 +2700,11 @@ impl Workspace {
                 ..
             } => {
                 // 历史页目前只读本机运行时的存档。
+                let Some(runtime) = crate::runtimes::Runtime::local() else {
+                    return;
+                };
                 self.set_history_custom_title(
-                    &crate::runtimes::Runtime::local(),
+                    &runtime,
                     agent,
                     profile_id,
                     cwd,

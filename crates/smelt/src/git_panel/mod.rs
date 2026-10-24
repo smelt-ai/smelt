@@ -89,7 +89,7 @@ impl RepoSet {
     pub fn roots(&self) -> impl Iterator<Item = &str> {
         self.repos
             .iter()
-            .map(|r| r.root.to_str().unwrap_or_default())
+            .map(|r| r.root.as_str())
     }
 }
 

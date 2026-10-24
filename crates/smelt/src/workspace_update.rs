@@ -442,7 +442,7 @@ impl Workspace {
             // 仍落后则无缝升级到磁盘最新 smeltd。
             let (outdated, info) = cx
                 .background_executor()
-                .spawn(async { (terminal::daemon_outdated(), terminal::daemon_info()) })
+                .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
@@ -497,6 +497,9 @@ impl Workspace {
     /// 逐 pane 在后台 reattach：会话 id 都还在，走正常重放恢复画面。无缝升级后
     /// 不能在 `update` 回调里同步握手，否则卡住的 daemon 会反过来拖住整个 UI。
     pub(crate) fn reconnect_all_terminals(&self, cx: &mut Context<Self>) {
+        let Some(runtime) = crate::runtimes::Runtime::local() else {
+            return;
+        };
         for sess in &self.sessions {
             let leaves = sess.term_leaves();
             for leaf in leaves {
@@ -505,12 +508,13 @@ impl Workspace {
                     (view.cwd(), view.session_id().to_string())
                 };
                 let leaf_for_result = leaf.clone();
+                let runtime = runtime.clone();
                 cx.spawn(async move |_, cx| {
                     let terminal = cx
                         .background_executor()
                         .spawn(async move {
                             terminal::Terminal::reattach(
-                                &crate::runtimes::Runtime::local(),
+                                &runtime,
                                 24,
                                 80,
                                 cwd.as_deref(),
@@ -543,33 +547,33 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async { terminal::upgrade_daemon() })
+                .spawn(async { crate::local_daemon::upgrade_daemon() })
                 .await;
             // exec 换代后 PID / 启动时刻都变了，跟版本一起重新问一遍。
             let (outdated, info) = cx
                 .background_executor()
-                .spawn(async { (terminal::daemon_outdated(), terminal::daemon_info()) })
+                .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_upgrading = false;
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
                 this.daemon_upgrade_msg = Some(match outcome {
-                    terminal::UpgradeOutcome::Upgraded => {
+                    crate::local_daemon::UpgradeOutcome::Upgraded => {
                         this.reconnect_all_terminals(cx);
                         "已无缝升级，所有会话保持运行。".to_string()
                     }
-                    terminal::UpgradeOutcome::Unsupported => {
+                    crate::local_daemon::UpgradeOutcome::Unsupported => {
                         // 守护完全没认这个 op，控制连接以外的东西没被碰过，各 pane
                         // 的流式连接照常连着，不需要重连。
                         "正在跑的守护版本过旧，不支持无缝升级；请用「重启守护进程」（会断开会话）。"
                             .to_string()
                     }
-                    terminal::UpgradeOutcome::Busy => {
+                    crate::local_daemon::UpgradeOutcome::Busy => {
                         this.daemon_upgrade_pending = true;
                         "有 Agent 回合仍在运行；回合结束后会自动升级。".to_string()
                     }
-                    terminal::UpgradeOutcome::Failed => {
+                    crate::local_daemon::UpgradeOutcome::Failed => {
                         // 守护回了 ok:true 才会 exec：旧连接多半已断。version
                         // 握手没看到新 pid/started_at 时按可能已断重连。
                         this.reconnect_all_terminals(cx);
@@ -625,10 +629,13 @@ impl Workspace {
     /// 却照样回 `{"ok":true}`（真实教训：两条表分开存，用错 op 表面上「成功」
     /// 实际上会话根本没被杀掉，圈了个大坑）。
     pub(crate) fn kill_daemon_session(id: &str) {
+        let Some(runtime) = crate::runtimes::Runtime::local() else {
+            return;
+        };
         if id.starts_with("acp-") {
-            smelt_client::acp_client::kill_acp_session(&crate::runtimes::local(), id);
+            smelt_client::acp_client::kill_acp_session(runtime.client(), id);
         } else {
-            terminal::kill_remote(&crate::runtimes::Runtime::local(), id);
+            terminal::kill_remote(&runtime, id);
         }
     }
 
@@ -704,20 +711,24 @@ impl Workspace {
             let (outdated, info) = cx
                 .background_executor()
                 .spawn(async {
-                    terminal::restart_daemon();
-                    terminal::ensure_daemon_running();
-                    (terminal::daemon_outdated(), terminal::daemon_info())
+                    crate::local_daemon::restart_daemon();
+                    crate::local_daemon::ensure_daemon_running();
+                    (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info())
                 })
                 .await;
 
             // 握手/重试全在后台；主线程只接结果
+            let runtime = crate::runtimes::Runtime::local();
             let built = cx
                 .background_executor()
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
+                    let Some(runtime) = runtime else {
+                        return out;
+                    };
                     for (entity, cwd, sid) in jobs {
                         let term = terminal::Terminal::spawn(
-                            &crate::runtimes::Runtime::local(),
+                            &runtime,
                             24,
                             80,
                             cwd.as_deref(),
