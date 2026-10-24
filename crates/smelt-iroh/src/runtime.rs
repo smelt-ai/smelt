@@ -760,9 +760,12 @@ mod tests {
     async fn bridged(bridge: Bridge) -> Bridged {
         let server = local_endpoint(vec![TEST_ALPN.to_vec()]).await;
         let client = local_endpoint(Vec::new()).await;
-        let conn = connect(&client, &server.addr()).await;
+        let addr = server.addr();
+        // 服务端不接下连接，握手就不往下走：两边要同时进行。
+        let (conn, accepted) = tokio::join!(connect(&client, &addr), async {
+            server.accept().await.unwrap().await.unwrap()
+        });
         let remote = open(&conn).await;
-        let accepted = server.accept().await.unwrap().await.unwrap();
         let (send, recv) = accepted.accept_bi().await.unwrap();
         let (local, pumped) = bridge(send, recv).unwrap();
         local.set_read_timeout(Some(ARRIVES)).unwrap();
