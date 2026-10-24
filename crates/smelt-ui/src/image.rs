@@ -310,11 +310,14 @@ fn path_inflight() -> &'static Mutex<HashSet<PathBuf>> {
 
 /// 路径扩展名到 GPUI 图片格式。会话图片和剪贴板粘贴共用这一张表。
 pub fn format_for_path(path: &Path) -> Option<gpui::ImageFormat> {
-    let ext = path
-        .extension()
+    path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())?;
-    Some(match ext.as_str() {
+        .and_then(format_for_extension)
+}
+
+/// 扩展名（不含点）到 GPUI 图片格式。运行时路径不要先套进 `Path`。
+pub fn format_for_extension(ext: &str) -> Option<gpui::ImageFormat> {
+    Some(match ext.to_ascii_lowercase().as_str() {
         "png" => gpui::ImageFormat::Png,
         "jpg" | "jpeg" => gpui::ImageFormat::Jpeg,
         "webp" => gpui::ImageFormat::Webp,

@@ -17,10 +17,10 @@ smelt-client = { path = "../smelt-client" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-ui = { path = "../smelt-ui" }
 gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "77ff6f794dca3bcee2e90977cedf12a64aed17e4" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "77ff6f794dca3bcee2e90977cedf12a64aed17e4", features = ["tree-sitter-languages"] }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "219fc1a9bdd6236c3a58f07c810e1b87079890c1" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "219fc1a9bdd6236c3a58f07c810e1b87079890c1", features = ["tree-sitter-languages"] }
 # 组件库自带的图标只有一百来个，输入栏的拼图图标要从完整的 Lucide 目录里拿。
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "77ff6f794dca3bcee2e90977cedf12a64aed17e4" }
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "219fc1a9bdd6236c3a58f07c810e1b87079890c1" }
 # 仅用于 SessionId 这一个类型（acp_session_id 字段/存档边界），协议本身的连接
 # 驱动已经不在这层了。3.x 默认 feature 全关，这里一个都不需要。
 agent-client-protocol = "=3.4.0"

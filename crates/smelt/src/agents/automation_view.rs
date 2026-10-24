@@ -81,14 +81,16 @@ impl Workspace {
                     entity.clone(),
                 ),
             )
-            .child(self.render_agent_product_navigation_row(
-                "automations-route",
-                "自动化",
-                IconName::Cpu,
-                automation_nav_needs_attention(&config),
-                WorkspaceRoute::Automations,
-                entity.clone(),
-            ))
+            .when(smelt_client::runtime::local_runtime_supported(), |nav| {
+                nav.child(self.render_agent_product_navigation_row(
+                    "automations-route",
+                    "自动化",
+                    IconName::Cpu,
+                    automation_nav_needs_attention(&config),
+                    WorkspaceRoute::Automations,
+                    entity.clone(),
+                ))
+            })
             .child(self.render_agent_product_navigation_row(
                 "capabilities-route",
                 "能力库",

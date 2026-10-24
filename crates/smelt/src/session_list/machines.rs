@@ -236,7 +236,10 @@ fn machines_panel(
     popover: WeakEntity<PopoverState>,
     cx: &App,
 ) -> Div {
-    let mut runtimes = vec![Runtime::local()];
+    let mut runtimes = Vec::new();
+    if let Some(local) = Runtime::local() {
+        runtimes.push(local);
+    }
     let mut any_relay = false;
     let mut load_error = None;
     if let Some(hub) = cx.try_global::<RuntimeHub>() {

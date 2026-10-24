@@ -88,15 +88,7 @@ pub fn retarget_symlink(dir: &Path, link_name: &str, image: &Path) -> io::Result
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&image_name, &tmp)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = image_name;
-        return Err(unsupported());
-    }
+    std::os::unix::fs::symlink(&image_name, &tmp)?;
     if let Err(error) = fs::rename(&tmp, dir.join(link_name)) {
         let _ = fs::remove_file(&tmp);
         return Err(error);
@@ -207,21 +199,13 @@ fn image_name_in_dir(dir: &Path, image: &Path) -> io::Result<std::ffi::OsString>
     let image_meta = fs::symlink_metadata(image)?;
     let expected_meta = fs::symlink_metadata(&expected)
         .map_err(|_| io::Error::other("映像和启动名必须在同一目录"))?;
-    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    if !image_meta.is_file()
+        || !expected_meta.is_file()
+        || image_meta.dev() != expected_meta.dev()
+        || image_meta.ino() != expected_meta.ino()
     {
-        use std::os::unix::fs::MetadataExt;
-        if !image_meta.is_file()
-            || !expected_meta.is_file()
-            || image_meta.dev() != expected_meta.dev()
-            || image_meta.ino() != expected_meta.ino()
-        {
-            return Err(io::Error::other("映像和启动名必须在同一目录"));
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (image_meta, expected_meta);
-        return Err(unsupported());
+        return Err(io::Error::other("映像和启动名必须在同一目录"));
     }
     Ok(name)
 }
@@ -402,22 +386,14 @@ struct FileId {
 }
 
 fn file_id(meta: &fs::Metadata) -> Option<FileId> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if !meta.file_type().is_file() {
-            return None;
-        }
-        return Some(FileId {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        });
+    use std::os::unix::fs::MetadataExt;
+    if !meta.file_type().is_file() {
+        return None;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        None
-    }
+    Some(FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
 }
 
 fn referenced_image_ids(dir: &Path) -> io::Result<Vec<FileId>> {
@@ -470,12 +446,7 @@ fn remove_pending_symlink(dir: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
-fn unsupported() -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, "守护映像只支持 Unix 符号链接")
-}
-
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;

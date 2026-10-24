@@ -4,7 +4,6 @@
 //! 这里不许出现子进程和文件读写：手机端也要编它。
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -237,7 +236,19 @@ pub fn build_git_tree(files: &[(String, String)], collapsed: &HashSet<String>) -
 }
 
 pub fn full_file_path(root: &str, path: &str, aggregate: bool) -> Option<String> {
-    (!aggregate).then(|| Path::new(root).join(path).to_string_lossy().into_owned())
+    // 仓库根和相对路径都属于运行时。分隔符固定为 `/`，不能用 `std::path`：
+    // 桌面在 Windows 上 join 会把 `\` 写进发给 Linux 的路径。
+    (!aggregate).then(|| {
+        if path.starts_with('/') {
+            path.to_string()
+        } else if root.is_empty() || root.ends_with('/') {
+            format!("{root}{path}")
+        } else if path.is_empty() {
+            format!("{root}/")
+        } else {
+            format!("{root}/{path}")
+        }
+    })
 }
 
 pub fn hunk_patch(header: &str, hunk: &DiffHunk) -> String {
@@ -262,7 +273,8 @@ pub enum RepoKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredRepo {
     /// 仓库真实根（`git rev-parse --show-toplevel` 的结果，已 canonicalize）。
-    pub root: PathBuf,
+    /// 运行时那台机器的路径，分隔符按那台机器，不用 `PathBuf`。
+    pub root: String,
     /// 相对项目根的路径。项目根自己是空串。仅用于展示与排序。
     pub rel_path: String,
     pub kind: RepoKind,

@@ -96,16 +96,24 @@ impl Workspace {
                 }
                 map
             },
+            #[cfg(target_os = "macos")]
             update_status: self.update_status.clone(),
+            #[cfg(target_os = "macos")]
             moving_app: self.moving_app,
+            #[cfg(target_os = "macos")]
             move_app_error: self.move_app_error.clone(),
+            #[cfg(unix)]
             daemon_outdated: self.daemon_outdated,
+            #[cfg(unix)]
             daemon_upgrading: self.daemon_upgrading,
+            #[cfg(unix)]
             daemon_upgrade_msg: self.daemon_upgrade_msg.clone(),
+            #[cfg(unix)]
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
             capabilities_tab: self.nav.capabilities_tab(),
+            #[cfg(unix)]
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             session_manager_open: self.session_manager_open,
         }
@@ -152,6 +160,11 @@ impl Workspace {
         {
             self.refresh_pi_auth_providers(cx);
         }
+        self.ensure_pi_library_runtime(cx);
+        if crate::runtimes::client(self.pi_library_runtime(), cx).is_none() {
+            self.capabilities_view = None;
+            return;
+        }
         if self.capabilities_view.is_some() {
             return;
         }
@@ -182,7 +195,10 @@ impl Workspace {
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         crate::runtime_events::probe_remotes(cx);
-        self.refresh_pi_config(crate::RuntimeKey::Local, cx);
+        self.ensure_pi_library_runtime(cx);
+        if smelt_client::runtime::local_runtime_supported() {
+            self.refresh_pi_config(crate::RuntimeKey::Local, cx);
+        }
         let workspace = cx.entity();
         cx.defer(move |cx| {
             if let Some(handle) = cx

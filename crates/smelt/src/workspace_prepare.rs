@@ -223,7 +223,7 @@ impl Workspace {
             self.applied_ui_font_px = Some(ui_font_px);
         }
 
-        if should_auto_resume_active_acp(self.local.sessions_restored)
+        if should_auto_resume_active_acp(self.session_restore_settled(self.active_session, cx))
             && let Some(SessionKind::Conversation(view)) =
                 self.sessions.get(self.active_session).map(|s| &s.kind)
         {
@@ -239,24 +239,32 @@ impl Workspace {
     /// 补位只做一次：每帧都做会把用户点侧栏「智能体」返回目录的动作顶回来。
     /// 项目舞台上的对话则是不变量，恢复完成后一直守着。
     fn align_visible_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !smelt_client::runtime::local_runtime_supported() {
+            if self.active_tab() == &crate::WorkspaceRoute::Automations {
+                self.nav.set_active(crate::WorkspaceRoute::Session);
+            }
+            if self.tool_panel_tab == tool_panel::ToolPanelTab::History {
+                self.tool_panel_tab = tool_panel::ToolPanelTab::Files;
+            }
+        }
         let active_is_agent_conversation = self
             .sessions
             .get(self.active_session)
             .is_some_and(|session| session.is_agent_conversation(cx));
         if crate::should_open_restored_agent_conversation(
-            self.local.sessions_restored,
+            self.session_restore_settled(self.active_session, cx),
             self.restored_agent_conversation_route,
             active_is_agent_conversation,
             self.active_tab(),
         ) {
             self.restored_agent_conversation_route = true;
             self.activate(self.active_session, window, cx);
-        } else if self.local.sessions_restored {
+        } else if self.session_restore_settled(self.active_session, cx) {
             self.restored_agent_conversation_route = true;
         }
 
         if crate::should_correct_agent_conversation_on_project_stage(
-            self.local.sessions_restored,
+            self.session_restore_settled(self.active_session, cx),
             self.active_tab(),
             active_is_agent_conversation,
         ) {

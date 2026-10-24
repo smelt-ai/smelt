@@ -11,7 +11,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,8 +18,8 @@ use crate::daemon_state::DaemonPhase;
 use smelt_model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
 use smelt_model::acp_wire::FrameMirror;
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
-use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
+use smelt_runtime_client::{RuntimeClient, RuntimeStream};
 
 pub const ACP_INITIAL_TAIL_LIMIT: usize = 100;
 pub const ACP_HISTORY_PAGE_LIMIT: usize = 100;
@@ -30,7 +29,7 @@ const ACP_ACTION_QUEUE_CAPACITY: usize = 256;
 /// 及时释放 worker，不能把关闭、重启或翻历史的任务永久挂住。
 const ACP_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn connect_acp_control(runtime: &RuntimeClient) -> Result<UnixStream, String> {
+fn connect_acp_control(runtime: &RuntimeClient) -> Result<RuntimeStream, String> {
     runtime
         .connect_with_timeout(ACP_CONTROL_TIMEOUT)
         .map_err(|e| format!("连不上 smeltd：{e}"))
@@ -107,7 +106,7 @@ pub struct ConversationClientHandle {
     /// `action_rx.recv()` 处自然退出，读线程仍会孤儿般地占着连接直到 smeltd
     /// 那边写超时/进程退出才收尾——代价可接受，不值得为这个窗口引入同步握手
     /// （那会让每次开 ACP 标签都卡一次 socket round-trip）。
-    conn_cell: Arc<Mutex<Option<UnixStream>>>,
+    conn_cell: Arc<Mutex<Option<RuntimeStream>>>,
 }
 
 impl Drop for ConversationClientHandle {
@@ -405,7 +404,7 @@ pub fn spawn_acp_client(
     // 大型图片 prompt；队列满后视图保留草稿，连接恢复后用户可再次提交。
     let (action_tx, action_rx) = smol::channel::bounded::<AcpUserAction>(ACP_ACTION_QUEUE_CAPACITY);
     let (snapshot_tx, snapshot_rx) = smol::channel::unbounded::<ConversationSnapshot>();
-    let conn_cell: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
+    let conn_cell: Arc<Mutex<Option<RuntimeStream>>> = Arc::new(Mutex::new(None));
     let conn_cell_for_thread = Arc::clone(&conn_cell);
     // 读线程在镜像接不上时自己要整段帧，和用户动作走同一条写端。
     let refresh_tx = action_tx.clone();
@@ -670,6 +669,7 @@ mod tests {
         assert_eq!(snapshot.end_kind, AcpEndKind::Unknown);
     }
 
+    #[cfg(unix)]
     #[test]
     fn snapshot_omitting_history_id_keeps_the_live_id() {
         let mut state = smelt_core::acp_session::AcpSessionState::default();
@@ -700,6 +700,7 @@ mod tests {
         assert_eq!(snapshot.history_session_id.as_deref(), Some("01a128ad"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn frame_keeps_entries_written_as_the_turn_closed() {
         // 收尾时写下的报错已经算历史，`live.open_turn` 是空的。快照带着它，
@@ -733,6 +734,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn unreadable_snapshot_phase_ends_startup_wait() {
         let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
@@ -810,6 +812,7 @@ mod tests {
         assert_eq!(error, "ACP 会话不存在");
     }
 
+    #[cfg(unix)]
     #[test]
     fn history_response_returns_the_snapshot() {
         let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);

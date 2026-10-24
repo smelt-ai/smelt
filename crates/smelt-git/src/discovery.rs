@@ -241,7 +241,7 @@ pub fn discover_with_sources(
         options,
     };
 
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let mut repos: Vec<DiscoveredRepo> = Vec::new();
     let mut truncated = false;
 
@@ -304,6 +304,8 @@ fn confirm(ctx: &DiscoveryContext<'_>, candidate: &Candidate) -> Option<Discover
     // rev-parse 返回的是真盘路径（macOS 上 /var → /private/var），两边都
     // canonicalize 才能比较；否则项目根判定会全线误判。
     let root = ctx.fs.canonicalize(Path::new(&toplevel)).ok()?;
+    // 协议里的仓库根是运行时路径字符串。非 UTF-8 路径序列化不出去，直接跳过。
+    let root_path = root.to_str()?.to_string();
 
     // 守门：不接受项目根之外的仓库。候选目录如果本身不是仓库根，rev-parse 会
     // 返回它的祖先——项目根在某个大仓库里时，这会把整个大仓库拖进来。
@@ -311,7 +313,7 @@ fn confirm(ctx: &DiscoveryContext<'_>, candidate: &Candidate) -> Option<Discover
     let rel = rel_path(ctx.project_root, &root)?;
 
     Some(DiscoveredRepo {
-        root,
+        root: root_path,
         rel_path: rel,
         kind: candidate.kind,
     })

@@ -1,20 +1,21 @@
-//! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自客户端库里登记的
-//! 连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
+//! 桌面挂着的运行时（设计文档 D6）。有本机运行时的平台上本机总在；远程运行时来自
+//! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
 use smelt_runtime_client::RuntimeClient;
 
 pub(crate) use smelt_client::runtime::{Runtime, RuntimeKey};
 
-/// 本机运行时的客户端。连本机 socket；守护的拉起和升级另由 `terminal` 管。
-pub(crate) fn local() -> RuntimeClient {
-    Runtime::local().client().clone()
+/// 本机运行时的客户端。连本机 socket；守护的拉起和升级由 [`crate::local_daemon`] 管。
+/// 这个平台没有本机运行时就是 `None`。
+pub(crate) fn local() -> Option<RuntimeClient> {
+    Runtime::local().map(|runtime| runtime.client().clone())
 }
 
-/// 发给 `key` 那台机器的客户端。本机总在；远程的机器已经移除就是 `None`，调用方报错，
-/// 不退回本机：发错机器比报错更糟。
+/// 发给 `key` 那台机器的客户端。没有本机运行时，或远程机器已经移除，就是 `None`。
+/// 调用方报错，不退回另一台机器：发错机器比报错更糟。
 pub(crate) fn client(key: &RuntimeKey, cx: &gpui::App) -> Option<RuntimeClient> {
     match key {
-        RuntimeKey::Local => Some(local()),
+        RuntimeKey::Local => local(),
         RuntimeKey::Remote(_) => remote_of(key, cx).map(|remote| remote.runtime.client().clone()),
     }
 }
@@ -26,14 +27,13 @@ pub(crate) fn runtime(key: &RuntimeKey, cx: &gpui::App) -> Option<Runtime> {
 
 /// 那台机器的 `SMELT_HOME`：本机直接算；远程的取连上时记下的，还没连上过（或运行时太旧
 /// 不报）是 `None`。客户端拿它认出那台机器上哪些会话是智能体对话。
-pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<std::path::PathBuf> {
+pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
     match key {
-        RuntimeKey::Local => smelt_paths::smelt_home(),
-        RuntimeKey::Remote(_) => remote_of(key, cx)?
-            .connection
-            .smelt_home
-            .as_ref()
-            .map(std::path::PathBuf::from),
+        // 本机主目录是这台电脑上的路径；比会话 cwd 时按运行时路径字符串用。
+        RuntimeKey::Local => {
+            smelt_paths::smelt_home().and_then(|path| path.to_str().map(str::to_owned))
+        }
+        RuntimeKey::Remote(_) => remote_of(key, cx)?.connection.smelt_home.clone(),
     }
 }
 
@@ -41,12 +41,23 @@ pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<std::path::
 /// 就是连不上，由调用方按断线处理。
 pub(crate) fn connect_terminal(
     runtime: &Runtime,
-) -> std::io::Result<std::os::unix::net::UnixStream> {
+) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
     if runtime.is_local() {
-        crate::terminal::connect_daemon()
-    } else {
-        runtime.client().connect()
+        // 拉起本机 smeltd 是 Unix 上的生命周期（设计文档 D3/D4）。Windows 第 1 步
+        // 只连远程运行时。
+        #[cfg(unix)]
+        {
+            return crate::local_daemon::connect_daemon();
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "本机运行时在这个平台上还不可用",
+            ));
+        }
     }
+    runtime.client().connect()
 }
 
 /// 给人看的运行时名字：本机就叫本机，远程用配对时记下的主机名。
@@ -345,7 +356,8 @@ pub(crate) fn runtime_incompatible(key: &RuntimeKey, cx: &gpui::App) -> bool {
 }
 
 /// 本机守护版本对不上、正在换代：这时由订阅线程负责升级（见 `runtime_events`），
-/// 别处的空闲升级不要再插一脚。
+/// 别处的空闲升级不要再插一脚。只在有本机 smeltd 的平台上有意义。
+#[cfg(unix)]
 pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
     status_of_key(&RuntimeKey::Local, cx).is_some_and(|status| {
         matches!(
@@ -473,7 +485,7 @@ struct LazyRemoteConnector {
 }
 
 impl smelt_runtime_client::Connector for LazyRemoteConnector {
-    fn connect(&self) -> std::io::Result<std::os::unix::net::UnixStream> {
+    fn connect(&self) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
         let connector = {
             let mut route = self.route.lock();
             match route.connector.as_ref() {
@@ -522,7 +534,8 @@ fn remote_client(
 /// 本机守护：没在跑就按 App 里的版本拉起（运行中退出了也靠这里补上），再对版本。
 /// 阻塞，只在后台调。
 pub(crate) fn local_status(client: &RuntimeClient) -> RuntimeStatus {
-    crate::terminal::ensure_daemon_running();
+    #[cfg(unix)]
+    crate::local_daemon::ensure_daemon_running();
     status_of(client)
 }
 
@@ -1128,12 +1141,13 @@ mod tests {
                 "取到的不是那台机器的客户端"
             );
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
-            assert!(client(&RuntimeKey::Local, cx).is_some());
+            if smelt_client::runtime::local_runtime_supported() {
+                assert!(client(&RuntimeKey::Local, cx).is_some());
+            } else {
+                assert!(client(&RuntimeKey::Local, cx).is_none());
+            }
             // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
-            assert_eq!(
-                smelt_home(&far, cx),
-                Some(std::path::PathBuf::from("/home/far/.smelt"))
-            );
+            assert_eq!(smelt_home(&far, cx), Some("/home/far/.smelt".to_string()));
             assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
         });
     }
@@ -1246,7 +1260,7 @@ mod tests {
     ) -> RuntimeClient {
         use std::io::{BufRead, Write};
         RuntimeClient::new(move || {
-            let (client, server) = std::os::unix::net::UnixStream::pair()?;
+            let (client, server) = smelt_runtime_client::RuntimeStream::pair()?;
             let respond = respond.clone();
             std::thread::spawn(move || {
                 let mut line = String::new();
@@ -1447,7 +1461,7 @@ mod tests {
     fn runtime_replying(lines: &'static [&'static str]) -> RuntimeClient {
         use std::io::{BufRead, Write};
         RuntimeClient::new(move || {
-            let (client, server) = std::os::unix::net::UnixStream::pair()?;
+            let (client, server) = smelt_runtime_client::RuntimeStream::pair()?;
             std::thread::spawn(move || {
                 let mut line = String::new();
                 std::io::BufReader::new(server.try_clone().unwrap())

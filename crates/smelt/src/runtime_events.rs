@@ -35,8 +35,8 @@ struct RuntimeSubscriptions {
     sender: smol::channel::Sender<RuntimeEvent>,
     /// 订阅线程把远程运行时的连通性报给主线程：哪个运行时、现在怎样。
     status: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
-    /// 本机那条。把手丢了线程就停，所以要留着。
-    _local: SubscriptionHandle,
+    /// 本机那条。没有本机运行时是 `None`，不另起一条每秒去探本机 socket 的线程。
+    _local: Option<SubscriptionHandle>,
     remotes: HashMap<RuntimeKey, SubscriptionHandle>,
     _hub_watch: Option<Subscription>,
 }
@@ -115,7 +115,9 @@ pub(crate) fn start(cx: &mut App) -> smol::channel::Receiver<RuntimeEvent> {
         }
     })
     .detach();
-    let local = spawn_subscription(Runtime::local(), sender.clone(), status.clone());
+    let local = Runtime::local().map(|runtime| {
+        spawn_subscription(runtime, sender.clone(), status.clone())
+    });
     cx.set_global(RuntimeSubscriptions {
         sender,
         status,
@@ -161,9 +163,16 @@ pub(crate) fn spawn_subscription(
                 {
                     let (version, detail) = (version.clone(), detail.clone());
                     if runtime.is_local() {
-                        status = upgrade_local_then_probe(
-                            &runtime, &version, &detail, &status_tx, &stop,
-                        );
+                        #[cfg(unix)]
+                        {
+                            status = upgrade_local_then_probe(
+                                &runtime, &version, &detail, &status_tx, &stop,
+                            );
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = (&version, &detail);
+                        }
                     } else if !upgrade_requested {
                         upgrade_requested = true;
                         status = upgrade_then_probe(&runtime, &version, &detail, &status_tx, &stop);
@@ -237,6 +246,7 @@ pub(crate) fn spawn_subscription(
 
 /// 本机守护版本对不上：请它交接到 App 里的版本（会话保留），换好再探一次。它有回合没跑完
 /// 时拒绝交接，隔一阵再请，直到换成或者停下；期间报「升级中」，界面上看得到在等什么。
+#[cfg(unix)]
 fn upgrade_local_then_probe(
     runtime: &Runtime,
     version: &str,
@@ -244,7 +254,7 @@ fn upgrade_local_then_probe(
     status_tx: &smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     stop: &AtomicBool,
 ) -> RuntimeStatus {
-    use crate::terminal::UpgradeOutcome;
+    use crate::local_daemon::UpgradeOutcome;
 
     const BUSY_RETRY: Duration = Duration::from_secs(15);
     let report = |progress: &str| {
@@ -255,7 +265,7 @@ fn upgrade_local_then_probe(
     };
     report("正在升级本机运行时");
     loop {
-        match crate::terminal::upgrade_daemon() {
+        match crate::local_daemon::upgrade_daemon() {
             UpgradeOutcome::Busy => {
                 report("本机运行时有回合没跑完，跑完就升级");
                 std::thread::sleep(BUSY_RETRY);

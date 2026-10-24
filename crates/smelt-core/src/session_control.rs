@@ -1339,7 +1339,7 @@ mod tests {
     #[test]
     fn display_title_prefers_the_user_name() {
         let mut session = HistorySessionSummary {
-            path: PathBuf::from("/tmp/session.jsonl"),
+            path: "/tmp/session.jsonl".to_string(),
             resume_id: "session-1".to_string(),
             title: "Fix the flaky test".to_string(),
             custom_title: None,

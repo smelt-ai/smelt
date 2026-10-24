@@ -1278,10 +1278,10 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_client::session_ops::submit_automation_command(
-                        &crate::runtimes::local(),
-                        &command,
-                    )
+                    let Some(client) = crate::runtimes::local() else {
+                        return Err("本机运行时在这个平台上还不可用".to_string());
+                    };
+                    smelt_client::session_ops::submit_automation_command(&client, &command)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
@@ -1353,11 +1353,16 @@ impl Workspace {
             cx.notify();
             return;
         };
+        let Some(runtime) = crate::runtimes::Runtime::local() else {
+            self.automation_surface.error = Some("本机运行时在这个平台上还不可用".to_string());
+            cx.notify();
+            return;
+        };
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::Runtime::local(),
+                    runtime,
                     launch_prep: None,
                     agent,
                     launch: record.launch,
@@ -2142,10 +2147,10 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_client::session_ops::submit_automation_command(
-                        &crate::runtimes::local(),
-                        &command,
-                    )
+                    let Some(client) = crate::runtimes::local() else {
+                        return Err("本机运行时在这个平台上还不可用".to_string());
+                    };
+                    smelt_client::session_ops::submit_automation_command(&client, &command)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

@@ -11,7 +11,6 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
-use std::path::Path;
 use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
@@ -109,7 +108,6 @@ fn search_tree_rows(
                 .py(px(2.))
                 .text_sm()
                 .text_color(context.fg)
-                
                 .hover(move |row| row.bg(context.hover))
                 .child(
                     Icon::new(IconName::File)
@@ -216,7 +214,7 @@ pub(super) fn walk_dir_cached(
         return;
     };
     for (name, is_dir) in entries.iter() {
-        let path = Path::new(dir).join(name).to_string_lossy().to_string();
+        let path = smelt_client::runtime_path::join(dir, name);
         let is_expanded = expanded.contains(&path);
         out.push((depth, name.clone(), *is_dir, path.clone(), is_expanded));
         if *is_dir && is_expanded {
@@ -352,11 +350,8 @@ pub(super) fn collect_file_tree_rows(
                 None
             } else {
                 marks.as_ref().and_then(|marks| {
-                    Path::new(&path)
-                        .strip_prefix(root)
-                        .ok()
-                        .and_then(|rel| rel.to_str())
-                        .and_then(|rel| marks.get(rel).copied())
+                    smelt_client::runtime_path::strip_prefix(&path, root)
+                        .and_then(|rel| marks.get(rel.as_str()).copied())
                 })
             };
             rows.push(FileTreeRow::Entry {
@@ -801,12 +796,9 @@ pub(super) fn breadcrumb_segments(path: &str, roots: &[String]) -> Vec<Breadcrum
 /// 名字组件会自动回退成纯文本，不会 panic。没有扩展名的文件（Makefile 等）退而
 /// 用文件名本身（能命中 "makefile" 这类按文件名匹配的语言）。
 pub(super) fn editor_language_for_path(path: &str) -> String {
-    let p = Path::new(path);
-    match p.extension().and_then(|e| e.to_str()) {
+    match smelt_client::runtime_path::extension(path) {
         Some(ext) => ext.to_lowercase(),
-        None => p
-            .file_name()
-            .and_then(|n| n.to_str())
+        None => smelt_client::runtime_path::file_name(path)
             .unwrap_or("text")
             .to_lowercase(),
     }
@@ -870,7 +862,6 @@ pub fn file_content_parts(
                         .items_center()
                         .text_size(px(14.))
                         .line_height(relative(1.2))
-                        
                         .when(is_last, |el| el.text_color(fg).font_semibold())
                         .when(!is_last, |el| el.text_color(muted))
                         .hover(move |el| el.bg(border).text_color(fg))

@@ -307,7 +307,7 @@ fn summarize_session_with(fs: &dyn FileSystem, path: &Path) -> Option<SessionSum
         title: title.clone(),
         agent_title: title,
         custom_title: None,
-        path: path.to_path_buf(),
+        path: path.to_string_lossy().into_owned(),
         resume_id: session_id,
         started_at,
         last_active_at,
@@ -572,7 +572,7 @@ fn summarize_codex_session_with(
 
     let title = title.unwrap_or_else(|| session_id.clone());
     Some(SessionSummary {
-        path: path.to_path_buf(),
+        path: path.to_string_lossy().into_owned(),
         title: title.clone(),
         agent_title: title,
         custom_title: None,
@@ -751,7 +751,7 @@ fn summarize_grok_session_with(
         .map(|s| truncate(s.trim(), 80))
         .unwrap_or_else(|| session_id.clone());
     Some(SessionSummary {
-        path: session_dir.to_path_buf(),
+        path: session_dir.to_string_lossy().into_owned(),
         title: title.clone(),
         agent_title: title,
         custom_title: None,
@@ -1000,7 +1000,7 @@ fn summarize_copilot_session_with(
     }
 
     Some(SessionSummary {
-        path: session_dir.to_path_buf(),
+        path: session_dir.to_string_lossy().into_owned(),
         title: title.clone(),
         agent_title: title,
         custom_title: None,
@@ -1648,7 +1648,7 @@ fn summarize_pi_session_with(
         .map(|title| truncate(title.trim(), 80))
         .unwrap_or_else(|| resume_id.clone());
     Some(SessionSummary {
-        path: path.to_path_buf(),
+        path: path.to_string_lossy().into_owned(),
         title: title.clone(),
         agent_title: title,
         custom_title: None,
@@ -1771,7 +1771,9 @@ pub fn list_antigravity_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<S
                     path: crate::antigravity_history::conversation_db(
                         override_dir,
                         &row.conversation_id,
-                    ),
+                    )
+                    .to_string_lossy()
+                    .into_owned(),
                     title: agent_title.clone(),
                     agent_title,
                     custom_title: None,
@@ -1944,28 +1946,28 @@ mod tests {
         let claude = list_sessions_with(&fs, cwd, Some("/providers/claude"));
         assert_eq!(claude.len(), 1);
         assert_eq!(claude[0].resume_id, "claude-id");
-        let detail = load_session_detail_with(&fs, &claude[0].path).unwrap();
+        let detail = load_session_detail_with(&fs, Path::new(&claude[0].path)).unwrap();
         assert_eq!(detail.turns.len(), 2);
         assert_eq!(detail.model.as_deref(), Some("claude-test"));
 
         let codex = list_codex_sessions_with(&fs, cwd, Some("/providers/codex"));
         assert_eq!(codex.len(), 1);
         assert_eq!(codex[0].resume_id, "codex-id");
-        let detail = load_codex_session_detail_with(&fs, &codex[0].path).unwrap();
+        let detail = load_codex_session_detail_with(&fs, Path::new(&codex[0].path)).unwrap();
         assert_eq!(detail.turns.len(), 2);
         assert_eq!(detail.model.as_deref(), Some("codex-test"));
 
         let grok = list_grok_sessions_with(&fs, cwd, Some("/providers/grok"));
         assert_eq!(grok.len(), 1);
         assert_eq!(grok[0].resume_id, "grok-id");
-        let detail = load_grok_session_detail_with(&fs, &grok[0].path).unwrap();
+        let detail = load_grok_session_detail_with(&fs, Path::new(&grok[0].path)).unwrap();
         assert_eq!(detail.turns.len(), 2);
         assert_eq!(detail.model.as_deref(), Some("grok-test"));
 
         let copilot = list_copilot_sessions_with(&fs, cwd, Some("/providers/copilot"));
         assert_eq!(copilot.len(), 1);
         assert_eq!(copilot[0].resume_id, "copilot-id");
-        let detail = load_copilot_session_detail_with(&fs, &copilot[0].path).unwrap();
+        let detail = load_copilot_session_detail_with(&fs, Path::new(&copilot[0].path)).unwrap();
         assert_eq!(detail.turns.len(), 2);
         assert_eq!(detail.model.as_deref(), Some("copilot-test"));
     }
@@ -2019,9 +2021,9 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
 
         assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].path.file_stem().unwrap(), "newer");
+        assert_eq!(Path::new(&sessions[0].path).file_stem().unwrap(), "newer");
         assert_eq!(sessions[0].title, "second session");
-        assert_eq!(sessions[1].path.file_stem().unwrap(), "older");
+        assert_eq!(Path::new(&sessions[1].path).file_stem().unwrap(), "older");
         assert_eq!(sessions[1].message_count, 2);
     }
 
@@ -2136,7 +2138,7 @@ mod tests {
         assert_eq!(sessions[0].title, "实际问题"); // 合成的 environment_context 不该被当标题
         assert_eq!(sessions[0].message_count, 2);
 
-        let detail = load_codex_session_detail(&sessions[0].path).unwrap();
+        let detail = load_codex_session_detail(Path::new(&sessions[0].path)).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();
         assert_eq!(detail.turns.len(), 2); // 合成消息被跳过，剩真实问题 + assistant 轮
         assert!(detail.turns[0].is_user);
@@ -2181,7 +2183,7 @@ mod tests {
         assert_eq!(sessions[0].title, "聊聊策略");
         assert_eq!(sessions[0].message_count, 2);
 
-        let detail = load_grok_session_detail(&sessions[0].path).unwrap();
+        let detail = load_grok_session_detail(Path::new(&sessions[0].path)).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();
         assert_eq!(detail.turns.len(), 2); // 两条合成消息（带/不带 synthetic_reason）都被跳过
         assert!(detail.turns[0].is_user);
@@ -2373,7 +2375,7 @@ mod tests {
         assert_eq!(sessions[0].title, "调试问题");
         assert_eq!(sessions[0].message_count, 3);
 
-        let detail = load_copilot_session_detail(&sessions[0].path).unwrap();
+        let detail = load_copilot_session_detail(Path::new(&sessions[0].path)).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();
         assert_eq!(detail.turns.len(), 3);
         assert!(detail.turns[0].is_user);

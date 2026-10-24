@@ -3,7 +3,6 @@
 //! 和桌面客户端。
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -59,8 +58,9 @@ pub fn agent_definition_id_from_option_id(option_id: &str) -> Option<&str> {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistorySessionSummary {
+    /// 运行时那台机器上的存档路径。
     #[serde(skip)]
-    pub path: PathBuf,
+    pub path: String,
     pub resume_id: String,
     /// agent transcript / summary 自己生成的标题，永远是原始值。
     pub title: String,
@@ -216,14 +216,19 @@ pub fn is_agent_conversation(
     cwd: Option<&str>,
 ) -> bool {
     let home = smelt_paths::smelt_home();
-    is_agent_conversation_on(home.as_deref(), automation_id, agent_definition_id, cwd)
+    is_agent_conversation_on(
+        home.as_deref().and_then(|path| path.to_str()),
+        automation_id,
+        agent_definition_id,
+        cwd,
+    )
 }
 
 /// 同 [`is_agent_conversation`]，托管目录按 `smelt_home`（会话所在那台机器的
 /// `SMELT_HOME`）算。那台机器的 `SMELT_HOME` 还不知道（运行时早于上报它、从没连上过）
 /// 时，有 cwd 的一律算项目：宁可放进项目列表，也不把项目对话藏进「最近对话」。
 pub fn is_agent_conversation_on(
-    smelt_home: Option<&std::path::Path>,
+    smelt_home: Option<&str>,
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
     cwd: Option<&str>,
@@ -241,14 +246,16 @@ pub fn is_agent_conversation_on(
 /// （`~/.smelt/agents/<id>`）或旧版每会话一个的对话目录。两者结构上都不可能
 /// 是用户项目。按本机的 `SMELT_HOME` 算。
 pub fn is_agent_conversation_cwd(cwd: &str) -> bool {
-    smelt_paths::smelt_home().is_some_and(|home| is_agent_conversation_cwd_in(&home, cwd))
+    smelt_paths::smelt_home().is_some_and(|home| {
+        home.to_str()
+            .is_some_and(|home| is_agent_conversation_cwd_in(home, cwd))
+    })
 }
 
 /// 同 [`is_agent_conversation_cwd`]，按 cwd 所在那台机器的 `SMELT_HOME` 算。
-pub fn is_agent_conversation_cwd_in(smelt_home: &std::path::Path, cwd: &str) -> bool {
-    let path = std::path::Path::new(cwd);
-    crate::agent_paths::is_agent_space_in(smelt_home, path)
-        || crate::agent_paths::is_workbench_conversation_workspace_in(smelt_home, path)
+pub fn is_agent_conversation_cwd_in(smelt_home: &str, cwd: &str) -> bool {
+    crate::agent_paths::is_agent_space_in(smelt_home, cwd)
+        || crate::agent_paths::is_workbench_conversation_workspace_in(smelt_home, cwd)
 }
 
 /// 不进项目会话列表：智能体对话、自动化 Run，以及旧档里的后台自动化 session。按本机的
@@ -261,7 +268,7 @@ pub fn is_product_conversation(
 ) -> bool {
     let home = smelt_paths::smelt_home();
     is_product_conversation_on(
-        home.as_deref(),
+        home.as_deref().and_then(|path| path.to_str()),
         automation_id,
         agent_definition_id,
         acp_session_id,
@@ -271,7 +278,7 @@ pub fn is_product_conversation(
 
 /// 同 [`is_product_conversation`]，按会话所在那台机器的 `SMELT_HOME` 算。
 pub fn is_product_conversation_on(
-    smelt_home: Option<&std::path::Path>,
+    smelt_home: Option<&str>,
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
     acp_session_id: Option<&str>,
@@ -441,12 +448,11 @@ pub fn resolve_session_delete_kind(
 #[cfg(test)]
 mod machine_home_tests {
     use super::*;
-    use std::path::Path;
 
     /// 远程机器上的 space 按那台机器的 SMELT_HOME 认，跟本机的主目录无关。
     #[test]
     fn agent_conversations_are_recognised_by_their_own_machine_home() {
-        let remote = Path::new("/home/someone/.smelt");
+        let remote = "/home/someone/.smelt";
         let space = "/home/someone/.smelt/agents/agent-1";
         assert!(is_agent_conversation_on(
             Some(remote),
@@ -462,7 +468,7 @@ mod machine_home_tests {
         ));
         // 换一台机器的主目录就不是它的 space。
         assert!(!is_agent_conversation_on(
-            Some(Path::new("/Users/me/.smelt")),
+            Some("/Users/me/.smelt"),
             None,
             Some("agent-1"),
             Some(space),
@@ -472,7 +478,7 @@ mod machine_home_tests {
     /// 项目里点 + 选智能体开的对话属于项目；主目录还不知道时有 cwd 的也一律算项目。
     #[test]
     fn project_conversations_and_unknown_homes_stay_in_projects() {
-        let remote = Path::new("/home/someone/.smelt");
+        let remote = "/home/someone/.smelt";
         assert!(!is_agent_conversation_on(
             Some(remote),
             None,

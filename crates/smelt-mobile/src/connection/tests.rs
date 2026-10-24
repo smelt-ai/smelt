@@ -1,11 +1,11 @@
-//! 状态机单测：假运行时按 wire 格式在 `UnixStream::pair()` 上回包。
+//! 状态机单测：假运行时按 wire 格式在 `RuntimeStream::pair()` 上回包。
 
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
+use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::control::{ControlError, ControlResponse};
 use smelt_runtime_client::protocol::write_json_line;
 
@@ -134,7 +134,7 @@ impl Route for FakeRoute {
                         "连不上运行时（超时）",
                     ));
                 }
-                let (client, server) = UnixStream::pair()?;
+                let (client, server) = RuntimeStream::pair()?;
                 let runtime = Arc::clone(&runtime);
                 std::thread::spawn(move || {
                     let mut line = String::new();

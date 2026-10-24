@@ -9,7 +9,6 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -19,10 +18,10 @@ use rust_embed::RustEmbed;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{Message, WebSocket};
 
-use crate::RuntimeClient;
 use crate::protocol::daemon::DaemonOperation;
 use crate::protocol::desktop::DesktopAttachReply;
 use crate::protocol::write_json_line;
+use crate::{RuntimeClient, RuntimeStream};
 
 /// noVNC（Debian 的 1.6.0 包，MPL-2.0，见 COPYRIGHT）和 Smelt 自己的宿主页 `desktop.html`。
 #[derive(RustEmbed)]
@@ -196,7 +195,7 @@ fn bridge(stream: TcpStream, shared: &Shared) {
 }
 
 /// 连上运行时的远程桌面，回 ok 之后这条连接就是 RFB 字节流。
-fn attach(client: &RuntimeClient) -> Result<UnixStream, String> {
+fn attach(client: &RuntimeClient) -> Result<RuntimeStream, String> {
     let mut stream = client
         .connect_with_timeout(Duration::from_secs(10))
         .map_err(|error| format!("连不上运行时：{error}"))?;
@@ -226,7 +225,7 @@ fn attach(client: &RuntimeClient) -> Result<UnixStream, String> {
 
 /// 一个线程把运行时的字节读进通道，另一个（当前）线程轮流读网页的帧、把通道里的字节
 /// 发给网页。WebSocket 不能拆成两半分别读写，所以写都在这一个线程。
-fn pump(mut ws: WebSocket<TcpStream>, runtime: UnixStream) {
+fn pump(mut ws: WebSocket<TcpStream>, runtime: RuntimeStream) {
     if ws.get_ref().set_read_timeout(Some(POLL)).is_err() {
         return;
     }
@@ -293,7 +292,7 @@ mod tests {
     /// 假运行时：回 ok，之后把收到的字节原样回过去。
     fn echo_runtime() -> RuntimeClient {
         RuntimeClient::new(move || {
-            let (client, mut server) = UnixStream::pair()?;
+            let (client, mut server) = RuntimeStream::pair()?;
             std::thread::spawn(move || {
                 let mut line = Vec::new();
                 let mut byte = [0u8; 1];

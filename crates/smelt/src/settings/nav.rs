@@ -19,6 +19,8 @@ pub enum SettingsSection {
     AgentNotify,
     AgentHooks,
     CollaborationRemote,
+    /// 应用更新只在 macOS 上提供（设计文档 D4）。
+    #[cfg(target_os = "macos")]
     MaintenanceUpdate,
     MaintenanceDaemon,
     MaintenanceStorage,
@@ -30,6 +32,7 @@ impl SettingsSection {
         Self::AppearanceTheme
     }
 
+    #[cfg(target_os = "macos")]
     pub fn maintenance_update() -> Self {
         Self::MaintenanceUpdate
     }
@@ -45,6 +48,7 @@ impl SettingsSection {
             Self::AgentNotify => "agent-notify".into(),
             Self::AgentHooks => "agent-hooks".into(),
             Self::CollaborationRemote => "collaboration-remote".into(),
+            #[cfg(target_os = "macos")]
             Self::MaintenanceUpdate => "maintenance-update".into(),
             Self::MaintenanceDaemon => "maintenance-daemon".into(),
             Self::MaintenanceStorage => "maintenance-storage".into(),
@@ -91,7 +95,7 @@ pub struct SettingsNavCategory {
 
 /// 设置侧栏的两级导航。一级分类默认展开。
 pub fn settings_nav() -> Vec<SettingsNavCategory> {
-    vec![
+    let mut nav = vec![
         SettingsNavCategory {
             id: SettingsCategoryId::General,
             title: "通用",
@@ -297,6 +301,7 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
             keywords: &["维护", "高级"],
             default_open: true,
             children: vec![
+                #[cfg(target_os = "macos")]
                 leaf(
                     "应用更新",
                     IconName::Redo,
@@ -355,7 +360,21 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                 ),
             ],
         },
-    ]
+    ];
+    if !smelt_client::runtime::local_runtime_supported() {
+        for category in &mut nav {
+            category.children.retain(|item| {
+                !matches!(
+                    item.section,
+                    SettingsSection::AgentRuntime
+                        | SettingsSection::AgentLaunch
+                        | SettingsSection::AgentWorkspace
+                        | SettingsSection::MaintenanceDaemon
+                )
+            });
+        }
+    }
+    nav
 }
 
 fn leaf(
@@ -629,6 +648,7 @@ mod tests {
         for (query, expected) in [
             ("任务完成通知", SettingsSection::AgentNotify),
             ("Relay 地址", SettingsSection::CollaborationRemote),
+            #[cfg(target_os = "macos")]
             ("自动下载安装", SettingsSection::MaintenanceUpdate),
         ] {
             assert_eq!(matching_sections(&nav, query), [expected], "query: {query}");
@@ -666,6 +686,7 @@ mod tests {
             SettingsSection::appearance(),
             SettingsSection::AppearanceTheme
         );
+        #[cfg(target_os = "macos")]
         assert_eq!(
             SettingsSection::maintenance_update(),
             SettingsSection::MaintenanceUpdate

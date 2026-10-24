@@ -1,7 +1,7 @@
 //! 客户端挂着的运行时：它是谁，怎么连（设计文档 D6）。
 //!
-//! 本机运行时总在，身份就是 `Local`；远程运行时按它永久不变的 `runtime_id` 认。会话、
-//! 视图各自记着自己属于哪个运行时，调用和连接都发给它。
+//! 有本机运行时的平台上，本机身份是 `Local`（设计文档 D3）。远程运行时按它永久不变的
+//! `runtime_id` 认。会话、视图各自记着自己属于哪个运行时，调用和连接都发给它。
 
 use smelt_runtime_client::RuntimeClient;
 
@@ -9,6 +9,11 @@ use smelt_runtime_client::RuntimeClient;
 pub enum RuntimeKey {
     Local,
     Remote(String),
+}
+
+/// 这一版桌面能不能在本机跑 smeltd。第 1 步是 Unix；Windows 只连远程运行时。
+pub fn local_runtime_supported() -> bool {
+    cfg!(unix)
 }
 
 #[derive(Clone)]
@@ -29,14 +34,20 @@ impl Runtime {
     }
 
     /// 本机运行时。连本机 socket，不负责拉起守护。
-    pub fn local() -> Self {
+    ///
+    /// 第 1 步只有 Unix 有本机运行时。没有的平台返回 `None`，调用方不能造一个离线的
+    /// 本机空间来顶上。
+    pub fn local() -> Option<Self> {
+        if !local_runtime_supported() {
+            return None;
+        }
         static LOCAL: std::sync::OnceLock<RuntimeClient> = std::sync::OnceLock::new();
-        Self {
+        Some(Self {
             key: RuntimeKey::Local,
             client: LOCAL
                 .get_or_init(smelt_runtime_client::local::local_runtime)
                 .clone(),
-        }
+        })
     }
 
     pub fn key(&self) -> &RuntimeKey {

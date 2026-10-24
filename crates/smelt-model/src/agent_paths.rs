@@ -44,13 +44,19 @@ fn agent_spaces_root() -> Option<PathBuf> {
 }
 
 pub fn is_agent_space(path: &Path) -> bool {
-    smelt_paths::smelt_home().is_some_and(|home| is_agent_space_in(&home, path))
+    let Some(home) = smelt_paths::smelt_home().and_then(|home| home.to_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    path.to_str()
+        .is_some_and(|path| is_agent_space_in(&home, path))
 }
 
 /// 同 [`is_agent_space`]，`smelt_home` 是路径所在那台机器的 `SMELT_HOME`。客户端判断别的
 /// 机器上的路径时用它：拿自己的主目录去比，远程机器上的 space 永远对不上。
-pub fn is_agent_space_in(smelt_home: &Path, path: &Path) -> bool {
-    path.starts_with(smelt_home.join("agents"))
+/// 两条都是运行时路径，按 `/` 比，不经过 `std::path`。
+pub fn is_agent_space_in(smelt_home: &str, path: &str) -> bool {
+    under(&format!("{}/agents", trim_slash(smelt_home)), path)
 }
 
 /// 从 space 路径反解出智能体 id。
@@ -76,13 +82,31 @@ pub fn workbench_conversation_workspace_root() -> Option<PathBuf> {
 }
 
 pub fn is_workbench_conversation_workspace(path: &Path) -> bool {
-    smelt_paths::smelt_home()
-        .is_some_and(|home| is_workbench_conversation_workspace_in(&home, path))
+    let Some(home) = smelt_paths::smelt_home().and_then(|home| home.to_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    path.to_str()
+        .is_some_and(|path| is_workbench_conversation_workspace_in(&home, path))
 }
 
 /// 同 [`is_workbench_conversation_workspace`]，按路径所在那台机器的 `SMELT_HOME` 算。
-pub fn is_workbench_conversation_workspace_in(smelt_home: &Path, path: &Path) -> bool {
-    path.starts_with(smelt_home.join("workspaces").join("conversations"))
+pub fn is_workbench_conversation_workspace_in(smelt_home: &str, path: &str) -> bool {
+    under(
+        &format!("{}/workspaces/conversations", trim_slash(smelt_home)),
+        path,
+    )
+}
+
+fn trim_slash(path: &str) -> &str {
+    path.trim_end_matches('/')
+}
+
+/// `path` 等于 `root`，或落在 `root` 的下一级完整路径段里。`/proj` 不包含 `/project`。
+fn under(root: &str, path: &str) -> bool {
+    let path = trim_slash(path);
+    let root = trim_slash(root);
+    path == root || path.starts_with(&format!("{root}/"))
 }
 
 /// Pi 子智能体的子会话目录：`~/.smelt/subagents`。不放进 Pi 的会话目录：历史列表会把

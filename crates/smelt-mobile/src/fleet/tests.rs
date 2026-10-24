@@ -1,16 +1,15 @@
-//! 机队单测：假传输按 endpoint 找假运行时（`UnixStream::pair()` 上按线格式回包），本机库和
+//! 机队单测：假传输按 endpoint 找假运行时（`RuntimeStream::pair()` 上按线格式回包），本机库和
 //! 缓存用内存库。
 
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use smelt_iroh::RelaySettings;
-use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlResponse};
 use smelt_runtime_client::protocol::write_json_line;
+use smelt_runtime_client::{RuntimeClient, RuntimeStream};
 
 use super::*;
 use crate::api::draft::MessageDraft;
@@ -88,7 +87,7 @@ struct FakeRuntime {
     describes: AtomicUsize,
     links: AtomicUsize,
     /// 会话目录的订阅连接，挂着不回。
-    subscriptions: Mutex<Vec<UnixStream>>,
+    subscriptions: Mutex<Vec<RuntimeStream>>,
 }
 
 impl FakeRuntime {
@@ -129,14 +128,14 @@ impl FakeRuntime {
                     "连不上运行时（超时）",
                 ));
             }
-            let (client, server) = UnixStream::pair()?;
+            let (client, server) = RuntimeStream::pair()?;
             let runtime = Arc::clone(&runtime);
             std::thread::spawn(move || runtime.serve(server));
             Ok(client)
         })
     }
 
-    fn serve(&self, server: UnixStream) {
+    fn serve(&self, server: RuntimeStream) {
         let mut line = String::new();
         if BufReader::new(&server).read_line(&mut line).is_err() || line.is_empty() {
             return;
