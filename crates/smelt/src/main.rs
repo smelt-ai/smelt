@@ -4191,9 +4191,7 @@ fn command_program(command: &str) -> Option<&str> {
         {
             continue;
         }
-        return std::path::Path::new(token)
-            .file_name()
-            .and_then(|name| name.to_str());
+        return smelt_client::runtime_path::file_name(token);
     }
     None
 }

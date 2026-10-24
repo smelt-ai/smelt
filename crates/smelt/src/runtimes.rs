@@ -26,14 +26,13 @@ pub(crate) fn runtime(key: &RuntimeKey, cx: &gpui::App) -> Option<Runtime> {
 
 /// 那台机器的 `SMELT_HOME`：本机直接算；远程的取连上时记下的，还没连上过（或运行时太旧
 /// 不报）是 `None`。客户端拿它认出那台机器上哪些会话是智能体对话。
-pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<std::path::PathBuf> {
+pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
     match key {
-        RuntimeKey::Local => smelt_paths::smelt_home(),
-        RuntimeKey::Remote(_) => remote_of(key, cx)?
-            .connection
-            .smelt_home
-            .as_ref()
-            .map(std::path::PathBuf::from),
+        // 本机主目录是这台电脑上的路径；比会话 cwd 时按运行时路径字符串用。
+        RuntimeKey::Local => {
+            smelt_paths::smelt_home().and_then(|path| path.to_str().map(str::to_owned))
+        }
+        RuntimeKey::Remote(_) => remote_of(key, cx)?.connection.smelt_home.clone(),
     }
 }
 
@@ -1143,10 +1142,7 @@ mod tests {
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
             assert!(client(&RuntimeKey::Local, cx).is_some());
             // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
-            assert_eq!(
-                smelt_home(&far, cx),
-                Some(std::path::PathBuf::from("/home/far/.smelt"))
-            );
+            assert_eq!(smelt_home(&far, cx), Some("/home/far/.smelt".to_string()));
             assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
         });
     }

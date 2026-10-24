@@ -5,7 +5,6 @@
 //! 数据修改在 `workspace.rs`，页面在 `view.rs`。
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -965,10 +964,7 @@ fn render_narrow_git_row(
                     let ws_menu = ws.clone();
                     let root_menu = root.to_string();
                     let path_menu = row.path.clone();
-                    let file_path = Path::new(root)
-                        .join(&row.path)
-                        .to_string_lossy()
-                        .to_string();
+                    let file_path = smelt_client::runtime_path::join(root, &row.path);
                     let file_path_copy = file_path.clone();
                     let file_path_finder = file_path;
                     let row_el = div()

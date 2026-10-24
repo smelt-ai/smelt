@@ -161,14 +161,21 @@ pub const PREVIEWABLE_IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 pub fn is_previewable_image(path: &str) -> bool {
-    std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| {
-            PREVIEWABLE_IMAGE_EXTENSIONS
-                .iter()
-                .any(|known| ext.eq_ignore_ascii_case(known))
-        })
+    // 扩展名按运行时路径取，不用 `std::path`（Windows 上 `\` 会切错 POSIX 路径）。
+    let name = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() {
+        return false;
+    }
+    PREVIEWABLE_IMAGE_EXTENSIONS
+        .iter()
+        .any(|known| ext.eq_ignore_ascii_case(known))
 }
 
 /// 二进制内容在 JSON 里按 base64 字符串传。直接序列化 `Vec<u8>` 会变成数字数组，

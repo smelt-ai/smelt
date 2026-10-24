@@ -2,12 +2,12 @@
 
 use crate::session_handoff::HandoffTurn;
 use chrono::{DateTime, Utc};
-use std::path::PathBuf;
 
 /// 一份历史会话的概览（列表用）。
 #[derive(Clone)]
 pub struct SessionSummary {
-    pub path: PathBuf,
+    /// 运行时那台机器上的存档路径。跨过协议的是字符串，不按桌面所在系统解释。
+    pub path: String,
     /// 实际展示标题：用户设置过名称时优先，否则使用 agent_title。
     pub title: String,
     /// Agent transcript / summary 提供的原始标题，用作搜索和自定义标题下的辅助信息。
