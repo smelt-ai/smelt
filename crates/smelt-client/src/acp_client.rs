@@ -669,6 +669,7 @@ mod tests {
         assert_eq!(snapshot.end_kind, AcpEndKind::Unknown);
     }
 
+    #[cfg(unix)]
     #[test]
     fn snapshot_omitting_history_id_keeps_the_live_id() {
         let mut state = smelt_core::acp_session::AcpSessionState::default();
@@ -699,6 +700,7 @@ mod tests {
         assert_eq!(snapshot.history_session_id.as_deref(), Some("01a128ad"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn frame_keeps_entries_written_as_the_turn_closed() {
         // 收尾时写下的报错已经算历史，`live.open_turn` 是空的。快照带着它，
@@ -732,6 +734,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn unreadable_snapshot_phase_ends_startup_wait() {
         let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
@@ -809,6 +812,7 @@ mod tests {
         assert_eq!(error, "ACP 会话不存在");
     }
 
+    #[cfg(unix)]
     #[test]
     fn history_response_returns_the_snapshot() {
         let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);

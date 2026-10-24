@@ -119,11 +119,8 @@ jobs:
             and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
           '
 
-  # Windows 桌面端（docs/windows-support.md 第 1 步）：只编桌面端和它连远程运行时要用的
+  # Windows 桌面端（docs/windows-support.md D4）：只编桌面端和它连远程运行时要用的
   # crate，smeltd 不在 Windows 上编。在 Windows runner 上原生编译，不交叉编译。
-  #
-  # 施工期间不在 ci-ok 里：桌面端在 Windows 上编过之前这里会红，不能卡住别的 PR。编过后
-  # 加进 ci-ok 的 needs，转为必需检查。
   windows:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -256,7 +253,7 @@ jobs:
   # 就失败。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, rust, mobile, android-build]
+    needs: [changes, rust, mobile, android-build, windows]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize

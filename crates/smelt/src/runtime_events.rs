@@ -161,9 +161,16 @@ pub(crate) fn spawn_subscription(
                 {
                     let (version, detail) = (version.clone(), detail.clone());
                     if runtime.is_local() {
-                        status = upgrade_local_then_probe(
-                            &runtime, &version, &detail, &status_tx, &stop,
-                        );
+                        #[cfg(unix)]
+                        {
+                            status = upgrade_local_then_probe(
+                                &runtime, &version, &detail, &status_tx, &stop,
+                            );
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = (&version, &detail);
+                        }
                     } else if !upgrade_requested {
                         upgrade_requested = true;
                         status = upgrade_then_probe(&runtime, &version, &detail, &status_tx, &stop);
@@ -237,6 +244,7 @@ pub(crate) fn spawn_subscription(
 
 /// 本机守护版本对不上：请它交接到 App 里的版本（会话保留），换好再探一次。它有回合没跑完
 /// 时拒绝交接，隔一阵再请，直到换成或者停下；期间报「升级中」，界面上看得到在等什么。
+#[cfg(unix)]
 fn upgrade_local_then_probe(
     runtime: &Runtime,
     version: &str,

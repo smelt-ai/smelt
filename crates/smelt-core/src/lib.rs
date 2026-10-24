@@ -32,10 +32,12 @@ pub use smelt_model::control_api;
 pub mod control_skill;
 pub use smelt_model::conversation;
 pub mod copilot_quota;
+#[cfg(unix)]
 pub use smelt_sys::daemon_image;
 pub mod daemon_state;
 pub mod default_conversation;
 pub use smelt_model::font_config;
+#[cfg(unix)]
 pub use smelt_sys::fd_limit;
 pub mod fs;
 pub mod history_service;
@@ -62,6 +64,7 @@ mod pi_queue;
 pub mod pi_quota;
 pub mod pi_rpc;
 pub mod pi_service;
+#[cfg(unix)]
 pub use smelt_sys::process_wait;
 pub mod project_catalog;
 pub mod project_files;

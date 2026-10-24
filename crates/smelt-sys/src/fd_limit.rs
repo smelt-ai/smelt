@@ -8,7 +8,7 @@
 /// 尽可能把当前进程的 NOFILE 软上限提高到一个合理值。
 ///
 /// 不触碰硬上限；受限沙箱或系统策略拒绝时保持原样，让调用方继续正常启动。
-#[cfg(unix)]
+/// 本模块只在 Unix 上编译（设计文档 D4）。
 pub fn raise_fd_limit() {
     unsafe {
         let mut lim = libc::rlimit {
@@ -31,6 +31,3 @@ pub fn raise_fd_limit() {
         }
     }
 }
-
-#[cfg(not(unix))]
-pub fn raise_fd_limit() {}

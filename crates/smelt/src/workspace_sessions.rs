@@ -119,8 +119,11 @@ impl Workspace {
             .spawn(move || {
                 // 1) 完整 ensure（可能 handoff）→ 2) 再 reattach。禁止与 UI 侧并行 upgrade。
                 if runtime_bg.is_local() {
-                    let _ = terminal::ensure_managed_daemon_current();
-                    terminal::ensure_daemon_running();
+                    #[cfg(unix)]
+                    {
+                        let _ = terminal::ensure_managed_daemon_current();
+                        terminal::ensure_daemon_running();
+                    }
                 }
                 // ACP 占位只有收到这道闸门后才会在 UI 线程创建；否则当前活动会话
                 // 会立刻 auto-resume，随后 ensure/handoff 重启守护，把刚建的 socket
@@ -432,6 +435,7 @@ impl Workspace {
                                 .unwrap_or(0);
                             if pending == 0 {
                                 if runtime.is_local() {
+                                    #[cfg(unix)]
                                     this.check_daemon_outdated(cx);
                                 }
                                 return;
@@ -458,6 +462,7 @@ impl Workspace {
                         );
                     }
                     // restore 完成后再查/升级守护，避免与 reattach / 重试并行 handoff。
+                    #[cfg(unix)]
                     this.check_daemon_outdated(cx);
                     // 恢复完成后刷新会话管理器，但不要在启动时自动删除未连接会话。
                     // 未连接并不等于用户想删除：守护重启、网络短暂中断和恢复竞态都会

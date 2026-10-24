@@ -3,6 +3,7 @@
 use super::*;
 
 impl Workspace {
+    #[cfg(target_os = "macos")]
     /// 设置入口与设置页共用它决定要不要显示更新提示。
     pub(crate) fn update_available(&self) -> bool {
         self.update_status.staged_update().is_some()
@@ -15,6 +16,7 @@ impl Workspace {
             )
     }
 
+    #[cfg(target_os = "macos")]
     /// App 放的位置装不上更新时，所有更新入口都停在「需要先移到『应用程序』」，不检查、
     /// 不下载、不安装：在那儿每一步都白做，最后还是写不进去。
     fn blocked_by_app_location(&mut self, cx: &mut Context<Self>) -> bool {
@@ -26,6 +28,7 @@ impl Workspace {
         true
     }
 
+    #[cfg(target_os = "macos")]
     /// 「移到『应用程序』并重新打开」：拷过去、安排好等这个进程退出后从新位置重开，再退出。
     /// 后台会话在守护里，重开后照常接上。失败就留在原地，把原因给人看。
     pub(crate) fn move_app_to_applications(&mut self, cx: &mut Context<Self>) {
@@ -68,6 +71,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     /// 检查是否有新版本。`silent` 区分启动时的后台静默检查（离线/失败时不打扰用户，
     /// 悄悄退回 Idle）和设置页手动点「检查更新」（失败要如实展示原因）。
     ///
@@ -163,6 +167,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     fn apply_update_check_outcome(
         &mut self,
         outcome: updater::CheckOutcome,
@@ -186,6 +191,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(target_os = "macos")]
     /// 只在 manifest 已经指向另一份发布包后进入。持久化旧作业的清理放到后台线程，
     /// 成功后才能开始新下载，保证 begin_staged_update 永远不会撞上旧事务。
     fn replace_failed_update_after_check(
@@ -224,6 +230,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     /// 恢复失败时先收敛原事务；安装失败则由 check_for_update 拉取 manifest，只有
     /// 确认发布 URL 已变化后才作废旧作业，不能绕过持久化事务直接另起下载。
     pub(crate) fn check_or_recover_update(&mut self, silent: bool, cx: &mut Context<Self>) {
@@ -237,6 +244,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(target_os = "macos")]
     /// 后台静默下载新版 ZIP 并暂存好 `.app`，完成后置 `ReadyToInstall`（不重启、不打断）。
     /// 下载线程通过 channel 往回推字节进度，UI 线程照单刷新状态；发送端随下载任务结束而
     /// drop，`recv` 收到 Err 即代表下载收尾，此时再 `await` 任务拿最终结果。
@@ -308,6 +316,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     /// 用户点击、启动恢复、退出安装都只从这里进入同一条安装状态机。
     pub(crate) fn begin_ready_update_install(&mut self, cx: &mut Context<Self>) {
         if self.blocked_by_app_location(cx) {
@@ -319,6 +328,7 @@ impl Workspace {
         self.start_update_install(update, UpdateInstallTrigger::User, cx);
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn recover_update_at_launch(&mut self, silent_check: bool, cx: &mut Context<Self>) {
         self.update_status = updater::UpdateStatus::Checking;
         cx.notify();
@@ -360,6 +370,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn start_update_install(
         &mut self,
         update: updater::StagedUpdate,
@@ -424,6 +435,7 @@ impl Workspace {
     /// 后台查一次守护是否落后于磁盘上的 smeltd 二进制，决定要不要在设置页/齿轮上
     /// 给出「重启守护」提示。本地 Unix socket 往返很快，但仍走后台线程，跟
     /// check_for_update 同款结构，别在 UI 线程里做阻塞 IO。
+    #[cfg(unix)]
     pub(crate) fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             // 只探测状态，不再在此 ensure/handoff（冷启动 ensure 由 restore 线程串行做完）。
@@ -473,6 +485,7 @@ impl Workspace {
     }
 
     /// subscribe 相位变化后调用：挂起的升级等所有 agent 空闲再发一次。
+    #[cfg(unix)]
     pub(crate) fn maybe_flush_pending_daemon_upgrade(&mut self, cx: &mut Context<Self>) {
         if !self.daemon_upgrade_pending || self.daemon_upgrading || self.any_agent_busy(cx) {
             return;
@@ -519,6 +532,7 @@ impl Workspace {
     /// 无缝升级守护：守护 exec 新二进制、PTY fd 原地交接，会话不中断（见 smeltd 升级设计）。
     /// 成功后逐 pane reconnect——会话 id 都还在，走正常 reattach + 重放，画面最多闪一下。
     /// 正在跑的守护太旧不认识 upgrade op 时提示改用下面的硬重启。
+    #[cfg(unix)]
     pub(crate) fn upgrade_daemon_seamless(&mut self, cx: &mut Context<Self>) {
         if self.daemon_upgrading {
             return;
@@ -668,6 +682,7 @@ impl Workspace {
     /// **禁止**在 `update` 里同步 `Terminal::spawn`：握手含 sleep/轮询，多 pane 会把
     /// UI 卡死（「点重启守护就假死」）。流程：后台杀+拉起守护 → 后台按 cwd/sid 建
     /// Terminal → 主线程 `adopt_terminal` 挂回各 pane。
+    #[cfg(unix)]
     pub(crate) fn confirm_restart_daemon(&mut self, cx: &mut Context<Self>) {
         self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;

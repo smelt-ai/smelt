@@ -92,8 +92,11 @@ impl Workspace {
                 }
                 map
             },
+            #[cfg(target_os = "macos")]
             update_status: self.update_status.clone(),
+            #[cfg(target_os = "macos")]
             moving_app: self.moving_app,
+            #[cfg(target_os = "macos")]
             move_app_error: self.move_app_error.clone(),
             daemon_outdated: self.daemon_outdated,
             daemon_upgrading: self.daemon_upgrading,
