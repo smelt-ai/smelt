@@ -50,9 +50,10 @@ PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile.yourname
 copies without changing `project.pbxproj`. Keep the same Bundle ID to preserve
 that developer build's Keychain pairing data across upgrades.
 
-Release does not load developer overrides. App Store signing remains
-intentionally unconfigured until the production Apple Developer team and final
-Bundle ID are chosen.
+Release does not load developer overrides: it signs with the production team
+and Bundle ID in `ios/Flutter/SigningDefaults.xcconfig`. Build App Store /
+TestFlight packages with `make ios` from the repository root, on the release
+tag; it stamps the release version (see `docs/release.md`, section 移动端).
 
 ## Android development
 

@@ -102,12 +102,15 @@ impl Workspace {
         // 登录在能力库眼下那台机器上跑，整条事件流都问它。
         let client = self.pi_library_client(cx);
         cx.spawn(async move |this, cx| {
-            let Some(client) = client else {
-                let _ = this.update(cx, |this, cx| {
-                    this.pi_auth_error = Some("这台机器已经移除".to_string());
-                    cx.notify();
-                });
-                return;
+            let client = match client {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.pi_auth_error = Some(error);
+                        cx.notify();
+                    });
+                    return;
+                }
             };
             let params = LoginStartParams {
                 provider_id: started_id.clone(),

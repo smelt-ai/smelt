@@ -44,7 +44,13 @@ fn agent_spaces_root() -> Option<PathBuf> {
 }
 
 pub fn is_agent_space(path: &Path) -> bool {
-    agent_spaces_root().is_some_and(|root| path.starts_with(&root))
+    smelt_paths::smelt_home().is_some_and(|home| is_agent_space_in(&home, path))
+}
+
+/// 同 [`is_agent_space`]，`smelt_home` 是路径所在那台机器的 `SMELT_HOME`。客户端判断别的
+/// 机器上的路径时用它：拿自己的主目录去比，远程机器上的 space 永远对不上。
+pub fn is_agent_space_in(smelt_home: &Path, path: &Path) -> bool {
+    path.starts_with(smelt_home.join("agents"))
 }
 
 /// 从 space 路径反解出智能体 id。
@@ -70,10 +76,13 @@ pub fn workbench_conversation_workspace_root() -> Option<PathBuf> {
 }
 
 pub fn is_workbench_conversation_workspace(path: &Path) -> bool {
-    let Some(root) = workbench_conversation_workspace_root() else {
-        return false;
-    };
-    path.starts_with(&root)
+    smelt_paths::smelt_home()
+        .is_some_and(|home| is_workbench_conversation_workspace_in(&home, path))
+}
+
+/// 同 [`is_workbench_conversation_workspace`]，按路径所在那台机器的 `SMELT_HOME` 算。
+pub fn is_workbench_conversation_workspace_in(smelt_home: &Path, path: &Path) -> bool {
+    path.starts_with(smelt_home.join("workspaces").join("conversations"))
 }
 
 /// Pi 子智能体的子会话目录：`~/.smelt/subagents`。不放进 Pi 的会话目录：历史列表会把

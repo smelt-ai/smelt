@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-pi
+.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-pi ios
 
 SMELT_PI := target/smelt-pi/smelt-pi
 PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts') $(shell find packages/pi-agent/skills -type f)
@@ -71,6 +71,9 @@ check-all: lint lint-sh lint-paths test test-sh pi-agent-check ## 完整检查 (
 
 $(SMELT_PI): packages/pi-agent/package.json packages/pi-agent/bun.lock scripts/compile-smelt-pi.ts scripts/build-smelt-pi.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
 	./scripts/build-smelt-pi.sh
+
+ios: ## 在发版 tag 上出 iOS 发布包（版本号跟发版统一，见 docs/release.md）
+	scripts/build-ios.sh
 
 smelt-pi: $(SMELT_PI) ## 编译 smelt-pi；源码、锁和编译脚本没变就跳过
 

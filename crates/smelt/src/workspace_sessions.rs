@@ -164,11 +164,11 @@ impl Workspace {
             if daemon_ready_rx.recv().await.is_err() {
                 return;
             }
-            // ACP 会话的启动命令、profile、智能体定义来自运行时的配置；没读到之前
-            // 拼出来的是出厂命令，用户配的命令和环境变量会全部失效。守护已经就绪，
-            // 正常一次往返就到。
+            // ACP 会话的启动命令、profile、智能体定义来自会话所在那台机器的配置；没读到
+            // 之前拼出来的是出厂命令，用户配的命令和环境变量会全部失效。守护已经就绪，
+            // 正常一次往返就到。还没连上的远程机器等不来，按存档里的启动命令恢复。
             loop {
-                match this.update(cx, |_, cx| settings::agent_host_loaded(cx)) {
+                match this.update(cx, |_, cx| settings::agent_host_settled(&key, cx)) {
                     Ok(true) => break,
                     Ok(false) => {
                         cx.background_executor()
@@ -194,8 +194,12 @@ impl Workspace {
                             .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
                         let refresh_launch_from_settings = saved.refresh_launch_from_settings();
                         let conversation_binding = saved.conversation_binding.clone();
-                        let config_values =
-                            settings::initial_acp_config_for(agent, &saved.config_values, cx);
+                        let config_values = settings::initial_acp_config_for(
+                            &key,
+                            agent,
+                            &saved.config_values,
+                            cx,
+                        );
                         let pending_prompt = saved.pending_prompt.clone();
                         let pending_delivery_id = saved.pending_delivery_id.clone();
                         let pending_agent_preset = saved.pending_agent_preset.clone();
@@ -891,9 +895,12 @@ impl Workspace {
                     value_id,
                 } => {
                     let agent = _view.read(cx).agent_kind();
+                    let runtime = _view.read(cx).runtime().key().clone();
                     let config_id = config_id.clone();
                     let value_id = value_id.clone();
+                    // 记在会话所在的那台机器上：下次在那台机器上开同一家 agent 时沿用。
                     settings::apply_agent_host(
+                        &runtime,
                         move |config| config.remember_acp_config_value(agent, config_id, value_id),
                         cx,
                     );
@@ -919,11 +926,7 @@ impl Workspace {
                             return None;
                         }
                         let id = session.agent_definition_id.as_deref()?;
-                        cx.global::<settings::AgentHostState>()
-                            .agents
-                            .iter()
-                            .find(|agent| agent.id == id)
-                            .cloned()
+                        settings::agent_definition(existing.read(cx).runtime().key(), id, cx)
                     });
                     this.add_acp_session(
                         NewAcpSessionRequest {
@@ -1046,7 +1049,7 @@ impl Workspace {
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: true } => {
                     // 智能体定义已经删了就停在智能体列表。
-                    let agent_id = this.sessions.iter().find_map(|session| {
+                    let agent = this.sessions.iter().find_map(|session| {
                         let SessionKind::Conversation(existing) = &session.kind else {
                             return None;
                         };
@@ -1054,15 +1057,13 @@ impl Workspace {
                             return None;
                         }
                         let id = session.agent_definition_id.as_deref()?;
-                        cx.global::<settings::AgentHostState>()
-                            .agents
-                            .iter()
-                            .any(|agent| agent.id == id)
-                            .then(|| id.to_string())
+                        let runtime = existing.read(cx).runtime().key().clone();
+                        settings::agent_definition(&runtime, id, cx)
+                            .map(|_| crate::agents::AgentRef::new(runtime, id.to_string()))
                     });
                     this.open_agents_route(window, cx);
-                    if let Some(id) = agent_id {
-                        this.open_agent_definition(id, window, cx);
+                    if let Some(agent) = agent {
+                        this.open_agent_definition(agent, window, cx);
                     }
                 }
                 acp_view::AcpViewEvent::OpenConversation { sid } => {
@@ -1101,11 +1102,7 @@ impl Workspace {
                     return None;
                 }
                 let id = session.agent_definition_id.as_deref()?;
-                cx.global::<settings::AgentHostState>()
-                    .agents
-                    .iter()
-                    .find(|agent| agent.id == id)
-                    .cloned()
+                settings::agent_definition(view.read(cx).runtime().key(), id, cx)
             })
         });
         let agent_definition_id = agent_definition.map(|definition| definition.id);
@@ -1115,16 +1112,23 @@ impl Workspace {
                 restore: false,
             });
         }
-        if !smelt_model::session_control::is_agent_conversation(
+        // 托管目录按会话所在那台机器的 SMELT_HOME 认，项目也记在那台机器上。
+        let runtime = request.runtime.key().clone();
+        if !smelt_model::session_control::is_agent_conversation_on(
+            crate::runtimes::smelt_home(&runtime, cx).as_deref(),
             None,
             agent_definition_id.as_deref(),
             request.cwd.as_deref(),
         ) {
-            self.remember_session_project(&RuntimeKey::Local, request.cwd.as_deref());
+            self.remember_session_project(&runtime, request.cwd.as_deref());
         }
         if agent_definition_id.is_none() {
-            request.config_values =
-                settings::initial_acp_config_for(request.agent, &request.config_values, cx);
+            request.config_values = settings::initial_acp_config_for(
+                request.runtime.key(),
+                request.agent,
+                &request.config_values,
+                cx,
+            );
         }
         let view = cx.new(|cx| acp_view::AcpView::start_with_handoff(window, cx, request));
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
@@ -1159,10 +1163,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 启动命令、profile、智能体定义都来自运行时的配置。还没读到就不起会话：
-        // 按出厂命令启动的话，用户配的命令和环境变量全不生效。
-        if !settings::agent_host_loaded(cx) {
-            crate::status_item::notify_error("正在读取运行时的智能体配置，请稍后再试");
+        // 启动命令、profile、智能体定义都来自会话所在那台机器的配置。还没读到就不起
+        // 会话：按出厂命令启动的话，用户配的命令和环境变量全不生效。
+        if !settings::agent_host_loaded(request.runtime.key(), cx) {
+            crate::status_item::notify_error("正在读取那台机器的智能体配置，请稍后再试");
             return;
         }
         let NewAcpSessionRequest {
@@ -1179,22 +1183,18 @@ impl Workspace {
         // 工作目录属于这次对话/Run，而非 AgentDefinition；项目菜单或触发器传来
         // 的上下文就是本次执行上下文。
         let cwd = fallback_cwd;
-        // 设置里的启动命令、环境变量和初始配置都是本机的。远程那台机器有自己的 CLI 和
-        // 配置，不能把本机的命令和环境变量（可能含密钥）带过去：先用引擎默认值，
-        // 能力库按运行时切换后改成读那台机器自己的设置。
-        let local = runtime.is_local();
-        let launch = launch_override.unwrap_or_else(|| {
-            if local {
-                settings::acp_launch_for(agent, cx)
-            } else {
-                agent.default_launch()
-            }
-        });
+        // 启动命令、环境变量和初始配置都取会话所在那台机器自己的：远程机器有自己的 CLI
+        // 和配置，本机的命令和环境变量（可能含密钥）不能带过去。
+        let launch =
+            launch_override.unwrap_or_else(|| settings::acp_launch_for(runtime.key(), agent, cx));
         let agent_model = agent_definition
             .as_ref()
             .and_then(|definition| definition.model_config_value());
         let agent_definition_id = agent_definition.map(|definition| definition.id);
-        let is_agent_conversation = smelt_model::session_control::is_agent_conversation(
+        // 托管目录按会话所在那台机器的 SMELT_HOME 认：远程智能体的 space 不在本机主目录下，
+        // 拿本机的去比会把它当成项目记下来。
+        let is_agent_conversation = smelt_model::session_control::is_agent_conversation_on(
+            crate::runtimes::smelt_home(runtime.key(), cx).as_deref(),
             automation_id.as_deref(),
             agent_definition_id.as_deref(),
             cwd.as_deref(),
@@ -1202,12 +1202,10 @@ impl Workspace {
         if !is_agent_conversation && automation_id.is_none() {
             self.remember_session_project(runtime.key(), cwd.as_deref());
         }
-        let mut initial_config = if !local {
-            Vec::new()
-        } else if is_agent_conversation {
-            settings::initial_agent_conversation_config_for(agent, cx)
+        let mut initial_config = if is_agent_conversation {
+            settings::initial_agent_conversation_config_for(runtime.key(), agent, cx)
         } else {
-            settings::initial_acp_config_for(agent, &[], cx)
+            settings::initial_acp_config_for(runtime.key(), agent, &[], cx)
         };
         if let Some(value) = agent_model {
             initial_config.retain(|(id, _)| id != "model");
@@ -1325,18 +1323,14 @@ impl Workspace {
                         ))
                         .and_then(|bindings| bindings.get(&resume_id).cloned())
                 })
-                .and_then(|id| {
-                    cx.global::<settings::AgentHostState>()
-                        .agents
-                        .iter()
-                        .find(|agent| agent.id == id)
-                        .cloned()
-                });
-        let launch = launch_override.unwrap_or_else(|| settings::acp_launch_for(agent, cx));
+                .and_then(|id| settings::agent_definition(&RuntimeKey::Local, &id, cx));
+        // 历史会话只在本机列出、在本机续接。
+        let launch = launch_override
+            .unwrap_or_else(|| settings::acp_launch_for(&RuntimeKey::Local, agent, cx));
         let initial_config = if definition.is_some() {
-            settings::initial_agent_conversation_config_for(agent, cx)
+            settings::initial_agent_conversation_config_for(&RuntimeKey::Local, agent, cx)
         } else {
-            settings::initial_acp_config_for(agent, &[], cx)
+            settings::initial_acp_config_for(&RuntimeKey::Local, agent, &[], cx)
         };
         // 智能体名是动态身份，不是用户给某段会话的命名覆盖层。无用户标题时，
         // Session::title 会按自动标题、当前智能体名依次回退。

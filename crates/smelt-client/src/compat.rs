@@ -177,6 +177,7 @@ mod tests {
                 arch: Some("x86_64".to_string()),
                 hostname: None,
                 desktop: None,
+                smelt_home: None,
             },
             events: Some(EventProtocolDescription {
                 protocol_version: EVENT_BUS_PROTOCOL_VERSION,

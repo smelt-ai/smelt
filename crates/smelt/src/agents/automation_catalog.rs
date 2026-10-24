@@ -77,7 +77,8 @@ impl Workspace {
     ) -> Div {
         let config = cx.global::<settings::AgentHostState>();
         let automations = config.automations.clone();
-        let agents = config.agents.clone();
+        // 自动化眼下只在本机，引用的智能体也按本机的认。
+        let agents = settings::agents_on(&crate::RuntimeKey::Local, cx).to_vec();
         automation_catalog_column()
             .flex()
             .flex_col()

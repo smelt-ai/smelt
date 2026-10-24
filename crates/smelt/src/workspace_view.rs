@@ -747,10 +747,9 @@ cx,
     ) -> Option<crate::settings::ConversationAgentKind> {
         let id =
             smelt_model::agent_paths::agent_definition_id_for_space(std::path::Path::new(cwd?))?;
-        cx.global::<crate::settings::AgentHostState>()
-            .agents
-            .iter()
-            .find(|agent| agent.id == id)
+        // 历史只在本机。
+        crate::settings::agent_hosts(cx)?
+            .agent(&crate::RuntimeKey::Local, &id)
             .and_then(|agent| agent.engine_kind())
     }
 
@@ -799,11 +798,12 @@ cx,
             (Some(_), Some(s)) => HistoryListState::Ready(s),
         };
         let (source_tabs, launch_override, profile_label, history_agent_ids) = {
-            let config = cx.global::<crate::settings::AgentHostState>();
+            // 历史只在本机，profile 和智能体定义也按本机的认。
+            let config = crate::settings::agent_host_settings(&crate::RuntimeKey::Local, cx);
             let source_tabs = crate::session_history::tabs_with_sessions(
                 crate::session_history::history_source_tabs(
                     restrict_to_kind,
-                    config.all_profiles().cloned(),
+                    config.profiles.iter().cloned(),
                 ),
                 (agent, profile_id.as_deref()),
                 |tab| {

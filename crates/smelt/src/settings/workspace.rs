@@ -402,7 +402,9 @@ impl Workspace {
 
     /// 懒创建 workspace 列表编辑器（需要 window）。
     pub fn ensure_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let count = cx.global::<AgentHostState>().profiles.len();
+        let count = super::agent_host_settings(&crate::RuntimeKey::Local, cx)
+            .profiles
+            .len();
         let stale = self
             .profile_inputs
             .as_ref()
@@ -415,7 +417,9 @@ impl Workspace {
     fn init_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::{InputEvent, InputState};
 
-        let profiles = cx.global::<AgentHostState>().profiles.clone();
+        let profiles = super::agent_host_settings(&crate::RuntimeKey::Local, cx)
+            .profiles
+            .clone();
         let save_on = |ev: &InputEvent| matches!(ev, InputEvent::Change | InputEvent::Blur);
         let mut rows = Vec::new();
         let mut subs = Vec::new();
@@ -438,6 +442,7 @@ impl Workspace {
                         let v = s.read(cx).value().to_string();
                         let id = id_for_label.clone();
                         apply_agent_host(
+                            &crate::RuntimeKey::Local,
                             move |c| {
                                 if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
                                     p.label = v;
@@ -454,6 +459,7 @@ impl Workspace {
                     let v = s.read(cx).value().to_string();
                     let id = id_for_dir.clone();
                     apply_agent_host(
+                        &crate::RuntimeKey::Local,
                         move |c| {
                             if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
                                 p.workspace_dir = v;
@@ -473,6 +479,7 @@ impl Workspace {
     /// Claude 是最常见的场景，跟「新建 ACP 对话」菜单的默认排位一致）。
     pub fn add_profile(&mut self, cx: &mut Context<Self>) {
         apply_agent_host(
+            &crate::RuntimeKey::Local,
             |c| {
                 c.profiles.push(AcpProfile {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -489,6 +496,7 @@ impl Workspace {
 
     pub fn remove_profile(&mut self, index: usize, cx: &mut Context<Self>) {
         apply_agent_host(
+            &crate::RuntimeKey::Local,
             |c| {
                 if index < c.profiles.len() {
                     c.profiles.remove(index);
@@ -508,6 +516,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         apply_agent_host(
+            &crate::RuntimeKey::Local,
             move |c| {
                 if let Some(p) = c.profiles.get_mut(index) {
                     p.kind_id = kind.id().to_string();
@@ -1138,7 +1147,9 @@ impl Workspace {
             move |this, result, cx| match result {
                 Ok(config) => {
                     this.pi_plugin_error = None;
+                    // 插件删在能力库那台机器上，只清那台机器上的智能体的勾选。
                     super::apply_agent_host(
+                        &this.pi_library_runtime().clone(),
                         move |host| {
                             for agent in &mut host.agents {
                                 agent.plugins.retain(|plugin_id| *plugin_id != id);

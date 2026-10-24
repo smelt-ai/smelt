@@ -125,6 +125,8 @@ fn dispatch_control(
                     arch: Some(std::env::consts::ARCH.to_string()),
                     hostname: smelt_sys::hostname(),
                     desktop: Some(smelt_paths::remote_desktop_installed()),
+                    smelt_home: smelt_paths::smelt_home()
+                        .map(|home| home.to_string_lossy().into_owned()),
                 },
                 events: Some(EventProtocolDescription {
                     protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,

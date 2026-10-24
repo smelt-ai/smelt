@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -127,7 +127,8 @@ CREATE TABLE runtime_connection (
   endpoint_id TEXT NOT NULL,
   relay_url TEXT,
   position INTEGER NOT NULL,
-  added_at_ms INTEGER NOT NULL
+  added_at_ms INTEGER NOT NULL,
+  smelt_home TEXT
 ) WITHOUT ROWID;
 ";
 
@@ -213,6 +214,12 @@ CREATE TABLE conversation_route_path (
 ) WITHOUT ROWID;
 ";
 
+/// v3 → v4：记下远程运行时的 `SMELT_HOME`（`system.describe` 报的）。客户端拿它认出那台
+/// 机器上哪些会话是智能体对话；记在库里，机器还没连上时也认得出。旧行先空着，连上一次就有。
+const MIGRATE_V3_TO_V4: &str = "
+ALTER TABLE runtime_connection ADD COLUMN smelt_home TEXT;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -241,10 +248,15 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
             }
         }
         1 => transaction
-            .execute_batch(&format!("{MIGRATE_V1_TO_V2}\n{MIGRATE_V2_TO_V3}"))
+            .execute_batch(&format!(
+                "{MIGRATE_V1_TO_V2}\n{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}"
+            ))
             .map_err(|error| error.to_string())?,
         2 => transaction
-            .execute_batch(MIGRATE_V2_TO_V3)
+            .execute_batch(&format!("{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}"))
+            .map_err(|error| error.to_string())?,
+        3 => transaction
+            .execute_batch(MIGRATE_V3_TO_V4)
             .map_err(|error| error.to_string())?,
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }

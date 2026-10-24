@@ -8,9 +8,10 @@ import type { MemoryLayer } from "./memory-files.ts";
  * 初始化 SQLite，所以直接调主 daemon 的 `agent.memory.*` 控制方法：带上 daemon 注入的
  * 会话 id 和 capability token，记忆层由 daemon 按会话的启动规格决定。
  * 协议见 Rust `smelt_core::control_api::AgentMemory*` 与 `smeltd/src/agent_memory_control.rs`。
- * 信封版本与 Rust `CONTROL_API_VERSION` 对齐。工作区文档升到 v2 后，daemon 不再接受 v1。
+ * 信封版本与 Rust `CONTROL_API_VERSION` 对齐：daemon 只接受不低于它最低支持版本的请求，
+ * 两边一起升（v3 起不再接受 v2）。
  */
-const CONTROL_API_VERSION = 2;
+const CONTROL_API_VERSION = 3;
 const HOST_TIMEOUT_MS = 5_000;
 
 export type MemoryUsage = { readCount: number; lastReadAtMs: number };

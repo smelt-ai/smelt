@@ -1,9 +1,10 @@
 //! 设置页：记忆的向量检索服务（OpenAI 兼容 `/embeddings`）。
 //!
 //! 配置属于运行时：读写走 `settings.get` / `settings.update`，连接测试走
-//! `memory.test_embedding`——服务地址常是 `localhost`，说的是运行时那台机器。这里只管
-//! 表单。表单状态挂在页面自己的 keyed state 上而不是 `Workspace`：它只在这一页可见
-//! 时活着，每次打开页面都重新读一次。
+//! `memory.test_embedding`——服务地址常是 `localhost`，说的是运行时那台机器。表单配的是
+//! 能力库眼下选中的那台机器，调用都发给它。这里只管表单。表单状态挂在页面自己的 keyed
+//! state 上而不是 `Workspace`，按机器分开：它只在这一页可见时活着，每次打开页面、换一台
+//! 机器都重新读一次。
 //!
 //! 已存的 API Key 客户端看不到，只知道设没设：输入框留空表示「保持不变」，要删得点
 //! 「清除密钥」。
@@ -14,14 +15,17 @@ use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::InputState;
 use serde_json::Value;
 use smelt_model::appearance_settings::{SettingsPatch, SettingsResult};
-use smelt_model::control_api::{MemoryTestEmbedding, MemoryTestParams, SettingsGet, SettingsUpdate};
+use smelt_model::control_api::{
+    MemoryTestEmbedding, MemoryTestParams, SettingsGet, SettingsUpdate,
+};
 use smelt_model::memory_settings::{
     EMBEDDING_API_KEY, EMBEDDING_BASE_URL, EMBEDDING_MODEL, RERANK_MODEL_ID, RERANK_MODEL_PROVIDER,
     RerankModel,
 };
-use smelt_runtime_client::protocol::control::EmptyParams;
+use smelt_runtime_client::RuntimeClient;
+use smelt_runtime_client::protocol::control::{ControlCall, EmptyParams};
 
-use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
+use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call_on, error_text};
 
 const KEY_SET_PLACEHOLDER: &str = "已设置";
 const KEY_EMPTY_PLACEHOLDER: &str = "可选，本地服务一般不需要";
@@ -74,6 +78,10 @@ fn patch_of(entries: &[(&str, String)]) -> SettingsPatch {
 }
 
 pub(crate) struct MemorySettingsForm {
+    /// 配的是哪台机器。重排模型从这台机器的模型里选。
+    pub runtime: crate::RuntimeKey,
+    /// 发给那台机器的客户端；机器已经移除时是给人看的原因。
+    client: Result<RuntimeClient, String>,
     pub base_url: Entity<InputState>,
     pub model: Entity<InputState>,
     pub api_key: Entity<InputState>,
@@ -91,7 +99,8 @@ pub(crate) struct MemorySettingsForm {
 }
 
 impl MemorySettingsForm {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(runtime: crate::RuntimeKey, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let client = crate::runtime_call::target(&runtime, cx);
         let base_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("如 http://localhost:11434/v1"));
         let model = cx.new(|cx| InputState::new(window, cx).placeholder("如 bge-m3"));
@@ -100,13 +109,9 @@ impl MemorySettingsForm {
                 .masked(true)
                 .placeholder(KEY_EMPTY_PLACEHOLDER)
         });
+        let load = send::<SettingsGet>(&client, EmptyParams::default(), RUNTIME_CALL_TIMEOUT);
         cx.spawn_in(window, async move |this, cx| {
-            let loaded = cx
-                .background_spawn(async {
-                    call::<SettingsGet>(EmptyParams::default(), RUNTIME_CALL_TIMEOUT)
-                        .map_err(error_text)
-                })
-                .await;
+            let loaded = cx.background_spawn(load).await;
             let _ = this.update_in(cx, |form, window, cx| {
                 form.loading = false;
                 form.apply_result(loaded, None, true, window, cx);
@@ -114,6 +119,8 @@ impl MemorySettingsForm {
         })
         .detach();
         Self {
+            runtime,
+            client,
             base_url,
             model,
             api_key,
@@ -134,12 +141,9 @@ impl MemorySettingsForm {
             .map(|model| (model.provider.clone(), model.id.clone()))
             .unwrap_or_default();
         let patch = patch_of(&[(RERANK_MODEL_PROVIDER, provider), (RERANK_MODEL_ID, id)]);
+        let update = send::<SettingsUpdate>(&self.client, patch, RUNTIME_CALL_TIMEOUT);
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    call::<SettingsUpdate>(patch, RUNTIME_CALL_TIMEOUT).map_err(error_text)
-                })
-                .await;
+            let result = cx.background_spawn(update).await;
             let _ = this.update(cx, |form, cx| {
                 match result {
                     Ok(result) => {
@@ -181,12 +185,9 @@ impl MemorySettingsForm {
         self.testing = true;
         self.test_result = None;
         cx.notify();
+        let probe = send::<MemoryTestEmbedding>(&self.client, params, TEST_TIMEOUT);
         cx.spawn_in(window, async move |this, cx| {
-            let outcome = cx
-                .background_spawn(async move {
-                    call::<MemoryTestEmbedding>(params, TEST_TIMEOUT).map_err(error_text)
-                })
-                .await;
+            let outcome = cx.background_spawn(probe).await;
             let _ = this.update(cx, |form, cx| {
                 form.testing = false;
                 form.test_result = Some(outcome.map(|probe| {
@@ -256,12 +257,9 @@ impl MemorySettingsForm {
         cx: &mut Context<Self>,
     ) {
         let patch = patch_of(&patch);
+        let update = send::<SettingsUpdate>(&self.client, patch, RUNTIME_CALL_TIMEOUT);
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    call::<SettingsUpdate>(patch, RUNTIME_CALL_TIMEOUT).map_err(error_text)
-                })
-                .await;
+            let result = cx.background_spawn(update).await;
             let _ = this.update_in(cx, |form, window, cx| {
                 form.apply_result(result, Some(notice), true, window, cx);
             });
@@ -307,6 +305,21 @@ impl MemorySettingsForm {
         }
         cx.notify();
     }
+}
+
+/// 发给表单那台机器的一次调用，交给后台执行。机器已经移除时直接给出原因。
+fn send<C>(
+    client: &Result<RuntimeClient, String>,
+    params: C::Params,
+    timeout: std::time::Duration,
+) -> impl std::future::Future<Output = Result<C::Result, String>> + Send + 'static
+where
+    C: ControlCall,
+    C::Params: Send + 'static,
+    C::Result: Send + 'static,
+{
+    let client = client.clone();
+    async move { call_on::<C>(&client?, params, timeout).map_err(error_text) }
 }
 
 fn key_placeholder(saved: &SavedMemory) -> &'static str {

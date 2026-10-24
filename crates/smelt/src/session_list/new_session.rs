@@ -236,12 +236,11 @@ fn picker_item_icon(target: &NewSessionTarget) -> Icon {
 /// 桌面这一侧的「有哪些对话入口」：产品智能体在前，裸引擎与 profile 在后。
 /// 只产出身份与显示名，启动规格在真正创建时由 [`conversation_launch`] 解析，
 /// 免得同一份配置被读成两种命令。
-/// `local`：项目在本机运行时上。智能体定义和 profile 目前只读本机运行时的配置，远程
-/// 运行时上的项目只给裸引擎，免得拿本机的定义去另一台机器上起。
-fn conversation_options(local: bool, cx: &App) -> Vec<AcpAgentOption> {
-    let config = cx.global::<crate::settings::AgentHostState>();
+/// 智能体定义和 profile 都取项目所在那台机器的配置。
+fn conversation_options(runtime: &RuntimeKey, cx: &App) -> Vec<AcpAgentOption> {
+    let config = crate::settings::agent_host_settings(runtime, cx);
     let mut options = Vec::new();
-    for definition in config.agents.iter().filter(|_| local) {
+    for definition in &config.agents {
         if !definition.is_conversation_ready() {
             continue;
         }
@@ -269,7 +268,7 @@ fn conversation_options(local: bool, cx: &App) -> Vec<AcpAgentOption> {
             history_dir: None,
         });
     }
-    for profile in config.all_profiles().filter(|_| local) {
+    for profile in &config.profiles {
         let Some(kind) = profile.kind() else {
             continue;
         };
@@ -298,22 +297,21 @@ type ConversationLaunchChoice = (
     Option<AgentDefinition>,
 );
 
-fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchChoice> {
-    let config = cx.global::<crate::settings::AgentHostState>();
+fn conversation_launch(
+    runtime: &RuntimeKey,
+    option_id: &str,
+    cx: &App,
+) -> Option<ConversationLaunchChoice> {
+    let config = crate::settings::agent_host_settings(runtime, cx);
     if let Some(definition_id) =
         smelt_model::session_control::agent_definition_id_from_option_id(option_id)
     {
-        let definition = config
-            .agents
-            .iter()
-            .find(|definition| definition.id == definition_id)?;
+        let definition = config.find_agent(definition_id)?;
         let (agent, launch) = config.resolve_agent(definition).ok()?;
         return Some((agent, Some(launch), None, Some(definition.clone())));
     }
     if let Some(profile_id) = option_id.strip_prefix("profile:") {
-        let profile = config
-            .all_profiles()
-            .find(|profile| profile.id == profile_id)?;
+        let profile = config.find_profile(profile_id)?;
         let kind = profile.kind()?;
         let launch = config.profile_launch_spec(profile).ok()?;
         return Some((kind, Some(launch), Some(profile_id.to_string()), None));
@@ -327,7 +325,7 @@ fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchCh
 /// [`RemoteLaunchCatalogs`]。
 fn available_new_session_actions(runtime: &RuntimeKey, cx: &App) -> Vec<NewSessionAction> {
     let local = *runtime == RuntimeKey::Local;
-    let conversations = conversation_options(local, cx);
+    let conversations = conversation_options(runtime, cx);
     if local {
         let diagnostics = cx
             .try_global::<AcpRuntimeState>()
@@ -489,7 +487,7 @@ impl NewSessionPickerState {
             NewSessionTarget::Conversation {
                 agent_option_id, ..
             } => {
-                let Some(resolved) = conversation_launch(agent_option_id, cx) else {
+                let Some(resolved) = conversation_launch(runtime.key(), agent_option_id, cx) else {
                     // 配置在弹层开着的时候被改没了：静默关掉比建出一场引擎不明的
                     // 对话安全。
                     self.dismiss(window, cx);

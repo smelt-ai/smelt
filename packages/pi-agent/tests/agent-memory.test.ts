@@ -545,7 +545,7 @@ describe("memory host client", () => {
 			expect(meta?.usage.get("fact.md")).toEqual({ readCount: 2, lastReadAtMs: 1000 });
 			expect(requests[0]).toMatchObject({
 				op: "control",
-				control_version: 2,
+				control_version: 3,
 				method: "agent.memory.meta",
 				params: { session_id: "acp-1", token: "tok" },
 			});

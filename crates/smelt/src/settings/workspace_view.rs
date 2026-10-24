@@ -58,6 +58,7 @@ impl Workspace {
                 .pi_library_config()
                 .map(|config| config.mcp_servers.clone())
                 .unwrap_or_else(|| Err(self.pi_library_pending_text())),
+            pi_library_runtime: self.pi_library_runtime().clone(),
             pi_mcp_remote_desktop: crate::runtimes::runtime_has_desktop(
                 self.pi_library_runtime(),
                 cx,
@@ -83,7 +84,10 @@ impl Workspace {
             pi_plugin_error: self.pi_plugin_error.clone(),
             agent_names_using_plugin: {
                 let mut map: std::collections::HashMap<String, Vec<String>> = Default::default();
-                for agent in &cx.global::<AgentHostState>().agents {
+                for agent in super::agent_host_settings(self.pi_library_runtime(), cx)
+                    .agents
+                    .iter()
+                {
                     for plugin_id in &agent.plugins {
                         map.entry(plugin_id.clone())
                             .or_default()
@@ -181,7 +185,7 @@ impl Workspace {
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         crate::runtime_events::probe_remotes(cx);
-        self.refresh_pi_config(cx);
+        self.refresh_pi_config(crate::RuntimeKey::Local, cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {
             if let Some(handle) = cx

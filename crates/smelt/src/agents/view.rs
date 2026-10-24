@@ -165,34 +165,24 @@ impl Workspace {
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let stored = stored_default_conversation_agent(cx);
-        let resolution = smelt_model::default_conversation::resolve_new_conversation(
-            &cx.global::<settings::AgentHostState>().agents,
-            stored.as_deref(),
-            self.agent_surface.conversation_draft_id.as_deref(),
-        );
-        let default_name = resolution.default_name.as_deref().map(agent_display_name);
+        let plan = plan_new_conversation(self.agent_surface.conversation_draft.as_ref(), cx);
+        let default_name = plan.default_name.as_deref().map(agent_display_name);
         let label = new_conversation_row_label(default_name.as_deref());
         let mark = default_name
             .as_deref()
             .map(|name| conversation_agent_mark(Some(name)));
-        match resolution.intent {
-            smelt_model::default_conversation::NewConversationIntent::PickAgent => self
-                .render_new_conversation_picker(
-                    entity,
-                    label,
-                    resolution.ready,
-                    resolution.clear_stored_default,
-                    cx,
-                ),
-            smelt_model::default_conversation::NewConversationIntent::Start { agent_id } => self
-                .render_new_conversation_action(
-                    entity,
-                    label,
-                    mark,
-                    Some((agent_id, resolution.ready)),
-                ),
-            smelt_model::default_conversation::NewConversationIntent::CreateAgent => {
+        match plan.intent {
+            NewConversationIntent::PickAgent => self.render_new_conversation_picker(
+                entity,
+                label,
+                plan.ready,
+                plan.stale_defaults,
+                cx,
+            ),
+            NewConversationIntent::Start(agent) => {
+                self.render_new_conversation_action(entity, label, mark, Some((agent, plan.ready)))
+            }
+            NewConversationIntent::CreateAgent => {
                 self.render_new_conversation_action(entity, label, mark, None)
             }
         }
@@ -203,10 +193,7 @@ impl Workspace {
         entity: Entity<Workspace>,
         label: String,
         mark: Option<String>,
-        switch: Option<(
-            String,
-            Vec<smelt_model::default_conversation::ConversationAgentChoice>,
-        )>,
+        switch: Option<(AgentRef, Vec<ConversationAgentPick>)>,
     ) -> AnyElement {
         let click_entity = entity.clone();
         ListRow::new("workbench-chat")
@@ -219,7 +206,7 @@ impl Workspace {
             .gap_2()
             .rounded(crate::ui_theme::row_radius())
             .child(new_conversation_row_body(label, mark).flex_1())
-            .when_some(switch, |row, (current_id, ready)| {
+            .when_some(switch, |row, (current, ready)| {
                 let menu_entity = entity.clone();
                 row.child(
                     div()
@@ -235,13 +222,14 @@ impl Workspace {
                                 // 菜单要向下展开，并贴着箭头右缘，避免冲出侧栏。
                                 .dropdown_menu_with_anchor(
                                     Anchor::TopRight,
-                                    move |menu, _, _| {
+                                    move |menu, _, cx| {
                                         fill_conversation_agent_menu(
                                             menu,
                                             ready.clone(),
-                                            Some(current_id.clone()),
+                                            Some(current.clone()),
                                             false,
                                             menu_entity.clone(),
+                                            cx,
                                         )
                                     },
                                 ),
@@ -260,8 +248,8 @@ impl Workspace {
         &self,
         entity: Entity<Workspace>,
         label: String,
-        ready: Vec<smelt_model::default_conversation::ConversationAgentChoice>,
-        clear_stored: bool,
+        ready: Vec<ConversationAgentPick>,
+        stale_defaults: Vec<crate::RuntimeKey>,
         _cx: &App,
     ) -> AnyElement {
         Button::new("workbench-chat-pick")
@@ -271,10 +259,10 @@ impl Workspace {
             .child(new_conversation_row_body(label, None).w_full())
             // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
-                if clear_stored {
-                    clear_default_conversation_agent(cx);
+                for runtime in &stale_defaults {
+                    clear_default_conversation_agent(runtime, cx);
                 }
-                fill_conversation_agent_menu(menu, ready.clone(), None, true, entity.clone())
+                fill_conversation_agent_menu(menu, ready.clone(), None, true, entity.clone(), cx)
             })
             .into_any_element()
     }
@@ -286,7 +274,6 @@ impl Workspace {
         statuses: &[AgentStatus],
         cx: &App,
     ) -> AnyElement {
-        let config = cx.global::<settings::AgentHostState>();
         let product: Vec<usize> = self
             .sessions
             .iter()
@@ -328,7 +315,11 @@ impl Workspace {
             };
             let sid = view.read(cx).session_id().to_string();
             let selected = selected_sid == Some(sid.as_str());
-            let updated_text = crate::session_list::row::session_updated_at_text(updated_at, &now);
+            let updated_text = conversation_row_meta(
+                view.read(cx).runtime().key(),
+                crate::session_list::row::session_updated_at_text(updated_at, &now),
+                cx,
+            );
             let title = conversation_row_title(
                 session.custom_title.as_deref(),
                 view.read(cx).auto_title().as_deref(),
@@ -338,11 +329,10 @@ impl Workspace {
                 session.agent_definition_id.as_deref(),
                 session.automation_id.as_deref(),
             );
+            // 对话绑定的智能体在对话所在的那台机器上。
             let agent_name = bound.and_then(|id| {
-                config
-                    .agents
-                    .iter()
-                    .find(|agent| agent.id == id)
+                settings::agent_hosts(cx)?
+                    .agent(view.read(cx).runtime().key(), id)
                     .map(|agent| agent_display_name(&agent.name))
             });
             let mark = conversation_agent_mark(agent_name.as_deref());
@@ -520,42 +510,36 @@ impl Workspace {
         &self,
         count: usize,
         entity: Entity<Workspace>,
-        _cx: &App,
+        cx: &App,
         left_guard: Pixels,
     ) -> AnyElement {
-        let add_entity = entity.clone();
+        let add_entity = entity;
         let engines = agent_engine_kinds();
-        let add_button = if let [kind] = engines.as_slice() {
-            let kind = *kind;
-            Button::new("agents-add")
+        let machines = agent_creation_machines(cx);
+        // 只有一台机器、一种引擎时直接建；不然先选建在哪台机器上、用哪个引擎。
+        let add_button = match (machines.as_slice(), engines.as_slice()) {
+            ([runtime], [kind]) => {
+                let (runtime, kind) = (runtime.clone(), *kind);
+                Button::new("agents-add")
+                    .normal()
+                    .icon(IconName::Plus)
+                    .label("新建智能体")
+                    .on_click(move |_, window, cx| {
+                        let runtime = runtime.clone();
+                        add_entity.update(cx, |workspace, cx| {
+                            workspace.create_agent(runtime, kind, window, cx)
+                        });
+                    })
+                    .into_any_element()
+            }
+            _ => Button::new("agents-add")
                 .normal()
                 .icon(IconName::Plus)
                 .label("新建智能体")
-                .on_click(move |_, window, cx| {
-                    add_entity.update(cx, |workspace, cx| workspace.create_agent(kind, window, cx));
+                .dropdown_menu(move |menu, _, cx| {
+                    fill_create_agent_menu(menu, add_entity.clone(), cx)
                 })
-                .into_any_element()
-        } else {
-            Button::new("agents-add")
-                .normal()
-                .icon(IconName::Plus)
-                .label("新建智能体")
-                .dropdown_menu(move |mut menu, _, _| {
-                    for kind in agent_engine_kinds() {
-                        let entity = add_entity.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(kind.label())
-                                .icon(IconName::Bot)
-                                .on_click(move |_, window, cx| {
-                                    entity.update(cx, |workspace, cx| {
-                                        workspace.create_agent(kind, window, cx)
-                                    });
-                                }),
-                        );
-                    }
-                    menu
-                })
-                .into_any_element()
+                .into_any_element(),
         };
         product_page_header(
             "智能体",
@@ -653,14 +637,16 @@ impl Workspace {
 
     pub(super) fn render_agent_catalog(
         &self,
-        agents: &[settings::AgentDefinition],
+        groups: &[AgentMachineGroup],
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
+        // 只有一台机器时不分组，跟没挂远程机器时一样。
+        let grouped = groups.len() > 1;
         let error = self.agent_surface.error.clone().or_else(|| {
-            cx.global::<settings::AgentHostState>()
-                .persistence_error
-                .clone()
+            groups
+                .iter()
+                .find_map(|group| agent_host_error(&group.runtime, cx))
         });
         div()
             .id("agent-catalog-scroll")
@@ -675,23 +661,40 @@ impl Workspace {
                     .flex_col()
                     .gap_3()
                     .children(error.map(render_agent_error))
-                    .children(
-                        agents
-                            .iter()
-                            .map(|agent| self.render_agent_catalog_row(agent, entity.clone(), cx)),
-                    ),
+                    .children(groups.iter().map(|group| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .when(grouped, |column| {
+                                column.child(render_agent_machine_header(group, cx))
+                            })
+                            .children(group.agents.iter().map(|agent| {
+                                self.render_agent_catalog_row(
+                                    &group.runtime,
+                                    agent,
+                                    entity.clone(),
+                                    cx,
+                                )
+                            }))
+                    })),
             )
             .into_any_element()
     }
 
     pub(super) fn render_agent_catalog_row(
         &self,
+        runtime: &crate::RuntimeKey,
         agent: &settings::AgentDefinition,
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let id = agent.id.clone();
-        let open_id = id.clone();
+        let agent_ref = AgentRef::new(runtime.clone(), agent.id.clone());
+        let row_id = match runtime {
+            crate::RuntimeKey::Local => format!("agent-row-{}", agent.id),
+            crate::RuntimeKey::Remote(machine) => format!("agent-row-{machine}-{}", agent.id),
+        };
+        let open_agent = agent_ref.clone();
         let open_entity = entity;
         let name = agent_display_name(&agent.name);
         let engine_kind = agent.engine_kind();
@@ -700,15 +703,12 @@ impl Workspace {
             .unwrap_or_else(|| agent.engine_kind_id.clone());
         let summary = agent_card_prompt(&agent.prompt);
         let show_engine = agent_engine_kinds().len() > 1;
-        let automation_count = cx
-            .global::<settings::AgentHostState>()
-            .automations_for(&agent.id)
-            .len();
+        let automation_count = agent_automation_count(&agent_ref, cx);
         let menu_talk_entity = open_entity.clone();
-        let menu_talk_id = id.clone();
+        let menu_talk_agent = agent_ref.clone();
         let menu_delete_entity = open_entity.clone();
-        let menu_delete_id = id.clone();
-        content_card_style(ListRow::new(format!("agent-row-{id}")).card())
+        let menu_delete_agent = agent_ref;
+        content_card_style(ListRow::new(row_id).card())
             .w_full()
             .px_4()
             .py_3()
@@ -759,20 +759,20 @@ impl Workspace {
             )
             // 行上不放「新对话」：点行进智能体详情，那里有新对话入口；右键菜单也有。
             .on_click(move |_, window, cx| {
-                let id = open_id.clone();
+                let agent = open_agent.clone();
                 open_entity.update(cx, |workspace, cx| {
-                    workspace.open_agent_definition(id, window, cx)
+                    workspace.open_agent_definition(agent, window, cx)
                 });
             })
             .context_menu(move |menu, _, _| {
                 let talk_entity = menu_talk_entity.clone();
-                let talk_id = menu_talk_id.clone();
+                let talk_agent = menu_talk_agent.clone();
                 let delete_entity = menu_delete_entity.clone();
-                let delete_id = menu_delete_id.clone();
+                let delete_agent = menu_delete_agent.clone();
                 menu.item(PopupMenuItem::new("新对话").on_click(move |_, window, cx| {
-                    let id = talk_id.clone();
+                    let agent = talk_agent.clone();
                     talk_entity.update(cx, |workspace, cx| {
-                        workspace.start_agent_conversation(id, window, cx)
+                        workspace.start_agent_conversation(agent, window, cx)
                     });
                 }))
                 .separator()
@@ -781,16 +781,17 @@ impl Workspace {
                         .icon(crate::trash_icon())
                         .disabled(automation_count != 0)
                         .on_click(move |_, _, cx| {
-                            let id = delete_id.clone();
-                            delete_entity
-                                .update(cx, |workspace, cx| workspace.start_delete_agent(id, cx));
+                            let agent = delete_agent.clone();
+                            delete_entity.update(cx, |workspace, cx| {
+                                workspace.start_delete_agent(agent, cx)
+                            });
                         }),
                 )
             })
             .into_any_element()
     }
 
-    pub(super) fn render_agents_empty(&self, entity: Entity<Workspace>, _cx: &App) -> AnyElement {
+    pub(super) fn render_agents_empty(&self, entity: Entity<Workspace>, cx: &App) -> AnyElement {
         let kind = agent_engine_kinds()
             .into_iter()
             .next()
@@ -838,18 +839,32 @@ impl Workspace {
                                     }),
                             ),
                     )
-                    .child(
-                        Button::new("agents-empty-add")
+                    .child({
+                        let button = Button::new("agents-empty-add")
                             .normal()
                             .compact()
                             .icon(IconName::Plus)
-                            .label("新建智能体")
-                            .on_click(move |_, window, cx| {
-                                entity.update(cx, |workspace, cx| {
-                                    workspace.create_agent(kind, window, cx)
-                                });
-                            }),
-                    ),
+                            .label("新建智能体");
+                        // 挂了不止一台机器时先选建在哪台机器上。
+                        match agent_creation_machines(cx).as_slice() {
+                            [runtime] => {
+                                let runtime = runtime.clone();
+                                button
+                                    .on_click(move |_, window, cx| {
+                                        let runtime = runtime.clone();
+                                        entity.update(cx, |workspace, cx| {
+                                            workspace.create_agent(runtime, kind, window, cx)
+                                        });
+                                    })
+                                    .into_any_element()
+                            }
+                            _ => button
+                                .dropdown_menu(move |menu, _, cx| {
+                                    fill_create_agent_menu(menu, entity.clone(), cx)
+                                })
+                                .into_any_element(),
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -861,15 +876,12 @@ impl Workspace {
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let automation_count = cx
-            .global::<settings::AgentHostState>()
-            .automations_for(&agent.id)
-            .len();
-        let error = self.agent_surface.error.clone().or_else(|| {
-            cx.global::<settings::AgentHostState>()
-                .persistence_error
-                .clone()
-        });
+        let automation_count = agent_automation_count(&editor.agent, cx);
+        let error = self
+            .agent_surface
+            .error
+            .clone()
+            .or_else(|| agent_host_error(&editor.agent.runtime, cx));
         if editor.tab == AgentEditorTab::Memory {
             // 单独的滚动区：两个页签各记各的滚动位置。
             return div()
@@ -901,7 +913,7 @@ impl Workspace {
             entity.clone(),
         );
         let model_control = render_agent_model_control(
-            agent.id.clone(),
+            editor.agent.clone(),
             agent.model_provider.clone(),
             agent.model_id.clone(),
             entity.clone(),
@@ -913,7 +925,7 @@ impl Workspace {
             .count();
         let instructions_footer = agent_instructions_footer(prompt_chars);
 
-        let conversation_id = agent.id.clone();
+        let conversation_agent = editor.agent.clone();
         let talk_entity = entity.clone();
         let talk_button = Button::new("agent-new-conversation")
             .commit()
@@ -921,14 +933,14 @@ impl Workspace {
             .label("新对话")
             .tooltip("新开一段对话")
             .on_click(move |_, window, cx| {
-                let id = conversation_id.clone();
+                let agent = conversation_agent.clone();
                 talk_entity.update(cx, |workspace, cx| {
-                    workspace.start_agent_conversation(id, window, cx)
+                    workspace.start_agent_conversation(agent, window, cx)
                 });
             });
 
         let delete_entity = entity.clone();
-        let delete_id = agent.id.clone();
+        let delete_agent = editor.agent.clone();
         let delete_tooltip = if automation_count == 0 {
             "删除智能体和它的记忆；已有对话会保留".to_string()
         } else {
@@ -942,15 +954,17 @@ impl Workspace {
             .tooltip(delete_tooltip)
             .dropdown_menu(move |menu, _, _| {
                 let entity = delete_entity.clone();
-                let id = delete_id.clone();
+                let agent = delete_agent.clone();
                 let disabled = automation_count != 0;
                 menu.item(
                     PopupMenuItem::new("删除智能体")
                         .icon(crate::trash_icon())
                         .disabled(disabled)
                         .on_click(move |_, _, cx| {
-                            let id = id.clone();
-                            entity.update(cx, |workspace, cx| workspace.start_delete_agent(id, cx));
+                            let agent = agent.clone();
+                            entity.update(cx, |workspace, cx| {
+                                workspace.start_delete_agent(agent, cx)
+                            });
                         }),
                 )
             });
@@ -1007,7 +1021,10 @@ impl Workspace {
                                                     .text_xs()
                                                     .text_color(rgb(crate::ui_theme::text_faint()))
                                                     .child(agent_usage_summary(
-                                                        self.agent_conversation_count(&agent.id),
+                                                        self.agent_conversation_count(
+                                                            &editor.agent,
+                                                            cx,
+                                                        ),
                                                         automation_count,
                                                     )),
                                             ),
@@ -1112,12 +1129,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let agents = cx.global::<settings::AgentHostState>().agents.clone();
-        let open_id = self.nav.agents().editor_id().map(str::to_string);
-        if open_id
-            .as_deref()
-            .is_some_and(|id| agents.iter().all(|agent| agent.id != id))
-        {
+        let groups = agent_machine_groups(cx);
+        let count: usize = groups.iter().map(|group| group.agents.len()).sum();
+        let open = self.nav.agents().editor_agent().cloned();
+        if open.as_ref().is_some_and(|agent| {
+            !groups.iter().any(|group| {
+                group.runtime == agent.runtime
+                    && group
+                        .agents
+                        .iter()
+                        .any(|definition| definition.id == agent.id)
+            })
+        }) {
             self.nav.agents_mut().pop_to_root();
             self.agent_surface.editor = None;
         }
@@ -1128,32 +1151,36 @@ impl Workspace {
             return self.render_agent_conversation_pane(view, cx);
         }
 
-        let editor_id = self.nav.agents().editor_id().map(str::to_string);
-        if editor_id.is_some() {
+        let open = self.nav.agents().editor_agent().cloned();
+        if open.is_some() {
             self.ensure_agent_editor(window, cx);
         } else {
             self.agent_surface.editor = None;
         }
 
         let left_guard = self.chrome_left_guard(window);
-        let (header, body) = if let Some(editor_id) = editor_id {
-            let selected = agents.iter().find(|agent| agent.id == editor_id).cloned();
+        let (header, body) = if let Some(open) = open {
+            let selected = groups
+                .iter()
+                .find(|group| group.runtime == open.runtime)
+                .and_then(|group| group.agents.iter().find(|agent| agent.id == open.id))
+                .cloned();
             match (selected, self.agent_surface.editor.as_ref()) {
                 (Some(agent), Some(editor)) => (
                     self.render_agent_editor_header(&agent.name, entity.clone(), left_guard),
                     self.render_agent_config_panel(agent, editor, entity, cx),
                 ),
                 _ => (
-                    self.render_agents_header(agents.len(), entity.clone(), cx, left_guard),
-                    self.render_agent_catalog(&agents, entity, cx),
+                    self.render_agents_header(count, entity.clone(), cx, left_guard),
+                    self.render_agent_catalog(&groups, entity, cx),
                 ),
             }
         } else {
-            let header = self.render_agents_header(agents.len(), entity.clone(), cx, left_guard);
-            let body = if agents.is_empty() {
+            let header = self.render_agents_header(count, entity.clone(), cx, left_guard);
+            let body = if count == 0 && groups.len() <= 1 {
                 self.render_agents_empty(entity, cx)
             } else {
-                self.render_agent_catalog(&agents, entity, cx)
+                self.render_agent_catalog(&groups, entity, cx)
             };
             (header, body)
         };
@@ -1243,15 +1270,10 @@ impl Workspace {
                     .child("能力库"),
             )
             .child(tabs)
-            // 挂了别的机器，才需要选在配哪台。记忆只在本机运行时上，切到别的机器时说清楚。
+            // 挂了别的机器，才需要选在配哪台。
             .when(crate::runtimes::has_remote_runtimes(cx), |header| {
                 header
                     .child(div().flex_1())
-                    .when(
-                        current == CapabilitiesTab::Memory
-                            && *self.pi_library_runtime() != crate::RuntimeKey::Local,
-                        |header| header.child(crate::runtimes::local_runtime_scope_chip()),
-                    )
                     .child(self.render_pi_library_picker(cx))
             });
 
@@ -1338,27 +1360,159 @@ fn new_conversation_row_body(label: String, mark: Option<String>) -> Div {
         )
 }
 
+/// 能开对话的智能体。挂了不止一台机器时按机器分段，段头是机器名。
 fn fill_conversation_agent_menu(
     mut menu: PopupMenu,
-    ready: Vec<smelt_model::default_conversation::ConversationAgentChoice>,
-    current_id: Option<String>,
+    ready: Vec<ConversationAgentPick>,
+    current: Option<AgentRef>,
     start: bool,
     entity: Entity<Workspace>,
+    cx: &App,
 ) -> PopupMenu {
-    for choice in ready {
+    let grouped = ready
+        .iter()
+        .any(|pick| pick.agent.runtime != crate::RuntimeKey::Local);
+    let mut section = None;
+    for pick in ready {
+        if grouped && section.as_ref() != Some(&pick.agent.runtime) {
+            if section.is_some() {
+                menu = menu.separator();
+            }
+            menu = menu.item(PopupMenuItem::label(crate::runtimes::runtime_name(
+                &pick.agent.runtime,
+                cx,
+            )));
+            section = Some(pick.agent.runtime.clone());
+        }
         let entity = entity.clone();
-        let id = choice.id;
-        let checked = !start && current_id.as_deref() == Some(id.as_str());
+        let checked = !start && current.as_ref() == Some(&pick.agent);
+        let agent = pick.agent;
         menu = menu.item(
-            PopupMenuItem::new(agent_display_name(&choice.name))
+            PopupMenuItem::new(agent_display_name(&pick.name))
                 .checked(checked)
                 .on_click(move |_, window, cx| {
-                    let id = id.clone();
+                    let agent = agent.clone();
                     entity.update(cx, |workspace, cx| {
-                        workspace.choose_default_conversation_agent(id, start, window, cx)
+                        workspace.choose_default_conversation_agent(agent, start, window, cx)
                     });
                 }),
         );
     }
     menu
+}
+
+/// 能新建智能体的机器：配置读到了的。一台都没读到时给本机，建的时候会说还没读到。
+fn agent_creation_machines(cx: &App) -> Vec<crate::RuntimeKey> {
+    let machines = agent_machines(cx);
+    if machines.is_empty() {
+        vec![crate::RuntimeKey::Local]
+    } else {
+        machines
+    }
+}
+
+/// 「新建智能体」菜单：不止一台机器时按机器分段，每段列可选的引擎。
+fn fill_create_agent_menu(mut menu: PopupMenu, entity: Entity<Workspace>, cx: &App) -> PopupMenu {
+    let machines = agent_creation_machines(cx);
+    let grouped = machines.len() > 1;
+    for (ix, runtime) in machines.into_iter().enumerate() {
+        if grouped {
+            if ix > 0 {
+                menu = menu.separator();
+            }
+            menu = menu.item(PopupMenuItem::label(crate::runtimes::runtime_name(
+                &runtime, cx,
+            )));
+        }
+        for kind in agent_engine_kinds() {
+            let entity = entity.clone();
+            let runtime = runtime.clone();
+            menu = menu.item(
+                PopupMenuItem::new(kind.label())
+                    .icon(IconName::Bot)
+                    .on_click(move |_, window, cx| {
+                        let runtime = runtime.clone();
+                        entity.update(cx, |workspace, cx| {
+                            workspace.create_agent(runtime, kind, window, cx)
+                        });
+                    }),
+            );
+        }
+    }
+    menu
+}
+
+/// 智能体列表里的一台机器。
+pub(super) struct AgentMachineGroup {
+    runtime: crate::RuntimeKey,
+    agents: Vec<settings::AgentDefinition>,
+    /// 配置还没读到、或机器连不上时给人看的话。
+    status: Option<String>,
+}
+
+/// 智能体列表按机器分组：挂着的每台机器一组，本机在前。配置还没读到的机器也列出来，
+/// 说明在读，不让它像是没有智能体。
+fn agent_machine_groups(cx: &App) -> Vec<AgentMachineGroup> {
+    let mut keys = attached_agent_machines(cx);
+    if keys.is_empty() {
+        keys.push(crate::RuntimeKey::Local);
+    }
+    keys.into_iter()
+        .map(|runtime| {
+            let loaded = settings::agent_host_loaded(&runtime, cx);
+            let status = crate::runtimes::runtime_unavailable_label(&runtime, cx)
+                .map(str::to_string)
+                .or_else(|| (!loaded).then(|| "正在读取…".to_string()));
+            AgentMachineGroup {
+                agents: settings::agents_on(&runtime, cx).to_vec(),
+                runtime,
+                status,
+            }
+        })
+        .collect()
+}
+
+fn render_agent_machine_header(group: &AgentMachineGroup, cx: &App) -> AnyElement {
+    div()
+        .pt_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .font_medium()
+                .text_color(rgb(crate::ui_theme::text_muted()))
+                .child(crate::runtimes::runtime_name(&group.runtime, cx)),
+        )
+        .children(group.status.clone().map(|status| {
+            div()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child(status)
+        }))
+        .when(group.status.is_none() && group.agents.is_empty(), |row| {
+            row.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(crate::ui_theme::text_faint()))
+                    .child("还没有智能体"),
+            )
+        })
+        .into_any_element()
+}
+
+/// 「最近对话」行的第二行。本机的只写时间；别的机器上的在前面标机器名，连不上时写状态：
+/// 智能体对话不按机器分组，只能在行上说清楚它在哪台机器上。
+fn conversation_row_meta(runtime: &crate::RuntimeKey, updated: String, cx: &App) -> String {
+    match runtime {
+        crate::RuntimeKey::Local => updated,
+        crate::RuntimeKey::Remote(_) => {
+            let machine = crate::runtimes::runtime_name(runtime, cx);
+            match crate::runtimes::runtime_unavailable_label(runtime, cx) {
+                Some(unavailable) => format!("{machine} · {unavailable}"),
+                None => format!("{machine} · {updated}"),
+            }
+        }
+    }
 }

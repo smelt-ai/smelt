@@ -152,8 +152,9 @@ impl Workspace {
                 let (agent, pid) = self.history_source(Some(root.as_str()), cx);
                 let tabs = crate::session_history::history_source_tabs(
                     self.history_engine_override(Some(root.as_str()), cx),
-                    cx.global::<crate::settings::AgentHostState>()
-                        .all_profiles()
+                    crate::settings::agent_host_settings(&crate::RuntimeKey::Local, cx)
+                        .profiles
+                        .iter()
                         .cloned(),
                 );
                 for tab in tabs {

@@ -941,7 +941,7 @@ pub(crate) fn session_list_key(
 }
 
 fn current_profile_launch(
-    config: &crate::settings::AgentHostState,
+    config: &crate::settings::AgentHostSettings,
     profile: &smelt_model::agent_kind::AcpProfile,
 ) -> Result<smelt_model::agent_kind::ConversationLaunchSpec, String> {
     config.profile_launch_spec(profile)
@@ -1315,7 +1315,8 @@ fn migration_menu(
     source_profile_id: Option<&str>,
     cx: &App,
 ) -> gpui_component::menu::PopupMenu {
-    let config = cx.global::<crate::settings::AgentHostState>().clone();
+    // 历史会话只在本机，迁移目标也用本机的启动命令和 workspace。
+    let config = crate::settings::agent_host_settings(&crate::RuntimeKey::Local, cx).into_owned();
     let mut menu = menu.separator().item(PopupMenuItem::label("迁移到"));
     for target_agent in ConversationAgentKind::ALL {
         if target_agent == source.agent && source_profile_id.is_none() {
@@ -1340,7 +1341,7 @@ fn migration_menu(
             },
         ));
     }
-    for profile in config.all_profiles() {
+    for profile in &config.profiles {
         if source_profile_id == Some(profile.id.as_str()) {
             continue;
         }
@@ -1441,7 +1442,7 @@ mod tests {
         handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
         history_source_tabs, tabs_with_sessions,
     };
-    use crate::settings::AgentHostState;
+    use crate::settings::AgentHostSettings;
     use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind};
     use smelt_model::session_handoff::HandoffTurn;
 
@@ -1503,8 +1504,8 @@ mod tests {
             label: "Quant".into(),
             workspace_dir: "~/Claude Workspaces/quant".into(),
         };
-        let config = AgentHostState::default()
-            .with_acp_cmd(ConversationAgentKind::Claude, "claude --current");
+        let mut config = AgentHostSettings::fresh();
+        config.set_acp_cmd_for(ConversationAgentKind::Claude, "claude --current".into());
 
         let launch = current_profile_launch(&config, &profile).expect("有效 profile");
 

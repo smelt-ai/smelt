@@ -223,6 +223,7 @@ fn v2_session_routes_are_dropped() {
          INSERT INTO collapsed_project VALUES ('', '/repo/b', 0), ('', '/repo/a', 1);
          INSERT INTO collapsed_agent VALUES ('writer', 0);
          INSERT INTO pinned_project VALUES ('', '/repo/z', 0), ('', '/repo/a', 1);
+         ALTER TABLE runtime_connection DROP COLUMN smelt_home;
          PRAGMA user_version = 2;",
     )
     .unwrap();
@@ -314,6 +315,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         endpoint_id: "aa".to_string(),
         relay_url: None,
         added_at_ms: 1,
+        smelt_home: None,
     };
     let pi = RuntimeConnection {
         runtime_id: "rt-pi".to_string(),
@@ -321,6 +323,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         endpoint_id: "bb".to_string(),
         relay_url: Some("https://relay.example".to_string()),
         added_at_ms: 2,
+        smelt_home: Some("/home/pi/.smelt".to_string()),
     };
     store.put_runtime_connection(&linux).unwrap();
     store.put_runtime_connection(&pi).unwrap();
@@ -328,6 +331,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         .put_runtime_connection(&RuntimeConnection {
             endpoint_id: "cc".to_string(),
             added_at_ms: 3,
+            smelt_home: Some("/home/linux/.smelt".to_string()),
             ..linux
         })
         .unwrap();
@@ -340,6 +344,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         ["rt-linux", "rt-pi"]
     );
     assert_eq!(listed[0].endpoint_id, "cc");
+    assert_eq!(listed[0].smelt_home.as_deref(), Some("/home/linux/.smelt"));
     assert_eq!(listed[0].added_at_ms, 1, "重新配对不改添加时间");
     assert!(store.delete_runtime_connection("rt-linux").unwrap());
     assert!(!store.delete_runtime_connection("rt-linux").unwrap());
@@ -422,6 +427,7 @@ fn v1_projects_become_local_projects() {
          INSERT INTO collapsed_project VALUES ('/repo/b', 0), ('/repo/a', 1);
          INSERT INTO collapsed_agent VALUES ('writer', 0);
          INSERT INTO pinned_project VALUES ('/repo/z', 0), ('/repo/a', 1);
+         ALTER TABLE runtime_connection DROP COLUMN smelt_home;
          PRAGMA user_version = 1;",
     )
     .unwrap();
@@ -448,5 +454,40 @@ fn a_newer_store_is_refused() {
         .unwrap();
     drop(connection);
     assert!(ClientStore::open(&path).is_err());
+    cleanup(&path);
+}
+
+/// v3 的远程运行时还没有 SMELT_HOME：升到 v4 时原样留下，SMELT_HOME 先空着，连上一次再记。
+#[test]
+fn v3_runtime_connections_gain_an_empty_smelt_home() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v3 = Connection::open(&path).unwrap();
+    v3.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    v3.execute_batch(
+        "ALTER TABLE runtime_connection DROP COLUMN smelt_home;
+         INSERT INTO runtime_connection VALUES ('rt-linux', 'linux-box', 'aa', NULL, 0, 1);
+         PRAGMA user_version = 3;",
+    )
+    .unwrap();
+    drop(v3);
+
+    let store = ClientStore::open(&path).unwrap();
+    let listed = store.runtime_connections().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "linux-box");
+    assert_eq!(listed[0].smelt_home, None);
+    store
+        .put_runtime_connection(&RuntimeConnection {
+            smelt_home: Some("/home/linux/.smelt".to_string()),
+            ..listed[0].clone()
+        })
+        .unwrap();
+    assert_eq!(
+        store.runtime_connections().unwrap()[0]
+            .smelt_home
+            .as_deref(),
+        Some("/home/linux/.smelt")
+    );
     cleanup(&path);
 }

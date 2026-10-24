@@ -28,9 +28,29 @@ use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, s
 use smelt_model::pi_plugin_catalog::PiPlugin;
 use smelt_ui::IconAction as _;
 
+/// 一个智能体：在哪台机器上、叫什么。定义存在那台机器的运行时里，不同机器上的 id 互不
+/// 相干，所以读、改、开对话都要连机器一起说。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct AgentRef {
+    pub(crate) runtime: crate::RuntimeKey,
+    pub(crate) id: String,
+}
+
+impl AgentRef {
+    pub(crate) fn new(runtime: crate::RuntimeKey, id: String) -> Self {
+        Self { runtime, id }
+    }
+
+    /// 它现在的定义；机器没挂、还没读到或已经删了是 `None`。
+    pub(crate) fn definition(&self, cx: &App) -> Option<settings::AgentDefinition> {
+        settings::agent_definition(&self.runtime, &self.id, cx)
+    }
+}
+
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
 pub(crate) struct AgentsSurface {
-    /// 落盘：工作台最后选中的定义。
+    /// 落盘：工作台最后选中的本机定义，新建自动化拿它当默认。自动化眼下只在本机，
+    /// 选中远程机器上的智能体不记。
     pub(crate) selected_id: Option<String>,
     pub(crate) editor: Option<AgentEditor>,
     pub(crate) error: Option<String>,
@@ -41,7 +61,7 @@ pub(crate) struct AgentsSurface {
     /// 从侧栏「新对话」进来、还没有可对话的智能体。下一次新建走草稿，不是普通创建。
     pub(crate) arm_conversation_on_create: bool,
     /// 这次「新对话」新建的草稿。点「开始对话」才设默认；返回则删掉。
-    pub(crate) conversation_draft_id: Option<String>,
+    pub(crate) conversation_draft: Option<AgentRef>,
 }
 
 impl AgentsSurface {
@@ -53,13 +73,13 @@ impl AgentsSurface {
             pending_delete: None,
             pending_memory_delete: None,
             arm_conversation_on_create: false,
-            conversation_draft_id: None,
+            conversation_draft: None,
         }
     }
 }
 
 pub(crate) struct AgentDeleteTarget {
-    id: String,
+    agent: AgentRef,
     name: String,
     conversations: usize,
 }
@@ -121,14 +141,14 @@ impl Default for AutomationsSurface {
 }
 
 pub(crate) struct AgentEditor {
-    id: String,
+    agent: AgentRef,
     name: Entity<InputState>,
     /// 名字平时当标题看，点一下才变成输入框，避免一进编辑器就闪光标。
     name_editing: bool,
     instructions: Entity<TextareaState>,
     /// 绑定参考链接用的输入框。目录走原生选择框，链接只能手输。
     context_link: Entity<InputState>,
-    /// 运行时扫出的插件目录，取自 Workspace 的 Pi 配置快照；快照更新时跟着换。
+    /// 智能体那台机器扫出的插件目录，取自 Workspace 的 Pi 配置快照；快照更新时跟着换。
     plugins: Vec<PiPlugin>,
     /// 运行时那台机器上 `~/.pi/agent/mcp.json` 里的服务器，同上。
     mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
@@ -150,12 +170,17 @@ pub(crate) struct AgentEditor {
 }
 
 impl AgentEditor {
-    /// 换上运行时新给的插件和 MCP 目录。
+    /// 换上 `runtime` 那台机器新给的插件和 MCP 目录。别的机器的目录不是这个智能体能用的，
+    /// 不换。
     pub(crate) fn set_pi_catalog(
         &mut self,
+        runtime: &crate::RuntimeKey,
         plugins: Vec<PiPlugin>,
         mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
     ) {
+        if self.agent.runtime != *runtime {
+            return;
+        }
         self.plugins = plugins;
         self.mcp_servers = mcp_servers;
     }
@@ -441,23 +466,146 @@ fn new_conversation_row_label(agent_name: Option<&str>) -> String {
     }
 }
 
-/// 侧栏默认智能体。运行时配置的一部分，读缓存，不碰库。
-fn stored_default_conversation_agent(cx: &App) -> Option<String> {
-    cx.global::<settings::AgentHostState>()
-        .default_conversation_agent
-        .clone()
+/// 挂着智能体配置的机器，本机在前，其余按显示名。
+fn attached_agent_machines(cx: &App) -> Vec<crate::RuntimeKey> {
+    let mut keys: Vec<crate::RuntimeKey> = settings::agent_hosts(cx)
+        .map(|hosts| hosts.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort_by_cached_key(|key| {
+        (
+            *key != crate::RuntimeKey::Local,
+            crate::runtimes::runtime_name(key, cx),
+        )
+    });
+    keys
 }
 
-fn set_default_conversation_agent(agent_id: &str, cx: &mut App) {
-    let agent_id = agent_id.trim().to_string();
-    if agent_id.is_empty() {
-        return;
+/// 其中配置已经读到的。
+pub(crate) fn agent_machines(cx: &App) -> Vec<crate::RuntimeKey> {
+    attached_agent_machines(cx)
+        .into_iter()
+        .filter(|key| settings::agent_host_loaded(key, cx))
+        .collect()
+}
+
+/// 选择器里一个能开对话的智能体。
+#[derive(Clone)]
+pub(crate) struct ConversationAgentPick {
+    agent: AgentRef,
+    name: String,
+}
+
+/// 侧栏「新对话」这一下该做什么。
+pub(crate) enum NewConversationIntent {
+    /// 没有可对话的智能体。去创建，不要开会话。
+    CreateAgent,
+    /// 有可对话的智能体，但没有有效默认。让用户选一次。
+    PickAgent,
+    /// 有有效默认。直接用它开对话。
+    Start(AgentRef),
+}
+
+/// 跨机器的「新对话」决议。默认智能体记在它所在那台机器的配置里，换默认时清掉别的机器
+/// 上记着的，所以同一时间最多一台记着；按机器顺序取第一个有效的。每台机器的判定规则见
+/// [`smelt_model::default_conversation::resolve_new_conversation`]。
+pub(crate) struct NewConversationPlan {
+    pub(crate) intent: NewConversationIntent,
+    /// 有效默认的原文名字。只有 [`NewConversationIntent::Start`] 时有值。
+    pub(crate) default_name: Option<String>,
+    /// 各台机器上能开对话、且不是这次未提交草稿的智能体，按机器顺序。
+    pub(crate) ready: Vec<ConversationAgentPick>,
+    /// 记着的默认已经对不上任何可对话智能体的机器。调用方应清掉记录。
+    pub(crate) stale_defaults: Vec<crate::RuntimeKey>,
+}
+
+pub(crate) fn plan_new_conversation(draft: Option<&AgentRef>, cx: &App) -> NewConversationPlan {
+    let mut start = None;
+    let mut default_name = None;
+    let mut ready = Vec::new();
+    let mut stale_defaults = Vec::new();
+    for key in agent_machines(cx) {
+        let Some(config) = settings::agent_hosts(cx).and_then(|hosts| hosts.settings(&key)) else {
+            continue;
+        };
+        let draft_id = draft
+            .filter(|draft| draft.runtime == key)
+            .map(|draft| draft.id.as_str());
+        let resolution = smelt_model::default_conversation::resolve_new_conversation(
+            &config.agents,
+            config.default_conversation_agent.as_deref(),
+            draft_id,
+        );
+        if resolution.clear_stored_default {
+            stale_defaults.push(key.clone());
+        }
+        if start.is_none()
+            && let smelt_model::default_conversation::NewConversationIntent::Start { agent_id } =
+                resolution.intent
+        {
+            start = Some(AgentRef::new(key.clone(), agent_id));
+            default_name = resolution.default_name;
+        }
+        ready.extend(
+            resolution
+                .ready
+                .into_iter()
+                .map(|choice| ConversationAgentPick {
+                    agent: AgentRef::new(key.clone(), choice.id),
+                    name: choice.name,
+                }),
+        );
     }
-    settings::apply_agent_host(move |c| c.default_conversation_agent = Some(agent_id), cx);
+    let intent = match start {
+        Some(agent) => NewConversationIntent::Start(agent),
+        None if ready.is_empty() => NewConversationIntent::CreateAgent,
+        None => NewConversationIntent::PickAgent,
+    };
+    NewConversationPlan {
+        intent,
+        default_name,
+        ready,
+        stale_defaults,
+    }
 }
 
-fn clear_default_conversation_agent(cx: &mut App) {
-    settings::apply_agent_host(|c| c.default_conversation_agent = None, cx);
+/// 那台机器的智能体配置最近一次读取或保存失败的原因。
+fn agent_host_error(runtime: &crate::RuntimeKey, cx: &App) -> Option<String> {
+    settings::agent_hosts(cx)?.machine(runtime)?.error.clone()
+}
+
+/// 引用它的自动化有几条。自动化眼下只在本机，别的机器上的智能体没有。
+fn agent_automation_count(agent: &AgentRef, cx: &App) -> usize {
+    if agent.runtime != crate::RuntimeKey::Local {
+        return 0;
+    }
+    cx.global::<settings::AgentHostState>()
+        .automations_for(&agent.id)
+        .len()
+}
+
+/// 它是不是侧栏「新对话」记着的默认。
+fn is_default_conversation_agent(agent: &AgentRef, cx: &App) -> bool {
+    settings::agent_hosts(cx)
+        .and_then(|hosts| hosts.settings(&agent.runtime))
+        .and_then(|config| config.default_conversation_agent.as_deref())
+        == Some(agent.id.as_str())
+}
+
+/// 设成侧栏默认：记在它那台机器上，别的机器上记着的清掉。
+fn set_default_conversation_agent(agent: &AgentRef, cx: &mut App) {
+    for key in agent_machines(cx) {
+        let target = (key == agent.runtime).then(|| agent.id.clone());
+        let current = settings::agent_hosts(cx)
+            .and_then(|hosts| hosts.settings(&key))
+            .and_then(|config| config.default_conversation_agent.clone());
+        if current != target {
+            settings::apply_agent_host(&key, move |c| c.default_conversation_agent = target, cx);
+        }
+    }
+}
+
+fn clear_default_conversation_agent(runtime: &crate::RuntimeKey, cx: &mut App) {
+    settings::apply_agent_host(runtime, |c| c.default_conversation_agent = None, cx);
 }
 
 /// 对话行图标色。只跟状态走：选中已经由行底色表达。
@@ -793,12 +941,9 @@ impl AutomationEditor {
     }
 
     fn missing_fields(&self, cx: &App) -> Vec<&'static str> {
+        // 自动化眼下只在本机，引用的是本机的智能体。
         let agent_exists = !self.agent_id.is_empty()
-            && cx
-                .global::<settings::AgentHostState>()
-                .agents
-                .iter()
-                .any(|agent| agent.id == self.agent_id);
+            && settings::agent_definition(&crate::RuntimeKey::Local, &self.agent_id, cx).is_some();
         let has_schedule = self
             .entries
             .iter()
@@ -2003,7 +2148,7 @@ fn render_agent_engine_control(
 }
 
 fn render_agent_model_control(
-    agent_id: String,
+    agent: AgentRef,
     model_provider: String,
     model_id: String,
     entity: Entity<Workspace>,
@@ -2021,7 +2166,7 @@ fn render_agent_model_control(
         .tooltip("这个智能体的新对话和自动化用这套模型。对话里仍可再改。")
         .dropdown_menu(move |mut menu, window, cx| {
             let inherit_entity = entity.clone();
-            let inherit_id = agent_id.clone();
+            let inherit_id = agent.id.clone();
             menu = menu.item(
                 PopupMenuItem::new("跟随 Pi 默认")
                     .checked(inherit)
@@ -2032,13 +2177,14 @@ fn render_agent_model_control(
                         });
                     }),
             );
-            let groups = crate::settings::pi_model_choice_groups(cx);
+            // 模型在智能体那台机器上跑，可选的也是那台机器的。
+            let groups = crate::settings::pi_model_choice_groups(&agent.runtime, cx);
             if !groups.is_empty() {
                 menu = menu.separator();
             }
             for group in groups {
                 let item_entity = entity.clone();
-                let item_id = agent_id.clone();
+                let item_id = agent.id.clone();
                 let current_provider = model_provider.clone();
                 let current_model = model_id.clone();
                 let models = group.models;
@@ -2300,9 +2446,13 @@ fn render_agent_context_card(
     editor: &AgentEditor,
     entity: Entity<Workspace>,
 ) -> AnyElement {
-    let space_root = smelt_model::agent_paths::agent_space_root(&agent.id)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // 工作目录按那台机器的主目录算，本机算不出远程机器上的路径。
+    let space_root = match editor.agent.runtime {
+        crate::RuntimeKey::Local => smelt_model::agent_paths::agent_space_root(&agent.id)
+            .map(|path| format!("工作目录 {}", path.to_string_lossy()))
+            .unwrap_or_else(|| "工作目录".to_string()),
+        crate::RuntimeKey::Remote(_) => "工作目录在那台机器上".to_string(),
+    };
 
     let pick_agent = agent.id.clone();
     let pick_entity = entity.clone();
@@ -2423,7 +2573,7 @@ fn render_agent_context_card(
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_faint()))
                 .child(format!(
-                    "工作目录 {space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
+                    "{space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
                     smelt_model::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
                 )),
         )
@@ -2878,7 +3028,6 @@ fn agent_memory_row(
                 .min_w_0()
                 .flex()
                 .flex_col()
-                
                 .on_click(move |_, _, cx| {
                     let file_name = toggle_file.clone();
                     toggle_entity.update(cx, |workspace, cx| {

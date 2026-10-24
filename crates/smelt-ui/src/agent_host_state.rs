@@ -1,4 +1,5 @@
-//! 产品智能体 / 自动化 / 启动命令 / 通知开关的宿主状态（SQLite 关系表）。
+//! 智能体宿主状态：每台机器上运行时那部分配置（启动命令、env、profile、智能体定义、
+//! hook 开关），加上客户端自己的通知偏好和自动化投影。
 //!
 //! 需要 `gpui::Global`，所以不能进不许引 GPUI 的 smelt-core。设置页怎么渲染
 //! 这些字段仍在主 crate 的 settings 模块。
@@ -6,340 +7,41 @@
 use gpui::{App, Global};
 use std::collections::{BTreeMap, HashSet};
 
-use serde::de::{IgnoredAny, MapAccess, Visitor};
-use serde::ser::SerializeMap;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use crate::automation::{Automation, AutomationRun, AutomationState};
+pub use smelt_client::runtime::RuntimeKey;
 pub use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::agent_host::{AgentHostEdit, AgentHostSettings};
-use smelt_model::agent_kind::{
-    AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind, ConversationLaunchSpec,
-};
 use smelt_model::automation::AutomationFile;
 use smelt_model::control_api::{AgentHostApplyEdit, AgentHostGet};
+use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 /// 读写运行时配置的上限。一次合并写库，正常是毫秒级。
 const RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-fn default_true() -> bool {
-    true
-}
-
-/// 各家 ACP agent 的启动命令，按 agent id 存。
-///
-/// 之所以不是四个具名字段：新增一家 agent 不该需要「加字段 + 加 serde 默认 +
-/// 加两处 match」。这里只认 `CONVERSATION_AGENTS` 这张表，加一行即全通。
-///
-/// 落盘键名仍是历史的 `acp_cmd` / `acp_copilot_cmd` / …（由描述符的
-/// `config_key` 提供），改名等于把用户自定义命令悄悄重置回默认。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ConversationCommands(BTreeMap<&'static str, String>);
-
-impl ConversationCommands {
-    /// 出厂值：每家都按描述符的默认命令填一份，新装用户落盘的 JSON 与
-    /// 重构前逐字节一致。
-    fn with_defaults() -> Self {
-        Self(
-            CONVERSATION_AGENTS
-                .iter()
-                .map(|d| (d.id, (d.default_cmd)()))
-                .collect(),
-        )
-    }
-
-    fn get(&self, agent: ConversationAgentKind) -> String {
-        self.0
-            .get(agent.id())
-            .cloned()
-            .unwrap_or_else(|| agent.default_cmd())
-    }
-
-    fn set(&mut self, agent: ConversationAgentKind, cmd: String) {
-        self.0.insert(agent.id(), cmd);
-    }
-}
-
-impl Serialize for ConversationCommands {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
-        // 按表顺序写，键名用历史字段名。
-        for descriptor in CONVERSATION_AGENTS {
-            if let Some(cmd) = self.0.get(descriptor.id) {
-                map.serialize_entry(descriptor.config_key, cmd)?;
-            }
-        }
-        map.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for ConversationCommands {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct MapVisitor;
-
-        impl<'de> Visitor<'de> for MapVisitor {
-            type Value = ConversationCommands;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("ACP agent 启动命令表")
-            }
-
-            fn visit_map<M: MapAccess<'de>>(
-                self,
-                mut access: M,
-            ) -> Result<ConversationCommands, M::Error> {
-                let mut cmds = BTreeMap::new();
-                while let Some(key) = access.next_key::<String>()? {
-                    // 这个类型被 `#[serde(flatten)]` 承接，会收到本结构体没
-                    // 声明的全部键；不是命令键就照旧丢弃。
-                    match CONVERSATION_AGENTS.iter().find(|d| d.config_key == key) {
-                        Some(descriptor) => {
-                            cmds.insert(descriptor.id, access.next_value::<String>()?);
-                        }
-                        None => {
-                            access.next_value::<IgnoredAny>()?;
-                        }
-                    }
-                }
-                Ok(ConversationCommands(cmds))
-            }
-        }
-
-        deserializer.deserialize_map(MapVisitor)
-    }
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// 客户端自己的那部分：通知偏好（每台设备可以不同）和自动化投影。运行时那部分按机器
+/// 放在 [`AgentHosts`]。
+#[derive(Clone)]
 pub struct AgentHostState {
-    /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。旧配置缺少此字段时，加载
-    /// 迁移会将其开启并写回；用户明确保存 false 后，后续升级不会重新开启。
-    #[serde(default)]
-    pub agent_hooks_enabled: bool,
-    #[serde(default = "default_true", alias = "notify_awaiting")]
     pub notify_approval: bool,
-    #[serde(default = "default_true")]
     pub notify_input: bool,
-    #[serde(default = "default_true")]
     pub notify_success: bool,
-    #[serde(default = "default_true")]
     pub notify_failure: bool,
-    #[serde(default = "default_true")]
     pub notify_terminal_bell: bool,
-    /// 各家 ACP 会话的 agent 启动命令（空白分词）。只在命令行可表达的权限模式
-    /// 仍由各 adapter 自己上报；OpenCode 这类只能走配置层的默认覆盖由描述符提供，
-    /// 不塞进这个用户可编辑的命令字符串。
-    ///
-    /// `flatten` 让它继续占用旧配置里那几个平铺的键名，不引入嵌套层级。
-    #[serde(flatten)]
-    pub acp_cmds: ConversationCommands,
-    /// 各家 ACP agent 额外注入的环境变量，按 agent id 存。
-    ///
-    /// 单独一个嵌套键（不像命令那样平铺）：这是新字段，没有历史键名包袱，嵌套
-    /// 能让"加一家 agent"继续只改 `CONVERSATION_AGENTS` 一张表。未知 id 原样保留，
-    /// 降级运行时不会把别的版本写的配置吃掉。
-    #[serde(default)]
-    pub acp_env: BTreeMap<String, BTreeMap<String, String>>,
-    /// 每个 ACP agent 最近一次由用户显式选择的模型、推理档位等配置。
-    ///
-    /// key 只用稳定的 agent id，不带项目或 profile：同一家 Grok/OpenCode/Codex
-    /// 在所有项目与 workspace 间共享最近选择；不同 agent 的私有 value id 不串用。
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub acp_config_memory: BTreeMap<String, Vec<(String, String)>>,
-    /// 手动添加的 workspace（同一家 agent 可以有好几个，比如 Claude 的默认
-    /// `.claude` 和自定义的 `.claude-quant` 并存）。基础 agent 槽位不变、
-    /// 走各自默认路径；这里只装"额外"的。
-    #[serde(default)]
-    pub profiles: Vec<AcpProfile>,
-    /// 用户定义的本地智能体。旧版本曾将它们作为会话「预设」保存；alias 只负责
-    /// 无损读取旧配置，新写入统一使用产品模型里的 `agents`。
-    #[serde(
-        default,
-        alias = "agent_presets",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub agents: Vec<AgentDefinition>,
-    /// daemon 自动化投影；GUI 不据此调度，也不写回智能体配置快照。
-    #[serde(skip)]
+    /// daemon 自动化投影；GUI 不据此调度。
     pub automations: Vec<Automation>,
-    #[serde(skip)]
     pub automation_store_id: String,
-    #[serde(skip)]
     pub retired_automation_store_ids: HashSet<String>,
-    #[serde(skip)]
     pub automation_revision: u64,
-    #[serde(skip)]
     pub automation_states: Vec<AutomationState>,
-    #[serde(skip)]
     pub automation_runs: Vec<AutomationRun>,
-    #[serde(skip)]
     pub automation_store_error: Option<String>,
-    #[serde(skip)]
     pub webhook_base_url: Option<String>,
-    #[serde(skip)]
+    /// 通知偏好写不进客户端库时的原因。
     pub persistence_error: Option<String>,
-    /// 侧栏「新对话」默认用哪个智能体。
-    #[serde(skip)]
-    pub default_conversation_agent: Option<String>,
-    /// 运行时那部分（命令、env、profile、定义、hook 开关）是否已从运行时加载。
-    /// 没加载前是出厂值，不能拿去启动会话，也不接受修改。
-    #[serde(skip)]
-    pub runtime_loaded: bool,
 }
 
 impl AgentHostState {
-    /// 某个 agent 种类当前生效的启动命令。
-    pub fn acp_cmd_for(&self, agent: ConversationAgentKind) -> String {
-        self.acp_cmds.get(agent)
-    }
-
-    /// 改某个 agent 的启动命令（设置页各条输入框共用）。
-    pub fn set_acp_cmd_for(&mut self, agent: ConversationAgentKind, cmd: String) {
-        self.acp_cmds.set(agent, cmd);
-    }
-
-    /// `set_acp_cmd_for` 的链式版本，便于在构造表达式里覆盖单家命令
-    /// （命令不再是具名字段，`..Default::default()` 那种写法覆盖不到）。
-    #[must_use]
-    pub fn with_acp_cmd(mut self, agent: ConversationAgentKind, cmd: impl Into<String>) -> Self {
-        self.set_acp_cmd_for(agent, cmd.into());
-        self
-    }
-
-    pub fn find_profile(&self, id: &str) -> Option<&AcpProfile> {
-        self.profiles.iter().find(|p| p.id == id)
-    }
-
-    pub fn all_profiles(&self) -> impl Iterator<Item = &AcpProfile> {
-        self.profiles.iter()
-    }
-
-    /// 某个 agent 当前生效的额外环境变量。
-    pub fn acp_env_for(&self, agent: ConversationAgentKind) -> BTreeMap<String, String> {
-        self.acp_env.get(agent.id()).cloned().unwrap_or_default()
-    }
-
-    /// 改某个 agent 的额外环境变量；清空即删键，别在配置里留一堆空对象。
-    pub fn set_acp_env_for(&mut self, agent: ConversationAgentKind, env: BTreeMap<String, String>) {
-        if env.is_empty() {
-            self.acp_env.remove(agent.id());
-        } else {
-            self.acp_env.insert(agent.id().to_string(), env);
-        }
-    }
-
-    /// 某个 agent 最近由用户选中的配置。返回去重后的副本，避免手改配置文件产生
-    /// 同一 config id 多个值，恢复时连续发送互相覆盖的请求。
-    pub fn remembered_acp_config(&self, agent: ConversationAgentKind) -> Vec<(String, String)> {
-        let mut remembered = Vec::new();
-        for (config_id, value_id) in self.acp_config_memory.get(agent.id()).into_iter().flatten() {
-            upsert_config_value(&mut remembered, config_id.clone(), value_id.clone());
-        }
-        remembered
-    }
-
-    /// 记录一次用户显式选择。同一配置只保留最后一个值；profile/cwd 不参与 key。
-    /// 默认值归引擎自己配置的项（Pi 的模型、推理档位）不记，见 `remembers_config`。
-    pub fn remember_acp_config_value(
-        &mut self,
-        agent: ConversationAgentKind,
-        config_id: String,
-        value_id: String,
-    ) {
-        if config_id.trim().is_empty()
-            || value_id.trim().is_empty()
-            || !agent.remembers_config(&config_id)
-        {
-            return;
-        }
-        let values = self
-            .acp_config_memory
-            .entry(agent.id().to_string())
-            .or_default();
-        upsert_config_value(values, config_id, value_id);
-    }
-
-    /// 新会话的初始配置：先铺该 agent 的最近选择，再由会话自身存档逐项覆盖。
-    /// 因此冷恢复不会把某条会话原本的模型顶掉，同时能继承它尚未显式设置的档位。
-    pub fn initial_acp_config(
-        &self,
-        agent: ConversationAgentKind,
-        session_values: &[(String, String)],
-    ) -> Vec<(String, String)> {
-        let mut values = self.remembered_acp_config(agent);
-        for (config_id, value_id) in session_values {
-            upsert_config_value(&mut values, config_id.clone(), value_id.clone());
-        }
-        values
-    }
-
-    /// 产品智能体由用户显式创建并长期托管，新开对话默认可自主执行。其余配置仍继承
-    /// 最近选择，但权限不能继承普通对话里可能选过的逐次审批。
-    pub fn initial_agent_conversation_config(
-        &self,
-        agent: ConversationAgentKind,
-    ) -> Vec<(String, String)> {
-        let mut values = self.initial_acp_config(agent, &[]);
-        if let Some(mode) = agent.task_params().full_access_mode {
-            upsert_config_value(&mut values, "mode".to_string(), mode.to_string());
-        }
-        values
-    }
-
-    /// 某个 agent 当前生效的完整启动规格：命令 + 用户配的环境变量。
-    ///
-    /// 唯一接缝。会话侧一律走这里，不要再自己 `from_command(acp_cmd_for(..))`
-    /// ——那样拼出来的规格永远少了环境变量，且漏一处就是"设置里填了不生效"。
-    pub fn acp_launch_for(&self, agent: ConversationAgentKind) -> ConversationLaunchSpec {
-        let mut launch = agent.default_launch();
-        launch.command = self.acp_cmd_for(agent);
-        // 用户显式配置优先于出厂覆盖；这样既默认全权限，也保留降权和自定义
-        // OPENCODE_CONFIG_CONTENT 的出口。
-        for (name, value) in self.acp_env_for(agent) {
-            launch.env.insert(name, value);
-        }
-        launch
-    }
-
-    pub fn profile_launch_spec(
-        &self,
-        profile: &AcpProfile,
-    ) -> Result<ConversationLaunchSpec, String> {
-        let kind = profile.kind().ok_or_else(|| {
-            format!(
-                "workspace profile `{}` 使用了未知 ACP Agent `{}`",
-                profile.id, profile.kind_id
-            )
-        })?;
-        let mut launch = profile.launch_spec()?;
-        launch.command = self.acp_cmd_for(kind);
-        // workspace 目录那条环境变量是 profile 的立身之本，不能被用户配的同名
-        // 变量顶掉；其余按 kind 继承并允许显式覆盖出厂环境，这样既能默认全权限，
-        // 也能在设置里把某个 OpenCode workspace 降权。
-        let workspace_env = profile.env_var()?;
-        for (name, value) in self.acp_env_for(kind) {
-            if name != workspace_env {
-                launch.env.insert(name, value);
-            }
-        }
-        Ok(launch)
-    }
-
-    /// 将智能体定义解析成执行引擎启动规格。工作目录、账号/profile 与模型属于
-    /// Conversation/Run 的执行上下文，不能从定义里偷偷带进来。
-    pub fn resolve_agent(
-        &self,
-        definition: &AgentDefinition,
-    ) -> Result<(ConversationAgentKind, ConversationLaunchSpec), String> {
-        let agent = definition.engine_kind().ok_or_else(|| {
-            format!(
-                "智能体 `{}` 使用了未知执行引擎 `{}`",
-                definition.name, definition.engine_kind_id
-            )
-        })?;
-        Ok((agent, self.acp_launch_for(agent)))
-    }
-
     pub fn automations_for<'a>(&'a self, agent_id: &str) -> Vec<&'a Automation> {
         self.automations
             .iter()
@@ -415,84 +117,6 @@ impl AgentHostState {
         self.webhook_base_url = snapshot.webhook_base_url;
         true
     }
-}
-
-impl Default for AgentHostState {
-    fn default() -> Self {
-        Self {
-            agent_hooks_enabled: true,
-            notify_approval: true,
-            notify_input: true,
-            notify_success: true,
-            notify_failure: true,
-            notify_terminal_bell: true,
-            acp_cmds: ConversationCommands::with_defaults(),
-            acp_env: BTreeMap::new(),
-            acp_config_memory: BTreeMap::new(),
-            profiles: Vec::new(),
-            agents: Vec::new(),
-            automations: Vec::new(),
-            automation_store_id: String::new(),
-            retired_automation_store_ids: HashSet::new(),
-            automation_revision: 0,
-            automation_states: Vec::new(),
-            automation_runs: Vec::new(),
-            automation_store_error: None,
-            webhook_base_url: None,
-            persistence_error: None,
-            default_conversation_agent: None,
-            runtime_loaded: false,
-        }
-    }
-}
-
-fn upsert_config_value(values: &mut Vec<(String, String)>, config_id: String, value_id: String) {
-    if let Some((_, current)) = values.iter_mut().find(|(id, _)| id == &config_id) {
-        *current = value_id;
-    } else {
-        values.push((config_id, value_id));
-    }
-}
-
-impl Global for AgentHostState {}
-
-// ===================== 运行时那部分：缓存 + 异步提交 =====================
-
-impl AgentHostState {
-    /// 交给运行时的那部分配置。通知开关、自动化投影、错误状态不在里面。
-    pub fn runtime_settings(&self) -> AgentHostSettings {
-        AgentHostSettings {
-            hooks_enabled: self.agent_hooks_enabled,
-            commands: self
-                .acp_cmds
-                .0
-                .iter()
-                .map(|(id, cmd)| ((*id).to_string(), cmd.clone()))
-                .collect(),
-            env: self.acp_env.clone(),
-            config_memory: self.acp_config_memory.clone(),
-            profiles: self.profiles.clone(),
-            agents: self.agents.clone(),
-            default_conversation_agent: self.default_conversation_agent.clone(),
-        }
-    }
-
-    /// 用运行时给的权威配置替换缓存里运行时那部分，并标记为已加载。
-    pub fn apply_runtime_settings(&mut self, settings: AgentHostSettings) {
-        self.agent_hooks_enabled = settings.hooks_enabled;
-        self.acp_cmds = ConversationCommands(
-            CONVERSATION_AGENTS
-                .iter()
-                .filter_map(|d| settings.commands.get(d.id).map(|cmd| (d.id, cmd.clone())))
-                .collect(),
-        );
-        self.acp_env = settings.env;
-        self.acp_config_memory = settings.config_memory;
-        self.profiles = settings.profiles;
-        self.agents = settings.agents;
-        self.default_conversation_agent = settings.default_conversation_agent;
-        self.runtime_loaded = true;
-    }
 
     fn notify_prefs(&self) -> NotifyPrefs {
         NotifyPrefs {
@@ -512,6 +136,29 @@ impl AgentHostState {
         self.notify_terminal_bell = prefs.terminal_bell;
     }
 }
+
+impl Default for AgentHostState {
+    fn default() -> Self {
+        Self {
+            notify_approval: true,
+            notify_input: true,
+            notify_success: true,
+            notify_failure: true,
+            notify_terminal_bell: true,
+            automations: Vec::new(),
+            automation_store_id: String::new(),
+            retired_automation_store_ids: HashSet::new(),
+            automation_revision: 0,
+            automation_states: Vec::new(),
+            automation_runs: Vec::new(),
+            automation_store_error: None,
+            webhook_base_url: None,
+            persistence_error: None,
+        }
+    }
+}
+
+impl Global for AgentHostState {}
 
 /// 通知怎么提醒是客户端自己的事（设计文档 D1），每台设备可以不同，不交给运行时。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -555,43 +202,174 @@ fn save_notify_prefs(prefs: NotifyPrefs) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// 启动时的初始状态：客户端的通知偏好立刻可用；运行时那部分还没加载，
-/// 不接受修改，见 [`start_agent_host_load`]。
+/// 启动时的初始状态：客户端的通知偏好立刻可用。
 pub fn initial_agent_host_state() -> AgentHostState {
     let mut state = AgentHostState::default();
     state.set_notify_prefs(load_notify_prefs());
     state
 }
 
-fn fetch_agent_host() -> Result<AgentHostSettings, String> {
-    smelt_client::daemon_state::local_runtime()
+/// 改通知偏好：先写客户端库，写成了才换上。
+pub fn apply_notify_prefs(f: impl FnOnce(&mut AgentHostState), cx: &mut App) {
+    let current = cx.global::<AgentHostState>().clone();
+    let mut candidate = current.clone();
+    f(&mut candidate);
+    if candidate.notify_prefs() == current.notify_prefs() {
+        return;
+    }
+    match save_notify_prefs(candidate.notify_prefs()) {
+        Ok(()) => candidate.persistence_error = None,
+        Err(error) => {
+            eprintln!("[agent-ui] 保存通知偏好失败: {error}");
+            candidate = current;
+            candidate.persistence_error = Some(format!("保存通知偏好失败：{error}"));
+        }
+    }
+    cx.set_global(candidate);
+}
+
+// ===================== 运行时那部分：按机器缓存 + 异步提交 =====================
+
+/// 一台机器上的智能体配置。
+#[derive(Clone)]
+pub struct MachineAgentHost {
+    client: RuntimeClient,
+    /// 运行时给的权威配置。还没读到是 `None`：这时不能拿去启动会话，也不接受修改。
+    settings: Option<AgentHostSettings>,
+    /// 最近一次读取或保存失败的原因。
+    pub error: Option<String>,
+}
+
+impl MachineAgentHost {
+    pub fn settings(&self) -> Option<&AgentHostSettings> {
+        self.settings.as_ref()
+    }
+}
+
+/// 每台挂着的机器各一份智能体配置。本机和远程机器同一套：读、改都按 `RuntimeKey`。
+#[derive(Clone, Default)]
+pub struct AgentHosts {
+    machines: BTreeMap<RuntimeKey, MachineAgentHost>,
+}
+
+impl Global for AgentHosts {}
+
+impl AgentHosts {
+    pub fn machine(&self, key: &RuntimeKey) -> Option<&MachineAgentHost> {
+        self.machines.get(key)
+    }
+
+    /// 那台机器的配置；没挂或还没读到是 `None`。
+    pub fn settings(&self, key: &RuntimeKey) -> Option<&AgentHostSettings> {
+        self.machines.get(key)?.settings.as_ref()
+    }
+
+    /// 那台机器上的智能体定义；没挂或还没读到是空的。
+    pub fn agents(&self, key: &RuntimeKey) -> &[AgentDefinition] {
+        self.settings(key)
+            .map(|settings| settings.agents.as_slice())
+            .unwrap_or_default()
+    }
+
+    pub fn agent(&self, key: &RuntimeKey, id: &str) -> Option<&AgentDefinition> {
+        self.settings(key)?.find_agent(id)
+    }
+
+    /// 挂着的机器，本机在前。
+    pub fn keys(&self) -> impl Iterator<Item = &RuntimeKey> {
+        self.machines.keys()
+    }
+
+    fn adopt(&mut self, key: &RuntimeKey, settings: AgentHostSettings) {
+        if let Some(machine) = self.machines.get_mut(key) {
+            machine.settings = Some(settings);
+            machine.error = None;
+        }
+    }
+
+    fn set_error(&mut self, key: &RuntimeKey, error: String) {
+        if let Some(machine) = self.machines.get_mut(key) {
+            machine.error = Some(error);
+        }
+    }
+}
+
+/// 读到的那台机器的配置。没挂这个全局（测试、启动早期）时当作什么都没有。
+pub fn agent_hosts(cx: &App) -> Option<&AgentHosts> {
+    cx.try_global::<AgentHosts>()
+}
+
+/// 那台机器的配置读到了没有。没读到之前，依赖它的启动和恢复要等。
+pub fn agent_host_loaded(key: &RuntimeKey, cx: &App) -> bool {
+    agent_hosts(cx).is_some_and(|hosts| hosts.settings(key).is_some())
+}
+
+/// 那台机器的配置不用再等了：已经读到，或者机器没挂（离线的远程机器连上才挂，等不来）。
+/// 会话恢复用它决定要不要等配置再拼启动命令。
+pub fn agent_host_settled(key: &RuntimeKey, cx: &App) -> bool {
+    agent_hosts(cx)
+        .and_then(|hosts| hosts.machine(key))
+        .is_none_or(|machine| machine.settings.is_some())
+}
+
+fn fetch_agent_host(client: &RuntimeClient) -> Result<AgentHostSettings, String> {
+    client
         .call::<AgentHostGet>(&EmptyParams::default(), RUNTIME_TIMEOUT)
         .map_err(|error| error.to_string())
 }
 
-/// 运行时那部分配置加载好了没有。没好之前，依赖它的启动和恢复要等。
-pub fn agent_host_loaded(cx: &App) -> bool {
-    cx.try_global::<AgentHostState>()
-        .is_some_and(|state| state.runtime_loaded)
+fn update_hosts(cx: &mut App, change: impl FnOnce(&mut AgentHosts)) {
+    if !cx.has_global::<AgentHosts>() {
+        cx.set_global(AgentHosts::default());
+    }
+    change(cx.global_mut::<AgentHosts>());
 }
 
-/// 后台从运行时加载配置；运行时还没起来就按退避重试，直到拿到为止。
-/// `on_first_load` 在第一次加载成功后调用一次。
-pub fn start_agent_host_load(cx: &mut App, on_first_load: impl FnOnce(&mut App) + 'static) {
+/// 挂上一台机器并在后台读它的配置；连不上就按退避重试，直到读到或机器被移除。
+/// 已经挂着的只换客户端（比如改了中继），不重读。`on_first_load` 在第一次读到后调用一次。
+pub fn attach_agent_host(
+    key: RuntimeKey,
+    client: RuntimeClient,
+    cx: &mut App,
+    on_first_load: impl FnOnce(&mut App) + 'static,
+) {
+    let mut fresh = false;
+    update_hosts(cx, |hosts| {
+        if let Some(machine) = hosts.machines.get_mut(&key) {
+            machine.client = client.clone();
+        } else {
+            fresh = true;
+            hosts.machines.insert(
+                key.clone(),
+                MachineAgentHost {
+                    client: client.clone(),
+                    settings: None,
+                    error: None,
+                },
+            );
+        }
+    });
+    if !fresh {
+        return;
+    }
     cx.spawn(async move |cx| {
         let mut attempt = 0u32;
         loop {
+            let still_attached = cx.update(|cx| {
+                agent_hosts(cx).is_some_and(|hosts| hosts.machines.contains_key(&key))
+            });
+            if !still_attached {
+                return;
+            }
+            let fetch_client = client.clone();
             let fetched = cx
                 .background_executor()
-                .spawn(async { fetch_agent_host() })
+                .spawn(async move { fetch_agent_host(&fetch_client) })
                 .await;
             match fetched {
                 Ok(settings) => {
                     cx.update(|cx| {
-                        let mut state = cx.global::<AgentHostState>().clone();
-                        state.apply_runtime_settings(settings);
-                        state.persistence_error = None;
-                        cx.set_global(state);
+                        update_hosts(cx, |hosts| hosts.adopt(&key, settings));
                         on_first_load(cx);
                     });
                     return;
@@ -600,10 +378,12 @@ pub fn start_agent_host_load(cx: &mut App, on_first_load: impl FnOnce(&mut App) 
                     // 运行时刚被拉起、正在升级时连不上是常态，先安静重试几次。
                     if attempt >= 4 {
                         cx.update(|cx| {
-                            let mut state = cx.global::<AgentHostState>().clone();
-                            state.persistence_error =
-                                Some(format!("读取运行时的智能体配置失败，正在重试：{error}"));
-                            cx.set_global(state);
+                            update_hosts(cx, |hosts| {
+                                hosts.set_error(
+                                    &key,
+                                    format!("读取智能体配置失败，正在重试：{error}"),
+                                )
+                            });
                         });
                     }
                 }
@@ -619,225 +399,151 @@ pub fn start_agent_host_load(cx: &mut App, on_first_load: impl FnOnce(&mut App) 
     .detach();
 }
 
-/// 修改按提交顺序逐个发给运行时。并发发出去，运行时处理的先后和回包的先后都可能
-/// 乱，界面就会停在一个旧版本上。
-struct AgentHostEditQueue {
-    tx: smol::channel::Sender<AgentHostEdit>,
+/// 机器被移除：丢掉它的配置，正在排队的修改也不再发。
+pub fn detach_agent_host(key: &RuntimeKey, cx: &mut App) {
+    update_hosts(cx, |hosts| {
+        hosts.machines.remove(key);
+    });
+    if cx.has_global::<AgentHostEditQueues>() {
+        cx.global_mut::<AgentHostEditQueues>().0.remove(key);
+    }
 }
 
-impl Global for AgentHostEditQueue {}
+/// 修改按提交顺序逐个发给那台机器。并发发出去，运行时处理的先后和回包的先后都可能
+/// 乱，界面就会停在一个旧版本上。每台机器一条队列，互不等待。
+#[derive(Default)]
+struct AgentHostEditQueues(BTreeMap<RuntimeKey, smol::channel::Sender<AgentHostEdit>>);
 
-fn submit_agent_host_edit(edit: AgentHostEdit, cx: &mut App) {
-    if !cx.has_global::<AgentHostEditQueue>() {
-        let (tx, rx) = smol::channel::unbounded::<AgentHostEdit>();
-        cx.set_global(AgentHostEditQueue { tx });
-        cx.spawn(async move |cx| {
-            while let Ok(edit) = rx.recv().await {
-                let applied = cx
-                    .background_executor()
-                    .spawn(async move {
-                        smelt_client::daemon_state::local_runtime()
-                            .call::<AgentHostApplyEdit>(&edit, RUNTIME_TIMEOUT)
-                            .map_err(|error| error.to_string())
-                    })
-                    .await;
-                // 后面还有排着的修改时，这一包不是最终状态，先不覆盖本地。
-                let drained = rx.is_empty();
-                let settled = match applied {
-                    Ok(settings) => Ok(settings),
-                    Err(error) if drained => {
-                        // 失败后以运行时为准，把本地乐观改动退回去。
-                        let fresh = cx
-                            .background_executor()
-                            .spawn(async { fetch_agent_host() })
-                            .await;
-                        Err((error, fresh.ok()))
-                    }
-                    Err(error) => Err((error, None)),
-                };
-                cx.update(|cx| {
-                    let mut state = cx.global::<AgentHostState>().clone();
-                    match settled {
-                        Ok(settings) => {
-                            if drained {
-                                state.apply_runtime_settings(settings);
-                            }
-                        }
-                        Err((error, fresh)) => {
-                            eprintln!("[agent-ui] 保存配置失败: {error}");
-                            if let Some(settings) = fresh {
-                                state.apply_runtime_settings(settings);
-                            }
-                            state.persistence_error = Some(format!("保存智能体配置失败：{error}"));
-                        }
-                    }
-                    cx.set_global(state);
-                });
-            }
-        })
-        .detach();
-    }
-    let _ = cx.global::<AgentHostEditQueue>().tx.try_send(edit);
-}
+impl Global for AgentHostEditQueues {}
 
-/// 改一次配置。本地立刻生效；运行时那部分按「这次改了什么」异步提交，以运行时
-/// 合并后的结果为准。返回 false 表示这次没有接受：运行时配置还没加载，或客户端
-/// 偏好写不进去。
-pub fn try_apply_agent_host(f: impl FnOnce(&mut AgentHostState), cx: &mut App) -> bool {
-    let current = cx.global::<AgentHostState>().clone();
-    if !current.runtime_loaded {
-        let mut current = current;
-        current.persistence_error = Some("运行时的智能体配置还没读到，稍后再改".to_string());
-        cx.set_global(current);
-        return false;
+fn submit_agent_host_edit(
+    key: RuntimeKey,
+    client: RuntimeClient,
+    edit: AgentHostEdit,
+    cx: &mut App,
+) {
+    if !cx.has_global::<AgentHostEditQueues>() {
+        cx.set_global(AgentHostEditQueues::default());
     }
-    let mut candidate = current.clone();
-    f(&mut candidate);
-    candidate.persistence_error = None;
-    if candidate.notify_prefs() != current.notify_prefs()
-        && let Err(error) = save_notify_prefs(candidate.notify_prefs())
-    {
-        eprintln!("[agent-ui] 保存通知偏好失败: {error}");
-        let mut current = current;
-        current.persistence_error = Some(format!("保存通知偏好失败：{error}"));
-        cx.set_global(current);
-        return false;
-    }
-    let before = current.runtime_settings();
-    let after = candidate.runtime_settings();
-    cx.set_global(candidate);
-    if before != after {
-        submit_agent_host_edit(AgentHostEdit { before, after }, cx);
-    }
-    true
-}
-
-/// 从运行时重新取一份。CLI / Control API 改过定义后，打开智能体面时对齐。
-pub fn reload_agent_definitions(cx: &mut App) {
-    if !agent_host_loaded(cx) {
+    if let Some(tx) = cx.global::<AgentHostEditQueues>().0.get(&key) {
+        let _ = tx.try_send(edit);
         return;
     }
+    let (tx, rx) = smol::channel::unbounded::<AgentHostEdit>();
+    let _ = tx.try_send(edit);
+    cx.global_mut::<AgentHostEditQueues>()
+        .0
+        .insert(key.clone(), tx);
     cx.spawn(async move |cx| {
-        let fetched = cx
-            .background_executor()
-            .spawn(async { fetch_agent_host() })
-            .await;
-        cx.update(|cx| {
-            let mut state = cx.global::<AgentHostState>().clone();
-            match fetched {
-                Ok(settings) => state.apply_runtime_settings(settings),
-                Err(error) => {
-                    state.persistence_error = Some(format!("读取智能体配置失败：{error}"))
+        while let Ok(edit) = rx.recv().await {
+            let apply_client = client.clone();
+            let applied = cx
+                .background_executor()
+                .spawn(async move {
+                    apply_client
+                        .call::<AgentHostApplyEdit>(&edit, RUNTIME_TIMEOUT)
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            // 后面还有排着的修改时，这一包不是最终状态，先不覆盖本地。
+            let drained = rx.is_empty();
+            let settled = match applied {
+                Ok(settings) => Ok(settings),
+                Err(error) if drained => {
+                    // 失败后以运行时为准，把本地乐观改动退回去。
+                    let fetch_client = client.clone();
+                    let fresh = cx
+                        .background_executor()
+                        .spawn(async move { fetch_agent_host(&fetch_client) })
+                        .await;
+                    Err((error, fresh.ok()))
                 }
-            }
-            cx.set_global(state);
-        });
+                Err(error) => Err((error, None)),
+            };
+            cx.update(|cx| {
+                update_hosts(cx, |hosts| match settled {
+                    Ok(settings) => {
+                        if drained {
+                            hosts.adopt(&key, settings);
+                        }
+                    }
+                    Err((error, fresh)) => {
+                        eprintln!("[agent-ui] 保存配置失败: {error}");
+                        if let Some(settings) = fresh {
+                            hosts.adopt(&key, settings);
+                        }
+                        hosts.set_error(&key, format!("保存智能体配置失败：{error}"));
+                    }
+                })
+            });
+        }
     })
     .detach();
 }
 
-pub fn apply_agent_host(f: impl FnOnce(&mut AgentHostState), cx: &mut App) {
-    let _ = try_apply_agent_host(f, cx);
+/// 改一台机器的配置。本地立刻生效；按「这次改了什么」异步提交给那台机器，以它合并后的
+/// 结果为准。返回 false 表示这次没有接受：机器没挂，或配置还没读到。
+pub fn try_apply_agent_host(
+    key: &RuntimeKey,
+    f: impl FnOnce(&mut AgentHostSettings),
+    cx: &mut App,
+) -> bool {
+    let Some(machine) = agent_hosts(cx).and_then(|hosts| hosts.machine(key)) else {
+        return false;
+    };
+    let client = machine.client.clone();
+    let Some(before) = machine.settings.clone() else {
+        update_hosts(cx, |hosts| {
+            hosts.set_error(key, "这台机器的智能体配置还没读到，稍后再改".to_string())
+        });
+        return false;
+    };
+    let mut after = before.clone();
+    f(&mut after);
+    if before == after {
+        return true;
+    }
+    update_hosts(cx, |hosts| hosts.adopt(key, after.clone()));
+    submit_agent_host_edit(key.clone(), client, AgentHostEdit { before, after }, cx);
+    true
+}
+
+pub fn apply_agent_host(key: &RuntimeKey, f: impl FnOnce(&mut AgentHostSettings), cx: &mut App) {
+    let _ = try_apply_agent_host(key, f, cx);
+}
+
+/// 从各台已经读到过的机器重新取一份。CLI / Control API 改过定义后，打开智能体面时对齐。
+pub fn reload_agent_hosts(cx: &mut App) {
+    let Some(hosts) = agent_hosts(cx) else {
+        return;
+    };
+    let targets: Vec<(RuntimeKey, RuntimeClient)> = hosts
+        .machines
+        .iter()
+        .filter(|(_, machine)| machine.settings.is_some())
+        .map(|(key, machine)| (key.clone(), machine.client.clone()))
+        .collect();
+    for (key, client) in targets {
+        cx.spawn(async move |cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { fetch_agent_host(&client) })
+                .await;
+            cx.update(|cx| {
+                update_hosts(cx, |hosts| match fetched {
+                    Ok(settings) => hosts.adopt(&key, settings),
+                    Err(error) => hosts.set_error(&key, format!("读取智能体配置失败：{error}")),
+                })
+            });
+        })
+        .detach();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn agent_definitions_round_trip_and_legacy_configs_migrate() {
-        let legacy: AgentHostState = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(legacy.agents.is_empty());
-
-        let mut config = AgentHostState::default();
-        config.agents.push(AgentDefinition {
-            id: "reviewer".into(),
-            name: "代码审查".into(),
-            description: "审查变更".into(),
-            engine_kind_id: ConversationAgentKind::Codex.id().into(),
-            prompt: "先检查正确性和回归风险".into(),
-            plugins: Vec::new(),
-            context_folders: Vec::new(),
-            context_links: Vec::new(),
-            ..Default::default()
-        });
-
-        let serialized = serde_json::to_value(&config).unwrap();
-        assert_eq!(serialized["agents"][0]["engine_kind"], "codex");
-        assert!(serialized["agents"][0].get("agent_id").is_none());
-
-        let restored: AgentHostState = serde_json::from_value(serialized).unwrap();
-        assert_eq!(restored.agents[0].name, "代码审查");
-        assert_eq!(restored.agents[0].description, "审查变更");
-        assert_eq!(
-            restored.resolve_agent(&restored.agents[0]).unwrap().0,
-            ConversationAgentKind::Codex
-        );
-
-        let legacy: AgentHostState = serde_json::from_value(serde_json::json!({
-            "agent_presets": [{
-                "id": "legacy",
-                "name": "旧智能体",
-                "agent_id": "pi",
-                "profile_id": null,
-                "prompt": "保留旧指令"
-            }]
-        }))
-        .unwrap();
-        assert_eq!(legacy.agents[0].id, "legacy");
-        assert_eq!(legacy.agents[0].prompt, "保留旧指令");
-        assert!(legacy.agents[0].description.is_empty());
-        let serialized = serde_json::to_value(legacy).unwrap();
-        assert!(serialized.get("agents").is_some());
-        assert!(serialized.get("agent_presets").is_none());
-    }
-
-    #[test]
-    fn agent_definition_does_not_persist_run_execution_context() {
-        let legacy: AgentHostState = serde_json::from_value(serde_json::json!({
-            "agents": [{
-                "id": "quant",
-                "name": "量化智能体",
-                "agent_id": "pi",
-                "profile_id": "old-account",
-                "working_directory": "/old/project",
-                "prompt": "分析行情"
-            }]
-        }))
-        .unwrap();
-
-        let serialized = serde_json::to_value(legacy).unwrap();
-        let definition = &serialized["agents"][0];
-        assert!(definition.get("profile_id").is_none());
-        assert!(definition.get("working_directory").is_none());
-        assert!(serialized.get("automations").is_none());
-    }
-
-    #[test]
-    fn legacy_automations_are_ignored() {
-        let config: AgentHostState = serde_json::from_value(serde_json::json!({
-            "automations": [{
-                "id": "open-scan",
-                "agent_id": "quant",
-                "name": "开盘扫描",
-                "enabled": true,
-                "prompt": "拉取行情并输出",
-                "cwd": "/tmp/quant",
-                "permission_mode": "ask",
-                "kind": "schedule",
-                "schedule": {"type": "weekdays", "hour": 9, "minute": 35}
-            }]
-        }))
-        .unwrap();
-
-        assert!(config.automations.is_empty());
-        assert!(
-            serde_json::to_value(config)
-                .unwrap()
-                .get("automations")
-                .is_none()
-        );
-    }
+    use gpui::TestAppContext;
 
     #[test]
     fn automation_snapshot_rejects_stale_revisions_and_retired_stores() {
@@ -876,336 +582,159 @@ mod tests {
         assert_eq!(config.automation_store_id, "store-b");
     }
 
-    /// 设置页填的环境变量必须真的跟着会话走。之前会话侧是自己
-    /// `from_command(acp_cmd_for(..))` 拼的规格，环境变量在那条路上会被整段丢掉，
-    /// 而症状要等到真发一轮才暴露成"key 没配"。
-    #[test]
-    fn launch_spec_carries_the_env_from_settings() {
-        let mut config = AgentHostState::default();
-        config.set_acp_env_for(
-            ConversationAgentKind::Codex,
-            BTreeMap::from([("OPENAI_API_KEY".into(), "sk-abc".into())]),
-        );
-
-        let launch = config.acp_launch_for(ConversationAgentKind::Codex);
-        assert_eq!(
-            launch.command,
-            config.acp_cmd_for(ConversationAgentKind::Codex)
-        );
-        assert_eq!(
-            launch.env.get("OPENAI_API_KEY").map(String::as_str),
-            Some("sk-abc")
-        );
-
-        // 没配的那家不能被别家的变量污染。
-        assert!(
-            config
-                .acp_launch_for(ConversationAgentKind::Claude)
-                .env
-                .is_empty()
-        );
+    /// 假运行时：`agent_host.get` 回它手里那份，`agent_host.apply_edit` 按 `after` 换上；
+    /// `fail_edits` 时修改一律报错。每台机器各一个，用来确认调用发到了对的机器。
+    #[derive(Clone)]
+    struct FakeRuntime {
+        settings: std::sync::Arc<std::sync::Mutex<AgentHostSettings>>,
+        fail_edits: bool,
     }
 
-    #[test]
-    fn opencode_acp_defaults_to_process_local_full_permissions() {
-        let launch = AgentHostState::default().acp_launch_for(ConversationAgentKind::OpenCode);
+    impl FakeRuntime {
+        fn new(agent_name: &str, fail_edits: bool) -> Self {
+            let mut settings = AgentHostSettings::fresh();
+            settings.agents.push(AgentDefinition {
+                id: "a".into(),
+                name: agent_name.into(),
+                ..Default::default()
+            });
+            Self {
+                settings: std::sync::Arc::new(std::sync::Mutex::new(settings)),
+                fail_edits,
+            }
+        }
 
-        assert_eq!(launch.command, "opencode acp");
-        assert_eq!(
-            launch
-                .env
-                .get("OPENCODE_CONFIG_CONTENT")
-                .map(String::as_str),
-            Some(r#"{"permission":"allow"}"#)
-        );
+        fn stored(&self) -> AgentHostSettings {
+            self.settings.lock().unwrap().clone()
+        }
+
+        /// 每次连接给出一对 socket，另一端在新线程里答一条控制请求。
+        fn client(&self) -> RuntimeClient {
+            use smelt_runtime_client::protocol::control::{
+                ControlError, ControlErrorCode, ControlResponse,
+            };
+            use std::io::{BufRead as _, Write as _};
+
+            let fake = self.clone();
+            RuntimeClient::new(move || {
+                let (client, server) = std::os::unix::net::UnixStream::pair()?;
+                let fake = fake.clone();
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    std::io::BufReader::new(server.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let request_id = request["request_id"].as_str().unwrap().to_string();
+                    let response = match request["method"].as_str().unwrap() {
+                        "agent.host.get" => {
+                            serde_json::to_value(ControlResponse::ok(request_id, fake.stored()))
+                        }
+                        "agent.host.apply_edit" if fake.fail_edits => {
+                            serde_json::to_value(ControlResponse::<()>::error(
+                                request_id,
+                                ControlError::new(ControlErrorCode::OperationFailed, "写库失败"),
+                            ))
+                        }
+                        "agent.host.apply_edit" => {
+                            let edit: AgentHostEdit =
+                                serde_json::from_value(request["params"].clone()).unwrap();
+                            *fake.settings.lock().unwrap() = edit.after.clone();
+                            serde_json::to_value(ControlResponse::ok(request_id, edit.after))
+                        }
+                        other => panic!("没预期的调用 {other}"),
+                    }
+                    .unwrap();
+                    writeln!(&server, "{response}").unwrap();
+                });
+                Ok(client)
+            })
+        }
     }
 
-    #[test]
-    fn remembered_acp_config_is_keyed_by_agent_not_profile_or_project() {
-        let mut config = AgentHostState::default();
-        config.remember_acp_config_value(
-            ConversationAgentKind::Grok,
-            "model".into(),
-            "grok-4".into(),
-        );
-        config.remember_acp_config_value(
-            ConversationAgentKind::OpenCode,
-            "model".into(),
-            "deepseek-v4".into(),
-        );
-        config.remember_acp_config_value(
-            ConversationAgentKind::Codex,
-            "reasoning_effort".into(),
-            "high".into(),
-        );
-
-        assert_eq!(
-            config.remembered_acp_config(ConversationAgentKind::Grok),
-            vec![("model".into(), "grok-4".into())]
-        );
-        assert_eq!(
-            config.remembered_acp_config(ConversationAgentKind::OpenCode),
-            vec![("model".into(), "deepseek-v4".into())]
-        );
-        assert_eq!(
-            config.remembered_acp_config(ConversationAgentKind::Codex),
-            vec![("reasoning_effort".into(), "high".into())]
-        );
-        assert!(
-            config
-                .remembered_acp_config(ConversationAgentKind::Claude)
-                .is_empty()
-        );
-
-        let round_trip: AgentHostState =
-            serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
-        assert_eq!(
-            round_trip.remembered_acp_config(ConversationAgentKind::OpenCode),
-            vec![("model".into(), "deepseek-v4".into())]
-        );
+    fn rename(name: &'static str) -> impl FnOnce(&mut AgentHostSettings) {
+        move |settings| settings.agents[0].name = name.into()
     }
 
-    #[test]
-    fn session_config_overrides_agent_memory_and_inherits_missing_values() {
-        let mut config = AgentHostState::default();
-        config.remember_acp_config_value(
-            ConversationAgentKind::Codex,
-            "model".into(),
-            "gpt-5.6".into(),
-        );
-        config.remember_acp_config_value(
-            ConversationAgentKind::Codex,
-            "reasoning_effort".into(),
-            "medium".into(),
-        );
-
-        assert_eq!(
-            config.initial_acp_config(ConversationAgentKind::Codex, &[]),
-            vec![
-                ("model".into(), "gpt-5.6".into()),
-                ("reasoning_effort".into(), "medium".into()),
-            ]
-        );
-        assert_eq!(
-            config.initial_acp_config(
-                ConversationAgentKind::Codex,
-                &[("reasoning_effort".into(), "high".into())],
-            ),
-            vec![
-                ("model".into(), "gpt-5.6".into()),
-                ("reasoning_effort".into(), "high".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn product_agent_conversation_forces_full_access_without_losing_recent_config() {
-        let mut config = AgentHostState::default();
-        config.remember_acp_config_value(
-            ConversationAgentKind::Pi,
-            "mode".into(),
-            "default".into(),
-        );
-        config.remember_acp_config_value(
-            ConversationAgentKind::Pi,
-            "codemode".into(),
-            "on".into(),
-        );
-
-        assert!(
-            config
-                .initial_acp_config(ConversationAgentKind::Pi, &[])
-                .contains(&("mode".into(), "default".into()))
-        );
-        assert_eq!(
-            config.initial_agent_conversation_config(ConversationAgentKind::Pi),
-            vec![
-                ("mode".into(), "bypassPermissions".into()),
-                ("codemode".into(), "on".into()),
-            ]
-        );
-    }
-
-    /// Pi 新对话的模型和推理档位只认 `~/.pi/agent/settings.json`。在对话里换模型不能
-    /// 变成第二份默认值：否则新对话先按 settings.json 起，Idle 后又被改成上次的选择，
-    /// 模型胶囊闪一下。别家没有这份引擎默认值，照旧记最近选择。
-    #[test]
-    fn pi_model_and_thinking_choices_stay_in_their_conversation() {
-        let mut config = AgentHostState::default();
-        config.remember_acp_config_value(
-            ConversationAgentKind::Pi,
-            "model".into(),
-            "commandcode/deepseek/deepseek-v4.1-flash-fast".into(),
-        );
-        config.remember_acp_config_value(
-            ConversationAgentKind::Pi,
-            "thought_level".into(),
-            "max".into(),
-        );
-        config.remember_acp_config_value(
-            ConversationAgentKind::Codex,
-            "model".into(),
-            "gpt-5.6".into(),
-        );
-
-        assert!(
-            config
-                .remembered_acp_config(ConversationAgentKind::Pi)
-                .is_empty()
-        );
-        assert_eq!(
-            config.initial_agent_conversation_config(ConversationAgentKind::Pi),
-            vec![("mode".into(), "bypassPermissions".into())]
-        );
-        assert_eq!(
-            config.remembered_acp_config(ConversationAgentKind::Codex),
-            vec![("model".into(), "gpt-5.6".into())]
-        );
-    }
-
-    /// 清空即删键：配置里不该留一堆空对象，否则每次存盘都在长。
-    #[test]
-    fn clearing_the_env_drops_the_key_instead_of_storing_an_empty_map() {
-        let mut config = AgentHostState::default();
-        config.set_acp_env_for(
-            ConversationAgentKind::Codex,
-            BTreeMap::from([("K".to_string(), "v".to_string())]),
-        );
-        config.set_acp_env_for(ConversationAgentKind::Codex, BTreeMap::new());
-
-        assert!(config.acp_env.is_empty());
-        assert_eq!(
-            serde_json::to_value(&config).unwrap()["acp_env"],
-            serde_json::json!({})
-        );
-    }
-
-    /// workspace profile 继承 kind 的环境变量（给某家配一次 key，它的每个
-    /// workspace 都能用），但 profile 自己那条数据目录变量不能被顶掉。
-    #[test]
-    fn profile_inherits_kind_env_without_losing_its_workspace_dir() {
-        let profile = AcpProfile {
-            id: "p1".into(),
-            kind_id: ConversationAgentKind::Claude.id().into(),
-            label: "Claude Quant".into(),
-            workspace_dir: "/tmp/quant".into(),
-        };
-        let dir_var = profile
-            .env_var()
-            .expect("Claude 支持 workspace")
-            .to_string();
-        let mut config = AgentHostState::default();
-        config.set_acp_env_for(
-            ConversationAgentKind::Claude,
-            BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".to_string(), "https://gw".to_string()),
-                (dir_var.clone(), "/tmp/hijacked".to_string()),
-            ]),
-        );
-
-        let launch = config.profile_launch_spec(&profile).expect("有效 profile");
-        assert_eq!(
-            launch.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some("https://gw")
-        );
-        assert_eq!(
-            launch.env.get(&dir_var).map(String::as_str),
-            Some("/tmp/quant"),
-            "profile 的数据目录是它的立身之本，不能被同名变量顶掉"
-        );
-    }
-
-    /// 存档契约：旧 agent_ui.json 里那几个平铺的命令键必须继续被认，
-    /// 且写回时键名不变——否则升级会把用户自定义命令重置回默认。
-    #[test]
-    fn legacy_flat_command_keys_round_trip() {
-        let legacy = serde_json::json!({
-            "acp_cmd": "claude-custom --acp",
-            "acp_copilot_cmd": "copilot-custom --acp",
-            "acp_codex_cmd": "codex-custom --acp",
-            "acp_grok_cmd": "grok-custom stdio",
-            "notify_success": false,
+    /// 两台机器各读各的、各改各的：改远程那台只落到远程，本机不受影响。
+    #[gpui::test]
+    fn each_machine_loads_and_saves_its_own_settings(cx: &mut TestAppContext) {
+        let local = FakeRuntime::new("本机的", false);
+        let far = FakeRuntime::new("远程的", false);
+        let far_key = RuntimeKey::Remote("far".into());
+        cx.update(|cx| {
+            attach_agent_host(RuntimeKey::Local, local.client(), cx, |_| {});
+            attach_agent_host(far_key.clone(), far.client(), cx, |_| {});
         });
-
-        let config: AgentHostState = serde_json::from_value(legacy).unwrap();
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Claude),
-            "claude-custom --acp"
-        );
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Copilot),
-            "copilot-custom --acp"
-        );
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Codex),
-            "codex-custom --acp"
-        );
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Grok),
-            "grok-custom stdio"
-        );
-        assert!(!config.notify_success);
-
-        let saved = serde_json::to_value(&config).unwrap();
-        assert_eq!(saved["acp_cmd"], "claude-custom --acp");
-        assert_eq!(saved["acp_grok_cmd"], "grok-custom stdio");
-    }
-
-    /// 缺键 = 用出厂默认（原先靠 `#[serde(default = ...)]`，现在靠查表兜底）。
-    #[test]
-    fn missing_command_key_falls_back_to_descriptor_default() {
-        let config: AgentHostState = serde_json::from_value(serde_json::json!({})).unwrap();
-        for kind in ConversationAgentKind::ALL {
-            assert_eq!(config.acp_cmd_for(kind), kind.default_cmd());
-        }
-    }
-
-    /// 新装用户落盘的键集合与重构前一致：每家一条，不多不少。
-    #[test]
-    fn default_config_writes_one_key_per_registered_agent() {
-        let saved = serde_json::to_value(AgentHostState::default()).unwrap();
-        for descriptor in CONVERSATION_AGENTS {
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let hosts = agent_hosts(cx).unwrap();
+            assert_eq!(hosts.agents(&RuntimeKey::Local)[0].name, "本机的");
+            assert_eq!(hosts.agents(&far_key)[0].name, "远程的");
+            assert!(try_apply_agent_host(&far_key, rename("改过的远程"), cx));
+            // 乐观更新：立刻能看到。
             assert_eq!(
-                saved[descriptor.config_key],
-                serde_json::json!((descriptor.default_cmd)()),
-                "{} 落盘缺失或不匹配",
-                descriptor.config_key
+                agent_hosts(cx).unwrap().agents(&far_key)[0].name,
+                "改过的远程"
             );
-        }
+        });
+        cx.run_until_parked();
+        assert_eq!(far.stored().agents[0].name, "改过的远程");
+        assert_eq!(local.stored().agents[0].name, "本机的");
+        cx.update(|cx| {
+            assert_eq!(
+                agent_hosts(cx).unwrap().agents(&RuntimeKey::Local)[0].name,
+                "本机的"
+            );
+        });
     }
 
-    #[test]
-    fn profile_launch_uses_configured_agent_command_and_workspace_env() {
-        let mut config = AgentHostState::default();
-        config.set_acp_cmd_for(ConversationAgentKind::Claude, "claude-custom --acp".into());
-        let profile = AcpProfile {
-            id: "quant".into(),
-            kind_id: "claude".into(),
-            label: "Quant".into(),
-            workspace_dir: "~/Claude Workspaces/quant".into(),
-        };
-
-        let launch = config.profile_launch_spec(&profile).expect("有效 profile");
-
-        assert_eq!(launch.command, "claude-custom --acp");
-        assert_eq!(
-            launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
-            Some("~/Claude Workspaces/quant")
-        );
+    /// 一台机器保存失败只退回那一台的乐观改动，别的机器照常。
+    #[gpui::test]
+    fn a_failed_save_rolls_back_only_that_machine(cx: &mut TestAppContext) {
+        let local = FakeRuntime::new("本机的", false);
+        let far = FakeRuntime::new("远程的", true);
+        let far_key = RuntimeKey::Remote("far".into());
+        cx.update(|cx| {
+            attach_agent_host(RuntimeKey::Local, local.client(), cx, |_| {});
+            attach_agent_host(far_key.clone(), far.client(), cx, |_| {});
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(try_apply_agent_host(&far_key, rename("改不进去"), cx));
+            assert!(try_apply_agent_host(
+                &RuntimeKey::Local,
+                rename("改过的本机"),
+                cx
+            ));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let hosts = agent_hosts(cx).unwrap();
+            assert_eq!(
+                hosts.agents(&far_key)[0].name,
+                "远程的",
+                "失败要退回运行时那份"
+            );
+            assert!(hosts.machine(&far_key).unwrap().error.is_some());
+            assert_eq!(hosts.agents(&RuntimeKey::Local)[0].name, "改过的本机");
+            assert!(hosts.machine(&RuntimeKey::Local).unwrap().error.is_none());
+        });
     }
 
-    #[test]
-    fn unknown_profile_cannot_resolve_a_launch_spec() {
-        let profile = AcpProfile {
-            id: "future-profile".into(),
-            kind_id: "future-agent".into(),
-            label: "Future Agent".into(),
-            workspace_dir: "~/.future-agent".into(),
-        };
-
-        let error = AgentHostState::default()
-            .profile_launch_spec(&profile)
-            .expect_err("未知 Agent 不能借用默认启动规格");
-        assert!(error.contains("future-agent"));
+    /// 机器移除后取不到它的配置，也不再接受修改。
+    #[gpui::test]
+    fn a_detached_machine_is_gone(cx: &mut TestAppContext) {
+        let far = FakeRuntime::new("远程的", false);
+        let far_key = RuntimeKey::Remote("far".into());
+        cx.update(|cx| attach_agent_host(far_key.clone(), far.client(), cx, |_| {}));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(agent_host_loaded(&far_key, cx));
+            detach_agent_host(&far_key, cx);
+            assert!(!agent_host_loaded(&far_key, cx));
+            assert!(agent_hosts(cx).unwrap().agents(&far_key).is_empty());
+            assert!(!try_apply_agent_host(&far_key, rename("没人收"), cx));
+        });
     }
 }

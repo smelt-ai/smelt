@@ -7,29 +7,46 @@ use smelt_model::memory_settings::RerankModel;
 
 const DESCRIPTION: &str = "按问题把相关的记忆附到对话里。关键词检索总是开着；重排模型和向量检索都可选，不可用时自动退回。";
 
-pub(super) fn pi_memory_page(_cx: &App) -> SettingPage {
+/// 配的是能力库眼下选中的那台机器。
+pub(super) fn pi_memory_page(snapshot: &SettingsRenderSnapshot, _cx: &App) -> SettingPage {
+    let rerank_runtime = snapshot.pi_library_runtime.clone();
+    let form_runtime = snapshot.pi_library_runtime.clone();
     SettingPage::new("记忆 · 召回")
         .description(DESCRIPTION)
         .default_open(true)
         .group(
             SettingGroup::new()
                 .title("重排模型")
-                .item(SettingItem::render(|_, window, cx: &mut App| {
-                    let form =
-                        window.use_keyed_state("pi-memory-form", cx, MemorySettingsForm::new);
+                .item(SettingItem::render(move |_, window, cx: &mut App| {
+                    let form = memory_form(&rerank_runtime, window, cx);
                     render_rerank_model(form, cx)
                 })),
         )
         .group(
             SettingGroup::new()
                 .title("向量检索服务（可选）")
-                .item(SettingItem::render(|_, window, cx: &mut App| {
-                    // 状态跟着这一页活：离开再回来、或重新打开窗口都会重新读库。
-                    let form =
-                        window.use_keyed_state("pi-memory-form", cx, MemorySettingsForm::new);
+                .item(SettingItem::render(move |_, window, cx: &mut App| {
+                    let form = memory_form(&form_runtime, window, cx);
                     render_form(form, cx)
                 })),
         )
+}
+
+/// 那台机器的记忆表单。状态跟着这一页活，按机器分开：离开再回来、重新打开窗口、换一台
+/// 机器都会重新读那台机器的配置。
+fn memory_form(
+    runtime: &crate::RuntimeKey,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<MemorySettingsForm> {
+    let key = match runtime {
+        crate::RuntimeKey::Local => "pi-memory-form".to_string(),
+        crate::RuntimeKey::Remote(id) => format!("pi-memory-form-{id}"),
+    };
+    let runtime = runtime.clone();
+    window.use_keyed_state(key, cx, move |window, cx| {
+        MemorySettingsForm::new(runtime, window, cx)
+    })
 }
 
 /// 召回第一轮、压缩后和 memory_search 时，用这个模型从候选里挑相关的记忆。
@@ -49,7 +66,9 @@ fn render_rerank_model(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyEle
                         auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
                     }),
             );
-            let groups = crate::settings::pi_model_choice_groups(cx);
+            // 重排在那台机器的运行时上跑，模型也从那台机器的里选。
+            let runtime = form.read(cx).runtime.clone();
+            let groups = crate::settings::pi_model_choice_groups(&runtime, cx);
             if !groups.is_empty() {
                 menu = menu.separator();
             }

@@ -342,9 +342,8 @@ impl Workspace {
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let ready_agents = cx
-            .global::<settings::AgentHostState>()
-            .agents
+        // 自动化眼下只在本机，只能选本机的智能体。
+        let ready_agents = settings::agents_on(&crate::RuntimeKey::Local, cx)
             .iter()
             .filter(|agent| agent.is_ready())
             .cloned()

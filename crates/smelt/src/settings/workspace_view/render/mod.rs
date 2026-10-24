@@ -54,7 +54,7 @@ pub(super) fn render_capabilities_content(
                 .child(pi_mcp::pi_mcp_page(entity, snapshot, cx));
         }
         crate::CapabilitiesTab::Plugins => pi_plugin::pi_plugin_page(entity, snapshot, cx),
-        crate::CapabilitiesTab::Memory => pi_memory::pi_memory_page(cx),
+        crate::CapabilitiesTab::Memory => pi_memory::pi_memory_page(snapshot, cx),
     };
     div().size_full().child(
         // 借 Settings 的内容排版，关掉它自带的分组侧栏。

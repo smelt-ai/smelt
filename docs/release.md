@@ -47,7 +47,37 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 
 - 桌面与运行时：`Cargo.toml` 的 `version`。
 - Android：versionName 是 tag 去掉 `v`（含 `-rc.N`，与工作区版本相同）；versionCode 是 release 流水线的 `run_number`，逐次递增，
-  新包总能覆盖安装旧包。`mobile/pubspec.yaml` 里的版本只给本地开发构建用。
+  新包总能覆盖安装旧包。
+- iOS：版本号是工作区版本去掉 `-rc.N`（Apple 只认纯数字的 `x.y.z`）：同一次发版的 rc 和正式版共用一个版本号，在
+  TestFlight 里靠构建号区分。构建号取出包时的 UTC 时间（`%y%j%H%M`：两位年、一年中的第几天、时、分），只增不减，
+  又在 32 位整数以内。见下面的「移动端」。
+- `mobile/pubspec.yaml` 里的版本只给本地开发构建用，发布包一律在命令行上传入版本号，不改它。
+
+## 移动端
+
+手机的版本号跟发版统一：手机发布时，版本号就是它出自的那次发版的号。但**不是每次发版都要发手机**。手机能不能连上
+运行时只看控制协议版本，跟版本号无关，所以只有这两种情况要发：
+
+1. 控制协议的最低支持版本抬高了（`CONTROL_API_MIN_SUPPORTED_VERSION`，比如 v2 → v3）：新运行时不再接受旧手机。
+   这种发版桌面、运行时、手机要一起发，而且先等手机过审，或者至少先上 TestFlight，再推 tag，免得用户先升了
+   运行时、手机却连不上。
+2. 手机自己有新功能或修复。
+
+别的发版只发桌面和运行时，App Store 上的手机留在旧版本，照常能连。手机的版本号会因此跳着走（`2026.1023.0` 之后
+直接是 `2026.1105.0`），App Store 只要求递增。
+
+- Android：发版流水线自动出包，跟着每次发版走，见上面的「版本号」。
+- iOS：本地出包、手动上传。`scripts/release.sh` 在本地打好 tag 之后就能出包，不必等推送：协议抬高最低版本的
+  那种发版，按「本地打 tag → 出 iOS 包传 TestFlight → 推送」的顺序走。在 tag 上执行：
+
+  ```sh
+  git checkout v<版本>
+  make ios        # = scripts/build-ios.sh，产物在 mobile/build/ios/ipa/
+  ```
+
+  脚本只在当前提交正好是工作区版本的 tag、`mobile/` 和 `crates/` 没有未提交改动时出包，保证包和发版的代码对得上。
+  签名用 `mobile/ios/Flutter/SigningDefaults.xcconfig` 里的正式团队和 Bundle ID，导出设置在
+  `mobile/ios/ExportOptions.plist`。上传用 Transporter 或 Xcode。
 
 ## Android 签名
 

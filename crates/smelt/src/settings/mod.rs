@@ -70,7 +70,7 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
-pub(crate) use pi_config::{PiLibrary, pi_model_choice_groups};
+pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -741,18 +741,21 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 
 // ===================== Agent 身份与宿主状态 =====================
 //
-// ConversationAgentKind / AcpProfile 搬进 smelt-core（本身不需要 GPUI），AgentHostState
-// （需要 `gpui::Global`）搬进 smelt-ui——都是 acp_view.rs 独立成 smelt-acp-view
-// crate 之后要跨 crate 共用的数据模型。这里重导出成原来的裸名字，本文件剩下
-// 的 UI 渲染代码（acp_cmd_setting_item、手动添加 workspace 的编辑器等）不用
-// 逐处改路径。
+// ConversationAgentKind / AcpProfile 在 smelt-model（本身不需要 GPUI），AgentHostState
+// 和按机器的 AgentHosts（需要 `gpui::Global`）在 smelt-ui——都是 acp_view.rs 独立成
+// smelt-acp-view crate 之后要跨 crate 共用的数据模型。这里重导出成裸名字。
+//
+// 智能体配置（启动命令、env、profile、定义）归运行时，每台机器一份：读、改都要说明是
+// 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
+pub use smelt_model::agent_host::AgentHostSettings;
 use smelt_model::agent_kind::ConversationLaunchSpec;
 pub use smelt_model::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
 pub use smelt_ui::agent_host_state::{
-    AgentDefinition, AgentHostState, agent_host_loaded, apply_agent_host, initial_agent_host_state,
-    reload_agent_definitions, start_agent_host_load, try_apply_agent_host,
+    AgentDefinition, AgentHostState, AgentHosts, agent_host_loaded, agent_host_settled,
+    agent_hosts, apply_agent_host, apply_notify_prefs, attach_agent_host, detach_agent_host,
+    initial_agent_host_state, reload_agent_hosts, try_apply_agent_host,
 };
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,
@@ -761,50 +764,69 @@ pub use smelt_ui::automation::{
     EventIngress, WebhookIngress,
 };
 
-/// 全局配置里某个 agent 的启动命令；配置还没装载就退回出厂值。
-pub fn acp_cmd_for(agent: ConversationAgentKind, cx: &App) -> String {
-    cx.try_global::<AgentHostState>()
-        .map(|c| c.acp_cmd_for(agent))
-        .unwrap_or_else(|| agent.default_cmd())
+/// 那台机器的智能体配置；还没读到（或机器已移除）时用出厂值。
+pub fn agent_host_settings<'a>(
+    runtime: &crate::RuntimeKey,
+    cx: &'a App,
+) -> std::borrow::Cow<'a, AgentHostSettings> {
+    match agent_hosts(cx).and_then(|hosts| hosts.settings(runtime)) {
+        Some(settings) => std::borrow::Cow::Borrowed(settings),
+        None => std::borrow::Cow::Owned(AgentHostSettings::fresh()),
+    }
 }
 
-/// 全局配置里某个 agent 的完整启动规格（命令 + 用户配的环境变量）。
+/// 那台机器上的全部智能体定义；没读到是空的。
+pub fn agents_on<'a>(runtime: &crate::RuntimeKey, cx: &'a App) -> &'a [AgentDefinition] {
+    agent_hosts(cx)
+        .map(|hosts| hosts.agents(runtime))
+        .unwrap_or_default()
+}
+
+/// 那台机器上的智能体定义。
+pub fn agent_definition(
+    runtime: &crate::RuntimeKey,
+    id: &str,
+    cx: &App,
+) -> Option<AgentDefinition> {
+    agent_hosts(cx)?.agent(runtime, id).cloned()
+}
+
+/// 那台机器上某个 agent 的启动命令。
+pub fn acp_cmd_for(runtime: &crate::RuntimeKey, agent: ConversationAgentKind, cx: &App) -> String {
+    agent_host_settings(runtime, cx).acp_cmd_for(agent)
+}
+
+/// 那台机器上某个 agent 的完整启动规格（命令 + 用户配的环境变量）。
 ///
 /// 新建会话一律走这里。只取 `acp_cmd_for` 再自己 `from_command` 会把环境变量
 /// 丢掉，表现是"设置里填了 API key 却还是说没配"——而且只在真发一轮时才暴露。
-pub fn acp_launch_for(agent: ConversationAgentKind, cx: &App) -> ConversationLaunchSpec {
-    cx.try_global::<AgentHostState>()
-        .map(|c| c.acp_launch_for(agent))
-        .unwrap_or_else(|| agent.default_launch())
+pub fn acp_launch_for(
+    runtime: &crate::RuntimeKey,
+    agent: ConversationAgentKind,
+    cx: &App,
+) -> ConversationLaunchSpec {
+    agent_host_settings(runtime, cx).acp_launch_for(agent)
 }
 
 /// 普通 ACP 对话的初始配置：Agent 级最近选择打底，会话自身存档逐项覆盖。
 /// 插件自动任务不应调用这里，避免交互偏好污染任务运行参数。
 pub fn initial_acp_config_for(
+    runtime: &crate::RuntimeKey,
     agent: ConversationAgentKind,
     session_values: &[(String, String)],
     cx: &App,
 ) -> Vec<(String, String)> {
-    cx.try_global::<AgentHostState>()
-        .map(|config| config.initial_acp_config(agent, session_values))
-        .unwrap_or_else(|| session_values.to_vec())
+    agent_host_settings(runtime, cx).initial_acp_config(agent, session_values)
 }
 
 /// 智能体页新开的产品对话继承模型等交互偏好，但权限固定为该引擎注册的全权限
 /// 模式。普通 ACP 对话和已有会话恢复继续走 `initial_acp_config_for`。
 pub fn initial_agent_conversation_config_for(
+    runtime: &crate::RuntimeKey,
     agent: ConversationAgentKind,
     cx: &App,
 ) -> Vec<(String, String)> {
-    cx.try_global::<AgentHostState>()
-        .map(|config| config.initial_agent_conversation_config(agent))
-        .unwrap_or_else(|| {
-            agent
-                .task_params()
-                .full_access_mode
-                .map(|mode| vec![("mode".to_string(), mode.to_string())])
-                .unwrap_or_default()
-        })
+    agent_host_settings(runtime, cx).initial_agent_conversation_config(agent)
 }
 
 /// 设置页只在用户覆盖内置适配器时显示原始命令；默认 `bunx`、CLI 参数等属于
@@ -823,12 +845,18 @@ fn acp_cmd_setting_item(agent: ConversationAgentKind) -> SettingItem {
     SettingItem::new(
         format!("{} 自定义启动命令", agent.label()),
         SettingField::input(
-            move |cx: &App| acp_cmd_setting_value(agent, acp_cmd_for(agent, cx)),
+            move |cx: &App| {
+                acp_cmd_setting_value(agent, acp_cmd_for(&crate::RuntimeKey::Local, agent, cx))
+            },
             move |v: SharedString, cx: &mut App| {
                 let v = v.trim().to_string();
                 // 留空 = 使用内置适配器（不是清成空串跑不起来）。
                 let cmd = if v.is_empty() { agent.default_cmd() } else { v };
-                apply_agent_host(move |c| c.set_acp_cmd_for(agent, cmd), cx);
+                apply_agent_host(
+                    &crate::RuntimeKey::Local,
+                    move |c| c.set_acp_cmd_for(agent, cmd),
+                    cx,
+                );
             },
         ),
     )
@@ -1263,6 +1291,8 @@ struct SettingsRenderSnapshot {
     pi_mcp_servers: Result<Vec<smelt_model::pi_mcp::PiMcpServer>, String>,
     /// 能力库那台机器装了远程桌面：浏览器类预设在那里接远程桌面里的 Chrome。
     pi_mcp_remote_desktop: bool,
+    /// 能力库在配哪台机器：模型下拉按它取可选模型。
+    pi_library_runtime: crate::RuntimeKey,
     pi_mcp_login: Option<String>,
     pi_mcp_pending_remove: Option<String>,
     pi_mcp_error: Option<String>,
@@ -1341,6 +1371,7 @@ impl SettingsContentView {
                 Self::observe_settings_global::<Appearance>(window, cx),
                 Self::observe_settings_global::<LaunchConfig>(window, cx),
                 Self::observe_settings_global::<AgentHostState>(window, cx),
+                Self::observe_settings_global::<AgentHosts>(window, cx),
                 Self::observe_settings_global::<AcpRuntimeState>(window, cx),
                 #[cfg(target_os = "macos")]
                 Self::observe_settings_global::<UpdateSettings>(window, cx),

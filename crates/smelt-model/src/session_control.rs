@@ -207,7 +207,23 @@ pub fn is_background_acp_session_id(id: &str) -> bool {
 ///
 /// `agent_definition_id` 只在还没有 cwd 时当归属（冷恢复占位、测试夹具）。
 /// 有 cwd 时，托管目录本身就是判据：归属字段缺失（旧库没落盘）也不会掉进「项目」。
+///
+/// 托管目录按本机的 `SMELT_HOME` 算，只用来判断本机运行时上的会话；别的机器上的会话用
+/// [`is_agent_conversation_on`]。
 pub fn is_agent_conversation(
+    automation_id: Option<&str>,
+    agent_definition_id: Option<&str>,
+    cwd: Option<&str>,
+) -> bool {
+    let home = smelt_paths::smelt_home();
+    is_agent_conversation_on(home.as_deref(), automation_id, agent_definition_id, cwd)
+}
+
+/// 同 [`is_agent_conversation`]，托管目录按 `smelt_home`（会话所在那台机器的
+/// `SMELT_HOME`）算。那台机器的 `SMELT_HOME` 还不知道（运行时早于上报它、从没连上过）
+/// 时，有 cwd 的一律算项目：宁可放进项目列表，也不把项目对话藏进「最近对话」。
+pub fn is_agent_conversation_on(
+    smelt_home: Option<&std::path::Path>,
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
     cwd: Option<&str>,
@@ -216,28 +232,52 @@ pub fn is_agent_conversation(
         return false;
     }
     match cwd {
-        Some(cwd) => is_agent_conversation_cwd(cwd),
+        Some(cwd) => smelt_home.is_some_and(|home| is_agent_conversation_cwd_in(home, cwd)),
         None => agent_definition_id.is_some(),
     }
 }
 
 /// cwd 落在 Smelt 为智能体托管的目录下：智能体自己的 space
 /// （`~/.smelt/agents/<id>`）或旧版每会话一个的对话目录。两者结构上都不可能
-/// 是用户项目。
+/// 是用户项目。按本机的 `SMELT_HOME` 算。
 pub fn is_agent_conversation_cwd(cwd: &str) -> bool {
-    let path = std::path::Path::new(cwd);
-    crate::agent_paths::is_agent_space(path)
-        || crate::agent_paths::is_workbench_conversation_workspace(path)
+    smelt_paths::smelt_home().is_some_and(|home| is_agent_conversation_cwd_in(&home, cwd))
 }
 
-/// 不进项目会话列表：智能体对话、自动化 Run，以及旧档里的后台自动化 session。
+/// 同 [`is_agent_conversation_cwd`]，按 cwd 所在那台机器的 `SMELT_HOME` 算。
+pub fn is_agent_conversation_cwd_in(smelt_home: &std::path::Path, cwd: &str) -> bool {
+    let path = std::path::Path::new(cwd);
+    crate::agent_paths::is_agent_space_in(smelt_home, path)
+        || crate::agent_paths::is_workbench_conversation_workspace_in(smelt_home, path)
+}
+
+/// 不进项目会话列表：智能体对话、自动化 Run，以及旧档里的后台自动化 session。按本机的
+/// `SMELT_HOME` 算，别的机器上的会话用 [`is_product_conversation_on`]。
 pub fn is_product_conversation(
     automation_id: Option<&str>,
     agent_definition_id: Option<&str>,
     acp_session_id: Option<&str>,
     cwd: Option<&str>,
 ) -> bool {
-    is_agent_conversation(automation_id, agent_definition_id, cwd)
+    let home = smelt_paths::smelt_home();
+    is_product_conversation_on(
+        home.as_deref(),
+        automation_id,
+        agent_definition_id,
+        acp_session_id,
+        cwd,
+    )
+}
+
+/// 同 [`is_product_conversation`]，按会话所在那台机器的 `SMELT_HOME` 算。
+pub fn is_product_conversation_on(
+    smelt_home: Option<&std::path::Path>,
+    automation_id: Option<&str>,
+    agent_definition_id: Option<&str>,
+    acp_session_id: Option<&str>,
+    cwd: Option<&str>,
+) -> bool {
+    is_agent_conversation_on(smelt_home, automation_id, agent_definition_id, cwd)
         || automation_id.is_some()
         || acp_session_id.is_some_and(is_background_acp_session_id)
 }
@@ -395,5 +435,70 @@ pub fn resolve_session_delete_kind(
             Some(WorkspaceMenuSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
             None => Err("session not found".to_string()),
         },
+    }
+}
+
+#[cfg(test)]
+mod machine_home_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// 远程机器上的 space 按那台机器的 SMELT_HOME 认，跟本机的主目录无关。
+    #[test]
+    fn agent_conversations_are_recognised_by_their_own_machine_home() {
+        let remote = Path::new("/home/someone/.smelt");
+        let space = "/home/someone/.smelt/agents/agent-1";
+        assert!(is_agent_conversation_on(
+            Some(remote),
+            None,
+            Some("agent-1"),
+            Some(space)
+        ));
+        assert!(is_agent_conversation_on(
+            Some(remote),
+            None,
+            None,
+            Some("/home/someone/.smelt/workspaces/conversations/c1"),
+        ));
+        // 换一台机器的主目录就不是它的 space。
+        assert!(!is_agent_conversation_on(
+            Some(Path::new("/Users/me/.smelt")),
+            None,
+            Some("agent-1"),
+            Some(space),
+        ));
+    }
+
+    /// 项目里点 + 选智能体开的对话属于项目；主目录还不知道时有 cwd 的也一律算项目。
+    #[test]
+    fn project_conversations_and_unknown_homes_stay_in_projects() {
+        let remote = Path::new("/home/someone/.smelt");
+        assert!(!is_agent_conversation_on(
+            Some(remote),
+            None,
+            Some("agent-1"),
+            Some("/home/someone/code/quant"),
+        ));
+        assert!(!is_agent_conversation_on(
+            None,
+            None,
+            Some("agent-1"),
+            Some("/home/someone/.smelt/agents/agent-1"),
+        ));
+        // 还没有 cwd（冷恢复占位）时按归属算，跟主目录无关。
+        assert!(is_agent_conversation_on(None, None, Some("agent-1"), None));
+        assert!(!is_agent_conversation_on(
+            Some(remote),
+            Some("auto-1"),
+            None,
+            None
+        ));
+        assert!(is_product_conversation_on(
+            Some(remote),
+            Some("auto-1"),
+            None,
+            None,
+            None
+        ));
     }
 }

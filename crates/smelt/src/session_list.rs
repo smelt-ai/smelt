@@ -22,13 +22,13 @@ use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuIte
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
-use smelt_ui::ListRow;
 use smelt_ui::IconAction as _;
+use smelt_ui::ListRow;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
 
 // drag.rs / row.rs 作为本模块子模块沿用 `super::*` 读取 ACP 类型。
-use crate::settings::{AgentHostState, ConversationAgentKind};
+use crate::settings::ConversationAgentKind;
 use crate::{
     AgentStatus, RenameTarget, SessionKind, SidebarGrouping, Workspace, pane_provider_kind,
     pane_status, pane_title, ui_theme,
@@ -1182,7 +1182,7 @@ impl Workspace {
                 let agent_mark = crate::agents::bound_agent_mark(
                     self.sessions[ix].agent_definition_id.as_deref(),
                     self.sessions[ix].automation_id.as_deref(),
-                    &cx.global::<AgentHostState>().agents,
+                    crate::settings::agents_on(self.sessions[ix].runtime(cx).key(), cx),
                 );
                 let identity_label = provider_label.to_string();
                 let project_context_matches = !is_project_group || is_active_group;

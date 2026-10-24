@@ -2,39 +2,38 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot,
-    OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction,
-    ViewHistoryIdentity, append_prompt_text, apply_pending_config_selection,
-    background_task_elapsed, background_task_one_line, background_task_output_lines,
-    background_task_summary, build_conversation_layout, dispatch_elapsed_ms, dispatch_progress,
-    running_subagents, subagent_elapsed_ms, subagent_run_title, subagent_status,
-    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
-    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
-    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
-    composer_menu_sections, composer_model_label, composer_model_scroll,
-    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
-    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
-    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
-    current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
-    diff_stats_for_output, entries_to_fade_in,
-    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
-    is_active_permission_selection, is_fresh_conversation_start, is_match_count_line,
-    is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
-    loaded_capabilities_summary, loaded_entries_end, loaded_skills_refresh,
-    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
-    native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
-    overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
+    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
+    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction, ViewHistoryIdentity,
+    append_prompt_text, apply_pending_config_selection, background_task_elapsed,
+    background_task_one_line, background_task_output_lines, background_task_summary,
+    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
+    build_tool_image_parts, cached_diff_stats, can_load_older_history, classify_attached_paths,
+    compact_token_count, compact_tool_headline, compact_tool_run_label,
+    composer_config_section_label, composer_menu_sections, composer_model_label,
+    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
+    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
+    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
+    conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
+    diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
+    entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
+    format_attached_paths, is_active_permission_selection, is_fresh_conversation_start,
+    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
+    latest_user_message_index, loaded_capabilities_summary, loaded_entries_end,
+    loaded_skills_refresh, merge_rejected_prompt, merge_snapshot_entries,
+    model_label_with_provider, native_queue_item_kind_label, next_prompt_dispatch_pending,
+    notice_to_show, overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
     pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
     process_group_label, progress_has_details, progress_summary, provider_menu_label,
     provider_retry_label, provider_switch_value, reconcile_pending_config_values,
     refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt, returned_to_latest,
-    rows_with_changed_shape, running_background_tasks, search_summary_text,
+    rows_with_changed_shape, running_background_tasks, running_subagents, search_summary_text,
     selected_provider_group, session_trajectory_events, settled_thought_elapsed,
     settled_thought_label, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
-    task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
-    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
-    turn_outcome_card, usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
+    subagent_elapsed_ms, subagent_run_title, subagent_status, task_body_from_selection,
+    tool_card_default_expanded, tool_image_cache_matches_output, tool_output_has_content,
+    tool_result_summary, tool_uses_compact_process_row, trajectory_counts, turn_outcome_card,
+    usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
@@ -71,7 +70,10 @@ fn loaded_capabilities_summary_names_only_what_is_loaded() {
     assert_eq!(loaded_capabilities_summary(0, 0), "没有加载技能或 MCP");
     assert_eq!(loaded_capabilities_summary(2, 0), "已加载 2 个技能");
     assert_eq!(loaded_capabilities_summary(0, 1), "已加载 1 个 MCP");
-    assert_eq!(loaded_capabilities_summary(2, 1), "已加载 2 个技能、1 个 MCP");
+    assert_eq!(
+        loaded_capabilities_summary(2, 1),
+        "已加载 2 个技能、1 个 MCP"
+    );
 }
 
 #[test]
@@ -682,7 +684,13 @@ fn missing_global_degrades_to_the_plain_name(cx: &mut gpui::TestAppContext) {
         );
     });
 }
-use smelt_ui::agent_host_state::AgentHostState;
+use smelt_model::agent_host::AgentHostSettings;
+
+fn settings_with_cmd(agent: ConversationAgentKind, cmd: &str) -> AgentHostSettings {
+    let mut settings = AgentHostSettings::fresh();
+    settings.set_acp_cmd_for(agent, cmd.into());
+    settings
+}
 
 #[test]
 fn legacy_delivery_prompt_is_not_restored_by_the_gui() {
@@ -2209,8 +2217,7 @@ fn task_complete_is_final_when_no_assistant_answer_exists() {
 fn restart_uses_updated_profile_launch_spec_when_profile_still_exists() {
     let current = ConversationLaunchSpec::from_command("claude --old")
         .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/old");
-    let mut config =
-        AgentHostState::default().with_acp_cmd(ConversationAgentKind::Claude, "claude --current");
+    let mut config = settings_with_cmd(ConversationAgentKind::Claude, "claude --current");
     config.profiles.push(AcpProfile {
         id: "quant".into(),
         kind_id: "claude".into(),
@@ -2245,7 +2252,7 @@ fn restart_keeps_persisted_launch_when_profile_was_deleted() {
     let resolved = resolve_restart_launch(
         &current,
         Some("quant"),
-        &AgentHostState::default(),
+        &AgentHostSettings::fresh(),
         ConversationAgentKind::Claude,
         false,
     );
@@ -2257,7 +2264,7 @@ fn restart_keeps_persisted_launch_when_profile_was_deleted() {
 fn restart_keeps_persisted_launch_when_profile_agent_is_unknown() {
     let current = ConversationLaunchSpec::from_command("future-agent --persisted")
         .with_env("FUTURE_HOME", "~/.future-agent");
-    let mut config = AgentHostState::default();
+    let mut config = AgentHostSettings::fresh();
     config.profiles.push(AcpProfile {
         id: "future-profile".into(),
         kind_id: "future-agent".into(),
@@ -2279,8 +2286,7 @@ fn restart_keeps_persisted_launch_when_profile_agent_is_unknown() {
 #[test]
 fn restart_refreshes_ordinary_session_from_current_agent_command() {
     let current = ConversationLaunchSpec::from_command("claude --stale");
-    let config =
-        AgentHostState::default().with_acp_cmd(ConversationAgentKind::Claude, "claude --current");
+    let config = settings_with_cmd(ConversationAgentKind::Claude, "claude --current");
 
     let resolved =
         resolve_restart_launch(&current, None, &config, ConversationAgentKind::Claude, true);
@@ -2297,8 +2303,7 @@ fn restart_refresh_preserves_product_agent_instructions() {
         smelt_model::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV,
         "Review every change carefully",
     );
-    let config =
-        AgentHostState::default().with_acp_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
+    let config = settings_with_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
 
     let resolved = resolve_restart_launch(&current, None, &config, ConversationAgentKind::Pi, true);
 
@@ -2318,8 +2323,7 @@ fn restart_refresh_preserves_product_agent_plugin_and_mcp_selection() {
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent --stale")
         .with_env(SMELT_AGENT_PLUGIN_ARGS_ENV, "[\"--no-extensions\"]")
         .with_env(SMELT_AGENT_MCP_SERVERS_ENV, "[\"rea\"]");
-    let config =
-        AgentHostState::default().with_acp_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
+    let config = settings_with_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
 
     let resolved = resolve_restart_launch(&current, None, &config, ConversationAgentKind::Pi, true);
 
@@ -2350,8 +2354,7 @@ fn restart_refresh_preserves_product_agent_memory_directories() {
             "/home/me/.smelt/agents/a/memory",
         )
         .with_env(SMELT_USER_MEMORY_DIR_ENV, "/home/me/.smelt/memory");
-    let config =
-        AgentHostState::default().with_acp_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
+    let config = settings_with_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
 
     let resolved = resolve_restart_launch(&current, None, &config, ConversationAgentKind::Pi, true);
 
@@ -2375,8 +2378,7 @@ fn restart_refresh_preserves_product_agent_memory_directories() {
 fn restart_keeps_legacy_launch_when_refresh_is_disabled() {
     let current =
         ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude");
-    let config =
-        AgentHostState::default().with_acp_cmd(ConversationAgentKind::Claude, "claude --current");
+    let config = settings_with_cmd(ConversationAgentKind::Claude, "claude --current");
 
     let resolved = resolve_restart_launch(
         &current,
@@ -4614,9 +4616,7 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
 /// 翻页补上。补上之后就不再是在等首帧：之后的帧（后台任务多了一行输出、已读状态变了）
 /// 只带快照头，按增量合并，不能把翻出来的对话整个换成那一帧的空尾片。
 #[gpui::test]
-fn frames_after_the_first_history_page_keep_the_loaded_conversation(
-    cx: &mut gpui::TestAppContext,
-) {
+fn frames_after_the_first_history_page_keep_the_loaded_conversation(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
     let (view, cx) = cx.add_window_view(|_window, cx| {
         super::AcpView::placeholder(
@@ -4646,10 +4646,7 @@ fn frames_after_the_first_history_page_keep_the_loaded_conversation(
     cx.update(|_window, cx| {
         view.update(cx, |view, cx| {
             view.apply_snapshot(tail_snapshot(1, 2, Vec::new(), DaemonPhase::Idle), cx);
-            view.prepend_history_page(
-                tail_snapshot(0, 0, history.clone(), DaemonPhase::Idle),
-                cx,
-            );
+            view.prepend_history_page(tail_snapshot(0, 0, history.clone(), DaemonPhase::Idle), cx);
             view.apply_snapshot(tail_snapshot(2, 2, Vec::new(), DaemonPhase::Idle), cx);
         });
     });
@@ -4744,7 +4741,10 @@ fn a_dispatch_line_summarizes_its_subagents() {
     let parallel = dispatch_progress(&[Completed, Running, Running], None);
     assert_eq!(parallel.text, "已完成 1/3");
     assert!(parallel.running);
-    assert_eq!(dispatch_progress(&[Completed, Completed], None).text, "全部完成");
+    assert_eq!(
+        dispatch_progress(&[Completed, Completed], None).text,
+        "全部完成"
+    );
     let mixed = dispatch_progress(&[Completed, Failed, Interrupted, Stopped], None);
     assert_eq!(mixed.text, "完成 1/4 · 1 个失败 · 1 个中断 · 1 个已停止");
     assert!(mixed.problem);
@@ -4760,9 +4760,15 @@ fn a_dispatch_runs_from_its_first_start_to_its_last_finish() {
     let mut second = subagent_view("sa-2", SubagentStatus::Completed);
     second.started_at_ms = 5_000;
     second.finished_at_ms = Some(90_000);
-    assert_eq!(dispatch_elapsed_ms(&[&first, &second], 200_000), Some(89_000));
+    assert_eq!(
+        dispatch_elapsed_ms(&[&first, &second], 200_000),
+        Some(89_000)
+    );
     let running = subagent_view("sa-3", SubagentStatus::Running);
-    assert_eq!(dispatch_elapsed_ms(&[&first, &running], 200_000), Some(199_000));
+    assert_eq!(
+        dispatch_elapsed_ms(&[&first, &running], 200_000),
+        Some(199_000)
+    );
     assert_eq!(dispatch_elapsed_ms(&[], 200_000), None);
 }
 

@@ -1200,10 +1200,14 @@ pub enum AcpViewEvent {
     /// 用户从往上翻的历史滚回了最新位置。这时才算看到了最新结果，上层据此补标已读。
     ReturnedToLatest,
     /// 用户点了另一个 Pi 对话的标题（互发消息的事件行）。上层切过去。
-    OpenConversation { sid: String },
+    OpenConversation {
+        sid: String,
+    },
     /// 用户在输入栏的能力弹层里点了修改。`by_agent`：这场对话按产品智能体的勾选加载，
     /// 去它的编辑器；否则是裸 Pi，去能力库。
-    ManageCapabilities { by_agent: bool },
+    ManageCapabilities {
+        by_agent: bool,
+    },
 }
 
 /// 上一轮没正常结束后能做的事。
@@ -1229,14 +1233,12 @@ fn turn_outcome_card(
         AcpTurnOutcome::Succeeded | AcpTurnOutcome::Cancelled => None,
         AcpTurnOutcome::Failed => Some(("这一轮没有完成", retry)),
         AcpTurnOutcome::Refused => Some(("Agent 拒绝继续处理", retry)),
-        AcpTurnOutcome::MaxTokens => Some((
-            "回复太长，被截断了",
-            Some(TurnOutcomeAction::Continue),
-        )),
-        AcpTurnOutcome::MaxTurnRequests => Some((
-            "已达到本轮最大请求数",
-            Some(TurnOutcomeAction::Continue),
-        )),
+        AcpTurnOutcome::MaxTokens => {
+            Some(("回复太长，被截断了", Some(TurnOutcomeAction::Continue)))
+        }
+        AcpTurnOutcome::MaxTurnRequests => {
+            Some(("已达到本轮最大请求数", Some(TurnOutcomeAction::Continue)))
+        }
     }
 }
 
@@ -1745,7 +1747,7 @@ pub struct AcpView {
 pub(crate) fn resolve_restart_launch(
     current_launch: &ConversationLaunchSpec,
     profile_id: Option<&str>,
-    config: &smelt_ui::agent_host_state::AgentHostState,
+    config: &smelt_model::agent_host::AgentHostSettings,
     agent: ConversationAgentKind,
     refresh_launch_from_settings: bool,
 ) -> ConversationLaunchSpec {
@@ -2195,7 +2197,9 @@ impl AcpView {
             self.history_session_id = None;
         }
         if !preserve_launch
-            && let Some(cfg) = cx.try_global::<smelt_ui::agent_host_state::AgentHostState>()
+            // 按这段对话所在那台机器当前的配置重拼；那台机器的配置还没读到就沿用原来的。
+            && let Some(cfg) = smelt_ui::agent_host_state::agent_hosts(cx)
+                .and_then(|hosts| hosts.settings(self.runtime.key()))
         {
             self.launch = resolve_restart_launch(
                 &self.launch,
@@ -2707,7 +2711,11 @@ impl AcpView {
             self.trace_startup(&format!("收到第一份快照（{phase:?}）"));
         }
         if phase != DaemonPhase::Connecting {
-            let step = if phase == DaemonPhase::Dead { "没起来" } else { "可以用了" };
+            let step = if phase == DaemonPhase::Dead {
+                "没起来"
+            } else {
+                "可以用了"
+            };
             self.trace_startup(&format!("{step}（{phase:?}）"));
             self.startup_trace = None;
         }
@@ -5097,7 +5105,6 @@ impl AcpView {
                         .py_2()
                         .gap_2p5()
                         .items_center()
-                        
                         .hover(|d| d.bg(ui_theme::overlay(0x14)))
                         .active(|d| d.opacity(0.88))
                         .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -5347,7 +5354,8 @@ struct DispatchProgress {
 
 fn dispatch_progress(statuses: &[SubagentStatus], activity: Option<&str>) -> DispatchProgress {
     let total = statuses.len();
-    let count = |wanted: SubagentStatus| statuses.iter().filter(|status| **status == wanted).count();
+    let count =
+        |wanted: SubagentStatus| statuses.iter().filter(|status| **status == wanted).count();
     let running = count(SubagentStatus::Running);
     let completed = count(SubagentStatus::Completed);
     let failed = count(SubagentStatus::Failed);

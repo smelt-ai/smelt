@@ -30,7 +30,7 @@ pub(crate) enum AgentsView {
     #[default]
     Catalog,
     Editor {
-        agent_id: String,
+        agent: crate::agents::AgentRef,
     },
     Conversation {
         sid: String,
@@ -45,15 +45,15 @@ impl AgentsView {
         }
     }
 
-    pub(crate) fn editor_id(&self) -> Option<&str> {
+    pub(crate) fn editor_agent(&self) -> Option<&crate::agents::AgentRef> {
         match self {
-            Self::Editor { agent_id } => Some(agent_id.as_str()),
+            Self::Editor { agent } => Some(agent),
             Self::Catalog | Self::Conversation { .. } => None,
         }
     }
 
-    pub(crate) fn open_editor(&mut self, agent_id: String) {
-        *self = Self::Editor { agent_id };
+    pub(crate) fn open_editor(&mut self, agent: crate::agents::AgentRef) {
+        *self = Self::Editor { agent };
     }
 
     pub(crate) fn open_conversation(&mut self, sid: String) {
@@ -240,19 +240,21 @@ mod tests {
 
     #[test]
     fn agents_catalog_editor_and_conversation_are_exclusive() {
+        let agent =
+            crate::agents::AgentRef::new(crate::RuntimeKey::Remote("far".into()), "agent-1".into());
         let mut view = AgentsView::Catalog;
-        view.open_editor("agent-1".into());
-        assert_eq!(view.editor_id(), Some("agent-1"));
+        view.open_editor(agent.clone());
+        assert_eq!(view.editor_agent(), Some(&agent));
         assert!(view.conversation_sid().is_none());
 
         view.open_conversation("sid-1".into());
         assert_eq!(view.conversation_sid(), Some("sid-1"));
-        assert!(view.editor_id().is_none());
+        assert!(view.editor_agent().is_none());
 
         view.pop_to_root();
         assert_eq!(view, AgentsView::Catalog);
         assert!(view.conversation_sid().is_none());
-        assert!(view.editor_id().is_none());
+        assert!(view.editor_agent().is_none());
     }
 
     #[test]
@@ -279,7 +281,10 @@ mod tests {
     #[test]
     fn sidebar_pop_to_root_clears_drill_in_on_the_active_face_only() {
         let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents);
-        nav.agents_mut().open_editor("agent-1".into());
+        nav.agents_mut().open_editor(crate::agents::AgentRef::new(
+            crate::RuntimeKey::Local,
+            "agent-1".into(),
+        ));
         nav.automations_mut().open_editor("auto-1".into());
 
         nav.pop_active_to_root();

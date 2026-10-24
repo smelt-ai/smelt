@@ -479,7 +479,7 @@ fn agent_groups(
                                     .unwrap_or(true)
                             },
                             |v: bool, cx: &mut App| {
-                                apply_agent_host(|c| c.notify_approval = v, cx);
+                                apply_notify_prefs(|c| c.notify_approval = v, cx);
                             },
                         ),
                     )
@@ -496,7 +496,7 @@ fn agent_groups(
                                     .unwrap_or(true)
                             },
                             |v: bool, cx: &mut App| {
-                                apply_agent_host(|c| c.notify_input = v, cx);
+                                apply_notify_prefs(|c| c.notify_input = v, cx);
                             },
                         ),
                     )
@@ -512,7 +512,7 @@ fn agent_groups(
                                     .unwrap_or(true)
                             },
                             |v: bool, cx: &mut App| {
-                                apply_agent_host(|c| c.notify_success = v, cx);
+                                apply_notify_prefs(|c| c.notify_success = v, cx);
                             },
                         ),
                     )
@@ -528,7 +528,7 @@ fn agent_groups(
                                     .unwrap_or(true)
                             },
                             |v: bool, cx: &mut App| {
-                                apply_agent_host(|c| c.notify_failure = v, cx);
+                                apply_notify_prefs(|c| c.notify_failure = v, cx);
                             },
                         ),
                     )
@@ -544,7 +544,7 @@ fn agent_groups(
                                     .unwrap_or(true)
                             },
                             |v: bool, cx: &mut App| {
-                                apply_agent_host(|c| c.notify_terminal_bell = v, cx);
+                                apply_notify_prefs(|c| c.notify_terminal_bell = v, cx);
                             },
                         ),
                     )
@@ -626,7 +626,7 @@ fn agent_groups(
                                             .child(div().w(del_w)),
                                     );
 
-                                let profiles = cx.global::<AgentHostState>().profiles.clone();
+                                let profiles = agent_host_settings(&crate::RuntimeKey::Local, cx).profiles.clone();
                                 for (ix, ((label, dir), p)) in
                                     profile_rows.iter().zip(profiles.iter()).enumerate()
                                 {
@@ -772,9 +772,11 @@ fn agent_groups(
                                         .on_click(move |_, _window, cx: &mut App| {
                                             // 先记用户意图：即使某个 provider 本次安装失败，
                                             // 下次启动也会继续校正，而不是悄悄退回关闭。
-                                            apply_agent_host(|c| {
-                                                c.agent_hooks_enabled = true;
-                                            }, cx);
+                                            apply_agent_host(
+                                                &crate::RuntimeKey::Local,
+                                                |c| c.hooks_enabled = true,
+                                                cx,
+                                            );
                                             install_agent_hooks(cx);
                                         }),
                                 )
@@ -785,9 +787,11 @@ fn agent_groups(
                                         .disabled(busy)
                                         .on_click(move |_, _window, cx: &mut App| {
                                             // 先关闭自动安装，避免部分移除失败后重启又被装回。
-                                            apply_agent_host(|c| {
-                                                c.agent_hooks_enabled = false;
-                                            }, cx);
+                                            apply_agent_host(
+                                                &crate::RuntimeKey::Local,
+                                                |c| c.hooks_enabled = false,
+                                                cx,
+                                            );
                                             uninstall_agent_hooks(cx);
                                         }),
                                 ),

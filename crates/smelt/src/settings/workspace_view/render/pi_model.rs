@@ -164,7 +164,12 @@ fn default_model_section(
     }
 
     let editing = snapshot.pi_model_editor.is_some();
-    let change = change_model_button(entity, current.clone(), editing);
+    let change = change_model_button(
+        entity,
+        snapshot.pi_library_runtime.clone(),
+        current.clone(),
+        editing,
+    );
     let thinking = thinking_level_row(entity, snapshot, explicit.is_some(), palette);
 
     let mut body = card(palette)
@@ -240,6 +245,7 @@ fn explicit_default(
 /// 目录在菜单打开时才读盘，不进每次刷新的快照。
 fn change_model_button(
     entity: &Entity<Workspace>,
+    runtime: crate::RuntimeKey,
     current: Option<(String, String)>,
     editing: bool,
 ) -> impl IntoElement {
@@ -249,7 +255,7 @@ fn change_model_button(
         .label("更换模型")
         .disabled(editing)
         .dropdown_menu(move |mut menu, window, cx| {
-            let groups = crate::settings::pi_model_choice_groups(cx);
+            let groups = crate::settings::pi_model_choice_groups(&runtime, cx);
             if groups.is_empty() {
                 menu = menu.item(
                     PopupMenuItem::new("还没有可选的模型：先在下面登录或添加 Provider")

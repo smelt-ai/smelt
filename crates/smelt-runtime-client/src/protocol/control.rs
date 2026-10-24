@@ -19,8 +19,12 @@ use super::daemon::DaemonOperation;
 /// v2：`workspace.load` / `workspace.save` 的文档改了形状（对话带稳定 id，终端平铺，
 /// 分屏归客户端）。旧桌面读写新文档、新桌面读写旧文档都会把终端对话存坏，两边都得拦住。
 /// 同一版删掉跨 Agent 消息的 `agent.list` / `agent.send`。
-pub const CONTROL_API_VERSION: u16 = 2;
-pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 2;
+///
+/// v3：删掉 DeepSeek Harness 后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置
+/// 少了 `native_dsh_profiles`。旧运行时缺这个字段就拒收修改，新桌面改不了旧运行时上的
+/// 智能体配置，得让兼容检查拦住、提示升级运行时。
+pub const CONTROL_API_VERSION: u16 = 3;
+pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
 
 macro_rules! define_control_methods {
@@ -238,6 +242,10 @@ pub struct DaemonRuntimeInfo {
     /// 入口。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<bool>,
+    /// 运行时的 `SMELT_HOME`。智能体的 space 等托管目录都在它下面，客户端拿它认出哪些
+    /// 会话是智能体对话：用自己的主目录去比，别的机器上的永远对不上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smelt_home: Option<String>,
 }
 
 /// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：版本对不上，

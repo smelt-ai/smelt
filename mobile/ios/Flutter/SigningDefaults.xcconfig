@@ -1,4 +1,6 @@
-// Shared fallback for simulator builds. App Store identity is intentionally
-// unset until a production Apple Developer account has been selected.
+// App Store identity: the production team and Bundle ID that TestFlight / App
+// Store builds are signed with. Debug and Profile builds override both from
+// Developer.xcconfig.
 PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile
+DEVELOPMENT_TEAM = H3H5ULV8KR
 CODE_SIGN_STYLE = Automatic
