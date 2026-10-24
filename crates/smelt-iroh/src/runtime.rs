@@ -353,14 +353,31 @@ mod threaded {
                 .name("smelt-iroh-up".into())
                 .spawn(move || up(&handle, recv, ours_write, &stop))?;
         }
-        std::thread::Builder::new()
-            .name("smelt-iroh-down".into())
-            .spawn(move || {
-                down(&handle, send, &ours);
+        // 下行线程起不来时，已经在跑的上行线程还堵在 `stop` 上。先叫停并关掉
+        // 本地这一端，它才能退出。套接字要留一份在外面：失败时闭包连同它捕获的
+        // 那份一起被丢掉。
+        let stop_down = Arc::clone(&stop);
+        let ours_down = match ours.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
                 stop.notify_one();
                 let _ = ours.shutdown(Shutdown::Both);
+                return Err(error);
+            }
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("smelt-iroh-down".into())
+            .spawn(move || {
+                down(&handle, send, &ours_down);
+                stop_down.notify_one();
+                let _ = ours_down.shutdown(Shutdown::Both);
                 drop(done);
-            })?;
+            })
+        {
+            stop.notify_one();
+            let _ = ours.shutdown(Shutdown::Both);
+            return Err(error);
+        }
         Ok((
             theirs,
             tokio::spawn(async move {

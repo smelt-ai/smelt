@@ -501,6 +501,10 @@ impl Workspace {
             return;
         };
         for sess in &self.sessions {
+            // 远程机器的终端还在它自己的运行时上，不拿本机守护去重连。
+            if !sess.runtime(cx).is_local() {
+                continue;
+            }
             let leaves = sess.term_leaves();
             for leaf in leaves {
                 let (cwd, sid) = {
@@ -697,6 +701,10 @@ impl Workspace {
         // 硬重启会清掉守护里的会话。终端 agent 不做语义恢复，缺失会话统一重开 shell。
         let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
         for sess in &self.sessions {
+            // 硬重启只清本机守护里的会话。远程机器上的终端不动。
+            if !sess.runtime(cx).is_local() {
+                continue;
+            }
             let leaves = sess.term_leaves();
             for leaf in leaves {
                 let view = leaf.read(cx);

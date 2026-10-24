@@ -165,10 +165,10 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           cat >> "$RUNNER_TEMP/release-notes.md" <<EOF
 
-## Windows
+          ## Windows
 
-\`smelt-${version}-windows-x86_64.zip\` 这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。
-EOF
+          \`smelt-${version}-windows-x86_64.zip\` 这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。
+          EOF
           cat "$RUNNER_TEMP/release-notes.md"
 
       # tag 带 - 后缀（v0.9.0-rc.1）就发成预发布：不成为 Latest，一键安装默认装的

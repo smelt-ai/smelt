@@ -415,9 +415,16 @@ fn symlink_at(target: &Path, at: &Path) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        // 目录和文件是两种链接。看不清目标（相对路径、悬空链接）时按文件建，
-        // 系统拒绝（没有创建链接的权限）就按不支持报。
-        let is_dir = std::fs::metadata(target).is_ok_and(|meta| meta.is_dir());
+        // 目录和文件是两种链接。相对目标相对落点的父目录看；看不清（悬空链接）
+        // 时按文件建。系统拒绝（没有创建链接的权限）就按不支持报。
+        let resolved = if target.is_relative() {
+            at.parent()
+                .map(|parent| parent.join(target))
+                .unwrap_or_else(|| target.to_path_buf())
+        } else {
+            target.to_path_buf()
+        };
+        let is_dir = std::fs::metadata(&resolved).is_ok_and(|meta| meta.is_dir());
         let result = if is_dir {
             std::os::windows::fs::symlink_dir(target, at)
         } else {
