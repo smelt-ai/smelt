@@ -11091,6 +11091,7 @@ version = "0.9.1"
 dependencies = [
  "dirs 5.0.1",
  "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
