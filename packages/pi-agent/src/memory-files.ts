@@ -214,12 +214,23 @@ export function validateMemoryContent(layer: MemoryLayer, fileName: string, cont
 /**
  * 常驻规则有总预算：超了就退回，让模型合并或删掉过时的规则，而不是注入时悄悄截断。
  * `fileName` 是这次要写的文件，计算时用新内容替换它的旧内容。
+ * `pending` 里的文件不注入，与 UI 一致，不计入写入预算（防投毒写满 pending 阻断正常写入）。
  */
-export function checkCoreBudget(root: string, fileName: string, content: string): string | undefined {
+export function checkCoreBudget(
+	root: string,
+	fileName: string,
+	content: string,
+	pending?: ReadonlySet<string>,
+): string | undefined {
 	const parsed = parseFrontmatter(content);
 	if (!parsed || !CORE_MEMORY_TYPES.has(parsed.fields.type ?? "")) return undefined;
 	const others = scanMemoryLayer(root)
-		.filter((entry) => entry.fileName !== fileName && CORE_MEMORY_TYPES.has(entry.type))
+		.filter(
+			(entry) =>
+				entry.fileName !== fileName &&
+				CORE_MEMORY_TYPES.has(entry.type) &&
+				!pending?.has(entry.fileName),
+		)
 		.reduce((total, entry) => total + coreBytes(entry.body), 0);
 	if (others + coreBytes(parsed.body) <= CORE_MEMORY_MAX_BYTES) return undefined;
 	return `这一层的 user / feedback 规则正文合计超过 ${CORE_MEMORY_MAX_BYTES / 1000}KB 上限（它们每轮都会常驻上下文）。先把相近的规则合并成一条、删掉过时的，再写这条`;
@@ -258,9 +269,15 @@ function selectWithinBudget<T extends MemoryEntry>(
 	return { selected, truncated };
 }
 
+/** 规则正文进系统提示前转义，避免 `</smelt_memory>` 之类提前闭合分节。 */
+export function escapeMemoryPromptText(text: string): string {
+	return text.replaceAll("<", "‹").replaceAll(">", "›");
+}
+
 function coreLine(entry: MemoryEntry & { global: boolean }): string {
 	const name = entry.global ? `${entry.name}（全局）` : entry.name;
-	return `- ${name}：${entry.body.replace(/\s*\n+\s*/g, " ")}`;
+	const body = escapeMemoryPromptText(entry.body.replace(/\s*\n+\s*/g, " "));
+	return `- ${escapeMemoryPromptText(name)}：${body}`;
 }
 
 function factLine(entry: MemoryEntry): string {

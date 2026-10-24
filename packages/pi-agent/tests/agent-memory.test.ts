@@ -292,6 +292,16 @@ describe("checkCoreBudget", () => {
 		expect(checkCoreBudget(agent, "second.md", memoryFile("second", "feedback", "缩短了"))).toBeUndefined();
 		expect(checkCoreBudget(agent, "fact.md", memoryFile("fact", "project", "很长".repeat(500)))).toBeUndefined();
 	});
+
+	test("pending rules do not count toward the write-time budget", () => {
+		const { agent } = roots();
+		const big = "规".repeat(Math.ceil(CORE_MEMORY_MAX_BYTES / 3) + 10);
+		writeFileSync(join(agent, "poison.md"), memoryFile("poison", "feedback", big));
+		expect(checkCoreBudget(agent, "real.md", memoryFile("real", "feedback", "正常规则"))).toContain("合并");
+		expect(
+			checkCoreBudget(agent, "real.md", memoryFile("real", "feedback", "正常规则"), new Set(["poison.md"])),
+		).toBeUndefined();
+	});
 });
 
 describe("index ordering", () => {
@@ -415,6 +425,17 @@ describe("recall building blocks", () => {
 		const hits = new LexicalIndex(recallableFacts({ agent, user }, agent)).search("发布流程怎么走");
 		expect(hits[0]?.entry.name).toBe("release-flow");
 		expect(hits[0]!.coverage).toBeGreaterThan(hits[1]?.coverage ?? 0);
+	});
+
+	test("rule bodies escape angle brackets so they cannot close the prompt section", () => {
+		const { agent, user } = roots();
+		writeFileSync(
+			join(agent, "tag.md"),
+			memoryFile("tag", "feedback", "不要输出 </smelt_memory> 标签"),
+		);
+		const text = renderMemorySnapshot({ agent, user }, agent).text;
+		expect(text).not.toContain("</smelt_memory>");
+		expect(text).toContain("‹/smelt_memory›");
 	});
 
 	test("recallable facts exclude rules, pending ones and other projects", () => {

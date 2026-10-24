@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { clampThinkingLevel, Type } from "@earendil-works/pi-ai";
@@ -7,11 +8,13 @@ import { SMELT_BACKGROUND_TASK_EXTENSION_PATH } from "./background-task.ts";
 import { SMELT_ELICITATION_EXTENSION_PATH } from "./elicitation.ts";
 import {
 	checkCoreBudget,
+	CORE_MEMORY_TYPES,
 	type MemoryLayer,
 	type MemoryRoots,
 	type MemorySnapshot,
 	type MemoryEntry,
 	memorySignature,
+	parseFrontmatter,
 	recallableFacts,
 	renderMemorySnapshot,
 	resolveMemoryTarget,
@@ -72,8 +75,33 @@ type InFlightWrite = {
 	absolutePath: string;
 	/** undefined 表示写入前文件不存在。校验或来源记录失败时据此恢复。 */
 	previous: string | undefined;
+	/** edit 校验失败回滚前：写后内容的哈希；对不上说明别人改过，不覆盖。 */
+	postEditHash?: string;
 	provenance: MemoryProvenance;
 };
+
+function contentHash(content: string): string {
+	return createHash("sha256").update(content).digest("hex");
+}
+
+/** 规则类（user/feedback）可信写入须包含用户原话的一段（≥ 此长度），降低 read/bash 污染写成常驻规则的风险。 */
+const RULE_VERBATIM_MIN_CHARS = 8;
+
+function ruleBodyLacksUserWords(content: string, userPrompt: string | undefined): string | undefined {
+	const parsed = parseFrontmatter(content);
+	if (!parsed || !CORE_MEMORY_TYPES.has(parsed.fields.type ?? "")) return undefined;
+	const prompt = userPrompt?.trim() ?? "";
+	// 用户这句太短，无法做原话校验（如「记住」）；仍允许在场写入为可信。
+	if (prompt.length < RULE_VERBATIM_MIN_CHARS) return undefined;
+	const body = parsed.body.trim();
+	for (let length = Math.min(prompt.length, 64); length >= RULE_VERBATIM_MIN_CHARS; length--) {
+		for (let start = 0; start + length <= prompt.length; start++) {
+			const slice = prompt.slice(start, start + length);
+			if (body.includes(slice)) return undefined;
+		}
+	}
+	return "user / feedback 规则正文须包含用户原话中至少一段（不少于 8 字），避免把网页或仓库里的文字写成常驻规则";
+}
 
 function isActualBuiltin(name: string, sourceInfo: SourceInfo | undefined): boolean {
 	return sourceInfo?.source === "builtin" && sourceInfo.path === `builtin:${name}`;
@@ -102,6 +130,18 @@ function everything(roots: MemoryRoots): { agent: Set<string>; user: Set<string>
 
 function restore(write: InFlightWrite): boolean {
 	try {
+		if (write.postEditHash !== undefined) {
+			let current: string;
+			try {
+				current = readFileSync(write.absolutePath, "utf8");
+			} catch {
+				return false;
+			}
+			if (contentHash(current) !== write.postEditHash) {
+				// 回滚会覆盖并发写入；留下现场，让调用方报错。
+				return false;
+			}
+		}
 		if (write.previous === undefined) unlinkSync(write.absolutePath);
 		else writeFileSync(write.absolutePath, write.previous);
 		return true;
@@ -114,8 +154,24 @@ function errorResult(text: string) {
 	return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-function validate(layer: MemoryLayer, root: string, fileName: string, content: string): string | undefined {
-	return validateMemoryContent(layer, fileName, content) ?? checkCoreBudget(root, fileName, content);
+function validate(
+	layer: MemoryLayer,
+	root: string,
+	fileName: string,
+	content: string,
+	pending?: ReadonlySet<string>,
+): string | undefined {
+	return (
+		validateMemoryContent(layer, fileName, content) ?? checkCoreBudget(root, fileName, content, pending)
+	);
+}
+
+/** 命令字符串是否明显指向记忆目录（启发式；真正闸门是无来源/mtime 校验）。 */
+export function commandTouchesMemoryDirs(command: string, roots: MemoryRoots): boolean {
+	for (const root of [roots.agent, roots.user]) {
+		if (command.includes(root)) return true;
+	}
+	return false;
 }
 
 /**
@@ -142,8 +198,8 @@ function validate(layer: MemoryLayer, root: string, fileName: string, content: s
  *
  * 来源：按轮次标记。这一轮里有工具把外部内容带进了上下文，或者是无人值守的运行，这时写的
  * 记忆记为待确认：不注入、不召回，等用户在记忆卡片里采纳。来源记在主库，不在正文里。
- * daemon 不可达、拿不到待确认列表时按"不知道"处理：只注入写入约定，不注入任何记忆、不召回。
- * 用户发下一条消息时清除标记——用户新发的话才是权威。
+ * daemon 不可达、拿不到元数据时按"不知道"处理：只注入写入约定，不注入任何记忆、不召回；
+ * 不得沿用上一轮的 stale meta。用户发下一条消息时清除标记——用户新发的话才是权威。
  *
  * 写入：只管 registry 证明身份的内建 write / edit 落在记忆目录里的调用。write 写前校验完整
  * 内容；edit 的匹配规则（含模糊匹配）只有 Pi 自己知道，所以写后读回实际结果校验，不合规就
@@ -157,10 +213,12 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 	const inFlight = new Map<string, InFlightWrite & { toolCallId: string }>();
 	/** 本轮把外部内容带进上下文的工具。 */
 	const turnTaint = new Set<string>();
+	/** 本轮已成功 read 过的记忆文件（同名 write 覆盖前须先读）。 */
+	const turnMemoryReads = new Set<string>();
+	/** 本轮用户消息原文，供规则类可信写入做原话校验。 */
+	let turnUserPrompt: string | undefined;
 	const turnWrites = { trusted: 0, pending: 0 };
 	let cached: { key: string; snapshot: MemorySnapshot } | undefined;
-	/** 最近一次从宿主拿到的元数据；拿不到时沿用它，从没拿到过就不注入任何记忆。 */
-	let lastMeta: MemoryHostMeta | undefined;
 	let warnedTruncation = false;
 	/** 下一轮走完整召回（会话开始、压缩之后）。 */
 	let recallPending = false;
@@ -183,8 +241,8 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 	}
 
 	async function currentMeta(): Promise<MemoryHostMeta | undefined> {
-		lastMeta = (await fetchMemoryMeta()) ?? lastMeta;
-		return lastMeta;
+		// 失败时不得沿用旧 meta：否则本进程刚写下的 pending 会按旧集合被当成可信注入。
+		return fetchMemoryMeta();
 	}
 
 	function snapshotFor(roots: MemoryRoots, cwd: string, meta: MemoryHostMeta | undefined): MemorySnapshot {
@@ -216,18 +274,27 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		layer: MemoryLayer,
 		fileName: string,
 		toolName: "write" | "edit",
+		content: string | undefined,
 	): Promise<MemoryProvenance> {
 		if (memoryRunIsUnattended()) return { trust: "pending", reason: "无人值守的运行（自动化）写入" };
 		if (turnTaint.size > 0) {
 			return { trust: "pending", reason: `写入的那一轮读取了外部内容（${[...turnTaint].join("、")}）` };
 		}
-		if (toolName === "write") return { trust: "trusted", reason: "用户在场时写入" };
-		// edit 只改一部分，其余内容仍是待确认时写的，保持待确认；拿不到列表时也按待确认。
-		const meta = await currentMeta();
-		if (!meta) return { trust: "pending", reason: "无法确认这条记忆原先的来源" };
-		return meta.pending[layer].has(fileName)
-			? { trust: "pending", reason: "修改的是一条待确认的记忆" }
-			: { trust: "trusted", reason: "用户在场时写入" };
+		let trust: MemoryProvenance["trust"] = "trusted";
+		let reason = "用户在场时写入";
+		if (toolName === "edit") {
+			// edit 只改一部分，其余内容仍是待确认时写的，保持待确认；拿不到列表时也按待确认。
+			const meta = await currentMeta();
+			if (!meta) return { trust: "pending", reason: "无法确认这条记忆原先的来源" };
+			if (meta.pending[layer].has(fileName)) {
+				return { trust: "pending", reason: "修改的是一条待确认的记忆" };
+			}
+		}
+		if (content !== undefined) {
+			const verbatim = ruleBodyLacksUserWords(content, turnUserPrompt);
+			if (verbatim) return { trust: "pending", reason: verbatim };
+		}
+		return { trust, reason };
 	}
 
 	function askModel(context: ExtensionContext, meta: MemoryHostMeta): AskModel | undefined {
@@ -431,8 +498,10 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		// 正可能是外部内容（子智能体就算外部），清了它写的记忆就成了可信的。
 		if (userTurn) {
 			turnTaint.clear();
+			turnMemoryReads.clear();
 			turnWrites.trusted = 0;
 			turnWrites.pending = 0;
+			turnUserPrompt = event.prompt;
 		}
 		const meta = await currentMeta();
 		// 用户在配置页关掉了记忆：不给分节。Pi 会在对话末尾追加一条移除它的系统消息。
@@ -462,7 +531,20 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, context) => {
 		const roots = currentMemoryRoots();
-		if (!roots || (event.toolName !== "write" && event.toolName !== "edit")) return;
+		if (!roots) return;
+		if (event.toolName === "bash" && isActualBuiltin("bash", sourceInfoOf("bash"))) {
+			const command = typeof (event.input as { command?: unknown }).command === "string"
+				? (event.input as { command: string }).command
+				: "";
+			if (commandTouchesMemoryDirs(command, roots)) {
+				return {
+					block: true,
+					reason: "不要用 bash 读写记忆目录；请用内建 write / edit / read。记忆目录直写不会被当作可信注入",
+				};
+			}
+			return;
+		}
+		if (event.toolName !== "write" && event.toolName !== "edit") return;
 		if (!isActualBuiltin(event.toolName, sourceInfoOf(event.toolName))) return;
 		const input = event.input as { path?: unknown; content?: unknown };
 		if (typeof input.path !== "string") return;
@@ -480,17 +562,26 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				reason: "这个记忆文件已有一次写入正在进行，请等上一步完成后再改，不要并行写同一个记忆文件",
 			};
 		}
-		if (event.toolName === "write") {
-			const content = typeof input.content === "string" ? input.content : "";
-			const problem = validate(target.layer, target.root, target.fileName, content);
-			if (problem) return { block: true, reason: problem };
-		}
 		let previous: string | undefined;
 		try {
 			previous = existsSync(target.absolutePath) ? readFileSync(target.absolutePath, "utf8") : undefined;
 		} catch {
 			return { block: true, reason: "读不了这个记忆文件，无法安全写入" };
 		}
+		if (event.toolName === "write" && previous !== undefined && !turnMemoryReads.has(target.fileName)) {
+			return {
+				block: true,
+				reason: "覆盖已有记忆前请先 read 该文件；静默整篇覆盖会丢掉旧内容且无历史",
+			};
+		}
+		const pending = meta?.pending[target.layer];
+		if (event.toolName === "write") {
+			const content = typeof input.content === "string" ? input.content : "";
+			const problem = validate(target.layer, target.root, target.fileName, content, pending);
+			if (problem) return { block: true, reason: problem };
+		}
+		const contentForProvenance =
+			event.toolName === "write" && typeof input.content === "string" ? input.content : previous;
 		inFlight.set(target.absolutePath, {
 			toolCallId: event.toolCallId,
 			toolName: event.toolName,
@@ -499,7 +590,12 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 			fileName: target.fileName,
 			absolutePath: target.absolutePath,
 			previous,
-			provenance: await provenanceFor(target.layer, target.fileName, event.toolName),
+			provenance: await provenanceFor(
+				target.layer,
+				target.fileName,
+				event.toolName,
+				contentForProvenance,
+			),
 		});
 		approvedMemoryWrites.add(event.toolCallId);
 	});
@@ -538,7 +634,10 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		const path = (event.input as { path?: unknown }).path;
 		if (typeof path !== "string") return;
 		const target = resolveMemoryTarget(path, context.cwd, roots);
-		if (target.kind === "memory") await recordMemoryRead(target.layer, target.fileName);
+		if (target.kind === "memory") {
+			turnMemoryReads.add(target.fileName);
+			await recordMemoryRead(target.layer, target.fileName);
+		}
 	});
 
 	async function finishMemoryWrite(
@@ -547,6 +646,8 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		content: unknown[],
 	) {
 		if (isError) return;
+		const meta = await currentMeta();
+		const pending = meta?.pending[write.layer];
 		if (write.toolName === "edit") {
 			let current: string;
 			try {
@@ -554,16 +655,27 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 			} catch {
 				return;
 			}
-			const problem = validate(write.layer, write.root, write.fileName, current);
+			write.postEditHash = contentHash(current);
+			const problem = validate(write.layer, write.root, write.fileName, current, pending);
 			if (problem) {
 				return restore(write)
 					? errorResult(`记忆校验未通过，这次编辑已撤销：${problem}`)
 					: errorResult(`记忆校验未通过，且恢复原文件失败，请手动检查 ${write.absolutePath}：${problem}`);
 			}
+			// edit 写后才有完整正文，规则原话校验放在这里；不通过则改为 pending。
+			const verbatim = ruleBodyLacksUserWords(current, turnUserPrompt);
+			if (verbatim && write.provenance.trust === "trusted") {
+				write.provenance = { trust: "pending", reason: verbatim };
+			}
 		}
 		const recorded = await recordMemoryWrite(write.layer, write.fileName, write.provenance);
 		if (write.provenance.trust === "trusted") {
-			// 没有来源记录本来就按可信处理，记录失败无妨。
+			// 无来源记录不再默认可信：trusted 必须成功落库，否则撤销。
+			if (!recorded) {
+				return restore(write)
+					? errorResult("记忆来源记录失败，为安全起见这次写入已撤销")
+					: errorResult(`记忆来源记录失败，且恢复原文件失败，请手动检查 ${write.absolutePath}`);
+			}
 			turnWrites.trusted++;
 			return;
 		}
