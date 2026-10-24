@@ -279,10 +279,13 @@ mod tests {
 
     #[test]
     fn abandoned_sandboxes_are_removed_and_live_ones_kept() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let tmp = std::env::temp_dir().join(format!(
-            "smelt-paths-sweep-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
+            "smelt-paths-sweep-{}-{stamp}",
+            std::process::id()
         ));
         let dead = tmp.join(format!("{SANDBOX_PREFIX}101")).join(".smelt");
         let live = tmp.join(format!("{SANDBOX_PREFIX}202")).join(".smelt");

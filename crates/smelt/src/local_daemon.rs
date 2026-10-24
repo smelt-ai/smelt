@@ -3,7 +3,7 @@
 //! 拉起、升级、交接和过期探测只在有本机运行时的平台上存在。第 1 步是 Unix。
 //! 终端网格、远程会话连接留在 `terminal`。
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
