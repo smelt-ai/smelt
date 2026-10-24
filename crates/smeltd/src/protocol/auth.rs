@@ -342,7 +342,7 @@ pub(super) fn static_cert_hash(path: &Path) -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
+pub(crate) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
     const LOCAL_PEERPID: libc::c_int = 0x002;
     const LOCAL_PEERTOKEN: libc::c_int = 0x006;
 
@@ -429,7 +429,7 @@ pub(super) fn process_executable(pid: u32) -> Result<PathBuf, String> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
+pub(crate) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,

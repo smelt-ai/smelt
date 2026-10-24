@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import type { MemoryHostTransport } from "../src/memory-host.ts";
 
 type Provenance = { trust: "trusted" | "pending"; reason: string };
@@ -16,6 +17,15 @@ export class FakeMemoryHost {
 	embedding: { base_url: string; model: string; api_key?: string } | undefined;
 	/** 用户指定的重排模型。 */
 	rerankModel: { provider: string; id: string } | undefined;
+	/**
+	 * 与 daemon 对齐：磁盘上有、却没有来源记录的文件也算 pending（防直写绕过）。
+	 * 测试里预置文件时要么设 roots，要么显式 trustFile。
+	 */
+	diskRoots: { agent: string; user: string } | undefined;
+
+	trustFile(layer: "agent" | "user", file: string, reason = "测试预置"): void {
+		this.provenance[layer].set(file, { trust: "trusted", reason });
+	}
 
 	/** 按 daemon `agent.memory.*` 控制方法的契约应答；失败返回 undefined。 */
 	readonly transport: MemoryHostTransport = async (method, params) => {
@@ -27,8 +37,24 @@ export class FakeMemoryHost {
 			if (!this.enabled) {
 				return { enabled: false, agent: { usage: [], pending: [] }, user: { usage: [], pending: [] } };
 			}
-			const pending = (which: "agent" | "user") =>
-				[...this.provenance[which]].filter(([, value]) => value.trust === "pending").map(([name]) => name);
+			const pending = (which: "agent" | "user") => {
+				const explicit = [...this.provenance[which]]
+					.filter(([, value]) => value.trust === "pending")
+					.map(([name]) => name);
+				const unknown: string[] = [];
+				const root = this.diskRoots?.[which];
+				if (root) {
+					try {
+						for (const name of readdirSync(root)) {
+							if (!/^[a-z0-9][a-z0-9-]{0,63}\.md$/.test(name)) continue;
+							if (!this.provenance[which].has(name)) unknown.push(name);
+						}
+					} catch {
+						// 目录不存在就算了
+					}
+				}
+				return [...new Set([...explicit, ...unknown])].sort();
+			};
 			return {
 				enabled: true,
 				embedding: this.embedding,

@@ -1,6 +1,7 @@
 import type { McpTransportFactory } from "@earendil-works/pi-coding-agent";
 import { createDefaultTransport as piCreateDefaultTransport } from "../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js";
 import { StdioTransport } from "@earendil-works/pi-mcp";
+import { withoutSessionControlEnv } from "./session-control-env.ts";
 
 /**
  * Pi's own transport factory, the one its MCP extension uses when none is given.
@@ -23,13 +24,7 @@ export const createPiDefaultTransport: McpTransportFactory = piCreateDefaultTran
  * 代码，拿到它们就能冒充这条会话调 smeltd，所以一个都不能漏给它。`SMELT_HOME` 只是数据目录，留着。
  */
 export function mcpServerEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
-	const result: Record<string, string> = {};
-	for (const [name, value] of Object.entries(environment)) {
-		if (value === undefined) continue;
-		if (name.startsWith("SMELT_") && name !== "SMELT_HOME") continue;
-		result[name] = value;
-	}
-	return result;
+	return withoutSessionControlEnv(environment);
 }
 
 /**

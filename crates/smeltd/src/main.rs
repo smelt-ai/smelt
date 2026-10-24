@@ -137,6 +137,7 @@ mod agent_memory_control;
 mod automation_runtime;
 mod desktop;
 mod control;
+mod memory_peer_auth;
 mod conversation_image;
 mod subagent_transcript;
 mod devices;

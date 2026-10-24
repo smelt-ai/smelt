@@ -643,7 +643,11 @@ fn start_task(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_remove("SMELT_BACKGROUND_TASK_SOCK");
+        // 会话控制凭据只给 Pi 自己用；后台 bash 拿到就能冒充会话写/采纳记忆。
+        .env_remove("SMELT_BACKGROUND_TASK_SOCK")
+        .env_remove("SMELT_SOCK")
+        .env_remove("SMELT_SESSION_ID")
+        .env_remove("SMELT_AGENT_TOKEN");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

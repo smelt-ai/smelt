@@ -77,6 +77,8 @@ fn dispatch_control(
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
+    // 控制连接对端 pid；记忆相关方法靠它区分「会话进程本身」与 bash 子孙 / GUI。
+    peer_pid: Option<u32>,
 ) -> serde_json::Value {
     let ControlRequestEnvelope {
         control_version,
@@ -634,6 +636,30 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
+            // 采纳/删除必须是用户在 GUI（或 CLI）里点的，不能是智能体会话或其 bash 子孙。
+            // 取不到对端身份时 fail closed（单元测试走 dispatch_control(..., None) 的除外）。
+            match peer_pid {
+                Some(pid) => {
+                    if let Err(error) =
+                        crate::memory_peer_auth::deny_agent_session_peer(acp_sessions, pid)
+                    {
+                        return error_value(control_version, request_id, error);
+                    }
+                }
+                None => {
+                    // handle_control 拿不到 peer 时拒绝；测试直接调 dispatch 传 None 放行。
+                    if !cfg!(test) {
+                        return error_value(
+                            control_version,
+                            request_id,
+                            ControlError::new(
+                                ControlErrorCode::PermissionDenied,
+                                "cannot authenticate caller for memory approve/delete",
+                            ),
+                        );
+                    }
+                }
+            }
             let result = if known_method == ControlMethod::AgentMemoryDelete {
                 smelt_core::agent_memory::delete_for_agent(
                     &params.agent_id,
@@ -824,7 +850,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match super::agent_memory_control::meta(&params, acp_sessions) {
+            match super::agent_memory_control::meta(&params, acp_sessions, peer_pid) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => error_value(control_version, request_id, error),
             }
@@ -835,7 +861,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match super::agent_memory_control::record_read(&params, acp_sessions) {
+            match super::agent_memory_control::record_read(&params, acp_sessions, peer_pid) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(control_version, request_id, error),
             }
@@ -846,7 +872,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match super::agent_memory_control::record_write(&params, acp_sessions) {
+            match super::agent_memory_control::record_write(&params, acp_sessions, peer_pid) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(control_version, request_id, error),
             }
@@ -1248,6 +1274,7 @@ pub(crate) fn handle_control(
     event_hub: &EventHubHandle,
     exe_mtime: u64,
 ) {
+    let peer_pid = crate::memory_peer_auth::peer_pid(&conn).ok();
     let response = match decode_request_envelope(payload) {
         Ok(envelope) => dispatch_control(
             envelope,
@@ -1259,6 +1286,7 @@ pub(crate) fn handle_control(
             automations,
             event_hub,
             exe_mtime,
+            peer_pid,
         ),
         Err(failure) => error_value(failure.response_version, failure.request_id, failure.error),
     };
@@ -1354,6 +1382,7 @@ mod tests {
             &automations,
             &event_hub,
             0,
+            None,
         );
 
         assert_eq!(response["control_version"], 2);
@@ -1379,6 +1408,7 @@ mod tests {
             &smelt_core::automation_store::new_automation_store(),
             &super::super::new_event_hub(),
             0,
+            None,
         )
     }
 

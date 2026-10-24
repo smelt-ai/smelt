@@ -95,11 +95,31 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+fn require_peer(
+    acp_sessions: &AcpSessions,
+    session_id: &str,
+    peer_pid: Option<u32>,
+) -> Result<(), ControlError> {
+    // 单元测试里没有真实 Unix 对端时跳过；生产路径必须带上 peer，否则 bash 子孙可冒用 token。
+    let Some(peer_pid) = peer_pid else {
+        if cfg!(test) {
+            return Ok(());
+        }
+        return Err(ControlError::new(
+            ControlErrorCode::PermissionDenied,
+            "cannot authenticate memory control peer",
+        ));
+    };
+    crate::memory_peer_auth::require_session_process(acp_sessions, session_id, peer_pid)
+}
+
 pub(crate) fn meta(
     params: &AgentMemorySessionParams,
     acp_sessions: &AcpSessions,
+    peer_pid: Option<u32>,
 ) -> Result<AgentMemoryMetaResult, ControlError> {
     let launch = authenticate(acp_sessions, &params.session_id, &params.token)?;
+    require_peer(acp_sessions, &params.session_id, peer_pid)?;
     agent_memory::launch_memory_meta(
         &store()?,
         launch.agent_dir.as_deref(),
@@ -111,8 +131,10 @@ pub(crate) fn meta(
 pub(crate) fn record_read(
     params: &AgentMemoryRecordReadParams,
     acp_sessions: &AcpSessions,
+    peer_pid: Option<u32>,
 ) -> Result<(), ControlError> {
     let launch = authenticate(acp_sessions, &params.session_id, &params.token)?;
+    require_peer(acp_sessions, &params.session_id, peer_pid)?;
     let scope = scope(&launch, params.layer)?;
     let store = store()?;
     ensure_enabled(&store, &launch)?;
@@ -122,8 +144,10 @@ pub(crate) fn record_read(
 pub(crate) fn record_write(
     params: &AgentMemoryRecordWriteParams,
     acp_sessions: &AcpSessions,
+    peer_pid: Option<u32>,
 ) -> Result<(), ControlError> {
     let launch = authenticate(acp_sessions, &params.session_id, &params.token)?;
+    require_peer(acp_sessions, &params.session_id, peer_pid)?;
     let scope = scope(&launch, params.layer)?;
     let store = store()?;
     ensure_enabled(&store, &launch)?;
