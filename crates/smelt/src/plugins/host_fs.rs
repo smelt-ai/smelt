@@ -257,18 +257,29 @@ pub(super) fn fs_module(host: Rc<HostFs>) -> HostModule {
 }
 
 /// 绝对路径、去掉 `.`、拒绝 `..`。不碰磁盘。
+///
+/// Windows 的 `\\?\` 路径里，`components` 不把 `..` 标成 `ParentDir`，它只是
+/// 一个普通名字。这种前缀会关掉系统对 `..` 的折叠，但门控仍然不接受它。
 fn lexical(raw: &str) -> Result<PathBuf, HostError> {
     let path = Path::new(raw);
     if !path.is_absolute() {
         return Err(HostError::new(format!("需要绝对路径：{raw}")));
     }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
+    let mut cleaned = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
+            }
+            Component::Normal(name) if name == "." => {}
+            Component::Normal(name) if name == ".." => {
+                return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
+            }
+            other => cleaned.push(other),
+        }
     }
-    Ok(path.components().collect())
+    Ok(cleaned.into_iter().collect())
 }
 
 /// 把最深的已存在祖先规范化，其余段原样拼回（它们不存在，也就没有软链可跟）。
@@ -564,6 +575,13 @@ mod tests {
         }
     }
 
+    /// `canonicalize` 在 Windows 上带 `\\?\` 前缀，`read_link` 读回来没有。
+    /// 比较的是同一条路径，不是前缀字节。
+    fn comparable_path(value: &HostValue) -> &str {
+        let text = value.as_str().unwrap_or("");
+        text.strip_prefix(r"\\?\").unwrap_or(text)
+    }
+
     fn kind(value: HostValue) -> Option<String> {
         value
             .get("kind")
@@ -603,12 +621,12 @@ mod tests {
             Some("symlink")
         );
         assert_eq!(
-            host.readlink(&sandbox.s("link")).unwrap(),
-            HostValue::Str(sandbox.s("real"))
+            comparable_path(&host.readlink(&sandbox.s("link")).unwrap()),
+            comparable_path(&HostValue::Str(sandbox.s("real")))
         );
         assert_eq!(
-            host.realpath(&sandbox.s("link")).unwrap(),
-            HostValue::Str(sandbox.s("real"))
+            comparable_path(&host.realpath(&sandbox.s("link")).unwrap()),
+            comparable_path(&HostValue::Str(sandbox.s("real")))
         );
         host.unlink(&sandbox.s("link")).unwrap();
         assert!(fs::symlink_metadata(sandbox.path("link")).is_err());
