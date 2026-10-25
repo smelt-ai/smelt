@@ -533,9 +533,16 @@ mod tests {
             child_titles(&nav, SettingsCategoryId::Workspace),
             ["手机远程"]
         );
+        // 应用更新只在 macOS 上提供：替换的是 .app 包。
+        #[cfg(target_os = "macos")]
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::System),
             ["应用更新", "后台服务", "存储清理"]
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            child_titles(&nav, SettingsCategoryId::System),
+            ["后台服务", "存储清理"]
         );
 
         let general = nav
@@ -665,7 +672,12 @@ mod tests {
             .map(|child| child.section.clone())
             .collect::<Vec<_>>();
 
-        assert_eq!(visible_destinations.len(), 13);
+        // 少掉的一页是 macOS 的「应用更新」。
+        #[cfg(target_os = "macos")]
+        let destination_count = 13;
+        #[cfg(not(target_os = "macos"))]
+        let destination_count = 12;
+        assert_eq!(visible_destinations.len(), destination_count);
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
     }
 
