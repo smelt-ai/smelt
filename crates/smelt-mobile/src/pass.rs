@@ -392,6 +392,11 @@ fn spawn_fetches(shared: &Arc<Shared>, requests: Vec<(Key, String)>) {
 fn fetch(shared: &Arc<Shared>, key: Key, fingerprint: String) {
     let mut failures = 0u32;
     loop {
+        // 睡醒（或线程刚起来）先看单据还在不在。先打再看的话，单据已经清掉的那一轮
+        // 仍会发出去。
+        if shared.lock().in_flight.get(&key) != Some(&fingerprint) {
+            return;
+        }
         let result = (shared.fetch)(&key.0, &key.1);
         let mut inner = shared.lock();
         if inner.in_flight.get(&key) != Some(&fingerprint) {
