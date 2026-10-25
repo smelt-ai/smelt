@@ -508,6 +508,8 @@ struct Watch {
     wake: Condvar,
     /// 各订阅者的推送出口，带订阅编号。全空了订阅就停。和状态锁一起拿时先拿状态锁。
     sinks: Mutex<Vec<(u32, EventSink)>>,
+    /// 收尾存盘。推送线程看到停止后也会存一次；取消订阅的那次必须等这次写完再返回。
+    flushing: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -552,6 +554,7 @@ impl Watch {
             state: Mutex::new(WatchState::default()),
             wake: Condvar::new(),
             sinks: Mutex::new(vec![(watch_id, sink)]),
+            flushing: Mutex::new(()),
         }
     }
 
@@ -666,7 +669,11 @@ impl Watch {
     }
 
     /// 还没存的实时数据立刻存掉（被顶掉或取消订阅时）。
+    ///
+    /// 推送线程发现订阅已停时也会走这里。两处同时存的话，先拿到待存标记的那个
+    /// 还在写，另一处就会直接返回。取消订阅必须等写完，否则调用方立刻读缓存会落空。
     fn flush(&self, cache: Option<&Cache>) {
+        let _flushing = self.flushing.lock().unwrap_or_else(|error| error.into_inner());
         let (tail, endpoint_id) = {
             let mut state = self.lock();
             if state.save_due.take().is_none() {
