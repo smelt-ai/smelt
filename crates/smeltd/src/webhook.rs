@@ -203,7 +203,7 @@ mod tests {
             id: "hook-1".into(),
             name: "Hook".into(),
             enabled: true,
-            workspace_dir: Some("/tmp".into()),
+            workspace_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             trigger: AutomationTrigger::webhook_with_secret(token),
             action: AutomationAction::shell("true", Vec::new()),
             sinks: Vec::new(),

@@ -7,12 +7,16 @@ use smelt_core::automation::{
     event_run_id, publish_automation_event,
 };
 
+fn existing_workspace() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
 fn automation(id: &str) -> Automation {
     Automation {
         id: id.to_string(),
         name: "Morning report".to_string(),
         enabled: true,
-        workspace_dir: Some("/tmp".to_string()),
+        workspace_dir: Some(existing_workspace()),
         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes { minutes: 30 }),
         action: smelt_core::automation::AutomationAction::Agent {
             agent_definition_id: "agent-1".to_string(),
@@ -27,7 +31,7 @@ fn event_automation(id: &str, topic: &str, filter: Option<&str>) -> Automation {
         id: id.to_string(),
         name: id.to_string(),
         enabled: true,
-        workspace_dir: Some("/tmp".to_string()),
+        workspace_dir: Some(existing_workspace()),
         trigger: AutomationTrigger::event(topic, filter.map(str::to_string)),
         action: smelt_core::automation::AutomationAction::Agent {
             agent_definition_id: "agent-1".to_string(),
@@ -187,7 +191,7 @@ fn shell_automation_does_not_require_an_agent() {
         id: "shell-1".into(),
         name: "Health check".into(),
         enabled: true,
-        workspace_dir: Some("/tmp".into()),
+        workspace_dir: Some(existing_workspace()),
         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes { minutes: 5 }),
         action: smelt_core::automation::AutomationAction::shell("true", Vec::new()),
         sinks: Vec::new(),
@@ -195,10 +199,21 @@ fn shell_automation_does_not_require_an_agent() {
 
     assert!(automation.validate().is_ok());
     assert!(automation.agent_definition_id().is_none());
-    assert_eq!(
-        automation.action.shell_invocation(),
-        Some(("bash".into(), vec!["-lc".into(), "true".into()]))
-    );
+    let (program, args) = automation.action.shell_invocation().unwrap();
+    #[cfg(unix)]
+    {
+        assert_eq!(program, "bash");
+        assert_eq!(args, ["-lc", "true"]);
+    }
+    #[cfg(windows)]
+    {
+        assert!(
+            program.eq_ignore_ascii_case("cmd.exe")
+                || program.to_ascii_lowercase().ends_with("\\cmd.exe"),
+            "{program}"
+        );
+        assert_eq!(args, ["/d", "/c", "true"]);
+    }
     assert_eq!(
         smelt_core::automation::AutomationAction::shell("echo", vec!["hi".into()])
             .shell_invocation(),
@@ -250,9 +265,10 @@ fn legacy_cwd_field_loads_as_the_managed_workspace_slot() {
 
     let loaded: Automation = serde_json::from_value(value).unwrap();
 
-    assert_eq!(loaded.workspace_dir.as_deref(), Some("/tmp"));
+    let workspace = existing_workspace();
+    assert_eq!(loaded.workspace_dir.as_deref(), Some(workspace.as_str()));
     let stored = serde_json::to_value(loaded).unwrap();
-    assert_eq!(stored["workspace_dir"], "/tmp");
+    assert_eq!(stored["workspace_dir"], workspace);
     assert!(stored.get("cwd").is_none());
 }
 
@@ -540,7 +556,7 @@ fn cancelling_a_shell_run_keeps_runtime_until_released() {
                 id: "shell-1".into(),
                 name: "Health check".into(),
                 enabled: true,
-                workspace_dir: Some("/tmp".into()),
+                workspace_dir: Some(existing_workspace()),
                 trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                     minutes: 5,
                 }),
@@ -1088,7 +1104,7 @@ fn webhook_token_identifies_the_automation() {
                 id: "hook-1".into(),
                 name: "Hook".into(),
                 enabled: true,
-                workspace_dir: Some("/tmp".into()),
+                workspace_dir: Some(existing_workspace()),
                 trigger: AutomationTrigger::webhook_with_secret("tok_abc"),
                 action: smelt_core::automation::AutomationAction::Agent {
                     agent_definition_id: "agent-1".into(),
@@ -1185,7 +1201,7 @@ fn paused_webhook_is_found_but_not_runnable() {
         id: "hook-1".into(),
         name: "Hook".into(),
         enabled: false,
-        workspace_dir: Some("/tmp".into()),
+        workspace_dir: Some(existing_workspace()),
         trigger: AutomationTrigger::webhook_with_secret("tok_abc"),
         action: smelt_core::automation::AutomationAction::shell("true", Vec::new()),
         sinks: Vec::new(),
@@ -1277,7 +1293,7 @@ fn schedule_and_webhook_can_share_one_automation() {
                 id: "both".into(),
                 name: "Both".into(),
                 enabled: true,
-                workspace_dir: Some("/tmp".into()),
+                workspace_dir: Some(existing_workspace()),
                 trigger: trigger.clone(),
                 action: smelt_core::automation::AutomationAction::shell("true", Vec::new()),
                 sinks: Vec::new(),
@@ -1339,7 +1355,7 @@ fn one_automation_can_have_two_webhook_addresses() {
                 id: "hooks".into(),
                 name: "Hooks".into(),
                 enabled: true,
-                workspace_dir: Some("/tmp".into()),
+                workspace_dir: Some(existing_workspace()),
                 trigger,
                 action: smelt_core::automation::AutomationAction::shell("true", Vec::new()),
                 sinks: Vec::new(),

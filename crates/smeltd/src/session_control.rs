@@ -894,7 +894,9 @@ mod tests {
                             id: "automation-1".into(),
                             name: "Morning report".into(),
                             enabled: true,
-                            workspace_dir: Some("/tmp".into()),
+                            workspace_dir: Some(
+                                std::env::temp_dir().to_string_lossy().into_owned(),
+                            ),
                             trigger: AutomationTrigger::schedule(
                                 AutomationSchedule::EveryMinutes { minutes: 30 },
                             ),
