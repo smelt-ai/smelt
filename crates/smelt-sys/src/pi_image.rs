@@ -187,7 +187,19 @@ fn publish_tree(dir: &Path, src_dir: &Path, files: &[PathBuf], name: &str) -> io
                 fs::create_dir_all(parent)?;
             }
             fs::copy(src_dir.join(relative), &dest)?;
-            fs::File::open(&dest)?.sync_all()?;
+            // Windows 的 FlushFileBuffers 要求写权限。只读打开会返回拒绝访问。
+            #[cfg(windows)]
+            {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&dest)?
+                    .sync_all()?;
+            }
+            #[cfg(not(windows))]
+            {
+                fs::File::open(&dest)?.sync_all()?;
+            }
         }
         #[cfg(unix)]
         {
