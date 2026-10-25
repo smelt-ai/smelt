@@ -12,9 +12,9 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-const title = "Smelt — 跨机器、多智能体的原生 AI 编程指挥台";
+const title = "Smelt — 把所有机器上的 AI 编程智能体收进同一个原生工作台";
 const description =
-  "The Multi-Agent, Multi-Machine AI Coding Cockpit. macOS GPUI 原生桌面端、Linux 无头守护进程 smeltd，以及 iOS/Android 手机与平板指挥台「出菜口」。在同一套工作台里指挥所有机器上的 AI 编程智能体。";
+  "在 120fps 原生 macOS 工作台里并行指挥 Claude Code、Codex 与内置智能体。一行命令直连 Linux 开发机；离开电脑后，用 iOS 与 Android 手机审批权限、查看 Diff、接管任务。";
 
 export const metadata: Metadata = {
   title: {
@@ -23,7 +23,7 @@ export const metadata: Metadata = {
   },
   description,
   openGraph: {
-    title: "Smelt — The Multi-Agent, Multi-Machine AI Coding Cockpit",
+    title,
     description,
     siteName: "Smelt",
     locale: "zh_CN",
@@ -31,7 +31,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary",
-    title: "Smelt — The Multi-Agent, Multi-Machine AI Coding Cockpit",
+    title,
     description,
   },
 };
@@ -44,6 +44,7 @@ export default function RootLayout({
   return (
     <html
       lang="zh-CN"
+      data-scroll-behavior="smooth"
       className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>

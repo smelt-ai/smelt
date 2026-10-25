@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { AppleLogo, BookIcon, PhoneIcon } from "./icons";
 import { InstallCommand } from "./InstallCommand";
 import { CockpitPreview } from "./CockpitPreview";
 
@@ -5,42 +7,69 @@ const RELEASE_URL = "https://github.com/smelt-ai/smelt/releases/latest";
 
 export function Hero() {
   return (
-    <section className="mx-auto max-w-6xl px-6 pt-16 pb-8 sm:pt-20">
-      <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-muted">
-        <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-        v2026.10 · 跨机器智能体管理 · 手机端「出菜口」指挥台 · 单二进制 smelt-pi
+    <section className="relative">
+      <div className="hero-stage" aria-hidden="true">
+        <div className="hero-glow" />
+        <div className="hero-dots" />
+        <div className="hero-grid" />
       </div>
 
-      <h1 className="max-w-4xl text-4xl font-semibold leading-[1.12] tracking-tight text-foreground sm:text-5xl lg:text-[3.4rem]">
-        在同一套工作台里，
-        <span className="text-accent">指挥你所有机器上的 AI 编程智能体</span>
-      </h1>
-
-      <p className="mt-5 max-w-2xl text-base leading-7 text-muted sm:text-[17px]">
-        无论是本机 Mac、实验室或云端 Linux 服务器，还是随身手机「出菜口」——结构化对话、长期记忆、定时自动化与内嵌远程桌面在同一套指挥台里完成。
-      </p>
-
-      <div className="mt-8 grid gap-4 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-start">
-        <div className="flex flex-wrap items-center gap-3">
-          <a
-            href={RELEASE_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-md bg-accent px-4 py-2.5 text-sm font-semibold text-[#1a1208] transition-opacity hover:opacity-90"
-          >
-            下载 macOS 桌面端
-          </a>
-          <a
-            href="/docs#手机出菜口"
-            className="rounded-md border border-border px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-accent/60 hover:text-accent"
-          >
-            下载移动端
-          </a>
+      <div className="relative z-10 mx-auto max-w-6xl px-6 pt-16 pb-6 sm:pt-20">
+        <div className="pill max-w-full flex-wrap">
+          <span className="pulse-dot h-1.5 w-1.5 shrink-0 rounded-full bg-accent shadow-[0_0_12px_rgba(224,159,90,0.8)]" />
+          <span className="leading-5">
+            v0.9 · 原生 macOS 工作台 · iOS & Android 随身掌控 · Linux 远程开发机直连
+          </span>
         </div>
-        <InstallCommand />
-      </div>
 
-      <CockpitPreview />
+        <h1 className="mt-6 max-w-4xl text-[2.35rem] font-semibold leading-[1.12] tracking-tight text-foreground sm:text-5xl lg:text-[3.45rem]">
+          <span className="block">把你所有机器上的 AI 编程智能体，</span>
+          <span className="mt-1 block text-accent">收进同一个原生工作台</span>
+        </h1>
+
+        <p className="mt-6 max-w-3xl text-base leading-8 text-muted sm:text-lg">
+          无论代码跑在本机 Mac，还是实验室和云端的 Linux 服务器上：在一个 120fps
+          原生桌面里并行指挥 Claude Code、Codex 与内置智能体；离开电脑后，打开手机就能随时审批权限、查看
+          Diff、接管任务。
+        </p>
+
+        <div className="mt-10 grid items-stretch gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
+          <div className="flex flex-col gap-3">
+            <a href={RELEASE_URL} target="_blank" rel="noopener noreferrer" className="btn btn-primary">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-black/10">
+                <AppleLogo className="h-5 w-5" />
+              </span>
+              <span>
+                <span className="block text-sm font-semibold leading-5">下载 macOS 版</span>
+                <span className="block text-[11px] font-medium leading-4 text-[#1a1208]/70">
+                  Apple Silicon · 免费
+                </span>
+              </span>
+            </a>
+            <Link href="/docs#远程访问" className="btn btn-secondary">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+                <PhoneIcon className="h-4 w-4" />
+              </span>
+              <span>
+                <span className="block text-sm font-semibold leading-5">iOS / Android 移动端</span>
+                <span className="block text-[11px] font-medium leading-4 text-dim">手机与平板随身掌控</span>
+              </span>
+            </Link>
+            <Link href="/docs#快速开始" className="btn btn-secondary">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+                <BookIcon className="h-4 w-4" />
+              </span>
+              <span>
+                <span className="block text-sm font-semibold leading-5">快速上手文档</span>
+                <span className="block text-[11px] font-medium leading-4 text-dim">安装、配对、远程桌面</span>
+              </span>
+            </Link>
+          </div>
+          <InstallCommand />
+        </div>
+
+        <CockpitPreview />
+      </div>
     </section>
   );
 }
