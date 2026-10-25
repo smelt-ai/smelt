@@ -2386,11 +2386,11 @@ mod tests {
     }
 
     /// 打印且不加换行。Windows 的 `cmd` 没有 `printf`。
-    /// `set /p` 直接读空设备会立刻碰到文件尾，退出码是 1，任务会被记成失败。
-    /// 先用 `echo(` 送进一行，读取成功，退出码才是 0，打出来的仍没有换行。
+    /// `set /p` 读到文件尾时退出码是 1，用管道送一行也一样，任务会被记成失败。
+    /// 打完之后执行 `exit /b 0`，退出码才是 0，输出仍没有换行。
     fn print_text(text: &str) -> String {
         if cfg!(windows) {
-            format!("echo(|set /p={text}")
+            format!("set /p={text}<nul&exit /b 0")
         } else {
             format!("printf {text}")
         }
