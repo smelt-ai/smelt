@@ -900,6 +900,7 @@ pub(crate) fn full_frame(frame: &serde_json::Value) -> (Vec<u8>, FrameMirror) {
 
 type SnapshotDetach = Arc<dyn Fn(RawFd) + Send + Sync>;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_acp_snapshot_link(
     stream: UnixStream,
     initial: Vec<u8>,

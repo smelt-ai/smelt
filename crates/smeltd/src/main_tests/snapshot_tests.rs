@@ -1,5 +1,4 @@
 use super::*;
-use crate::terminal_snapshot::snapshot_ansi_for_handoff;
 use alacritty_terminal::index::Column;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::Processor;
@@ -304,14 +303,6 @@ fn snapshot_alt_screen_agent_keeps_viewport_only() {
     assert!(
         !snap_text.contains("main-only-line-"),
         "备用屏快照不应携带主屏 scrollback: {snap_text}"
-    );
-
-    let handoff_snap = snapshot_ansi_for_handoff(&term, Some("codex"));
-    let handoff_text = String::from_utf8_lossy(&handoff_snap);
-    assert!(handoff_text.contains("codex-alt-screen"));
-    assert!(
-        !handoff_text.contains("main-only-line-"),
-        "备用屏 handoff 快照不应携带主屏 scrollback: {handoff_text}"
     );
 
     let mut restored = Term::new(daemon_term_config(), &size, VoidListener);

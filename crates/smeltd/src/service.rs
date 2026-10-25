@@ -514,34 +514,6 @@ fn uninstall() -> Result<(), String> {
     Err("只有 Linux 上才有 systemd 服务可移除".to_string())
 }
 
-/// 告诉 systemd 主进程换成了 `pid`。不是 systemd 拉起的（没有 `NOTIFY_SOCKET`）就什么都
-/// 不做。协议见 sd_notify(3)：往这个 datagram socket 发 `MAINPID=<pid>`。
-#[cfg(target_os = "linux")]
-pub(crate) fn notify_main_pid(pid: u32) {
-    use std::os::linux::net::SocketAddrExt as _;
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::net::{SocketAddr, UnixDatagram};
-
-    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
-        return;
-    };
-    let message = format!("MAINPID={pid}");
-    let sent = UnixDatagram::unbound().and_then(|socket| {
-        let bytes = path.as_bytes();
-        let addr = match bytes.strip_prefix(b"@") {
-            Some(name) => SocketAddr::from_abstract_name(name)?,
-            None => SocketAddr::from_pathname(&path)?,
-        };
-        socket.send_to_addr(message.as_bytes(), &addr)
-    });
-    if let Err(error) = sent {
-        crate::dlog(&format!("通知 systemd 主进程换成 {pid} 失败：{error}"));
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn notify_main_pid(_pid: u32) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

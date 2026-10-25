@@ -178,8 +178,8 @@ use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, Once, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -445,9 +445,6 @@ struct Ctl {
     /// 会让 PTY 在「桌面尺寸 ↔ 手机尺寸」之间来回 resize，主屏 CLI 每次都把整段
     /// 对话重排重印一遍。见 `pause_remote_viewport`。
     remote_grace: u64,
-    /// spawn 时的静态目录（作战地图要）。**不**跟随 shell 的 `cd`——真实 cwd 要
-    /// OSC 7，这里只是「这个会话是从哪打开的」，见 SessionState.cwd 用法。
-    cwd: Option<String>,
 }
 
 impl Ctl {
@@ -1942,30 +1939,130 @@ fn clear_inherited_signal_mask() {
 #[cfg(not(unix))]
 fn clear_inherited_signal_mask() {}
 
-/// 挡住 SIGTERM / SIGINT，并起一个线程 `sigwait`。收到之后走和 shutdown op 同一条停机。
+/// 停机自管道的写端。信号处理器只许 `write` 这一个 fd，不能动掩码、不能分配。
+#[cfg(unix)]
+static SHUTDOWN_SIGNAL_WRITE: AtomicI32 = AtomicI32::new(-1);
+
+/// `SIGTERM` / `SIGINT` 共用。把信号号写进自管道，立刻返回。
+#[cfg(unix)]
+extern "C" fn shutdown_signal_handler(signal: libc::c_int) {
+    let fd = SHUTDOWN_SIGNAL_WRITE.load(Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+    let byte = [signal as u8];
+    unsafe {
+        libc::write(fd, byte.as_ptr().cast(), 1);
+    }
+}
+
+/// 装上 `sigaction`（`SA_RESTART`），不调用 `pthread_sigmask` / `sigprocmask`。
+/// 写端 `O_NONBLOCK | O_CLOEXEC`，读端只 `O_CLOEXEC`，子进程既不继承掩码阻塞，也不继承管道。
+#[cfg(unix)]
+fn install_shutdown_signal_handlers() -> std::io::Result<RawFd> {
+    let mut fds = [-1; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if let Err(error) = (|| {
+        set_cloexec(fds[0], true)?;
+        set_cloexec(fds[1], true)?;
+        set_fd_nonblocking(fds[1], true)?;
+        Ok(())
+    })() {
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        return Err(error);
+    }
+    let previous = SHUTDOWN_SIGNAL_WRITE.swap(fds[1], Ordering::Relaxed);
+    if previous >= 0 {
+        unsafe { libc::close(previous) };
+    }
+    if let Err(error) = arm_shutdown_sigactions() {
+        reset_shutdown_signals_to_default();
+        unsafe { libc::close(fds[0]) };
+        return Err(error);
+    }
+    Ok(fds[0])
+}
+
+#[cfg(unix)]
+fn arm_shutdown_sigactions() -> std::io::Result<()> {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = shutdown_signal_handler as *const () as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut action.sa_mask);
+        if libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// 读端阻塞，直到处理器写进一个字节。`SA_RESTART` 之下仍对其他来源的 `EINTR` 重试。
+#[cfg(unix)]
+fn read_shutdown_signal(fd: RawFd) -> Option<u8> {
+    let mut buf = [0u8; 1];
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), 1) };
+        if n > 0 {
+            return Some(buf[0]);
+        }
+        if n == 0 {
+            return None;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    }
+}
+
+/// 接住 SIGTERM / SIGINT，转到和 shutdown op 同一条停机。信号掩码保持不动。
 #[cfg(unix)]
 fn install_shutdown_signals() {
-    unsafe {
-        let mut set = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGTERM);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-    }
-    thread::Builder::new()
-        .name("smelt-shutdown-signals".into())
-        .spawn(|| unsafe {
-            let mut set = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGTERM);
-            libc::sigaddset(&mut set, libc::SIGINT);
-            let mut signal = 0;
-            if libc::sigwait(&set, &mut signal) == 0 {
-                dlog(&format!("收到信号 {signal}，开始优雅停机"));
-                protocol::graceful_shutdown(None, None);
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let read = match install_shutdown_signal_handlers() {
+            Ok(fd) => fd,
+            Err(error) => {
+                dlog(&format!("安装停机信号失败：{error}"));
+                return;
             }
-        })
-        .ok();
+        };
+        let spawned = thread::Builder::new()
+            .name("smelt-shutdown-signals".into())
+            .spawn(move || {
+                if let Some(signal) = read_shutdown_signal(read) {
+                    dlog(&format!("收到信号 {signal}，开始优雅停机"));
+                    protocol::graceful_shutdown(None, None);
+                }
+            });
+        if spawned.is_err() {
+            dlog("停机信号线程没有起来，恢复默认终止动作");
+            reset_shutdown_signals_to_default();
+        }
+    });
+}
+
+#[cfg(unix)]
+fn reset_shutdown_signals_to_default() {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+        let write = SHUTDOWN_SIGNAL_WRITE.swap(-1, Ordering::Relaxed);
+        if write >= 0 {
+            libc::close(write);
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -2000,6 +2097,136 @@ fn startup_clears_inherited_sigchld_mask() {
     }
 }
 
+#[cfg(all(test, unix))]
+fn signal_is_blocked(signal: libc::c_int) -> bool {
+    unsafe {
+        let mut current = std::mem::zeroed();
+        assert_eq!(
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut current),
+            0
+        );
+        libc::sigismember(&current, signal) == 1
+    }
+}
+
+/// 子进程探针。正常跑时断言 SIGINT/SIGTERM 都没被挡住；
+/// `SMELTD_EXPECT_SIGTERM_BLOCKED=1` 时断言只挡住了 SIGTERM（证明探针看得见继承来的掩码）。
+#[cfg(all(test, unix))]
+#[test]
+fn shutdown_signal_mask_probe() {
+    let sigint = signal_is_blocked(libc::SIGINT);
+    let sigterm = signal_is_blocked(libc::SIGTERM);
+    if std::env::var_os("SMELTD_EXPECT_SIGTERM_BLOCKED").is_some() {
+        assert!(sigterm, "child should inherit a blocked SIGTERM");
+        assert!(!sigint, "SIGINT was blocked along with SIGTERM");
+        return;
+    }
+    assert!(!sigint, "SIGINT is blocked");
+    assert!(!sigterm, "SIGTERM is blocked");
+}
+
+#[cfg(all(test, unix))]
+fn run_shutdown_mask_probe(expect_sigterm_blocked: bool) -> std::process::Output {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args(["shutdown_signal_mask_probe", "--exact"]);
+    if expect_sigterm_blocked {
+        command.env("SMELTD_EXPECT_SIGTERM_BLOCKED", "1");
+    } else {
+        command.env_remove("SMELTD_EXPECT_SIGTERM_BLOCKED");
+    }
+    command.output().unwrap()
+}
+
+#[cfg(all(test, unix))]
+struct RestoredShutdownSignals {
+    term: libc::sigaction,
+    int: libc::sigaction,
+}
+
+#[cfg(all(test, unix))]
+impl Drop for RestoredShutdownSignals {
+    fn drop(&mut self) {
+        unsafe {
+            libc::sigaction(libc::SIGTERM, &self.term, std::ptr::null_mut());
+            libc::sigaction(libc::SIGINT, &self.int, std::ptr::null_mut());
+            let write = SHUTDOWN_SIGNAL_WRITE.swap(-1, Ordering::Relaxed);
+            if write >= 0 {
+                libc::close(write);
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn shutdown_handlers_leave_child_signals_unblocked_and_wake_listener() {
+    // 先挡住再拉子进程，确认探针真的能看见继承来的掩码，而不是永远报告「没挡住」。
+    struct UnblockSigterm;
+    impl Drop for UnblockSigterm {
+        fn drop(&mut self) {
+            unsafe {
+                let mut set = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            }
+        }
+    }
+    let unblock = UnblockSigterm;
+    unsafe {
+        let mut set = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+            0
+        );
+    }
+    let inherited = run_shutdown_mask_probe(true);
+    drop(unblock);
+    assert!(
+        inherited.status.success(),
+        "probe did not observe inherited SIGTERM block\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&inherited.stdout),
+        String::from_utf8_lossy(&inherited.stderr)
+    );
+
+    let restore = unsafe {
+        let mut term = std::mem::zeroed();
+        let mut int = std::mem::zeroed();
+        assert_eq!(
+            libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut term),
+            0
+        );
+        assert_eq!(libc::sigaction(libc::SIGINT, std::ptr::null(), &mut int), 0);
+        RestoredShutdownSignals { term, int }
+    };
+    let read_fd = install_shutdown_signal_handlers().expect("install shutdown handlers");
+    assert!(!signal_is_blocked(libc::SIGINT));
+    assert!(!signal_is_blocked(libc::SIGTERM));
+
+    let cleared = run_shutdown_mask_probe(false);
+    assert!(
+        cleared.status.success(),
+        "child inherited a blocked shutdown signal\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&cleared.stdout),
+        String::from_utf8_lossy(&cleared.stderr)
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let got = read_shutdown_signal(read_fd);
+        unsafe { libc::close(read_fd) };
+        let _ = tx.send(got);
+    });
+    unsafe { libc::raise(libc::SIGINT) };
+    let woke = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("shutdown listener did not wake");
+    assert_eq!(woke, Some(libc::SIGINT as u8));
+    drop(restore);
+}
+
 fn main() {
     // GUI 从 libdispatch 工作线程 posix_spawn 本进程时，会把那套「屏蔽 SIGCHLD」
     // 的线程掩码遗传进来。async-process 靠 SIGCHLD 回收子进程；掩码不清掉，
@@ -2025,8 +2252,8 @@ fn main() {
     if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
-    // 在任何业务线程之前挡住 SIGTERM/SIGINT，交给单独的 sigwait 线程走优雅停机。
-    // 后建的线程会继承这套掩码，信号不会在别的线程上直接把进程打死。
+    // 在任何业务线程之前接住 SIGTERM/SIGINT。处理器只往自管道写一个字节，
+    // 不改信号掩码，子进程仍能收到 Ctrl+C 和 SIGTERM。
     install_shutdown_signals();
     exit_with_test_owner();
     smelt_core::sqlite_state::enable_sqlite_state();
@@ -2354,10 +2581,13 @@ fn run_serve_loop(
                 let _ = daemon.join();
             }
         }
+        // accept 循环退出后的兜底。正常停机已经在回执前摘掉路径。
+        let _ = std::fs::remove_file(sock_path());
         return;
     }
 
     accept_loop();
+    let _ = std::fs::remove_file(sock_path());
 }
 
 /// `input` op 的载荷解析：取 `data` 字段的 UTF-8 字节。空串 / 缺字段 → `None`。
@@ -2679,7 +2909,6 @@ fn spawn_session(
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
-            cwd: cwd.map(String::from),
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {

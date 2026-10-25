@@ -114,7 +114,6 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
-            cwd: None,
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {

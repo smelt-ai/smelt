@@ -424,7 +424,7 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream, o
             abandon_listener(&inner, id);
             return;
         }
-        if ready.get(0) == Some(&true) {
+        if ready.first() == Some(&true) {
             let peer_gone = match stream.read(&mut buf) {
                 Ok(0) => true,
                 Err(error)
@@ -926,11 +926,12 @@ fn deadline_loop(inner: Arc<Inner>) {
             }
         }
         for (id, pgid) in due {
-            if let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) {
-                if is_running(task.status) && task.cancel.is_none() {
-                    task.cancel = Some(BackgroundTaskStatus::TimedOut);
-                    signal_group(pgid, libc::SIGTERM);
-                }
+            if let Some(task) = state.tasks.iter_mut().find(|task| task.id == id)
+                && is_running(task.status)
+                && task.cancel.is_none()
+            {
+                task.cancel = Some(BackgroundTaskStatus::TimedOut);
+                signal_group(pgid, libc::SIGTERM);
             }
         }
         state = if let Some(deadline) = next {
@@ -1299,7 +1300,7 @@ fn serve_wait_until(
         if ready.get(1) == Some(&true) {
             drain_wake(&mut wake);
         }
-        if ready.get(0) == Some(&true) {
+        if ready.first() == Some(&true) {
             let mut buf = [0u8; 64];
             match stream.read(&mut buf) {
                 Ok(0) => break None,

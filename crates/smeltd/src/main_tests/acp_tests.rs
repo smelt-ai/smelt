@@ -4736,12 +4736,3 @@ fn conversation_image_finds_the_original_by_reference() {
     assert_eq!(again, thumb);
 }
 
-/// 两个 fd 指向同一个打开的文件（同设备、同 inode）。
-fn same_open_file(a: std::os::fd::RawFd, b: std::os::fd::RawFd) -> bool {
-    let stat = |fd| {
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0, "fstat {fd} 失败");
-        (stat.st_dev, stat.st_ino)
-    };
-    stat(a) == stat(b)
-}

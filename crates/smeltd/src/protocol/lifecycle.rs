@@ -113,7 +113,9 @@ pub(crate) fn graceful_shutdown(
         Err(error) => dlog(&format!("shutdown: 打开状态库失败：{error}")),
     }
 
-    // 5. 句柄已经放开，才告诉调用方可以换二进制。
+    // 5. 先摘掉监听路径，再回执。调用方拿到 ok 就会立刻 bind 新守护；
+    // 旧进程这时还没退出，路径还在的话新进程会连上这个即将消失的监听。
+    let _ = std::fs::remove_file(crate::sock_path());
     if let Some(mut conn) = ack {
         let _ = smelt_runtime_client::protocol::write_json_line(
             &mut conn,

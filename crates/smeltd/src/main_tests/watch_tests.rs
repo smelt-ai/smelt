@@ -38,7 +38,6 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
-            cwd: None,
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {

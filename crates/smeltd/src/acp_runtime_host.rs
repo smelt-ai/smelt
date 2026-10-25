@@ -275,24 +275,8 @@ impl HostedConversationHandle {
         self.inner.peer_rx.clone()
     }
 
-    #[cfg(test)]
-    fn clone_control(&self) -> std::io::Result<UnixStream> {
-        self.inner
-            .control
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or_else(|| std::io::Error::other("ACP session host 已关闭"))?
-            .try_clone()
-    }
-
     pub(crate) fn pid(&self) -> i32 {
         self.inner.pid
-    }
-
-    pub(crate) fn provider_pid(&self) -> Option<i32> {
-        let pid = self.inner.provider_pid.load(Ordering::SeqCst);
-        (pid > 1).then_some(pid)
     }
 
     #[cfg(test)]
