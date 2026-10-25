@@ -105,7 +105,8 @@ fn set_modified_windows(path: &std::path::Path, when: std::time::SystemTime) -> 
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
         .as_nanos()
         / 100
-        + 11_644_473_600_000_000;
+        // 1601-01-01 到 1970-01-01 是 11_644_473_600 秒。FILETIME 的一格是 100 纳秒。
+        + 11_644_473_600 * 10_000_000;
     let stamp = FILETIME {
         dwLowDateTime: ticks as u32,
         dwHighDateTime: (ticks >> 32) as u32,

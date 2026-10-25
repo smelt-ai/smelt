@@ -690,8 +690,8 @@ mod windows {
             return None;
         }
         let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-        // FILETIME 是从 1601-01-01 起的 100 纳秒。
-        const EPOCH_DIFF: u64 = 11_644_473_600_000_000;
+        // FILETIME 是从 1601-01-01 起的 100 纳秒。到 Unix 纪元是 11_644_473_600 秒。
+        const EPOCH_DIFF: u64 = 11_644_473_600 * 10_000_000;
         let unix_100ns = ticks.checked_sub(EPOCH_DIFF)?;
         let secs = unix_100ns / 10_000_000;
         let nanos = (unix_100ns % 10_000_000) * 100;
