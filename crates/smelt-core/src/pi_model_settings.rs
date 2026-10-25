@@ -1439,10 +1439,8 @@ mod tests {
         assert!(lock_path.is_dir());
 
         let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(31);
-        std::fs::File::open(&lock_path)
-            .unwrap()
-            .set_modified(stale)
-            .unwrap();
+        // Windows 上 `File::open` 打不开目录。
+        smelt_sys::set_modified(&lock_path, stale).unwrap();
         update_auth_json(&auth_path, |obj| {
             obj.insert(
                 "gw".to_string(),
