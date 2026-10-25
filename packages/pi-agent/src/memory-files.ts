@@ -35,6 +35,30 @@ export type MemoryTarget =
 
 const MEMORY_FILE_NAME = /^[a-z0-9][a-z0-9-]{0,63}\.md$/;
 
+/**
+ * 元数据和扫描结果用小写文件名。`MEMORY.md` 在大小写不敏感的盘上和 `memory.md` 是同一个文件，
+ * 不能折叠成一条合法记忆。
+ */
+export function canonicalMemoryFileName(name: string): string | undefined {
+	if (name.toLowerCase() === "memory.md") return undefined;
+	const canonical = name.toLowerCase();
+	return MEMORY_FILE_NAME.test(canonical) ? canonical : undefined;
+}
+
+/** 目录里已有大小写不同的同名文件时，打开磁盘上的那一个。 */
+function existingMemoryPath(dir: string, fileName: string): string | undefined {
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return undefined;
+	}
+	const exact = names.find((entry) => entry === fileName);
+	if (exact) return join(dir, exact);
+	const folded = names.find((entry) => entry.toLowerCase() === fileName.toLowerCase());
+	return folded ? join(dir, folded) : undefined;
+}
+
 const FORMAT_HINT = `记忆文件格式：
 ---
 name: <与文件名相同的 slug>
@@ -80,24 +104,26 @@ export function resolveMemoryTarget(rawPath: string, cwd: string, roots: MemoryR
 		if (dirname(absolutePath) !== root) {
 			return { kind: "invalid", reason: "记忆文件只能直接放在记忆目录下，不能建子目录" };
 		}
-		const fileName = basename(absolutePath);
-		if (fileName === "MEMORY.md") {
+		const rawName = basename(absolutePath);
+		if (rawName.toLowerCase() === "memory.md") {
 			return { kind: "invalid", reason: "记忆索引由宿主根据各文件的 description 自动生成，不用写 MEMORY.md" };
 		}
-		if (!MEMORY_FILE_NAME.test(fileName)) {
+		const fileName = canonicalMemoryFileName(rawName);
+		if (!fileName) {
 			return {
 				kind: "invalid",
 				reason: "记忆文件名必须是小写字母、数字、连字符组成的 slug 加 .md，例如 reply-in-chinese.md",
 			};
 		}
+		const targetPath = existingMemoryPath(root, fileName) ?? join(root, fileName);
 		try {
-			if (lstatSync(absolutePath).isSymbolicLink()) {
+			if (lstatSync(targetPath).isSymbolicLink()) {
 				return { kind: "invalid", reason: "记忆文件不能是符号链接" };
 			}
 		} catch {
 			// 新文件，还不存在。
 		}
-		return { kind: "memory", layer, root, absolutePath, fileName };
+		return { kind: "memory", layer, root, absolutePath: targetPath, fileName };
 	}
 	return { kind: "outside" };
 }
@@ -149,19 +175,23 @@ function coreBytes(body: string): number {
 export function scanMemoryLayer(dir: string): MemoryEntry[] {
 	let names: string[];
 	try {
-		names = readdirSync(dir).filter((name) => MEMORY_FILE_NAME.test(name));
+		names = readdirSync(dir);
 	} catch {
 		return [];
 	}
-	const entries: MemoryEntry[] = [];
-	for (const fileName of names) {
+	const entries = new Map<string, MemoryEntry>();
+	for (const diskName of names) {
+		const fileName = canonicalMemoryFileName(diskName);
+		if (!fileName) continue;
+		// 大小写不敏感的盘上只应有一条；两边都在时认规范名。
+		if (entries.has(fileName) && diskName !== fileName) continue;
 		try {
-			const path = join(dir, fileName);
+			const path = join(dir, diskName);
 			if (lstatSync(path).isSymbolicLink()) continue;
 			const parsed = parseFrontmatter(readFileSync(path, "utf8"));
 			const type = parsed?.fields.type ?? "";
 			if (!parsed || !(MEMORY_TYPES as readonly string[]).includes(type) || !parsed.body.trim()) continue;
-			entries.push({
+			entries.set(fileName, {
 				fileName,
 				name: fileName.slice(0, -".md".length),
 				description: parsed.fields.description ?? "",
@@ -174,7 +204,7 @@ export function scanMemoryLayer(dir: string): MemoryEntry[] {
 			// 读不了的文件跳过。
 		}
 	}
-	return entries.sort((a, b) => b.mtimeMs - a.mtimeMs || a.fileName.localeCompare(b.fileName));
+	return [...entries.values()].sort((a, b) => b.mtimeMs - a.mtimeMs || a.fileName.localeCompare(b.fileName));
 }
 
 /** 返回 undefined 表示合规；否则是给模型看的、能照着改的原因。格式说明只在出错时给。 */

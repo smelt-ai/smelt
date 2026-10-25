@@ -242,27 +242,47 @@ Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记�
 - 有工具把外部内容带进了上下文：除 Pi 内建工具、`smelt_ask_user`（答案来自用户）、后台任务
   （同 bash）之外的工具，包括 MCP、用户扩展的工具（如网页搜索）、子智能体；
 - 无人值守的运行：自动化启动时带 `SMELT_AGENT_UNATTENDED=1`，它写的一律待确认；
-- 写 `user` / `feedback` 规则时，用户这句 ≥ 8 字却正文里没有任何一段原话（降低 read/bash
-  结果被写成常驻规则的风险；短指令如「记住」不做这项校验）。
+- 写 `user` / `feedback` 规则时，正文里没有用户原话的一段。比较前去掉空白并转小写。
+  含中日韩字符的窗口最短 8 字；纯 ASCII 窗口要 18 个非空白字符（短英文太好撞）。
+  用户这句短到没有合格窗口（如「记住」）时跳过这项校验。
 
-`bash` 仍不算外部内容标记（否则几乎每个会话都会被标记）。对 bash 另有两道闸：
+`bash` 仍不算外部内容标记（否则几乎每个会话都会被标记）。对 bash 另有几道闸：
 
-1. 命令字符串若包含记忆目录路径，直接拒绝（请用内建 write / edit / read）；
+1. 命令字符串若包含记忆目录路径，直接拒绝（请用内建 write / edit / read）。比较前展开
+   `$SMELT_HOME` / `${SMELT_HOME}`、`$HOME` / `${HOME}`、`~`，去掉引号，并折叠 `/./`；
 2. bash / 后台任务 / MCP server **不继承** `SMELT_SOCK`、`SMELT_SESSION_ID`、
-   `SMELT_AGENT_TOKEN`（与 MCP 剥离同一套规则）。daemon 侧 `agent.memory.record_*` /
-   `meta` 还要求对端 pid 就是该会话的 provider 进程本身，子孙即使偷到 token 也无法冒用；
-   `approve` / `delete` 拒绝任何智能体会话进程及其子孙。
+   `SMELT_AGENT_TOKEN`（与 MCP 剥离同一套规则）。pi-agent 把这三个变量读进模块私有缓存后，
+   立刻从 `process.env` 删掉，之后拉起的子进程也继承不到；
+3. daemon 侧 `agent.memory.record_*` / `meta` 只接受该会话的 pi-agent 自己：托管模式是
+   provider pid，同进程模式是 `session.handle` 的 stdio pid。provider 还没报上来时，只放行
+   session-host 的直接子进程，且进程名必须读得到、并且不是 shell。bash / sh / zsh 以及
+   pi-agent 的孙进程即使偷到 token 也不能调这些方法。
+
+`approve` / `delete` 不走会话 token。本机调用方必须是签过名的桌面进程（`smelt`），并且
+不是任何活跃智能体会话进程或其子孙。double-fork 之后父进程变成 1 的孤儿靠「是不是子孙」
+认不出来，所以桌面白名单是主闸。已配对的远程设备（`Principal::Device`）允许操作。
 
 **信任默认（防直写绕过）**：只有主库里 `trust = trusted` 且文件 mtime 不晚于
-`written_at_ms`（5 秒余量）的记忆才注入/召回。没有来源记录的文件、显式 pending、以及来源
-记下之后被外部改过的文件，一律不注入。升级时一次性把当时磁盘上已有、尚无来源记录的文件
-回填为 trusted（哨兵行 `system:trust-gate` / `legacy-backfill-v1`），之后新出现的无记录
-文件保持待确认。用户在 GUI 点「采纳」会刷新 `written_at_ms`。
+`written_at_ms` 加余量的记忆才注入/召回。普通来源余量 5 秒。升级回填的行
+`session_id = legacy-backfill-v1`，`written_at_ms` 就是当时的 mtime，余量为 0
+（`mtime > written_at_ms` 即待确认）。没有来源记录的文件、显式 pending、以及来源记下之后
+被外部改过的文件，一律不注入。升级时一次性把当时磁盘上已有、尚无来源记录的文件回填为
+trusted，并和哨兵行 `system:trust-gate` / `legacy-backfill-v1` 放进同一个事务；目录读失败
+（除了目录不存在）不写哨兵。之后新出现的无记录文件保持待确认。
+
+用户在 GUI 点「采纳」要求文件还在磁盘上。来源行不存在时插入 trusted；已有行（包括仍标着
+trusted、但 mtime 已经越界的）刷新 `written_at_ms = max(now, 文件 mtime)`。大小写不同的
+同一文件（`Style.md` / `style.md`）在库里只用小写主键，写入前删掉其它大小写变体。
+`MEMORY.md` 不会被折叠成 `memory.md`。
 
 **待确认的记忆**：照常写入文件，但不注入、不召回；工具结果里告诉模型"已暂存为待确认，请转告
 用户"。记忆卡片标红显示原因，用户点"采纳"后才生效。edit 一条待确认的记忆仍是待确认；write
-整篇重写按当轮判断。覆盖已有记忆前必须先 read（禁止静默整篇覆盖）。pending 条目不计入写入
-时的规则预算（与 UI 一致）。
+整篇重写按当轮判断。覆盖已有记忆前必须先 read（禁止静默整篇覆盖）。已经存在、且当前不是
+待确认的文件，不能被不可信的 write / edit 覆盖：写前能判断就直接拒绝，写后才发现（预测不了
+的 edit）就按预测哈希或写后哈希恢复原内容，并且不把来源改成 pending。pending 条目不计入
+写入时的规则预算（与 UI 一致）。服务端 `record_write` 不单信客户端的 `overwrote_existing`：
+库里已有行也算覆盖；把已有 trusted 行记成 pending 直接拒绝；可信覆盖还要求本会话在 5 分钟内
+读过该文件（edit 由扩展在落库前补一次 `record_read`）。
 
 **失败时偏安全**：来源记不下来（宿主不可达、库锁住），**不论 trusted 还是 pending** 的写入
 都当场撤销（无来源记录不再默认可信）。拿不到元数据时，只注入写入约定，不注入任何记忆、不召回；
@@ -285,16 +305,16 @@ scope 为 `agent:<智能体 id>` 或 `user`。**没有来源记录的文件不�
 Pi 进程不链接 `smelt-store`、不直接打开数据库；托管它的独立会话宿主（`smeltd
 --acp-session-host`）按设计也不初始化 SQLite。所以 Pi 直接调主 daemon 的控制方法：连
 `SMELT_SOCK`，带上 daemon 注入的 `SMELT_SESSION_ID` 和 `SMELT_AGENT_TOKEN`（与跨会话消息同一套
-capability）。daemon 校验令牌、会话未结束、**且 Unix 对端 pid 就是该会话 provider 进程**后，
-从该会话的启动规格取两个记忆目录，经 `smelt-store` 读写。调用方只能操作自己这个会话的两层
-记忆；普通会话没有记忆层。`agent.memory.approve` / `delete` 不走会话 token，但拒绝智能体
-会话进程及其子孙调用（须 GUI / CLI 等用户侧操作）。
+capability）。daemon 校验令牌、会话未结束、**且 Unix 对端就是该会话的 pi-agent 进程**
+（见 5.4）后，从该会话的启动规格取两个记忆目录，经 `smelt-store` 读写。调用方只能操作
+自己这个会话的两层记忆；普通会话没有记忆层。`agent.memory.approve` / `delete` 不走会话
+token：本机必须是签过名的桌面进程，并且不是智能体会话进程树里的进程；已配对的远程设备可以。
 
 | 方法 | 参数（另带 `session_id`、`token`） | 返回 |
 |---|---|---|
 | `agent.memory.meta` | — | 两层的使用统计和**不应注入**的文件名（含无来源 / 外部改过） |
 | `agent.memory.record_read` | `layer`、`file` | 记一次使用 |
-| `agent.memory.record_write` | `layer`、`file`、`trust`、`reason` | 记来源（会话 id 取认证过的那个） |
+| `agent.memory.record_write` | `layer`、`file`、`trust`、`reason`、`overwrote_existing` | 记来源（会话 id 取认证过的那个）。服务端仍查已有行，不能只信 `overwrote_existing` |
 
 ## 6. 写入与校验
 
@@ -321,8 +341,12 @@ capability）。daemon 校验令牌、会话未结束、**且 Unix 对端 pid �
 
 不处理 / 额外闸门：
 
-- 用 `bash` 写或删记忆目录：命令若包含记忆路径则直接拒绝；否则仍走权限审批。即便绕过，
-  无来源记录或 mtime 晚于来源的文件也不会被注入（见 5.4）。
+- 用 `bash` 写或删记忆目录：命令若包含记忆路径则直接拒绝（含 `$SMELT_HOME`、引号、`/./`
+  这类改写）；否则仍走权限审批。即便绕过，无来源记录或 mtime 晚于来源的文件也不会被注入
+  （见 5.4）。
+- 不可信的 write / edit 覆盖已经存在的可信记忆：直接拒绝或回滚，不把来源降成 pending。
+- 文件名按小写身份认（`Style.md` 与 `style.md` 是同一条）；磁盘打开真实目录项。`MEMORY.md`
+  任何大小写都不是记忆文件。
 - 自动化运行处于 `bypassPermissions`：免审批本来就生效，但第 4 步的校验仍然执行，
   因为校验发生在权限判断之前。
 - 覆盖已有记忆文件的 `write`：本轮须先 `read` 过该文件，否则拒绝。

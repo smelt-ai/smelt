@@ -27,6 +27,7 @@ import {
 	type MemoryProvenance,
 	recordMemoryRead,
 	recordMemoryWrite,
+	scrubSessionControlEnv,
 } from "./memory-host.ts";
 import {
 	type AskModel,
@@ -75,8 +76,12 @@ type InFlightWrite = {
 	absolutePath: string;
 	/** undefined 表示写入前文件不存在。校验或来源记录失败时据此恢复。 */
 	previous: string | undefined;
-	/** edit 校验失败回滚前：写后内容的哈希；对不上说明别人改过，不覆盖。 */
+	/** edit 校验失败回滚前：写后内容的哈希；对不上说明别人改过，不覆盖。空字符串也有哈希。 */
 	postEditHash?: string;
+	/** 写前预测的写后内容哈希。空字符串写入同样要记，不能用假值判断。 */
+	expectedHash?: string;
+	/** 写入前这条记忆已经在待确认列表里。已有的可信文件不能被不可信写入降级。 */
+	alreadyPending: boolean;
 	provenance: MemoryProvenance;
 };
 
@@ -84,23 +89,43 @@ function contentHash(content: string): string {
 	return createHash("sha256").update(content).digest("hex");
 }
 
-/** 规则类（user/feedback）可信写入须包含用户原话的一段（≥ 此长度），降低 read/bash 污染写成常驻规则的风险。 */
-const RULE_VERBATIM_MIN_CHARS = 8;
+/** 规则原话窗口。含中日韩字符时最短 8；纯 ASCII 太好撞，要 18 个非空白字符。 */
+const RULE_VERBATIM_WINDOW = 64;
+const RULE_VERBATIM_MIN_CJK = 8;
+const RULE_VERBATIM_MIN_ASCII = 18;
+const CJK_CHAR = /[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/;
 
-function ruleBodyLacksUserWords(content: string, userPrompt: string | undefined): string | undefined {
+function normalizeForMatch(text: string): string {
+	return text.replace(/\s+/g, "").toLowerCase();
+}
+
+function windowMinChars(slice: string): number {
+	return CJK_CHAR.test(slice) ? RULE_VERBATIM_MIN_CJK : RULE_VERBATIM_MIN_ASCII;
+}
+
+/**
+ * 规则类正文是否带了用户原话。不是规则、或用户这句短到没有合格窗口时，不做这项校验。
+ */
+export function ruleContentMatchesUserPrompt(content: string, userPrompt: string | undefined): boolean {
 	const parsed = parseFrontmatter(content);
-	if (!parsed || !CORE_MEMORY_TYPES.has(parsed.fields.type ?? "")) return undefined;
-	const prompt = userPrompt?.trim() ?? "";
-	// 用户这句太短，无法做原话校验（如「记住」）；仍允许在场写入为可信。
-	if (prompt.length < RULE_VERBATIM_MIN_CHARS) return undefined;
-	const body = parsed.body.trim();
-	for (let length = Math.min(prompt.length, 64); length >= RULE_VERBATIM_MIN_CHARS; length--) {
+	if (!parsed || !CORE_MEMORY_TYPES.has(parsed.fields.type ?? "")) return true;
+	const prompt = normalizeForMatch(userPrompt ?? "");
+	const body = normalizeForMatch(parsed.body);
+	let eligible = false;
+	for (let length = Math.min(prompt.length, RULE_VERBATIM_WINDOW); length >= RULE_VERBATIM_MIN_CJK; length--) {
 		for (let start = 0; start + length <= prompt.length; start++) {
 			const slice = prompt.slice(start, start + length);
-			if (body.includes(slice)) return undefined;
+			if (slice.length < windowMinChars(slice)) continue;
+			eligible = true;
+			if (body.includes(slice)) return true;
 		}
 	}
-	return "user / feedback 规则正文须包含用户原话中至少一段（不少于 8 字），避免把网页或仓库里的文字写成常驻规则";
+	return !eligible;
+}
+
+function ruleBodyLacksUserWords(content: string, userPrompt: string | undefined): string | undefined {
+	if (ruleContentMatchesUserPrompt(content, userPrompt)) return undefined;
+	return "user / feedback 规则正文须包含用户原话中至少一段（中文不少于 8 字，纯英文不少于 18 个非空白字符），避免把网页或仓库里的文字写成常驻规则";
 }
 
 function isActualBuiltin(name: string, sourceInfo: SourceInfo | undefined): boolean {
@@ -130,15 +155,19 @@ function everything(roots: MemoryRoots): { agent: Set<string>; user: Set<string>
 
 function restore(write: InFlightWrite): boolean {
 	try {
-		if (write.postEditHash !== undefined) {
+		if (write.expectedHash !== undefined || write.postEditHash !== undefined) {
 			let current: string;
 			try {
 				current = readFileSync(write.absolutePath, "utf8");
 			} catch {
 				return false;
 			}
-			if (contentHash(current) !== write.postEditHash) {
-				// 回滚会覆盖并发写入；留下现场，让调用方报错。
+			const hash = contentHash(current);
+			const matches =
+				(write.expectedHash !== undefined && hash === write.expectedHash) ||
+				(write.postEditHash !== undefined && hash === write.postEditHash);
+			if (!matches) {
+				// 回滚会覆盖并发写入；留下现场，让调用方报错。空内容的哈希同样算数。
 				return false;
 			}
 		}
@@ -166,12 +195,68 @@ function validate(
 	);
 }
 
+/**
+ * 把命令里用来躲开路径检查的写法展开：`$SMELT_HOME` / `${SMELT_HOME}`、`$HOME` / `${HOME}`、
+ * `~`、引号、`/./`。然后再跟记忆目录比。
+ */
+export function normalizeCommandForPathCheck(
+	command: string,
+	env: NodeJS.ProcessEnv = process.env,
+): string {
+	const smeltHome = env.SMELT_HOME ?? "";
+	const home = env.HOME ?? "";
+	let text = command;
+	if (smeltHome) {
+		text = text.replaceAll("${SMELT_HOME}", smeltHome);
+		text = text.replace(/\$SMELT_HOME(?![A-Za-z0-9_])/g, () => smeltHome);
+	}
+	if (home) {
+		text = text.replaceAll("${HOME}", home);
+		text = text.replace(/\$HOME(?![A-Za-z0-9_])/g, () => home);
+	}
+	text = text.replace(/(^|[\s=:;&|])~(?=\/|$)/g, (_match, prefix: string) => `${prefix}${home}`);
+	text = text.replaceAll("'", "").replaceAll('"', "");
+	while (text.includes("/./")) text = text.replaceAll("/./", "/");
+	return text;
+}
+
 /** 命令字符串是否明显指向记忆目录（启发式；真正闸门是无来源/mtime 校验）。 */
-export function commandTouchesMemoryDirs(command: string, roots: MemoryRoots): boolean {
+export function commandTouchesMemoryDirs(
+	command: string,
+	roots: MemoryRoots,
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	const normalized = normalizeCommandForPathCheck(command, env);
 	for (const root of [roots.agent, roots.user]) {
-		if (command.includes(root)) return true;
+		if (!root) continue;
+		if (normalized.includes(root) || normalized.includes(normalizeCommandForPathCheck(root, env))) return true;
 	}
 	return false;
+}
+
+/**
+ * 用唯一的 oldText → newText 预测 edit 写完后的正文。空 oldText、对不上、或出现多次时不猜，
+ * 留给写后的安全网。
+ */
+function predictMemoryEdit(previous: string | undefined, input: unknown): string | undefined {
+	if (previous === undefined) return undefined;
+	const record = input as { edits?: unknown; oldText?: unknown; newText?: unknown };
+	const edits = Array.isArray(record.edits)
+		? record.edits
+		: typeof record.oldText === "string" && typeof record.newText === "string"
+			? [{ oldText: record.oldText, newText: record.newText }]
+			: undefined;
+	if (!edits || edits.length === 0) return undefined;
+	let next = previous;
+	for (const edit of edits) {
+		const item = edit as { oldText?: unknown; newText?: unknown };
+		if (typeof item.oldText !== "string" || typeof item.newText !== "string" || item.oldText === "") return undefined;
+		const first = next.indexOf(item.oldText);
+		if (first < 0) return undefined;
+		if (next.indexOf(item.oldText, first + item.oldText.length) >= 0) return undefined;
+		next = `${next.slice(0, first)}${item.newText}${next.slice(first + item.oldText.length)}`;
+	}
+	return next;
 }
 
 /**
@@ -206,6 +291,8 @@ export function commandTouchesMemoryDirs(command: string, roots: MemoryRoots): b
  * 恢复原样并把这次调用改成失败。注册在 smelt-permission 之前：校验在任何权限模式下都生效。
  */
 export default function smeltMemoryExtension(pi: ExtensionAPI): void {
+	// 工厂调用时 Pi 已经加载完发现的扩展（含 pi-status 的环境快照）。这里再删 token。
+	scrubSessionControlEnv();
 	/**
 	 * 正在写的记忆文件 → 这次写入。并行批次里所有 tool_call 都先于执行触发，同一文件的
 	 * 第二次写入看到的"原内容"已经过时，回滚会覆盖或删掉前一次的结果，所以直接拒绝。
@@ -575,13 +662,25 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 			};
 		}
 		const pending = meta?.pending[target.layer];
+		const prospective =
+			event.toolName === "write"
+				? typeof input.content === "string"
+					? input.content
+					: ""
+				: predictMemoryEdit(previous, event.input);
 		if (event.toolName === "write") {
-			const content = typeof input.content === "string" ? input.content : "";
-			const problem = validate(target.layer, target.root, target.fileName, content, pending);
+			const problem = validate(target.layer, target.root, target.fileName, prospective ?? "", pending);
 			if (problem) return { block: true, reason: problem };
 		}
-		const contentForProvenance =
-			event.toolName === "write" && typeof input.content === "string" ? input.content : previous;
+		const alreadyPending = pending?.has(target.fileName) === true;
+		const provenance = await provenanceFor(target.layer, target.fileName, event.toolName, prospective);
+		// 已有、且不是待确认的文件，不能被不可信写入盖掉。待确认条目仍允许改；整篇重写按当轮判断。
+		if (previous !== undefined && provenance.trust !== "trusted" && !alreadyPending) {
+			return {
+				block: true,
+				reason: "不能用不可信的写入覆盖已有的可信记忆。请在没有读取外部内容的一轮里修改，或请用户在记忆卡片里处理",
+			};
+		}
 		inFlight.set(target.absolutePath, {
 			toolCallId: event.toolCallId,
 			toolName: event.toolName,
@@ -590,12 +689,9 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 			fileName: target.fileName,
 			absolutePath: target.absolutePath,
 			previous,
-			provenance: await provenanceFor(
-				target.layer,
-				target.fileName,
-				event.toolName,
-				contentForProvenance,
-			),
+			alreadyPending,
+			expectedHash: prospective !== undefined ? contentHash(prospective) : undefined,
+			provenance,
 		});
 		approvedMemoryWrites.add(event.toolCallId);
 	});
@@ -668,7 +764,23 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				write.provenance = { trust: "pending", reason: verbatim };
 			}
 		}
-		const recorded = await recordMemoryWrite(write.layer, write.fileName, write.provenance);
+		// 写前没拦住的降级（预测不了的 edit、写后才发现原话不够）要恢复磁盘，并且不能记 pending。
+		if (write.previous !== undefined && write.provenance.trust !== "trusted" && !write.alreadyPending) {
+			return restore(write)
+				? errorResult(
+						`不能用不可信的写入覆盖已有的可信记忆，这次修改已撤销（${write.provenance.reason}）`,
+					)
+				: errorResult(
+						`不能用不可信的写入覆盖已有的可信记忆，且恢复原文件失败，请手动检查 ${write.absolutePath}`,
+					);
+		}
+		// 服务端覆盖已有可信行前要求本会话先读过。edit 不经过模型的 read，这里补一笔。
+		if (write.toolName === "edit" && write.previous !== undefined && write.provenance.trust === "trusted") {
+			await recordMemoryRead(write.layer, write.fileName);
+		}
+		const recorded = await recordMemoryWrite(write.layer, write.fileName, write.provenance, {
+			overwroteExisting: write.previous !== undefined && write.toolName === "write",
+		});
 		if (write.provenance.trust === "trusted") {
 			// 无来源记录不再默认可信：trusted 必须成功落库，否则撤销。
 			if (!recorded) {

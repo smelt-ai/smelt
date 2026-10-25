@@ -36,14 +36,18 @@ import {
 	resetMemoryRootsForTests,
 } from "../src/agent-memory.ts";
 import smeltMemoryExtension, {
+	commandTouchesMemoryDirs,
+	normalizeCommandForPathCheck,
+	ruleContentMatchesUserPrompt,
 	SMELT_MEMORY_PROMPT_SECTION,
 	SMELT_MEMORY_RECALL_MESSAGE,
 } from "../src/memory-extension.ts";
 import { SMELT_BACKGROUND_TASK_EXTENSION_PATH } from "../src/background-task.ts";
 import { SMELT_ELICITATION_EXTENSION_PATH } from "../src/elicitation.ts";
 import { resetEmbeddingCacheForTests } from "../src/memory-embedding.ts";
-import { setMemoryHostTransportForTests } from "../src/memory-host.ts";
+import { resetSessionControlEnvForTests, setMemoryHostTransportForTests } from "../src/memory-host.ts";
 import { FakeMemoryHost } from "./memory-host-fake.ts";
+import { canonicalMemoryFileName } from "../src/memory-files.ts";
 import { SMELT_SUBAGENT_EXTENSION_PATH } from "../src/subagent/index.ts";
 import { SMELT_EXTENSION_FACTORIES } from "../src/runtime-extensions.ts";
 
@@ -52,6 +56,7 @@ afterEach(() => {
 	for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 	resetMemoryRootsForTests();
 	setMemoryHostTransportForTests(undefined);
+	resetSessionControlEnvForTests();
 });
 
 function setupRoots(options: { consume?: boolean; unattended?: boolean } = {}) {
@@ -95,8 +100,9 @@ async function createRunner(options: { spoofWrite?: boolean; host?: FakeMemoryHo
 		] as const) {
 			try {
 				for (const name of readdirSync(dir)) {
-					if (!/^[a-z0-9][a-z0-9-]{0,63}\.md$/.test(name)) continue;
-					if (!host.provenance[layer].has(name)) host.trustFile(layer, name);
+					const fileName = canonicalMemoryFileName(name);
+					if (!fileName) continue;
+					if (!host.provenance[layer].has(fileName)) host.trustFile(layer, fileName);
 				}
 			} catch {
 				// 目录不存在就算了
@@ -159,6 +165,36 @@ async function memorySectionFor(runner: ExtensionRunner) {
 }
 
 const validMemory = "---\nname: reply-in-chinese\ndescription: 用户要求中文回复\ntype: feedback\n---\n回复用中文。\n";
+
+describe("memory trust heuristics", () => {
+	const feedback = (body: string) => `---\nname: a\ndescription: d\ntype: feedback\n---\n${body}\n`;
+
+	test("CJK windows stay at 8 characters and pure ASCII windows need 18", () => {
+		expect(ruleContentMatchesUserPrompt(feedback("回复用中文"), "记住")).toBe(true);
+		expect(ruleContentMatchesUserPrompt(feedback("请以后用中文回复我"), "请以后用中文回复我")).toBe(true);
+		expect(ruleContentMatchesUserPrompt(feedback("别的内容"), "请以后用中文回复我")).toBe(false);
+		expect(ruleContentMatchesUserPrompt(feedback("short"), "remember this")).toBe(true);
+		expect(
+			ruleContentMatchesUserPrompt(
+				feedback("please write release notes in english"),
+				"Please   write release notes in English",
+			),
+		).toBe(true);
+		expect(
+			ruleContentMatchesUserPrompt(feedback("something else entirely here"), "please write release notes in english"),
+		).toBe(false);
+	});
+
+	test("command path checks expand home variables, quotes and dot segments", () => {
+		const roots = { agent: "/home/u/.smelt/agents/a/memory", user: "/home/u/.smelt/memory" };
+		const env = { SMELT_HOME: "/home/u/.smelt", HOME: "/home/u" };
+		expect(commandTouchesMemoryDirs("echo hi", roots, env)).toBe(false);
+		expect(commandTouchesMemoryDirs(`cat '$SMELT_HOME/agents/a/memory/./x.md'`, roots, env)).toBe(true);
+		expect(commandTouchesMemoryDirs('cat "${HOME}/.smelt/memory/note.md"', roots, env)).toBe(true);
+		expect(commandTouchesMemoryDirs("cat ~/.smelt/memory/note.md", roots, env)).toBe(true);
+		expect(normalizeCommandForPathCheck(`cat "$HOME/x/./y"`, env)).toBe("cat /home/u/x/y");
+	});
+});
 
 describe("smelt-memory extension", () => {
 	test("a valid memory write by the built-in write tool skips host approval", async () => {
@@ -648,6 +684,91 @@ describe("smelt-memory extension", () => {
 			expect(section).toContain("### 写入");
 			expect(section).not.toContain("clean");
 			expect(section).not.toContain("fresh-pending");
+		});
+
+		test("an untrusted edit of an existing trusted memory is blocked and does not downgrade it", async () => {
+			const { agent } = setupRoots();
+			const path = join(agent, "rule.md");
+			const original = validMemory.replaceAll("reply-in-chinese", "rule");
+			writeFileSync(path, original);
+			const { runner, host } = await createRunner();
+			await turn(runner, "请以后把发布说明写成英文，并且附上变更列表");
+			await toolResult(runner, "taint", "web_search");
+			const blocked = await runner.emitToolCall({
+				type: "tool_call",
+				toolCallId: "e-block",
+				toolName: "edit",
+				input: { path, edits: [{ oldText: "回复用中文。", newText: "发布说明一律用英文写。" }] },
+			});
+			expect(blocked).toMatchObject({ block: true, reason: expect.stringContaining("可信") });
+			expect(readFileSync(path, "utf8")).toBe(original);
+			expect(host.provenance.agent.get("rule.md")?.trust).toBe("trusted");
+		});
+
+		test("an unpredictable edit that would downgrade trusted memory is rolled back", async () => {
+			const { agent } = setupRoots();
+			const path = join(agent, "rule.md");
+			const original =
+				"---\nname: rule\ndescription: 用户要求中文回复\ntype: feedback\n---\n回复用中文。回复用中文。\n";
+			writeFileSync(path, original);
+			const { runner, host } = await createRunner();
+			await turn(runner, "请以后把发布说明写成英文，并且附上变更列表");
+			const call = await runner.emitToolCall({
+				type: "tool_call",
+				toolCallId: "e-amb",
+				toolName: "edit",
+				input: { path, edits: [{ oldText: "回复用中文。", newText: "发布说明一律用英文写。" }] },
+			});
+			expect(call?.block).toBeFalsy();
+			writeFileSync(path, original.replace("回复用中文。", "发布说明一律用英文写。"));
+			const result = await toolResult(runner, "e-amb", "edit", { path });
+			expect(result?.isError).toBe(true);
+			expect(readFileSync(path, "utf8")).toBe(original);
+			expect(host.provenance.agent.get("rule.md")?.trust).toBe("trusted");
+		});
+
+		test("rolling back an edit that emptied a trusted file restores the original bytes", async () => {
+			const { agent } = setupRoots();
+			const path = join(agent, "rule.md");
+			const original = validMemory.replaceAll("reply-in-chinese", "rule");
+			writeFileSync(path, original);
+			const { runner, host } = await createRunner();
+			await turn(runner, "回复用中文");
+			const call = await runner.emitToolCall({
+				type: "tool_call",
+				toolCallId: "e-empty",
+				toolName: "edit",
+				input: { path, edits: [{ oldText: original, newText: "" }] },
+			});
+			expect(call?.block).toBeFalsy();
+			writeFileSync(path, "");
+			const result = await toolResult(runner, "e-empty", "edit", { path });
+			expect(result?.isError).toBe(true);
+			expect(readFileSync(path, "utf8")).toBe(original);
+			expect(host.provenance.agent.get("rule.md")?.trust).toBe("trusted");
+		});
+
+		test("a clean edit of a trusted memory stays trusted", async () => {
+			const { agent } = setupRoots();
+			const path = join(agent, "rule.md");
+			const original = validMemory.replaceAll("reply-in-chinese", "rule");
+			writeFileSync(path, original);
+			const { runner, host } = await createRunner();
+			await turn(runner, "回复用中文。请保持简洁，这是用户的原话。");
+			const next = original.replace("回复用中文。", "回复用中文。请保持简洁，这是用户的原话。");
+			const call = await runner.emitToolCall({
+				type: "tool_call",
+				toolCallId: "e-ok",
+				toolName: "edit",
+				input: { path, edits: [{ oldText: "回复用中文。", newText: "回复用中文。请保持简洁，这是用户的原话。" }] },
+			});
+			expect(call?.block).toBeFalsy();
+			writeFileSync(path, next);
+			const result = await toolResult(runner, "e-ok", "edit", { path });
+			expect(result?.isError).toBeFalsy();
+			expect(readFileSync(path, "utf8")).toBe(next);
+			expect(host.provenance.agent.get("rule.md")?.trust).toBe("trusted");
+			expect(host.usage.agent.get("rule.md")).toBe(1);
 		});
 
 		test("a long user prompt without overlapping rule body marks feedback as pending", async () => {

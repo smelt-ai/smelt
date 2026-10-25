@@ -338,6 +338,17 @@ impl MemoryTrust {
 pub struct MemoryTrustedRecord {
     pub file_name: String,
     pub written_at_ms: i64,
+    /// 写入这条来源的会话。升级回填是 `legacy-backfill-v1`，mtime 容差为 0。
+    pub session_id: String,
+}
+
+/// 一条记忆来源的完整行。覆盖写入前用它判断库里是否已经有记录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProvenanceRecord {
+    pub trust: MemoryTrust,
+    pub reason: String,
+    pub session_id: String,
+    pub written_at_ms: i64,
 }
 
 /// 一台已配对的远程设备。

@@ -16,6 +16,7 @@ import {
 	recallableFacts,
 	renderMemorySnapshot,
 	resolveMemoryTarget,
+	scanMemoryLayer,
 	validateMemoryContent,
 } from "../src/memory-files.ts";
 import {
@@ -40,6 +41,7 @@ import {
 	fetchMemoryMeta,
 	recordMemoryRead,
 	recordMemoryWrite,
+	resetSessionControlEnvForTests,
 	setMemoryHostTransportForTests,
 } from "../src/memory-host.ts";
 import { FakeMemoryHost } from "./memory-host-fake.ts";
@@ -212,12 +214,24 @@ describe("resolveMemoryTarget", () => {
 			kind: "invalid",
 			reason: expect.stringContaining("自动生成"),
 		});
+		expect(resolveMemoryTarget(join(agent, "Memory.md"), "/", memoryRoots)).toMatchObject({ kind: "invalid" });
 		expect(resolveMemoryTarget(join(agent, "sub", "a.md"), "/", memoryRoots).kind).toBe("invalid");
 		expect(resolveMemoryTarget(join(agent, "Bad Name.md"), "/", memoryRoots).kind).toBe("invalid");
 		expect(resolveMemoryTarget(join(agent, "a.txt"), "/", memoryRoots).kind).toBe("invalid");
 		writeFileSync(join(base, "outside.md"), "x");
 		symlinkSync(join(base, "outside.md"), join(agent, "link.md"));
 		expect(resolveMemoryTarget(join(agent, "link.md"), "/", memoryRoots).kind).toBe("invalid");
+	});
+
+	test("a differently cased file keeps the on-disk path and the lowercase identity", () => {
+		const { agent, user } = roots();
+		writeFileSync(join(agent, "Style.md"), memoryFile("style", "feedback"));
+		expect(resolveMemoryTarget(join(agent, "STYLE.md"), "/", { agent, user })).toMatchObject({
+			kind: "memory",
+			fileName: "style.md",
+			absolutePath: join(agent, "Style.md"),
+		});
+		expect(scanMemoryLayer(agent).map((entry) => entry.fileName)).toEqual(["style.md"]);
 	});
 
 	test("a symlinked memory root is never trusted", () => {
@@ -558,10 +572,14 @@ describe("memory host client", () => {
 		});
 		await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 		const saved = { ...process.env };
+		resetSessionControlEnvForTests();
 		Object.assign(process.env, { SMELT_SOCK: socketPath, SMELT_SESSION_ID: "acp-1", SMELT_AGENT_TOKEN: "tok" });
 		try {
 			setMemoryHostTransportForTests(undefined);
 			const meta = await fetchMemoryMeta();
+			expect(process.env.SMELT_AGENT_TOKEN).toBeUndefined();
+			expect(process.env.SMELT_SESSION_ID).toBeUndefined();
+			expect(process.env.SMELT_SOCK).toBeUndefined();
 			expect([...(meta?.pending.agent ?? [])]).toEqual(["x.md"]);
 			expect(meta?.usage.get("fact.md")).toEqual({ readCount: 2, lastReadAtMs: 1000 });
 			expect(requests[0]).toMatchObject({
@@ -570,7 +588,13 @@ describe("memory host client", () => {
 				method: "agent.memory.meta",
 				params: { session_id: "acp-1", token: "tok" },
 			});
+			await recordMemoryWrite("agent", "a.md", { trust: "trusted", reason: "在场" }, { overwroteExisting: true });
+			expect(requests[1]).toMatchObject({
+				method: "agent.memory.record_write",
+				params: { session_id: "acp-1", token: "tok", overwrote_existing: true, file: "a.md" },
+			});
 		} finally {
+			resetSessionControlEnvForTests();
 			process.env = saved;
 			server.close();
 		}

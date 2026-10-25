@@ -558,6 +558,37 @@ pub(super) fn authenticate_event_client_without_codesign(
     authenticate_first_party_sibling(kind, peer, daemon_pid, daemon_executable)
 }
 
+/// 本机控制连接的对端必须是经过签名校验的桌面进程（`smelt`）。
+/// 事件订阅那条路要客户端自报 kind；采纳/删除没有这帧，只认内核看到的对端身份。
+pub(crate) fn authenticate_first_party_peer(
+    conn: &UnixStream,
+) -> Result<FirstPartyClientKind, String> {
+    let peer = system_peer_identity(conn)?;
+    let daemon_executable = std::env::current_exe()
+        .map_err(|error| format!("cannot resolve daemon executable: {error}"))?;
+    let daemon_pid = std::process::id();
+    #[cfg(target_os = "macos")]
+    {
+        authenticate_first_party_macos(
+            FirstPartyClientKind::Desktop,
+            &peer,
+            daemon_pid,
+            &daemon_executable,
+            &SystemPeerCodeIdentity,
+        )?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        authenticate_first_party_sibling(
+            FirstPartyClientKind::Desktop,
+            &peer,
+            daemon_pid,
+            &daemon_executable,
+        )?;
+    }
+    Ok(FirstPartyClientKind::Desktop)
+}
+
 pub(super) fn authenticate_event_connection(
     value: &serde_json::Value,
     conn: &UnixStream,

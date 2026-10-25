@@ -4,7 +4,9 @@
 //! 会话的 capability token 调这里，由主 daemon 经 `smelt-store` 读写主库。记忆层取自会话的
 //! 启动规格，调用方只能操作自己这个会话的两层记忆。见 `docs/agent-memory.md`。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 
 use smelt_core::agent_memory::{self, MemoryRequestError, MemoryScope};
 use smelt_core::control_api::{
@@ -95,6 +97,60 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// 本会话读过某个记忆文件的时间。键是 `(session_id, scope, file)`，避免别的会话的 read 给这次覆盖放行。
+const READ_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+fn recent_reads() -> &'static Mutex<HashMap<(String, String, String), i64>> {
+    static READS: LazyLock<Mutex<HashMap<(String, String, String), i64>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    &READS
+}
+
+fn note_read(session_id: &str, scope: &str, file: &str, now: i64) {
+    let mut reads = recent_reads()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reads.insert(
+        (session_id.to_string(), scope.to_string(), file.to_string()),
+        now,
+    );
+}
+
+fn has_recent_read(session_id: &str, scope: &str, file: &str, now: i64) -> bool {
+    let reads = recent_reads()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reads
+        .get(&(session_id.to_string(), scope.to_string(), file.to_string()))
+        .is_some_and(|read_at| now >= *read_at && now.saturating_sub(*read_at) <= READ_WINDOW_MS)
+}
+
+fn consume_read(session_id: &str, scope: &str, file: &str) {
+    let mut reads = recent_reads()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reads.remove(&(session_id.to_string(), scope.to_string(), file.to_string()));
+}
+
+/// 覆盖已有来源时，不能只信客户端的 `overwrote_existing`。
+fn reject_record_write(
+    client_overwrote: bool,
+    existing_trusted: bool,
+    has_existing: bool,
+    trust: smelt_core::control_api::AgentMemoryTrust,
+    recent_read: bool,
+) -> Option<&'static str> {
+    use smelt_core::control_api::AgentMemoryTrust;
+    if existing_trusted && trust == AgentMemoryTrust::Pending {
+        return Some("不能把已可信的记忆降级为待确认");
+    }
+    let overwrote = client_overwrote || has_existing;
+    if trust == AgentMemoryTrust::Trusted && overwrote && !recent_read {
+        return Some("覆盖已有记忆前必须先在本会话读取");
+    }
+    None
+}
+
 fn require_peer(
     acp_sessions: &AcpSessions,
     session_id: &str,
@@ -138,7 +194,12 @@ pub(crate) fn record_read(
     let scope = scope(&launch, params.layer)?;
     let store = store()?;
     ensure_enabled(&store, &launch)?;
-    agent_memory::record_launch_read(&store, &scope, &params.file, now_ms()).map_err(request_error)
+    let now = now_ms();
+    agent_memory::record_launch_read(&store, &scope, &params.file, now).map_err(request_error)?;
+    if let Some(file) = agent_memory::canonical_memory_file_name(&params.file) {
+        note_read(&params.session_id, &scope.key(), &file, now);
+    }
+    Ok(())
 }
 
 pub(crate) fn record_write(
@@ -149,25 +210,109 @@ pub(crate) fn record_write(
     let launch = authenticate(acp_sessions, &params.session_id, &params.token)?;
     require_peer(acp_sessions, &params.session_id, peer_pid)?;
     let scope = scope(&launch, params.layer)?;
+    let Some(file) = agent_memory::canonical_memory_file_name(&params.file) else {
+        return Err(request_error(MemoryRequestError::InvalidFile));
+    };
     let store = store()?;
     ensure_enabled(&store, &launch)?;
+    let existing = store
+        .get_memory_provenance(&scope.key(), &file)
+        .map_err(|error| ControlError::new(ControlErrorCode::OperationFailed, error.to_string()))?;
+    let now = now_ms();
+    if let Some(reason) = reject_record_write(
+        params.overwrote_existing,
+        existing
+            .as_ref()
+            .is_some_and(|row| row.trust == smelt_store::MemoryTrust::Trusted),
+        existing.is_some(),
+        params.trust,
+        has_recent_read(&params.session_id, &scope.key(), &file, now),
+    ) {
+        return Err(ControlError::new(
+            ControlErrorCode::FailedPrecondition,
+            reason,
+        ));
+    }
     agent_memory::record_launch_write(
         &store,
         &scope,
-        &params.file,
+        &file,
         params.trust,
         &params.reason,
         &params.session_id,
-        now_ms(),
+        now,
     )
-    .map_err(request_error)
+    .map_err(request_error)?;
+    if params.overwrote_existing || existing.is_some() {
+        consume_read(&params.session_id, &scope.key(), &file);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use smelt_core::control_api::AgentMemoryTrust;
+
     use super::*;
+
+    #[test]
+    fn record_write_refuses_a_downgrade_and_scopes_the_recent_read() {
+        assert_eq!(
+            reject_record_write(false, true, true, AgentMemoryTrust::Pending, true),
+            Some("不能把已可信的记忆降级为待确认")
+        );
+        assert_eq!(
+            reject_record_write(true, true, true, AgentMemoryTrust::Trusted, false),
+            Some("覆盖已有记忆前必须先在本会话读取")
+        );
+        assert!(
+            reject_record_write(false, false, true, AgentMemoryTrust::Trusted, false).is_some(),
+            "库里已有行也算覆盖，不能只看客户端的 overwrote_existing"
+        );
+        assert!(
+            reject_record_write(false, false, false, AgentMemoryTrust::Trusted, false).is_none()
+        );
+        assert!(
+            reject_record_write(true, false, false, AgentMemoryTrust::Pending, false).is_none()
+        );
+        assert!(reject_record_write(false, true, true, AgentMemoryTrust::Trusted, true).is_none());
+
+        let now = 1_700_000_000_000;
+        note_read("session-a", "agent:writer", "rule.md", now);
+        assert!(has_recent_read(
+            "session-a",
+            "agent:writer",
+            "rule.md",
+            now + 1_000
+        ));
+        assert!(!has_recent_read(
+            "session-b",
+            "agent:writer",
+            "rule.md",
+            now + 1_000
+        ));
+        assert!(!has_recent_read(
+            "session-a",
+            "user",
+            "rule.md",
+            now + 1_000
+        ));
+        assert!(!has_recent_read(
+            "session-a",
+            "agent:writer",
+            "rule.md",
+            now + READ_WINDOW_MS + 1
+        ));
+        consume_read("session-a", "agent:writer", "rule.md");
+        assert!(!has_recent_read(
+            "session-a",
+            "agent:writer",
+            "rule.md",
+            now + 1_000
+        ));
+    }
 
     fn make_session(registry: &AcpSessions, id: &str, token: &str, memory: bool) {
         let (slot, _) = registry.reserve_with(id, || {

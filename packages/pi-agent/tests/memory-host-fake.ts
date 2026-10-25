@@ -1,4 +1,5 @@
 import { readdirSync } from "node:fs";
+import { canonicalMemoryFileName } from "../src/memory-files.ts";
 import type { MemoryHostTransport } from "../src/memory-host.ts";
 
 type Provenance = { trust: "trusted" | "pending"; reason: string };
@@ -46,8 +47,9 @@ export class FakeMemoryHost {
 				if (root) {
 					try {
 						for (const name of readdirSync(root)) {
-							if (!/^[a-z0-9][a-z0-9-]{0,63}\.md$/.test(name)) continue;
-							if (!this.provenance[which].has(name)) unknown.push(name);
+							const fileName = canonicalMemoryFileName(name);
+							if (!fileName) continue;
+							if (!this.provenance[which].has(fileName)) unknown.push(fileName);
 						}
 					} catch {
 						// 目录不存在就算了

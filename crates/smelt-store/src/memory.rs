@@ -7,7 +7,8 @@
 //! 升级迁移用哨兵行标记「存量已回填为 trusted」，见 [`LEGACY_TRUST_BACKFILL_SCOPE`]。
 
 use crate::{
-    MemoryMetaSnapshot, MemoryTrust, MemoryTrustedRecord, MemoryUsageRecord, StoreError,
+    MemoryMetaSnapshot, MemoryProvenanceRecord, MemoryTrust, MemoryTrustedRecord,
+    MemoryUsageRecord, StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -41,6 +42,9 @@ pub(crate) fn record_write(
     session_id: &str,
     now_ms: i64,
 ) -> Result<(), StoreError> {
+    // 大小写不敏感的盘上 Style.md 与 style.md 是同一个文件，主键却区分大小写。
+    // 写入规范名之前先清掉其它大小写变体，避免留下一条 mtime 对不上的旧行。
+    delete_case_variants(transaction, scope, file_name)?;
     transaction.execute(
         "INSERT INTO agent_memory_provenance (scope, file_name, trust, reason, session_id, written_at_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -57,13 +61,89 @@ pub(crate) fn approve(
     file_name: &str,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
+    delete_case_variants(transaction, scope, file_name)?;
+    // 无来源行、以及外部改过但 trust 仍是 trusted 的行，都要能被采纳。
+    // 不能再要求 WHERE trust = 'pending'，否则这两类点击「采纳」匹配 0 行。
     let changed = transaction.execute(
-        "UPDATE agent_memory_provenance
-         SET trust = 'trusted', reason = '用户采纳', written_at_ms = ?3
-         WHERE scope = ?1 AND file_name = ?2 AND trust = 'pending'",
+        "INSERT INTO agent_memory_provenance (scope, file_name, trust, reason, session_id, written_at_ms)
+         VALUES (?1, ?2, 'trusted', '用户采纳', '', ?3)
+         ON CONFLICT(scope, file_name) DO UPDATE SET
+             trust = 'trusted',
+             reason = '用户采纳',
+             written_at_ms = excluded.written_at_ms",
         params![scope, file_name, now_ms],
     )?;
     Ok(changed > 0)
+}
+
+fn delete_case_variants(
+    transaction: &Transaction<'_>,
+    scope: &str,
+    file_name: &str,
+) -> Result<(), StoreError> {
+    for table in ["agent_memory_usage", "agent_memory_provenance"] {
+        transaction.execute(
+            &format!(
+                "DELETE FROM {table}
+                 WHERE scope = ?1 AND lower(file_name) = lower(?2) AND file_name != ?2"
+            ),
+            params![scope, file_name],
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn get_provenance(
+    connection: &Connection,
+    scope: &str,
+    file_name: &str,
+) -> Result<Option<MemoryProvenanceRecord>, StoreError> {
+    let found = connection
+        .query_row(
+            "SELECT trust, reason, session_id, written_at_ms
+             FROM agent_memory_provenance
+             WHERE scope = ?1 AND lower(file_name) = lower(?2)
+             ORDER BY file_name
+             LIMIT 1",
+            params![scope, file_name],
+            |row| {
+                let trust = match row.get::<_, String>(0)?.as_str() {
+                    "trusted" => MemoryTrust::Trusted,
+                    _ => MemoryTrust::Pending,
+                };
+                Ok(MemoryProvenanceRecord {
+                    trust,
+                    reason: row.get(1)?,
+                    session_id: row.get(2)?,
+                    written_at_ms: row.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(found)
+}
+
+/// 回填记录和哨兵放进同一个事务：中途失败不会先写上哨兵，把还没回填的目录永久漏掉。
+pub(crate) fn commit_legacy_backfill(
+    transaction: &Transaction<'_>,
+    files: &[(String, String, i64)],
+    reason: &str,
+    session_id: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    for (scope, file_name, written_at_ms) in files {
+        record_write(
+            transaction,
+            scope,
+            file_name,
+            MemoryTrust::Trusted,
+            reason,
+            session_id,
+            *written_at_ms,
+        )?;
+    }
+    mark_legacy_trust_backfill_done(transaction, now_ms)?;
+    Ok(())
 }
 
 pub(crate) fn forget(
@@ -141,7 +221,7 @@ pub(crate) fn read_meta(
         .query_map(params![scope], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     let mut trusted_statement = connection.prepare(
-        "SELECT file_name, written_at_ms FROM agent_memory_provenance
+        "SELECT file_name, written_at_ms, session_id FROM agent_memory_provenance
          WHERE scope = ?1 AND trust = 'trusted' ORDER BY file_name",
     )?;
     let trusted = trusted_statement
@@ -149,6 +229,7 @@ pub(crate) fn read_meta(
             Ok(MemoryTrustedRecord {
                 file_name: row.get(0)?,
                 written_at_ms: row.get(1)?,
+                session_id: row.get(2)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
