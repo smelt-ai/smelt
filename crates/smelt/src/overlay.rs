@@ -168,7 +168,7 @@ impl Workspace {
         if self.session_manager_open {
             rank = Some(ModalLayer::SessionManager.rank());
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.show_daemon_restart_confirm {
             rank = Some(rank.unwrap_or(0).max(ModalLayer::DaemonRestart.rank()));
         }

@@ -124,9 +124,21 @@ impl AcpTerminals {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(
+                smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
+            );
+        }
         let mut child = cmd
             .spawn()
             .map_err(|err| format!("启动终端命令失败：{err}"))?;
+        #[cfg(windows)]
+        if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
+            let _ = child.wait();
+            return Err(format!("无法把终端命令放进进程树：{error}"));
+        }
         let pid = child.id();
         let stdout = child
             .stdout
@@ -177,6 +189,7 @@ impl AcpTerminals {
             .name(format!("smelt-acp-term-wait-{}", &id[..id.len().min(8)]))
             .spawn(move || {
                 let status = child.wait();
+                smelt_sys::process::release_tree(pid);
                 // 退出码先到，管道里可能还有没读完的输出。等读线程读到 EOF 再定稿，
                 // 否则 `wait_for_exit` 和退出事件会丢掉最后一段。
                 {
@@ -427,6 +440,10 @@ fn kill_pid(pid: u32) {
     unsafe {
         // 创建时用了 process_group(0)，负 pid 杀掉整组。
         libc::kill(-(pid as i32), libc::SIGTERM);
+    }
+    #[cfg(windows)]
+    {
+        let _ = smelt_sys::process::signal_tree(pid, smelt_sys::process::TreeSignal::Interrupt);
     }
 }
 

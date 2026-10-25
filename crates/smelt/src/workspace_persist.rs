@@ -821,7 +821,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
                 .spawn(async {
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     {
                         let _ = crate::local_daemon::ensure_managed_daemon_current();
                         crate::local_daemon::ensure_daemon_running();
@@ -989,7 +989,7 @@ impl Workspace {
         }
         if pending.is_empty() {
             if is_local {
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 self.check_daemon_outdated(cx);
             }
         } else {

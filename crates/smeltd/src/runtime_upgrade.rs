@@ -7,8 +7,7 @@
 //! 只升不降：要的版本比自己旧就拒绝。两台不同版本的桌面连同一个运行时时，运行时最终
 //! 跟着较新的那台。系统包和远程桌面的配置要 root，这里不碰，变了仍要重新跑安装脚本。
 
-use std::io::Write as _;
-use std::os::unix::net::UnixStream;
+use super::ClientSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use smelt_runtime_client::protocol::runtime_upgrade::{RuntimeUpgradeReply, RuntimeUpgradeRequest};
@@ -16,7 +15,7 @@ use smelt_runtime_client::protocol::runtime_upgrade::{RuntimeUpgradeReply, Runti
 /// 同一时间只做一次：两台桌面同时请求时，后来的直接回失败，等前一次的结局。
 static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn handle_runtime_upgrade(mut conn: UnixStream, request: &serde_json::Value) {
+pub(crate) fn handle_runtime_upgrade<C: ClientSocket>(mut conn: C, request: &serde_json::Value) {
     let reply = match serde_json::from_value::<RuntimeUpgradeRequest>(request.clone()) {
         Ok(request) => upgrade(&mut conn, &request.version),
         Err(error) => RuntimeUpgradeReply::Failed {
@@ -26,7 +25,7 @@ pub(crate) fn handle_runtime_upgrade(mut conn: UnixStream, request: &serde_json:
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &reply);
 }
 
-fn upgrade(conn: &mut UnixStream, version: &str) -> RuntimeUpgradeReply {
+fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply {
     let target = match check_target(version, env!("CARGO_PKG_VERSION")) {
         Ok(target) => target,
         Err(error) => return RuntimeUpgradeReply::Failed { error },

@@ -119,8 +119,8 @@ jobs:
             and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
           '
 
-  # Windows 桌面端（docs/windows-support.md D4）：只编桌面端和它连远程运行时要用的
-  # crate，smeltd 不在 Windows 上编。在 Windows runner 上原生编译，不交叉编译。
+  # Windows 本机运行时（docs/windows-support.md）：桌面、smeltd 和它们的依赖
+  # 在 windows-latest 上原生编译、跑测试。Unix 专用测试用 cfg 跳过。
   windows:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -140,19 +140,17 @@ jobs:
           save-if: false
 
       # --keep-going：一个 crate 编不过时继续编不依赖它的那些，一次拿到尽量全的报错。
-      - name: Check desktop
-        run: cargo check -p smelt --all-targets --keep-going
+      - name: Check local runtime
+        run: cargo check --all-targets --keep-going -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
 
-      # 下面的测试和上面的检查互不依赖：桌面端编不过时也照跑，看连接这几个 crate 的结果。
       - name: Install cargo-nextest
         if: ${{ !cancelled() }}
         uses: taiki-e/install-action@nextest
 
-      # 连接流、路径、客户端库在 Windows 上换了实现，单测在这里真跑一遍。
-      # smelt 二进制自己的测试仍假设本机运行时和 macOS 界面，这里用上面的 check 守编译。
+      # 本机运行时这条链在 Windows 上换了实现，单测在这里真跑一遍。
       - name: Run tests
         if: ${{ !cancelled() }}
-        run: cargo nextest run -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client
+        run: cargo nextest run -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
 
   mobile:
     needs: changes

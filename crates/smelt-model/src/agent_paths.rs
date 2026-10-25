@@ -3,9 +3,13 @@
 
 use std::path::{Path, PathBuf};
 
-/// 运行时自带 Bun 启动器（`~/.smelt/runtime/bin/bun`）的 `~/` 写法。写进外部配置（如 Pi
-/// `mcp.json` 的 `command`）的路径必须是这一条，Pi 会展开开头的 `~/`。
+/// 运行时自带 Bun 启动器的 `~/` 写法。Unix 是 `~/.smelt/runtime/bin/bun`，Windows 是
+/// `~/.smelt/runtime/bin/bun.exe`。写进外部配置（如 Pi `mcp.json` 的 `command`）的路径
+/// 必须是这一条，Pi 会展开开头的 `~/`。
+#[cfg(unix)]
 pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun";
+#[cfg(windows)]
+pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun.exe";
 
 /// 智能体自己的 space 根目录：`~/.smelt/agents/<id>`。
 ///

@@ -13,7 +13,8 @@ pub enum RuntimeKey {
 
 /// 这一版桌面能不能在本机跑 smeltd。第 1 步是 Unix；Windows 只连远程运行时。
 pub fn local_runtime_supported() -> bool {
-    cfg!(unix)
+    // 手机端是 unix，本来就会走本机运行时。Windows 桌面从这一版起同样拉起本机 smeltd。
+    cfg!(any(unix, windows))
 }
 
 #[derive(Clone)]

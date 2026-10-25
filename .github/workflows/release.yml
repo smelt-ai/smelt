@@ -167,7 +167,7 @@ jobs:
 
           ## Windows
 
-          \`smelt-${version}-windows-x86_64.zip\` 这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。
+          \`smelt-${version}-windows-x86_64.zip\` 里是 \`smelt.exe\`、\`smeltd.exe\`、\`smelt-notify.exe\`、\`smelt-pi.exe\`（以及 Pi 要的 wasm）。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。升级本机守护会重启进程，终端会话不保留。
           EOF
           cat "$RUNNER_TEMP/release-notes.md"
 
@@ -377,7 +377,7 @@ jobs:
           files: dist/Smelt-*-android-arm64.apk
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # Windows 桌面（设计文档 D5）：只编 smelt，不编 smeltd。第一版不签名。
+  # Windows 本机运行时：smelt、smeltd、smelt-notify、smelt-pi 打在同一个目录里。第一版不签名。
   # 构建和 dmg 并行；上传在 windows-release，等 Release 建好再挂，避免两边同时建。
   windows:
     runs-on: windows-latest
@@ -395,15 +395,25 @@ jobs:
           save-if: false
 
       - name: Build
-        run: cargo build --release -p smelt --locked
+        run: cargo build --release -p smelt -p smeltd --locked
+
+      # GitHub 的 windows-latest 默认是 PowerShell，仓库里的 Bun 脚本是 bash。
+      - name: Build smelt-pi
+        shell: bash
+        run: bash scripts/build-smelt-pi.sh --out target/smelt-pi
 
       - name: Package
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v', ''
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stage = "dist/stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/release/smelt.exe, target/release/smeltd.exe, target/release/smelt-notify.exe -Destination $stage
+          Copy-Item target/smelt-pi/smelt-pi.exe, target/smelt-pi/photon_rs_bg.wasm -Destination $stage
+          if (Test-Path target/smelt-pi/skills) { Copy-Item target/smelt-pi/skills -Destination $stage -Recurse }
+          if (Test-Path target/smelt-pi/native) { Copy-Item target/smelt-pi/native -Destination $stage -Recurse }
           $name = "smelt-$version-windows-x86_64.zip"
-          Compress-Archive -Path target/release/smelt.exe -DestinationPath "dist/$name"
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name"
           $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
           Write-Output "$hash  $name"
           Get-Item "dist/$name" | Select-Object Name, Length

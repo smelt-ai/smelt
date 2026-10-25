@@ -83,6 +83,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     #[test]
     fn removes_the_copy_we_wrote_and_its_claude_bridge() {
         let home = tempfile::tempdir().unwrap();

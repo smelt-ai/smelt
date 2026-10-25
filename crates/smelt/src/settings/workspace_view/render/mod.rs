@@ -263,9 +263,9 @@ fn section_page(
         SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
         #[cfg(target_os = "macos")]
         SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         SettingsSection::MaintenanceDaemon => appearance::theme_page(entity, snapshot, cx),
         SettingsSection::MaintenanceStorage => maintenance::storage_page(cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),

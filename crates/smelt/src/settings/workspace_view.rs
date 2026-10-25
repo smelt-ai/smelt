@@ -102,18 +102,18 @@ impl Workspace {
             moving_app: self.moving_app,
             #[cfg(target_os = "macos")]
             move_app_error: self.move_app_error.clone(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_outdated: self.daemon_outdated,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_upgrading: self.daemon_upgrading,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_upgrade_msg: self.daemon_upgrade_msg.clone(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
             capabilities_tab: self.nav.capabilities_tab(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             session_manager_open: self.session_manager_open,
         }

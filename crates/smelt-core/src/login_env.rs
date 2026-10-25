@@ -104,6 +104,8 @@ fn build_probe_command(shell: &str) -> Command {
 fn run_probe_with_timeout(shell: &str) -> Option<String> {
     let child = build_probe_command(shell).spawn().ok()?;
     let pid = child.id();
+    #[cfg(not(unix))]
+    let _ = pid;
     let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {

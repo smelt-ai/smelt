@@ -3,9 +3,8 @@
 use super::super::session_catalog::{published_session_states, session_connection_counts};
 use super::super::*;
 use std::io::{BufReader, Write};
-use std::os::unix::net::UnixStream;
 
-pub(super) fn handle_list(conn: UnixStream, sessions: &Sessions, acp_sessions: &AcpSessions) {
+pub(super) fn handle_list<C: ClientSocket>(conn: C, sessions: &Sessions, acp_sessions: &AcpSessions) {
     // 附带每个会话是否「有客户端连接」（connected），供 GUI 每次启动时
     // 自动清理：死会话和长期无人认领的游离会话都没有连接，一个字段覆盖
     // 两种场景。正常使用中的会话（GUI/远程/移动端正 attach 或旁观）都有
@@ -37,8 +36,8 @@ pub(super) fn handle_list(conn: UnixStream, sessions: &Sessions, acp_sessions: &
         &serde_json::json!({ "sessions": ids, "states": states }),
     );
 }
-pub(super) fn handle_kill(
-    conn: UnixStream,
+pub(super) fn handle_kill<C: ClientSocket>(
+    conn: C,
     v: &serde_json::Value,
     sessions: &Sessions,
     remote_sessions: &RemoteSessions,
@@ -155,7 +154,7 @@ pub(crate) fn kill_terminal_session(
     cleanup_error.map_or(Ok(()), Err)
 }
 
-pub(super) fn handle_action(conn: UnixStream, v: &serde_json::Value, sessions: &Sessions) {
+pub(super) fn handle_action<C: ClientSocket>(conn: C, v: &serde_json::Value, sessions: &Sessions) {
     let id = v["id"].as_str().unwrap_or_default();
     let mut c = conn;
     let payload = match action_payload(v["kind"].as_str(), v["text"].as_str()) {
@@ -194,7 +193,7 @@ pub(super) fn handle_action(conn: UnixStream, v: &serde_json::Value, sessions: &
     }
 }
 
-pub(super) fn handle_raw_input(conn: UnixStream, v: &serde_json::Value, sessions: &Sessions) {
+pub(super) fn handle_raw_input<C: ClientSocket>(conn: C, v: &serde_json::Value, sessions: &Sessions) {
     // 原始输入：工作延续，无 phase 门闩。权限在连接身份（未配对的设备进不来），这里
     // 只做「会话在不在 + 载荷非空 + 写进 master」。
     let id = v["id"].as_str().unwrap_or_default();
@@ -227,7 +226,7 @@ pub(super) fn handle_raw_input(conn: UnixStream, v: &serde_json::Value, sessions
     }
 }
 
-pub(super) fn handle_resize(conn: UnixStream, v: &serde_json::Value, sessions: &Sessions) {
+pub(super) fn handle_resize<C: ClientSocket>(conn: C, v: &serde_json::Value, sessions: &Sessions) {
     // 手机端按视口改 PTY 尺寸，让 Claude 等 TUI SIGWINCH 重排，
     // 避免「镜像桌面大窗口 → 底部空一大截」。
     let id = v["id"].as_str().unwrap_or_default();
@@ -274,7 +273,7 @@ pub(crate) fn terminal_error_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8
     format!("{header}\n\r\n\x1b[31m{reason}\x1b[0m\r\n").into_bytes()
 }
 
-pub(crate) fn write_terminal_error(mut conn: &UnixStream, reason: &str, rows: u16, cols: u16) {
+pub(crate) fn write_terminal_error(conn: &mut impl Write, reason: &str, rows: u16, cols: u16) {
     let _ = conn.write_all(&terminal_error_reply(reason, rows, cols));
 }
 
@@ -505,9 +504,9 @@ pub(crate) fn open_terminal_runtime<R>(
     Ok((slot, attached))
 }
 
-pub(crate) fn handle_open(
-    conn: UnixStream,
-    mut reader: BufReader<UnixStream>,
+pub(crate) fn handle_open<C: ClientSocket>(
+    mut conn: C,
+    mut reader: BufReader<C>,
     v: &serde_json::Value,
     sessions: Sessions,
     acp_sessions: AcpSessions,
@@ -524,7 +523,7 @@ pub(crate) fn handle_open(
         Some(value) => match serde_json::from_value::<RemoteTerminalSession>(value.clone()) {
             Ok(session) => Some(session),
             Err(error) => {
-                write_terminal_error(&conn, &format!("远程目录会话无效：{error}"), rows, cols);
+                write_terminal_error(&mut conn, &format!("远程目录会话无效：{error}"), rows, cols);
                 return;
             }
         },
@@ -592,7 +591,7 @@ pub(crate) fn handle_open(
         Ok((slot, Some((sess, fd)))) => (slot, sess, fd),
         Ok((_, None)) => return,
         Err(error) => {
-            write_terminal_error(&conn, &error, rows, cols);
+            write_terminal_error(&mut conn, &error, rows, cols);
             return;
         }
     };
@@ -719,9 +718,9 @@ impl Drop for RemoteViewportLease {
 /// 1. 不兜底 spawn：会话必须已存在，旁观一个不存在的会话没有意义；
 /// 2. 不影响 `out.clients`，也不顶替其它 watcher——`push` 进去，多个旁观者可并存；
 /// 3. 移动端只取得尺寸所有权，不替换桌面 attachment；断开时自动归还。
-pub(crate) fn handle_watch(
-    conn: UnixStream,
-    mut reader: BufReader<UnixStream>,
+pub(crate) fn handle_watch<C: ClientSocket>(
+    conn: C,
+    mut reader: BufReader<C>,
     v: &serde_json::Value,
     sessions: Sessions,
 ) {

@@ -7,7 +7,7 @@
 //! - iroh：QUIC 握手证明对端持有它 endpoint id 的私钥；id 在 `paired_device` 表里才放行。
 //!   不在表里的设备只能调 `device.pair`，提交运行时发出的一次性配对码。
 
-use std::os::unix::net::UnixStream;
+use smelt_runtime_client::UnixStream;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 

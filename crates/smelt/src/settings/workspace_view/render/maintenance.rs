@@ -17,7 +17,7 @@ pub(super) fn update_page(
         .group(update_group(entity, snapshot, cx))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) fn daemon_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -478,7 +478,7 @@ fn update_group(
     }))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn daemon_group(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -490,7 +490,7 @@ fn daemon_group(
     };
     let daemon_entity = entity;
     let daemon_outdated = snapshot.daemon_outdated;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let daemon_upgrading = snapshot.daemon_upgrading;
     let daemon_upgrade_msg = snapshot.daemon_upgrade_msg.clone();
     let daemon_info = snapshot.daemon_info.clone();
@@ -500,14 +500,20 @@ fn daemon_group(
                     let upgrade_msg = daemon_upgrade_msg.clone();
                     let restart_entity = daemon_entity.clone();
                     // 无缝升级只在 Unix 上交接 smeltd（设计文档 D3）。没有本机守护时不放这个按钮。
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     let upgrade_daemon_btn = {
                         let upgrading = daemon_upgrading;
                         let upgrade_entity = daemon_entity.clone();
                         (outdated == Some(true)).then(|| {
                             Button::new("upgrade-daemon")
                                 .compact()
-                                .label(if upgrading { "升级中…" } else { "无缝升级" })
+                                .label(if upgrading {
+                                    "升级中…"
+                                } else if cfg!(windows) {
+                                    "升级并重启"
+                                } else {
+                                    "无缝升级"
+                                })
                                 .loading(upgrading)
                                 .disabled(upgrading)
                                 .on_click(move |_, _window, cx: &mut App| {
@@ -517,7 +523,7 @@ fn daemon_group(
                                 })
                         })
                     };
-                    #[cfg(not(unix))]
+                    #[cfg(not(any(unix, windows)))]
                     let upgrade_daemon_btn = Option::<smelt_ui::Button>::None;
                     // 硬重启：常驻入口（守护卡死 / 想强制换二进制时用），会断会话。
                     // 不受版本是否落后限制；点击走二次确认弹窗兜底。

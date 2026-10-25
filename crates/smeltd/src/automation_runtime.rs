@@ -816,6 +816,10 @@ impl Driver {
         };
         if let Ok(pid) = i32::try_from(child.id()) {
             self.shell_pgids.insert(run.id.clone(), pid);
+            #[cfg(windows)]
+            if let Err(error) = smelt_sys::process::attach_running(pid as u32) {
+                eprintln!("[automation] 命令 pid={pid} 没能放进 Job：{error}");
+            }
         }
         if let Err(error) = std::thread::Builder::new()
             .name("smelt-automation-shell".into())
@@ -830,9 +834,12 @@ impl Driver {
             if let Some(pid) = self.shell_pgids.remove(&run.id)
                 && pid > 1
             {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
+                let _ = smelt_sys::process::signal_tree(
+                    pid as u32,
+                    smelt_sys::process::TreeSignal::Kill,
+                );
+                #[cfg(windows)]
+                smelt_sys::process::release_tree(pid as u32);
             }
             self.fail_run(&run, &format!("无法启动 Shell 执行线程: {error}"));
         }
@@ -854,9 +861,12 @@ impl Driver {
                 continue;
             };
             if pid > 1 {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
+                let _ = smelt_sys::process::signal_tree(
+                    pid as u32,
+                    smelt_sys::process::TreeSignal::Kill,
+                );
+                #[cfg(windows)]
+                smelt_sys::process::release_tree(pid as u32);
             }
         }
     }

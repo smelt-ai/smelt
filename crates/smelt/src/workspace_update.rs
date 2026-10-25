@@ -435,7 +435,7 @@ impl Workspace {
     /// 后台查一次守护是否落后于磁盘上的 smeltd 二进制，决定要不要在设置页/齿轮上
     /// 给出「重启守护」提示。本地 Unix socket 往返很快，但仍走后台线程，跟
     /// check_for_update 同款结构，别在 UI 线程里做阻塞 IO。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             // 只探测状态，不再在此 ensure/handoff（冷启动 ensure 由 restore 线程串行做完）。
@@ -485,7 +485,7 @@ impl Workspace {
     }
 
     /// subscribe 相位变化后调用：挂起的升级等所有 agent 空闲再发一次。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn maybe_flush_pending_daemon_upgrade(&mut self, cx: &mut Context<Self>) {
         if !self.daemon_upgrade_pending || self.daemon_upgrading || self.any_agent_busy(cx) {
             return;
@@ -540,7 +540,7 @@ impl Workspace {
     /// 无缝升级守护：守护 exec 新二进制、PTY fd 原地交接，会话不中断（见 smeltd 升级设计）。
     /// 成功后逐 pane reconnect——会话 id 都还在，走正常 reattach + 重放，画面最多闪一下。
     /// 正在跑的守护太旧不认识 upgrade op 时提示改用下面的硬重启。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn upgrade_daemon_seamless(&mut self, cx: &mut Context<Self>) {
         if self.daemon_upgrading {
             return;
@@ -565,7 +565,11 @@ impl Workspace {
                 this.daemon_upgrade_msg = Some(match outcome {
                     crate::local_daemon::UpgradeOutcome::Upgraded => {
                         this.reconnect_all_terminals(cx);
-                        "已无缝升级，所有会话保持运行。".to_string()
+                        if cfg!(windows) {
+                            "已重启到新版本。终端会话已断开。".to_string()
+                        } else {
+                            "已无缝升级，所有会话保持运行。".to_string()
+                        }
                     }
                     crate::local_daemon::UpgradeOutcome::Unsupported => {
                         // 守护完全没认这个 op，控制连接以外的东西没被碰过，各 pane
@@ -693,7 +697,7 @@ impl Workspace {
     /// **禁止**在 `update` 里同步 `Terminal::spawn`：握手含 sleep/轮询，多 pane 会把
     /// UI 卡死（「点重启守护就假死」）。流程：后台杀+拉起守护 → 后台按 cwd/sid 建
     /// Terminal → 主线程 `adopt_terminal` 挂回各 pane。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn confirm_restart_daemon(&mut self, cx: &mut Context<Self>) {
         self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;

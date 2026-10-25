@@ -1216,7 +1216,7 @@ fn fmt_uptime(secs: u64) -> String {
 
 /// 守护运行信息拼成一行：`v0.5.4 · PID 64954 · 启动于 07-16 20:38（已运行 3 小时 12 分）· 5 个会话`。
 /// 老守护回不出的字段直接不显示——宁可少一段，也不摆「未知」占位。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn daemon_info_line(info: &crate::local_daemon::DaemonInfo) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(v) = &info.version {
@@ -1313,20 +1313,20 @@ struct SettingsRenderSnapshot {
     moving_app: bool,
     #[cfg(target_os = "macos")]
     move_app_error: Option<SharedString>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_outdated: Option<bool>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_upgrading: bool,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_upgrade_msg: Option<String>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
     /// 能力库当前页签。和 `settings_section` 分开记：设置窗口和能力库可以同时开着，
     /// 各看各的页。
     capabilities_tab: crate::CapabilitiesTab,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     show_daemon_restart_confirm: bool,
     session_manager_open: bool,
 }
@@ -1484,7 +1484,7 @@ impl Render for SettingsContentView {
         // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
         // 焦点也在这扇窗里记，不能放到主窗口的 prepare。
         workspace.update(cx, |ws, cx| ws.sync_settings_modal_focus(window, cx));
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let show_daemon_restart_confirm = snapshot.show_daemon_restart_confirm;
         let session_manager_open = snapshot.session_manager_open;
 
@@ -1499,13 +1499,13 @@ impl Render for SettingsContentView {
             // 弹层开启期间才需要读它的动态会话数据；正常浏览设置页不会因此订阅整个
             // Workspace 的高频状态通知。
             .children({
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 {
                     show_daemon_restart_confirm.then(|| {
                         workspace.update(cx, |ws, cx| ws.render_daemon_restart_confirm(cx))
                     })
                 }
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 {
                     None::<gpui::AnyElement>
                 }

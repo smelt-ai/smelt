@@ -1,10 +1,9 @@
 //! 守护进程级 op：version / shutdown / hook 状态。
 
 use super::super::*;
-use std::os::unix::net::UnixStream;
 
-pub(super) fn handle_version(
-    conn: UnixStream,
+pub(super) fn handle_version<C: ClientSocket>(
+    conn: C,
     sessions: &Sessions,
     exe_mtime: u64,
     daemon_fingerprint: Option<&str>,
@@ -36,7 +35,7 @@ pub(super) fn handle_version(
     );
 }
 
-pub(super) fn handle_shutdown(conn: UnixStream) {
+pub(super) fn handle_shutdown<C: ClientSocket>(conn: C) {
     let mut c = conn;
     let _ =
         smelt_runtime_client::protocol::write_json_line(&mut c, &serde_json::json!({ "ok": true }));
@@ -51,8 +50,8 @@ pub(super) fn handle_shutdown(conn: UnixStream) {
     std::process::exit(0);
 }
 
-pub(super) fn handle_agent_event_op(
-    conn: UnixStream,
+pub(super) fn handle_agent_event_op<C: ClientSocket>(
+    conn: C,
     v: &serde_json::Value,
     sessions: &Sessions,
     event_hub: &EventHubHandle,

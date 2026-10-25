@@ -667,6 +667,7 @@ mod tests {
         std::fs::remove_dir_all(&temp).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn broken_symlinks_are_listed_so_they_can_be_removed() {
         let temp = std::env::temp_dir().join(format!("smelt-broken-{}", uuid::Uuid::new_v4()));

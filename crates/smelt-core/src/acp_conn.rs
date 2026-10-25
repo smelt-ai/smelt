@@ -15,6 +15,7 @@
 pub use smelt_model::acp_conn::*;
 
 use std::future::Future;
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -717,8 +718,11 @@ pub struct ConversationHandle {
 #[derive(Clone, Copy)]
 pub struct AcpStdio {
     pub pid: i32,
-    pub stdin_fd: std::os::unix::io::RawFd,
-    pub stdout_fd: std::os::unix::io::RawFd,
+    /// 交接用的原始 fd。Job 在进程登记表里，不放在这个值上。
+    #[cfg(unix)]
+    pub stdin_fd: RawFd,
+    #[cfg(unix)]
+    pub stdout_fd: RawFd,
 }
 
 /// SIGKILL 之后等内核收尸的上限。这不是「再猜一次进程死了没」，而是 `waitpid`
@@ -791,6 +795,47 @@ fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool)
     if pid <= 1 {
         return true;
     }
+    #[cfg(windows)]
+    {
+        let _ = reap_child;
+        prove_windows_process_dead(pid, timeout)
+    }
+    #[cfg(unix)]
+    {
+    prove_unix_process_group_dead(pid, timeout, reap_child)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (timeout, reap_child);
+        false
+    }
+}
+
+/// Windows 没有交接过来的进程组。这个 pid 是我们拉起来的，等它退出即可。
+#[cfg(windows)]
+fn prove_windows_process_dead(pid: i32, timeout: Duration) -> bool {
+    let Ok(pid) = u32::try_from(pid) else {
+        return true;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !smelt_sys::process::pid_is_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let slice = Duration::from_millis(15)
+            .min(deadline.saturating_duration_since(Instant::now()));
+        if slice.is_zero() {
+            return !smelt_sys::process::pid_is_alive(pid);
+        }
+        std::thread::park_timeout(slice);
+    }
+}
+
+#[cfg(unix)]
+fn prove_unix_process_group_dead(pid: i32, timeout: Duration, reap_child: bool) -> bool {
     let deadline = Instant::now() + timeout;
     // 允许收尸时才做亲缘判定：ECHILD=收养/已收走。此后不再复核。
     // 不允许收尸时，连这一次 WNOHANG 也不发，避免和还堵在 wait 上的那条线程抢。
@@ -862,6 +907,7 @@ fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool)
 }
 
 /// pid 本人是否已不存在。EPERM（活着但无权限）按存在处理。
+#[cfg(unix)]
 fn process_absent(pid: i32) -> bool {
     if pid <= 1 {
         return true;
@@ -882,7 +928,11 @@ pub fn kill_and_reap_process_group(pid: i32, timeout: Duration) -> bool {
         return true;
     }
     kill_process_group(pid);
-    prove_process_group_dead(pid, timeout)
+    let dead = prove_process_group_dead(pid, timeout);
+    if dead && let Ok(pid) = u32::try_from(pid) {
+        smelt_sys::process::release_tree(pid);
+    }
+    dead
 }
 
 /// 进程启动时刻（wall clock）。给“按 pid 动刀前验明正身”用：handoff 后 successor
@@ -984,11 +1034,20 @@ fn process_birth_inner(pid: i32) -> Option<String> {
     ))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn process_start_time_inner(pid: i32) -> Option<std::time::SystemTime> {
+    let Ok(pid) = u32::try_from(pid) else {
+        return None;
+    };
+    smelt_sys::process::process_started_at(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn process_start_time_inner(_pid: i32) -> Option<std::time::SystemTime> {
     None
 }
 
+#[cfg(unix)]
 enum Waitpid {
     Reaped,
     StillRunning,
@@ -996,6 +1055,7 @@ enum Waitpid {
     Interrupted,
 }
 
+#[cfg(unix)]
 fn waitpid_child(pid: i32, options: i32) -> Waitpid {
     let mut status = 0;
     let waited = unsafe { libc::waitpid(pid, &mut status, options) };
@@ -1010,6 +1070,7 @@ fn waitpid_child(pid: i32, options: i32) -> Waitpid {
     }
 }
 
+#[cfg(unix)]
 fn process_group_absent(pgid: i32) -> bool {
     if pgid <= 1 {
         return true;
@@ -1020,6 +1081,7 @@ fn process_group_absent(pgid: i32) -> bool {
 
 /// 这个进程组里现在还挂着哪些 pid。用来等组员退出，而不是隔几毫秒问组还在不在。
 /// 枚举失败就返回空：调用方会把剩余截止时间一次睡完再查。
+#[cfg(unix)]
 fn process_group_members(pgid: i32) -> Vec<i32> {
     if pgid <= 1 {
         return Vec::new();
@@ -1090,7 +1152,7 @@ fn linux_process_group(pid: i32) -> Option<i32> {
     after_comm.split_whitespace().nth(2)?.parse().ok()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn process_group_members_os(_pgid: i32) -> Vec<i32> {
     Vec::new()
 }
@@ -1404,6 +1466,9 @@ impl AcpChildGuard {
         self.reaped = true;
         self.kill_tree();
         let _ = crate::process_wait::reap_direct_child(self.pid);
+        if let Ok(pid) = u32::try_from(self.pid) {
+            smelt_sys::process::release_tree(pid);
+        }
     }
 
     fn kill_and_reap(&mut self) {
@@ -1418,7 +1483,10 @@ impl Drop for AcpChildGuard {
 }
 
 /// Handoff 恢复时没有直属 child handle，只能按已验证的进程组 id 兜底终止。
+#[cfg(unix)]
 struct KillProcessGroupOnDrop(i32);
+
+#[cfg(unix)]
 
 impl Drop for KillProcessGroupOnDrop {
     fn drop(&mut self) {
@@ -1430,9 +1498,13 @@ impl Drop for KillProcessGroupOnDrop {
 }
 
 fn kill_process_group(pid: i32) {
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
+    if pid <= 1 {
+        return;
     }
+    let Ok(pid) = u32::try_from(pid) else {
+        return;
+    };
+    let _ = smelt_sys::process::signal_tree(pid, smelt_sys::process::TreeSignal::Kill);
 }
 
 /// `connect_with` 的 SDK future 可能卡在 transport 或 agent 自己的启动阶段，
@@ -1579,7 +1651,9 @@ struct AcpChannels {
 
 /// 无缝升级交接时从旧进程继承的连接状态（fd / pid / agent 侧 session id）。
 pub struct ResumedSession {
+    #[cfg(unix)]
     pub stdin_fd: RawFd,
+    #[cfg(unix)]
     pub stdout_fd: RawFd,
     pub pid: i32,
     pub acp_session_id: String,
@@ -1657,7 +1731,9 @@ async fn run_connection(
             spawn_agent_process(&agent, launch.cwd.as_deref(), managed_bun.as_ref())?;
         *stdio = Some(AcpStdio {
             pid: child.id() as i32,
+            #[cfg(unix)]
             stdin_fd: child_stdin.as_raw_fd(),
+            #[cfg(unix)]
             stdout_fd: child_stdout.as_raw_fd(),
         });
         Ok::<_, agent_client_protocol::Error>(Some((
@@ -2061,6 +2137,7 @@ async fn run_connection(
 /// 清了 CLOEXEC、活过整个交接）继续跑，起一条跟 `spawn_acp` 同款的专用线程，
 /// 立即返回句柄。`ConversationHandle.stdio` 一开始就是 `Some`——这几个 fd 本来就是
 /// 调用方（smeltd）传进来的，不用等 spawn。
+#[cfg(unix)]
 pub fn resume_acp_from_fds(sid: String, resumed: ResumedSession) -> ConversationHandle {
     let (cmd_tx, cmd_rx) = smol::channel::unbounded::<ConversationCommand>();
     let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
@@ -2112,6 +2189,7 @@ pub fn resume_acp_from_fds(sid: String, resumed: ResumedSession) -> Conversation
 /// 完全一样——本想抽成共用，但 `Client.builder()` 链式调用之后的类型是个
 /// 展开不动的匿名泛型，硬拆共用函数会把签名搞得比这点重复代码还难读，
 /// protocol 这层的粘合代码本来就不常变，可以接受这份重复。
+#[cfg(unix)]
 async fn run_resumed_connection(
     resumed: ResumedSession,
     channels: AcpChannels,
@@ -3651,22 +3729,30 @@ fn spawn_agent_process(
         // （npx/uvx）以及它派生的真实 agent 必须属于同一进程组，结束会话时不留孤儿。
         std_cmd.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std_cmd.creation_flags(
+            smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
+        );
+    }
     if let Some(runtime) = managed_bun {
         runtime.inherit_into(&mut std_cmd);
     }
     let mut cmd = async_process::Command::from(std_cmd);
-    #[cfg(windows)]
-    {
-        use async_process::windows::CommandExt as _;
-
-        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+    #[cfg(windows)]
+    if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
+        drop(child);
+        return Err(agent_client_protocol::Error::internal_error().data(format!(
+            "无法把 agent 放进进程树：{error}"
+        )));
+    }
     let child_stdin = child.stdin.take().ok_or_else(|| {
         agent_client_protocol::Error::internal_error().data("无法打开 agent stdin")
     })?;
@@ -4897,17 +4983,25 @@ pub(crate) fn extended_search_path() -> String {
 /// 已经带 `/` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
 /// None——调用方保留原名，让 spawn 照常失败并把真实错误报出来。
 fn resolve_in_path(program: &str, path: &str) -> Option<String> {
-    if program.contains('/') {
+    if program.contains('/') || program.contains('\\') {
         return Some(program.to_string());
     }
-    for dir in path.split(':').filter(|d| !d.is_empty()) {
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    for dir in path.split(separator).filter(|d| !d.is_empty()) {
         let full = std::path::Path::new(dir).join(program);
-        // 是文件且可执行（软链会被 metadata 跟随到目标）。
+        // 是文件且可执行（软链会被 metadata 跟随到目标）。Windows 没有执行位。
         if let Ok(meta) = std::fs::metadata(&full) {
-            use std::os::unix::fs::PermissionsExt;
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                return full.to_str().map(String::from);
+            if !meta.is_file() {
+                continue;
             }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+            }
+            return full.to_str().map(String::from);
         }
     }
     None
@@ -6304,7 +6398,7 @@ mod model_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod process_reap_tests {
     use super::{
         Waitpid, kill_and_reap_process_group, process_birth, process_start_time,

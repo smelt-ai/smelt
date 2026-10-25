@@ -359,11 +359,10 @@ mod tests {
         assert!(out.stderr_str().contains("not found"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_subprocess_respects_cwd_and_env() {
         let sp = LocalSubprocess;
-        // 用 env 命令验证环境变量传递
-        #[cfg(unix)]
         {
             let out = sp
                 .run("env", &[], None, &[("TEST_VAR", "test_value")])
@@ -372,11 +371,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_with_stdin_passes_input() {
         let sp = LocalSubprocess;
-        // 用 cat 验证 stdin 传递
-        #[cfg(unix)]
         {
             let out = sp
                 .run_with_stdin("cat", &[], None, &[], b"hello world")

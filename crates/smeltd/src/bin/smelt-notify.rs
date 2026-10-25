@@ -15,7 +15,7 @@
 //! 缺失、env 没设置）都静默退出。
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
+use smelt_runtime_client::UnixStream;
 use std::time::Duration;
 
 use smelt_core::agent_event::{AgentEvent, AgentEventKind};

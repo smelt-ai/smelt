@@ -45,11 +45,11 @@ pub(crate) fn connect_terminal(
     if runtime.is_local() {
         // 拉起本机 smeltd 是 Unix 上的生命周期（设计文档 D3/D4）。Windows 第 1 步
         // 只连远程运行时。
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             return crate::local_daemon::connect_daemon();
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -357,7 +357,7 @@ pub(crate) fn runtime_incompatible(key: &RuntimeKey, cx: &gpui::App) -> bool {
 
 /// 本机守护版本对不上、正在换代：这时由订阅线程负责升级（见 `runtime_events`），
 /// 别处的空闲升级不要再插一脚。只在有本机 smeltd 的平台上有意义。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
     status_of_key(&RuntimeKey::Local, cx).is_some_and(|status| {
         matches!(
@@ -534,7 +534,7 @@ fn remote_client(
 /// 本机守护：没在跑就按 App 里的版本拉起（运行中退出了也靠这里补上），再对版本。
 /// 阻塞，只在后台调。
 pub(crate) fn local_status(client: &RuntimeClient) -> RuntimeStatus {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     crate::local_daemon::ensure_daemon_running();
     status_of(client)
 }

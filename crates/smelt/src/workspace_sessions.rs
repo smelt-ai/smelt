@@ -119,7 +119,7 @@ impl Workspace {
             .spawn(move || {
                 // 1) 完整 ensure（可能 handoff）→ 2) 再 reattach。禁止与 UI 侧并行 upgrade。
                 if runtime_bg.is_local() {
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     {
                         let _ = crate::local_daemon::ensure_managed_daemon_current();
                         crate::local_daemon::ensure_daemon_running();
@@ -439,7 +439,7 @@ impl Workspace {
                                 .unwrap_or(0);
                             if pending == 0 {
                                 if runtime.is_local() {
-                                    #[cfg(unix)]
+                                    #[cfg(any(unix, windows))]
                                     this.check_daemon_outdated(cx);
                                 }
                                 return;
@@ -466,7 +466,7 @@ impl Workspace {
                         );
                     }
                     // restore 完成后再查/升级守护，避免与 reattach / 重试并行 handoff。
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     this.check_daemon_outdated(cx);
                     // 恢复完成后刷新会话管理器，但不要在启动时自动删除未连接会话。
                     // 未连接并不等于用户想删除：守护重启、网络短暂中断和恢复竞态都会

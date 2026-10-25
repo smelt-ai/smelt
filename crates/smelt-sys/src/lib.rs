@@ -2,14 +2,13 @@
 
 pub mod app_log;
 pub mod block_on;
-/// 守护映像、文件描述符上限、等子进程：只服务 smeltd 生命周期（设计文档 D4）。
-#[cfg(unix)]
 pub mod daemon_image;
-#[cfg(unix)]
 pub mod fd_limit;
-#[cfg(unix)]
+pub mod file_lock;
+#[cfg(windows)]
+pub mod named_pipe;
 pub mod pi_image;
-#[cfg(unix)]
+pub mod process;
 pub mod process_wait;
 pub mod tty_color;
 

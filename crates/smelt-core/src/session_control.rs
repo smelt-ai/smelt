@@ -33,7 +33,7 @@ pub struct RemoteSessionCatalog {
 
 fn smelt_path(name: &str) -> PathBuf {
     smelt_paths::smelt_home()
-        .unwrap_or_else(|| PathBuf::from("/tmp/.smelt"))
+        .unwrap_or_else(|| std::env::temp_dir().join(".smelt"))
         .join(name)
 }
 

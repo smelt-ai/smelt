@@ -40,7 +40,7 @@ mod provider_quota;
 mod resizable_split;
 mod runtime_call;
 mod runtime_events;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod local_daemon;
 mod runtime_space;
 mod runtimes;
@@ -2790,24 +2790,24 @@ struct Workspace {
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
     /// 本机守护是否落后于磁盘上的 smeltd。没有本机运行时这些字段不存在。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_outdated: Option<bool>,
     /// 最近一次无缝升级的结果提示（设置页守护分区显示；None = 没试过）。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_upgrade_msg: Option<String>,
     /// 无缝升级进行中（按钮置灰防连点）。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_upgrading: bool,
     /// 检测到守护已过期、但有 agent 正在跑，升级挂起等空闲：true = 待升级。
     /// 空闲后（或用户手动点升级）会清掉，转成真正的 `upgrade_daemon_seamless`。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_upgrade_pending: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     daemon_info: Option<local_daemon::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     show_daemon_restart_confirm: bool,
     /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
     /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的游离会话、忘了关的临时会话都会
@@ -3252,17 +3252,17 @@ impl Workspace {
             git_writes: HashMap::new(),
             provider_quota_refresh_tx: None,
 
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_outdated: None,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_upgrade_msg: None,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_upgrading: false,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_upgrade_pending: false,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             daemon_info: None,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             show_daemon_restart_confirm: false,
             session_manager_open: false,
             session_manager_list: None,
@@ -3334,7 +3334,7 @@ impl Workspace {
                 this.sync_remote_spaces(window, cx)
             }),
         );
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         ws.reconcile_remote_catalog_projection(window, cx);
@@ -3371,7 +3371,7 @@ impl Workspace {
     /// 的空闲门控——agent 忙就挂起,空闲才升,不打扰使用(连接路径的 ensure 只
     /// 对齐磁盘不再偷跑 exec,这里负责兜底把守护在空闲时跟上)。
     /// 探测是本地 socket 往返(毫秒级),60s 一次对用户完全无感。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn start_daemon_outdated_watch(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -4631,7 +4631,7 @@ fn main() {
     schedule_obsolete_file_cleanup();
     // Finder / launchd 启动的 GUI 默认软上限常是 256；在创建窗口、socket 和终端
     // 线程之前先抬高，避免正常多会话也让更新检查等新连接触发 EMFILE。
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     smelt_sys::fd_limit::raise_fd_limit();
     // with_assets 注册图标资源，Sidebar 的 IconName svg 才能渲染；见上面 SmeltAssets。
     let app = gpui_platform::application().with_assets(SmeltAssets);
@@ -4766,7 +4766,7 @@ fn main() {
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);
                     }
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     ws.maybe_flush_pending_daemon_upgrade(cx);
                     ws.notify_if_session_facts_changed(cx);
                 });
