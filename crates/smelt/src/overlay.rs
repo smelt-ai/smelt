@@ -31,6 +31,7 @@ pub(crate) enum ModalLayer {
     UnsavedFile,
     SessionManager,
     DaemonRestart,
+    UpdateInstall,
     DirPicker,
 }
 
@@ -54,13 +55,17 @@ impl ModalLayer {
             Self::UnsavedFile => 13,
             Self::SessionManager => 1,
             Self::DaemonRestart => 2,
+            Self::UpdateInstall => 3,
             // 选目录盖在所有主窗口确认框之上：它总是从一次明确的点击打开。
             Self::DirPicker => 15,
         }
     }
 
     fn is_settings(self) -> bool {
-        matches!(self, Self::SessionManager | Self::DaemonRestart)
+        matches!(
+            self,
+            Self::SessionManager | Self::DaemonRestart | Self::UpdateInstall
+        )
     }
 }
 
@@ -167,6 +172,9 @@ impl Workspace {
         }
         if self.show_daemon_restart_confirm {
             rank = Some(rank.unwrap_or(0).max(ModalLayer::DaemonRestart.rank()));
+        }
+        if self.show_update_install_confirm {
+            rank = Some(rank.unwrap_or(0).max(ModalLayer::UpdateInstall.rank()));
         }
         rank
     }
@@ -446,7 +454,6 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .bg(rgba(0x000000d9))
-                
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.acp_image_preview = None;
                     cx.notify();

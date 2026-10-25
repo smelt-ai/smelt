@@ -17,6 +17,8 @@ mod terminal;
 use lifecycle::*;
 use remote::*;
 
+pub(crate) use lifecycle::graceful_shutdown;
+
 pub(crate) use auth::*;
 pub(crate) use subscribe::*;
 pub(crate) use terminal::*;
@@ -34,6 +36,7 @@ pub(crate) struct ServerShared {
     /// 启动时钉死的进程指纹（version 回给 GUI 判 outdated 用）。
     /// 内容哈希，不随 StageDiskOnly 变化；None=启动时文件已消失的孤儿进程。
     pub(crate) daemon_fingerprint: Option<String>,
+    #[allow(dead_code)]
     pub(crate) listen_fd: RawFd,
     pub(crate) event_hub: EventHubHandle,
 }
@@ -73,7 +76,7 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         automations,
         exe_mtime,
         daemon_fingerprint,
-        listen_fd,
+        listen_fd: _,
         event_hub,
     } = shared;
     // 头一行 JSON。之后的帧字节可能已被 BufReader 预读，故帧循环必须复用同一个 reader。
@@ -164,7 +167,7 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
             handle_conversation_rename(conn, &v, &acp_sessions, &remote_sessions, &event_hub)
         }
         DaemonOperation::Kill => handle_kill(conn, &v, &sessions, &remote_sessions, &event_hub),
-        DaemonOperation::Upgrade => handle_upgrade(conn, &v, &sessions, &acp_sessions, listen_fd),
+        DaemonOperation::Upgrade => handle_upgrade(conn, &v),
         DaemonOperation::Version => {
             handle_version(conn, &sessions, exe_mtime, daemon_fingerprint.as_deref())
         }
@@ -176,9 +179,7 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         DaemonOperation::DesktopAttach => {
             crate::desktop::handle_desktop_attach(conn, reader, &crate::desktop::vnc_endpoint())
         }
-        DaemonOperation::RuntimeUpgrade => {
-            crate::runtime_upgrade::handle_runtime_upgrade(conn, &v)
-        }
+        DaemonOperation::RuntimeUpgrade => crate::runtime_upgrade::handle_runtime_upgrade(conn, &v),
     }
 }
 

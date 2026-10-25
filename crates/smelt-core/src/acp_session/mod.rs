@@ -31,7 +31,7 @@ use crate::daemon_state::DaemonPhase;
 mod apply;
 pub use apply::{
     ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
-    queue_composer_restore, queued_item_images, take_claimed_queue_text,
+    interrupt_open_turn, queue_composer_restore, queued_item_images, take_claimed_queue_text,
 };
 use apply::{pending_action_phase, resume_running};
 
@@ -662,11 +662,17 @@ impl AcpSessionState {
     /// 重放草稿是从 0 开始的完整投影。提交时丢掉上一份正文，并把后缀下标清掉。
     /// 没在重放时调用只清标志。后缀种子的绝对长度要留到真正的重放提交。
     pub fn commit_replay(&mut self) {
+        let was_replaying = self.replaying_history || self.replay_baseline.is_some();
         let committing_scratch = self.replay_baseline.take().is_some();
         if committing_scratch {
             self.entries_base = 0;
         }
         self.replaying_history = false;
+        // 重放结束时，文件里没写完的那一轮不会再收到 TurnEnded。留着会让
+        // 重连后的会话一直转圈。用户取消仍记成 Cancelled。
+        if was_replaying {
+            let _ = interrupt_open_turn(self);
+        }
     }
 
     /// 重放没有形成完整投影。草稿不能当会话，回到开始重放前已发布的正文。

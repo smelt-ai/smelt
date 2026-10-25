@@ -144,12 +144,12 @@
 
 ## 第 2 步：方向
 
-第 2 步基本等于把 smeltd 移植一遍。平台相关代码集中在 smeltd 的 `main.rs`、`protocol/auth.rs`、`handoff_v2/`，以及 smelt-core 的 `background_tasks.rs`、`acp_conn.rs`、`pi_rpc.rs`、`pi_model_settings.rs`、`managed_runtime.rs`。
+第 2 步基本等于把 smeltd 移植一遍。平台相关代码集中在 smeltd 的 `main.rs`、`protocol/auth.rs`、`protocol/lifecycle.rs`，以及 smelt-core 的 `background_tasks.rs`、`acp_conn.rs`、`pi_rpc.rs`、`pi_model_settings.rs`、`managed_runtime.rs`。
 
 - **本机通信与鉴权**：`protocol/auth.rs` 按对端进程身份鉴权（macOS 取 audit token 再校验代码签名），回环端口拿不到对端进程，不可用。候选是 AF_UNIX（和 D1 同一种流，对端 pid 用 `SIO_AF_UNIX_GETPEERPID`）或命名管道（`GetNamedPipeClientProcessId`），再校验 Authenticode 签名。取舍的关键是 smeltd 服务端大量用 tokio，而 tokio 在 Windows 上没有 AF_UNIX，要评估监听和会话流怎么接进运行时。未定。
 - **Pi 扩展**：`background_tasks.rs` 里 Pi 扩展通过 Unix 套接字给会话宿主下命令，TS 侧要一起换传输。
 - **进程模型**：`pi_rpc.rs` 的 `sigprocmask` / `SIGCHLD`，`acp_conn.rs` 的 `WNOHANG` / `proc_bsdinfo`，`background_tasks.rs` 的 `kill` / `SIGKILL`，换成 Job Object。终端用的 `portable-pty` 支持 ConPTY。
-- **无缝交接**：`handoff_v2` 用 `SCM_RIGHTS` 把 PTY 等 fd 交给新进程。ConPTY 句柄能不能交给另一个进程接着用待验证；第一版不做交接，升级即重启，终端会话丢失。
+- **升级**：新二进制校验通过后，先走优雅停机（收割子进程、回写未完成回合），再 `exec` 或重启到新映像。不交接 fd。Windows 第一版同样是升级即重启。进行中的回合记为中断，历史还在，重启后可以继续。
 - **软链接与权限**：`managed_runtime.rs`、`daemon_image` 靠软链接切版本，Windows 上建软链接要开发者模式或管理员权限，要换机制；`pi_model_settings.rs` 的 0600 凭据保护和 `kevent` 文件监听要换成 ACL 和别的监听方式。
 - **hook**：各 agent hook 里的 smelt-notify 路径要按 cmd / PowerShell 规则引用，配置位置按 Windows 约定。
 

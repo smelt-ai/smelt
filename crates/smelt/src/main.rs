@@ -21,6 +21,7 @@ pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
 mod conversation_layout;
+mod daemon_restart_prompt;
 mod desktop_view;
 mod dir_picker;
 mod dock;
@@ -2780,11 +2781,10 @@ struct Workspace {
     daemon_outdated: Option<bool>,
     /// 最近一次无缝升级的结果提示（设置页守护分区显示；None = 没试过）。
     daemon_upgrade_msg: Option<String>,
-    /// 无缝升级进行中（按钮置灰防连点）。
+    /// 重启守护进行中（按钮置灰防连点）。
     daemon_upgrading: bool,
-    /// 检测到守护已过期、但有 agent 正在跑，升级挂起等空闲：true = 待升级。
-    /// 空闲后（或用户手动点升级）会清掉，转成真正的 `upgrade_daemon_seamless`。
-    daemon_upgrade_pending: bool,
+    /// 设置页「立即重启更新」：只有有进行中的会话时才弹出。
+    show_update_install_confirm: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
     daemon_info: Option<terminal::DaemonInfo>,
@@ -3228,7 +3228,7 @@ impl Workspace {
             daemon_outdated: None,
             daemon_upgrade_msg: None,
             daemon_upgrading: false,
-            daemon_upgrade_pending: false,
+            show_update_install_confirm: false,
             daemon_info: None,
             show_daemon_restart_confirm: false,
             session_manager_open: false,
@@ -3913,6 +3913,23 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 if this.quit_requested {
                     return;
+                }
+                if matches!(this.update_status, updater::UpdateStatus::Applying { .. }) {
+                    this.begin_main_modal_focus(window, cx);
+                    this.show_quit_confirm = true;
+                    cx.notify();
+                    return;
+                }
+                // 有待装更新时退出会停掉守护并换包。没有进行中的会话就直接走，
+                // 有的话必须先确认，不能把正在输出的对话静默杀掉。
+                if this.update_status.ready_update().is_some() {
+                    let names = this.busy_work_names(cx);
+                    if !daemon_restart_prompt::should_confirm(&names) {
+                        if let Some(update) = this.update_status.ready_update().cloned() {
+                            this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
+                        }
+                        return;
+                    }
                 }
                 this.begin_main_modal_focus(window, cx);
                 this.show_quit_confirm = true;
@@ -4701,7 +4718,6 @@ fn main() {
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);
                     }
-                    ws.maybe_flush_pending_daemon_upgrade(cx);
                     ws.notify_if_session_facts_changed(cx);
                 });
             }

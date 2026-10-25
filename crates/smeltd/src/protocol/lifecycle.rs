@@ -37,18 +37,137 @@ pub(super) fn handle_version(
 }
 
 pub(super) fn handle_shutdown(conn: UnixStream) {
-    let mut c = conn;
-    let _ =
-        smelt_runtime_client::protocol::write_json_line(&mut c, &serde_json::json!({ "ok": true }));
-    let _ = c.shutdown(Shutdown::Both);
-    // 先关 iroh endpoint 再 exit，远程设备立刻知道连接断了，而不是等超时。
-    // PTY 随本进程死、shell 收 SIGHUP，这是「重启守护」的代价。
-    cleanup_sidecar_services();
-    // 正常退出：清空身份落盘，下次启动视为干净退出。
-    // 保持到 process::exit：不能让已等待的 state/remove 在删除后重新落盘。
-    let _commit = STATE_DIRECTORY_COMMIT_GATE.lock().unwrap();
-    with_session_directory(SessionDirectory::clear_for_clean_shutdown);
+    graceful_shutdown(Some(conn), None);
+}
+
+/// 停机只做一次。信号和 shutdown op 撞在一起时，后来的调用停在这里，
+/// 等先到的那次把进程换掉或退出。
+static SHUTDOWN_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 五步停机。`exec_exe` 有值时，子进程和文件句柄都放开之后再 `exec` 到那份新映像。
+/// 没有则在回执写完后退出。回执一定在收割和 WAL checkpoint 之后，调用方才能去换
+/// `.app` / `.exe`。
+pub(crate) fn graceful_shutdown(
+    ack: Option<UnixStream>,
+    exec_exe: Option<std::path::PathBuf>,
+) -> ! {
+    use std::sync::atomic::Ordering;
+
+    if SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+
+    // 1. 禁新会话、禁新子进程，并挡住身份目录的迟到提交。
+    let _spawn_gate = SPAWN_GATE
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    let _commit_gate = STATE_DIRECTORY_COMMIT_GATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    dlog("shutdown: 已拦住新会话和新的状态提交");
+
+    // 2. 拉回宿主流式缓冲，把没写完的回合收成中断，并留下自动化对话。
+    if let Some(server) = super::SERVER.get() {
+        for (id, slot) in server.acp_sessions.snapshot() {
+            dlog(&format!("shutdown: 结算会话 {id}"));
+            crate::acp_host::settle_acp_session_for_shutdown(&slot.value);
+        }
+        save_active_automation_transcripts(&server.automations, &server.acp_sessions);
+    }
+
+    // 3. 并发收割 ACP 进程组和 PTY。回执之前必须证明它们已经退出。
+    if let Some(server) = super::SERVER.get() {
+        let acp = server.acp_sessions.snapshot();
+        let sessions = server.sessions.snapshot();
+        let mut joins = Vec::with_capacity(acp.len() + sessions.len());
+        for (id, slot) in acp {
+            joins.push(std::thread::spawn(move || {
+                if !crate::acp_host::retire_acp_runtime(&slot.value) {
+                    dlog(&format!("shutdown: 会话 {id} 的进程组没有收干净"));
+                }
+            }));
+        }
+        for (id, session) in sessions {
+            joins.push(std::thread::spawn(move || {
+                if !session.child.terminate_and_wait(ACP_SHUTDOWN_GRACE) {
+                    dlog(&format!("shutdown: 终端 {id} 没有在宽限内退出"));
+                }
+            }));
+        }
+        for join in joins {
+            let _ = join.join();
+        }
+    }
+
+    // 4. sidecar、身份目录、SQLite WAL。目录清空握着上面那把提交锁。
+    crate::remote::cleanup_sidecar_services();
+    with_session_directory(crate::session_directory::SessionDirectory::clear_for_clean_shutdown);
+    match smelt_core::sqlite_state::default_sqlite_store() {
+        Ok(store) => {
+            if let Err(error) = store.checkpoint_wal_truncate() {
+                dlog(&format!("shutdown: WAL checkpoint 失败：{error}"));
+            }
+        }
+        Err(error) => dlog(&format!("shutdown: 打开状态库失败：{error}")),
+    }
+
+    // 5. 句柄已经放开，才告诉调用方可以换二进制。
+    if let Some(mut conn) = ack {
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut conn,
+            &serde_json::json!({ "ok": true }),
+        );
+        let _ = conn.flush();
+        let _ = conn.shutdown(std::net::Shutdown::Both);
+    }
+    if let Some(exe) = exec_exe {
+        use std::os::unix::process::CommandExt;
+        dlog(&format!("shutdown: exec {}", exe.display()));
+        let mut command = std::process::Command::new(&exe);
+        command
+            .env_remove("SMELTD_HANDOFF")
+            .env_remove("SMELTD_HANDOFF_SOCK")
+            .env_remove("SMELTD_DAEMON_FINGERPRINT");
+        let error = command.exec();
+        dlog(&format!("shutdown: exec {} 失败：{error}", exe.display()));
+        std::process::exit(1);
+    }
     std::process::exit(0);
+}
+
+fn save_active_automation_transcripts(
+    automations: &crate::AutomationStore,
+    acp_sessions: &crate::acp_host::AcpSessions,
+) {
+    let runs = automations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .snapshot()
+        .runs;
+    for run in runs.into_iter().filter(|run| run.status.is_active()) {
+        let Some(session_id) = run.session_id.as_deref() else {
+            continue;
+        };
+        let Some(slot) = acp_sessions.get(session_id) else {
+            continue;
+        };
+        let entries = slot.value.reduced.lock().unwrap().entries().to_vec();
+        if entries.is_empty() {
+            continue;
+        }
+        if let Err(error) = automations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_run_transcript(&run.id, &entries)
+        {
+            dlog(&format!(
+                "shutdown: 保存自动化 {} 的对话失败：{error}",
+                run.id
+            ));
+        }
+    }
 }
 
 pub(super) fn handle_agent_event_op(
