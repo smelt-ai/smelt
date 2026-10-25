@@ -3477,7 +3477,7 @@ mod tests {
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_dir(name: &str) -> PathBuf {
+    fn temp_dir(name: &str) -> TempDir {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3486,7 +3486,26 @@ mod tests {
             .join("../../target/smelt-store-tests")
             .join(format!("{name}-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
-        path
+        TempDir { path }
+    }
+
+    /// 测试结束再删目录。库连接比这个值后声明，会先关掉；Windows 不能删还开着的数据库文件。
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 
     #[test]
@@ -3503,7 +3522,6 @@ mod tests {
         drop(before);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v17 的完整结构（冻结的 `V17_SCHEMA`）。
@@ -3684,7 +3702,6 @@ mod tests {
             1,
             "全局层不属于任何一个智能体"
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3734,7 +3751,6 @@ mod tests {
         assert!(!agents[0].memory_enabled);
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3789,7 +3805,6 @@ mod tests {
         assert_eq!(agents[0].mcp_servers_json, br#"["github"]"#.to_vec());
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v16 的库：v17 多一张已配对设备表，再到 v18 把偏好搬进按字段的表。
@@ -3815,7 +3830,6 @@ mod tests {
         drop(store);
 
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 照开发者真实 v16/v17 库的 `kv` 形状（已脱敏）造一份旧库：运行时自己的数据要落进新表，
@@ -4344,7 +4358,6 @@ mod tests {
                 .unwrap();
             assert_eq!(project_columns, ["root", "position"], "折叠状态归客户端");
             drop(connection);
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -4382,7 +4395,6 @@ mod tests {
         assert!(!store.delete_paired_device("aa").unwrap());
         assert!(store.paired_device("aa").unwrap().is_none());
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v15 发出去的库：`mcp_servers_json` 默认值是文本 `'[]'`。升到 v16 后默认值改成 BLOB，
@@ -4438,7 +4450,6 @@ mod tests {
             .unwrap();
         assert_eq!(default, "X'5B5D'");
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4481,7 +4492,6 @@ mod tests {
         store.record_memory_read("user", "a.md", 1).unwrap();
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4508,7 +4518,6 @@ mod tests {
         );
 
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4551,7 +4560,6 @@ mod tests {
             "v2 建的跨 Agent 消息表在 v23 删掉"
         );
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4671,7 +4679,6 @@ mod tests {
             .unwrap();
         assert_eq!(event_tables, 0);
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4763,7 +4770,6 @@ mod tests {
             "Pi 的名单保留，DSH 的删掉"
         );
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4795,7 +4801,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cursors, 0, "持久投递在 v23 整个删掉");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4827,7 +4832,6 @@ mod tests {
             0
         );
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn kept_history_title(store: &Store) -> String {
@@ -4890,7 +4894,6 @@ mod tests {
             "codex acp"
         );
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4911,7 +4914,6 @@ mod tests {
 
         let store = Store::open_or_create(&path).unwrap();
         assert_eq!(kept_history_title(&store), "keep");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4951,7 +4953,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("pi".to_string(), None, None));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v7 的库一路迁到当前版本。v9 之前的自动化只存在 `kv` 文档里，那套导入已经删了
@@ -4992,7 +4993,6 @@ mod tests {
             .unwrap();
         assert!(!kv_exists);
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn json_bytes(value: serde_json::Value) -> Vec<u8> {
@@ -5072,7 +5072,6 @@ mod tests {
             Some(b"[1]".to_vec())
         );
         assert_eq!(store.get_automation_run_transcript("drop").unwrap(), None);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5128,7 +5127,6 @@ mod tests {
             store.get_automation_run_transcript("run-drop").unwrap(),
             None
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5163,7 +5161,6 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(columns.contains(&"obsolete_context".to_string()));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5194,7 +5191,6 @@ mod tests {
         }
         let store = Store::open_or_create(path).unwrap();
         assert_eq!(store.list_paired_devices().unwrap().len(), 8);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5225,7 +5221,6 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
             .unwrap();
         assert_eq!(journal_mode, "delete", "拒绝未来 schema 时不得先改库");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5266,7 +5261,6 @@ mod tests {
             )
             .unwrap();
         assert!(!rebuilt, "拒绝打开时不得重建当前 schema");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5298,7 +5292,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(root, "/keep-me");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5354,7 +5347,6 @@ mod tests {
                 1,
                 "{table}"
             );
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -5412,7 +5404,6 @@ mod tests {
                 1,
                 "{name}"
             );
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -5467,7 +5458,6 @@ mod tests {
             .unwrap();
         assert!(!event_log_exists);
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5517,7 +5507,6 @@ mod tests {
             .unwrap();
         assert_eq!(note, "");
         transaction.commit().unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5688,7 +5677,6 @@ mod tests {
             3,
             "重复快照应原子替换，不能累积旧 session"
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn put_workspace_json(store: &Store, raw: &[u8]) {
@@ -5745,7 +5733,6 @@ mod tests {
             Some("pi-picked"),
             "只有第一次落库采用窗口的 id"
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5814,7 +5801,6 @@ mod tests {
             store.stored_history_identity("acp-missing").unwrap(),
             StoredHistoryIdentity::NoRow
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5978,7 +5964,6 @@ mod tests {
                 .unwrap();
             assert_eq!(count, expected, "{table}");
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v9 的库建出 v10 起的目录表，一路迁到当前版本；已有的关系表数据原样保留。
@@ -6010,7 +5995,6 @@ mod tests {
         assert!(store.get_agent_ui_snapshot().unwrap().is_none());
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6097,7 +6081,6 @@ mod tests {
                 .unwrap(),
             STORE_SCHEMA_VERSION
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn catalog_writer(id: &str, seq: u64) -> WorkspaceCatalogWriter {
@@ -6147,7 +6130,6 @@ mod tests {
         );
         assert_eq!(store.workspace_catalog_revision().unwrap(), 3);
         assert_eq!(catalog_projects(&store), ["/a3"]);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 别的写入方提交过一次，基于旧版本的提交就是真冲突，哪怕更早的版本是自己写的。
@@ -6186,7 +6168,6 @@ mod tests {
         );
         assert_eq!(store.workspace_catalog_revision().unwrap(), 2);
         assert_eq!(catalog_projects(&store), ["/b"]);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 超时的旧请求在新提交之后才到：序号更小，不能盖掉更新的那份。
@@ -6209,7 +6190,6 @@ mod tests {
             WorkspaceCatalogCommit::Conflict { current: 1 }
         );
         assert_eq!(catalog_projects(&store), ["/new"]);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v18、v19 都有、v20 删掉的 worktree 继承两张表，原样照 v18 的建表语句。
@@ -6303,7 +6283,6 @@ CREATE TABLE worktree_inherit_skip_pattern (
             normalized_schema(&fresh),
             "从 v18 升上来的库要和新建的库一个形状"
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v19 的库：worktree 继承两张表随 git worktree 功能下线删掉，其余数据原样留着，
@@ -6403,7 +6382,6 @@ CREATE TABLE worktree_inherit_skip_pattern (
             "备份里留着删表前的数据"
         );
         drop(backup);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 一段终端对话、一段 ACP 对话。终端对话里三个终端故意不按 id 排。
@@ -6461,7 +6439,6 @@ CREATE TABLE worktree_inherit_skip_pattern (
         // 分屏和当前看的是哪个归客户端，运行时不收也不吐。
         assert!(terminals.get("layout").is_none());
         assert!(terminals.get("active").is_none());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6490,7 +6467,6 @@ CREATE TABLE worktree_inherit_skip_pattern (
             store.put_workspace_snapshot(&snapshot),
             Err(StoreError::EmptyConversation { id }) if id == "conv-terminals"
         ));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// v21 的会话和会话组：会话还没有 `position`，会话组还记着当前看的是哪个。从新建的库
@@ -6631,7 +6607,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
                 path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v{version}"))
                     .exists()
             );
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -6782,7 +6757,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             store.history_agent_bindings("pi", "work").unwrap(),
             std::collections::BTreeMap::from([("resume-2".to_string(), "coder".to_string())])
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -6799,7 +6773,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6814,7 +6787,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         assert!(!path.exists(), "open 缺失路径不得建库");
         assert!(!super::database_sidecar_path(&path, "-wal").exists());
         assert!(!super::database_sidecar_path(&path, "-shm").exists());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6836,7 +6808,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             "{error}"
         );
         assert!(!path.exists());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6846,7 +6817,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         Store::create(&path).unwrap();
         let error = Store::create(&path).unwrap_err();
         assert!(matches!(error, StoreError::AlreadyExists { .. }), "{error}");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6868,7 +6838,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
                 .unwrap();
             assert_eq!(version, 0, "open 不得把空文件初始化成当前 schema");
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6883,6 +6852,5 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         let _ = std::fs::remove_file(super::database_sidecar_path(&path, "-shm"));
         std::fs::write(super::database_sidecar_path(&path, "-shm"), b"x").unwrap();
         assert_eq!(database_presence(&path), DatabasePresence::OrphanSidecars);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
