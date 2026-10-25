@@ -231,6 +231,8 @@ mod tests {
                 .iter()
                 .any(|entry| entry["provider"] == "crush" && entry["command"] == "crush --yolo")
         }));
+        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
