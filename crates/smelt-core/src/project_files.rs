@@ -181,11 +181,7 @@ pub fn search(root: &str, query: &str) -> ProjectSearchResult {
 
         let path = entry.path();
         let name = entry.file_name().to_string_lossy();
-        let rel = path
-            .strip_prefix(root_path)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
+        let rel = portable_rel(path.strip_prefix(root_path).unwrap_or(path));
         let abs = path.to_string_lossy().to_string();
 
         // 1. 文件名命中：直接记一条（不再看内容），命中行留空
@@ -257,6 +253,16 @@ pub fn search(root: &str, query: &str) -> ProjectSearchResult {
     ProjectSearchResult {
         hits: name_hits,
         truncated,
+    }
+}
+
+/// 相对路径用 `/`。搜索结果要和 git 的路径一样，不随本机分隔符变。
+fn portable_rel(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
     }
 }
 
@@ -458,13 +464,33 @@ mod tests {
 
     #[test]
     fn paths_outside_the_project_are_rejected() {
-        assert!(within("/repo", "/repo"));
-        assert!(within("/repo", "/repo/src/main.rs"));
-        assert!(!within("/repo", "/repository/x"), "前缀相同但不是子目录");
-        assert!(!within("/repo", "/repo/../etc/passwd"));
-        assert!(!within("/repo", "src/main.rs"), "必须是绝对路径");
+        // Windows 上 `/repo` 不是绝对路径，用盘符路径测同一套规则。
+        let (root, child, cousin, escape, relative, outside) = if cfg!(windows) {
+            (
+                r"C:\repo",
+                r"C:\repo\src\main.rs",
+                r"C:\repository\x",
+                r"C:\repo\..\etc\passwd",
+                r"src\main.rs",
+                r"C:\etc",
+            )
+        } else {
+            (
+                "/repo",
+                "/repo/src/main.rs",
+                "/repository/x",
+                "/repo/../etc/passwd",
+                "src/main.rs",
+                "/etc",
+            )
+        };
+        assert!(within(root, root));
+        assert!(within(root, child));
+        assert!(!within(root, cousin), "前缀相同但不是子目录");
+        assert!(!within(root, escape));
+        assert!(!within(root, relative), "必须是绝对路径");
         assert!(matches!(
-            tree("/repo", "/etc"),
+            tree(root, outside),
             Err(ProjectFileError::OutsideProject(_))
         ));
     }
