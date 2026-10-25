@@ -2385,10 +2385,12 @@ mod tests {
         }
     }
 
-    /// 打印且不加换行。Windows 的 `cmd` 没有 `printf`，用 `set /p` 把提示打出来就结束。
+    /// 打印且不加换行。Windows 的 `cmd` 没有 `printf`。
+    /// `set /p` 直接读空设备会立刻碰到文件尾，退出码是 1，任务会被记成失败。
+    /// 先用 `echo(` 送进一行，读取成功，退出码才是 0，打出来的仍没有换行。
     fn print_text(text: &str) -> String {
         if cfg!(windows) {
-            format!("set /p={text}<nul")
+            format!("echo(|set /p={text}")
         } else {
             format!("printf {text}")
         }
