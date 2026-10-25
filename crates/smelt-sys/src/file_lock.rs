@@ -86,12 +86,18 @@ fn lock_file(file: &File, blocking: bool) -> io::Result<()> {
 #[cfg(windows)]
 fn lock_file(file: &File, blocking: bool) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx};
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
 
     let mut flags = LOCKFILE_EXCLUSIVE_LOCK;
     if !blocking {
         flags |= LOCKFILE_FAIL_IMMEDIATELY;
     }
+    // 锁的起点在 OVERLAPPED 里。空指针会被直接解引用，进程以访问违规退出。
+    // 文件不是重叠 IO 打开的，调用会阻塞到拿到锁；hEvent 保持空。
+    let mut overlapped = OVERLAPPED::default();
     let ok = unsafe {
         LockFileEx(
             file.as_raw_handle(),
@@ -99,7 +105,7 @@ fn lock_file(file: &File, blocking: bool) -> io::Result<()> {
             0,
             u32::MAX,
             u32::MAX,
-            std::ptr::null_mut(),
+            &mut overlapped,
         )
     };
     if ok == 0 {
