@@ -1696,12 +1696,8 @@ mod hook_file_tests {
 
     #[test]
     fn removing_smelt_hook_preserves_third_party_handlers() {
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-hook-remove-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        // 目录名只用标签。测试线程名里有冒号，不能拿来当文件名。
+        let dir = temp_dir("hook-remove");
         let path = dir.join("hooks.json");
         std::fs::write(
             &path,
