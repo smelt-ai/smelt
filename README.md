@@ -34,11 +34,26 @@ The app checks for updates on launch and on demand (stable/beta channel), showin
 
 > The desktop app currently supports **macOS (Apple Silicon)**. A Linux machine can run headless `smeltd` and be paired from the Mac app or the mobile app.
 
+```sh
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash -s -- --with-desktop
+```
+
+Or download `smeltd-<version>-linux-<arch>.tar.gz` and run `./install.sh`. `--with-desktop` also installs TigerVNC, XFCE, and a resident Chrome, then runs `smeltd mcp add playwright`. `--relay=<url>` sets the initial iroh relay. `--apt-mirror=<mirror>` selects an apt mirror for this install.
+
+```sh
+smeltd status
+smeltd pair
+smeltd devices
+smeltd relay [<url>|off]     # show, set, or clear the custom iroh relay
+smeltd mcp add <id>          # playwright, figma, rea, browser-mcp
+```
+
 ## Features
 
 - **Workspace**: Multiple projects and tabs with real embedded terminals for interactive programs and full-screen TUIs such as `claude`, `codex`, `copilot`, `pi`, `vim`, and `htop`; split panes, a command palette (`Cmd+K`), and customizable quick launchers
 - **Keep an eye on agents**: Session state comes from agent hooks (`smelt-notify`) and structured protocols (ACP or provider-native). The session name comes from ACP `session_title` or hook `SessionTitleChanged`, and falls back to the first user prompt; OSC 0/2 is not a session name. OSC 9/777 notifications and bells are informational only. Badges and system notifications highlight sessions that need attention, without depending on any vendor-specific private format
-- **Native agent conversations**: Connect Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, and Pi through ACP or provider-native protocols for structured message streams, tool cards, inline diffs, permission prompts, PLAN progress, and resumable sessions (Pi uses its native JSONL RPC through Smelt's managed Bun runtime; it is not wrapped in ACP)
+- **Native agent conversations**: Connect Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Crush, and Pi through ACP or provider-native protocols for structured message streams, tool cards, inline diffs, permission prompts, PLAN progress, and resumable sessions. Pi is the single binary `smelt-pi` (`~/.smelt/bin/smelt-pi`) and speaks Pi's official JSONL RPC; it is not wrapped in ACP. Managed Bun (`~/.smelt/runtime`) starts ACP adapters and MCP servers on demand
 - **Persistent agents and automations**: The top-level Agents workspace manages reusable definitions, while Automations independently manages triggers, per-run input, and run history. Agent automations get a stable directory under that agent's space (`~/.smelt/agents/<id>/automations/`); shell automations stay in `~/.smelt/workspaces/automations`. Triggers are schedule or an external trigger: schedules cover weekday/daily/interval, while an external trigger is a loopback HTTP URL (`127.0.0.1`) that other programs on the same machine can POST to. The catalog shows “external trigger” without exposing the token. Pi is the first registered engine, and `smeltd` owns scheduled, external-trigger, and manual run lifecycles. Automations run with full access; there is no separate permission policy
 - **Read and edit code**: File tree and search, built-in editor, Git diff view, and Markdown/Mermaid rendering
 - **Usage and history**: Account usage is queried per provider (Claude, Copilot, Codex, Cursor, Grok) and is not read from transcripts. Historical sessions read each agent's local transcripts; Claude Code is not the only source
@@ -71,10 +86,10 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 ## Architecture
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed) (`gpui-pre` 0.3.9) / [gpui-kit](https://github.com/longbridge/gpui-kit) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, and iroh for remote connections. axum only serves the loopback webhook that starts an automation. Structured state is SQLite under `~/.smelt/`: `smelt.sqlite3` for the runtime and `client.sqlite3` for this desktop. See [`docs/local-storage.md`](docs/local-storage.md).
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed) (`gpui-pre` 0.3.9) / [gpui-kit](https://github.com/longbridge/gpui-kit) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, and iroh for remote connections. axum for the automation webhook server (loopback only). Structured state is SQLite under `~/.smelt/`: `smelt.sqlite3` for the runtime and `client.sqlite3` for this desktop. See [`docs/local-storage.md`](docs/local-storage.md).
 
-The workspace contains `smelt` (the main GUI), `smeltd` (the runtime daemon: PTY sessions, ACP hosts, and automations; launched on demand by the GUI, or installed as a systemd user service on Linux), `smelt-notify` (status reports from agent hooks), and `smelt-installer` (the helper that swaps the app in after quit). `smelt-iroh-connect` debugs the runtime's iroh path. Most users only interact with `smelt`; the GUI manages the local `smeltd`.
-The mobile client lives in `mobile/` (Flutter). `crates/smelt-mobile` is its Rust core — device identity, pairing, catalog, conversation, terminal, and an offline SQLite cache — and uses the same `smelt-runtime-client` as the desktop. It is not published yet; build it locally, see [`mobile/README.md`](mobile/README.md).
+The workspace contains `smelt` (the main GUI), `smeltd` (the runtime daemon: PTY sessions, ACP hosts, and automations; launched on demand by the GUI, or installed as a systemd user service on Linux), `smelt-pi` (the Pi runtime binary), `smelt-notify` (status reports from agent hooks), and `smelt-installer` (the helper that swaps the app in after quit). `smelt-iroh-connect` debugs the runtime's iroh path. Most users only interact with `smelt`; the GUI manages the local `smeltd`.
+The mobile client lives in `mobile/` (Flutter) and is the cross-machine pass called 出菜口. On launch it connects to every paired machine (recorded in `smelt-mobile.sqlite3`). The first screen is the decisions waiting on you and what each machine is doing. Navigation is four tabs — pass, sessions, agents, settings — with a three-column layout on tablets, in Chinese and English. `crates/smelt-mobile` is its Rust core and uses the same `smelt-runtime-client` as the desktop. Each GitHub Release includes a signed `Smelt-<version>-android-arm64.apk`. iOS TestFlight archives are built with `make ios` (`scripts/build-ios.sh`). See [`mobile/README.md`](mobile/README.md).
 
 For architecture, directory layout, Linux install, multi-runtime windows, remote desktop, and the idle-suspend behavior, see [`docs/workspace.md`](docs/workspace.md).
 For the product roadmap, see [`docs/product-roadmap.md`](docs/product-roadmap.md); for the miscellaneous backlog, see [`docs/roadmap.md`](docs/roadmap.md).

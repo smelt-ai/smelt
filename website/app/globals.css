@@ -1,35 +1,35 @@
 @import "tailwindcss";
 
 :root {
-  /* 基础色阶 —— 固定深色，不跟随系统 */
-  --background: #08090c;
-  --surface: #111219;
-  --surface-2: #15171f;
-  --border: #23252f;
-  --foreground: #e8e9ee;
-  --muted: #8b8d9c;
-  --dim: #56586a;
+  /* 深色高对比。舞台近黑，主色是暖铜琥珀，描边保持 1px。 */
+  --background: #08090a;
+  --surface: #101113;
+  --surface-2: #17191c;
+  --surface-3: #1e2126;
+  --border: #2a2d32;
+  --foreground: #eceae6;
+  --muted: #9a958c;
+  --dim: #6d6860;
 
-  /* smelt 品牌色：熔炼 / 炉火橙 */
-  --accent: #f0a545;
-  --accent-2: #ff6b4a;
-  --success: #7ee787;
-  --danger: #ff7b72;
+  --accent: #e09f5a;
+  --accent-2: #c4783a;
+  --success: #8fbf9f;
+  --danger: #e07a6a;
 
-  /* 语法高亮 token（One Dark 风格） */
   --syn-keyword: #c586c0;
   --syn-string: #98c379;
-  --syn-function: #61afef;
-  --syn-number: #d19a66;
-  --syn-comment: #5c6370;
-  --syn-punct: #abb2bf;
-  --syn-property: #e06c75;
+  --syn-function: #7eb6d6;
+  --syn-number: #e09f5a;
+  --syn-comment: #6d6860;
+  --syn-punct: #b7b2a9;
+  --syn-property: #e07a6a;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-border: var(--border);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
@@ -47,16 +47,21 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
   background-image:
-    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(240, 165, 69, 0.12), transparent),
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: auto, 48px 48px, 48px 48px;
+    radial-gradient(ellipse 70% 42% at 50% -12%, rgba(224, 159, 90, 0.14), transparent 58%),
+    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: auto, 56px 56px, 56px 56px;
   background-position: 0 0, -1px -1px, -1px -1px;
 }
 
 ::selection {
   background: var(--accent);
-  color: #08090c;
+  color: #1a1208;
+}
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
 }
 
 ::-webkit-scrollbar {
@@ -67,7 +72,7 @@ body {
   background: var(--background);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
+  background: var(--surface-3);
   border-radius: 999px;
   border: 2px solid var(--background);
 }

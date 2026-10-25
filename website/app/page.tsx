@@ -1,10 +1,9 @@
 import { Nav } from "./components/Nav";
 import { Hero } from "./components/Hero";
-import { Integrations } from "./components/Integrations";
 import { Features } from "./components/Features";
-import { FeatureComparison } from "./components/FeatureComparison";
-import { CodeSnippet } from "./components/CodeSnippet";
-import { DocsCTA } from "./components/DocsCTA";
+import { Showcase } from "./components/Showcase";
+import { Integrations } from "./components/Integrations";
+import { Cta } from "./components/Cta";
 import { Footer } from "./components/Footer";
 
 export default function Home() {
@@ -13,11 +12,10 @@ export default function Home() {
       <Nav />
       <main className="flex-1">
         <Hero />
-        <Integrations />
         <Features />
-        <FeatureComparison />
-        <CodeSnippet />
-        <DocsCTA />
+        <Showcase />
+        <Integrations />
+        <Cta />
       </main>
       <Footer />
     </div>

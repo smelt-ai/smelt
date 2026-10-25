@@ -34,11 +34,26 @@ AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agen
 
 > 桌面 App 目前支持 **macOS（Apple Silicon）**。Linux 机器可以无头跑 `smeltd`，再从 Mac 或手机配对过去。
 
+```sh
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash -s -- --with-desktop
+```
+
+也可以下载 `smeltd-<版本>-linux-<架构>.tar.gz`，解压后运行 `./install.sh`。`--with-desktop` 会装上 TigerVNC、XFCE 和常驻 Chrome，并执行 `smeltd mcp add playwright`。`--relay=<地址>` 写入初始 iroh 中继。`--apt-mirror=<镜像>` 指定这次安装用的 apt 源。
+
+```sh
+smeltd status
+smeltd pair
+smeltd devices
+smeltd relay [<url>|off]     # 查看、设置或清除自定义 iroh 中继
+smeltd mcp add <id>          # playwright、figma、rea、browser-mcp
+```
+
 ## 功能
 
 - **工作台**：多项目 × 多标签内嵌真终端（跑 `claude`/`codex`/`copilot`/`pi`/`vim`/`htop` 等交互式程序与全屏 TUI），分屏、命令面板（`Cmd+K`）、可自定义的快捷启动
 - **看住 agent**：基于 agent hook（`smelt-notify`）与结构化协议（ACP 或 provider 原生协议）跟踪会话状态（等你批准 / 等你输入 / 跑着呢 / 有结果可看）。会话名来自 ACP `session_title` 或 hook `SessionTitleChanged`，没有时用首条用户请求；OSC 0/2 不是会话名。OSC 9/777 通知与响铃仅作信息提示；需要关注时角标提醒 + 系统通知；不依赖任何一家的私有格式
-- **原生 agent 对话**：通过 ACP 或 provider 原生协议接入 Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Pi，提供结构化消息流、工具卡片、内嵌 diff、权限审批、PLAN 进度和可续接会话（Pi 由受管 Bun 启动其官方 JSONL RPC，不经 ACP 转换）
+- **原生 agent 对话**：通过 ACP 或 provider 原生协议接入 Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Crush、Pi，提供结构化消息流、工具卡片、内嵌 diff、权限审批、PLAN 进度和可续接会话。Pi 编译为单二进制 `smelt-pi`（`~/.smelt/bin/smelt-pi`），跑官方 JSONL RPC，不经 ACP 转换。受管 Bun（`~/.smelt/runtime`）按需启动 ACP 适配器和 MCP 服务器
 - **持久化智能体与自动化**：左侧「智能体」管理可复用定义，「自动化」独立管理时机、每次运行的输入与结果历史。智能体自动化在该智能体 space 下分配稳定目录（`~/.smelt/agents/<id>/automations/`）；Shell 自动化留在 `~/.smelt/workspaces/automations`。时机是定时或外部触发：定时仍是工作日/每天/按间隔；外部触发是本机 `127.0.0.1` 上的接收地址，同机程序 POST JSON 即可开 Run。目录只显示「外部触发」，不展示令牌。当前引擎只开放 Pi，定时、外部触发和手动 Run 均由 `smeltd` 托管。自动化固定全权限跑，不另存一套权限策略
 - **读写代码**：文件树 + 搜索、内置编辑器、Git diff 视图、Markdown/Mermaid 渲染
 - **用量与历史**：用量按 provider 查账户（Claude、Copilot、Codex、Cursor、Grok），不读 transcript。历史会话读各家本机存档，不只 Claude Code
@@ -70,10 +85,10 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 ## 架构
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.9）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、iroh（远程连接）。axum 只负责本机回环上的自动化 webhook。结构化状态在 `~/.smelt/` 的 SQLite：运行时库 `smelt.sqlite3`，这台桌面的客户端库 `client.sqlite3`。见 [`docs/local-storage.md`](docs/local-storage.md)。
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.9）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、iroh（远程连接）。axum 用于自动化 webhook 服务（只听本机回环）。结构化状态在 `~/.smelt/` 的 SQLite：运行时库 `smelt.sqlite3`，这台桌面的客户端库 `client.sqlite3`。见 [`docs/local-storage.md`](docs/local-storage.md)。
 
-工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、ACP 宿主、自动化；由 GUI 按需拉起，在 Linux 上则装成 systemd 用户服务）、`smelt-notify`（agent hook 的状态上报）、`smelt-installer`（退出后替换 App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
-移动端在 `mobile/`（Flutter）。`crates/smelt-mobile` 是它的 Rust 内核（设备身份、配对、目录、对话、终端、离线 SQLite 缓存），走和桌面同一套 `smelt-runtime-client`。目前尚未上架，需要自行构建，见 [`mobile/README.md`](mobile/README.md)。
+工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、ACP 宿主、自动化；由 GUI 按需拉起，在 Linux 上则装成 systemd 用户服务）、`smelt-pi`（Pi 运行时单二进制）、`smelt-notify`（agent hook 的状态上报）、`smelt-installer`（退出后替换 App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
+移动端在 `mobile/`（Flutter），是跨机器指挥台「出菜口」。启动后同时连接所有已配对机器（登记在 `smelt-mobile.sqlite3`）。首屏是待拍板单据和各机器的实时进展。四栏是指挥台、会话、智能体、设置；平板是三栏；中英双语。`crates/smelt-mobile` 是它的 Rust 内核，走和桌面同一套 `smelt-runtime-client`。每次发版的 GitHub Release 提供签名的 `Smelt-<版本>-android-arm64.apk`。iOS 用 `make ios`（`scripts/build-ios.sh`）打 TestFlight 归档。见 [`mobile/README.md`](mobile/README.md)。
 
 架构、目录、Linux 安装、多运行时窗口、远程桌面和闲置挂起见 [`docs/workspace.md`](docs/workspace.md)。产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)。
 

@@ -12,10 +12,28 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const title = "Smelt — 跨机器、多智能体的原生 AI 编程指挥台";
+const description =
+  "The Multi-Agent, Multi-Machine AI Coding Cockpit. macOS GPUI 原生桌面端、Linux 无头守护进程 smeltd，以及 iOS/Android 手机与平板指挥台「出菜口」。在同一套工作台里指挥所有机器上的 AI 编程智能体。";
+
 export const metadata: Metadata = {
-  title: "smelt — Mac 上的 AI Coding 驾驶舱",
-  description:
-    "基于 GPUI 的桌面工作台，内嵌真终端，专为同时指挥多个 Claude Code agent 设计。多项目 × 多标签，会话状态一目了然。",
+  title: {
+    default: title,
+    template: "%s",
+  },
+  description,
+  openGraph: {
+    title: "Smelt — The Multi-Agent, Multi-Machine AI Coding Cockpit",
+    description,
+    siteName: "Smelt",
+    locale: "zh_CN",
+    type: "website",
+  },
+  twitter: {
+    card: "summary",
+    title: "Smelt — The Multi-Agent, Multi-Machine AI Coding Cockpit",
+    description,
+  },
 };
 
 export default function RootLayout({

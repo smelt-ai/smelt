@@ -1,92 +1,46 @@
-import { TerminalWindow } from "./TerminalWindow";
-import { Tok } from "./Syntax";
+import { InstallCommand } from "./InstallCommand";
+import { CockpitPreview } from "./CockpitPreview";
+
+const RELEASE_URL = "https://github.com/smelt-ai/smelt/releases/latest";
 
 export function Hero() {
   return (
-    <section className="mx-auto grid max-w-5xl gap-12 px-6 pt-16 pb-20 sm:pt-24 sm:pb-28 lg:grid-cols-2 lg:items-center">
-      <div>
-        <div className="mb-5 inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted">
-          <span className="h-1.5 w-1.5 rounded-full bg-success" />
-          working prototype · 持续迭代中
-        </div>
-
-        <h1 className="text-4xl font-semibold leading-tight tracking-tight text-foreground sm:text-5xl">
-          Mac 上的
-          <br />
-          <span className="bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-transparent">
-            AI Coding 驾驶舱
-          </span>
-        </h1>
-
-        <p className="mt-5 max-w-md text-base leading-7 text-muted">
-          基于 GPUI 的桌面工作台，内嵌真终端，专为
-          <span className="text-foreground">同时指挥多个 Claude Code agent</span>
-          设计——多项目 × 多标签，会话状态一目了然。
-        </p>
-
-        <div className="mt-8 flex flex-wrap items-center gap-3">
-          <a
-            href="https://github.com/smelt-ai/smelt/releases"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-lg bg-gradient-to-r from-accent to-accent-2 px-5 py-2.5 text-sm font-medium text-[#08090c] transition-opacity hover:opacity-90"
-          >
-            下载 Smelt.dmg（macOS）
-          </a>
-          <a
-            href="https://github.com/smelt-ai/smelt"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-lg px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground"
-          >
-            或从源码构建 →
-          </a>
-        </div>
+    <section className="mx-auto max-w-6xl px-6 pt-16 pb-8 sm:pt-20">
+      <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-muted">
+        <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+        v2026.10 · 跨机器智能体管理 · 手机端「出菜口」指挥台 · 单二进制 smelt-pi
       </div>
 
-      <TerminalWindow title="workspace — zsh">
-        <div>
-          <span className="text-dim">$ </span>
-          <Tok c="function">cargo</Tok> <Tok c="fg">run --bin workspace</Tok>
+      <h1 className="max-w-4xl text-4xl font-semibold leading-[1.12] tracking-tight text-foreground sm:text-5xl lg:text-[3.4rem]">
+        在同一套工作台里，
+        <span className="text-accent">指挥你所有机器上的 AI 编程智能体</span>
+      </h1>
+
+      <p className="mt-5 max-w-2xl text-base leading-7 text-muted sm:text-[17px]">
+        无论是本机 Mac、实验室或云端 Linux 服务器，还是随身手机「出菜口」——结构化对话、长期记忆、定时自动化与内嵌远程桌面在同一套指挥台里完成。
+      </p>
+
+      <div className="mt-8 grid gap-4 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-start">
+        <div className="flex flex-wrap items-center gap-3">
+          <a
+            href={RELEASE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md bg-accent px-4 py-2.5 text-sm font-semibold text-[#1a1208] transition-opacity hover:opacity-90"
+          >
+            下载 macOS 桌面端
+          </a>
+          <a
+            href="/docs#手机出菜口"
+            className="rounded-md border border-border px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-accent/60 hover:text-accent"
+          >
+            下载移动端
+          </a>
         </div>
-        <div style={{ color: "var(--syn-comment)" }}>
-          &nbsp;&nbsp; Compiling <Tok c="string">smelt v0.1.0</Tok> (~/dev/smelt)
-        </div>
-        <div>
-          &nbsp;&nbsp;&nbsp;&nbsp;
-          <Tok c="success">Finished</Tok>{" "}
-          <span style={{ color: "var(--syn-comment)" }}>
-            `dev` profile [unoptimized] target(s) in 4.82s
-          </span>
-        </div>
-        <div>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-          <Tok c="accent">Running</Tok> <Tok c="string">`target/debug/workspace`</Tok>
-        </div>
-        <div>&nbsp;</div>
-        <div>
-          <Tok c="accent">▸ workspace</Tok>{" "}
-          <span className="text-dim">▸ smeltd  ▸ docs</span>
-          <span className="text-dim">   +</span>
-        </div>
-        <div className="text-dim">
-          ────────────────────────────────────
-        </div>
-        <div>
-          <span className="text-dim">$ </span>
-          <Tok c="keyword">claude</Tok>
-        </div>
-        <div>
-          <Tok c="success">✓</Tok>{" "}
-          <span style={{ color: "var(--foreground)" }}>session attached</span>
-          <span className="text-dim"> · </span>
-          <Tok c="property">tokyo-night</Tok>
-          <span className="text-dim"> · </span>
-          <Tok c="number">256-color</Tok>
-          <span className="text-dim"> · </span>
-          <Tok c="function">nerd-font</Tok>
-        </div>
-      </TerminalWindow>
+        <InstallCommand />
+      </div>
+
+      <CockpitPreview />
     </section>
   );
 }

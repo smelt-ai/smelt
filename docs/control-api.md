@@ -1,4 +1,4 @@
-# smeltd Control API v1
+# smeltd Control API v3
 
 状态：已实现。方法名的真源是
 `crates/smelt-runtime-client/src/protocol/control.rs` 的 `define_control_methods!`。
@@ -6,6 +6,8 @@
 没有 `smelt-core/src/control_api.rs` 这个文件）。服务端分发在 `smeltd/src/control.rs`。
 
 Control API 是 smeltd 的**版本化短请求协议**，不是 HTTP 服务，也不取代 ACP。
+当前 `CONTROL_API_VERSION = 3`，`CONTROL_API_MIN_SUPPORTED_VERSION = 3`
+（`crates/smelt-runtime-client/src/protocol/control.rs`）。
 它复用 `~/.smelt/smeltd.sock` 的首帧分流，供桌面、Mobile、MCP、CLI 和未来的进程外
 插件共享同一份控制契约。
 
@@ -33,7 +35,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 ```json
 {
   "op": "control",
-  "control_version": 1,
+  "control_version": 3,
   "request_id": "request-abc",
   "method": "system.describe",
   "params": {}
@@ -42,20 +44,52 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 
 成功响应：
 
+`system.describe` 的成功响应（daemon 上的新字段都是可选的，`None` 表示运行时早于这个字段）：
+
 ```json
 {
-  "control_version": 1,
+  "control_version": 3,
   "request_id": "request-abc",
   "status": "ok",
-  "result": {}
+  "result": {
+    "control": {
+      "current_version": 3,
+      "min_supported_version": 3,
+      "max_supported_version": 3,
+      "methods": ["system.describe", "session.list"]
+    },
+    "daemon": {
+      "version": "2026.1023.0-rc.1",
+      "exe_mtime": 0,
+      "exe": "/home/me/.smelt/bin/smeltd",
+      "pid": 4242,
+      "started_at": 0,
+      "session_count": 2,
+      "agent_event_version": 2,
+      "runtime_id": "01HRUNTIME",
+      "os": "linux",
+      "arch": "x86_64",
+      "hostname": "gpu-box",
+      "desktop": true,
+      "smelt_home": "/home/me/.smelt"
+    },
+    "events": {
+      "protocol_version": 2,
+      "projection_version": 1,
+      "session_projection_version": 3,
+      "session_state_schema_version": 3
+    }
+  }
 }
 ```
+
+`daemon` 字段：`runtime_id` 是运行时永久身份；`os` / `arch` 来自 `std::env::consts`；`hostname` 是默认机器名；`desktop` 表示这台机器装了远程桌面（`install.sh --with-desktop`）；`smelt_home` 是这台运行时的 `SMELT_HOME`，客户端用它认出远程机器上哪些会话是智能体对话。`methods` 在真实响应里是完整清单，这里只示意两项。
 
 失败响应：
 
 ```json
 {
-  "control_version": 1,
+  "control_version": 3,
   "request_id": "request-abc",
   "status": "error",
   "error": {
@@ -77,13 +111,13 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
   "code": "unsupported_version",
   "message": "...",
   "supported_versions": {
-    "min_supported_version": 1,
-    "max_supported_version": 1
+    "min_supported_version": 3,
+    "max_supported_version": 3
   }
 }
 ```
 
-## v1 方法
+## 方法
 
 | method | 性质 | 说明 |
 |---|---|---|
@@ -111,11 +145,26 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`subagent.transcript` |
 | 工作区与文件 | `workspace.load` / `workspace.save` / `workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
-| 智能体记忆 | `agent.memory.meta` / `record_read` / `record_write` / `list` / `delete` / `approve` / `ensure_dir`；`memory.test_embedding` |
+| 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
 | Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`；`quota.get` / `quota.refresh` |
 | 其它 | `agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`history.*`、`desktop.type_text`、`automation.run_detail` |
 
-CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用这组 CLI 的技能（`packages/pi-agent/skills/smelt`）随 smelt-pi 发布，产品智能体勾选了才传给 Pi，不写进 `~/.agents/skills`。无头机器上的安装和配对是 `smeltd install` / `smeltd pair` / `smeltd devices`，不是这组 CLI。
+### `agent.memory.*`
+
+记忆正文在文件系统，元数据由主守护代写。会话侧的三个方法用会话 id 和 daemon 发给该会话的 capability token 证明身份。设置页的方法按智能体 id 操作两层：`agent`（这个智能体自己的）和 `user`（跨智能体的用户全局记忆）。语义见 `docs/agent-memory.md`。
+
+| method | 说明 |
+|---|---|
+| `agent.memory.meta` | 读这个会话两层记忆的使用统计和来源 |
+| `agent.memory.record_read` | 记下读过哪一条。参数带 `layer` 和 `file` |
+| `agent.memory.record_write` | 记下写入。`trust` 是 `trusted` 或 `pending` |
+| `agent.memory.list` | 设置页列出某个智能体的两层记忆 |
+| `agent.memory.delete` | 删除一条。用户全局层还会从所有智能体里消失 |
+| `agent.memory.approve` | 采纳一条待确认记忆 |
+| `agent.memory.ensure_dir` | 确保某层目录存在，返回它在那台机器上的路径 |
+| `memory.test_embedding` | 试一次向量检索服务。`api_key` 省略时用已存密钥，响应不回密钥本身 |
+
+CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用这组 CLI 的技能（`packages/pi-agent/skills/smelt`）随 smelt-pi 发布，产品智能体勾选了才传给 Pi，不写进 `~/.agents/skills`。无头机器上的安装、配对、中继和 MCP 预设是 `smeltd install` / `smeltd pair` / `smeltd devices` / `smeltd relay` / `smeltd mcp`，不是这组 CLI。
 
 ## 版本与重试
 
@@ -127,6 +176,7 @@ CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令
    分支，版本仍是 1：客户端按 `system.describe` 的方法清单判断运行时有没有要用的方法，
    旧桌面连新运行时的 Git 面板需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
    的文档形状，同时删掉跨 Agent 消息的 `agent.list` / `agent.send`，两边最低版本都抬到 2。
+   v2 → v3：删掉 DeepSeek Harness 之后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置去掉 `native_dsh_profiles`。旧运行时缺这个字段会拒收修改，所以最低版本抬到 3。同一版 `system.describe` 的 daemon 信息增加 `smelt_home`。
 2. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
    条件、冲突、忙碌和临时不可用分别返回 `invalid_params`、`permission_denied`、
    `not_found`、`failed_precondition`、`conflict`、`busy`、
