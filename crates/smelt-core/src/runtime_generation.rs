@@ -634,9 +634,7 @@ fn sync_tree(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     if metadata.is_file() {
-        File::open(path)
-            .and_then(|file| file.sync_all())
-            .map_err(|error| format!("持久化 generation 文件 {} 失败：{error}", path.display()))?;
+        sync_file(path)?;
         return Ok(());
     }
     if metadata.is_dir() {
@@ -651,6 +649,17 @@ fn sync_tree(path: &Path) -> Result<(), String> {
         sync_directory(path)?;
     }
     Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<(), String> {
+    // Windows 的 FlushFileBuffers 要求写权限。只读打开会返回拒绝访问。
+    #[cfg(windows)]
+    let opened = OpenOptions::new().read(true).write(true).open(path);
+    #[cfg(not(windows))]
+    let opened = File::open(path);
+    opened
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("持久化 generation 文件 {} 失败：{error}", path.display()))
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
