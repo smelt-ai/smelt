@@ -15,7 +15,6 @@
 pub use smelt_model::acp_conn::*;
 
 use std::future::Future;
-use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -344,10 +343,7 @@ pub enum ConversationEvent {
         responder: PermissionResponder,
         details: crate::acp_session::ApprovalDetailsView,
         /// 这条请求的原始 JSON-RPC 行文本（`with_debug` 的 `Stdout` 方向捕获的
-        /// 最近一行）。smeltd 无缝升级时若这条会话正卡着这张审批卡，会把这行
-        /// 原文一起交接过去——新进程接手继承来的 fd 后，先把这行「回放」一遍
-        /// 让 SDK 重新解析出等价的 responder（绑定同一个原始请求 id），再继续
-        /// 读实时字节，见 `resume_acp_from_fds`。GUI 直连路径不用这个字段。
+        /// 最近一行）。审批卡挂起期间保留，供活体状态对照；GUI 直连路径不用。
         raw_request_line: Option<String>,
     },
     /// 用户消息的回显：`session/load` 重放历史时，agent 会把旧的用户提问也
@@ -690,11 +686,10 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
 pub struct ConversationHandle {
     pub cmd_tx: smol::channel::Sender<ConversationCommand>,
     pub event_rx: smol::channel::Receiver<ConversationEvent>,
-    /// 子进程 pid + 原始 stdin/stdout fd，spawn 成功后才会填（Fatal 前的极短
-    /// 窗口是 None）。停机和杀进程组用 pid；fd 只是当时的句柄编号。
+    /// 子进程 pid，spawn 成功后才会填（Fatal 前的极短窗口是 None）。
+    /// 停机和杀进程组用这个 pid。
     pub stdio: Arc<Mutex<Option<AcpStdio>>>,
-    /// 已发出但尚未收到最终 JSON-RPC response 的请求数。热升级不得跨越这些
-    /// callback；fd 能交接字节流，但不能交接 SDK 内存里的 request callback。
+    /// 已发出但尚未收到最终 JSON-RPC response 的请求数。
     pub in_flight_rpc: Arc<AtomicUsize>,
     /// 生命周期层直接设置的停止标记。连接线程在真正 spawn 子进程的同一把
     /// `stdio` 锁内检查它，保证“请求停止时尚未 spawn”的连接以后也不会漏跑。
@@ -711,11 +706,10 @@ pub struct ConversationHandle {
     pub supports_rewind: bool,
 }
 
+/// 子进程 pid。spawn 成功后由连接线程写入，停机时用来杀进程组。
 #[derive(Clone, Copy)]
 pub struct AcpStdio {
     pub pid: i32,
-    pub stdin_fd: std::os::unix::io::RawFd,
-    pub stdout_fd: std::os::unix::io::RawFd,
 }
 
 /// SIGKILL 之后等内核收尸的上限。这不是「再猜一次进程死了没」，而是 `waitpid`
@@ -1326,18 +1320,6 @@ impl Drop for AcpChildGuard {
     }
 }
 
-/// Handoff 恢复时没有直属 child handle，只能按已验证的进程组 id 兜底终止。
-struct KillProcessGroupOnDrop(i32);
-
-impl Drop for KillProcessGroupOnDrop {
-    fn drop(&mut self) {
-        // 无身份门：guard 在连接任务结束瞬间触发，pid 重用需要“死+收尸+
-        // 重分配”三连，挤不进这个微秒窗口（cleanup 路径是秒级窗口才要验）。
-        // 接受该残余——与 exec-self 时代同形（那时靠亲缘僵尸占位，窗口为零）。
-        kill_process_group(self.0);
-    }
-}
-
 fn kill_process_group(pid: i32) {
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
@@ -1550,8 +1532,6 @@ async fn run_connection(
             spawn_agent_process(&agent, launch.cwd.as_deref(), managed_bun.as_ref())?;
         *stdio = Some(AcpStdio {
             pid: child.id() as i32,
-            stdin_fd: child_stdin.as_raw_fd(),
-            stdout_fd: child_stdout.as_raw_fd(),
         });
         Ok::<_, agent_client_protocol::Error>(Some((
             child_stdin,
@@ -1838,8 +1818,7 @@ async fn run_connection(
             // 冷恢复只有一条路径：`session/load`。agent 的 session store 是历史
             // 唯一持久化来源，load 重放的更新负责重建 smeltd 的 entries 投影。
             // `session/resume` 不重放历史，不能拿来冷恢复；smeltd 仍持有完整活体
-            // 状态时根本不会进这里，而是在 `acp_open` 里直接 attach。无缝升级继承
-            // fd 则走 `resume_acp_from_fds`，同样不进入这条 spawn 路径。
+            // 状态时根本不会进这里，而是在 `acp_open` 里直接 attach。
             //
             // 任何恢复失败都必须显式分类报告：连接层不在这里静默 session/new，
             // 由上层 supervisor 根据本地投影决定是否安全地降级。
@@ -2078,276 +2057,6 @@ fn update_tool_id(update: &serde_json::Value) -> &str {
         .get("toolCallId")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
-}
-
-/// 交接里未完成的这一轮，减去会话文件已经重放过的部分。
-///
-/// 用户消息已经在重放里就不再发。助手正文只补文件里还没有的后缀。
-/// 文件里没有的工具按交接时的卡片补回去。
-fn unflushed_open_turn_events(
-    open_turn: &[crate::acp_chat::AcpEntry],
-    replay: &ReplayCursor,
-) -> Vec<ConversationEvent> {
-    let Some(user) = open_turn.first() else {
-        return Vec::new();
-    };
-    let user_text = match user {
-        crate::acp_chat::AcpEntry::User(text) => text.as_str(),
-        crate::acp_chat::AcpEntry::UserWithImages { text, .. } => text.as_str(),
-        _ => {
-            let mut events = Vec::new();
-            push_aligned_tail(open_turn, replay, &mut events);
-            return events;
-        }
-    };
-    let mut events = Vec::new();
-    if !(replay.saw_user && replay.last_user == user_text) {
-        push_user_entry(user, &mut events);
-        for entry in &open_turn[1..] {
-            push_snapshot_entry(entry, replay, &mut events);
-        }
-        return events;
-    }
-    push_aligned_tail(&open_turn[1..], replay, &mut events);
-    events
-}
-
-fn push_aligned_tail(
-    tail: &[crate::acp_chat::AcpEntry],
-    replay: &ReplayCursor,
-    events: &mut Vec<ConversationEvent>,
-) {
-    let mut segments = replay.after_user.iter().peekable();
-    for entry in tail {
-        match entry {
-            crate::acp_chat::AcpEntry::Assistant { text, thought } => {
-                let suffix = match segments.peek() {
-                    Some(ReplaySegment::Assistant {
-                        thought: replayed_thought,
-                        text: replayed,
-                    }) if replayed_thought == thought => {
-                        let replayed = (*replayed).clone();
-                        segments.next();
-                        assistant_suffix(text, &replayed)
-                    }
-                    _ => Some(text.clone()),
-                };
-                if let Some(suffix) = suffix {
-                    push_assistant(*thought, suffix, events);
-                }
-            }
-            crate::acp_chat::AcpEntry::ToolCall { .. } => {
-                if matches!(segments.peek(), Some(ReplaySegment::Tool)) {
-                    segments.next();
-                }
-                push_missing_tool(entry, replay, events);
-            }
-            crate::acp_chat::AcpEntry::TaskNote(note) => {
-                events.push(ConversationEvent::BackgroundNotice(note.clone()));
-            }
-            _ => {}
-        }
-    }
-}
-
-fn push_snapshot_entry(
-    entry: &crate::acp_chat::AcpEntry,
-    replay: &ReplayCursor,
-    events: &mut Vec<ConversationEvent>,
-) {
-    match entry {
-        crate::acp_chat::AcpEntry::Assistant { text, thought } => {
-            push_assistant(*thought, text.clone(), events);
-        }
-        crate::acp_chat::AcpEntry::ToolCall { .. } => push_missing_tool(entry, replay, events),
-        crate::acp_chat::AcpEntry::User(_) | crate::acp_chat::AcpEntry::UserWithImages { .. } => {
-            push_user_entry(entry, events);
-        }
-        crate::acp_chat::AcpEntry::TaskNote(note) => {
-            events.push(ConversationEvent::BackgroundNotice(note.clone()));
-        }
-        crate::acp_chat::AcpEntry::Divider(_) => {}
-    }
-}
-
-fn push_user_entry(entry: &crate::acp_chat::AcpEntry, events: &mut Vec<ConversationEvent>) {
-    match entry {
-        crate::acp_chat::AcpEntry::User(text) => {
-            if !text.is_empty() {
-                events.push(ConversationEvent::UserChunk(text.clone()));
-            }
-        }
-        crate::acp_chat::AcpEntry::UserWithImages { text, images } => {
-            if !text.is_empty() {
-                events.push(ConversationEvent::UserChunk(text.clone()));
-            }
-            for image in images {
-                events.push(ConversationEvent::UserImage(image.clone()));
-            }
-        }
-        _ => {}
-    }
-}
-
-fn push_assistant(thought: bool, text: String, events: &mut Vec<ConversationEvent>) {
-    if text.is_empty() {
-        return;
-    }
-    events.push(ConversationEvent::AgentChunk {
-        thought,
-        text,
-        parent_id: None,
-    });
-}
-
-fn push_missing_tool(
-    entry: &crate::acp_chat::AcpEntry,
-    replay: &ReplayCursor,
-    events: &mut Vec<ConversationEvent>,
-) {
-    let crate::acp_chat::AcpEntry::ToolCall {
-        id,
-        title,
-        kind,
-        status,
-        output,
-        children,
-        subagents: _,
-        peer: _,
-    } = entry
-    else {
-        return;
-    };
-    if replay.tool_ids.contains(id) {
-        return;
-    }
-    events.push(ConversationEvent::ToolStarted {
-        id: id.clone(),
-        title: title.clone(),
-        kind: *kind,
-    });
-    events.push(ConversationEvent::ToolFinished {
-        id: id.clone(),
-        status: *status,
-        output: output.clone(),
-    });
-    if !children.is_empty() {
-        events.push(ConversationEvent::ToolChildren {
-            id: id.clone(),
-            children: children.clone(),
-            debug: BTreeMap::new(),
-        });
-    }
-}
-
-/// 快照里的助手正文减去文件已经写过的前缀。对不上时保留快照全文，半句不能丢。
-fn assistant_suffix(snapshot: &str, replayed: &str) -> Option<String> {
-    if let Some(suffix) = snapshot.strip_prefix(replayed) {
-        return (!suffix.is_empty()).then(|| suffix.to_string());
-    }
-    if replayed.starts_with(snapshot) {
-        return None;
-    }
-    Some(snapshot.to_string())
-}
-
-#[cfg(test)]
-mod open_turn_replay_tests {
-    use super::*;
-
-    fn user_turn(user: &str, assistant: &str) -> Vec<crate::acp_chat::AcpEntry> {
-        vec![
-            crate::acp_chat::AcpEntry::User(user.into()),
-            crate::acp_chat::AcpEntry::Assistant {
-                text: assistant.into(),
-                thought: false,
-            },
-        ]
-    }
-
-    fn replay_of(user: &str, assistant: &str) -> ReplayCursor {
-        let mut replay = ReplayCursor::default();
-        replay.note_user(user);
-        if !assistant.is_empty() {
-            replay.note_assistant(false, assistant);
-        }
-        replay
-    }
-
-    #[test]
-    fn flushed_prefix_keeps_only_the_unwritten_suffix() {
-        let events = unflushed_open_turn_events(
-            &user_turn("现在", "Hello wor"),
-            &replay_of("现在", "Hello"),
-        );
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            ConversationEvent::AgentChunk { thought: false, text, parent_id: None }
-                if text == " wor"
-        ));
-    }
-
-    #[test]
-    fn fully_flushed_assistant_is_not_sent_again() {
-        let events =
-            unflushed_open_turn_events(&user_turn("现在", "Hello"), &replay_of("现在", "Hello"));
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn missing_user_message_is_sent_with_the_whole_turn() {
-        let events =
-            unflushed_open_turn_events(&user_turn("现在", "半句"), &ReplayCursor::default());
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], ConversationEvent::UserChunk(text) if text == "现在"));
-        assert!(matches!(
-            &events[1],
-            ConversationEvent::AgentChunk { text, .. } if text == "半句"
-        ));
-    }
-
-    #[test]
-    fn tool_missing_from_replay_is_restored_from_the_snapshot() {
-        let open_turn = vec![
-            crate::acp_chat::AcpEntry::User("现在".into()),
-            crate::acp_chat::AcpEntry::tool_call(
-                "tc-1",
-                "读文件",
-                crate::acp_chat::ToolKind::Read,
-                crate::acp_chat::ToolCallStatus::InProgress,
-                vec![crate::acp_chat::ToolOutputPart::Text("一部分".into())],
-            ),
-        ];
-        let events = unflushed_open_turn_events(&open_turn, &replay_of("现在", ""));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ConversationEvent::ToolStarted { id, .. } if id == "tc-1"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ConversationEvent::ToolFinished { id, output, .. }
-                if id == "tc-1" && output.len() == 1
-        )));
-    }
-
-    #[test]
-    fn tool_already_replayed_is_not_emitted_again() {
-        let open_turn = vec![
-            crate::acp_chat::AcpEntry::User("现在".into()),
-            crate::acp_chat::AcpEntry::tool_call(
-                "tc-1",
-                "读文件",
-                crate::acp_chat::ToolKind::Read,
-                crate::acp_chat::ToolCallStatus::InProgress,
-                Vec::new(),
-            ),
-        ];
-        let mut replay = replay_of("现在", "");
-        replay.note_tool("tc-1");
-        let events = unflushed_open_turn_events(&open_turn, &replay);
-        assert!(events.is_empty());
-    }
 }
 
 /// 已建立会话的最小读写面：官方 `ActiveSession` 和无缝升级的自建路由共用。
@@ -3010,10 +2719,9 @@ async fn translate_update(
 
 /// 组装 ACP agent 的 stdio 配置（不 spawn）：命令按空白分词，注入 login shell 的 PATH
 /// （Finder 启动的 GUI 进程 PATH 不含 nvm/homebrew，直接 spawn `npx` 会
-/// ENOENT）。先借 SDK 解析成标准 stdio 配置，再由本文件自己 spawn；这样既能拿到
-/// agent 子进程的 pid + 原始 stdin/stdout fd（smeltd 无缝升级要用），也能让
-/// `run_connection` 统一接管 stderr 尾巴和原始行捕获。网页 agent 的临时环境变量
-/// （ephemeral_env）在组装参数时叠加进子进程环境，但不会写回可持久化的 launch。
+/// ENOENT）。先借 SDK 解析成标准 stdio 配置，再由本文件自己 spawn；这样能拿到
+/// agent 子进程的 pid，也能让 `run_connection` 统一接管 stderr 尾巴和原始行捕获。
+/// 网页 agent 的临时环境变量（ephemeral_env）在组装参数时叠加进子进程环境，但不会写回可持久化的 launch。
 fn build_agent(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,

@@ -59,8 +59,7 @@ pub struct LivePermission {
     pub options: Vec<PermissionOptionView>,
     pub details: ApprovalDetailsView,
     pub responder: Option<PermissionResponder>,
-    /// 这张卡对应请求的原始 JSON-RPC 行，smeltd 无缝升级时用来重放（见
-    /// `ConversationEvent::Permission` 同名字段）。
+    /// 这张卡对应请求的原始 JSON-RPC 行（见 `ConversationEvent::Permission` 同名字段）。
     pub raw_request_line: Option<String>,
 }
 
@@ -279,13 +278,6 @@ impl AcpSessionState {
         }
     }
 
-    /// smeltd 无缝升级续接：从升级前落进交接文件的快照重建活体状态。
-    /// `permission`/`elicitation` 故意留空——不是丢了，是这份快照本来就没有
-    /// 真正的 responder 可用（那是连接线程内部状态，没法序列化），如果确实
-    /// 有一张卡正卡着，`pending_raw_request_line` 抓出来的那行原文会在
-    /// `resume_acp_from_fds` 重新接上连接后被回放，SDK 重新解析出等价请求，
-    /// 走一遍正常的 `apply_event(Permission/Elicitation)`，到时候会自然把
-    /// `permission`/`elicitation` 填回去——不需要（也没法）在这里预置。
     /// 工具参数表变了。没变的快照不要再拷这张表。
     pub fn note_tool_debug_changed(&mut self) {
         self.tool_debug_generation = self.tool_debug_generation.wrapping_add(1);
@@ -576,11 +568,8 @@ impl AcpSessionState {
         self.entries_base += keep_from;
     }
 
-    /// 当前有没有一张卡（权限/选择题）正等着人处理，有就带上它原始请求那行
-    /// ——smeltd 无缝升级时用来判断"这条会话要不要在交接文件里多带一行"
-    /// 以及 resume 时重放这行，见 `resume_acp_from_fds`。同一时刻协议上只会
-    /// 有一张卡挂起（agent 等到上一个请求有回应才会发下一个），不用管两者
-    /// 都有值的情况。
+    /// 当前有没有一张卡（权限/选择题）正等着人处理，有就带上它原始请求那行。
+    /// 同一时刻协议上只会有一张卡挂起（agent 等到上一个请求有回应才会发下一个）。
     pub fn pending_raw_request_line(&self) -> Option<&str> {
         self.permissions
             .iter()

@@ -5,7 +5,6 @@
 //! 是历史 wire 兼容名，不代表这里向 Pi 发送过任何 ACP 消息。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -397,8 +396,6 @@ async fn run_connection(
         );
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
-            stdin_fd: spawned.0.as_raw_fd(),
-            stdout_fd: spawned.1.as_raw_fd(),
         });
         spawned
     };
