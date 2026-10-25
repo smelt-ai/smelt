@@ -580,6 +580,7 @@ mod tests {
     /// 退出时管道里还有没读完的输出：`wait` 返回、退出事件发出之前必须读完。
     /// 读线程每读一块都要克隆整份缓冲（最多 1MB），追不上进程退出——以前等待线程
     /// 一拿到退出码就取快照，最后那段（这里是 `END`）常常丢掉。
+    #[cfg(unix)]
     #[test]
     fn exit_waits_for_the_output_still_in_the_pipe() {
         let terminals = AcpTerminals::new();
@@ -617,6 +618,7 @@ mod tests {
     }
 
     /// 后台孙进程继承了 stdout、一直不关：不能因为等 EOF 就永远不报告退出。
+    #[cfg(unix)]
     #[test]
     fn exit_is_reported_even_if_a_grandchild_keeps_the_pipe_open() {
         let terminals = AcpTerminals::new();
@@ -646,15 +648,16 @@ mod tests {
     fn create_echo_captures_output_and_exit() {
         let terminals = AcpTerminals::new();
         let (tx, _rx) = smol::channel::unbounded();
-        let id = terminals
-            .create(
-                "/bin/echo".into(),
-                vec!["hello-acp".into()],
-                Vec::new(),
-                None,
-                None,
-                tx,
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/d".into(), "/c".into(), "echo hello-acp".into()],
             )
+        } else {
+            ("/bin/echo".to_string(), vec!["hello-acp".into()])
+        };
+        let id = terminals
+            .create(command, args, Vec::new(), None, None, tx)
             .expect("create echo");
         let status = terminals.wait(&id).expect("wait echo");
         assert_eq!(status.exit_code, Some(0));
@@ -667,15 +670,16 @@ mod tests {
     fn kill_long_running_command() {
         let terminals = AcpTerminals::new();
         let (tx, _rx) = smol::channel::unbounded();
-        let id = terminals
-            .create(
-                "/bin/sleep".into(),
-                vec!["30".into()],
-                Vec::new(),
-                None,
-                None,
-                tx,
+        let (command, args) = if cfg!(windows) {
+            (
+                "ping".to_string(),
+                vec!["-n".into(), "30".into(), "127.0.0.1".into()],
             )
+        } else {
+            ("/bin/sleep".to_string(), vec!["30".into()])
+        };
+        let id = terminals
+            .create(command, args, Vec::new(), None, None, tx)
             .expect("create sleep");
         terminals.kill(&id).expect("kill");
         let started = std::time::Instant::now();

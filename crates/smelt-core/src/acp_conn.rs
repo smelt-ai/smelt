@@ -5585,11 +5585,64 @@ mod path_resolve_tests {
         assert_eq!(resolve_in_path("./x", "/bin").as_deref(), Some("./x"));
     }
 
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "smelt-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// 写成当前系统会认的可执行文件：Unix 要执行位，Windows 无扩展名时是 `.exe`。
+    fn write_executable(dir: &std::path::Path, bare: &str) -> std::path::PathBuf {
+        let file_name = if cfg!(windows) && !bare.contains('.') {
+            format!("{bare}.exe")
+        } else {
+            bare.to_string()
+        };
+        let exe = dir.join(file_name);
+        std::fs::write(&exe, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&exe).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&exe, permissions).unwrap();
+        }
+        exe
+    }
+
+    fn path_list(dirs: &[std::path::PathBuf]) -> String {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        dirs.iter()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(sep)
+    }
+
     #[test]
     fn finds_executable_across_path_dirs() {
-        // `sh` 一定在 /bin；把它藏在几个假目录后面，验证会逐段找下去。
-        let path = "/no/such/dir:/also/fake:/bin:/usr/bin";
-        assert_eq!(resolve_in_path("sh", path).as_deref(), Some("/bin/sh"));
+        // 命令放在最后一段，前面两段是空目录，验证会逐段找下去。
+        let root = temp_root("path");
+        let missing_a = root.join("no");
+        let missing_b = root.join("also");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&missing_a).unwrap();
+        std::fs::create_dir_all(&missing_b).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = write_executable(&bin, "sh");
+        let path = path_list(&[missing_a, missing_b, bin]);
+        assert_eq!(
+            resolve_in_path("sh", &path).as_deref(),
+            exe.to_str(),
+            "前面的空目录跳过，命中后面目录里的命令"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]
@@ -5632,7 +5685,7 @@ mod path_resolve_tests {
     #[test]
     fn build_agent_args_preserves_plain_launch_specs() {
         let args = build_agent_args(
-            &ConversationLaunchSpec::from_command("sh -lc echo"),
+            &ConversationLaunchSpec::from_command("/bin/sh -lc echo"),
             "/bin:/usr/bin",
         )
         .expect("plain launch spec should build");
@@ -5651,7 +5704,7 @@ mod path_resolve_tests {
     #[test]
     fn build_agent_args_overlays_structured_env_on_legacy_prefixes() {
         let launch =
-            ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=/legacy/path sh --version")
+            ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=/legacy/path /bin/sh --version")
                 .with_env(
                     "CLAUDE_CONFIG_DIR",
                     "~/Library/Application Support/Claude Quant",
@@ -5675,7 +5728,7 @@ mod path_resolve_tests {
 
     #[test]
     fn ephemeral_env_overlays_launch_env_without_mutating_the_saved_spec() {
-        let launch = ConversationLaunchSpec::from_command("sh --version")
+        let launch = ConversationLaunchSpec::from_command("/bin/sh --version")
             .with_env("PLUGIN_TOKEN", "stored-value")
             .with_env("UNCHANGED", "yes");
         let ephemeral =
@@ -5746,6 +5799,10 @@ mod path_resolve_tests {
 
     #[test]
     fn official_claude_adapter_prefers_local_claude_cli() {
+        let root = temp_root("claude");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = write_executable(&bin, "sh");
         let mut env = BTreeMap::new();
 
         inject_local_adapter_cli_path(
@@ -5754,13 +5811,14 @@ mod path_resolve_tests {
             "CLAUDE_CODE_EXECUTABLE",
             "sh",
             &mut env,
-            "/bin:/usr/bin",
+            bin.to_str().unwrap(),
         );
 
         assert_eq!(
             env.get("CLAUDE_CODE_EXECUTABLE").map(String::as_str),
-            Some("/bin/sh")
+            exe.to_str()
         );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
