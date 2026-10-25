@@ -1447,6 +1447,8 @@ mod agent_conversation_persist_tests {
             Some("pi-history-1"),
             "第一次落库采用窗口带的对话身份"
         );
+        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
