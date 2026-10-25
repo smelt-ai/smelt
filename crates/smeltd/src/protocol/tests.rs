@@ -218,7 +218,8 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
         .join("target/peer-auth-tests");
     std::fs::create_dir_all(&root).unwrap();
     let daemon_executable = root.join("smeltd");
-    let desktop_executable = root.join("smelt");
+    // Windows 上桌面程序是 `smelt.exe`，兄弟校验按这个名字找。
+    let desktop_executable = root.join(if cfg!(windows) { "smelt.exe" } else { "smelt" });
     std::fs::write(&daemon_executable, b"daemon").unwrap();
     std::fs::write(&desktop_executable, b"desktop").unwrap();
     let desktop_peer = peer(7, Some(desktop_executable.clone()));
