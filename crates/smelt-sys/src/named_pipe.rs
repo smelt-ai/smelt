@@ -4,34 +4,48 @@
 //! 事件鉴权会拒绝。
 //!
 //! 管道拒绝远程客户端，DACL 只给当前用户。接受之后用
-//! `GetNamedPipeClientProcessId` 拿对端 pid。字节管道没有套接字那种接收超时，
-//! 超时靠 `PeekNamedPipe` 等到有字节、管道断开，或期限到了。
+//! `GetNamedPipeClientProcessId` 拿对端 pid。
+//!
+//! 读写带 `FILE_FLAG_OVERLAPPED`。每次操作自己的手动重置事件，超时靠
+//! `WaitForSingleObject`。不切换 `PIPE_NOWAIT`：那个模式挂在管道实例上，
+//! `DuplicateHandle` 出来的句柄共享同一份，一边为了写超时改成不等待，
+//! 另一边正在进行的 `ReadFile` 会立刻以 `ERROR_NO_DATA` 失败。
 
-use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     ACL_REVISION, AddAccessAllowedAce, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
     SECURITY_ATTRIBUTES, SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX,
 };
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PeekNamedPipe, SetNamedPipeHandleState,
-    PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, PeekNamedPipe,
+    WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, GetCurrentProcess, INFINITE, OpenProcessToken, WaitForSingleObject,
+};
 
 use crate::process::current_user_key;
+
+/// 实例都在忙时，客户端最多等多久才放弃。监听方在 `accept` 返回前会先建好下一个实例，
+/// 这段等待盖住中间那一下空档。服务没起来时 `CreateFile` 是「找不到」，不会耗这点时间。
+const CONNECT_BUDGET: Duration = Duration::from_secs(2);
 
 /// 当前用户专属的管道名，形如 `\\.\pipe\smelt-<sid>-<tag>`。
 pub fn user_pipe_path(tag: &str) -> io::Result<String> {
@@ -51,74 +65,120 @@ pub fn user_pipe_path(tag: &str) -> io::Result<String> {
 
 pub struct PipeListener {
     name: String,
+    /// 已经建好、正在等客户端的那一个实例。`bind` 时就放上，避免调用方一返回
+    /// 客户端就 `ERROR_FILE_NOT_FOUND`。
+    pending: Mutex<Option<OwnedHandle>>,
 }
 
 impl PipeListener {
     pub fn bind(name: impl Into<String>) -> io::Result<Self> {
         let name = name.into();
-        if !name.starts_with(r"\\.\pipe\") && !name.starts_with(r"\\?\pipe\") {
+        if !is_pipe_path(&name) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("命名管道路径必须以 \\\\.\\pipe\\ 开头：{name}"),
             ));
         }
-        Ok(Self { name })
+        let pending = create_instance(&name)?;
+        Ok(Self {
+            name,
+            pending: Mutex::new(Some(pending)),
+        })
     }
 
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// 新建一个实例并阻塞到有客户端连上。每个连接一个实例。
+    /// 阻塞到有客户端连上。返回已连接的流之前，先建好下一个实例。
     pub fn accept(&self) -> io::Result<PipeStream> {
-        let handle = create_instance(&self.name)?;
-        let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
-        if connected == 0 {
-            let error = unsafe { GetLastError() };
-            if error != ERROR_PIPE_CONNECTED {
-                unsafe { CloseHandle(handle) };
-                return Err(io::Error::from_raw_os_error(error as i32));
+        let current = {
+            let mut slot = self.pending.lock().unwrap_or_else(|error| error.into_inner());
+            match slot.take() {
+                Some(handle) => handle,
+                None => create_instance(&self.name)?,
             }
+        };
+        let connected = match wait_for_client(current) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.ensure_pending();
+                return Err(error);
+            }
+        };
+        // 客户端已经占用了这一实例。下一个必须在把流交出去之前就存在，
+        // 否则紧跟着来的连接会落到「没有实例」。
+        self.ensure_pending();
+        Ok(PipeStream::from_handle(connected))
+    }
+
+    fn ensure_pending(&self) {
+        let mut slot = self.pending.lock().unwrap_or_else(|error| error.into_inner());
+        if slot.is_none()
+            && let Ok(handle) = create_instance(&self.name)
+        {
+            *slot = Some(handle);
         }
-        let file = unsafe { File::from_raw_handle(handle) };
-        Ok(PipeStream {
-            file,
-            read_timeout: None,
-            write_timeout: None,
-        })
     }
 }
 
 pub struct PipeStream {
-    file: File,
+    handle: OwnedHandle,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
+    /// 只影响这一份句柄之后的操作。不改内核里的管道模式。
+    nonblocking: AtomicBool,
 }
 
 impl PipeStream {
-    /// 连上已经在听的管道。`name` 是 `\\.\pipe\...`。
+    /// 连上已经在听的管道。`name` 是 `\\.\pipe\...`。实例正忙时等到有空位或预算用完。
     pub fn connect(name: &str) -> io::Result<Self> {
         let wide = wide(name);
-        // GENERIC_READ | GENERIC_WRITE。客户端独占这一实例。
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                0x8000_0000 | 0x4000_0000,
-                0,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+        let deadline = std::time::Instant::now() + CONNECT_BUDGET;
+        loop {
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    0x8000_0000 | 0x4000_0000,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                    std::ptr::null_mut(),
+                )
+            };
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                return Ok(Self::from_handle(unsafe { OwnedHandle::from_raw_handle(handle) }));
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
+                return Err(error);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "命名管道正忙",
+                ));
+            }
+            let millis = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX - 1).max(1);
+            let waited = unsafe { WaitNamedPipeW(wide.as_ptr(), millis) };
+            if waited == 0 && std::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "命名管道正忙",
+                ));
+            }
         }
-        Ok(Self {
-            file: unsafe { File::from_raw_handle(handle) },
+    }
+
+    fn from_handle(handle: OwnedHandle) -> Self {
+        Self {
+            handle,
             read_timeout: None,
             write_timeout: None,
-        })
+            nonblocking: AtomicBool::new(false),
+        }
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {
@@ -126,7 +186,7 @@ impl PipeStream {
         let ok = unsafe {
             DuplicateHandle(
                 GetCurrentProcess(),
-                self.file.as_raw_handle(),
+                self.handle.as_raw_handle(),
                 GetCurrentProcess(),
                 &mut duplicated,
                 0,
@@ -137,40 +197,46 @@ impl PipeStream {
         if ok == 0 || duplicated.is_null() {
             return Err(io::Error::last_os_error());
         }
+        let cloned = Self::from_handle(unsafe { OwnedHandle::from_raw_handle(duplicated) });
+        cloned
+            .nonblocking
+            .store(self.nonblocking.load(Ordering::Relaxed), Ordering::Relaxed);
         Ok(Self {
-            file: unsafe { File::from_raw_handle(duplicated) },
             read_timeout: self.read_timeout,
             write_timeout: self.write_timeout,
+            ..cloned
         })
     }
 
-    /// `PIPE_NOWAIT` 或 `PIPE_WAIT`。读模式保持字节流。
+    /// 之后没有单独设超时的读写立刻返回 `WouldBlock`。不改管道实例的等待模式，
+    /// 所以不会碰到同一实例上另一份句柄正在进行的读写。
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        set_wait_mode(self.file.as_raw_handle(), nonblocking)
+        self.nonblocking.store(nonblocking, Ordering::Relaxed);
+        Ok(())
     }
 
-    /// 存下读超时。有期限时改成 `PIPE_WAIT`：真正的等待是 `PeekNamedPipe`，
-    /// 不是套接字接收超时。
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         self.read_timeout = timeout;
-        if timeout.is_some() {
-            self.set_nonblocking(false)?;
-        }
         Ok(())
     }
 
-    /// 存下写超时。有期限时改成 `PIPE_WAIT`。
     pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         self.write_timeout = timeout;
-        if timeout.is_some() {
-            self.set_nonblocking(false)?;
-        }
         Ok(())
+    }
+
+    /// 断开服务端这一实例。堵在另一份句柄上的重叠读写会结束，读端看到管道断开。
+    pub fn disconnect(&self) -> io::Result<()> {
+        if unsafe { DisconnectNamedPipe(self.handle.as_raw_handle()) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     pub fn client_pid(&self) -> io::Result<u32> {
         let mut pid = 0u32;
-        if unsafe { GetNamedPipeClientProcessId(self.file.as_raw_handle(), &mut pid) } == 0 {
+        if unsafe { GetNamedPipeClientProcessId(self.handle.as_raw_handle(), &mut pid) } == 0 {
             return Err(io::Error::last_os_error());
         }
         if pid == 0 {
@@ -178,11 +244,21 @@ impl PipeStream {
         }
         Ok(pid)
     }
+
+    fn wait_for(&self, timeout: Option<Duration>) -> Wait {
+        if let Some(timeout) = timeout {
+            Wait::Budget(timeout)
+        } else if self.nonblocking.load(Ordering::Relaxed) {
+            Wait::Poll
+        } else {
+            Wait::Forever
+        }
+    }
 }
 
 impl AsRawHandle for PipeStream {
     fn as_raw_handle(&self) -> RawHandle {
-        self.file.as_raw_handle()
+        self.handle.as_raw_handle()
     }
 }
 
@@ -191,12 +267,14 @@ impl Read for PipeStream {
         if buf.is_empty() {
             return Ok(0);
         }
-        if let Some(timeout) = self.read_timeout {
-            // 有期限就先 Peek，到点、有字节或管道断开再 ReadFile。PIPE_WAIT 下
-            // 没有数据时 ReadFile 会一直堵着。
-            wait_until_readable(&self.file, timeout)?;
-        }
-        read_file(&self.file, buf)
+        let wait = self.wait_for(self.read_timeout);
+        overlapped_transfer(
+            self.handle.as_raw_handle(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            false,
+            wait,
+        )
     }
 }
 
@@ -205,51 +283,32 @@ impl Write for PipeStream {
         if buf.is_empty() {
             return Ok(0);
         }
-        if let Some(timeout) = self.write_timeout {
-            // 满缓冲时阻塞的 WriteFile 会越过期限。Peek 确认管道还在，再以
-            // PIPE_NOWAIT 写；缓冲满就停 15ms 重试。期限请求本身把句柄留在
-            // PIPE_WAIT，尝试前后改回去。
-            let deadline = Instant::now() + timeout;
-            self.set_nonblocking(true)?;
-            let result = loop {
-                match peek_pipe(self.file.as_raw_handle()) {
-                    Ok(PipePeek::Broken) => {
-                        break Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            "命名管道已断开",
-                        ));
-                    }
-                    Ok(_) => {}
-                    Err(error) => break Err(error),
-                }
-                match write_file(&self.file, buf) {
-                    Ok(written) => break Ok(written),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        if Instant::now() >= deadline {
-                            break Err(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                "命名管道写入超时",
-                            ));
-                        }
-                        thread::park_timeout(Duration::from_millis(15));
-                    }
-                    Err(error) => break Err(error),
-                }
-            };
-            let _ = self.set_nonblocking(false);
-            return result;
-        }
-        write_file(&self.file, buf)
+        let wait = self.wait_for(self.write_timeout);
+        overlapped_transfer(
+            self.handle.as_raw_handle(),
+            buf.as_ptr() as *mut u8,
+            buf.len(),
+            true,
+            wait,
+        )
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
+        Ok(())
     }
 }
 
 /// 匿名管道的写端也要能改成非阻塞，免得唤醒写在缓冲满时卡住持锁的线程。
+/// 这是管道两端各自的句柄，不是 `PipeStream` 那种同一实例上复制出来的一对。
 pub fn set_nonblocking_handle(handle: RawHandle, nonblocking: bool) -> io::Result<()> {
-    set_wait_mode(handle, nonblocking)
+    use windows_sys::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_NOWAIT};
+    let mode = PIPE_READMODE_BYTE | if nonblocking { PIPE_NOWAIT } else { PIPE_WAIT };
+    let ok = unsafe { SetNamedPipeHandleState(handle, &mode, std::ptr::null(), std::ptr::null()) };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// `PeekNamedPipe` 的结果。字节管道上等可读就靠这个，不把管道当成套接字。
@@ -268,37 +327,16 @@ pub fn peek_available(handle: RawHandle) -> io::Result<PipeAvailability> {
     }
 }
 
-fn set_wait_mode(handle: RawHandle, nonblocking: bool) -> io::Result<()> {
-    let mode = PIPE_READMODE_BYTE | if nonblocking { PIPE_NOWAIT } else { PIPE_WAIT };
-    let ok = unsafe {
-        SetNamedPipeHandleState(handle, &mode, std::ptr::null(), std::ptr::null())
-    };
-    if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 enum PipePeek {
     Empty,
     Ready(u32),
     Broken,
 }
 
-fn wait_until_readable(file: &File, timeout: Duration) -> io::Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match peek_pipe(file.as_raw_handle())? {
-            PipePeek::Ready(_) | PipePeek::Broken => return Ok(()),
-            PipePeek::Empty => {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "命名管道读取超时"));
-                }
-                thread::park_timeout(Duration::from_millis(15));
-            }
-        }
-    }
+enum Wait {
+    Forever,
+    Budget(Duration),
+    Poll,
 }
 
 fn peek_pipe(handle: RawHandle) -> io::Result<PipePeek> {
@@ -330,60 +368,158 @@ fn peek_pipe(handle: RawHandle) -> io::Result<PipePeek> {
     }
 }
 
-fn read_file(file: &File, buf: &mut [u8]) -> io::Result<usize> {
+fn overlapped_transfer(
+    handle: HANDLE,
+    buf: *mut u8,
+    len: usize,
+    write: bool,
+    wait: Wait,
+) -> io::Result<usize> {
+    let len = u32::try_from(len).unwrap_or(u32::MAX);
+    let event = ManualEvent::new()?;
+    let mut overlapped = OVERLAPPED {
+        hEvent: event.raw(),
+        ..OVERLAPPED::default()
+    };
     let mut transferred = 0u32;
     let ok = unsafe {
-        ReadFile(
-            file.as_raw_handle(),
-            buf.as_mut_ptr(),
-            buf.len().min(u32::MAX as usize) as u32,
-            &mut transferred,
-            std::ptr::null_mut(),
-        )
+        if write {
+            WriteFile(handle, buf, len, &mut transferred, &mut overlapped)
+        } else {
+            ReadFile(handle, buf, len, &mut transferred, &mut overlapped)
+        }
     };
-    map_transfer(ok, transferred, false)
+    if ok != 0 {
+        return Ok(transferred as usize);
+    }
+    let error = unsafe { GetLastError() };
+    if error != ERROR_IO_PENDING {
+        return map_completed_error(error, write);
+    }
+    let millis = match wait {
+        Wait::Forever => INFINITE,
+        Wait::Budget(duration) => duration_millis(duration),
+        Wait::Poll => 0,
+    };
+    let status = unsafe { WaitForSingleObject(event.raw(), millis) };
+    if status == WAIT_OBJECT_0 {
+        return overlapped_result(handle, &overlapped, write);
+    }
+    if status == WAIT_TIMEOUT {
+        unsafe { CancelIoEx(handle, &overlapped) };
+        unsafe { WaitForSingleObject(event.raw(), INFINITE) };
+        return match overlapped_result(handle, &overlapped, write) {
+            Ok(written) => Ok(written),
+            Err(error) if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) => {
+                if matches!(wait, Wait::Poll) {
+                    Err(io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据"))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        if write {
+                            "命名管道写入超时"
+                        } else {
+                            "命名管道读取超时"
+                        },
+                    ))
+                }
+            }
+            Err(error) => Err(error),
+        };
+    }
+    Err(io::Error::last_os_error())
 }
 
-fn write_file(file: &File, buf: &[u8]) -> io::Result<usize> {
+fn overlapped_result(handle: HANDLE, overlapped: &OVERLAPPED, write: bool) -> io::Result<usize> {
     let mut transferred = 0u32;
-    let ok = unsafe {
-        WriteFile(
-            file.as_raw_handle(),
-            buf.as_ptr(),
-            buf.len().min(u32::MAX as usize) as u32,
-            &mut transferred,
-            std::ptr::null_mut(),
-        )
-    };
-    map_transfer(ok, transferred, true)
+    let ok = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, 0) };
+    if ok != 0 {
+        return Ok(transferred as usize);
+    }
+    map_completed_error(unsafe { GetLastError() }, write)
 }
 
-fn map_transfer(ok: i32, transferred: u32, write: bool) -> io::Result<usize> {
-    if ok == 0 {
-        let error = unsafe { GetLastError() };
-        if error == ERROR_NO_DATA {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "命名管道没有数据",
-            ));
+fn map_completed_error(error: u32, write: bool) -> io::Result<usize> {
+    if !write && matches!(error, ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED | 0) {
+        return Ok(0);
+    }
+    if error == ERROR_NO_DATA {
+        return Err(io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据"));
+    }
+    Err(io::Error::from_raw_os_error(error as i32))
+}
+
+fn duration_millis(duration: Duration) -> u32 {
+    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX - 1)
+}
+
+struct ManualEvent(HANDLE);
+
+impl ManualEvent {
+    fn new() -> io::Result<Self> {
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if handle.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self(handle))
         }
-        if !write && (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED || error == 0)
-        {
-            return Ok(0);
-        }
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for ManualEvent {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn wait_for_client(handle: OwnedHandle) -> io::Result<OwnedHandle> {
+    let event = ManualEvent::new()?;
+    let mut overlapped = OVERLAPPED {
+        hEvent: event.raw(),
+        ..OVERLAPPED::default()
+    };
+    let connected = unsafe { ConnectNamedPipe(handle.as_raw_handle(), &mut overlapped) };
+    if connected != 0 {
+        return Ok(handle);
+    }
+    let error = unsafe { GetLastError() };
+    if error == ERROR_PIPE_CONNECTED {
+        return Ok(handle);
+    }
+    if error != ERROR_IO_PENDING {
         return Err(io::Error::from_raw_os_error(error as i32));
     }
-    Ok(transferred as usize)
+    let status = unsafe { WaitForSingleObject(event.raw(), INFINITE) };
+    if status != WAIT_OBJECT_0 {
+        unsafe { CancelIoEx(handle.as_raw_handle(), &overlapped) };
+        unsafe { WaitForSingleObject(event.raw(), INFINITE) };
+        return Err(io::Error::last_os_error());
+    }
+    let mut transferred = 0u32;
+    let ok = unsafe {
+        GetOverlappedResult(handle.as_raw_handle(), &overlapped, &mut transferred, 0)
+    };
+    if ok == 0 {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_PIPE_CONNECTED {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+    }
+    Ok(handle)
 }
 
-fn create_instance(name: &str) -> io::Result<HANDLE> {
+fn create_instance(name: &str) -> io::Result<OwnedHandle> {
     let wide = wide(name);
     let mut security = UserOnlySecurity::new()?;
     security.attributes.lpSecurityDescriptor = security.descriptor.as_mut_ptr().cast();
     let handle = unsafe {
         CreateNamedPipeW(
             wide.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             64 * 1024,
@@ -397,7 +533,7 @@ fn create_instance(name: &str) -> io::Result<HANDLE> {
     }
     // 安全描述符只在 CreateNamedPipe 期间使用。
     security.detach_without_freeing_acl_memory();
-    Ok(handle)
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
 struct UserOnlySecurity {
@@ -480,12 +616,18 @@ impl UserOnlySecurity {
     }
 }
 
+fn is_pipe_path(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 9
+        && bytes[0] == b'\\'
+        && bytes[1] == b'\\'
+        && (bytes[2] == b'.' || bytes[2] == b'?')
+        && bytes[3] == b'\\'
+        && bytes[4..8].eq_ignore_ascii_case(b"pipe")
+        && bytes[8] == b'\\'
+}
+
 fn wide(value: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     Path::new(value).as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
-#[allow(dead_code)]
-fn _raw(file: &File) -> RawHandle {
-    file.as_raw_handle()
 }

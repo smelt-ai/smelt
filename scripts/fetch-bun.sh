@@ -62,8 +62,8 @@ case "$ID" in
   windows-x64)
     ZIP=bun-windows-x64.zip
     ARCHIVE_SHA=0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d
-    # 压缩包里是 bun-windows-x64/bun.exe。只钉 zip 的哈希，exe 随包安装。
-    EXE_SHA=
+    # 压缩包里是 bun-windows-x64/bun.exe。
+    EXE_SHA=095db4abae203d42f29fdec26da4a882fcde6333cdd84e40c0c7828c0cf543f6
     BIN_NAME=bun.exe
     ;;
 esac

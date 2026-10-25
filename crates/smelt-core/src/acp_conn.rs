@@ -4979,32 +4979,51 @@ pub(crate) fn extended_search_path() -> String {
     path
 }
 
-/// 在 `:` 分隔的 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
-/// 已经带 `/` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
+/// 在 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
+/// 已经带 `/` 或 `\` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
 /// None——调用方保留原名，让 spawn 照常失败并把真实错误报出来。
+///
+/// Windows 上没有扩展名的名字按 `.exe`、`.cmd`、`.bat`、原名这个顺序找。
+/// `CreateProcess` 只补 `.exe`，`claude` / `npx` 这类实际是 `.cmd`。
 fn resolve_in_path(program: &str, path: &str) -> Option<String> {
     if program.contains('/') || program.contains('\\') {
         return Some(program.to_string());
     }
     let separator = if cfg!(windows) { ';' } else { ':' };
+    let names = command_file_names(program);
     for dir in path.split(separator).filter(|d| !d.is_empty()) {
-        let full = std::path::Path::new(dir).join(program);
-        // 是文件且可执行（软链会被 metadata 跟随到目标）。Windows 没有执行位。
-        if let Ok(meta) = std::fs::metadata(&full) {
-            if !meta.is_file() {
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if meta.permissions().mode() & 0o111 == 0 {
+        for name in &names {
+            let full = std::path::Path::new(dir).join(name);
+            // 是文件且可执行（软链会被 metadata 跟随到目标）。Windows 没有执行位。
+            if let Ok(meta) = std::fs::metadata(&full) {
+                if !meta.is_file() {
                     continue;
                 }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        continue;
+                    }
+                }
+                return full.to_str().map(String::from);
             }
-            return full.to_str().map(String::from);
         }
     }
     None
+}
+
+fn command_file_names(program: &str) -> Vec<String> {
+    #[cfg(windows)]
+    if !program.as_bytes().contains(&b'.') {
+        return vec![
+            format!("{program}.exe"),
+            format!("{program}.cmd"),
+            format!("{program}.bat"),
+            program.to_string(),
+        ];
+    }
+    vec![program.to_string()]
 }
 
 // login shell 的 PATH 探测（连同各家 agent 的自定义 workspace 目录变量一起）
@@ -5571,6 +5590,37 @@ mod path_resolve_tests {
         // `sh` 一定在 /bin；把它藏在几个假目录后面，验证会逐段找下去。
         let path = "/no/such/dir:/also/fake:/bin:/usr/bin";
         assert_eq!(resolve_in_path("sh", path).as_deref(), Some("/bin/sh"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bare_name_prefers_exe_then_cmd() {
+        let root = std::env::temp_dir().join(format!(
+            "smelt-cmd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.to_string_lossy().into_owned();
+        std::fs::write(root.join("claude.cmd"), "@echo off\r\n").unwrap();
+        let found = resolve_in_path("claude", &path).expect("cmd");
+        assert!(
+            found.to_ascii_lowercase().ends_with("claude.cmd"),
+            "{found}"
+        );
+        std::fs::write(root.join("claude.exe"), "MZ").unwrap();
+        let found = resolve_in_path("claude", &path).expect("exe");
+        assert!(
+            found.to_ascii_lowercase().ends_with("claude.exe"),
+            "{found}"
+        );
+        std::fs::write(root.join("grok"), "bare").unwrap();
+        let found = resolve_in_path("grok", &path).expect("bare");
+        assert!(found.to_ascii_lowercase().ends_with("grok"), "{found}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

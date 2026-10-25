@@ -465,12 +465,6 @@ pub(super) fn process_executable(pid: u32) -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-pub(super) fn process_executable(pid: u32) -> Result<PathBuf, String> {
-    smelt_sys::process::process_executable(pid)
-        .map_err(|error| format!("cannot determine executable for peer pid {pid}: {error}"))
-}
-
-#[cfg(windows)]
 pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
     use std::os::windows::io::AsRawSocket;
     let pid = smelt_sys::process::af_unix_peer_pid(conn.as_raw_socket())
@@ -482,12 +476,11 @@ pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, St
 /// 不查 Authenticode。
 #[cfg(windows)]
 pub(crate) fn windows_peer_identity(pid: u32) -> Result<PeerIdentity, String> {
-    let same_user = smelt_sys::process::same_user_as_current(pid)
-        .map_err(|error| format!("cannot compare peer user for pid {pid}: {error}"))?;
+    let (same_user, executable) = smelt_sys::process::peer_user_and_executable(pid)
+        .map_err(|error| format!("cannot read Windows peer pid {pid}: {error}"))?;
     if !same_user {
         return Err(format!("Windows peer pid {pid} is not the current user"));
     }
-    let executable = process_executable(pid)?;
     Ok(PeerIdentity {
         pid,
         executable: Some(executable),

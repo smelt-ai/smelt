@@ -530,6 +530,20 @@ fn agent_model_from_launch(launch: &ConversationLaunch) -> Option<(String, Strin
     Some((provider.to_string(), model.to_string()))
 }
 
+/// 交给子进程的 `SMELT_SOCK`。Unix 是 sock 文件。Windows 上 Bun 的
+/// `net.connect` 只认命名管道，名字和 smeltd 监听的 `user_pipe_path("daemon")` 相同。
+fn daemon_sock_for_child() -> String {
+    #[cfg(windows)]
+    {
+        if let Ok(name) = smelt_sys::named_pipe::user_pipe_path("daemon") {
+            return name;
+        }
+    }
+    crate::daemon_state::smeltd_sock_path()
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn spawn_process(
     launch: &ConversationLaunch,
     inline_env: BTreeMap<String, String>,
@@ -564,12 +578,7 @@ fn spawn_process(
         crate::managed_runtime::PI_PROTOCOL_ENV,
         crate::managed_runtime::pi_protocol(),
     );
-    command.env(
-        "SMELT_SOCK",
-        crate::daemon_state::smeltd_sock_path()
-            .to_string_lossy()
-            .as_ref(),
-    );
+    command.env("SMELT_SOCK", daemon_sock_for_child());
     if let Some(path) = background_sock {
         command.env("SMELT_BACKGROUND_TASK_SOCK", path);
     }

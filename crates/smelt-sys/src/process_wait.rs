@@ -371,6 +371,9 @@ fn wait_until_any_exit_os(pids: &[i32], timeout: Duration) -> Option<i32> {
             )
         };
         if handle.is_null() {
+            for (_, opened) in handles {
+                unsafe { CloseHandle(opened) };
+            }
             return Some(pid);
         }
         handles.push((pid, handle));

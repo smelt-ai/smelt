@@ -534,8 +534,9 @@ struct Ctl {
     /// Windows：ConPTY。不能 CREATE_SUSPENDED，也不把句柄交出去。
     #[cfg(windows)]
     master: Box<dyn portable_pty::MasterPty + Send>,
+    /// 会话唯一的 ConPTY 写线程。写端握在那个线程里。按键不再各起一个线程。
     #[cfg(windows)]
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    input_tx: std::sync::mpsc::SyncSender<PtyInputWrite>,
     /// reattach 后首个 resize 强制「抖动」（先 rows+1 再回正）：即使尺寸与断开前相同也
     /// 制造 SIGWINCH，让备用屏 TUI（Claude Code 等）重绘整屏，避免重连花屏。
     jolt: bool,
@@ -736,6 +737,8 @@ impl TerminalChild {
                         }
                     }
                 };
+                // shell 已经退出。丢掉 Job，KILL_ON_JOB_CLOSE 收掉还在组里的孙子。
+                smelt_sys::process::release_tree(pid as u32);
                 let mut state = reaper
                     .state
                     .lock()
@@ -2016,22 +2019,56 @@ pub(crate) fn write_session_input(sess: &Session, bytes: &[u8]) -> std::io::Resu
 }
 
 #[cfg(windows)]
+struct PtyInputWrite {
+    bytes: Vec<u8>,
+    done: std::sync::mpsc::Sender<std::io::Result<()>>,
+}
+
+/// 一个会话一条写线程，队列最多 8 笔。ConPTY 缓冲满时线程停在 `write_all`，
+/// 后来的按键进队列，满了就返回超时，不再按每次输入起线程。
+#[cfg(windows)]
+fn spawn_pty_input_thread(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+) -> std::sync::mpsc::SyncSender<PtyInputWrite> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PtyInputWrite>(8);
+    let _ = thread::Builder::new()
+        .name("smelt-pty-input".to_string())
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                let result = writer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .write_all(&job.bytes);
+                let _ = job.done.send(result);
+            }
+        });
+    tx
+}
+
+#[cfg(windows)]
 fn write_session_input_windows(sess: &Session, bytes: &[u8]) -> std::io::Result<()> {
     if bytes.is_empty() {
         return Ok(());
     }
     let _input_gate = sess.input_gate.lock().unwrap();
-    let writer = {
+    let input_tx = {
         let ctl = sess.ctl.lock().unwrap();
-        Arc::clone(&ctl.writer)
+        ctl.input_tx.clone()
     };
-    let (tx, rx) = std::sync::mpsc::channel();
-    let payload = bytes.to_vec();
-    thread::spawn(move || {
-        let mut writer = writer.lock().unwrap();
-        let _ = tx.send(writer.write_all(&payload));
-    });
-    match rx.recv_timeout(PTY_WRITE_TIMEOUT) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    if input_tx
+        .try_send(PtyInputWrite {
+            bytes: bytes.to_vec(),
+            done: done_tx,
+        })
+        .is_err()
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::TimedOut,
+            "PTY input write timed out",
+        ));
+    }
+    match done_rx.recv_timeout(PTY_WRITE_TIMEOUT) {
         Ok(result) => result,
         Err(_) => Err(std::io::Error::new(
             ErrorKind::TimedOut,
@@ -4429,7 +4466,7 @@ fn spawn_session(
         (terminal_child, master, pty_reader)
     };
     #[cfg(windows)]
-    let (terminal_child, master, writer, pty_reader) = {
+    let (terminal_child, master, input_tx, pty_reader) = {
         let terminal_child = TerminalChild::start_with_child(child)?;
         let reader = pair
             .master
@@ -4439,13 +4476,9 @@ fn spawn_session(
             .master
             .take_writer()
             .map_err(|error| anyhow::anyhow!("拿不到 ConPTY 写端：{error}"))?;
+        let input_tx = spawn_pty_input_thread(Arc::new(Mutex::new(writer)));
         let pty_reader = threaded_pty_reader(reader);
-        (
-            terminal_child,
-            pair.master,
-            Arc::new(Mutex::new(writer)),
-            pty_reader,
-        )
+        (terminal_child, pair.master, input_tx, pty_reader)
     };
     let state = Arc::new(Mutex::new(SessionState {
         id: id.to_string(),
@@ -4463,7 +4496,7 @@ fn spawn_session(
         ctl: Mutex::new(Ctl {
             master,
             #[cfg(windows)]
-            writer,
+            input_tx,
             jolt: false,
             cols,
             rows,

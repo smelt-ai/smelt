@@ -119,11 +119,12 @@ impl ClientSocket for ClientConn {
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         match self {
             Self::Unix(stream) => stream.shutdown(how),
-            // 管道没有套接字那种 shutdown。改成不等待，让堵在读写上的另一份句柄尽快返回。
+            // 管道没有套接字那种 shutdown。断开这一实例，堵在另一份句柄上的
+            // 重叠读写会结束。不改 PIPE_NOWAIT，那会连正在读的句柄一起打断。
             #[cfg(windows)]
             Self::Pipe { stream, .. } => {
                 let _ = how;
-                stream.set_nonblocking(true)
+                stream.disconnect()
             }
         }
     }

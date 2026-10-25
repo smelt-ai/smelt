@@ -286,6 +286,13 @@ pub fn same_user_as_current(pid: u32) -> io::Result<bool> {
     windows::same_user_as_current(pid)
 }
 
+/// 一次 `OpenProcess` 同时取出「是不是当前用户」和映像路径。
+/// 分两次打开的话，两次之间这个 pid 可能已经被复用。
+#[cfg(windows)]
+pub fn peer_user_and_executable(pid: u32) -> io::Result<(bool, PathBuf)> {
+    windows::peer_user_and_executable(pid)
+}
+
 #[cfg(windows)]
 pub fn current_user_key() -> io::Result<String> {
     windows::current_user_key()
@@ -325,7 +332,7 @@ mod windows {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ACCESS_DENIED, FILETIME, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-        STILL_ACTIVE,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Networking::WinSock::WSAIoctl;
     use windows_sys::Win32::Security::{
@@ -340,7 +347,7 @@ mod windows {
         TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, INFINITE, OpenProcess,
+        GetCurrentProcess, GetProcessTimes, INFINITE, OpenProcess,
         OpenProcessToken, OpenThread, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
         PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW, ResumeThread,
         THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
@@ -375,10 +382,11 @@ mod windows {
         if process.is_null() {
             return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
         }
-        let mut code = 0u32;
-        let queried = unsafe { GetExitCodeProcess(process, &mut code) } != 0;
+        // 句柄带 SYNCHRONIZE。进程退出后这个句柄变成有信号。
+        // `GetExitCodeProcess == STILL_ACTIVE` 会把真的以 259 退出的进程当成还活着。
+        let running = unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT;
         unsafe { CloseHandle(process) };
-        !queried || code == STILL_ACTIVE as u32
+        running
     }
 
     pub fn terminate_pid(pid: u32) -> io::Result<()> {
@@ -528,11 +536,34 @@ mod windows {
     }
 
     pub fn process_executable(pid: u32) -> io::Result<PathBuf> {
+        let process = open_query(pid)?;
+        let _process = OwnedHandle(process);
+        image_path(process)
+    }
+
+    pub fn same_user_as_current(pid: u32) -> io::Result<bool> {
+        Ok(peer_user_and_executable(pid)?.0)
+    }
+
+    pub fn peer_user_and_executable(pid: u32) -> io::Result<(bool, PathBuf)> {
+        let process = open_query(pid)?;
+        let _process = OwnedHandle(process);
+        let current = user_sid_bytes(unsafe { GetCurrentProcess() })?;
+        let peer = user_sid_bytes(process)?;
+        let executable = image_path(process)?;
+        Ok((current == peer, executable))
+    }
+
+    fn open_query(pid: u32) -> io::Result<HANDLE> {
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if process.is_null() {
-            return Err(io::Error::last_os_error());
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(process)
         }
-        let _process = OwnedHandle(process);
+    }
+
+    fn image_path(process: HANDLE) -> io::Result<PathBuf> {
         let mut buf = vec![0u16; 32 * 1024];
         let mut len = buf.len() as u32;
         let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len) };
@@ -540,17 +571,6 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         Ok(PathBuf::from(OsString::from_wide(&buf[..len as usize])))
-    }
-
-    pub fn same_user_as_current(pid: u32) -> io::Result<bool> {
-        let current = user_sid_bytes(unsafe { GetCurrentProcess() })?;
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if process.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let _process = OwnedHandle(process);
-        let peer = user_sid_bytes(process)?;
-        Ok(current == peer)
     }
 
     pub fn current_user_key() -> io::Result<String> {
