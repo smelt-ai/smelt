@@ -354,6 +354,23 @@ fn reap_host_tasks(host_pid: i32) {
     }
 }
 
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(bytes.len());
+    if start >= end {
+        &[]
+    } else {
+        &bytes[start..end]
+    }
+}
+
 fn dispatch_snapshot_line(
     line: &[u8],
     mirror: &mut smelt_core::acp_wire::FrameMirror,
@@ -547,7 +564,7 @@ pub(crate) fn run_session_host() {
     if !created {
         return;
     }
-    crate::acp_host::install_peer_uplink(Arc::clone(&acp_sessions), req.id.clone());
+    crate::acp_host::install_peer_uplink(Arc::clone(&acp_sessions), req.id);
 
     handle_acp_open(
         conn,

@@ -470,6 +470,63 @@ enum TerminalChildState {
     Finished(TerminalChildExit),
 }
 
+fn waitpid_retry(pid: i32, options: i32) -> i32 {
+    loop {
+        let waited = unsafe { libc::waitpid(pid, std::ptr::null_mut(), options) };
+        if waited >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return waited;
+        }
+    }
+}
+
+fn waitid_exact_child(pid: i32, options: i32) -> std::io::Result<()> {
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        let result =
+            unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, info.as_mut_ptr(), options) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(error);
+        }
+    }
+}
+
+/// 不消费退出状态，先确认这个 pid 已经退出，并且仍是本进程的直接子进程。
+fn wait_for_exact_child_exit(pid: i32) -> Result<(), TerminalChildExit> {
+    match waitid_exact_child(pid, libc::WEXITED | libc::WNOWAIT) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+            Err(TerminalChildExit::AlreadyReaped)
+        }
+        Err(error) => {
+            let code = error.raw_os_error();
+            dlog(&format!(
+                "terminal: waitid({pid}, WNOWAIT) 失败，退出状态可能未回收：{code:?}"
+            ));
+            Err(TerminalChildExit::WaitFailed(code))
+        }
+    }
+}
+
+fn wait_for_exact_child(pid: i32) -> TerminalChildExit {
+    let waited = waitpid_retry(pid, 0);
+    if waited == pid {
+        return TerminalChildExit::Reaped;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ECHILD) => TerminalChildExit::AlreadyReaped,
+        error => {
+            dlog(&format!(
+                "terminal: waitpid({pid}) 失败，退出状态可能未回收：{error:?}"
+            ));
+            TerminalChildExit::WaitFailed(error)
+        }
+    }
+}
+
 /// 一个终端 shell 的唯一 `waitpid` 所有者。
 ///
 /// PTY EOF 代表所有持有 slave 的后代都离开了，不等于直接 shell 此刻才退出。若把

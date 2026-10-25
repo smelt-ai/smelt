@@ -15,13 +15,14 @@
 pub use smelt_model::acp_conn::*;
 
 use std::future::Future;
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt, channel::mpsc};
+use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
 use agent_client_protocol::schema::v1::{
     AgentRequest, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
@@ -46,8 +47,8 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Dispatch, Lines,
-    Responder, SessionMessage,
+    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines, Responder,
+    SessionMessage,
 };
 
 pub use crate::acp_chat::AcpImage as PromptImage;
@@ -690,9 +691,7 @@ pub struct ConversationHandle {
     pub cmd_tx: smol::channel::Sender<ConversationCommand>,
     pub event_rx: smol::channel::Receiver<ConversationEvent>,
     /// 子进程 pid + 原始 stdin/stdout fd，spawn 成功后才会填（Fatal 前的极短
-    /// 窗口是 None）。smeltd 无缝升级要用它把这两个 fd 也裸传过 exec()（跟
-    /// PTY master fd 同一招），见 `resume_acp_from_fds`。GUI 直连路径用不上，
-    /// 多存三个整数不加负担。
+    /// 窗口是 None）。停机和杀进程组用 pid；fd 只是当时的句柄编号。
     pub stdio: Arc<Mutex<Option<AcpStdio>>>,
     /// 已发出但尚未收到最终 JSON-RPC response 的请求数。热升级不得跨越这些
     /// callback；fd 能交接字节流，但不能交接 SDK 内存里的 request callback。
