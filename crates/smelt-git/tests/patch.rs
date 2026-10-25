@@ -12,6 +12,8 @@ fn repo_with_change(tag: &str, content: &str, modified: &str) -> std::path::Path
     std::fs::create_dir_all(&root).unwrap();
     let r = root.to_str().unwrap();
     run_git(r, &["init", "-q"]).unwrap();
+    // Windows 的 Git 默认把工作区换行转成 CRLF。这里要比对提交里的原始字节。
+    run_git(r, &["config", "core.autocrlf", "false"]).unwrap();
     run_git(r, &["config", "user.email", "t@t"]).unwrap();
     run_git(r, &["config", "user.name", "t"]).unwrap();
     std::fs::write(root.join("f.txt"), content).unwrap();
