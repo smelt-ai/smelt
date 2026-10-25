@@ -5162,7 +5162,13 @@ mod runtime_tests {
 
     #[test]
     fn runtime_version_probe_collects_a_short_lived_process() {
-        let output = run_runtime_version(std::path::Path::new("/usr/bin/true"));
+        let program = if cfg!(windows) {
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+            std::path::PathBuf::from(root).join(r"System32\where.exe")
+        } else {
+            std::path::PathBuf::from("/usr/bin/true")
+        };
+        let output = run_runtime_version(&program);
         assert!(output.is_ok(), "短命令的版本探测应正常收尾：{output:?}");
     }
 

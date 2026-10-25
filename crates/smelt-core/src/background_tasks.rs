@@ -2385,6 +2385,24 @@ mod tests {
         }
     }
 
+    /// 打印且不加换行。Windows 的 `cmd` 没有 `printf`，用 `set /p` 把提示打出来就结束。
+    fn print_text(text: &str) -> String {
+        if cfg!(windows) {
+            format!("set /p={text}<nul")
+        } else {
+            format!("printf {text}")
+        }
+    }
+
+    /// 停住一段时间。Windows 上 `ping` 的次数比秒数多 1，大约就是这段时间。
+    fn sleep_for(seconds: u32) -> String {
+        if cfg!(windows) {
+            format!("ping -n {} 127.0.0.1 >nul", seconds.saturating_add(1))
+        } else {
+            format!("sleep {seconds}")
+        }
+    }
+
     fn call(path: &Path, request: serde_json::Value) -> serde_json::Value {
         let mut stream = connect_task_stream(path).unwrap();
         stream
@@ -2407,7 +2425,7 @@ mod tests {
 
         let started = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf child", "title": "子任务", "owner": "/sub-a"}),
+            serde_json::json!({"op": "start", "command": print_text("child"), "title": "子任务", "owner": "/sub-a"}),
         );
         let child_task = started["id"].as_str().unwrap().to_string();
         until_settled_as(&path, "/sub-a", &child_task);
@@ -2417,7 +2435,7 @@ mod tests {
 
         let mine = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf session", "title": "会话任务"}),
+            serde_json::json!({"op": "start", "command": print_text("session"), "title": "会话任务"}),
         );
         let session_task = mine["id"].as_str().unwrap().to_string();
         until_settled(&path, &session_task);
@@ -2454,7 +2472,7 @@ mod tests {
         let start = |owner: &str| {
             call(
                 &path,
-                serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待", "owner": owner}),
+                serde_json::json!({"op": "start", "command": sleep_for(30), "title": "等待", "owner": owner}),
             )["id"]
                 .as_str()
                 .unwrap()
@@ -2522,7 +2540,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true);
@@ -2549,7 +2567,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "等待"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2568,7 +2586,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "会被杀掉"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "会被杀掉"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2700,7 +2718,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "还在跑"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "还在跑"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2718,7 +2736,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2738,7 +2756,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "还在跑"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "还在跑"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2763,7 +2781,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "sleep 30",
+                "command": sleep_for(30),
                 "title": "到点停止",
                 "timeoutSeconds": 1,
             }),
@@ -2779,7 +2797,7 @@ mod tests {
         let (supervisor, _events, outbound) = supervisor_with_outbound();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2806,7 +2824,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "printf ready",
+                "command": print_text("ready"),
                 "title": "打印",
                 "watch": true,
             }),
@@ -2834,7 +2852,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "printf ready",
+                "command": print_text("ready"),
                 "title": "打印",
                 "watch": true,
             }),
@@ -2860,7 +2878,7 @@ mod tests {
         let mut listen = Listen::connect(supervisor.socket_path());
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "等待"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2884,7 +2902,7 @@ mod tests {
         let mut listen = Listen::connect(supervisor.socket_path());
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2910,7 +2928,7 @@ mod tests {
         let mut second = Listen::connect(supervisor.socket_path());
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2938,7 +2956,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "printf ready",
+                "command": print_text("ready"),
                 "title": "打印",
                 "watch": true,
             }),
@@ -2979,7 +2997,7 @@ mod tests {
     /// id 就会悄悄指到新宿主的同号任务上。随机 id 让旧 id 对不上任何任务、明确报错。
     #[test]
     fn task_ids_do_not_repeat_across_host_instances() {
-        let start = serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"});
+        let start = serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"});
         let (before_restart, _first_events) = supervisor();
         let (after_restart, _second_events) = supervisor();
         let old = call(before_restart.socket_path(), start.clone());
@@ -3004,7 +3022,7 @@ mod tests {
                 supervisor.socket_path(),
                 serde_json::json!({
                     "op": "start",
-                    "command": format!("printf {index}"),
+                    "command": print_text(&index.to_string()),
                     "title": "打印",
                 }),
             );
@@ -3054,7 +3072,7 @@ mod tests {
         let mut before_fork = Listen::connect(&path);
         let started = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap().to_string();
         until_settled(&path, &id);
@@ -3087,7 +3105,7 @@ mod tests {
         let mut listen = Listen::connect(&path);
         let started = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap().to_string();
         until_settled(&path, &id);
