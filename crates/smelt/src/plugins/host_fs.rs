@@ -137,7 +137,7 @@ impl HostFs {
                 at.display()
             )));
         }
-        fs::remove_file(&at)
+        remove_file_or_link(&at, meta.file_type())
             .map(|()| HostValue::Null)
             .map_err(|error| HostError::new(format!("删除 {} 失败：{error}", at.display())))
     }
@@ -258,9 +258,12 @@ pub(super) fn fs_module(host: Rc<HostFs>) -> HostModule {
 
 /// 绝对路径、去掉 `.`、拒绝 `..`。不碰磁盘。
 ///
-/// Windows 的 `\\?\` 路径里，`components` 不把 `..` 标成 `ParentDir`，它只是
-/// 一个普通名字。这种前缀会关掉系统对 `..` 的折叠，但门控仍然不接受它。
+/// `\\?\` 路径的 `components` 只认 `\`。`a/../b` 因此是一个普通名字，不会变成
+/// `ParentDir`。门控按两种分隔符切开，这种写法同样拒绝。
 fn lexical(raw: &str) -> Result<PathBuf, HostError> {
+    if raw.split(['/', '\\']).any(|segment| segment == "..") {
+        return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
+    }
     let path = Path::new(raw);
     if !path.is_absolute() {
         return Err(HostError::new(format!("需要绝对路径：{raw}")));
@@ -273,13 +276,29 @@ fn lexical(raw: &str) -> Result<PathBuf, HostError> {
                 return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
             }
             Component::Normal(name) if name == "." => {}
-            Component::Normal(name) if name == ".." => {
-                return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
-            }
             other => cleaned.push(other),
         }
     }
     Ok(cleaned.into_iter().collect())
+}
+
+/// 删文件，或软链本身。
+///
+/// Windows 上目录软链带目录属性，`DeleteFile` 会返回 Access Denied。这种链接用
+/// `RemoveDirectory` 删，删的是链接，不是它指向的目录。
+fn remove_file_or_link(path: &Path, file_type: fs::FileType) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if is_directory_link(&file_type) {
+        return fs::remove_dir(path);
+    }
+    let _ = file_type;
+    fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn is_directory_link(file_type: &fs::FileType) -> bool {
+    use std::os::windows::fs::FileTypeExt;
+    file_type.is_symlink_dir()
 }
 
 /// 把最深的已存在祖先规范化，其余段原样拼回（它们不存在，也就没有软链可跟）。
@@ -405,7 +424,7 @@ fn relocate_across_devices(from: &Path, to: &Path) -> Result<(), HostError> {
         })?;
         symlink_at(&target, to)
             .map_err(|error| HostError::new(format!("创建链接 {} 失败：{error}", to.display())))?;
-        return fs::remove_file(from)
+        return remove_file_or_link(from, meta.file_type())
             .map_err(|error| HostError::new(format!("删除 {} 失败：{error}", from.display())));
     }
     copy_entry(from, to, false)?;
