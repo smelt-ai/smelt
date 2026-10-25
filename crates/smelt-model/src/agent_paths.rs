@@ -58,7 +58,7 @@ pub fn is_agent_space(path: &Path) -> bool {
 
 /// 同 [`is_agent_space`]，`smelt_home` 是路径所在那台机器的 `SMELT_HOME`。客户端判断别的
 /// 机器上的路径时用它：拿自己的主目录去比，远程机器上的 space 永远对不上。
-/// 两条都是运行时路径，按 `/` 比，不经过 `std::path`。
+/// 两条都是运行时路径，按 `/` 和 `\` 切开比较，不经过 `std::path`。
 pub fn is_agent_space_in(smelt_home: &str, path: &str) -> bool {
     under(&format!("{}/agents", trim_slash(smelt_home)), path)
 }
@@ -103,14 +103,20 @@ pub fn is_workbench_conversation_workspace_in(smelt_home: &str, path: &str) -> b
 }
 
 fn trim_slash(path: &str) -> &str {
-    path.trim_end_matches('/')
+    path.trim_end_matches(['/', '\\'])
 }
 
 /// `path` 等于 `root`，或落在 `root` 的下一级完整路径段里。`/proj` 不包含 `/project`。
+///
+/// 比较前把 `\` 收成 `/`：Windows 本机路径用反斜杠，远程机器的路径用正斜杠，两边要对上。
 fn under(root: &str, path: &str) -> bool {
-    let path = trim_slash(path);
-    let root = trim_slash(root);
+    let path = slash_form(path);
+    let root = slash_form(root);
     path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn slash_form(path: &str) -> String {
+    trim_slash(path).replace('\\', "/")
 }
 
 /// Pi 子智能体的子会话目录：`~/.smelt/subagents`。不放进 Pi 的会话目录：历史列表会把
@@ -132,4 +138,34 @@ pub fn subagent_session_file_in(dir: &Path, subagent_id: &str) -> Option<PathBuf
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
     safe.then(|| dir.join(format!("{id}.jsonl")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_agent_space_in, is_workbench_conversation_workspace_in};
+
+    #[test]
+    fn backslash_paths_count_as_the_same_space() {
+        let home = r"C:\Users\me\.smelt";
+        assert!(is_agent_space_in(
+            home,
+            r"C:\Users\me\.smelt\agents\space-agent"
+        ));
+        assert!(is_agent_space_in(
+            home,
+            r"C:\Users\me\.smelt\agents\space-agent\notes.md"
+        ));
+        assert!(!is_agent_space_in(
+            home,
+            r"C:\Users\me\.smelt\agents-evil\space-agent"
+        ));
+        assert!(is_workbench_conversation_workspace_in(
+            home,
+            r"C:\Users\me\.smelt\workspaces\conversations\chat-1",
+        ));
+        assert!(is_agent_space_in(
+            "/Users/me/.smelt",
+            "/Users/me/.smelt/agents/space-agent"
+        ));
+    }
 }
