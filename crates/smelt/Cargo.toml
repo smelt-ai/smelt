@@ -12,6 +12,7 @@ workspace = true
 smelt-sys = { path = "../smelt-sys" }
 smelt-model = { path = "../smelt-model" }
 smelt-client = { path = "../smelt-client" }
+smelt-cli = { path = "../smelt-cli" }
 smelt-paths = { path = "../smelt-paths" }
 smelt-pairing = { path = "../smelt-pairing" }
 smelt-iroh = { path = "../smelt-iroh" }

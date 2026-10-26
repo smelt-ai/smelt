@@ -1707,7 +1707,7 @@ mod managed_daemon_ensure_tests {
     fn install_app_cli_is_opt_in() {
         assert!(maybe_run_install_app(["smelt"]).is_none());
         assert!(maybe_run_install_app(["smelt", "--help"]).is_none());
-        assert_eq!(crate::cli::maybe_run(["smelt", "--help"]), Some(0));
+        assert_eq!(smelt_cli::maybe_run(["smelt", "--help"]), Some(0));
         assert_eq!(maybe_run_install_app(["smelt", "--install-app"]), Some(2));
     }
 

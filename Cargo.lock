@@ -10896,6 +10896,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-acp-view",
+ "smelt-cli",
  "smelt-client",
  "smelt-client-store",
  "smelt-core",
@@ -10933,6 +10934,18 @@ dependencies = [
  "smelt-sys",
  "smelt-ui",
  "smol",
+ "uuid",
+]
+
+[[package]]
+name = "smelt-cli"
+version = "2026.1023.0-rc.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "smelt-client",
+ "smelt-model",
+ "smelt-runtime-client",
  "uuid",
 ]
 

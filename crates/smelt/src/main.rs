@@ -23,7 +23,6 @@ pub(crate) use smelt_ui::ui_theme;
 
 pub(crate) mod agents;
 mod automation_notifications;
-mod cli;
 mod conversation_layout;
 mod desktop_view;
 mod dir_picker;
@@ -4584,7 +4583,7 @@ fn main() {
     if let Some(code) = local_daemon::maybe_run_install_app(std::env::args()) {
         std::process::exit(code);
     }
-    if let Some(code) = cli::maybe_run(std::env::args()) {
+    if let Some(code) = smelt_cli::maybe_run(std::env::args()) {
         std::process::exit(code);
     }
     // 整个 GUI 生命周期持共享 lease。installer 只有等所有 GUI 退出并拿到独占 lease

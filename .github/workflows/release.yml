@@ -167,7 +167,7 @@ jobs:
 
           ## Windows
 
-          \`smelt-${version}-windows-x86_64.zip\` 里是 \`smelt.exe\`、\`smeltd.exe\`、\`smelt-notify.exe\`、\`smelt-pi.exe\`（以及 Pi 要的 wasm）。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。升级本机守护会重启进程，终端会话不保留。
+          \`smelt-${version}-windows-x86_64.zip\` 里是 \`smelt.exe\`、\`smelt.com\`（命令行入口）、\`smeltd.exe\`、\`smelt-notify.exe\`、\`smelt-pi.exe\`（以及 Pi 要的 wasm）。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。升级本机守护会重启进程，终端会话不保留。
           EOF
           cat "$RUNNER_TEMP/release-notes.md"
 
@@ -395,7 +395,7 @@ jobs:
           save-if: false
 
       - name: Build
-        run: cargo build --release -p smelt -p smeltd --locked
+        run: cargo build --release -p smelt -p smelt-cli -p smeltd --locked
 
       # GitHub 的 windows-latest 默认是 PowerShell，仓库里的 Bun 脚本是 bash。
       - name: Build smelt-pi
@@ -409,6 +409,8 @@ jobs:
           $stage = "dist/stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item target/release/smelt.exe, target/release/smeltd.exe, target/release/smelt-notify.exe -Destination $stage
+          # 控制台入口。cmd / PowerShell 敲 smelt 先找到 .com，命令行子命令才有输出。
+          Copy-Item target/release/smelt-cli.exe -Destination "$stage/smelt.com"
           Copy-Item target/smelt-pi/smelt-pi.exe, target/smelt-pi/photon_rs_bg.wasm -Destination $stage
           if (Test-Path target/smelt-pi/skills) { Copy-Item target/smelt-pi/skills -Destination $stage -Recurse }
           if (Test-Path target/smelt-pi/native) { Copy-Item target/smelt-pi/native -Destination $stage -Recurse }

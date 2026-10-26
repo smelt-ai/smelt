@@ -151,7 +151,7 @@
 - **守护映像**。不建符号链接（那要额外权限）。发布是复制或硬链接到 `smeltd-<指纹>.exe`，启动名是旁边的 `smelt-image-v1` 指针文件。`launch_executable` 读出真正要执行的那份。
 - **Bun**。`scripts/fetch-bun.sh` 在 Windows 上取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `bin/bun.exe`（硬链接或复制）。`scripts/build-smelt-pi.sh` 编出 `smelt-pi.exe`。
 - **Shell 和进程**。交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`。没有参数的自动化 Shell 脚本同样走 `cmd.exe /d /c`，不调用 bash。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。ConPTY 不能 `CREATE_SUSPENDED`，shell 起来之后立刻 `attach_running`。PTY 尺寸走 master 的 `resize`，不用 `as_raw_fd`。
-- **发版 zip**。`smelt-<版本>-windows-x86_64.zip` 根上是 `smelt.exe`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。
+- **发版 zip**。`smelt-<版本>-windows-x86_64.zip` 根上是 `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。`smelt.com` 是控制台子系统的命令行入口（`smelt-cli.exe` 改名），cmd / PowerShell 敲 `smelt` 先找到它。
 
 ## 已定
 

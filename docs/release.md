@@ -7,7 +7,7 @@
 | `Smelt.dmg` | `build`（macos-14） | `make dist-build`，用 secrets 里的自签名证书签名（`CODESIGN_P12_*`） |
 | `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
-| `smelt-<版本>-windows-x86_64.zip` | `windows` → `windows-release` | `smelt.exe`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe` 在同一层。第一版不签名，见下面的「Windows」 |
+| `smelt-<版本>-windows-x86_64.zip` | `windows` → `windows-release` | `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe` 在同一层。第一版不签名，见下面的「Windows」 |
 | `SHA256SUMS` | `linux-release` → `checksums` | 先只含 Linux 包（一键安装和运行时自动升级马上能用），全部产物到齐后重写成覆盖所有产物 |
 
 ## 发版步骤
@@ -82,11 +82,13 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 
 ## Windows
 
-`windows` job 在 `windows-latest` 上 `cargo build --release -p smelt -p smeltd --locked`，再用
+`windows` job 在 `windows-latest` 上 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用
 `scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`（Bun 1.4.3，`bun-windows-x64`）。打成
 `smelt-<版本>-windows-x86_64.zip`，根目录放在一起：
 
 - `smelt.exe`
+- `smelt.com`：`smelt-cli.exe` 改名。`smelt.exe` 是 GUI 子系统，命令行子命令在 cmd / PowerShell
+  里没有输出；敲 `smelt` 时先找到 `.com`，子命令在它里面跑，不带子命令就拉起 `smelt.exe`
 - `smeltd.exe`
 - `smelt-notify.exe`
 - `smelt-pi.exe`
