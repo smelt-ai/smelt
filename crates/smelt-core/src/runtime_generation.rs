@@ -95,10 +95,7 @@ impl GenerationStore {
                 return Ok(Some(RuntimeManagerLock { _file: file }));
             }
             let error = std::io::Error::last_os_error();
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::EWOULDBLOCK) | Some(libc::EAGAIN)
-            ) {
+            if matches!(error.raw_os_error(), Some(libc::EWOULDBLOCK)) {
                 Ok(None)
             } else {
                 Err(format!("锁定受管运行时目录失败：{error}"))

@@ -2401,11 +2401,14 @@ impl Workspace {
             self.desktop = None;
             self.nav.set_active(WorkspaceRoute::Session);
             let route_has_overlay = self.stage_cover.is_some();
+            // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
+            // 视图更新期间再读它会 panic。
+            let restore_settled = self.session_restore_settled(ix, cx);
             // 切到会话即视为看过一次性通知；结构化等待状态仍由 daemon phase 保留。
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
                     // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
-                    if should_auto_resume_active_acp(self.session_restore_settled(ix, cx)) {
+                    if should_auto_resume_active_acp(restore_settled) {
                         v.maybe_auto_resume(window, cx);
                     }
                     if !route_has_overlay {

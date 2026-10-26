@@ -1146,6 +1146,7 @@ pub fn ensure_daemon_running() {
 #[cfg(test)]
 mod successor_daemon_tests {
     use super::*;
+    use std::time::Instant;
 
     fn info(pid: Option<u32>, started_at: Option<u64>) -> DaemonInfo {
         DaemonInfo {

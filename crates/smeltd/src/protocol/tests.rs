@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 use super::auth::{
     KernelCodeIdentity, PeerAuditToken, PeerCodeIdentity, SystemPeerCodeIdentity,
-    authenticate_event_connection_with_verifier, first_party_event_client, self_audit_token,
+    authenticate_event_client_with_verifier, first_party_event_client, self_audit_token,
 };
 use super::*;
 #[cfg(target_os = "macos")]
@@ -23,14 +23,6 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
-
-struct FakePeerIdentityProvider(PeerIdentity);
-
-impl PeerIdentityProvider for FakePeerIdentityProvider {
-    fn identity(&self, _conn: &UnixStream) -> Result<PeerIdentity, String> {
-        Ok(self.0.clone())
-    }
-}
 
 /// 测试里用确定性 token 代表一个进程实例：前 5 个字段填 0，第 6 个是 pid，
 /// 末位放 pidversion，形状与内核给出的 audit token 一致。
@@ -223,17 +215,15 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
     std::fs::write(&daemon_executable, b"daemon").unwrap();
     std::fs::write(&desktop_executable, b"desktop").unwrap();
     let desktop_peer = peer(7, Some(desktop_executable.clone()));
-    let (server, _client) = UnixStream::pair().unwrap();
     #[cfg(target_os = "macos")]
-    let desktop = authenticate_event_connection_with_verifier(
+    let desktop = authenticate_event_client_with_verifier(
         &serde_json::json!({
             "auth": {
                 "type": "first_party",
                 "kind": "desktop"
             }
         }),
-        &server,
-        &FakePeerIdentityProvider(desktop_peer),
+        &desktop_peer,
         42,
         &daemon_executable,
         &FakePeerCodeIdentity {
@@ -246,15 +236,14 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
     )
     .unwrap();
     #[cfg(not(target_os = "macos"))]
-    let desktop = authenticate_event_connection(
+    let desktop = super::auth::authenticate_event_client_for_platform(
         &serde_json::json!({
             "auth": {
                 "type": "first_party",
                 "kind": "desktop"
             }
         }),
-        &server,
-        &FakePeerIdentityProvider(desktop_peer),
+        &desktop_peer,
         42,
         &daemon_executable,
     )

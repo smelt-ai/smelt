@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 对话图片摘要（图片按需取的引用）。纯 Rust，移动端能编。
 sha2 = "0.10"
-similar = "2"
+similar = "3"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

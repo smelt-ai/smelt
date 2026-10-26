@@ -14,7 +14,7 @@ smelt-client-store = { path = "../smelt-client-store" }
 smelt-sys = { path = "../smelt-sys" }
 anyhow = "1"
 dirs = "5"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 url = "2"

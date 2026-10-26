@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 # diff 行内词级高亮（protocol::git 的 mark_inline），跟 ACP 对话的逐行 diff 同一个算法库。
-similar = "2"
+similar = "3"
 # 文件查看器的图片等二进制内容在 JSON 里按 base64 传。
 base64 = "0.22"
 # 远程桌面的本机转发口：网页视图里的 noVNC 说 WebSocket；noVNC 和宿主页总是编进二进制

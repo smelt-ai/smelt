@@ -206,7 +206,7 @@ jobs:
       # Gradle 9.1 / AGP 9 目前支持到 JDK 25，runner 默认的 JDK 未必在范围内，
       # 钉一个已知可用的。
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"

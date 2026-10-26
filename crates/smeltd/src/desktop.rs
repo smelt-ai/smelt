@@ -8,7 +8,6 @@
 use super::ClientSocket;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use smelt_runtime_client::UnixStream;
 use std::process::Command;
 use std::time::Duration;
 
@@ -144,6 +143,7 @@ fn type_text_command(display: &str, text: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smelt_runtime_client::UnixStream;
     use std::net::TcpListener;
 
     /// 假 VNC：把收到的字节原样回过去。
