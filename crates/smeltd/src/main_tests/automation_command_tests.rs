@@ -24,7 +24,6 @@ fn call_automation(
             automations: Arc::clone(automations),
             exe_mtime: 0,
             daemon_fingerprint: None,
-            listen_fd: -1,
             event_hub: Arc::clone(event_hub),
         }
         .context(Principal::Local),

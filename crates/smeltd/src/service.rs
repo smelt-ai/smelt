@@ -298,9 +298,9 @@ fn unit_path() -> Result<PathBuf, String> {
 
 #[cfg(any(target_os = "linux", test))]
 /// 单元文件内容。`ExecStart` 是启动名 `~/.smelt/bin/smeltd` 本身（指向当前不可变映像
-/// 的软链），不解析：升级时 smeltd 在原进程里 exec 新映像、交接提交后拨启动名，
-/// 之后 systemd 重启拉起的就是新版本。`KillMode=process`：停服务只停守护本身，会话里
-/// 的 agent 子进程由守护自己收拾，避免 systemd 连同终端里的进程一起杀掉。
+/// 的软链）。升级时先把启动名拨到新映像，优雅停机后在本进程里 exec 那份映像，systemd
+/// 看到的还是同一个主进程。`Restart=on-failure` 不会在干净退出后续上，所以升级不能只
+/// exit。`KillMode=process`：停服务只停守护本身。
 fn unit_contents(exe: &Path) -> String {
     format!(
         "[Unit]
@@ -310,7 +310,6 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart={exe}
-# 升级时 smeltd 拉起 successor 再退出，退出前用 MAINPID= 把主进程交过去。
 NotifyAccess=main
 Restart=on-failure
 RestartSec=2
@@ -348,16 +347,14 @@ pub(crate) enum ImageInstall {
     AlreadyInstalled,
     /// 运行时没在跑，启动名已经拨过去，下次拉起就是它。
     Launched,
-    /// 正在跑的运行时交接到了新映像，会话保留。
+    /// 正在跑的运行时已经退出，新映像由接替进程拉起。进行中的回合会中断。
     Upgraded,
-    /// 运行时正忙，新映像挂在 `smeltd.pending`，空闲时它自己换。
-    Busy(String),
 }
 
 /// 把 `exe` 装进 `~/.smelt/bin`，用和桌面同一套受管布局：发布成不可变映像
-/// `smeltd-<指纹>`，启动名 `smeltd` 是指向它的软链。运行时已经在跑就请它交接到新映像
-/// （会话保留），正忙就挂在 `smeltd.pending`，空闲时它自己换。`smeltd install` 和桌面
-/// 请运行时升级（[`crate::runtime_upgrade`]）共用这一份。
+/// `smeltd-<指纹>`，启动名 `smeltd` 是指向它的软链。运行时已经在跑就停掉旧进程并
+/// 拉起这份映像，不等待 agent 空闲。`smeltd install` 和桌面请运行时升级
+/// （[`crate::runtime_upgrade`]）共用这一份。
 #[cfg(target_os = "linux")]
 pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
     use smelt_core::daemon_image;
@@ -382,11 +379,10 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
     let outcome = if installed {
         ImageInstall::AlreadyInstalled
     } else if running {
-        daemon_image::retarget_pending_symlink(&dir, &image)
-            .map_err(|error| format!("挂上 smeltd.pending 失败：{error}"))?;
+        daemon_image::retarget_launch_after_commit(&image)
+            .map_err(|error| format!("设置启动名失败：{error}"))?;
         match crate::request_self_upgrade(&image) {
             crate::SelfUpgradeOutcome::Upgraded => ImageInstall::Upgraded,
-            crate::SelfUpgradeOutcome::Busy(reason) => ImageInstall::Busy(reason),
             crate::SelfUpgradeOutcome::Failed(error) => {
                 return Err(format!("运行时换到新版本失败：{error}"));
             }
@@ -420,8 +416,9 @@ fn install_current_exe() -> Result<PathBuf, String> {
         std::env::current_exe().map_err(|error| format!("找不到 smeltd 自身路径：{error}"))?;
     match install_image(&exe)? {
         ImageInstall::AlreadyInstalled => println!("这个版本已经装好了"),
-        ImageInstall::Upgraded => println!("运行时已换到新版本，会话都保留着"),
-        ImageInstall::Busy(reason) => println!("运行时正忙（{reason}），空闲时会自己换到新版本"),
+        ImageInstall::Upgraded => {
+            println!("运行时已重启到新版本。进行中的回合会中断，历史记录还在")
+        }
         ImageInstall::Launched => {}
     }
     Ok(bin_dir()?.join(smelt_core::daemon_image::LAUNCH_NAME))
@@ -513,34 +510,6 @@ fn install() -> Result<(), String> {
 fn uninstall() -> Result<(), String> {
     Err("只有 Linux 上才有 systemd 服务可移除".to_string())
 }
-
-/// 告诉 systemd 主进程换成了 `pid`。不是 systemd 拉起的（没有 `NOTIFY_SOCKET`）就什么都
-/// 不做。协议见 sd_notify(3)：往这个 datagram socket 发 `MAINPID=<pid>`。
-#[cfg(target_os = "linux")]
-pub(crate) fn notify_main_pid(pid: u32) {
-    use std::os::linux::net::SocketAddrExt as _;
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::net::{SocketAddr, UnixDatagram};
-
-    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
-        return;
-    };
-    let message = format!("MAINPID={pid}");
-    let sent = UnixDatagram::unbound().and_then(|socket| {
-        let bytes = path.as_bytes();
-        let addr = match bytes.strip_prefix(b"@") {
-            Some(name) => SocketAddr::from_abstract_name(name)?,
-            None => SocketAddr::from_pathname(&path)?,
-        };
-        socket.send_to_addr(message.as_bytes(), &addr)
-    });
-    if let Err(error) = sent {
-        crate::dlog(&format!("通知 systemd 主进程换成 {pid} 失败：{error}"));
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn notify_main_pid(_pid: u32) {}
 
 #[cfg(test)]
 mod tests {

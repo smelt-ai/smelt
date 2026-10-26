@@ -166,7 +166,7 @@ fn bundle_fingerprint(src_dir: &Path, files: &[PathBuf]) -> io::Result<String> {
         digest.update(relative.to_string_lossy().as_bytes());
         digest.update([0]);
         digest.update(content_fingerprint(&src_dir.join(relative))?.as_bytes());
-        digest.update([b'\n']);
+        digest.update(*b"\n");
     }
     Ok(format!("{:x}", digest.finalize()))
 }

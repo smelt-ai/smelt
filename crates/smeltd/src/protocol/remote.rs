@@ -25,16 +25,16 @@ pub(super) fn handle_conversation_rename<C: ClientSocket>(
             catalog.rename_acp_by_id(id, title)
         })?;
         broadcast_remote_sessions(event_hub, &snapshot);
-        if let Some(resume_id) = renamed.resume_id.as_deref().filter(|id| !id.is_empty()) {
-            if let Some(kind) = smelt_core::agent_kind::HistorySourceKind::from_id(&renamed.agent) {
-                let profile_id = renamed.agent_option_id.strip_prefix("profile:");
-                smelt_core::session_metadata::set_custom_title(
-                    kind,
-                    profile_id,
-                    resume_id,
-                    Some(renamed.title.as_str()),
-                )?;
-            }
+        if let Some(resume_id) = renamed.resume_id.as_deref().filter(|id| !id.is_empty())
+            && let Some(kind) = smelt_core::agent_kind::HistorySourceKind::from_id(&renamed.agent)
+        {
+            let profile_id = renamed.agent_option_id.strip_prefix("profile:");
+            smelt_core::session_metadata::set_custom_title(
+                kind,
+                profile_id,
+                resume_id,
+                Some(renamed.title.as_str()),
+            )?;
         }
         let _ = smelt_core::session_control::persist_workspace_conversation_title(
             &renamed.id,

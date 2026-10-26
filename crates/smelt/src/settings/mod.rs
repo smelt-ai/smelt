@@ -4,7 +4,7 @@
 //! 跟 git_panel / file_tree 同一个套路：从 main.rs 拆出来的 `impl Workspace`
 //! 方法 + 独立类型/函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
 //!
-//! 自动更新（`update_status`/`check_for_update`/`upgrade_daemon_seamless` 等）**不在
+//! 自动更新（`update_status`/`check_for_update`/`request_daemon_restart` 等）**不在
 //! 这里**——那是应用级生命周期状态，不属于任何一个面板，仍留在 main.rs；这里的
 //! 「维护」SettingPage 只是读它、展示它、提供按钮触发它。
 
@@ -1322,6 +1322,7 @@ struct SettingsRenderSnapshot {
     /// 各看各的页。
     capabilities_tab: crate::CapabilitiesTab,
     show_daemon_restart_confirm: bool,
+    show_update_install_confirm: bool,
     session_manager_open: bool,
 }
 
@@ -1479,6 +1480,7 @@ impl Render for SettingsContentView {
         // 焦点也在这扇窗里记，不能放到主窗口的 prepare。
         workspace.update(cx, |ws, cx| ws.sync_settings_modal_focus(window, cx));
         let show_daemon_restart_confirm = snapshot.show_daemon_restart_confirm;
+        let show_update_install_confirm = snapshot.show_update_install_confirm;
         let session_manager_open = snapshot.session_manager_open;
 
         div()
@@ -1491,8 +1493,12 @@ impl Render for SettingsContentView {
             ))
             // 弹层开启期间才需要读它的动态会话数据；正常浏览设置页不会因此订阅整个
             // Workspace 的高频状态通知。
-            .children(show_daemon_restart_confirm.then(|| {
-                workspace.update(cx, |ws, cx| ws.render_daemon_restart_confirm(cx))
+            .children(
+                show_daemon_restart_confirm
+                    .then(|| workspace.update(cx, |ws, cx| ws.render_daemon_restart_confirm(cx))),
+            )
+            .children(show_update_install_confirm.then(|| {
+                workspace.update(cx, |ws, cx| ws.render_update_install_confirm(cx))
             }))
             .children(
                 session_manager_open

@@ -22,7 +22,6 @@ fn call_action(sessions: &Sessions, id: &str, kind: &str) -> serde_json::Value {
             automations: new_test_automation_store(),
             exe_mtime: 0,
             daemon_fingerprint: None,
-            listen_fd: -1,
             event_hub: subscribers,
         }
         .context(Principal::Local),

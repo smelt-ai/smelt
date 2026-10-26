@@ -2,7 +2,7 @@
 //! [`smelt_runtime_client::protocol::runtime_upgrade`]）。运行时自己从 GitHub Release
 //! 下载那个版本的包，对着同一个 Release 的 SHA256SUMS 校验，和一键安装（`get-smeltd.sh`
 //! 加包里的 `install.sh`）装的是同一份东西：随运行时一起的小工具原子替换进
-//! `~/.smelt/bin`，smeltd 发布成不可变映像再交接，会话保留。
+//! `~/.smelt/bin`，smeltd 发布成不可变映像后重启。进行中的回合会中断，历史记录还在。
 //!
 //! 只升不降：要的版本比自己旧就拒绝。两台不同版本的桌面连同一个运行时时，运行时最终
 //! 跟着较新的那台。系统包和远程桌面的配置要 root，这里不碰，变了仍要重新跑安装脚本。
@@ -99,9 +99,8 @@ fn install_release(version: &semver::Version) -> RuntimeUpgradeReply {
         crate::service::install_image(&package.join("smeltd"))
     });
     match result {
-        // 交接成功时这个进程已经退出，一般走不到 `Upgraded`；真走到了，跑着的也已是新版。
+        // 重启成功时这个进程已经退出，一般走不到 `Upgraded`；真走到了，跑着的也已是新版。
         Ok(ImageInstall::AlreadyInstalled | ImageInstall::Upgraded) => RuntimeUpgradeReply::Current,
-        Ok(ImageInstall::Busy(reason)) => RuntimeUpgradeReply::Staged { reason },
         // 问自己没问着，当成没在跑：启动名已拨到新版，下次拉起就是它。
         Ok(ImageInstall::Launched) => RuntimeUpgradeReply::Staged {
             reason: "新版本已装好，运行时下次重启时换过去".to_string(),
@@ -185,10 +184,15 @@ mod linux {
         download(&format!("{base}/SHA256SUMS"), &sums_path).map_err(|error| {
             format!("取不到 v{version} 的校验和清单（GitHub 上可能没有这个版本）：{error}")
         })?;
-        let sums = fs::read_to_string(&sums_path)
-            .map_err(|error| format!("读校验和清单失败：{error}"))?;
+        let sums =
+            fs::read_to_string(&sums_path).map_err(|error| format!("读校验和清单失败：{error}"))?;
         let expected = super::checksum_for(&sums, &archive_name)
-            .ok_or_else(|| format!("v{version} 没有这台机器（linux-{}）的包", std::env::consts::ARCH))?
+            .ok_or_else(|| {
+                format!(
+                    "v{version} 没有这台机器（linux-{}）的包",
+                    std::env::consts::ARCH
+                )
+            })?
             .to_string();
         let archive = staging.0.join(&archive_name);
         download(&format!("{base}/{archive_name}"), &archive)
@@ -252,11 +256,14 @@ mod linux {
         if !output.status.success() || printed.trim() != expected {
             return Err(format!(
                 "新版 smeltd 在这台机器上跑不起来（{}）",
-                [printed.trim(), String::from_utf8_lossy(&output.stderr).trim()]
-                    .into_iter()
-                    .filter(|text| !text.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("；")
+                [
+                    printed.trim(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ]
+                .into_iter()
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("；")
             ));
         }
         Ok(())
@@ -303,10 +310,8 @@ mod linux {
         /// 下载回来的包和清单对不上就停，不解包、不装。
         #[test]
         fn a_tampered_package_is_rejected() {
-            let release = std::env::temp_dir().join(format!(
-                "smelt-release-{}",
-                uuid::Uuid::new_v4().simple()
-            ));
+            let release = std::env::temp_dir()
+                .join(format!("smelt-release-{}", uuid::Uuid::new_v4().simple()));
             fs::create_dir_all(&release).unwrap();
             let version = semver::Version::parse("9.9.9").unwrap();
             let archive = format!(
@@ -322,9 +327,8 @@ mod linux {
 
             let staging = Staging(release.join("staging"));
             fs::create_dir_all(&staging.0).unwrap();
-            let error =
-                fetch_package(&staging, &version, &format!("file://{}", release.display()))
-                    .unwrap_err();
+            let error = fetch_package(&staging, &version, &format!("file://{}", release.display()))
+                .unwrap_err();
             assert!(error.contains("校验失败"), "{error}");
             drop(staging);
             let _ = fs::remove_dir_all(release);
@@ -335,17 +339,15 @@ mod linux {
         fn a_missing_release_says_so() {
             let staging = Staging::new_in_temp();
             let version = semver::Version::parse("9.9.9").unwrap();
-            let error = fetch_package(&staging, &version, "file:///nonexistent-smelt-release")
-                .unwrap_err();
+            let error =
+                fetch_package(&staging, &version, "file:///nonexistent-smelt-release").unwrap_err();
             assert!(error.contains("没有这个版本"), "{error}");
         }
 
         impl Staging {
             fn new_in_temp() -> Self {
-                let dir = std::env::temp_dir().join(format!(
-                    "smelt-staging-{}",
-                    uuid::Uuid::new_v4().simple()
-                ));
+                let dir = std::env::temp_dir()
+                    .join(format!("smelt-staging-{}", uuid::Uuid::new_v4().simple()));
                 fs::create_dir_all(&dir).unwrap();
                 Self(dir)
             }
@@ -376,7 +378,10 @@ mod tests {
         assert!(check_target("2026.1023.0", "2026.1023.0-rc.1").is_ok());
         assert!(check_target("2027.103.0", "2026.1231.5").is_ok());
         assert!(check_target("2026.1003.0", "2026.1031.0").is_err());
-        assert!(check_target("2026.0103.0", "0.9.1").is_err(), "前导零不是合法 semver");
+        assert!(
+            check_target("2026.0103.0", "0.9.1").is_err(),
+            "前导零不是合法 semver"
+        );
     }
 
     /// 版本号会拼进下载地址，不是 semver 的一律拒绝。
@@ -416,6 +421,9 @@ mod tests {
             Some(a.as_str())
         );
         assert_eq!(checksum_for(&sums, "smeltd-0.9.1-linux-x86.tar.gz"), None);
-        assert_eq!(checksum_for("short  smeltd.tar.gz\n", "smeltd.tar.gz"), None);
+        assert_eq!(
+            checksum_for("short  smeltd.tar.gz\n", "smeltd.tar.gz"),
+            None
+        );
     }
 }

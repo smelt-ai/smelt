@@ -1950,8 +1950,19 @@ fn finalize_pending_update_for_attempt(
         anyhow::bail!("installer 目标 App 与持久化 attempt 不一致");
     }
     finalize_pending_update_at(&update, Some(attempt_id), target_app, |_| {
-        Ok(InstallPreparation::Proceed)
+        if shutdown_local_daemon() {
+            Ok(InstallPreparation::Proceed)
+        } else {
+            anyhow::bail!("旧守护进程没有退出，已停止替换 App")
+        }
     })
+}
+
+/// 停掉本机 smeltd，并等到进程退出。替换 `.app` 之前调用。
+///
+/// 连不上表示没有守护在跑。进程仍活着则返回 false，调用方不得继续换包。
+pub fn shutdown_local_daemon() -> bool {
+    crate::daemon_stop::stop_local_daemon()
 }
 
 fn finalize_pending_update_at(

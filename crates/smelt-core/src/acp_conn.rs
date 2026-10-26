@@ -15,15 +15,13 @@
 pub use smelt_model::acp_conn::*;
 
 use std::future::Future;
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt, channel::mpsc};
+use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
 use agent_client_protocol::schema::v1::{
     AgentRequest, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
@@ -32,24 +30,24 @@ use agent_client_protocol::schema::v1::{
     ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
     ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities,
     FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, MultiSelectItems,
-    NewSessionRequest, Plan, PlanCapabilities, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    PlanUpdate, PlanUpdateContent, PromptRequest, PromptResponse, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigOptionsCapabilities,
-    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
-    SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, StopReason, TerminalOutputRequest, TerminalOutputResponse,
-    ToolCall, ToolCallId, ToolCallUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    KillTerminalResponse, LoadSessionRequest, MultiSelectItems, NewSessionRequest, Plan,
+    PlanCapabilities, PlanEntry, PlanEntryPriority, PlanEntryStatus, PlanUpdate, PlanUpdateContent,
+    PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionConfigOptionsCapabilities, SessionConfigSelectOption,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModeState,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason,
+    TerminalOutputRequest, TerminalOutputResponse, ToolCall, ToolCallId, ToolCallUpdate,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
-use agent_client_protocol::util::{MatchDispatch, MatchDispatchFrom};
+use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Dispatch,
-    DynamicHandlerGuard, HandleDispatchFrom, Handled, Lines, Responder, SessionMessage,
+    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines, Responder,
+    SessionMessage,
 };
 
 pub use crate::acp_chat::AcpImage as PromptImage;
@@ -140,9 +138,6 @@ pub enum ConversationCommand {
         truncate_from: usize,
         then: AfterRewind,
     },
-    /// 连接线程内部使用：当前 turn 不再活跃，但 `TurnEnded` 已由别处发出。
-    /// 只有 exec 交接后补发遗失回调那条路径用（见 `make_resume_incoming_lines`）。
-    TurnCompleted,
     /// 连接线程内部使用：一轮 prompt 的 JSON-RPC response 已经回来。
     ///
     /// `Ok` 带 agent 给的 StopReason；`Err` 是 agent 明确回的错误响应——那是
@@ -345,10 +340,7 @@ pub enum ConversationEvent {
         responder: PermissionResponder,
         details: crate::acp_session::ApprovalDetailsView,
         /// 这条请求的原始 JSON-RPC 行文本（`with_debug` 的 `Stdout` 方向捕获的
-        /// 最近一行）。smeltd 无缝升级时若这条会话正卡着这张审批卡，会把这行
-        /// 原文一起交接过去——新进程接手继承来的 fd 后，先把这行「回放」一遍
-        /// 让 SDK 重新解析出等价的 responder（绑定同一个原始请求 id），再继续
-        /// 读实时字节，见 `resume_acp_from_fds`。GUI 直连路径不用这个字段。
+        /// 最近一行）。审批卡挂起期间保留，供活体状态对照；GUI 直连路径不用。
         raw_request_line: Option<String>,
     },
     /// 用户消息的回显：`session/load` 重放历史时，agent 会把旧的用户提问也
@@ -467,8 +459,7 @@ pub enum ReadyKind {
     /// `session/load` 续接：agent 会重放完整历史。归约器先把草稿清空，已发布
     /// 正文留到 `HistoryReplayFinished` 再换上。Ready 本身不得修改消息。
     ResumedWithReplay,
-    /// smeltd 无缝升级继承 agent stdio fd，且这次没有重放历史。
-    /// 投影保持交接时的样子：旧文件里的正文还在；新文件加载失败时只剩未完成的一轮。
+    /// 续接时不重放历史。投影保持调用方已经有的正文。
     ResumedKeepHistory,
 }
 
@@ -692,13 +683,10 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
 pub struct ConversationHandle {
     pub cmd_tx: smol::channel::Sender<ConversationCommand>,
     pub event_rx: smol::channel::Receiver<ConversationEvent>,
-    /// 子进程 pid + 原始 stdin/stdout fd，spawn 成功后才会填（Fatal 前的极短
-    /// 窗口是 None）。smeltd 无缝升级要用它把这两个 fd 也裸传过 exec()（跟
-    /// PTY master fd 同一招），见 `resume_acp_from_fds`。GUI 直连路径用不上，
-    /// 多存三个整数不加负担。
+    /// 子进程 pid，spawn 成功后才会填（Fatal 前的极短窗口是 None）。
+    /// 停机和杀进程组用这个 pid。
     pub stdio: Arc<Mutex<Option<AcpStdio>>>,
-    /// 已发出但尚未收到最终 JSON-RPC response 的请求数。热升级不得跨越这些
-    /// callback；fd 能交接字节流，但不能交接 SDK 内存里的 request callback。
+    /// 已发出但尚未收到最终 JSON-RPC response 的请求数。
     pub in_flight_rpc: Arc<AtomicUsize>,
     /// 生命周期层直接设置的停止标记。连接线程在真正 spawn 子进程的同一把
     /// `stdio` 锁内检查它，保证“请求停止时尚未 spawn”的连接以后也不会漏跑。
@@ -715,14 +703,10 @@ pub struct ConversationHandle {
     pub supports_rewind: bool,
 }
 
+/// 子进程 pid。spawn 成功后由连接线程写入，停机时用来杀进程组。
 #[derive(Clone, Copy)]
 pub struct AcpStdio {
     pub pid: i32,
-    /// 交接用的原始 fd。Job 在进程登记表里，不放在这个值上。
-    #[cfg(unix)]
-    pub stdin_fd: RawFd,
-    #[cfg(unix)]
-    pub stdout_fd: RawFd,
 }
 
 /// SIGKILL 之后等内核收尸的上限。这不是「再猜一次进程死了没」，而是 `waitpid`
@@ -1325,94 +1309,6 @@ where
         })
 }
 
-/// 无缝升级续接专用：先「回放」升级前捕获到的那行原始请求（如果有——对应
-/// 一张正卡着的权限/选择题卡片），再无缝接上继承来的 fd 往后实时读。SDK 的
-/// 请求分发器看到的字节序列跟"从来没断过"完全一样，会重新解析出一个等价的
-/// responder（绑定同一个原始 JSON-RPC 请求 id），不会丢这张卡。
-///
-/// `last_stdout_line` 回放行 + 后续实时行都要写——不写的话，这条恢复出来的
-/// 连接活着期间如果 agent 又发一次新的权限/选择题请求，`raw_request_line`
-/// 会一直是 None：等真撑到*下一次*升级，这条请求就没有原文可回放，agent
-/// 会永远卡在等一个不会来的回复上，审批卡在 GUI 上直接消失（真实教训：
-/// 早期版本这里只在 `make_incoming_lines`——也就是首次 spawn 那条路——接了
-/// 这根线，`make_resume_incoming_lines` 漏接，连续两次升级期间会复现）。
-fn make_resume_incoming_lines<R>(
-    reader: R,
-    pending_raw_line: Option<String>,
-    last_stdout_line: Arc<Mutex<Option<String>>>,
-    orphaned_turn_tx: Option<smol::channel::Sender<ConversationEvent>>,
-    turn_completed_tx: Option<smol::channel::Sender<ConversationCommand>>,
-    config_tx: Option<smol::channel::Sender<ConversationEvent>>,
-) -> std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<String>> + Send>>
-where
-    R: futures::AsyncRead + Send + Unpin + 'static,
-{
-    let last_stdout_line_for_replay = Arc::clone(&last_stdout_line);
-    let mut orphaned_turn_tx = orphaned_turn_tx;
-    let mut turn_completed_tx = turn_completed_tx;
-    let live = futures::io::BufReader::new(reader)
-        .lines()
-        .inspect(move |res| {
-            if let Ok(line) = res {
-                *last_stdout_line.lock().unwrap() = Some(line.clone());
-                if let Some(event_tx) = &config_tx {
-                    publish_raw_session_config_line(line, event_tx);
-                }
-                // `send_prompt` 把完成响应绑定在旧进程内存里的 request callback 上。
-                // exec 交接后 callback 不复存在，新连接仍会读到响应，但 SDK 不会再
-                // 产出 StopReason。只为交接时确实 Running 的那一轮补发一次；随后
-                // 新进程发起的 prompt 仍走 SDK 自己的正常完成路径。
-                if let Some(tx) = orphaned_turn_tx.as_ref()
-                    && let Some(outcome) = prompt_outcome_from_response(line)
-                {
-                    if let Some(done_tx) = turn_completed_tx.as_ref() {
-                        let _ = done_tx.try_send(ConversationCommand::TurnCompleted);
-                    }
-                    let _ = tx.try_send(match outcome {
-                        Ok(reason) => ConversationEvent::TurnEnded(reason),
-                        Err(msg) => ConversationEvent::TurnFailed(msg),
-                    });
-                    orphaned_turn_tx = None;
-                    turn_completed_tx = None;
-                }
-            }
-        });
-    match pending_raw_line {
-        Some(line) => {
-            *last_stdout_line_for_replay.lock().unwrap() = Some(line.clone());
-            Box::pin(futures::stream::once(async move { Ok(line) }).chain(live))
-        }
-        None => Box::pin(live),
-    }
-}
-
-/// 从一行原始 JSON-RPC 响应里认出「这一轮结束了」。
-///
-/// 成功和失败都要认。只认 `result` 的话，交接后那一轮若以 error 收场就永远
-/// 等不到终态，UI 一直转圈——跟 `PromptSettled` 修的是同一类问题，只是发生在
-/// smeltd 无缝升级这条路上：回调随旧进程内存一起没了，只剩这个行解析器。
-fn prompt_outcome_from_response(line: &str) -> Option<Result<StopReason, String>> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    if value.get("method").is_some() || value.get("id").is_none() {
-        return None;
-    }
-    if let Some(result) = value.get("result") {
-        return serde_json::from_value::<PromptResponse>(result.clone())
-            .ok()
-            .map(|response| Ok(response.stop_reason));
-    }
-    let error = value.get("error")?;
-    let message = error
-        .get("message")
-        .and_then(|m| m.as_str())
-        .unwrap_or("agent 返回错误")
-        .to_string();
-    Some(Err(match prompt_error_hint(&message) {
-        Some(hint) => format!("{message}\n\n{hint}"),
-        None => message,
-    }))
-}
-
 /// 子进程 stderr 逐行收进尾巴（原来挂在 `AcpAgent::with_debug` 的
 /// `Stderr` 分支，自己接管 spawn 之后要自己起一条任务做）。
 fn spawn_stderr_drain(stderr: async_process::ChildStderr, stderr_tail: Arc<Mutex<Vec<String>>>) {
@@ -1479,21 +1375,6 @@ impl AcpChildGuard {
 impl Drop for AcpChildGuard {
     fn drop(&mut self) {
         self.reap_now();
-    }
-}
-
-/// Handoff 恢复时没有直属 child handle，只能按已验证的进程组 id 兜底终止。
-#[cfg(unix)]
-struct KillProcessGroupOnDrop(i32);
-
-#[cfg(unix)]
-
-impl Drop for KillProcessGroupOnDrop {
-    fn drop(&mut self) {
-        // 无身份门：guard 在连接任务结束瞬间触发，pid 重用需要“死+收尸+
-        // 重分配”三连，挤不进这个微秒窗口（cleanup 路径是秒级窗口才要验）。
-        // 接受该残余——与 exec-self 时代同形（那时靠亲缘僵尸占位，窗口为零）。
-        kill_process_group(self.0);
     }
 }
 
@@ -1649,24 +1530,6 @@ struct AcpChannels {
     event_tx: smol::channel::Sender<ConversationEvent>,
 }
 
-/// 无缝升级交接时从旧进程继承的连接状态（fd / pid / agent 侧 session id）。
-pub struct ResumedSession {
-    #[cfg(unix)]
-    pub stdin_fd: RawFd,
-    #[cfg(unix)]
-    pub stdout_fd: RawFd,
-    pub pid: i32,
-    pub acp_session_id: String,
-    pub supports_image: bool,
-    pub pending_raw_line: Option<String>,
-    pub recover_running_turn: bool,
-    /// 交接文件没有已提交正文。接上后用 `session/load` 重放 agent 会话。
-    /// 只在加载成功之后才清空投影，失败则留下交接里的未完成一轮。
-    pub reload_history: bool,
-    pub cwd: Option<std::path::PathBuf>,
-    pub open_turn: Vec<crate::acp_chat::AcpEntry>,
-}
-
 fn acp_err(message: impl Into<String>) -> agent_client_protocol::Error {
     agent_client_protocol::Error::internal_error().data(message.into())
 }
@@ -1731,10 +1594,6 @@ async fn run_connection(
             spawn_agent_process(&agent, launch.cwd.as_deref(), managed_bun.as_ref())?;
         *stdio = Some(AcpStdio {
             pid: child.id() as i32,
-            #[cfg(unix)]
-            stdin_fd: child_stdin.as_raw_fd(),
-            #[cfg(unix)]
-            stdout_fd: child_stdout.as_raw_fd(),
         });
         Ok::<_, agent_client_protocol::Error>(Some((
             child_stdin,
@@ -2021,8 +1880,7 @@ async fn run_connection(
             // 冷恢复只有一条路径：`session/load`。agent 的 session store 是历史
             // 唯一持久化来源，load 重放的更新负责重建 smeltd 的 entries 投影。
             // `session/resume` 不重放历史，不能拿来冷恢复；smeltd 仍持有完整活体
-            // 状态时根本不会进这里，而是在 `acp_open` 里直接 attach。无缝升级继承
-            // fd 则走 `resume_acp_from_fds`，同样不进入这条 spawn 路径。
+            // 状态时根本不会进这里，而是在 `acp_open` 里直接 attach。
             //
             // 任何恢复失败都必须显式分类报告：连接层不在这里静默 session/new，
             // 由上层 supervisor 根据本地投影决定是否安全地降级。
@@ -2083,7 +1941,6 @@ async fn run_connection(
                                 ReadyKind::ResumedWithReplay,
                                 supports_image,
                                 in_flight_rpc,
-                                false,
                             )
                             .await;
                         }
@@ -2117,7 +1974,6 @@ async fn run_connection(
                 ReadyKind::Fresh,
                 supports_image,
                 in_flight_rpc,
-                false,
             )
             .await
         })
@@ -2131,393 +1987,6 @@ async fn run_connection(
         )));
     }
     result
-}
-
-/// smeltd 无缝升级续接：不 spawn 新子进程，直接接上继承来的 fd（`exec()` 前
-/// 清了 CLOEXEC、活过整个交接）继续跑，起一条跟 `spawn_acp` 同款的专用线程，
-/// 立即返回句柄。`ConversationHandle.stdio` 一开始就是 `Some`——这几个 fd 本来就是
-/// 调用方（smeltd）传进来的，不用等 spawn。
-#[cfg(unix)]
-pub fn resume_acp_from_fds(sid: String, resumed: ResumedSession) -> ConversationHandle {
-    let (cmd_tx, cmd_rx) = smol::channel::unbounded::<ConversationCommand>();
-    let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
-    let cmd_tx_for_thread = cmd_tx.clone();
-    let stdio = Arc::new(Mutex::new(Some(AcpStdio {
-        pid: resumed.pid,
-        stdin_fd: resumed.stdin_fd,
-        stdout_fd: resumed.stdout_fd,
-    })));
-    let in_flight_rpc = Arc::new(AtomicUsize::new(usize::from(resumed.recover_running_turn)));
-    let shutdown_requested = Arc::new(AtomicBool::new(false));
-    let in_flight_rpc_for_thread = Arc::clone(&in_flight_rpc);
-    let thread_name = format!("smelt-acp-r-{}", &sid[..sid.len().min(10)]);
-    std::thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || {
-            let result = smol::block_on(run_resumed_connection(
-                resumed,
-                AcpChannels {
-                    cmd_rx,
-                    cmd_tx: cmd_tx_for_thread,
-                    event_tx: event_tx.clone(),
-                },
-                in_flight_rpc_for_thread,
-            ));
-            if let Err(e) = result {
-                let _ = event_tx.try_send(ConversationEvent::Fatal(format!("{e}")));
-            }
-            // Ok 结束（Shutdown）不发 Fatal——跟 run_connection 一致。
-        })
-        .expect("spawn smelt-acp resume thread");
-    ConversationHandle {
-        cmd_tx,
-        event_rx,
-        stdio,
-        in_flight_rpc,
-        shutdown_requested,
-        // 通用 ACP 没有中途插话的协议动作，运行中的消息仍由 daemon 排队。
-        supports_mid_turn_input: false,
-        supports_compaction: false,
-        supports_native_queue: false,
-        supports_rewind: false,
-    }
-}
-
-/// `resume_acp_from_fds` 的连接主体：接上继承来的 fd → 跳过握手，按已知
-/// session id 挂上动态路由（agent 早跟上一个进程做过 initialize/newSession）→
-/// 双源 loop。`.on_receive_request` 那两段处理逻辑跟 `run_connection`里的
-/// 完全一样——本想抽成共用，但 `Client.builder()` 链式调用之后的类型是个
-/// 展开不动的匿名泛型，硬拆共用函数会把签名搞得比这点重复代码还难读，
-/// protocol 这层的粘合代码本来就不常变，可以接受这份重复。
-#[cfg(unix)]
-async fn run_resumed_connection(
-    resumed: ResumedSession,
-    channels: AcpChannels,
-    in_flight_rpc: Arc<AtomicUsize>,
-) -> Result<(), agent_client_protocol::Error> {
-    // `unsafe`：这两个 fd 是 smeltd 从上一代进程 dup 过来、清了 CLOEXEC 活过
-    // exec() 的，调用方保证此刻整个进程里没有别的代码持有/关闭过它们
-    // （smeltd 那边交接完立刻转手，见 resume_handoff 的用法）。
-    let stdin_file = unsafe { std::fs::File::from_raw_fd(resumed.stdin_fd) };
-    let stdout_file = unsafe { std::fs::File::from_raw_fd(resumed.stdout_fd) };
-    let stdin_async = smol::Async::new(stdin_file)
-        .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
-    let stdout_async = smol::Async::new(stdout_file)
-        .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
-
-    let _guard = KillProcessGroupOnDrop(resumed.pid);
-
-    let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let outgoing = make_outgoing_sink(stdin_async);
-    let incoming = make_resume_incoming_lines(
-        stdout_async,
-        resumed.pending_raw_line,
-        Arc::clone(&last_stdout_line),
-        resumed
-            .recover_running_turn
-            .then(|| channels.event_tx.clone()),
-        resumed
-            .recover_running_turn
-            .then(|| channels.cmd_tx.clone()),
-        Some(channels.event_tx.clone()),
-    );
-    let transport = Lines::new(outgoing, incoming);
-
-    let session_id = SessionId::new(resumed.acp_session_id);
-
-    let perm_tx = channels.event_tx.clone();
-    let elicit_tx = channels.event_tx.clone();
-    let perm_last_line = Arc::clone(&last_stdout_line);
-    let elicit_last_line = Arc::clone(&last_stdout_line);
-    let terminals = Arc::new(crate::acp_terminal::AcpTerminals::new());
-    let term_tx = spawn_terminal_event_forwarder(channels.event_tx.clone());
-    let session_cwd: Option<std::path::PathBuf> = None;
-    Client
-        .builder()
-        .name("smelt")
-        .on_receive_request(
-            move |request: RequestPermissionRequest, responder, _connection| {
-                let perm_tx = perm_tx.clone();
-                let raw_request_line = perm_last_line.lock().unwrap().clone();
-                async move {
-                    let question = permission_question(&request);
-                    let _ = perm_tx.try_send(ConversationEvent::Permission {
-                        question,
-                        tool_call_id: request.tool_call.tool_call_id.clone(),
-                        pub_options: request
-                            .options
-                            .into_iter()
-                            .map(|option| crate::acp_session::PermissionOptionView {
-                                option_id: option.option_id.to_string(),
-                                name: option.name,
-                                kind: crate::acp_session::PermissionOptionKindView::from_acp(
-                                    option.kind,
-                                ),
-                            })
-                            .collect(),
-                        responder: PermissionResponder::acp(responder),
-                        details: crate::acp_session::ApprovalDetailsView::Generic,
-                        raw_request_line,
-                    });
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            move |request: CreateElicitationRequest, responder, _connection| {
-                let elicit_tx = elicit_tx.clone();
-                let raw_request_line = elicit_last_line.lock().unwrap().clone();
-                async move {
-                    let fields = elicitation_fields(&request);
-                    match fields {
-                        Some(fields) => {
-                            let _ = elicit_tx.try_send(ConversationEvent::Elicitation {
-                                message: request.message,
-                                fields,
-                                responder: ElicitationResponder(Some(
-                                    ElicitationResponderInner::Acp(responder),
-                                )),
-                                raw_request_line,
-                            });
-                            Ok(())
-                        }
-                        None => responder
-                            .respond(CreateElicitationResponse::new(ElicitationAction::Decline)),
-                    }
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            move |request: ReadTextFileRequest,
-                  responder: Responder<ReadTextFileResponse>,
-                  _connection| async move {
-                match crate::acp_terminal::read_text_file(
-                    &request.path,
-                    request.line,
-                    request.limit,
-                ) {
-                    Ok(content) => {
-                        let _ = responder.respond(ReadTextFileResponse::new(content));
-                        Ok(())
-                    }
-                    Err(msg) => Err(acp_err(msg)),
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            move |request: WriteTextFileRequest,
-                  responder: Responder<WriteTextFileResponse>,
-                  _connection| async move {
-                crate::acp_terminal::write_text_file(&request.path, &request.content)
-                    .map_err(acp_err)?;
-                let _ = responder.respond(WriteTextFileResponse::new());
-                Ok(())
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = Arc::clone(&terminals);
-                let term_tx = term_tx.clone();
-                let session_cwd = session_cwd.clone();
-                move |request: CreateTerminalRequest,
-                      responder: Responder<CreateTerminalResponse>,
-                      _connection| {
-                    let terminals = Arc::clone(&terminals);
-                    let term_tx = term_tx.clone();
-                    let session_cwd = session_cwd.clone();
-                    async move {
-                        let command = resolve_terminal_command(&request.command);
-                        let env = request
-                            .env
-                            .into_iter()
-                            .map(|item| (item.name, item.value))
-                            .collect();
-                        let id = terminals
-                            .create(
-                                command,
-                                request.args,
-                                env,
-                                request.cwd.or(session_cwd),
-                                request.output_byte_limit,
-                                term_tx,
-                            )
-                            .map_err(acp_err)?;
-                        let _ = responder.respond(CreateTerminalResponse::new(id));
-                        Ok(())
-                    }
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = Arc::clone(&terminals);
-                move |request: TerminalOutputRequest,
-                      responder: Responder<TerminalOutputResponse>,
-                      _connection| {
-                    let terminals = Arc::clone(&terminals);
-                    async move {
-                        let id = request.terminal_id.to_string();
-                        let snapshot = terminals
-                            .snapshot(&id)
-                            .ok_or_else(|| acp_err(format!("终端不存在：{id}")))?;
-                        let mut response =
-                            TerminalOutputResponse::new(snapshot.output, snapshot.truncated);
-                        if let Some(exit) = terminals.proto_exit(&id) {
-                            response = response.exit_status(exit);
-                        }
-                        let _ = responder.respond(response);
-                        Ok(())
-                    }
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = Arc::clone(&terminals);
-                move |request: WaitForTerminalExitRequest,
-                      responder: Responder<WaitForTerminalExitResponse>,
-                      _connection| {
-                    let terminals = Arc::clone(&terminals);
-                    async move {
-                        let id = request.terminal_id.to_string();
-                        if terminals.snapshot(&id).is_none() {
-                            return Err(acp_err(format!("终端不存在：{id}")));
-                        }
-                        std::thread::Builder::new()
-                            .name("smelt-acp-term-wait-rpc".into())
-                            .spawn(move || {
-                                let status = terminals.wait(&id).unwrap_or_else(|_| {
-                                    agent_client_protocol::schema::v1::TerminalExitStatus::new()
-                                });
-                                let _ = responder.respond(WaitForTerminalExitResponse::new(status));
-                            })
-                            .map_err(|err| acp_err(format!("等待线程启动失败：{err}")))?;
-                        Ok(())
-                    }
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = Arc::clone(&terminals);
-                move |request: KillTerminalRequest,
-                      responder: Responder<KillTerminalResponse>,
-                      _connection| {
-                    let terminals = Arc::clone(&terminals);
-                    async move {
-                        terminals
-                            .kill(&request.terminal_id.to_string())
-                            .map_err(acp_err)?;
-                        let _ = responder.respond(KillTerminalResponse::new());
-                        Ok(())
-                    }
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = Arc::clone(&terminals);
-                move |request: ReleaseTerminalRequest,
-                      responder: Responder<ReleaseTerminalResponse>,
-                      _connection| {
-                    let terminals = Arc::clone(&terminals);
-                    async move {
-                        terminals
-                            .release(&request.terminal_id.to_string())
-                            .map_err(acp_err)?;
-                        let _ = responder.respond(ReleaseTerminalResponse::new());
-                        Ok(())
-                    }
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            move |request: AgentRequest,
-                  responder: Responder<serde_json::Value>,
-                  _connection| async move {
-                respond_vendor_ext_request(request, responder).await
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
-            // 这条连接早就跟旧进程握过手，不再 initialize。交接文件没带已提交
-            // 正文时，向仍活着的 agent 发 session/load，让它把会话文件重放出来。
-            // 2.1 的 load 会在请求发出前装好路由，响应返回时，响应前的重放已经
-            // 在会话队列里。只有这一步成功才清空投影；失败就留下未完成的一轮。
-            if resumed.reload_history
-                && let Some(cwd) = resumed.cwd.clone()
-            {
-                let load_request = LoadSessionRequest::new(session_id.clone(), cwd);
-                match wait_for_acp_request(
-                    connection
-                        .load_session_from(load_request)
-                        .block_task()
-                        .start_session(),
-                    "session/load",
-                )
-                .await
-                {
-                    Ok(restored) => {
-                        let (mut session, loaded) = restored.into_parts();
-                        let _ = channels
-                            .event_tx
-                            .try_send(ConversationEvent::HistoryReplayStarted);
-                        let mut replay = ReplayCursor::default();
-                        drain_loaded_replay(&mut session, &channels.event_tx, &mut replay).await?;
-                        for event in
-                            unflushed_open_turn_events(&resumed.open_turn, &replay)
-                        {
-                            let _ = channels.event_tx.try_send(event);
-                        }
-                        let _ = channels
-                            .event_tx
-                            .try_send(ConversationEvent::HistoryReplayFinished);
-                        publish_session_surface(
-                            loaded.config_options.as_deref(),
-                            loaded.modes.as_ref(),
-                            &channels.event_tx,
-                        );
-                        return drive_session(
-                            session,
-                            channels,
-                            ReadyKind::ResumedWithReplay,
-                            resumed.supports_image,
-                            in_flight_rpc,
-                            resumed.recover_running_turn,
-                        )
-                        .await;
-                    }
-                    Err(error) => {
-                        crate::app_log::info(
-                            "acp",
-                            &format!("直接交接重放历史失败，保留未完成的这一轮：{error}"),
-                        );
-                    }
-                }
-            }
-            // 不重放时自己挂动态路由。2.1 把 attach_session 收成 crate 私有。
-            // 加载失败时 modes/config_options 先空着，下次 ConfigOptionUpdate 会补上。
-            let session = attach_inherited_session(&connection, session_id)?;
-            drive_session(
-                session,
-                channels,
-                ReadyKind::ResumedKeepHistory,
-                resumed.supports_image,
-                in_flight_rpc,
-                resumed.recover_running_turn,
-            )
-            .await
-        })
-        .await
 }
 
 /// 把 `session/load` 响应前已经入队的重放翻译进投影，并记下当前这一轮的形状。
@@ -2650,276 +2119,6 @@ fn update_tool_id(update: &serde_json::Value) -> &str {
         .unwrap_or("")
 }
 
-/// 交接里未完成的这一轮，减去会话文件已经重放过的部分。
-///
-/// 用户消息已经在重放里就不再发。助手正文只补文件里还没有的后缀。
-/// 文件里没有的工具按交接时的卡片补回去。
-fn unflushed_open_turn_events(
-    open_turn: &[crate::acp_chat::AcpEntry],
-    replay: &ReplayCursor,
-) -> Vec<ConversationEvent> {
-    let Some(user) = open_turn.first() else {
-        return Vec::new();
-    };
-    let user_text = match user {
-        crate::acp_chat::AcpEntry::User(text) => text.as_str(),
-        crate::acp_chat::AcpEntry::UserWithImages { text, .. } => text.as_str(),
-        _ => {
-            let mut events = Vec::new();
-            push_aligned_tail(open_turn, replay, &mut events);
-            return events;
-        }
-    };
-    let mut events = Vec::new();
-    if !(replay.saw_user && replay.last_user == user_text) {
-        push_user_entry(user, &mut events);
-        for entry in &open_turn[1..] {
-            push_snapshot_entry(entry, replay, &mut events);
-        }
-        return events;
-    }
-    push_aligned_tail(&open_turn[1..], replay, &mut events);
-    events
-}
-
-fn push_aligned_tail(
-    tail: &[crate::acp_chat::AcpEntry],
-    replay: &ReplayCursor,
-    events: &mut Vec<ConversationEvent>,
-) {
-    let mut segments = replay.after_user.iter().peekable();
-    for entry in tail {
-        match entry {
-            crate::acp_chat::AcpEntry::Assistant { text, thought } => {
-                let suffix = match segments.peek() {
-                    Some(ReplaySegment::Assistant {
-                        thought: replayed_thought,
-                        text: replayed,
-                    }) if replayed_thought == thought => {
-                        let replayed = (*replayed).clone();
-                        segments.next();
-                        assistant_suffix(text, &replayed)
-                    }
-                    _ => Some(text.clone()),
-                };
-                if let Some(suffix) = suffix {
-                    push_assistant(*thought, suffix, events);
-                }
-            }
-            crate::acp_chat::AcpEntry::ToolCall { .. } => {
-                if matches!(segments.peek(), Some(ReplaySegment::Tool)) {
-                    segments.next();
-                }
-                push_missing_tool(entry, replay, events);
-            }
-            crate::acp_chat::AcpEntry::TaskNote(note) => {
-                events.push(ConversationEvent::BackgroundNotice(note.clone()));
-            }
-            _ => {}
-        }
-    }
-}
-
-fn push_snapshot_entry(
-    entry: &crate::acp_chat::AcpEntry,
-    replay: &ReplayCursor,
-    events: &mut Vec<ConversationEvent>,
-) {
-    match entry {
-        crate::acp_chat::AcpEntry::Assistant { text, thought } => {
-            push_assistant(*thought, text.clone(), events);
-        }
-        crate::acp_chat::AcpEntry::ToolCall { .. } => push_missing_tool(entry, replay, events),
-        crate::acp_chat::AcpEntry::User(_) | crate::acp_chat::AcpEntry::UserWithImages { .. } => {
-            push_user_entry(entry, events);
-        }
-        crate::acp_chat::AcpEntry::TaskNote(note) => {
-            events.push(ConversationEvent::BackgroundNotice(note.clone()));
-        }
-        crate::acp_chat::AcpEntry::Divider(_) => {}
-    }
-}
-
-fn push_user_entry(entry: &crate::acp_chat::AcpEntry, events: &mut Vec<ConversationEvent>) {
-    match entry {
-        crate::acp_chat::AcpEntry::User(text) => {
-            if !text.is_empty() {
-                events.push(ConversationEvent::UserChunk(text.clone()));
-            }
-        }
-        crate::acp_chat::AcpEntry::UserWithImages { text, images } => {
-            if !text.is_empty() {
-                events.push(ConversationEvent::UserChunk(text.clone()));
-            }
-            for image in images {
-                events.push(ConversationEvent::UserImage(image.clone()));
-            }
-        }
-        _ => {}
-    }
-}
-
-fn push_assistant(thought: bool, text: String, events: &mut Vec<ConversationEvent>) {
-    if text.is_empty() {
-        return;
-    }
-    events.push(ConversationEvent::AgentChunk {
-        thought,
-        text,
-        parent_id: None,
-    });
-}
-
-fn push_missing_tool(
-    entry: &crate::acp_chat::AcpEntry,
-    replay: &ReplayCursor,
-    events: &mut Vec<ConversationEvent>,
-) {
-    let crate::acp_chat::AcpEntry::ToolCall {
-        id,
-        title,
-        kind,
-        status,
-        output,
-        children,
-        subagents: _,
-        peer: _,
-    } = entry
-    else {
-        return;
-    };
-    if replay.tool_ids.contains(id) {
-        return;
-    }
-    events.push(ConversationEvent::ToolStarted {
-        id: id.clone(),
-        title: title.clone(),
-        kind: *kind,
-    });
-    events.push(ConversationEvent::ToolFinished {
-        id: id.clone(),
-        status: *status,
-        output: output.clone(),
-    });
-    if !children.is_empty() {
-        events.push(ConversationEvent::ToolChildren {
-            id: id.clone(),
-            children: children.clone(),
-            debug: BTreeMap::new(),
-        });
-    }
-}
-
-/// 快照里的助手正文减去文件已经写过的前缀。对不上时保留快照全文，半句不能丢。
-fn assistant_suffix(snapshot: &str, replayed: &str) -> Option<String> {
-    if let Some(suffix) = snapshot.strip_prefix(replayed) {
-        return (!suffix.is_empty()).then(|| suffix.to_string());
-    }
-    if replayed.starts_with(snapshot) {
-        return None;
-    }
-    Some(snapshot.to_string())
-}
-
-#[cfg(test)]
-mod open_turn_replay_tests {
-    use super::*;
-
-    fn user_turn(user: &str, assistant: &str) -> Vec<crate::acp_chat::AcpEntry> {
-        vec![
-            crate::acp_chat::AcpEntry::User(user.into()),
-            crate::acp_chat::AcpEntry::Assistant {
-                text: assistant.into(),
-                thought: false,
-            },
-        ]
-    }
-
-    fn replay_of(user: &str, assistant: &str) -> ReplayCursor {
-        let mut replay = ReplayCursor::default();
-        replay.note_user(user);
-        if !assistant.is_empty() {
-            replay.note_assistant(false, assistant);
-        }
-        replay
-    }
-
-    #[test]
-    fn flushed_prefix_keeps_only_the_unwritten_suffix() {
-        let events = unflushed_open_turn_events(
-            &user_turn("现在", "Hello wor"),
-            &replay_of("现在", "Hello"),
-        );
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            ConversationEvent::AgentChunk { thought: false, text, parent_id: None }
-                if text == " wor"
-        ));
-    }
-
-    #[test]
-    fn fully_flushed_assistant_is_not_sent_again() {
-        let events =
-            unflushed_open_turn_events(&user_turn("现在", "Hello"), &replay_of("现在", "Hello"));
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn missing_user_message_is_sent_with_the_whole_turn() {
-        let events =
-            unflushed_open_turn_events(&user_turn("现在", "半句"), &ReplayCursor::default());
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], ConversationEvent::UserChunk(text) if text == "现在"));
-        assert!(matches!(
-            &events[1],
-            ConversationEvent::AgentChunk { text, .. } if text == "半句"
-        ));
-    }
-
-    #[test]
-    fn tool_missing_from_replay_is_restored_from_the_snapshot() {
-        let open_turn = vec![
-            crate::acp_chat::AcpEntry::User("现在".into()),
-            crate::acp_chat::AcpEntry::tool_call(
-                "tc-1",
-                "读文件",
-                crate::acp_chat::ToolKind::Read,
-                crate::acp_chat::ToolCallStatus::InProgress,
-                vec![crate::acp_chat::ToolOutputPart::Text("一部分".into())],
-            ),
-        ];
-        let events = unflushed_open_turn_events(&open_turn, &replay_of("现在", ""));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ConversationEvent::ToolStarted { id, .. } if id == "tc-1"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ConversationEvent::ToolFinished { id, output, .. }
-                if id == "tc-1" && output.len() == 1
-        )));
-    }
-
-    #[test]
-    fn tool_already_replayed_is_not_emitted_again() {
-        let open_turn = vec![
-            crate::acp_chat::AcpEntry::User("现在".into()),
-            crate::acp_chat::AcpEntry::tool_call(
-                "tc-1",
-                "读文件",
-                crate::acp_chat::ToolKind::Read,
-                crate::acp_chat::ToolCallStatus::InProgress,
-                Vec::new(),
-            ),
-        ];
-        let mut replay = replay_of("现在", "");
-        replay.note_tool("tc-1");
-        let events = unflushed_open_turn_events(&open_turn, &replay);
-        assert!(events.is_empty());
-    }
-}
-
 /// 已建立会话的最小读写面：官方 `ActiveSession` 和无缝升级的自建路由共用。
 trait SessionDrive {
     fn session_id(&self) -> &SessionId;
@@ -2945,89 +2144,8 @@ impl SessionDrive for ActiveSession<'_, Agent> {
     }
 }
 
-/// 2.1 不再公开 `attach_session`。无缝升级继承 fd 时，按已知 session id
-/// 自己挂一条动态 handler，行为对齐 SDK 内部的 session 路由。
-struct InheritedSession {
-    session_id: SessionId,
-    connection: ConnectionTo<Agent>,
-    update_rx: mpsc::UnboundedReceiver<SessionMessage>,
-    _handler: DynamicHandlerGuard<Agent>,
-}
-
-struct InheritedSessionHandler {
-    session_id: SessionId,
-    update_tx: mpsc::UnboundedSender<SessionMessage>,
-}
-
-impl HandleDispatchFrom<Agent> for InheritedSessionHandler {
-    async fn handle_dispatch_from(
-        &mut self,
-        message: Dispatch,
-        cx: ConnectionTo<Agent>,
-    ) -> Result<Handled<Dispatch>, agent_client_protocol::Error> {
-        MatchDispatchFrom::new(message, &cx)
-            .if_dispatch_from(Agent, async |message: Dispatch| {
-                if message.has_field("sessionId")
-                    && let Ok(untyped) = message.to_untyped_message()
-                    && let Some(value) = untyped.params().get("sessionId")
-                    && let Ok(session_id) = serde_json::from_value::<SessionId>(value.clone())
-                    && session_id == self.session_id
-                {
-                    self.update_tx
-                        .unbounded_send(SessionMessage::SessionMessage(message))
-                        .map_err(|_| acp_err("session channel closed"))?;
-                    return Ok(Handled::Yes);
-                }
-                Ok(Handled::No {
-                    message,
-                    retry: false,
-                })
-            })
-            .await
-            .done()
-    }
-
-    fn describe_chain(&self) -> impl std::fmt::Debug {
-        format!("InheritedSessionHandler({})", self.session_id)
-    }
-}
-
-fn attach_inherited_session(
-    connection: &ConnectionTo<Agent>,
-    session_id: SessionId,
-) -> Result<InheritedSession, agent_client_protocol::Error> {
-    let (update_tx, update_rx) = mpsc::unbounded();
-    let handler = connection.add_dynamic_handler(InheritedSessionHandler {
-        session_id: session_id.clone(),
-        update_tx,
-    })?;
-    Ok(InheritedSession {
-        session_id,
-        connection: connection.clone(),
-        update_rx,
-        _handler: handler,
-    })
-}
-
-impl SessionDrive for InheritedSession {
-    fn session_id(&self) -> &SessionId {
-        &self.session_id
-    }
-
-    fn connection(&self) -> &ConnectionTo<Agent> {
-        &self.connection
-    }
-
-    async fn read_update(&mut self) -> Result<SessionMessage, agent_client_protocol::Error> {
-        self.update_rx
-            .next()
-            .await
-            .ok_or_else(|| acp_err("session channel closed unexpectedly"))
-    }
-}
-
 /// 驱动一个已建立的会话：发 Ready → 双源 loop（UI 指令 / agent 更新流）。
-/// `session/load` / `session/new` 与继承 fd 的路径共用。
+/// `session/load` 与 `session/new` 共用。
 async fn drive_session<S: SessionDrive>(
     mut session: S,
     channels: AcpChannels,
@@ -3035,7 +2153,6 @@ async fn drive_session<S: SessionDrive>(
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
     in_flight_rpc: Arc<AtomicUsize>,
-    turn_already_active: bool,
 ) -> Result<(), agent_client_protocol::Error> {
     let _ = channels.event_tx.try_send(ConversationEvent::Ready {
         session_id: session.session_id().clone(),
@@ -3046,7 +2163,7 @@ async fn drive_session<S: SessionDrive>(
     // 改变：不少 adapter 会把它留到当前 turn 结束，或用 turn 末尾的旧快照
     // 覆盖刚写入的值。这里在协议驱动层排队，保证桌面、移动端和任务入口都
     // 走同一套「本轮结束 → 配置确认 → 下一轮 prompt」顺序。
-    let mut turn_active = turn_already_active;
+    let mut turn_active = false;
     let mut pending_config_options: Vec<(String, ConfigValue)> = Vec::new();
 
     loop {
@@ -3069,17 +2186,6 @@ async fn drive_session<S: SessionDrive>(
             // 通道关闭（UI 句柄 drop）等同 Shutdown。
             Next::Cmd(None) | Next::Cmd(Some(ConversationCommand::Shutdown)) => {
                 return Ok(());
-            }
-            Next::Cmd(Some(ConversationCommand::TurnCompleted)) => {
-                turn_active = false;
-                flush_pending_config_options(
-                    &mut pending_config_options,
-                    session.connection().clone(),
-                    session.session_id().clone(),
-                    &channels.event_tx,
-                    &in_flight_rpc,
-                )
-                .await;
             }
             Next::Cmd(Some(ConversationCommand::PromptSettled(settled))) => {
                 // 响应回来时，本轮更早的通知早已按线序进了 SDK 的 update 队列
@@ -3661,10 +2767,9 @@ async fn translate_update(
 
 /// 组装 ACP agent 的 stdio 配置（不 spawn）：命令按空白分词，注入 login shell 的 PATH
 /// （Finder 启动的 GUI 进程 PATH 不含 nvm/homebrew，直接 spawn `npx` 会
-/// ENOENT）。先借 SDK 解析成标准 stdio 配置，再由本文件自己 spawn；这样既能拿到
-/// agent 子进程的 pid + 原始 stdin/stdout fd（smeltd 无缝升级要用），也能让
-/// `run_connection` 统一接管 stderr 尾巴和原始行捕获。网页 agent 的临时环境变量
-/// （ephemeral_env）在组装参数时叠加进子进程环境，但不会写回可持久化的 launch。
+/// ENOENT）。先借 SDK 解析成标准 stdio 配置，再由本文件自己 spawn；这样能拿到
+/// agent 子进程的 pid，也能让 `run_connection` 统一接管 stderr 尾巴和原始行捕获。
+/// 网页 agent 的临时环境变量（ephemeral_env）在组装参数时叠加进子进程环境，但不会写回可持久化的 launch。
 fn build_agent(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,
@@ -5168,9 +4273,11 @@ mod runtime_tests {
 
     #[test]
     fn runtime_version_probe_collects_a_short_lived_process() {
+        // where.exe 会把 `--version` 当文件名逐个搜 PATH，CI 上耗时 1.7～5.3 秒，
+        // 压线超时；whoami.exe 遇到未知参数立刻报错退出。
         let program = if cfg!(windows) {
             let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-            std::path::PathBuf::from(root).join(r"System32\where.exe")
+            std::path::PathBuf::from(root).join(r"System32\whoami.exe")
         } else {
             std::path::PathBuf::from("/usr/bin/true")
         };
@@ -5863,199 +4970,6 @@ mod image_block_tests {
         assert_eq!(v["type"], "image");
         assert_eq!(v["data"], "QUJD");
         assert_eq!(v["mimeType"], "image/png");
-    }
-}
-
-#[cfg(test)]
-mod resume_incoming_lines_tests {
-    use super::{
-        ConversationCommand, ConversationEvent, make_resume_incoming_lines,
-        prompt_outcome_from_response,
-    };
-    use crate::acp_session::{AcpSessionState, LivePermission};
-    use futures::StreamExt;
-    use std::sync::{Arc, Mutex};
-
-    /// 复现 code review 发现的 bug：早期版本只有 `make_incoming_lines`（首次
-    /// spawn 路径）接了 `last_stdout_line`，`make_resume_incoming_lines`（续接
-    /// 路径）漏接——连续两次升级期间，第二次升级前如果 agent 又发一次权限/
-    /// 选择题请求，`pending_raw_request_line()` 读到的永远是 None，回放不出
-    /// 那行原文，审批卡直接消失，agent 永久卡死。这里验证回放行和后续实时行
-    /// 都会写回 `last_stdout_line`，保证下一次升级能读到最新的待处理请求。
-    #[test]
-    fn replay_and_live_lines_both_update_last_stdout_line() {
-        let reader = futures::io::Cursor::new(b"live-request-line\n".to_vec());
-        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let mut stream = make_resume_incoming_lines(
-            reader,
-            Some("replayed-request-line".to_string()),
-            Arc::clone(&last_stdout_line),
-            None,
-            None,
-            None,
-        );
-
-        smol::block_on(async {
-            let first = stream.next().await.unwrap().unwrap();
-            assert_eq!(first, "replayed-request-line");
-            assert_eq!(
-                last_stdout_line.lock().unwrap().as_deref(),
-                Some("replayed-request-line"),
-                "回放行也要立刻计入 last_stdout_line：万一 agent 紧跟着又发一次新\
-                 请求，下一次升级得从这行往后看，不能还停在 None"
-            );
-
-            let second = stream.next().await.unwrap().unwrap();
-            assert_eq!(second, "live-request-line");
-            assert_eq!(
-                last_stdout_line.lock().unwrap().as_deref(),
-                Some("live-request-line"),
-                "续接连接活着期间读到的实时行（模拟第二次升级前新来的权限/选择题\
-                 请求）也必须覆盖 last_stdout_line，否则下一次升级回放不出这行"
-            );
-        });
-    }
-
-    #[test]
-    fn no_pending_line_still_tracks_live_lines() {
-        let reader = futures::io::Cursor::new(b"only-live-line\n".to_vec());
-        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let mut stream = make_resume_incoming_lines(
-            reader,
-            None,
-            Arc::clone(&last_stdout_line),
-            None,
-            None,
-            None,
-        );
-
-        smol::block_on(async {
-            let line = stream.next().await.unwrap().unwrap();
-            assert_eq!(line, "only-live-line");
-            assert_eq!(
-                last_stdout_line.lock().unwrap().as_deref(),
-                Some("only-live-line")
-            );
-        });
-    }
-
-    #[test]
-    fn pending_request_survives_two_resume_handoff_cycles() {
-        let replayed = r#"{"jsonrpc":"2.0","id":41,"method":"session/request_permission"}"#;
-        let live = r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission"}"#;
-        let reader = futures::io::Cursor::new(format!("{live}\n").into_bytes());
-        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let mut first_resume = make_resume_incoming_lines(
-            reader,
-            Some(replayed.to_string()),
-            Arc::clone(&last_stdout_line),
-            None,
-            None,
-            None,
-        );
-
-        let pending_raw_line = smol::block_on(async {
-            assert_eq!(first_resume.next().await.unwrap().unwrap(), replayed);
-            assert_eq!(last_stdout_line.lock().unwrap().as_deref(), Some(replayed));
-
-            assert_eq!(first_resume.next().await.unwrap().unwrap(), live);
-            assert_eq!(last_stdout_line.lock().unwrap().as_deref(), Some(live));
-
-            let mut state = AcpSessionState::default();
-            state.permissions.push(LivePermission {
-                question: "Allow?".to_string(),
-                tool_call_id: "tool-1".to_string(),
-                options: Vec::new(),
-                details: crate::acp_session::ApprovalDetailsView::Generic,
-                responder: None,
-                raw_request_line: last_stdout_line.lock().unwrap().clone(),
-            });
-            state
-                .pending_raw_request_line()
-                .expect("handoff must capture the live raw request")
-                .to_string()
-        });
-
-        let mut second_resume = make_resume_incoming_lines(
-            futures::io::Cursor::new(Vec::<u8>::new()),
-            Some(pending_raw_line.clone()),
-            Arc::new(Mutex::new(None)),
-            None,
-            None,
-            None,
-        );
-        let replayed_again = smol::block_on(async { second_resume.next().await.unwrap().unwrap() });
-
-        assert_eq!(replayed_again, pending_raw_line);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&replayed_again).unwrap()["id"],
-            42
-        );
-    }
-
-    #[test]
-    fn recognizes_only_prompt_completion_responses() {
-        let completed = r#"{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}"#;
-        assert!(matches!(
-            prompt_outcome_from_response(completed),
-            Some(Ok(_))
-        ));
-        assert!(
-            prompt_outcome_from_response(
-                r#"{"jsonrpc":"2.0","method":"session/update","params":{"stopReason":"end_turn"}}"#
-            )
-            .is_none()
-        );
-        assert!(
-            prompt_outcome_from_response(
-                r#"{"jsonrpc":"2.0","id":8,"result":{"configOptions":[]}}"#
-            )
-            .is_none()
-        );
-    }
-
-    /// 交接后那一轮若以错误收场，也必须产出终态。只认 `result` 会让 UI
-    /// 永远停在「运行中」——这一轮的回调随旧进程一起没了，没人再补。
-    #[test]
-    fn orphaned_error_response_also_settles_the_turn() {
-        let failed = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"turn failed: no api key"}}"#;
-        match prompt_outcome_from_response(failed) {
-            Some(Err(msg)) => {
-                assert!(msg.contains("no api key"), "{msg}");
-                assert!(msg.contains("环境变量"), "同样要给下一步建议：{msg}");
-            }
-            other => panic!("失败响应必须收敛成终态：{other:?}"),
-        }
-    }
-
-    #[test]
-    fn resumed_running_turn_emits_one_completion_for_orphaned_response() {
-        let lines = concat!(
-            "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"stopReason\":\"end_turn\"}}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"stopReason\":\"cancelled\"}}\n"
-        );
-        let (tx, rx) = smol::channel::unbounded();
-        let (done_tx, done_rx) = smol::channel::unbounded();
-        let mut stream = make_resume_incoming_lines(
-            futures::io::Cursor::new(lines.as_bytes().to_vec()),
-            None,
-            Arc::new(Mutex::new(None)),
-            Some(tx),
-            Some(done_tx),
-            None,
-        );
-
-        smol::block_on(async {
-            assert!(stream.next().await.is_some());
-            assert!(stream.next().await.is_some());
-        });
-        assert!(matches!(rx.try_recv(), Ok(ConversationEvent::TurnEnded(_))));
-        assert!(rx.try_recv().is_err(), "交接遗失的回调只能补发一次");
-        assert!(matches!(
-            done_rx.try_recv(),
-            Ok(ConversationCommand::TurnCompleted)
-        ));
-        assert!(done_rx.try_recv().is_err(), "交接只应唤醒一次配置队列");
     }
 }
 

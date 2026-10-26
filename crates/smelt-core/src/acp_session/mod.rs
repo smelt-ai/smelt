@@ -31,7 +31,7 @@ use crate::daemon_state::DaemonPhase;
 mod apply;
 pub use apply::{
     ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
-    queue_composer_restore, queued_item_images, take_claimed_queue_text,
+    interrupt_open_turn, queue_composer_restore, queued_item_images, take_claimed_queue_text,
 };
 use apply::{pending_action_phase, resume_running};
 
@@ -59,8 +59,7 @@ pub struct LivePermission {
     pub options: Vec<PermissionOptionView>,
     pub details: ApprovalDetailsView,
     pub responder: Option<PermissionResponder>,
-    /// 这张卡对应请求的原始 JSON-RPC 行，smeltd 无缝升级时用来重放（见
-    /// `ConversationEvent::Permission` 同名字段）。
+    /// 这张卡对应请求的原始 JSON-RPC 行（见 `ConversationEvent::Permission` 同名字段）。
     pub raw_request_line: Option<String>,
 }
 
@@ -279,13 +278,6 @@ impl AcpSessionState {
         }
     }
 
-    /// smeltd 无缝升级续接：从升级前落进交接文件的快照重建活体状态。
-    /// `permission`/`elicitation` 故意留空——不是丢了，是这份快照本来就没有
-    /// 真正的 responder 可用（那是连接线程内部状态，没法序列化），如果确实
-    /// 有一张卡正卡着，`pending_raw_request_line` 抓出来的那行原文会在
-    /// `resume_acp_from_fds` 重新接上连接后被回放，SDK 重新解析出等价请求，
-    /// 走一遍正常的 `apply_event(Permission/Elicitation)`，到时候会自然把
-    /// `permission`/`elicitation` 填回去——不需要（也没法）在这里预置。
     /// 工具参数表变了。没变的快照不要再拷这张表。
     pub fn note_tool_debug_changed(&mut self) {
         self.tool_debug_generation = self.tool_debug_generation.wrapping_add(1);
@@ -576,11 +568,8 @@ impl AcpSessionState {
         self.entries_base += keep_from;
     }
 
-    /// 当前有没有一张卡（权限/选择题）正等着人处理，有就带上它原始请求那行
-    /// ——smeltd 无缝升级时用来判断"这条会话要不要在交接文件里多带一行"
-    /// 以及 resume 时重放这行，见 `resume_acp_from_fds`。同一时刻协议上只会
-    /// 有一张卡挂起（agent 等到上一个请求有回应才会发下一个），不用管两者
-    /// 都有值的情况。
+    /// 当前有没有一张卡（权限/选择题）正等着人处理，有就带上它原始请求那行。
+    /// 同一时刻协议上只会有一张卡挂起（agent 等到上一个请求有回应才会发下一个）。
     pub fn pending_raw_request_line(&self) -> Option<&str> {
         self.permissions
             .iter()
@@ -662,11 +651,22 @@ impl AcpSessionState {
     /// 重放草稿是从 0 开始的完整投影。提交时丢掉上一份正文，并把后缀下标清掉。
     /// 没在重放时调用只清标志。后缀种子的绝对长度要留到真正的重放提交。
     pub fn commit_replay(&mut self) {
+        let was_replaying = self.replaying_history || self.replay_baseline.is_some();
         let committing_scratch = self.replay_baseline.take().is_some();
         if committing_scratch {
             self.entries_base = 0;
         }
         self.replaying_history = false;
+        // 从历史里恢复出来的问题卡片在等用户回答，重启后照样能答，这一轮没有中断。
+        let awaiting_recovered_answer = self
+            .elicitation
+            .as_ref()
+            .is_some_and(|card| card.recovered_tool_call_id.is_some());
+        // 重放结束时，文件里没写完的那一轮不会再收到 TurnEnded。留着会让
+        // 重连后的会话一直转圈。用户取消仍记成 Cancelled。
+        if was_replaying && !awaiting_recovered_answer {
+            let _ = interrupt_open_turn(self);
+        }
     }
 
     /// 重放没有形成完整投影。草稿不能当会话，回到开始重放前已发布的正文。

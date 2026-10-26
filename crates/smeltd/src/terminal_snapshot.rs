@@ -63,14 +63,6 @@ fn history_span<T: EventListener>(term: &Term<T>) -> usize {
     (bottom.0 - top.0 + 1).max(0) as usize
 }
 
-/// 写入 handoff.json 的 grid：主屏包含 history + viewport，备用屏只包含 viewport。
-pub(crate) fn snapshot_ansi_for_handoff<T: EventListener>(
-    term: &Term<T>,
-    _launch: Option<&str>,
-) -> Vec<u8> {
-    snapshot_for_terminal_mode(term, SNAPSHOT_MAX_LINES)
-}
-
 fn snapshot_for_terminal_mode<T: EventListener>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
     if term.mode().contains(TermMode::ALT_SCREEN) {
         snapshot_viewport(term)

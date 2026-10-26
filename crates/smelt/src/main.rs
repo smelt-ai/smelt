@@ -24,6 +24,7 @@ pub(crate) use smelt_ui::ui_theme;
 pub(crate) mod agents;
 mod automation_notifications;
 mod conversation_layout;
+mod daemon_restart_prompt;
 mod desktop_view;
 mod dir_picker;
 mod dock;
@@ -2789,16 +2790,18 @@ struct Workspace {
     daemon_outdated: Option<bool>,
     /// 最近一次无缝升级的结果提示（设置页守护分区显示；None = 没试过）。
     daemon_upgrade_msg: Option<String>,
-    /// 无缝升级进行中（按钮置灰防连点）。
+    /// 重启守护进行中（按钮置灰防连点）。
     daemon_upgrading: bool,
-    /// 检测到守护已过期、但有 agent 正在跑，升级挂起等空闲：true = 待升级。
-    /// 空闲后（或用户手动点升级）会清掉，转成真正的 `upgrade_daemon_seamless`。
-    daemon_upgrade_pending: bool,
+    /// 设置页「立即重启更新」：只有有进行中的会话时才弹出。
+    show_update_install_confirm: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
     daemon_info: Option<local_daemon::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
+    /// 停掉守护会打断的会话名。退出、重启守护、装更新的确认框打开时算一次，
+    /// 弹窗的 render 只读这份，不在每次重绘时整份克隆会话状态。
+    stop_prompt_names: Vec<String>,
     /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
     /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的游离会话、忘了关的临时会话都会
     /// 计进「N 个会话」里但从没在任何侧栏露过面，只有这里能看见并单独清理，
@@ -3242,9 +3245,10 @@ impl Workspace {
             daemon_outdated: None,
             daemon_upgrade_msg: None,
             daemon_upgrading: false,
-            daemon_upgrade_pending: false,
+            show_update_install_confirm: false,
             daemon_info: None,
             show_daemon_restart_confirm: false,
+            stop_prompt_names: Vec::new(),
             session_manager_open: false,
             session_manager_list: None,
             session_manager_tombstones: HashSet::new(),
@@ -3345,10 +3349,8 @@ impl Workspace {
     }
 
     /// 每 60s 探一次守护是否落后于磁盘上的 smeltd。手工装 App / dev 重编译后
-    /// 没有「更新事件」可挂,只能靠检测发现;探到落后就走 `check_daemon_outdated`
-    /// 的空闲门控——agent 忙就挂起,空闲才升,不打扰使用(连接路径的 ensure 只
-    /// 对齐磁盘不再偷跑 exec,这里负责兜底把守护在空闲时跟上)。
-    /// 探测是本地 socket 往返(毫秒级),60s 一次对用户完全无感。
+    /// 没有「更新事件」可挂，只能靠检测发现；探到落后就交给 `check_daemon_outdated`：
+    /// 没有进行中的会话才自动重启，有的话等空闲后的下一次。
     fn start_daemon_outdated_watch(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -3944,6 +3946,23 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 if this.quit_requested {
                     return;
+                }
+                this.stop_prompt_names.clear();
+                // 更新事务只在 macOS 上存在。
+                #[cfg(target_os = "macos")]
+                if !matches!(this.update_status, updater::UpdateStatus::Applying { .. })
+                    && this.update_status.ready_update().is_some()
+                {
+                    // 有待装更新时退出会停掉守护并换包。没有进行中的会话就直接走，
+                    // 有的话必须先确认，不能把正在输出的对话静默杀掉。
+                    let names = this.busy_work_names(cx);
+                    if !daemon_restart_prompt::should_confirm(&names) {
+                        if let Some(update) = this.update_status.ready_update().cloned() {
+                            this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
+                        }
+                        return;
+                    }
+                    this.stop_prompt_names = names;
                 }
                 this.begin_main_modal_focus(window, cx);
                 this.show_quit_confirm = true;
@@ -4738,7 +4757,6 @@ fn main() {
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);
                     }
-                    ws.maybe_flush_pending_daemon_upgrade(cx);
                     ws.notify_if_session_facts_changed(cx);
                 });
             }

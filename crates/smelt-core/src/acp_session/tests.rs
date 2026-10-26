@@ -430,6 +430,10 @@ fn replay_commit_publishes_the_transcript_from_the_start() {
     let finished = apply_event(&mut state, ConversationEvent::HistoryReplayFinished);
 
     assert_eq!(finished.entries_offset, Some(0));
+    assert_eq!(
+        state.turn_outcome, None,
+        "重放出来的完整回合没有未结束的工具，不能标成中断"
+    );
     let published = state.to_snapshot_since(false, finished.entries_offset.unwrap_or(99));
     assert_eq!(published.entries_offset, 0);
     assert_eq!(published.entries_total, 2);
@@ -438,6 +442,139 @@ fn replay_commit_publishes_the_transcript_from_the_start() {
         [AcpEntry::User(user), AcpEntry::Assistant { text, .. }]
             if user == "A" && text == "重放后的回复"
     ));
+}
+
+#[test]
+fn replay_commit_marks_a_trailing_open_turn_interrupted() {
+    let mut state = fresh_state();
+    state.replaying_history = true;
+    state.phase = DaemonPhase::ExecutingTool;
+    state.turn_started_at_ms = Some(1);
+    state.entries.push(AcpEntry::User("继续".into()));
+    state.entries.push(AcpEntry::ToolCall {
+        id: "tool-open".into(),
+        title: "Read".into(),
+        kind: ToolKind::Read,
+        status: ToolCallStatus::InProgress,
+        output: Vec::new(),
+        children: Vec::new(),
+        subagents: Vec::new(),
+        peer: None,
+    });
+
+    state.commit_replay();
+
+    assert!(!state.replaying_history);
+    assert_eq!(state.phase, DaemonPhase::Idle);
+    assert_eq!(state.turn_outcome, Some(AcpTurnOutcome::Interrupted));
+    assert!(state.turn_started_at_ms.is_none());
+    match state.entries.last() {
+        Some(AcpEntry::ToolCall { status, output, .. }) => {
+            assert_eq!(*status, ToolCallStatus::Failed);
+            assert!(output.iter().any(|part| matches!(
+                part,
+                ToolOutputPart::Text(text) if text.contains("中断")
+            )));
+        }
+        other => panic!("未完成工具应留在末尾，实际 {other:?}"),
+    }
+}
+
+/// adapter 重放时没给早几轮的工具补终态。那几轮早就结束了，重放完不能把已结束的
+/// 对话标成中断、未读，也不改写那几轮的工具。
+#[test]
+fn replay_commit_ignores_dangling_tools_in_earlier_turns() {
+    let mut state = fresh_state();
+    state.replaying_history = true;
+    state.entries.push(AcpEntry::User("第一轮".into()));
+    state.entries.push(AcpEntry::ToolCall {
+        id: "tool-old".into(),
+        title: "Read".into(),
+        kind: ToolKind::Read,
+        status: ToolCallStatus::InProgress,
+        output: Vec::new(),
+        children: Vec::new(),
+        subagents: Vec::new(),
+        peer: None,
+    });
+    state.entries.push(AcpEntry::User("第二轮".into()));
+    state.entries.push(AcpEntry::Assistant {
+        text: "好了".into(),
+        thought: false,
+    });
+
+    state.commit_replay();
+
+    assert_eq!(state.turn_outcome, None);
+    assert!(!state.completed_unread);
+    assert!(matches!(
+        &state.entries[1],
+        AcpEntry::ToolCall { status: ToolCallStatus::InProgress, output, .. } if output.is_empty()
+    ));
+}
+
+/// 重放恢复出来的问题卡片重启后还能答，重放结束不能把它当成没写完的一轮清掉。
+#[test]
+fn replay_commit_keeps_a_recovered_question_answerable() {
+    let raw_input = serde_json::json!({
+        "questions": [{
+            "question": "Choose",
+            "options": [{"label": "A"}]
+        }]
+    });
+    let mut state = fresh_state();
+    state.replaying_history = true;
+    state.entries.push(AcpEntry::User("问我".into()));
+    state.entries.push(AcpEntry::ToolCall {
+        id: "ask-1".into(),
+        title: "AskUserQuestion".into(),
+        kind: ToolKind::Other,
+        status: ToolCallStatus::Pending,
+        output: Vec::new(),
+        children: Vec::new(),
+        subagents: Vec::new(),
+        peer: None,
+    });
+    state.elicitation = recovered_elicitation("Choose", Some(&raw_input), "ask-1");
+    state.phase = DaemonPhase::WaitingForUser;
+
+    state.commit_replay();
+
+    assert!(state.elicitation.is_some());
+    assert_eq!(state.phase, DaemonPhase::WaitingForUser);
+    assert_eq!(state.turn_outcome, None);
+    assert!(matches!(
+        state.entries.last(),
+        Some(AcpEntry::ToolCall { status: ToolCallStatus::Pending, .. })
+    ));
+}
+
+#[test]
+fn replay_commit_keeps_a_user_cancel_as_cancelled() {
+    let mut state = fresh_state();
+    state.replaying_history = true;
+    state.cancel_requested = true;
+    state.phase = DaemonPhase::Thinking;
+    state.turn_started_at_ms = Some(1);
+    state.entries.push(AcpEntry::User("停".into()));
+
+    state.commit_replay();
+
+    assert_eq!(state.turn_outcome, Some(AcpTurnOutcome::Cancelled));
+}
+
+#[test]
+fn commit_replay_does_not_interrupt_a_live_turn() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Thinking;
+    state.turn_started_at_ms = Some(1);
+    state.entries.push(AcpEntry::User("还在跑".into()));
+
+    state.commit_replay();
+
+    assert_eq!(state.phase, DaemonPhase::Thinking);
+    assert_eq!(state.turn_outcome, None);
+    assert_eq!(state.turn_started_at_ms, Some(1));
 }
 
 /// 重放开始后、第一条历史还没回来时用户又发了一条。新消息接在仍发布的旧正文上，
@@ -1035,6 +1172,12 @@ fn missing_turn_outcome_is_not_success() {
     assert!(!AcpTurnOutcome::MaxTokens.is_success());
     assert!(!AcpTurnOutcome::MaxTurnRequests.is_success());
     assert!(!AcpTurnOutcome::Refused.is_success());
+    assert!(!AcpTurnOutcome::Interrupted.is_success());
+    assert_eq!(
+        AcpTurnOutcome::Interrupted.failure_message(),
+        Some("本轮回复已中断，重启后可继续")
+    );
+    assert_eq!(AcpTurnOutcome::Cancelled.failure_message(), None);
 }
 
 #[test]

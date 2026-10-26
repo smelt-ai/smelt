@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   mac:
-    # 和 release.yml 的 build 一样：GPUI 只在 Apple Silicon 的 macOS 上编得过。
+    # 和 release.yml 的 build 同一种 runner（Apple Silicon 的 macOS），缓存才对得上。
     runs-on: macos-14
     steps:
       - name: Checkout

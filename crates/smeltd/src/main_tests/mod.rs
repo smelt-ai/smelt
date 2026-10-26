@@ -2,17 +2,6 @@
 
 use super::*;
 
-/// 从交接文件恢复的测试入口：`legacy_rehome` 传 `false`，只验证「认领 fd +
-/// 重建会话表」这一段纯粹的恢复行为，不触发会杀进程/起宿主的遗留迁移。
-/// 需要覆盖迁移决策的用例请直接测 `legacy_rehome_is_safe`。
-#[cfg(unix)]
-fn resume_handoff(
-    path: &str,
-    event_hub: &EventHubHandle,
-) -> Option<(UnixListener, Sessions, AcpSessions)> {
-    resume_handoff_with_remote(path, event_hub, None, false)
-}
-
 mod acp_idle_tests;
 #[cfg(unix)]
 mod acp_tests;
@@ -25,10 +14,6 @@ mod autostart_remote_tests;
 mod daemon_executable_tests;
 #[cfg(unix)]
 mod flow_control_tests;
-#[cfg(unix)]
-mod handoff_tests;
-#[cfg(unix)]
-mod handoff_v2_tests;
 mod history_rename_tests;
 #[cfg(unix)]
 mod input_integration_tests;
@@ -38,8 +23,6 @@ mod remote_catalog_recovery_tests;
 mod remote_reattach_tests;
 #[cfg(unix)]
 mod resize_bounds_tests;
-#[cfg(unix)]
-mod resume_handoff_tests;
 mod runtime_client_tests;
 mod self_upgrade_tests;
 mod session_directory_tests;
@@ -48,7 +31,6 @@ mod single_instance_tests;
 mod sleep_assertion_leak_tests;
 mod sleep_assertion_policy_tests;
 mod snapshot_tests;
-mod spawn_gate_sync_tests;
 mod state_bus_tests;
 #[cfg(unix)]
 mod state_listener_tests;
@@ -58,7 +40,6 @@ mod watch_tests;
 mod workspace_menu_tests;
 
 /// 测一个 ACP 会话值：默认 Direct 绑定、无 launch，供各子模块复用。
-/// 从 `acp_tests` 迁出——handoff drill 也要搭 hosted 会话，一份拷贝。
 fn make_acp_session_value(
     id: &str,
     reduced: smelt_core::acp_session::AcpSessionState,
@@ -143,7 +124,6 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
-            cwd: None,
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {

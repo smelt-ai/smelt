@@ -335,7 +335,7 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "进程",
                         "重启",
                         "重启守护进程",
-                        "无缝升级",
+                        "重启以升级",
                         "会话服务",
                         "卡死",
                     ],

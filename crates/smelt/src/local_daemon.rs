@@ -5,7 +5,9 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, TryLockError};
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::TryLockError;
 use std::thread;
 use std::time::Duration;
 
@@ -265,98 +267,8 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     }
 }
 
-/// 守护在跑时只发布新映像并挂上 `smeltd.pending`。启动名留到交接提交之后再拨。
-fn stage_managed_daemon_update(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let dir = managed_daemon_dir();
-    std::fs::create_dir_all(&dir)?;
-    stage_daemon_update_in(&dir, src)
-}
-
-/// `dir` 由调用方给。测试必须用临时目录，不能写真实的 `managed_daemon_path()`。
-fn stage_daemon_update_in(
-    dir: &std::path::Path,
-    src: &std::path::Path,
-) -> std::io::Result<std::path::PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let image = smelt_sys::daemon_image::publish_image(dir, src)?;
-    smelt_sys::daemon_image::retarget_pending_symlink(dir, &image)?;
-    reap_managed_daemon_images(dir);
-    eprintln!(
-        "[workspace] 已暂存守护更新 {} → {}",
-        src.display(),
-        image.display()
-    );
-    Ok(image)
-}
-
 fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
     smelt_sys::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
-}
-
-fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
-    handoff_daemon_to_managed_once(src)
-}
-
-/// App 安装不能在持有安装锁时无限等 ACP 回合；交给 UI 显示等待状态并在安全边界后重试。
-fn try_handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
-    handoff_daemon_to_managed_once(src)
-}
-
-/// 把正在跑的守护用一次 handoff 迁到 `~/.smelt/bin` 里的一份新映像（会话 PTY 保留）。
-///
-/// 无论现在跑的是不是 managed 路径，都先发布不可变映像再 exec 那份文件。
-/// 启动名要等升级成功才拨；失败时链接保持原样，候选留在 `smeltd.pending`。
-///
-/// 一次尝试：Busy 原样返回，由 GUI 在回合结束后再发一次 upgrade。
-fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
-    let managed = managed_daemon_path();
-    let dir = managed_daemon_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("[workspace] 创建 managed 目录失败：{e}");
-        return UpgradeOutcome::Failed;
-    }
-
-    let image = match smelt_sys::daemon_image::publish_image(&dir, src) {
-        Ok(image) => image,
-        Err(e) => {
-            eprintln!("[workspace] 发布守护映像失败：{e}");
-            reap_managed_daemon_images(&dir);
-            return UpgradeOutcome::Failed;
-        }
-    };
-    if let Err(e) = smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image) {
-        eprintln!("[workspace] 挂上 smeltd.pending 失败：{e}");
-        reap_managed_daemon_images(&dir);
-        return UpgradeOutcome::Failed;
-    }
-
-    let outcome = upgrade_daemon_exe(Some(&image));
-    match outcome {
-        UpgradeOutcome::Upgraded => {
-            if let Err(e) = smelt_sys::daemon_image::retarget_launch_after_commit(&image) {
-                eprintln!(
-                    "[workspace] 完成 managed 安装失败：{e}（目标：{}）",
-                    managed.display()
-                );
-            }
-            reap_managed_daemon_images(&dir);
-            eprintln!("[workspace] 守护已迁入 managed：{}", managed.display());
-            UpgradeOutcome::Upgraded
-        }
-        UpgradeOutcome::Busy => {
-            reap_managed_daemon_images(&dir);
-            UpgradeOutcome::Busy
-        }
-        other => {
-            // 失败时启动名不动。候选留在 pending，下次再 exec 同一份映像。
-            reap_managed_daemon_images(&dir);
-            eprintln!(
-                "[workspace] handoff 到 managed 失败（{other:?}），候选：{}",
-                image.display()
-            );
-            other
-        }
-    }
 }
 
 /// 多 pane 同时 connect 时串行化迁移，避免并发 upgrade 踩踏。
@@ -458,9 +370,14 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             Ok(managed_daemon_path())
         }
         DaemonProbe::Unresponsive => {
-            // 连得上但无 version：进程可能还活着，只 stage 下一份，不覆盖正在跑的文件。
-            let _ = stage_managed_daemon_update(&bundled);
-            Ok(managed_daemon_path())
+            // 套接字还在，但读不出 version。先停掉旧进程，再装上 App 里的映像并拉起。
+            restart_daemon();
+            install_managed_daemon_from(&bundled)?;
+            let path = managed_daemon_path();
+            spawn_managed_daemon_and_connect(path.clone()).map_err(|error| {
+                std::io::Error::other(format!("旧守护无响应，重启后仍未就绪：{error}"))
+            })?;
+            Ok(path)
         }
         DaemonProbe::Running {
             exe_mtime: _,
@@ -474,29 +391,21 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             let inside_app = exe_path
                 .as_ref()
                 .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
-                .unwrap_or(!on_managed); // 老守护无 exe：若已在 managed 目录则别瞎迁
-            // 路径不对（仍在 .app / 非 managed）→ 必须迁。
-            // 二进制升级：仅当「跑的比 App 旧」且**文件内容实质不同**——
-            // 禁止仅因 cp 造成 mtime+1s 就 handoff（会清空 Term → 对话像被重初始化）。
+                .unwrap_or(!on_managed);
             let content_differs = !managed.is_file() || !same_daemon_binary(&managed, &bundled);
-            let must_relocate = inside_app || !on_managed;
-            if must_relocate {
-                // **安全关键**：守护还住在 .app 里 / 不在 managed 目录，随时可能被
-                // Finder 拖 DMG 覆盖 App 时误杀，必须立即迁出——这条不能等空闲。
+            if inside_app || !on_managed || content_differs {
                 eprintln!(
-                    "[workspace] 迁移守护 → managed（inside_app={inside_app} on_managed={on_managed} exe={exe_path:?}）"
+                    "[workspace] 重启守护到 App 内映像（inside_app={inside_app} on_managed={on_managed} content_differs={content_differs} exe={exe_path:?}）"
                 );
-                let outcome = handoff_daemon_to_managed(&bundled);
-                if !matches!(outcome, UpgradeOutcome::Upgraded) {
-                    let _ = stage_managed_daemon_update(&bundled);
+                match upgrade_daemon_exe(Some(&bundled)) {
+                    UpgradeOutcome::Upgraded => Ok(managed_daemon_path()),
+                    _ => Err(std::io::Error::other(
+                        "未能停掉旧守护并换上与 App 一致的映像",
+                    )),
                 }
-            } else if content_differs {
-                // 守护已在 managed（含版本旧）：只发布新映像并挂 pending，**不拨
-                // 启动名，也不 exec**。连接路径偷偷换代正是「用着用着终端全卡」的
-                // 根源。真正的换代交给 GUI 空闲升级或用户手动点升级。
-                let _ = stage_managed_daemon_update(&bundled);
+            } else {
+                Ok(managed_daemon_path())
             }
-            Ok(managed_daemon_path())
         }
     }
 }
@@ -555,7 +464,8 @@ fn migrate_running_daemon_off_app(managed: &std::path::Path) -> UpgradeOutcome {
             if on_managed && !inside_app {
                 return UpgradeOutcome::Upgraded;
             }
-            handoff_daemon_to_managed(managed)
+            // 停掉正在跑的守护，换成 `~/.smelt/bin` 里的这份映像，再拉起同版本新进程。
+            upgrade_daemon_exe(Some(managed))
         }
         DaemonProbe::NotRunning | DaemonProbe::Unresponsive => UpgradeOutcome::Failed,
     }
@@ -570,8 +480,6 @@ static CONNECT_MANAGED_ENSURED: AtomicBool = AtomicBool::new(false);
 ///
 /// **这里绝不删 sock 文件。**（僵尸 sock 由 smeltd bind 方清理，见 smeltd。）
 pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
-    let path = sock_path();
-
     // 已有守护：进程内只 ensure 一次。
     if local_runtime().connect().is_ok() {
         if !CONNECT_MANAGED_ENSURED.load(Ordering::Relaxed) {
@@ -607,9 +515,16 @@ pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
         }
     };
 
-    // 二次确认：若 sock 已因 handoff 起来，直接连
-    if let Ok(s) = local_runtime().connect() {
-        return Ok(s);
+    spawn_managed_daemon_and_connect(daemon)
+}
+
+/// 拉起 `daemon` 并等到套接字可连。已经在听就直接返回。
+///
+/// 不经过 `ensure_managed_daemon_current`：调用方可能正握着安装锁。
+fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Result<RuntimeStream> {
+    let path = sock_path();
+    if let Ok(stream) = local_runtime().connect() {
+        return Ok(stream);
     }
 
     let spawn_err: Option<String> = {
@@ -642,13 +557,20 @@ pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
             cmd.env("SMELTD_DAEMON_FINGERPRINT", fingerprint);
         }
         match smelt_sys::process::spawn_detached(&mut cmd) {
-            Ok(child) => {
+            Ok(mut child) => {
                 eprintln!(
                     "[workspace] 已拉起 smeltd pid={} ({}) menubar={}",
                     child.id(),
                     spawn_at.display(),
                     in_app_bundle
                 );
+                // 守护是本进程的直接子进程。没人 wait，它退出后会留成僵尸，按 pid 看存活
+                // 会一直以为它还在：停机要白等到强杀，强杀之后还以为没杀掉。
+                let _ = thread::Builder::new()
+                    .name("smeltd-reaper".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
                 None
             }
             Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", spawn_at.display())),
@@ -871,33 +793,12 @@ fn is_successor_daemon(before: Option<&DaemonInfo>, now: Option<&DaemonInfo>) ->
     )
 }
 
-/// 旧守护写完升级回执就会退出，并关掉这条连接。
-/// 读到 EOF、对端重置，都是它已经走了。到 `timeout` 还没关，返回 false。
-fn read_until_peer_closes(reader: &mut BufReader<RuntimeStream>, timeout: Duration) -> bool {
-    let _ = reader.get_ref().set_read_timeout(Some(timeout));
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(_) => true,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::TimedOut
-                || error.kind() == std::io::ErrorKind::WouldBlock =>
-        {
-            false
-        }
-        Err(_) => true,
-    }
-}
-
-/// 无缝升级的结果。
+/// 把守护换到另一份映像之后的结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpgradeOutcome {
-    /// 交接完成，会话全部保留；或守护本来没跑、直接拉起了最新版。
+    /// 新进程已经起来，或者本来没跑、直接拉起了目标映像。
     Upgraded,
-    /// 正在跑的守护太旧，不认识 "upgrade" op（静默断连），只能走硬重启。
-    Unsupported,
-    /// ACP 仍有未完成 RPC；守护未执行 exec，现有连接完全未受影响。
-    Busy,
-    /// 守护接了单但升级没生效（exec 失败等），版本还是旧的。
+    /// 映像没发布成功，或者新进程没有接替旧进程。
     Failed,
 }
 
@@ -905,96 +806,96 @@ pub enum UpgradeOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppInstallOutcome {
     Installed,
-    /// 当前 ACP 回合或另一条 handoff 正在占用安全边界；App 包尚未替换。
-    WaitingForSafeHandoff,
+    /// 另一条安装正占着安装锁；App 包尚未替换。
+    WaitingForInstallLock,
 }
 
-/// 无缝升级守护：发 "upgrade" op，守护 exec 磁盘上的新二进制、PTY fd 原地交接，
-/// **所有会话不中断**（协议与流程见 smeltd 升级设计）。调用方在成功后应对每个
-/// 终端调 reconnect()——会话 id 都还在，走的是正常 reattach + 重放恢复。
-///
-/// `read_line` 前设了读超时：守护万一卡住（比如某个 out 锁被冻结客户端占住），不能
-/// 让这次调用永久挂起——上层 `daemon_upgrading` 标志会跟着卡死，整个功能失效。
+/// 停掉本机守护并拉起受管目录里的目标映像。进行中的回合会中断，历史还在。
 pub fn upgrade_daemon() -> UpgradeOutcome {
     upgrade_daemon_exe(pending_upgrade_exe().as_deref())
 }
 
-/// 无缝升级守护。`new_exe` 为 `Some` 时让守护 **exec 指定路径**（装 DMG：先 exec
-/// 暂存包里的 smeltd，会话不丢，再替换 .app）；`None` 则 exec `current_exe`。
+/// 发布 `new_exe`（或待装映像）到 `~/.smelt/bin`，拨好启动名，停掉旧进程再拉起。
+///
+/// 不向旧守护发 `upgrade`。旧进程可能还是会做 fd 交接的版本，桌面必须自己停掉它。
+/// `new_exe` 为 `None` 时用 `smeltd.pending`，没有就用 App 里的那份。
 pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
-    let predecessor = daemon_info();
-    let Ok(mut s) = local_runtime().connect() else {
-        // 守护没跑：拉起磁盘上最新的等于升级完成，但要探测确认它真的起来了再报
-        // 成功——ensure_daemon_running 的失败是静默的，不确认就报 Upgraded 会让
-        // UI 显示"已升级"而守护其实没起来。
-        ensure_daemon_running();
-        return if matches!(probe_daemon(), DaemonProbe::Running { .. }) {
-            UpgradeOutcome::Upgraded
-        } else {
-            UpgradeOutcome::Failed
-        };
-    };
-    let msg = match new_exe {
-        Some(p) => serde_json::json!({
-            "op": DaemonOperation::Upgrade,
-            "exe": p.to_string_lossy()
-        }),
-        None => serde_json::json!({ "op": DaemonOperation::Upgrade }),
-    };
-    if writeln!(s, "{msg}").is_err() {
-        return UpgradeOutcome::Failed;
-    }
-    // 守护 upgrade 在回 ok 前要逐会话拿 out 锁；每个冻结 client 最多卡
-    // CLIENT_WRITE_TIMEOUT(3s)。会话多时 5s 不够——会误报 Failed 而守护稍后仍 exec。
-    let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
-    // 三种读结果分开判断，不能混为一谈：
-    // - Ok(0)（EOF，没读到任何字节）＝老守护完全不认识这个 op，直接断连 → Unsupported；
-    // - Err（超时/IO 错误）＝守护接了但迟迟不回（可能卡住），不代表版本问题 → Failed；
-    // - Ok(n>0) 但解析不出 JSON，或解析出来 ok!=true（比如 current_exe/写交接文件
-    //   失败的显式回执）＝守护是新版本、只是这次没成功，同样是 Failed，不能引导
-    //   用户去做「版本过旧只能硬重启」这种更破坏性的操作。
-    let mut resp = String::new();
-    let mut reader = BufReader::new(s);
-    match reader.read_line(&mut resp) {
-        Ok(0) => return UpgradeOutcome::Unsupported,
-        Ok(_) => {}
-        Err(_) => return UpgradeOutcome::Failed,
-    }
-    let parsed = serde_json::from_str::<serde_json::Value>(resp.trim()).ok();
-    if parsed
-        .as_ref()
-        .is_some_and(|v| v["busy"].as_bool() == Some(true))
-    {
-        return UpgradeOutcome::Busy;
-    }
-    let acked = parsed.is_some_and(|v| v["ok"].as_bool() == Some(true));
-    if !acked {
-        return UpgradeOutcome::Failed;
-    }
-    // 回执已经到手。接班进程在 COMMIT 前就拿着监听 fd，旧进程退出时关掉这条连接。
-    // 等到那个 EOF 再问一次版本，pid 就是新的。中间不再隔几十毫秒连一次。
-    if !read_until_peer_closes(&mut reader, Duration::from_secs(10)) {
-        return UpgradeOutcome::Failed;
-    }
-    // Windows 没有 fd 交接：旧进程退出后，它拉起的接班进程才绑定监听。这里等接班进程
-    // 起来，不自己拉。自己拉会和接班进程抢监听，抢到的是启动名指着的旧映像。
-    #[cfg(windows)]
-    {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            if is_successor_daemon(predecessor.as_ref(), daemon_info().as_ref()) {
-                return UpgradeOutcome::Upgraded;
-            }
-            std::thread::sleep(Duration::from_millis(200));
+    let image = match resolve_restart_image(new_exe) {
+        Ok(image) => image,
+        Err(error) => {
+            eprintln!("[workspace] 准备守护映像失败：{error}");
+            return UpgradeOutcome::Failed;
         }
+    };
+    if let Err(error) = smelt_sys::daemon_image::retarget_launch_after_commit(&image) {
+        eprintln!("[workspace] 设置启动名失败：{error}");
         return UpgradeOutcome::Failed;
     }
-    #[cfg(unix)]
-    if is_successor_daemon(predecessor.as_ref(), daemon_info().as_ref()) {
+    let before = daemon_info();
+    let was_up = !matches!(probe_daemon(), DaemonProbe::NotRunning);
+    if was_up {
+        restart_daemon();
+    }
+    if local_runtime()
+        .connect_with_timeout(Duration::from_millis(200))
+        .is_err()
+    {
+        if let Err(error) = spawn_managed_daemon_and_connect(managed_daemon_path()) {
+            eprintln!("[workspace] 拉起新守护失败：{error}");
+            return UpgradeOutcome::Failed;
+        }
+    }
+    let running = matches!(probe_daemon(), DaemonProbe::Running { .. });
+    let replaced = !was_up || is_successor_daemon(before.as_ref(), daemon_info().as_ref());
+    if running && replaced {
+        reap_managed_daemon_images(&managed_daemon_dir());
         UpgradeOutcome::Upgraded
     } else {
+        eprintln!("[workspace] 守护没有换成新映像（was_up={was_up}）");
         UpgradeOutcome::Failed
     }
+}
+
+/// 目标已经是受管目录里的不可变映像时直接用它，否则发布一份进去。
+/// 启动名不能指向 `.app` 里面的文件。
+fn resolve_restart_image(new_exe: Option<&std::path::Path>) -> std::io::Result<std::path::PathBuf> {
+    let dir = managed_daemon_dir();
+    std::fs::create_dir_all(&dir)?;
+    let src = match new_exe {
+        Some(path) if path.is_file() => path.to_path_buf(),
+        Some(path) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("映像不存在：{}", path.display()),
+            ));
+        }
+        None => pending_upgrade_exe()
+            .filter(|path| path.is_file())
+            .or_else(bundled_daemon_path)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "没有可切换的 smeltd 映像")
+            })?,
+    };
+    if image_already_in_managed_dir(&src, &dir) {
+        return Ok(std::fs::canonicalize(&src).unwrap_or(src));
+    }
+    smelt_sys::daemon_image::publish_image(&dir, &src)
+}
+
+fn image_already_in_managed_dir(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !smelt_sys::daemon_image::is_immutable_image_name(name) {
+        return false;
+    }
+    let Ok(canon) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(dir) = dir.canonicalize() else {
+        return false;
+    };
+    canon.parent() == Some(dir.as_path())
 }
 
 /// 候选 `.app` 安装的公共前半段：取出候选包里的守护程序，再交到 `~/.smelt/bin`。
@@ -1006,46 +907,16 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
     }
     // smelt-pi 和守护分开发布。安装会当场交接守护，交接上来的新守护起 Pi 时链接必须已经
     // 就位；发布不上就不换 App。
-    let pi_bundle = candidate_app.join("Contents").join(smelt_sys::pi_image::APP_BUNDLE_DIR);
+    let pi_bundle = candidate_app
+        .join("Contents")
+        .join(smelt_sys::pi_image::APP_BUNDLE_DIR);
     smelt_sys::pi_image::publish(&managed_daemon_dir(), &pi_bundle)
         .map_err(|error| anyhow::anyhow!("发布 smelt-pi 失败：{error}"))?;
     Ok(daemon)
 }
 
-/// 安装时对运行中守护的处置决策。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(unix)]
-enum InstallCommitAction {
-    /// 守护已在 managed 路径：只发布新映像并挂 pending，不拨启动名，不 handoff。
-    /// 版本升级交给空闲无缝升级；安装永不因此阻塞。
-    StageDiskOnly,
-    /// 守护仍在 .app 里（或路径未知）：必须 handoff 迁出，否则换 App 会 SIGKILL 它。
-    RelocateHandoff,
-}
-
-/// 安装处置决策（纯函数，可单测）：managed 不变量已成立就只 stage 磁盘。
-///
-/// 历史上这里无条件 handoff，把"换 App"和"换守护版本"绑成一次原子事务——
-/// ACP 忙就 exit 75 半安装（映射写了、App 没换）。解耦后安装只保证 managed
-/// 不变量；版本升级由空闲无缝升级接管（restore 后检查 + 60s watch + 回合结束
-/// flush），skew 窗口的新 GUI + 老守护由启动路径的 op 容忍覆盖。
-#[cfg(unix)]
-fn install_commit_action_for_running_daemon(
-    exe_path: Option<&std::path::Path>,
-) -> InstallCommitAction {
-    let managed = exe_path.map(exe_is_managed).unwrap_or(false);
-    // 老守护无 exe 字段：无法证明已迁出，保守迁出（一次性迁移，此后永久跳过）。
-    let inside_app = exe_path.map(path_inside_app_bundle).unwrap_or(true);
-    if managed && !inside_app {
-        InstallCommitAction::StageDiskOnly
-    } else {
-        InstallCommitAction::RelocateHandoff
-    }
-}
-
-/// 安装提交：守护没在跑就只落盘 managed；在跑且已在 managed 路径同样只 stage
-/// 磁盘（版本升级交给空闲无缝升级，安装不等 ACP）；只在守护仍住在 .app 里时
-/// 才强制 handoff 迁出——此时 ACP 忙仍返回 WaitingForSafeHandoff、不替换 App。
+/// 安装提交：没在跑就只落盘；无响应先杀掉再装；在跑则停掉旧进程并换上候选映像。
+/// 安装锁被占用时由调用方返回 `WaitingForInstallLock`，这里不再因会话忙碌推迟。
 #[cfg(unix)]
 fn commit_candidate_daemon(
     candidate_smeltd: &std::path::Path,
@@ -1058,30 +929,22 @@ fn commit_candidate_daemon(
         return Ok(AppInstallOutcome::Installed);
     }
     match probe {
-        DaemonProbe::NotRunning | DaemonProbe::Unresponsive => {
-            stage_managed_daemon_update(candidate_smeltd)?;
+        DaemonProbe::NotRunning => {
+            install_managed_daemon_from(candidate_smeltd)?;
             Ok(AppInstallOutcome::Installed)
         }
-        DaemonProbe::Running { exe_path, .. } => {
-            let exe = exe_path.as_deref().map(std::path::Path::new);
-            match install_commit_action_for_running_daemon(exe) {
-                InstallCommitAction::StageDiskOnly => {
-                    stage_managed_daemon_update(candidate_smeltd)?;
-                    Ok(AppInstallOutcome::Installed)
-                }
-                InstallCommitAction::RelocateHandoff => {
-                    match try_handoff_daemon_to_managed(candidate_smeltd) {
-                        UpgradeOutcome::Upgraded => Ok(AppInstallOutcome::Installed),
-                        UpgradeOutcome::Busy => Ok(AppInstallOutcome::WaitingForSafeHandoff),
-                        UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
-                            anyhow::bail!(
-                                "装包前 handoff→managed 未成功，已停止替换 App 以保护现有会话"
-                            )
-                        }
-                    }
-                }
-            }
+        DaemonProbe::Unresponsive => {
+            restart_daemon();
+            install_managed_daemon_from(candidate_smeltd)?;
+            spawn_managed_daemon_and_connect(managed_daemon_path())
+                .map_err(|error| anyhow::anyhow!("旧守护无响应，重启后仍未就绪：{error}"))?;
+            Ok(AppInstallOutcome::Installed)
         }
+        // 守护住在哪都一样：停掉旧进程，换上候选映像，再拉起。
+        DaemonProbe::Running { .. } => match upgrade_daemon_exe(Some(candidate_smeltd)) {
+            UpgradeOutcome::Upgraded => Ok(AppInstallOutcome::Installed),
+            UpgradeOutcome::Failed => anyhow::bail!("装包前未能停掉旧守护并换上新映像"),
+        },
     }
 }
 
@@ -1101,11 +964,11 @@ pub fn install_local_app_bundle(
 ) -> anyhow::Result<AppInstallOutcome> {
     let _gate = match MANAGED_DAEMON_GATE.try_lock() {
         Ok(gate) => gate,
-        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForSafeHandoff),
+        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForInstallLock),
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
     };
     let Some(_file_gate) = try_acquire_managed_daemon_file_lock()? else {
-        return Ok(AppInstallOutcome::WaitingForSafeHandoff);
+        return Ok(AppInstallOutcome::WaitingForInstallLock);
     };
 
     match prepare_and_commit_candidate_app(source)? {
@@ -1142,58 +1005,15 @@ where
         .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Smelt.app"));
     match install_local_app_bundle(&source, &target) {
         Ok(AppInstallOutcome::Installed) => {
-            let dir = managed_daemon_dir();
-            if let Some(pending) = smelt_sys::daemon_image::pending_image(&dir) {
-                match upgrade_daemon_exe(Some(&pending)) {
-                    UpgradeOutcome::Upgraded => {
-                        if let Err(error) =
-                            smelt_sys::daemon_image::retarget_launch_after_commit(&pending)
-                        {
-                            eprintln!("[workspace] 升级后改写启动名失败：{error}");
-                        }
-                        eprintln!("✅ 守护进程已无缝升级到最新版本");
-                    }
-                    UpgradeOutcome::Busy => {
-                        eprintln!("⏸ 守护进程忙碌中，新版本已暂存，将在空闲时自升级");
-                    }
-                    UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
-                        eprintln!("ℹ️ 守护进程无需或无法直接无缝升级（已暂存，下次启动生效）");
-                    }
-                }
-            } else if let DaemonProbe::Running { exe_path, .. } = probe_daemon_detail()
-                && let Ok(image) = std::fs::canonicalize(managed_daemon_path())
-            {
-                let already = exe_path
-                    .as_deref()
-                    .is_some_and(|exe| same_daemon_path(std::path::Path::new(exe), &image));
-                if !already {
-                    match upgrade_daemon_exe(Some(&image)) {
-                        UpgradeOutcome::Upgraded => {
-                            if let Err(error) =
-                                smelt_sys::daemon_image::retarget_launch_after_commit(&image)
-                            {
-                                eprintln!("[workspace] 升级后改写启动名失败：{error}");
-                            }
-                            eprintln!("✅ 守护进程已无缝升级到最新版本");
-                        }
-                        UpgradeOutcome::Busy => {
-                            eprintln!("⏸ 守护进程忙碌中，新版本已暂存，将在空闲时自升级");
-                        }
-                        UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {}
-                    }
-                }
-            }
-            reap_managed_daemon_images(&dir);
+            reap_managed_daemon_images(&managed_daemon_dir());
             eprintln!(
-                "✅ 已安装 {}（守护交接与插件映射与在线更新相同）",
+                "✅ 已安装 {}。守护已换成同一版本；进行中的回合已中断，历史记录还在。",
                 target.display()
             );
             Some(0)
         }
-        Ok(AppInstallOutcome::WaitingForSafeHandoff) => {
-            eprintln!(
-                "⏸ ACP 会话仍在运行，未替换 App（与在线更新一致）。回合结束后再 make install。"
-            );
+        Ok(AppInstallOutcome::WaitingForInstallLock) => {
+            eprintln!("⏸ 另一条安装正在进行，未替换 App。等它结束后再 make install。");
             Some(75)
         }
         Err(error) => {
@@ -1265,75 +1085,22 @@ fn sync_managed_helpers_from_app(app: &std::path::Path) -> std::io::Result<()> {
 /// 监听 socket 的进程直接 SIGKILL，这条路径不依赖守护认不认识任何协议。
 pub fn restart_daemon() {
     let path = sock_path();
-    let daemon_pid = daemon_pid_with_timeout();
     // 硬重启后必须重新验证托管文件；此前的成功缓存不能跨 daemon 生命周期。
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
-    // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
-    if let Ok(mut s) = local_runtime().connect_with_timeout(Duration::from_secs(2)) {
-        let _ = writeln!(
-            s,
-            "{}",
-            serde_json::json!({ "op": DaemonOperation::Shutdown })
-        );
-        let mut resp = String::new();
-        let _ = BufReader::new(s).read_line(&mut resp);
+    let stopped = smelt_client::daemon_stop::stop_local_daemon();
+    // 老守护的 version 响应没有 pid，停不停得掉只能看 socket。Unix 用 lsof 按 sock 反查。
+    // Windows 没有这条路：只删残留 sock，等下次拉起。
+    #[cfg(unix)]
+    if !stopped && local_runtime().connect().is_ok() {
+        force_kill_socket_owner(&path);
     }
-    // 等守护退出（最多 ~1s）；socket 仍能连上再强杀，**不要**提前 return 漏掉残留 sock。
-    for _ in 0..10 {
-        if local_runtime().connect().is_err() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    // shutdown 会先回包再清理 sidecar；若清理卡住，另一个启动者可能已经删掉
-    // socket 目录项，此时 lsof(path) 再也找不到旧守护。按重启前记录的 PID 兜底。
-    if let Some(pid) = daemon_pid {
-        if process_is_alive(pid) {
-            let _ = smelt_sys::process::signal_tree(pid, smelt_sys::process::TreeSignal::Kill);
-            let _ = smelt_sys::process::terminate_pid(pid);
-            for _ in 0..10 {
-                if !process_is_alive(pid) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-    } else if local_runtime().connect().is_ok() {
-        // 老守护的 version 响应没有 pid。Unix 用 lsof 按 sock 反查。
-        // Windows 没有这条路：没有 pid 就只删残留 sock，等下次拉起。
-        #[cfg(unix)]
-        {
-            force_kill_socket_owner(&path);
-            thread::sleep(Duration::from_millis(150));
-        }
-    }
+    #[cfg(not(unix))]
+    let _ = stopped;
     // 残留 sock 文件会让下一次 connect 误判/卡住；尽量清掉。
     if local_runtime().connect().is_err() {
         let _ = std::fs::remove_file(&path);
     }
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
-}
-
-fn daemon_pid_with_timeout() -> Option<u32> {
-    let mut s = local_runtime()
-        .connect_with_timeout(Duration::from_millis(500))
-        .ok()?;
-    writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::Version })
-    )
-    .ok()?;
-    let mut resp = String::new();
-    BufReader::new(s).read_line(&mut resp).ok()?;
-    let value: serde_json::Value = serde_json::from_str(resp.trim()).ok()?;
-    value["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-}
-
-fn process_is_alive(pid: u32) -> bool {
-    smelt_sys::process::pid_is_alive(pid)
 }
 
 /// 兜底：找到正监听着 `path` 的进程并 SIGKILL，再清掉残留 socket 文件。用于优雅
@@ -1404,61 +1171,11 @@ mod successor_daemon_tests {
         assert!(!is_successor_daemon(Some(&old), None));
         assert!(is_successor_daemon(None, Some(&old)));
     }
-
-    #[test]
-    fn peer_close_is_observed_before_the_deadline() {
-        let (ours, theirs) = RuntimeStream::pair().expect("socketpair");
-        let mut reader = BufReader::new(ours);
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(200));
-            drop(theirs);
-        });
-        let started = Instant::now();
-        assert!(read_until_peer_closes(&mut reader, Duration::from_secs(5)));
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "对端关掉连接后应马上返回，实际 {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[test]
-    fn open_peer_waits_out_the_deadline() {
-        let (ours, theirs) = RuntimeStream::pair().expect("socketpair");
-        let mut reader = BufReader::new(ours);
-        let started = Instant::now();
-        assert!(!read_until_peer_closes(
-            &mut reader,
-            Duration::from_millis(200)
-        ));
-        let elapsed = started.elapsed();
-        assert!(elapsed >= Duration::from_millis(150), "实际 {elapsed:?}");
-        assert!(elapsed < Duration::from_secs(2), "实际 {elapsed:?}");
-        drop(theirs);
-    }
 }
 
 #[cfg(all(test, unix))]
 mod install_commit_tests {
     use super::*;
-
-    /// 核心回归：守护已在 managed 路径时安装只发布新映像，不 handoff——
-    /// 此前无条件 handoff，ACP 忙就 exit 75 半安装（映射写了、App 没换）。
-    #[test]
-    fn managed_daemon_stages_disk_only() {
-        let managed = managed_daemon_path();
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(&managed)),
-            InstallCommitAction::StageDiskOnly
-        );
-        // 不可变映像仍在 managed 目录内：同样不得在安装时 handoff。
-        let staged = managed_daemon_dir()
-            .join("smeltd-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(&staged)),
-            InstallCommitAction::StageDiskOnly
-        );
-    }
 
     #[test]
     fn only_a_down_and_unmapped_daemon_may_be_replaced() {
@@ -1498,63 +1215,6 @@ mod install_commit_tests {
             "没人映射的文件必须允许替换"
         );
         std::fs::remove_file(fresh).unwrap();
-    }
-
-    /// 守护仍住在 .app 里：必须 handoff 迁出，否则换 App 会被 SIGKILL。
-    #[test]
-    fn app_resident_daemon_must_relocate() {
-        let in_app = std::path::PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smeltd");
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(&in_app)),
-            InstallCommitAction::RelocateHandoff
-        );
-        // 非 managed 的其它路径同样迁出。
-        let elsewhere = std::path::PathBuf::from("/tmp/smeltd");
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(&elsewhere)),
-            InstallCommitAction::RelocateHandoff
-        );
-    }
-
-    /// 老守护无 exe 字段：无法证明已迁出，保守迁出（一次性，此后永久跳过）。
-    #[test]
-    fn unknown_exe_relocates_conservatively() {
-        assert_eq!(
-            install_commit_action_for_running_daemon(None),
-            InstallCommitAction::RelocateHandoff
-        );
-    }
-
-    #[test]
-    fn staging_an_update_does_not_replace_the_live_launch_file() {
-        use std::os::unix::fs::MetadataExt;
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-stage-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let launch = dir.join("smeltd");
-        std::fs::write(&launch, b"running-image").unwrap();
-        let launch_inode = std::fs::metadata(&launch).unwrap().ino();
-        let src = dir.join("src");
-        std::fs::write(&src, b"pending-image").unwrap();
-
-        let dest = stage_daemon_update_in(&dir, &src).unwrap();
-        assert_eq!(std::fs::read(&launch).unwrap(), b"running-image");
-        assert_eq!(std::fs::metadata(&launch).unwrap().ino(), launch_inode);
-        assert_eq!(std::fs::read(&dest).unwrap(), b"pending-image");
-        assert_eq!(
-            smelt_sys::daemon_image::pending_image(&dir).as_deref(),
-            Some(std::fs::canonicalize(&dest).unwrap().as_path()),
-            "空闲升级必须 exec 新映像，不能再 exec 正在跑的旧文件"
-        );
-
-        let image_inode = std::fs::metadata(&dest).unwrap().ino();
-        let again = stage_daemon_update_in(&dir, &src).unwrap();
-        assert_eq!(again, dest);
-        assert_eq!(std::fs::metadata(&again).unwrap().ino(), image_inode);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

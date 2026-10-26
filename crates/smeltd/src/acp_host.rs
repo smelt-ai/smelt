@@ -900,6 +900,7 @@ pub(crate) fn full_frame(frame: &serde_json::Value) -> (Vec<u8>, FrameMirror) {
 
 type SnapshotDetach = Arc<dyn Fn(ConnId) + Send + Sync>;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_acp_snapshot_link<C: ClientSocket>(
     stream: C,
     initial: Vec<u8>,
@@ -3874,7 +3875,7 @@ fn write_rejected_acp_snapshot<C: ClientSocket>(mut conn: C, reason: &str) {
 
 /// 父镜像裁过前缀时，向还活着的宿主要回全文，供下一次 `to_snapshot` 当种子。
 /// 要不到就留下当前这一截。种子仍带着绝对下标，新宿主重放会话文件前不会把历史长度缩短。
-fn reassemble_hosted_transcript(sess: &AcpSession) {
+pub(crate) fn reassemble_hosted_transcript(sess: &AcpSession) {
     let trimmed = sess.reduced.lock().unwrap().entries_base() > 0;
     if !trimmed {
         return;
@@ -3900,6 +3901,12 @@ fn reassemble_hosted_transcript(sess: &AcpSession) {
             eprintln!("[acp] 重启前读不回宿主全文：{error}");
         }
     }
+}
+
+/// 停机前把没写完的回合收成中断。
+pub(crate) fn settle_acp_session_for_shutdown(sess: &AcpSession) {
+    let mut reduced = sess.reduced.lock().unwrap();
+    smelt_core::acp_session::interrupt_open_turn(&mut reduced);
 }
 
 /// Ensure an ACP runtime exists without attaching a controlling client. Both desktop
@@ -4746,235 +4753,6 @@ pub(crate) fn relaunch_recorded_acp_runtime(
     Ok(())
 }
 
-fn recorded_handoff_launch(sess: &AcpSession) -> smelt_core::agent_kind::ConversationLaunchSpec {
-    sess.launch_spec.lock().unwrap().clone().unwrap_or_else(|| {
-        smelt_core::agent_kind::ConversationLaunchSpec::from_command(
-            sess.state
-                .lock()
-                .unwrap()
-                .launch
-                .clone()
-                .unwrap_or_default(),
-        )
-    })
-}
-
-/// 交接不带走已提交的消息正文。那些在 agent 自己的会话文件里，新进程重读。
-/// 这里只留相位、身份，以及还没写完的这一轮。
-fn conversation_snapshot_for_handoff(
-    reduced: &smelt_core::acp_session::AcpSessionState,
-) -> smelt_core::acp_session::ConversationSnapshot {
-    let (history_len, end) = reduced.open_turn_range();
-    let mut snapshot = reduced.to_snapshot_range(false, history_len, end);
-    snapshot.entries_offset = 0;
-    snapshot.entries_total = snapshot.entries.len();
-    snapshot.history_omitted = true;
-    snapshot.runtime_debug = None;
-    snapshot.tool_debug = None;
-    snapshot
-}
-
-/// 交接 v2 typed 收集：与旧版同锁、同过滤、同 retire 语义，只换 typed 输出。
-/// 旧 JSON 版已删：v2 写端不再产文件，legacy 文件读端只认旧二进制写的文件。
-/// 交接回滚：[`collect_acp_handoff_typed`] 停下的宿主读端从停手处接着读。
-/// 控制连接全程没动，宿主和镜像都不用重开，界面也就不会重连。
-pub(crate) fn resume_acp_after_handoff_rollback(acp_sessions: &AcpSessions) {
-    for (_, slot) in &acp_sessions.snapshot() {
-        if let Some(host) = slot.value.hosted_handle.lock().unwrap().as_ref() {
-            host.resume_after_handoff_rollback();
-        }
-    }
-}
-
-/// fd 都是收集时 dup 出来的副本（见 [`crate::handoff_v2::predecessor::StagedHandoff`]）：
-/// 原件归会话，交接期间别的线程关会话会关掉它。dup 不出来就说明原件已经关了，这个
-/// 会话不交接，和拿不到 fd 同样处理。
-#[cfg(unix)]
-pub(crate) fn collect_acp_handoff_typed(
-    acp_sessions: &AcpSessions,
-) -> (
-    Vec<crate::handoff_v2::manifest::AcpHandoff>,
-    Vec<(crate::handoff_v2::manifest::FdRole, std::os::fd::OwnedFd)>,
-) {
-    use crate::handoff_v2::manifest::{AcpHandoff, FdRole};
-    use crate::handoff_v2::predecessor::pin_fd;
-    let acp_session_list = acp_sessions.snapshot();
-    let mut acp_items = Vec::new();
-    let mut acp_fds = Vec::new();
-    for (id, slot) in &acp_session_list {
-        let sess = &slot.value;
-        // 先停读端再取 fd。读线程还在跑时把 fd 交出去，两个进程会从一行中间撕开。
-        let host = sess.hosted_handle.lock().unwrap().clone();
-        if let Some(host) = host {
-            let pending_host_bytes = match host.take_for_handoff() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    crate::dlog(&format!("acp 交接停不下宿主读端 {id}：{error}"));
-                    continue;
-                }
-            };
-            let Some(host_fd) = host.control_fd() else {
-                crate::dlog(&format!("acp 交接拿不到宿主控制连接 {id}"));
-                continue;
-            };
-            let host_fd = match pin_fd(host_fd) {
-                Ok(fd) => fd,
-                Err(error) => {
-                    crate::dlog(&format!("acp 交接宿主控制连接已关闭 {id}：{error}"));
-                    continue;
-                }
-            };
-            let host_pid = host.pid();
-            let provider_pid = host.provider_pid();
-            let host_snapshot_revision = sess.host_snapshot_revision.load(Ordering::SeqCst);
-            let launch = recorded_handoff_launch(sess);
-            let agent_token = sess.state.lock().unwrap().agent_token.clone();
-            let mut snapshot = conversation_snapshot_for_handoff(&sess.reduced.lock().unwrap());
-            snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
-            set_conversation_snapshot(sess, &mut snapshot);
-            acp_items.push(AcpHandoff::Hosted {
-                id: id.clone(),
-                host_pid,
-                provider_pid,
-                host_snapshot_revision,
-                cwd: sess.cwd.clone(),
-                launch,
-                agent_token,
-                runtime_spec_fingerprint: sess.runtime_spec_fingerprint.lock().unwrap().clone(),
-                conversation_binding: sess.conversation_binding.lock().unwrap().clone(),
-                snapshot,
-                pending_host_bytes,
-            });
-            acp_fds.push((
-                FdRole::AcpHost {
-                    session_id: id.to_string(),
-                },
-                host_fd,
-            ));
-            continue;
-        }
-        let stdio = sess
-            .handle
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|h| *h.stdio.lock().unwrap());
-        let Some(stdio) = stdio else { continue };
-        let (stdin_fd, stdout_fd) = match (pin_fd(stdio.stdin_fd), pin_fd(stdio.stdout_fd)) {
-            (Ok(stdin_fd), Ok(stdout_fd)) => (stdin_fd, stdout_fd),
-            (Err(error), _) | (_, Err(error)) => {
-                crate::dlog(&format!("acp 交接 provider 管道已关闭 {id}：{error}"));
-                continue;
-            }
-        };
-        let launch = recorded_handoff_launch(sess);
-        let agent_token = sess.state.lock().unwrap().agent_token.clone();
-        let (mut snapshot, pending_raw_line) = {
-            let reduced = sess.reduced.lock().unwrap();
-            (
-                conversation_snapshot_for_handoff(&reduced),
-                reduced.pending_raw_request_line().map(str::to_string),
-            )
-        };
-        set_conversation_snapshot(sess, &mut snapshot);
-        acp_items.push(AcpHandoff::Direct {
-            id: id.to_string(),
-            pid: stdio.pid,
-            cwd: sess.cwd.clone(),
-            launch,
-            agent_token,
-            runtime_spec_fingerprint: sess.runtime_spec_fingerprint.lock().unwrap().clone(),
-            conversation_binding: sess.conversation_binding.lock().unwrap().clone(),
-            snapshot,
-            pending_raw_line,
-        });
-        acp_fds.push((
-            FdRole::AcpStdin {
-                session_id: id.to_string(),
-            },
-            stdin_fd,
-        ));
-        acp_fds.push((
-            FdRole::AcpStdout {
-                session_id: id.to_string(),
-            },
-            stdout_fd,
-        ));
-    }
-
-    let handed_off_ids: std::collections::HashSet<&str> =
-        acp_items.iter().map(|item| item.id()).collect();
-    for (id, slot) in &acp_session_list {
-        if handed_off_ids.contains(id.as_str()) {
-            continue;
-        }
-        let sess = &slot.value;
-        // 这类会话通常还在 runtime 解析、尚无 fd 可交接。必须设置连接级停止
-        // 标记；否则 exec 失败回滚并释放 spawn gate 后，旧线程会迟到 spawn。
-        if !retire_acp_runtime(sess) {
-            eprintln!("[acp] upgrade 淘汰未交接会话 {id} 时未能证明 provider 已退出");
-        }
-    }
-
-    (acp_items, acp_fds)
-}
-
-pub(crate) fn acp_upgrade_blockers(acp_sessions: &AcpSessions) -> Vec<String> {
-    use smelt_core::daemon_state::DaemonPhase;
-
-    acp_sessions
-        .snapshot()
-        .into_iter()
-        .filter_map(|(id, slot)| {
-            // hosted 与 direct 共用同一回合门槛。独立宿主让 mid-turn handoff 可恢复，
-            // 但恢复能力不能成为正常升级主动打断活跃回合的理由。
-            let (phase_blocks, has_unfinished_tool) = {
-                let reduced = slot.value.reduced.lock().unwrap();
-                // `phase` alone is not a reliable liveness signal.  A late event or an
-                // old handoff can leave `Running` behind after the turn start timestamp
-                // has already been cleared.  Such a session is safe to hand off; the
-                // snapshot restore path will normalize any remaining dangling tools.
-                let phase_blocks = match reduced.phase {
-                    // Connecting 不是回合：握手卡住不能把升级永久拦住。
-                    DaemonPhase::Connecting => false,
-                    DaemonPhase::Thinking | DaemonPhase::ExecutingTool => {
-                        reduced.turn_started_at_ms.is_some()
-                    }
-                    DaemonPhase::AwaitingApproval | DaemonPhase::WaitingForUser => {
-                        reduced.turn_started_at_ms.is_some()
-                            || !reduced.permissions.is_empty()
-                            || reduced.elicitation.is_some()
-                    }
-                    DaemonPhase::Idle
-                    | DaemonPhase::Dead
-                    | DaemonPhase::Succeeded
-                    | DaemonPhase::Failed => false,
-                };
-                let idle_without_active_turn = matches!(reduced.phase, DaemonPhase::Idle)
-                    && reduced.turn_started_at_ms.is_none()
-                    && reduced.permissions.is_empty()
-                    && reduced.elicitation.is_none();
-                let has_unfinished_tool = !reduced.replaying_history
-                    && !idle_without_active_turn
-                    && smelt_core::acp_chat::has_unfinished_tool_call(reduced.entries());
-                (phase_blocks, has_unfinished_tool)
-            };
-            let in_flight = slot
-                .value
-                .handle
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|handle| handle.in_flight_rpc.load(Ordering::SeqCst) != 0);
-            // 快照只带 `pending_prompts` 的展示投影，附图和投递 id 不随交接；只要
-            // daemon 还握着回合闸门，交接就必须等它先派发/清空队列，不能把用户已经提交的输入丢掉。
-            let prompt_queue_held = slot.value.prompt_in_flight.load(Ordering::SeqCst)
-                || !slot.value.pending_prompts.lock().unwrap().is_empty();
-            (phase_blocks || has_unfinished_tool || in_flight || prompt_queue_held).then_some(id)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod snapshot_batch_tests {
     use super::coalesce_snapshot_offset;
@@ -5003,31 +4781,6 @@ mod snapshot_link_tests {
     use std::io::Read;
     /// 历史重放会在写线程还堵在 socket 上时连续 mark。旧邮箱把这些快照排成字节
     /// 队列，超限就摘连接；现在必须还连着，并且只序列化一份覆盖全部 mark 的快照。
-    #[test]
-    fn direct_handoff_snapshot_omits_committed_history() {
-        let mut state = smelt_core::acp_session::AcpSessionState::default();
-        state.phase = smelt_core::daemon_state::DaemonPhase::Idle;
-        *state.entries_mut() = vec![smelt_core::acp_chat::AcpEntry::User("以前".into())];
-        let snapshot = conversation_snapshot_for_handoff(&state);
-        assert!(
-            snapshot.entries.is_empty(),
-            "空闲会话的已提交消息不能进交接文件"
-        );
-
-        state.phase = smelt_core::daemon_state::DaemonPhase::Thinking;
-        state.turn_started_at_ms = Some(1);
-        state
-            .entries_mut()
-            .push(smelt_core::acp_chat::AcpEntry::User("现在".into()));
-        let snapshot = conversation_snapshot_for_handoff(&state);
-        assert!(snapshot.history_omitted);
-        assert_eq!(snapshot.entries.len(), 1);
-        assert!(matches!(
-            &snapshot.entries[0],
-            smelt_core::acp_chat::AcpEntry::User(text) if text == "现在"
-        ));
-    }
-
     #[test]
     fn burst_while_writer_is_blocked_coalesces_and_stays_connected() {
         let slot = Arc::new(AcpSlot {

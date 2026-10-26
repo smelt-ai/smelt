@@ -473,7 +473,7 @@ fn serve_listen(inner: Arc<Inner>, mut stream: TaskStream, owner: String) {
             abandon_listener(&inner, id);
             return;
         }
-        if ready.get(0) == Some(&true) {
+        if ready.first() == Some(&true) {
             let peer_gone = match stream.read(&mut buf) {
                 Ok(0) => true,
                 Err(error)
@@ -1392,7 +1392,7 @@ fn serve_wait_until(inner: Arc<Inner>, mut stream: TaskStream, request: &serde_j
         if ready.get(1) == Some(&true) {
             drain_wake(&mut wake);
         }
-        if ready.get(0) == Some(&true) {
+        if ready.first() == Some(&true) {
             let mut buf = [0u8; 64];
             match stream.read(&mut buf) {
                 Ok(0) => break None,

@@ -381,10 +381,11 @@ fn reap_unused_images_with(
         if probe(&path) != MappedState::Unused {
             continue;
         }
-        if let Err(error) = fs::remove_file(&path) {
-            if error.kind() != io::ErrorKind::NotFound && first_delete_error.is_none() {
-                first_delete_error = Some(error);
-            }
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != io::ErrorKind::NotFound
+            && first_delete_error.is_none()
+        {
+            first_delete_error = Some(error);
         }
     }
     match first_delete_error {
