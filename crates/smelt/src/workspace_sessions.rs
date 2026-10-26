@@ -163,17 +163,16 @@ impl Workspace {
             }
             // ACP 会话的启动命令、profile、智能体定义来自会话所在那台机器的配置；没读到
             // 之前拼出来的是出厂命令，用户配的命令和环境变量会全部失效。守护已经就绪，
-            // 正常一次往返就到。还没连上的远程机器等不来，按存档里的启动命令恢复。
-            loop {
-                match this.update(cx, |_, cx| settings::agent_host_settled(&key, cx)) {
-                    Ok(true) => break,
-                    Ok(false) => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(50))
-                            .await
-                    }
-                    Err(_) => return,
-                }
+            // 正常一次往返就到，读到时 AgentHosts 一变就接着往下走。还没连上的远程机器
+            // 等不来，按存档里的启动命令恢复。
+            let settled_key = key.clone();
+            let settled =
+                move |cx: &App| settings::agent_host_settled(&settled_key, cx).then_some(());
+            if smelt_ui::global_wait::wait_for_global::<settings::AgentHosts, ()>(cx, settled)
+                .await
+                .is_none()
+            {
+                return;
             }
             if this
                 .update_in(cx, |this, window, cx| {
@@ -974,14 +973,40 @@ impl Workspace {
                         // 当前没有 daemon 持有的执行时，不论会话采用哪个
                         // Agent/Controller，都沿用 GUI 的可视重连体验。
                         let view = _view.clone();
+                        let runtime_key = view.read(cx).runtime().key().clone();
                         cx.spawn_in(window, async move |_this, cx| {
-                            let executor = cx.background_executor().clone();
-                            // 指数退避循环（500ms 起、翻倍到 8s 上限），不写死
-                            // 单次等待——短故障（升级 exec 一两秒）很快重连，长
-                            // 故障间隔自动拉长，预算在 AcpView 内（6 次）防风暴。
-                            let mut delay = std::time::Duration::from_millis(500);
+                            // 相位一变就叫醒这条循环：AcpView 改相位都会 notify。
+                            let (changed_tx, changed_rx) = smol::channel::bounded::<()>(1);
+                            let Ok(_observe) = cx.update(|_, cx| {
+                                cx.observe(&view, move |_, _| {
+                                    let _ = changed_tx.try_send(());
+                                })
+                            }) else {
+                                return;
+                            };
+                            // 每次重连前退避（250ms 起、翻倍到 8s 上限）并等运行时在线：短故障
+                            // （升级 exec 一两秒）很快重连，运行时不在线就不发；预算在 AcpView
+                            // 内（6 次）防风暴。Connecting 时不重试也不花预算，等相位变了再看。
+                            let mut retries = 0u32;
                             loop {
-                                executor.timer(delay).await;
+                                let dead = view
+                                    .update_in(cx, |view, _window, _cx| {
+                                        matches!(
+                                            view.phase(),
+                                            smelt_client::daemon_state::DaemonPhase::Dead
+                                        )
+                                    })
+                                    .unwrap_or(false);
+                                if dead
+                                    && !crate::runtime_events::wait_online(
+                                        &runtime_key,
+                                        retries.saturating_add(1),
+                                        cx,
+                                    )
+                                    .await
+                                {
+                                    break;
+                                }
                                 let step = view.update_in(cx, |view, window, cx| {
                                     // Starting 只是 provider 正在重建，不能重置预算；
                                     // 等 daemon 返回可用相位。
@@ -1018,9 +1043,13 @@ impl Workspace {
                                         break;
                                     }
                                     Ok(AcpReconnectStep::Retrying) => {
-                                        delay = (delay * 2).min(std::time::Duration::from_secs(8));
+                                        retries = retries.saturating_add(1);
                                     }
-                                    Ok(AcpReconnectStep::Waiting) => {}
+                                    Ok(AcpReconnectStep::Waiting) => {
+                                        if changed_rx.recv().await.is_err() {
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         })
@@ -2372,6 +2401,8 @@ impl Workspace {
         if became_active {
             status_item::refresh_system_notification_authorization();
             self.mark_visible_session_read(cx);
+            // 离线的远程机器隔几分钟才探一次；人回到这里时多半要用，立刻探一次。
+            crate::runtime_events::probe_remotes(cx);
         }
     }
 

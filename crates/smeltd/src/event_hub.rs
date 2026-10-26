@@ -105,6 +105,9 @@ fn projection_value(projection: &Option<CoreProjectionEvent>) -> (u64, serde_jso
 pub(crate) struct DaemonEventHub {
     hub: Arc<EventHub>,
     projection: Arc<Mutex<ProjectionState>>,
+    /// 每个终端正在显示的进度条（会话 id → 实例号、进度）。只为新订阅者补发：
+    /// `terminal.progress` 没有快照，后连上的客户端靠它看到已经在跑的进度条。
+    terminal_progress: Mutex<BTreeMap<String, (u64, smelt_event_protocol::TerminalProgress)>>,
 }
 
 impl DaemonEventHub {
@@ -121,7 +124,11 @@ impl DaemonEventHub {
         let projection = Arc::new(Mutex::new(ProjectionState::default()));
         register_snapshot_providers(&hub, &projection)
             .map_err(|error| format!("register core snapshot provider: {error}"))?;
-        Ok(Arc::new(Self { hub, projection }))
+        Ok(Arc::new(Self {
+            hub,
+            projection,
+            terminal_progress: Mutex::new(BTreeMap::new()),
+        }))
     }
 
     pub(crate) fn runtime(&self) -> &Arc<EventHub> {
@@ -375,6 +382,29 @@ impl DaemonEventHub {
         Ok(())
     }
 
+    /// 智能体的记忆目录里有文件变了（`agent_id` 为 `None` 是用户全局记忆）。没人订阅就不发。
+    pub(crate) fn publish_agent_memory_changed(
+        &self,
+        agent_id: Option<&str>,
+    ) -> Result<(), EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        let payload = smelt_event_protocol::AgentMemoryChanged {
+            agent_id: agent_id.map(str::to_string),
+        };
+        self.publish_core(
+            smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED,
+            serde_json::to_value(payload).map_err(|error| {
+                EventBusError::new(format!("serialize agent memory change: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(())
+    }
+
     /// 终端里的程序发了一条 OSC 通知。没人订阅就不发：通知是一次性的，不补发。
     pub(crate) fn publish_terminal_notification(
         &self,
@@ -400,8 +430,57 @@ impl DaemonEventHub {
         Ok(())
     }
 
-    /// 终端进度变了（`None` = 清掉）。没人订阅就不发。
+    /// 记下并广播一个终端的进度变化（`None` = 清掉）。记账和广播在同一把锁里：订阅时的补发不会
+    /// 插在中间，把旧值发到新值后面。
     pub(crate) fn publish_terminal_progress(
+        &self,
+        session_id: &str,
+        instance: u64,
+        progress: Option<smelt_event_protocol::TerminalProgress>,
+    ) -> Result<(), EventBusError> {
+        let mut current = self
+            .terminal_progress
+            .lock()
+            .map_err(|_| EventBusError::new("terminal progress lock poisoned"))?;
+        match progress {
+            Some(progress) => {
+                current.insert(session_id.to_string(), (instance, progress));
+            }
+            None => {
+                current.remove(session_id);
+            }
+        }
+        self.broadcast_terminal_progress(session_id, progress)
+    }
+
+    /// 新订阅了 `terminal.progress` 的客户端连上后调：把正在显示的进度条再发一遍。
+    /// 广播会让老订阅者也收到一份，进度是状态，重复无害。
+    pub(crate) fn replay_terminal_progress(&self) -> Result<(), EventBusError> {
+        let current = self
+            .terminal_progress
+            .lock()
+            .map_err(|_| EventBusError::new("terminal progress lock poisoned"))?;
+        for (session_id, (_, progress)) in current.iter() {
+            self.broadcast_terminal_progress(session_id, Some(*progress))?;
+        }
+        Ok(())
+    }
+
+    /// 这个终端实例结束了，不再补发它的进度条。同 id 的新实例不受影响。
+    pub(crate) fn forget_terminal_progress(&self, session_id: &str, instance: u64) {
+        let Ok(mut current) = self.terminal_progress.lock() else {
+            return;
+        };
+        if current
+            .get(session_id)
+            .is_some_and(|(owner, _)| *owner == instance)
+        {
+            current.remove(session_id);
+        }
+    }
+
+    /// 没人订阅就不发。
+    fn broadcast_terminal_progress(
         &self,
         session_id: &str,
         progress: Option<smelt_event_protocol::TerminalProgress>,

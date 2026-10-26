@@ -318,6 +318,23 @@ fn dispatch_control(
                 .unwrap_or_default();
             success_value(control_version, &request_id, status)
         }
+        ControlMethod::RemoteStatusWait => {
+            let params: smelt_core::remote_config::RemoteStatusWaitParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let status = super::remote::lifecycle_remote()
+                .map(|state| {
+                    super::remote::wait_remote_status_change(
+                        state,
+                        &params.known,
+                        smelt_core::remote_config::REMOTE_STATUS_WAIT_MAX,
+                    )
+                })
+                .unwrap_or_default();
+            success_value(control_version, &request_id, status)
+        }
         device @ (ControlMethod::DevicePairBegin
         | ControlMethod::DevicePair
         | ControlMethod::DeviceList
@@ -558,6 +575,21 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             match super::project_watch::watch(&params.root, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentMemoryWatch => {
+            let params: AgentDefinitionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::memory_watch::watch(&params.id, event_hub) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(
                     control_version,

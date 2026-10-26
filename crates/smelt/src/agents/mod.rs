@@ -62,6 +62,9 @@ pub(crate) struct AgentsSurface {
     pub(crate) arm_conversation_on_create: bool,
     /// 这次「新对话」新建的草稿。点「开始对话」才设默认；返回则删掉。
     pub(crate) conversation_draft: Option<AgentRef>,
+    /// 已经请运行时监听记忆目录的智能体（见 `agent.memory.watch`）。监听在运行时进程里，
+    /// 运行时断线（换了进程）时清掉那台机器的，下次重取记忆时重新登记。
+    pub(crate) watched_memories: std::collections::HashSet<AgentRef>,
 }
 
 impl AgentsSurface {
@@ -74,6 +77,7 @@ impl AgentsSurface {
             pending_memory_delete: None,
             arm_conversation_on_create: false,
             conversation_draft: None,
+            watched_memories: std::collections::HashSet::new(),
         }
     }
 }
@@ -152,7 +156,7 @@ pub(crate) struct AgentEditor {
     plugins: Vec<PiPlugin>,
     /// 运行时那台机器上 `~/.pi/agent/mcp.json` 里的服务器，同上。
     mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
-    /// 同理，记忆不在渲染里扫：打开编辑器、记忆目录有变化、有对话停下来、
+    /// 同理，记忆不在渲染里扫：打开编辑器、运行时报记忆目录有变化、有对话停下来、
     /// 点刷新或删除后才重扫。
     memories: AgentMemories,
     /// 当前页签。每次打开编辑器回到配置。
@@ -162,10 +166,6 @@ pub(crate) struct AgentEditor {
     memory_filter: MemoryFilter,
     /// 记忆页签里展开看全文的那条记忆。只是看，改仍走系统编辑器。
     expanded_memory: Option<(MemoryLayer, String)>,
-    /// 监听两层记忆目录，智能体或外部编辑器改了文件，卡片自己刷新。跟着编辑器走：
-    /// 关掉或换一个智能体时 drop，监听随之停止。
-    /// 编辑器开着时定时重取记忆的任务。
-    _memory_poll: gpui::Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 

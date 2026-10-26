@@ -110,6 +110,30 @@ const MIN_TOOL_PANEL_WIDTH: f32 = 320.0;
 const DEFAULT_SIDEBAR_WIDTH: f32 = MIN_SIDEBAR_WIDTH;
 const DEFAULT_TOOL_PANEL_WIDTH: f32 = MIN_TOOL_PANEL_WIDTH;
 
+/// 文件事件里有没有名叫 `name` 的文件。
+fn event_touches_file(event: &notify::Event, name: &std::ffi::OsStr) -> bool {
+    event.paths.iter().any(|path| path.file_name() == Some(name))
+}
+
+/// 从 `now` 到下一个本地零点还有多久。有的时区在零点拨夏令时，那天没有 0 点，就取那天
+/// 最早存在的整点。
+fn until_next_midnight<Tz: TimeZone>(now: &chrono::DateTime<Tz>) -> Duration {
+    let timezone = now.timezone();
+    now.date_naive()
+        .succ_opt()
+        .and_then(|day| day.and_hms_opt(0, 0, 0))
+        .and_then(|midnight| {
+            (0..24).find_map(|hour| {
+                timezone
+                    .from_local_datetime(&(midnight + chrono::TimeDelta::hours(hour)))
+                    .earliest()
+            })
+        })
+        .and_then(|next| next.signed_duration_since(now).to_std().ok())
+        // 算不出来（日期到头了）就一小时后再看。
+        .unwrap_or(Duration::from_secs(3600))
+}
+
 fn sidebar_width_for_viewport(preferred: f32, viewport_width: Pixels) -> f32 {
     let shell_inset = f32::from(ui_theme::shell_padding()) * 2.0;
     let available = (f32::from(viewport_width) - shell_inset - MIN_WORKSPACE_CONTENT_WIDTH)
@@ -2829,6 +2853,22 @@ struct Workspace {
     _history_titles_sub: Option<Subscription>,
     /// 外观全局变化。不能放进 `settings_subs`：设置滑块重建时会清掉那个 vec。
     _appearance_sub: Option<Subscription>,
+    /// 侧栏按哪一天算的「今天」。跨日检查拿它比，见 [`Self::start_date_change_watch`]。
+    shown_date: chrono::NaiveDate,
+    /// 到下一个本地零点的一次性计时器，到点重画再排下一个。
+    _date_change_timer: Option<Task<()>>,
+    /// 系统醒来时补查跨日：睡眠那段计时器不走。
+    _system_wake_sub: Option<Subscription>,
+    /// 主窗口激活时补查跨日、守护是否落后。
+    _window_activation_sub: Option<Subscription>,
+    /// 本机运行时最近一次是不是在线。从不在线变成在线，就是守护（重新）连上了。
+    local_runtime_online: bool,
+    /// 本机运行时连上时刷新守护落后的提示，见 [`Self::start_daemon_outdated_watch`]。
+    _local_runtime_sub: Option<Subscription>,
+    /// 盯着 App 里的 smeltd 所在目录：重编译、覆盖安装后查一次守护是否落后。
+    _daemon_binary_watcher: Option<notify::RecommendedWatcher>,
+    /// 守护落后，但有会话在跑没重启：等会话都停下来再查一次。
+    daemon_restart_waiting_idle: bool,
     /// 正在后台 reattach 中、尚未插入侧栏的移动端终端会话 id。不去重会对同一 id
     /// 并发 open 两次，smeltd 第二次会顶掉前一个连接。
     remote_terminal_reattach_pending: HashSet<String>,
@@ -3262,6 +3302,14 @@ impl Workspace {
             _provider_status_sub: None,
             _history_titles_sub: None,
             _appearance_sub: None,
+            shown_date: Local::now().date_naive(),
+            _date_change_timer: None,
+            _system_wake_sub: None,
+            _window_activation_sub: None,
+            local_runtime_online: false,
+            _local_runtime_sub: None,
+            _daemon_binary_watcher: None,
+            daemon_restart_waiting_idle: false,
             remote_terminal_reattach_pending: HashSet::new(),
             remote_projected_terminal_ids: HashSet::new(),
             session_list_revision: 0,
@@ -3319,6 +3367,13 @@ impl Workspace {
         );
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.recheck_date(cx);
+                this.check_daemon_outdated_on_event(cx);
+            }
+        });
+        ws._window_activation_sub = Some(activation);
         ws.reconcile_remote_catalog_projection(window, cx);
         ws._remote_sessions_sub = Some(
             cx.observe_global_in::<RemoteSessionCatalogGlobal>(window, |this, window, cx| {
@@ -3348,50 +3403,128 @@ impl Workspace {
         ws
     }
 
-    /// 每 60s 探一次守护是否落后于磁盘上的 smeltd。手工装 App / dev 重编译后
-    /// 没有「更新事件」可挂，只能靠检测发现；探到落后就交给 `check_daemon_outdated`：
-    /// 没有进行中的会话才自动重启，有的话等空闲后的下一次。
+    /// 守护是否落后于 App 里的 smeltd 没有专门的「更新事件」，下面这几件事发生时各查一次；
+    /// 探到落后交给 `check_daemon_outdated`：没有进行中的会话才自动重启，有的话等会话都
+    /// 停下来再查（见 [`Self::retry_daemon_restart_when_idle`]）。
+    /// - App 里的 smeltd 变了（dev 重编译、`make install`、覆盖安装）：盯着它所在的目录；
+    /// - 主窗口激活（在 `new` 里挂）：整个 `.app` 被换掉时换的是上一级目录项，目录监听
+    ///   跟不上，人切回来时补查；
+    /// - 本机运行时重新连上：别处重启、交接了守护，只刷新提示，不在这里重启。
     fn start_daemon_outdated_watch(&mut self, cx: &mut Context<Self>) {
+        let reconnects = cx.observe_global::<crate::runtimes::RuntimeHub>(|this, cx| {
+            let online = crate::runtimes::runtime_online(&RuntimeKey::Local, cx);
+            if online && !this.local_runtime_online {
+                this.probe_daemon_outdated(false, cx);
+            }
+            this.local_runtime_online = online;
+        });
+        self._local_runtime_sub = Some(reconnects);
+        self._daemon_binary_watcher = Self::watch_bundled_daemon(cx);
+    }
+
+    /// 盯着分发物 smeltd 所在的目录，只认 smeltd 这个名字上的变化。
+    fn watch_bundled_daemon(cx: &mut Context<Self>) -> Option<notify::RecommendedWatcher> {
+        use notify::Watcher as _;
+        /// 拷贝、链接一个映像会连着来一串事件：静下来这么久才算写完，免得哈希半截文件、
+        /// 拿半截映像去换守护。
+        const QUIET: Duration = Duration::from_secs(2);
+
+        let dir = local_daemon::bundled_daemon_dir()?;
+        let name = std::ffi::OsString::from(local_daemon::bundled_daemon_file_name());
+        // 容量 1：一串事件只需要一次唤醒。
+        let (changed_tx, changed_rx) = smol::channel::bounded::<()>(1);
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event.is_ok_and(|event| event_touches_file(&event, &name)) {
+                let _ = changed_tx.try_send(());
+            }
+        });
+        let mut watcher = match watcher {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                eprintln!("[daemon] 监听 {} 失败：{error}", dir.display());
+                return None;
+            }
+        };
+        if let Err(error) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+            eprintln!("[daemon] 监听 {} 失败：{error}", dir.display());
+            return None;
+        }
+        // 监听器随 Workspace 丢掉时发送端跟着没了，循环随之结束。
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(60))
-                    .await;
-                let ok = this.update(cx, |this, cx| {
-                    this.check_daemon_outdated(cx);
-                });
-                if ok.is_err() {
-                    break; // Workspace 已销毁
+            while changed_rx.recv().await.is_ok() {
+                loop {
+                    let quiet = cx.background_executor().timer(QUIET);
+                    let changed = async { changed_rx.recv().await.is_ok() };
+                    let settled = async {
+                        quiet.await;
+                        false
+                    };
+                    if !smol::future::or(changed, settled).await {
+                        break;
+                    }
+                }
+                if this
+                    .update(cx, |this, cx| this.check_daemon_outdated_on_event(cx))
+                    .is_err()
+                {
+                    break;
                 }
             }
         })
         .detach();
+        Some(watcher)
+    }
+
+    /// 事件触发的落后检查。本机会话恢复完之前不查：恢复收尾时自己会查一次，不能和恢复
+    /// 并行换守护。
+    fn check_daemon_outdated_on_event(&mut self, cx: &mut Context<Self>) {
+        if self
+            .space(&RuntimeKey::Local)
+            .is_some_and(|space| space.sessions_restored)
+        {
+            self.check_daemon_outdated(cx);
+        }
+    }
+
+    /// 守护落后、因为有会话在跑没重启的话，会话状态一变就看看是不是都停下来了，停了就再查
+    /// 一次（查到还落后就重启）。只看内存里的会话状态。
+    pub(crate) fn retry_daemon_restart_when_idle(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_restart_waiting_idle
+            && !daemon_restart_prompt::should_confirm(&self.busy_work_names(cx))
+        {
+            self.daemon_restart_waiting_idle = false;
+            self.check_daemon_outdated(cx);
+        }
     }
 
     /// 侧栏的「今天 / 昨天」和按时间分组的分桶都按当前日期算，日期一变就得重画，
-    /// 哪怕没有任何会话事实变化。每分钟看一次日期，而不是排一个到零点的长计时器：
-    /// 计时器按开机时长走，合盖睡眠那段不算，醒来后会晚很久才响。
+    /// 哪怕没有任何会话事实变化。排一个到下一个本地零点的一次性计时器，到点重画再排下一个。
+    /// 计时器按开机时长走，合盖睡眠那段不算，醒来后会晚很久才响：系统醒来、主窗口激活时
+    /// 各补查一次（激活在 `new` 里挂）。
     fn start_date_change_watch(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let mut today = Local::now().date_naive();
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(60))
-                    .await;
-                let date = Local::now().date_naive();
-                let changed = date != today;
-                today = date;
-                let ok = this.update(cx, |_, cx| {
-                    if changed {
-                        cx.notify();
-                    }
-                });
-                if ok.is_err() {
-                    break; // Workspace 已销毁
-                }
-            }
-        })
-        .detach();
+        let this = cx.weak_entity();
+        self._system_wake_sub = Some(cx.on_system_wake(move |cx| {
+            let _ = this.update(cx, |this, cx| this.recheck_date(cx));
+        }));
+        self.arm_date_change_timer(cx);
+    }
+
+    fn arm_date_change_timer(&mut self, cx: &mut Context<Self>) {
+        let wait = until_next_midnight(&Local::now());
+        self._date_change_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| this.recheck_date(cx));
+        }));
+    }
+
+    /// 日期变了就重画；计时器重新排到下一个零点（醒来、激活时原来那个可能还要很久才响）。
+    fn recheck_date(&mut self, cx: &mut Context<Self>) {
+        let today = Local::now().date_naive();
+        if today != self.shown_date {
+            self.shown_date = today;
+            cx.notify();
+        }
+        self.arm_date_change_timer(cx);
     }
 
     /// 将 app 级 daemon 目录投影到当前窗口。全局状态由唯一的 subscribe 循环写入，
@@ -4753,6 +4886,7 @@ fn main() {
                     }
                     let states: Vec<_> = states.into_iter().map(|(_, state)| state).collect();
                     ws.refresh_agent_memories_after_turns(&states, cx);
+                    ws.retry_daemon_restart_when_idle(cx);
                     ws.sync_notification_surfaces(cx);
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);
@@ -4829,6 +4963,29 @@ fn main() {
                         let _ = ws.update(cx, |ws, cx| ws.on_project_changed(root, cx));
                     }
                     continue;
+                }
+                // 记忆在智能体那台机器上，哪台运行时报的就是哪台的。
+                if let terminal::DaemonStateEvent::AgentMemoryChanged { agent_id } = &event {
+                    if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                        let _ = ws.update(cx, |ws, cx| {
+                            ws.on_agent_memory_changed(&runtime, agent_id.as_deref(), cx)
+                        });
+                    }
+                    continue;
+                }
+                // 运行时换了进程，它替我们建的记忆监听也没了；重新订阅上时重取并重新登记。
+                if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                    match &event {
+                        terminal::DaemonStateEvent::Disconnected => {
+                            let _ = ws.update(cx, |ws, _| ws.forget_agent_memory_watches(&runtime));
+                        }
+                        terminal::DaemonStateEvent::Snapshot { .. } => {
+                            let _ = ws.update(cx, |ws, cx| {
+                                ws.on_runtime_resubscribed(&runtime, cx)
+                            });
+                        }
+                        _ => {}
+                    }
                 }
                 // 终端程序的 OSC 通知：运行时已滤掉有结构化 hook 的会话，这里进同一个
                 // 关注 store，正在看的会话由 store 标已读、不弹。
@@ -4915,6 +5072,7 @@ fn main() {
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
+                        terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
                         terminal::DaemonStateEvent::TerminalNotification { .. } => {}
                         terminal::DaemonStateEvent::TerminalProgress { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {}
@@ -4962,6 +5120,7 @@ fn main() {
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
+                        terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
                         terminal::DaemonStateEvent::TerminalNotification { .. } => {}
                         terminal::DaemonStateEvent::TerminalProgress { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {

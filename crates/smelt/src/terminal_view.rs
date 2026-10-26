@@ -546,15 +546,17 @@ impl TerminalView {
         self.publish_attention(AttentionKind::Success, "已完成", "已完成".to_string(), cx);
     }
 
-    /// 断线自动重连（后台，带退避）。守护 exec 交接 / 被强杀 / 重启时，会话本身
+    /// 断线自动重连（后台）。守护 exec 交接 / 被强杀 / 重启时，会话本身
     /// 还活在守护里，reattach 即可恢复画面；只有 shell 真的退出/被杀（守护里查无
     /// 此会话）才不复活。
     ///
     /// 这是终端断线的**兜底自愈**：此前重连只挂在守护重启一条
     /// 路径上，而守护 exec 还有别的触发方式（ensure/handoff 迁移、装 App 时
     /// handoff、异常重启），那些路径断开连接后没有任何人重连终端 → 全部终端
-    /// 永久冻结、只能重启 GUI。这里跟状态订阅通道的 2s 重连循环同一个思路，
-    /// 让终端自己长出一条命来，不依赖调用方。
+    /// 永久冻结、只能重启 GUI。这里让终端自己长出一条命来，不依赖调用方。
+    ///
+    /// 运行时不在线时不拨号，等订阅线程探到它在线（见
+    /// [`crate::runtime_events::wait_online`]）；在线了 reattach 还失败才退避再试。
     fn schedule_auto_reconnect(&mut self, generation: u64, cx: &mut Context<Self>) {
         if self.reconnecting || self.session_runtime_gone {
             return;
@@ -564,24 +566,28 @@ impl TerminalView {
         let cwd = self.cwd.clone();
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
-            // 退避：500ms 起步，翻倍到 10s 封顶，重到成功或会话消失为止。
-            let mut delay = Duration::from_millis(500);
+            let mut failures = 0u32;
             loop {
                 let still_current = this
-                    .update(cx, |this, _| {
-                        this.terminal_generation == generation && !this.session_runtime_gone
+                    .update(cx, |this, cx| {
+                        let current =
+                            this.terminal_generation == generation && !this.session_runtime_gone;
+                        // exec 期间 socket 短暂不可连 / 守护还没起来 / 网络断了，都不能判
+                        // 「会话没了」——那是要等的，不是要放弃的。
+                        if current && !crate::runtimes::runtime_online(this.runtime.key(), cx) {
+                            this.show_reconnect_notice(cx);
+                        }
+                        current
                     })
                     .unwrap_or(false);
                 if !still_current {
                     return;
                 }
-                // 1) 运行时活着吗？exec 期间 socket 短暂不可连 / 守护还没起来 / 网络断了，
-                //    都不能判「会话没了」——那是要等的，不是要放弃的。
-                let probe = runtime.client().clone();
-                let daemon_up = cx
-                    .background_executor()
-                    .spawn(async move { probe.describe().is_ok() })
-                    .await;
+                // 1) 等运行时在线。机器被移除了就不再接。
+                if !crate::runtime_events::wait_online(runtime.key(), failures, cx).await {
+                    break;
+                }
+                // 2) 当前 epoch 的快照明确说这个 id 没有运行时进程了，就不再补发。
                 let sid2 = sid.clone();
                 let alive = this
                     .update(cx, |this, cx| {
@@ -593,23 +599,14 @@ impl TerminalView {
                     })
                     .ok()
                     .flatten();
-                match smelt_client::daemon_state::terminal_reconnect_action(daemon_up, alive) {
-                    smelt_client::daemon_state::TerminalReconnectAction::Wait => {
-                        let _ = this.update(cx, |this, cx| this.show_reconnect_notice(cx));
-                        cx.background_executor().timer(delay).await;
-                        delay = (delay * 2).min(Duration::from_secs(10));
-                        continue;
-                    }
-                    smelt_client::daemon_state::TerminalReconnectAction::GiveUp => {
-                        let _ = this.update(cx, |this, cx| {
-                            if this.terminal_generation == generation {
-                                this.mark_session_runtime_gone(TERMINAL_SESSION_ENDED_MESSAGE);
-                                cx.notify();
-                            }
-                        });
-                        break;
-                    }
-                    smelt_client::daemon_state::TerminalReconnectAction::Reattach => {}
+                if alive == Some(false) {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.terminal_generation == generation {
+                            this.mark_session_runtime_gone(TERMINAL_SESSION_ENDED_MESSAGE);
+                            cx.notify();
+                        }
+                    });
+                    break;
                 }
                 // 3) 重连（reattach：守护按 id 重放历史画面，输出不丢）。
                 // 镜像未知时也立刻 attach：tmux 式，attach 本人才是还活着的权威答案。
@@ -640,12 +637,12 @@ impl TerminalView {
                     }
                     Err(_) => {
                         let _ = this.update(cx, |this, cx| this.show_reconnect_notice(cx));
-                        cx.background_executor().timer(delay).await;
-                        delay = (delay * 2).min(Duration::from_secs(10));
+                        failures = failures.saturating_add(1);
                     }
                 }
             }
-            // 接回、会话消失（shell 退出）或视图销毁：复位标志，下次断线还能再触发。
+            // 接回、会话消失（shell 退出）、机器被移除或视图销毁：复位标志，下次断线还能
+            // 再触发。
             let _ = this.update(cx, |this, cx| {
                 if this.reconnect_notice {
                     this.reconnect_notice = false;

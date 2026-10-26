@@ -38,7 +38,7 @@ fn managed_daemon_dir() -> std::path::PathBuf {
         .join("bin")
 }
 
-fn bundled_daemon_file_name() -> &'static str {
+pub(crate) fn bundled_daemon_file_name() -> &'static str {
     if cfg!(windows) { "smeltd.exe" } else { "smeltd" }
 }
 
@@ -113,6 +113,12 @@ fn distribution_exe() -> Option<std::path::PathBuf> {
         return Some(profile_dir.join(exe.file_name()?));
     }
     Some(exe)
+}
+
+/// 分发物 smeltd 所在的目录（App 包的 `Contents/MacOS`、cargo 的 profile 目录）。那里
+/// 眼下还没有 smeltd 也照样给：盯着它，等它出现。
+pub(crate) fn bundled_daemon_dir() -> Option<std::path::PathBuf> {
+    distribution_exe()?.parent().map(std::path::Path::to_path_buf)
 }
 
 /// App 包 / cargo 同目录下的 smeltd（分发物，不是常驻运行路径）。
@@ -492,7 +498,7 @@ pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
         if let Ok(s) = local_runtime().connect() {
             return Ok(s);
         }
-        // handoff 后短暂窗口：下面走拉起/轮询
+        // handoff 后短暂窗口：下面走拉起、等就绪
     }
 
     // 要拉起了：完整检查一遍，不用进程内缓存。缓存只说明「之前在跑的那个已经核对过」，
@@ -527,6 +533,8 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
         return Ok(stream);
     }
 
+    // 子进程绑好 socket 时从这条管道报一声；没就绪就退出时管道读到 EOF。
+    let mut ready = None;
     let spawn_err: Option<String> = {
         use std::process::Stdio;
         let exe = std::env::current_exe().ok();
@@ -556,8 +564,10 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
         if let Ok(fingerprint) = smelt_sys::daemon_image::content_fingerprint(&spawn_at) {
             cmd.env("SMELTD_DAEMON_FINGERPRINT", fingerprint);
         }
+        let pipe = smelt_sys::ready_pipe::ReadyPipe::attach(&mut cmd);
         match smelt_sys::process::spawn_detached(&mut cmd) {
             Ok(mut child) => {
+                ready = Some(pipe);
                 eprintln!(
                     "[workspace] 已拉起 smeltd pid={} ({}) menubar={}",
                     child.id(),
@@ -577,26 +587,38 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
         }
     };
 
+    // 等子进程报就绪或退出，上限只兜底它卡住不动。读完都再连一次：报了就绪自然连得上；
+    // 退出了也可能是别人先起好了守护，它看见就让开了。
     let timeout = daemon_ready_timeout();
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(100));
-        if let Ok(s) = local_runtime().connect() {
-            return Ok(s);
-        }
+    let readiness = match ready {
+        Some(Ok(pipe)) => pipe.wait(timeout),
+        Some(Err(error)) => Err(error),
+        None => Ok(smelt_sys::ready_pipe::Readiness::Exited),
+    };
+    if let Ok(s) = local_runtime().connect() {
+        return Ok(s);
     }
     let secs = timeout.as_secs();
-    Err(std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        match spawn_err {
-            Some(why) => format!("smeltd 未就绪：{why}；{secs}s 内未监听 {}", path.display()),
-            None => format!(
+    Err(match (spawn_err, readiness) {
+        (Some(why), _) => std::io::Error::other(format!("smeltd 未就绪：{why}")),
+        (None, Ok(smelt_sys::ready_pipe::Readiness::TimedOut)) => std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
                 "smeltd 未就绪（已拉起 {}，{secs}s 内未监听 {}）",
                 daemon.display(),
                 path.display()
             ),
-        },
-    ))
+        ),
+        (None, Ok(_)) => std::io::Error::other(format!(
+            "smeltd 未就绪（已拉起 {}，没监听 {} 就退出了，见 ~/.smelt/daemon.log）",
+            daemon.display(),
+            path.display()
+        )),
+        (None, Err(error)) => std::io::Error::other(format!(
+            "smeltd 未就绪（已拉起 {}，等不到它的就绪信号：{error}）",
+            daemon.display()
+        )),
+    })
 }
 
 /// 探测正在跑的守护：连不上（守护没起，`connect_daemon` 会自己拉起磁盘上最新的）
@@ -769,10 +791,53 @@ fn outdated_by_fingerprint(pinned: &str, expected: Option<&std::path::Path>) -> 
     let Some(path) = expected else {
         return false;
     };
-    match smelt_sys::daemon_image::content_fingerprint(path) {
+    match expected_fingerprint(path) {
         Ok(disk) => disk != pinned,
         Err(_) => false,
     }
+}
+
+/// 一份文件的身份：换了文件或者改了内容，这几项至少变一项。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp {
+    path: std::path::PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64),
+}
+
+fn file_stamp(path: &std::path::Path) -> std::io::Result<FileStamp> {
+    let metadata = std::fs::metadata(path)?;
+    Ok(FileStamp {
+        path: path.to_path_buf(),
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        inode: {
+            use std::os::unix::fs::MetadataExt as _;
+            (metadata.dev(), metadata.ino())
+        },
+    })
+}
+
+/// 期望映像的指纹，按文件身份缓存。落后检查跟着文件变化、窗口激活、本机运行时重连走，
+/// 次数不定；映像几十到几百 MB，文件没变就不重新哈希。
+fn expected_fingerprint(path: &std::path::Path) -> std::io::Result<String> {
+    static CACHE: Mutex<Option<(FileStamp, String)>> = Mutex::new(None);
+    let stamp = file_stamp(path)?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached, fingerprint)) = cache.as_ref()
+        && *cached == stamp
+    {
+        return Ok(fingerprint.clone());
+    }
+    let fingerprint = smelt_sys::daemon_image::content_fingerprint(path)?;
+    // 哈希期间文件又变了就不记：下次按新身份重算。
+    if file_stamp(path).is_ok_and(|after| after == stamp) {
+        *cache = Some((stamp, fingerprint.clone()));
+    }
+    Ok(fingerprint)
 }
 
 /// 新守护是否已经用 version 握手接替了旧进程。pid / started_at 在交接后都会变。
@@ -1137,7 +1202,7 @@ fn force_kill_socket_owner(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// 确保守护活着，没有就拉起来（复用 connect_daemon 的探测+拉起+轮询逻辑）。
+/// 确保守护活着，没有就拉起来（复用 connect_daemon 的探测、拉起和等就绪）。
 /// 调用方（重启守护后想立刻刷新状态）负责扔到后台线程，避免卡 UI（最坏等 5s）。
 pub fn ensure_daemon_running() {
     let _ = connect_daemon();

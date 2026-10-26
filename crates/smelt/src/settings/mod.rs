@@ -648,11 +648,15 @@ fn set_launch_entries(entries: Vec<LaunchEntry>, cx: &mut App) {
     });
 }
 
-/// 后台从运行时加载启动项；运行时还没起来就按退避重试，直到拿到为止。
+/// 后台从本机运行时加载启动项：等它在线再读，读失败就退避后回去等（见
+/// [`crate::runtime_events::wait_online`]），直到拿到为止。
 pub fn start_launch_config_load(cx: &mut App) {
     cx.spawn(async move |cx| {
-        let mut attempt = 0u32;
+        let mut failures = 0u32;
         loop {
+            if !crate::runtime_events::wait_online(&crate::RuntimeKey::Local, failures, cx).await {
+                return;
+            }
             let fetched = cx
                 .background_executor()
                 .spawn(async { fetch_launch_settings() })
@@ -661,12 +665,7 @@ pub fn start_launch_config_load(cx: &mut App) {
                 cx.update(|cx| set_launch_entries(settings.entries, cx));
                 return;
             }
-            cx.background_executor()
-                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
-                    attempt,
-                ))
-                .await;
-            attempt = attempt.saturating_add(1);
+            failures = failures.saturating_add(1);
         }
     })
     .detach();
@@ -754,8 +753,8 @@ pub use smelt_model::agent_kind::{
 };
 pub use smelt_ui::agent_host_state::{
     AgentDefinition, AgentHostState, AgentHosts, agent_host_loaded, agent_host_settled,
-    agent_hosts, apply_agent_host, apply_notify_prefs, attach_agent_host, detach_agent_host,
-    initial_agent_host_state, reload_agent_hosts, try_apply_agent_host,
+    agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host, initial_agent_host_state,
+    reload_agent_hosts, try_apply_agent_host,
 };
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,
@@ -763,6 +762,40 @@ pub use smelt_ui::automation::{
     AutomationTriggerPresetId, BUILTIN_AUTOMATION_ACTIONS, BUILTIN_AUTOMATION_TRIGGER_PRESETS,
     EventIngress, WebhookIngress,
 };
+
+/// 挂上一台机器并在后台读它的配置：等那台机器在线再读，读失败就退避后回去等（见
+/// [`crate::runtime_events::wait_online`]），直到读到或机器被移除。已经挂着的只换客户端
+/// （比如改了中继），不重读。`on_first_load` 在第一次读到后调用一次。
+pub fn attach_agent_host(
+    key: crate::RuntimeKey,
+    client: smelt_runtime_client::RuntimeClient,
+    cx: &mut App,
+    on_first_load: impl FnOnce(&mut App) + 'static,
+) {
+    use smelt_ui::agent_host_state::{AgentHostLoad, load_agent_host, register_agent_host};
+
+    if !register_agent_host(&key, client, cx) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let mut failures = 0u32;
+        loop {
+            if !crate::runtime_events::wait_online(&key, failures, cx).await {
+                return;
+            }
+            // 刚断线、订阅还没察觉时会读失败，先安静重试几次再报。
+            match load_agent_host(&key, failures >= 4, cx).await {
+                AgentHostLoad::Loaded => {
+                    cx.update(on_first_load);
+                    return;
+                }
+                AgentHostLoad::Detached => return,
+                AgentHostLoad::Failed => failures = failures.saturating_add(1),
+            }
+        }
+    })
+    .detach();
+}
 
 /// 那台机器的智能体配置；还没读到（或机器已移除）时用出厂值。
 pub fn agent_host_settings<'a>(

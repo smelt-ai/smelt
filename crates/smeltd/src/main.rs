@@ -115,6 +115,7 @@ mod files_control;
 mod client_conn;
 mod git_control;
 mod history_control;
+mod memory_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod peer_messages;
@@ -681,19 +682,16 @@ impl TerminalChild {
             state: Mutex::new(TerminalChildState::Running),
             changed: Condvar::new(),
         });
-        let child = Mutex::new(child);
         let reaper = Arc::clone(&tracked);
         if let Err(error) = thread::Builder::new()
             .name(format!("smelt-terminal-reaper-{pid}"))
             .spawn(move || {
-                let outcome = loop {
-                    match child.lock().unwrap().try_wait() {
-                        Ok(Some(_)) => break TerminalChildExit::Reaped,
-                        Ok(None) => thread::sleep(Duration::from_millis(200)),
-                        Err(error) => {
-                            break TerminalChildExit::WaitFailed(error.raw_os_error())
-                        }
-                    }
+                // 只有这条线程碰 `child`，阻塞在进程句柄上（`WaitForSingleObject`）等它退出，
+                // 不占任何锁。
+                let mut child = child;
+                let outcome = match child.wait() {
+                    Ok(_) => TerminalChildExit::Reaped,
+                    Err(error) => TerminalChildExit::WaitFailed(error.raw_os_error()),
                 };
                 // shell 已经退出。丢掉 Job，KILL_ON_JOB_CLOSE 收掉还在组里的孙子。
                 smelt_sys::process::release_tree(pid as u32);
@@ -762,6 +760,7 @@ impl TerminalChild {
     }
 }
 
+/// PTY 读端。`read` 不阻塞：没有输出时返回 `WouldBlock`，再用 [`wait_pty_readable`] 等。
 #[cfg(unix)]
 trait PtyReader: Read + AsRawFd + Send {}
 
@@ -769,15 +768,55 @@ trait PtyReader: Read + AsRawFd + Send {}
 impl<T: Read + AsRawFd + Send> PtyReader for T {}
 
 #[cfg(windows)]
-trait PtyReader: Read + Send {}
+trait PtyReader: Read + Send {
+    /// 等到有输出（或 EOF、出错），最多等 `timeout`；`None` 一直等。
+    fn wait_readable(&mut self, timeout: Option<Duration>);
+}
+
+/// 等 PTY 有东西可读，最多等 `timeout`（`None` 一直等）。返回 `false` 表示读端坏了，
+/// 泵该收尾。
+#[cfg(unix)]
+fn wait_pty_readable(reader: &mut dyn PtyReader, timeout: Option<Duration>) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let polled = unsafe { libc::poll(&mut pollfd, 1, poll_timeout_ms(timeout)) };
+    if polled < 0 {
+        return std::io::Error::last_os_error().kind() == ErrorKind::Interrupted;
+    }
+    let events = pollfd.revents;
+    !(polled > 0
+        && (events & libc::POLLNVAL != 0
+            || (events & libc::POLLIN == 0 && events & (libc::POLLERR | libc::POLLHUP) != 0)))
+}
 
 #[cfg(windows)]
-impl<T: Read + Send> PtyReader for T {}
+fn wait_pty_readable(reader: &mut dyn PtyReader, timeout: Option<Duration>) -> bool {
+    reader.wait_readable(timeout);
+    true
+}
 
-/// ConPTY 的读端没有 poll。单独线程阻塞读，泵用 1 秒超时醒过来刷进度。
+/// `poll` 的毫秒超时：`None` 是 -1（一直等）。向上取整，免得在截止前一点点醒来、
+/// 看到还没到点又立刻再睡一轮。
+#[cfg(unix)]
+fn poll_timeout_ms(timeout: Option<Duration>) -> i32 {
+    match timeout {
+        None => -1,
+        Some(timeout) => {
+            let millis = timeout.as_nanos().div_ceil(1_000_000);
+            i32::try_from(millis).unwrap_or(i32::MAX)
+        }
+    }
+}
+
+/// ConPTY 的读端没有 poll。单独线程阻塞读，泵在 [`PtyReader::wait_readable`] 里等它。
 #[cfg(windows)]
 struct ThreadedPtyReader {
     rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    /// `wait_readable` 等到、还没交给 `read` 的那一条。
+    received: Option<std::io::Result<Vec<u8>>>,
     pending: Vec<u8>,
     offset: usize,
 }
@@ -807,8 +846,29 @@ fn threaded_pty_reader(mut reader: Box<dyn Read + Send>) -> ThreadedPtyReader {
     });
     ThreadedPtyReader {
         rx,
+        received: None,
         pending: Vec::new(),
         offset: 0,
+    }
+}
+
+#[cfg(windows)]
+impl PtyReader for ThreadedPtyReader {
+    fn wait_readable(&mut self, timeout: Option<Duration>) {
+        if self.offset < self.pending.len() || self.received.is_some() {
+            return;
+        }
+        let received = match timeout {
+            Some(timeout) => self.rx.recv_timeout(timeout),
+            None => self
+                .rx
+                .recv()
+                .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+        };
+        // 超时什么也不留；读线程没了由下一次 `read` 的 `try_recv` 报 EOF。
+        if let Ok(item) = received {
+            self.received = Some(item);
+        }
     }
 }
 
@@ -825,7 +885,11 @@ impl Read for ThreadedPtyReader {
             }
             return Ok(n);
         }
-        match self.rx.recv_timeout(Duration::from_secs(1)) {
+        let next = match self.received.take() {
+            Some(item) => Ok(item),
+            None => self.rx.try_recv(),
+        };
+        match next {
             Ok(Ok(data)) if data.is_empty() => Ok(0),
             Ok(Ok(data)) => {
                 self.pending = data;
@@ -833,11 +897,11 @@ impl Read for ThreadedPtyReader {
                 self.read(buf)
             }
             Ok(Err(error)) => Err(error),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+            Err(std::sync::mpsc::TryRecvError::Empty) => Err(std::io::Error::new(
                 ErrorKind::WouldBlock,
-                "pty read timeout",
+                "pty has no output yet",
             )),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(0),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(0),
         }
     }
 }
@@ -2644,6 +2708,9 @@ fn main() {
         .and_then(|pid| pid.parse::<i32>().ok());
     // Edition 2024：`remove_var` 标为 unsafe（多线程改 env 非同步）。此时只有不访问
     // 环境变量的 stderr tee 读线程，尚未启动任何会并发读环境的业务线程。
+    // 桌面拉起时递来的就绪管道（见 `smelt_sys::ready_pipe`）：绑好 socket 后写一个字节，
+    // 桌面就不用隔一会儿试连。没就绪就退出时写端随进程关掉，桌面立刻知道。
+    let ready = unsafe { smelt_sys::ready_pipe::ReadyNotifier::take_from_env() };
     unsafe {
         std::env::remove_var("SMELTD_HANDOFF");
         std::env::remove_var("SMELTD_HANDOFF_SOCK");
@@ -2695,6 +2762,10 @@ fn main() {
         drop(listener);
         let _ = std::fs::remove_file(&path);
         std::process::exit(1);
+    }
+    // 监听已经在内核里排队接连接，accept 循环稍后起来也不丢：这就算就绪。
+    if let Some(ready) = ready {
+        ready.notify();
     }
     // 拿到监听之后才接住 SIGTERM/SIGINT：停机会摘掉 socket 路径，还没拿到监听的进程
     // 摘掉的是正在服务的那个守护的。在这之前收到信号按默认动作退出，本来也没有要收尾的。
@@ -2765,8 +2836,111 @@ fn wait_for_test_owner_exit(owner: i32) {
     while !smelt_core::process_wait::wait_until_exit(owner, Duration::from_secs(3600)) {}
 }
 
+/// headless 自升级第一次检查前让 GUI 先手：GUI 拉起守护后马上会连上来，升级时机归它。
+/// 只在启动时等这一次。
+const HEADLESS_UPGRADE_STARTUP_GRACE: Duration = Duration::from_secs(60);
+/// 升级没做成（交接被拒、读不了新映像）之后隔多久再试：从 60 秒起翻倍，上限 30 分钟。
+// 轮询例外：升级被拒之后没有「可以再试了」的事件；周期 60 秒起翻倍，上限 30 分钟。新映像挂上、最后一个观看连接断开都会立刻再看。
+const HEADLESS_UPGRADE_RETRY_FIRST: Duration = Duration::from_secs(60);
+const HEADLESS_UPGRADE_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// 叫醒 headless 自升级线程。容量 1 的通道：连着来的几次合成一次检查。
+static HEADLESS_UPGRADE_WAKE: Mutex<Option<std::sync::mpsc::SyncSender<()>>> = Mutex::new(None);
+
+/// 最后一个观看连接断开时由 [`protocol::ViewerLease`] 调用。线程没起来时什么也不做。
+pub(crate) fn nudge_headless_self_upgrade() {
+    if let Ok(slot) = HEADLESS_UPGRADE_WAKE.lock()
+        && let Some(wake) = slot.as_ref()
+    {
+        let _ = wake.try_send(());
+    }
+}
+
+/// 连续第 `failures` 次（从 0 起）没升成之后隔多久再试。
+fn headless_upgrade_retry_delay(failures: u32) -> Duration {
+    HEADLESS_UPGRADE_RETRY_FIRST
+        .saturating_mul(1u32.checked_shl(failures).unwrap_or(u32::MAX))
+        .min(HEADLESS_UPGRADE_RETRY_MAX)
+}
+
+/// 这条文件事件是不是 `smeltd.pending` 被挂上、改指或拿掉。事件丢了（要重扫）也算，
+/// 宁可多看一眼。
+fn touches_staged_successor(event: &notify::Event) -> bool {
+    let pending = std::ffi::OsStr::new(smelt_core::daemon_image::PENDING_NAME);
+    event.need_rescan()
+        || event
+            .paths
+            .iter()
+            .any(|path| path.file_name() == Some(pending))
+}
+
+/// 盯着守护映像所在的目录，`smeltd.pending` 一变就叫醒自升级线程。盯不上只记日志：
+/// 那样新映像要等下一次「最后一个观看连接断开」才会被看到。
+fn watch_staged_successor(
+    wake: std::sync::mpsc::SyncSender<()>,
+) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher as _;
+    let dir = daemon_executable_path().ok()?.parent()?.to_path_buf();
+    let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        // 出错多半是事件丢了，看一眼不亏。
+        let relevant = match &event {
+            Ok(event) => touches_staged_successor(event),
+            Err(_) => true,
+        };
+        if relevant {
+            let _ = wake.try_send(());
+        }
+    });
+    let mut watcher = match watcher {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            dlog(&format!("headless 自升级盯不住 {}：{error}", dir.display()));
+            return None;
+        }
+    };
+    if let Err(error) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+        dlog(&format!("headless 自升级盯不住 {}：{error}", dir.display()));
+        return None;
+    }
+    Some(watcher)
+}
+
+enum HeadlessUpgradeStep {
+    /// 已经交给新映像，本线程到此为止。
+    Upgraded,
+    /// 现在没什么可做：有人在看、没挂新映像、挂的就是自己。等下一次事件。
+    Idle,
+    Failed(String),
+}
+
+fn headless_self_upgrade_once(pinned: &str) -> HeadlessUpgradeStep {
+    // 有人在看就让 GUI 提示并重启，避免无界面地把对话打断。
+    if protocol::viewer_is_present() {
+        return HeadlessUpgradeStep::Idle;
+    }
+    let Ok(current) = daemon_executable_path() else {
+        return HeadlessUpgradeStep::Idle;
+    };
+    let Some(target) = staged_successor_executable(&current) else {
+        return HeadlessUpgradeStep::Idle;
+    };
+    let disk = match smelt_core::daemon_image::content_fingerprint(&target) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => return HeadlessUpgradeStep::Failed(format!("读不了新映像：{error}")),
+    };
+    if disk == pinned {
+        return HeadlessUpgradeStep::Idle;
+    }
+    dlog("headless 自升级：已 stage 新映像且没有观看连接，重启到新映像");
+    match request_self_upgrade(&target) {
+        SelfUpgradeOutcome::Upgraded => HeadlessUpgradeStep::Upgraded,
+        SelfUpgradeOutcome::Failed(reason) => HeadlessUpgradeStep::Failed(reason),
+    }
+}
+
 /// headless 自升级：没人看时，把 `smeltd.pending` 指向的新映像应用到运行中的守护。
-/// 每 60s 看一次（与 GUI 的 watch 同频，首轮延迟 60s，把先手让给 GUI）。
+/// 启动后先让 GUI 一分钟，之后只在两件事发生时看：`smeltd.pending` 变了，最后一个
+/// 观看连接断开了。
 /// 门控：
 /// - 指纹未知（None）不升：证明不了自己旧，别乱动。
 /// - 有活着的观看连接就不升：GUI 在，由它提示用户并重启。
@@ -2775,34 +2949,42 @@ fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
     let Some(pinned) = daemon_fingerprint else {
         return;
     };
+    let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
     std::thread::Builder::new()
         .name("smelt-headless-self-upgrade".into())
         .spawn(move || {
+            let _watcher = watch_staged_successor(wake_tx.clone());
+            if let Ok(mut slot) = HEADLESS_UPGRADE_WAKE.lock() {
+                *slot = Some(wake_tx);
+            }
+            // 期间到的叫醒留在通道里，让完一起看。
+            std::thread::sleep(HEADLESS_UPGRADE_STARTUP_GRACE);
+            let mut failures = 0u32;
             loop {
-                std::thread::sleep(Duration::from_secs(60));
-                // 有人在看就让 GUI 提示并重启，避免无界面地把对话打断。
-                if protocol::viewer_is_present() {
-                    continue;
-                }
-                let Ok(current) = daemon_executable_path() else {
-                    continue;
-                };
-                let Some(target) = staged_successor_executable(&current) else {
-                    continue;
-                };
-                let disk = match smelt_core::daemon_image::content_fingerprint(&target) {
-                    Ok(fingerprint) => fingerprint,
-                    Err(_) => continue,
-                };
-                if disk == pinned {
-                    continue;
-                }
-                dlog("headless 自升级：已 stage 新映像且没有观看连接，重启到新映像");
-                match request_self_upgrade(&target) {
-                    SelfUpgradeOutcome::Upgraded => return,
-                    SelfUpgradeOutcome::Failed(reason) => {
-                        dlog(&format!("headless 自升级未完成，60s 后重试：{reason}"));
+                let retry = match headless_self_upgrade_once(&pinned) {
+                    HeadlessUpgradeStep::Upgraded => return,
+                    HeadlessUpgradeStep::Idle => {
+                        failures = 0;
+                        None
                     }
+                    HeadlessUpgradeStep::Failed(reason) => {
+                        let delay = headless_upgrade_retry_delay(failures);
+                        failures = failures.saturating_add(1);
+                        dlog(&format!(
+                            "headless 自升级未完成，{}s 后重试：{reason}",
+                            delay.as_secs()
+                        ));
+                        Some(delay)
+                    }
+                };
+                let woke = match retry {
+                    Some(delay) => wake_rx.recv_timeout(delay),
+                    None => wake_rx
+                        .recv()
+                        .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+                };
+                if matches!(woke, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) {
+                    return;
                 }
             }
         })
@@ -2851,6 +3033,15 @@ pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutco
         return SelfUpgradeOutcome::Failed(format!("读回包失败：{error}"));
     }
     classify_self_upgrade_reply(&reply)
+}
+
+/// 命名管道连续第 `failures` 次（从 0 起）accept 失败后隔多久再试：50 毫秒起翻倍，
+/// 上限 5 秒。
+#[cfg(any(windows, test))]
+fn pipe_accept_retry_delay(failures: u32) -> Duration {
+    Duration::from_millis(50)
+        .saturating_mul(1u32.checked_shl(failures).unwrap_or(u32::MAX))
+        .min(Duration::from_secs(5))
 }
 
 /// 服务主循环：远端自愈→accept（+macOS 菜单栏主线程编排）。
@@ -2922,16 +3113,22 @@ fn run_serve_loop(
                         return;
                     }
                 };
+                // 轮询例外：accept 失败（建不出新的管道实例、客户端连上就断）之后没有「可以再试」
+                // 的事件；周期 50 毫秒起翻倍，上限 5 秒，成功一次就回到起点。不放弃：Bun 只能走
+                // 这条管道连守护。
+                let mut failures = 0u32;
                 loop {
                     match listener.accept() {
                         Ok(stream) => {
+                            failures = 0;
                             let context = pipe_server.context(Principal::Local);
                             let conn = ClientConn::from_pipe(stream);
                             thread::spawn(move || handle_conn(conn, context));
                         }
                         Err(error) => {
                             dlog(&format!("命名管道 accept 失败：{error}"));
-                            thread::sleep(Duration::from_millis(50));
+                            thread::sleep(pipe_accept_retry_delay(failures));
+                            failures = failures.saturating_add(1);
                         }
                     }
                 }
@@ -3410,9 +3607,14 @@ fn publish_terminal_notifications(
     }
 }
 
-fn publish_terminal_progress(progress: &mut ProgressTracker, id: &str, event_hub: &EventHubHandle) {
+fn publish_terminal_progress(
+    progress: &mut ProgressTracker,
+    id: &str,
+    instance: u64,
+    event_hub: &EventHubHandle,
+) {
     if let Some(update) = progress.take_update(Instant::now())
-        && let Err(error) = event_hub.publish_terminal_progress(id, update)
+        && let Err(error) = event_hub.publish_terminal_progress(id, instance, update)
     {
         eprintln!("[event-hub] terminal progress publish failed: {error}");
     }
@@ -3444,32 +3646,14 @@ fn start_pty_pump(
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    #[cfg(unix)]
-                    {
-                        let mut pollfd = libc::pollfd {
-                            fd: pty_reader.as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        let polled = unsafe { libc::poll(&mut pollfd, 1, 1000) };
-                        if polled < 0
-                            && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted
-                        {
-                            break;
-                        }
-                        if polled > 0 {
-                            let events = pollfd.revents;
-                            if events & libc::POLLNVAL != 0
-                                || (events & libc::POLLIN == 0
-                                    && events & (libc::POLLERR | libc::POLLHUP) != 0)
-                            {
-                                break;
-                            }
-                        }
+                    // 没输出时一直等。进度条还在时最多等到它过期，好把不再刷新的进度条清掉。
+                    let timeout = progress
+                        .next_deadline()
+                        .map(|at| at.saturating_duration_since(Instant::now()));
+                    if !wait_pty_readable(&mut *pty_reader, timeout) {
+                        break;
                     }
-                    // 没输出时每秒醒一次：顺带把不再刷新的进度条清掉、定期重发还在的。
-                    // Windows 的读端在超时后返回 WouldBlock，这里不再 poll。
-                    publish_terminal_progress(&mut progress, &id, &event_hub);
+                    publish_terminal_progress(&mut progress, &id, sess.instance, &event_hub);
                     continue;
                 }
                 Err(_) => break,
@@ -3512,10 +3696,11 @@ fn start_pty_pump(
                     // 再做，避免把 resize 的 ctl -> term 路径拖住。
                     flush_terminal_color_replies(&sess);
                     publish_terminal_notifications(&sess.state, &id, &event_hub, notifications);
-                    publish_terminal_progress(&mut progress, &id, &event_hub);
+                    publish_terminal_progress(&mut progress, &id, sess.instance, &event_hub);
                 }
             }
         }
+        event_hub.forget_terminal_progress(&id, sess.instance);
         // 主动 kill 可能已经摘掉并替换了同 ID slot。这里只能清理自己仍拥有的实例，
         // 否则旧 PTY EOF 会删掉刚创建的新会话和它的远程目录。
         let _lifecycle = slot.lifecycle.lock().unwrap();

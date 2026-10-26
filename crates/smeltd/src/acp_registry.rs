@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::Duration;
 
 pub(crate) struct AcpSlot<T> {
     pub(crate) lifecycle: Mutex<()>,
@@ -52,6 +53,8 @@ pub(crate) struct AcpRegistry<T> {
     /// 会话表和 provider 所有权必须在同一个临界区内变更。拆成两把锁会让
     /// reserve/remove 与 acquire/release 之间出现可观察的半状态。
     state: Mutex<RegistryState<T>>,
+    /// 有新会话登记时响一次，和 `state` 配对。等某个会话出现的人在这上面等。
+    inserted: Condvar,
     spawn_gate: Arc<RwLock<()>>,
     spawn_policy: AcpSpawnPolicy,
 }
@@ -74,6 +77,7 @@ impl<T> AcpRegistry<T> {
                 resume_owners: HashMap::new(),
                 session_resumes: HashMap::new(),
             }),
+            inserted: Condvar::new(),
             spawn_gate,
             spawn_policy,
         }
@@ -174,6 +178,7 @@ impl<T> AcpRegistry<T> {
                     value: create(),
                 });
                 entry.insert(Arc::clone(&slot));
+                self.inserted.notify_all();
                 (slot, true)
             }
         }
@@ -181,6 +186,17 @@ impl<T> AcpRegistry<T> {
 
     pub(crate) fn get(&self, id: &str) -> Option<Arc<AcpSlot<T>>> {
         self.state.lock().unwrap().sessions.get(id).cloned()
+    }
+
+    /// 等 `id` 登记进来，最多等 `timeout`。已经在就立刻返回。
+    pub(crate) fn wait_for(&self, id: &str, timeout: Duration) -> Option<Arc<AcpSlot<T>>> {
+        let (state, _) = self
+            .inserted
+            .wait_timeout_while(self.state.lock().unwrap(), timeout, |state| {
+                !state.sessions.contains_key(id)
+            })
+            .unwrap();
+        state.sessions.get(id).cloned()
     }
 
     pub(crate) fn is_current(&self, id: &str, expected: &Arc<AcpSlot<T>>) -> bool {
@@ -277,6 +293,22 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
+
+    #[test]
+    fn waiting_for_a_session_returns_once_it_is_registered() {
+        let registry = Arc::new(AcpRegistry::<usize>::new(Arc::new(RwLock::new(()))));
+        assert!(registry.wait_for("acp-missing", Duration::ZERO).is_none());
+        let waiter = {
+            let registry = Arc::clone(&registry);
+            std::thread::spawn(move || {
+                registry
+                    .wait_for("acp-late", Duration::from_secs(60))
+                    .map(|slot| slot.value)
+            })
+        };
+        registry.reserve_with("acp-late", || 7);
+        assert_eq!(waiter.join().unwrap(), Some(7));
+    }
 
     #[test]
     fn concurrent_reserve_returns_one_entry() {

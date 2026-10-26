@@ -107,15 +107,24 @@ fn local() -> smelt_runtime_client::RuntimeClient {
 fn call<C: smelt_runtime_client::protocol::control::ControlCall>(
     params: &C::Params,
 ) -> Result<C::Result, String> {
+    call_with_timeout::<C>(params, smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT)
+}
+
+fn call_with_timeout<C: smelt_runtime_client::protocol::control::ControlCall>(
+    params: &C::Params,
+    timeout: std::time::Duration,
+) -> Result<C::Result, String> {
     local()
-        .call::<C>(params, smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT)
+        .call::<C>(params, timeout)
         .map_err(|error| format!("调用本机运行时失败：{error}"))
 }
 
 /// 远程访问没开就打开（保留已配的自建 relay），等它真正跑起来。
 fn ensure_remote_running() -> Result<(), String> {
-    use smelt_core::control_api::{RemoteConfigGet, RemoteConfigSet, RemoteStatus};
-    use smelt_core::remote_config::RemoteAccessState;
+    use smelt_core::control_api::{RemoteConfigGet, RemoteConfigSet, RemoteStatus, RemoteStatusWait};
+    use smelt_core::remote_config::{
+        REMOTE_STATUS_WAIT_MAX, RemoteAccessState, RemoteStatusWaitParams,
+    };
     use smelt_runtime_client::protocol::control::EmptyParams;
 
     let mut state = call::<RemoteStatus>(&EmptyParams::default())?;
@@ -132,7 +141,7 @@ fn ensure_remote_running() -> Result<(), String> {
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
-        match state {
+        match &state {
             RemoteAccessState::Running { .. } => return Ok(()),
             RemoteAccessState::Failed { error } if std::time::Instant::now() >= deadline => {
                 return Err(format!("远程访问起不来：{error}"));
@@ -142,8 +151,11 @@ fn ensure_remote_running() -> Result<(), String> {
             }
             _ => {}
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        state = call::<RemoteStatus>(&EmptyParams::default())?;
+        // 运行时在状态变了时才回；一直没变就最多挂 REMOTE_STATUS_WAIT_MAX，回来再看截止。
+        state = call_with_timeout::<RemoteStatusWait>(
+            &RemoteStatusWaitParams { known: state },
+            REMOTE_STATUS_WAIT_MAX + std::time::Duration::from_secs(5),
+        )?;
     }
 }
 

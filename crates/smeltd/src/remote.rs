@@ -7,6 +7,7 @@
 use super::*;
 use smelt_core::remote_config::{RemoteAccessState, RemoteConfig};
 use smelt_iroh::runtime::ConnectionRegistry;
+use std::sync::{LockResult, MutexGuard};
 
 /// 远程访问开着时持有的空闲防睡眠断言名称。合盖仍走 Clamshell Sleep。
 #[cfg(target_os = "macos")]
@@ -277,22 +278,135 @@ pub(crate) fn sync_remote_sleep_assertion(state: &RemoteState) {
     }
 }
 
-fn run_power_source_watch(state: RemoteState, generation: u64) {
-    let mut last = None;
+// 供电方式变化走 notify(3)：系统在供电方式切换（交流电 ↔ 电池 / UPS）时发
+// `kIOPSNotifyPowerSource`。用文件描述符接收，监听线程阻塞在 `read` 上，不用 CFRunLoop。
+// 只有 macOS 读得到供电方式，别的平台一律当插电，不起监听线程。
+#[cfg(target_os = "macos")]
+mod power_notify {
+    use std::ffi::{c_char, c_int};
+
+    pub(super) const NOTIFY_STATUS_OK: u32 = 0;
+    pub(super) const NOTIFY_REUSE: c_int = 1;
+    /// `IOPowerSources.h` 的 `kIOPSNotifyPowerSource`。
+    pub(super) const POWER_SOURCE_KEY: &std::ffi::CStr = c"com.apple.system.powersources.source";
+
+    unsafe extern "C" {
+        pub(super) fn notify_register_file_descriptor(
+            name: *const c_char,
+            notify_fd: *mut c_int,
+            flags: c_int,
+            out_token: *mut c_int,
+        ) -> u32;
+        pub(super) fn notify_cancel(token: c_int) -> u32;
+        pub(super) fn notify_post(name: *const c_char) -> u32;
+    }
+}
+
+/// 供电方式监听。跟着 endpoint 活：endpoint 被拿掉（关远程、换 relay、升级前停机）
+/// 时 Drop 发一条只有这个监听认得的通知，监听线程醒来就退出。
+#[cfg(target_os = "macos")]
+pub(crate) struct PowerSourceWatch {
+    stop: Arc<AtomicBool>,
+    stop_name: std::ffi::CString,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for PowerSourceWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        unsafe { power_notify::notify_post(self.stop_name.as_ptr()) };
+    }
+}
+
+/// 订阅供电方式变化，起监听线程。订阅不上只记日志：断言停在绑定成功时的样子。
+#[cfg(target_os = "macos")]
+fn start_power_source_watch(state: &RemoteState) -> Option<PowerSourceWatch> {
+    use power_notify::*;
+    static NEXT_WATCH: AtomicU64 = AtomicU64::new(0);
+
+    let stop_name = std::ffi::CString::new(format!(
+        "com.smelt.smeltd.{}.power-watch.{}",
+        std::process::id(),
+        NEXT_WATCH.fetch_add(1, Ordering::Relaxed)
+    ))
+    .ok()?;
+    let mut fd = -1;
+    let mut power_token = 0;
+    let mut stop_token = 0;
+    let status = unsafe {
+        notify_register_file_descriptor(POWER_SOURCE_KEY.as_ptr(), &mut fd, 0, &mut power_token)
+    };
+    if status != NOTIFY_STATUS_OK {
+        dlog(&format!("订阅供电方式变化失败：notify {status}"));
+        return None;
+    }
+    let status = unsafe {
+        notify_register_file_descriptor(stop_name.as_ptr(), &mut fd, NOTIFY_REUSE, &mut stop_token)
+    };
+    if status != NOTIFY_STATUS_OK {
+        unsafe { notify_cancel(power_token) };
+        dlog(&format!("订阅供电方式变化失败：notify {status}"));
+        return None;
+    }
+    // 别漏进拉起的子进程。
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    let stop = Arc::new(AtomicBool::new(false));
+    let watch_stop = Arc::clone(&stop);
+    let watch_state = Arc::clone(state);
+    let spawned = thread::Builder::new()
+        .name("smeltd-power-source".into())
+        .spawn(move || {
+            run_power_source_watch(&watch_state, fd, &watch_stop);
+            // 最后一个订阅取消时 libnotify 自己关掉 fd。
+            unsafe {
+                notify_cancel(power_token);
+                notify_cancel(stop_token);
+            }
+        });
+    if let Err(error) = spawned {
+        unsafe {
+            notify_cancel(power_token);
+            notify_cancel(stop_token);
+        }
+        dlog(&format!("供电方式监听线程启动失败：{error}"));
+        return None;
+    }
+    Some(PowerSourceWatch { stop, stop_name })
+}
+
+/// 每来一条通知同步一次断言，直到 endpoint 被拿掉。
+#[cfg(target_os = "macos")]
+fn run_power_source_watch(state: &RemoteState, fd: std::ffi::c_int, stop: &AtomicBool) {
+    // 订阅之前那一刻的变化没有通知，先对齐一次。
+    sync_remote_sleep_assertion(state);
     loop {
-        thread::sleep(Duration::from_secs(2));
-        {
-            let guard = state.lock().unwrap();
-            if guard.stopping || guard.generation != generation || guard.endpoint.is_none() {
-                return;
+        // 每条通知是 4 字节的订阅号，只用来叫醒，内容不看。
+        let mut token = [0u8; 4];
+        let read = unsafe { libc::read(fd, token.as_mut_ptr().cast(), token.len()) };
+        if read < 0 {
+            match std::io::Error::last_os_error().kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                // fd 要是非阻塞的，就停在 poll 上等下一条。
+                std::io::ErrorKind::WouldBlock => {
+                    let mut pollfd = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    unsafe { libc::poll(&mut pollfd, 1, -1) };
+                    continue;
+                }
+                _ => {}
             }
         }
-        let now = current_power_kind();
-        if last == Some(now) {
-            continue;
+        if read <= 0 {
+            dlog("供电方式监听中断，断言停在当前状态");
+            return;
         }
-        last = Some(now);
-        sync_remote_sleep_assertion(&state);
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        sync_remote_sleep_assertion(state);
     }
 }
 
@@ -303,6 +417,9 @@ pub(crate) struct RemoteEndpoint {
     pub(crate) registry: ConnectionRegistry,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) sleep_assertion: Option<SystemSleepAssertion>,
+    /// 供电方式监听，跟 endpoint 一起放掉。
+    #[cfg(target_os = "macos")]
+    _power_watch: Option<PowerSourceWatch>,
 }
 
 impl RemoteEndpoint {
@@ -331,27 +448,68 @@ pub(crate) struct RemoteStateData {
     pub(crate) stopping: bool,
 }
 
-pub(crate) type RemoteState = Arc<Mutex<RemoteStateData>>;
+/// 远程访问的状态，外加一个「状态变了」的通知。
+pub(crate) struct RemoteShared {
+    data: Mutex<RemoteStateData>,
+    /// 改了 `remote_status` 看得到的东西、代际或停机标记就响，和 `data` 配对。
+    /// `remote.status.wait` 等状态变化，绑定退避等代际变化，都在它上面等。
+    changed: Condvar,
+}
+
+impl RemoteShared {
+    pub(crate) fn lock(&self) -> LockResult<MutexGuard<'_, RemoteStateData>> {
+        self.data.lock()
+    }
+
+    /// 改完状态、代际或停机标记，放掉锁之后调。
+    fn notify_changed(&self) {
+        self.changed.notify_all();
+    }
+}
+
+pub(crate) type RemoteState = Arc<RemoteShared>;
 
 pub(crate) fn new_remote_state() -> RemoteState {
-    Arc::new(Mutex::new(RemoteStateData::default()))
+    Arc::new(RemoteShared {
+        data: Mutex::new(RemoteStateData::default()),
+        changed: Condvar::new(),
+    })
 }
 
 pub(crate) fn remote_status(state: &RemoteState) -> RemoteAccessState {
-    let guard = state.lock().unwrap();
-    if let Some(endpoint) = guard.endpoint.as_ref() {
+    status_of(&state.lock().unwrap())
+}
+
+fn status_of(data: &RemoteStateData) -> RemoteAccessState {
+    if let Some(endpoint) = data.endpoint.as_ref() {
         return RemoteAccessState::Running {
             endpoint_id: endpoint.endpoint_id.clone(),
             relay: endpoint.relay.as_ref().map(|relay| relay.url.to_string()),
         };
     }
-    match &guard.phase {
+    match &data.phase {
         Phase::Idle => RemoteAccessState::Off,
         Phase::Starting => RemoteAccessState::Starting,
         Phase::Failed(error) => RemoteAccessState::Failed {
             error: error.clone(),
         },
     }
+}
+
+/// 等状态变得和 `known` 不一样，最多等 `timeout`，返回那时的状态（到时没变就仍是
+/// `known`）。超时只是上限：每次状态变化都会叫醒。
+pub(crate) fn wait_remote_status_change(
+    state: &RemoteState,
+    known: &RemoteAccessState,
+    timeout: Duration,
+) -> RemoteAccessState {
+    let (guard, _) = state
+        .changed
+        .wait_timeout_while(state.lock().unwrap(), timeout, |data| {
+            status_of(data) == *known
+        })
+        .unwrap();
+    status_of(&guard)
 }
 
 /// 照配置开关 endpoint，立刻返回。绑定在后台线程，失败就退避重试，直到成功、配置
@@ -377,6 +535,7 @@ pub(crate) fn apply_remote_config(state: &RemoteState, config: &RemoteConfig) {
             }
             guard.phase = Phase::Idle;
             drop(guard);
+            state.notify_changed();
             #[cfg(target_os = "macos")]
             SystemSleepAssertion::release_orphans();
             dlog("远程访问已关闭");
@@ -387,6 +546,8 @@ pub(crate) fn apply_remote_config(state: &RemoteState, config: &RemoteConfig) {
                 endpoint.shutdown();
             }
             guard.phase = Phase::Failed(error);
+            drop(guard);
+            state.notify_changed();
             return;
         }
     };
@@ -395,6 +556,9 @@ pub(crate) fn apply_remote_config(state: &RemoteState, config: &RemoteConfig) {
         .as_ref()
         .is_some_and(|endpoint| endpoint.relay == relay)
     {
+        // 状态没变，代际变了：等在旧代际上的退避也该醒来退出。
+        drop(guard);
+        state.notify_changed();
         return;
     }
     if let Some(endpoint) = guard.endpoint.take() {
@@ -402,6 +566,7 @@ pub(crate) fn apply_remote_config(state: &RemoteState, config: &RemoteConfig) {
     }
     guard.phase = Phase::Starting;
     drop(guard);
+    state.notify_changed();
     let state = Arc::clone(state);
     thread::spawn(move || bind_with_backoff(state, relay, generation));
 }
@@ -417,11 +582,23 @@ fn bind_with_backoff(
     relay: Option<smelt_iroh::RelaySettings>,
     generation: u64,
 ) {
+    // 轮询例外：绑定失败多半是网络还没好，守护拿不到可靠的「网络好了」事件（无头 Linux
+    // 上更没有）；周期 0/3/10/30/60 秒退避，之后每 60 秒一次，上限是远程开着的时长：
+    // 关远程、换配置、停机都会推进代际或置停，立刻叫醒这里退出。
     const BACKOFF_SECS: [u64; 5] = [0, 3, 10, 30, 60];
     for attempt in 0usize.. {
         let delay = BACKOFF_SECS[attempt.min(BACKOFF_SECS.len() - 1)];
         if delay > 0 {
-            thread::sleep(Duration::from_secs(delay));
+            drop(
+                state
+                    .changed
+                    .wait_timeout_while(
+                        state.lock().unwrap(),
+                        Duration::from_secs(delay),
+                        |data| !data.stopping && data.generation == generation,
+                    )
+                    .unwrap(),
+            );
         }
         if !generation_is_current(&state, generation) {
             return;
@@ -435,14 +612,21 @@ fn bind_with_backoff(
                     return;
                 }
                 dlog(&format!("远程访问已开启：{}", endpoint.endpoint_id));
+                // 监听跟着 endpoint 走：之后谁把 endpoint 拿掉，监听线程就退出。
+                #[cfg(target_os = "macos")]
+                let endpoint = RemoteEndpoint {
+                    _power_watch: if cfg!(test) {
+                        None
+                    } else {
+                        start_power_source_watch(&state)
+                    },
+                    ..endpoint
+                };
                 guard.endpoint = Some(endpoint);
                 guard.phase = Phase::Idle;
                 drop(guard);
+                state.notify_changed();
                 sync_remote_sleep_assertion(&state);
-                if !cfg!(test) {
-                    let watch_state = Arc::clone(&state);
-                    thread::spawn(move || run_power_source_watch(watch_state, generation));
-                }
                 return;
             }
             Err(error) => {
@@ -453,6 +637,8 @@ fn bind_with_backoff(
                 let mut guard = state.lock().unwrap();
                 if guard.generation == generation {
                     guard.phase = Phase::Failed(error);
+                    drop(guard);
+                    state.notify_changed();
                 }
             }
         }
@@ -484,6 +670,9 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
                     return;
                 }
             };
+            // 轮询例外：iroh 自带的 relay 心跳、QUIC 保活、pkarr 地址发布靠定时发包维持
+            // 连接和可达性，没有事件可替；周期约 15 秒 / 5 秒 / 5 分钟，上限是这个 endpoint
+            // 的寿命：关远程或换 relay 时 endpoint 关掉，这些定时器跟着停。
             let endpoint = match smelt_iroh::runtime::bind_runtime_endpoint(
                 secret,
                 vec![smelt_iroh::runtime::RUNTIME_ALPN.to_vec()],
@@ -536,6 +725,8 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
             registry,
             shutdown_tx: Some(shutdown_tx),
             sleep_assertion: None,
+            #[cfg(target_os = "macos")]
+            _power_watch: None,
         }),
         Ok(Err(error)) => Err(error),
         Err(_) => {
@@ -574,6 +765,7 @@ pub(crate) fn cleanup_sidecar_services() {
             guard.stopping = true;
             guard.endpoint.take()
         };
+        remote.notify_changed();
         if let Some(endpoint) = endpoint {
             endpoint.shutdown();
         }
@@ -618,7 +810,10 @@ pub(crate) fn install_test_endpoint(state: &RemoteState, endpoint_id: &str) {
         registry: ConnectionRegistry::default(),
         shutdown_tx: None,
         sleep_assertion: None,
+        #[cfg(target_os = "macos")]
+        _power_watch: None,
     });
     drop(guard);
+    state.notify_changed();
     sync_remote_sleep_assertion(state);
 }

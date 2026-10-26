@@ -32,9 +32,14 @@ impl Workspace {
         let (refresh_tx, refresh_rx) = smol::channel::unbounded::<QuotaTarget>();
         self.provider_quota_refresh_tx = Some(refresh_tx);
         cx.spawn(async move |this, cx| {
-            // 运行时可能还在起来：按断线重连的节奏等到它答话。
-            let mut attempt = 0u32;
+            // 运行时可能还在起来：等它在线再读，读失败就退避后回去等。
+            let mut failures = 0u32;
             let snapshot = loop {
+                if !crate::runtime_events::wait_online(&crate::RuntimeKey::Local, failures, cx)
+                    .await
+                {
+                    return;
+                }
                 let fetched = cx
                     .background_executor()
                     .spawn(async {
@@ -47,10 +52,7 @@ impl Workspace {
                 if let Ok(snapshot) = fetched {
                     break snapshot;
                 }
-                cx.background_executor()
-                    .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
-                    .await;
-                attempt = attempt.saturating_add(1);
+                failures = failures.saturating_add(1);
             };
             if this
                 .update(cx, |_workspace, cx| {

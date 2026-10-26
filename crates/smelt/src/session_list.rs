@@ -119,6 +119,15 @@ fn runtime_name_with_indicator(
         .tooltip(move |window, cx| {
             gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
         })
+        // 延迟平时只在连接换路径时读；有人悬停来看时再读一次，提示里的数是新的。
+        .on_hover({
+            let key = key.clone();
+            move |hovered, _window, cx| {
+                if *hovered {
+                    crate::runtimes::sample_link(&key, cx);
+                }
+            }
+        })
         .into_any_element()
 }
 

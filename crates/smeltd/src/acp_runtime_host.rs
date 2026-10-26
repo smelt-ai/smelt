@@ -494,7 +494,7 @@ fn start_snapshot_reader(
                     Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                     Ok(0) => {
                         reap_host_tasks(host_pid);
-                        return;
+                        break;
                     }
                     Ok(_) => {
                         if !dispatch_snapshot_line(
@@ -505,15 +505,18 @@ fn start_snapshot_reader(
                             &history_waiters,
                             &peer_requests,
                         ) {
-                            return;
+                            break;
                         }
                     }
                     Err(_) => {
                         reap_host_tasks(host_pid);
-                        return;
+                        break;
                     }
                 }
             }
+            // 宿主那头断了，等着的历史页不会再来。丢掉发送端，等的人立刻收到断开，
+            // 不用等满超时。
+            history_waiters.lock().unwrap().clear();
         })?;
     Ok(rx)
 }

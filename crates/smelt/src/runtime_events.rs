@@ -11,6 +11,8 @@
 //! 不等空闲——对不上时桌面什么都用不了，等也没有意义。
 //!
 //! 连不上和对不上都退避重探；「重新连接」（[`reconnect`]）叫醒线程立刻再试，退避从头算。
+//! 远程机器回来不会通知这台桌面，离线时的退避翻倍到分钟级；应用回到前台、打开设置窗口时
+//! （[`probe_remotes`]）叫醒连不上的再探一次。
 //!
 //! 订阅线程是远程运行时连通性的唯一来源：每次探测的结果、订阅断开，都报回 [`RuntimeHub`]，
 //! 侧栏的「离线」跟着它走，不是只在启动时探一次。
@@ -18,13 +20,16 @@
 //! 运行时比桌面旧时先请它升到桌面的版本（设计文档 D7，见 [`upgrade_then_probe`]），升完
 //! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请，人点「重新连接」
 //! 才再请一次。
+//!
+//! 别处要读运行时的（工作区目录、配置、额度、终端重连），用 [`wait_online`] 等这里探到
+//! 在线再读，不各自拨号重试。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui::{App, Global, Subscription};
+use gpui::{App, AsyncApp, Global, Subscription};
 
 use crate::runtimes::{Runtime, RuntimeHub, RuntimeKey, RuntimeStatus};
 use crate::terminal::DaemonStateEvent;
@@ -44,9 +49,11 @@ struct RuntimeSubscriptions {
 /// 叫醒退避中的订阅线程。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Wake {
-    /// 立刻再探一次，退避从头算。
+    /// 立刻再探一次。退避不从头算：还是连不上就接着按原来的间隔等，应用每回前台一次
+    /// 就只多探一次，不会又从 250ms 起密集地拨。
     Probe,
-    /// 人点了「重新连接」：再探，运行时旧就再请它升级一次（每条线程本来只请一次）。
+    /// 人点了「重新连接」：再探，退避从头算，运行时旧就再请它升级一次（每条线程本来
+    /// 只请一次）。
     Reconnect,
 }
 
@@ -72,8 +79,20 @@ impl SubscriptionHandle {
 }
 
 /// 版本对不上要等人去升级一边，不必勤探：从 30 秒起翻倍，封顶 10 分钟。
+// 轮询例外：版本对不上要等有人去升级某一边，升级完不会通知这台桌面，只能隔一阵再探；
+// 周期 30s 起翻倍，上限 10min。
 fn incompatible_backoff(attempt: u32) -> Duration {
     (Duration::from_secs(30) * 2u32.pow(attempt.min(5))).min(Duration::from_secs(600))
+}
+
+/// 远程机器连不上时隔多久再探：250ms 起翻倍，封顶 5 分钟。刚断的（升级重启、换网络）
+/// 几秒内就能接回；关机好几天的，一小时只拨十来次。
+// 轮询例外：远程机器开机、联网后不会通知这台桌面，连上之前收不到它的任何东西，只能隔一阵
+// 拨一次；每次拨号都要过 relay 和地址发现，关机时一直勤探白白耗电耗流量，所以封顶拉到分钟
+// 级，应用回到前台、打开设置窗口（[`probe_remotes`]）和「重新连接」会立刻叫醒；周期 250ms
+// 起翻倍，上限 5min。
+fn remote_offline_backoff(attempt: u32) -> Duration {
+    (Duration::from_millis(250) * 2u32.pow(attempt.min(11))).min(Duration::from_secs(300))
 }
 
 /// 请这台运行时的订阅线程立刻重连（机器菜单的「重新连接」）。
@@ -86,12 +105,48 @@ pub(crate) fn reconnect(key: &RuntimeKey, cx: &App) {
     }
 }
 
-/// 请各台远程运行时立刻再探一次（打开设置窗口时），不重新请求升级。
+/// 请连不上、版本对不上的远程运行时立刻再探一次（打开设置窗口、应用回到前台时），不重新
+/// 请求升级。在线的连着订阅，断了自己会知道；连接中、升级中的正在探，都不用叫。
 pub(crate) fn probe_remotes(cx: &App) {
     if let Some(subscriptions) = cx.try_global::<RuntimeSubscriptions>() {
-        for handle in subscriptions.remotes.values() {
-            handle.wake(Wake::Probe);
+        for (key, handle) in &subscriptions.remotes {
+            if crate::runtimes::runtime_can_reconnect(key, cx) {
+                handle.wake(Wake::Probe);
+            }
         }
+    }
+}
+
+/// 读运行时之前等它在线。连通性由订阅线程探、记在 [`RuntimeHub`] 上，这里只看着它：在线
+/// 了才往下走，等的时候自己不拨号，远程机器关着也只有订阅线程按它的节奏去探。
+///
+/// `failures` 是这次之前已经连着失败了几次：不是 0 就先退避一会儿再看在不在线，在线却
+/// 失败（刚断线订阅还没察觉、运行时那边出错、会话又断了）时不会对着它连环重试。运行时被
+/// 移除了（远程机器删掉了）或应用要退出了返回 `false`，调用方就此停下。
+pub(crate) async fn wait_online(key: &RuntimeKey, failures: u32, cx: &AsyncApp) -> bool {
+    if let Some(previous) = failures.checked_sub(1) {
+        // 轮询例外：运行时在线、上一次却没成，没有「可以再试了」的事件可等；离线时不走这里，
+        // 退避完回去等在线；周期 250ms 起翻倍，上限 8s。
+        cx.background_executor()
+            .timer(crate::terminal::daemon_reconnect_backoff(previous))
+            .await;
+    }
+    let key = key.clone();
+    let ready = move |cx: &App| online_or_removed(&key, cx);
+    smelt_ui::global_wait::wait_for_global::<RuntimeHub, bool>(cx, ready)
+        .await
+        .unwrap_or(false)
+}
+
+/// 在线是 `Some(true)`，移除了是 `Some(false)`；还没探过、离线、版本对不上、升级中都是
+/// `None`，接着等。
+fn online_or_removed(key: &RuntimeKey, cx: &App) -> Option<bool> {
+    if crate::runtimes::runtime_online(key, cx) {
+        Some(true)
+    } else if crate::runtimes::client(key, cx).is_none() {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -181,7 +236,13 @@ pub(crate) fn spawn_subscription(
                     // 连不上就不再拨一次订阅，直接退避。
                     RuntimeStatus::Offline(_) => {
                         incompatible_attempt = 0;
-                        let pause = crate::terminal::daemon_reconnect_backoff(reconnect_attempt);
+                        let pause = if runtime.is_local() {
+                            // 轮询例外：本机守护拉不起来时没有「现在能起了」的事件，探一次就是
+                            // 再拉一次；周期 250ms 起翻倍，上限 8s。
+                            crate::terminal::daemon_reconnect_backoff(reconnect_attempt)
+                        } else {
+                            remote_offline_backoff(reconnect_attempt)
+                        };
                         reconnect_attempt = reconnect_attempt.saturating_add(1);
                         pause
                     }
@@ -209,6 +270,8 @@ pub(crate) fn spawn_subscription(
                         if connected_at.elapsed() >= Duration::from_secs(5) {
                             reconnect_attempt = 0;
                         }
+                        // 轮询例外：订阅断了，对端重新能连时不会通知我们，只能隔一会儿再探；
+                        // 周期 250ms 起翻倍，上限 8s（再探仍连不上就转到上面离线的退避）。
                         let pause = crate::terminal::daemon_reconnect_backoff(reconnect_attempt);
                         reconnect_attempt = reconnect_attempt.saturating_add(1);
                         pause
@@ -220,13 +283,14 @@ pub(crate) fn spawn_subscription(
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 };
-                // 攒着的几次叫醒并成一次，有人点过「重新连接」就按它算。
+                // 攒着的几次叫醒并成一次，有人点过「重新连接」就按它算。只是再探一次
+                // （回到前台、开设置窗口）的不动退避，见 [`Wake::Probe`]。
                 let reconnect = std::iter::once(wake)
                     .chain(woken.try_iter())
                     .any(|wake| wake == Wake::Reconnect);
-                reconnect_attempt = 0;
-                incompatible_attempt = 0;
                 if reconnect {
+                    reconnect_attempt = 0;
+                    incompatible_attempt = 0;
                     upgrade_requested = false;
                 }
             }
@@ -308,6 +372,8 @@ fn upgrade_then_probe(
     const RESTART_GRACE: Duration = Duration::from_secs(120);
     let started = Instant::now();
     loop {
+        // 轮询例外：重启中的运行时连同 iroh 端点一起下线，新进程上线不会通知这台桌面，只能
+        // 隔一会儿探一次；周期 2s，上限 120s。
         std::thread::sleep(Duration::from_secs(2));
         let status = status_of(runtime.client());
         // 连不上就是还在重启；连上了还是旧版本，就是没换成。
@@ -389,5 +455,17 @@ mod tests {
             .map(|attempt| incompatible_backoff(attempt).as_secs())
             .collect();
         assert_eq!(pauses, [30, 60, 120, 240, 480, 600, 600, 600]);
+    }
+
+    #[test]
+    fn remote_offline_backoff_doubles_up_to_five_minutes() {
+        let pauses: Vec<u128> = [0, 1, 2, 5, 9, 10, 11, 12, 100, u32::MAX]
+            .into_iter()
+            .map(|attempt| remote_offline_backoff(attempt).as_millis())
+            .collect();
+        assert_eq!(
+            pauses,
+            [250, 500, 1_000, 8_000, 128_000, 256_000, 300_000, 300_000, 300_000, 300_000]
+        );
     }
 }

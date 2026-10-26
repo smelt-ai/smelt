@@ -10,6 +10,7 @@ pub mod named_pipe;
 pub mod pi_image;
 pub mod process;
 pub mod process_wait;
+pub mod ready_pipe;
 pub mod tty_color;
 
 /// 这台机器的主机名；读不到就是 `None`。

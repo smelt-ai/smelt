@@ -53,8 +53,10 @@ pub(crate) fn graceful_shutdown(
     use std::sync::atomic::Ordering;
 
     if SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+        // 先到的那次会 exec 或退出，这条线程不会再被用到。没有人 unpark 它；
+        // park 可能假醒，所以套在循环里。
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::thread::park();
         }
     }
 

@@ -1059,6 +1059,9 @@ impl Terminal {
             };
             for attempt in 0..retries {
                 if attempt > 0 {
+                    // 轮询例外：守护 exec 交接时会无声关掉已接受、卡在升级闸门上的连接，交接
+                    // 完成没有我们能等的通知（根治要靠 smeltd 交接时不丢已接受的连接）；周期
+                    // 300ms，上限 5 次。
                     thread::sleep(HANDSHAKE_RETRY_DELAY);
                 }
                 // connect 失败（自动拉起守护 5s 都没就绪）是不可恢复的环境问题，

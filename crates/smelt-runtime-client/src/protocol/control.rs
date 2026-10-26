@@ -159,6 +159,7 @@ define_control_methods! {
     RemoteConfigGet => (REMOTE_CONFIG_GET_METHOD, "remote.config.get"),
     RemoteConfigSet => (REMOTE_CONFIG_SET_METHOD, "remote.config.set"),
     RemoteStatus => (REMOTE_STATUS_METHOD, "remote.status"),
+    RemoteStatusWait => (REMOTE_STATUS_WAIT_METHOD, "remote.status.wait"),
     DevicePairBegin => (DEVICE_PAIR_BEGIN_METHOD, "device.pair_begin"),
     DevicePair => (DEVICE_PAIR_METHOD, "device.pair"),
     DeviceList => (DEVICE_LIST_METHOD, "device.list"),
@@ -170,6 +171,7 @@ define_control_methods! {
     SessionLaunchPrepare => (SESSION_LAUNCH_PREPARE_METHOD, "session.launch.prepare"),
     SessionLoadedSkills => (SESSION_LOADED_SKILLS_METHOD, "session.loaded_skills"),
     AgentMemoryEnsureDir => (AGENT_MEMORY_ENSURE_DIR_METHOD, "agent.memory.ensure_dir"),
+    AgentMemoryWatch => (AGENT_MEMORY_WATCH_METHOD, "agent.memory.watch"),
     ProjectWatch => (PROJECT_WATCH_METHOD, "project.watch"),
     WorkspaceBrowseDirs => (WORKSPACE_BROWSE_DIRS_METHOD, "workspace.browse_dirs"),
     ConversationCreateForAgent => (CONVERSATION_CREATE_FOR_AGENT_METHOD, "conversation.create_for_agent"),
@@ -615,7 +617,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 115);
+        assert_eq!(names.len(), 117);
     }
 
     #[test]

@@ -48,9 +48,10 @@ use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::markdown_links::FileLinks;
 use smelt_ui::motion::{
-    BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_active,
-    ambient_motion_enabled, ambient_spinner, composer_shadows, copy_ack_opacity, ease_overshoot,
-    ease_snap, enter_offset_px, mix_rgba, quiet_dots, running_sweep, unit_transition,
+    BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_activated,
+    ambient_application_active, ambient_motion_enabled, ambient_spinner, composer_shadows,
+    copy_ack_opacity, ease_overshoot, ease_snap, enter_offset_px, mix_rgba, quiet_dots,
+    running_sweep, unit_transition,
 };
 use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
@@ -2736,7 +2737,8 @@ impl AcpView {
             .unwrap_or(&[])
     }
 
-    /// 回合进行中每秒重绘一次，让「已用 6s」跟 Grok 一样往前走。
+    /// 回合进行中每秒重绘一次，让「已用 6s」跟 Grok 一样往前走。应用不在前台时看不见，
+    /// 跟装饰动画一样停下，等回到前台再走（回前台那一帧本来就会重画，时间不会错）。
     fn ensure_running_tick(&mut self, cx: &mut Context<Self>) {
         if self.running_tick {
             return;
@@ -2744,6 +2746,7 @@ impl AcpView {
         self.running_tick = true;
         cx.spawn(async move |this, cx| {
             loop {
+                ambient_application_activated(cx).await;
                 smol::Timer::after(std::time::Duration::from_secs(1)).await;
                 let keep = this
                     .update(cx, |view, cx| {

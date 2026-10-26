@@ -4,13 +4,15 @@
 //! 配置拉起来，客户端不用补发什么。
 
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
-use gpui::{App, Global, Image, ImageFormat, SharedString};
+use gpui::{App, Global, Image, ImageFormat, SharedString, Task};
 use smelt_model::control_api::{
     DeviceList, DevicePairBegin, DeviceRevoke, RemoteConfigGet, RemoteConfigSet, RemoteStatus,
+    RemoteStatusWait,
 };
-use smelt_model::remote_config::{DeviceIdParams, DeviceInfo, RemoteAccessState};
+use smelt_model::remote_config::{
+    DeviceIdParams, DeviceInfo, REMOTE_STATUS_WAIT_MAX, RemoteAccessState, RemoteStatusWaitParams,
+};
 use smelt_runtime_client::protocol::control::{ControlCall, EmptyParams};
 
 /// 远程访问配置。孤儿规则不允许给外部类型实现 GPUI 的 `Global`，套一层 newtype。
@@ -93,11 +95,15 @@ fn user_edited() -> &'static std::sync::atomic::AtomicBool {
     EDITED.get_or_init(Default::default)
 }
 
-/// 启动时从运行时取回配置。运行时可能还在起来，按断线重连的节奏等它。
+/// 启动时从本机运行时取回配置。运行时可能还在起来：等它在线再读，读失败就退避后回去等
+/// （见 [`crate::runtime_events::wait_online`]）。
 pub fn start_remote_config_load(cx: &mut App) {
     cx.spawn(async move |cx| {
-        let mut attempt = 0u32;
+        let mut failures = 0u32;
         let loaded = loop {
+            if !crate::runtime_events::wait_online(&crate::RuntimeKey::Local, failures, cx).await {
+                return;
+            }
             let fetched = cx
                 .background_executor()
                 .spawn(async {
@@ -110,10 +116,7 @@ pub fn start_remote_config_load(cx: &mut App) {
             if let Ok(config) = fetched {
                 break RemoteConfig(config);
             }
-            cx.background_executor()
-                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
-                .await;
-            attempt = attempt.saturating_add(1);
+            failures = failures.saturating_add(1);
         };
         cx.update(|cx| {
             if !user_edited().load(std::sync::atomic::Ordering::SeqCst) {
@@ -124,7 +127,8 @@ pub fn start_remote_config_load(cx: &mut App) {
     .detach();
 }
 
-/// 取一次远程状态和设备列表。打开设置窗口时调；绑定中就隔一秒再看。
+/// 取一次远程状态和设备列表。打开设置窗口时调；绑定中就等它绑完（见
+/// [`watch_remote_status`]）。
 pub fn refresh_remote(cx: &mut App) {
     run_call::<RemoteStatus>(EmptyParams::default(), cx, |result, cx| {
         let starting = matches!(result, Ok(RemoteAccessState::Starting));
@@ -133,28 +137,76 @@ pub fn refresh_remote(cx: &mut App) {
             Err(error) => state.error = Some(error),
         });
         if starting {
-            poll_remote_status_later(cx);
+            watch_remote_status(cx);
         }
     });
     refresh_devices(cx);
 }
 
-fn poll_remote_status_later(cx: &mut App) {
-    cx.spawn(async move |cx| {
-        cx.background_executor().timer(Duration::from_secs(1)).await;
-        cx.update(|cx| {
-            run_call::<RemoteStatus>(EmptyParams::default(), cx, |result, cx| {
-                let starting = matches!(result, Ok(RemoteAccessState::Starting));
-                if let Ok(status) = result {
+/// 正在跟着绑定进度的那条等待。新的顶掉旧的：丢掉旧任务就停了它。
+struct RemoteStatusWatch {
+    _task: Task<()>,
+}
+
+impl Global for RemoteStatusWatch {}
+
+/// 远程访问正在绑定（要联网找 relay，可能十几秒）时跟着它，直到绑完或失败：每次请运行时
+/// 等状态和手里的不一样了再回（`remote.status.wait`），不隔一会儿查一次。设置窗口关了就
+/// 不再等，重开时 [`refresh_remote`] 会重新取一次。
+fn watch_remote_status(cx: &mut App) {
+    let task = cx.spawn(async move |cx| {
+        let mut known = RemoteAccessState::Starting;
+        loop {
+            let params = RemoteStatusWaitParams {
+                known: known.clone(),
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<RemoteStatusWait>(
+                        params,
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let status = match result {
+                Ok(status) => status,
+                Err(error) => {
+                    cx.update(|cx| update_state(cx, |state| state.error = Some(error)));
+                    return;
+                }
+            };
+            let keep_waiting = cx.update(|cx| {
+                if status != known {
+                    let status = status.clone();
                     update_state(cx, |state| state.status = status);
                 }
-                if starting {
-                    poll_remote_status_later(cx);
-                }
+                status == RemoteAccessState::Starting && settings_window_open(cx)
             });
-        });
-    })
-    .detach();
+            if !keep_waiting {
+                return;
+            }
+            known = status;
+        }
+    });
+    cx.set_global(RemoteStatusWatch { _task: task });
+}
+
+// 运行时最多挂 REMOTE_STATUS_WAIT_MAX 就回，等它的读超时要比这长，不然没变化时会报超时。
+const _: () = assert!(
+    crate::runtime_call::RUNTIME_CALL_TIMEOUT.as_secs() > REMOTE_STATUS_WAIT_MAX.as_secs()
+);
+
+/// 设置窗口还开着。远程访问的状态只在那里显示。
+fn settings_window_open(cx: &mut App) -> bool {
+    let Some(handle) = cx
+        .try_global::<super::SettingsWindowHandle>()
+        .map(|handle| handle.0)
+    else {
+        return false;
+    };
+    handle.is_active(cx).is_some()
 }
 
 fn refresh_devices(cx: &mut App) {
@@ -196,7 +248,7 @@ fn save_remote_config(config: RemoteConfig, cx: &mut App) {
                 Err(error) => state.error = Some(format!("保存远程配置失败：{error}")),
             });
             if starting {
-                poll_remote_status_later(cx);
+                watch_remote_status(cx);
             }
         });
     })

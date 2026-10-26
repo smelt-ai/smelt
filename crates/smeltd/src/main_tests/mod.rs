@@ -48,6 +48,7 @@ fn make_acp_session_value(
     AcpSession {
         instance,
         reduced: Mutex::new(reduced),
+        reduced_changed: Condvar::new(),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
         turn_completion: Mutex::new(()),

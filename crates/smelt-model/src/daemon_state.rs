@@ -206,31 +206,6 @@ impl DaemonSessionState {
     }
 }
 
-/// 终端 attachment 断线后的下一步。权威答案是 reattach 本身；镜像只用来
-/// 确认「当前 epoch 已经明确没有 runtime」，避免在 shell 真退出后永远重试。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TerminalReconnectAction {
-    /// 守护还没起来。
-    Wait,
-    /// 立刻 reattach。镜像未知时也走这条——attach 成功则会话还活着。
-    Reattach,
-    /// 当前订阅快照明确说这个 id 没有 runtime，停止补发。
-    GiveUp,
-}
-
-pub fn terminal_reconnect_action(
-    daemon_up: bool,
-    runtime_alive: Option<bool>,
-) -> TerminalReconnectAction {
-    if !daemon_up {
-        return TerminalReconnectAction::Wait;
-    }
-    match runtime_alive {
-        Some(false) => TerminalReconnectAction::GiveUp,
-        Some(true) | None => TerminalReconnectAction::Reattach,
-    }
-}
-
 /// 会话管理刚杀掉的 id，在 subscribe 确认消失前从快照里滤掉。
 /// 返回过滤后的列表，并丢掉镜像里已经没有的 tombstone。
 pub fn apply_identity_tombstones(
@@ -292,6 +267,8 @@ pub enum DaemonStateEvent {
     ConversationWakeRequested { session_id: String },
     /// 关注过的项目目录里有文件变了。
     ProjectChanged { root: String },
+    /// 关注过的智能体的记忆目录里有文件变了（`None` 是用户全局记忆）。
+    AgentMemoryChanged { agent_id: Option<String> },
     /// 会话里的终端程序发了一条 OSC 9/99/777 通知。一次性事件，不是投影；会话已有
     /// 结构化 hook 事件时运行时不会发。
     TerminalNotification { session_id: String, message: String },
@@ -392,31 +369,6 @@ mod tests {
         assert_eq!(
             DaemonSessionState::runtime_alive_from_mirror(false, true, None),
             None
-        );
-    }
-
-    #[test]
-    fn reconnect_tries_attach_until_current_epoch_says_dead() {
-        assert_eq!(
-            terminal_reconnect_action(false, None),
-            TerminalReconnectAction::Wait
-        );
-        assert_eq!(
-            terminal_reconnect_action(false, Some(false)),
-            TerminalReconnectAction::Wait
-        );
-        // 守护已起来但新订阅还没到：立刻 reattach，不要空等镜像。
-        assert_eq!(
-            terminal_reconnect_action(true, None),
-            TerminalReconnectAction::Reattach
-        );
-        assert_eq!(
-            terminal_reconnect_action(true, Some(true)),
-            TerminalReconnectAction::Reattach
-        );
-        assert_eq!(
-            terminal_reconnect_action(true, Some(false)),
-            TerminalReconnectAction::GiveUp
         );
     }
 

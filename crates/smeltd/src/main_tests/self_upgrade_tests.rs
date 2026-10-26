@@ -54,3 +54,36 @@ fn nested_viewer_leases_keep_presence_until_the_last_drop() {
     );
     drop(outer);
 }
+
+#[test]
+fn only_changes_to_the_pending_link_wake_the_headless_upgrade() {
+    use notify::event::{CreateKind, EventKind, Flag, ModifyKind, RenameMode};
+    let dir = std::path::PathBuf::from("/opt/smelt/bin");
+    let renamed = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+        .add_path(dir.join(".smeltd.pending.link-1-abc"))
+        .add_path(dir.join(smelt_core::daemon_image::PENDING_NAME));
+    assert!(touches_staged_successor(&renamed), "挂上新映像要叫醒");
+    let unrelated = notify::Event::new(EventKind::Create(CreateKind::File))
+        .add_path(dir.join("smeltd-0123abcd"));
+    assert!(!touches_staged_successor(&unrelated), "发布映像本身还不算挂上");
+    let rescan = notify::Event::new(EventKind::Other).set_flag(Flag::Rescan);
+    assert!(touches_staged_successor(&rescan), "事件丢了要看一眼");
+}
+
+#[test]
+fn failed_headless_upgrades_back_off_up_to_thirty_minutes() {
+    assert_eq!(headless_upgrade_retry_delay(0), Duration::from_secs(60));
+    assert_eq!(headless_upgrade_retry_delay(1), Duration::from_secs(120));
+    assert_eq!(headless_upgrade_retry_delay(4), Duration::from_secs(16 * 60));
+    assert_eq!(headless_upgrade_retry_delay(5), Duration::from_secs(30 * 60));
+    assert_eq!(headless_upgrade_retry_delay(u32::MAX), Duration::from_secs(30 * 60));
+}
+
+#[test]
+fn failed_pipe_accepts_back_off_up_to_five_seconds() {
+    assert_eq!(pipe_accept_retry_delay(0), Duration::from_millis(50));
+    assert_eq!(pipe_accept_retry_delay(3), Duration::from_millis(400));
+    assert_eq!(pipe_accept_retry_delay(6), Duration::from_millis(3_200));
+    assert_eq!(pipe_accept_retry_delay(7), Duration::from_secs(5));
+    assert_eq!(pipe_accept_retry_delay(u32::MAX), Duration::from_secs(5));
+}

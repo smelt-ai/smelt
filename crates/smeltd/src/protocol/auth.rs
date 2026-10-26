@@ -631,7 +631,10 @@ impl ViewerLease {
 
 impl Drop for ViewerLease {
     fn drop(&mut self) {
-        LIVE_VIEWERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        // 最后一个观看连接走了：headless 自升级可能正等着这一刻。
+        if LIVE_VIEWERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            crate::nudge_headless_self_upgrade();
+        }
     }
 }
 

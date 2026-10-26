@@ -139,6 +139,17 @@ impl ControlCall for AgentMemoryEnsureDir {
     const METHOD: ControlMethod = ControlMethod::AgentMemoryEnsureDir;
 }
 
+/// 关注一个智能体的记忆（`id` 是智能体定义 id）：之后它自己的或用户全局的记忆目录里
+/// 文件有变化，运行时发 `agent_memory.changed` 事件。幂等；监听保持到运行时退出。
+pub enum AgentMemoryWatch {}
+
+impl ControlCall for AgentMemoryWatch {
+    type Params = AgentDefinitionIdParams;
+    type Result = EmptyParams;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryWatch;
+}
+
 /// 一次自动化运行的详情：归档的完整运行（实时投影里裁掉了大字段时才取）和对话记录。
 pub enum AutomationRunDetail {}
 
@@ -831,6 +842,11 @@ pi_calls! {
     RemoteConfigSet => RemoteConfigSet(crate::remote_config::RemoteConfig)
         -> crate::remote_config::RemoteAccessState;
     RemoteStatus => RemoteStatus(EmptyParams) -> crate::remote_config::RemoteAccessState;
+    /// 等远程访问的状态变得和 `known` 不一样，返回新状态。最多等
+    /// [`crate::remote_config::REMOTE_STATUS_WAIT_MAX`]，到时照样返回现在的状态（可能
+    /// 仍等于 `known`），调用方想继续等就再发一次。用来代替绑定期间隔一会儿查一次。
+    RemoteStatusWait => RemoteStatusWait(crate::remote_config::RemoteStatusWaitParams)
+        -> crate::remote_config::RemoteAccessState;
     /// 生成一次性配对串。远程访问要先开着。
     DevicePairBegin => DevicePairBegin(EmptyParams) -> crate::remote_config::PairingOffer;
     /// 新设备提交配对码，通过后这台设备进白名单。

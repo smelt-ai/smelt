@@ -179,6 +179,12 @@ pub(super) fn machines_button(workspace: Entity<Workspace>, cx: &App) -> impl In
                 .anchor(Anchor::BottomLeft)
                 .w(px(PANEL_WIDTH))
                 .trigger(trigger)
+                // 延迟平时只在连接换路径时读；面板打开时重读一次，看到的是现在的数。
+                .on_open_change(|open, _window, cx| {
+                    if *open {
+                        crate::runtimes::sample_links(cx);
+                    }
+                })
                 .content(move |_, window, cx| {
                     let page = machines_page(window, cx);
                     let popover = cx.entity().downgrade();
