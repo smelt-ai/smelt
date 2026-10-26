@@ -587,13 +587,20 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
             cmd.env("SMELTD_DAEMON_FINGERPRINT", fingerprint);
         }
         match smelt_sys::process::spawn_detached(&mut cmd) {
-            Ok(child) => {
+            Ok(mut child) => {
                 eprintln!(
                     "[workspace] 已拉起 smeltd pid={} ({}) menubar={}",
                     child.id(),
                     spawn_at.display(),
                     in_app_bundle
                 );
+                // 守护是本进程的直接子进程。没人 wait，它退出后会留成僵尸，按 pid 看存活
+                // 会一直以为它还在：停机要白等到强杀，强杀之后还以为没杀掉。
+                let _ = thread::Builder::new()
+                    .name("smeltd-reaper".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
                 None
             }
             Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", spawn_at.display())),
@@ -1148,77 +1155,22 @@ fn sync_managed_helpers_from_app(app: &std::path::Path) -> std::io::Result<()> {
 /// 监听 socket 的进程直接 SIGKILL，这条路径不依赖守护认不认识任何协议。
 pub fn restart_daemon() {
     let path = sock_path();
-    let daemon_pid = daemon_pid_with_timeout();
     // 硬重启后必须重新验证托管文件；此前的成功缓存不能跨 daemon 生命周期。
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
-    // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
-    if let Ok(mut s) = local_runtime().connect_with_timeout(Duration::from_secs(2)) {
-        // 优雅停机要先收割 ACP 进程组再回执。读超时盖住这段宽限，超时后下面再 SIGKILL。
-        let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
-        let _ = writeln!(
-            s,
-            "{}",
-            serde_json::json!({ "op": DaemonOperation::Shutdown })
-        );
-        let mut resp = String::new();
-        let _ = BufReader::new(s).read_line(&mut resp);
+    let stopped = smelt_client::daemon_stop::stop_local_daemon();
+    // 老守护的 version 响应没有 pid，停不停得掉只能看 socket。Unix 用 lsof 按 sock 反查。
+    // Windows 没有这条路：只删残留 sock，等下次拉起。
+    #[cfg(unix)]
+    if !stopped && local_runtime().connect().is_ok() {
+        force_kill_socket_owner(&path);
     }
-    // 等守护退出（最多 ~1s）；socket 仍能连上再强杀，**不要**提前 return 漏掉残留 sock。
-    for _ in 0..10 {
-        if local_runtime().connect().is_err() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    // shutdown 会先回包再清理 sidecar；若清理卡住，另一个启动者可能已经删掉
-    // socket 目录项，此时 lsof(path) 再也找不到旧守护。按重启前记录的 PID 兜底。
-    if let Some(pid) = daemon_pid {
-        if process_is_alive(pid) {
-            let _ = smelt_sys::process::signal_tree(pid, smelt_sys::process::TreeSignal::Kill);
-            let _ = smelt_sys::process::terminate_pid(pid);
-            for _ in 0..10 {
-                if !process_is_alive(pid) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-    } else if local_runtime().connect().is_ok() {
-        // 老守护的 version 响应没有 pid。Unix 用 lsof 按 sock 反查。
-        // Windows 没有这条路：没有 pid 就只删残留 sock，等下次拉起。
-        #[cfg(unix)]
-        {
-            force_kill_socket_owner(&path);
-            thread::sleep(Duration::from_millis(150));
-        }
-    }
+    #[cfg(not(unix))]
+    let _ = stopped;
     // 残留 sock 文件会让下一次 connect 误判/卡住；尽量清掉。
     if local_runtime().connect().is_err() {
         let _ = std::fs::remove_file(&path);
     }
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
-}
-
-fn daemon_pid_with_timeout() -> Option<u32> {
-    let mut s = local_runtime()
-        .connect_with_timeout(Duration::from_millis(500))
-        .ok()?;
-    writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::Version })
-    )
-    .ok()?;
-    let mut resp = String::new();
-    BufReader::new(s).read_line(&mut resp).ok()?;
-    let value: serde_json::Value = serde_json::from_str(resp.trim()).ok()?;
-    value["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-}
-
-fn process_is_alive(pid: u32) -> bool {
-    smelt_sys::process::pid_is_alive(pid)
 }
 
 /// 兜底：找到正监听着 `path` 的进程并 SIGKILL，再清掉残留 socket 文件。用于优雅

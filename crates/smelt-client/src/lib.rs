@@ -4,6 +4,7 @@
 pub mod acp_client;
 pub mod compat;
 pub mod daemon_state;
+pub mod daemon_stop;
 pub mod runtime;
 pub mod runtime_path;
 pub mod session_kill;

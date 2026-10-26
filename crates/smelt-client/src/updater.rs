@@ -6,7 +6,7 @@
 //! `cx.background_executor().spawn`）。
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -1960,81 +1960,9 @@ fn finalize_pending_update_for_attempt(
 
 /// 停掉本机 smeltd，并等到进程退出。替换 `.app` 之前调用。
 ///
-/// 连不上表示没有守护在跑。优雅停机超时后 SIGKILL；进程仍活着则返回 false，
-/// 调用方不得继续换包。
+/// 连不上表示没有守护在跑。进程仍活着则返回 false，调用方不得继续换包。
 pub fn shutdown_local_daemon() -> bool {
-    #[cfg(unix)]
-    {
-        shutdown_local_daemon_unix()
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-#[cfg(unix)]
-fn shutdown_local_daemon_unix() -> bool {
-    let runtime = smelt_runtime_client::local::local_runtime();
-    let pid = daemon_pid_for_shutdown();
-    let Some(mut stream) = runtime.connect_with_timeout(Duration::from_secs(2)).ok() else {
-        return pid.is_none_or(|pid| !process_alive(pid));
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
-    let wrote = writeln!(stream, "{}", serde_json::json!({ "op": "shutdown" }));
-    if wrote.is_ok() {
-        let mut line = String::new();
-        let _ = std::io::BufReader::new(stream).read_line(&mut line);
-    }
-    let Some(pid) = pid else {
-        return runtime
-            .connect_with_timeout(Duration::from_millis(200))
-            .is_err();
-    };
-    if wait_until_dead(pid, Duration::from_secs(2)) {
-        return true;
-    }
-    unsafe {
-        libc::kill(pid as i32, libc::SIGKILL);
-    }
-    wait_until_dead(pid, Duration::from_secs(2))
-}
-
-#[cfg(unix)]
-fn daemon_pid_for_shutdown() -> Option<u32> {
-    let runtime = smelt_runtime_client::local::local_runtime();
-    let mut stream = runtime
-        .connect_with_timeout(Duration::from_millis(500))
-        .ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    writeln!(stream, "{}", serde_json::json!({ "op": "version" })).ok()?;
-    let mut line = String::new();
-    std::io::BufReader::new(stream).read_line(&mut line).ok()?;
-    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    value["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-}
-
-#[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let rc = unsafe { libc::kill(pid as i32, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(unix)]
-fn wait_until_dead(pid: u32, budget: Duration) -> bool {
-    let deadline = Instant::now() + budget;
-    while Instant::now() < deadline {
-        if !process_alive(pid) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    !process_alive(pid)
+    crate::daemon_stop::stop_local_daemon()
 }
 
 fn finalize_pending_update_at(
