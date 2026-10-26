@@ -329,7 +329,7 @@ impl Workspace {
         // 仓库选择器的选项：(显示名, 仓库根)。
         let repo_label_of = |repo: &DiscoveredRepo| -> String {
             if repo.rel_path.is_empty() {
-                smelt_client::runtime_path::file_name(&root)
+                smelt_client::runtime_path::PathStyle::LOCAL.file_name(&root)
                     .unwrap_or(root.as_str())
                     .to_string()
             } else {
@@ -522,7 +522,7 @@ impl Workspace {
                 narrow_rows.push(NarrowGitRow::RepoHeader {
                     root: repo_root.clone(),
                     label: if repo.rel_path.is_empty() {
-                        smelt_client::runtime_path::file_name(&root)
+                        smelt_client::runtime_path::PathStyle::LOCAL.file_name(&root)
                             .unwrap_or(root.as_str())
                             .to_string()
                     } else {

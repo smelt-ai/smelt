@@ -4228,7 +4228,7 @@ fn command_program(command: &str) -> Option<&str> {
         {
             continue;
         }
-        return smelt_client::runtime_path::file_name(token);
+        return smelt_client::runtime_path::PathStyle::LOCAL.file_name(token);
     }
     None
 }

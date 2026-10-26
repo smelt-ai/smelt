@@ -214,7 +214,7 @@ pub(super) fn walk_dir_cached(
         return;
     };
     for (name, is_dir) in entries.iter() {
-        let path = smelt_client::runtime_path::join(dir, name);
+        let path = smelt_client::runtime_path::PathStyle::LOCAL.join(dir, name);
         let is_expanded = expanded.contains(&path);
         out.push((depth, name.clone(), *is_dir, path.clone(), is_expanded));
         if *is_dir && is_expanded {
@@ -350,7 +350,7 @@ pub(super) fn collect_file_tree_rows(
                 None
             } else {
                 marks.as_ref().and_then(|marks| {
-                    smelt_client::runtime_path::strip_prefix(&path, root)
+                    smelt_client::runtime_path::PathStyle::LOCAL.strip_prefix(&path, root)
                         .and_then(|rel| marks.get(rel.as_str()).copied())
                 })
             };
@@ -796,9 +796,9 @@ pub(super) fn breadcrumb_segments(path: &str, roots: &[String]) -> Vec<Breadcrum
 /// 名字组件会自动回退成纯文本，不会 panic。没有扩展名的文件（Makefile 等）退而
 /// 用文件名本身（能命中 "makefile" 这类按文件名匹配的语言）。
 pub(super) fn editor_language_for_path(path: &str) -> String {
-    match smelt_client::runtime_path::extension(path) {
+    match smelt_client::runtime_path::PathStyle::LOCAL.extension(path) {
         Some(ext) => ext.to_lowercase(),
-        None => smelt_client::runtime_path::file_name(path)
+        None => smelt_client::runtime_path::PathStyle::LOCAL.file_name(path)
             .unwrap_or("text")
             .to_lowercase(),
     }
