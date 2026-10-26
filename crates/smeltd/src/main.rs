@@ -23,10 +23,12 @@
 //!   {"op":"list"}                                            → 回 {"sessions":[..]} 后关闭
 //!   {"op":"kill","id":".."}                                  → 回 {"ok":true} 后关闭
 //!   {"op":"version"}                                         → 回 {"version":"..","exe_mtime":123} 后关闭
-//!   {"op":"shutdown"}                                        → 回 {"ok":true} 后进程退出（杀掉所有会话！）
-//!   {"op":"upgrade"}                                         → 回 {"ok":true} 后退出，由已拉起的
-//!                                                              新进程接替。不交接 fd，进行中的回合中断
-//!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，退出后 exec 指定路径
+//!   {"op":"shutdown"}                                        → 优雅停机（收割子进程、checkpoint 状态库）后
+//!                                                              回 {"ok":true} 再退出，所有会话结束
+//!   {"op":"upgrade"}                                         → 先把启动名拨到本进程钉住的映像，同样优雅停机、
+//!                                                              回执；Unix 随后在本进程 exec，Windows 拉起接班
+//!                                                              进程后退出。不交接 fd，进行中的回合中断
+//!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，换到指定映像
 //!   {"op":"runtime_upgrade","version":"2026.1023.0"}         → 回 {"state":"accepted"}，从 GitHub Release
 //!                                                              下载该版本校验通过后重启守护；见 runtime_upgrade.rs
 //!   {"op":"agent_event","id":"..","event":{...}}             → 回 {"ok":true} 后关闭，归一化 hook 事件
@@ -2742,7 +2744,7 @@ fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
                 dlog("headless 自升级：已 stage 新映像且没有观看连接，重启到新映像");
                 match request_self_upgrade(&target) {
                     SelfUpgradeOutcome::Upgraded => return,
-                    SelfUpgradeOutcome::Busy(reason) | SelfUpgradeOutcome::Failed(reason) => {
+                    SelfUpgradeOutcome::Failed(reason) => {
                         dlog(&format!("headless 自升级未完成，60s 后重试：{reason}"));
                     }
                 }
@@ -2754,7 +2756,6 @@ fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SelfUpgradeOutcome {
     Upgraded,
-    Busy(String),
     Failed(String),
 }
 
@@ -2772,11 +2773,7 @@ fn classify_self_upgrade_reply(reply: &str) -> SelfUpgradeOutcome {
         .or_else(|| value["error"].as_str())
         .unwrap_or("未知")
         .to_string();
-    if value["busy"].as_bool() == Some(true) {
-        SelfUpgradeOutcome::Busy(reason)
-    } else {
-        SelfUpgradeOutcome::Failed(reason)
-    }
+    SelfUpgradeOutcome::Failed(reason)
 }
 
 pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
@@ -2812,10 +2809,6 @@ fn run_serve_loop(
     event_hub: EventHubHandle,
     daemon_fingerprint: Option<String>,
 ) {
-    #[cfg(unix)]
-    let listen_fd = listener.as_raw_fd();
-    #[cfg(windows)]
-    let listen_fd = 0;
     let exe_mtime = exe_mtime_secs();
     // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
     let _ = runtime_identity::runtime_id();
@@ -2840,7 +2833,6 @@ fn run_serve_loop(
         automations,
         exe_mtime,
         daemon_fingerprint,
-        listen_fd,
         event_hub,
     };
     // 先登记再拉起远程访问：iroh 流一进来就要从这里取服务状态。

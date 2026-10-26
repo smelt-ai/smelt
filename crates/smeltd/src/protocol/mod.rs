@@ -36,8 +36,6 @@ pub(crate) struct ServerShared {
     /// 启动时钉死的进程指纹（version 回给 GUI 判 outdated 用）。
     /// 内容哈希，不随 StageDiskOnly 变化；None=启动时文件已消失的孤儿进程。
     pub(crate) daemon_fingerprint: Option<String>,
-    #[allow(dead_code)]
-    pub(crate) listen_fd: i32,
     pub(crate) event_hub: EventHubHandle,
 }
 
@@ -79,7 +77,6 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         automations,
         exe_mtime,
         daemon_fingerprint,
-        listen_fd: _,
         event_hub,
     } = shared;
     // 头一行 JSON。之后的帧字节可能已被 BufReader 预读，故帧循环必须复用同一个 reader。

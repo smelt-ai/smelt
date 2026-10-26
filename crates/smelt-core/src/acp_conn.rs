@@ -138,9 +138,6 @@ pub enum ConversationCommand {
         truncate_from: usize,
         then: AfterRewind,
     },
-    /// 连接线程内部使用：当前 turn 不再活跃，但 `TurnEnded` 已由别处发出。
-    /// 只有 exec 交接后补发遗失回调那条路径用（见 `make_resume_incoming_lines`）。
-    TurnCompleted,
     /// 连接线程内部使用：一轮 prompt 的 JSON-RPC response 已经回来。
     ///
     /// `Ok` 带 agent 给的 StopReason；`Err` 是 agent 明确回的错误响应——那是
@@ -1944,7 +1941,6 @@ async fn run_connection(
                                 ReadyKind::ResumedWithReplay,
                                 supports_image,
                                 in_flight_rpc,
-                                false,
                             )
                             .await;
                         }
@@ -1978,7 +1974,6 @@ async fn run_connection(
                 ReadyKind::Fresh,
                 supports_image,
                 in_flight_rpc,
-                false,
             )
             .await
         })
@@ -2158,7 +2153,6 @@ async fn drive_session<S: SessionDrive>(
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
     in_flight_rpc: Arc<AtomicUsize>,
-    turn_already_active: bool,
 ) -> Result<(), agent_client_protocol::Error> {
     let _ = channels.event_tx.try_send(ConversationEvent::Ready {
         session_id: session.session_id().clone(),
@@ -2169,7 +2163,7 @@ async fn drive_session<S: SessionDrive>(
     // 改变：不少 adapter 会把它留到当前 turn 结束，或用 turn 末尾的旧快照
     // 覆盖刚写入的值。这里在协议驱动层排队，保证桌面、移动端和任务入口都
     // 走同一套「本轮结束 → 配置确认 → 下一轮 prompt」顺序。
-    let mut turn_active = turn_already_active;
+    let mut turn_active = false;
     let mut pending_config_options: Vec<(String, ConfigValue)> = Vec::new();
 
     loop {
@@ -2192,17 +2186,6 @@ async fn drive_session<S: SessionDrive>(
             // 通道关闭（UI 句柄 drop）等同 Shutdown。
             Next::Cmd(None) | Next::Cmd(Some(ConversationCommand::Shutdown)) => {
                 return Ok(());
-            }
-            Next::Cmd(Some(ConversationCommand::TurnCompleted)) => {
-                turn_active = false;
-                flush_pending_config_options(
-                    &mut pending_config_options,
-                    session.connection().clone(),
-                    session.session_id().clone(),
-                    &channels.event_tx,
-                    &in_flight_rpc,
-                )
-                .await;
             }
             Next::Cmd(Some(ConversationCommand::PromptSettled(settled))) => {
                 // 响应回来时，本轮更早的通知早已按线序进了 SDK 的 update 队列

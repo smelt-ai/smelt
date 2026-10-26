@@ -298,9 +298,9 @@ fn unit_path() -> Result<PathBuf, String> {
 
 #[cfg(any(target_os = "linux", test))]
 /// 单元文件内容。`ExecStart` 是启动名 `~/.smelt/bin/smeltd` 本身（指向当前不可变映像
-/// 的软链）。升级时先把启动名拨到新映像，再由守护拉起一个独立进程，等自己退出后
-/// exec 那份映像。`Restart=on-failure` 不会在干净退出后续上，所以不能只 exit。
-/// `KillMode=process`：停服务只停守护本身。
+/// 的软链）。升级时先把启动名拨到新映像，优雅停机后在本进程里 exec 那份映像，systemd
+/// 看到的还是同一个主进程。`Restart=on-failure` 不会在干净退出后续上，所以升级不能只
+/// exit。`KillMode=process`：停服务只停守护本身。
 fn unit_contents(exe: &Path) -> String {
     format!(
         "[Unit]
@@ -383,9 +383,6 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
             .map_err(|error| format!("设置启动名失败：{error}"))?;
         match crate::request_self_upgrade(&image) {
             crate::SelfUpgradeOutcome::Upgraded => ImageInstall::Upgraded,
-            crate::SelfUpgradeOutcome::Busy(reason) => {
-                return Err(format!("运行时换到新版本失败：{reason}"));
-            }
             crate::SelfUpgradeOutcome::Failed(error) => {
                 return Err(format!("运行时换到新版本失败：{error}"));
             }

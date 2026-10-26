@@ -2174,9 +2174,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         }
         // 这两种命令只供 ACP driver 的异步 request callback 回送结果。Pi RPC 的
         // response 直接在本模块解析，不会生成它们。
-        ConversationCommand::PromptSettled(_)
-        | ConversationCommand::TurnCompleted
-        | ConversationCommand::Shutdown => {}
+        ConversationCommand::PromptSettled(_) | ConversationCommand::Shutdown => {}
     }
     Ok(())
 }

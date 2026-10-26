@@ -293,15 +293,6 @@ fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
     smelt_sys::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
 }
 
-fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
-    handoff_daemon_to_managed_once(src)
-}
-
-/// 停掉正在跑的守护，换成 `~/.smelt/bin` 里的这份映像，再拉起同版本新进程。
-fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
-    upgrade_daemon_exe(Some(src))
-}
-
 /// 多 pane 同时 connect 时串行化迁移，避免并发 upgrade 踩踏。
 static MANAGED_DAEMON_GATE: Mutex<()> = Mutex::new(());
 
@@ -495,7 +486,8 @@ fn migrate_running_daemon_off_app(managed: &std::path::Path) -> UpgradeOutcome {
             if on_managed && !inside_app {
                 return UpgradeOutcome::Upgraded;
             }
-            handoff_daemon_to_managed(managed)
+            // 停掉正在跑的守护，换成 `~/.smelt/bin` 里的这份映像，再拉起同版本新进程。
+            upgrade_daemon_exe(Some(managed))
         }
         DaemonProbe::NotRunning | DaemonProbe::Unresponsive => UpgradeOutcome::Failed,
     }
@@ -845,10 +837,6 @@ fn read_until_peer_closes(reader: &mut BufReader<RuntimeStream>, timeout: Durati
 pub enum UpgradeOutcome {
     /// 新进程已经起来，或者本来没跑、直接拉起了目标映像。
     Upgraded,
-    /// 旧守护不认识升级协议。本机路径不再发送 upgrade op，这个值只留给旧回包分类。
-    Unsupported,
-    /// 旧守护因忙碌拒绝升级。本机路径不再返回这个值。
-    Busy,
     /// 映像没发布成功，或者新进程没有接替旧进程。
     Failed,
 }
@@ -858,7 +846,7 @@ pub enum UpgradeOutcome {
 pub enum AppInstallOutcome {
     Installed,
     /// 另一条安装正占着安装锁；App 包尚未替换。
-    WaitingForSafeHandoff,
+    WaitingForInstallLock,
 }
 
 /// 停掉本机守护并拉起受管目录里的目标映像。进行中的回合会中断，历史还在。
@@ -966,23 +954,8 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
     Ok(daemon)
 }
 
-/// 安装时对运行中守护的处置：停掉旧进程，换上候选映像，再拉起。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(unix)]
-enum InstallCommitAction {
-    Restart,
-}
-
-/// 只要守护还在跑，安装就要停掉它再换映像。路径在不在 `.app` 里都一样。
-#[cfg(unix)]
-fn install_commit_action_for_running_daemon(
-    _exe_path: Option<&std::path::Path>,
-) -> InstallCommitAction {
-    InstallCommitAction::Restart
-}
-
 /// 安装提交：没在跑就只落盘；无响应先杀掉再装；在跑则停掉旧进程并换上候选映像。
-/// 安装锁被占用时由调用方返回 `WaitingForSafeHandoff`，这里不再因会话忙碌推迟。
+/// 安装锁被占用时由调用方返回 `WaitingForInstallLock`，这里不再因会话忙碌推迟。
 #[cfg(unix)]
 fn commit_candidate_daemon(
     candidate_smeltd: &std::path::Path,
@@ -1006,15 +979,11 @@ fn commit_candidate_daemon(
                 .map_err(|error| anyhow::anyhow!("旧守护无响应，重启后仍未就绪：{error}"))?;
             Ok(AppInstallOutcome::Installed)
         }
-        DaemonProbe::Running { exe_path, .. } => {
-            let exe = exe_path.as_deref().map(std::path::Path::new);
-            match install_commit_action_for_running_daemon(exe) {
-                InstallCommitAction::Restart => match upgrade_daemon_exe(Some(candidate_smeltd)) {
-                    UpgradeOutcome::Upgraded => Ok(AppInstallOutcome::Installed),
-                    _ => anyhow::bail!("装包前未能停掉旧守护并换上新映像"),
-                },
-            }
-        }
+        // 守护住在哪都一样：停掉旧进程，换上候选映像，再拉起。
+        DaemonProbe::Running { .. } => match upgrade_daemon_exe(Some(candidate_smeltd)) {
+            UpgradeOutcome::Upgraded => Ok(AppInstallOutcome::Installed),
+            UpgradeOutcome::Failed => anyhow::bail!("装包前未能停掉旧守护并换上新映像"),
+        },
     }
 }
 
@@ -1034,11 +1003,11 @@ pub fn install_local_app_bundle(
 ) -> anyhow::Result<AppInstallOutcome> {
     let _gate = match MANAGED_DAEMON_GATE.try_lock() {
         Ok(gate) => gate,
-        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForSafeHandoff),
+        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForInstallLock),
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
     };
     let Some(_file_gate) = try_acquire_managed_daemon_file_lock()? else {
-        return Ok(AppInstallOutcome::WaitingForSafeHandoff);
+        return Ok(AppInstallOutcome::WaitingForInstallLock);
     };
 
     match prepare_and_commit_candidate_app(source)? {
@@ -1082,7 +1051,7 @@ where
             );
             Some(0)
         }
-        Ok(AppInstallOutcome::WaitingForSafeHandoff) => {
+        Ok(AppInstallOutcome::WaitingForInstallLock) => {
             eprintln!("⏸ 另一条安装正在进行，未替换 App。等它结束后再 make install。");
             Some(75)
         }
@@ -1277,35 +1246,6 @@ mod successor_daemon_tests {
 #[cfg(all(test, unix))]
 mod install_commit_tests {
     use super::*;
-
-    /// 守护无论住在 managed 还是 `.app`，安装都要停掉旧进程再换映像。
-    #[test]
-    fn running_daemon_always_restarts() {
-        let managed = managed_daemon_path();
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(&managed)),
-            InstallCommitAction::Restart
-        );
-        let staged = managed_daemon_dir()
-            .join("smeltd-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(&staged)),
-            InstallCommitAction::Restart
-        );
-        let in_app = std::path::PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smeltd");
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(&in_app)),
-            InstallCommitAction::Restart
-        );
-        assert_eq!(
-            install_commit_action_for_running_daemon(Some(std::path::Path::new("/tmp/smeltd"))),
-            InstallCommitAction::Restart
-        );
-        assert_eq!(
-            install_commit_action_for_running_daemon(None),
-            InstallCommitAction::Restart
-        );
-    }
 
     #[test]
     fn only_a_down_and_unmapped_daemon_may_be_replaced() {

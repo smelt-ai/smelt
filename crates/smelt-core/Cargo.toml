@@ -40,8 +40,8 @@ agent-client-protocol = { version = "=3.4.0", features = ["process", "unstable_p
 smol = "2"
 chrono = { version = "0.4", features = ["serde"] }
 iana-time-zone = "0.1"
-# ACP 无缝升级续接（resume_acp_from_fds）要手搭 Lines 传输层（agent-client-
-# protocol 的低层原语，见 acp_conn.rs 用法），直接用它的 Stream/Sink trait。
+# ACP 连接手搭 Lines 传输层（agent-client-protocol 的低层原语，见 acp_conn.rs），
+# 用它的 Stream/Sink trait；Pi 登录事件流也走它的 channel。
 futures = "0.3"
 async-process = "2"
 libc = "0.2"
