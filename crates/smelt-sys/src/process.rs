@@ -625,26 +625,31 @@ mod windows {
         JOBS.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    /// 哪一步失败都结束进程。挂起的进程不会自己跑起来，留着只会让等它退出的人一直等。
     pub fn attach_suspended(pid: u32) -> io::Result<()> {
+        match assign_and_resume(pid) {
+            Ok(job) => {
+                remember(pid, job);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = terminate_pid(pid);
+                Err(error)
+            }
+        }
+    }
+
+    fn assign_and_resume(pid: u32) -> io::Result<OwnedHandle> {
         let job = prepare_job()?;
         let process = open_for_job(pid)?;
         let assigned = unsafe { AssignProcessToJobObject(job.raw(), process) } != 0;
-        let assign_error = if assigned {
-            None
-        } else {
-            Some(io::Error::last_os_error())
-        };
+        let assign_error = (!assigned).then(io::Error::last_os_error);
         unsafe { CloseHandle(process) };
-        if let Err(error) = resume_process(pid) {
-            let _ = terminate_pid(pid);
-            return Err(error);
-        }
         if let Some(error) = assign_error {
-            let _ = terminate_pid(pid);
             return Err(error);
         }
-        remember(pid, job);
-        Ok(())
+        resume_process(pid)?;
+        Ok(job)
     }
 
     pub fn attach_running(pid: u32) -> io::Result<()> {
