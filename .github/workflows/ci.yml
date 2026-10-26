@@ -33,7 +33,7 @@ jobs:
 
       - name: Detect changes
         id: filter
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           # rust：整个 workspace 的输入。smelt-core 的 build.rs 只读 packages/pi-agent 的版本号，
           # 桌面与 smeltd 会嵌 assets/，所以这两处也算。
