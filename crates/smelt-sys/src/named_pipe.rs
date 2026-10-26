@@ -413,36 +413,44 @@ fn overlapped_transfer(
     };
     let status = unsafe { WaitForSingleObject(event.raw(), millis) };
     if status == WAIT_OBJECT_0 {
-        return overlapped_result(handle, &overlapped, write);
+        return overlapped_result(handle, &overlapped, write, false);
     }
-    if status == WAIT_TIMEOUT {
-        unsafe { CancelIoEx(handle, &overlapped) };
-        unsafe { WaitForSingleObject(event.raw(), INFINITE) };
-        return match overlapped_result(handle, &overlapped, write) {
-            Ok(written) => Ok(written),
-            Err(error) if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) => {
+    // 超时或等待本身失败。缓冲和 OVERLAPPED 都在调用方的栈上，返回前取消并等这次读写真的结束。
+    let wait_error = (status != WAIT_TIMEOUT).then(io::Error::last_os_error);
+    unsafe { CancelIoEx(handle, &overlapped) };
+    match overlapped_result(handle, &overlapped, write, true) {
+        Ok(transferred) => Ok(transferred),
+        Err(error) if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) => {
+            Err(wait_error.unwrap_or_else(|| {
                 if matches!(wait, Wait::Poll) {
-                    Err(io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据"))
+                    io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
                 } else {
-                    Err(io::Error::new(
+                    io::Error::new(
                         io::ErrorKind::TimedOut,
                         if write {
                             "命名管道写入超时"
                         } else {
                             "命名管道读取超时"
                         },
-                    ))
+                    )
                 }
-            }
-            Err(error) => Err(error),
-        };
+            }))
+        }
+        Err(error) => Err(error),
     }
-    Err(io::Error::last_os_error())
 }
 
-fn overlapped_result(handle: HANDLE, overlapped: &OVERLAPPED, write: bool) -> io::Result<usize> {
+/// `wait` 为真时等到这次读写结束，取消之后用。
+fn overlapped_result(
+    handle: HANDLE,
+    overlapped: &OVERLAPPED,
+    write: bool,
+    wait: bool,
+) -> io::Result<usize> {
     let mut transferred = 0u32;
-    let ok = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, 0) };
+    let ok = unsafe {
+        GetOverlappedResult(handle, overlapped, &mut transferred, i32::from(wait))
+    };
     if ok != 0 {
         return Ok(transferred as usize);
     }
