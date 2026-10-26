@@ -3,14 +3,19 @@
 //! ```text
 //!            connect / pair
 //! Disconnected ─────────────> Connecting ──成功──> Connected <──┐
-//!      ^                          │                   │ 探活失败  │ 重连成功
+//!      ^                          │                   │ 链路断开 / 确认失败 │ 重连成功
 //!      │      未配对 / 不兼容 / pair 失败 / 其它失败    v           │
 //!      ├──────────────────────────┤             Reconnecting ─────┘
 //!      │                          └─connect 离线──>   │（退避 2s 起，翻倍，封顶 30s）
-//!      └──── disconnect（任意状态）/ 探活未配对、不兼容 ──┘
+//!      └──── disconnect（任意状态）/ 重连未配对、不兼容 ──┘
 //! ```
 //!
-//! 每次 connect / pair / disconnect 换一代（generation）：旧会话的探活线程被叫停，它晚到的
+//! 已连上时不定时探活：链路断开由传输层报（[`LinkChange::Closed`]：iroh 的 QUIC 每 5 秒保活，
+//! 对端消失约 30 秒后空闲超时；运行时撤销设备、重启时直接关连接），这条链路上的长连接也同时
+//! 读到 EOF。换传输路径时刷新路径和 RTT（[`LinkChange::Path`]）。回前台、下拉刷新时
+//! [`ConnectionHub::verify`] 在现有链路上确认一次：系统在后台冻结过保活，网络可能已经换过。
+//!
+//! 每次 connect / pair / disconnect 换一代（generation）：旧会话的线程被叫停，它晚到的
 //! 结果、以及被取代的 connect / pair 的结果，都按代号丢弃。一个状态机只连一台机器，换代
 //! 只说明重新连过（重连、endpoint 换形态、重新配对），不说明换了机器。传输经 [`Dialer`]
 //! 注入，测试用假运行时。
@@ -75,12 +80,28 @@ impl Target {
     }
 }
 
-/// 一条到运行时的链路：发请求用的客户端，和读当前传输路径的方法。
+/// 链路上的变化，见 [`Link::watch`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkChange {
+    /// 换了传输路径，路径和 RTT 要刷新。
+    Path,
+    /// 连接断了，这条链路上的长连接都已读到 EOF。
+    Closed,
+}
+
+/// 链路变化的回调。在传输层的线程上调：不能阻塞，也不能在里面放掉 [`Link`]（iroh 客户端
+/// 的 Drop 会 `block_on`）。
+pub(crate) type OnLinkChange = Box<dyn Fn(LinkChange) + Send + Sync>;
+
+/// 一条到运行时的链路：发请求用的客户端，读当前传输路径、盯连接变化的方法。
 #[derive(Clone)]
 pub(crate) struct Link {
     pub client: RuntimeClient,
     /// 阻塞（iroh 连接器内部 `block_on`），只在普通线程上调。
     pub metrics: Arc<dyn Fn() -> LinkMetrics + Send + Sync>,
+    /// 盯着这条链路当前的连接，返回的守卫丢掉就不再盯。还没连上或已经断了时立刻报
+    /// [`LinkChange::Closed`]。阻塞（`block_on`），只在普通线程上调。
+    pub watch: Arc<dyn Fn(OnLinkChange) -> Box<dyn Send> + Send + Sync>,
 }
 
 /// 到某个运行时的路由，能反复建新链路。
@@ -98,9 +119,7 @@ pub(crate) trait Dialer: Send + Sync {
 /// 各种时限。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Timing {
-    /// 已连接时的探活间隔。
-    pub interval: Duration,
-    /// 探活请求的读写时限。
+    /// 确认链路（回前台、重连）时 `system.describe` 的读写时限。
     pub probe_timeout: Duration,
     /// connect 的 `system.describe` 时限。拨号自身另有 iroh 的 20 秒上限。
     pub connect_timeout: Duration,
@@ -112,7 +131,6 @@ pub(crate) struct Timing {
 
 impl Timing {
     pub(crate) const PRODUCTION: Self = Self {
-        interval: Duration::from_secs(5),
         probe_timeout: Duration::from_secs(5),
         connect_timeout: Duration::from_secs(10),
         pair_timeout: Duration::from_secs(30),
@@ -181,7 +199,7 @@ impl Inner {
     fn retire(&mut self) {
         self.generation += 1;
         if let Some(session) = self.session.take() {
-            session.stop();
+            session.signals.stop();
         }
     }
 
@@ -197,7 +215,12 @@ struct Session {
     target: Target,
     route: Arc<dyn Route>,
     link: Mutex<Link>,
-    signal: Mutex<Signal>,
+    /// 链路回调只碰它、不碰会话：会话持有链路，在传输层的线程上放掉链路会 `block_on`。
+    signals: Arc<Signals>,
+}
+
+struct Signals {
+    state: Mutex<Signal>,
     wake: Condvar,
 }
 
@@ -205,11 +228,17 @@ struct Session {
 struct Signal {
     stop: bool,
     probe_now: bool,
+    /// 当前盯着的链路的编号。换过链路后，旧链路晚到的回调按它丢弃。
+    watching: u64,
+    path_changed: bool,
+    link_closed: bool,
 }
 
 enum Wake {
     Stop,
     Now,
+    Path,
+    Closed,
     Timeout,
 }
 
@@ -218,21 +247,79 @@ impl Session {
         self.link.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// 盯着当前链路，之前盯的作废。阻塞，只在会话线程上调。
+    fn watch(&self) -> Box<dyn Send> {
+        let watching = {
+            let mut signal = self.signals.lock();
+            signal.watching += 1;
+            signal.path_changed = false;
+            signal.link_closed = false;
+            signal.watching
+        };
+        let signals = Arc::clone(&self.signals);
+        let link = self.link();
+        let guard = (link.watch)(Box::new(move |change| signals.on_link(watching, change)));
+        // 读完路径到盯上之间换过路径的话收不到事件：登记后补读一次（没变不会推）。
+        self.signals.lock().path_changed = true;
+        guard
+    }
+}
+
+impl Signals {
+    fn lock(&self) -> MutexGuard<'_, Signal> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn stop(&self) {
-        self.signal.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
+        self.lock().stop = true;
         self.wake.notify_all();
     }
 
     fn probe_now(&self) {
-        self.signal
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .probe_now = true;
+        self.lock().probe_now = true;
         self.wake.notify_all();
     }
 
-    fn wait(&self, delay: Duration) -> Wake {
-        let signal = self.signal.lock().unwrap_or_else(|e| e.into_inner());
+    fn on_link(&self, watching: u64, change: LinkChange) {
+        let mut signal = self.lock();
+        if signal.watching != watching {
+            return;
+        }
+        match change {
+            LinkChange::Path => signal.path_changed = true,
+            LinkChange::Closed => signal.link_closed = true,
+        }
+        drop(signal);
+        self.wake.notify_all();
+    }
+
+    /// 已连上时等：叫停、链路断了、要求确认、换了路径。不设超时，全靠事件叫醒。
+    fn wait_connected(&self) -> Wake {
+        let signal = self.lock();
+        let mut signal = self
+            .wake
+            .wait_while(signal, |s| {
+                !s.stop && !s.link_closed && !s.probe_now && !s.path_changed
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        if signal.stop {
+            Wake::Stop
+        } else if std::mem::take(&mut signal.link_closed) {
+            // 反正要建新链路重连，攒下的确认和换路径一并作废。
+            signal.probe_now = false;
+            signal.path_changed = false;
+            Wake::Closed
+        } else if std::mem::take(&mut signal.probe_now) {
+            Wake::Now
+        } else {
+            signal.path_changed = false;
+            Wake::Path
+        }
+    }
+
+    /// 重连的退避：等 `delay`，叫停或要求立刻重试时提前返回。
+    fn wait_backoff(&self, delay: Duration) -> Wake {
+        let signal = self.lock();
         let (mut signal, _) = self
             .wake
             .wait_timeout_while(signal, delay, |s| !s.stop && !s.probe_now)
@@ -343,10 +430,10 @@ impl ConnectionHub {
         inner.publish(event(ConnectionState::Disconnected, None, None, None));
     }
 
-    /// 立刻探活 / 重试一次。
+    /// 立刻确认一次链路；重连中的立刻重试。
     pub(crate) fn verify(&self) {
         if let Some(session) = self.shared.lock().session.as_ref() {
-            session.probe_now();
+            session.signals.probe_now();
         }
     }
 
@@ -401,8 +488,10 @@ impl ConnectionHub {
             target: target.clone(),
             route,
             link: Mutex::new(link),
-            signal: Mutex::new(Signal::default()),
-            wake: Condvar::new(),
+            signals: Arc::new(Signals {
+                state: Mutex::new(Signal::default()),
+                wake: Condvar::new(),
+            }),
         });
         inner.session = Some(Arc::clone(&session));
         match &outcome {
@@ -422,13 +511,13 @@ impl ConnectionHub {
         let shared = Arc::clone(&self.shared);
         let timing = self.timing;
         let spawned = std::thread::Builder::new()
-            .name("smelt-heartbeat".to_string())
-            .spawn(move || heartbeat(shared, session, timing, failures));
+            .name("smelt-connection".to_string())
+            .spawn(move || supervise(shared, session, timing, failures));
         if let Err(spawn_error) = spawned {
             inner.retire();
             let error = error(
                 SmeltErrorKind::Other,
-                format!("起不了探活线程：{spawn_error}"),
+                format!("起不了连接线程：{spawn_error}"),
             );
             inner.publish(event(
                 ConnectionState::Disconnected,
@@ -442,24 +531,65 @@ impl ConnectionHub {
     }
 }
 
-/// 探活循环：已连接时按间隔探，失败后建新链路按退避重试。未配对、不兼容就停。
-fn heartbeat(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut failures: u32) {
+/// 会话线程：已连上时等链路的事件（不定时探活）；链路断了或确认失败就建新链路按退避重连。
+/// 未配对、不兼容就停。
+fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut failures: u32) {
+    // 盯链路的守卫只在这条普通线程上建和放。
+    let mut watch = (failures == 0).then(|| session.watch());
     loop {
-        let delay = if failures == 0 {
-            timing.interval
+        // 这一轮用不用新链路：重连不复用可能已经僵死的旧连接。
+        let fresh = if failures == 0 {
+            match session.signals.wait_connected() {
+                Wake::Stop => return,
+                // 回前台、下拉刷新：在现有链路上确认一下。
+                Wake::Now | Wake::Timeout => false,
+                Wake::Path => {
+                    // 读路径会 block_on，放在锁外。
+                    let metrics = (session.link().metrics)();
+                    let mut inner = shared.lock();
+                    if !inner.is_current(&session) {
+                        return;
+                    }
+                    inner.publish(event(
+                        ConnectionState::Connected,
+                        Some(&session.target),
+                        Some(metrics),
+                        None,
+                    ));
+                    continue;
+                }
+                Wake::Closed => {
+                    watch = None;
+                    let mut inner = shared.lock();
+                    if !inner.is_current(&session) {
+                        return;
+                    }
+                    log::info!("到运行时的连接断了：{}", session.target.endpoint_id);
+                    // 先告诉界面在重连：新链路拨号可能要十几秒。
+                    inner.publish(event(
+                        ConnectionState::Reconnecting,
+                        Some(&session.target),
+                        None,
+                        Some(error(SmeltErrorKind::Offline, "到运行时的连接断了")),
+                    ));
+                    true
+                }
+            }
         } else {
-            timing.backoff(failures)
+            // 轮询例外：对端回来不会通知我们，连上之前收不到它的任何东西，只能定时重拨（回前台、
+            // 下拉刷新经 `verify` 立刻重试并把退避归零）；周期 2 秒起逐次翻倍，上限 30 秒。
+            match session.signals.wait_backoff(timing.backoff(failures)) {
+                Wake::Stop => return,
+                // 回前台：网络多半变了，退避从头算。
+                Wake::Now => failures = failures.min(1),
+                Wake::Path | Wake::Closed | Wake::Timeout => {}
+            }
+            true
         };
-        match session.wait(delay) {
-            Wake::Stop => return,
-            // 回前台：网络多半变了，退避从头算。
-            Wake::Now => failures = failures.min(1),
-            Wake::Timeout => {}
-        }
-        let link = if failures == 0 {
-            session.link()
-        } else {
+        let link = if fresh {
             session.route.link()
+        } else {
+            session.link()
         };
         let outcome =
             describe(&link, &session.target, timing.probe_timeout).map(|_| (link.metrics)());
@@ -471,7 +601,7 @@ fn heartbeat(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
         let target = Some(&session.target);
         match outcome {
             Ok(metrics) => {
-                if failures > 0 {
+                if fresh {
                     *session.link.lock().unwrap_or_else(|e| e.into_inner()) = link;
                     log::info!("运行时已重新连上：{}", session.target.endpoint_id);
                 }
@@ -482,6 +612,10 @@ fn heartbeat(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
                     Some(metrics),
                     None,
                 ));
+                drop(inner);
+                if watch.is_none() {
+                    watch = Some(session.watch());
+                }
             }
             Err(error) if is_terminal(error.kind) => {
                 log::warn!("运行时连接停止：{}", error.message);
@@ -495,7 +629,7 @@ fn heartbeat(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
                 return;
             }
             Err(error) => {
-                log::info!("探活失败（第 {} 次）：{}", failures + 1, error.message);
+                log::info!("连不上运行时（第 {} 次）：{}", failures + 1, error.message);
                 failures = failures.saturating_add(1);
                 inner.publish(event(
                     ConnectionState::Reconnecting,
@@ -503,6 +637,8 @@ fn heartbeat(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
                     None,
                     Some(error),
                 ));
+                drop(inner);
+                watch = None;
             }
         }
     }

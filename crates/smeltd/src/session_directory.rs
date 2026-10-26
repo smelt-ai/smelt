@@ -4,18 +4,20 @@
 //! 只表示「现在能不能 attach」，不负责展示用身份。
 //!
 //! 崩溃后 PTY / ACP 子进程都接管不了，但标题、目录、最后相位还值得留给 GUI。
-//! 正常 shutdown 会清空持久化文档；文档里有内容就说明上次非正常退出，启动时灌回目录
-//! 并标 `runtime=false`。
+//! 正常 shutdown 只把还能续接的终端留在持久化文档里（哪家 CLI、哪段对话，见
+//! `terminal_resume`），其余清空：桌面会用原来的 id 重新打开这些终端，接回原来的对话。
+//! 启动时文档里的条目灌回目录并标 `runtime=false`。
 //!
 //! 身份只走两个口：`upsert`（`broadcast_state`）和 `remove`（`forget_session`）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::terminal_resume::{ResumeLaunch, resume_launch};
 use super::{Phase, SessionState};
 
 /// 持久化文档格式版本。结构演进时递增，旧版本文档直接丢弃。
@@ -355,21 +357,39 @@ impl SessionDirectory {
         self.persist_locked(&mut state);
     }
 
-    /// 正常退出时清空持久化文档。清空和所有提交持有同一把状态锁，避免清空后被一个
-    /// 已在飞行中的旧快照重新写回。
+    /// 正常退出时，持久化文档里只留还能续接的终端：`terminal_ids` 是停机前还开着的终端，
+    /// 再加上上次留下、这次还没被重新打开的。其余（对话、普通 shell、认不出的 CLI）清空。
+    /// 写入和所有提交持有同一把状态锁，避免写完后被一个已在飞行中的旧快照覆盖。
     ///
-    /// 只写空快照，不碰文件本身：`session_directory_path()` 返回的是承载全部用户数据
-    /// 的主库，删掉它等于抹掉所有项目与会话组。会话目录早已是库里的一份文档，写空快照
-    /// 就是它完整的清空语义。
-    pub fn clear_for_clean_shutdown(&self) {
-        let _state = self.state.lock().unwrap();
+    /// 只改快照，不碰文件本身：`session_directory_path()` 返回的是承载全部用户数据的主库，
+    /// 删掉它等于抹掉所有项目与会话组。
+    pub(crate) fn keep_resumable_terminals(&self, terminal_ids: &HashSet<String>) {
+        let state = self.state.lock().unwrap();
+        let sessions = state
+            .entries
+            .values()
+            .filter(|entry| terminal_ids.contains(&entry.id) || !entry.runtime)
+            .filter(|entry| resume_of(entry).is_some())
+            .map(|entry| published_from_record(&SessionRecord::from_state(entry)))
+            .collect();
         let path = session_directory_path();
         if let Ok(store) = smelt_core::sqlite_state::store_beside_json(&path) {
             let _ = store.put_published_session_snapshot(&smelt_store::PublishedSessionSnapshot {
                 version: SESSION_DIRECTORY_VERSION,
-                sessions: Vec::new(),
+                sessions,
             });
         }
+    }
+
+    /// 重新打开这个终端时怎么接回原来的对话。只看守护停过之后留下的条目
+    /// （`runtime=false`）：活着的终端直接 attach，用不到。
+    pub(crate) fn resume_launch(&self, id: &str) -> Option<ResumeLaunch> {
+        let state = self.state.lock().unwrap();
+        state
+            .entries
+            .get(id)
+            .filter(|entry| !entry.runtime)
+            .and_then(resume_of)
     }
 
     fn persist_locked(&self, state: &mut DirectoryState) {
@@ -382,6 +402,14 @@ impl SessionDirectory {
             state.last_persist = Some(Instant::now());
         }
     }
+}
+
+fn resume_of(entry: &SessionState) -> Option<ResumeLaunch> {
+    resume_launch(
+        entry.launch.as_deref(),
+        entry.provider.as_deref(),
+        entry.conversation_id.as_deref(),
+    )
 }
 
 fn now_unix() -> u64 {
@@ -669,9 +697,71 @@ mod tests {
             directory.upsert(&sample_state("s1"));
             assert!(session_directory_persisted());
 
-            directory.clear_for_clean_shutdown();
+            directory.keep_resumable_terminals(&HashSet::new());
             assert!(!session_directory_persisted());
             assert!(SessionDirectory::restore_from_disk().snapshot().is_empty());
+        });
+    }
+
+    /// 停机只留能续接的终端；重启后它们回到目录里，重新打开时接回原来的对话。
+    #[test]
+    fn shutdown_keeps_only_resumable_terminals_for_the_next_run() {
+        with_test_dir(|| {
+            let directory = SessionDirectory::with_interval(Duration::ZERO);
+            // 终端里的 claude，hook 报过对话 id：要留。
+            directory.upsert(&sample_state("claude-term"));
+            // 普通 shell：没有可续接的。
+            let mut shell = sample_state("shell-term");
+            shell.launch = None;
+            shell.provider = None;
+            shell.conversation_id = None;
+            directory.upsert(&shell);
+            // 同样能拼出续接命令、但不是终端（对话会话由自己的存档续接）：不留。
+            directory.upsert(&sample_state("acp-conversation"));
+
+            let terminals: HashSet<String> = ["claude-term", "shell-term"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+            directory.keep_resumable_terminals(&terminals);
+
+            let next = SessionDirectory::restore_from_disk();
+            let ids: Vec<String> = next.snapshot().into_iter().map(|entry| entry.id).collect();
+            assert_eq!(ids, vec!["claude-term".to_string()]);
+            assert_eq!(
+                next.resume_launch("claude-term").map(|resume| resume.run),
+                Some("claude --resume conv-1".to_string())
+            );
+            assert_eq!(next.resume_launch("shell-term"), None);
+        });
+    }
+
+    /// 上次留下、这次桌面还没来得及重新打开的终端，再停一次机也不能丢。
+    #[test]
+    fn a_terminal_not_yet_reopened_survives_another_shutdown() {
+        with_test_dir(|| {
+            let directory = SessionDirectory::with_interval(Duration::ZERO);
+            directory.upsert(&sample_state("claude-term"));
+            directory.keep_resumable_terminals(&HashSet::from(["claude-term".to_string()]));
+
+            let next = SessionDirectory::restore_from_disk();
+            next.keep_resumable_terminals(&HashSet::new());
+
+            assert!(
+                SessionDirectory::restore_from_disk()
+                    .resume_launch("claude-term")
+                    .is_some()
+            );
+        });
+    }
+
+    /// 活着的终端直接 attach，不该拿到续接命令。
+    #[test]
+    fn a_live_terminal_has_nothing_to_resume() {
+        with_test_dir(|| {
+            let directory = SessionDirectory::with_interval(Duration::ZERO);
+            directory.upsert(&sample_state("claude-term"));
+            assert_eq!(directory.resume_launch("claude-term"), None);
         });
     }
 
@@ -688,7 +778,7 @@ mod tests {
             #[cfg(unix)]
             let inode = file_identity(&database);
 
-            directory.clear_for_clean_shutdown();
+            directory.keep_resumable_terminals(&HashSet::new());
 
             assert!(
                 database.exists(),
@@ -721,7 +811,7 @@ mod tests {
             let clear_directory = std::sync::Arc::clone(&directory);
             let clear = std::thread::spawn(move || {
                 started_tx.send(()).unwrap();
-                clear_directory.clear_for_clean_shutdown();
+                clear_directory.keep_resumable_terminals(&HashSet::new());
                 done_tx.send(()).unwrap();
             });
             started_rx

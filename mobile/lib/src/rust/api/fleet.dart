@@ -47,7 +47,7 @@ Future<void> forgetRuntime({required String runtimeId}) =>
 Future<void> reconnectRuntime({required String runtimeId}) =>
     RustLib.instance.api.crateApiFleetReconnectRuntime(runtimeId: runtimeId);
 
-/// 所有机器立刻探活一次（App 回到前台时调用）。重连中的立刻重试并把退避归零。结果从
+/// 所有机器立刻确认一次链路（App 回到前台、下拉刷新时调用）。重连中的立刻重试并把退避归零。结果从
 /// [`fleet_events`] 推出。
 Future<void> verifyConnections() =>
     RustLib.instance.api.crateApiFleetVerifyConnections();
@@ -65,10 +65,10 @@ enum ConnectionState {
   /// 正在连（启动、重连、重新配对）。
   connecting,
 
-  /// 最近一次探活成功。
+  /// 连着：握手或确认成功，之后传输层没报断开。
   connected,
 
-  /// 探活失败，后台按指数退避重连中。
+  /// 链路断了或确认失败，后台按指数退避重连中。
   reconnecting,
 }
 
@@ -110,7 +110,7 @@ class FleetView {
 class LinkMetrics {
   final LinkPath path;
 
-  /// QUIC 层的 RTT。还没选出路径时没有。
+  /// QUIC 层的 RTT，连上、换路径、确认时取的快照。还没选出路径时没有。
   final int? rttMs;
 
   const LinkMetrics({required this.path, this.rttMs});

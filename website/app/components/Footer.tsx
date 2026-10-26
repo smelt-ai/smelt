@@ -21,7 +21,7 @@ export function Footer() {
             <span className="text-sm font-semibold tracking-tight text-foreground">smelt</span>
           </div>
           <p className="mt-3 max-w-xs text-sm leading-6 text-muted">
-            原生 macOS 工作台、Linux 远程开发机，以及 iOS / Android 随身端。
+            原生 macOS 与 Windows 工作台、Linux 远程开发机，以及 iOS / Android 随身端。
           </p>
           <p className="mt-4 font-mono text-xs text-dim">Apache-2.0 License</p>
         </div>

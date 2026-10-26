@@ -29,6 +29,15 @@ pub enum RemoteAccessState {
     Failed { error: String },
 }
 
+/// `remote.status.wait` 一次最多挂这么久。调用方的读超时要比它长。
+pub const REMOTE_STATUS_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// `remote.status.wait` 的参数：调用方手里的状态。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteStatusWaitParams {
+    pub known: RemoteAccessState,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceInfo {
     /// 设备的 iroh endpoint id，运行时按它认设备。

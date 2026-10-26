@@ -492,7 +492,7 @@ fn details_are_fetched_once_per_fingerprint_and_pushed() {
     );
 }
 
-/// 在等你的会话列表不会再变：失败了要自己重取，不能等下一次推列表。
+/// 在等你的会话列表不会再变：连着却取不到时要自己重取，不能等下一次推列表。
 #[test]
 fn failed_fetches_are_retried_with_backoff() {
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -506,6 +506,7 @@ fn failed_fetches_are_retried_with_backoff() {
         }
     }));
     hub.set_order(vec!["a".to_string()]);
+    hub.set_connected("a", true);
     let passes = record(&hub);
     hub.update("a", live(vec![waiting("s", 100)]));
     passes.wait("不推新列表也重取成功", |pass| {
@@ -521,6 +522,7 @@ fn retrying_stops_once_the_ticket_is_gone() {
         Err(error(SmeltErrorKind::Offline, "断线"))
     }));
     hub.set_order(vec!["a".to_string()]);
+    hub.set_connected("a", true);
     let _passes = record(&hub);
     hub.update("a", live(vec![waiting("s", 100)]));
     wait_until("重取过", || calls.lock().unwrap().len() >= 2);
@@ -531,6 +533,62 @@ fn retrying_stops_once_the_ticket_is_gone() {
     let settled = calls.lock().unwrap().len();
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(calls.lock().unwrap().len(), settled, "单据没了就不再取");
+}
+
+/// 重取的退避长到测试等不到：能取到只能是事件叫醒的。
+const SLOW: Timing = Timing {
+    retry_base: Duration::from_secs(3600),
+    retry_max: Duration::from_secs(3600),
+};
+
+/// 第一次失败，之后都成功。
+fn fails_once(attempts: &Arc<AtomicUsize>) -> Fetch {
+    let counter = Arc::clone(attempts);
+    Arc::new(move |_, _| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(error(SmeltErrorKind::Offline, "断线"))
+        } else {
+            Ok(actions(&["t"]))
+        }
+    })
+}
+
+/// 机器没连上时不重取，等它连上立刻重取。
+#[test]
+fn an_offline_failure_waits_for_the_runtime_to_connect() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let hub = PassHub::new(fails_once(&attempts), SLOW);
+    hub.set_order(vec!["a".to_string()]);
+    let passes = record(&hub);
+    hub.update("a", live(vec![waiting("s", 100)]));
+    wait_until("取过一次", || attempts.load(Ordering::SeqCst) == 1);
+
+    hub.set_connected("a", true);
+
+    passes.wait("连上后重取成功", |pass| {
+        pass.tickets.first().is_some_and(|ticket| ticket.details_loaded)
+    });
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+/// 连着却取不到时退避；期间重新连上过（换了链路）就不等退避。
+#[test]
+fn a_reconnect_cuts_the_retry_backoff_short() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let hub = PassHub::new(fails_once(&attempts), SLOW);
+    hub.set_order(vec!["a".to_string()]);
+    hub.set_connected("a", true);
+    let passes = record(&hub);
+    hub.update("a", live(vec![waiting("s", 100)]));
+    wait_until("取过一次", || attempts.load(Ordering::SeqCst) == 1);
+
+    hub.set_connected("a", false);
+    hub.set_connected("a", true);
+
+    passes.wait("重新连上后重取成功", |pass| {
+        pass.tickets.first().is_some_and(|ticket| ticket.details_loaded)
+    });
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 /// 机器重连（换代）时列表先退回缓存、单据暂时下架；连回来状态没变就不重取。

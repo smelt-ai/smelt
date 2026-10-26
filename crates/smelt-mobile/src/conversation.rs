@@ -726,7 +726,7 @@ impl Watch {
                 return false;
             }
             ConnectionState::Connecting | ConnectionState::Reconnecting => {
-                // 探活失败：旧链路上的 watch 可能已经僵死但还没察觉，掐掉，重连后再订。
+                // 链路断了或确认失败：旧链路上的 watch 可能已经僵死但还没察觉，掐掉，重连后再订。
                 state.connected = false;
                 if let Some(conn) = state.conn.take() {
                     let _ = conn.shutdown(std::net::Shutdown::Both);
@@ -783,6 +783,8 @@ impl Watch {
                 // 刚换代、正在连：等这一代连上（监听会叫醒）。
                 _ => {
                     failures = failures.saturating_add(1);
+                    // 轮询例外：状态机的锁和本订阅的锁不能嵌套，读到的 Connected 与当前连接之间
+                    // 可能错开一拍，没有专门的事件；重新连上会提前叫醒。周期 1 秒起逐次翻倍，上限 15 秒。
                     if self.pause(self.timing.backoff(failures)) {
                         return;
                     }
@@ -818,6 +820,8 @@ impl Watch {
                         reported = true;
                         self.emit(message_event(ConversationEventKind::Error, error));
                     }
+                    // 轮询例外：连着却订不上、或订上后断了，运行时不会再通知我们，只能隔一会儿重订
+                    // （掉线、换代、重新连上由监听叫醒）；周期 1 秒起逐次翻倍，上限 15 秒。
                     if self.pause(self.timing.backoff(failures)) {
                         return;
                     }

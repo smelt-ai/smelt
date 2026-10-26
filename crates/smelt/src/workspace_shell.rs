@@ -605,7 +605,7 @@ impl Workspace {
                                     .label("添加远程机器")
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.open_settings_section(
-                                            crate::settings::SettingsSection::CollaborationRemote,
+                                            crate::settings::SettingsSection::CollaborationMachines,
                                             cx,
                                         );
                                     })),

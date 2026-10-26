@@ -215,6 +215,17 @@ pub(crate) fn handle_event_subscribe<C: ClientSocket>(
             return;
         }
     };
+    // `terminal.progress` 只在变化时发，也没有快照。订阅已经登记，这时补发一遍，新连上的
+    // 客户端才看得到已经在跑的进度条。
+    if request
+        .subscription
+        .topics
+        .iter()
+        .any(|topic| topic.as_str() == smelt_event_protocol::CORE_TOPIC_TERMINAL_PROGRESS)
+        && let Err(error) = event_hub.replay_terminal_progress()
+    {
+        eprintln!("[event-hub] terminal progress replay failed: {error}");
+    }
     // 桌面 subscribe 是 GUI 活着的长连接。headless 自升级必须让路，不能靠
     // 「最近鉴权过」这种会过期的时间戳。
     let _desktop_viewer =

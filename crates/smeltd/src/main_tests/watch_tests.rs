@@ -606,3 +606,16 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
     drop(open2_br);
     drop(open2_client);
 }
+
+#[test]
+fn pty_poll_waits_forever_without_a_deadline_and_rounds_deadlines_up() {
+    assert_eq!(poll_timeout_ms(None), -1, "没有进度条时一直等输出");
+    assert_eq!(poll_timeout_ms(Some(Duration::ZERO)), 0);
+    assert_eq!(
+        poll_timeout_ms(Some(Duration::from_micros(1_500))),
+        2,
+        "不足一毫秒的零头向上取整，免得截止前醒来空转"
+    );
+    assert_eq!(poll_timeout_ms(Some(Duration::from_secs(15))), 15_000);
+    assert_eq!(poll_timeout_ms(Some(Duration::MAX)), i32::MAX);
+}

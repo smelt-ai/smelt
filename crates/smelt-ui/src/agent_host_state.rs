@@ -4,7 +4,7 @@
 //! 需要 `gpui::Global`，所以不能进不许引 GPUI 的 smelt-core。设置页怎么渲染
 //! 这些字段仍在主 crate 的 settings 模块。
 
-use gpui::{App, Global};
+use gpui::{App, AsyncApp, Global};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::automation::{Automation, AutomationRun, AutomationState};
@@ -325,78 +325,73 @@ fn update_hosts(cx: &mut App, change: impl FnOnce(&mut AgentHosts)) {
     change(cx.global_mut::<AgentHosts>());
 }
 
-/// 挂上一台机器并在后台读它的配置；连不上就按退避重试，直到读到或机器被移除。
-/// 已经挂着的只换客户端（比如改了中继），不重读。`on_first_load` 在第一次读到后调用一次。
-pub fn attach_agent_host(
-    key: RuntimeKey,
-    client: RuntimeClient,
-    cx: &mut App,
-    on_first_load: impl FnOnce(&mut App) + 'static,
-) {
+/// 挂上一台机器。已经挂着的只换客户端（比如改了中继），配置不重读，返回 `false`；新挂上
+/// 的返回 `true`，由调用方接着用 [`load_agent_host`] 读它的配置——什么时候读（等那台机器
+/// 在线）是主 crate 的事，这里看不到机器的连通性。
+pub fn register_agent_host(key: &RuntimeKey, client: RuntimeClient, cx: &mut App) -> bool {
     let mut fresh = false;
     update_hosts(cx, |hosts| {
-        if let Some(machine) = hosts.machines.get_mut(&key) {
-            machine.client = client.clone();
+        if let Some(machine) = hosts.machines.get_mut(key) {
+            machine.client = client;
         } else {
             fresh = true;
             hosts.machines.insert(
                 key.clone(),
                 MachineAgentHost {
-                    client: client.clone(),
+                    client,
                     settings: None,
                     error: None,
                 },
             );
         }
     });
-    if !fresh {
-        return;
-    }
-    cx.spawn(async move |cx| {
-        let mut attempt = 0u32;
-        loop {
-            let still_attached = cx.update(|cx| {
-                agent_hosts(cx).is_some_and(|hosts| hosts.machines.contains_key(&key))
-            });
-            if !still_attached {
-                return;
+    fresh
+}
+
+/// 读一次配置的结果，见 [`load_agent_host`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentHostLoad {
+    /// 读到了，已经存上。
+    Loaded,
+    /// 没读到。
+    Failed,
+    /// 机器已经移除（[`detach_agent_host`]），不用再读。
+    Detached,
+}
+
+/// 在后台读一次那台机器的配置，读到就存上。没读到时 `report` 为真就把原因记在机器上给人
+/// 看；运行时刚被拉起、正在升级时读不到是常态，调用方先安静重试几次再报。
+pub async fn load_agent_host(key: &RuntimeKey, report: bool, cx: &AsyncApp) -> AgentHostLoad {
+    let Some(client) = cx.update(|cx| {
+        agent_hosts(cx)
+            .and_then(|hosts| hosts.machine(key))
+            .map(|machine| machine.client.clone())
+    }) else {
+        return AgentHostLoad::Detached;
+    };
+    let fetched = cx
+        .background_executor()
+        .spawn(async move { fetch_agent_host(&client) })
+        .await;
+    cx.update(|cx| {
+        if !agent_hosts(cx).is_some_and(|hosts| hosts.machines.contains_key(key)) {
+            return AgentHostLoad::Detached;
+        }
+        match fetched {
+            Ok(settings) => {
+                update_hosts(cx, |hosts| hosts.adopt(key, settings));
+                AgentHostLoad::Loaded
             }
-            let fetch_client = client.clone();
-            let fetched = cx
-                .background_executor()
-                .spawn(async move { fetch_agent_host(&fetch_client) })
-                .await;
-            match fetched {
-                Ok(settings) => {
-                    cx.update(|cx| {
-                        update_hosts(cx, |hosts| hosts.adopt(&key, settings));
-                        on_first_load(cx);
+            Err(error) => {
+                if report {
+                    update_hosts(cx, |hosts| {
+                        hosts.set_error(key, format!("读取智能体配置失败，正在重试：{error}"))
                     });
-                    return;
                 }
-                Err(error) => {
-                    // 运行时刚被拉起、正在升级时连不上是常态，先安静重试几次。
-                    if attempt >= 4 {
-                        cx.update(|cx| {
-                            update_hosts(cx, |hosts| {
-                                hosts.set_error(
-                                    &key,
-                                    format!("读取智能体配置失败，正在重试：{error}"),
-                                )
-                            });
-                        });
-                    }
-                }
+                AgentHostLoad::Failed
             }
-            cx.background_executor()
-                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
-                    attempt,
-                ))
-                .await;
-            attempt = attempt.saturating_add(1);
         }
     })
-    .detach();
 }
 
 /// 机器被移除：丢掉它的配置，正在排队的修改也不再发。
@@ -652,6 +647,16 @@ mod tests {
         }
     }
 
+    /// 挂上并读一次。主 crate 里要等那台机器在线才读，这里的假运行时总在。
+    fn attach(key: RuntimeKey, client: RuntimeClient, cx: &mut App) {
+        if register_agent_host(&key, client, cx) {
+            cx.spawn(async move |cx| {
+                load_agent_host(&key, true, cx).await;
+            })
+            .detach();
+        }
+    }
+
     fn rename(name: &'static str) -> impl FnOnce(&mut AgentHostSettings) {
         move |settings| settings.agents[0].name = name.into()
     }
@@ -663,8 +668,8 @@ mod tests {
         let far = FakeRuntime::new("远程的", false);
         let far_key = RuntimeKey::Remote("far".into());
         cx.update(|cx| {
-            attach_agent_host(RuntimeKey::Local, local.client(), cx, |_| {});
-            attach_agent_host(far_key.clone(), far.client(), cx, |_| {});
+            attach(RuntimeKey::Local, local.client(), cx);
+            attach(far_key.clone(), far.client(), cx);
         });
         cx.run_until_parked();
         cx.update(|cx| {
@@ -696,8 +701,8 @@ mod tests {
         let far = FakeRuntime::new("远程的", true);
         let far_key = RuntimeKey::Remote("far".into());
         cx.update(|cx| {
-            attach_agent_host(RuntimeKey::Local, local.client(), cx, |_| {});
-            attach_agent_host(far_key.clone(), far.client(), cx, |_| {});
+            attach(RuntimeKey::Local, local.client(), cx);
+            attach(far_key.clone(), far.client(), cx);
         });
         cx.run_until_parked();
         cx.update(|cx| {
@@ -727,7 +732,7 @@ mod tests {
     fn a_detached_machine_is_gone(cx: &mut TestAppContext) {
         let far = FakeRuntime::new("远程的", false);
         let far_key = RuntimeKey::Remote("far".into());
-        cx.update(|cx| attach_agent_host(far_key.clone(), far.client(), cx, |_| {}));
+        cx.update(|cx| attach(far_key.clone(), far.client(), cx));
         cx.run_until_parked();
         cx.update(|cx| {
             assert!(agent_host_loaded(&far_key, cx));

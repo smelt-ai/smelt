@@ -73,6 +73,9 @@ jobs:
             pi-agent:
               - *workflow
               - 'scripts/fetch-bun.sh'
+              - 'scripts/build-smelt-pi.sh'
+              - 'scripts/compile-smelt-pi.ts'
+              - 'scripts/compiled-smoke.ts'
               - 'packages/pi-agent/**'
 
   rust:
@@ -270,11 +273,25 @@ jobs:
       - name: Check
         run: bun run check
 
+  # Windows 上把 smelt-pi 编出来跑一遍冒烟：嵌入文件的路径、可执行文件后缀都和
+  # macOS / Linux 不一样，本地开发机上测不到，不在这里跑就只能等发版时才暴露。
+  pi-agent-windows:
+    needs: changes
+    if: needs.changes.outputs.pi-agent == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build and smoke smelt-pi
+        shell: bash
+        run: bash scripts/build-smelt-pi.sh --out target/smelt-pi
+
   # 唯一的必需检查（分支保护里只要求它）。被跳过的 job 算通过；任何一个失败或被取消
   # 就失败。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, rust, mobile, android-build, windows, pi-agent]
+    needs: [changes, rust, mobile, android-build, windows, pi-agent, pi-agent-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize

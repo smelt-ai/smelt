@@ -131,7 +131,7 @@ function serve(gateway: McpGateway): string {
 	return `http://127.0.0.1:${server.port}`;
 }
 
-function setup() {
+function setup(options: Partial<McpGatewayOptions> = {}) {
 	const fake = fakeServer();
 	let clock = 1_000;
 	const gateway = new McpGateway({
@@ -140,6 +140,7 @@ function setup() {
 		upstreamIdleMs: 60_000,
 		sessionIdleMs: 120_000,
 		now: () => clock,
+		...options,
 	});
 	const base = serve(gateway);
 	const key = gateway.register(SPEC);
@@ -299,6 +300,77 @@ describe("shared MCP gateway", () => {
 			body: JSON.stringify({ name: "x" }),
 		});
 		expect(bad.status).toBe(400);
+	});
+});
+
+describe("the next deadline the gateway process waits for", () => {
+	test("with nothing registered, only the idle exit", () => {
+		let clock = 1_000;
+		const gateway = new McpGateway({
+			token: "secret",
+			createTransport: fakeServer().factory,
+			upstreamIdleMs: 60_000,
+			sessionIdleMs: 120_000,
+			idleExitMs: 300_000,
+			now: () => clock,
+		});
+		expect(gateway.nextDeadline()).toBe(301_000);
+		clock = 300_999;
+		expect(gateway.idleExitDue()).toBe(false);
+		clock = 301_000;
+		expect(gateway.idleExitDue()).toBe(true);
+	});
+
+	test("without an idle exit and with nothing registered, no timer at all", () => {
+		const gateway = new McpGateway({
+			token: "secret",
+			createTransport: fakeServer().factory,
+			upstreamIdleMs: 60_000,
+			sessionIdleMs: 120_000,
+		});
+		expect(gateway.nextDeadline()).toBeUndefined();
+	});
+
+	test("none while a call runs; the server's idle stop once it ends", async () => {
+		const { fake, gateway, connect, advance } = setup({ idleExitMs: 300_000 });
+		const client = await connect();
+		const call = client.callTool("slow", {});
+		await until(() => fake.stats.calls === 1);
+		expect(gateway.nextDeadline()).toBeUndefined();
+		advance(5_000);
+		fake.finishSlow();
+		await call;
+		expect(gateway.nextDeadline()).toBe(6_000 + 60_000);
+	});
+
+	test("server stop, then the session without a stream, then the idle exit", async () => {
+		const { gateway, base, key, advance } = setup({ idleExitMs: 300_000 });
+		// A session that never opens its stream, like a conversation that crashed after connecting.
+		const response = await fetch(`${base}/mcp/${key}`, {
+			method: "POST",
+			headers: { authorization: "Bearer secret", "content-type": "application/json" },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "initialize",
+				params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "raw", version: "1" } },
+			}),
+		});
+		expect(response.ok).toBe(true);
+		// `initialize` started the server; it was last used when it was registered.
+		expect(gateway.nextDeadline()).toBe(61_000);
+
+		advance(60_000);
+		await gateway.sweep();
+		expect(gateway.status().servers[0]?.running).toBe(false);
+		// The session was last seen at its `initialize`.
+		expect(gateway.nextDeadline()).toBe(121_000);
+
+		advance(60_000);
+		await gateway.sweep();
+		expect(gateway.status()).toEqual({ servers: [], sessions: 0 });
+		expect(gateway.nextDeadline()).toBe(121_000 + 300_000);
+		expect(gateway.idleExitDue()).toBe(false);
 	});
 });
 

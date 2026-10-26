@@ -2257,7 +2257,7 @@ mod tests {
 
         /// 以某个归属连上监听。空串是会话本身。
         fn connect_as(path: &Path, owner: &str) -> Self {
-            let mut stream = connect_task_stream(path).unwrap();
+            let stream = connect_task_stream(path).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -3112,7 +3112,7 @@ mod tests {
 
     /// 开一条派发连接，返回读写端。
     fn dispatch(path: &Path, tool_call_id: &str, background: bool) -> std::io::BufReader<TaskStream> {
-        let mut stream = connect_task_stream(path).unwrap();
+        let stream = connect_task_stream(path).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

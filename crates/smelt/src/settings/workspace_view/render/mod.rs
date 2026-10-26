@@ -15,6 +15,7 @@ mod agent;
 mod appearance;
 mod collaboration;
 mod maintenance;
+mod panel_plugin;
 mod pi_auth;
 mod pi_mcp;
 mod pi_memory;
@@ -216,7 +217,14 @@ impl SidebarItem for SettingsNavMenu {
 fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut App) {
     entity.update(cx, |workspace, cx| {
         if workspace.settings_section != section {
+            // 机器页的延迟平时只在连接换路径时读，切过去重读一次。
+            let machines = section == SettingsSection::CollaborationMachines;
             workspace.settings_section = section;
+            // 资源页只在看得见时采样：切过去要叫醒采样循环。
+            workspace.wake_resource_monitor();
+            if machines {
+                crate::runtimes::sample_links(cx);
+            }
             cx.notify();
         }
     });
@@ -244,12 +252,17 @@ fn section_page(
         SettingsSection::AgentWorkspace => agent::workspace_page(entity, snapshot, cx),
         SettingsSection::AgentNotify => agent::notify_page(entity, snapshot, cx),
         SettingsSection::AgentHooks => agent::hooks_page(entity, snapshot, cx),
+        SettingsSection::CollaborationMachines => collaboration::machines_page(),
         SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
         #[cfg(target_os = "macos")]
         SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),
         SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
+        SettingsSection::MaintenanceResources => {
+            crate::resource_monitor::resources_page(entity, snapshot.resources.clone())
+        }
         SettingsSection::MaintenanceStorage => maintenance::storage_page(cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
+        SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
     };
     if local_runtime_only && crate::runtimes::has_remote_runtimes(cx) {
         page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())

@@ -28,9 +28,13 @@ use super::{
     push_acp_snapshot_since,
 };
 
-/// 该做的事这一轮没做成（库还锁着、确认已经超时却没改状态）时，隔这一段再试。
-/// 不是空闲轮询：没事做就一直等到下一次真正的截止或外部叫醒。
-const DUE_BACKOFF: Duration = Duration::from_secs(1);
+/// 该做的事这一轮没做成（库还锁着、确认已经超时却没改状态）时，过一会儿再试。
+/// 不是空闲轮询：没事做就一直等到下一次真正的截止或外部叫醒。外部改了自动化
+/// （Nudge）会立刻再转一轮；做成一轮就回到起点。上限定在 5 分钟：过点的自动化
+/// 最多晚这么久，卡住时也不会每秒醒。
+// 轮询例外：库被别的进程锁着、过点的运行没认领上，都没有通知可等；周期 1 秒起翻倍，上限 5 分钟。
+const STUCK_RETRY_FIRST: Duration = Duration::from_secs(1);
+const STUCK_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 const DELIVERY_ACK_TIMEOUT_SECS: i64 = 5;
 const MAX_DELIVERY_ATTEMPTS: u32 = 5;
 const MAX_DELIVERY_RETRY_SECONDS: i64 = 30;
@@ -92,6 +96,24 @@ struct Driver {
     shell_pgids: HashMap<String, i32>,
     shell_tx: Sender<DriverWake>,
     shell_rx: Receiver<DriverWake>,
+    /// 连续几轮卡住了，决定下一次重试隔多久。
+    stuck_rounds: u32,
+}
+
+/// 这一轮之后等多久。
+#[derive(Debug, PartialEq)]
+struct NextWait {
+    /// `None` 表示没有截止，一直等到壳结束或外部叫醒。
+    delay: Option<Duration>,
+    /// 有该做的事没做成，`delay` 里含着一次重试。
+    stuck: bool,
+}
+
+/// 连续第 `rounds` 次（从 0 起）卡住后隔多久再试。
+fn stuck_retry_delay(rounds: u32) -> Duration {
+    STUCK_RETRY_FIRST
+        .saturating_mul(1u32.checked_shl(rounds).unwrap_or(u32::MAX))
+        .min(STUCK_RETRY_MAX)
 }
 
 impl Driver {
@@ -115,6 +137,7 @@ impl Driver {
             shell_pgids: HashMap::new(),
             shell_tx,
             shell_rx,
+            stuck_rounds: 0,
         }
     }
 
@@ -129,7 +152,13 @@ impl Driver {
             self.launch_unbound_runs();
             self.dispatch_queued_runs();
             self.release_terminal_sessions();
-            let woke = match self.next_wait() {
+            let wait = self.next_wait();
+            self.stuck_rounds = if wait.stuck {
+                self.stuck_rounds.saturating_add(1)
+            } else {
+                0
+            };
+            let woke = match wait.delay {
                 Some(delay) => self.shell_rx.recv_timeout(delay),
                 None => match self.shell_rx.recv() {
                     Ok(wake) => Ok(wake),
@@ -144,11 +173,12 @@ impl Driver {
         }
     }
 
-    /// 下一次该醒的时刻。`None` 表示没有截止，一直等到壳结束或外部叫醒。
+    /// 下一次该醒的时刻。
     ///
     /// 时区变化跟着这次醒来一起看。没有任务、也没有人改自动化时，不每秒起来问一次。
-    /// 已经过点的时间不把等待压成 0：这一轮刚刚处理过，再立刻转一圈只会空转。
-    fn next_wait(&self) -> Option<Duration> {
+    /// 已经过点的时间不把等待压成 0：这一轮刚刚处理过，再立刻转一圈只会空转，
+    /// 改成按 [`stuck_retry_delay`] 退避。
+    fn next_wait(&self) -> NextWait {
         let now = Local::now().timestamp();
         let snapshot = self.automations.lock().unwrap().snapshot();
         let enabled = snapshot
@@ -203,9 +233,13 @@ impl Driver {
             }
         }
         if stuck {
-            consider(now.saturating_add(DUE_BACKOFF.as_secs() as i64));
+            let retry = stuck_retry_delay(self.stuck_rounds).as_secs();
+            consider(now.saturating_add(i64::try_from(retry).unwrap_or(i64::MAX)));
         }
-        soonest.map(|at| Duration::from_secs(at.saturating_sub(now) as u64))
+        NextWait {
+            delay: soonest.map(|at| Duration::from_secs(at.saturating_sub(now) as u64)),
+            stuck,
+        }
     }
 
     fn recover_active_runs(&mut self) {
@@ -1342,11 +1376,23 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn stuck_rounds_back_off_up_to_five_minutes() {
+        assert_eq!(stuck_retry_delay(0), Duration::from_secs(1));
+        assert_eq!(stuck_retry_delay(1), Duration::from_secs(2));
+        assert_eq!(stuck_retry_delay(8), Duration::from_secs(256));
+        assert_eq!(stuck_retry_delay(9), Duration::from_secs(5 * 60));
+        assert_eq!(stuck_retry_delay(u32::MAX), Duration::from_secs(5 * 60));
+    }
+
+    #[test]
     fn idle_schedule_has_no_deadline() {
         let driver = driver_for(AutomationOwner::in_memory());
         assert_eq!(
             driver.next_wait(),
-            None,
+            NextWait {
+                delay: None,
+                stuck: false
+            },
             "没有截止时要一直等叫醒，不能隔一秒起来看"
         );
     }
@@ -1360,7 +1406,7 @@ mod lifecycle_tests {
             .and_then(|state| state.next_run_at)
             .expect("启用的日程要有下次运行时刻");
         let driver = driver_for(owner);
-        let wait = driver.next_wait().expect("未来的日程就是截止");
+        let wait = driver.next_wait().delay.expect("未来的日程就是截止");
         assert!(
             wait > Duration::from_secs(60),
             "30 分钟后的日程不能被压成一秒内醒来，实际 {wait:?}，时刻 {due}"
@@ -1378,7 +1424,7 @@ mod lifecycle_tests {
             )
             .unwrap();
         let driver = driver_for(owner);
-        assert_eq!(driver.next_wait(), None, "停用的日程不是截止");
+        assert_eq!(driver.next_wait().delay, None, "停用的日程不是截止");
     }
 
     #[test]

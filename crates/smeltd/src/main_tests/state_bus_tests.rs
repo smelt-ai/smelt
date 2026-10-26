@@ -384,3 +384,45 @@ fn terminal_notifications_reach_subscribers_until_hooks_take_over() {
         "hook 接通后通知以 hook 为准，终端通知不再发"
     );
 }
+
+/// 进度只在变化时发。后连上的订阅者靠订阅时的补发看到已经在跑的进度条；终端结束后
+/// 不再补发它的，同 id 的新实例不受旧实例收尾影响。
+#[test]
+fn late_subscribers_get_the_current_terminal_progress_replayed() {
+    use smelt_event_protocol::{
+        CORE_TOPIC_TERMINAL_PROGRESS, TerminalProgress, TerminalProgressState,
+    };
+    let event_hub = new_event_hub();
+    let progress = TerminalProgress {
+        state: TerminalProgressState::Normal,
+        percent: Some(40),
+    };
+    // 还没有人订阅时发的那次也要记下。
+    event_hub
+        .publish_terminal_progress("term", 7, Some(progress))
+        .unwrap();
+
+    let subscription = subscribe(&event_hub, &[CORE_TOPIC_TERMINAL_PROGRESS]);
+    event_hub.replay_terminal_progress().unwrap();
+    let event = recv_event(&subscription);
+    assert_eq!(event.envelope.payload["session_id"], "term");
+    assert_eq!(event.envelope.payload["progress"]["percent"], 40);
+
+    event_hub.forget_terminal_progress("term", 6);
+    event_hub.replay_terminal_progress().unwrap();
+    assert_eq!(
+        recv_event(&subscription).envelope.payload["progress"]["percent"],
+        40,
+        "旧实例收尾不能清掉新实例的进度条"
+    );
+
+    event_hub.forget_terminal_progress("term", 7);
+    event_hub.replay_terminal_progress().unwrap();
+    assert!(
+        matches!(
+            subscription.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "终端结束后不再补发它的进度条"
+    );
+}

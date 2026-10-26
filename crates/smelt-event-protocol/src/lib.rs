@@ -30,6 +30,9 @@ pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requ
 /// 项目目录里的文件变了（已滤掉构建产物、依赖目录）。只在客户端用 `project.watch`
 /// 关注过的项目上发；客户端据此重取 git 状态、文件树。
 pub const CORE_TOPIC_PROJECT_CHANGED: &str = "project.changed";
+/// 智能体的记忆目录里有文件变了。只在客户端用 `agent.memory.watch` 关注过的智能体上发；
+/// 客户端据此重取记忆列表。
+pub const CORE_TOPIC_AGENT_MEMORY_CHANGED: &str = "agent_memory.changed";
 /// CLI / Control API 要改外观。外观归客户端，运行时只校验后转给在线的桌面端。
 pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
 /// 终端里的程序用 OSC 9 / 99 / 777 发了一条通知。运行时在 PTY 字节流上扫一次，
@@ -440,6 +443,13 @@ pub struct ProjectChanged {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AgentMemoryChanged {
+    /// 哪个智能体自己的记忆变了。`None` 是用户全局记忆，所有智能体都读它。
+    pub agent_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalNotification {
     pub session_id: String,
     /// 通知正文，已从 OSC 载荷里取出（777 取最后一段，99 已解 base64）。
@@ -541,6 +551,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
         )?,
         descriptor(
             CORE_TOPIC_PROJECT_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_AGENT_MEMORY_CHANGED,
             CORE_CAPABILITY_WORKSPACE_READ,
             None,
             4 * 1024,
@@ -740,6 +756,7 @@ mod tests {
             (CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, None, 1),
             (CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, None, 1),
             (CORE_TOPIC_PROJECT_CHANGED, None, 1),
+            (CORE_TOPIC_AGENT_MEMORY_CHANGED, None, 1),
             (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
             (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
         ];

@@ -1,18 +1,40 @@
 # 文档
 
-smelt 是跨机器、多智能体的原生 AI 编程指挥台：macOS 上的 GPUI 桌面工作台，Linux 上的无头守护进程 `smeltd`，以及 iOS / Android 的手机和平板「出菜口」。
-桌面只支持 Apple Silicon Mac。Linux 上跑 `smeltd`，再用电脑或手机配对上去。
+smelt 是跨机器、多智能体的原生 AI 编程指挥台：macOS（Apple Silicon）和 Windows 10 1803+（x86_64）上的 GPUI 桌面工作台，Linux 上的无头守护进程 `smeltd`，以及 iOS / Android 的手机和平板「出菜口」。
+Windows 第一版是不签名的 zip 便携包，没有安装包，也没有自动更新。Linux 上可以只跑 `smeltd`，再用电脑或手机配对上去。
 这页文档只讲怎么用，架构细节不在这——接口和默认行为可能会变。
 
 ## 快速开始
 
+### macOS
+
 从 [GitHub Releases](https://github.com/smelt-ai/smelt/releases) 下载 `Smelt.dmg`，拖进
-应用程序文件夹，打开即可，只支持 Apple Silicon Mac。
+应用程序文件夹，打开即可，只支持 Apple Silicon Mac。应用在启动时和手动检查更新
+（stable/beta 渠道），有新版本时会提示。
+
+### Windows
+
+从同一个 [Releases](https://github.com/smelt-ai/smelt/releases) 页下载
+`smelt-<版本>-windows-x86_64.zip`，完整解压到同一个文件夹后运行 `smelt.exe`。
+不要把 `smelt.exe` 单独拖出来，同目录里的文件是运行要用的。
+
+数据目录是 `%USERPROFILE%\.smelt`。
+
+这一版：
+
+- 只有 x86_64，系统是 Windows 10 1803 及以上。没有安装包。
+- exe 不签名。SmartScreen 可能提示未知发布者，选择仍要运行即可。
+- 没有自动更新。
+- 交互 shell 是 `cmd.exe`（ConPTY），或 `COMSPEC` 指向的程序。
+- 没有菜单栏图标、Dock 角标、系统通知。这些只在 macOS 上。
+
+### 关掉窗口之后
 
 退出 smelt 甚至它崩溃了，里面跑着的 shell（包括正在干活的 `claude`）不会被杀掉，
 后台继续活着；重新打开 smelt，之前的分屏布局和终端会话都会自动恢复，不用重新
 `cd` 进项目、重新跑一遍命令。注意这只扛得住"关 smelt"，扛不住重启电脑——重启会
-把所有进程一起带走。
+把所有进程一起带走。升级或重启本机守护进程也一样：正在跑的 shell 会被关掉，进行中的
+回合会中断，对话历史保留（见[设置窗口](#设置窗口)里的「后台服务」）。
 
 想从源码构建、或者想搞清楚内部是怎么拼起来的，看[开发文档](/develop)。
 
@@ -51,7 +73,7 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 - 分屏布局会自动存档。同一格还可以叠几个终端（终端 Dock）
 - 右侧工具面板（`Opt+Cmd+B`）放文件、Git、历史，以及插件自己的页
 - 每个会话按状态着色，多开几个 agent 时一眼看出该管哪个
-- 菜单栏（Dock 之外）常驻一个图标，点击会弹出菜单
+- macOS 上，菜单栏（Dock 之外）常驻一个图标，点击会弹出菜单。Windows 第一版没有菜单栏图标，也没有 Dock 角标
 
 **用量**
 - 用量是各家账户额度（Claude、Copilot、Codex、Cursor、Grok），按 provider 查询，
@@ -88,7 +110,7 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 - 按来源列出当前项目下各家 agent 的本地历史，不只 Claude Code
 - 左列表、右详情。有 ACP 身份的来源可以「ACP 继续」或「CLI/TUI 继续」
 
-**通知**
+**通知**（菜单栏图标、Dock 角标和系统通知只在 macOS 上；Windows 第一版没有）
 - Dock 图标角标：数字是"需要你处理 + 等你批准"的会话总数；只是切过去看一眼不会
   清除，要等你真正回应了才清
 - macOS 系统通知（Notification Center）：只有 smelt 不在前台时才弹，标题固定
@@ -128,7 +150,7 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 
 ### Linux 上的无头运行时
 
-桌面 GUI 只在 Mac。Linux 上可以只跑 `smeltd`。
+Linux 上可以只跑 `smeltd`，不装桌面。桌面在 macOS 和 Windows 上。
 
 一键安装从 Release 拉取 `install.sh`。脚本按架构下载 `smeltd-<版本>-linux-<架构>.tar.gz`，对照同一份 `SHA256SUMS` 校验，再把参数交给包里的 `install.sh`：
 
@@ -159,7 +181,7 @@ smeltd mcp add <id>              # 添加内置 MCP 预设
 
 `smeltd mcp add` 的内置 id 有 `playwright`、`figma`、`rea`、`browser-mcp`。桌面端改某台远程机器的中继：侧栏那台机器的菜单里点「中继…」。控制接口是 `remote.config.set`，字段名是 `iroh_relay`。
 
-`smeltd install` 只在 Linux 注册 systemd 单元。macOS 上守护由桌面拉起。
+`smeltd install` 只在 Linux 注册 systemd 单元。macOS 和 Windows 上守护由桌面按需拉起。Windows 没有 systemd。
 
 ### 一个窗口里的多台机器
 
@@ -260,7 +282,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 
 ## 数据与配置
 
-结构化状态在两份 SQLite，都在 `~/.smelt/`：
+结构化状态在两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`）：
 
 | 位置 | 内容 |
 |---|---|
@@ -268,7 +290,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 | `~/.smelt/client.sqlite3` | 这台桌面的主题、字体、窗口背景、侧栏，以及连过哪些运行时。分屏布局在 `conversation_route.dock_layout` |
 | `~/.smelt/bin/smelt-pi` | 内置 Pi 运行时，单个二进制，跑官方 JSONL RPC |
 | `~/.smelt/runtime/` | 受管 Bun。ACP 适配器和 MCP 服务器按需从这里启动 |
-| `~/.smelt/smeltd.sock` | `smeltd` 的 Unix socket |
+| `~/.smelt/smeltd.sock` | `smeltd` 的本机 socket |
 | `~/.smelt/iroh-secret` | 这台运行时的 iroh 身份 |
 
 `workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`pet.json`、`llm.json`
@@ -284,7 +306,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 能。有 ACP 身份的来源可以选择「ACP 继续」或「CLI/TUI 继续」。
 
 **支持 Linux / Windows 吗？**
-桌面 GUI 只做 Mac。Linux 可以跑无头 `smeltd`，再用 Mac 或手机配对。没有 Windows 版。
+支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`，有自动更新）和 Windows 10 1803+ 的 x86_64 zip（`smelt-<版本>-windows-x86_64.zip`）。Windows 这一版不签名，没有安装包，没有自动更新，也没有 arm64 包；交互 shell 是 `cmd.exe`。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
 
 **在哪反馈问题？**
 去 [GitHub Issues](https://github.com/smelt-ai/smelt/issues/new/choose) 提，有 Bug 反馈

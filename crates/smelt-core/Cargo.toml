@@ -57,6 +57,14 @@ sha2 = "0.10"
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
 
+# Windows 上等 auth 锁目录被删：在父目录挂目录变化通知（pi_model_settings）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
 [build-dependencies]
 serde_json = "1"
 

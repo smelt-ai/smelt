@@ -69,3 +69,30 @@ fn stopping_blocks_any_further_start() {
         "升级 exec 前停掉后，不能再拉起任何东西"
     );
 }
+
+/// `remote.status.wait`：状态和调用方手里的不一样就立刻回，一样就等到它变。
+#[test]
+fn status_wait_returns_once_the_state_differs() {
+    let _lock = lock_remote_tests();
+    let state = new_remote_state();
+    assert_eq!(
+        wait_remote_status_change(&state, &RemoteAccessState::Starting, Duration::ZERO),
+        RemoteAccessState::Off,
+        "已经不一样就不等"
+    );
+    let waiter = {
+        let state = Arc::clone(&state);
+        thread::spawn(move || {
+            wait_remote_status_change(&state, &RemoteAccessState::Off, Duration::from_secs(60))
+        })
+    };
+    install_test_endpoint(&state, "endpoint-a");
+    assert_eq!(
+        waiter.join().unwrap(),
+        RemoteAccessState::Running {
+            endpoint_id: "endpoint-a".to_string(),
+            relay: None,
+        }
+    );
+    apply_remote_config(&state, &config(false, ""));
+}

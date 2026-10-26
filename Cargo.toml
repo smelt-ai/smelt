@@ -34,7 +34,7 @@ resolver = "3"
 # 版本号唯一真源，由 scripts/release.sh 改，不要手改（scripts/package-mac.sh 与 release CI 都
 # grep 本文件的 '^version' 行做校验），各成员 version.workspace = true 继承。
 [workspace.package]
-version = "2026.1023.0-rc.1"
+version = "2026.1026.0-rc.1"
 edition = "2024"
 # 与 rust-toolchain.toml 一致。成员 crate 未一律 inherit，钉编译器靠 toolchain 文件。
 rust-version = "1.97.0"

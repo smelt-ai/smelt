@@ -798,24 +798,10 @@ fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool)
 /// Windows 没有交接过来的进程组。这个 pid 是我们拉起来的，等它退出即可。
 #[cfg(windows)]
 fn prove_windows_process_dead(pid: i32, timeout: Duration) -> bool {
-    let Ok(pid) = u32::try_from(pid) else {
-        return true;
-    };
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !smelt_sys::process::pid_is_alive(pid) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        let slice = Duration::from_millis(15)
-            .min(deadline.saturating_duration_since(Instant::now()));
-        if slice.is_zero() {
-            return !smelt_sys::process::pid_is_alive(pid);
-        }
-        std::thread::park_timeout(slice);
-    }
+    // 等进程句柄变成有信号。句柄打不开时 `wait_until_exit` 也报「已退出」，
+    // 所以返回前再查一次：没权限打开（活着）不能当成已死。
+    crate::process_wait::wait_until_exit(pid, timeout)
+        && u32::try_from(pid).is_ok_and(|pid| !smelt_sys::process::pid_is_alive(pid))
 }
 
 #[cfg(unix)]
@@ -875,6 +861,8 @@ fn prove_unix_process_group_dead(pid: i32, timeout: Duration, reap_child: bool) 
                 return false;
             }
             blind_wait_used = true;
+            // 轮询例外：僵尸由别的父进程收走时没有我们能挂的事件（pid 已报过退出，组探针
+            // 要等收尸才变）；只睡一次，周期即剩余时间，上限是调用方的 timeout。
             std::thread::park_timeout(remaining);
             continue;
         }
@@ -3783,7 +3771,8 @@ fn inspect_runtime_path(program: &str, path: Option<std::path::PathBuf>) -> Runt
 }
 
 /// 版本查询必须有上限：用户自己的 shell shim 或损坏的 CLI 不能让设置页永久处于
-/// 「检测中」。版本输出很小，进程退出前不读 pipe；超过上限便终止子进程。
+/// 「检测中」。stdout / stderr 各由一条线程边跑边读，输出再多也不会把子进程卡在写
+/// 管道上；进程退出由 `wait` 告知，超过上限便杀掉并收回。
 fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, String> {
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
     let mut command = std::process::Command::new(path);
@@ -3801,28 +3790,48 @@ fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, S
         .spawn()
         .map_err(|error| format!("无法执行 `--version`：{error}"))?;
     let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| format!("读取 `--version` 输出失败：{error}"));
-            }
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("`--version` 检测超时（5 秒）".to_string());
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("等待 `--version` 失败：{error}"));
-            }
-        }
+    let stdout = read_pipe_in_background(child.stdout.take());
+    let stderr = read_pipe_in_background(child.stderr.take());
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let status = {
+        let timed_out = timed_out.clone();
+        crate::process_wait::wait_child_for(child, VERSION_PROBE_TIMEOUT, move |pid| {
+            timed_out.store(true, Ordering::SeqCst);
+            let _ = smelt_sys::process::terminate_pid(pid);
+        })
     }
+    .map_err(|error| format!("等待 `--version` 失败：{error}"))?;
+    if timed_out.load(Ordering::SeqCst) {
+        return Err("`--version` 检测超时（5 秒）".to_string());
+    }
+    // 子进程已经退出。它派生的后代可能还握着管道，读的一侧也只等到同一个截止。
+    let collect = |pipe: std::sync::mpsc::Receiver<Vec<u8>>| {
+        pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_default()
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: collect(stdout),
+        stderr: collect(stderr),
+    })
+}
+
+/// 在后台线程里把管道读到 EOF，读完从返回的 channel 交出。没有管道或线程起不来时
+/// channel 直接断开，接收方拿到空输出。
+fn read_pipe_in_background(
+    pipe: Option<impl std::io::Read + Send + 'static>,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut pipe) = pipe {
+        let _ = std::thread::Builder::new()
+            .name("smelt-pipe-read".to_string())
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = pipe.read_to_end(&mut buf);
+                let _ = tx.send(buf);
+            });
+    }
+    rx
 }
 
 /// 从命令输出中提取首个非空行，并限制长度，避免异常 CLI 输出撑爆设置页。
@@ -3937,7 +3946,7 @@ fn acp_cli_install_plan(
 
 /// 包安装可能拉取数百 MB，但不能无限占着设置页的任务状态。stdout/stderr 刻意
 /// 丢弃，避免 npm 或 brew 的大量进度输出塞满 pipe 导致子进程卡死；失败会返回固定
-/// 命令，用户可在终端重跑获得完整日志。
+/// 命令，用户可在终端重跑获得完整日志。进程退出由 `wait` 告知，到上限便杀掉并收回。
 fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<(), String> {
     const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
     let report = plan.report();
@@ -3952,37 +3961,31 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
     // 超时；brew 同理。PATH 放在最后，覆盖快照里那份。
     crate::login_env::apply_login_environment(&mut command);
     command.env("PATH", search_path);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| format!("无法启动 {}：{error}", report.installer))?;
-    let deadline = Instant::now() + INSTALL_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                return Err(format!(
-                    "{} 安装命令退出（{status}）。可在终端执行 `{}` 查看完整错误",
-                    report.installer, report.command
-                ));
-            }
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "{} 安装超时（15 分钟）。可在终端执行 `{}` 重试",
-                    report.installer, report.command
-                ));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("等待 {} 安装进程失败：{error}", report.installer));
-            }
-        }
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let status = {
+        let timed_out = timed_out.clone();
+        crate::process_wait::wait_child_for(child, INSTALL_TIMEOUT, move |pid| {
+            timed_out.store(true, Ordering::SeqCst);
+            let _ = smelt_sys::process::terminate_pid(pid);
+        })
     }
+    .map_err(|error| format!("等待 {} 安装进程失败：{error}", report.installer))?;
+    if timed_out.load(Ordering::SeqCst) {
+        return Err(format!(
+            "{} 安装超时（15 分钟）。可在终端执行 `{}` 重试",
+            report.installer, report.command
+        ));
+    }
+    if status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} 安装命令退出（{status}）。可在终端执行 `{}` 查看完整错误",
+        report.installer, report.command
+    ))
 }
 
 /// 命令首词是 `bunx`/`bun` 时解析到应用里的 Bun。Pi 的逻辑入口由
@@ -4283,6 +4286,32 @@ mod runtime_tests {
         };
         let output = run_runtime_version(&program);
         assert!(output.is_ok(), "短命令的版本探测应正常收尾：{output:?}");
+    }
+
+    /// 输出超过管道容量时，退出前没人读就会卡在写上，只能等到超时。
+    #[cfg(unix)]
+    #[test]
+    fn runtime_version_probe_drains_large_output_while_running() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("noisy-cli");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ndd if=/dev/zero bs=1024 count=256 1>&2 2>/dev/null\necho noisy-cli 1.2.3\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+
+        let output = run_runtime_version(&program).expect("大量输出不该让版本探测超时");
+        assert!(output.status.success());
+        assert_eq!(output.stderr.len(), 256 * 1024);
+        assert_eq!(
+            runtime_output_line(&output.stdout, &output.stderr),
+            Some("noisy-cli 1.2.3".to_string())
+        );
     }
 
     #[test]

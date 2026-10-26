@@ -245,7 +245,7 @@ export function importSource(session, cx, pick) {
   if (session.source === null) {
     return v_flex()
       .gap(SPACE.sm)
-      .child(hint("选一个含 SKILL.md 的目录，整个目录会被复制进来。只能是主目录里的目录。", cx))
+      .child(hint("选一个含 SKILL.md 的目录，整个目录会被复制进来。", cx))
       .child(h_flex().child(button("pick", "选择目录…", pick, "primary").loading(session.picking)));
   }
   return v_flex()

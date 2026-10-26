@@ -77,7 +77,7 @@ Future<String?> _demoScreen() async {
   }
 }
 
-/// 回到前台立刻确认每台机器还连着：系统在后台冻结心跳，这段时间网络往往已经换过。
+/// 回到前台立刻确认每台机器还连着：系统在后台冻结了链路保活，这段时间网络往往已经换过。
 class _Lifecycle extends StatefulWidget {
   const _Lifecycle({required this.model, required this.child});
 

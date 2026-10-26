@@ -8,6 +8,7 @@ pub mod automation;
 pub mod button;
 pub mod daemon_states_global;
 pub mod frame_stats;
+pub mod global_wait;
 pub mod history_titles_global;
 pub mod icon_action;
 pub mod image;

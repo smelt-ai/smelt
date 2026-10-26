@@ -1,4 +1,4 @@
-//! 设置页：远程访问与设备。
+//! 设置页：这台桌面连着的机器，和这台机器的远程访问、设备。
 
 use super::*;
 use smelt_model::remote_config::RemoteAccessState;
@@ -248,7 +248,16 @@ pub(super) fn remote_page(
         }),
     ]);
 
-    let runtimes_group = SettingGroup::new().title("其他运行时").items(vec![
+    SettingPage::new("远程访问")
+        .description("让配对过的电脑和手机经 iroh 连这台机器的运行时。")
+        .group(access_group)
+        .group(devices_group)
+}
+
+/// 这台桌面连着的其他机器。每台机器的日常操作（打开项目、远程桌面、重命名、中继）在侧栏
+/// 它那一段标题的 `⋯` 菜单里，这里管添加、看连接状态和移除。
+pub(super) fn machines_page() -> SettingPage {
+    let runtimes_group = SettingGroup::new().items(vec![
         SettingItem::new(
             "配对串",
             SettingField::input(
@@ -272,6 +281,7 @@ pub(super) fn remote_page(
             let danger = cx.theme().danger;
             let fg = cx.theme().foreground;
             let online = gpui::rgb(crate::ui_theme::green());
+            let warning = cx.theme().warning;
 
             let mut list = v_flex().gap_2();
             let label = if hub.adding { "正在配对…" } else { "添加运行时" };
@@ -295,17 +305,31 @@ pub(super) fn remote_page(
             }
             for (index, remote) in hub.remotes.iter().enumerate() {
                 let runtime_id = remote.connection.runtime_id.clone();
+                let key = remote.runtime.key().clone();
+                // 连得上就能升，不管兼不兼容（见 `runtime_events::upgrade_remote`）。
+                let can_upgrade = matches!(
+                    remote.status,
+                    crate::runtimes::RuntimeStatus::Online { .. }
+                        | crate::runtimes::RuntimeStatus::Incompatible { .. }
+                );
+                // 在线时再写走哪条路、多慢；慢了标黄。
+                let (link, link_tone) =
+                    crate::runtimes::runtime_link_detail(remote.runtime.key(), cx);
+                let slow = link_tone == crate::runtimes::LinkTone::Warning;
                 let (status, is_online) = match &remote.status {
                     crate::runtimes::RuntimeStatus::Connecting => ("正在连接…".to_string(), false),
                     crate::runtimes::RuntimeStatus::Online {
                         version, platform, ..
-                    } => (
-                        match platform {
+                    } => {
+                        let mut status = match platform {
                             Some(platform) => format!("在线 · {version} · {platform}"),
                             None => format!("在线 · {version}"),
-                        },
-                        true,
-                    ),
+                        };
+                        if link != "在线" {
+                            status = format!("{status} · {}", link.trim_start_matches("在线 · "));
+                        }
+                        (status, true)
+                    }
                     crate::runtimes::RuntimeStatus::Offline(error) => (format!("离线：{error}"), false),
                     crate::runtimes::RuntimeStatus::Incompatible { detail, .. } => {
                         (format!("版本不兼容：{detail}"), false)
@@ -334,8 +358,30 @@ pub(super) fn remote_page(
                                         .text_color(fg)
                                         .child(remote.connection.name.clone()),
                                 )
-                                .child(div().text_xs().text_color(muted).child(status)),
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if is_online && slow { warning } else { muted })
+                                        .child(status),
+                                )
+                                .children(remote.upgrade_note.clone().map(|note| {
+                                    div().text_xs().text_color(warning).child(note)
+                                })),
                         )
+                        .when(can_upgrade, |row| {
+                            row.child(
+                                Button::new(("upgrade-runtime", index))
+                                    .compact()
+                                    .label("升级")
+                                    .tooltip(format!(
+                                        "请这台机器升到 v{}",
+                                        crate::runtimes::DESKTOP_VERSION
+                                    ))
+                                    .on_click(move |_, _window, cx: &mut App| {
+                                        crate::runtime_events::upgrade_remote(&key, cx);
+                                    }),
+                            )
+                        })
                         .child(
                             Button::new(("remove-runtime", index))
                                 .compact()
@@ -350,9 +396,8 @@ pub(super) fn remote_page(
         }),
     ]);
 
-    SettingPage::new("远程访问")
-        .description("让配对过的电脑和手机经 iroh 连这台机器的运行时，或者添加其他机器上的运行时。")
-        .group(access_group)
-        .group(devices_group)
+    SettingPage::new("机器")
+        .description("添加其他机器上的运行时，在它们上面开项目、跑会话。")
+        .resettable(false)
         .group(runtimes_group)
 }

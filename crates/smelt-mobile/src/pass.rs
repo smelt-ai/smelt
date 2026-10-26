@@ -12,15 +12,17 @@
 //!                     取详情线程（pending_actions）──> 记下详情、再投影一次
 //! ```
 //!
-//! 取详情失败（断线、会话唤醒超时）就在取详情线程里退避重取，直到取到、单据没了或指纹
-//! 变了：在等你的会话列表不会再变，等不来下一次推送替它重取。
+//! 取详情失败就在取详情线程里重取，直到取到、单据没了或指纹变了：在等你的会话列表不会
+//! 再变，等不来下一次推送替它重取。机器没连上时不重取，等它重新连上（[`PassHub::set_connected`]）；
+//! 连着却取不到（会话唤醒超时）才退避，期间重新连上也立刻重取。
 //!
-//! 锁的顺序：会话目录的锁 → 本模块的锁（`update` 在会话目录的监听里调）。持有本模块的
-//! 锁时不调会话目录、不做网络 IO；取详情在单独的线程上做。
+//! 锁的顺序：会话目录的锁 → 本模块的锁（`update` 在会话目录的监听里调）；连接状态机的锁
+//! → 机队视图的锁 → 本模块的锁（`set_connected` 在连接状态的监听里调）。持有本模块的锁时
+//! 不调会话目录和连接状态机、不做网络 IO；取详情在单独的线程上做。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::api::catalog::{
     AttentionKind, SessionList, SessionPhase, SessionStatus, SessionSummary,
@@ -230,6 +232,16 @@ struct Shared {
     fetch: Fetch,
     timing: Timing,
     inner: Mutex<Inner>,
+    /// 取详情线程等重取：单据变了、机器连接状态变了时叫醒，条件各自重查。
+    wake: Condvar,
+}
+
+/// 一台机器的连接状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Connectivity {
+    connected: bool,
+    /// 连上过几次：变了说明期间重新连上过。
+    connects: u64,
 }
 
 #[derive(Default)]
@@ -243,6 +255,8 @@ struct Inner {
     first_seen: HashMap<Key, i64>,
     listeners: Vec<PassListener>,
     last: Option<Pass>,
+    /// runtime_id → 连接状态。
+    links: HashMap<String, Connectivity>,
 }
 
 impl Shared {
@@ -258,6 +272,7 @@ impl PassHub {
                 fetch,
                 timing,
                 inner: Mutex::new(Inner::default()),
+                wake: Condvar::new(),
             }),
         }
     }
@@ -284,7 +299,23 @@ impl PassHub {
         inner.order = order;
         let requests = update_locked(&mut inner);
         drop(inner);
+        self.shared.wake.notify_all();
         spawn_fetches(&self.shared, requests);
+    }
+
+    /// 一台机器的连接状态变了。在连接状态机的锁里调用：只记状态、叫醒等着重取的线程。
+    pub(crate) fn set_connected(&self, runtime_id: &str, connected: bool) {
+        let mut inner = self.shared.lock();
+        let link = inner.links.entry(runtime_id.to_string()).or_default();
+        if link.connected == connected {
+            return;
+        }
+        link.connected = connected;
+        if connected {
+            link.connects += 1;
+        }
+        drop(inner);
+        self.shared.wake.notify_all();
     }
 
     /// 一台机器推来新的会话列表。在会话目录的锁里调用：只改内存、推事件、起线程。
@@ -296,6 +327,8 @@ impl PassHub {
         inner.lists.insert(runtime_id.to_string(), list);
         let requests = update_locked(&mut inner);
         drop(inner);
+        // 单据可能没了或指纹变了，等着重取的线程据此退出。
+        self.shared.wake.notify_all();
         spawn_fetches(&self.shared, requests);
     }
 }
@@ -316,6 +349,7 @@ fn refresh(inner: &mut Inner) -> Pass {
         first_seen,
         listeners,
         last,
+        links: _,
     } = inner;
     let pass = project(Inputs {
         order,
@@ -388,22 +422,26 @@ fn spawn_fetches(shared: &Arc<Shared>, requests: Vec<(Key, String)>) {
     }
 }
 
-/// 取一张单据的详情，失败就退避重取。期间一直占着 `in_flight`：同一指纹不会另起请求。
+/// 取一张单据的详情，失败就重取。期间一直占着 `in_flight`：同一指纹不会另起请求。
 fn fetch(shared: &Arc<Shared>, key: Key, fingerprint: String) {
     let mut failures = 0u32;
     loop {
-        // 睡醒（或线程刚起来）先看单据还在不在。先打再看的话，单据已经清掉的那一轮
-        // 仍会发出去。
-        if shared.lock().in_flight.get(&key) != Some(&fingerprint) {
-            return;
-        }
+        // 线程刚起来（或重取前）先看单据还在不在。先打再看的话，单据已经清掉的那一轮
+        // 仍会发出去。连接状态在发请求前记下：取的期间重新连上的话，失败后立刻重取。
+        let seen = {
+            let inner = shared.lock();
+            if inner.in_flight.get(&key) != Some(&fingerprint) {
+                return;
+            }
+            inner.links.get(&key.0).copied().unwrap_or_default()
+        };
         let result = (shared.fetch)(&key.0, &key.1);
         let mut inner = shared.lock();
         if inner.in_flight.get(&key) != Some(&fingerprint) {
             // 取的期间指纹又变了（已有新的请求），或单据没了：这份作废。
             return;
         }
-        match result {
+        let failure = match result {
             Ok(actions) => {
                 inner.in_flight.remove(&key);
                 inner.details.insert(
@@ -415,19 +453,45 @@ fn fetch(shared: &Arc<Shared>, key: Key, fingerprint: String) {
                 );
                 let requests = update_locked(&mut inner);
                 drop(inner);
+                shared.wake.notify_all();
                 spawn_fetches(shared, requests);
                 return;
             }
-            Err(failure) => {
-                drop(inner);
-                failures = failures.saturating_add(1);
-                log::info!(
-                    "取单据详情失败（{}，第 {failures} 次）：{}",
-                    key.1,
-                    failure.message
-                );
-                std::thread::sleep(shared.timing.retry_delay(failures));
+            Err(failure) => failure,
+        };
+        failures = failures.saturating_add(1);
+        log::info!(
+            "取单据详情失败（{}，第 {failures} 次）：{}",
+            key.1,
+            failure.message
+        );
+        let retry_at = Instant::now() + shared.timing.retry_delay(failures);
+        loop {
+            if inner.in_flight.get(&key) != Some(&fingerprint) {
+                return;
             }
+            let link = inner.links.get(&key.0).copied().unwrap_or_default();
+            if link.connects != seen.connects {
+                // 期间重新连上过：换了链路，立刻重取，退避从头算。
+                failures = 0;
+                break;
+            }
+            if !link.connected {
+                // 没连上：重取也是白打，等它重新连上。
+                inner = shared.wake.wait(inner).unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            // 轮询例外：连着却取不到（会话唤醒超时、运行时一时出错）时运行时不会再通知我们，只能
+            // 隔一会儿重取（单据变了、重新连上会提前叫醒）；周期 2 秒起逐次翻倍，上限 30 秒。
+            let now = Instant::now();
+            if now >= retry_at {
+                break;
+            }
+            inner = shared
+                .wake
+                .wait_timeout(inner, retry_at - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 }

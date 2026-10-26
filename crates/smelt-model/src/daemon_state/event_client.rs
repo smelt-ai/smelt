@@ -167,6 +167,8 @@ pub struct SubscriptionShape {
     pub appearance_requests: bool,
     /// 关注的项目里文件变了：重取 git 状态和文件树。
     pub project_changes: bool,
+    /// 关注的智能体的记忆目录里文件变了：记忆页开着就重取。
+    pub agent_memory_changes: bool,
     /// 终端程序发的 OSC 通知，运行时扫好再推过来，桌面不再自己扫字节流。
     pub terminal_notifications: bool,
     /// 终端程序用 OSC 9;4 报的进度，侧栏画进度条。
@@ -182,6 +184,7 @@ impl SubscriptionShape {
         conversation_wake: true,
         appearance_requests: true,
         project_changes: true,
+        agent_memory_changes: true,
         terminal_notifications: true,
         terminal_progress: true,
     };
@@ -196,6 +199,7 @@ impl SubscriptionShape {
         conversation_wake: false,
         appearance_requests: false,
         project_changes: false,
+        agent_memory_changes: false,
         terminal_notifications: false,
         terminal_progress: false,
     };
@@ -217,6 +221,10 @@ impl SubscriptionShape {
                 CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
             ),
             (self.project_changes, CORE_TOPIC_PROJECT_CHANGED),
+            (
+                self.agent_memory_changes,
+                smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED,
+            ),
             (
                 self.terminal_notifications,
                 CORE_TOPIC_TERMINAL_NOTIFICATION,
@@ -536,6 +544,15 @@ impl DaemonStateEventClient {
                 let changed: smelt_event_protocol::ProjectChanged = decode_payload(payload, topic)?;
                 Ok(Some(DaemonStateEvent::ProjectChanged {
                     root: changed.root,
+                }))
+            }
+            smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED
+                if self.shape.agent_memory_changes =>
+            {
+                let changed: smelt_event_protocol::AgentMemoryChanged =
+                    decode_payload(payload, topic)?;
+                Ok(Some(DaemonStateEvent::AgentMemoryChanged {
+                    agent_id: changed.agent_id,
                 }))
             }
             CORE_TOPIC_TERMINAL_NOTIFICATION if self.shape.terminal_notifications => {
@@ -902,7 +919,7 @@ mod tests {
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
-        assert_eq!(topics.len(), 10);
+        assert_eq!(topics.len(), 11);
         assert!(
             topics
                 .iter()
@@ -1115,6 +1132,30 @@ mod tests {
             desktop.decode_message(wake()).unwrap(),
             Some(DaemonStateEvent::ConversationWakeRequested { session_id })
                 if session_id == "acp-dormant"
+        ));
+    }
+
+    #[test]
+    fn desktop_decodes_agent_memory_changes() {
+        let mut desktop = desktop_client();
+        let _ = complete_snapshot(&mut desktop, 7, vec![]);
+        assert!(matches!(
+            desktop
+                .decode_message(event_message(
+                    smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED,
+                    serde_json::json!({ "agent_id": "writer" }),
+                ))
+                .unwrap(),
+            Some(DaemonStateEvent::AgentMemoryChanged { agent_id: Some(id) }) if id == "writer"
+        ));
+        assert!(matches!(
+            desktop
+                .decode_message(event_message(
+                    smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED,
+                    serde_json::json!({ "agent_id": null }),
+                ))
+                .unwrap(),
+            Some(DaemonStateEvent::AgentMemoryChanged { agent_id: None })
         ));
     }
 

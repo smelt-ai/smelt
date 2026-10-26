@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { AppleLogo, PhoneIcon } from "./icons";
+import { AppleLogo, DesktopIcon, PhoneIcon } from "./icons";
 import { InstallCommand } from "./InstallCommand";
 
 const RELEASE_URL = "https://github.com/smelt-ai/smelt/releases/latest";
@@ -18,15 +18,19 @@ export function Cta() {
             开始使用
           </p>
           <h2 className="mt-5 max-w-2xl text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
-            现在就把你的 Mac、远程服务器和手机连成一体
+            现在就把本机桌面、远程服务器和手机连成一体
           </h2>
           <p className="mt-4 max-w-2xl text-base leading-7 text-muted">
-            在工位用原生桌面深入编码，在 Linux 上让代码和环境留在服务器，离开工位就用手机审批、看进度、把任务继续往下推。
+            在工位用 macOS 或 Windows 原生桌面深入编码，在 Linux 上让代码和环境留在服务器，离开工位就用手机审批、看进度、把任务继续往下推。
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
             <a href={RELEASE_URL} target="_blank" rel="noopener noreferrer" className="btn btn-primary">
               <AppleLogo className="h-4 w-4" />
               <span className="text-sm font-semibold">下载 macOS 版</span>
+            </a>
+            <a href={RELEASE_URL} target="_blank" rel="noopener noreferrer" className="btn btn-secondary">
+              <DesktopIcon className="h-4 w-4" />
+              <span className="text-sm font-semibold">下载 Windows 版</span>
             </a>
             <Link href="/docs#远程访问" className="btn btn-secondary">
               <PhoneIcon className="h-4 w-4" />

@@ -195,9 +195,9 @@ impl HubInner {
                     attachment.fail(NO_RUNTIME);
                     return None;
                 }
-                // 连上时监听叫醒；连接停下由监听收尾。
+                // 连上时监听叫醒（`retry_now`）；连接停下由监听收尾（叫停）。
                 None => {
-                    if let Wake::Stop = attachment.wait(self.timing.backoff_max) {
+                    if let Wake::Stop = attachment.wait_signal() {
                         return None;
                     }
                 }
@@ -239,6 +239,8 @@ impl HubInner {
                     attachment.notify_error(reason);
                 }
             }
+            // 轮询例外：连着却附着不上、或附着后断了，运行时不会再通知我们，只能隔一会儿重新附着
+            // （换代、重新连上由监听叫醒）；周期 500 毫秒起逐次翻倍，上限 8 秒。
             match attachment.wait(self.timing.backoff(failures)) {
                 Wake::Stop => break,
                 Wake::Now => failures = 0,
@@ -631,6 +633,21 @@ impl Attachment {
     fn retry_now(&self) {
         self.lock().retry_now = true;
         self.wake.notify_all();
+    }
+
+    /// 不设超时地等叫停或 `retry_now`。
+    fn wait_signal(&self) -> Wake {
+        let state = self.lock();
+        let mut state = self
+            .wake
+            .wait_while(state, |s| !s.stopped && !s.retry_now)
+            .unwrap_or_else(|e| e.into_inner());
+        if state.stopped {
+            Wake::Stop
+        } else {
+            state.retry_now = false;
+            Wake::Now
+        }
     }
 
     fn wait(&self, delay: Duration) -> Wake {

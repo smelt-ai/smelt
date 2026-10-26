@@ -364,31 +364,52 @@ impl Workspace {
         }
     }
 
-    /// 重新扫描记忆目录。智能体在对话里写了新记忆后，不用重开编辑器就能看到。
     /// 向运行时重新取当前编辑器那个智能体的记忆。回来时编辑器已换人就丢掉。
+    ///
+    /// 第一次取时顺带请运行时监听它的记忆目录（`agent.memory.watch`）：之后智能体在对话里
+    /// 写了新记忆、用户在外部编辑器改了文件，运行时推 `agent_memory.changed`，见
+    /// [`Self::on_agent_memory_changed`]。先登记再取，登记之后的变化不会漏。
     pub(super) fn refresh_agent_memories(&mut self, cx: &mut Context<Self>) {
+        use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call_on, error_text};
+        use smelt_model::control_api::{AgentDefinitionIdParams, AgentMemoryList, AgentMemoryWatch};
+
         let Some(agent) = self.agent_surface.editor.as_ref().map(|e| e.agent.clone()) else {
             return;
         };
+        let watch = self.agent_surface.watched_memories.insert(agent.clone());
         // 记忆在智能体那台机器上，问那台机器的运行时。
         let client = crate::runtime_call::target(&agent.runtime, cx);
         cx.spawn(async move |this, cx| {
             let id = agent.id.clone();
-            let listed = cx
+            let (watched, listed) = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::runtime_call::call_on::<smelt_model::control_api::AgentMemoryList>(
-                        &client?,
-                        smelt_model::control_api::AgentDefinitionIdParams { id },
-                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                    )
-                    .map_err(crate::runtime_call::error_text)
+                    let client = match client {
+                        Ok(client) => client,
+                        Err(error) => return (Ok(()), Err(error)),
+                    };
+                    let params = AgentDefinitionIdParams { id };
+                    let watched = if watch {
+                        call_on::<AgentMemoryWatch>(&client, params.clone(), RUNTIME_CALL_TIMEOUT)
+                            .map(|_| ())
+                            .map_err(error_text)
+                    } else {
+                        Ok(())
+                    };
+                    let listed = call_on::<AgentMemoryList>(&client, params, RUNTIME_CALL_TIMEOUT)
+                        .map_err(error_text);
+                    (watched, listed)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if let Err(error) = watched {
+                    // 没登记上：下次重取时再试。
+                    eprintln!("[agents] 请运行时监听记忆失败：{error}");
+                    this.agent_surface.watched_memories.remove(&agent);
+                }
                 match listed {
                     Ok(memories) => {
-                        // 定时重取大多数时候什么都没变，没变就不重绘。
+                        // 重取大多数时候什么都没变，没变就不重绘。
                         if let Some(editor) =
                             this.agent_surface.editor.as_mut().filter(|editor| {
                                 editor.agent == agent && editor.memories != memories
@@ -490,21 +511,45 @@ impl Workspace {
         }
     }
 
-    /// 编辑器开着时定时向运行时重取记忆：智能体在对话里写了新记忆、用户在编辑器里
-    /// 改了文件，卡片都能跟上。记忆目录在运行时那台机器上，桌面监听不到它。任务随
-    /// 编辑器一起丢弃。
-    fn poll_agent_memories(&mut self, cx: &mut Context<Self>) -> gpui::Task<()> {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(MEMORY_POLL_INTERVAL).await;
-                if this
-                    .update(cx, |this, cx| this.refresh_agent_memories(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
+    /// 运行时说某个智能体的记忆目录变了（`agent_id` 为 `None` 是用户全局记忆，谁都读）。
+    /// 编辑器正开着那台机器上受影响的智能体就重取。
+    pub(crate) fn on_agent_memory_changed(
+        &mut self,
+        runtime: &crate::RuntimeKey,
+        agent_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let affected = self.agent_surface.editor.as_ref().is_some_and(|editor| {
+            &editor.agent.runtime == runtime
+                && agent_id.is_none_or(|id| id == editor.agent.id.as_str())
+        });
+        if affected {
+            self.refresh_agent_memories(cx);
+        }
+    }
+
+    /// 运行时断线：它替我们建的记忆监听随旧进程没了，清掉这台机器的登记。
+    pub(crate) fn forget_agent_memory_watches(&mut self, runtime: &crate::RuntimeKey) {
+        self.agent_surface
+            .watched_memories
+            .retain(|agent| &agent.runtime != runtime);
+    }
+
+    /// 运行时重新订阅上了：断线期间记忆可能变过，监听也要重新登记。编辑器正开着那台机器上
+    /// 的智能体就重取一次（重取时顺带登记）。
+    pub(crate) fn on_runtime_resubscribed(
+        &mut self,
+        runtime: &crate::RuntimeKey,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .agent_surface
+            .editor
+            .as_ref()
+            .is_some_and(|editor| &editor.agent.runtime == runtime)
+        {
+            self.refresh_agent_memories(cx);
+        }
     }
 
     pub(super) fn open_agent_memory_file(
@@ -758,7 +803,6 @@ impl Workspace {
         }));
 
         let memories = AgentMemories::default();
-        let memory_poll = self.poll_agent_memories(cx);
         let pi_config = self.pi_config_on(&agent_ref.runtime);
         let plugins = pi_config
             .map(|config| config.plugins.clone())
@@ -780,7 +824,6 @@ impl Workspace {
             memory_query,
             memory_filter: MemoryFilter::default(),
             expanded_memory: None,
-            _memory_poll: memory_poll,
             _subscriptions: subscriptions,
         });
         self.refresh_agent_memories(cx);
@@ -2214,5 +2257,3 @@ impl Workspace {
     }
 }
 
-/// 编辑器开着时多久向运行时重取一次记忆。
-const MEMORY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);

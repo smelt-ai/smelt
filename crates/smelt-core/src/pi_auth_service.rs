@@ -133,6 +133,9 @@ pub fn events(params: LoginEventsParams) -> Result<LoginEventsResult, String> {
         if now >= deadline {
             return Ok(LoginEventsResult::default());
         }
+        // 轮询例外：控制通道是一问一答，没有往客户端推事件的路，客户端隔一阵再来取，
+        // 也靠这个证明自己还在（见 ABANDONED_AFTER）；服务端这边阻塞在 Condvar 上，有事件即返回。
+        // 周期 20s（POLL_WAIT），只在登录对话期间；上限是登录结束、取消，或 120s 没人来取被清掉。
         entries = logins
             .changed
             .wait_timeout(entries, deadline - now)

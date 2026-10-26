@@ -1,8 +1,7 @@
 //! `smelt-fs`：smelt 注册给全部插件的通用文件 HostModule。
 //!
-//! 插件当作可信代码，文件访问限在用户主目录内：官方 `fs/promises` 的授权根由宿主
-//! 设成主目录（见 `mod.rs`），这里的函数用同一条规则。不按插件区分，也不含任何
-//! 某个插件专属的逻辑。
+//! 插件当作可信代码，不限权限（见 `mod.rs`），这里也不设路径门控。不按插件区分，
+//! 也不含任何某个插件专属的逻辑。
 //!
 //! 只放官方 `fs/promises` 没有或做不对的操作：
 //! - 官方没有：`symlink`、`realpath`、`copy`（整树复制）、`exchange`（原子交换）。
@@ -11,15 +10,11 @@
 //!   `lstat`/`readlink` 看到的是目标，`unlink`/`rename` 落到目标上。这几个作用于
 //!   「路径本身」的操作放在这里，上游修好后换回官方的。
 //!
-//! 门控规则：
-//! - 路径必须是绝对路径，且不含 `..`。
+//! 路径规则（为了语义明确，不是为了拦权限）：
+//! - 路径必须是绝对路径，且不含 `..`：插件没有当前目录，相对路径没有确定的含义。
 //! - 作用于路径本身的调用（lstat、readlink、symlink 的落点、rename、unlink、
 //!   exchange、copy 的目标）只规范化父目录，最后一段不跟随——否则无法区分本体与引用。
-//! - 跟随软链的调用（realpath、copy 的源）真实路径也必须落在主目录内：
-//!   指向主目录外的软链读不穿。
-//! - 规范化途中遇到失效软链一律拒绝，不把它当作「还不存在的目录」顺着走出去。
-//!
-//! 已知缺口：检查与操作之间没有用 openat 一类的手段消除竞态。
+//! - 规范化途中遇到失效软链一律拒绝，不把它当作「还不存在的目录」顺着往下写。
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -28,51 +23,23 @@ use std::time::UNIX_EPOCH;
 
 use gpui_shell::{HostArguments, HostError, HostModule, HostObject, HostResult, HostValue};
 
-/// 全部插件共用的文件门控：只认用户主目录。
-pub(super) struct HostFs {
-    /// 已规范化的主目录。
-    home: PathBuf,
-}
+/// 全部插件共用的文件操作。
+pub(super) struct HostFs;
 
 impl HostFs {
-    pub(super) fn new(home: PathBuf) -> Self {
-        let home = fs::canonicalize(&home).unwrap_or(home);
-        Self { home }
-    }
-
-    fn check(&self, resolved: &Path) -> Result<(), HostError> {
-        if resolved.starts_with(&self.home) {
-            Ok(())
-        } else {
-            Err(HostError::new(format!(
-                "只能访问用户主目录内的路径：{}",
-                resolved.display()
-            )))
-        }
-    }
-
     /// 作用于路径本身：父目录规范化，最后一段原样保留。
     fn nofollow(&self, raw: &str) -> Result<PathBuf, HostError> {
         let path = lexical(raw)?;
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return Err(HostError::new(format!("不能操作根目录：{raw}")));
         };
-        let resolved = canonical_prefix(parent)?.join(name);
-        self.check(&resolved)?;
-        Ok(resolved)
+        Ok(canonical_prefix(parent)?.join(name))
     }
 
     /// 跟随软链。目标不存在时返回 `None`。
     fn follow(&self, raw: &str) -> Result<Option<PathBuf>, HostError> {
-        // 先按「不跟随」过一遍：落点本身不在主目录里就不该去碰它。
         let at = self.nofollow(raw)?;
-        match fs::canonicalize(&at) {
-            Ok(real) => {
-                self.check(&real)?;
-                Ok(Some(real))
-            }
-            Err(_) => Ok(None),
-        }
+        Ok(fs::canonicalize(&at).ok())
     }
 
     fn lstat(&self, raw: &str) -> HostResult {
@@ -91,14 +58,10 @@ impl HostFs {
             .map_or(HostValue::Null, |real| path_value(&real)))
     }
 
-    /// 在 `at` 建一条指向 `target` 的软链。`target` 必须存在且在主目录内：
-    /// 不允许插件借软链给别的程序指一条通往主目录外的路。
+    /// 在 `at` 建一条指向 `target` 的软链。
     fn symlink(&self, target: &str, at: &str) -> HostResult {
         let at = self.nofollow(at)?;
         let target = lexical(target)?;
-        let real = fs::canonicalize(&target)
-            .map_err(|_| HostError::new(format!("链接目标不存在：{}", target.display())))?;
-        self.check(&real)?;
         symlink_at(&target, &at)
             .map(|()| HostValue::Null)
             .map_err(|error| HostError::new(format!("创建链接 {} 失败：{error}", at.display())))
@@ -191,9 +154,9 @@ export interface Stat { kind: EntryKind; mtime_ms: number }
 export function lstat(path: string): Stat | null;
 /** 软链里存的目标原文。不是软链或不存在时为 null。 */
 export function readlink(path: string): string | null;
-/** 跟随软链后的真实路径。不存在（含失效软链）时为 null；真实路径在主目录外时抛错。 */
+/** 跟随软链后的真实路径。不存在（含失效软链）时为 null。 */
 export function realpath(path: string): string | null;
-/** 在 at 建一条指向 target 的软链。target 必须存在且在主目录内。 */
+/** 在 at 建一条指向 target 的软链。 */
 export function symlink(target: string, at: string): null;
 /** 移动文件、目录或软链本身。目标已存在时抛错。 */
 export function rename(from: string, to: string): null;
@@ -304,7 +267,7 @@ fn is_directory_link(file_type: &fs::FileType) -> bool {
 /// 把最深的已存在祖先规范化，其余段原样拼回（它们不存在，也就没有软链可跟）。
 ///
 /// 中途碰到失效软链（lstat 得到、canonicalize 不了）直接拒绝：否则它会被当成
-/// 「还不存在的目录」，随后的写操作顺着它落到主目录之外。
+/// 「还不存在的目录」，随后的写操作顺着它落到链接原本指向的地方。
 fn canonical_prefix(path: &Path) -> Result<PathBuf, HostError> {
     let mut existing = path;
     let mut missing = Vec::new();
@@ -584,7 +547,7 @@ mod tests {
         }
 
         fn host(&self) -> HostFs {
-            HostFs::new(self.home.clone())
+            HostFs
         }
     }
 
@@ -617,15 +580,6 @@ mod tests {
         assert!(host.lstat(&escape).is_err());
     }
 
-    #[test]
-    fn paths_outside_home_are_refused() {
-        let sandbox = Sandbox::new();
-        let host = sandbox.host();
-        let outside = sandbox.outside.join("x").to_string_lossy().into_owned();
-        assert!(host.lstat(&outside).is_err());
-        assert!(host.unlink(&outside).is_err());
-        assert!(host.rename(&sandbox.s("a"), &outside).is_err());
-    }
 
     #[test]
     fn lstat_readlink_and_unlink_act_on_the_link_itself() {
@@ -653,25 +607,24 @@ mod tests {
         assert!(host.unlink(&sandbox.s("real")).is_err(), "unlink 不删目录");
     }
 
+    /// 不限权限：主目录外的路径和指向主目录外的链接都照常操作。
     #[cfg(unix)]
     #[test]
-    fn a_link_out_of_home_cannot_be_followed_or_created() {
+    fn paths_and_links_outside_home_work() {
         let sandbox = Sandbox::new();
         let host = sandbox.host();
-        std::os::unix::fs::symlink(&sandbox.outside, sandbox.path("leak")).unwrap();
-        // 链接本身看得见……
-        assert_eq!(
-            kind(host.lstat(&sandbox.s("leak")).unwrap()).as_deref(),
-            Some("symlink")
-        );
-        // ……跟不过去。
-        assert!(host.realpath(&sandbox.s("leak")).is_err());
-        // 也建不出新的。
         let outside = sandbox.outside.to_string_lossy().into_owned();
-        assert!(host.symlink(&outside, &sandbox.s("another")).is_err());
-        assert!(
-            host.symlink(&sandbox.s("missing"), &sandbox.s("another"))
-                .is_err()
+        assert_eq!(kind(host.lstat(&outside).unwrap()).as_deref(), Some("dir"));
+        host.symlink(&outside, &sandbox.s("out")).unwrap();
+        assert_eq!(
+            comparable_path(&host.realpath(&sandbox.s("out")).unwrap()),
+            outside.as_str()
+        );
+        host.rename(&sandbox.s("out"), &sandbox.outside.join("moved").to_string_lossy())
+            .unwrap();
+        assert_eq!(
+            kind(host.lstat(&sandbox.outside.join("moved").to_string_lossy()).unwrap()).as_deref(),
+            Some("symlink")
         );
     }
 
@@ -782,8 +735,6 @@ mod tests {
             host.copy_plan(&sandbox.s("missing"), &sandbox.s("fresh"))
                 .is_err()
         );
-        let outside = sandbox.outside.join("x").to_string_lossy().into_owned();
-        assert!(host.copy_plan(&sandbox.s("source"), &outside).is_err());
     }
 
     #[test]

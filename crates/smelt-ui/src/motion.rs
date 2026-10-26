@@ -6,7 +6,7 @@
 //! 链上各层的 render 只读内存。应用不在前台、窗口失焦或系统开了减弱动态效果时，停在静态终态。
 
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, Element, ElementId, GlobalElementId, Hsla,
+    AnyElement, App, AsyncApp, Bounds, BoxShadow, Element, ElementId, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled as _,
     Transformation, Window, hsla, percentage, point, px,
 };
@@ -47,6 +47,15 @@ pub fn set_ambient_application_active(cx: &mut App, application_active: bool) {
 pub fn ambient_application_active(cx: &App) -> bool {
     cx.try_global::<AmbientMotionState>()
         .is_none_or(|state| state.application_active)
+}
+
+/// 等应用回到前台（[`ambient_application_active`]）。已经在前台就立刻返回。只在用户看得见
+/// 时才有意义的定时重绘，在后台时挂在这里不醒。
+pub async fn ambient_application_activated(cx: &AsyncApp) {
+    crate::global_wait::wait_for_global::<AmbientMotionState, ()>(cx, |cx| {
+        ambient_application_active(cx).then_some(())
+    })
+    .await;
 }
 
 fn ambient_transition_phase(duration: Duration, elapsed: Duration) -> (f32, bool) {

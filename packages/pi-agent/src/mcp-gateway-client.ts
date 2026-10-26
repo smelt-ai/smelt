@@ -1,16 +1,18 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import {
 	closeSync,
+	type FSWatcher,
 	mkdirSync,
 	openSync,
 	readFileSync,
 	renameSync,
 	rmSync,
 	statSync,
+	watch,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServerEntry, McpTransportFactory } from "@earendil-works/pi-coding-agent";
 import {
@@ -31,8 +33,10 @@ import { mcpServerEnvironment } from "./pi-mcp-runtime.ts";
  *
  * The gateway is a detached process with its own session, so ending a conversation (which kills
  * the conversation's process group) does not take it down. It records where it listens in a state
- * file; whoever finds no healthy gateway starts one under a lock, so concurrent conversations end
- * up with the same one. A gateway that died or was replaced is found again on the next connect.
+ * file once it listens; whoever finds no healthy gateway starts one under a lock, so concurrent
+ * conversations end up with the same one. Those that lose the lock wait for the state file (or the
+ * lock) to change instead of retrying. A gateway that died or was replaced is found again on the next
+ * connect.
  */
 
 export interface GatewayState {
@@ -49,6 +53,9 @@ export interface GatewayEndpoint {
 }
 
 const SPAWN_TIMEOUT_MS = 15_000;
+/** A lock not refreshed for this long belongs to a conversation that died while starting the gateway. */
+const LOCK_STALE_MS = SPAWN_TIMEOUT_MS + 5_000;
+const SPAWN_LOCK = "spawn.lock";
 const HEALTH_TIMEOUT_MS = 1_000;
 const LOG_ROTATE_BYTES = 1024 * 1024;
 
@@ -114,7 +121,62 @@ async function runningGateway(dir: string): Promise<GatewayEndpoint | undefined>
 	return (await healthy(endpoint)) ? endpoint : undefined;
 }
 
-function spawnGateway(dir: string): number {
+/** Wakes `changed()` when the state file or the spawn lock in `dir` changes. */
+interface GatewayDirWatch {
+	/** Resolves on the next change (or one that came since the last call), or after `timeoutMs`. */
+	changed(timeoutMs: number): Promise<void>;
+	close(): void;
+}
+
+/**
+ * Watch `dir` for the state file and the spawn lock. Armed before the caller looks, so a change between
+ * looking and waiting is not missed. The log file in the same directory does not wake it.
+ */
+function watchGatewayDir(dir: string): GatewayDirWatch {
+	// The state file is written to a temporary name next to it and renamed; either name may be reported.
+	const stateName = basename(gatewayStatePath(dir));
+	let pending = false;
+	let wake: (() => void) | undefined;
+	const notify = () => {
+		pending = true;
+		wake?.();
+	};
+	let watcher: FSWatcher | undefined;
+	try {
+		watcher = watch(dir, (_event, file) => {
+			if (file === null || file === SPAWN_LOCK || file.startsWith(stateName)) notify();
+		});
+		watcher.on("error", notify);
+	} catch {
+		// 轮询例外：目录监听开不起来就没有事件可等，只能每次等满调用方给的时长再看；周期至多
+		// LOCK_STALE_MS（20s），上限是调用方的截止时间（至多 35s）。
+	}
+	return {
+		changed(timeoutMs) {
+			if (pending) {
+				pending = false;
+				return Promise.resolve();
+			}
+			return new Promise((resolve) => {
+				const done = () => {
+					clearTimeout(timer);
+					wake = undefined;
+					pending = false;
+					resolve();
+				};
+				const timer = setTimeout(done, Math.max(0, timeoutMs));
+				wake = done;
+			});
+		},
+		close() {
+			watcher?.close();
+			watcher = undefined;
+			wake?.();
+		},
+	};
+}
+
+function spawnGateway(dir: string): ChildProcess {
 	const log = join(dir, "gateway.log");
 	try {
 		if (statSync(log).size > LOG_ROTATE_BYTES) renameSync(log, `${log}.1`);
@@ -136,35 +198,97 @@ function spawnGateway(dir: string): number {
 		});
 		child.unref();
 		if (child.pid === undefined) throw new Error("MCP gateway did not start");
-		return child.pid;
+		return child;
 	} finally {
 		closeSync(output);
 	}
 }
 
+/**
+ * Start a gateway and wait for it to write its state file, which it does once it listens. Fails as soon
+ * as the gateway exits, and after `SPAWN_TIMEOUT_MS` at the latest.
+ */
+async function launchGateway(dir: string): Promise<GatewayEndpoint> {
+	const logHint = `see ${join(dir, "gateway.log")}`;
+	let fail: (error: Error) => void = () => undefined;
+	const failed = new Promise<never>((_, reject) => {
+		fail = reject;
+	});
+	// Raced below; never left to reject unobserved.
+	failed.catch(() => undefined);
+	const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
+		fail(new Error(`MCP gateway exited before it was ready (${signal ?? `code ${code}`}); ${logHint}`));
+	const onError = (error: Error) => fail(new Error(`MCP gateway did not start: ${error.message}`));
+	const states = watchGatewayDir(dir);
+	let child: ChildProcess | undefined;
+	try {
+		child = spawnGateway(dir);
+		child.once("exit", onExit);
+		child.once("error", onError);
+		const pid = child.pid;
+		const deadline = Date.now() + SPAWN_TIMEOUT_MS;
+		for (;;) {
+			const state = readGatewayState(dir);
+			if (state !== undefined && state.pid === pid) {
+				const endpoint = endpointOf(state);
+				if (await healthy(endpoint)) return endpoint;
+				throw new Error(`MCP gateway ${pid} wrote its state but does not answer; ${logHint}`);
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new Error(`MCP gateway did not come up in ${SPAWN_TIMEOUT_MS / 1000}s; ${logHint}`);
+			await Promise.race([states.changed(remaining), failed]);
+		}
+	} finally {
+		states.close();
+		child?.off("exit", onExit);
+		child?.off("error", onError);
+	}
+}
+
+/** The spawn lock, or `undefined` when another conversation holds it. */
+async function tryLockSpawn(dir: string): Promise<(() => Promise<void>) | undefined> {
+	try {
+		return await lockfile.lock(dir, {
+			realpath: false,
+			lockfilePath: join(dir, SPAWN_LOCK),
+			stale: LOCK_STALE_MS,
+		});
+	} catch (error) {
+		if ((error as { code?: unknown }).code === "ELOCKED") return undefined;
+		throw error;
+	}
+}
+
 async function startGateway(dir: string): Promise<GatewayEndpoint> {
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	const existing = await runningGateway(dir);
-	if (existing) return existing;
-	const release = await lockfile.lock(dir, {
-		realpath: false,
-		lockfilePath: join(dir, "spawn.lock"),
-		stale: SPAWN_TIMEOUT_MS + 5_000,
-		retries: { retries: 200, minTimeout: 50, maxTimeout: 200 },
-	});
+	const changes = watchGatewayDir(dir);
 	try {
-		const raced = await runningGateway(dir);
-		if (raced) return raced;
-		const pid = spawnGateway(dir);
-		const deadline = Date.now() + SPAWN_TIMEOUT_MS;
-		while (Date.now() < deadline) {
-			await new Promise((resolve) => setTimeout(resolve, 50));
-			const state = readGatewayState(dir);
-			if (state?.pid === pid && (await healthy(endpointOf(state)))) return endpointOf(state);
+		// Long enough for a holder that died to leave a stale lock, and for us to start one after it.
+		const giveUp = Date.now() + LOCK_STALE_MS + SPAWN_TIMEOUT_MS;
+		for (;;) {
+			const existing = await runningGateway(dir);
+			if (existing) return existing;
+			const release = await tryLockSpawn(dir);
+			if (release) {
+				try {
+					const raced = await runningGateway(dir);
+					if (raced) return raced;
+					return await launchGateway(dir);
+				} finally {
+					await release().catch(() => undefined);
+				}
+			}
+			const remaining = giveUp - Date.now();
+			if (remaining <= 0) {
+				throw new Error(`MCP gateway did not come up; another conversation holds ${join(dir, SPAWN_LOCK)}`);
+			}
+			// Another conversation is starting it: wake when it writes the state file or lets go of the
+			// lock. A holder that died only leaves a lock that goes stale, which no event announces, so one
+			// wait lasts at most until then.
+			await changes.changed(Math.min(remaining, LOCK_STALE_MS));
 		}
-		throw new Error(`MCP gateway did not come up in ${SPAWN_TIMEOUT_MS / 1000}s; see ${join(dir, "gateway.log")}`);
 	} finally {
-		await release().catch(() => undefined);
+		changes.close();
 	}
 }
 
@@ -193,6 +317,17 @@ export function forgetGateway(endpoint: GatewayEndpoint | undefined): void {
 	if (!endpoint || currentEndpoint?.pid !== endpoint.pid) return;
 	current = undefined;
 	currentEndpoint = undefined;
+}
+
+/**
+ * `fetch` without Bun's socket idle timeout (5 minutes by default). The server-to-client stream stays
+ * silent while nothing happens, and a tool call can run longer than that; on loopback a closed peer is
+ * seen at once, so no heartbeat is needed to keep the connection or to notice it dropped. Each request
+ * still has its client's own timeout.
+ */
+function loopbackFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+	const options: BunFetchRequestInit = { ...init, timeout: false };
+	return fetch(input, options);
 }
 
 /** Connection refused or reset before anything was sent: the request did not reach a gateway. */
@@ -272,6 +407,7 @@ export class GatewayTransport implements McpTransport {
 		const inner = new StreamableHttpTransport({
 			url: `${endpoint.base}/mcp/${key}`,
 			headers: { authorization: `Bearer ${endpoint.token}` },
+			fetch: loopbackFetch,
 		});
 		inner.onMessage((message) => {
 			for (const listener of this.messageListeners) listener(message);

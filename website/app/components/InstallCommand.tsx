@@ -21,7 +21,7 @@ const MODES: { id: Mode; label: string; flag?: string; detail: string }[] = [
     id: "desktop",
     label: "含远程桌面与浏览器",
     flag: "--with-desktop",
-    detail: "同时准备远程桌面和浏览器。扫码登录或界面验证时，可以在 Mac 上直接接管。",
+    detail: "同时准备远程桌面和浏览器。扫码登录或界面验证时，可以在桌面上直接接管。",
   },
 ];
 

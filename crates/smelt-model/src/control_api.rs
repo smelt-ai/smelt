@@ -139,6 +139,17 @@ impl ControlCall for AgentMemoryEnsureDir {
     const METHOD: ControlMethod = ControlMethod::AgentMemoryEnsureDir;
 }
 
+/// 关注一个智能体的记忆（`id` 是智能体定义 id）：之后它自己的或用户全局的记忆目录里
+/// 文件有变化，运行时发 `agent_memory.changed` 事件。幂等；监听保持到运行时退出。
+pub enum AgentMemoryWatch {}
+
+impl ControlCall for AgentMemoryWatch {
+    type Params = AgentDefinitionIdParams;
+    type Result = EmptyParams;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryWatch;
+}
+
 /// 一次自动化运行的详情：归档的完整运行（实时投影里裁掉了大字段时才取）和对话记录。
 pub enum AutomationRunDetail {}
 
@@ -401,6 +412,51 @@ impl ControlCall for AutomationRunOnce {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionListResult {
     pub sessions: Vec<String>,
+}
+
+/// 一个进程或一棵进程树的资源占用。
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProcessUsage {
+    /// 两次采样之间的平均 CPU，按单核计，多核可以超过 100。
+    pub cpu_percent: f32,
+    /// macOS 是 `phys_footprint`（活动监视器的「内存」），其它平台是常驻集。
+    pub memory_bytes: u64,
+    pub process_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SessionResourceUsage {
+    pub session_id: String,
+    /// 会话根进程的整棵树：终端是 shell 和它起的一切，对话是会话宿主、provider 和工具进程。
+    pub usage: ProcessUsage,
+    /// 树里的进程，内存大的在前，最多 [`SESSION_PROCESS_LIMIT`] 个；`usage` 仍是整棵树。
+    pub processes: Vec<ProcessEntry>,
+}
+
+/// `SessionResourceUsage::processes` 最多列这么多个，免得一次大编译把回包撑大。
+pub const SESSION_PROCESS_LIMIT: usize = 50;
+
+/// 会话进程树里的一个进程。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProcessEntry {
+    pub pid: u32,
+    /// 进程名（`node`、`cargo`……）。
+    pub name: String,
+    /// 命令行，参数用空格连起来，过长截断；读不到是空的。
+    pub command: String,
+    /// 只算这一个进程，`process_count` 恒为 1。
+    pub usage: ProcessUsage,
+}
+
+/// 这台运行时此刻的资源占用。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ResourceUsageResult {
+    /// smeltd 进程本身，不含子进程。
+    pub daemon: ProcessUsage,
+    /// 根进程还在的会话，按 id 排序。
+    pub sessions: Vec<SessionResourceUsage>,
+    /// 这台机器的物理内存总量；读不到是 0。
+    pub total_memory_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -834,6 +890,11 @@ pi_calls! {
     RemoteConfigSet => RemoteConfigSet(crate::remote_config::RemoteConfig)
         -> crate::remote_config::RemoteAccessState;
     RemoteStatus => RemoteStatus(EmptyParams) -> crate::remote_config::RemoteAccessState;
+    /// 等远程访问的状态变得和 `known` 不一样，返回新状态。最多等
+    /// [`crate::remote_config::REMOTE_STATUS_WAIT_MAX`]，到时照样返回现在的状态（可能
+    /// 仍等于 `known`），调用方想继续等就再发一次。用来代替绑定期间隔一会儿查一次。
+    RemoteStatusWait => RemoteStatusWait(crate::remote_config::RemoteStatusWaitParams)
+        -> crate::remote_config::RemoteAccessState;
     /// 生成一次性配对串。远程访问要先开着。
     DevicePairBegin => DevicePairBegin(EmptyParams) -> crate::remote_config::PairingOffer;
     /// 新设备提交配对码，通过后这台设备进白名单。
@@ -868,6 +929,9 @@ pi_calls! {
     /// 读一个 Pi 子智能体的子会话（`~/.smelt/subagents/<id>.jsonl`），按对话条目给出，
     /// 默认是最后一页。子智能体还在跑时文件随时在长，再读一次就是新的。
     SubagentTranscript => SubagentTranscript(SubagentTranscriptParams) -> SubagentTranscriptResult;
+    /// 这台运行时的资源占用：守护进程自己和每个活会话的进程树。CPU 是跟上一次调用比的，
+    /// 第一次调用全是 0；隔一两秒调一次。
+    ResourceUsage => ResourceUsage(EmptyParams) -> ResourceUsageResult;
     /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录），顺带给出
     /// 会加载的技能。
     SessionLaunchPrepare => SessionLaunchPrepare(crate::agent_definition_store::LaunchPrepareParams)

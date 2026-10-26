@@ -43,6 +43,12 @@ pub(super) fn handle_shutdown<C: ClientSocket>(conn: C) {
 /// 等先到的那次把进程换掉或退出。
 static SHUTDOWN_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 停机是否已经开始。一旦为真，这个进程只会 exec 或退出，不会再回到正常服务。
+/// 新会话请求据此立刻回「守护正在停机」，不去 SPAWN_GATE 上排队。
+pub(crate) fn shutdown_started() -> bool {
+    SHUTDOWN_STARTED.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// 五步停机。`exec_exe` 有值时，子进程和文件句柄都放开之后再 `exec` 到那份新映像。
 /// 没有则在回执写完后退出。回执一定在收割和 WAL checkpoint 之后，调用方才能去换
 /// `.app` / `.exe`。
@@ -53,12 +59,15 @@ pub(crate) fn graceful_shutdown(
     use std::sync::atomic::Ordering;
 
     if SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+        // 先到的那次会 exec 或退出，这条线程不会再被用到。没有人 unpark 它；
+        // park 可能假醒，所以套在循环里。
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::thread::park();
         }
     }
 
-    // 1. 禁新会话、禁新子进程，并挡住身份目录的迟到提交。
+    // 1. 禁新会话、禁新子进程，并挡住身份目录的迟到提交。上面的标记先于写锁置上：
+    // 新的终端请求看到标记或拿不到读锁，都立刻回「守护正在停机」（见 `spawn_permit`）。
     let _spawn_gate = SPAWN_GATE
         .write()
         .unwrap_or_else(|error| error.into_inner());
@@ -81,6 +90,19 @@ pub(crate) fn graceful_shutdown(
         }
         save_active_automation_transcripts(&server.automations, &server.acp_sessions);
     }
+
+    // 停机前还开着的终端。收割之后它们就不在登记表里了，第 4 步要靠这份名单留下能续接的。
+    let terminal_ids: std::collections::HashSet<String> = super::SERVER
+        .get()
+        .map(|server| {
+            server
+                .sessions
+                .snapshot()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
+        .unwrap_or_default();
 
     // 3. 并发收割 ACP 进程组和 PTY。回执之前必须证明它们已经退出。
     if let Some(server) = super::SERVER.get() {
@@ -106,9 +128,10 @@ pub(crate) fn graceful_shutdown(
         }
     }
 
-    // 4. sidecar、身份目录、SQLite WAL。目录清空握着上面那把提交锁。
+    // 4. sidecar、身份目录、SQLite WAL。目录只留能续接的终端（桌面会用原来的 id 重新打开，
+    // 接回原来的对话），写入握着上面那把提交锁。
     crate::remote::cleanup_sidecar_services();
-    with_session_directory(crate::session_directory::SessionDirectory::clear_for_clean_shutdown);
+    with_session_directory(|directory| directory.keep_resumable_terminals(&terminal_ids));
     match smelt_core::sqlite_state::default_sqlite_store() {
         Ok(store) => {
             if let Err(error) = store.checkpoint_wal_truncate() {

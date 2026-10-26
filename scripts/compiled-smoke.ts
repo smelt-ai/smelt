@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, copyFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { createInterface } from "node:readline";
 import pkg from "../packages/pi-agent/package.json" with { type: "json" };
 
@@ -29,7 +29,8 @@ writeFileSync(
 }
 `,
 );
-const binary = join(dir, "smelt-pi");
+// 沿用原文件名：Windows 上没有 .exe 后缀的文件起不了进程。
+const binary = join(dir, basename(source));
 copyFileSync(source, binary);
 copyFileSync(join(dirname(source), "photon_rs_bg.wasm"), join(dir, "photon_rs_bg.wasm"));
 const { chmodSync } = await import("node:fs");
@@ -52,6 +53,11 @@ const probeResult = await new Promise<{ text: string; code: number | null }>((re
 	});
 	probe.stderr.on("data", (chunk: string) => {
 		text += chunk;
+	});
+	// 起不来时只有 error 没有 exit；不接住它，这个 Promise 永远不落地，发版作业就挂到超时。
+	probe.on("error", (error) => {
+		clearTimeout(timer);
+		resolve({ text: `${text}${error.message}\n`, code: null });
 	});
 	probe.on("exit", (code) => {
 		clearTimeout(timer);
@@ -98,6 +104,8 @@ function fail(message: string): never {
 	rmSync(dir, { recursive: true, force: true });
 	process.exit(1);
 }
+
+child.on("error", (error) => fail(`smelt-pi 起不来：${error.message}`));
 
 child.on("exit", (code, signal) => {
 	if (failed || pending.size === 0) return;
@@ -161,19 +169,30 @@ const prompt = await request("smoke-prompt", {
 		},
 	],
 });
-const deadline = Date.now() + 20_000;
-while (Date.now() < deadline) {
-	const text = `${JSON.stringify(prompt)}\n${seen.join("\n")}\n${stderr.join("")}`;
-	if (/cannot find module|MODULE_NOT_FOUND|module not found/i.test(text)) {
-		fail(`懒加载块没有留在 bunfs 里：${text.slice(-2000)}`);
+const MODULE_MISSING = /cannot find module|MODULE_NOT_FOUND|module not found/i;
+const REACHED_MODEL =
+	/unauthorized|invalid api key|api key|authentication|ENOTFOUND|ECONNREFUSED|fetch failed|network|offline|401|403/i;
+const trail = () => `${JSON.stringify(prompt)}\n${seen.join("\n")}\n${stderr.join("")}`;
+// 每来一行输出看一次：缺模块立刻失败，走到模型或网络错误就算通过，20 秒是上限。
+await new Promise<void>((resolve) => {
+	const timer = setTimeout(done, 20_000);
+	function done() {
+		clearTimeout(timer);
+		lines.off("line", check);
+		child.stderr.off("data", check);
+		resolve();
 	}
-	if (/unauthorized|invalid api key|api key|authentication|ENOTFOUND|ECONNREFUSED|fetch failed|network|offline|401|403/i.test(text)) {
-		break;
+	function check() {
+		const text = trail();
+		if (MODULE_MISSING.test(text)) fail(`懒加载块没有留在 bunfs 里：${text.slice(-2000)}`);
+		if (REACHED_MODEL.test(text)) done();
 	}
-	await new Promise((resolve) => setTimeout(resolve, 100));
-}
-const trailed = `${JSON.stringify(prompt)}\n${seen.join("\n")}\n${stderr.join("")}`;
-if (!/unauthorized|invalid api key|api key|authentication|ENOTFOUND|ECONNREFUSED|fetch failed|network|offline|401|403/i.test(trailed)) {
+	lines.on("line", check);
+	child.stderr.on("data", check);
+	check();
+});
+const trailed = trail();
+if (!REACHED_MODEL.test(trailed)) {
 	fail(`提示没有走到真实的模型或网络错误：${trailed.slice(-2000)}`);
 }
 

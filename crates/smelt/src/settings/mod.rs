@@ -32,6 +32,7 @@ mod agent_hooks;
 mod bundled_helpers;
 mod memory;
 mod nav;
+mod panel_plugins;
 mod pi_auth;
 mod pi_config;
 mod pi_mcp;
@@ -71,6 +72,7 @@ pub(super) use agent_hooks::{
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
 pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
+pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -648,11 +650,15 @@ fn set_launch_entries(entries: Vec<LaunchEntry>, cx: &mut App) {
     });
 }
 
-/// 后台从运行时加载启动项；运行时还没起来就按退避重试，直到拿到为止。
+/// 后台从本机运行时加载启动项：等它在线再读，读失败就退避后回去等（见
+/// [`crate::runtime_events::wait_online`]），直到拿到为止。
 pub fn start_launch_config_load(cx: &mut App) {
     cx.spawn(async move |cx| {
-        let mut attempt = 0u32;
+        let mut failures = 0u32;
         loop {
+            if !crate::runtime_events::wait_online(&crate::RuntimeKey::Local, failures, cx).await {
+                return;
+            }
             let fetched = cx
                 .background_executor()
                 .spawn(async { fetch_launch_settings() })
@@ -661,12 +667,7 @@ pub fn start_launch_config_load(cx: &mut App) {
                 cx.update(|cx| set_launch_entries(settings.entries, cx));
                 return;
             }
-            cx.background_executor()
-                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
-                    attempt,
-                ))
-                .await;
-            attempt = attempt.saturating_add(1);
+            failures = failures.saturating_add(1);
         }
     })
     .detach();
@@ -754,8 +755,8 @@ pub use smelt_model::agent_kind::{
 };
 pub use smelt_ui::agent_host_state::{
     AgentDefinition, AgentHostState, AgentHosts, agent_host_loaded, agent_host_settled,
-    agent_hosts, apply_agent_host, apply_notify_prefs, attach_agent_host, detach_agent_host,
-    initial_agent_host_state, reload_agent_hosts, try_apply_agent_host,
+    agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host, initial_agent_host_state,
+    reload_agent_hosts, try_apply_agent_host,
 };
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,
@@ -763,6 +764,40 @@ pub use smelt_ui::automation::{
     AutomationTriggerPresetId, BUILTIN_AUTOMATION_ACTIONS, BUILTIN_AUTOMATION_TRIGGER_PRESETS,
     EventIngress, WebhookIngress,
 };
+
+/// 挂上一台机器并在后台读它的配置：等那台机器在线再读，读失败就退避后回去等（见
+/// [`crate::runtime_events::wait_online`]），直到读到或机器被移除。已经挂着的只换客户端
+/// （比如改了中继），不重读。`on_first_load` 在第一次读到后调用一次。
+pub fn attach_agent_host(
+    key: crate::RuntimeKey,
+    client: smelt_runtime_client::RuntimeClient,
+    cx: &mut App,
+    on_first_load: impl FnOnce(&mut App) + 'static,
+) {
+    use smelt_ui::agent_host_state::{AgentHostLoad, load_agent_host, register_agent_host};
+
+    if !register_agent_host(&key, client, cx) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let mut failures = 0u32;
+        loop {
+            if !crate::runtime_events::wait_online(&key, failures, cx).await {
+                return;
+            }
+            // 刚断线、订阅还没察觉时会读失败，先安静重试几次再报。
+            match load_agent_host(&key, failures >= 4, cx).await {
+                AgentHostLoad::Loaded => {
+                    cx.update(on_first_load);
+                    return;
+                }
+                AgentHostLoad::Detached => return,
+                AgentHostLoad::Failed => failures = failures.saturating_add(1),
+            }
+        }
+    })
+    .detach();
+}
 
 /// 那台机器的智能体配置；还没读到（或机器已移除）时用出厂值。
 pub fn agent_host_settings<'a>(
@@ -1305,6 +1340,7 @@ struct SettingsRenderSnapshot {
     pi_plugin_error: Option<String>,
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
     agent_names_using_plugin: std::collections::HashMap<String, Vec<String>>,
+    panel_plugins: PanelPluginsSnapshot,
     #[cfg(target_os = "macos")]
     update_status: updater::UpdateStatus,
     /// 正在把 App 移到「应用程序」，见 `Workspace::move_app_to_applications`。
@@ -1324,6 +1360,8 @@ struct SettingsRenderSnapshot {
     show_daemon_restart_confirm: bool,
     show_update_install_confirm: bool,
     session_manager_open: bool,
+    /// 资源页的数。只在停在资源页时取，别的页用不着拼它。
+    resources: Option<std::rc::Rc<crate::resource_monitor::PanelSnapshot>>,
 }
 
 /// 设置内容画在哪。两处共用同一套快照和节流刷新，只是外壳不同。

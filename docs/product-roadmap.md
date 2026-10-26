@@ -215,9 +215,9 @@ flowchart LR
 **目标体验：** 人不在电脑前，也能知道 agent 卡在哪、一点允许/拒绝、必要时短回复——**手机是指挥台，不是第二块小终端。**  
 引擎与会话仍在那台机器的 smeltd。手机和另一台桌面都是运行时的客户端，走 iroh，不经过网关。飞书卡片还没做。
 
-已落地（细节在 [`workspace.md`](workspace.md)）：Flutter 手机 App 同时连所有配对过的机器，看对话和终端、批权限、离线 SQLite 缓存；一次性配对码；Linux 无头 `smeltd`；一个桌面窗口挂多台运行时；远程桌面（noVNC）能看能接管。下面未勾的仍是未做或不按原设想走的（没有做手机 H5 / PWA）。
+已落地（细节在 [`workspace.md`](workspace.md)）：Flutter 手机 App 同时连所有配对过的机器，看对话和终端、批权限、离线 SQLite 缓存；一次性配对码；Linux 无头 `smeltd`；Windows 本机 `smeltd`（x86_64 zip，不签名、无安装包、无自动更新）；一个桌面窗口挂多台运行时；远程桌面（noVNC）能看能接管。下面未勾的仍是未做或不按原设想走的（没有做手机 H5 / PWA）。
 
-**给谁用：** 开会、通勤、下班后 agent 还在跑，不能坐回 Mac 的人。
+**给谁用：** 开会、通勤、下班后 agent 还在跑，不能坐回电脑的人。
 
 已删除的 JSON-WS 网关分层记录见 [`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md)，不是现行协议。
 
@@ -238,6 +238,7 @@ flowchart LR
 - [x] 桌面和手机共用 `smelt-runtime-client`（iroh 或本机 socket）。JSON-WS 网关已删除
 - [x] 公网可达：iroh P2P，默认可走 n0 公共 relay，也可自建；一次性配对码（10 分钟、用一次），设备可撤销
 - [x] Linux 无头运行时（systemd 用户服务，`smeltd install` / `pair` / `devices`）与桌面多运行时
+- [x] Windows 本机运行时（x86_64 zip；不签名、无安装包、无自动更新）
 - [ ] 多端同时看不顶掉桌面 GUI；权限操作幂等、可审计
 
 ### 飞书（轻量通道，与手机共用 action）

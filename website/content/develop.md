@@ -5,7 +5,7 @@
 
 ## 从源码构建
 
-需要 Rust 工具链和 Xcode Command Line Tools（不需要完整 Xcode）：
+下面是 macOS。需要 Rust 工具链和 Xcode Command Line Tools（不需要完整 Xcode）。Windows 的发版 zip 在 Windows 上编，见后面的「打包发布」。
 
 ```sh
 cargo run --bin smelt   # GUI 主程序
@@ -27,10 +27,13 @@ cargo build --bin smeltd
 核心二进制：
 
 - **smelt**（`crates/smelt/`）—— GUI 本体：多项目 × 多标签、文件树、Git、智能体和自动化。
-- **smeltd**（`crates/smeltd/`）—— 后台守护，管 PTY / ACP 子进程生命周期，跟 GUI
-  之间靠 Unix socket 通信（attach 时先回报真实尺寸，再发网格 keyframe 快照与
-  增量输出，重放区间按 `replay_len` 划界）。就算 GUI 挂了，`smeltd` 照样把 shell
-  养着；重开 GUI 按会话 id 自动 reattach。手机和另一台桌面经 iroh 连的也是它。
+- **smeltd**（`crates/smeltd/`）—— 后台守护，管 PTY / ACP 子进程生命周期。macOS 和
+  Windows 桌面按需拉起它，Linux 上可以装成 systemd 用户服务。跟 GUI 之间靠本机
+  socket 通信（attach 时先回报真实尺寸，再发网格 keyframe 快照与增量输出，重放区间
+  按 `replay_len` 划界）。Windows 上 Rust 客户端连 `%USERPROFILE%\.smelt\smeltd.sock`
+  （`uds_windows` 的 AF_UNIX），Bun / Pi 走当前用户的命名管道。就算 GUI 挂了，`smeltd`
+  照样把 shell 养着；重开 GUI 按会话 id 自动 reattach。升级守护是先优雅停机再换
+  新版本，不交接 fd，进行中的终端会话和回合会中断。手机和另一台桌面经 iroh 连的也是它。
 - **smelt-pi** —— Pi 运行时单二进制，跑官方 JSONL RPC。`make smelt-pi` 走
   `scripts/build-smelt-pi.sh`。装到用户机器上是 `~/.smelt/bin/smelt-pi`。受管 Bun
   在 `~/.smelt/runtime`，只负责按需启动 ACP 适配器和 MCP 服务器。
@@ -51,7 +54,7 @@ make ios          # scripts/build-ios.sh，在发版 tag 上出 iOS 包
 make dist-build   # macOS dmg
 ```
 
-Linux 运行时包是 `scripts/package-linux.sh`。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)。
+Linux 运行时包是 `scripts/package-linux.sh`。Windows 桌面 zip 不在这些 Make 目标里：发版的 `windows` job 在 `windows-latest` 上执行 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用 `scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`，打成 `smelt-<版本>-windows-x86_64.zip`。第一版不签名，没有自动更新。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)，Windows 行为见 [`docs/windows-support.md`](https://github.com/smelt-ai/smelt/blob/main/docs/windows-support.md)。
 
 两者解耦：`smelt` 可以单独跑（这时终端会话就跟着 GUI 生命周期走），也可以接上
 `smeltd` 拿到跨重启的会话持久化。打包发布时核心二进制会被塞进同一个
@@ -79,6 +82,11 @@ make dist-build
 都过不了 Gatekeeper 公证）。不加 `--build` 则跳过编译，直接用已有的 release
 产物组装。
 
+Windows 没有对应的 `package-windows.sh`。zip 由 `.github/workflows/release.yml` 的
+`windows` job 在 `windows-latest` 上打：`smelt.exe`、`smelt.com`（`smelt-cli.exe`
+改名）、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，以及 Pi 要的 wasm。产物名
+是 `smelt-<版本>-windows-x86_64.zip`。这一版不签名。
+
 ## 目录结构
 
 - `crates/smelt/` —— GUI
@@ -98,6 +106,7 @@ make dist-build
 - `crates/smelt-mobile/`、`mobile/` —— 手机 Rust 内核与 Flutter App
 - `scripts/package-mac.sh` —— macOS 打包；`make dist` / `make dist-build` 是入口
 - `scripts/package-linux.sh` —— Linux 运行时 tar.gz
+- `.github/workflows/release.yml` 的 `windows` job —— Windows x86_64 zip，没有单独的打包脚本
 - `scripts/build-smelt-pi.sh` —— 编译 `smelt-pi`
 - `scripts/build-ios.sh` —— `make ios`
 - `scripts/release.sh` —— 日期版本号 `YYYY.MDD.N`

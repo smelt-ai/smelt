@@ -5,66 +5,13 @@
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
-use std::collections::HashSet;
 use std::path::Path;
 use std::process::Child;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::thread;
 
 /// 应用图标母图，编进二进制当菜单栏图标（跟 workspace 用的是同一张）。
 const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon-1024.png");
-
-struct GuiReaper {
-    sender: std::sync::mpsc::Sender<GuiChild>,
-    pids: Arc<Mutex<HashSet<i32>>>,
-}
-
-enum GuiChild {
-    Spawned(Child),
-}
-
-impl GuiChild {
-    fn pid(&self) -> i32 {
-        match self {
-            Self::Spawned(child) => child.id() as i32,
-        }
-    }
-
-    fn try_reap(&mut self) -> std::io::Result<bool> {
-        try_reap_pid_with(self.pid(), |pid| {
-            let waited = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
-            if waited < 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(waited)
-            }
-        })
-    }
-}
-
-/// 对一个确切 PID 做非阻塞 wait。Spawned/Inherited 统一走这条路径，避免
-/// `Child::try_wait` 在 Unix 上把 EINTR 原样抛出后，管理线程误以为 owner 已失效。
-fn try_reap_pid_with(
-    pid: i32,
-    mut waitpid: impl FnMut(i32) -> std::io::Result<i32>,
-) -> std::io::Result<bool> {
-    loop {
-        match waitpid(pid) {
-            Ok(waited) if waited == pid => return Ok(true),
-            Ok(0) => return Ok(false),
-            Ok(waited) => {
-                return Err(std::io::Error::other(format!(
-                    "waitpid({pid}) 返回意外 PID {waited}"
-                )));
-            }
-            Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
-            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => return Ok(true),
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-static GUI_REAPER: OnceLock<GuiReaper> = OnceLock::new();
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -75,103 +22,47 @@ struct NSSize {
 
 /// 点「打开 smelt」：拉起同目录的 GUI（dev 的 target 目录和 app 包内都叫 smelt）。
 /// 已在跑的话，由 GUI 自己的单实例逻辑负责前置窗口，这里只管发起。
-fn gui_reaper() -> std::io::Result<&'static GuiReaper> {
-    if let Some(reaper) = GUI_REAPER.get() {
-        return Ok(reaper);
-    }
-
-    let (sender, receiver) = std::sync::mpsc::channel::<GuiChild>();
-    let pids = Arc::new(Mutex::new(HashSet::new()));
-    let reaper_pids = Arc::clone(&pids);
-    thread::Builder::new()
-        .name("smelt-gui-reaper".into())
-        .spawn(move || {
-            let mut children = Vec::<GuiChild>::new();
-            loop {
-                if children.is_empty() {
-                    let Ok(child) = receiver.recv() else {
-                        break;
-                    };
-                    children.push(child);
-                } else {
-                    match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
-                        Ok(child) => children.push(child),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-                while let Ok(child) = receiver.try_recv() {
-                    children.push(child);
-                }
-                // 不能对第一个 Child 阻塞 wait：首个 GUI 通常会长期存活，那会让后续
-                // 单实例启动器即使已经退出也永远排在它后面。后台线程逐个做精确 PID
-                // 的非阻塞 wait，既不抢别的模块的退出状态，也能并发管理多个 launcher。
-                children.retain_mut(|child| match child.try_reap() {
-                    Ok(false) => true,
-                    Ok(true) => {
-                        reaper_pids.lock().unwrap().remove(&child.pid());
-                        false
-                    }
-                    Err(error) => {
-                        super::dlog(&format!(
-                            "menubar: 回收 GUI launcher pid={} 失败：{error}",
-                            child.pid()
-                        ));
-                        // 未确认 ECHILD/已回收前不能放弃唯一 owner。保留 Child 并在
-                        // 下一轮重试，避免一次瞬态系统调用失败重新制造永久僵尸。
-                        true
-                    }
-                });
-            }
-        })?;
-    // 正常只有 AppKit 主线程初始化。即便测试并发撞上，输掉 set 的 sender 一 drop，
-    // 它对应的空 reaper 会自然退出；所有调用方都返回唯一的静态 sender。
-    let _ = GUI_REAPER.set(GuiReaper { sender, pids });
-    GUI_REAPER
-        .get()
-        .ok_or_else(|| std::io::Error::other("GUI child reaper 初始化失败"))
-}
-
 fn spawn_gui(gui: &Path) -> std::io::Result<i32> {
     use std::process::Stdio;
 
-    let reaper = gui_reaper()?;
     let child = std::process::Command::new(gui)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let pid = child.id() as i32;
-    reaper.pids.lock().unwrap().insert(pid);
-    if let Err(error) = reaper.sender.send(GuiChild::Spawned(child)) {
-        reaper.pids.lock().unwrap().remove(&pid);
-        // 静态 sender 存在时 receiver 理论上不会消失。若线程异常退出，宁可在这个
-        // 极端失败路径同步 wait 一次，也不能重新制造永久僵尸。
-        if let GuiChild::Spawned(mut child) = error.0 {
-            let _ = child.wait();
-        }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "GUI child reaper 已退出",
-        ));
-    }
-    Ok(pid)
+    Ok(reap_gui_child(child))
 }
 
-/// 本模块持有回收权的直接子进程。
-pub(crate) fn tracked_child_pids() -> Vec<i32> {
-    let Some(reaper) = GUI_REAPER.get() else {
-        return Vec::new();
-    };
-    let mut pids: Vec<_> = reaper.pids.lock().unwrap().iter().copied().collect();
-    pids.sort_unstable();
-    pids
+/// 每个 GUI 子进程一条线程，阻塞在它自己那个 pid 的 `waitpid` 上。首个 GUI 通常
+/// 长期存活，各等各的，它就挡不住后面已经退出的单实例启动器；也不抢别的模块的
+/// 退出状态。`Child` 不负责收尸，丢掉它只是放下句柄，进程仍归这条线程收。
+fn reap_gui_child(child: Child) -> i32 {
+    let pid = child.id() as i32;
+    drop(child);
+    let spawned = thread::Builder::new()
+        .name("smelt-gui-reaper".into())
+        .spawn(move || reap_tracked_gui_child(pid));
+    if spawned.is_err() {
+        // 起不了线程时宁可在这个极端失败路径同步等一次，也不能制造永久僵尸。
+        reap_tracked_gui_child(pid);
+    }
+    pid
+}
+
+fn reap_tracked_gui_child(pid: i32) {
+    if !smelt_sys::process_wait::reap_direct_child(pid) {
+        super::dlog(&format!(
+            "menubar: 回收 GUI launcher pid={pid} 失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
 }
 
 extern "C" fn on_open(_this: &Object, _cmd: Sel, _sender: *mut Object) {
-    let _spawn_gate = super::SPAWN_GATE
-        .read()
-        .unwrap_or_else(|error| error.into_inner());
+    // 守护在停机就不拉 GUI：这是 AppKit 主线程，在闸门上排队会一直卡到进程退出。
+    let Ok(_spawn_gate) = super::spawn_permit() else {
+        return;
+    };
     if let Ok(exe) = super::daemon_executable_path() {
         let gui = exe.with_file_name("smelt");
         let _ = spawn_gui(&gui);
@@ -296,33 +187,6 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    #[test]
-    fn nonblocking_exact_wait_retries_eintr_without_dropping_ownership() {
-        let pid = 42;
-        let mut calls = 0;
-        let reaped = try_reap_pid_with(pid, |waited_pid| {
-            assert_eq!(waited_pid, pid);
-            calls += 1;
-            if calls == 1 {
-                Err(std::io::Error::from_raw_os_error(libc::EINTR))
-            } else {
-                Ok(pid)
-            }
-        })
-        .unwrap();
-
-        assert!(reaped);
-        assert_eq!(calls, 2, "EINTR 后必须继续等待同一个精确 PID");
-    }
-
-    #[test]
-    fn unexpected_nonblocking_wait_error_is_not_treated_as_reaped() {
-        let error = try_reap_pid_with(42, |_| Err(std::io::Error::from_raw_os_error(libc::EIO)))
-            .unwrap_err();
-
-        assert_eq!(error.raw_os_error(), Some(libc::EIO));
-    }
-
     fn wait_until_reaped_without_stealing_status(pid: i32, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -371,11 +235,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let blocker_pid = blocker.id() as i32;
-        let reaper = gui_reaper().unwrap();
-        reaper.pids.lock().unwrap().insert(blocker_pid);
-        reaper.sender.send(GuiChild::Spawned(blocker)).unwrap();
-        let handoff_contains_blocker = tracked_child_pids().contains(&blocker_pid);
+        let blocker_pid = reap_gui_child(blocker);
 
         let short_pid = spawn_gui(Path::new("/usr/bin/true")).unwrap();
         let short_reaped =
@@ -388,10 +248,6 @@ mod tests {
         let _ = wait_until_reaped_without_stealing_status(blocker_pid, Duration::from_secs(1));
         let _ = wait_until_reaped_without_stealing_status(short_pid, Duration::from_secs(1));
 
-        assert!(
-            handoff_contains_blocker,
-            "仍存活且由菜单 reaper 持有的 PID 必须进入 exec handoff"
-        );
         assert!(
             short_reaped,
             "一个长生命周期 GUI 不能阻塞后续已退出启动器的回收"

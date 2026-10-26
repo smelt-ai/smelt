@@ -52,9 +52,40 @@ pub struct DaemonRequest {
     pub payload: serde_json::Map<String, serde_json::Value>,
 }
 
+/// 终端 `open` 失败回执（`{"ok":false,"err",...}`）里可选的 `code`。没有 `code` 的失败
+/// 就是普通错误，照 `err` 报给人看；带 `code` 的是调用方要分开处理的几种。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalOpenErrorCode {
+    /// 守护已经开始停机（升级换映像，或退出），不再起新会话。回执之后这条连接一直开着，
+    /// 直到旧进程 exec 或退出才断：客户端读到 EOF，就是旧守护已经走了，可以重连。
+    DaemonStopping,
+    /// 比本客户端新的守护加的码。当普通错误处理。
+    #[serde(other)]
+    Unknown,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_open_error_codes_are_a_typed_wire_contract() {
+        assert_eq!(
+            serde_json::to_value(TerminalOpenErrorCode::DaemonStopping).unwrap(),
+            "daemon_stopping"
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalOpenErrorCode>(serde_json::json!("daemon_stopping"))
+                .unwrap(),
+            TerminalOpenErrorCode::DaemonStopping
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalOpenErrorCode>(serde_json::json!("from_the_future"))
+                .unwrap(),
+            TerminalOpenErrorCode::Unknown
+        );
+    }
 
     #[test]
     fn operation_names_are_a_typed_wire_contract() {

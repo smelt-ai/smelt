@@ -70,6 +70,13 @@ export interface McpGatewayOptions {
 	upstreamIdleMs: number;
 	/** Forget a session after this long without a request and without an open stream. */
 	sessionIdleMs: number;
+	/** With it, `nextDeadline()` includes the moment the gateway has had nothing to serve for this long. */
+	idleExitMs?: number;
+	/**
+	 * Called after anything that can move `nextDeadline()`: a request ends, a stream closes, a server
+	 * stops or exits, a sweep ran, `mcp.json` changed.
+	 */
+	onActivity?: () => void;
 	/** Timeout of the gateway's own `initialize` with a server. */
 	initializeTimeoutMs?: number;
 	/** Watch a server's `mcp.json`, to retire the server when its entry changes. Not watched without it. */
@@ -96,7 +103,6 @@ const BROADCAST_NOTIFICATIONS = [
 	"notifications/resources/updated",
 ];
 
-const SSE_KEEPALIVE_MS = 15_000;
 const STDERR_TAIL_CHARS = 2_000;
 const REQUEST_CANCELLED = -32800;
 
@@ -190,6 +196,12 @@ class Session {
 		this.lastSeen = now;
 	}
 
+	/** When a sweep forgets this session: never while it streams or has a request running. */
+	expiresAt(idleMs: number): number | undefined {
+		if (this.streams.size > 0 || this.pending.size > 0) return undefined;
+		return this.lastSeen + idleMs;
+	}
+
 	send(message: JsonRpcMessage): void {
 		const frame = new TextEncoder().encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
 		for (const stream of this.streams) {
@@ -250,6 +262,16 @@ class Upstream {
 		return this.client !== undefined || this.starting !== undefined;
 	}
 
+	/**
+	 * When a sweep next acts on this server: stops it, or, stopped and without sessions, forgets it.
+	 * Never while a request runs or it is starting; the request that started it reports when it ends.
+	 */
+	idleAt(idleMs: number): number | undefined {
+		if (this.inflight > 0 || this.starting !== undefined) return undefined;
+		if (this.client === undefined && this.sessions.size > 0) return undefined;
+		return this.lastUsed + idleMs;
+	}
+
 	getClient(): Promise<McpClient> {
 		if (this.client?.connectionState === "connected") return Promise.resolve(this.client);
 		if (this.retired) return Promise.reject(new Error(`MCP server "${this.spec.name}" was reconfigured; retry`));
@@ -282,6 +304,7 @@ class Upstream {
 		client.onClose(() => {
 			if (this.client === client) this.client = undefined;
 			this.gateway.log(`[${label}] stopped`);
+			this.gateway.activityChanged();
 		});
 		let transport: McpTransport | undefined;
 		try {
@@ -373,8 +396,12 @@ export class McpGateway {
 	private readonly sessions = new Map<string, Session>();
 	/** Stop functions of the watched `mcp.json` files, by path. */
 	private readonly watchers = new Map<string, () => void>();
+	/** Since when there has been nothing to serve, as of the last `activityChanged()`. */
+	private idleSince: number | undefined;
 
-	constructor(readonly options: McpGatewayOptions) {}
+	constructor(readonly options: McpGatewayOptions) {
+		this.idleSince = this.now();
+	}
 
 	now(): number {
 		return this.options.now?.() ?? Date.now();
@@ -419,6 +446,7 @@ export class McpGateway {
 			else if (upstreamKey(current) !== upstream.key) this.retire(upstream, "reconfigured");
 		}
 		this.unwatchUnused();
+		this.activityChanged();
 	}
 
 	/**
@@ -484,25 +512,67 @@ export class McpGateway {
 		return this.sessions.size === 0 && [...this.upstreams.values()].every((upstream) => !upstream.running);
 	}
 
+	/**
+	 * Record a change that can move `nextDeadline()` and tell `onActivity`. Called by the gateway itself;
+	 * public so a server's exit can report it.
+	 */
+	activityChanged(): void {
+		if (this.isIdle()) this.idleSince ??= this.now();
+		else this.idleSince = undefined;
+		this.options.onActivity?.();
+	}
+
+	/**
+	 * The earliest time a sweep has something to do, or the idle exit is due: a session expires, a
+	 * server is stopped or forgotten, or the gateway has been idle for `idleExitMs`. `undefined` when
+	 * nothing will happen until the next request, so no timer needs to run.
+	 */
+	nextDeadline(): number | undefined {
+		let next = Number.POSITIVE_INFINITY;
+		for (const session of this.sessions.values()) {
+			next = Math.min(next, session.expiresAt(this.options.sessionIdleMs) ?? next);
+		}
+		for (const upstream of this.upstreams.values()) {
+			next = Math.min(next, upstream.idleAt(this.options.upstreamIdleMs) ?? next);
+		}
+		const exitAt = this.idleExitAt();
+		if (exitAt !== undefined) next = Math.min(next, exitAt);
+		return Number.isFinite(next) ? next : undefined;
+	}
+
+	/** The gateway has had nothing to serve for `idleExitMs`. */
+	idleExitDue(): boolean {
+		const exitAt = this.idleExitAt();
+		return exitAt !== undefined && this.now() >= exitAt;
+	}
+
+	private idleExitAt(): number | undefined {
+		const idleExitMs = this.options.idleExitMs;
+		if (idleExitMs === undefined || this.idleSince === undefined || !this.isIdle()) return undefined;
+		return this.idleSince + idleExitMs;
+	}
+
 	/** Stop idle servers and forget sessions whose client went away. */
 	async sweep(): Promise<void> {
 		const now = this.now();
 		for (const session of [...this.sessions.values()]) {
-			if (session.streams.size > 0 || session.pending.size > 0) continue;
-			if (now - session.lastSeen >= this.options.sessionIdleMs) this.dropSession(session);
+			const expiresAt = session.expiresAt(this.options.sessionIdleMs);
+			if (expiresAt !== undefined && now >= expiresAt) this.dropSession(session);
 		}
 		const stops: Promise<void>[] = [];
 		for (const upstream of [...this.upstreams.values()]) {
-			if (upstream.inflight > 0 || now - upstream.lastUsed < this.options.upstreamIdleMs) continue;
+			const idleAt = upstream.idleAt(this.options.upstreamIdleMs);
+			if (idleAt === undefined || now < idleAt) continue;
 			if (upstream.running) {
 				this.log(`[${upstream.label}] idle for ${Math.round((now - upstream.lastUsed) / 1000)}s, stopping`);
 				stops.push(upstream.stop());
-			} else if (upstream.sessions.size === 0) {
+			} else {
 				this.upstreams.delete(upstream.key);
 			}
 		}
 		this.unwatchUnused();
 		await Promise.all(stops);
+		this.activityChanged();
 	}
 
 	async close(): Promise<void> {
@@ -513,6 +583,14 @@ export class McpGateway {
 	}
 
 	async handle(request: Request): Promise<Response> {
+		try {
+			return await this.route(request);
+		} finally {
+			this.activityChanged();
+		}
+	}
+
+	private async route(request: Request): Promise<Response> {
 		// Browsers send Origin; the gateway only serves local processes (DNS rebinding protection).
 		if (request.headers.get("origin")) return text(403, "forbidden");
 		if (!this.authorized(request.headers.get("authorization"))) return text(401, "unauthorized");
@@ -622,24 +700,19 @@ export class McpGateway {
 		const session = this.sessionOf(upstream, request);
 		if (!session) return text(request.headers.get("mcp-session-id") ? 404 : 400, "session not found");
 		let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-		let keepalive: ReturnType<typeof setInterval> | undefined;
 		const detach = () => {
-			if (keepalive) clearInterval(keepalive);
 			if (controller) session.streams.delete(controller);
 			session.lastSeen = this.now();
+			this.activityChanged();
 		};
+		// No keepalive: the connection is loopback, the server has no idle timeout (`idleTimeout: 0`), and
+		// the gateway's client turns off Bun's fetch idle timeout (`GatewayTransport`). A client that goes
+		// away closes the socket, which cancels the stream or aborts the request.
 		const stream = new ReadableStream<Uint8Array>({
 			start: (opened) => {
 				controller = opened;
 				session.streams.add(opened);
 				opened.enqueue(new TextEncoder().encode(": connected\n\n"));
-				keepalive = setInterval(() => {
-					try {
-						opened.enqueue(new TextEncoder().encode(": keepalive\n\n"));
-					} catch {
-						detach();
-					}
-				}, SSE_KEEPALIVE_MS);
 			},
 			cancel: detach,
 		});

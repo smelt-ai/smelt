@@ -4,7 +4,7 @@ const STEPS = [
   {
     n: "01",
     title: "打开原生工作台",
-    body: "在 Mac 上安装 Smelt 桌面端，开箱即可在本机项目里启动内置智能体或接入已安装的 Claude Code / Codex。",
+    body: "在 Mac 或 Windows 上安装 Smelt 桌面端，开箱即可在本机项目里启动内置智能体或接入已安装的 Claude Code / Codex。",
   },
   {
     n: "02",
@@ -20,9 +20,9 @@ const STEPS = [
 
 const NODES = [
   {
-    mark: "Mac",
-    title: "本机 Mac",
-    kicker: "120fps 原生桌面体验",
+    mark: "桌面",
+    title: "本机桌面",
+    kicker: "macOS 与 Windows 原生桌面",
     points: ["并行指挥多个智能体", "大屏看 Diff 和远程桌面", "工位上的主操作台"],
   },
   {
@@ -45,7 +45,7 @@ export function Showcase() {
       <SectionHeading
         eyebrow="上手指南"
         title="三步连上你的全部开发机"
-        body="从一台 Mac 开始，把实验室和云端的 Linux 服务器接进来，再用手机补上离开工位之后的时间。"
+        body="从一台 Mac 或 Windows 开始，把实验室和云端的 Linux 服务器接进来，再用手机补上离开工位之后的时间。"
       />
 
       <ol className="mt-12 grid gap-4 lg:grid-cols-3">
@@ -60,7 +60,7 @@ export function Showcase() {
       </ol>
 
       <div className="mt-16">
-        <h3 className="text-2xl font-semibold tracking-tight text-foreground">本机 Mac、远程 Linux，和口袋里的手机</h3>
+        <h3 className="text-2xl font-semibold tracking-tight text-foreground">本机桌面、远程 Linux，和口袋里的手机</h3>
         <p className="mt-3 max-w-2xl text-sm leading-7 text-muted">
           三端看的是同一批会话。桌面负责深入编码，服务器留着代码和环境，手机负责你不在键盘前的那些决定。
         </p>

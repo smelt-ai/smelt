@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { AppleLogo, BookIcon, PhoneIcon } from "./icons";
+import { AppleLogo, BookIcon, DesktopIcon, PhoneIcon } from "./icons";
 import { InstallCommand } from "./InstallCommand";
 import { CockpitPreview } from "./CockpitPreview";
 
@@ -18,7 +18,7 @@ export function Hero() {
         <div className="pill max-w-full flex-wrap">
           <span className="pulse-dot h-1.5 w-1.5 shrink-0 rounded-full bg-accent shadow-[0_0_12px_rgba(224,159,90,0.8)]" />
           <span className="leading-5">
-            v0.9 · 原生 macOS 工作台 · iOS & Android 随身掌控 · Linux 远程开发机直连
+            macOS 与 Windows 工作台 · iOS 与 Android 随身掌控 · Linux 远程开发机直连
           </span>
         </div>
 
@@ -28,9 +28,8 @@ export function Hero() {
         </h1>
 
         <p className="mt-6 max-w-3xl text-base leading-8 text-muted sm:text-lg">
-          无论代码跑在本机 Mac，还是实验室和云端的 Linux 服务器上：在一个 120fps
-          原生桌面里并行指挥 Claude Code、Codex 与内置智能体；离开电脑后，打开手机就能随时审批权限、查看
-          Diff、接管任务。
+          代码可以留在本机 Mac、本机 Windows，或实验室和云端的 Linux 服务器上：在一个原生桌面工作台里并行指挥
+          Claude Code、Codex 与内置智能体；离开电脑后，打开手机就能审批权限、查看 Diff、接管任务。
         </p>
 
         <div className="mt-10 grid items-stretch gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
@@ -43,6 +42,17 @@ export function Hero() {
                 <span className="block text-sm font-semibold leading-5">下载 macOS 版</span>
                 <span className="block text-[11px] font-medium leading-4 text-[#1a1208]/70">
                   Apple Silicon · 免费
+                </span>
+              </span>
+            </a>
+            <a href={RELEASE_URL} target="_blank" rel="noopener noreferrer" className="btn btn-secondary">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+                <DesktopIcon className="h-4 w-4" />
+              </span>
+              <span>
+                <span className="block text-sm font-semibold leading-5">下载 Windows 版</span>
+                <span className="block text-[11px] font-medium leading-4 text-dim">
+                  Windows 10 1803+ · x86_64 · 免安装便携包
                 </span>
               </span>
             </a>

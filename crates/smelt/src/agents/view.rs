@@ -859,7 +859,7 @@ impl Workspace {
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |workspace, cx| {
                                         workspace.open_settings_section(
-                                            crate::settings::SettingsSection::CollaborationRemote,
+                                            crate::settings::SettingsSection::CollaborationMachines,
                                             cx,
                                         );
                                     });
@@ -1300,7 +1300,7 @@ impl Workspace {
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |workspace, cx| {
                             workspace.open_settings_section(
-                                crate::settings::SettingsSection::CollaborationRemote,
+                                crate::settings::SettingsSection::CollaborationMachines,
                                 cx,
                             );
                         });

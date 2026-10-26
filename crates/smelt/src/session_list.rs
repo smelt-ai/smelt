@@ -119,6 +119,15 @@ fn runtime_name_with_indicator(
         .tooltip(move |window, cx| {
             gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
         })
+        // 延迟平时只在连接换路径时读；有人悬停来看时再读一次，提示里的数是新的。
+        .on_hover({
+            let key = key.clone();
+            move |hovered, _window, cx| {
+                if *hovered {
+                    crate::runtimes::sample_link(&key, cx);
+                }
+            }
+        })
         .into_any_element()
 }
 
@@ -304,7 +313,7 @@ use drag::{
 
 pub(crate) mod row;
 
-use machines::{machine_menu, machines_button};
+use machines::machine_menu;
 use new_session::new_session_picker;
 use row::{
     acp_provider_icon, effective_pane_updated_at, project_header_is_selected, provider_icon,
@@ -1793,7 +1802,8 @@ impl Workspace {
         }
 
         // ---- 底部操作条：设置 ----
-        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。
+        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。机器和资源占用
+        // 都在设置里，下拉菜单给直达入口；有机器要处理时也挂在设置的提示点上。
         let e_settings = this.clone();
         let settings_needs_attention = {
             #[cfg(target_os = "macos")]
@@ -1808,7 +1818,7 @@ impl Workspace {
             {
                 false
             }
-        };
+        } || crate::runtimes::any_runtime_needs_attention(cx);
 
         // ---- 底部额度条：provider 账户额度（Codex / Claude / Copilot / Grok / Cursor）----
         // 从舞台头栏迁到这里（底部操作条上方）。只显示「检测到额度」的 provider，
@@ -1911,8 +1921,6 @@ impl Workspace {
             .py_2()
             .border_t_1()
             .border_color(ui_theme::hairline())
-            .gap_1()
-            .child(machines_button(this.clone(), cx))
             .child(
                 div()
                     .id("sidebar-settings")
@@ -1965,7 +1973,34 @@ impl Workspace {
                                                 });
                                             }),
                                     );
-                                    let menu = menu.separator();
+                                    let e_machines = e_settings.clone();
+                                    let e_resources = e_settings.clone();
+                                    let menu = menu
+                                        .separator()
+                                        .item(
+                                            PopupMenuItem::new("机器...")
+                                                .icon(Icon::new(gpui_kit_assets::IconName::Server))
+                                                .on_click(move |_ev, _window, cx| {
+                                                    e_machines.update(cx, |ws, cx| {
+                                                        ws.open_settings_section(
+                                                            crate::settings::SettingsSection::CollaborationMachines,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new("资源占用...")
+                                                .icon(IconName::MemoryStick)
+                                                .on_click(move |_ev, _window, cx| {
+                                                    e_resources.update(cx, |ws, cx| {
+                                                        ws.open_settings_section(
+                                                            crate::settings::SettingsSection::MaintenanceResources,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                        );
 
                                     menu.item(
                                         PopupMenuItem::new("设置...")

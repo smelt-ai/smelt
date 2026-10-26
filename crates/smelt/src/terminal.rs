@@ -24,7 +24,7 @@ use alacritty_terminal::term::{
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use smelt_runtime_client::RuntimeStream;
-use smelt_runtime_client::protocol::daemon::DaemonOperation;
+use smelt_runtime_client::protocol::daemon::{DaemonOperation, TerminalOpenErrorCode};
 
 type SearchMatch = (Point, Point);
 type SearchResult = (u64, String, i32, Vec<SearchMatch>);
@@ -964,10 +964,10 @@ impl Drop for Terminal {
     }
 }
 
-/// 新建/reattach 握手失败时的重试次数与间隔：守护无缝升级 exec 交接的一次性抖动是
-/// 百毫秒到 1 秒量级，这个预算（5 次 × 300ms ≈ 1.2s，含首次尝试共 5 次）足够盖过去。
-const HANDSHAKE_RETRIES: u32 = 5;
-const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(300);
+/// 守护回 daemon_stopping 之后等旧进程走掉的上限。停机回执前要收割子进程、checkpoint
+/// 状态库，smelt-client 等停机回执给的是 20s，回执后旧进程立刻 exec 或退出；超过这么久
+/// 还没断，按守护卡住处理。
+const DAEMON_STOPPING_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 握手回执的读超时。正常守护毫秒级就回；僵死/半退出的守护可能接受连接却永不回话，
 /// 而握手在 GUI 主线程同步跑——没有这个超时就是无限 beachball（真实发生过：启动
 /// 恢复会话时主线程卡死，强杀重开又 abort）。取值对齐 probe_daemon 的 5s。
@@ -975,6 +975,64 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// 后台终端 writer 的单帧写超时。UI 从不直接执行这次 `write_all`；守护停止消费时，
 /// 最多让 writer 线程等约一秒，随后断开 attachment 并由 UI 的重连路径恢复。
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// 一次握手的结果。真出错走 `Err`；这里的另外两种都是「对面的旧守护要走了」。
+enum HandshakeReply {
+    Opened(HandshakeResult),
+    /// 守护在停机，回了 daemon_stopping。连接还开着，读到 EOF 就是旧守护已经走了。
+    DaemonStopping(BufReader<RuntimeStream>),
+    /// 一个字节都没回连接就断了：接了这条连接的进程已经不在了。老守护停机 exec 或退出时
+    /// 就是这样无声断开的，守护崩了也是。
+    Closed,
+}
+
+/// 握手回执的头一行分到哪一类。
+#[derive(Debug)]
+enum HandshakeLine {
+    Opened(serde_json::Value),
+    DaemonStopping,
+    Closed,
+}
+
+/// `line` 是 `read_line` 读到的头一行，连接在回执前断开时为空串。
+fn classify_handshake_line(line: &str) -> anyhow::Result<HandshakeLine> {
+    if line.is_empty() {
+        return Ok(HandshakeLine::Closed);
+    }
+    let v: serde_json::Value = serde_json::from_str(line.trim())?;
+    if v["ok"].as_bool() == Some(false) {
+        let code = v
+            .get("code")
+            .and_then(|code| serde_json::from_value::<TerminalOpenErrorCode>(code.clone()).ok());
+        if code == Some(TerminalOpenErrorCode::DaemonStopping) {
+            return Ok(HandshakeLine::DaemonStopping);
+        }
+        anyhow::bail!("{}", v["err"].as_str().unwrap_or("终端重新附着失败"));
+    }
+    Ok(HandshakeLine::Opened(v))
+}
+
+/// 守护回了 daemon_stopping 之后，等同一条连接断开：那就是旧守护已经 exec 或退出。
+/// 回执后面还跟着给直接画字节流的客户端看的红字，读掉丢弃。
+fn wait_daemon_gone(mut reader: BufReader<RuntimeStream>) -> anyhow::Result<()> {
+    use std::io::ErrorKind;
+    // 设不上就沿用握手时的读超时，上限还在。macOS 上对端已经关掉时 setsockopt 会报
+    // EINVAL，那时下面一读就是 EOF。
+    let _ = reader
+        .get_ref()
+        .set_read_timeout(Some(DAEMON_STOPPING_WAIT_TIMEOUT));
+    match std::io::copy(&mut reader, &mut std::io::sink()) {
+        // 读超时：Unix 报 WouldBlock，Windows 报 TimedOut。
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            anyhow::bail!(
+                "守护正在停机，{}s 内没有退出",
+                DAEMON_STOPPING_WAIT_TIMEOUT.as_secs()
+            )
+        }
+        // 读到 EOF，或连接被重置：对面都已经走了。
+        _ => Ok(()),
+    }
+}
 
 pub(crate) fn open_request(
     rows: usize,
@@ -1041,45 +1099,33 @@ impl Terminal {
         launch: Option<&str>,
         create_if_missing: bool,
     ) -> anyhow::Result<Self> {
-        // 1) 连守护（不在则自动拉起）并声明要打开的会话，握手失败带几次短重试。
+        // 1) 连守护（不在则自动拉起）并声明要打开的会话。
         //
-        // 守护无缝升级 exec 交接期间，恰好在这一瞬间新开的 pane 可能撞上这个连接
-        // 被接受、但握手线程卡在守护内部的 SPAWN_GATE（跟 upgrade 互斥，见 smeltd 升级设计）
-        // 上——exec 一发生，这条连接（普通客户端 fd 默认带 CLOEXEC）就被无声关闭，
-        // 我们这边会读到 EOF/解析失败。整个交接是百毫秒到 1 秒量级的一次性抖动，
-        // 短重试几次基本能把这个窗口盖掉，调用方不必为这种瞬时性错误崩溃整个 GUI
-        // （调用方目前对失败仍是 `.expect()`，见 terminal_view.rs 的注释）。
-        let (buffered, size, replay_len, geometry_token, daemon_handles_color_requests) = {
-            let mut last_err = None;
-            let mut result = None;
-            let retries = if create_if_missing {
-                HANDSHAKE_RETRIES
-            } else {
-                1
-            };
-            for attempt in 0..retries {
-                if attempt > 0 {
-                    thread::sleep(HANDSHAKE_RETRY_DELAY);
-                }
-                // connect 失败（自动拉起守护 5s 都没就绪）是不可恢复的环境问题，
-                // 立即失败——重试只会把「守护起不来」放大成每会话 ~26s 的主线程
-                // 阻塞（重试 × 每次再拉一遍守护），启动恢复 8 个会话就是 3 分钟
-                // beachball。重试只留给握手层：连上了但读到 EOF/坏行，那才是
-                // upgrade 交接的百毫秒抖动，重连一次就好。
-                let writer = crate::runtimes::connect_terminal(runtime)?;
-                match Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing) {
-                    Ok(x) => {
-                        result = Some(x);
-                        break;
-                    }
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            match result {
-                Some(x) => x,
-                None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("握手失败"))),
-            }
+        // 守护停机（升级换映像，或退出）期间来的请求，新守护立刻回 daemon_stopping，并把
+        // 连接留到旧进程 exec 或退出才断；老守护不回这个码，请求卡到旧进程走掉时连接被
+        // 无声关掉。两种都等到「旧守护已经走了」这个事件（同一条连接读到 EOF）再连一次：
+        // 本机 connect_terminal 连不上会拉起守护、等它的就绪管道；远程重新拨号。只再连
+        // 这一次，第二次不管什么失败都交给调用方。其它失败（守护明确回错、读超时、
+        // connect 失败即自动拉起守护都没就绪）立即返回，不重试。
+        let handshake = |writer: RuntimeStream| {
+            Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing)
         };
+        let (buffered, size, replay_len, geometry_token, daemon_handles_color_requests) =
+            match handshake(crate::runtimes::connect_terminal(runtime)?)? {
+                HandshakeReply::Opened(opened) => opened,
+                stopping_or_closed => {
+                    if let HandshakeReply::DaemonStopping(reader) = stopping_or_closed {
+                        wait_daemon_gone(reader)?;
+                    }
+                    match handshake(crate::runtimes::connect_terminal(runtime)?)? {
+                        HandshakeReply::Opened(opened) => opened,
+                        HandshakeReply::DaemonStopping(_) => {
+                            anyhow::bail!("守护正在停机，接班的守护还没起来")
+                        }
+                        HandshakeReply::Closed => anyhow::bail!("守护没回握手就断开了"),
+                    }
+                }
+            };
         let writer = TerminalWriter::start(buffered.get_ref().try_clone()?)?;
 
         // 2) alacritty 终端状态机。EventProxy 把 PTY 自动应答写回共享写端。
@@ -1243,7 +1289,7 @@ impl Terminal {
         id: &str,
         launch: Option<&str>,
         create_if_missing: bool,
-    ) -> anyhow::Result<HandshakeResult> {
+    ) -> anyhow::Result<HandshakeReply> {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
@@ -1255,10 +1301,11 @@ impl Terminal {
         let mut buffered = BufReader::new(writer);
         let mut line = String::new();
         buffered.read_line(&mut line)?;
-        let v: serde_json::Value = serde_json::from_str(line.trim())?;
-        if v["ok"].as_bool() == Some(false) {
-            anyhow::bail!("{}", v["err"].as_str().unwrap_or("终端重新附着失败"));
-        }
+        let v = match classify_handshake_line(&line)? {
+            HandshakeLine::Opened(v) => v,
+            HandshakeLine::DaemonStopping => return Ok(HandshakeReply::DaemonStopping(buffered)),
+            HandshakeLine::Closed => return Ok(HandshakeReply::Closed),
+        };
         let size = TermSize {
             rows: v["rows"].as_u64().unwrap_or(rows as u64) as usize,
             cols: v["cols"].as_u64().unwrap_or(cols as u64) as usize,
@@ -1272,13 +1319,13 @@ impl Terminal {
         // spawn 里 `let mut reader = buffered`），空闲终端半天没输出是常态，读循环
         // 对任何 Err 一律 break 当 EOF——超时留着就等于给每个安静的终端定时断线。
         buffered.get_ref().set_read_timeout(None)?;
-        Ok((
+        Ok(HandshakeReply::Opened((
             buffered,
             size,
             replay_len,
             geometry_token,
             daemon_handles_color_requests,
-        ))
+        )))
     }
 
     /// 取走一次普通终端 BEL 提醒；它不携带 Agent 状态语义。
@@ -2500,9 +2547,83 @@ mod handshake_timeout_tests {
 
         let result = Terminal::handshake_on(ours, 24, 80, None, "color-capability", None, true);
         let _ = release_tx.send(());
-        let (_buffered, _size, _replay, _geometry_token, daemon_handles_color_requests) =
-            result.expect("能力位握手应成功");
+        let Ok(HandshakeReply::Opened(opened)) = result else {
+            panic!("能力位握手应成功");
+        };
+        let (_buffered, _size, _replay, _geometry_token, daemon_handles_color_requests) = opened;
         assert!(daemon_handles_color_requests);
+    }
+
+    /// 守护停机时回的 daemon_stopping 要认成「等旧守护走了再连」，其它失败照旧报错；
+    /// 回执前就断开认成 Closed。
+    #[test]
+    fn handshake_line_classifies_stopping_closed_and_plain_errors() {
+        assert!(matches!(
+            classify_handshake_line("").unwrap(),
+            HandshakeLine::Closed
+        ));
+        let stopping = serde_json::json!({
+            "ok": false,
+            "err": "守护正在停机",
+            "code": "daemon_stopping",
+            "rows": 24,
+            "cols": 80,
+            "replay_len": 0,
+        });
+        assert!(matches!(
+            classify_handshake_line(&format!("{stopping}\n")).unwrap(),
+            HandshakeLine::DaemonStopping
+        ));
+        // 不认识的码、没有码：都是普通错误，带守护给的原因。
+        for code in [Some("from_the_future"), None] {
+            let mut reply = serde_json::json!({ "ok": false, "err": "终端会话不存在" });
+            if let Some(code) = code {
+                reply["code"] = serde_json::json!(code);
+            }
+            let error = classify_handshake_line(&format!("{reply}\n")).unwrap_err();
+            assert!(error.to_string().contains("不存在"), "{code:?}");
+        }
+        assert!(matches!(
+            classify_handshake_line("{\"rows\":24,\"cols\":80,\"replay_len\":0}\n").unwrap(),
+            HandshakeLine::Opened(_)
+        ));
+        // 半行就断：不是干净的 EOF，是坏回执。
+        assert!(classify_handshake_line("{\"rows\":24").is_err());
+    }
+
+    /// daemon_stopping 回执之后连接一直开着，客户端读到 EOF 才算旧守护走了。
+    #[test]
+    fn handshake_hands_back_the_open_connection_on_daemon_stopping() {
+        let (ours, mut theirs) = RuntimeStream::pair().expect("pair 失败");
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let daemon = thread::spawn(move || {
+            let mut request = String::new();
+            BufReader::new(theirs.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let header = serde_json::json!({
+                "ok": false,
+                "err": "守护正在停机",
+                "code": "daemon_stopping",
+                "rows": 24,
+                "cols": 80,
+                "replay_len": 0,
+            });
+            theirs
+                .write_all(format!("{header}\n\r\n\x1b[31m守护正在停机\x1b[0m\r\n").as_bytes())
+                .unwrap();
+            // 模拟旧进程还在：等测试说放才关，关掉就是 exec / 退出。
+            let _ = release_rx.recv();
+        });
+
+        let reply = Terminal::handshake_on(ours, 24, 80, None, "stopping", None, true)
+            .expect("daemon_stopping 不是握手错误");
+        let HandshakeReply::DaemonStopping(reader) = reply else {
+            panic!("应认出 daemon_stopping");
+        };
+        drop(release_tx);
+        wait_daemon_gone(reader).expect("对面关掉连接就该返回");
+        daemon.join().unwrap();
     }
 
     /// 复现 2026-08-04 hang 报告（Smelt 0.6.9）的第二环：守护不再消费终端写
@@ -2524,9 +2645,12 @@ mod handshake_timeout_tests {
             thread::sleep(Duration::from_secs(60));
         });
 
-        let (buffered, _size, _replay, _geometry_token, _daemon_handles_color_requests) =
+        let Ok(HandshakeReply::Opened(opened)) =
             Terminal::handshake_on(client_side, 24, 80, None, "write-timeout-test", None, true)
-                .expect("假守护正常回执，握手应成功");
+        else {
+            panic!("假守护正常回执，握手应成功");
+        };
+        let (buffered, _size, _replay, _geometry_token, _daemon_handles_color_requests) = opened;
 
         // 与 Terminal::spawn 同一条路径：后续写入进入后台单消费者队列。UI 线程只把
         // 4MB 输入请求投进去便返回；假守护不消费时，阻塞最多发生在 writer 线程。

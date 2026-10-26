@@ -226,6 +226,35 @@ impl Workspace {
             status_item::update_menu(&menu_snapshot);
             self.status_menu_snapshot = Some(menu_snapshot);
         }
+
+        // 插件经 `smelt-workspace.sessions()` 读：全部会话按侧栏顺序，挂着要处理的提醒也算「要你」。
+        let viewed = self.viewed_session_id(cx);
+        let plugin_sessions = self
+            .sessions
+            .iter()
+            .zip(&statuses)
+            .filter_map(|(session, &status)| {
+                let ids = session_attention_ids(session, cx);
+                let active_id = session
+                    .active_term()
+                    .map(|pane| pane.read(cx).session_id().to_string());
+                let id = menu_jump_target(&ids, &badge, active_id.as_deref())?;
+                let requires_action = ids.iter().any(|id| badge.get(id) == Some(&true));
+                Some(crate::plugins::SessionInfo {
+                    viewing: ids.iter().any(|id| Some(id.as_str()) == viewed.as_deref()),
+                    id,
+                    title: Self::title_with_runtime(session, cx),
+                    agent: session.agent_icon_id(cx),
+                    status: if requires_action {
+                        AgentStatus::NeedsYou
+                    } else {
+                        status
+                    },
+                    cwd: session.cwd(cx),
+                })
+            })
+            .collect();
+        crate::plugins::set_sessions(plugin_sessions);
     }
 }
 

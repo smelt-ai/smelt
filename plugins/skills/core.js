@@ -1,7 +1,7 @@
 // 技能的磁盘逻辑。设计依据见同目录的 DESIGN.md：`.agents/skills` 是本体，
 // agent 目录里的软链是派生的兼容桥，软链一律是引用，不是本体。
 //
-// 读内容、列目录、建删目录用官方 `fs/promises`（宿主把授权根设成用户主目录）。
+// 读内容、列目录、建删目录用官方 `fs/promises`。
 // 作用于软链本身的操作（lstat/rename/unlink）和官方没有的建软链、解析真实路径、
 // 整树复制、原子交换来自 smelt 的通用模块 `smelt-fs`。官方的是异步的，所以这里
 // 的入口都是 async：面板在事件里 await，结果缓存在视图上，render 只读缓存。
@@ -140,7 +140,7 @@ async function scanRoot(root, placement, agent, projectScope, copies, links, bro
       try {
         target = realpath(path);
       } catch {
-        // 指向主目录外：读不了，也不能当成失效链接去清理。
+        // 解析出错（比如没有权限）：读不了，也不能当成失效链接去清理。
         continue;
       }
       const skillMd = target === null ? undefined : await attempt(() => fs.stat(join(target, "SKILL.md")));
@@ -613,13 +613,6 @@ export async function migrateLegacy(home, projectRoot) {
   return { text: lines.join(" "), level: skipped.length > 0 ? "error" : "info", migrated, skipped };
 }
 
-/// 插件只能碰用户主目录里的文件，主目录外的目录在这里先拦下，给一句看得懂的话。
-function requireInsideHome(home, source) {
-  if (source !== home && !source.startsWith(`${home}/`)) {
-    throw new Error(`只能导入用户主目录里的目录：${source}`);
-  }
-}
-
 /// 所选目录的 SKILL.md：名字（校验过）和描述。
 async function readSource(source) {
   const text = await attempt(() => fs.readFile(join(source, "SKILL.md"), "utf8"));
@@ -640,7 +633,6 @@ async function findNamed(home, base, projectScope, name) {
 /// 选中的目录叫什么、用户级是否已经有另一份同名 skill。
 /// 源本身就是那份用户级 skill 时不算「已有」，否则把自己再导入一次也会弹出选择。
 export async function inspectImport(home, source) {
-  requireInsideHome(home, source);
   const { name, description } = await readSource(source);
   const existing = await findNamed(home, home, false, name);
   const sourceReal = canonical(source);
@@ -653,7 +645,6 @@ export async function inspectImport(home, source) {
 /// 按这份作用范围导入会做什么，给导入页预览。`replaces` 表示目标已有同名目录，
 /// 导入会换掉它（旧版本进回收目录）。
 export async function previewImport(home, projectRoot, rawRequest, source) {
-  requireInsideHome(home, source);
   const { name } = await readSource(source);
   const request = normalizeRequest(rawRequest);
   const base = scopeBase(home, projectRoot, request.project_scope);
@@ -676,7 +667,6 @@ export function pickSkillDirectory() {
 
 /// 返回装好后的目录，界面导入完直接打开它的详情。
 export async function importSkill(home, projectRoot, rawRequest, source) {
-  requireInsideHome(home, source);
   const { name } = await readSource(source);
   const request = normalizeRequest(rawRequest);
   const base = scopeBase(home, projectRoot, request.project_scope);

@@ -390,6 +390,7 @@ fn restore_waits_for_the_model_before_writing_other_settings() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(!restoring.is_finished(), "模型没确认前不能往下走");
     // agent 确认换好了模型，推理强度被打回中。
+    // 只改镜像、不发快照：等确认的一方靠守卫放锁时的通知醒来。
     session.reduced.lock().unwrap().model = Some(pi_model("deepseek/flash"));
 
     assert_eq!(
@@ -468,4 +469,79 @@ fn clients_cannot_forward_peer_messages_to_the_host() {
         BufReader::new(peer).read_line(&mut line).is_err(),
         "不能转给宿主，实际写出了 {line:?}"
     );
+}
+
+#[test]
+fn the_reaper_sleeps_until_the_earliest_deadline_or_until_activity() {
+    assert_eq!(
+        acp_idle::next_reaper_wake_ms(Vec::<u64>::new(), None),
+        None,
+        "没有会话可能变闲置时一直睡到下一次活动"
+    );
+    assert_eq!(acp_idle::next_reaper_wake_ms([300, 100, 200], None), Some(100));
+    assert_eq!(acp_idle::next_reaper_wake_ms([300], Some(50)), Some(50));
+    assert_eq!(acp_idle::next_reaper_wake_ms(Vec::<u64>::new(), Some(50)), Some(50));
+    assert_eq!(
+        acp_idle::idle_deadline_ms(1_000, Duration::from_secs(30 * 60)),
+        1_000 + 30 * 60 * 1_000
+    );
+}
+
+#[test]
+fn contended_retries_back_off_up_to_a_minute() {
+    assert_eq!(acp_idle::idle_retry_delay(0), Duration::from_secs(1));
+    assert_eq!(acp_idle::idle_retry_delay(1), Duration::from_secs(2));
+    assert_eq!(acp_idle::idle_retry_delay(5), Duration::from_secs(32));
+    assert_eq!(acp_idle::idle_retry_delay(6), Duration::from_secs(60));
+    assert_eq!(acp_idle::idle_retry_delay(u32::MAX), Duration::from_secs(60));
+}
+
+#[test]
+fn a_recently_active_conversation_sets_the_next_wake() {
+    let acp_sessions = new_test_acp_sessions();
+    let (session, _peer) = hosted_session(quiet_state());
+    let (slot, _) = acp_sessions.reserve_with("acp-idle-recent", || session);
+    let before = crate::event_hub::now_ms();
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        &new_test_remote_sessions(),
+        acp_idle::ACP_IDLE_SUSPEND_AFTER,
+    );
+    let deadline = sweep.next_deadline_ms.expect("还没闲置够的会话要排上截止");
+    assert!(deadline > before + 29 * 60 * 1_000, "截止是最后活动加闲置期");
+    assert!(!sweep.contended);
+    assert!(!slot.value.idle.is_suspended());
+}
+
+#[test]
+fn a_blocked_conversation_past_its_deadline_waits_for_activity() {
+    let acp_sessions = new_test_acp_sessions();
+    acp_sessions.reserve_with("acp-idle-blocked", || {
+        make_acp_session_value("acp-idle-blocked", quiet_state())
+    });
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        &new_test_remote_sessions(),
+        Duration::ZERO,
+    );
+    assert_eq!(
+        sweep.next_deadline_ms, None,
+        "没有宿主的会话不排截止，下次拉起会记活动"
+    );
+    assert!(!sweep.contended);
+}
+
+#[test]
+fn a_busy_lifecycle_lock_is_retried_later() {
+    let acp_sessions = new_test_acp_sessions();
+    let (session, _peer) = hosted_session(quiet_state());
+    let (slot, _) = acp_sessions.reserve_with("acp-idle-contended", || session);
+    let _held = slot.lifecycle.lock().unwrap();
+    let sweep = acp_idle::suspend_idle_acp_sessions(
+        &acp_sessions,
+        &new_test_remote_sessions(),
+        Duration::ZERO,
+    );
+    assert!(sweep.contended, "抢不到生命周期锁要稍后重试");
+    assert!(!slot.value.idle.is_suspended());
 }

@@ -31,7 +31,8 @@ const UPSTREAM_IDLE_MS = duration("SMELT_MCP_GATEWAY_SERVER_IDLE_MS", 10 * MINUT
 const SESSION_IDLE_MS = duration("SMELT_MCP_GATEWAY_SESSION_IDLE_MS", 30 * MINUTE);
 /** Exit after this long with nothing to serve. */
 const GATEWAY_IDLE_MS = duration("SMELT_MCP_GATEWAY_IDLE_MS", 5 * MINUTE);
-const SWEEP_INTERVAL_MS = Math.min(30_000, UPSTREAM_IDLE_MS, GATEWAY_IDLE_MS);
+/** `setTimeout` takes at most this many milliseconds; a later deadline is reached by re-arming. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 /** Editors and atomic writes touch the file several times per save; act once it settles. */
 const CONFIG_SETTLE_MS = 200;
 
@@ -85,6 +86,8 @@ const gateway = new McpGateway({
 		),
 	upstreamIdleMs: UPSTREAM_IDLE_MS,
 	sessionIdleMs: SESSION_IDLE_MS,
+	idleExitMs: GATEWAY_IDLE_MS,
+	onActivity: () => armDeadline(),
 	watchConfig,
 	log,
 });
@@ -97,6 +100,8 @@ const server = Bun.serve({
 	fetch: (request) => gateway.handle(request),
 });
 
+// Written once listening: the conversation that started the gateway, and any waiting for it, take the
+// state file as the signal that it is ready (`mcp-gateway-client.ts`).
 writeGatewayState(dir, { protocol: GATEWAY_PROTOCOL, pid: process.pid, port: server.port ?? 0, token });
 log(`listening on 127.0.0.1:${server.port} (pid ${process.pid})`);
 
@@ -112,17 +117,28 @@ async function shutdown(reason: string): Promise<never> {
 	process.exit(0);
 }
 
-let idleSince: number | undefined;
-setInterval(() => {
-	void gateway.sweep().then(() => {
-		if (!gateway.isIdle()) {
-			idleSince = undefined;
-			return;
-		}
-		idleSince ??= Date.now();
-		if (Date.now() - idleSince >= GATEWAY_IDLE_MS) void shutdown("idle");
-	});
-}, SWEEP_INTERVAL_MS);
+/**
+ * One timer for the nearest deadline (a server or session going idle, or the gateway's own idle exit),
+ * re-armed whenever activity moves it. Nothing runs while no deadline is pending.
+ */
+let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+function armDeadline(): void {
+	clearTimeout(deadlineTimer);
+	deadlineTimer = undefined;
+	if (shuttingDown) return;
+	const at = gateway.nextDeadline();
+	if (at === undefined) return;
+	deadlineTimer = setTimeout(() => void onDeadline(), Math.min(Math.max(0, at - Date.now()), MAX_TIMER_MS));
+}
+
+async function onDeadline(): Promise<void> {
+	deadlineTimer = undefined;
+	// The sweep reports its changes, which arms the timer for the next deadline.
+	await gateway.sweep();
+	if (gateway.idleExitDue()) void shutdown("idle");
+}
+
+armDeadline();
 
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));

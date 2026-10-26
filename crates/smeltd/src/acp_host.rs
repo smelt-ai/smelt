@@ -6,6 +6,9 @@ use super::*;
 use smelt_core::acp_wire::FrameMirror;
 use std::collections::{BTreeSet, VecDeque};
 
+mod watched;
+pub(crate) use watched::Watched;
+
 // ===================== ACP 会话托管 =====================
 //
 // 跟终端会话是两条平行的托管逻辑：没有 PTY/网格，「画面」就是
@@ -145,7 +148,9 @@ impl AcpRestoreState {
 
 pub(crate) struct AcpSession {
     pub(crate) instance: u64,
-    pub(crate) reduced: Mutex<smelt_core::acp_session::AcpSessionState>,
+    /// 改过就自动叫醒等待者。要等相位或配置落定的地方用 `wait_timeout_while` 等，
+    /// 不再隔一会儿查一次，也不靠改值的地方记得发快照。
+    pub(crate) reduced: Watched<smelt_core::acp_session::AcpSessionState>,
     pub(crate) snapshot_revision: AtomicU64,
     pub(crate) connection_generation: AtomicU64,
     /// 串行化回合收尾与 prompt 闸门释放。看门狗和迟到的 ACP 更新可能同时
@@ -1906,14 +1911,16 @@ pub(crate) fn start_hosted_snapshot_drain(
                 let runtime_debug_changed = snapshot.runtime_debug.is_some();
                 let should_persist = snapshot.should_persist;
                 let requested_offset = snapshot.entries_offset;
-                let (owner_ids, runtime_debug, history_id, history_abandoned) = {
+                let (owner_ids, runtime_debug, history_id, history_abandoned, was_busy) = {
                     let mut reduced = sess.reduced.lock().unwrap();
+                    let was_busy = crate::acp_idle::reduced_suspend_blocker(&reduced).is_some();
                     match reduced.merge_hosted_snapshot(snapshot) {
                         Ok(merged) => (
                             live_acp_owner_ids(&reduced),
                             merged.runtime_debug.map(Arc::new),
                             normalize_resume_id(reduced.history_session_id.clone()),
                             reduced.history_abandoned,
+                            was_busy,
                         ),
                         Err(error) => {
                             eprintln!("[acp] 会话 {session_id} 宿主快照无法连续合并：{error}");
@@ -1944,8 +1951,11 @@ pub(crate) fn start_hosted_snapshot_drain(
                         &subscribers,
                     );
                 }
-                // 宿主在干活就算活动；安静下来之后才开始计闲置。
-                if crate::acp_idle::reduced_suspend_blocker(&sess.reduced.lock().unwrap()).is_some()
+                // 宿主在干活就算活动；安静下来之后才开始计闲置。安静下来的那一帧也算：
+                // 闲置回收线程不给被挡住的会话排截止，靠这一下把它重新排上。
+                if was_busy
+                    || crate::acp_idle::reduced_suspend_blocker(&sess.reduced.lock().unwrap())
+                        .is_some()
                 {
                     sess.idle.touch();
                 }
@@ -2236,7 +2246,7 @@ pub(crate) fn make_acp_session(
     let instance = next_session_instance();
     AcpSession {
         instance,
-        reduced: Mutex::new(smelt_core::acp_session::AcpSessionState::default()),
+        reduced: Watched::new(smelt_core::acp_session::AcpSessionState::default()),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
         turn_completion: Mutex::new(()),
@@ -4276,7 +4286,6 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
 /// 桌面端收到唤醒请求后立刻 `acp_open`，slot 在它接上时就已占住；等的只是事件
 /// 投递和 GUI 主线程的一拍。宽裕到覆盖 GUI 刚起、对话占位还在恢复的窗口。
 const ACP_WAKE_TIMEOUT: Duration = Duration::from_secs(15);
-const ACP_WAKE_POLL: Duration = Duration::from_millis(100);
 
 /// 这段对话的注册表槽：在就直接给；不在但在桌面侧栏菜单里（daemon 冷启动后桌面只放了
 /// 占位），请桌面打开再等它出现。错误串直接给人看：手机上的提示、peer 发送方收到的退信。
@@ -4335,16 +4344,10 @@ fn wake_dormant_conversation(
             return Err("Could not ask the computer to resume this conversation.".to_string());
         }
     }
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(slot) = acp_sessions.get(id) {
-            return Ok(slot);
-        }
-        if Instant::now() >= deadline {
-            return Err("The computer did not resume this conversation in time.".to_string());
-        }
-        thread::sleep(ACP_WAKE_POLL);
-    }
+    // 登记时就醒，超时只是上限。
+    acp_sessions
+        .wait_for(id, timeout)
+        .ok_or_else(|| "The computer did not resume this conversation in time.".to_string())
 }
 
 /// 请求没写就照旧带调试 sidecar：桌面的调试面板靠它。

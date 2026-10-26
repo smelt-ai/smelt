@@ -96,6 +96,7 @@ impl Workspace {
                 }
                 map
             },
+            panel_plugins: self.panel_plugins_snapshot(),
             #[cfg(target_os = "macos")]
             update_status: self.update_status.clone(),
             #[cfg(target_os = "macos")]
@@ -112,6 +113,8 @@ impl Workspace {
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             show_update_install_confirm: self.show_update_install_confirm,
             session_manager_open: self.session_manager_open,
+            resources: (self.settings_section == SettingsSection::MaintenanceResources)
+                .then(|| self.resources_snapshot(cx)),
         }
     }
 
@@ -188,9 +191,15 @@ impl Workspace {
     /// 的重入保护直接 panic 崩溃（"cannot update ... while it is already being
     /// updated"）——这就是「点齿轮整个 app 崩溃」的真正原因。
     pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
+        // 已经开着、换到资源页时，采样循环要醒来看一眼；新开的窗口在下面开好之后再叫一次。
+        self.wake_resource_monitor();
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         crate::runtime_events::probe_remotes(cx);
+        if self.settings_section == SettingsSection::CollaborationMachines {
+            // 延迟平时只在连接换路径时读；停在机器页时重读一次，看到的是现在的数。
+            crate::runtimes::sample_links(cx);
+        }
         self.ensure_pi_library_runtime(cx);
         self.refresh_pi_config(crate::RuntimeKey::Local, cx);
         let workspace = cx.entity();
@@ -262,6 +271,7 @@ impl Workspace {
                 })
                 .expect("打开设置窗口失败");
             cx.set_global(SettingsWindowHandle(handle));
+            workspace.read(cx).wake_resource_monitor();
         });
     }
 }

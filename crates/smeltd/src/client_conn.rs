@@ -51,7 +51,6 @@ impl ClientConn {
 /// `UnixStream::pair()` 的一端直接交给处理函数。
 pub trait ClientSocket: Read + Write + Send + Sized + 'static {
     fn try_clone(&self) -> io::Result<Self>;
-    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()>;
     fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()>;
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
     fn connection_id(&self) -> ConnId;
@@ -61,10 +60,6 @@ pub trait ClientSocket: Read + Write + Send + Sized + 'static {
 impl ClientSocket for UnixStream {
     fn try_clone(&self) -> io::Result<Self> {
         UnixStream::try_clone(self)
-    }
-
-    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        UnixStream::set_read_timeout(self, timeout)
     }
 
     fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
@@ -102,14 +97,6 @@ impl ClientSocket for ClientConn {
                 stream: stream.try_clone()?,
                 id: *id,
             }),
-        }
-    }
-
-    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.set_read_timeout(timeout),
-            #[cfg(windows)]
-            Self::Pipe { stream, .. } => stream.set_read_timeout(timeout),
         }
     }
 

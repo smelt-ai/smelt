@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 const title = "Smelt — 把所有机器上的 AI 编程智能体收进同一个原生工作台";
 const description =
-  "在 120fps 原生 macOS 工作台里并行指挥 Claude Code、Codex 与内置智能体。一行命令直连 Linux 开发机；离开电脑后，用 iOS 与 Android 手机审批权限、查看 Diff、接管任务。";
+  "在原生 macOS 与 Windows 工作台里并行指挥 Claude Code、Codex 与内置智能体。一行命令直连 Linux 开发机；离开电脑后，用 iOS 与 Android 手机审批权限、查看 Diff、接管任务。";
 
 export const metadata: Metadata = {
   title: {

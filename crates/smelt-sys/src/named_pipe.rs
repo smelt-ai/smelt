@@ -133,10 +133,15 @@ impl PipeListener {
     }
 }
 
+fn timeout_of(slot: &Mutex<Option<Duration>>) -> Option<Duration> {
+    *slot.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 pub struct PipeStream {
     handle: OwnedHandle,
-    read_timeout: Option<Duration>,
-    write_timeout: Option<Duration>,
+    /// 和 `UnixStream` 一样经 `&self` 设：两边的调用方写法一致。只影响这一份句柄。
+    read_timeout: Mutex<Option<Duration>>,
+    write_timeout: Mutex<Option<Duration>>,
     /// 只影响这一份句柄之后的操作。不改内核里的管道模式。
     nonblocking: AtomicBool,
 }
@@ -186,8 +191,8 @@ impl PipeStream {
     fn from_handle(handle: OwnedHandle) -> Self {
         Self {
             handle,
-            read_timeout: None,
-            write_timeout: None,
+            read_timeout: Mutex::new(None),
+            write_timeout: Mutex::new(None),
             nonblocking: AtomicBool::new(false),
         }
     }
@@ -213,8 +218,8 @@ impl PipeStream {
             .nonblocking
             .store(self.nonblocking.load(Ordering::Relaxed), Ordering::Relaxed);
         Ok(Self {
-            read_timeout: self.read_timeout,
-            write_timeout: self.write_timeout,
+            read_timeout: Mutex::new(timeout_of(&self.read_timeout)),
+            write_timeout: Mutex::new(timeout_of(&self.write_timeout)),
             ..cloned
         })
     }
@@ -226,13 +231,13 @@ impl PipeStream {
         Ok(())
     }
 
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        self.read_timeout = timeout;
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        *self.read_timeout.lock().unwrap_or_else(|error| error.into_inner()) = timeout;
         Ok(())
     }
 
-    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        self.write_timeout = timeout;
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        *self.write_timeout.lock().unwrap_or_else(|error| error.into_inner()) = timeout;
         Ok(())
     }
 
@@ -278,7 +283,7 @@ impl Read for PipeStream {
         if buf.is_empty() {
             return Ok(0);
         }
-        let wait = self.wait_for(self.read_timeout);
+        let wait = self.wait_for(timeout_of(&self.read_timeout));
         overlapped_transfer(
             self.handle.as_raw_handle(),
             buf.as_mut_ptr(),
@@ -294,7 +299,7 @@ impl Write for PipeStream {
         if buf.is_empty() {
             return Ok(0);
         }
-        let wait = self.wait_for(self.write_timeout);
+        let wait = self.wait_for(timeout_of(&self.write_timeout));
         overlapped_transfer(
             self.handle.as_raw_handle(),
             buf.as_ptr() as *mut u8,

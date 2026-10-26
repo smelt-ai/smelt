@@ -13,7 +13,8 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use futures_util::StreamExt as _;
+use iroh::endpoint::{Connection, PathEvent, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use smelt_runtime_client::RuntimeStream;
 #[cfg(unix)]
@@ -547,6 +548,67 @@ impl RuntimeConnector {
             }
             crate::selected_path(&conn, &self.target.id.to_string())
         })
+    }
+
+    /// 盯着当前连接：选中路径变了报 [`LinkChange::PathSelected`]，连接断了报一次
+    /// [`LinkChange::Closed`] 后结束；还没连上或已经断了时立刻报 `Closed`。只拿弱引用，
+    /// 不让连接因此多活；不会为此拨号。回调在 iroh 客户端的 tokio 线程上跑，不能阻塞。
+    /// 和 [`smelt_runtime_client::Connector::connect`] 一样不能在 tokio 运行时里调用。
+    pub fn watch(&self, on_change: impl Fn(LinkChange) + Send + Sync + 'static) -> LinkWatch {
+        let watched = self.client.runtime.block_on(async {
+            let conn = self.conn.lock().await.clone()?;
+            if conn.close_reason().is_some() {
+                return None;
+            }
+            Some((conn.weak_handle(), conn.path_events()))
+        });
+        let task = self.client.runtime.spawn(async move {
+            let Some((weak, mut events)) = watched else {
+                on_change(LinkChange::Closed);
+                return;
+            };
+            // 第一次 poll 时登记关闭：连接器手里还握着强引用。那之前强引用就全丢了的话
+            // 这里立刻落地，等同于已经断了。
+            let closed = async move { weak.closed().await };
+            tokio::pin!(closed);
+            loop {
+                tokio::select! {
+                    _ = &mut closed => break,
+                    event = events.next() => match event {
+                        Some(PathEvent::Selected { .. } | PathEvent::Lagged { .. }) => {
+                            on_change(LinkChange::PathSelected);
+                        }
+                        Some(_) => {}
+                        // 事件流随连接关闭结束；等关闭本身落地再报。
+                        None => {
+                            (&mut closed).await;
+                            break;
+                        }
+                    },
+                }
+            }
+            on_change(LinkChange::Closed);
+        });
+        LinkWatch(task.abort_handle())
+    }
+}
+
+/// 连接上的变化，见 [`RuntimeConnector::watch`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkChange {
+    /// iroh 换了选中的传输路径（中继 ↔ 直连、网络切换），路径和 RTT 随之变了。
+    PathSelected,
+    /// 连接断了：对端关闭，或对端消失后 QUIC 保活收不到回应、到了空闲超时（iroh 默认
+    /// 每 5 秒保活、30 秒超时）。这条连接上所有流的读写随之出错，桥接的本地一端读到 EOF。
+    Closed,
+}
+
+/// [`RuntimeConnector::watch`] 的守卫：丢掉就不再盯。
+pub struct LinkWatch(tokio::task::AbortHandle);
+
+impl Drop for LinkWatch {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

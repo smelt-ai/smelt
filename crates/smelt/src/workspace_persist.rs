@@ -829,8 +829,9 @@ impl Workspace {
         .detach();
     }
 
-    /// 向一个运行时读它那份工作区目录，读到为止：运行时还没就绪、远程运行时离线都按
-    /// 退避重试。运行时被移除了就停。
+    /// 向一个运行时读它那份工作区目录，读到为止：运行时还没就绪、远程运行时离线时等它
+    /// 在线再读，读失败就退避后回去等（见 [`crate::runtime_events::wait_online`]）。运行时
+    /// 被移除了就停。
     pub(crate) fn start_space_catalog_load(
         &mut self,
         runtime: Runtime,
@@ -839,8 +840,11 @@ impl Workspace {
     ) {
         cx.spawn_in(window, async move |this, cx| {
             let key = runtime.key().clone();
-            let mut attempt = 0u32;
+            let mut failures = 0u32;
             loop {
+                if !crate::runtime_events::wait_online(&key, failures, cx).await {
+                    return;
+                }
                 let client = runtime.client().clone();
                 let loaded = cx
                     .background_executor()
@@ -865,7 +869,7 @@ impl Workspace {
                         return;
                     }
                     // 远程运行时离线是常态，侧栏那一段会标出来，不再弹提示。
-                    Err(error) if attempt == 4 && key == RuntimeKey::Local => {
+                    Err(error) if failures == 4 && key == RuntimeKey::Local => {
                         let message = format!(
                             "正在等待运行时的工作区：{}",
                             crate::runtime_call::error_text(error)
@@ -874,12 +878,7 @@ impl Workspace {
                     }
                     Err(_) => {}
                 }
-                cx.background_executor()
-                    .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
-                        attempt,
-                    ))
-                    .await;
-                attempt = attempt.saturating_add(1);
+                failures = failures.saturating_add(1);
             }
         })
         .detach();
