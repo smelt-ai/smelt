@@ -2022,7 +2022,17 @@ pub(crate) fn write_session_input(sess: &Session, bytes: &[u8]) -> std::io::Resu
 struct PtyInputWrite {
     bytes: Vec<u8>,
     done: std::sync::mpsc::Sender<std::io::Result<()>>,
+    /// 写线程开写前和调用方超时时各抢一次，谁先到算谁。取消了的不再写，
+    /// 超时报给调用方的「没写进去」才是真的。
+    state: Arc<std::sync::atomic::AtomicU8>,
 }
+
+#[cfg(windows)]
+const PTY_INPUT_QUEUED: u8 = 0;
+#[cfg(windows)]
+const PTY_INPUT_STARTED: u8 = 1;
+#[cfg(windows)]
+const PTY_INPUT_CANCELLED: u8 = 2;
 
 /// 一个会话一条写线程，队列最多 8 笔。ConPTY 缓冲满时线程停在 `write_all`，
 /// 后来的按键进队列，满了就返回超时，不再按每次输入起线程。
@@ -2035,6 +2045,18 @@ fn spawn_pty_input_thread(
         .name("smelt-pty-input".to_string())
         .spawn(move || {
             while let Ok(job) = rx.recv() {
+                if job
+                    .state
+                    .compare_exchange(
+                        PTY_INPUT_QUEUED,
+                        PTY_INPUT_STARTED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
                 let result = writer
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -2056,10 +2078,12 @@ fn write_session_input_windows(sess: &Session, bytes: &[u8]) -> std::io::Result<
         ctl.input_tx.clone()
     };
     let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(PTY_INPUT_QUEUED));
     if input_tx
         .try_send(PtyInputWrite {
             bytes: bytes.to_vec(),
             done: done_tx,
+            state: Arc::clone(&state),
         })
         .is_err()
     {
@@ -2070,10 +2094,19 @@ fn write_session_input_windows(sess: &Session, bytes: &[u8]) -> std::io::Result<
     }
     match done_rx.recv_timeout(PTY_WRITE_TIMEOUT) {
         Ok(result) => result,
-        Err(_) => Err(std::io::Error::new(
-            ErrorKind::TimedOut,
-            "PTY input write timed out",
-        )),
+        Err(_) => {
+            // 还在排队的撤下来，之后不会再写进去。已经开写的和 Unix 一样，可能写进去了一部分。
+            let _ = state.compare_exchange(
+                PTY_INPUT_QUEUED,
+                PTY_INPUT_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "PTY input write timed out",
+            ))
+        }
     }
 }
 
