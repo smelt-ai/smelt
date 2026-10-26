@@ -12,7 +12,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -35,10 +35,21 @@ pub(crate) type TaskStream = smelt_sys::named_pipe::PipeStream;
 type WakeReader = std::os::unix::net::UnixStream;
 #[cfg(unix)]
 type WakeWriter = std::os::unix::net::UnixStream;
+/// Windows 用事件：置位是叫醒，复位是读空。管道读端只能轮询，不能和别的来源一起阻塞等待。
 #[cfg(windows)]
-type WakeReader = std::io::PipeReader;
+type WakeReader = smelt_sys::named_pipe::WakeEvent;
 #[cfg(windows)]
-type WakeWriter = std::io::PipeWriter;
+type WakeWriter = smelt_sys::named_pipe::WakeEvent;
+
+/// 任务的输出管道。Windows 用自己建的可重叠读管道，才能和唤醒一起等，见 `output_pipe`。
+#[cfg(unix)]
+type TaskStdout = std::process::ChildStdout;
+#[cfg(unix)]
+type TaskStderr = std::process::ChildStderr;
+#[cfg(windows)]
+type TaskStdout = smelt_sys::named_pipe::PipeStream;
+#[cfg(windows)]
+type TaskStderr = smelt_sys::named_pipe::PipeStream;
 
 #[cfg(unix)]
 type TaskListener = std::os::unix::net::UnixListener;
@@ -673,31 +684,42 @@ fn start_task(
     command_process
         .current_dir(&cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .env_remove("SMELT_BACKGROUND_TASK_SOCK");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command_process.process_group(0);
+        command_process
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
     }
     #[cfg(windows)]
-    {
+    let (stdout, stderr) = {
         use std::os::windows::process::CommandExt;
-        command_process.creation_flags(
-            smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
-        );
-    }
+        let (stdout, child_stdout) = smelt_sys::named_pipe::output_pipe()
+            .map_err(|error| format!("无法建立输出管道：{error}"))?;
+        let (stderr, child_stderr) = smelt_sys::named_pipe::output_pipe()
+            .map_err(|error| format!("无法建立输出管道：{error}"))?;
+        command_process
+            .stdout(Stdio::from(child_stdout))
+            .stderr(Stdio::from(child_stderr))
+            .creation_flags(
+                smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
+            );
+        (Some(stdout), Some(stderr))
+    };
     let mut child = command_process
         .spawn()
         .map_err(|error| format!("无法启动命令：{error}"))?;
+    // 子进程那端的句柄还在 `Command` 里。不关掉，子进程退出后这边读不到结束。
+    drop(command_process);
     #[cfg(windows)]
     if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
         let _ = child.wait();
         return Err(format!("无法把命令放进进程树：{error}"));
     }
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    #[cfg(unix)]
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let pgid = child.id() as i32;
     record_task_group(&inner.root, pgid);
     state.tasks.push(LiveTask {
@@ -994,24 +1016,19 @@ fn deadline_loop(inner: Arc<Inner>) {
     }
 }
 
-/// 组长的 `wait` 写一个字节到这条管道，监督线程不用再开第二条 `waitpid`。
+/// 组长的 `wait` 结束后叫醒监督线程，监督线程不用再开第二条 `waitpid`。
 struct ExitWait {
-    wake: std::io::PipeReader,
+    wake: WakeReader,
     status_rx: std::sync::mpsc::Receiver<Option<i32>>,
 }
 
 impl ExitWait {
-    /// 管道或等待线程起不来时把子进程还回来，调用方退回「先读完再 wait」。
+    /// 唤醒或等待线程起不来时把子进程还回来，调用方退回「先读完再 wait」。
     fn start(child: Child) -> Result<Self, Child> {
-        let (wake, mut write) = match std::io::pipe() {
+        let (wake, mut write) = match wake_pair() {
             Ok(pair) => pair,
             Err(_) => return Err(child),
         };
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            set_fd_nonblocking(wake.as_raw_fd());
-        }
         let slot = Arc::new(Mutex::new(Some(child)));
         let thread_slot = Arc::clone(&slot);
         let (tx, status_rx) = std::sync::mpsc::channel();
@@ -1024,7 +1041,7 @@ impl ExitWait {
                     .take()
                     .and_then(|mut child| child.wait().ok())
                     .and_then(|status| status.code());
-                let _ = write.write_all(&[1]);
+                poke_stream(&mut write);
                 drop(write);
                 let _ = tx.send(code);
             });
@@ -1044,8 +1061,8 @@ fn supervise_task(
     inner: Arc<Inner>,
     id: String,
     child: Child,
-    mut stdout: Option<ChildStdout>,
-    mut stderr: Option<ChildStderr>,
+    mut stdout: Option<TaskStdout>,
+    mut stderr: Option<TaskStderr>,
 ) {
     #[cfg(unix)]
     {
@@ -1056,6 +1073,10 @@ fn supervise_task(
         if let Some(pipe) = stderr.as_ref() {
             set_fd_nonblocking(pipe.as_raw_fd());
         }
+    }
+    #[cfg(windows)]
+    for pipe in [stdout.as_ref(), stderr.as_ref()].into_iter().flatten() {
+        let _ = pipe.set_nonblocking(true);
     }
     let log_path = {
         let state = inner.mu.lock().unwrap();
@@ -1124,8 +1145,8 @@ fn supervise_task(
 }
 
 struct LiveOutput<'a> {
-    stdout: &'a mut Option<ChildStdout>,
-    stderr: &'a mut Option<ChildStderr>,
+    stdout: &'a mut Option<TaskStdout>,
+    stderr: &'a mut Option<TaskStderr>,
     log: &'a mut Option<File>,
     total: &'a mut u64,
     capped: &'a mut bool,
@@ -1136,7 +1157,7 @@ fn watch_output(
     inner: &Inner,
     id: &str,
     output: &mut LiveOutput<'_>,
-    wake: Option<&std::io::PipeReader>,
+    wake: Option<&WakeReader>,
 ) -> bool {
     loop {
         if output.stdout.is_none() && output.stderr.is_none() && wake.is_none() {
@@ -1199,7 +1220,7 @@ fn watch_output(
 }
 
 fn consume_ready(
-    pipe: &mut Option<impl DrainRead>,
+    pipe: &mut Option<impl Read>,
     index: Option<usize>,
     ready: &[bool],
     log: &mut Option<File>,
@@ -1214,7 +1235,7 @@ fn consume_ready(
     take_available(pipe, log, total)
 }
 
-fn take_available(pipe: &mut Option<impl DrainRead>, log: &mut Option<File>, total: &mut u64) -> bool {
+fn take_available(pipe: &mut Option<impl Read>, log: &mut Option<File>, total: &mut u64) -> bool {
     let Some(inner) = pipe.as_mut() else {
         return false;
     };
@@ -1229,22 +1250,13 @@ fn take_available(pipe: &mut Option<impl DrainRead>, log: &mut Option<File>, tot
 
 /// `(对端已关, 这次读到了输出)`。
 fn drain_pipe(
-    pipe: &mut impl DrainRead,
+    pipe: &mut impl Read,
     log: &mut Option<File>,
     total: &mut u64,
 ) -> std::io::Result<(bool, bool)> {
     let mut wrote = false;
     let mut buf = [0u8; 8192];
     loop {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            match smelt_sys::named_pipe::peek_available(pipe.as_raw_handle())? {
-                smelt_sys::named_pipe::PipeAvailability::Empty => return Ok((false, wrote)),
-                smelt_sys::named_pipe::PipeAvailability::Broken => return Ok((true, wrote)),
-                smelt_sys::named_pipe::PipeAvailability::Ready(_) => {}
-            }
-        }
         match pipe.read(&mut buf) {
             Ok(0) => return Ok((true, wrote)),
             Ok(size) => {
@@ -1618,11 +1630,8 @@ fn wake_pair() -> std::io::Result<(WakeReader, WakeWriter)> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle;
-        let (read, write) = std::io::pipe()?;
-        // 写端非阻塞：缓冲满时唤醒不能堵在持锁的线程上。
-        let _ = smelt_sys::named_pipe::set_nonblocking_handle(write.as_raw_handle(), true);
-        Ok((read, write))
+        let event = smelt_sys::named_pipe::WakeEvent::new()?;
+        Ok((event.clone(), event))
     }
 }
 
@@ -1635,7 +1644,7 @@ fn poke_stream(stream: &mut WakeWriter) {
     }
     #[cfg(windows)]
     {
-        let _ = stream.write_all(&[1]);
+        stream.set();
     }
 }
 
@@ -1660,20 +1669,19 @@ fn poke(inner: &Inner) {
 }
 
 fn drain_wake(stream: &mut WakeReader) {
-    let mut buf = [0u8; 64];
-    loop {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            match smelt_sys::named_pipe::peek_available(stream.as_raw_handle()) {
-                Ok(smelt_sys::named_pipe::PipeAvailability::Ready(_)) => {}
-                _ => break,
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 64];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
             }
         }
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => continue,
-        }
+    }
+    #[cfg(windows)]
+    {
+        stream.reset();
     }
 }
 
@@ -1706,27 +1714,22 @@ impl<T: std::os::fd::AsRawFd + ?Sized> PollSource for T {
 
 #[cfg(windows)]
 trait PollSource {
-    fn poll_handle(&self) -> std::os::windows::io::RawHandle;
+    fn waitable(&self) -> smelt_sys::named_pipe::Waitable<'_>;
 }
 
 #[cfg(windows)]
-impl<T: std::os::windows::io::AsRawHandle + ?Sized> PollSource for T {
-    fn poll_handle(&self) -> std::os::windows::io::RawHandle {
-        self.as_raw_handle()
+impl PollSource for smelt_sys::named_pipe::PipeStream {
+    fn waitable(&self) -> smelt_sys::named_pipe::Waitable<'_> {
+        smelt_sys::named_pipe::Waitable::Pipe(self)
     }
 }
 
-#[cfg(unix)]
-trait DrainRead: Read {}
-
-#[cfg(unix)]
-impl<T: Read> DrainRead for T {}
-
 #[cfg(windows)]
-trait DrainRead: Read + std::os::windows::io::AsRawHandle {}
-
-#[cfg(windows)]
-impl<T: Read + std::os::windows::io::AsRawHandle> DrainRead for T {}
+impl PollSource for smelt_sys::named_pipe::WakeEvent {
+    fn waitable(&self) -> smelt_sys::named_pipe::Waitable<'_> {
+        smelt_sys::named_pipe::Waitable::Event(self)
+    }
+}
 
 #[cfg(unix)]
 fn poll_wait(fds: &[(std::os::fd::RawFd, i16)], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
@@ -1767,38 +1770,8 @@ fn poll_wait(fds: &[(std::os::fd::RawFd, i16)], timeout: Option<Duration>) -> st
 
 #[cfg(windows)]
 fn poll_handles(sources: &[&dyn PollSource], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
-    if sources.is_empty() {
-        return Ok(Vec::new());
-    }
-    let deadline = timeout.map(|duration| Instant::now() + duration);
-    loop {
-        let mut ready = Vec::with_capacity(sources.len());
-        let mut any = false;
-        for source in sources {
-            let readable = match smelt_sys::named_pipe::peek_available(source.poll_handle())? {
-                smelt_sys::named_pipe::PipeAvailability::Empty => false,
-                smelt_sys::named_pipe::PipeAvailability::Ready(_)
-                | smelt_sys::named_pipe::PipeAvailability::Broken => true,
-            };
-            any |= readable;
-            ready.push(readable);
-        }
-        if any {
-            return Ok(ready);
-        }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Ok(ready);
-        }
-        let park = Duration::from_millis(15);
-        let park = match deadline {
-            Some(deadline) => park.min(deadline.saturating_duration_since(Instant::now())),
-            None => park,
-        };
-        if park.is_zero() {
-            return Ok(ready);
-        }
-        thread::park_timeout(park);
-    }
+    let waitables: Vec<_> = sources.iter().map(|source| source.waitable()).collect();
+    smelt_sys::named_pipe::wait_readable(&waitables, timeout)
 }
 
 #[cfg(unix)]

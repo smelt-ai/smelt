@@ -21,7 +21,7 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     CloseHandle, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     ACL_REVISION, AddAccessAllowedAce, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
@@ -33,12 +33,13 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, PeekNamedPipe,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
     WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, INFINITE, OpenProcessToken, WaitForSingleObject,
+    CreateEventW, GetCurrentProcess, INFINITE, OpenProcessToken, ResetEvent, SetEvent,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
 
 use crate::process::current_user_key;
@@ -308,74 +309,157 @@ impl Write for PipeStream {
     }
 }
 
-/// 匿名管道的写端也要能改成非阻塞，免得唤醒写在缓冲满时卡住持锁的线程。
-/// 这是管道两端各自的句柄，不是 `PipeStream` 那种同一实例上复制出来的一对。
-pub fn set_nonblocking_handle(handle: RawHandle, nonblocking: bool) -> io::Result<()> {
-    use windows_sys::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_NOWAIT};
-    let mode = PIPE_READMODE_BYTE | if nonblocking { PIPE_NOWAIT } else { PIPE_WAIT };
-    let ok = unsafe { SetNamedPipeHandleState(handle, &mode, std::ptr::null(), std::ptr::null()) };
-    if ok == 0 {
-        Err(io::Error::last_os_error())
+/// 手动复位的事件，代替「写一个字节叫醒对方」的唤醒管道：`set` 是叫醒，`reset` 是读空。
+/// 克隆出来的是同一个事件。
+#[derive(Clone)]
+pub struct WakeEvent(std::sync::Arc<ManualEvent>);
+
+impl WakeEvent {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self(std::sync::Arc::new(ManualEvent::new()?)))
+    }
+
+    pub fn set(&self) {
+        unsafe { SetEvent(self.0.raw()) };
+    }
+
+    pub fn reset(&self) {
+        unsafe { ResetEvent(self.0.raw()) };
+    }
+}
+
+/// [`wait_readable`] 能等的东西。
+pub enum Waitable<'a> {
+    /// 有数据可读，或者对端已经关掉。
+    Pipe(&'a PipeStream),
+    /// 已置位。
+    Event(&'a WakeEvent),
+}
+
+/// 阻塞到其中一个就绪，或者超时，返回每一个是否就绪。不取走管道里的数据。
+///
+/// 管道上挂一个零字节的重叠读：有数据或对端关掉时它完成。返回前没完成的都取消并等它结束，
+/// 不会留下一个还挂在栈外缓冲上的读。
+pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io::Result<Vec<bool>> {
+    struct ZeroRead {
+        index: usize,
+        handle: HANDLE,
+        event: ManualEvent,
+        overlapped: OVERLAPPED,
+        byte: u8,
+    }
+    let mut ready = vec![false; sources.len()];
+    // 先把会失败的事件都建好，再发起读，中途不会带着挂起的读提前返回。
+    let mut reads = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        if let Waitable::Pipe(pipe) = source {
+            let event = ManualEvent::new()?;
+            reads.push(Box::new(ZeroRead {
+                index,
+                handle: pipe.handle.as_raw_handle(),
+                overlapped: OVERLAPPED {
+                    hEvent: event.raw(),
+                    ..OVERLAPPED::default()
+                },
+                event,
+                byte: 0,
+            }));
+        }
+    }
+    let mut pending = Vec::new();
+    for read in &mut reads {
+        let ok = unsafe {
+            ReadFile(
+                read.handle,
+                &mut read.byte,
+                0,
+                std::ptr::null_mut(),
+                &mut read.overlapped,
+            )
+        };
+        if ok == 0 && unsafe { GetLastError() } == ERROR_IO_PENDING {
+            pending.push(read.event.raw());
+        } else {
+            // 立刻完成是有数据；立刻失败（多半是对端关了）也交给调用方去读，读会报出原因。
+            ready[read.index] = true;
+        }
+    }
+    let mut handles = pending;
+    for source in sources {
+        if let Waitable::Event(event) = source {
+            handles.push(event.0.raw());
+        }
+    }
+    let millis = if ready.iter().any(|ready| *ready) {
+        0
     } else {
-        Ok(())
+        timeout.map_or(INFINITE, duration_millis)
+    };
+    // 管道都已就绪、又没有事件时没有可等的句柄，空数组会让等待直接失败。
+    let wait_error = if handles.is_empty() {
+        None
+    } else {
+        let status = unsafe {
+            WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, millis)
+        };
+        (status == WAIT_FAILED).then(io::Error::last_os_error)
+    };
+    for read in &mut reads {
+        if ready[read.index] {
+            continue;
+        }
+        unsafe { CancelIoEx(read.handle, &read.overlapped) };
+        let mut transferred = 0u32;
+        let ok = unsafe { GetOverlappedResult(read.handle, &read.overlapped, &mut transferred, 1) };
+        ready[read.index] =
+            ok != 0 || unsafe { GetLastError() } != ERROR_OPERATION_ABORTED;
     }
-}
-
-/// `PeekNamedPipe` 的结果。字节管道上等可读就靠这个，不把管道当成套接字。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PipeAvailability {
-    Empty,
-    Ready(u32),
-    Broken,
-}
-
-pub fn peek_available(handle: RawHandle) -> io::Result<PipeAvailability> {
-    match peek_pipe(handle)? {
-        PipePeek::Empty => Ok(PipeAvailability::Empty),
-        PipePeek::Ready(available) => Ok(PipeAvailability::Ready(available)),
-        PipePeek::Broken => Ok(PipeAvailability::Broken),
+    if let Some(error) = wait_error {
+        return Err(error);
     }
+    for (index, source) in sources.iter().enumerate() {
+        if let Waitable::Event(event) = source {
+            ready[index] = unsafe { WaitForSingleObject(event.0.raw(), 0) } == WAIT_OBJECT_0;
+        }
+    }
+    Ok(ready)
 }
 
-enum PipePeek {
-    Empty,
-    Ready(u32),
-    Broken,
+/// 子进程输出用的管道。我们这端是能重叠读的 [`PipeStream`]，可以和别的来源一起等；
+/// 子进程那端是普通的同步写句柄，交给 `Stdio`。std 的 `Stdio::piped()` 这端能不能重叠读
+/// 是它的内部实现，不依赖它。
+pub fn output_pipe() -> io::Result<(PipeStream, OwnedHandle)> {
+    let name = user_pipe_path(&format!(
+        "out-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ))?;
+    let ours = create_instance(&name, true)?;
+    let wide = wide(&name);
+    // GENERIC_WRITE | FILE_READ_ATTRIBUTES
+    let theirs = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0x4000_0000 | 0x0000_0080,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if theirs.is_null() || theirs == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((PipeStream::from_handle(ours), unsafe {
+        OwnedHandle::from_raw_handle(theirs)
+    }))
 }
 
 enum Wait {
     Forever,
     Budget(Duration),
     Poll,
-}
-
-fn peek_pipe(handle: RawHandle) -> io::Result<PipePeek> {
-    let mut available = 0u32;
-    let ok = unsafe {
-        PeekNamedPipe(
-            handle,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            &mut available,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        let error = unsafe { GetLastError() };
-        if error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED {
-            return Ok(PipePeek::Broken);
-        }
-        if error == ERROR_NO_DATA {
-            return Ok(PipePeek::Empty);
-        }
-        return Err(io::Error::from_raw_os_error(error as i32));
-    }
-    if available == 0 {
-        Ok(PipePeek::Empty)
-    } else {
-        Ok(PipePeek::Ready(available))
-    }
 }
 
 fn overlapped_transfer(
@@ -472,6 +556,10 @@ fn duration_millis(duration: Duration) -> u32 {
 }
 
 struct ManualEvent(HANDLE);
+
+// 事件是内核对象，句柄可以在线程间传递、同时使用。
+unsafe impl Send for ManualEvent {}
+unsafe impl Sync for ManualEvent {}
 
 impl ManualEvent {
     fn new() -> io::Result<Self> {
@@ -676,5 +764,40 @@ mod tests {
         let name = user_pipe_path(&format!("test-first-{}", uuid::Uuid::new_v4().simple())).unwrap();
         let _first = PipeListener::bind(&name).unwrap();
         assert!(PipeListener::bind(&name).is_err());
+    }
+
+    #[test]
+    fn wake_event_is_ready_only_while_set() {
+        let event = WakeEvent::new().unwrap();
+        let short = Some(Duration::from_millis(20));
+        assert_eq!(wait_readable(&[Waitable::Event(&event)], short).unwrap(), [false]);
+        event.clone().set();
+        assert_eq!(wait_readable(&[Waitable::Event(&event)], None).unwrap(), [true]);
+        event.reset();
+        assert_eq!(wait_readable(&[Waitable::Event(&event)], short).unwrap(), [false]);
+    }
+
+    /// 等可读不能取走数据，超时要按时返回，对端关掉也算可读。
+    #[test]
+    fn output_pipe_wakes_waiters_without_consuming_data() {
+        let (mut ours, theirs) = output_pipe().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let mut theirs = std::fs::File::from(theirs);
+        let wake = WakeEvent::new().unwrap();
+        let short = Some(Duration::from_millis(20));
+        let sources = [Waitable::Pipe(&ours), Waitable::Event(&wake)];
+        assert_eq!(wait_readable(&sources, short).unwrap(), [false, false]);
+
+        theirs.write_all(b"hello").unwrap();
+        assert_eq!(wait_readable(&sources, None).unwrap(), [true, false]);
+        let mut buf = [0u8; 16];
+        assert_eq!(ours.read(&mut buf).unwrap(), 5);
+        assert_eq!(&buf[..5], b"hello");
+
+        let sources = [Waitable::Pipe(&ours), Waitable::Event(&wake)];
+        assert_eq!(wait_readable(&sources, short).unwrap(), [false, false]);
+        drop(theirs);
+        assert_eq!(wait_readable(&sources, None).unwrap(), [true, false]);
+        assert_eq!(ours.read(&mut buf).unwrap(), 0);
     }
 }
