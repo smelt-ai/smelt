@@ -15,7 +15,7 @@ use super::*;
 use crate::api::draft::MessageDraft;
 use crate::api::fleet::{LinkMetrics, LinkPath};
 use crate::api::pass::Pass;
-use crate::connection::{Link, Route};
+use crate::connection::{Link, LinkChange, OnLinkChange, Route};
 use crate::iroh_dialer::{Shape, shape_for};
 
 const CODE: &str = "K7QX-M2PD";
@@ -26,7 +26,6 @@ fn fast_backoff(_attempt: u32) -> Duration {
 
 const FAST: Timings = Timings {
     connection: crate::connection::Timing {
-        interval: Duration::from_millis(40),
         probe_timeout: Duration::from_millis(500),
         connect_timeout: Duration::from_millis(500),
         pair_timeout: Duration::from_millis(500),
@@ -88,6 +87,8 @@ struct FakeRuntime {
     links: AtomicUsize,
     /// 会话目录的订阅连接，挂着不回。
     subscriptions: Mutex<Vec<RuntimeStream>>,
+    /// 各链路登记的连接变化回调。
+    watchers: Mutex<Vec<OnLinkChange>>,
 }
 
 impl FakeRuntime {
@@ -101,7 +102,17 @@ impl FakeRuntime {
             describes: AtomicUsize::new(0),
             links: AtomicUsize::new(0),
             subscriptions: Mutex::new(Vec::new()),
+            watchers: Mutex::new(Vec::new()),
         })
+    }
+
+    /// 撤销这台手机：运行时同时断开它的连接（传输层报关闭）。
+    fn revoke(&self) {
+        self.paired.store(false, Ordering::SeqCst);
+        let watchers = std::mem::take(&mut *self.watchers.lock().unwrap());
+        for watcher in watchers {
+            watcher(LinkChange::Closed);
+        }
     }
 
     fn info(&self, relay_url: Option<&str>) -> RuntimeInfo {
@@ -216,11 +227,20 @@ struct FakeRoute(Arc<FakeRuntime>);
 impl Route for FakeRoute {
     fn link(&self) -> Link {
         self.0.links.fetch_add(1, Ordering::SeqCst);
+        let runtime = Arc::clone(&self.0);
         Link {
             client: self.0.client(),
             metrics: Arc::new(|| LinkMetrics {
                 path: LinkPath::Lan,
                 rtt_ms: Some(3),
+            }),
+            watch: Arc::new(move |on_change: OnLinkChange| -> Box<dyn Send> {
+                if runtime.online.load(Ordering::SeqCst) {
+                    runtime.watchers.lock().unwrap().push(on_change);
+                } else {
+                    on_change(LinkChange::Closed);
+                }
+                Box::new(())
             }),
         }
     }
@@ -438,7 +458,7 @@ fn pairing_a_known_endpoint_updates_the_entry_and_keeps_the_node() {
     let node = h.fleet.node("ra").unwrap();
 
     // 被撤销后重新配对。
-    a.paired.store(false, Ordering::SeqCst);
+    a.revoke();
     h.wait_state("ra", ConnectionState::Disconnected);
     let record = h.pair(&a, None).unwrap();
 
@@ -472,6 +492,7 @@ fn re_pairing_a_reinstalled_runtime_drops_the_old_cache() {
         describes: AtomicUsize::new(0),
         links: AtomicUsize::new(0),
         subscriptions: Mutex::new(Vec::new()),
+        watchers: Mutex::new(Vec::new()),
     });
     {
         let mut runtimes = h.transport.runtimes.lock().unwrap();
@@ -681,9 +702,9 @@ fn forgetting_cleans_up_everything_of_that_runtime() {
     assert_eq!(stations, ["rb"]);
 
     // 停下后不再探活，也不再开订阅。
-    std::thread::sleep(FAST.connection.interval * 4);
+    std::thread::sleep(Duration::from_millis(160));
     let after = a.describes.load(Ordering::SeqCst);
-    std::thread::sleep(FAST.connection.interval * 4);
+    std::thread::sleep(Duration::from_millis(160));
     assert_eq!(a.describes.load(Ordering::SeqCst), after);
     assert!(h.fleet.forget("ra").is_err());
 }
@@ -864,7 +885,7 @@ fn reconnect_and_verify_reach_the_runtime() {
     let a = FakeRuntime::new("ra", "mac-a");
     let h = harness(&[(&a, None)], &[]);
     h.wait_state("ra", ConnectionState::Connected);
-    a.paired.store(false, Ordering::SeqCst);
+    a.revoke();
     h.wait_state("ra", ConnectionState::Disconnected);
 
     a.paired.store(true, Ordering::SeqCst);

@@ -13,7 +13,6 @@ use super::*;
 use crate::api::fleet::LinkPath;
 
 const FAST: Timing = Timing {
-    interval: Duration::from_millis(30),
     probe_timeout: Duration::from_millis(500),
     connect_timeout: Duration::from_millis(500),
     pair_timeout: Duration::from_millis(500),
@@ -21,7 +20,10 @@ const FAST: Timing = Timing {
     backoff_max: Duration::from_millis(80),
 };
 
-/// 假运行时：在线与否、是否已配对可以随时改。
+/// 停下后等多久再看有没有多余的请求。
+const SETTLE: Duration = Duration::from_millis(120);
+
+/// 假运行时：在线与否、是否已配对可以随时改；连接断开、换路径由测试触发。
 struct FakeRuntime {
     runtime_id: String,
     code: String,
@@ -31,6 +33,9 @@ struct FakeRuntime {
     paired_names: Mutex<Vec<String>>,
     describes: AtomicUsize,
     links: AtomicUsize,
+    /// 各链路登记的连接变化回调。
+    watchers: Mutex<Vec<OnLinkChange>>,
+    rtt_ms: Mutex<Option<u32>>,
 }
 
 impl FakeRuntime {
@@ -43,6 +48,8 @@ impl FakeRuntime {
             paired_names: Mutex::new(Vec::new()),
             describes: AtomicUsize::new(0),
             links: AtomicUsize::new(0),
+            watchers: Mutex::new(Vec::new()),
+            rtt_ms: Mutex::new(None),
         })
     }
 
@@ -62,6 +69,26 @@ impl FakeRuntime {
 
     fn describes(&self) -> usize {
         self.describes.load(Ordering::SeqCst)
+    }
+
+    fn watchers(&self) -> usize {
+        self.watchers.lock().unwrap().len()
+    }
+
+    /// 连接断了（传输层报关闭）：登记过的回调都收到 `Closed`。
+    fn drop_links(&self) {
+        let watchers = std::mem::take(&mut *self.watchers.lock().unwrap());
+        for watcher in watchers {
+            watcher(LinkChange::Closed);
+        }
+    }
+
+    /// 换了传输路径，RTT 变成 `rtt_ms`。
+    fn change_path(&self, rtt_ms: u32) {
+        *self.rtt_ms.lock().unwrap() = Some(rtt_ms);
+        for watcher in self.watchers.lock().unwrap().iter() {
+            watcher(LinkChange::Path);
+        }
     }
 
     fn respond(&self, request: Value) -> Value {
@@ -126,6 +153,8 @@ impl Route for FakeRoute {
     fn link(&self) -> Link {
         self.0.links.fetch_add(1, Ordering::SeqCst);
         let runtime = Arc::clone(&self.0);
+        let for_metrics = Arc::clone(&self.0);
+        let for_watch = Arc::clone(&self.0);
         Link {
             client: RuntimeClient::new(move || {
                 if !*runtime.online.lock().unwrap() {
@@ -146,9 +175,18 @@ impl Route for FakeRoute {
                 });
                 Ok(client)
             }),
-            metrics: Arc::new(|| LinkMetrics {
+            metrics: Arc::new(move || LinkMetrics {
                 path: LinkPath::Unknown,
-                rtt_ms: None,
+                rtt_ms: *for_metrics.rtt_ms.lock().unwrap(),
+            }),
+            watch: Arc::new(move |on_change: OnLinkChange| -> Box<dyn Send> {
+                // 离线时没有连接可盯：同真实传输，立刻报断开。
+                if !*for_watch.online.lock().unwrap() {
+                    on_change(LinkChange::Closed);
+                } else {
+                    for_watch.watchers.lock().unwrap().push(on_change);
+                }
+                Box::new(())
             }),
         }
     }
@@ -244,9 +282,8 @@ fn pair_redeems_the_code_then_describes_and_stays_connected() {
     assert_eq!(connected.link.unwrap().path, LinkPath::Unknown);
     assert_eq!(hub.current().unwrap().endpoint_id, "ep-a");
 
-    // 心跳在跑。
-    let before = runtime.describes();
-    wait_until("探活", || runtime.describes() >= before + 2);
+    // 不定时探活，盯着链路等传输层报变化。
+    wait_until("盯上链路", || runtime.watchers() == 1);
     hub.disconnect();
 }
 
@@ -317,7 +354,7 @@ fn connect_with_a_bad_target_fails_without_a_session() {
 }
 
 #[test]
-fn heartbeat_reconnects_on_a_fresh_link_after_going_offline() {
+fn a_closed_link_reconnects_on_a_fresh_link() {
     let runtime = FakeRuntime::paired("runtime-a");
     let dialer = FakeDialer(vec![("ep-a".into(), Arc::clone(&runtime))]);
     let hub = ConnectionHub::new(FAST);
@@ -325,8 +362,10 @@ fn heartbeat_reconnects_on_a_fresh_link_after_going_offline() {
     hub.connect(&dialer, target("ep-a")).unwrap();
     let generation = hub.current().unwrap().generation;
     let links = runtime.links.load(Ordering::SeqCst);
+    wait_until("盯上链路", || runtime.watchers() == 1);
 
     runtime.set_online(false);
+    runtime.drop_links();
     let reconnecting = wait_state(&events, ConnectionState::Reconnecting);
     assert_eq!(reconnecting.error.unwrap().kind, SmeltErrorKind::Offline);
     assert!(reconnecting.link.is_none());
@@ -339,6 +378,28 @@ fn heartbeat_reconnects_on_a_fresh_link_after_going_offline() {
     // 重连用的是新链路，不复用可能僵死的旧连接。
     assert!(runtime.links.load(Ordering::SeqCst) > links);
     assert_eq!(hub.current().unwrap().generation, generation);
+    // 新链路接着盯。
+    wait_until("盯上新链路", || runtime.watchers() == 1);
+    hub.disconnect();
+}
+
+#[test]
+fn a_path_change_refreshes_the_link_metrics() {
+    let runtime = FakeRuntime::paired("runtime-a");
+    let dialer = FakeDialer(vec![("ep-a".into(), Arc::clone(&runtime))]);
+    let hub = ConnectionHub::new(FAST);
+    let events = record(&hub);
+    hub.connect(&dialer, target("ep-a")).unwrap();
+    wait_until("盯上链路", || runtime.watchers() == 1);
+    let describes = runtime.describes();
+
+    runtime.change_path(42);
+
+    wait_until("推出新的 RTT", || {
+        last(&events).link.and_then(|link| link.rtt_ms) == Some(42)
+    });
+    assert_eq!(last(&events).state, ConnectionState::Connected);
+    assert_eq!(runtime.describes(), describes, "换路径不用发请求");
     hub.disconnect();
 }
 
@@ -360,7 +421,7 @@ fn connect_while_offline_returns_offline_but_keeps_retrying() {
 }
 
 #[test]
-fn revocation_during_heartbeat_stops_with_unpaired() {
+fn revocation_closes_the_link_and_stops_with_unpaired() {
     let runtime = FakeRuntime::paired("runtime-a");
     let dialer = FakeDialer(vec![("ep-a".into(), Arc::clone(&runtime))]);
     let hub = ConnectionHub::new(FAST);
@@ -374,7 +435,11 @@ fn revocation_during_heartbeat_stops_with_unpaired() {
         true
     }));
 
+    wait_until("盯上链路", || runtime.watchers() == 1);
+
+    // 运行时撤销设备时直接断开它的连接。
     runtime.set_paired(false);
+    runtime.drop_links();
     let stopped = wait_state(&events, ConnectionState::Disconnected);
 
     assert_eq!(stopped.error.unwrap().kind, SmeltErrorKind::Unpaired);
@@ -382,9 +447,9 @@ fn revocation_during_heartbeat_stops_with_unpaired() {
     assert!(hub.current().is_none());
     // 会话结束换了代，后续阶段据此丢掉旧状态。
     assert!(generations.lock().unwrap().last().unwrap() > &generation);
-    // 停下后不再探活。
+    // 停下后不再重连。
     let attempts = runtime.links.load(Ordering::SeqCst);
-    std::thread::sleep(FAST.interval * 4);
+    std::thread::sleep(SETTLE);
     assert_eq!(runtime.links.load(Ordering::SeqCst), attempts);
 }
 
@@ -403,10 +468,11 @@ fn disconnect_stops_probing() {
         event(ConnectionState::Disconnected, None, None, None)
     );
     assert!(hub.current().is_none());
-    // 允许一次已在路上的探活落地，之后不再增加。
-    std::thread::sleep(FAST.interval * 2);
+    // 链路事件、确认都不再引起请求。
     let describes = runtime.describes();
-    std::thread::sleep(FAST.interval * 4);
+    runtime.drop_links();
+    hub.verify();
+    std::thread::sleep(SETTLE);
     assert_eq!(runtime.describes(), describes);
     assert_eq!(last(&events).state, ConnectionState::Disconnected);
 }
@@ -430,11 +496,11 @@ fn switching_runtimes_retires_the_old_session() {
     let current = hub.current().unwrap();
     assert_eq!(current.endpoint_id, "ep-b");
     assert!(current.generation > first);
-    // 旧运行时的探活停了，且它的结果不会再改状态。
-    std::thread::sleep(FAST.interval * 2);
+    // 旧会话停了：旧链路断开不会再引起请求或改状态。
     let a_describes = a.describes();
     a.set_online(false);
-    std::thread::sleep(FAST.interval * 4);
+    a.drop_links();
+    std::thread::sleep(SETTLE);
     assert_eq!(a.describes(), a_describes);
     let now = last(&events);
     assert_eq!(now.state, ConnectionState::Connected);
@@ -446,10 +512,7 @@ fn switching_runtimes_retires_the_old_session() {
 fn verify_probes_immediately() {
     let runtime = FakeRuntime::paired("runtime-a");
     let dialer = FakeDialer(vec![("ep-a".into(), Arc::clone(&runtime))]);
-    let hub = ConnectionHub::new(Timing {
-        interval: Duration::from_secs(3600),
-        ..FAST
-    });
+    let hub = ConnectionHub::new(FAST);
     hub.connect(&dialer, target("ep-a")).unwrap();
     let describes = runtime.describes();
 

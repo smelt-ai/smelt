@@ -13,9 +13,9 @@
 //! 忘记、导入时可能变化：变了就让所有节点重新 connect（旧会话换代退出，各模块按代号丢旧
 //! 状态或跟上新连接）。
 //!
-//! 锁的顺序：`ops` → `registry` → 连接状态机 → 会话目录 → `view` / 指挥台。连接状态机在
-//! 自己的锁里回调监听（更新 `view`、通知会话目录），所以持有 `view` 时绝不调连接状态机；
-//! 持有 `registry` 时不做网络和 SQLite IO。
+//! 锁的顺序：`ops` → `registry` → 连接状态机 → 会话目录 → `view` → 指挥台。连接状态机在
+//! 自己的锁里回调监听（更新 `view` 并告诉指挥台连接状态、通知会话目录），所以持有 `view`
+//! 时绝不调连接状态机；持有 `registry` 时不做网络和 SQLite IO。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -691,6 +691,10 @@ impl Shared {
                 Some((current, status)) if *current == serial => {
                     *status = status_of(event);
                     view.publish();
+                    // 在视图锁里告诉指挥台：节点被撤掉、替换后，旧节点晚到的状态进不来。
+                    shared
+                        .pass
+                        .set_connected(&status_id, event.state == ConnectionState::Connected);
                     true
                 }
                 // 节点已撤掉或被替换。

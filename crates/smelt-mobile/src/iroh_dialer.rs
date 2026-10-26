@@ -16,7 +16,7 @@ use smelt_runtime_client::{Connector as _, RuntimeClient};
 
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
 use crate::api::fleet::{LinkMetrics, LinkPath};
-use crate::connection::{Dialer, Link, Route, Target};
+use crate::connection::{Dialer, Link, LinkChange, OnLinkChange, Route, Target};
 use crate::fleet::Transport;
 
 /// endpoint 的形态。
@@ -132,9 +132,18 @@ impl Route for IrohRoute {
         // 机器自己的 relay：endpoint 是 n0 预设时靠它找到用自建 relay 的机器。
         let connector = Arc::new(self.client.connector(self.endpoint, self.relay.as_ref()));
         let for_client = Arc::clone(&connector);
+        let for_watch = Arc::clone(&connector);
         Link {
             client: RuntimeClient::new(move || for_client.connect()),
             metrics: Arc::new(move || link_metrics(connector.path_status())),
+            watch: Arc::new(move |on_change: OnLinkChange| -> Box<dyn Send> {
+                Box::new(for_watch.watch(move |change| {
+                    on_change(match change {
+                        smelt_iroh::runtime::LinkChange::PathSelected => LinkChange::Path,
+                        smelt_iroh::runtime::LinkChange::Closed => LinkChange::Closed,
+                    })
+                }))
+            }),
         }
     }
 }

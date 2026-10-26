@@ -9,9 +9,10 @@
 //!   调度线程：合并 100ms 推会话列表、最多每 500ms 存一次离线缓存 ──> Dart 订阅者（可多个）
 //! ```
 //!
-//! 只在连接状态是 Connected 时订阅：探活失败（Reconnecting）时旧链路多半已经僵死，阻塞读
-//! 不会自己醒，所以直接 shutdown；探活恢复后用新链路重开。订阅自己断开（运行时关掉了流、
-//! 协议错误）时按 `daemon_reconnect_backoff` 重连，连接活过 5 秒退避清零。
+//! 只在连接状态是 Connected 时订阅：离开 Connected（链路断开，或回前台确认失败）时直接
+//! shutdown——确认失败的旧链路可能已经僵死，阻塞读要等到 QUIC 空闲超时才醒；连接恢复后用
+//! 新链路重开。订阅自己断开（运行时关掉了流、协议错误）时按 `daemon_reconnect_backoff`
+//! 重连，连接活过 5 秒退避清零。
 //!
 //! 锁的顺序：连接状态机的锁 → 本模块的锁。持有本模块的锁时绝不调
 //! [`RuntimeSource::current`] / [`RuntimeSource::cache`]，也不做网络和 SQLite IO。
@@ -694,13 +695,17 @@ fn supervise(shared: Arc<Shared>) {
             if inner.signal || due(inner.push_at) || due(inner.save_at) {
                 break;
             }
-            let next = [inner.push_at, inner.save_at].into_iter().flatten().min();
-            let wait = next.map_or(Duration::from_secs(3600), |at| at - now);
-            inner = shared
-                .wake
-                .wait_timeout(inner, wait)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            inner = match [inner.push_at, inner.save_at].into_iter().flatten().min() {
+                Some(at) => {
+                    shared
+                        .wake
+                        .wait_timeout(inner, at - now)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                // 没有排着的推送和存盘：等连接状态、订阅线程或调用方叫醒。
+                None => shared.wake.wait(inner).unwrap_or_else(|e| e.into_inner()),
+            };
         }
         inner.signal = false;
 
@@ -836,7 +841,7 @@ fn run_worker(shared: Arc<Shared>, worker: Arc<Worker>) {
     let timing = shared.timing;
     let mut attempt = 0u32;
     while !worker.stopped() {
-        // 每次重连都重新取：探活重连成功后客户端会换成新链路的。
+        // 每次重连都重新取：断线重连成功后客户端会换成新链路的。
         let Some(runtime) = shared
             .source
             .current()
@@ -854,6 +859,9 @@ fn run_worker(shared: Arc<Shared>, worker: Arc<Worker>) {
         if started.elapsed() >= timing.stable_after {
             attempt = 0;
         }
+        // 轮询例外：连着却订不上（运行时关掉了流、协议错误）时运行时不会再通知我们，只能隔
+        // 一会儿重订（掉线时连接状态叫停这条线程，重新连上另开新的）；周期 250 毫秒起逐次翻倍，
+        // 上限 8 秒。
         let delay = (timing.backoff)(attempt);
         attempt = attempt.saturating_add(1);
         if worker.sleep(delay) {
