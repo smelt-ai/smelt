@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 dirs = "5"
-notify = "6"
+notify = "8"
 smelt-paths = { path = "../smelt-paths" }
 smelt-core = { path = "../smelt-core" }
 smelt-sys = { path = "../smelt-sys" }
