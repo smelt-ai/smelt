@@ -472,8 +472,7 @@ impl Workspace {
     /// check_for_update 同款结构，别在 UI 线程里做阻塞 IO。
     pub(crate) fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            // 只探测状态，不再在此 ensure/handoff（冷启动 ensure 由 restore 线程串行做完）。
-            // 仍落后就立刻重启到磁盘上的最新 smeltd，不等空闲，也不弹窗。
+            // 只探测状态，不再在此 ensure（冷启动 ensure 由 restore 线程串行做完）。
             let (outdated, info) = cx
                 .background_executor()
                 .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
@@ -481,10 +480,14 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                if outdated && !crate::runtimes::local_upgrade_in_hand(cx) && !this.daemon_upgrading
+                // 磁盘上的映像已经不是正在跑的这份。没有进行中的会话就直接重启。
+                // 有的话不在后台打断它们，也不弹窗（定时检查会反复弹）：设置页的
+                // 「重启以升级」走确认，空闲下来后下一次检查再重启。
+                if outdated
+                    && !crate::runtimes::local_upgrade_in_hand(cx)
+                    && !this.daemon_upgrading
+                    && !super::daemon_restart_prompt::should_confirm(&this.busy_work_names(cx))
                 {
-                    // 磁盘上的映像已经不是正在跑的这份。不等待空闲，也不弹窗：
-                    // 这是启动和定时检查，不是用户按下的退出。
                     this.restart_daemon_and_rebuild_terminals(cx);
                 }
                 cx.notify();

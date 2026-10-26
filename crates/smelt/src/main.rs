@@ -3345,10 +3345,8 @@ impl Workspace {
     }
 
     /// 每 60s 探一次守护是否落后于磁盘上的 smeltd。手工装 App / dev 重编译后
-    /// 没有「更新事件」可挂,只能靠检测发现;探到落后就走 `check_daemon_outdated`
-    /// 的空闲门控——agent 忙就挂起,空闲才升,不打扰使用(连接路径的 ensure 只
-    /// 对齐磁盘不再偷跑 exec,这里负责兜底把守护在空闲时跟上)。
-    /// 探测是本地 socket 往返(毫秒级),60s 一次对用户完全无感。
+    /// 没有「更新事件」可挂，只能靠检测发现；探到落后就交给 `check_daemon_outdated`：
+    /// 没有进行中的会话才自动重启，有的话等空闲后的下一次。
     fn start_daemon_outdated_watch(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
