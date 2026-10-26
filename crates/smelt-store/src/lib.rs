@@ -4761,6 +4761,28 @@ mod tests {
         drop(connection);
     }
 
+    /// v24 及更早的 `published_session`：还没有 `cli_exited` 列。
+    const V24_PUBLISHED_SESSION: &str = "
+DROP TABLE published_session;
+CREATE TABLE published_session (
+  id TEXT PRIMARY KEY,
+  cwd TEXT,
+  launch TEXT,
+  provider TEXT,
+  conversation_id TEXT,
+  title TEXT,
+  phase TEXT NOT NULL,
+  phase_since INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  structured_events INTEGER NOT NULL CHECK (structured_events IN (0, 1)),
+  turn_events INTEGER NOT NULL CHECK (turn_events IN (0, 1)),
+  agent_event_version INTEGER,
+  tokens_used INTEGER,
+  branch TEXT,
+  dirty_files_json BLOB NOT NULL
+);
+";
+
     #[test]
     fn v23_database_drops_deepseek_harness_data() {
         let dir = temp_dir("v23-migration");
@@ -4769,7 +4791,8 @@ mod tests {
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
-        // 当前形状换回带 harness 列的 auto_model_provider，就是一个 v23 库。
+        connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
+        // 再把 auto_model_provider 换回带 harness 列的形状，就是一个 v23 库。
         connection
             .execute_batch(
                 "DROP TABLE auto_model_provider;
@@ -4849,7 +4872,48 @@ mod tests {
             ["token-x"],
             "Pi 的名单保留，DSH 的删掉"
         );
+        assert!(
+            strings("SELECT name FROM pragma_table_info('published_session')")
+                .contains(&"cli_exited".to_string()),
+            "v23 一路升到当前，v25 的列也要补上"
+        );
         drop(connection);
+    }
+
+    #[test]
+    fn v24_database_adds_cli_exited_to_published_sessions() {
+        let dir = temp_dir("v24-migration");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO published_session(
+                   id, cwd, launch, provider, conversation_id, title, phase, phase_since,
+                   updated_at, structured_events, turn_events, agent_event_version, tokens_used,
+                   branch, dirty_files_json
+                 ) VALUES (
+                   't1', '/work', 'claude', 'claude', 'conv-1', '旧会话', 'succeeded', 1,
+                   2, 1, 1, 1, NULL, NULL, X'5B5D'
+                 );",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 24).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let sessions = store
+            .get_published_session_snapshot()
+            .unwrap()
+            .expect("迁移不能丢掉已发布会话")
+            .sessions;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].conversation_id.as_deref(), Some("conv-1"));
+        assert!(!sessions[0].cli_exited, "旧库里的会话按 CLI 未退出迁移");
     }
 
     #[test]

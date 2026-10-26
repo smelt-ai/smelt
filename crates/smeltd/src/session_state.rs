@@ -691,7 +691,6 @@ mod agent_event_reducer_tests {
     #[test]
     fn session_end_keeps_the_conversation_and_a_later_start_rebinds() {
         let mut state = SessionState {
-            id: "finished".into(),
             launch: Some("claude".into()),
             title: Some("这段对话".into()),
             ..Default::default()
@@ -715,7 +714,12 @@ mod agent_event_reducer_tests {
         assert_eq!(state.provider.as_deref(), Some("claude"));
         assert_eq!(state.title.as_deref(), Some("这段对话"));
         assert_eq!(state.launch.as_deref(), Some("claude"));
-        assert_not_resumable(&state);
+
+        // 回合已关闭，迟到的进度不放行，也不能把退出标记抹掉。
+        let mut late = AgentEvent::new("claude", AgentEventKind::ToolFinished);
+        late.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut state, &late);
+        assert!(state.cli_exited);
 
         let mut again = AgentEvent::new("claude", AgentEventKind::SessionStarted);
         again.conversation_id = Some("conv-2".into());
@@ -726,7 +730,6 @@ mod agent_event_reducer_tests {
         assert_eq!(state.title, None, "新对话不能顶着上一段的名字");
 
         let mut fresh = SessionState {
-            id: "zero-turn".into(),
             launch: Some("claude".into()),
             title: Some("自定义标题".into()),
             ..Default::default()
@@ -760,38 +763,6 @@ mod agent_event_reducer_tests {
         assert_eq!(fresh.conversation_id.as_deref(), Some("conv-2"));
         assert!(!fresh.cli_exited);
         assert_eq!(fresh.title, None);
-    }
-
-    /// 退出后的对话 id 还在，但目录不把这条终端留下，重新打开也不 `--resume`。
-    fn assert_not_resumable(state: &SessionState) {
-        let _guard = super::super::session_directory::DIRECTORY_TEST_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-session-end-reducer-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("SMELT_GHOST_SESSIONS_DIR", &dir) };
-
-        let directory = super::super::session_directory::SessionDirectory::new();
-        let mut live = state.clone();
-        live.runtime = true;
-        directory.upsert(&live);
-        let mut ghost = live.clone();
-        ghost.id = format!("{}-ghost", state.id);
-        ghost.runtime = false;
-        directory.upsert(&ghost);
-        assert_eq!(directory.resume_launch(&ghost.id), None);
-
-        let terminals = std::collections::HashSet::from([state.id.clone()]);
-        directory.keep_resumable_terminals(&terminals);
-        let next = super::super::session_directory::SessionDirectory::restore_from_disk();
-        assert!(
-            next.snapshot().is_empty(),
-            "已退出的 CLI 不能留到下次启动"
-        );
-        assert_eq!(next.resume_launch(&state.id), None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
