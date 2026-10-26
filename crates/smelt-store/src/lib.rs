@@ -735,25 +735,17 @@ mod imp {
         }
     }
 
-    /// 并发首次建库：A 刚创建空文件、schema 还没写完时，B 会把路径看成 Ready，
-    /// 按已有库打开又拒绝 bootstrap，于是拿到 `UninitializedDatabase`。
-    /// open_or_create 在这个窗口里重试，等初始化方提交 schema。
+    /// 并发首次建库不用等：建库方在旁边的临时文件里把 schema 建完，才挂到正式路径上
+    /// （见 [`publish_new_database`]），正式路径上不会出现建了一半的库。抢输的一方拿到
+    /// `AlreadyExists`，直接打开对方建好的那份。
     fn open_or_create_backend(path: &Path) -> Result<Backend, StoreError> {
-        let deadline = Instant::now() + BUSY_TIMEOUT;
-        loop {
-            let result = match super::inspect_database_presence(path) {
-                super::DatabasePresence::Ready => open_existing_backend(path),
-                super::DatabasePresence::Absent => create_new_backend(path),
-                super::DatabasePresence::OrphanSidecars => {
-                    return Err(super::orphan_sidecar_error(path));
-                }
-            };
-            match result {
-                Err(StoreError::UninitializedDatabase) if Instant::now() < deadline => {
-                    std::thread::sleep(BUSY_RETRY_DELAY);
-                }
-                other => return other,
-            }
+        match super::inspect_database_presence(path) {
+            super::DatabasePresence::Ready => open_existing_backend(path),
+            super::DatabasePresence::Absent => match create_new_backend(path) {
+                Err(StoreError::AlreadyExists { .. }) => open_existing_backend(path),
+                other => other,
+            },
+            super::DatabasePresence::OrphanSidecars => Err(super::orphan_sidecar_error(path)),
         }
     }
 
@@ -768,13 +760,51 @@ mod imp {
     }
 
     fn create_new_backend(path: &Path) -> Result<Backend, StoreError> {
-        let mut connection = open_connection(path, OPEN_CREATE_FLAGS, true)?;
-        initialize_schema(&mut connection, true, path)?;
-        secure_sidecar_permissions(path);
-        Ok(Backend {
-            path: path.to_path_buf(),
-            connection: Arc::new(Mutex::new(connection)),
-        })
+        publish_new_database(path)?;
+        open_existing_backend(path)
+    }
+
+    /// 在同目录的临时文件里建好当前 schema，再用硬链接挂到 `path`。
+    ///
+    /// 直接在 `path` 上建库时，从 SQLite 创建空文件到建库方拿到写锁之间有一段空窗：别的
+    /// 进程这时把路径看成已有库，打开后只看到空 schema，又不许 bootstrap，只能报
+    /// `UninitializedDatabase` 或者反复重试。硬链接不覆盖已有文件，`path` 一出现就是建完的库；
+    /// 已经有人挂上了就报 `AlreadyExists`。临时库关闭时 SQLite 把 WAL checkpoint 回主文件并
+    /// 删掉 sidecar，挂上去的只有一个完整的主文件。
+    fn publish_new_database(path: &Path) -> Result<(), StoreError> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(super::DATABASE_FILE_NAME);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let staging = path.with_file_name(format!(
+            "{file_name}.creating-{}-{nonce}",
+            std::process::id()
+        ));
+        let built = (|| {
+            let mut connection = open_connection(&staging, OPEN_CREATE_FLAGS, true)?;
+            initialize_schema(&mut connection, true, &staging)?;
+            connection.close().map_err(|(_, error)| StoreError::from(error))?;
+            set_owner_only(&staging)
+        })();
+        let published = built.and_then(|()| match std::fs::hard_link(&staging, path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(StoreError::AlreadyExists {
+                    path: path.to_path_buf(),
+                })
+            }
+            Err(error) => Err(error.into()),
+        });
+        // 挂上了的话正式路径是另一个目录项，删临时名不影响它。
+        let _ = std::fs::remove_file(&staging);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(super::database_sidecar_path(&staging, suffix));
+        }
+        published
     }
 
     fn lock_connection(backend: &Backend) -> Result<MutexGuard<'_, Connection>, StoreError> {
@@ -1516,6 +1546,7 @@ mod imp {
                         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
                     ) && Instant::now() < deadline =>
                 {
+                    // 轮询例外：改 WAL 时 SQLite 先开读事务再升写锁，升级失败直接回 SQLITE_BUSY、不调 busy handler（见 sqlite3BtreeSetVersion，防死锁），没有能等的事件；周期 10ms，上限 5s。
                     std::thread::sleep(BUSY_RETRY_DELAY);
                 }
                 Err(error) => return Err(error.into()),
@@ -6830,6 +6861,51 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         Store::create(&path).unwrap();
         let error = Store::create(&path).unwrap_err();
         assert!(matches!(error, StoreError::AlreadyExists { .. }), "{error}");
+    }
+
+    /// 几个进程同时首次建库：都拿到建好的库，没人撞见建了一半的空 schema，临时文件不留。
+    #[test]
+    fn concurrent_open_or_create_all_see_a_complete_database() {
+        let dir = temp_dir("concurrent-create");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let openers = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(openers));
+        let handles: Vec<_> = (0..openers)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open_or_create(&path).map(drop)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let version: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, STORE_SCHEMA_VERSION);
+        drop(connection);
+        let leftovers: Vec<_> = std::fs::read_dir(&*dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".creating-"))
+            .collect();
+        assert!(leftovers.is_empty(), "临时库没删干净：{leftovers:?}");
+    }
+
+    /// 正式路径上的空文件不会是别人建了一半的库（建库只挂建完的），立刻拒绝，不等。
+    #[test]
+    fn open_or_create_refuses_an_empty_file_at_once() {
+        let dir = temp_dir("empty-file-open-or-create");
+        let path = dir.join(DATABASE_FILE_NAME);
+        std::fs::write(&path, []).unwrap();
+        let error = Store::open_or_create(&path).unwrap_err();
+        assert!(matches!(error, StoreError::UninitializedDatabase), "{error}");
     }
 
     #[test]
