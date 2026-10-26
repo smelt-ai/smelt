@@ -29,7 +29,7 @@ shell-words = "1"
 reqwest = { version = "0.12", features = ["json"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 # ACP 对话共享模型（acp_chat）里的逐行 diff 计算，GPUI 和 smelt 都用同一个算法。
-similar = "2"
+similar = "3"
 # ACP 连接层（acp_conn）：JSON-RPC over stdio 连子进程 agent，不含 GPUI，为
 # smeltd 未来托管 ACP 会话铺路（见 acp_conn.rs 文件头）。
 # 3.x 默认不带任何 feature。`process` 只为 `AcpAgent` / `AcpAgentConfig`

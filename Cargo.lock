@@ -2327,7 +2327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3953,7 +3953,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_repr",
- "similar",
+ "similar 2.7.0",
  "smallvec",
  "smol",
  "syntect",
@@ -10787,6 +10787,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
 name = "simple-dns"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10994,7 +11003,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shell-words",
- "similar",
+ "similar 3.2.0",
  "smelt-event-protocol",
  "smelt-model",
  "smelt-paths",
@@ -11068,7 +11077,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "similar",
+ "similar 3.2.0",
  "smelt-event-protocol",
  "smelt-paths",
  "smelt-runtime-client",
@@ -11099,7 +11108,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
- "similar",
+ "similar 3.2.0",
  "smelt-paths",
  "tungstenite",
  "uuid",
