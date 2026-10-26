@@ -2538,9 +2538,6 @@ fn main() {
     if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
-    // 在任何业务线程之前接住 SIGTERM/SIGINT。处理器只往自管道写一个字节，
-    // 不改信号掩码，子进程仍能收到 Ctrl+C 和 SIGTERM。
-    install_shutdown_signals();
     exit_with_test_owner();
     smelt_core::sqlite_state::enable_sqlite_state();
     // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
@@ -2637,6 +2634,10 @@ fn main() {
         let _ = std::fs::remove_file(&path);
         std::process::exit(1);
     }
+    // 拿到监听之后才接住 SIGTERM/SIGINT：停机会摘掉 socket 路径，还没拿到监听的进程
+    // 摘掉的是正在服务的那个守护的。在这之前收到信号按默认动作退出，本来也没有要收尾的。
+    // 处理器只往自管道写一个字节，不改信号掩码，子进程仍能收到 Ctrl+C 和 SIGTERM。
+    install_shutdown_signals();
     // 崩溃恢复：落盘有内容就说明上次非正常退出（正常 shutdown 会清空）。
     // 灌进身份目录，runtime=false，保留最后相位。
     let directory = SessionDirectory::restore_from_disk();
