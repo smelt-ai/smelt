@@ -4273,9 +4273,11 @@ mod runtime_tests {
 
     #[test]
     fn runtime_version_probe_collects_a_short_lived_process() {
+        // where.exe 会把 `--version` 当文件名逐个搜 PATH，CI 上耗时 1.7～5.3 秒，
+        // 压线超时；whoami.exe 遇到未知参数立刻报错退出。
         let program = if cfg!(windows) {
             let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-            std::path::PathBuf::from(root).join(r"System32\where.exe")
+            std::path::PathBuf::from(root).join(r"System32\whoami.exe")
         } else {
             std::path::PathBuf::from("/usr/bin/true")
         };
