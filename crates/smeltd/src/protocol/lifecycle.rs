@@ -43,6 +43,12 @@ pub(super) fn handle_shutdown<C: ClientSocket>(conn: C) {
 /// 等先到的那次把进程换掉或退出。
 static SHUTDOWN_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 停机是否已经开始。一旦为真，这个进程只会 exec 或退出，不会再回到正常服务。
+/// 新会话请求据此立刻回「守护正在停机」，不去 SPAWN_GATE 上排队。
+pub(crate) fn shutdown_started() -> bool {
+    SHUTDOWN_STARTED.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// 五步停机。`exec_exe` 有值时，子进程和文件句柄都放开之后再 `exec` 到那份新映像。
 /// 没有则在回执写完后退出。回执一定在收割和 WAL checkpoint 之后，调用方才能去换
 /// `.app` / `.exe`。
@@ -60,7 +66,8 @@ pub(crate) fn graceful_shutdown(
         }
     }
 
-    // 1. 禁新会话、禁新子进程，并挡住身份目录的迟到提交。
+    // 1. 禁新会话、禁新子进程，并挡住身份目录的迟到提交。上面的标记先于写锁置上：
+    // 新的终端请求看到标记或拿不到读锁，都立刻回「守护正在停机」（见 `spawn_permit`）。
     let _spawn_gate = SPAWN_GATE
         .write()
         .unwrap_or_else(|error| error.into_inner());

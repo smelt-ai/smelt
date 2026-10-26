@@ -218,8 +218,43 @@ const PTY_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 /// 不能让一条控制连接永久卡住整个会话生命周期锁。
 const TERMINAL_CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 /// 多个新 shell / ACP 子进程可以同时 spawn。锁仍留在各 spawn 点，避免以后
-/// 又有一条需要独占 fork 的路径时漏掉调用方。
+/// 又有一条需要独占 fork 的路径时漏掉调用方。写锁只有停机拿；终端打开走
+/// [`spawn_permit`]，停机开始后不排队。
 static SPAWN_GATE: LazyLock<Arc<RwLock<()>>> = LazyLock::new(|| Arc::new(RwLock::new(())));
+
+/// 停机已经开始：不再起新会话、新子进程。见 [`spawn_permit`]。
+#[derive(Debug)]
+pub(crate) struct DaemonStopping;
+
+impl std::fmt::Display for DaemonStopping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("守护正在停机")
+    }
+}
+
+/// 拿一张 spawn 许可。停机一开始就回 [`DaemonStopping`]，不排队。
+///
+/// 写锁只有停机拿，拿到就握到 exec 或退出，从不放开。在这里排队的请求只会等到连接
+/// 被关掉，调用方分不清「守护在重启」和真出错。所以先看停机标记，再 `try_read`：
+/// 停机先置标记、后拿写锁，`try_read` 拿不到就只可能是停机已经在拿或握着写锁。
+fn spawn_permit() -> Result<std::sync::RwLockReadGuard<'static, ()>, DaemonStopping> {
+    acquire_spawn_permit(&SPAWN_GATE, protocol::shutdown_started())
+}
+
+fn acquire_spawn_permit(
+    gate: &RwLock<()>,
+    stopping: bool,
+) -> Result<std::sync::RwLockReadGuard<'_, ()>, DaemonStopping> {
+    if stopping {
+        return Err(DaemonStopping);
+    }
+    match gate.try_read() {
+        Ok(permit) => Ok(permit),
+        // 锁里没有数据，中毒不影响语义。
+        Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err(DaemonStopping),
+    }
+}
 
 fn sock_path() -> std::path::PathBuf {
     let dir = smelt_paths::smelt_home().unwrap_or_else(|| std::env::temp_dir().join(".smelt"));
@@ -3420,6 +3455,8 @@ fn launch_with_terminal_status_bridge(launch: &str, extension: &std::path::Path)
     }
 }
 
+/// 调用方必须握着 [`spawn_permit`]，并握到新会话登记、广播完（见
+/// `open_terminal_runtime`）：停机收割那一步才一定看得到它。
 fn spawn_session(
     id: &str,
     instance: u64,
@@ -3469,11 +3506,7 @@ fn spawn_session(
         "SMELT_NOTIFY_BIN",
         smelt_core::agent_event::notify_executable_path(),
     );
-    // 与其它 spawn 共用这把锁（见 SPAWN_GATE）。
-    let child = {
-        let _gate = SPAWN_GATE.read().unwrap();
-        pair.slave.spawn_command(cmd)?
-    };
+    let child = pair.slave.spawn_command(cmd)?;
     #[cfg(unix)]
     let (terminal_child, master, pty_reader) = {
         let pid = child

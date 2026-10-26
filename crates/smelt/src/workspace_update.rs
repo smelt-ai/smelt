@@ -610,8 +610,8 @@ impl Workspace {
     /// 用户在弹窗里点了「确定重启」：让守护退出（断开所有会话）、拉起磁盘上最新的
     /// smeltd、再刷新状态。
     ///
-    /// **禁止**在 `update` 里同步 `Terminal::spawn`：握手含 sleep/轮询，多 pane 会把
-    /// UI 卡死（「点重启守护就假死」）。流程：后台杀+拉起守护 → 后台按 cwd/sid 建
+    /// **禁止**在 `update` 里同步 `Terminal::spawn`：连守护、握手、等守护换代都会阻塞，
+    /// 多 pane 会把 UI 卡死（「点重启守护就假死」）。流程：后台杀+拉起守护 → 后台按 cwd/sid 建
     /// Terminal → 主线程 `adopt_terminal` 挂回各 pane。
     /// 设置里的「重启以升级」和「重启守护进程」都走这里。有进行中的会话时先确认。
     pub(crate) fn request_daemon_restart(&mut self, cx: &mut Context<Self>) {
@@ -669,7 +669,7 @@ impl Workspace {
                 })
                 .await;
 
-            // 握手/重试全在后台；主线程只接结果
+            // 握手和等守护换代全在后台；主线程只接结果
             let runtime = crate::runtimes::Runtime::local();
             let built = cx
                 .background_executor()

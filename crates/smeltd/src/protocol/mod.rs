@@ -17,7 +17,7 @@ mod terminal;
 use lifecycle::*;
 use remote::*;
 
-pub(crate) use lifecycle::graceful_shutdown;
+pub(crate) use lifecycle::{graceful_shutdown, shutdown_started};
 
 pub(crate) use auth::*;
 pub(crate) use subscribe::*;

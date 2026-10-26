@@ -72,9 +72,10 @@ pub(crate) fn tracked_child_pids() -> Vec<i32> {
 }
 
 extern "C" fn on_open(_this: &Object, _cmd: Sel, _sender: *mut Object) {
-    let _spawn_gate = super::SPAWN_GATE
-        .read()
-        .unwrap_or_else(|error| error.into_inner());
+    // 守护在停机就不拉 GUI：这是 AppKit 主线程，在闸门上排队会一直卡到进程退出。
+    let Ok(_spawn_gate) = super::spawn_permit() else {
+        return;
+    };
     if let Ok(exe) = super::daemon_executable_path() {
         let gui = exe.with_file_name("smelt");
         let _ = spawn_gui(&gui);

@@ -2,6 +2,7 @@
 
 use super::super::session_catalog::{published_session_states, session_connection_counts};
 use super::super::*;
+use smelt_runtime_client::protocol::daemon::TerminalOpenErrorCode;
 use std::io::{BufReader, Write};
 
 pub(super) fn handle_list<C: ClientSocket>(conn: C, sessions: &Sessions, acp_sessions: &AcpSessions) {
@@ -258,23 +259,53 @@ pub(super) fn handle_resize<C: ClientSocket>(conn: C, v: &serde_json::Value, ses
         &serde_json::json!({ "ok": true, "cols": cols, "rows": rows }),
     );
 }
-pub(crate) fn terminal_error_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
+/// 终端 open 的失败回执：头行之后再跟一段红字，直接把字节流画出来的客户端也看得到。
+/// `code` 只在调用方要分开处理的失败上带，见 [`TerminalOpenErrorCode`]。
+pub(crate) fn terminal_error_reply(
+    reason: &str,
+    code: Option<TerminalOpenErrorCode>,
+    rows: u16,
+    cols: u16,
+) -> Vec<u8> {
     let reason: String = reason
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
-    let header = serde_json::json!({
+    let mut header = serde_json::json!({
         "ok": false,
         "err": reason,
         "rows": rows,
         "cols": cols,
         "replay_len": 0,
     });
+    if let Some(code) = code {
+        header["code"] = serde_json::json!(code);
+    }
     format!("{header}\n\r\n\x1b[31m{reason}\x1b[0m\r\n").into_bytes()
 }
 
 pub(crate) fn write_terminal_error(conn: &mut impl Write, reason: &str, rows: u16, cols: u16) {
-    let _ = conn.write_all(&terminal_error_reply(reason, rows, cols));
+    let _ = conn.write_all(&terminal_error_reply(reason, None, rows, cols));
+}
+
+/// 回「守护正在停机」，然后把这条连接留到本进程 exec 或退出。
+///
+/// 客户端读完回执接着读同一条连接，读到 EOF 就是旧守护已经走了，这时再连才连得到
+/// 接班的守护，不用隔一会儿去试。连接的两个句柄都还在：`conn` 在这里，reader 在调用方
+/// 的栈上，本线程不再返回。停机只会以 exec 或退出收场，停住的线程活不过这次停机。
+fn reply_daemon_stopping_until_exit(conn: &mut impl Write, rows: u16, cols: u16) -> ! {
+    let reply = terminal_error_reply(
+        &DaemonStopping.to_string(),
+        Some(TerminalOpenErrorCode::DaemonStopping),
+        rows,
+        cols,
+    );
+    let _ = conn.write_all(&reply);
+    let _ = conn.flush();
+    // park 可能假醒，套在循环里。
+    loop {
+        std::thread::park();
+    }
 }
 
 pub(crate) fn runtime_id_taken_by_other_kind(
@@ -307,6 +338,27 @@ pub(crate) struct TerminalOpenRequest {
     pub(crate) remote_session: Option<RemoteTerminalSession>,
 }
 
+/// [`open_terminal_runtime`] 失败的原因。
+#[derive(Debug)]
+pub(crate) enum TerminalOpenError {
+    /// 守护已经开始停机，不再起新会话，也不再接回要被收割的旧会话。
+    DaemonStopping,
+    /// 其它失败，原因给人看。
+    Failed(String),
+}
+
+impl From<String> for TerminalOpenError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<DaemonStopping> for TerminalOpenError {
+    fn from(_: DaemonStopping) -> Self {
+        Self::DaemonStopping
+    }
+}
+
 /// 确保终端 runtime 在跑：已有就复用（远程目录里的同类记录重新激活），没有就创建、
 /// 登记远程目录并起 PTY 泵。`attach` 在同一把 slot 生命周期锁里执行，kill 因此要么
 /// 看到挂好的 attachment，要么等它挂完；第二个参数表示复用的是已有 runtime。
@@ -317,7 +369,7 @@ pub(crate) fn open_terminal_runtime<R>(
     event_hub: &EventHubHandle,
     remote_sessions: &RemoteSessions,
     attach: impl FnOnce(&Arc<Session>, bool) -> R,
-) -> Result<(Arc<TerminalSlot<Session>>, R), String> {
+) -> Result<(Arc<TerminalSlot<Session>>, R), TerminalOpenError> {
     let TerminalOpenRequest {
         id,
         cols,
@@ -327,10 +379,14 @@ pub(crate) fn open_terminal_runtime<R>(
         create_if_missing,
         mut remote_session,
     } = request;
+    // 整段都握着 spawn 许可：停机要等进行中的打开把会话登记、广播完才拿得到写锁，
+    // 收割那一步一定看得到新会话，这里也不会在停机握着的提交锁上卡住。停机开始后来的
+    // 请求立刻拿到 DaemonStopping：旧会话马上要被收割，新会话也起不了。
+    let _spawn_permit = spawn_permit()?;
     if let Some(session) = &remote_session
         && session.id != id
     {
-        return Err("远程目录会话 id 不匹配".to_string());
+        return Err("远程目录会话 id 不匹配".to_string().into());
     }
 
     // 一个 slot 覆盖 Starting -> Live -> Removed 的全部转换。创建和 kill 都先取得这把
@@ -342,16 +398,16 @@ pub(crate) fn open_terminal_runtime<R>(
         if created {
             let _ = sessions.remove_if_same(&id, &slot);
         }
-        return Err(error);
+        return Err(error.into());
     }
     let lifecycle = slot.lifecycle.lock().unwrap();
     if !sessions.is_current(&id, &slot) {
-        return Err("终端会话正在收尾，请重试".to_string());
+        return Err("终端会话正在收尾，请重试".to_string().into());
     }
 
     let existing = sessions.live_in_slot(&slot);
     if !created && existing.is_none() {
-        return Err("终端会话正在收尾，请重试".to_string());
+        return Err("终端会话正在收尾，请重试".to_string().into());
     }
     let mut remote_snapshots = Vec::new();
     let mut pty_pump = None;
@@ -365,7 +421,9 @@ pub(crate) fn open_terminal_runtime<R>(
                 if is_known_remote_session(remote_sessions, RemoteSessionKind::Terminal, &id)
                     != Some(true)
                 {
-                    return Err("terminal id already belongs to a local session".to_string());
+                    return Err("terminal id already belongs to a local session"
+                        .to_string()
+                        .into());
                 }
                 let snapshot = activate_remote_session_instance(
                     remote_sessions,
@@ -380,7 +438,7 @@ pub(crate) fn open_terminal_runtime<R>(
         }
         None if !create_if_missing => {
             let _ = sessions.remove_if_same(&id, &slot);
-            return Err("终端会话不存在".to_string());
+            return Err("终端会话不存在".to_string().into());
         }
         None => {
             if let Some(session) = &mut remote_session {
@@ -391,7 +449,7 @@ pub(crate) fn open_terminal_runtime<R>(
                     Ok(((), snapshot)) => snapshot,
                     Err(error) => {
                         let _ = sessions.remove_if_same(&id, &slot);
-                        return Err(format!("无法记录远程会话：{error}"));
+                        return Err(format!("无法记录远程会话：{error}").into());
                     }
                 };
                 remote_snapshots.push(snapshot);
@@ -423,7 +481,7 @@ pub(crate) fn open_terminal_runtime<R>(
                         "session",
                         &format!("会话 {id} 启动失败：{error:#}"),
                     );
-                    return Err(format!("终端启动失败：{error:#}"));
+                    return Err(format!("终端启动失败：{error:#}").into());
                 }
             };
             smelt_core::app_log::info("session", &format!("会话 {id} 已创建"));
@@ -446,7 +504,7 @@ pub(crate) fn open_terminal_runtime<R>(
                         &id,
                     );
                 }
-                return Err("终端会话创建已取消".to_string());
+                return Err("终端会话创建已取消".to_string().into());
             }
             if remote_session.is_some() {
                 match activate_remote_session_instance(
@@ -470,7 +528,7 @@ pub(crate) fn open_terminal_runtime<R>(
                             &id,
                         );
                         let _ = sessions.remove_if_same(&id, &slot);
-                        return Err(format!("无法激活远程会话目录：{error}"));
+                        return Err(format!("无法激活远程会话目录：{error}").into());
                     }
                 }
             }
@@ -590,7 +648,10 @@ pub(crate) fn handle_open<C: ClientSocket>(
     ) {
         Ok((slot, Some((sess, fd)))) => (slot, sess, fd),
         Ok((_, None)) => return,
-        Err(error) => {
+        Err(TerminalOpenError::DaemonStopping) => {
+            reply_daemon_stopping_until_exit(&mut conn, rows, cols)
+        }
+        Err(TerminalOpenError::Failed(error)) => {
             write_terminal_error(&mut conn, &error, rows, cols);
             return;
         }

@@ -1043,3 +1043,39 @@ fn client_message_after_subscribe_closes_socket_and_reclaims_reader_worker() {
         .join()
         .expect("subscription and reader workers must exit");
 }
+
+/// 停机握着写锁时，新的终端打开拿许可要立刻被拒，不能排队：排队就是等到进程 exec、
+/// 连接被无声关掉。同一线程里测，排队就会死锁，测试挂住即失败。
+#[test]
+fn spawn_permit_is_refused_without_queueing_once_shutdown_begins() {
+    let gate = std::sync::RwLock::new(());
+    let first = crate::acquire_spawn_permit(&gate, false).expect("平时拿得到许可");
+    let second = crate::acquire_spawn_permit(&gate, false).expect("许可可以并存");
+    drop((first, second));
+    // 停机已置标记、还没拿到写锁。
+    assert!(crate::acquire_spawn_permit(&gate, true).is_err());
+    // 停机握着写锁。
+    let _shutdown = gate.write().unwrap();
+    assert!(crate::acquire_spawn_permit(&gate, false).is_err());
+}
+
+#[test]
+fn daemon_stopping_reply_carries_a_typed_code_and_plain_errors_do_not() {
+    use smelt_runtime_client::protocol::daemon::TerminalOpenErrorCode;
+    let header = |reply: Vec<u8>| -> serde_json::Value {
+        let line = reply.split(|byte| *byte == b'\n').next().unwrap().to_vec();
+        serde_json::from_slice(&line).unwrap()
+    };
+    let stopping = header(terminal_error_reply(
+        "守护正在停机",
+        Some(TerminalOpenErrorCode::DaemonStopping),
+        24,
+        80,
+    ));
+    assert_eq!(stopping["ok"], false);
+    assert_eq!(stopping["code"], "daemon_stopping");
+    assert_eq!(stopping["replay_len"], 0);
+    let plain = header(terminal_error_reply("终端会话不存在", None, 24, 80));
+    assert_eq!(plain["err"], "终端会话不存在");
+    assert!(plain.get("code").is_none());
+}

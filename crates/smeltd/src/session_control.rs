@@ -341,6 +341,7 @@ pub(crate) fn create_session(
     let created = match plan {
         CreatePlan::Acp(session) => {
             create_remote_acp_session(session, sessions, acp_sessions, event_hub, remote_sessions)
+                .map_err(|message| error(ControlErrorCode::OperationFailed, message))
         }
         CreatePlan::Terminal { session, launch } => super::open_terminal_runtime(
             super::TerminalOpenRequest {
@@ -358,9 +359,19 @@ pub(crate) fn create_session(
             remote_sessions,
             |_, _| (),
         )
-        .map(|_| ()),
+        .map(|_| ())
+        .map_err(|open_error| match open_error {
+            // 守护在停机：换了守护再建就行，不是这次请求本身有错。
+            super::TerminalOpenError::DaemonStopping => error(
+                ControlErrorCode::TemporarilyUnavailable,
+                super::DaemonStopping.to_string(),
+            ),
+            super::TerminalOpenError::Failed(message) => {
+                error(ControlErrorCode::OperationFailed, message)
+            }
+        }),
     };
-    created.map_err(|message| error(ControlErrorCode::OperationFailed, message))?;
+    created?;
     Ok(SessionCreateResult { session_id })
 }
 
