@@ -1,3 +1,7 @@
+#![cfg_attr(
+    all(windows, not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 //! smelt 工作台 —— 基于 gpui-component 的桌面窗口。
 //!
 //! Workspace 管理多个会话（终端或 ACP 对话）：左侧会话列表切换 / 新建 / 关闭，
@@ -19,7 +23,6 @@ pub(crate) use smelt_ui::ui_theme;
 
 pub(crate) mod agents;
 mod automation_notifications;
-mod cli;
 mod conversation_layout;
 mod desktop_view;
 mod dir_picker;
@@ -36,6 +39,7 @@ mod provider_quota;
 mod resizable_split;
 mod runtime_call;
 mod runtime_events;
+mod local_daemon;
 mod runtime_space;
 mod runtimes;
 mod tool_panel;
@@ -2497,10 +2501,8 @@ struct Workspace {
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
     /// 已消失时回退到活动会话所在组（见 active_project_root）。
     active_project: Option<ProjectRef>,
-    /// 本机运行时在侧栏里的那一份：项目、置顶、折叠、目录同步、冷启动恢复。
-    local: crate::runtime_space::RuntimeSpace,
-    /// 添加过的远程运行时各一份，顺序同运行时登记表。
-    remote_spaces: Vec<crate::runtime_space::RuntimeSpace>,
+    /// 侧栏里的运行时空间。本机在前，然后是配对的远程机器。
+    spaces: Vec<crate::runtime_space::RuntimeSpace>,
     /// 侧栏「对话」里被折叠起来的智能体（存定义 id）。
     collapsed_agents: HashSet<String>,
     /// 会话列表分组方式（默认按项目）。
@@ -2705,17 +2707,24 @@ struct Workspace {
     /// 用户已确认退出；防止异步更新收尾期间重复提交退出动作。
     quit_requested: bool,
     /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 齿轮强调色。
+    /// 只在 macOS 上存在：更新器替换的是 .app 包（设计文档 D4）。
+    #[cfg(target_os = "macos")]
     update_status: updater::UpdateStatus,
     /// 每次开始或取消安装等待时递增，防止旧的后台重试在新请求上继续执行。
+    #[cfg(target_os = "macos")]
     update_install_generation: u64,
     /// App 放的位置装不上更新（被系统转移、只读），启动时查一次；见
     /// `smelt_client::app_location`。有问题时更新入口都停在「需要先移到『应用程序』」。
+    #[cfg(target_os = "macos")]
     app_location_issue: Option<smelt_client::app_location::LocationIssue>,
     /// 启动时提议「移到『应用程序』」的确认框。
+    #[cfg(target_os = "macos")]
     show_move_app_confirm: bool,
     /// 正在移动；移完就退出，从新位置重开。
+    #[cfg(target_os = "macos")]
     moving_app: bool,
     /// 上次移动失败的原因，确认框和设置页都显示。
+    #[cfg(target_os = "macos")]
     move_app_error: Option<SharedString>,
     /// 设置窗口打开时要停在哪一页（对应左侧子菜单的独立内容页）。
     settings_section: settings::SettingsSection,
@@ -2787,7 +2796,7 @@ struct Workspace {
     daemon_upgrade_pending: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
-    daemon_info: Option<terminal::DaemonInfo>,
+    daemon_info: Option<local_daemon::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
     /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
@@ -2873,12 +2882,14 @@ struct Workspace {
     next_workspace_menu_source_revision: AtomicU64,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateInstallTrigger {
     User,
     Quit,
 }
 
+#[cfg(target_os = "macos")]
 impl UpdateInstallTrigger {
     fn relaunches(self) -> bool {
         !matches!(self, Self::Quit)
@@ -3084,21 +3095,18 @@ impl Workspace {
             next_workspace_menu_source_revision: AtomicU64::new(1),
             close_confirm: None,
             desktop: None,
-            local: {
-                let mut space = space_with_ui(crate::runtimes::Runtime::local());
-                space.projects = projects;
-                space.restore_pending = restore_pending;
-                space
+            spaces: {
+                let mut local = space_with_ui(crate::runtimes::Runtime::local());
+                local.projects = projects;
+                local.restore_pending = restore_pending;
+                let mut spaces = vec![local];
+                if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
+                    for remote in &hub.remotes {
+                        spaces.push(space_with_ui(remote.runtime.clone()));
+                    }
+                }
+                spaces
             },
-            remote_spaces: cx
-                .try_global::<crate::runtimes::RuntimeHub>()
-                .map(|hub| {
-                    hub.remotes
-                        .iter()
-                        .map(|remote| space_with_ui(remote.runtime.clone()))
-                        .collect()
-                })
-                .unwrap_or_default(),
             active_project: None,
             collapsed_agents: saved
                 .as_ref()
@@ -3199,11 +3207,17 @@ impl Workspace {
             debug_hud: false,
             show_quit_confirm: false,
             quit_requested: false,
+            #[cfg(target_os = "macos")]
             update_status: updater::UpdateStatus::default(),
+            #[cfg(target_os = "macos")]
             update_install_generation: 0,
+            #[cfg(target_os = "macos")]
             app_location_issue: None,
+            #[cfg(target_os = "macos")]
             show_move_app_confirm: false,
+            #[cfg(target_os = "macos")]
             moving_app: false,
+            #[cfg(target_os = "macos")]
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
@@ -3268,22 +3282,32 @@ impl Workspace {
         ws.refresh_acp_runtime(cx);
         // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不恢复也不
         // 检查，免得下载了还是装不上。移过去重开后才走下面的正常流程。
-        ws.app_location_issue = smelt_client::app_location::current_issue();
-        if ws.app_location_issue.is_some() {
-            ws.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::Location);
-            ws.show_move_app_confirm = true;
-        } else {
-            // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；恢复出待安装
-            // 作业后走与用户点击完全相同的安装驱动，没有待办才做常规静默检查。
-            ws.recover_update_at_launch(true, cx);
+        // 这套事务只替换 macOS 的 .app（设计文档 D4），其它平台不检查、不安装。
+        #[cfg(target_os = "macos")]
+        {
+            ws.app_location_issue = smelt_client::app_location::current_issue();
+            if ws.app_location_issue.is_some() {
+                ws.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::Location);
+                ws.show_move_app_confirm = true;
+            } else {
+                // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；恢复出待安装
+                // 作业后走与用户点击完全相同的安装驱动，没有待办才做常规静默检查。
+                ws.recover_update_at_launch(true, cx);
+            }
         }
         ws.start_workspace_catalog_load(window, cx);
-        for space in &ws.remote_spaces {
-            let runtime = space.runtime.clone();
+        let remote_runtimes: Vec<_> = ws
+            .spaces
+            .iter()
+            .filter(|space| !space.runtime.is_local())
+            .map(|space| space.runtime.clone())
+            .collect();
+        for runtime in remote_runtimes {
             cx.defer_in(window, move |this, window, cx| {
                 this.start_space_catalog_load(runtime, window, cx)
             });
         }
+        ws.ensure_pi_library_runtime(cx);
         ws._runtime_hub_sub = Some(
             cx.observe_global_in::<crate::runtimes::RuntimeHub>(window, |this, window, cx| {
                 this.sync_remote_spaces(window, cx)
@@ -3373,7 +3397,10 @@ impl Workspace {
     fn reconcile_remote_catalog_projection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 工作区目录还没到时不知道哪些会话会被恢复，这时投影远程目录会把同一场会话
         // 再投一份。目录到了以后会补做一次。
-        if !self.local.catalog_loaded {
+        if self
+            .space(&RuntimeKey::Local)
+            .is_none_or(|space| !space.catalog_loaded)
+        {
             return;
         }
         let Some(global) = cx.try_global::<RemoteSessionCatalogGlobal>() else {
@@ -3500,7 +3527,7 @@ impl Workspace {
             .collect::<HashSet<_>>();
         // 正在恢复的存档会话已经拿了这些 id，只是还没插进 `sessions`。不计进来就会
         // 把同一场对话再投影一份，两个视图抢同一个 smeltd 会话。
-        let pending = crate::pending_restore_session_ids(&self.local.restore_pending);
+        let pending = self.all_pending_restore_session_ids();
         let mut changed = false;
         let titled = records
             .iter()
@@ -3557,6 +3584,7 @@ impl Workspace {
             .resume_id
             .map(agent_client_protocol::schema::v1::SessionId::new);
         let cwd = Some(record.cwd.clone());
+        let runtime = crate::runtimes::Runtime::local();
         if !smelt_model::session_control::is_agent_conversation(
             None,
             agent_definition_id.as_deref(),
@@ -3568,7 +3596,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::Runtime::local(),
+                    runtime,
                     launch_prep: None,
                     agent,
                     launch: record.launch,
@@ -3661,7 +3689,7 @@ impl Workspace {
             })
             .collect::<HashSet<_>>();
         // 和 ACP 那边同理：存档里还在排队恢复的终端也已经报了这些 id。
-        let pending_restore = crate::pending_restore_session_ids(&self.local.restore_pending);
+        let pending_restore = self.all_pending_restore_session_ids();
         for record in records {
             if existing.contains(&record.id) || pending_restore.contains(&record.id) {
                 continue;
@@ -3678,15 +3706,17 @@ impl Workspace {
             {
                 continue;
             }
+            let runtime = crate::runtimes::Runtime::local();
             self.remember_session_project(&RuntimeKey::Local, Some(record.cwd.as_str()));
             let (tx, rx) = smol::channel::bounded(1);
+            let runtime_bg = runtime.clone();
             let cwd_bg = record.cwd.clone();
             let sid_bg = record.id.clone();
             std::thread::Builder::new()
                 .name("smelt-remote-term-reattach".into())
                 .spawn(move || {
                     let r = terminal::Terminal::reattach(
-                        &crate::runtimes::Runtime::local(),
+                        &runtime_bg,
                         24,
                         80,
                         Some(&cwd_bg),
@@ -3699,6 +3729,7 @@ impl Workspace {
             let cwd = record.cwd.clone();
             let sid = record.id.clone();
             let window_handle = self.window_handle;
+            let runtime_ui = runtime;
             cx.spawn(async move |this, cx| {
                 let result = match rx.recv().await {
                     Ok(r) => r,
@@ -3742,7 +3773,7 @@ impl Workspace {
                         let view = cx.new(|cx| {
                             TerminalView::from_terminal(
                                 cx,
-                                crate::runtimes::Runtime::local(),
+                                runtime_ui,
                                 terminal,
                                 Some(cwd),
                                 sid,
@@ -3881,7 +3912,7 @@ impl Render for Workspace {
         };
 
         // 壳层走界面字体（默认系统 UI）；终端/diff/代码块各自绑代码字体。
-        div()
+        let frame = div()
             .relative()
             .flex()
             .flex_col()
@@ -3931,16 +3962,18 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| {
                 this.cycle_session(1, window, cx);
-            }))
-            // 应用菜单「检查更新…」：顺手发起一次检查，再把设置窗口开到「更新」页看进度。
-            .on_action(cx.listener(|this, _: &CheckForUpdate, _window, cx| {
-                if this.update_status.can_check() || this.update_status.can_retry_recovery() {
-                    this.check_or_recover_update(false, cx);
-                }
-                this.open_settings_section(settings::SettingsSection::maintenance_update(), cx);
-            }))
-            // 应用菜单「反馈问题…」：跳内部飞书反馈群。
-            .on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
+            }));
+        // 应用菜单「检查更新…」：顺手发起一次检查，再把设置窗口开到「更新」页看进度。
+        // 更新器只在 macOS 上存在（设计文档 D4）。
+        #[cfg(target_os = "macos")]
+        let frame = frame.on_action(cx.listener(|this, _: &CheckForUpdate, _window, cx| {
+            if this.update_status.can_check() || this.update_status.can_retry_recovery() {
+                this.check_or_recover_update(false, cx);
+            }
+            this.open_settings_section(settings::SettingsSection::maintenance_update(), cx);
+        }));
+        // 应用菜单「反馈问题…」：跳内部飞书反馈群。
+        frame.on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
                 cx.open_url(settings::FEEDBACK_URL);
             }))
             // 文件内容视图右键菜单里的「发送选中内容到会话」，见 send_open_file_selection。
@@ -4168,9 +4201,7 @@ fn command_program(command: &str) -> Option<&str> {
         {
             continue;
         }
-        return std::path::Path::new(token)
-            .file_name()
-            .and_then(|name| name.to_str());
+        return smelt_client::runtime_path::PathStyle::LOCAL.file_name(token);
     }
     None
 }
@@ -4548,14 +4579,17 @@ fn app_key_bindings() -> Vec<KeyBinding> {
 }
 
 fn main() {
-    if let Some(code) = terminal::maybe_run_install_app(std::env::args()) {
+    #[cfg(target_os = "macos")]
+    if let Some(code) = local_daemon::maybe_run_install_app(std::env::args()) {
         std::process::exit(code);
     }
-    if let Some(code) = cli::maybe_run(std::env::args()) {
+    if let Some(code) = smelt_cli::maybe_run(std::env::args()) {
         std::process::exit(code);
     }
     // 整个 GUI 生命周期持共享 lease。installer 只有等所有 GUI 退出并拿到独占 lease
     // 后才可交换 Bundle；若交换已经开始，新 GUI fail-fast，避免从旧 vnode 启动。
+    // 这把锁保护的是 macOS .app 交换，其它平台没有安装事务（设计文档 D4）。
+    #[cfg(target_os = "macos")]
     let _app_runtime_lease = match updater::acquire_app_runtime_lease() {
         Ok(lease) => lease,
         Err(error) => {
@@ -4635,7 +4669,9 @@ fn main() {
             Menu::new("Smelt").items([
                 MenuItem::action(concat!("v", env!("CARGO_PKG_VERSION")), gpui::NoAction)
                     .disabled(true),
+                #[cfg(target_os = "macos")]
                 MenuItem::Separator,
+                #[cfg(target_os = "macos")]
                 MenuItem::action("检查更新…", CheckForUpdate),
                 MenuItem::Separator,
                 MenuItem::action("设置…", OpenSettings),
@@ -4658,6 +4694,7 @@ fn main() {
         settings::apply_bg_color(&appearance);
         cx.set_global(settings::LaunchConfig::default());
         settings::start_launch_config_load(cx);
+        #[cfg(target_os = "macos")]
         cx.set_global(settings::load_update_settings());
 
         // 原生通知/菜单栏桥必须先于任何 Attention producer 就绪。daemon 快照可能在

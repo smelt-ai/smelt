@@ -96,8 +96,11 @@ impl Workspace {
                 }
                 map
             },
+            #[cfg(target_os = "macos")]
             update_status: self.update_status.clone(),
+            #[cfg(target_os = "macos")]
             moving_app: self.moving_app,
+            #[cfg(target_os = "macos")]
             move_app_error: self.move_app_error.clone(),
             daemon_outdated: self.daemon_outdated,
             daemon_upgrading: self.daemon_upgrading,
@@ -152,6 +155,11 @@ impl Workspace {
         {
             self.refresh_pi_auth_providers(cx);
         }
+        self.ensure_pi_library_runtime(cx);
+        if crate::runtimes::client(self.pi_library_runtime(), cx).is_none() {
+            self.capabilities_view = None;
+            return;
+        }
         if self.capabilities_view.is_some() {
             return;
         }
@@ -182,6 +190,7 @@ impl Workspace {
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         crate::runtime_events::probe_remotes(cx);
+        self.ensure_pi_library_runtime(cx);
         self.refresh_pi_config(crate::RuntimeKey::Local, cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {

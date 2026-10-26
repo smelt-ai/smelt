@@ -118,6 +118,14 @@ impl Workspace {
         &self.pi_library.runtime
     }
 
+    /// 能力库配的那台远程机器已经移除时，回到本机。
+    pub(crate) fn ensure_pi_library_runtime(&mut self, cx: &mut Context<Self>) {
+        if crate::runtimes::client(&self.pi_library.runtime, cx).is_some() {
+            return;
+        }
+        self.select_pi_library_runtime(crate::RuntimeKey::Local, cx);
+    }
+
     /// 重读能力库那台机器的快照。
     pub(crate) fn refresh_pi_library(&mut self, cx: &mut Context<Self>) {
         self.refresh_pi_config(self.pi_library.runtime.clone(), cx);

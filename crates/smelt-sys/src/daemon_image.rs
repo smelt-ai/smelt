@@ -33,17 +33,39 @@ pub fn content_fingerprint(path: &Path) -> io::Result<String> {
 }
 
 pub fn image_file_name(fingerprint: &str) -> String {
-    format!("{IMAGE_PREFIX}{fingerprint}")
+    if cfg!(windows) {
+        format!("{IMAGE_PREFIX}{fingerprint}.exe")
+    } else {
+        format!("{IMAGE_PREFIX}{fingerprint}")
+    }
 }
 
 pub fn is_immutable_image_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix(IMAGE_PREFIX) else {
         return false;
     };
+    let rest = rest.strip_suffix(".exe").unwrap_or(rest);
     rest.len() == 64
         && rest
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// 真正拿去执行的那份映像。Unix 是启动名那条符号链接；Windows 没有符号链接权限时，
+/// 启动名是一份指针文件，这里返回它指向的 `smeltd-<指纹>.exe`。
+pub fn launch_executable(dir: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        dir.join(LAUNCH_NAME)
+    }
+    #[cfg(windows)]
+    {
+        read_image_pointer(dir, LAUNCH_NAME).unwrap_or_else(|| dir.join("smeltd.exe"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        dir.join(LAUNCH_NAME)
+    }
 }
 
 /// 把 `src` 的字节写成 `dir/smeltd-<指纹>`。同内容再发布一次必须还是同一个 inode。
@@ -66,7 +88,7 @@ pub fn publish_image(dir: &Path, src: &Path) -> io::Result<PathBuf> {
         let _ = fs::remove_file(&tmp);
         return Err(error);
     }
-    let linked = fs::hard_link(&tmp, &dest);
+    let linked = place_image(&tmp, &dest);
     let _ = fs::remove_file(&tmp);
     match linked {
         Ok(()) => Ok(dest),
@@ -77,7 +99,8 @@ pub fn publish_image(dir: &Path, src: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// 原子替换同目录里的一条符号链接。目标只写文件名，目录挪走链接仍然指向旁边的映像。
+/// 原子替换同目录里的启动名。Unix 是符号链接；Windows 是一份指针文件，
+/// 内容是映像文件名。两边的目标都只写文件名，目录挪走仍然指向旁边的映像。
 pub fn retarget_symlink(dir: &Path, link_name: &str, image: &Path) -> io::Result<()> {
     if is_immutable_image_name(link_name) {
         return Err(io::Error::other(format!("不能改写映像文件：{link_name}")));
@@ -88,14 +111,27 @@ pub fn retarget_symlink(dir: &Path, link_name: &str, image: &Path) -> io::Result
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&image_name, &tmp)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = image_name;
-        return Err(unsupported());
+    let write_tmp = (|| {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&image_name, &tmp)
+        }
+        #[cfg(windows)]
+        {
+            fs::write(
+                &tmp,
+                format!("smelt-image-v1\n{}\n", image_name.to_string_lossy()),
+            )
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = &image_name;
+            Err(io::Error::new(io::ErrorKind::Unsupported, "不能发布启动名"))
+        }
+    })();
+    if let Err(error) = write_tmp {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
     if let Err(error) = fs::rename(&tmp, dir.join(link_name)) {
         let _ = fs::remove_file(&tmp);
@@ -112,18 +148,30 @@ pub fn retarget_pending_symlink(dir: &Path, image: &Path) -> io::Result<()> {
     retarget_symlink(dir, PENDING_NAME, image)
 }
 
-/// `smeltd.pending` 解析后的普通文件。链接断了、或这个名字本身是普通文件，都当没有。
+/// `smeltd.pending` 解析后的普通文件。链接断了、指针指空了，都当没有。
 pub fn pending_image(dir: &Path) -> Option<PathBuf> {
-    let link = dir.join(PENDING_NAME);
-    let meta = fs::symlink_metadata(&link).ok()?;
-    if !meta.file_type().is_symlink() {
-        return None;
+    #[cfg(unix)]
+    {
+        let link = dir.join(PENDING_NAME);
+        let meta = fs::symlink_metadata(&link).ok()?;
+        if !meta.file_type().is_symlink() {
+            return None;
+        }
+        let resolved = fs::canonicalize(&link).ok()?;
+        fs::symlink_metadata(&resolved)
+            .ok()
+            .filter(|meta| meta.is_file())
+            .map(|_| resolved)
     }
-    let resolved = fs::canonicalize(&link).ok()?;
-    fs::symlink_metadata(&resolved)
-        .ok()
-        .filter(|meta| meta.is_file())
-        .map(|_| resolved)
+    #[cfg(windows)]
+    {
+        read_image_pointer(dir, PENDING_NAME)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// 交接提交之后把启动名拨到这次 exec 的映像，并拆掉 pending 链接。
@@ -190,6 +238,35 @@ fn write_temp(tmp: &Path, src: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn place_image(tmp: &Path, dest: &Path) -> io::Result<()> {
+    match fs::hard_link(tmp, dest) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+            fs::copy(tmp, dest).map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn read_image_pointer(dir: &Path, name: &str) -> Option<PathBuf> {
+    let text = fs::read_to_string(dir.join(name)).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != "smelt-image-v1" {
+        return None;
+    }
+    let image_name = lines.next()?;
+    if !is_immutable_image_name(image_name) {
+        return None;
+    }
+    let path = dir.join(image_name);
+    fs::metadata(&path)
+        .ok()
+        .filter(|meta| meta.is_file())
+        .and_then(|_| fs::canonicalize(&path).ok())
+}
+
 fn image_name_in_dir(dir: &Path, image: &Path) -> io::Result<std::ffi::OsString> {
     let name = image
         .file_name()
@@ -204,26 +281,39 @@ fn image_name_in_dir(dir: &Path, image: &Path) -> io::Result<std::ffi::OsString>
         )));
     }
     let expected = dir.join(&name);
-    let image_meta = fs::symlink_metadata(image)?;
-    let expected_meta = fs::symlink_metadata(&expected)
-        .map_err(|_| io::Error::other("映像和启动名必须在同一目录"))?;
+    if !same_regular_file(image, &expected) {
+        return Err(io::Error::other("映像和启动名必须在同一目录"));
+    }
+    Ok(name)
+}
+
+fn same_regular_file(left: &Path, right: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if !image_meta.is_file()
-            || !expected_meta.is_file()
-            || image_meta.dev() != expected_meta.dev()
-            || image_meta.ino() != expected_meta.ino()
-        {
-            return Err(io::Error::other("映像和启动名必须在同一目录"));
-        }
+        let (Ok(left), Ok(right)) = (fs::symlink_metadata(left), fs::symlink_metadata(right)) else {
+            return false;
+        };
+        left.is_file() && right.is_file() && left.dev() == right.dev() && left.ino() == right.ino()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = (image_meta, expected_meta);
-        return Err(unsupported());
+        let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(left), fs::metadata(right)) else {
+            return false;
+        };
+        if !left_meta.is_file() || !right_meta.is_file() {
+            return false;
+        }
+        matches!(
+            (fs::canonicalize(left), fs::canonicalize(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
     }
-    Ok(name)
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (left, right);
+        false
+    }
 }
 
 /// `lsof` 的约定与在线更新一致：退出码 0 表示至少有一个打开项；
@@ -277,15 +367,15 @@ fn reap_unused_images_with(
             continue;
         }
         let path = entry.path();
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
-        };
-        if file_id(&meta).is_none() {
-            continue;
         }
-        if keep.iter().any(|id| file_id(&meta) == Some(*id)) {
+        let Some(id) = file_id(&path) else {
+            continue;
+        };
+        if keep.iter().any(|kept| kept == &id) {
             continue;
         }
         if probe(&path) != MappedState::Unused {
@@ -376,7 +466,7 @@ fn linux_makedev(major: u32, minor: u32) -> u64 {
         | (minor & 0x0000_00ff)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn probe_image_mapped(path: &Path) -> MappedState {
     let output = match std::process::Command::new("/usr/sbin/lsof")
         .arg("-Fn")
@@ -395,27 +485,53 @@ pub(crate) fn probe_image_mapped(path: &Path) -> MappedState {
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct FileId {
-    dev: u64,
-    ino: u64,
+/// 正在映射的 exe 不能再以写方式打开。打得开就没人执行它。
+#[cfg(windows)]
+pub(crate) fn probe_image_mapped(path: &Path) -> MappedState {
+    match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(_) => MappedState::Unused,
+        Err(error) if error.raw_os_error() == Some(32) => MappedState::InUse,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => MappedState::Unused,
+        Err(_) => MappedState::Unknown,
+    }
 }
 
-fn file_id(meta: &fs::Metadata) -> Option<FileId> {
+#[derive(Clone, PartialEq, Eq)]
+struct FileId {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    path: PathBuf,
+}
+
+fn file_id(path: &Path) -> Option<FileId> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(path).ok()?;
         if !meta.file_type().is_file() {
             return None;
         }
-        return Some(FileId {
+        Some(FileId {
             dev: meta.dev(),
             ino: meta.ino(),
-        });
+        })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = meta;
+        let meta = fs::metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        Some(FileId {
+            path: fs::canonicalize(path).ok()?,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
         None
     }
 }
@@ -431,22 +547,38 @@ fn referenced_image_ids(dir: &Path) -> io::Result<Vec<FileId>> {
 }
 
 fn resolved_image_id(dir: &Path, name: &str) -> io::Result<Option<FileId>> {
-    let link = dir.join(name);
-    let meta = match fs::symlink_metadata(&link) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+    let resolved = {
+        #[cfg(unix)]
+        {
+            let link = dir.join(name);
+            let meta = match fs::symlink_metadata(&link) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            if !meta.file_type().is_symlink() {
+                return Ok(None);
+            }
+            match fs::canonicalize(&link) {
+                Ok(resolved) => resolved,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        #[cfg(windows)]
+        {
+            let Some(resolved) = read_image_pointer(dir, name) else {
+                return Ok(None);
+            };
+            resolved
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (dir, name);
+            return Ok(None);
+        }
     };
-    if !meta.file_type().is_symlink() {
-        return Ok(None);
-    }
-    let resolved = match fs::canonicalize(&link) {
-        Ok(resolved) => resolved,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let resolved_meta = fs::symlink_metadata(&resolved)?;
-    let Some(id) = file_id(&resolved_meta) else {
+    let Some(id) = file_id(&resolved) else {
         return Ok(None);
     };
     let Some(parent) = resolved.parent() else {
@@ -463,21 +595,19 @@ fn resolved_image_id(dir: &Path, name: &str) -> io::Result<Option<FileId>> {
 fn remove_pending_symlink(dir: &Path) -> io::Result<()> {
     let path = dir.join(PENDING_NAME);
     match fs::symlink_metadata(&path) {
-        Ok(meta) if meta.file_type().is_symlink() => fs::remove_file(path),
+        Ok(meta) if meta.file_type().is_symlink() || (cfg!(windows) && meta.is_file()) => {
+            fs::remove_file(path)
+        }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
 
-#[cfg(not(unix))]
-fn unsupported() -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, "守护映像只支持 Unix 符号链接")
-}
-
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
     fn scratch(label: &str) -> PathBuf {
@@ -497,10 +627,12 @@ mod tests {
         fs::write(&src, b"same-image").unwrap();
 
         let first = publish_image(&dir, &src).unwrap();
+        #[cfg(unix)]
         let inode = fs::metadata(&first).unwrap().ino();
         let second = publish_image(&dir, &src).unwrap();
 
         assert_eq!(first, second);
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&second).unwrap().ino(), inode);
         assert!(is_immutable_image_name(
             first.file_name().unwrap().to_str().unwrap()
@@ -516,11 +648,13 @@ mod tests {
         let image = publish_image(&dir, &src).unwrap();
         fs::remove_file(&image).unwrap();
         fs::write(&image, b"not-the-same-bytes").unwrap();
+        #[cfg(unix)]
         let inode = fs::metadata(&image).unwrap().ino();
 
         let error = publish_image(&dir, &src).expect_err("内容对不上时必须拒绝覆盖");
         assert!(error.to_string().contains("拒绝覆盖"), "实际错误：{error}");
         assert_eq!(fs::read(&image).unwrap(), b"not-the-same-bytes");
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&image).unwrap().ino(), inode);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -534,23 +668,33 @@ mod tests {
         fs::write(&new_src, b"image-new").unwrap();
         let old_image = publish_image(&dir, &old_src).unwrap();
         let new_image = publish_image(&dir, &new_src).unwrap();
+        #[cfg(unix)]
         let old_inode = fs::metadata(&old_image).unwrap().ino();
 
         retarget_launch_symlink(&dir, &old_image).unwrap();
         retarget_launch_symlink(&dir, &new_image).unwrap();
 
-        let launch = dir.join(LAUNCH_NAME);
+        #[cfg(unix)]
+        {
+            let launch = dir.join(LAUNCH_NAME);
+            assert_eq!(
+                fs::read_link(&launch).unwrap(),
+                new_image.file_name().unwrap()
+            );
+            assert!(
+                fs::symlink_metadata(&launch)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        #[cfg(windows)]
         assert_eq!(
-            fs::read_link(&launch).unwrap(),
-            new_image.file_name().unwrap()
-        );
-        assert!(
-            fs::symlink_metadata(&launch)
-                .unwrap()
-                .file_type()
-                .is_symlink()
+            launch_executable(&dir),
+            fs::canonicalize(&new_image).unwrap()
         );
         assert_eq!(fs::read(&old_image).unwrap(), b"image-old");
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&old_image).unwrap().ino(), old_inode);
         assert_eq!(fs::read(&new_image).unwrap(), b"image-new");
         fs::remove_dir_all(dir).unwrap();

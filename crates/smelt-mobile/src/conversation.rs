@@ -25,7 +25,6 @@ mod view;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -41,7 +40,7 @@ use smelt_model::session_control::parse_conversation_submit_response;
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use smelt_runtime_client::protocol::write_json_line;
-use smelt_runtime_client::{RequestError, RuntimeClient};
+use smelt_runtime_client::{RequestError, RuntimeClient, RuntimeStream};
 
 use crate::api::conversation::{
     ConversationEntry, ConversationEvent, ConversationEventKind, ElicitationTextInput, ImageData,
@@ -509,6 +508,8 @@ struct Watch {
     wake: Condvar,
     /// 各订阅者的推送出口，带订阅编号。全空了订阅就停。和状态锁一起拿时先拿状态锁。
     sinks: Mutex<Vec<(u32, EventSink)>>,
+    /// 收尾存盘。推送线程看到停止后也会存一次；取消订阅的那次必须等这次写完再返回。
+    flushing: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -524,7 +525,7 @@ struct WatchState {
     /// 刚从别的状态回到 Connected：退避等待立即结束。
     reconnected: bool,
     /// 正在读的 watch 连接，留一份给别的线程 shutdown 打断阻塞的读。
-    conn: Option<UnixStream>,
+    conn: Option<RuntimeStream>,
     /// 手里的连续窗口（实时尾部 + 翻出来的更早页），线格式。
     snapshot: Option<ConversationSnapshot>,
     /// 收到过运行时的实时数据。之前的窗口只是离线缓存。
@@ -553,6 +554,7 @@ impl Watch {
             state: Mutex::new(WatchState::default()),
             wake: Condvar::new(),
             sinks: Mutex::new(vec![(watch_id, sink)]),
+            flushing: Mutex::new(()),
         }
     }
 
@@ -667,7 +669,11 @@ impl Watch {
     }
 
     /// 还没存的实时数据立刻存掉（被顶掉或取消订阅时）。
+    ///
+    /// 推送线程发现订阅已停时也会走这里。两处同时存的话，先拿到待存标记的那个
+    /// 还在写，另一处就会直接返回。取消订阅必须等写完，否则调用方立刻读缓存会落空。
     fn flush(&self, cache: Option<&Cache>) {
+        let _flushing = self.flushing.lock().unwrap_or_else(|error| error.into_inner());
         let (tail, endpoint_id) = {
             let mut state = self.lock();
             if state.save_due.take().is_none() {
@@ -853,7 +859,7 @@ impl Watch {
         end
     }
 
-    fn read_frames(&self, client: &RuntimeClient, stream: UnixStream) -> StreamEnd {
+    fn read_frames(&self, client: &RuntimeClient, stream: RuntimeStream) -> StreamEnd {
         let mut reader = BufReader::new(stream);
         let mut mirror = FrameMirror::default();
         let mut awaiting_full = false;

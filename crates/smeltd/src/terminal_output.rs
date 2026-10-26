@@ -7,10 +7,12 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Write};
 use std::net::Shutdown;
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+
+use smelt_runtime_client::UnixStream;
+
+use crate::{ClientConn, ClientSocket, ConnId};
 
 /// 单个终端 attachment 尚未交给内核的输出上限。超过说明该客户端已经长期不消费；
 /// 摘掉它以保护守护进程内存，而不是让它反压 PTY 泵或拖慢其它 attachment。
@@ -208,9 +210,9 @@ impl FlowControl {
 /// 一个客户端输出端。`shutdown` 是写线程 socket 的 duplicate，连接移除时用它同时
 /// 唤醒可能阻塞的写线程与 handle_open/handle_watch 的读循环。
 pub(crate) struct OutputAttachment {
-    pub(crate) fd: RawFd,
+    pub(crate) fd: ConnId,
     mailbox: Arc<OutputMailbox>,
-    shutdown: UnixStream,
+    shutdown: ClientConn,
     /// `None`：不回确认的旁观连接，仍按邮箱上限隔离。
     flow: Option<FlowControl>,
 }
@@ -218,8 +220,8 @@ pub(crate) struct OutputAttachment {
 impl OutputAttachment {
     /// 交互连接：`header` 是首行，`keyframe` 是紧随其后的画面快照。客户端从快照第
     /// 一个字节起按累计字节数回确认，流控据此限制在途的实时输出。
-    pub(crate) fn interactive(
-        stream: UnixStream,
+    pub(crate) fn interactive<C: ClientSocket>(
+        stream: C,
         header: Vec<u8>,
         keyframe: Vec<u8>,
         id: &str,
@@ -232,17 +234,19 @@ impl OutputAttachment {
         Ok(attachment)
     }
 
-    pub(crate) fn new(
-        stream: UnixStream,
+    pub(crate) fn new<C: ClientSocket>(
+        stream: C,
         initial: Vec<u8>,
         id: &str,
         kind: &'static str,
     ) -> std::io::Result<Self> {
-        let fd = stream.as_raw_fd();
+        let mut stream = stream;
+        let fd = stream.connection_id();
         // 不继承任何短写超时。GUI 短暂停顿时由 mailbox 吸收，只有队列真正耗尽才
         // 隔离 attachment；这里若仍是 3 秒超时，会重新把瞬时背压误判成断线。
         stream.set_write_timeout(None)?;
-        let shutdown = stream.try_clone()?;
+        let shutdown = stream.try_clone()?.into_client_conn();
+        let stream = stream.into_client_conn();
         let mailbox = Arc::new(OutputMailbox::new(TERMINAL_OUTPUT_QUEUE_MAX_BYTES));
         let attachment = Self {
             fd,
@@ -268,7 +272,7 @@ impl OutputAttachment {
                     // interrupted write 不需要污染日志。
                     if !mailbox.is_closed() {
                         crate::dlog(&format!(
-                            "{kind} writer stopped id={writer_id} fd={fd} error={error}"
+                            "{kind} writer stopped id={writer_id} fd={fd:?} error={error}"
                         ));
                     }
                     mailbox.close();
@@ -362,7 +366,7 @@ pub(crate) fn enqueue_session_streams(
             live.push(stream);
         } else {
             crate::dlog(&format!(
-                "terminal {kind} output queue saturated or closed id={id} fd={}",
+                "terminal {kind} output queue saturated or closed id={id} fd={:?}",
                 stream.fd
             ));
             stream.close();
@@ -445,9 +449,9 @@ mod tests {
         // 故意不启动 writer：这个 attachment 的 socket 已不可写。若 PTY 转发重新
         // 直接 write_all，这里会得到 WouldBlock 并被踢出；正确实现只向 mailbox 入队。
         let attachment = OutputAttachment {
-            fd: server.as_raw_fd(),
+            fd: ClientSocket::connection_id(&server),
             mailbox: Arc::new(OutputMailbox::new(1024)),
-            shutdown: server,
+            shutdown: server.into_client_conn(),
             flow: None,
         };
         let live = enqueue_session_streams(vec![attachment], b"x", "test", "attachment");

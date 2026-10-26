@@ -1,7 +1,7 @@
 //! 运行时链路：客户端经 iroh 直接说运行时的协议（设计文档 D2）。
 //!
 //! 一条 QUIC 双向流就是一条连接，和 unix socket 上的一条连接等价。两端都把流桥接成
-//! `UnixStream::pair()` 的一端：运行时把另一端交给现有分发器，客户端把它交给
+//! `RuntimeStream::pair()` 的一端：运行时把另一端交给现有分发器，客户端把它交给
 //! `RuntimeClient`。上层的阻塞读写、超时、`try_clone` 对两种传输完全一样。
 //!
 //! 鉴权不在这里：服务端把对端的 endpoint id 连同流一起交出去，由运行时按已配对设备
@@ -10,12 +10,13 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use smelt_runtime_client::RuntimeStream;
+#[cfg(unix)]
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
@@ -45,7 +46,7 @@ pub trait StreamAcceptor: Send + Sync + 'static {
     fn is_trusted(&self, remote: &str) -> bool;
 
     /// `remote` 是对端的 endpoint id。在 tokio 线程上被调用，不能阻塞：处理放到自己的线程。
-    fn accept(&self, remote: &str, stream: UnixStream);
+    fn accept(&self, remote: &str, stream: RuntimeStream);
 }
 
 /// 活着的连接，按对端 endpoint id 分组。撤销设备时据此立即断开它的全部连接。
@@ -262,25 +263,36 @@ async fn is_trusted(acceptor: &Arc<dyn StreamAcceptor>, remote: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 把一条 QUIC 双向流接到 `UnixStream::pair()` 的一端，返回另一端。必须在 tokio
-/// 运行时里调用：搬运任务挂在当前运行时上。
-pub fn bridge(send: SendStream, recv: RecvStream) -> io::Result<UnixStream> {
+/// 把一条 QUIC 双向流接到 `RuntimeStream::pair()` 的一端，返回另一端。必须在 tokio
+/// 运行时里调用：搬运挂在当前运行时上。
+pub fn bridge(send: SendStream, recv: RecvStream) -> io::Result<RuntimeStream> {
     bridge_tracked(send, recv).map(|(stream, _)| stream)
 }
 
 /// 同 [`bridge`]，另返回搬运任务：它结束时这条流已经收摊。
+#[cfg(unix)]
 fn bridge_tracked(
     send: SendStream,
     recv: RecvStream,
-) -> io::Result<(UnixStream, tokio::task::JoinHandle<()>)> {
-    let (ours, theirs) = UnixStream::pair()?;
+) -> io::Result<(RuntimeStream, tokio::task::JoinHandle<()>)> {
+    let (ours, theirs) = RuntimeStream::pair()?;
     ours.set_nonblocking(true)?;
     let ours = tokio::net::UnixStream::from_std(ours)?;
     Ok((theirs, tokio::spawn(pump(send, recv, ours))))
 }
 
+/// Windows 上 AF_UNIX 套接字进不了 tokio，改用线程搬运，见 [`threaded`]。
+#[cfg(windows)]
+fn bridge_tracked(
+    send: SendStream,
+    recv: RecvStream,
+) -> io::Result<(RuntimeStream, tokio::task::JoinHandle<()>)> {
+    threaded::bridge_tracked(send, recv)
+}
+
 /// 两个方向分别搬到对端 EOF。对端只是写完（半关闭）时，另一方向继续，回包还要回去；
 /// 任一方向出错，或本地一端关闭，就整条收摊，避免长流在对端消失后挂着。
+#[cfg(unix)]
 async fn pump(mut send: SendStream, mut recv: RecvStream, unix: tokio::net::UnixStream) {
     let (mut unix_read, mut unix_write) = unix.into_split();
     let up = async {
@@ -300,6 +312,128 @@ async fn pump(mut send: SendStream, mut recv: RecvStream, unix: tokio::net::Unix
                 Err(_) => return,
             },
             _ = &mut down => return,
+        }
+    }
+}
+
+/// 线程搬运：每个方向一条线程，本地一端阻塞读写，QUIC 一端经 `Handle::block_on` 读写。
+/// 语义和 [`pump`] 一致。Windows 用它；Unix 上只为测试编译，好让同一套桥接测试在 macOS
+/// 上也覆盖到这份实现。
+///
+/// 每条远程流两条线程。桌面同时开着的流是事件订阅加每个打开的终端、对话各一条，几十条
+/// 量级。
+#[cfg(any(windows, test))]
+mod threaded {
+    use std::io::{self, Read as _, Write as _};
+    use std::net::Shutdown;
+    use std::sync::Arc;
+
+    use iroh::endpoint::{RecvStream, SendStream};
+    use smelt_runtime_client::RuntimeStream;
+    use tokio::runtime::Handle;
+    use tokio::sync::{Notify, oneshot};
+
+    const CHUNK: usize = 16 * 1024;
+
+    /// 同 [`super::bridge_tracked`]。返回的任务在本地一端读完（或出错）、上行线程也被
+    /// 叫停时结束。
+    pub(super) fn bridge_tracked(
+        send: SendStream,
+        recv: RecvStream,
+    ) -> io::Result<(RuntimeStream, tokio::task::JoinHandle<()>)> {
+        let (ours, theirs) = RuntimeStream::pair()?;
+        let ours_write = ours.try_clone()?;
+        let handle = Handle::current();
+        let stop = Arc::new(Notify::new());
+        let (done, finished) = oneshot::channel::<()>();
+        {
+            let handle = handle.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::Builder::new()
+                .name("smelt-iroh-up".into())
+                .spawn(move || up(&handle, recv, ours_write, &stop))?;
+        }
+        // 下行线程起不来时，已经在跑的上行线程还堵在 `stop` 上。先叫停并关掉
+        // 本地这一端，它才能退出。套接字要留一份在外面：失败时闭包连同它捕获的
+        // 那份一起被丢掉。
+        let stop_down = Arc::clone(&stop);
+        let ours_down = match ours.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                stop.notify_one();
+                let _ = ours.shutdown(Shutdown::Both);
+                return Err(error);
+            }
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("smelt-iroh-down".into())
+            .spawn(move || {
+                down(&handle, send, &ours_down);
+                stop_down.notify_one();
+                let _ = ours_down.shutdown(Shutdown::Both);
+                drop(done);
+            })
+        {
+            stop.notify_one();
+            let _ = ours.shutdown(Shutdown::Both);
+            return Err(error);
+        }
+        Ok((
+            theirs,
+            tokio::spawn(async move {
+                let _ = finished.await;
+            }),
+        ))
+    }
+
+    /// QUIC → 本地。对端写完就半关闭本地写端，另一方向继续；出错就关掉本地两个方向，
+    /// 上层读到 EOF 关掉连接后下行随之结束。被 `stop` 叫停时直接退出。
+    fn up(handle: &Handle, mut recv: RecvStream, mut local: RuntimeStream, stop: &Notify) {
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            let read = handle.block_on(async {
+                tokio::select! {
+                    read = recv.read(&mut buf) => Some(read),
+                    () = stop.notified() => None,
+                }
+            });
+            match read {
+                None => return,
+                Some(Ok(None)) => {
+                    let _ = local.shutdown(Shutdown::Write);
+                    return;
+                }
+                Some(Ok(Some(n))) => {
+                    if local.write_all(&buf[..n]).is_err() {
+                        let _ = local.shutdown(Shutdown::Both);
+                        return;
+                    }
+                }
+                Some(Err(_)) => {
+                    let _ = local.shutdown(Shutdown::Both);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// 本地 → QUIC，直到本地读到 EOF（写完 QUIC 一侧）或任一侧出错。
+    fn down(handle: &Handle, mut send: SendStream, mut local: &RuntimeStream) {
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            match local.read(&mut buf) {
+                Ok(0) => {
+                    let _ = send.finish();
+                    return;
+                }
+                Ok(n) => {
+                    if handle.block_on(send.write_all(&buf[..n])).is_err() {
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
         }
     }
 }
@@ -417,7 +551,7 @@ impl RuntimeConnector {
 }
 
 impl smelt_runtime_client::Connector for RuntimeConnector {
-    fn connect(&self) -> io::Result<UnixStream> {
+    fn connect(&self) -> io::Result<RuntimeStream> {
         self.client.runtime.block_on(async {
             let conn = self.connection().await?;
             match conn.open_bi().await {
@@ -437,6 +571,7 @@ impl smelt_runtime_client::Connector for RuntimeConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read as _, Write as _};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -451,7 +586,7 @@ mod tests {
 
     struct TestAcceptor {
         trusted: AtomicBool,
-        streams: mpsc::UnboundedSender<UnixStream>,
+        streams: mpsc::UnboundedSender<RuntimeStream>,
     }
 
     impl StreamAcceptor for TestAcceptor {
@@ -459,7 +594,7 @@ mod tests {
             self.trusted.load(Ordering::SeqCst)
         }
 
-        fn accept(&self, _remote: &str, stream: UnixStream) {
+        fn accept(&self, _remote: &str, stream: RuntimeStream) {
             let _ = self.streams.send(stream);
         }
     }
@@ -480,7 +615,7 @@ mod tests {
     ) -> (
         EndpointAddr,
         Arc<TestAcceptor>,
-        mpsc::UnboundedReceiver<UnixStream>,
+        mpsc::UnboundedReceiver<RuntimeStream>,
     ) {
         let (tx, rx) = mpsc::unbounded_channel();
         let acceptor = Arc::new(TestAcceptor {
@@ -511,11 +646,11 @@ mod tests {
         (send, recv)
     }
 
-    async fn next(rx: &mut mpsc::UnboundedReceiver<UnixStream>) -> UnixStream {
+    async fn next(rx: &mut mpsc::UnboundedReceiver<RuntimeStream>) -> RuntimeStream {
         timeout(ARRIVES, rx.recv()).await.unwrap().unwrap()
     }
 
-    async fn nothing_more(rx: &mut mpsc::UnboundedReceiver<UnixStream>) {
+    async fn nothing_more(rx: &mut mpsc::UnboundedReceiver<RuntimeStream>) {
         assert!(timeout(STAYS_AWAY, rx.recv()).await.is_err());
     }
 
@@ -617,5 +752,136 @@ mod tests {
         let later = connect(&client, &addr).await;
         let _later = open(&later).await;
         next(&mut rx).await;
+    }
+
+    type Bridge =
+        fn(SendStream, RecvStream) -> io::Result<(RuntimeStream, tokio::task::JoinHandle<()>)>;
+
+    /// 两种搬运实现跑同一套桥接测试：本平台用的那份，和 Windows 用的线程版。
+    const BRIDGES: [(&str, Bridge); 2] = [
+        ("platform", bridge_tracked),
+        ("threaded", threaded::bridge_tracked),
+    ];
+
+    /// 一条桥接好的流：`remote` 是 QUIC 那头（测试直接读写），`local` 是交给上层的那头。
+    /// 解构时每个字段都要绑定：没绑定的字段在语句结束就被丢掉，端点一丢连接就断了。
+    struct Bridged {
+        _server: (Endpoint, Connection),
+        _client: Endpoint,
+        conn: Connection,
+        remote: (SendStream, RecvStream),
+        local: RuntimeStream,
+        pumped: tokio::task::JoinHandle<()>,
+    }
+
+    async fn bridged(bridge: Bridge) -> Bridged {
+        let server = local_endpoint(vec![TEST_ALPN.to_vec()]).await;
+        let client = local_endpoint(Vec::new()).await;
+        let addr = server.addr();
+        // 服务端不接下连接，握手就不往下走：两边要同时进行。
+        let (conn, accepted) = tokio::join!(connect(&client, &addr), async {
+            server.accept().await.unwrap().await.unwrap()
+        });
+        let remote = open(&conn).await;
+        let (send, recv) = accepted.accept_bi().await.unwrap();
+        let (local, pumped) = bridge(send, recv).unwrap();
+        local.set_read_timeout(Some(ARRIVES)).unwrap();
+        // `open` 写的那个字节：对端要收到数据才看得见这条流。
+        let local = blocking(move || {
+            let mut byte = [0u8; 1];
+            (&local).read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"x");
+            local
+        })
+        .await;
+        Bridged {
+            _server: (server, accepted),
+            _client: client,
+            conn,
+            remote,
+            local,
+            pumped,
+        }
+    }
+
+    /// 本地一头是阻塞读写，放到阻塞线程上做，别卡住 tokio。
+    async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        tokio::task::spawn_blocking(f).await.unwrap()
+    }
+
+    fn read_to_eof(mut local: &RuntimeStream) -> Vec<u8> {
+        let mut out = Vec::new();
+        local.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bridge_keeps_the_other_direction_after_a_half_close() {
+        for (name, bridge) in BRIDGES {
+            let Bridged {
+                conn: _conn,
+                remote: (mut send, mut recv),
+                local,
+                pumped,
+                _server,
+                _client,
+            } = bridged(bridge).await;
+            send.write_all(b"ping").await.unwrap();
+            send.finish().unwrap();
+            let local = blocking(move || {
+                assert_eq!(read_to_eof(&local), b"ping", "{name}");
+                (&local).write_all(b"pong").unwrap();
+                local
+            })
+            .await;
+            drop(local);
+            let reply = timeout(ARRIVES, recv.read_to_end(1024)).await.unwrap();
+            assert_eq!(reply.unwrap(), b"pong", "{name}");
+            timeout(ARRIVES, pumped).await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bridge_finishes_when_the_local_end_closes() {
+        for (name, bridge) in BRIDGES {
+            let Bridged {
+                conn: _conn,
+                remote: (_send, mut recv),
+                local,
+                pumped,
+                _server,
+                _client,
+            } = bridged(bridge).await;
+            blocking(move || {
+                (&local).write_all(b"bye").unwrap();
+                drop(local);
+            })
+            .await;
+            let rest = timeout(ARRIVES, recv.read_to_end(1024)).await.unwrap();
+            assert_eq!(rest.unwrap(), b"bye", "{name}");
+            timeout(ARRIVES, pumped).await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bridge_closes_the_local_end_when_the_connection_drops() {
+        for (name, bridge) in BRIDGES {
+            let Bridged {
+                conn,
+                remote: _remote,
+                local,
+                pumped,
+                _server,
+                _client,
+            } = bridged(bridge).await;
+            conn.close(0u32.into(), b"gone");
+            let read = blocking(move || {
+                let mut buf = [0u8; 16];
+                (&local).read(&mut buf).map_err(|error| error.kind())
+            })
+            .await;
+            assert_eq!(read, Ok(0), "{name}");
+            timeout(ARRIVES, pumped).await.unwrap().unwrap();
+        }
     }
 }

@@ -53,7 +53,7 @@ cargo run --bin smelt
   主库入口（`sqlite_state.rs`，关系表在 `smelt-store`）。`daemon_state` 和 `agent_status`
   的定义在 `smelt-model`，这里只再导出。
 - **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
-  `~/.smelt/client.sqlite3`（外观、每段对话的界面状态和分屏布局、连过哪些运行时）。
+  `~/.smelt/client.sqlite3`（外观、每段对话的界面状态和分屏布局、连过哪些运行时）。`SCHEMA_VERSION = 4`。
 - **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（unix socket 与 iroh）。
 - **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify`）：
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
@@ -64,7 +64,7 @@ cargo run --bin smelt
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
 - **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
-- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 23，按字段建表，没有通用 kv）。
+- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 24，按字段建表，没有通用 kv）。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
 - **`crates/smelt-mobile`** —— 手机 Rust 内核（身份、连接、目录、对话、终端、离线缓存），经 flutter_rust_bridge 给 Flutter。
@@ -251,30 +251,37 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 桌面 GUI 和手机都是客户端。机器上的会话、项目、智能体、自动化在那台机器的 `smeltd` 里。
 一个桌面窗口可以同时挂上本机和多台远程运行时：侧栏按运行时分块，Git、文件、历史和额度打到会话所在的那一台。
 添加远程运行时是把一次性配对串粘进桌面。设置里标了「只作用于本机运行时」的页面不改远程机器。
+智能体列表按机器分组。桌面可以在已配对的远程机器上新建、编辑智能体。远程机器上的智能体对话进入侧栏「最近对话」，行上标出机器名。能力库里的「记忆」跟着当前选中的机器。
 
 ### Linux 无头运行时
 
-发布包是 `smeltd-<版本>-linux-<架构>.tar.gz`（`scripts/package-linux.sh`）。在机器上解包后：
+发布包是 `smeltd-<版本>-linux-<架构>.tar.gz`（`scripts/package-linux.sh`）。一键安装：
 
 ```bash
-./install.sh           # 装 systemd 用户服务、启动，并打印配对串
-./install.sh --no-pair # 只安装并启动
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash -s -- --with-desktop
 ```
 
-脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-pi`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-pi-<指纹>/`，`~/.smelt/bin/smelt-pi` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-pi）。已经在跑就交接，会话保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
+`install.sh` 会下载对应架构的 tar.gz、对照 `SHA256SUMS` 校验，再调用包里的脚本。也可以自己解包后在包目录执行 `./install.sh`。参数：`--with-desktop`（TigerVNC / Xvnc、XFCE、Chrome 或 Chromium，用户级 systemd 服务 `smelt-display`、`smelt-desktop`、`smelt-chrome`，并执行 `smeltd mcp add playwright`）、`--relay=<地址>`（初始 iroh 中继，域名、IP 或 URL）、`--apt-mirror=<镜像>`（这次安装用的 apt 源；不给时官方源连不上就自动换阿里云 / 清华 / 中科大）、`--no-pair`。
+
+脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-pi`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-pi-<指纹>/`，`~/.smelt/bin/smelt-pi` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-pi）。已经在跑就交接，会话保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`，供 ACP 适配器和 MCP 使用。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
 
 ```bash
 smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码
 smeltd devices                   # 列出已配对设备
 smeltd devices revoke <endpoint> # 撤销并立刻断开
 smeltd status
+smeltd relay                     # 查看当前 iroh 中继
+smeltd relay <url>               # 只用这个自建中继
+smeltd relay off                 # 改回 n0 的公共中继
+smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea、browser-mcp
 ```
 
 `pair` 会把远程访问打开（保留已填写的自建 relay）。配对串 10 分钟、用一次。配对等于把这台机器上当前用户的 shell 交给对方。macOS 上守护仍由桌面拉起，`smeltd install` 只在 Linux 注册 systemd 单元。细节在 `crates/smeltd/src/service.rs` 和 `scripts/install-smeltd.sh`。
 
 ### 远程桌面
 
-配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。中文直接打在画面上。安装包里的 `--with-desktop`（把 Xvnc、桌面环境和常驻浏览器一并装上）还没做，现有机器上的显示栈是单独配的。见 `docs/archive/remote-runtime.html` 的 D9。
+配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。中文直接打在画面上。`install.sh --with-desktop` 装上 Xvnc（起始 1440×900）、XFCE 和常驻 Chrome（调试端口 `127.0.0.1:9222`）。内置 `playwright` 预设看到 `~/.smelt/desktop/bin/display` 就用 `--cdp-endpoint http://127.0.0.1:9222`，否则用 `--extension`。见 `docs/archive/remote-runtime.html` 的 D9。
 
 ### 终端 Dock
 
@@ -286,7 +293,7 @@ smeltd status
 
 ### 手机
 
-`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。内核是一个「机队」：同时连着所有配对过的机器，每台一个节点（连接状态机、会话目录投影、对话订阅、终端字节流），各自重连、互不影响，没有「当前运行时」；全进程共用一个 iroh endpoint，形态由所有机器的 relay 设置决定。跨机器的指挥台（等你处理的单据、各机器在做和刚完成的会话）也在内核里投影。设计见 [`mobile-redesign.md`](mobile-redesign.md) 第 1 节。机器登记和消息草稿存在 App 数据目录的 `smelt-mobile.sqlite3`，按 `user_version` 逐步迁移、不删库。离线时读同目录的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每台机器最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端区域固定深色（底色、前景与 ANSI 色板在 `mobile/lib/theme/terminal_theme.dart`），不随 App 明暗切换，也不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`archive/mobile-runtime-p4.md`](archive/mobile-runtime-p4.md)。
+`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。界面叫「出菜口」：四栏是指挥台、会话、智能体、设置；平板是导航、列表、详情三栏；中英双语。内核是一个「机队」：同时连着所有配对过的机器，每台一个节点（连接状态机、会话目录投影、对话订阅、终端字节流），各自重连、互不影响，没有「当前运行时」；全进程共用一个 iroh endpoint，形态由所有机器的 relay 设置决定。跨机器的指挥台（等你处理的单据、各机器在做和刚完成的会话）也在内核里投影。设计见 [`mobile-redesign.md`](mobile-redesign.md) 第 1 节。机器登记和消息草稿存在 App 数据目录的 `smelt-mobile.sqlite3`，按 `user_version` 逐步迁移、不删库。离线时读同目录的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每台机器最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端区域固定深色（底色、前景与 ANSI 色板在 `mobile/lib/theme/terminal_theme.dart`），不随 App 明暗切换，也不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`archive/mobile-runtime-p4.md`](archive/mobile-runtime-p4.md)。
 
 ## 路线图
 

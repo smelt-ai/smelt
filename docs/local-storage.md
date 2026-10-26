@@ -35,7 +35,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SM
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，schema 版本 3（`crates/smelt-client-store/src/schema.rs`）。
+只属于这台桌面，`SCHEMA_VERSION = 4`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。
 
 | 表 | 内容 |
 | --- | --- |
@@ -45,7 +45,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SM
 | `workspace_ui` | 当前路由、侧栏宽度和开合 |
 | `collapsed_project` / `pinned_project` / `collapsed_agent` | 按 `runtime_id` 记住折叠和置顶 |
 | `conversation_route` / `conversation_route_path` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端、工具面板、打开的文件、Git 视图 |
-| `runtime_connection` | 这台桌面连过哪些运行时（endpoint、relay、名字） |
+| `runtime_connection` | 这台桌面连过哪些运行时（endpoint、relay、名字、`smelt_home`） |
 | `runtime_migration` | 客户端数据迁出运行时库的标记 |
 
 从旧版本迁移前，旧库整份留成 `client.sqlite3.bak-v<旧版本>`。

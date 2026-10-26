@@ -2,20 +2,24 @@
 //!
 //! Published generation directories are never modified. Their lease inode lives outside the
 //! content tree so GC can remove a generation while retaining one stable synchronization object.
-
-#![cfg(unix)]
+//!
+//! 管理锁独占，generation 租约共享：同一个 generation 可以被任意多个会话同时钉住，
+//! GC 要拿到独占锁才删。Unix 用 `flock`，子进程可以继承共享租约。Windows 用
+//! `LockFileEx` 的共享锁，句柄不交给子进程，升级会重启，不做继承。
 
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write as _,
-    os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::{fs::OpenOptionsExt as _, process::CommandExt as _},
-    },
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
+};
+
+#[cfg(unix)]
+use std::os::{
+    fd::{AsRawFd, OwnedFd},
+    unix::{fs::OpenOptionsExt as _, process::CommandExt as _},
 };
 
 pub const GENERATION_SCHEMA: u32 = 1;
@@ -83,16 +87,35 @@ impl GenerationStore {
         fs::create_dir_all(&self.runtime)
             .map_err(|error| format!("创建受管运行时目录失败：{error}"))?;
         let path = self.runtime.join(".generation.lock");
-        let file =
-            open_lock_file(&path).map_err(|error| format!("打开受管运行时管理锁失败：{error}"))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(Some(RuntimeManagerLock { _file: file }));
+        #[cfg(unix)]
+        {
+            let file = open_lock_file(&path)
+                .map_err(|error| format!("打开受管运行时管理锁失败：{error}"))?;
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Some(RuntimeManagerLock { _file: file }));
+            }
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::EWOULDBLOCK) | Some(libc::EAGAIN)
+            ) {
+                Ok(None)
+            } else {
+                Err(format!("锁定受管运行时目录失败：{error}"))
+            }
         }
-        let error = std::io::Error::last_os_error();
-        if matches!(error.raw_os_error(), Some(libc::EWOULDBLOCK)) {
-            Ok(None)
-        } else {
-            Err(format!("锁定受管运行时目录失败：{error}"))
+        #[cfg(windows)]
+        {
+            match smelt_sys::file_lock::ExclusiveFile::try_lock(&path) {
+                Ok(Some(file)) => Ok(Some(RuntimeManagerLock { _file: file })),
+                Ok(None) => Ok(None),
+                Err(error) => Err(format!("锁定受管运行时目录失败：{error}")),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Err("这个平台没有文件锁".to_string())
         }
     }
 
@@ -100,14 +123,29 @@ impl GenerationStore {
         fs::create_dir_all(&self.runtime)
             .map_err(|error| format!("创建受管运行时目录失败：{error}"))?;
         let path = self.runtime.join(".generation.lock");
-        let file =
-            open_lock_file(&path).map_err(|error| format!("打开受管运行时管理锁失败：{error}"))?;
         debug_assert!(
             !nonblocking,
             "nonblocking acquisition uses try_lock_manager"
         );
-        flock(&file, libc::LOCK_EX, "锁定受管运行时目录")?;
-        Ok(RuntimeManagerLock { _file: file })
+        #[cfg(unix)]
+        {
+            let file = open_lock_file(&path)
+                .map_err(|error| format!("打开受管运行时管理锁失败：{error}"))?;
+            flock(&file, libc::LOCK_EX, "锁定受管运行时目录")?;
+            Ok(RuntimeManagerLock { _file: file })
+        }
+        #[cfg(windows)]
+        {
+            let _ = nonblocking;
+            let file = smelt_sys::file_lock::ExclusiveFile::lock(&path)
+                .map_err(|error| format!("锁定受管运行时目录失败：{error}"))?;
+            Ok(RuntimeManagerLock { _file: file })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (path, nonblocking);
+            Err("这个平台没有文件锁".to_string())
+        }
     }
 
     /// Must be called while the manager lock is held. The caller keeps that lock until this
@@ -129,16 +167,35 @@ impl GenerationStore {
         let parent = path.parent().ok_or("generation lease 没有父目录")?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("创建 generation lease 目录失败：{error}"))?;
-        let file = open_lock_file(&path)
-            .map_err(|error| format!("打开 generation lease 失败：{error}"))?;
-        flock(&file, libc::LOCK_SH, "钉住受管运行时 generation")?;
-        let fd: OwnedFd = file.into();
-        Ok(GenerationLease {
-            kind,
-            id: id.to_string(),
-            root,
-            fd: Arc::new(fd),
-        })
+        #[cfg(unix)]
+        {
+            let file = open_lock_file(&path)
+                .map_err(|error| format!("打开 generation lease 失败：{error}"))?;
+            flock(&file, libc::LOCK_SH, "钉住受管运行时 generation")?;
+            let fd: OwnedFd = file.into();
+            Ok(GenerationLease {
+                kind,
+                id: id.to_string(),
+                root,
+                fd: Arc::new(fd),
+            })
+        }
+        #[cfg(windows)]
+        {
+            let file = smelt_sys::file_lock::SharedFile::lock(&path)
+                .map_err(|error| format!("钉住受管运行时 generation 失败：{error}"))?;
+            Ok(GenerationLease {
+                kind,
+                id: id.to_string(),
+                root,
+                _lock: Arc::new(file),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (path, root, kind, id);
+            Err("这个平台没有文件锁".to_string())
+        }
     }
 
     pub fn acquire_shared(
@@ -355,23 +412,48 @@ impl GenerationStore {
 }
 
 pub struct RuntimeManagerLock {
+    #[cfg(unix)]
     _file: File,
+    /// 锁随这个值活着。Windows 不继承句柄，升级会重启。
+    #[cfg(windows)]
+    _file: smelt_sys::file_lock::ExclusiveFile,
 }
 
 impl RuntimeManagerLock {
     /// Keep the manager transaction alive if the supervisor dies while a staging subprocess is
     /// still writing. This is only for bounded build/download children, never runtime sessions.
+    /// Windows 没有把锁句柄交给子进程这一步：升级不交接，子进程退出锁就没了。
     pub fn inherit_into(&self, command: &mut Command) {
+        #[cfg(unix)]
         inherit_raw_fds(command, &[self._file.as_raw_fd()]);
+        #[cfg(not(unix))]
+        {
+            let _ = command;
+        }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GenerationLease {
     kind: GenerationKind,
     id: String,
     root: PathBuf,
+    #[cfg(unix)]
     fd: Arc<OwnedFd>,
+    /// 最后一份克隆 drop 时句柄关掉，共享锁才放。
+    #[cfg(windows)]
+    _lock: Arc<smelt_sys::file_lock::SharedFile>,
+}
+
+impl std::fmt::Debug for GenerationLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GenerationLease")
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GenerationLease {
@@ -387,13 +469,17 @@ impl GenerationLease {
         &self.root
     }
 
+    #[cfg(unix)]
     pub fn inherited_fd(&self) -> Arc<OwnedFd> {
         Arc::clone(&self.fd)
     }
 }
 
 struct ExclusiveGenerationLease {
+    #[cfg(unix)]
     _file: File,
+    #[cfg(windows)]
+    _file: smelt_sys::file_lock::ExclusiveFile,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -409,6 +495,7 @@ pub struct BunGenerationManifest {
 }
 
 pub fn inherit_generation_fds(command: &mut Command, leases: &[GenerationLease]) {
+    #[cfg(unix)]
     inherit_raw_fds(
         command,
         &leases
@@ -416,8 +503,14 @@ pub fn inherit_generation_fds(command: &mut Command, leases: &[GenerationLease])
             .map(|lease| lease.fd.as_raw_fd())
             .collect::<Vec<_>>(),
     );
+    #[cfg(not(unix))]
+    {
+        // Windows 不把 generation 租约句柄交出去。升级重启，不假装继承。
+        let _ = (command, leases);
+    }
 }
 
+#[cfg(unix)]
 fn inherit_raw_fds(command: &mut Command, fds: &[std::os::fd::RawFd]) {
     let fds = fds.to_vec();
     // SAFETY: the closure runs after fork in the child. It only calls async-signal-safe fcntl and
@@ -442,27 +535,49 @@ fn try_exclusive(path: &Path) -> Result<ExclusiveGenerationLease, String> {
     let parent = path.parent().ok_or("generation lease 没有父目录")?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("创建 generation lease 目录失败：{error}"))?;
-    let file =
-        open_lock_file(path).map_err(|error| format!("打开 generation GC lease 失败：{error}"))?;
-    flock(&file, libc::LOCK_EX | libc::LOCK_NB, "generation 仍在使用")?;
-    Ok(ExclusiveGenerationLease { _file: file })
+    #[cfg(unix)]
+    {
+        let file = open_lock_file(path)
+            .map_err(|error| format!("打开 generation GC lease 失败：{error}"))?;
+        flock(&file, libc::LOCK_EX | libc::LOCK_NB, "generation 仍在使用")?;
+        Ok(ExclusiveGenerationLease { _file: file })
+    }
+    #[cfg(windows)]
+    {
+        match smelt_sys::file_lock::ExclusiveFile::try_lock(path) {
+            Ok(Some(file)) => Ok(ExclusiveGenerationLease { _file: file }),
+            Ok(None) => Err("generation 仍在使用失败：锁被占用".to_string()),
+            Err(error) => Err(format!("打开 generation GC lease 失败：{error}")),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err("这个平台没有文件锁".to_string())
+    }
 }
 
 fn open_lock_file(path: &Path) -> std::io::Result<File> {
-    let file = OpenOptions::new()
+    let mut options = OpenOptions::new();
+    options
         .create(true)
         .read(true)
         .write(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)?;
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("lock path is not a regular file"));
     }
     Ok(file)
 }
 
+#[cfg(unix)]
 fn flock(file: &File, operation: libc::c_int, action: &str) -> Result<(), String> {
     if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
         Ok(())
@@ -496,10 +611,13 @@ fn published_marker_is_valid(root: &Path) -> bool {
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(path)
         .map_err(|error| format!("创建 {} 失败：{error}", path.display()))?;
     file.write_all(bytes)
@@ -515,9 +633,7 @@ fn sync_tree(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     if metadata.is_file() {
-        File::open(path)
-            .and_then(|file| file.sync_all())
-            .map_err(|error| format!("持久化 generation 文件 {} 失败：{error}", path.display()))?;
+        sync_file(path)?;
         return Ok(());
     }
     if metadata.is_dir() {
@@ -534,10 +650,30 @@ fn sync_tree(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn sync_file(path: &Path) -> Result<(), String> {
+    // Windows 的 FlushFileBuffers 要求写权限。只读打开会返回拒绝访问。
+    #[cfg(windows)]
+    let opened = OpenOptions::new().read(true).write(true).open(path);
+    #[cfg(not(windows))]
+    let opened = File::open(path);
+    opened
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("持久化 generation 文件 {} 失败：{error}", path.display()))
+}
+
 fn sync_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("持久化目录 {} 失败：{error}", path.display()))
+    #[cfg(unix)]
+    {
+        File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("持久化目录 {} 失败：{error}", path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows 用普通 CreateFile 打不开目录。文件本身已经 sync_all。
+        let _ = path;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -576,8 +712,7 @@ mod tests {
         fs::create_dir_all(runtime.join("current")).unwrap();
         fs::write(runtime.join("current/pi"), b"pi-aaaaaaaa\n").unwrap();
 
-        let held = open_lock_file(&runtime.join("leases/pi/pi-bbbbbbbb.lock")).unwrap();
-        flock(&held, libc::LOCK_SH, "测试占住旧 Pi generation").unwrap();
+        let held = hold_lease(&runtime.join("leases/pi/pi-bbbbbbbb.lock"));
         {
             let _manager = store.lock_manager().unwrap();
             store.retire_kind_locked("pi");
@@ -618,6 +753,28 @@ mod tests {
         assert_eq!(fs::read(final_root.join("bun")).unwrap(), b"complete");
         assert!(final_root.join(MANIFEST_FILE).is_file());
         assert!(final_root.join(READY_FILE).is_file());
+    }
+
+    fn hold_lease(path: &Path) -> HeldLease {
+        #[cfg(unix)]
+        {
+            let file = open_lock_file(path).unwrap();
+            flock(&file, libc::LOCK_SH, "测试占住旧 Pi generation").unwrap();
+            HeldLease { _file: file }
+        }
+        #[cfg(windows)]
+        {
+            HeldLease {
+                _file: smelt_sys::file_lock::SharedFile::lock(path).unwrap(),
+            }
+        }
+    }
+
+    struct HeldLease {
+        #[cfg(unix)]
+        _file: File,
+        #[cfg(windows)]
+        _file: smelt_sys::file_lock::SharedFile,
     }
 
     /// Re-executed by `child_process_acquired_shared_lease_blocks_exclusive_gc`.
@@ -708,6 +865,7 @@ mod tests {
         assert!(store.lease_path(GenerationKind::Bun, id).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_child_shared_lease_blocks_cross_process_gc() {
         if std::env::var_os("SMELT_GENERATION_LEASE_HELPER").is_some() {
@@ -767,6 +925,7 @@ mod tests {
     }
 
     /// Helper process that exits immediately after handing its manager-lock FD to a builder.
+    #[cfg(unix)]
     #[test]
     fn manager_lock_supervisor_exits_after_spawning_builder() {
         let (Some(runtime), Some(pid_file)) = (
@@ -791,6 +950,7 @@ mod tests {
     }
 
     /// The child keeps the exclusive manager transaction alive after its supervisor exits.
+    #[cfg(unix)]
     #[test]
     fn inherited_manager_lock_survives_supervisor_process_exit() {
         let temp = tempfile::tempdir().unwrap();
@@ -830,6 +990,7 @@ mod tests {
     }
 
     /// Helper process that exits after passing its shared generation lease to a child.
+    #[cfg(unix)]
     #[test]
     fn lease_supervisor_exits_after_spawning_runtime_child() {
         let (Some(runtime), Some(id), Some(pid_file)) = (
@@ -856,6 +1017,7 @@ mod tests {
         drop(lease);
     }
 
+    #[cfg(unix)]
     #[test]
     fn inherited_lease_fd_survives_supervisor_process_exit_and_exec() {
         let temp = tempfile::tempdir().unwrap();
@@ -917,8 +1079,10 @@ mod tests {
         assert!(store.lease_path(GenerationKind::Bun, id).exists());
     }
 
+    #[cfg(unix)]
     struct OrphanProcess(i32);
 
+    #[cfg(unix)]
     impl OrphanProcess {
         fn kill(&mut self) {
             if self.0 > 1 {
@@ -928,6 +1092,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for OrphanProcess {
         fn drop(&mut self) {
             self.kill();
@@ -1083,6 +1248,48 @@ mod tests {
             fs::read(store.generation_root(GenerationKind::Bun, id).join("bun")).unwrap(),
             b"rebuilt"
         );
+    }
+
+    /// 两个会话同时用同一个 Bun generation：第二份租约不能被第一份挡住，
+    /// 两份都在时 GC 也删不掉。租约要是独占锁，第二个会话会拿着管理锁一直等下去。
+    #[test]
+    fn two_leases_on_one_generation_coexist_and_both_block_gc() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let id = "bun-12121212";
+        {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                    fs::write(staging.join("bun"), b"published").map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        let first = store.acquire_shared(GenerationKind::Bun, id).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let second_store = store.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(second_store.acquire_shared(GenerationKind::Bun, id));
+        });
+        let second = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("第二份租约被第一份挡住了")
+            .unwrap();
+        drop(first);
+        {
+            let _manager = store.lock_manager().unwrap();
+            assert!(
+                store
+                    .discard_invalid_locked(GenerationKind::Bun, id)
+                    .is_err(),
+                "还有一份租约时 GC 不能删"
+            );
+        }
+        drop(second);
+        let _manager = store.lock_manager().unwrap();
+        store
+            .discard_invalid_locked(GenerationKind::Bun, id)
+            .unwrap();
     }
 
     #[test]

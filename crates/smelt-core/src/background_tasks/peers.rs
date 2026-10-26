@@ -9,13 +9,12 @@
 //! 只认会话本身（空归属）：子智能体不收也不发。
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::acp_conn::ConversationEvent;
 use crate::acp_session::{PeerDelivery, PeerMessageStatus, PeerMessageView};
 
-use super::{Inner, ModelNotice, State, now_ms, poke, request_owner};
+use super::{Inner, ModelNotice, State, TaskStream, now_ms, poke, request_owner};
 
 /// 送到的留最近这么多条，`session_list` 据此告诉发送方送到了没有。
 const KEEP_DELIVERED: usize = 64;
@@ -57,7 +56,7 @@ pub(super) fn deliver(inner: &Inner, delivery: PeerDelivery) {
 }
 
 /// 扩展的请求转给主 daemon，回答原样写回。子智能体不能用。
-pub(super) fn forward(mut stream: UnixStream, op: &str, request: &serde_json::Value) {
+pub(super) fn forward(mut stream: TaskStream, op: &str, request: &serde_json::Value) {
     let reply = if !request_owner(request).is_empty() {
         serde_json::json!({"ok": false, "error": "子智能体不能和别的对话通信"})
     } else {

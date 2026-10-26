@@ -5,6 +5,7 @@
 //! 是历史 wire 兼容名，不代表这里向 Pi 发送过任何 ACP 消息。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -397,7 +398,9 @@ async fn run_connection(
         );
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
+            #[cfg(unix)]
             stdin_fd: spawned.0.as_raw_fd(),
+            #[cfg(unix)]
             stdout_fd: spawned.1.as_raw_fd(),
         });
         spawned
@@ -527,6 +530,22 @@ fn agent_model_from_launch(launch: &ConversationLaunch) -> Option<(String, Strin
     Some((provider.to_string(), model.to_string()))
 }
 
+/// 交给子进程的 `SMELT_SOCK`。Unix 是 sock 文件。Windows 上 Bun 的
+/// `net.connect` 只认命名管道，名字和 smeltd 监听的 `daemon_pipe_path` 相同。
+fn daemon_sock_for_child() -> String {
+    #[cfg(windows)]
+    {
+        if let Ok(name) = smelt_sys::named_pipe::daemon_pipe_path(
+            &crate::daemon_state::smeltd_sock_path(),
+        ) {
+            return name;
+        }
+    }
+    crate::daemon_state::smeltd_sock_path()
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn spawn_process(
     launch: &ConversationLaunch,
     inline_env: BTreeMap<String, String>,
@@ -561,12 +580,7 @@ fn spawn_process(
         crate::managed_runtime::PI_PROTOCOL_ENV,
         crate::managed_runtime::pi_protocol(),
     );
-    command.env(
-        "SMELT_SOCK",
-        crate::daemon_state::smeltd_sock_path()
-            .to_string_lossy()
-            .as_ref(),
-    );
+    command.env("SMELT_SOCK", daemon_sock_for_child());
     if let Some(path) = background_sock {
         command.env("SMELT_BACKGROUND_TASK_SOCK", path);
     }
@@ -578,6 +592,13 @@ fn spawn_process(
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
+        );
+    }
     let mut command = async_process::Command::from(command);
     let mut child = command
         .stdin(std::process::Stdio::piped())
@@ -585,6 +606,11 @@ fn spawn_process(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| format!("无法启动 Pi RPC：{error}"))?;
+    #[cfg(windows)]
+    if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
+        drop(child);
+        return Err(format!("无法把 Pi 放进进程树：{error}"));
+    }
     let stdin = child.stdin.take().ok_or("无法打开 Pi RPC stdin")?;
     let stdout = child.stdout.take().ok_or("无法打开 Pi RPC stdout")?;
     let stderr = child.stderr.take().ok_or("无法打开 Pi RPC stderr")?;
@@ -668,11 +694,17 @@ impl PiProcessGuard {
         let reaped = crate::process_wait::wait_for_pid(
             pid,
             PI_EXIT_GRACE,
-            || unsafe {
-                libc::kill(-pid, libc::SIGTERM);
+            move || {
+                let _ = smelt_sys::process::signal_tree(
+                    pid as u32,
+                    smelt_sys::process::TreeSignal::Interrupt,
+                );
             },
-            move || unsafe {
-                libc::kill(-pid, libc::SIGKILL);
+            move || {
+                let _ = smelt_sys::process::signal_tree(
+                    pid as u32,
+                    smelt_sys::process::TreeSignal::Kill,
+                );
             },
             PI_EXIT_GRACE,
         );
@@ -680,6 +712,9 @@ impl PiProcessGuard {
             // 子进程理论上仍是组长；即便它异常改了进程组，也要保证直属 child 会死。
             let _ = self.child.kill();
             let _ = crate::process_wait::reap_direct_child(pid);
+        }
+        if let Ok(pid) = u32::try_from(pid) {
+            smelt_sys::process::release_tree(pid);
         }
     }
 
@@ -7865,8 +7900,8 @@ mod tests {
         .unwrap();
 
         use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixStream;
-        let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+        let mut stream =
+            crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
         stream
             .write_all(b"{\"op\":\"start\",\"command\":\"sleep 30\",\"title\":\"task\"}\n")
             .unwrap();
@@ -7889,7 +7924,7 @@ mod tests {
         ))
         .unwrap();
 
-        let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+        let mut stream = crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
         let wait = serde_json::json!({"op": "wait", "id": started["id"]});
         stream.write_all(format!("{wait}\n").as_bytes()).unwrap();
         let mut line = String::new();
@@ -7953,8 +7988,8 @@ mod tests {
         .unwrap();
 
         use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixStream;
-        let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+        let mut stream =
+            crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
         stream
             .write_all(b"{\"op\":\"start\",\"command\":\"sleep 30\",\"title\":\"task\"}\n")
             .unwrap();
@@ -7982,7 +8017,7 @@ mod tests {
 
         let started_at = std::time::Instant::now();
         let status = loop {
-            let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+            let mut stream = crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
             let wait = serde_json::json!({"op": "wait", "id": id});
             stream.write_all(format!("{wait}\n").as_bytes()).unwrap();
             let mut line = String::new();

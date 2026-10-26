@@ -13,6 +13,7 @@ members = [
     "crates/smelt-sys",
     "crates/smelt-model",
     "crates/smelt-client",
+    "crates/smelt-cli",
     "crates/smelt-event-protocol",
     "crates/smelt-event-bus",
     "crates/smelt-store",
@@ -48,7 +49,7 @@ thiserror = "2"
 # patch 不随依赖传递，所以这里照抄一份，rev 必须和各 crate 里的 gpui-kit 一致。
 # 去掉会让 crates.io 的 rquickjs-core 和 quickjs-jit 同时进依赖图，gpui-shell 编不过
 # （2026-10-16 在 8a83be7e 上验证）。上游官方仓库，不是 fork。
-rquickjs = { git = "https://github.com/longbridge/gpui-kit", rev = "77ff6f794dca3bcee2e90977cedf12a64aed17e4" }
+rquickjs = { git = "https://github.com/longbridge/gpui-kit", rev = "219fc1a9bdd6236c3a58f07c810e1b87079890c1" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

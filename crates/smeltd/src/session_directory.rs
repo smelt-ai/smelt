@@ -39,7 +39,7 @@ pub fn session_directory_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("SMELT_GHOST_SESSIONS_DIR") {
         return PathBuf::from(dir).join(smelt_store::DATABASE_FILE_NAME);
     }
-    let dir = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
+    let dir = smelt_paths::smelt_home().unwrap_or_else(|| std::env::temp_dir().join(".smelt"));
     let _ = std::fs::create_dir_all(&dir);
     dir.join(smelt_store::DATABASE_FILE_NAME)
 }
@@ -685,6 +685,7 @@ mod tests {
             let directory = SessionDirectory::with_interval(Duration::ZERO);
             directory.upsert(&sample_state("s1"));
             assert!(database.exists(), "写入后主库应当存在");
+            #[cfg(unix)]
             let inode = file_identity(&database);
 
             directory.clear_for_clean_shutdown();
@@ -693,6 +694,7 @@ mod tests {
                 database.exists(),
                 "干净退出把主库删了，全部用户数据会随之消失"
             );
+            #[cfg(unix)]
             assert_eq!(
                 file_identity(&database),
                 inode,
@@ -701,6 +703,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     fn file_identity(path: &std::path::Path) -> u64 {
         use std::os::unix::fs::MetadataExt as _;
         std::fs::metadata(path).expect("读取主库元数据").ino()

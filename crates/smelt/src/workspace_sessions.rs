@@ -51,7 +51,7 @@ impl Workspace {
             // 一次性闸门在 maybe_auto_resume 里：桌面已经拉起过或拉失败过就不再重试，
             // 和点开时的行为一致。
             Some(view) => view.update(cx, |view, cx| view.maybe_auto_resume(window, cx)),
-            None if !self.local.sessions_restored
+            None if !self.sessions_restore_settled()
                 && !self.pending_conversation_wakes.contains(&session_id) =>
             {
                 self.pending_conversation_wakes.push(session_id);
@@ -119,8 +119,8 @@ impl Workspace {
             .spawn(move || {
                 // 1) 完整 ensure（可能 handoff）→ 2) 再 reattach。禁止与 UI 侧并行 upgrade。
                 if runtime_bg.is_local() {
-                    let _ = terminal::ensure_managed_daemon_current();
-                    terminal::ensure_daemon_running();
+                    let _ = crate::local_daemon::ensure_managed_daemon_current();
+                    crate::local_daemon::ensure_daemon_running();
                 }
                 // ACP 占位只有收到这道闸门后才会在 UI 线程创建；否则当前活动会话
                 // 会立刻 auto-resume，随后 ensure/handoff 重启守护，把刚建的 socket
@@ -1345,12 +1345,13 @@ impl Workspace {
                 cx,
             );
         }
+        let runtime = crate::runtimes::Runtime::local();
         let view_profile_id = profile_id;
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::Runtime::local(),
+                    runtime,
                     launch_prep: Some(acp_view::LaunchPrep {
                         agent_definition_id: agent_definition_id.clone(),
                         restore: false,
@@ -1966,6 +1967,7 @@ impl Workspace {
 
     /// 「打开项目」：在运行时那台机器上选一个目录，加进项目列表。**不自动建会话**——
     /// 打开项目只是把它放上工作台，要开终端还是开对话由分组行的「+」决定。
+    /// 打开项目落在本机。远程机器上打开走侧栏运行时标题行的「+」。
     pub(crate) fn open_project(&mut self, cx: &mut Context<Self>) {
         self.open_project_on(crate::runtimes::Runtime::local(), cx);
     }
@@ -2403,7 +2405,7 @@ impl Workspace {
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
                     // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
-                    if should_auto_resume_active_acp(self.local.sessions_restored) {
+                    if should_auto_resume_active_acp(self.session_restore_settled(ix, cx)) {
                         v.maybe_auto_resume(window, cx);
                     }
                     if !route_has_overlay {

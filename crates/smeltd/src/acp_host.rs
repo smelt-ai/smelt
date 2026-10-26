@@ -755,9 +755,9 @@ struct SnapshotLinkInner {
 }
 
 pub(crate) struct AcpSnapshotLink {
-    pub(crate) fd: RawFd,
+    pub(crate) fd: ConnId,
     inner: Arc<SnapshotLinkInner>,
-    shutdown: UnixStream,
+    shutdown: ClientConn,
 }
 
 const ACP_SNAPSHOT_FLUSH_DEADLINE: Duration = Duration::from_secs(3);
@@ -898,10 +898,10 @@ pub(crate) fn full_frame(frame: &serde_json::Value) -> (Vec<u8>, FrameMirror) {
     (bytes, mirror)
 }
 
-type SnapshotDetach = Arc<dyn Fn(RawFd) + Send + Sync>;
+type SnapshotDetach = Arc<dyn Fn(ConnId) + Send + Sync>;
 
-pub(crate) fn spawn_acp_snapshot_link(
-    stream: UnixStream,
+pub(crate) fn spawn_acp_snapshot_link<C: ClientSocket>(
+    stream: C,
     initial: Vec<u8>,
     mirror: FrameMirror,
     tool_debug_generation_sent: u64,
@@ -910,9 +910,11 @@ pub(crate) fn spawn_acp_snapshot_link(
     encode: SnapshotEncode,
     detach: SnapshotDetach,
 ) -> std::io::Result<AcpSnapshotLink> {
-    let fd = stream.as_raw_fd();
+    let mut stream = stream;
+    let fd = stream.connection_id();
     stream.set_write_timeout(None)?;
-    let shutdown = stream.try_clone()?;
+    let shutdown = stream.try_clone()?.into_client_conn();
+    let stream = stream.into_client_conn();
     let inner = Arc::new(SnapshotLinkInner {
         mailbox: Mutex::new(SnapshotMailbox {
             dirty: None,
@@ -1000,9 +1002,9 @@ pub(crate) fn apply_image_refs(snapshot: &mut smelt_core::acp_session::Conversat
 
 /// `initial` 是首帧（整段帧），`mirror` 和它一起建：见 [`full_frame`]。
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn acp_snapshot_link_for_slot(
+pub(crate) fn acp_snapshot_link_for_slot<C: ClientSocket>(
     slot: &Arc<AcpSlot<AcpSession>>,
-    stream: UnixStream,
+    stream: C,
     initial: Vec<u8>,
     mirror: FrameMirror,
     tool_debug_generation_sent: u64,
@@ -1051,7 +1053,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
 }
 
 struct SnapshotWriter {
-    stream: UnixStream,
+    stream: ClientConn,
     initial: Vec<u8>,
     /// 对方手里有哪些条目。只有这条写线程读写它。
     mirror: FrameMirror,
@@ -1060,7 +1062,7 @@ struct SnapshotWriter {
     inner: Arc<SnapshotLinkInner>,
     id: String,
     kind: &'static str,
-    fd: RawFd,
+    fd: ConnId,
 }
 
 fn acp_snapshot_writer(writer: SnapshotWriter) {
@@ -1185,7 +1187,7 @@ fn note_snapshot_writer_stopped(
     detach: &SnapshotDetach,
     id: &str,
     kind: &'static str,
-    fd: RawFd,
+    fd: ConnId,
     error: &std::io::Error,
 ) {
     inner.failed.store(true, Ordering::SeqCst);
@@ -1193,13 +1195,13 @@ fn note_snapshot_writer_stopped(
     inner.cv.notify_all();
     if !inner.closed.load(Ordering::SeqCst) {
         crate::dlog(&format!(
-            "{kind} snapshot writer stopped id={id} fd={fd} error={error}"
+            "{kind} snapshot writer stopped id={id} fd={fd:?} error={error}"
         ));
         detach(fd);
     }
 }
 
-pub(crate) fn detach_failed_snapshot_link(sess: &AcpSession, fd: RawFd) {
+pub(crate) fn detach_failed_snapshot_link(sess: &AcpSession, fd: ConnId) {
     let _output_gate = sess.output_gate.lock().unwrap();
     let mut out = sess.out.lock().unwrap();
     if out.client.as_ref().is_some_and(|link| link.fd == fd) {
@@ -3499,8 +3501,8 @@ fn apply_submit_config_values(
     Ok(())
 }
 
-pub(crate) fn handle_acp_submit_input(
-    mut conn: UnixStream,
+pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
     workspace_menu: &WorkspaceMenuStore,
@@ -3556,8 +3558,8 @@ pub(crate) fn handle_acp_submit_input(
 
 /// Apply one protocol action without attaching a control client. Prompt here always means
 /// direct ACP delivery; interactive callers must use `acp_submit_input` so binding is honored.
-pub(crate) fn handle_acp_action(
-    mut conn: UnixStream,
+pub(crate) fn handle_acp_action<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
@@ -3665,9 +3667,9 @@ pub(crate) fn handle_acp_action(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
-pub(crate) fn handle_acp_open(
-    conn: UnixStream,
-    mut reader: BufReader<UnixStream>,
+pub(crate) fn handle_acp_open<C: ClientSocket>(
+    conn: C,
+    mut reader: BufReader<C>,
     v: &serde_json::Value,
     sessions: Sessions,
     acp_sessions: AcpSessions,
@@ -3858,7 +3860,7 @@ fn history_page_bytes(sess: &AcpSession, request_id: u64, before: usize, limit: 
     bytes
 }
 
-fn write_rejected_acp_snapshot(mut conn: UnixStream, reason: &str) {
+fn write_rejected_acp_snapshot<C: ClientSocket>(mut conn: C, reason: &str) {
     let mut state = smelt_core::acp_session::AcpSessionState::default();
     state.phase = smelt_core::daemon_state::DaemonPhase::Dead;
     state.end_reason = reason.to_string();
@@ -4029,8 +4031,8 @@ pub(crate) fn ensure_acp_session(
     }
 }
 
-pub(crate) fn handle_acp_create(
-    mut conn: UnixStream,
+pub(crate) fn handle_acp_create<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
@@ -4140,9 +4142,9 @@ pub(crate) fn create_daemon_acp_session(
 /// 对话（daemon 冷重启后桌面只放了占位），就请桌面端拉起来再接上；拉不起来写一行
 /// `{"unavailable": {"reason": ..}}` 说清楚，绝不静默断开——旁观方分不清「没有」
 /// 和「还没到」，只会一直转圈。
-pub(crate) fn handle_acp_watch(
-    mut conn: UnixStream,
-    mut reader: BufReader<UnixStream>,
+pub(crate) fn handle_acp_watch<C: ClientSocket>(
+    mut conn: C,
+    mut reader: BufReader<C>,
     v: &serde_json::Value,
     acp_sessions: AcpSessions,
     workspace_menu: &WorkspaceMenuStore,
@@ -4355,8 +4357,8 @@ fn omit_debug_sidecars(snapshot: &mut smelt_core::acp_session::ConversationSnaps
 
 /// One-shot bounded history read used by mobile upward pagination. Unlike `acp_watch`,
 /// this does not register a watcher and therefore cannot leak a long-lived connection.
-pub(crate) fn handle_acp_snapshot(
-    mut conn: UnixStream,
+pub(crate) fn handle_acp_snapshot<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
@@ -4484,8 +4486,8 @@ enum HistoryRead {
 /// 故意不塞进会话快照：快照每次状态变化都要推给所有观察者，而技能得扫一遍
 /// 磁盘；两者的频率和代价对不上。手机打开对话时问一次即可，和桌面每次渲染
 /// 输入栏重算是同一份来源（`loaded_skills_for_launch`）。
-pub(crate) fn handle_acp_skills(
-    mut conn: UnixStream,
+pub(crate) fn handle_acp_skills<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
 ) {
@@ -4542,8 +4544,8 @@ pub(crate) fn handle_acp_skills(
 /// 杀会话：先在 lifecycle 锁内 retire（waitpid），再从表里摘掉。这是 Recreate：
 /// 拆卸完成前 sid 仍在表里，并发 open 堵在同一把锁上，不会先 reserve 一个
 /// 替换 slot 再用 sleep 去等。证不了退出就留在表里，让后续 open/restart 失败。
-pub(crate) fn handle_acp_kill(
-    conn: UnixStream,
+pub(crate) fn handle_acp_kill<C: ClientSocket>(
+    conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
@@ -4667,8 +4669,8 @@ pub(crate) fn kill_acp_session(
 /// GUI 连接、不清 watchers：会话本体（entries/id/GUI 那条 acp_open 连接）
 /// 全部原样留着，只是换一个新的子进程，带着 resume_session_id 去 `session/load`
 /// 接回同一份历史，对用户来说是同一个标签、同一段对话，只是"服务端"心跳重启了。
-pub(crate) fn handle_acp_restart(
-    conn: UnixStream,
+pub(crate) fn handle_acp_restart<C: ClientSocket>(
+    conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
@@ -4787,6 +4789,7 @@ pub(crate) fn resume_acp_after_handoff_rollback(acp_sessions: &AcpSessions) {
 /// fd 都是收集时 dup 出来的副本（见 [`crate::handoff_v2::predecessor::StagedHandoff`]）：
 /// 原件归会话，交接期间别的线程关会话会关掉它。dup 不出来就说明原件已经关了，这个
 /// 会话不交接，和拿不到 fd 同样处理。
+#[cfg(unix)]
 pub(crate) fn collect_acp_handoff_typed(
     acp_sessions: &AcpSessions,
 ) -> (

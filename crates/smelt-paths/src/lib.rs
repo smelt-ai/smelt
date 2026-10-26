@@ -130,6 +130,7 @@ fn remove_abandoned_sandboxes(tmp: &Path, alive: impl Fn(u32) -> bool) {
 }
 
 /// `EPERM` 说明进程在、只是不归我们管，也算活着。
+#[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -141,6 +142,28 @@ fn pid_is_alive(pid: u32) -> bool {
     // 紧接着读 errno，中间不能再有系统调用。
     let signalled = unsafe { libc::kill(pid, 0) } == 0;
     signalled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// 打不开但拒绝访问，说明进程在、只是不归我们管，也算活着。进程对象在最后一个句柄
+/// 关掉前一直在，所以还要看它退出没有。
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    let mut code = 0u32;
+    let queried = unsafe { GetExitCodeProcess(process, &mut code) } != 0;
+    unsafe { CloseHandle(process) };
+    // 查不到退出码时当它活着：只是晚些再删，不会删错。
+    !queried || code == STILL_ACTIVE as u32
 }
 
 /// 把当前解析结果显式传给子进程。
@@ -256,10 +279,13 @@ mod tests {
 
     #[test]
     fn abandoned_sandboxes_are_removed_and_live_ones_kept() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let tmp = std::env::temp_dir().join(format!(
-            "smelt-paths-sweep-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
+            "smelt-paths-sweep-{}-{stamp}",
+            std::process::id()
         ));
         let dead = tmp.join(format!("{SANDBOX_PREFIX}101")).join(".smelt");
         let live = tmp.join(format!("{SANDBOX_PREFIX}202")).join(".smelt");
@@ -283,7 +309,13 @@ mod tests {
     #[test]
     fn liveness_check_sees_this_process_and_not_a_reaped_child() {
         assert!(pid_is_alive(std::process::id()));
+        #[cfg(unix)]
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit"])
+            .spawn()
+            .unwrap();
         let pid = child.id();
         child.wait().unwrap();
         assert!(!pid_is_alive(pid));

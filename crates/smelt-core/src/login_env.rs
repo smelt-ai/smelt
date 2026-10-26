@@ -53,6 +53,7 @@ fn login_env() -> &'static LoginEnv {
 
 /// 权威探测用户的默认登录 Shell：优先从 `$SHELL` 环境变量取，
 /// 其次通过 `libc::getpwuid` 从系统目录服务获取，最后回退 `/bin/zsh`。
+/// Windows 没有这套目录服务，用 `COMSPEC`（通常是 `cmd.exe`）。
 fn detect_user_shell() -> String {
     if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty())
         && std::path::Path::new(&shell).is_file()
@@ -72,7 +73,41 @@ fn detect_user_shell() -> String {
             return s.to_string();
         }
     }
+    #[cfg(windows)]
+    if let Some(shell) = windows_command_shell() {
+        return shell;
+    }
     "/bin/zsh".to_string()
+}
+
+/// `cmd.exe` 跑不了 `zsh -ilc` 那条探测脚本。只有名字像 Unix shell 时才去探。
+fn unix_login_shell(shell: &str) -> bool {
+    let name = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell);
+    let name = name
+        .rsplit_once('.')
+        .filter(|(_, ext)| ext.eq_ignore_ascii_case("exe"))
+        .map(|(stem, _)| stem)
+        .unwrap_or(name);
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "zsh" | "bash" | "sh" | "fish" | "nu" | "ksh" | "dash" | "ash" | "csh" | "tcsh"
+    )
+}
+
+#[cfg(windows)]
+fn windows_command_shell() -> Option<String> {
+    if let Some(shell) = std::env::var("COMSPEC")
+        .ok()
+        .filter(|shell| std::path::Path::new(shell).is_file())
+    {
+        return Some(shell);
+    }
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let cmd = std::path::Path::new(&root).join(r"System32\cmd.exe");
+    cmd.is_file().then(|| cmd.to_string_lossy().into_owned())
 }
 
 fn build_probe_command(shell: &str) -> Command {
@@ -104,6 +139,8 @@ fn build_probe_command(shell: &str) -> Command {
 fn run_probe_with_timeout(shell: &str) -> Option<String> {
     let child = build_probe_command(shell).spawn().ok()?;
     let pid = child.id();
+    #[cfg(not(unix))]
+    let _ = pid;
     let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
@@ -134,7 +171,13 @@ fn run_probe_with_timeout(shell: &str) -> Option<String> {
 
 fn probe() -> LoginEnv {
     let shell = detect_user_shell();
-    let raw = run_probe_with_timeout(&shell);
+    // Windows 上的 `cmd.exe` 不是 login shell。硬跑 `-ilc` 既拿不到环境，
+    // 超时后也杀不掉子进程。探测失败时下面会退回进程自己的 PATH。
+    let raw = if cfg!(unix) || unix_login_shell(&shell) {
+        run_probe_with_timeout(&shell)
+    } else {
+        None
+    };
 
     let mut vars = raw
         .as_deref()

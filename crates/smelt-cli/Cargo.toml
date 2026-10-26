@@ -1,0 +1,18 @@
+# smelt 的命令行：`smelt agent …`、`smelt automation …`、`smelt settings …`。
+# lib 给 GUI 的 smelt 在启动时先拦截子命令；bin 是控制台子系统的同一套命令，
+# Windows 发版时改名成 smelt.com 放在 smelt.exe 旁边（见 src/main.rs）。
+[package]
+name = "smelt-cli"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-model = { path = "../smelt-model" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-client = { path = "../smelt-client" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }

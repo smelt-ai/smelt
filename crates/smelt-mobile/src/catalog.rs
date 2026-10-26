@@ -22,7 +22,6 @@ mod projection;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -41,7 +40,7 @@ use smelt_model::session_control::AcpAgentOption;
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode, EmptyParams};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use smelt_runtime_client::protocol::history::{HistoryListCall, HistoryListParams, HistorySession};
-use smelt_runtime_client::{RequestError, RuntimeClient};
+use smelt_runtime_client::{RequestError, RuntimeClient, RuntimeStream};
 
 use crate::api::catalog::{
     AutomationCatalog, CatalogEvent, CatalogEventKind, HistoryRenameResult, HistorySessionSummary,
@@ -782,7 +781,7 @@ struct Worker {
 #[derive(Default)]
 struct WorkerSignal {
     stopped: bool,
-    stream: Option<UnixStream>,
+    stream: Option<RuntimeStream>,
 }
 
 impl Worker {
@@ -812,7 +811,7 @@ impl Worker {
     }
 
     /// 登记正在读的连接。已被叫停就直接关掉它并返回 false。
-    fn attach(&self, stream: &UnixStream) -> bool {
+    fn attach(&self, stream: &RuntimeStream) -> bool {
         let mut signal = self.signal();
         if signal.stopped {
             let _ = stream.shutdown(Shutdown::Both);

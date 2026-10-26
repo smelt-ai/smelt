@@ -1,7 +1,7 @@
 # 文档
 
-smelt 是一个跑在 Mac 上的桌面工作台：内嵌真终端，同时开着好几个 agent 会话。
-桌面只支持 Apple Silicon Mac。Linux 上可以跑无头的 `smeltd`，再用电脑或手机配对上去。
+smelt 是跨机器、多智能体的原生 AI 编程指挥台：macOS 上的 GPUI 桌面工作台，Linux 上的无头守护进程 `smeltd`，以及 iOS / Android 的手机和平板「出菜口」。
+桌面只支持 Apple Silicon Mac。Linux 上跑 `smeltd`，再用电脑或手机配对上去。
 这页文档只讲怎么用，架构细节不在这——接口和默认行为可能会变。
 
 ## 快速开始
@@ -29,8 +29,9 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
   配置的启动命令。启动项在设置 →「新建与启动」里按显示名和命令增删改。
 - 顶栏的 `+` 新建标签：不弹选择框，直接继承当前会话的 cwd。
 
-侧栏里的项目分组按各会话的工作目录派生。布局和会话存在运行时的
-`~/.smelt/smelt.sqlite3`，下次打开原样恢复。没有 `workspace.json`。
+侧栏里的项目分组按各会话的工作目录派生。会话存在运行时的
+`~/.smelt/smelt.sqlite3`。分屏布局存在这台桌面的 `~/.smelt/client.sqlite3`，
+表是 `conversation_route`，列是 `dock_layout`。没有 `workspace.json`。
 
 ## 功能一览
 
@@ -44,6 +45,8 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 
 **工作台外壳**
 - 左侧是新对话、智能体、自动化、最近对话。能力库有四个平级页签：模型、插件、MCP、记忆
+- 智能体列表按机器分组。已配对的远程机器上可以直接新建、编辑智能体；那些对话进入侧栏「最近对话」，并标出机器名
+- 能力库里的「记忆」跟着当前选中的机器，不只改本机
 - 多标签，每个标签独立 PTY / 历史 / 焦点，`+` 新建、`×` 关闭
 - 分屏布局会自动存档。同一格还可以叠几个终端（终端 Dock）
 - 右侧工具面板（`Opt+Cmd+B`）放文件、Git、历史，以及插件自己的页
@@ -71,6 +74,11 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 **Git diff 视图**
 - 改动一眼看清
 
+**内置 MCP**
+- `smeltd mcp add <id>` 把预设写进 Pi 的 `mcp.json`。内置 id：`playwright`、`figma`、`rea`、`browser-mcp`。已经有同名服务器就不动
+- `playwright` 看目标机器有没有远程桌面（`~/.smelt/desktop/bin/display`）。有，就连常驻 Chrome：`--cdp-endpoint http://127.0.0.1:9222`。没有，就用浏览器扩展：`--extension`
+- 自定义 stdio / HTTP MCP 仍在能力库里加
+
 **Skill**
 - 用户级在 `~/.agents/skills`，项目级在 `<项目>/.agents/skills`。这是本体
 - 还不读这个目录的 agent，由技能插件从它自己的目录软链回去
@@ -97,8 +105,10 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 「允许远程写入」开关。
 
 > 早先的浏览器面板、Cloudflare 隧道、自建 WebRTC 信令、JSON-WS 网关都已下线。
-> 手机 App 在仓库的 `mobile/` 目录（Flutter），还没上架，需要自己构建。iOS 和
-> Android 的构建说明在 [`mobile/README.md`](https://github.com/smelt-ai/smelt/blob/main/mobile/README.md)。
+> 手机 App 在仓库的 `mobile/`（Flutter）。GitHub Releases 每次发版提供签名的 Android
+> 安装包 `Smelt-<版本>-android-arm64.apk`。iOS 用 `make ios`（`scripts/build-ios.sh`）
+> 打 TestFlight 归档。应用商店上架还没做。构建说明在
+> [`mobile/README.md`](https://github.com/smelt-ai/smelt/blob/main/mobile/README.md)。
 
 ### 开启
 
@@ -118,15 +128,36 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 
 ### Linux 上的无头运行时
 
-桌面 GUI 只在 Mac。Linux 上可以只跑 `smeltd`：解包 `smeltd-<版本>-linux-<架构>.tar.gz` 后
+桌面 GUI 只在 Mac。Linux 上可以只跑 `smeltd`。
+
+一键安装从 Release 拉取 `install.sh`。脚本按架构下载 `smeltd-<版本>-linux-<架构>.tar.gz`，对照同一份 `SHA256SUMS` 校验，再把参数交给包里的 `install.sh`：
 
 ```bash
-./install.sh           # 装 systemd 用户服务、启动，并打印配对串
-./install.sh --no-pair # 只安装并启动
-smeltd pair            # 之后再打开远程访问
-smeltd devices
-smeltd status
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash -s -- --with-desktop
 ```
+
+也可以自己下载 `smeltd-<版本>-linux-<架构>.tar.gz`，解压后在包目录里执行 `./install.sh`。参数：
+
+- **`--with-desktop`**：一并安装 TigerVNC / Xvnc、XFCE、Chrome 或 Chromium。配置三个用户级 systemd 服务：`smelt-display`、`smelt-desktop`、`smelt-chrome`。装完执行 `smeltd mcp add playwright`。Xvnc 起始几何是 1440×900，桌面打开远程桌面页后按页面大小改。Chrome 调试端口只绑 `127.0.0.1:9222`。
+- **`--relay=<地址>`**：写入初始自定义 iroh 中继。域名、IP 或 URL 都可以，例如 `./install.sh --relay=https://relay.example.com`。不给就用 n0 的公共中继。
+- **`--apt-mirror=<镜像>`**：这次安装把 Debian / Ubuntu 官方源换成指定镜像（主机名或 URL）。不给时先试官方源，连不上就按顺序自动换 `mirrors.aliyun.com`、`mirrors.tuna.tsinghua.edu.cn`、`mirrors.ustc.edu.cn` 里第一个连得上的。只用于这次安装，不改 `/etc/apt`。Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动）。
+- **`--no-pair`**：只安装并启动，不打印配对串。
+
+之后：
+
+```bash
+smeltd pair                      # 打开远程访问，打印一次性配对串
+smeltd devices                   # 列出已配对设备
+smeltd devices revoke <endpoint> # 撤销并立刻断开
+smeltd status
+smeltd relay                     # 查看当前 iroh 中继
+smeltd relay <url>               # 只用这个自建中继
+smeltd relay off                 # 改回 n0 的公共中继
+smeltd mcp add <id>              # 添加内置 MCP 预设
+```
+
+`smeltd mcp add` 的内置 id 有 `playwright`、`figma`、`rea`、`browser-mcp`。桌面端改某台远程机器的中继：侧栏那台机器的菜单里点「中继…」。控制接口是 `remote.config.set`，字段名是 `iroh_relay`。
 
 `smeltd install` 只在 Linux 注册 systemd 单元。macOS 上守护由桌面拉起。
 
@@ -139,8 +170,7 @@ smeltd status
 ### 远程桌面
 
 配对之后，桌面可以打开那台 Linux 的屏幕：运行时转发 VNC，本机用 noVNC 页面打开。
-打开即接管；切到「只看」后不再发送键鼠。安装包里的 `--with-desktop`（把显示栈一并装上）
-还没做，现有机器上的桌面环境是单独配的。
+打开即接管；切到「只看」后不再发送键鼠。显示栈用上面的 `install.sh --with-desktop` 装好。
 
 ### 部署自建 Relay
 
@@ -157,11 +187,17 @@ smeltd status
 脚本在本机下载并校验 iroh 官方二进制后上传，再申请 Let's Encrypt 证书。完整步骤见
 [`docs/iroh-relay-deployment.md`](https://github.com/smelt-ai/smelt/blob/main/docs/iroh-relay-deployment.md)。
 
-### 手机上能做什么
+### 手机出菜口
 
-- 会话列表、结构化对话、审批和追问
-- 终端画面（配色由手机自己定，不跟电脑下发）
+手机端是跨机器指挥台「出菜口」。启动后同时连接所有已配对机器，机器登记在 App 数据目录的 `smelt-mobile.sqlite3`，没有「当前只连一台」。
+
+- 首屏是待拍板单据（权限审批、追问回答）和各机器正在执行、刚完成的任务，可以原地批准或回复
+- 四栏导航：指挥台、会话、智能体、设置。平板是导航、列表、详情三栏
+- 中文和英文
+- 终端画面配色由手机自己定，不跟电脑下发
 - 断线后读本机缓存：每个运行时最近的会话列表，以及最近几个对话快照（最多 5 段、合计 32MB）
+
+Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归档用 `make ios`。
 
 ### 闲置挂起
 
@@ -173,8 +209,7 @@ smeltd status
 
 - **联机 review**、**任务认领池**、**会话移交**、**飞书卡片**：多人协作仍是设计，见
   [collaboration.md](https://github.com/smelt-ai/smelt/blob/main/docs/collaboration.md)
-- **App 上架**
-- **`--with-desktop`**：远程桌面的显示栈还要自己装
+- **应用商店上架**。Android 签名包已经随 Releases 发布，iOS 可以打 TestFlight 归档
 
 [`remote-ops-roadmap.md`](https://github.com/smelt-ai/smelt/blob/main/docs/archive/remote-ops-roadmap.md)
 是已删除的 JSON-WS 网关路线图，不是现行协议。
@@ -230,8 +265,10 @@ smeltd status
 
 | 位置 | 内容 |
 |---|---|
-| `~/.smelt/smelt.sqlite3` | 这台机器的会话、分屏（含终端 Dock）、项目、智能体、自动化、配对设备和远程开关 |
-| `~/.smelt/client.sqlite3` | 这台桌面的主题、字体、窗口背景、侧栏和连过哪些运行时 |
+| `~/.smelt/smelt.sqlite3` | 这台机器的会话、项目、智能体、自动化、配对设备和远程开关。分屏布局不在这里 |
+| `~/.smelt/client.sqlite3` | 这台桌面的主题、字体、窗口背景、侧栏，以及连过哪些运行时。分屏布局在 `conversation_route.dock_layout` |
+| `~/.smelt/bin/smelt-pi` | 内置 Pi 运行时，单个二进制，跑官方 JSONL RPC |
+| `~/.smelt/runtime/` | 受管 Bun。ACP 适配器和 MCP 服务器按需从这里启动 |
 | `~/.smelt/smeltd.sock` | `smeltd` 的 Unix socket |
 | `~/.smelt/iroh-secret` | 这台运行时的 iroh 身份 |
 

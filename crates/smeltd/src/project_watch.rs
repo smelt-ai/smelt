@@ -195,7 +195,7 @@ mod tests {
             .into_iter()
             .map(|(path, mode)| {
                 (
-                    path.strip_prefix(&root).unwrap().display().to_string(),
+                    path.strip_prefix(&root).unwrap().to_path_buf(),
                     mode == RecursiveMode::Recursive,
                 )
             })
@@ -204,12 +204,12 @@ mod tests {
         assert_eq!(
             targets,
             vec![
-                (String::new(), false),
-                (".git".to_string(), false),
-                (".git/refs".to_string(), true),
-                ("src".to_string(), false),
-                ("src/nested".to_string(), false),
-                ("web".to_string(), false),
+                (PathBuf::new(), false),
+                (PathBuf::from(".git"), false),
+                (PathBuf::from(".git/refs"), true),
+                (PathBuf::from("src"), false),
+                (PathBuf::from("src/nested"), false),
+                (PathBuf::from("web"), false),
             ]
         );
         std::fs::remove_dir_all(root).unwrap();

@@ -405,6 +405,8 @@ pub(crate) fn write_json_file(
         serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
     #[cfg(unix)]
     let mode = target_file_mode(path, secure)?;
+    #[cfg(not(unix))]
+    let _ = secure;
 
     let tmp_path = unique_tmp_path(path);
     let write_tmp = || -> Result<(), String> {
@@ -585,8 +587,14 @@ fn wait_for_dir_delete(path: &Path, timeout: std::time::Duration) {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = path;
-        std::thread::park_timeout(timeout);
+        let deadline = std::time::Instant::now() + timeout;
+        while path.exists() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            std::thread::park_timeout(remaining.min(std::time::Duration::from_millis(50)));
+        }
     }
 }
 
@@ -1431,10 +1439,8 @@ mod tests {
         assert!(lock_path.is_dir());
 
         let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(31);
-        std::fs::File::open(&lock_path)
-            .unwrap()
-            .set_modified(stale)
-            .unwrap();
+        // Windows 上 `File::open` 打不开目录。
+        smelt_sys::set_modified(&lock_path, stale).unwrap();
         update_auth_json(&auth_path, |obj| {
             obj.insert(
                 "gw".to_string(),
@@ -1706,8 +1712,11 @@ mod pi_model_settings_integration_tests {
     use crate::pi_model_settings::{
         PiCustomModel, PiCustomProvider, PiDefaultModelConfig, load_pi_model_settings_at,
         pi_settings_summary_at, remove_pi_custom_provider_at, save_pi_custom_provider_at,
-        save_pi_default_model_at, write_json_file,
+        save_pi_default_model_at,
     };
+    #[cfg(unix)]
+    use crate::pi_model_settings::write_json_file;
+    #[cfg(unix)]
     use std::path::Path;
 
     #[test]

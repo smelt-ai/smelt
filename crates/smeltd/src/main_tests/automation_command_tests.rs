@@ -3,6 +3,10 @@ use smelt_core::automation::{
     Automation, AutomationCommand, AutomationFile, AutomationSchedule, AutomationTrigger,
 };
 
+fn existing_workspace() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
 fn call_automation(
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
@@ -38,7 +42,7 @@ fn automation_commands_and_snapshots_share_one_daemon_owner() {
         id: "automation-1".into(),
         name: "Morning report".into(),
         enabled: true,
-        workspace_dir: Some("/tmp".into()),
+        workspace_dir: Some(existing_workspace()),
         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes { minutes: 30 }),
         action: smelt_core::automation::AutomationAction::Agent {
             agent_definition_id: "missing-agent".into(),
@@ -108,7 +112,7 @@ fn event_publish_matches_subscribers_without_automation_id() {
                     id: "lark-mentions".into(),
                     name: "飞书 @我".into(),
                     enabled: true,
-                    workspace_dir: Some("/tmp".into()),
+                    workspace_dir: Some(existing_workspace()),
                     trigger: AutomationTrigger::event(
                         "lark.message.received",
                         Some(r#"{"mention":true}"#.into()),

@@ -1,11 +1,11 @@
-# Windows 支持（设计，未开工）
+# Windows 支持
 
-对应 issue [#74](https://github.com/smelt-ai/smelt/issues/74)。分两步：
+对应 issue [#74](https://github.com/smelt-ai/smelt/issues/74)。两步都已落地：
 
-1. Windows 桌面端只连远程运行时，本机不起 smeltd。
-2. Windows 本机跑 smeltd。
+1. Windows 桌面端连远程运行时（Linux / macOS 上的 smeltd）。
+2. Windows 本机跑 smeltd：冷启动、Rust 客户端走 AF_UNIX、Bun 走命名管道、升级即重启。
 
-本文把第 1 步写到能开工，第 2 步只定方向和待定问题，开工前另补。
+数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名，没有自动更新。
 
 ## 第 1 步的范围
 
@@ -16,9 +16,8 @@
 
 不做：
 
-- 本机运行时（smeltd、smelt-notify、Pi 运行时、agent hook），留给第 2 步。
 - 自动更新、代码签名、安装包。
-- 系统通知、状态栏图标、IDE 集成、Dock 角标、液态玻璃。这些模块已经有非 macOS 的空实现（`status_item.rs`、`dock.rs`、`liquid_glass.rs`），保持为空。
+- 系统通知、状态栏图标、Dock 角标、液态玻璃。这些模块的非 macOS 实现保持为空（`status_item.rs`、`dock.rs`、`liquid_glass.rs`）。
 
 ## 前提
 
@@ -88,10 +87,10 @@
 
 ### 方案
 
-1. **能力判定一处**：`smelt_client::runtime::local_runtime_supported()`，第 1 步为 `cfg!(unix)`，第 2 步给 Windows 打开。
-2. **`Runtime::local()` 改返回 `Option<Runtime>`**，让编译器逼出每个调用点的处理，不靠运行时连不上兜底。
+1. **本机运行时在所有桌面平台上都有**：Windows 也跑 smeltd 之后，`local_runtime_supported()` 恒为真，已删除。
+2. **`Runtime::local()` 直接返回 `Runtime`**。过渡期它返回过 `Option<Runtime>`，用来逼出每个调用点的处理；三个桌面平台都有本机之后，`None` 分支全部是死代码，一并删掉。
 3. **空间合一**：`local` 和 `remote_spaces` 合成 `spaces: Vec<RuntimeSpace>`，有本机时本机在前，`space()` 等去掉本机特判。那 14 处 `self.local` 原本为本机冷启动恢复而设，逐个确认原意后改成读会话所属运行时的空间，改之前要确认远程空间的恢复语义一致。
-4. **smeltd 生命周期独立成模块**：`terminal.rs` 里上面那段挪到 `local_daemon.rs`，整体 `cfg(unix)`，`runtimes::connect_terminal` 在本机分支调它。第 2 步再给 Windows 实现。
+4. **smeltd 生命周期独立成模块**：`terminal.rs` 里上面那段挪到 `local_daemon.rs`。现在是 `cfg(any(unix, windows))`，`runtimes::connect_terminal` 在本机分支调它。Windows 用 `spawn_detached`、`ExclusiveFile`、`pid_is_alive`，升级不交接。
 5. **只认本机的功能**按下表处理：
 
 | 功能 | 位置 | 没有本机运行时时 |
@@ -142,26 +141,24 @@
 5. D4 零散平台调用，直到 Windows 上编过、跑通；CI 的 Windows 任务转为必需。
 6. D5 发版与打包。
 
-## 第 2 步：方向
+## 第 2 步：本机 smeltd
 
-第 2 步基本等于把 smeltd 移植一遍。平台相关代码集中在 smeltd 的 `main.rs`、`protocol/auth.rs`、`handoff_v2/`，以及 smelt-core 的 `background_tasks.rs`、`acp_conn.rs`、`pi_rpc.rs`、`pi_model_settings.rs`、`managed_runtime.rs`。
+已实现。Unix 行为不变。Windows 是一套真的本机运行时，不是远程客户端的空壳。
 
-- **本机通信与鉴权**：`protocol/auth.rs` 按对端进程身份鉴权（macOS 取 audit token 再校验代码签名），回环端口拿不到对端进程，不可用。候选是 AF_UNIX（和 D1 同一种流，对端 pid 用 `SIO_AF_UNIX_GETPEERPID`）或命名管道（`GetNamedPipeClientProcessId`），再校验 Authenticode 签名。取舍的关键是 smeltd 服务端大量用 tokio，而 tokio 在 Windows 上没有 AF_UNIX，要评估监听和会话流怎么接进运行时。未定。
-- **Pi 扩展**：`background_tasks.rs` 里 Pi 扩展通过 Unix 套接字给会话宿主下命令，TS 侧要一起换传输。
-- **进程模型**：`pi_rpc.rs` 的 `sigprocmask` / `SIGCHLD`，`acp_conn.rs` 的 `WNOHANG` / `proc_bsdinfo`，`background_tasks.rs` 的 `kill` / `SIGKILL`，换成 Job Object。终端用的 `portable-pty` 支持 ConPTY。
-- **无缝交接**：`handoff_v2` 用 `SCM_RIGHTS` 把 PTY 等 fd 交给新进程。ConPTY 句柄能不能交给另一个进程接着用待验证；第一版不做交接，升级即重启，终端会话丢失。
-- **软链接与权限**：`managed_runtime.rs`、`daemon_image` 靠软链接切版本，Windows 上建软链接要开发者模式或管理员权限，要换机制；`pi_model_settings.rs` 的 0600 凭据保护和 `kevent` 文件监听要换成 ACL 和别的监听方式。
-- **hook**：各 agent hook 里的 smelt-notify 路径要按 cmd / PowerShell 规则引用，配置位置按 Windows 约定。
+- **IPC**。Rust 客户端（桌面、`smelt-notify`、runtime client）继续连 AF_UNIX 文件 `~/.smelt/smeltd.sock`。Windows 上这个类型是 `uds_windows`，由 `smelt_runtime_client` 再导出。守护的 accept 循环是同步线程（`incoming` / `accept`），不把监听塞进 tokio，所以不要求 tokio 的 Windows AF_UNIX。Bun / Node 的 `net.connect(path)` 在 Windows 上连的是命名管道，不是这个文件。第二条监听只在 Windows 上建：`PipeListener::bind(user_pipe_path("daemon"))`，accept 之后进同一个连接处理函数。不把管道桥进 AF_UNIX，否则对端 pid 会变成 smeltd 自己，鉴权直接拒绝。交给 Bun / Pi / shell 的 `SMELT_SOCK` 在 Windows 上是 `\\.\pipe\smelt-<sid>-daemon` 这种管道名；Rust 代码连守护仍然用 sock 文件。
+- **鉴权**。macOS 的 codesign 路径不动。Windows 走同一用户 SID：pid 来自 AF_UNIX 的 `SIO_AF_UNIX_GETPEERPID` 或管道的 `GetNamedPipeClientProcessId`，exe 来自 `process_executable`，必须 `same_user_as_current`，并且不能是守护自己的 pid。basename 和 `"smelt"` 比的时候去掉一个结尾的 `.exe`、大小写不敏感，不另加一行表，免得 macOS 的 signing-id 列分叉。路径要和守护目录旁边的 `smelt.exe` 相同，或者和 `SMELT_BUNDLE_DIR`（桌面拉起守护时写成 GUI exe 所在目录）旁边的 `smelt.exe` 相同。托管映像是 `~/.smelt/bin/smeltd-<指纹>.exe`，GUI 在安装目录，只认守护目录的兄弟会把桌面拒掉。不做 Authenticode。
+- **交接**。`handoff_v2` 和一切 `SCM_RIGHTS` / `from_raw_fd` 恢复只在 Unix。Windows 上 `upgrade` 先拉起目标映像当接班进程（`SMELTD_PREDECESSOR_PID` 告诉它前任是谁），回执之后旧进程退出；接班进程等前任退出再绑定监听，绑上之后把启动名拨到自己。没有桌面的运行时（推送升级、空闲自升级）也能换上新版。桌面不自己拉，只等接班进程起来。终端会话丢失。不伪造 fd 传递。
+- **守护映像**。不建符号链接（那要额外权限）。发布是复制或硬链接到 `smeltd-<指纹>.exe`，启动名是旁边的 `smelt-image-v1` 指针文件。`launch_executable` 读出真正要执行的那份。
+- **Bun**。`scripts/fetch-bun.sh` 在 Windows 上取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `bin/bun.exe`（硬链接或复制）。`scripts/build-smelt-pi.sh` 编出 `smelt-pi.exe`。
+- **Shell 和进程**。交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`。没有参数的自动化 Shell 脚本同样走 `cmd.exe /d /c`，不调用 bash。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。ConPTY 不能 `CREATE_SUSPENDED`，shell 起来之后立刻 `attach_running`。PTY 尺寸走 master 的 `resize`，不用 `as_raw_fd`。
+- **发版 zip**。`smelt-<版本>-windows-x86_64.zip` 根上是 `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。`smelt.com` 是控制台子系统的命令行入口（`smelt-cli.exe` 改名），cmd / PowerShell 敲 `smelt` 先找到它。
 
-## 待定问题
+## 已定
 
-第 1 步：
+原先写成「未定」的，按上面落地：
 
-- **历史页**：没有本机运行时时是隐藏，还是改成跟当前选中的机器走。倾向后者：读写已经按 `&Runtime` 传，改动小，而 Windows 用户没有历史页会少一大块功能。
-- **数据目录**：沿用 `%USERPROFILE%\.smelt`，还是改用 `%LOCALAPPDATA%\Smelt`。倾向沿用：路径只有 smelt-paths 一处真源，和其它平台一致，开发者工具在家目录放点目录在 Windows 上也常见。
-- **架构**：第一版是否同时出 aarch64。
-
-第 2 步：
-
-- **本机通信**：AF_UNIX 还是命名管道，见上文。
-- **签名**：Authenticode 证书从哪来，决定本机鉴权能不能按签名校验。
+- 本机通信是 Rust AF_UNIX（`uds_windows`，sock 文件）加 Bun 命名管道。不是回环 TCP，也不要求 tokio AF_UNIX。
+- 鉴权是同用户 SID、peer exe 的 basename、守护目录或 `SMELT_BUNDLE_DIR` 的兄弟。没有 Authenticode。
+- 交接不做。升级重启，终端会话丢失。
+- 数据目录沿用 `%USERPROFILE%\.smelt`。
+- 第一版只出 x86_64。

@@ -15,14 +15,18 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+#[cfg(target_os = "macos")]
 use gpui_component::progress::Progress;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
+#[cfg(target_os = "macos")]
 use gpui_component::switch::Switch;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
 
-use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
+#[cfg(target_os = "macos")]
+use crate::updater;
+use crate::{Workspace, liquid_glass, terminal, terminal_view};
 
 mod agent_hooks;
 mod bundled_helpers;
@@ -220,7 +224,8 @@ pub fn apply_window_opacity(_window: &Window, _opacity: f32) {}
 /// 在线更新配置（全局单例，存 SQLite KV）。
 ///
 /// 通道只决定更新源给哪一路包（GitHub 上认不认预发布，或打包时指定的哪份清单）；
-/// 更新流程本身仍由 updater 统一处理。
+/// 更新流程本身仍由 updater 统一处理。只在 macOS 上存在（设计文档 D4）。
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpdateSettings {
     #[serde(default)]
@@ -231,10 +236,12 @@ pub struct UpdateSettings {
     pub auto_install: bool,
 }
 
+#[cfg(target_os = "macos")]
 fn default_auto_install() -> bool {
     true
 }
 
+#[cfg(target_os = "macos")]
 impl Default for UpdateSettings {
     fn default() -> Self {
         Self {
@@ -244,6 +251,7 @@ impl Default for UpdateSettings {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Global for UpdateSettings {}
 
 /// 枚举在客户端库里存它的 serde 名（`dev`、`dark`、`session`……），和协议里的写法一致。
@@ -260,6 +268,7 @@ pub(crate) fn enum_from_name<T: serde::de::DeserializeOwned>(name: &str) -> Opti
 }
 
 /// 更新设置归客户端（每台设备各自管自己的更新），存在客户端库。
+#[cfg(target_os = "macos")]
 pub fn load_update_settings() -> UpdateSettings {
     let record = match smelt_client_store::client_store().and_then(|store| store.update_settings())
     {
@@ -278,6 +287,7 @@ pub fn load_update_settings() -> UpdateSettings {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn save_update_settings(settings: &UpdateSettings) {
     let record = smelt_client_store::UpdateSettingsRecord {
         channel: enum_name(&settings.channel),
@@ -290,6 +300,7 @@ pub fn save_update_settings(settings: &UpdateSettings) {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn apply_update_channel(channel: updater::UpdateChannel, cx: &mut App) {
     let mut settings = *cx.global::<UpdateSettings>();
     settings.channel = channel;
@@ -297,6 +308,7 @@ pub fn apply_update_channel(channel: updater::UpdateChannel, cx: &mut App) {
     cx.set_global(settings);
 }
 
+#[cfg(target_os = "macos")]
 pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
     let mut settings = *cx.global::<UpdateSettings>();
     settings.auto_install = auto_install;
@@ -1204,7 +1216,7 @@ fn fmt_uptime(secs: u64) -> String {
 
 /// 守护运行信息拼成一行：`v0.5.4 · PID 64954 · 启动于 07-16 20:38（已运行 3 小时 12 分）· 5 个会话`。
 /// 老守护回不出的字段直接不显示——宁可少一段，也不摆「未知」占位。
-fn daemon_info_line(info: &terminal::DaemonInfo) -> String {
+fn daemon_info_line(info: &crate::local_daemon::DaemonInfo) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(v) = &info.version {
         parts.push(format!("v{v}"));
@@ -1293,14 +1305,17 @@ struct SettingsRenderSnapshot {
     pi_plugin_error: Option<String>,
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
     agent_names_using_plugin: std::collections::HashMap<String, Vec<String>>,
+    #[cfg(target_os = "macos")]
     update_status: updater::UpdateStatus,
     /// 正在把 App 移到「应用程序」，见 `Workspace::move_app_to_applications`。
+    #[cfg(target_os = "macos")]
     moving_app: bool,
+    #[cfg(target_os = "macos")]
     move_app_error: Option<SharedString>,
     daemon_outdated: Option<bool>,
     daemon_upgrading: bool,
     daemon_upgrade_msg: Option<String>,
-    daemon_info: Option<terminal::DaemonInfo>,
+    daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
     /// 能力库当前页签。和 `settings_section` 分开记：设置窗口和能力库可以同时开着，
@@ -1358,6 +1373,7 @@ impl SettingsContentView {
                 Self::observe_settings_global::<AgentHostState>(window, cx),
                 Self::observe_settings_global::<AgentHosts>(window, cx),
                 Self::observe_settings_global::<AcpRuntimeState>(window, cx),
+                #[cfg(target_os = "macos")]
                 Self::observe_settings_global::<UpdateSettings>(window, cx),
                 Self::observe_settings_global::<CleanupState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),
@@ -1475,10 +1491,9 @@ impl Render for SettingsContentView {
             ))
             // 弹层开启期间才需要读它的动态会话数据；正常浏览设置页不会因此订阅整个
             // Workspace 的高频状态通知。
-            .children(
-                show_daemon_restart_confirm
-                    .then(|| workspace.update(cx, |ws, cx| ws.render_daemon_restart_confirm(cx))),
-            )
+            .children(show_daemon_restart_confirm.then(|| {
+                workspace.update(cx, |ws, cx| ws.render_daemon_restart_confirm(cx))
+            }))
             .children(
                 session_manager_open
                     .then(|| workspace.update(cx, |ws, cx| ws.render_session_manager(cx))),

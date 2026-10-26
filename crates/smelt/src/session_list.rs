@@ -647,7 +647,10 @@ impl Workspace {
         // ---- 运行时标题行：挂了远程运行时才分段 ----
         // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
         // 「打开项目」就在上面。
-        let runtime_sections = !self.remote_spaces.is_empty();
+        let runtime_sections = self
+            .spaces
+            .iter()
+            .any(|space| !space.runtime.is_local());
         // 折起的机器分段挂上组里最要紧的状态：在跑、在等你，折起来也看得见。
         let mut runtime_alerts: std::collections::HashMap<RuntimeKey, AgentStatus> =
             Default::default();
@@ -681,7 +684,7 @@ impl Workspace {
             )
         };
         let mut headers_left: std::collections::VecDeque<crate::runtimes::Runtime> =
-            if self.remote_spaces.is_empty() {
+            if !runtime_sections {
                 Default::default()
             } else {
                 self.space_keys()
@@ -1792,8 +1795,20 @@ impl Workspace {
         // ---- 底部操作条：设置 ----
         // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。
         let e_settings = this.clone();
-        let settings_needs_attention =
-            self.update_available() || self.daemon_outdated == Some(true);
+        let settings_needs_attention = {
+            #[cfg(target_os = "macos")]
+            {
+                self.update_available() || self.daemon_outdated == Some(true)
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                self.daemon_outdated == Some(true)
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        };
 
         // ---- 底部额度条：provider 账户额度（Codex / Claude / Copilot / Grok / Cursor）----
         // 从舞台头栏迁到这里（底部操作条上方）。只显示「检测到额度」的 provider，
@@ -1915,6 +1930,7 @@ impl Workspace {
                                 Anchor::BottomLeft,
                                 move |menu, _window, _cx| {
                                     let e_settings = e_settings.clone();
+                                    #[cfg(target_os = "macos")]
                                     let e_check_update = e_settings.clone();
                                     let menu = menu
                                         .item(
@@ -1930,25 +1946,26 @@ impl Workspace {
                                                 .on_click(|_ev, _window, cx| {
                                                     cx.open_url(crate::settings::FEEDBACK_URL);
                                                 }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("检查更新...")
-                                                .icon(IconName::LoaderCircle)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    e_check_update.update(cx, |ws, cx| {
-                                                        if ws.update_status.can_check()
-                                                            || ws.update_status.can_retry_recovery()
-                                                        {
-                                                            ws.check_or_recover_update(false, cx);
-                                                        }
-                                                        ws.open_settings_section(
-                                                            crate::settings::SettingsSection::maintenance_update(),
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        )
-                                        .separator();
+                                        );
+                                    #[cfg(target_os = "macos")]
+                                    let menu = menu.item(
+                                        PopupMenuItem::new("检查更新...")
+                                            .icon(IconName::LoaderCircle)
+                                            .on_click(move |_ev, _window, cx| {
+                                                e_check_update.update(cx, |ws, cx| {
+                                                    if ws.update_status.can_check()
+                                                        || ws.update_status.can_retry_recovery()
+                                                    {
+                                                        ws.check_or_recover_update(false, cx);
+                                                    }
+                                                    ws.open_settings_section(
+                                                        crate::settings::SettingsSection::maintenance_update(),
+                                                        cx,
+                                                    );
+                                                });
+                                            }),
+                                    );
+                                    let menu = menu.separator();
 
                                     menu.item(
                                         PopupMenuItem::new("设置...")

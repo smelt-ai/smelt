@@ -382,8 +382,21 @@ fn executable_in_path(program: &str) -> bool {
     std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<PathBuf>>())
-        .map(|directory| directory.join(program))
-        .any(|candidate| is_executable(&candidate))
+        .any(|directory| command_exists_in(&directory, program))
+}
+
+/// PATH 的一个目录里有没有这个命令。
+///
+/// Windows 上 `Command` 和 `CreateProcess` 对不含 `.` 的文件名只补 `.exe` 再搜。
+/// `rustc` 在磁盘上是 `rustc.exe`；已经带扩展名的名字按原样查找。
+fn command_exists_in(directory: &Path, program: &str) -> bool {
+    #[cfg(windows)]
+    if !program.as_bytes().contains(&b'.') {
+        let mut name = std::ffi::OsString::from(program);
+        name.push(".exe");
+        return is_executable(&directory.join(name));
+    }
+    is_executable(&directory.join(program))
 }
 
 fn is_executable(path: &Path) -> bool {

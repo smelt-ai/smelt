@@ -60,8 +60,8 @@ impl RuntimeSpace {
 }
 
 impl crate::Workspace {
-    /// 侧栏里这台机器的分段折没折。用户这次点过就按他点的；没点过的，远程机器折起、本机
-    /// 展开：日常干活在本机，别的机器有事时标题上挂着状态点，要看再点开。
+    /// 侧栏里这台机器的分段折没折。用户这次点过就按他点的。没点过的：远程折起、
+    /// 本机展开（日常干活在本机）。
     pub(crate) fn runtime_folded(&self, key: &crate::runtimes::RuntimeKey) -> bool {
         self.space(key)
             .and_then(|space| space.folded)
@@ -80,12 +80,9 @@ impl crate::Workspace {
         cx.notify();
     }
 
-    /// 某个运行时的空间。远程运行时被移除后就没有了。
+    /// 某个运行时的空间。运行时被移除就没有了。
     pub(crate) fn space(&self, key: &crate::runtimes::RuntimeKey) -> Option<&RuntimeSpace> {
-        if *key == crate::runtimes::RuntimeKey::Local {
-            return Some(&self.local);
-        }
-        self.remote_spaces
+        self.spaces
             .iter()
             .find(|space| space.runtime.key() == key)
     }
@@ -94,19 +91,38 @@ impl crate::Workspace {
         &mut self,
         key: &crate::runtimes::RuntimeKey,
     ) -> Option<&mut RuntimeSpace> {
-        if *key == crate::runtimes::RuntimeKey::Local {
-            return Some(&mut self.local);
-        }
-        self.remote_spaces
+        self.spaces
             .iter_mut()
             .find(|space| space.runtime.key() == key)
     }
 
-    /// 本机在前，远程按登记顺序。
+    /// 有本机时本机在前，远程按登记顺序。
     pub(crate) fn space_keys(&self) -> Vec<crate::runtimes::RuntimeKey> {
-        std::iter::once(&self.local)
-            .chain(self.remote_spaces.iter())
+        self.spaces
+            .iter()
             .map(|space| space.runtime.key().clone())
+            .collect()
+    }
+
+    /// 冷启动恢复是否都结束了。没有空间（没有本机、也还没配对）算结束：不能永远等
+    /// 一个不存在的本机目录。
+    pub(crate) fn sessions_restore_settled(&self) -> bool {
+        self.spaces.iter().all(|space| space.sessions_restored)
+    }
+
+    /// 这一条会话所在运行时的恢复是否结束。会话还没进列表时，看全部空间。
+    pub(crate) fn session_restore_settled(&self, ix: usize, cx: &gpui::App) -> bool {
+        let Some(session) = self.sessions.get(ix) else {
+            return self.sessions_restore_settled();
+        };
+        self.space(session.runtime(cx).key())
+            .is_none_or(|space| space.sessions_restored)
+    }
+
+    pub(crate) fn all_pending_restore_session_ids(&self) -> std::collections::HashSet<String> {
+        self.spaces
+            .iter()
+            .flat_map(|space| crate::pending_restore_session_ids(&space.restore_pending))
             .collect()
     }
 }
@@ -191,8 +207,9 @@ impl crate::Workspace {
             .map(|remote| remote.runtime.clone())
             .collect();
         let removed: Vec<RuntimeKey> = self
-            .remote_spaces
+            .spaces
             .iter()
+            .filter(|space| !space.runtime.is_local())
             .map(|space| space.runtime.key().clone())
             .filter(|key| !remotes.iter().any(|runtime| runtime.key() == key))
             .collect();
@@ -204,8 +221,7 @@ impl crate::Workspace {
             for ix in ixs {
                 self.remove_session(ix, false, cx);
             }
-            self.remote_spaces
-                .retain(|space| space.runtime.key() != &key);
+            self.spaces.retain(|space| space.runtime.key() != &key);
             if self
                 .active_project
                 .as_ref()
@@ -219,8 +235,9 @@ impl crate::Workspace {
                 continue;
             }
             changed = true;
-            self.remote_spaces.push(RuntimeSpace::new(runtime.clone()));
+            self.spaces.push(RuntimeSpace::new(runtime.clone()));
             self.start_space_catalog_load(runtime, window, cx);
+            self.ensure_pi_library_runtime(cx);
         }
         if changed {
             self.save_state(cx);

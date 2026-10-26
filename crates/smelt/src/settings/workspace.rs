@@ -164,6 +164,8 @@ impl Workspace {
 
     /// 切换在线更新通道并立即检查一次。通道切换只影响后续更新来源，不改变当前包的
     /// 展示版本；若新通道指向不同发布包，仍按 URL 差异正常下载。
+    /// 更新通道只在 macOS 上存在（设计文档 D4）。
+    #[cfg(target_os = "macos")]
     pub fn set_update_channel(&mut self, channel: updater::UpdateChannel, cx: &mut Context<Self>) {
         if cx.global::<UpdateSettings>().channel == channel {
             return;
@@ -1173,8 +1175,13 @@ impl Workspace {
         kind: smelt_model::pi_plugin_catalog::PiPluginKind,
         cx: &mut Context<Self>,
     ) {
+        let Some(runtime) = crate::runtimes::runtime(self.pi_library_runtime(), cx) else {
+            self.pi_plugin_error = Some("先配对一台远程机器，再导入插件".to_string());
+            cx.notify();
+            return;
+        };
         self.open_dir_picker(
-            crate::runtimes::Runtime::local(),
+            runtime,
             crate::dir_picker::DirPickerPurpose::PluginImport { kind },
             cx,
         );

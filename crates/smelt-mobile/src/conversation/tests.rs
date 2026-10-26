@@ -1,4 +1,4 @@
-//! 订阅与动作的单测：假运行时在 `UnixStream::pair()` 上按线格式回包，假连接状态源可以
+//! 订阅与动作的单测：假运行时在 `RuntimeStream::pair()` 上按线格式回包，假连接状态源可以
 //! 随时换代、掉线。
 
 use std::io::{BufRead, BufReader, Read};
@@ -53,7 +53,7 @@ struct FakeRuntime {
 
 /// 运行时这一端的一条 watch 连接。
 struct FakeWatch {
-    stream: UnixStream,
+    stream: RuntimeStream,
     mirror: Mutex<FrameMirror>,
     /// 客户端在首行之后又写了东西（协议不允许）。
     client_wrote: AtomicBool,
@@ -121,14 +121,14 @@ impl FakeRuntime {
                     "连不上运行时（超时）",
                 ));
             }
-            let (client, server) = UnixStream::pair()?;
+            let (client, server) = RuntimeStream::pair()?;
             let runtime = Arc::clone(&runtime);
             std::thread::spawn(move || runtime.serve(server));
             Ok(client)
         })
     }
 
-    fn serve(&self, server: UnixStream) {
+    fn serve(&self, server: RuntimeStream) {
         let mut reader = BufReader::new(server.try_clone().unwrap());
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() || line.trim().is_empty() {

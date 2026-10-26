@@ -22,15 +22,14 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlClientError, EmptyParams, SystemDescribe};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
+use smelt_runtime_client::{RuntimeClient, RuntimeStream};
 
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
 use crate::api::fleet::ConnectionState;
@@ -278,7 +277,7 @@ impl HubInner {
         &self,
         attachment: &Attachment,
         client: &RuntimeClient,
-        stream: UnixStream,
+        stream: RuntimeStream,
         scrollback_lines: u32,
     ) -> Attempt {
         let mut reader = BufReader::with_capacity(CHUNK_BYTES, stream);
@@ -511,7 +510,7 @@ struct State {
     /// 当前附着用的连接代号。没拿到过连接时为空。
     generation: Option<u64>,
     /// 当前附着连接的写端（同一 socket 的 dup），写 resize 帧、叫停时 shutdown。
-    writer: Option<UnixStream>,
+    writer: Option<RuntimeStream>,
     /// 界面要的尺寸；重新附着按它来。
     desired: TerminalGeometry,
     /// 当前连接上最后发出的尺寸。
@@ -652,7 +651,7 @@ impl Attachment {
     /// 登记新连接并写 watch 首帧。返回这次的 scrollback 预算；已叫停时返回 None。
     ///
     /// 首帧在状态锁里写：并发的 resize 只能排在它后面，不会抢在首帧前写进连接。
-    fn start(&self, stream: &UnixStream) -> io::Result<Option<u32>> {
+    fn start(&self, stream: &RuntimeStream) -> io::Result<Option<u32>> {
         let mut state = self.lock();
         if state.stopped {
             let _ = stream.shutdown(Shutdown::Both);
@@ -799,7 +798,7 @@ enum HeaderError {
 }
 
 /// 读头行。运行时在头行前就关了连接时返回 None。
-fn read_header(reader: &mut BufReader<UnixStream>) -> Result<Option<WatchHeader>, HeaderError> {
+fn read_header(reader: &mut BufReader<RuntimeStream>) -> Result<Option<WatchHeader>, HeaderError> {
     let mut line = Vec::new();
     loop {
         match reader

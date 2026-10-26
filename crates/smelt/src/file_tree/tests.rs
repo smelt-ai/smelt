@@ -7,6 +7,7 @@ use super::view::{
 };
 use super::{DirCache, SearchHit, build_search_tree};
 use crate::git_panel::GitStatusData;
+use smelt_client::runtime_path::PathStyle;
 
 #[test]
 fn breadcrumb_segments_split_path_under_workspace_root() {
@@ -104,7 +105,7 @@ fn file_tree_rows_single_root_keeps_walk_order_without_header() {
     let git = HashMap::from([("/repo".into(), (Instant::now(), status))]);
 
     assert_eq!(
-        collect_file_tree_rows(&["/repo".into()], &expanded, &HashSet::new(), &cache, &git,),
+        collect_file_tree_rows(PathStyle::Posix, &["/repo".into()], &expanded, &HashSet::new(), &cache, &git,),
         vec![
             FileTreeRow::Entry {
                 depth: 0,
@@ -143,6 +144,7 @@ fn file_tree_row_identity_follows_path_when_a_directory_expands() {
     );
     cache.insert("/repo/src".into(), cached(vec![("a.rs", false)]));
     let collapsed = collect_file_tree_rows(
+        PathStyle::Posix,
         &["/repo".into()],
         &HashSet::new(),
         &HashSet::new(),
@@ -151,6 +153,7 @@ fn file_tree_row_identity_follows_path_when_a_directory_expands() {
     );
     let expanded_dirs = HashSet::from(["/repo/src".into()]);
     let expanded = collect_file_tree_rows(
+        PathStyle::Posix,
         &["/repo".into()],
         &expanded_dirs,
         &HashSet::new(),
@@ -191,6 +194,7 @@ fn file_tree_rows_multi_root_header_collapses_children() {
 
     assert_eq!(
         collect_file_tree_rows(
+            PathStyle::Posix,
             &["/a".into(), "/b".into()],
             &HashSet::new(),
             &collapsed,

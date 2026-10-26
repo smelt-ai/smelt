@@ -414,7 +414,7 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "rea", false).unwrap();
 
         let rea = &read(&dir)["mcpServers"]["rea"];
-        assert_eq!(rea["command"], "~/.smelt/runtime/bin/bun");
+        assert_eq!(rea["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
         assert_eq!(
             rea["args"],
             serde_json::json!(["x", "--bun", "rea-agents@6.5.0", "mcp"]),
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(
             servers[0].transport,
             PiMcpTransport::Stdio {
-                command: "~/.smelt/runtime/bin/bun".into(),
+                command: smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH.into(),
                 args: vec![
                     "x".into(),
                     "--bun".into(),
@@ -448,7 +448,7 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "browser-mcp", false).unwrap();
 
         let browser = &read(&dir)["mcpServers"]["browser-mcp"];
-        assert_eq!(browser["command"], "~/.smelt/runtime/bin/bun");
+        assert_eq!(browser["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
         assert_eq!(
             browser["args"],
             serde_json::json!(["x", "--bun", "@agent360/browser-mcp@1.30.2"]),
@@ -471,7 +471,7 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "playwright", false).unwrap();
 
         let playwright = &read(&dir)["mcpServers"]["playwright"];
-        assert_eq!(playwright["command"], "~/.smelt/runtime/bin/bun");
+        assert_eq!(playwright["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
         assert_eq!(
             playwright["args"],
             serde_json::json!(["x", "--bun", "@playwright/mcp@0.0.83", "--extension"]),
@@ -496,7 +496,7 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "playwright", true).unwrap();
 
         let chrome = &read(&dir)["mcpServers"]["playwright"];
-        assert_eq!(chrome["command"], "~/.smelt/runtime/bin/bun");
+        assert_eq!(chrome["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
         assert_eq!(
             chrome["args"],
             serde_json::json!([

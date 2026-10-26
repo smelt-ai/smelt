@@ -667,6 +667,7 @@ mod tests {
         std::fs::remove_dir_all(&temp).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn broken_symlinks_are_listed_so_they_can_be_removed() {
         let temp = std::env::temp_dir().join(format!("smelt-broken-{}", uuid::Uuid::new_v4()));
@@ -791,7 +792,14 @@ mod tests {
         assert!(plugins.iter().any(|plugin| plugin.id == "skill:other" && !plugin.builtin));
 
         let args = launch_args_for_selection(&["skill:smelt".to_string()], &plugins);
-        assert_eq!(args[2..], ["--skill".to_string(), temp.join("bundle/skills/smelt").to_string_lossy().into_owned()]);
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(args[2], "--skill");
+        // 目录枚举拼出的分隔符和一次 join 整段相对路径不一定相同，按路径比较。
+        assert_eq!(
+            Path::new(&args[3]),
+            temp.join("bundle/skills/smelt").as_path(),
+            "{args:?}"
+        );
         std::fs::remove_dir_all(&temp).ok();
     }
 

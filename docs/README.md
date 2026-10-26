@@ -21,7 +21,7 @@ How the product works today.
 
 Current behavior. Keep these in sync with the code.
 
-- [`control-api.md`](control-api.md) — smeltd Control API v1, the short request protocol shared by desktop, mobile, and CLI.
+- [`control-api.md`](control-api.md) — smeltd Control API v3, the short request protocol shared by desktop, mobile, and CLI.
 - [`notification-architecture.md`](notification-architecture.md) — Status, attention, and notification model.
 - [`event-bus-architecture.md`](event-bus-architecture.md) — Event bus and `event_subscribe`. Plugin-host sections describe a removed design.
 - [`terminal-rendering-gaps.md`](terminal-rendering-gaps.md) — Living notes versus Zed. The main render path is aligned; a few input and platform gaps remain.

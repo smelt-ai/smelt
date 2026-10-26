@@ -9,10 +9,15 @@ pub const AGENT_EVENT_MIN_VERSION: u32 = 1;
 /// Agent hook/extension helper 的稳定路径。GUI 会把 App 内同版本二进制同步到这里，
 /// daemon 再把绝对路径传给进程级集成，避免依赖 Dock 启动时不完整的 PATH。
 pub fn notify_executable_path() -> std::path::PathBuf {
+    let name = if cfg!(windows) {
+        "smelt-notify.exe"
+    } else {
+        "smelt-notify"
+    };
     smelt_paths::smelt_home()
-        .unwrap_or_else(|| "/tmp/.smelt".into())
+        .unwrap_or_else(|| std::env::temp_dir().join(".smelt"))
         .join("bin")
-        .join("smelt-notify")
+        .join(name)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

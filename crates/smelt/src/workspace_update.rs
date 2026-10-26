@@ -3,6 +3,7 @@
 use super::*;
 
 impl Workspace {
+    #[cfg(target_os = "macos")]
     /// 设置入口与设置页共用它决定要不要显示更新提示。
     pub(crate) fn update_available(&self) -> bool {
         self.update_status.staged_update().is_some()
@@ -15,6 +16,7 @@ impl Workspace {
             )
     }
 
+    #[cfg(target_os = "macos")]
     /// App 放的位置装不上更新时，所有更新入口都停在「需要先移到『应用程序』」，不检查、
     /// 不下载、不安装：在那儿每一步都白做，最后还是写不进去。
     fn blocked_by_app_location(&mut self, cx: &mut Context<Self>) -> bool {
@@ -26,6 +28,7 @@ impl Workspace {
         true
     }
 
+    #[cfg(target_os = "macos")]
     /// 「移到『应用程序』并重新打开」：拷过去、安排好等这个进程退出后从新位置重开，再退出。
     /// 后台会话在守护里，重开后照常接上。失败就留在原地，把原因给人看。
     pub(crate) fn move_app_to_applications(&mut self, cx: &mut Context<Self>) {
@@ -68,6 +71,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     /// 检查是否有新版本。`silent` 区分启动时的后台静默检查（离线/失败时不打扰用户，
     /// 悄悄退回 Idle）和设置页手动点「检查更新」（失败要如实展示原因）。
     ///
@@ -163,6 +167,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     fn apply_update_check_outcome(
         &mut self,
         outcome: updater::CheckOutcome,
@@ -186,6 +191,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(target_os = "macos")]
     /// 只在 manifest 已经指向另一份发布包后进入。持久化旧作业的清理放到后台线程，
     /// 成功后才能开始新下载，保证 begin_staged_update 永远不会撞上旧事务。
     fn replace_failed_update_after_check(
@@ -224,6 +230,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     /// 恢复失败时先收敛原事务；安装失败则由 check_for_update 拉取 manifest，只有
     /// 确认发布 URL 已变化后才作废旧作业，不能绕过持久化事务直接另起下载。
     pub(crate) fn check_or_recover_update(&mut self, silent: bool, cx: &mut Context<Self>) {
@@ -237,6 +244,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(target_os = "macos")]
     /// 后台静默下载新版 ZIP 并暂存好 `.app`，完成后置 `ReadyToInstall`（不重启、不打断）。
     /// 下载线程通过 channel 往回推字节进度，UI 线程照单刷新状态；发送端随下载任务结束而
     /// drop，`recv` 收到 Err 即代表下载收尾，此时再 `await` 任务拿最终结果。
@@ -308,6 +316,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     /// 用户点击、启动恢复、退出安装都只从这里进入同一条安装状态机。
     pub(crate) fn begin_ready_update_install(&mut self, cx: &mut Context<Self>) {
         if self.blocked_by_app_location(cx) {
@@ -319,6 +328,7 @@ impl Workspace {
         self.start_update_install(update, UpdateInstallTrigger::User, cx);
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn recover_update_at_launch(&mut self, silent_check: bool, cx: &mut Context<Self>) {
         self.update_status = updater::UpdateStatus::Checking;
         cx.notify();
@@ -360,6 +370,7 @@ impl Workspace {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn start_update_install(
         &mut self,
         update: updater::StagedUpdate,
@@ -430,7 +441,7 @@ impl Workspace {
             // 仍落后则无缝升级到磁盘最新 smeltd。
             let (outdated, info) = cx
                 .background_executor()
-                .spawn(async { (terminal::daemon_outdated(), terminal::daemon_info()) })
+                .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
@@ -484,7 +495,12 @@ impl Workspace {
     /// 逐 pane 在后台 reattach：会话 id 都还在，走正常重放恢复画面。无缝升级后
     /// 不能在 `update` 回调里同步握手，否则卡住的 daemon 会反过来拖住整个 UI。
     pub(crate) fn reconnect_all_terminals(&self, cx: &mut Context<Self>) {
+        let runtime = crate::runtimes::Runtime::local();
         for sess in &self.sessions {
+            // 远程机器的终端还在它自己的运行时上，不拿本机守护去重连。
+            if !sess.runtime(cx).is_local() {
+                continue;
+            }
             let leaves = sess.term_leaves();
             for leaf in leaves {
                 let (cwd, sid) = {
@@ -492,12 +508,13 @@ impl Workspace {
                     (view.cwd(), view.session_id().to_string())
                 };
                 let leaf_for_result = leaf.clone();
+                let runtime = runtime.clone();
                 cx.spawn(async move |_, cx| {
                     let terminal = cx
                         .background_executor()
                         .spawn(async move {
                             terminal::Terminal::reattach(
-                                &crate::runtimes::Runtime::local(),
+                                &runtime,
                                 24,
                                 80,
                                 cwd.as_deref(),
@@ -529,33 +546,37 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async { terminal::upgrade_daemon() })
+                .spawn(async { crate::local_daemon::upgrade_daemon() })
                 .await;
             // exec 换代后 PID / 启动时刻都变了，跟版本一起重新问一遍。
             let (outdated, info) = cx
                 .background_executor()
-                .spawn(async { (terminal::daemon_outdated(), terminal::daemon_info()) })
+                .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_upgrading = false;
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
                 this.daemon_upgrade_msg = Some(match outcome {
-                    terminal::UpgradeOutcome::Upgraded => {
+                    crate::local_daemon::UpgradeOutcome::Upgraded => {
                         this.reconnect_all_terminals(cx);
-                        "已无缝升级，所有会话保持运行。".to_string()
+                        if cfg!(windows) {
+                            "已重启到新版本。终端会话已断开。".to_string()
+                        } else {
+                            "已无缝升级，所有会话保持运行。".to_string()
+                        }
                     }
-                    terminal::UpgradeOutcome::Unsupported => {
+                    crate::local_daemon::UpgradeOutcome::Unsupported => {
                         // 守护完全没认这个 op，控制连接以外的东西没被碰过，各 pane
                         // 的流式连接照常连着，不需要重连。
                         "正在跑的守护版本过旧，不支持无缝升级；请用「重启守护进程」（会断开会话）。"
                             .to_string()
                     }
-                    terminal::UpgradeOutcome::Busy => {
+                    crate::local_daemon::UpgradeOutcome::Busy => {
                         this.daemon_upgrade_pending = true;
                         "有 Agent 回合仍在运行；回合结束后会自动升级。".to_string()
                     }
-                    terminal::UpgradeOutcome::Failed => {
+                    crate::local_daemon::UpgradeOutcome::Failed => {
                         // 守护回了 ok:true 才会 exec：旧连接多半已断。version
                         // 握手没看到新 pid/started_at 时按可能已断重连。
                         this.reconnect_all_terminals(cx);
@@ -611,10 +632,11 @@ impl Workspace {
     /// 却照样回 `{"ok":true}`（真实教训：两条表分开存，用错 op 表面上「成功」
     /// 实际上会话根本没被杀掉，圈了个大坑）。
     pub(crate) fn kill_daemon_session(id: &str) {
+        let runtime = crate::runtimes::Runtime::local();
         if id.starts_with("acp-") {
-            smelt_client::acp_client::kill_acp_session(&crate::runtimes::local(), id);
+            smelt_client::acp_client::kill_acp_session(runtime.client(), id);
         } else {
-            terminal::kill_remote(&crate::runtimes::Runtime::local(), id);
+            terminal::kill_remote(&runtime, id);
         }
     }
 
@@ -675,6 +697,10 @@ impl Workspace {
         // 硬重启会清掉守护里的会话。终端 agent 不做语义恢复，缺失会话统一重开 shell。
         let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
         for sess in &self.sessions {
+            // 硬重启只清本机守护里的会话。远程机器上的终端不动。
+            if !sess.runtime(cx).is_local() {
+                continue;
+            }
             let leaves = sess.term_leaves();
             for leaf in leaves {
                 let view = leaf.read(cx);
@@ -689,20 +715,21 @@ impl Workspace {
             let (outdated, info) = cx
                 .background_executor()
                 .spawn(async {
-                    terminal::restart_daemon();
-                    terminal::ensure_daemon_running();
-                    (terminal::daemon_outdated(), terminal::daemon_info())
+                    crate::local_daemon::restart_daemon();
+                    crate::local_daemon::ensure_daemon_running();
+                    (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info())
                 })
                 .await;
 
             // 握手/重试全在后台；主线程只接结果
+            let runtime = crate::runtimes::Runtime::local();
             let built = cx
                 .background_executor()
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
                     for (entity, cwd, sid) in jobs {
                         let term = terminal::Terminal::spawn(
-                            &crate::runtimes::Runtime::local(),
+                            &runtime,
                             24,
                             80,
                             cwd.as_deref(),

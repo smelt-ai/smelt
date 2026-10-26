@@ -2,4 +2,6 @@
 //!
 //! 安装 helper 与桌面进程必须共享同一份状态机，禁止在 GUI crate 内复制事务逻辑。
 
+/// 更新器替换的是 macOS 的 .app 包。其它平台不提供这套事务（设计文档 D4）。
+#[cfg(target_os = "macos")]
 pub use smelt_client::updater::*;

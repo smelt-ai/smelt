@@ -1,7 +1,7 @@
 //! 客户端挂着的运行时：它是谁，怎么连（设计文档 D6）。
 //!
-//! 本机运行时总在，身份就是 `Local`；远程运行时按它永久不变的 `runtime_id` 认。会话、
-//! 视图各自记着自己属于哪个运行时，调用和连接都发给它。
+//! 本机运行时的身份是 `Local`（设计文档 D3）。远程运行时按它永久不变的
+//! `runtime_id` 认。会话、视图各自记着自己属于哪个运行时，调用和连接都发给它。
 
 use smelt_runtime_client::RuntimeClient;
 
@@ -28,7 +28,7 @@ impl Runtime {
         Self { key, client }
     }
 
-    /// 本机运行时。连本机 socket，不负责拉起守护。
+    /// 本机运行时。连本机 socket，不负责拉起守护。桌面支持的平台上都有。
     pub fn local() -> Self {
         static LOCAL: std::sync::OnceLock<RuntimeClient> = std::sync::OnceLock::new();
         Self {

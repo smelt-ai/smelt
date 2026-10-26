@@ -32,7 +32,10 @@ fn raw_attach(
     id: &str,
     launch: Option<&str>,
     create: bool,
-) -> (serde_json::Value, BufReader<std::os::unix::net::UnixStream>) {
+) -> (
+    serde_json::Value,
+    BufReader<smelt_runtime_client::RuntimeStream>,
+) {
     let mut stream = runtime.client().connect().unwrap();
     let request = crate::terminal::open_request(40, 160, None, id, launch, create);
     writeln!(stream, "{request}").unwrap();
@@ -54,7 +57,7 @@ struct RawRun {
 
 /// 读到结尾标记、断开或超时为止。`pause` 模拟慢客户端：每读一块歇一下。
 fn drain(
-    reader: &mut BufReader<std::os::unix::net::UnixStream>,
+    reader: &mut BufReader<smelt_runtime_client::RuntimeStream>,
     timeout: Duration,
     pause: Option<(usize, Duration)>,
 ) -> RawRun {

@@ -11,10 +11,10 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
-use std::path::Path;
 use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
+use smelt_client::runtime_path::PathStyle;
 use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
 use smelt_ui::IconAction as _;
 
@@ -109,7 +109,6 @@ fn search_tree_rows(
                 .py(px(2.))
                 .text_sm()
                 .text_color(context.fg)
-                
                 .hover(move |row| row.bg(context.hover))
                 .child(
                     Icon::new(IconName::File)
@@ -206,6 +205,7 @@ fn name_likely_truncated(name: &str, depth: usize, panel_w: f32) -> bool {
 /// 展开了但尚未缓存的目录会被跳过。展开、定位和可见数据刷新会去补目录列表，
 /// 缓存写回后再画出来。
 pub(super) fn walk_dir_cached(
+    style: PathStyle,
     dir: &str,
     dir_cache: &DirCache,
     expanded: &HashSet<String>,
@@ -216,11 +216,11 @@ pub(super) fn walk_dir_cached(
         return;
     };
     for (name, is_dir) in entries.iter() {
-        let path = Path::new(dir).join(name).to_string_lossy().to_string();
+        let path = style.join(dir, name);
         let is_expanded = expanded.contains(&path);
         out.push((depth, name.clone(), *is_dir, path.clone(), is_expanded));
         if *is_dir && is_expanded {
-            walk_dir_cached(&path, dir_cache, expanded, depth + 1, out);
+            walk_dir_cached(style, &path, dir_cache, expanded, depth + 1, out);
         }
     }
 }
@@ -315,7 +315,9 @@ fn git_mark_index(files: &[(String, String)]) -> HashMap<&str, char> {
 
 /// 展平当前可见树。只读缓存，不碰文件系统。单根不插标题行，和以前键盘导航的
 /// 下标一致；多根才有可折叠的根标题。
+/// `style` 是这些路径所属运行时的规则。界面传本机的；测试固定一种，结果不随宿主平台变。
 pub(super) fn collect_file_tree_rows(
+    style: PathStyle,
     roots: &[String],
     expanded: &HashSet<String>,
     collapsed_roots: &HashSet<String>,
@@ -346,17 +348,14 @@ pub(super) fn collect_file_tree_rows(
             continue;
         }
         let mut flat = Vec::new();
-        walk_dir_cached(root, dir_cache, expanded, usize::from(multi), &mut flat);
+        walk_dir_cached(style, root, dir_cache, expanded, usize::from(multi), &mut flat);
         for (depth, name, is_dir, path, is_expanded) in flat {
             let git_mark = if is_dir {
                 None
             } else {
                 marks.as_ref().and_then(|marks| {
-                    Path::new(&path)
-                        .strip_prefix(root)
-                        .ok()
-                        .and_then(|rel| rel.to_str())
-                        .and_then(|rel| marks.get(rel).copied())
+                    style.strip_prefix(&path, root)
+                        .and_then(|rel| marks.get(rel.as_str()).copied())
                 })
             };
             rows.push(FileTreeRow::Entry {
@@ -428,6 +427,7 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
     }
 
     let rows = Rc::new(collect_file_tree_rows(
+        PathStyle::LOCAL,
         roots,
         expanded,
         collapsed_roots,
@@ -801,12 +801,9 @@ pub(super) fn breadcrumb_segments(path: &str, roots: &[String]) -> Vec<Breadcrum
 /// 名字组件会自动回退成纯文本，不会 panic。没有扩展名的文件（Makefile 等）退而
 /// 用文件名本身（能命中 "makefile" 这类按文件名匹配的语言）。
 pub(super) fn editor_language_for_path(path: &str) -> String {
-    let p = Path::new(path);
-    match p.extension().and_then(|e| e.to_str()) {
+    match smelt_client::runtime_path::PathStyle::LOCAL.extension(path) {
         Some(ext) => ext.to_lowercase(),
-        None => p
-            .file_name()
-            .and_then(|n| n.to_str())
+        None => smelt_client::runtime_path::PathStyle::LOCAL.file_name(path)
             .unwrap_or("text")
             .to_lowercase(),
     }
@@ -870,7 +867,6 @@ pub fn file_content_parts(
                         .items_center()
                         .text_size(px(14.))
                         .line_height(relative(1.2))
-                        
                         .when(is_last, |el| el.text_color(fg).font_semibold())
                         .when(!is_last, |el| el.text_color(muted))
                         .hover(move |el| el.bg(border).text_color(fg))

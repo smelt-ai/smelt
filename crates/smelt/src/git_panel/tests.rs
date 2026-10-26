@@ -391,7 +391,7 @@ fn hunk_row_shows_context_not_coordinates() {
 
 fn repo(root: &str, rel: &str, kind: RepoKind) -> DiscoveredRepo {
     DiscoveredRepo {
-        root: std::path::PathBuf::from(root),
+        root: root.to_string(),
         rel_path: rel.to_string(),
         kind,
     }

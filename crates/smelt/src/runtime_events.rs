@@ -35,7 +35,7 @@ struct RuntimeSubscriptions {
     sender: smol::channel::Sender<RuntimeEvent>,
     /// 订阅线程把远程运行时的连通性报给主线程：哪个运行时、现在怎样。
     status: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
-    /// 本机那条。把手丢了线程就停，所以要留着。
+    /// 本机那条。
     _local: SubscriptionHandle,
     remotes: HashMap<RuntimeKey, SubscriptionHandle>,
     _hub_watch: Option<Subscription>,
@@ -244,7 +244,7 @@ fn upgrade_local_then_probe(
     status_tx: &smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     stop: &AtomicBool,
 ) -> RuntimeStatus {
-    use crate::terminal::UpgradeOutcome;
+    use crate::local_daemon::UpgradeOutcome;
 
     const BUSY_RETRY: Duration = Duration::from_secs(15);
     let report = |progress: &str| {
@@ -255,7 +255,7 @@ fn upgrade_local_then_probe(
     };
     report("正在升级本机运行时");
     loop {
-        match crate::terminal::upgrade_daemon() {
+        match crate::local_daemon::upgrade_daemon() {
             UpgradeOutcome::Busy => {
                 report("本机运行时有回合没跑完，跑完就升级");
                 std::thread::sleep(BUSY_RETRY);

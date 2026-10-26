@@ -7,6 +7,7 @@
 | `Smelt.dmg` | `build`（macos-14） | `make dist-build`，用 secrets 里的自签名证书签名（`CODESIGN_P12_*`） |
 | `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
+| `smelt-<版本>-windows-x86_64.zip` | `windows` → `windows-release` | `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe` 在同一层。第一版不签名，见下面的「Windows」 |
 | `SHA256SUMS` | `linux-release` → `checksums` | 先只含 Linux 包（一键安装和运行时自动升级马上能用），全部产物到齐后重写成覆盖所有产物 |
 
 ## 发版步骤
@@ -78,6 +79,26 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
   脚本只在当前提交正好是工作区版本的 tag、`mobile/` 和 `crates/` 没有未提交改动时出包，保证包和发版的代码对得上。
   签名用 `mobile/ios/Flutter/SigningDefaults.xcconfig` 里的正式团队和 Bundle ID，导出设置在
   `mobile/ios/ExportOptions.plist`。上传用 Transporter 或 Xcode。
+
+## Windows
+
+`windows` job 在 `windows-latest` 上 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用
+`scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`（Bun 1.4.3，`bun-windows-x64`）。打成
+`smelt-<版本>-windows-x86_64.zip`，根目录放在一起：
+
+- `smelt.exe`
+- `smelt.com`：`smelt-cli.exe` 改名。`smelt.exe` 是 GUI 子系统，命令行子命令在 cmd / PowerShell
+  里没有输出；敲 `smelt` 时先找到 `.com`，子命令在它里面跑，不带子命令就拉起 `smelt.exe`
+- `smeltd.exe`
+- `smelt-notify.exe`
+- `smelt-pi.exe`
+- Pi 运行要的 `photon_rs_bg.wasm`（以及打出来的 `skills/`、`native/`）
+
+桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`。由 `windows-release` 挂到同一个 Release。
+校验和在 `checksums` 里和其它产物写在一起。
+
+这一版 exe 不签名。下载后 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新等安装包方案定了再做。
+本机守护可以冷启动。升级是关掉旧进程再拉起新的，终端会话不保留。Release 说明里有同样的一段。
 
 ## Android 签名
 

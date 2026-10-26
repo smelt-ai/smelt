@@ -7,7 +7,6 @@ use smelt_runtime_client::protocol::history::{
     HistoryDeleteCall, HistoryDeleteParams, HistoryDetailCall, HistoryDetailParams,
     HistoryListCall, HistoryListParams,
 };
-use std::path::{Path, PathBuf};
 
 use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
 
@@ -44,7 +43,7 @@ pub(crate) fn format_count(n: u64) -> String {
 /// 行元素键。有 resume id 用它；空 id 退回路径。在快照里算一次，render 只克隆。
 fn history_row_key(session: &SessionSummary) -> SharedString {
     if session.resume_id.is_empty() {
-        SharedString::from(session.path.to_string_lossy().as_ref())
+        SharedString::from(session.path.clone())
     } else {
         SharedString::from(session.resume_id.as_str())
     }
@@ -125,7 +124,7 @@ pub struct DeleteHistoryTarget {
     pub profile_id: Option<String>,
     pub cwd: String,
     pub resume_id: String,
-    pub path: PathBuf,
+    pub path: String,
     pub title: String,
 }
 
@@ -354,9 +353,9 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                             let ix = visible_indices[row_ix];
                             let s = &list[ix];
                             let is_sel =
-                                selected_path_for_list.as_deref() == Some(s.path.as_path());
+                                selected_path_for_list.as_deref() == Some(s.path.as_str());
                             let path = s.path.clone();
-                            let path_for_copy = path.to_string_lossy().into_owned();
+                            let path_for_copy = path.clone();
                             let resume_id = s.resume_id.clone();
                             let row_is_agent = history_row_is_agent_session(
                                 agent_context,
@@ -577,8 +576,10 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                             .on_click(move |_ev, _window, cx| {
                                                                 ws.update(cx, |this, cx| {
                                                                     // 历史页读的是本机运行时的存档。
+                                                                    let runtime =
+                                                                        crate::runtimes::Runtime::local();
                                                                     this.set_history_custom_title(
-                                                                        &crate::runtimes::Runtime::local(),
+                                                                        &runtime,
                                                                         agent,
                                                                         reset_profile_id.clone(),
                                                                         reset_cwd.clone(),
@@ -783,13 +784,13 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
 /// 打开着的那份历史会话：路径、解析出的对话，和各轮正文的 Markdown 解析状态。
 /// 解析状态跟着它一起换掉、一起丢，换会话不用另外清。
 pub(crate) struct OpenedHistory {
-    pub path: PathBuf,
+    pub path: String,
     pub detail: Rc<SessionDetail>,
     turn_markdown: Rc<HistoryTurnMarkdown>,
 }
 
 impl OpenedHistory {
-    fn new(path: PathBuf, detail: SessionDetail) -> Self {
+    fn new(path: String, detail: SessionDetail) -> Self {
         Self {
             path,
             detail: Rc::new(detail),
@@ -968,7 +969,7 @@ fn load_history_list(
                         .custom_title
                         .clone()
                         .unwrap_or_else(|| session.title.clone()),
-                    path: PathBuf::from(session.path),
+                    path: session.path,
                     agent_title: session.title,
                     custom_title: session.custom_title,
                     resume_id: session.resume_id,
@@ -1019,10 +1020,10 @@ pub(crate) fn remember_history_agent(
 }
 
 /// 向运行时要一份历史会话的对话内容。存档被删、格式认不出、或运行时连不上都是 `None`。
-fn load_history_detail(agent: HistorySourceKind, path: &Path) -> Option<SessionDetail> {
+fn load_history_detail(agent: HistorySourceKind, path: &str) -> Option<SessionDetail> {
     let params = HistoryDetailParams {
         agent: agent.id().to_string(),
-        path: path.to_string_lossy().into_owned(),
+        path: path.to_string(),
     };
     let detail = call::<HistoryDetailCall>(params, RUNTIME_CALL_TIMEOUT)
         .map_err(|error| eprintln!("[history] 读取会话内容失败：{}", error_text(error)))
@@ -1121,7 +1122,7 @@ impl Workspace {
     pub fn open_session_detail(
         &mut self,
         agent: HistorySourceKind,
-        path: std::path::PathBuf,
+        path: String,
         cx: &mut Context<Self>,
     ) {
         self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
@@ -1194,7 +1195,7 @@ impl Workspace {
             profile_id: profile_id.clone(),
             cwd: cwd.clone(),
             resume_id,
-            path: path.to_string_lossy().into_owned(),
+            path,
         };
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1293,7 +1294,7 @@ impl Workspace {
                     // 存档被删/被换格式：明说读不出来，别让用户对着一条空会话猜。
                     crate::status_item::notify_error(format!(
                         "读不出这条历史会话，迁移取消：{}",
-                        path.display()
+                        path
                     ));
                     return;
                 };
@@ -1381,7 +1382,7 @@ pub struct HistoryMigrationSource {
     /// 源 agent 自己认的 session id（历史页那行的 `resume_id`）。只作为溯源信息
     /// 记进新会话，不发给目标 agent——它不认别家的 id。
     pub resume_id: String,
-    pub path: std::path::PathBuf,
+    pub path: String,
     pub cwd: String,
 }
 
@@ -1436,9 +1437,11 @@ mod tests {
     // 不用 `use super::*;`：本文件后半段引入了 gpui/gpui_component 的 glob 导入，
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
+    #[cfg(unix)]
+    use super::{HistoryMigrationSource, build_history_handoff_request};
     use super::{
-        HistoryListSnapshot, HistoryMigrationSource, HistorySourceTab, SessionDetail,
-        SessionSummary, Turn, build_history_handoff_request, current_profile_launch,
+        HistoryListSnapshot, HistorySourceTab, SessionDetail, SessionSummary, Turn,
+        current_profile_launch,
         handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
         history_source_tabs, tabs_with_sessions,
     };
@@ -1448,7 +1451,7 @@ mod tests {
 
     fn summary(title: &str, custom: Option<&str>, agent_title: &str) -> SessionSummary {
         SessionSummary {
-            path: std::path::PathBuf::new(),
+            path: String::new(),
             title: title.to_string(),
             agent_title: agent_title.to_string(),
             custom_title: custom.map(str::to_string),
@@ -1481,14 +1484,14 @@ mod tests {
     fn history_list_snapshot_keeps_row_element_key() {
         let mut with_id = summary("标题", None, "原始");
         with_id.resume_id = "resume-id-longer-than-inline".into();
-        with_id.path = std::path::PathBuf::from("/ignored/when/resume-id-is-present");
+        with_id.path = "/ignored/when/resume-id-is-present".to_string();
         let snap = HistoryListSnapshot::new(vec![with_id]);
         assert_eq!(snap.row_keys[0].as_ref(), "resume-id-longer-than-inline");
         let cloned = snap.row_keys[0].clone();
         assert_eq!(cloned.as_ptr(), snap.row_keys[0].as_ptr());
 
         let mut path_only = summary("标题", None, "原始");
-        path_only.path = std::path::PathBuf::from("/tmp/session-path-longer-than-23");
+        path_only.path = "/tmp/session-path-longer-than-23".to_string();
         let snap = HistoryListSnapshot::new(vec![path_only]);
         assert_eq!(
             snap.row_keys[0].as_ref(),
@@ -1570,6 +1573,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn history_migration_request_carries_source_identity_and_no_inherited_config() {
         let detail = SessionDetail {
@@ -1587,7 +1591,7 @@ mod tests {
             profile_label: None,
             title: "老会话".into(),
             resume_id: "grok-session-1".into(),
-            path: std::path::PathBuf::from("/tmp/does-not-matter"),
+            path: "/tmp/does-not-matter".to_string(),
             cwd: "/repo".into(),
         };
         let target = crate::acp_view::AcpHandoffTarget {

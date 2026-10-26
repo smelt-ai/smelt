@@ -5,7 +5,7 @@
 //! stdin: provider hook JSON（`hook_event_name` 或 Grok 的 `hookEventName`，
 //!        以及 `tool_name` / `toolName`、`notification_type` / `message` 等）
 //! env:   `SMELT_SESSION_ID`（smeltd 会话 id，spawn_session 时注入）、
-//!        `SMELT_SOCK`（smeltd.sock 路径，同样是 spawn 时注入）
+//!        `SMELT_SOCK`（Unix 是 smeltd.sock；Windows 是 `\\.\pipe\...`）
 //! 出参:  连 `$SMELT_SOCK` 发一行 `{"op":"agent_event","id":"..","event":{...}}`
 //!
 //! **必须 exit 0，并返回各 provider 要求的无副作用响应**：Antigravity 的 Stop 明确
@@ -15,7 +15,7 @@
 //! 缺失、env 没设置）都静默退出。
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
+use smelt_runtime_client::UnixStream;
 use std::time::Duration;
 
 use smelt_core::agent_event::{AgentEvent, AgentEventKind};
@@ -72,8 +72,18 @@ fn run() -> Option<()> {
 }
 
 fn send_once_and_confirm(sock: &str, payload: &serde_json::Value) -> std::io::Result<bool> {
-    let mut stream = UnixStream::connect(sock)?;
+    #[cfg(windows)]
+    if is_named_pipe(sock) {
+        let mut stream = smelt_sys::named_pipe::PipeStream::connect(sock)?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        return confirm_response(stream, payload);
+    }
+    let stream = UnixStream::connect(sock)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    confirm_response(stream, payload)
+}
+
+fn confirm_response(mut stream: impl Read + Write, payload: &serde_json::Value) -> std::io::Result<bool> {
     writeln!(stream, "{payload}")?;
     let mut response = String::new();
     BufReader::new(stream).read_line(&mut response)?;
@@ -81,6 +91,19 @@ fn send_once_and_confirm(sock: &str, payload: &serde_json::Value) -> std::io::Re
         .ok()
         .and_then(|value| value["ok"].as_bool())
         == Some(true))
+}
+
+/// Windows 上 `\\.\pipe\` 和 `\\?\pipe\` 是命名管道。其余仍按 AF_UNIX 路径连。
+#[cfg(windows)]
+fn is_named_pipe(sock: &str) -> bool {
+    let bytes = sock.as_bytes();
+    bytes.len() >= 9
+        && bytes[0] == b'\\'
+        && bytes[1] == b'\\'
+        && (bytes[2] == b'.' || bytes[2] == b'?')
+        && bytes[3] == b'\\'
+        && bytes[4..8].eq_ignore_ascii_case(b"pipe")
+        && bytes[8] == b'\\'
 }
 
 fn normalize_hook_event_name(event: &str) -> &str {
