@@ -4954,12 +4954,15 @@ fn rewrite_runtime_command_with_bun(cmd: &str, bun: &str) -> Option<String> {
 /// 注释）。顺序：login PATH 在前（用户显式配的优先），标准安装位在后兜底；
 /// 重复目录无所谓，resolve 取第一个命中即止。
 pub(crate) fn extended_search_path() -> String {
-    let mut path = crate::login_env::login_path().to_string();
-    let mut push = |p: String| {
-        path.push(':');
-        path.push_str(&p);
-    };
-    if let Some(home) = dirs::home_dir() {
+    extend_search_path(crate::login_env::login_path(), dirs::home_dir().as_deref())
+}
+
+fn extend_search_path(login: &str, home: Option<&std::path::Path>) -> String {
+    // 空的一段在 PATH 里等于当前目录，不带进来。
+    let mut entries: Vec<std::path::PathBuf> = std::env::split_paths(login)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .collect();
+    if let Some(home) = home {
         // grok 装在 ~/.grok/bin（软链常在 ~/.local/bin）；其余是 pip/npm/cargo
         // 之类常把 CLI 放的用户级目录。
         for sub in [
@@ -4970,13 +4973,17 @@ pub(crate) fn extended_search_path() -> String {
             ".cargo/bin",
             ".volta/bin",
         ] {
-            push(home.join(sub).to_string_lossy().into_owned());
+            entries.push(home.join(sub));
         }
     }
-    for d in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
-        push(d.to_string());
+    #[cfg(unix)]
+    for dir in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        entries.push(dir.into());
     }
-    path
+    // 分隔符按平台：Windows 是 `;`。拼不起来（某一项本身带分隔符）就只用登录 PATH。
+    std::env::join_paths(entries)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| login.to_string())
 }
 
 /// 在 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
@@ -4989,11 +4996,10 @@ fn resolve_in_path(program: &str, path: &str) -> Option<String> {
     if program.contains('/') || program.contains('\\') {
         return Some(program.to_string());
     }
-    let separator = if cfg!(windows) { ';' } else { ':' };
     let names = command_file_names(program);
-    for dir in path.split(separator).filter(|d| !d.is_empty()) {
+    for dir in std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()) {
         for name in &names {
-            let full = std::path::Path::new(dir).join(name);
+            let full = dir.join(name);
             // 是文件且可执行（软链会被 metadata 跟随到目标）。Windows 没有执行位。
             if let Ok(meta) = std::fs::metadata(&full) {
                 if !meta.is_file() {
@@ -5679,6 +5685,20 @@ mod path_resolve_tests {
         std::fs::write(root.join("grok"), "bare").unwrap();
         let found = resolve_in_path("grok", &path).expect("bare");
         assert!(found.to_ascii_lowercase().ends_with("grok"), "{found}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 追加目录要按平台的分隔符拼。Windows 上用 `:` 拼会把登录 PATH 的最后一段
+    /// 和追加的目录粘成一个不存在的目录。
+    #[test]
+    fn extended_search_path_keeps_every_entry_separable() {
+        let root = temp_root("extend");
+        let login_dirs = [root.join("a"), root.join("b")];
+        let home = root.join("home");
+        let extended = extend_search_path(&path_list(&login_dirs), Some(&home));
+        let entries: Vec<_> = std::env::split_paths(&extended).collect();
+        assert_eq!(&entries[..2], &login_dirs[..]);
+        assert!(entries.contains(&home.join(".cargo/bin")), "{extended}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
