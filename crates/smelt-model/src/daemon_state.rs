@@ -56,7 +56,8 @@ pub struct DaemonSessionState {
     pub provider: Option<String>,
     /// 该终端此刻正在对话的 provider 会话 id（由每条 hook 携带）。UI 用它把侧栏
     /// 会话对上 provider 自己的历史存档：重命名写进历史标题覆盖层，显示名也跟着
-    /// 对话切换走。旧守护不报该字段时为 None，退化成纯终端标题语义。
+    /// 对话切换走。旧守护不报该字段时为 None，退化成纯终端标题语义。CLI 进程退出
+    /// （`SessionEnded`）后守护会把它清掉：终端回到 shell，不再有进行中的对话。
     #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(default)]
