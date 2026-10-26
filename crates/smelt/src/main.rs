@@ -2799,6 +2799,9 @@ struct Workspace {
     daemon_info: Option<local_daemon::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
+    /// 停掉守护会打断的会话名。退出、重启守护、装更新的确认框打开时算一次，
+    /// 弹窗的 render 只读这份，不在每次重绘时整份克隆会话状态。
+    stop_prompt_names: Vec<String>,
     /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
     /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的游离会话、忘了关的临时会话都会
     /// 计进「N 个会话」里但从没在任何侧栏露过面，只有这里能看见并单独清理，
@@ -3245,6 +3248,7 @@ impl Workspace {
             show_update_install_confirm: false,
             daemon_info: None,
             show_daemon_restart_confirm: false,
+            stop_prompt_names: Vec::new(),
             session_manager_open: false,
             session_manager_list: None,
             session_manager_tombstones: HashSet::new(),
@@ -3943,15 +3947,14 @@ impl Render for Workspace {
                 if this.quit_requested {
                     return;
                 }
-                if matches!(this.update_status, updater::UpdateStatus::Applying { .. }) {
-                    this.begin_main_modal_focus(window, cx);
-                    this.show_quit_confirm = true;
-                    cx.notify();
-                    return;
-                }
-                // 有待装更新时退出会停掉守护并换包。没有进行中的会话就直接走，
-                // 有的话必须先确认，不能把正在输出的对话静默杀掉。
-                if this.update_status.ready_update().is_some() {
+                this.stop_prompt_names.clear();
+                // 更新事务只在 macOS 上存在。
+                #[cfg(target_os = "macos")]
+                if !matches!(this.update_status, updater::UpdateStatus::Applying { .. })
+                    && this.update_status.ready_update().is_some()
+                {
+                    // 有待装更新时退出会停掉守护并换包。没有进行中的会话就直接走，
+                    // 有的话必须先确认，不能把正在输出的对话静默杀掉。
                     let names = this.busy_work_names(cx);
                     if !daemon_restart_prompt::should_confirm(&names) {
                         if let Some(update) = this.update_status.ready_update().cloned() {
@@ -3959,6 +3962,7 @@ impl Render for Workspace {
                         }
                         return;
                     }
+                    this.stop_prompt_names = names;
                 }
                 this.begin_main_modal_focus(window, cx);
                 this.show_quit_confirm = true;

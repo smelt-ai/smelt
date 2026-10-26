@@ -385,14 +385,9 @@ impl Workspace {
         let installing = !update_is_applying && self.update_status.ready_update().is_some();
         #[cfg(not(target_os = "macos"))]
         let installing = false;
-        let names = if installing {
-            self.busy_work_names(cx)
-        } else {
-            Vec::new()
-        };
         let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
             super::daemon_restart_prompt::DaemonStopReason::QuitToInstall,
-            &names,
+            &self.stop_prompt_names,
         );
         let title = if installing {
             prompt.title
@@ -637,10 +632,9 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let names = self.busy_work_names(cx);
         let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
             super::daemon_restart_prompt::DaemonStopReason::ExplicitRestart,
-            &names,
+            &self.stop_prompt_names,
         );
 
         let content = v_flex()
@@ -681,10 +675,9 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let names = self.busy_work_names(cx);
         let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
             super::daemon_restart_prompt::DaemonStopReason::UpdateInstall,
-            &names,
+            &self.stop_prompt_names,
         );
         let content = v_flex()
             .child(Self::modal_title(fg, prompt.title))

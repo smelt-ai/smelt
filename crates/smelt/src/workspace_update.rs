@@ -328,6 +328,7 @@ impl Workspace {
         };
         let names = self.busy_work_names(cx);
         if super::daemon_restart_prompt::should_confirm(&names) {
+            self.stop_prompt_names = names;
             self.show_update_install_confirm = true;
             cx.notify();
             return;
@@ -604,6 +605,7 @@ impl Workspace {
         }
         let names = self.busy_work_names(cx);
         if super::daemon_restart_prompt::should_confirm(&names) {
+            self.stop_prompt_names = names;
             self.show_daemon_restart_confirm = true;
             cx.notify();
             return;
