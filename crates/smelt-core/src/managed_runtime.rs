@@ -326,9 +326,16 @@ fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        if same_file(&launcher, bun) {
+        // 入口是硬链接或复制品，路径和 generation 里的 bun.exe 永远不同，比路径比不出来。
+        // 发布成功后在旁边记下来源，对得上就不碰正在用的入口。
+        let source_marker = dir.join("bun.exe.source");
+        let source = bun.to_string_lossy();
+        if launcher.is_file()
+            && fs::read_to_string(&source_marker).is_ok_and(|recorded| recorded == source)
+        {
             return Ok(());
         }
+        remove_retired_launchers(dir);
         let temporary = dir.join(format!(
             ".bun-{}-{}.exe",
             std::process::id(),
@@ -356,16 +363,24 @@ fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
         }
         fs::rename(&temporary, &launcher).map_err(|error| {
             format!("更新 Bun 固定入口 {} 失败：{error}", launcher.display())
-        })
+        })?;
+        // 记不下来只是下次再发布一遍。
+        let _ = fs::write(&source_marker, source.as_bytes());
+        Ok(())
     }
 }
 
+/// 换入口时挪开的旧 `bun.exe` 当时还在跑，删不掉。之后再发布时把已经没人用的清掉。
 #[cfg(windows)]
-fn same_file(left: &Path, right: &Path) -> bool {
-    matches!(
-        (fs::canonicalize(left), fs::canonicalize(right)),
-        (Ok(left), Ok(right)) if left == right
-    )
+fn remove_retired_launchers(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(".bun-old-") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// 下载 Bun 的 curl。连不上、或者连上了却半天不动（走代理、跨地区连 GitHub 常见）都要
@@ -716,6 +731,35 @@ mod tests {
         );
         let leftovers = fs::read_dir(runtime.join("bin")).unwrap().count();
         assert_eq!(leftovers, 1, "临时链接不能留下");
+        fs::remove_dir_all(runtime).ok();
+    }
+
+    /// Windows 的入口是硬链接或复制品。同一个 generation 再同步时不能重新发布：
+    /// 那会把正在跑的 bun.exe 挪开，挪开到换上之间入口不存在。
+    #[cfg(windows)]
+    #[test]
+    fn bun_launcher_is_not_republished_for_the_same_generation() {
+        let runtime =
+            std::env::temp_dir().join(format!("smelt-bun-launcher-{}", uuid::Uuid::new_v4()));
+        let first = runtime.join("store/bun/bun-a/bun.exe");
+        let second = runtime.join("store/bun/bun-b/bun.exe");
+        for (path, bytes) in [(&first, b"first"), (&second, b"secnd")] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let launcher = runtime.join(BUN_LAUNCHER);
+
+        publish_bun_launcher(&runtime, &first).unwrap();
+        // 上一次换入口时没删掉的旧文件。同一个 generation 再同步不碰 bin 目录，它还在。
+        let retired = runtime.join("bin/.bun-old-1-x.exe");
+        fs::write(&retired, b"old").unwrap();
+        publish_bun_launcher(&runtime, &first).unwrap();
+        assert!(retired.exists(), "同一个 generation 不应重新发布");
+        assert_eq!(fs::read(&launcher).unwrap(), b"first");
+
+        publish_bun_launcher(&runtime, &second).unwrap();
+        assert_eq!(fs::read(&launcher).unwrap(), b"secnd");
+        assert!(!retired.exists(), "换 generation 时清掉没人用的旧入口");
         fs::remove_dir_all(runtime).ok();
     }
 
