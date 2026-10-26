@@ -272,7 +272,7 @@ impl OutputAttachment {
                     // interrupted write 不需要污染日志。
                     if !mailbox.is_closed() {
                         crate::dlog(&format!(
-                            "{kind} writer stopped id={writer_id} fd={fd} error={error}"
+                            "{kind} writer stopped id={writer_id} fd={fd:?} error={error}"
                         ));
                     }
                     mailbox.close();
@@ -366,7 +366,7 @@ pub(crate) fn enqueue_session_streams(
             live.push(stream);
         } else {
             crate::dlog(&format!(
-                "terminal {kind} output queue saturated or closed id={id} fd={}",
+                "terminal {kind} output queue saturated or closed id={id} fd={:?}",
                 stream.fd
             ));
             stream.close();

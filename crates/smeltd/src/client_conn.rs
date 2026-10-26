@@ -12,8 +12,13 @@ use smelt_runtime_client::UnixStream;
 
 #[cfg(unix)]
 pub type ConnId = std::os::unix::io::RawFd;
+/// 套接字句柄和管道连接的序号是两个各自的号段，混成一个整数会撞号。
 #[cfg(windows)]
-pub type ConnId = i64;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConnId {
+    Socket(u64),
+    Pipe(u64),
+}
 
 /// 一条已经接受的客户端连接。协议代码只依赖 [`ClientSocket`]。
 pub enum ClientConn {
@@ -34,10 +39,10 @@ impl ClientConn {
 
     #[cfg(windows)]
     pub fn from_pipe(stream: smelt_sys::named_pipe::PipeStream) -> Self {
-        static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self::Pipe {
             stream,
-            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            id: ConnId::Pipe(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
         }
     }
 }
@@ -79,7 +84,7 @@ impl ClientSocket for UnixStream {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawSocket;
-            self.as_raw_socket() as i64
+            ConnId::Socket(self.as_raw_socket())
         }
     }
 

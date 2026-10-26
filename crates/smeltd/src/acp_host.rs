@@ -1195,7 +1195,7 @@ fn note_snapshot_writer_stopped(
     inner.cv.notify_all();
     if !inner.closed.load(Ordering::SeqCst) {
         crate::dlog(&format!(
-            "{kind} snapshot writer stopped id={id} fd={fd} error={error}"
+            "{kind} snapshot writer stopped id={id} fd={fd:?} error={error}"
         ));
         detach(fd);
     }
