@@ -183,8 +183,12 @@ use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use smelt_runtime_client::{UnixListener, UnixStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, Once, OnceLock, RwLock};
+#[cfg(unix)]
+use std::sync::Once;
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -653,6 +657,58 @@ impl TerminalChild {
             return Err(error);
         }
         Ok(child)
+    }
+
+    /// ConPTY 不能 CREATE_SUSPENDED。先记下 Child，再尽量放进 Job。
+    /// Job 没挂上时进程还在，结束时 `terminate_pid` 收它自己。
+    #[cfg(windows)]
+    fn start_with_child(
+        child: Box<dyn portable_pty::Child + Send>,
+    ) -> std::io::Result<Arc<Self>> {
+        let Some(pid) = child.process_id().and_then(|pid| i32::try_from(pid).ok()) else {
+            return Err(std::io::Error::other("拿不到 shell pid"));
+        };
+        if pid <= 1 {
+            return Ok(Self::finished(pid, TerminalChildExit::AlreadyReaped));
+        }
+        if let Err(error) = smelt_sys::process::attach_running(pid as u32) {
+            dlog(&format!(
+                "terminal: shell pid={pid} 没能放进 Job（{error}），结束时改为结束这个 pid"
+            ));
+        }
+        let tracked = Arc::new(Self {
+            pid,
+            state: Mutex::new(TerminalChildState::Running),
+            changed: Condvar::new(),
+        });
+        let child = Mutex::new(child);
+        let reaper = Arc::clone(&tracked);
+        if let Err(error) = thread::Builder::new()
+            .name(format!("smelt-terminal-reaper-{pid}"))
+            .spawn(move || {
+                let outcome = loop {
+                    match child.lock().unwrap().try_wait() {
+                        Ok(Some(_)) => break TerminalChildExit::Reaped,
+                        Ok(None) => thread::sleep(Duration::from_millis(200)),
+                        Err(error) => {
+                            break TerminalChildExit::WaitFailed(error.raw_os_error())
+                        }
+                    }
+                };
+                // shell 已经退出。丢掉 Job，KILL_ON_JOB_CLOSE 收掉还在组里的孙子。
+                smelt_sys::process::release_tree(pid as u32);
+                let mut state = reaper
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                *state = TerminalChildState::Finished(outcome);
+                reaper.changed.notify_all();
+            })
+        {
+            let _ = smelt_sys::process::terminate_pid(pid as u32);
+            return Err(error);
+        }
+        Ok(tracked)
     }
 
     fn finished(pid: i32, exit: TerminalChildExit) -> Arc<Self> {

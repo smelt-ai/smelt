@@ -474,7 +474,7 @@ fn dispatch_snapshot_line(
 }
 
 fn start_snapshot_reader(
-    mut stream: ClientConn,
+    stream: ClientConn,
     provider_pid: Arc<AtomicI32>,
     host_pid: i32,
     history_waiters: Arc<

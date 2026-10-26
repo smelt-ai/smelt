@@ -5,7 +5,9 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, TryLockError};
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::TryLockError;
 use std::thread;
 use std::time::Duration;
 
