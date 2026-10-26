@@ -229,7 +229,7 @@ async function launchGateway(dir: string): Promise<GatewayEndpoint> {
 		const deadline = Date.now() + SPAWN_TIMEOUT_MS;
 		for (;;) {
 			const state = readGatewayState(dir);
-			if (state?.pid === pid) {
+			if (state !== undefined && state.pid === pid) {
 				const endpoint = endpointOf(state);
 				if (await healthy(endpoint)) return endpoint;
 				throw new Error(`MCP gateway ${pid} wrote its state but does not answer; ${logHint}`);

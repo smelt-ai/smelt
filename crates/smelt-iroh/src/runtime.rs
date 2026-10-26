@@ -560,14 +560,16 @@ impl RuntimeConnector {
             if conn.close_reason().is_some() {
                 return None;
             }
-            // 趁手里还有强引用时登记关闭：之后连接的强引用全丢了也保证收得到。
-            Some((conn.weak_handle().closed(), conn.path_events()))
+            Some((conn.weak_handle(), conn.path_events()))
         });
         let task = self.client.runtime.spawn(async move {
-            let Some((closed, mut events)) = watched else {
+            let Some((weak, mut events)) = watched else {
                 on_change(LinkChange::Closed);
                 return;
             };
+            // 第一次 poll 时登记关闭：连接器手里还握着强引用。那之前强引用就全丢了的话
+            // 这里立刻落地，等同于已经断了。
+            let closed = async move { weak.closed().await };
             tokio::pin!(closed);
             loop {
                 tokio::select! {
