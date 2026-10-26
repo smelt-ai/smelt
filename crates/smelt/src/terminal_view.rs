@@ -2809,8 +2809,8 @@ mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
         BELL_NOTIFICATION_GRACE, CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bell_notification_due,
-        bg_spans, cells_to_token, classify_launch, keystroke_to_bytes, link_at, scrollbar_thumb,
-        terminal_event_needs_redraw, text_batches, visible_end,
+        bg_spans, cells_to_token, classify_launch, expand_existing_path, keystroke_to_bytes,
+        link_at, scrollbar_thumb, terminal_event_needs_redraw, text_batches, visible_end,
     };
     use crate::terminal;
     use crate::terminal::Cell;
@@ -3037,23 +3037,35 @@ mod tests {
     }
 
     /// 远程终端：路径和 `file:` 链接在另一台机器上，不能当本机文件打开；网址照常。
+    ///
+    /// 路径写成 `~/`：展开后是当前用户主目录，测试机上该目录存在，本机终端才认它可点。
     #[test]
     fn remote_terminals_only_link_urls() {
         use std::sync::Arc;
-        let mut cells = row("/tmp https://a.b/c x");
+        let path = "~/";
+        let url = "https://a.b/c";
+        let mut cells = row(&format!("{path} {url} x"));
         // 「x」挂着远程 `eza` 这类程序给的文件超链接。
         let last = cells.len() - 1;
         cells[last].link = Some(Arc::from("file://gs-wynn/etc/hosts"));
         let frame = single_row_frame(cells);
+        let path_col = path.chars().count() - 1;
+        let url_col = path.chars().count() + 1;
+        let expected = expand_existing_path(path).expect("主目录存在，~/ 应可展开");
 
-        assert!(
-            link_at(&frame, 0, 1, true).is_some(),
+        assert_eq!(
+            link_at(&frame, 0, path_col, true).map(|(_, got)| got),
+            Some(expected),
             "本机终端：存在的路径可点"
         );
-        assert_eq!(link_at(&frame, 0, 1, false), None, "远程终端：路径不可点");
         assert_eq!(
-            link_at(&frame, 0, 6, false).map(|(_, url)| url),
-            Some("https://a.b/c".to_string()),
+            link_at(&frame, 0, path_col, false),
+            None,
+            "远程终端：路径不可点"
+        );
+        assert_eq!(
+            link_at(&frame, 0, url_col, false).map(|(_, got)| got),
+            Some(url.to_string()),
             "远程终端：网址照常可点"
         );
         assert_eq!(

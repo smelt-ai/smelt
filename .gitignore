@@ -15,7 +15,7 @@ dist/
 # macOS 目录元数据
 .DS_Store
 
-# Python 脚本缓存（.github/scripts/ 下的审核脚本）
+# Python 脚本缓存
 __pycache__/
 
 # 插件（plugins/<name>/）：gpui-shell 加载时给编辑器生成的类型声明与 jsconfig，

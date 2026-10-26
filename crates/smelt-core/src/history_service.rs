@@ -57,7 +57,7 @@ pub fn list(params: &HistoryListParams) -> Result<HistoryListResult, HistoryErro
     )
     .into_iter()
     .map(|session| HistorySession {
-        path: session.path.to_string_lossy().into_owned(),
+        path: session.path,
         resume_id: session.resume_id,
         title: session.title,
         custom_title: session.custom_title,
@@ -113,11 +113,12 @@ pub fn delete(params: &HistoryDeleteParams) -> Result<(), HistoryError> {
     let target = Path::new(&params.path);
     let listed = sessions
         .iter()
-        .any(|session| session.resume_id == params.resume_id && session.path == target);
+        .any(|session| session.resume_id == params.resume_id && session.path == params.path);
     if !listed {
         return Err(HistoryError::NotInHistory(params.path.clone()));
     }
-    let is_pi = kind == HistorySourceKind::Conversation(crate::agent_kind::ConversationAgentKind::Pi);
+    let is_pi =
+        kind == HistorySourceKind::Conversation(crate::agent_kind::ConversationAgentKind::Pi);
     // 删之前读：删完就不知道它引用过谁了。
     let released = is_pi
         .then(|| std::fs::read_to_string(target).ok())
@@ -131,7 +132,7 @@ pub fn delete(params: &HistoryDeleteParams) -> Result<(), HistoryError> {
     {
         let remaining = sessions
             .iter()
-            .filter(|session| session.path != target)
+            .filter(|session| session.path != params.path)
             .map(|session| session.path.clone());
         crate::subagent_sessions::remove_unreferenced(released, remaining, &dir);
     }

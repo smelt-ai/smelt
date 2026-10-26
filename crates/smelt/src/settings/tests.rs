@@ -74,7 +74,7 @@ mod appearance_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod update_settings_tests {
     use super::UpdateSettings;
     use crate::updater::UpdateChannel;
@@ -127,8 +127,11 @@ mod pairing_qr_tests {
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{acp_cmd_setting_value, daemon_info_line, fmt_uptime};
-    use crate::terminal::DaemonInfo;
+    use super::{acp_cmd_setting_value, fmt_uptime};
+    #[cfg(unix)]
+    use super::daemon_info_line;
+    #[cfg(unix)]
+    use crate::local_daemon::DaemonInfo;
     use smelt_model::agent_kind::ConversationAgentKind;
 
     #[test]
@@ -156,6 +159,7 @@ mod daemon_info_tests {
 
     /// 老守护只回 version/exe_mtime：拿不到的字段整段省掉，不摆「未知」占位。
     #[test]
+    #[cfg(unix)]
     fn old_daemon_without_new_fields_shows_only_version() {
         let info = DaemonInfo {
             version: Some("0.5.4".into()),
@@ -166,6 +170,7 @@ mod daemon_info_tests {
 
     /// 全字段齐活：各段用 · 连起来，PID 和会话数都在。
     #[test]
+    #[cfg(unix)]
     fn full_info_joins_all_parts() {
         let info = DaemonInfo {
             version: Some("0.5.4".into()),
@@ -184,6 +189,7 @@ mod daemon_info_tests {
 
     /// 守护时钟比 GUI 快时不能算出天文数字（saturating_sub 兜底）。
     #[test]
+    #[cfg(unix)]
     fn future_started_at_does_not_underflow() {
         let future = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

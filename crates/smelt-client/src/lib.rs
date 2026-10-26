@@ -5,6 +5,7 @@ pub mod acp_client;
 pub mod compat;
 pub mod daemon_state;
 pub mod runtime;
+pub mod runtime_path;
 pub mod session_kill;
 pub mod session_ops;
 // 更新器替换的是 macOS 的 .app 包（codesign、Info.plist、原子交换目录），桌面也只有

@@ -17,6 +17,7 @@ pub(crate) enum ModalLayer {
     Rename,
     RelayEdit,
     Quit,
+    #[cfg(target_os = "macos")]
     MoveApp,
     CloseConfirm,
     DiscardHunk,
@@ -41,6 +42,7 @@ impl ModalLayer {
             Self::Rename => 1,
             Self::RelayEdit => 1,
             Self::Quit => 2,
+            #[cfg(target_os = "macos")]
             Self::MoveApp => 14,
             Self::CloseConfirm => 3,
             Self::DiscardHunk => 4,
@@ -94,6 +96,7 @@ impl Workspace {
             ModalLayer::RelayEdit.rank(),
         );
         raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
+        #[cfg(target_os = "macos")]
         raise(
             &mut rank,
             self.show_move_app_confirm,
@@ -314,8 +317,18 @@ impl Workspace {
             self.show_quit_confirm = false;
             cx.notify();
             true
-        } else if self.show_move_app_confirm {
+        } else if {
+            #[cfg(target_os = "macos")]
+            {
+                self.show_move_app_confirm
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        } {
             // Esc 等于「以后再说」；正在移动时不能撤，移完就退出了。
+            #[cfg(target_os = "macos")]
             if !self.moving_app {
                 self.show_move_app_confirm = false;
                 cx.notify();
@@ -489,10 +502,17 @@ impl Workspace {
             .inset_0()
             .children(palette_overlay)
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
-            .children(
-                self.show_move_app_confirm
-                    .then(|| self.render_move_app_confirm(cx)),
-            )
+            .children({
+                #[cfg(target_os = "macos")]
+                {
+                    self.show_move_app_confirm
+                        .then(|| self.render_move_app_confirm(cx))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    None::<gpui::AnyElement>
+                }
+            })
             .children(
                 self.rename_target
                     .is_some()

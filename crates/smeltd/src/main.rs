@@ -110,6 +110,7 @@ mod desktop;
 mod devices;
 mod event_hub;
 mod files_control;
+mod client_conn;
 mod git_control;
 mod history_control;
 #[cfg(target_os = "macos")]
@@ -172,11 +173,13 @@ use terminal_snapshot::{
     snapshot_ansi_screen,
 };
 
+use client_conn::{ClientConn, ClientSocket, ConnId};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::net::{UnixListener, UnixStream};
+use smelt_runtime_client::{UnixListener, UnixStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once, OnceLock, RwLock};
@@ -212,7 +215,7 @@ const TERMINAL_CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 static SPAWN_GATE: LazyLock<Arc<RwLock<()>>> = LazyLock::new(|| Arc::new(RwLock::new(())));
 
 fn sock_path() -> std::path::PathBuf {
-    let dir = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
+    let dir = smelt_paths::smelt_home().unwrap_or_else(|| std::env::temp_dir().join(".smelt"));
     let _ = std::fs::create_dir_all(&dir);
     dir.join("smeltd.sock")
 }
@@ -220,7 +223,9 @@ fn sock_path() -> std::path::PathBuf {
 /// 启动时钉住的那份普通文件。会话宿主只 exec 这条路径，不再回头看启动名现在指向谁。
 struct PinnedDaemonImage {
     path: std::path::PathBuf,
+    #[cfg(unix)]
     dev: u64,
+    #[cfg(unix)]
     ino: u64,
 }
 
@@ -254,18 +259,32 @@ fn pin_running_daemon_image() {
 }
 
 fn open_mapped_image(current: &std::path::Path) -> Option<PinnedDaemonImage> {
-    if let Some(pinned) = open_regular_nofollow(current) {
-        return Some(pinned);
+    #[cfg(windows)]
+    {
+        // `current_exe()` 在 Windows 上就是正在映射的那份 exe（哈希副本），不是启动名。
+        let path = std::fs::canonicalize(current).ok()?;
+        let meta = std::fs::metadata(&path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        return Some(PinnedDaemonImage { path });
     }
-    let target = std::fs::read_link(current).ok()?;
-    let resolved = if target.is_absolute() {
-        target
-    } else {
-        current.parent()?.join(target)
-    };
-    open_regular_nofollow(&resolved)
+    #[cfg(unix)]
+    {
+        if let Some(pinned) = open_regular_nofollow(current) {
+            return Some(pinned);
+        }
+        let target = std::fs::read_link(current).ok()?;
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            current.parent()?.join(target)
+        };
+        open_regular_nofollow(&resolved)
+    }
 }
 
+#[cfg(unix)]
 fn open_regular_nofollow(path: &std::path::Path) -> Option<PinnedDaemonImage> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()
@@ -286,14 +305,26 @@ fn open_regular_nofollow(path: &std::path::Path) -> Option<PinnedDaemonImage> {
 
 /// 不跟随符号链接。钉住的必须是那个普通文件本身；路径变成链接就当成映像已经换了。
 fn path_has_inode(path: &std::path::Path, dev: u64, ino: u64) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() {
-        return false;
+    #[cfg(windows)]
+    {
+        let _ = (dev, ino);
+        // 钉住的是 canonicalize 之后的路径。路径还在、并且规范化结果没换，才是同一份映像。
+        match std::fs::canonicalize(path) {
+            Ok(canonical) => canonical == path,
+            Err(_) => false,
+        }
     }
-    use std::os::unix::fs::MetadataExt;
-    meta.dev() == dev && meta.ino() == ino
+    #[cfg(unix)]
+    {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        use std::os::unix::fs::MetadataExt;
+        meta.dev() == dev && meta.ino() == ino
+    }
 }
 
 fn session_host_executable_from(
@@ -318,7 +349,11 @@ fn session_host_executable() -> std::io::Result<std::path::PathBuf> {
     let pinned = PINNED_DAEMON_IMAGE
         .get()
         .ok_or_else(|| std::io::Error::other("没有钉住守护映像"))?;
-    session_host_executable_from(&pinned.path, Some((pinned.dev, pinned.ino)))
+    #[cfg(unix)]
+    let identity = Some((pinned.dev, pinned.ino));
+    #[cfg(windows)]
+    let identity = Some((0, 0));
+    session_host_executable_from(&pinned.path, identity)
 }
 
 /// 已经写好、还没切到运行中守护的下一份映像。只认 `smeltd.pending` 这根链接，
@@ -329,11 +364,21 @@ fn staged_successor_executable(running: &std::path::Path) -> Option<std::path::P
 }
 
 fn same_device_inode(left: &std::path::Path, right: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
-        return false;
-    };
-    left.dev() == right.dev() && left.ino() == right.ino()
+    #[cfg(windows)]
+    {
+        matches!(
+            (std::fs::canonicalize(left), std::fs::canonicalize(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
+            return false;
+        };
+        left.dev() == right.dev() && left.ino() == right.ino()
+    }
 }
 
 /// 进程指纹钉死（启动时调一次）：GUI 拉起时对 spawn 目标的哈希优先；否则对
@@ -358,16 +403,23 @@ fn bind_single_instance(
     check_existing: bool,
 ) -> std::io::Result<Option<UnixListener>> {
     let lock_path = path.with_extension("lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        // 锁文件只借 flock 语义，不关心内容，绝不截断（可能已有旧内容）。
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    // 锁只覆盖「检查 → 删僵尸 sock → bind」。函数结束就放锁；长期单实例靠套接字文件本身。
+    #[cfg(unix)]
+    let _lock = {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            // 锁文件只借 flock 语义，不关心内容，绝不截断（可能已有旧内容）。
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        lock
+    };
+    #[cfg(windows)]
+    let _lock = smelt_sys::file_lock::ExclusiveFile::lock(&lock_path)?;
 
     if check_existing && UnixStream::connect(path).is_ok() {
         return Ok(None);
@@ -381,7 +433,17 @@ fn bind_fresh_daemon(path: &std::path::Path) -> std::io::Result<Option<UnixListe
 }
 
 fn secure_daemon_socket(path: &std::path::Path) -> std::io::Result<()> {
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+    }
+    #[cfg(windows)]
+    {
+        // sock 文件在用户配置目录 `~/.smelt` 下。目录 ACL 加上同用户对端校验就是边界。
+        // 不在 AF_UNIX 文件上再套一层 DACL，也不调用 PermissionsExt。
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// 追加一行到 ~/.smelt/daemon.log。给守护交接故障和需要跨进程查看的网络状态留痕——
@@ -424,8 +486,15 @@ fn exe_mtime_secs() -> u64 {
 /// 持有的是 PTY master 的**裸 fd**（File 包装）而非 portable_pty 的类型。
 /// spawn 仍用 portable_pty（openpty + 环境 + 会话组等脏活），起完就把 fd dup 出来自己管。
 struct Ctl {
-    /// PTY master：写输入 + ioctl(TIOCSWINSZ) resize；泵线程的读端是它的 try_clone。
+    /// Unix：PTY master 的裸 fd。交接要把这份 fd 原样带过 exec。
+    #[cfg(unix)]
     master: std::fs::File,
+    /// Windows：ConPTY。不能 CREATE_SUSPENDED，也不把句柄交出去。
+    #[cfg(windows)]
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    /// 会话唯一的 ConPTY 写线程。写端握在那个线程里。按键不再各起一个线程。
+    #[cfg(windows)]
+    input_tx: std::sync::mpsc::SyncSender<PtyInputWrite>,
     /// reattach 后首个 resize 强制「抖动」（先 rows+1 再回正）：即使尺寸与断开前相同也
     /// 制造 SIGWINCH，让备用屏 TUI（Claude Code 等）重绘整屏，避免重连花屏。
     jolt: bool,
@@ -537,6 +606,7 @@ struct TerminalChild {
 }
 
 impl TerminalChild {
+    #[cfg(unix)]
     fn start(pid: i32) -> std::io::Result<Arc<Self>> {
         if pid <= 1 {
             return Ok(Self::finished(pid, TerminalChildExit::AlreadyReaped));
@@ -613,8 +683,16 @@ impl TerminalChild {
         }
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if matches!(*state, TerminalChildState::Running) {
+            #[cfg(unix)]
             unsafe {
                 libc::kill(self.pid, libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            {
+                let pid = self.pid as u32;
+                let _ = smelt_sys::process::signal_tree(pid, smelt_sys::process::TreeSignal::Kill);
+                smelt_sys::process::release_tree(pid);
+                let _ = smelt_sys::process::terminate_pid(pid);
             }
         }
         drop(state);
@@ -622,9 +700,85 @@ impl TerminalChild {
     }
 }
 
+#[cfg(unix)]
 trait PtyReader: Read + AsRawFd + Send {}
 
+#[cfg(unix)]
 impl<T: Read + AsRawFd + Send> PtyReader for T {}
+
+#[cfg(windows)]
+trait PtyReader: Read + Send {}
+
+#[cfg(windows)]
+impl<T: Read + Send> PtyReader for T {}
+
+/// ConPTY 的读端没有 poll。单独线程阻塞读，泵用 1 秒超时醒过来刷进度。
+#[cfg(windows)]
+struct ThreadedPtyReader {
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    offset: usize,
+}
+
+#[cfg(windows)]
+fn threaded_pty_reader(mut reader: Box<dyn Read + Send>) -> ThreadedPtyReader {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    let _ = tx.send(Ok(Vec::new()));
+                    break;
+                }
+                Ok(n) => {
+                    if tx.send(Ok(buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    ThreadedPtyReader {
+        rx,
+        pending: Vec::new(),
+        offset: 0,
+    }
+}
+
+#[cfg(windows)]
+impl Read for ThreadedPtyReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.offset < self.pending.len() {
+            let n = (self.pending.len() - self.offset).min(buf.len());
+            buf[..n].copy_from_slice(&self.pending[self.offset..self.offset + n]);
+            self.offset += n;
+            if self.offset == self.pending.len() {
+                self.pending.clear();
+                self.offset = 0;
+            }
+            return Ok(n);
+        }
+        match self.rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(Ok(data)) if data.is_empty() => Ok(0),
+            Ok(Ok(data)) => {
+                self.pending = data;
+                self.offset = 0;
+                self.read(buf)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                ErrorKind::WouldBlock,
+                "pty read timeout",
+            )),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(0),
+        }
+    }
+}
 
 /// 本进程启动时刻（unix 秒），`version` op 回给 GUI 展示「守护跑了多久」。
 /// 必须在 main 最开头取一次，否则记的是「首次有人问」的时间。
@@ -1047,8 +1201,8 @@ fn apply_history_rename(
     Ok(())
 }
 
-fn handle_history_rename(
-    mut conn: UnixStream,
+fn handle_history_rename<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     remote_sessions: &RemoteSessions,
     event_hub: &EventHubHandle,
@@ -1078,8 +1232,8 @@ fn handle_history_rename(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
-fn handle_workspace_menu(
-    mut conn: UnixStream,
+fn handle_workspace_menu<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     store: &WorkspaceMenuStore,
     event_hub: &EventHubHandle,
@@ -1116,8 +1270,8 @@ pub(crate) fn recover_locked_automations(
     }
 }
 
-fn handle_automations_snapshot(
-    mut conn: UnixStream,
+fn handle_automations_snapshot<C: ClientSocket>(
+    mut conn: C,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
 ) {
@@ -1129,8 +1283,8 @@ fn handle_automations_snapshot(
     );
 }
 
-fn handle_automation_command(
-    mut conn: UnixStream,
+fn handle_automation_command<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
@@ -1175,8 +1329,8 @@ fn handle_automation_command(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
-fn handle_event_publish(
-    mut conn: UnixStream,
+fn handle_event_publish<C: ClientSocket>(
+    mut conn: C,
     v: &serde_json::Value,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
@@ -1396,6 +1550,7 @@ fn resolve_terminal_theme_color(
 
 /// 按行列 + 可选像素尺寸 resize PTY（TIOCSWINSZ）。
 /// `xpixel`/`ypixel` 是**整窗**像素（cols×cell_w / rows×cell_h），不是单格。
+#[cfg(unix)]
 fn resize_fd(fd: RawFd, rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
     let ws = libc::winsize {
         ws_row: rows,
@@ -1483,7 +1638,7 @@ fn resize_session_from(
         dispatch_session_outputs_under_gate(sess, &marker, "<resize-refused>", true, false);
         return false;
     }
-    let (fd, jolt, xpixel, ypixel, marker) = {
+    let (resize_token, jolt, xpixel, ypixel, marker) = {
         let mut ctl = sess.ctl.lock().unwrap();
         if cell_w > 0 {
             ctl.cell_w = cell_w;
@@ -1495,6 +1650,7 @@ fn resize_session_from(
         let cell_h = ctl.cell_h;
         let xpixel = cols.saturating_mul(cell_w);
         let ypixel = rows.saturating_mul(cell_h);
+        #[cfg(unix)]
         let fd = ctl.master.as_raw_fd();
         let jolt = std::mem::take(&mut ctl.jolt);
         ctl.cols = cols;
@@ -1522,16 +1678,39 @@ fn resize_session_from(
         } else {
             None
         };
-        (fd, jolt, xpixel, ypixel, marker)
+        #[cfg(unix)]
+        let resize_token = fd;
+        #[cfg(windows)]
+        let resize_token = ();
+        let _ = (xpixel, ypixel);
+        (resize_token, jolt, xpixel, ypixel, marker)
     };
     if let Some(marker) = marker {
         dispatch_session_outputs_under_gate(sess, &marker, "<resize>", true, false);
     }
 
-    if jolt {
-        resize_fd(fd, rows.saturating_add(1), cols, xpixel, ypixel);
+    #[cfg(unix)]
+    {
+        if jolt {
+            resize_fd(resize_token, rows.saturating_add(1), cols, xpixel, ypixel);
+        }
+        resize_fd(resize_token, rows, cols, xpixel, ypixel);
     }
-    resize_fd(fd, rows, cols, xpixel, ypixel);
+    #[cfg(windows)]
+    {
+        let _ = resize_token;
+        let size = |rows: u16| portable_pty::PtySize {
+            rows,
+            cols,
+            pixel_width: xpixel,
+            pixel_height: ypixel,
+        };
+        let ctl = sess.ctl.lock().unwrap();
+        if jolt {
+            let _ = ctl.master.resize(size(rows.saturating_add(1)));
+        }
+        let _ = ctl.master.resize(size(rows));
+    }
     true
 }
 
@@ -1653,6 +1832,7 @@ fn publish_remote_geometry_release(sess: &Session) {
 
 /// 开/关 fd 的 CLOEXEC 标志。平时所有 fd 都应带 CLOEXEC（不泄漏给 spawn 出的 shell）；
 /// 仅在 exec 交接前对要带过去的 fd 关掉。
+#[cfg(unix)]
 fn set_cloexec(fd: RawFd, on: bool) -> std::io::Result<()> {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFD);
@@ -1673,6 +1853,7 @@ fn set_cloexec(fd: RawFd, on: bool) -> std::io::Result<()> {
 
 /// dup 一个 fd 并包成 File。dup 出的新 fd 默认**不带** CLOEXEC，这里立即补上——
 /// 否则它会泄漏进之后 spawn 的每个 shell（占着 PTY master 不放，会话杀不干净）。
+#[cfg(unix)]
 fn dup_file(fd: RawFd) -> anyhow::Result<std::fs::File> {
     let d = unsafe { libc::dup(fd) };
     anyhow::ensure!(d >= 0, "dup({fd}) 失败");
@@ -1680,6 +1861,7 @@ fn dup_file(fd: RawFd) -> anyhow::Result<std::fs::File> {
     Ok(unsafe { std::fs::File::from_raw_fd(d) })
 }
 
+#[cfg(unix)]
 fn set_fd_nonblocking(fd: RawFd, enabled: bool) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
@@ -1712,6 +1894,110 @@ struct Out {
 /// 输入队列，也不会把会话控制锁永久占住。写入期间用 `input_gate` 保证多个输入源
 /// 不交错，且让 resize/升级与输入保持同一顺序。
 pub(crate) fn write_session_input(sess: &Session, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        write_session_input_unix(sess, bytes)
+    }
+    #[cfg(windows)]
+    {
+        write_session_input_windows(sess, bytes)
+    }
+}
+
+#[cfg(windows)]
+struct PtyInputWrite {
+    bytes: Vec<u8>,
+    done: std::sync::mpsc::Sender<std::io::Result<()>>,
+    /// 写线程开写前和调用方超时时各抢一次，谁先到算谁。取消了的不再写，
+    /// 超时报给调用方的「没写进去」才是真的。
+    state: Arc<std::sync::atomic::AtomicU8>,
+}
+
+#[cfg(windows)]
+const PTY_INPUT_QUEUED: u8 = 0;
+#[cfg(windows)]
+const PTY_INPUT_STARTED: u8 = 1;
+#[cfg(windows)]
+const PTY_INPUT_CANCELLED: u8 = 2;
+
+/// 一个会话一条写线程，队列最多 8 笔。ConPTY 缓冲满时线程停在 `write_all`，
+/// 后来的按键进队列，满了就返回超时，不再按每次输入起线程。
+#[cfg(windows)]
+fn spawn_pty_input_thread(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+) -> std::sync::mpsc::SyncSender<PtyInputWrite> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PtyInputWrite>(8);
+    let _ = thread::Builder::new()
+        .name("smelt-pty-input".to_string())
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                if job
+                    .state
+                    .compare_exchange(
+                        PTY_INPUT_QUEUED,
+                        PTY_INPUT_STARTED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+                let result = writer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .write_all(&job.bytes);
+                let _ = job.done.send(result);
+            }
+        });
+    tx
+}
+
+#[cfg(windows)]
+fn write_session_input_windows(sess: &Session, bytes: &[u8]) -> std::io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let _input_gate = sess.input_gate.lock().unwrap();
+    let input_tx = {
+        let ctl = sess.ctl.lock().unwrap();
+        ctl.input_tx.clone()
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(PTY_INPUT_QUEUED));
+    if input_tx
+        .try_send(PtyInputWrite {
+            bytes: bytes.to_vec(),
+            done: done_tx,
+            state: Arc::clone(&state),
+        })
+        .is_err()
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::TimedOut,
+            "PTY input write timed out",
+        ));
+    }
+    match done_rx.recv_timeout(PTY_WRITE_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => {
+            // 还在排队的撤下来，之后不会再写进去。已经开写的和 Unix 一样，可能写进去了一部分。
+            let _ = state.compare_exchange(
+                PTY_INPUT_QUEUED,
+                PTY_INPUT_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "PTY input write timed out",
+            ))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_session_input_unix(sess: &Session, bytes: &[u8]) -> std::io::Result<()> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -1838,7 +2124,7 @@ fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
 }
 
 /// 客户端确认处理到第 `consumed` 个字节。合并中的连接追上来了，就补一帧关键帧。
-fn acknowledge_terminal_output(sess: &Session, fd: RawFd, consumed: u64) {
+fn acknowledge_terminal_output(sess: &Session, fd: ConnId, consumed: u64) {
     let _output_gate = sess.output_gate.lock().unwrap();
     let need = {
         let mut out = sess.out.lock().unwrap();
@@ -2275,12 +2561,12 @@ fn main() {
     // CLI）在启动阶段调 `process.cwd()` 直接抛异常退出——外部表现就是"所有
     // ACP 会话的 initialize 都失败，transport closed"，坑了很久才排出来。
     // 钉死到 HOME：一个几乎不可能被删除、稳定存在的目录，一劳永逸避免这个坑。
-    if let Some(home) = std::env::var_os("HOME")
+    if let Some(home) = dirs::home_dir()
         && let Err(e) = std::env::set_current_dir(&home)
     {
         smelt_core::app_log::error(
             "smeltd",
-            &format!("启动时 cwd 校正失败（HOME={home:?}）：{e}"),
+            &format!("启动时 cwd 校正失败（home={}）：{e}", home.display()),
         );
     }
     // 尽早提 fd 上限：晚了的话，前面已经开的 fd 会先一步顶到旧上限。
@@ -2293,12 +2579,18 @@ fn main() {
     // 钉住启动时刻：晚一步取到的就是「首次有人问 version」的时间，不是启动时间。
     started_at();
     let env_daemon_fingerprint = std::env::var("SMELTD_DAEMON_FINGERPRINT").ok();
+    #[cfg(windows)]
+    let predecessor_pid = std::env::var(PREDECESSOR_PID_ENV)
+        .ok()
+        .and_then(|pid| pid.parse::<i32>().ok());
     // Edition 2024：`remove_var` 标为 unsafe（多线程改 env 非同步）。此时只有不访问
     // 环境变量的 stderr tee 读线程，尚未启动任何会并发读环境的业务线程。
     unsafe {
         std::env::remove_var("SMELTD_HANDOFF");
         std::env::remove_var("SMELTD_HANDOFF_SOCK");
         std::env::remove_var("SMELTD_DAEMON_FINGERPRINT");
+        #[cfg(windows)]
+        std::env::remove_var(PREDECESSOR_PID_ENV);
     }
     // 进程指纹启动时钉死：env（GUI 拉起时对 spawn 目标的哈希）优先，否则对
     // current_exe 文件哈希一次。此后进程生命期内不再重哈希磁盘。
@@ -2318,6 +2610,13 @@ fn main() {
     // 即可。读取异常时 fail-closed，绝不把损坏文档当成空目录发布给 GUI。
     let remote_sessions = new_remote_sessions();
     let workspace_menu = new_workspace_menu();
+    // 升级的接班进程：前任回执后才退出，退出前监听还在它手里。等它退了再绑。
+    #[cfg(windows)]
+    if let Some(pid) = predecessor_pid
+        && !smelt_core::process_wait::wait_until_exit(pid, Duration::from_secs(30))
+    {
+        dlog(&format!("升级接班：前任 {pid} 30 秒内没退出，照常尝试绑定"));
+    }
     let listener = match bind_fresh_daemon(&path) {
         Ok(Some(l)) => l,
         Ok(None) => return,
@@ -2508,7 +2807,10 @@ fn run_serve_loop(
     event_hub: EventHubHandle,
     daemon_fingerprint: Option<String>,
 ) {
+    #[cfg(unix)]
     let listen_fd = listener.as_raw_fd();
+    #[cfg(windows)]
+    let listen_fd = 0;
     let exe_mtime = exe_mtime_secs();
     // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
     let _ = runtime_identity::runtime_id();
@@ -2553,11 +2855,42 @@ fn run_serve_loop(
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
+    #[cfg(windows)]
+    if let Ok(pipe_name) = smelt_sys::named_pipe::daemon_pipe_path(&sock_path()) {
+        client_conn::remember_daemon_pipe(pipe_name.clone());
+        let pipe_server = server.clone();
+        thread::Builder::new()
+            .name("smelt-pipe-accept".into())
+            .spawn(move || {
+                let listener = match smelt_sys::named_pipe::PipeListener::bind(pipe_name) {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        dlog(&format!("命名管道监听失败，Bun 连不上守护：{error}"));
+                        return;
+                    }
+                };
+                loop {
+                    match listener.accept() {
+                        Ok(stream) => {
+                            let context = pipe_server.context(Principal::Local);
+                            let conn = ClientConn::from_pipe(stream);
+                            thread::spawn(move || handle_conn(conn, context));
+                        }
+                        Err(error) => {
+                            dlog(&format!("命名管道 accept 失败：{error}"));
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
     let accept_loop = move || {
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
             let context = server.context(Principal::Local);
-            thread::spawn(move || handle_conn(conn, context));
+            thread::spawn(move || handle_conn(ClientConn::from_unix(conn), context));
         }
     };
 
@@ -2620,28 +2953,32 @@ fn action_payload(kind: Option<&str>, text: Option<&str>) -> Result<Vec<u8>, &'s
     }
 }
 
-fn handle_upgrade(conn: UnixStream, req: &serde_json::Value) {
-    let mut c = conn;
-    let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+/// 升级换到哪份映像。可选 `"exe"` 指定不可变映像；没传就是本进程钉住的那份文件。
+fn upgrade_target(req: &serde_json::Value) -> Result<std::path::PathBuf, String> {
+    if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         let path = std::path::PathBuf::from(p);
         if !path.is_file() {
+            return Err(format!("exe 不存在：{}", path.display()));
+        }
+        return Ok(path);
+    }
+    daemon_executable_path().map_err(|error| format!("找不到当前守护映像：{error}"))
+}
+
+/// Windows 升级时接班进程从这个变量拿到前任的 pid，等它退出再绑定监听。
+#[cfg(windows)]
+const PREDECESSOR_PID_ENV: &str = "SMELTD_PREDECESSOR_PID";
+
+fn handle_upgrade<C: ClientSocket>(conn: C, req: &serde_json::Value) {
+    let mut c = conn;
+    let exe = match upgrade_target(req) {
+        Ok(exe) => exe,
+        Err(error) => {
             let _ = smelt_runtime_client::protocol::write_json_line(
                 &mut c,
-                &serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) }),
+                &serde_json::json!({ "ok": false, "err": error }),
             );
             return;
-        }
-        path
-    } else {
-        match daemon_executable_path() {
-            Ok(p) => p,
-            Err(error) => {
-                let _ = smelt_runtime_client::protocol::write_json_line(
-                    &mut c,
-                    &serde_json::json!({ "ok": false, "err": format!("找不到当前守护映像：{error}") }),
-                );
-                return;
-            }
         }
     };
     // 启动名先拨到这份映像。失败就停在当前映像上，不把进程换到一个拨不上的路径。
@@ -2652,8 +2989,9 @@ fn handle_upgrade(conn: UnixStream, req: &serde_json::Value) {
         );
         return;
     }
-    // 先收割子进程并回执，再在本进程里 exec。systemd 看到的还是同一个主进程。
-    protocol::graceful_shutdown(Some(c), Some(exe));
+    // 先收割子进程并回执，再换映像：Unix 在本进程里 exec，systemd 看到的还是同一个
+    // 主进程；Windows 拉起接班进程后退出。
+    protocol::graceful_shutdown(Some(c.into_client_conn()), Some(exe));
 }
 
 /// 开 PTY + 起 shell。交互环境在下面的 `apply_interactive_pty_env`：PTY 只活在守护里，
@@ -2663,9 +3001,21 @@ fn handle_upgrade(conn: UnixStream, req: &serde_json::Value) {
 /// 这样从根上没有"shell 是否已经在读 stdin"的时序问题，命令跑完会 exec 回一个
 /// 正常交互 login shell，之后就是一个普通会话。
 fn shell_launch_args(shell: &str, launch: Option<&str>) -> Vec<String> {
-    match launch {
-        Some(launch) => vec!["-ilc".to_string(), format!("{launch}; exec {shell} -l")],
-        None => vec!["-l".to_string()],
+    #[cfg(windows)]
+    {
+        // 交互终端：cmd 不读 profile（/d），/k 留下提示符。不走 zsh 的 -ilc。
+        let _ = shell;
+        match launch {
+            Some(launch) => vec!["/d".into(), "/k".into(), launch.to_string()],
+            None => vec!["/d".into(), "/k".into()],
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match launch {
+            Some(launch) => vec!["-ilc".to_string(), format!("{launch}; exec {shell} -l")],
+            None => vec!["-l".to_string()],
+        }
     }
 }
 
@@ -2737,7 +3087,7 @@ const PI_STATUS_EXTENSION_SOURCE: &str = include_str!("../assets/pi-status-exten
 
 fn pi_status_extension_path() -> std::path::PathBuf {
     smelt_paths::smelt_home()
-        .unwrap_or_else(|| "/tmp/.smelt".into())
+        .unwrap_or_else(|| std::env::temp_dir().join(".smelt"))
         .join("integrations")
         .join("pi-status-extension.ts")
 }
@@ -2837,6 +3187,9 @@ fn spawn_session(
         pixel_height: 0,
     })?;
 
+    #[cfg(windows)]
+    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    #[cfg(not(windows))]
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(shell.clone());
     // 快捷启动必须同时是 interactive + login：用户级 CLI 安装器通常把 PATH
@@ -2861,7 +3214,7 @@ fn spawn_session(
     // 后面的 state op 全是空中楼阁（见 docs/archive/state-channel-plan.md）。
     cmd.env("SMELT_SESSION_ID", id);
     cmd.env("SMELT_AGENT_TOKEN", &agent_token);
-    cmd.env("SMELT_SOCK", sock_path());
+    cmd.env("SMELT_SOCK", client_conn::child_smelt_sock());
     cmd.env(
         "SMELT_NOTIFY_BIN",
         smelt_core::agent_event::notify_executable_path(),
@@ -2871,22 +3224,39 @@ fn spawn_session(
         let _gate = SPAWN_GATE.read().unwrap();
         pair.slave.spawn_command(cmd)?
     };
-    let pid = child
-        .process_id()
-        .map(|p| p as i32)
-        .ok_or_else(|| anyhow::anyhow!("拿不到 shell pid"))?;
-    let terminal_child = TerminalChild::start(pid)?;
-
-    // 把 master fd dup 成自己持有的 File（写端 + 读端各一份），portable_pty 的 pair
-    // 在函数结尾 drop、关掉它自己那份 fd——PTY 只要还有 fd 开着就活着。child 句柄
-    // 一并丢弃：kill/收尸都用 pid 直接做（portable_pty 的 Child drop 不杀进程）。
-    let raw = pair
-        .master
-        .as_raw_fd()
-        .ok_or_else(|| anyhow::anyhow!("拿不到 PTY master fd"))?;
-    let master = dup_file(raw)?;
-    set_fd_nonblocking(master.as_raw_fd(), true)?;
-    let pty_reader = master.try_clone()?;
+    #[cfg(unix)]
+    let (terminal_child, master, pty_reader) = {
+        let pid = child
+            .process_id()
+            .map(|p| p as i32)
+            .ok_or_else(|| anyhow::anyhow!("拿不到 shell pid"))?;
+        // child 句柄丢弃：kill/收尸都用 pid（portable_pty 的 Child drop 不杀进程）。
+        drop(child);
+        let terminal_child = TerminalChild::start(pid)?;
+        let raw = pair
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| anyhow::anyhow!("拿不到 PTY master fd"))?;
+        let master = dup_file(raw)?;
+        set_fd_nonblocking(master.as_raw_fd(), true)?;
+        let pty_reader = master.try_clone()?;
+        (terminal_child, master, pty_reader)
+    };
+    #[cfg(windows)]
+    let (terminal_child, master, input_tx, pty_reader) = {
+        let terminal_child = TerminalChild::start_with_child(child)?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| anyhow::anyhow!("拿不到 ConPTY 读端：{error}"))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| anyhow::anyhow!("拿不到 ConPTY 写端：{error}"))?;
+        let input_tx = spawn_pty_input_thread(Arc::new(Mutex::new(writer)));
+        let pty_reader = threaded_pty_reader(reader);
+        (terminal_child, pair.master, input_tx, pty_reader)
+    };
     let state = Arc::new(Mutex::new(SessionState {
         id: id.to_string(),
         instance,
@@ -2902,6 +3272,8 @@ fn spawn_session(
         child: terminal_child,
         ctl: Mutex::new(Ctl {
             master,
+            #[cfg(windows)]
+            input_tx,
             jolt: false,
             cols,
             rows,
@@ -3019,27 +3391,31 @@ fn start_pty_pump(
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    let mut pollfd = libc::pollfd {
-                        fd: pty_reader.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    let polled = unsafe { libc::poll(&mut pollfd, 1, 1000) };
-                    if polled < 0
-                        && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted
+                    #[cfg(unix)]
                     {
-                        break;
-                    }
-                    if polled > 0 {
-                        let events = pollfd.revents;
-                        if events & libc::POLLNVAL != 0
-                            || (events & libc::POLLIN == 0
-                                && events & (libc::POLLERR | libc::POLLHUP) != 0)
+                        let mut pollfd = libc::pollfd {
+                            fd: pty_reader.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        let polled = unsafe { libc::poll(&mut pollfd, 1, 1000) };
+                        if polled < 0
+                            && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted
                         {
                             break;
                         }
+                        if polled > 0 {
+                            let events = pollfd.revents;
+                            if events & libc::POLLNVAL != 0
+                                || (events & libc::POLLIN == 0
+                                    && events & (libc::POLLERR | libc::POLLHUP) != 0)
+                            {
+                                break;
+                            }
+                        }
                     }
                     // 没输出时每秒醒一次：顺带把不再刷新的进度条清掉、定期重发还在的。
+                    // Windows 的读端在超时后返回 WouldBlock，这里不再 poll。
                     publish_terminal_progress(&mut progress, &id, &event_hub);
                     continue;
                 }

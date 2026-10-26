@@ -12,6 +12,8 @@ fn committed_repo() -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_str().unwrap().to_string();
     run_git(&root, &["init", "-q"]).unwrap();
+    // Windows 的 Git 默认把工作区换行转成 CRLF。这里要比对提交里的原始字节。
+    run_git(&root, &["config", "core.autocrlf", "false"]).unwrap();
     run_git(&root, &["config", "user.email", "t@t"]).unwrap();
     run_git(&root, &["config", "user.name", "t"]).unwrap();
     std::fs::write(tmp.path().join("a.txt"), "one\n").unwrap();

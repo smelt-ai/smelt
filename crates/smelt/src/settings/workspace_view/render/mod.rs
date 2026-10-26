@@ -245,9 +245,10 @@ fn section_page(
         SettingsSection::AgentNotify => agent::notify_page(entity, snapshot, cx),
         SettingsSection::AgentHooks => agent::hooks_page(entity, snapshot, cx),
         SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
+        #[cfg(target_os = "macos")]
         SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),
         SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
-        SettingsSection::MaintenanceStorage => maintenance::storage_page(entity, snapshot, cx),
+        SettingsSection::MaintenanceStorage => maintenance::storage_page(cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
     };
     if local_runtime_only && crate::runtimes::has_remote_runtimes(cx) {

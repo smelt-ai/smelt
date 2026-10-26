@@ -5,12 +5,12 @@
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::RuntimeStream;
 use crate::connector::Connector;
 use crate::protocol::control::{
     CONTROL_API_VERSION, ControlCall, ControlClientError, ControlError, ControlErrorCode,
@@ -60,12 +60,12 @@ impl RuntimeClient {
     }
 
     /// 新开一条不设超时的连接，首帧由调用方写。长连接（订阅、ACP 会话、终端流）用它。
-    pub fn connect(&self) -> io::Result<UnixStream> {
+    pub fn connect(&self) -> io::Result<RuntimeStream> {
         self.connector.connect()
     }
 
     /// 新开一条连接并设好读写时限。短请求用它。
-    pub fn connect_with_timeout(&self, timeout: Duration) -> io::Result<UnixStream> {
+    pub fn connect_with_timeout(&self, timeout: Duration) -> io::Result<RuntimeStream> {
         let stream = self.connector.connect()?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
@@ -154,7 +154,7 @@ impl RuntimeClient {
     }
 }
 
-fn exchange_line(mut stream: UnixStream, request: &str) -> io::Result<String> {
+fn exchange_line(mut stream: RuntimeStream, request: &str) -> io::Result<String> {
     writeln!(stream, "{request}")?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
@@ -204,7 +204,7 @@ mod tests {
         serve: impl Fn(Value) -> Value + Send + Sync + Clone + 'static,
     ) -> RuntimeClient {
         RuntimeClient::new(move || {
-            let (client, server) = UnixStream::pair()?;
+            let (client, server) = RuntimeStream::pair()?;
             let serve = serve.clone();
             thread::spawn(move || {
                 let mut line = String::new();
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn request_reports_a_silent_disconnect_as_closed() {
         let client = RuntimeClient::new(|| {
-            let (client, server) = UnixStream::pair()?;
+            let (client, server) = RuntimeStream::pair()?;
             thread::spawn(move || {
                 let mut line = String::new();
                 let _ = BufReader::new(server).read_line(&mut line);

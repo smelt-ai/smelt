@@ -13,10 +13,28 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-/// 调用方已经发过终止信号。阻塞到 `waitpid` 收回这个直属子进程。
+/// 调用方已经发过终止信号。阻塞到这个直属子进程被收回。
 ///
-/// `ECHILD` 表示已经被收过。`EINTR` 重试。其它错误直接返回，不再空转。
+/// Unix：`ECHILD` 表示已经被收过，`EINTR` 重试。Windows：打开进程句柄再
+/// `WaitForSingleObject`。句柄打不开就当成已经退出。
 pub fn reap_direct_child(pid: i32) -> bool {
+    #[cfg(unix)]
+    {
+        reap_direct_child_unix(pid)
+    }
+    #[cfg(windows)]
+    {
+        reap_direct_child_windows(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+#[cfg(unix)]
+fn reap_direct_child_unix(pid: i32) -> bool {
     if pid <= 1 {
         return true;
     }
@@ -42,6 +60,29 @@ pub fn reap_direct_child(pid: i32) -> bool {
 /// 两次都是截止，中间不轮询。第二次仍未返回时函数返回 `false`，等的那条线程
 /// 继续停在这个 pid 的 `waitpid` 上。调用方不能再开第二个。
 pub fn wait_for_pid(
+    pid: i32,
+    grace: Duration,
+    on_armed: impl FnOnce(),
+    on_timeout: impl FnOnce() + Send + 'static,
+    reap_grace: Duration,
+) -> bool {
+    #[cfg(windows)]
+    {
+        wait_for_pid_windows(pid, grace, on_armed, on_timeout, reap_grace)
+    }
+    #[cfg(unix)]
+    {
+        wait_for_pid_unix(pid, grace, on_armed, on_timeout, reap_grace)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (pid, grace, on_armed, on_timeout, reap_grace);
+        true
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_pid_unix(
     pid: i32,
     grace: Duration,
     on_armed: impl FnOnce(),
@@ -131,9 +172,7 @@ pub fn wait_child_stdout(mut child: Child, grace: Duration) -> io::Result<Option
         Ok((_status, buf)) => Ok(Some(buf)),
         Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("进程输出线程在收尸前退出")),
         Err(RecvTimeoutError::Timeout) => {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
+            let _ = crate::process::terminate_pid(pid);
             let _ = rx.recv();
             Ok(None)
         }
@@ -172,8 +211,7 @@ pub fn wait_until_any_exit(pids: &[i32], timeout: Duration) -> Option<i32> {
 }
 
 fn pid_is_gone(pid: i32) -> bool {
-    let sent = unsafe { libc::kill(pid, 0) };
-    sent != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    pid <= 1 || !crate::process::pid_is_alive(pid as u32)
 }
 
 #[cfg(target_os = "macos")]
@@ -307,9 +345,113 @@ fn wait_until_any_exit_os(pids: &[i32], timeout: Duration) -> Option<i32> {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn wait_until_any_exit_os(pids: &[i32], timeout: Duration) -> Option<i32> {
     wait_by_parking(pids, timeout)
+}
+
+#[cfg(windows)]
+fn wait_until_any_exit_os(pids: &[i32], timeout: Duration) -> Option<i32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        WaitForMultipleObjects,
+    };
+
+    if let Some(pid) = pids.iter().copied().find(|pid| pid_is_gone(*pid)) {
+        return Some(pid);
+    }
+    let mut handles: Vec<(i32, HANDLE)> = Vec::new();
+    for &pid in pids {
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid as u32,
+            )
+        };
+        if handle.is_null() {
+            for (_, opened) in handles {
+                unsafe { CloseHandle(opened) };
+            }
+            return Some(pid);
+        }
+        handles.push((pid, handle));
+        if handles.len() == 64 {
+            break;
+        }
+    }
+    let raw: Vec<HANDLE> = handles.iter().map(|(_, handle)| *handle).collect();
+    let millis = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE.saturating_sub(1));
+    let waited = unsafe {
+        WaitForMultipleObjects(raw.len() as u32, raw.as_ptr(), 0, millis.max(1))
+    };
+    let result = usize::try_from(waited.wrapping_sub(WAIT_OBJECT_0))
+        .ok()
+        .filter(|index| *index < handles.len())
+        .map(|index| handles[index].0);
+    for (_, handle) in handles {
+        unsafe { CloseHandle(handle) };
+    }
+    result.or_else(|| pids.iter().copied().find(|pid| pid_is_gone(*pid)))
+}
+
+#[cfg(windows)]
+fn reap_direct_child_windows(pid: i32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        WaitForSingleObject,
+    };
+
+    if pid <= 1 {
+        return true;
+    }
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid as u32,
+        )
+    };
+    if handle.is_null() {
+        return true;
+    }
+    unsafe { WaitForSingleObject(handle, INFINITE) };
+    unsafe { CloseHandle(handle) };
+    true
+}
+
+#[cfg(windows)]
+fn wait_for_pid_windows(
+    pid: i32,
+    grace: Duration,
+    on_armed: impl FnOnce(),
+    on_timeout: impl FnOnce() + Send + 'static,
+    reap_grace: Duration,
+) -> bool {
+    if pid <= 1 {
+        return true;
+    }
+    let (tx, rx) = mpsc::channel();
+    let started = thread::Builder::new()
+        .name("smelt-waitpid".to_string())
+        .spawn(move || {
+            let _ = tx.send(reap_direct_child(pid));
+        });
+    if started.is_err() {
+        on_timeout();
+        return reap_direct_child(pid);
+    }
+    on_armed();
+    match rx.recv_timeout(grace) {
+        Ok(reaped) => reaped,
+        Err(RecvTimeoutError::Disconnected) => false,
+        Err(RecvTimeoutError::Timeout) => {
+            on_timeout();
+            rx.recv_timeout(reap_grace).unwrap_or_default()
+        }
+    }
 }
 
 /// 没有进程退出事件时，把剩余截止时间一次睡完再查。中途被叫醒就再睡剩下的，
@@ -328,7 +470,7 @@ fn wait_by_parking(pids: &[i32], timeout: Duration) -> Option<i32> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};

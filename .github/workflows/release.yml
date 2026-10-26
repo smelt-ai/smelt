@@ -1,5 +1,5 @@
 # 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release，
-# 再附上 Linux 运行时两种架构的包和一键安装脚本。
+# 再附上 Linux 运行时两种架构的包、Windows 桌面 zip 和一键安装脚本。
 # 本地打包链路复用：make dist-build → scripts/package-mac.sh；Linux 用 scripts/package-linux.sh。
 name: release
 
@@ -162,6 +162,13 @@ jobs:
           [[ -n "$previous" ]] && args+=(-f previous_tag_name="$previous")
           gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body \
             > "$RUNNER_TEMP/release-notes.md"
+          version="${GITHUB_REF_NAME#v}"
+          cat >> "$RUNNER_TEMP/release-notes.md" <<EOF
+
+          ## Windows
+
+          \`smelt-${version}-windows-x86_64.zip\` 里是 \`smelt.exe\`、\`smelt.com\`（命令行入口）、\`smeltd.exe\`、\`smelt-notify.exe\`、\`smelt-pi.exe\`（以及 Pi 要的 wasm）。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。升级本机守护会重启进程，终端会话不保留。
+          EOF
           cat "$RUNNER_TEMP/release-notes.md"
 
       # tag 带 - 后缀（v0.9.0-rc.1）就发成预发布：不成为 Latest，一键安装默认装的
@@ -370,9 +377,76 @@ jobs:
           files: dist/Smelt-*-android-arm64.apk
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、自更新 zip、APK、Linux 包、install.sh）。
+  # Windows 本机运行时：smelt、smeltd、smelt-notify、smelt-pi 打在同一个目录里。第一版不签名。
+  # 构建和 dmg 并行；上传在 windows-release，等 Release 建好再挂，避免两边同时建。
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 和 ci.yml 一样不往仓库缓存里写：macOS 那份已经占掉配额里的一大块。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      - name: Build
+        run: cargo build --release -p smelt -p smelt-cli -p smeltd --locked
+
+      # GitHub 的 windows-latest 默认是 PowerShell，仓库里的 Bun 脚本是 bash。
+      - name: Build smelt-pi
+        shell: bash
+        run: bash scripts/build-smelt-pi.sh --out target/smelt-pi
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $stage = "dist/stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/release/smelt.exe, target/release/smeltd.exe, target/release/smelt-notify.exe -Destination $stage
+          # 控制台入口。cmd / PowerShell 敲 smelt 先找到 .com，命令行子命令才有输出。
+          Copy-Item target/release/smelt-cli.exe -Destination "$stage/smelt.com"
+          Copy-Item target/smelt-pi/smelt-pi.exe, target/smelt-pi/photon_rs_bg.wasm -Destination $stage
+          if (Test-Path target/smelt-pi/skills) { Copy-Item target/smelt-pi/skills -Destination $stage -Recurse }
+          if (Test-Path target/smelt-pi/native) { Copy-Item target/smelt-pi/native -Destination $stage -Recurse }
+          $name = "smelt-$version-windows-x86_64.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name"
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+          Write-Output "$hash  $name"
+          Get-Item "dist/$name" | Select-Object Name, Length
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: smelt-windows
+          path: dist/smelt-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  windows-release:
+    needs: [build, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v8
+        with:
+          name: smelt-windows
+          path: dist
+
+      - name: Add to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/smelt-*-windows-x86_64.zip
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、自更新 zip、APK、
+  # Linux 包、Windows 桌面 zip、install.sh）。
   checksums:
-    needs: [linux-release, android-release]
+    needs: [linux-release, android-release, windows-release]
     runs-on: ubuntu-24.04
     steps:
       - name: Checksums of all assets
@@ -381,7 +455,7 @@ jobs:
         run: |
           mkdir dist && cd dist
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Smelt.dmg' --pattern 'Smelt.app.zip' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'install.sh'
+            --pattern 'Smelt.dmg' --pattern 'Smelt.app.zip' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'smelt-*-windows-x86_64.zip' --pattern 'install.sh'
           sha256sum -- * | sort -k2 > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"

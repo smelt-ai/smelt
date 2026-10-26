@@ -37,7 +37,7 @@ pub(crate) struct ServerShared {
     /// 内容哈希，不随 StageDiskOnly 变化；None=启动时文件已消失的孤儿进程。
     pub(crate) daemon_fingerprint: Option<String>,
     #[allow(dead_code)]
-    pub(crate) listen_fd: RawFd,
+    pub(crate) listen_fd: i32,
     pub(crate) event_hub: EventHubHandle,
 }
 
@@ -66,7 +66,10 @@ fn unpaired_may_call(operation: DaemonOperation, payload: &serde_json::Value) ->
             == Some(ControlMethod::DevicePair.as_str())
 }
 
-pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
+pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
+    conn: C,
+    ctx: ServerContext,
+) {
     let ServerContext { shared, principal } = ctx;
     let ServerShared {
         sessions,
@@ -184,7 +187,11 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
 }
 
 /// 控制请求回一个带 request_id 的 PermissionDenied，客户端能看懂；其余 op 直接断开。
-fn reject_unpaired(mut conn: UnixStream, operation: DaemonOperation, payload: &serde_json::Value) {
+fn reject_unpaired<C: ClientSocket>(
+    mut conn: C,
+    operation: DaemonOperation,
+    payload: &serde_json::Value,
+) {
     if operation != DaemonOperation::Control {
         return;
     }

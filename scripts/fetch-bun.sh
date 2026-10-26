@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 把钉死的 Bun 1.4.3 放进 target/bundled-bun/<id>/bun。已有且可执行文件哈希相符就复用。
-# 用法：scripts/fetch-bun.sh [darwin-arm64|darwin-x64|linux-x64|linux-arm64]
+# 用法：scripts/fetch-bun.sh [darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64]
 # `--managed-only` 只是不走 PATH，和默认行为一样。
 set -euo pipefail
 
@@ -11,6 +11,14 @@ host_id() {
   local os arch
   os="$(uname -s)"
   arch="$(uname -m)"
+  # GitHub windows-latest 的 bash 是 MINGW/MSYS；有的环境只设了 OS=Windows_NT。
+  case "$os" in
+    MINGW*|MSYS*|CYGWIN*) echo windows-x64; return ;;
+  esac
+  if [[ "${OS:-}" == "Windows_NT" ]]; then
+    echo windows-x64
+    return
+  fi
   case "$os-$arch" in
     Darwin-arm64) echo darwin-arm64 ;;
     Darwin-x86_64) echo darwin-x64 ;;
@@ -24,8 +32,8 @@ ID=""
 for arg in "$@"; do
   case "$arg" in
     --managed-only) ;;
-    darwin-arm64|darwin-x64|linux-x64|linux-arm64) ID="$arg" ;;
-    *) echo "用法：$0 [--managed-only] [darwin-arm64|darwin-x64|linux-x64|linux-arm64]" >&2; exit 2 ;;
+    darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64) ID="$arg" ;;
+    *) echo "用法：$0 [--managed-only] [darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64]" >&2; exit 2 ;;
   esac
 done
 ID="${ID:-$(host_id)}"
@@ -51,6 +59,13 @@ case "$ID" in
     ARCHIVE_SHA=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21
     EXE_SHA=029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe
     ;;
+  windows-x64)
+    ZIP=bun-windows-x64.zip
+    ARCHIVE_SHA=0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d
+    # 压缩包里是 bun-windows-x64/bun.exe。
+    EXE_SHA=095db4abae203d42f29fdec26da4a882fcde6333cdd84e40c0c7828c0cf543f6
+    BIN_NAME=bun.exe
+    ;;
 esac
 
 sha256_file() {
@@ -62,13 +77,17 @@ sha256_file() {
 }
 
 DEST="$ROOT/target/bundled-bun/$ID"
-EXE="$DEST/bun"
-if [[ -x "$EXE" ]]; then
+BIN_NAME="${BIN_NAME:-bun}"
+EXE="$DEST/$BIN_NAME"
+if [[ -n "$EXE_SHA" && -x "$EXE" ]]; then
   current="$(sha256_file "$EXE")"
   if [[ "$current" == "$EXE_SHA" ]]; then
     printf '%s\n' "$EXE"
     exit 0
   fi
+elif [[ -z "$EXE_SHA" && -f "$EXE" ]]; then
+  printf '%s\n' "$EXE"
+  exit 0
 fi
 
 mkdir -p "$DEST"
@@ -82,15 +101,21 @@ if [[ "$archive" != "$ARCHIVE_SHA" ]]; then
   exit 1
 fi
 unzip -q "$tmp/$ZIP" -d "$tmp/out"
-found="$(find "$tmp/out" -type f -name bun -print -quit)"
+found="$(find "$tmp/out" -type f -name "$BIN_NAME" -print -quit)"
 if [[ -z "$found" ]]; then
-  echo "✗ 压缩包里没有 bun" >&2
+  echo "✗ 压缩包里没有 $BIN_NAME" >&2
   exit 1
 fi
-exe="$(sha256_file "$found")"
-if [[ "$exe" != "$EXE_SHA" ]]; then
-  echo "✗ bun 可执行文件哈希不符：$exe" >&2
-  exit 1
+if [[ -n "$EXE_SHA" ]]; then
+  exe="$(sha256_file "$found")"
+  if [[ "$exe" != "$EXE_SHA" ]]; then
+    echo "✗ bun 可执行文件哈希不符：$exe" >&2
+    exit 1
+  fi
 fi
-install -m 0755 "$found" "$EXE"
+if command -v install >/dev/null 2>&1; then
+  install -m 0755 "$found" "$EXE"
+else
+  cp "$found" "$EXE"
+fi
 printf '%s\n' "$EXE"

@@ -7,6 +7,7 @@
 use super::*;
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::fd::{IntoRawFd, OwnedFd};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI32, AtomicU64};
@@ -50,7 +51,7 @@ pub(crate) struct HistoryPageBody {
 
 struct HostInner {
     pid: i32,
-    control: Mutex<Option<UnixStream>>,
+    control: Mutex<Option<ClientConn>>,
     snapshot_rx: smol::channel::Receiver<HostedSnapshotEnvelope>,
     /// 宿主转上来的 Pi 会话互发请求（`peer_request` 行的内容）。
     peer_rx: smol::channel::Receiver<serde_json::Value>,
@@ -72,22 +73,37 @@ impl HostedConversationHandle {
         initial_open: &serde_json::Value,
         spawn_gate: &Arc<RwLock<()>>,
     ) -> std::io::Result<Self> {
-        let (parent, child) = UnixStream::pair()?;
-        set_cloexec(parent.as_raw_fd(), true)?;
-        set_cloexec(child.as_raw_fd(), true)?;
-
-        let child_fd = unsafe { OwnedFd::from_raw_fd(child.into_raw_fd()) };
+        #[cfg(unix)]
+        let (parent, child_stdio) = {
+            let (parent, child) = UnixStream::pair()?;
+            set_cloexec(parent.as_raw_fd(), true)?;
+            set_cloexec(child.as_raw_fd(), true)?;
+            let child_fd = unsafe { OwnedFd::from_raw_fd(child.into_raw_fd()) };
+            (parent, Stdio::from(child_fd))
+        };
+        #[cfg(windows)]
+        let pipe_name = {
+            let tag = format!("acp-host-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
+            smelt_sys::named_pipe::user_pipe_path(&tag)?
+        };
+        #[cfg(windows)]
+        let pipe_listener = smelt_sys::named_pipe::PipeListener::bind(&pipe_name)?;
         let exe = session_host_executable()?;
         let mut command = std::process::Command::new(exe);
         command
             .arg(SESSION_HOST_ARG)
-            .stdin(Stdio::from(child_fd))
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            command.process_group(0);
+            command.stdin(child_stdio).process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            command
+                .stdin(Stdio::null())
+                .env("SMELT_HOST_PIPE", &pipe_name);
         }
 
         let child = {
@@ -96,8 +112,21 @@ impl HostedConversationHandle {
         };
         let pid = child.id() as i32;
         drop(child);
+        #[cfg(windows)]
+        if let Err(error) = smelt_sys::process::attach_running(pid as u32) {
+            dlog(&format!(
+                "acp host pid={pid} 没能放进 Job（{error}），结束时改为结束这个 pid"
+            ));
+        }
 
-        let handle = Self::from_stream(pid, parent, None)?;
+        #[cfg(unix)]
+        let control = ClientConn::from_unix(parent);
+        #[cfg(windows)]
+        let control = ClientConn::from_pipe(pipe_listener.accept().map_err(|error| {
+            let _ = smelt_sys::process::terminate_pid(pid as u32);
+            error
+        })?);
+        let handle = Self::from_stream(pid, control, None)?;
         if let Err(error) = handle.send_json(initial_open) {
             let _ = handle.shutdown_and_wait(ACP_SHUTDOWN_GRACE);
             return Err(error);
@@ -107,7 +136,7 @@ impl HostedConversationHandle {
 
     fn from_stream(
         pid: i32,
-        control: UnixStream,
+        control: ClientConn,
         initial_provider_pid: Option<i32>,
     ) -> std::io::Result<Self> {
         let reader = control.try_clone()?;
@@ -282,7 +311,10 @@ impl HostedConversationHandle {
     #[cfg(test)]
     pub(crate) fn test_stub() -> (Self, UnixStream) {
         let (control, peer) = UnixStream::pair().unwrap();
-        (Self::from_stream(999_999, control, None).unwrap(), peer)
+        (
+            Self::from_stream(999_999, ClientConn::from_unix(control), None).unwrap(),
+            peer,
+        )
     }
 
     pub(crate) fn shutdown_and_wait(self, grace: Duration) -> bool {
@@ -308,14 +340,18 @@ impl HostedConversationHandle {
                 flag.store(true, Ordering::SeqCst);
                 let provider_pid = provider.load(Ordering::SeqCst);
                 if provider_pid > 1 {
-                    unsafe {
-                        libc::kill(-provider_pid, libc::SIGKILL);
-                    }
+                    let _ = smelt_sys::process::signal_tree(
+                        provider_pid as u32,
+                        smelt_sys::process::TreeSignal::Kill,
+                    );
+                    smelt_sys::process::release_tree(provider_pid as u32);
                 }
                 if host_pid > 1 {
-                    unsafe {
-                        libc::kill(-host_pid, libc::SIGKILL);
-                    }
+                    let _ = smelt_sys::process::signal_tree(
+                        host_pid as u32,
+                        smelt_sys::process::TreeSignal::Kill,
+                    );
+                    smelt_sys::process::release_tree(host_pid as u32);
                 }
             },
             grace,
@@ -438,7 +474,7 @@ fn dispatch_snapshot_line(
 }
 
 fn start_snapshot_reader(
-    stream: UnixStream,
+    mut stream: ClientConn,
     provider_pid: Arc<AtomicI32>,
     host_pid: i32,
     history_waiters: Arc<
@@ -489,17 +525,33 @@ pub(crate) fn is_session_host_process() -> bool {
 /// session-host 模式不绑定全局 daemon socket。stdin 是主 daemon 传入的双向
 /// Unix socket：首行是内部 acp_open，后续沿用正常 `AcpUserAction` wire；输出
 /// 仍复用 `handle_acp_open` 的 snapshot attachment。
+fn session_host_conn() -> Option<ClientConn> {
+    #[cfg(unix)]
+    {
+        let fd = unsafe { libc::dup(libc::STDIN_FILENO) };
+        if fd < 0 {
+            return None;
+        }
+        let conn = unsafe { UnixStream::from_raw_fd(fd) };
+        return Some(ClientConn::from_unix(conn));
+    }
+    #[cfg(windows)]
+    {
+        let name = std::env::var("SMELT_HOST_PIPE").ok()?;
+        let pipe = smelt_sys::named_pipe::PipeStream::connect(&name).ok()?;
+        Some(ClientConn::from_pipe(pipe))
+    }
+}
+
 pub(crate) fn run_session_host() {
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = dirs::home_dir() {
         let _ = std::env::set_current_dir(home);
     }
     smelt_core::fd_limit::raise_fd_limit();
 
-    let fd = unsafe { libc::dup(libc::STDIN_FILENO) };
-    if fd < 0 {
+    let Some(conn) = session_host_conn() else {
         return;
-    }
-    let conn = unsafe { UnixStream::from_raw_fd(fd) };
+    };
     let Ok(reader_stream) = conn.try_clone() else {
         return;
     };
@@ -567,7 +619,7 @@ pub(crate) fn run_session_host() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -617,7 +669,7 @@ mod tests {
     fn unparsable_snapshot_line_disconnects_the_mirror() {
         let (host_side, daemon_side) = UnixStream::pair().unwrap();
         let rx = start_snapshot_reader(
-            daemon_side,
+            crate::client_conn::ClientConn::Unix(daemon_side),
             Arc::new(AtomicI32::new(0)),
             0,
             Arc::new(Mutex::new(std::collections::HashMap::new())),

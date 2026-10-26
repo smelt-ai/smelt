@@ -5,9 +5,10 @@
 //! （TigerVNC 的 Xvnc，它本身就是这块虚拟屏幕的 X 服务器）。VNC 只听本机，外面只能经过
 //! 运行时、也就是只有配对过的设备能连。
 
+use super::ClientSocket;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::os::unix::net::UnixStream;
+use smelt_runtime_client::UnixStream;
 use std::process::Command;
 use std::time::Duration;
 
@@ -32,9 +33,9 @@ fn display() -> String {
 ///
 /// `reader` 里可能已经预读了首行之后的字节（客户端紧接着发的 RFB 握手），所以往 VNC 那边
 /// 转发必须从它读，不能另开一个裸流。
-pub(crate) fn handle_desktop_attach(
-    mut conn: UnixStream,
-    mut reader: BufReader<UnixStream>,
+pub(crate) fn handle_desktop_attach<C: ClientSocket>(
+    mut conn: C,
+    mut reader: BufReader<C>,
     endpoint: &str,
 ) {
     let vnc = match connect(endpoint) {
@@ -161,7 +162,7 @@ mod tests {
         endpoint
     }
 
-    fn read_line(stream: &mut UnixStream) -> Vec<u8> {
+    fn read_line<C: ClientSocket>(stream: &mut C) -> Vec<u8> {
         let mut line = Vec::new();
         let mut byte = [0u8; 1];
         while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {

@@ -33,7 +33,7 @@ pub struct RemoteSessionCatalog {
 
 fn smelt_path(name: &str) -> PathBuf {
     smelt_paths::smelt_home()
-        .unwrap_or_else(|| PathBuf::from("/tmp/.smelt"))
+        .unwrap_or_else(|| std::env::temp_dir().join(".smelt"))
         .join(name)
 }
 
@@ -1101,6 +1101,8 @@ mod tests {
             .upsert_acp(test_remote_acp("shared"))
             .expect_err("写入时也必须阻止跨 kind 覆盖");
         assert!(error.contains("already belongs to a terminal"));
+        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1177,6 +1179,8 @@ mod tests {
             RemoteSessionCatalog::load_from_paths(Some(acp_path), Some(terminal_path)).unwrap();
         assert_eq!(catalog.acp_sessions.len(), 1);
         assert!(catalog.terminal_sessions.is_empty());
+        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1216,6 +1220,8 @@ mod tests {
         let persisted = store.get_remote_session_snapshot().unwrap();
         assert!(persisted.is_none() || persisted.unwrap().terminal.is_empty());
 
+        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1339,7 +1345,7 @@ mod tests {
     #[test]
     fn display_title_prefers_the_user_name() {
         let mut session = HistorySessionSummary {
-            path: PathBuf::from("/tmp/session.jsonl"),
+            path: "/tmp/session.jsonl".to_string(),
             resume_id: "session-1".to_string(),
             title: "Fix the flaky test".to_string(),
             custom_title: None,

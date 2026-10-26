@@ -3,18 +3,25 @@
 use super::*;
 
 mod acp_idle_tests;
+#[cfg(unix)]
 mod acp_tests;
+#[cfg(unix)]
 mod action_integration_tests;
 mod action_tests;
 mod automation_command_tests;
 mod autostart_remote_tests;
+#[cfg(unix)]
 mod daemon_executable_tests;
+#[cfg(unix)]
 mod flow_control_tests;
 mod history_rename_tests;
+#[cfg(unix)]
 mod input_integration_tests;
 mod input_payload_tests;
 mod remote_catalog_recovery_tests;
+#[cfg(unix)]
 mod remote_reattach_tests;
+#[cfg(unix)]
 mod resize_bounds_tests;
 mod runtime_client_tests;
 mod self_upgrade_tests;
@@ -25,8 +32,10 @@ mod sleep_assertion_leak_tests;
 mod sleep_assertion_policy_tests;
 mod snapshot_tests;
 mod state_bus_tests;
+#[cfg(unix)]
 mod state_listener_tests;
 mod test_owner_tests;
+#[cfg(unix)]
 mod watch_tests;
 mod workspace_menu_tests;
 
@@ -80,6 +89,7 @@ fn make_acp_session_value(
 
 /// `Ctl.master` 用一根真管道（不是 /dev/null）：这样能从另一头读回真正写
 /// 进去的字节。action 和 input 的集成测试共用这一份。
+#[cfg(unix)]
 fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::fs::File) {
     let mut fds = [0i32; 2];
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() 失败");

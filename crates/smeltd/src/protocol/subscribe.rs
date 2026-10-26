@@ -2,20 +2,16 @@
 
 use super::super::session_catalog::published_session_states;
 use super::super::*;
-use super::{
-    AuthenticatedEventClient, SystemPeerIdentityProvider, ViewerLease,
-    authenticate_event_connection,
-};
+use super::{AuthenticatedEventClient, PeerSource, ViewerLease};
 use smelt_event_bus::Delivery;
 use smelt_event_protocol::{
     EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, SubscribeErrorCode,
     SubscribeMessage, SubscribeRequest,
 };
 use std::collections::BTreeSet;
-use std::os::unix::net::UnixStream;
 
-pub(super) fn handle_event_subscribe_op(
-    conn: UnixStream,
+pub(super) fn handle_event_subscribe_op<C: ClientSocket + PeerSource>(
+    conn: C,
     v: &serde_json::Value,
     principal: &crate::devices::Principal,
     event_hub: &EventHubHandle,
@@ -32,10 +28,10 @@ pub(super) fn handle_event_subscribe_op(
     let identity = daemon_executable_path()
         .map_err(|error| format!("cannot determine smeltd executable: {error}"))
         .and_then(|daemon_executable| {
-            authenticate_event_connection(
+            let peer = conn.peer_identity()?;
+            super::auth::authenticate_event_client_for_platform(
                 v,
-                &conn,
-                &SystemPeerIdentityProvider,
+                &peer,
                 std::process::id(),
                 &daemon_executable,
             )
@@ -59,15 +55,15 @@ pub(crate) fn collect_subscription_snapshot(
     }
 }
 
-pub(super) fn write_event_protocol_value(
-    conn: &mut UnixStream,
+pub(super) fn write_event_protocol_value<C: ClientSocket>(
+    conn: &mut C,
     value: impl serde::Serialize,
 ) -> Result<(), String> {
     let value = serde_json::to_value(value).map_err(|error| error.to_string())?;
     smelt_runtime_client::protocol::write_json_line(conn, &value).map_err(|error| error.to_string())
 }
 
-pub(super) fn write_event_protocol_error(conn: &mut UnixStream, error: impl std::fmt::Display) {
+pub(super) fn write_event_protocol_error<C: ClientSocket>(conn: &mut C, error: impl std::fmt::Display) {
     let _ = write_event_protocol_value(
         conn,
         SubscribeMessage::<serde_json::Value>::Error {
@@ -169,8 +165,8 @@ impl ConnectionMailbox {
     }
 }
 
-pub(crate) fn handle_event_subscribe(
-    mut conn: UnixStream,
+pub(crate) fn handle_event_subscribe<C: ClientSocket>(
+    mut conn: C,
     request: Option<&serde_json::Value>,
     identity: Result<AuthenticatedEventClient, String>,
     event_hub: &EventHubHandle,

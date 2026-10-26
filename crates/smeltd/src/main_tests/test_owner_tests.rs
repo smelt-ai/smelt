@@ -2,6 +2,12 @@ use super::*;
 
 #[test]
 fn owner_watch_returns_once_the_owner_exits() {
+    #[cfg(windows)]
+    let mut owner = std::process::Command::new("ping")
+        .args(["-n", "31", "127.0.0.1"])
+        .spawn()
+        .unwrap();
+    #[cfg(not(windows))]
     let mut owner = std::process::Command::new("/bin/sleep")
         .arg("30")
         .spawn()

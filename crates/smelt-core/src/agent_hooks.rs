@@ -190,7 +190,11 @@ pub(crate) fn command_uses_smelt_notify(command: &str) -> bool {
                     .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
         })
         .and_then(|word| std::path::Path::new(word).file_name())
-        .is_some_and(|name| name == "smelt-notify")
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("smelt-notify")
+                || name.eq_ignore_ascii_case("smelt-notify.exe")
+        })
 }
 
 fn command_uses_current_smelt_hook(command: &str, event: &str) -> bool {
@@ -1692,12 +1696,8 @@ mod hook_file_tests {
 
     #[test]
     fn removing_smelt_hook_preserves_third_party_handlers() {
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-hook-remove-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        // 目录名只用标签。测试线程名里有冒号，不能拿来当文件名。
+        let dir = temp_dir("hook-remove");
         let path = dir.join("hooks.json");
         std::fs::write(
             &path,

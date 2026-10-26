@@ -6,11 +6,12 @@ fn automation_run_does_not_require_an_existing_conversation() {
     use crate::settings::{Automation, AutomationSchedule, AutomationTrigger};
     use smelt_model::automation::{AutomationCommand, AutomationFile, apply_automation_command};
 
+    let workspace = std::env::temp_dir().to_string_lossy().into_owned();
     let automation = Automation {
         id: "open-scan".into(),
         name: "开盘扫描".into(),
         enabled: true,
-        workspace_dir: Some("/tmp".into()),
+        workspace_dir: Some(workspace.clone()),
         trigger: AutomationTrigger::schedule(AutomationSchedule::daily_morning()),
         action: smelt_model::automation::AutomationAction::Agent {
             agent_definition_id: "quant".into(),
@@ -41,7 +42,7 @@ fn automation_run_does_not_require_an_existing_conversation() {
 
     assert_eq!(run.context.prompt.as_deref(), Some("拉取行情并输出"));
     assert_eq!(run.context.action.agent_definition_id(), Some("quant"));
-    assert_eq!(run.context.cwd, "/tmp");
+    assert_eq!(run.context.cwd, workspace);
     assert_eq!(run.context.automation_name, "开盘扫描");
 }
 

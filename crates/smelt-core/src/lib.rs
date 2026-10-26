@@ -41,7 +41,6 @@ pub mod fs;
 pub mod history_service;
 pub mod launch_settings;
 pub mod login_env;
-#[cfg(unix)]
 pub mod managed_runtime;
 pub mod memory_settings;
 mod mirrors;
@@ -52,7 +51,6 @@ pub mod peer_link;
 pub mod pi_auth;
 pub mod pi_auth_service;
 pub mod pi_auto_models;
-#[cfg(unix)]
 pub use smelt_sys::pi_image;
 pub mod pi_mcp;
 pub mod pi_model_discovery;

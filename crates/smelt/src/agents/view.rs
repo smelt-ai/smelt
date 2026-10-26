@@ -796,6 +796,8 @@ impl Workspace {
             .into_iter()
             .next()
             .unwrap_or(settings::ConversationAgentKind::Pi);
+        let machines = agent_creation_machines(cx);
+        let needs_remote = machines.is_empty();
         div()
             .id("agent-config-scroll")
             .flex_1()
@@ -832,7 +834,9 @@ impl Workspace {
                                     .text_sm()
                                     .text_color(rgb(crate::ui_theme::text_muted()))
                                     .text_center()
-                                    .child(if self.agent_surface.arm_conversation_on_create {
+                                    .child(if needs_remote {
+                                        "先配对一台远程机器。智能体配置保存在那台机器上。"
+                                    } else if self.agent_surface.arm_conversation_on_create {
                                         "创建一个可复用的智能体。开始对话后会用它开场，并设为默认。返回则不保留。"
                                     } else {
                                         "写下一个可复用的智能体。对话会带着它的工作方式开始。"
@@ -846,7 +850,21 @@ impl Workspace {
                             .icon(IconName::Plus)
                             .label("新建智能体");
                         // 挂了不止一台机器时先选建在哪台机器上。
-                        match agent_creation_machines(cx).as_slice() {
+                        match machines.as_slice() {
+                            [] => Button::new("agents-empty-pair")
+                                .normal()
+                                .compact()
+                                .icon(IconName::Plus)
+                                .label("添加远程机器")
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |workspace, cx| {
+                                        workspace.open_settings_section(
+                                            crate::settings::SettingsSection::CollaborationRemote,
+                                            cx,
+                                        );
+                                    });
+                                })
+                                .into_any_element(),
                             [runtime] => {
                                 let runtime = runtime.clone();
                                 button
@@ -1239,6 +1257,58 @@ impl Workspace {
             })
     }
 
+    fn render_capabilities_needs_runtime(
+        &self,
+        entity: Entity<Workspace>,
+        cx: &App,
+    ) -> AnyElement {
+        let (fg, muted) = {
+            let theme = cx.theme();
+            (theme.foreground, theme.muted_foreground)
+        };
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .px_8()
+            .bg(rgb(crate::ui_theme::bg_stage()))
+            .child(
+                div()
+                    .text_size(px(28.))
+                    .font_semibold()
+                    .text_color(fg)
+                    .child("添加远程机器"),
+            )
+            .child(
+                div()
+                    .max_w(px(420.))
+                    .text_sm()
+                    .text_center()
+                    .text_color(muted)
+                    .child("模型、技能和插件跟运行时所在的机器走。配对一台远程机器后就能配置。"),
+            )
+            .child(
+                Button::new("capabilities-add-runtime")
+                    .commit()
+                    .capsule()
+                    .label("添加远程机器")
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |workspace, cx| {
+                            workspace.open_settings_section(
+                                crate::settings::SettingsSection::CollaborationRemote,
+                                cx,
+                            );
+                        });
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// 能力库：页头和智能体、自动化同一条，左边页名接三个页签。正文是独立的设置内容视图，
     /// 自己节流刷新快照，终端输出这类高频通知不会让它每帧重读 Pi 配置。
     pub(crate) fn render_capabilities_page(
@@ -1247,6 +1317,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entity = cx.entity();
+        if crate::runtimes::client(self.pi_library_runtime(), cx).is_none() {
+            return self.render_capabilities_needs_runtime(entity, cx);
+        }
         let current = self.nav.capabilities_tab();
         let tabs = choice_tabs(
             "capabilities-tabs",
@@ -1404,11 +1477,10 @@ fn fill_conversation_agent_menu(
 /// 能新建智能体的机器：配置读到了的。一台都没读到时给本机，建的时候会说还没读到。
 fn agent_creation_machines(cx: &App) -> Vec<crate::RuntimeKey> {
     let machines = agent_machines(cx);
-    if machines.is_empty() {
-        vec![crate::RuntimeKey::Local]
-    } else {
-        machines
+    if !machines.is_empty() {
+        return machines;
     }
+    vec![crate::RuntimeKey::Local]
 }
 
 /// 「新建智能体」菜单：不止一台机器时按机器分段，每段列可选的引擎。

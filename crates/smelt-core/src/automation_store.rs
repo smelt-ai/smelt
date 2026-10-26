@@ -1398,7 +1398,7 @@ mod tests {
             id: "automation-1".into(),
             name: "Report".into(),
             enabled: true,
-            workspace_dir: Some("/tmp".into()),
+            workspace_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes { minutes: 10 }),
             action: crate::automation::AutomationAction::Agent {
                 agent_definition_id: "agent-1".into(),

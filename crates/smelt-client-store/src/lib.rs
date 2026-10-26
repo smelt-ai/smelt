@@ -4,7 +4,6 @@
 //! 通知开关、侧栏等界面状态、远程运行时的连接。运行时的数据在运行时自己的库里，GUI
 //! 只经协议读写。每样东西一张表、一个字段一列，表结构见 `schema.rs`。
 
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -185,12 +184,27 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
+/// 更新器状态里的路径。更新器只在 macOS 写这些列（设计文档 D4）。
+///
+/// Unix 上这就是 `OsStr` 的原始字节，和以前的 `OsStrExt::as_bytes` 相同，已经落库的
+/// 非 UTF-8 路径还能读回来。别的平台用同一套 `as_encoded_bytes`（WTF-8），不再引用
+/// Unix 的 `OsStrExt`。
 fn path_bytes(path: &Path) -> &[u8] {
-    path.as_os_str().as_bytes()
+    path.as_os_str().as_encoded_bytes()
 }
 
 fn path_from(bytes: Vec<u8>) -> PathBuf {
-    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        return PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    }
+    #[cfg(not(unix))]
+    {
+        // 更新器不在这些平台写列。迁移进来的 JSON 路径是 UTF-8；坏数据用替换符，
+        // 不把不可信字节交给 `from_encoded_bytes_unchecked`。
+        PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
 fn sql(error: rusqlite::Error) -> String {

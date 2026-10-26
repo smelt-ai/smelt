@@ -11,9 +11,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -21,12 +20,45 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::acp_conn::ConversationEvent;
 use crate::acp_session::{BackgroundTaskStatus, BackgroundTaskView, PeerDelivery};
+use smelt_sys::process::TreeSignal;
 
 mod peers;
 mod subagents;
 
+/// Pi 扩展连上来的那条流。Unix 是文件系统上的 `AF_UNIX`，Windows 是命名管道。
+#[cfg(unix)]
+pub(crate) type TaskStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub(crate) type TaskStream = smelt_sys::named_pipe::PipeStream;
+
+#[cfg(unix)]
+type WakeReader = std::os::unix::net::UnixStream;
+#[cfg(unix)]
+type WakeWriter = std::os::unix::net::UnixStream;
+/// Windows 用事件：置位是叫醒，复位是读空。管道读端只能轮询，不能和别的来源一起阻塞等待。
+#[cfg(windows)]
+type WakeReader = smelt_sys::named_pipe::WakeEvent;
+#[cfg(windows)]
+type WakeWriter = smelt_sys::named_pipe::WakeEvent;
+
+/// 任务的输出管道。Windows 用自己建的可重叠读管道，才能和唤醒一起等，见 `output_pipe`。
+#[cfg(unix)]
+type TaskStdout = std::process::ChildStdout;
+#[cfg(unix)]
+type TaskStderr = std::process::ChildStderr;
+#[cfg(windows)]
+type TaskStdout = smelt_sys::named_pipe::PipeStream;
+#[cfg(windows)]
+type TaskStderr = smelt_sys::named_pipe::PipeStream;
+
+#[cfg(unix)]
+type TaskListener = std::os::unix::net::UnixListener;
+#[cfg(windows)]
+type TaskListener = smelt_sys::named_pipe::PipeListener;
+
 const MAX_TASKS: usize = 12;
 /// `sockaddr_un.sun_path` 在 macOS 上是 104 字节，还要留一个结尾的 NUL。
+#[cfg(unix)]
 const MAX_UNIX_SOCKET_PATH: usize = 103;
 const LOG_CAP: u64 = 2 * 1024 * 1024;
 const OUTPUT_DEFAULT: u64 = 16 * 1024;
@@ -113,13 +145,13 @@ struct State {
 /// 当前这条监听，连同用来叫醒它的写端。换监听时一起换掉。
 struct CurrentListen {
     id: Option<u64>,
-    poke: Option<std::os::unix::net::UnixStream>,
+    poke: Option<WakeWriter>,
 }
 
 /// 阻塞着等事件的写端。有任务结束、到点或要停机时写一个字节。
 struct Pokes {
-    accept: Option<std::os::unix::net::UnixStream>,
-    waits: Vec<std::os::unix::net::UnixStream>,
+    accept: Option<WakeWriter>,
+    waits: Vec<(u64, WakeWriter)>,
 }
 
 struct Inner {
@@ -135,6 +167,7 @@ struct Inner {
     listen: Mutex<std::collections::HashMap<String, CurrentListen>>,
     pokes: Mutex<Pokes>,
     next_listener: AtomicU64,
+    next_wait: AtomicU64,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -166,16 +199,7 @@ impl BackgroundSupervisor {
         }
         let socket_path = control_socket_path(std::env::temp_dir(), std::process::id(), nonce);
         let _ = fs::remove_file(&socket_path);
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path)
-            .map_err(|error| format!("无法监听后台任务套接字：{error}"))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| format!("无法设置后台任务套接字：{error}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600));
-        }
+        let listener = bind_control_listener(&socket_path)?;
 
         let inner = Arc::new(Inner {
             stop: AtomicBool::new(false),
@@ -197,6 +221,7 @@ impl BackgroundSupervisor {
                 waits: Vec::new(),
             }),
             next_listener: AtomicU64::new(1),
+            next_wait: AtomicU64::new(1),
             threads: Mutex::new(Vec::new()),
         });
         let (accept_wake, accept_poke) =
@@ -279,13 +304,13 @@ impl Drop for BackgroundSupervisor {
         self.inner.stop.store(true, Ordering::SeqCst);
         poke(&self.inner);
         self.inner.cv.notify_all();
-        if let Ok(state) = self.inner.mu.lock() {
+        if let Ok(mut state) = self.inner.mu.lock() {
             for task in &state.tasks {
                 if is_running(task.status) {
-                    interrupt_task(task, libc::SIGKILL);
+                    interrupt_task(task, TreeSignal::Kill);
                 }
             }
-            subagents::wake_dispatches(&state);
+            subagents::wake_dispatches(&mut state);
         }
         let threads = std::mem::take(&mut *self.inner.threads.lock().unwrap());
         for thread in threads {
@@ -298,56 +323,83 @@ impl Drop for BackgroundSupervisor {
 
 fn accept_loop(
     inner: Arc<Inner>,
-    listener: std::os::unix::net::UnixListener,
+    listener: TaskListener,
     session_cwd: String,
-    mut wake: std::os::unix::net::UnixStream,
+    mut wake: WakeReader,
 ) {
-    loop {
-        if inner.stop.load(Ordering::SeqCst) {
-            return;
-        }
+    #[cfg(unix)]
+    {
         loop {
+            if inner.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let inner = Arc::clone(&inner);
+                        let session_cwd = session_cwd.clone();
+                        let _ = thread::Builder::new()
+                            .name("smelt-bg-req".into())
+                            .spawn(move || handle_client(inner, stream, &session_cwd));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => return,
+                }
+            }
+            if inner.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            let ready = match poll_ready(&[&listener, &wake], None) {
+                Ok(ready) => ready,
+                Err(_) => return,
+            };
+            if ready.get(1) == Some(&true) {
+                drain_wake(&mut wake);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // 接受会堵住。停机时连一个空客户端把这一次 accept 放开。
+        let _ = &mut wake;
+        loop {
+            if inner.stop.load(Ordering::SeqCst) {
+                return;
+            }
             match listener.accept() {
-                Ok((stream, _)) => {
+                Ok(stream) => {
+                    let stopped = inner.stop.load(Ordering::SeqCst);
                     let inner = Arc::clone(&inner);
                     let session_cwd = session_cwd.clone();
                     let _ = thread::Builder::new()
                         .name("smelt-bg-req".into())
                         .spawn(move || handle_client(inner, stream, &session_cwd));
+                    if stopped {
+                        return;
+                    }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => return,
             }
-        }
-        if inner.stop.load(Ordering::SeqCst) {
-            return;
-        }
-        let ready = match poll_wait(
-            &[
-                (listener.as_raw_fd(), libc::POLLIN),
-                (wake.as_raw_fd(), libc::POLLIN),
-            ],
-            None,
-        ) {
-            Ok(ready) => ready,
-            Err(_) => return,
-        };
-        if ready.get(1) == Some(&true) {
-            drain_wake(&mut wake);
         }
     }
 }
 
-fn handle_client(inner: Arc<Inner>, stream: std::os::unix::net::UnixStream, session_cwd: &str) {
+fn handle_client(inner: Arc<Inner>, mut stream: TaskStream, session_cwd: &str) {
     use std::io::{BufRead, BufReader};
     // macOS 上，非阻塞监听套接字 accept 出来的连接也是非阻塞的。
     // 请求行还没写到时，读会立刻返回 WouldBlock；那不是对端关掉了。
-    set_fd_blocking(stream.as_raw_fd());
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        set_fd_blocking(stream.as_raw_fd());
+    }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
+    // 空读是停机时连上来的那下，或者对端马上关掉了。没有请求可处理。
+    match reader.read_line(&mut line) {
+        Ok(0) | Err(_) => return,
+        Ok(_) => {}
     }
     let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
     // 派发连接在请求行之后还会接着登记子智能体、报进展，读请求行时多读进缓冲的那部分不能丢。
@@ -373,7 +425,7 @@ fn handle_client(inner: Arc<Inner>, stream: std::os::unix::net::UnixStream, sess
 
 /// 扩展保持这条连接。结果在任务记录里：这条连接把还没写成功的读出来，写进套接字才算送到。
 /// 对端关掉、任务结束、自己被换掉，都由这一次等待返回，不再隔一段时间醒来看。
-fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream, owner: String) {
+fn serve_listen(inner: Arc<Inner>, mut stream: TaskStream, owner: String) {
     let owner = owner.as_str();
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -400,13 +452,7 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream, o
             abandon_listener(&inner, id);
             return;
         }
-        let ready = match poll_wait(
-            &[
-                (stream.as_raw_fd(), libc::POLLIN),
-                (wake.as_raw_fd(), libc::POLLIN),
-            ],
-            None,
-        ) {
+        let ready = match poll_ready(&[&stream, &wake], None) {
             Ok(ready) => ready,
             Err(_) => {
                 end_listener(&inner, owner, id);
@@ -463,7 +509,7 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream, o
     }
 }
 
-fn register_listener(inner: &Inner, owner: &str, poke_tx: std::os::unix::net::UnixStream) -> u64 {
+fn register_listener(inner: &Inner, owner: &str, poke_tx: WakeWriter) -> u64 {
     let id = inner.next_listener.fetch_add(1, Ordering::Relaxed);
     let mut listens = inner.listen.lock().unwrap();
     let slot = listens.entry(owner.to_string()).or_insert(CurrentListen {
@@ -471,8 +517,8 @@ fn register_listener(inner: &Inner, owner: &str, poke_tx: std::os::unix::net::Un
         poke: None,
     });
     slot.id = Some(id);
-    if let Some(old) = slot.poke.replace(poke_tx) {
-        poke_stream(&old);
+    if let Some(mut old) = slot.poke.replace(poke_tx) {
+        poke_stream(&mut old);
     }
     id
 }
@@ -634,26 +680,46 @@ fn start_task(
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600));
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut command_process = Command::new(shell);
+    let mut command_process = shell_command(&command);
     command_process
-        .arg("-lc")
-        .arg(&command)
         .current_dir(&cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .env_remove("SMELT_BACKGROUND_TASK_SOCK");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command_process.process_group(0);
+        command_process
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
     }
+    #[cfg(windows)]
+    let (stdout, stderr) = {
+        use std::os::windows::process::CommandExt;
+        let (stdout, child_stdout) = smelt_sys::named_pipe::output_pipe()
+            .map_err(|error| format!("无法建立输出管道：{error}"))?;
+        let (stderr, child_stderr) = smelt_sys::named_pipe::output_pipe()
+            .map_err(|error| format!("无法建立输出管道：{error}"))?;
+        command_process
+            .stdout(Stdio::from(child_stdout))
+            .stderr(Stdio::from(child_stderr))
+            .creation_flags(
+                smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
+            );
+        (Some(stdout), Some(stderr))
+    };
     let mut child = command_process
         .spawn()
         .map_err(|error| format!("无法启动命令：{error}"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    // 子进程那端的句柄还在 `Command` 里。不关掉，子进程退出后这边读不到结束。
+    drop(command_process);
+    #[cfg(windows)]
+    if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
+        let _ = child.wait();
+        return Err(format!("无法把命令放进进程树：{error}"));
+    }
+    #[cfg(unix)]
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let pgid = child.id() as i32;
     record_task_group(&inner.root, pgid);
     state.tasks.push(LiveTask {
@@ -684,7 +750,8 @@ fn start_task(
         .name("smelt-bg-task".into())
         .spawn(move || supervise_task(task_inner, waited_id, child, stdout, stderr))
         .map_err(|error| {
-            signal_group(Some(pgid), libc::SIGKILL);
+            let _ = smelt_sys::process::signal_tree(pgid as u32, TreeSignal::Kill);
+            smelt_sys::process::release_tree(pgid as u32);
             forget_task_group(&inner.root, pgid);
             format!("无法看管后台任务：{error}")
         })?;
@@ -783,7 +850,7 @@ fn stop_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<
         ));
     }
     task.cancel = Some(BackgroundTaskStatus::Stopped);
-    interrupt_task(task, libc::SIGTERM);
+    interrupt_task(task, TreeSignal::Interrupt);
     Ok(reply(
         format!("{id} 正在停止"),
         serde_json::json!({"id": id, "status": "stopped"}),
@@ -926,12 +993,11 @@ fn deadline_loop(inner: Arc<Inner>) {
             }
         }
         for (id, pgid) in due {
-            if let Some(task) = state.tasks.iter_mut().find(|task| task.id == id)
-                && is_running(task.status)
-                && task.cancel.is_none()
-            {
-                task.cancel = Some(BackgroundTaskStatus::TimedOut);
-                signal_group(pgid, libc::SIGTERM);
+            if let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) {
+                if is_running(task.status) && task.cancel.is_none() {
+                    task.cancel = Some(BackgroundTaskStatus::TimedOut);
+                    signal_group(pgid, TreeSignal::Interrupt);
+                }
             }
         }
         state = if let Some(deadline) = next {
@@ -950,20 +1016,19 @@ fn deadline_loop(inner: Arc<Inner>) {
     }
 }
 
-/// 组长的 `wait` 写一个字节到这条管道，监督线程不用再开第二条 `waitpid`。
+/// 组长的 `wait` 结束后叫醒监督线程，监督线程不用再开第二条 `waitpid`。
 struct ExitWait {
-    wake: std::io::PipeReader,
+    wake: WakeReader,
     status_rx: std::sync::mpsc::Receiver<Option<i32>>,
 }
 
 impl ExitWait {
-    /// 管道或等待线程起不来时把子进程还回来，调用方退回「先读完再 wait」。
+    /// 唤醒或等待线程起不来时把子进程还回来，调用方退回「先读完再 wait」。
     fn start(child: Child) -> Result<Self, Child> {
-        let (wake, mut write) = match std::io::pipe() {
+        let (wake, mut write) = match wake_pair() {
             Ok(pair) => pair,
             Err(_) => return Err(child),
         };
-        set_fd_nonblocking(wake.as_raw_fd());
         let slot = Arc::new(Mutex::new(Some(child)));
         let thread_slot = Arc::clone(&slot);
         let (tx, status_rx) = std::sync::mpsc::channel();
@@ -976,7 +1041,7 @@ impl ExitWait {
                     .take()
                     .and_then(|mut child| child.wait().ok())
                     .and_then(|status| status.code());
-                let _ = write.write_all(&[1]);
+                poke_stream(&mut write);
                 drop(write);
                 let _ = tx.send(code);
             });
@@ -996,14 +1061,22 @@ fn supervise_task(
     inner: Arc<Inner>,
     id: String,
     child: Child,
-    mut stdout: Option<ChildStdout>,
-    mut stderr: Option<ChildStderr>,
+    mut stdout: Option<TaskStdout>,
+    mut stderr: Option<TaskStderr>,
 ) {
-    if let Some(pipe) = stdout.as_ref() {
-        set_fd_nonblocking(pipe.as_raw_fd());
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if let Some(pipe) = stdout.as_ref() {
+            set_fd_nonblocking(pipe.as_raw_fd());
+        }
+        if let Some(pipe) = stderr.as_ref() {
+            set_fd_nonblocking(pipe.as_raw_fd());
+        }
     }
-    if let Some(pipe) = stderr.as_ref() {
-        set_fd_nonblocking(pipe.as_raw_fd());
+    #[cfg(windows)]
+    for pipe in [stdout.as_ref(), stderr.as_ref()].into_iter().flatten() {
+        let _ = pipe.set_nonblocking(true);
     }
     let log_path = {
         let state = inner.mu.lock().unwrap();
@@ -1025,12 +1098,12 @@ fn supervise_task(
     };
     let exit_code = match ExitWait::start(child) {
         Ok(wait) => {
-            let leader_exited = watch_output(&inner, &id, &mut output, Some(wait.wake.as_raw_fd()));
+            let leader_exited = watch_output(&inner, &id, &mut output, Some(&wait.wake));
             if leader_exited {
                 let wrote = take_available(output.stdout, output.log, output.total)
                     || take_available(output.stderr, output.log, output.total);
                 if !*output.capped && *output.total > LOG_CAP {
-                    mark_cancel(&inner, &id, BackgroundTaskStatus::Failed, libc::SIGKILL);
+                    mark_cancel(&inner, &id, BackgroundTaskStatus::Failed, TreeSignal::Kill);
                 }
                 if wrote {
                     note_output(&inner);
@@ -1043,8 +1116,11 @@ fn supervise_task(
         }
         Err(mut child) => {
             // 连唤醒管道都建不出来时，不再读到管道关闭才 wait，那样会又被孙进程拖住。
-            signal_group(Some(child.id() as i32), libc::SIGKILL);
-            child.wait().ok().and_then(|status| status.code())
+            let pid = child.id();
+            let _ = smelt_sys::process::signal_tree(pid, TreeSignal::Kill);
+            let code = child.wait().ok().and_then(|status| status.code());
+            smelt_sys::process::release_tree(pid);
+            code
         }
     };
     if let Some(file) = log.as_mut() {
@@ -1069,44 +1145,67 @@ fn supervise_task(
 }
 
 struct LiveOutput<'a> {
-    stdout: &'a mut Option<ChildStdout>,
-    stderr: &'a mut Option<ChildStderr>,
+    stdout: &'a mut Option<TaskStdout>,
+    stderr: &'a mut Option<TaskStderr>,
     log: &'a mut Option<File>,
     total: &'a mut u64,
     capped: &'a mut bool,
 }
 
 /// 读到组长退出的唤醒就返回 true。管道先关则返回 false，调用方仍等同一条 wait。
-fn watch_output(inner: &Inner, id: &str, output: &mut LiveOutput<'_>, wake: Option<RawFd>) -> bool {
+fn watch_output(
+    inner: &Inner,
+    id: &str,
+    output: &mut LiveOutput<'_>,
+    wake: Option<&WakeReader>,
+) -> bool {
     loop {
         if output.stdout.is_none() && output.stderr.is_none() && wake.is_none() {
             return false;
         }
-        let mut fds = Vec::new();
-        let stdout_at = output.stdout.as_ref().map(|pipe| {
-            fds.push((pipe.as_raw_fd(), libc::POLLIN));
-            fds.len() - 1
-        });
-        let stderr_at = output.stderr.as_ref().map(|pipe| {
-            fds.push((pipe.as_raw_fd(), libc::POLLIN));
-            fds.len() - 1
-        });
-        let wake_at = wake.map(|fd| {
-            fds.push((fd, libc::POLLIN));
-            fds.len() - 1
-        });
-        if fds.is_empty() {
-            return false;
-        }
-        let ready = match poll_wait(&fds, None) {
-            Ok(ready) => ready,
-            Err(_) => return false,
+        let has_stdout = output.stdout.is_some();
+        let has_stderr = output.stderr.is_some();
+        let has_wake = wake.is_some();
+        let ready = {
+            let mut sources: Vec<&dyn PollSource> = Vec::new();
+            if let Some(pipe) = output.stdout.as_ref() {
+                sources.push(pipe);
+            }
+            if let Some(pipe) = output.stderr.as_ref() {
+                sources.push(pipe);
+            }
+            if let Some(pipe) = wake {
+                sources.push(pipe);
+            }
+            if sources.is_empty() {
+                return false;
+            }
+            match poll_ready(&sources, None) {
+                Ok(ready) => ready,
+                Err(_) => return false,
+            }
         };
+        let mut index = 0;
+        let stdout_at = has_stdout.then(|| {
+            let at = index;
+            index += 1;
+            at
+        });
+        let stderr_at = has_stderr.then(|| {
+            let at = index;
+            index += 1;
+            at
+        });
+        let wake_at = has_wake.then(|| {
+            let at = index;
+            index += 1;
+            at
+        });
         let wrote = consume_ready(output.stdout, stdout_at, &ready, output.log, output.total)
             || consume_ready(output.stderr, stderr_at, &ready, output.log, output.total);
         if !*output.capped && *output.total > LOG_CAP {
             *output.capped = true;
-            mark_cancel(inner, id, BackgroundTaskStatus::Failed, libc::SIGKILL);
+            mark_cancel(inner, id, BackgroundTaskStatus::Failed, TreeSignal::Kill);
         }
         if wrote {
             note_output(inner);
@@ -1178,7 +1277,7 @@ fn drain_pipe(
     }
 }
 
-fn mark_cancel(inner: &Inner, id: &str, status: BackgroundTaskStatus, signal: i32) {
+fn mark_cancel(inner: &Inner, id: &str, status: BackgroundTaskStatus, signal: TreeSignal) {
     let pgid = {
         let mut state = inner.mu.lock().unwrap();
         let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) else {
@@ -1242,11 +1341,7 @@ fn wait_timeout(request: &serde_json::Value) -> Option<Duration> {
 }
 
 /// 守到这些任务结束，或期限到了，或对端把连接关掉。期限是这一次等待的上限。
-fn serve_wait_until(
-    inner: Arc<Inner>,
-    mut stream: std::os::unix::net::UnixStream,
-    request: &serde_json::Value,
-) {
+fn serve_wait_until(inner: Arc<Inner>, mut stream: TaskStream, request: &serde_json::Value) {
     let Some(timeout) = wait_timeout(request) else {
         return;
     };
@@ -1266,8 +1361,8 @@ fn serve_wait_until(
     let Ok((mut wake, poke_tx)) = wake_pair() else {
         return;
     };
-    let poke_fd = poke_tx.as_raw_fd();
-    inner.pokes.lock().unwrap().waits.push(poke_tx);
+    let poke_id = inner.next_wait.fetch_add(1, Ordering::Relaxed);
+    inner.pokes.lock().unwrap().waits.push((poke_id, poke_tx));
     let outcome = loop {
         if inner.stop.load(Ordering::SeqCst) {
             break None;
@@ -1287,13 +1382,7 @@ fn serve_wait_until(
             let state = inner.mu.lock().unwrap();
             break Some(wait_reply(&state, owner, &ids).map(|(_done, body)| body));
         }
-        let ready = match poll_wait(
-            &[
-                (stream.as_raw_fd(), libc::POLLIN),
-                (wake.as_raw_fd(), libc::POLLIN),
-            ],
-            Some(remaining),
-        ) {
+        let ready = match poll_ready(&[&stream, &wake], Some(remaining)) {
             Ok(ready) => ready,
             Err(_) => break None,
         };
@@ -1314,7 +1403,7 @@ fn serve_wait_until(
     };
     {
         let mut pokes = inner.pokes.lock().unwrap();
-        pokes.waits.retain(|waiting| waiting.as_raw_fd() != poke_fd);
+        pokes.waits.retain(|(id, _)| *id != poke_id);
     }
     match outcome {
         Some(Ok(body)) => {
@@ -1389,7 +1478,7 @@ fn write_ready(
     inner: &Inner,
     owner: &str,
     listener_id: u64,
-    stream: &mut std::os::unix::net::UnixStream,
+    stream: &mut TaskStream,
 ) -> std::io::Result<()> {
     loop {
         if !is_current(inner, owner, listener_id) {
@@ -1531,47 +1620,119 @@ fn publish_locked(state: &State, events: &smol::channel::Sender<ConversationEven
     let _ = events.try_send(ConversationEvent::BackgroundTasks(views));
 }
 
-fn wake_pair() -> std::io::Result<(
-    std::os::unix::net::UnixStream,
-    std::os::unix::net::UnixStream,
-)> {
-    let (read, write) = std::os::unix::net::UnixStream::pair()?;
-    read.set_nonblocking(true)?;
-    write.set_nonblocking(true)?;
-    Ok((read, write))
+fn wake_pair() -> std::io::Result<(WakeReader, WakeWriter)> {
+    #[cfg(unix)]
+    {
+        let (read, write) = std::os::unix::net::UnixStream::pair()?;
+        read.set_nonblocking(true)?;
+        write.set_nonblocking(true)?;
+        Ok((read, write))
+    }
+    #[cfg(windows)]
+    {
+        let event = smelt_sys::named_pipe::WakeEvent::new()?;
+        Ok((event.clone(), event))
+    }
 }
 
-fn poke_stream(stream: &std::os::unix::net::UnixStream) {
-    let byte = [1u8];
-    let _ = unsafe { libc::write(stream.as_raw_fd(), byte.as_ptr().cast(), 1) };
+fn poke_stream(stream: &mut WakeWriter) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let byte = [1u8];
+        let _ = unsafe { libc::write(stream.as_raw_fd(), byte.as_ptr().cast(), 1) };
+    }
+    #[cfg(windows)]
+    {
+        stream.set();
+    }
 }
 
 fn poke(inner: &Inner) {
-    for slot in inner.listen.lock().unwrap().values() {
-        if let Some(stream) = slot.poke.as_ref() {
+    for slot in inner.listen.lock().unwrap().values_mut() {
+        if let Some(stream) = slot.poke.as_mut() {
             poke_stream(stream);
         }
     }
-    let pokes = inner.pokes.lock().unwrap();
-    if let Some(stream) = pokes.accept.as_ref() {
+    let mut pokes = inner.pokes.lock().unwrap();
+    if let Some(stream) = pokes.accept.as_mut() {
         poke_stream(stream);
     }
-    for stream in &pokes.waits {
+    for (_, stream) in &mut pokes.waits {
         poke_stream(stream);
+    }
+    #[cfg(windows)]
+    if inner.stop.load(Ordering::SeqCst) {
+        let name = inner.socket_path.to_string_lossy();
+        let _ = smelt_sys::named_pipe::PipeStream::connect(name.as_ref());
     }
 }
 
-fn drain_wake(stream: &mut std::os::unix::net::UnixStream) {
-    let mut buf = [0u8; 64];
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => continue,
+fn drain_wake(stream: &mut WakeReader) {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 64];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
         }
     }
+    #[cfg(windows)]
+    {
+        stream.reset();
+    }
 }
 
-fn poll_wait(fds: &[(RawFd, i16)], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
+fn poll_ready(sources: &[&dyn PollSource], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
+    #[cfg(unix)]
+    {
+        let fds: Vec<(std::os::fd::RawFd, i16)> = sources
+            .iter()
+            .map(|source| (source.poll_fd(), libc::POLLIN))
+            .collect();
+        poll_wait(&fds, timeout)
+    }
+    #[cfg(windows)]
+    {
+        poll_handles(sources, timeout)
+    }
+}
+
+#[cfg(unix)]
+trait PollSource {
+    fn poll_fd(&self) -> std::os::fd::RawFd;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd + ?Sized> PollSource for T {
+    fn poll_fd(&self) -> std::os::fd::RawFd {
+        self.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+trait PollSource {
+    fn waitable(&self) -> smelt_sys::named_pipe::Waitable<'_>;
+}
+
+#[cfg(windows)]
+impl PollSource for smelt_sys::named_pipe::PipeStream {
+    fn waitable(&self) -> smelt_sys::named_pipe::Waitable<'_> {
+        smelt_sys::named_pipe::Waitable::Pipe(self)
+    }
+}
+
+#[cfg(windows)]
+impl PollSource for smelt_sys::named_pipe::WakeEvent {
+    fn waitable(&self) -> smelt_sys::named_pipe::Waitable<'_> {
+        smelt_sys::named_pipe::Waitable::Event(self)
+    }
+}
+
+#[cfg(unix)]
+fn poll_wait(fds: &[(std::os::fd::RawFd, i16)], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
     if fds.is_empty() {
         return Ok(Vec::new());
     }
@@ -1607,15 +1768,24 @@ fn poll_wait(fds: &[(RawFd, i16)], timeout: Option<Duration>) -> std::io::Result
         .collect())
 }
 
-fn set_fd_nonblocking(fd: RawFd) {
+#[cfg(windows)]
+fn poll_handles(sources: &[&dyn PollSource], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
+    let waitables: Vec<_> = sources.iter().map(|source| source.waitable()).collect();
+    smelt_sys::named_pipe::wait_readable(&waitables, timeout)
+}
+
+#[cfg(unix)]
+fn set_fd_nonblocking(fd: std::os::fd::RawFd) {
     set_fd_flag(fd, libc::O_NONBLOCK, true);
 }
 
-fn set_fd_blocking(fd: RawFd) {
+#[cfg(unix)]
+fn set_fd_blocking(fd: std::os::fd::RawFd) {
     set_fd_flag(fd, libc::O_NONBLOCK, false);
 }
 
-fn set_fd_flag(fd: RawFd, flag: i32, on: bool) {
+#[cfg(unix)]
+fn set_fd_flag(fd: std::os::fd::RawFd, flag: i32, on: bool) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         if flags < 0 {
@@ -1625,6 +1795,62 @@ fn set_fd_flag(fd: RawFd, flag: i32, on: bool) {
         if next != flags {
             libc::fcntl(fd, libc::F_SETFL, next);
         }
+    }
+}
+
+fn bind_control_listener(socket_path: &Path) -> Result<TaskListener, String> {
+    #[cfg(unix)]
+    {
+        let listener = std::os::unix::net::UnixListener::bind(socket_path)
+            .map_err(|error| format!("无法监听后台任务套接字：{error}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("无法设置后台任务套接字：{error}"))?;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600));
+        Ok(listener)
+    }
+    #[cfg(windows)]
+    {
+        let name = socket_path
+            .to_str()
+            .ok_or_else(|| "后台任务管道名不是 Unicode".to_string())?;
+        smelt_sys::named_pipe::PipeListener::bind(name)
+            .map_err(|error| format!("无法监听后台任务管道：{error}"))
+    }
+}
+
+fn shell_command(command: &str) -> Command {
+    #[cfg(unix)]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let mut command_process = Command::new(shell);
+        command_process.arg("-lc").arg(command);
+        command_process
+    }
+    #[cfg(windows)]
+    {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut command_process = Command::new(shell);
+        command_process.arg("/d").arg("/c").arg(command);
+        command_process
+    }
+}
+
+pub(crate) fn connect_task_stream(path: &Path) -> std::io::Result<TaskStream> {
+    #[cfg(unix)]
+    {
+        TaskStream::connect(path)
+    }
+    #[cfg(windows)]
+    {
+        let name = path.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "后台任务管道名不是 Unicode",
+            )
+        })?;
+        TaskStream::connect(name)
     }
 }
 
@@ -1647,7 +1873,15 @@ fn forget_task_group(root: &Path, pgid: i32) {
 }
 
 /// 宿主进程已经不在了。扫临时目录里属于它的任务目录，按记录杀掉还在的进程组。
+/// Windows 上进程死掉会关掉 Job，`KILL_ON_JOB_CLOSE` 收掉整棵树，这里不用再扫。
 pub fn reap_orphaned_task_groups(host_pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = host_pid;
+        return;
+    }
+    #[cfg(unix)]
+    {
     if host_pid == 0 {
         return;
     }
@@ -1663,6 +1897,7 @@ pub fn reap_orphaned_task_groups(host_pid: u32) {
         }
         reap_group_records(&entry.path());
     }
+    }
 }
 
 fn task_dir_host_pid(name: &str) -> Option<u32> {
@@ -1673,6 +1908,7 @@ fn task_dir_host_pid(name: &str) -> Option<u32> {
     pid.parse().ok()
 }
 
+#[cfg(unix)]
 fn reap_group_records(root: &Path) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -1688,12 +1924,13 @@ fn reap_group_records(root: &Path) {
             continue;
         };
         if group_record_matches(&entry.path(), pgid) {
-            signal_group(Some(pgid), libc::SIGKILL);
+            signal_group(Some(pgid), TreeSignal::Kill);
         }
         let _ = fs::remove_file(entry.path());
     }
 }
 
+#[cfg(unix)]
 fn group_record_matches(path: &Path, pgid: i32) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
@@ -1701,29 +1938,39 @@ fn group_record_matches(path: &Path, pgid: i32) -> bool {
     crate::acp_conn::process_birth(pgid).is_some_and(|live| live == text.trim())
 }
 
-/// 叫一个任务停下：给它的整个进程组发信号。
-fn interrupt_task(task: &LiveTask, signal: i32) {
+/// 叫一个任务停下。Unix 打到进程组，Windows 结束已登记的 Job。
+fn interrupt_task(task: &LiveTask, signal: TreeSignal) {
     signal_group(task.pgid, signal);
 }
 
-fn signal_group(pgid: Option<i32>, signal: i32) {
+fn signal_group(pgid: Option<i32>, signal: TreeSignal) {
     let Some(pgid) = pgid.filter(|pgid| *pgid > 0) else {
         return;
     };
-    unsafe {
-        libc::kill(-pgid, signal);
-    }
+    let _ = smelt_sys::process::signal_tree(pgid as u32, signal);
 }
 
-/// 组长已经 `wait` 过。这个号若又指着一个活进程，就是被系统拿去复用了，不能整组杀。
+/// 组长已经 `wait` 过。Unix 上这个号若又指着一个活进程，就是被系统拿去复用了，不能整组杀。
 /// 号已经空着时，同组里没跟着退出的进程还挂在这个组号上。
+/// Windows 放掉 Job，`KILL_ON_JOB_CLOSE` 收掉还活着的后代。
 fn kill_leftovers(pgid: i32) {
-    if pgid <= 1 || process_alive(pgid) {
+    if pgid <= 1 {
         return;
     }
-    signal_group(Some(pgid), libc::SIGKILL);
+    #[cfg(unix)]
+    {
+        if process_alive(pgid) {
+            return;
+        }
+        signal_group(Some(pgid), TreeSignal::Kill);
+    }
+    #[cfg(windows)]
+    {
+        smelt_sys::process::release_tree(pgid as u32);
+    }
 }
 
+#[cfg(unix)]
 fn process_alive(pid: i32) -> bool {
     if pid <= 1 {
         return false;
@@ -1851,7 +2098,7 @@ fn end_owner(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<
             task.delivering_to = None;
             if is_running(task.status) && task.cancel.is_none() {
                 task.cancel = Some(BackgroundTaskStatus::Stopped);
-                interrupt_task(task, libc::SIGTERM);
+                interrupt_task(task, TreeSignal::Interrupt);
                 stopped += 1;
             }
         }
@@ -1861,7 +2108,7 @@ fn end_owner(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<
         let mut listens = inner.listen.lock().unwrap();
         listens.retain(|listen_owner, slot| {
             let ended = owns(&target, listen_owner);
-            if ended && let Some(stream) = slot.poke.as_ref() {
+            if ended && let Some(stream) = slot.poke.as_mut() {
                 poke_stream(stream);
             }
             !ended
@@ -1923,13 +2170,26 @@ fn resolve_cwd(requested: Option<&str>, session_cwd: &str) -> Result<String, Str
 }
 
 /// 日志目录可以很长，套接字不行。文件名只带 pid 和序号，放在临时目录根上。
+/// Windows 上扩展用 `net.connect` 连的是命名管道，路径就是 `\\.\pipe\...`。
 fn control_socket_path(temp: PathBuf, pid: u32, nonce: u64) -> PathBuf {
-    let name = format!("smbg-{pid}-{nonce}.sock");
-    let in_temp = temp.join(&name);
-    if in_temp.as_os_str().len() <= MAX_UNIX_SOCKET_PATH {
-        return in_temp;
+    #[cfg(unix)]
+    {
+        let name = format!("smbg-{pid}-{nonce}.sock");
+        let in_temp = temp.join(&name);
+        if in_temp.as_os_str().len() <= MAX_UNIX_SOCKET_PATH {
+            return in_temp;
+        }
+        PathBuf::from("/tmp").join(name)
     }
-    PathBuf::from("/tmp").join(name)
+    #[cfg(windows)]
+    {
+        let _ = temp;
+        let tag = format!("bg-{pid}-{nonce}");
+        PathBuf::from(
+            smelt_sys::named_pipe::user_pipe_path(&tag)
+                .unwrap_or_else(|_| format!(r"\\.\pipe\smelt-bg-{pid}-{nonce}")),
+        )
+    }
 }
 
 fn safe_component(value: &str) -> String {
@@ -1955,7 +2215,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixStream;
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt as _;
 
     fn supervisor() -> (
@@ -1979,7 +2239,7 @@ mod tests {
     }
 
     struct Listen {
-        reader: std::io::BufReader<UnixStream>,
+        reader: std::io::BufReader<TaskStream>,
     }
 
     impl Listen {
@@ -1989,7 +2249,7 @@ mod tests {
 
         /// 以某个归属连上监听。空串是会话本身。
         fn connect_as(path: &Path, owner: &str) -> Self {
-            let stream = UnixStream::connect(path).unwrap();
+            let mut stream = connect_task_stream(path).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -2035,7 +2295,10 @@ mod tests {
         }
 
         fn shutdown(&self) {
-            let _ = self.reader.get_ref().shutdown(std::net::Shutdown::Both);
+            #[cfg(unix)]
+            {
+                let _ = self.reader.get_ref().shutdown(std::net::Shutdown::Both);
+            }
         }
 
         /// 扩展看到 Pi 把这条结果交给了模型。
@@ -2063,6 +2326,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn wait_until_group_gone(pgid: i32) -> bool {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(1) {
@@ -2094,8 +2358,28 @@ mod tests {
         }
     }
 
+    /// 打印且不加换行。Windows 的 `cmd` 没有 `printf`。
+    /// `set /p` 读到文件尾时退出码是 1，用管道送一行也一样，任务会被记成失败。
+    /// 打完之后执行 `exit /b 0`，退出码才是 0，输出仍没有换行。
+    fn print_text(text: &str) -> String {
+        if cfg!(windows) {
+            format!("set /p={text}<nul&exit /b 0")
+        } else {
+            format!("printf {text}")
+        }
+    }
+
+    /// 停住一段时间。Windows 上 `ping` 的次数比秒数多 1，大约就是这段时间。
+    fn sleep_for(seconds: u32) -> String {
+        if cfg!(windows) {
+            format!("ping -n {} 127.0.0.1 >nul", seconds.saturating_add(1))
+        } else {
+            format!("sleep {seconds}")
+        }
+    }
+
     fn call(path: &Path, request: serde_json::Value) -> serde_json::Value {
-        let mut stream = UnixStream::connect(path).unwrap();
+        let mut stream = connect_task_stream(path).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -2116,7 +2400,7 @@ mod tests {
 
         let started = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf child", "title": "子任务", "owner": "/sub-a"}),
+            serde_json::json!({"op": "start", "command": print_text("child"), "title": "子任务", "owner": "/sub-a"}),
         );
         let child_task = started["id"].as_str().unwrap().to_string();
         until_settled_as(&path, "/sub-a", &child_task);
@@ -2126,7 +2410,7 @@ mod tests {
 
         let mine = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf session", "title": "会话任务"}),
+            serde_json::json!({"op": "start", "command": print_text("session"), "title": "会话任务"}),
         );
         let session_task = mine["id"].as_str().unwrap().to_string();
         until_settled(&path, &session_task);
@@ -2163,7 +2447,7 @@ mod tests {
         let start = |owner: &str| {
             call(
                 &path,
-                serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待", "owner": owner}),
+                serde_json::json!({"op": "start", "command": sleep_for(30), "title": "等待", "owner": owner}),
             )["id"]
                 .as_str()
                 .unwrap()
@@ -2209,6 +2493,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn control_socket_stays_within_sun_path_on_a_long_macos_temp_dir() {
         let temp = PathBuf::from("/var/folders/0y/st66nkz547z4jtx7c5mjsf3r0000gq/T");
@@ -2230,7 +2515,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true);
@@ -2257,7 +2542,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "等待"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2270,12 +2555,13 @@ mod tests {
         assert_eq!(finished["tasks"][0]["status"], "stopped", "{finished}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_dead_process_ends_the_wait_without_timing_out() {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "会被杀掉"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "会被杀掉"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2287,6 +2573,7 @@ mod tests {
         assert_ne!(finished["tasks"][0]["status"], "running", "{finished}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_grandchild_holding_the_pipe_does_not_keep_the_task_running() {
         let (supervisor, _events) = supervisor();
@@ -2322,6 +2609,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn host_death_reaps_a_group_only_when_the_start_time_matches() {
         let host_pid: u32 = u32::MAX - 7;
@@ -2405,7 +2693,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "还在跑"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "还在跑"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2423,7 +2711,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2443,7 +2731,7 @@ mod tests {
         let (supervisor, _events) = supervisor();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "还在跑"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "还在跑"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2468,7 +2756,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "sleep 30",
+                "command": sleep_for(30),
                 "title": "到点停止",
                 "timeoutSeconds": 1,
             }),
@@ -2484,7 +2772,7 @@ mod tests {
         let (supervisor, _events, outbound) = supervisor_with_outbound();
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2511,7 +2799,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "printf ready",
+                "command": print_text("ready"),
                 "title": "打印",
                 "watch": true,
             }),
@@ -2539,7 +2827,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "printf ready",
+                "command": print_text("ready"),
                 "title": "打印",
                 "watch": true,
             }),
@@ -2565,7 +2853,7 @@ mod tests {
         let mut listen = Listen::connect(supervisor.socket_path());
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待"}),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "等待"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2589,7 +2877,7 @@ mod tests {
         let mut listen = Listen::connect(supervisor.socket_path());
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2615,7 +2903,7 @@ mod tests {
         let mut second = Listen::connect(supervisor.socket_path());
         let started = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
@@ -2643,7 +2931,7 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({
                 "op": "start",
-                "command": "printf ready",
+                "command": print_text("ready"),
                 "title": "打印",
                 "watch": true,
             }),
@@ -2684,7 +2972,7 @@ mod tests {
     /// id 就会悄悄指到新宿主的同号任务上。随机 id 让旧 id 对不上任何任务、明确报错。
     #[test]
     fn task_ids_do_not_repeat_across_host_instances() {
-        let start = serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"});
+        let start = serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"});
         let (before_restart, _first_events) = supervisor();
         let (after_restart, _second_events) = supervisor();
         let old = call(before_restart.socket_path(), start.clone());
@@ -2709,7 +2997,7 @@ mod tests {
                 supervisor.socket_path(),
                 serde_json::json!({
                     "op": "start",
-                    "command": format!("printf {index}"),
+                    "command": print_text(&index.to_string()),
                     "title": "打印",
                 }),
             );
@@ -2727,7 +3015,7 @@ mod tests {
         assert_eq!(got, ids, "没写成功的结果不能因为条数被丢掉");
     }
 
-    fn send_line(reader: &mut std::io::BufReader<UnixStream>, value: serde_json::Value) {
+    fn send_line(reader: &mut std::io::BufReader<TaskStream>, value: serde_json::Value) {
         reader
             .get_mut()
             .write_all(format!("{value}\n").as_bytes())
@@ -2759,7 +3047,7 @@ mod tests {
         let mut before_fork = Listen::connect(&path);
         let started = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap().to_string();
         until_settled(&path, &id);
@@ -2792,7 +3080,7 @@ mod tests {
         let mut listen = Listen::connect(&path);
         let started = call(
             &path,
-            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"}),
         );
         let id = started["id"].as_str().unwrap().to_string();
         until_settled(&path, &id);
@@ -2815,8 +3103,8 @@ mod tests {
 
 
     /// 开一条派发连接，返回读写端。
-    fn dispatch(path: &Path, tool_call_id: &str, background: bool) -> std::io::BufReader<UnixStream> {
-        let stream = UnixStream::connect(path).unwrap();
+    fn dispatch(path: &Path, tool_call_id: &str, background: bool) -> std::io::BufReader<TaskStream> {
+        let mut stream = connect_task_stream(path).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -2835,7 +3123,7 @@ mod tests {
         reader
     }
 
-    fn read_json(reader: &mut std::io::BufReader<UnixStream>) -> serde_json::Value {
+    fn read_json(reader: &mut std::io::BufReader<TaskStream>) -> serde_json::Value {
         let mut line = String::new();
         std::io::BufRead::read_line(reader, &mut line).unwrap();
         serde_json::from_str(line.trim()).unwrap()
@@ -2843,7 +3131,7 @@ mod tests {
 
     /// 在派发连接上登记一个子智能体，返回宿主分的 id 和子会话文件。
     fn start_subagent(
-        conn: &mut std::io::BufReader<UnixStream>,
+        conn: &mut std::io::BufReader<TaskStream>,
         reference: u64,
         title: &str,
     ) -> (String, String) {

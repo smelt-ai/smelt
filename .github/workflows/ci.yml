@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # 按改动路径决定跑哪些 job。只改文档时三个都跳过，由 ci-ok 汇总成通过。
+  # 按改动路径决定跑哪些 job。只改文档时全部跳过，由 ci-ok 汇总成通过。
   # 手动触发（workflow_dispatch）时全部跑。
   changes:
     runs-on: ubuntu-latest
@@ -118,6 +118,39 @@ jobs:
             not test(damage_gate_tests)
             and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
           '
+
+  # Windows 本机运行时（docs/windows-support.md）：桌面、smeltd 和它们的依赖
+  # 在 windows-latest 上原生编译、跑测试。Unix 专用测试用 cfg 跳过。
+  windows:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 只读不写：仓库缓存上限 10GB，main 上 macOS 那份已经 2GB+。转为必需检查时再决定
+      # 要不要在 main 上存一份 Windows 的。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      # --keep-going：一个 crate 编不过时继续编不依赖它的那些，一次拿到尽量全的报错。
+      - name: Check local runtime
+        run: cargo check --all-targets --keep-going -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-cli -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
+
+      - name: Install cargo-nextest
+        if: ${{ !cancelled() }}
+        uses: taiki-e/install-action@nextest
+
+      # 本机运行时这条链在 Windows 上换了实现，单测在这里真跑一遍。
+      - name: Run tests
+        if: ${{ !cancelled() }}
+        run: cargo nextest run -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-cli -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
 
   mobile:
     needs: changes
@@ -219,7 +252,7 @@ jobs:
   # 就失败。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, rust, mobile, android-build]
+    needs: [changes, rust, mobile, android-build, windows]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize

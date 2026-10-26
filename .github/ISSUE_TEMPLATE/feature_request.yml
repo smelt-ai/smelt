@@ -1,12 +1,24 @@
 name: "💡 功能建议"
 description: 提一个 smelt 的新功能或改进想法
 title: "[Feature] "
-labels: ["enhancement"]
+labels: ["enhancement", "needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
         欢迎提想法！尽量说清楚想解决的具体场景，方便评估。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及端 / 模块
+      description: 选最接近的一端，方便判断改动范围。不确定可以留空。
+      options:
+        - 全平台 / 通用
+        - 桌面端 (macOS / Windows / Linux)
+        - 守护进程与智能体运行时 (smeltd / Pi / ACP)
+        - 移动端 (Android / iOS)
+    validations:
+      required: false
   - type: textarea
     id: problem
     attributes:

@@ -1,6 +1,7 @@
 //! `smelt agent …`：产品智能体定义的 CLI。
 //!
-//! 无子命令时仍启动 GUI。这里只拦截明确的控制命令，一律经 smeltd 的 Control API
+//! GUI 的 `smelt` 和控制台的 `smelt-cli` 启动时都先交给 [`maybe_run`]，没有子命令时由
+//! 它们各自去开窗口。这里只拦截明确的控制命令，一律经 smeltd 的 Control API
 //! 读写：库只有运行时一个写入者，CLI 不绕过它。smeltd 没在跑时直接报错。
 
 use smelt_model::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};

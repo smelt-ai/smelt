@@ -8,15 +8,22 @@
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use crate::daemon_image::{MappedState, content_fingerprint, probe_image_mapped};
 
-/// 启动链接名，也是目录里可执行文件的名字。
+/// 启动链接名。目录里的可执行文件在 Windows 上是 `smelt-pi.exe`，见 [`binary_file_name`]。
 pub const LAUNCH_NAME: &str = "smelt-pi";
+
+pub fn binary_file_name() -> &'static str {
+    if cfg!(windows) {
+        "smelt-pi.exe"
+    } else {
+        LAUNCH_NAME
+    }
+}
 const WASM_NAME: &str = "photon_rs_bg.wasm";
 const NATIVE_DIR: &str = "native";
 /// 内置技能目录。只在智能体勾选时用 `--skill` 传给 Pi，不在 Pi 的自动发现路径上。
@@ -36,20 +43,33 @@ pub fn publish(dir: &Path, src_dir: &Path) -> io::Result<PathBuf> {
         publish_tree(dir, src_dir, &files, &name)?;
     }
     retarget(dir, &name)?;
-    Ok(target.join(LAUNCH_NAME))
+    Ok(target.join(binary_file_name()))
 }
 
 /// `dir/smelt-pi` 现在指向的、能执行的那份，解析成真实路径。链接缺了、指空了都是 `None`。
 /// 拿真实路径去 exec：之后链接拨到新版本，已经起来的 Pi 还在原来的目录里。
 pub fn current(dir: &Path) -> Option<PathBuf> {
-    let executable = fs::canonicalize(dir.join(LAUNCH_NAME)).ok()?;
-    let meta = fs::metadata(&executable).ok()?;
-    (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(executable)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let executable = fs::canonicalize(dir.join(LAUNCH_NAME)).ok()?;
+        let meta = fs::metadata(&executable).ok()?;
+        (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(executable)
+    }
+    #[cfg(windows)]
+    {
+        read_pi_pointer(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// `src_dir` 里有没有一整套可以发布的 smelt-pi（不跟符号链接）。
 pub fn bundled(src_dir: &Path) -> bool {
-    fs::symlink_metadata(src_dir.join(LAUNCH_NAME)).is_ok_and(|meta| meta.is_file())
+    fs::symlink_metadata(src_dir.join(binary_file_name())).is_ok_and(|meta| meta.is_file())
 }
 
 /// 删掉启动链接没指向、里面的 smelt-pi 也证明没人映射的旧目录。证明不了就留下。
@@ -58,12 +78,7 @@ pub fn reap_unused(dir: &Path) -> io::Result<()> {
 }
 
 fn reap_unused_with(dir: &Path, mut probe: impl FnMut(&Path) -> MappedState) -> io::Result<()> {
-    let current = fs::read_link(dir.join(LAUNCH_NAME)).ok().and_then(|target| {
-        target
-            .components()
-            .next()
-            .and_then(|first| first.as_os_str().to_str().map(str::to_string))
-    });
+    let current = current_dir_name(dir);
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -81,7 +96,7 @@ fn reap_unused_with(dir: &Path, mut probe: impl FnMut(&Path) -> MappedState) -> 
         if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
             continue;
         }
-        let binary = path.join(LAUNCH_NAME);
+        let binary = path.join(binary_file_name());
         if fs::symlink_metadata(&binary).is_ok_and(|meta| meta.is_file())
             && probe(&binary) != MappedState::Unused
         {
@@ -113,7 +128,7 @@ fn is_published_dir_name(name: &str) -> bool {
 /// 符号链接一律不跟。
 fn bundle_files(src_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for required in [LAUNCH_NAME, WASM_NAME] {
+    for required in [binary_file_name(), WASM_NAME] {
         if !fs::symlink_metadata(src_dir.join(required)).is_ok_and(|meta| meta.is_file()) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -172,9 +187,28 @@ fn publish_tree(dir: &Path, src_dir: &Path, files: &[PathBuf], name: &str) -> io
                 fs::create_dir_all(parent)?;
             }
             fs::copy(src_dir.join(relative), &dest)?;
-            fs::File::open(&dest)?.sync_all()?;
+            // Windows 的 FlushFileBuffers 要求写权限。只读打开会返回拒绝访问。
+            #[cfg(windows)]
+            {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&dest)?
+                    .sync_all()?;
+            }
+            #[cfg(not(windows))]
+            {
+                fs::File::open(&dest)?.sync_all()?;
+            }
         }
-        fs::set_permissions(staging.join(LAUNCH_NAME), fs::Permissions::from_mode(0o755))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(
+                staging.join(binary_file_name()),
+                fs::Permissions::from_mode(0o755),
+            )?;
+        }
         fs::rename(&staging, dir.join(name))
     })();
     if let Err(error) = result {
@@ -189,9 +223,19 @@ fn publish_tree(dir: &Path, src_dir: &Path, files: &[PathBuf], name: &str) -> io
 
 /// 原子地把 `dir/smelt-pi` 指向 `<name>/smelt-pi`。链接只写相对路径。
 fn retarget(dir: &Path, name: &str) -> io::Result<()> {
+    let relative = format!("{name}/{}", binary_file_name());
+    #[cfg(unix)]
     let link = dir.join(LAUNCH_NAME);
-    let target = Path::new(name).join(LAUNCH_NAME);
-    if fs::read_link(&link).is_ok_and(|current| current == target) {
+    #[cfg(windows)]
+    let link = dir.join("smelt-pi.current");
+    #[cfg(not(any(unix, windows)))]
+    let link = dir.join(LAUNCH_NAME);
+    #[cfg(unix)]
+    if fs::read_link(&link).is_ok_and(|current| current == Path::new(&relative)) {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if read_pi_pointer(dir).is_some_and(|path| path.ends_with(Path::new(&relative))) {
         return Ok(());
     }
     let tmp = dir.join(format!(
@@ -199,12 +243,81 @@ fn retarget(dir: &Path, name: &str) -> io::Result<()> {
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    std::os::unix::fs::symlink(&target, &tmp)?;
+    let written = (|| {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(relative, &tmp)
+        }
+        #[cfg(windows)]
+        {
+            fs::write(&tmp, format!("smelt-image-v1\n{relative}\n"))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = &relative;
+            Err(io::Error::new(io::ErrorKind::Unsupported, "不能发布 smelt-pi"))
+        }
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
     if let Err(error) = fs::rename(&tmp, &link) {
         let _ = fs::remove_file(&tmp);
         return Err(error);
     }
     Ok(())
+}
+
+fn current_dir_name(dir: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        fs::read_link(dir.join(LAUNCH_NAME))
+            .ok()
+            .and_then(|target| {
+                target
+                    .components()
+                    .next()
+                    .and_then(|first| first.as_os_str().to_str().map(str::to_string))
+            })
+    }
+    #[cfg(windows)]
+    {
+        let text = fs::read_to_string(dir.join("smelt-pi.current")).ok()?;
+        let mut lines = text.lines();
+        if lines.next()? != "smelt-image-v1" {
+            return None;
+        }
+        let rel = lines.next()?;
+        rel.split(['/', '\\']).next().map(str::to_string)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+#[cfg(windows)]
+fn read_pi_pointer(dir: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(dir.join("smelt-pi.current")).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != "smelt-image-v1" {
+        return None;
+    }
+    let rel = lines.next()?;
+    let mut path = dir.to_path_buf();
+    for part in rel.split(['/', '\\']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        path.push(part);
+    }
+    let path = fs::canonicalize(path).ok()?;
+    fs::metadata(&path)
+        .ok()
+        .filter(|meta| meta.is_file())
+        .map(|_| path)
 }
 
 #[cfg(test)]
@@ -223,7 +336,7 @@ mod tests {
 
     fn package(dir: &Path, pi: &[u8], wasm: &[u8], native: Option<&[u8]>) {
         fs::create_dir_all(dir).unwrap();
-        fs::write(dir.join(LAUNCH_NAME), pi).unwrap();
+        fs::write(dir.join(binary_file_name()), pi).unwrap();
         fs::write(dir.join(WASM_NAME), wasm).unwrap();
         if let Some(native) = native {
             fs::create_dir_all(dir.join("native/sub")).unwrap();
@@ -261,8 +374,12 @@ mod tests {
         assert_eq!(current(&bin), Some(fs::canonicalize(&first).unwrap()));
         let first_dir = first.parent().unwrap().to_path_buf();
         assert_eq!(fs::read(first_dir.join("native/sub/addon.node")).unwrap(), b"native-v1");
-        let mode = fs::metadata(&first).unwrap().permissions().mode();
-        assert_ne!(mode & 0o111, 0, "smelt-pi 必须可执行");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&first).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "smelt-pi 必须可执行");
+        }
 
         assert_eq!(publish(&bin, &pkg).unwrap(), first, "同一套内容只发布一次");
 
@@ -299,7 +416,7 @@ mod tests {
         let (pkg, bin) = (root.join("pkg"), root.join("bin"));
         package(&pkg, b"pi-v1", b"wasm", None);
         let first = publish(&bin, &pkg).unwrap();
-        fs::write(pkg.join(LAUNCH_NAME), b"pi-v2").unwrap();
+        fs::write(pkg.join(binary_file_name()), b"pi-v2").unwrap();
         fs::remove_file(pkg.join(WASM_NAME)).unwrap();
         assert!(publish(&bin, &pkg).is_err());
         assert_eq!(current(&bin), Some(fs::canonicalize(&first).unwrap()));

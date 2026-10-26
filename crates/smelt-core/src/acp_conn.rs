@@ -782,6 +782,47 @@ fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool)
     if pid <= 1 {
         return true;
     }
+    #[cfg(windows)]
+    {
+        let _ = reap_child;
+        prove_windows_process_dead(pid, timeout)
+    }
+    #[cfg(unix)]
+    {
+    prove_unix_process_group_dead(pid, timeout, reap_child)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (timeout, reap_child);
+        false
+    }
+}
+
+/// Windows 没有交接过来的进程组。这个 pid 是我们拉起来的，等它退出即可。
+#[cfg(windows)]
+fn prove_windows_process_dead(pid: i32, timeout: Duration) -> bool {
+    let Ok(pid) = u32::try_from(pid) else {
+        return true;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !smelt_sys::process::pid_is_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let slice = Duration::from_millis(15)
+            .min(deadline.saturating_duration_since(Instant::now()));
+        if slice.is_zero() {
+            return !smelt_sys::process::pid_is_alive(pid);
+        }
+        std::thread::park_timeout(slice);
+    }
+}
+
+#[cfg(unix)]
+fn prove_unix_process_group_dead(pid: i32, timeout: Duration, reap_child: bool) -> bool {
     let deadline = Instant::now() + timeout;
     // 允许收尸时才做亲缘判定：ECHILD=收养/已收走。此后不再复核。
     // 不允许收尸时，连这一次 WNOHANG 也不发，避免和还堵在 wait 上的那条线程抢。
@@ -853,6 +894,7 @@ fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool)
 }
 
 /// pid 本人是否已不存在。EPERM（活着但无权限）按存在处理。
+#[cfg(unix)]
 fn process_absent(pid: i32) -> bool {
     if pid <= 1 {
         return true;
@@ -873,7 +915,11 @@ pub fn kill_and_reap_process_group(pid: i32, timeout: Duration) -> bool {
         return true;
     }
     kill_process_group(pid);
-    prove_process_group_dead(pid, timeout)
+    let dead = prove_process_group_dead(pid, timeout);
+    if dead && let Ok(pid) = u32::try_from(pid) {
+        smelt_sys::process::release_tree(pid);
+    }
+    dead
 }
 
 /// 进程启动时刻（wall clock）。给“按 pid 动刀前验明正身”用：handoff 后 successor
@@ -975,11 +1021,20 @@ fn process_birth_inner(pid: i32) -> Option<String> {
     ))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn process_start_time_inner(pid: i32) -> Option<std::time::SystemTime> {
+    let Ok(pid) = u32::try_from(pid) else {
+        return None;
+    };
+    smelt_sys::process::process_started_at(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn process_start_time_inner(_pid: i32) -> Option<std::time::SystemTime> {
     None
 }
 
+#[cfg(unix)]
 enum Waitpid {
     Reaped,
     StillRunning,
@@ -987,6 +1042,7 @@ enum Waitpid {
     Interrupted,
 }
 
+#[cfg(unix)]
 fn waitpid_child(pid: i32, options: i32) -> Waitpid {
     let mut status = 0;
     let waited = unsafe { libc::waitpid(pid, &mut status, options) };
@@ -1001,6 +1057,7 @@ fn waitpid_child(pid: i32, options: i32) -> Waitpid {
     }
 }
 
+#[cfg(unix)]
 fn process_group_absent(pgid: i32) -> bool {
     if pgid <= 1 {
         return true;
@@ -1011,6 +1068,7 @@ fn process_group_absent(pgid: i32) -> bool {
 
 /// 这个进程组里现在还挂着哪些 pid。用来等组员退出，而不是隔几毫秒问组还在不在。
 /// 枚举失败就返回空：调用方会把剩余截止时间一次睡完再查。
+#[cfg(unix)]
 fn process_group_members(pgid: i32) -> Vec<i32> {
     if pgid <= 1 {
         return Vec::new();
@@ -1081,7 +1139,7 @@ fn linux_process_group(pid: i32) -> Option<i32> {
     after_comm.split_whitespace().nth(2)?.parse().ok()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn process_group_members_os(_pgid: i32) -> Vec<i32> {
     Vec::new()
 }
@@ -1307,6 +1365,9 @@ impl AcpChildGuard {
         self.reaped = true;
         self.kill_tree();
         let _ = crate::process_wait::reap_direct_child(self.pid);
+        if let Ok(pid) = u32::try_from(self.pid) {
+            smelt_sys::process::release_tree(pid);
+        }
     }
 
     fn kill_and_reap(&mut self) {
@@ -1321,9 +1382,13 @@ impl Drop for AcpChildGuard {
 }
 
 fn kill_process_group(pid: i32) {
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
+    if pid <= 1 {
+        return;
     }
+    let Ok(pid) = u32::try_from(pid) else {
+        return;
+    };
+    let _ = smelt_sys::process::signal_tree(pid, smelt_sys::process::TreeSignal::Kill);
 }
 
 /// `connect_with` 的 SDK future 可能卡在 transport 或 agent 自己的启动阶段，
@@ -2786,22 +2851,30 @@ fn spawn_agent_process(
         // （npx/uvx）以及它派生的真实 agent 必须属于同一进程组，结束会话时不留孤儿。
         std_cmd.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std_cmd.creation_flags(
+            smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
+        );
+    }
     if let Some(runtime) = managed_bun {
         runtime.inherit_into(&mut std_cmd);
     }
     let mut cmd = async_process::Command::from(std_cmd);
-    #[cfg(windows)]
-    {
-        use async_process::windows::CommandExt as _;
-
-        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+    #[cfg(windows)]
+    if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
+        drop(child);
+        return Err(agent_client_protocol::Error::internal_error().data(format!(
+            "无法把 agent 放进进程树：{error}"
+        )));
+    }
     let child_stdin = child.stdin.take().ok_or_else(|| {
         agent_client_protocol::Error::internal_error().data("无法打开 agent stdin")
     })?;
@@ -4003,12 +4076,15 @@ fn rewrite_runtime_command_with_bun(cmd: &str, bun: &str) -> Option<String> {
 /// 注释）。顺序：login PATH 在前（用户显式配的优先），标准安装位在后兜底；
 /// 重复目录无所谓，resolve 取第一个命中即止。
 pub(crate) fn extended_search_path() -> String {
-    let mut path = crate::login_env::login_path().to_string();
-    let mut push = |p: String| {
-        path.push(':');
-        path.push_str(&p);
-    };
-    if let Some(home) = dirs::home_dir() {
+    extend_search_path(crate::login_env::login_path(), dirs::home_dir().as_deref())
+}
+
+fn extend_search_path(login: &str, home: Option<&std::path::Path>) -> String {
+    // 空的一段在 PATH 里等于当前目录，不带进来。
+    let mut entries: Vec<std::path::PathBuf> = std::env::split_paths(login)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .collect();
+    if let Some(home) = home {
         // grok 装在 ~/.grok/bin（软链常在 ~/.local/bin）；其余是 pip/npm/cargo
         // 之类常把 CLI 放的用户级目录。
         for sub in [
@@ -4019,33 +4095,63 @@ pub(crate) fn extended_search_path() -> String {
             ".cargo/bin",
             ".volta/bin",
         ] {
-            push(home.join(sub).to_string_lossy().into_owned());
+            entries.push(home.join(sub));
         }
     }
-    for d in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
-        push(d.to_string());
+    #[cfg(unix)]
+    for dir in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        entries.push(dir.into());
     }
-    path
+    // 分隔符按平台：Windows 是 `;`。拼不起来（某一项本身带分隔符）就只用登录 PATH。
+    std::env::join_paths(entries)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| login.to_string())
 }
 
-/// 在 `:` 分隔的 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
-/// 已经带 `/` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
+/// 在 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
+/// 已经带 `/` 或 `\` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
 /// None——调用方保留原名，让 spawn 照常失败并把真实错误报出来。
+///
+/// Windows 上没有扩展名的名字按 `.exe`、`.cmd`、`.bat`、原名这个顺序找。
+/// `CreateProcess` 只补 `.exe`，`claude` / `npx` 这类实际是 `.cmd`。
 fn resolve_in_path(program: &str, path: &str) -> Option<String> {
-    if program.contains('/') {
+    if program.contains('/') || program.contains('\\') {
         return Some(program.to_string());
     }
-    for dir in path.split(':').filter(|d| !d.is_empty()) {
-        let full = std::path::Path::new(dir).join(program);
-        // 是文件且可执行（软链会被 metadata 跟随到目标）。
-        if let Ok(meta) = std::fs::metadata(&full) {
-            use std::os::unix::fs::PermissionsExt;
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+    let names = command_file_names(program);
+    for dir in std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()) {
+        for name in &names {
+            let full = dir.join(name);
+            // 是文件且可执行（软链会被 metadata 跟随到目标）。Windows 没有执行位。
+            if let Ok(meta) = std::fs::metadata(&full) {
+                if !meta.is_file() {
+                    continue;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        continue;
+                    }
+                }
                 return full.to_str().map(String::from);
             }
         }
     }
     None
+}
+
+fn command_file_names(program: &str) -> Vec<String> {
+    #[cfg(windows)]
+    if !program.as_bytes().contains(&b'.') {
+        return vec![
+            format!("{program}.exe"),
+            format!("{program}.cmd"),
+            format!("{program}.bat"),
+            program.to_string(),
+        ];
+    }
+    vec![program.to_string()]
 }
 
 // login shell 的 PATH 探测（连同各家 agent 的自定义 workspace 目录变量一起）
@@ -4184,7 +4290,13 @@ mod runtime_tests {
 
     #[test]
     fn runtime_version_probe_collects_a_short_lived_process() {
-        let output = run_runtime_version(std::path::Path::new("/usr/bin/true"));
+        let program = if cfg!(windows) {
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+            std::path::PathBuf::from(root).join(r"System32\where.exe")
+        } else {
+            std::path::PathBuf::from("/usr/bin/true")
+        };
+        let output = run_runtime_version(&program);
         assert!(output.is_ok(), "短命令的版本探测应正常收尾：{output:?}");
     }
 
@@ -4591,8 +4703,8 @@ mod spawn_gate_tests {
 #[cfg(test)]
 mod path_resolve_tests {
     use super::{
-        build_agent_args, build_agent_args_with_ephemeral_env, inject_local_adapter_cli_path,
-        resolve_in_path,
+        build_agent_args, build_agent_args_with_ephemeral_env, extend_search_path,
+        inject_local_adapter_cli_path, resolve_in_path,
     };
     use crate::agent_kind::ConversationLaunchSpec;
     use std::collections::BTreeMap;
@@ -4607,11 +4719,109 @@ mod path_resolve_tests {
         assert_eq!(resolve_in_path("./x", "/bin").as_deref(), Some("./x"));
     }
 
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "smelt-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// 写成当前系统会认的可执行文件：Unix 要执行位，Windows 无扩展名时是 `.exe`。
+    fn write_executable(dir: &std::path::Path, bare: &str) -> std::path::PathBuf {
+        let file_name = if cfg!(windows) && !bare.contains('.') {
+            format!("{bare}.exe")
+        } else {
+            bare.to_string()
+        };
+        let exe = dir.join(file_name);
+        std::fs::write(&exe, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&exe).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&exe, permissions).unwrap();
+        }
+        exe
+    }
+
+    fn path_list(dirs: &[std::path::PathBuf]) -> String {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        dirs.iter()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(sep)
+    }
+
     #[test]
     fn finds_executable_across_path_dirs() {
-        // `sh` 一定在 /bin；把它藏在几个假目录后面，验证会逐段找下去。
-        let path = "/no/such/dir:/also/fake:/bin:/usr/bin";
-        assert_eq!(resolve_in_path("sh", path).as_deref(), Some("/bin/sh"));
+        // 命令放在最后一段，前面两段是空目录，验证会逐段找下去。
+        let root = temp_root("path");
+        let missing_a = root.join("no");
+        let missing_b = root.join("also");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&missing_a).unwrap();
+        std::fs::create_dir_all(&missing_b).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = write_executable(&bin, "sh");
+        let path = path_list(&[missing_a, missing_b, bin]);
+        assert_eq!(
+            resolve_in_path("sh", &path).as_deref(),
+            exe.to_str(),
+            "前面的空目录跳过，命中后面目录里的命令"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bare_name_prefers_exe_then_cmd() {
+        let root = std::env::temp_dir().join(format!(
+            "smelt-cmd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.to_string_lossy().into_owned();
+        std::fs::write(root.join("claude.cmd"), "@echo off\r\n").unwrap();
+        let found = resolve_in_path("claude", &path).expect("cmd");
+        assert!(
+            found.to_ascii_lowercase().ends_with("claude.cmd"),
+            "{found}"
+        );
+        std::fs::write(root.join("claude.exe"), "MZ").unwrap();
+        let found = resolve_in_path("claude", &path).expect("exe");
+        assert!(
+            found.to_ascii_lowercase().ends_with("claude.exe"),
+            "{found}"
+        );
+        std::fs::write(root.join("grok"), "bare").unwrap();
+        let found = resolve_in_path("grok", &path).expect("bare");
+        assert!(found.to_ascii_lowercase().ends_with("grok"), "{found}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 追加目录要按平台的分隔符拼。Windows 上用 `:` 拼会把登录 PATH 的最后一段
+    /// 和追加的目录粘成一个不存在的目录。
+    #[test]
+    fn extended_search_path_keeps_every_entry_separable() {
+        let root = temp_root("extend");
+        let login_dirs = [root.join("a"), root.join("b")];
+        let home = root.join("home");
+        let extended = extend_search_path(&path_list(&login_dirs), Some(&home));
+        let entries: Vec<_> = std::env::split_paths(&extended).collect();
+        assert_eq!(&entries[..2], &login_dirs[..]);
+        assert!(entries.contains(&home.join(".cargo/bin")), "{extended}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -4623,7 +4833,7 @@ mod path_resolve_tests {
     #[test]
     fn build_agent_args_preserves_plain_launch_specs() {
         let args = build_agent_args(
-            &ConversationLaunchSpec::from_command("sh -lc echo"),
+            &ConversationLaunchSpec::from_command("/bin/sh -lc echo"),
             "/bin:/usr/bin",
         )
         .expect("plain launch spec should build");
@@ -4642,7 +4852,7 @@ mod path_resolve_tests {
     #[test]
     fn build_agent_args_overlays_structured_env_on_legacy_prefixes() {
         let launch =
-            ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=/legacy/path sh --version")
+            ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=/legacy/path /bin/sh --version")
                 .with_env(
                     "CLAUDE_CONFIG_DIR",
                     "~/Library/Application Support/Claude Quant",
@@ -4666,7 +4876,7 @@ mod path_resolve_tests {
 
     #[test]
     fn ephemeral_env_overlays_launch_env_without_mutating_the_saved_spec() {
-        let launch = ConversationLaunchSpec::from_command("sh --version")
+        let launch = ConversationLaunchSpec::from_command("/bin/sh --version")
             .with_env("PLUGIN_TOKEN", "stored-value")
             .with_env("UNCHANGED", "yes");
         let ephemeral =
@@ -4737,6 +4947,10 @@ mod path_resolve_tests {
 
     #[test]
     fn official_claude_adapter_prefers_local_claude_cli() {
+        let root = temp_root("claude");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = write_executable(&bin, "sh");
         let mut env = BTreeMap::new();
 
         inject_local_adapter_cli_path(
@@ -4745,13 +4959,14 @@ mod path_resolve_tests {
             "CLAUDE_CODE_EXECUTABLE",
             "sh",
             &mut env,
-            "/bin:/usr/bin",
+            bin.to_str().unwrap(),
         );
 
         assert_eq!(
             env.get("CLAUDE_CODE_EXECUTABLE").map(String::as_str),
-            Some("/bin/sh")
+            exe.to_str()
         );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -5246,7 +5461,7 @@ mod model_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod process_reap_tests {
     use super::{
         Waitpid, kill_and_reap_process_group, process_birth, process_start_time,

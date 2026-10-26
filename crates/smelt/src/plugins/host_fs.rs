@@ -99,7 +99,7 @@ impl HostFs {
         let real = fs::canonicalize(&target)
             .map_err(|_| HostError::new(format!("链接目标不存在：{}", target.display())))?;
         self.check(&real)?;
-        std::os::unix::fs::symlink(&target, &at)
+        symlink_at(&target, &at)
             .map(|()| HostValue::Null)
             .map_err(|error| HostError::new(format!("创建链接 {} 失败：{error}", at.display())))
     }
@@ -114,7 +114,7 @@ impl HostFs {
         match fs::rename(&from, &to) {
             Ok(()) => Ok(HostValue::Null),
             // 同卷 rename 是原子的；跨卷时退成复制再删，语义仍是「搬走」，不是留下两份。
-            Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
                 relocate_across_devices(&from, &to)?;
                 Ok(HostValue::Null)
             }
@@ -137,7 +137,7 @@ impl HostFs {
                 at.display()
             )));
         }
-        fs::remove_file(&at)
+        remove_file_or_link(&at, meta.file_type())
             .map(|()| HostValue::Null)
             .map_err(|error| HostError::new(format!("删除 {} 失败：{error}", at.display())))
     }
@@ -257,18 +257,48 @@ pub(super) fn fs_module(host: Rc<HostFs>) -> HostModule {
 }
 
 /// 绝对路径、去掉 `.`、拒绝 `..`。不碰磁盘。
+///
+/// `\\?\` 路径的 `components` 只认 `\`。`a/../b` 因此是一个普通名字，不会变成
+/// `ParentDir`。门控按两种分隔符切开，这种写法同样拒绝。
 fn lexical(raw: &str) -> Result<PathBuf, HostError> {
+    if raw.split(['/', '\\']).any(|segment| segment == "..") {
+        return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
+    }
     let path = Path::new(raw);
     if !path.is_absolute() {
         return Err(HostError::new(format!("需要绝对路径：{raw}")));
     }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
+    let mut cleaned = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(HostError::new(format!("路径不能含 `..`：{raw}")));
+            }
+            Component::Normal(name) if name == "." => {}
+            other => cleaned.push(other),
+        }
     }
-    Ok(path.components().collect())
+    Ok(cleaned.into_iter().collect())
+}
+
+/// 删文件，或软链本身。
+///
+/// Windows 上目录软链带目录属性，`DeleteFile` 会返回 Access Denied。这种链接用
+/// `RemoveDirectory` 删，删的是链接，不是它指向的目录。
+fn remove_file_or_link(path: &Path, file_type: fs::FileType) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if is_directory_link(&file_type) {
+        return fs::remove_dir(path);
+    }
+    let _ = file_type;
+    fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn is_directory_link(file_type: &fs::FileType) -> bool {
+    use std::os::windows::fs::FileTypeExt;
+    file_type.is_symlink_dir()
 }
 
 /// 把最深的已存在祖先规范化，其余段原样拼回（它们不存在，也就没有软链可跟）。
@@ -363,7 +393,7 @@ fn copy_tree_into(source: &Path, destination: &Path, skip_symlinks: bool) -> Res
             let target = fs::read_link(entry.path()).map_err(|error| {
                 HostError::new(format!("读取链接 {} 失败：{error}", entry.path().display()))
             })?;
-            std::os::unix::fs::symlink(&target, &to).map_err(|error| {
+            symlink_at(&target, &to).map_err(|error| {
                 HostError::new(format!("创建链接 {} 失败：{error}", to.display()))
             })?;
         } else if file_type.is_dir() {
@@ -392,9 +422,9 @@ fn relocate_across_devices(from: &Path, to: &Path) -> Result<(), HostError> {
         let target = fs::read_link(from).map_err(|error| {
             HostError::new(format!("读取链接 {} 失败：{error}", from.display()))
         })?;
-        std::os::unix::fs::symlink(&target, to)
+        symlink_at(&target, to)
             .map_err(|error| HostError::new(format!("创建链接 {} 失败：{error}", to.display())))?;
-        return fs::remove_file(from)
+        return remove_file_or_link(from, meta.file_type())
             .map_err(|error| HostError::new(format!("删除 {} 失败：{error}", from.display())));
     }
     copy_entry(from, to, false)?;
@@ -406,43 +436,88 @@ fn relocate_across_devices(from: &Path, to: &Path) -> Result<(), HostError> {
     removed.map_err(|error| HostError::new(format!("删除 {} 失败：{error}", from.display())))
 }
 
-/// 交换两个已存在的路径。普通 rename 做不到「两边都在，且中间没有空窗」。
-fn exchange_paths(left: &Path, right: &Path) -> Result<(), HostError> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let left =
-        CString::new(left.as_os_str().as_bytes()).map_err(|_| HostError::new("路径含空字节"))?;
-    let right =
-        CString::new(right.as_os_str().as_bytes()).map_err(|_| HostError::new("路径含空字节"))?;
-    let rc = unsafe {
-        #[cfg(target_os = "macos")]
-        {
-            libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP)
-        }
-        #[cfg(target_os = "linux")]
-        {
-            libc::renameat2(
-                libc::AT_FDCWD,
-                left.as_ptr(),
-                libc::AT_FDCWD,
-                right.as_ptr(),
-                libc::RENAME_EXCHANGE,
+/// 建一条软链。Unix 用 `symlink`；Windows 用 `symlink_file` / `symlink_dir`，
+/// 失败（没开开发者模式或没有管理员权限）按不支持报错（设计文档 D4）。
+fn symlink_at(target: &Path, at: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        return std::os::unix::fs::symlink(target, at);
+    }
+    #[cfg(windows)]
+    {
+        // 目录和文件是两种链接。相对目标相对落点的父目录看；看不清（悬空链接）
+        // 时按文件建。系统拒绝（没有创建链接的权限）就按不支持报。
+        let resolved = if target.is_relative() {
+            at.parent()
+                .map(|parent| parent.join(target))
+                .unwrap_or_else(|| target.to_path_buf())
+        } else {
+            target.to_path_buf()
+        };
+        let is_dir = std::fs::metadata(&resolved).is_ok_and(|meta| meta.is_dir());
+        let result = if is_dir {
+            std::os::windows::fs::symlink_dir(target, at)
+        } else {
+            std::os::windows::fs::symlink_file(target, at)
+        };
+        return result.map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("创建软链接失败：{error}"),
             )
+        });
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, at);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "当前平台不支持创建软链接",
+        ))
+    }
+}
+
+/// 交换两个已存在的路径。普通 rename 做不到「两边都在，且中间没有空窗」。
+/// macOS / Linux 走原子交换；其它平台按不支持报错（设计文档 D4）。
+fn exchange_paths(left: &Path, right: &Path) -> Result<(), HostError> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let left = CString::new(left.as_os_str().as_bytes())
+            .map_err(|_| HostError::new("路径含空字节"))?;
+        let right = CString::new(right.as_os_str().as_bytes())
+            .map_err(|_| HostError::new("路径含空字节"))?;
+        let rc = unsafe {
+            #[cfg(target_os = "macos")]
+            {
+                libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP)
+            }
+            #[cfg(target_os = "linux")]
+            {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    left.as_ptr(),
+                    libc::AT_FDCWD,
+                    right.as_ptr(),
+                    libc::RENAME_EXCHANGE,
+                )
+            }
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(HostError::new(format!(
+                "原子交换失败：{}",
+                std::io::Error::last_os_error()
+            )))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            let _ = (&left, &right);
-            -1
-        }
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(HostError::new(format!(
-            "原子交换失败：{}",
-            std::io::Error::last_os_error()
-        )))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (left, right);
+        Err(HostError::new("原子交换失败：当前平台不支持"))
     }
 }
 
@@ -519,6 +594,13 @@ mod tests {
         }
     }
 
+    /// `canonicalize` 在 Windows 上带 `\\?\` 前缀，`read_link` 读回来没有。
+    /// 比较的是同一条路径，不是前缀字节。
+    fn comparable_path(value: &HostValue) -> &str {
+        let text = value.as_str().unwrap_or("");
+        text.strip_prefix(r"\\?\").unwrap_or(text)
+    }
+
     fn kind(value: HostValue) -> Option<String> {
         value
             .get("kind")
@@ -558,12 +640,12 @@ mod tests {
             Some("symlink")
         );
         assert_eq!(
-            host.readlink(&sandbox.s("link")).unwrap(),
-            HostValue::Str(sandbox.s("real"))
+            comparable_path(&host.readlink(&sandbox.s("link")).unwrap()),
+            comparable_path(&HostValue::Str(sandbox.s("real")))
         );
         assert_eq!(
-            host.realpath(&sandbox.s("link")).unwrap(),
-            HostValue::Str(sandbox.s("real"))
+            comparable_path(&host.realpath(&sandbox.s("link")).unwrap()),
+            comparable_path(&HostValue::Str(sandbox.s("real")))
         );
         host.unlink(&sandbox.s("link")).unwrap();
         assert!(fs::symlink_metadata(sandbox.path("link")).is_err());
@@ -571,6 +653,7 @@ mod tests {
         assert!(host.unlink(&sandbox.s("real")).is_err(), "unlink 不删目录");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_link_out_of_home_cannot_be_followed_or_created() {
         let sandbox = Sandbox::new();
@@ -592,6 +675,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_dangling_link_reads_as_missing_and_is_never_walked_through() {
         let sandbox = Sandbox::new();
@@ -615,6 +699,7 @@ mod tests {
         assert!(sandbox.path("c").is_dir());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn exchange_swaps_two_directories_without_breaking_a_link() {
         let sandbox = Sandbox::new();
@@ -642,6 +727,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn copy_preserves_or_skips_symlinks() {
         let sandbox = Sandbox::new();

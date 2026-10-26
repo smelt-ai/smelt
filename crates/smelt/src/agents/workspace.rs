@@ -1278,10 +1278,8 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_client::session_ops::submit_automation_command(
-                        &crate::runtimes::local(),
-                        &command,
-                    )
+                    let client = crate::runtimes::local();
+                    smelt_client::session_ops::submit_automation_command(&client, &command)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
@@ -1353,11 +1351,12 @@ impl Workspace {
             cx.notify();
             return;
         };
+        let runtime = crate::runtimes::Runtime::local();
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::Runtime::local(),
+                    runtime,
                     launch_prep: None,
                     agent,
                     launch: record.launch,
@@ -2142,10 +2141,8 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_client::session_ops::submit_automation_command(
-                        &crate::runtimes::local(),
-                        &command,
-                    )
+                    let client = crate::runtimes::local();
+                    smelt_client::session_ops::submit_automation_command(&client, &command)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

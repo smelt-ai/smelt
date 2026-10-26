@@ -14,7 +14,6 @@ smelt-client-store = { path = "../smelt-client-store" }
 smelt-sys = { path = "../smelt-sys" }
 anyhow = "1"
 dirs = "5"
-libc = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
@@ -28,12 +27,15 @@ serde_json = "1"
 smol = "2"
 uuid = { version = "1", features = ["v4"] }
 
-# 「移到应用程序」：系统的移到废纸篓，和查被转移的 App 原来放在哪（NSURL 与 CFURL 免费桥接）。
+# 「移到应用程序」和更新器的 flock / dlopen 只在 macOS 上编（设计文档 D4）。
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [dev-dependencies]
-# 测试要用运行时的归约器造快照，只在测试里依赖。
-smelt-core = { path = "../smelt-core", features = ["test-support"] }
 tempfile = "3"
+
+# 造 ACP 快照的测试依赖 smelt-core。那一层是 Unix 进程模型，第 1 步不在 Windows 上编。
+[target.'cfg(unix)'.dev-dependencies]
+smelt-core = { path = "../smelt-core", features = ["test-support"] }

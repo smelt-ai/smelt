@@ -319,16 +319,26 @@ mod tests {
         assert_run_git_contract(&sp, &root);
     }
 
+    /// 打印子进程看到的 PATH。Unix 用 `sh`，Windows 用 `cmd`，两边都去掉行尾。
+    fn child_path(sp: &LocalSubprocess, env: &[(&str, &str)]) -> String {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/d", "/c", "echo %PATH%"])
+        } else {
+            ("/bin/sh", &["-c", "printf %s \"$PATH\""])
+        };
+        let out = sp.run(program, args, None, env).unwrap();
+        out.stdout_str()
+            .trim_end_matches(['\r', '\n'])
+            .to_string()
+    }
+
     /// git hook（husky 调 npm、pre-commit 调 python）跑在子进程里，靠 PATH 找工具。
     /// GUI 从 Finder 启动时进程 PATH 只有 /usr/bin:/bin，hook 会 127 退出，
     /// 表现成「点提交毫无反应」。所以本地子进程必须带上 login shell 的 PATH。
     #[test]
     fn local_provider_runs_with_login_path() {
         let sp = LocalSubprocess;
-        let out = sp
-            .run("/bin/sh", &["-c", "printf %s \"$PATH\""], None, &[])
-            .unwrap();
-        assert_eq!(out.stdout_str(), crate::login_env::login_path());
+        assert_eq!(child_path(&sp, &[]), crate::login_env::login_path());
     }
 
     /// 显式传入的 env 是调用方的明确意图（如 GIT_OPTIONAL_LOCKS），
@@ -336,15 +346,7 @@ mod tests {
     #[test]
     fn explicit_env_overrides_login_environment() {
         let sp = LocalSubprocess;
-        let out = sp
-            .run(
-                "/bin/sh",
-                &["-c", "printf %s \"$PATH\""],
-                None,
-                &[("PATH", "/sentinel")],
-            )
-            .unwrap();
-        assert_eq!(out.stdout_str(), "/sentinel");
+        assert_eq!(child_path(&sp, &[("PATH", "/sentinel")]), "/sentinel");
     }
 
     #[test]
@@ -359,11 +361,10 @@ mod tests {
         assert!(out.stderr_str().contains("not found"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_subprocess_respects_cwd_and_env() {
         let sp = LocalSubprocess;
-        // 用 env 命令验证环境变量传递
-        #[cfg(unix)]
         {
             let out = sp
                 .run("env", &[], None, &[("TEST_VAR", "test_value")])
@@ -372,11 +373,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_with_stdin_passes_input() {
         let sp = LocalSubprocess;
-        // 用 cat 验证 stdin 传递
-        #[cfg(unix)]
         {
             let out = sp
                 .run_with_stdin("cat", &[], None, &[], b"hello world")

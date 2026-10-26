@@ -1,18 +1,20 @@
 //! 设置页：系统（更新、后台服务、存储清理）。
 
 use super::*;
+#[cfg(target_os = "macos")]
 use gpui_component::tab::{Tab, TabBar};
 
+/// 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。Windows 上不提供这一页。
+#[cfg(target_os = "macos")]
 pub(super) fn update_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    let (update, _, _) = maintenance_groups(entity, snapshot, cx);
     SettingPage::new("应用更新")
         .description("检查 Smelt 版本，选择更新通道和自动下载方式。")
         .resettable(false)
-        .group(update)
+        .group(update_group(entity, snapshot, cx))
 }
 
 pub(super) fn daemon_page(
@@ -20,45 +22,39 @@ pub(super) fn daemon_page(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    let (_, daemon, _) = maintenance_groups(entity, snapshot, cx);
     SettingPage::new("后台服务")
         .description("查看或维护承载本机终端与 Agent 会话的 smeltd 服务。")
         .resettable(false)
-        .group(daemon)
+        .group(daemon_group(entity, snapshot, cx))
 }
 
-pub(super) fn storage_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingPage {
-    let (_, _, storage) = maintenance_groups(entity, snapshot, cx);
+pub(super) fn storage_page(cx: &App) -> SettingPage {
     SettingPage::new("存储清理")
         .description(
             "清理已经没人读写的残留：instincts 的 smelt.db、根目录\
              调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
         )
         .resettable(false)
-        .group(storage)
+        .group(storage_group(cx))
 }
 
-fn maintenance_groups(
+#[cfg(target_os = "macos")]
+fn update_group(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
-) -> (SettingGroup, SettingGroup, SettingGroup) {
+) -> SettingGroup {
     let (fg, muted, border) = {
         let t = cx.theme();
         (t.foreground, t.muted_foreground, t.border)
     };
 
     // —— 维护：更新、守护进程和残留数据清理 ——
-    let update_entity = entity.clone();
+    let update_entity = entity;
     let update_status = snapshot.update_status.clone();
     let moving_app = snapshot.moving_app;
     let move_app_error = snapshot.move_app_error.clone();
-    let daemon_entity = entity;
-    let update_group = SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
+    SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
         let status = update_status.clone();
         let channel = cx.global::<UpdateSettings>().channel;
         let auto_install = cx.global::<UpdateSettings>().auto_install;
@@ -478,13 +474,24 @@ fn maintenance_groups(
                     ),
             )
             .child(links.pt_3().mt_1().border_t_1().border_color(border))
-    }));
+    }))
+}
 
+fn daemon_group(
+    entity: Entity<Workspace>,
+    snapshot: &SettingsRenderSnapshot,
+    cx: &App,
+) -> SettingGroup {
+    let (fg, muted, _border) = {
+        let t = cx.theme();
+        (t.foreground, t.muted_foreground, t.border)
+    };
+    let daemon_entity = entity;
     let daemon_outdated = snapshot.daemon_outdated;
     let daemon_upgrading = snapshot.daemon_upgrading;
     let daemon_upgrade_msg = snapshot.daemon_upgrade_msg.clone();
     let daemon_info = snapshot.daemon_info.clone();
-    let daemon_group = SettingGroup::new()
+    SettingGroup::new()
             .item(SettingItem::render(move |_, _, _cx: &mut App| {
                     let outdated = daemon_outdated;
                     let upgrading = daemon_upgrading;
@@ -573,10 +580,16 @@ fn maintenance_groups(
                                 .text_color(muted)
                                 .child("没有正在进行的会话时直接重启。有的话会先确认：这一轮回复会被中断，历史记录已保存，重启后可以继续对话。"),
                         )
-            }));
+            }))
+}
 
+fn storage_group(cx: &App) -> SettingGroup {
+    let (fg, muted, _border) = {
+        let t = cx.theme();
+        (t.foreground, t.muted_foreground, t.border)
+    };
     // —— 存储：`~/.smelt` 下的历史残留（老 schema / 老实现留下的遗留文件）扫描与清理 ——
-    let storage_group = SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
+    SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
         let state = cx.try_global::<CleanupState>().cloned().unwrap_or_default();
 
         let summary_text = match &state.scan {
@@ -647,7 +660,5 @@ fn maintenance_groups(
                     .message
                     .map(|m| div().text_xs().text_color(muted).child(m)),
             )
-    }));
-
-    (update_group, daemon_group, storage_group)
+    }))
 }

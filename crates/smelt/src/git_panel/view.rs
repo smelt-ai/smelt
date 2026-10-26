@@ -320,7 +320,7 @@ impl Workspace {
             Some(set) if !set.repos.is_empty() => set.repos.clone(),
             // 发现还没回来：先当单仓渲染，首帧不至于空白。
             _ => vec![DiscoveredRepo {
-                root: std::path::PathBuf::from(&root),
+                root: root.clone(),
                 rel_path: String::new(),
                 kind: RepoKind::Root,
             }],
@@ -329,21 +329,20 @@ impl Workspace {
         // 仓库选择器的选项：(显示名, 仓库根)。
         let repo_label_of = |repo: &DiscoveredRepo| -> String {
             if repo.rel_path.is_empty() {
-                std::path::Path::new(&root)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| root.clone())
+                smelt_client::runtime_path::PathStyle::LOCAL.file_name(&root)
+                    .unwrap_or(root.as_str())
+                    .to_string()
             } else {
                 repo.rel_path.clone()
             }
         };
         let repo_choices: Vec<(String, String)> = repos
             .iter()
-            .map(|repo| (repo_label_of(repo), repo.root.to_string_lossy().to_string()))
+            .map(|repo| (repo_label_of(repo), repo.root.clone()))
             .collect();
         let active_repo_label = repos
             .iter()
-            .find(|repo| repo.root.to_string_lossy() == active_repo)
+            .find(|repo| repo.root == active_repo)
             .map(repo_label_of)
             .unwrap_or_else(|| active_repo.clone());
         let ws_log_repo = cx.entity();
@@ -501,7 +500,7 @@ impl Workspace {
         // 有没有任何值得让列表存在的事：改动、待推送、待拉取、压着的 stash。
         let mut anything_to_do = false;
         for repo in &repos {
-            let repo_root = repo.root.to_string_lossy().to_string();
+            let repo_root = repo.root.clone();
             let repo_status = self.git_status.get(&repo_root).map(|(_, d)| d);
             let (staged, changed) = match repo_status {
                 Some(d) => split_staged_and_changed(&d.files),
@@ -523,10 +522,9 @@ impl Workspace {
                 narrow_rows.push(NarrowGitRow::RepoHeader {
                     root: repo_root.clone(),
                     label: if repo.rel_path.is_empty() {
-                        std::path::Path::new(&root)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| root.clone())
+                        smelt_client::runtime_path::PathStyle::LOCAL.file_name(&root)
+                            .unwrap_or(root.as_str())
+                            .to_string()
                     } else {
                         repo.rel_path.clone()
                     },

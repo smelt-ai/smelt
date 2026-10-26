@@ -11,8 +11,6 @@
 //! 前台派发的结果就是工具调用的返回值，这里不再交一遍。
 
 use std::io::Read;
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -21,8 +19,8 @@ use crate::acp_conn::ConversationEvent;
 use crate::acp_session::{SubagentStatus, SubagentView};
 
 use super::{
-    Inner, ModelNotice, State, display_tail, drain_wake, now_ms, poke, poke_stream, poll_wait,
-    request_owner, wake_pair, write_line,
+    Inner, ModelNotice, State, TaskStream, WakeWriter, display_tail, drain_wake, now_ms, poke,
+    poke_stream, poll_ready, request_owner, wake_pair, write_line,
 };
 
 /// 本次宿主生命期里留着多少个结束的子智能体。卡片靠它拿最终状态；更早的从父会话记录恢复。
@@ -40,7 +38,7 @@ pub(super) struct LiveDispatch {
     result: Option<String>,
     status: SubagentStatus,
     /// 派发连接看管线程的唤醒端。要转告扩展停下时叫醒它。
-    poke: Option<UnixStream>,
+    poke: Option<WakeWriter>,
     model_delivered: bool,
     delivering_to: Option<u64>,
     quiet: bool,
@@ -58,7 +56,7 @@ pub(super) struct LiveSubagent {
 /// 扩展开的派发连接。见模块说明。
 pub(super) fn serve_dispatch(
     inner: Arc<Inner>,
-    mut stream: UnixStream,
+    mut stream: TaskStream,
     request: &serde_json::Value,
     mut pending: Vec<u8>,
 ) {
@@ -146,13 +144,7 @@ pub(super) fn serve_dispatch(
                 break 'serve None;
             }
         }
-        let ready = match poll_wait(
-            &[
-                (stream.as_raw_fd(), libc::POLLIN),
-                (wake.as_raw_fd(), libc::POLLIN),
-            ],
-            None,
-        ) {
+        let ready = match poll_ready(&[&stream, &wake], None) {
             Ok(ready) => ready,
             Err(_) => break None,
         };
@@ -405,9 +397,9 @@ pub(super) fn request_stop(inner: &Inner, id: &str) -> Result<(), String> {
     let tool_call_id = subagent.view.tool_call_id.clone();
     if let Some(poke) = state
         .dispatches
-        .iter()
+        .iter_mut()
         .find(|dispatch| dispatch.tool_call_id == tool_call_id)
-        .and_then(|dispatch| dispatch.poke.as_ref())
+        .and_then(|dispatch| dispatch.poke.as_mut())
     {
         poke_stream(poke);
     }
@@ -428,9 +420,9 @@ fn take_stop_requests(inner: &Inner, tool_call_id: &str) -> Vec<String> {
 }
 
 /// 宿主停机：叫醒每条派发连接，让它们看到停机标志后退出。
-pub(super) fn wake_dispatches(state: &State) {
-    for dispatch in &state.dispatches {
-        if let Some(poke) = dispatch.poke.as_ref() {
+pub(super) fn wake_dispatches(state: &mut State) {
+    for dispatch in &mut state.dispatches {
+        if let Some(poke) = dispatch.poke.as_mut() {
             poke_stream(poke);
         }
     }

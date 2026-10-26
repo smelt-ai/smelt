@@ -464,14 +464,79 @@ pub(super) fn process_executable(pid: u32) -> Result<PathBuf, String> {
         .map_err(|error| format!("cannot determine executable for Unix peer pid {pid}: {error}"))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+#[cfg(windows)]
+pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
+    use std::os::windows::io::AsRawSocket;
+    let pid = smelt_sys::process::af_unix_peer_pid(conn.as_raw_socket())
+        .map_err(|error| format!("cannot determine Windows peer pid: {error}"))?;
+    windows_peer_identity(pid)
+}
+
+/// Windows 对端：同一用户、能读到 exe。pid 等于守护自己在后面的第一方校验里拒绝。
+/// 不查 Authenticode。
+#[cfg(windows)]
+pub(crate) fn windows_peer_identity(pid: u32) -> Result<PeerIdentity, String> {
+    let (same_user, executable) = smelt_sys::process::peer_user_and_executable(pid)
+        .map_err(|error| format!("cannot read Windows peer pid {pid}: {error}"))?;
+    if !same_user {
+        return Err(format!("Windows peer pid {pid} is not the current user"));
+    }
+    Ok(PeerIdentity {
+        pid,
+        executable: Some(executable),
+    })
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
 pub(super) fn process_executable(_pid: u32) -> Result<PathBuf, String> {
     Err("process executable lookup is unsupported on this platform".to_string())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
 pub(super) fn system_peer_identity(_conn: &UnixStream) -> Result<PeerIdentity, String> {
     Err("first-party Unix peer authentication is unsupported on this platform".to_string())
+}
+
+/// 从一条客户端连接取出对端身份。Unix 仍走原来的 getsockopt；Windows 管道走
+/// `GetNamedPipeClientProcessId`。
+/// 连接处理函数用它取对端，不关心底下是 AF_UNIX 还是命名管道。
+pub(crate) trait PeerSource {
+    fn peer_identity(&self) -> Result<PeerIdentity, String>;
+}
+
+impl PeerSource for UnixStream {
+    fn peer_identity(&self) -> Result<PeerIdentity, String> {
+        system_peer_identity(self)
+    }
+}
+
+impl PeerSource for crate::ClientConn {
+    fn peer_identity(&self) -> Result<PeerIdentity, String> {
+        peer_identity_of(self)
+    }
+}
+
+pub(crate) fn peer_identity_of(conn: &crate::ClientConn) -> Result<PeerIdentity, String> {
+    match conn {
+        crate::ClientConn::Unix(stream) => system_peer_identity(stream),
+        #[cfg(windows)]
+        crate::ClientConn::Pipe { stream, .. } => {
+            let pid = stream
+                .client_pid()
+                .map_err(|error| format!("cannot determine named pipe peer pid: {error}"))?;
+            windows_peer_identity(pid)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -484,7 +549,7 @@ pub(crate) fn authenticate_event_client(
     authenticate_event_client_for_platform(value, peer, daemon_pid, daemon_executable)
 }
 
-pub(super) fn authenticate_event_client_for_platform(
+pub(crate) fn authenticate_event_client_for_platform(
     value: &serde_json::Value,
     peer: &PeerIdentity,
     daemon_pid: u32,
@@ -715,16 +780,49 @@ pub(super) fn executable_kind(executable: &Path) -> Option<FirstPartyClientKind>
     let basename = executable.file_name()?.to_str()?;
     FIRST_PARTY_EXECUTABLES
         .iter()
-        .find(|entry| entry.basename == basename)
+        .find(|entry| basename_matches(entry.basename, basename))
         .map(|entry| entry.kind)
 }
 
+/// 表里的 basename 是 `smelt`。Windows 上文件是 `smelt.exe`，大小写不敏感，
+/// 比较前去掉一个结尾的 `.exe`。不另加一行，避免 macOS 的 signing-id 列分叉。
+fn basename_matches(expected: &str, actual: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let actual = strip_one_exe(actual);
+        expected.eq_ignore_ascii_case(actual)
+    }
+    #[cfg(not(windows))]
+    {
+        expected == actual
+    }
+}
+
+#[cfg(windows)]
+fn strip_one_exe(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    if bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
+}
+
 pub(super) fn executable_basename(kind: FirstPartyClientKind) -> &'static str {
-    FIRST_PARTY_EXECUTABLES
-        .iter()
-        .find(|entry| entry.kind == kind)
-        .map(|entry| entry.basename)
-        .expect("first-party executable table covers every client kind")
+    #[cfg(windows)]
+    {
+        match kind {
+            FirstPartyClientKind::Desktop => "smelt.exe",
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        FIRST_PARTY_EXECUTABLES
+            .iter()
+            .find(|entry| entry.kind == kind)
+            .map(|entry| entry.basename)
+            .expect("first-party executable table covers every client kind")
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -754,9 +852,26 @@ pub(super) fn trusted_sibling(
     let Some(parent) = daemon_executable.parent() else {
         return false;
     };
-    let trusted = parent.join(expected_basename);
-    match (trusted.canonicalize(), peer_executable.canonicalize()) {
-        (Ok(trusted), Ok(peer)) => trusted == peer,
+    if canonical_eq(&parent.join(expected_basename), peer_executable) {
+        return true;
+    }
+    // 托管守护是 `~/.smelt/bin/smeltd-<hash>.exe`，桌面是安装目录里的 `smelt.exe`。
+    // 只认守护目录的兄弟会把 GUI 拒掉。桌面拉起守护时写入 `SMELT_BUNDLE_DIR`。
+    #[cfg(windows)]
+    {
+        if let Some(bundle) = std::env::var_os("SMELT_BUNDLE_DIR") {
+            let bundle = PathBuf::from(bundle);
+            if canonical_eq(&bundle.join(expected_basename), peer_executable) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn canonical_eq(expected: &Path, peer: &Path) -> bool {
+    match (expected.canonicalize(), peer.canonicalize()) {
+        (Ok(expected), Ok(peer)) => expected == peer,
         _ => false,
     }
 }

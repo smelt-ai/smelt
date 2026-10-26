@@ -572,6 +572,44 @@ impl Workspace {
                                 },
                             ),
                         )
+                    } else if self.spaces.is_empty() {
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_4()
+                            .px_8()
+                            .child(
+                                div()
+                                    .text_size(px(28.))
+                                    .font_semibold()
+                                    .text_color(c_fg)
+                                    .child("添加远程机器"),
+                            )
+                            .child(
+                                div()
+                                    .max_w(px(420.))
+                                    .text_sm()
+                                    .text_center()
+                                    .text_color(c_muted)
+                                    .child(
+                                        "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
+                                    ),
+                            )
+                            .child(
+                                Button::new("empty-add-runtime")
+                                    .commit()
+                                    .capsule()
+                                    .label("添加远程机器")
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.open_settings_section(
+                                            crate::settings::SettingsSection::CollaborationRemote,
+                                            cx,
+                                        );
+                                    })),
+                            )
                     } else {
                         div()
                             .flex_1()

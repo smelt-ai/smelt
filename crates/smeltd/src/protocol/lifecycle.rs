@@ -1,10 +1,9 @@
 //! 守护进程级 op：version / shutdown / hook 状态。
 
 use super::super::*;
-use std::os::unix::net::UnixStream;
 
-pub(super) fn handle_version(
-    conn: UnixStream,
+pub(super) fn handle_version<C: ClientSocket>(
+    conn: C,
     sessions: &Sessions,
     exe_mtime: u64,
     daemon_fingerprint: Option<&str>,
@@ -36,8 +35,8 @@ pub(super) fn handle_version(
     );
 }
 
-pub(super) fn handle_shutdown(conn: UnixStream) {
-    graceful_shutdown(Some(conn), None);
+pub(super) fn handle_shutdown<C: ClientSocket>(conn: C) {
+    graceful_shutdown(Some(conn.into_client_conn()), None);
 }
 
 /// 停机只做一次。信号和 shutdown op 撞在一起时，后来的调用停在这里，
@@ -48,7 +47,7 @@ static SHUTDOWN_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// 没有则在回执写完后退出。回执一定在收割和 WAL checkpoint 之后，调用方才能去换
 /// `.app` / `.exe`。
 pub(crate) fn graceful_shutdown(
-    ack: Option<UnixStream>,
+    ack: Option<crate::ClientConn>,
     exec_exe: Option<std::path::PathBuf>,
 ) -> ! {
     use std::sync::atomic::Ordering;
@@ -122,19 +121,33 @@ pub(crate) fn graceful_shutdown(
             &serde_json::json!({ "ok": true }),
         );
         let _ = conn.flush();
-        let _ = conn.shutdown(std::net::Shutdown::Both);
+        let _ = ClientSocket::shutdown(&conn, std::net::Shutdown::Both);
     }
     if let Some(exe) = exec_exe {
-        use std::os::unix::process::CommandExt;
-        dlog(&format!("shutdown: exec {}", exe.display()));
-        let mut command = std::process::Command::new(&exe);
-        command
-            .env_remove("SMELTD_HANDOFF")
-            .env_remove("SMELTD_HANDOFF_SOCK")
-            .env_remove("SMELTD_DAEMON_FINGERPRINT");
-        let error = command.exec();
-        dlog(&format!("shutdown: exec {} 失败：{error}", exe.display()));
-        std::process::exit(1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            dlog(&format!("shutdown: exec {}", exe.display()));
+            let mut command = std::process::Command::new(&exe);
+            command
+                .env_remove("SMELTD_HANDOFF")
+                .env_remove("SMELTD_HANDOFF_SOCK")
+                .env_remove("SMELTD_DAEMON_FINGERPRINT");
+            let error = command.exec();
+            dlog(&format!("shutdown: exec {} 失败：{error}", exe.display()));
+            std::process::exit(1);
+        }
+        // 没有 exec：拉起接班进程，它等本进程退出、放掉监听再绑定。
+        #[cfg(windows)]
+        {
+            dlog(&format!("shutdown: 拉起接班守护 {}", exe.display()));
+            let mut successor = std::process::Command::new(&exe);
+            successor.env(crate::PREDECESSOR_PID_ENV, std::process::id().to_string());
+            if let Err(error) = smelt_sys::process::spawn_detached(&mut successor) {
+                dlog(&format!("shutdown: 拉起接班守护 {} 失败：{error}", exe.display()));
+                std::process::exit(1);
+            }
+        }
     }
     std::process::exit(0);
 }
@@ -172,8 +185,8 @@ fn save_active_automation_transcripts(
     }
 }
 
-pub(super) fn handle_agent_event_op(
-    conn: UnixStream,
+pub(super) fn handle_agent_event_op<C: ClientSocket>(
+    conn: C,
     v: &serde_json::Value,
     sessions: &Sessions,
     event_hub: &EventHubHandle,

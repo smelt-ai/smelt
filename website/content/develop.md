@@ -24,18 +24,34 @@ cargo build --bin smeltd
 
 ## 二进制与架构
 
-核心两个二进制（另有若干辅助二进制）：
+核心二进制：
 
 - **smelt**（`crates/smelt/`）—— GUI 本体：多项目 × 多标签、文件树、Git、智能体和自动化。
 - **smeltd**（`crates/smeltd/`）—— 后台守护，管 PTY / ACP 子进程生命周期，跟 GUI
   之间靠 Unix socket 通信（attach 时先回报真实尺寸，再发网格 keyframe 快照与
   增量输出，重放区间按 `replay_len` 划界）。就算 GUI 挂了，`smeltd` 照样把 shell
   养着；重开 GUI 按会话 id 自动 reattach。手机和另一台桌面经 iroh 连的也是它。
+- **smelt-pi** —— Pi 运行时单二进制，跑官方 JSONL RPC。`make smelt-pi` 走
+  `scripts/build-smelt-pi.sh`。装到用户机器上是 `~/.smelt/bin/smelt-pi`。受管 Bun
+  在 `~/.smelt/runtime`，只负责按需启动 ACP 适配器和 MCP 服务器。
 
 辅助二进制：`smelt-notify`（agent hook 状态上报，在
-`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-iroh-connect`
+`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App，退出后替换安装）、`smelt-iroh-connect`
 （iroh 调试）。没有 `gateway`、`smelt-task`、`smelt-iroh-host`。`crates/smelt-mobile`
 是给 Flutter 手机端用的 Rust 内核，经 `smelt-runtime-client` 连运行时，不是隧道。
+
+常用目标：
+
+```sh
+make dev          # 编译 release 并安装到 /Applications
+make smelt-pi     # 编译 smelt-pi
+make check-all    # clippy、shell、路径、测试、Pi Agent
+make test         # cargo nextest
+make ios          # scripts/build-ios.sh，在发版 tag 上出 iOS 包
+make dist-build   # macOS dmg
+```
+
+Linux 运行时包是 `scripts/package-linux.sh`。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)。
 
 两者解耦：`smelt` 可以单独跑（这时终端会话就跟着 GUI 生命周期走），也可以接上
 `smeltd` 拿到跨重启的会话持久化。打包发布时核心二进制会被塞进同一个
@@ -81,6 +97,10 @@ make dist-build
 - `crates/smelt-iroh/` —— iroh 传输，另有调试二进制 `smelt-iroh-connect`
 - `crates/smelt-mobile/`、`mobile/` —— 手机 Rust 内核与 Flutter App
 - `scripts/package-mac.sh` —— macOS 打包；`make dist` / `make dist-build` 是入口
+- `scripts/package-linux.sh` —— Linux 运行时 tar.gz
+- `scripts/build-smelt-pi.sh` —— 编译 `smelt-pi`
+- `scripts/build-ios.sh` —— `make ios`
+- `scripts/release.sh` —— 日期版本号 `YYYY.MDD.N`
 - `docs/workspace.md` —— 现行架构
 - `docs/local-storage.md` —— 两份 SQLite 各存什么
 

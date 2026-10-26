@@ -14,7 +14,11 @@ fn smelt_notify_path() -> std::path::PathBuf {
 /// managed 副本，避免“hook JSON 已升级、helper 仍是旧版”的半升级状态。rename 替换
 /// 不影响已经启动的旧 helper：它仍持有旧 inode，下一次 hook 自动使用新文件。
 pub fn sync_bundled_smelt_notify() -> std::io::Result<()> {
-    let bundled = std::env::current_exe()?.with_file_name("smelt-notify");
+    let bundled = std::env::current_exe()?.with_file_name(if cfg!(windows) {
+        "smelt-notify.exe"
+    } else {
+        "smelt-notify"
+    });
     if !bundled.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -30,7 +34,11 @@ pub fn sync_bundled_smelt_notify() -> std::io::Result<()> {
         )
     })?;
     std::fs::create_dir_all(dir)?;
-    let staged = dir.join("smelt-notify.next");
+    let staged = dir.join(if cfg!(windows) {
+        "smelt-notify.exe.next"
+    } else {
+        "smelt-notify.next"
+    });
     let _ = std::fs::remove_file(&staged);
     std::fs::copy(&bundled, &staged)?;
     #[cfg(unix)]
@@ -40,5 +48,21 @@ pub fn sync_bundled_smelt_notify() -> std::io::Result<()> {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&staged, permissions)?;
     }
-    std::fs::rename(staged, managed)
+    // 正在跑的 exe 映射着目标文件时，Windows 上直接 rename 覆盖会失败。
+    // 先把旧文件挪开，再把新文件换进去。
+    if std::fs::rename(&staged, &managed).is_err() {
+        let aside = dir.join(if cfg!(windows) {
+            "smelt-notify.exe.old"
+        } else {
+            "smelt-notify.old"
+        });
+        let _ = std::fs::remove_file(&aside);
+        std::fs::rename(&managed, &aside)?;
+        if let Err(error) = std::fs::rename(&staged, &managed) {
+            let _ = std::fs::rename(&aside, &managed);
+            return Err(error);
+        }
+        let _ = std::fs::remove_file(&aside);
+    }
+    Ok(())
 }

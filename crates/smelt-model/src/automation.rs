@@ -32,6 +32,32 @@ pub enum AutomationAction {
     },
 }
 
+/// 没有参数的 Shell 动作是一段脚本，不自己选解释器。
+fn inline_shell(script: &str) -> (String, Vec<String>) {
+    #[cfg(unix)]
+    {
+        (
+            "bash".to_string(),
+            vec!["-lc".to_string(), script.to_string()],
+        )
+    }
+    #[cfg(windows)]
+    {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        (
+            shell,
+            vec!["/d".to_string(), "/c".to_string(), script.to_string()],
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        (
+            "bash".to_string(),
+            vec!["-lc".to_string(), script.to_string()],
+        )
+    }
+}
+
 impl AutomationAction {
     pub fn agent(agent_definition_id: impl Into<String>, prompt: Option<String>) -> Self {
         Self::Agent {
@@ -47,12 +73,11 @@ impl AutomationAction {
         }
     }
 
-    /// 单行命令按 bash 脚本执行；带 args 时按 execve 直接启动。
+    /// 单行命令交给本机 shell：Unix 是 `bash -lc`，Windows 是 `cmd.exe /d /c`。
+    /// 带 args 时按原命令直接启动。
     pub fn shell_invocation(&self) -> Option<(String, Vec<String>)> {
         match self {
-            Self::Shell { command, args } if args.is_empty() => {
-                Some(("bash".to_string(), vec!["-lc".to_string(), command.clone()]))
-            }
+            Self::Shell { command, args } if args.is_empty() => Some(inline_shell(command)),
             Self::Shell { command, args } => Some((command.clone(), args.clone())),
             Self::Agent { .. } => None,
         }

@@ -13,7 +13,7 @@ use crate::{LocalConnector, RuntimeClient};
 /// 只给本机运行时的生命周期管理用（拉起、清理残留 socket、交给 agent 子进程）。
 /// 连运行时一律走 [`local_runtime`]。
 pub fn smeltd_sock_path() -> PathBuf {
-    let dir = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
+    let dir = smelt_paths::smelt_home().unwrap_or_else(|| std::env::temp_dir().join(".smelt"));
     let _ = std::fs::create_dir_all(&dir);
     dir.join("smeltd.sock")
 }

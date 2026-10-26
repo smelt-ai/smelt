@@ -2,7 +2,7 @@
 //!
 //! 领域逻辑留在各自模块；这里仅负责 wire 解码、能力发现、类型转换和统一错误。
 
-use std::os::unix::net::UnixStream;
+use super::ClientSocket;
 
 use serde::Serialize;
 use smelt_core::agent_definition_store::{self, AgentDefinitionError};
@@ -1236,8 +1236,8 @@ fn create_agent_conversation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_control(
-    mut conn: UnixStream,
+pub(crate) fn handle_control<C: ClientSocket>(
+    mut conn: C,
     payload: serde_json::Value,
     principal: &crate::devices::Principal,
     sessions: &Sessions,
@@ -1268,7 +1268,7 @@ pub(crate) fn handle_control(
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader};
-    use std::os::unix::net::UnixStream;
+    use smelt_runtime_client::UnixStream;
 
     use smelt_runtime_client::protocol::control::{
         CONTROL_API_VERSION, ControlErrorCode, ControlOutcome, ControlResponse, EmptyParams,

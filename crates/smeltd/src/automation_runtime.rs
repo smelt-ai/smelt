@@ -809,6 +809,10 @@ impl Driver {
         };
         if let Ok(pid) = i32::try_from(child.id()) {
             self.shell_pgids.insert(run.id.clone(), pid);
+            #[cfg(windows)]
+            if let Err(error) = smelt_sys::process::attach_running(pid as u32) {
+                eprintln!("[automation] 命令 pid={pid} 没能放进 Job：{error}");
+            }
         }
         if let Err(error) = std::thread::Builder::new()
             .name("smelt-automation-shell".into())
@@ -823,9 +827,12 @@ impl Driver {
             if let Some(pid) = self.shell_pgids.remove(&run.id)
                 && pid > 1
             {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
+                let _ = smelt_sys::process::signal_tree(
+                    pid as u32,
+                    smelt_sys::process::TreeSignal::Kill,
+                );
+                #[cfg(windows)]
+                smelt_sys::process::release_tree(pid as u32);
             }
             self.fail_run(&run, &format!("无法启动 Shell 执行线程: {error}"));
         }
@@ -847,9 +854,12 @@ impl Driver {
                 continue;
             };
             if pid > 1 {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
+                let _ = smelt_sys::process::signal_tree(
+                    pid as u32,
+                    smelt_sys::process::TreeSignal::Kill,
+                );
+                #[cfg(windows)]
+                smelt_sys::process::release_tree(pid as u32);
             }
         }
     }
@@ -1221,7 +1231,7 @@ mod lifecycle_tests {
                         id: "automation-1".into(),
                         name: "Morning report".into(),
                         enabled: true,
-                        workspace_dir: Some("/tmp".into()),
+                        workspace_dir: Some(test_workspace_dir()),
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes: 30,
                         }),
@@ -1314,7 +1324,7 @@ mod lifecycle_tests {
                         id: "later".into(),
                         name: "Later".into(),
                         enabled: true,
-                        workspace_dir: Some("/tmp".into()),
+                        workspace_dir: Some(test_workspace_dir()),
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes,
                         }),
@@ -1575,7 +1585,7 @@ mod lifecycle_tests {
                         id: "automation-1".into(),
                         name: "Morning report".into(),
                         enabled: true,
-                        workspace_dir: Some("/tmp".into()),
+                        workspace_dir: Some(test_workspace_dir()),
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes: 30,
                         }),
@@ -1732,11 +1742,11 @@ mod lifecycle_tests {
                         id: "automation-1".into(),
                         name: "Health check".into(),
                         enabled: true,
-                        workspace_dir: Some("/tmp".into()),
+                        workspace_dir: Some(test_workspace_dir()),
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes: 30,
                         }),
-                        action: smelt_core::automation::AutomationAction::shell("true", Vec::new()),
+                        action: smelt_core::automation::AutomationAction::shell("exit 0", Vec::new()),
                         sinks: Vec::new(),
                     }),
                 },
@@ -1775,12 +1785,16 @@ mod lifecycle_tests {
                         id: "automation-1".into(),
                         name: "Slow check".into(),
                         enabled: true,
-                        workspace_dir: Some("/tmp".into()),
+                        workspace_dir: Some(test_workspace_dir()),
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes: 30,
                         }),
                         action: smelt_core::automation::AutomationAction::shell(
-                            "sleep 0.4",
+                            if cfg!(windows) {
+                                "ping -n 2 127.0.0.1 >nul"
+                            } else {
+                                "sleep 0.4"
+                            },
                             Vec::new(),
                         ),
                         sinks: Vec::new(),
@@ -1836,12 +1850,12 @@ mod lifecycle_tests {
                         id: "automation-cancel-shell".into(),
                         name: "Cancelable command".into(),
                         enabled: true,
-                        workspace_dir: Some("/tmp".into()),
+                        workspace_dir: Some(test_workspace_dir()),
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes: 30,
                         }),
                         action: smelt_core::automation::AutomationAction::shell(
-                            format!("sleep 0.5; printf leaked > {}", marker.display()),
+                            cancelled_shell_script(&marker),
                             Vec::new(),
                         ),
                         sinks: Vec::new(),
@@ -1899,6 +1913,28 @@ mod lifecycle_tests {
     }
 }
 
+#[cfg(test)]
+fn test_workspace_dir() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
+/// 先停一小会儿再写标记。取消必须在写入前杀掉进程；等待比这段停顿长，
+/// 杀不掉的话标记会出现。
+#[cfg(test)]
+fn cancelled_shell_script(marker: &std::path::Path) -> String {
+    #[cfg(unix)]
+    {
+        format!("sleep 0.5; printf leaked > {}", marker.display())
+    }
+    #[cfg(windows)]
+    {
+        let path = marker.display().to_string().replace('\'', "''");
+        format!(
+            "powershell -NoProfile -Command \"Start-Sleep -Milliseconds 400; Set-Content -LiteralPath '{path}' -Value leaked\""
+        )
+    }
+}
+
 fn pi_full_access_action() -> AcpUserAction {
     AcpUserAction::SetConfigOption {
         config_id: "mode".to_string(),
@@ -1939,7 +1975,7 @@ mod tests {
                         id: "automation-1".into(),
                         name: "Morning report".into(),
                         enabled: true,
-                        workspace_dir: Some("/tmp".into()),
+                        workspace_dir: Some(test_workspace_dir()),
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes: 30,
                         }),

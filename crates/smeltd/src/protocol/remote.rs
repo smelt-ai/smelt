@@ -1,9 +1,8 @@
 //! 远程会话目录与对话改名 op。
 
 use super::super::*;
-use std::os::unix::net::UnixStream;
 
-pub(super) fn handle_remote_sessions_op(conn: UnixStream, remote_sessions: &RemoteSessions) {
+pub(super) fn handle_remote_sessions_op<C: ClientSocket>(conn: C, remote_sessions: &RemoteSessions) {
     let mut c = conn;
     let response = match remote_session_snapshot(remote_sessions) {
         Ok(snapshot) => serde_json::json!({ "ok": true, "remote_sessions": snapshot }),
@@ -12,8 +11,8 @@ pub(super) fn handle_remote_sessions_op(conn: UnixStream, remote_sessions: &Remo
     let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
-pub(super) fn handle_conversation_rename(
-    conn: UnixStream,
+pub(super) fn handle_conversation_rename<C: ClientSocket>(
+    conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
@@ -58,8 +57,8 @@ pub(super) fn handle_conversation_rename(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
-pub(super) fn handle_remote_rename_resume(
-    conn: UnixStream,
+pub(super) fn handle_remote_rename_resume<C: ClientSocket>(
+    conn: C,
     v: &serde_json::Value,
     remote_sessions: &RemoteSessions,
     event_hub: &EventHubHandle,
