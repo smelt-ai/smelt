@@ -976,15 +976,18 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     if !read_until_peer_closes(&mut reader, Duration::from_secs(10)) {
         return UpgradeOutcome::Failed;
     }
-    // Windows 没有 fd 交接。旧进程退出后会话已经没了，这里再拉起一份新守护。
+    // Windows 没有 fd 交接：旧进程退出后，它拉起的接班进程才绑定监听。这里等接班进程
+    // 起来，不自己拉。自己拉会和接班进程抢监听，抢到的是启动名指着的旧映像。
     #[cfg(windows)]
     {
-        ensure_daemon_running();
-        return if matches!(probe_daemon(), DaemonProbe::Running { .. }) {
-            UpgradeOutcome::Upgraded
-        } else {
-            UpgradeOutcome::Failed
-        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if is_successor_daemon(predecessor.as_ref(), daemon_info().as_ref()) {
+                return UpgradeOutcome::Upgraded;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        return UpgradeOutcome::Failed;
     }
     #[cfg(unix)]
     if is_successor_daemon(predecessor.as_ref(), daemon_info().as_ref()) {

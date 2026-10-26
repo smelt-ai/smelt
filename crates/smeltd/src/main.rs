@@ -2403,12 +2403,18 @@ fn main() {
         .ok()
         .and_then(|fd| fd.parse::<RawFd>().ok());
     let env_daemon_fingerprint = std::env::var("SMELTD_DAEMON_FINGERPRINT").ok();
+    #[cfg(windows)]
+    let predecessor_pid = std::env::var(PREDECESSOR_PID_ENV)
+        .ok()
+        .and_then(|pid| pid.parse::<i32>().ok());
     // Edition 2024：`remove_var` 标为 unsafe（多线程改 env 非同步）。此时只有不访问
     // 环境变量的 stderr tee 读线程，尚未启动任何会并发读环境的业务线程。
     unsafe {
         std::env::remove_var("SMELTD_HANDOFF");
         std::env::remove_var("SMELTD_HANDOFF_SOCK");
         std::env::remove_var("SMELTD_DAEMON_FINGERPRINT");
+        #[cfg(windows)]
+        std::env::remove_var(PREDECESSOR_PID_ENV);
     }
     // 进程指纹启动时钉死：env（handoff successor / GUI 拉起传入）优先，否则对
     // current_exe 文件哈希一次。此后进程生命期内不再重哈希磁盘——StageDiskOnly
@@ -2434,6 +2440,13 @@ fn main() {
     // 即可。读取异常时 fail-closed，绝不把损坏文档当成空目录发布给 GUI。
     let remote_sessions = new_remote_sessions();
     let workspace_menu = new_workspace_menu();
+    // 升级的接班进程：前任回执后才退出，退出前监听还在它手里。等它退了再绑。
+    #[cfg(windows)]
+    if let Some(pid) = predecessor_pid
+        && !smelt_core::process_wait::wait_until_exit(pid, Duration::from_secs(30))
+    {
+        dlog(&format!("升级接班：前任 {pid} 30 秒内没退出，照常尝试绑定"));
+    }
     let listener = match bind_fresh_daemon(&path) {
         Ok(Some(l)) => l,
         Ok(None) => return,
@@ -2453,6 +2466,15 @@ fn main() {
         drop(listener);
         let _ = std::fs::remove_file(&path);
         std::process::exit(1);
+    }
+    // 接班成功、已在服务，才把启动名拨到自己这份映像。
+    #[cfg(windows)]
+    if predecessor_pid.is_some() {
+        let retargeted = daemon_executable_path()
+            .and_then(|exe| smelt_core::daemon_image::retarget_launch_after_commit(&exe));
+        if let Err(error) = retargeted {
+            dlog(&format!("升级接班：改写启动名失败：{error}"));
+        }
     }
     // 崩溃恢复：落盘有内容就说明上次非正常退出（正常 shutdown 会清空）。
     // 灌进身份目录，runtime=false，保留最后相位。
@@ -4108,6 +4130,22 @@ fn action_payload(kind: Option<&str>, text: Option<&str>) -> Result<Vec<u8>, &'s
 /// 不持有 `ctl` 或 `out` 成员锁进入 kernel，因此冻结 GUI 不会把升级链路永久焊死。
 /// （极小残余窗口：某泵线程恰好已 read 出 ≤8KB 还没拿到锁，这部分随 exec 丢失。
 /// 丢的只是"显示字节"不是输入；重连后的 jolt 全屏重绘会盖掉，可接受。）
+/// 升级换到哪份映像。可选 `"exe"` 指定不可变映像；没传就是本进程钉住的那份文件。
+fn upgrade_target(req: &serde_json::Value) -> Result<std::path::PathBuf, String> {
+    if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        let path = std::path::PathBuf::from(p);
+        if !path.is_file() {
+            return Err(format!("exe 不存在：{}", path.display()));
+        }
+        return Ok(path);
+    }
+    daemon_executable_path().map_err(|error| format!("找不到当前守护映像：{error}"))
+}
+
+/// Windows 升级时接班进程从这个变量拿到前任的 pid，等它退出再绑定监听。
+#[cfg(windows)]
+const PREDECESSOR_PID_ENV: &str = "SMELTD_PREDECESSOR_PID";
+
 fn handle_upgrade<C: ClientSocket>(
     conn: C,
     req: &serde_json::Value,
@@ -4117,13 +4155,32 @@ fn handle_upgrade<C: ClientSocket>(
 ) {
     #[cfg(windows)]
     {
-        let _ = (req, sessions, acp_sessions, listen_fd);
+        // Windows 不交接 fd。拉起目标映像当接班进程：它等本进程退出、放掉监听再绑定，
+        // 然后把启动名拨到自己。本进程回执后退出，终端会话随之结束。
+        // 不能只退出等桌面再拉：没有桌面的运行时（推送升级、空闲自升级）就没人拉了。
+        let _ = (sessions, acp_sessions, listen_fd);
         let mut c = conn;
+        let spawned = upgrade_target(req).and_then(|exe| {
+            let mut successor = std::process::Command::new(&exe);
+            successor.env(PREDECESSOR_PID_ENV, std::process::id().to_string());
+            smelt_sys::process::spawn_detached(&mut successor)
+                .map(drop)
+                .map_err(|error| format!("拉起接班守护 {} 失败：{error}", exe.display()))
+        });
+        if let Err(error) = spawned {
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": error }),
+            );
+            return;
+        }
         let _ = smelt_runtime_client::protocol::write_json_line(
             &mut c,
             &serde_json::json!({ "ok": true }),
         );
-        dlog("upgrade: Windows 不交接 fd，回复后退出，终端会话随之结束");
+        let _ = c.shutdown(Shutdown::Both);
+        dlog("upgrade: 接班守护已拉起，本进程退出");
+        cleanup_sidecar_services();
         std::process::exit(0);
     }
     #[cfg(unix)]
@@ -4153,28 +4210,15 @@ fn handle_upgrade<C: ClientSocket>(
     }
 
     // busy 是可重试的瞬时状态，先于映像校验报告。
-    // 可选 `"exe"`：spawn 指定的不可变映像做 successor。启动名要等 COMMIT 之后
-    // 再拨过去。未传则 spawn 本进程钉住的那份文件。
-    let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-        let path = std::path::PathBuf::from(p);
-        if !path.is_file() {
+    // 启动名要等 COMMIT 之后再拨过去。
+    let exe = match upgrade_target(req) {
+        Ok(exe) => exe,
+        Err(error) => {
             let _ = smelt_runtime_client::protocol::write_json_line(
                 &mut c,
-                &serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) }),
+                &serde_json::json!({ "ok": false, "err": error }),
             );
             return;
-        }
-        path
-    } else {
-        match daemon_executable_path() {
-            Ok(p) => p,
-            Err(error) => {
-                let _ = smelt_runtime_client::protocol::write_json_line(
-                    &mut c,
-                    &serde_json::json!({ "ok": false, "err": format!("找不到当前守护映像：{error}") }),
-                );
-                return;
-            }
         }
     };
 
