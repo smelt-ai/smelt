@@ -5,9 +5,9 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Mutex, TryLockError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
@@ -265,30 +265,6 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     }
 }
 
-/// 守护在跑时只发布新映像并挂上 `smeltd.pending`。启动名留到交接提交之后再拨。
-fn stage_managed_daemon_update(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let dir = managed_daemon_dir();
-    std::fs::create_dir_all(&dir)?;
-    stage_daemon_update_in(&dir, src)
-}
-
-/// `dir` 由调用方给。测试必须用临时目录，不能写真实的 `managed_daemon_path()`。
-fn stage_daemon_update_in(
-    dir: &std::path::Path,
-    src: &std::path::Path,
-) -> std::io::Result<std::path::PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let image = smelt_sys::daemon_image::publish_image(dir, src)?;
-    smelt_sys::daemon_image::retarget_pending_symlink(dir, &image)?;
-    reap_managed_daemon_images(dir);
-    eprintln!(
-        "[workspace] 已暂存守护更新 {} → {}",
-        src.display(),
-        image.display()
-    );
-    Ok(image)
-}
-
 fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
     smelt_sys::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
 }
@@ -543,7 +519,7 @@ pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
 /// 拉起 `daemon` 并等到套接字可连。已经在听就直接返回。
 ///
 /// 不经过 `ensure_managed_daemon_current`：调用方可能正握着安装锁。
-fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Result<UnixStream> {
+fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Result<RuntimeStream> {
     let path = sock_path();
     if let Ok(stream) = local_runtime().connect() {
         return Ok(stream);
@@ -813,23 +789,6 @@ fn is_successor_daemon(before: Option<&DaemonInfo>, now: Option<&DaemonInfo>) ->
         (before.started_at, now.started_at),
         (Some(old), Some(new)) if old != new
     )
-}
-
-/// 旧守护写完升级回执就会退出，并关掉这条连接。
-/// 读到 EOF、对端重置，都是它已经走了。到 `timeout` 还没关，返回 false。
-fn read_until_peer_closes(reader: &mut BufReader<RuntimeStream>, timeout: Duration) -> bool {
-    let _ = reader.get_ref().set_read_timeout(Some(timeout));
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(_) => true,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::TimedOut
-                || error.kind() == std::io::ErrorKind::WouldBlock =>
-        {
-            false
-        }
-        Err(_) => true,
-    }
 }
 
 /// 把守护换到另一份映像之后的结果。
@@ -1209,38 +1168,6 @@ mod successor_daemon_tests {
         assert!(!is_successor_daemon(Some(&old), None));
         assert!(is_successor_daemon(None, Some(&old)));
     }
-
-    #[test]
-    fn peer_close_is_observed_before_the_deadline() {
-        let (ours, theirs) = RuntimeStream::pair().expect("socketpair");
-        let mut reader = BufReader::new(ours);
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(200));
-            drop(theirs);
-        });
-        let started = Instant::now();
-        assert!(read_until_peer_closes(&mut reader, Duration::from_secs(5)));
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "对端关掉连接后应马上返回，实际 {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[test]
-    fn open_peer_waits_out_the_deadline() {
-        let (ours, theirs) = RuntimeStream::pair().expect("socketpair");
-        let mut reader = BufReader::new(ours);
-        let started = Instant::now();
-        assert!(!read_until_peer_closes(
-            &mut reader,
-            Duration::from_millis(200)
-        ));
-        let elapsed = started.elapsed();
-        assert!(elapsed >= Duration::from_millis(150), "实际 {elapsed:?}");
-        assert!(elapsed < Duration::from_secs(2), "实际 {elapsed:?}");
-        drop(theirs);
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -1285,38 +1212,6 @@ mod install_commit_tests {
             "没人映射的文件必须允许替换"
         );
         std::fs::remove_file(fresh).unwrap();
-    }
-
-    #[test]
-    fn staging_an_update_does_not_replace_the_live_launch_file() {
-        use std::os::unix::fs::MetadataExt;
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-stage-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let launch = dir.join("smeltd");
-        std::fs::write(&launch, b"running-image").unwrap();
-        let launch_inode = std::fs::metadata(&launch).unwrap().ino();
-        let src = dir.join("src");
-        std::fs::write(&src, b"pending-image").unwrap();
-
-        let dest = stage_daemon_update_in(&dir, &src).unwrap();
-        assert_eq!(std::fs::read(&launch).unwrap(), b"running-image");
-        assert_eq!(std::fs::metadata(&launch).unwrap().ino(), launch_inode);
-        assert_eq!(std::fs::read(&dest).unwrap(), b"pending-image");
-        assert_eq!(
-            smelt_sys::daemon_image::pending_image(&dir).as_deref(),
-            Some(std::fs::canonicalize(&dest).unwrap().as_path()),
-            "空闲升级必须 exec 新映像，不能再 exec 正在跑的旧文件"
-        );
-
-        let image_inode = std::fs::metadata(&dest).unwrap().ino();
-        let again = stage_daemon_update_in(&dir, &src).unwrap();
-        assert_eq!(again, dest);
-        assert_eq!(std::fs::metadata(&again).unwrap().ino(), image_inode);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -1374,6 +1269,7 @@ mod outdated_fingerprint_tests {
 mod managed_daemon_ensure_tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
     fn managed_test_file(name: &str) -> std::path::PathBuf {
