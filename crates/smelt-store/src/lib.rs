@@ -60,7 +60,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 24;
+pub const STORE_SCHEMA_VERSION: u32 = 25;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -1782,6 +1782,16 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 24 {
+            apply_v25_cli_exited(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v24 形状：补上 cli_exited 后与当前形状逐字一致，就说明原来正是 v24。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 23 {
             apply_v24_drop_deepseek_harness(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2196,6 +2206,18 @@ mod imp {
             .any(|column| column == "harness")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V23_TO_V24)?;
+        }
+        apply_v25_cli_exited(transaction)
+    }
+
+    /// v25 记下 CLI 是否已经退出。对话 id 退出后仍留着，续接与否看这一列。
+    /// 已经有 `cli_exited` 列的库跳过。
+    fn apply_v25_cli_exited(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_columns(transaction, "published_session")?
+            .iter()
+            .any(|column| column == "cli_exited")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V24_TO_V25)?;
         }
         Ok(())
     }
@@ -5995,6 +6017,7 @@ mod tests {
                 tokens_used: Some(42),
                 branch: Some("feat/store".into()),
                 dirty_files_json: b"[\"a.rs\"]".to_vec(),
+                cli_exited: false,
             }],
         };
         store.put_published_session_snapshot(&published).unwrap();

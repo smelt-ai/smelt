@@ -41,17 +41,22 @@ pub(crate) struct SessionState {
     /// `session_title`）直接替换。还没有名字时，首条能抽出标题的 prompt 写一次。
     /// 已有名字不被后来的 prompt 改掉。换对话时清空。OSC 0/2 不是会话名。
     pub(crate) title: Option<String>,
-    /// 该终端此刻正在对话的 provider 会话 id（Copilot `sessionId` 等）。由每条
-    /// hook 携带，因此 TUI 内部 `/resume`、退出重开都会自动改写，不需要另外的
-    /// 握手或代次推断。None = 这家 provider 的 hook 不带 id，还没有事件到达，
-    /// 或 CLI 进程已经退出（`SessionEnded`）。
+    /// 该终端绑定的 provider 会话 id（Copilot `sessionId` 等）。由每条 hook 携带，
+    /// 因此 TUI 内部 `/resume`、退出重开都会自动改写，不需要另外的握手或代次推断。
+    /// None = 这家 provider 的 hook 不带 id，或还没有事件到达。
     ///
     /// 它是「侧栏这条会话对应哪段历史存档」的唯一可信来源：重命名据此写入
-    /// 历史标题覆盖层，标题解析也据此跟随对话切换。也是守护重启后续接 CLI 的
-    /// 唯一依据：进程退出后这里被清掉，启动命令即便就是这家 CLI，也不会再
-    /// `--resume` 一段已经结束的对话。下一次 `SessionStarted` 带上新 id 再重新绑定。
+    /// 历史标题覆盖层，标题解析、复制会话 id 也据此跟随。CLI 进程退出
+    /// （`SessionEnded`）之后 id 仍留着，桌面退出后还要对上这段对话。
+    /// 能不能续接不看这里，看 [`Self::cli_exited`]。
     #[serde(default)]
     pub(crate) conversation_id: Option<String>,
+    /// CLI 进程已经退出、终端回到 shell。`SessionEnded` 置位；之后又有
+    /// `SessionStarted`，或相位门控放行的活事件，再清掉。对话 id 不受影响。
+    /// 为 true 时这条终端不能 `--resume`（见 `resume_of`）。不发 SessionEnd 的
+    /// provider 一直是 false。
+    #[serde(default)]
+    pub(crate) cli_exited: bool,
     pub(crate) phase: Phase,
     /// unix 秒。「空转多久了」靠它算——作战地图用。
     pub(crate) phase_since: u64,
@@ -118,6 +123,7 @@ impl Default for SessionState {
             agent_token: String::new(),
             title: None,
             conversation_id: None,
+            cli_exited: false,
             phase: Phase::Idle,
             phase_since: 0,
             pending_question: None,
@@ -238,9 +244,9 @@ enum BindingTransition {
 /// 换对话时（id 变了）清掉上一段对话的会话名。
 /// 留着就会让侧栏顶着上一段对话的名字。
 ///
-/// `SessionEnded` 会把对话 id 清掉，下一次 `SessionStarted` 看起来像第一次绑定。
-/// 只要已经有过回合、名字还在，这仍是新进程换上一段对话，名字一样要让位。
-/// 还没有任何回合时的第一次绑定不清名字。
+/// 还没有对话 id 时的第一次绑定不清名字：`None` 变成 `Some` 不是换对话。
+/// CLI 退出只把 `cli_exited` 置上，id 留着，所以退出后再起一段新对话仍然走
+/// 「id 变了」，名字会让位；再 `--resume` 同一段则是 `Same`，名字留着。
 fn switch_conversation(state: &mut SessionState, event: &AgentEvent) -> BindingTransition {
     if matches!(
         event.kind,
@@ -259,11 +265,7 @@ fn switch_conversation(state: &mut SessionState, event: &AgentEvent) -> BindingT
     if state.conversation_id.as_deref() == Some(id) {
         return BindingTransition::Same;
     }
-    let ended_process_starting_again = state.conversation_id.is_none()
-        && event.kind == AgentEventKind::SessionStarted
-        && state.title.is_some()
-        && state.turn_events;
-    if state.conversation_id.is_some() || ended_process_starting_again {
+    if state.conversation_id.is_some() {
         state.title = None;
     }
     state.conversation_id = Some(id.to_string());
@@ -314,6 +316,15 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
         state.provider = Some(provider.id().to_string());
     }
     let _ = switch_conversation(state, event);
+    // 进程退出和对话身份分开。SessionEnded 无条件记下退出，写在相位门控之前：
+    // 回合已经 Finished 时 EndProcess 不改相位，退出标记一样要落下。之后
+    // `SessionStarted`，或相位门控放行的活事件，说明进程又在跑，再清掉。
+    // 回合已关闭之后的迟到进度不放行，也不把退出标记抹掉。
+    if occupancy == Occupancy::EndProcess {
+        state.cli_exited = true;
+    } else if event.kind == AgentEventKind::SessionStarted || allow {
+        state.cli_exited = false;
+    }
 
     match occupancy {
         Occupancy::Metadata => {
@@ -384,14 +395,9 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
             }
         }
         Occupancy::EndProcess => {
-            // CLI 进程已经退出，终端回到 shell，不再有进行中的对话。
-            // 清掉对话 id 之后 `resume_launch` 拼不出 `--resume`，停机也不会把这个
-            // 终端当成还能续接的留下。必须写在下面的 `if allow` 之前：回合已经
-            // Finished 时 EndProcess 不改相位，但绑定一样作废。本条 hook 自己也带
-            // id，上面的 `switch_conversation` 刚写过，所以要在那之后清。
-            // provider 和 title 留着：侧栏图标、手机端 agent 标签和已经发布的会话名
-            // 不靠这段对话 id。不发 SessionEnd 的 provider 走不到这里，见 `terminal_resume`。
-            state.conversation_id = None;
+            // 退出标记在上面已经落下，对话 id 留着。能不能续接看 `cli_exited`
+            // （`resume_of`），不靠把身份清掉。provider 和 title 同样留着。
+            // 不发 SessionEnd 的 provider 走不到这里，见 `terminal_resume`。
             if allow {
                 let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Dead);
                 state.pending_question = None;
@@ -680,12 +686,12 @@ mod agent_event_reducer_tests {
         assert_eq!(dead.phase, Phase::Thinking);
     }
 
-    /// CLI `/exit` 回到 shell：完成过的回合相位不动，但续接绑定必须作废。
-    /// SessionEnd hook 自己也带对话 id；清绑定发生在 `switch_conversation` 之后，
-    /// 否则这条事件会把刚清掉的 id 写回去。下一次 SessionStart 再重新绑定。
+    /// CLI `/exit` 回到 shell：完成过的回合相位和对话身份都留着，只是进程已经退出，
+    /// 停机不续接。零回合退出后再起另一段对话，身份换了，自定义标题让位。
     #[test]
-    fn session_end_drops_the_resume_binding_and_a_later_start_rebinds() {
+    fn session_end_keeps_the_conversation_and_a_later_start_rebinds() {
         let mut state = SessionState {
+            id: "finished".into(),
             launch: Some("claude".into()),
             title: Some("这段对话".into()),
             ..Default::default()
@@ -704,34 +710,88 @@ mod agent_event_reducer_tests {
         ended.conversation_id = Some("conv-1".into());
         apply_agent_event(&mut state, &ended);
         assert_eq!(state.phase, Phase::Succeeded);
-        assert_eq!(state.conversation_id, None);
+        assert_eq!(state.conversation_id.as_deref(), Some("conv-1"));
+        assert!(state.cli_exited);
         assert_eq!(state.provider.as_deref(), Some("claude"));
         assert_eq!(state.title.as_deref(), Some("这段对话"));
         assert_eq!(state.launch.as_deref(), Some("claude"));
+        assert_not_resumable(&state);
 
         let mut again = AgentEvent::new("claude", AgentEventKind::SessionStarted);
         again.conversation_id = Some("conv-2".into());
         apply_agent_event(&mut state, &again);
         assert_eq!(state.conversation_id.as_deref(), Some("conv-2"));
+        assert!(!state.cli_exited);
         assert_eq!(state.phase, Phase::Succeeded);
-        assert_eq!(state.provider.as_deref(), Some("claude"));
-        assert_eq!(state.title, None, "新进程不能顶着上一段对话的名字");
-    }
+        assert_eq!(state.title, None, "新对话不能顶着上一段的名字");
 
-    /// 还没有回合时的第一次绑定不是「换对话」，预先放着的名字要留着。
-    /// 和上面 SessionEnded 之后的 SessionStarted 分开：那边已经有过回合。
-    #[test]
-    fn the_first_session_start_keeps_an_existing_title() {
-        let mut state = SessionState {
-            title: Some("还没有对话".into()),
+        let mut fresh = SessionState {
+            id: "zero-turn".into(),
+            launch: Some("claude".into()),
+            title: Some("自定义标题".into()),
             ..Default::default()
         };
-        let mut started = AgentEvent::new("claude", AgentEventKind::SessionStarted);
-        started.conversation_id = Some("conv-1".into());
-        apply_agent_event(&mut state, &started);
-        assert_eq!(state.conversation_id.as_deref(), Some("conv-1"));
-        assert!(!state.turn_events);
-        assert_eq!(state.title.as_deref(), Some("还没有对话"));
+        let mut first = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        first.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut fresh, &first);
+        assert_eq!(fresh.conversation_id.as_deref(), Some("conv-1"));
+        assert!(!fresh.cli_exited);
+        assert!(!fresh.turn_events);
+        assert_eq!(fresh.title.as_deref(), Some("自定义标题"));
+
+        let mut ended = AgentEvent::new("claude", AgentEventKind::SessionEnded);
+        ended.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut fresh, &ended);
+        assert_eq!(fresh.conversation_id.as_deref(), Some("conv-1"));
+        assert!(fresh.cli_exited);
+        assert_eq!(fresh.title.as_deref(), Some("自定义标题"));
+
+        let mut resumed = fresh.clone();
+        let mut same = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        same.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut resumed, &same);
+        assert_eq!(resumed.conversation_id.as_deref(), Some("conv-1"));
+        assert!(!resumed.cli_exited);
+        assert_eq!(resumed.title.as_deref(), Some("自定义标题"));
+
+        let mut next = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        next.conversation_id = Some("conv-2".into());
+        apply_agent_event(&mut fresh, &next);
+        assert_eq!(fresh.conversation_id.as_deref(), Some("conv-2"));
+        assert!(!fresh.cli_exited);
+        assert_eq!(fresh.title, None);
+    }
+
+    /// 退出后的对话 id 还在，但目录不把这条终端留下，重新打开也不 `--resume`。
+    fn assert_not_resumable(state: &SessionState) {
+        let _guard = super::super::session_directory::DIRECTORY_TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "smelt-session-end-reducer-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("SMELT_GHOST_SESSIONS_DIR", &dir) };
+
+        let directory = super::super::session_directory::SessionDirectory::new();
+        let mut live = state.clone();
+        live.runtime = true;
+        directory.upsert(&live);
+        let mut ghost = live.clone();
+        ghost.id = format!("{}-ghost", state.id);
+        ghost.runtime = false;
+        directory.upsert(&ghost);
+        assert_eq!(directory.resume_launch(&ghost.id), None);
+
+        let terminals = std::collections::HashSet::from([state.id.clone()]);
+        directory.keep_resumable_terminals(&terminals);
+        let next = super::super::session_directory::SessionDirectory::restore_from_disk();
+        assert!(
+            next.snapshot().is_empty(),
+            "已退出的 CLI 不能留到下次启动"
+        );
+        assert_eq!(next.resume_launch(&state.id), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
