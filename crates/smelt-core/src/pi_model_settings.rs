@@ -585,7 +585,11 @@ fn wait_for_dir_delete(path: &Path, timeout: std::time::Duration) {
     {
         wait_for_dir_delete_inotify(path, timeout);
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        wait_for_dir_delete_windows(path, timeout);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let deadline = std::time::Instant::now() + timeout;
         while path.exists() {
@@ -593,9 +597,62 @@ fn wait_for_dir_delete(path: &Path, timeout: std::time::Duration) {
             if remaining.is_zero() {
                 return;
             }
+            // 轮询例外：其余平台（iOS / Android）没接目录通知，一次睡完又会让拿锁晚到
+            // 截止才动；周期 50ms，上限是调用方给的 timeout（不超过 30s）。
             std::thread::park_timeout(remaining.min(std::time::Duration::from_millis(50)));
         }
     }
+}
+
+/// Windows 没法对目录自己挂「被删」通知，改在父目录上等目录名变化
+/// （`FILE_NOTIFY_CHANGE_DIR_NAME`，删子目录会触发）。父目录里别的目录增删也会
+/// 叫醒，所以每次醒来都再查一遍锁目录还在不在。
+#[cfg(windows)]
+fn wait_for_dir_delete_windows(path: &Path, timeout: std::time::Duration) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NOTIFY_CHANGE_DIR_NAME, FindCloseChangeNotification, FindFirstChangeNotificationW,
+        FindNextChangeNotification,
+    };
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+        park_without_dir_notification(timeout);
+        return;
+    };
+    let wide: Vec<u16> = parent
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle =
+        unsafe { FindFirstChangeNotificationW(wide.as_ptr(), 0, FILE_NOTIFY_CHANGE_DIR_NAME) };
+    if handle == INVALID_HANDLE_VALUE {
+        if path.exists() {
+            park_without_dir_notification(timeout);
+        }
+        return;
+    }
+    // 通知挂上之后才查：挂之前就删掉的不会再来通知，这里直接看到不在。
+    let deadline = std::time::Instant::now() + timeout;
+    while path.exists() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        // `INFINITE` 是 u32::MAX，换算出来的毫秒数不能撞上它。
+        let millis = u32::try_from(remaining.as_millis())
+            .unwrap_or(u32::MAX)
+            .clamp(1, u32::MAX - 1);
+        if unsafe { WaitForSingleObject(handle, millis) } != WAIT_OBJECT_0 {
+            break;
+        }
+        if unsafe { FindNextChangeNotification(handle) } == 0 {
+            break;
+        }
+    }
+    unsafe { FindCloseChangeNotification(handle) };
 }
 
 #[cfg(target_os = "macos")]
@@ -604,12 +661,12 @@ fn wait_for_dir_delete_kqueue(path: &Path, timeout: std::time::Duration) {
     use std::os::unix::ffi::OsStrExt;
 
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        std::thread::park_timeout(timeout);
+        park_without_dir_notification(timeout);
         return;
     };
     let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
     if fd < 0 && path.exists() {
-        std::thread::park_timeout(timeout);
+        park_without_dir_notification(timeout);
         return;
     }
     if fd < 0 {
@@ -618,7 +675,7 @@ fn wait_for_dir_delete_kqueue(path: &Path, timeout: std::time::Duration) {
     let dir = unsafe { OwnedFd::from_raw_fd(fd) };
     let kq = unsafe { libc::kqueue() };
     if kq < 0 {
-        std::thread::park_timeout(timeout);
+        park_without_dir_notification(timeout);
         return;
     }
     let kq = unsafe { OwnedFd::from_raw_fd(kq) };
@@ -638,7 +695,7 @@ fn wait_for_dir_delete_kqueue(path: &Path, timeout: std::time::Duration) {
         )
     };
     if armed < 0 {
-        std::thread::park_timeout(timeout);
+        park_without_dir_notification(timeout);
         return;
     }
     if !path.exists() {
@@ -672,12 +729,12 @@ fn wait_for_dir_delete_inotify(path: &Path, timeout: std::time::Duration) {
     use std::os::unix::ffi::OsStrExt;
 
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        std::thread::park_timeout(timeout);
+        park_without_dir_notification(timeout);
         return;
     };
     let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
     if fd < 0 {
-        std::thread::park_timeout(timeout);
+        park_without_dir_notification(timeout);
         return;
     }
     let notify = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -685,7 +742,7 @@ fn wait_for_dir_delete_inotify(path: &Path, timeout: std::time::Duration) {
         libc::inotify_add_watch(notify.as_raw_fd(), c_path.as_ptr(), libc::IN_DELETE_SELF)
     };
     if watch < 0 && path.exists() {
-        std::thread::park_timeout(timeout);
+        park_without_dir_notification(timeout);
         return;
     }
     if watch < 0 {
@@ -714,6 +771,14 @@ fn wait_for_dir_delete_inotify(path: &Path, timeout: std::time::Duration) {
             return;
         }
     }
+}
+
+/// 目录通知挂不上时（路径里有 NUL、kqueue / inotify / 通知句柄用尽）的退路。
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn park_without_dir_notification(timeout: std::time::Duration) {
+    // 轮询例外：挂不上目录通知就没有「锁目录被删」的事件可等，只能一次睡完再让调用方
+    // 重试 mkdir；周期等于这次的 timeout，上限是锁的陈旧时间与放弃时间里更早的那个（30s）。
+    std::thread::park_timeout(timeout);
 }
 
 fn update_auth_json(
