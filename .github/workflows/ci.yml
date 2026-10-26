@@ -27,6 +27,7 @@ jobs:
       rust: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.rust == 'true' }}
       mobile: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.mobile == 'true' }}
       android: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.android == 'true' }}
+      pi-agent: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.pi-agent == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -69,11 +70,15 @@ jobs:
               - 'crates/smelt-pairing/**'
               - 'crates/smelt-event-protocol/**'
               - 'crates/smelt-paths/**'
+            pi-agent:
+              - *workflow
+              - 'scripts/fetch-bun.sh'
+              - 'packages/pi-agent/**'
 
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    # GPUI 只在 macOS 上编得过，且 runner 必须是 Apple Silicon（同 release.yml）。
+    # 整个 workspace 都编（GPUI 在 Linux 上编不过），runner 要 Apple Silicon（同 release.yml）。
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -92,10 +97,8 @@ jobs:
       # 漂移），加上去只会一上来就红，把真正的信号淹掉。要么先整体格式化一次，
       # 那是独立的一次改动。
       #
-      # 用 nextest 而不是 cargo test：smeltd 的 resume_handoff 测试摆弄的是进程级
-      # 的全局状态（fd 表、waitpid、进程组），同一个进程里跑就会互相串味——原样
-      # 跑大约五次挂一次，串行也照挂。nextest 每个测试起一个独立进程，这个干扰
-      # 就不存在了。
+      # 用 nextest 而不是 cargo test：每个测试一个独立进程。不少测试碰进程级状态
+      # （环境变量、子进程、进程组、信号），同一个进程里跑会互相串味。
       # 不靠 clippy：这个 job 不跑 clippy，GUI crate 在 Linux 上也编不进来。
       # 手型光标是调用点约定，grep 能在编译之前就失败。
       - name: 禁止手型光标
@@ -125,7 +128,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
-    # 没有缓存，每次全量编译；不要调试信息，链接快得多。测试只看通过与否。
+    # 不用缓存：仓库缓存上限 10GB，macOS 那份已经 3GB，再存一份 Windows 的会互相挤掉。
+    # 于是每次全量编译；不要调试信息，链接快得多。测试只看通过与否。
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
@@ -134,13 +138,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      # 只读不写：仓库缓存上限 10GB，main 上 macOS 那份已经 2GB+。转为必需检查时再决定
-      # 要不要在 main 上存一份 Windows 的。
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: false
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -226,9 +223,12 @@ jobs:
       # cargokit 不用 crates/smelt-mobile/target，而是把 Rust 编进 Gradle 给插件工程的
       # 构建目录（rust_builder/cargokit/gradle/plugin.gradle 的 cargoBuildDir）。缓存要
       # 指到那里，否则每次 APK 构建都从头交叉编译整棵依赖树。
+      # shared-key 要和 release.yml 的 android 一致：缓存键默认带 job 名，两边 job 名
+      # 不同，发版那边就一直读不到这里存的。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: android
           workspaces: ". -> mobile/build/rust_lib_smelt_mobile/build/release"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -246,11 +246,35 @@ jobs:
         working-directory: mobile
         run: flutter build apk --release --target-platform android-arm64
 
+  # Pi 运行时（TypeScript）：类型检查 + bun 单测。Bun 版本跟打包进 App 的那份一致。
+  pi-agent:
+    needs: changes
+    if: needs.changes.outputs.pi-agent == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/pi-agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 与 scripts/fetch-bun.sh 的 BUN_VERSION 保持一致。
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: bun run check
+
   # 唯一的必需检查（分支保护里只要求它）。被跳过的 job 算通过；任何一个失败或被取消
   # 就失败。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, rust, mobile, android-build, windows]
+    needs: [changes, rust, mobile, android-build, windows, pi-agent]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize

@@ -1,4 +1,4 @@
-import { createServer } from "node:net";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -310,10 +310,10 @@ describe("background task host client", () => {
 	test("aborts pending background host call on signal abort", async () => {
 		// 模拟一个从不响应的 host
 		const path = join(tmpdir(), `smelt-bg-hang-${process.pid}-${Math.random().toString(16).slice(2)}.sock`);
-		const open: import("node:net").Socket[] = [];
+		const connections = new Set<Socket>();
 		const server = createServer((socket) => {
-			// 刻意不回消息，模拟长时间卡住。先记下连接，否则 close 会一直等它。
-			open.push(socket);
+			// 刻意不回消息，模拟长时间卡住
+			connections.add(socket);
 		});
 		await new Promise<void>((resolve) => server.listen(path, resolve));
 		const controller = new AbortController();
@@ -325,7 +325,9 @@ describe("background task host client", () => {
 			expect(response.ok).toBe(false);
 			expect(response.error).toContain("操作已取消");
 		} finally {
-			for (const socket of open) socket.destroy();
+			// server.close 要等连接全断开才回调；服务端这头不读也不关，
+			// 不能指望它自己察觉客户端已断开（CI 的 Linux 上就一直等到测试超时）。
+			for (const socket of connections) socket.destroy();
 			await new Promise<void>((resolve, reject) => {
 				server.close((error) => (error ? reject(error) : resolve()));
 			});

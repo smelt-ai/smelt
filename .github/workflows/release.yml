@@ -290,10 +290,12 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      # 路径与只读的原因见 ci.yml 的 android-build：tag 上存的缓存别处读不到，只读 main 的。
+      # 路径、shared-key 与只读的原因见 ci.yml 的 android-build：tag 上存的缓存别处读不到，
+      # 只读 main 的。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: android
           workspaces: ". -> mobile/build/rust_lib_smelt_mobile/build/release"
           save-if: false
 
@@ -387,12 +389,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      # 和 ci.yml 一样不往仓库缓存里写：macOS 那份已经占掉配额里的一大块。
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: false
 
       - name: Build
         run: cargo build --release -p smelt -p smelt-cli -p smeltd --locked
