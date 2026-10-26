@@ -215,6 +215,7 @@ impl Workspace {
     /// 当前可见树，下标和虚拟列表一致。
     fn file_tree_rows(&self, cx: &App) -> Vec<super::view::FileTreeRow> {
         collect_file_tree_rows(
+            smelt_client::runtime_path::PathStyle::LOCAL,
             &self.workspace_roots(cx),
             &self.expanded,
             &self.collapsed_roots,
