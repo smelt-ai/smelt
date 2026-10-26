@@ -787,6 +787,18 @@ mod imp {
         let built = (|| {
             let mut connection = open_connection(&staging, OPEN_CREATE_FLAGS, true)?;
             initialize_schema(&mut connection, true, &staging)?;
+            // 挂上去的必须是自足的主文件。WAL 模式下内容可能还留在 `-wal` 里：关闭时的
+            // checkpoint 拿不到锁就会跳过（Windows CI 上撞见过），硬链接只带走主文件，
+            // 对方打开看到的是空 schema。退出 WAL 会把内容全部写回主文件并删掉 `-wal`；
+            // 正式路径打开时 `open_connection` 再切回 WAL。
+            let mode: String =
+                connection.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
+            if !mode.eq_ignore_ascii_case("delete") {
+                return Err(std::io::Error::other(format!(
+                    "新库退出 WAL 失败（journal_mode={mode}）"
+                ))
+                .into());
+            }
             connection.close().map_err(|(_, error)| StoreError::from(error))?;
             set_owner_only(&staging)
         })();
