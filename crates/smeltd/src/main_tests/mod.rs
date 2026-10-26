@@ -47,8 +47,7 @@ fn make_acp_session_value(
     let instance = next_session_instance();
     AcpSession {
         instance,
-        reduced: Mutex::new(reduced),
-        reduced_changed: Condvar::new(),
+        reduced: Watched::new(reduced),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
         turn_completion: Mutex::new(()),

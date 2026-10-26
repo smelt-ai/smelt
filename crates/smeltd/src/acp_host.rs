@@ -6,6 +6,9 @@ use super::*;
 use smelt_core::acp_wire::FrameMirror;
 use std::collections::{BTreeSet, VecDeque};
 
+mod watched;
+pub(crate) use watched::Watched;
+
 // ===================== ACP 会话托管 =====================
 //
 // 跟终端会话是两条平行的托管逻辑：没有 PTY/网格，「画面」就是
@@ -145,10 +148,9 @@ impl AcpRestoreState {
 
 pub(crate) struct AcpSession {
     pub(crate) instance: u64,
-    pub(crate) reduced: Mutex<smelt_core::acp_session::AcpSessionState>,
-    /// `reduced` 变了、快照发出去之后响一次，和 `reduced` 那把锁配对。
-    /// 要等相位或配置落定的地方在它上面等，不再隔一会儿查一次。
-    pub(crate) reduced_changed: Condvar,
+    /// 改过就自动叫醒等待者。要等相位或配置落定的地方用 `wait_timeout_while` 等，
+    /// 不再隔一会儿查一次，也不靠改值的地方记得发快照。
+    pub(crate) reduced: Watched<smelt_core::acp_session::AcpSessionState>,
     pub(crate) snapshot_revision: AtomicU64,
     pub(crate) connection_generation: AtomicU64,
     /// 串行化回合收尾与 prompt 闸门释放。看门狗和迟到的 ACP 更新可能同时
@@ -1431,8 +1433,6 @@ fn push_acp_snapshot_since_with_runtime_debug(
             runtime_debug.clone(),
         );
     }
-    // 改 `reduced` 的地方都经这里把快照发出去，等相位或配置的人也在这里叫醒。
-    sess.reduced_changed.notify_all();
 }
 
 /// 对方要了完整快照：各连接下一帧改发整段帧，发送方镜像跟着重建。
@@ -2246,8 +2246,7 @@ pub(crate) fn make_acp_session(
     let instance = next_session_instance();
     AcpSession {
         instance,
-        reduced: Mutex::new(smelt_core::acp_session::AcpSessionState::default()),
-        reduced_changed: Condvar::new(),
+        reduced: Watched::new(smelt_core::acp_session::AcpSessionState::default()),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
         turn_completion: Mutex::new(()),

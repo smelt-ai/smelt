@@ -554,16 +554,12 @@ fn apply_config_restore_step(
                 .as_deref()
                 .is_some_and(|status| status.starts_with(CONFIG_UPDATE_FAILURE_PREFIX))
     };
-    // 每发一次快照醒一次，超时只是上限。
+    // `reduced` 每改一次醒一次，超时只是上限。
     let (reduced, _) = sess
-        .reduced_changed
-        .wait_timeout_while(
-            sess.reduced.lock().unwrap(),
-            ACP_CONFIG_RESTORE_TIMEOUT,
-            |reduced| {
-                !restored(reduced) && reduced.phase != DaemonPhase::Dead && !rejected(reduced)
-            },
-        )
+        .reduced
+        .wait_timeout_while(ACP_CONFIG_RESTORE_TIMEOUT, |reduced| {
+            !restored(reduced) && reduced.phase != DaemonPhase::Dead && !rejected(reduced)
+        })
         .unwrap();
     if restored(&reduced) || reduced.phase == DaemonPhase::Dead {
         return;
@@ -592,12 +588,10 @@ pub(crate) fn copy_session_config(
 }
 
 fn wait_for_acp_ready(sess: &AcpSession, timeout: Duration) -> Result<(), String> {
-    // 每发一次快照醒一次，超时只是上限。
+    // `reduced` 每改一次醒一次，超时只是上限。
     let (reduced, _) = sess
-        .reduced_changed
-        .wait_timeout_while(sess.reduced.lock().unwrap(), timeout, |reduced| {
-            acp_ready_outcome(reduced).is_none()
-        })
+        .reduced
+        .wait_timeout_while(timeout, |reduced| acp_ready_outcome(reduced).is_none())
         .unwrap();
     acp_ready_outcome(&reduced).unwrap_or_else(|| Err("会话恢复超时".to_string()))
 }

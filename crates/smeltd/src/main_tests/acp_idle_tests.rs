@@ -390,9 +390,8 @@ fn restore_waits_for_the_model_before_writing_other_settings() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(!restoring.is_finished(), "模型没确认前不能往下走");
     // agent 确认换好了模型，推理强度被打回中。
+    // 只改镜像、不发快照：等确认的一方靠守卫放锁时的通知醒来。
     session.reduced.lock().unwrap().model = Some(pi_model("deepseek/flash"));
-    // 镜像改了就发快照，等确认的一方靠这一下醒来。
-    crate::acp_host::push_acp_snapshot_since(&session, false, None);
 
     assert_eq!(
         [next(), next(), next()].map(|action| format!("{action:?}")),
@@ -404,7 +403,6 @@ fn restore_waits_for_the_model_before_writing_other_settings() {
     );
     session.reduced.lock().unwrap().config_options =
         vec![mode("完全访问"), thinking("高"), switch("codemode", true)];
-    crate::acp_host::push_acp_snapshot_since(&session, false, None);
     restoring.join().unwrap();
 }
 
@@ -425,7 +423,6 @@ fn a_rejected_restore_does_not_hold_the_user_action() {
     };
     std::thread::sleep(Duration::from_millis(200));
     session.reduced.lock().unwrap().status_line = Some("更新会话配置失败：不行".into());
-    crate::acp_host::push_acp_snapshot_since(&session, false, None);
     let started = std::time::Instant::now();
     restoring.join().unwrap();
     assert!(
