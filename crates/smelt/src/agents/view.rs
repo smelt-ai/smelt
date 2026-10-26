@@ -1229,10 +1229,7 @@ impl Workspace {
             ))
             .icon(IconName::ChevronDown)
             .dropdown_menu(move |menu, _window, cx| {
-                let mut runtimes = Vec::new();
-                if smelt_client::runtime::local_runtime_supported() {
-                    runtimes.push(crate::RuntimeKey::Local);
-                }
+                let mut runtimes = vec![crate::RuntimeKey::Local];
                 if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
                     runtimes.extend(
                         hub.remotes
@@ -1483,11 +1480,7 @@ fn agent_creation_machines(cx: &App) -> Vec<crate::RuntimeKey> {
     if !machines.is_empty() {
         return machines;
     }
-    if smelt_client::runtime::local_runtime_supported() {
-        vec![crate::RuntimeKey::Local]
-    } else {
-        Vec::new()
-    }
+    vec![crate::RuntimeKey::Local]
 }
 
 /// 「新建智能体」菜单：不止一台机器时按机器分段，每段列可选的引擎。

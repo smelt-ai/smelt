@@ -239,14 +239,6 @@ impl Workspace {
     /// 补位只做一次：每帧都做会把用户点侧栏「智能体」返回目录的动作顶回来。
     /// 项目舞台上的对话则是不变量，恢复完成后一直守着。
     fn align_visible_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !smelt_client::runtime::local_runtime_supported() {
-            if self.active_tab() == &crate::WorkspaceRoute::Automations {
-                self.nav.set_active(crate::WorkspaceRoute::Session);
-            }
-            if self.tool_panel_tab == tool_panel::ToolPanelTab::History {
-                self.tool_panel_tab = tool_panel::ToolPanelTab::Files;
-            }
-        }
         let active_is_agent_conversation = self
             .sessions
             .get(self.active_session)

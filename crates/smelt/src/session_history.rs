@@ -576,11 +576,8 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                             .on_click(move |_ev, _window, cx| {
                                                                 ws.update(cx, |this, cx| {
                                                                     // 历史页读的是本机运行时的存档。
-                                                                    let Some(runtime) =
-                                                                        crate::runtimes::Runtime::local()
-                                                                    else {
-                                                                        return;
-                                                                    };
+                                                                    let runtime =
+                                                                        crate::runtimes::Runtime::local();
                                                                     this.set_history_custom_title(
                                                                         &runtime,
                                                                         agent,
@@ -1301,10 +1298,7 @@ impl Workspace {
                     ));
                     return;
                 };
-                let Some(request) = build_history_handoff_request(&source, &detail, target)
-                else {
-                    return;
-                };
+                let request = build_history_handoff_request(&source, &detail, target);
                 this.add_acp_handoff_session(request, window, cx);
             });
         })
@@ -1398,7 +1392,7 @@ fn build_history_handoff_request(
     source: &HistoryMigrationSource,
     detail: &SessionDetail,
     target: acp_view::AcpHandoffTarget,
-) -> Option<acp_view::AcpHandoffRequest> {
+) -> acp_view::AcpHandoffRequest {
     use smelt_model::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
 
     let context = HandoffContext {
@@ -1411,11 +1405,8 @@ fn build_history_handoff_request(
     };
     let prompt = build_handoff_prompt(&context);
 
-    let Some(runtime) = crate::runtimes::Runtime::local() else {
-        return None;
-    };
-    Some(acp_view::AcpHandoffRequest {
-        runtime,
+    acp_view::AcpHandoffRequest {
+        runtime: crate::runtimes::Runtime::local(),
         launch_prep: None,
         source: Some(acp_view::AcpForkOrigin {
             session_id: source.resume_id.clone(),
@@ -1438,7 +1429,7 @@ fn build_history_handoff_request(
         fork_session_id: None,
         fork_cut: None,
         conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1610,8 +1601,7 @@ mod tests {
             profile_label: None,
         };
 
-        let request = build_history_handoff_request(&source, &detail, target)
-            .expect("历史迁移测试在有本机运行时的平台上跑");
+        let request = build_history_handoff_request(&source, &detail, target);
         let origin = request
             .source
             .expect("创建时要知道源会话，才能跳过本机定义继承");

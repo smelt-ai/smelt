@@ -118,18 +118,12 @@ impl Workspace {
         &self.pi_library.runtime
     }
 
-    /// 能力库默认跟第一台还能连上的机器。没有本机运行时时不能停在 `Local`。
+    /// 能力库配的那台远程机器已经移除时，回到本机。
     pub(crate) fn ensure_pi_library_runtime(&mut self, cx: &mut Context<Self>) {
         if crate::runtimes::client(&self.pi_library.runtime, cx).is_some() {
             return;
         }
-        let Some(key) = cx
-            .try_global::<crate::runtimes::RuntimeHub>()
-            .and_then(|hub| hub.remotes.first().map(|remote| remote.runtime.key().clone()))
-        else {
-            return;
-        };
-        self.select_pi_library_runtime(key, cx);
+        self.select_pi_library_runtime(crate::RuntimeKey::Local, cx);
     }
 
     /// 重读能力库那台机器的快照。

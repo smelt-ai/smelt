@@ -1972,7 +1972,6 @@ impl Workspace {
                                             .icon(IconName::Settings)
                                             .on_click(move |_ev, _window, cx| {
                                                 e_settings.update(cx, |ws, cx| {
-                                                    #[cfg(any(unix, windows))]
                                                     ws.check_daemon_outdated(cx);
                                                     ws.settings_section =
                                                         crate::settings::SettingsSection::appearance();

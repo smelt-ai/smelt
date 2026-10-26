@@ -44,14 +44,6 @@ fn run(args: &[String]) -> i32 {
             print_help();
             0
         }
-        Some("agent" | "automation" | "settings")
-            if !smelt_client::runtime::local_runtime_supported() =>
-        {
-            eprintln!(
-                "本机守护进程的命令行在这个平台上还不可用。这一版桌面只连接远程运行时。"
-            );
-            1
-        }
         Some("agent") => run_agent(&args[2..]),
         Some("automation") => run_automation(&args[2..]),
         Some("settings") => run_settings(&args[2..]),

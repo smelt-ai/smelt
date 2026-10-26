@@ -1,4 +1,4 @@
-//! 桌面挂着的运行时（设计文档 D6）。有本机运行时的平台上本机总在；远程运行时来自
+//! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自
 //! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
 use smelt_runtime_client::RuntimeClient;
@@ -6,16 +6,15 @@ use smelt_runtime_client::RuntimeClient;
 pub(crate) use smelt_client::runtime::{Runtime, RuntimeKey};
 
 /// 本机运行时的客户端。连本机 socket；守护的拉起和升级由 [`crate::local_daemon`] 管。
-/// 这个平台没有本机运行时就是 `None`。
-pub(crate) fn local() -> Option<RuntimeClient> {
-    Runtime::local().map(|runtime| runtime.client().clone())
+pub(crate) fn local() -> RuntimeClient {
+    Runtime::local().client().clone()
 }
 
-/// 发给 `key` 那台机器的客户端。没有本机运行时，或远程机器已经移除，就是 `None`。
+/// 发给 `key` 那台机器的客户端。远程机器已经移除就是 `None`。
 /// 调用方报错，不退回另一台机器：发错机器比报错更糟。
 pub(crate) fn client(key: &RuntimeKey, cx: &gpui::App) -> Option<RuntimeClient> {
     match key {
-        RuntimeKey::Local => local(),
+        RuntimeKey::Local => Some(local()),
         RuntimeKey::Remote(_) => remote_of(key, cx).map(|remote| remote.runtime.client().clone()),
     }
 }
@@ -43,19 +42,8 @@ pub(crate) fn connect_terminal(
     runtime: &Runtime,
 ) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
     if runtime.is_local() {
-        // 拉起本机 smeltd 是 Unix 上的生命周期（设计文档 D3/D4）。Windows 第 1 步
-        // 只连远程运行时。
-        #[cfg(any(unix, windows))]
-        {
-            return crate::local_daemon::connect_daemon();
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "本机运行时在这个平台上还不可用",
-            ));
-        }
+        // 拉起本机 smeltd 的生命周期见设计文档 D3/D4。
+        return crate::local_daemon::connect_daemon();
     }
     runtime.client().connect()
 }
@@ -357,7 +345,6 @@ pub(crate) fn runtime_incompatible(key: &RuntimeKey, cx: &gpui::App) -> bool {
 
 /// 本机守护版本对不上、正在换代：这时由订阅线程负责升级（见 `runtime_events`），
 /// 别处的空闲升级不要再插一脚。只在有本机 smeltd 的平台上有意义。
-#[cfg(any(unix, windows))]
 pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
     status_of_key(&RuntimeKey::Local, cx).is_some_and(|status| {
         matches!(
@@ -534,7 +521,6 @@ fn remote_client(
 /// 本机守护：没在跑就按 App 里的版本拉起（运行中退出了也靠这里补上），再对版本。
 /// 阻塞，只在后台调。
 pub(crate) fn local_status(client: &RuntimeClient) -> RuntimeStatus {
-    #[cfg(any(unix, windows))]
     crate::local_daemon::ensure_daemon_running();
     status_of(client)
 }
@@ -1141,11 +1127,7 @@ mod tests {
                 "取到的不是那台机器的客户端"
             );
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
-            if smelt_client::runtime::local_runtime_supported() {
-                assert!(client(&RuntimeKey::Local, cx).is_some());
-            } else {
-                assert!(client(&RuntimeKey::Local, cx).is_none());
-            }
+            assert!(client(&RuntimeKey::Local, cx).is_some());
             // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
             assert_eq!(smelt_home(&far, cx), Some("/home/far/.smelt".to_string()));
             assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());

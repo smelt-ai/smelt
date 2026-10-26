@@ -1,6 +1,6 @@
 //! 本机 smeltd 的生命周期（设计文档 D3）。
 //!
-//! 拉起、升级、交接和过期探测只在有本机运行时的平台上存在。第 1 步是 Unix。
+//! 拉起、升级、交接和过期探测。Windows 上升级是重启，不交接。
 //! 终端网格、远程会话连接留在 `terminal`。
 
 use std::io::{BufRead, BufReader, Read, Write};

@@ -102,18 +102,13 @@ impl Workspace {
             moving_app: self.moving_app,
             #[cfg(target_os = "macos")]
             move_app_error: self.move_app_error.clone(),
-            #[cfg(any(unix, windows))]
             daemon_outdated: self.daemon_outdated,
-            #[cfg(any(unix, windows))]
             daemon_upgrading: self.daemon_upgrading,
-            #[cfg(any(unix, windows))]
             daemon_upgrade_msg: self.daemon_upgrade_msg.clone(),
-            #[cfg(any(unix, windows))]
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
             capabilities_tab: self.nav.capabilities_tab(),
-            #[cfg(any(unix, windows))]
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             session_manager_open: self.session_manager_open,
         }
@@ -196,9 +191,7 @@ impl Workspace {
         super::refresh_remote(cx);
         crate::runtime_events::probe_remotes(cx);
         self.ensure_pi_library_runtime(cx);
-        if smelt_client::runtime::local_runtime_supported() {
-            self.refresh_pi_config(crate::RuntimeKey::Local, cx);
-        }
+        self.refresh_pi_config(crate::RuntimeKey::Local, cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {
             if let Some(handle) = cx

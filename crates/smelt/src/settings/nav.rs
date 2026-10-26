@@ -95,7 +95,7 @@ pub struct SettingsNavCategory {
 
 /// 设置侧栏的两级导航。一级分类默认展开。
 pub fn settings_nav() -> Vec<SettingsNavCategory> {
-    let mut nav = vec![
+    vec![
         SettingsNavCategory {
             id: SettingsCategoryId::General,
             title: "通用",
@@ -360,21 +360,7 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                 ),
             ],
         },
-    ];
-    if !smelt_client::runtime::local_runtime_supported() {
-        for category in &mut nav {
-            category.children.retain(|item| {
-                !matches!(
-                    item.section,
-                    SettingsSection::AgentRuntime
-                        | SettingsSection::AgentLaunch
-                        | SettingsSection::AgentWorkspace
-                        | SettingsSection::MaintenanceDaemon
-                )
-            });
-        }
-    }
-    nav
+    ]
 }
 
 fn leaf(

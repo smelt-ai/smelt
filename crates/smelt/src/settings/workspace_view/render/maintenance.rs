@@ -17,7 +17,6 @@ pub(super) fn update_page(
         .group(update_group(entity, snapshot, cx))
 }
 
-#[cfg(any(unix, windows))]
 pub(super) fn daemon_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -478,7 +477,6 @@ fn update_group(
     }))
 }
 
-#[cfg(any(unix, windows))]
 fn daemon_group(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -490,7 +488,6 @@ fn daemon_group(
     };
     let daemon_entity = entity;
     let daemon_outdated = snapshot.daemon_outdated;
-    #[cfg(any(unix, windows))]
     let daemon_upgrading = snapshot.daemon_upgrading;
     let daemon_upgrade_msg = snapshot.daemon_upgrade_msg.clone();
     let daemon_info = snapshot.daemon_info.clone();
@@ -499,8 +496,7 @@ fn daemon_group(
                     let outdated = daemon_outdated;
                     let upgrade_msg = daemon_upgrade_msg.clone();
                     let restart_entity = daemon_entity.clone();
-                    // 无缝升级只在 Unix 上交接 smeltd（设计文档 D3）。没有本机守护时不放这个按钮。
-                    #[cfg(any(unix, windows))]
+                    // Unix 无缝交接 smeltd，Windows 升级即重启（设计文档 D3）。
                     let upgrade_daemon_btn = {
                         let upgrading = daemon_upgrading;
                         let upgrade_entity = daemon_entity.clone();
@@ -523,8 +519,6 @@ fn daemon_group(
                                 })
                         })
                     };
-                    #[cfg(not(any(unix, windows)))]
-                    let upgrade_daemon_btn = Option::<smelt_ui::Button>::None;
                     // 硬重启：常驻入口（守护卡死 / 想强制换二进制时用），会断会话。
                     // 不受版本是否落后限制；点击走二次确认弹窗兜底。
                     let restart_daemon_btn = Button::new("restart-daemon")

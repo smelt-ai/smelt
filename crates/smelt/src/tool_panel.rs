@@ -356,14 +356,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> TabBar {
         // 内置面板来自注册表，插件面板追在后面；两者在这一层同等。
-        let mut tabs: Vec<ToolPanelTab> = BUILTIN_PANELS
-            .iter()
-            .filter(|panel| {
-                panel.tab != ToolPanelTab::History
-                    || smelt_client::runtime::local_runtime_supported()
-            })
-            .map(|panel| panel.tab)
-            .collect();
+        let mut tabs: Vec<ToolPanelTab> = BUILTIN_PANELS.iter().map(|panel| panel.tab).collect();
         tabs.extend(
             crate::plugins::slots()
                 .into_iter()
@@ -465,13 +458,10 @@ impl Workspace {
     /// Tool Panel 的内容渲染与停靠/全屏展示方式无关。
     pub(crate) fn render_tool_panel_content(
         &mut self,
-        mut tab: ToolPanelTab,
+        tab: ToolPanelTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if tab == ToolPanelTab::History && !smelt_client::runtime::local_runtime_supported() {
-            tab = ToolPanelTab::Files;
-        }
         match tab {
             ToolPanelTab::Plugin(slot) => {
                 // 插件读写的是本机磁盘（D8），远程项目上不可用，说明原因。

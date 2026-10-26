@@ -815,24 +815,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !smelt_client::runtime::local_runtime_supported() {
-            return;
-        }
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
                 .spawn(async {
-                    #[cfg(any(unix, windows))]
-                    {
-                        let _ = crate::local_daemon::ensure_managed_daemon_current();
-                        crate::local_daemon::ensure_daemon_running();
-                    }
+                    let _ = crate::local_daemon::ensure_managed_daemon_current();
+                    crate::local_daemon::ensure_daemon_running();
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let Some(runtime) = crate::runtimes::Runtime::local() else {
-                    return;
-                };
-                this.start_space_catalog_load(runtime, window, cx)
+                this.start_space_catalog_load(crate::runtimes::Runtime::local(), window, cx)
             });
         })
         .detach();
@@ -989,7 +980,6 @@ impl Workspace {
         }
         if pending.is_empty() {
             if is_local {
-                #[cfg(any(unix, windows))]
                 self.check_daemon_outdated(cx);
             }
         } else {

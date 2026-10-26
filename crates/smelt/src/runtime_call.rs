@@ -22,12 +22,7 @@ pub(crate) fn call<C: ControlCall>(
     params: C::Params,
     timeout: Duration,
 ) -> Result<C::Result, ControlClientError> {
-    let Some(client) = crate::runtimes::local() else {
-        return Err(ControlClientError::Transport(
-            "本机运行时在这个平台上还不可用".into(),
-        ));
-    };
-    call_on::<C>(&client, params, timeout)
+    call_on::<C>(&crate::runtimes::local(), params, timeout)
 }
 
 /// 发给 [`target`] 取到的那台机器。

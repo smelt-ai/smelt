@@ -2069,7 +2069,7 @@ mod damage_gate_tests {
             );
         }
         Terminal::spawn(
-            &crate::runtimes::Runtime::local().expect("Unix 测试有本机运行时"),
+            &crate::runtimes::Runtime::local(),
             24,
             80,
             dir.to_str(),
@@ -2093,7 +2093,7 @@ mod damage_gate_tests {
     impl Drop for TestSessionGuard {
         fn drop(&mut self) {
             kill_remote(
-                &crate::runtimes::Runtime::local().expect("Unix 测试有本机运行时"),
+                &crate::runtimes::Runtime::local(),
                 &self.0,
             );
         }
@@ -2116,7 +2116,7 @@ mod damage_gate_tests {
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
         thread::sleep(Duration::from_millis(500));
         kill_remote(
-            &crate::runtimes::Runtime::local().expect("Unix 测试有本机运行时"),
+            &crate::runtimes::Runtime::local(),
             &id,
         );
 

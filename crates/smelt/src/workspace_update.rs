@@ -435,7 +435,6 @@ impl Workspace {
     /// 后台查一次守护是否落后于磁盘上的 smeltd 二进制，决定要不要在设置页/齿轮上
     /// 给出「重启守护」提示。本地 Unix socket 往返很快，但仍走后台线程，跟
     /// check_for_update 同款结构，别在 UI 线程里做阻塞 IO。
-    #[cfg(any(unix, windows))]
     pub(crate) fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             // 只探测状态，不再在此 ensure/handoff（冷启动 ensure 由 restore 线程串行做完）。
@@ -485,7 +484,6 @@ impl Workspace {
     }
 
     /// subscribe 相位变化后调用：挂起的升级等所有 agent 空闲再发一次。
-    #[cfg(any(unix, windows))]
     pub(crate) fn maybe_flush_pending_daemon_upgrade(&mut self, cx: &mut Context<Self>) {
         if !self.daemon_upgrade_pending || self.daemon_upgrading || self.any_agent_busy(cx) {
             return;
@@ -497,9 +495,7 @@ impl Workspace {
     /// 逐 pane 在后台 reattach：会话 id 都还在，走正常重放恢复画面。无缝升级后
     /// 不能在 `update` 回调里同步握手，否则卡住的 daemon 会反过来拖住整个 UI。
     pub(crate) fn reconnect_all_terminals(&self, cx: &mut Context<Self>) {
-        let Some(runtime) = crate::runtimes::Runtime::local() else {
-            return;
-        };
+        let runtime = crate::runtimes::Runtime::local();
         for sess in &self.sessions {
             // 远程机器的终端还在它自己的运行时上，不拿本机守护去重连。
             if !sess.runtime(cx).is_local() {
@@ -540,7 +536,6 @@ impl Workspace {
     /// 无缝升级守护：守护 exec 新二进制、PTY fd 原地交接，会话不中断（见 smeltd 升级设计）。
     /// 成功后逐 pane reconnect——会话 id 都还在，走正常 reattach + 重放，画面最多闪一下。
     /// 正在跑的守护太旧不认识 upgrade op 时提示改用下面的硬重启。
-    #[cfg(any(unix, windows))]
     pub(crate) fn upgrade_daemon_seamless(&mut self, cx: &mut Context<Self>) {
         if self.daemon_upgrading {
             return;
@@ -637,9 +632,7 @@ impl Workspace {
     /// 却照样回 `{"ok":true}`（真实教训：两条表分开存，用错 op 表面上「成功」
     /// 实际上会话根本没被杀掉，圈了个大坑）。
     pub(crate) fn kill_daemon_session(id: &str) {
-        let Some(runtime) = crate::runtimes::Runtime::local() else {
-            return;
-        };
+        let runtime = crate::runtimes::Runtime::local();
         if id.starts_with("acp-") {
             smelt_client::acp_client::kill_acp_session(runtime.client(), id);
         } else {
@@ -697,7 +690,6 @@ impl Workspace {
     /// **禁止**在 `update` 里同步 `Terminal::spawn`：握手含 sleep/轮询，多 pane 会把
     /// UI 卡死（「点重启守护就假死」）。流程：后台杀+拉起守护 → 后台按 cwd/sid 建
     /// Terminal → 主线程 `adopt_terminal` 挂回各 pane。
-    #[cfg(any(unix, windows))]
     pub(crate) fn confirm_restart_daemon(&mut self, cx: &mut Context<Self>) {
         self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;
@@ -735,9 +727,6 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
-                    let Some(runtime) = runtime else {
-                        return out;
-                    };
                     for (entity, cwd, sid) in jobs {
                         let term = terminal::Terminal::spawn(
                             &runtime,

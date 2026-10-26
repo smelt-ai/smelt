@@ -608,7 +608,6 @@ impl Workspace {
     ///
     /// 入口只在设置窗「更新」页；弹层挂在设置窗上（见 `SettingsWindow::render`），
     /// 不再画到主窗口，避免「按钮在设置、确认框跑到主界面」的割裂感。
-    #[cfg(any(unix, windows))]
     pub(crate) fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted) = {
             let t = cx.theme();
@@ -640,7 +639,6 @@ impl Workspace {
 "confirm-daemon-restart",
 "确定重启",
 |this, _, _, cx| {
-                            #[cfg(any(unix, windows))]
                             this.confirm_restart_daemon(cx);
                             #[cfg(not(unix))]
                             {

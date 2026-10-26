@@ -40,7 +40,6 @@ mod provider_quota;
 mod resizable_split;
 mod runtime_call;
 mod runtime_events;
-#[cfg(any(unix, windows))]
 mod local_daemon;
 mod runtime_space;
 mod runtimes;
@@ -2503,8 +2502,7 @@ struct Workspace {
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
     /// 已消失时回退到活动会话所在组（见 active_project_root）。
     active_project: Option<ProjectRef>,
-    /// 侧栏里的运行时空间。有本机运行时时本机在前，然后是配对的远程机器。
-    /// 没有本机运行时（Windows 第 1 步）就只有远程机器，不放一个离线的本机空间。
+    /// 侧栏里的运行时空间。本机在前，然后是配对的远程机器。
     spaces: Vec<crate::runtime_space::RuntimeSpace>,
     /// 侧栏「对话」里被折叠起来的智能体（存定义 id）。
     collapsed_agents: HashSet<String>,
@@ -2789,25 +2787,18 @@ struct Workspace {
 
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
-    /// 本机守护是否落后于磁盘上的 smeltd。没有本机运行时这些字段不存在。
-    #[cfg(any(unix, windows))]
     daemon_outdated: Option<bool>,
     /// 最近一次无缝升级的结果提示（设置页守护分区显示；None = 没试过）。
-    #[cfg(any(unix, windows))]
     daemon_upgrade_msg: Option<String>,
     /// 无缝升级进行中（按钮置灰防连点）。
-    #[cfg(any(unix, windows))]
     daemon_upgrading: bool,
     /// 检测到守护已过期、但有 agent 正在跑，升级挂起等空闲：true = 待升级。
     /// 空闲后（或用户手动点升级）会清掉，转成真正的 `upgrade_daemon_seamless`。
-    #[cfg(any(unix, windows))]
     daemon_upgrade_pending: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
-    #[cfg(any(unix, windows))]
     daemon_info: Option<local_daemon::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
-    #[cfg(any(unix, windows))]
     show_daemon_restart_confirm: bool,
     /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
     /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的游离会话、忘了关的临时会话都会
@@ -3106,13 +3097,10 @@ impl Workspace {
             close_confirm: None,
             desktop: None,
             spaces: {
-                let mut spaces = Vec::new();
-                if let Some(local) = crate::runtimes::Runtime::local() {
-                    let mut space = space_with_ui(local);
-                    space.projects = projects;
-                    space.restore_pending = restore_pending;
-                    spaces.push(space);
-                }
+                let mut local = space_with_ui(crate::runtimes::Runtime::local());
+                local.projects = projects;
+                local.restore_pending = restore_pending;
+                let mut spaces = vec![local];
                 if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
                     for remote in &hub.remotes {
                         spaces.push(space_with_ui(remote.runtime.clone()));
@@ -3252,17 +3240,11 @@ impl Workspace {
             git_writes: HashMap::new(),
             provider_quota_refresh_tx: None,
 
-            #[cfg(any(unix, windows))]
             daemon_outdated: None,
-            #[cfg(any(unix, windows))]
             daemon_upgrade_msg: None,
-            #[cfg(any(unix, windows))]
             daemon_upgrading: false,
-            #[cfg(any(unix, windows))]
             daemon_upgrade_pending: false,
-            #[cfg(any(unix, windows))]
             daemon_info: None,
-            #[cfg(any(unix, windows))]
             show_daemon_restart_confirm: false,
             session_manager_open: false,
             session_manager_list: None,
@@ -3314,9 +3296,7 @@ impl Workspace {
                 ws.recover_update_at_launch(true, cx);
             }
         }
-        if smelt_client::runtime::local_runtime_supported() {
-            ws.start_workspace_catalog_load(window, cx);
-        }
+        ws.start_workspace_catalog_load(window, cx);
         let remote_runtimes: Vec<_> = ws
             .spaces
             .iter()
@@ -3334,7 +3314,6 @@ impl Workspace {
                 this.sync_remote_spaces(window, cx)
             }),
         );
-        #[cfg(any(unix, windows))]
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         ws.reconcile_remote_catalog_projection(window, cx);
@@ -3371,7 +3350,6 @@ impl Workspace {
     /// 的空闲门控——agent 忙就挂起,空闲才升,不打扰使用(连接路径的 ensure 只
     /// 对齐磁盘不再偷跑 exec,这里负责兜底把守护在空闲时跟上)。
     /// 探测是本地 socket 往返(毫秒级),60s 一次对用户完全无感。
-    #[cfg(any(unix, windows))]
     fn start_daemon_outdated_watch(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -3607,9 +3585,7 @@ impl Workspace {
             .resume_id
             .map(agent_client_protocol::schema::v1::SessionId::new);
         let cwd = Some(record.cwd.clone());
-        let Some(runtime) = crate::runtimes::Runtime::local() else {
-            return;
-        };
+        let runtime = crate::runtimes::Runtime::local();
         if !smelt_model::session_control::is_agent_conversation(
             None,
             agent_definition_id.as_deref(),
@@ -3731,9 +3707,7 @@ impl Workspace {
             {
                 continue;
             }
-            let Some(runtime) = crate::runtimes::Runtime::local() else {
-                return;
-            };
+            let runtime = crate::runtimes::Runtime::local();
             self.remember_session_project(&RuntimeKey::Local, Some(record.cwd.as_str()));
             let (tx, rx) = smol::channel::bounded(1);
             let runtime_bg = runtime.clone();
@@ -4631,7 +4605,6 @@ fn main() {
     schedule_obsolete_file_cleanup();
     // Finder / launchd 启动的 GUI 默认软上限常是 256；在创建窗口、socket 和终端
     // 线程之前先抬高，避免正常多会话也让更新检查等新连接触发 EMFILE。
-    #[cfg(any(unix, windows))]
     smelt_sys::fd_limit::raise_fd_limit();
     // with_assets 注册图标资源，Sidebar 的 IconName svg 才能渲染；见上面 SmeltAssets。
     let app = gpui_platform::application().with_assets(SmeltAssets);
@@ -4766,7 +4739,6 @@ fn main() {
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);
                     }
-                    #[cfg(any(unix, windows))]
                     ws.maybe_flush_pending_daemon_upgrade(cx);
                     ws.notify_if_session_facts_changed(cx);
                 });
@@ -4781,36 +4753,32 @@ fn main() {
         cx.set_global(settings::AcpRuntimeState::default());
         // hook 配置和 helper 必须作为一个版本单元升级：先把 App 内最新版同步到稳定
         // managed 路径，再改写各 provider 的 hook 命令。失败时保留旧 helper，不阻塞 GUI。
-        if smelt_client::runtime::local_runtime_supported()
-            && let Err(error) = settings::sync_bundled_smelt_notify()
-        {
+        if let Err(error) = settings::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         cx.set_global(settings::AgentHosts::default());
-        if let Some(local) = runtimes::local() {
-            settings::attach_agent_host(RuntimeKey::Local, local, cx, |cx| {
-                if settings::agent_host_settings(&RuntimeKey::Local, cx).hooks_enabled {
-                    settings::reconcile_agent_hooks(cx);
-                }
-                // 运行时已经连上：请它照端点刷新 Pi 里标记为「自动」的自定义 provider
-                // 的模型目录。用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型
-                // 不该要他再来点一次。放后台跑。
-                cx.background_executor()
-                    .spawn(async {
-                        use smelt_runtime_client::protocol::control::EmptyParams;
-                        let timeout = std::time::Duration::from_secs(300);
-                        if let Err(error) = runtime_call::call::<
-                            smelt_model::control_api::PiProvidersRefreshAuto,
-                        >(EmptyParams::default(), timeout)
-                        {
-                            eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
-                        }
-                    })
-                    .detach();
-            });
-        }
+        settings::attach_agent_host(RuntimeKey::Local, runtimes::local(), cx, |cx| {
+            if settings::agent_host_settings(&RuntimeKey::Local, cx).hooks_enabled {
+                settings::reconcile_agent_hooks(cx);
+            }
+            // 运行时已经连上：请它照端点刷新 Pi 里标记为「自动」的自定义 provider
+            // 的模型目录。用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型
+            // 不该要他再来点一次。放后台跑。
+            cx.background_executor()
+                .spawn(async {
+                    use smelt_runtime_client::protocol::control::EmptyParams;
+                    let timeout = std::time::Duration::from_secs(300);
+                    if let Err(error) = runtime_call::call::<
+                        smelt_model::control_api::PiProvidersRefreshAuto,
+                    >(EmptyParams::default(), timeout)
+                    {
+                        eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
+                    }
+                })
+                .detach();
+        });
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
         // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求、项目文件

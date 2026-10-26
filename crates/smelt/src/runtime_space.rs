@@ -60,20 +60,12 @@ impl RuntimeSpace {
 }
 
 impl crate::Workspace {
-    /// 侧栏里这台机器的分段折没折。用户这次点过就按他点的。没点过的：有本机时远程折起、
-    /// 本机展开（日常干活在本机）；没有本机时第一台远程展开，其余折起，侧栏不至于全空。
+    /// 侧栏里这台机器的分段折没折。用户这次点过就按他点的。没点过的：远程折起、
+    /// 本机展开（日常干活在本机）。
     pub(crate) fn runtime_folded(&self, key: &crate::runtimes::RuntimeKey) -> bool {
         self.space(key)
             .and_then(|space| space.folded)
-            .unwrap_or_else(|| {
-                if smelt_client::runtime::local_runtime_supported() {
-                    *key != crate::runtimes::RuntimeKey::Local
-                } else {
-                    self.spaces
-                        .first()
-                        .is_none_or(|space| space.runtime.key() != key)
-                }
-            })
+            .unwrap_or(*key != crate::runtimes::RuntimeKey::Local)
     }
 
     pub(crate) fn toggle_runtime_fold(
@@ -88,7 +80,7 @@ impl crate::Workspace {
         cx.notify();
     }
 
-    /// 某个运行时的空间。运行时被移除、或者这个平台没有本机运行时，就没有了。
+    /// 某个运行时的空间。运行时被移除就没有了。
     pub(crate) fn space(&self, key: &crate::runtimes::RuntimeKey) -> Option<&RuntimeSpace> {
         self.spaces
             .iter()
