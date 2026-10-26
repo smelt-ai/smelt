@@ -494,45 +494,35 @@ fn daemon_group(
     SettingGroup::new()
             .item(SettingItem::render(move |_, _, _cx: &mut App| {
                     let outdated = daemon_outdated;
+                    let upgrading = daemon_upgrading;
                     let upgrade_msg = daemon_upgrade_msg.clone();
+                    let upgrade_entity = daemon_entity.clone();
                     let restart_entity = daemon_entity.clone();
-                    // Unix 无缝交接 smeltd，Windows 升级即重启（设计文档 D3）。
-                    let upgrade_daemon_btn = {
-                        let upgrading = daemon_upgrading;
-                        let upgrade_entity = daemon_entity.clone();
-                        (outdated == Some(true)).then(|| {
-                            Button::new("upgrade-daemon")
-                                .compact()
-                                .label(if upgrading {
-                                    "升级中…"
-                                } else if cfg!(windows) {
-                                    "升级并重启"
-                                } else {
-                                    "无缝升级"
-                                })
-                                .loading(upgrading)
-                                .disabled(upgrading)
-                                .on_click(move |_, _window, cx: &mut App| {
-                                    upgrade_entity.update(cx, |this, cx| {
-                                        this.upgrade_daemon_seamless(cx);
-                                    });
-                                })
-                        })
-                    };
-                    // 硬重启：常驻入口（守护卡死 / 想强制换二进制时用），会断会话。
-                    // 不受版本是否落后限制；点击走二次确认弹窗兜底。
+                    // 版本落后时重启到 App 里的守护。没有进行中的会话就直接重启。
+                    let upgrade_daemon_btn = (outdated == Some(true)).then(|| {
+                        Button::new("upgrade-daemon")
+                            .compact()
+                            .label(if upgrading { "升级中…" } else { "重启以升级" })
+                            .loading(upgrading)
+                            .disabled(upgrading)
+                            .on_click(move |_, _window, cx: &mut App| {
+                                upgrade_entity.update(cx, |this, cx| {
+                                    this.request_daemon_restart(cx);
+                                });
+                            })
+                    });
+                    // 常驻入口（守护卡死 / 想强制换二进制时用）。同样只在有进行中的会话时确认。
                     let restart_daemon_btn = Button::new("restart-daemon")
                         .danger_outline()
                         .compact()
                         .label("重启守护进程")
                         .on_click(move |_, _window, cx: &mut App| {
                             restart_entity.update(cx, |this, cx| {
-                                this.show_daemon_restart_confirm = true;
-                                cx.notify();
+                                this.request_daemon_restart(cx);
                             });
                         });
                     let status_text = match outdated {
-                        Some(true) => "版本落后于当前安装包，升级守护后新功能/修复才生效。".to_string(),
+                        Some(true) => "版本落后于当前安装包。重启守护进程后新版本才会生效；进行中的回合会被中断，历史记录还在。".to_string(),
                         Some(false) => "已是最新。".to_string(),
                         None => "检测中…".to_string(),
                     };
@@ -588,7 +578,7 @@ fn daemon_group(
                             div()
                                 .text_xs()
                                 .text_color(muted)
-                                .child("「重启守护进程」会断开并终止当前所有终端会话（含正在跑的 agent）；若只是版本落后，优先用会话不中断的「无缝升级」。"),
+                                .child("没有正在进行的会话时直接重启。有的话会先确认：这一轮回复会被中断，历史记录已保存，重启后可以继续对话。"),
                         )
             }))
 }

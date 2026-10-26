@@ -26,7 +26,7 @@ serde_json = "1"
 anyhow = "1"
 dirs = "5"
 shell-words = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 # ACP 对话共享模型（acp_chat）里的逐行 diff 计算，GPUI 和 smelt 都用同一个算法。
 similar = "3"
@@ -40,8 +40,8 @@ agent-client-protocol = { version = "=3.4.0", features = ["process", "unstable_p
 smol = "2"
 chrono = { version = "0.4", features = ["serde"] }
 iana-time-zone = "0.1"
-# ACP 无缝升级续接（resume_acp_from_fds）要手搭 Lines 传输层（agent-client-
-# protocol 的低层原语，见 acp_conn.rs 用法），直接用它的 Stream/Sink trait。
+# ACP 连接手搭 Lines 传输层（agent-client-protocol 的低层原语，见 acp_conn.rs），
+# 用它的 Stream/Sink trait；Pi 登录事件流也走它的 channel。
 futures = "0.3"
 async-process = "2"
 libc = "0.2"

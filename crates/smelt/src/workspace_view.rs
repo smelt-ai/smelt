@@ -368,7 +368,8 @@ impl Workspace {
         })
     }
 
-    /// 渲染无条件退出确认弹层：轻遮罩 + 确认退出/取消按钮。
+    /// 渲染退出确认。普通退出仍保留后台守护；待装更新的退出会停掉守护，
+    /// 只有存在进行中的会话时才走到这里。
     pub(crate) fn render_quit_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted) = {
             let t = cx.theme();
@@ -379,19 +380,67 @@ impl Workspace {
             matches!(self.update_status, updater::UpdateStatus::Applying { .. });
         #[cfg(not(target_os = "macos"))]
         let update_is_applying = false;
+        // 更新事务只在 macOS 上存在。
+        #[cfg(target_os = "macos")]
+        let installing = !update_is_applying && self.update_status.ready_update().is_some();
+        #[cfg(not(target_os = "macos"))]
+        let installing = false;
+        let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
+            super::daemon_restart_prompt::DaemonStopReason::QuitToInstall,
+            &self.stop_prompt_names,
+        );
+        let title = if installing {
+            prompt.title
+        } else {
+            "退出 Smelt？"
+        };
+        let body = if update_is_applying {
+            "正在安全应用更新，完成后会自动重启。".to_string()
+        } else if installing {
+            prompt.body
+        } else {
+            "后台会话将继续运行，当前连接会断开。".to_string()
+        };
+        let confirm_label: SharedString = if self.quit_requested {
+            "正在退出…".into()
+        } else if update_is_applying {
+            "正在更新…".into()
+        } else if installing {
+            prompt.confirm.into()
+        } else {
+            "退出".into()
+        };
+        let on_confirm =
+            |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                if this.quit_requested {
+                    return;
+                }
+                // Applying 表示 helper 已派生且当前 GUI 正在退出，不能再启动
+                // 第二条退出或安装流程。
+                #[cfg(target_os = "macos")]
+                if matches!(this.update_status, updater::UpdateStatus::Applying { .. }) {
+                    return;
+                }
+                this.quit_requested = true;
+                cx.notify();
+                // 退出只是统一安装驱动的一种触发策略：helper 派生成功后退出，
+                // 并在本进程完全消失后才提交同一份事务。
+                #[cfg(target_os = "macos")]
+                if let Some(update) = this.update_status.ready_update().cloned() {
+                    this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
+                    return;
+                }
+                request_app_quit(cx);
+            };
+        let confirm = if installing && prompt.danger {
+            Self::modal_danger_button("confirm-quit", confirm_label, on_confirm, cx)
+        } else {
+            Self::modal_commit_button("confirm-quit", confirm_label, on_confirm, cx)
+        };
 
         let content = v_flex()
-            .child(Self::modal_title(fg, "退出 Smelt？"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(if update_is_applying {
-                        "正在安全应用更新，完成后会自动重启。"
-                    } else {
-                        "后台会话将继续运行，当前连接会断开。"
-                    }),
-            )
+            .child(Self::modal_title(fg, title))
+            .child(div().text_sm().text_color(muted).child(body))
             .child(
                 h_flex()
                     .justify_end()
@@ -408,41 +457,15 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .child(Self::modal_commit_button(
-                        "confirm-quit",
-                        if self.quit_requested {
-                            "正在退出…"
-                        } else if update_is_applying {
-                            "正在更新…"
-                        } else {
-                            "退出"
-                        },
-                        |this, _, _, cx| {
-                            if this.quit_requested {
-                                return;
-                            }
-                            // Applying 表示 helper 已派生且当前 GUI 正在退出，不能再启动
-                            // 第二条退出或安装流程。更新事务只在 macOS 上存在。
-                            #[cfg(target_os = "macos")]
-                            if matches!(this.update_status, updater::UpdateStatus::Applying { .. })
-                            {
-                                return;
-                            }
-                            this.quit_requested = true;
-                            cx.notify();
-                            // 退出只是统一安装驱动的一种触发策略：helper 派生成功后退出，
-                            // 并在本进程完全消失后才提交同一份事务。
-                            #[cfg(target_os = "macos")]
-                            if let Some(update) = this.update_status.ready_update().cloned() {
-                                this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
-                                return;
-                            }
-                            request_app_quit(cx);
-                        },
-                        cx,
-                    )),
+                    .child(confirm),
             );
-        self.modal_shell(320., true, content, crate::overlay::ModalLayer::Quit, cx)
+        self.modal_shell(
+            if installing { 420. } else { 320. },
+            true,
+            content,
+            crate::overlay::ModalLayer::Quit,
+            cx,
+        )
     }
 
     /// 启动时提议把 App 移到「应用程序」：被系统转移或放在只读位置时更新装不上。
@@ -603,25 +626,20 @@ impl Workspace {
         )
     }
 
-    /// 「重启守护进程」二次确认弹窗：明确告知会断开所有当前终端会话。与
-    /// render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩）。
-    ///
-    /// 入口只在设置窗「更新」页；弹层挂在设置窗上（见 `SettingsWindow::render`），
-    /// 不再画到主窗口，避免「按钮在设置、确认框跑到主界面」的割裂感。
+    /// 「重启守护进程」确认。只在有进行中的会话时打开，挂在设置窗上。
     pub(crate) fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
+        let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
+            super::daemon_restart_prompt::DaemonStopReason::ExplicitRestart,
+            &self.stop_prompt_names,
+        );
 
         let content = v_flex()
-            .child(Self::modal_title(fg, "确定重启守护进程吗？"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("守护进程升级后才会生效新版本。重启会立即断开并终止当前所有终端会话（包括正在跑的 agent），且无法恢复。"),
-            )
+            .child(Self::modal_title(fg, prompt.title))
+            .child(div().text_sm().text_color(muted).child(prompt.body))
             .child(
                 h_flex()
                     .justify_end()
@@ -636,23 +654,59 @@ impl Workspace {
                         cx,
                     ))
                     .child(Self::modal_danger_button(
-"confirm-daemon-restart",
-"确定重启",
-|this, _, _, cx| {
-                            this.confirm_restart_daemon(cx);
-                            #[cfg(not(unix))]
-                            {
-                                let _ = (this, cx);
-                            }
-                        },
-cx,
-)),
+                        "confirm-daemon-restart",
+                        prompt.confirm,
+                        |this, _, _, cx| this.confirm_restart_daemon(cx),
+                        cx,
+                    )),
             );
         self.modal_shell(
-            320.,
+            420.,
             true,
             content,
             crate::overlay::ModalLayer::DaemonRestart,
+            cx,
+        )
+    }
+
+    /// 「立即重启更新」确认。有进行中的会话时挂在设置窗上。
+    pub(crate) fn render_update_install_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (fg, muted) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground)
+        };
+        let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
+            super::daemon_restart_prompt::DaemonStopReason::UpdateInstall,
+            &self.stop_prompt_names,
+        );
+        let content = v_flex()
+            .child(Self::modal_title(fg, prompt.title))
+            .child(div().text_sm().text_color(muted).child(prompt.body))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_normal_button(
+                        "cancel-update-install",
+                        "取消",
+                        |this, _, _, cx| {
+                            this.show_update_install_confirm = false;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(Self::modal_danger_button(
+                        "confirm-update-install",
+                        prompt.confirm,
+                        |this, _, _, cx| this.confirm_update_install(cx),
+                        cx,
+                    )),
+            );
+        self.modal_shell(
+            420.,
+            true,
+            content,
+            crate::overlay::ModalLayer::UpdateInstall,
             cx,
         )
     }

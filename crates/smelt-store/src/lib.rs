@@ -214,6 +214,11 @@ impl Store {
         imp::read_user_version(path)
     }
 
+    /// 把 WAL 合并回主库并截断。停机时调用，避免退出后还留着 `-wal` 占用。
+    pub fn checkpoint_wal_truncate(&self) -> Result<(), StoreError> {
+        imp::checkpoint_wal_truncate(&self.backend)
+    }
+
     /// 运行时身份。只有 smeltd 第一次启动时写一次。
     pub fn runtime_id(&self) -> Result<Option<String>, StoreError> {
         imp::runtime_id(&self.backend)
@@ -840,6 +845,12 @@ mod imp {
 
     pub(super) fn runtime_id(backend: &Backend) -> Result<Option<String>, StoreError> {
         read(backend, crate::config::read_runtime_id)
+    }
+
+    pub(super) fn checkpoint_wal_truncate(backend: &Backend) -> Result<(), StoreError> {
+        let connection = lock_connection(backend)?;
+        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
     }
 
     pub(super) fn put_runtime_id(backend: &Backend, runtime_id: &str) -> Result<(), StoreError> {
@@ -3186,6 +3197,9 @@ mod imp {
     }
 
     pub(super) fn runtime_id(_backend: &Backend) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn checkpoint_wal_truncate(_backend: &Backend) -> Result<(), StoreError> {
         unsupported()
     }
     pub(super) fn put_runtime_id(_backend: &Backend, _runtime_id: &str) -> Result<(), StoreError> {

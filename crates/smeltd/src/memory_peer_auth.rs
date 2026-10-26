@@ -58,6 +58,7 @@ fn session_roots(session: &super::AcpSession) -> SessionRoots {
 const SHELL_NAMES: &[&str] = &[
     "ash",
     "bash",
+    "cmd",
     "csh",
     "dash",
     "fish",
@@ -71,19 +72,10 @@ const SHELL_NAMES: &[&str] = &[
 
 fn is_shell_name(name: &str) -> bool {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let base = strip_one_exe(base);
+    let base = crate::protocol::strip_one_exe(base);
     SHELL_NAMES
         .iter()
         .any(|shell| base.eq_ignore_ascii_case(shell))
-}
-
-fn strip_one_exe(name: &str) -> &str {
-    let bytes = name.as_bytes();
-    if bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
-        &name[..name.len() - 4]
-    } else {
-        name
-    }
 }
 
 /// `peer` 能不能代表这条会话调 `agent.memory.*`。
@@ -473,12 +465,10 @@ mod tests {
         names.insert(21, "bash");
         names.insert(22, "python");
         names.insert(23, "zsh");
-        names.insert(25, "powershell.exe");
         names.insert(30, "pi-rpc");
         let allow = |pid| allows_session_peer(pid, &roots, parents(&tree), comms(&names));
         assert!(allow(20), "provider 自己可以");
         assert!(allow(30), "同进程模式的 handle pid 可以");
-        assert!(!allow(25), "Windows 的 powershell.exe 也不行");
         assert!(!allow(21), "pi-agent 的 bash 子进程不行");
         assert!(!allow(22), "再往下的孙进程不行");
         assert!(!allow(23), "宿主的 shell 子进程不行");
@@ -492,14 +482,44 @@ mod tests {
         let mut names = HashMap::new();
         names.insert(24, "bun");
         names.insert(23, "zsh");
+        // 不去掉 `.exe` 时，这些名字对不上 shell 表，会被当成宿主的直接子进程放行。
+        names.insert(26, "powershell.exe");
+        names.insert(
+            27,
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        );
+        names.insert(28, "cmd.exe");
+        names.insert(29, "node.exe");
         tree.insert(24, 10);
+        tree.insert(26, 10);
+        tree.insert(27, 10);
+        tree.insert(28, 10);
+        tree.insert(29, 10);
         let allow = |pid| allows_session_peer(pid, &unbound, parents(&tree), comms(&names));
         assert!(
             allow(24),
             "provider 还没绑定时，宿主的非 shell 直接子进程可以"
         );
+        assert!(allow(29), "node.exe 不是 shell，直接子进程可以");
         assert!(!allow(23), "这时 shell 仍然不行");
+        assert!(!allow(26), "powershell.exe 不能靠漏剥后缀放行");
+        assert!(!allow(27), "带路径的 powershell.exe 也不能放行");
+        assert!(!allow(28), "cmd.exe 不能靠漏剥后缀放行");
         assert!(!allow(21), "pi-agent 的子进程仍然不行");
+    }
+
+    #[test]
+    fn shell_names_strip_one_exe_suffix_and_a_windows_path() {
+        assert!(is_shell_name("powershell.exe"));
+        assert!(is_shell_name("cmd.exe"));
+        assert!(is_shell_name("CMD.EXE"));
+        assert!(is_shell_name(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ));
+        assert!(is_shell_name(r"C:\Windows\System32\cmd.exe"));
+        assert!(!is_shell_name("node.exe"));
+        assert!(!is_shell_name("bun"));
+        assert!(!is_shell_name("notcmd"));
     }
 
     fn session_with_handle_pid(registry: &AcpSessions, id: &str, pid: i32) {
@@ -520,13 +540,7 @@ mod tests {
         *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
             cmd_tx,
             event_rx,
-            stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio {
-                pid,
-                #[cfg(unix)]
-                stdin_fd: -1,
-                #[cfg(unix)]
-                stdout_fd: -1,
-            }))),
+            stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio { pid }))),
             in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             supports_mid_turn_input: false,

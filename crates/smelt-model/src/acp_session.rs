@@ -90,7 +90,10 @@ pub struct AcpNoticeView {
 #[serde(rename_all = "snake_case")]
 pub enum AcpTurnOutcome {
     Succeeded,
+    /// 用户主动停下这一轮。
     Cancelled,
+    /// 守护进程重启或更新把这一轮掐断。历史还在，重连后可以接着说。
+    Interrupted,
     MaxTokens,
     MaxTurnRequests,
     Refused,
@@ -122,6 +125,7 @@ impl AcpTurnOutcome {
     pub fn failure_message(self) -> Option<&'static str> {
         match self {
             Self::Succeeded | Self::Cancelled => None,
+            Self::Interrupted => Some("本轮回复已中断，重启后可继续"),
             Self::MaxTokens => Some("已达到本轮最大令牌数"),
             Self::MaxTurnRequests => Some("已达到本轮最大请求数"),
             Self::Refused => Some("Agent 拒绝继续处理"),

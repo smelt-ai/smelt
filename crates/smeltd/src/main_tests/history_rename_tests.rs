@@ -34,7 +34,6 @@ fn history_rename_writes_metadata_overlay() {
             automations: new_test_automation_store(),
             exe_mtime: 0,
             daemon_fingerprint: None,
-            listen_fd: -1,
             event_hub: new_event_hub(),
         }
         .context(Principal::Local),

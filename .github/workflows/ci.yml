@@ -125,6 +125,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
+    # 没有缓存，每次全量编译；不要调试信息，链接快得多。测试只看通过与否。
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -139,17 +142,12 @@ jobs:
         with:
           save-if: false
 
-      # --keep-going：一个 crate 编不过时继续编不依赖它的那些，一次拿到尽量全的报错。
-      - name: Check local runtime
-        run: cargo check --all-targets --keep-going -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-cli -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
-
       - name: Install cargo-nextest
-        if: ${{ !cancelled() }}
         uses: taiki-e/install-action@nextest
 
-      # 本机运行时这条链在 Windows 上换了实现，单测在这里真跑一遍。
+      # 本机运行时这条链在 Windows 上换了实现，单测在这里真跑一遍。编译错误也在这一步报，
+      # 不再单独 cargo check：check 只出元数据，测试还得从头再编一遍，白花 8 分钟。
       - name: Run tests
-        if: ${{ !cancelled() }}
         run: cargo nextest run -p smelt-sys -p smelt-paths -p smelt-client-store -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt-client -p smelt-cli -p smelt-store -p smelt-git -p smelt-core -p smeltd -p smelt
 
   mobile:
@@ -206,7 +204,7 @@ jobs:
       # Gradle 9.1 / AGP 9 目前支持到 JDK 25，runner 默认的 JDK 未必在范围内，
       # 钉一个已知可用的。
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"

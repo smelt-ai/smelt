@@ -1231,6 +1231,7 @@ fn turn_outcome_card(
     let retry = supports_rewind.then_some(TurnOutcomeAction::Retry);
     match outcome? {
         AcpTurnOutcome::Succeeded | AcpTurnOutcome::Cancelled => None,
+        AcpTurnOutcome::Interrupted => Some(("本轮回复已中断，重启后可继续", None)),
         AcpTurnOutcome::Failed => Some(("这一轮没有完成", retry)),
         AcpTurnOutcome::Refused => Some(("Agent 拒绝继续处理", retry)),
         AcpTurnOutcome::MaxTokens => {

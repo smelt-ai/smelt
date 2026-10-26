@@ -316,8 +316,8 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ),
         ConversationEvent::BackgroundNotice(note) => {
             // 状态行不是一轮对话。相位、回合序号和用户回显都保持原样。
-            outcome.entries_offset = settle_dispatched_subagents(state, &note)
-                .or(Some(state.entries.len()));
+            outcome.entries_offset =
+                settle_dispatched_subagents(state, &note).or(Some(state.entries.len()));
             state.entries.push(AcpEntry::TaskNote(note));
         }
         ConversationEvent::ProviderTurnStarted => apply_provider_turn_started(state, &mut outcome),
@@ -612,10 +612,7 @@ fn apply_background_tasks(
 
 /// 子智能体快照。后台派发的子智能体和后台任务一样压着完成：全停掉了才在这里放出来，
 /// 正常结束的会把结果交回会话、叫醒 Provider 再跑一轮。
-fn apply_subagents(
-    state: &mut AcpSessionState,
-    subagents: Vec<crate::acp_session::SubagentView>,
-) {
+fn apply_subagents(state: &mut AcpSessionState, subagents: Vec<crate::acp_session::SubagentView>) {
     use crate::acp_session::SubagentStatus;
     let finished: Vec<SubagentStatus> = state
         .subagents
@@ -1246,6 +1243,94 @@ fn cancelled_tool_output(
 fn finish_turn(state: &mut AcpSessionState, reason: StopReason) -> Option<usize> {
     let outcome = AcpTurnOutcome::from_stop_reason(reason, state.cancel_requested);
     finish_turn_with(state, outcome)
+}
+
+/// 重放结束或守护停机时，把还没收到终态的那一轮收成「中断」。
+/// 用户已经点过停止的，仍记成取消。没有未完成回合时什么都不改。
+pub fn interrupt_open_turn(state: &mut AcpSessionState) -> bool {
+    if !turn_is_open(state) {
+        return false;
+    }
+    if state.cancel_requested {
+        let _ = finish_turn_with(state, AcpTurnOutcome::Cancelled);
+    } else {
+        finish_interrupted_turn(state);
+    }
+    true
+}
+
+/// 只有最后一轮可能还没写完：从最后一条用户消息到末尾，和 `open_turn_range` 同一个边界。
+/// 更早几轮里没收尾的工具是 adapter 重放时没补终态，那几轮早就结束了。
+fn last_turn_start(entries: &[AcpEntry]) -> usize {
+    super::last_user_index(entries).unwrap_or(0)
+}
+
+fn turn_is_open(state: &AcpSessionState) -> bool {
+    let entries = state.entries();
+    state.turn_started_at_ms.is_some()
+        || matches!(
+            state.phase,
+            DaemonPhase::Thinking
+                | DaemonPhase::ExecutingTool
+                | DaemonPhase::AwaitingApproval
+                | DaemonPhase::WaitingForUser
+        )
+        || crate::acp_chat::has_unfinished_tool_call(&entries[last_turn_start(entries)..])
+}
+
+fn finish_interrupted_turn(state: &mut AcpSessionState) {
+    let _ = finish_interrupted_turn_tools(state);
+    state.cancel_requested = false;
+    state.permissions.clear();
+    state.elicitation = None;
+    state.phase = DaemonPhase::Idle;
+    state.end_reason.clear();
+    state.provider_retry = None;
+    state.completed_delivery_id = state.active_delivery_id.take();
+    state.completed_unread = true;
+    state.turn_outcome = Some(AcpTurnOutcome::Interrupted);
+    let ended_at_ms = super::unix_time_ms();
+    if let Some(timing) = state.turn_timings.last_mut()
+        && timing.ended_at_ms.is_none()
+    {
+        timing.ended_at_ms = Some(ended_at_ms);
+    }
+    state.turn_started_at_ms = None;
+}
+
+fn finish_interrupted_turn_tools(state: &mut AcpSessionState) -> Option<usize> {
+    let start = last_turn_start(&state.entries);
+    let mut first_changed = None;
+    for (index, entry) in state.entries.iter_mut().enumerate().skip(start) {
+        if finish_interrupted_entry(entry) {
+            first_changed.get_or_insert(index);
+        }
+    }
+    first_changed
+}
+
+fn finish_interrupted_entry(entry: &mut AcpEntry) -> bool {
+    let AcpEntry::ToolCall {
+        status,
+        output,
+        children,
+        ..
+    } = entry
+    else {
+        return false;
+    };
+    let mut changed = false;
+    if is_unfinished_tool_status(*status) {
+        *status = crate::acp_chat::ToolCallStatus::Failed;
+        output.push(crate::acp_chat::ToolOutputPart::Text(
+            "服务重启，工具已中断".to_string(),
+        ));
+        changed = true;
+    }
+    for child in children.iter_mut() {
+        changed |= finish_interrupted_entry(child);
+    }
+    changed
 }
 
 /// 回退落地：把目标用户消息及其之后的所有条目从投影里丢掉。发起方（daemon

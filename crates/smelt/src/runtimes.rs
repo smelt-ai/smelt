@@ -547,9 +547,9 @@ pub(crate) const DESKTOP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 请运行时升级（[`push_upgrade`]）的结局。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PushUpgrade {
-    /// 运行时接下后断开了：多半是交接到了新版本（旧进程退出），也可能是中途断了网。
+    /// 运行时接下后断开了：多半是停机重启到了新版本，也可能是中途断了网。
     /// 重新探测才知道。
-    HandedOff,
+    Restarting,
     /// 装着的已经是这个版本。
     Current,
     /// 新版本装好了，运行时正忙，空闲时自己换过去。
@@ -586,7 +586,7 @@ pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
     loop {
         let mut line = String::new();
         match reader.read_line(&mut line) {
-            Ok(0) if accepted => return PushUpgrade::HandedOff,
+            Ok(0) if accepted => return PushUpgrade::Restarting,
             Ok(0) => return PushUpgrade::Unsupported,
             Ok(_) => {}
             Err(error) if accepted => {
@@ -1470,12 +1470,12 @@ mod tests {
         );
     }
 
-    /// 接下以后断开：交接时旧进程退出就是这样，要重新探测。
+    /// 接下以后断开：停机重启时旧进程退出就是这样，要重新探测。
     #[test]
     fn hanging_up_after_accepting_means_go_look_again() {
         assert_eq!(
             push_upgrade(&runtime_replying(&[r#"{"state":"accepted"}"#])),
-            PushUpgrade::HandedOff
+            PushUpgrade::Restarting
         );
     }
 

@@ -68,7 +68,6 @@ fn color_replies_for(script: &[u8]) -> String {
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
-            cwd: None,
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {

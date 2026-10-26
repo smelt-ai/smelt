@@ -235,46 +235,28 @@ pub(crate) fn spawn_subscription(
     handle
 }
 
-/// 本机守护版本对不上：请它交接到 App 里的版本（会话保留），换好再探一次。它有回合没跑完
-/// 时拒绝交接，隔一阵再请，直到换成或者停下；期间报「升级中」，界面上看得到在等什么。
+/// 本机守护版本对不上：停掉旧进程并拉起 App 里的那份，再探一次。
+/// 进行中的回合会中断。只试一次，不再因为忙碌反复等。
 fn upgrade_local_then_probe(
     runtime: &Runtime,
     version: &str,
     detail: &str,
     status_tx: &smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
-    stop: &AtomicBool,
+    _stop: &AtomicBool,
 ) -> RuntimeStatus {
     use crate::local_daemon::UpgradeOutcome;
 
-    const BUSY_RETRY: Duration = Duration::from_secs(15);
-    let report = |progress: &str| {
-        let _ = status_tx.try_send((
-            runtime.key().clone(),
-            RuntimeStatus::Upgrading(progress.to_string()),
-        ));
-    };
-    report("正在升级本机运行时");
-    loop {
-        match crate::local_daemon::upgrade_daemon() {
-            UpgradeOutcome::Busy => {
-                report("本机运行时有回合没跑完，跑完就升级");
-                std::thread::sleep(BUSY_RETRY);
-                if stop.load(Ordering::Acquire) {
-                    return crate::runtimes::status_of(runtime.client());
-                }
-            }
-            UpgradeOutcome::Unsupported => {
-                return RuntimeStatus::Incompatible {
-                    version: version.to_string(),
-                    detail: format!(
-                        "{detail}。本机运行时太旧，不能无缝升级：在设置里重启守护进程（会断开会话）"
-                    ),
-                    runtime_outdated: true,
-                };
-            }
-            // 换成了，或者没换成（新守护没起来、交接回滚），都以重新探到的为准。
-            UpgradeOutcome::Upgraded | UpgradeOutcome::Failed => {
-                return crate::runtimes::local_status(runtime.client());
+    let _ = status_tx.try_send((
+        runtime.key().clone(),
+        RuntimeStatus::Upgrading("正在重启本机运行时".to_string()),
+    ));
+    match crate::local_daemon::upgrade_daemon() {
+        UpgradeOutcome::Upgraded => crate::runtimes::local_status(runtime.client()),
+        UpgradeOutcome::Failed => {
+            RuntimeStatus::Incompatible {
+                version: version.to_string(),
+                detail: format!("{detail}。本机运行时没有换成当前版本，可在设置里重启守护进程"),
+                runtime_outdated: true,
             }
         }
     }
@@ -301,13 +283,11 @@ fn upgrade_then_probe(
         runtime_outdated: true,
     };
     report(format!("正在升级到 v{DESKTOP_VERSION}"));
-    let waiting_for_idle = match push_upgrade(runtime.client()) {
-        PushUpgrade::HandedOff => false,
+    match push_upgrade(runtime.client()) {
+        PushUpgrade::Restarting => {}
+        // 老运行时正忙时会先装好、等空闲再换。
         PushUpgrade::Staged(reason) => {
-            report(format!(
-                "v{DESKTOP_VERSION} 已装好，运行时正忙（{reason}），空闲后自己换过去"
-            ));
-            true
+            return still_incompatible(reason);
         }
         PushUpgrade::Current => {
             return still_incompatible(format!(
@@ -323,23 +303,16 @@ fn upgrade_then_probe(
         PushUpgrade::Failed(error) => {
             return still_incompatible(format!("自动升级失败：{error}"));
         }
-    };
-    // 交接时旧进程连同 iroh 端点一起退出，新进程重新上线要几秒；正忙的要等到它空闲。
-    const HANDOFF_GRACE: Duration = Duration::from_secs(120);
+    }
+    // 重启时旧进程连同 iroh 端点一起退出，新进程重新上线要几秒。
+    const RESTART_GRACE: Duration = Duration::from_secs(120);
     let started = Instant::now();
     loop {
-        std::thread::sleep(if waiting_for_idle {
-            Duration::from_secs(30)
-        } else {
-            Duration::from_secs(2)
-        });
+        std::thread::sleep(Duration::from_secs(2));
         let status = status_of(runtime.client());
-        let pending = match &status {
-            RuntimeStatus::Offline(_) => !waiting_for_idle && started.elapsed() < HANDOFF_GRACE,
-            // 还是旧进程：正忙的接着等它空闲，交接过的就是没换成。
-            RuntimeStatus::Incompatible { .. } => waiting_for_idle,
-            _ => false,
-        };
+        // 连不上就是还在重启；连上了还是旧版本，就是没换成。
+        let pending =
+            matches!(status, RuntimeStatus::Offline(_)) && started.elapsed() < RESTART_GRACE;
         if !pending || stop.load(Ordering::Acquire) {
             return match status {
                 RuntimeStatus::Incompatible {

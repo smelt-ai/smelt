@@ -62,18 +62,6 @@ pub(crate) struct PeerIdentity {
     pub(crate) audit_token: Option<PeerAuditToken>,
 }
 
-pub(crate) trait PeerIdentityProvider {
-    fn identity(&self, conn: &UnixStream) -> Result<PeerIdentity, String>;
-}
-
-pub(super) struct SystemPeerIdentityProvider;
-
-impl PeerIdentityProvider for SystemPeerIdentityProvider {
-    fn identity(&self, conn: &UnixStream) -> Result<PeerIdentity, String> {
-        system_peer_identity(conn)
-    }
-}
-
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct KernelCodeIdentity {
@@ -660,17 +648,6 @@ pub(crate) fn authenticate_first_party_desktop(
     Ok(FirstPartyClientKind::Desktop)
 }
 
-pub(super) fn authenticate_event_connection(
-    value: &serde_json::Value,
-    conn: &UnixStream,
-    provider: &dyn PeerIdentityProvider,
-    daemon_pid: u32,
-    daemon_executable: &Path,
-) -> Result<AuthenticatedEventClient, String> {
-    let peer = provider.identity(conn)?;
-    authenticate_event_client_for_platform(value, &peer, daemon_pid, daemon_executable)
-}
-
 /// 正在看画面的活连接数。headless 自升级只在这是 0 时才动手——GUI 自己有空闲
 /// 门控（agent 忙不闪终端），有人连着就把升级时机让出去。
 ///
@@ -697,19 +674,6 @@ impl Drop for ViewerLease {
 
 pub(crate) fn viewer_is_present() -> bool {
     LIVE_VIEWERS.load(std::sync::atomic::Ordering::SeqCst) > 0
-}
-
-#[cfg(all(target_os = "macos", test))]
-pub(super) fn authenticate_event_connection_with_verifier(
-    value: &serde_json::Value,
-    conn: &UnixStream,
-    provider: &dyn PeerIdentityProvider,
-    daemon_pid: u32,
-    daemon_executable: &Path,
-    verifier: &dyn PeerCodeIdentity,
-) -> Result<AuthenticatedEventClient, String> {
-    let peer = provider.identity(conn)?;
-    authenticate_event_client_with_verifier(value, &peer, daemon_pid, daemon_executable, verifier)
 }
 
 #[cfg(target_os = "macos")]
@@ -835,8 +799,9 @@ fn basename_matches(expected: &str, actual: &str) -> bool {
     }
 }
 
-#[cfg(windows)]
-fn strip_one_exe(name: &str) -> &str {
+/// 去掉恰好一个结尾的 `.exe`（大小写不敏感）。
+/// Windows 第一方 basename 和记忆鉴权里的 shell 名都用这一份，避免两套规则。
+pub(crate) fn strip_one_exe(name: &str) -> &str {
     let bytes = name.as_bytes();
     if bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
         &name[..name.len() - 4]

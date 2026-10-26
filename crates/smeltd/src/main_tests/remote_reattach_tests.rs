@@ -94,7 +94,6 @@ fn make_live_session(master: std::fs::File, pid: i32, rows: u16, cols: u16) -> A
             cell_h: 15,
             remote_viewports: 0,
             remote_grace: 0,
-            cwd: None,
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {

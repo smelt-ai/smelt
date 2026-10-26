@@ -384,8 +384,11 @@ fn accept_loop(
     }
 }
 
-fn handle_client(inner: Arc<Inner>, mut stream: TaskStream, session_cwd: &str) {
+fn handle_client(inner: Arc<Inner>, stream: TaskStream, session_cwd: &str) {
     use std::io::{BufRead, BufReader};
+    // 命名管道设读超时要可变借用，Unix 套接字不用。
+    #[cfg(windows)]
+    let mut stream = stream;
     // macOS 上，非阻塞监听套接字 accept 出来的连接也是非阻塞的。
     // 请求行还没写到时，读会立刻返回 WouldBlock；那不是对端关掉了。
     #[cfg(unix)]
@@ -470,7 +473,7 @@ fn serve_listen(inner: Arc<Inner>, mut stream: TaskStream, owner: String) {
             abandon_listener(&inner, id);
             return;
         }
-        if ready.get(0) == Some(&true) {
+        if ready.first() == Some(&true) {
             let peer_gone = match stream.read(&mut buf) {
                 Ok(0) => true,
                 Err(error)
@@ -1393,7 +1396,7 @@ fn serve_wait_until(inner: Arc<Inner>, mut stream: TaskStream, request: &serde_j
         if ready.get(1) == Some(&true) {
             drain_wake(&mut wake);
         }
-        if ready.get(0) == Some(&true) {
+        if ready.first() == Some(&true) {
             let mut buf = [0u8; 64];
             match stream.read(&mut buf) {
                 Ok(0) => break None,
@@ -1841,6 +1844,7 @@ fn shell_command(command: &str) -> Command {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn connect_task_stream(path: &Path) -> std::io::Result<TaskStream> {
     #[cfg(unix)]
     {

@@ -110,6 +110,7 @@ impl Workspace {
             settings_page_nonce: self.settings_page_nonce,
             capabilities_tab: self.nav.capabilities_tab(),
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
+            show_update_install_confirm: self.show_update_install_confirm,
             session_manager_open: self.session_manager_open,
         }
     }

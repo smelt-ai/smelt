@@ -1,4 +1,4 @@
-//! 应用更新、守护无缝升级、会话管理器。
+//! 应用更新、守护重启、会话管理器。
 
 use super::*;
 
@@ -318,6 +318,7 @@ impl Workspace {
 
     #[cfg(target_os = "macos")]
     /// 用户点击、启动恢复、退出安装都只从这里进入同一条安装状态机。
+    /// 没有进行中的会话时直接安装；有的话先在设置窗确认。
     pub(crate) fn begin_ready_update_install(&mut self, cx: &mut Context<Self>) {
         if self.blocked_by_app_location(cx) {
             return;
@@ -325,7 +326,32 @@ impl Workspace {
         let Some(update) = self.update_status.ready_update().cloned() else {
             return;
         };
+        let names = self.busy_work_names(cx);
+        if super::daemon_restart_prompt::should_confirm(&names) {
+            self.stop_prompt_names = names;
+            self.show_update_install_confirm = true;
+            cx.notify();
+            return;
+        }
         self.start_update_install(update, UpdateInstallTrigger::User, cx);
+    }
+
+    /// 更新事务只在 macOS 上存在；别的平台不会弹这个确认，这里只是关掉它。
+    pub(crate) fn confirm_update_install(&mut self, cx: &mut Context<Self>) {
+        self.show_update_install_confirm = false;
+        #[cfg(target_os = "macos")]
+        if let Some(update) = self.update_status.ready_update().cloned() {
+            self.start_update_install(update, UpdateInstallTrigger::User, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn busy_work_names(&self, cx: &App) -> Vec<String> {
+        super::daemon_restart_prompt::busy_work_names(&DaemonStates::snapshot(
+            &crate::RuntimeKey::Local,
+            cx,
+        ))
     }
 
     #[cfg(target_os = "macos")]
@@ -401,8 +427,18 @@ impl Workspace {
                             ticket.update_id, ticket.attempt_id
                         ),
                     );
-                    // helper 已成功派生并持有精确 attempt。此后当前 GUI 不能继续运行：
-                    // helper 只会在本进程完全退出后提交原子交换。
+                    // helper 已成功派生并持有精确 attempt。先停掉旧守护，再退出。
+                    // 安装器换 `.app` 时文件不能还被旧进程占着。派生失败不走这里。
+                    let stopped = cx
+                        .background_executor()
+                        .spawn(async { updater::shutdown_local_daemon() })
+                        .await;
+                    if !stopped {
+                        smelt_sys::app_log::error(
+                            "updater",
+                            "退出前没能确认旧守护已退出，安装器换包前会再停一次",
+                        );
+                    }
                     cx.update(request_app_quit);
                 }
                 Err(error) => {
@@ -437,8 +473,7 @@ impl Workspace {
     /// check_for_update 同款结构，别在 UI 线程里做阻塞 IO。
     pub(crate) fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            // 只探测状态，不再在此 ensure/handoff（冷启动 ensure 由 restore 线程串行做完）。
-            // 仍落后则无缝升级到磁盘最新 smeltd。
+            // 只探测状态，不再在此 ensure（冷启动 ensure 由 restore 线程串行做完）。
             let (outdated, info) = cx
                 .background_executor()
                 .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
@@ -446,143 +481,16 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                if outdated && crate::runtimes::local_upgrade_in_hand(cx) {
-                    // 版本对不上：订阅线程正在换代，这里不再发一次。
-                    this.daemon_upgrade_pending = false;
-                } else if outdated {
-                    if this.any_agent_busy(cx) {
-                        // 有 agent 正在跑：无缝升级虽然不丢会话，但会让所有终端
-                        // 闪断重连——挑用户不在跑任务的时刻做，别背着用户换代
-                        // （这正是「用着用着终端全卡」的体验来源之一）。
-                        this.daemon_upgrade_pending = true;
-                    } else {
-                        this.daemon_upgrade_pending = false;
-                        this.upgrade_daemon_seamless(cx);
-                    }
-                } else {
-                    this.daemon_upgrade_pending = false;
+                // 磁盘上的映像已经不是正在跑的这份。没有进行中的会话就直接重启。
+                // 有的话不在后台打断它们，也不弹窗（定时检查会反复弹）：设置页的
+                // 「重启以升级」走确认，空闲下来后下一次检查再重启。
+                if outdated
+                    && !crate::runtimes::local_upgrade_in_hand(cx)
+                    && !this.daemon_upgrading
+                    && !super::daemon_restart_prompt::should_confirm(&this.busy_work_names(cx))
+                {
+                    this.restart_daemon_and_rebuild_terminals(cx);
                 }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 本机运行时上是否有 agent 正在跑（结构化 phase 处于 Thinking / ExecutingTool）。
-    /// 本机守护空闲升级的门控：升级会让终端闪断重连，不该打断正在跑的任务。
-    pub(crate) fn any_agent_busy(&self, cx: &App) -> bool {
-        DaemonStates::snapshot(&crate::RuntimeKey::Local, cx)
-            .iter()
-            .any(|s| {
-                s.has_runtime()
-                    && matches!(
-                        s.phase,
-                        crate::terminal::DaemonPhase::Thinking
-                            | crate::terminal::DaemonPhase::ExecutingTool
-                    )
-            })
-    }
-
-    /// subscribe 相位变化后调用：挂起的升级等所有 agent 空闲再发一次。
-    pub(crate) fn maybe_flush_pending_daemon_upgrade(&mut self, cx: &mut Context<Self>) {
-        if !self.daemon_upgrade_pending || self.daemon_upgrading || self.any_agent_busy(cx) {
-            return;
-        }
-        self.daemon_upgrade_pending = false;
-        self.upgrade_daemon_seamless(cx);
-    }
-
-    /// 逐 pane 在后台 reattach：会话 id 都还在，走正常重放恢复画面。无缝升级后
-    /// 不能在 `update` 回调里同步握手，否则卡住的 daemon 会反过来拖住整个 UI。
-    pub(crate) fn reconnect_all_terminals(&self, cx: &mut Context<Self>) {
-        let runtime = crate::runtimes::Runtime::local();
-        for sess in &self.sessions {
-            // 远程机器的终端还在它自己的运行时上，不拿本机守护去重连。
-            if !sess.runtime(cx).is_local() {
-                continue;
-            }
-            let leaves = sess.term_leaves();
-            for leaf in leaves {
-                let (cwd, sid) = {
-                    let view = leaf.read(cx);
-                    (view.cwd(), view.session_id().to_string())
-                };
-                let leaf_for_result = leaf.clone();
-                let runtime = runtime.clone();
-                cx.spawn(async move |_, cx| {
-                    let terminal = cx
-                        .background_executor()
-                        .spawn(async move {
-                            terminal::Terminal::reattach(
-                                &runtime,
-                                24,
-                                80,
-                                cwd.as_deref(),
-                                &sid,
-                            )
-                        })
-                        .await;
-                    if let Ok(terminal) = terminal {
-                        leaf_for_result.update(cx, |view, cx| {
-                            view.adopt_terminal(terminal, cx);
-                        });
-                    }
-                })
-                .detach();
-            }
-        }
-    }
-
-    /// 无缝升级守护：守护 exec 新二进制、PTY fd 原地交接，会话不中断（见 smeltd 升级设计）。
-    /// 成功后逐 pane reconnect——会话 id 都还在，走正常 reattach + 重放，画面最多闪一下。
-    /// 正在跑的守护太旧不认识 upgrade op 时提示改用下面的硬重启。
-    pub(crate) fn upgrade_daemon_seamless(&mut self, cx: &mut Context<Self>) {
-        if self.daemon_upgrading {
-            return;
-        }
-        self.daemon_upgrading = true;
-        self.daemon_upgrade_msg = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async { crate::local_daemon::upgrade_daemon() })
-                .await;
-            // exec 换代后 PID / 启动时刻都变了，跟版本一起重新问一遍。
-            let (outdated, info) = cx
-                .background_executor()
-                .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.daemon_upgrading = false;
-                this.daemon_info = info;
-                this.daemon_outdated = Some(outdated);
-                this.daemon_upgrade_msg = Some(match outcome {
-                    crate::local_daemon::UpgradeOutcome::Upgraded => {
-                        this.reconnect_all_terminals(cx);
-                        if cfg!(windows) {
-                            "已重启到新版本。终端会话已断开。".to_string()
-                        } else {
-                            "已无缝升级，所有会话保持运行。".to_string()
-                        }
-                    }
-                    crate::local_daemon::UpgradeOutcome::Unsupported => {
-                        // 守护完全没认这个 op，控制连接以外的东西没被碰过，各 pane
-                        // 的流式连接照常连着，不需要重连。
-                        "正在跑的守护版本过旧，不支持无缝升级；请用「重启守护进程」（会断开会话）。"
-                            .to_string()
-                    }
-                    crate::local_daemon::UpgradeOutcome::Busy => {
-                        this.daemon_upgrade_pending = true;
-                        "有 Agent 回合仍在运行；回合结束后会自动升级。".to_string()
-                    }
-                    crate::local_daemon::UpgradeOutcome::Failed => {
-                        // 守护回了 ok:true 才会 exec：旧连接多半已断。version
-                        // 握手没看到新 pid/started_at 时按可能已断重连。
-                        this.reconnect_all_terminals(cx);
-                        "升级结果未确认（新守护未完成 version 握手），已尝试重连各终端；如仍无响应可重试或改用重启。".to_string()
-                    }
-                });
                 cx.notify();
             });
         })
@@ -690,9 +598,34 @@ impl Workspace {
     /// **禁止**在 `update` 里同步 `Terminal::spawn`：握手含 sleep/轮询，多 pane 会把
     /// UI 卡死（「点重启守护就假死」）。流程：后台杀+拉起守护 → 后台按 cwd/sid 建
     /// Terminal → 主线程 `adopt_terminal` 挂回各 pane。
+    /// 设置里的「重启以升级」和「重启守护进程」都走这里。有进行中的会话时先确认。
+    pub(crate) fn request_daemon_restart(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_upgrading {
+            return;
+        }
+        let names = self.busy_work_names(cx);
+        if super::daemon_restart_prompt::should_confirm(&names) {
+            self.stop_prompt_names = names;
+            self.show_daemon_restart_confirm = true;
+            cx.notify();
+            return;
+        }
+        self.restart_daemon_and_rebuild_terminals(cx);
+    }
+
     pub(crate) fn confirm_restart_daemon(&mut self, cx: &mut Context<Self>) {
         self.show_daemon_restart_confirm = false;
+        self.restart_daemon_and_rebuild_terminals(cx);
+    }
+
+    pub(crate) fn restart_daemon_and_rebuild_terminals(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_upgrading {
+            return;
+        }
+        self.daemon_upgrading = true;
+        self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;
+        self.daemon_upgrade_msg = None;
         // 收集重建参数（Entity 可 Clone；真正 spawn 扔后台）。
         // 硬重启会清掉守护里的会话。终端 agent 不做语义恢复，缺失会话统一重开 shell。
         let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
@@ -745,6 +678,7 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
+                this.daemon_upgrading = false;
                 let mut failed = 0usize;
                 for (entity, term) in built {
                     match term {
@@ -762,8 +696,9 @@ impl Workspace {
                         "守护已重启，但有 {failed} 个终端没能重开（侧栏会话仍在，可关了再开）"
                     ));
                 } else {
-                    this.daemon_upgrade_msg =
-                        Some("守护已硬重启，会话已按原目录/启动命令重建。".into());
+                    this.daemon_upgrade_msg = Some(
+                        "守护已重启。进行中的回合已中断，历史记录还在，终端已按原目录重建。".into(),
+                    );
                 }
                 // 布局没变，写盘刷新 launch_cmd 等字段即可。
                 this.save_state(cx);

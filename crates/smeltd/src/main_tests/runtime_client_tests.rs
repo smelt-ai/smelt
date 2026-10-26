@@ -29,7 +29,6 @@ fn in_process_runtime_as(principal: Principal) -> RuntimeClient {
         automations: new_test_automation_store(),
         exe_mtime: TEST_EXE_MTIME,
         daemon_fingerprint: None,
-        listen_fd: -1,
         event_hub: new_event_hub(),
     };
     RuntimeClient::new(move || {

@@ -192,9 +192,6 @@ pub fn child_smelt_sock() -> std::ffi::OsString {
 #[cfg(windows)]
 pub static DAEMON_PIPE_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-#[cfg(not(windows))]
-pub fn remember_daemon_pipe(_name: String) {}
-
 #[cfg(windows)]
 pub fn remember_daemon_pipe(name: String) {
     let _ = DAEMON_PIPE_NAME.set(name);

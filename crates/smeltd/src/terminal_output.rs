@@ -10,8 +10,6 @@ use std::net::Shutdown;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use smelt_runtime_client::UnixStream;
-
 use crate::{ClientConn, ClientSocket, ConnId};
 
 /// 单个终端 attachment 尚未交给内核的输出上限。超过说明该客户端已经长期不消费；
@@ -378,6 +376,7 @@ pub(crate) fn enqueue_session_streams(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smelt_runtime_client::UnixStream;
     use std::io::{Read, Write};
     use std::time::Duration;
 

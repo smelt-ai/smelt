@@ -156,7 +156,7 @@ fn changed_acp_runtime_spec_relaunches_live_session() {
 }
 
 #[test]
-fn runtime_spec_fingerprint_survives_handoff_without_serializing_secrets() {
+fn runtime_spec_fingerprint_does_not_serialize_secrets() {
     let launch = smelt_core::agent_kind::ConversationLaunchSpec::from_command("copilot --acp");
     let mut original_env = BTreeMap::new();
     original_env.insert("PLUGIN_TOKEN".to_string(), "original-token".to_string());
@@ -3278,7 +3278,10 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
         "快照写线程不能因为增量补不上而退出（以前在这里 panic）"
     );
     let raw: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert!(raw.get("delta").is_none(), "补不上的增量要改发整段帧：{line}");
+    assert!(
+        raw.get("delta").is_none(),
+        "补不上的增量要改发整段帧：{line}"
+    );
     let frame = decode_frame(&mut mirror, &line);
     assert_eq!(frame["snapshot"]["entries_offset"], 4);
     let entries = frame["snapshot"]["entries"].as_array().unwrap();
@@ -3306,7 +3309,11 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
     reader.read_line(&mut line).unwrap();
     assert!(line.contains("\"delta\""), "镜像重建后应回到增量帧：{line}");
     let frame = decode_frame(&mut mirror, &line);
-    assert!(frame["snapshot"]["entries"].to_string().contains("B 的回答"));
+    assert!(
+        frame["snapshot"]["entries"]
+            .to_string()
+            .contains("B 的回答")
+    );
 }
 
 #[test]
@@ -3583,9 +3590,7 @@ fn open_after_kill_creates_a_fresh_slot() {
     assert!(!Arc::ptr_eq(&current, &old));
 }
 
-/// 回归 code review 发现的高严重度 bug：创建新会话却从没插进
-/// `acp_sessions` 表，导致 watch/list/kill 都找不到它，`handle_upgrade`
-/// 收集 fd 时也会漏掉它——无缝升级直接把这条会话弄丢。
+/// 回归：创建新会话却从没插进 `acp_sessions` 表，导致 watch/list/kill 都找不到它。
 #[test]
 fn open_new_session_registers_it_in_acp_sessions_table() {
     let acp_sessions = new_test_acp_sessions();
@@ -3624,296 +3629,6 @@ fn reopening_same_id_reuses_existing_session_instead_of_spawning_a_duplicate() {
     );
 }
 
-#[test]
-fn open_then_handoff_keeps_one_stable_registry_slot() {
-    let acp_sessions = new_test_acp_sessions();
-    let subscribers = new_event_hub();
-    let (stdin_fd_owner, _stdin_peer) = UnixStream::pair().unwrap();
-    let (stdout_fd_owner, _stdout_peer) = UnixStream::pair().unwrap();
-    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
-    let (_event_tx, event_rx) = smol::channel::unbounded();
-    let (slot, created) = acp_sessions.reserve_with("acp-handoff", || {
-        let sess = make_acp_session_value("acp-handoff", AcpSessionState::default());
-        *sess.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
-            cmd_tx,
-            event_rx,
-            stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio {
-                pid: std::process::id() as i32,
-                stdin_fd: stdin_fd_owner.as_raw_fd(),
-                stdout_fd: stdout_fd_owner.as_raw_fd(),
-            }))),
-            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            supports_mid_turn_input: false,
-            supports_compaction: false,
-            supports_native_queue: false,
-            supports_rewind: false,
-        });
-        *sess.launch_spec.lock().unwrap() = Some(
-            smelt_core::agent_kind::ConversationLaunchSpec::from_command(
-                "/definitely/not/a/real/binary-xyz",
-            ),
-        );
-        sess
-    });
-    assert!(created);
-
-    let opened = open_acp_session_once("acp-handoff", &acp_sessions, &subscribers);
-    assert!(Arc::ptr_eq(&opened, &slot));
-
-    let (items, fds) = collect_acp_handoff_typed(&acp_sessions);
-
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].id(), "acp-handoff");
-    // typed 枚举无 cmd 字段，"不发 legacy cmd"由类型系统保证。
-    let crate::handoff_v2::manifest::AcpHandoff::Direct { launch, .. } = &items[0] else {
-        panic!("应为 direct 形态");
-    };
-    assert_eq!(launch.command, "/definitely/not/a/real/binary-xyz");
-    let roles: Vec<_> = fds.iter().map(|(role, _)| role.clone()).collect();
-    assert_eq!(
-        roles,
-        vec![
-            crate::handoff_v2::manifest::FdRole::AcpStdin {
-                session_id: "acp-handoff".to_string()
-            },
-            crate::handoff_v2::manifest::FdRole::AcpStdout {
-                session_id: "acp-handoff".to_string()
-            },
-        ]
-    );
-    // 交出去的是副本：和原件是同一个打开的文件，号却是自己的。
-    assert!(same_open_file(
-        fds[0].1.as_raw_fd(),
-        stdin_fd_owner.as_raw_fd()
-    ));
-    assert!(same_open_file(
-        fds[1].1.as_raw_fd(),
-        stdout_fd_owner.as_raw_fd()
-    ));
-    assert_ne!(fds[0].1.as_raw_fd(), stdin_fd_owner.as_raw_fd());
-    // 交接期间会话被关掉（原件关了），快照里的副本照样能发：以前这里交出去的是原件号，
-    // 发送时报 EBADF，或者号被别的连接复用、successor 接到错的 socket。
-    let stdin_fd = fds[0].1.as_raw_fd();
-    drop(stdin_fd_owner);
-    assert!(
-        unsafe { libc::fcntl(stdin_fd, libc::F_GETFD) } >= 0,
-        "原件关了以后快照里的 fd 不能跟着失效"
-    );
-    assert_eq!(acp_sessions.snapshot().len(), 1);
-    assert!(Arc::ptr_eq(
-        &acp_sessions.get("acp-handoff").unwrap(),
-        &slot
-    ));
-}
-
-#[test]
-fn handoff_snapshot_keeps_the_open_turn_and_omits_debug_sidecars() {
-    let acp_sessions = new_test_acp_sessions();
-    let (stdin_fd_owner, _stdin_peer) = UnixStream::pair().unwrap();
-    let (stdout_fd_owner, _stdout_peer) = UnixStream::pair().unwrap();
-    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
-    let (_event_tx, event_rx) = smol::channel::unbounded();
-    let mut reduced = AcpSessionState::default();
-    // 已提交的正文留在 agent 自己的会话文件里，交接只带还没写完的这一轮。
-    reduced
-        .entries_mut()
-        .push(AcpEntry::User("以前的话".into()));
-    reduced
-        .entries_mut()
-        .push(AcpEntry::User("继续这条对话".into()));
-    reduced.phase = smelt_core::daemon_state::DaemonPhase::Thinking;
-    reduced.turn_started_at_ms = Some(1);
-    reduced.tool_debug.insert(
-        "call-1".into(),
-        smelt_core::acp_session::ToolCallDebug {
-            name: Some("read".into()),
-            raw_input: Some(serde_json::json!({"path": "/tmp/secret"})),
-        },
-    );
-    reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {
-        version: 3,
-        source: "pi_runtime_debug".into(),
-        system_prompt: Some("完整系统提示".into()),
-        model_calls: vec![smelt_core::acp_session::RuntimeDebugModelCall {
-            sequence: 1,
-            source: "pi_context_with_system".into(),
-            payload: serde_json::json!({"messages": [{"role": "user", "content": "hello"}]}),
-            ..smelt_core::acp_session::RuntimeDebugModelCall::default()
-        }],
-        ..smelt_core::acp_session::RuntimeDebug::default()
-    };
-    acp_sessions.reserve_with("acp-debug-handoff", || {
-        let sess = make_acp_session_value("acp-debug-handoff", reduced);
-        *sess.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
-            cmd_tx,
-            event_rx,
-            stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio {
-                pid: std::process::id() as i32,
-                stdin_fd: stdin_fd_owner.as_raw_fd(),
-                stdout_fd: stdout_fd_owner.as_raw_fd(),
-            }))),
-            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            supports_mid_turn_input: false,
-            supports_compaction: false,
-            supports_native_queue: false,
-            supports_rewind: false,
-        });
-        sess
-    });
-
-    let (items, _) = collect_acp_handoff_typed(&acp_sessions);
-    let crate::handoff_v2::manifest::AcpHandoff::Direct { snapshot, .. } = &items[0] else {
-        panic!("应为 direct 形态");
-    };
-    assert!(
-        matches!(&snapshot.entries[..], [AcpEntry::User(text)] if text == "继续这条对话"),
-        "交接必须带走还没写完的这一轮，且不带已提交的正文"
-    );
-    assert!(snapshot.history_omitted);
-    assert!(snapshot.runtime_debug.is_none());
-    assert!(snapshot.tool_debug.is_none());
-    let wire = serde_json::to_value(snapshot).unwrap();
-    assert!(wire.get("runtime_debug").is_none());
-    assert!(wire.get("tool_debug").is_none());
-
-    let live = acp_sessions.get("acp-debug-handoff").unwrap();
-    let live = live.value.reduced.lock().unwrap();
-    assert_eq!(
-        live.runtime_debug.system_prompt.as_deref(),
-        Some("完整系统提示")
-    );
-    assert!(live.tool_debug.contains_key("call-1"));
-}
-
-#[test]
-fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
-    let acp_sessions = new_test_acp_sessions();
-
-    let mut idle = AcpSessionState::default();
-    idle.phase = DaemonPhase::Idle;
-    let (idle_slot, _) =
-        acp_sessions.reserve_with("acp-idle", || make_acp_session_value("acp-idle", idle));
-    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
-    let (_event_tx, event_rx) = smol::channel::unbounded();
-    *idle_slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
-        cmd_tx,
-        event_rx,
-        stdio: Arc::new(Mutex::new(None)),
-        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        supports_mid_turn_input: false,
-        supports_compaction: false,
-        supports_native_queue: false,
-        supports_rewind: false,
-    });
-    assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
-
-    idle_slot.value.reduced.lock().unwrap().phase = DaemonPhase::Connecting;
-    assert!(
-        acp_upgrade_blockers(&acp_sessions).is_empty(),
-        "握手中的会话不是活跃回合，不能把升级永久拦住"
-    );
-
-    {
-        let mut reduced = idle_slot.value.reduced.lock().unwrap();
-        reduced.phase = DaemonPhase::Thinking;
-        reduced.turn_started_at_ms = Some(1);
-    }
-    assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
-
-    // 乱序/旧 handoff 可能留下 Running，但回合开始时间已经清空。这个相位
-    // 不是活跃回合，升级不应被它永久拦住。
-    idle_slot.value.reduced.lock().unwrap().turn_started_at_ms = None;
-    assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
-
-    // 真正仍有未收尾工具时，即使相位字段不完整，也必须继续拦截。
-    idle_slot
-        .value
-        .reduced
-        .lock()
-        .unwrap()
-        .entries_mut()
-        .push(AcpEntry::ToolCall {
-            id: "active-tool".into(),
-            title: "running".into(),
-            kind: ToolKind::Execute,
-            status: ToolCallStatus::InProgress,
-            output: Vec::new(),
-            children: Vec::new(),
-            subagents: Vec::new(),
-            peer: None,
-        });
-    assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
-
-    // TurnEnded 已经落地但 adapter 没补工具终态时，交接恢复会统一收尾，
-    // 不应让更新无限等待看门狗。
-    {
-        let mut reduced = idle_slot.value.reduced.lock().unwrap();
-        reduced.phase = DaemonPhase::Idle;
-        reduced.completed_unread = true;
-        reduced.turn_started_at_ms = None;
-    }
-    assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
-    idle_slot.value.reduced.lock().unwrap().completed_unread = false;
-    assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
-
-    idle_slot
-        .value
-        .prompt_in_flight
-        .store(true, Ordering::SeqCst);
-    assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
-    idle_slot
-        .value
-        .prompt_in_flight
-        .store(false, Ordering::SeqCst);
-
-    // 有 outstanding RPC 仍然是硬门槛。
-    idle_slot.value.reduced.lock().unwrap().completed_unread = false;
-
-    idle_slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
-    idle_slot
-        .value
-        .handle
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .in_flight_rpc
-        .store(1, Ordering::SeqCst);
-    assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
-}
-
-#[test]
-fn hosted_runtime_blocks_upgrade_until_the_active_turn_is_idle() {
-    let acp_sessions = new_test_acp_sessions();
-    let mut running = AcpSessionState::default();
-    running.phase = DaemonPhase::AwaitingApproval;
-    running.turn_started_at_ms = Some(1);
-    let (slot, _) = acp_sessions.reserve_with("acp-hosted", || {
-        make_acp_session_value("acp-hosted", running)
-    });
-    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
-    let (hosted, peer) = acp_runtime_host::HostedConversationHandle::test_stub();
-    *slot.value.hosted_handle.lock().unwrap() = Some(hosted);
-
-    assert_eq!(
-        acp_upgrade_blockers(&acp_sessions),
-        vec!["acp-hosted"],
-        "session host 能恢复回合不等于应主动打断回合；升级必须等到 idle"
-    );
-
-    {
-        let mut reduced = slot.value.reduced.lock().unwrap();
-        reduced.phase = DaemonPhase::Idle;
-        reduced.turn_started_at_ms = None;
-    }
-    slot.value.prompt_in_flight.store(false, Ordering::SeqCst);
-    assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
-    drop(peer);
-}
-
 /// unreaped 重试只 prove、不重杀：活着的陌生组 → false + pid 原样留下，
 /// 调用方不得 spawn。旧语义 ECHILD 直接 true（杀都不杀就放行 spawn），
 /// 收养路径下等于没证明；更不能重杀——该号可能已被复用。
@@ -3935,31 +3650,23 @@ fn unreaped_retry_proves_without_killing_strangers() {
 }
 
 #[test]
-fn upgrade_returns_busy_before_touching_handoff_for_active_acp_turn() {
-    let sessions = new_sessions();
-    let acp_sessions = new_test_acp_sessions();
-    let mut running = AcpSessionState::default();
-    running.phase = DaemonPhase::Thinking;
-    running.turn_started_at_ms = Some(1);
-    acp_sessions.reserve_with("acp-running", || {
-        make_acp_session_value("acp-running", running)
-    });
-
+fn upgrade_rejects_a_missing_binary_without_waiting_for_idle() {
     let (server, client) = UnixStream::pair().unwrap();
     handle_upgrade(
         server,
-        &serde_json::json!({"op": "upgrade"}),
-        &sessions,
-        &acp_sessions,
-        -1,
+        &serde_json::json!({"op": "upgrade", "exe": "/no/such/smeltd-upgrade-target"}),
     );
-
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(response["ok"], false);
-    assert_eq!(response["busy"], true);
-    assert_eq!(response["sessions"], serde_json::json!(["acp-running"]));
+    assert!(response.get("busy").is_none() || response["busy"] == false);
+    assert!(
+        response["err"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("不存在")
+    );
 }
 
 #[test]
@@ -4492,7 +4199,9 @@ fn retry_rewinds_the_failed_turn_and_resends_its_message_once() {
     let image = smelt_core::acp_chat::AcpImage::new("image/png", "aGk=");
     let mut reduced = AcpSessionState::default();
     reduced.phase = DaemonPhase::Idle;
-    reduced.entries_mut().push(AcpEntry::User("早先的问题".into()));
+    reduced
+        .entries_mut()
+        .push(AcpEntry::User("早先的问题".into()));
     reduced.entries_mut().push(AcpEntry::Assistant {
         text: "早先的回答".into(),
         thought: false,
@@ -5027,12 +4736,3 @@ fn conversation_image_finds_the_original_by_reference() {
     assert_eq!(again, thumb);
 }
 
-/// 两个 fd 指向同一个打开的文件（同设备、同 inode）。
-fn same_open_file(a: std::os::fd::RawFd, b: std::os::fd::RawFd) -> bool {
-    let stat = |fd| {
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0, "fstat {fd} 失败");
-        (stat.st_dev, stat.st_ino)
-    };
-    stat(a) == stat(b)
-}

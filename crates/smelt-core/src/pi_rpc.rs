@@ -5,8 +5,6 @@
 //! 是历史 wire 兼容名，不代表这里向 Pi 发送过任何 ACP 消息。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -398,10 +396,6 @@ async fn run_connection(
         );
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
-            #[cfg(unix)]
-            stdin_fd: spawned.0.as_raw_fd(),
-            #[cfg(unix)]
-            stdout_fd: spawned.1.as_raw_fd(),
         });
         spawned
     };
@@ -2180,9 +2174,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         }
         // 这两种命令只供 ACP driver 的异步 request callback 回送结果。Pi RPC 的
         // response 直接在本模块解析，不会生成它们。
-        ConversationCommand::PromptSettled(_)
-        | ConversationCommand::TurnCompleted
-        | ConversationCommand::Shutdown => {}
+        ConversationCommand::PromptSettled(_) | ConversationCommand::Shutdown => {}
     }
     Ok(())
 }

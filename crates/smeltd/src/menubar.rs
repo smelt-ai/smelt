@@ -21,14 +21,12 @@ struct GuiReaper {
 
 enum GuiChild {
     Spawned(Child),
-    Inherited(i32),
 }
 
 impl GuiChild {
     fn pid(&self) -> i32 {
         match self {
             Self::Spawned(child) => child.id() as i32,
-            Self::Inherited(pid) => *pid,
         }
     }
 
@@ -60,7 +58,6 @@ fn try_reap_pid_with(
                 )));
             }
             Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
-            // 交接启动边界可能已经先收掉这个退出状态。
             Err(error) if error.raw_os_error() == Some(libc::ECHILD) => return Ok(true),
             Err(error) => return Err(error),
         }
@@ -161,8 +158,8 @@ fn spawn_gui(gui: &Path) -> std::io::Result<i32> {
     Ok(pid)
 }
 
-/// exec 交接快照：只返回本模块确实持有回收权的直接子进程。
-pub(crate) fn child_pids_for_handoff() -> Vec<i32> {
+/// 本模块持有回收权的直接子进程。
+pub(crate) fn tracked_child_pids() -> Vec<i32> {
     let Some(reaper) = GUI_REAPER.get() else {
         return Vec::new();
     };
@@ -171,32 +168,7 @@ pub(crate) fn child_pids_for_handoff() -> Vec<i32> {
     pids
 }
 
-/// exec 后为仍存活的菜单 GUI launcher 重建精确 PID owner。已经在启动边界被 sweep
-/// 掉的 PID 会得到 ECHILD，按“已回收”处理；绝不使用运行期 waitpid(-1)。
-pub(crate) fn restore_child_pids(pids: &[i32]) -> std::io::Result<()> {
-    let pids: HashSet<_> = pids.iter().copied().filter(|pid| *pid > 1).collect();
-    if pids.is_empty() {
-        return Ok(());
-    }
-    let reaper = gui_reaper()?;
-    for pid in pids {
-        if !reaper.pids.lock().unwrap().insert(pid) {
-            continue;
-        }
-        if reaper.sender.send(GuiChild::Inherited(pid)).is_err() {
-            reaper.pids.lock().unwrap().remove(&pid);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                format!("GUI child reaper 无法接管 handoff pid={pid}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
 extern "C" fn on_open(_this: &Object, _cmd: Sel, _sender: *mut Object) {
-    // 与终端/ACP spawn 共用升级门闩：handoff 快照 PID 集合后到 exec 之间不能再冒出
-    // 一个未被记录的新 GUI 直接子进程。
     let _spawn_gate = super::SPAWN_GATE
         .read()
         .unwrap_or_else(|error| error.into_inner());
@@ -210,8 +182,7 @@ extern "C" fn on_open(_this: &Object, _cmd: Sel, _sender: *mut Object) {
 /// 跑的 agent）随之结束。后果已写进菜单项文案里。先关 iroh endpoint，免得已连上的
 /// 远程设备挂在一个已死的运行时上。
 extern "C" fn on_quit(_this: &Object, _cmd: Sel, _sender: *mut Object) {
-    crate::cleanup_sidecar_services();
-    std::process::exit(0);
+    crate::protocol::graceful_shutdown(None, None);
 }
 
 /// 注册（仅一次）点击靶子类：AppKit 菜单项只认 target-action，不认 Rust 闭包，
@@ -404,7 +375,7 @@ mod tests {
         let reaper = gui_reaper().unwrap();
         reaper.pids.lock().unwrap().insert(blocker_pid);
         reaper.sender.send(GuiChild::Spawned(blocker)).unwrap();
-        let handoff_contains_blocker = child_pids_for_handoff().contains(&blocker_pid);
+        let handoff_contains_blocker = tracked_child_pids().contains(&blocker_pid);
 
         let short_pid = spawn_gui(Path::new("/usr/bin/true")).unwrap();
         let short_reaped =

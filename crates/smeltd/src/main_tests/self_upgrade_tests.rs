@@ -9,16 +9,6 @@ fn self_upgrade_reply_ok_is_upgraded() {
 }
 
 #[test]
-fn self_upgrade_reply_busy_stays_for_retry() {
-    assert_eq!(
-        classify_self_upgrade_reply(
-            "{\"ok\":false,\"busy\":true,\"err\":\"ACP 会话仍有未完成请求\"}"
-        ),
-        SelfUpgradeOutcome::Busy("ACP 会话仍有未完成请求".to_string())
-    );
-}
-
-#[test]
 fn self_upgrade_reply_error_is_failed() {
     assert_eq!(
         classify_self_upgrade_reply("{\"ok\":false,\"err\":\"store 已被迁移\"}"),

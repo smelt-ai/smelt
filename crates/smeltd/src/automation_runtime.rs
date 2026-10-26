@@ -41,7 +41,6 @@ pub(crate) fn spawn(
     acp_sessions: AcpSessions,
     remote_sessions: RemoteSessions,
     event_hub: EventHubHandle,
-    came_from_handoff: bool,
 ) {
     std::thread::spawn(move || {
         let mut driver = Driver::new(
@@ -55,7 +54,7 @@ pub(crate) fn spawn(
         if let Ok(mut slot) = AUTOMATION_NUDGE.lock() {
             *slot = Some(driver.shell_tx.clone());
         }
-        driver.recover_active_runs(came_from_handoff);
+        driver.recover_active_runs();
         driver.run();
     });
 }
@@ -209,7 +208,7 @@ impl Driver {
         soonest.map(|at| Duration::from_secs(at.saturating_sub(now) as u64))
     }
 
-    fn recover_active_runs(&mut self, came_from_handoff: bool) {
+    fn recover_active_runs(&mut self) {
         let runs = self
             .automations
             .lock()
@@ -255,12 +254,6 @@ impl Driver {
                     self.mark_run_status(
                         &run,
                         AutomationRunStatus::Running,
-                        provider_id(&slot.value),
-                    );
-                } else if came_from_handoff {
-                    self.mark_run_status(
-                        &run,
-                        AutomationRunStatus::Queued,
                         provider_id(&slot.value),
                     );
                 } else {
@@ -1443,23 +1436,16 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn dispatch_recovery_distinguishes_cold_restart_handoff_and_acknowledgment() {
+    fn dispatch_recovery_fails_an_unaccepted_run_after_restart() {
         let (mut cold, cold_store, _) = dispatching_fixture(false);
-        cold.recover_active_runs(false);
+        cold.recover_active_runs();
         let cold_snapshot = cold_store.lock().unwrap().snapshot();
         let cold_run = &cold_snapshot.runs[0];
         assert_eq!(cold_run.status, AutomationRunStatus::Failed);
         assert!(cold_run.error.as_deref().unwrap().contains("结果未知"));
 
-        let (mut handoff, handoff_store, _) = dispatching_fixture(false);
-        handoff.recover_active_runs(true);
-        assert_eq!(
-            handoff_store.lock().unwrap().snapshot().runs[0].status,
-            AutomationRunStatus::Queued
-        );
-
         let (mut acknowledged, acknowledged_store, acknowledged_run) = dispatching_fixture(true);
-        acknowledged.recover_active_runs(false);
+        acknowledged.recover_active_runs();
         assert_eq!(
             acknowledged_store.lock().unwrap().snapshot().runs[0].status,
             AutomationRunStatus::Running
@@ -1484,7 +1470,7 @@ mod lifecycle_tests {
             .unwrap() = Some(ConversationBinding::Automation {
             run_id: "another-run".into(),
         });
-        conflicting.recover_active_runs(true);
+        conflicting.recover_active_runs();
         let conflict = conflicting_store.lock().unwrap().snapshot();
         assert_eq!(conflict.runs[0].status, AutomationRunStatus::Failed);
         assert!(
