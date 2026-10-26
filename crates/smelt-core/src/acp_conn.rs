@@ -5581,8 +5581,8 @@ mod spawn_gate_tests {
 #[cfg(test)]
 mod path_resolve_tests {
     use super::{
-        build_agent_args, build_agent_args_with_ephemeral_env, inject_local_adapter_cli_path,
-        resolve_in_path,
+        build_agent_args, build_agent_args_with_ephemeral_env, extend_search_path,
+        inject_local_adapter_cli_path, resolve_in_path,
     };
     use crate::agent_kind::ConversationLaunchSpec;
     use std::collections::BTreeMap;
