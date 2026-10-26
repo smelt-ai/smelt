@@ -1259,7 +1259,14 @@ pub fn interrupt_open_turn(state: &mut AcpSessionState) -> bool {
     true
 }
 
+/// 只有最后一轮可能还没写完：从最后一条用户消息到末尾，和 `open_turn_range` 同一个边界。
+/// 更早几轮里没收尾的工具是 adapter 重放时没补终态，那几轮早就结束了。
+fn last_turn_start(entries: &[AcpEntry]) -> usize {
+    super::last_user_index(entries).unwrap_or(0)
+}
+
 fn turn_is_open(state: &AcpSessionState) -> bool {
+    let entries = state.entries();
     state.turn_started_at_ms.is_some()
         || matches!(
             state.phase,
@@ -1268,7 +1275,7 @@ fn turn_is_open(state: &AcpSessionState) -> bool {
                 | DaemonPhase::AwaitingApproval
                 | DaemonPhase::WaitingForUser
         )
-        || crate::acp_chat::has_unfinished_tool_call(state.entries())
+        || crate::acp_chat::has_unfinished_tool_call(&entries[last_turn_start(entries)..])
 }
 
 fn finish_interrupted_turn(state: &mut AcpSessionState) {
@@ -1292,8 +1299,9 @@ fn finish_interrupted_turn(state: &mut AcpSessionState) {
 }
 
 fn finish_interrupted_turn_tools(state: &mut AcpSessionState) -> Option<usize> {
+    let start = last_turn_start(&state.entries);
     let mut first_changed = None;
-    for (index, entry) in state.entries.iter_mut().enumerate() {
+    for (index, entry) in state.entries.iter_mut().enumerate().skip(start) {
         if finish_interrupted_entry(entry) {
             first_changed.get_or_insert(index);
         }

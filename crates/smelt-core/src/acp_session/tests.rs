@@ -480,6 +480,75 @@ fn replay_commit_marks_a_trailing_open_turn_interrupted() {
     }
 }
 
+/// adapter 重放时没给早几轮的工具补终态。那几轮早就结束了，重放完不能把已结束的
+/// 对话标成中断、未读，也不改写那几轮的工具。
+#[test]
+fn replay_commit_ignores_dangling_tools_in_earlier_turns() {
+    let mut state = fresh_state();
+    state.replaying_history = true;
+    state.entries.push(AcpEntry::User("第一轮".into()));
+    state.entries.push(AcpEntry::ToolCall {
+        id: "tool-old".into(),
+        title: "Read".into(),
+        kind: ToolKind::Read,
+        status: ToolCallStatus::InProgress,
+        output: Vec::new(),
+        children: Vec::new(),
+        subagents: Vec::new(),
+        peer: None,
+    });
+    state.entries.push(AcpEntry::User("第二轮".into()));
+    state.entries.push(AcpEntry::Assistant {
+        text: "好了".into(),
+        thought: false,
+    });
+
+    state.commit_replay();
+
+    assert_eq!(state.turn_outcome, None);
+    assert!(!state.completed_unread);
+    assert!(matches!(
+        &state.entries[1],
+        AcpEntry::ToolCall { status: ToolCallStatus::InProgress, output, .. } if output.is_empty()
+    ));
+}
+
+/// 重放恢复出来的问题卡片重启后还能答，重放结束不能把它当成没写完的一轮清掉。
+#[test]
+fn replay_commit_keeps_a_recovered_question_answerable() {
+    let raw_input = serde_json::json!({
+        "questions": [{
+            "question": "Choose",
+            "options": [{"label": "A"}]
+        }]
+    });
+    let mut state = fresh_state();
+    state.replaying_history = true;
+    state.entries.push(AcpEntry::User("问我".into()));
+    state.entries.push(AcpEntry::ToolCall {
+        id: "ask-1".into(),
+        title: "AskUserQuestion".into(),
+        kind: ToolKind::Other,
+        status: ToolCallStatus::Pending,
+        output: Vec::new(),
+        children: Vec::new(),
+        subagents: Vec::new(),
+        peer: None,
+    });
+    state.elicitation = recovered_elicitation("Choose", Some(&raw_input), "ask-1");
+    state.phase = DaemonPhase::WaitingForUser;
+
+    state.commit_replay();
+
+    assert!(state.elicitation.is_some());
+    assert_eq!(state.phase, DaemonPhase::WaitingForUser);
+    assert_eq!(state.turn_outcome, None);
+    assert!(matches!(
+        state.entries.last(),
+        Some(AcpEntry::ToolCall { status: ToolCallStatus::Pending, .. })
+    ));
+}
+
 #[test]
 fn replay_commit_keeps_a_user_cancel_as_cancelled() {
     let mut state = fresh_state();

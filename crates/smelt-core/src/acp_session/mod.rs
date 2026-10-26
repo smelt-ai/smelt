@@ -657,9 +657,14 @@ impl AcpSessionState {
             self.entries_base = 0;
         }
         self.replaying_history = false;
+        // 从历史里恢复出来的问题卡片在等用户回答，重启后照样能答，这一轮没有中断。
+        let awaiting_recovered_answer = self
+            .elicitation
+            .as_ref()
+            .is_some_and(|card| card.recovered_tool_call_id.is_some());
         // 重放结束时，文件里没写完的那一轮不会再收到 TurnEnded。留着会让
         // 重连后的会话一直转圈。用户取消仍记成 Cancelled。
-        if was_replaying {
+        if was_replaying && !awaiting_recovered_answer {
             let _ = interrupt_open_turn(self);
         }
     }
