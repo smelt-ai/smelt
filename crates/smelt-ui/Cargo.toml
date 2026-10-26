@@ -32,7 +32,7 @@ merman = { version = "=0.9.2", default-features = false, features = ["all-diagra
 # 类图测宽和单测解析都用 GPUI 同一份 usvg 0.46（gpui-pre 0.3.9 经 resvg 打开
 # text/system-fonts/memmap-fonts）。gpui 不把 fontdb 公开出去，只能直接依赖这个版本，
 # cargo 会和 gpui 合成同一份。
-usvg = "=0.46.0"
+usvg = "=0.48.1"
 # usvg 0.46 已经依赖 rustybuzz 0.20.1，显式依赖是为了用 Face 量 advance。
 rustybuzz = "=0.20.1"
 sha2 = "0.10"
