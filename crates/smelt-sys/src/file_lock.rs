@@ -1,7 +1,8 @@
-//! 跨进程的独占文件锁。锁随这个值的 drop 释放，进程退出时句柄关掉，锁也没了。
+//! 跨进程的文件锁，分独占和共享两种。锁随这个值的 drop 释放，进程退出时句柄关掉，锁也没了。
 //!
-//! Unix 用 `flock`。Windows 用 `LockFileEx`，锁住整个文件范围。两边都是建议锁里
-//! 我们自己遵守的那一种：没拿到锁的人不会去改同一份状态。
+//! Unix 用 `flock`。Windows 用 `LockFileEx`，锁住整个文件范围；不带
+//! `LOCKFILE_EXCLUSIVE_LOCK` 就是共享锁，和 `LOCK_SH` 一样：共享锁之间不冲突，
+//! 只挡独占锁。两边都是建议锁里我们自己遵守的那一种：没拿到锁的人不会去改同一份状态。
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -22,19 +23,39 @@ impl ExclusiveFile {
     /// 阻塞直到拿到独占锁。
     pub fn lock(path: &Path) -> io::Result<Self> {
         let file = open_lock_file(path)?;
-        lock_file(&file, true)?;
+        lock_file(&file, LockMode::Exclusive, true)?;
         Ok(Self { file })
     }
 
     /// 拿不到就立刻返回 `Ok(None)`，不排队。
     pub fn try_lock(path: &Path) -> io::Result<Option<Self>> {
         let file = open_lock_file(path)?;
-        match lock_file(&file, false) {
+        match lock_file(&file, LockMode::Exclusive, false) {
             Ok(()) => Ok(Some(Self { file })),
             Err(error) if is_would_block(&error) => Ok(None),
             Err(error) => Err(error),
         }
     }
+}
+
+/// 共享锁。同一个文件可以有任意多个共享锁（同进程里不同句柄也行），独占锁要等它们全放掉。
+pub struct SharedFile {
+    _file: File,
+}
+
+impl SharedFile {
+    /// 阻塞直到拿到共享锁。只有别人持着独占锁时才会等。
+    pub fn lock(path: &Path) -> io::Result<Self> {
+        let file = open_lock_file(path)?;
+        lock_file(&file, LockMode::Shared, true)?;
+        Ok(Self { _file: file })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LockMode {
+    Shared,
+    Exclusive,
 }
 
 fn open_lock_file(path: &Path) -> io::Result<File> {
@@ -71,9 +92,12 @@ fn is_would_block(error: &io::Error) -> bool {
 }
 
 #[cfg(unix)]
-fn lock_file(file: &File, blocking: bool) -> io::Result<()> {
+fn lock_file(file: &File, mode: LockMode, blocking: bool) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
-    let mut flags = libc::LOCK_EX;
+    let mut flags = match mode {
+        LockMode::Shared => libc::LOCK_SH,
+        LockMode::Exclusive => libc::LOCK_EX,
+    };
     if !blocking {
         flags |= libc::LOCK_NB;
     }
@@ -84,14 +108,17 @@ fn lock_file(file: &File, blocking: bool) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn lock_file(file: &File, blocking: bool) -> io::Result<()> {
+fn lock_file(file: &File, mode: LockMode, blocking: bool) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
     };
     use windows_sys::Win32::System::IO::OVERLAPPED;
 
-    let mut flags = LOCKFILE_EXCLUSIVE_LOCK;
+    let mut flags = match mode {
+        LockMode::Shared => 0,
+        LockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
+    };
     if !blocking {
         flags |= LOCKFILE_FAIL_IMMEDIATELY;
     }
@@ -116,7 +143,7 @@ fn lock_file(file: &File, blocking: bool) -> io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn lock_file(_file: &File, _blocking: bool) -> io::Result<()> {
+fn lock_file(_file: &File, _mode: LockMode, _blocking: bool) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "这个平台没有文件锁",

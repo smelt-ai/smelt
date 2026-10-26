@@ -3,9 +3,9 @@
 //! Published generation directories are never modified. Their lease inode lives outside the
 //! content tree so GC can remove a generation while retaining one stable synchronization object.
 //!
-//! Unix 用 `flock`：管理锁独占，generation 租约共享，子进程可以继承共享租约。
-//! Windows 的 `LockFileEx` 只有独占锁，升级也不会把句柄交到下一个进程，所以管理锁和
-//! generation 租约都用独占。这比 `LOCK_SH` 更严，是对的。
+//! 管理锁独占，generation 租约共享：同一个 generation 可以被任意多个会话同时钉住，
+//! GC 要拿到独占锁才删。Unix 用 `flock`，子进程可以继承共享租约。Windows 用
+//! `LockFileEx` 的共享锁，句柄不交给子进程，升级会重启，不做继承。
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -182,14 +182,13 @@ impl GenerationStore {
         }
         #[cfg(windows)]
         {
-            // LockFileEx 只有独占。没有跨进程继承的共享租约，见模块说明。
-            let file = smelt_sys::file_lock::ExclusiveFile::lock(&path)
-                .map_err(|error| format!("钉住受管运行时 generation失败：{error}"))?;
+            let file = smelt_sys::file_lock::SharedFile::lock(&path)
+                .map_err(|error| format!("钉住受管运行时 generation 失败：{error}"))?;
             Ok(GenerationLease {
                 kind,
                 id: id.to_string(),
                 root,
-                _lock: Arc::new(std::sync::Mutex::new(file)),
+                _lock: Arc::new(file),
             })
         }
         #[cfg(not(any(unix, windows)))]
@@ -441,9 +440,9 @@ pub struct GenerationLease {
     root: PathBuf,
     #[cfg(unix)]
     fd: Arc<OwnedFd>,
-    /// `Mutex` 只为了让租约能跨线程移动。文件锁是 `ExclusiveFile` 自己，关掉句柄才放。
+    /// 最后一份克隆 drop 时句柄关掉，共享锁才放。
     #[cfg(windows)]
-    _lock: Arc<std::sync::Mutex<smelt_sys::file_lock::ExclusiveFile>>,
+    _lock: Arc<smelt_sys::file_lock::SharedFile>,
 }
 
 impl std::fmt::Debug for GenerationLease {
@@ -766,7 +765,7 @@ mod tests {
         #[cfg(windows)]
         {
             HeldLease {
-                _file: smelt_sys::file_lock::ExclusiveFile::lock(path).unwrap(),
+                _file: smelt_sys::file_lock::SharedFile::lock(path).unwrap(),
             }
         }
     }
@@ -775,7 +774,7 @@ mod tests {
         #[cfg(unix)]
         _file: File,
         #[cfg(windows)]
-        _file: smelt_sys::file_lock::ExclusiveFile,
+        _file: smelt_sys::file_lock::SharedFile,
     }
 
     /// Re-executed by `child_process_acquired_shared_lease_blocks_exclusive_gc`.
@@ -1249,6 +1248,48 @@ mod tests {
             fs::read(store.generation_root(GenerationKind::Bun, id).join("bun")).unwrap(),
             b"rebuilt"
         );
+    }
+
+    /// 两个会话同时用同一个 Bun generation：第二份租约不能被第一份挡住，
+    /// 两份都在时 GC 也删不掉。租约要是独占锁，第二个会话会拿着管理锁一直等下去。
+    #[test]
+    fn two_leases_on_one_generation_coexist_and_both_block_gc() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let id = "bun-12121212";
+        {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                    fs::write(staging.join("bun"), b"published").map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        let first = store.acquire_shared(GenerationKind::Bun, id).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let second_store = store.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(second_store.acquire_shared(GenerationKind::Bun, id));
+        });
+        let second = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("第二份租约被第一份挡住了")
+            .unwrap();
+        drop(first);
+        {
+            let _manager = store.lock_manager().unwrap();
+            assert!(
+                store
+                    .discard_invalid_locked(GenerationKind::Bun, id)
+                    .is_err(),
+                "还有一份租约时 GC 不能删"
+            );
+        }
+        drop(second);
+        let _manager = store.lock_manager().unwrap();
+        store
+            .discard_invalid_locked(GenerationKind::Bun, id)
+            .unwrap();
     }
 
     #[test]
