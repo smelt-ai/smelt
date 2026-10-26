@@ -3903,9 +3903,8 @@ pub(crate) fn reassemble_hosted_transcript(sess: &AcpSession) {
     }
 }
 
-/// 停机前把宿主里还没交到父镜像的流式缓冲拉回来，并把没写完的回合收成中断。
+/// 停机前把没写完的回合收成中断。
 pub(crate) fn settle_acp_session_for_shutdown(sess: &AcpSession) {
-    reassemble_hosted_transcript(sess);
     let mut reduced = sess.reduced.lock().unwrap();
     smelt_core::acp_session::interrupt_open_turn(&mut reduced);
 }
