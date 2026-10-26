@@ -17,36 +17,46 @@ if (process.env.SMELT_PI_PROBE_WORKERS === "1") {
 		),
 	);
 
+	/** 等 worker 的第一份有效回包；出错或提前退出立即失败，最多等 10 秒。 */
+	function reply(worker: InstanceType<typeof Worker>, specifier: string, accept: (value: unknown) => boolean) {
+		return new Promise<unknown>((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error(`${specifier} 没有回包`)), 10_000);
+			worker.on("message", (value) => {
+				if (!accept(value)) return;
+				clearTimeout(timer);
+				resolve(value);
+			});
+			worker.once("error", (error) => {
+				clearTimeout(timer);
+				reject(error);
+			});
+			worker.once("exit", (code) => {
+				clearTimeout(timer);
+				reject(new Error(`${specifier} 提前退出（${code}）`));
+			});
+		});
+	}
+
 	async function probe(specifier: string, message?: Uint8Array): Promise<void> {
-		const worker = new Worker(specifier);
+		// 没有缩放请求的 worker（codemode）带上 smeltProbe：包装层在依赖全部求值后回一声。
+		const worker = new Worker(specifier, message ? undefined : { workerData: { smeltProbe: true } });
 		try {
 			if (message) {
-				const response = await new Promise<unknown>((resolve, reject) => {
-					const timer = setTimeout(() => reject(new Error(`${specifier} 没有回包`)), 10_000);
-					worker.once("message", (value) => {
-						clearTimeout(timer);
-						resolve(value);
-					});
-					worker.once("error", (error) => {
-						clearTimeout(timer);
-						reject(error);
-					});
-					const bytes = new Uint8Array(message);
-					worker.postMessage({ inputBytes: bytes, mimeType: "image/png" }, [bytes.buffer]);
-				});
+				const replied = reply(worker, specifier, () => true);
+				const bytes = new Uint8Array(message);
+				worker.postMessage({ inputBytes: bytes, mimeType: "image/png" }, [bytes.buffer]);
+				const response = await replied;
 				const record = response as { error?: string; result?: { width?: number } };
 				if (record.error) throw new Error(record.error);
 				if (!record.result?.width) {
 					throw new Error(`${specifier} 没有返回缩放结果：${JSON.stringify(response)}`);
 				}
 			} else {
-				await new Promise<void>((resolve, reject) => {
-					const timer = setTimeout(resolve, 1_000);
-					worker.once("error", (error) => {
-						clearTimeout(timer);
-						reject(error);
-					});
-				});
+				await reply(
+					worker,
+					specifier,
+					(value) => (value as { smeltProbe?: unknown } | null)?.smeltProbe === "ready",
+				);
 			}
 			console.log(`worker ${specifier} ok`);
 		} finally {

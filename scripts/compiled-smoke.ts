@@ -169,19 +169,30 @@ const prompt = await request("smoke-prompt", {
 		},
 	],
 });
-const deadline = Date.now() + 20_000;
-while (Date.now() < deadline) {
-	const text = `${JSON.stringify(prompt)}\n${seen.join("\n")}\n${stderr.join("")}`;
-	if (/cannot find module|MODULE_NOT_FOUND|module not found/i.test(text)) {
-		fail(`懒加载块没有留在 bunfs 里：${text.slice(-2000)}`);
+const MODULE_MISSING = /cannot find module|MODULE_NOT_FOUND|module not found/i;
+const REACHED_MODEL =
+	/unauthorized|invalid api key|api key|authentication|ENOTFOUND|ECONNREFUSED|fetch failed|network|offline|401|403/i;
+const trail = () => `${JSON.stringify(prompt)}\n${seen.join("\n")}\n${stderr.join("")}`;
+// 每来一行输出看一次：缺模块立刻失败，走到模型或网络错误就算通过，20 秒是上限。
+await new Promise<void>((resolve) => {
+	const timer = setTimeout(done, 20_000);
+	function done() {
+		clearTimeout(timer);
+		lines.off("line", check);
+		child.stderr.off("data", check);
+		resolve();
 	}
-	if (/unauthorized|invalid api key|api key|authentication|ENOTFOUND|ECONNREFUSED|fetch failed|network|offline|401|403/i.test(text)) {
-		break;
+	function check() {
+		const text = trail();
+		if (MODULE_MISSING.test(text)) fail(`懒加载块没有留在 bunfs 里：${text.slice(-2000)}`);
+		if (REACHED_MODEL.test(text)) done();
 	}
-	await new Promise((resolve) => setTimeout(resolve, 100));
-}
-const trailed = `${JSON.stringify(prompt)}\n${seen.join("\n")}\n${stderr.join("")}`;
-if (!/unauthorized|invalid api key|api key|authentication|ENOTFOUND|ECONNREFUSED|fetch failed|network|offline|401|403/i.test(trailed)) {
+	lines.on("line", check);
+	child.stderr.on("data", check);
+	check();
+});
+const trailed = trail();
+if (!REACHED_MODEL.test(trailed)) {
 	fail(`提示没有走到真实的模型或网络错误：${trailed.slice(-2000)}`);
 }
 
