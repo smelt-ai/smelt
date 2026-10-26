@@ -14,6 +14,7 @@ pub(crate) use smelt_ui::Button;
 use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
+use smelt_client::runtime_path::PathStyle;
 use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
 use smelt_ui::IconAction as _;
 
@@ -204,6 +205,7 @@ fn name_likely_truncated(name: &str, depth: usize, panel_w: f32) -> bool {
 /// 展开了但尚未缓存的目录会被跳过。展开、定位和可见数据刷新会去补目录列表，
 /// 缓存写回后再画出来。
 pub(super) fn walk_dir_cached(
+    style: PathStyle,
     dir: &str,
     dir_cache: &DirCache,
     expanded: &HashSet<String>,
@@ -214,11 +216,11 @@ pub(super) fn walk_dir_cached(
         return;
     };
     for (name, is_dir) in entries.iter() {
-        let path = smelt_client::runtime_path::PathStyle::LOCAL.join(dir, name);
+        let path = style.join(dir, name);
         let is_expanded = expanded.contains(&path);
         out.push((depth, name.clone(), *is_dir, path.clone(), is_expanded));
         if *is_dir && is_expanded {
-            walk_dir_cached(&path, dir_cache, expanded, depth + 1, out);
+            walk_dir_cached(style, &path, dir_cache, expanded, depth + 1, out);
         }
     }
 }
@@ -313,7 +315,9 @@ fn git_mark_index(files: &[(String, String)]) -> HashMap<&str, char> {
 
 /// 展平当前可见树。只读缓存，不碰文件系统。单根不插标题行，和以前键盘导航的
 /// 下标一致；多根才有可折叠的根标题。
+/// `style` 是这些路径所属运行时的规则。界面传本机的；测试固定一种，结果不随宿主平台变。
 pub(super) fn collect_file_tree_rows(
+    style: PathStyle,
     roots: &[String],
     expanded: &HashSet<String>,
     collapsed_roots: &HashSet<String>,
@@ -344,13 +348,13 @@ pub(super) fn collect_file_tree_rows(
             continue;
         }
         let mut flat = Vec::new();
-        walk_dir_cached(root, dir_cache, expanded, usize::from(multi), &mut flat);
+        walk_dir_cached(style, root, dir_cache, expanded, usize::from(multi), &mut flat);
         for (depth, name, is_dir, path, is_expanded) in flat {
             let git_mark = if is_dir {
                 None
             } else {
                 marks.as_ref().and_then(|marks| {
-                    smelt_client::runtime_path::PathStyle::LOCAL.strip_prefix(&path, root)
+                    style.strip_prefix(&path, root)
                         .and_then(|rel| marks.get(rel.as_str()).copied())
                 })
             };
@@ -423,6 +427,7 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
     }
 
     let rows = Rc::new(collect_file_tree_rows(
+        PathStyle::LOCAL,
         roots,
         expanded,
         collapsed_roots,
