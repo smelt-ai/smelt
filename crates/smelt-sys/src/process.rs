@@ -257,9 +257,21 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP
-        const FLAGS: u32 = 0x0000_0008 | 0x0800_0000 | 0x0100_0000 | 0x0000_0200;
-        command.creation_flags(FLAGS).spawn()
+        // DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        const FLAGS: u32 = 0x0000_0008 | 0x0800_0000 | 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        match command
+            .creation_flags(FLAGS | CREATE_BREAKAWAY_FROM_JOB)
+            .spawn()
+        {
+            // 启动我们的终端、IDE 或 CI 把我们放进了不许脱离的 Job，带这个标志的
+            // CreateProcess 直接拒绝。留在 Job 里也比起不来强，只是会随那个 Job 一起结束。
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                command.creation_flags(FLAGS).spawn()
+            }
+            result => result,
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
