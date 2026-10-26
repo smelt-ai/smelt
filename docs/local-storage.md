@@ -1,6 +1,6 @@
 # 本地状态存储
 
-Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。启动时会删掉已经没有读写路径的旧 JSON（`workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`llm.json`、`pet.json` 等），见 `crates/smelt/src/storage_cleanup.rs`。
+Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows 上是 `%USERPROFILE%\.smelt`，可用 `SMELT_HOME` 改）。不再用 JSON 文件当数据库。启动时会删掉已经没有读写路径的旧 JSON（`workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`llm.json`、`pet.json` 等），见 `crates/smelt/src/storage_cleanup.rs`。
 
 ## 运行时库
 

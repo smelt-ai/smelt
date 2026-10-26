@@ -6,7 +6,7 @@ const TABS = [
   {
     id: "desktop",
     label: "桌面多机工作台",
-    hint: "本机 Mac 与远程 Linux 同屏指挥",
+    hint: "本机桌面与远程 Linux 同屏指挥",
   },
   {
     id: "mobile",
