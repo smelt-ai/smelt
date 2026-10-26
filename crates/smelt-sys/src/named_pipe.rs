@@ -63,6 +63,16 @@ pub fn user_pipe_path(tag: &str) -> io::Result<String> {
     Ok(format!(r"\\.\pipe\smelt-{key}-{tag}"))
 }
 
+/// 守护给 Bun / Pi 的命名管道名。和 AF_UNIX 的 `smeltd.sock` 一一对应：
+/// 管道名只看用户 SID 的话，同一用户下不同 `SMELT_HOME` 的守护会抢同一个名字。
+pub fn daemon_pipe_path(sock: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    // Windows 路径不区分大小写，同一个目录换个写法也得到同一个名字。
+    let digest = Sha256::digest(sock.to_string_lossy().to_lowercase().as_bytes());
+    let short: String = digest[..8].iter().map(|byte| format!("{byte:02x}")).collect();
+    user_pipe_path(&format!("daemon-{short}"))
+}
+
 pub struct PipeListener {
     name: String,
     /// 已经建好、正在等客户端的那一个实例。`bind` 时就放上，避免调用方一返回
@@ -79,7 +89,7 @@ impl PipeListener {
                 format!("命名管道路径必须以 \\\\.\\pipe\\ 开头：{name}"),
             ));
         }
-        let pending = create_instance(&name)?;
+        let pending = create_instance(&name, true)?;
         Ok(Self {
             name,
             pending: Mutex::new(Some(pending)),
@@ -96,7 +106,7 @@ impl PipeListener {
             let mut slot = self.pending.lock().unwrap_or_else(|error| error.into_inner());
             match slot.take() {
                 Some(handle) => handle,
-                None => create_instance(&self.name)?,
+                None => create_instance(&self.name, false)?,
             }
         };
         let connected = match wait_for_client(current) {
@@ -115,7 +125,7 @@ impl PipeListener {
     fn ensure_pending(&self) {
         let mut slot = self.pending.lock().unwrap_or_else(|error| error.into_inner());
         if slot.is_none()
-            && let Ok(handle) = create_instance(&self.name)
+            && let Ok(handle) = create_instance(&self.name, false)
         {
             *slot = Some(handle);
         }
@@ -512,14 +522,21 @@ fn wait_for_client(handle: OwnedHandle) -> io::Result<OwnedHandle> {
     Ok(handle)
 }
 
-fn create_instance(name: &str) -> io::Result<OwnedHandle> {
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`：这个名字已经有人在听时建不出来（拒绝访问）。
+const FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+
+/// `first` 是监听方建的第一个实例。名字已被别人占着时失败，不悄悄挂成同一管道的另一个实例，
+/// 否则客户端会随机连到另一个进程。
+fn create_instance(name: &str, first: bool) -> io::Result<OwnedHandle> {
     let wide = wide(name);
     let mut security = UserOnlySecurity::new()?;
     security.attributes.lpSecurityDescriptor = security.descriptor.as_mut_ptr().cast();
+    let open_mode =
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | if first { FIRST_PIPE_INSTANCE } else { 0 };
     let handle = unsafe {
         CreateNamedPipeW(
             wide.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            open_mode,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             64 * 1024,
@@ -630,4 +647,26 @@ fn is_pipe_path(name: &str) -> bool {
 fn wide(value: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     Path::new(value).as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_pipe_follows_the_socket_path() {
+        let first = daemon_pipe_path(Path::new(r"C:\Users\me\.smelt\smeltd.sock")).unwrap();
+        let other_home = daemon_pipe_path(Path::new(r"C:\Temp\dev\smeltd.sock")).unwrap();
+        let other_case = daemon_pipe_path(Path::new(r"c:\users\ME\.smelt\smeltd.sock")).unwrap();
+        assert_ne!(first, other_home);
+        assert_eq!(first, other_case);
+    }
+
+    /// 同一个名字只能有一个监听方。第二个 `bind` 要失败，不能悄悄变成同一管道的另一个实例。
+    #[test]
+    fn second_listener_on_the_same_name_is_refused() {
+        let name = user_pipe_path(&format!("test-first-{}", uuid::Uuid::new_v4().simple())).unwrap();
+        let _first = PipeListener::bind(&name).unwrap();
+        assert!(PipeListener::bind(&name).is_err());
+    }
 }

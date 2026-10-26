@@ -177,7 +177,7 @@ pub fn child_smelt_sock() -> std::ffi::OsString {
         if let Some(name) = DAEMON_PIPE_NAME.get() {
             return name.into();
         }
-        if let Ok(name) = smelt_sys::named_pipe::user_pipe_path("daemon") {
+        if let Ok(name) = smelt_sys::named_pipe::daemon_pipe_path(&crate::sock_path()) {
             return name.into();
         }
     }

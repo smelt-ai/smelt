@@ -2775,7 +2775,7 @@ fn run_serve_loop(
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
     #[cfg(windows)]
-    if let Ok(pipe_name) = smelt_sys::named_pipe::user_pipe_path("daemon") {
+    if let Ok(pipe_name) = smelt_sys::named_pipe::daemon_pipe_path(&sock_path()) {
         client_conn::remember_daemon_pipe(pipe_name.clone());
         let pipe_server = server.clone();
         thread::Builder::new()

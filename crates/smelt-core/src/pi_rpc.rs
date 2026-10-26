@@ -531,11 +531,13 @@ fn agent_model_from_launch(launch: &ConversationLaunch) -> Option<(String, Strin
 }
 
 /// 交给子进程的 `SMELT_SOCK`。Unix 是 sock 文件。Windows 上 Bun 的
-/// `net.connect` 只认命名管道，名字和 smeltd 监听的 `user_pipe_path("daemon")` 相同。
+/// `net.connect` 只认命名管道，名字和 smeltd 监听的 `daemon_pipe_path` 相同。
 fn daemon_sock_for_child() -> String {
     #[cfg(windows)]
     {
-        if let Ok(name) = smelt_sys::named_pipe::user_pipe_path("daemon") {
+        if let Ok(name) = smelt_sys::named_pipe::daemon_pipe_path(
+            &crate::daemon_state::smeltd_sock_path(),
+        ) {
             return name;
         }
     }
