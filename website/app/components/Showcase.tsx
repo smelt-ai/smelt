@@ -4,7 +4,7 @@ const STEPS = [
   {
     n: "01",
     title: "打开原生工作台",
-    body: "在 Mac 或 Windows 上打开 Smelt 桌面端。macOS 是 dmg；Windows 是 x86_64 zip，不签名，没有自动更新。开箱即可在本机项目里启动内置智能体或接入已安装的 Claude Code / Codex。",
+    body: "在 Mac 或 Windows 上安装 Smelt 桌面端，开箱即可在本机项目里启动内置智能体或接入已安装的 Claude Code / Codex。",
   },
   {
     n: "02",
@@ -22,8 +22,8 @@ const NODES = [
   {
     mark: "桌面",
     title: "本机桌面",
-    kicker: "macOS，以及 Windows x86_64",
-    points: ["并行指挥多个智能体", "大屏看 Diff 和远程桌面", "Windows 不签名，升级会丢掉终端会话"],
+    kicker: "macOS 与 Windows 原生桌面",
+    points: ["并行指挥多个智能体", "大屏看 Diff 和远程桌面", "工位上的主操作台"],
   },
   {
     mark: "Lin",

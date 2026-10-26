@@ -15,10 +15,8 @@ Windows 第一版是不签名的 zip 便携包，没有安装包，也没有自�
 ### Windows
 
 从同一个 [Releases](https://github.com/smelt-ai/smelt/releases) 页下载
-`smelt-<版本>-windows-x86_64.zip`，解压后运行 `smelt.exe`。文件要留在同一个目录：
-桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`。zip 根上还有
-`smelt.com`（控制台入口，由 `smelt-cli.exe` 改名；cmd / PowerShell 里敲 `smelt` 会先
-找到这个 `.com`）、`photon_rs_bg.wasm`，以及打出来的 `skills/`、`native/`。
+`smelt-<版本>-windows-x86_64.zip`，完整解压到同一个文件夹后运行 `smelt.exe`。
+不要把 `smelt.exe` 单独拖出来，同目录里的文件是运行要用的。
 
 数据目录是 `%USERPROFILE%\.smelt`。
 
@@ -27,7 +25,6 @@ Windows 第一版是不签名的 zip 便携包，没有安装包，也没有自�
 - 只有 x86_64，系统是 Windows 10 1803 及以上。没有安装包。
 - exe 不签名。SmartScreen 可能提示未知发布者，选择仍要运行即可。
 - 没有自动更新。
-- 升级本机守护会重启。没有交接，终端会话丢失。
 - 交互 shell 是 `cmd.exe`（ConPTY），或 `COMSPEC` 指向的程序。
 - 没有菜单栏图标、Dock 角标、系统通知。这些只在 macOS 上。
 
@@ -36,8 +33,8 @@ Windows 第一版是不签名的 zip 便携包，没有安装包，也没有自�
 退出 smelt 甚至它崩溃了，里面跑着的 shell（包括正在干活的 `claude`）不会被杀掉，
 后台继续活着；重新打开 smelt，之前的分屏布局和终端会话都会自动恢复，不用重新
 `cd` 进项目、重新跑一遍命令。注意这只扛得住"关 smelt"，扛不住重启电脑——重启会
-把所有进程一起带走。Windows 上还有一种例外：升级本机 `smeltd` 会退出旧进程再拉起
-新的，终端会话不保留。
+把所有进程一起带走。升级或重启本机守护进程也一样：正在跑的 shell 会被关掉，进行中的
+回合会中断，对话历史保留（见[设置窗口](#设置窗口)里的「后台服务」）。
 
 想从源码构建、或者想搞清楚内部是怎么拼起来的，看[开发文档](/develop)。
 
@@ -184,7 +181,7 @@ smeltd mcp add <id>              # 添加内置 MCP 预设
 
 `smeltd mcp add` 的内置 id 有 `playwright`、`figma`、`rea`、`browser-mcp`。桌面端改某台远程机器的中继：侧栏那台机器的菜单里点「中继…」。控制接口是 `remote.config.set`，字段名是 `iroh_relay`。
 
-`smeltd install` 只在 Linux 注册 systemd 单元。macOS 和 Windows 上守护由桌面按需拉起。Windows 没有 systemd；升级本机守护会重启，终端会话不保留。
+`smeltd install` 只在 Linux 注册 systemd 单元。macOS 和 Windows 上守护由桌面按需拉起。Windows 没有 systemd。
 
 ### 一个窗口里的多台机器
 
@@ -291,9 +288,9 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 |---|---|
 | `~/.smelt/smelt.sqlite3` | 这台机器的会话、项目、智能体、自动化、配对设备和远程开关。分屏布局不在这里 |
 | `~/.smelt/client.sqlite3` | 这台桌面的主题、字体、窗口背景、侧栏，以及连过哪些运行时。分屏布局在 `conversation_route.dock_layout` |
-| `~/.smelt/bin/smelt-pi` | 内置 Pi 运行时，单个二进制，跑官方 JSONL RPC。Windows 上可执行文件是 `smelt-pi.exe`，启动名是旁边的 `smelt-pi.current` 指针文件 |
-| `~/.smelt/runtime/` | 受管 Bun。ACP 适配器和 MCP 服务器按需从这里启动。Windows 取 `bun-windows-x64.zip`，入口是 `bin/bun.exe` |
-| `~/.smelt/smeltd.sock` | Rust 客户端连 `smeltd` 的本机 socket。Windows 上这个类型是 `uds_windows` 的 AF_UNIX；Bun / Pi 另走当前用户的命名管道 |
+| `~/.smelt/bin/smelt-pi` | 内置 Pi 运行时，单个二进制，跑官方 JSONL RPC |
+| `~/.smelt/runtime/` | 受管 Bun。ACP 适配器和 MCP 服务器按需从这里启动 |
+| `~/.smelt/smeltd.sock` | `smeltd` 的本机 socket |
 | `~/.smelt/iroh-secret` | 这台运行时的 iroh 身份 |
 
 `workspace.json`、`appearance.json`、`launch.json`、`collab.json`、`pet.json`、`llm.json`
@@ -309,7 +306,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 能。有 ACP 身份的来源可以选择「ACP 继续」或「CLI/TUI 继续」。
 
 **支持 Linux / Windows 吗？**
-支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`，有自动更新）和 Windows 10 1803+ 的 x86_64 zip（`smelt-<版本>-windows-x86_64.zip`）。Windows 这一版不签名，没有安装包，没有自动更新；升级本机守护会重启，终端会话丢失；交互 shell 是 `cmd.exe`。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。没有 Windows 安装包，也没有 arm64 Windows 包。
+支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`，有自动更新）和 Windows 10 1803+ 的 x86_64 zip（`smelt-<版本>-windows-x86_64.zip`）。Windows 这一版不签名，没有安装包，没有自动更新，也没有 arm64 包；交互 shell 是 `cmd.exe`。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
 
 **在哪反馈问题？**
 去 [GitHub Issues](https://github.com/smelt-ai/smelt/issues/new/choose) 提，有 Bug 反馈

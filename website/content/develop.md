@@ -32,8 +32,8 @@ cargo build --bin smeltd
   socket 通信（attach 时先回报真实尺寸，再发网格 keyframe 快照与增量输出，重放区间
   按 `replay_len` 划界）。Windows 上 Rust 客户端连 `%USERPROFILE%\.smelt\smeltd.sock`
   （`uds_windows` 的 AF_UNIX），Bun / Pi 走当前用户的命名管道。就算 GUI 挂了，`smeltd`
-  照样把 shell 养着；重开 GUI 按会话 id 自动 reattach。Windows 上升级守护不交接，
-  终端会话丢失。手机和另一台桌面经 iroh 连的也是它。
+  照样把 shell 养着；重开 GUI 按会话 id 自动 reattach。升级守护是先优雅停机再换
+  新版本，不交接 fd，进行中的终端会话和回合会中断。手机和另一台桌面经 iroh 连的也是它。
 - **smelt-pi** —— Pi 运行时单二进制，跑官方 JSONL RPC。`make smelt-pi` 走
   `scripts/build-smelt-pi.sh`。装到用户机器上是 `~/.smelt/bin/smelt-pi`。受管 Bun
   在 `~/.smelt/runtime`，只负责按需启动 ACP 适配器和 MCP 服务器。
@@ -54,7 +54,7 @@ make ios          # scripts/build-ios.sh，在发版 tag 上出 iOS 包
 make dist-build   # macOS dmg
 ```
 
-Linux 运行时包是 `scripts/package-linux.sh`。Windows 桌面 zip 不在这些 Make 目标里：发版的 `windows` job 在 `windows-latest` 上执行 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用 `scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`，打成 `smelt-<版本>-windows-x86_64.zip`。第一版不签名，没有自动更新；升级本机守护会重启，终端会话不保留。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)，Windows 行为见 [`docs/windows-support.md`](https://github.com/smelt-ai/smelt/blob/main/docs/windows-support.md)。
+Linux 运行时包是 `scripts/package-linux.sh`。Windows 桌面 zip 不在这些 Make 目标里：发版的 `windows` job 在 `windows-latest` 上执行 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用 `scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`，打成 `smelt-<版本>-windows-x86_64.zip`。第一版不签名，没有自动更新。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)，Windows 行为见 [`docs/windows-support.md`](https://github.com/smelt-ai/smelt/blob/main/docs/windows-support.md)。
 
 两者解耦：`smelt` 可以单独跑（这时终端会话就跟着 GUI 生命周期走），也可以接上
 `smeltd` 拿到跨重启的会话持久化。打包发布时核心二进制会被塞进同一个

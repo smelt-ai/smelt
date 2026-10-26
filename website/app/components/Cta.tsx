@@ -21,7 +21,7 @@ export function Cta() {
             现在就把本机桌面、远程服务器和手机连成一体
           </h2>
           <p className="mt-4 max-w-2xl text-base leading-7 text-muted">
-            在工位用 macOS 或 Windows 桌面深入编码。Windows 是不签名的 x86_64 zip，没有自动更新，升级本机守护会丢掉终端会话。Linux 上让代码和环境留在服务器，离开工位就用手机审批、看进度、把任务继续往下推。
+            在工位用 macOS 或 Windows 原生桌面深入编码，在 Linux 上让代码和环境留在服务器，离开工位就用手机审批、看进度、把任务继续往下推。
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
             <a href={RELEASE_URL} target="_blank" rel="noopener noreferrer" className="btn btn-primary">
