@@ -1,7 +1,7 @@
 name: "🐛 Bug 反馈"
 description: 报告一个 smelt 里遇到的问题
 title: "[Bug] "
-labels: ["bug"]
+labels: ["bug", "needs-triage"]
 body:
   - type: markdown
     attributes:
@@ -11,15 +11,42 @@ body:
     id: version
     attributes:
       label: smelt 版本
-      description: 设置页「更新」tab 顶部能看到，例如 v0.5.8
-      placeholder: v0.5.8
+      description: 设置页「更新」tab 顶部能看到，例如 v0.9.0
+      placeholder: v0.9.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 运行平台
+      description: 问题出现在哪一端、哪种架构。只选最接近的一项。
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows (x86_64)
+        - Linux (x86_64 / ARM64)
+        - Android
+        - iOS
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 所属模块
+      description: 最接近的模块，方便分诊。拿不准选「其他」。
+      options:
+        - 桌面端 (GPUI Desktop)
+        - 守护进程与运行时 (smeltd / Pi / ACP)
+        - 移动端 (Flutter App)
+        - 远程连接与配对 (iroh / Pairing)
+        - 其他
     validations:
       required: true
   - type: input
-    id: macos-version
+    id: os-version
     attributes:
-      label: macOS 版本 / 芯片
-      placeholder: 例如 macOS 15.1, Apple M2
+      label: 系统版本与环境信息
+      placeholder: 例如 macOS 15.4 / Windows 11 24H2 / Ubuntu 24.04 / iOS 18.3
     validations:
       required: true
   - type: textarea

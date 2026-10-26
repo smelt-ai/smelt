@@ -156,11 +156,13 @@ sudo ./deploy-iroh-relay.sh \
 Relay 配置属于**运行时**：每个运行时自己决定用哪个 Relay，生成的配对串会带上
 `relay=` 参数，客户端照它去连。
 
-- **Mac 本机运行时**：桌面「设置 → 远程访问」里填 Relay 地址（如 `relay.example.com`，
-  省略协议时自动补 `https://`）并打开远程访问。
-- **Linux 无头运行时**：目前还没有命令行入口，只能通过控制接口
-  `remote.config.set {"enabled": true, "iroh_relay": "https://relay.example.com"}` 设置
-  （待补一个 `smeltd` 子命令）。设好后用 `remote.status` 确认 `relay` 字段已经是新地址。
+- **Linux / 本机命令行**：`smeltd relay https://relay.example.com` 只用这个中继。
+  `smeltd relay` 查看当前地址，`smeltd relay off` 改回 n0 的公共中继。安装时也可以
+  `./install.sh --relay=https://relay.example.com`。要在 `smeltd pair` 之前设好，配对串才会带上它。
+- **桌面端**：侧栏里那台远程机器的菜单点「中继…」，在弹窗里改。
+- **控制接口**：`remote.config.set`，字段是 `iroh_relay`（例如
+  `{"enabled": true, "iroh_relay": "https://relay.example.com"}`）。设好后用
+  `remote.status` 确认。Mac 本机运行时也可以在桌面「设置 → 远程访问」里填；省略协议时自动补 `https://`。
 
 换 Relay 之后，运行时不再通过 n0 的 DNS 公布地址，**已有的配对会连不上**：在客户端
 移除这个运行时，再用 `smeltd pair` 或设置页生成的新配对串重新添加。

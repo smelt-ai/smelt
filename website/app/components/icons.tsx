@@ -143,3 +143,34 @@ export function TermMark({ className }: IconProps) {
     </svg>
   );
 }
+
+export function AppleLogo({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M16.37 12.73c.03 2.72 2.39 3.62 2.42 3.64-.02.07-.38 1.3-1.25 2.57-.75 1.1-1.53 2.19-2.76 2.21-1.2.03-1.59-.71-2.96-.71-1.38 0-1.81.69-2.94.73-1.19.04-2.09-1.19-2.85-2.28-1.55-2.24-2.73-6.33-1.14-9.09.78-1.37 2.19-2.24 3.72-2.26 1.16-.02 2.26.78 2.97.78.7 0 2.02-.97 3.41-.82.58.02 2.21.23 3.26 1.77-.08.05-1.94 1.13-1.92 3.46zM14.7 6.3c.63-.76 1.05-1.82.94-2.87-.91.04-2 .6-2.65 1.36-.58.67-1.09 1.74-.95 2.77 1.01.08 2.04-.51 2.66-1.26z" />
+    </svg>
+  );
+}
+
+export function PhoneIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <rect x="7" y="2.75" width="10" height="18.5" rx="2.4" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M11 18.25h2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function BookIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M5 4.75h9.2A3.3 3.3 0 0 1 17.5 8v11.25H8.3A3.3 3.3 0 0 0 5 16.05V4.75Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <path d="M5 16.05A3.3 3.3 0 0 1 8.3 12.8H17.5" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
