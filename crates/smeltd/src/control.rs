@@ -1252,7 +1252,7 @@ fn create_agent_conversation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_control<C: ClientSocket>(
+pub(crate) fn handle_control<C: ClientSocket + crate::protocol::PeerSource>(
     mut conn: C,
     payload: serde_json::Value,
     principal: &crate::devices::Principal,
@@ -1264,6 +1264,8 @@ pub(crate) fn handle_control<C: ClientSocket>(
     event_hub: &EventHubHandle,
     exe_mtime: u64,
 ) {
+    // Unix 走 getsockopt，Windows 管道走 client pid + 映像路径。
+    // 取不到就当未认证：采纳/删除拒绝，会话记忆方法也拒绝。
     let peer_pid = crate::memory_peer_auth::peer_pid(&conn).ok();
     let desktop_authenticated = crate::protocol::authenticate_first_party_peer(&conn).is_ok();
     let response = match decode_request_envelope(payload) {
@@ -1287,8 +1289,8 @@ pub(crate) fn handle_control<C: ClientSocket>(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader};
     use smelt_runtime_client::UnixStream;
+    use std::io::{BufRead, BufReader};
 
     use smelt_runtime_client::protocol::control::{
         CONTROL_API_VERSION, ControlErrorCode, ControlOutcome, ControlResponse, EmptyParams,

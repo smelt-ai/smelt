@@ -2,7 +2,6 @@
 //! 不能由它的 bash / 后台任务子孙冒用；采纳/删除不能由任何智能体会话进程调用。
 
 use std::collections::HashSet;
-use std::os::unix::net::UnixStream;
 
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 
@@ -12,9 +11,10 @@ fn denied(message: &str) -> ControlError {
     ControlError::new(ControlErrorCode::PermissionDenied, message)
 }
 
-/// 当前控制连接对端的 pid；取不到就拒绝（生产路径必须能取证）。
-pub(crate) fn peer_pid(conn: &UnixStream) -> Result<u32, ControlError> {
-    crate::protocol::system_peer_identity(conn)
+/// 当前控制连接对端的 pid。AF_UNIX 与 Windows 命名管道都走 [`crate::protocol::PeerSource`]。
+/// 取不到就拒绝（生产路径必须能取证）。
+pub(crate) fn peer_pid(conn: &impl crate::protocol::PeerSource) -> Result<u32, ControlError> {
+    conn.peer_identity()
         .map(|identity| identity.pid)
         .map_err(|error| denied(&format!("cannot authenticate memory control peer: {error}")))
 }
@@ -71,9 +71,19 @@ const SHELL_NAMES: &[&str] = &[
 
 fn is_shell_name(name: &str) -> bool {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let base = strip_one_exe(base);
     SHELL_NAMES
         .iter()
         .any(|shell| base.eq_ignore_ascii_case(shell))
+}
+
+fn strip_one_exe(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    if bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
 }
 
 /// `peer` 能不能代表这条会话调 `agent.memory.*`。
@@ -364,12 +374,24 @@ fn process_comm(pid: u32) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// Windows 没有可用的父进程查询。父链走不到就拒绝「宿主直接子进程」这条宽放。
+/// 子孙黑名单因此只能认出 pid 本身；采纳和删除仍由桌面白名单失败关闭。
+/// 精确的 provider / handle pid 仍然有效。
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn parent_pid(_pid: u32) -> Option<u32> {
     None
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows 用 #83 的映像路径判断是不是 shell。读不到就当未知，宽放路径因此失败关闭。
+#[cfg(windows)]
+fn process_comm(pid: u32) -> Option<String> {
+    let path = smelt_sys::process::process_executable(pid).ok()?;
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn process_comm(_pid: u32) -> Option<String> {
     None
 }
@@ -387,6 +409,38 @@ mod tests {
 
     fn comms<'map>(map: &'map HashMap<u32, &'static str>) -> impl Fn(u32) -> Option<String> + 'map {
         move |pid| map.get(&pid).map(|name| (*name).to_string())
+    }
+
+    struct FixedPeer {
+        pid: u32,
+        fail: bool,
+    }
+
+    impl crate::protocol::PeerSource for FixedPeer {
+        fn peer_identity(&self) -> Result<crate::protocol::PeerIdentity, String> {
+            if self.fail {
+                return Err("no peer".into());
+            }
+            Ok(crate::protocol::PeerIdentity {
+                pid: self.pid,
+                executable: None,
+                #[cfg(target_os = "macos")]
+                audit_token: None,
+            })
+        }
+    }
+
+    #[test]
+    fn peer_pid_reads_the_peer_source_identity() {
+        assert_eq!(
+            peer_pid(&FixedPeer {
+                pid: 42,
+                fail: false
+            })
+            .unwrap(),
+            42
+        );
+        assert!(peer_pid(&FixedPeer { pid: 1, fail: true }).is_err());
     }
 
     #[test]
@@ -419,10 +473,12 @@ mod tests {
         names.insert(21, "bash");
         names.insert(22, "python");
         names.insert(23, "zsh");
+        names.insert(25, "powershell.exe");
         names.insert(30, "pi-rpc");
         let allow = |pid| allows_session_peer(pid, &roots, parents(&tree), comms(&names));
         assert!(allow(20), "provider 自己可以");
         assert!(allow(30), "同进程模式的 handle pid 可以");
+        assert!(!allow(25), "Windows 的 powershell.exe 也不行");
         assert!(!allow(21), "pi-agent 的 bash 子进程不行");
         assert!(!allow(22), "再往下的孙进程不行");
         assert!(!allow(23), "宿主的 shell 子进程不行");
@@ -466,7 +522,9 @@ mod tests {
             event_rx,
             stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio {
                 pid,
+                #[cfg(unix)]
                 stdin_fd: -1,
+                #[cfg(unix)]
                 stdout_fd: -1,
             }))),
             in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
