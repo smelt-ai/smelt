@@ -33,6 +33,12 @@ impl<T> Watched<T> {
         }
     }
 
+    /// 清掉 poison 标志。`into_inner` 只拿出这次的值，标志还在，下一次
+    /// `lock().unwrap()` 仍会 panic。
+    pub(crate) fn clear_poison(&self) {
+        self.value.clear_poison();
+    }
+
     // 只有单测查锁有没有被污染。bin 目标不编译 tests，所以这里单独放开死代码检查。
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_poisoned(&self) -> bool {
@@ -60,10 +66,11 @@ impl<T> Watched<T> {
             });
         let woken = (WatchedGuard::new(self, guard), result.timed_out());
         if poisoned {
-            Err(PoisonError::new(woken))
-        } else {
-            Ok(woken)
+            // 等待期间别人持锁 panic 会把这把锁标脏。清掉之后返回 Ok，
+            // 调用处的 `unwrap` 不会因为另一个会话的驱动异常而 panic。
+            self.value.clear_poison();
         }
+        Ok(woken)
     }
 }
 

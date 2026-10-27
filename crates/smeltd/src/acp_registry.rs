@@ -1,6 +1,21 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
+
+/// 取出锁里的值，并清掉 poison。
+///
+/// 一个会话的驱动在持锁时 panic，这把锁会中毒。`into_inner` 只拿出这次的值，
+/// 不清标志；下一次 `lock().unwrap()` 仍会 panic。跨会话遍历和之后的控制
+/// 操作都走这里，单会话中毒不会再传染。
+pub(crate) fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            mutex.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
 
 pub(crate) struct AcpSlot<T> {
     pub(crate) lifecycle: Mutex<()>,
@@ -198,7 +213,7 @@ impl<T> AcpRegistry<T> {
         expected: &Arc<AcpSlot<T>>,
         operation: impl FnOnce(&T) -> R,
     ) -> Option<R> {
-        let _lifecycle = expected.lifecycle.lock().unwrap();
+        let _lifecycle = lock_mutex(&expected.lifecycle);
         if !self.is_current(id, expected) {
             return None;
         }

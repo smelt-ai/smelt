@@ -790,7 +790,7 @@ fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool)
     }
     #[cfg(unix)]
     {
-        prove_unix_process_group_dead(pid, timeout, reap_child)
+    prove_unix_process_group_dead(pid, timeout, reap_child)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -2924,8 +2924,9 @@ fn spawn_agent_process(
     #[cfg(windows)]
     if let Err(error) = smelt_sys::process::attach_suspended(child.id()) {
         drop(child);
-        return Err(agent_client_protocol::Error::internal_error()
-            .data(format!("无法把 agent 放进进程树：{error}")));
+        return Err(agent_client_protocol::Error::internal_error().data(format!(
+            "无法把 agent 放进进程树：{error}"
+        )));
     }
     let child_stdin = child.stdin.take().ok_or_else(|| {
         agent_client_protocol::Error::internal_error().data("无法打开 agent stdin")
@@ -5031,14 +5032,13 @@ mod path_resolve_tests {
 
     #[test]
     fn build_agent_args_overlays_structured_env_on_legacy_prefixes() {
-        let launch = ConversationLaunchSpec::from_command(
-            "CLAUDE_CONFIG_DIR=/legacy/path /bin/sh --version",
-        )
-        .with_env(
-            "CLAUDE_CONFIG_DIR",
-            "~/Library/Application Support/Claude Quant",
-        )
-        .with_env("XDG_CONFIG_HOME", "~/.config");
+        let launch =
+            ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=/legacy/path /bin/sh --version")
+                .with_env(
+                    "CLAUDE_CONFIG_DIR",
+                    "~/Library/Application Support/Claude Quant",
+                )
+                .with_env("XDG_CONFIG_HOME", "~/.config");
 
         let args = build_agent_args(&launch, "/bin:/usr/bin").expect("launch args");
         let home = dirs::home_dir().unwrap();

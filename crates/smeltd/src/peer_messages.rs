@@ -388,8 +388,12 @@ pub(crate) fn reset_chain(session_id: &str) {
 }
 
 /// 起这个 Pi 会话时绑上的应答。来源是 `session_id`，请求体里的字段不算。
+///
+/// `source_slot` 是绑定时的那一代槽位。请求到达时再 `get` 会拿到当前一代，
+/// 紧接着 `is_current` 恒为真，换代之后的旧 runtime 就拦不住了。
 pub(crate) fn bind_peer_handler(
     session_id: String,
+    source_slot: std::sync::Weak<AcpSlot<AcpSession>>,
     acp_sessions: AcpSessions,
     subscribers: EventHubHandle,
 ) -> smelt_core::background_tasks::PeerRequestHandler {
@@ -398,7 +402,7 @@ pub(crate) fn bind_peer_handler(
             acp_sessions: Arc::clone(&acp_sessions),
             subscribers: subscribers.clone(),
         };
-        let Some(slot) = acp_sessions.get(&session_id) else {
+        let Some(slot) = source_slot.upgrade() else {
             return rejected("not_found", "发出请求的对话已经换掉了");
         };
         if !acp_sessions.is_current(&session_id, &slot) {
@@ -449,16 +453,13 @@ struct Peer {
 fn is_live_peer(id: &str, sess: &AcpSession) -> bool {
     if is_automation(id)
         || matches!(
-            *sess.conversation_binding.lock().unwrap(),
+            *crate::acp_registry::lock_mutex(&sess.conversation_binding),
             Some(smelt_core::conversation::ConversationBinding::Automation { .. })
         )
     {
         return false;
     }
-    let is_pi = sess
-        .launch_spec
-        .lock()
-        .unwrap()
+    let is_pi = crate::acp_registry::lock_mutex(&sess.launch_spec)
         .as_ref()
         .is_some_and(smelt_core::pi_rpc::is_smelt_pi_launch);
     is_pi && (acp_runtime_alive(sess) || sess.idle.is_suspended())
@@ -559,7 +560,7 @@ fn title_of(id: &str, sess: &AcpSession) -> String {
             return title;
         }
     }
-    if let Some(title) = sess.reduced.lock().unwrap().resolved_session_title() {
+    if let Some(title) = crate::acp_host::lock_reduced(sess).resolved_session_title() {
         return title;
     }
     sess.cwd
@@ -573,7 +574,7 @@ fn state_of(sess: &AcpSession) -> &'static str {
     if sess.idle.is_suspended() {
         return "suspended";
     }
-    let phase = sess.reduced.lock().unwrap().phase;
+    let phase = crate::acp_host::lock_reduced(sess).phase;
     let busy = sess.prompt_in_flight.load(Ordering::SeqCst)
         || !matches!(
             phase,
@@ -587,9 +588,7 @@ fn state_of(sess: &AcpSession) -> &'static str {
 
 /// 权限模式是「完全访问」。值来自驱动报的配置项，挂起的会话镜像里也还在。
 fn bypasses_approval(sess: &AcpSession) -> bool {
-    sess.reduced
-        .lock()
-        .unwrap()
+    crate::acp_host::lock_reduced(sess)
         .config_options
         .iter()
         .find(|config| config.config_id == "mode")
@@ -685,7 +684,7 @@ fn read(
     let sess = &slot.value;
     // 挂起后内存里只剩当前回合，有多少给多少，不为此把对方拉起来。
     let replies = {
-        let reduced = sess.reduced.lock().unwrap();
+        let reduced = crate::acp_host::lock_reduced(sess);
         assistant_replies(reduced.entries(), limit)
     };
     Ok(serde_json::json!({
@@ -885,17 +884,14 @@ fn spawn(
     }
 
     let source = &source_slot.value;
-    let launch = source
-        .launch_spec
-        .lock()
-        .unwrap()
+    let launch = crate::acp_registry::lock_mutex(&source.launch_spec)
         .clone()
         .ok_or_else(|| rejected("invalid", "找不到这个对话的启动规格"))?;
     let cwd = source
         .cwd
         .clone()
         .ok_or_else(|| rejected("invalid", "这个对话没有工作目录"))?;
-    let ephemeral_env = source.ephemeral_env.lock().unwrap().clone();
+    let ephemeral_env = crate::acp_registry::lock_mutex(&source.ephemeral_env).clone();
     // 发起方在远程目录里就照抄它的选项；桌面开的对话不在目录里，按 Pi 记。
     let agent_option_id = server
         .remote_sessions
@@ -1388,11 +1384,11 @@ mod tests {
         let slot = acp_sessions.reserve_with(id, || {
             crate::acp_host::make_acp_session(id, Some("/work".into()), None, None)
         });
-        *slot.0.value.launch_spec.lock().unwrap() =
+        *crate::acp_registry::lock_mutex(&slot.0.value.launch_spec) =
             Some(smelt_core::agent_kind::ConversationAgentKind::Pi.default_launch());
         let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
         let (_event_tx, event_rx) = smol::channel::unbounded();
-        *slot.0.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        *crate::acp_registry::lock_mutex(&slot.0.value.handle) = Some(smelt_core::acp_conn::ConversationHandle {
             cmd_tx,
             event_rx,
             stdio: Arc::new(Mutex::new(None)),
@@ -1414,6 +1410,7 @@ mod tests {
         let _b = live_pi(&acp_sessions, "acp-b");
         let handler = bind_peer_handler(
             "acp-a".into(),
+            Arc::downgrade(&_a),
             Arc::clone(&acp_sessions),
             crate::new_event_hub(),
         );
@@ -1462,5 +1459,133 @@ mod tests {
             .letters
             .retain(|found| found.delivery.id != id);
         assert_eq!(state, Some(LetterState::Delivered));
+    }
+
+    /// 绑定时记下的那一代槽位被换掉之后，旧 runtime 的请求不能再进门。
+    #[test]
+    fn a_replaced_slot_cannot_keep_using_the_bound_handler() {
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let old = live_pi(&acp_sessions, "acp-a");
+        let _b = live_pi(&acp_sessions, "acp-b");
+        let stale = bind_peer_handler(
+            "acp-a".into(),
+            Arc::downgrade(&old),
+            Arc::clone(&acp_sessions),
+            crate::new_event_hub(),
+        );
+        assert!(acp_sessions.remove_if_same("acp-a", &old).is_some());
+        let current = live_pi(&acp_sessions, "acp-a");
+        assert!(!Arc::ptr_eq(&old, &current));
+
+        let rejected_list = stale("session_list", &serde_json::json!({}));
+        assert_eq!(rejected_list["ok"], false, "{rejected_list}");
+        assert_eq!(rejected_list["reason"], "not_found");
+
+        let fresh = bind_peer_handler(
+            "acp-a".into(),
+            Arc::downgrade(&current),
+            Arc::clone(&acp_sessions),
+            crate::new_event_hub(),
+        );
+        let listed = fresh("session_list", &serde_json::json!({}));
+        assert_eq!(listed["ok"], true, "{listed}");
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|peer| peer["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"acp-b"), "{listed}");
+    }
+
+    /// 驱动在持有本会话锁时 panic。别的会话的 session_list / session_read 仍能返回，
+    /// 这一个会话清掉 poison 之后还能在同一个槽位上重新开始。
+    #[test]
+    fn a_panicked_session_does_not_break_other_sessions_or_its_own_restart() {
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let panicked = live_pi(&acp_sessions, "acp-panic");
+        let other = live_pi(&acp_sessions, "acp-ok");
+        let hub = crate::new_event_hub();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _reduced = panicked.value.reduced.lock().unwrap();
+            let _turn = panicked.value.turn_completion.lock().unwrap();
+            let _spec = panicked.value.launch_spec.lock().unwrap();
+            panic!("driver boom");
+        }));
+        assert!(caught.is_err());
+        assert!(
+            panicked.value.reduced.is_poisoned(),
+            "持锁 unwind 后归约锁应当中毒"
+        );
+        assert!(panicked.value.turn_completion.is_poisoned());
+
+        let handler = bind_peer_handler(
+            "acp-ok".into(),
+            Arc::downgrade(&other),
+            Arc::clone(&acp_sessions),
+            hub.clone(),
+        );
+        let listed = handler("session_list", &serde_json::json!({}));
+        assert_eq!(listed["ok"], true, "{listed}");
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|peer| peer["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&"acp-panic"),
+            "中毒会话仍应被列出来，而不是把整次请求打崩：{listed}"
+        );
+        let read = handler(
+            "session_read",
+            &serde_json::json!({"sessionId": "acp-panic", "limit": 1}),
+        );
+        assert_eq!(read["ok"], true, "{read}");
+
+        let payload: Box<dyn std::any::Any + Send> = Box::new("driver boom".to_string());
+        crate::acp_host::mark_session_driver_panic(
+            &panicked,
+            "acp-panic",
+            &hub,
+            payload.as_ref(),
+        );
+        assert!(
+            !panicked.value.reduced.is_poisoned(),
+            "mark 之后归约锁的 poison 应当被清掉"
+        );
+        assert!(!panicked.value.turn_completion.is_poisoned());
+        assert!(!panicked.value.launch_spec.is_poisoned());
+
+        let listed_after = handler("session_list", &serde_json::json!({}));
+        assert_eq!(listed_after["ok"], true, "{listed_after}");
+        let read_after = handler(
+            "session_read",
+            &serde_json::json!({"sessionId": "acp-panic", "limit": 1}),
+        );
+        assert_eq!(read_after["ok"], true, "{read_after}");
+
+        {
+            let mut reduced = crate::acp_host::lock_reduced(&panicked.value);
+            reduced.history_session_id = Some("hist-resume".to_string());
+        }
+        *crate::acp_registry::lock_mutex(&panicked.value.launch_spec) = Some(
+            smelt_core::agent_kind::ConversationLaunchSpec::from_command("/bin/true"),
+        );
+        let restarted =
+            crate::acp_host::restart_acp_session("acp-panic", &acp_sessions, &hub);
+        assert!(restarted.is_ok(), "{restarted:?}");
+        let current = acp_sessions.get("acp-panic").expect("槽位还在");
+        assert!(
+            Arc::ptr_eq(&current, &panicked),
+            "重新开始应当复用同一个槽位"
+        );
+        let reduced = crate::acp_host::lock_reduced(&current.value);
+        assert_eq!(reduced.history_session_id.as_deref(), Some("hist-resume"));
+        drop(reduced);
+        assert!(
+            crate::acp_host::retire_acp_runtime(&current.value),
+            "测试拉起的 runtime 应当能退掉"
+        );
     }
 }

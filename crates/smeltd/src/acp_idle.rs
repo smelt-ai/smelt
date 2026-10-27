@@ -243,27 +243,18 @@ pub(crate) fn acp_suspend_blocker(
     now_ms: u64,
     idle_after: Duration,
 ) -> Option<&'static str> {
-    if sess
-        .handle
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    if crate::acp_registry::lock_mutex(&sess.handle)
         .is_none()
     {
         return Some("no runtime");
     }
-    if sess
-        .unreaped_pid
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    if crate::acp_registry::lock_mutex(&sess.unreaped_pid)
         .is_some()
     {
         return Some("previous runtime not reaped");
     }
     if matches!(
-        &*sess
-            .conversation_binding
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        &*crate::acp_registry::lock_mutex(&sess.conversation_binding),
         Some(smelt_core::conversation::ConversationBinding::Automation { .. })
     ) {
         return Some("daemon-owned binding");
@@ -272,29 +263,17 @@ pub(crate) fn acp_suspend_blocker(
         return Some("recently active");
     }
     if sess.prompt_in_flight.load(Ordering::SeqCst)
-        || !sess
-            .pending_prompts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        || !crate::acp_registry::lock_mutex(&sess.pending_prompts)
             .is_empty()
-        || sess
-            .unaccepted_prompt
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        || crate::acp_registry::lock_mutex(&sess.unaccepted_prompt)
             .is_some()
-        || sess
-            .immediate_delivery
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        || crate::acp_registry::lock_mutex(&sess.immediate_delivery)
             .is_some()
     {
         return Some("prompt in flight");
     }
     reduced_suspend_blocker(
-        &sess
-            .reduced
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        &crate::acp_host::lock_reduced(sess),
     )
 }
 
@@ -386,9 +365,7 @@ pub(crate) fn suspend_idle_acp_sessions(
             continue;
         };
         if retire_acp_runtime(sess) {
-            sess.reduced
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+            crate::acp_host::lock_reduced(sess)
                 .trim_to_current_turn();
             sess.idle.mark_suspended();
             crate::dlog(&format!("acp 闲置挂起 id={id}"));
@@ -506,7 +483,7 @@ pub(crate) fn wake_suspended_acp_session(
         return Ok(());
     }
     let saved = {
-        let _lifecycle = slot.lifecycle.lock().unwrap();
+        let _lifecycle = crate::acp_registry::lock_mutex(&slot.lifecycle);
         if !acp_sessions.is_current(id, slot) {
             return Err("ACP session was replaced".to_string());
         }
@@ -515,7 +492,7 @@ pub(crate) fn wake_suspended_acp_session(
             crate::dlog(&format!("acp 唤醒闲置会话 id={id}"));
             // 拉起会清掉镜像里的模型，必须在那之前记下。挂起期间改不了配置
             // （改配置要 runtime，会先走到这里），所以镜像就是挂起时的值。
-            let saved = SuspendedConfig::capture(&sess.reduced.lock().unwrap());
+            let saved = SuspendedConfig::capture(&crate::acp_host::lock_reduced(sess));
             relaunch_recorded_acp_runtime(id, slot, acp_sessions, subscribers)
                 .map_err(str::to_string)?;
             Some(saved)
@@ -539,7 +516,7 @@ pub(crate) fn restore_suspended_config(
     saved: &SuspendedConfig,
     subscribers: &EventHubHandle,
 ) {
-    let model = saved.model_action(&sess.reduced.lock().unwrap());
+    let model = saved.model_action(&crate::acp_host::lock_reduced(sess));
     apply_config_restore_step(
         id,
         sess,
@@ -547,7 +524,7 @@ pub(crate) fn restore_suspended_config(
         subscribers,
         |reduced| saved.model_action(reduced).is_none(),
     );
-    let options = saved.option_actions(&sess.reduced.lock().unwrap());
+    let options = saved.option_actions(&crate::acp_host::lock_reduced(sess));
     apply_config_restore_step(id, sess, options, subscribers, |reduced| {
         saved.option_actions(reduced).is_empty()
     });
@@ -565,7 +542,7 @@ fn apply_config_restore_step(
         return;
     }
     crate::dlog(&format!("acp 恢复闲置前的会话配置 id={id} {actions:?}"));
-    let status_before = sess.reduced.lock().unwrap().status_line.clone();
+    let status_before = crate::acp_host::lock_reduced(sess).status_line.clone();
     for action in actions {
         if let Err(error) = apply_acp_user_action(sess, action, subscribers) {
             eprintln!("[acp] 会话 {id} 恢复闲置前的配置失败：{error}");
@@ -606,7 +583,7 @@ pub(crate) fn copy_session_config(
     target: &AcpSession,
     subscribers: &EventHubHandle,
 ) -> Result<(), String> {
-    let saved = SuspendedConfig::capture(&source.reduced.lock().unwrap());
+    let saved = SuspendedConfig::capture(&crate::acp_host::lock_reduced(source));
     wait_for_acp_ready(target, ACP_WAKE_READY_TIMEOUT)?;
     restore_suspended_config(id, target, &saved, subscribers);
     Ok(())

@@ -1532,7 +1532,8 @@ fn claim_model(state: &mut State, owner: &str, listener_id: u64) -> Option<Model
         task.delivering_to = Some(listener_id);
         return Some(completion_of(task));
     }
-    subagents::claim(state, owner, listener_id).or_else(|| peers::claim(state, owner, listener_id))
+    subagents::claim(state, owner, listener_id)
+        .or_else(|| peers::claim(state, owner, listener_id))
 }
 
 /// 扩展确认 Pi 已经把这条结果交给了模型。
@@ -1697,10 +1698,7 @@ fn drain_wake(stream: &mut WakeReader) {
     }
 }
 
-fn poll_ready(
-    sources: &[&dyn PollSource],
-    timeout: Option<Duration>,
-) -> std::io::Result<Vec<bool>> {
+fn poll_ready(sources: &[&dyn PollSource], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
     #[cfg(unix)]
     {
         let fds: Vec<(std::os::fd::RawFd, i16)> = sources
@@ -1747,10 +1745,7 @@ impl PollSource for smelt_sys::named_pipe::WakeEvent {
 }
 
 #[cfg(unix)]
-fn poll_wait(
-    fds: &[(std::os::fd::RawFd, i16)],
-    timeout: Option<Duration>,
-) -> std::io::Result<Vec<bool>> {
+fn poll_wait(fds: &[(std::os::fd::RawFd, i16)], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
     if fds.is_empty() {
         return Ok(Vec::new());
     }
@@ -1787,10 +1782,7 @@ fn poll_wait(
 }
 
 #[cfg(windows)]
-fn poll_handles(
-    sources: &[&dyn PollSource],
-    timeout: Option<Duration>,
-) -> std::io::Result<Vec<bool>> {
+fn poll_handles(sources: &[&dyn PollSource], timeout: Option<Duration>) -> std::io::Result<Vec<bool>> {
     let waitables: Vec<_> = sources.iter().map(|source| source.waitable()).collect();
     smelt_sys::named_pipe::wait_readable(&waitables, timeout)
 }
@@ -1904,21 +1896,21 @@ pub fn reap_orphaned_task_groups(host_pid: u32) {
     }
     #[cfg(unix)]
     {
-        if host_pid == 0 {
-            return;
-        }
-        let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
-            return;
+    if host_pid == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
         };
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if task_dir_host_pid(&name) != Some(host_pid) {
-                continue;
-            }
-            reap_group_records(&entry.path());
+        if task_dir_host_pid(&name) != Some(host_pid) {
+            continue;
         }
+        reap_group_records(&entry.path());
+    }
     }
 }
 
@@ -2995,8 +2987,7 @@ mod tests {
     /// id 就会悄悄指到新宿主的同号任务上。随机 id 让旧 id 对不上任何任务、明确报错。
     #[test]
     fn task_ids_do_not_repeat_across_host_instances() {
-        let start =
-            serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"});
+        let start = serde_json::json!({"op": "start", "command": print_text("ready"), "title": "打印"});
         let (before_restart, _first_events) = supervisor();
         let (after_restart, _second_events) = supervisor();
         let old = call(before_restart.socket_path(), start.clone());
@@ -3124,12 +3115,10 @@ mod tests {
         );
     }
 
+
+
     /// 开一条派发连接，返回读写端。
-    fn dispatch(
-        path: &Path,
-        tool_call_id: &str,
-        background: bool,
-    ) -> std::io::BufReader<TaskStream> {
+    fn dispatch(path: &Path, tool_call_id: &str, background: bool) -> std::io::BufReader<TaskStream> {
         let stream = connect_task_stream(path).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -3254,18 +3243,9 @@ mod tests {
         assert_eq!(progressed.last_activity.as_deref(), Some("运行了 rg"));
         assert!(progressed.revision > 0);
 
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "end", "id": first, "status": "completed"}),
-        );
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "end", "id": second, "status": "failed"}),
-        );
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "finish", "text": "两项结果"}),
-        );
+        send_line(&mut conn, serde_json::json!({"op": "end", "id": first, "status": "completed"}));
+        send_line(&mut conn, serde_json::json!({"op": "end", "id": second, "status": "failed"}));
+        send_line(&mut conn, serde_json::json!({"op": "finish", "text": "两项结果"}));
 
         let completion = session.next();
         assert_eq!(completion["id"], "call-7", "派发的结果按工具调用 id 交回");
@@ -3275,14 +3255,8 @@ mod tests {
         assert_eq!(completion["wake"], true);
         let runs = completion["runs"].as_array().unwrap();
         assert_eq!(runs.len(), 2);
-        assert!(
-            runs.iter()
-                .any(|run| run["id"] == first.as_str() && run["status"] == "completed")
-        );
-        assert!(
-            runs.iter()
-                .any(|run| run["id"] == second.as_str() && run["status"] == "failed")
-        );
+        assert!(runs.iter().any(|run| run["id"] == first.as_str() && run["status"] == "completed"));
+        assert!(runs.iter().any(|run| run["id"] == second.as_str() && run["status"] == "failed"));
 
         let listed = call(&path, serde_json::json!({"op": "list"}));
         assert_eq!(listed["text"], "没有后台任务", "子智能体不是后台任务");
@@ -3296,14 +3270,8 @@ mod tests {
         let mut session = Listen::connect(&path);
         let mut conn = dispatch(&path, "call-8", false);
         let (id, _) = start_subagent(&mut conn, 1, "查登录");
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "end", "id": id, "status": "completed"}),
-        );
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "finish", "text": "结果"}),
-        );
+        send_line(&mut conn, serde_json::json!({"op": "end", "id": id, "status": "completed"}));
+        send_line(&mut conn, serde_json::json!({"op": "finish", "text": "结果"}));
         assert!(session.try_next(Duration::from_millis(300)).is_none());
     }
 
@@ -3317,9 +3285,7 @@ mod tests {
         let (id, _) = start_subagent(&mut conn, 1, "查登录");
         drop(conn);
         let views = until_subagents(&events, |views| {
-            views
-                .iter()
-                .any(|view| view.id == id && !view.status.is_running())
+            views.iter().any(|view| view.id == id && !view.status.is_running())
         });
         let view = views.iter().find(|view| view.id == id).unwrap();
         assert_eq!(view.status, crate::acp_session::SubagentStatus::Interrupted);
@@ -3342,18 +3308,10 @@ mod tests {
         assert_eq!(request["op"], "stop");
         assert_eq!(request["id"], id.as_str());
 
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "end", "id": id, "status": "failed"}),
-        );
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "finish", "text": "aborted"}),
-        );
+        send_line(&mut conn, serde_json::json!({"op": "end", "id": id, "status": "failed"}));
+        send_line(&mut conn, serde_json::json!({"op": "finish", "text": "aborted"}));
         let views = until_subagents(&events, |views| {
-            views
-                .iter()
-                .any(|view| view.id == id && !view.status.is_running())
+            views.iter().any(|view| view.id == id && !view.status.is_running())
         });
         assert_eq!(
             views.iter().find(|view| view.id == id).unwrap().status,
@@ -3373,14 +3331,8 @@ mod tests {
         let mut listen = Listen::connect(&path);
         let mut conn = dispatch(&path, "call-11", true);
         let (id, _) = start_subagent(&mut conn, 1, "查登录");
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "end", "id": id, "status": "completed"}),
-        );
-        send_line(
-            &mut conn,
-            serde_json::json!({"op": "finish", "text": "结果"}),
-        );
+        send_line(&mut conn, serde_json::json!({"op": "end", "id": id, "status": "completed"}));
+        send_line(&mut conn, serde_json::json!({"op": "finish", "text": "结果"}));
         assert_eq!(listen.next()["wake"], true);
 
         supervisor.control().queue_cleared();
