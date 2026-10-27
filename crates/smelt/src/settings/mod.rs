@@ -19,7 +19,6 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::progress::Progress;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-#[cfg(target_os = "macos")]
 use gpui_component::switch::Switch;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
