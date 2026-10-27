@@ -193,7 +193,7 @@ fn save_active_automation_transcripts(
         let Some(slot) = acp_sessions.get(session_id) else {
             continue;
         };
-        let entries = slot.value.reduced.lock().unwrap().entries().to_vec();
+        let entries = slot.value.reduced.lock().entries().to_vec();
         if entries.is_empty() {
             continue;
         }

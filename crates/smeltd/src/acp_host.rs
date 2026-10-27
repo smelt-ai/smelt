@@ -4,7 +4,7 @@
 //! 对话和它的驱动线程都在 smeltd 里。agent（`smelt-pi` 或外部 ACP）是这个进程的子进程。
 
 use super::*;
-use crate::acp_registry::lock_mutex;
+use crate::acp_registry::SessionLock;
 use smelt_core::acp_wire::FrameMirror;
 use std::collections::{BTreeSet, VecDeque};
 
@@ -24,8 +24,9 @@ pub(crate) use watched::Watched;
 // 一条驱动 panic 只把这个会话标成失败，不把别的会话或终端一起带走。
 //
 // 状态管理复用终端会话已有的 `SessionState`/`Phase`/`broadcast_state`/
-// `subscribe` 机制：`AcpSession.state` 就是一份跟终端会话同类型的
-// `Arc<Mutex<SessionState>>`，list/subscribe 汇总时两边的 Vec 拼在一起即可。
+// `subscribe` 机制：`AcpSession.state` 和终端会话存的是同一个 `SessionState`
+// 类型（锁换成了不传 poison 的 `SessionLock`），list/subscribe 汇总时两边的 Vec
+// 拼在一起即可。
 // ACP 会话 id 沿用 GUI 现有的 `acp-` 前缀约定，GUI 靠这个前缀判断该走
 // open/watch 还是 acp_open/acp_watch。
 //
@@ -158,103 +159,59 @@ pub(crate) struct AcpSession {
     /// 串行化回合收尾与 prompt 闸门释放。看门狗和迟到的 ACP 更新可能同时
     /// 判定同一回合结束；必须在同一临界区内重新检查状态并派发下一条 prompt，
     /// 否则旧回合会把新回合的 gate 再次打开。
-    pub(crate) turn_completion: Mutex<()>,
+    pub(crate) turn_completion: SessionLock<()>,
     /// 服务端 prompt 闸门。GUI 侧会乐观排队，但多个客户端可能共用一个 ACP
     /// 会话，且快照可能与 provider 的最终更新竞态，最终顺序必须由 daemon 保证。
     pub(crate) prompt_in_flight: AtomicBool,
     /// 自动化只关心相位、投递账本和闸门。流式文本不进这组，避免每来一个字就整段重算。
-    pub(crate) automation_watch: Mutex<Option<AutomationWatch>>,
+    pub(crate) automation_watch: SessionLock<Option<AutomationWatch>>,
     /// 回合闸门后面排队的输入。只经 [`edit_pending_prompts`] 改，快照里那份展示投影跟着它走。
-    pub(crate) pending_prompts: Mutex<VecDeque<QueuedAcpPrompt>>,
+    pub(crate) pending_prompts: SessionLock<VecDeque<QueuedAcpPrompt>>,
     /// 排队消息的会话内 id。撤回按它找。
     pub(crate) next_pending_prompt_id: AtomicU64,
     /// 一次「立即发送」还没落地。文本是稳定键；附图在认领时抄下，因为 Pi 的 clear_queue 还原不带图。
-    pub(crate) immediate_delivery: Mutex<Option<ImmediateDelivery>>,
+    pub(crate) immediate_delivery: SessionLock<Option<ImmediateDelivery>>,
     /// 已经写给 Pi、还没被收下的那条。收下之前不回显；拒绝后回到队列，不记回合失败。
-    pub(crate) unaccepted_prompt: Mutex<Option<QueuedAcpPrompt>>,
+    pub(crate) unaccepted_prompt: SessionLock<Option<QueuedAcpPrompt>>,
     /// 界面上的「思考中」只是为了接住还在跑的 Pi，并不是一条已被收下的回合。
     /// 下一次 `ProviderIdle` 要把它收回去，进门才能放行。
     pub(crate) provider_hold: AtomicBool,
     /// 同进程里的 ACP / Pi 驱动。agent 子进程的 pid 在 `stdio` 上。
-    pub(crate) handle: Mutex<Option<smelt_core::acp_conn::ConversationHandle>>,
+    pub(crate) handle: SessionLock<Option<smelt_core::acp_conn::ConversationHandle>>,
     /// 上次 retire 未能 waitpid 的直接子进程。未清空前禁止 relaunch，也不得
     /// 把 sid 从表里摘掉——否则新 open 会在旧进程还活着时 session/load。
-    pub(crate) unreaped_pid: Mutex<Option<i32>>,
+    pub(crate) unreaped_pid: SessionLock<Option<i32>>,
     pub(crate) cwd: Option<String>,
     /// 四色状态，跟终端会话共用同一个类型/同一套广播机制。
-    pub(crate) state: Arc<Mutex<SessionState>>,
+    pub(crate) state: Arc<SessionLock<SessionState>>,
     /// Serializes snapshot creation, initial attachment, and incremental fanout.
-    pub(crate) output_gate: Mutex<()>,
-    pub(crate) out: Mutex<AcpOut>,
+    pub(crate) output_gate: SessionLock<()>,
+    pub(crate) out: SessionLock<AcpOut>,
     /// 最近一次真正 open/relaunch 用过的完整启动规格（含 env），供 `acp_restart`
     /// 重启时复用——`state.launch` 只存了命令字符串给状态展示用，重启需要
     /// 完整结构化的 `ConversationLaunchSpec`（env 可能带空格，不能靠字符串拼回去）。
-    pub(crate) launch_spec: Mutex<Option<smelt_core::agent_kind::ConversationLaunchSpec>>,
+    pub(crate) launch_spec: SessionLock<Option<smelt_core::agent_kind::ConversationLaunchSpec>>,
     /// ACP 恢复 supervisor 的生命周期状态，不属于可持久化的对话投影。
-    pub(crate) restore_state: Mutex<AcpRestoreState>,
+    pub(crate) restore_state: SessionLock<AcpRestoreState>,
     /// 外部智能体/网页配置的临时环境变量。仅在当前 daemon 生命周期内保存，以便
     /// 强制重启同一 ACP 子进程；不落盘，防止凭据写入磁盘。
-    pub(crate) ephemeral_env: Mutex<BTreeMap<String, String>>,
+    pub(crate) ephemeral_env: SessionLock<BTreeMap<String, String>>,
     /// 用户输入的宿主级路由。`None` 表示尚未确认，
     /// 不能当成 Direct；第一次 attach 才采用客户端值。Task Runtime delivery
     /// 不读取它，只由 `acp_submit_input` 使用。
-    pub(crate) conversation_binding: Mutex<Option<smelt_core::conversation::ConversationBinding>>,
+    pub(crate) conversation_binding:
+        SessionLock<Option<smelt_core::conversation::ConversationBinding>>,
     /// 串行化所有交互式输入。没有这把门时两个客户端会同时把同一个首轮预设各带一次。
     /// 门里同时记着最近接受过的 submission_id：客户端没等到回包就重发同一条输入时，
     /// 认出来直接回成功，不再提交第二遍。
-    pub(crate) conversation_submit: Mutex<RecentSubmissions>,
+    pub(crate) conversation_submit: SessionLock<RecentSubmissions>,
     /// 只装饰下一条成功路由的交互输入。Task/Peer delivery 不读取也不消费它。
-    pub(crate) pending_agent_preset: Mutex<Option<String>>,
+    pub(crate) pending_agent_preset: SessionLock<Option<String>>,
     /// 已经写进 `acp_detail.history_session_id` 的身份。
     /// 和内存里的确认值一样就不再写库；行还不在时保持空，下一帧再试。
-    pub(crate) durable_history_session_id: Mutex<Option<String>>,
+    pub(crate) durable_history_session_id: SessionLock<Option<String>>,
     /// 闲置挂起的账本，见 `acp_idle`。
     pub(crate) idle: crate::acp_idle::AcpIdleState,
-}
-
-/// 读这份归约。驱动持锁 panic 后锁是 poisoned 的：取出值并清掉标志，
-/// 别的会话遍历到这里不会跟着 panic。
-pub(crate) fn lock_reduced(
-    sess: &AcpSession,
-) -> watched::WatchedGuard<'_, smelt_core::acp_session::AcpSessionState> {
-    match sess.reduced.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            sess.reduced.clear_poison();
-            poisoned.into_inner()
-        }
-    }
-}
-
-/// 清掉这个会话每一把 `Mutex` 的 poison。驱动 unwind 时持着哪一把，哪一把就会中毒；
-/// `into_inner` 不清标志，之后任何 `lock().unwrap()` 都会把 panic 传开。
-pub(crate) fn clear_session_lock_poison(sess: &AcpSession) {
-    sess.reduced.clear_poison();
-    sess.turn_completion.clear_poison();
-    sess.automation_watch.clear_poison();
-    sess.pending_prompts.clear_poison();
-    sess.immediate_delivery.clear_poison();
-    sess.unaccepted_prompt.clear_poison();
-    sess.handle.clear_poison();
-    sess.unreaped_pid.clear_poison();
-    sess.state.clear_poison();
-    sess.output_gate.clear_poison();
-    sess.out.clear_poison();
-    sess.launch_spec.clear_poison();
-    sess.restore_state.clear_poison();
-    sess.ephemeral_env.clear_poison();
-    sess.conversation_binding.clear_poison();
-    sess.conversation_submit.clear_poison();
-    sess.pending_agent_preset.clear_poison();
-    sess.durable_history_session_id.clear_poison();
-    if let Some(handle) = sess
-        .handle
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-    {
-        handle.stdio.clear_poison();
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,9 +254,9 @@ pub(crate) fn edit_pending_prompts<R>(
     sess: &AcpSession,
     edit: impl FnOnce(&mut VecDeque<QueuedAcpPrompt>) -> R,
 ) -> R {
-    let mut queue = lock_mutex(&sess.pending_prompts);
+    let mut queue = sess.pending_prompts.lock();
     let result = edit(&mut queue);
-    lock_reduced(sess).pending_prompts = queue
+    sess.reduced.lock().pending_prompts = queue
         .iter()
         .filter(|prompt| !prompt.echoed)
         .map(|prompt| smelt_core::acp_session::PendingPromptView {
@@ -329,8 +286,7 @@ pub(crate) fn new_test_acp_sessions() -> AcpSessions {
 }
 
 pub(crate) fn acp_runtime_alive(sess: &AcpSession) -> bool {
-    lock_mutex(&sess.handle)
-        .is_some()
+    sess.handle.lock().is_some()
 }
 
 #[derive(Clone)]
@@ -617,7 +573,7 @@ pub(crate) fn durable_history_write(
 
 fn persist_confirmed_history_id(sess: &AcpSession) {
     let Some(history_id) = ({
-        let reduced = lock_reduced(sess);
+        let reduced = sess.reduced.lock();
         normalize_resume_id(reduced.history_session_id.clone())
     }) else {
         return;
@@ -626,16 +582,16 @@ fn persist_confirmed_history_id(sess: &AcpSession) {
 }
 
 fn write_durable_history_id(sess: &AcpSession, history_id: &str) {
-    if lock_mutex(&sess.durable_history_session_id).as_deref() == Some(history_id) {
+    if sess.durable_history_session_id.lock().as_deref() == Some(history_id) {
         return;
     }
-    let session_id = lock_mutex(&sess.state).id.clone();
+    let session_id = sess.state.lock().id.clone();
     let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
         return;
     };
     match store.remember_history_session_id(&session_id, history_id) {
         Ok(true) => {
-            *lock_mutex(&sess.durable_history_session_id) = Some(history_id.to_string());
+            *sess.durable_history_session_id.lock() = Some(history_id.to_string());
         }
         Ok(false) => {}
         Err(error) => {
@@ -645,8 +601,8 @@ fn write_durable_history_id(sess: &AcpSession, history_id: &str) {
 }
 
 fn clear_durable_history_id(sess: &AcpSession) {
-    *lock_mutex(&sess.durable_history_session_id) = None;
-    let session_id = lock_mutex(&sess.state).id.clone();
+    *sess.durable_history_session_id.lock() = None;
+    let session_id = sess.state.lock().id.clone();
     let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
         return;
     };
@@ -660,7 +616,7 @@ fn clear_durable_history_id(sess: &AcpSession) {
 pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubHandle) {
     persist_confirmed_history_id(sess);
     let (phase, pending_question, title) = {
-        let reduced = lock_reduced(sess);
+        let reduced = sess.reduced.lock();
         (
             compute_acp_daemon_phase(&reduced),
             acp_pending_question(&reduced),
@@ -672,7 +628,7 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let snapshot = {
-        let mut st = lock_mutex(&sess.state);
+        let mut st = sess.state.lock();
         let phase_changed = commit_session_phase(&mut st, PhaseSource::AcpProjection, phase);
         let question_changed = st.pending_question != pending_question;
         let title_changed = st.title != title;
@@ -708,9 +664,9 @@ pub(crate) struct AutomationWatch {
 }
 
 fn note_automation_watch(sess: &AcpSession) {
-    let reduced = lock_reduced(sess);
+    let reduced = sess.reduced.lock();
     let prompt_in_flight = sess.prompt_in_flight.load(Ordering::SeqCst);
-    let mut slot = lock_mutex(&sess.automation_watch);
+    let mut slot = sess.automation_watch.lock();
     let unchanged = slot.as_ref().is_some_and(|current| {
         current.phase == reduced.phase
             && current.active_delivery_id == reduced.active_delivery_id
@@ -1204,8 +1160,8 @@ fn note_snapshot_writer_stopped(
 }
 
 pub(crate) fn detach_failed_snapshot_link(sess: &AcpSession, fd: ConnId) {
-    let _output_gate = lock_mutex(&sess.output_gate);
-    let mut out = lock_mutex(&sess.out);
+    let _output_gate = sess.output_gate.lock();
+    let mut out = sess.out.lock();
     if out.client.as_ref().is_some_and(|link| link.fd == fd) {
         out.client.take();
     }
@@ -1236,7 +1192,7 @@ pub(crate) fn encode_acp_snapshot(
         SnapshotFrameKind::Delta(mirror) => (mirror, false),
     };
     let (mut snap, entries_delta, live, tool_debug_generation, included_tool_debug) = {
-        let reduced = lock_reduced(sess);
+        let reduced = sess.reduced.lock();
         let tool_debug_generation = reduced.tool_debug_generation;
         let included_tool_debug =
             include_debug && tool_debug_generation != tool_debug_generation_sent;
@@ -1340,7 +1296,7 @@ pub(crate) fn encode_acp_snapshot(
         // 整段帧的条目在上面已经算好摘要，这里只是就地替换副本。增量帧这里没有条目。
         apply_image_refs(&mut snap);
     }
-    let provider_pid = lock_mutex(&sess.handle).as_ref().and_then(|handle| {
+    let provider_pid = sess.handle.lock().as_ref().and_then(|handle| {
         handle
             .stdio
             .lock()
@@ -1406,12 +1362,12 @@ fn push_acp_snapshot_since_with_runtime_debug(
     include_envelope: bool,
     runtime_debug: Option<Arc<smelt_core::acp_session::RuntimeDebug>>,
 ) {
-    let _output_gate = lock_mutex(&sess.output_gate);
+    let _output_gate = sess.output_gate.lock();
     let from = {
-        let reduced = lock_reduced(sess);
+        let reduced = sess.reduced.lock();
         entries_offset.unwrap_or(reduced.entries_total())
     };
-    let out = lock_mutex(&sess.out);
+    let out = sess.out.lock();
     if let Some(client) = out.client.as_ref() {
         client.mark(
             from,
@@ -1434,7 +1390,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
 
 /// 对方要了完整快照：各连接下一帧改发整段帧，发送方镜像跟着重建。
 fn request_full_snapshot_frames(sess: &AcpSession) {
-    let out = lock_mutex(&sess.out);
+    let out = sess.out.lock();
     for link in out.client.iter().chain(out.watchers.iter()) {
         link.request_full_frame();
     }
@@ -1446,9 +1402,7 @@ pub(crate) fn push_acp_snapshot_with_runtime_debug_for_test(sess: &AcpSession) {
 }
 
 pub(crate) fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
-    let offset = lock_reduced(sess)
-        .entries_total()
-        .saturating_sub(1);
+    let offset = sess.reduced.lock().entries_total().saturating_sub(1);
     push_acp_snapshot_since(sess, should_persist, Some(offset));
 }
 
@@ -1457,8 +1411,8 @@ pub(crate) fn set_conversation_snapshot(
     snapshot: &mut smelt_core::acp_session::ConversationSnapshot,
 ) {
     snapshot.conversation_state = Some(smelt_core::conversation::ConversationStateSnapshot {
-        binding: lock_mutex(&sess.conversation_binding).clone(),
-        pending_agent_preset: lock_mutex(&sess.pending_agent_preset).clone(),
+        binding: sess.conversation_binding.lock().clone(),
+        pending_agent_preset: sess.pending_agent_preset.lock().clone(),
     });
 }
 
@@ -1468,14 +1422,15 @@ fn adopt_unknown_conversation_binding(
     sess: &AcpSession,
     client: Option<smelt_core::conversation::ConversationBinding>,
 ) {
-    let mut current = lock_mutex(&sess.conversation_binding);
+    let mut current = sess.conversation_binding.lock();
     if current.is_none() {
         *current = client;
     }
 }
 
 fn session_uses_pi_admission(sess: &AcpSession) -> bool {
-    lock_mutex(&sess.launch_spec)
+    sess.launch_spec
+        .lock()
         .as_ref()
         .is_some_and(smelt_core::pi_rpc::is_smelt_pi_launch)
 }
@@ -1494,14 +1449,14 @@ pub(crate) fn settle_acp_turn_locked(
     subscribers: &EventHubHandle,
 ) {
     let idle = matches!(
-        lock_reduced(sess).phase,
+        sess.reduced.lock().phase,
         smelt_core::daemon_state::DaemonPhase::Idle
     );
     if !idle {
         return;
     }
     let pi = session_uses_pi_admission(sess);
-    if pi && lock_mutex(&sess.unaccepted_prompt).is_some() {
+    if pi && sess.unaccepted_prompt.lock().is_some() {
         return;
     }
     if pi && sess.prompt_in_flight.load(Ordering::SeqCst) && !provider_idle {
@@ -1582,7 +1537,7 @@ pub(crate) fn start_acp_event_drain(
             let mut fallback_to_fresh = false;
             smol::block_on(async {
                 while let Ok(first) = event_rx.recv().await {
-                    let _turn_completion = lock_mutex(&sess.turn_completion);
+                    let _turn_completion = sess.turn_completion.lock();
                     // 重放把整段历史一次性塞进通道。先收干已经到达的事件，再发一份
                     // 快照；实时流通常一次只有一条，行为与逐条推送相同。
                     let mut batch = vec![first];
@@ -1602,8 +1557,7 @@ pub(crate) fn start_acp_event_drain(
                     // 重试的回退落地后要原样再发的那条。截断先归约进投影，放闸前再排进队列。
                     let mut resend = None;
                     let was_busy =
-                        crate::acp_idle::reduced_suspend_blocker(&lock_reduced(sess))
-                            .is_some();
+                        crate::acp_idle::reduced_suspend_blocker(&sess.reduced.lock()).is_some();
                     for mut ev in batch {
                         if sess.connection_generation.load(Ordering::SeqCst) != generation {
                             // 这条连接已被换掉，剩下的事件不能再改新连接的状态。但被丢掉的
@@ -1680,9 +1634,9 @@ pub(crate) fn start_acp_event_drain(
                             crate::dlog(&format!(
                                 "acp drain 收到恢复 Ready id={session_id} gen={generation}"
                             ));
-                            let history_id =
-                                lock_reduced(sess).history_session_id.clone();
-                            lock_mutex(&sess.restore_state)
+                            let history_id = sess.reduced.lock().history_session_id.clone();
+                            sess.restore_state
+                                .lock()
                                 .mark_restored(history_id.as_deref());
                         }
                         if let smelt_core::acp_conn::ConversationEvent::ComposerRestore {
@@ -1701,7 +1655,7 @@ pub(crate) fn start_acp_event_drain(
                             resend = Some((text.clone(), images.clone()));
                         }
                         let (outcome, owner_ids) = {
-                            let mut st = lock_reduced(sess);
+                            let mut st = sess.reduced.lock();
                             let outcome = smelt_core::acp_session::apply_event(&mut st, ev);
                             let owner_ids = live_acp_owner_ids(&st);
                             (outcome, owner_ids)
@@ -1709,7 +1663,7 @@ pub(crate) fn start_acp_event_drain(
                         if let Err(error) =
                             acp_sessions.try_acquire_resumes(&owner_ids, &session_id)
                         {
-                            let mut reduced = lock_reduced(sess);
+                            let mut reduced = sess.reduced.lock();
                             smelt_core::acp_session::force_end(
                                 &mut reduced,
                                 smelt_core::acp_session::AcpEndKind::SessionOwnershipConflict,
@@ -1770,7 +1724,7 @@ pub(crate) fn start_acp_event_drain(
                         // 交给这个 runtime 的 peer 消息靠它的 `peer_inbox` 结算。
                         // 送到了就结束；runtime 换代、消息还没进会话就重投。
                         if crate::peer_messages::awaiting_inbox(&session_id) {
-                            let inbox = lock_reduced(sess).peer_inbox.clone();
+                            let inbox = sess.reduced.lock().peer_inbox.clone();
                             crate::peer_messages::observe_inbox(
                                 &session_id,
                                 generation,
@@ -1782,7 +1736,7 @@ pub(crate) fn start_acp_event_drain(
                         // 还在干活就算活动。安静下来的这一帧也算：闲置从这时起计，
                         // 回收线程才能给刚空闲的会话排上截止。
                         let still_busy =
-                            crate::acp_idle::reduced_suspend_blocker(&lock_reduced(sess))
+                            crate::acp_idle::reduced_suspend_blocker(&sess.reduced.lock())
                                 .is_some();
                         if was_busy || still_busy {
                             sess.idle.touch();
@@ -1793,14 +1747,14 @@ pub(crate) fn start_acp_event_drain(
                     }
                 }
             });
-            let _lifecycle = lock_mutex(&slot.lifecycle);
-            let _turn_completion = lock_mutex(&sess.turn_completion);
+            let _lifecycle = slot.lifecycle.lock();
+            let _turn_completion = sess.turn_completion.lock();
             if sess.connection_generation.load(Ordering::SeqCst) != generation {
                 return;
             }
             if !retire_acp_runtime(sess) {
                 eprintln!("[acp] 会话 {session_id} 未能证明旧 provider 已退出，拒绝再 spawn");
-                let mut reduced = lock_reduced(sess);
+                let mut reduced = sess.reduced.lock();
                 smelt_core::acp_session::force_end(
                     &mut reduced,
                     smelt_core::acp_session::AcpEndKind::ProviderFailed,
@@ -1811,7 +1765,7 @@ pub(crate) fn start_acp_event_drain(
                 update_acp_daemon_state(sess, &subscribers);
                 return;
             }
-            if fallback_to_fresh && let Some(launch) = lock_mutex(&sess.launch_spec).clone() {
+            if fallback_to_fresh && let Some(launch) = sess.launch_spec.lock().clone() {
                 // `acp_relaunch(None)` 会清掉旧的 canonical history id，再走
                 // `session/new`；标题、smeltd slot 和 GUI 控制连接都保持不变。
                 // 放弃写进会话状态，和清掉的 id 同一把锁。普通重启不带这个请求，
@@ -1833,14 +1787,14 @@ pub(crate) fn start_acp_event_drain(
                 return;
             }
             let already_ended = matches!(
-                lock_reduced(sess).phase,
+                sess.reduced.lock().phase,
                 smelt_core::daemon_state::DaemonPhase::Dead
             );
             if already_ended {
                 // 终态事件可能先于 waitpid 到达。收尸后再发一帧，清掉旧 pid。
                 push_acp_snapshot_since(sess, false, None);
             } else {
-                let mut reduced = lock_reduced(sess);
+                let mut reduced = sess.reduced.lock();
                 smelt_core::acp_session::force_end(
                     &mut reduced,
                     smelt_core::acp_session::AcpEndKind::TransportDisconnected,
@@ -1864,22 +1818,19 @@ pub(crate) fn start_acp_event_drain(
 
 /// 驱动线程 panic 只把这一个会话标成失败。
 ///
-/// unwind 时若正持着这个会话自己的锁，锁会留下 poison。这里先把这些锁的
-/// poison 清掉，再写失败态。清标志之前已经在等这把锁的人拿到的仍是
-/// `PoisonError`，所以跨会话读取另外走 [`lock_reduced`] / [`lock_mutex`]。
+/// unwind 时持着的会话锁会中毒，但 [`SessionLock`] / `Watched` 不把 poison 交给
+/// 调用方，别的会话读到这里照常拿值。这里只负责把相位收成失败，让界面能重新开始。
 pub(crate) fn mark_session_driver_panic(
     slot: &AcpSlot<AcpSession>,
     session_id: &str,
     subscribers: &EventHubHandle,
     payload: &(dyn std::any::Any + Send),
 ) {
-    clear_session_lock_poison(&slot.value);
-    slot.lifecycle.clear_poison();
     let message = smelt_core::acp_conn::panic_message(payload);
     eprintln!("[acp] 会话 {session_id} 的驱动线程异常退出：{message}");
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let sess = &slot.value;
-        let mut reduced = lock_reduced(sess);
+        let mut reduced = sess.reduced.lock();
         if reduced.phase != smelt_core::daemon_state::DaemonPhase::Dead {
             smelt_core::acp_session::force_end(
                 &mut reduced,
@@ -1891,9 +1842,6 @@ pub(crate) fn mark_session_driver_panic(
         push_acp_snapshot_since(sess, true, None);
         update_acp_daemon_state(sess, subscribers);
     }));
-    // 上面若在持锁时又 panic，标志会再次被置上。收尾再清一次。
-    clear_session_lock_poison(&slot.value);
-    slot.lifecycle.clear_poison();
 }
 
 /// spawn 一次连接（首次建会话 / 「重新开始」共用）：先按旧版 GUI `restart()`
@@ -1913,7 +1861,7 @@ pub(crate) fn acp_relaunch(
     let sess = &slot.value;
     sess.idle.mark_running();
     let (generation, restore_policy) = {
-        let _turn_completion = lock_mutex(&sess.turn_completion);
+        let _turn_completion = sess.turn_completion.lock();
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
         // 每次换连接都推进代数。旧 drain 即使随后才看到 event_rx 关闭，也不能
         // 把新连接的 handle/Starting 状态清掉。
@@ -1922,9 +1870,9 @@ pub(crate) fn acp_relaunch(
             "acp relaunch id={id} gen={generation} resume={resume_id:?} fork={fork_id:?}"
         ));
         let restore_policy = {
-            let mut reduced = lock_reduced(sess);
+            let mut reduced = sess.reduced.lock();
             let previous_history_session_id = reduced.history_session_id.clone();
-            let restore_policy = lock_mutex(&sess.restore_state).begin(
+            let restore_policy = sess.restore_state.lock().begin(
                 if fork_id.is_some() {
                     None
                 } else {
@@ -1955,12 +1903,12 @@ pub(crate) fn acp_relaunch(
     // 无头恢复不会经过 GUI 的 AgentHostState 迁移；daemon 自己也要把 Smelt
     // 发布过的旧默认值升到当前适配器，否则历史会话 relaunch 仍会拉旧包。
     upgrade_released_adapter_launch(&mut launch);
-    let ephemeral_env = lock_mutex(&sess.ephemeral_env).clone();
+    let ephemeral_env = sess.ephemeral_env.lock().clone();
     // 记住这次真正用过的完整启动规格，`acp_restart` 卡死重启时不必依赖 GUI
     // 重新把 launch 传一遍（GUI 那条 acp_open 连接可能压根没断，不会重新握手）。
-    *lock_mutex(&sess.launch_spec) = Some(launch.clone());
-    let agent_token = lock_mutex(&sess.state).agent_token.clone();
-    lock_mutex(&sess.state).launch = Some(launch.command.clone());
+    *sess.launch_spec.lock() = Some(launch.clone());
+    let agent_token = sess.state.lock().agent_token.clone();
+    sess.state.lock().launch = Some(launch.command.clone());
 
     // 来源会话 id 绑在这次启动上。Pi 的 session_* 请求由主进程直接回答，
     // 请求体里的字段不能改这个来源。
@@ -1990,7 +1938,7 @@ pub(crate) fn acp_relaunch(
     let handle =
         smelt_core::acp_conn::spawn_agent_runtime(app_launch, Some(acp_sessions.spawn_gate()));
     let event_rx = handle.event_rx.clone();
-    *lock_mutex(&sess.handle) = Some(handle);
+    *sess.handle.lock() = Some(handle);
     push_acp_snapshot(sess, false); // 刚 spawn，还没有新内容，不用触发落盘
     update_acp_daemon_state(sess, subscribers);
     start_acp_event_drain(
@@ -2029,17 +1977,14 @@ pub(crate) fn retire_acp_runtime(sess: &AcpSession) -> bool {
     // 探得仍在就继续留着不 spawn。
     // 先 take 掉再判：`if let` 的 scrutinee guard 会活过整个 body，里面再
     // lock 同一把就是自死锁。
-    let unreaped = lock_mutex(&sess.unreaped_pid)
-        .take();
+    let unreaped = sess.unreaped_pid.lock().take();
     if let Some(pid) = unreaped
         && !smelt_core::acp_conn::prove_process_group_dead_without_reaping(pid, ACP_SHUTDOWN_GRACE)
     {
-        *lock_mutex(&sess.unreaped_pid) = Some(pid);
+        *sess.unreaped_pid.lock() = Some(pid);
         return false;
     }
-    let Some(handle) = lock_mutex(&sess.handle)
-        .take()
-    else {
+    let Some(handle) = sess.handle.lock().take() else {
         return true;
     };
     let pid = handle
@@ -2051,7 +1996,7 @@ pub(crate) fn retire_acp_runtime(sess: &AcpSession) -> bool {
         return true;
     }
     if let Some(pid) = pid {
-        *lock_mutex(&sess.unreaped_pid) = Some(pid);
+        *sess.unreaped_pid.lock() = Some(pid);
     }
     false
 }
@@ -2068,43 +2013,43 @@ pub(crate) fn make_acp_session(
         reduced: Watched::new(smelt_core::acp_session::AcpSessionState::default()),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
-        turn_completion: Mutex::new(()),
+        turn_completion: SessionLock::new(()),
         prompt_in_flight: AtomicBool::new(false),
-        automation_watch: Mutex::new(None),
-        pending_prompts: Mutex::new(VecDeque::new()),
+        automation_watch: SessionLock::new(None),
+        pending_prompts: SessionLock::new(VecDeque::new()),
         next_pending_prompt_id: AtomicU64::new(0),
-        immediate_delivery: Mutex::new(None),
-        unaccepted_prompt: Mutex::new(None),
+        immediate_delivery: SessionLock::new(None),
+        unaccepted_prompt: SessionLock::new(None),
         provider_hold: AtomicBool::new(false),
-        handle: Mutex::new(None),
-        unreaped_pid: Mutex::new(None),
+        handle: SessionLock::new(None),
+        unreaped_pid: SessionLock::new(None),
         cwd: cwd.clone(),
-        state: Arc::new(Mutex::new(SessionState::acp(
+        state: Arc::new(SessionLock::new(SessionState::acp(
             id.to_string(),
             instance,
             cwd,
             None,
             uuid::Uuid::new_v4().simple().to_string(),
         ))),
-        output_gate: Mutex::new(()),
-        out: Mutex::new(AcpOut {
+        output_gate: SessionLock::new(()),
+        out: SessionLock::new(AcpOut {
             client: None,
             watchers: Vec::new(),
         }),
-        launch_spec: Mutex::new(None),
-        restore_state: Mutex::new(AcpRestoreState::Fresh),
-        ephemeral_env: Mutex::new(BTreeMap::new()),
-        conversation_binding: Mutex::new(conversation_binding),
-        conversation_submit: Mutex::new(RecentSubmissions::default()),
-        pending_agent_preset: Mutex::new(pending_agent_preset),
-        durable_history_session_id: Mutex::new(None),
+        launch_spec: SessionLock::new(None),
+        restore_state: SessionLock::new(AcpRestoreState::Fresh),
+        ephemeral_env: SessionLock::new(BTreeMap::new()),
+        conversation_binding: SessionLock::new(conversation_binding),
+        conversation_submit: SessionLock::new(RecentSubmissions::default()),
+        pending_agent_preset: SessionLock::new(pending_agent_preset),
+        durable_history_session_id: SessionLock::new(None),
         idle: Default::default(),
     }
 }
 
 /// Pi 还在跑。空闲界面拉回转圈，好接住迟到的输出；这不是一条新回合。
 pub(crate) fn remember_provider_hold(sess: &AcpSession) {
-    let mut state = lock_reduced(sess);
+    let mut state = sess.reduced.lock();
     let was_idle = matches!(state.phase, smelt_core::daemon_state::DaemonPhase::Idle)
         && state.turn_started_at_ms.is_none();
     smelt_core::acp_session::note_provider_still_running(&mut state);
@@ -2119,7 +2064,7 @@ pub(crate) fn release_provider_hold(sess: &AcpSession) {
     if !sess.provider_hold.swap(false, Ordering::SeqCst) {
         return;
     }
-    let mut state = lock_reduced(sess);
+    let mut state = sess.reduced.lock();
     smelt_core::acp_session::clear_provider_queue_status(&mut state);
     if matches!(state.phase, smelt_core::daemon_state::DaemonPhase::Thinking) {
         state.phase = smelt_core::daemon_state::DaemonPhase::Idle;
@@ -2128,7 +2073,7 @@ pub(crate) fn release_provider_hold(sess: &AcpSession) {
 }
 
 fn take_unaccepted_prompt(sess: &AcpSession) -> Option<QueuedAcpPrompt> {
-    lock_mutex(&sess.unaccepted_prompt).take()
+    sess.unaccepted_prompt.lock().take()
 }
 
 pub(crate) fn requeue_unaccepted_prompt(sess: &AcpSession) {
@@ -2159,7 +2104,7 @@ fn withdraw_pending_prompt(sess: &AcpSession, id: u64) -> Result<(), &'static st
 
 /// 还草稿：正文回输入框的同时把消息流里的气泡撤掉，不能两处都留。
 fn restore_prompt_to_composer(sess: &AcpSession, prompt: QueuedAcpPrompt) {
-    let mut state = lock_reduced(sess);
+    let mut state = sess.reduced.lock();
     if prompt.echoed {
         smelt_core::acp_session::undo_prompt_sent(&mut state);
     }
@@ -2189,7 +2134,7 @@ pub(crate) fn accept_unaccepted_prompt(sess: &AcpSession) -> bool {
         return false;
     }
     sess.provider_hold.store(false, Ordering::SeqCst);
-    let mut state = lock_reduced(sess);
+    let mut state = sess.reduced.lock();
     smelt_core::acp_session::clear_provider_queue_status(&mut state);
     true
 }
@@ -2208,12 +2153,14 @@ pub(crate) fn send_acp_prompt_reserved(
     echoed: bool,
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
-    let handle = lock_mutex(&sess.handle)
+    let handle = sess
+        .handle
+        .lock()
         .as_ref()
         .map(|h| (h.cmd_tx.clone(), Arc::clone(&h.in_flight_rpc)));
     let Some((cmd_tx, in_flight_rpc)) = handle else {
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
-        *lock_mutex(&sess.unaccepted_prompt) = None;
+        *sess.unaccepted_prompt.lock() = None;
         return Err("ACP session is not running");
     };
     let shown_images = images.clone();
@@ -2231,7 +2178,7 @@ pub(crate) fn send_acp_prompt_reserved(
     } else {
         in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
-        *lock_mutex(&sess.unaccepted_prompt) = None;
+        *sess.unaccepted_prompt.lock() = None;
         Err("ACP command channel is busy or closed")
     }
 }
@@ -2250,7 +2197,7 @@ fn remember_outgoing_prompt(
         return false;
     }
     if pi {
-        *lock_mutex(&sess.unaccepted_prompt) = Some(QueuedAcpPrompt {
+        *sess.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
             id: next_pending_prompt_id(sess),
             text: text.clone(),
             images: images.clone(),
@@ -2264,7 +2211,7 @@ fn remember_outgoing_prompt(
         return false;
     }
     smelt_core::acp_session::note_prompt_sent_with_delivery(
-        &mut lock_reduced(sess),
+        &mut sess.reduced.lock(),
         text,
         images,
         delivery_id,
@@ -2281,7 +2228,9 @@ fn dispatch_pi_session_command(
     text: &str,
     images: Vec<smelt_core::acp_conn::PromptImage>,
 ) -> Result<bool, &'static str> {
-    let is_pi = lock_mutex(&sess.launch_spec)
+    let is_pi = sess
+        .launch_spec
+        .lock()
         .as_ref()
         .is_some_and(smelt_core::pi_rpc::is_smelt_pi_launch);
     if !is_pi {
@@ -2327,7 +2276,9 @@ fn send_driver_command(
     sess: &AcpSession,
     command: smelt_core::acp_conn::ConversationCommand,
 ) -> Result<(), &'static str> {
-    let handle = lock_mutex(&sess.handle)
+    let handle = sess
+        .handle
+        .lock()
         .as_ref()
         .map(|h| (h.cmd_tx.clone(), Arc::clone(&h.in_flight_rpc)));
     let Some((cmd_tx, in_flight_rpc)) = handle else {
@@ -2351,7 +2302,7 @@ pub(crate) fn send_acp_mid_turn_input(
     images: Vec<smelt_core::acp_conn::PromptImage>,
     subscribers: &EventHubHandle,
 ) -> Result<bool, &'static str> {
-    let handle = lock_mutex(&sess.handle).as_ref().map(|h| {
+    let handle = sess.handle.lock().as_ref().map(|h| {
         (
             h.cmd_tx.clone(),
             Arc::clone(&h.in_flight_rpc),
@@ -2366,7 +2317,7 @@ pub(crate) fn send_acp_mid_turn_input(
     }
     // 先入本地队列再发给 Pi，避免回执/queue_update 抢在乐观更新前面造成重复。
     smelt_core::acp_session::queue_mid_turn_input(
-        &mut lock_reduced(sess),
+        &mut sess.reduced.lock(),
         text.clone(),
         images.clone(),
     );
@@ -2376,7 +2327,7 @@ pub(crate) fn send_acp_mid_turn_input(
         .is_err()
     {
         in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
-        let mut state = lock_reduced(sess);
+        let mut state = sess.reduced.lock();
         let _ = state.queued_steering.pop();
         let _ = state.queued_steering_images.pop();
         return Err("ACP command channel is busy or closed");
@@ -2393,7 +2344,7 @@ fn send_acp_follow_up(
     delivery_id: Option<String>,
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
-    let handle = lock_mutex(&sess.handle).as_ref().map(|h| {
+    let handle = sess.handle.lock().as_ref().map(|h| {
         (
             h.cmd_tx.clone(),
             Arc::clone(&h.in_flight_rpc),
@@ -2440,7 +2391,7 @@ fn send_acp_follow_up(
 }
 
 fn send_acp_compact(sess: &AcpSession) -> Result<(), &'static str> {
-    let handle = lock_mutex(&sess.handle).as_ref().map(|h| {
+    let handle = sess.handle.lock().as_ref().map(|h| {
         (
             h.cmd_tx.clone(),
             Arc::clone(&h.in_flight_rpc),
@@ -2468,7 +2419,7 @@ fn send_acp_compact(sess: &AcpSession) -> Result<(), &'static str> {
 
 fn request_acp_cancel(sess: &AcpSession, subscribers: &EventHubHandle) -> Result<(), &'static str> {
     let result = {
-        let handle = lock_mutex(&sess.handle);
+        let handle = sess.handle.lock();
         let Some(h) = handle.as_ref() else {
             return Err("ACP session is not running");
         };
@@ -2477,7 +2428,7 @@ fn request_acp_cancel(sess: &AcpSession, subscribers: &EventHubHandle) -> Result
             .map_err(|_| "ACP command channel is busy or closed")
     };
     if result.is_ok() {
-        smelt_core::acp_session::note_cancel_requested(&mut lock_reduced(sess));
+        smelt_core::acp_session::note_cancel_requested(&mut sess.reduced.lock());
         push_acp_snapshot(sess, false);
         update_acp_daemon_state(sess, subscribers);
     }
@@ -2491,12 +2442,12 @@ fn deliver_queued_now(
     text: String,
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
-    let _turn = lock_mutex(&sess.turn_completion);
-    if lock_mutex(&sess.handle).is_none() {
+    let _turn = sess.turn_completion.lock();
+    if sess.handle.lock().is_none() {
         return Err("ACP session is not running");
     }
     {
-        let slot = lock_mutex(&sess.immediate_delivery);
+        let slot = sess.immediate_delivery.lock();
         if let Some(existing) = slot.as_ref() {
             return if existing.text == text {
                 Ok(())
@@ -2506,7 +2457,7 @@ fn deliver_queued_now(
         }
     }
     let (images, stop_turn) = {
-        let state = lock_reduced(sess);
+        let state = sess.reduced.lock();
         if !state.supports_native_queue {
             return Err("agent does not support native queue");
         }
@@ -2524,7 +2475,7 @@ fn deliver_queued_now(
         let stop_turn = !matches!(state.phase, smelt_core::daemon_state::DaemonPhase::Idle);
         (images, stop_turn)
     };
-    *lock_mutex(&sess.immediate_delivery) = Some(ImmediateDelivery {
+    *sess.immediate_delivery.lock() = Some(ImmediateDelivery {
         text,
         images,
         awaiting_clear: true,
@@ -2536,7 +2487,7 @@ fn deliver_queued_now(
         send_acp_clear_queue(sess)
     };
     if result.is_err() {
-        *lock_mutex(&sess.immediate_delivery) = None;
+        *sess.immediate_delivery.lock() = None;
     }
     result
 }
@@ -2547,7 +2498,7 @@ pub(crate) fn note_immediate_queue_restore(
     texts: &mut Vec<String>,
     images: &mut Vec<Vec<smelt_core::acp_conn::PromptImage>>,
 ) {
-    let mut slot = lock_mutex(&sess.immediate_delivery);
+    let mut slot = sess.immediate_delivery.lock();
     let Some(delivery) = slot.as_mut() else {
         return;
     };
@@ -2568,17 +2519,17 @@ pub(crate) fn note_immediate_queue_restore(
 /// 闸门开着、界面空闲、还原已经证明这一条还在队列里，才发一次。再调用不会再发。
 pub(crate) fn try_flush_immediate_delivery(sess: &AcpSession, subscribers: &EventHubHandle) {
     let idle = matches!(
-        lock_reduced(sess).phase,
+        sess.reduced.lock().phase,
         smelt_core::daemon_state::DaemonPhase::Idle
     );
-    if !idle || lock_mutex(&sess.unaccepted_prompt).is_some() {
+    if !idle || sess.unaccepted_prompt.lock().is_some() {
         return;
     }
     if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
         return;
     }
     let delivery = {
-        let mut slot = lock_mutex(&sess.immediate_delivery);
+        let mut slot = sess.immediate_delivery.lock();
         let ready = slot
             .as_ref()
             .is_some_and(|delivery| delivery.send && !delivery.awaiting_clear);
@@ -2599,12 +2550,12 @@ pub(crate) fn try_flush_immediate_delivery(sess: &AcpSession, subscribers: &Even
     )
     .is_err()
     {
-        *lock_mutex(&sess.immediate_delivery) = Some(delivery);
+        *sess.immediate_delivery.lock() = Some(delivery);
     }
 }
 
 fn send_acp_clear_queue(sess: &AcpSession) -> Result<(), &'static str> {
-    let handle = lock_mutex(&sess.handle).as_ref().map(|h| {
+    let handle = sess.handle.lock().as_ref().map(|h| {
         (
             h.cmd_tx.clone(),
             Arc::clone(&h.in_flight_rpc),
@@ -2657,9 +2608,7 @@ fn send_acp_command(
     sess: &AcpSession,
     command: smelt_core::acp_conn::ConversationCommand,
 ) -> Result<(), &'static str> {
-    let cmd_tx = lock_mutex(&sess.handle)
-        .as_ref()
-        .map(|h| h.cmd_tx.clone());
+    let cmd_tx = sess.handle.lock().as_ref().map(|h| h.cmd_tx.clone());
     let Some(cmd_tx) = cmd_tx else {
         return Err("ACP session is not running");
     };
@@ -2677,7 +2626,7 @@ fn send_acp_rewind(
     target: Option<usize>,
     resend: bool,
 ) -> Result<(), &'static str> {
-    let handle = lock_mutex(&sess.handle).as_ref().map(|h| {
+    let handle = sess.handle.lock().as_ref().map(|h| {
         (
             h.cmd_tx.clone(),
             Arc::clone(&h.in_flight_rpc),
@@ -2693,7 +2642,7 @@ fn send_acp_rewind(
     // 回退会丢弃之后的所有回合与未决审批，只能在完全空闲的会话上发生。
     // 相位不是 Idle 时拒绝，不给“边跑边回退”留出任何竞态窗口。
     let (entry_index, text, images, occurrence) = {
-        let reduced = lock_reduced(sess);
+        let reduced = sess.reduced.lock();
         // 重放期间工作缓冲是草稿，GUI 的下标按已发布正文算，两边对不上；
         // 截断也不能落在半成品上。等重放收尾再回退。
         if reduced.replaying_history {
@@ -2815,7 +2764,7 @@ pub(crate) fn try_rename_running_acp_session(sessions: &AcpSessions, id: &str, t
         return;
     };
     let _ = sessions.with_current(id, &slot, |sess| {
-        let handle = lock_mutex(&sess.handle);
+        let handle = sess.handle.lock();
         let Some(handle) = handle.as_ref() else {
             return;
         };
@@ -2841,7 +2790,7 @@ pub(crate) fn apply_acp_user_action(
             | AcpUserAction::FollowUp { .. }
             | AcpUserAction::DeliverQueuedNow { .. }
     ) {
-        let id = lock_mutex(&sess.state).id.clone();
+        let id = sess.state.lock().id.clone();
         crate::peer_messages::reset_chain(&id);
     }
     apply_acp_user_action_inner(sess, action, subscribers, false)
@@ -2865,7 +2814,7 @@ fn apply_acp_user_action_inner(
     if let AcpUserAction::Prompt { delivery_id, .. } | AcpUserAction::FollowUp { delivery_id, .. } =
         &action
         && let Some(smelt_core::conversation::ConversationBinding::Automation { run_id }) =
-            &*lock_mutex(&sess.conversation_binding)
+            &*sess.conversation_binding.lock()
         && !allow_automation_continuation
         && delivery_id.as_deref() != Some(run_id.as_str())
     {
@@ -2887,12 +2836,13 @@ fn apply_acp_user_action_inner(
             // 从取得 gate 到把本地投影切到 Running 必须与回合收尾串行。否则
             // 看门狗/迟到事件可能在 gate 已被这条新 prompt 占住、但状态尚未
             // 更新时把 gate 再次释放，从而并发派发下一条 prompt。
-            let _turn_completion = lock_mutex(&sess.turn_completion);
-            if lock_mutex(&sess.handle).is_none() {
+            let _turn_completion = sess.turn_completion.lock();
+            if sess.handle.lock().is_none() {
                 return Err("ACP session is not running");
             }
             if delivery_id.as_deref().is_some_and(|delivery_id| {
-                lock_reduced(sess)
+                sess.reduced
+                    .lock()
                     .accepted_delivery_ids
                     .contains(delivery_id)
             }) {
@@ -2902,7 +2852,8 @@ fn apply_acp_user_action_inner(
                 return Ok(());
             }
             if let Some(delivery_id) = delivery_id.as_ref() {
-                lock_reduced(sess)
+                sess.reduced
+                    .lock()
                     .accepted_delivery_ids
                     .insert(delivery_id.clone());
             }
@@ -2913,7 +2864,8 @@ fn apply_acp_user_action_inner(
                 Ok(false) => {}
                 Err(error) => {
                     if let Some(delivery_id) = delivery_id.as_deref() {
-                        lock_reduced(sess)
+                        sess.reduced
+                            .lock()
                             .accepted_delivery_ids
                             .remove(delivery_id);
                     }
@@ -2923,15 +2875,15 @@ fn apply_acp_user_action_inner(
             if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
                 // 只有回合还在跑才 steer。取消已经把界面收成 Idle、闸门却还握着等 Pi 空闲时，
                 // 再插进当前回合会把「立即发送」的消息退回队列；再点一次就会连发两遍。
-                let steer =
-                    smelt_core::acp_session::accepts_mid_turn_steer(&lock_reduced(sess));
+                let steer = smelt_core::acp_session::accepts_mid_turn_steer(&sess.reduced.lock());
                 if steer {
                     match send_acp_mid_turn_input(sess, text.clone(), images.clone(), subscribers) {
                         Ok(true) => return Ok(()),
                         Ok(false) => {}
                         Err(error) => {
                             if let Some(delivery_id) = delivery_id.as_deref() {
-                                lock_reduced(sess)
+                                sess.reduced
+                                    .lock()
                                     .accepted_delivery_ids
                                     .remove(delivery_id);
                             }
@@ -2966,7 +2918,8 @@ fn apply_acp_user_action_inner(
             if result.is_err()
                 && let Some(delivery_id) = delivery_id.as_deref()
             {
-                lock_reduced(sess)
+                sess.reduced
+                    .lock()
                     .accepted_delivery_ids
                     .remove(delivery_id);
             }
@@ -2987,7 +2940,7 @@ fn apply_acp_user_action_inner(
         AcpUserAction::Compact => send_acp_compact(sess),
         AcpUserAction::AcknowledgeComposerRestore { revision } => {
             if smelt_core::acp_session::acknowledge_composer_restore(
-                &mut lock_reduced(sess),
+                &mut sess.reduced.lock(),
                 revision,
             ) {
                 push_acp_snapshot_since(sess, false, None);
@@ -3013,7 +2966,7 @@ fn apply_acp_user_action_inner(
             value_id,
             boolean,
         } => {
-            let handle = lock_mutex(&sess.handle);
+            let handle = sess.handle.lock();
             let Some(h) = handle.as_ref() else {
                 return Err("ACP session is not running");
             };
@@ -3034,7 +2987,7 @@ fn apply_acp_user_action_inner(
             result
         }
         AcpUserAction::SetSessionTitle { title } => {
-            let handle = lock_mutex(&sess.handle);
+            let handle = sess.handle.lock();
             let Some(h) = handle.as_ref() else {
                 return Err("ACP session is not running");
             };
@@ -3043,7 +2996,7 @@ fn apply_acp_user_action_inner(
                 .map_err(|_| "ACP command channel is busy or closed")
         }
         AcpUserAction::RefreshModels => {
-            let handle = lock_mutex(&sess.handle);
+            let handle = sess.handle.lock();
             let Some(h) = handle.as_ref() else {
                 return Err("ACP session is not running");
             };
@@ -3056,7 +3009,7 @@ fn apply_acp_user_action_inner(
             tool_call_id,
             option_id,
         } => {
-            let mut reduced = lock_reduced(sess);
+            let mut reduced = sess.reduced.lock();
             let exists = reduced.permissions.iter().any(|card| {
                 card.tool_call_id == tool_call_id
                     && card
@@ -3075,7 +3028,7 @@ fn apply_acp_user_action_inner(
         }
         AcpUserAction::ElicitationChoose { field_ix, opt_ix } => {
             let auto_submit = {
-                let mut reduced = lock_reduced(sess);
+                let mut reduced = sess.reduced.lock();
                 smelt_core::acp_session::choose_elicitation(&mut reduced, field_ix, opt_ix)
             };
             if auto_submit {
@@ -3087,7 +3040,7 @@ fn apply_acp_user_action_inner(
         }
         AcpUserAction::ElicitationText { field_ix, value } => {
             smelt_core::acp_session::set_elicitation_text(
-                &mut lock_reduced(sess),
+                &mut sess.reduced.lock(),
                 field_ix,
                 value,
             );
@@ -3097,7 +3050,7 @@ fn apply_acp_user_action_inner(
         }
         AcpUserAction::ElicitationSubmit => submit_acp_elicitation(sess, subscribers),
         AcpUserAction::ElicitationDismiss => {
-            smelt_core::acp_session::dismiss_elicitation(&mut lock_reduced(sess));
+            smelt_core::acp_session::dismiss_elicitation(&mut sess.reduced.lock());
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
             Ok(())
@@ -3110,11 +3063,11 @@ pub(crate) fn submit_acp_elicitation(
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
     let recovered_answer = {
-        let reduced = lock_reduced(sess);
+        let reduced = sess.reduced.lock();
         smelt_core::acp_session::recovered_elicitation_answer(&reduced)
     };
     if let Some(text) = recovered_answer {
-        smelt_core::acp_session::dismiss_elicitation(&mut lock_reduced(sess));
+        smelt_core::acp_session::dismiss_elicitation(&mut sess.reduced.lock());
         return apply_acp_user_action_inner(
             sess,
             smelt_core::acp_session::AcpUserAction::Prompt {
@@ -3127,7 +3080,7 @@ pub(crate) fn submit_acp_elicitation(
         );
     }
 
-    smelt_core::acp_session::submit_elicitation(&mut lock_reduced(sess));
+    smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock());
     push_acp_snapshot(sess, false);
     update_acp_daemon_state(sess, subscribers);
     Ok(())
@@ -3165,12 +3118,12 @@ pub(crate) fn dispatch_conversation_input(
 ) -> Result<(), smelt_core::conversation::ConversationSubmitError> {
     use smelt_core::conversation::ConversationBinding;
 
-    let mut submitted = lock_mutex(&sess.conversation_submit);
+    let mut submitted = sess.conversation_submit.lock();
     if submitted.contains(&input.submission_id) {
         return Ok(());
     }
-    let pending_preset = lock_mutex(&sess.pending_agent_preset).clone();
-    let binding = lock_mutex(&sess.conversation_binding).clone();
+    let pending_preset = sess.pending_agent_preset.lock().clone();
+    let binding = sess.conversation_binding.lock().clone();
     match binding.unwrap_or_default() {
         ConversationBinding::Direct => {}
         ConversationBinding::Automation { .. } => {
@@ -3182,7 +3135,7 @@ pub(crate) fn dispatch_conversation_input(
     let input_submission_id = input.submission_id.clone();
     input.text =
         smelt_core::conversation::merge_agent_preset(pending_preset.as_deref(), &input.text);
-    if !lock_reduced(sess).supports_image && !input.images.is_empty() {
+    if !sess.reduced.lock().supports_image && !input.images.is_empty() {
         let note = format!(
             "[该任务附带 {} 张图片，但当前智能体不支持图片输入，图片未转发。]",
             input.images.len()
@@ -3206,7 +3159,7 @@ pub(crate) fn dispatch_conversation_input(
     .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
     submitted.remember(input_submission_id);
     if pending_preset.is_some() {
-        *lock_mutex(&sess.pending_agent_preset) = None;
+        *sess.pending_agent_preset.lock() = None;
         // 显式发布消费状态，确保所有客户端同步，并让 workspace 在进程退出前清掉
         // 已使用的预设。
         push_acp_snapshot_since(sess, true, None);
@@ -3234,7 +3187,7 @@ fn apply_submit_config_values(
     config_values: &[(String, String)],
     subscribers: &EventHubHandle,
 ) -> Result<(), smelt_core::conversation::ConversationSubmitError> {
-    if config_values.is_empty() || lock_mutex(&sess.handle).is_none() {
+    if config_values.is_empty() || sess.handle.lock().is_none() {
         return Ok(());
     }
     for (config_id, value_id) in config_values {
@@ -3242,7 +3195,7 @@ fn apply_submit_config_values(
             continue;
         }
         let boolean = {
-            let reduced = lock_reduced(sess);
+            let reduced = sess.reduced.lock();
             reduced
                 .config_options
                 .iter()
@@ -3362,7 +3315,7 @@ pub(crate) fn handle_acp_action<C: ClientSocket>(
 
     let managed_binding = acp_sessions
         .with_current(id, &slot, |session| {
-            match &*lock_mutex(&session.conversation_binding) {
+            match &*session.conversation_binding.lock() {
                 Some(smelt_core::conversation::ConversationBinding::Automation { .. })
                     if matches!(
                         &action,
@@ -3450,7 +3403,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
         }
     };
     let attached_fd = loop {
-        let lifecycle = lock_mutex(&slot.lifecycle);
+        let lifecycle = slot.lifecycle.lock();
         let still_current = acp_sessions
             .get(&id)
             .is_some_and(|current| Arc::ptr_eq(&current, &slot));
@@ -3468,9 +3421,9 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
 
         let sess = &slot.value;
         let attached_fd = {
-            let _output_gate = lock_mutex(&sess.output_gate);
+            let _output_gate = sess.output_gate.lock();
             let Ok(c) = conn.try_clone() else { return };
-            let reduced = lock_reduced(sess);
+            let reduced = sess.reduced.lock();
             let omit_history = req.omit_history;
             let (history_len, open_end) = reduced.open_turn_range();
             let live = smelt_core::acp_session::live_from_state(&reduced);
@@ -3483,7 +3436,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
             snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
             drop(reduced);
             set_conversation_snapshot(sess, &mut snapshot);
-            let provider_pid = lock_mutex(&sess.handle).as_ref().and_then(|handle| {
+            let provider_pid = sess.handle.lock().as_ref().and_then(|handle| {
                 handle
                     .stdio
                     .lock()
@@ -3515,7 +3468,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
                 return;
             };
             let fd = attachment.fd;
-            let mut out = lock_mutex(&sess.out);
+            let mut out = sess.out.lock();
             if let Some(old) = out.client.take() {
                 old.close(); // 顶掉旧连接（同 id 只允许一个控制连接）
             }
@@ -3583,8 +3536,8 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
         }
     }
 
-    let _output_gate = lock_mutex(&sess.output_gate);
-    let mut out = lock_mutex(&sess.out);
+    let _output_gate = sess.output_gate.lock();
+    let mut out = sess.out.lock();
     if out.client.as_ref().is_some_and(|c| c.fd == attached_fd)
         && let Some(client) = out.client.take()
     {
@@ -3606,7 +3559,7 @@ fn write_rejected_acp_snapshot<C: ClientSocket>(mut conn: C, reason: &str) {
 
 /// 停机前把没写完的回合收成中断。
 pub(crate) fn settle_acp_session_for_shutdown(sess: &AcpSession) {
-    let mut reduced = lock_reduced(sess);
+    let mut reduced = sess.reduced.lock();
     smelt_core::acp_session::interrupt_open_turn(&mut reduced);
 }
 
@@ -3639,7 +3592,7 @@ pub(crate) fn ensure_acp_session(
             eprintln!("[acp] 拒绝会话 {}：{error}", req.id);
             return Err(error);
         }
-        let lifecycle = lock_mutex(&slot.lifecycle);
+        let lifecycle = slot.lifecycle.lock();
         let still_current = acp_sessions
             .get(&req.id)
             .is_some_and(|current| Arc::ptr_eq(&current, &slot));
@@ -3649,9 +3602,9 @@ pub(crate) fn ensure_acp_session(
         }
         let alive = acp_runtime_alive(&slot.value);
         let (needs_relaunch, known_history) = {
-            let reduced = lock_reduced(&slot.value);
-            let current_launch = lock_mutex(&slot.value.launch_spec).clone();
-            let current_ephemeral_env = lock_mutex(&slot.value.ephemeral_env).clone();
+            let reduced = slot.value.reduced.lock();
+            let current_launch = slot.value.launch_spec.lock().clone();
+            let current_ephemeral_env = slot.value.ephemeral_env.lock().clone();
             let runtime_spec_changed = acp_runtime_needs_relaunch(
                 alive,
                 current_launch.as_ref(),
@@ -3687,7 +3640,7 @@ pub(crate) fn ensure_acp_session(
                 drop(lifecycle);
                 return Err(error.to_string());
             }
-            if (lock_mutex(&slot.value.unreaped_pid).is_some() || (alive && !created))
+            if (slot.value.unreaped_pid.lock().is_some() || (alive && !created))
                 && !retire_acp_runtime(&slot.value)
             {
                 eprintln!(
@@ -3705,7 +3658,7 @@ pub(crate) fn ensure_acp_session(
             acp_sessions.retain_resumes_for(&req.id, &resume_ids);
             // 只在真正启动新进程前写入；热 attach 不能改变一个已运行子进程的
             // 环境，也不该把下一次任务的凭据混进现有会话。
-            *lock_mutex(&slot.value.ephemeral_env) = req.ephemeral_env.clone();
+            *slot.value.ephemeral_env.lock() = req.ephemeral_env.clone();
             acp_relaunch(
                 &slot,
                 &req.id,
@@ -3861,14 +3814,14 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
     };
     // 先拿输出闸门再读归约状态，和快照推送同一把锁。挂起后镜像只剩当前回合，
     // 旁观不唤醒，给多少是多少。
-    let attached_fd = loop {
-        let lifecycle = lock_mutex(&slot.lifecycle);
+    let attached_fd = {
+        let lifecycle = slot.lifecycle.lock();
         if !acp_sessions.is_current(&id, &slot) {
             return;
         }
         let sess = &slot.value;
-        let _output_gate = lock_mutex(&sess.output_gate);
-        let reduced = lock_reduced(sess);
+        let _output_gate = sess.output_gate.lock();
+        let reduced = sess.reduced.lock();
         let entries_total = reduced.entries_total();
         let current_history_id = reduced
             .history_session_id
@@ -3923,16 +3876,18 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
             return;
         };
         let fd = attachment.fd;
-        lock_mutex(&sess.out).watchers.push(attachment);
+        sess.out.lock().watchers.push(attachment);
         drop(_output_gate);
         drop(lifecycle);
-        break fd;
+        fd
     };
     let _viewer = crate::protocol::ViewerLease::acquire();
     let mut scratch = [0u8; 64];
     let _ = reader.read(&mut scratch);
-    let _output_gate = lock_mutex(&slot.value.output_gate);
-    lock_mutex(&slot.value.out)
+    let _output_gate = slot.value.output_gate.lock();
+    slot.value
+        .out
+        .lock()
         .watchers
         .retain(|w| w.fd != attached_fd);
 }
@@ -4092,7 +4047,7 @@ pub(crate) fn read_history_page(
     };
     let needs_wake = acp_sessions
         .with_current(id, &slot, |session| {
-            let reduced = lock_reduced(session);
+            let reduced = session.reduced.lock();
             let end = before.min(reduced.entries_total());
             end.saturating_sub(limit) < reduced.entries_base() && session.idle.is_suspended()
         })
@@ -4103,8 +4058,8 @@ pub(crate) fn read_history_page(
     }
     acp_sessions
         .with_current(id, &slot, |session| {
-            let _output_gate = lock_mutex(&session.output_gate);
-            let reduced = lock_reduced(session);
+            let _output_gate = session.output_gate.lock();
+            let reduced = session.reduced.lock();
             let end = before.min(reduced.entries_total());
             let start = end.saturating_sub(limit);
             // runtime debug 只是账本，历史页不带；不要调试数据时工具参数表也不克隆。
@@ -4131,10 +4086,7 @@ pub(crate) fn handle_acp_skills<C: ClientSocket>(
     let id = v["id"].as_str().unwrap_or_default();
     let launch = acp_sessions.get(id).and_then(|slot| {
         acp_sessions.with_current(id, &slot, |session| {
-            (
-                lock_mutex(&session.launch_spec).clone(),
-                session.cwd.clone(),
-            )
+            (session.launch_spec.lock().clone(), session.cwd.clone())
         })
     });
     let Some((Some(launch), cwd)) = launch else {
@@ -4223,7 +4175,7 @@ pub(crate) fn kill_acp_session(
     let mut removed_instance = None;
     let mut retire_failed = false;
     let mut error = if let Some(slot) = slot {
-        let _lifecycle = lock_mutex(&slot.lifecycle);
+        let _lifecycle = slot.lifecycle.lock();
         if !acp_sessions.is_current(id, &slot) {
             Some("ACP session changed during kill; retry".to_string())
         } else if !retire_acp_runtime(&slot.value) {
@@ -4236,7 +4188,7 @@ pub(crate) fn kill_acp_session(
             // 只能看到 EOF，会当成传输抖动用同一个 sid 重新 acp_open，把刚删掉的
             // 会话原地复活（手机删一条 PC 还开着的会话就是这个场景）。
             {
-                let mut reduced = lock_reduced(sess);
+                let mut reduced = sess.reduced.lock();
                 smelt_core::acp_session::force_end(
                     &mut reduced,
                     smelt_core::acp_session::AcpEndKind::SessionTerminated,
@@ -4245,8 +4197,8 @@ pub(crate) fn kill_acp_session(
             }
             // 会话马上就不存在了，这份终态不进归档（should_persist = false）。
             push_acp_snapshot_since(sess, false, None);
-            let _output_gate = lock_mutex(&sess.output_gate);
-            let mut out = lock_mutex(&sess.out);
+            let _output_gate = sess.output_gate.lock();
+            let mut out = sess.out.lock();
             if let Some(c) = out.client.take() {
                 c.close_after_flush();
             }
@@ -4330,7 +4282,7 @@ pub(crate) fn restart_acp_session(
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
     let slot = acp_sessions.get(id).ok_or("ACP session not found")?;
-    let _lifecycle = lock_mutex(&slot.lifecycle);
+    let _lifecycle = slot.lifecycle.lock();
     if !acp_sessions.is_current(id, &slot) {
         return Err("ACP session was replaced");
     }
@@ -4346,11 +4298,11 @@ pub(crate) fn relaunch_recorded_acp_runtime(
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
     let sess = &slot.value;
-    let Some(launch) = lock_mutex(&sess.launch_spec).clone() else {
+    let Some(launch) = sess.launch_spec.lock().clone() else {
         return Err("no launch spec recorded for this session yet");
     };
     let resume_id = {
-        let reduced = lock_reduced(sess);
+        let reduced = sess.reduced.lock();
         resolve_resume_id(id, None, known_acp_resume_id(&reduced), true)
     };
     // 续持自己的 provider session 占用（owner 是自身，正常情况下必然成功）；
@@ -4408,7 +4360,7 @@ mod snapshot_link_tests {
     #[test]
     fn burst_while_writer_is_blocked_coalesces_and_stays_connected() {
         let slot = Arc::new(AcpSlot {
-            lifecycle: Mutex::new(()),
+            lifecycle: SessionLock::new(()),
             value: make_acp_session("acp-burst", None, None, None),
         });
         let (mut server, mut client) = UnixStream::pair().unwrap();
@@ -4440,18 +4392,22 @@ mod snapshot_link_tests {
             SnapshotProjection::FULL,
         )
         .unwrap();
-        lock_mutex(&slot.value.out).client = Some(link);
+        slot.value.out.lock().client = Some(link);
 
         // 写线程卡在首包上。这段时间里的 mark 必须并成一份，而不是把连接摘掉。
         thread::sleep(Duration::from_millis(50));
         for index in 0..40 {
-            lock_reduced(&slot.value).entries_mut().push(
-                smelt_core::acp_chat::AcpEntry::User(format!("marker-{index}")),
-            );
+            slot.value
+                .reduced
+                .lock()
+                .entries_mut()
+                .push(smelt_core::acp_chat::AcpEntry::User(format!(
+                    "marker-{index}"
+                )));
             push_acp_snapshot_since(&slot.value, true, Some(0));
         }
         {
-            let out = lock_mutex(&slot.value.out);
+            let out = slot.value.out.lock();
             let link = out.client.as_ref().unwrap();
             assert!(!link.has_failed(), "快照堆积不应摘掉 ACP 连接");
             assert_eq!(link.snapshots_sent(), 0, "写线程堵住时不应提前序列化");
@@ -4490,7 +4446,10 @@ mod snapshot_link_tests {
             snapshots <= 2,
             "堵住期间的 40 次 mark 应并成一份更新，实际 snapshot 行约 {snapshots} 份:\n{text}"
         );
-        let sent = lock_mutex(&slot.value.out)
+        let sent = slot
+            .value
+            .out
+            .lock()
             .client
             .as_ref()
             .unwrap()

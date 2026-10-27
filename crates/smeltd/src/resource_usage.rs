@@ -93,10 +93,7 @@ fn session_roots(sessions: &Sessions, acp_sessions: &AcpSessions) -> Vec<(String
 
 /// 对话的根进程是 agent 子进程。句柄还在，pid 就还是它的。
 fn acp_root_pid(session: &AcpSession) -> Option<i32> {
-    let handle = session
-        .handle
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let handle = session.handle.lock();
     let stdio = *handle
         .as_ref()?
         .stdio

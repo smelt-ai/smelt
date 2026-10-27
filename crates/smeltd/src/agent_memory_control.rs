@@ -35,7 +35,7 @@ fn authenticate(
     let slot = acp_sessions.get(session_id).ok_or_else(denied)?;
     acp_sessions
         .with_current(session_id, &slot, |session| {
-            let state = session.state.lock().unwrap();
+            let state = session.state.lock();
             let valid = !token.is_empty()
                 && state.agent_token == token
                 && state.phase != Phase::Dead
@@ -44,7 +44,7 @@ fn authenticate(
             if !valid {
                 return Err(denied());
             }
-            let launch = session.launch_spec.lock().unwrap();
+            let launch = session.launch_spec.lock();
             let dir = |name: &str| {
                 launch
                     .as_ref()
@@ -155,7 +155,7 @@ mod tests {
             )
         });
         {
-            let mut state = slot.value.state.lock().unwrap();
+            let mut state = slot.value.state.lock();
             state.agent_token = token.to_string();
             state.phase = Phase::Idle;
         }
@@ -166,10 +166,10 @@ mod tests {
                 Some("writer"),
             );
         }
-        *slot.value.launch_spec.lock().unwrap() = Some(launch);
+        *slot.value.launch_spec.lock() = Some(launch);
         let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
         let (_event_tx, event_rx) = smol::channel::unbounded();
-        *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
             cmd_tx,
             event_rx,
             stdio: Arc::new(Mutex::new(None)),
@@ -227,7 +227,6 @@ mod tests {
             .value
             .state
             .lock()
-            .unwrap()
             .phase = Phase::Dead;
         assert!(authenticate(&acp_sessions, "acp-agent", "token-1").is_err());
     }

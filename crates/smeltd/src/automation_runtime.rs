@@ -281,7 +281,6 @@ impl Driver {
                     .value
                     .reduced
                     .lock()
-                    .unwrap()
                     .accepted_delivery_ids
                     .contains(&run.id);
                 if accepted {
@@ -530,7 +529,7 @@ impl Driver {
                 continue;
             };
             let (accepted, phase, provider_session_id) = {
-                let reduced = slot.value.reduced.lock().unwrap();
+                let reduced = slot.value.reduced.lock();
                 (
                     reduced.accepted_delivery_ids.contains(&run.id),
                     reduced.phase,
@@ -591,7 +590,7 @@ impl Driver {
                 continue;
             };
             let projection = {
-                let reduced = slot.value.reduced.lock().unwrap();
+                let reduced = slot.value.reduced.lock();
                 RunProjection {
                     phase: reduced.phase,
                     accepted: reduced.accepted_delivery_ids.contains(&run.id),
@@ -1061,7 +1060,7 @@ fn ensure_run_conversation_binding(
     session: &super::AcpSession,
     run_id: &str,
 ) -> Result<bool, String> {
-    let mut binding = session.conversation_binding.lock().unwrap();
+    let mut binding = session.conversation_binding.lock();
     match binding.as_ref() {
         Some(ConversationBinding::Automation { run_id: bound }) if bound == run_id => Ok(false),
         None | Some(ConversationBinding::Direct) => {
@@ -1208,7 +1207,7 @@ fn completed_turn_output(entries: &[AcpEntry]) -> String {
 }
 
 fn provider_id(session: &super::AcpSession) -> Option<String> {
-    let reduced = session.reduced.lock().unwrap();
+    let reduced = session.reduced.lock();
     reduced
         .history_session_id
         .clone()
@@ -1306,7 +1305,7 @@ mod lifecycle_tests {
             reduced.accepted_delivery_ids.insert(run.id.clone());
             reduced.active_delivery_id = Some(run.id.clone());
         }
-        *slot.value.reduced.lock().unwrap() = reduced;
+        *slot.value.reduced.lock() = reduced;
         let driver = Driver::new(
             Arc::clone(&automations),
             new_sessions(),
@@ -1479,21 +1478,17 @@ mod lifecycle_tests {
             &*acknowledged_session
                 .value
                 .conversation_binding
-                .lock()
-                .unwrap(),
+                .lock(),
             Some(ConversationBinding::Automation { run_id })
                 if run_id == &acknowledged_run.id
         ));
 
         let (mut conflicting, conflicting_store, _) = dispatching_fixture(false);
         let conflicting_session = conflicting.acp_sessions.get("session-1").unwrap();
-        *conflicting_session
-            .value
-            .conversation_binding
-            .lock()
-            .unwrap() = Some(ConversationBinding::Automation {
-            run_id: "another-run".into(),
-        });
+        *conflicting_session.value.conversation_binding.lock() =
+            Some(ConversationBinding::Automation {
+                run_id: "another-run".into(),
+            });
         conflicting.recover_active_runs();
         let conflict = conflicting_store.lock().unwrap().snapshot();
         assert_eq!(conflict.runs[0].status, AutomationRunStatus::Failed);
@@ -1669,7 +1664,7 @@ mod lifecycle_tests {
         let mut reduced = AcpSessionState::default();
         reduced.phase = DaemonPhase::Idle;
         reduced.history_session_id = Some("provider-session".into());
-        *slot.value.reduced.lock().unwrap() = reduced;
+        *slot.value.reduced.lock() = reduced;
 
         let remote_sessions = Arc::new(Mutex::new(RemoteCatalogState::in_memory()));
         let event_hub = new_event_hub();
@@ -1697,7 +1692,7 @@ mod lifecycle_tests {
             )
             .unwrap();
         {
-            let mut reduced = slot.value.reduced.lock().unwrap();
+            let mut reduced = slot.value.reduced.lock();
             reduced.phase = DaemonPhase::AwaitingApproval;
             reduced.accepted_delivery_ids.insert(run.id.clone());
             reduced.active_delivery_id = Some(run.id.clone());
@@ -1727,7 +1722,7 @@ mod lifecycle_tests {
         );
 
         {
-            let mut reduced = slot.value.reduced.lock().unwrap();
+            let mut reduced = slot.value.reduced.lock();
             reduced.phase = DaemonPhase::Idle;
             reduced.active_delivery_id = None;
             reduced.completed_delivery_id = Some(run.id.clone());

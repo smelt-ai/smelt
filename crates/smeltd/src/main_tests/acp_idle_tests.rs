@@ -30,7 +30,7 @@ fn direct_session(
     let session = make_acp_session_value("acp-idle", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -159,7 +159,7 @@ fn sessions_without_a_runtime_are_left_alone() {
 #[test]
 fn daemon_owned_conversations_are_never_suspended() {
     let (session, _cmd_rx) = direct_session(quiet_state());
-    *session.conversation_binding.lock().unwrap() =
+    *session.conversation_binding.lock() =
         Some(smelt_core::conversation::ConversationBinding::Automation {
             run_id: "run".into(),
         });
@@ -213,7 +213,7 @@ fn waking_a_running_conversation_only_records_activity() {
     );
     assert!(!slot.value.idle.is_suspended());
     assert!(
-        slot.value.launch_spec.lock().unwrap().is_none(),
+        slot.value.launch_spec.lock().is_none(),
         "没挂起就不该重新拉起"
     );
 }
@@ -417,7 +417,7 @@ fn restore_waits_for_the_model_before_writing_other_settings() {
     assert!(cmd_rx.try_recv().is_err(), "模型没确认前不能写其它项");
     // agent 确认换好了模型，推理强度被打回中。
     // 只改镜像、不发快照：等确认的一方靠守卫放锁时的通知醒来。
-    session.reduced.lock().unwrap().model = Some(pi_model("deepseek/flash"));
+    session.reduced.lock().model = Some(pi_model("deepseek/flash"));
 
     expect(
         next(),
@@ -426,7 +426,7 @@ fn restore_waits_for_the_model_before_writing_other_settings() {
     );
     expect(next(), "thought_level", ConfigValue::Select("high".into()));
     expect(next(), "codemode", ConfigValue::Boolean(true));
-    session.reduced.lock().unwrap().config_options =
+    session.reduced.lock().config_options =
         vec![mode("完全访问"), thinking("高"), switch("codemode", true)];
     restoring.join().unwrap();
 }
@@ -447,7 +447,7 @@ fn a_rejected_restore_does_not_hold_the_user_action() {
         })
     };
     std::thread::sleep(Duration::from_millis(200));
-    session.reduced.lock().unwrap().status_line = Some("更新会话配置失败：不行".into());
+    session.reduced.lock().status_line = Some("更新会话配置失败：不行".into());
     let started = std::time::Instant::now();
     restoring.join().unwrap();
     assert!(
@@ -557,7 +557,7 @@ fn a_busy_lifecycle_lock_is_retried_later() {
     let acp_sessions = new_test_acp_sessions();
     let (session, _cmd_rx) = direct_session(quiet_state());
     let (slot, _) = acp_sessions.reserve_with("acp-idle-contended", || session);
-    let _held = slot.lifecycle.lock().unwrap();
+    let _held = slot.lifecycle.lock();
     let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
     assert!(sweep.contended, "抢不到生命周期锁要稍后重试");
     assert!(!slot.value.idle.is_suspended());
@@ -568,7 +568,7 @@ fn suspending_trims_the_transcript_to_the_current_turn() {
     use smelt_core::acp_chat::AcpEntry;
     let acp_sessions = new_test_acp_sessions();
     let (session, _cmd_rx) = direct_session(quiet_state());
-    session.reduced.lock().unwrap().entries_mut().extend([
+    session.reduced.lock().entries_mut().extend([
         AcpEntry::User("第一轮".into()),
         AcpEntry::Assistant {
             text: "旧回答".into(),
@@ -583,7 +583,7 @@ fn suspending_trims_the_transcript_to_the_current_turn() {
     let (slot, _) = acp_sessions.reserve_with("acp-idle", || session);
     let sweep = acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
     assert!(!sweep.contended);
-    let reduced = slot.value.reduced.lock().unwrap();
+    let reduced = slot.value.reduced.lock();
     assert_eq!(reduced.entries_base(), 2);
     assert_eq!(reduced.entries_total(), 4);
     assert_eq!(reduced.entries().len(), 2);
@@ -637,7 +637,7 @@ fn a_mobile_remote_session_still_suspends_when_idle() {
 fn a_poisoned_session_lock_does_not_panic_the_suspend_check() {
     let (session, _cmd_rx) = direct_session(quiet_state());
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = session.handle.lock().unwrap();
+        let _guard = session.handle.lock();
         panic!("one session");
     }));
     let blocker =

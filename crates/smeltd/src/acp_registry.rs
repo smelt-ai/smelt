@@ -1,24 +1,43 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::Duration;
 
-/// 取出锁里的值，并清掉 poison。
+/// 会话自己的锁，不把 poison 交给调用方。
 ///
-/// 一个会话的驱动在持锁时 panic，这把锁会中毒。`into_inner` 只拿出这次的值，
-/// 不清标志；下一次 `lock().unwrap()` 仍会 panic。跨会话遍历和之后的控制
-/// 操作都走这里，单会话中毒不会再传染。
-pub(crate) fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            mutex.clear_poison();
+/// 所有会话同在一个 smeltd 里。任何线程持着某个会话的锁 panic，这把锁都会中毒；
+/// 若照常 `lock().unwrap()`，之后列会话、对账、跨对话读取都会跟着 panic。
+/// `lock` 直接返回守卫，遇到 poison 取出值并清掉标志。`.unwrap()` 写不出来，
+/// 也就不用靠每个调用点记得换写法。被打断的这一次留下的状态由会话自己的
+/// 失败处理收拾（见 `mark_session_driver_panic`）。
+pub(crate) struct SessionLock<T>(Mutex<T>);
+
+impl<T> SessionLock<T> {
+    pub(crate) const fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, T> {
+        self.0.lock().unwrap_or_else(|poisoned| {
+            self.0.clear_poison();
             poisoned.into_inner()
+        })
+    }
+
+    /// 别人正持着就返回 `None`；中毒和 `lock` 一样照常取值。
+    pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        match self.0.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(poisoned)) => {
+                self.0.clear_poison();
+                Some(poisoned.into_inner())
+            }
         }
     }
 }
 
 pub(crate) struct AcpSlot<T> {
-    pub(crate) lifecycle: Mutex<()>,
+    pub(crate) lifecycle: SessionLock<()>,
     pub(crate) value: T,
 }
 
@@ -171,7 +190,7 @@ impl<T> AcpRegistry<T> {
             Entry::Occupied(entry) => (Arc::clone(entry.get()), false),
             Entry::Vacant(entry) => {
                 let slot = Arc::new(AcpSlot {
-                    lifecycle: Mutex::new(()),
+                    lifecycle: SessionLock::new(()),
                     value: create(),
                 });
                 entry.insert(Arc::clone(&slot));
@@ -213,7 +232,7 @@ impl<T> AcpRegistry<T> {
         expected: &Arc<AcpSlot<T>>,
         operation: impl FnOnce(&T) -> R,
     ) -> Option<R> {
-        let _lifecycle = lock_mutex(&expected.lifecycle);
+        let _lifecycle = expected.lifecycle.lock();
         if !self.is_current(id, expected) {
             return None;
         }
@@ -348,7 +367,7 @@ mod tests {
     fn current_operation_waits_for_the_slot_lifecycle() {
         let registry = Arc::new(AcpRegistry::new(Arc::new(RwLock::new(()))));
         let (slot, _) = registry.reserve_with("id", || 1usize);
-        let lifecycle = slot.lifecycle.lock().unwrap();
+        let lifecycle = slot.lifecycle.lock();
         let (started_tx, started_rx) = mpsc::channel();
         let (ran_tx, ran_rx) = mpsc::channel();
         let worker_registry = Arc::clone(&registry);

@@ -1524,7 +1524,7 @@ fn reconcile_remote_catalog_runtime(
     let mut acp_lifecycles = Vec::with_capacity(acp_slots.len());
     let mut live_acp_instances = HashMap::new();
     for (id, slot) in &acp_slots {
-        let lifecycle = slot.lifecycle.lock().unwrap();
+        let lifecycle = slot.lifecycle.lock();
         if acp_sessions.is_current(id, slot) {
             live_acp_instances.insert(id.clone(), slot.value.instance);
         }

@@ -248,7 +248,7 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
             )
         });
         {
-            let mut state = slot.value.state.lock().unwrap();
+            let mut state = slot.value.state.lock();
             state.phase = Phase::Thinking;
             state.title = Some("已恢复运行".to_string());
         }
