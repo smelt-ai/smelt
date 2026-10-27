@@ -634,7 +634,7 @@ fn render_transcript(
     column.into_any_element()
 }
 
-fn process_icon(kind: &smelt_model::acp_chat::ToolKind) -> IconName {
+fn process_icon(kind: &smelt_model::acp_chat::ToolKind) -> Icon {
     acp_view::process_timeline_icon(kind)
 }
 
@@ -690,7 +690,7 @@ impl StepFlag {
 /// 一行步骤：图标、动词句、可选状态。能展开的整行可点，正文缩进挂在下面。
 fn transcript_step(
     key: &str,
-    icon: IconName,
+    icon: impl Into<Icon>,
     headline: String,
     flag: Option<StepFlag>,
     detail: &AutomationRunDetail,

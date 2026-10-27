@@ -2,7 +2,6 @@
 //! 访问、已配对设备、relay）。配对新设备是一次性的短任务，在对话框里做。
 
 use super::*;
-use gpui_component::WindowExt as _;
 use gpui_component::dialog::Dialog;
 use gpui_component::input::{Input, InputEvent, InputState};
 use smelt_model::remote_config::RemoteAccessState;
