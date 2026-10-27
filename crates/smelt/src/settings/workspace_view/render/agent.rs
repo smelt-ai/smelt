@@ -359,14 +359,6 @@ fn agent_groups(
                         })
                         .child(message)
                 });
-
-                content = content.child(
-                    div()
-                        .text_xs()
-                        .font_semibold()
-                        .text_color(muted)
-                        .child("Agent 对话运行时"),
-                );
                 for agent in ConversationAgentKind::ALL {
                     if let Some(executable) = diagnostics.for_agent(agent) {
                         content = content.child(runtime_row(agent, executable));
