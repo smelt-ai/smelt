@@ -162,3 +162,7 @@
 - 交接不做。升级重启，终端会话丢失。
 - 数据目录沿用 `%USERPROFILE%\.smelt`。
 - 第一版只出 x86_64。
+
+## 待办
+
+- **远程升级与自动更新**（10-27 记）。现在 Windows 上的运行时回不了 `runtime_upgrade`：它跟桌面装在同一个安装程序里，只能到那台机器上手动跑新版的 `setup.exe` 覆盖安装。打算的做法：smeltd 收到升级请求后从 Release 下载 `smelt-<版本>-windows-x86_64-setup.exe`，按校验和清单核对哈希，拉起一个脱离自己的安装进程（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）后退出，好让 Inno Setup 替换正在用的 exe；装完重新拉起 smeltd，桌面那边照现有流程等它重启、重连。代价：终端会话不保留；那台机器上开着的 Smelt 桌面会被关掉。本机自动更新可以复用这套流程。做的时候要在 Windows 机器上实测。
