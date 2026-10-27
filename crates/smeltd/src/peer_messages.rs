@@ -1,13 +1,13 @@
 //! Pi 对话互发消息：主 daemon 这一头（门卫 + 发件队列）。设计见 `docs/pi-session-messaging-design.html`。
 //!
-//! 会话宿主把扩展的 `session_list` / `session_read` / `session_send` / `session_spawn`
-//! 写成控制连接上的 `peer_request` 行。来源只认这条控制连接属于哪个注册表槽，请求里写什么都不算。
+//! 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn` 由起会话时
+//! 绑上的应答函数直接回答。来源是绑定时记下的会话 id，请求体里的字段不算。
 //!
 //! 先收下，再处理：门卫只做同步检查，通过就把消息记进内存里的发件队列、回 `accepted`。
 //! 拉起对方、投递在后台：每个目标一条投递线程，按收下的先后经
-//! [`crate::acp_host::ensure_conversation_runtime`] 拉起对方，把 `DeliverPeerMessage`
-//! 交给它的宿主。对方的快照（`peer_inbox`）回来后由 [`observe_inbox`] 对账：送到了就结束；
-//! 接手的宿主已经退出、消息还没进会话就重投。投不了给发送方退信。
+//! [`crate::acp_host::ensure_conversation_runtime`] 拉起对方，把消息交给它的驱动。
+//! 事件归约里的 `peer_inbox` 由 [`observe_inbox`] 对账：送到了就结束；
+//! 那一代 runtime 已经退出、消息还没进会话就重投。投不了给发送方退信。
 //!
 //! 消息 id、起出来的对话 id 都由（来源，Pi 的 `toolCallId`）算出：同一次调用重放落到同一条。
 //!
@@ -46,6 +46,24 @@ static CHAINS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Default::de
 /// 每个对话起过、还在（或正在建）的新对话。值里出现过的对话不能再起。
 static SPAWNED: LazyLock<Mutex<HashMap<String, Vec<String>>>> = LazyLock::new(Default::default);
 static OUTBOX: LazyLock<Mutex<Outbox>> = LazyLock::new(Default::default);
+
+fn lock_outbox() -> std::sync::MutexGuard<'static, Outbox> {
+    OUTBOX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_chains() -> std::sync::MutexGuard<'static, HashMap<String, u32>> {
+    CHAINS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_spawned() -> std::sync::MutexGuard<'static, HashMap<String, Vec<String>>> {
+    SPAWNED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Default)]
 struct Outbox {
@@ -270,7 +288,7 @@ impl Courier {
     /// 收下一封并按需起投递线程。
     fn post(&self, letter: Letter, limit: Option<usize>) -> Accepted {
         let target = letter.to.clone();
-        let mut outbox = OUTBOX.lock().unwrap();
+        let mut outbox = lock_outbox();
         let accepted = outbox.accept(letter, limit);
         if matches!(accepted, Accepted::New) && outbox.claim_drain(&target) {
             drop(outbox);
@@ -292,17 +310,12 @@ impl Courier {
             .name("smelt-peer-courier".into())
             .spawn(move || {
                 loop {
-                    let Some((delivery, source_bypasses)) =
-                        OUTBOX.lock().unwrap().next_for(&target)
-                    else {
+                    let Some((delivery, source_bypasses)) = lock_outbox().next_for(&target) else {
                         return;
                     };
                     let id = delivery.id.clone();
                     if let Err(reason) = courier.hand_off(&target, delivery, source_bypasses) {
-                        let bounce = OUTBOX
-                            .lock()
-                            .unwrap()
-                            .settle(&id, LetterState::Failed(reason));
+                        let bounce = lock_outbox().settle(&id, LetterState::Failed(reason));
                         courier.post_bounce(bounce);
                     }
                 }
@@ -328,19 +341,16 @@ impl Courier {
                 "对方是「完全访问」，你是「逐次审批」，不能给它发消息（permission）".to_string(),
             );
         }
-        // 先记下交给哪一代宿主再写：宿主的快照可能比这边改状态先回来。中途换了宿主也不要紧，
-        // 记的代数旧了，新宿主的第一份快照会让它重投，宿主按 id 去重。
+        // 先记下交给哪一代 runtime 再写：快照可能比这边改状态先回来。中途换了 runtime
+        // 也不要紧，记的代数旧了，新的第一份快照会让它重投，驱动按 id 去重。
         let generation = sess.connection_generation.load(Ordering::SeqCst);
-        OUTBOX
-            .lock()
-            .unwrap()
-            .mark_handed_off(&delivery.id, generation);
+        lock_outbox().mark_handed_off(&delivery.id, generation);
         crate::acp_host::deliver_peer_message(sess, delivery).map_err(ToOwned::to_owned)
     }
 }
 
-/// 主 daemon 合并了 `target` 第 `generation` 代宿主的一份快照：拿它的 `peer_inbox`
-/// 对一遍交出去的信。送到的结束；交给更早一代宿主、还没送到的，那个宿主已经不在了，退回排队重投。
+/// 这一代 runtime 的 `peer_inbox` 对一遍交出去的信。送到的结束；交给更早一代、
+/// 还没送到的，那一代已经不在了，退回排队重投。
 pub(crate) fn observe_inbox(
     target: &str,
     generation: u64,
@@ -348,7 +358,7 @@ pub(crate) fn observe_inbox(
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
 ) {
-    let mut outbox = OUTBOX.lock().unwrap();
+    let mut outbox = lock_outbox();
     if outbox.reconcile(target, generation, inbox) && outbox.claim_drain(target) {
         drop(outbox);
         Courier {
@@ -359,84 +369,53 @@ pub(crate) fn observe_inbox(
     }
 }
 
-/// 有交给这个对话的宿主、还没结算的信。合并快照时先问一句，没有就不必拷 `peer_inbox`。
+/// 有交给这个对话、还没结算的信。归约时先问一句，没有就不必拷 `peer_inbox`。
 pub(crate) fn awaiting_inbox(target: &str) -> bool {
-    OUTBOX
-        .lock()
-        .unwrap()
+    lock_outbox()
         .letters
         .iter()
         .any(|letter| letter.to == target && matches!(letter.state, LetterState::HandedOff { .. }))
 }
 
-/// 还有发给这个对话、没送到的信：它不能挂起，挂起会让交出去的那几封跟着宿主一起没了。
+/// 还有发给这个对话、没送到的信：它不能挂起，挂起会让交出去的那几封跟着进程一起没了。
 pub(crate) fn has_undelivered(target: &str) -> bool {
-    OUTBOX.lock().unwrap().undelivered(target) > 0
+    lock_outbox().undelivered(target) > 0
 }
 
 /// 用户在这个对话里说话了：别的对话发来的消息链到这里断开，预算复位。
 pub(crate) fn reset_chain(session_id: &str) {
-    CHAINS.lock().unwrap().remove(session_id);
+    lock_chains().remove(session_id);
 }
 
-/// 收这个宿主转上来的请求。每个请求单开线程：读历史可能要等宿主回一页。
-pub(crate) fn serve_host_requests(
-    slot: Arc<AcpSlot<AcpSession>>,
-    requests: smol::channel::Receiver<serde_json::Value>,
+/// 起这个 Pi 会话时绑上的应答。来源是 `session_id`，请求体里的字段不算。
+pub(crate) fn bind_peer_handler(
     session_id: String,
     acp_sessions: AcpSessions,
     subscribers: EventHubHandle,
-) {
-    let _ = thread::Builder::new()
-        .name("smelt-peer-requests".into())
-        .spawn(move || {
-            while let Ok(line) = requests.recv_blocking() {
-                let slot = Arc::clone(&slot);
-                let session_id = session_id.clone();
-                let courier = Courier {
-                    acp_sessions: Arc::clone(&acp_sessions),
-                    subscribers: subscribers.clone(),
-                };
-                let _ = thread::Builder::new()
-                    .name("smelt-peer-request".into())
-                    .spawn(move || {
-                        answer_host_request(&slot, &session_id, &courier, &line);
-                    });
-            }
-        });
-}
-
-fn answer_host_request(
-    slot: &Arc<AcpSlot<AcpSession>>,
-    source_id: &str,
-    courier: &Courier,
-    line: &serde_json::Value,
-) {
-    let Some(request_id) = line.get("request_id").and_then(serde_json::Value::as_u64) else {
-        return;
-    };
-    let op = line
-        .get("op")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let body = line.get("body").cloned().unwrap_or_default();
-    let acp_sessions = &courier.acp_sessions;
-    let reply = if !acp_sessions.is_current(source_id, slot) {
-        rejected("not_found", "发出请求的对话已经换掉了")
-    } else {
-        let answered = match op {
-            "session_list" => Ok(list(source_id, acp_sessions, &body)),
-            "session_read" => read(source_id, acp_sessions, &body),
-            "session_send" => send(slot, source_id, courier, &body),
-            "session_spawn" => spawn(slot, source_id, courier, &body),
-            _ => Err(rejected("invalid", format!("不认识的操作 {op}"))),
+) -> smelt_core::background_tasks::PeerRequestHandler {
+    Arc::new(move |op, body| {
+        let courier = Courier {
+            acp_sessions: Arc::clone(&acp_sessions),
+            subscribers: subscribers.clone(),
         };
-        answered.unwrap_or_else(|rejection| rejection)
-    };
-    let host = slot.value.hosted_handle.lock().unwrap().clone();
-    if let Some(host) = host {
-        let _ = host.send_action(&AcpUserAction::PeerReply { request_id, reply });
-    }
+        let Some(slot) = acp_sessions.get(&session_id) else {
+            return rejected("not_found", "发出请求的对话已经换掉了");
+        };
+        if !acp_sessions.is_current(&session_id, &slot) {
+            return rejected("not_found", "发出请求的对话已经换掉了");
+        }
+        match op {
+            "session_list" => list(&session_id, &acp_sessions, body),
+            "session_read" => read(&session_id, &acp_sessions, body).unwrap_or_else(|error| error),
+            "session_send" => {
+                send(&slot, &session_id, &courier, body).unwrap_or_else(|error| error)
+            }
+            "session_spawn" => {
+                spawn(&slot, &session_id, &courier, body).unwrap_or_else(|error| error)
+            }
+            _ => rejected("invalid", format!("不认识的操作 {op}")),
+        }
+    })
 }
 
 fn rejected(reason: &str, error: impl Into<String>) -> serde_json::Value {
@@ -621,9 +600,7 @@ fn bypasses_approval(sess: &AcpSession) -> bool {
 
 /// `source` 发给 `target` 的信，发件队列还记得的。退信不算发送方发的。
 fn sent_to(source: &str, target: &str) -> Vec<serde_json::Value> {
-    OUTBOX
-        .lock()
-        .unwrap()
+    lock_outbox()
         .letters
         .iter()
         .filter(|letter| {
@@ -706,22 +683,11 @@ fn read(
         return Err(not_found(&id));
     };
     let sess = &slot.value;
-    let (mut replies, total) = {
+    // 挂起后内存里只剩当前回合，有多少给多少，不为此把对方拉起来。
+    let replies = {
         let reduced = sess.reduced.lock().unwrap();
-        (
-            assistant_replies(reduced.entries(), limit),
-            reduced.entries_total(),
-        )
+        assistant_replies(reduced.entries(), limit)
     };
-    // 宿主模式下父镜像只留当前回合。不够就向还活着的宿主要一页；挂起的不唤醒，镜像里有多少给多少。
-    if replies.len() < limit && !sess.idle.is_suspended() {
-        let host = sess.hosted_handle.lock().unwrap().clone();
-        if let Some(host) = host
-            && let Ok(page) = host.request_history_page(total, 200)
-        {
-            replies = assistant_replies(&page.entries, limit);
-        }
-    }
     Ok(serde_json::json!({
         "ok": true,
         "sessionId": id,
@@ -768,7 +734,7 @@ fn accepted_reply(id: &str, to: &str, to_title: &str, hops: u32) -> serde_json::
 
 /// 同一次工具调用又来了：回第一次的结果。
 fn replay_reply(id: &str) -> Option<serde_json::Value> {
-    let outbox = OUTBOX.lock().unwrap();
+    let outbox = lock_outbox();
     let letter = outbox.find(id)?;
     Some(accepted_reply(
         id,
@@ -943,7 +909,7 @@ fn spawn(
         .ok_or_else(|| rejected("invalid", "没有可用的 Pi 配置"))?;
 
     {
-        let mut spawned = SPAWNED.lock().unwrap();
+        let mut spawned = lock_spawned();
         let children = spawned.entry(source_id.to_string()).or_default();
         if children.contains(&id) {
             // 同一次调用并发重放：另一个请求已经在建了。
@@ -958,7 +924,7 @@ fn spawn(
         }
         children.push(id.clone());
         // 和上面的计数在同一把锁里登记「正在建」：别的请求清理时不会把它当成已经关掉的。
-        OUTBOX.lock().unwrap().held.insert(id.clone());
+        lock_outbox().held.insert(id.clone());
     }
     let hops = budget - 1;
     let letter = Letter {
@@ -978,7 +944,7 @@ fn spawn(
         spawned: true,
     };
     {
-        let mut outbox = OUTBOX.lock().unwrap();
+        let mut outbox = lock_outbox();
         // 同一个 id 已经在 `SPAWNED` 里挡住了，这里只会是新的。
         outbox.accept(letter, None);
     }
@@ -1025,7 +991,7 @@ fn spawn(
                 server,
                 &courier,
             );
-            let mut outbox = OUTBOX.lock().unwrap();
+            let mut outbox = lock_outbox();
             outbox.held.remove(&request.id);
             match built {
                 Ok(()) => {
@@ -1106,7 +1072,7 @@ fn was_spawned(session_id: &str) -> bool {
 
 /// 起出来的对话里，关掉、删掉的清出去。正在建的（还在发件队列里等）留着。
 fn retain_live_children(children: &mut Vec<String>, acp_sessions: &AcpSessions) {
-    let building = OUTBOX.lock().unwrap().held.clone();
+    let building = lock_outbox().held.clone();
     children.retain(|child| {
         building.contains(child)
             || acp_sessions
@@ -1116,7 +1082,7 @@ fn retain_live_children(children: &mut Vec<String>, acp_sessions: &AcpSessions) 
 }
 
 fn forget_child(child: &str) {
-    for children in SPAWNED.lock().unwrap().values_mut() {
+    for children in lock_spawned().values_mut() {
         children.retain(|id| id != child);
     }
 }
@@ -1132,7 +1098,7 @@ fn chain_budget(session_id: &str) -> u32 {
 
 /// 收到一条还剩 `hops` 跳的消息，对方往下转最多也就这么多。
 fn lower_chain(session_id: &str, hops: u32) {
-    let mut chains = CHAINS.lock().unwrap();
+    let mut chains = lock_chains();
     let current = chains.get(session_id).copied().unwrap_or(INITIAL_HOPS);
     chains.insert(session_id.to_string(), current.min(hops));
 }
@@ -1416,5 +1382,85 @@ mod tests {
         assert_eq!(outbox.letters.len(), KEEP_SETTLED + 1);
         assert!(outbox.find("pm-open").is_some());
         assert!(outbox.find("pm-0").is_none());
+    }
+
+    fn live_pi(acp_sessions: &AcpSessions, id: &str) -> Arc<AcpSlot<AcpSession>> {
+        let slot = acp_sessions.reserve_with(id, || {
+            crate::acp_host::make_acp_session(id, Some("/work".into()), None, None)
+        });
+        *slot.0.value.launch_spec.lock().unwrap() =
+            Some(smelt_core::agent_kind::ConversationAgentKind::Pi.default_launch());
+        let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        *slot.0.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+            cmd_tx,
+            event_rx,
+            stdio: Arc::new(Mutex::new(None)),
+            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            supports_mid_turn_input: false,
+            supports_compaction: false,
+            supports_native_queue: false,
+            supports_rewind: false,
+        });
+        slot.0
+    }
+
+    /// 来源是绑定时记下的会话。请求体里写别的 sourceSessionId 也不改来源。
+    #[test]
+    fn the_bound_source_session_is_not_taken_from_the_request() {
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        let _a = live_pi(&acp_sessions, "acp-a");
+        let _b = live_pi(&acp_sessions, "acp-b");
+        let handler = bind_peer_handler(
+            "acp-a".into(),
+            Arc::clone(&acp_sessions),
+            crate::new_event_hub(),
+        );
+        let listed = handler(
+            "session_list",
+            &serde_json::json!({"sourceSessionId": "acp-b"}),
+        );
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|peer| peer["id"].as_str())
+            .collect();
+        assert!(!ids.contains(&"acp-a"), "自己不在名单里");
+        assert!(ids.contains(&"acp-b"));
+
+        let sent = handler(
+            "session_send",
+            &serde_json::json!({
+                "to": "acp-a",
+                "text": "hi",
+                "toolCallId": "toolu_forged",
+                "sourceSessionId": "acp-b",
+            }),
+        );
+        assert_eq!(sent["reason"], "self");
+    }
+
+    /// 事件归约看到送到，就把 HandedOff 结掉。测完把这封从进程全局队列里拿走。
+    #[test]
+    fn observe_inbox_settles_a_handed_off_letter() {
+        let id = format!("pm-observe-{}", uuid::Uuid::new_v4().simple());
+        let mut letter = letter(&id, "acp-a", "acp-observe");
+        letter.state = LetterState::HandedOff { generation: 3 };
+        lock_outbox().letters.push(letter);
+        let acp_sessions = crate::acp_host::new_test_acp_sessions();
+        observe_inbox(
+            "acp-observe",
+            3,
+            &[inbox_view(&id, PeerMessageStatus::Delivered)],
+            &acp_sessions,
+            &crate::new_event_hub(),
+        );
+        let state = lock_outbox().find(&id).map(|found| found.state.clone());
+        lock_outbox()
+            .letters
+            .retain(|found| found.delivery.id != id);
+        assert_eq!(state, Some(LetterState::Delivered));
     }
 }

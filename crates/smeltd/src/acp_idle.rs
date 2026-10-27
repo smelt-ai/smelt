@@ -1,28 +1,27 @@
 //! 闲置会话挂起。
 //!
-//! 每场打开过的对话都有一个独立会话宿主，外加它的 Pi 进程。对话几个小时没人碰，
-//! 这些进程也一直占着内存。这里把闲置够久的会话宿主停掉，也就是挂起。回收线程
-//! 睡到最早的闲置截止才醒；一个可能变闲置的会话都没有时就一直睡，直到下一次活动。
+//! 每场对话的驱动和它的 agent 子进程都在这个 smeltd 里。对话几个小时没人碰，
+//! 这些进程也一直占着内存。这里把闲置够久的 runtime 停掉，也就是挂起，并丢掉
+//! 内存里已经提交的历史前缀。回收线程睡到最早的闲置截止才醒；一个可能变闲置的
+//! 会话都没有时就一直睡，直到下一次活动。
 //!
-//! 挂起只停进程，会话本身留在注册表里。镜像、绑定、启动规格、provider 会话占用
-//! 都不动，客户端看到的仍是空闲。之后真要用 runtime 时，入口先调
+//! 挂起只停进程、裁掉已提交前缀。会话本身留在注册表里。绑定、启动规格、
+//! provider 会话占用都不动，客户端看到的仍是空闲。之后真要用 runtime 时，入口先调
 //! [`wake_suspended_acp_session`]。会按记录的启动规格带 `--session` 重新拉起，
-//! 等 Pi 重放完历史，再把动作交过去。会用到 runtime 的情况包括：发消息、改配置、
-//! 手机往上翻历史、跨智能体投递。客户端重新 `acp_open` 时，`ensure_acp_session`
-//! 本来就会拉起没有 runtime 的会话。
+//! 等 Pi 重放完历史，再把动作交过去。往上翻历史走同一条唤醒。会用到 runtime 的
+//! 情况包括：发消息、改配置、往上翻历史、跨智能体投递。客户端重新 `acp_open`
+//! 时，`ensure_acp_session` 本来就会拉起没有 runtime 的会话。
 //!
 //! 只挂起确定安全的会话，条件是以下全部满足：
-//! - 跑在独立宿主里；
+//! - 有活着的 runtime；
 //! - 没有进行中的回合；
 //! - 没有待审批或待回答的问题；
 //! - 没有排队的输入；
 //! - 没有在跑的后台任务；
-//! - 不归自动化或插件驱动；
-//! - 不是手机建的远程会话。远程会话只靠槽位里的启动规格才能恢复，守护重启后
-//!   槽位就不在了。
+//! - 不归自动化或插件驱动。
 //!
-//! daemon 升级会停掉旧守护，已挂起的槽位随之不在。桌面端断线重连会
-//! `acp_open`，把它们重新拉起来，再过一轮闲置期后再次挂起。
+//! 手机建的远程会话同样挂起。唤醒靠槽位里还在的启动规格；守护进程停掉之后，
+//! 挂起的和没挂起的槽位都会消失，桌面端断线重连会 `acp_open` 重新拉起。
 //!
 //! 唤醒要把挂起那一刻的会话配置（模型、推理强度、权限模式等）写回新 runtime。
 //! 新进程只会从 provider 自己的会话文件里找回一部分：Pi 的权限模式和脚本工具
@@ -224,7 +223,7 @@ pub(crate) fn reduced_suspend_blocker(
         .iter()
         .any(|subagent| subagent.status.is_running())
     {
-        // 子智能体的进程是会话里的 Pi 起的，停宿主会把它一起杀掉。
+        // 子智能体的进程是会话里的 Pi 起的，停掉 runtime 会把它一起杀掉。
         return Some("subagent running");
     }
     if reduced
@@ -232,7 +231,7 @@ pub(crate) fn reduced_suspend_blocker(
         .iter()
         .any(|message| message.status == smelt_core::acp_session::PeerMessageStatus::Pending)
     {
-        // 别的对话发来、还没送进会话的消息只在宿主内存里，停宿主就丢了。
+        // 别的对话发来、还没送进会话的消息只在驱动内存里，停掉就丢了。
         return Some("peer message pending");
     }
     None
@@ -244,14 +243,27 @@ pub(crate) fn acp_suspend_blocker(
     now_ms: u64,
     idle_after: Duration,
 ) -> Option<&'static str> {
-    if sess.hosted_handle.lock().unwrap().is_none() {
-        return Some("no hosted runtime");
+    if sess
+        .handle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_none()
+    {
+        return Some("no runtime");
     }
-    if sess.unreaped_pid.lock().unwrap().is_some() {
+    if sess
+        .unreaped_pid
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+    {
         return Some("previous runtime not reaped");
     }
     if matches!(
-        &*sess.conversation_binding.lock().unwrap(),
+        &*sess
+            .conversation_binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
         Some(smelt_core::conversation::ConversationBinding::Automation { .. })
     ) {
         return Some("daemon-owned binding");
@@ -260,27 +272,40 @@ pub(crate) fn acp_suspend_blocker(
         return Some("recently active");
     }
     if sess.prompt_in_flight.load(Ordering::SeqCst)
-        || !sess.pending_prompts.lock().unwrap().is_empty()
-        || sess.unaccepted_prompt.lock().unwrap().is_some()
-        || sess.immediate_delivery.lock().unwrap().is_some()
+        || !sess
+            .pending_prompts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        || sess
+            .unaccepted_prompt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+        || sess
+            .immediate_delivery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     {
         return Some("prompt in flight");
     }
-    reduced_suspend_blocker(&sess.reduced.lock().unwrap())
+    reduced_suspend_blocker(
+        &sess
+            .reduced
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
 }
 
-pub(crate) fn spawn_acp_idle_reaper(acp_sessions: AcpSessions, remote_sessions: RemoteSessions) {
+pub(crate) fn spawn_acp_idle_reaper(acp_sessions: AcpSessions) {
     let spawned = thread::Builder::new()
         .name("smeltd-acp-idle".into())
         .spawn(move || {
             let mut contended_rounds = 0u32;
             loop {
                 let seen = REAPER_BELL.listen();
-                let sweep = suspend_idle_acp_sessions(
-                    &acp_sessions,
-                    &remote_sessions,
-                    ACP_IDLE_SUSPEND_AFTER,
-                );
+                let sweep = suspend_idle_acp_sessions(&acp_sessions, ACP_IDLE_SUSPEND_AFTER);
                 let now = crate::event_hub::now_ms();
                 let retry_at = if sweep.contended {
                     let delay = idle_retry_delay(contended_rounds);
@@ -320,7 +345,6 @@ pub(crate) struct IdleSweep {
 /// 生命周期锁，后闸门。
 pub(crate) fn suspend_idle_acp_sessions(
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
     idle_after: Duration,
 ) -> IdleSweep {
     let mut sweep = IdleSweep::default();
@@ -338,13 +362,10 @@ pub(crate) fn suspend_idle_acp_sessions(
         if sess.idle.is_suspended() || not_yet(sess, &mut sweep) {
             continue;
         }
-        // 发件队列里还有发给它、没送到的信：挂起会让交出去的那几封跟着宿主一起没了。
+        // 发件队列里还有发给它、没送到的信：挂起会让交出去的那几封跟着进程一起没了。
         if acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some()
             || crate::peer_messages::has_undelivered(&id)
         {
-            continue;
-        }
-        if is_known_remote_session(remote_sessions, RemoteSessionKind::Acp, &id) != Some(false) {
             continue;
         }
         let Ok(_lifecycle) = slot.lifecycle.try_lock() else {
@@ -365,11 +386,15 @@ pub(crate) fn suspend_idle_acp_sessions(
             continue;
         };
         if retire_acp_runtime(sess) {
+            sess.reduced
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .trim_to_current_turn();
             sess.idle.mark_suspended();
             crate::dlog(&format!("acp 闲置挂起 id={id}"));
         } else {
             // 留下的 unreaped_pid 挡住后面的挂起和拉起，下次拉起前会先复核它。
-            eprintln!("[acp] 闲置挂起会话 {id} 时未能证明宿主已退出");
+            eprintln!("[acp] 闲置挂起会话 {id} 时未能证明 runtime 已退出");
         }
     }
     sweep

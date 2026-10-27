@@ -156,28 +156,6 @@ fn changed_acp_runtime_spec_relaunches_live_session() {
 }
 
 #[test]
-fn runtime_spec_fingerprint_does_not_serialize_secrets() {
-    let launch = smelt_core::agent_kind::ConversationLaunchSpec::from_command("copilot --acp");
-    let mut original_env = BTreeMap::new();
-    original_env.insert("PLUGIN_TOKEN".to_string(), "original-token".to_string());
-
-    let before_handoff = acp_runtime_spec_fingerprint(&launch, &original_env);
-    assert_eq!(
-        before_handoff,
-        acp_runtime_spec_fingerprint(&launch, &original_env),
-        "相同 runtime 规格在 daemon exec 前后必须稳定，不能误重启仍存活的宿主"
-    );
-
-    let mut changed_env = original_env;
-    changed_env.insert("PLUGIN_TOKEN".to_string(), "rotated-token".to_string());
-    assert_ne!(
-        before_handoff,
-        acp_runtime_spec_fingerprint(&launch, &changed_env),
-        "凭据真的变化时仍必须触发 runtime 重启"
-    );
-}
-
-#[test]
 fn blank_restore_policy_survives_replay_reset_and_success_becomes_strict() {
     let mut state = AcpRestoreState::Fresh;
     assert_eq!(
@@ -3484,9 +3462,8 @@ fn open_acp_session_once(
 
 #[test]
 fn concurrent_open_same_id_keeps_one_registry_slot() {
-    let acp_sessions: AcpSessions = Arc::new(acp_registry::AcpRegistry::new_same_process(
-        Arc::new(RwLock::new(())),
-    ));
+    let acp_sessions: AcpSessions =
+        Arc::new(acp_registry::AcpRegistry::new(Arc::new(RwLock::new(()))));
     let subscribers = new_event_hub();
     let barrier = Arc::new(std::sync::Barrier::new(8));
 
@@ -3516,9 +3493,8 @@ fn concurrent_open_same_id_keeps_one_registry_slot() {
 
 #[test]
 fn kill_does_not_unpublish_until_lifecycle_is_free() {
-    let acp_sessions: AcpSessions = Arc::new(acp_registry::AcpRegistry::new_same_process(
-        Arc::new(RwLock::new(())),
-    ));
+    let acp_sessions: AcpSessions =
+        Arc::new(acp_registry::AcpRegistry::new(Arc::new(RwLock::new(()))));
     let (old, _) = acp_sessions.reserve_with("acp-race", || {
         make_acp_session_value("acp-race", AcpSessionState::default())
     });
@@ -3629,9 +3605,9 @@ fn reopening_same_id_reuses_existing_session_instead_of_spawning_a_duplicate() {
     );
 }
 
-/// unreaped 重试只 prove、不重杀：活着的陌生组 → false + pid 原样留下，
-/// 调用方不得 spawn。旧语义 ECHILD 直接 true（杀都不杀就放行 spawn），
-/// 收养路径下等于没证明；更不能重杀——该号可能已被复用。
+/// 上次关不掉留下的 pid，重试只观察、不收尸、也不再发信号。活着的进程组
+/// → false，pid 原样留下，调用方不得 spawn。这里再 waitpid 会和上次的 wait 抢；
+/// pid 若已被复用，发信号会误伤。
 #[test]
 fn unreaped_retry_proves_without_killing_strangers() {
     let acp_sessions = new_test_acp_sessions();
@@ -3871,9 +3847,8 @@ fn acp_open_request_rejects_legacy_cmd() {
 fn acp_open_invalid_request_still_returns_ended_snapshot() {
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
-    let acp_sessions: AcpSessions = Arc::new(acp_registry::AcpRegistry::new_same_process(
-        Arc::new(RwLock::new(())),
-    ));
+    let acp_sessions: AcpSessions =
+        Arc::new(acp_registry::AcpRegistry::new(Arc::new(RwLock::new(()))));
     let subscribers = new_event_hub();
     let worker = thread::spawn(move || {
         handle_acp_open(
@@ -4735,4 +4710,3 @@ fn conversation_image_finds_the_original_by_reference() {
     .unwrap();
     assert_eq!(again, thumb);
 }
-

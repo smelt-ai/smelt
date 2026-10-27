@@ -1,7 +1,7 @@
 //! `agent.memory.*` 控制方法：替 Pi 读写智能体记忆的元数据（使用统计、来源）。
 //!
-//! Pi 进程不碰数据库；托管它的会话宿主也不初始化 SQLite。Pi 带着会话 id 和 daemon 发给该
-//! 会话的 capability token 调这里，由主 daemon 经 `smelt-store` 读写主库。记忆层取自会话的
+//! Pi 进程不碰数据库。它带着会话 id 和 daemon 发给该会话的 capability token 调这里，
+//! 由主 daemon 经 `smelt-store` 读写主库。记忆层取自会话的
 //! 启动规格，调用方只能操作自己这个会话的两层记忆。见 `docs/agent-memory.md`。
 
 use std::path::PathBuf;

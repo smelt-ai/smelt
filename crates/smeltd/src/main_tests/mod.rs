@@ -58,8 +58,6 @@ fn make_acp_session_value(
         immediate_delivery: Mutex::new(None),
         unaccepted_prompt: Mutex::new(None),
         provider_hold: AtomicBool::new(false),
-        hosted_handle: Mutex::new(None),
-        host_snapshot_revision: AtomicU64::new(0),
         handle: Mutex::new(None),
         unreaped_pid: Mutex::new(None),
         cwd: None,
@@ -74,7 +72,6 @@ fn make_acp_session_value(
             watchers: Vec::new(),
         }),
         launch_spec: Mutex::new(None),
-        runtime_spec_fingerprint: Mutex::new(None),
         restore_state: Mutex::new(AcpRestoreState::Fresh),
         ephemeral_env: Mutex::new(BTreeMap::new()),
         conversation_binding: Mutex::new(Some(

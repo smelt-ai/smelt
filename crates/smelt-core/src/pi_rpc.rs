@@ -247,82 +247,100 @@ pub fn spawn_pi_rpc(
     std::thread::Builder::new()
         .name(format!("smelt-pi-rpc-{}", &sid[..sid.len().min(12)]))
         .spawn(move || {
-            let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
-            let stderr_drain: Arc<Mutex<Option<smol::Task<()>>>> = Arc::default();
-            let ready = Arc::new(AtomicBool::new(false));
-            let runtime = crate::managed_runtime::sync_managed_pi_agent(&|message| {
-                let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
-            });
-            let runtime = match runtime {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let _ = event_tx.try_send(ConversationEvent::Fatal(error));
-                    return;
-                }
-            };
-            // 要连的 MCP 里有用受管 Bun 启动的（预设都是），先把 Bun 备好，会话期间持有它的
-            // 租约。Pi 自己已经不跑在 Bun 上，没人会为它下载；新装的机器上那条路径不在，
-            // MCP 起不来（spawn … ENOENT）。备不好也照常起 Pi，MCP 那边会如实报错。
-            let _mcp_bun = crate::pi_mcp::uses_managed_bun(
-                &crate::pi_mcp::loaded_mcp_servers_for_launch(&launch.launch),
-            )
-            .then(|| {
-                crate::managed_runtime::sync_managed_bun(&|message| {
+            let event_tx_for_panic = event_tx.clone();
+            let sid_for_panic = sid.clone();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
+                let stderr_drain: Arc<Mutex<Option<smol::Task<()>>>> = Arc::default();
+                let ready = Arc::new(AtomicBool::new(false));
+                let runtime = crate::managed_runtime::sync_managed_pi_agent(&|message| {
                     let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
-                })
-                .inspect_err(|error| {
-                    crate::app_log::error("pi-rpc", &format!("准备 MCP 用的 Bun 失败：{error}"));
-                })
-                .ok()
-            });
-            let had_resume = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
-            let result = smol::block_on(async {
-                let result = run_connection(
-                    &launch,
-                    runtime,
-                    cmd_rx,
-                    event_tx.clone(),
-                    Arc::clone(&stderr_tail),
-                    Arc::clone(&stderr_drain),
-                    stdio_for_thread,
-                    spawn_gate,
-                    in_flight_for_thread,
-                    shutdown_for_thread,
-                    Arc::clone(&ready),
+                });
+                let runtime = match runtime {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = event_tx.try_send(ConversationEvent::Fatal(error));
+                        return;
+                    }
+                };
+                // 要连的 MCP 里有用受管 Bun 启动的（预设都是），先把 Bun 备好，会话期间持有它的
+                // 租约。Pi 自己已经不跑在 Bun 上，没人会为它下载；新装的机器上那条路径不在，
+                // MCP 起不来（spawn … ENOENT）。备不好也照常起 Pi，MCP 那边会如实报错。
+                let _mcp_bun = crate::pi_mcp::uses_managed_bun(
+                    &crate::pi_mcp::loaded_mcp_servers_for_launch(&launch.launch),
                 )
-                .await;
-                // run_connection 返回后进程组已 SIGKILL。stderr drain 必须仍在
-                // 同一个 smol executor 上被 poll，否则 EOF 永远到不了。
-                let drain = if result.is_err() {
-                    stderr_drain.lock().unwrap().take()
-                } else {
-                    None
-                };
-                if let Some(drain) = drain {
-                    drain.await;
-                }
-                result
-            });
-            if let Err(error) = result {
-                let tail = stderr_tail.lock().unwrap().join("\n");
-                let message = if tail.is_empty() {
-                    error
-                } else {
-                    format!("{error}\n--- Pi stderr ---\n{tail}")
-                };
-                crate::app_log::error("pi-rpc", &format!("会话 {sid} 异常终止：{message}"));
-                if had_resume && !ready.load(Ordering::Acquire) {
-                    let failure = if tail.to_ascii_lowercase().contains("no session found") {
-                        ConversationRestoreFailure::HistoryMissing
+                .then(|| {
+                    crate::managed_runtime::sync_managed_bun(&|message| {
+                        let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
+                    })
+                    .inspect_err(|error| {
+                        crate::app_log::error(
+                            "pi-rpc",
+                            &format!("准备 MCP 用的 Bun 失败：{error}"),
+                        );
+                    })
+                    .ok()
+                });
+                let had_resume =
+                    launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
+                let result = smol::block_on(async {
+                    let result = run_connection(
+                        &launch,
+                        runtime,
+                        cmd_rx,
+                        event_tx.clone(),
+                        Arc::clone(&stderr_tail),
+                        Arc::clone(&stderr_drain),
+                        stdio_for_thread,
+                        spawn_gate,
+                        in_flight_for_thread,
+                        shutdown_for_thread,
+                        Arc::clone(&ready),
+                    )
+                    .await;
+                    // run_connection 返回后进程组已 SIGKILL。stderr drain 必须仍在
+                    // 同一个 smol executor 上被 poll，否则 EOF 永远到不了。
+                    let drain = if result.is_err() {
+                        stderr_drain.lock().unwrap().take()
                     } else {
-                        ConversationRestoreFailure::Failed(format!(
-                            "恢复 Pi 历史对话失败：{message}"
-                        ))
+                        None
                     };
-                    let _ = event_tx.try_send(ConversationEvent::RestoreFailed(failure));
-                } else {
-                    let _ = event_tx.try_send(ConversationEvent::Fatal(message));
+                    if let Some(drain) = drain {
+                        drain.await;
+                    }
+                    result
+                });
+                if let Err(error) = result {
+                    let tail = stderr_tail.lock().unwrap().join("\n");
+                    let message = if tail.is_empty() {
+                        error
+                    } else {
+                        format!("{error}\n--- Pi stderr ---\n{tail}")
+                    };
+                    crate::app_log::error("pi-rpc", &format!("会话 {sid} 异常终止：{message}"));
+                    if had_resume && !ready.load(Ordering::Acquire) {
+                        let failure = if tail.to_ascii_lowercase().contains("no session found") {
+                            ConversationRestoreFailure::HistoryMissing
+                        } else {
+                            ConversationRestoreFailure::Failed(format!(
+                                "恢复 Pi 历史对话失败：{message}"
+                            ))
+                        };
+                        let _ = event_tx.try_send(ConversationEvent::RestoreFailed(failure));
+                    } else {
+                        let _ = event_tx.try_send(ConversationEvent::Fatal(message));
+                    }
                 }
+            }));
+            if let Err(payload) = panicked {
+                let message = crate::acp_conn::panic_message(payload.as_ref());
+                crate::app_log::error(
+                    "pi-rpc",
+                    &format!("会话 {sid_for_panic} 驱动异常退出：{message}"),
+                );
+                let _ = event_tx_for_panic.try_send(ConversationEvent::Fatal(format!(
+                    "会话驱动异常退出：{message}"
+                )));
             }
         })
         .expect("spawn smelt Pi RPC thread");
@@ -367,6 +385,7 @@ async fn run_connection(
         launch.cwd.clone(),
         event_tx.clone(),
         outbound_tx.clone(),
+        launch.peer_handler.clone(),
     )?;
     let mut trace = HandshakeTrace {
         started: std::time::Instant::now(),
@@ -374,8 +393,12 @@ async fn run_connection(
     };
     let session_seed_rx = start_session_preload(launch);
     let (child_stdin, child_stdout, child_stderr, child) = {
-        let _spawn_permit = spawn_gate.as_ref().map(|gate| gate.read().unwrap());
-        let mut stdio = stdio_out.lock().unwrap();
+        let _spawn_permit = spawn_gate
+            .as_ref()
+            .map(|gate| gate.read().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        let mut stdio = stdio_out
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if shutdown_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -529,9 +552,9 @@ fn agent_model_from_launch(launch: &ConversationLaunch) -> Option<(String, Strin
 fn daemon_sock_for_child() -> String {
     #[cfg(windows)]
     {
-        if let Ok(name) = smelt_sys::named_pipe::daemon_pipe_path(
-            &crate::daemon_state::smeltd_sock_path(),
-        ) {
+        if let Ok(name) =
+            smelt_sys::named_pipe::daemon_pipe_path(&crate::daemon_state::smeltd_sock_path())
+        {
             return name;
         }
     }
@@ -4683,6 +4706,7 @@ mod tests {
             resume_session_id: None,
             fork_session_id: None,
             fork_cut: None,
+            peer_handler: None,
         }
     }
 
@@ -7897,6 +7921,7 @@ mod tests {
             None,
             event_tx.clone(),
             outbound_tx,
+            None,
         )
         .unwrap();
 
@@ -7925,7 +7950,8 @@ mod tests {
         ))
         .unwrap();
 
-        let mut stream = crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
+        let mut stream =
+            crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
         let wait = serde_json::json!({"op": "wait", "id": started["id"]});
         stream.write_all(format!("{wait}\n").as_bytes()).unwrap();
         let mut line = String::new();
@@ -7985,6 +8011,7 @@ mod tests {
             None,
             event_tx.clone(),
             outbound_tx,
+            None,
         )
         .unwrap();
 
@@ -8018,7 +8045,8 @@ mod tests {
 
         let started_at = std::time::Instant::now();
         let status = loop {
-            let mut stream = crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
+            let mut stream =
+                crate::background_tasks::connect_task_stream(supervisor.socket_path()).unwrap();
             let wait = serde_json::json!({"op": "wait", "id": id});
             stream.write_all(format!("{wait}\n").as_bytes()).unwrap();
             let mut line = String::new();
@@ -8609,7 +8637,11 @@ mod tests {
             .expect("重读完要接着切模型");
         assert_eq!(set["provider"], "minmax");
         assert_eq!(set["modelId"], "minimax-m3.1-flash");
-        assert_eq!(in_flight.load(Ordering::SeqCst), 1, "等 set_model 的回执再还账");
+        assert_eq!(
+            in_flight.load(Ordering::SeqCst),
+            1,
+            "等 set_model 的回执再还账"
+        );
     }
 
     /// 先点了 Pi 还不认识的 A（在等重读），又点了认识的 B：B 是最后的选择，重读回执到了
@@ -8878,7 +8910,10 @@ mod tests {
                 if texts == ["same".to_string()]
         ));
         let requests = rpc_lines(writer.clone());
-        let types: Vec<_> = requests.iter().map(|r| r["type"].as_str().unwrap()).collect();
+        let types: Vec<_> = requests
+            .iter()
+            .map(|r| r["type"].as_str().unwrap())
+            .collect();
         assert_eq!(types, ["set_model", "set_thinking_level", "get_state"]);
         assert_eq!(requests[0]["provider"], "github-copilot");
         assert_eq!(requests[0]["modelId"], "gemini-3.8-flash");
