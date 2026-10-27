@@ -78,12 +78,9 @@ fn outgoing_group() -> SettingGroup {
             for (index, remote) in hub.remotes.iter().enumerate() {
                 let runtime_id = remote.connection.runtime_id.clone();
                 let key = remote.runtime.key().clone();
-                // 连得上就能升，不管兼不兼容（见 `runtime_events::upgrade_remote`）。
-                let can_upgrade = matches!(
-                    remote.status,
-                    crate::runtimes::RuntimeStatus::Online { .. }
-                        | crate::runtimes::RuntimeStatus::Incompatible { .. }
-                );
+                // 跟侧栏机器菜单同一个判断：连得上、而且能远程升级。Windows、macOS 上的运行时
+                // 随那台机器上的 Smelt 一起更新，不给按钮。
+                let can_upgrade = crate::runtimes::runtime_can_upgrade(&key, cx);
                 // 在线时再写走哪条路、多慢；慢了标黄。
                 let (link, link_tone) =
                     crate::runtimes::runtime_link_detail(remote.runtime.key(), cx);
