@@ -9,10 +9,10 @@ use crate::plugins::{InstalledPlugin, PluginSource};
 /// 示例插件仓库，照着它写自己的插件。
 const DEMO_URL: &str = "https://github.com/smelt-ai/smelt-plugin-demo";
 
-pub(super) fn panel_plugin_page(
+pub(super) fn panel_plugin_sections(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
-) -> SettingPage {
+) -> (String, Vec<SettingGroup>) {
     let state = &snapshot.panel_plugins;
     let failed = state
         .plugins
@@ -37,14 +37,12 @@ pub(super) fn panel_plugin_page(
     groups.push(list_group(entity, state));
 
     let count = state.plugins.len();
-    SettingPage::new("面板插件")
-        .description(if failed == 0 {
-            format!("已加载 {count} 个插件，每个插件是右侧 Tool Panel 里的一个页签。")
-        } else {
-            format!("已加载 {count} 个插件，其中 {failed} 个加载失败，原因写在下面。")
-        })
-        .resettable(false)
-        .groups(groups)
+    let description = if failed == 0 {
+        format!("已加载 {count} 个插件，每个插件是右侧 Tool Panel 里的一个页签。")
+    } else {
+        format!("已加载 {count} 个插件，其中 {failed} 个加载失败，原因写在下面。")
+    };
+    (description, groups)
 }
 
 fn source_group(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> SettingGroup {

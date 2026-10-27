@@ -1,6 +1,6 @@
 //! 机器能做的事：侧栏里每台机器那一段标题的 `⋯` 和右键菜单。
 //!
-//! 添加、移除机器和看连接状态在设置的「机器」页（`SettingsSection::CollaborationMachines`）。
+//! 添加、移除机器和看连接状态在设置的「远程连接与配对」页（`SettingsSection::Remote`）。
 
 use std::rc::Rc;
 
@@ -23,11 +23,7 @@ struct MachineAction {
 }
 
 /// 一台机器能做的事。远程机器多出重命名和移除。
-fn machine_actions(
-    runtime: Runtime,
-    workspace: Entity<Workspace>,
-    cx: &App,
-) -> Vec<MachineAction> {
+fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> Vec<MachineAction> {
     let key = runtime.key().clone();
     let mut actions = vec![
         MachineAction {

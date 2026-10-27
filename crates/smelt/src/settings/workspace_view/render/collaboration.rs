@@ -32,11 +32,19 @@ fn last_seen_text(device: &smelt_model::remote_config::DeviceInfo) -> String {
     }
 }
 
-pub(super) fn remote_page(
+pub(super) fn remote_pairing_page(
     _entity: Entity<Workspace>,
     _snapshot: &SettingsRenderSnapshot,
     _cx: &App,
 ) -> SettingPage {
+    SettingPage::new("远程连接与配对")
+        .description("已连接的远程机器，以及这台机器的 iroh 远程访问和手机扫码配对。")
+        .resettable(false)
+        .group(machines_group())
+        .groups(remote_access_groups())
+}
+
+fn remote_access_groups() -> Vec<SettingGroup> {
     let access_group = SettingGroup::new().items(vec![
         SettingItem::new(
             "开启远程访问",
@@ -248,15 +256,17 @@ pub(super) fn remote_page(
         }),
     ]);
 
-    SettingPage::new("远程访问")
-        .description("让配对过的电脑和手机经 iroh 连这台机器的运行时。")
-        .group(access_group)
-        .group(devices_group)
+    vec![
+        access_group
+            .title("手机远程")
+            .description("让配对过的电脑和手机经 iroh 连这台机器的运行时。"),
+        devices_group,
+    ]
 }
 
 /// 这台桌面连着的其他机器。每台机器的日常操作（打开项目、远程桌面、重命名、中继）在侧栏
 /// 它那一段标题的 `⋯` 菜单里，这里管添加、看连接状态和移除。
-pub(super) fn machines_page() -> SettingPage {
+fn machines_group() -> SettingGroup {
     let runtimes_group = SettingGroup::new().items(vec![
         SettingItem::new(
             "配对串",
@@ -396,8 +406,7 @@ pub(super) fn machines_page() -> SettingPage {
         }),
     ]);
 
-    SettingPage::new("机器")
+    runtimes_group
+        .title("机器")
         .description("添加其他机器上的运行时，在它们上面开项目、跑会话。")
-        .resettable(false)
-        .group(runtimes_group)
 }

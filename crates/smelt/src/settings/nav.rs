@@ -6,62 +6,64 @@
 
 use gpui_component::{Icon, IconName};
 
-/// 设置窗口当前选中的内容页。深链接（检查更新、登录）也走这里，不再用页下标。
+/// 设置窗口当前选中的内容页。深链接（检查更新、外观、机器、资源）也走这里。
+///
+/// 原先按子功能拆开的叶子页收成 7 个高内聚页。外观深链接走 [`Self::appearance`]；
+/// macOS 上的检查更新深链接走 `maintenance_update`，落到「系统更新与维护」。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SettingsSection {
+    /// 主题、界面字号、终端字体、窗口与背景。
     #[default]
-    AppearanceTheme,
-    AppearanceTerminal,
-    AppearanceWindow,
-    AgentRuntime,
-    AgentLaunch,
-    AgentWorkspace,
-    AgentNotify,
-    AgentHooks,
-    /// 这台桌面连着的机器：添加、看状态、移除。
-    CollaborationMachines,
-    CollaborationRemote,
-    /// 应用更新只在 macOS 上提供（设计文档 D4）。
-    #[cfg(target_os = "macos")]
-    MaintenanceUpdate,
-    MaintenanceDaemon,
-    /// 界面、守护进程和各会话的 CPU 与内存。停在这一页时才采样。
-    MaintenanceResources,
-    MaintenanceStorage,
+    Appearance,
+    /// 原「通知」。
+    Notifications,
     Shortcuts,
-    /// Tool Panel 里的插件：列出、导入、删除、重新加载。
-    PanelPlugins,
+    /// Agent 运行环境、新建与启动、对话与工作区。
+    AgentEnvironment,
+    /// 面板插件和 Agent Hooks。
+    PluginsAndHooks,
+    /// 已连接的远程机器，以及手机 iroh 远程访问。
+    Remote,
+    /// 资源占用、应用更新（仅 macOS 展示该分组）、后台服务、存储清理。
+    /// 停在这一页时才采样资源。
+    Maintenance,
 }
 
 impl SettingsSection {
     pub fn appearance() -> Self {
-        Self::AppearanceTheme
+        Self::Appearance
     }
 
+    /// 检查更新深链接。更新分组只在 macOS 上画出来，页面本身各平台都有。
     #[cfg(target_os = "macos")]
     pub fn maintenance_update() -> Self {
-        Self::MaintenanceUpdate
+        Self::Maintenance
     }
 
     pub fn element_key(&self) -> gpui::SharedString {
         match self {
-            Self::AppearanceTheme => "appearance-theme".into(),
-            Self::AppearanceTerminal => "appearance-terminal".into(),
-            Self::AppearanceWindow => "appearance-window".into(),
-            Self::AgentRuntime => "agent-runtime".into(),
-            Self::AgentLaunch => "agent-launch".into(),
-            Self::AgentWorkspace => "agent-workspace".into(),
-            Self::AgentNotify => "agent-notify".into(),
-            Self::AgentHooks => "agent-hooks".into(),
-            Self::CollaborationMachines => "collaboration-machines".into(),
-            Self::CollaborationRemote => "collaboration-remote".into(),
-            #[cfg(target_os = "macos")]
-            Self::MaintenanceUpdate => "maintenance-update".into(),
-            Self::MaintenanceDaemon => "maintenance-daemon".into(),
-            Self::MaintenanceResources => "maintenance-resources".into(),
-            Self::MaintenanceStorage => "maintenance-storage".into(),
+            Self::Appearance => "appearance".into(),
+            Self::Notifications => "notifications".into(),
             Self::Shortcuts => "shortcuts".into(),
-            Self::PanelPlugins => "panel-plugins".into(),
+            Self::AgentEnvironment => "agent-environment".into(),
+            Self::PluginsAndHooks => "plugins-hooks".into(),
+            Self::Remote => "remote".into(),
+            Self::Maintenance => "maintenance".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsCategoryId {
+    General,
+    AgentAndSystem,
+}
+
+impl SettingsCategoryId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::AgentAndSystem => "agent-and-system",
         }
     }
 }
@@ -76,8 +78,10 @@ pub struct SettingsNavLeaf {
 
 #[derive(Clone)]
 pub struct SettingsNavCategory {
+    pub id: SettingsCategoryId,
     pub title: &'static str,
     pub keywords: &'static [&'static str],
+    pub default_open: bool,
     pub children: Vec<SettingsNavLeaf>,
 }
 
@@ -85,13 +89,15 @@ pub struct SettingsNavCategory {
 pub fn settings_nav() -> Vec<SettingsNavCategory> {
     vec![
         SettingsNavCategory {
-            title: "通用",
-            keywords: &["常规", "偏好设置"],
+            id: SettingsCategoryId::General,
+            title: "通用与交互",
+            keywords: &["通用", "常规", "偏好设置", "交互"],
+            default_open: true,
             children: vec![
                 leaf(
-                    "主题与界面",
+                    "外观、主题与终端",
                     IconName::Palette,
-                    SettingsSection::AppearanceTheme,
+                    SettingsSection::Appearance,
                     &[
                         "外观",
                         "主题",
@@ -111,30 +117,13 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "字体大小",
                         "调整字号",
                         "缩放",
-                    ],
-                ),
-                leaf(
-                    "终端",
-                    IconName::SquareTerminal,
-                    SettingsSection::AppearanceTerminal,
-                    &[
-                        "外观",
                         "terminal",
+                        "终端",
                         "终端字号",
                         "代码字体",
                         "等宽字体",
                         "字体",
-                        "字体大小",
-                        "调整字号",
                         "输出",
-                    ],
-                ),
-                leaf(
-                    "窗口与背景",
-                    IconName::GalleryVerticalEnd,
-                    SettingsSection::AppearanceWindow,
-                    &[
-                        "外观",
                         "窗口",
                         "背景",
                         "背景图",
@@ -147,6 +136,33 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "标题栏玻璃",
                         "玻璃",
                         "液态玻璃",
+                        "毛玻璃",
+                    ],
+                ),
+                leaf(
+                    "通知与提醒",
+                    IconName::Bell,
+                    SettingsSection::Notifications,
+                    &[
+                        "通知",
+                        "通知与提醒",
+                        "Agent",
+                        "Agent通知",
+                        "提醒",
+                        "notification",
+                        "系统通知",
+                        "等待批准通知",
+                        "等待输入通知",
+                        "任务完成通知",
+                        "任务失败通知",
+                        "终端响铃通知",
+                        "审批",
+                        "批准",
+                        "输入",
+                        "完成",
+                        "失败",
+                        "响铃",
+                        "bell",
                     ],
                 ),
                 leaf(
@@ -164,44 +180,36 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "command",
                     ],
                 ),
-                leaf(
-                    "面板插件",
-                    Icon::new(gpui_kit_assets::IconName::Puzzle),
-                    SettingsSection::PanelPlugins,
-                    &[
-                        "插件",
-                        "plugin",
-                        "扩展",
-                        "Tool Panel",
-                        "右侧面板",
-                        "导入插件",
-                        "安装插件",
-                        "删除插件",
-                        "卸载插件",
-                        "重新加载",
-                        "gpui-shell",
-                    ],
-                ),
             ],
         },
         SettingsNavCategory {
-            title: "模型与 Agent",
-            keywords: &["Agent", "智能体", "AI"],
+            id: SettingsCategoryId::AgentAndSystem,
+            title: "智能体与系统",
+            keywords: &["智能体与系统"],
+            default_open: true,
             children: vec![
                 leaf(
-                    "Agent 运行环境",
+                    "模型与智能体环境",
                     IconName::Bot,
-                    SettingsSection::AgentRuntime,
+                    SettingsSection::AgentEnvironment,
                     &[
-                        "Agent", "会话", "cli", "安装", "版本", "检测", "路径", "claude", "codex",
-                        "copilot", "grok", "cursor", "opencode", "kiro", "pi",
-                    ],
-                ),
-                leaf(
-                    "新建与启动",
-                    IconName::Play,
-                    SettingsSection::AgentLaunch,
-                    &[
+                        "Agent",
+                        "智能体",
+                        "AI",
+                        "会话",
+                        "cli",
+                        "安装",
+                        "版本",
+                        "检测",
+                        "路径",
+                        "claude",
+                        "codex",
+                        "copilot",
+                        "grok",
+                        "cursor",
+                        "opencode",
+                        "kiro",
+                        "pi",
                         "快捷启动项",
                         "启动",
                         "launch",
@@ -211,22 +219,13 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "新建菜单",
                         "项目菜单",
                         "终端",
-                    ],
-                ),
-                leaf(
-                    "对话与工作区",
-                    IconName::Settings2,
-                    SettingsSection::AgentWorkspace,
-                    &[
                         "Agent 对话",
-                        "会话",
                         "adapter",
                         "适配器",
                         "workspace",
                         "工作区",
                         "启动命令",
                         "参数",
-                        "智能体",
                         "预设",
                         "prompt",
                         "persona",
@@ -239,44 +238,33 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                     ],
                 ),
                 leaf(
-                    "通知",
-                    IconName::Bell,
-                    SettingsSection::AgentNotify,
+                    "插件与 Hooks",
+                    Icon::new(gpui_kit_assets::IconName::Puzzle),
+                    SettingsSection::PluginsAndHooks,
                     &[
-                        "Agent",
-                        "Agent通知",
-                        "提醒",
-                        "notification",
-                        "等待批准通知",
-                        "等待输入通知",
-                        "任务完成通知",
-                        "任务失败通知",
-                        "终端响铃通知",
-                        "审批",
-                        "批准",
-                        "输入",
-                        "完成",
-                        "失败",
-                        "响铃",
-                        "bell",
+                        "插件",
+                        "plugin",
+                        "扩展",
+                        "Tool Panel",
+                        "右侧面板",
+                        "导入插件",
+                        "安装插件",
+                        "删除插件",
+                        "卸载插件",
+                        "重新加载",
+                        "gpui-shell",
+                        "hook",
+                        "hooks",
+                        "Agent Hooks",
+                        "通知接入",
+                        "权限接入",
+                        "配置文件",
                     ],
                 ),
                 leaf(
-                    "Agent Hooks",
-                    IconName::Network,
-                    SettingsSection::AgentHooks,
-                    &["hook", "hooks", "通知接入", "权限接入", "配置文件"],
-                ),
-            ],
-        },
-        SettingsNavCategory {
-            title: "工作区与远程",
-            keywords: &["项目"],
-            children: vec![
-                leaf(
-                    "机器",
-                    Icon::new(gpui_kit_assets::IconName::Server),
-                    SettingsSection::CollaborationMachines,
+                    "远程连接与配对",
+                    IconName::Globe,
+                    SettingsSection::Remote,
                     &[
                         "多机器",
                         "远程机器",
@@ -288,13 +276,6 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "smeltd pair",
                         "离线",
                         "版本不兼容",
-                    ],
-                ),
-                leaf(
-                    "手机远程",
-                    IconName::Globe,
-                    SettingsSection::CollaborationRemote,
-                    &[
                         "远程访问",
                         "开启远程",
                         "Relay 地址",
@@ -310,19 +291,13 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "分享",
                         "只读",
                         "写入",
+                        "项目",
                     ],
                 ),
-            ],
-        },
-        SettingsNavCategory {
-            title: "系统",
-            keywords: &["维护", "高级"],
-            children: vec![
-                #[cfg(target_os = "macos")]
                 leaf(
-                    "应用更新",
-                    IconName::Redo,
-                    SettingsSection::MaintenanceUpdate,
+                    "系统更新与维护",
+                    IconName::Cpu,
+                    SettingsSection::Maintenance,
                     &[
                         "软件版本",
                         "应用版本",
@@ -337,31 +312,18 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "生产版",
                         "内测版",
                         "自动更新",
-                    ],
-                ),
-                leaf(
-                    "后台服务",
-                    IconName::Cpu,
-                    SettingsSection::MaintenanceDaemon,
-                    &[
                         "smeltd",
                         "守护进程",
                         "守护",
                         "后台",
                         "服务",
+                        "后台服务",
                         "进程",
                         "重启",
                         "重启守护进程",
                         "重启以升级",
                         "会话服务",
                         "卡死",
-                    ],
-                ),
-                leaf(
-                    "资源占用",
-                    IconName::MemoryStick,
-                    SettingsSection::MaintenanceResources,
-                    &[
                         "资源",
                         "性能",
                         "内存",
@@ -370,16 +332,8 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "占用",
                         "卡",
                         "慢",
-                        "进程",
                         "活动监视器",
                         "GPUI",
-                    ],
-                ),
-                leaf(
-                    "存储清理",
-                    IconName::HardDrive,
-                    SettingsSection::MaintenanceStorage,
-                    &[
                         "残留数据清理",
                         "清理",
                         "残留",
@@ -391,6 +345,9 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "旧数据",
                         "历史",
                         "~/.smelt",
+                        "维护",
+                        "高级",
+                        "系统",
                     ],
                 ),
             ],
@@ -508,9 +465,9 @@ mod tests {
         nav.iter().map(|category| category.title).collect()
     }
 
-    fn child_titles(nav: &[SettingsNavCategory], title: &str) -> Vec<String> {
+    fn child_titles(nav: &[SettingsNavCategory], id: SettingsCategoryId) -> Vec<String> {
         nav.iter()
-            .find(|category| category.title == title)
+            .find(|category| category.id == id)
             .map(|category| {
                 category
                     .children
@@ -530,73 +487,51 @@ mod tests {
     }
 
     #[test]
-    fn nav_exposes_task_oriented_groups_as_independent_sections() {
+    fn nav_exposes_two_groups_and_seven_pages() {
         let nav = settings_nav();
+        assert_eq!(titles(&nav), ["通用与交互", "智能体与系统"]);
         assert_eq!(
-            titles(&nav),
-            ["通用", "模型与 Agent", "工作区与远程", "系统"]
+            child_titles(&nav, SettingsCategoryId::General),
+            ["外观、主题与终端", "通知与提醒", "键盘快捷键"]
         );
         assert_eq!(
-            child_titles(&nav, "通用"),
-            ["主题与界面", "终端", "窗口与背景", "键盘快捷键", "面板插件"]
-        );
-        assert_eq!(
-            child_titles(&nav, "模型与 Agent"),
+            child_titles(&nav, SettingsCategoryId::AgentAndSystem),
             [
-                "Agent 运行环境",
-                "新建与启动",
-                "对话与工作区",
-                "通知",
-                "Agent Hooks"
+                "模型与智能体环境",
+                "插件与 Hooks",
+                "远程连接与配对",
+                "系统更新与维护"
             ]
         );
-        assert_eq!(
-            child_titles(&nav, "工作区与远程"),
-            ["机器", "手机远程"]
-        );
-        // 应用更新只在 macOS 上提供：替换的是 .app 包。
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            child_titles(&nav, "系统"),
-            ["应用更新", "后台服务", "资源占用", "存储清理"]
-        );
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            child_titles(&nav, "系统"),
-            ["后台服务", "资源占用", "存储清理"]
-        );
-
-        let general = nav
+        let sections = nav
             .iter()
-            .find(|category| category.title == "通用")
-            .unwrap();
-        let sections = general
-            .children
-            .iter()
+            .flat_map(|category| category.children.iter())
             .map(|child| child.section.clone())
             .collect::<Vec<_>>();
         assert_eq!(
             sections,
             [
-                SettingsSection::AppearanceTheme,
-                SettingsSection::AppearanceTerminal,
-                SettingsSection::AppearanceWindow,
+                SettingsSection::Appearance,
+                SettingsSection::Notifications,
                 SettingsSection::Shortcuts,
-                SettingsSection::PanelPlugins,
+                SettingsSection::AgentEnvironment,
+                SettingsSection::PluginsAndHooks,
+                SettingsSection::Remote,
+                SettingsSection::Maintenance,
             ]
-        );
-        assert_ne!(
-            sections[0], sections[1],
-            "子菜单必须指向不同内容页，不能共用一个滚动页"
         );
     }
 
     #[test]
-    fn every_group_has_pages() {
+    fn nav_categories_are_default_open_two_level_branches() {
         let nav = settings_nav();
         assert!(
             nav.iter().all(|category| !category.children.is_empty()),
-            "分组下面必须有页面，不能混入同级叶子"
+            "一级分类下面必须有二级页面，不能混入同级叶子"
+        );
+        assert!(
+            nav.iter().all(|category| category.default_open),
+            "所有一级分类都应默认展开，让二级页面直接可见"
         );
     }
 
@@ -604,16 +539,21 @@ mod tests {
     fn search_filters_visible_entries_without_changing_page_structure() {
         let nav = settings_nav();
         let filtered = filter_settings_nav(&nav, "守护");
-        assert_eq!(titles(&filtered), ["系统"]);
+        assert_ne!(
+            filtered[0].id, nav[0].id,
+            "搜索会让分类换位，折叠状态必须按 SettingsCategoryId 记账，不能按下标"
+        );
+        assert_eq!(filtered[0].id, SettingsCategoryId::AgentAndSystem);
+        assert_eq!(titles(&filtered), ["智能体与系统"]);
         assert_eq!(
-            child_titles(&filtered, "系统"),
-            ["后台服务"]
+            child_titles(&filtered, SettingsCategoryId::AgentAndSystem),
+            ["系统更新与维护"]
         );
 
         let by_category = filter_settings_nav(&nav, "通用");
         assert_eq!(
-            child_titles(&by_category, "通用").len(),
-            5
+            child_titles(&by_category, SettingsCategoryId::General).len(),
+            3
         );
     }
 
@@ -621,58 +561,59 @@ mod tests {
     fn search_understands_user_tasks_and_multiple_terms() {
         let nav = settings_nav();
 
-        assert!(
+        assert_eq!(
             child_titles(
                 &filter_settings_nav(&nav, "模型"),
-                "模型与 Agent",
-            )
-            .is_empty(),
-            "分类标题里的一个宽泛词不能把整组结果都留下"
+                SettingsCategoryId::AgentAndSystem,
+            ),
+            ["模型与智能体环境"],
+            "分类标题里的一个宽泛词不能把同组其它页都留下"
         );
         assert_eq!(
             child_titles(
                 &filter_settings_nav(&nav, "agent 通知"),
-                "模型与 Agent",
+                SettingsCategoryId::General,
             ),
-            ["通知", "Agent Hooks"]
+            ["通知与提醒"]
+        );
+        assert!(
+            child_titles(
+                &filter_settings_nav(&nav, "agent 通知"),
+                SettingsCategoryId::AgentAndSystem,
+            )
+            .contains(&"插件与 Hooks".to_string()),
+            "「通知接入」仍应命中插件与 Hooks"
         );
         assert_eq!(
-            child_titles(
-                &filter_settings_nav(&nav, "agent通知"),
-                "模型与 Agent",
-            ),
-            ["通知"]
+            matching_sections(&nav, "agent通知"),
+            [SettingsSection::Notifications]
         );
         assert_eq!(
-            child_titles(
-                &filter_settings_nav(&nav, "后台服务"),
-                "系统",
-            ),
-            ["后台服务"]
+            matching_sections(&nav, "后台服务"),
+            [SettingsSection::Maintenance]
         );
         assert_eq!(
-            child_titles(
-                &filter_settings_nav(&nav, "清缓存"),
-                "系统",
-            ),
-            ["存储清理"]
+            matching_sections(&nav, "清缓存"),
+            [SettingsSection::Maintenance]
         );
         assert_eq!(
-            child_titles(
-                &filter_settings_nav(&nav, "预设 prompt"),
-                "模型与 Agent",
-            ),
-            ["对话与工作区"]
+            matching_sections(&nav, "预设 prompt"),
+            [SettingsSection::AgentEnvironment]
         );
 
         for (query, expected) in [
-            ("任务完成通知", SettingsSection::AgentNotify),
-            ("Relay 地址", SettingsSection::CollaborationRemote),
-            ("添加机器", SettingsSection::CollaborationMachines),
-            ("内存占用", SettingsSection::MaintenanceResources),
-            ("导入插件", SettingsSection::PanelPlugins),
-            #[cfg(target_os = "macos")]
-            ("自动下载安装", SettingsSection::MaintenanceUpdate),
+            ("任务完成通知", SettingsSection::Notifications),
+            ("Relay 地址", SettingsSection::Remote),
+            ("添加机器", SettingsSection::Remote),
+            ("内存占用", SettingsSection::Maintenance),
+            ("导入插件", SettingsSection::PluginsAndHooks),
+            ("自动下载安装", SettingsSection::Maintenance),
+            ("终端字号", SettingsSection::Appearance),
+            ("毛玻璃", SettingsSection::Appearance),
+            ("背景图", SettingsSection::Appearance),
+            ("守护", SettingsSection::Maintenance),
+            ("hook", SettingsSection::PluginsAndHooks),
+            ("快捷启动项", SettingsSection::AgentEnvironment),
         ] {
             assert_eq!(matching_sections(&nav, query), [expected], "query: {query}");
         }
@@ -687,14 +628,9 @@ mod tests {
             .flat_map(|category| category.children.iter())
             .map(|child| child.section.clone())
             .collect::<Vec<_>>();
-
-        // 少掉的一页是 macOS 的「应用更新」。
-        #[cfg(target_os = "macos")]
-        let destination_count = 16;
-        #[cfg(not(target_os = "macos"))]
-        let destination_count = 15;
-        assert_eq!(visible_destinations.len(), destination_count);
+        assert_eq!(visible_destinations.len(), 7);
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
+        assert!(visible_destinations.contains(&SettingsSection::Maintenance));
     }
 
     #[test]
@@ -709,15 +645,12 @@ mod tests {
     }
 
     #[test]
-    fn deep_links_point_at_content_sections() {
-        assert_eq!(
-            SettingsSection::appearance(),
-            SettingsSection::AppearanceTheme
-        );
+    fn deep_links_point_at_merged_pages() {
+        assert_eq!(SettingsSection::appearance(), SettingsSection::Appearance);
         #[cfg(target_os = "macos")]
         assert_eq!(
             SettingsSection::maintenance_update(),
-            SettingsSection::MaintenanceUpdate
+            SettingsSection::Maintenance
         );
     }
 }

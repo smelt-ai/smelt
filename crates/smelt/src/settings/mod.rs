@@ -1,5 +1,5 @@
-//! 设置面板：外观 / 模型 / 会话与 Agent / 协作 / 插件 / 维护 / 快捷键，含独立
-//! 设置窗口的渲染逻辑。左侧是分类和子菜单，每个子菜单对应独立内容页。
+//! 设置面板：通用与交互、智能体与系统，共 7 个高内聚页，含独立设置窗口的渲染逻辑。
+//! 左侧是默认展开的两级导航，每个二级入口对应独立内容页。
 //!
 //! 跟 git_panel / file_tree 同一个套路：从 main.rs 拆出来的 `impl Workspace`
 //! 方法 + 独立类型/函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
@@ -69,8 +69,8 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
-pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
 pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
+pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
 
 // ===================== 外观 / 启动 配置类型 =====================
 

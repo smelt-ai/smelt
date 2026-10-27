@@ -1,54 +1,32 @@
-//! 设置页：模型与 Agent（运行环境 / 新建与启动 / 对话工作区 / 通知 / Hooks）。
+//! 设置页：模型与智能体环境、通知、Agent Hooks。
 
 use super::*;
 use smelt_ui::IconAction as _;
 
-pub(super) fn runtime_page(
+pub(super) fn environment_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    wrap_agent_page(
-        "Agent 运行环境",
-        Some("查看 Smelt 用于启动 Agent 对话的内置运行时与本机 CLI 状态。"),
-        0,
-        entity,
-        snapshot,
-        cx,
-    )
-}
-
-pub(super) fn launch_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingPage {
-    wrap_agent_page(
-        "新建与启动",
-        Some("管理项目行“+”菜单中显示的终端与 Agent 启动命令。"),
-        2,
-        entity,
-        snapshot,
-        cx,
-    )
-}
-
-pub(super) fn workspace_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingPage {
-    wrap_agent_page(
-        "对话与工作区",
-        Some(
+    let groups = agent_groups(entity, snapshot, cx);
+    SettingPage::new("模型与智能体环境")
+        .description("管理 Agent CLI、启动命令，以及对话与工作区。")
+        .group(
+            groups
+                .runtime
+                .title("运行环境")
+                .description("查看 Smelt 用于启动 Agent 对话的内置运行时与本机 CLI 状态。"),
+        )
+        .group(
+            groups
+                .launch
+                .title("新建与启动")
+                .description("管理项目行“+”菜单中显示的终端与 Agent 启动命令。"),
+        )
+        .group(groups.workspace.title("对话与工作区").description(
             "管理执行引擎启动命令、额外 workspace 与跨 Agent 通讯。智能体定义请在\
              主窗口左侧「智能体」中管理；API key 与网关地址在「Pi 模型」页面。",
-        ),
-        3,
-        entity,
-        snapshot,
-        cx,
-    )
+        ))
 }
 
 pub(super) fn notify_page(
@@ -56,57 +34,33 @@ pub(super) fn notify_page(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    wrap_agent_page(
-        "通知",
-        Some("选择哪些 Agent 状态和终端事件需要提醒你。"),
-        1,
-        entity,
-        snapshot,
-        cx,
-    )
+    let groups = agent_groups(entity, snapshot, cx);
+    SettingPage::new("通知与提醒")
+        .description("选择哪些 Agent 状态和终端事件需要提醒你。")
+        .group(groups.notify)
 }
 
-pub(super) fn hooks_page(
+pub(super) fn hooks_group(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
-) -> SettingPage {
-    wrap_agent_page(
-        "Agent Hooks",
-        Some("将 Smelt 通知与权限处理接入本机 Agent 配置。"),
-        4,
-        entity,
-        snapshot,
-        cx,
-    )
+) -> SettingGroup {
+    agent_groups(entity, snapshot, cx).hooks
 }
 
-fn wrap_agent_page(
-    title: &'static str,
-    description: Option<&'static str>,
-    group_ix: usize,
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingPage {
-    // agent_groups 顺序：0 运行环境 / 1 通知 / 2 新建与启动 / 3 对话与工作区 / 4 Hooks
-    let group = agent_groups(entity, snapshot, cx)
-        .into_iter()
-        .nth(group_ix)
-        .expect("agent 设置分组下标应对应 wrap_agent_page 的调用");
-    let page = SettingPage::new(title);
-    if let Some(description) = description {
-        page.description(description).group(group)
-    } else {
-        page.group(group)
-    }
+struct AgentSettingGroups {
+    runtime: SettingGroup,
+    notify: SettingGroup,
+    launch: SettingGroup,
+    workspace: SettingGroup,
+    hooks: SettingGroup,
 }
 
 fn agent_groups(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     _cx: &App,
-) -> Vec<SettingGroup> {
+) -> AgentSettingGroups {
     // —— 启动：项目「+」下拉菜单的可配置启动项 ——
     // Settings 的 list 测量项高度时，百分比宽度（w_full）经常解析不到确定父宽，
     // 卡片会缩成「内容宽」——输入框只露出几个字。这里用窗口视口算绝对像素宽。
@@ -235,8 +189,8 @@ fn agent_groups(
                     .keywords(["快捷启动", "launch", "命令", "claude", "codex", "copilot"]),
                 );
 
-    vec![
-            SettingGroup::new()
+    AgentSettingGroups {
+            runtime: SettingGroup::new()
                 .item(SettingItem::render({
                     let runtime_entity = entity.clone();
                     move |_, _, cx: &mut App| {
@@ -412,7 +366,7 @@ fn agent_groups(
                     "kiro",
                     "pi",
                 ])),
-            SettingGroup::new()
+            notify: SettingGroup::new()
                 .item(
                     SettingItem::new(
                         "系统通知权限",
@@ -551,8 +505,8 @@ fn agent_groups(
                     .description("终端输出 BEL 控制字符时显示普通信息提醒。")
                     .keywords(["通知", "notification", "响铃", "bell"]),
                 ),
-            launch_group,
-            SettingGroup::new()
+            launch: launch_group,
+            workspace: SettingGroup::new()
                 // 按 `ConversationAgentKind::ALL` 迭代，不逐家手写：加一家 agent 不该
                 // 需要记得回到设置页再抄一遍。
                 .items(
@@ -704,7 +658,7 @@ fn agent_groups(
                     })
                     .keywords(["workspace", "claude-quant", "config dir", "多工作区", "agent"]),
                 ),
-            SettingGroup::new()
+            hooks: SettingGroup::new()
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
                     // 状态由运行时检测，这里只读设置窗口打开时取回的缓存。
                     let (hook_status, notify_path, busy) = cx
@@ -811,5 +765,5 @@ fn agent_groups(
                         )
                         .into_any_element()
                 })),
-            ]
+    }
 }

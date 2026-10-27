@@ -1,41 +1,37 @@
-//! 设置页：系统（更新、后台服务、存储清理）。
+//! 设置页：系统（资源占用、更新、后台服务、存储清理）。
 
 use super::*;
 #[cfg(target_os = "macos")]
 use gpui_component::tab::{Tab, TabBar};
 
-/// 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。Windows 上不提供这一页。
-#[cfg(target_os = "macos")]
-pub(super) fn update_page(
+pub(super) fn system_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    SettingPage::new("应用更新")
-        .description("检查 Smelt 版本，选择更新通道和自动下载方式。")
+    // 资源占用放最前：侧栏「资源占用」和这一页本身都从 CPU / 内存与展开项开始。
+    let mut groups =
+        crate::resource_monitor::resources_groups(entity.clone(), snapshot.resources.clone());
+    // 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。
+    #[cfg(target_os = "macos")]
+    groups.push(
+        update_group(entity.clone(), snapshot, cx)
+            .title("应用更新")
+            .description("检查 Smelt 版本，选择更新通道和自动下载方式。"),
+    );
+    groups.push(
+        daemon_group(entity, snapshot, cx)
+            .title("后台服务")
+            .description("查看或维护承载本机终端与 Agent 会话的 smeltd 服务。"),
+    );
+    groups.push(storage_group(cx).title("存储清理").description(
+        "清理已经没人读写的残留：instincts 的 smelt.db、根目录\
+                 调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
+    ));
+    SettingPage::new("系统更新与维护")
+        .description("资源占用、应用更新、后台服务和存储清理。")
         .resettable(false)
-        .group(update_group(entity, snapshot, cx))
-}
-
-pub(super) fn daemon_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingPage {
-    SettingPage::new("后台服务")
-        .description("查看或维护承载本机终端与 Agent 会话的 smeltd 服务。")
-        .resettable(false)
-        .group(daemon_group(entity, snapshot, cx))
-}
-
-pub(super) fn storage_page(cx: &App) -> SettingPage {
-    SettingPage::new("存储清理")
-        .description(
-            "清理已经没人读写的残留：instincts 的 smelt.db、根目录\
-             调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
-        )
-        .resettable(false)
-        .group(storage_group(cx))
+        .groups(groups)
 }
 
 #[cfg(target_os = "macos")]

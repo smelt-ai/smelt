@@ -2293,7 +2293,7 @@ impl Workspace {
                                                 .on_click(move |_ev, _window, cx| {
                                                     e_machines.update(cx, |ws, cx| {
                                                         ws.open_settings_section(
-                                                            crate::settings::SettingsSection::CollaborationMachines,
+                                                            crate::settings::SettingsSection::Remote,
                                                             cx,
                                                         );
                                                     });
@@ -2305,7 +2305,7 @@ impl Workspace {
                                                 .on_click(move |_ev, _window, cx| {
                                                     e_resources.update(cx, |ws, cx| {
                                                         ws.open_settings_section(
-                                                            crate::settings::SettingsSection::MaintenanceResources,
+                                                            crate::settings::SettingsSection::Maintenance,
                                                             cx,
                                                         );
                                                     });

@@ -86,17 +86,6 @@ pub(crate) fn has_remote_runtimes(cx: &gpui::App) -> bool {
         .is_some_and(|hub| !hub.remotes.is_empty())
 }
 
-/// 设置、能力库里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
-/// 对远程不生效，得说清楚。
-pub(crate) fn local_runtime_scope_chip() -> gpui_component::tag::Tag {
-    use gpui::{ParentElement as _, Styled as _};
-    gpui_component::tag::Tag::secondary()
-        .outline()
-        .rounded_full()
-        .flex_none()
-        .child("只作用于本机运行时")
-}
-
 /// 远程运行时不能用时侧栏标的字（按最近一次探测），能用就是 `None`。本机总能用。
 pub(crate) fn runtime_unavailable_label(key: &RuntimeKey, cx: &gpui::App) -> Option<&'static str> {
     match key {
@@ -1419,7 +1408,10 @@ mod tests {
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
             assert!(client(&RuntimeKey::Local, cx).is_some());
             // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
-            assert_eq!(smelt_home(&far, cx), Some("C:\\Users\\far\\.smelt".to_string()));
+            assert_eq!(
+                smelt_home(&far, cx),
+                Some("C:\\Users\\far\\.smelt".to_string())
+            );
             assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
             // 路径按那台机器的系统切，跟本机是什么系统无关。
             assert_eq!(path_style(&far, cx), PathStyle::Windows);

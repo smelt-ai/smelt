@@ -113,7 +113,7 @@ impl Workspace {
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             show_update_install_confirm: self.show_update_install_confirm,
             session_manager_open: self.session_manager_open,
-            resources: (self.settings_section == SettingsSection::MaintenanceResources)
+            resources: (self.settings_section == SettingsSection::Maintenance)
                 .then(|| self.resources_snapshot(cx)),
         }
     }
@@ -196,8 +196,8 @@ impl Workspace {
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         crate::runtime_events::probe_remotes(cx);
-        if self.settings_section == SettingsSection::CollaborationMachines {
-            // 延迟平时只在连接换路径时读；停在机器页时重读一次，看到的是现在的数。
+        if self.settings_section == SettingsSection::Remote {
+            // 延迟平时只在连接换路径时读；停在远程页时重读一次，看到的是现在的数。
             crate::runtimes::sample_links(cx);
         }
         self.ensure_pi_library_runtime(cx);
