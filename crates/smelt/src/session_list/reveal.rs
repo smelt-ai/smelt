@@ -217,7 +217,9 @@ fn rows_top(rows: &[(u64, Bounds<Pixels>)], ui_id: u64) -> Pixels {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // 不用 `use super::*`，原因见 `keyboard` 的测试模块。
+    use super::{OffscreenAttention, offscreen_attention, reveal_offset};
+    use gpui::{Bounds, Pixels, point, px, size};
 
     fn row(ui_id: u64, top: f32) -> (u64, Bounds<Pixels>) {
         (

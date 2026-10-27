@@ -407,7 +407,10 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // 不用 `use super::*`：它连带把上面 `use gpui::*` 里的 `gpui::test` 引进来，盖掉标准的
+    // `#[test]`；`gpui::test` 展开出来又是 `#[test]`，编测试时无限展开。
+    use super::{SidebarItem, parent_index, typeahead_match};
+    use crate::{ProjectRef, RuntimeKey};
 
     fn group(root: &str) -> SidebarItem {
         SidebarItem::Group(ProjectRef {
