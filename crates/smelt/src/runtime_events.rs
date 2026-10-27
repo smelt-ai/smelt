@@ -369,6 +369,8 @@ pub(crate) fn spawn_subscription(
                     reconnect_attempt = 0;
                     incompatible_attempt = 0;
                     upgrade_requested = false;
+                    // 拨号连不上要等到拨号时限才知道，这期间灯还停在「离线」，人会以为没点上。
+                    let _ = status_tx.try_send((key.clone(), RuntimeStatus::Connecting));
                 }
             }
         })

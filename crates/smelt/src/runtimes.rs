@@ -1235,9 +1235,11 @@ pub(crate) fn runtime_relay(key: &RuntimeKey, cx: &gpui::App) -> String {
 /// 改一台远程机器的中继，`relay` 空着就是 n0 的公共 relay。
 ///
 /// 在线：先请它自己改用新中继（它的远程配置），成了再改这边记下的地址。顺序不能反：先改
-/// 这边就连不上它，没法再请它改。不在线：只改这边记下的——那台机器多半已经在那边改过
-/// （`smeltd relay`），这边跟上才连得回去。改完立刻重连，开着的终端和对话下次开流就走
-/// 新中继（见 [`RemoteRoute`]）。
+/// 这边就连不上它，没法再请它改。它换中继会关掉回复要走的那条连接，回复常常丢：丢了就
+/// 按新中继连过去读它的配置，确认改了再记（见 [`RelaySetReply`]）。
+///
+/// 不在线：只改这边记下的——那台机器多半已经在那边改过（`smeltd relay`），这边跟上才
+/// 连得回去。改完立刻重连，开着的终端和对话下次开流就走新中继（见 [`RemoteRoute`]）。
 pub(crate) fn set_runtime_relay(
     runtime_id: String,
     relay: String,
@@ -1270,10 +1272,29 @@ pub(crate) fn set_runtime_relay(
                         .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
                         .map_err(|error| format!("读不到那台机器的远程配置：{error}"))?;
                     if config.iroh_relay != relay {
-                        config.iroh_relay = relay;
-                        client
-                            .call::<RemoteConfigSet>(&config, timeout)
-                            .map_err(|error| format!("那台机器没改成：{error}"))?;
+                        config.iroh_relay = relay.clone();
+                        match relay_set_reply(client.call::<RemoteConfigSet>(&config, timeout)) {
+                            RelaySetReply::Applied => {}
+                            RelaySetReply::Rejected(error) => {
+                                return Err(format!("那台机器没改成：{error}"));
+                            }
+                            // 改没改成以它眼下的配置为准：按新中继连过去问一次。它要重绑
+                            // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。
+                            RelaySetReply::Lost(error) => {
+                                let (confirm, _route) = remote_client(&saved)?;
+                                let now = confirm
+                                    .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
+                                    .map_err(|confirm_error| {
+                                        format!(
+                                            "没收到那台机器的回复（{error}），按新中继也没连上它\
+                                             （{confirm_error}）"
+                                        )
+                                    })?;
+                                if now.iroh_relay != relay {
+                                    return Err(format!("那台机器没改成：{error}"));
+                                }
+                            }
+                        }
                     }
                 }
                 smelt_client_store::client_store()
@@ -1297,6 +1318,28 @@ pub(crate) fn set_runtime_relay(
         });
         Ok(())
     })
+}
+
+/// 请远程机器改中继之后，从回复里能看出的结果。
+#[derive(Debug, PartialEq, Eq)]
+enum RelaySetReply {
+    Applied,
+    /// 它明确回了错：没改。
+    Rejected(String),
+    /// 没拿到回复。它换中继要关掉旧 endpoint，回复走的正是这条连接，常常发不回来；
+    /// 这时它多半已经改了，不能当成没改。
+    Lost(String),
+}
+
+fn relay_set_reply<T>(
+    result: Result<T, smelt_runtime_client::protocol::control::ControlClientError>,
+) -> RelaySetReply {
+    use smelt_runtime_client::protocol::control::ControlClientError;
+    match result {
+        Ok(_) => RelaySetReply::Applied,
+        Err(error @ ControlClientError::Protocol(_)) => RelaySetReply::Rejected(error.to_string()),
+        Err(error) => RelaySetReply::Lost(error.to_string()),
+    }
 }
 
 /// 配对要走公网拨号，比本机调用慢得多。
@@ -1432,6 +1475,32 @@ mod tests {
             );
             assert_eq!(path_style(&RuntimeKey::Local, cx), PathStyle::LOCAL);
         });
+    }
+
+    /// 改中继的回复丢了不等于没改：那台机器换中继时会关掉回复要走的那条连接。
+    #[test]
+    fn lost_relay_reply_is_not_taken_as_rejected() {
+        use smelt_runtime_client::protocol::control::{
+            ControlClientError, ControlError, ControlErrorCode,
+        };
+        assert_eq!(relay_set_reply(Ok(())), RelaySetReply::Applied);
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::Protocol(ControlError::new(
+                ControlErrorCode::InvalidParams,
+                "bad relay",
+            )))),
+            RelaySetReply::Rejected(_)
+        ));
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::Transport(
+                "smeltd closed the control request without a response".into()
+            ))),
+            RelaySetReply::Lost(_)
+        ));
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::InvalidResponse("eof".into()))),
+            RelaySetReply::Lost(_)
+        ));
     }
 
     #[test]
