@@ -601,11 +601,14 @@ pub(crate) fn resources_page(
     workspace: Entity<Workspace>,
     snapshot: Option<Rc<PanelSnapshot>>,
 ) -> SettingPage {
+    // 它是监视器不是设置：标题旁写刷新频率，口径说明放到总量卡片底部。
     let page = SettingPage::new("资源占用")
-        .description(
-            "Smelt 界面、后台服务和每个会话占用的 CPU 与内存。会话按整棵进程树计，包括智能体\
-             起的命令；CPU 按单核计，多核可超过 100%。停在这一页时每 2 秒刷新。",
-        )
+        .title_suffix(|_, cx| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("停在这一页时每 2 秒刷新")
+        })
         .resettable(false);
     let Some(snapshot) = snapshot else {
         return page;
@@ -700,7 +703,10 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
         div()
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child("本机合计：Smelt 界面、后台服务和本机会话。曲线从打开这一页起画，最多两分钟。"),
+            .child(
+                "本机合计：Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
+                 包括智能体起的命令；CPU 按单核计，多核可超过 100%。",
+            ),
     )
     .into_any_element()
 }
@@ -733,7 +739,12 @@ fn section_view(
                     cx.notify();
                 });
             })
-            .child(label)
+            // 当前按哪列排，在列头标出来：只靠颜色深浅分不出来。
+            .child(if sort_by == by {
+                format!("{label} ↓")
+            } else {
+                label.to_string()
+            })
     };
     let mut table = v_flex().w_full().child(
         h_flex()
