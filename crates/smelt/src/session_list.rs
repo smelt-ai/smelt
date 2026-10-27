@@ -1769,7 +1769,7 @@ impl Workspace {
                         if is_acp {
                             menu = menu.item(
                                 PopupMenuItem::new("强制重启")
-                                    .icon(IconName::Redo)
+                                    .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RotateCw))
                                     .on_click(move |_ev, _window, cx| {
                                         e_restart.update(cx, |ws, cx| {
                                             ws.force_restart_acp_session(sess_ix, cx)

@@ -686,7 +686,7 @@ impl AcpView {
                                     .border_1()
                                     .border_color(t.border)
                                     .child(
-                                        Icon::new(IconName::LoaderCircle)
+                                        Icon::new(gpui_kit_assets::IconName::Clock)
                                             .size_3p5()
                                             .text_color(gpui::rgb(ui_theme::text_muted())),
                                     )
@@ -776,7 +776,7 @@ impl AcpView {
                                 .border_1()
                                 .border_color(t.border)
                                 .child(
-                                    Icon::new(IconName::LoaderCircle)
+                                    Icon::new(gpui_kit_assets::IconName::Clock)
                                         .size_3p5()
                                         .text_color(gpui::rgb(ui_theme::text_muted())),
                                 )

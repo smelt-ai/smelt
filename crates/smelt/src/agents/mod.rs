@@ -2296,7 +2296,7 @@ fn render_agent_plugin_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-plugins-refresh")
-        .icon(IconName::Redo)
+        .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
         .icon_action("重新扫描插件目录")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));
@@ -2690,7 +2690,7 @@ fn render_agent_memory_card(
     let memory_enabled = agent.memory_enabled;
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-memory-refresh")
-        .icon(IconName::Redo)
+        .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
         .icon_action("重新读取记忆")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_memories(cx));
@@ -3227,7 +3227,7 @@ fn render_agent_mcp_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-mcp-refresh")
-        .icon(IconName::Redo)
+        .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
         .icon_action("重新读取 mcp.json")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));

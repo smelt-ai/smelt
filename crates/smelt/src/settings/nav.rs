@@ -144,7 +144,7 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                 ),
                 leaf(
                     "快捷键",
-                    IconName::Asterisk,
+                    Icon::new(gpui_kit_assets::IconName::Keyboard),
                     SettingsSection::Shortcuts,
                     &[
                         "键盘快捷键",

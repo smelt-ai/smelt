@@ -234,7 +234,7 @@ fn agent_groups(
                 let refresh = Button::new("refresh-acp-runtime")
                     .quiet()
                     .compact()
-                    .icon(IconName::Redo)
+                    .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
                     .loading_icon(IconName::LoaderCircle)
                     .loading(runtime.refreshing)
                     .disabled(runtime.refreshing || runtime.installing.is_some())

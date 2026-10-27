@@ -74,7 +74,7 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
             0,
             MachineAction {
                 label: "重新连接",
-                icon: IconName::Redo.into(),
+                icon: gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw),
                 separated: false,
                 run: Rc::new({
                     let key = key.clone();

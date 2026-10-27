@@ -4646,7 +4646,10 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
 
 // 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
 // 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
-gpui_kit_assets::icon_assets!(LucideExtras, [Coffee, MessageSquare, Puzzle, Server, Wrench]);
+gpui_kit_assets::icon_assets!(
+    LucideExtras,
+    [Clock, Coffee, Keyboard, MessageSquare, Puzzle, RefreshCw, RotateCw, Server, Wrench]
+);
 
 struct SmeltAssets;
 
