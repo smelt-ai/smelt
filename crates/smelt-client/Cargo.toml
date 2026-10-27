@@ -35,6 +35,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 # Windows 的更新认编进程序的发版号，对着发版的 SHA256SUMS 校验安装程序。
 [target.'cfg(windows)'.dependencies]
+semver = "1"
 smelt-version = { path = "../smelt-version" }
 
 [dev-dependencies]

@@ -380,8 +380,11 @@ impl Workspace {
             matches!(self.update_status, updater::UpdateStatus::Applying { .. });
         #[cfg(not(any(target_os = "macos", windows)))]
         let update_is_applying = false;
+        // 「退出并安装」的提示讲的是停守护；不停守护的平台照普通退出说。
         #[cfg(any(target_os = "macos", windows))]
-        let installing = !update_is_applying && self.update_status.ready_update().is_some();
+        let installing = updater::INSTALL_STOPS_LOCAL_DAEMON
+            && !update_is_applying
+            && self.update_status.ready_update().is_some();
         #[cfg(not(any(target_os = "macos", windows)))]
         let installing = false;
         let prompt = super::daemon_restart_prompt::daemon_stop_prompt(

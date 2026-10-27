@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
 use sha2::{Digest, Sha256};
 
 const BUNDLE_ID: &str = "com.zzfn.smelt";
@@ -25,6 +24,10 @@ const APP_LAUNCH_GATE_FILE: &str = "app-launch-gate.lock";
 const APP_RUNTIME_LOCK_FILE: &str = "app-runtime.lock";
 const BUNDLE_FINGERPRINT_VERSION: &str = "sha256-tree-v1";
 const INSTALLER_NAME: &str = "smelt-installer";
+
+/// 应用更新要不要先停掉本机守护：换 `.app` 时文件不能还被旧守护占着，installer 换包前
+/// 也会再停一次。
+pub const INSTALL_STOPS_LOCAL_DAEMON: bool = true;
 
 /// 查指定通道最新的发布。macOS 的更新包下下来再校验签名，查的时候不用多确认什么。
 pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
@@ -1838,7 +1841,7 @@ mod tests {
     #[test]
     fn installer_gate_blocks_new_gui_before_waiting_for_existing_gui() {
         const TEST_NAME: &str =
-            "updater::tests::installer_gate_blocks_new_gui_before_waiting_for_existing_gui";
+            "updater::macos::tests::installer_gate_blocks_new_gui_before_waiting_for_existing_gui";
         const ROLE_ENV: &str = "SMELT_RUNTIME_GATE_TEST_ROLE";
         const ROOT_ENV: &str = "SMELT_RUNTIME_GATE_TEST_ROOT";
 

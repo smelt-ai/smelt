@@ -15,7 +15,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use gpui_component::progress::Progress;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};

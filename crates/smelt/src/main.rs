@@ -3413,7 +3413,7 @@ impl Workspace {
                 ws.recover_update_at_launch(true, cx);
             }
         }
-        // Windows 由安装程序装在固定位置，没有位置问题，直接恢复、检查。
+        // Windows 不是安装程序装的（开发构建等）在检查时拦下，见 `blocked_by_app_location`。
         #[cfg(windows)]
         ws.recover_update_at_launch(true, cx);
         ws.start_workspace_catalog_load(window, cx);
@@ -4158,10 +4158,12 @@ impl Render for Workspace {
                 if !matches!(this.update_status, updater::UpdateStatus::Applying { .. })
                     && this.update_status.ready_update().is_some()
                 {
-                    // 有待装更新时退出会停掉守护并换包。没有进行中的会话就直接走，
-                    // 有的话必须先确认，不能把正在输出的对话静默杀掉。
+                    // 有待装更新时退出会换包，macOS 还会停掉守护。没有进行中的会话、或者
+                    // 不停守护，就直接走；否则必须先确认，不能把正在输出的对话静默杀掉。
                     let names = this.busy_work_names(cx);
-                    if !daemon_restart_prompt::should_confirm(&names) {
+                    if !updater::INSTALL_STOPS_LOCAL_DAEMON
+                        || !daemon_restart_prompt::should_confirm(&names)
+                    {
                         if let Some(update) = this.update_status.ready_update().cloned() {
                             this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
                         }
@@ -4584,6 +4586,18 @@ fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) ->
             window.set_rem_size(px(ui_font_px as f32));
             let view = cx.new(|cx| Workspace::new(window, cx));
             workspace = Some(view.downgrade());
+            // Windows 上关掉主窗口就是退出（设置窗口跟着关，GPUI 随后退出），不走 Quit
+            // 动作。待装更新在窗口还在、Workspace 还活着的时候接上。
+            #[cfg(windows)]
+            {
+                let ws = view.downgrade();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    if let Some(ws) = ws.upgrade() {
+                        ws.read(cx).install_ready_update_on_exit();
+                    }
+                    true
+                });
+            }
             // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。
             cx.new(|cx| Root::new(view, window, cx).bg(gpui::transparent_black()))
         })

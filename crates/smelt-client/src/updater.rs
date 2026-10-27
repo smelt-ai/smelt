@@ -121,6 +121,9 @@ pub enum UpdateFailure {
     /// App 被系统转移或放在只读位置，更新装不上；见 `app_location`。先移到「应用程序」，
     /// 不检查、不下载。
     Location,
+    /// Windows 上不是安装程序装的（开发构建、拷出来的 exe）：没有能覆盖的安装，不检查、
+    /// 不下载。
+    NotInstalled,
 }
 
 impl UpdateFailure {
@@ -130,6 +133,7 @@ impl UpdateFailure {
             Self::Download => "下载更新失败",
             Self::Recovery => "恢复更新失败",
             Self::Location => "需要先移到「应用程序」",
+            Self::NotInstalled => "这个 Smelt 不能自动更新",
         }
     }
 
@@ -140,6 +144,9 @@ impl UpdateFailure {
             Self::Recovery => "上次更新事务尚未恢复，请重试；现有安装不会被覆盖。",
             Self::Location => {
                 "Smelt 没放进「应用程序」就打开了，macOS 让它在只读位置运行，更新装不上。移过去后会自动重新打开，后台会话不受影响。"
+            }
+            Self::NotInstalled => {
+                "它不是安装程序装的（比如开发构建）。从 Releases 下载安装程序装好后，就能在这里更新。"
             }
         }
     }
@@ -280,13 +287,24 @@ struct GithubAsset {
     browser_download_url: String,
 }
 
-/// 查指定通道最新的发布，返回版本展示文本和本平台更新包的下载地址。平台的
-/// `fetch_latest` 在它之上再确认这个包能不能装。
-async fn fetch_candidate(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
+/// 查指定通道的发布，新的在前，每个给出版本展示文本和本平台更新包的下载地址。更新
+/// 清单只给一个。平台的 `fetch_latest` 从里面挑能装的。
+async fn fetch_candidates(channel: UpdateChannel) -> anyhow::Result<Vec<UpdateCandidate>> {
     match UPDATE_MANIFEST_URL {
-        Some(template) => fetch_manifest(&manifest_url(template, channel)).await,
-        None => fetch_github_release(channel).await,
+        Some(template) => Ok(vec![
+            fetch_manifest(&manifest_url(template, channel)).await?,
+        ]),
+        None => fetch_github_releases(channel).await,
     }
+}
+
+/// `fetch_candidates` 里最新的那个。
+async fn fetch_candidate(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
+    fetch_candidates(channel)
+        .await?
+        .into_iter()
+        .next()
+        .with_context(|| format!("没有已传好更新包的{}", channel.label()))
 }
 
 fn manifest_url(template: &str, channel: UpdateChannel) -> String {
@@ -354,7 +372,7 @@ fn release_label_from_url(download_url: &str) -> String {
         .unwrap_or_else(|| "更新包".to_string())
 }
 
-async fn fetch_github_release(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
+async fn fetch_github_releases(channel: UpdateChannel) -> anyhow::Result<Vec<UpdateCandidate>> {
     let releases: Vec<GithubRelease> = reqwest::Client::new()
         .get(RELEASES_API)
         .header("User-Agent", "smelt-updater")
@@ -364,30 +382,35 @@ async fn fetch_github_release(channel: UpdateChannel) -> anyhow::Result<UpdateCa
         .error_for_status()?
         .json()
         .await?;
-    let candidate = pick_release(&releases, channel, platform::update_asset)
-        .with_context(|| format!("GitHub Releases 里没有已传好更新包的{}", channel.label()))?;
-    validate_download_url(&candidate.url)?;
-    Ok(candidate)
+    let candidates = pick_releases(&releases, channel, platform::update_asset);
+    for candidate in &candidates {
+        validate_download_url(&candidate.url)?;
+    }
+    Ok(candidates)
 }
 
-/// 取符合通道、且已经传上更新包的发布里发布时间最晚的一个。不靠列表顺序：GitHub 按
+/// 符合通道、且已经传上更新包的发布，按发布时间从新到旧排。不靠列表顺序：GitHub 按
 /// tag 所在提交的时间排，rc 和正式版打在同一个提交上时分不出先后。更新包还没传完的
 /// 发布先跳过，等下次检查。哪个文件是更新包由平台的 `update_asset` 认。
-fn pick_release(
+fn pick_releases(
     releases: &[GithubRelease],
     channel: UpdateChannel,
     update_asset: fn(&GithubRelease) -> Option<&GithubAsset>,
-) -> Option<UpdateCandidate> {
-    releases
+) -> Vec<UpdateCandidate> {
+    let mut picked: Vec<_> = releases
         .iter()
         .filter(|release| !release.draft)
         .filter(|release| channel == UpdateChannel::Dev || !release.prerelease)
         .filter_map(|release| Some((release, update_asset(release)?)))
-        .max_by(|(left, _), (right, _)| left.published_at.cmp(&right.published_at))
+        .collect();
+    picked.sort_by(|(left, _), (right, _)| right.published_at.cmp(&left.published_at));
+    picked
+        .into_iter()
         .map(|(release, asset)| UpdateCandidate {
             version: release.version().to_string(),
             url: asset.browser_download_url.trim().to_string(),
         })
+        .collect()
 }
 
 fn validate_download_url(download_url: &str) -> anyhow::Result<()> {
@@ -425,7 +448,7 @@ mod tests {
     use super::{
         CheckOutcome, GithubAsset, GithubRelease, InstalledRelease, UpdateCandidate, UpdateChannel,
         UpdateFailure, UpdateManifest, decide_check_outcome, manifest_url, manifest_version_text,
-        pick_release, release_label_from_url, validate_download_url,
+        pick_releases, release_label_from_url, validate_download_url,
     };
 
     fn candidate(url: &str) -> UpdateCandidate {
@@ -501,16 +524,33 @@ mod tests {
         let releases = releases(RELEASES);
         // rc.5 还没传更新包、v1.0.0 是草稿，都不算；同一提交上的正式版晚于 rc.4 发布。
         assert_eq!(
-            pick_release(&releases, UpdateChannel::Dev, app_zip),
-            Some(UpdateCandidate {
+            pick_releases(&releases, UpdateChannel::Dev, app_zip).first(),
+            Some(&UpdateCandidate {
                 version: "0.9.0".into(),
                 url: "https://example.test/090/Smelt.app.zip".into(),
             })
         );
         assert_eq!(
-            pick_release(&releases, UpdateChannel::Prod, app_zip).map(|c| c.version),
+            first_version(&releases, UpdateChannel::Prod),
             Some("0.9.0".into())
         );
+    }
+
+    fn first_version(releases: &[GithubRelease], channel: UpdateChannel) -> Option<String> {
+        pick_releases(releases, channel, app_zip)
+            .into_iter()
+            .next()
+            .map(|c| c.version)
+    }
+
+    /// 最新的发布装不了时（比如 Windows 的校验和清单还没重写），平台要能退到上一个。
+    #[test]
+    fn releases_are_listed_newest_first() {
+        let versions: Vec<_> = pick_releases(&releases(RELEASES), UpdateChannel::Dev, app_zip)
+            .into_iter()
+            .map(|c| c.version)
+            .collect();
+        assert_eq!(versions, ["0.9.0", "0.9.0-rc.4"]);
     }
 
     #[test]
@@ -519,9 +559,9 @@ mod tests {
             r#"[{"tag_name":"v0.9.0-rc.4","prerelease":true,"published_at":"2026-10-19T00:00:00Z",
                  "assets":[{"name":"Smelt.app.zip","browser_download_url":"https://example.test/rc4/Smelt.app.zip"}]}]"#,
         );
-        assert_eq!(pick_release(&releases, UpdateChannel::Prod, app_zip), None);
+        assert_eq!(first_version(&releases, UpdateChannel::Prod), None);
         assert_eq!(
-            pick_release(&releases, UpdateChannel::Dev, app_zip).map(|c| c.version),
+            first_version(&releases, UpdateChannel::Dev),
             Some("0.9.0-rc.4".into())
         );
     }

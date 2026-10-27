@@ -1,6 +1,9 @@
 //! Windows 的更新：下载 Inno Setup 安装程序，对着同一个 Release 的 `SHA256SUMS` 校验；
-//! 应用时拉起它静默覆盖安装，桌面随即退出。安装程序先等桌面进程退出再换文件，装完按需
-//! 重新打开 Smelt（`scripts/windows-installer.iss` 的 `/WAITPID`、`/RELAUNCH`）。
+//! 应用时拉起它静默覆盖安装，桌面随即退出。安装程序先等桌面进程退出再换文件，装完（或
+//! 没装成）重新打开 Smelt（`scripts/windows-installer.iss` 的 `/WAITPID`、`/RELAUNCH`）。
+//!
+//! 本机守护不用停：smeltd、smelt-pi、smelt-notify 跑的都是 `~/.smelt/bin` 里的副本，
+//! 不占安装目录。新版桌面起来后照「守护落后就在空闲时重启」的老规矩换守护，会话不断。
 //!
 //! 换文件、出错回滚是安装程序的事，这里不记持久化事务：下好的安装程序只在这次运行里
 //! 等着装，重启后重新检查；同一个版本已经下好、校验过就不再下一遍。
@@ -10,8 +13,16 @@ use super::*;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
 use sha2::{Digest, Sha256};
+
+/// 应用更新要不要先停掉本机守护。见模块说明。
+pub const INSTALL_STOPS_LOCAL_DAEMON: bool = false;
+
+/// Inno Setup 放在安装目录里的卸载程序。有它才说明这个 exe 是安装程序装的。
+const UNINSTALLER: &str = "unins000.exe";
+
+/// 最新的发布还没传完时，最多往前再看几个。
+const MAX_CANDIDATES: usize = 3;
 
 /// 发版时和安装程序传到同一个 Release 的校验和清单。
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
@@ -27,21 +38,43 @@ pub(super) fn update_asset(release: &GithubRelease) -> Option<&GithubAsset> {
     release.asset(&installer_asset_name(release.version()))
 }
 
-/// 查指定通道最新的发布，并确认它的校验和清单里已经有安装程序：发版流水线等所有产物
-/// 都传完才把清单重写成全量的，在那之前这个发布还装不了。
+/// 查指定通道最新的、能装的发布：校验和清单里要已经有它的安装程序。发版流水线等所有
+/// 产物都传完才把清单重写成全量的，在那之前最新的发布装不了，退到上一个。退之前先看
+/// 装着的是不是就是它，免得把刚装上的新版「更新」回旧版。
 pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
-    let candidate = fetch_candidate(channel).await?;
-    expected_sha256(&candidate.url).await?;
-    Ok(candidate)
+    let installed = installed_release()?;
+    let mut last_error = None;
+    for candidate in fetch_candidates(channel)
+        .await?
+        .into_iter()
+        .take(MAX_CANDIDATES)
+    {
+        // 更新清单可以不给版本号（拿地址最后一段凑），这里却靠版本号认新旧。
+        semver::Version::parse(&candidate.version)
+            .with_context(|| format!("更新包的版本号不是发版号：{}", candidate.version))?;
+        if installed.is(&candidate) {
+            return Ok(candidate);
+        }
+        match expected_sha256(&candidate.url).await {
+            Ok(_) => return Ok(candidate),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("没有已传好安装程序的{}", channel.label())))
 }
 
-/// 装着的就是编进程序的那次发版。开发构建没有发版号。
+/// 这个 exe 是不是安装程序装的：发版构建，而且旁边有卸载程序。开发构建、拷出来的 exe
+/// 没有能覆盖的安装，不检查、不下载。
+pub fn installed_by_setup() -> bool {
+    smelt_version::RELEASE.is_some()
+        && std::env::current_exe().is_ok_and(|exe| exe.with_file_name(UNINSTALLER).is_file())
+}
+
+/// 装着的就是编进程序的那次发版。
 pub fn installed_release() -> anyhow::Result<InstalledRelease> {
-    Ok(
-        smelt_version::RELEASE.map_or(InstalledRelease::Unknown, |release| {
-            InstalledRelease::Version(release.to_string())
-        }),
-    )
+    smelt_version::RELEASE
+        .map(|release| InstalledRelease::Version(release.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("开发构建没有发版号，不自动更新"))
 }
 
 /// 下好、校验过的安装程序，等用户点「立即重启更新」或退出时拉起。
@@ -231,8 +264,9 @@ async fn download_verified(
     Ok(())
 }
 
-/// 拉起安装程序静默覆盖安装。返回后调用方停掉本机守护、退出桌面；安装程序先等这个
-/// 进程退出（`/WAITPID`）再换文件，`relaunch` 时装完重新打开 Smelt。
+/// 拉起安装程序静默覆盖安装，返回后调用方退出桌面。安装程序先等这个进程退出
+/// （`/WAITPID`）再换文件。`relaunch` 时把当前 exe 交给它（`/RELAUNCH`）：装好了打开
+/// 新版，没装成（等超时、文件被占用）就把原来这个打开，不让人对着一个消失的窗口。
 ///
 /// 拉起前再校验一遍：下载之后文件被换过就不装。安装程序要脱离桌面的 Job，不然桌面
 /// 一退出它就跟着没了。
@@ -255,7 +289,8 @@ pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     if relaunch {
-        command.arg("/RELAUNCH=1");
+        let exe = std::env::current_exe().context("找不到当前 exe")?;
+        command.arg(format!("/RELAUNCH={}", exe.display()));
     }
     let child = smelt_sys::process::spawn_detached(&mut command).context("拉起安装程序失败")?;
     Ok(InstallerTicket {
@@ -266,11 +301,26 @@ pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result
 
 /// 启动时调用。没有跨进程的待装作业要恢复（见模块说明），只清掉已经装上的这个版本的
 /// 安装程序和日志。新版是安装程序装完直接拉起的，那时它可能还没退出、删不掉，下次再清。
+///
+/// 还留着别的版本的安装日志，说明那次没装成（装成了跑的就是那个版本，日志已经删了）。
+/// 记进 app.log，指向安装日志。
 pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
-    if let Some(release) = smelt_version::RELEASE {
-        let installer = installer_path(&download_dir()?, release);
-        let _ = std::fs::remove_file(installer.with_extension("log"));
-        let _ = std::fs::remove_file(&installer);
+    let Some(release) = smelt_version::RELEASE else {
+        return Ok(None);
+    };
+    let dir = download_dir()?;
+    let installer = installer_path(&dir, release);
+    let current_log = installer.with_extension("log");
+    let _ = std::fs::remove_file(&current_log);
+    let _ = std::fs::remove_file(&installer);
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "log") {
+            smelt_sys::app_log::error(
+                "updater",
+                &format!("上次应用更新没装成，安装日志：{}", path.display()),
+            );
+        }
     }
     Ok(None)
 }

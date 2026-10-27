@@ -8,9 +8,10 @@
 ;
 ; 桌面的应用内更新（crates/smelt-client/src/updater/windows.rs）这样拉起它：
 ;
-;   setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /WAITPID=<桌面 pid> /LOG=<日志> [/RELAUNCH=1]
+;   setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /WAITPID=<桌面 pid> /LOG=<日志> [/RELAUNCH=<桌面 exe>]
 ;
-; 桌面拉起安装程序后才退出，/WAITPID 让安装程序先等它退出；/RELAUNCH=1 时装完重新打开 Smelt。
+; 桌面拉起安装程序后才退出，/WAITPID 让安装程序先等它退出。给了 /RELAUNCH 时，装好了打开新版；
+; 没装成（等超时、文件被占用、又有 Smelt 开着）就把原来那个 exe 打开，不让人对着一个消失的窗口。
 
 #ifndef AppVersion
   #error 缺 /DAppVersion
@@ -75,7 +76,7 @@ Name: "{autodesktop}\Smelt"; Filename: "{app}\smelt.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\smelt.exe"; Description: "{cm:LaunchProgram,Smelt}"; Flags: nowait postinstall skipifsilent
-; 应用内更新是静默安装，上面那项跳过；要求重新打开时由这项打开。
+; 应用内更新是静默安装，上面那项跳过；给了 /RELAUNCH 时由这项打开新版。
 Filename: "{app}\smelt.exe"; Flags: nowait skipifnotsilent; Check: RelaunchRequested
 
 [UninstallRun]
@@ -90,6 +91,10 @@ const
   WAIT_OBJECT_0 = 0;
   { 桌面拉起安装程序后马上退出。等这么久还没退，多半是卡住了，这次就不装。 }
   WaitPidTimeoutMs = 120000;
+
+var
+  { 走到 ssDone 才算装好。没走到就是中途放弃或出错了。 }
+  InstallDone: Boolean;
 
 function OpenProcess(DesiredAccess: DWORD; InheritHandle: BOOL; ProcessId: DWORD): THandle;
   external 'OpenProcess@kernel32.dll stdcall';
@@ -123,9 +128,31 @@ begin
     Log(Format('等了 %d 毫秒，进程 %d 还没退出，放弃这次安装', [WaitPidTimeoutMs, Pid]));
 end;
 
+{ 桌面 exe 的路径，没给就是空。 }
+function RelaunchPath: String;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|}');
+end;
+
 function RelaunchRequested: Boolean;
 begin
-  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+  Result := RelaunchPath <> '';
+end;
+
+{ 应用内更新没装成：桌面已经退出了，把原来那个打开。 }
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  if InstallDone or not RelaunchRequested then
+    exit;
+  if not FileExists(RelaunchPath) then
+    exit;
+  { 用户已经自己又打开了一个（这也是没装成的原因之一），就不再开第二个。 }
+  if CheckForMutexes('SmeltDesktop') then
+    exit;
+  Log('没装成，重新打开原来的 Smelt：' + RelaunchPath);
+  Exec(RelaunchPath, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
 end;
 
 { 用户 PATH 里有没有这一项。按 ; 切开整段比，不区分大小写。 }
@@ -166,6 +193,8 @@ end;
 { PATH 跟着这次的勾选走：重装时取消勾选，就把上次加的那项拿掉。 }
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if CurStep = ssDone then
+    InstallDone := True;
   if CurStep = ssPostInstall then
   begin
     if WizardIsTaskSelected('addtopath') then

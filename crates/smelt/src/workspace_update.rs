@@ -28,10 +28,42 @@ impl Workspace {
         true
     }
 
-    /// Windows 由安装程序装在固定位置，不会有放错地方的问题。
+    /// Windows 上不是安装程序装的（开发构建、拷出来的 exe）没有能覆盖的安装，所有更新
+    /// 入口都停在「这个 Smelt 不能自动更新」，不检查、不下载、不安装。
     #[cfg(windows)]
-    fn blocked_by_app_location(&mut self, _cx: &mut Context<Self>) -> bool {
-        false
+    fn blocked_by_app_location(&mut self, cx: &mut Context<Self>) -> bool {
+        if updater::installed_by_setup() {
+            return false;
+        }
+        self.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::NotInstalled);
+        cx.notify();
+        true
+    }
+
+    /// 关掉主窗口时还有待装的更新就拉起安装程序，不重新打开。Windows 上关主窗口就是
+    /// 退出，不经过 Quit 动作；窗口马上要没了，这里同步拉起，不停守护（Windows 换文件
+    /// 不用停，见 `updater::INSTALL_STOPS_LOCAL_DAEMON`）。
+    #[cfg(windows)]
+    pub(crate) fn install_ready_update_on_exit(&self) {
+        if matches!(self.update_status, updater::UpdateStatus::Applying { .. }) {
+            return;
+        }
+        let Some(update) = self.update_status.ready_update() else {
+            return;
+        };
+        match updater::launch_installer(update, false) {
+            Ok(ticket) => smelt_sys::app_log::info(
+                "updater",
+                &format!("退出时拉起安装程序装 {}（{ticket}）", update.version),
+            ),
+            Err(error) => smelt_sys::app_log::error(
+                "updater",
+                &format!(
+                    "退出时拉起安装程序失败，{} 下次再装：{error:#}",
+                    update.version
+                ),
+            ),
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -330,8 +362,11 @@ impl Workspace {
         let Some(update) = self.update_status.ready_update().cloned() else {
             return;
         };
+        // 不停守护的平台（Windows）会话不受影响，不用确认。
         let names = self.busy_work_names(cx);
-        if super::daemon_restart_prompt::should_confirm(&names) {
+        if updater::INSTALL_STOPS_LOCAL_DAEMON
+            && super::daemon_restart_prompt::should_confirm(&names)
+        {
             self.stop_prompt_names = names;
             self.show_update_install_confirm = true;
             cx.notify();
@@ -427,17 +462,19 @@ impl Workspace {
                         "updater",
                         &format!("installer 已接管更新 {version}（{ticket}），等待 GUI 退出"),
                     );
-                    // 安装程序已成功派生。先停掉旧守护，再退出：换文件时不能还被旧进程
-                    // 占着。派生失败不走这里。
-                    let stopped = cx
-                        .background_executor()
-                        .spawn(async { updater::shutdown_local_daemon() })
-                        .await;
-                    if !stopped {
-                        smelt_sys::app_log::error(
-                            "updater",
-                            "退出前没能确认旧守护已退出，安装器换包前会再停一次",
-                        );
+                    // 安装程序已成功派生。macOS 先停掉旧守护，再退出：换文件时不能还被
+                    // 旧进程占着。派生失败不走这里。
+                    if updater::INSTALL_STOPS_LOCAL_DAEMON {
+                        let stopped = cx
+                            .background_executor()
+                            .spawn(async { updater::shutdown_local_daemon() })
+                            .await;
+                        if !stopped {
+                            smelt_sys::app_log::error(
+                                "updater",
+                                "退出前没能确认旧守护已退出，安装器换包前会再停一次",
+                            );
+                        }
                     }
                     cx.update(request_app_quit);
                 }

@@ -36,7 +36,7 @@ The app checks for updates on launch and on demand (stable/beta channel), showin
 
 ### Windows (x86_64)
 
-Download `smelt-<version>-windows-x86_64-setup.exe` from the same [Releases](https://github.com/smelt-ai/smelt/releases) page and run it. It installs for the current user without admin rights, into `%LOCALAPPDATA%\Programs\Smelt` by default, adds a Start menu entry, and can put the `smelt` command on your PATH. Like macOS, the app checks for updates on launch and on demand (stable/beta channel); applying an update closes Smelt, runs the new installer silently, and reopens it.
+Download `smelt-<version>-windows-x86_64-setup.exe` from the same [Releases](https://github.com/smelt-ai/smelt/releases) page and run it. It installs for the current user without admin rights, into `%LOCALAPPDATA%\Programs\Smelt` by default, adds a Start menu entry, and can put the `smelt` command on your PATH. Like macOS, the app checks for updates on launch and on demand (stable/beta channel); applying an update closes Smelt, runs the new installer silently, and reopens it. Running sessions are not interrupted.
 
 Data lives in `%USERPROFILE%\.smelt`.
 
