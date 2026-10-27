@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Global, Subscription};
 
-use crate::runtimes::{Runtime, RuntimeHub, RuntimeKey, RuntimeStatus};
+use crate::runtimes::{IncompatibleFix, Runtime, RuntimeHub, RuntimeKey, RuntimeStatus};
 use crate::terminal::DaemonStateEvent;
 
 pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
@@ -276,15 +276,28 @@ pub(crate) fn spawn_subscription(
                 if let RuntimeStatus::Incompatible {
                     version,
                     detail,
-                    runtime_outdated: true,
+                    fix,
                 } = &status
+                    && fix.runtime_outdated()
                 {
-                    let (version, detail) = (version.clone(), detail.clone());
+                    let (version, detail, fix) = (version.clone(), detail.clone(), *fix);
                     if runtime.is_local() {
                         status = upgrade_local_then_probe(
-                            &runtime, &version, &detail, &status_tx, &stop,
+                            &runtime, &version, &detail, fix, &status_tx, &stop,
                         );
-                    } else if !upgrade_requested {
+                    } else if fix == IncompatibleFix::UpdateSmeltThere {
+                        // 请不动它：说清到哪儿去更新，不发注定失败的升级请求。
+                        status = RuntimeStatus::Incompatible {
+                            version,
+                            detail: format!(
+                                "{detail}。这台运行时随那台机器上的 Smelt 一起更新，不能远程升级：\
+                                 到那台机器上把 Smelt 更新到 v{}",
+                                crate::runtimes::DESKTOP_VERSION
+                            ),
+                            fix,
+                        };
+                    } else if !upgrade_requested && smelt_version::RELEASE.is_some() {
+                        // 开发构建没有对应的发版可升，留着不兼容的说明。
                         upgrade_requested = true;
                         status = upgrade_then_probe(&runtime, &version, &detail, &status_tx, &stop);
                     }
@@ -357,6 +370,8 @@ pub(crate) fn spawn_subscription(
                     reconnect_attempt = 0;
                     incompatible_attempt = 0;
                     upgrade_requested = false;
+                    // 拨号连不上要等到拨号时限才知道，这期间灯还停在「离线」，人会以为没点上。
+                    let _ = status_tx.try_send((key.clone(), RuntimeStatus::Connecting));
                 }
             }
         })
@@ -370,6 +385,7 @@ fn upgrade_local_then_probe(
     runtime: &Runtime,
     version: &str,
     detail: &str,
+    fix: IncompatibleFix,
     status_tx: &smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     _stop: &AtomicBool,
 ) -> RuntimeStatus {
@@ -381,13 +397,11 @@ fn upgrade_local_then_probe(
     ));
     match crate::local_daemon::upgrade_daemon() {
         UpgradeOutcome::Upgraded => crate::runtimes::local_status(runtime.client()),
-        UpgradeOutcome::Failed => {
-            RuntimeStatus::Incompatible {
-                version: version.to_string(),
-                detail: format!("{detail}。本机运行时没有换成当前版本，可在设置里重启守护进程"),
-                runtime_outdated: true,
-            }
-        }
+        UpgradeOutcome::Failed => RuntimeStatus::Incompatible {
+            version: version.to_string(),
+            detail: format!("{detail}。本机运行时没有换成当前版本，可在设置里重启守护进程"),
+            fix,
+        },
     }
 }
 
@@ -409,7 +423,7 @@ fn upgrade_then_probe(
     let still_incompatible = |note: String| RuntimeStatus::Incompatible {
         version: version.to_string(),
         detail: format!("{detail}。{note}"),
-        runtime_outdated: true,
+        fix: IncompatibleFix::UpgradeRuntime,
     };
     report(format!("正在升级到 v{DESKTOP_VERSION}"));
     match push_upgrade(runtime.client()) {
@@ -449,13 +463,13 @@ fn upgrade_then_probe(
                 RuntimeStatus::Incompatible {
                     version,
                     detail,
-                    runtime_outdated,
+                    fix,
                 } => RuntimeStatus::Incompatible {
                     version,
                     detail: format!(
                         "{detail}。请它升到 v{DESKTOP_VERSION} 后仍对不上，详见那台机器的 ~/.smelt/daemon.log"
                     ),
-                    runtime_outdated,
+                    fix,
                 },
                 status => status,
             };

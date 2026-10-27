@@ -1,5 +1,5 @@
-//! 设置面板：外观 / 模型 / 会话与 Agent / 协作 / 插件 / 维护 / 快捷键，含独立
-//! 设置窗口的渲染逻辑。左侧是分类和子菜单，每个子菜单对应独立内容页。
+//! 设置面板：「通用」「Agent 与运行」两组共 8 页，含独立设置窗口的渲染逻辑。
+//! 左侧按分组列出各页，每页对应独立内容页，页内再分节。
 //!
 //! 跟 git_panel / file_tree 同一个套路：从 main.rs 拆出来的 `impl Workspace`
 //! 方法 + 独立类型/函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
@@ -19,7 +19,6 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::progress::Progress;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-#[cfg(target_os = "macos")]
 use gpui_component::switch::Switch;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
@@ -40,19 +39,17 @@ mod remote;
 mod workspace;
 mod workspace_view;
 
-pub(crate) use nav::{
-    SettingsCategoryId, SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav,
-};
+pub(crate) use nav::{SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav};
 pub(super) use remote::*;
 
-/// 「反馈问题」入口统一跳转的链接。应用菜单 / 侧栏用户菜单 / 设置页三处共用。
+/// 「反馈问题」入口统一跳转的链接。菜单栏「帮助」和设置「关于」页共用。
 /// 打包时设 `SMELT_FEEDBACK_URL` 换成自己的反馈渠道。
 pub const FEEDBACK_URL: &str = build_time_url(
     option_env!("SMELT_FEEDBACK_URL"),
     "https://github.com/smelt-ai/smelt/issues/new/choose",
 );
 
-/// 「帮助文档」入口的链接，侧栏用户菜单和设置页共用。打包时设 `SMELT_DOCS_URL` 换掉。
+/// 「帮助文档」入口的链接，菜单栏「帮助」和设置「关于」页共用。打包时设 `SMELT_DOCS_URL` 换掉。
 pub const DOCS_URL: &str = build_time_url(option_env!("SMELT_DOCS_URL"), "https://smelt.onoo.io/");
 
 /// 打包时没设或设成空串，都用开源版的默认地址。
@@ -71,8 +68,8 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
-pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
 pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
+pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -874,11 +871,11 @@ fn acp_cmd_setting_value(agent: ConversationAgentKind, command: String) -> Share
     }
 }
 
-/// 设置页「Agent 集成」里每个 agent 一条自定义启动命令输入框（从枚举派生，加
-/// 一家 agent 不用回来抄第四遍）。
+/// 设置「Agent → 高级 → 对话适配器命令」里每家 Agent 一个输入框（从枚举派生，加
+/// 一家 agent 不用回来抄第四遍）。各家的说明一样，写在那一节的标题行。
 fn acp_cmd_setting_item(agent: ConversationAgentKind) -> SettingItem {
     SettingItem::new(
-        format!("{} 自定义启动命令", agent.label()),
+        agent.label(),
         SettingField::input(
             move |cx: &App| {
                 acp_cmd_setting_value(agent, acp_cmd_for(&crate::RuntimeKey::Local, agent, cx))
@@ -895,12 +892,7 @@ fn acp_cmd_setting_item(agent: ConversationAgentKind) -> SettingItem {
             },
         ),
     )
-    .description(format!(
-        "留空使用内置适配器；仅在需要替换适配器或追加参数时填写。\
-         改动只影响之后新建的「{}」对话会话。",
-        agent.label()
-    ))
-    .keywords(["acp", "对话", "agent", agent.id()])
+    .keywords(["acp", "对话", "agent", "自定义启动命令", agent.id()])
 }
 
 /// 按钮的短暂成功文案（设置页复制、自动化保存等读它改按钮字）。
@@ -913,11 +905,13 @@ struct CopyFlash {
 
 impl Global for CopyFlash {}
 
-/// 「存储」设置页的扫描结果 + 上一次清理的提示文案（点按钮时同步刷新，扫描很快
-/// 不值得像更新检查那样搞异步状态机）。
+/// 「维护 → 旧版本残留」的扫描结果、是否正在确认清理，以及上一次清理的提示文案（点按钮
+/// 时同步刷新，扫描很快不值得像更新检查那样搞异步状态机）。
 #[derive(Clone, Default)]
 struct CleanupState {
     scan: Option<crate::storage_cleanup::CleanupScan>,
+    /// 点了「清理…」，等「确认清理」。删的是文件，先确认一次。
+    confirming: bool,
     message: Option<SharedString>,
 }
 
@@ -1354,6 +1348,7 @@ struct SettingsRenderSnapshot {
     daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
+    acp_commands_open: bool,
     /// 能力库当前页签。和 `settings_section` 分开记：设置窗口和能力库可以同时开着，
     /// 各看各的页。
     capabilities_tab: crate::CapabilitiesTab,
@@ -1362,6 +1357,8 @@ struct SettingsRenderSnapshot {
     session_manager_open: bool,
     /// 资源页的数。只在停在资源页时取，别的页用不着拼它。
     resources: Option<std::rc::Rc<crate::resource_monitor::PanelSnapshot>>,
+    /// 有要处理的事的那一页，设置侧栏在它后面标红点。
+    attention: Option<SettingsSection>,
 }
 
 /// 设置内容画在哪。两处共用同一套快照和节流刷新，只是外壳不同。
@@ -1605,7 +1602,9 @@ impl Render for SettingsWindow {
             .relative()
             .size_full()
             .font_family(resolved_ui_font_family(cx.global::<Appearance>()))
+            .key_context("SettingsWindow")
             .track_focus(&self.focus_handle)
+            .on_action(|_: &crate::CloseSettingsWindow, window, _| window.remove_window())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;
                 if keystroke.modifiers.platform && keystroke.modifiers.shift && keystroke.key == "f"

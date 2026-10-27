@@ -1,0 +1,7 @@
+[package]
+name = "smelt-version"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true

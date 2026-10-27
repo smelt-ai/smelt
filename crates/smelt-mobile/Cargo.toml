@@ -20,8 +20,8 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-model = { path = "../smelt-model" }
 smelt-pairing = { path = "../smelt-pairing" }
 smelt-event-protocol = { path = "../smelt-event-protocol" }
-# 只为在设备身份里存 `iroh::SecretKey`，版本跟 smelt-iroh 走同一个。
-iroh = "1"
+# 只为在设备身份里存 `iroh::SecretKey`，版本跟 smelt-iroh 走同一个（>=1.1.0）。
+iroh = "1.1"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -40,9 +40,12 @@ log = "0.4"
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
 
-# 不直接用 libc，只给它封顶：libc 0.2.190 起 `in6_ifreq` 只在 macOS 上导出，
-# netdev 0.46.x（iroh → netwatch 引入）在所有 Apple 平台都用它，iOS 上编不过。
-# 封顶写在这里，`cargo update` 就不会把 lockfile 里的 libc 又升上去。
-# netdev 发布 https://github.com/shellrow/netdev/pull/192 的修复后删掉这段。
+# 不直接用 libc，只给它封顶：libc 0.2.190 起 `in6_ifreq`、`RTM_GET2`、`RTF_IFSCOPE` 等只在
+# macOS 上导出，netwatch 0.19/0.20（iroh 引入）在所有 Apple 平台都用它们，iOS 上编不过。
+# netdev 的同类问题已由根 Cargo.toml 的 patch 解决，剩下的是 netwatch，上游 main 也还没修。
+# 封顶写在这里，`cargo update` 就不会把 lockfile 里的 libc 又升上去；dependabot 也忽略了
+# 这个范围（.github/dependabot.yml），它曾经直接把上限改高（#121）。
+# netwatch 在 iOS 上能用新 libc 编过后（https://github.com/n0-computer/net-tools/issues/261）
+# 删掉这段和 dependabot 的忽略。
 [target.'cfg(target_os = "ios")'.dependencies]
-libc = ">=0.2, <0.2.192"
+libc = ">=0.2, <0.2.190"

@@ -513,9 +513,11 @@ impl Workspace {
                     None::<gpui::AnyElement>
                 }
             })
+            // 侧栏行上的改名画在那一行里（见 `RenameTarget::is_inline`），这里只画弹窗那几种。
             .children(
                 self.rename_target
-                    .is_some()
+                    .as_ref()
+                    .is_some_and(|target| !target.is_inline())
                     .then(|| self.render_rename_session(cx)),
             )
             .children(

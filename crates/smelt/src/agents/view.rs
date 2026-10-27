@@ -104,7 +104,7 @@ impl Workspace {
         &self,
         id: &'static str,
         label: &'static str,
-        icon: IconName,
+        icon: impl Into<Icon>,
         attention: bool,
         route: WorkspaceRoute,
         entity: Entity<Workspace>,
@@ -130,7 +130,7 @@ impl Workspace {
                     .text_sm()
                     .font_medium()
                     .text_color(rgb(if selected {
-                        crate::ui_theme::text_bright()
+                        crate::ui_theme::text_selected()
                     } else {
                         crate::ui_theme::text_mid()
                     }))
@@ -158,8 +158,9 @@ impl Workspace {
 
     /// 侧栏最顶「新对话」：跟某个智能体开一场，不是裸引擎。
     ///
-    /// 有默认时单击直接开，右侧箭头只换默认。没有默认时弹出可对话的智能体。
-    /// 一个都没有就去空状态，不偷偷开 Pi。
+    /// 「新对话」是一个真按钮。默认智能体是它的参数，名字放在右边另一个按钮上，点那个
+    /// 只换默认。没有默认时点「新对话」弹出可对话的智能体。一个都没有就去空状态，不偷偷
+    /// 开 Pi。
     pub(super) fn render_workbench_chat_row(
         &self,
         entity: Entity<Workspace>,
@@ -168,9 +169,6 @@ impl Workspace {
         let plan = plan_new_conversation(self.agent_surface.conversation_draft.as_ref(), cx);
         let default_name = plan.default_name.as_deref().map(agent_display_name);
         let label = new_conversation_row_label(default_name.as_deref());
-        let mark = default_name
-            .as_deref()
-            .map(|name| conversation_agent_mark(Some(name)));
         match plan.intent {
             NewConversationIntent::PickAgent => self.render_new_conversation_picker(
                 entity,
@@ -179,11 +177,13 @@ impl Workspace {
                 plan.stale_defaults,
                 cx,
             ),
-            NewConversationIntent::Start(agent) => {
-                self.render_new_conversation_action(entity, label, mark, Some((agent, plan.ready)))
-            }
+            NewConversationIntent::Start(agent) => self.render_new_conversation_action(
+                entity,
+                label,
+                default_name.map(|name| (name, agent, plan.ready)),
+            ),
             NewConversationIntent::CreateAgent => {
-                self.render_new_conversation_action(entity, label, mark, None)
+                self.render_new_conversation_action(entity, label, None)
             }
         }
     }
@@ -192,54 +192,66 @@ impl Workspace {
         &self,
         entity: Entity<Workspace>,
         label: String,
-        mark: Option<String>,
-        switch: Option<(AgentRef, Vec<ConversationAgentPick>)>,
+        switch: Option<(String, AgentRef, Vec<ConversationAgentPick>)>,
     ) -> AnyElement {
         let click_entity = entity.clone();
-        ListRow::new("workbench-chat")
-            .role(gpui::Role::Button)
-            .aria_label(label.clone())
-            .h(crate::ui_theme::height::md())
-            .px_2()
+        div()
             .flex()
             .items_center()
-            .gap_2()
-            .rounded(crate::ui_theme::row_radius())
-            .child(new_conversation_row_body(label, mark).flex_1())
-            .when_some(switch, |row, (current, ready)| {
+            .gap_1p5()
+            .child(new_conversation_button("workbench-chat", label).on_click(
+                move |_, window, cx| {
+                    click_entity.update(cx, |workspace, cx| {
+                        workspace.begin_new_conversation(window, cx)
+                    });
+                },
+            ))
+            .when_some(switch, |row, (name, current, ready)| {
                 let menu_entity = entity.clone();
                 row.child(
-                    div()
-                        .flex_shrink_0()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    Button::new("workbench-chat-switch")
+                        .quiet()
+                        .flex_shrink_1()
+                        .min_w_0()
+                        .max_w(px(NEW_CONVERSATION_SWITCH_MAX_WIDTH))
+                        .accessibility_label("更换默认智能体")
+                        .tooltip("更换默认智能体")
                         .child(
-                            Button::new("workbench-chat-switch")
-                                .quiet()
-                                .size(px(22.))
-                                .icon(IconName::ChevronDown)
-                                .icon_action("更换默认智能体")
-                                // 这一行在侧栏顶上。Bottom* 会往上翻进红绿灯，
-                                // 菜单要向下展开，并贴着箭头右缘，避免冲出侧栏。
-                                .dropdown_menu_with_anchor(
-                                    Anchor::TopRight,
-                                    move |menu, _, cx| {
-                                        fill_conversation_agent_menu(
-                                            menu,
-                                            ready.clone(),
-                                            Some(current.clone()),
-                                            false,
-                                            menu_entity.clone(),
-                                            cx,
-                                        )
-                                    },
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(new_conversation_mark(conversation_agent_mark(Some(
+                                    &name,
+                                ))))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(rgb(crate::ui_theme::text_mid()))
+                                        .child(name),
+                                )
+                                .child(
+                                    Icon::new(IconName::ChevronDown)
+                                        .size(px(14.))
+                                        .text_color(rgb(crate::ui_theme::text_muted())),
                                 ),
-                        ),
+                        )
+                        // 这一行在侧栏顶上。Bottom* 会往上翻进红绿灯，
+                        // 菜单要向下展开，并贴着按钮右缘，避免冲出侧栏。
+                        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                            fill_conversation_agent_menu(
+                                menu,
+                                ready.clone(),
+                                Some(current.clone()),
+                                false,
+                                menu_entity.clone(),
+                                cx,
+                            )
+                        }),
                 )
-            })
-            .on_click(move |_, window, cx| {
-                click_entity.update(cx, |workspace, cx| {
-                    workspace.begin_new_conversation(window, cx)
-                });
             })
             .into_any_element()
     }
@@ -252,11 +264,7 @@ impl Workspace {
         stale_defaults: Vec<crate::RuntimeKey>,
         _cx: &App,
     ) -> AnyElement {
-        Button::new("workbench-chat-pick")
-            .quiet()
-            .w_full()
-            .accessibility_label(label.clone())
-            .child(new_conversation_row_body(label, None).w_full())
+        new_conversation_button("workbench-chat-pick", label)
             // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
                 for runtime in &stale_defaults {
@@ -267,46 +275,123 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 侧栏「最近对话」。跟项目在同一个滚动区里，收起时只列几条。
+    /// 侧栏「对话」分组。跟项目分组同一套：分组行点一下收起或展开，展开列出全部对话，
+    /// 按最近活动排；收起时分组行写数量和最要紧的状态。一个对话都没有就整组不出现。
+    /// 跟项目在同一个滚动区里，对话多了只是把项目往下推。
     pub(crate) fn render_product_conversation_nav(
         &self,
         entity: Entity<Workspace>,
         statuses: &[AgentStatus],
+        // 键盘焦点在侧栏里时，焦点环落在哪一行（`SidebarItem::key`）。
+        focused_key: Option<u64>,
         cx: &App,
     ) -> AnyElement {
-        let product: Vec<usize> = self
-            .sessions
+        // 跟键盘导航同一份顺序。
+        let product = self.sidebar_conversation_order(cx);
+        if product.is_empty() {
+            return div().into_any_element();
+        }
+        let ordered: Vec<(usize, u64)> = product
             .iter()
-            .enumerate()
-            .filter(|(_, session)| session.is_agent_conversation(cx))
-            .map(|(ix, _)| ix)
-            .collect();
-        let updated: Vec<u64> = product
-            .iter()
-            .map(|&ix| self.sessions[ix].effective_updated_at(cx))
-            .collect();
-        let ordered: Vec<(usize, u64)> = recent_conversation_order(&updated)
-            .into_iter()
-            .map(|order| (product[order], updated[order]))
+            .map(|&ix| (ix, self.sessions[ix].effective_updated_at(cx)))
             .collect();
         let selected_sid = if self.active_tab() == &WorkspaceRoute::Agents {
             self.nav.agents().conversation_sid()
         } else {
             None
         };
-        let selected_pos = selected_sid.and_then(|sid| {
-            ordered.iter().position(|&(ix, _)| {
+        let collapsed = self.sidebar_conversations_collapsed;
+        let agg = product
+            .iter()
+            .filter_map(|&ix| statuses.get(ix).copied())
+            .min_by_key(|status| status.rank())
+            .unwrap_or(AgentStatus::Idle);
+        let selected_inside = selected_sid.is_some_and(|sid| {
+            product.iter().any(|&ix| {
                 self.sessions[ix]
                     .active_acp()
                     .is_some_and(|view| view.read(cx).session_id().to_string() == sid)
             })
         });
-        let expanded = self.sidebar_recent_conversations_expanded;
-        let shown = visible_recent_conversations(ordered.len(), selected_pos, expanded);
-        let hidden = ordered.len() - shown.len();
+        let toggle_entity = entity.clone();
+        let group_key = crate::session_list::SidebarItem::ConversationGroup.key();
+        let reveal_target = self.sidebar_reveal.target();
+        // 分组行跟项目行同一个样子：图标、名字，收起时右边写数量和状态点。选中的对话被
+        // 收在里面时，分组行代它亮起来。
+        let header = ListRow::new("conversation-group")
+            .group(CONVERSATION_GROUP_HOVER)
+            .relative()
+            .when(focused_key == Some(group_key), |row| {
+                row.child(crate::session_list::row::focus_ring())
+            })
+            .when(reveal_target == Some(group_key), |row| {
+                row.child(crate::session_list::reveal_anchor(
+                    self.sidebar_reveal.clone(),
+                    group_key,
+                    self.sidebar_scroll.clone(),
+                    entity.clone(),
+                ))
+            })
+            .selected(collapsed && selected_inside)
+            .h(crate::ui_theme::height::md())
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(crate::ui_theme::row_radius())
+            .child(crate::session_list::row::group_disclosure(
+                "conversation-group-disclosure",
+                CONVERSATION_GROUP_HOVER,
+                Icon::new(gpui_kit_assets::IconName::MessageSquare).size(px(15.)),
+                collapsed,
+                true,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(rgb(crate::ui_theme::text_mid()))
+                    .child("对话"),
+            )
+            .when(collapsed && agg != AgentStatus::Idle, |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(crate::ui_theme::session_dot_color(agg)),
+                )
+            })
+            .when(collapsed, |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(product.len().to_string()),
+                )
+            })
+            .on_click(move |_, _, cx| {
+                toggle_entity.update(cx, |workspace, cx| {
+                    workspace.sidebar_conversations_collapsed =
+                        !workspace.sidebar_conversations_collapsed;
+                    cx.notify();
+                });
+            });
+        let section = div().mx_2().mt_3().flex().flex_col().child(header);
+        if collapsed {
+            return section.into_any_element();
+        }
+
         let now = chrono::Local::now();
+        // 正在就地改名的那一行：标题那一格换成输入框。
+        let renaming = match (&self.rename_target, &self.rename_input) {
+            (Some(crate::RenameTarget::Session(ix)), Some(input)) => Some((*ix, input.clone())),
+            _ => None,
+        };
         let mut rows = Vec::new();
-        for (ix, updated_at) in shown.into_iter().map(|pos| ordered[pos]) {
+        for (ix, updated_at) in ordered {
             let Some(session) = self.sessions.get(ix) else {
                 continue;
             };
@@ -315,16 +400,30 @@ impl Workspace {
             };
             let sid = view.read(cx).session_id().to_string();
             let selected = selected_sid == Some(sid.as_str());
-            let updated_text = conversation_row_meta(
-                view.read(cx).runtime().key(),
-                crate::session_list::row::session_updated_at_text(updated_at, &now),
-                cx,
-            );
+            let runtime = view.read(cx).runtime().key().clone();
             let title = conversation_row_title(
                 session.custom_title.as_deref(),
                 view.read(cx).auto_title().as_deref(),
             );
             let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
+            // 行尾一格：要人管时写状态；对话所在的机器用不了时写它怎么了；否则写时间。
+            let meta: (SharedString, Hsla) =
+                match crate::session_list::row::session_row_status_label(status) {
+                    Some(label) => (
+                        label.into(),
+                        crate::ui_theme::session_dot_color(status).into(),
+                    ),
+                    None => (
+                        conversation_row_meta(
+                            &runtime,
+                            crate::session_list::row::session_updated_at_text(updated_at, &now),
+                            cx,
+                        )
+                        .into(),
+                        rgb(crate::ui_theme::text_muted()).into(),
+                    ),
+                };
+            let tooltip = conversation_row_tooltip(&title, &runtime, cx);
             let bound = bound_agent_definition_id(
                 session.agent_definition_id.as_deref(),
                 session.automation_id.as_deref(),
@@ -332,24 +431,49 @@ impl Workspace {
             // 对话绑定的智能体在对话所在的那台机器上。
             let agent_name = bound.and_then(|id| {
                 settings::agent_hosts(cx)?
-                    .agent(view.read(cx).runtime().key(), id)
+                    .agent(&runtime, id)
                     .map(|agent| agent_display_name(&agent.name))
             });
             let mark = conversation_agent_mark(agent_name.as_deref());
             let open_ix = ix;
+            let ui_id = session.ui_id;
             let open_entity = entity.clone();
             let close_entity = entity.clone();
             let rename_entity = entity.clone();
             rows.push(
                 ListRow::new(format!("product-conversation-{sid}"))
                     .selected(selected)
-                    .group("product-conv-row")
+                    .group(CONVERSATION_ROW_HOVER)
+                    .relative()
+                    .h(crate::ui_theme::height::md())
                     .px_2()
-                    .py(px(6.))
                     .flex()
                     .items_center()
                     .gap_2()
                     .rounded(crate::ui_theme::row_radius())
+                    .when(self.sidebar_flash == Some(ui_id), |row| {
+                        row.child(crate::session_list::row::new_row_flash((
+                            "sidebar-new-row",
+                            ui_id,
+                        )))
+                    })
+                    .when(self.sidebar_reveal.target() == Some(ui_id), |row| {
+                        row.child(crate::session_list::reveal_anchor(
+                            self.sidebar_reveal.clone(),
+                            ui_id,
+                            self.sidebar_scroll.clone(),
+                            entity.clone(),
+                        ))
+                    })
+                    .when(status == AgentStatus::NeedsYou, |row| {
+                        row.child(crate::session_list::attention_anchor(
+                            self.sidebar_reveal.clone(),
+                            ui_id,
+                        ))
+                    })
+                    .when(focused_key == Some(ui_id), |row| {
+                        row.child(crate::session_list::row::focus_ring())
+                    })
                     .child(
                         div()
                             .flex_shrink_0()
@@ -364,65 +488,56 @@ impl Workspace {
                             .text_color(conversation_icon_color(status, None))
                             .child(mark),
                     )
-                    // 跟项目下的会话行一样两行：标题，下面是最近活动时间。
-                    .child(
-                        div()
+                    // 跟项目下的会话行一样一行：标题占满，行尾一格写时间或状态。
+                    .child(match renaming.as_ref().filter(|(renaming, _)| *renaming == ix) {
+                        Some((_, input)) => {
+                            crate::session_list::row::inline_rename_input(input, entity.clone())
+                                .into_any_element()
+                        }
+                        // 选中跟项目下的会话行同口径：选中字色加中等字重。
+                        None => div()
                             .flex_1()
                             .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .line_height(px(16.))
-                                    .text_sm()
-                                    .text_color(rgb(if selected {
-                                        crate::ui_theme::text_bright()
-                                    } else {
-                                        crate::ui_theme::text()
-                                    }))
-                                    .truncate()
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .line_height(px(14.))
-                                    .text_xs()
-                                    .text_color(rgb(crate::ui_theme::text_faint()))
-                                    .truncate()
-                                    .child(updated_text),
-                            ),
-                    )
-                    .children(
-                        crate::session_list::row::session_row_status_label(status).map(|label| {
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .text_color(crate::ui_theme::session_dot_color(status))
-                                .child(label)
-                        }),
-                    )
-                    .child(
+                            .text_sm()
+                            .when(selected, |title| title.font_medium())
+                            .text_color(rgb(if selected {
+                                crate::ui_theme::text_selected()
+                            } else {
+                                crate::ui_theme::text()
+                            }))
+                            .truncate()
+                            .child(title)
+                            .into_any_element(),
+                    })
+                    .child(crate::session_list::row::row_trailing_slot(
+                        CONVERSATION_ROW_HOVER,
+                        Some(meta),
                         Button::new(format!("close-product-conversation-{sid}"))
                             .dismiss()
-                            .flex_shrink_0()
                             .icon(IconName::Close)
                             .icon_action("关闭")
-                            .opacity(0.0)
-                            .group_hover("product-conv-row", |s| s.opacity(1.0))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
                                 close_entity.update(cx, |workspace, cx| {
                                     workspace.request_close_session(open_ix, window, cx)
                                 });
                             }),
-                    )
-                    .on_click(move |_, window, cx| {
+                    ))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                    })
+                    // 双击改名：第一下已经打开了，第二下就地改名。
+                    .on_click(move |ev, window, cx| {
                         open_entity.update(cx, |workspace, cx| {
-                            workspace.open_agent_conversation(open_ix, window, cx)
+                            if ev.click_count() >= 2 {
+                                workspace.start_rename(
+                                    crate::RenameTarget::Session(open_ix),
+                                    window,
+                                    cx,
+                                );
+                            } else {
+                                workspace.open_agent_conversation(open_ix, window, cx);
+                            }
                         });
                     })
                     .context_menu(move |menu, _window, _cx| {
@@ -444,65 +559,27 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        let toggle_label = (ordered.len() > SIDEBAR_RECENT_CONVERSATION_LIMIT).then(|| {
-            if expanded {
-                "收起".to_string()
-            } else {
-                format!("显示其余 {hidden} 个")
-            }
-        });
-        div()
-            .px_2()
-            .pt_1()
-            .pb_1()
-            .flex()
-            .flex_col()
-            .gap(px(1.))
+        // 对话缩进一档挂在分组下面，左边一根细线，跟项目下的会话同一套尺寸。
+        section
             .child(
                 div()
-                    .px_2()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
                     .pb_1()
-                    .text_xs()
-                    .font_medium()
-                    .text_color(rgb(crate::ui_theme::text_muted()))
-                    .child("最近对话"),
-            )
-            .map(|section| {
-                if rows.is_empty() {
-                    section.child(
+                    .pl(px(crate::session_list::PROJECT_SESSION_INDENT))
+                    .child(
                         div()
-                            .px_2()
-                            .h(crate::ui_theme::height::sm())
-                            .flex()
-                            .items_center()
-                            .text_xs()
-                            .text_color(rgb(crate::ui_theme::text_faint()))
-                            .child("还没有对话"),
+                            .absolute()
+                            .left(px(crate::session_list::PROJECT_GUIDE_LEFT))
+                            .top_0()
+                            .bottom(px(4.))
+                            .w(px(1.))
+                            .bg(crate::ui_theme::hairline()),
                     )
-                } else {
-                    section.children(rows)
-                }
-            })
-            .when_some(toggle_label, |section, label| {
-                section.child(
-                    ListRow::new("recent-conversations-toggle")
-                        .px_2()
-                        .h(crate::ui_theme::height::sm())
-                        .flex()
-                        .items_center()
-                        .rounded(crate::ui_theme::row_radius())
-                        .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_faint()))
-                        .child(label)
-                        .on_click(move |_, _, cx| {
-                            entity.update(cx, |workspace, cx| {
-                                workspace.sidebar_recent_conversations_expanded =
-                                    !workspace.sidebar_recent_conversations_expanded;
-                                cx.notify();
-                            });
-                        }),
-                )
-            })
+                    .children(rows),
+            )
             .into_any_element()
     }
 
@@ -859,7 +936,7 @@ impl Workspace {
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |workspace, cx| {
                                         workspace.open_settings_section(
-                                            crate::settings::SettingsSection::CollaborationMachines,
+                                            crate::settings::SettingsSection::Remote,
                                             cx,
                                         );
                                     });
@@ -1257,11 +1334,7 @@ impl Workspace {
             })
     }
 
-    fn render_capabilities_needs_runtime(
-        &self,
-        entity: Entity<Workspace>,
-        cx: &App,
-    ) -> AnyElement {
+    fn render_capabilities_needs_runtime(&self, entity: Entity<Workspace>, cx: &App) -> AnyElement {
         let (fg, muted) = {
             let theme = cx.theme();
             (theme.foreground, theme.muted_foreground)
@@ -1300,7 +1373,7 @@ impl Workspace {
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |workspace, cx| {
                             workspace.open_settings_section(
-                                crate::settings::SettingsSection::CollaborationMachines,
+                                crate::settings::SettingsSection::Remote,
                                 cx,
                             );
                         });
@@ -1406,31 +1479,20 @@ fn new_conversation_mark(mark: String) -> Div {
         .child(mark)
 }
 
-fn new_conversation_row_body(label: String, mark: Option<String>) -> Div {
-    div()
+/// 默认智能体那个按钮最宽多少：名字再长就截断，「新对话」始终占大头。
+const NEW_CONVERSATION_SWITCH_MAX_WIDTH: f32 = 128.;
+
+/// 侧栏最顶的「新对话」按钮。`label` 带着默认智能体的名字，给读屏用。悬停提示写上
+/// ⌘N。
+fn new_conversation_button(id: &'static str, label: String) -> Button {
+    Button::new(id)
+        .normal()
+        .flex_1()
         .min_w_0()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(match mark {
-            Some(mark) => new_conversation_mark(mark),
-            None => div().flex_shrink_0().child(
-                Icon::empty()
-                    .path("smelt-icons/square-pen.svg")
-                    .size(px(16.))
-                    .text_color(rgb(crate::ui_theme::text_muted())),
-            ),
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                .font_medium()
-                .text_color(rgb(crate::ui_theme::text_mid()))
-                .child(label),
-        )
+        .icon(IconName::Plus)
+        .label("新对话")
+        .accessibility_label(label)
+        .tooltip_with_action("新对话", &crate::NewConversation, None)
 }
 
 /// 能开对话的智能体。挂了不止一台机器时按机器分段，段头是机器名。
@@ -1576,15 +1638,24 @@ fn render_agent_machine_header(group: &AgentMachineGroup, cx: &App) -> AnyElemen
 
 /// 「最近对话」行的第二行。本机的只写时间；别的机器上的在前面标机器名，连不上时写状态：
 /// 智能体对话不按机器分组，只能在行上说清楚它在哪台机器上。
+/// 对话行行尾那一格：对话所在的机器用不了时写它怎么了（离线、版本不兼容……），
+/// 否则写最近活动时间。机器名放不进这一格，写在悬停提示里。
 fn conversation_row_meta(runtime: &crate::RuntimeKey, updated: String, cx: &App) -> String {
+    crate::runtimes::runtime_unavailable_label(runtime, cx)
+        .map(str::to_string)
+        .unwrap_or(updated)
+}
+
+/// 对话行的悬停提示：完整标题，在远程机器上的再带上机器名。
+fn conversation_row_tooltip(title: &str, runtime: &crate::RuntimeKey, cx: &App) -> SharedString {
     match runtime {
-        crate::RuntimeKey::Local => updated,
+        crate::RuntimeKey::Local => title.to_string().into(),
         crate::RuntimeKey::Remote(_) => {
-            let machine = crate::runtimes::runtime_name(runtime, cx);
-            match crate::runtimes::runtime_unavailable_label(runtime, cx) {
-                Some(unavailable) => format!("{machine} · {unavailable}"),
-                None => format!("{machine} · {updated}"),
-            }
+            format!("{title} · {}", crate::runtimes::runtime_name(runtime, cx)).into()
         }
     }
 }
+
+/// 「对话」分组行、对话行的 hover group 名。
+const CONVERSATION_GROUP_HOVER: &str = "conversation-group-hover";
+const CONVERSATION_ROW_HOVER: &str = "product-conv-row";

@@ -770,6 +770,50 @@ mod tests {
         );
     }
 
+    /// revision 1 先发布、revision 2 后发布：两条都成功，序号和投递都按这个顺序。
+    /// 并发测试里这条路径取决于谁先拿到序号，不能靠调度碰运气。
+    #[test]
+    fn sequential_ephemeral_revisions_publish_and_deliver_in_order() {
+        let hub = EventHub::new(registry(None));
+        let subscription = hub
+            .subscribe(
+                PluginId::new("com.example").unwrap(),
+                SubscriptionId::new("sessions").unwrap(),
+                BTreeSet::from([topic("example.changed")]),
+                &BTreeSet::from([capability("session.read")]),
+                2,
+            )
+            .unwrap();
+
+        let first = hub
+            .publish(
+                &PublisherIdentity::Core,
+                aggregate_envelope(1, 1),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let second = hub
+            .publish(
+                &PublisherIdentity::Core,
+                aggregate_envelope(1, 2),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(
+            first.sequence < second.sequence,
+            "revision 2 was sequenced before revision 1"
+        );
+
+        let mut delivered = Vec::new();
+        for _ in 0..2 {
+            let Delivery::Event(event) = subscription.try_recv().unwrap() else {
+                panic!("expected event");
+            };
+            delivered.push((event.sequence, event.envelope.aggregate_revision.unwrap()));
+        }
+        assert_eq!(delivered, vec![(first.sequence, 1), (second.sequence, 2)]);
+    }
+
     #[test]
     fn concurrent_ephemeral_revisions_never_publish_or_deliver_in_reverse_order() {
         const ITERATIONS: usize = 128;
@@ -785,7 +829,6 @@ mod tests {
             )
             .unwrap();
         let mut delivered_count = 0;
-        let mut paired_publishes = 0;
 
         for id in 0..ITERATIONS {
             let barrier = Arc::new(Barrier::new(3));
@@ -804,18 +847,15 @@ mod tests {
             barrier.wait();
             let [first, second] = threads.map(|thread| thread.join().unwrap());
             delivered_count += usize::from(first.is_ok()) + usize::from(second.is_ok());
+            // 两条都成功只发生在 revision 1 先拿到序号时，哪边先到取决于调度。
+            // 这里只保留那时的不变式；「先 1 后 2」由串行测试确定覆盖。
             if let (Ok(first), Ok(second)) = (first, second) {
-                paired_publishes += 1;
                 assert!(
                     first.sequence < second.sequence,
                     "revision 2 was sequenced before revision 1 for aggregate {id}"
                 );
             }
         }
-        assert!(
-            paired_publishes > 0,
-            "the concurrency regression never published both revisions"
-        );
 
         let mut revisions_by_aggregate = BTreeMap::<String, Vec<u64>>::new();
         for _ in 0..delivered_count {

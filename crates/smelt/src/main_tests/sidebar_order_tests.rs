@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use super::{SessionState, WsState, indices_share_group, reorder_vec, session_state_cwd};
 use crate::sidebar_order::{
     apply_pinned_project_drop, is_pinned_project, move_index_near, move_project_root_near,
-    pinned_projects_first, project_header_click_toggles_collapse, project_header_is_dimmed,
-    same_project_root, sidebar_empty_project_visible, toggle_pinned_project,
+    neighbor_in_group, pinned_projects_first, previous_viewed,
+    project_header_click_toggles_collapse, project_header_is_dimmed, same_project_root,
+    sidebar_empty_project_visible, toggle_pinned_project,
 };
 
 fn leaf(cwd: &str) -> crate::PaneState {
@@ -208,4 +209,26 @@ fn dropping_pinned_onto_unpinned_unpins_it() {
         projects,
         vec!["/a".to_string(), "/smelt".into(), "/b".into()]
     );
+}
+
+#[test]
+fn closing_the_current_session_goes_back_to_the_last_one_viewed() {
+    let recent = [5, 2, 8, 3];
+    assert_eq!(previous_viewed(&recent, 3, |_| true), Some(8));
+    assert_eq!(
+        previous_viewed(&recent, 3, |id| id != 8),
+        Some(2),
+        "关掉了的、不是同一类的跳过"
+    );
+    assert_eq!(previous_viewed(&[3], 3, |_| true), None, "还没看过别的");
+}
+
+#[test]
+fn closing_the_current_session_lands_on_its_neighbour_in_the_same_project() {
+    // 侧栏顺序和 sessions 下标不是一回事。
+    let order = [4, 1, 7];
+    assert_eq!(neighbor_in_group(&order, 1), Some(7), "优先下面那个");
+    assert_eq!(neighbor_in_group(&order, 7), Some(1), "最后一个就落到上面那个");
+    assert_eq!(neighbor_in_group(&[3], 3), None, "组里只剩它");
+    assert_eq!(neighbor_in_group(&order, 9), None);
 }

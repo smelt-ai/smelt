@@ -19,40 +19,17 @@ pub(crate) fn peer_pid(conn: &impl crate::protocol::PeerSource) -> Result<u32, C
         .map_err(|error| denied(&format!("cannot authenticate memory control peer: {error}")))
 }
 
-/// 一条会话里和记忆鉴权有关的进程：独立宿主、它拉起的 pi-agent，以及同进程模式的 stdio。
+/// 这条会话的 pi-agent。ACP 由 smeltd 同进程拉起，pid 在 `handle.stdio` 上。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SessionRoots {
-    host_pid: Option<u32>,
-    provider_pid: Option<u32>,
-    handle_pid: Option<u32>,
+    agent_pid: Option<u32>,
 }
 
 fn session_roots(session: &super::AcpSession) -> SessionRoots {
-    let hosted = session.hosted_handle.lock().unwrap();
-    let host_pid = hosted
-        .as_ref()
-        .map(|host| host.pid())
+    let agent_pid = super::acp_agent_pid(session)
         .filter(|pid| *pid > 1)
         .and_then(|pid| u32::try_from(pid).ok());
-    let provider_pid = hosted
-        .as_ref()
-        .and_then(|host| host.provider_pid())
-        .filter(|pid| *pid > 1)
-        .and_then(|pid| u32::try_from(pid).ok());
-    drop(hosted);
-    let handle_pid = session
-        .handle
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|handle| handle.stdio.lock().unwrap().as_ref().map(|stdio| stdio.pid))
-        .filter(|pid| *pid > 1)
-        .and_then(|pid| u32::try_from(pid).ok());
-    SessionRoots {
-        host_pid,
-        provider_pid,
-        handle_pid,
-    }
+    SessionRoots { agent_pid }
 }
 
 const SHELL_NAMES: &[&str] = &[
@@ -80,32 +57,17 @@ fn is_shell_name(name: &str) -> bool {
 
 /// `peer` 能不能代表这条会话调 `agent.memory.*`。
 ///
-/// 只认 pi-agent 自己：hosted 模式的 `provider_pid`，或同进程模式 `session.handle` 的
-/// stdio pid。宿主的直接子进程仅在 provider 还没报上来、且能确认不是 shell 时放行。
-/// pi-agent 再往下的 bash / sh / zsh 一律拒绝。
+/// 只认 `handle.stdio` 上的 pi-agent pid。bash / sh / zsh / cmd，以及带 `.exe`
+/// 的这些名字，即使 pid 正好对上也拒绝。其它进程（包括它的子进程）一律拒绝。
 fn allows_session_peer(
     peer: u32,
     roots: &SessionRoots,
-    parent_of: impl Fn(u32) -> Option<u32>,
     comm_of: impl Fn(u32) -> Option<String>,
 ) -> bool {
     if comm_of(peer).is_some_and(|name| is_shell_name(&name)) {
         return false;
     }
-    if roots.provider_pid == Some(peer) || roots.handle_pid == Some(peer) {
-        return true;
-    }
-    let Some(host) = roots.host_pid else {
-        return false;
-    };
-    if parent_of(peer) != Some(host) {
-        return false;
-    }
-    match roots.provider_pid {
-        Some(provider) => peer == provider,
-        // 还不知道 pi-agent 的 pid：直接子进程必须能读到进程名，并且不是 shell。
-        None => comm_of(peer).is_some_and(|name| !is_shell_name(&name)),
-    }
+    roots.agent_pid == Some(peer)
 }
 
 /// `agent.memory.meta` / `record_*`：对端必须是持有该 token 的 pi-agent 本身。
@@ -124,9 +86,7 @@ pub(crate) fn require_session_process(
         Some(session_roots(session))
     });
     match roots {
-        Some(Some(roots)) if allows_session_peer(peer_pid, &roots, parent_pid, process_comm) => {
-            Ok(())
-        }
+        Some(Some(roots)) if allows_session_peer(peer_pid, &roots, process_comm) => Ok(()),
         _ => Err(denied(
             "memory control methods may only be called by the session process itself",
         )),
@@ -141,10 +101,7 @@ fn agent_ancestor_pids(acp_sessions: &AcpSessions) -> HashSet<u32> {
         }) else {
             continue;
         };
-        for pid in [roots.host_pid, roots.provider_pid, roots.handle_pid]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(pid) = roots.agent_pid {
             agent_pids.insert(pid);
         }
     }
@@ -366,15 +323,14 @@ fn process_comm(pid: u32) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// Windows 没有可用的父进程查询。父链走不到就拒绝「宿主直接子进程」这条宽放。
-/// 子孙黑名单因此只能认出 pid 本身；采纳和删除仍由桌面白名单失败关闭。
-/// 精确的 provider / handle pid 仍然有效。
+/// Windows 没有可用的父进程查询。采纳/删除的子孙黑名单因此只能认出 pi-agent
+/// 自己的 pid；桌面白名单仍然失败关闭。
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn parent_pid(_pid: u32) -> Option<u32> {
     None
 }
 
-/// Windows 用 #83 的映像路径判断是不是 shell。读不到就当未知，宽放路径因此失败关闭。
+/// Windows 用映像路径判断是不是 shell。读不到就当未知：pid 对上且名字未知时放行。
 #[cfg(windows)]
 fn process_comm(pid: u32) -> Option<String> {
     let path = smelt_sys::process::process_executable(pid).ok()?;
@@ -450,39 +406,9 @@ mod tests {
 
     #[test]
     fn only_the_pi_agent_itself_may_call_session_memory_methods() {
-        let roots = SessionRoots {
-            host_pid: Some(10),
-            provider_pid: Some(20),
-            handle_pid: Some(30),
-        };
-        let mut tree = HashMap::new();
-        tree.insert(20, 10); // pi-agent 是 host 的直接子进程
-        tree.insert(21, 20); // bash 是 pi-agent 的子进程
-        tree.insert(22, 21); // 孙进程
-        tree.insert(23, 10); // host 的另一个直接子进程
         let mut names = HashMap::new();
         names.insert(20, "node");
         names.insert(21, "bash");
-        names.insert(22, "python");
-        names.insert(23, "zsh");
-        names.insert(30, "pi-rpc");
-        let allow = |pid| allows_session_peer(pid, &roots, parents(&tree), comms(&names));
-        assert!(allow(20), "provider 自己可以");
-        assert!(allow(30), "同进程模式的 handle pid 可以");
-        assert!(!allow(21), "pi-agent 的 bash 子进程不行");
-        assert!(!allow(22), "再往下的孙进程不行");
-        assert!(!allow(23), "宿主的 shell 子进程不行");
-        assert!(!allow(10), "session-host 自己不是 pi-agent");
-
-        let unbound = SessionRoots {
-            host_pid: Some(10),
-            provider_pid: None,
-            handle_pid: None,
-        };
-        let mut names = HashMap::new();
-        names.insert(24, "bun");
-        names.insert(23, "zsh");
-        // 不去掉 `.exe` 时，这些名字对不上 shell 表，会被当成宿主的直接子进程放行。
         names.insert(26, "powershell.exe");
         names.insert(
             27,
@@ -490,22 +416,29 @@ mod tests {
         );
         names.insert(28, "cmd.exe");
         names.insert(29, "node.exe");
-        tree.insert(24, 10);
-        tree.insert(26, 10);
-        tree.insert(27, 10);
-        tree.insert(28, 10);
-        tree.insert(29, 10);
-        let allow = |pid| allows_session_peer(pid, &unbound, parents(&tree), comms(&names));
-        assert!(
-            allow(24),
-            "provider 还没绑定时，宿主的非 shell 直接子进程可以"
-        );
-        assert!(allow(29), "node.exe 不是 shell，直接子进程可以");
-        assert!(!allow(23), "这时 shell 仍然不行");
-        assert!(!allow(26), "powershell.exe 不能靠漏剥后缀放行");
-        assert!(!allow(27), "带路径的 powershell.exe 也不能放行");
-        assert!(!allow(28), "cmd.exe 不能靠漏剥后缀放行");
-        assert!(!allow(21), "pi-agent 的子进程仍然不行");
+        let allow = |pid, agent: u32| {
+            allows_session_peer(
+                pid,
+                &SessionRoots {
+                    agent_pid: Some(agent),
+                },
+                comms(&names),
+            )
+        };
+        assert!(allow(20, 20), "stdio 上的 pi-agent 可以");
+        assert!(!allow(21, 20), "bash 子进程不是 pi-agent");
+        assert!(!allow(22, 20), "没有登记的进程不行");
+        assert!(!allow(10, 20), "smeltd 自己不是 pi-agent");
+        // 不去掉 `.exe` 时这些名字对不上 shell 表，pid 对上就会放行。
+        assert!(!allow(26, 26), "powershell.exe 不能靠漏剥后缀放行");
+        assert!(!allow(27, 27), "带路径的 powershell.exe 也不能放行");
+        assert!(!allow(28, 28), "cmd.exe 不能靠漏剥后缀放行");
+        assert!(allow(29, 29), "node.exe 不是 shell");
+        assert!(!allows_session_peer(
+            20,
+            &SessionRoots { agent_pid: None },
+            comms(&names)
+        ));
     }
 
     #[test]
@@ -532,12 +465,12 @@ mod tests {
             )
         });
         {
-            let mut state = slot.value.state.lock().unwrap();
+            let mut state = slot.value.state.lock();
             state.phase = super::super::Phase::Idle;
         }
         let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
         let (_event_tx, event_rx) = smol::channel::unbounded();
-        *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
             cmd_tx,
             event_rx,
             stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio { pid }))),

@@ -1,7 +1,7 @@
 //! `resource.usage`：这台运行时此刻的资源占用。
 //!
 //! 守护进程只算它自己：会话都是它的子孙，算整棵树就把会话重复算一遍。每个会话从根进程往下
-//! 算整棵树。终端的根是 PTY 里的 shell；对话的根是独立的会话宿主进程，provider（Pi、Claude、
+//! 算整棵树。终端的根是 PTY 里的 shell；对话的根是 agent 子进程（Pi、Claude、
 //! Codex……）和它们起的工具进程都在下面，真正吃资源的多半是这些子孙。
 //!
 //! 采样器整个守护共用一份。CPU 是跟上一次调用比出来的：几个客户端同时在看时，间隔就是
@@ -91,14 +91,14 @@ fn session_roots(sessions: &Sessions, acp_sessions: &AcpSessions) -> Vec<(String
     roots
 }
 
-/// 对话的根进程：独立的会话宿主；没有宿主（同进程托管）时是直接起的 provider。
-/// 两者都要等会话收尾时才回收，句柄还在，pid 就还是它的。
+/// 对话的根进程是 agent 子进程。句柄还在，pid 就还是它的。
 fn acp_root_pid(session: &AcpSession) -> Option<i32> {
-    if let Some(hosted) = session.hosted_handle.lock().unwrap().as_ref() {
-        return Some(hosted.pid());
-    }
-    let handle = session.handle.lock().unwrap();
-    let stdio = *handle.as_ref()?.stdio.lock().unwrap();
+    let handle = session.handle.lock();
+    let stdio = *handle
+        .as_ref()?
+        .stdio
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     stdio.map(|stdio| stdio.pid)
 }
 

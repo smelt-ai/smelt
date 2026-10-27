@@ -201,6 +201,8 @@ pub struct PublishedSessionRecord {
     pub launch: Option<String>,
     pub provider: Option<String>,
     pub conversation_id: Option<String>,
+    /// CLI 进程已经退出。对话 id 退出后仍留着，续接与否看这一列。
+    pub cli_exited: bool,
     pub title: Option<String>,
     pub phase: String,
     pub phase_since: i64,

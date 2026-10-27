@@ -30,7 +30,7 @@ fn decode_frame(mirror: &mut smelt_core::acp_wire::FrameMirror, line: &str) -> s
 }
 
 fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> AcpSnapshotLink {
-    let tool_debug_generation_sent = sess.reduced.lock().unwrap().tool_debug_generation;
+    let tool_debug_generation_sent = sess.reduced.lock().tool_debug_generation;
     let encode_sess = Arc::downgrade(sess);
     let detach_sess = Arc::downgrade(sess);
     spawn_acp_snapshot_link(
@@ -156,28 +156,6 @@ fn changed_acp_runtime_spec_relaunches_live_session() {
 }
 
 #[test]
-fn runtime_spec_fingerprint_does_not_serialize_secrets() {
-    let launch = smelt_core::agent_kind::ConversationLaunchSpec::from_command("copilot --acp");
-    let mut original_env = BTreeMap::new();
-    original_env.insert("PLUGIN_TOKEN".to_string(), "original-token".to_string());
-
-    let before_handoff = acp_runtime_spec_fingerprint(&launch, &original_env);
-    assert_eq!(
-        before_handoff,
-        acp_runtime_spec_fingerprint(&launch, &original_env),
-        "相同 runtime 规格在 daemon exec 前后必须稳定，不能误重启仍存活的宿主"
-    );
-
-    let mut changed_env = original_env;
-    changed_env.insert("PLUGIN_TOKEN".to_string(), "rotated-token".to_string());
-    assert_ne!(
-        before_handoff,
-        acp_runtime_spec_fingerprint(&launch, &changed_env),
-        "凭据真的变化时仍必须触发 runtime 重启"
-    );
-}
-
-#[test]
 fn blank_restore_policy_survives_replay_reset_and_success_becomes_strict() {
     let mut state = AcpRestoreState::Fresh;
     assert_eq!(
@@ -226,7 +204,7 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
         acp_sessions.reserve_with("acp-live", || make_acp_session_value("acp-live", reduced));
     let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -237,7 +215,7 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
         supports_native_queue: false,
         supports_rewind: false,
     });
-    *slot.value.conversation_binding.lock().unwrap() =
+    *slot.value.conversation_binding.lock() =
         Some(smelt_core::conversation::ConversationBinding::Automation {
             run_id: "run-current".into(),
         });
@@ -273,9 +251,9 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
         response["snapshot"]["conversation_state"]["binding"]["run_id"],
         "run-current"
     );
-    assert!(slot.value.handle.lock().unwrap().is_some());
+    assert!(slot.value.handle.lock().is_some());
     assert!(matches!(
-        &*slot.value.conversation_binding.lock().unwrap(),
+        &*slot.value.conversation_binding.lock(),
         Some(smelt_core::conversation::ConversationBinding::Automation { run_id })
             if run_id == "run-current"
     ));
@@ -296,7 +274,7 @@ fn reopening_live_session_adopts_client_binding_when_unknown() {
     });
     let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -307,7 +285,7 @@ fn reopening_live_session_adopts_client_binding_when_unknown() {
         supports_native_queue: false,
         supports_rewind: false,
     });
-    *slot.value.conversation_binding.lock().unwrap() = None;
+    *slot.value.conversation_binding.lock() = None;
 
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
@@ -339,7 +317,7 @@ fn reopening_live_session_adopts_client_binding_when_unknown() {
         "run-restored"
     );
     assert!(matches!(
-        &*slot.value.conversation_binding.lock().unwrap(),
+        &*slot.value.conversation_binding.lock(),
         Some(smelt_core::conversation::ConversationBinding::Automation { run_id })
             if run_id == "run-restored"
     ));
@@ -360,7 +338,7 @@ fn unknown_conversation_binding_is_not_mirrored_as_direct() {
     });
     let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -371,7 +349,7 @@ fn unknown_conversation_binding_is_not_mirrored_as_direct() {
         supports_native_queue: false,
         supports_rewind: false,
     });
-    *slot.value.conversation_binding.lock().unwrap() = None;
+    *slot.value.conversation_binding.lock() = None;
 
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
@@ -399,7 +377,7 @@ fn unknown_conversation_binding_is_not_mirrored_as_direct() {
         "未知 binding 不能被快照发明成 Direct：{}",
         response["snapshot"]["conversation_state"]
     );
-    assert!(slot.value.conversation_binding.lock().unwrap().is_none());
+    assert!(slot.value.conversation_binding.lock().is_none());
 
     drop(reader);
     drop(client);
@@ -414,7 +392,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -428,7 +406,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
 
     let (control_server, _control_client) = UnixStream::pair().unwrap();
     let control_fd = control_server.as_raw_fd();
-    slot.value.out.lock().unwrap().client = Some(
+    slot.value.out.lock().client = Some(
         acp_snapshot_link_for_slot(
             &slot,
             control_server,
@@ -465,7 +443,6 @@ fn one_shot_action_keeps_existing_control_client_attached() {
         slot.value
             .out
             .lock()
-            .unwrap()
             .client
             .as_ref()
             .map(|client| client.fd),
@@ -480,7 +457,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
         _ => panic!("expected prompt command"),
     }
     assert!(matches!(
-        slot.value.reduced.lock().unwrap().entries().last(),
+        slot.value.reduced.lock().entries().last(),
         Some(AcpEntry::User(text)) if text == "from mobile"
     ));
 }
@@ -493,7 +470,7 @@ fn submit_input_applies_pending_model_before_the_prompt() {
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -552,7 +529,7 @@ fn switching_model_does_not_stop_the_current_turn() {
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -602,7 +579,7 @@ fn switching_model_does_not_stop_the_current_turn() {
         _ => panic!("回车仍应插进当前回合"),
     }
     assert!(cmd_rx.try_recv().is_err());
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
 }
 
 #[test]
@@ -611,13 +588,13 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
     let (slot, _) = acp_sessions.reserve_with("acp-automation-action", || {
         make_acp_session_value("acp-automation-action", AcpSessionState::default())
     });
-    *slot.value.conversation_binding.lock().unwrap() =
+    *slot.value.conversation_binding.lock() =
         Some(smelt_core::conversation::ConversationBinding::Automation {
             run_id: "run-1".into(),
         });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -671,7 +648,6 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
     slot.value
         .reduced
         .lock()
-        .unwrap()
         .permissions
         .push(smelt_core::acp_session::LivePermission {
             question: "允许执行？".into(),
@@ -712,13 +688,13 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
 #[test]
 fn automation_run_accepts_only_its_daemon_delivery_id() {
     let session = make_acp_session("acp-automation-delivery", AcpSessionState::default());
-    *session.conversation_binding.lock().unwrap() =
+    *session.conversation_binding.lock() =
         Some(smelt_core::conversation::ConversationBinding::Automation {
             run_id: "run-owned".into(),
         });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -767,20 +743,19 @@ fn automation_run_keeps_elicitation_actions() {
     let (slot, _) = acp_sessions.reserve_with("acp-automation-elicit", || {
         make_acp_session_value("acp-automation-elicit", AcpSessionState::default())
     });
-    *slot.value.conversation_binding.lock().unwrap() =
+    *slot.value.conversation_binding.lock() =
         Some(smelt_core::conversation::ConversationBinding::Automation {
             run_id: "run-2".into(),
         });
-    slot.value.reduced.lock().unwrap().elicitation =
-        Some(smelt_core::acp_session::LiveElicitation {
-            message: "补充信息".into(),
-            raw_fields: Vec::new(),
-            chosen: BTreeMap::new(),
-            text_values: BTreeMap::new(),
-            responder: None,
-            recovered_tool_call_id: None,
-            raw_request_line: None,
-        });
+    slot.value.reduced.lock().elicitation = Some(smelt_core::acp_session::LiveElicitation {
+        message: "补充信息".into(),
+        raw_fields: Vec::new(),
+        chosen: BTreeMap::new(),
+        text_values: BTreeMap::new(),
+        responder: None,
+        recovered_tool_call_id: None,
+        raw_request_line: None,
+    });
 
     let (server, client) = UnixStream::pair().unwrap();
     handle_acp_action(
@@ -798,13 +773,13 @@ fn automation_run_keeps_elicitation_actions() {
         serde_json::from_str::<serde_json::Value>(&response).unwrap()["ok"],
         true
     );
-    assert!(slot.value.reduced.lock().unwrap().elicitation.is_none());
+    assert!(slot.value.reduced.lock().elicitation.is_none());
 }
 
 #[test]
 fn automation_run_rejects_freeform_conversation_input() {
     let session = make_acp_session("acp-automation", AcpSessionState::default());
-    *session.conversation_binding.lock().unwrap() =
+    *session.conversation_binding.lock() =
         Some(smelt_core::conversation::ConversationBinding::Automation {
             run_id: "run-1".into(),
         });
@@ -819,7 +794,7 @@ fn automation_run_rejects_freeform_conversation_input() {
         result.unwrap_err().message,
         "automation Run input is daemon-owned"
     );
-    assert!(session.reduced.lock().unwrap().entries().is_empty());
+    assert!(session.reduced.lock().entries().is_empty());
 }
 
 #[test]
@@ -842,7 +817,7 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
     let session = make_acp_session("acp-direct-images", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -875,10 +850,10 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
 #[test]
 fn direct_agent_preset_remains_part_of_the_first_acp_prompt() {
     let session = make_acp_session("acp-direct-preset", AcpSessionState::default());
-    *session.pending_agent_preset.lock().unwrap() = Some("你是量化研究员".into());
+    *session.pending_agent_preset.lock() = Some("你是量化研究员".into());
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -902,7 +877,7 @@ fn direct_agent_preset_remains_part_of_the_first_acp_prompt() {
         smelt_core::acp_conn::ConversationCommand::Prompt { text, .. }
             if text == "你是量化研究员\n\n分析组合风险"
     ));
-    assert!(session.pending_agent_preset.lock().unwrap().is_none());
+    assert!(session.pending_agent_preset.lock().is_none());
 }
 
 #[test]
@@ -910,7 +885,7 @@ fn submitted_direct_input_delivers_to_acp() {
     let session = make_acp_session("acp-direct-route", AcpSessionState::default());
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -944,7 +919,7 @@ fn resubmitted_input_with_the_same_submission_id_is_delivered_once() {
     let session = make_acp_session("acp-direct-resubmit", AcpSessionState::default());
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -974,7 +949,7 @@ fn resubmitted_input_with_the_same_submission_id_is_delivered_once() {
         .collect();
     assert_eq!(prompts, ["第一条"]);
     assert!(
-        session.pending_prompts.lock().unwrap().is_empty(),
+        session.pending_prompts.lock().is_empty(),
         "重发不该变成排队的第二条"
     );
 }
@@ -1005,7 +980,7 @@ fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -1030,12 +1005,12 @@ fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
     )
     .unwrap();
     assert!(cmd_rx.try_recv().is_err());
-    assert_eq!(slot.value.pending_prompts.lock().unwrap().len(), 1);
+    assert_eq!(slot.value.pending_prompts.lock().len(), 1);
 
-    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+    let _turn_completion = slot.value.turn_completion.lock();
     slot.value.prompt_in_flight.store(false, Ordering::SeqCst);
     flush_pending_acp_prompt_locked(&slot.value, &subscribers);
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
     match cmd_rx.try_recv().unwrap() {
         smelt_core::acp_conn::ConversationCommand::Prompt { text, images } => {
             assert_eq!(text, "after current turn");
@@ -1044,7 +1019,7 @@ fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
         _ => panic!("expected deferred prompt command"),
     }
     assert!(matches!(
-        slot.value.reduced.lock().unwrap().entries().last(),
+        slot.value.reduced.lock().entries().last(),
         Some(AcpEntry::User(text)) if text == "after current turn"
     ));
 }
@@ -1055,7 +1030,6 @@ fn user_bubbles(session: &AcpSession, text: &str) -> usize {
     session
         .reduced
         .lock()
-        .unwrap()
         .entries()
         .iter()
         .filter(|entry| match entry {
@@ -1073,7 +1047,7 @@ fn attach_prompt_handle(
 ) -> smol::channel::Receiver<smelt_core::acp_conn::ConversationCommand> {
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -1096,18 +1070,18 @@ fn background_notice_while_idle_is_a_status_line() {
         make_acp_session_value("acp-bg-idle", reduced)
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
-    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+    let _turn_completion = slot.value.turn_completion.lock();
 
     smelt_core::acp_session::apply_event(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::BackgroundNotice(task_note()),
     );
 
     assert!(cmd_rx.try_recv().is_err(), "结束说明不能变成一条 prompt");
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
     assert!(!slot.value.prompt_in_flight.load(Ordering::SeqCst));
-    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_none());
-    let state = slot.value.reduced.lock().unwrap();
+    assert!(slot.value.unaccepted_prompt.lock().is_none());
+    let state = slot.value.reduced.lock();
     assert!(state.turn_started_at_ms.is_none());
     assert!(matches!(state.phase, DaemonPhase::Idle));
     assert!(matches!(
@@ -1127,17 +1101,17 @@ fn background_notice_during_a_turn_does_not_queue_a_prompt() {
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
     slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
-    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+    let _turn_completion = slot.value.turn_completion.lock();
 
     smelt_core::acp_session::apply_event(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::BackgroundNotice(task_note()),
     );
 
     assert!(cmd_rx.try_recv().is_err());
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
     assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
-    let state = slot.value.reduced.lock().unwrap();
+    let state = slot.value.reduced.lock();
     assert_eq!(state.turn_started_at_ms, Some(1));
     assert!(matches!(state.phase, DaemonPhase::Thinking));
     assert!(matches!(
@@ -1166,7 +1140,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     reduced.phase = DaemonPhase::Idle;
     let (slot, _) = acp_sessions.reserve_with("acp-pi-cancel-gate", || {
         let session = make_acp_session_value("acp-pi-cancel-gate", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
@@ -1174,7 +1148,6 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     slot.value
         .pending_prompts
         .lock()
-        .unwrap()
         .push_back(QueuedAcpPrompt {
             id: 1,
             text: "下一句".to_string(),
@@ -1187,7 +1160,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
 
     settle_acp_turn_locked(&slot.value, true, false, false, &subscribers);
     assert!(cmd_rx.try_recv().is_err());
-    assert_eq!(slot.value.pending_prompts.lock().unwrap().len(), 1);
+    assert_eq!(slot.value.pending_prompts.lock().len(), 1);
     assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
 
     settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
@@ -1199,7 +1172,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     }
     assert!(cmd_rx.try_recv().is_err());
     assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
-    let state = slot.value.reduced.lock().unwrap();
+    let state = slot.value.reduced.lock();
     // 排队中的消息不在消息流里（GUI 显示在队列区），真正派发时才落气泡。
     assert!(matches!(
         state.entries().last(),
@@ -1207,7 +1180,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     ));
     assert!(state.turn_started_at_ms.is_some());
     drop(state);
-    let unaccepted = slot.value.unaccepted_prompt.lock().unwrap();
+    let unaccepted = slot.value.unaccepted_prompt.lock();
     assert_eq!(
         unaccepted.as_ref().map(|prompt| prompt.text.as_str()),
         Some("下一句")
@@ -1228,7 +1201,6 @@ fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn()
     slot.value
         .handle
         .lock()
-        .unwrap()
         .as_mut()
         .unwrap()
         .supports_mid_turn_input = false;
@@ -1265,13 +1237,7 @@ fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn()
     assert!(cmd_rx.try_recv().is_err(), "回合在跑，不能并发派发");
 
     // 排队的消息在快照里：客户端看得见，不会以为发丢了。
-    let queued = slot
-        .value
-        .reduced
-        .lock()
-        .unwrap()
-        .to_snapshot(false)
-        .pending_prompts;
+    let queued = slot.value.reduced.lock().to_snapshot(false).pending_prompts;
     assert_eq!(
         queued
             .iter()
@@ -1297,7 +1263,7 @@ fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn()
     )
     .unwrap();
     {
-        let state = slot.value.reduced.lock().unwrap();
+        let state = slot.value.reduced.lock();
         assert_eq!(
             state
                 .pending_prompts
@@ -1324,7 +1290,7 @@ fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn()
         .is_err()
     );
     {
-        let mut state = slot.value.reduced.lock().unwrap();
+        let mut state = slot.value.reduced.lock();
         state.phase = DaemonPhase::Idle;
         state.turn_started_at_ms = None;
     }
@@ -1336,14 +1302,7 @@ fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn()
         _ => panic!("回合结束只放出队首一条"),
     }
     assert!(cmd_rx.try_recv().is_err());
-    assert!(
-        slot.value
-            .reduced
-            .lock()
-            .unwrap()
-            .pending_prompts
-            .is_empty()
-    );
+    assert!(slot.value.reduced.lock().pending_prompts.is_empty());
 }
 
 #[test]
@@ -1353,12 +1312,12 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     reduced.phase = DaemonPhase::Idle;
     let (slot, _) = acp_sessions.reserve_with("acp-pi-refuse", || {
         let session = make_acp_session_value("acp-pi-refuse", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
     let subscribers = new_event_hub();
-    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+    let _turn_completion = slot.value.turn_completion.lock();
 
     send_acp_prompt_reserved(
         &slot.value,
@@ -1375,15 +1334,15 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
         Ok(smelt_core::acp_conn::ConversationCommand::Prompt { .. })
     ));
     assert_eq!(user_bubbles(&slot.value, "再问一句"), 1);
-    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_some());
+    assert!(slot.value.unaccepted_prompt.lock().is_some());
 
     requeue_unaccepted_prompt(&slot.value);
-    smelt_core::acp_session::note_provider_still_running(&mut slot.value.reduced.lock().unwrap());
-    assert_eq!(slot.value.pending_prompts.lock().unwrap().len(), 1);
+    smelt_core::acp_session::note_provider_still_running(&mut slot.value.reduced.lock());
+    assert_eq!(slot.value.pending_prompts.lock().len(), 1);
     assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
-    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_none());
+    assert!(slot.value.unaccepted_prompt.lock().is_none());
     {
-        let state = slot.value.reduced.lock().unwrap();
+        let state = slot.value.reduced.lock();
         assert!(matches!(state.phase, DaemonPhase::Thinking));
         assert_eq!(
             state.status_line.as_deref(),
@@ -1396,7 +1355,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     assert!(cmd_rx.try_recv().is_err());
 
     smelt_core::acp_session::apply_event(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::TurnEnded(
             agent_client_protocol::schema::v1::StopReason::EndTurn,
         ),
@@ -1411,7 +1370,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     // 重发的是同一条，消息流里永远只能有一个气泡。
     assert_eq!(user_bubbles(&slot.value, "再问一句"), 1);
     assert!(
-        !slot.value.reduced.lock().unwrap().entries().iter().any(
+        !slot.value.reduced.lock().entries().iter().any(
             |entry| matches!(entry, AcpEntry::Assistant { text, .. } if text.contains("回合失败"))
         ),
         "拒绝不能写成回合失败"
@@ -1425,11 +1384,11 @@ fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
     reduced.phase = DaemonPhase::Idle;
     let (slot, _) = acp_sessions.reserve_with("acp-pi-refuse-idle", || {
         let session = make_acp_session_value("acp-pi-refuse-idle", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+    *slot.value.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
         id: 1,
         text: "再问一句".to_string(),
         images: Vec::new(),
@@ -1448,10 +1407,7 @@ fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
         }
         _ => panic!("same-batch idle must flush the refused prompt"),
     }
-    assert!(matches!(
-        slot.value.reduced.lock().unwrap().phase,
-        DaemonPhase::Idle
-    ));
+    assert!(matches!(slot.value.reduced.lock().phase, DaemonPhase::Idle));
     settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
     assert!(
         cmd_rx.try_recv().is_err(),
@@ -1466,7 +1422,7 @@ fn pi_prompt_is_echoed_without_waiting_for_pi_to_accept() {
     reduced.phase = DaemonPhase::Idle;
     let (slot, _) = acp_sessions.reserve_with("acp-pi-accept", || {
         let session = make_acp_session_value("acp-pi-accept", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
@@ -1489,7 +1445,7 @@ fn pi_prompt_is_echoed_without_waiting_for_pi_to_accept() {
     {
         // Pi 的 admission 可能要数秒（扩展在 before_agent_start 里做慢活）。
         // 用户确实提交过这条，气泡不能等到那时候才出现。
-        let state = slot.value.reduced.lock().unwrap();
+        let state = slot.value.reduced.lock();
         assert!(matches!(
             state.entries().last(),
             Some(AcpEntry::User(text)) if text == "卡住了吗"
@@ -1497,11 +1453,11 @@ fn pi_prompt_is_echoed_without_waiting_for_pi_to_accept() {
         assert!(matches!(state.phase, DaemonPhase::Thinking));
         assert!(state.turn_started_at_ms.is_some());
     }
-    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_some());
+    assert!(slot.value.unaccepted_prompt.lock().is_some());
 
-    slot.value.reduced.lock().unwrap().status_line = Some("已排队，这一轮结束后再发".to_string());
+    slot.value.reduced.lock().status_line = Some("已排队，这一轮结束后再发".to_string());
     assert!(accept_unaccepted_prompt(&slot.value));
-    let state = slot.value.reduced.lock().unwrap();
+    let state = slot.value.reduced.lock();
     // 收下只是确认：不能再写第二个气泡。
     assert_eq!(
         state
@@ -1521,10 +1477,10 @@ fn real_prompt_failure_returns_the_text_instead_of_retrying() {
     let acp_sessions = new_test_acp_sessions();
     let (slot, _) = acp_sessions.reserve_with("acp-pi-fail", || {
         let session = make_acp_session_value("acp-pi-fail", AcpSessionState::default());
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+    *slot.value.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
         id: 1,
         text: "再试一次".to_string(),
         images: Vec::new(),
@@ -1533,28 +1489,21 @@ fn real_prompt_failure_returns_the_text_instead_of_retrying() {
         echoed: true,
     });
     smelt_core::acp_session::note_prompt_sent(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         "再试一次".to_string(),
         Vec::new(),
     );
 
     restore_unaccepted_to_composer(&slot.value);
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
-    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_none());
+    assert!(slot.value.pending_prompts.lock().is_empty());
+    assert!(slot.value.unaccepted_prompt.lock().is_none());
     assert_eq!(
-        slot.value.reduced.lock().unwrap().composer_restore_texts,
+        slot.value.reduced.lock().composer_restore_texts,
         ["再试一次".to_string()]
     );
     // 正文回了输入框，消息流里就不能再留着它。
     assert_eq!(user_bubbles(&slot.value, "再试一次"), 0);
-    assert!(
-        slot.value
-            .reduced
-            .lock()
-            .unwrap()
-            .turn_started_at_ms
-            .is_none()
-    );
+    assert!(slot.value.reduced.lock().turn_started_at_ms.is_none());
 }
 
 #[test]
@@ -1564,7 +1513,7 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
         make_acp_session_value("acp-pi-cancel-images", AcpSessionState::default())
     });
     let image = smelt_core::acp_chat::AcpImage::new("image/png", "aGk=");
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+    *slot.value.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
         id: 1,
         text: "看这张".to_string(),
         images: vec![image.clone()],
@@ -1573,19 +1522,19 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
         echoed: true,
     });
     smelt_core::acp_session::note_prompt_sent(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         "看这张".to_string(),
         vec![image.clone()],
     );
     park_unaccepted_after_cancel(&slot.value);
     {
-        let state = slot.value.reduced.lock().unwrap();
+        let state = slot.value.reduced.lock();
         assert_eq!(state.composer_restore_texts, ["看这张".to_string()]);
         assert_eq!(state.composer_restore_images, vec![image.clone()]);
     }
     assert_eq!(user_bubbles(&slot.value, "看这张"), 0);
 
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+    *slot.value.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
         id: 1,
         text: "   ".to_string(),
         images: vec![image.clone()],
@@ -1594,7 +1543,7 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
         echoed: false,
     });
     park_unaccepted_after_cancel(&slot.value);
-    let state = slot.value.reduced.lock().unwrap();
+    let state = slot.value.reduced.lock();
     assert!(state.composer_restore_texts.is_empty());
     assert_eq!(state.composer_restore_images, vec![image]);
     assert!(state.composer_restore_revision >= 2);
@@ -1605,11 +1554,11 @@ fn real_prompt_failure_restores_the_images_with_the_text() {
     let acp_sessions = new_test_acp_sessions();
     let (slot, _) = acp_sessions.reserve_with("acp-pi-fail-images", || {
         let session = make_acp_session_value("acp-pi-fail-images", AcpSessionState::default());
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let image = smelt_core::acp_chat::AcpImage::new("image/png", "aGk=");
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+    *slot.value.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
         id: 1,
         text: "再试一次".to_string(),
         images: vec![image.clone()],
@@ -1618,16 +1567,16 @@ fn real_prompt_failure_restores_the_images_with_the_text() {
         echoed: true,
     });
     smelt_core::acp_session::note_prompt_sent(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         "再试一次".to_string(),
         vec![image.clone()],
     );
     restore_unaccepted_to_composer(&slot.value);
     assert_eq!(user_bubbles(&slot.value, "再试一次"), 0);
-    let state = slot.value.reduced.lock().unwrap();
+    let state = slot.value.reduced.lock();
     assert_eq!(state.composer_restore_texts, ["再试一次".to_string()]);
     assert_eq!(state.composer_restore_images, vec![image]);
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
 }
 
 #[test]
@@ -1636,7 +1585,7 @@ fn cancel_before_accept_restores_user_text() {
     let (slot, _) = acp_sessions.reserve_with("acp-pi-cancel-unaccepted", || {
         make_acp_session_value("acp-pi-cancel-unaccepted", AcpSessionState::default())
     });
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+    *slot.value.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
         id: 1,
         text: "用户刚发的".to_string(),
         images: Vec::new(),
@@ -1645,17 +1594,17 @@ fn cancel_before_accept_restores_user_text() {
         echoed: true,
     });
     smelt_core::acp_session::note_prompt_sent(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         "用户刚发的".to_string(),
         Vec::new(),
     );
     park_unaccepted_after_cancel(&slot.value);
     assert_eq!(
-        slot.value.reduced.lock().unwrap().composer_restore_texts,
+        slot.value.reduced.lock().composer_restore_texts,
         ["用户刚发的".to_string()]
     );
     assert_eq!(user_bubbles(&slot.value, "用户刚发的"), 0);
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
 }
 
 #[test]
@@ -1665,11 +1614,11 @@ fn pi_queue_hold_clears_when_the_provider_becomes_idle() {
     reduced.phase = DaemonPhase::Idle;
     let (slot, _) = acp_sessions.reserve_with("acp-pi-hold", || {
         let session = make_acp_session_value("acp-pi-hold", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+    *slot.value.unaccepted_prompt.lock() = Some(QueuedAcpPrompt {
         id: 1,
         text: "再问一句".to_string(),
         images: Vec::new(),
@@ -1682,7 +1631,7 @@ fn pi_queue_hold_clears_when_the_provider_becomes_idle() {
     requeue_unaccepted_prompt(&slot.value);
     remember_provider_hold(&slot.value);
     assert!(matches!(
-        slot.value.reduced.lock().unwrap().phase,
+        slot.value.reduced.lock().phase,
         DaemonPhase::Thinking
     ));
     settle_acp_turn_locked(&slot.value, false, false, false, &subscribers);
@@ -1696,11 +1645,8 @@ fn pi_queue_hold_clears_when_the_provider_becomes_idle() {
         }
         _ => panic!("占位转圈收回后，空闲信号要放出这条消息"),
     }
-    assert!(matches!(
-        slot.value.reduced.lock().unwrap().phase,
-        DaemonPhase::Idle
-    ));
-    assert!(slot.value.reduced.lock().unwrap().status_line.is_none());
+    assert!(matches!(slot.value.reduced.lock().phase, DaemonPhase::Idle));
+    assert!(slot.value.reduced.lock().status_line.is_none());
 }
 
 #[test]
@@ -1714,7 +1660,7 @@ fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -1748,9 +1694,9 @@ fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     }
     // 插入不占闸门、不进 daemon 回合后队列，也不能把正在跑的那一轮改成新回合。
     // 此时只进入 steering 队列；Pi 真正吃掉之前不得写进会话。
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
     assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
-    let state = slot.value.reduced.lock().unwrap();
+    let state = slot.value.reduced.lock();
     assert_eq!(state.turn_started_at_ms, Some(1));
     assert!(matches!(state.phase, DaemonPhase::Thinking));
     assert_eq!(state.queued_steering, ["换个方向"]);
@@ -1777,7 +1723,7 @@ fn prompt_after_cancel_waits_for_provider_idle_instead_of_reentering_the_queue()
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -1807,16 +1753,16 @@ fn prompt_after_cancel_waits_for_provider_idle_instead_of_reentering_the_queue()
         "取消后的替换 prompt 不能再 steer 回当前回合"
     );
     assert_eq!(
-        slot.value.pending_prompts.lock().unwrap().len(),
+        slot.value.pending_prompts.lock().len(),
         1,
         "要停在 daemon 队列，等 provider 空闲再发一次"
     );
     assert_eq!(
-        slot.value.reduced.lock().unwrap().queued_steering,
+        slot.value.reduced.lock().queued_steering,
         ["但是我想字数一致".to_string()]
     );
 
-    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+    let _turn_completion = slot.value.turn_completion.lock();
     settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
     match cmd_rx.try_recv().unwrap() {
         smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
@@ -1825,7 +1771,7 @@ fn prompt_after_cancel_waits_for_provider_idle_instead_of_reentering_the_queue()
         _ => panic!("expected a single prompt"),
     }
     assert!(cmd_rx.try_recv().is_err(), "只能发一次");
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
 }
 
 #[test]
@@ -1842,7 +1788,7 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
     ];
     let (slot, _) = acp_sessions.reserve_with("acp-deliver-now", || {
         let session = make_acp_session_value("acp-deliver-now", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
@@ -1871,7 +1817,7 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
     assert!(cmd_rx.try_recv().is_err(), "再点一次不能再取消或再发");
     assert!(deliver("别的").is_err(), "另一条要等这一条落地");
 
-    let _turn = slot.value.turn_completion.lock().unwrap();
+    let _turn = slot.value.turn_completion.lock();
     try_flush_immediate_delivery(&slot.value, &subscribers);
     assert!(cmd_rx.try_recv().is_err(), "还原没到不能发");
 
@@ -1884,14 +1830,14 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
     assert_eq!(texts, vec!["别的".to_string()]);
     assert_eq!(images, vec![Vec::new()], "认领那条的图不能再还回输入框");
     smelt_core::acp_session::apply_event(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::ComposerRestore {
             revision: 1,
             texts,
             images,
         },
     );
-    slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
+    slot.value.reduced.lock().phase = DaemonPhase::Idle;
     try_flush_immediate_delivery(&slot.value, &subscribers);
     assert!(
         cmd_rx.try_recv().is_err(),
@@ -1908,9 +1854,9 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
         Err(_) => panic!("expected one prompt, channel was empty"),
     }
     assert!(cmd_rx.try_recv().is_err(), "只能发一次");
-    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.pending_prompts.lock().is_empty());
     assert_eq!(
-        slot.value.reduced.lock().unwrap().composer_restore_texts,
+        slot.value.reduced.lock().composer_restore_texts,
         vec!["别的".to_string()]
     );
 }
@@ -1924,7 +1870,7 @@ fn deliver_queued_now_does_not_resend_when_the_provider_already_took_the_item() 
     reduced.queued_steering = vec!["但是我想字数一致".into()];
     let (slot, _) = acp_sessions.reserve_with("acp-deliver-consumed", || {
         let session = make_acp_session_value("acp-deliver-consumed", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
@@ -1947,8 +1893,8 @@ fn deliver_queued_now_does_not_resend_when_the_provider_already_took_the_item() 
     let mut images = vec![Vec::new()];
     note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
     assert_eq!(texts, vec!["别的".to_string()]);
-    slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
-    let _turn = slot.value.turn_completion.lock().unwrap();
+    slot.value.reduced.lock().phase = DaemonPhase::Idle;
+    let _turn = slot.value.turn_completion.lock();
     settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
     assert!(
         cmd_rx.try_recv().is_err(),
@@ -2013,12 +1959,12 @@ fn pi_session_commands_are_not_steered_during_a_turn() {
     reduced.turn_started_at_ms = Some(1);
     let (slot, _) = acp_sessions.reserve_with("acp-pi-slash", || {
         let session = make_acp_session_value("acp-pi-slash", reduced);
-        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        *session.launch_spec.lock() = Some(pi_launch());
         session
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -2072,14 +2018,13 @@ fn pi_session_commands_are_not_steered_during_a_turn() {
         slot.value
             .handle
             .lock()
-            .unwrap()
             .as_ref()
             .unwrap()
             .in_flight_rpc
             .load(Ordering::SeqCst),
         3
     );
-    let state = slot.value.reduced.lock().unwrap();
+    let state = slot.value.reduced.lock();
     assert_eq!(state.turn_started_at_ms, Some(1));
     assert!(state.queued_steering.is_empty());
     assert!(state.entries().is_empty());
@@ -2093,13 +2038,13 @@ fn non_pi_slash_text_is_still_steered() {
     reduced.turn_started_at_ms = Some(1);
     let (slot, _) = acp_sessions.reserve_with("acp-claude-slash", || {
         let session = make_acp_session_value("acp-claude-slash", reduced);
-        *session.launch_spec.lock().unwrap() =
+        *session.launch_spec.lock() =
             Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"));
         session
     });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -2149,7 +2094,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
     let session = make_acp_session("acp-dangling-tool", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -2161,18 +2106,14 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         supports_rewind: false,
     });
     session.prompt_in_flight.store(true, Ordering::SeqCst);
-    session
-        .pending_prompts
-        .lock()
-        .unwrap()
-        .push_back(QueuedAcpPrompt {
-            id: 1,
-            text: "prompt B".to_string(),
-            images: Vec::new(),
-            delivery_id: None,
-            origin: AcpPromptOrigin::User,
-            echoed: false,
-        });
+    session.pending_prompts.lock().push_back(QueuedAcpPrompt {
+        id: 1,
+        text: "prompt B".to_string(),
+        images: Vec::new(),
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+        echoed: false,
+    });
     let subscribers = new_event_hub();
     let (late_started_tx, late_started_rx) = std::sync::mpsc::channel();
     let (late_done_tx, late_done_rx) = std::sync::mpsc::channel();
@@ -2181,16 +2122,16 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
 
     // event drain 会先应用迟到更新、再进入回合收尾。让它在 watchdog 的
     // 收尾锁外等待，模拟 15 秒边界刚好收到 ToolFinished 的竞态。
-    let turn_completion = session.turn_completion.lock().unwrap();
+    let turn_completion = session.turn_completion.lock();
     {
-        let mut reduced = session.reduced.lock().unwrap();
+        let mut reduced = session.reduced.lock();
         assert!(smelt_core::acp_session::finalize_dangling_tool_calls(&mut reduced).is_some());
     }
     let late_session = Arc::clone(&session);
     let late_subscribers = Arc::clone(&subscribers);
     let late_update = thread::spawn(move || {
         {
-            let mut reduced = late_session.reduced.lock().unwrap();
+            let mut reduced = late_session.reduced.lock();
             smelt_core::acp_session::apply_event(
                 &mut reduced,
                 smelt_core::acp_conn::ConversationEvent::ToolFinished {
@@ -2201,7 +2142,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
             );
         }
         late_started_tx.send(()).unwrap();
-        let _turn_completion = late_session.turn_completion.lock().unwrap();
+        let _turn_completion = late_session.turn_completion.lock();
         settle_acp_turn_locked(&late_session, false, false, false, &late_subscribers);
         late_done_tx.send(()).unwrap();
     });
@@ -2249,7 +2190,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         cmd_rx.try_recv().is_err(),
         "迟到工具终态不能把 prompt C 与 B 并发下发"
     );
-    assert_eq!(session.pending_prompts.lock().unwrap().len(), 1);
+    assert_eq!(session.pending_prompts.lock().len(), 1);
     assert!(session.prompt_in_flight.load(Ordering::SeqCst));
 }
 
@@ -2267,7 +2208,7 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
     let session = make_acp_session("acp-cancel-release", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -2279,18 +2220,14 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
         supports_rewind: false,
     });
     session.prompt_in_flight.store(true, Ordering::SeqCst);
-    session
-        .pending_prompts
-        .lock()
-        .unwrap()
-        .push_back(QueuedAcpPrompt {
-            id: 1,
-            text: "send now".to_string(),
-            images: Vec::new(),
-            delivery_id: None,
-            origin: AcpPromptOrigin::User,
-            echoed: false,
-        });
+    session.pending_prompts.lock().push_back(QueuedAcpPrompt {
+        id: 1,
+        text: "send now".to_string(),
+        images: Vec::new(),
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+        echoed: false,
+    });
     let subscribers = new_event_hub();
 
     settle_acp_turn_locked(&session, true, false, false, &subscribers);
@@ -2300,7 +2237,7 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
         }
         _ => panic!("expected queued prompt as soon as the cancelled turn is Idle"),
     }
-    assert!(session.pending_prompts.lock().unwrap().is_empty());
+    assert!(session.pending_prompts.lock().is_empty());
 }
 
 #[test]
@@ -2391,7 +2328,7 @@ fn skills_are_only_a_pi_concept() {
     let acp_sessions = new_test_acp_sessions();
     acp_sessions.reserve_with("acp-claude", || {
         let session = make_acp_session_value("acp-claude", AcpSessionState::default());
-        *session.launch_spec.lock().unwrap() =
+        *session.launch_spec.lock() =
             Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"));
         session
     });
@@ -2425,7 +2362,7 @@ fn pi_skills_come_from_the_launch_spec_plugin_args() {
     let acp_sessions = new_test_acp_sessions();
     acp_sessions.reserve_with("acp-pi", || {
         let session = make_acp_session_value("acp-pi", AcpSessionState::default());
-        *session.launch_spec.lock().unwrap() = Some(
+        *session.launch_spec.lock() = Some(
             smelt_core::agent_kind::ConversationLaunchSpec::from_command("pi acp").with_env(
                 smelt_core::agent_kind::SMELT_AGENT_PLUGIN_ARGS_ENV,
                 serde_json::json!(["--no-skills", "--skill", skill_dir.to_str().unwrap()])
@@ -2671,7 +2608,7 @@ fn watch_registration_is_serialized_with_snapshot_push() {
     let (slot, _) = acp_sessions.reserve_with("acp-watch-race", || {
         make_acp_session_value("acp-watch-race", reduced)
     });
-    let mut reduced_guard = slot.value.reduced.lock().unwrap();
+    let mut reduced_guard = slot.value.reduced.lock();
 
     let (server, client) = UnixStream::pair().unwrap();
     client
@@ -2693,11 +2630,8 @@ fn watch_registration_is_serialized_with_snapshot_push() {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match slot.value.output_gate.try_lock() {
-            Err(std::sync::TryLockError::WouldBlock) => break,
-            Err(std::sync::TryLockError::Poisoned(error)) => {
-                panic!("ACP output gate poisoned: {error}");
-            }
-            Ok(guard) => {
+            None => break,
+            Some(guard) => {
                 drop(guard);
                 assert!(
                     Instant::now() < deadline,
@@ -2871,7 +2805,7 @@ fn watch_without_debug_never_streams_the_debug_sidecars() {
 
     // 模型调用把 runtime debug 和工具参数都改了：桌面控制连接会收到整表，
     // 不要调试数据的旁观者仍然只能收到正文。
-    slot.value.reduced.lock().unwrap().tool_debug_generation = 2;
+    slot.value.reduced.lock().tool_debug_generation = 2;
     push_acp_snapshot_with_runtime_debug_for_test(&slot.value);
     let mut changed = String::new();
     lines.read_line(&mut changed).unwrap();
@@ -2896,7 +2830,7 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
     // 必然失败。
     let mut c_probe = c_server.try_clone().unwrap();
     {
-        let mut out = sess.out.lock().unwrap();
+        let mut out = sess.out.lock();
         out.client = Some(test_acp_attachment(&sess, c_server, "acp-2-client"));
         out.watchers
             .push(test_acp_attachment(&sess, w_server, "acp-2-watcher"));
@@ -2912,24 +2846,24 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
     push_acp_snapshot(&sess, false);
 
     let deadline = Instant::now() + Duration::from_secs(1);
-    while sess.out.lock().unwrap().client.is_some() && Instant::now() < deadline {
+    while sess.out.lock().client.is_some() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(1));
     }
-    if sess.out.lock().unwrap().client.is_some() {
+    if sess.out.lock().client.is_some() {
         // Unix socket 的 orderly EOF 允许首个反向 write 成功；下一次入队会
         // 观察到写线程已经关闭的 mailbox，并完成摘除。
         push_acp_snapshot(&sess, false);
         let retry_deadline = Instant::now() + Duration::from_secs(1);
-        while sess.out.lock().unwrap().client.is_some() && Instant::now() < retry_deadline {
+        while sess.out.lock().client.is_some() && Instant::now() < retry_deadline {
             thread::sleep(Duration::from_millis(1));
         }
     }
     assert!(
-        sess.out.lock().unwrap().client.is_none(),
+        sess.out.lock().client.is_none(),
         "写线程发现断线后应摘掉 client"
     );
     assert_eq!(
-        sess.out.lock().unwrap().watchers.len(),
+        sess.out.lock().watchers.len(),
         1,
         "还活着的 watcher 不该被牵连摘掉"
     );
@@ -2956,20 +2890,20 @@ fn composer_restore_ack_action_clears_text_but_preserves_revision() {
     )
     .unwrap();
     {
-        let reduced = session.reduced.lock().unwrap();
+        let reduced = session.reduced.lock();
         assert_eq!(reduced.composer_restore_revision, 7);
         assert!(reduced.composer_restore_texts.is_empty());
     }
 
-    session.reduced.lock().unwrap().composer_restore_texts = vec!["更新的一次恢复".into()];
-    session.reduced.lock().unwrap().composer_restore_revision = 8;
+    session.reduced.lock().composer_restore_texts = vec!["更新的一次恢复".into()];
+    session.reduced.lock().composer_restore_revision = 8;
     apply_acp_user_action(
         &session,
         smelt_core::acp_session::AcpUserAction::AcknowledgeComposerRestore { revision: 7 },
         &subscribers,
     )
     .unwrap();
-    let reduced = session.reduced.lock().unwrap();
+    let reduced = session.reduced.lock();
     assert_eq!(reduced.composer_restore_revision, 8);
     assert_eq!(reduced.composer_restore_texts, ["更新的一次恢复"]);
 }
@@ -3007,8 +2941,7 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     };
     let sess = make_acp_session("acp-runtime-debug-wire", reduced);
     let (server, client) = UnixStream::pair().unwrap();
-    sess.out.lock().unwrap().client =
-        Some(test_acp_attachment(&sess, server, "acp-runtime-debug-wire"));
+    sess.out.lock().client = Some(test_acp_attachment(&sess, server, "acp-runtime-debug-wire"));
     let mut reader = BufReader::new(client);
 
     push_acp_snapshot_since(&sess, false, None);
@@ -3048,10 +2981,10 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
     }
     let sess = make_acp_session("acp-parallel", reduced);
     let (server, client) = UnixStream::pair().unwrap();
-    sess.out.lock().unwrap().client = Some(test_acp_attachment(&sess, server, "acp-parallel"));
+    sess.out.lock().client = Some(test_acp_attachment(&sess, server, "acp-parallel"));
 
     let outcome = {
-        let mut state = sess.reduced.lock().unwrap();
+        let mut state = sess.reduced.lock();
         smelt_core::acp_session::apply_event(
             &mut state,
             smelt_core::acp_conn::ConversationEvent::ToolFinished {
@@ -3087,13 +3020,13 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
         make_acp_session_value("acp-turn-failed", AcpSessionState::default())
     });
     {
-        let mut reduced = slot.value.reduced.lock().unwrap();
+        let mut reduced = slot.value.reduced.lock();
         reduced.entries_mut().push(AcpEntry::User("A".into()));
         reduced.phase = DaemonPhase::Thinking;
         reduced.turn_started_at_ms = Some(1);
     }
     let (server, client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().unwrap().client = Some(
+    slot.value.out.lock().client = Some(
         acp_snapshot_link_for_slot(
             &slot,
             server,
@@ -3112,7 +3045,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
     );
 
     let outcome = smelt_core::acp_session::apply_event(
-        &mut slot.value.reduced.lock().unwrap(),
+        &mut slot.value.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::TurnFailed("499 status code (no body)".into()),
     );
     push_acp_snapshot_since(&slot.value, false, outcome.entries_offset);
@@ -3155,11 +3088,10 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
     slot.value
         .reduced
         .lock()
-        .unwrap()
         .merge_hosted_snapshot(host.to_snapshot(false))
         .unwrap();
     let (server, client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().unwrap().client = Some(
+    slot.value.out.lock().client = Some(
         acp_snapshot_link_for_slot(
             &slot,
             server,
@@ -3186,10 +3118,9 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
         .value
         .reduced
         .lock()
-        .unwrap()
         .merge_hosted_snapshot(host_frame)
         .unwrap();
-    assert_eq!(slot.value.reduced.lock().unwrap().entries_base(), 2);
+    assert_eq!(slot.value.reduced.lock().entries_base(), 2);
     push_acp_snapshot_since(&slot.value, false, Some(merged.changed_from));
 
     let mut line = String::new();
@@ -3226,11 +3157,10 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
         .value
         .reduced
         .lock()
-        .unwrap()
         .merge_hosted_snapshot(host.to_snapshot(false))
         .unwrap();
     let (server, client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().unwrap().client = Some(
+    slot.value.out.lock().client = Some(
         acp_snapshot_link_for_slot(
             &slot,
             server,
@@ -3266,10 +3196,9 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
         .value
         .reduced
         .lock()
-        .unwrap()
         .merge_hosted_snapshot(host.to_snapshot_since(false, 3))
         .unwrap();
-    assert_eq!(slot.value.reduced.lock().unwrap().entries_base(), 4);
+    assert_eq!(slot.value.reduced.lock().entries_base(), 4);
     push_acp_snapshot_since(&slot.value, false, Some(merged.changed_from));
     line.clear();
     reader.read_line(&mut line).unwrap();
@@ -3301,7 +3230,6 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
         .value
         .reduced
         .lock()
-        .unwrap()
         .merge_hosted_snapshot(host.to_snapshot_since(false, 5))
         .unwrap();
     push_acp_snapshot_since(&slot.value, false, Some(merged.changed_from));
@@ -3320,7 +3248,7 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
 fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     let sess = make_acp_session("acp-tool-debug", AcpSessionState::default());
     let (server, client) = UnixStream::pair().unwrap();
-    sess.out.lock().unwrap().client = Some(test_acp_attachment(&sess, server, "acp-tool-debug"));
+    sess.out.lock().client = Some(test_acp_attachment(&sess, server, "acp-tool-debug"));
     let mut reader = BufReader::new(client);
 
     push_acp_snapshot_since(&sess, false, None);
@@ -3334,7 +3262,7 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     );
 
     {
-        let mut state = sess.reduced.lock().unwrap();
+        let mut state = sess.reduced.lock();
         smelt_core::acp_session::apply_event(
             &mut state,
             smelt_core::acp_conn::ConversationEvent::ToolDebug {
@@ -3373,7 +3301,7 @@ fn kill_removes_session_and_closes_connections() {
     });
 
     let (c_server, c_client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().unwrap().client = Some(
+    slot.value.out.lock().client = Some(
         acp_snapshot_link_for_slot(
             &slot,
             c_server,
@@ -3484,9 +3412,8 @@ fn open_acp_session_once(
 
 #[test]
 fn concurrent_open_same_id_keeps_one_registry_slot() {
-    let acp_sessions: AcpSessions = Arc::new(acp_registry::AcpRegistry::new_same_process(
-        Arc::new(RwLock::new(())),
-    ));
+    let acp_sessions: AcpSessions =
+        Arc::new(acp_registry::AcpRegistry::new(Arc::new(RwLock::new(()))));
     let subscribers = new_event_hub();
     let barrier = Arc::new(std::sync::Barrier::new(8));
 
@@ -3516,13 +3443,12 @@ fn concurrent_open_same_id_keeps_one_registry_slot() {
 
 #[test]
 fn kill_does_not_unpublish_until_lifecycle_is_free() {
-    let acp_sessions: AcpSessions = Arc::new(acp_registry::AcpRegistry::new_same_process(
-        Arc::new(RwLock::new(())),
-    ));
+    let acp_sessions: AcpSessions =
+        Arc::new(acp_registry::AcpRegistry::new(Arc::new(RwLock::new(()))));
     let (old, _) = acp_sessions.reserve_with("acp-race", || {
         make_acp_session_value("acp-race", AcpSessionState::default())
     });
-    let lifecycle = old.lifecycle.lock().unwrap();
+    let lifecycle = old.lifecycle.lock();
     let registry_for_kill = Arc::clone(&acp_sessions);
     let remote_sessions = new_test_remote_sessions();
     let subscribers = new_event_hub();
@@ -3629,9 +3555,9 @@ fn reopening_same_id_reuses_existing_session_instead_of_spawning_a_duplicate() {
     );
 }
 
-/// unreaped 重试只 prove、不重杀：活着的陌生组 → false + pid 原样留下，
-/// 调用方不得 spawn。旧语义 ECHILD 直接 true（杀都不杀就放行 spawn），
-/// 收养路径下等于没证明；更不能重杀——该号可能已被复用。
+/// 上次关不掉留下的 pid，重试只观察、不收尸、也不再发信号。活着的进程组
+/// → false，pid 原样留下，调用方不得 spawn。这里再 waitpid 会和上次的 wait 抢；
+/// pid 若已被复用，发信号会误伤。
 #[test]
 fn unreaped_retry_proves_without_killing_strangers() {
     let acp_sessions = new_test_acp_sessions();
@@ -3640,12 +3566,12 @@ fn unreaped_retry_proves_without_killing_strangers() {
     });
     // 自己的进程组当“活陌生组”：非亲生、活着、杀不得。
     let foreign_live = unsafe { libc::getpgrp() };
-    *slot.value.unreaped_pid.lock().unwrap() = Some(foreign_live);
+    *slot.value.unreaped_pid.lock() = Some(foreign_live);
     assert!(
         !retire_acp_runtime(&slot.value),
         "活陌生组必须判失败、保住 unreaped"
     );
-    assert_eq!(*slot.value.unreaped_pid.lock().unwrap(), Some(foreign_live));
+    assert_eq!(*slot.value.unreaped_pid.lock(), Some(foreign_live));
     assert_eq!(unsafe { libc::kill(std::process::id() as i32, 0) }, 0);
 }
 
@@ -3871,9 +3797,8 @@ fn acp_open_request_rejects_legacy_cmd() {
 fn acp_open_invalid_request_still_returns_ended_snapshot() {
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
-    let acp_sessions: AcpSessions = Arc::new(acp_registry::AcpRegistry::new_same_process(
-        Arc::new(RwLock::new(())),
-    ));
+    let acp_sessions: AcpSessions =
+        Arc::new(acp_registry::AcpRegistry::new(Arc::new(RwLock::new(()))));
     let subscribers = new_event_hub();
     let worker = thread::spawn(move || {
         handle_acp_open(
@@ -4082,7 +4007,7 @@ fn rewind_action_gates_on_capability_phase_and_target() {
     let session = make_acp_session("acp-rewind-gates", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -4104,13 +4029,7 @@ fn rewind_action_gates_on_capability_phase_and_target() {
     assert!(cmd_rx.try_recv().is_err());
 
     // 2) 打开能力位，目标不是用户消息（下标 1 是 assistant）。
-    session
-        .handle
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .supports_rewind = true;
+    session.handle.lock().as_mut().unwrap().supports_rewind = true;
     let rejected = apply_acp_user_action(
         &session,
         smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 1 },
@@ -4127,19 +4046,19 @@ fn rewind_action_gates_on_capability_phase_and_target() {
     assert_eq!(rejected.unwrap_err(), "rewind target is not a user message");
 
     // 4) 相位不是 Idle：回退会丢弃未决回合，正在思考时必须拒绝。
-    session.reduced.lock().unwrap().phase = DaemonPhase::Thinking;
+    session.reduced.lock().phase = DaemonPhase::Thinking;
     let rejected = apply_acp_user_action(
         &session,
         smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 0 },
         &new_event_hub(),
     );
     assert_eq!(rejected.unwrap_err(), "rewind requires an idle session");
-    session.reduced.lock().unwrap().phase = DaemonPhase::Idle;
+    session.reduced.lock().phase = DaemonPhase::Idle;
 
     // 5) 历史重放中：草稿还在重建，GUI 的下标是按已发布正文算的，对不上草稿。
     //    相位虽是 Idle，也必须等重放收尾，不能拿草稿去校验或截断。
     smelt_core::acp_session::apply_event(
-        &mut session.reduced.lock().unwrap(),
+        &mut session.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::HistoryReplayStarted,
     );
     let rejected = apply_acp_user_action(
@@ -4152,7 +4071,7 @@ fn rewind_action_gates_on_capability_phase_and_target() {
         "rewind requires history replay to finish"
     );
     assert!(cmd_rx.try_recv().is_err());
-    session.reduced.lock().unwrap().abandon_replay_scratch();
+    session.reduced.lock().abandon_replay_scratch();
 
     // 6) 编辑重发只允许最后一条真实用户消息；旧消息应走独立的分叉对话功能。
     let rejected = apply_acp_user_action(
@@ -4217,7 +4136,7 @@ fn retry_rewinds_the_failed_turn_and_resends_its_message_once() {
     let session = make_acp_session("acp-retry", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -4258,9 +4177,9 @@ fn retry_rewinds_the_failed_turn_and_resends_its_message_once() {
 
     // 2) 回退落地：截掉这条消息和失败的那一轮，再按普通发送发一次。drain 里的顺序。
     let hub = new_event_hub();
-    let _turn_completion = session.turn_completion.lock().unwrap();
+    let _turn_completion = session.turn_completion.lock();
     smelt_core::acp_session::apply_event(
-        &mut session.reduced.lock().unwrap(),
+        &mut session.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::Rewound {
             truncate_from: 2,
             then: then.clone(),
@@ -4280,7 +4199,7 @@ fn retry_rewinds_the_failed_turn_and_resends_its_message_once() {
         _ => panic!("回退之后要把这条原样再发一次"),
     }
     assert!(cmd_rx.try_recv().is_err(), "只发一次");
-    let reduced = session.reduced.lock().unwrap();
+    let reduced = session.reduced.lock();
     let users: Vec<_> = reduced
         .entries()
         .iter()
@@ -4315,7 +4234,7 @@ fn retry_is_rejected_without_a_user_message_or_while_running() {
     let session = make_acp_session("acp-retry-gates", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *session.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -4338,10 +4257,9 @@ fn retry_is_rejected_without_a_user_message_or_while_running() {
     session
         .reduced
         .lock()
-        .unwrap()
         .entries_mut()
         .push(AcpEntry::User("问题".into()));
-    session.reduced.lock().unwrap().phase = DaemonPhase::Thinking;
+    session.reduced.lock().phase = DaemonPhase::Thinking;
     assert_eq!(retry().unwrap_err(), "rewind requires an idle session");
     assert!(cmd_rx.try_recv().is_err());
 }
@@ -4353,13 +4271,13 @@ fn automation_binding_rejects_rewind() {
     let (slot, _) = acp_sessions.reserve_with("acp-rewind-automation", || {
         make_acp_session_value("acp-rewind-automation", AcpSessionState::default())
     });
-    *slot.value.conversation_binding.lock().unwrap() =
+    *slot.value.conversation_binding.lock() =
         Some(smelt_core::conversation::ConversationBinding::Automation {
             run_id: "run-owned".into(),
         });
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
-    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
         cmd_tx,
         event_rx,
         stdio: Arc::new(Mutex::new(None)),
@@ -4520,7 +4438,7 @@ fn watch_frames_follow_the_image_projection(image_refs: bool) {
     let mut lines = BufReader::new(client.try_clone().unwrap());
     let mut mirror = smelt_core::acp_wire::FrameMirror::default();
     let mut view = Vec::new();
-    let current = || slot.value.reduced.lock().unwrap().entries().to_vec();
+    let current = || slot.value.reduced.lock().entries().to_vec();
     let big = smelt_core::acp_chat::IMAGE_INLINE_MAX_B64;
 
     // 首帧（整段帧）。
@@ -4542,7 +4460,7 @@ fn watch_frames_follow_the_image_projection(image_refs: bool) {
 
     // 增量帧：工具收尾（含大图的条目改了），再追加一条带新大图的工具和一段回复。
     {
-        let mut reduced = slot.value.reduced.lock().unwrap();
+        let mut reduced = slot.value.reduced.lock();
         let entries = reduced.entries_mut();
         entries[1] = tool_with_image("t1", ToolCallStatus::Completed, 'B');
         entries.push(tool_with_image("t2", ToolCallStatus::Completed, 'C'));
@@ -4565,7 +4483,7 @@ fn watch_frames_follow_the_image_projection(image_refs: bool) {
 
     // 回复继续长：增量只带新文字，镜像里替换过的条目原样保留。
     {
-        let mut reduced = slot.value.reduced.lock().unwrap();
+        let mut reduced = slot.value.reduced.lock();
         reduced.entries_mut()[3] = AcpEntry::Assistant {
             text: "看完了，图里是登录页".into(),
             thought: false,
@@ -4591,7 +4509,7 @@ fn watch_frames_follow_the_image_projection(image_refs: bool) {
         assert!(bytes < big, "整段帧不能带大图：{bytes} 字节");
     }
     {
-        let mut reduced = slot.value.reduced.lock().unwrap();
+        let mut reduced = slot.value.reduced.lock();
         reduced.entries_mut()[2] = tool_with_image("t2", ToolCallStatus::Failed, 'C');
     }
     push_acp_snapshot_since(&slot.value, false, Some(2));
@@ -4736,3 +4654,43 @@ fn conversation_image_finds_the_original_by_reference() {
     assert_eq!(again, thumb);
 }
 
+/// 别的线程（不只是驱动线程，也可能是处理某个请求的线程）持着这个会话的锁 panic，
+/// 锁会中毒，而且没有人替它收尾。列会话、数连接、对账远程目录都要跨会话读，
+/// 不能因为这一个会话跟着 panic。
+#[test]
+fn a_poisoned_acp_session_does_not_break_cross_session_readers() {
+    let sessions: Sessions = new_sessions();
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-poisoned", || {
+        crate::acp_host::make_acp_session("acp-poisoned", Some("/work".into()), None, None)
+    });
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _lifecycle = slot.lifecycle.lock();
+        let _reduced = slot.value.reduced.lock();
+        let _state = slot.value.state.lock();
+        let _out = slot.value.out.lock();
+        let _launch = slot.value.launch_spec.lock();
+        let _binding = slot.value.conversation_binding.lock();
+        panic!("request thread boom");
+    }));
+    assert!(caught.is_err());
+
+    let published = crate::session_catalog::published_session_states(&sessions, &acp_sessions);
+    assert!(published.iter().any(|state| state.id == "acp-poisoned"));
+    assert_eq!(
+        crate::session_catalog::session_connection_counts("acp-poisoned", &sessions, &acp_sessions),
+        (0, 0)
+    );
+    reconcile_remote_catalog_runtime(
+        &new_test_remote_sessions(),
+        &sessions,
+        &acp_sessions,
+        &new_event_hub(),
+    );
+    // 第二轮：中毒标志不能留着让下一个读者再踩一次。
+    assert!(
+        crate::session_catalog::published_session_states(&sessions, &acp_sessions)
+            .iter()
+            .any(|state| state.id == "acp-poisoned")
+    );
+}

@@ -38,7 +38,7 @@ where
 fn run(args: &[String]) -> i32 {
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
+            println!("{}", smelt_version::VERSION);
             0
         }
         Some("help" | "-h" | "--help") => {
@@ -83,7 +83,7 @@ smelt {version}
 
 stdout 为 JSON。
 ",
-        version = env!("CARGO_PKG_VERSION")
+        version = smelt_version::VERSION
     );
 }
 

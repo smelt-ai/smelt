@@ -190,6 +190,77 @@ fn private_memory(_pid: Pid) -> Option<u64> {
     None
 }
 
+/// 本进程的内存拆成几块，加起来是 `total`。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryBreakdown {
+    /// 和 [`Usage::memory_bytes`] 同一个口径（macOS 的 `phys_footprint`），同一刻读的。
+    pub total: u64,
+    /// GPU 用的画面缓冲和纹理：窗口的 drawable（IOSurface）、Metal 纹理、图集。跟窗口的像素
+    /// 面积成正比。
+    pub graphics: u64,
+    /// malloc 堆上正在用的字节：程序自己的数据。
+    pub heap: u64,
+}
+
+impl MemoryBreakdown {
+    /// 剩下的：系统库的可写数据段、线程栈、堆里已弄脏但空着的页。
+    pub fn other(&self) -> u64 {
+        self.total
+            .saturating_sub(self.graphics)
+            .saturating_sub(self.heap)
+    }
+}
+
+/// 本进程的内存拆分。一次 `task_info` 加一次 malloc 统计，微秒级。只有 macOS 记了这本账；
+/// 别的平台是 `None`。
+///
+/// 内核按账本记：Metal 纹理记在 graphics 标签下；IOSurface（CAMetalLayer 的 drawable 就是
+/// 它）记在可清除但未标记可清除（purgeable nonvolatile）那一栏，不进 graphics 标签。两栏
+/// 不重叠，都算进 `phys_footprint`。malloc 只进 internal，跟这两栏也不重叠。
+#[cfg(target_os = "macos")]
+pub fn own_memory() -> Option<MemoryBreakdown> {
+    use mach2::task_info::{TASK_VM_INFO, task_vm_info};
+    use mach2::vm_types::natural_t;
+
+    let mut info = task_vm_info::default();
+    let mut count = (std::mem::size_of::<task_vm_info>() / std::mem::size_of::<natural_t>()) as u32;
+    // SAFETY: info 是一份完整的 task_vm_info，count 按它的大小给，内核最多写这么多。
+    let status = unsafe {
+        mach2::task::task_info(
+            mach2::traps::mach_task_self(),
+            TASK_VM_INFO,
+            (&mut info as *mut task_vm_info).cast(),
+            &mut count,
+        )
+    };
+    // 账本那几栏是后来的版本才有的：老内核回得短，就不拆。
+    let ledger_end = std::mem::offset_of!(task_vm_info, ledger_tag_neural_nofootprint_compressed)
+        + std::mem::size_of::<i64>();
+    if status != mach2::kern_return::KERN_SUCCESS
+        || (count as usize) * std::mem::size_of::<natural_t>() < ledger_end
+    {
+        return None;
+    }
+    let bytes = |value: i64| u64::try_from(value).unwrap_or(0);
+    let graphics = bytes(info.ledger_tag_graphics_footprint)
+        + bytes(info.ledger_tag_graphics_footprint_compressed)
+        + bytes(info.ledger_purgeable_nonvolatile)
+        + bytes(info.ledger_purgeable_novolatile_compressed);
+    let mut stats: libc::malloc_statistics_t = unsafe { std::mem::zeroed() };
+    // SAFETY: 空 zone 表示所有 zone 合计；stats 是完整的一份。
+    unsafe { libc::malloc_zone_statistics(std::ptr::null_mut(), &mut stats) };
+    Some(MemoryBreakdown {
+        total: info.phys_footprint,
+        graphics,
+        heap: stats.size_in_use as u64,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn own_memory() -> Option<MemoryBreakdown> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +276,38 @@ mod tests {
         // pid 上限远小于 u32::MAX，这个 pid 不会有进程。
         assert_eq!(sampler.sample_process(u32::MAX - 1), None);
         assert!(sampler.total_memory() > 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn own_memory_splits_the_footprint_and_sees_the_heap_grow() {
+        let before = own_memory().expect("macOS 一定有");
+        assert!(before.heap > 0 && before.heap + before.graphics <= before.total);
+        let block = vec![1u8; 64 << 20];
+        let after = own_memory().expect("macOS 一定有");
+        assert!(
+            after.heap >= before.heap + (64 << 20),
+            "{before:?} -> {after:?}"
+        );
+        assert!(after.total >= before.total + (64 << 20), "{before:?} -> {after:?}");
+        drop(block);
+    }
+
+    #[test]
+    fn other_is_what_is_left() {
+        let memory = MemoryBreakdown {
+            total: 100,
+            graphics: 60,
+            heap: 30,
+        };
+        assert_eq!(memory.other(), 10);
+        // 两次读之间有出入时不倒挂。
+        let skewed = MemoryBreakdown {
+            total: 50,
+            graphics: 60,
+            heap: 30,
+        };
+        assert_eq!(skewed.other(), 0);
     }
 
     #[cfg(unix)]

@@ -289,18 +289,36 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             responder,
             details,
             raw_request_line,
-        } => apply_permission(
-            state,
-            &mut outcome,
-            LivePermission {
-                question,
-                tool_call_id: tool_call_id.to_string(),
-                options: pub_options,
-                details,
-                responder: Some(responder),
-                raw_request_line,
-            },
-        ),
+        } => {
+            let tool_call_id = tool_call_id.to_string();
+            // 审批请求里的 tool_call 是稀疏的，常常只有标题。认不出对象时，拿之前那条
+            // tool_call 记下的参数再认一次，卡片才看得出要批的是哪个网址、哪条命令。
+            let (question, details) = match details {
+                crate::acp_session::ApprovalDetailsView::Generic => crate::acp_conn::permission_view(
+                    Some(&question),
+                    &tool_call_id,
+                    None,
+                    state
+                        .tool_debug
+                        .get(&tool_call_id)
+                        .and_then(|debug| debug.raw_input.as_ref()),
+                    &[],
+                ),
+                details => (question, details),
+            };
+            apply_permission(
+                state,
+                &mut outcome,
+                LivePermission {
+                    question,
+                    tool_call_id,
+                    options: pub_options,
+                    details,
+                    responder: Some(responder),
+                    raw_request_line,
+                },
+            )
+        }
         ConversationEvent::Elicitation {
             message,
             fields,

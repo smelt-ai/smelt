@@ -1,41 +1,58 @@
-//! 设置页：系统（更新、后台服务、存储清理）。
+//! 设置页：维护（后台服务、旧版本残留）和关于（版本、应用更新、帮助与反馈）。
 
 use super::*;
 #[cfg(target_os = "macos")]
 use gpui_component::tab::{Tab, TabBar};
 
-/// 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。Windows 上不提供这一页。
-#[cfg(target_os = "macos")]
-pub(super) fn update_page(
+pub(super) fn maintenance_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    SettingPage::new("应用更新")
-        .description("检查 Smelt 版本，选择更新通道和自动下载方式。")
+    SettingPage::new("维护")
         .resettable(false)
-        .group(update_group(entity, snapshot, cx))
-}
-
-pub(super) fn daemon_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingPage {
-    SettingPage::new("后台服务")
-        .description("查看或维护承载本机终端与 Agent 会话的 smeltd 服务。")
-        .resettable(false)
-        .group(daemon_group(entity, snapshot, cx))
-}
-
-pub(super) fn storage_page(cx: &App) -> SettingPage {
-    SettingPage::new("存储清理")
-        .description(
-            "清理已经没人读写的残留：instincts 的 smelt.db、根目录\
-             调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
+        .group(
+            daemon_group(entity, snapshot)
+                .title("后台服务")
+                .description("smeltd 承载本机的终端和 Agent 会话。"),
         )
-        .resettable(false)
-        .group(storage_group(cx))
+        .group(storage_group(cx).title("旧版本残留").description(
+            "升级后没人再读写的文件。废弃文件启动时自动删；旧版 worktree 目录要你在这里确认。",
+        ))
+}
+
+pub(super) fn about_page(
+    entity: Entity<Workspace>,
+    snapshot: &SettingsRenderSnapshot,
+    cx: &App,
+) -> SettingPage {
+    let page = SettingPage::new("关于").resettable(false).group(
+        SettingGroup::new().item(SettingItem::render(|_, _, cx: &mut App| about_header(cx))),
+    );
+    // 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。别的平台整节不出。
+    #[cfg(target_os = "macos")]
+    let page = page.group(update_group(entity, snapshot, cx).title("更新"));
+    #[cfg(not(target_os = "macos"))]
+    let _ = (entity, snapshot, cx);
+    page.group(help_group().title("帮助与反馈"))
+}
+
+/// 关于页头：名字、版本，macOS 上还有当前更新通道。版本号只在这里出现一次。
+fn about_header(cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    #[cfg(target_os = "macos")]
+    let version = format!(
+        "v{} · {}",
+        smelt_version::VERSION,
+        cx.global::<UpdateSettings>().channel.label()
+    );
+    #[cfg(not(target_os = "macos"))]
+    let version = format!("v{}", smelt_version::VERSION);
+    v_flex()
+        .gap_1()
+        .child(div().text_base().font_semibold().child("Smelt"))
+        .child(div().text_sm().text_color(muted).child(version))
+        .into_any_element()
 }
 
 #[cfg(target_os = "macos")]
@@ -294,74 +311,6 @@ fn update_group(
             action_row = action_row.child(restart_btn);
         }
 
-        let links = h_flex()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .flex_wrap()
-            .child(
-                Button::new("settings-github-link")
-                    .link()
-                    .icon_size()
-                    .label("源码 GitHub ↗")
-                    .on_click(|_, _window, cx| {
-                        cx.open_url("https://github.com/smelt-ai/smelt");
-                    }),
-            )
-            .child(
-                Button::new("settings-help-link")
-                    .link()
-                    .icon_size()
-                    .label("帮助文档 ↗")
-                    .on_click(|_, _window, cx| {
-                        cx.open_url(DOCS_URL);
-                    }),
-            )
-            .child(
-                Button::new("settings-open-log-link")
-                    .quiet()
-                    .icon_size()
-                    .label("打开日志 ↗")
-                    .on_click(|_, _window, _cx| {
-                        // 反馈问题时手动带上这份日志：GitHub issue 附件靠拖拽，
-                        // 没有 API 能替用户自动上传，所以帮用户直接定位到文件。
-                        if let Some(path) = smelt_sys::app_log::log_path() {
-                            #[cfg(target_os = "macos")]
-                            {
-                                let _ = std::process::Command::new("open")
-                                    .arg("-R")
-                                    .arg(&path)
-                                    .spawn();
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                if let Some(dir) = path.parent() {
-                                    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
-                                }
-                            }
-                        }
-                    }),
-            )
-            .child(
-                Button::new("settings-report-issue-link")
-                    .link()
-                    .icon_size()
-                    .label("反馈问题 ↗")
-                    .on_click(|_, _window, cx| {
-                        // 先把日志在 Finder 里选出来，用户点开 issue 页面后可以直接把它拖进去。
-                        if let Some(path) = smelt_sys::app_log::log_path() {
-                            #[cfg(target_os = "macos")]
-                            {
-                                let _ = std::process::Command::new("open")
-                                    .arg("-R")
-                                    .arg(&path)
-                                    .spawn();
-                            }
-                        }
-                        cx.open_url(FEEDBACK_URL);
-                    }),
-            );
-
         v_flex()
             .w_full()
             .gap_0()
@@ -389,13 +338,6 @@ fn update_group(
                                     .text_color(status_color)
                                     .child(status_title),
                             ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(concat!("当前版本 v", env!("CARGO_PKG_VERSION"))),
                     )
                     .child(action_row),
             )
@@ -473,192 +415,253 @@ fn update_group(
                             ),
                     ),
             )
-            .child(links.pt_3().mt_1().border_t_1().border_color(border))
     }))
 }
 
-fn daemon_group(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingGroup {
-    let (fg, muted, _border) = {
-        let t = cx.theme();
-        (t.foreground, t.muted_foreground, t.border)
+/// 帮助文档、反馈、源码。三个平台都有：Windows、Linux 没有菜单栏，帮助和反馈只能从这里进。
+fn help_group() -> SettingGroup {
+    SettingGroup::new().items(vec![
+        SettingItem::new(
+            "使用文档",
+            SettingField::render(|_, _, _| {
+                Button::new("settings-help-link")
+                    .link()
+                    .icon_size()
+                    .label("帮助文档 ↗")
+                    .on_click(|_, _window, cx| cx.open_url(DOCS_URL))
+            }),
+        ),
+        SettingItem::new(
+            "反馈问题",
+            SettingField::render(|_, _, _| {
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        Button::new("settings-open-log-link")
+                            .quiet()
+                            .icon_size()
+                            .label("打开日志")
+                            .on_click(|_, _window, _cx| reveal_app_log()),
+                    )
+                    .child(
+                        Button::new("settings-report-issue-link")
+                            .link()
+                            .icon_size()
+                            .label("反馈问题 ↗")
+                            .on_click(|_, _window, cx| {
+                                reveal_app_log();
+                                cx.open_url(FEEDBACK_URL);
+                            }),
+                    )
+            }),
+        )
+        .description("会同时在文件管理器里找出日志，拖进反馈页就行"),
+        SettingItem::new(
+            "源码",
+            SettingField::render(|_, _, _| {
+                Button::new("settings-github-link")
+                    .link()
+                    .icon_size()
+                    .label("GitHub ↗")
+                    .on_click(|_, _window, cx| {
+                        cx.open_url("https://github.com/smelt-ai/smelt");
+                    })
+            }),
+        ),
+    ])
+}
+
+/// 在文件管理器里找出日志。反馈问题时手动带上它：issue 附件靠拖拽，没有 API 能替用户
+/// 自动上传。macOS 直接选中文件，别的平台打开所在目录。
+fn reveal_app_log() {
+    let Some(path) = smelt_sys::app_log::log_path() else {
+        return;
     };
-    let daemon_entity = entity;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(dir) = path.parent() {
+        let _ = crate::ide::open_in_file_manager(dir);
+    }
+}
+
+fn daemon_group(entity: Entity<Workspace>, snapshot: &SettingsRenderSnapshot) -> SettingGroup {
     let daemon_outdated = snapshot.daemon_outdated;
     let daemon_upgrading = snapshot.daemon_upgrading;
     let daemon_upgrade_msg = snapshot.daemon_upgrade_msg.clone();
     let daemon_info = snapshot.daemon_info.clone();
-    SettingGroup::new()
-            .item(SettingItem::render(move |_, _, _cx: &mut App| {
-                    let outdated = daemon_outdated;
-                    let upgrading = daemon_upgrading;
-                    let upgrade_msg = daemon_upgrade_msg.clone();
-                    let upgrade_entity = daemon_entity.clone();
-                    let restart_entity = daemon_entity.clone();
-                    // 版本落后时重启到 App 里的守护。没有进行中的会话就直接重启。
-                    let upgrade_daemon_btn = (outdated == Some(true)).then(|| {
-                        Button::new("upgrade-daemon")
-                            .compact()
-                            .label(if upgrading { "升级中…" } else { "重启以升级" })
-                            .loading(upgrading)
-                            .disabled(upgrading)
-                            .on_click(move |_, _window, cx: &mut App| {
-                                upgrade_entity.update(cx, |this, cx| {
-                                    this.request_daemon_restart(cx);
-                                });
-                            })
-                    });
-                    // 常驻入口（守护卡死 / 想强制换二进制时用）。同样只在有进行中的会话时确认。
-                    let restart_daemon_btn = Button::new("restart-daemon")
-                        .danger_outline()
+    let mut group = SettingGroup::new();
+    // 版本落后时，警示和「重启以升级」放在最上面：这是这一页唯一要你处理的事。
+    if daemon_outdated == Some(true) {
+        let upgrade_entity = entity.clone();
+        group = group.item(
+            SettingItem::new(
+                "版本落后于当前安装包",
+                SettingField::render(move |_, _, _| {
+                    let upgrade_entity = upgrade_entity.clone();
+                    Button::new("upgrade-daemon")
                         .compact()
-                        .label("重启守护进程")
+                        .label(if daemon_upgrading {
+                            "升级中…"
+                        } else {
+                            "重启以升级"
+                        })
+                        .loading(daemon_upgrading)
+                        .disabled(daemon_upgrading)
                         .on_click(move |_, _window, cx: &mut App| {
-                            restart_entity.update(cx, |this, cx| {
-                                this.request_daemon_restart(cx);
-                            });
-                        });
-                    let status_text = match outdated {
-                        Some(true) => "版本落后于当前安装包。重启守护进程后新版本才会生效；进行中的回合会被中断，历史记录还在。".to_string(),
-                        Some(false) => "已是最新。".to_string(),
-                        None => "检测中…".to_string(),
-                    };
-                    // 运行信息：守护没起就明说，别留空白让人以为没加载出来。
-                    let info = daemon_info.clone();
-                    let info_text = match (&info, outdated) {
-                        (Some(i), _) => Some(daemon_info_line(i)),
-                        // outdated 已探测完但拿不到 info → 守护确实没跑。
-                        (None, Some(_)) => Some("未在运行（新建终端时会自动拉起）".to_string()),
-                        (None, None) => None,
-                    };
-                    // 「N 个会话」不只是个数字——守护持有的会话不全是侧栏认领的
-                    // （测试跑出来的游离会话、忘了关的临时会话也计在内），点开能看
-                    // 到明细并单独清理，不用被迫走「重启守护进程」那种连坐所有
-                    // 会话的核选项。守护没起来就没什么可看的，不露这个入口。
-                    let manage_sessions_entity = daemon_entity.clone();
-                    let manage_sessions_link = info.is_some().then(|| {
+                            upgrade_entity.update(cx, |this, cx| this.request_daemon_restart(cx));
+                        })
+                }),
+            )
+            .description(
+                "重启后新版本才生效。进行中的回合会被中断，历史记录还在，重启后可以接着聊。",
+            ),
+        );
+    }
+    // 运行信息：守护没起就明说，别留空白让人以为没加载出来。
+    let info_text = match (&daemon_info, daemon_outdated) {
+        (Some(info), _) => daemon_info_line(info),
+        // outdated 已探测完但拿不到 info → 守护确实没跑。
+        (None, Some(_)) => "未在运行（新建终端时会自动拉起）".to_string(),
+        (None, None) => "检测中…".to_string(),
+    };
+    let info_text = match daemon_upgrade_msg {
+        Some(message) => format!("{info_text}\n{message}"),
+        None => info_text,
+    };
+    let has_info = daemon_info.is_some();
+    group.item(
+        SettingItem::new(
+            "smeltd",
+            SettingField::render(move |_, _, _| {
+                // 「N 个会话」不只是个数字——守护持有的会话不全是侧栏认领的（测试跑出来的
+                // 游离会话、忘了关的临时会话也计在内），点开能看到明细并单独清理，不用被迫
+                // 走重启那种连坐所有会话的核选项。守护没起来就没什么可看的，不露这个入口。
+                let sessions_entity = entity.clone();
+                let restart_entity = entity.clone();
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .children(has_info.then(|| {
                         Button::new("settings-manage-daemon-sessions")
                             .quiet()
-                            .icon_size()
-                            .label("查看/清理会话 ›")
+                            .compact()
+                            .label("查看会话 ›")
                             .on_click(move |_, _window, cx| {
-                                manage_sessions_entity.update(cx, |ws, cx| {
-                                    ws.open_session_manager(cx);
-                                });
+                                sessions_entity.update(cx, |ws, cx| ws.open_session_manager(cx));
                             })
-                    });
-
-                    v_flex()
-                        .w_full()
-                        .gap_3()
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .justify_between()
-                                .items_center()
-                                .child(div().text_sm().text_color(fg).child("守护进程（smeltd）"))
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .children(upgrade_daemon_btn)
-                                        .child(restart_daemon_btn),
-                                ),
-                        )
-                        .child(div().text_xs().text_color(muted).child(status_text))
-                        .children(
-                            info_text.map(|t| div().text_xs().text_color(muted).child(t)),
-                        )
-                        .children(manage_sessions_link)
-                        .children(upgrade_msg.map(|m| div().text_xs().text_color(muted).child(m)))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child("没有正在进行的会话时直接重启。有的话会先确认：这一轮回复会被中断，历史记录已保存，重启后可以继续对话。"),
-                        )
-            }))
+                    }))
+                    // 常驻入口（守护卡死 / 想强制换二进制时用）。有进行中的会话时先确认。
+                    .child(
+                        Button::new("restart-daemon")
+                            .quiet()
+                            .compact()
+                            .label("重启")
+                            .on_click(move |_, _window, cx: &mut App| {
+                                restart_entity.update(cx, |this, cx| this.request_daemon_restart(cx));
+                            }),
+                    )
+            }),
+        )
+        .description(info_text),
+    )
+    // 页脚本身就是小号灰字（见 SettingGroup::footer），不用再上色。
+    .footer(|_, _| "重启时如果有进行中的会话，会先问你。")
 }
 
 fn storage_group(cx: &App) -> SettingGroup {
-    let (fg, muted, _border) = {
-        let t = cx.theme();
-        (t.foreground, t.muted_foreground, t.border)
+    // —— `~/.smelt` 下的历史残留（老 schema / 老实现留下的遗留文件）扫描与清理 ——
+    let state = cx.try_global::<CleanupState>().cloned().unwrap_or_default();
+    let summary = match &state.scan {
+        None => "还没扫描".to_string(),
+        Some(scan) if scan.is_empty() => "没有发现残留".to_string(),
+        Some(scan) => format!(
+            "发现 {} 处：废弃文件 {} 个、旧版 worktree 目录 {} 个、废弃目录 {} 个。不会删除 Git 分支。",
+            scan.total_items(),
+            scan.obsolete_files.len(),
+            scan.legacy_worktree_dirs.len(),
+            scan.obsolete_dirs.len(),
+        ),
     };
-    // —— 存储：`~/.smelt` 下的历史残留（老 schema / 老实现留下的遗留文件）扫描与清理 ——
-    SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
-        let state = cx.try_global::<CleanupState>().cloned().unwrap_or_default();
-
-        let summary_text = match &state.scan {
-            None => "还没扫描".to_string(),
-            Some(s) if s.is_empty() => "没有发现残留数据".to_string(),
-            Some(s) => format!(
-                "发现 {} 处残留：废弃文件 {} 个、旧版 worktree 目录 {} 个、废弃目录 {} 个",
-                s.total_items(),
-                s.obsolete_files.len(),
-                s.legacy_worktree_dirs.len(),
-                s.obsolete_dirs.len(),
-            ),
-        };
-
-        let has_findings = state.scan.as_ref().is_some_and(|s| !s.is_empty());
-
-        let scan_btn = Button::new("storage-scan")
-            .compact()
-            .label("扫描残留数据")
-            .on_click(move |_, _window, cx: &mut App| {
-                let scan = crate::storage_cleanup::scan();
-                cx.set_global(CleanupState {
-                    scan: Some(scan),
-                    message: None,
-                });
-            });
-
-        let clean_btn = has_findings.then(|| {
-            Button::new("storage-clean")
-                .danger()
-                .compact()
-                .label("清理")
-                .on_click(move |_, _window, cx: &mut App| {
-                    let Some(scan) = cx
-                        .try_global::<CleanupState>()
-                        .and_then(|state| state.scan.clone())
-                    else {
-                        return;
-                    };
-                    let removed = crate::storage_cleanup::clean(&scan);
-                    cx.set_global(CleanupState {
-                        scan: Some(crate::storage_cleanup::scan()),
-                        message: Some(format!("已清理 {removed} 项").into()),
+    let summary = match &state.message {
+        Some(message) => format!("{summary}\n{message}"),
+        None => summary,
+    };
+    SettingGroup::new().item(
+        SettingItem::new(
+            "~/.smelt 里的残留",
+            SettingField::render(move |_, _, cx: &mut App| {
+                let state = cx.try_global::<CleanupState>().cloned().unwrap_or_default();
+                let has_findings = state.scan.as_ref().is_some_and(|scan| !scan.is_empty());
+                let scan_btn = Button::new("storage-scan")
+                    .quiet()
+                    .compact()
+                    .label(if state.scan.is_some() {
+                        "重新扫描"
+                    } else {
+                        "扫描"
+                    })
+                    .on_click(|_, _window, cx: &mut App| {
+                        cx.set_global(CleanupState {
+                            scan: Some(crate::storage_cleanup::scan()),
+                            ..Default::default()
+                        });
                     });
-                })
-        });
+                let mut row = h_flex().gap_1().items_center().child(scan_btn);
+                if has_findings && state.confirming {
+                    row = row
+                        .child(
+                            Button::new("storage-clean-cancel")
+                                .quiet()
+                                .compact()
+                                .label("取消")
+                                .on_click(|_, _window, cx: &mut App| set_confirming(false, cx)),
+                        )
+                        .child(
+                            Button::new("storage-clean-confirm")
+                                .danger()
+                                .compact()
+                                .label("确认清理")
+                                .on_click(|_, _window, cx: &mut App| {
+                                    let Some(scan) = cx
+                                        .try_global::<CleanupState>()
+                                        .and_then(|state| state.scan.clone())
+                                    else {
+                                        return;
+                                    };
+                                    let removed = crate::storage_cleanup::clean(&scan);
+                                    cx.set_global(CleanupState {
+                                        scan: Some(crate::storage_cleanup::scan()),
+                                        confirming: false,
+                                        message: Some(format!("已清理 {removed} 项").into()),
+                                    });
+                                }),
+                        );
+                } else if has_findings {
+                    row = row.child(
+                        Button::new("storage-clean")
+                            .danger_outline()
+                            .compact()
+                            .label("清理…")
+                            .on_click(|_, _window, cx: &mut App| set_confirming(true, cx)),
+                    );
+                }
+                row
+            }),
+        )
+        .description(summary),
+    )
+}
 
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .items_center()
-                    .child(div().text_sm().text_color(fg).child("~/.smelt 历史残留"))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(scan_btn)
-                            .children(clean_btn),
-                    ),
-            )
-            .child(div().text_xs().text_color(muted).child(summary_text))
-            .children(
-                state
-                    .message
-                    .map(|m| div().text_xs().text_color(muted).child(m)),
-            )
-    }))
+/// 进入或退出「确认清理」。整份换掉全局，设置窗口跟着重绘（跟扫描按钮同一个做法）。
+fn set_confirming(confirming: bool, cx: &mut App) {
+    let mut state = cx.try_global::<CleanupState>().cloned().unwrap_or_default();
+    state.confirming = confirming;
+    cx.set_global(state);
 }

@@ -114,6 +114,7 @@ fn launch_fake_agent(script: &str, resume_session_id: Option<&str>) -> Conversat
             resume_session_id: resume_session_id.map(SessionId::new),
             fork_session_id: None,
             fork_cut: None,
+            peer_handler: None,
         },
         None,
     )

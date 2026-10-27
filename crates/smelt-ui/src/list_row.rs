@@ -130,7 +130,14 @@ impl RenderOnce for ListRow {
         let selected_fill = gpui::rgb(ui_theme::bg_selected());
         // 先吃调用点的布局，再盖箭头。这样调用点就算写了别的光标，画出来仍是箭头。
         let row = base.refine_style(&style).cursor_default();
-        let row = if selected { row.bg(selected_fill) } else { row };
+        // 选中照组件库侧栏：底色之外，字也换成主题给选中项的字色。子元素自己没定字色的就
+        // 跟着变；字重留给调用点，免得时间这类次要字也跟着加粗。
+        let row = if selected {
+            row.bg(selected_fill)
+                .text_color(gpui::rgb(ui_theme::text_selected()))
+        } else {
+            row
+        };
         let row = if disabled || selected {
             row
         } else {

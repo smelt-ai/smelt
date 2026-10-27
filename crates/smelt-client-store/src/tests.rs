@@ -223,6 +223,7 @@ fn v2_session_routes_are_dropped() {
          INSERT INTO collapsed_project VALUES ('', '/repo/b', 0), ('', '/repo/a', 1);
          INSERT INTO collapsed_agent VALUES ('writer', 0);
          INSERT INTO pinned_project VALUES ('', '/repo/z', 0), ('', '/repo/a', 1);
+         ALTER TABLE runtime_connection DROP COLUMN os;
          ALTER TABLE runtime_connection DROP COLUMN smelt_home;
          PRAGMA user_version = 2;",
     )
@@ -316,6 +317,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         relay_url: None,
         added_at_ms: 1,
         smelt_home: None,
+        os: None,
     };
     let pi = RuntimeConnection {
         runtime_id: "rt-pi".to_string(),
@@ -324,6 +326,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
         relay_url: Some("https://relay.example".to_string()),
         added_at_ms: 2,
         smelt_home: Some("/home/pi/.smelt".to_string()),
+        os: Some("linux".to_string()),
     };
     store.put_runtime_connection(&linux).unwrap();
     store.put_runtime_connection(&pi).unwrap();
@@ -332,6 +335,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
             endpoint_id: "cc".to_string(),
             added_at_ms: 3,
             smelt_home: Some("/home/linux/.smelt".to_string()),
+            os: Some("linux".to_string()),
             ..linux
         })
         .unwrap();
@@ -345,6 +349,7 @@ fn runtime_connections_keep_order_and_repairing_overwrites_in_place() {
     );
     assert_eq!(listed[0].endpoint_id, "cc");
     assert_eq!(listed[0].smelt_home.as_deref(), Some("/home/linux/.smelt"));
+    assert_eq!(listed[0].os.as_deref(), Some("linux"));
     assert_eq!(listed[0].added_at_ms, 1, "重新配对不改添加时间");
     assert!(store.delete_runtime_connection("rt-linux").unwrap());
     assert!(!store.delete_runtime_connection("rt-linux").unwrap());
@@ -427,6 +432,7 @@ fn v1_projects_become_local_projects() {
          INSERT INTO collapsed_project VALUES ('/repo/b', 0), ('/repo/a', 1);
          INSERT INTO collapsed_agent VALUES ('writer', 0);
          INSERT INTO pinned_project VALUES ('/repo/z', 0), ('/repo/a', 1);
+         ALTER TABLE runtime_connection DROP COLUMN os;
          ALTER TABLE runtime_connection DROP COLUMN smelt_home;
          PRAGMA user_version = 1;",
     )
@@ -465,7 +471,8 @@ fn v3_runtime_connections_gain_an_empty_smelt_home() {
     let v3 = Connection::open(&path).unwrap();
     v3.execute_batch(schema::CREATE_SCHEMA).unwrap();
     v3.execute_batch(
-        "ALTER TABLE runtime_connection DROP COLUMN smelt_home;
+        "ALTER TABLE runtime_connection DROP COLUMN os;
+         ALTER TABLE runtime_connection DROP COLUMN smelt_home;
          INSERT INTO runtime_connection VALUES ('rt-linux', 'linux-box', 'aa', NULL, 0, 1);
          PRAGMA user_version = 3;",
     )
@@ -488,6 +495,40 @@ fn v3_runtime_connections_gain_an_empty_smelt_home() {
             .smelt_home
             .as_deref(),
         Some("/home/linux/.smelt")
+    );
+    cleanup(&path);
+}
+
+/// v4 的远程运行时还不知道自己在什么系统上：升到 v5 时原样留下，`os` 先空着，连上一次再记。
+#[test]
+fn v4_runtime_connections_gain_an_empty_os() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v4 = Connection::open(&path).unwrap();
+    v4.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    v4.execute_batch(
+        "ALTER TABLE runtime_connection DROP COLUMN os;
+         INSERT INTO runtime_connection
+           VALUES ('rt-win', 'DESKTOP-1', 'aa', NULL, 0, 1, 'C:\\Users\\w\\.smelt');
+         PRAGMA user_version = 4;",
+    )
+    .unwrap();
+    drop(v4);
+
+    let store = ClientStore::open(&path).unwrap();
+    let listed = store.runtime_connections().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].smelt_home.as_deref(), Some("C:\\Users\\w\\.smelt"));
+    assert_eq!(listed[0].os, None);
+    store
+        .put_runtime_connection(&RuntimeConnection {
+            os: Some("windows".to_string()),
+            ..listed[0].clone()
+        })
+        .unwrap();
+    assert_eq!(
+        store.runtime_connections().unwrap()[0].os.as_deref(),
+        Some("windows")
     );
     cleanup(&path);
 }

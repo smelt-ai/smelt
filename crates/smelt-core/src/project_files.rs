@@ -361,7 +361,9 @@ pub fn browse_dirs(
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.clone());
-    let dir = std::fs::canonicalize(&requested).map_err(|error| {
+    // 不用 std::fs::canonicalize：它在 Windows 上返回 `\\?\C:\...`，选中的路径会原样
+    // 成为项目根、出现在侧栏。dunce 能去掉这个前缀时就去掉，其它平台等同 std。
+    let dir = dunce::canonicalize(&requested).map_err(|error| {
         ProjectFileError::Io(format!("打不开 {}：{error}", requested.display()))
     })?;
     if !dir.is_dir() {
@@ -429,6 +431,14 @@ mod tests {
         .unwrap();
         let last = with_files.entries.last().unwrap();
         assert_eq!((last.name.as_str(), last.is_dir), ("notes.md", false));
+
+        // 选中的路径会成为项目根：Windows 上不能带 `\\?\` 前缀。
+        let returned = std::iter::once(&with_files.path)
+            .chain(with_files.parent.as_ref())
+            .chain(with_files.entries.iter().map(|entry| &entry.path));
+        for path in returned {
+            assert!(!path.starts_with(r"\\?\"), "路径带了 verbatim 前缀：{path}");
+        }
     }
 
     /// `@` 的候选源必须真能列出文件——列空了菜单就是个空壳，而且不会报错。

@@ -20,8 +20,9 @@ esac
 # 随运行时一起分发的程序。
 PROGRAMS=(smeltd smelt-notify)
 
-version="$(awk -F'"' '/^\[workspace.package\]/{inside=1; next} /^\[/{inside=0} inside && /^version *=/{print $2; exit}' Cargo.toml)"
-[[ -n "$version" ]] || { echo "✗ 读不到工作区版本号" >&2; exit 1; }
+# 版本号按 git tag 算（发版流水线直接传 SMELT_BUILD_VERSION），编进 smeltd。
+version="$(scripts/version.sh)"
+export SMELT_BUILD_VERSION="$version"
 name="smeltd-${version}-linux-$(uname -m)"
 echo "▶ 打包 ${name}"
 cargo build --release -p smeltd --bins --locked

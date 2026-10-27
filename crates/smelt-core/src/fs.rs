@@ -147,7 +147,8 @@ impl FileSystem for LocalFs {
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        std::fs::canonicalize(path)
+        // Windows 上 std 的结果带 `\\?\` 前缀，会原样进协议、显示给用户；dunce 能去就去掉。
+        dunce::canonicalize(path)
     }
 
     fn metadata(&self, path: &Path) -> Option<Metadata> {

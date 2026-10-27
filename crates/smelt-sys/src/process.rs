@@ -248,6 +248,11 @@ pub fn process_started_at(pid: u32) -> Option<std::time::SystemTime> {
 
 /// 脱离当前控制台拉起一个进程，调用方不等它。守护进程用这个，避免被桌面的
 /// Job 带着一起退出。
+///
+/// Windows 上给它一个自己的隐藏控制台（`CREATE_NO_WINDOW`），不用 `DETACHED_PROCESS`。
+/// 完全没有控制台的进程再拉起控制台程序时，没带 `CREATE_NO_WINDOW` 的子进程会各自
+/// 弹出一个看得见的控制台（对话的 session host、下载解压的 curl/tar 都是）。有了隐藏
+/// 控制台，子进程默认继承它，整棵树都不弹窗。
 pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
     #[cfg(unix)]
     {
@@ -257,8 +262,9 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-        const FLAGS: u32 = 0x0000_0008 | 0x0800_0000 | 0x0000_0200;
+        // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP。不要加 DETACHED_PROCESS：
+        // 两者同时给时 CREATE_NO_WINDOW 被忽略，进程就没有控制台了。
+        const FLAGS: u32 = CREATE_NO_WINDOW | 0x0000_0200;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         const ERROR_ACCESS_DENIED: i32 = 5;
         match command

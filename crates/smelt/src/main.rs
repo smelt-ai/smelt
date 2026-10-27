@@ -97,6 +97,7 @@ use gpui_component::input::{
 use gpui_component::resizable::ResizableState;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
+use smelt_client::runtime_path::PathStyle;
 use terminal_view::TerminalView;
 
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
@@ -267,11 +268,13 @@ gpui::actions!(
         OpenSettings,
         CheckForUpdate,
         ReportIssue,
+        OpenDocs,
         SendSelectionToTerminal,
         PrevSession,
         NextSession,
         ToggleSidebar,
         ToggleToolPanel,
+        NewConversation,
         ToggleCommandPalette,
         CyclePanePrev,
         CyclePaneNext,
@@ -288,6 +291,14 @@ gpui::actions!(
         FileTreeMoveLeft,
         FileTreeMoveRight,
         FileTreeActivate,
+        FocusSidebar,
+        SidebarUp,
+        SidebarDown,
+        SidebarCollapse,
+        SidebarExpand,
+        SidebarOpen,
+        SidebarExit,
+        CloseSettingsWindow,
     ]
 );
 
@@ -1254,6 +1265,9 @@ impl Session {
                 let view = view.read(cx);
                 let title = view.auto_title();
                 let cwd = view.cwd();
+                let dir = cwd.as_deref().and_then(|cwd| {
+                    crate::runtimes::path_style(view.runtime().key(), cx).file_name(cwd.trim())
+                });
                 let fallback = self
                     .agent_definition_id
                     .as_deref()
@@ -1269,11 +1283,7 @@ impl Session {
                         .unwrap_or(fallback)
                         .to_string()
                 } else {
-                    smelt_model::session_title::acp_display_title(
-                        title.as_deref(),
-                        fallback,
-                        cwd.as_deref(),
-                    )
+                    smelt_model::session_title::acp_display_title(title.as_deref(), fallback, dir)
                 }
             }),
         }
@@ -1408,7 +1418,7 @@ fn next_session_ui_id() -> u64 {
 enum RenameTarget {
     Session(usize),
     Pane(Entity<TerminalView>),
-    /// 侧栏和设置「机器」页里一台远程机器的名字，只在这台电脑上生效。
+    /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
     History {
         agent: settings::HistorySourceKind,
@@ -1417,6 +1427,14 @@ enum RenameTarget {
         resume_id: String,
         current_title: String,
     },
+}
+
+impl RenameTarget {
+    /// 侧栏里的会话行、分屏行、对话行就地改名：输入框画在那一行里，回车或点别处保存，
+    /// Esc 取消。历史会话和机器名不在侧栏的行上，还用弹窗。
+    fn is_inline(&self) -> bool {
+        matches!(self, Self::Session(_) | Self::Pane(_))
+    }
 }
 
 /// 单个终端 pane 自动推导的标题。
@@ -2000,14 +2018,17 @@ pub(crate) fn sidebar_groups(
 }
 
 /// 显示名撞车时往前补 `extra` 段父目录：`/a/b/smelt` + 1 → `b · smelt`。
-/// base 是这一组本来的显示名（目录末段）。
-fn label_with_parents(root: &str, base: &str, extra: usize) -> String {
+/// base 是这一组本来的显示名（目录末段）。root 按那台机器的系统切（`style`）。
+fn label_with_parents(style: PathStyle, root: &str, base: &str, extra: usize) -> String {
     if extra == 0 {
         return base.to_string();
     }
+    let (separators, joiner): (&[char], &str) = match style {
+        PathStyle::Posix => (&['/'], "/"),
+        PathStyle::Windows => (&['\\', '/'], "\\"),
+    };
     let segs: Vec<&str> = root
-        .trim_end_matches('/')
-        .split('/')
+        .split(separators)
         .filter(|s| !s.is_empty())
         .collect();
     let end = segs.len().saturating_sub(1); // base 已经代表末段
@@ -2015,11 +2036,12 @@ fn label_with_parents(root: &str, base: &str, extra: usize) -> String {
     if start >= end {
         return base.to_string();
     }
-    format!("{} · {}", segs[start..end].join("/"), base)
+    format!("{} · {}", segs[start..end].join(joiner), base)
 }
 
-/// 给重名的分组逐步补父目录段，直到互不相同（或路径已经补到顶）。
-fn disambiguate_labels(groups: &mut [ProjectGroup]) {
+/// 给重名的分组逐步补父目录段，直到互不相同（或路径已经补到顶）。分组都在同一个运行时
+/// 上，路径按它的系统切（`style`）。
+fn disambiguate_labels(style: PathStyle, groups: &mut [ProjectGroup]) {
     let bases: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
     let mut extra = vec![0usize; groups.len()];
     // 每轮给所有重名组多补一段；路径最深也就那么几段，8 轮足够收敛。
@@ -2040,7 +2062,7 @@ fn disambiguate_labels(groups: &mut [ProjectGroup]) {
         let mut changed = false;
         for i in dup {
             let next = extra[i] + 1;
-            let candidate = label_with_parents(&groups[i].root, &bases[i], next);
+            let candidate = label_with_parents(style, &groups[i].root, &bases[i], next);
             if candidate != groups[i].label {
                 extra[i] = next;
                 groups[i].label = candidate;
@@ -2057,15 +2079,15 @@ fn disambiguate_labels(groups: &mut [ProjectGroup]) {
 /// cwd 归属哪个项目根：cwd 就是根、或落在根之下（必须是完整路径段，`/a/bc` 不算
 /// 落在 `/a/b` 下）。多个根都匹配时取最深的那个——`~/dev/a` 和 `~/dev/a/sub` 都打开
 /// 过时，子目录的会话归后者。空 cwd 或谁都不沾 → None（调用方按 cwd 自建隐式组）。
-fn project_root_of(projects: &[String], cwd: &str) -> Option<String> {
+/// 路径是运行时那台机器上的，按它的系统比（`style`）。
+fn project_root_of(style: PathStyle, projects: &[String], cwd: &str) -> Option<String> {
     if cwd.is_empty() {
         return None;
     }
-    let cwd = cwd.trim_end_matches('/');
     projects
         .iter()
         .map(|p| p.trim_end_matches('/'))
-        .filter(|root| !root.is_empty() && (cwd == *root || cwd.starts_with(&format!("{root}/"))))
+        .filter(|root| !root.is_empty() && style.starts_with(cwd, root))
         .max_by_key(|root| root.len())
         .map(str::to_string)
 }
@@ -2535,8 +2557,8 @@ struct Workspace {
     sidebar_grouping: SidebarGrouping,
     /// 按项目分组时是否把无会话的项目从侧栏藏起来（固定的 / 当前项目除外）。
     sidebar_hide_empty_projects: bool,
-    /// 侧栏「最近对话」是否展开全部。只在本次运行内记住。
-    sidebar_recent_conversations_expanded: bool,
+    /// 侧栏「对话」分组是否收起。只在本次运行内记住。
+    sidebar_conversations_collapsed: bool,
     /// 会话拖拽悬停中的插入位置：(目标会话 ui_id, 插它前面?)。
     sess_drop_hint: Option<(u64, bool)>,
     /// 项目拖拽悬停中的插入位置：(目标项目 root, 插它前面?)。
@@ -2551,6 +2573,19 @@ struct Workspace {
     sidebar_drop_origin: Option<(SidebarDrag, Pixels)>,
     /// 侧栏会话列表的滚动位置；拖到顶底边缘时靠它自动滚。
     sidebar_scroll: ScrollHandle,
+    /// 侧栏要滚到哪一行、视口外有没有「需要你」，见 `session_list::reveal`。
+    sidebar_reveal: std::rc::Rc<session_list::SidebarReveal>,
+    /// 刚新建、要闪一下的那一行（会话 `ui_id`）。新建下一个时换掉。
+    sidebar_flash: Option<u64>,
+    /// 侧栏键盘焦点。挂在列表里一个零大小的元素上，见 `session_list::keyboard`。
+    sidebar_focus: FocusHandle,
+    /// 侧栏键盘光标停在哪一行。
+    sidebar_cursor: Option<session_list::SidebarItem>,
+    /// 打字跳转攒的前缀和最后一次按键的时间。
+    sidebar_typeahead: Option<(String, std::time::Instant)>,
+    /// 看过的会话（`ui_id`），最近的在最后。关掉当前会话时回到上一个看过的；只在本次
+    /// 运行内记，重启后从当前会话重新记起。
+    recent_sessions: Vec<u64>,
     sidebar_auto_scroll: gpui_component::scroll::AutoScroll,
     /// 已发现 IDE 的按需缓存。没有项目目录时完全不触发；首次打开 IDE 菜单才后台
     /// 填充，之后菜单只读这里的快照。
@@ -2734,7 +2769,7 @@ struct Workspace {
     show_quit_confirm: bool,
     /// 用户已确认退出；防止异步更新收尾期间重复提交退出动作。
     quit_requested: bool,
-    /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 齿轮强调色。
+    /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 侧栏「设置」红点。
     /// 只在 macOS 上存在：更新器替换的是 .app 包（设计文档 D4）。
     #[cfg(target_os = "macos")]
     update_status: updater::UpdateStatus,
@@ -2763,6 +2798,8 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
+    /// 设置「Agent → 高级 → 对话适配器命令」是否展开。只在本次运行内记住。
+    settings_acp_commands_open: bool,
     /// 能力库正文。只在能力库路由可见时存在，见 `sync_capabilities_view`。
     capabilities_view: Option<Entity<settings::SettingsContentView>>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
@@ -3183,7 +3220,7 @@ impl Workspace {
                 .as_ref()
                 .map(|s| s.sidebar_hide_empty_projects)
                 .unwrap_or(false),
-            sidebar_recent_conversations_expanded: false,
+            sidebar_conversations_collapsed: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
             sidebar_drag: None,
@@ -3191,6 +3228,12 @@ impl Workspace {
             shown_session_facts: Vec::new(),
             sidebar_drop_origin: None,
             sidebar_scroll: ScrollHandle::new(),
+            sidebar_reveal: Default::default(),
+            sidebar_flash: None,
+            recent_sessions: Vec::new(),
+            sidebar_focus: cx.focus_handle(),
+            sidebar_cursor: None,
+            sidebar_typeahead: None,
             sidebar_auto_scroll: gpui_component::scroll::AutoScroll::default(),
             ide_catalog: ide::IdeCatalog::default(),
             ide_popup_waiters: Vec::new(),
@@ -3285,6 +3328,7 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
+            settings_acp_commands_open: false,
             capabilities_view: None,
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
@@ -3749,7 +3793,7 @@ impl Workspace {
             agent_definition_id.as_deref(),
             cwd.as_deref(),
         ) {
-            self.remember_session_project(&RuntimeKey::Local, cwd.as_deref());
+            self.remember_session_project(&RuntimeKey::Local, cwd.as_deref(), cx);
         }
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
@@ -3866,7 +3910,11 @@ impl Workspace {
                 continue;
             }
             let runtime = crate::runtimes::Runtime::local();
-            self.remember_session_project(&RuntimeKey::Local, Some(record.cwd.as_str()));
+            self.remember_session_project(
+                &RuntimeKey::Local,
+                Some(record.cwd.as_str()),
+                cx,
+            );
             let (tx, rx) = smol::channel::bounded(1);
             let runtime_bg = runtime.clone();
             let cwd_bg = record.cwd.clone();
@@ -4031,7 +4079,7 @@ impl Render for Workspace {
         let shell_chrome = self.render_shared_right_chrome(
             self.chrome_left_guard(window),
             tool_span,
-            window.is_fullscreen(),
+            !workspace_frame::traffic_lights_visible(window),
             cx,
         );
         // 外壳分栏拖动要在窗口级听按下和松开：弹出菜单等元素会拿走焦点、停止事件
@@ -4080,11 +4128,11 @@ impl Render for Workspace {
             .font_family(settings::resolved_ui_font_family(
                 cx.global::<Appearance>(),
             ))
-            .drag_over::<ExternalPaths>(|style, _paths, _window, _cx| {
+            .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
                 style
-                    .bg(ui_theme::tint(ui_theme::blue(), 0x28))
+                    .bg(cx.theme().drop_target)
                     .border_2()
-                    .border_color(rgb(ui_theme::blue()))
+                    .border_color(cx.theme().drag_border)
             })
             .on_drop::<ExternalPaths>(cx.listener(
                 |this, paths: &ExternalPaths, _window, cx| {
@@ -4125,12 +4173,9 @@ impl Render for Workspace {
                 this.show_quit_confirm = true;
                 cx.notify();
             }))
-            // Cmd+, / 应用菜单「设置…」：跟齿轮图标共用同一个独立设置窗口。
+            // Cmd+, / 应用菜单「设置…」：跟侧栏「设置」同一个入口，见 `open_settings`。
             .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| {
-                // 不动 nonce：窗口已开着就保持用户当前所在页，只是把它提到前台；
-                // 但下次新开窗口得回到外观页，不能停在「检查更新…」跳过去的那页。
-                this.settings_section = settings::SettingsSection::appearance();
-                this.open_settings_window(cx);
+                this.open_settings(cx);
             }))
             // Cmd+↑ / Cmd+↓：上/下一个会话（按侧栏视觉顺序）。
             .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
@@ -4146,11 +4191,14 @@ impl Render for Workspace {
             if this.update_status.can_check() || this.update_status.can_retry_recovery() {
                 this.check_or_recover_update(false, cx);
             }
-            this.open_settings_section(settings::SettingsSection::maintenance_update(), cx);
+            this.open_settings_section(settings::SettingsSection::app_update(), cx);
         }));
-        // 应用菜单「反馈问题…」：跳内部飞书反馈群。
+        // 应用菜单「帮助」：反馈渠道和帮助文档，链接打包时可换（见 settings::FEEDBACK_URL）。
         frame.on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
                 cx.open_url(settings::FEEDBACK_URL);
+            }))
+            .on_action(cx.listener(|_this, _: &OpenDocs, _window, cx| {
+                cx.open_url(settings::DOCS_URL);
             }))
             // 文件内容视图右键菜单里的「发送选中内容到会话」，见 send_open_file_selection。
             .on_action(
@@ -4164,6 +4212,13 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ToggleToolPanel, window, cx| {
                 this.toggle_tool_panel(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
+                this.focus_sidebar(window, cx);
+            }))
+            // ⌘N：跟侧栏最顶的「新对话」同一个动作。
+            .on_action(cx.listener(|this, _: &NewConversation, window, cx| {
+                this.begin_new_conversation(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 if this.palette.is_some() {
@@ -4296,10 +4351,15 @@ impl Render for Workspace {
                         // 这一条浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
                         div()
                             // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
-                            // 隐藏红绿灯，这 92px 就全空了，按钮回到窗口左侧
+                            // 隐藏红绿灯、Windows 用系统标题栏不在客户区画红绿灯，
+                            // 这 92px 就全空了，按钮回到窗口左侧
                             // 18px 的统一视觉基准。纵向不再手算 top：由共用顶栏的
                             // flex 居中，UI 字号改变、按钮尺寸随 rem 缩放时也不会偏。
-                            .ml(px(if window.is_fullscreen() { 18. } else { 92. }))
+                            .ml(px(if workspace_frame::traffic_lights_visible(window) {
+                                92.
+                            } else {
+                                18.
+                            }))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 smelt_ui::Button::new("sidebar-toggle")
@@ -4447,15 +4507,11 @@ fn current_dir() -> Option<String> {
         .and_then(|p| p.to_str().map(String::from))
 }
 
-/// cwd → 侧栏项目分组显示名，统一取目录末段，不为特定 cwd 做额外分支。
+/// cwd → 侧栏项目分组显示名，统一取目录末段，不为特定 cwd 做额外分支。cwd 是运行时那台
+/// 机器上的路径，按它的系统切（`style`）。
 /// Workspace::project_groups（侧栏渲染）和拖拽排序（找会话/插入点归属的项目）共用。
-fn project_name_for_cwd(cwd: &str) -> String {
-    cwd.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("项目")
-        .to_string()
+fn project_name_for_cwd(style: PathStyle, cwd: &str) -> String {
+    style.file_name(cwd).unwrap_or("项目").to_string()
 }
 
 /// file:// URL → 本地路径（percent 解码，支持中文 / 空格目录名）。
@@ -4590,7 +4646,25 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
 
 // 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
 // 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
-gpui_kit_assets::icon_assets!(LucideExtras, [Puzzle, Server]);
+gpui_kit_assets::icon_assets!(
+    LucideExtras,
+    [
+        BellOff,
+        Clock,
+        Coffee,
+        Keyboard,
+        MessageSquare,
+        Pin,
+        Puzzle,
+        RefreshCw,
+        RotateCw,
+        Server,
+        SlidersHorizontal,
+        Webhook,
+        Workflow,
+        Wrench,
+    ]
+);
 
 struct SmeltAssets;
 
@@ -4694,6 +4768,7 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-up", PrevSession, Some("Workspace")),
         KeyBinding::new("cmd-down", NextSession, Some("Workspace")),
         KeyBinding::new("cmd-k", ToggleCommandPalette, Some("Workspace")),
+        KeyBinding::new("cmd-n", NewConversation, Some("Workspace")),
         KeyBinding::new("cmd-[", CyclePanePrev, Some("Workspace")),
         KeyBinding::new("cmd-]", CyclePaneNext, Some("Workspace")),
         KeyBinding::new("cmd-d", SplitBeside, Some("Workspace")),
@@ -4704,6 +4779,9 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f7", NextHunk, Some("GitChanges")),
         KeyBinding::new("shift-f7", PrevHunk, Some("GitChanges")),
         KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
+        // 设置窗口：Cmd+W（Windows / Linux 是 Ctrl+W）关窗。它是普通窗口，不是模态层，
+        // Esc 不关它，留给下拉框、弹出层和输入框。
+        KeyBinding::new("secondary-w", CloseSettingsWindow, Some("SettingsWindow")),
         // 文件树只在自己的宿主上挂 FileTree。树没挂载（文件页不可见、树收起、
         // 搜索框有内容）时这条 context 不在焦点路径上。
         KeyBinding::new("up", FileTreeMoveUp, Some("FileTree")),
@@ -4711,6 +4789,14 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("left", FileTreeMoveLeft, Some("FileTree")),
         KeyBinding::new("right", FileTreeMoveRight, Some("FileTree")),
         KeyBinding::new("enter", FileTreeActivate, Some("FileTree")),
+        // 侧栏键盘操作，见 `session_list::keyboard`。⌘⇧E 跟 VS Code「聚焦资源管理器」一样。
+        KeyBinding::new("cmd-shift-e", FocusSidebar, Some("Workspace")),
+        KeyBinding::new("up", SidebarUp, Some("Sidebar")),
+        KeyBinding::new("down", SidebarDown, Some("Sidebar")),
+        KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
+        KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
+        KeyBinding::new("enter", SidebarOpen, Some("Sidebar")),
+        KeyBinding::new("escape", SidebarExit, Some("Sidebar")),
         // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
         // Ctrl+W 删词。绑在 Input context，所有输入框（ACP composer 等）生效。
         KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),
@@ -4773,6 +4859,9 @@ fn main() {
             std::process::exit(75);
         }
     };
+    // Windows 安装程序靠它认出 Smelt 还开着，覆盖装和卸载前先请用户关掉。
+    #[cfg(windows)]
+    smelt_sys::mark_desktop_running();
     // GUI 启动失败时用户通常看不到终端输出；把原始 panic 先落到统一日志，
     // 尤其能保留 GPUI 清理阶段二次 panic 之前的第一条错误。
     smelt_sys::app_log::install_panic_hook("smelt");
@@ -4841,11 +4930,12 @@ fn main() {
             ])
             .expect("加载内嵌字体失败");
         // 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
-        // （跟齿轮图标一样开独立设置窗口，符合 mac 惯例——系统偏好设置一般都在这）。
+        // （跟侧栏「设置」一样开独立设置窗口，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
+        // 放「帮助」菜单。设置「关于」页也有这两项，没有菜单栏的平台从那里进。
         cx.bind_keys(app_key_bindings());
         cx.set_menus(vec![
             Menu::new("Smelt").items([
-                MenuItem::action(concat!("v", env!("CARGO_PKG_VERSION")), gpui::NoAction)
+                MenuItem::action(format!("v{}", smelt_version::VERSION), gpui::NoAction)
                     .disabled(true),
                 #[cfg(target_os = "macos")]
                 MenuItem::Separator,
@@ -4853,9 +4943,12 @@ fn main() {
                 MenuItem::action("检查更新…", CheckForUpdate),
                 MenuItem::Separator,
                 MenuItem::action("设置…", OpenSettings),
-                MenuItem::action("反馈问题…", ReportIssue),
                 MenuItem::Separator,
                 MenuItem::action("退出 Smelt", Quit),
+            ]),
+            Menu::new("帮助").items([
+                MenuItem::action("帮助文档", OpenDocs),
+                MenuItem::action("反馈问题", ReportIssue),
             ]),
         ]);
 

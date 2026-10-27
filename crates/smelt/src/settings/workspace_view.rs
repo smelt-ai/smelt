@@ -109,12 +109,14 @@ impl Workspace {
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
+            acp_commands_open: self.settings_acp_commands_open,
             capabilities_tab: self.nav.capabilities_tab(),
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             show_update_install_confirm: self.show_update_install_confirm,
             session_manager_open: self.session_manager_open,
-            resources: (self.settings_section == SettingsSection::MaintenanceResources)
+            resources: (self.settings_section == SettingsSection::Resources)
                 .then(|| self.resources_snapshot(cx)),
+            attention: self.settings_attention(cx),
         }
     }
 
@@ -132,6 +134,37 @@ impl Workspace {
         cx: &App,
     ) -> Div {
         render::render_capabilities_content(entity, snapshot, cx)
+    }
+
+    /// 设置里有没有要你处理的事，有的话落在哪一页：有新版本、后台服务旧了 → 系统；有机器
+    /// 要处理 → 远程。侧栏「设置」上的红点和设置侧栏那一页的红点都看它。
+    pub(crate) fn settings_attention(&self, cx: &App) -> Option<SettingsSection> {
+        #[cfg(target_os = "macos")]
+        if self.update_available() {
+            return Some(SettingsSection::app_update());
+        }
+        #[cfg(unix)]
+        if self.daemon_outdated == Some(true) {
+            return Some(SettingsSection::Maintenance);
+        }
+        crate::runtimes::any_runtime_needs_attention(cx).then_some(SettingsSection::Remote)
+    }
+
+    /// 打开设置窗口：⌘,、菜单栏「设置…」、侧栏「设置」都走这里。窗口已开着就只提到前面，
+    /// 不换页；新开时有要处理的事就停在那一页，没有就从外观开始。
+    pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.check_daemon_outdated(cx);
+        let open = cx
+            .try_global::<SettingsWindowHandle>()
+            .map(|handle| handle.0)
+            .is_some_and(|handle| crate::window_handle_is_open(&handle, cx));
+        if !open {
+            match self.settings_attention(cx) {
+                Some(section) => return self.open_settings_section(section, cx),
+                None => self.settings_section = SettingsSection::appearance(),
+            }
+        }
+        self.open_settings_window(cx);
     }
 
     /// 跳到指定设置子页并打开设置窗口。已打开时靠 nonce 强制切到目标子页。
@@ -185,19 +218,19 @@ impl Workspace {
     /// 快照，颜色选择器和配置输入框等状态仍挂在 Workspace；观察器负责同步两者。
     ///
     /// 必须用 `cx.defer` 推迟到当前这轮 `Workspace::update` 彻底返回之后再开窗：
-    /// 这里被点齿轮的 `cx.listener` 调用时，`Workspace` 这个 entity 正被 update
+    /// 这里被点侧栏「设置」的 `cx.listener` 调用时，`Workspace` 这个 entity 正被 update
     /// 占着；若同步 `cx.open_window`，新窗口首帧 `SettingsWindow::render` 里会
     /// 马上又对同一个 `Workspace` entity 调 `update`，两层嵌套 update 撞上 GPUI
     /// 的重入保护直接 panic 崩溃（"cannot update ... while it is already being
-    /// updated"）——这就是「点齿轮整个 app 崩溃」的真正原因。
+    /// updated"）——这就是「点设置整个 app 崩溃」的真正原因。
     pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
         // 已经开着、换到资源页时，采样循环要醒来看一眼；新开的窗口在下面开好之后再叫一次。
         self.wake_resource_monitor();
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         crate::runtime_events::probe_remotes(cx);
-        if self.settings_section == SettingsSection::CollaborationMachines {
-            // 延迟平时只在连接换路径时读；停在机器页时重读一次，看到的是现在的数。
+        if self.settings_section == SettingsSection::Remote {
+            // 延迟平时只在连接换路径时读；停在远程页时重读一次，看到的是现在的数。
             crate::runtimes::sample_links(cx);
         }
         self.ensure_pi_library_runtime(cx);

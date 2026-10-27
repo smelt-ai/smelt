@@ -14,6 +14,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # libc 在 iOS 上封顶 <0.2.190，原因和解除条件见 crates/smelt-mobile/Cargo.toml。
+    # 不忽略的话 dependabot 会连上限一起改高，iOS 又编不过（#121）。
+    ignore:
+      - dependency-name: libc
+        versions: [">=0.2.190"]
 
   - package-ecosystem: github-actions
     directory: /

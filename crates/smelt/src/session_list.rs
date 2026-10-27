@@ -55,9 +55,9 @@ const PROJECT_DISCLOSURE_ICON_SIZE: f32 = 15.;
 /// 项目行左内边距。加上分组外边距，文件夹图标跟侧栏入口图标、分组标题落在同一条左缘。
 const PROJECT_HEADER_PAD_X: f32 = 8.;
 /// 会话图标落在项目名正下方。
-const PROJECT_SESSION_INDENT: f32 = 18.;
+pub(crate) const PROJECT_SESSION_INDENT: f32 = 18.;
 /// 引导线对着文件夹图标的中线。
-const PROJECT_GUIDE_LEFT: f32 = 14.;
+pub(crate) const PROJECT_GUIDE_LEFT: f32 = 14.;
 const SESSION_AGENT_ICON_BOX_SIZE: f32 = 18.;
 const SESSION_AGENT_ICON_SIZE: f32 = 17.;
 pub(crate) const SESSION_GLOW_PERIOD: Duration = Duration::from_secs(2);
@@ -82,12 +82,13 @@ fn runtime_name_with_indicator(
     name: impl IntoElement,
     indicator: Option<crate::runtimes::RuntimeIndicator>,
 ) -> AnyElement {
+    // 机器名是分段标题，跟「项目」「对话」这些标题同一个样子：小号、中等字重、灰。
     let name = div()
         .min_w_0()
         .truncate()
-        .text_sm()
+        .text_xs()
         .font_medium()
-        .text_color(rgb(ui_theme::text_mid()))
+        .text_color(rgb(ui_theme::text_muted()))
         .child(name);
     let Some(indicator) = indicator else {
         return name.into_any_element();
@@ -105,8 +106,8 @@ fn runtime_name_with_indicator(
         .min_w_0()
         .gap_1p5()
         .items_center()
-        .child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(light)))
         .child(name)
+        .child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(light)))
         .when_some(indicator.label, |d, label| {
             d.child(
                 div()
@@ -131,16 +132,23 @@ fn runtime_name_with_indicator(
         .into_any_element()
 }
 
-/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器名字前一盏连接灯（绿：在线；
+/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器名字后一盏连接灯（绿：在线；
 /// 黄：慢、连接中、升级中；红：离线、版本不兼容），悬停名字看走哪条路、多慢、什么版本，
 /// 要人处理的状态名字后再写几个字；折起时组里有对话在跑或在等你，挂一个状态点，免得
 /// 「需要你」被折没了。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
-/// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。
+/// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。`grouping` 是侧栏的「筛选与
+/// 分组」按钮：分了机器段就没有「项目」标题了，它挂在第一段的标题上。
+///
+/// 跟「项目」「对话」标题同一套尺寸：28 高，文字和下面各行的图标落在同一条左缘。
+/// 折叠箭头跟在名字后面，折起时常显，展开时悬停才出现。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
     folded: bool,
     alert: Option<AgentStatus>,
+    grouping: Option<Div>,
+    // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
+    extras: Vec<AnyElement>,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let key = runtime.key().clone();
@@ -156,9 +164,11 @@ fn runtime_section_header(
     let context_workspace = workspace.clone();
     ListRow::new(ElementId::from(group.clone()))
         .group(group.clone())
+        .relative()
+        .children(extras)
         .mx_2()
         .mt_3()
-        .pl_1()
+        .pl(px(PROJECT_HEADER_PAD_X))
         .pr_1()
         .h(ui_theme::height::sm())
         .flex()
@@ -168,16 +178,22 @@ fn runtime_section_header(
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
-        .child(
-            Icon::new(if folded {
-                IconName::ChevronRight
-            } else {
-                IconName::ChevronDown
-            })
-            .size(px(12.))
-            .text_color(rgb(ui_theme::text_faint())),
-        )
         .child(runtime_name_with_indicator(&key, name, indicator))
+        .child(
+            div()
+                .flex_none()
+                .opacity(if folded { 1.0 } else { 0.0 })
+                .group_hover(group.clone(), |style| style.opacity(1.0))
+                .child(
+                    Icon::new(if folded {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .size(px(12.))
+                    .text_color(rgb(ui_theme::text_muted())),
+                ),
+        )
         .when_some(alert.filter(|_| folded), |d, status| {
             d.child(
                 div()
@@ -188,6 +204,11 @@ fn runtime_section_header(
             )
         })
         .child(div().flex_1())
+        .children(grouping.map(|grouping| {
+            grouping
+                .opacity(0.0)
+                .group_hover(group.clone(), |style| style.opacity(1.0))
+        }))
         .when(has_desktop, |d| {
             let runtime = runtime.clone();
             let workspace = workspace.clone();
@@ -273,7 +294,7 @@ fn remote_project_menu(
     .separator()
     .item(
         PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
-            .icon(IconName::Star)
+            .icon(Icon::new(gpui_kit_assets::IconName::Pin))
             .on_click(move |_ev, _window, cx| {
                 let project = pin_project.clone();
                 pin_workspace.update(cx, |ws, cx| ws.toggle_project_pinned(project, cx));
@@ -294,6 +315,111 @@ fn remote_project_menu(
     )
 }
 
+/// 底栏额度弹层的宽度：名字一栏、用量条、百分比放得下。
+const QUOTA_POPOVER_WIDTH: f32 = 268.;
+
+/// 底栏额度点开的列表：每家一行，名字、用量条、百分比。悬停看各窗口和重置时间，点哪家
+/// 刷新哪家（只刷这一家）。
+fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div {
+    div()
+        .w_full()
+        .p_1()
+        // Popover 本身是无样式宿主，内容自己铺实色底和描边，跟新建菜单一样。
+        .bg(ui_theme::glass_floating())
+        .border_1()
+        .border_color(ui_theme::card_stroke())
+        .rounded(px(8.))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(ui_theme::height::sm())
+                .px_2()
+                .flex()
+                .items_center()
+                .text_xs()
+                .font_medium()
+                .text_color(rgb(ui_theme::text_muted()))
+                .child("账户额度"),
+        )
+        .children(quotas.into_iter().map(|quota| {
+            let color = quota.color;
+            let target = quota.target;
+            let tip = if quota.refreshing {
+                format!("{} · 正在刷新…", quota.hint)
+            } else {
+                format!("{} · 点击刷新", quota.hint)
+            };
+            let workspace = workspace.clone();
+            ListRow::new(SharedString::from(format!("quota-{}", target.id())))
+                .h(px(30.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(6.))
+                .text_xs()
+                .child(
+                    acp_provider_icon(target.agent)
+                        .size(px(14.))
+                        .text_color(rgb(color)),
+                )
+                .child(
+                    div()
+                        .w(px(64.))
+                        .flex_shrink_0()
+                        .truncate()
+                        .text_color(rgb(ui_theme::text()))
+                        .child(target.label()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(4.))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(rgb(ui_theme::border_dim()))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative((quota.used / 100.0).clamp(0.0, 1.0) as f32))
+                                .rounded_full()
+                                .bg(rgb(color)),
+                        ),
+                )
+                // 手点刷新、还没回来时，百分比那一格换成转圈：真在等，等完就停。
+                .child(
+                    div()
+                        .w(px(36.))
+                        .flex_shrink_0()
+                        .flex()
+                        .justify_end()
+                        .font_family(crate::terminal_view::font_family())
+                        .text_color(rgb(color))
+                        .map(|cell| {
+                            if quota.refreshing {
+                                cell.child(smelt_ui::motion::ambient_spinner(
+                                    SharedString::from(format!("quota-refresh-{}", target.id())),
+                                    rgb(color).into(),
+                                    true,
+                                ))
+                            } else {
+                                cell.child(quota.text)
+                            }
+                        }),
+                )
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .on_click(move |_ev, _window, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.request_provider_quota_refresh(target);
+                        cx.notify();
+                    });
+                })
+        }))
+}
+
 fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
     if collapsed_or_empty {
         IconName::Folder
@@ -303,8 +429,15 @@ fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
 }
 
 mod drag;
+mod keyboard;
 mod machines;
 mod new_session;
+mod reveal;
+
+pub(crate) use keyboard::SidebarItem;
+
+pub(crate) use reveal::{SidebarReveal, attention_anchor, reveal_anchor};
+use reveal::{attention_checker, attention_pill};
 
 use drag::{
     ProjectDrag, SessionDrag, attach_project_drop_layers, attach_session_drop_layers,
@@ -316,9 +449,10 @@ pub(crate) mod row;
 use machines::machine_menu;
 use new_session::new_session_picker;
 use row::{
-    acp_provider_icon, effective_pane_updated_at, project_header_is_selected, provider_icon,
-    provider_quota_row, session_progress_bar, session_row_is_selected, session_row_status_label,
-    session_updated_at_text, status_text,
+    FooterQuota, acp_provider_icon, effective_pane_updated_at, focus_ring, group_disclosure,
+    inline_rename_input, new_row_flash, project_header_is_selected, provider_icon,
+    provider_quota_row, row_trailing_slot, session_progress_bar, session_row_is_selected,
+    session_row_status_label, session_updated_at_text, status_text,
 };
 
 /// 工具面板（文件树 / 变更 / 历史 / 技能 / 插件）绑定的上下文根。
@@ -350,6 +484,68 @@ pub(crate) fn tool_panel_context_root(
 }
 
 impl Workspace {
+    /// 侧栏要画的分组：各机器依次铺开，每段内按当前分组方式分组，按项目分组时置顶的在前。
+    /// render 和键盘导航共用这一份，两边的顺序才对得上。`each_project` 在分组前看一眼每台
+    /// 机器的项目分组（render 要记下每个会话来自哪个项目）。
+    pub(crate) fn sidebar_display_groups(
+        &self,
+        statuses: &[AgentStatus],
+        last_updated_at: &[u64],
+        cx: &App,
+        mut each_project: impl FnMut(&RuntimeKey, &[crate::ProjectGroup]),
+    ) -> Vec<crate::ProjectGroup> {
+        let mut groups = Vec::new();
+        for key in self.space_keys() {
+            let Some(space) = self.space(&key) else {
+                continue;
+            };
+            let project_groups = self.project_groups(&key, cx);
+            each_project(&key, &project_groups);
+            let members = self.space_members(&key, cx);
+            let mut space_groups = crate::sidebar_groups(
+                &key,
+                self.sidebar_grouping,
+                project_groups,
+                statuses,
+                last_updated_at,
+                &members,
+            );
+            if self.sidebar_grouping == SidebarGrouping::Project {
+                space_groups = crate::sidebar_order::pinned_projects_first(
+                    space_groups,
+                    &space.pinned_projects,
+                    |group| group.root.as_str(),
+                );
+            }
+            groups.extend(space_groups);
+        }
+        groups
+    }
+
+    /// 让会话在侧栏里看得见：它所在的机器段、项目折着就展开，下一帧滚到它那一行。
+    /// 切会话（点行、⌘↑↓、点通知）和新建都走这里：当前会话不能藏在折起来的组里。
+    pub(crate) fn reveal_session_in_sidebar(&mut self, ix: usize, cx: &App) {
+        let Some(ui_id) = self.sessions.get(ix).map(|session| session.ui_id) else {
+            return;
+        };
+        if let Some(group) = self
+            .all_project_groups(cx)
+            .into_iter()
+            .find(|group| group.sessions.contains(&ix))
+        {
+            let folded = self.runtime_folded(&group.runtime);
+            if let Some(space) = self.space_mut(&group.runtime) {
+                if folded {
+                    space.folded = Some(false);
+                }
+                space
+                    .collapsed_projects
+                    .retain(|root| !crate::sidebar_order::same_project_root(root, &group.root));
+            }
+        }
+        self.sidebar_reveal.request(ui_id);
+    }
+
     /// 当前活动的项目：优先用用户点选的 `active_project`，该项目已被关掉则回退到活动
     /// 会话所在组，再回退第一组，都在选中项目（没有就是活动会话）所在的运行时里找。
     ///
@@ -429,8 +625,13 @@ impl Workspace {
         cx: &App,
         statuses: &[AgentStatus],
         animate_running: bool,
+        // 键盘焦点在侧栏里时，焦点环落在哪一行（`SidebarItem::key`）。
+        focused_key: Option<u64>,
     ) -> Div {
         debug_assert_eq!(statuses.len(), self.sessions.len());
+        // 上一帧量出的视口外「需要你」，这一帧画提示用。
+        let offscreen = self.sidebar_reveal.offscreen();
+        let reveal_target = self.sidebar_reveal.target();
         let active = self.active_session;
         // 注：项目实体化后允许关到一个会话都不剩（侧栏还有项目行撑着，舞台落到引导页），
         // 所以关闭键不再有「最后一个不许关」那道门槛，全都常显。
@@ -451,44 +652,32 @@ impl Workspace {
         // 非项目分组会拿掉项目标题，因此把每个会话所属项目的标签摊到行内展示，
         // 否则同名会话按状态混在一起后完全看不出来自哪个项目。
         let mut session_projects = vec![None; self.sessions.len()];
-        // 各运行时依次铺开，每段内按当前分组方式分组。
-        let mut groups = Vec::new();
-        for key in self.space_keys() {
-            let Some(space) = self.space(&key) else {
-                continue;
-            };
-            let project_groups = self.project_groups(&key, cx);
-            for group in &project_groups {
-                // 仓库信息目前只有本机项目有。
-                let branch = self
-                    .repo_info
-                    .get(group.root.as_str())
-                    .filter(|_| key == RuntimeKey::Local)
-                    .and_then(|(_, info)| info.as_ref())
-                    .map(|info| info.branch.clone());
-                for &ix in &group.sessions {
-                    session_projects[ix] = Some((group.label.clone(), branch.clone()));
+        let groups =
+            self.sidebar_display_groups(statuses, &last_updated_at, cx, |key, project_groups| {
+                for group in project_groups {
+                    // 仓库信息目前只有本机项目有。
+                    let branch = self
+                        .repo_info
+                        .get(group.root.as_str())
+                        .filter(|_| *key == RuntimeKey::Local)
+                        .and_then(|(_, info)| info.as_ref())
+                        .map(|info| info.branch.clone());
+                    for &ix in &group.sessions {
+                        session_projects[ix] = Some((group.label.clone(), branch.clone()));
+                    }
                 }
-            }
-            let members = self.space_members(&key, cx);
-            let mut space_groups = crate::sidebar_groups(
-                &key,
-                self.sidebar_grouping,
-                project_groups,
-                statuses,
-                &last_updated_at,
-                &members,
-            );
-            if self.sidebar_grouping == SidebarGrouping::Project {
-                space_groups = crate::sidebar_order::pinned_projects_first(
-                    space_groups,
-                    &space.pinned_projects,
-                    |group| group.root.as_str(),
-                );
-            }
-            groups.extend(space_groups);
-        }
+            });
         let session_route_active = self.active_tab().is_session();
+        // 正在就地改名的那一行：标题那一格换成输入框。
+        let rename_input = self.rename_input.clone();
+        let renaming_session = match &self.rename_target {
+            Some(RenameTarget::Session(ix)) => Some(*ix),
+            _ => None,
+        };
+        let renaming_pane = match &self.rename_target {
+            Some(RenameTarget::Pane(view)) => Some(view.entity_id()),
+            _ => None,
+        };
 
         // ---- 头部：工作区标题 + 分组设置 ----
         // 新建入口全撤：建会话一律走「项目行 hover 出的 +」（落到那个项目）；
@@ -514,7 +703,7 @@ impl Workspace {
                 Button::new("session-grouping")
                     .quiet()
                     .compact()
-                    .icon(IconName::Settings2)
+                    .icon(Icon::new(gpui_kit_assets::IconName::SlidersHorizontal))
                     .icon_action("筛选与分组")
                     .dropdown_menu(move |menu, _window, _cx| {
                         let menu = menu.item(PopupMenuItem::label("分组依据"));
@@ -566,56 +755,67 @@ impl Workspace {
                     }),
             );
 
-        // 「项目」分组标题跟「最近对话」一起放进滚动区：两段列表共用一个滚动条，
-        // 对话再多也只是往下推，不会把项目列表压没。
+        // 挂了远程机器就按机器分段，机器名就是分段标题，不再叠一层「项目」。
+        let runtime_sections = self.spaces.iter().any(|space| !space.runtime.is_local());
+        // 「筛选与分组」只有一个：没分段时在「项目」标题上，分段时挂在第一段机器标题上。
+        let mut grouping_slot = Some(grouping_btn);
+
+        // 「项目」分组标题跟「对话」分组一起放进滚动区：两段列表共用一个滚动条。
         let e_open = this.clone();
-        let project_section_header = div()
-            .id("project-section-header")
-            .group(PROJ_SECTION_GROUP)
-            .flex_shrink_0()
-            .child(crate::workspace_frame::with_window_drag(
-                div()
-                    .px_3()
-                    .pt_2()
-                    .pb_1()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .px_1()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .font_medium()
-                            .text_color(rgb(ui_theme::text_muted()))
-                            .child("项目"),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .opacity(0.0)
-                            .group_hover(PROJ_SECTION_GROUP, |s| s.opacity(1.0))
-                            .child(grouping_btn)
-                            .child(
-                                div()
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .child(
-                                        Button::new("open-project")
-                                            .quiet()
-                                            .compact()
-                                            .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
-                                            .icon_action("添加项目")
-                                            .on_click(move |_ev, _window, cx| {
-                                                e_open.update(cx, |ws, cx| ws.open_project(cx));
-                                            }),
-                                    ),
-                            ),
-                    ),
-            ));
+        let project_section_header = (!runtime_sections).then(|| {
+            let grouping_btn = grouping_slot.take();
+            div()
+                .id("project-section-header")
+                .group(PROJ_SECTION_GROUP)
+                .flex_shrink_0()
+                .child(crate::workspace_frame::with_window_drag(
+                    div()
+                        .mx_2()
+                        .mt_3()
+                        .pl(px(PROJECT_HEADER_PAD_X))
+                        .pr_1()
+                        .h(ui_theme::height::sm())
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(rgb(ui_theme::text_muted()))
+                                .child("项目"),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .opacity(0.0)
+                                .group_hover(PROJ_SECTION_GROUP, |s| s.opacity(1.0))
+                                .children(grouping_btn)
+                                .child(
+                                    div()
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .child(
+                                            Button::new("open-project")
+                                                .quiet()
+                                                .compact()
+                                                .icon(
+                                                    Icon::empty()
+                                                        .path("smelt-icons/folder-plus.svg"),
+                                                )
+                                                .icon_action("添加项目")
+                                                .on_click(move |_ev, _window, cx| {
+                                                    e_open.update(cx, |ws, cx| ws.open_project(cx));
+                                                }),
+                                        ),
+                                ),
+                        ),
+                ))
+        });
 
         let e_scroll_sess = this.clone();
         let e_scroll_proj = this.clone();
@@ -639,8 +839,73 @@ impl Workspace {
                     ws.update_sidebar_drag_scroll(ev.event.position, cx);
                 });
             })
-            .child(self.render_product_conversation_nav(this.clone(), statuses, cx))
-            .child(project_section_header);
+            // 键盘操作，见 `keyboard`。焦点句柄挂在零大小的子元素上，点行不会把焦点从终端抢过来。
+            .key_context("Sidebar")
+            .on_action({
+                let this = this.clone();
+                move |_: &crate::SidebarUp, _window, cx| {
+                    this.update(cx, |ws, cx| ws.sidebar_move(-1, cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                move |_: &crate::SidebarDown, _window, cx| {
+                    this.update(cx, |ws, cx| ws.sidebar_move(1, cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                move |_: &crate::SidebarCollapse, _window, cx| {
+                    this.update(cx, |ws, cx| ws.sidebar_collapse(cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                move |_: &crate::SidebarExpand, _window, cx| {
+                    this.update(cx, |ws, cx| ws.sidebar_expand(cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                move |_: &crate::SidebarOpen, window, cx| {
+                    this.update(cx, |ws, cx| ws.sidebar_open_cursor(window, cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                move |_: &crate::SidebarExit, window, cx| {
+                    this.update(cx, |ws, cx| ws.sidebar_exit(window, cx));
+                }
+            })
+            // 打字跳转。只在焦点就在侧栏上时：行内改名的输入框也在这里面，打的字不能被截走。
+            .on_key_down({
+                let this = this.clone();
+                let focus = self.sidebar_focus.clone();
+                move |event: &KeyDownEvent, window, cx| {
+                    let modifiers = &event.keystroke.modifiers;
+                    if !focus.is_focused(window)
+                        || modifiers.control
+                        || modifiers.platform
+                        || modifiers.alt
+                        || modifiers.function
+                    {
+                        return;
+                    }
+                    let Some(text) = event
+                        .keystroke
+                        .key_char
+                        .clone()
+                        .filter(|text| !text.trim().is_empty())
+                    else {
+                        return;
+                    };
+                    cx.stop_propagation();
+                    this.update(cx, |ws, cx| ws.sidebar_typeahead(&text, cx));
+                }
+            })
+            .child(div().track_focus(&self.sidebar_focus).size_0())
+            .child(self.render_product_conversation_nav(this.clone(), statuses, focused_key, cx))
+            .children(project_section_header);
 
         // 拖拽排序生效后，项目组和会话行都从旧位置滑到新位置。
         let reorder_generation = self.sidebar_reorder_generation;
@@ -652,14 +917,9 @@ impl Workspace {
                 .map(|(_, top)| *top)
         };
         let mut hidden_empty = 0usize;
-        let mut visible_ix = 0usize;
         // ---- 运行时标题行：挂了远程运行时才分段 ----
         // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
         // 「打开项目」就在上面。
-        let runtime_sections = self
-            .spaces
-            .iter()
-            .any(|space| !space.runtime.is_local());
         // 折起的机器分段挂上组里最要紧的状态：在跑、在等你，折起来也看得见。
         let mut runtime_alerts: std::collections::HashMap<RuntimeKey, AgentStatus> =
             Default::default();
@@ -679,8 +939,24 @@ impl Workspace {
                     .or_insert(status);
             }
         }
-        let header_for = |runtime: crate::runtimes::Runtime, cx: &App| {
+        let header_for = |runtime: crate::runtimes::Runtime, grouping: Option<Div>, cx: &App| {
             let key = runtime.key().clone();
+            let item_key = SidebarItem::Runtime(key.clone()).key();
+            let mut extras = Vec::new();
+            if focused_key == Some(item_key) {
+                extras.push(focus_ring().into_any_element());
+            }
+            if reveal_target == Some(item_key) {
+                extras.push(
+                    reveal_anchor(
+                        self.sidebar_reveal.clone(),
+                        item_key,
+                        self.sidebar_scroll.clone(),
+                        this.clone(),
+                    )
+                    .into_any_element(),
+                );
+            }
             runtime_section_header(
                 runtime,
                 this.clone(),
@@ -689,6 +965,8 @@ impl Workspace {
                     .get(&key)
                     .copied()
                     .filter(|status| *status != AgentStatus::Idle),
+                grouping,
+                extras,
                 cx,
             )
         };
@@ -711,7 +989,7 @@ impl Workspace {
             {
                 while let Some(runtime) = headers_left.pop_front() {
                     let reached = runtime.key() == &group.runtime;
-                    rows = rows.child(header_for(runtime, cx));
+                    rows = rows.child(header_for(runtime, grouping_slot.take(), cx));
                     if reached {
                         break;
                     }
@@ -722,6 +1000,11 @@ impl Workspace {
                 continue;
             }
             let is_project_group = grouping == SidebarGrouping::Project;
+            let group_key = SidebarItem::Group(ProjectRef {
+                runtime: group.runtime.clone(),
+                root: group.root.clone(),
+            })
+            .key();
             // ---- 项目分组标题行 ----
             // 分组身份一律用运行时加 root 路径（末段同名的两个目录是两个项目，见
             // ProjectGroup）；name 只是显示用的。
@@ -803,10 +1086,8 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .when(is_drag_source_project, |d| d.opacity(0.4))
-                .when(grouping != SidebarGrouping::None, |d| {
-                    d.mx_2().when(visible_ix > 0, |d| d.mt_2())
-                });
-            visible_ix += 1;
+                // 项目行之间不留缝：跟导航、会话同一个行高，一列连续往下排。
+                .when(grouping != SidebarGrouping::None, |d| d.mx_2());
             if grouping != SidebarGrouping::None {
                 group_rows = group_rows.child(
                     ListRow::new(project_element_id("proj-group", &project))
@@ -817,25 +1098,26 @@ impl Workspace {
                         .items_center()
                         .gap_1p5()
                         .px(px(PROJECT_HEADER_PAD_X))
-                        .py(px(4.))
+                        .h(ui_theme::height::md())
                         .rounded(ui_theme::row_radius())
                         .group(PROJ_HEADER_GROUP)
-                        .child(
-                            div()
-                                .id(project_element_id("proj-disclosure", &project))
-                                .w(px(14.))
-                                .flex_shrink_0()
-                                .flex()
-                                .justify_center()
-                                .text_color(rgb(ui_theme::text_muted()))
-                                .group_hover(PROJ_HEADER_GROUP, |s| {
-                                    s.text_color(rgb(ui_theme::text_bright()))
-                                })
-                                .child(
-                                    Icon::new(project_disclosure_icon(collapsed || empty_group))
-                                        .size(px(PROJECT_DISCLOSURE_ICON_SIZE)),
-                                ),
-                        )
+                        .when(focused_key == Some(group_key), |row| row.child(focus_ring()))
+                        .when(reveal_target == Some(group_key), |row| {
+                            row.child(reveal_anchor(
+                                self.sidebar_reveal.clone(),
+                                group_key,
+                                self.sidebar_scroll.clone(),
+                                this.clone(),
+                            ))
+                        })
+                        .child(group_disclosure(
+                            project_element_id("proj-disclosure", &project),
+                            PROJ_HEADER_GROUP,
+                            Icon::new(project_disclosure_icon(collapsed || empty_group))
+                                .size(px(PROJECT_DISCLOSURE_ICON_SIZE)),
+                            collapsed,
+                            !empty_group,
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -847,14 +1129,19 @@ impl Workspace {
                                 .gap_1p5()
                                 .overflow_hidden()
                                 .child(
-                                    // 项目名与会话同为 text_sm，再用 semibold 区分结构层级；
-                                    // 空项目降一档到 muted，不和活跃项目抢注意力。不降到 faint：
-                                    // 它仍是能点、能新建会话的条目，faint 读起来像禁用。
+                                    // 项目名与会话同为 text_sm、常规字重：层级靠文件夹图标和
+                                    // 会话的缩进表达，不靠加粗。活动项目提亮；空项目降一档到
+                                    // muted，不降到 faint：它仍是能点、能新建会话的条目，faint
+                                    // 读起来像禁用。
                                     div()
                                         .flex_shrink_0()
                                         .text_sm()
-                                        .font_semibold()
-                                        .text_color(rgb(if is_active_group {
+                                        // 项目行自己被选中（它的会话没露出来）时跟会话行一样：
+                                        // 选中字色加中等字重。
+                                        .when(project_header_selected, |name| name.font_medium())
+                                        .text_color(rgb(if project_header_selected {
+                                            ui_theme::text_selected()
+                                        } else if is_active_group {
                                             ui_theme::text_bright()
                                         } else if crate::sidebar_order::project_header_is_dimmed(
                                             is_active_group,
@@ -872,7 +1159,7 @@ impl Workspace {
                                             .id(project_element_id("proj-pin", &project))
                                             .flex_shrink_0()
                                             .text_color(rgb(ui_theme::text_faint()))
-                                            .child(Icon::new(IconName::Star).size(px(11.))),
+                                            .child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(11.))),
                                     )
                                 })
                                 .when(agg != AgentStatus::Idle, |row| {
@@ -908,7 +1195,8 @@ impl Workspace {
                             // 数字和「+」不是两套右对齐元素，而是同一个方形槽里的
                             // 两个满铺图层；hover 只切透明度，因此字形中心不会横跳。
                             // 槽仍是 28，计数和按钮共用一个中心。「+」本身是图标档 20。
-                            // 数字只在折叠或空项目时有用：展开后下面的会话一眼就数得出来。
+                            // 数字只在折起来、里面又有会话时有用：展开后下面的会话一眼就
+                            // 数得出来；空项目挂个「0」只是在说没有东西。
                             div()
                                 .relative()
                                 .flex_shrink_0()
@@ -923,12 +1211,11 @@ impl Workspace {
                                         .items_center()
                                         .justify_center()
                                         .text_xs()
-                                        .text_color(rgb(ui_theme::text_faint()))
-                                        .when(empty_group, |d| d.opacity(0.55))
+                                        .text_color(rgb(ui_theme::text_muted()))
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
-                                        .when(collapsed || empty_group, |d| {
+                                        .when(collapsed && !empty_group, |d| {
                                             d.child(ixs.len().to_string())
                                         }),
                                 )
@@ -1086,7 +1373,7 @@ impl Workspace {
                                     .separator()
                                     .item(
                                         PopupMenuItem::new(sidebar_pin_label)
-                                            .icon(IconName::Star)
+                                            .icon(Icon::new(gpui_kit_assets::IconName::Pin))
                                             .on_click(move |_ev, _window, cx| {
                                                 let project = sidebar_pin_project.clone();
                                                 e_sidebar_pin.update(cx, |ws, cx| {
@@ -1157,7 +1444,7 @@ impl Workspace {
             }
 
             // ---- 组内会话行 ----
-            // 会话保持两行信息和 22px 缩进；项目模式再从 chevron 下方落一根 hairline，
+            // 会话一行，缩进一档；项目模式再从文件夹图标下方落一根 hairline，
             // 它位于会话卡片左侧，不会和选中底色叠在一起。
             let mut group_body = div()
                 .relative()
@@ -1335,48 +1622,49 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .py(px(6.))
+                    .h(ui_theme::height::md())
                     .rounded(ui_theme::row_radius())
                     .when(is_drag_source_session, |d| d.opacity(0.4))
                     .tooltip(move |window, cx| {
                         gpui_component::tooltip::Tooltip::new(row_tooltip.clone()).build(window, cx)
                     })
+                    .when(self.sidebar_flash == Some(ui_id), |row| {
+                        row.child(new_row_flash(("sidebar-new-row", ui_id)))
+                    })
                     // 选中靠整张会话卡亮起来，不再靠左侧白条。悬停底由 ListRow 铺。
                     // Grok 对话列表：小图标，不套色块。状态只给图标上色。
                     .child(session_icon)
+                    // 一行：会话名占满，最近活动时间在行尾那一格里。改名时这一格换成输入框。
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            // 会话名是侧栏主体（常规字重、正文色）；项目标题则用同字号
-                            // semibold 表达上一级结构，不靠继续放大字号争夺注意力。
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .line_height(px(16.))
-                                    .text_sm()
-                                    .text_color(rgb(if is_active {
-                                        ui_theme::text_bright()
+                        match rename_input.as_ref().filter(|_| renaming_session == Some(ix)) {
+                            Some(input) => {
+                                inline_rename_input(input, this.clone()).into_any_element()
+                            }
+                            // 选中照组件库侧栏：选中底、选中字色、中等字重。没选中的标题
+                            // 压到弱字，悬停才提亮：选中底和悬停底在不少深色主题里是相近
+                            // 的两档灰，光靠底色分不出哪行是选中、哪行只是鼠标停着。
+                            None => div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .map(|title| {
+                                    if is_active {
+                                        title
+                                            .font_medium()
+                                            .text_color(rgb(ui_theme::text_selected()))
                                     } else {
-                                        ui_theme::text()
-                                    }))
-                                    .truncate()
-                                    .child(title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .line_height(px(14.))
-                                    .text_xs()
-                                    .text_color(rgb(ui_theme::text_faint()))
-                                    .truncate()
-                                    .child(updated_text),
-                            ),
+                                        title.text_color(rgb(ui_theme::text_muted())).group_hover(
+                                            SESSION_ROW_GROUP,
+                                            |style| style.text_color(rgb(ui_theme::text())),
+                                        )
+                                    }
+                                })
+                                .truncate()
+                                .child(title.clone())
+                                .into_any_element(),
+                        },
                     )
-                    // 分屏数继续用行尾小角标；第二行固定留给跨会话可比较的时间。
+                    // 分屏数用行尾小角标，跟在时间前面。
                     .children(subtitle.as_ref().map(|s| {
                         div()
                             .flex_shrink_0()
@@ -1403,33 +1691,37 @@ impl Workspace {
                                     .child(name)
                             }))
                     }))
-                    .children(progress.map(session_progress_bar))
-                    // 只要人管才写字，不加色胶囊。
-                    .children(status_label.map(|label| {
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(ui_theme::session_dot_color(status))
-                            .child(label)
-                    }))
-                    .child(
-                        // 关闭占着行尾。整行 hover 才显出来，用透明度而不是不渲染，
-                        // 标题截断才不会跳。悬停字色走主题 danger。
+                    .children(progress.and_then(|progress| session_progress_bar(ui_id, progress)))
+                    .when(reveal_target == Some(ui_id), |row| {
+                        row.child(reveal_anchor(
+                            self.sidebar_reveal.clone(),
+                            ui_id,
+                            self.sidebar_scroll.clone(),
+                            this.clone(),
+                        ))
+                    })
+                    .when(status == AgentStatus::NeedsYou, |row| {
+                        row.child(attention_anchor(self.sidebar_reveal.clone(), ui_id))
+                    })
+                    .when(focused_key == Some(ui_id), |row| row.child(focus_ring()))
+                    // 行尾一格：要人管时写状态（不加色胶囊），否则写时间；悬停换成关闭。
+                    .child(row_trailing_slot(
+                        SESSION_ROW_GROUP,
+                        Some(match status_label {
+                            Some(label) => (label.into(), ui_theme::session_dot_color(status).into()),
+                            None => (updated_text.into(), rgb(ui_theme::text_muted()).into()),
+                        }),
                         Button::new(("close-session", ui_id))
                             .dismiss()
-                            .flex_shrink_0()
                             .icon(IconName::Close)
                             .icon_action("关闭")
-                            .opacity(0.0)
-                            .group_hover(SESSION_ROW_GROUP, |s| s.opacity(1.0))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_ev, window, cx| {
                                 cx.stop_propagation();
                                 e_close.update(cx, |ws, cx| {
                                     ws.request_close_session(ix, window, cx)
                                 });
                             }),
-                    )
+                    ))
                     .when(can_drag, |row| {
                         with_session_drag(
                             row,
@@ -1446,8 +1738,15 @@ impl Workspace {
                             this.clone(),
                         )
                     })
-                    .on_click(move |_ev, window, cx| {
-                        e_act.update(cx, |ws, cx| ws.activate(ix, window, cx));
+                    // 双击改名：第一下已经切过去了，第二下就地改名。
+                    .on_click(move |ev, window, cx| {
+                        e_act.update(cx, |ws, cx| {
+                            if ev.click_count() >= 2 {
+                                ws.start_rename(RenameTarget::Session(ix), window, cx);
+                            } else {
+                                ws.activate(ix, window, cx);
+                            }
+                        });
                     })
                     .context_menu(move |menu, _window, _cx| {
                         let e_rename = e_rename.clone();
@@ -1478,7 +1777,7 @@ impl Workspace {
                         if is_acp {
                             menu = menu.item(
                                 PopupMenuItem::new("强制重启")
-                                    .icon(IconName::Redo)
+                                    .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RotateCw))
                                     .on_click(move |_ev, _window, cx| {
                                         e_restart.update(cx, |ws, cx| {
                                             ws.force_restart_acp_session(sess_ix, cx)
@@ -1548,6 +1847,7 @@ impl Workspace {
                         let close_pane = view.clone();
                         let copy_id_source = crate::CopySessionIdSource::Terminal(view.clone());
                         let pane_entity_id = view.entity_id();
+                        let pane_key = SidebarItem::Pane(ui_id, pane_entity_id).key();
                         let pane_icon = if animate_running && p_status == AgentStatus::Running {
                             ambient_animation(
                                 ("pane-provider-glow", pane_entity_id),
@@ -1596,71 +1896,82 @@ impl Workspace {
                         };
                         pane_rows = pane_rows.child(
                             ListRow::new(("sess-pane-row", pane_entity_id))
+                                .group(SESSION_ROW_GROUP)
                                 .selected(is_current_view)
                                 .relative()
                                 .flex()
                                 .items_center()
                                 .gap_2()
                                 .px_2()
-                                .py(px(6.))
+                                .h(ui_theme::height::md())
                                 .rounded(ui_theme::row_radius())
                                 .when(is_drag_source_session, |d| d.opacity(0.4))
+                                .when(p_status == AgentStatus::NeedsYou, |row| {
+                                    row.child(attention_anchor(self.sidebar_reveal.clone(), ui_id))
+                                })
+                                .when(focused_key == Some(pane_key), |row| {
+                                    row.child(focus_ring())
+                                })
+                                .when(reveal_target == Some(pane_key), |row| {
+                                    row.child(reveal_anchor(
+                                        self.sidebar_reveal.clone(),
+                                        pane_key,
+                                        self.sidebar_scroll.clone(),
+                                        this.clone(),
+                                    ))
+                                })
                                 .child(pane_icon)
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(1.))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .line_height(px(16.))
-                                                .text_sm()
-                                                // 当前 pane 提亮，其余用中灰——和会话行选中态同口径。
-                                                .text_color(rgb(if is_current_view {
-                                                    ui_theme::text_bright()
+                                    match rename_input
+                                        .as_ref()
+                                        .filter(|_| renaming_pane == Some(pane_entity_id))
+                                    {
+                                        Some(input) => inline_rename_input(input, this.clone())
+                                            .into_any_element(),
+                                        None => div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_sm()
+                                            // 当前 pane 跟会话行同口径：选中亮，其余弱字、
+                                            // 悬停提亮。
+                                            .map(|title| {
+                                                if is_current_view {
+                                                    title.font_medium().text_color(rgb(
+                                                        ui_theme::text_selected(),
+                                                    ))
                                                 } else {
-                                                    ui_theme::text_mid()
-                                                }))
-                                                .truncate()
-                                                .child(p_title),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .line_height(px(14.))
-                                                .text_xs()
-                                                .text_color(rgb(ui_theme::text_faint()))
-                                                .truncate()
-                                                .child(pane_updated_text),
-                                        ),
+                                                    title
+                                                        .text_color(rgb(ui_theme::text_muted()))
+                                                        .group_hover(SESSION_ROW_GROUP, |style| {
+                                                            style.text_color(rgb(ui_theme::text()))
+                                                        })
+                                                }
+                                            })
+                                            .truncate()
+                                            .child(p_title)
+                                            .into_any_element(),
+                                    },
                                 )
                                 // 每个 pane 自己的关闭键：只关这一个 pane，剩下的照常活着。
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .child(
-                                            Button::new(("close-pane", pane_entity_id))
-                                                .quiet()
-                                                .icon_size()
-                                                .icon(IconName::Close)
-                                                .accessibility_label("关闭分栏")
-                                                .on_click(move |_ev, window, cx| {
-                                                    cx.stop_propagation();
-                                                    let pane = close_pane.clone();
-                                                    e_pane_close.update(cx, |ws, cx| {
-                                                        ws.request_close_session_pane(
-                                                            ix, pane, window, cx,
-                                                        )
-                                                    });
-                                                }),
-                                        ),
-                                )
+                                // 跟会话行一样跟时间共用行尾那一格，悬停才换出来。
+                                .child(row_trailing_slot(
+                                    SESSION_ROW_GROUP,
+                                    Some((
+                                        pane_updated_text.into(),
+                                        rgb(ui_theme::text_muted()).into(),
+                                    )),
+                                    Button::new(("close-pane", pane_entity_id))
+                                        .dismiss()
+                                        .icon(IconName::Close)
+                                        .accessibility_label("关闭分栏")
+                                        .on_click(move |_ev, window, cx| {
+                                            cx.stop_propagation();
+                                            let pane = close_pane.clone();
+                                            e_pane_close.update(cx, |ws, cx| {
+                                                ws.request_close_session_pane(ix, pane, window, cx)
+                                            });
+                                        }),
+                                ))
                                 .when(can_drag, |row| {
                                     with_session_drag(
                                         row,
@@ -1677,10 +1988,14 @@ impl Workspace {
                                         this.clone(),
                                     )
                                 })
-                                .on_click(move |_ev, window, cx| {
+                                .on_click(move |ev, window, cx| {
                                     let pane = pane.clone();
                                     e_pane_act.update(cx, |ws, cx| {
-                                        ws.activate_session_pane(ix, pane, window, cx)
+                                        if ev.click_count() >= 2 {
+                                            ws.start_rename(RenameTarget::Pane(pane), window, cx);
+                                        } else {
+                                            ws.activate_session_pane(ix, pane, window, cx);
+                                        }
                                     });
                                 })
                                 .context_menu(move |menu, _window, _cx| {
@@ -1734,7 +2049,18 @@ impl Workspace {
                     let pane_group = div()
                         .id(("sess-pane-group", ui_id))
                         .relative()
+                        .when(self.sidebar_flash == Some(ui_id), |group| {
+                            group.child(new_row_flash(("sidebar-new-row", ui_id)))
+                        })
                         .child(pane_rows)
+                        .when(reveal_target == Some(ui_id), |group| {
+                            group.child(reveal_anchor(
+                                self.sidebar_reveal.clone(),
+                                ui_id,
+                                self.sidebar_scroll.clone(),
+                                this.clone(),
+                            ))
+                        })
                         // 成组的唯一标记：贴左缘一条圆角竖线，把这几个 pane 圈在一起，
                         // 不挤占内容宽度（pane 行仍与普通会话行左对齐、同字号）。括线放在
                         // pane_rows 后绘制，确保 hover / 选中背景不会把分组关系盖掉。
@@ -1775,7 +2101,7 @@ impl Workspace {
         }
 
         for runtime in headers_left {
-            rows = rows.child(header_for(runtime, cx));
+            rows = rows.child(header_for(runtime, grouping_slot.take(), cx));
         }
 
         if hidden_empty > 0 {
@@ -1802,220 +2128,138 @@ impl Workspace {
         }
 
         // ---- 底部操作条：设置 ----
-        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。机器和资源占用
-        // 都在设置里，下拉菜单给直达入口；有机器要处理时也挂在设置的提示点上。
+        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。「设置」点一下直接
+        // 开设置窗口；有要处理的事（新版本、后台服务旧了、机器要处理）时挂红点，打开就停在那一页。
         let e_settings = this.clone();
-        let settings_needs_attention = {
-            #[cfg(target_os = "macos")]
-            {
-                self.update_available() || self.daemon_outdated == Some(true)
-            }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            {
-                self.daemon_outdated == Some(true)
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        } || crate::runtimes::any_runtime_needs_attention(cx);
+        let settings_needs_attention = self.settings_attention(cx).is_some();
 
-        // ---- 底部额度条：provider 账户额度（Codex / Claude / Copilot / Grok / Cursor）----
-        // 从舞台头栏迁到这里（底部操作条上方）。只显示「检测到额度」的 provider，
-        // 全部挤在一行：每项 = provider 图标 + 最差窗口的已用百分比（颜色也由它
-        // 决定）；悬浮单项看完整窗口明细与重置时间；点击整条刷新。
+        // ---- 底部额度：跟设置同一条底栏，放在右边 ----
+        // provider 账户额度（Codex / Claude / Copilot / Grok / Cursor），只列「检测到额度」
+        // 的。一家就是一个图标加百分比，几家都常显，不收起来：要看额度还得悬停就白放在
+        // 底栏了。侧栏窄、一行放不下时折到第二行，底栏跟着长高。悬停哪块看哪块的各窗口
+        // 和重置时间；点开是全部：每家一行，点哪家刷新哪家。
         // Pi 不在这里：它底下几家 provider 是独立账户，额度跟在对话模型菜单的
         // provider 名字后面（括号），那里才说得清数字属于谁。
+        // 状态在这里一次性读完，弹层的构造闭包里不再碰全局。
         let quota_this = this.clone();
-        // (provider 身份, 行内百分比文本, 行内颜色, tooltip 完整文案, 是否用户手动刷新中)
-        // 状态在这里一次性读完，子元素的构造闭包里不再碰全局。
-        let quota_rows = crate::provider_quota::ProviderStatus::sidebar_targets(cx)
+        let quotas: Vec<FooterQuota> = crate::provider_quota::ProviderStatus::sidebar_targets(cx)
             .into_iter()
             .filter_map(|target| {
                 let status = crate::provider_quota::ProviderStatus::quota_status(target, cx)?;
+                let used = status.quota.as_ref()?.used_percent();
                 let row = provider_quota_row(target, &status)?;
-                let manual_refreshing =
-                    crate::provider_quota::ProviderStatus::is_manually_refreshing(target, cx);
-                Some((target, row.text, row.color, row.hint, manual_refreshing))
+                Some(FooterQuota {
+                    target,
+                    text: row.text,
+                    color: row.color,
+                    hint: row.hint,
+                    used,
+                    refreshing: crate::provider_quota::ProviderStatus::is_manually_refreshing(
+                        target, cx,
+                    ),
+                })
             })
-            .collect::<Vec<_>>();
-
-        let quota_footer = if quota_rows.is_empty() {
-            // 完全没有额度数据：只保留「查询中」过渡行；否则整条不占位。
-            if crate::provider_quota::ProviderStatus::is_refreshing(cx) {
-                Some(
-                    div()
-                        .id("sidebar-quota")
-                        .flex_shrink_0()
-                        .px_2()
-                        .py(px(4.))
-                        .border_t_1()
-                        .border_color(rgb(ui_theme::border_dim()))
-                        .text_xs()
-                        .font_family(crate::terminal_view::font_family())
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .child("额度查询中…"),
-                )
-            } else {
-                None
-            }
-        } else {
-            Some(
+            .collect();
+        let quota_footer: Option<AnyElement> = if quotas.is_empty() {
+            // 完全没有额度数据：只留「查询中」过渡；否则不占位。
+            crate::provider_quota::ProviderStatus::is_refreshing(cx).then(|| {
                 div()
-                    .id("sidebar-quota")
                     .flex_shrink_0()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py(px(4.))
-                    .border_t_1()
-                    .border_color(rgb(ui_theme::border_dim()))
-                    .children(quota_rows.into_iter().map(
-                        |(target, text, color, hint, is_manual_refreshing)| {
-                            // 只对用户手动点击刷新的那家转绿；启动首查和定时刷新保持
-                            // 静默，继续显示已有额度自己的风险颜色。
-                            // 点击只刷新当前这一家（点谁查谁）。
-                            let tip = if is_manual_refreshing {
-                                format!("{hint} 正在刷新…")
+                    .text_xs()
+                    .font_family(crate::terminal_view::font_family())
+                    .text_color(rgb(ui_theme::text_faint()))
+                    .child("额度查询中…")
+                    .into_any_element()
+            })
+        } else {
+            // 能折行的触发器：按钮高度固定折不了行，换成侧栏的列表行（悬停、弹层开着时的
+            // 选中底都跟别的行一样）。
+            let trigger = ListRow::new("sidebar-quota")
+                .min_w_0()
+                .px_1p5()
+                .py_1()
+                .rounded(ui_theme::row_radius())
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .items_center()
+                .gap_x_2()
+                .gap_y_1()
+                .text_xs()
+                .font_family(crate::terminal_view::font_family())
+                .children(quotas.iter().map(|quota| {
+                    let tip = if quota.refreshing {
+                        format!("{} 正在刷新…", quota.hint)
+                    } else {
+                        quota.hint.clone()
+                    };
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "quota-chip-{}",
+                            quota.target.id()
+                        )))
+                        .flex_shrink_0()
+                        .gap_1()
+                        .items_center()
+                        .text_color(rgb(quota.color))
+                        .child(acp_provider_icon(quota.target.agent).size(px(12.)))
+                        .map(|chip| {
+                            if quota.refreshing {
+                                chip.child(smelt_ui::motion::ambient_spinner(
+                                    SharedString::from(format!(
+                                        "quota-chip-refresh-{}",
+                                        quota.target.id()
+                                    )),
+                                    rgb(quota.color).into(),
+                                    true,
+                                ))
                             } else {
-                                format!("{hint} 点击刷新。")
-                            };
-                            let on_click_this = quota_this.clone();
-                            ListRow::new(SharedString::from(target.id()))
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_1()
-                                .rounded(px(4.))
-                                .text_xs()
-                                .font_family(crate::terminal_view::font_family())
-                                .text_color(rgb(if is_manual_refreshing {
-                                    ui_theme::green()
-                                } else {
-                                    color
-                                }))
-                                .child(acp_provider_icon(target.agent).size(px(12.)))
-                                .child(text)
-                                .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(tip.clone())
-                                        .build(window, cx)
-                                })
-                                .on_click(move |_ev, _window, cx| {
-                                    on_click_this.update(cx, |workspace, cx| {
-                                        workspace.request_provider_quota_refresh(target);
-                                        cx.notify();
-                                    });
-                                })
-                        },
-                    )),
+                                chip.child(quota.text.clone())
+                            }
+                        })
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        })
+                }));
+            Some(
+                gpui_component::popover::Popover::new("sidebar-quota-popover")
+                    .anchor(Anchor::BottomRight)
+                    .w(px(QUOTA_POPOVER_WIDTH))
+                    .p_0()
+                    // 弹层的触发容器要能收窄，额度才会在里面折行，不把底栏撑出侧栏。
+                    .trigger_style(StyleRefinement::default().min_w_0())
+                    .trigger(trigger)
+                    .content(move |_, _window, _cx| {
+                        quota_popover(quotas.clone(), quota_this.clone())
+                    })
+                    .into_any_element(),
             )
         };
 
+        // 底栏一条：左边设置，右边额度。设置是普通入口，不做成通栏的大按钮。
         let footer = div()
             .flex_shrink_0()
+            .min_h(px(44.))
+            .py_1()
             .flex()
             .items_center()
+            .gap_2()
             .px_2()
-            .py_2()
             .border_t_1()
             .border_color(ui_theme::hairline())
             .child(
                 div()
                     .id("sidebar-settings")
                     .relative()
-                    .flex_1()
-                    .min_w_0()
+                    .flex_shrink_0()
                     .child(
                         Button::new("sidebar-settings-btn")
-                            .normal()
-                            .capsule()
-                            .w_full()
+                            .quiet()
                             .icon(IconName::Settings)
                             .label("设置")
-                            .dropdown_menu_with_anchor(
-                                Anchor::BottomLeft,
-                                move |menu, _window, _cx| {
-                                    let e_settings = e_settings.clone();
-                                    #[cfg(target_os = "macos")]
-                                    let e_check_update = e_settings.clone();
-                                    let menu = menu
-                                        .item(
-                                            PopupMenuItem::new("帮助文档")
-                                                .icon(IconName::BookOpen)
-                                                .on_click(|_ev, _window, cx| {
-                                                    cx.open_url(crate::settings::DOCS_URL);
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("反馈问题")
-                                                .icon(IconName::Info)
-                                                .on_click(|_ev, _window, cx| {
-                                                    cx.open_url(crate::settings::FEEDBACK_URL);
-                                                }),
-                                        );
-                                    #[cfg(target_os = "macos")]
-                                    let menu = menu.item(
-                                        PopupMenuItem::new("检查更新...")
-                                            .icon(IconName::LoaderCircle)
-                                            .on_click(move |_ev, _window, cx| {
-                                                e_check_update.update(cx, |ws, cx| {
-                                                    if ws.update_status.can_check()
-                                                        || ws.update_status.can_retry_recovery()
-                                                    {
-                                                        ws.check_or_recover_update(false, cx);
-                                                    }
-                                                    ws.open_settings_section(
-                                                        crate::settings::SettingsSection::maintenance_update(),
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                    );
-                                    let e_machines = e_settings.clone();
-                                    let e_resources = e_settings.clone();
-                                    let menu = menu
-                                        .separator()
-                                        .item(
-                                            PopupMenuItem::new("机器...")
-                                                .icon(Icon::new(gpui_kit_assets::IconName::Server))
-                                                .on_click(move |_ev, _window, cx| {
-                                                    e_machines.update(cx, |ws, cx| {
-                                                        ws.open_settings_section(
-                                                            crate::settings::SettingsSection::CollaborationMachines,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("资源占用...")
-                                                .icon(IconName::MemoryStick)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    e_resources.update(cx, |ws, cx| {
-                                                        ws.open_settings_section(
-                                                            crate::settings::SettingsSection::MaintenanceResources,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        );
-
-                                    menu.item(
-                                        PopupMenuItem::new("设置...")
-                                            .icon(IconName::Settings)
-                                            .on_click(move |_ev, _window, cx| {
-                                                e_settings.update(cx, |ws, cx| {
-                                                    ws.check_daemon_outdated(cx);
-                                                    ws.settings_section =
-                                                        crate::settings::SettingsSection::appearance();
-                                                    ws.open_settings_window(cx);
-                                                });
-                                            }),
-                                    )
-                                },
-                            ),
+                            .on_click(move |_, _, cx| {
+                                e_settings.update(cx, |ws, cx| ws.open_settings(cx));
+                            }),
                     )
                     .when(settings_needs_attention, |d| {
                         d.child(
@@ -2028,7 +2272,9 @@ impl Workspace {
                                 .bg(rgb(ui_theme::red())),
                         )
                     }),
-            );
+            )
+            .child(div().flex_1())
+            .children(quota_footer);
 
         div()
             .w_full()
@@ -2039,8 +2285,17 @@ impl Workspace {
             // 外层工作区负责玻璃表面、描边与裁切；列表自身保持透明，才能让
             // vibrancy / 半透明底贯穿整个面板而不是只透出四角。
             .bg(gpui::transparent_black())
-            // 顶部固定的只有几个入口；「最近对话」和项目都在下面的滚动区里。
-            .child(self.render_automation_navigation(this, statuses, cx))
+            // 顶部固定的只有几个入口；「对话」和项目都在下面的滚动区里。列表滚动过以后
+            // 固定区下沿才出一条细线，平时不画（线一直占着 1px，出现时不跳）。
+            .child(
+                self.render_automation_navigation(this.clone(), statuses, cx)
+                    .border_b_1()
+                    .border_color(if self.sidebar_scroll.offset().y < px(0.) {
+                        Hsla::from(ui_theme::hairline())
+                    } else {
+                        gpui::transparent_black()
+                    }),
+            )
             .child(
                 div()
                     .id("session-rows-pane")
@@ -2048,9 +2303,20 @@ impl Workspace {
                     .min_h_0()
                     .relative()
                     .child(rows)
-                    .vertical_scrollbar(&self.sidebar_scroll),
+                    .vertical_scrollbar(&self.sidebar_scroll)
+                    // 放在所有行后面：行都量完了才算视口外的「需要你」。
+                    .child(attention_checker(
+                        self.sidebar_reveal.clone(),
+                        self.sidebar_scroll.clone(),
+                        this.clone(),
+                    ))
+                    .children(offscreen.above.map(|target| {
+                        attention_pill(true, target, self.sidebar_reveal.clone(), this.clone())
+                    }))
+                    .children(offscreen.below.map(|target| {
+                        attention_pill(false, target, self.sidebar_reveal.clone(), this.clone())
+                    })),
             )
-            .children(quota_footer)
             .child(footer)
     }
 }

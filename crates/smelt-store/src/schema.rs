@@ -437,7 +437,8 @@ CREATE TABLE published_session (
   agent_event_version INTEGER,
   tokens_used INTEGER,
   branch TEXT,
-  dirty_files_json BLOB NOT NULL
+  dirty_files_json BLOB NOT NULL,
+  cli_exited INTEGER NOT NULL DEFAULT 0 CHECK (cli_exited IN (0, 1))
 );
 CREATE TABLE paired_device (
   endpoint_id TEXT PRIMARY KEY,
@@ -1678,4 +1679,10 @@ CREATE TABLE auto_model_provider (
 INSERT INTO auto_model_provider(provider)
   SELECT provider FROM auto_model_provider_v23 WHERE harness = 'pi';
 DROP TABLE auto_model_provider_v23;
+";
+
+/// v25 给已发布会话加上「CLI 进程是否已经退出」。对话 id 退出后仍留着，
+/// 续接与否看这一列。新列加在表尾，和 `CREATE_SCHEMA` 逐字一致。
+pub const MIGRATE_V24_TO_V25: &str = "
+ALTER TABLE published_session ADD COLUMN cli_exited INTEGER NOT NULL DEFAULT 0 CHECK (cli_exited IN (0, 1));
 ";

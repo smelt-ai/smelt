@@ -1599,4 +1599,96 @@ class L10nZh extends L10n {
 
   @override
   String get terminalKeyPageDown => '下翻页';
+
+  @override
+  String get updateSection => '更新';
+
+  @override
+  String updateCurrentVersion(String version) {
+    return '当前版本 $version';
+  }
+
+  @override
+  String get updateChannelProd => '生产版';
+
+  @override
+  String get updateChannelDev => '内测版';
+
+  @override
+  String get updateChannelHint => '内测版会先收到还没正式发布的测试构建。';
+
+  @override
+  String get updateIdle => '还没检查';
+
+  @override
+  String get updateChecking => '正在检查更新…';
+
+  @override
+  String get updateUpToDate => '已是最新版本';
+
+  @override
+  String updateAvailable(String version) {
+    return '新版本 $version 可以更新';
+  }
+
+  @override
+  String updateDownloading(String version) {
+    return '正在下载 $version…';
+  }
+
+  @override
+  String updateDownloadingPercent(String version, int percent) {
+    return '正在下载 $version… $percent%';
+  }
+
+  @override
+  String updateReady(String version) {
+    return '新版本 $version 已下载好';
+  }
+
+  @override
+  String get updateNeedsPermission => '允许 Smelt 安装应用后回到这里，就会接着安装。';
+
+  @override
+  String get updateInstalling => '正在等系统安装…';
+
+  @override
+  String get updateFailedCheck => '检查更新失败，请检查网络后重试。';
+
+  @override
+  String get updateFailedDownload => '下载没完成，请重试。';
+
+  @override
+  String get updateFailedVerify => '下载的包和发布的校验和对不上，已经丢掉。过会儿再试。';
+
+  @override
+  String get updateFailedInstall => '没装上，可以再试一次。';
+
+  @override
+  String get updateCheck => '检查更新';
+
+  @override
+  String get updateDownload => '下载';
+
+  @override
+  String get updateInstall => '安装';
+
+  @override
+  String get updateRetry => '重试';
+
+  @override
+  String get updateGrantPermission => '去授权';
+
+  @override
+  String get updateReleaseNotes => '更新说明';
+
+  @override
+  String updateSnackAvailable(String version) {
+    return 'Smelt $version 可以更新';
+  }
+
+  @override
+  String updateSnackReady(String version) {
+    return 'Smelt $version 已下载好';
+  }
 }

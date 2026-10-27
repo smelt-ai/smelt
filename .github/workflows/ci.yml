@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.rust == 'true' }}
+      advisories: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.advisories == 'true' }}
       mobile: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.mobile == 'true' }}
       android: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.android == 'true' }}
       pi-agent: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.pi-agent == 'true' }}
@@ -39,7 +40,9 @@ jobs:
           # rust：整个 workspace 的输入。smelt-core 的 build.rs 只读 packages/pi-agent 的版本号，
           # 桌面与 smeltd 会嵌 assets/，所以这两处也算。
           # android：手机内核 smelt_mobile 及其依赖的 crate（`cargo tree -p smelt_mobile`
-          # 里的本地 crate，加依赖时同步这里）和 Flutter 工程。
+          # 里的本地 crate，加依赖时同步这里）和 Flutter 工程。ios-check 也看它。
+          # advisories：只在依赖图或 deny 配置可能变时跑（cargo deny 本身很快，但拉
+          # advisory-db 要网络；纯 .rs 改动不必每次扫）。
           filters: |
             workflow: &workflow
               - '.github/workflows/ci.yml'
@@ -54,6 +57,11 @@ jobs:
               - 'crates/**'
               - 'packages/**'
               - 'assets/**'
+            advisories:
+              - *workflow
+              - *toolchain
+              - 'deny.toml'
+              - 'crates/**/Cargo.toml'
             mobile:
               - *workflow
               - 'mise.toml'
@@ -77,6 +85,29 @@ jobs:
               - 'scripts/compile-smelt-pi.ts'
               - 'scripts/compiled-smoke.ts'
               - 'packages/pi-agent/**'
+
+  # RustSec：只查 advisories，不跑 license/bans（那些噪声大、与本 PR 目标无关）。
+  # ubuntu 上跑：不编代码，只要 cargo metadata + advisory-db，通常几十秒内结束。
+  cargo-deny:
+    needs: changes
+    if: needs.changes.outputs.advisories == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 跟 rust-toolchain.toml 对齐；cargo-deny-action 默认镜像的 rustc 偏旧，
+      # edition 2024 / rust-version 1.97 的 workspace 元数据解析会踩坑。
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 与 nextest 一样用 install-action：比整镜像换工具链更贴本仓库习惯，也避免
+      # Embark 镜像里自带的旧 rustc。
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Check advisories
+        run: cargo deny check advisories
 
   rust:
     needs: changes
@@ -249,6 +280,28 @@ jobs:
         working-directory: mobile
         run: flutter build apk --release --target-platform android-arm64
 
+  # iOS 一侧只检查手机内核能不能编过 aarch64-apple-ios：依赖在 iOS 上编不过（比如 netdev
+  # 用了 macOS 才有的 libc 类型）这类问题，不在这里拦就只能等发版出包时才暴露。完整出包要签名，
+  # 留给发版流水线；cargo check 不链接，也就不用 Flutter 和 Xcode 工程。
+  # 不用缓存，原因同 windows job。
+  ios-check:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # rust-toolchain.toml 钉了版本，target 要装到那一份上：在仓库里不带参数的
+      # rustup toolchain install 装的就是钉住的那份，随后的 target add 也加到它上面。
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-ios
+
+      - name: Check smelt_mobile for iOS
+        run: cargo check -p smelt_mobile --target aarch64-apple-ios --locked
+
   # Pi 运行时（TypeScript）：类型检查 + bun 单测。Bun 版本跟打包进 App 的那份一致。
   pi-agent:
     needs: changes
@@ -291,7 +344,7 @@ jobs:
   # 就失败。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
-    needs: [changes, rust, mobile, android-build, windows, pi-agent, pi-agent-windows]
+    needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, pi-agent-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize

@@ -340,9 +340,11 @@ impl AcpView {
                 if smelt_model::agent_paths::is_workbench_conversation_workspace(path) {
                     return Some("工作台".to_string());
                 }
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| !name.is_empty())
+                // cwd 是运行时那台机器上的路径，不能用本机的 `Path::file_name` 切：Mac 上
+                // 看 Windows 运行时的 `C:\a\b` 会整串当成名字。只取末段显示，和
+                // `compact_path_leaf` 一样两种分隔符都认。
+                cwd.rsplit(['/', '\\'])
+                    .find(|name| !name.is_empty())
                     .map(|name| format!("当前工作区 · {name}"))
             });
             let quick_prompts = [

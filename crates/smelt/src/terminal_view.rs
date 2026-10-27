@@ -334,11 +334,10 @@ impl TerminalView {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        // 标签标题：取工作目录最后一段
+        // 标签标题：取工作目录最后一段，按终端所在那台机器的系统切
         let title = cwd
             .as_deref()
-            .and_then(|p| p.trim_end_matches('/').rsplit('/').next())
-            .filter(|s| !s.is_empty())
+            .and_then(|p| crate::runtimes::path_style(runtime.key(), cx).file_name(p))
             .unwrap_or("终端")
             .to_string();
 

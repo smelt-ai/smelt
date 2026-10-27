@@ -41,14 +41,22 @@ pub(crate) struct SessionState {
     /// `session_title`）直接替换。还没有名字时，首条能抽出标题的 prompt 写一次。
     /// 已有名字不被后来的 prompt 改掉。换对话时清空。OSC 0/2 不是会话名。
     pub(crate) title: Option<String>,
-    /// 该终端此刻正在对话的 provider 会话 id（Copilot `sessionId` 等）。由每条
-    /// hook 携带，因此 TUI 内部 `/resume`、退出重开都会自动改写，不需要另外的
-    /// 握手或代次推断。None = 这家 provider 的 hook 不带 id，或还没有事件到达。
+    /// 该终端绑定的 provider 会话 id（Copilot `sessionId` 等）。由每条 hook 携带，
+    /// 因此 TUI 内部 `/resume`、退出重开都会自动改写，不需要另外的握手或代次推断。
+    /// None = 这家 provider 的 hook 不带 id，或还没有事件到达。
     ///
     /// 它是「侧栏这条会话对应哪段历史存档」的唯一可信来源：重命名据此写入
-    /// 历史标题覆盖层，标题解析也据此跟随对话切换。
+    /// 历史标题覆盖层，标题解析、复制会话 id 也据此跟随。CLI 进程退出
+    /// （`SessionEnded`）之后 id 仍留着，桌面退出后还要对上这段对话。
+    /// 能不能续接不看这里，看 [`Self::cli_exited`]。
     #[serde(default)]
     pub(crate) conversation_id: Option<String>,
+    /// CLI 进程已经退出、终端回到 shell。`SessionEnded` 置位；之后又有
+    /// `SessionStarted`，或相位门控放行的活事件，再清掉。对话 id 不受影响。
+    /// 为 true 时这条终端不能 `--resume`（见 `resume_of`）。不发 SessionEnd 的
+    /// provider 一直是 false。
+    #[serde(default)]
+    pub(crate) cli_exited: bool,
     pub(crate) phase: Phase,
     /// unix 秒。「空转多久了」靠它算——作战地图用。
     pub(crate) phase_since: u64,
@@ -115,6 +123,7 @@ impl Default for SessionState {
             agent_token: String::new(),
             title: None,
             conversation_id: None,
+            cli_exited: false,
             phase: Phase::Idle,
             phase_since: 0,
             pending_question: None,
@@ -234,6 +243,10 @@ enum BindingTransition {
 ///
 /// 换对话时（id 变了）清掉上一段对话的会话名。
 /// 留着就会让侧栏顶着上一段对话的名字。
+///
+/// 还没有对话 id 时的第一次绑定不清名字：`None` 变成 `Some` 不是换对话。
+/// CLI 退出只把 `cli_exited` 置上，id 留着，所以退出后再起一段新对话仍然走
+/// 「id 变了」，名字会让位；再 `--resume` 同一段则是 `Same`，名字留着。
 fn switch_conversation(state: &mut SessionState, event: &AgentEvent) -> BindingTransition {
     if matches!(
         event.kind,
@@ -303,6 +316,15 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
         state.provider = Some(provider.id().to_string());
     }
     let _ = switch_conversation(state, event);
+    // 进程退出和对话身份分开。SessionEnded 无条件记下退出，写在相位门控之前：
+    // 回合已经 Finished 时 EndProcess 不改相位，退出标记一样要落下。之后
+    // `SessionStarted`，或相位门控放行的活事件，说明进程又在跑，再清掉。
+    // 回合已关闭之后的迟到进度不放行，也不把退出标记抹掉。
+    if occupancy == Occupancy::EndProcess {
+        state.cli_exited = true;
+    } else if event.kind == AgentEventKind::SessionStarted || allow {
+        state.cli_exited = false;
+    }
 
     match occupancy {
         Occupancy::Metadata => {
@@ -373,6 +395,9 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
             }
         }
         Occupancy::EndProcess => {
+            // 退出标记在上面已经落下，对话 id 留着。能不能续接看 `cli_exited`
+            // （`resume_of`），不靠把身份清掉。provider 和 title 同样留着。
+            // 不发 SessionEnd 的 provider 走不到这里，见 `terminal_resume`。
             if allow {
                 let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Dead);
                 state.pending_question = None;
@@ -659,6 +684,85 @@ mod agent_event_reducer_tests {
         assert_eq!(dead.phase, Phase::Dead);
         apply_agent_event(&mut dead, &event(AgentEventKind::PromptSubmitted));
         assert_eq!(dead.phase, Phase::Thinking);
+    }
+
+    /// CLI `/exit` 回到 shell：完成过的回合相位和对话身份都留着，只是进程已经退出，
+    /// 停机不续接。零回合退出后再起另一段对话，身份换了，自定义标题让位。
+    #[test]
+    fn session_end_keeps_the_conversation_and_a_later_start_rebinds() {
+        let mut state = SessionState {
+            launch: Some("claude".into()),
+            title: Some("这段对话".into()),
+            ..Default::default()
+        };
+        let mut started = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        started.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut state, &started);
+
+        let mut done = AgentEvent::new("claude", AgentEventKind::TurnSucceeded);
+        done.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut state, &done);
+        assert_eq!(state.phase, Phase::Succeeded);
+        assert_eq!(state.conversation_id.as_deref(), Some("conv-1"));
+
+        let mut ended = AgentEvent::new("claude", AgentEventKind::SessionEnded);
+        ended.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut state, &ended);
+        assert_eq!(state.phase, Phase::Succeeded);
+        assert_eq!(state.conversation_id.as_deref(), Some("conv-1"));
+        assert!(state.cli_exited);
+        assert_eq!(state.provider.as_deref(), Some("claude"));
+        assert_eq!(state.title.as_deref(), Some("这段对话"));
+        assert_eq!(state.launch.as_deref(), Some("claude"));
+
+        // 回合已关闭，迟到的进度不放行，也不能把退出标记抹掉。
+        let mut late = AgentEvent::new("claude", AgentEventKind::ToolFinished);
+        late.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut state, &late);
+        assert!(state.cli_exited);
+
+        let mut again = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        again.conversation_id = Some("conv-2".into());
+        apply_agent_event(&mut state, &again);
+        assert_eq!(state.conversation_id.as_deref(), Some("conv-2"));
+        assert!(!state.cli_exited);
+        assert_eq!(state.phase, Phase::Succeeded);
+        assert_eq!(state.title, None, "新对话不能顶着上一段的名字");
+
+        let mut fresh = SessionState {
+            launch: Some("claude".into()),
+            title: Some("自定义标题".into()),
+            ..Default::default()
+        };
+        let mut first = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        first.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut fresh, &first);
+        assert_eq!(fresh.conversation_id.as_deref(), Some("conv-1"));
+        assert!(!fresh.cli_exited);
+        assert!(!fresh.turn_events);
+        assert_eq!(fresh.title.as_deref(), Some("自定义标题"));
+
+        let mut ended = AgentEvent::new("claude", AgentEventKind::SessionEnded);
+        ended.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut fresh, &ended);
+        assert_eq!(fresh.conversation_id.as_deref(), Some("conv-1"));
+        assert!(fresh.cli_exited);
+        assert_eq!(fresh.title.as_deref(), Some("自定义标题"));
+
+        let mut resumed = fresh.clone();
+        let mut same = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        same.conversation_id = Some("conv-1".into());
+        apply_agent_event(&mut resumed, &same);
+        assert_eq!(resumed.conversation_id.as_deref(), Some("conv-1"));
+        assert!(!resumed.cli_exited);
+        assert_eq!(resumed.title.as_deref(), Some("自定义标题"));
+
+        let mut next = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        next.conversation_id = Some("conv-2".into());
+        apply_agent_event(&mut fresh, &next);
+        assert_eq!(fresh.conversation_id.as_deref(), Some("conv-2"));
+        assert!(!fresh.cli_exited);
+        assert_eq!(fresh.title, None);
     }
 
     #[test]

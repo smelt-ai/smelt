@@ -266,7 +266,7 @@ impl AcpView {
             for (ix, item) in popup.items.iter().enumerate() {
                 let selected = ix == popup.selected;
                 let label_color = if selected {
-                    gpui::rgb(ui_theme::text_bright())
+                    gpui::rgb(ui_theme::text_selected())
                 } else {
                     gpui::rgb(ui_theme::text_mid())
                 };
@@ -295,41 +295,38 @@ impl AcpView {
                         .into_any_element()
                 };
                 list = list.child(
-                    h_flex()
-                        .id((
-                            gpui::ElementId::from("acp-completion-item"),
-                            item.label.clone(),
-                        ))
-                        .px_3()
-                        .py_1p5()
-                        .gap_2()
-                        .items_center()
-                        .when(selected, |d| d.bg(ui_theme::tint(ui_theme::accent(), 0x38)))
-                        
-                        .hover(move |d| {
-                            d.bg(if selected {
-                                ui_theme::tint(ui_theme::accent(), 0x48)
-                            } else {
-                                ui_theme::overlay(0x20)
-                            })
-                        })
-                        .child(label)
-                        .when(!item.hint.is_empty(), |row| {
-                            row.child(
-                                div()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .text_color(if selected { t.foreground } else { muted })
-                                    .truncate()
-                                    .child(item.hint.clone()),
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            if let Some(popup) = &mut this.completion {
-                                popup.selected = ix;
-                            }
-                            this.accept_completion(window, cx);
-                        })),
+                    ListRow::new((
+                        gpui::ElementId::from("acp-completion-item"),
+                        item.label.clone(),
+                    ))
+                    .card()
+                    .selected(selected)
+                    .flex()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .child(label)
+                    .when(!item.hint.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(if selected {
+                                    gpui::rgb(ui_theme::text_selected()).into()
+                                } else {
+                                    muted
+                                })
+                                .truncate()
+                                .child(item.hint.clone()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(popup) = &mut this.completion {
+                            popup.selected = ix;
+                        }
+                        this.accept_completion(window, cx);
+                    })),
                 );
             }
             list.child(
@@ -689,7 +686,7 @@ impl AcpView {
                                     .border_1()
                                     .border_color(t.border)
                                     .child(
-                                        Icon::new(IconName::LoaderCircle)
+                                        Icon::new(gpui_kit_assets::IconName::Clock)
                                             .size_3p5()
                                             .text_color(gpui::rgb(ui_theme::text_muted())),
                                     )
@@ -779,7 +776,7 @@ impl AcpView {
                                 .border_1()
                                 .border_color(t.border)
                                 .child(
-                                    Icon::new(IconName::LoaderCircle)
+                                    Icon::new(gpui_kit_assets::IconName::Clock)
                                         .size_3p5()
                                         .text_color(gpui::rgb(ui_theme::text_muted())),
                                 )

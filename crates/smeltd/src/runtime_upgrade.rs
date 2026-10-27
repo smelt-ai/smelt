@@ -26,8 +26,9 @@ pub(crate) fn handle_runtime_upgrade<C: ClientSocket>(mut conn: C, request: &ser
 }
 
 fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply {
-    let target = match check_target(version, env!("CARGO_PKG_VERSION")) {
-        Ok(target) => target,
+    let target = match check_target(version, smelt_version::VERSION) {
+        Ok(Some(target)) => target,
+        Ok(None) => return RuntimeUpgradeReply::Current,
         Err(error) => return RuntimeUpgradeReply::Failed { error },
     };
     if IN_PROGRESS.swap(true, Ordering::AcqRel) {
@@ -50,16 +51,27 @@ fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply 
     reply
 }
 
-/// 版本号要是合法的 semver（顺带挡住拼进 URL 的斜杠之类），且不比自己旧。
-fn check_target(requested: &str, current: &str) -> Result<semver::Version, String> {
+/// 版本号要是合法的 semver（顺带挡住拼进 URL 的斜杠之类）、是一次发版（不带 `+` 构建信息，
+/// GitHub 上才有这个 Release），且不比自己旧。比新旧不看构建信息。
+///
+/// 返回 `None`：自己就出自这次发版，只是 tag 之后还有提交（如 `2026.1027.0-rc.1+g32c3172`
+/// 被要求升到 `2026.1027.0-rc.1`）。这时下载那个 Release 其实是退回去，当成已经是这个版本。
+fn check_target(requested: &str, current: &str) -> Result<Option<semver::Version>, String> {
     let target = semver::Version::parse(requested.trim())
         .map_err(|error| format!("版本号不合法（{requested}）：{error}"))?;
-    if let Ok(current) = semver::Version::parse(current)
-        && target < current
-    {
-        return Err(format!("只升不降：运行时 v{current} 比要的 v{target} 新"));
+    if !target.build.is_empty() {
+        return Err(format!("v{target} 不是发版的版本号，没有对应的 Release"));
     }
-    Ok(target)
+    if let Ok(current) = semver::Version::parse(current) {
+        match target.cmp_precedence(&current) {
+            std::cmp::Ordering::Less => {
+                return Err(format!("只升不降：运行时 v{current} 比要的 v{target} 新"));
+            }
+            std::cmp::Ordering::Equal if !current.build.is_empty() => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(Some(target))
 }
 
 /// 守护启动后在后台调一次，见 `linux::ensure_smelt_pi`。只有装在 `~/.smelt/bin` 的映像
@@ -74,7 +86,7 @@ pub(crate) fn ensure_smelt_pi() {
     if !managed {
         return;
     }
-    let Ok(version) = semver::Version::parse(env!("CARGO_PKG_VERSION")) else {
+    let Some(Ok(version)) = smelt_version::RELEASE.map(semver::Version::parse) else {
         return;
     };
     if let Err(error) = linux::ensure_smelt_pi(&version) {
@@ -85,7 +97,8 @@ pub(crate) fn ensure_smelt_pi() {
 #[cfg(not(target_os = "linux"))]
 fn install_release(_version: &semver::Version) -> RuntimeUpgradeReply {
     RuntimeUpgradeReply::Failed {
-        error: "只有 Linux 上的运行时这样升级；macOS 上运行时随桌面升级".to_string(),
+        error: "这台运行时随这台机器上的 Smelt 一起更新，不能远程升级：到这台机器上更新 Smelt"
+            .to_string(),
     }
 }
 
@@ -382,6 +395,31 @@ mod tests {
             check_target("2026.0103.0", "0.9.1").is_err(),
             "前导零不是合法 semver"
         );
+    }
+
+    /// tag 之后的构建带构建信息：比新旧时不算它，但要升到的版本不能带（没有这样的 Release）。
+    #[test]
+    fn build_metadata_is_ignored_when_comparing_and_rejected_as_target() {
+        assert!(matches!(
+            check_target("2026.1027.0", "2026.1027.0-rc.1+g32c3172"),
+            Ok(Some(_))
+        ));
+        assert!(check_target("2026.1026.0", "2026.1027.0-rc.1+g32c3172").is_err());
+        let error = check_target("2026.1027.0-rc.1+g32c3172", "2026.1026.0").unwrap_err();
+        assert!(error.contains("不是发版"), "{error}");
+    }
+
+    /// 出自同一次发版、只是 tag 之后多了提交的运行时，不能被「升」回那个 Release。
+    #[test]
+    fn same_release_with_later_commits_is_already_current() {
+        assert_eq!(
+            check_target("2026.1027.0-rc.1", "2026.1027.0-rc.1+g32c3172"),
+            Ok(None)
+        );
+        assert!(matches!(
+            check_target("2026.1027.0-rc.1", "2026.1027.0-rc.1"),
+            Ok(Some(_))
+        ));
     }
 
     /// 版本号会拼进下载地址，不是 semver 的一律拒绝。

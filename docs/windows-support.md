@@ -5,7 +5,7 @@
 1. Windows 桌面端连远程运行时（Linux / macOS 上的 smeltd）。
 2. Windows 本机跑 smeltd：冷启动、Rust 客户端走 AF_UNIX、Bun 走命名管道、升级即重启。
 
-数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名，没有自动更新。
+数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名，没有自动更新。发版起初是 zip 便携包，后来换成按用户安装的 Inno Setup 安装程序（`scripts/windows-installer.iss`）。
 
 ## 第 1 步的范围
 
@@ -128,7 +128,7 @@
 - **CI**：`ci.yml` 加 `windows-latest` 任务，跑 `cargo check -p smelt` 和受影响 crate 的测试（smelt-runtime-client、smelt-iroh、smelt-client）。在 Windows runner 上原生编译，不交叉编译。桌面端在 Windows 上编过之前不设为必需检查，编过后加进 `ci-ok`。
 - **发版**：`release.yml` 加 Windows 任务，只编 `smelt`，产出 `smelt-<版本>-windows-x86_64.zip`，挂到同一个 Release，写进校验和清单。
 - **图标与清单**：Windows 清单由 `gpui-pre-platform` 的 `windows-manifest` 特性带上；exe 图标要新加 `crates/smelt/build.rs`，只在 Windows 目标上嵌资源。
-- **签名与更新**：第一版不签名，下载后有 SmartScreen 提示，在 Release 说明里写明。自动更新等安装包方案定了再做。
+- **签名与更新**：第一版不签名，下载后有 SmartScreen 提示，在 Release 说明里写明。安装包已定为 Inno Setup 按用户安装；自动更新还没做。
 
 ## 施工顺序
 
@@ -151,7 +151,7 @@
 - **守护映像**。不建符号链接（那要额外权限）。发布是复制或硬链接到 `smeltd-<指纹>.exe`，启动名是旁边的 `smelt-image-v1` 指针文件。`launch_executable` 读出真正要执行的那份。
 - **Bun**。`scripts/fetch-bun.sh` 在 Windows 上取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `bin/bun.exe`（硬链接或复制）。`scripts/build-smelt-pi.sh` 编出 `smelt-pi.exe`。
 - **Shell 和进程**。交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`。没有参数的自动化 Shell 脚本同样走 `cmd.exe /d /c`，不调用 bash。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。ConPTY 不能 `CREATE_SUSPENDED`，shell 起来之后立刻 `attach_running`。PTY 尺寸走 master 的 `resize`，不用 `as_raw_fd`。
-- **发版 zip**。`smelt-<版本>-windows-x86_64.zip` 根上是 `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。`smelt.com` 是控制台子系统的命令行入口（`smelt-cli.exe` 改名），cmd / PowerShell 敲 `smelt` 先找到它。
+- **发版**。安装程序 `smelt-<版本>-windows-x86_64-setup.exe` 装进安装目录的是 `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。`smelt.com` 是控制台子系统的命令行入口（`smelt-cli.exe` 改名），cmd / PowerShell 敲 `smelt` 先找到它。
 
 ## 已定
 
@@ -162,3 +162,7 @@
 - 交接不做。升级重启，终端会话丢失。
 - 数据目录沿用 `%USERPROFILE%\.smelt`。
 - 第一版只出 x86_64。
+
+## 待办
+
+- **远程升级与自动更新**（10-27 记）。现在 Windows 上的运行时回不了 `runtime_upgrade`：它跟桌面装在同一个安装程序里，只能到那台机器上手动跑新版的 `setup.exe` 覆盖安装。打算的做法：smeltd 收到升级请求后从 Release 下载 `smelt-<版本>-windows-x86_64-setup.exe`，按校验和清单核对哈希，拉起一个脱离自己的安装进程（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）后退出，好让 Inno Setup 替换正在用的 exe；装完重新拉起 smeltd，桌面那边照现有流程等它重启、重连。代价：终端会话不保留；那台机器上开着的 Smelt 桌面会被关掉。本机自动更新可以复用这套流程。做的时候要在 Windows 机器上实测。

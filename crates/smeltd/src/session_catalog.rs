@@ -18,7 +18,7 @@ pub(crate) fn published_session_states(
         out.push(state);
     }
     for (_, slot) in acp_sessions.snapshot() {
-        let state = slot.value.state.lock().unwrap().clone();
+        let state = slot.value.state.lock().clone();
         seen.insert(state.id.clone());
         out.push(state);
     }
@@ -42,7 +42,7 @@ pub(crate) fn session_connection_counts(
         return (out.clients.len(), out.watchers.len());
     }
     if let Some(slot) = acp_sessions.get(id) {
-        let out = slot.value.out.lock().unwrap();
+        let out = slot.value.out.lock();
         let interactive = usize::from(out.client.is_some());
         return (interactive, out.watchers.len());
     }

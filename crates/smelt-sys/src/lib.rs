@@ -70,6 +70,21 @@ pub fn hostname() -> Option<String> {
     None
 }
 
+/// 桌面在跑的标记：Windows 上的命名互斥量 `SmeltDesktop`。安装程序
+/// （`scripts/windows-installer.iss` 的 `AppMutex`）在安装和卸载开头查它，Smelt 还开着就
+/// 提示先关掉。只要它存在，不做单实例：另一个实例已经建过也照样拿到句柄。句柄不关，
+/// 进程退出时系统收回。
+#[cfg(windows)]
+pub fn mark_desktop_running() {
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "SmeltDesktop".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: name 以 0 结尾，调用期间有效；默认安全属性，不要初始所有权。
+    unsafe {
+        CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+    }
+}
+
 /// 把文件或目录的修改时间改成 `when`。
 ///
 /// Windows 上用普通的 `File::open` 打不开目录（没有 `FILE_FLAG_BACKUP_SEMANTICS`

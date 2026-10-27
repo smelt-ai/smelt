@@ -48,20 +48,17 @@ pub fn display_title(
 
 /// ACP 会话统一使用协议/本地生成的对话标题；尚无标题时才回退到 Agent + 项目。
 /// 用户手改名由上层优先处理，不在这里混入持久化语义。
+///
+/// `dir` 是工作目录的末段。cwd 是运行时那台机器上的路径，得按它的系统切，由调用方切好。
 pub fn acp_display_title(
     conversation_title: Option<&str>,
     agent_label: &str,
-    cwd: Option<&str>,
+    dir: Option<&str>,
 ) -> String {
     if let Some(title) = nonempty(conversation_title) {
         return title.to_string();
     }
-    let fallback = cwd
-        .map(str::trim)
-        .filter(|cwd| !cwd.is_empty())
-        .and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next())
-        .filter(|dir| !dir.is_empty());
-    match fallback {
+    match nonempty(dir) {
         Some(dir) => format!("{agent_label} 对话 · {dir}"),
         None => format!("{agent_label} 对话"),
     }
@@ -135,12 +132,12 @@ mod tests {
         for kind in crate::agent_kind::ConversationAgentKind::ALL {
             let agent = kind.short_label();
             assert_eq!(
-                acp_display_title(Some("修复侧栏标题"), agent, Some("/work/smelt")),
+                acp_display_title(Some("修复侧栏标题"), agent, Some("smelt")),
                 "修复侧栏标题",
                 "{agent} 不应被 Agent 类型特判挡住 ACP 标题"
             );
             assert_eq!(
-                acp_display_title(None, agent, Some("/work/smelt")),
+                acp_display_title(None, agent, Some("smelt")),
                 format!("{agent} 对话 · smelt")
             );
         }

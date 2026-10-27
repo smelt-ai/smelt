@@ -1,9 +1,43 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::Duration;
 
+/// 会话自己的锁，不把 poison 交给调用方。
+///
+/// 所有会话同在一个 smeltd 里。任何线程持着某个会话的锁 panic，这把锁都会中毒；
+/// 若照常 `lock().unwrap()`，之后列会话、对账、跨对话读取都会跟着 panic。
+/// `lock` 直接返回守卫，遇到 poison 取出值并清掉标志。`.unwrap()` 写不出来，
+/// 也就不用靠每个调用点记得换写法。被打断的这一次留下的状态由会话自己的
+/// 失败处理收拾（见 `mark_session_driver_panic`）。
+pub(crate) struct SessionLock<T>(Mutex<T>);
+
+impl<T> SessionLock<T> {
+    pub(crate) const fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, T> {
+        self.0.lock().unwrap_or_else(|poisoned| {
+            self.0.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
+    /// 别人正持着就返回 `None`；中毒和 `lock` 一样照常取值。
+    pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        match self.0.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(poisoned)) => {
+                self.0.clear_poison();
+                Some(poisoned.into_inner())
+            }
+        }
+    }
+}
+
 pub(crate) struct AcpSlot<T> {
-    pub(crate) lifecycle: Mutex<()>,
+    pub(crate) lifecycle: SessionLock<()>,
     pub(crate) value: T,
 }
 
@@ -36,19 +70,6 @@ impl std::fmt::Display for ResumeAcquireError {
     }
 }
 
-/// 新会话的 runtime 落在哪里。显式存进注册表，而不是在 spawn 点反问构建配置：
-/// 那样测试里那条分支按构造永远不可达，等于没有覆盖，而且将来谁多建一个注册表
-/// 也看不出它会不会去起进程。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AcpSpawnPolicy {
-    /// prod：每个会话一个独立的 smeltd 宿主进程。
-    HostedProcess,
-    /// 同进程直连 driver。只有单测注册表会选它，所以 prod 构建里没有构造点；
-    /// 判定逻辑本身两种构建都编译，这正是这次改动要保住的东西。
-    #[cfg_attr(not(test), allow(dead_code))]
-    SameProcess,
-}
-
 pub(crate) struct AcpRegistry<T> {
     /// 会话表和 provider 所有权必须在同一个临界区内变更。拆成两把锁会让
     /// reserve/remove 与 acquire/release 之间出现可观察的半状态。
@@ -56,21 +77,10 @@ pub(crate) struct AcpRegistry<T> {
     /// 有新会话登记时响一次，和 `state` 配对。等某个会话出现的人在这上面等。
     inserted: Condvar,
     spawn_gate: Arc<RwLock<()>>,
-    spawn_policy: AcpSpawnPolicy,
 }
 
 impl<T> AcpRegistry<T> {
     pub(crate) fn new(spawn_gate: Arc<RwLock<()>>) -> Self {
-        Self::with_policy(spawn_gate, AcpSpawnPolicy::HostedProcess)
-    }
-
-    /// 同进程 driver 的注册表。只有单测该用它。
-    #[cfg(test)]
-    pub(crate) fn new_same_process(spawn_gate: Arc<RwLock<()>>) -> Self {
-        Self::with_policy(spawn_gate, AcpSpawnPolicy::SameProcess)
-    }
-
-    fn with_policy(spawn_gate: Arc<RwLock<()>>, spawn_policy: AcpSpawnPolicy) -> Self {
         Self {
             state: Mutex::new(RegistryState {
                 sessions: HashMap::new(),
@@ -79,8 +89,14 @@ impl<T> AcpRegistry<T> {
             }),
             inserted: Condvar::new(),
             spawn_gate,
-            spawn_policy,
         }
+    }
+
+    /// 注册表锁没有数据。一个会话的驱动 panic 把它中毒了，别的会话还要能登记。
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState<T>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// 原子地给 `acp_sid` 增加一组 provider 身份别名。任一 id 已被其他会话
@@ -90,7 +106,7 @@ impl<T> AcpRegistry<T> {
         resume_ids: &[String],
         acp_sid: &str,
     ) -> Result<(), ResumeAcquireError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if !state.sessions.contains_key(acp_sid) {
             return Err(ResumeAcquireError::SessionMissing);
         }
@@ -125,7 +141,7 @@ impl<T> AcpRegistry<T> {
     /// 旧 provider 进程已经停止后，只保留本次 relaunch 使用的身份。调用方必须
     /// 先通过 `try_acquire_resumes` 占住新身份，避免“先释放、后启动”窗口。
     pub(crate) fn retain_resumes_for(&self, acp_sid: &str, keep: &[String]) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let keep = keep
             .iter()
             .filter(|resume_id| !resume_id.trim().is_empty())
@@ -153,7 +169,7 @@ impl<T> AcpRegistry<T> {
 
     /// 会话移除时释放它持有的全部 resume 占用。
     pub(crate) fn release_resume_for(&self, acp_sid: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if let Some(resume_ids) = state.session_resumes.remove(acp_sid) {
             for resume_id in resume_ids {
                 if state.resume_owners.get(&resume_id).map(String::as_str) == Some(acp_sid) {
@@ -170,11 +186,11 @@ impl<T> AcpRegistry<T> {
     ) -> (Arc<AcpSlot<T>>, bool) {
         use std::collections::hash_map::Entry;
 
-        match self.state.lock().unwrap().sessions.entry(id.to_string()) {
+        match self.lock_state().sessions.entry(id.to_string()) {
             Entry::Occupied(entry) => (Arc::clone(entry.get()), false),
             Entry::Vacant(entry) => {
                 let slot = Arc::new(AcpSlot {
-                    lifecycle: Mutex::new(()),
+                    lifecycle: SessionLock::new(()),
                     value: create(),
                 });
                 entry.insert(Arc::clone(&slot));
@@ -185,14 +201,14 @@ impl<T> AcpRegistry<T> {
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<Arc<AcpSlot<T>>> {
-        self.state.lock().unwrap().sessions.get(id).cloned()
+        self.lock_state().sessions.get(id).cloned()
     }
 
     /// 等 `id` 登记进来，最多等 `timeout`。已经在就立刻返回。
     pub(crate) fn wait_for(&self, id: &str, timeout: Duration) -> Option<Arc<AcpSlot<T>>> {
         let (state, _) = self
             .inserted
-            .wait_timeout_while(self.state.lock().unwrap(), timeout, |state| {
+            .wait_timeout_while(self.lock_state(), timeout, |state| {
                 !state.sessions.contains_key(id)
             })
             .unwrap();
@@ -216,7 +232,7 @@ impl<T> AcpRegistry<T> {
         expected: &Arc<AcpSlot<T>>,
         operation: impl FnOnce(&T) -> R,
     ) -> Option<R> {
-        let _lifecycle = expected.lifecycle.lock().unwrap();
+        let _lifecycle = expected.lifecycle.lock();
         if !self.is_current(id, expected) {
             return None;
         }
@@ -238,7 +254,7 @@ impl<T> AcpRegistry<T> {
         id: &str,
         expected: &Arc<AcpSlot<T>>,
     ) -> Option<Arc<AcpSlot<T>>> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let current = state.sessions.get(id)?;
         if !Arc::ptr_eq(current, expected) {
             return None;
@@ -256,10 +272,6 @@ impl<T> AcpRegistry<T> {
 
     pub(crate) fn spawn_gate(&self) -> Arc<RwLock<()>> {
         Arc::clone(&self.spawn_gate)
-    }
-
-    pub(crate) fn spawn_policy(&self) -> AcpSpawnPolicy {
-        self.spawn_policy
     }
 }
 
@@ -355,7 +367,7 @@ mod tests {
     fn current_operation_waits_for_the_slot_lifecycle() {
         let registry = Arc::new(AcpRegistry::new(Arc::new(RwLock::new(()))));
         let (slot, _) = registry.reserve_with("id", || 1usize);
-        let lifecycle = slot.lifecycle.lock().unwrap();
+        let lifecycle = slot.lifecycle.lock();
         let (started_tx, started_rx) = mpsc::channel();
         let (ran_tx, ran_rx) = mpsc::channel();
         let worker_registry = Arc::clone(&registry);

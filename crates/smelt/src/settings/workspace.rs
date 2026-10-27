@@ -62,7 +62,7 @@ impl Workspace {
             SliderState::new()
                 .min(60.0)
                 .max(100.0)
-                .step(5.0)
+                .step(1.0)
                 .default_value(ap.window_opacity() * 100.0)
         });
         let ui_font_size_slider = cx.new(|_| {
@@ -83,7 +83,7 @@ impl Workspace {
             SliderState::new()
                 .min(0.0)
                 .max(100.0)
-                .step(5.0)
+                .step(1.0)
                 .default_value(ap.bg_image_opacity.clamp(0.0, 1.0) * 100.0)
         });
         let bg_color_picker =

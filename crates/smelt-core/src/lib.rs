@@ -47,7 +47,6 @@ mod mirrors;
 pub mod new_session;
 pub mod runtime_generation;
 pub use smelt_model::osc;
-pub mod peer_link;
 pub mod pi_auth;
 pub mod pi_auth_service;
 pub mod pi_auto_models;

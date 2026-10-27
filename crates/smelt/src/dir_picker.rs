@@ -278,17 +278,14 @@ impl Workspace {
                     let path = entry.path.clone();
                     let is_dir = entry.is_dir;
                     let toggle_path = entry.path.clone();
-                    h_flex()
-                        .id(("dir-picker-entry", ix))
+                    smelt_ui::ListRow::new(("dir-picker-entry", ix))
+                        .card()
+                        .selected(selected)
+                        .flex()
                         .px_3()
                         .py_1p5()
                         .gap_2()
                         .items_center()
-                        
-                        .when(selected, |row| {
-                            row.bg(ui_theme::tint(ui_theme::action_fill(), 0x22))
-                        })
-                        .hover(|row| row.bg(ui_theme::overlay(0x14)))
                         .child(
                             Icon::new(if is_dir {
                                 IconName::Folder

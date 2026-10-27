@@ -6,6 +6,14 @@
 //! 对话也跟着变）。停机时会话目录把能续接的终端留下（见
 //! `SessionDirectory::keep_resumable_terminals`），崩溃时目录本来就整份留着；重启后它们是
 //! `runtime=false` 的目录条目，`open` 新建 PTY 前从这里取续接命令。
+//!
+//! 对话 id 在 CLI 退出后仍留着（侧栏身份、复制会话 id、改名都靠它）。能不能续接看
+//! `SessionState::cli_exited`：`SessionEnded` 把它置上之后，会话目录拒绝拼 `--resume`，
+//! 启动命令即便就是这家 CLI（`launch = "claude"`）也不续。
+//! 不发 `SessionEnded` 的 provider 没有「进程已退出」这个信号：用户回到 shell 之后，
+//! `cli_exited` 仍是 false，守护重启仍会按最后一次对话 id 续接。当前 hook 集里没有
+//! SessionEnd 的是 Antigravity 和 Kiro；Crush 没有生命周期 hook。OpenCode 只在会话被删除时
+//! 转发 SessionEnd，退出 TUI 回到 shell 通常不会发。
 
 use smelt_core::agent_kind::TerminalAgentKind;
 
@@ -20,10 +28,12 @@ pub(crate) struct ResumeLaunch {
 
 /// 这个终端能不能续接、怎么续接。
 ///
-/// 只有 hook 报过对话 id、这家 CLI 有续接语法时才续。启动命令就是这家 CLI 时带着原来
-/// 的参数（权限、配置目录这些）接回去；没有启动命令（在 shell 里手动起的）用这家的程序名，
-/// 退出后照样回到 shell。启动的是别的东西（脚本、别家 CLI），这家是后来在里面起的：不替
-/// 用户把这个终端改成别的命令，照旧起原来那条。
+/// 只有 hook 报过对话 id、这家 CLI 有续接语法时才续。`conversation_id` 为 None
+/// （还没报过）直接不续，启动命令是不是这家 CLI 都不看。进程已经退出由调用方
+/// 看 `cli_exited` 提前拒绝，这里不重复。
+/// 启动命令就是这家 CLI 时带着原来的参数（权限、配置目录这些）接回去；没有启动命令
+/// （在 shell 里手动起的）用这家的程序名，退出后照样回到 shell。启动的是别的东西
+/// （脚本、别家 CLI），这家是后来在里面起的：不替用户把这个终端改成别的命令，照旧起原来那条。
 pub(crate) fn resume_launch(
     launch: Option<&str>,
     provider: Option<&str>,
@@ -61,26 +71,13 @@ fn is_assignment(word: &str) -> bool {
     })
 }
 
-/// 对话 id 平常是 uuid 一类，原样拼进命令行。别的字符在 Unix 上加单引号；Windows 的
-/// `cmd` 没有对应的转义，不续接，照旧起原来那条。
+/// 对话 id 平常是 uuid 一类，原样拼进命令行；别的字符按终端用的 shell 引用。shell 引用
+/// 不了（cmd 碰上 `"`、`%`）就不续接，照旧起原来那条。
 fn quote_id(id: &str) -> Option<String> {
     if id.is_empty() {
         return None;
     }
-    if id
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        return Some(id.to_string());
-    }
-    #[cfg(windows)]
-    {
-        None
-    }
-    #[cfg(not(windows))]
-    {
-        Some(crate::shell_quote(id))
-    }
+    crate::terminal_shell::TerminalShell::detect().quote(id)
 }
 
 #[cfg(test)]

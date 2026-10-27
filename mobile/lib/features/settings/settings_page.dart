@@ -1,4 +1,4 @@
-/// 设置：机器（顺序、详情、配对新机器）、外观、终端、关于。
+/// 设置：机器（顺序、详情、配对新机器）、外观、终端、更新（只有安卓）、关于。
 ///
 /// 机器的一切状态都从 [FleetStore] 读，偏好从 [PreferencesStore] 读；这里只把它们摆出来，
 /// 改动直接写回去，不自己另存一份。
@@ -7,7 +7,9 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../data/app_update.dart';
 import '../../data/models.dart';
 import '../../data/preferences.dart';
 import '../../data/stores.dart';
@@ -67,7 +69,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final model = AppScope.of(context);
     final l10n = L10n.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([model.fleet, model.prefs]),
+      listenable: Listenable.merge([model.fleet, model.prefs, model.updater]),
       builder: (context, _) {
         final fleet = model.fleet.value;
         final prefs = model.prefs.value;
@@ -99,6 +101,18 @@ class _SettingsPageState extends State<SettingsPage> {
                 },
               ),
             ),
+            if (model.updater.value is! UpdateUnsupported)
+              SliverToBoxAdapter(
+                child: _UpdateSection(
+                  updater: model.updater,
+                  channel: prefs.updateChannel,
+                  onChannelChanged: (channel) {
+                    model.prefs.update(prefs.copyWith(updateChannel: channel));
+                    // 换了通道就照新通道再查一次。
+                    model.updater.check();
+                  },
+                ),
+              ),
             const SliverToBoxAdapter(child: _AboutSection()),
           ],
         );
@@ -400,6 +414,173 @@ class _TerminalSection extends StatelessWidget {
             ),
           ],
         ),
+      ],
+    );
+  }
+}
+
+/// 应用内更新：当前版本、状态、下一步该点的那一个按钮、通道。
+class _UpdateSection extends StatelessWidget {
+  const _UpdateSection({
+    required this.updater,
+    required this.channel,
+    required this.onChannelChanged,
+  });
+
+  final AppUpdater updater;
+  final UpdateChannel channel;
+  final ValueChanged<UpdateChannel> onChannelChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    final t = GalleyText.of(context);
+    final l10n = L10n.of(context);
+    final status = updater.value;
+    final text = switch (status) {
+      UpdateUnsupported() || UpdateIdle() => l10n.updateIdle,
+      UpdateChecking() => l10n.updateChecking,
+      UpdateUpToDate() => l10n.updateUpToDate,
+      UpdateAvailable(:final release) => l10n.updateAvailable(release.version),
+      UpdateDownloading(:final release, :final received, :final total?)
+          when total > 0 =>
+        l10n.updateDownloadingPercent(
+          release.version,
+          (received * 100 ~/ total).clamp(0, 100),
+        ),
+      UpdateDownloading(:final release) => l10n.updateDownloading(
+        release.version,
+      ),
+      UpdateReady(:final release) => l10n.updateReady(release.version),
+      UpdateNeedsPermission() => l10n.updateNeedsPermission,
+      UpdateInstalling() => l10n.updateInstalling,
+      UpdateFailed(stage: UpdateStage.check) => l10n.updateFailedCheck,
+      UpdateFailed(stage: UpdateStage.download) => l10n.updateFailedDownload,
+      UpdateFailed(stage: UpdateStage.verify) => l10n.updateFailedVerify,
+      UpdateFailed(stage: UpdateStage.install) => l10n.updateFailedInstall,
+    };
+    final failed = status is UpdateFailed;
+    // 当下该点的那一个。
+    final (String, VoidCallback)? action = switch (status) {
+      UpdateIdle() || UpdateUpToDate() => (l10n.updateCheck, updater.check),
+      UpdateFailed(stage: UpdateStage.check) => (
+        l10n.updateRetry,
+        updater.check,
+      ),
+      UpdateAvailable() => (l10n.updateDownload, updater.download),
+      UpdateFailed(stage: UpdateStage.download || UpdateStage.verify) => (
+        l10n.updateRetry,
+        updater.download,
+      ),
+      UpdateReady() => (l10n.updateInstall, updater.install),
+      UpdateFailed(stage: UpdateStage.install) => (
+        l10n.updateRetry,
+        updater.install,
+      ),
+      UpdateNeedsPermission() => (
+        l10n.updateGrantPermission,
+        updater.openInstallSettings,
+      ),
+      _ => null,
+    };
+    final release = switch (status) {
+      UpdateAvailable(:final release) ||
+      UpdateDownloading(:final release) ||
+      UpdateReady(:final release) ||
+      UpdateNeedsPermission(:final release) ||
+      UpdateInstalling(:final release) => release,
+      UpdateFailed(:final release) => release,
+      _ => null,
+    };
+    final notes = release?.notesUrl;
+    // 正在进行的才有进度条；拿得到总长度的给确定进度，否则跑不确定动画。
+    final busy =
+        status is UpdateChecking ||
+        status is UpdateDownloading ||
+        status is UpdateInstalling;
+    final progress = switch (status) {
+      UpdateDownloading(:final received, :final total?) when total > 0 =>
+        received / total,
+      _ => null,
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ShelfHeader(title: l10n.updateSection),
+        Shelf(
+          children: [
+            ShelfRow(
+              leading: Icon(
+                LucideIcons.download,
+                size: Strokes.icon,
+                color: c.ink,
+              ),
+              // 授权说明、失败原因比一行长，不截断。
+              title: Text(text, maxLines: 3),
+              titleStyle: t.body.copyWith(color: failed ? c.danger : null),
+              subtitle: updater.installedVersion == null
+                  ? null
+                  : Text(l10n.updateCurrentVersion(updater.installedVersion!)),
+            ),
+            if (busy)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: Space.lg),
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: Space.xxs,
+                ),
+              ),
+            if (action != null || notes != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Space.lg,
+                  Space.sm,
+                  Space.lg,
+                  Space.md,
+                ),
+                child: Wrap(
+                  spacing: Space.sm,
+                  runSpacing: Space.sm,
+                  children: [
+                    if (action case (final label, final onPressed))
+                      FilledButton(onPressed: onPressed, child: Text(label)),
+                    if (notes != null)
+                      TextButton(
+                        onPressed: () => launchUrl(
+                          Uri.parse(notes),
+                          mode: LaunchMode.externalApplication,
+                        ),
+                        child: Text(l10n.updateReleaseNotes),
+                      ),
+                  ],
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(Space.md),
+              child: SegmentedButton<UpdateChannel>(
+                showSelectedIcon: false,
+                expandedInsets: EdgeInsets.zero,
+                segments: [
+                  ButtonSegment(
+                    value: UpdateChannel.prod,
+                    label: Text(l10n.updateChannelProd),
+                  ),
+                  ButtonSegment(
+                    value: UpdateChannel.dev,
+                    label: Text(l10n.updateChannelDev),
+                  ),
+                ],
+                selected: {channel},
+                // 下载、安装中途不让换通道，免得手里的包和通道对不上。
+                onSelectionChanged: updater.canCheck
+                    ? (selection) => onChannelChanged(selection.first)
+                    : null,
+              ),
+            ),
+          ],
+        ),
+        _Footnote(text: l10n.updateChannelHint),
       ],
     );
   }

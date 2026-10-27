@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use super::daemon::DaemonOperation;
 
-/// 控制协议版本。只加方法不升它：客户端按 `system.describe` 的方法清单看运行时有没有
-/// 自己要用的方法。删方法、改已有方法的参数或结果才升，同时抬
+/// 控制协议版本。只加方法不升它：新方法记进 [`ControlMethod::OPTIONAL`]，客户端按
+/// `system.describe` 的方法清单看运行时有没有。删方法、改已有方法的参数或结果才升，同时抬
 /// [`CONTROL_API_MIN_SUPPORTED_VERSION`]，旧客户端据此知道该升级自己。
 ///
 /// v2：`workspace.load` / `workspace.save` 的文档改了形状（对话带稳定 id，终端平铺，
@@ -182,6 +182,22 @@ define_control_methods! {
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
+}
+
+impl ControlMethod {
+    /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加的方法。运行时可以
+    /// 没有：客户端不因缺它们判不兼容，用到它们的功能调到 MethodNotFound 时自己降级。
+    /// 新加方法都先放进来；抬最低版本时清空，它们成了新基线里的必需方法。
+    pub const OPTIONAL: &'static [Self] = &[
+        Self::AgentMemoryWatch,
+        Self::RemoteStatusWait,
+        Self::ResourceUsage,
+    ];
+
+    /// 运行时必须有这个方法：缺了就是运行时比客户端旧。
+    pub fn required(self) -> bool {
+        !Self::OPTIONAL.contains(&self)
+    }
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;

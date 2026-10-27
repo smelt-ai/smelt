@@ -3,18 +3,20 @@
 //! 快照构建和独立窗口生命周期留在父模块；这里只组装各设置页。
 //! 各页实现按主题拆到同目录的 sibling 模块。
 //!
-//! 左侧用默认全部展开的两级导航展示内容页；一级分类只负责分层与折叠，点击二级
-//! 入口只渲染对应页面，不再把整类设置堆进一个可滚动长页。
+//! 左侧导航按分组列出各页：分组只是一行小标题，不折叠、不缩进；点一页只渲染那一页，
+//! 不把整组设置堆进一个可滚动长页。
 
 use super::*;
+use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputState};
-use gpui_component::sidebar::{Sidebar, SidebarItem, SidebarMenuItem};
+use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_component::tag::Tag;
 
 mod agent;
 mod appearance;
 mod collaboration;
 mod maintenance;
+mod notify;
 mod panel_plugin;
 mod pi_auth;
 mod pi_mcp;
@@ -23,7 +25,7 @@ mod pi_model;
 mod pi_plugin;
 mod shortcuts;
 
-/// 渲染独立设置页面：左侧两级菜单切换内容页，右侧只显示当前选中项。
+/// 渲染独立设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。
 pub(super) fn render_settings_content(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -91,6 +93,7 @@ impl RenderOnce for SettingsShell {
                 self.entity.clone(),
                 &nav,
                 &selected,
+                self.snapshot.attention.as_ref(),
                 &query,
                 search,
                 cx,
@@ -103,6 +106,9 @@ impl RenderOnce for SettingsShell {
                         selected.element_key(),
                         self.snapshot.settings_page_nonce
                     )))
+                    // 每一节一张描边卡片。不用 Fill：它的底色是背景混 30% 的次级色，近黑主题上
+                    // 跟背景几乎分不出来；描边在各主题下都看得见。
+                    .with_group_variant(GroupBoxVariant::Outline)
                     .sidebar_width(px(0.))
                     .sidebar_size_range(px(0.)..px(0.))
                     .pages(vec![page]),
@@ -115,6 +121,7 @@ fn render_nav(
     entity: Entity<Workspace>,
     nav: &[SettingsNavCategory],
     selected: &SettingsSection,
+    attention: Option<&SettingsSection>,
     query: &str,
     search: Entity<InputState>,
     cx: &App,
@@ -151,78 +158,52 @@ fn render_nav(
         .collapsible(false)
         .collapsed(false)
         .header(header)
-        .child(SettingsNavMenu {
-            collapsed: false,
-            items: nav
-                .iter()
-                .map(|category| {
-                    (
-                        category.id,
-                        SidebarMenuItem::new(category.title)
-                            .default_open(category.default_open)
-                            .click_to_toggle(true)
-                            .children(category.children.iter().map(|child| {
-                                let is_active = selected == &child.section;
-                                let entity = entity.clone();
-                                let section = child.section.clone();
-                                SidebarMenuItem::new(child.title.clone())
-                                    .icon(child.icon.clone())
-                                    .active(is_active)
-                                    .on_click(move |_, _, cx| {
-                                        select_section(&entity, section.clone(), cx)
-                                    })
-                            })),
-                    )
-                })
-                .collect(),
-        })
-}
-
-#[derive(Clone)]
-struct SettingsNavMenu {
-    collapsed: bool,
-    items: Vec<(SettingsCategoryId, SidebarMenuItem)>,
-}
-
-impl Collapsible for SettingsNavMenu {
-    fn is_collapsed(&self) -> bool {
-        self.collapsed
-    }
-
-    fn collapsed(mut self, collapsed: bool) -> Self {
-        self.collapsed = collapsed;
-        self
-    }
-}
-
-impl SidebarItem for SettingsNavMenu {
-    fn render(
-        self,
-        _id: impl Into<ElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let mut items = Vec::with_capacity(self.items.len());
-        for (id, item) in self.items {
-            items.push(
-                item.collapsed(self.collapsed)
-                    .render(format!("settings-cat-{}", id.as_str()), window, cx)
-                    .into_any_element(),
-            );
-        }
-        v_flex().gap_2().children(items)
-    }
+        .children(nav.iter().enumerate().map(|(ix, category)| {
+            // 组与组之间空一截：上游 Sidebar 的列表项之间没有间距，小标题也不带上边距，
+            // 不空开的话两组贴在一起像一组。
+            let menu = if ix + 1 == nav.len() {
+                SidebarMenu::new()
+            } else {
+                SidebarMenu::new().pb_4()
+            };
+            SidebarGroup::new(category.title).child(menu.children(
+                category.children.iter().map(|child| {
+                    let entity = entity.clone();
+                    let section = child.section.clone();
+                    let item = SidebarMenuItem::new(child.title.clone())
+                        .icon(child.icon.clone())
+                        .active(selected == &child.section)
+                        .on_click(move |_, _, cx| select_section(&entity, section.clone(), cx));
+                    // 有要处理的事的那一页标个红点，跟侧栏「设置」上的是同一件事。
+                    if attention == Some(&child.section) {
+                        item.suffix(|_, _| {
+                            div()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(rgb(crate::ui_theme::red()))
+                        })
+                    } else {
+                        item
+                    }
+                }),
+            ))
+        }))
 }
 
 fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut App) {
     entity.update(cx, |workspace, cx| {
         if workspace.settings_section != section {
-            // 机器页的延迟平时只在连接换路径时读，切过去重读一次。
-            let machines = section == SettingsSection::CollaborationMachines;
+            // 远程页的延迟平时只在连接换路径时读，切过去重读一次。
+            let remote = section == SettingsSection::Remote;
+            // 资源页只在看得见时采样：切过去要叫醒采样循环；离开也叫醒，循环才能确认
+            // 看不见了，马上睡下，不用再等一轮。
+            let resources = section == SettingsSection::Resources
+                || workspace.settings_section == SettingsSection::Resources;
             workspace.settings_section = section;
-            // 资源页只在看得见时采样：切过去要叫醒采样循环。
-            workspace.wake_resource_monitor();
-            if machines {
+            if resources {
+                workspace.wake_resource_monitor();
+            }
+            if remote {
                 crate::runtimes::sample_links(cx);
             }
             cx.notify();
@@ -236,37 +217,25 @@ fn section_page(
     selected: &SettingsSection,
     cx: &App,
 ) -> SettingPage {
-    // 这几页改的是本机运行时上的配置（引擎、启动项、对话命令、CLI）。
-    let local_runtime_only = matches!(
-        selected,
-        SettingsSection::AgentRuntime
-            | SettingsSection::AgentLaunch
-            | SettingsSection::AgentWorkspace
-    );
-    let page = match selected {
-        SettingsSection::AppearanceTheme => appearance::theme_page(entity, snapshot, cx),
-        SettingsSection::AppearanceTerminal => appearance::terminal_page(entity, snapshot, cx),
-        SettingsSection::AppearanceWindow => appearance::window_page(entity, snapshot, cx),
-        SettingsSection::AgentRuntime => agent::runtime_page(entity, snapshot, cx),
-        SettingsSection::AgentLaunch => agent::launch_page(entity, snapshot, cx),
-        SettingsSection::AgentWorkspace => agent::workspace_page(entity, snapshot, cx),
-        SettingsSection::AgentNotify => agent::notify_page(entity, snapshot, cx),
-        SettingsSection::AgentHooks => agent::hooks_page(entity, snapshot, cx),
-        SettingsSection::CollaborationMachines => collaboration::machines_page(),
-        SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
-        #[cfg(target_os = "macos")]
-        SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),
-        SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
-        SettingsSection::MaintenanceResources => {
-            crate::resource_monitor::resources_page(entity, snapshot.resources.clone())
-        }
-        SettingsSection::MaintenanceStorage => maintenance::storage_page(cx),
+    match selected {
+        SettingsSection::Appearance => appearance::appearance_page(entity, snapshot, cx),
+        SettingsSection::Notifications => notify::notify_page(),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
         SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
-    };
-    if local_runtime_only && crate::runtimes::has_remote_runtimes(cx) {
-        page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())
-    } else {
-        page
+        SettingsSection::Agents => {
+            let page = agent::agents_page(entity, snapshot, cx);
+            // 这一页改的都是本机运行时上的东西（CLI、hooks、启动命令）。
+            if crate::runtimes::has_remote_runtimes(cx) {
+                page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())
+            } else {
+                page
+            }
+        }
+        SettingsSection::Remote => collaboration::remote_page(entity, snapshot, cx),
+        SettingsSection::Resources => {
+            crate::resource_monitor::resources_page(entity, snapshot.resources.clone())
+        }
+        SettingsSection::Maintenance => maintenance::maintenance_page(entity, snapshot, cx),
+        SettingsSection::About => maintenance::about_page(entity, snapshot, cx),
     }
 }

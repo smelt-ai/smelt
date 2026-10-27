@@ -545,7 +545,10 @@ fn replay_commit_keeps_a_recovered_question_answerable() {
     assert_eq!(state.turn_outcome, None);
     assert!(matches!(
         state.entries.last(),
-        Some(AcpEntry::ToolCall { status: ToolCallStatus::Pending, .. })
+        Some(AcpEntry::ToolCall {
+            status: ToolCallStatus::Pending,
+            ..
+        })
     ));
 }
 
@@ -1619,6 +1622,48 @@ fn cancelled_turn_does_not_accept_another_steer() {
     assert!(
         !accepts_mid_turn_steer(&settled),
         "界面已停、Pi 闸门还没放开时不能再插入当前回合"
+    );
+}
+
+/// 审批请求只带了标题时，用之前那条 tool_call 的参数认出对象，卡片上看得到网址。
+#[test]
+fn a_bare_permission_names_its_target_from_the_earlier_tool_call() {
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "look it up".into(), Vec::new());
+    apply_event(
+        &mut s,
+        ConversationEvent::ToolDebug {
+            id: "fetch-1".into(),
+            name: None,
+            raw_input: Some(serde_json::json!({"url": "https://example.com/docs"})),
+        },
+    );
+    let ConversationEvent::Permission {
+        tool_call_id,
+        pub_options,
+        responder,
+        details,
+        raw_request_line,
+        ..
+    } = late_permission_event("fetch-1")
+    else {
+        unreachable!();
+    };
+    apply_event(
+        &mut s,
+        ConversationEvent::Permission {
+            question: "Fetch URL".into(),
+            tool_call_id,
+            pub_options,
+            responder,
+            details,
+            raw_request_line,
+        },
+    );
+    assert_eq!(s.permissions.len(), 1);
+    assert_eq!(
+        s.permissions[0].question,
+        "Fetch URL：https://example.com/docs"
     );
 }
 
@@ -3276,6 +3321,43 @@ fn hosted_snapshot_merge_replaces_incremental_tail_and_runtime_state() {
     ));
     assert_eq!(state.phase, DaemonPhase::Thinking);
     assert_eq!(state.turn_started_at_ms, Some(123));
+}
+
+#[test]
+fn trimming_to_the_current_turn_drops_the_committed_prefix() {
+    let mut state = AcpSessionState {
+        entries: vec![
+            AcpEntry::User("第一轮".into()),
+            AcpEntry::Assistant {
+                text: "旧回答".into(),
+                thought: false,
+            },
+            AcpEntry::User("第二轮".into()),
+            AcpEntry::Assistant {
+                text: "刚结束的回答".into(),
+                thought: false,
+            },
+        ],
+        phase: DaemonPhase::Idle,
+        ..Default::default()
+    };
+    state.trim_to_current_turn();
+    assert_eq!(state.entries_base(), 2);
+    assert_eq!(state.entries_total(), 4);
+    assert!(matches!(
+        state.entries(),
+        [AcpEntry::User(user), AcpEntry::Assistant { text, thought: false }]
+            if user == "第二轮" && text == "刚结束的回答"
+    ));
+
+    let mut single = AcpSessionState {
+        entries: vec![AcpEntry::User("只有一轮".into())],
+        phase: DaemonPhase::Idle,
+        ..Default::default()
+    };
+    single.trim_to_current_turn();
+    assert_eq!(single.entries_base(), 0);
+    assert_eq!(single.entries().len(), 1);
 }
 
 #[test]

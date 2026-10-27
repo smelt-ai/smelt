@@ -5,9 +5,9 @@
 use gpui::{Action, KeyBinding, KeyContext, Keymap, Keystroke};
 
 use crate::{
-    ActivateSession, ClosePane, CyclePanePrev, DismissWorkspace, FileTreeActivate, FileTreeMoveUp,
-    NextHunk, PrevHunk, Quit, SaveFile, SplitBelow, SplitBeside, ToggleCommandPalette,
-    app_key_bindings, workspace_key_context,
+    ActivateSession, ClosePane, CloseSettingsWindow, CyclePanePrev, DismissWorkspace,
+    FileTreeActivate, FileTreeMoveUp, NextHunk, PrevHunk, Quit, SaveFile, SplitBelow, SplitBeside,
+    ToggleCommandPalette, app_key_bindings, workspace_key_context,
 };
 
 fn keymap() -> Keymap {
@@ -163,4 +163,11 @@ fn migrated_chords_are_not_bound_at_the_root_context() {
             "{spec} 不该在没有 Workspace / Files / GitChanges / FileTree 时命中"
         );
     }
+}
+
+/// 设置窗口 Cmd+W（Windows / Linux 是 Ctrl+W）关窗；它是普通窗口，Esc 不关它。
+#[test]
+fn settings_window_closes_on_secondary_w_but_not_escape() {
+    assert!(first_is::<CloseSettingsWindow>("secondary-w", &["SettingsWindow"]));
+    assert!(matched("escape", &["SettingsWindow"]).is_empty());
 }

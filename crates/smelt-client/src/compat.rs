@@ -47,8 +47,9 @@ impl fmt::Display for Incompatibility {
 
 /// 这个桌面能不能用这个运行时。
 ///
-/// 控制方法：运行时支持的协议版本区间要包含桌面的，还要有桌面认得的全部方法（方法只增
-/// 不改，缺了就是运行时旧）。事件：总线协议和核心投影要相同，会话投影和会话状态事件
+/// 控制方法：运行时支持的协议版本区间要包含桌面的，还要有全部必需方法（方法只增不改，
+/// 缺了就是运行时旧）。可选方法（[`ControlMethod::OPTIONAL`]）缺了不算：只有那一项功能
+/// 用不了，由用它的地方降级，不能为此把整台机器的终端和对话都拦在外面。事件：总线协议和核心投影要相同，会话投影和会话状态事件
 /// 不能比桌面新（新字段都可缺省，桌面解得了更旧的）。
 pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
     check_versions(described).map_err(|(outdated, reason)| Incompatibility {
@@ -74,6 +75,7 @@ fn check_versions(described: &SystemDescribeResult) -> Result<(), (Outdated, Str
     }
     let missing: Vec<&str> = ControlMethod::ALL
         .iter()
+        .filter(|method| method.required())
         .map(|method| method.as_str())
         .filter(|name| !control.methods.iter().any(|known| known == name))
         .collect();
@@ -217,6 +219,20 @@ mod tests {
         let error = check(&described).unwrap_err();
         assert_eq!(error.outdated, Outdated::Runtime);
         assert!(error.reason.contains("conversation.create_for_agent"));
+    }
+
+    /// 最低协议版本之后才加的方法，旧运行时没有也照常连：只是那一项功能用不了。
+    #[test]
+    fn missing_optional_methods_are_still_compatible() {
+        let mut described = current();
+        described.control.methods.retain(|method| {
+            ControlMethod::from_wire_name(method).is_none_or(ControlMethod::required)
+        });
+        assert!(
+            !ControlMethod::OPTIONAL.is_empty(),
+            "这条测试要真的去掉了可选方法才有意义"
+        );
+        assert_eq!(check(&described), Ok(()));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自
 //! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
+use smelt_client::runtime_path::PathStyle;
 use smelt_runtime_client::RuntimeClient;
 
 pub(crate) use smelt_client::runtime::{Runtime, RuntimeKey};
@@ -33,6 +34,21 @@ pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
             smelt_paths::smelt_home().and_then(|path| path.to_str().map(str::to_owned))
         }
         RuntimeKey::Remote(_) => remote_of(key, cx)?.connection.smelt_home.clone(),
+    }
+}
+
+/// 那台机器上的路径（会话 cwd、项目根）按哪种系统的规则切：本机就是这台电脑；远程的取
+/// 连上时记下的 `os`，还没连上过当 POSIX——运行时开始支持 Windows 之前就在报 `os` 了，
+/// 不报的只会是 Linux、macOS。
+pub(crate) fn path_style(key: &RuntimeKey, cx: &gpui::App) -> PathStyle {
+    match key {
+        RuntimeKey::Local => PathStyle::LOCAL,
+        RuntimeKey::Remote(_) => {
+            match remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()) {
+                Some("windows") => PathStyle::Windows,
+                _ => PathStyle::Posix,
+            }
+        }
     }
 }
 
@@ -70,7 +86,7 @@ pub(crate) fn has_remote_runtimes(cx: &gpui::App) -> bool {
         .is_some_and(|hub| !hub.remotes.is_empty())
 }
 
-/// 设置、能力库里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
+/// 设置里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
 /// 对远程不生效，得说清楚。
 pub(crate) fn local_runtime_scope_chip() -> gpui_component::tag::Tag {
     use gpui::{ParentElement as _, Styled as _};
@@ -125,11 +141,36 @@ pub(crate) enum RuntimeStatus {
         /// 运行时自己报的版本。
         version: String,
         detail: String,
-        /// 是运行时旧：可以请它升到这个桌面的版本（见 [`push_upgrade`]）。
-        runtime_outdated: bool,
+        fix: IncompatibleFix,
     },
     /// 正在请它升到这个桌面的版本，带着给人看的进展。
     Upgrading(String),
+}
+
+/// 版本对不上时该升级哪一边、怎么升。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IncompatibleFix {
+    /// 运行时旧，桌面请它自己升到这个桌面的版本（见 [`push_upgrade`]）。
+    UpgradeRuntime,
+    /// 运行时旧，但它随那台机器上的 Smelt 一起更新，桌面请不动它（见 [`upgrades_remotely`]）。
+    /// 本机守护照样由桌面重启换上 App 里的那份。
+    UpdateSmeltThere,
+    /// 运行时比桌面新：升级这个桌面。
+    UpdateDesktop,
+}
+
+impl IncompatibleFix {
+    /// 运行时比桌面旧。
+    pub(crate) fn runtime_outdated(self) -> bool {
+        !matches!(self, Self::UpdateDesktop)
+    }
+}
+
+/// 这台运行时能不能由桌面远程升级。`runtime_upgrade` 只在 Linux 上实现：Windows 和
+/// macOS 上运行时随那台机器上的 Smelt 桌面一起更新。不报 `os` 的旧运行时照常请它升，
+/// 它不认这个请求时 [`push_upgrade`] 回 `Unsupported`。
+pub(crate) fn upgrades_remotely(os: Option<&str>) -> bool {
+    os.is_none_or(|os| os == "linux")
 }
 
 /// 一个登记过的远程运行时。
@@ -283,6 +324,10 @@ fn indicator(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> RuntimeIndic
     };
     let detail = match status {
         RuntimeStatus::Offline(error) => format!("离线：{error}"),
+        // 光说对不上不够：悬停要看得到为什么、该升级哪一边。
+        RuntimeStatus::Incompatible { detail, .. } if !detail.is_empty() => {
+            format!("{}\n{detail}", link_text(status, link).0)
+        }
         _ => link_text(status, link).0,
     };
     RuntimeIndicator {
@@ -330,7 +375,7 @@ pub(crate) fn runtime_indicator(key: &RuntimeKey, cx: &gpui::App) -> Option<Runt
     }
 }
 
-/// 一台机器的完整连接说明，设置「机器」页用。
+/// 一台机器的完整连接说明，设置「远程」页的机器一节用。
 pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, LinkTone) {
     match key {
         RuntimeKey::Local => ("这台 Mac".to_string(), LinkTone::Muted),
@@ -357,14 +402,22 @@ pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
     })
 }
 
-/// 远程机器眼下连得上（在线，或连上了但版本对不上）：可以请它升级。升级走守护协议的
-/// `runtime_upgrade`，不经控制方法，版本对不上也发得过去。
+/// 远程机器眼下连得上（在线，或运行时旧得对不上），而且能远程升级：可以请它升级。
+/// 升级走守护协议的 `runtime_upgrade`，不经控制方法，版本对不上也发得过去。
+/// 随 Smelt 桌面更新的运行时（Windows、macOS）不给这一项，见 [`upgrades_remotely`]。开发构建
+/// 没有对应的发版可升，也不给。
 pub(crate) fn runtime_can_upgrade(key: &RuntimeKey, cx: &gpui::App) -> bool {
-    remote_of(key, cx).is_some_and(|remote| {
-        matches!(
-            remote.status,
-            RuntimeStatus::Online { .. } | RuntimeStatus::Incompatible { .. }
-        )
+    if smelt_version::RELEASE.is_none() {
+        return false;
+    }
+    remote_of(key, cx).is_some_and(|remote| match &remote.status {
+        RuntimeStatus::Online { platform, .. } => upgrades_remotely(
+            platform
+                .as_deref()
+                .and_then(|platform| platform.split('/').next()),
+        ),
+        RuntimeStatus::Incompatible { fix, .. } => *fix == IncompatibleFix::UpgradeRuntime,
+        _ => false,
     })
 }
 
@@ -426,7 +479,7 @@ pub(crate) struct RuntimeHub {
     /// 最近一次添加、移除的失败原因。
     pub(crate) error: Option<String>,
     /// 启动时没读出登记过的机器（比如客户端库版本比程序新）。这时列表里只剩本机，不说
-    /// 一声就像机器全丢了，所以设置「机器」页要显示它。
+    /// 一声就像机器全丢了，所以设置「远程」页的机器一节要显示它。
     pub(crate) load_error: Option<String>,
     /// 本机守护最近一次探到的状态，订阅线程报来（见 `runtime_events`）。还没探过是 `None`。
     pub(crate) local_status: Option<RuntimeStatus>,
@@ -645,16 +698,31 @@ pub(crate) fn status_of(client: &RuntimeClient) -> RuntimeStatus {
     }
 }
 
-fn incompatible_status(incompatible: &smelt_client::compat::Incompatibility) -> RuntimeStatus {
+fn incompatible_status(
+    incompatible: &smelt_client::compat::Incompatibility,
+    os: Option<&str>,
+) -> RuntimeStatus {
+    use smelt_client::compat::Outdated;
+
+    let fix = match incompatible.outdated {
+        Outdated::Desktop => IncompatibleFix::UpdateDesktop,
+        Outdated::Runtime if upgrades_remotely(os) => IncompatibleFix::UpgradeRuntime,
+        Outdated::Runtime => IncompatibleFix::UpdateSmeltThere,
+    };
     RuntimeStatus::Incompatible {
         version: incompatible.runtime_version.clone(),
         detail: incompatible.to_string(),
-        runtime_outdated: incompatible.outdated == smelt_client::compat::Outdated::Runtime,
+        fix,
     }
 }
 
-/// 这个桌面的版本：请远程运行时升级时就升到它。
-pub(crate) const DESKTOP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 这个桌面出自的发版：请远程运行时升级时就升到它。tag 之后的构建，完整版本号带构建信息（见
+/// `smelt_version`），升级要的是 GitHub 上真有的那个 Release。开发构建没有对应的发版，这里
+/// 退回完整版本号只为显示，[`push_upgrade`] 不拿它去请运行时升级。
+pub(crate) const DESKTOP_VERSION: &str = match smelt_version::RELEASE {
+    Some(release) => release,
+    None => smelt_version::VERSION,
+};
 
 /// 请运行时升级（[`push_upgrade`]）的结局。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -677,6 +745,15 @@ const PUSH_UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// 请远程运行时升到这个桌面的版本：它自己去 GitHub Release 下载、装好、交接（协议见
 /// `smelt_runtime_client::protocol::runtime_upgrade`）。阻塞，只在后台调。
 pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
+    match smelt_version::RELEASE {
+        Some(release) => push_upgrade_to(client, release),
+        None => PushUpgrade::Failed(
+            "这是开发构建，没有对应的发版可升：用发布的 Smelt 来升级这台运行时".to_string(),
+        ),
+    }
+}
+
+fn push_upgrade_to(client: &RuntimeClient, version: &str) -> PushUpgrade {
     use smelt_runtime_client::protocol::daemon::DaemonOperation;
     use smelt_runtime_client::protocol::runtime_upgrade::RuntimeUpgradeReply;
     use std::io::BufRead as _;
@@ -687,7 +764,7 @@ pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
     };
     let request = serde_json::json!({
         "op": DaemonOperation::RuntimeUpgrade,
-        "version": DESKTOP_VERSION,
+        "version": version,
     });
     if let Err(error) = smelt_runtime_client::protocol::write_json_line(&mut stream, &request) {
         return PushUpgrade::Failed(format!("发不出升级请求：{error}"));
@@ -728,7 +805,7 @@ fn described_status(
     described: smelt_runtime_client::protocol::control::SystemDescribeResult,
 ) -> RuntimeStatus {
     if let Err(incompatible) = smelt_client::compat::check(&described) {
-        return incompatible_status(&incompatible);
+        return incompatible_status(&incompatible, described.daemon.os.as_deref());
     }
     RuntimeStatus::Online {
         desktop: described.daemon.desktop.unwrap_or(false),
@@ -757,7 +834,7 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
         return;
     }
     let online = matches!(status, RuntimeStatus::Online { .. });
-    let mut learned_home = None;
+    let mut learned = None;
     update_hub(cx, |hub| match key {
         RuntimeKey::Local => hub.local_status = Some(status),
         RuntimeKey::Remote(_) => {
@@ -766,16 +843,33 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
                 .iter_mut()
                 .find(|remote| remote.runtime.key() == key)
             {
-                // SMELT_HOME 记在机器上并落库：离线时、下次启动还没连上时也要认得出它的
-                // 智能体对话。
+                // SMELT_HOME 和所在系统记在机器上并落库：离线时、下次启动还没连上时也要
+                // 认得出它的智能体对话、切得对它的路径。
                 if let RuntimeStatus::Online {
-                    smelt_home: Some(home),
+                    smelt_home,
+                    platform,
                     ..
                 } = &status
-                    && remote.connection.smelt_home.as_ref() != Some(home)
                 {
-                    remote.connection.smelt_home = Some(home.clone());
-                    learned_home = Some(remote.connection.clone());
+                    let os = platform
+                        .as_deref()
+                        .and_then(|platform| platform.split('/').next());
+                    let mut changed = false;
+                    if let Some(home) = smelt_home
+                        && remote.connection.smelt_home.as_ref() != Some(home)
+                    {
+                        remote.connection.smelt_home = Some(home.clone());
+                        changed = true;
+                    }
+                    if let Some(os) = os
+                        && remote.connection.os.as_deref() != Some(os)
+                    {
+                        remote.connection.os = Some(os.to_string());
+                        changed = true;
+                    }
+                    if changed {
+                        learned = Some(remote.connection.clone());
+                    }
                 }
                 if !connected(&status) {
                     remote.link = None;
@@ -784,13 +878,13 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
             }
         }
     });
-    if let Some(connection) = learned_home {
+    if let Some(connection) = learned {
         cx.background_executor()
             .spawn(async move {
                 if let Err(error) = smelt_client_store::client_store()
                     .and_then(|store| store.put_runtime_connection(&connection))
                 {
-                    eprintln!("[runtimes] 保存机器的 SMELT_HOME 失败：{error}");
+                    eprintln!("[runtimes] 保存机器的 SMELT_HOME / 系统失败：{error}");
                 }
             })
             .detach();
@@ -1073,6 +1167,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         endpoint_id: pairing.endpoint_id,
         relay_url: pairing.relay_url,
         smelt_home: None,
+        os: None,
         added_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as i64)
@@ -1102,6 +1197,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         .clone()
         .unwrap_or_else(|| connection.endpoint_id.chars().take(8).collect());
     connection.smelt_home = described.daemon.smelt_home.clone();
+    connection.os = described.daemon.os.clone();
     smelt_client_store::client_store()
         .and_then(|store| store.put_runtime_connection(&connection))
         .map_err(|error| format!("保存运行时失败：{error}"))?;
@@ -1157,9 +1253,11 @@ pub(crate) fn runtime_relay(key: &RuntimeKey, cx: &gpui::App) -> String {
 /// 改一台远程机器的中继，`relay` 空着就是 n0 的公共 relay。
 ///
 /// 在线：先请它自己改用新中继（它的远程配置），成了再改这边记下的地址。顺序不能反：先改
-/// 这边就连不上它，没法再请它改。不在线：只改这边记下的——那台机器多半已经在那边改过
-/// （`smeltd relay`），这边跟上才连得回去。改完立刻重连，开着的终端和对话下次开流就走
-/// 新中继（见 [`RemoteRoute`]）。
+/// 这边就连不上它，没法再请它改。它换中继会关掉回复要走的那条连接，回复常常丢：丢了就
+/// 按新中继连过去读它的配置，确认改了再记（见 [`RelaySetReply`]）。
+///
+/// 不在线：只改这边记下的——那台机器多半已经在那边改过（`smeltd relay`），这边跟上才
+/// 连得回去。改完立刻重连，开着的终端和对话下次开流就走新中继（见 [`RemoteRoute`]）。
 pub(crate) fn set_runtime_relay(
     runtime_id: String,
     relay: String,
@@ -1192,10 +1290,29 @@ pub(crate) fn set_runtime_relay(
                         .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
                         .map_err(|error| format!("读不到那台机器的远程配置：{error}"))?;
                     if config.iroh_relay != relay {
-                        config.iroh_relay = relay;
-                        client
-                            .call::<RemoteConfigSet>(&config, timeout)
-                            .map_err(|error| format!("那台机器没改成：{error}"))?;
+                        config.iroh_relay = relay.clone();
+                        match relay_set_reply(client.call::<RemoteConfigSet>(&config, timeout)) {
+                            RelaySetReply::Applied => {}
+                            RelaySetReply::Rejected(error) => {
+                                return Err(format!("那台机器没改成：{error}"));
+                            }
+                            // 改没改成以它眼下的配置为准：按新中继连过去问一次。它要重绑
+                            // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。
+                            RelaySetReply::Lost(error) => {
+                                let (confirm, _route) = remote_client(&saved)?;
+                                let now = confirm
+                                    .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
+                                    .map_err(|confirm_error| {
+                                        format!(
+                                            "没收到那台机器的回复（{error}），按新中继也没连上它\
+                                             （{confirm_error}）"
+                                        )
+                                    })?;
+                                if now.iroh_relay != relay {
+                                    return Err(format!("那台机器没改成：{error}"));
+                                }
+                            }
+                        }
                     }
                 }
                 smelt_client_store::client_store()
@@ -1219,6 +1336,28 @@ pub(crate) fn set_runtime_relay(
         });
         Ok(())
     })
+}
+
+/// 请远程机器改中继之后，从回复里能看出的结果。
+#[derive(Debug, PartialEq, Eq)]
+enum RelaySetReply {
+    Applied,
+    /// 它明确回了错：没改。
+    Rejected(String),
+    /// 没拿到回复。它换中继要关掉旧 endpoint，回复走的正是这条连接，常常发不回来；
+    /// 这时它多半已经改了，不能当成没改。
+    Lost(String),
+}
+
+fn relay_set_reply<T>(
+    result: Result<T, smelt_runtime_client::protocol::control::ControlClientError>,
+) -> RelaySetReply {
+    use smelt_runtime_client::protocol::control::ControlClientError;
+    match result {
+        Ok(_) => RelaySetReply::Applied,
+        Err(error @ ControlClientError::Protocol(_)) => RelaySetReply::Rejected(error.to_string()),
+        Err(error) => RelaySetReply::Lost(error.to_string()),
+    }
 }
 
 /// 配对要走公网拨号，比本机调用慢得多。
@@ -1315,7 +1454,8 @@ mod tests {
                         endpoint_id: String::new(),
                         relay_url: None,
                         added_at_ms: 0,
-                        smelt_home: Some("/home/far/.smelt".into()),
+                        smelt_home: Some("C:\\Users\\far\\.smelt".into()),
+                        os: Some("windows".into()),
                     },
                     runtime: remote_runtime(
                         "far",
@@ -1340,9 +1480,45 @@ mod tests {
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
             assert!(client(&RuntimeKey::Local, cx).is_some());
             // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
-            assert_eq!(smelt_home(&far, cx), Some("/home/far/.smelt".to_string()));
+            assert_eq!(
+                smelt_home(&far, cx),
+                Some("C:\\Users\\far\\.smelt".to_string())
+            );
             assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
+            // 路径按那台机器的系统切，跟本机是什么系统无关。
+            assert_eq!(path_style(&far, cx), PathStyle::Windows);
+            assert_eq!(
+                path_style(&RuntimeKey::Remote("gone".into()), cx),
+                PathStyle::Posix
+            );
+            assert_eq!(path_style(&RuntimeKey::Local, cx), PathStyle::LOCAL);
         });
+    }
+
+    /// 改中继的回复丢了不等于没改：那台机器换中继时会关掉回复要走的那条连接。
+    #[test]
+    fn lost_relay_reply_is_not_taken_as_rejected() {
+        use smelt_runtime_client::protocol::control::{
+            ControlClientError, ControlError, ControlErrorCode,
+        };
+        assert_eq!(relay_set_reply(Ok(())), RelaySetReply::Applied);
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::Protocol(ControlError::new(
+                ControlErrorCode::InvalidParams,
+                "bad relay",
+            )))),
+            RelaySetReply::Rejected(_)
+        ));
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::Transport(
+                "smeltd closed the control request without a response".into()
+            ))),
+            RelaySetReply::Lost(_)
+        ));
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::InvalidResponse("eof".into()))),
+            RelaySetReply::Lost(_)
+        ));
     }
 
     #[test]
@@ -1371,7 +1547,7 @@ mod tests {
         assert!(!link_changed(None, None));
     }
 
-    /// 设置「机器」页里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
+    /// 设置「远程」页的机器一节里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
     #[test]
     fn the_machine_panel_spells_the_link_out() {
         let status = online();
@@ -1394,7 +1570,7 @@ mod tests {
         let incompatible = RuntimeStatus::Incompatible {
             version: "0.9.0-rc.3".into(),
             detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，桌面要 v2）".into(),
-            runtime_outdated: true,
+            fix: IncompatibleFix::UpgradeRuntime,
         };
         assert_eq!(
             link_text(
@@ -1435,7 +1611,7 @@ mod tests {
             &RuntimeStatus::Incompatible {
                 version: "0.9.0".into(),
                 detail: String::new(),
-                runtime_outdated: true,
+                fix: IncompatibleFix::UpgradeRuntime,
             },
             None,
         );
@@ -1537,16 +1713,51 @@ mod tests {
         let RuntimeStatus::Incompatible {
             version,
             detail,
-            runtime_outdated,
+            fix,
         } = status_of(&describe_without("workspace.load"))
         else {
             panic!("缺方法的运行时应判为不兼容");
         };
-        assert!(runtime_outdated, "运行时旧，可以请它升级");
+        assert_eq!(
+            fix,
+            IncompatibleFix::UpgradeRuntime,
+            "Linux 运行时旧，可以请它升级"
+        );
         assert_eq!(version, "0.0.1");
         assert!(detail.contains("0.0.1"), "{detail}");
         assert!(detail.contains("需要升级运行时"), "{detail}");
         assert!(detail.contains("workspace.load"), "{detail}");
+    }
+
+    /// Windows 上的运行时随那台机器上的 Smelt 一起更新：旧了也不请它远程升级。
+    #[test]
+    fn older_windows_runtime_is_updated_on_that_machine() {
+        use smelt_runtime_client::protocol::control::ControlResponse;
+        let client = runtime_answering(|request| {
+            let request_id = request["request_id"].as_str().unwrap();
+            let mut described = described_without("workspace.load");
+            described.daemon.os = Some("windows".to_string());
+            serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
+        });
+        let RuntimeStatus::Incompatible { fix, .. } = status_of(&client) else {
+            panic!("缺必需方法的运行时应判为不兼容");
+        };
+        assert_eq!(fix, IncompatibleFix::UpdateSmeltThere);
+        assert!(fix.runtime_outdated());
+    }
+
+    /// 只缺最低协议版本之后才加的方法：照常在线，那一项功能自己降级。
+    #[test]
+    fn runtime_missing_only_optional_methods_is_online() {
+        use smelt_runtime_client::protocol::control::ControlMethod;
+        let optional = ControlMethod::OPTIONAL
+            .first()
+            .expect("至少有一个可选方法")
+            .as_str();
+        assert!(matches!(
+            status_of(&describe_without(optional)),
+            RuntimeStatus::Online { .. }
+        ));
     }
 
     /// 运行时的控制协议比桌面新，拒绝桌面的版本：按它的版本再问一次，读出它是什么版本，
@@ -1580,12 +1791,16 @@ mod tests {
         let RuntimeStatus::Incompatible {
             version,
             detail,
-            runtime_outdated,
+            fix,
         } = status_of(&client)
         else {
             panic!("控制协议对不上应判为不兼容");
         };
-        assert!(!runtime_outdated, "运行时比桌面新，只升不降，不能请它升级");
+        assert_eq!(
+            fix,
+            IncompatibleFix::UpdateDesktop,
+            "运行时比桌面新，只升不降，不能请它升级"
+        );
         assert_eq!(version, "9.9.9");
         assert!(detail.contains("需要升级桌面"), "{detail}");
     }
@@ -1635,20 +1850,30 @@ mod tests {
         );
 
         handle.reconnect();
-        // 首档退避 30 秒；叫醒了就不用等。
-        let again = smol::block_on(smol::future::or(
-            async { status_rx.recv().await.ok() },
-            async {
-                smol::Timer::after(std::time::Duration::from_secs(5)).await;
-                None
-            },
-        ));
+        // 首档退避 30 秒；叫醒了就不用等。叫醒先报「连接中」，再报探到的结果。
+        let next = || {
+            smol::block_on(smol::future::or(
+                async { status_rx.recv().await.ok() },
+                async {
+                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                    None
+                },
+            ))
+        };
+        let connecting = next();
+        assert!(
+            matches!(connecting, Some((_, RuntimeStatus::Connecting))),
+            "{connecting:?}"
+        );
+        let again = next();
         assert!(
             matches!(again, Some((_, RuntimeStatus::Incompatible { .. }))),
             "{again:?}"
         );
         handle.stop();
     }
+
+    const UPGRADE_TARGET: &str = "2026.1027.0";
 
     /// 假运行时：读到首行升级请求后按顺序回这几行，然后断开。
     fn runtime_replying(lines: &'static [&'static str]) -> RuntimeClient {
@@ -1662,7 +1887,7 @@ mod tests {
                     .unwrap();
                 let request: serde_json::Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(request["op"], "runtime_upgrade");
-                assert_eq!(request["version"], DESKTOP_VERSION);
+                assert_eq!(request["version"], UPGRADE_TARGET);
                 for reply in lines {
                     writeln!(&server, "{reply}").unwrap();
                 }
@@ -1676,7 +1901,7 @@ mod tests {
     #[test]
     fn a_runtime_that_hangs_up_without_a_word_cannot_upgrade_itself() {
         assert_eq!(
-            push_upgrade(&runtime_replying(&[])),
+            push_upgrade_to(&runtime_replying(&[]), UPGRADE_TARGET),
             PushUpgrade::Unsupported
         );
     }
@@ -1685,7 +1910,7 @@ mod tests {
     #[test]
     fn hanging_up_after_accepting_means_go_look_again() {
         assert_eq!(
-            push_upgrade(&runtime_replying(&[r#"{"state":"accepted"}"#])),
+            push_upgrade_to(&runtime_replying(&[r#"{"state":"accepted"}"#]), UPGRADE_TARGET),
             PushUpgrade::Restarting
         );
     }
@@ -1693,21 +1918,27 @@ mod tests {
     #[test]
     fn the_runtime_says_how_the_upgrade_ended() {
         assert_eq!(
-            push_upgrade(&runtime_replying(&[
-                r#"{"state":"accepted"}"#,
-                r#"{"state":"failed","error":"GitHub 上没有 v9.9.9"}"#,
-            ])),
+            push_upgrade_to(
+                &runtime_replying(&[
+                    r#"{"state":"accepted"}"#,
+                    r#"{"state":"failed","error":"GitHub 上没有 v9.9.9"}"#,
+                ]),
+                UPGRADE_TARGET,
+            ),
             PushUpgrade::Failed("GitHub 上没有 v9.9.9".into())
         );
         assert_eq!(
-            push_upgrade(&runtime_replying(&[
-                r#"{"state":"accepted"}"#,
-                r#"{"state":"staged","reason":"ACP 会话仍有未完成请求"}"#,
-            ])),
+            push_upgrade_to(
+                &runtime_replying(&[
+                    r#"{"state":"accepted"}"#,
+                    r#"{"state":"staged","reason":"ACP 会话仍有未完成请求"}"#,
+                ]),
+                UPGRADE_TARGET,
+            ),
             PushUpgrade::Staged("ACP 会话仍有未完成请求".into())
         );
         assert_eq!(
-            push_upgrade(&runtime_replying(&[r#"{"state":"current"}"#])),
+            push_upgrade_to(&runtime_replying(&[r#"{"state":"current"}"#]), UPGRADE_TARGET),
             PushUpgrade::Current
         );
     }

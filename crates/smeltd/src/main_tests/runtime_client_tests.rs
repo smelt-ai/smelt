@@ -91,7 +91,7 @@ fn describe_reports_protocol_version_methods_and_platform() {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
     );
-    assert_eq!(result.daemon.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(result.daemon.version, smelt_version::VERSION);
     assert_eq!(result.daemon.exe_mtime, TEST_EXE_MTIME);
     assert_eq!(result.daemon.os.as_deref(), Some(std::env::consts::OS));
     assert_eq!(result.daemon.arch.as_deref(), Some(std::env::consts::ARCH));

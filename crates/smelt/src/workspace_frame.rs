@@ -6,9 +6,27 @@ use gpui_component::TitleBar;
 /// 工作区自绘顶栏与 gpui-component TitleBar 共用同一高度契约。
 pub(crate) const TOP_BAR_HEIGHT: Pixels = gpui_component::TITLE_BAR_HEIGHT;
 
+/// Windows 主窗口用系统标题栏：拖动、贴边分屏、最小化 / 最大化 / 关闭都交给系统。
+/// 透明标题栏下这些都得应用自己画，而 GPUI 在 Windows 上没有 `start_window_move`。
+/// 自绘顶栏照常留在系统标题栏下面，只是不再当拖动区，客户区里也没有交通灯。
+pub(crate) const NATIVE_TITLEBAR: bool = cfg!(windows);
+
+/// 客户区里有没有交通灯要让位。macOS 全屏时隐藏，用系统标题栏时根本不在客户区。
+pub(crate) fn traffic_lights_visible(window: &Window) -> bool {
+    !NATIVE_TITLEBAR && !window.is_fullscreen()
+}
+
 /// 主窗口透明标题栏配置。调用方传入内容外壳的顶部内边距，原生交通灯应跟随
 /// 自绘顶栏一起下移；横向位置维持 Smelt 左侧 18px 的视觉基准。
+/// 用系统标题栏的平台只给窗口标题。
 pub(crate) fn titlebar_options(shell_padding: Pixels) -> TitlebarOptions {
+    if NATIVE_TITLEBAR {
+        return TitlebarOptions {
+            title: Some("Smelt".into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        };
+    }
     let mut options = TitleBar::title_bar_options();
     if let Some(position) = options.traffic_light_position.as_mut() {
         position.x = px(18.);
@@ -30,7 +48,7 @@ pub(crate) fn workspace_window_options(
     WindowOptions {
         titlebar: Some(titlebar_options(shell_padding)),
         window_background,
-        app_owns_titlebar_drag: true,
+        app_owns_titlebar_drag: !NATIVE_TITLEBAR,
         ..Default::default()
     }
 }
@@ -69,7 +87,13 @@ fn titlebar_mouse_down(event: &MouseDownEvent, window: &mut Window, cx: &mut App
 }
 
 /// 卡片头和标题胶囊共用的拖窗口。单击移动，双击缩放，并拦住这一下。
+///
+/// 用系统标题栏时原样返回：拖动归系统标题栏。Windows 会把客户区里的 `Drag` 区域
+/// 当成标题栏，叠在上面的按钮反而点不到。
 pub(crate) fn with_window_drag<E: InteractiveElement>(el: E) -> E {
+    if NATIVE_TITLEBAR {
+        return el;
+    }
     el.window_control_area(WindowControlArea::Drag)
         .on_mouse_down(MouseButton::Left, titlebar_mouse_down)
 }
@@ -97,11 +121,8 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        TitlebarMouseAction, titlebar_mouse_action, titlebar_options, workspace_window_options,
-    };
+    use super::{TitlebarMouseAction, titlebar_mouse_action, workspace_window_options};
     use gpui::{WindowBackgroundAppearance, px};
-    use gpui_component::TitleBar;
 
     #[test]
     fn plain_titlebar_region_moves_or_double_clicks() {
@@ -109,8 +130,12 @@ mod tests {
         assert_eq!(titlebar_mouse_action(2), TitlebarMouseAction::DoubleClick);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn native_traffic_lights_follow_the_shared_titlebar_geometry() {
+        use super::titlebar_options;
+        use gpui_component::TitleBar;
+
         let component_position = TitleBar::title_bar_options()
             .traffic_light_position
             .expect("gpui-component 的 macOS TitleBar 应声明交通灯位置");
@@ -135,6 +160,19 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_uses_the_system_titlebar() {
+        let options = workspace_window_options(px(0.), WindowBackgroundAppearance::Opaque);
+        assert!(!options.app_owns_titlebar_drag, "拖动归系统标题栏");
+        let titlebar = options.titlebar.expect("主窗口要给系统标题栏一个标题");
+        assert!(
+            !titlebar.appears_transparent,
+            "透明标题栏下 Windows 没有最小化 / 最大化 / 关闭，也拖不动"
+        );
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn self_drawn_titlebar_owns_its_drag() {
         let options = workspace_window_options(px(0.), WindowBackgroundAppearance::Opaque);

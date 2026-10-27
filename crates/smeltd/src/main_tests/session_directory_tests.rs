@@ -28,6 +28,7 @@ fn recovered_state(id: &str) -> SessionState {
         launch: Some("claude".to_string()),
         provider: Some("claude".to_string()),
         conversation_id: Some("conv-1".to_string()),
+        cli_exited: false,
         agent_token: "should-not-persist".to_string(),
         title: Some("崩溃前的会话".to_string()),
         phase: Phase::AwaitingApproval,
@@ -247,7 +248,7 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
             )
         });
         {
-            let mut state = slot.value.state.lock().unwrap();
+            let mut state = slot.value.state.lock();
             state.phase = Phase::Thinking;
             state.title = Some("已恢复运行".to_string());
         }

@@ -52,8 +52,10 @@ that developer build's Keychain pairing data across upgrades.
 
 Release does not load developer overrides: it signs with the production team
 and Bundle ID in `ios/Flutter/SigningDefaults.xcconfig`. Build App Store /
-TestFlight packages with `make ios` from the repository root, on the release
-tag; it stamps the release version (see `docs/release.md`, section 移动端).
+TestFlight packages are built and uploaded by the release workflow on every
+tag; to build one locally, run `make ios` (or `scripts/build-ios.sh --upload`)
+from the repository root on the release tag. Both stamp the release version
+(see `docs/release.md`, section 移动端).
 
 ## Android development
 
@@ -93,6 +95,25 @@ secrets and removes it again when the build finishes.
 
 The production keystore and the final Play Store listing are intentionally not
 configured yet, mirroring the iOS situation above.
+
+### In-app updates
+
+Release builds check GitHub Releases for a newer `Smelt-<version>-android-arm64.apk`
+on launch and when the app comes back to the foreground (at most every six hours),
+and from Settings → Updates. A new version is only announced; the APK is
+downloaded when the user taps Download, verified against the release's
+`SHA256SUMS`, and handed to the system through a `PackageInstaller` session
+(`AppUpdateChannel.kt`). The first time, the user has to allow Smelt to install
+apps in system settings. Stable follows full releases; Beta also follows `-rc`
+pre-releases.
+
+Only release builds take part: the version name has to be a release version
+(`YYYY.MDD.N[-rc.N]`, set by `--build-name` in the release workflow).
+Development builds keep the placeholder version from `pubspec.yaml` and are
+signed with a different key, so they never offer an update. A distributor can
+point updates at their own server with
+`--dart-define=SMELT_UPDATE_MANIFEST_URL=https://…/update.{channel}.json`
+(`{"version": "…", "url": "https://…/x.apk"}`, with `SHA256SUMS` next to the APK).
 
 ### Rust ↔ Gradle integration
 

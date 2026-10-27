@@ -13,6 +13,7 @@ workspace = true
 smelt-model = { path = "../smelt-model" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-client = { path = "../smelt-client" }
+smelt-version = { path = "../smelt-version" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }

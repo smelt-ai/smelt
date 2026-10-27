@@ -69,18 +69,18 @@ pub(crate) fn stage_has_page_header(
 
 /// 内容贴到窗口顶时，交通灯这一条仍然拖窗口。
 ///
-/// 侧栏收起且不是全屏时从 80px 起，跟侧栏安全条一样躲开红绿灯。
+/// 侧栏收起且红绿灯在客户区时从 80px 起，跟侧栏安全条一样躲开红绿灯。
 /// 右栏打开时停在分栏左边。返回值是 `(left, right, height)`。
 pub(crate) fn stage_content_drag_band(
     sidebar_open: bool,
-    fullscreen: bool,
+    no_traffic_lights: bool,
     panel_width: Pixels,
     page_header: bool,
 ) -> Option<(Pixels, Pixels, Pixels)> {
     if page_header {
         return None;
     }
-    let left = if sidebar_open || fullscreen {
+    let left = if sidebar_open || no_traffic_lights {
         px(0.)
     } else {
         px(80.)
@@ -404,10 +404,11 @@ impl Workspace {
     }
 
     /// 侧栏收起时，舞台左缘要让开交通灯和侧栏开关。侧栏开着时让位是 0。
+    /// 客户区没有交通灯（macOS 全屏、Windows 系统标题栏）时只让侧栏开关。
     pub(crate) fn chrome_left_guard(&self, window: &Window) -> Pixels {
         if self.sidebar_open {
             px(0.)
-        } else if window.is_fullscreen() {
+        } else if !workspace_frame::traffic_lights_visible(window) {
             px(48.)
         } else {
             px(128.)
@@ -450,7 +451,7 @@ impl Workspace {
         &mut self,
         left_guard: Pixels,
         panel_reserve: Pixels,
-        fullscreen: bool,
+        no_traffic_lights: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let island = match self.chrome_title(cx) {
@@ -483,7 +484,7 @@ impl Workspace {
         let toggles = self.render_window_trailing_toggles(cx);
         let drag_band = stage_content_drag_band(
             self.sidebar_open,
-            fullscreen,
+            no_traffic_lights,
             panel_reserve,
             stage_has_page_header(
                 self.active_tab(),

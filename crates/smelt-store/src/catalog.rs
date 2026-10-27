@@ -253,7 +253,7 @@ pub(crate) fn read_published_session_snapshot(
     let mut statement = connection.prepare(
         "SELECT id, cwd, launch, provider, conversation_id, title, phase, phase_since,
                     updated_at, structured_events, turn_events, agent_event_version, tokens_used,
-                    branch, dirty_files_json
+                    branch, dirty_files_json, cli_exited
              FROM published_session ORDER BY id",
     )?;
     let rows = statement.query_map([], |row| {
@@ -273,6 +273,7 @@ pub(crate) fn read_published_session_snapshot(
             tokens_used: row.get(12)?,
             branch: row.get(13)?,
             dirty_files_json: row.get(14)?,
+            cli_exited: row.get::<_, i64>(15)? != 0,
         })
     })?;
     let sessions = rows.collect::<Result<Vec<_>, _>>()?;
@@ -295,8 +296,8 @@ pub(crate) fn write_published_session_snapshot(
             "INSERT INTO published_session(
                    id, cwd, launch, provider, conversation_id, title, phase, phase_since,
                    updated_at, structured_events, turn_events, agent_event_version, tokens_used,
-                   branch, dirty_files_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                   branch, dirty_files_json, cli_exited
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 session.id,
                 session.cwd.as_deref(),
@@ -313,6 +314,7 @@ pub(crate) fn write_published_session_snapshot(
                 session.tokens_used,
                 session.branch.as_deref(),
                 &session.dirty_files_json,
+                i64::from(session.cli_exited),
             ],
         )?;
     }

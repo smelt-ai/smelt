@@ -15,8 +15,10 @@ use gpui_component::dock::{
     register_panel,
 };
 
-use gpui_component::ActiveTheme as _;
-use gpui_component::StyledExt as _;
+use gpui_component::Icon;
+use gpui_component::empty::{
+    Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
+};
 pub(crate) use smelt_ui::Button;
 
 use crate::settings::Appearance;
@@ -192,7 +194,7 @@ impl Render for ShellPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.workspace
             .update(cx, |workspace, cx| match self.name {
-                SIDEBAR_PANEL => workspace.render_sidebar_dock(cx),
+                SIDEBAR_PANEL => workspace.render_sidebar_dock(window, cx),
                 STAGE_PANEL => workspace.render_stage_dock(window, cx),
                 _ => workspace.render_tool_dock(window, cx),
             })
@@ -467,7 +469,11 @@ impl Workspace {
             )
     }
 
-    pub(crate) fn render_sidebar_dock(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_sidebar_dock(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let surface: Hsla = rgb(ui_theme::bg_column()).into();
         let animate = self.workspace_window_active && self.sidebar_open;
         let statuses: Vec<AgentStatus> = self
@@ -475,7 +481,8 @@ impl Workspace {
             .iter()
             .map(|session| session.status(cx))
             .collect();
-        let list = self.render_session_list(cx.entity(), cx, &statuses, animate);
+        let focused_key = self.sidebar_focused_key(window);
+        let list = self.render_session_list(cx.entity(), cx, &statuses, animate, focused_key);
         // 间距留在卡片外面，透出壳的底色。加在卡片上会被卡片自己的底色填满。
         div()
             .size_full()
@@ -514,10 +521,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (c_muted, c_fg) = {
-            let theme = cx.theme();
-            (theme.muted_foreground, theme.foreground)
-        };
         let stage_surface: Hsla = rgb(ui_theme::bg_stage()).into();
         let left_guard = self.chrome_left_guard(window);
         let stage_content: AnyElement = match self.active_tab() {
@@ -573,73 +576,31 @@ impl Workspace {
                             ),
                         )
                     } else if self.spaces.is_empty() {
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap_4()
-                            .px_8()
-                            .child(
-                                div()
-                                    .text_size(px(28.))
-                                    .font_semibold()
-                                    .text_color(c_fg)
-                                    .child("添加远程机器"),
-                            )
-                            .child(
-                                div()
-                                    .max_w(px(420.))
-                                    .text_sm()
-                                    .text_center()
-                                    .text_color(c_muted)
-                                    .child(
-                                        "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
-                                    ),
-                            )
-                            .child(
+                        stage_empty_state(
+                            gpui_kit_assets::IconName::Server,
+                            "添加远程机器",
+                            "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
+                            Some(
                                 Button::new("empty-add-runtime")
                                     .commit()
-                                    .capsule()
                                     .label("添加远程机器")
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.open_settings_section(
-                                            crate::settings::SettingsSection::CollaborationMachines,
+                                            crate::settings::SettingsSection::Remote,
                                             cx,
                                         );
                                     })),
-                            )
+                            ),
+                        )
                     } else {
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .text_size(px(28.))
-                                    .font_semibold()
-                                    .text_color(c_fg)
-                                    .child("Smelt"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(c_muted)
-                                    .child("打开一个项目，开始对话或终端"),
-                            )
-                            .child(
-                                Button::new("empty-open")
-                                    .commit()
-                                    .capsule()
-                                    .label("打开项目")
-                                    .on_click(
-                                        cx.listener(|this, _, _window, cx| this.open_project(cx)),
-                                    ),
-                            )
+                        // 舞台上没有会话时的通用空态，不分为什么空、也不催下一步：
+                        // 开对话、开项目的入口都在侧栏。
+                        stage_empty_state(
+                            gpui_kit_assets::IconName::Coffee,
+                            "休息一下",
+                            "没有打开的会话",
+                            None,
+                        )
                     };
                     content.into_any_element()
                 }
@@ -658,6 +619,30 @@ impl Workspace {
             .child(workspace_frame::card(stage_surface).child(stage))
             .into_any_element()
     }
+}
+
+/// 舞台空态。用组件库的 `Empty`，各种空态长一个样；只有非做不可的下一步才给按钮。
+fn stage_empty_state(
+    icon: impl Into<Icon>,
+    title: &'static str,
+    description: &'static str,
+    action: Option<Button>,
+) -> gpui::Div {
+    let empty = Empty::new()
+        .header(
+            EmptyHeader::new()
+                .media(
+                    EmptyMedia::new()
+                        .with_variant(EmptyMediaVariant::Icon)
+                        .child(Icon::new(icon)),
+                )
+                .title(EmptyTitle::new().child(title))
+                .description(EmptyDescription::new().max_w(px(420.)).child(description)),
+        )
+        .when_some(action, |empty, action| {
+            empty.content(EmptyContent::new().child(action))
+        });
+    div().flex_1().flex().child(empty)
 }
 
 /// 松手时窄于收起线，就用按下前的宽度，并把它抬到这一栏的最小宽度以上。

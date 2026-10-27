@@ -8,6 +8,7 @@ import 'conversation/conversation_page.dart';
 import 'package:flutter/foundation.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../data/app_update.dart';
 import '../data/models.dart';
 import '../data/stores.dart';
 import '../l10n/gen/l10n.dart';
@@ -79,6 +80,11 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   /// 不再跟着「最近」换。页面原样留着，不重建。
   final _pinnedDefault = ValueNotifier<(String, String)?>(null);
   StreamSubscription<(String, AttentionItem)>? _attention;
+  AppUpdater? _updater;
+
+  /// 每个版本只提示一次：查到了、下好了各一次。
+  String? _promptedAvailable;
+  String? _promptedReady;
 
   @override
   void initState() {
@@ -102,6 +108,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _attention ??= AppScope.of(context).catalog.attention.listen(_onAttention);
+    _updater ??= AppScope.of(context).updater..addListener(_onUpdate);
   }
 
   /// 外壳里面（DetailHost 之下）的 context：从外面打开要用详情去处的弹层时用它。
@@ -119,10 +126,53 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   @override
   void dispose() {
     _attention?.cancel();
+    _updater?.removeListener(_onUpdate);
     _sessionFilter.dispose();
     _tabNotifier.dispose();
     _pinnedDefault.dispose();
     super.dispose();
+  }
+
+  /// 查到新版、下好了，各弹一条可点的提示，不打断手上的事。设置里的「更新」一节一直在。
+  void _onUpdate() {
+    final updater = _updater;
+    if (!mounted || updater == null) return;
+    final l10n = L10n.of(context);
+    final (String, String, VoidCallback)? prompt = switch (updater.value) {
+      UpdateAvailable(:final release)
+          when release.version != _promptedAvailable =>
+        (
+          release.version,
+          l10n.updateSnackAvailable(release.version),
+          updater.download,
+        ),
+      UpdateReady(:final release) when release.version != _promptedReady => (
+        release.version,
+        l10n.updateSnackReady(release.version),
+        updater.install,
+      ),
+      _ => null,
+    };
+    if (prompt == null) return;
+    final (version, text, onPressed) = prompt;
+    if (updater.value is UpdateAvailable) {
+      _promptedAvailable = version;
+    } else {
+      _promptedReady = version;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        // 带按钮的提示默认一直挂着、还会挡住后面排队的提示。这条到时间就走，设置里一直有。
+        persist: false,
+        content: Text(text),
+        action: SnackBarAction(
+          label: updater.value is UpdateAvailable
+              ? l10n.updateDownload
+              : l10n.updateInstall,
+          onPressed: onPressed,
+        ),
+      ),
+    );
   }
 
   /// 不在指挥台、也没开着那条会话时，新的提醒弹一条可点的提示。

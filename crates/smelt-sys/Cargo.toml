@@ -24,6 +24,10 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# 本进程内存按内核账本拆开（process_usage::own_memory）。gpui 已经带进来了。
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

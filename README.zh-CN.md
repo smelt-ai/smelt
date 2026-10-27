@@ -15,7 +15,7 @@ Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Pi、Cr
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20Windows%20desktop%20%2B%20Linux%20runtime-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **状态**：working prototype，持续迭代中。桌面 App 跑在 macOS（Apple Silicon）和 Windows 10 1803+（x86_64）上；运行时 `smeltd` 也可以无头跑在 Linux 上。Windows 是不签名的 zip 便携包：没有安装包，没有自动更新。
+> **状态**：working prototype，持续迭代中。桌面 App 跑在 macOS（Apple Silicon）和 Windows 10 1803+（x86_64）上；运行时 `smeltd` 也可以无头跑在 Linux 上。Windows 是不签名的安装包，没有自动更新。
 
 </div>
 
@@ -36,14 +36,14 @@ AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agen
 
 ### Windows（x86_64）
 
-从同一个 [Releases](https://github.com/smelt-ai/smelt/releases) 页下载 `smelt-<版本>-windows-x86_64.zip`，完整解压到同一个文件夹后运行 `smelt.exe`。不要把 `smelt.exe` 单独拖出来，同目录里的文件是运行要用的。
+从同一个 [Releases](https://github.com/smelt-ai/smelt/releases) 页下载 `smelt-<版本>-windows-x86_64-setup.exe` 运行。按当前用户安装，不要管理员权限，默认装到 `%LOCALAPPDATA%\Programs\Smelt`，建开始菜单项，可选把 `smelt` 命令加入 PATH。升级时先关掉 Smelt，再运行新版本的安装程序。
 
 数据目录是 `%USERPROFILE%\.smelt`。
 
 这一版 Windows：
 
-- 只有 x86_64，系统是 Windows 10 1803 及以上。没有安装包。
-- exe 不签名。SmartScreen 可能提示未知发布者，选择仍要运行即可。
+- 只有 x86_64，系统是 Windows 10 1803 及以上。
+- 安装程序和 exe 都不签名。SmartScreen 可能提示未知发布者，选择仍要运行即可。
 - 没有自动更新。
 - 交互 shell 是 `cmd.exe`（ConPTY），或 `COMSPEC` 指向的程序。
 - 没有菜单栏图标、Dock 角标、系统通知。这些只在 macOS 上。
@@ -94,7 +94,7 @@ make dist-build             # 编译 release 并打包出 dist/Smelt.dmg
 make help                   # 查看全部构建目标
 ```
 
-Windows 的 zip 在 Windows 上编，不走 `make dist-build`。发版任务是 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再跑 `bash scripts/build-smelt-pi.sh`。见 [`docs/release.md`](docs/release.md)。
+Windows 的安装包在 Windows 上编，不走 `make dist-build`。发版任务是 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再跑 `bash scripts/build-smelt-pi.sh`。见 [`docs/release.md`](docs/release.md)。
 
 跑测试与类型检查：
 

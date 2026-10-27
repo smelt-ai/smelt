@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'app_update.dart';
 import 'json_prefs_file.dart';
 
 /// 这台手机上的显示偏好（配置，不是业务数据，所以是一份带版本号的 JSON）。
@@ -13,6 +14,7 @@ class Preferences {
   const Preferences({
     this.themeMode = ThemeMode.system,
     this.terminalFontSize = defaultTerminalFontSize,
+    this.updateChannel = UpdateChannel.prod,
   });
 
   static const version = 1;
@@ -25,11 +27,18 @@ class Preferences {
   final ThemeMode themeMode;
   final double terminalFontSize;
 
-  Preferences copyWith({ThemeMode? themeMode, double? terminalFontSize}) =>
-      Preferences(
-        themeMode: themeMode ?? this.themeMode,
-        terminalFontSize: terminalFontSize ?? this.terminalFontSize,
-      );
+  /// 安卓应用内更新跟哪个通道（见 `app_update.dart`）。后加的字段：旧文件里没有就是生产版。
+  final UpdateChannel updateChannel;
+
+  Preferences copyWith({
+    ThemeMode? themeMode,
+    double? terminalFontSize,
+    UpdateChannel? updateChannel,
+  }) => Preferences(
+    themeMode: themeMode ?? this.themeMode,
+    terminalFontSize: terminalFontSize ?? this.terminalFontSize,
+    updateChannel: updateChannel ?? this.updateChannel,
+  );
 
   factory Preferences.fromJson(Map<String, dynamic> json) {
     if (json['version'] != version) return const Preferences();
@@ -41,6 +50,8 @@ class Preferences {
     return Preferences(
       themeMode: mode ?? ThemeMode.system,
       terminalFontSize: font,
+      updateChannel:
+          parseUpdateChannel(json['updateChannel']) ?? UpdateChannel.prod,
     );
   }
 
@@ -48,16 +59,18 @@ class Preferences {
     'version': version,
     'themeMode': themeMode.name,
     'terminalFontSize': terminalFontSize,
+    'updateChannel': updateChannel.name,
   };
 
   @override
   bool operator ==(Object other) =>
       other is Preferences &&
       other.themeMode == themeMode &&
-      other.terminalFontSize == terminalFontSize;
+      other.terminalFontSize == terminalFontSize &&
+      other.updateChannel == updateChannel;
 
   @override
-  int get hashCode => Object.hash(themeMode, terminalFontSize);
+  int get hashCode => Object.hash(themeMode, terminalFontSize, updateChannel);
 }
 
 /// 偏好：改了立刻生效（界面监听这个 notifier），再排队落盘。

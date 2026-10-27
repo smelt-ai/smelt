@@ -449,34 +449,6 @@ fn interactive_pty_strips_host_color_suppression() {
 }
 
 #[test]
-fn agent_launch_reads_interactive_shell_config() {
-    if cfg!(windows) {
-        // cmd 不读 AutoRun（/d），/k 跑完命令留在提示符。
-        assert_eq!(
-            shell_launch_args("cmd.exe", Some("claude --dangerously-skip-permissions")),
-            vec![
-                "/d".to_string(),
-                "/k".to_string(),
-                "claude --dangerously-skip-permissions".to_string(),
-            ]
-        );
-        assert_eq!(
-            shell_launch_args("cmd.exe", None),
-            vec!["/d".to_string(), "/k".to_string()]
-        );
-    } else {
-        assert_eq!(
-            shell_launch_args("/bin/zsh", Some("claude --dangerously-skip-permissions")),
-            vec![
-                "-ilc".to_string(),
-                "claude --dangerously-skip-permissions; exec /bin/zsh -l".to_string(),
-            ]
-        );
-        assert_eq!(shell_launch_args("/bin/zsh", None), vec!["-l".to_string()]);
-    }
-}
-
-#[test]
 fn snapshot_includes_scrollback_history() {
     // 3 行屏高，灌 10 行 → 前几行进 history
     let size = DaemonTermSize { rows: 3, cols: 40 };

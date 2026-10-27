@@ -84,7 +84,7 @@ impl Workspace {
             .child(self.render_agent_product_navigation_row(
                 "automations-route",
                 "自动化",
-                IconName::Cpu,
+                Icon::new(gpui_kit_assets::IconName::Workflow),
                 automation_nav_needs_attention(&config),
                 WorkspaceRoute::Automations,
                 entity.clone(),
@@ -310,13 +310,8 @@ impl Workspace {
                         .px_2()
                         .py_2()
                         .rounded(crate::ui_theme::row_radius())
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_medium()
-                                .text_color(rgb(crate::ui_theme::text_bright()))
-                                .child("设置"),
-                        )
+                        // 字色跟着行走，选中时换成选中字色（见 `ListRow`）。
+                        .child(div().text_sm().font_medium().child("设置"))
                         .on_click(move |_, _, cx| {
                             task_entity
                                 .update(cx, |workspace, cx| workspace.show_automation_task(cx));

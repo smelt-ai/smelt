@@ -4,23 +4,36 @@
 //! `themes/` 里，随二进制嵌入，不依赖进程的当前目录。Default 不在这些文件里，
 //! `gpui_component::init` 已经装好。
 
-use gpui::SharedString;
+use gpui::{App, Hsla, SharedString};
 use gpui_component::{Theme, ThemeRegistry};
 
 use crate::theme_files::THEME_FILES;
 use crate::ui_theme;
 
-/// 设置页下拉的 (值, 标签)。值是主题文件里的 `name`，例如 `Ayu Light`。
-pub fn options() -> Vec<(SharedString, SharedString)> {
-    smelt_model::theme_index::entries()
-        .iter()
-        .map(|entry| {
-            (
-                SharedString::from(entry.name.clone()),
-                SharedString::from(entry.name.clone()),
-            )
-        })
-        .collect()
+/// 一款主题的代表色：背景、前景、强调（primary）。设置页拿它画色点。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeSwatch {
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub accent: Hsla,
+}
+
+/// 按名字取一款主题的代表色。颜色由 gpui-kit 自己解析主题配置得出，换上这款主题后
+/// 界面就是这几个色；不另写一套解析。名字不在注册表里时是 `None`。
+///
+/// 注册表在启动装主题时已经装满（见 [`apply`]），这里只读不装。
+pub fn swatch(name: &str, cx: &App) -> Option<ThemeSwatch> {
+    let config = ThemeRegistry::global(cx)
+        .themes()
+        .get(&SharedString::from(name))?
+        .clone();
+    let mut theme = Theme::global(cx).clone();
+    theme.apply_config(&config);
+    Some(ThemeSwatch {
+        background: theme.background,
+        foreground: theme.foreground,
+        accent: theme.primary,
+    })
 }
 
 /// 按名字装上主题，产品色跟着换成这份主题。名字不在目录里时返回 false。
@@ -70,5 +83,31 @@ fn ensure_loaded(cx: &mut gpui::App) {
         if let Err(err) = ThemeRegistry::global_mut(cx).load_themes_from_str(file) {
             eprintln!("[theme] 加载主题失败: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    #[gpui::test]
+    fn every_indexed_theme_has_a_swatch(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            // 装主题顺带把整份目录装进注册表。
+            assert!(apply("Default Dark", cx));
+            for entry in smelt_model::theme_index::entries() {
+                let swatch = swatch(&entry.name, cx)
+                    .unwrap_or_else(|| panic!("{} 不在注册表里", entry.name));
+                assert_ne!(
+                    swatch.background, swatch.foreground,
+                    "{} 的背景和前景不应是同一个色",
+                    entry.name
+                );
+            }
+            assert_eq!(swatch("没有这款主题", cx), None);
+        });
     }
 }

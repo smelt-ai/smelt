@@ -343,35 +343,33 @@ mod threaded {
         recv: RecvStream,
     ) -> io::Result<(RuntimeStream, tokio::task::JoinHandle<()>)> {
         let (ours, theirs) = RuntimeStream::pair()?;
-        let ours_write = ours.try_clone()?;
+        // 上下行共用这一个描述符。不要 `try_clone`：Windows 上它走 WSADuplicateSocketW，
+        // 复制出独立的 SOCKET。在其中一个上 `shutdown(SD_SEND)` 后立刻 `closesocket`，
+        // 另一个正堵在 `recv` 时，对端偶尔收不到 EOF。半关闭和读写必须落在同一个 SOCKET
+        // 上，最后一份 `Arc` 丢掉才关闭。
+        let ours = Arc::new(ours);
         let handle = Handle::current();
         let stop = Arc::new(Notify::new());
         let (done, finished) = oneshot::channel::<()>();
         {
             let handle = handle.clone();
             let stop = Arc::clone(&stop);
+            let local = Arc::clone(&ours);
             std::thread::Builder::new()
                 .name("smelt-iroh-up".into())
-                .spawn(move || up(&handle, recv, ours_write, &stop))?;
+                .spawn(move || up(&handle, recv, &local, &stop))?;
         }
         // 下行线程起不来时，已经在跑的上行线程还堵在 `stop` 上。先叫停并关掉
-        // 本地这一端，它才能退出。套接字要留一份在外面：失败时闭包连同它捕获的
-        // 那份一起被丢掉。
+        // 本地这一端，它才能退出。这份 `Arc` 留在外面：失败时闭包连同它捕获的
+        // 那份一起被丢掉，外面这份还能 `shutdown`。
         let stop_down = Arc::clone(&stop);
-        let ours_down = match ours.try_clone() {
-            Ok(stream) => stream,
-            Err(error) => {
-                stop.notify_one();
-                let _ = ours.shutdown(Shutdown::Both);
-                return Err(error);
-            }
-        };
+        let local = Arc::clone(&ours);
         if let Err(error) = std::thread::Builder::new()
             .name("smelt-iroh-down".into())
             .spawn(move || {
-                down(&handle, send, &ours_down);
+                down(&handle, send, &local);
                 stop_down.notify_one();
-                let _ = ours_down.shutdown(Shutdown::Both);
+                let _ = local.shutdown(Shutdown::Both);
                 drop(done);
             })
         {
@@ -379,6 +377,8 @@ mod threaded {
             let _ = ours.shutdown(Shutdown::Both);
             return Err(error);
         }
+        // 函数自己这份到此结束。描述符由两条线程持有，两边都退出才关闭。
+        drop(ours);
         Ok((
             theirs,
             tokio::spawn(async move {
@@ -389,7 +389,7 @@ mod threaded {
 
     /// QUIC → 本地。对端写完就半关闭本地写端，另一方向继续；出错就关掉本地两个方向，
     /// 上层读到 EOF 关掉连接后下行随之结束。被 `stop` 叫停时直接退出。
-    fn up(handle: &Handle, mut recv: RecvStream, mut local: RuntimeStream, stop: &Notify) {
+    fn up(handle: &Handle, mut recv: RecvStream, mut local: &RuntimeStream, stop: &Notify) {
         let mut buf = vec![0u8; CHUNK];
         loop {
             let read = handle.block_on(async {

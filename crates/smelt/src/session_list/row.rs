@@ -54,61 +54,212 @@ pub(crate) fn session_row_status_label(status: AgentStatus) -> Option<&'static s
     (status == AgentStatus::NeedsYou).then(|| status_text(status))
 }
 
-/// 进度条填满的比例：不确定进度和没有数值的出错画满一条，其余按百分比。
-pub(super) fn progress_fraction(progress: TerminalProgress) -> f32 {
+/// 进度条填满的比例：没有数值的出错画满一条，其余按百分比。不确定进度不画条（`None`），
+/// 见 [`session_progress_bar`]。
+pub(super) fn progress_fraction(progress: TerminalProgress) -> Option<f32> {
     match (progress.state, progress.percent) {
-        (TerminalProgressState::Indeterminate, _)
-        | (TerminalProgressState::Error, None | Some(0)) => 1.0,
-        (_, percent) => f32::from(percent.unwrap_or(0).min(100)) / 100.0,
+        (TerminalProgressState::Indeterminate, _) => None,
+        (TerminalProgressState::Error, None | Some(0)) => Some(1.0),
+        (_, percent) => Some(f32::from(percent.unwrap_or(0).min(100)) / 100.0),
     }
 }
 
-/// 会话行底部的细进度条：终端程序用 OSC 9;4 报的进度。不确定进度画一条淡色满条，
-/// 不做动画——侧栏常驻，动画会让整个工作台不停重绘。
-pub(super) fn session_progress_bar(progress: TerminalProgress) -> Div {
-    let (color, opacity) = match progress.state {
-        TerminalProgressState::Normal => (ui_theme::blue(), 1.0),
-        TerminalProgressState::Indeterminate => (ui_theme::blue(), 0.35),
-        TerminalProgressState::Error => (ui_theme::red(), 1.0),
-        TerminalProgressState::Paused => (ui_theme::yellow(), 1.0),
+/// 会话行底部的细进度条：终端程序用 OSC 9;4 报的进度。用组件库的 `Progress`，颜色
+/// 跟主题的进度条色走；出错、暂停换成危险、警告色。
+///
+/// 不确定进度不画：别家终端拿动画表达它，侧栏常驻不开动画（会让整个工作台不停重绘），
+/// 静止的一条空轨道又像行间分隔线，让人错认选中的是哪一行。程序在忙已经由会话图标说了。
+pub(super) fn session_progress_bar(ui_id: u64, progress: TerminalProgress) -> Option<Div> {
+    let fraction = progress_fraction(progress)?;
+    let bar = progress::Progress::new(("session-progress", ui_id))
+        .with_size(px(2.))
+        .value(fraction * 100.);
+    let bar = match progress.state {
+        TerminalProgressState::Normal | TerminalProgressState::Indeterminate => bar,
+        TerminalProgressState::Error => bar.color(rgb(ui_theme::red())),
+        TerminalProgressState::Paused => bar.color(rgb(ui_theme::yellow())),
     };
-    div()
-        .absolute()
-        .left(px(8.))
-        .right(px(8.))
-        .bottom_0()
-        .h(px(2.))
-        .rounded_full()
-        .overflow_hidden()
-        .bg(rgb(ui_theme::border_dim()))
-        .child(
-            div()
-                .h_full()
-                .w(relative(progress_fraction(progress)))
-                .rounded_full()
-                .bg(rgb(color))
-                .opacity(opacity),
-        )
+    Some(
+        div()
+            .absolute()
+            .left(px(8.))
+            .right(px(8.))
+            .bottom_0()
+            .child(bar),
+    )
 }
 
-/// 侧栏第二行的最近活动时间。采用不会随分钟流逝而过期的本地日历文案：今天和
-/// 昨天保留时分，更早的会话显示日期；旧存档没有时间时明确写“时间未知”。
+/// 侧栏行尾的最近活动时间。用不会随分钟流逝而过期的本地日历文案，侧栏不必为它
+/// 定时重画：今天只写时分，昨天写「昨天」，今年更早的写月日，再早的写年月日；旧存档
+/// 没有时间时写「未知」。行尾一格放不下「今天 14:05」这种长写法。
 pub(crate) fn session_updated_at_text(timestamp: u64, now: &DateTime<Local>) -> String {
     if timestamp == 0 {
-        return "时间未知".to_string();
+        return "未知".to_string();
     }
     let Some(updated) = Local
         .timestamp_opt(timestamp.min(i64::MAX as u64) as i64, 0)
         .single()
     else {
-        return "时间未知".to_string();
+        return "未知".to_string();
     };
     match (now.date_naive() - updated.date_naive()).num_days() {
-        days if days <= 0 => format!("今天 {}", updated.format("%H:%M")),
-        1 => format!("昨天 {}", updated.format("%H:%M")),
-        _ if updated.year() == now.year() => updated.format("%m-%d %H:%M").to_string(),
+        days if days <= 0 => updated.format("%H:%M").to_string(),
+        1 => "昨天".to_string(),
+        _ if updated.year() == now.year() => updated.format("%m-%d").to_string(),
         _ => updated.format("%Y-%m-%d").to_string(),
     }
+}
+
+/// 键盘焦点环：盖在行上的一圈描边，不占排版，前后的行不会挪。
+pub(crate) fn focus_ring() -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(ui_theme::row_radius())
+        .border_2()
+        .border_color(rgb(ui_theme::border_focus()))
+}
+
+/// 刚新建那一行闪多久。
+const NEW_ROW_FLASH_MS: u64 = 600;
+
+/// 刚新建的那一行：铺一层强调色再淡回，让人看见新东西落在了哪。只播一次，播完是
+/// 透明的；放在行的第一个子元素，压在图标和文字下面。
+pub(crate) fn new_row_flash(id: impl Into<ElementId>) -> impl IntoElement {
+    ambient_animation(id, Duration::from_millis(NEW_ROW_FLASH_MS), true, |phase| {
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(ui_theme::row_radius())
+            .bg(rgb(ui_theme::accent()))
+            .opacity(0.28 * (1.0 - phase))
+    })
+}
+
+/// 行内改名的输入框，占标题那一格。回车、点别处保存（见 `start_rename` 里的订阅），
+/// Esc 取消：输入框自己用不上 Esc 时会往上传，在这里接住。按下不往行上传，免得点进
+/// 输入框就起拖拽或切会话。
+pub(crate) fn inline_rename_input(
+    input: &Entity<gpui_component::input::InputState>,
+    workspace: Entity<Workspace>,
+) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_action(move |_: &gpui_component::input::Escape, _window, cx| {
+            workspace.update(cx, |ws, cx| ws.cancel_rename(cx));
+        })
+        .child(gpui_component::input::Input::new(input).small())
+}
+
+/// 分组行开头那一格的宽度。项目、「对话」两种分组共用，下面会话的引导线对着它的中线。
+pub(crate) const GROUP_ICON_BOX: f32 = 14.;
+
+/// 分组箭头转一次多久。
+const DISCLOSURE_TURN_MS: u64 = 120;
+
+/// 分组行开头的图标：平时是分组自己的图标（文件夹、对话气泡），悬停整行时换成展开 /
+/// 收起箭头，告诉人点这一行会折起来。分组空着、没东西可折时只有图标。两个图标叠在
+/// 同一格里只切透明度，换的时候后面的名字不动。
+///
+/// 箭头收起时朝右、展开时朝下，开合时转过去。动画的 id 带着开合状态：一换状态就是
+/// 一个新动画，从另一头转过来；转完不再要帧。
+pub(crate) fn group_disclosure(
+    id: impl Into<ElementId>,
+    group: &'static str,
+    icon: Icon,
+    collapsed: bool,
+    collapsible: bool,
+) -> Stateful<Div> {
+    let id = id.into();
+    let turn_id = ElementId::from((id.clone(), if collapsed { "collapsed" } else { "expanded" }));
+    div()
+        .id(id)
+        .relative()
+        .w(px(GROUP_ICON_BOX))
+        .h(px(16.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rgb(ui_theme::text_muted()))
+        .group_hover(group, |style| {
+            style.text_color(rgb(ui_theme::text_bright()))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .when(collapsible, |d| {
+                    d.group_hover(group, |style| style.opacity(0.0))
+                })
+                .child(icon),
+        )
+        .when(collapsible, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(0.0)
+                    .group_hover(group, |style| style.opacity(1.0))
+                    .child(ambient_animation(
+                        turn_id,
+                        Duration::from_millis(DISCLOSURE_TURN_MS),
+                        true,
+                        move |phase| {
+                            let (from, to) = if collapsed { (90.0, 0.0) } else { (0.0, 90.0) };
+                            let degrees: f32 =
+                                from + (to - from) * smelt_ui::motion::ease_snap(phase);
+                            Icon::new(IconName::ChevronRight)
+                                .size(px(14.))
+                                .transform(Transformation::rotate(radians(degrees.to_radians())))
+                        },
+                    )),
+            )
+        })
+}
+
+/// 行尾一格：平时写时间或要人管的状态，悬停这一行时同一格换成关闭键。两样叠在一起，
+/// 换的时候这一格不变宽，标题不跟着伸缩。`group` 是整行的 hover group 名。
+pub(crate) fn row_trailing_slot(
+    group: &'static str,
+    meta: Option<(SharedString, Hsla)>,
+    close: Button,
+) -> Div {
+    div()
+        .relative()
+        .flex_shrink_0()
+        .min_w(px(20.))
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .justify_end()
+        .children(meta.map(|(text, color)| {
+            div()
+                .text_xs()
+                .text_color(color)
+                .group_hover(group, |style| style.opacity(0.0))
+                .child(text)
+        }))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    close
+                        .opacity(0.0)
+                        .group_hover(group, |style| style.opacity(1.0)),
+                ),
+        )
 }
 
 /// 分屏优先展示自己的守护更新时间；守护镜像尚未到达时，回退到所属会话时间。
@@ -120,11 +271,14 @@ pub(super) fn effective_pane_updated_at(pane_updated_at: u64, session_updated_at
     }
 }
 
+/// 用到这个百分比就算快用完：标黄，并且在底栏常显。
+pub(super) const QUOTA_WARN_PERCENT: f64 = 75.0;
+
 /// 按已用百分比取行内颜色：>=90% 红、>=75% 黄、否则灰（额度充足，默认不抢眼）。
 pub(super) fn quota_color(used_percent: f64) -> u32 {
     if used_percent >= 90.0 {
         ui_theme::red()
-    } else if used_percent >= 75.0 {
+    } else if used_percent >= QUOTA_WARN_PERCENT {
         ui_theme::yellow()
     } else {
         ui_theme::text_muted()
@@ -157,25 +311,32 @@ pub(super) fn quota_until_text(seconds: i64) -> Option<String> {
     }
 }
 
-/// 窗口重置时间文本：绝对时间带相对剩余（如「重置 08-09 14:00（还有 2天5小时）」），
-/// 没有绝对时间时退回相对秒数。
-pub(super) fn quota_reset_text(window: &smelt_model::provider_quota::ProviderQuotaWindow) -> String {
-    if let Some(millis) = window.resets_at_ms
-        && let Some(date) = Local.timestamp_millis_opt(millis as i64).single()
-    {
-        let until = date.signed_duration_since(Local::now()).num_seconds();
-        return match quota_until_text(until) {
-            Some(text) => format!("重置 {}（还有 {text}）", date.format("%m-%d %H:%M")),
-            None => format!("重置 {}", date.format("%m-%d %H:%M")),
-        };
-    }
-    if let Some(seconds) = window.reset_after_seconds {
-        return match quota_until_text(seconds as i64) {
-            Some(text) => format!("约 {text} 后重置"),
-            None => "即将重置".to_string(),
-        };
-    }
-    "重置时间未知".to_string()
+/// 窗口还有多久重置，只写剩余时间（「2天5小时后重置」）：悬停提示是一行，绝对时间
+/// 占地方又不如剩余时间好用。不知道什么时候重置就不写。
+pub(super) fn quota_reset_text(
+    window: &smelt_model::provider_quota::ProviderQuotaWindow,
+) -> Option<String> {
+    let seconds = match (window.resets_at_ms, window.reset_after_seconds) {
+        (Some(millis), _) => (millis as i64 - Local::now().timestamp_millis()) / 1000,
+        (None, Some(seconds)) => seconds as i64,
+        (None, None) => return None,
+    };
+    Some(match quota_until_text(seconds) {
+        Some(text) => format!("{text}后重置"),
+        None => "即将重置".to_string(),
+    })
+}
+
+/// 底栏上一家 provider 的额度。
+#[derive(Clone)]
+pub(super) struct FooterQuota {
+    pub(super) target: crate::provider_quota::QuotaTarget,
+    pub(super) text: String,
+    pub(super) color: u32,
+    pub(super) hint: String,
+    pub(super) used: f64,
+    /// 用户手点刷新、还没回来。只有这种在百分比的位置转圈；启动首查和定时刷新不打扰。
+    pub(super) refreshing: bool,
 }
 
 pub(super) struct ProviderQuotaRow {
@@ -197,25 +358,29 @@ pub(super) fn provider_quota_row(
     let quota = status.quota.as_ref()?;
     let text = quota.short_text();
     let color = quota_color(quota.used_percent());
+    // 悬停提示一行写完，像状态栏：名字写一次，窗口之间用「·」隔开，
+    // 如「Claude 5h 76%（2小时后重置） · 7d 30%（4天后重置）」。
     let hint = match quota {
-        crate::provider_quota::ProviderQuotaData::Windows(quota) => quota
-            .windows
-            .iter()
-            .map(|window| {
-                format!(
-                    "{label} {} 窗口已用 {}%，{}。",
-                    window.label,
-                    window.used_percent.round() as u32,
-                    quota_reset_text(window)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
+        crate::provider_quota::ProviderQuotaData::Windows(quota) => {
+            let windows = quota
+                .windows
+                .iter()
+                .map(|window| {
+                    let used = window.used_percent.round() as u32;
+                    match quota_reset_text(window) {
+                        Some(reset) => format!("{} {used}%（{reset}）", window.label),
+                        None => format!("{} {used}%", window.label),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!("{label} {windows}")
+        }
         crate::provider_quota::ProviderQuotaData::Copilot(copilot) => match copilot.limit {
             Some(limit) => {
                 let used = copilot.used.unwrap_or((limit - copilot.remaining).max(0.0));
                 format!(
-                    "{label} 本周期已用 {} / {} {}（{}%）。",
+                    "{label} 本周期 {} / {} {}（{}%）",
                     smelt_model::copilot_quota::format_amount(used),
                     smelt_model::copilot_quota::format_amount(limit),
                     copilot.unit.label(),
@@ -223,7 +388,7 @@ pub(super) fn provider_quota_row(
                 )
             }
             None => format!(
-                "{label} 本周期剩余 {} {}。",
+                "{label} 本周期剩余 {} {}",
                 smelt_model::copilot_quota::format_amount(copilot.remaining),
                 copilot.unit.label()
             ),
@@ -273,7 +438,7 @@ mod tests {
 
         assert_eq!(row.text, "91%");
         assert_eq!(row.color, ui_theme::red());
-        assert!(row.hint.contains("Claude 5h 窗口已用 76%"));
+        assert_eq!(row.hint, "Claude 5h 76%（1小时后重置） · 7d 91%");
     }
 
     #[test]
@@ -294,16 +459,20 @@ mod tests {
 
         assert_eq!(row.text, "25%");
         assert_eq!(row.color, ui_theme::text_muted());
-        assert!(row.hint.contains("25 / 100 premium requests（25%）"));
+        assert_eq!(row.hint, "Copilot 本周期 25 / 100 premium requests（25%）");
     }
 
     #[test]
-    fn progress_bar_fills_by_percent_and_fully_when_unknown() {
+    fn progress_bar_fills_by_percent_and_skips_unknown() {
         let bar = |state, percent| progress_fraction(TerminalProgress { state, percent });
-        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        let close = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-6);
         assert!(close(bar(TerminalProgressState::Normal, Some(42)), 0.42));
         assert!(close(bar(TerminalProgressState::Paused, Some(100)), 1.0));
-        assert!(close(bar(TerminalProgressState::Indeterminate, None), 1.0));
+        assert_eq!(
+            bar(TerminalProgressState::Indeterminate, Some(60)),
+            None,
+            "不确定进度不画条，空轨道会被看成分隔线"
+        );
         assert!(
             close(bar(TerminalProgressState::Error, None), 1.0),
             "出错没数值也要看得见"
@@ -336,21 +505,21 @@ mod tests {
 
         assert_eq!(
             session_updated_at_text(today.timestamp() as u64, &now),
-            "今天 14:05"
+            "14:05"
         );
         assert_eq!(
             session_updated_at_text(yesterday.timestamp() as u64, &now),
-            "昨天 23:15"
+            "昨天"
         );
         assert_eq!(
             session_updated_at_text(earlier.timestamp() as u64, &now),
-            "08-01 09:30"
+            "08-01"
         );
         assert_eq!(
             session_updated_at_text(previous_year.timestamp() as u64, &now),
             "2025-12-31"
         );
-        assert_eq!(session_updated_at_text(0, &now), "时间未知");
+        assert_eq!(session_updated_at_text(0, &now), "未知");
     }
 
     #[test]

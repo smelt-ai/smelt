@@ -253,10 +253,9 @@ Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记�
 2. bash / 后台任务 / MCP server **不继承** `SMELT_SOCK`、`SMELT_SESSION_ID`、
    `SMELT_AGENT_TOKEN`（与 MCP 剥离同一套规则）。pi-agent 把这三个变量读进模块私有缓存后，
    立刻从 `process.env` 删掉，之后拉起的子进程也继承不到；
-3. daemon 侧 `agent.memory.record_*` / `meta` 只接受该会话的 pi-agent 自己：托管模式是
-   provider pid，同进程模式是 `session.handle` 的 stdio pid。provider 还没报上来时，只放行
-   session-host 的直接子进程，且进程名必须读得到、并且不是 shell。bash / sh / zsh 以及
-   pi-agent 的孙进程即使偷到 token 也不能调这些方法。
+3. daemon 侧 `agent.memory.record_*` / `meta` 只接受该会话的 pi-agent 自己，也就是
+   `session.handle` 的 stdio pid（ACP 由 smeltd 同进程拉起）。bash / sh / zsh / cmd
+   以及带 `.exe` 的这些名字，即使 pid 正好对上也拒绝。其它进程即使偷到 token 也不能调这些方法。
 
 `approve` / `delete` 不走会话 token。本机调用方必须是签过名的桌面进程（`smelt`），并且
 不是任何活跃智能体会话进程或其子孙。double-fork 之后父进程变成 1 的孤儿靠「是不是子孙」
@@ -302,8 +301,7 @@ trusted、但 mtime 已经越界的）刷新 `written_at_ms = max(now, 文件 mt
 scope 为 `agent:<智能体 id>` 或 `user`。**没有来源记录的文件不注入**（见 5.4）；升级回填例外。
 删除智能体时同一事务里删掉它的元数据；删除记忆时删掉对应行。schema v13 引入。
 
-Pi 进程不链接 `smelt-store`、不直接打开数据库；托管它的独立会话宿主（`smeltd
---acp-session-host`）按设计也不初始化 SQLite。所以 Pi 直接调主 daemon 的控制方法：连
+Pi 进程不链接 `smelt-store`、不直接打开数据库。所以 Pi 直接调主 daemon 的控制方法：连
 `SMELT_SOCK`，带上 daemon 注入的 `SMELT_SESSION_ID` 和 `SMELT_AGENT_TOKEN`（与跨会话消息同一套
 capability）。daemon 校验令牌、会话未结束、**且 Unix 对端就是该会话的 pi-agent 进程**
 （见 5.4）后，从该会话的启动规格取两个记忆目录，经 `smelt-store` 读写。调用方只能操作

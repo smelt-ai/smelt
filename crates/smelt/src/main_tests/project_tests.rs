@@ -1,6 +1,6 @@
 use super::{
-    AcpSaved, PaneState, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
-    project_root_of, session_state_cwd,
+    AcpSaved, PaneState, PathStyle, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
+    project_name_for_cwd, project_root_of, session_state_cwd,
 };
 
 fn group(root: &str, label: &str) -> ProjectGroup {
@@ -13,9 +13,40 @@ fn group(root: &str, label: &str) -> ProjectGroup {
 }
 
 /// 跑一遍消歧，取回显示名（base 就是各组当前的 label）。
-fn labels(mut groups: Vec<ProjectGroup>) -> Vec<String> {
-    disambiguate_labels(&mut groups);
+fn labels(groups: Vec<ProjectGroup>) -> Vec<String> {
+    labels_in(PathStyle::Posix, groups)
+}
+
+fn labels_in(style: PathStyle, mut groups: Vec<ProjectGroup>) -> Vec<String> {
+    disambiguate_labels(style, &mut groups);
     groups.into_iter().map(|g| g.label).collect()
+}
+
+/// 项目名是目录末段。Windows 运行时报来的路径用 `\` 分隔，按 `/` 切会把整条路径当成名字。
+#[test]
+fn project_name_is_the_last_segment_on_the_runtime() {
+    assert_eq!(project_name_for_cwd(PathStyle::Posix, "/a/smelt/"), "smelt");
+    assert_eq!(
+        project_name_for_cwd(PathStyle::Windows, r"C:\Users\w\code\xunxian-reverse"),
+        "xunxian-reverse"
+    );
+    assert_eq!(project_name_for_cwd(PathStyle::Posix, "/"), "项目");
+    assert_eq!(project_name_for_cwd(PathStyle::Windows, r"C:\"), "项目");
+}
+
+/// Windows 项目重名时同样往前补父目录段，段之间用 `\` 连。
+#[test]
+fn windows_duplicate_labels_get_parent_segments() {
+    assert_eq!(
+        labels_in(
+            PathStyle::Windows,
+            vec![
+                group(r"C:\x\dev\smelt", "smelt"),
+                group(r"D:\y\dev\smelt", "smelt")
+            ]
+        ),
+        vec![r"x\dev · smelt", r"y\dev · smelt"]
+    );
 }
 
 /// 不重名就别乱加前缀（大多数情况该保持干净的目录名）。
@@ -80,15 +111,15 @@ fn projects(list: &[&str]) -> Vec<String> {
 fn cwd_belongs_to_its_project_root() {
     let p = projects(&["/Users/me/dev/smelt"]);
     assert_eq!(
-        project_root_of(&p, "/Users/me/dev/smelt").as_deref(),
+        project_root_of(PathStyle::Posix, &p, "/Users/me/dev/smelt").as_deref(),
         Some("/Users/me/dev/smelt")
     );
     assert_eq!(
-        project_root_of(&p, "/Users/me/dev/smelt/crates/smeltd").as_deref(),
+        project_root_of(PathStyle::Posix, &p, "/Users/me/dev/smelt/crates/smeltd").as_deref(),
         Some("/Users/me/dev/smelt")
     );
-    assert_eq!(project_root_of(&p, "/Users/me/dev/other"), None);
-    assert_eq!(project_root_of(&p, ""), None);
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/Users/me/dev/other"), None);
+    assert_eq!(project_root_of(PathStyle::Posix, &p, ""), None);
 }
 
 /// 前缀必须卡在完整路径段上：`/a/smelt-old` 不是 `/a/smelt` 的子目录，
@@ -96,10 +127,10 @@ fn cwd_belongs_to_its_project_root() {
 #[test]
 fn prefix_must_be_a_whole_path_segment() {
     let p = projects(&["/a/smelt"]);
-    assert_eq!(project_root_of(&p, "/a/smelt-old"), None);
-    assert_eq!(project_root_of(&p, "/a/smeltd"), None);
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/smelt-old"), None);
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/smeltd"), None);
     assert_eq!(
-        project_root_of(&p, "/a/smelt/sub").as_deref(),
+        project_root_of(PathStyle::Posix, &p, "/a/smelt/sub").as_deref(),
         Some("/a/smelt")
     );
 }
@@ -108,18 +139,36 @@ fn prefix_must_be_a_whole_path_segment() {
 #[test]
 fn deepest_matching_project_wins() {
     let p = projects(&["/a", "/a/b", "/a/b/c"]);
-    assert_eq!(project_root_of(&p, "/a/b/c/x").as_deref(), Some("/a/b/c"));
-    assert_eq!(project_root_of(&p, "/a/b/x").as_deref(), Some("/a/b"));
-    assert_eq!(project_root_of(&p, "/a/x").as_deref(), Some("/a"));
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/c/x").as_deref(), Some("/a/b/c"));
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/x").as_deref(), Some("/a/b"));
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/x").as_deref(), Some("/a"));
+}
+
+/// Windows 运行时的会话开在项目子目录里也归这个项目：按 `\` 切、不分大小写。
+#[test]
+fn windows_cwd_belongs_to_its_project_root() {
+    let p = projects(&[r"C:\Users\w\code\smelt"]);
+    assert_eq!(
+        project_root_of(PathStyle::Windows, &p, r"C:\Users\w\code\smelt\crates").as_deref(),
+        Some(r"C:\Users\w\code\smelt")
+    );
+    assert_eq!(
+        project_root_of(PathStyle::Windows, &p, r"c:\users\w\code\SMELT").as_deref(),
+        Some(r"C:\Users\w\code\smelt")
+    );
+    assert_eq!(
+        project_root_of(PathStyle::Windows, &p, r"C:\Users\w\code\smelt-old"),
+        None
+    );
 }
 
 /// 结尾斜杠是路径写法差异，不该影响归属判定。
 #[test]
 fn trailing_slashes_are_ignored() {
     let p = projects(&["/a/b/"]);
-    assert_eq!(project_root_of(&p, "/a/b").as_deref(), Some("/a/b"));
-    assert_eq!(project_root_of(&p, "/a/b/").as_deref(), Some("/a/b"));
-    assert_eq!(project_root_of(&p, "/a/b/c").as_deref(), Some("/a/b"));
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b").as_deref(), Some("/a/b"));
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/").as_deref(), Some("/a/b"));
+    assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/c").as_deref(), Some("/a/b"));
 }
 
 /// 旧存档迁移：项目列表从会话 cwd 反推，终端会话取分屏树里第一个叶子的 cwd。

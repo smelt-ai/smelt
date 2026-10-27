@@ -127,9 +127,9 @@ mod pairing_qr_tests {
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{acp_cmd_setting_value, fmt_uptime};
     #[cfg(unix)]
     use super::daemon_info_line;
+    use super::{acp_cmd_setting_value, fmt_uptime};
     #[cfg(unix)]
     use crate::local_daemon::DaemonInfo;
     use smelt_model::agent_kind::ConversationAgentKind;

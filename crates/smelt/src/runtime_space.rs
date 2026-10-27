@@ -128,7 +128,7 @@ impl crate::Workspace {
 }
 
 /// 一个项目：所在运行时 + 根路径。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ProjectRef {
     pub(crate) runtime: crate::runtimes::RuntimeKey,
     pub(crate) root: String,

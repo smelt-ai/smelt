@@ -83,6 +83,8 @@ pub struct ConversationLaunch {
     /// `occurrence` 与 `ConversationCommand::Rewind` 同语义：在 agent 的可分叉
     /// 列表里按文本配对，`occurrence` 是同文本消息中的第几条（从 0 数起）。
     pub fork_cut: Option<AcpForkCut>,
+    /// 这个 Pi 会话的跨对话请求。来源会话绑在闭包里。非 Pi 会话是 `None`。
+    pub peer_handler: Option<crate::background_tasks::PeerRequestHandler>,
 }
 
 /// 回退到一条用户消息之前以后，这条消息怎么办。
@@ -738,7 +740,11 @@ async fn wait_for_event_senders_closed(
 pub fn shutdown_and_wait(handle: ConversationHandle, timeout: std::time::Duration) -> bool {
     handle.shutdown_requested.store(true, Ordering::SeqCst);
     let _ = handle.cmd_tx.try_send(ConversationCommand::Shutdown);
-    let pid = handle.stdio.lock().unwrap().map(|process| process.pid);
+    let pid = handle
+        .stdio
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .map(|process| process.pid);
     let event_rx = handle.event_rx;
     // 尚无子进程：停止标记与 spawn 共用 stdio 锁，连接线程不会再创建 provider。
     // 这里不等 event_rx——测试桩会故意留着 sender，那不是一个可收尸的 child。
@@ -751,14 +757,12 @@ pub fn shutdown_and_wait(handle: ConversationHandle, timeout: std::time::Duratio
 
 /// 证明一个 provider 进程组已经死了。本函数是纯验证，不发任何信号。
 ///
-/// 证明方式取决于亲缘关系（调用方不用选，运行时按 `waitpid` 结果自动分流——
-/// 同一个会话交接前是亲生、交接后是收养，关系是动态的）：
-/// - 直接子进程：`waitpid`（精确，还能收走僵尸）+ 组缺席双重确认；
-/// - 收养进程（handoff 后前任已退）：`waitpid` 永报 ECHILD，改用信号探针，
-///   组员退出用内核事件等（macOS `kqueue`，Linux `pidfd`）。调用方应在 prove
-///   之前先发过 SIGKILL：刚杀完就地等，pid 复用需要整组先死再重建同号组，
-///   不可能在该窗口内完成，探得缺席即原组已死。D-state 等杀不死的只会探得
-///   仍在，超时返回 false（与 waitpid 路径同语义）。
+/// 直接子进程用 `waitpid`（还能收走僵尸）再确认整组缺席。`waitpid` 报 ECHILD
+/// 时不能当成已经死了：驱动线程可能已经收过这个子进程，pid 也可能已被复用。
+/// 这时改用信号探针，组员退出用内核事件等（macOS `kqueue`，Linux `pidfd`）。
+/// 调用方应在 prove 之前先发过 SIGKILL：刚杀完就地等，pid 复用需要整组先死再
+/// 重建同号组，不可能在该窗口内完成，探得缺席即原组已死。D-state 等杀不死的
+/// 只会探得仍在，超时返回 false（与 waitpid 路径同语义）。
 ///
 /// 组缺席之外还查 leader 本人：若该 pid 活着却已不在自编号组里（重设过 pgid
 /// 的非 leader），光看组会误判已死。双条件缺一不可。
@@ -1129,6 +1133,61 @@ fn process_group_members_os(_pgid: i32) -> Vec<i32> {
     Vec::new()
 }
 
+/// `catch_unwind` 拿到的 panic 载荷。不是字符串时给一句固定说明。
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "未知异常".to_string())
+}
+
+/// 一个会话的驱动崩了只结束这一次运行。调用方据此把这个会话标成失败。
+///
+/// 会话自己的锁可以在 unwind 时中毒；别的会话的锁不在这次调用里，不受影响。
+/// 跨会话的锁（spawn 闸门等）中毒后用 `into_inner` 继续用，不把整个守护带走。
+pub fn catch_driver_panic(run: impl FnOnce(), on_panic: impl FnOnce(String)) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        on_panic(panic_message(payload.as_ref()));
+    }
+}
+
+#[cfg(test)]
+mod driver_panic_tests {
+    use super::catch_driver_panic;
+    use std::sync::{Mutex, RwLock};
+
+    #[test]
+    fn a_driver_panic_is_contained_and_another_session_lock_stays_usable() {
+        let other_session = Mutex::new(7);
+        let shared_gate = RwLock::new(());
+        let mut marked = None;
+        catch_driver_panic(
+            || {
+                let _permit = shared_gate
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let _this_session = Mutex::new(1);
+                panic!("boom in one session");
+            },
+            |message| {
+                assert!(message.contains("boom"), "{message}");
+                let _permit = shared_gate
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                assert_eq!(*other_session.lock().unwrap(), 7);
+                marked = Some(message);
+            },
+        );
+        let marked = marked.expect("panic 应该被接住并标成这次失败");
+        assert!(marked.contains("boom"));
+        assert_eq!(*other_session.lock().unwrap(), 7);
+        let _permit = shared_gate
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+}
+
 /// 根据启动规格选择 provider 原生驱动。Pi 走自己的 JSONL RPC；其余 agent 才
 /// 进入 ACP。返回的统一句柄只承载 Smelt 内部命令/事件，不代表底层 wire 协议。
 pub fn spawn_agent_runtime(
@@ -1162,72 +1221,91 @@ pub fn spawn_acp(
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
-            // 失败的真实原因都在 stderr 里，别让用户猜）。
-            let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
-            // 先把 bunx / bun 指到应用里的 Bun，再进连接循环。
-            let (cmd, managed_bun) = {
-                let tx = event_tx.clone();
-                match resolve_runtime_command_with_bun(&launch.launch.command, &|msg| {
-                    let _ = tx.try_send(ConversationEvent::Status(msg.to_string()));
-                }) {
-                    Ok(cmd) => cmd,
-                    Err(e) => {
-                        let _ = event_tx.try_send(ConversationEvent::Fatal(e));
-                        return;
+            let event_tx_for_panic = event_tx.clone();
+            let sid_for_panic = launch.sid.clone();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
+                // 失败的真实原因都在 stderr 里，别让用户猜）。
+                let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
+                // 先把 bunx / bun 指到应用里的 Bun，再进连接循环。
+                let (cmd, managed_bun) = {
+                    let tx = event_tx.clone();
+                    match resolve_runtime_command_with_bun(&launch.launch.command, &|msg| {
+                        let _ = tx.try_send(ConversationEvent::Status(msg.to_string()));
+                    }) {
+                        Ok(cmd) => cmd,
+                        Err(e) => {
+                            let _ = event_tx.try_send(ConversationEvent::Fatal(e));
+                            return;
+                        }
                     }
-                }
-            };
-            let ConversationLaunch {
-                launch: launch_spec,
-                ephemeral_env,
-                cwd,
-                sid,
-                agent_token,
-                resume_session_id,
-                fork_session_id,
-                fork_cut,
-            } = launch;
-            let launch = ConversationLaunch {
-                launch: ConversationLaunchSpec {
-                    command: cmd,
-                    env: launch_spec.env,
-                },
-                ephemeral_env,
-                cwd,
-                sid,
-                agent_token,
-                resume_session_id,
-                fork_session_id,
-                fork_cut,
-            };
-            let result = smol::block_on(run_connection(
-                &launch,
-                managed_bun,
-                AcpChannels {
-                    cmd_rx,
-                    cmd_tx: cmd_tx_for_thread,
-                    event_tx: event_tx.clone(),
-                },
-                ConnectionSync {
-                    stderr_tail: stderr_tail.clone(),
-                    stdio_out: stdio_for_thread,
-                    spawn_gate,
-                    in_flight_rpc: in_flight_rpc_for_thread,
-                    shutdown_requested: shutdown_requested_for_thread,
-                },
-            ));
-            if let Err(e) = result {
-                let tail = stderr_tail.lock().unwrap().join("\n");
-                let msg = if tail.is_empty() {
-                    format!("{e}")
-                } else {
-                    format!("{e}\n--- agent stderr ---\n{tail}")
                 };
-                crate::app_log::error("acp", &format!("会话 {} 连接异常终止：{msg}", launch.sid));
-                let _ = event_tx.try_send(ConversationEvent::Fatal(msg));
+                let ConversationLaunch {
+                    launch: launch_spec,
+                    ephemeral_env,
+                    cwd,
+                    sid,
+                    agent_token,
+                    resume_session_id,
+                    fork_session_id,
+                    fork_cut,
+                    peer_handler: _,
+                } = launch;
+                let launch = ConversationLaunch {
+                    launch: ConversationLaunchSpec {
+                        command: cmd,
+                        env: launch_spec.env,
+                    },
+                    ephemeral_env,
+                    cwd,
+                    sid,
+                    agent_token,
+                    resume_session_id,
+                    fork_session_id,
+                    fork_cut,
+                    peer_handler: None,
+                };
+                let result = smol::block_on(run_connection(
+                    &launch,
+                    managed_bun,
+                    AcpChannels {
+                        cmd_rx,
+                        cmd_tx: cmd_tx_for_thread,
+                        event_tx: event_tx.clone(),
+                    },
+                    ConnectionSync {
+                        stderr_tail: stderr_tail.clone(),
+                        stdio_out: stdio_for_thread,
+                        spawn_gate,
+                        in_flight_rpc: in_flight_rpc_for_thread,
+                        shutdown_requested: shutdown_requested_for_thread,
+                    },
+                ));
+                if let Err(e) = result {
+                    let tail = stderr_tail.lock().unwrap().join("\n");
+                    let msg = if tail.is_empty() {
+                        format!("{e}")
+                    } else {
+                        format!("{e}\n--- agent stderr ---\n{tail}")
+                    };
+                    crate::app_log::error(
+                        "acp",
+                        &format!("会话 {} 连接异常终止：{msg}", launch.sid),
+                    );
+                    let _ = event_tx.try_send(ConversationEvent::Fatal(msg));
+                }
+                // Ok 结束（Shutdown）不发 Fatal——UI 主动关的，没必要再报。
+            }));
+            if let Err(payload) = panicked {
+                let message = panic_message(payload.as_ref());
+                crate::app_log::error(
+                    "acp",
+                    &format!("会话 {sid_for_panic} 驱动异常退出：{message}"),
+                );
+                let _ = event_tx_for_panic.try_send(ConversationEvent::Fatal(format!(
+                    "会话驱动异常退出：{message}"
+                )));
             }
-            // Ok 结束（Shutdown）不发 Fatal——UI 主动关的，没必要再报。
         })
         .expect("spawn smelt-acp thread");
     ConversationHandle {
@@ -1245,7 +1323,9 @@ pub fn spawn_acp(
 }
 
 fn with_spawn_gate<T>(spawn_gate: Option<&Arc<RwLock<()>>>, spawn: impl FnOnce() -> T) -> T {
-    let _permit = spawn_gate.map(|gate| gate.read().unwrap());
+    // 闸门没有数据。别的会话的驱动 panic 把它中毒了也不该挡住这次拉起。
+    let _permit =
+        spawn_gate.map(|gate| gate.read().unwrap_or_else(|poisoned| poisoned.into_inner()));
     spawn()
 }
 
@@ -1574,7 +1654,9 @@ async fn run_connection(
     } = sync;
     let agent = build_agent(&launch.launch, &launch.ephemeral_env)?;
     let spawned = with_spawn_gate(spawn_gate.as_ref(), || {
-        let mut stdio = stdio_out.lock().unwrap();
+        let mut stdio = stdio_out
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if shutdown_requested.load(Ordering::SeqCst) {
             return Ok(None);
         }
@@ -1635,7 +1717,7 @@ async fn run_connection(
                 let perm_tx = perm_tx.clone();
                 let raw_request_line = perm_last_line.lock().unwrap().clone();
                 async move {
-                    let question = permission_question(&request);
+                    let (question, details) = permission_from_request(&request);
                     let _ = perm_tx.try_send(ConversationEvent::Permission {
                         question,
                         tool_call_id: request.tool_call.tool_call_id.clone(),
@@ -1651,7 +1733,7 @@ async fn run_connection(
                             })
                             .collect(),
                         responder: PermissionResponder::acp(responder),
-                        details: crate::acp_session::ApprovalDetailsView::Generic,
+                        details,
                         raw_request_line,
                     });
                     Ok(())
@@ -1854,7 +1936,7 @@ async fn run_connection(
                             InitializeRequest::new(ProtocolVersion::V1)
                                 .client_info(Implementation::new(
                                     "smelt",
-                                    env!("CARGO_PKG_VERSION"),
+                                    smelt_version::VERSION,
                                 ))
                                 .client_capabilities(smelt_client_capabilities()),
                         )
@@ -3319,15 +3401,100 @@ fn publish_raw_session_config_line(
     }
 }
 
-/// 权限卡片的问题摘要：tool call 有标题用标题，否则退回工具 id。
-fn permission_question(request: &RequestPermissionRequest) -> String {
-    request
-        .tool_call
-        .fields
-        .title
-        .clone()
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| format!("工具调用 {}", request.tool_call.tool_call_id))
+/// ACP 审批请求的问题和详情。
+fn permission_from_request(
+    request: &RequestPermissionRequest,
+) -> (String, crate::acp_session::ApprovalDetailsView) {
+    let fields = &request.tool_call.fields;
+    let paths: Vec<String> = fields
+        .locations
+        .iter()
+        .flatten()
+        .map(|location| location.path.to_string_lossy().into_owned())
+        .collect();
+    permission_view(
+        fields.title.as_deref(),
+        &request.tool_call.tool_call_id.to_string(),
+        fields.kind,
+        fields.raw_input.as_ref(),
+        &paths,
+    )
+}
+
+/// 审批卡要让人看得出批的是什么：工具标题（「Fetch URL」「Run shell」）之外，带上这次
+/// 调用的对象——命令、网址、文件。能认出是执行命令或改文件的，给专门的详情样式；其余的
+/// 把对象接在标题后面。请求里的字段是稀疏的，没带参数时调用方用之前那条 tool_call 的
+/// `raw_input` 再算一次（见 `acp_session::apply` 的审批分支）。
+pub(crate) fn permission_view(
+    title: Option<&str>,
+    tool_call_id: &str,
+    kind: Option<agent_client_protocol::schema::v1::ToolKind>,
+    raw_input: Option<&serde_json::Value>,
+    paths: &[String],
+) -> (String, crate::acp_session::ApprovalDetailsView) {
+    use crate::acp_session::ApprovalDetailsView;
+    use agent_client_protocol::schema::v1::ToolKind as Acp;
+
+    /// 网址、命令过长时只留开头，卡片和系统通知都放得下。
+    const TARGET_MAX_CHARS: usize = 300;
+
+    let title = title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("工具调用 {tool_call_id}"));
+    let input = raw_input.and_then(serde_json::Value::as_object);
+    let text = |keys: &[&str]| {
+        let input = input?;
+        keys.iter()
+            .find_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let command = input
+        .and_then(|input| input.get("command"))
+        .and_then(|command| match command {
+            serde_json::Value::String(command) => {
+                Some(command.trim().to_string()).filter(|command| !command.is_empty())
+            }
+            serde_json::Value::Array(words) => {
+                let words: Vec<&str> = words.iter().filter_map(serde_json::Value::as_str).collect();
+                (!words.is_empty()).then(|| words.join(" "))
+            }
+            _ => None,
+        });
+    let path = text(&["file_path", "path", "notebook_path"]).or_else(|| paths.first().cloned());
+
+    let details = match kind {
+        Some(Acp::Execute) if command.is_some() => ApprovalDetailsView::Command {
+            command: command.clone().unwrap_or_default(),
+            cwd: text(&["cwd", "workdir"]),
+            reason: None,
+        },
+        Some(Acp::Edit | Acp::Delete | Acp::Move) if path.is_some() => {
+            ApprovalDetailsView::FileChange {
+                reason: None,
+                grant_root: path.clone(),
+            }
+        }
+        _ => ApprovalDetailsView::Generic,
+    };
+    let target = command
+        .or_else(|| text(&["url", "uri"]))
+        .or(path)
+        .or_else(|| text(&["pattern", "query"]));
+    let question = match target {
+        Some(target) if !title.contains(&target) => {
+            let mut clipped: String = target.chars().take(TARGET_MAX_CHARS).collect();
+            if clipped.len() < target.len() {
+                clipped.push('…');
+            }
+            format!("{title}：{clipped}")
+        }
+        _ => title,
+    };
+    (question, details)
 }
 
 /// ContentBlock 文本化：MVP 只取文本，资源/图片降级为占位（方案「已知不做」）。
@@ -5907,5 +6074,91 @@ mod runtime_diagnostics_wire_tests {
             decoded.for_terminal(TerminalAgentKind::Claude),
             Some(&claude)
         );
+    }
+}
+
+#[cfg(test)]
+mod permission_view_tests {
+    use super::permission_view;
+    use crate::acp_session::ApprovalDetailsView;
+    use agent_client_protocol::schema::v1::ToolKind;
+    use serde_json::json;
+
+    #[test]
+    fn a_fetch_names_its_url() {
+        let (question, details) = permission_view(
+            Some("Fetch URL"),
+            "t1",
+            Some(ToolKind::Fetch),
+            Some(&json!({"url": "https://example.com/a", "prompt": "summarize"})),
+            &[],
+        );
+        assert_eq!(question, "Fetch URL：https://example.com/a");
+        assert!(matches!(details, ApprovalDetailsView::Generic));
+    }
+
+    #[test]
+    fn a_command_gets_the_command_card() {
+        let (question, details) = permission_view(
+            Some("Run shell"),
+            "t1",
+            Some(ToolKind::Execute),
+            Some(&json!({"command": ["git", "push"], "cwd": "/repo"})),
+            &[],
+        );
+        assert_eq!(question, "Run shell：git push");
+        assert!(matches!(
+            details,
+            ApprovalDetailsView::Command { command, cwd, .. }
+                if command == "git push" && cwd.as_deref() == Some("/repo")
+        ));
+    }
+
+    #[test]
+    fn an_edit_takes_its_file_from_the_locations() {
+        let (_, details) = permission_view(
+            Some("Edit"),
+            "t1",
+            Some(ToolKind::Edit),
+            None,
+            &["/repo/src/main.rs".to_string()],
+        );
+        assert!(matches!(
+            details,
+            ApprovalDetailsView::FileChange { grant_root: Some(root), .. } if root == "/repo/src/main.rs"
+        ));
+    }
+
+    #[test]
+    fn the_target_is_not_repeated_when_the_title_already_has_it() {
+        let (question, _) = permission_view(
+            Some("`git status`"),
+            "t1",
+            Some(ToolKind::Execute),
+            Some(&json!({"command": "git status"})),
+            &[],
+        );
+        assert_eq!(question, "`git status`");
+    }
+
+    #[test]
+    fn without_a_title_or_input_it_falls_back_to_the_tool_id() {
+        let (question, details) = permission_view(None, "t9", None, None, &[]);
+        assert_eq!(question, "工具调用 t9");
+        assert!(matches!(details, ApprovalDetailsView::Generic));
+    }
+
+    #[test]
+    fn a_long_target_is_clipped() {
+        let url = format!("https://example.com/{}", "a".repeat(400));
+        let (question, _) = permission_view(
+            Some("Fetch URL"),
+            "t1",
+            None,
+            Some(&json!({ "url": url })),
+            &[],
+        );
+        assert!(question.ends_with('…'));
+        assert!(question.chars().count() < 320);
     }
 }

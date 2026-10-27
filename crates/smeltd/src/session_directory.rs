@@ -4,8 +4,10 @@
 //! 只表示「现在能不能 attach」，不负责展示用身份。
 //!
 //! 崩溃后 PTY / ACP 子进程都接管不了，但标题、目录、最后相位还值得留给 GUI。
-//! 正常 shutdown 只把还能续接的终端留在持久化文档里（哪家 CLI、哪段对话，见
-//! `terminal_resume`），其余清空：桌面会用原来的 id 重新打开这些终端，接回原来的对话。
+//! 正常 shutdown 只把还能续接的终端留在持久化文档里（哪家 CLI、哪段还在进行的对话，见
+//! `terminal_resume`）。`cli_exited` 的终端 `resume_of` 直接返回 None，跟普通 shell 一样不留。
+//! 对话 id 仍留在内存里给桌面用，只是不再进下次启动的续接名单。桌面会用原来的 id
+//! 重新打开留下的终端，接回原来的对话。
 //! 启动时文档里的条目灌回目录并标 `runtime=false`。
 //!
 //! 身份只走两个口：`upsert`（`broadcast_state`）和 `remove`（`forget_session`）。
@@ -54,10 +56,13 @@ struct SessionRecord {
     pub launch: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
-    /// 崩溃前这条会话最后对上的 provider 对话 id。CLI 进程可能还活着，恢复它
-    /// 才能让 GUI 继续把侧栏这条对上同一段历史存档。
+    /// 崩溃前这条会话最后对上的 provider 对话 id。CLI 退出后也留着，桌面继续用它
+    /// 对历史标题；能不能续接看 `cli_exited`。
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// CLI 进程已经退出。崩溃恢复时必须带着，否则退出后留下的对话 id 会被当成还能续接。
+    #[serde(default)]
+    pub cli_exited: bool,
     pub title: Option<String>,
     pub phase: Phase,
     pub phase_since: u64,
@@ -79,6 +84,7 @@ impl SessionRecord {
             launch: state.launch.clone(),
             provider: state.provider.clone(),
             conversation_id: state.conversation_id.clone(),
+            cli_exited: state.cli_exited,
             title: state.title.clone(),
             phase: state.phase,
             phase_since: state.phase_since,
@@ -102,6 +108,7 @@ impl SessionRecord {
             launch: self.launch,
             provider: self.provider,
             conversation_id: self.conversation_id,
+            cli_exited: self.cli_exited,
             agent_token: String::new(),
             title: self.title,
             phase: self.phase,
@@ -155,6 +162,7 @@ fn published_from_record(record: &SessionRecord) -> smelt_store::PublishedSessio
         launch: record.launch.clone(),
         provider: record.provider.clone(),
         conversation_id: record.conversation_id.clone(),
+        cli_exited: record.cli_exited,
         title: record.title.clone(),
         phase: serde_json::to_value(record.phase)
             .ok()
@@ -181,6 +189,7 @@ fn record_from_published(record: smelt_store::PublishedSessionRecord) -> Session
         launch: record.launch,
         provider: record.provider,
         conversation_id: record.conversation_id,
+        cli_exited: record.cli_exited,
         title: record.title,
         phase: serde_json::from_value(serde_json::Value::String(record.phase)).unwrap_or_default(),
         phase_since: record.phase_since.max(0) as u64,
@@ -405,6 +414,9 @@ impl SessionDirectory {
 }
 
 fn resume_of(entry: &SessionState) -> Option<ResumeLaunch> {
+    if entry.cli_exited {
+        return None;
+    }
     resume_launch(
         entry.launch.as_deref(),
         entry.provider.as_deref(),
@@ -462,6 +474,7 @@ mod tests {
             launch: Some("claude".to_string()),
             provider: Some("claude".to_string()),
             conversation_id: Some("conv-1".to_string()),
+            cli_exited: false,
             agent_token: "secret-token".to_string(),
             title: Some("重构存储层".to_string()),
             phase: Phase::AwaitingApproval,
@@ -734,6 +747,95 @@ mod tests {
             );
             assert_eq!(next.resume_launch("shell-term"), None);
         });
+    }
+
+    /// CLI 跑完一轮再退出回到 shell：对话 id 还在，但停机不留这个终端，重新打开也不
+    /// `--resume`。`launch` 为 None 是在 shell 里手动起的；`Some("claude")` 是用启动命令
+    /// 起的，`/exit` 之后终端仍回到交互 shell。启动命令本身不能让它继续可续接。
+    #[test]
+    fn an_exited_cli_is_not_kept_or_resumed_across_restart() {
+        with_test_dir(|| {
+            let directory = SessionDirectory::with_interval(Duration::ZERO);
+            let cases = [("manual-claude", None), ("launched-claude", Some("claude"))];
+            let mut terminal_ids = HashSet::new();
+            for (id, launch) in cases {
+                let mut state = exited_cli(id, launch);
+                directory.upsert(&state);
+                terminal_ids.insert(id.to_string());
+
+                // 活着的 PTY 在停机前 runtime=true，resume_launch 本来就不看它。
+                // 这里再放一条 runtime=false 的同样状态，确认不是「还活着」才返回 None。
+                state.runtime = false;
+                state.id = format!("{id}-ghost");
+                directory.upsert(&state);
+                assert_eq!(directory.resume_launch(&state.id), None, "{id}");
+            }
+
+            // 崩溃不走 keep_resumable，整份快照还在。退出标记必须跟着落盘，
+            // 否则恢复出来的对话 id 又会被当成还能续接。
+            let crashed = SessionDirectory::restore_from_disk();
+            let ghost = crashed
+                .snapshot()
+                .into_iter()
+                .find(|entry| entry.id == "manual-claude-ghost")
+                .expect("崩溃恢复应留下退出前的终端");
+            assert_eq!(ghost.conversation_id.as_deref(), Some("conv-old"));
+            assert!(ghost.cli_exited);
+            assert_eq!(crashed.resume_launch("manual-claude-ghost"), None);
+            assert_eq!(crashed.resume_launch("launched-claude-ghost"), None);
+
+            directory.keep_resumable_terminals(&terminal_ids);
+
+            let next = SessionDirectory::restore_from_disk();
+            let ids: Vec<String> = next.snapshot().into_iter().map(|entry| entry.id).collect();
+            assert!(
+                ids.is_empty(),
+                "已退出的 CLI 不能留到下次启动，实际留下了 {ids:?}"
+            );
+            for (id, _) in cases {
+                assert_eq!(next.resume_launch(id), None, "{id}");
+            }
+        });
+    }
+
+    /// SessionStarted（带 provider 和对话 id）→ TurnSucceeded → SessionEnded。
+    /// 对话 id 和标题留着，退出只记在 `cli_exited`。
+    fn exited_cli(id: &str, launch: Option<&str>) -> SessionState {
+        use smelt_core::agent_event::{AgentEvent, AgentEventKind};
+
+        let mut state = SessionState {
+            id: id.to_string(),
+            instance: 1,
+            launch: launch.map(str::to_string),
+            title: Some("这段对话".to_string()),
+            runtime: true,
+            ..SessionState::default()
+        };
+        let mut started = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        started.conversation_id = Some("conv-old".into());
+        crate::session_state::apply_agent_event(&mut state, &started);
+
+        let mut done = AgentEvent::new("claude", AgentEventKind::TurnSucceeded);
+        done.conversation_id = Some("conv-old".into());
+        crate::session_state::apply_agent_event(&mut state, &done);
+        assert_eq!(state.phase, Phase::Succeeded, "{id}");
+        assert_eq!(state.conversation_id.as_deref(), Some("conv-old"), "{id}");
+
+        let mut ended = AgentEvent::new("claude", AgentEventKind::SessionEnded);
+        ended.conversation_id = Some("conv-old".into());
+        crate::session_state::apply_agent_event(&mut state, &ended);
+
+        assert_eq!(
+            state.phase,
+            Phase::Succeeded,
+            "{id}：完成过的回合要留在 Finished"
+        );
+        assert_eq!(state.conversation_id.as_deref(), Some("conv-old"), "{id}");
+        assert!(state.cli_exited, "{id}");
+        assert_eq!(state.provider.as_deref(), Some("claude"), "{id}");
+        assert_eq!(state.title.as_deref(), Some("这段对话"), "{id}");
+        assert_eq!(state.launch.as_deref(), launch, "{id}");
+        state
     }
 
     /// 上次留下、这次桌面还没来得及重新打开的终端，再停一次机也不能丢。

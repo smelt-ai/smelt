@@ -35,7 +35,7 @@ Each design states its status at the top.
 - [`pi-session-messaging-design.html`](pi-session-messaging-design.html) — Pi↔Pi session messaging (transcript as inbox). P0 is implemented (#55); P1 and P2 are not.
 - [`pi-runtime-compile-design.html`](pi-runtime-compile-design.html) — Compile the Pi runtime into the single `smelt-pi` binary. Implemented (#62); see its "落地差异" section.
 - [`mobile-redesign.md`](mobile-redesign.md) — Mobile rebuilt as a multi-machine command board. Implemented (#69).
-- [`windows-support.md`](windows-support.md) — Windows desktop and a native smeltd. Implemented (#74, #83): x86_64 portable zip, unsigned, no installer and no auto-update.
+- [`windows-support.md`](windows-support.md) — Windows desktop and a native smeltd. Implemented (#74, #83): x86_64 per-user installer, unsigned, no auto-update.
 - [`collaboration.md`](collaboration.md) — Multiplayer around a live session. Not started.
 
 ## Product / planning

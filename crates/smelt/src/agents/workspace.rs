@@ -914,9 +914,9 @@ impl Workspace {
         .detach();
     }
 
-    /// 侧栏「新对话」。有默认就直接开；没有可对话智能体就去创建；有人但没默认时
-    /// 选择器自己处理，这里不猜。
-    pub(super) fn begin_new_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 侧栏「新对话」和 ⌘N。有默认就直接开；没有可对话智能体就去创建；有人但没默认时
+    /// 侧栏按钮自己弹选择器，不走到这里；⌘N 没有地方弹菜单，去智能体页挑。
+    pub(crate) fn begin_new_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let plan = plan_new_conversation(self.agent_surface.conversation_draft.as_ref(), cx);
         let agents_empty = agent_machines(cx)
             .iter()
@@ -929,7 +929,7 @@ impl Workspace {
                 self.discard_uncommitted_draft(Some(&agent), cx);
                 self.start_agent_conversation(agent, window, cx);
             }
-            NewConversationIntent::PickAgent => {}
+            NewConversationIntent::PickAgent => self.open_agents_route(window, cx),
             NewConversationIntent::CreateAgent => {
                 if self.agent_surface.conversation_draft.is_some() {
                     self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
@@ -1077,7 +1077,11 @@ impl Workspace {
         if self.active_session != session_ix {
             self.active_session_revision = self.active_session_revision.wrapping_add(1);
             self.active_session = session_ix;
+            // 换到的对话在侧栏「对话」组里得看得见：组折着就展开，再滚到它。
+            self.sidebar_conversations_collapsed = false;
+            self.sidebar_reveal.request(self.sessions[session_ix].ui_id);
         }
+        self.note_session_viewed(session_ix);
         if let Some(agent_id) = agent_id
             && self.sessions[session_ix].runtime(cx).key() == &crate::RuntimeKey::Local
         {

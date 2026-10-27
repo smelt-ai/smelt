@@ -124,6 +124,30 @@ pub(crate) fn toggle_pinned_project(pinned: &mut HashSet<String>, root: &str) {
     }
 }
 
+/// 关掉当前会话后回到哪一个：最近看过、还开着、`eligible` 认的那个（`recent` 里最近的
+/// 在最后，存的是会话 `ui_id`）。
+pub(crate) fn previous_viewed(
+    recent: &[u64],
+    closed: u64,
+    eligible: impl Fn(u64) -> bool,
+) -> Option<u64> {
+    recent
+        .iter()
+        .rev()
+        .copied()
+        .find(|&ui_id| ui_id != closed && eligible(ui_id))
+}
+
+/// 还没有看过别的会话时（刚启动）关掉当前会话的兜底：同组里它下面那个，没有就上面那个；
+/// 组里只剩它就没有。`order` 是这组会话在侧栏里的顺序，跟 sessions 下标不是一回事。
+pub(crate) fn neighbor_in_group(order: &[usize], closed: usize) -> Option<usize> {
+    let pos = order.iter().position(|&ix| ix == closed)?;
+    order
+        .get(pos + 1)
+        .or_else(|| pos.checked_sub(1).and_then(|before| order.get(before)))
+        .copied()
+}
+
 /// 空项目标题再降一档；当前项目即使没会话也保持可读（落地页）。
 pub(crate) fn project_header_is_dimmed(is_active: bool, is_empty: bool) -> bool {
     is_empty && !is_active

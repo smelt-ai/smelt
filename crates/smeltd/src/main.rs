@@ -103,9 +103,9 @@
 mod acp_host;
 mod acp_idle;
 mod acp_registry;
-mod acp_runtime_host;
 mod agent_memory_control;
 mod automation_runtime;
+mod client_conn;
 mod control;
 mod memory_peer_auth;
 mod conversation_image;
@@ -113,7 +113,6 @@ mod desktop;
 mod devices;
 mod event_hub;
 mod files_control;
-mod client_conn;
 mod git_control;
 mod history_control;
 mod memory_watch;
@@ -121,8 +120,8 @@ mod memory_watch;
 mod menubar;
 mod peer_messages;
 mod pi_control;
-mod subagent_transcript;
 mod resource_usage;
+mod subagent_transcript;
 use devices::Principal;
 mod program_status;
 mod project_watch;
@@ -139,6 +138,7 @@ mod terminal_output;
 mod terminal_progress;
 mod terminal_registry;
 mod terminal_resume;
+mod terminal_shell;
 mod terminal_snapshot;
 mod webhook;
 
@@ -180,12 +180,12 @@ use terminal_snapshot::{
 };
 
 use client_conn::{ClientConn, ClientSocket, ConnId};
+use smelt_runtime_client::{UnixListener, UnixStream};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use smelt_runtime_client::{UnixListener, UnixStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 #[cfg(unix)]
 use std::sync::Once;
@@ -265,12 +265,16 @@ fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
-/// 启动时钉住的那份普通文件。会话宿主只 exec 这条路径，不再回头看启动名现在指向谁。
+/// 启动时钉住的那份普通文件。升级只 exec 这条路径，不再回头看启动名现在指向谁。
 struct PinnedDaemonImage {
     path: std::path::PathBuf,
+    /// 钉住时的设备号和 inode。生产路径只 exec `path`；单测用这两个字段确认
+    /// 钉住的是映像文件本身，不是启动名那根链接。
     #[cfg(unix)]
+    #[cfg_attr(not(test), allow(dead_code))]
     dev: u64,
     #[cfg(unix)]
+    #[cfg_attr(not(test), allow(dead_code))]
     ino: u64,
 }
 
@@ -290,12 +294,12 @@ fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
 /// 之后启动名被拨到别的映像，也不改变已经钉住的路径。
 fn pin_running_daemon_image() {
     let Ok(path) = std::env::current_exe() else {
-        eprintln!("smeltd 无法读取当前可执行路径，会话宿主将拒绝启动");
+        eprintln!("smeltd 无法读取当前可执行路径，升级将拒绝换映像");
         return;
     };
     let Some(pinned) = open_mapped_image(&path) else {
         eprintln!(
-            "smeltd 没有钉住守护映像（{}），会话宿主将拒绝启动",
+            "smeltd 没有钉住守护映像（{}），升级将拒绝换映像",
             path.display()
         );
         return;
@@ -346,59 +350,6 @@ fn open_regular_nofollow(path: &std::path::Path) -> Option<PinnedDaemonImage> {
         dev: meta.dev(),
         ino: meta.ino(),
     })
-}
-
-/// 不跟随符号链接。钉住的必须是那个普通文件本身；路径变成链接就当成映像已经换了。
-fn path_has_inode(path: &std::path::Path, dev: u64, ino: u64) -> bool {
-    #[cfg(windows)]
-    {
-        let _ = (dev, ino);
-        // 钉住的是 canonicalize 之后的路径。路径还在、并且规范化结果没换，才是同一份映像。
-        match std::fs::canonicalize(path) {
-            Ok(canonical) => canonical == path,
-            Err(_) => false,
-        }
-    }
-    #[cfg(unix)]
-    {
-        let Ok(meta) = std::fs::symlink_metadata(path) else {
-            return false;
-        };
-        if !meta.is_file() {
-            return false;
-        }
-        use std::os::unix::fs::MetadataExt;
-        meta.dev() == dev && meta.ino() == ino
-    }
-}
-
-fn session_host_executable_from(
-    pinned_path: &std::path::Path,
-    pinned: Option<(u64, u64)>,
-) -> std::io::Result<std::path::PathBuf> {
-    let Some((dev, ino)) = pinned else {
-        return Err(std::io::Error::other("没有钉住守护映像"));
-    };
-    if path_has_inode(pinned_path, dev, ino) {
-        return Ok(pinned_path.to_path_buf());
-    }
-    Err(std::io::Error::other(format!(
-        "smeltd 路径已指向另一份映像，拒绝用它启动会话宿主：{}",
-        pinned_path.display()
-    )))
-}
-
-/// 会话宿主必须和本进程是同一个 inode。钉住的文件被换掉时直接失败。
-/// 不能改去 exec 启动名现在指向的文件，也不能另拷一份再跑。
-fn session_host_executable() -> std::io::Result<std::path::PathBuf> {
-    let pinned = PINNED_DAEMON_IMAGE
-        .get()
-        .ok_or_else(|| std::io::Error::other("没有钉住守护映像"))?;
-    #[cfg(unix)]
-    let identity = Some((pinned.dev, pinned.ino));
-    #[cfg(windows)]
-    let identity = Some((0, 0));
-    session_host_executable_from(&pinned.path, identity)
 }
 
 /// 已经写好、还没切到运行中守护的下一份映像。只认 `smeltd.pending` 这根链接，
@@ -701,9 +652,7 @@ impl TerminalChild {
     /// ConPTY 不能 CREATE_SUSPENDED。先记下 Child，再尽量放进 Job。
     /// Job 没挂上时进程还在，结束时 `terminate_pid` 收它自己。
     #[cfg(windows)]
-    fn start_with_child(
-        child: Box<dyn portable_pty::Child + Send>,
-    ) -> std::io::Result<Arc<Self>> {
+    fn start_with_child(child: Box<dyn portable_pty::Child + Send>) -> std::io::Result<Arc<Self>> {
         let Some(pid) = child.process_id().and_then(|pid| i32::try_from(pid).ok()) else {
             return Err(std::io::Error::other("拿不到 shell pid"));
         };
@@ -1576,7 +1525,7 @@ fn reconcile_remote_catalog_runtime(
     let mut acp_lifecycles = Vec::with_capacity(acp_slots.len());
     let mut live_acp_instances = HashMap::new();
     for (id, slot) in &acp_slots {
-        let lifecycle = slot.lifecycle.lock().unwrap();
+        let lifecycle = slot.lifecycle.lock();
         if acp_sessions.is_current(id, slot) {
             live_acp_instances.insert(id.clone(), slot.value.instance);
         }
@@ -2687,23 +2636,14 @@ fn main() {
     // GUI 从 libdispatch 工作线程 posix_spawn 本进程时，会把那套「屏蔽 SIGCHLD」
     // 的线程掩码遗传进来。async-process 靠 SIGCHLD 回收子进程；掩码不清掉，
     // Pi 退出后 status() 永远等不到通知，会话就停在「正在启动」。
-    // 必须赶在任何 thread::spawn / 再拉起 session host 之前做，新建线程才会复制空掩码。
+    // 必须赶在任何 thread::spawn 之前做，新建线程才会复制空掩码。
     clear_inherited_signal_mask();
     // Grok/CI 会给进程打 NO_COLOR=1。必须在任何线程/子进程之前卸掉，否则
     // 交互式 PTY（agy 等）会继承关色开关，整屏只剩默认灰白。
     smelt_core::tty_color::clear_process();
-    // 独立 ACP 会话宿主只跑一条私有控制连接，不能初始化 SQLite、绑定全局
-    // smeltd.sock 或启动菜单/远程服务。尽量早分流也避免每个会话宿主各起一套
-    // app_log tee 后台线程。
-    // 会话宿主和主进程都要钉住自己映射的那份文件。钉晚了，启动名若已被拨走，
-    // 再去解析 `current_exe()` 就会拿到下一份映像。
+    // 钉住自己映射的那份文件。钉晚了，启动名若已被拨走，再去解析
+    // `current_exe()` 就会拿到下一份映像。
     pin_running_daemon_image();
-    // 会话宿主的 `--acp-session-host` 是内部参数，必须先于子命令分流认出来，
-    // 否则会被当成未知子命令退出，对话会话起来就挂。
-    if acp_runtime_host::is_session_host_process() {
-        acp_runtime_host::run_session_host();
-        return;
-    }
     // `smeltd install` / `status` 这类子命令跑完就退出，不起守护。
     if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
@@ -3135,11 +3075,8 @@ fn run_serve_loop(
     // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
     spawn_headless_self_upgrade(server.daemon_fingerprint.clone());
 
-    // 闲置会话挂起（见 acp_idle）。冷启动和升级交接都走到这里；会话宿主进程不走。
-    acp_idle::spawn_acp_idle_reaper(
-        Arc::clone(&server.acp_sessions),
-        Arc::clone(&server.remote_sessions),
-    );
+    // 闲置会话挂起（见 acp_idle）。冷启动走到这里。
+    acp_idle::spawn_acp_idle_reaper(Arc::clone(&server.acp_sessions));
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
@@ -3288,31 +3225,6 @@ fn handle_upgrade<C: ClientSocket>(conn: C, req: &serde_json::Value) {
     protocol::graceful_shutdown(Some(c.into_client_conn()), Some(exe));
 }
 
-/// 开 PTY + 起 shell。交互环境在下面的 `apply_interactive_pty_env`：PTY 只活在守护里，
-/// GUI 的 `terminal.rs` 只消费字节流。
-/// `launch`：项目「+」悬浮菜单的 Claude Code / Codex 快捷入口——把要跑的命令直接编进
-/// 启动命令行（`-ilc '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
-/// 这样从根上没有"shell 是否已经在读 stdin"的时序问题，命令跑完会 exec 回一个
-/// 正常交互 login shell，之后就是一个普通会话。
-fn shell_launch_args(shell: &str, launch: Option<&str>) -> Vec<String> {
-    #[cfg(windows)]
-    {
-        // 交互终端：cmd 不读 profile（/d），/k 留下提示符。不走 zsh 的 -ilc。
-        let _ = shell;
-        match launch {
-            Some(launch) => vec!["/d".into(), "/k".into(), launch.to_string()],
-            None => vec!["/d".into(), "/k".into()],
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        match launch {
-            Some(launch) => vec!["-ilc".to_string(), format!("{launch}; exec {shell} -l")],
-            None => vec!["-l".to_string()],
-        }
-    }
-}
-
 /// 宿主终端的身份变量。smeltd 从别的终端里起（开发时 `cargo run`、命令行里跑 `smelt`）
 /// 会把它们带进会话：不少程序先看这些、再看 `TERM_PROGRAM`（Pi 认 `KITTY_WINDOW_ID`、
 /// Claude Code 认 `ITERM_SESSION_ID`），漏进来的 `TMUX` 还会让程序把转义序列包成 tmux
@@ -3371,10 +3283,6 @@ fn apply_interactive_pty_env(cmd: &mut CommandBuilder) {
     if std::env::var("LANG").is_err() {
         cmd.env("LANG", "en_US.UTF-8");
     }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 const PI_STATUS_EXTENSION_SOURCE: &str = include_str!("../assets/pi-status-extension.ts");
@@ -3441,7 +3349,11 @@ fn launch_terminal_agent_kind(launch: &str) -> Option<smelt_core::agent_kind::Te
         .find(|kind| kind.cli_program() == program)
 }
 
-fn launch_with_terminal_status_bridge(launch: &str, extension: &std::path::Path) -> String {
+fn launch_with_terminal_status_bridge(
+    launch: &str,
+    extension: &std::path::Path,
+    shell: &terminal_shell::TerminalShell,
+) -> String {
     let Some(agent) = launch_terminal_agent_kind(launch) else {
         return launch.to_string();
     };
@@ -3452,7 +3364,10 @@ fn launch_with_terminal_status_bridge(launch: &str, extension: &std::path::Path)
             if launch.contains(extension.as_ref()) {
                 return launch.to_string();
             }
-            let option = format!("--extension {}", shell_quote(&extension));
+            let Some(extension) = shell.quote(&extension) else {
+                return launch.to_string();
+            };
+            let option = format!("--extension {extension}");
             if let Some(index) = launch.find(" -- ") {
                 format!("{} {option}{}", &launch[..index], &launch[index..])
             } else if let Some(prefix) = launch.strip_suffix(" --") {
@@ -3491,23 +3406,20 @@ fn spawn_session(
         pixel_height: 0,
     })?;
 
-    #[cfg(windows)]
-    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-    #[cfg(not(windows))]
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut cmd = CommandBuilder::new(shell.clone());
-    // 快捷启动必须同时是 interactive + login：用户级 CLI 安装器通常把 PATH
-    // 写进 .zshrc，只用 `-lc` 读不到，Dock 启动的 smeltd 又只有系统 PATH。
+    // 交互环境在下面的 `apply_interactive_pty_env`：PTY 只活在守护里，GUI 的
+    // `terminal.rs` 只消费字节流。
+    let shell = terminal_shell::TerminalShell::detect();
+    let mut cmd = CommandBuilder::new(&shell.program);
     let agent_token = uuid::Uuid::new_v4().simple().to_string();
     let status_extension = pi_status_extension_path();
     let injected_launch = launch.run.map(|launch| {
         if status_extension.is_file() {
-            launch_with_terminal_status_bridge(launch, &status_extension)
+            launch_with_terminal_status_bridge(launch, &status_extension, &shell)
         } else {
             launch.to_string()
         }
     });
-    for arg in shell_launch_args(&shell, injected_launch.as_deref()) {
+    for arg in shell.launch_args(injected_launch.as_deref()) {
         cmd.arg(arg);
     }
     if let Some(dir) = cwd {
