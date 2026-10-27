@@ -20,8 +20,8 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-model = { path = "../smelt-model" }
 smelt-pairing = { path = "../smelt-pairing" }
 smelt-event-protocol = { path = "../smelt-event-protocol" }
-# 只为在设备身份里存 `iroh::SecretKey`，版本跟 smelt-iroh 走同一个。
-iroh = "1"
+# 只为在设备身份里存 `iroh::SecretKey`，版本跟 smelt-iroh 走同一个（>=1.1.0）。
+iroh = "1.1"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

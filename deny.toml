@@ -1,0 +1,25 @@
+# RustSec advisory 闸门。CI 只跑 `cargo deny check advisories`
+# （见 .github/workflows/ci.yml）。license / bans / sources 另议。
+
+[graph]
+# 跟 lockfile 对齐；不强制 --all-features，避免扫到未启用的可选依赖树。
+all-features = false
+
+[advisories]
+# yanked 默认 warn，不挡 CI。
+yanked = "warn"
+# 只对 workspace 直接依赖报 unmaintained。传递依赖的「无人维护」噪声太多，
+# 且多数钉死在 gpui / usvg 树上，本仓库单独升不了。
+unmaintained = "workspace"
+# 忽略必须带 reason，禁止静默 suppress。
+ignore = [
+    # --- unmaintained（workspace 直接依赖）---
+    { id = "RUSTSEC-2026-0206", reason = "smelt-ui 钉 rustybuzz =0.20.1 以匹配 usvg 0.46 的 Face API；无兼容的维护中替代，换版本需连同 usvg 升级（另开 PR）" },
+
+    # --- vulnerability（均经 gpui-shell → quickjs-jit-stdlib → llrt_*，本仓库无法单独升）---
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 经 llrt_crypto 引入；llrt 钉在 gpui-shell 所用 rev，且 0.7.6 亦已 yank，需等上游 llrt/gpui-kit 升依赖" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin Attack：RustCrypto/RSA 尚无 patched 版本（patched=[]）；仅经 llrt_crypto 进入 JS 运行时加密路径，非 smelt 网络协议私钥路径。规避需换掉 rsa 或等上游修复" },
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13.x 经 llrt_compression 引入（llrt 要求 zstd 0.13）；修复要 >=0.14.3，需上游 llrt 改版本约束" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 随 zstd 0.13 锁在 7.x；修复要 >=8.2.0，同上受 llrt_compression 约束" },
+    { id = "RUSTSEC-2026-0403", reason = "同 RUSTSEC-2026-0398：zstd-safe 7.x / llrt_compression，需上游升级" },
+]

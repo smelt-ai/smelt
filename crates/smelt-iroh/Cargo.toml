@@ -16,8 +16,10 @@ smelt-paths = { path = "../smelt-paths" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-model = { path = "../smelt-model" }
 smelt-pairing = { path = "../smelt-pairing" }
-iroh = "1"
-iroh-relay = "1"
+# >=1.1.0：排除 2026-10-05 的三条 advisory（GHSA-7cq4-mhxw-xw78 /
+# GHSA-jx4g-cg2x-jc35 / GHSA-vwh7-9883-83xj）；"1" 会允许回到有漏洞的 1.0.x。
+iroh = "1.1"
+iroh-relay = "1.1"
 # 构造 iroh::dns::DnsError 要用它的 AnyError（iroh 本身已依赖，不增新包）。
 n0-error = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "time"] }
