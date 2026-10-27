@@ -4781,7 +4781,12 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
         // 设置窗口：Cmd+W（Windows / Linux 是 Ctrl+W）关窗。它是普通窗口，不是模态层，
         // Esc 不关它，留给下拉框、弹出层和输入框。
-        KeyBinding::new("secondary-w", CloseSettingsWindow, Some("SettingsWindow")),
+        // gpui-pre 0.3.10 的 `KeyBinding::new` 不解析 `secondary-`（那要 `KeyBinding::load`
+        // 和 App）。注册发生在启动、还没有 cx，按目标平台写成显式修饰键。
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-w", CloseSettingsWindow, Some("SettingsWindow")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-w", CloseSettingsWindow, Some("SettingsWindow")),
         // 文件树只在自己的宿主上挂 FileTree。树没挂载（文件页不可见、树收起、
         // 搜索框有内容）时这条 context 不在焦点路径上。
         KeyBinding::new("up", FileTreeMoveUp, Some("FileTree")),

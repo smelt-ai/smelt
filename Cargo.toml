@@ -39,7 +39,8 @@ resolver = "3"
 version = "0.0.0"
 edition = "2024"
 # 与 rust-toolchain.toml 一致。成员 crate 未一律 inherit，钉编译器靠 toolchain 文件。
-rust-version = "1.97.0"
+# gpui-pre-macos 0.3.10 用了 1.98 才稳定的 `Option::map_or_default`。
+rust-version = "1.98.0"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }

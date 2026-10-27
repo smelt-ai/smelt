@@ -165,9 +165,18 @@ fn migrated_chords_are_not_bound_at_the_root_context() {
     }
 }
 
+/// 与 `app_key_bindings` 里关设置窗口的键一致。`Keystroke::parse` 不接受 `secondary-`。
+#[cfg(target_os = "macos")]
+const CLOSE_SETTINGS_CHORD: &str = "cmd-w";
+#[cfg(not(target_os = "macos"))]
+const CLOSE_SETTINGS_CHORD: &str = "ctrl-w";
+
 /// 设置窗口 Cmd+W（Windows / Linux 是 Ctrl+W）关窗；它是普通窗口，Esc 不关它。
 #[test]
 fn settings_window_closes_on_secondary_w_but_not_escape() {
-    assert!(first_is::<CloseSettingsWindow>("secondary-w", &["SettingsWindow"]));
+    assert!(first_is::<CloseSettingsWindow>(
+        CLOSE_SETTINGS_CHORD,
+        &["SettingsWindow"]
+    ));
     assert!(matched("escape", &["SettingsWindow"]).is_empty());
 }
