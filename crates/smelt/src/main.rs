@@ -268,6 +268,7 @@ gpui::actions!(
         OpenSettings,
         CheckForUpdate,
         ReportIssue,
+        OpenDocs,
         SendSelectionToTerminal,
         PrevSession,
         NextSession,
@@ -2768,7 +2769,7 @@ struct Workspace {
     show_quit_confirm: bool,
     /// 用户已确认退出；防止异步更新收尾期间重复提交退出动作。
     quit_requested: bool,
-    /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 齿轮强调色。
+    /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 侧栏「设置」红点。
     /// 只在 macOS 上存在：更新器替换的是 .app 包（设计文档 D4）。
     #[cfg(target_os = "macos")]
     update_status: updater::UpdateStatus,
@@ -4169,12 +4170,9 @@ impl Render for Workspace {
                 this.show_quit_confirm = true;
                 cx.notify();
             }))
-            // Cmd+, / 应用菜单「设置…」：跟齿轮图标共用同一个独立设置窗口。
+            // Cmd+, / 应用菜单「设置…」：跟侧栏「设置」同一个入口，见 `open_settings`。
             .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| {
-                // 不动 nonce：窗口已开着就保持用户当前所在页，只是把它提到前台；
-                // 但下次新开窗口得回到外观页，不能停在「检查更新…」跳过去的那页。
-                this.settings_section = settings::SettingsSection::appearance();
-                this.open_settings_window(cx);
+                this.open_settings(cx);
             }))
             // Cmd+↑ / Cmd+↓：上/下一个会话（按侧栏视觉顺序）。
             .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
@@ -4192,9 +4190,12 @@ impl Render for Workspace {
             }
             this.open_settings_section(settings::SettingsSection::app_update(), cx);
         }));
-        // 应用菜单「反馈问题…」：跳内部飞书反馈群。
+        // 应用菜单「帮助」：反馈渠道和帮助文档，链接打包时可换（见 settings::FEEDBACK_URL）。
         frame.on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
                 cx.open_url(settings::FEEDBACK_URL);
+            }))
+            .on_action(cx.listener(|_this, _: &OpenDocs, _window, cx| {
+                cx.open_url(settings::DOCS_URL);
             }))
             // 文件内容视图右键菜单里的「发送选中内容到会话」，见 send_open_file_selection。
             .on_action(
@@ -4908,7 +4909,8 @@ fn main() {
             ])
             .expect("加载内嵌字体失败");
         // 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
-        // （跟齿轮图标一样开独立设置窗口，符合 mac 惯例——系统偏好设置一般都在这）。
+        // （跟侧栏「设置」一样开独立设置窗口，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
+        // 放「帮助」菜单。设置「系统」页末尾也有这两项，没有菜单栏的平台从那里进。
         cx.bind_keys(app_key_bindings());
         cx.set_menus(vec![
             Menu::new("Smelt").items([
@@ -4920,9 +4922,12 @@ fn main() {
                 MenuItem::action("检查更新…", CheckForUpdate),
                 MenuItem::Separator,
                 MenuItem::action("设置…", OpenSettings),
-                MenuItem::action("反馈问题…", ReportIssue),
                 MenuItem::Separator,
                 MenuItem::action("退出 Smelt", Quit),
+            ]),
+            Menu::new("帮助").items([
+                MenuItem::action("帮助文档", OpenDocs),
+                MenuItem::action("反馈问题", ReportIssue),
             ]),
         ]);
 

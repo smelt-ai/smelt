@@ -2112,23 +2112,10 @@ impl Workspace {
         }
 
         // ---- 底部操作条：设置 ----
-        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。机器和资源占用
-        // 都在设置里，下拉菜单给直达入口；有机器要处理时也挂在设置的提示点上。
+        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。「设置」点一下直接
+        // 开设置窗口；有要处理的事（新版本、后台服务旧了、机器要处理）时挂红点，打开就停在那一页。
         let e_settings = this.clone();
-        let settings_needs_attention = {
-            #[cfg(target_os = "macos")]
-            {
-                self.update_available() || self.daemon_outdated == Some(true)
-            }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            {
-                self.daemon_outdated == Some(true)
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        } || crate::runtimes::any_runtime_needs_attention(cx);
+        let settings_needs_attention = self.settings_attention(cx).is_some();
 
         // ---- 底部额度：跟设置同一条底栏，放在右边 ----
         // provider 账户额度（Codex / Claude / Copilot / Grok / Cursor），只列「检测到额度」
@@ -2244,88 +2231,9 @@ impl Workspace {
                             .quiet()
                             .icon(IconName::Settings)
                             .label("设置")
-                            .dropdown_menu_with_anchor(
-                                Anchor::BottomLeft,
-                                move |menu, _window, _cx| {
-                                    let e_settings = e_settings.clone();
-                                    #[cfg(target_os = "macos")]
-                                    let e_check_update = e_settings.clone();
-                                    let menu = menu
-                                        .item(
-                                            PopupMenuItem::new("帮助文档")
-                                                .icon(IconName::BookOpen)
-                                                .on_click(|_ev, _window, cx| {
-                                                    cx.open_url(crate::settings::DOCS_URL);
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("反馈问题")
-                                                .icon(IconName::Info)
-                                                .on_click(|_ev, _window, cx| {
-                                                    cx.open_url(crate::settings::FEEDBACK_URL);
-                                                }),
-                                        );
-                                    #[cfg(target_os = "macos")]
-                                    let menu = menu.item(
-                                        PopupMenuItem::new("检查更新...")
-                                            .icon(IconName::LoaderCircle)
-                                            .on_click(move |_ev, _window, cx| {
-                                                e_check_update.update(cx, |ws, cx| {
-                                                    if ws.update_status.can_check()
-                                                        || ws.update_status.can_retry_recovery()
-                                                    {
-                                                        ws.check_or_recover_update(false, cx);
-                                                    }
-                                                    ws.open_settings_section(
-                                                        crate::settings::SettingsSection::app_update(),
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                    );
-                                    let e_machines = e_settings.clone();
-                                    let e_resources = e_settings.clone();
-                                    let menu = menu
-                                        .separator()
-                                        .item(
-                                            PopupMenuItem::new("机器...")
-                                                .icon(Icon::new(gpui_kit_assets::IconName::Server))
-                                                .on_click(move |_ev, _window, cx| {
-                                                    e_machines.update(cx, |ws, cx| {
-                                                        ws.open_settings_section(
-                                                            crate::settings::SettingsSection::Remote,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("资源占用...")
-                                                .icon(IconName::MemoryStick)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    e_resources.update(cx, |ws, cx| {
-                                                        ws.open_settings_section(
-                                                            crate::settings::SettingsSection::Resources,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        );
-
-                                    menu.item(
-                                        PopupMenuItem::new("设置...")
-                                            .icon(IconName::Settings)
-                                            .on_click(move |_ev, _window, cx| {
-                                                e_settings.update(cx, |ws, cx| {
-                                                    ws.check_daemon_outdated(cx);
-                                                    ws.settings_section =
-                                                        crate::settings::SettingsSection::appearance();
-                                                    ws.open_settings_window(cx);
-                                                });
-                                            }),
-                                    )
-                                },
-                            ),
+                            .on_click(move |_, _, cx| {
+                                e_settings.update(cx, |ws, cx| ws.open_settings(cx));
+                            }),
                     )
                     .when(settings_needs_attention, |d| {
                         d.child(

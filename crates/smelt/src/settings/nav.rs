@@ -21,7 +21,7 @@ pub enum SettingsSection {
     Remote,
     /// 停在这一页时才采样。
     Resources,
-    /// 应用更新（仅 macOS）、后台服务、存储清理。
+    /// 应用更新（仅 macOS）、后台服务、存储清理、帮助与反馈。
     System,
 }
 
@@ -315,6 +315,15 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "~/.smelt",
                         "维护",
                         "高级",
+                        "帮助",
+                        "帮助文档",
+                        "文档",
+                        "反馈",
+                        "反馈问题",
+                        "日志",
+                        "源码",
+                        "GitHub",
+                        "关于",
                     ],
                 ),
             ],
@@ -522,6 +531,8 @@ mod tests {
             ("hook", SettingsSection::Agents),
             ("快捷启动项", SettingsSection::Agents),
             ("config dir", SettingsSection::Agents),
+            ("反馈问题", SettingsSection::System),
+            ("帮助文档", SettingsSection::System),
         ] {
             assert_eq!(matching_sections(&nav, query), [expected], "query: {query}");
         }

@@ -43,14 +43,14 @@ mod workspace_view;
 pub(crate) use nav::{SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav};
 pub(super) use remote::*;
 
-/// 「反馈问题」入口统一跳转的链接。应用菜单 / 侧栏用户菜单 / 设置页三处共用。
+/// 「反馈问题」入口统一跳转的链接。菜单栏「帮助」和设置「系统」页共用。
 /// 打包时设 `SMELT_FEEDBACK_URL` 换成自己的反馈渠道。
 pub const FEEDBACK_URL: &str = build_time_url(
     option_env!("SMELT_FEEDBACK_URL"),
     "https://github.com/smelt-ai/smelt/issues/new/choose",
 );
 
-/// 「帮助文档」入口的链接，侧栏用户菜单和设置页共用。打包时设 `SMELT_DOCS_URL` 换掉。
+/// 「帮助文档」入口的链接，菜单栏「帮助」和设置「系统」页共用。打包时设 `SMELT_DOCS_URL` 换掉。
 pub const DOCS_URL: &str = build_time_url(option_env!("SMELT_DOCS_URL"), "https://smelt.onoo.io/");
 
 /// 打包时没设或设成空串，都用开源版的默认地址。
@@ -1360,6 +1360,8 @@ struct SettingsRenderSnapshot {
     session_manager_open: bool,
     /// 资源页的数。只在停在资源页时取，别的页用不着拼它。
     resources: Option<std::rc::Rc<crate::resource_monitor::PanelSnapshot>>,
+    /// 有要处理的事的那一页，设置侧栏在它后面标红点。
+    attention: Option<SettingsSection>,
 }
 
 /// 设置内容画在哪。两处共用同一套快照和节流刷新，只是外壳不同。

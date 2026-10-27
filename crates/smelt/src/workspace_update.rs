@@ -468,7 +468,7 @@ impl Workspace {
         .detach();
     }
 
-    /// 后台查一次守护是否落后于磁盘上的 smeltd 二进制，决定要不要在设置页/齿轮上
+    /// 后台查一次守护是否落后于磁盘上的 smeltd 二进制，决定要不要在设置页和侧栏「设置」上
     /// 给出「重启守护」提示；落后又没有进行中的会话就直接重启。
     pub(crate) fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         self.probe_daemon_outdated(true, cx);

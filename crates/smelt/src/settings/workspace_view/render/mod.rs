@@ -91,6 +91,7 @@ impl RenderOnce for SettingsShell {
                 self.entity.clone(),
                 &nav,
                 &selected,
+                self.snapshot.attention.as_ref(),
                 &query,
                 search,
                 cx,
@@ -115,6 +116,7 @@ fn render_nav(
     entity: Entity<Workspace>,
     nav: &[SettingsNavCategory],
     selected: &SettingsSection,
+    attention: Option<&SettingsSection>,
     query: &str,
     search: Entity<InputState>,
     cx: &App,
@@ -156,10 +158,21 @@ fn render_nav(
                 category.children.iter().map(|child| {
                     let entity = entity.clone();
                     let section = child.section.clone();
-                    SidebarMenuItem::new(child.title.clone())
+                    let item = SidebarMenuItem::new(child.title.clone())
                         .icon(child.icon.clone())
                         .active(selected == &child.section)
-                        .on_click(move |_, _, cx| select_section(&entity, section.clone(), cx))
+                        .on_click(move |_, _, cx| select_section(&entity, section.clone(), cx));
+                    // 有要处理的事的那一页标个红点，跟侧栏「设置」上的是同一件事。
+                    if attention == Some(&child.section) {
+                        item.suffix(|_, _| {
+                            div()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(rgb(crate::ui_theme::red()))
+                        })
+                    } else {
+                        item
+                    }
                 }),
             ))
         }))

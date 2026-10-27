@@ -1,4 +1,4 @@
-//! 设置页：系统（应用更新、后台服务、存储清理）。
+//! 设置页：系统（应用更新、后台服务、存储清理、帮助）。
 
 use super::*;
 #[cfg(target_os = "macos")]
@@ -26,10 +26,11 @@ pub(super) fn system_page(
         "清理已经没人读写的残留：instincts 的 smelt.db、根目录\
          调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
     ));
+    groups.push(help_group());
     let description = if cfg!(target_os = "macos") {
-        "应用更新、后台服务和存储清理。"
+        "应用更新、后台服务、存储清理，以及帮助和反馈。"
     } else {
-        "后台服务和存储清理。"
+        "后台服务、存储清理，以及帮助和反馈。"
     };
     SettingPage::new("系统")
         .description(description)
@@ -293,74 +294,6 @@ fn update_group(
             action_row = action_row.child(restart_btn);
         }
 
-        let links = h_flex()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .flex_wrap()
-            .child(
-                Button::new("settings-github-link")
-                    .link()
-                    .icon_size()
-                    .label("源码 GitHub ↗")
-                    .on_click(|_, _window, cx| {
-                        cx.open_url("https://github.com/smelt-ai/smelt");
-                    }),
-            )
-            .child(
-                Button::new("settings-help-link")
-                    .link()
-                    .icon_size()
-                    .label("帮助文档 ↗")
-                    .on_click(|_, _window, cx| {
-                        cx.open_url(DOCS_URL);
-                    }),
-            )
-            .child(
-                Button::new("settings-open-log-link")
-                    .quiet()
-                    .icon_size()
-                    .label("打开日志 ↗")
-                    .on_click(|_, _window, _cx| {
-                        // 反馈问题时手动带上这份日志：GitHub issue 附件靠拖拽，
-                        // 没有 API 能替用户自动上传，所以帮用户直接定位到文件。
-                        if let Some(path) = smelt_sys::app_log::log_path() {
-                            #[cfg(target_os = "macos")]
-                            {
-                                let _ = std::process::Command::new("open")
-                                    .arg("-R")
-                                    .arg(&path)
-                                    .spawn();
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                if let Some(dir) = path.parent() {
-                                    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
-                                }
-                            }
-                        }
-                    }),
-            )
-            .child(
-                Button::new("settings-report-issue-link")
-                    .link()
-                    .icon_size()
-                    .label("反馈问题 ↗")
-                    .on_click(|_, _window, cx| {
-                        // 先把日志在 Finder 里选出来，用户点开 issue 页面后可以直接把它拖进去。
-                        if let Some(path) = smelt_sys::app_log::log_path() {
-                            #[cfg(target_os = "macos")]
-                            {
-                                let _ = std::process::Command::new("open")
-                                    .arg("-R")
-                                    .arg(&path)
-                                    .spawn();
-                            }
-                        }
-                        cx.open_url(FEEDBACK_URL);
-                    }),
-            );
-
         v_flex()
             .w_full()
             .gap_0()
@@ -472,8 +405,75 @@ fn update_group(
                             ),
                     ),
             )
-            .child(links.pt_3().mt_1().border_t_1().border_color(border))
     }))
+}
+
+/// 版本、源码、帮助文档、日志和反馈。原先挂在「应用更新」里，只有 macOS 看得到；放这里
+/// 三个平台都有，Windows、Linux 没有菜单栏，帮助和反馈只能从这里进。
+fn help_group() -> SettingGroup {
+    SettingGroup::new()
+        .title("帮助")
+        .description(concat!("Smelt v", env!("CARGO_PKG_VERSION")))
+        .item(SettingItem::render(|_, _, _| {
+            h_flex()
+                .w_full()
+                .gap_3()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    Button::new("settings-help-link")
+                        .link()
+                        .icon_size()
+                        .label("帮助文档 ↗")
+                        .on_click(|_, _window, cx| cx.open_url(DOCS_URL)),
+                )
+                .child(
+                    Button::new("settings-report-issue-link")
+                        .link()
+                        .icon_size()
+                        .label("反馈问题 ↗")
+                        .on_click(|_, _window, cx| {
+                            // 先把日志在文件管理器里找出来，用户点开反馈页面后可以直接把它拖进去。
+                            reveal_app_log();
+                            cx.open_url(FEEDBACK_URL);
+                        }),
+                )
+                .child(
+                    Button::new("settings-open-log-link")
+                        .quiet()
+                        .icon_size()
+                        .label("打开日志")
+                        .on_click(|_, _window, _cx| reveal_app_log()),
+                )
+                .child(
+                    Button::new("settings-github-link")
+                        .link()
+                        .icon_size()
+                        .label("源码 GitHub ↗")
+                        .on_click(|_, _window, cx| {
+                            cx.open_url("https://github.com/smelt-ai/smelt");
+                        }),
+                )
+        }))
+}
+
+/// 在文件管理器里找出日志。反馈问题时手动带上它：issue 附件靠拖拽，没有 API 能替用户
+/// 自动上传。macOS 直接选中文件，别的平台打开所在目录。
+fn reveal_app_log() {
+    let Some(path) = smelt_sys::app_log::log_path() else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(dir) = path.parent() {
+        let _ = crate::ide::open_in_file_manager(dir);
+    }
 }
 
 fn daemon_group(
