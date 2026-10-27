@@ -305,25 +305,20 @@ pub(super) fn quota_until_text(seconds: i64) -> Option<String> {
     }
 }
 
-/// 窗口重置时间文本：绝对时间带相对剩余（如「重置 08-09 14:00（还有 2天5小时）」），
-/// 没有绝对时间时退回相对秒数。
-pub(super) fn quota_reset_text(window: &smelt_model::provider_quota::ProviderQuotaWindow) -> String {
-    if let Some(millis) = window.resets_at_ms
-        && let Some(date) = Local.timestamp_millis_opt(millis as i64).single()
-    {
-        let until = date.signed_duration_since(Local::now()).num_seconds();
-        return match quota_until_text(until) {
-            Some(text) => format!("重置 {}（还有 {text}）", date.format("%m-%d %H:%M")),
-            None => format!("重置 {}", date.format("%m-%d %H:%M")),
-        };
-    }
-    if let Some(seconds) = window.reset_after_seconds {
-        return match quota_until_text(seconds as i64) {
-            Some(text) => format!("约 {text} 后重置"),
-            None => "即将重置".to_string(),
-        };
-    }
-    "重置时间未知".to_string()
+/// 窗口还有多久重置，只写剩余时间（「2天5小时后重置」）：悬停提示是一行，绝对时间
+/// 占地方又不如剩余时间好用。不知道什么时候重置就不写。
+pub(super) fn quota_reset_text(
+    window: &smelt_model::provider_quota::ProviderQuotaWindow,
+) -> Option<String> {
+    let seconds = match (window.resets_at_ms, window.reset_after_seconds) {
+        (Some(millis), _) => (millis as i64 - Local::now().timestamp_millis()) / 1000,
+        (None, Some(seconds)) => seconds as i64,
+        (None, None) => return None,
+    };
+    Some(match quota_until_text(seconds) {
+        Some(text) => format!("{text}后重置"),
+        None => "即将重置".to_string(),
+    })
 }
 
 /// 底栏上一家 provider 的额度。
@@ -376,25 +371,29 @@ pub(super) fn provider_quota_row(
     let quota = status.quota.as_ref()?;
     let text = quota.short_text();
     let color = quota_color(quota.used_percent());
+    // 悬停提示一行写完，像状态栏：名字写一次，窗口之间用「·」隔开，
+    // 如「Claude 5h 76%（2小时后重置） · 7d 30%（4天后重置）」。
     let hint = match quota {
-        crate::provider_quota::ProviderQuotaData::Windows(quota) => quota
-            .windows
-            .iter()
-            .map(|window| {
-                format!(
-                    "{label} {} 窗口已用 {}%，{}。",
-                    window.label,
-                    window.used_percent.round() as u32,
-                    quota_reset_text(window)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
+        crate::provider_quota::ProviderQuotaData::Windows(quota) => {
+            let windows = quota
+                .windows
+                .iter()
+                .map(|window| {
+                    let used = window.used_percent.round() as u32;
+                    match quota_reset_text(window) {
+                        Some(reset) => format!("{} {used}%（{reset}）", window.label),
+                        None => format!("{} {used}%", window.label),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!("{label} {windows}")
+        }
         crate::provider_quota::ProviderQuotaData::Copilot(copilot) => match copilot.limit {
             Some(limit) => {
                 let used = copilot.used.unwrap_or((limit - copilot.remaining).max(0.0));
                 format!(
-                    "{label} 本周期已用 {} / {} {}（{}%）。",
+                    "{label} 本周期 {} / {} {}（{}%）",
                     smelt_model::copilot_quota::format_amount(used),
                     smelt_model::copilot_quota::format_amount(limit),
                     copilot.unit.label(),
@@ -402,7 +401,7 @@ pub(super) fn provider_quota_row(
                 )
             }
             None => format!(
-                "{label} 本周期剩余 {} {}。",
+                "{label} 本周期剩余 {} {}",
                 smelt_model::copilot_quota::format_amount(copilot.remaining),
                 copilot.unit.label()
             ),
@@ -453,7 +452,7 @@ mod tests {
 
         assert_eq!(row.text, "91%");
         assert_eq!(row.color, ui_theme::red());
-        assert!(row.hint.contains("Claude 5h 窗口已用 76%"));
+        assert_eq!(row.hint, "Claude 5h 76%（1小时后重置） · 7d 91%");
     }
 
     #[test]
@@ -474,7 +473,7 @@ mod tests {
 
         assert_eq!(row.text, "25%");
         assert_eq!(row.color, ui_theme::text_muted());
-        assert!(row.hint.contains("25 / 100 premium requests（25%）"));
+        assert_eq!(row.hint, "Copilot 本周期 25 / 100 premium requests（25%）");
     }
 
     #[test]

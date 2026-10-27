@@ -346,9 +346,9 @@ fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div 
             let color = quota.color;
             let target = quota.target;
             let tip = if quota.refreshing {
-                format!("{} 正在刷新…", quota.hint)
+                format!("{} · 正在刷新…", quota.hint)
             } else {
-                format!("{} 点击刷新。", quota.hint)
+                format!("{} · 点击刷新", quota.hint)
             };
             let workspace = workspace.clone();
             ListRow::new(SharedString::from(format!("quota-{}", target.id())))
@@ -2119,8 +2119,8 @@ impl Workspace {
 
         // ---- 底部额度：跟设置同一条底栏，放在右边 ----
         // provider 账户额度（Codex / Claude / Copilot / Grok / Cursor），只列「检测到额度」
-        // 的。底栏放不下五家，常显哪几家见 `footer_quota_chips`，其余收成「+N」；点开是
-        // 全部：每家一行，悬停看各窗口和重置时间，点哪家刷新哪家。
+        // 的。底栏放不下五家，常显哪几家见 `footer_quota_chips`，其余收成「+N」；悬停哪块
+        // 看哪块的各窗口和重置时间；点开是全部：每家一行，点哪家刷新哪家。
         // Pi 不在这里：它底下几家 provider 是独立账户，额度跟在对话模型菜单的
         // provider 名字后面（括号），那里才说得清数字属于谁。
         // 状态在这里一次性读完，弹层的构造闭包里不再碰全局。
@@ -2157,6 +2157,13 @@ impl Workspace {
         } else {
             let used: Vec<f64> = quotas.iter().map(|quota| quota.used).collect();
             let shown = footer_quota_chips(&used);
+            // 悬停哪块看哪块：一家的图标和百分比看这家的各窗口和重置时间，「+N」看收起的
+            // 那几家，一家一行。
+            let folded_tip = (0..quotas.len())
+                .filter(|ix| !shown.contains(ix))
+                .map(|ix| quotas[ix].hint.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             let folded = quotas.len() - shown.len();
             let trigger = Button::new("sidebar-quota")
                 .quiet()
@@ -2170,7 +2177,16 @@ impl Workspace {
                         .font_family(crate::terminal_view::font_family())
                         .children(shown.iter().map(|&ix| {
                             let quota = &quotas[ix];
+                            let tip = if quota.refreshing {
+                                format!("{} 正在刷新…", quota.hint)
+                            } else {
+                                quota.hint.clone()
+                            };
                             h_flex()
+                                .id(SharedString::from(format!(
+                                    "quota-chip-{}",
+                                    quota.target.id()
+                                )))
                                 .gap_1()
                                 .items_center()
                                 .text_color(rgb(quota.color))
@@ -2189,12 +2205,21 @@ impl Workspace {
                                         chip.child(quota.text.clone())
                                     }
                                 })
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                })
                         }))
                         .when(folded > 0, |chips| {
                             chips.child(
                                 div()
+                                    .id("quota-chip-folded")
                                     .text_color(rgb(ui_theme::text_muted()))
-                                    .child(format!("+{folded}")),
+                                    .child(format!("+{folded}"))
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(folded_tip.clone())
+                                            .build(window, cx)
+                                    }),
                             )
                         }),
                 );
