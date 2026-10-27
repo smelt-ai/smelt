@@ -84,7 +84,7 @@ fn slider_with_value(
     slider: Option<Entity<SliderState>>,
     value: String,
     cx: &App,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     h_flex()
         .items_center()
         .gap_2()
