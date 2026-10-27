@@ -20,9 +20,9 @@ esac
 # 随运行时一起分发的程序。
 PROGRAMS=(smeltd smelt-notify)
 
-# 版本号按 git tag 算（发版流水线直接传 SMELT_VERSION），编进 smeltd。
+# 版本号按 git tag 算（发版流水线直接传 SMELT_BUILD_VERSION），编进 smeltd。
 version="$(scripts/version.sh)"
-export SMELT_VERSION="$version"
+export SMELT_BUILD_VERSION="$version"
 name="smeltd-${version}-linux-$(uname -m)"
 echo "▶ 打包 ${name}"
 cargo build --release -p smeltd --bins --locked

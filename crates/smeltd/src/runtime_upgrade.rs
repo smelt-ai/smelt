@@ -27,7 +27,8 @@ pub(crate) fn handle_runtime_upgrade<C: ClientSocket>(mut conn: C, request: &ser
 
 fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply {
     let target = match check_target(version, smelt_version::VERSION) {
-        Ok(target) => target,
+        Ok(Some(target)) => target,
+        Ok(None) => return RuntimeUpgradeReply::Current,
         Err(error) => return RuntimeUpgradeReply::Failed { error },
     };
     if IN_PROGRESS.swap(true, Ordering::AcqRel) {
@@ -51,20 +52,26 @@ fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply 
 }
 
 /// 版本号要是合法的 semver（顺带挡住拼进 URL 的斜杠之类）、是一次发版（不带 `+` 构建信息，
-/// GitHub 上才有这个 Release），且不比自己旧。比新旧不看构建信息：不在 tag 上的构建是
-/// `2026.1027.0-rc.1+3.g32c3172`，和 `2026.1027.0-rc.1` 算同一个版本。
-fn check_target(requested: &str, current: &str) -> Result<semver::Version, String> {
+/// GitHub 上才有这个 Release），且不比自己旧。比新旧不看构建信息。
+///
+/// 返回 `None`：自己就出自这次发版，只是 tag 之后还有提交（如 `2026.1027.0-rc.1+g32c3172`
+/// 被要求升到 `2026.1027.0-rc.1`）。这时下载那个 Release 其实是退回去，当成已经是这个版本。
+fn check_target(requested: &str, current: &str) -> Result<Option<semver::Version>, String> {
     let target = semver::Version::parse(requested.trim())
         .map_err(|error| format!("版本号不合法（{requested}）：{error}"))?;
     if !target.build.is_empty() {
         return Err(format!("v{target} 不是发版的版本号，没有对应的 Release"));
     }
-    if let Ok(current) = semver::Version::parse(current)
-        && target.cmp_precedence(&current).is_lt()
-    {
-        return Err(format!("只升不降：运行时 v{current} 比要的 v{target} 新"));
+    if let Ok(current) = semver::Version::parse(current) {
+        match target.cmp_precedence(&current) {
+            std::cmp::Ordering::Less => {
+                return Err(format!("只升不降：运行时 v{current} 比要的 v{target} 新"));
+            }
+            std::cmp::Ordering::Equal if !current.build.is_empty() => return Ok(None),
+            _ => {}
+        }
     }
-    Ok(target)
+    Ok(Some(target))
 }
 
 /// 守护启动后在后台调一次，见 `linux::ensure_smelt_pi`。只有装在 `~/.smelt/bin` 的映像
@@ -390,14 +397,29 @@ mod tests {
         );
     }
 
-    /// 不在 tag 上的构建带构建信息：比新旧时不算它，但要升到的版本不能带（没有这样的 Release）。
+    /// tag 之后的构建带构建信息：比新旧时不算它，但要升到的版本不能带（没有这样的 Release）。
     #[test]
     fn build_metadata_is_ignored_when_comparing_and_rejected_as_target() {
-        assert!(check_target("2026.1027.0-rc.1", "2026.1027.0-rc.1+3.g32c3172").is_ok());
-        assert!(check_target("2026.1027.0", "2026.1027.0-rc.1+3.g32c3172").is_ok());
-        assert!(check_target("2026.1026.0", "2026.1027.0-rc.1+3.g32c3172").is_err());
-        let error = check_target("2026.1027.0-rc.1+3.g32c3172", "2026.1026.0").unwrap_err();
+        assert!(matches!(
+            check_target("2026.1027.0", "2026.1027.0-rc.1+g32c3172"),
+            Ok(Some(_))
+        ));
+        assert!(check_target("2026.1026.0", "2026.1027.0-rc.1+g32c3172").is_err());
+        let error = check_target("2026.1027.0-rc.1+g32c3172", "2026.1026.0").unwrap_err();
         assert!(error.contains("不是发版"), "{error}");
+    }
+
+    /// 出自同一次发版、只是 tag 之后多了提交的运行时，不能被「升」回那个 Release。
+    #[test]
+    fn same_release_with_later_commits_is_already_current() {
+        assert_eq!(
+            check_target("2026.1027.0-rc.1", "2026.1027.0-rc.1+g32c3172"),
+            Ok(None)
+        );
+        assert!(matches!(
+            check_target("2026.1027.0-rc.1", "2026.1027.0-rc.1"),
+            Ok(Some(_))
+        ));
     }
 
     /// 版本号会拼进下载地址，不是 semver 的一律拒绝。

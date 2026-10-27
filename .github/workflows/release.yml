@@ -24,14 +24,6 @@ jobs:
           # 发布说明要找上一个 tag，需要完整历史和全部 tag。
           fetch-depth: 0
 
-      # 版本号只在 tag 上：tag 去掉 v 就是版本号，打包时经 SMELT_VERSION 编进程序（见
-      # scripts/version.sh，取号见 docs/release.md）。桌面请远程运行时升级时，运行时按这个版本号
-      # 去同名 tag 的 Release 下载包。下面每个编 Rust 的 job 都设一遍。
-      - name: Version from tag
-        run: |
-          echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          SMELT_VERSION="${GITHUB_REF_NAME#v}" scripts/version.sh
-
       # 打包链路依赖这些文件真的进了 git；缺任何一个就一次性列全并失败，
       # 而不是跑到一半才炸（历史教训：本地能打包 ≠ 文件都入了库）。
       - name: Verify required files exist
@@ -57,6 +49,14 @@ jobs:
           done
           [[ "$missing" == 0 ]] || { echo "打包链路文件不完整，终止。"; exit 1; }
           echo "✅ 打包所需文件齐全"
+
+      # 版本号只在 tag 上：tag 去掉 v 就是版本号，打包时经 SMELT_BUILD_VERSION 编进程序（见
+      # scripts/version.sh，取号见 docs/release.md）。桌面请远程运行时升级时，运行时按这个版本号
+      # 去同名 tag 的 Release 下载包。linux、ios、windows 这几个 job 也各设一遍。
+      - name: Version from tag
+        run: |
+          echo "SMELT_BUILD_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          SMELT_BUILD_VERSION="${GITHUB_REF_NAME#v}" scripts/version.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -210,7 +210,7 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Version from tag
-        run: echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: echo "SMELT_BUILD_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       # 版本由仓库根的 rust-toolchain.toml 决定，rustup 只装个壳，再按它补齐工具链。
       - name: Toolchain
@@ -391,7 +391,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Version from tag
-        run: echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: echo "SMELT_BUILD_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       # cargokit 用 rust-toolchain.toml 钉的工具链编 crates/smelt-mobile，缺的 target 它自己装。
       # 不读 Rust 缓存：没有哪个 main 上的 job 编 iOS，预热不到，每次冷编。
@@ -473,7 +473,7 @@ jobs:
 
       - name: Version from tag
         shell: bash
-        run: echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: echo "SMELT_BUILD_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release -p smelt -p smelt-cli -p smeltd --locked

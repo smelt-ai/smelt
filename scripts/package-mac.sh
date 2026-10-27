@@ -15,7 +15,7 @@
 #   SMELT_UPDATE_URL            这个包本身的下载地址，写进包里，装好后不会把自己当成新版本
 #   SMELT_BUILD_NUMBER          Info.plist 的 CFBundleVersion（纯数字、只增不减），不设取打包时的 UTC 时间
 #   以下几项在编译时生效，要配合 --build（或自己带着它们 cargo build --release）：
-#   SMELT_VERSION               版本号；--build 时不设就由 scripts/version.sh 按 git tag 算
+#   SMELT_BUILD_VERSION         版本号；--build 时不设就由 scripts/version.sh 按 git tag 算
 #   SMELT_UPDATE_MANIFEST_URL   更新清单地址，`{channel}` 换成 dev / prod；不设则查 GitHub Releases
 #   SMELT_FEEDBACK_URL          「反馈问题」的链接；不设则是 GitHub issues
 #   SMELT_DOCS_URL              「帮助文档」的链接；不设则是 smelt.onoo.io
@@ -70,9 +70,9 @@ if [[ "$SKIP_DMG" -eq 0 ]]; then
 fi
 
 if [[ "$BUILD" -eq 1 ]]; then
-  SMELT_VERSION="$("$ROOT/scripts/version.sh")"
-  export SMELT_VERSION
-  echo "▶ 编译 release（v$SMELT_VERSION）…"
+  SMELT_BUILD_VERSION="$("$ROOT/scripts/version.sh")"
+  export SMELT_BUILD_VERSION
+  echo "▶ 编译 release（v$SMELT_BUILD_VERSION）…"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-installer
   echo "▶ 编译 smelt-pi …"
   make -C "$ROOT" smelt-pi

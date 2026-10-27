@@ -296,7 +296,8 @@ pub(crate) fn spawn_subscription(
                             ),
                             fix,
                         };
-                    } else if !upgrade_requested {
+                    } else if !upgrade_requested && smelt_version::RELEASE.is_some() {
+                        // 开发构建没有对应的发版可升，留着不兼容的说明。
                         upgrade_requested = true;
                         status = upgrade_then_probe(&runtime, &version, &detail, &status_tx, &stop);
                     }

@@ -26,7 +26,6 @@ case "${1:-}" in
 esac
 
 version="$(scripts/version.sh)"
-export SMELT_VERSION="${version}"
 
 # 包必须正好出自这次发版的代码：当前提交就是 tag，代码也对得上。
 [[ "${version}" != *+* ]] \

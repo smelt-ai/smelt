@@ -47,16 +47,19 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 - 版本号只表示先后，不表示兼容：桌面和运行时兼不兼容看控制协议版本，不看它。v0.9.1 之后改用这套，
   数值上 `2026.x` 比 `0.9.x` 大，运行时「只升不降」和自动更新都照常。
 
-版本号不写在代码里，打包时由 `scripts/version.sh` 从 git tag 算出，经环境变量 `SMELT_VERSION` 在编译时编进程序
+版本号不写在代码里，打包时由 `scripts/version.sh` 从 git tag 算出，经环境变量 `SMELT_BUILD_VERSION` 在编译时编进程序
 （`crates/smelt-version`）。`Cargo.toml` 的 `version` 固定 `0.0.0`，发版不改它，也就没有「改版本号」的提交。
 
-- 当前提交正好是发版 tag `v<版本>`：版本号就是 `<版本>`，如 `2026.1027.0-rc.1`。发版流水线直接把 tag 名传进
-  `SMELT_VERSION`。
-- 不在 tag 上（如 tag 之后的提交、合并提交）：最近的发版 tag 加 semver 构建信息，如 `2026.1027.0-rc.1+3.g32c3172`，
-  即离 `v2026.1027.0-rc.1` 3 个提交、提交 `32c3172`。同一个 tag 之后打的包各不相同，能直接对回代码。比新旧时不看
-  `+` 后面；请远程运行时升级时去掉它，升到 GitHub 上那个 Release（`smelt_version::RELEASE`）。
-- 算不出来（没有 tag、浅克隆）打包直接失败，不打出版本号是占位值的包。没注入版本号的开发构建（`cargo run`、`make build`）
-  显示 `0.0.0-dev`，不能请远程运行时升级。
+- 提交正好是发版 tag `v<版本>`：版本号就是 `<版本>`，如 `2026.1027.0-rc.1`。发版流水线直接把 tag 名传进
+  `SMELT_BUILD_VERSION`。
+- tag 之后的提交：最近的发版 tag 加 semver 构建信息 `+g<提交>`，如 `2026.1027.0-rc.1+g32c3172`。同一个 tag 之后打的包
+  各不相同，能直接对回代码。比新旧时不看 `+` 后面；请远程运行时升级时去掉它，升到 GitHub 上那个 Release
+  （`smelt_version::RELEASE`）。运行时本身是 `<版本>+g…` 时，不会被「升」回 `<版本>`。
+- 只合并本仓库、自己不打 tag 的下游仓库，按最近合进来的本仓库提交算（`scripts/version.sh <提交>`）：合进来的正好是
+  发版提交时，打出的包版本号就等于 tag。
+- 算不出来（不在 git 仓库里、浅克隆、没有 tag）打包直接失败，不打出版本号是占位值的包。没注入版本号的开发构建
+  （`cargo run`、`make build`）显示 `0.0.0-dev`，不能请远程运行时升级。
+- `SMELT_BUILD_VERSION` 只管编译时注入；一键安装脚本里指定装哪个版本的是另一个变量 `SMELT_VERSION`。
 
 - 桌面与运行时：上面算出的版本号。macOS 的 `CFBundleShortVersionString` 也是它；`CFBundleVersion` 取打包时的 UTC 时间
   （同 iOS 构建号），纯数字、只增不减。

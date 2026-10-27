@@ -404,8 +404,12 @@ pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
 
 /// 远程机器眼下连得上（在线，或运行时旧得对不上），而且能远程升级：可以请它升级。
 /// 升级走守护协议的 `runtime_upgrade`，不经控制方法，版本对不上也发得过去。
-/// 随 Smelt 桌面更新的运行时（Windows、macOS）不给这一项，见 [`upgrades_remotely`]。
+/// 随 Smelt 桌面更新的运行时（Windows、macOS）不给这一项，见 [`upgrades_remotely`]。开发构建
+/// 没有对应的发版可升，也不给。
 pub(crate) fn runtime_can_upgrade(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    if smelt_version::RELEASE.is_none() {
+        return false;
+    }
     remote_of(key, cx).is_some_and(|remote| match &remote.status {
         RuntimeStatus::Online { platform, .. } => upgrades_remotely(
             platform
@@ -712,7 +716,7 @@ fn incompatible_status(
     }
 }
 
-/// 这个桌面出自的发版：请远程运行时升级时就升到它。不在 tag 上的构建，完整版本号带构建信息（见
+/// 这个桌面出自的发版：请远程运行时升级时就升到它。tag 之后的构建，完整版本号带构建信息（见
 /// `smelt_version`），升级要的是 GitHub 上真有的那个 Release。开发构建没有对应的发版，这里
 /// 退回完整版本号只为显示，[`push_upgrade`] 不拿它去请运行时升级。
 pub(crate) const DESKTOP_VERSION: &str = match smelt_version::RELEASE {
