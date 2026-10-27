@@ -1832,14 +1832,22 @@ mod tests {
         );
 
         handle.reconnect();
-        // 首档退避 30 秒；叫醒了就不用等。
-        let again = smol::block_on(smol::future::or(
-            async { status_rx.recv().await.ok() },
-            async {
-                smol::Timer::after(std::time::Duration::from_secs(5)).await;
-                None
-            },
-        ));
+        // 首档退避 30 秒；叫醒了就不用等。叫醒先报「连接中」，再报探到的结果。
+        let next = || {
+            smol::block_on(smol::future::or(
+                async { status_rx.recv().await.ok() },
+                async {
+                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                    None
+                },
+            ))
+        };
+        let connecting = next();
+        assert!(
+            matches!(connecting, Some((_, RuntimeStatus::Connecting))),
+            "{connecting:?}"
+        );
+        let again = next();
         assert!(
             matches!(again, Some((_, RuntimeStatus::Incompatible { .. }))),
             "{again:?}"
