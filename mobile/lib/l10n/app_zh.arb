@@ -478,6 +478,7 @@
   "updateInstalling": "正在等系统安装…",
   "updateFailedCheck": "检查更新失败，请检查网络后重试。",
   "updateFailedDownload": "下载没完成，请重试。",
+  "updateFailedVerify": "下载的包和发布的校验和对不上，已经丢掉。过会儿再试。",
   "updateFailedInstall": "没装上，可以再试一次。",
   "updateCheck": "检查更新",
   "updateDownload": "下载",

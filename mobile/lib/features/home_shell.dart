@@ -162,6 +162,8 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
     }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
+        // 带按钮的提示默认一直挂着、还会挡住后面排队的提示。这条到时间就走，设置里一直有。
+        persist: false,
         content: Text(text),
         action: SnackBarAction(
           label: updater.value is UpdateAvailable

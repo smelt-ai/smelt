@@ -80,6 +80,7 @@ class _FakePlatform implements UpdatePlatform {
 
   final String? version;
   bool allowed = true;
+  bool sessionAlive = true;
   final installed = <String>[];
   final failures = StreamController<bool>.broadcast();
 
@@ -98,6 +99,9 @@ class _FakePlatform implements UpdatePlatform {
 
   @override
   Future<void> install(File apk) async => installed.add(apk.path);
+
+  @override
+  Future<bool> installInProgress() async => sessionAlive;
 
   @override
   Stream<bool> get installFailures => failures.stream;
@@ -168,6 +172,7 @@ void main() {
       expect(isNewerRelease('2026.1027.0', '2026.1027.0'), isFalse);
       expect(isNewerRelease('2026.1026.0', '2026.1027.0'), isFalse);
       expect(isNewerRelease('garbage', '2026.1027.0'), isFalse);
+      expect(compareReleaseVersions('garbage', '2026.1027.0'), lessThan(0));
     });
   });
 
@@ -233,19 +238,77 @@ void main() {
       expect(platform.installed, [ready.apk.path]);
     });
 
-    test('校验对不上就算下载失败，可以重试', () async {
+    test('校验对不上单独报出来，包丢掉，可以重下', () async {
       final source = _FakeSource([_candidate('2026.1027.0')])..bytes = 'evil';
       final u = updater(source, _FakePlatform('2026.1026.0'));
       await u.start();
       await u.download();
       expect(
         u.value,
-        isA<UpdateFailed>().having(
-          (f) => f.stage,
-          'stage',
-          UpdateStage.download,
-        ),
+        isA<UpdateFailed>().having((f) => f.stage, 'stage', UpdateStage.verify),
       );
+      expect(await Directory('${dir.path}/update').list().toList(), isEmpty);
+
+      source.bytes = 'apk-bytes';
+      await u.download();
+      expect(u.value, isA<UpdateReady>());
+    });
+
+    test('进程被杀后重启：已经下好的新版直接等着装，不用再下', () async {
+      final source = _FakeSource([_candidate('2026.1027.0')]);
+      final first = updater(source, _FakePlatform('2026.1026.0'));
+      await first.start();
+      await first.download();
+      expect(source.downloads, 1);
+
+      final again = updater(source, _FakePlatform('2026.1026.0'));
+      await again.start();
+      expect(again.value, isA<UpdateReady>());
+      expect(source.downloads, 1);
+    });
+
+    test('启动时清掉已经装上的版本的包', () async {
+      final source = _FakeSource([_candidate('2026.1027.0')]);
+      final before = updater(source, _FakePlatform('2026.1026.0'));
+      await before.start();
+      await before.download();
+
+      final after = updater(source, _FakePlatform('2026.1027.0'));
+      await after.start();
+      expect(after.value, isA<UpdateUpToDate>());
+      expect(await Directory('${dir.path}/update').list().toList(), isEmpty);
+    });
+
+    test('交给系统的安装没了下文，回到前台就回到可以再装', () async {
+      final source = _FakeSource([_candidate('2026.1027.0')]);
+      final platform = _FakePlatform('2026.1026.0');
+      final u = updater(source, platform);
+      await u.start();
+      await u.download();
+      await u.install();
+
+      await u.resumed();
+      expect(u.value, isA<UpdateInstalling>());
+
+      platform.sessionAlive = false;
+      await u.resumed();
+      expect(u.value, isA<UpdateReady>());
+    });
+
+    test('按版本挑，不按发布的先后', () async {
+      // 列表里旧版本排在前面（发布得晚）。
+      final source = _FakeSource([
+        _candidate('2026.1027.0'),
+        _candidate('2026.1027.1-rc.1'),
+      ]);
+      final u = AppUpdater(
+        source: source,
+        platform: _FakePlatform('2026.1027.0'),
+        downloadDir: Directory('${dir.path}/update'),
+        channel: () => UpdateChannel.dev,
+      );
+      await u.start();
+      expect((u.value as UpdateAvailable).release.version, '2026.1027.1-rc.1');
     });
 
     test('没授权就先去授权，回到前台授权了接着装', () async {

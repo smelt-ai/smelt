@@ -1659,6 +1659,9 @@ class L10nZh extends L10n {
   String get updateFailedDownload => '下载没完成，请重试。';
 
   @override
+  String get updateFailedVerify => '下载的包和发布的校验和对不上，已经丢掉。过会儿再试。';
+
+  @override
   String get updateFailedInstall => '没装上，可以再试一次。';
 
   @override

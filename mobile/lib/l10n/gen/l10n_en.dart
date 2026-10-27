@@ -1742,6 +1742,10 @@ class L10nEn extends L10n {
   String get updateFailedDownload => 'The download didn\'t finish. Try again.';
 
   @override
+  String get updateFailedVerify =>
+      'The downloaded package didn\'t match the release checksum and was discarded. Try again later.';
+
+  @override
   String get updateFailedInstall => 'The update wasn\'t installed. Try again.';
 
   @override

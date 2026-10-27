@@ -1257,6 +1257,7 @@
   "updateInstalling": "Waiting for the system installer…",
   "updateFailedCheck": "Couldn't check for updates. Check your network and try again.",
   "updateFailedDownload": "The download didn't finish. Try again.",
+  "updateFailedVerify": "The downloaded package didn't match the release checksum and was discarded. Try again later.",
   "updateFailedInstall": "The update wasn't installed. Try again.",
   "updateCheck": "Check for updates",
   "updateDownload": "Download",

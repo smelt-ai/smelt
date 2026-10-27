@@ -2965,6 +2965,12 @@ abstract class L10n {
   /// **'The download didn\'t finish. Try again.'**
   String get updateFailedDownload;
 
+  /// No description provided for @updateFailedVerify.
+  ///
+  /// In en, this message translates to:
+  /// **'The downloaded package didn\'t match the release checksum and was discarded. Try again later.'**
+  String get updateFailedVerify;
+
   /// No description provided for @updateFailedInstall.
   ///
   /// In en, this message translates to:

@@ -112,18 +112,27 @@ final _releaseVersion = RegExp(
 bool isReleaseVersion(String version) =>
     _releaseVersion.hasMatch(version.trim());
 
-/// [candidate] 是否比 [installed] 新，按 semver 的先后比。认不出的版本号一律不算新：
-/// 安卓不许装 versionCode 更小的包，宁可不提示也不提示一个装不上的「更新」。
-bool isNewerRelease(String candidate, String installed) {
-  final a = _releaseVersion.firstMatch(candidate.trim());
-  final b = _releaseVersion.firstMatch(installed.trim());
-  if (a == null || b == null) return false;
-  for (var i = 1; i <= 3; i++) {
-    final diff = int.parse(a.group(i)!).compareTo(int.parse(b.group(i)!));
-    if (diff != 0) return diff > 0;
+/// 按 semver 的先后比两个发版号。认不出的排在最旧。
+int compareReleaseVersions(String a, String b) {
+  final x = _releaseVersion.firstMatch(a.trim());
+  final y = _releaseVersion.firstMatch(b.trim());
+  if (x == null || y == null) {
+    if (x == null && y == null) return 0;
+    return x == null ? -1 : 1;
   }
-  return _comparePrerelease(a.group(4), b.group(4)) > 0;
+  for (var i = 1; i <= 3; i++) {
+    final diff = int.parse(x.group(i)!).compareTo(int.parse(y.group(i)!));
+    if (diff != 0) return diff;
+  }
+  return _comparePrerelease(x.group(4), y.group(4));
 }
+
+/// [candidate] 是否比 [installed] 新。认不出的版本号一律不算新：安卓不许装 versionCode
+/// 更小的包，宁可不提示也不提示一个装不上的「更新」。
+bool isNewerRelease(String candidate, String installed) =>
+    isReleaseVersion(candidate) &&
+    isReleaseVersion(installed) &&
+    compareReleaseVersions(candidate, installed) > 0;
 
 /// semver 的预发布比较：没有预发布的比有的大；逐段比，数字段按数值，数字段比字母段小。
 int _comparePrerelease(String? a, String? b) {
@@ -204,7 +213,14 @@ final class UpdateInstalling extends UpdateStatus {
   final File apk;
 }
 
-enum UpdateStage { check, download, install }
+enum UpdateStage {
+  check,
+  download,
+
+  /// 下完了，校验和对不上：包已经丢掉，重下一遍。
+  verify,
+  install,
+}
 
 /// 失败了。下载、安装失败时留着发布（和下好的包），可以直接重试。
 final class UpdateFailed extends UpdateStatus {
@@ -245,6 +261,9 @@ abstract interface class UpdatePlatform {
   /// 交给系统安装。返回时系统已经接手；结果从 [installFailures] 回来。
   Future<void> install(File apk);
 
+  /// 交给系统的那次安装还没出结果（还在写包、等确认框）。进程被杀过就是 false。
+  Future<bool> installInProgress();
+
   /// 系统没装上：`true` 是用户在确认框里取消了，`false` 是装失败了。
   Stream<bool> get installFailures;
 }
@@ -261,7 +280,8 @@ class AppUpdater extends ValueNotifier<UpdateStatus> {
        _downloadDir = downloadDir,
        _channel = channel,
        _now = now ?? DateTime.now,
-       super(const UpdateIdle());
+       // 读到版本号、确认是发版构建之前不露面（见 [start]）。
+       super(const UpdateUnsupported());
 
   /// 没有应用内更新的平台和演示模式用：一直是 [UpdateUnsupported]，什么都不做。
   AppUpdater.unsupported()
@@ -295,28 +315,40 @@ class AppUpdater extends ValueNotifier<UpdateStatus> {
   Future<void> start() async {
     final platform = _platform;
     if (platform == null || _installed != null) return;
-    final version = await platform.currentVersion();
-    if (version == null || !isReleaseVersion(version)) {
-      value = const UpdateUnsupported();
-      return;
+    try {
+      final version = await platform.currentVersion();
+      if (version == null || !isReleaseVersion(version)) return;
+      _installed = version;
+      _failures = platform.installFailures.listen(_onInstallFailed);
+      value = const UpdateIdle();
+      await _cleanup(version);
+      await check();
+    } catch (error) {
+      debugPrint('[update] 启动更新检查失败：$error');
     }
-    _installed = version;
-    _failures = platform.installFailures.listen(_onInstallFailed);
-    await _cleanup();
-    await check();
   }
 
-  /// 回到前台时调。等授权的接着装；否则距上次检查够久了就再查一次。
+  /// 回到前台时调。等授权的接着装；交给系统的那次安装已经没了下文（确认框没弹出来、
+  /// 进程被杀过）就回到「已下载」；否则距上次检查够久了就再查一次。
   Future<void> resumed() async {
     final platform = _platform;
     if (platform == null || _installed == null) return;
-    if (value case UpdateNeedsPermission(:final release, :final apk)) {
-      if (await platform.canInstall()) await _install(release, apk);
-      return;
+    try {
+      switch (value) {
+        case UpdateNeedsPermission(:final release, :final apk):
+          if (await platform.canInstall()) await _install(release, apk);
+        case UpdateInstalling(:final release, :final apk):
+          if (!await platform.installInProgress()) {
+            value = UpdateReady(release, apk);
+          }
+        default:
+          final last = _lastCheck;
+          if (last != null && _now().difference(last) < checkInterval) return;
+          await check();
+      }
+    } catch (error) {
+      debugPrint('[update] 回到前台时处理更新失败：$error');
     }
-    final last = _lastCheck;
-    if (last != null && _now().difference(last) < checkInterval) return;
-    await check();
   }
 
   /// 正在下载、安装，或者已经下好等着装时不查：查了也只会换掉手里这个包。
@@ -333,21 +365,29 @@ class AppUpdater extends ValueNotifier<UpdateStatus> {
     value = const UpdateChecking();
     _lastCheck = _now();
     try {
-      final candidates = await source.candidates(_channel());
+      // 按版本从新到旧挑，不按发布时间：两个 tag 前后脚推上去时，发布的先后可能和版本反着。
+      final candidates = [...await source.candidates(_channel())]
+        ..sort((a, b) => compareReleaseVersions(b.version, a.version));
       Object? lastError;
       for (final candidate in candidates.take(maxCandidates)) {
-        // 新的在前：这个都不比装着的新，后面的更不会。
+        // 这个都不比装着的新，后面的更不会。
         if (!isNewerRelease(candidate.version, installed)) {
           value = const UpdateUpToDate();
           return;
         }
+        final String expected;
         try {
-          await source.checksum(candidate.apkUrl);
-          value = UpdateAvailable(candidate);
-          return;
+          expected = await source.checksum(candidate.apkUrl);
         } catch (error) {
+          // 校验和清单里还没有它：发布还没传完，退到上一个。
           lastError = error;
+          continue;
         }
+        // 上次已经下好了（比如去系统设置里授权时进程被杀了），直接等着装。
+        value =
+            await _downloaded(candidate, expected) ??
+            UpdateAvailable(candidate);
+        return;
       }
       if (lastError != null) throw lastError;
       value = const UpdateUpToDate();
@@ -364,20 +404,23 @@ class AppUpdater extends ValueNotifier<UpdateStatus> {
     final dir = _downloadDir;
     final release = switch (value) {
       UpdateAvailable(:final release) => release,
-      UpdateFailed(stage: UpdateStage.download, :final release?) => release,
+      UpdateFailed(
+        stage: UpdateStage.download || UpdateStage.verify,
+        :final release?,
+      ) =>
+        release,
       _ => null,
     };
     if (source == null || platform == null || dir == null || release == null) {
       return;
     }
     value = UpdateDownloading(release, 0, null);
-    final apk = File('${dir.path}/${apkAssetName(release.version)}');
+    final apk = _apkFile(dir, release);
     final partial = File('${apk.path}.part');
     try {
       final expected = await source.checksum(release.apkUrl);
-      // 上次已经下好同一个包就不再下。
-      if (await apk.exists() && await platform.sha256(apk) == expected) {
-        value = UpdateReady(release, apk);
+      if (await _downloaded(release, expected) case final ready?) {
+        value = ready;
         return;
       }
       await dir.create(recursive: true);
@@ -387,14 +430,49 @@ class AppUpdater extends ValueNotifier<UpdateStatus> {
       });
       final actual = await platform.sha256(partial);
       if (actual != expected) {
-        throw StateError('APK 校验失败（期望 $expected，实际 $actual）');
+        debugPrint(
+          '[update] ${release.version} 校验对不上（期望 $expected，实际 $actual）',
+        );
+        await _delete(partial);
+        value = UpdateFailed(UpdateStage.verify, release: release);
+        return;
       }
       await partial.rename(apk.path);
       value = UpdateReady(release, apk);
     } catch (error) {
       debugPrint('[update] 下载 ${release.version} 失败：$error');
-      if (await partial.exists()) await partial.delete();
+      await _delete(partial);
       value = UpdateFailed(UpdateStage.download, release: release);
+    }
+  }
+
+  File _apkFile(Directory dir, ReleaseCandidate release) =>
+      File('${dir.path}/${apkAssetName(release.version)}');
+
+  /// 这个包已经下好、校验和对得上，就不用再下。
+  Future<UpdateReady?> _downloaded(
+    ReleaseCandidate release,
+    String expected,
+  ) async {
+    final platform = _platform;
+    final dir = _downloadDir;
+    if (platform == null || dir == null) return null;
+    final apk = _apkFile(dir, release);
+    try {
+      if (await apk.exists() && await platform.sha256(apk) == expected) {
+        return UpdateReady(release, apk);
+      }
+    } catch (error) {
+      debugPrint('[update] 读已下载的 ${release.version} 失败：$error');
+    }
+    return null;
+  }
+
+  static Future<void> _delete(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (error) {
+      debugPrint('[update] 删除 ${file.path} 失败：$error');
     }
   }
 
@@ -437,12 +515,21 @@ class AppUpdater extends ValueNotifier<UpdateStatus> {
     }
   }
 
-  /// 启动时清掉下载目录：装上之后旧包就没用了，没装上的下次查到再下。
-  Future<void> _cleanup() async {
+  /// 启动时清理下载目录：下了一半的、已经装上（或更旧）的版本都删掉。比装着的新、
+  /// 已经下好的留着：去系统设置里授权会让 Android 杀掉进程，回来查到它时直接用。
+  Future<void> _cleanup(String installed) async {
     final dir = _downloadDir;
     if (dir == null) return;
+    final apkName = RegExp(r'^Smelt-(.+)-android-arm64\.apk$');
     try {
-      if (await dir.exists()) await dir.delete(recursive: true);
+      if (!await dir.exists()) return;
+      await for (final entry in dir.list()) {
+        final name = entry.uri.pathSegments.lastWhere((s) => s.isNotEmpty);
+        final version = apkName.firstMatch(name)?.group(1);
+        if (version == null || !isNewerRelease(version, installed)) {
+          await entry.delete(recursive: true);
+        }
+      }
     } catch (error) {
       debugPrint('[update] 清理下载目录失败：$error');
     }
@@ -528,14 +615,17 @@ class HttpUpdateSource implements UpdateSource {
   ) async {
     final client = _client();
     try {
-      final response = await (await client.getUrl(_https(url))).close();
+      final response = await (await client.getUrl(
+        _https(url),
+      )).close().timeout(_readTimeout);
       _ensureOk(response, url);
       final total = response.contentLength >= 0 ? response.contentLength : null;
       final sink = to.openWrite();
       var received = 0;
       var reported = 0;
       try {
-        await for (final chunk in response) {
+        // 网断了不一定报错，读会一直挂着：一段时间收不到数据就当失败，用户可以重试。
+        await for (final chunk in response.timeout(_readTimeout)) {
           sink.add(chunk);
           received += chunk.length;
           // 攒够一段再报，别每个 chunk 都重绘。
@@ -552,6 +642,9 @@ class HttpUpdateSource implements UpdateSource {
     }
   }
 
+  /// 连接建好之后，等下一段数据最多等这么久。
+  static const _readTimeout = Duration(seconds: 60);
+
   static HttpClient _client() => HttpClient()
     ..userAgent = 'smelt-mobile-updater'
     ..connectionTimeout = const Duration(seconds: 20);
@@ -561,9 +654,12 @@ class HttpUpdateSource implements UpdateSource {
     try {
       final request = await client.getUrl(url);
       if (accept != null) request.headers.set(HttpHeaders.acceptHeader, accept);
-      final response = await request.close();
+      final response = await request.close().timeout(_readTimeout);
       _ensureOk(response, url.toString());
-      return await response.transform(utf8.decoder).join();
+      return await response
+          .timeout(_readTimeout)
+          .transform(utf8.decoder)
+          .join();
     } finally {
       client.close();
     }
@@ -619,6 +715,10 @@ class MethodChannelUpdatePlatform implements UpdatePlatform {
   @override
   Future<void> install(File apk) =>
       _channel.invokeMethod<void>('install', {'path': apk.path});
+
+  @override
+  Future<bool> installInProgress() async =>
+      await _channel.invokeMethod<bool>('installInProgress') ?? false;
 
   @override
   Stream<bool> get installFailures => _failures.stream;

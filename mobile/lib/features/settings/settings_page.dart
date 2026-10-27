@@ -456,6 +456,7 @@ class _UpdateSection extends StatelessWidget {
       UpdateInstalling() => l10n.updateInstalling,
       UpdateFailed(stage: UpdateStage.check) => l10n.updateFailedCheck,
       UpdateFailed(stage: UpdateStage.download) => l10n.updateFailedDownload,
+      UpdateFailed(stage: UpdateStage.verify) => l10n.updateFailedVerify,
       UpdateFailed(stage: UpdateStage.install) => l10n.updateFailedInstall,
     };
     final failed = status is UpdateFailed;
@@ -467,7 +468,7 @@ class _UpdateSection extends StatelessWidget {
         updater.check,
       ),
       UpdateAvailable() => (l10n.updateDownload, updater.download),
-      UpdateFailed(stage: UpdateStage.download) => (
+      UpdateFailed(stage: UpdateStage.download || UpdateStage.verify) => (
         l10n.updateRetry,
         updater.download,
       ),
@@ -515,7 +516,8 @@ class _UpdateSection extends StatelessWidget {
                 size: Strokes.icon,
                 color: c.ink,
               ),
-              title: Text(text),
+              // 授权说明、失败原因比一行长，不截断。
+              title: Text(text, maxLines: 3),
               titleStyle: t.body.copyWith(color: failed ? c.danger : null),
               subtitle: updater.installedVersion == null
                   ? null
