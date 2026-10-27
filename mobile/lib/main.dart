@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'app.dart';
+import 'data/app_update.dart';
 import 'data/backend.dart';
 import 'data/demo_backend.dart';
 import 'data/preferences.dart';
@@ -31,6 +33,7 @@ Future<void> main() async {
 
   final Backend backend;
   final PreferencesStore prefs;
+  AppUpdater? updater;
   String? deviceId;
   if (_demo) {
     deviceId = 'demo0device0id0synthetic';
@@ -46,9 +49,23 @@ Future<void> main() async {
     deviceId = (await initClient(dataDir: dataDir.path)).endpointId;
     backend = const FrbBackend();
     await importLegacyData(backend: backend, dataDir: dataDir, prefs: prefs);
+    // 应用内更新只有安卓有（iOS 走 TestFlight / App Store）。下载的 APK 放缓存目录。
+    if (Platform.isAndroid) {
+      updater = AppUpdater(
+        source: const HttpUpdateSource(),
+        platform: MethodChannelUpdatePlatform(),
+        downloadDir: Directory(
+          '${(await getTemporaryDirectory()).path}/update',
+        ),
+        channel: () => prefs.value.updateChannel,
+      );
+    }
   }
 
-  final model = AppModel(backend, prefs, deviceId: deviceId)..start();
+  final model = AppModel(backend, prefs, deviceId: deviceId, updater: updater)
+    ..start();
+  // 不等它：查更新要联网，不能拖住首屏。
+  unawaited(model.updater.start());
   final demoScreen = _demo ? await _demoScreen() : null;
   runApp(
     _Lifecycle(
@@ -105,6 +122,7 @@ class _LifecycleState extends State<_Lifecycle> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       widget.model.backend.verifyConnections();
+      unawaited(widget.model.updater.resumed());
     }
   }
 

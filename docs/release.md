@@ -130,7 +130,9 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 
 ## Android 签名
 
-APK 必须一直用同一把 keystore 签名，否则已装的用户只能卸载重装、数据丢失。keystore 生成于 2026-10-19，
+APK 必须一直用同一把 keystore 签名，否则已装的用户只能卸载重装、数据丢失；应用内更新也装不上去
+（系统按签名认是不是同一个应用）。应用内更新认的是 Release 里的 `Smelt-<版本>-android-arm64.apk` 和
+`SHA256SUMS` 里它的条目，版本号取自 `--build-name`，见 `mobile/README.md` 的「In-app updates」。keystore 生成于 2026-10-19，
 证书 SHA256 指纹 `F3:68:94:C3:7F:AC:49:70:9A:FE:3D:93:41:09:96:36:52:F0:84:DC:32:7E:13:55:8D:DC:3B:6A:79:B3:5D:32`，
 存在 repo secrets：`SMELT_ANDROID_KEYSTORE_BASE64`、`SMELT_ANDROID_KEYSTORE_PASSWORD`、`SMELT_ANDROID_KEY_PASSWORD`、
 `SMELT_ANDROID_KEY_ALIAS`。原件与密码由维护者离线保管，不进仓库。
