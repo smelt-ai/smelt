@@ -270,16 +270,12 @@ abstract interface class UpdatePlatform {
 
 class AppUpdater extends ValueNotifier<UpdateStatus> {
   AppUpdater({
-    required UpdateSource source,
-    required UpdatePlatform platform,
-    required Directory downloadDir,
-    required UpdateChannel Function() channel,
+    required UpdateSource this._source,
+    required UpdatePlatform this._platform,
+    required Directory this._downloadDir,
+    required this._channel,
     DateTime Function()? now,
-  }) : _source = source,
-       _platform = platform,
-       _downloadDir = downloadDir,
-       _channel = channel,
-       _now = now ?? DateTime.now,
+  }) : _now = now ?? DateTime.now,
        // 读到版本号、确认是发版构建之前不露面（见 [start]）。
        super(const UpdateUnsupported());
 
