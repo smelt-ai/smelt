@@ -1,4 +1,4 @@
-//! 设置页：系统（资源占用、更新、后台服务、存储清理）。
+//! 设置页：系统（应用更新、后台服务、存储清理）。
 
 use super::*;
 #[cfg(target_os = "macos")]
@@ -9,9 +9,7 @@ pub(super) fn system_page(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    // 资源占用放最前：侧栏「资源占用」和这一页本身都从 CPU / 内存与展开项开始。
-    let mut groups =
-        crate::resource_monitor::resources_groups(entity.clone(), snapshot.resources.clone());
+    let mut groups = Vec::new();
     // 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。
     #[cfg(target_os = "macos")]
     groups.push(
@@ -26,10 +24,15 @@ pub(super) fn system_page(
     );
     groups.push(storage_group(cx).title("存储清理").description(
         "清理已经没人读写的残留：instincts 的 smelt.db、根目录\
-                 调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
+         调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
     ));
-    SettingPage::new("系统更新与维护")
-        .description("资源占用、应用更新、后台服务和存储清理。")
+    let description = if cfg!(target_os = "macos") {
+        "应用更新、后台服务和存储清理。"
+    } else {
+        "后台服务和存储清理。"
+    };
+    SettingPage::new("系统")
+        .description(description)
         .resettable(false)
         .groups(groups)
 }

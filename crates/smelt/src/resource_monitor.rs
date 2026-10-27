@@ -1,4 +1,4 @@
-//! 资源占用：设置「系统更新与维护」页最前面的分组。
+//! 资源占用：设置「Agent 与运行 → 资源占用」那一页。
 //!
 //! 桌面进程（GPUI）在本进程里量；会话都跑在运行时那边，由运行时用 `resource.usage` 报它
 //! 自己和每个会话的整棵进程树（见 smeltd `resource_usage`）。远程机器上的会话就在那台
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::chart::AreaChart;
-use gpui_component::setting::{SettingGroup, SettingItem};
+use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use smelt_model::control_api::{
     ProcessEntry, ProcessUsage, ResourceUsage, ResourceUsageResult, SessionResourceUsage,
@@ -149,7 +149,8 @@ impl Workspace {
                 if this
                     .update(cx, |ws, cx| {
                         ws.resource_monitor.desktop_memory = desktop_memory.flatten();
-                        ws.resource_monitor.apply(desktop, runtimes, Instant::now());
+                        ws.resource_monitor
+                            .apply(desktop, runtimes, Instant::now());
                         cx.notify();
                     })
                     .is_err()
@@ -182,7 +183,7 @@ impl Workspace {
 
     /// 设置窗口开着，而且停在资源页。
     fn resources_visible(&self, cx: &mut App) -> bool {
-        self.settings_section == SettingsSection::Maintenance
+        self.settings_section == SettingsSection::Resources
             && cx
                 .try_global::<SettingsWindowHandle>()
                 .map(|handle| handle.0)
@@ -355,7 +356,8 @@ fn group_sessions(
                 }
             },
             None => {
-                let (count, group) = others.get_or_insert_with(|| (0, empty(String::new(), None)));
+                let (count, group) =
+                    others.get_or_insert_with(|| (0, empty(String::new(), None)));
                 *count += 1;
                 group
             }
@@ -536,11 +538,7 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
     let owners = session_owners(ws, cx);
     let mut keys = vec![RuntimeKey::Local];
     if let Some(hub) = cx.try_global::<RuntimeHub>() {
-        keys.extend(
-            hub.remotes
-                .iter()
-                .map(|remote| remote.runtime.key().clone()),
-        );
+        keys.extend(hub.remotes.iter().map(|remote| remote.runtime.key().clone()));
     }
     keys.into_iter()
         .map(|key| {
@@ -598,46 +596,35 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
 const CPU_COLUMN: f32 = 64.;
 const MEMORY_COLUMN: f32 = 80.;
 
-/// 「系统更新与维护」里的资源分组。`snapshot` 只在停在这一页时有。
-pub(crate) fn resources_groups(
+/// 资源页。`snapshot` 只在停在这一页时有。
+pub(crate) fn resources_page(
     workspace: Entity<Workspace>,
     snapshot: Option<Rc<PanelSnapshot>>,
-) -> Vec<SettingGroup> {
-    let description = "Smelt 界面、后台服务和每个会话占用的 CPU 与内存。会话按整棵进程树计，包括智能体\
-         起的命令；CPU 按单核计，多核可超过 100%。停在这一页时每 2 秒刷新。";
+) -> SettingPage {
+    let page = SettingPage::new("资源占用")
+        .description(
+            "Smelt 界面、后台服务和每个会话占用的 CPU 与内存。会话按整棵进程树计，包括智能体\
+             起的命令；CPU 按单核计，多核可超过 100%。停在这一页时每 2 秒刷新。",
+        )
+        .resettable(false);
     let Some(snapshot) = snapshot else {
-        return vec![
-            SettingGroup::new()
-                .title("资源占用")
-                .description(description)
-                .item(SettingItem::render(|_, _, cx: &mut App| {
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("读取中…")
-                        .into_any_element()
-                })),
-        ];
+        return page;
     };
     let summary = snapshot.clone();
-    let mut groups = vec![
-        SettingGroup::new()
-            .title("资源占用")
-            .description(description)
-            .item(SettingItem::render(move |_, _, cx: &mut App| {
-                summary_view(&summary, cx)
-            })),
-    ];
+    let mut page = page.group(SettingGroup::new().item(SettingItem::render(
+        move |_, _, cx: &mut App| summary_view(&summary, cx),
+    )));
     for ix in 0..snapshot.sections.len() {
         let snapshot = snapshot.clone();
         let workspace = workspace.clone();
-        groups.push(
+        page = page.group(
             SettingGroup::new()
                 .title(snapshot.sections[ix].name.clone())
                 .item(SettingItem::render(move |_, window, cx: &mut App| {
-                    let sort = window.use_keyed_state("settings-resources-sort", cx, |_, _| {
-                        PanelSort::default()
-                    });
+                    let sort =
+                        window.use_keyed_state("settings-resources-sort", cx, |_, _| {
+                            PanelSort::default()
+                        });
                     let expanded =
                         window.use_keyed_state("settings-resources-expanded", cx, |_, _| {
                             ExpandedRows::default()
@@ -646,7 +633,7 @@ pub(crate) fn resources_groups(
                 })),
         );
     }
-    groups
+    page
 }
 
 /// 本机合计、占比和最近两分钟的内存曲线。
@@ -738,17 +725,10 @@ fn section_view(
     let sort_header = |label: &'static str, by: SortBy, width: f32| {
         let sort = sort.clone();
         div()
-            .id(SharedString::from(format!(
-                "{}-sort-{label}",
-                section.id_prefix
-            )))
+            .id(SharedString::from(format!("{}-sort-{label}", section.id_prefix)))
             .w(px(width))
             .text_right()
-            .text_color(if sort_by == by {
-                colors.fg
-            } else {
-                colors.muted
-            })
+            .text_color(if sort_by == by { colors.fg } else { colors.muted })
             .when(sort_by == by, |d| d.font_medium())
             .on_click(move |_ev, _window, cx| {
                 sort.update(cx, |sort, cx| {
@@ -800,9 +780,7 @@ fn section_view(
             None => format!("{}-others-{ix}", section.id_prefix),
         });
         let is_open = open.contains(&id);
-        table = table.child(session_row(
-            id, group, is_open, &expanded, workspace, colors,
-        ));
+        table = table.child(session_row(id, group, is_open, &expanded, workspace, colors));
     }
     if let Some(total) = section.total {
         table = table.child(
@@ -862,13 +840,7 @@ fn row_label(label: String, detail: Option<String>, colors: RowColors) -> Div {
     v_flex()
         .flex_1()
         .min_w_0()
-        .child(
-            div()
-                .truncate()
-                .text_sm()
-                .text_color(colors.fg)
-                .child(label),
-        )
+        .child(div().truncate().text_sm().text_color(colors.fg).child(label))
         .children(detail.map(|detail| {
             div()
                 .truncate()
@@ -1006,9 +978,8 @@ fn session_row(
                     .icon_action("跳到会话")
                     .on_click(move |_, _, cx| {
                         let session_id = session_id.clone();
-                        workspace.update(cx, |ws, cx| {
-                            ws.jump_to_session_from_settings(session_id, cx)
-                        });
+                        workspace
+                            .update(cx, |ws, cx| ws.jump_to_session_from_settings(session_id, cx));
                     }),
             )
     });

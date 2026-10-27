@@ -14,7 +14,7 @@ pub(super) fn shortcuts_page(
 
     // —— 键盘快捷键：只展示当前实际绑定，暂不支持用户改键 ——
 
-    SettingPage::new("键盘快捷键").resettable(false).group(
+    SettingPage::new("快捷键").resettable(false).group(
         SettingGroup::new().item(
             SettingItem::render(move |_, window, _| {
                 let row = |label: &'static str, keys: Vec<gpui::AnyElement>| {

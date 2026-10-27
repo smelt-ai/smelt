@@ -170,12 +170,12 @@ fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut
         if workspace.settings_section != section {
             // 远程页的延迟平时只在连接换路径时读，切过去重读一次。
             let remote = section == SettingsSection::Remote;
-            // 资源占用只在「系统更新与维护」看得见时采样：切过去要叫醒采样循环。
-            // 离开这一页也要叫醒，循环才能重新确认看不见并睡下。
-            let maintenance = section == SettingsSection::Maintenance
-                || workspace.settings_section == SettingsSection::Maintenance;
+            // 资源页只在看得见时采样：切过去要叫醒采样循环；离开也叫醒，循环才能确认
+            // 看不见了，马上睡下，不用再等一轮。
+            let resources = section == SettingsSection::Resources
+                || workspace.settings_section == SettingsSection::Resources;
             workspace.settings_section = section;
-            if maintenance {
+            if resources {
                 workspace.wake_resource_monitor();
             }
             if remote {
@@ -196,21 +196,20 @@ fn section_page(
         SettingsSection::Appearance => appearance::appearance_page(entity, snapshot, cx),
         SettingsSection::Notifications => agent::notify_page(entity, snapshot, cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
-        SettingsSection::AgentEnvironment => agent::environment_page(entity, snapshot, cx),
-        SettingsSection::PluginsAndHooks => {
-            let (plugin_description, mut groups) =
-                panel_plugin::panel_plugin_sections(entity.clone(), snapshot);
-            groups.push(
-                agent::hooks_group(entity, snapshot, cx)
-                    .title("Agent Hooks")
-                    .description("将 Smelt 通知与权限处理接入本机 Agent 配置。"),
-            );
-            SettingPage::new("插件与 Hooks")
-                .description(plugin_description)
-                .resettable(false)
-                .groups(groups)
+        SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
+        SettingsSection::Agents => {
+            let page = agent::agents_page(entity, snapshot, cx);
+            // 这一页改的都是本机运行时上的东西（CLI、hooks、启动命令）。
+            if crate::runtimes::has_remote_runtimes(cx) {
+                page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())
+            } else {
+                page
+            }
         }
-        SettingsSection::Remote => collaboration::remote_pairing_page(entity, snapshot, cx),
-        SettingsSection::Maintenance => maintenance::system_page(entity, snapshot, cx),
+        SettingsSection::Remote => collaboration::remote_page(entity, snapshot, cx),
+        SettingsSection::Resources => {
+            crate::resource_monitor::resources_page(entity, snapshot.resources.clone())
+        }
+        SettingsSection::System => maintenance::system_page(entity, snapshot, cx),
     }
 }

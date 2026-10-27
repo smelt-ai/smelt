@@ -1,31 +1,37 @@
-//! 设置页：模型与智能体环境、通知、Agent Hooks。
+//! 设置页：Agent（运行环境、Hooks、新建与启动、对话命令与工作区）和通知。
 
 use super::*;
 use smelt_ui::IconAction as _;
 
-pub(super) fn environment_page(
+pub(super) fn agents_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
     let groups = agent_groups(entity, snapshot, cx);
-    SettingPage::new("模型与智能体环境")
-        .description("管理 Agent CLI、启动命令，以及对话与工作区。")
+    SettingPage::new("Agent")
+        .description("本机的 Agent CLI、Hooks 接入和启动命令。")
         .group(
             groups
                 .runtime
                 .title("运行环境")
-                .description("查看 Smelt 用于启动 Agent 对话的内置运行时与本机 CLI 状态。"),
+                .description("Smelt 用于启动 Agent 对话的内置运行时与本机 CLI 状态。"),
+        )
+        .group(
+            groups
+                .hooks
+                .title("Hooks")
+                .description("把 Smelt 的通知与权限处理接入本机各家 Agent 的配置。"),
         )
         .group(
             groups
                 .launch
                 .title("新建与启动")
-                .description("管理项目行“+”菜单中显示的终端与 Agent 启动命令。"),
+                .description("项目行「+」菜单里列出的终端与 Agent 启动命令。"),
         )
-        .group(groups.workspace.title("对话与工作区").description(
-            "管理执行引擎启动命令、额外 workspace 与跨 Agent 通讯。智能体定义请在\
-             主窗口左侧「智能体」中管理；API key 与网关地址在「Pi 模型」页面。",
+        .group(groups.workspace.title("对话命令与工作区").description(
+            "每家 Agent 开对话时用的启动命令，以及按不同配置目录开的额外 workspace。智能体定义\
+             在主窗口左侧「智能体」里；API key 与网关地址在「Pi 模型」页面。",
         ))
 }
 
@@ -35,17 +41,9 @@ pub(super) fn notify_page(
     cx: &App,
 ) -> SettingPage {
     let groups = agent_groups(entity, snapshot, cx);
-    SettingPage::new("通知与提醒")
+    SettingPage::new("通知")
         .description("选择哪些 Agent 状态和终端事件需要提醒你。")
         .group(groups.notify)
-}
-
-pub(super) fn hooks_group(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingGroup {
-    agent_groups(entity, snapshot, cx).hooks
 }
 
 struct AgentSettingGroups {

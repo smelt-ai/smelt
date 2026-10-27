@@ -1417,7 +1417,7 @@ fn next_session_ui_id() -> u64 {
 enum RenameTarget {
     Session(usize),
     Pane(Entity<TerminalView>),
-    /// 侧栏和设置「机器」页里一台远程机器的名字，只在这台电脑上生效。
+    /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
     History {
         agent: settings::HistorySourceKind,
@@ -4190,7 +4190,7 @@ impl Render for Workspace {
             if this.update_status.can_check() || this.update_status.can_retry_recovery() {
                 this.check_or_recover_update(false, cx);
             }
-            this.open_settings_section(settings::SettingsSection::maintenance_update(), cx);
+            this.open_settings_section(settings::SettingsSection::app_update(), cx);
         }));
         // 应用菜单「反馈问题…」：跳内部飞书反馈群。
         frame.on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {

@@ -2277,7 +2277,7 @@ impl Workspace {
                                                         ws.check_or_recover_update(false, cx);
                                                     }
                                                     ws.open_settings_section(
-                                                        crate::settings::SettingsSection::maintenance_update(),
+                                                        crate::settings::SettingsSection::app_update(),
                                                         cx,
                                                     );
                                                 });
@@ -2305,7 +2305,7 @@ impl Workspace {
                                                 .on_click(move |_ev, _window, cx| {
                                                     e_resources.update(cx, |ws, cx| {
                                                         ws.open_settings_section(
-                                                            crate::settings::SettingsSection::Maintenance,
+                                                            crate::settings::SettingsSection::Resources,
                                                             cx,
                                                         );
                                                     });

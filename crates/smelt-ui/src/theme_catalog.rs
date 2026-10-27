@@ -4,161 +4,35 @@
 //! `themes/` 里，随二进制嵌入，不依赖进程的当前目录。Default 不在这些文件里，
 //! `gpui_component::init` 已经装好。
 
-use std::collections::HashMap;
-use std::sync::LazyLock;
-
-use gpui::SharedString;
+use gpui::{App, Hsla, SharedString};
 use gpui_component::{Theme, ThemeRegistry};
 
 use crate::theme_files::THEME_FILES;
 use crate::ui_theme;
 
-/// 设置页下拉的 (值, 标签)。值是主题文件里的 `name`，例如 `Ayu Light`。
-pub fn options() -> Vec<(SharedString, SharedString)> {
-    smelt_model::theme_index::entries()
-        .iter()
-        .map(|entry| {
-            (
-                SharedString::from(entry.name.clone()),
-                SharedString::from(entry.name.clone()),
-            )
-        })
-        .collect()
-}
-
-/// 一款主题的四个代表色：背景、前景、强调（primary / accent）、终端底（secondary）。
-///
-/// 设置页用它们画色点，不用先把主题装进 [`ThemeRegistry`]。色值来自主题文件的
-/// `colors`；Default 不在这些文件里，按 gpui-kit 默认主题的同名 token 解析。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 一款主题的代表色：背景、前景、强调（primary）。设置页拿它画色点。
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeSwatch {
-    pub background: u32,
-    pub foreground: u32,
-    pub accent: u32,
-    pub terminal: u32,
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub accent: Hsla,
 }
 
-impl ThemeSwatch {
-    pub fn colors(self) -> [u32; 4] {
-        [self.background, self.foreground, self.accent, self.terminal]
-    }
-}
-
-/// 按主题名取四色。名字不在目录里时返回 `None`。
-pub fn swatch(name: &str) -> Option<ThemeSwatch> {
-    SWATCHES.get(name).copied()
-}
-
-static SWATCHES: LazyLock<HashMap<String, ThemeSwatch>> = LazyLock::new(load_swatches);
-
-fn load_swatches() -> HashMap<String, ThemeSwatch> {
-    let mut swatches = HashMap::new();
-    for file in THEME_FILES {
-        let parsed: ThemeFile = serde_json::from_str(file).expect("内置主题文件必须能解析出色点");
-        for theme in parsed.themes {
-            if let Some(swatch) = swatch_from_colors(&theme.colors) {
-                swatches.insert(theme.name, swatch);
-            }
-        }
-    }
-    // gpui-kit 自带的 Default 用命名色（neutral-950 / white），不在 themes/*.json 里。
-    swatches.insert(
-        "Default Dark".to_string(),
-        ThemeSwatch {
-            background: named_color("neutral-950").unwrap(),
-            foreground: named_color("neutral-50").unwrap(),
-            accent: named_color("neutral-50").unwrap(),
-            terminal: named_color("neutral-800").unwrap(),
-        },
-    );
-    swatches.insert(
-        "Default Light".to_string(),
-        ThemeSwatch {
-            background: named_color("white").unwrap(),
-            foreground: named_color("neutral-950").unwrap(),
-            accent: named_color("neutral-900").unwrap(),
-            terminal: named_color("neutral-200").unwrap(),
-        },
-    );
-    swatches
-}
-
-#[derive(serde::Deserialize)]
-struct ThemeFile {
-    themes: Vec<ThemeBody>,
-}
-
-#[derive(serde::Deserialize)]
-struct ThemeBody {
-    name: String,
-    colors: HashMap<String, String>,
-}
-
-fn swatch_from_colors(colors: &HashMap<String, String>) -> Option<ThemeSwatch> {
-    let background = color_value(colors.get("background")?)?;
-    let foreground = color_value(colors.get("foreground")?)?;
-    let accent = [
-        "primary.background",
-        "accent.background",
-        "ring",
-        "base.blue",
-    ]
-    .iter()
-    .find_map(|key| colors.get(*key).and_then(|value| color_value(value)))?;
-    let terminal = ["secondary.background", "popover.background", "background"]
-        .iter()
-        .find_map(|key| colors.get(*key).and_then(|value| color_value(value)))?;
+/// 按名字取一款主题的代表色。颜色由 gpui-kit 自己解析主题配置得出，换上这款主题后
+/// 界面就是这几个色；不另写一套解析。名字不在注册表里时是 `None`。
+///
+/// 注册表在启动装主题时已经装满（见 [`apply`]），这里只读不装。
+pub fn swatch(name: &str, cx: &App) -> Option<ThemeSwatch> {
+    let config = ThemeRegistry::global(cx)
+        .themes()
+        .get(&SharedString::from(name))?
+        .clone();
+    let mut theme = Theme::global(cx).clone();
+    theme.apply_config(&config);
     Some(ThemeSwatch {
-        background,
-        foreground,
-        accent,
-        terminal,
-    })
-}
-
-/// `#RRGGBB`、`#RRGGBBAA`，或主题文件里的 `linear-gradient(..., #1E293B, ...)`。
-/// 没有十六进制时再认 gpui-kit Default 用的命名色。
-fn color_value(raw: &str) -> Option<u32> {
-    if let Some(hex) = first_hex(raw) {
-        return Some(hex);
-    }
-    let name = raw.split('/').next().unwrap_or(raw).trim();
-    named_color(name)
-}
-
-fn first_hex(raw: &str) -> Option<u32> {
-    let rest = raw.split_once('#')?.1;
-    let hex: String = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_hexdigit())
-        .collect();
-    let rgb = match hex.len() {
-        3 => {
-            let chars = hex.chars().collect::<Vec<_>>();
-            format!("{0}{0}{1}{1}{2}{2}", chars[0], chars[1], chars[2])
-        }
-        6 | 8 => hex[..6].to_string(),
-        _ => return None,
-    };
-    u32::from_str_radix(&rgb, 16).ok()
-}
-
-fn named_color(name: &str) -> Option<u32> {
-    Some(match name {
-        "white" => 0xffffff,
-        "black" => 0x000000,
-        "neutral-50" => 0xfafafa,
-        "neutral-100" => 0xf5f5f5,
-        "neutral-200" => 0xe5e5e5,
-        "neutral-300" => 0xd4d4d4,
-        "neutral-400" => 0xa3a3a3,
-        "neutral-500" => 0x737373,
-        "neutral-600" => 0x525252,
-        "neutral-700" => 0x404040,
-        "neutral-800" => 0x262626,
-        "neutral-900" => 0x171717,
-        "neutral-950" => 0x0a0a0a,
-        _ => return None,
+        background: theme.background,
+        foreground: theme.foreground,
+        accent: theme.primary,
     })
 }
 
@@ -214,47 +88,26 @@ fn ensure_loaded(cx: &mut gpui::App) {
 
 #[cfg(test)]
 mod tests {
+    use gpui::TestAppContext;
+
     use super::*;
 
-    #[test]
-    fn every_indexed_theme_has_four_swatch_colors() {
-        let entries = smelt_model::theme_index::entries();
-        assert_eq!(entries.len(), 38);
-        for entry in entries {
-            let swatch = swatch(&entry.name).unwrap_or_else(|| {
-                panic!("{} 缺少四色预览", entry.name);
-            });
-            assert_ne!(
-                swatch.background, swatch.foreground,
-                "{} 的背景和前景不应是同一个色",
-                entry.name
-            );
-        }
-    }
-
-    #[test]
-    fn packaged_themes_use_background_foreground_primary_and_secondary() {
-        assert_eq!(
-            swatch("Ayu Dark").unwrap().colors(),
-            [0x0d1016, 0xb3b1ad, 0x5ac1fe, 0x1f2127]
-        );
-        assert_eq!(
-            swatch("Catppuccin Frappe").unwrap().colors(),
-            [0x232634, 0xc6d0f5, 0x8caaee, 0x414559]
-        );
-        // Aurora 的 primary 是渐变，取第一段实色。
-        assert_eq!(swatch("Aurora Light").unwrap().accent, 0x1e293b);
-    }
-
-    #[test]
-    fn default_themes_resolve_named_palette_tokens() {
-        assert_eq!(
-            swatch("Default Dark").unwrap().colors(),
-            [0x0a0a0a, 0xfafafa, 0xfafafa, 0x262626]
-        );
-        assert_eq!(
-            swatch("Default Light").unwrap().colors(),
-            [0xffffff, 0x0a0a0a, 0x171717, 0xe5e5e5]
-        );
+    #[gpui::test]
+    fn every_indexed_theme_has_a_swatch(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            // 装主题顺带把整份目录装进注册表。
+            assert!(apply("Default Dark", cx));
+            for entry in smelt_model::theme_index::entries() {
+                let swatch = swatch(&entry.name, cx)
+                    .unwrap_or_else(|| panic!("{} 不在注册表里", entry.name));
+                assert_ne!(
+                    swatch.background, swatch.foreground,
+                    "{} 的背景和前景不应是同一个色",
+                    entry.name
+                );
+            }
+            assert_eq!(swatch("没有这款主题", cx), None);
+        });
     }
 }

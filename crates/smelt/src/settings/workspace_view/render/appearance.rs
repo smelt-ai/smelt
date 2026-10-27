@@ -1,120 +1,145 @@
-//! 设置页：外观、主题与终端（主题、字号与字体、窗口与背景）。
+//! 设置页：外观（主题、字号与字体、窗口与背景）。
 
 use super::*;
-use gpui_component::input::{Input, InputState};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::IndexPath;
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
+use smelt_ui::theme_catalog::ThemeSwatch;
+use std::collections::HashMap;
 
 pub(super) fn appearance_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    SettingPage::new("外观、主题与终端")
-        .description("界面主题、字号、终端字体，以及窗口透明度和背景。")
-        .group(theme_group(cx))
+    SettingPage::new("外观")
+        .description("主题、字号与字体，以及窗口透明度和背景。")
+        .group(theme_group())
         .group(typography_group(snapshot, cx))
         .group(window_group(entity, snapshot, cx))
 }
 
-fn theme_group(cx: &App) -> SettingGroup {
-    let border = cx.theme().border;
-    SettingGroup::new()
-        .title("主题")
-        .description("选定主题后，按该主题的明暗同步界面模式。共 38 款内置主题。")
-        .item(
-            SettingItem::new(
-                "主题",
-                SettingField::render(move |_, window, cx: &mut App| {
-                    let current = cx.global::<Appearance>().theme_name.clone();
-                    let swatch = smelt_ui::theme_catalog::swatch(&current);
-                    let search =
-                        window.use_keyed_state("settings-theme-search", cx, |window, cx| {
-                            InputState::new(window, cx).placeholder("搜索主题，如 Ayu、Catppuccin")
-                        });
-                    let search_for_menu = search.clone();
-                    let current_for_menu = current.clone();
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(theme_dots(swatch, border))
-                        .child(Input::new(&search).w(px(168.)).small())
-                        .child(
-                            Button::new("settings-theme")
-                                .outline()
-                                .compact()
-                                .label(current.clone())
-                                .dropdown_caret(true)
-                                .max_w(px(220.))
-                                .overflow_hidden()
-                                .dropdown_menu_with_anchor(
-                                    gpui::Anchor::TopRight,
-                                    move |menu, _, cx| {
-                                        let query =
-                                            search_for_menu.read(cx).value().trim().to_lowercase();
-                                        let matches = smelt_model::theme_index::entries()
-                                            .iter()
-                                            .filter(|entry| {
-                                                query.is_empty()
-                                                    || entry.name.to_lowercase().contains(&query)
-                                                    || entry.family.to_lowercase().contains(&query)
-                                            })
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        if matches.is_empty() {
-                                            return menu.scrollable(true).item(
-                                                PopupMenuItem::new("没有匹配的主题").disabled(true),
-                                            );
-                                        }
-                                        let current = current_for_menu.clone();
-                                        matches.into_iter().fold(
-                                            menu.scrollable(true).max_h(px(280.)).min_w(px(280.)),
-                                            |menu, entry| {
-                                                let name = entry.name.clone();
-                                                let family = entry.family.clone();
-                                                let swatch = smelt_ui::theme_catalog::swatch(&name);
-                                                let selected = name == current;
-                                                let item_name = name.clone();
-                                                menu.item(
-                                                    PopupMenuItem::element(move |_, cx| {
-                                                        let muted = cx.theme().muted_foreground;
-                                                        let border = cx.theme().border;
-                                                        h_flex()
-                                                            .w_full()
-                                                            .min_w(px(240.))
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .child(theme_dots(swatch, border))
-                                                            .child(
-                                                                div()
-                                                                    .flex_1()
-                                                                    .min_w_0()
-                                                                    .overflow_hidden()
-                                                                    .text_ellipsis()
-                                                                    .whitespace_nowrap()
-                                                                    .child(item_name.clone()),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .flex_shrink_0()
-                                                                    .text_xs()
-                                                                    .text_color(muted)
-                                                                    .child(family.clone()),
-                                                            )
-                                                    })
-                                                    .checked(selected)
-                                                    .on_click(move |_, _, cx| {
-                                                        select_theme(name.clone(), cx);
-                                                    }),
-                                                )
-                                            },
-                                        )
-                                    },
-                                ),
-                        )
-                }),
-            )
-            .description("Default 是库自带的默认外观。换主题后，组件和自绘界面一起变"),
+fn theme_group() -> SettingGroup {
+    SettingGroup::new().title("主题").item(
+        SettingItem::new(
+            "主题",
+            SettingField::render(|_, window, cx: &mut App| {
+                let picker =
+                    window.use_keyed_state("settings-theme-picker", cx, ThemePicker::new);
+                let select = picker.read(cx).select.clone();
+                let border = cx.theme().border;
+                // 别处换了主题（命令面板等）时，下拉跟着对上，不停在旧的那项。只对目录里
+                // 有的名字同步：选不中的名字每次重绘都会再选一遍，停不下来。
+                let current = SharedString::from(cx.global::<Appearance>().theme_name.clone());
+                let swatch = picker.read(cx).swatches.get(&current).copied();
+                if swatch.is_some() && select.read(cx).selected_value() != Some(&current) {
+                    select.update(cx, |select, cx| {
+                        select.set_selected_value(&current, window, cx)
+                    });
+                }
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .children(swatch.map(|swatch| theme_dots(swatch, border)))
+                    .child(
+                        Select::new(&select)
+                            .w(px(220.))
+                            .menu_width(px(300.))
+                            .search_placeholder("搜索主题，如 Ayu、Catppuccin"),
+                    )
+            }),
         )
+        .description("换主题后界面和终端配色一起变，界面明暗跟着这款主题走。"),
+    )
+}
+
+/// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置窗口的元素状态上，窗口关了就丢。
+struct ThemePicker {
+    select: Entity<SelectState<SearchableVec<ThemeOption>>>,
+    /// 每款主题的色点，建下拉时一次算好：每项都要把主题配置套一遍，不放进重绘。
+    swatches: HashMap<SharedString, ThemeSwatch>,
+    _confirm: Subscription,
+}
+
+impl ThemePicker {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let current = cx.global::<Appearance>().theme_name.clone();
+        let options = smelt_model::theme_index::entries()
+            .iter()
+            .map(|entry| ThemeOption {
+                name: entry.name.clone().into(),
+                family: entry.family.clone().into(),
+                swatch: smelt_ui::theme_catalog::swatch(&entry.name, cx),
+            })
+            .collect::<Vec<_>>();
+        let selected = options
+            .iter()
+            .position(|option| *option.name == *current)
+            .map(IndexPath::new);
+        let swatches = options
+            .iter()
+            .filter_map(|option| Some((option.name.clone(), option.swatch?)))
+            .collect();
+        let select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(options), selected, window, cx).searchable(true)
+        });
+        let _confirm = cx.subscribe(
+            &select,
+            |_, _, event: &SelectEvent<SearchableVec<ThemeOption>>, cx| {
+                if let SelectEvent::Confirm(Some(name)) = event {
+                    select_theme(name.to_string(), cx);
+                }
+            },
+        );
+        Self {
+            select,
+            swatches,
+            _confirm,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ThemeOption {
+    name: SharedString,
+    family: SharedString,
+    swatch: Option<ThemeSwatch>,
+}
+
+impl SelectItem for ThemeOption {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.name.clone()
+    }
+
+    fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .children(self.swatch.map(|swatch| theme_dots(swatch, border)))
+            .child(div().flex_1().min_w_0().truncate().child(self.name.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(self.family.clone()),
+            )
+    }
+
+    fn value(&self) -> &SharedString {
+        &self.name
+    }
+
+    /// 名字或系列（Ayu、Catppuccin）都能搜。
+    fn matches(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        self.name.to_lowercase().contains(&query) || self.family.to_lowercase().contains(&query)
+    }
 }
 
 fn select_theme(name: String, cx: &mut App) {
@@ -146,7 +171,6 @@ fn typography_group(snapshot: &SettingsRenderSnapshot, cx: &App) -> SettingGroup
 
     SettingGroup::new()
         .title("字号与字体")
-        .description("界面和终端的字号、字体在同一页对照调整。")
         .items(vec![
             SettingItem::new(
                 "界面字号",
@@ -228,120 +252,20 @@ fn typography_group(snapshot: &SettingsRenderSnapshot, cx: &App) -> SettingGroup
                 "终端、Git diff、代码块的等宽字体，跟界面字体分开。",
                 "建议选等宽，图标缺字回落内嵌默认（Maple Mono NF）",
             )),
-            SettingItem::render(|_, _, cx: &mut App| typography_preview(cx)),
         ])
 }
 
-fn typography_preview(cx: &App) -> gpui::AnyElement {
-    let appearance = cx.global::<Appearance>();
-    let swatch = smelt_ui::theme_catalog::swatch(&appearance.theme_name).unwrap_or(
-        smelt_ui::theme_catalog::ThemeSwatch {
-            background: 0x101113,
-            foreground: 0xeceae6,
-            accent: 0xe09f5a,
-            terminal: 0x17191c,
-        },
-    );
-    let ui_px = appearance.ui_font_px;
-    let term_px = appearance.font_px;
-    let ui_font = resolved_ui_font_family(appearance);
-    let mono = terminal_view::font_family();
-    let muted = cx.theme().muted_foreground;
-    let border = cx.theme().border;
-    let ink = rgb(swatch.foreground);
-    let accent = rgb(swatch.accent);
-
-    v_flex()
-        .w_full()
-        .gap_1()
-        .child(
+/// 背景、前景、强调三个色点。描边用当前主题的边框色，深色主题的底色点在深色界面上也看得见。
+fn theme_dots(swatch: ThemeSwatch, border: gpui::Hsla) -> impl IntoElement {
+    h_flex().flex_none().items_center().gap_1().children(
+        [swatch.background, swatch.foreground, swatch.accent].map(|color| {
             div()
-                .text_xs()
-                .text_color(muted)
-                .child("实时字号与配色预览"),
-        )
-        .child(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .py_2()
-                .rounded(cx.theme().radius)
+                .size(px(10.))
+                .rounded_full()
+                .bg(color)
                 .border_1()
                 .border_color(border)
-                .bg(rgb(swatch.background))
-                .child(
-                    h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded(cx.theme().radius)
-                                .bg(accent)
-                                .text_color(rgb(swatch.background))
-                                .text_size(px((ui_px.saturating_sub(4).max(10)) as f32))
-                                .font_family(ui_font.clone())
-                                .child(format!("UI {ui_px}px")),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .text_color(ink)
-                                .text_size(px(ui_px as f32))
-                                .font_family(ui_font)
-                                .child("对话气泡与界面排版预览"),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .gap_1()
-                        .px_2()
-                        .py_1()
-                        .rounded(cx.theme().radius)
-                        .border_1()
-                        .border_color(border)
-                        .bg(rgb(swatch.terminal))
-                        .text_color(ink)
-                        .text_size(px(term_px as f32))
-                        .font_family(mono)
-                        .child(div().text_color(accent).child("$"))
-                        .child("cargo check --workspace")
-                        .child(div().text_color(rgb(crate::ui_theme::green())).child("✓")),
-                ),
-        )
-        .into_any_element()
-}
-
-fn theme_dots(
-    swatch: Option<smelt_ui::theme_catalog::ThemeSwatch>,
-    border: gpui::Hsla,
-) -> impl IntoElement {
-    let colors = swatch.map(smelt_ui::theme_catalog::ThemeSwatch::colors);
-    h_flex().items_center().gap_1().children(
-        colors
-            .unwrap_or([0x808080, 0xeceae6, 0xe09f5a, 0x17191c])
-            .map(|color| {
-                div()
-                    .size(px(10.))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(rgb(color))
-                    .border_1()
-                    .border_color(border)
-            }),
+        }),
     )
 }
 

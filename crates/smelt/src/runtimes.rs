@@ -86,6 +86,17 @@ pub(crate) fn has_remote_runtimes(cx: &gpui::App) -> bool {
         .is_some_and(|hub| !hub.remotes.is_empty())
 }
 
+/// 设置里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
+/// 对远程不生效，得说清楚。
+pub(crate) fn local_runtime_scope_chip() -> gpui_component::tag::Tag {
+    use gpui::{ParentElement as _, Styled as _};
+    gpui_component::tag::Tag::secondary()
+        .outline()
+        .rounded_full()
+        .flex_none()
+        .child("只作用于本机运行时")
+}
+
 /// 远程运行时不能用时侧栏标的字（按最近一次探测），能用就是 `None`。本机总能用。
 pub(crate) fn runtime_unavailable_label(key: &RuntimeKey, cx: &gpui::App) -> Option<&'static str> {
     match key {
@@ -364,7 +375,7 @@ pub(crate) fn runtime_indicator(key: &RuntimeKey, cx: &gpui::App) -> Option<Runt
     }
 }
 
-/// 一台机器的完整连接说明，设置「机器」页用。
+/// 一台机器的完整连接说明，设置「远程」页的机器一节用。
 pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, LinkTone) {
     match key {
         RuntimeKey::Local => ("这台 Mac".to_string(), LinkTone::Muted),
@@ -464,7 +475,7 @@ pub(crate) struct RuntimeHub {
     /// 最近一次添加、移除的失败原因。
     pub(crate) error: Option<String>,
     /// 启动时没读出登记过的机器（比如客户端库版本比程序新）。这时列表里只剩本机，不说
-    /// 一声就像机器全丢了，所以设置「机器」页要显示它。
+    /// 一声就像机器全丢了，所以设置「远程」页的机器一节要显示它。
     pub(crate) load_error: Option<String>,
     /// 本机守护最近一次探到的状态，订阅线程报来（见 `runtime_events`）。还没探过是 `None`。
     pub(crate) local_status: Option<RuntimeStatus>,
@@ -1449,7 +1460,7 @@ mod tests {
         assert!(!link_changed(None, None));
     }
 
-    /// 设置「机器」页里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
+    /// 设置「远程」页的机器一节里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
     #[test]
     fn the_machine_panel_spells_the_link_out() {
         let status = online();

@@ -113,7 +113,7 @@ impl Workspace {
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             show_update_install_confirm: self.show_update_install_confirm,
             session_manager_open: self.session_manager_open,
-            resources: (self.settings_section == SettingsSection::Maintenance)
+            resources: (self.settings_section == SettingsSection::Resources)
                 .then(|| self.resources_snapshot(cx)),
         }
     }

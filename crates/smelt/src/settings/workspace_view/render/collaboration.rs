@@ -32,13 +32,13 @@ fn last_seen_text(device: &smelt_model::remote_config::DeviceInfo) -> String {
     }
 }
 
-pub(super) fn remote_pairing_page(
+pub(super) fn remote_page(
     _entity: Entity<Workspace>,
     _snapshot: &SettingsRenderSnapshot,
     _cx: &App,
 ) -> SettingPage {
-    SettingPage::new("远程连接与配对")
-        .description("已连接的远程机器，以及这台机器的 iroh 远程访问和手机扫码配对。")
+    SettingPage::new("远程")
+        .description("连到其他机器上的运行时，或者让配对过的电脑和手机连进这台机器。")
         .resettable(false)
         .group(machines_group())
         .groups(remote_access_groups())
@@ -258,7 +258,7 @@ fn remote_access_groups() -> Vec<SettingGroup> {
 
     vec![
         access_group
-            .title("手机远程")
+            .title("远程访问")
             .description("让配对过的电脑和手机经 iroh 连这台机器的运行时。"),
         devices_group,
     ]

@@ -172,7 +172,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-pi` 跑 Pi 官方
 > JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。终端通道另有 **Antigravity** 与 **Crush**
 > （`settings::TerminalAgentKind`）。
-> 各条启动命令可在设置 →「Agent 运行环境」和「对话与工作区」改。provider 支持历史恢复时，
+> 各条启动命令可在设置 →「Agent」改。provider 支持历史恢复时，
 > 「重新开始」是协议级续接而非摆样子的新对话（Pi 使用自身 session id）。
 >
 > 各家实测差异（决定了下面几个 UI 决策）：首块响应 Claude ~2.6s / Copilot ~7s /
