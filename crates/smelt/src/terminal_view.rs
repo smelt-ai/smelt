@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
+use smelt_client::daemon_state::RuntimePresence;
 use smelt_ui::daemon_states_global::{AttentionGlobal, AttentionItem, AttentionKind};
 use smol::Timer;
 
@@ -252,6 +253,7 @@ const BELL_NOTIFICATION_GRACE: Duration = Duration::from_millis(250);
 const TERMINAL_RECOVERY_INPUT_MAX_BYTES: usize = 64 * 1024 * 1024;
 const TERMINAL_RECOVERY_OVERFLOW_MESSAGE: &str = "终端重连期间待发送的输入过多，未发送部分已取消";
 const TERMINAL_SESSION_ENDED_MESSAGE: &str = "终端会话已结束，未发送的输入已取消";
+const TERMINAL_REOPENED_MESSAGE: &str = "运行时重启过，终端已重新打开，未发送的输入已取消";
 
 fn bell_notification_due(pending_at: Option<Instant>, now: Instant) -> bool {
     pending_at.is_some_and(|at| now.duration_since(at) >= BELL_NOTIFICATION_GRACE)
@@ -545,9 +547,9 @@ impl TerminalView {
         self.publish_attention(AttentionKind::Success, "已完成", "已完成".to_string(), cx);
     }
 
-    /// 断线自动重连（后台）。守护 exec 交接 / 被强杀 / 重启时，会话本身
-    /// 还活在守护里，reattach 即可恢复画面；只有 shell 真的退出/被杀（守护里查无
-    /// 此会话）才不复活。
+    /// 断线自动重连（后台）。会话还活在守护里时 reattach 恢复画面；守护崩溃过、
+    /// 会话只剩目录里的身份时按原 id 重新打开（能续接的 CLI 接回原对话）；只有 shell
+    /// 真的退出/被杀（守护里查无此会话）才不复活。
     ///
     /// 这是终端断线的**兜底自愈**：此前重连只挂在守护重启一条
     /// 路径上，而守护 exec 还有别的触发方式（ensure/handoff 迁移、装 App 时
@@ -588,9 +590,9 @@ impl TerminalView {
                 }
                 // 2) 当前 epoch 的快照明确说这个 id 没有运行时进程了，就不再补发。
                 let sid2 = sid.clone();
-                let alive = this
+                let presence = this
                     .update(cx, |this, cx| {
-                        smelt_ui::daemon_states_global::DaemonStates::runtime_alive(
+                        smelt_ui::daemon_states_global::DaemonStates::runtime_presence(
                             this.runtime.key(),
                             &sid2,
                             cx,
@@ -598,7 +600,7 @@ impl TerminalView {
                     })
                     .ok()
                     .flatten();
-                if alive == Some(false) {
+                if presence == Some(RuntimePresence::Gone) {
                     let _ = this.update(cx, |this, cx| {
                         if this.terminal_generation == generation {
                             this.mark_session_runtime_gone(TERMINAL_SESSION_ENDED_MESSAGE);
@@ -607,17 +609,24 @@ impl TerminalView {
                     });
                     break;
                 }
-                // 3) 重连（reattach：守护按 id 重放历史画面，输出不丢）。
-                // 镜像未知时也立刻 attach：tmux 式，attach 本人才是还活着的权威答案。
+                // 3) 重连。守护停过（崩溃）后留下的会话进程已经没了，reattach 只会被拒：
+                // 按原 id 重新打开，守护能续接的 CLI 会接回原来的对话，接不了的起一个新
+                // shell，跟升级、冷启动重开一致。其余 reattach：守护按 id 重放历史画面，
+                // 输出不丢；镜像未知时也立刻 attach，attach 本人才是还活着的权威答案。
+                let reopen = presence == Some(RuntimePresence::LeftOver);
                 let sid3 = sid.clone();
                 let cwd3 = cwd.clone();
                 let runtime3 = runtime.clone();
-                let term =
-                    cx.background_executor()
-                        .spawn(async move {
+                let term = cx
+                    .background_executor()
+                    .spawn(async move {
+                        if reopen {
+                            Terminal::spawn(&runtime3, 24, 80, cwd3.as_deref(), &sid3, None)
+                        } else {
                             Terminal::reattach(&runtime3, 24, 80, cwd3.as_deref(), &sid3)
-                        })
-                        .await;
+                        }
+                    })
+                    .await;
                 match term {
                     Ok(t) => {
                         // 主线程挂回：adopt_terminal 换 Terminal、清 attention、
@@ -627,6 +636,10 @@ impl TerminalView {
                                 return;
                             }
                             this.reconnecting = false;
+                            // 断线时攒下的按键是打给旧进程的，不能灌进刚起来的新进程。
+                            if reopen {
+                                this.discard_recovery_input_if_any(TERMINAL_REOPENED_MESSAGE);
+                            }
                             this.adopt_terminal(t, cx);
                         });
                         if done.is_err() {
