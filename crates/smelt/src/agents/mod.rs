@@ -1215,13 +1215,13 @@ fn render_add_trigger_button(entity: Entity<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
-fn trigger_preset_icon(preset: settings::AutomationTriggerPresetId) -> IconName {
+fn trigger_preset_icon(preset: settings::AutomationTriggerPresetId) -> Icon {
     match preset {
-        settings::AutomationTriggerPresetId::Webhook => IconName::Network,
+        settings::AutomationTriggerPresetId::Webhook => Icon::new(gpui_kit_assets::IconName::Webhook),
         settings::AutomationTriggerPresetId::Hourly
-        | settings::AutomationTriggerPresetId::Interval => IconName::Cpu,
+        | settings::AutomationTriggerPresetId::Interval => Icon::new(gpui_kit_assets::IconName::Clock),
         settings::AutomationTriggerPresetId::Daily
-        | settings::AutomationTriggerPresetId::Weekly => IconName::Calendar,
+        | settings::AutomationTriggerPresetId::Weekly => IconName::Calendar.into(),
     }
 }
 
@@ -1236,10 +1236,10 @@ fn render_trigger_entry(
     let title = trigger_entry_title(entry, cx);
     let hint = trigger_entry_hint(entry);
     let show_hint = title != hint;
-    let icon = match entry.trigger_kind {
-        settings::AutomationTriggerKindId::Webhook => IconName::Network,
-        settings::AutomationTriggerKindId::Interval => IconName::Cpu,
-        settings::AutomationTriggerKindId::Calendar => IconName::Calendar,
+    let icon: Icon = match entry.trigger_kind {
+        settings::AutomationTriggerKindId::Webhook => Icon::new(gpui_kit_assets::IconName::Webhook),
+        settings::AutomationTriggerKindId::Interval => Icon::new(gpui_kit_assets::IconName::Clock),
+        settings::AutomationTriggerKindId::Calendar => IconName::Calendar.into(),
     };
     let body = match entry.trigger_kind {
         settings::AutomationTriggerKindId::Webhook => {
@@ -1303,7 +1303,7 @@ fn render_trigger_entry(
 }
 
 /// 目录和编辑器里的小图标。不染色，底就是悬停灰。
-fn neutral_icon_mark(icon: IconName, size: f32) -> AnyElement {
+fn neutral_icon_mark(icon: impl Into<Icon>, size: f32) -> AnyElement {
     div()
         .size(px(size))
         .rounded(crate::ui_theme::row_radius())
@@ -1320,7 +1320,7 @@ fn neutral_icon_mark(icon: IconName, size: f32) -> AnyElement {
         .into_any_element()
 }
 
-fn automation_trigger_glyph(icon: IconName) -> AnyElement {
+fn automation_trigger_glyph(icon: Icon) -> AnyElement {
     neutral_icon_mark(icon, 32.)
 }
 
@@ -1437,10 +1437,10 @@ fn automation_access_note(is_agent: bool) -> &'static str {
     }
 }
 
-fn notification_preset_icon(preset: settings::AutomationNotificationPreset) -> IconName {
+fn notification_preset_icon(preset: settings::AutomationNotificationPreset) -> Icon {
     match preset {
-        settings::AutomationNotificationPreset::Off => IconName::EyeOff,
-        settings::AutomationNotificationPreset::App => IconName::Bell,
+        settings::AutomationNotificationPreset::Off => Icon::new(gpui_kit_assets::IconName::BellOff),
+        settings::AutomationNotificationPreset::App => IconName::Bell.into(),
     }
 }
 

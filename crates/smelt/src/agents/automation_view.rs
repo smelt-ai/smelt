@@ -84,7 +84,7 @@ impl Workspace {
             .child(self.render_agent_product_navigation_row(
                 "automations-route",
                 "自动化",
-                IconName::Cpu,
+                Icon::new(gpui_kit_assets::IconName::Workflow),
                 automation_nav_needs_attention(&config),
                 WorkspaceRoute::Automations,
                 entity.clone(),

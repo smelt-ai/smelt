@@ -104,7 +104,7 @@ impl Workspace {
         &self,
         id: &'static str,
         label: &'static str,
-        icon: IconName,
+        icon: impl Into<Icon>,
         attention: bool,
         route: WorkspaceRoute,
         entity: Entity<Workspace>,

@@ -294,7 +294,7 @@ fn remote_project_menu(
     .separator()
     .item(
         PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
-            .icon(IconName::Star)
+            .icon(Icon::new(gpui_kit_assets::IconName::Pin))
             .on_click(move |_ev, _window, cx| {
                 let project = pin_project.clone();
                 pin_workspace.update(cx, |ws, cx| ws.toggle_project_pinned(project, cx));
@@ -703,7 +703,7 @@ impl Workspace {
                 Button::new("session-grouping")
                     .quiet()
                     .compact()
-                    .icon(IconName::Settings2)
+                    .icon(Icon::new(gpui_kit_assets::IconName::SlidersHorizontal))
                     .icon_action("筛选与分组")
                     .dropdown_menu(move |menu, _window, _cx| {
                         let menu = menu.item(PopupMenuItem::label("分组依据"));
@@ -1159,7 +1159,7 @@ impl Workspace {
                                             .id(project_element_id("proj-pin", &project))
                                             .flex_shrink_0()
                                             .text_color(rgb(ui_theme::text_faint()))
-                                            .child(Icon::new(IconName::Star).size(px(11.))),
+                                            .child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(11.))),
                                     )
                                 })
                                 .when(agg != AgentStatus::Idle, |row| {
@@ -1373,7 +1373,7 @@ impl Workspace {
                                     .separator()
                                     .item(
                                         PopupMenuItem::new(sidebar_pin_label)
-                                            .icon(IconName::Star)
+                                            .icon(Icon::new(gpui_kit_assets::IconName::Pin))
                                             .on_click(move |_ev, _window, cx| {
                                                 let project = sidebar_pin_project.clone();
                                                 e_sidebar_pin.update(cx, |ws, cx| {

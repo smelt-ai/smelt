@@ -3197,7 +3197,7 @@ const SUBAGENT_STOP_GROUP: &str = "acp-subagent-stop-row";
 
 /// 可展开行：平时左侧是工具图标，hover 换成箭头。展开仍靠点击。
 fn expandable_lead_icon(
-    rest_icon: IconName,
+    rest_icon: impl Into<Icon>,
     expanded: bool,
     color: impl Into<gpui::Hsla>,
 ) -> gpui::AnyElement {

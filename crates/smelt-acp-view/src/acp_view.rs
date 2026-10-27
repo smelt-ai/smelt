@@ -7169,26 +7169,29 @@ fn tool_kind_label(kind: &ToolKind) -> &'static str {
     }
 }
 
-fn tool_kind_icon(kind: &ToolKind) -> IconName {
+/// 工具调用的图标按它做的事挑。思考、评审、整理、切模式是 Agent 自己的步骤，跟思考
+/// 标记用同一枚星号；等待是时钟，说不清是什么的工具是扳手。
+fn tool_kind_icon(kind: &ToolKind) -> Icon {
     match kind {
-        ToolKind::Execute => IconName::SquareTerminal,
-        ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move | ToolKind::Image => {
-            IconName::File
-        }
-        ToolKind::Search | ToolKind::Fetch => IconName::Search,
-        ToolKind::Collaborate => IconName::Bot,
+        ToolKind::Execute => IconName::SquareTerminal.into(),
+        ToolKind::Read | ToolKind::Move | ToolKind::Image => IconName::File.into(),
+        ToolKind::Edit => Icon::empty().path("smelt-icons/square-pen.svg"),
+        ToolKind::Delete => Icon::empty().path("smelt-icons/trash.svg"),
+        ToolKind::Search | ToolKind::Fetch => IconName::Search.into(),
+        ToolKind::Collaborate => IconName::Bot.into(),
         ToolKind::Review | ToolKind::Compact | ToolKind::Think | ToolKind::SwitchMode => {
-            IconName::Asterisk
+            IconName::Asterisk.into()
         }
-        ToolKind::Wait | ToolKind::Other => IconName::Asterisk,
+        ToolKind::Wait => Icon::new(gpui_kit_assets::IconName::Clock),
+        ToolKind::Other => Icon::new(gpui_kit_assets::IconName::Wrench),
     }
 }
 
 /// 时间线用更接近 Grok 的图标：打开页面是地球，搜索是放大镜。
-pub fn process_timeline_icon(kind: &ToolKind) -> IconName {
+pub fn process_timeline_icon(kind: &ToolKind) -> Icon {
     match kind {
-        ToolKind::Fetch => IconName::Globe,
-        ToolKind::Search => IconName::Search,
+        ToolKind::Fetch => IconName::Globe.into(),
+        ToolKind::Search => IconName::Search.into(),
         _ => tool_kind_icon(kind),
     }
 }
