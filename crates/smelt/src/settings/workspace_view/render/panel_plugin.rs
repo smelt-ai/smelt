@@ -18,17 +18,20 @@ pub(super) fn panel_plugin_page(
         .description("每个插件是右侧 Tool Panel 里的一个页签。")
         .resettable(false);
     if let Some(error) = state.error.clone() {
-        page = page.group(SettingGroup::new().title("上一次操作失败").item(
-            SettingItem::render(move |_, _, cx: &mut App| {
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(error.clone())
-                    .into_any_element()
-            }),
-        ));
+        page = page.group(
+            SettingGroup::new()
+                .title("上一次操作失败")
+                .item(SettingItem::render(move |_, _, cx: &mut App| {
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(error.clone())
+                        .into_any_element()
+                })),
+        );
     }
-    page.group(list_group(entity, state)).group(authoring_group())
+    page.group(list_group(entity, state))
+        .group(authoring_group())
 }
 
 /// 页面的主体：已装的插件。导入、打开目录、重新加载是对这张列表的操作，放在它的第一行。

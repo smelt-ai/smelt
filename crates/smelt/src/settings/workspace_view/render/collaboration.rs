@@ -316,8 +316,7 @@ fn incoming_group() -> SettingGroup {
             )
             .description("配对一台设备，就是把你在这台机器上的 shell 权限交给它。"),
         )
-        .item(
-        SettingItem::render(move |_, _, cx: &mut App| {
+        .item(SettingItem::render(move |_, _, cx: &mut App| {
             let state = cx
                 .try_global::<RemoteSettingsState>()
                 .cloned()
@@ -368,8 +367,7 @@ fn incoming_group() -> SettingGroup {
                 );
             }
             list.into_any_element()
-        }),
-        )
+        }))
         .item(
             SettingItem::new(
                 "自建 relay",
@@ -378,7 +376,9 @@ fn incoming_group() -> SettingGroup {
                     |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, cx),
                 ),
             )
-            .description("留空用 n0 的公共 relay；填了域名、IP 或 URL 就只用它，省略协议时用 https://。"),
+            .description(
+                "留空用 n0 的公共 relay；填了域名、IP 或 URL 就只用它，省略协议时用 https://。",
+            ),
         )
 }
 
@@ -398,86 +398,85 @@ fn pairing_dialog(dialog: Dialog, cx: &mut App) -> Dialog {
     if let Some(error) = state.error.clone() {
         body = body.child(div().text_xs().text_color(cx.theme().danger).child(error));
     }
-    body = match state.offer.clone() {
-        None => body.child(div().text_sm().text_color(muted).child(if state.generating_offer {
-            "正在生成配对串…"
-        } else {
-            "还没有配对串。"
-        })),
-        Some(offer) => {
-            let uri = offer.uri.clone();
-            let mut row = h_flex().items_start().gap_3();
-            if let Some(image) = offer.qr_image {
-                row = row.child(
-                    div()
+    body =
+        match state.offer.clone() {
+            None => body.child(div().text_sm().text_color(muted).child(
+                if state.generating_offer {
+                    "正在生成配对串…"
+                } else {
+                    "还没有配对串。"
+                },
+            )),
+            Some(offer) => {
+                let uri = offer.uri.clone();
+                let mut row = h_flex().items_start().gap_3();
+                if let Some(image) = offer.qr_image {
+                    row = row.child(
+                        div()
                         .p_2()
                         .rounded(px(8.))
                         // 二维码底必须是纯白，两种主题都一样：深色底上的二维码扫不出来。
                         .bg(gpui::rgb(0xffffff))
                         .child(img(image).w(px(132.)).h(px(132.))),
-                );
-            }
-            body.child(
-                row.child(
-                    v_flex()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .gap_2()
-                        .child(div().text_sm().child(
-                            "手机扫码；或复制配对串，在另一台电脑的「连到其他机器」里粘贴。",
-                        ))
-                        .child(
-                            div()
-                                .max_w(px(280.))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis_middle()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(offer.uri),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child("只能用一次，10 分钟内有效。"),
-                        )
-                        .child(
-                            h_flex().gap_2().child(
-                                Button::new("copy-pairing-uri")
-                                    .compact()
-                                    .label(copy_btn_label("copy-pairing-uri", "复制配对串", cx))
-                                    .on_click(move |_, _window, cx: &mut App| {
-                                        copy_with_feedback(uri.clone(), "copy-pairing-uri", cx);
-                                    }),
+                    );
+                }
+                body.child(
+                    row.child(
+                        v_flex()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap_2()
+                            .child(div().text_sm().child(
+                                "手机扫码；或复制配对串，在另一台电脑的「连到其他机器」里粘贴。",
+                            ))
+                            .child(
+                                div()
+                                    .max_w(px(280.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis_middle()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(offer.uri),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("只能用一次，10 分钟内有效。"),
+                            )
+                            .child(
+                                h_flex().gap_2().child(
+                                    Button::new("copy-pairing-uri")
+                                        .compact()
+                                        .label(copy_btn_label("copy-pairing-uri", "复制配对串", cx))
+                                        .on_click(move |_, _window, cx: &mut App| {
+                                            copy_with_feedback(uri.clone(), "copy-pairing-uri", cx);
+                                        }),
+                                ),
                             ),
-                        ),
-                ),
-            )
-        }
-    };
-    dialog
-        .title("配对新设备")
-        .w(px(520.))
-        .child(body)
-        .footer(
-            h_flex()
-                .w_full()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new("regenerate-pairing")
-                        .quiet()
-                        .compact()
-                        .label("换一个配对串")
-                        .disabled(state.generating_offer)
-                        .on_click(|_, _window, cx: &mut App| begin_pairing(cx)),
+                    ),
                 )
-                .child(
-                    Button::new("close-pairing")
-                        .compact()
-                        .label("完成")
-                        .on_click(|_, window, cx: &mut App| window.close_dialog(cx)),
-                ),
-        )
+            }
+        };
+    dialog.title("配对新设备").w(px(520.)).child(body).footer(
+        h_flex()
+            .w_full()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("regenerate-pairing")
+                    .quiet()
+                    .compact()
+                    .label("换一个配对串")
+                    .disabled(state.generating_offer)
+                    .on_click(|_, _window, cx: &mut App| begin_pairing(cx)),
+            )
+            .child(
+                Button::new("close-pairing")
+                    .compact()
+                    .label("完成")
+                    .on_click(|_, window, cx: &mut App| window.close_dialog(cx)),
+            ),
+    )
 }

@@ -26,11 +26,9 @@ pub(super) fn about_page(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    let page = SettingPage::new("关于")
-        .resettable(false)
-        .group(SettingGroup::new().item(SettingItem::render(|_, _, cx: &mut App| {
-            about_header(cx)
-        })));
+    let page = SettingPage::new("关于").resettable(false).group(
+        SettingGroup::new().item(SettingItem::render(|_, _, cx: &mut App| about_header(cx))),
+    );
     // 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。别的平台整节不出。
     #[cfg(target_os = "macos")]
     let page = page.group(update_group(entity, snapshot, cx).title("更新"));

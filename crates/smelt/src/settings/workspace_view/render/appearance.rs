@@ -111,7 +111,9 @@ fn theme_item() -> SettingItem {
             let current = SharedString::from(cx.global::<Appearance>().theme_name.clone());
             let swatch = picker.read(cx).swatches.get(&current).copied();
             if swatch.is_some() && select.read(cx).selected_value() != Some(&current) {
-                select.update(cx, |select, cx| select.set_selected_value(&current, window, cx));
+                select.update(cx, |select, cx| {
+                    select.set_selected_value(&current, window, cx)
+                });
             }
             h_flex()
                 .items_center()
@@ -318,7 +320,11 @@ fn window_group(
                             .text_color(cx.theme().muted_foreground)
                             .child(label),
                     )
-                    .children(bg_color_picker.as_ref().map(|p| ColorPicker::new(p).small()))
+                    .children(
+                        bg_color_picker
+                            .as_ref()
+                            .map(|p| ColorPicker::new(p).small()),
+                    )
             }),
         )
         .description("会话内容区的底色"),
@@ -355,7 +361,11 @@ fn window_group(
                     .child(
                         Button::new("pick-img")
                             .compact()
-                            .label(if has_image { "更换…" } else { "选择图片…" })
+                            .label(if has_image {
+                                "更换…"
+                            } else {
+                                "选择图片…"
+                            })
                             .flex_shrink_0()
                             .on_click(move |_, _window, cx: &mut App| {
                                 pick_entity.update(cx, |this, cx| this.pick_bg_image(cx));
