@@ -2,6 +2,9 @@
     all(windows, not(debug_assertions)),
     windows_subsystem = "windows"
 )]
+// 钉死的 1.97 编测试时在 `session_list/keyboard.rs` 的 `#[test]` 上报宏展开超过默认 128 层，
+// 更新的 rustc 不报。照编译器的建议放到 256。
+#![recursion_limit = "256"]
 //! smelt 工作台 —— 基于 gpui-component 的桌面窗口。
 //!
 //! Workspace 管理多个会话（终端或 ACP 对话）：左侧会话列表切换 / 新建 / 关闭，
