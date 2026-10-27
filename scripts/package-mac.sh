@@ -72,7 +72,7 @@ fi
 if [[ "$BUILD" -eq 1 ]]; then
   SMELT_BUILD_VERSION="$("$ROOT/scripts/version.sh")"
   export SMELT_BUILD_VERSION
-  echo "▶ 编译 release（v$SMELT_BUILD_VERSION）…"
+  echo "▶ 编译 release（v${SMELT_BUILD_VERSION}）…"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-installer
   echo "▶ 编译 smelt-pi …"
   make -C "$ROOT" smelt-pi

@@ -420,7 +420,7 @@ jobs:
         run: |
           for var in ASC_KEY_P8 ASC_KEY_ID ASC_ISSUER_ID DEV_CERT_P12_BASE64 DEV_CERT_P12_PASSWORD; do
             if [[ -z "${!var}" ]]; then
-              echo "✗ 没配置 iOS 签名的 secret（$var），见 docs/release.md 的「iOS 签名」。"
+              echo "✗ 没配置 iOS 签名的 secret（${var}），见 docs/release.md 的「iOS 签名」。"
               exit 1
             fi
           done

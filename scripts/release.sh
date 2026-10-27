@@ -79,7 +79,7 @@ else
 fi
 
 git rev-parse -q --verify "refs/tags/v$version" >/dev/null && die "tag v$version 已存在"
-echo "▶ $current → $version（$(git rev-parse --short HEAD)）"
+echo "▶ ${current} → ${version}（$(git rev-parse --short HEAD)）"
 if ((dry_run)); then exit 0; fi
 
 git tag -a "v$version" -m "v$version"
