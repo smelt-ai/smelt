@@ -680,15 +680,12 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
     );
     if snapshot.chart.len() > 1 {
         let peak = snapshot.chart.iter().copied().fold(0., f64::max);
-        let stroke: Hsla = rgb(ui_theme::blue()).into();
         view = view.child(
             div().h(px(96.)).w_full().child(
                 AreaChart::new(snapshot.chart.clone().into_iter().enumerate())
                     .id("settings-resources-chart")
                     .x(|(ix, _)| ix.to_string())
                     .y(|(_, bytes)| *bytes)
-                    .stroke(stroke)
-                    .fill(stroke.opacity(0.15))
                     .linear()
                     .x_axis(false)
                     .y_axis(false)

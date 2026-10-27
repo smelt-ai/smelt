@@ -4125,11 +4125,11 @@ impl Render for Workspace {
             .font_family(settings::resolved_ui_font_family(
                 cx.global::<Appearance>(),
             ))
-            .drag_over::<ExternalPaths>(|style, _paths, _window, _cx| {
+            .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
                 style
-                    .bg(ui_theme::tint(ui_theme::blue(), 0x28))
+                    .bg(cx.theme().drop_target)
                     .border_2()
-                    .border_color(rgb(ui_theme::blue()))
+                    .border_color(cx.theme().drag_border)
             })
             .on_drop::<ExternalPaths>(cx.listener(
                 |this, paths: &ExternalPaths, _window, cx| {

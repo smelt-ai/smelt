@@ -20,7 +20,7 @@ where
         .border_1()
         .border_color(if selected { accent.into() } else { border })
         .bg(if selected {
-            ui_theme::tint(ui_theme::accent(), 0x24)
+            gpui::rgb(ui_theme::bg_selected())
         } else {
             ui_theme::overlay(0x10)
         })

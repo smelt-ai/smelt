@@ -1683,7 +1683,7 @@ impl Workspace {
                                     .child(name)
                             }))
                     }))
-                    .children(progress.map(session_progress_bar))
+                    .children(progress.map(|progress| session_progress_bar(ui_id, progress)))
                     .when(reveal_target == Some(ui_id), |row| {
                         row.child(reveal_anchor(
                             self.sidebar_reveal.clone(),

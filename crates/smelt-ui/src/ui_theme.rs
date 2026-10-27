@@ -34,7 +34,8 @@ pub struct Palette {
     pub bg_hover: u32,
     /// 列表行 hover。`list_hover` 压在侧栏上，不跟控件 hover 共用一个底。
     pub bg_row_hover: u32,
-    /// 选中行底。侧栏选中色和列表选中色里，离栏底更远的那一个。
+    /// 选中行底：主题的 `sidebar.accent`，跟组件库侧栏选中项同一个色。主题没写时组件库
+    /// 回落到 `accent`，这里照用，不另挑颜色。
     pub bg_selected: u32,
     /// 状态栏 / 终端底条。
     pub bg_status: u32,
@@ -153,7 +154,6 @@ struct ThemeRoles {
     sidebar: Hsla,
     popover: Hsla,
     list_hover: Hsla,
-    list_active: Hsla,
     sidebar_accent: Hsla,
     sidebar_accent_foreground: Hsla,
     list_active_border: Hsla,
@@ -181,7 +181,6 @@ fn palette_from_theme(theme: &gpui_component::Theme) -> Palette {
         sidebar: theme.sidebar,
         popover: theme.popover,
         list_hover: theme.list_hover,
-        list_active: theme.list_active,
         sidebar_accent: theme.sidebar_accent,
         sidebar_accent_foreground: theme.sidebar_accent_foreground,
         list_active_border: theme.list_active_border,
@@ -234,7 +233,6 @@ fn palette_from_roles(theme: &ThemeRoles) -> Palette {
     let yellow = solid(theme.warning, theme.background);
     let blue = solid(theme.blue, theme.background);
     let accent = emphasis(link, fg, bg, active_border, blue);
-    let selected = selected_fill(theme.sidebar_accent, theme.list_active, theme.sidebar);
     let text_selected = solid(theme.sidebar_accent_foreground, theme.sidebar);
     Palette {
         bg_rail: bg,
@@ -244,7 +242,7 @@ fn palette_from_roles(theme: &ThemeRoles) -> Palette {
         bg_card: card,
         bg_hover: control_hover,
         bg_row_hover: row_hover,
-        bg_selected: selected,
+        bg_selected: solid(theme.sidebar_accent, theme.sidebar),
         bg_status: solid(theme.status_bar, theme.background),
         border_dim: solid(theme.sidebar_border, theme.background),
         border,
@@ -280,20 +278,6 @@ fn palette_from_roles(theme: &ThemeRoles) -> Palette {
         diff_gutter: card,
         action_fill: solid(theme.primary, theme.background),
         action_on: solid(theme.primary_foreground, theme.primary),
-    }
-}
-
-/// 侧栏行的选中底。主题给侧栏准备的选中色离栏底更远，就用它。
-/// 否则用列表选中色。Ayu 没写侧栏，回落的 accent 几乎贴着栏底，
-/// 真正的选中是 `list.active`。
-fn selected_fill(sidebar_accent: Hsla, list_active: Hsla, column: Hsla) -> u32 {
-    let column_rgb = solid(column, column);
-    let accent_fill = solid(sidebar_accent, column);
-    let active_fill = solid(list_active, column);
-    if distance2(accent_fill, column_rgb) >= distance2(active_fill, column_rgb) {
-        accent_fill
-    } else {
-        active_fill
     }
 }
 
@@ -782,7 +766,6 @@ mod tests {
             sidebar: opaque(0x222222),
             popover: opaque(0x181818),
             list_hover: rgba(0xffffff40).into(),
-            list_active: rgba(0x1e40af33).into(),
             sidebar_accent: opaque(0x3a3a3a),
             sidebar_accent_foreground: opaque(0xfafafa),
             list_active_border: opaque(0x1d4ed8),
@@ -818,7 +801,6 @@ mod tests {
         assert_eq!(palette.bg_hover, solid(roles.list_hover, roles.popover));
         assert_ne!(palette.bg_hover, palette.bg_row_hover);
         assert_eq!(palette.bg_selected, 0x3a3a3a);
-        assert_ne!(palette.bg_selected, solid(roles.list_active, roles.sidebar));
         assert_eq!(palette.border_dim, 0x262626);
         assert_eq!(palette.border, 0x2a2a2a);
         assert_eq!(palette.border_mid, palette.border);
@@ -872,16 +854,13 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_keeps_list_active_when_sidebar_accent_is_flat() {
+    fn selected_row_keeps_the_sidebar_accent_pair_even_when_flat() {
+        // 主题的侧栏选中色贴着栏底也照用，不换成别的选中色：底色和字色是主题配好的一对，
+        // 换掉底色就可能压不住字（Solarized Light 的 `list.active` 是深灰，侧栏选中字也是深色）。
         let mut roles = sample_roles();
         roles.sidebar_accent = opaque(0x282828);
-        roles.list_active = rgba(0x36a3d980).into();
         let palette = palette_from_roles(&roles);
-        assert_eq!(palette.bg_selected, solid(roles.list_active, roles.sidebar));
-        assert_ne!(
-            palette.bg_selected,
-            solid(roles.sidebar_accent, roles.sidebar)
-        );
+        assert_eq!(palette.bg_selected, 0x282828);
     }
 
     #[test]
