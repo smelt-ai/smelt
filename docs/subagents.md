@@ -101,6 +101,8 @@ details: {
 
 ### 会话宿主（`smelt-core`）
 
+它在 `smeltd` 里，跟这场对话的驱动线程在一起，不是单独的 `smeltd --acp-session-host` 进程。扩展连的仍是这只后台套接字。
+
 - 派发和子智能体两份记录，和后台任务并列，**共用同一个 socket 服务和同一套投递**（一个是传输，一个是投递，模型各是各的）。
 - 删掉 `attach` 操作和 `LiveTask` 里只为它存在的字段（`attached`、`result`、`attach_poke`、`tool_call_id`），删掉 `BackgroundTaskView.tool_call_id`。全仓库只有子智能体在挂接。
 - 会话状态加一个字段，和 `background_tasks` 并列，走快照信封：

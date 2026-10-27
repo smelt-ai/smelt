@@ -265,11 +265,11 @@ Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记�
 scope 为 `agent:<智能体 id>` 或 `user`。没有来源记录的文件（用户手写）按可信处理。删除智能体时
 同一事务里删掉它的元数据；删除记忆时删掉对应行。schema v13 引入。
 
-Pi 进程不链接 `smelt-store`、不直接打开数据库；托管它的独立会话宿主（`smeltd
---acp-session-host`）按设计也不初始化 SQLite。所以 Pi 直接调主 daemon 的控制方法：连
-`SMELT_SOCK`，带上 daemon 注入的 `SMELT_SESSION_ID` 和 `SMELT_AGENT_TOKEN`（与跨会话消息同一套
-capability）。daemon 校验令牌、会话未结束后，从该会话的启动规格取两个记忆目录，经
-`smelt-store` 读写。调用方只能操作自己这个会话的两层记忆；普通会话没有记忆层。
+Pi 进程不链接 `smelt-store`、不直接打开数据库。对话的驱动线程留在 `smeltd` 里，不再另起
+`smeltd --acp-session-host`。Pi 仍直接调主 daemon 的控制方法：连 `SMELT_SOCK`，带上 daemon
+注入的 `SMELT_SESSION_ID` 和 `SMELT_AGENT_TOKEN`（与跨会话消息同一套 capability）。daemon
+校验令牌、会话未结束后，从该会话的启动规格取两个记忆目录，经 `smelt-store` 读写。调用方只能
+操作自己这个会话的两层记忆；普通会话没有记忆层。
 
 | 方法 | 参数（另带 `session_id`、`token`） | 返回 |
 |---|---|---|

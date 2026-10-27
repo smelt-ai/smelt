@@ -77,7 +77,7 @@ smeltd mcp add <id>          # playwright、figma、rea、browser-mcp
 - **用量与历史**：用量按 provider 查账户（Claude、Copilot、Codex、Cursor、Grok），不读 transcript。历史会话读各家本机存档，不只 Claude Code
 - **远程访问**（默认关闭）：把另一台 Smelt 桌面或手机 App 配对到这台机器的运行时，连接走 iroh。同网直连，否则打洞，再走 relay。relay 留空用 n0 的公共 relay，也可以填自建地址。配对串是 `smelt+iroh://<endpoint_id>/?code=<一次性码>`，10 分钟内、只能用一次。没有长期共享 token，也没有单独的「允许远程写入」开关：配对就是把这台机器上当前用户的 shell 交给那台设备。在设置里撤销设备，或执行 `smeltd devices revoke`。应用不开放普通局域网监听端口。
   **配对码即权限，开之前先读 [relay 说明](docs/iroh-relay-deployment.md)**
-- **其它**：终端会话持久化（GUI 退出/崩溃不影响 shell，重开自动 reattach）。升级或重启本机 `smeltd` 会停掉它（各平台都一样）：正在跑的终端会话会关掉，进行中的回合会中断，对话历史保留。同一格终端可以叠成 Dock，也可以分屏。结构化对话闲置 30 分钟会挂起宿主进程，再用时唤醒，并恢复挂起前的模型、权限模式和推理强度。一个窗口可以挂多台运行时，包括无头 Linux，并能经 noVNC 看那台机器的桌面。细节见 [`docs/workspace.md`](docs/workspace.md)。
+- **其它**：终端会话持久化（GUI 退出/崩溃不影响 shell，重开自动 reattach）。升级或重启本机 `smeltd` 会停掉它（各平台都一样）：正在跑的终端会话会关掉，进行中的回合会中断，对话历史保留。同一格终端可以叠成 Dock，也可以分屏。结构化对话闲置 30 分钟会停掉这场会话在同进程里的 runtime，再用时唤醒，并恢复挂起前的模型、权限模式和推理强度。一个窗口可以挂多台运行时，包括无头 Linux，并能经 noVNC 看那台机器的桌面。细节见 [`docs/workspace.md`](docs/workspace.md)。
 
 完整功能清单、快捷键与架构细节见 [`docs/workspace.md`](docs/workspace.md)；产品方向见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
 
@@ -107,9 +107,9 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.9）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、iroh（远程连接）。axum 用于自动化 webhook 服务（只听本机回环）。结构化状态在 `~/.smelt/` 的 SQLite（Windows 上是 `%USERPROFILE%\.smelt`）：运行时库 `smelt.sqlite3`，这台桌面的客户端库 `client.sqlite3`。见 [`docs/local-storage.md`](docs/local-storage.md)。
 
-工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、ACP 宿主、自动化；macOS 与 Windows 桌面按需拉起，在 Linux 上可以装成 systemd 用户服务）、`smelt-pi`（Pi 运行时单二进制）、`smelt-notify`（agent hook 的状态上报）、`smelt-installer`（退出后替换 macOS App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
+工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、同进程的 ACP 驱动、自动化；macOS 与 Windows 桌面按需拉起，在 Linux 上可以装成 systemd 用户服务）、`smelt-pi`（Pi 运行时单二进制）、`smelt-notify`（agent hook 的状态上报）、`smelt-installer`（退出后替换 macOS App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
 Windows 上，Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（经 `uds_windows` 的 AF_UNIX）。Bun 和 Pi 走当前用户的命名管道。子进程放进 Job Object（`KILL_ON_JOB_CLOSE`）。受管 Bun 下载 `bun-windows-x64.zip`，装到 `%USERPROFILE%\.smelt\runtime`。
-移动端在 `mobile/`（Flutter），是跨机器指挥台「出菜口」。启动后同时连接所有已配对机器（登记在 `smelt-mobile.sqlite3`）。首屏是待拍板单据和各机器的实时进展。四栏是指挥台、会话、智能体、设置；平板是三栏；中英双语。`crates/smelt-mobile` 是它的 Rust 内核，走和桌面同一套 `smelt-runtime-client`。每次发版的 GitHub Release 提供签名的 `Smelt-<版本>-android-arm64.apk`。iOS 用 `make ios`（`scripts/build-ios.sh`）打 TestFlight 归档。见 [`mobile/README.md`](mobile/README.md)。
+移动端在 `mobile/`（Flutter），是跨机器指挥台「出菜口」。启动后同时连接所有已配对机器（登记在 `smelt-mobile.sqlite3`）。首屏是待拍板单据和各机器的实时进展。四栏是指挥台、会话、智能体、设置；平板是三栏；中英双语。`crates/smelt-mobile` 是它的 Rust 内核，走和桌面同一套 `smelt-runtime-client`。每次发版的 GitHub Release 提供签名的 `Smelt-<版本>-android-arm64.apk`。发版构建在启动和回到前台时检查更新（至少隔 6 小时），设置页「更新」也能手动查。点了才下载，对照同一份 `SHA256SUMS` 校验后交给系统安装。生产版只跟正式发布，内测版也跟 `-rc`。开发构建和 iOS 不参与。`--dart-define=SMELT_UPDATE_MANIFEST_URL=…` 可以把更新指到自己的服务器。iOS 用 `make ios`（`scripts/build-ios.sh`）打 TestFlight 归档。见 [`mobile/README.md`](mobile/README.md)。
 
 架构、目录、Linux 安装、多运行时窗口、远程桌面和闲置挂起见 [`docs/workspace.md`](docs/workspace.md)。产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)。
 

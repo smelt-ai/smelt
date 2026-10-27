@@ -67,4 +67,4 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 
 - 运行时库由 `smeltd` 写。桌面、手机和 `smelt` CLI 走 Control API，不各自打开这张库改。
 - 客户端库由这台桌面写。外观修改经运行时转给打开着的桌面；桌面没开时，CLI 改外观会失败。
-- 新功能走 `smelt-store` 或 `smelt-client-store` 的仓储。Pi 启动器不链接 `smelt-store`，记忆元数据经 `agent.memory.*` 由主守护代写。独立 ACP 会话宿主不初始化 SQLite。
+- 新功能走 `smelt-store` 或 `smelt-client-store` 的仓储。Pi 启动器不链接 `smelt-store`，记忆元数据经 `agent.memory.*` 由主守护代写。ACP 对话的驱动在 `smeltd` 进程里，不再另起会话宿主进程。

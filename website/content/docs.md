@@ -129,8 +129,11 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 
 > 早先的浏览器面板、Cloudflare 隧道、自建 WebRTC 信令、JSON-WS 网关都已下线。
 > 手机 App 在仓库的 `mobile/`（Flutter）。GitHub Releases 每次发版提供签名的 Android
-> 安装包 `Smelt-<版本>-android-arm64.apk`。iOS 用 `make ios`（`scripts/build-ios.sh`）
-> 打 TestFlight 归档。应用商店上架还没做。构建说明在
+> 安装包 `Smelt-<版本>-android-arm64.apk`。发版构建在启动和回到前台时检查更新（至少隔 6 小时），
+> 设置页「更新」也能手动查。查到新版只提示，点了才下载；下完对照同一份 `SHA256SUMS` 校验，
+> 再交给系统安装。生产版只跟正式发布，内测版也跟 `-rc`。开发构建和 iOS 不参与。
+> 自建分发可用 `--dart-define=SMELT_UPDATE_MANIFEST_URL=https://…/update.{channel}.json`。
+> iOS 用 `make ios`（`scripts/build-ios.sh`）打 TestFlight 归档。应用商店上架还没做。构建说明在
 > [`mobile/README.md`](https://github.com/smelt-ai/smelt/blob/main/mobile/README.md)。
 
 ### 开启
@@ -220,13 +223,13 @@ smeltd mcp add <id>              # 添加内置 MCP 预设
 - 终端画面配色由手机自己定，不跟电脑下发
 - 断线后读本机缓存：每个运行时最近的会话列表，以及最近几个对话快照（最多 5 段、合计 32MB）
 
-Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归档用 `make ios`。
+Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。发版构建能在应用内更新：下载后对照 `SHA256SUMS` 校验，再交给系统安装。iOS 归档用 `make ios`，不参与这套更新。
 
 ### 闲置挂起
 
-结构化对话闲置 30 分钟后，`smeltd` 停掉那场会话的宿主进程。会话还在列表里。
-下次发消息、改配置或翻历史时先唤醒，并把挂起前的模型、权限模式和推理强度写回去。
-正在跑、等审批、排队、有后台任务，或属于自动化 / 手机建的会话，不会挂起。
+结构化对话闲置 30 分钟后，`smeltd` 停掉这场会话在同进程里的 runtime（agent 子进程），并丢掉内存里已经提交的历史前缀。会话还在列表里。
+下次发消息、改配置、翻历史或跨智能体投递时先唤醒，并把挂起前的模型、权限模式和推理强度写回去。
+正在跑、等审批、排队、有后台任务，或属于自动化 / 插件驱动的会话，不会挂起。手机建的会话同样会挂起。
 
 ### 还没做的
 
@@ -307,7 +310,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 能。有 ACP 身份的来源可以选择「ACP 继续」或「CLI/TUI 继续」。
 
 **支持 Linux / Windows 吗？**
-支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`，有自动更新）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`）。Windows 这一版不签名，没有自动更新，也没有 arm64 包；交互 shell 是 `cmd.exe`。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
+支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`，有自动更新）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`）。Windows 这一版不签名，没有自动更新，也没有 arm64 包；交互 shell 是 `cmd.exe`。Android 发版构建会在应用里查更新，下载 `Smelt-<版本>-android-arm64.apk`，对照 `SHA256SUMS` 校验后交给系统安装；开发构建和 iOS 不查。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
 
 **在哪反馈问题？**
 去 [GitHub Issues](https://github.com/smelt-ai/smelt/issues/new/choose) 提，有 Bug 反馈

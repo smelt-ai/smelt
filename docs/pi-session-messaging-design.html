@@ -380,7 +380,7 @@
   <div class="meta">
     <strong>日期</strong>：2026-10-20（Asia/Taipei） ·
     <strong>受众</strong>：smelt 仓库维护者（Rust <code>smeltd</code> + Pi agent） ·
-    <strong>状态</strong>：P0 已实现（PR #55），P1、P2 未做。本稿和代码一致，名字以代码为准
+    <strong>状态</strong>：P0 已实现（PR #55）。PR #135 起，对话驱动留在 <code>smeltd</code> 同进程，不再另起 <code>smeltd --acp-session-host</code>。P1、P2 未做。本稿和代码一致，名字以代码为准
   </div>
   <div class="meta" style="margin-top:0.45rem">
     <strong>项目</strong>：
@@ -455,8 +455,8 @@
       发件队列、链预算只在主 daemon 内存里。
     </li>
     <li>
-      <strong>来源只认连接。</strong>
-      来源是「这条宿主控制连接属于注册表里哪个对话」，请求里不带来源，也不带跳数。
+      <strong>来源只认绑定。</strong>
+      来源是起这次会话时绑上的会话 id，请求里不带来源，也不带跳数。
       模型在 bash 里读得到自己的环境，请求里写什么都能伪造。
     </li>
     <li>
@@ -477,7 +477,7 @@
     </li>
     <li>
       <strong>复用既有结果投递路径，不当用户输入。</strong>
-      投递就是交给目标宿主的 <code>BackgroundSupervisor</code>，和后台任务、子智能体交回结果走同一条 listen / ack。
+      投递就是交给目标对话驱动里的 <code>BackgroundSupervisor</code>，和后台任务、子智能体交回结果走同一条 listen / ack。
       不走 <code>Prompt</code> / <code>FollowUp</code>。
     </li>
     <li>
@@ -564,12 +564,12 @@
       <tr>
         <td>幂等</td>
         <td>UNIQUE(plugin, source, idempotency_key)</td>
-        <td>id 由（来源，<code>toolCallId</code>）算出；发件队列和目标宿主都按 id 去重；不跨 daemon 重启</td>
+        <td>id 由（来源，<code>toolCallId</code>）算出；发件队列和目标驱动都按 id 去重；不跨 daemon 重启</td>
       </tr>
       <tr>
         <td>投递中的状态</td>
         <td>queued 行，崩溃后可重放</td>
-        <td>主 daemon 内存里的发件队列；对方宿主退出会重投，主 daemon 崩溃时还没交出去的丢</td>
+        <td>主 daemon 内存里的发件队列；对方这一代 runtime 退出会重投，主 daemon 崩溃时还没交出去的丢</td>
       </tr>
       <tr>
         <td>schema 成本</td>
@@ -592,10 +592,12 @@
   <h2><span class="num">5.</span>总体方案</h2>
 
   <p>
-    三个角色：发起方 Pi（A）、主 <code>smeltd</code>（门卫 + 发件队列）、目标 Pi（B）。
-    A 的工具经自己的会话宿主把请求交给主 daemon；主 daemon 当场检查、收下、回 id；
-    再在后台把 B 拉起来，把消息交给 B 宿主的 <code>BackgroundSupervisor</code>；
+    三个角色：发起方 Pi（A）、<code>smeltd</code>（门卫 + 发件队列 + 两边的驱动线程）、目标 Pi（B）。
+    A 的工具经这场对话的后台套接字交给起会话时绑上的应答；应答就在 <code>smeltd</code> 里，当场检查、收下、回 id。
+    再在后台把 B 拉起来，把消息交给 B 的驱动。
     B 的扩展把它写成 <code>smelt.peer_message</code> 进 transcript，按既有 claim / ack 认领。
+    驱动线程留在 <code>smeltd</code> 里，agent 仍是这个进程的子进程。不再为每个对话另起
+    <code>smeltd --acp-session-host</code>，也没有宿主控制连接、进程间镜像和整份快照回补。
   </p>
 
   <div class="sketch-label">组件关系</div>
@@ -605,19 +607,13 @@ flowchart TB
     ToolA["session_list / read / send / spawn"]
   end
 
-  subgraph HostA["宿主 A · smeltd --acp-session-host"]
-    BgA["BackgroundSupervisor<br/>SMELT_BACKGROUND_TASK_SOCK"]
-  end
-
-  subgraph Daemon["主 smeltd"]
-    Gate["门卫<br/>来源 = 这条连接的注册表 id"]
+  subgraph Daemon["smeltd（同进程）"]
+    BgA["A 的驱动线程<br/>BackgroundSupervisor<br/>SMELT_BACKGROUND_TASK_SOCK"]
+    Gate["绑上的应答<br/>来源 = 绑定时的会话 id"]
     Dir["对话目录<br/>注册表 + 侧栏菜单"]
     Outbox["发件队列（内存）<br/>每个目标一条投递线程"]
     Ensure["ensure_conversation_runtime<br/>唤醒挂起 · 请桌面打开"]
-  end
-
-  subgraph HostB["宿主 B"]
-    BgB["BackgroundSupervisor<br/>peer 投递队列 · peer_inbox"]
+    BgB["B 的驱动线程<br/>BackgroundSupervisor<br/>peer 投递队列 · peer_inbox"]
   end
 
   subgraph PiB["Pi B（Bun 扩展）"]
@@ -625,19 +621,19 @@ flowchart TB
   end
 
   ToolA -->|"一行 JSON · 带 toolCallId"| BgA
-  BgA -->|"socketpair 上的 peer_request 行"| Gate
+  BgA -->|"同一进程里的应答函数"| Gate
   Gate --> Dir
   Gate -->|"收下 · 回 id"| Outbox
   Outbox --> Ensure
-  Outbox -->|"AcpUserAction::DeliverPeerMessage"| BgB
+  Outbox -->|"DeliverPeerMessage"| BgB
   BgB -->|"listen 连接 · kind peer_message"| TrB
-  BgB -.->|"快照里的 peer_inbox"| Outbox
+  BgB -.->|"归约里的 peer_inbox"| Outbox
   </div>
 
   <div class="callout">
     <div class="label">核心断言</div>
     送达 =「<code>smelt.peer_message</code> 已进入 B 的 transcript」，以 Pi 的 <code>message_start</code> 为准，B 的扩展此时回 ack。
-    在这之前，消息归主 daemon 的发件队列管：B 没在跑就拉起，B 的宿主退出就重投，投不了就退信。
+    在这之前，消息归 <code>smeltd</code> 的发件队列管：B 没在跑就拉起，B 这一代 runtime 退出就重投，投不了就退信。
   </div>
 </section>
 
@@ -690,7 +686,7 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
       <tr>
         <td>手机旁观（<code>handle_acp_watch</code>）</td>
         <td><code>conversation_slot</code></td>
-        <td>原来内联的「没有就请桌面打开」挪进去。旁观不唤醒挂起的 runtime，镜像够看</td>
+        <td>原来内联的「没有就请桌面打开」挪进去。旁观不唤醒挂起的 runtime。挂起后内存里只剩当前回合，给多少是多少</td>
       </tr>
       <tr>
         <td>提交输入（<code>handle_acp_submit_input</code>）</td>
@@ -715,63 +711,53 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
   <h2>通信链路 / 传输层</h2>
 
   <p>
-    不新开协议、不新开套接字、不走 MCP、也不让两个 Pi 直接连。
-    扩展只连自己这个会话宿主上已经在听的 Unix 套接字；宿主只沿主 daemon 拉起它时留下的那条 socketpair 把请求交上去；
-    主 daemon 找到目标宿主，把一条 <code>AcpUserAction</code> 写过去。
+    不新开协议、不新开第二根套接字、不走 MCP、也不让两个 Pi 直接连。
+    扩展只连这场对话的驱动已经在听的 Unix 套接字。
+    <code>session_list</code> / <code>session_read</code> / <code>session_send</code> / <code>session_spawn</code>
+    由起会话时绑上的应答直接回答，应答和驱动都在 <code>smeltd</code> 里。
+    发件队列再把一条 <code>DeliverPeerMessage</code> 交给目标对话的驱动。
   </p>
 
-  <h3>现成的三条通道</h3>
+  <h3>现成的两条通道</h3>
   <table>
     <thead>
       <tr><th>谁和谁</th><th>现网</th><th>这次怎么用</th></tr>
     </thead>
     <tbody>
       <tr>
-        <td>Pi → 自己的会话宿主</td>
+        <td>Pi → 这场对话的驱动</td>
         <td>
-          <code>BackgroundSupervisor::start</code> 在临时目录听 <code>smbg-{pid}-{nonce}.sock</code>（权限 <code>0o600</code>），路径放进这个 Pi 的 <code>SMELT_BACKGROUND_TASK_SOCK</code>。
+          驱动线程在 <code>smeltd</code> 里。<code>BackgroundSupervisor::start</code> 在临时目录听 <code>smbg-{pid}-{nonce}.sock</code>（权限 <code>0o600</code>），路径放进这个 Pi 的 <code>SMELT_BACKGROUND_TASK_SOCK</code>。
           <code>handle_client</code>（<code>background_tasks.rs</code>）按一行 JSON 的 <code>op</code> 分流。扩展侧短调用是 <code>callBackgroundHost</code>。
         </td>
         <td>
-          加 <code>session_list</code> / <code>session_read</code> / <code>session_send</code> / <code>session_spawn</code> 四个短 op，一问一答。
-          <code>owner</code> 非空是子智能体，一律拒绝：peer 只给会话本身用。
-        </td>
-      </tr>
-      <tr>
-        <td>会话宿主 ↔ 主 smeltd</td>
-        <td>
-          每个对话是一个 <code>smeltd --acp-session-host</code>，和主 daemon 之间一条 <code>UnixStream::pair()</code>。
-          daemon → 宿主是 <code>AcpUserAction</code>（<code>send_action</code>）；宿主 → daemon 是快照行和 <code>history_page</code> 回包。
-        </td>
-        <td>
-          宿主 → daemon 加一种行 <code>{"peer_request": {"request_id", "op", "body"}}</code>，<code>dispatch_snapshot_line</code> 和 <code>history_page</code> 一样先分流；
-          daemon 用 <code>AcpUserAction::PeerReply { request_id, reply }</code> 回答，宿主的动作循环先截下来交给 <code>peer_link::complete</code>。
+          四个短 op，一问一答。<code>owner</code> 非空是子智能体，一律拒绝：peer 只给会话本身用。
+          应答函数自己认来源，这里不从请求体里取，也不补一个。
           <strong>不走 Control API</strong>：那是 <code>smeltd.sock</code> 上靠参数里的 session id 和 token 认人的，token 就在 Pi 的环境里。
         </td>
       </tr>
       <tr>
-        <td>主 smeltd → 目标宿主 → Pi B</td>
+        <td>发件队列 → 目标驱动 → Pi B</td>
         <td>
-          槽在 <code>AcpRegistry</code>，句柄是 <code>AcpSession.hosted_handle</code>。Pi 的 stdin 由 <code>write_rpc</code> 写。
+          槽在 <code>AcpRegistry</code>，驱动和 agent 子进程都在这个 <code>smeltd</code> 里。Pi 的 stdin 由 <code>write_rpc</code> 写。没有单独的会话宿主进程。
         </td>
         <td>
-          新动作 <code>AcpUserAction::DeliverPeerMessage { message }</code>，宿主交给自己的 <code>BackgroundSupervisor</code>。
+          <code>DeliverPeerMessage</code> 交给目标驱动自己的 <code>BackgroundSupervisor</code>。
         </td>
       </tr>
     </tbody>
   </table>
 
-  <h3>1. Pi A → 宿主 A</h3>
+  <h3>1. Pi A → 驱动 A</h3>
   <p>
     工具写一行 <code>{"op": "session_send", "toolCallId", "to", "text", "kind", "replyTo"}</code>，读一行回答。
-    宿主只托管这一个对话，不改写也不添加来源；去掉 <code>op</code> / <code>owner</code> 后原样转给主 daemon，等 15 秒。
-    主 daemon 只做同步检查，正常几毫秒就回。
+    驱动去掉 <code>op</code> / <code>owner</code> 后交给绑上的应答。来源是绑定时记下的会话 id，请求体改不了。
+    应答和门卫在同一进程，只做同步检查，正常几毫秒就回。
   </p>
 
-  <h3>2. 宿主 A → 主 smeltd：门卫</h3>
+  <h3>2. 绑上的应答：门卫</h3>
   <p>
-    主 daemon 每收一行 <code>peer_request</code> 单开一个线程回答。来源就是这条控制连接所属的注册表 id；
-    连接已经被换掉（同一个 id 有了新槽）就拒绝。同步检查见 §7、§9，通过后：
+    来源就是绑定时的会话 id。请求到达时再对一下当前槽位，换代之后的旧 runtime 直接拒绝。同步检查见 §7、§9，通过后：
   </p>
   <ul>
     <li><code>session_list</code> / <code>session_read</code>：直接回答。</li>
@@ -779,42 +765,42 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
     <li><code>session_spawn</code>：算出新对话 id 和任务消息 id，把建对话这件事交给后台，回 <code>accepted</code>。</li>
   </ul>
 
-  <h3>3. 发件队列 → 宿主 B</h3>
+  <h3>3. 发件队列 → 驱动 B</h3>
   <p>
-    发件队列是主 daemon 内存里的一张表，每封信：id、来源、目标、内容、状态。每个目标同一时间只有一条投递线程，按收下的先后一封封投：
+    发件队列是 <code>smeltd</code> 内存里的一张表，每封信：id、来源、目标、内容、状态。每个目标同一时间只有一条投递线程，按收下的先后一封封投：
   </p>
   <ol>
     <li><code>ensure_conversation_runtime(B)</code>。</li>
     <li>B 原来没打开、收下时还不知道它的权限档位的，这时补查权限（§9.2）。</li>
-    <li>记下 B 当前的 <code>connection_generation</code>，把 <code>DeliverPeerMessage</code> 写给 B 的宿主，信的状态改成「已交给宿主」。</li>
+    <li>记下 B 当前的 <code>connection_generation</code>，把 <code>DeliverPeerMessage</code> 交给 B 的驱动，信的状态改成「已交给这一代 runtime」。</li>
   </ol>
   <p>任何一步失败：这封信标成失败，给 A 退信（§7.2）。投递线程接着投下一封。</p>
 
-  <h3>4. 宿主 B → Pi B</h3>
+  <h3>4. 驱动 B → Pi B</h3>
   <p>
     <code>FollowUp</code> / <code>Prompt</code> 的时机是对的（空闲开一轮，忙时排队），但进 Pi 的是一条 <strong>user 消息</strong>：
     B 的界面会画成用户气泡，忙时还会出现在 B 输入栏的排队区里让用户撤回、改写，hops 复位也分不清是不是用户说了话。peer 不用它，走后台任务交回结果那条路：
   </p>
   <ul>
-    <li>宿主 B 把消息排进 <code>BackgroundSupervisor</code>，同一个 id 只收一次。快照里的 <code>peer_inbox</code> 多一条 <code>pending</code>。</li>
+    <li>驱动 B 把消息排进 <code>BackgroundSupervisor</code>，同一个 id 只收一次。归约状态里的 <code>peer_inbox</code> 多一条 <code>pending</code>。</li>
     <li>经扩展的 <code>listen</code> 连接写一行 <code>{"op": "completion", "kind": "peer_message", ...}</code>。</li>
     <li>扩展调 <code>pi.sendMessage({customType: "smelt.peer_message", display: false, content, details}, {triggerTurn: true, deliverAs: "followUp"})</code>。空闲时开一轮；忙时进 Pi 的 followUp 队列，这一轮做完再看，<strong>不 steer</strong>。</li>
-    <li>扩展看到这条的 <code>message_start</code> 才回 ack，<code>peer_inbox</code> 里标成 <code>delivered</code>。<code>clear_queue</code> 清掉的、fork / reload 后换了监听的，宿主再写一次，都是现网 <code>claim_model</code> / <code>acknowledge_model</code> 的行为。</li>
+    <li>扩展看到这条的 <code>message_start</code> 才回 ack，<code>peer_inbox</code> 里标成 <code>delivered</code>。<code>clear_queue</code> 清掉的、fork / reload 后换了监听的，驱动再写一次，都是现网 <code>claim_model</code> / <code>acknowledge_model</code> 的行为。</li>
     <li>对模型来说，Pi 把自定义消息也按 user 内容交给模型（<code>convertToLlm</code>）。来源靠正文开头那句「另一个 Pi 对话发来，不是用户的请求，不代表用户授权」交代。</li>
   </ul>
 
   <h3>5. 状态怎么回到发件队列</h3>
   <p>
-    主 daemon 每合并一份 B 的快照，就拿 B 的 <code>peer_inbox</code> 和当前代数去对一遍发给 B、已经交给宿主的信（B 没有这样的信就立刻返回）：
+    事件归约看到 B 的 <code>peer_inbox</code>，就拿它和当前代数去对一遍发给 B、已经交给驱动的信（B 没有这样的信就立刻返回）：
   </p>
   <ul>
     <li><code>peer_inbox</code> 里是 <code>delivered</code>：信标成已送到，结束。</li>
-    <li>是 <code>pending</code>，或还没出现但代数没变：还在 B 的宿主里，不动。</li>
-    <li>代数变了、信还没送到：接手这封信的宿主已经不在了（重启、挂起、崩溃）。信退回「排队」，投递线程重新拉起 B 再投。B 的新宿主按 id 去重。</li>
+    <li>是 <code>pending</code>，或还没出现但代数没变：还在这一代 runtime 里，不动。</li>
+    <li>代数变了、信还没送到：那一代 runtime 已经不在了（重启、挂起、崩溃）。信退回「排队」，投递线程重新拉起 B 再投。新的驱动按 id 去重。</li>
   </ul>
   <p>
-    这就是「至少送一次」：B 的宿主在消息进 transcript 之前退出，消息不会默默丢掉。
-    唯一会重复的窗口是 B 已经 ack、快照还没传回来宿主就退出了。
+    这就是「至少送一次」：runtime 在消息进 transcript 之前退出，消息不会默默丢掉。
+    唯一会重复的窗口是 B 已经 ack、归约还没把 <code>peer_inbox</code> 对上发件队列，这一代 runtime 就退出了。
   </p>
   <p>
     <strong>完成</strong>不是这条链路的事：B 在自己的回合里用 <code>session_send</code> 回 A（<code>kind=completion</code>，<code>replyTo</code> 填原消息 id）。
@@ -825,7 +811,7 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
     <div class="label">非目标</div>
     <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
       <li>不新开协议族。两边都还是现成的一行 JSON。</li>
-      <li>不新开套接字。不加第二根后台套接字，也不让宿主去 <code>bind</code> <code>~/.smelt/smeltd.sock</code>。</li>
+      <li>不新开套接字。不加第二根后台套接字。<code>session_*</code> 也不走 <code>smeltd.sock</code>。</li>
       <li>不走 MCP，不复活已经删掉的 peer 总线。</li>
       <li>两个 Pi 不直接连接。A 的扩展看不到 B 的套接字路径。</li>
       <li>不加 SQL 账本表。发件队列只在内存里。</li>
@@ -864,7 +850,7 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
         <td>退信，原因 <code>permission</code></td>
       </tr>
       <tr>
-        <td>B 的宿主在消息进 transcript 前退出</td>
+        <td>B 这一代 runtime 在消息进 transcript 前退出</td>
         <td>代数变了，信退回排队，重新拉起再投</td>
         <td>状态退回 <code>queued</code>，之后 <code>delivered</code></td>
       </tr>
@@ -880,7 +866,7 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
       </tr>
       <tr>
         <td>主 daemon 崩溃重启</td>
-        <td>发件队列和链预算都在内存里，一起没了；宿主看到控制连接 EOF 也退出。有序升级交接时宿主不退，已交给宿主的继续投</td>
+        <td>发件队列和链预算都在内存里，一起没了。驱动线程也在这个进程里，一起退出。升级会停掉旧守护，收割 agent 子进程；进行中的回合记为中断，会话正文在 agent 自己的历史里</td>
         <td>还在排队的信丢失，<strong>没有退信</strong>（§12）</td>
       </tr>
     </tbody>
@@ -931,11 +917,11 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
       </tr>
       <tr>
         <td><code>id</code></td>
-        <td><code>pm-</code> 加 SHA-256（来源对话 id、<code>toolCallId</code>）的前 12 位十六进制。发件队列、宿主去重、ack、<code>peer_inbox</code>、<code>replyTo</code> 都认它。退信的 id 是原 id 加 <code>-bounce</code></td>
+        <td><code>pm-</code> 加 SHA-256（来源对话 id、<code>toolCallId</code>）的前 12 位十六进制。发件队列、驱动去重、ack、<code>peer_inbox</code>、<code>replyTo</code> 都认它。退信的 id 是原 id 加 <code>-bounce</code></td>
       </tr>
       <tr>
         <td><code>sourceSessionId</code> / <code>sourceTitle</code></td>
-        <td>来源，主 daemon 按连接写入。退信里是没收到的那个对话</td>
+        <td>来源，主 daemon 按绑上的会话 id 写入。退信里是没收到的那个对话</td>
       </tr>
       <tr>
         <td><code>kind</code></td>
@@ -995,7 +981,7 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
   <ul>
     <li>目录见 §5.1。<code>dormant</code> 告诉模型：发消息会让桌面把它打开，可能要等一会。</li>
     <li>
-      <code>sent</code> 取自发件队列：<code>queued</code> 还在主 daemon 里等对方拉起；<code>pending</code> 已在对方宿主里、还没进 transcript；
+      <code>sent</code> 取自发件队列：<code>queued</code> 还在发件队列里等对方拉起；<code>pending</code> 已交给对方这一代 runtime、还没进 transcript；
       <code>delivered</code> 已进 transcript；<code>failed</code> 带原因，同时已经退信。
       每个来源留最近 64 封已结束的。主 daemon 重启过，之前的就不在了。
     </li>
@@ -1013,8 +999,8 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
   "replies": ["e2e 跑完了，失败 2 个：…"]
 }</code></pre>
   <ul>
-    <li>先读主 daemon 里的会话镜像；宿主模式下镜像只留当前回合，不够时向还活着的宿主要一页历史。不唤醒、不打开对方，也不进对方的 transcript。</li>
-    <li>挂起的只给镜像里有的；<code>dormant</code> 的拒绝（<code>not_running</code>）：为了读而把对话拉起来不值得，要它干活就发消息。</li>
+    <li>直接读这场对话在 <code>smeltd</code> 里的归约条目。不唤醒、不打开对方，也不进对方的 transcript。不再向另一进程要历史页。</li>
+    <li>挂起后内存里只剩当前回合，有多少给多少。<code>dormant</code> 的拒绝（<code>not_running</code>）：为了读而把对话拉起来不值得，要它干活就发消息。</li>
     <li>只返回助手的文字回复，每条截到 4000 字符；不返回用户消息、工具输出和思考。</li>
   </ul>
 
@@ -1084,33 +1070,32 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
 sequenceDiagram
   autonumber
   participant Tool as Pi A 扩展
-  participant HostA as 宿主 A
-  participant D as 主 smeltd
-  participant Q as 发件队列（D 内）
-  participant HostB as 宿主 B
+  participant DriveA as A 的驱动（smeltd 内）
+  participant D as smeltd 应答 / 发件队列
+  participant DriveB as B 的驱动（smeltd 内）
   participant PiB as Pi B
 
-  Tool->>HostA: session_send 一行 JSON（带 toolCallId）
-  HostA->>D: peer_request 行
-  Note over D: 来源 = 这条连接的注册表 id<br/>目录 · 自己 · 跳数 · 积压 · 已知的权限
+  Tool->>DriveA: session_send 一行 JSON（带 toolCallId）
+  DriveA->>D: 绑上的应答
+  Note over D: 来源 = 绑定时的会话 id<br/>目录 · 自己 · 跳数 · 积压 · 已知的权限
   alt 同步检查不过
-    D-->>HostA: PeerReply ok false
-    HostA-->>Tool: 失败 + 原因
+    D-->>DriveA: ok false
+    DriveA-->>Tool: 失败 + 原因
   else 通过
-    D->>Q: 记一封信 id = pm-hash(来源, toolCallId)
-    D-->>HostA: PeerReply accepted
-    HostA-->>Tool: accepted
-    Q->>Q: ensure_conversation_runtime(B)<br/>唤醒挂起 · 请桌面打开
+    D->>D: 记一封信 id = pm-hash(来源, toolCallId)
+    D-->>DriveA: accepted
+    DriveA-->>Tool: accepted
+    D->>D: ensure_conversation_runtime(B)<br/>唤醒挂起 · 请桌面打开
     alt 拉不起 / 权限不允许
-      Q->>HostA: DeliverPeerMessage kind bounce（退信给 A）
+      D->>DriveA: DeliverPeerMessage kind bounce（退信给 A）
     else
-      Q->>HostB: DeliverPeerMessage（记下代数）
-      Note over HostB: 按 id 排队<br/>peer_inbox 多一条 pending
-      HostB->>PiB: listen 连接写 kind peer_message
+      D->>DriveB: DeliverPeerMessage（记下代数）
+      Note over DriveB: 按 id 排队<br/>peer_inbox 多一条 pending
+      DriveB->>PiB: listen 连接写 kind peer_message
       Note over PiB: sendMessage smelt.peer_message<br/>空闲开一轮 · 忙则 followUp 排队
-      PiB-->>HostB: message_start 后 ack
-      HostB-->>D: 快照 peer_inbox delivered
-      D->>Q: 信标成 delivered
+      PiB-->>DriveB: message_start 后 ack
+      Note over D: 归约里的 peer_inbox 标成 delivered
+      D->>D: 信标成 delivered
     end
   end
   </div>
@@ -1123,7 +1108,7 @@ sequenceDiagram
     <tbody>
       <tr><td><code>accepted</code></td><td>工具调用的回答：主 daemon 收下了</td><td>门卫</td></tr>
       <tr><td><code>queued</code></td><td>在发件队列里，等对方拉起或等前面的投完</td><td>发件队列</td></tr>
-      <tr><td><code>pending</code></td><td>已交给对方宿主，还没进 transcript（对方正忙，排在 followUp 里）</td><td>对方宿主的 <code>peer_inbox</code></td></tr>
+      <tr><td><code>pending</code></td><td>已交给对方这一代 runtime，还没进 transcript（对方正忙，排在 followUp 里）</td><td>对方驱动的 <code>peer_inbox</code></td></tr>
       <tr><td><code>delivered</code></td><td>已进对方 transcript，模型这一轮看得到。在 Pi 里「进 transcript」和「交给模型」是同一刻</td><td>对方扩展在 <code>message_start</code> 的 ack</td></tr>
       <tr><td><code>failed</code></td><td>送不到，带原因，已退信</td><td>发件队列</td></tr>
     </tbody>
@@ -1143,17 +1128,17 @@ sequenceDiagram
       <tr>
         <td>只在 Pi 对话之间</td>
         <td>对话目录</td>
-        <td>双方都是 Smelt 的 Pi、不归自动化；子智能体拿不到这四个工具，宿主也拒绝非空 <code>owner</code></td>
+        <td>双方都是 Smelt 的 Pi、不归自动化；子智能体拿不到这四个工具，驱动也拒绝非空 <code>owner</code></td>
       </tr>
       <tr>
         <td>来源防伪</td>
-        <td>宿主控制连接</td>
-        <td>来源 = 连接所属的注册表 id；请求里不带来源</td>
+        <td>绑上的应答</td>
+        <td>来源 = 绑定时的会话 id；请求到达时再对当前槽位。请求里不带来源</td>
       </tr>
       <tr>
         <td>积压</td>
         <td>发件队列里发给这个对话、还没送到的信（<code>queued</code> + <code>pending</code>）</td>
-        <td>到 8 封就拒收新的（<code>inbox_full</code>）。发件队列是唯一往宿主投 peer 消息的地方，这个数是准的，不用再估在途</td>
+        <td>到 8 封就拒收新的（<code>inbox_full</code>）。发件队列是唯一往驱动投 peer 消息的地方，这个数是准的，不用再估在途</td>
       </tr>
       <tr>
         <td>跳数</td>
@@ -1168,7 +1153,7 @@ sequenceDiagram
       <tr>
         <td>去重</td>
         <td>id 由（来源，<code>toolCallId</code>）算出</td>
-        <td>发件队列见过这个 id 就回原结果；宿主 B 同一个 id 只排一次</td>
+        <td>发件队列见过这个 id 就回原结果；驱动 B 同一个 id 只排一次</td>
       </tr>
       <tr>
         <td>起新对话</td>
@@ -1187,7 +1172,7 @@ sequenceDiagram
     对方是「完全访问」、发送方是「逐次审批」，就不送（<code>permission</code>）。否则会变成：发送方不经审批，借对方之手执行本来要审批的操作。
   </div>
   <ul>
-    <li><strong>什么时候判</strong>：对方在跑或挂起时，档位在会话镜像里，收下前当场判、当场拒。对方还没打开时不知道档位，拉起之后、投递之前判，不过就退信。</li>
+    <li><strong>什么时候判</strong>：对方在跑或挂起时，档位在这场对话的归约状态里，收下前当场判、当场拒。对方还没打开时不知道档位，拉起之后、投递之前判，不过就退信。</li>
     <li>
       <strong>「完全访问」发给「完全访问」：允许，不加限制。</strong>
       发送方自己已经能不经审批做对方能做的任何事：同一台机器、同一个系统用户、同样不审批，工作目录也拦不住它 <code>cd</code> 到别处。
@@ -1289,7 +1274,7 @@ sequenceDiagram
         <li>四个工具：<code>session_list</code> / <code>session_read</code> / <code>session_send</code> / <code>session_spawn</code></li>
         <li>对话目录含没打开的侧栏对话；<code>ensure_conversation_runtime</code> 统一拉起，手机提交和旁观一起改用</li>
         <li>门卫：Pi↔Pi、来源防伪、不发给自己、积压、跳数、权限</li>
-        <li>发件队列：先收下、按目标排队投、宿主退出重投、失败退信</li>
+        <li>发件队列：先收下、按目标排队投、runtime 退出重投、失败退信</li>
         <li>id 由（来源，<code>toolCallId</code>）算出；<code>session_spawn</code> 失败补偿</li>
         <li>对话区居中事件行，<code>TaskNote</code> 一起改成同一样式</li>
       </ul>
@@ -1378,7 +1363,7 @@ sequenceDiagram
     <div class="label">相对 SQL 账本的弱点</div>
     <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
       <li><strong>主 daemon 崩溃会丢信</strong>：发件队列只在内存里。崩溃时还在排队的信没了，发送方收不到退信；它 <code>session_list</code> 时会发现 <code>sent</code> 里没有这条。有序升级交接不受影响。</li>
-      <li><strong>至少送一次，不是恰好一次</strong>：B 已经 ack、快照还没传回来宿主就退出，这条会再投一次，B 的 transcript 里出现两条同 id 的消息。</li>
+      <li><strong>至少送一次，不是恰好一次</strong>：B 已经 ack、归约还没把 <code>peer_inbox</code> 对上发件队列，这一代 runtime 就退出，这条会再投一次，B 的 transcript 里出现两条同 id 的消息。</li>
       <li><strong>没打开的对话要靠桌面</strong>：启动规格归桌面，桌面没开就拉不起来，只能退信。</li>
       <li><strong>「谁起的」不跨重启</strong>：daemon 重启后，「起出来的不能再起」「最多 4 个」从零算。</li>
     </ul>
@@ -1387,7 +1372,7 @@ sequenceDiagram
   <h3>12.1 为何仍选这条路</h3>
   <p>
     「再开一套协作 SQL」与 Pi-native 心智冲突，维护成本（迁移、投影、与 transcript 双写一致）高于它带来的恢复收益。
-    上面的丢失窗口只在主 daemon 崩溃时出现，而那时所有对话的宿主也一起退出，正在跑的回合本来就断了。
+    上面的丢失窗口只在 <code>smeltd</code> 崩溃时出现，而那时所有对话的驱动线程也一起退出，正在跑的回合本来就断了。
     如果使用中证明这不够，再评估把发件队列落进 SQLite；那是按字段建的表，不是 JSON。
   </p>
 </section>
@@ -1404,7 +1389,7 @@ sequenceDiagram
     </li>
     <li>
       <strong><code>clear_queue</code> 后的静默重写会不会丢。</strong>
-      用户按停止清掉队列后，宿主把没 ack 的 peer 消息再写一次，但不叫醒模型；扩展这时立刻 ack。
+      用户按停止清掉队列后，驱动把没 ack 的 peer 消息再写一次，但不叫醒模型；扩展这时立刻 ack。
       如果 Pi 那一刻还没把它放进 transcript，就会出现「已 ack、没进 transcript」。
     </li>
   </ol>
