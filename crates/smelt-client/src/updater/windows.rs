@@ -39,8 +39,8 @@ pub(super) fn update_asset(release: &GithubRelease) -> Option<&GithubAsset> {
 }
 
 /// 查指定通道最新的、能装的发布：校验和清单里要已经有它的安装程序。发版流水线等所有
-/// 产物都传完才把清单重写成全量的，在那之前最新的发布装不了，退到上一个。退之前先看
-/// 装着的是不是就是它，免得把刚装上的新版「更新」回旧版。
+/// 产物都传完才把清单重写成全量的，在那之前最新的发布装不了，退到上一个。退到不比
+/// 装着的新就停：交给 `decide_check_outcome` 判成没有更新，不会装回旧版。
 pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
     let installed = installed_release()?;
     let mut last_error = None;
@@ -49,10 +49,16 @@ pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandid
         .into_iter()
         .take(MAX_CANDIDATES)
     {
-        // 更新清单可以不给版本号（拿地址最后一段凑），这里却靠版本号认新旧。
-        semver::Version::parse(&candidate.version)
-            .with_context(|| format!("更新包的版本号不是发版号：{}", candidate.version))?;
-        if installed.is(&candidate) {
+        // 更新清单可以不给版本号（拿地址最后一段凑），这里却靠版本号认新旧。认不出的跳过，
+        // 接着看上一个。
+        if let Err(error) = semver::Version::parse(&candidate.version) {
+            last_error = Some(anyhow::anyhow!(
+                "更新包的版本号不是发版号：{}（{error}）",
+                candidate.version
+            ));
+            continue;
+        }
+        if installed.covers(&candidate) {
             return Ok(candidate);
         }
         match expected_sha256(&candidate.url).await {
@@ -72,9 +78,11 @@ pub fn installed_by_setup() -> bool {
 
 /// 装着的就是编进程序的那次发版。
 pub fn installed_release() -> anyhow::Result<InstalledRelease> {
-    smelt_version::RELEASE
-        .map(|release| InstalledRelease::Version(release.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("开发构建没有发版号，不自动更新"))
+    let release = smelt_version::RELEASE
+        .ok_or_else(|| anyhow::anyhow!("开发构建没有发版号，不自动更新"))?;
+    let version = semver::Version::parse(release)
+        .with_context(|| format!("编进程序的发版号不是 semver：{release}"))?;
+    Ok(InstalledRelease::Version(version))
 }
 
 /// 下好、校验过的安装程序，等用户点「立即重启更新」或退出时拉起。
@@ -302,8 +310,8 @@ pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result
 /// 启动时调用。没有跨进程的待装作业要恢复（见模块说明），只清掉已经装上的这个版本的
 /// 安装程序和日志。新版是安装程序装完直接拉起的，那时它可能还没退出、删不掉，下次再清。
 ///
-/// 还留着别的版本的安装日志，说明那次没装成（装成了跑的就是那个版本，日志已经删了）。
-/// 记进 app.log，指向安装日志。
+/// 还留着别的版本的安装日志，说明那次没装成（装成了跑的就是那个版本）。记进 app.log，
+/// 指向安装日志。
 pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
     let Some(release) = smelt_version::RELEASE else {
         return Ok(None);
@@ -313,16 +321,25 @@ pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
     let current_log = installer.with_extension("log");
     let _ = std::fs::remove_file(&current_log);
     let _ = std::fs::remove_file(&installer);
-    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "log") {
-            smelt_sys::app_log::error(
-                "updater",
-                &format!("上次应用更新没装成，安装日志：{}", path.display()),
-            );
-        }
+    for log in failed_install_logs(&dir, &current_log) {
+        smelt_sys::app_log::error(
+            "updater",
+            &format!("上次应用更新没装成，安装日志：{}", log.display()),
+        );
     }
     Ok(None)
+}
+
+/// 下载目录里别的版本留下的安装日志。装上的这个版本的日志不算：安装程序拉起新版时还
+/// 开着它，刚才可能没删掉。
+fn failed_install_logs(dir: &Path, current_log: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path != current_log && path.extension().is_some_and(|ext| ext == "log"))
+        .collect()
 }
 
 /// 安装失败后更新源换了包：删掉旧的安装程序。
@@ -337,7 +354,7 @@ pub fn discard_failed_update(expected: &StagedUpdate) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GithubRelease, installer_path, update_asset};
+    use super::{GithubRelease, failed_install_logs, installer_path, update_asset};
     use std::path::Path;
 
     fn release(json: &str) -> GithubRelease {
@@ -388,5 +405,18 @@ mod tests {
             installer_path(dir, r"..\..\evil"),
             dir.join("smelt-evil-setup.exe")
         );
+    }
+
+    /// 装成了、新版启动时安装程序还占着这次的日志：不能当成「上次没装成」。
+    #[test]
+    fn current_version_log_is_not_a_failed_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = installer_path(dir.path(), "2026.1028.0").with_extension("log");
+        let failed = installer_path(dir.path(), "2026.1029.0").with_extension("log");
+        for path in [&current, &failed] {
+            std::fs::write(path, "log").unwrap();
+        }
+        std::fs::write(installer_path(dir.path(), "2026.1029.0"), "exe").unwrap();
+        assert_eq!(failed_install_logs(dir.path(), &current), vec![failed]);
     }
 }

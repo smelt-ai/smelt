@@ -23,7 +23,7 @@ pub enum SettingsSection {
     Resources,
     /// 后台服务、旧版本残留。
     Maintenance,
-    /// 版本、应用更新（仅 macOS）、帮助与反馈。
+    /// 版本、应用更新（macOS、Windows）、帮助与反馈。
     About,
 }
 

@@ -196,18 +196,22 @@ pub enum InstalledRelease {
     /// 就换了 URL，同一个版本号重发的内测包也认得出来。
     Url(String),
     /// Windows 认编进程序的发版号（`smelt_version::RELEASE`）：安装程序装的就是那次发版，
-    /// 没有另外记录的地方。
-    Version(String),
+    /// 没有另外记录的地方。只有比它新的才算更新：切回生产通道、或者最新的发布还没传完
+    /// 退到上一个时，候选可能比装着的旧，不能装回去（旧版读不了新版升级过的客户端库）。
+    Version(semver::Version),
     /// 没有可比较的记录：迁移前的旧安装、手工安装的首个包、开发构建。这时让 updater
     /// 下载一次，装好之后就有记录了，免得同版本内测包永远无法更新。
     Unknown,
 }
 
 impl InstalledRelease {
-    fn is(&self, candidate: &UpdateCandidate) -> bool {
+    /// 候选不用装：就是装着的这个，或者（按版本号认时）不比它新。
+    fn covers(&self, candidate: &UpdateCandidate) -> bool {
         match self {
             Self::Url(url) => url.trim() == candidate.url.trim(),
-            Self::Version(version) => version.trim() == candidate.version.trim(),
+            // 认不出版本号的候选也不装：不知道它新还是旧。
+            Self::Version(installed) => semver::Version::parse(candidate.version.trim())
+                .map_or(true, |candidate| candidate <= *installed),
             Self::Unknown => false,
         }
     }
@@ -232,7 +236,7 @@ pub fn decide_check_outcome(
     installed: &InstalledRelease,
     auto_install: bool,
 ) -> CheckOutcome {
-    if installed.is(&candidate) {
+    if installed.covers(&candidate) {
         return CheckOutcome::NoUpdate;
     }
     if auto_install {
@@ -609,21 +613,54 @@ mod tests {
     #[test]
     fn url_difference_is_the_update_identity() {
         let installed = InstalledRelease::Url("https://example.test/a".into());
-        assert!(installed.is(&candidate(" https://example.test/a ")));
-        assert!(!installed.is(&candidate("https://example.test/b")));
-        assert!(!InstalledRelease::Unknown.is(&candidate("https://example.test/a")));
+        assert!(installed.covers(&candidate(" https://example.test/a ")));
+        assert!(!installed.covers(&candidate("https://example.test/b")));
+        assert!(!InstalledRelease::Unknown.covers(&candidate("https://example.test/a")));
+    }
+
+    fn versioned(version: &str) -> UpdateCandidate {
+        UpdateCandidate {
+            version: version.into(),
+            url: format!("https://example.test/{version}/setup.exe"),
+        }
+    }
+
+    fn installed_version(version: &str) -> InstalledRelease {
+        InstalledRelease::Version(semver::Version::parse(version).unwrap())
     }
 
     /// Windows 认版本号：同一个版本换了下载地址（比如改走镜像）也不算新版。
     #[test]
     fn version_identity_ignores_the_download_url() {
-        let installed = InstalledRelease::Version("0.6.15".into());
-        assert!(installed.is(&candidate("https://mirror.test/a")));
-        let newer = UpdateCandidate {
-            version: "0.6.16".into(),
-            url: "https://example.test/a".into(),
-        };
-        assert!(!installed.is(&newer));
+        let installed = installed_version("0.6.15");
+        assert!(installed.covers(&candidate("https://mirror.test/a")));
+        assert!(!installed.covers(&versioned("0.6.16")));
+    }
+
+    /// 装着内测版时切回生产通道，生产通道最新的比它旧：不能装回去。
+    #[test]
+    fn version_older_than_installed_is_not_an_update() {
+        let installed = installed_version("2026.1027.1-rc.1");
+        assert!(installed.covers(&versioned("2026.1026.3")));
+        assert!(installed.covers(&versioned("2026.1027.1-rc.1")));
+        assert!(!installed.covers(&versioned("2026.1027.1-rc.2")));
+        assert!(!installed.covers(&versioned("2026.1027.1")));
+        assert_eq!(
+            decide_check_outcome(versioned("2026.1026.3"), &installed, true),
+            CheckOutcome::NoUpdate
+        );
+    }
+
+    /// 预发布号按数字比：rc.10 比 rc.9 新。
+    #[test]
+    fn prerelease_numbers_compare_numerically() {
+        let installed = installed_version("2026.1027.0-rc.9");
+        assert!(!installed.covers(&versioned("2026.1027.0-rc.10")));
+    }
+
+    #[test]
+    fn unparsable_candidate_version_is_not_an_update() {
+        assert!(installed_version("2026.1027.0").covers(&versioned("Smelt-latest")));
     }
 
     #[test]

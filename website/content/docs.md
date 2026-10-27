@@ -248,7 +248,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 - **Agent 与远程**：Agent、远程
 - **系统**：资源占用、维护、关于
 
-外观把主题、字号与字体、窗口与背景放在同一页，页内是「界面」「终端与代码」「窗口」。Agent 页是「本机 Agent」（CLI 和 Hooks）、「新建菜单」、「高级」（对话适配器命令）。远程页是「连到其他机器」和「让其他设备连进来」。维护页是「后台服务」和「旧版本残留」。关于页是版本、「更新」（仅 macOS）和「帮助与反馈」。
+外观把主题、字号与字体、窗口与背景放在同一页，页内是「界面」「终端与代码」「窗口」。Agent 页是「本机 Agent」（CLI 和 Hooks）、「新建菜单」、「高级」（对话适配器命令）。远程页是「连到其他机器」和「让其他设备连进来」。维护页是「后台服务」和「旧版本残留」。关于页是版本、「更新」和「帮助与反馈」。
 
 连着远程运行时，「Agent」页标题旁会标「只作用于本机运行时」。没连远程就不标。
 
@@ -311,7 +311,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 能。有 ACP 身份的来源可以选择「ACP 继续」或「CLI/TUI 继续」。
 
 **支持 Linux / Windows 吗？**
-支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`，有自动更新）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`）。Windows 这一版不签名，没有自动更新，也没有 arm64 包；交互 shell 是 `cmd.exe`。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
+支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`），都在应用内自动更新。Windows 这一版不签名，也没有 arm64 包；交互 shell 是 `cmd.exe`。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
 
 **在哪反馈问题？**
 去 [GitHub Issues](https://github.com/smelt-ai/smelt/issues/new/choose) 提，有 Bug 反馈

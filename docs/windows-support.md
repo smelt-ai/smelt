@@ -158,7 +158,7 @@
 已实现。通道、查新版、设置页和 macOS 共用（`smelt-client/src/updater.rs`），Windows 只换「下什么、怎么装」（`updater/windows.rs`）：
 
 - **谁能更新**。只有安装程序装的发版构建：有发版号 `smelt_version::RELEASE`，exe 旁边有 Inno 的卸载程序 `unins000.exe`。开发构建、拷出来的 exe 停在「这个 Smelt 不能自动更新」，不检查、不下载。
-- **查**。认 Release 里的 `smelt-<版本>-windows-x86_64-setup.exe`，同一个 Release 还要有 `SHA256SUMS`，而且清单里已经有它（发版流水线等所有产物到齐才重写清单）；最新的还没齐就退到上一个，最多看三个，装着的就是最新的那个时不退。是不是新版比的是发版号，所以更新清单要给出能解析的版本号。
+- **查**。认 Release 里的 `smelt-<版本>-windows-x86_64-setup.exe`，同一个 Release 还要有 `SHA256SUMS`，而且清单里已经有它（发版流水线等所有产物到齐才重写清单）；最新的还没齐就退到上一个，最多看三个。是不是新版比的是发版号：只有比装着的新才装，切回生产通道或退到比装着的旧时都不装回去（旧版读不了新版升级过的客户端库）。版本号认不出的候选跳过，所以更新清单要给出能解析的版本号。
 - **下**。下到 `%LOCALAPPDATA%\Smelt\update`，边下边算 SHA-256，对上清单才算下好；同一版本下过就不再下。不记持久化事务：下好的安装程序只在这次运行里等着装，重启后重新检查。启动时删掉已经装上的那个版本的安装程序和日志。
 - **装**。拉起前再校验一遍，再用 `spawn_detached` 拉起 `setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /WAITPID=<桌面 pid> /LOG=<日志> [/RELAUNCH=<桌面 exe>]`，脱离桌面的 Job，桌面随即退出。安装程序在 `InitializeSetup` 里等桌面进程退出（上限 2 分钟，超时这次不装），之后才查 `AppMutex`、换文件（Inno 源码里这两步就是这个顺序）。给了 `/RELAUNCH` 时，装好由 `[Run]` 打开新版；没装成（超时、文件被占用、又有 Smelt 开着）由 `DeinitializeSetup` 把原来那个打开。下次启动在 app.log 里记一笔，指向留下的安装日志。
 - **退出时装**。Quit 动作和关掉主窗口（Windows 上关主窗口就是退出，不走 Quit）都会装待装的更新，不重新打开。
