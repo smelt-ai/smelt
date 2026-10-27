@@ -109,6 +109,7 @@ impl Workspace {
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
+            acp_commands_open: self.settings_acp_commands_open,
             capabilities_tab: self.nav.capabilities_tab(),
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             show_update_install_confirm: self.show_update_install_confirm,

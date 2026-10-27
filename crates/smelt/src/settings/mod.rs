@@ -872,11 +872,11 @@ fn acp_cmd_setting_value(agent: ConversationAgentKind, command: String) -> Share
     }
 }
 
-/// 设置页「Agent 集成」里每个 agent 一条自定义启动命令输入框（从枚举派生，加
-/// 一家 agent 不用回来抄第四遍）。
+/// 设置「Agent → 高级 → 对话适配器命令」里每家 Agent 一个输入框（从枚举派生，加
+/// 一家 agent 不用回来抄第四遍）。各家的说明一样，写在那一节的标题行。
 fn acp_cmd_setting_item(agent: ConversationAgentKind) -> SettingItem {
     SettingItem::new(
-        format!("{} 自定义启动命令", agent.label()),
+        agent.label(),
         SettingField::input(
             move |cx: &App| {
                 acp_cmd_setting_value(agent, acp_cmd_for(&crate::RuntimeKey::Local, agent, cx))
@@ -893,12 +893,7 @@ fn acp_cmd_setting_item(agent: ConversationAgentKind) -> SettingItem {
             },
         ),
     )
-    .description(format!(
-        "留空使用内置适配器；仅在需要替换适配器或追加参数时填写。\
-         改动只影响之后新建的「{}」对话会话。",
-        agent.label()
-    ))
-    .keywords(["acp", "对话", "agent", agent.id()])
+    .keywords(["acp", "对话", "agent", "自定义启动命令", agent.id()])
 }
 
 /// 按钮的短暂成功文案（设置页复制、自动化保存等读它改按钮字）。
@@ -1354,6 +1349,7 @@ struct SettingsRenderSnapshot {
     daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
+    acp_commands_open: bool,
     /// 能力库当前页签。和 `settings_section` 分开记：设置窗口和能力库可以同时开着，
     /// 各看各的页。
     capabilities_tab: crate::CapabilitiesTab,

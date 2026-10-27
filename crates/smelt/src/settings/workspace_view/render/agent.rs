@@ -1,4 +1,5 @@
-//! 设置页：Agent（运行环境、Hooks、新建与启动、对话命令与工作区）。
+//! 设置页：Agent。本机 Agent（CLI 和 Hooks）、新建菜单（「+」菜单项和额外 workspace）、
+//! 高级（对话适配器命令，默认折叠）。
 
 use super::*;
 use smelt_ui::IconAction as _;
@@ -8,53 +9,97 @@ pub(super) fn agents_page(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    let groups = agent_groups(entity, snapshot, cx);
+    let items = agent_groups(entity.clone(), snapshot, cx);
     SettingPage::new("Agent")
-        .description("本机的 Agent CLI、Hooks 接入和启动命令。")
         .group(
-            groups
-                .runtime
-                .title("运行环境")
-                .description("Smelt 用于启动 Agent 对话的内置运行时与本机 CLI 状态。"),
+            SettingGroup::new()
+                .title("本机 Agent")
+                .item(items.runtime)
+                .item(items.hooks),
         )
         .group(
-            groups
-                .hooks
-                .title("Hooks")
-                .description("把 Smelt 的通知与权限处理接入本机各家 Agent 的配置。"),
+            SettingGroup::new()
+                .title("新建菜单")
+                .item(items.launch)
+                .item(items.profiles),
         )
-        .group(
-            groups
-                .launch
-                .title("新建与启动")
-                .description("项目行「+」菜单里列出的终端与 Agent 启动命令。"),
-        )
-        .group(groups.workspace.title("对话命令与工作区").description(
-            "每家 Agent 开对话时用的启动命令，以及按不同配置目录开的额外 workspace。智能体定义\
-             在主窗口左侧「智能体」里；API key 与网关地址在「Pi 模型」页面。",
-        ))
+        .group(advanced_group(entity, snapshot.acp_commands_open, cx))
 }
 
-struct AgentSettingGroups {
-    runtime: SettingGroup,
-    launch: SettingGroup,
-    workspace: SettingGroup,
-    hooks: SettingGroup,
+/// 对话适配器命令：几乎没人改，默认折起来只露一行摘要。每家一项的说明都一样，写在标题行
+/// 一次就够。
+fn advanced_group(entity: Entity<Workspace>, open: bool, cx: &App) -> SettingGroup {
+    let changed = ConversationAgentKind::ALL
+        .into_iter()
+        .filter(|agent| {
+            acp_cmd_for(&crate::RuntimeKey::Local, *agent, cx) != agent.default_cmd()
+        })
+        .count();
+    let summary = match changed {
+        0 => format!("{} 家都用内置", ConversationAgentKind::ALL.len()),
+        n => format!("{n} 家改过"),
+    };
+    let header = SettingItem::new(
+        "对话适配器命令",
+        SettingField::render(move |_, _, cx: &mut App| {
+            let entity = entity.clone();
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(summary.clone()),
+                )
+                .child(
+                    Button::new("toggle-acp-commands")
+                        .quiet()
+                        .compact()
+                        .icon(if open {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .label(if open { "收起" } else { "展开" })
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |ws, cx| {
+                                ws.settings_acp_commands_open = !ws.settings_acp_commands_open;
+                                cx.notify();
+                            });
+                        }),
+                )
+        }),
+    )
+    .description("替换适配器或追加参数时才需要改，留空用内置；只影响之后新建的对话。")
+    .keywords(["acp", "适配器", "自定义启动命令", "对话命令"]);
+    let group = SettingGroup::new().title("高级").item(header);
+    if open {
+        group.items(ConversationAgentKind::ALL.into_iter().map(acp_cmd_setting_item))
+    } else {
+        group
+    }
+}
+
+/// Agent 页的四块内容，由 `agents_page` 按「本机 Agent / 新建菜单」组装。
+struct AgentSettingItems {
+    runtime: SettingItem,
+    hooks: SettingItem,
+    launch: SettingItem,
+    profiles: SettingItem,
 }
 
 fn agent_groups(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     _cx: &App,
-) -> AgentSettingGroups {
+) -> AgentSettingItems {
     // —— 启动：项目「+」下拉菜单的可配置启动项 ——
     // Settings 的 list 测量项高度时，百分比宽度（w_full）经常解析不到确定父宽，
     // 卡片会缩成「内容宽」——输入框只露出几个字。这里用窗口视口算绝对像素宽。
     let launch_editor_entity = entity.clone();
     let launch_rows = snapshot.launch_rows.clone();
-    let launch_group = SettingGroup::new()
-            .item(
-                    SettingItem::render(move |_, window, cx: &mut App| {
+    let launch_item = SettingItem::render(move |_, window, cx: &mut App| {
                         let muted = cx.theme().muted_foreground;
                         let border = cx.theme().border;
                         let fg = cx.theme().foreground;
@@ -77,13 +122,11 @@ fn agent_groups(
                                                 .text_sm()
                                                 .font_semibold()
                                                 .text_color(fg)
-                                                .child("快捷启动项"),
+                                                .child("项目「+」菜单"),
                                         )
                                         .child(
                                             div().w(field_w).text_sm().text_color(muted).child(
-                                                "项目行「+」菜单里除「新建终端」外的项。\
-                                                 显示名会出现在菜单上；命令是在该项目目录下执行的 shell 命令\
-                                                 （可含参数）。内置 Agent 项固定存在，自定义项可删除。",
+                                                "命令在项目目录下执行，可带参数；内置项不能删。",
                                             ),
                                         ),
                                 );
@@ -172,12 +215,10 @@ fn agent_groups(
                             )
                             .into_any_element()
                     })
-                    .keywords(["快捷启动", "launch", "命令", "claude", "codex", "copilot"]),
-                );
+                    .keywords(["快捷启动", "launch", "命令", "claude", "codex", "copilot"]);
 
-    AgentSettingGroups {
-            runtime: SettingGroup::new()
-                .item(SettingItem::render({
+    AgentSettingItems {
+            runtime: SettingItem::render({
                     let runtime_entity = entity.clone();
                     move |_, _, cx: &mut App| {
                         let runtime = cx
@@ -351,18 +392,9 @@ fn agent_groups(
                     "opencode",
                     "kiro",
                     "pi",
-                ])),
-            launch: launch_group,
-            workspace: SettingGroup::new()
-                // 按 `ConversationAgentKind::ALL` 迭代，不逐家手写：加一家 agent 不该
-                // 需要记得回到设置页再抄一遍。
-                .items(
-                    ConversationAgentKind::ALL
-                        .into_iter()
-                        .map(acp_cmd_setting_item),
-                )
-                .item(
-                    SettingItem::render({
+                ]),
+            launch: launch_item,
+            profiles: SettingItem::render({
                         let profile_editor_entity = entity;
                         let profile_rows = snapshot.profile_rows.clone();
                         move |_, window, cx: &mut App| {
@@ -387,15 +419,12 @@ fn agent_groups(
                                                     .text_sm()
                                                     .font_semibold()
                                                     .text_color(fg)
-                                                    .child("手动添加 workspace"),
+                                                    .child("「新建对话」菜单里的额外 workspace"),
                                             )
                                             .child(
                                                 div().w(field_w).text_sm().text_color(muted).child(
-                                                    "同一家 agent 可以同时用好几个 workspace（比如 Claude \
-                                                     默认的 ~/.claude 之外再开一个 ~/.claude-quant）。选好\
-                                                     agent 类型、填上目录，启动命令自动拼好，不用自己写 \
-                                                     shell 语法。「新建对话」菜单和历史会话页都会多出对应\
-                                                     的入口。",
+                                                    "同一家 Agent 再开一个配置目录（如 ~/.claude-quant），\
+                                                     「新建对话」菜单和历史会话页都会多一项。",
                                                 ),
                                             ),
                                     );
@@ -504,9 +533,7 @@ fn agent_groups(
                         }
                     })
                     .keywords(["workspace", "claude-quant", "config dir", "多工作区", "agent"]),
-                ),
-            hooks: SettingGroup::new()
-                .item(SettingItem::render(move |_, _, cx: &mut App| {
+            hooks: SettingItem::render(move |_, _, cx: &mut App| {
                     // 状态由运行时检测，这里只读设置窗口打开时取回的缓存。
                     let (hook_status, notify_path, busy) = cx
                         .try_global::<AgentHooksCache>()
@@ -523,94 +550,104 @@ fn agent_groups(
                         .is_some_and(|providers| providers.iter().all(|provider| provider.installed));
                     let muted = cx.theme().muted_foreground;
                     let success: Hsla = rgb(crate::ui_theme::green()).into();
+                    // 接入项照运行时报的原样列：它们不是一家 Agent 一项（「Claude / Grok」共用
+                    // 一份配置，Pi 没有 hooks），硬对到上面的 CLI 表反而对不齐。
+                    let providers = match hook_status {
+                        Some(providers) => h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .children(providers.into_iter().map(|provider| {
+                                let color = if provider.installed { success } else { muted };
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(div().size(px(6.)).rounded_full().bg(color))
+                                    .child(div().text_xs().child(provider.label))
+                                    .child(div().text_xs().text_color(muted).child(
+                                        if provider.installed { "已接入" } else { "未接入" },
+                                    ))
+                            }))
+                            .into_any_element(),
+                        None => div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("正在读取接入状态…")
+                            .into_any_element(),
+                    };
                     v_flex()
+                        .w_full()
                         .gap_2()
-                        .child(match hook_status {
-                            Some(providers) => h_flex()
-                                .gap_2()
-                                .flex_wrap()
-                                .children(providers.into_iter().map(|provider| {
-                                    div()
-                                        .text_sm()
-                                        .text_color(if provider.installed { success } else { muted })
-                                        .child(format!(
-                                            "{} {}",
-                                            provider.label,
-                                            if provider.installed {
-                                                "已接入"
-                                            } else {
-                                                "未接入"
-                                            }
-                                        ))
-                                }))
-                                .into_any_element(),
-                            None => div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child("正在读取接入状态…")
-                                .into_any_element(),
-                        })
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .items_start()
+                                .gap_3()
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(div().text_sm().child("Hooks"))
+                                        .child(div().text_xs().text_color(muted).child(
+                                            "把 Smelt 的通知接进各家 Agent 的用户级配置，只增删 Smelt \
+                                             自己的条目；不介入工具权限决策，重开会话后生效。",
+                                        )),
+                                )
+                                .child(
+                                    h_flex()
+                                        .flex_none()
+                                        .gap_1()
+                                        .child(
+                                            Button::new("uninstall-agent-hooks")
+                                                .quiet()
+                                                .compact()
+                                                .label("移除")
+                                                .disabled(busy)
+                                                .on_click(move |_, _window, cx: &mut App| {
+                                                    // 先关闭自动安装，避免部分移除失败后重启又被装回。
+                                                    apply_agent_host(
+                                                        &crate::RuntimeKey::Local,
+                                                        |c| c.hooks_enabled = false,
+                                                        cx,
+                                                    );
+                                                    uninstall_agent_hooks(cx);
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("install-agent-hooks")
+                                                .compact()
+                                                .label(if installed {
+                                                    "重新安装"
+                                                } else {
+                                                    "安装 hooks"
+                                                })
+                                                .disabled(busy)
+                                                .on_click(move |_, _window, cx: &mut App| {
+                                                    // 先记用户意图：即使某个 provider 本次安装失败，
+                                                    // 下次启动也会继续校正，而不是悄悄退回关闭。
+                                                    apply_agent_host(
+                                                        &crate::RuntimeKey::Local,
+                                                        |c| c.hooks_enabled = true,
+                                                        cx,
+                                                    );
+                                                    install_agent_hooks(cx);
+                                                }),
+                                        ),
+                                ),
+                        )
+                        .child(providers)
                         .when_some(notify_path, |this, path| {
                             this.child(
                                 div()
                                     .text_xs()
                                     .text_color(muted)
-                                    .child(format!("路径：{path}")),
+                                    .child(format!("smelt-notify：{path}")),
                             )
                         })
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("install-agent-hooks")
-                                        .outline()
-                                        .label(if installed {
-                                            "重新安装 hooks"
-                                        } else {
-                                            "安装 hooks"
-                                        })
-                                        .disabled(busy)
-                                        .on_click(move |_, _window, cx: &mut App| {
-                                            // 先记用户意图：即使某个 provider 本次安装失败，
-                                            // 下次启动也会继续校正，而不是悄悄退回关闭。
-                                            apply_agent_host(
-                                                &crate::RuntimeKey::Local,
-                                                |c| c.hooks_enabled = true,
-                                                cx,
-                                            );
-                                            install_agent_hooks(cx);
-                                        }),
-                                )
-                                .child(
-                                    Button::new("uninstall-agent-hooks")
-                                        .danger()
-                                        .label("移除 Smelt hooks")
-                                        .disabled(busy)
-                                        .on_click(move |_, _window, cx: &mut App| {
-                                            // 先关闭自动安装，避免部分移除失败后重启又被装回。
-                                            apply_agent_host(
-                                                &crate::RuntimeKey::Local,
-                                                |c| c.hooks_enabled = false,
-                                                cx,
-                                            );
-                                            uninstall_agent_hooks(cx);
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(
-                                    "分别写入 Claude、Copilot、Codex、Antigravity、Cursor 的用户级 hooks，\
-                                     OpenCode 的全局插件、~/.grok/hooks/smelt-notifications.json，以及 \
-                                     ~/.kiro/hooks/smelt-notifications.json。Grok TUI 读自己的 hooks 目录，\
-                                     不只读 Claude settings；Kiro 全局 hooks 需要 CLI v3 / IDE 1.0+。只增删 \
-                                     Smelt 条目或 Smelt 管理的插件文件；hooks 只观察进度和完成态，不介入工具\
-                                     权限决策，重开会话后生效。",
-                                ),
-                        )
                         .into_any_element()
-                })),
+                })
+                .keywords(["hook", "hooks", "通知接入", "配置文件"]),
     }
 }
