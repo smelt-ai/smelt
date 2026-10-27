@@ -4935,7 +4935,7 @@ fn main() {
         cx.bind_keys(app_key_bindings());
         cx.set_menus(vec![
             Menu::new("Smelt").items([
-                MenuItem::action(concat!("v", env!("CARGO_PKG_VERSION")), gpui::NoAction)
+                MenuItem::action(format!("v{}", smelt_version::VERSION), gpui::NoAction)
                     .disabled(true),
                 #[cfg(target_os = "macos")]
                 MenuItem::Separator,

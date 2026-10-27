@@ -24,16 +24,13 @@ jobs:
           # 发布说明要找上一个 tag，需要完整历史和全部 tag。
           fetch-depth: 0
 
-      # tag 必须就是 v<工作区版本号>（预发布也一样，先把版本号改成 2026.1023.0-rc.1 再打
-      # v2026.1023.0-rc.1，取号见 docs/release.md）：桌面请远程运行时升级时，运行时按桌面的版本号去这个 tag 的 Release
-      # 下载包，对不上就找不到。
-      - name: Tag matches workspace version
+      # 版本号只在 tag 上：tag 去掉 v 就是版本号，打包时经 SMELT_VERSION 编进程序（见
+      # scripts/version.sh，取号见 docs/release.md）。桌面请远程运行时升级时，运行时按这个版本号
+      # 去同名 tag 的 Release 下载包。下面每个编 Rust 的 job 都设一遍。
+      - name: Version from tag
         run: |
-          version="$(awk -F'"' '/^\[workspace.package\]/{inside=1; next} /^\[/{inside=0} inside && /^version *=/{print $2; exit}' Cargo.toml)"
-          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "✗ tag $GITHUB_REF_NAME 和 Cargo.toml 的版本 $version 对不上，应打 v$version"
-            exit 1
-          fi
+          echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          SMELT_VERSION="${GITHUB_REF_NAME#v}" scripts/version.sh
 
       # 打包链路依赖这些文件真的进了 git；缺任何一个就一次性列全并失败，
       # 而不是跑到一半才炸（历史教训：本地能打包 ≠ 文件都入了库）。
@@ -44,6 +41,7 @@ jobs:
             Makefile \
             scripts/package-mac.sh \
             scripts/package-linux.sh \
+            scripts/version.sh \
             scripts/build-smelt-pi.sh \
             scripts/fetch-bun.sh \
             scripts/entitlements.plist \
@@ -210,6 +208,9 @@ jobs:
       # 容器里工作区属主和当前用户不一致，git 会拒绝操作。
       - name: Trust workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Version from tag
+        run: echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       # 版本由仓库根的 rust-toolchain.toml 决定，rustup 只装个壳，再按它补齐工具链。
       - name: Toolchain
@@ -389,6 +390,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Version from tag
+        run: echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       # cargokit 用 rust-toolchain.toml 钉的工具链编 crates/smelt-mobile，缺的 target 它自己装。
       # 不读 Rust 缓存：没有哪个 main 上的 job 编 iOS，预热不到，每次冷编。
       - name: Install Rust toolchain
@@ -445,7 +449,7 @@ jobs:
           EXISTING="$(security list-keychains -d user | sed 's/[\" ]//g')"
           security list-keychains -d user -s "$KEYCHAIN" $EXISTING
 
-      # 出包前会核对 tag 就是工作区版本、代码没有改动。
+      # 出包前会核对当前提交就是这个 tag、代码没有改动。
       - name: Build and upload to TestFlight
         run: scripts/build-ios.sh --upload
 
@@ -466,6 +470,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Version from tag
+        shell: bash
+        run: echo "SMELT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release -p smelt -p smelt-cli -p smeltd --locked

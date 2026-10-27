@@ -13,7 +13,9 @@
 #
 # 自己分发安装包时可设的环境变量：
 #   SMELT_UPDATE_URL            这个包本身的下载地址，写进包里，装好后不会把自己当成新版本
-#   以下三项在编译时生效，要配合 --build（或自己带着它们 cargo build --release）：
+#   SMELT_BUILD_NUMBER          Info.plist 的 CFBundleVersion（纯数字、只增不减），不设取打包时的 UTC 时间
+#   以下几项在编译时生效，要配合 --build（或自己带着它们 cargo build --release）：
+#   SMELT_VERSION               版本号；--build 时不设就由 scripts/version.sh 按 git tag 算
 #   SMELT_UPDATE_MANIFEST_URL   更新清单地址，`{channel}` 换成 dev / prod；不设则查 GitHub Releases
 #   SMELT_FEEDBACK_URL          「反馈问题」的链接；不设则是 GitHub issues
 #   SMELT_DOCS_URL              「帮助文档」的链接；不设则是 smelt.onoo.io
@@ -25,7 +27,6 @@ EXEC_NAME="smelt"             # .app 内可执行文件名
 BUNDLE_ID="com.zzfn.smelt"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')"
 UPDATE_URL="${SMELT_UPDATE_URL:-}"
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
@@ -69,7 +70,9 @@ if [[ "$SKIP_DMG" -eq 0 ]]; then
 fi
 
 if [[ "$BUILD" -eq 1 ]]; then
-  echo "▶ 编译 release …"
+  SMELT_VERSION="$("$ROOT/scripts/version.sh")"
+  export SMELT_VERSION
+  echo "▶ 编译 release（v$SMELT_VERSION）…"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-installer
   echo "▶ 编译 smelt-pi …"
   make -C "$ROOT" smelt-pi
@@ -115,6 +118,13 @@ if ! file "$PI_BIN" | grep -q "arm64"; then
   echo "✗ $PI_BIN 不是 arm64。" >&2
   exit 1
 fi
+
+# 版本号以编进程序的为准，Info.plist 才和「当前版本」对得上；不带 --build 时
+# （make install）用的是已有的产物，那时编的是什么就是什么，开发构建是 0.0.0-dev。
+VERSION="$("$DAEMON_BIN" --version)"
+VERSION="${VERSION#smeltd }"
+BUILD_NUMBER="${SMELT_BUILD_NUMBER:-$(date -u +%y%j%H%M)}"
+[[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || { echo "✗ SMELT_BUILD_NUMBER 要是整数：$BUILD_NUMBER" >&2; exit 1; }
 
 # 在临时目录组装。签名校验通过前不碰 dist 里的正式包，失败的半成品不能被
 # make install 当成已经打好的 Smelt.app。
@@ -232,7 +242,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleExecutable</key>
 	<string>${EXEC_NAME}</string>
 	<key>CFBundleVersion</key>
-	<string>${VERSION}</string>
+	<string>${BUILD_NUMBER}</string>
 	<key>CFBundleShortVersionString</key>
 	<string>${VERSION}</string>
 	<key>CFBundlePackageType</key>

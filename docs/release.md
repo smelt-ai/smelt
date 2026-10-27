@@ -13,9 +13,8 @@
 
 ## 发版步骤
 
-tag 必须**正好**是 `v<Cargo.toml 的工作区版本>`，预发布也一样：桌面请远程运行时升级时，运行时按桌面的版本号
-去同名 tag 的 Release 下载 `smeltd-<版本>-linux-<架构>.tar.gz`，版本号里少了 `-rc.N` 就找不到包。版本号不要手改，
-统一用 `scripts/release.sh`：
+版本号只在 tag 上，代码里不写（`Cargo.toml` 固定 `0.0.0`）：打包时从 tag 算出版本号编进程序，见下面的「版本号」。
+发版就是打 tag，统一用 `scripts/release.sh` 取号：
 
 ```sh
 scripts/release.sh --rc        # 预发布：2026.1023.0-rc.1，已有进行中的 rc 就 rc.2、rc.3…
@@ -23,9 +22,9 @@ scripts/release.sh             # 正式版：有进行中的 rc 就去掉 -rc.N 
 scripts/release.sh --dry-run   # 只看会取到哪个号
 ```
 
-脚本在本地 `main` 上改 `Cargo.toml`、跑 `cargo update --workspace` 更新锁文件（Linux 打包用 `--locked`），只提交这两个
-文件并打 tag，最后打印推送命令（`git push --atomic <远端> main v<版本>`），确认后自己推。只提交这两个文件，工作区里
-别的未提交改动不受影响。直接推 `main` 会绕过 PR 和 `ci-ok` 检查，需要管理员权限；发版流水线自己会完整构建一遍。
+脚本在本地 `main` 的当前提交上打 tag，不改文件、不提交，最后打印推送命令，确认后自己推：本地 `main` 和
+GitHub 一致时只推 tag（`git push <远端> v<版本>`）；本地领先时连 `main` 一起推（`git push --atomic <远端> main v<版本>`），
+直接推 `main` 会绕过 PR 和 `ci-ok` 检查，需要管理员权限。发版流水线自己会完整构建一遍。
 
 tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装默认也不会装它（要装得设 `SMELT_VERSION`）。
 
@@ -41,17 +40,29 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 
 - `YYYY` 四位年份；`MDD` 是月份接两位日期（10 月 23 日是 `1023`，1 月 3 日是 `103`）；`N` 是当天第几个版本，从 `0` 起。
   例：`2026.1023.0`、同一天再发 `2026.1023.1`。
-- `MDD` 不补成四位：Cargo 要求合法的 semver，各段不能有前导零（`0103` 会被拒）。月份在前、日期固定两位，所以
+- `MDD` 不补成四位：版本号要是合法的 semver，各段不能有前导零（`0103` 会被拒）。月份在前、日期固定两位，所以
   不同日子不会撞号，数值大小也和日期先后一致。
 - 日期就是打 tag 那天。当天的 rc 接着发 `-rc.N+1`，当天发正式版就沿用 rc 的号、只去掉 `-rc.N`；前几天没发完的
   rc 不再接着用旧日期，不管再发 rc 还是正式版都取今天的新号（`2026.1026.0-rc.2` 隔天再发是 `2026.1027.0-rc.1`）。
 - 版本号只表示先后，不表示兼容：桌面和运行时兼不兼容看控制协议版本，不看它。v0.9.1 之后改用这套，
   数值上 `2026.x` 比 `0.9.x` 大，运行时「只升不降」和自动更新都照常。
 
-- 桌面与运行时：`Cargo.toml` 的 `version`。
-- Android：versionName 是 tag 去掉 `v`（含 `-rc.N`，与工作区版本相同）；versionCode 是 release 流水线的 `run_number`，逐次递增，
+版本号不写在代码里，打包时由 `scripts/version.sh` 从 git tag 算出，经环境变量 `SMELT_VERSION` 在编译时编进程序
+（`crates/smelt-version`）。`Cargo.toml` 的 `version` 固定 `0.0.0`，发版不改它，也就没有「改版本号」的提交。
+
+- 当前提交正好是发版 tag `v<版本>`：版本号就是 `<版本>`，如 `2026.1027.0-rc.1`。发版流水线直接把 tag 名传进
+  `SMELT_VERSION`。
+- 不在 tag 上（如 tag 之后的提交、合并提交）：最近的发版 tag 加 semver 构建信息，如 `2026.1027.0-rc.1+3.g32c3172`，
+  即离 `v2026.1027.0-rc.1` 3 个提交、提交 `32c3172`。同一个 tag 之后打的包各不相同，能直接对回代码。比新旧时不看
+  `+` 后面；请远程运行时升级时去掉它，升到 GitHub 上那个 Release（`smelt_version::RELEASE`）。
+- 算不出来（没有 tag、浅克隆）打包直接失败，不打出版本号是占位值的包。没注入版本号的开发构建（`cargo run`、`make build`）
+  显示 `0.0.0-dev`，不能请远程运行时升级。
+
+- 桌面与运行时：上面算出的版本号。macOS 的 `CFBundleShortVersionString` 也是它；`CFBundleVersion` 取打包时的 UTC 时间
+  （同 iOS 构建号），纯数字、只增不减。
+- Android：versionName 是 tag 去掉 `v`（含 `-rc.N`）；versionCode 是 release 流水线的 `run_number`，逐次递增，
   新包总能覆盖安装旧包。
-- iOS：版本号是工作区版本去掉 `-rc.N`（Apple 只认纯数字的 `x.y.z`）：同一次发版的 rc 和正式版共用一个版本号，在
+- iOS：版本号是发版版本号去掉 `-rc.N`（Apple 只认纯数字的 `x.y.z`）：同一次发版的 rc 和正式版共用一个版本号，在
   TestFlight 里靠构建号区分。构建号取出包时的 UTC 时间（`%y%j%H%M`：两位年、一年中的第几天、时、分），只增不减，
   又在 32 位整数以内。见下面的「移动端」。
 - `mobile/pubspec.yaml` 里的版本只给本地开发构建用，发布包一律在命令行上传入版本号，不改它。
@@ -83,7 +94,7 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
   scripts/build-ios.sh --upload   # 出包直接上传；不带 --upload（= make ios）只出 ipa，在 mobile/build/ios/ipa/
   ```
 
-  脚本只在当前提交正好是工作区版本的 tag、`mobile/` 和 `crates/` 没有未提交改动时出包，保证包和发版的代码对得上。
+  脚本只在当前提交正好是发版 tag、`mobile/` 和 `crates/` 没有未提交改动时出包，保证包和发版的代码对得上。
   签名用 `mobile/ios/Flutter/SigningDefaults.xcconfig` 里的正式团队和 Bundle ID，导出设置在
   `mobile/ios/ExportOptions.plist`。本地用 Xcode 里登录的账号签名。
 

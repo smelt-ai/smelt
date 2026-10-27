@@ -22,7 +22,7 @@ pub(super) fn handle_version<C: ClientSocket>(
     let _ = smelt_runtime_client::protocol::write_json_line(
         &mut c,
         &serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": smelt_version::VERSION,
             "exe_mtime": exe_mtime,
             "exe": exe_path,
             "daemon_fingerprint": daemon_fingerprint,

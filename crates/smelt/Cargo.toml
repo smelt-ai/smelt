@@ -14,6 +14,7 @@ smelt-model = { path = "../smelt-model" }
 smelt-client = { path = "../smelt-client" }
 smelt-cli = { path = "../smelt-cli" }
 smelt-paths = { path = "../smelt-paths" }
+smelt-version = { path = "../smelt-version" }
 smelt-pairing = { path = "../smelt-pairing" }
 smelt-iroh = { path = "../smelt-iroh" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }

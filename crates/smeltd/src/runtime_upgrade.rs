@@ -26,7 +26,7 @@ pub(crate) fn handle_runtime_upgrade<C: ClientSocket>(mut conn: C, request: &ser
 }
 
 fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply {
-    let target = match check_target(version, env!("CARGO_PKG_VERSION")) {
+    let target = match check_target(version, smelt_version::VERSION) {
         Ok(target) => target,
         Err(error) => return RuntimeUpgradeReply::Failed { error },
     };
@@ -50,12 +50,17 @@ fn upgrade<C: ClientSocket>(conn: &mut C, version: &str) -> RuntimeUpgradeReply 
     reply
 }
 
-/// 版本号要是合法的 semver（顺带挡住拼进 URL 的斜杠之类），且不比自己旧。
+/// 版本号要是合法的 semver（顺带挡住拼进 URL 的斜杠之类）、是一次发版（不带 `+` 构建信息，
+/// GitHub 上才有这个 Release），且不比自己旧。比新旧不看构建信息：不在 tag 上的构建是
+/// `2026.1027.0-rc.1+3.g32c3172`，和 `2026.1027.0-rc.1` 算同一个版本。
 fn check_target(requested: &str, current: &str) -> Result<semver::Version, String> {
     let target = semver::Version::parse(requested.trim())
         .map_err(|error| format!("版本号不合法（{requested}）：{error}"))?;
+    if !target.build.is_empty() {
+        return Err(format!("v{target} 不是发版的版本号，没有对应的 Release"));
+    }
     if let Ok(current) = semver::Version::parse(current)
-        && target < current
+        && target.cmp_precedence(&current).is_lt()
     {
         return Err(format!("只升不降：运行时 v{current} 比要的 v{target} 新"));
     }
@@ -74,7 +79,7 @@ pub(crate) fn ensure_smelt_pi() {
     if !managed {
         return;
     }
-    let Ok(version) = semver::Version::parse(env!("CARGO_PKG_VERSION")) else {
+    let Some(Ok(version)) = smelt_version::RELEASE.map(semver::Version::parse) else {
         return;
     };
     if let Err(error) = linux::ensure_smelt_pi(&version) {
@@ -383,6 +388,16 @@ mod tests {
             check_target("2026.0103.0", "0.9.1").is_err(),
             "前导零不是合法 semver"
         );
+    }
+
+    /// 不在 tag 上的构建带构建信息：比新旧时不算它，但要升到的版本不能带（没有这样的 Release）。
+    #[test]
+    fn build_metadata_is_ignored_when_comparing_and_rejected_as_target() {
+        assert!(check_target("2026.1027.0-rc.1", "2026.1027.0-rc.1+3.g32c3172").is_ok());
+        assert!(check_target("2026.1027.0", "2026.1027.0-rc.1+3.g32c3172").is_ok());
+        assert!(check_target("2026.1026.0", "2026.1027.0-rc.1+3.g32c3172").is_err());
+        let error = check_target("2026.1027.0-rc.1+3.g32c3172", "2026.1026.0").unwrap_err();
+        assert!(error.contains("不是发版"), "{error}");
     }
 
     /// 版本号会拼进下载地址，不是 semver 的一律拒绝。

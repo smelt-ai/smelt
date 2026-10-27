@@ -127,7 +127,7 @@ pub fn grant_codex_hook_trust(
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "clientInfo": {"name":"smelt", "title":"Smelt", "version":env!("CARGO_PKG_VERSION")},
+                    "clientInfo": {"name":"smelt", "title":"Smelt", "version":smelt_version::VERSION},
                     "capabilities": {"experimentalApi":true}
                 }
             }),

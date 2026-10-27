@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 发版：按日期取号，改工作区版本、更新 Cargo.lock、提交、打 tag。不推送，最后打印推送命令。
-# 取号规则见 docs/release.md 的「版本号」。
+# 发版：按日期取号，在当前提交上打 tag。不改文件、不提交、不推送，最后打印推送命令。
+# 版本号只在 tag 上：打包时由 scripts/version.sh 从 tag 算出来编进程序。取号规则见 docs/release.md
+# 的「版本号」。
 #
 #   scripts/release.sh             正式版：今天有进行中的 rc 就去掉 -rc.N 发它，否则取今天的新号
 #   scripts/release.sh --rc        预发布：今天有进行中的 rc 就 rc.N+1，否则今天的新号加 -rc.1
@@ -8,7 +9,7 @@
 # 日期一律是打 tag 那天：前几天没发完的 rc 不再接着用旧日期，取今天的新号。
 #   scripts/release.sh --dry-run   只算出版本号，什么都不改（可与 --rc 同用）
 #
-# Cargo.toml 的版本平时就是最近发过的那个 tag，脚本靠它判断有没有进行中的 rc。
+# 「当前版本」是当前提交往前最近的发版 tag，脚本靠它判断有没有进行中的 rc。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,10 +25,6 @@ for arg in "$@"; do
     *) die "未知参数：${arg}（可用 --rc、--dry-run）" ;;
   esac
 done
-
-workspace_version() {
-  awk -F'"' '/^\[workspace.package\]/{inside=1; next} /^\[/{inside=0} inside && /^version *=/{print $2; exit}' Cargo.toml
-}
 
 # 比较 x.y.z 三段整数：$1 > $2 返回 0。
 core_gt() {
@@ -46,15 +43,13 @@ remote="$(git remote -v | awk '$2 ~ /github\.com[:\/]smelt-ai\/smelt(\.git)?$/ &
 [[ -n "$remote" ]] || die "没有指向 github.com/smelt-ai/smelt 的远端"
 
 [[ "$(git rev-parse --abbrev-ref HEAD)" == main ]] || die "只在 main 上发版"
-# 只提交 Cargo.toml 和 Cargo.lock，别的未提交改动不进这次提交。
-git diff --quiet HEAD -- Cargo.toml Cargo.lock || die "Cargo.toml 或 Cargo.lock 有未提交的改动，先处理掉"
 git fetch --quiet --tags "$remote" main
 git merge-base --is-ancestor "$remote/main" HEAD || die "本地 main 落后于 $remote/main，先 pull"
 
-current="$(workspace_version)"
-[[ -n "$current" ]] || die "读不到工作区版本号"
-git rev-parse -q --verify "refs/tags/v$current" >/dev/null \
-  || die "Cargo.toml 的 $current 还没有对应的 tag v${current}；版本号应只由本脚本改"
+# 只认发版 tag（v 加数字开头），plugin-sdk-v0.1.0 这类不算。
+current="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null)" \
+  || die "找不到发版 tag（v*）"
+current="${current#v}"
 
 today="$(date +%Y).$((10#$(date +%m)))$(date +%d)"
 
@@ -84,28 +79,14 @@ else
 fi
 
 git rev-parse -q --verify "refs/tags/v$version" >/dev/null && die "tag v$version 已存在"
-echo "▶ $current → $version"
+echo "▶ $current → $version（$(git rev-parse --short HEAD)）"
 if ((dry_run)); then exit 0; fi
 
-tmp="$(mktemp)"
-awk -v version="$version" '
-  /^\[workspace.package\]/ { inside = 1 }
-  /^\[/ && !/^\[workspace.package\]/ { inside = 0 }
-  inside && !done && /^version *=/ { print "version = \"" version "\""; done = 1; next }
-  { print }
-' Cargo.toml >"$tmp"
-mv "$tmp" Cargo.toml
-[[ "$(workspace_version)" == "$version" ]] || die "改 Cargo.toml 失败"
-
-# 只改工作区成员的版本行，不动依赖；Linux 打包用 --locked，锁文件必须跟上。
-cargo update --workspace --quiet
-if git diff -U0 Cargo.lock | grep -E '^[+-][^+-]' | grep -vqE '^[+-]version = '; then
-  git diff Cargo.lock >&2
-  git checkout -- Cargo.toml Cargo.lock
-  die "Cargo.lock 改了版本行以外的内容（多半是有成员的 Cargo.toml 改了依赖还没提交），已还原"
-fi
-
-git commit --quiet -m "chore(release): v$version" -- Cargo.toml Cargo.lock
 git tag -a "v$version" -m "v$version"
-echo "✓ 已提交并打 tag v${version}。确认无误后推送："
-echo "  git push --atomic $remote main v$version"
+echo "✓ 已打 tag v${version}。确认无误后推送："
+if [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$remote/main")" ]]; then
+  echo "  git push $remote v$version"
+else
+  # 本地 main 领先：tag 指向的提交要和 main 一起上去。
+  echo "  git push --atomic $remote main v$version"
+fi

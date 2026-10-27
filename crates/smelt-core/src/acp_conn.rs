@@ -1854,7 +1854,7 @@ async fn run_connection(
                             InitializeRequest::new(ProtocolVersion::V1)
                                 .client_info(Implementation::new(
                                     "smelt",
-                                    env!("CARGO_PKG_VERSION"),
+                                    smelt_version::VERSION,
                                 ))
                                 .client_capabilities(smelt_client_capabilities()),
                         )

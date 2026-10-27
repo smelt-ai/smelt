@@ -1,6 +1,7 @@
 # 虚拟 workspace：所有代码住 crates/ 下，根不再有 package。
 # - crates/smelt-store  —— 桌面 SQLite/KV 与 legacy 导入事务原语（移动端不编 native SQLite）
 # - crates/smelt-pairing —— 桌面/移动端共用的配对码格式
+# - crates/smelt-version —— 编译时从 SMELT_VERSION 注入的版本号（见 scripts/version.sh）
 # - crates/smelt-runtime-client —— smeltd wire 契约与协议客户端（桌面/移动端共用，能编进移动端）
 # - crates/smelt-client-store —— 桌面客户端自己的库 client.sqlite3（外观、界面状态等）
 # - crates/smelt-core   —— GUI 与守护共用的无 UI 逻辑（不许引 GPUI）
@@ -10,6 +11,7 @@
 [workspace]
 members = [
     "crates/smelt-paths",
+    "crates/smelt-version",
     "crates/smelt-sys",
     "crates/smelt-model",
     "crates/smelt-client",
@@ -31,10 +33,10 @@ members = [
 ]
 resolver = "3"
 
-# 版本号唯一真源，由 scripts/release.sh 改，不要手改（scripts/package-mac.sh 与 release CI 都
-# grep 本文件的 '^version' 行做校验），各成员 version.workspace = true 继承。
+# 版本号不写在这里：发版只打 tag，打包时从 tag 算出版本号，经 SMELT_VERSION 编进程序
+# （crates/smelt-version，规则见 docs/release.md 的「版本号」）。这里固定 0.0.0，不要改。
 [workspace.package]
-version = "2026.1026.0-rc.3"
+version = "0.0.0"
 edition = "2024"
 # 与 rust-toolchain.toml 一致。成员 crate 未一律 inherit，钉编译器靠 toolchain 文件。
 rust-version = "1.97.0"

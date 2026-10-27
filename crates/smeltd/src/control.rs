@@ -111,7 +111,7 @@ fn dispatch_control(
                         .collect(),
                 },
                 daemon: DaemonRuntimeInfo {
-                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    version: smelt_version::VERSION.to_string(),
                     exe_mtime,
                     exe: super::daemon_executable_path()
                         .ok()

@@ -43,11 +43,11 @@ fn about_header(cx: &App) -> AnyElement {
     #[cfg(target_os = "macos")]
     let version = format!(
         "v{} · {}",
-        env!("CARGO_PKG_VERSION"),
+        smelt_version::VERSION,
         cx.global::<UpdateSettings>().channel.label()
     );
     #[cfg(not(target_os = "macos"))]
-    let version = concat!("v", env!("CARGO_PKG_VERSION")).to_string();
+    let version = format!("v{}", smelt_version::VERSION);
     v_flex()
         .gap_1()
         .child(div().text_base().font_semibold().child("Smelt"))

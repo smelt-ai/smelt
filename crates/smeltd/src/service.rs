@@ -21,7 +21,7 @@ pub(crate) fn maybe_run(args: &[String]) -> Option<i32> {
     let command = args.get(1)?;
     Some(match command.as_str() {
         "--version" | "-V" => {
-            println!("smeltd {}", env!("CARGO_PKG_VERSION"));
+            println!("smeltd {}", smelt_version::VERSION);
             0
         }
         "status" => status(),
