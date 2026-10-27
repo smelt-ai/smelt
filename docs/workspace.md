@@ -64,7 +64,7 @@ cargo run --bin smelt
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
 - **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
-- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 24，按字段建表，没有通用 kv）。
+- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 25，按字段建表，没有通用 kv）。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
 - **`crates/smelt-mobile`** —— 手机 Rust 内核（身份、连接、目录、对话、终端、离线缓存），经 flutter_rust_bridge 给 Flutter。
