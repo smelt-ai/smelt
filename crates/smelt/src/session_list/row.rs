@@ -54,33 +54,39 @@ pub(crate) fn session_row_status_label(status: AgentStatus) -> Option<&'static s
     (status == AgentStatus::NeedsYou).then(|| status_text(status))
 }
 
-/// 进度条填满的比例：不确定进度只留轨道，没有数值的出错画满一条，其余按百分比。
-pub(super) fn progress_fraction(progress: TerminalProgress) -> f32 {
+/// 进度条填满的比例：没有数值的出错画满一条，其余按百分比。不确定进度不画条（`None`），
+/// 见 [`session_progress_bar`]。
+pub(super) fn progress_fraction(progress: TerminalProgress) -> Option<f32> {
     match (progress.state, progress.percent) {
-        (TerminalProgressState::Indeterminate, _) => 0.0,
-        (TerminalProgressState::Error, None | Some(0)) => 1.0,
-        (_, percent) => f32::from(percent.unwrap_or(0).min(100)) / 100.0,
+        (TerminalProgressState::Indeterminate, _) => None,
+        (TerminalProgressState::Error, None | Some(0)) => Some(1.0),
+        (_, percent) => Some(f32::from(percent.unwrap_or(0).min(100)) / 100.0),
     }
 }
 
 /// 会话行底部的细进度条：终端程序用 OSC 9;4 报的进度。用组件库的 `Progress`，颜色
-/// 跟主题的进度条色走；出错、暂停换成危险、警告色。不确定进度只画它那条淡轨道，
-/// 不开 `loading` 动画——侧栏常驻，动画会让整个工作台不停重绘。
-pub(super) fn session_progress_bar(ui_id: u64, progress: TerminalProgress) -> Div {
+/// 跟主题的进度条色走；出错、暂停换成危险、警告色。
+///
+/// 不确定进度不画：别家终端拿动画表达它，侧栏常驻不开动画（会让整个工作台不停重绘），
+/// 静止的一条空轨道又像行间分隔线，让人错认选中的是哪一行。程序在忙已经由会话图标说了。
+pub(super) fn session_progress_bar(ui_id: u64, progress: TerminalProgress) -> Option<Div> {
+    let fraction = progress_fraction(progress)?;
     let bar = progress::Progress::new(("session-progress", ui_id))
         .with_size(px(2.))
-        .value(progress_fraction(progress) * 100.);
+        .value(fraction * 100.);
     let bar = match progress.state {
         TerminalProgressState::Normal | TerminalProgressState::Indeterminate => bar,
         TerminalProgressState::Error => bar.color(rgb(ui_theme::red())),
         TerminalProgressState::Paused => bar.color(rgb(ui_theme::yellow())),
     };
-    div()
-        .absolute()
-        .left(px(8.))
-        .right(px(8.))
-        .bottom_0()
-        .child(bar)
+    Some(
+        div()
+            .absolute()
+            .left(px(8.))
+            .right(px(8.))
+            .bottom_0()
+            .child(bar),
+    )
 }
 
 /// 侧栏行尾的最近活动时间。用不会随分钟流逝而过期的本地日历文案，侧栏不必为它
@@ -489,14 +495,15 @@ mod tests {
     }
 
     #[test]
-    fn progress_bar_fills_by_percent_and_leaves_unknown_to_the_track() {
+    fn progress_bar_fills_by_percent_and_skips_unknown() {
         let bar = |state, percent| progress_fraction(TerminalProgress { state, percent });
-        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        let close = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-6);
         assert!(close(bar(TerminalProgressState::Normal, Some(42)), 0.42));
         assert!(close(bar(TerminalProgressState::Paused, Some(100)), 1.0));
-        assert!(
-            close(bar(TerminalProgressState::Indeterminate, Some(60)), 0.0),
-            "不确定进度只留轨道，不画假的百分比"
+        assert_eq!(
+            bar(TerminalProgressState::Indeterminate, Some(60)),
+            None,
+            "不确定进度不画条，空轨道会被看成分隔线"
         );
         assert!(
             close(bar(TerminalProgressState::Error, None), 1.0),

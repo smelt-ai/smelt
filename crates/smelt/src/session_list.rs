@@ -1640,17 +1640,25 @@ impl Workspace {
                             Some(input) => {
                                 inline_rename_input(input, this.clone()).into_any_element()
                             }
-                            // 选中照组件库侧栏：选中底、选中字色、中等字重。
+                            // 选中照组件库侧栏：选中底、选中字色、中等字重。没选中的标题
+                            // 压到弱字，悬停才提亮：选中底和悬停底在不少深色主题里是相近
+                            // 的两档灰，光靠底色分不出哪行是选中、哪行只是鼠标停着。
                             None => div()
                                 .flex_1()
                                 .min_w_0()
                                 .text_sm()
-                                .when(is_active, |title| title.font_medium())
-                                .text_color(rgb(if is_active {
-                                    ui_theme::text_selected()
-                                } else {
-                                    ui_theme::text()
-                                }))
+                                .map(|title| {
+                                    if is_active {
+                                        title
+                                            .font_medium()
+                                            .text_color(rgb(ui_theme::text_selected()))
+                                    } else {
+                                        title.text_color(rgb(ui_theme::text_muted())).group_hover(
+                                            SESSION_ROW_GROUP,
+                                            |style| style.text_color(rgb(ui_theme::text())),
+                                        )
+                                    }
+                                })
                                 .truncate()
                                 .child(title.clone())
                                 .into_any_element(),
@@ -1683,7 +1691,7 @@ impl Workspace {
                                     .child(name)
                             }))
                     }))
-                    .children(progress.map(|progress| session_progress_bar(ui_id, progress)))
+                    .children(progress.and_then(|progress| session_progress_bar(ui_id, progress)))
                     .when(reveal_target == Some(ui_id), |row| {
                         row.child(reveal_anchor(
                             self.sidebar_reveal.clone(),
@@ -1924,13 +1932,21 @@ impl Workspace {
                                             .flex_1()
                                             .min_w_0()
                                             .text_sm()
-                                            // 当前 pane 跟会话行选中同口径，其余用中灰。
-                                            .when(is_current_view, |title| title.font_medium())
-                                            .text_color(rgb(if is_current_view {
-                                                ui_theme::text_selected()
-                                            } else {
-                                                ui_theme::text_mid()
-                                            }))
+                                            // 当前 pane 跟会话行同口径：选中亮，其余弱字、
+                                            // 悬停提亮。
+                                            .map(|title| {
+                                                if is_current_view {
+                                                    title.font_medium().text_color(rgb(
+                                                        ui_theme::text_selected(),
+                                                    ))
+                                                } else {
+                                                    title
+                                                        .text_color(rgb(ui_theme::text_muted()))
+                                                        .group_hover(SESSION_ROW_GROUP, |style| {
+                                                            style.text_color(rgb(ui_theme::text()))
+                                                        })
+                                                }
+                                            })
                                             .truncate()
                                             .child(p_title)
                                             .into_any_element(),
