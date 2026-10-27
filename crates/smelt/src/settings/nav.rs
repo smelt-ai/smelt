@@ -21,8 +21,10 @@ pub enum SettingsSection {
     Remote,
     /// 停在这一页时才采样。
     Resources,
-    /// 应用更新（仅 macOS）、后台服务、存储清理、帮助与反馈。
-    System,
+    /// 后台服务、旧版本残留。
+    Maintenance,
+    /// 版本、应用更新（仅 macOS）、帮助与反馈。
+    About,
 }
 
 impl SettingsSection {
@@ -33,7 +35,7 @@ impl SettingsSection {
     /// 检查更新的深链接。应用更新只在 macOS 上有。
     #[cfg(target_os = "macos")]
     pub fn app_update() -> Self {
-        Self::System
+        Self::About
     }
 
     pub fn element_key(&self) -> gpui::SharedString {
@@ -45,7 +47,8 @@ impl SettingsSection {
             Self::Agents => "agents".into(),
             Self::Remote => "remote".into(),
             Self::Resources => "resources".into(),
-            Self::System => "system".into(),
+            Self::Maintenance => "maintenance".into(),
+            Self::About => "about".into(),
         }
     }
 }
@@ -65,7 +68,7 @@ pub struct SettingsNavCategory {
     pub children: Vec<SettingsNavLeaf>,
 }
 
-/// 设置侧栏：两组，每组一行小标题加若干页。
+/// 设置侧栏：三组，每组一行小标题加若干页。
 pub fn settings_nav() -> Vec<SettingsNavCategory> {
     vec![
         SettingsNavCategory {
@@ -175,7 +178,7 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
             ],
         },
         SettingsNavCategory {
-            title: "Agent 与运行",
+            title: "Agent 与远程",
             keywords: &["运行时"],
             children: vec![
                 leaf(
@@ -256,6 +259,12 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "写入",
                     ],
                 ),
+            ],
+        },
+        SettingsNavCategory {
+            title: "系统",
+            keywords: &[],
+            children: vec![
                 leaf(
                     "资源占用",
                     IconName::MemoryStick,
@@ -274,23 +283,10 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                     ],
                 ),
                 leaf(
-                    "系统",
-                    IconName::Cpu,
-                    SettingsSection::System,
+                    "维护",
+                    Icon::new(gpui_kit_assets::IconName::Wrench),
+                    SettingsSection::Maintenance,
                     &[
-                        "软件版本",
-                        "应用版本",
-                        "版本",
-                        "更新",
-                        "检查更新",
-                        "更新通道",
-                        "自动下载安装",
-                        "升级",
-                        "下载",
-                        "通道",
-                        "生产版",
-                        "内测版",
-                        "自动更新",
                         "smeltd",
                         "守护进程",
                         "守护",
@@ -313,8 +309,27 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "磁盘",
                         "旧数据",
                         "~/.smelt",
-                        "维护",
                         "高级",
+                    ],
+                ),
+                leaf(
+                    "关于",
+                    IconName::Info,
+                    SettingsSection::About,
+                    &[
+                        "软件版本",
+                        "应用版本",
+                        "版本",
+                        "更新",
+                        "检查更新",
+                        "更新通道",
+                        "自动下载安装",
+                        "升级",
+                        "下载",
+                        "通道",
+                        "生产版",
+                        "内测版",
+                        "自动更新",
                         "帮助",
                         "帮助文档",
                         "文档",
@@ -323,7 +338,6 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "日志",
                         "源码",
                         "GitHub",
-                        "关于",
                     ],
                 ),
             ],
@@ -465,15 +479,13 @@ mod tests {
     #[test]
     fn nav_is_two_groups_of_pages() {
         let nav = settings_nav();
-        assert_eq!(titles(&nav), ["通用", "Agent 与运行"]);
+        assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统"]);
         assert_eq!(
             child_titles(&nav, "通用"),
             ["外观", "通知", "快捷键", "面板插件"]
         );
-        assert_eq!(
-            child_titles(&nav, "Agent 与运行"),
-            ["Agent", "远程", "资源占用", "系统"]
-        );
+        assert_eq!(child_titles(&nav, "Agent 与远程"), ["Agent", "远程"]);
+        assert_eq!(child_titles(&nav, "系统"), ["资源占用", "维护", "关于"]);
         let sections = nav
             .iter()
             .flat_map(|category| category.children.iter())
@@ -489,7 +501,8 @@ mod tests {
                 SettingsSection::Agents,
                 SettingsSection::Remote,
                 SettingsSection::Resources,
-                SettingsSection::System,
+                SettingsSection::Maintenance,
+                SettingsSection::About,
             ]
         );
     }
@@ -498,8 +511,8 @@ mod tests {
     fn search_keeps_only_matching_pages_under_their_group() {
         let nav = settings_nav();
         let filtered = filter_settings_nav(&nav, "守护");
-        assert_eq!(titles(&filtered), ["Agent 与运行"]);
-        assert_eq!(child_titles(&filtered, "Agent 与运行"), ["系统"]);
+        assert_eq!(titles(&filtered), ["系统"]);
+        assert_eq!(child_titles(&filtered, "系统"), ["维护"]);
 
         let by_group = filter_settings_nav(&nav, "通用");
         assert_eq!(child_titles(&by_group, "通用").len(), 4);
@@ -514,7 +527,7 @@ mod tests {
         );
         assert_eq!(
             matching_sections(&nav, "后台服务"),
-            [SettingsSection::System]
+            [SettingsSection::Maintenance]
         );
 
         for (query, expected) in [
@@ -523,16 +536,16 @@ mod tests {
             ("添加机器", SettingsSection::Remote),
             ("内存占用", SettingsSection::Resources),
             ("导入插件", SettingsSection::PanelPlugins),
-            ("自动下载安装", SettingsSection::System),
-            ("清缓存", SettingsSection::System),
+            ("自动下载安装", SettingsSection::About),
+            ("清缓存", SettingsSection::Maintenance),
             ("终端字号", SettingsSection::Appearance),
             ("毛玻璃", SettingsSection::Appearance),
             ("背景图", SettingsSection::Appearance),
             ("hook", SettingsSection::Agents),
             ("快捷启动项", SettingsSection::Agents),
             ("config dir", SettingsSection::Agents),
-            ("反馈问题", SettingsSection::System),
-            ("帮助文档", SettingsSection::System),
+            ("反馈问题", SettingsSection::About),
+            ("帮助文档", SettingsSection::About),
         ] {
             assert_eq!(matching_sections(&nav, query), [expected], "query: {query}");
         }

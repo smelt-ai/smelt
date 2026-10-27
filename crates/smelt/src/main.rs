@@ -4643,7 +4643,7 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
 
 // 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
 // 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
-gpui_kit_assets::icon_assets!(LucideExtras, [Coffee, MessageSquare, Puzzle, Server]);
+gpui_kit_assets::icon_assets!(LucideExtras, [Coffee, MessageSquare, Puzzle, Server, Wrench]);
 
 struct SmeltAssets;
 
@@ -4910,7 +4910,7 @@ fn main() {
             .expect("加载内嵌字体失败");
         // 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
         // （跟侧栏「设置」一样开独立设置窗口，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
-        // 放「帮助」菜单。设置「系统」页末尾也有这两项，没有菜单栏的平台从那里进。
+        // 放「帮助」菜单。设置「关于」页也有这两项，没有菜单栏的平台从那里进。
         cx.bind_keys(app_key_bindings());
         cx.set_menus(vec![
             Menu::new("Smelt").items([

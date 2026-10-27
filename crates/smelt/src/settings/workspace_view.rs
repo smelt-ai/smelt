@@ -144,7 +144,7 @@ impl Workspace {
         }
         #[cfg(unix)]
         if self.daemon_outdated == Some(true) {
-            return Some(SettingsSection::System);
+            return Some(SettingsSection::Maintenance);
         }
         crate::runtimes::any_runtime_needs_attention(cx).then_some(SettingsSection::Remote)
     }

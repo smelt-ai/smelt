@@ -43,14 +43,14 @@ mod workspace_view;
 pub(crate) use nav::{SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav};
 pub(super) use remote::*;
 
-/// 「反馈问题」入口统一跳转的链接。菜单栏「帮助」和设置「系统」页共用。
+/// 「反馈问题」入口统一跳转的链接。菜单栏「帮助」和设置「关于」页共用。
 /// 打包时设 `SMELT_FEEDBACK_URL` 换成自己的反馈渠道。
 pub const FEEDBACK_URL: &str = build_time_url(
     option_env!("SMELT_FEEDBACK_URL"),
     "https://github.com/smelt-ai/smelt/issues/new/choose",
 );
 
-/// 「帮助文档」入口的链接，菜单栏「帮助」和设置「系统」页共用。打包时设 `SMELT_DOCS_URL` 换掉。
+/// 「帮助文档」入口的链接，菜单栏「帮助」和设置「关于」页共用。打包时设 `SMELT_DOCS_URL` 换掉。
 pub const DOCS_URL: &str = build_time_url(option_env!("SMELT_DOCS_URL"), "https://smelt.onoo.io/");
 
 /// 打包时没设或设成空串，都用开源版的默认地址。
@@ -911,11 +911,13 @@ struct CopyFlash {
 
 impl Global for CopyFlash {}
 
-/// 「存储」设置页的扫描结果 + 上一次清理的提示文案（点按钮时同步刷新，扫描很快
-/// 不值得像更新检查那样搞异步状态机）。
+/// 「维护 → 旧版本残留」的扫描结果、是否正在确认清理，以及上一次清理的提示文案（点按钮
+/// 时同步刷新，扫描很快不值得像更新检查那样搞异步状态机）。
 #[derive(Clone, Default)]
 struct CleanupState {
     scan: Option<crate::storage_cleanup::CleanupScan>,
+    /// 点了「清理…」，等「确认清理」。删的是文件，先确认一次。
+    confirming: bool,
     message: Option<SharedString>,
 }
 

@@ -7,6 +7,7 @@
 //! 不把整组设置堆进一个可滚动长页。
 
 use super::*;
+use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputState};
 use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_component::tag::Tag;
@@ -104,6 +105,9 @@ impl RenderOnce for SettingsShell {
                         selected.element_key(),
                         self.snapshot.settings_page_nonce
                     )))
+                    // 每一节一张描边卡片。不用 Fill：它的底色是背景混 30% 的次级色，近黑主题上
+                    // 跟背景几乎分不出来；描边在各主题下都看得见。
+                    .with_group_variant(GroupBoxVariant::Outline)
                     .sidebar_width(px(0.))
                     .sidebar_size_range(px(0.)..px(0.))
                     .pages(vec![page]),
@@ -153,8 +157,15 @@ fn render_nav(
         .collapsible(false)
         .collapsed(false)
         .header(header)
-        .children(nav.iter().map(|category| {
-            SidebarGroup::new(category.title).child(SidebarMenu::new().children(
+        .children(nav.iter().enumerate().map(|(ix, category)| {
+            // 组与组之间空一截：上游 Sidebar 的列表项之间没有间距，小标题也不带上边距，
+            // 不空开的话两组贴在一起像一组。
+            let menu = if ix + 1 == nav.len() {
+                SidebarMenu::new()
+            } else {
+                SidebarMenu::new().pb_4()
+            };
+            SidebarGroup::new(category.title).child(menu.children(
                 category.children.iter().map(|child| {
                     let entity = entity.clone();
                     let section = child.section.clone();
@@ -223,6 +234,7 @@ fn section_page(
         SettingsSection::Resources => {
             crate::resource_monitor::resources_page(entity, snapshot.resources.clone())
         }
-        SettingsSection::System => maintenance::system_page(entity, snapshot, cx),
+        SettingsSection::Maintenance => maintenance::maintenance_page(entity, snapshot, cx),
+        SettingsSection::About => maintenance::about_page(entity, snapshot, cx),
     }
 }
