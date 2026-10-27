@@ -16,6 +16,7 @@ mod agent;
 mod appearance;
 mod collaboration;
 mod maintenance;
+mod notify;
 mod panel_plugin;
 mod pi_auth;
 mod pi_mcp;
@@ -218,7 +219,7 @@ fn section_page(
 ) -> SettingPage {
     match selected {
         SettingsSection::Appearance => appearance::appearance_page(entity, snapshot, cx),
-        SettingsSection::Notifications => agent::notify_page(entity, snapshot, cx),
+        SettingsSection::Notifications => notify::notify_page(),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
         SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
         SettingsSection::Agents => {

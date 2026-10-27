@@ -1,4 +1,4 @@
-//! 设置页：Agent（运行环境、Hooks、新建与启动、对话命令与工作区）和通知。
+//! 设置页：Agent（运行环境、Hooks、新建与启动、对话命令与工作区）。
 
 use super::*;
 use smelt_ui::IconAction as _;
@@ -35,20 +35,8 @@ pub(super) fn agents_page(
         ))
 }
 
-pub(super) fn notify_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> SettingPage {
-    let groups = agent_groups(entity, snapshot, cx);
-    SettingPage::new("通知")
-        .description("选择哪些 Agent 状态和终端事件需要提醒你。")
-        .group(groups.notify)
-}
-
 struct AgentSettingGroups {
     runtime: SettingGroup,
-    notify: SettingGroup,
     launch: SettingGroup,
     workspace: SettingGroup,
     hooks: SettingGroup,
@@ -364,145 +352,6 @@ fn agent_groups(
                     "kiro",
                     "pi",
                 ])),
-            notify: SettingGroup::new()
-                .item(
-                    SettingItem::new(
-                        "系统通知权限",
-                        SettingField::render(|_, _, cx: &mut App| {
-                            let status = crate::status_item::system_notification_status();
-                            let presentation =
-                                crate::status_item::system_notification_status_presentation(&status);
-                            let color = if presentation.is_error {
-                                cx.theme().danger
-                            } else if status.authorization
-                                == crate::status_item::SystemNotificationAuthorization::Authorized
-                            {
-                                rgb(crate::ui_theme::green()).into()
-                            } else {
-                                cx.theme().muted_foreground
-                            };
-                            h_flex()
-                                .items_center()
-                                .justify_end()
-                                .gap_2()
-                                .flex_wrap()
-                                .child(div().size(px(6.)).rounded_full().bg(color))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(color)
-                                        .child(presentation.text),
-                                )
-                                .children(presentation.is_error.then(|| {
-                                    Button::new("refresh-system-notification-status")
-                                        .compact()
-                                        .quiet()
-                                        .label("重新检查")
-                                        .on_click(|_, _, _| {
-                                            crate::status_item::refresh_system_notification_authorization();
-                                        })
-                                }))
-                                .children(presentation.can_open_settings.then(|| {
-                                    Button::new("open-system-notification-settings")
-                                        .compact()
-                                        .quiet()
-                                        .icon(IconName::ExternalLink)
-                                        .label("系统设置")
-                                        .tooltip("打开 macOS 通知设置")
-                                        .on_click(|_, _, cx| {
-                                            cx.open_url(
-                                                crate::status_item::SYSTEM_NOTIFICATION_SETTINGS_URL,
-                                            );
-                                        })
-                                }))
-                                .into_any_element()
-                        }),
-                    )
-                    .description("提醒类型开关独立保存；macOS 权限决定系统是否实际显示通知。")
-                    .keywords(["通知", "notification", "权限", "macOS"]),
-                )
-                .item(
-                    SettingItem::new(
-                        "等待批准通知",
-                        SettingField::switch(
-                            |cx: &App| {
-                                cx.try_global::<AgentHostState>()
-                                    .map(|c| c.notify_approval)
-                                    .unwrap_or(true)
-                            },
-                            |v: bool, cx: &mut App| {
-                                apply_notify_prefs(|c| c.notify_approval = v, cx);
-                            },
-                        ),
-                    )
-                    .description("Agent 明确进入等待审批状态时提醒。")
-                    .keywords(["通知", "notification", "审批"]),
-                )
-                .item(
-                    SettingItem::new(
-                        "等待输入通知",
-                        SettingField::switch(
-                            |cx: &App| {
-                                cx.try_global::<AgentHostState>()
-                                    .map(|c| c.notify_input)
-                                    .unwrap_or(true)
-                            },
-                            |v: bool, cx: &mut App| {
-                                apply_notify_prefs(|c| c.notify_input = v, cx);
-                            },
-                        ),
-                    )
-                    .description("Agent 提问或等待你继续时提醒。"),
-                )
-                .item(
-                    SettingItem::new(
-                        "任务完成通知",
-                        SettingField::switch(
-                            |cx: &App| {
-                                cx.try_global::<AgentHostState>()
-                                    .map(|c| c.notify_success)
-                                    .unwrap_or(true)
-                            },
-                            |v: bool, cx: &mut App| {
-                                apply_notify_prefs(|c| c.notify_success = v, cx);
-                            },
-                        ),
-                    )
-                    .description("Agent 当前回合正常完成时提醒。"),
-                )
-                .item(
-                    SettingItem::new(
-                        "任务失败通知",
-                        SettingField::switch(
-                            |cx: &App| {
-                                cx.try_global::<AgentHostState>()
-                                    .map(|c| c.notify_failure)
-                                    .unwrap_or(true)
-                            },
-                            |v: bool, cx: &mut App| {
-                                apply_notify_prefs(|c| c.notify_failure = v, cx);
-                            },
-                        ),
-                    )
-                    .description("Agent 因错误中断时提醒。"),
-                )
-                .item(
-                    SettingItem::new(
-                        "终端响铃通知",
-                        SettingField::switch(
-                            |cx: &App| {
-                                cx.try_global::<AgentHostState>()
-                                    .map(|c| c.notify_terminal_bell)
-                                    .unwrap_or(true)
-                            },
-                            |v: bool, cx: &mut App| {
-                                apply_notify_prefs(|c| c.notify_terminal_bell = v, cx);
-                            },
-                        ),
-                    )
-                    .description("终端输出 BEL 控制字符时显示普通信息提醒。")
-                    .keywords(["通知", "notification", "响铃", "bell"]),
-                ),
             launch: launch_group,
             workspace: SettingGroup::new()
                 // 按 `ConversationAgentKind::ALL` 迭代，不逐家手写：加一家 agent 不该
