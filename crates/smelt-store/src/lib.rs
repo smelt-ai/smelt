@@ -665,6 +665,7 @@ mod imp {
         Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params,
     };
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use std::time::{Duration, Instant};
 
@@ -776,12 +777,19 @@ mod imp {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(super::DATABASE_FILE_NAME);
-        let nonce = std::time::SystemTime::now()
+        // 同进程的线程共享 pid。墙钟分辨率经常粗于 1ns，同时放行时会读到同一个
+        // 纳秒值，于是两个线程建、硬链接、删除同一个临时文件：Unix 上 hard_link
+        // 得到 NotFound，Windows 上两个连接抢 checkpoint 得到 busy。序号在进程内
+        // 单调递增，同一次并发不再靠时钟错开。时间戳仍留着，是为了进程崩溃留下的
+        // 临时文件在 pid 被复用后不会被下一次建库重新打开。
+        static CREATING_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = CREATING_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
         let staging = path.with_file_name(format!(
-            "{file_name}.creating-{}-{nonce}",
+            "{file_name}.creating-{}-{seq}-{nanos}",
             std::process::id()
         ));
         let built = (|| {
