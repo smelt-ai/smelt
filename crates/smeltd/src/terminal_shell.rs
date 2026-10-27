@@ -8,7 +8,10 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShellKind {
     Posix,
+    // 只有 Windows 的 `detect` 会挑出这两种；别的平台也留着，让拼参数和引用的测试在 Mac 上照跑。
+    #[cfg_attr(not(windows), allow(dead_code))]
     PowerShell,
+    #[cfg_attr(not(windows), allow(dead_code))]
     Cmd,
 }
 
