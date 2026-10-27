@@ -137,18 +137,6 @@ fn package_name(version: &semver::Version, arch: &str) -> String {
     format!("smeltd-{version}-linux-{arch}")
 }
 
-/// 从 `sha256sum` 的输出里找出这个文件的校验和。
-#[cfg(any(target_os = "linux", test))]
-fn checksum_for<'a>(sums: &'a str, file: &str) -> Option<&'a str> {
-    sums.lines().find_map(|line| {
-        let (sum, name) = line.split_once(char::is_whitespace)?;
-        // `sha256sum` 二进制模式在文件名前加 `*`。
-        let name = name.trim_start().trim_start_matches('*');
-        (name == file && sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then_some(sum)
-    })
-}
-
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs;
@@ -199,7 +187,7 @@ mod linux {
         })?;
         let sums =
             fs::read_to_string(&sums_path).map_err(|error| format!("读校验和清单失败：{error}"))?;
-        let expected = super::checksum_for(&sums, &archive_name)
+        let expected = smelt_version::checksum_for(&sums, &archive_name)
             .ok_or_else(|| {
                 format!(
                     "v{version} 没有这台机器（linux-{}）的包",
@@ -440,28 +428,6 @@ mod tests {
         assert_eq!(
             package_name(&version, "x86_64"),
             "smeltd-0.9.1-rc.1-linux-x86_64"
-        );
-    }
-
-    #[test]
-    fn finds_the_checksum_line_for_exactly_this_package() {
-        let a = "a".repeat(64);
-        let b = "b".repeat(64);
-        let sums = format!(
-            "{a}  smeltd-0.9.1-linux-aarch64.tar.gz\n{b} *smeltd-0.9.1-linux-x86_64.tar.gz\n"
-        );
-        assert_eq!(
-            checksum_for(&sums, "smeltd-0.9.1-linux-x86_64.tar.gz"),
-            Some(b.as_str())
-        );
-        assert_eq!(
-            checksum_for(&sums, "smeltd-0.9.1-linux-aarch64.tar.gz"),
-            Some(a.as_str())
-        );
-        assert_eq!(checksum_for(&sums, "smeltd-0.9.1-linux-x86.tar.gz"), None);
-        assert_eq!(
-            checksum_for("short  smeltd.tar.gz\n", "smeltd.tar.gz"),
-            None
         );
     }
 }

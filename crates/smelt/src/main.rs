@@ -2770,11 +2770,10 @@ struct Workspace {
     /// 用户已确认退出；防止异步更新收尾期间重复提交退出动作。
     quit_requested: bool,
     /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 侧栏「设置」红点。
-    /// 只在 macOS 上存在：更新器替换的是 .app 包（设计文档 D4）。
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     update_status: updater::UpdateStatus,
     /// 每次开始或取消安装等待时递增，防止旧的后台重试在新请求上继续执行。
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     update_install_generation: u64,
     /// App 放的位置装不上更新（被系统转移、只读），启动时查一次；见
     /// `smelt_client::app_location`。有问题时更新入口都停在「需要先移到『应用程序』」。
@@ -2967,14 +2966,14 @@ struct Workspace {
     next_workspace_menu_source_revision: AtomicU64,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateInstallTrigger {
     User,
     Quit,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl UpdateInstallTrigger {
     fn relaunches(self) -> bool {
         !matches!(self, Self::Quit)
@@ -3314,9 +3313,9 @@ impl Workspace {
             debug_hud: false,
             show_quit_confirm: false,
             quit_requested: false,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             update_status: updater::UpdateStatus::default(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             update_install_generation: 0,
             #[cfg(target_os = "macos")]
             app_location_issue: None,
@@ -3402,7 +3401,6 @@ impl Workspace {
         ws.refresh_acp_runtime(cx);
         // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不恢复也不
         // 检查，免得下载了还是装不上。移过去重开后才走下面的正常流程。
-        // 这套事务只替换 macOS 的 .app（设计文档 D4），其它平台不检查、不安装。
         #[cfg(target_os = "macos")]
         {
             ws.app_location_issue = smelt_client::app_location::current_issue();
@@ -3415,6 +3413,9 @@ impl Workspace {
                 ws.recover_update_at_launch(true, cx);
             }
         }
+        // Windows 由安装程序装在固定位置，没有位置问题，直接恢复、检查。
+        #[cfg(windows)]
+        ws.recover_update_at_launch(true, cx);
         ws.start_workspace_catalog_load(window, cx);
         let remote_runtimes: Vec<_> = ws
             .spaces
@@ -4153,8 +4154,7 @@ impl Render for Workspace {
                     return;
                 }
                 this.stop_prompt_names.clear();
-                // 更新事务只在 macOS 上存在。
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 if !matches!(this.update_status, updater::UpdateStatus::Applying { .. })
                     && this.update_status.ready_update().is_some()
                 {
@@ -4965,7 +4965,7 @@ fn main() {
         settings::apply_bg_color(&appearance);
         cx.set_global(settings::LaunchConfig::default());
         settings::start_launch_config_load(cx);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         cx.set_global(settings::load_update_settings());
 
         // 原生通知/菜单栏桥必须先于任何 Attention producer 就绪。daemon 快照可能在

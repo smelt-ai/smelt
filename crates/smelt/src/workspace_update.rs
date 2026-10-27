@@ -3,7 +3,7 @@
 use super::*;
 
 impl Workspace {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     /// 设置入口与设置页共用它决定要不要显示更新提示。
     pub(crate) fn update_available(&self) -> bool {
         self.update_status.staged_update().is_some()
@@ -26,6 +26,12 @@ impl Workspace {
         self.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::Location);
         cx.notify();
         true
+    }
+
+    /// Windows 由安装程序装在固定位置，不会有放错地方的问题。
+    #[cfg(windows)]
+    fn blocked_by_app_location(&mut self, _cx: &mut Context<Self>) -> bool {
+        false
     }
 
     #[cfg(target_os = "macos")]
@@ -71,7 +77,7 @@ impl Workspace {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     /// 检查是否有新版本。`silent` 区分启动时的后台静默检查（离线/失败时不打扰用户，
     /// 悄悄退回 Idle）和设置页手动点「检查更新」（失败要如实展示原因）。
     ///
@@ -91,8 +97,8 @@ impl Workspace {
         };
         self.update_status = updater::UpdateStatus::Checking;
         let channel = cx.global::<settings::UpdateSettings>().channel;
-        let current_release_url = match updater::current_release_url() {
-            Ok(url) => url,
+        let installed = match updater::installed_release() {
+            Ok(installed) => installed,
             Err(error) => {
                 smelt_sys::app_log::error(
                     "updater",
@@ -124,7 +130,7 @@ impl Workspace {
                         if let Some(failed) = failed_update {
                             match updater::decide_failed_update_check(
                                 candidate,
-                                current_release_url.as_deref(),
+                                &installed,
                                 &failed,
                                 auto_install,
                             ) {
@@ -139,11 +145,8 @@ impl Workspace {
                             }
                             return;
                         }
-                        let outcome = updater::decide_check_outcome(
-                            candidate,
-                            current_release_url.as_deref(),
-                            auto_install,
-                        );
+                        let outcome =
+                            updater::decide_check_outcome(candidate, &installed, auto_install);
                         this.apply_update_check_outcome(outcome, cx);
                         return;
                     }
@@ -167,7 +170,7 @@ impl Workspace {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     fn apply_update_check_outcome(
         &mut self,
         outcome: updater::CheckOutcome,
@@ -191,7 +194,7 @@ impl Workspace {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     /// 只在 manifest 已经指向另一份发布包后进入。持久化旧作业的清理放到后台线程，
     /// 成功后才能开始新下载，保证 begin_staged_update 永远不会撞上旧事务。
     fn replace_failed_update_after_check(
@@ -230,7 +233,7 @@ impl Workspace {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     /// 恢复失败时先收敛原事务；安装失败则由 check_for_update 拉取 manifest，只有
     /// 确认发布 URL 已变化后才作废旧作业，不能绕过持久化事务直接另起下载。
     pub(crate) fn check_or_recover_update(&mut self, silent: bool, cx: &mut Context<Self>) {
@@ -244,8 +247,9 @@ impl Workspace {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    /// 后台静默下载新版 ZIP 并暂存好 `.app`，完成后置 `ReadyToInstall`（不重启、不打断）。
+    #[cfg(any(target_os = "macos", windows))]
+    /// 后台静默下载新版并准备好（macOS 暂存 `.app`，Windows 校验安装程序），完成后置
+    /// `ReadyToInstall`（不重启、不打断）。
     /// 下载线程通过 channel 往回推字节进度，UI 线程照单刷新状态；发送端随下载任务结束而
     /// drop，`recv` 收到 Err 即代表下载收尾，此时再 `await` 任务拿最终结果。
     pub(crate) fn start_update_download(
@@ -316,7 +320,7 @@ impl Workspace {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     /// 用户点击、启动恢复、退出安装都只从这里进入同一条安装状态机。
     /// 没有进行中的会话时直接安装；有的话先在设置窗确认。
     pub(crate) fn begin_ready_update_install(&mut self, cx: &mut Context<Self>) {
@@ -336,10 +340,9 @@ impl Workspace {
         self.start_update_install(update, UpdateInstallTrigger::User, cx);
     }
 
-    /// 更新事务只在 macOS 上存在；别的平台不会弹这个确认，这里只是关掉它。
     pub(crate) fn confirm_update_install(&mut self, cx: &mut Context<Self>) {
         self.show_update_install_confirm = false;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(update) = self.update_status.ready_update().cloned() {
             self.start_update_install(update, UpdateInstallTrigger::User, cx);
             return;
@@ -354,7 +357,7 @@ impl Workspace {
         ))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn recover_update_at_launch(&mut self, silent_check: bool, cx: &mut Context<Self>) {
         self.update_status = updater::UpdateStatus::Checking;
         cx.notify();
@@ -396,7 +399,7 @@ impl Workspace {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn start_update_install(
         &mut self,
         update: updater::StagedUpdate,
@@ -422,13 +425,10 @@ impl Workspace {
                 Ok(ticket) => {
                     smelt_sys::app_log::info(
                         "updater",
-                        &format!(
-                            "installer 已接管更新 {version}（job={} attempt={}），等待 GUI 退出",
-                            ticket.update_id, ticket.attempt_id
-                        ),
+                        &format!("installer 已接管更新 {version}（{ticket}），等待 GUI 退出"),
                     );
-                    // helper 已成功派生并持有精确 attempt。先停掉旧守护，再退出。
-                    // 安装器换 `.app` 时文件不能还被旧进程占着。派生失败不走这里。
+                    // 安装程序已成功派生。先停掉旧守护，再退出：换文件时不能还被旧进程
+                    // 占着。派生失败不走这里。
                     let stopped = cx
                         .background_executor()
                         .spawn(async { updater::shutdown_local_daemon() })

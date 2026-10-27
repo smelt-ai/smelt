@@ -1,7 +1,7 @@
 # 文档
 
 smelt 是跨机器、多智能体的原生 AI 编程指挥台：macOS（Apple Silicon）和 Windows 10 1803+（x86_64）上的 GPUI 桌面工作台，Linux 上的无头守护进程 `smeltd`，以及 iOS / Android 的手机和平板「出菜口」。
-Windows 第一版是不签名的安装包，没有自动更新。Linux 上可以只跑 `smeltd`，再用电脑或手机配对上去。
+Windows 第一版是不签名的安装包。Linux 上可以只跑 `smeltd`，再用电脑或手机配对上去。
 这页文档只讲怎么用，架构细节不在这——接口和默认行为可能会变。
 
 ## 快速开始
@@ -17,7 +17,7 @@ Windows 第一版是不签名的安装包，没有自动更新。Linux 上可以
 从同一个 [Releases](https://github.com/smelt-ai/smelt/releases) 页下载
 `smelt-<版本>-windows-x86_64-setup.exe` 运行。按当前用户安装，不要管理员权限，
 默认装到 `%LOCALAPPDATA%\Programs\Smelt`，建开始菜单项，可选把 `smelt` 命令加入 PATH。
-升级时先关掉 Smelt，再运行新版本的安装程序。
+和 macOS 一样，启动时和手动都会检查更新；应用更新时 Smelt 退出，新版安装程序静默装好后重新打开。
 
 数据目录是 `%USERPROFILE%\.smelt`。
 
@@ -25,7 +25,6 @@ Windows 第一版是不签名的安装包，没有自动更新。Linux 上可以
 
 - 只有 x86_64，系统是 Windows 10 1803 及以上。
 - 安装程序和 exe 都不签名。SmartScreen 可能提示未知发布者，选择仍要运行即可。
-- 没有自动更新。
 - 交互 shell 是 `cmd.exe`（ConPTY），或 `COMSPEC` 指向的程序。
 - 没有菜单栏图标、Dock 角标、系统通知。这些只在 macOS 上。
 

@@ -15,7 +15,7 @@ Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, Crush — 
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20Windows%20desktop%20%2B%20Linux%20runtime-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **Status**: working prototype, under active development. The desktop app runs on macOS (Apple Silicon) and Windows 10 1803+ (x86_64). The runtime (`smeltd`) also runs headless on Linux. The Windows build is an unsigned installer without automatic updates.
+> **Status**: working prototype, under active development. The desktop app runs on macOS (Apple Silicon) and Windows 10 1803+ (x86_64). The runtime (`smeltd`) also runs headless on Linux. The Windows build is an unsigned installer.
 
 </div>
 
@@ -36,7 +36,7 @@ The app checks for updates on launch and on demand (stable/beta channel), showin
 
 ### Windows (x86_64)
 
-Download `smelt-<version>-windows-x86_64-setup.exe` from the same [Releases](https://github.com/smelt-ai/smelt/releases) page and run it. It installs for the current user without admin rights, into `%LOCALAPPDATA%\Programs\Smelt` by default, adds a Start menu entry, and can put the `smelt` command on your PATH. To upgrade, close Smelt and run the newer installer.
+Download `smelt-<version>-windows-x86_64-setup.exe` from the same [Releases](https://github.com/smelt-ai/smelt/releases) page and run it. It installs for the current user without admin rights, into `%LOCALAPPDATA%\Programs\Smelt` by default, adds a Start menu entry, and can put the `smelt` command on your PATH. Like macOS, the app checks for updates on launch and on demand (stable/beta channel); applying an update closes Smelt, runs the new installer silently, and reopens it.
 
 Data lives in `%USERPROFILE%\.smelt`.
 
@@ -44,7 +44,6 @@ This first Windows build:
 
 - x86_64 only, on Windows 10 version 1803 or later.
 - The installer and executables are unsigned. SmartScreen may warn about an unknown publisher; choose to run anyway.
-- There is no automatic update.
 - The interactive shell is `cmd.exe` (ConPTY), or the program named by `COMSPEC`.
 - There is no menu-bar icon, Dock badge, or system notification. Those stay macOS-only.
 

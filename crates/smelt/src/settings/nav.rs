@@ -32,8 +32,8 @@ impl SettingsSection {
         Self::Appearance
     }
 
-    /// 检查更新的深链接。应用更新只在 macOS 上有。
-    #[cfg(target_os = "macos")]
+    /// 检查更新的深链接。
+    #[cfg(any(target_os = "macos", windows))]
     pub fn app_update() -> Self {
         Self::About
     }

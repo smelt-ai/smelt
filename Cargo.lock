@@ -10862,6 +10862,7 @@ dependencies = [
  "smelt-paths",
  "smelt-runtime-client",
  "smelt-sys",
+ "smelt-version",
  "smol",
  "tempfile",
  "tokio",

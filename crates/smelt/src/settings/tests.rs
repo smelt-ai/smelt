@@ -74,7 +74,7 @@ mod appearance_tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", windows)))]
 mod update_settings_tests {
     use super::UpdateSettings;
     use crate::updater::UpdateChannel;

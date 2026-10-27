@@ -54,7 +54,7 @@ make ios          # scripts/build-ios.sh，在发版 tag 上出 iOS 包
 make dist-build   # macOS dmg
 ```
 
-Linux 运行时包是 `scripts/package-linux.sh`。Windows 安装包不在这些 Make 目标里：发版的 `windows` job 在 `windows-latest` 上执行 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用 `scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`，用 Inno Setup 按 `scripts/windows-installer.iss` 编成 `smelt-<版本>-windows-x86_64-setup.exe`。第一版不签名，没有自动更新。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)，Windows 行为见 [`docs/windows-support.md`](https://github.com/smelt-ai/smelt/blob/main/docs/windows-support.md)。
+Linux 运行时包是 `scripts/package-linux.sh`。Windows 安装包不在这些 Make 目标里：发版的 `windows` job 在 `windows-latest` 上执行 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用 `scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`，用 Inno Setup 按 `scripts/windows-installer.iss` 编成 `smelt-<版本>-windows-x86_64-setup.exe`。第一版不签名；桌面的应用内更新下载的就是它。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)，Windows 行为见 [`docs/windows-support.md`](https://github.com/smelt-ai/smelt/blob/main/docs/windows-support.md)。
 
 两者解耦：`smelt` 可以单独跑（这时终端会话就跟着 GUI 生命周期走），也可以接上
 `smeltd` 拿到跨重启的会话持久化。打包发布时核心二进制会被塞进同一个
