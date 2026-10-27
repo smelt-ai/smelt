@@ -28,17 +28,17 @@ fn contexts(stack: &[&str]) -> Vec<KeyContext> {
         .collect()
 }
 
-fn stroke(spec: &str) -> Keystroke {
+fn stroke(spec: &'static str) -> Keystroke {
     Keystroke::parse(spec).expect("keystroke")
 }
 
-fn matched(spec: &str, stack: &[&str]) -> Vec<KeyBinding> {
+fn matched(spec: &'static str, stack: &[&str]) -> Vec<KeyBinding> {
     let (bindings, pending) = keymap().bindings_for_input(&[stroke(spec)], &contexts(stack));
     assert!(!pending, "{spec} 不该停在半截组合键上");
     bindings.into_vec()
 }
 
-fn first_is<T: Action>(spec: &str, stack: &[&str]) -> bool {
+fn first_is<T: Action>(spec: &'static str, stack: &[&str]) -> bool {
     matched(spec, stack)
         .first()
         .is_some_and(|binding| binding.action().as_any().is::<T>())
