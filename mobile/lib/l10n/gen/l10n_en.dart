@@ -1679,4 +1679,100 @@ class L10nEn extends L10n {
 
   @override
   String get terminalKeyPageDown => 'Page down';
+
+  @override
+  String get updateSection => 'Updates';
+
+  @override
+  String updateCurrentVersion(String version) {
+    return 'Version $version';
+  }
+
+  @override
+  String get updateChannelProd => 'Stable';
+
+  @override
+  String get updateChannelDev => 'Beta';
+
+  @override
+  String get updateChannelHint =>
+      'Beta gets test builds before they are released.';
+
+  @override
+  String get updateIdle => 'Not checked yet';
+
+  @override
+  String get updateChecking => 'Checking for updates…';
+
+  @override
+  String get updateUpToDate => 'You\'re up to date';
+
+  @override
+  String updateAvailable(String version) {
+    return 'Version $version is available';
+  }
+
+  @override
+  String updateDownloading(String version) {
+    return 'Downloading $version…';
+  }
+
+  @override
+  String updateDownloadingPercent(String version, int percent) {
+    return 'Downloading $version… $percent%';
+  }
+
+  @override
+  String updateReady(String version) {
+    return 'Version $version is ready to install';
+  }
+
+  @override
+  String get updateNeedsPermission =>
+      'Allow Smelt to install apps, then come back here to finish.';
+
+  @override
+  String get updateInstalling => 'Waiting for the system installer…';
+
+  @override
+  String get updateFailedCheck =>
+      'Couldn\'t check for updates. Check your network and try again.';
+
+  @override
+  String get updateFailedDownload => 'The download didn\'t finish. Try again.';
+
+  @override
+  String get updateFailedVerify =>
+      'The downloaded package didn\'t match the release checksum and was discarded. Try again later.';
+
+  @override
+  String get updateFailedInstall => 'The update wasn\'t installed. Try again.';
+
+  @override
+  String get updateCheck => 'Check for updates';
+
+  @override
+  String get updateDownload => 'Download';
+
+  @override
+  String get updateInstall => 'Install';
+
+  @override
+  String get updateRetry => 'Try again';
+
+  @override
+  String get updateGrantPermission => 'Allow installs';
+
+  @override
+  String get updateReleaseNotes => 'Release notes';
+
+  @override
+  String updateSnackAvailable(String version) {
+    return 'Smelt $version is available';
+  }
+
+  @override
+  String updateSnackReady(String version) {
+    return 'Smelt $version is ready to install';
+  }
 }

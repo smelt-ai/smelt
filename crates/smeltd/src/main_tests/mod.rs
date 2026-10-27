@@ -1,6 +1,7 @@
 //! smeltd 守护进程单测：按主题拆成子模块，从 `main.rs` 迁出。
 
 use super::*;
+use crate::acp_registry::SessionLock;
 
 mod acp_idle_tests;
 #[cfg(unix)]
@@ -50,39 +51,36 @@ fn make_acp_session_value(
         reduced: Watched::new(reduced),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
-        turn_completion: Mutex::new(()),
+        turn_completion: SessionLock::new(()),
         prompt_in_flight: AtomicBool::new(false),
-        automation_watch: Mutex::new(None),
-        pending_prompts: Mutex::new(VecDeque::new()),
+        automation_watch: SessionLock::new(None),
+        pending_prompts: SessionLock::new(VecDeque::new()),
         next_pending_prompt_id: AtomicU64::new(0),
-        immediate_delivery: Mutex::new(None),
-        unaccepted_prompt: Mutex::new(None),
+        immediate_delivery: SessionLock::new(None),
+        unaccepted_prompt: SessionLock::new(None),
         provider_hold: AtomicBool::new(false),
-        hosted_handle: Mutex::new(None),
-        host_snapshot_revision: AtomicU64::new(0),
-        handle: Mutex::new(None),
-        unreaped_pid: Mutex::new(None),
+        handle: SessionLock::new(None),
+        unreaped_pid: SessionLock::new(None),
         cwd: None,
-        state: Arc::new(Mutex::new(SessionState {
+        state: Arc::new(SessionLock::new(SessionState {
             id: id.to_string(),
             instance,
             ..Default::default()
         })),
-        output_gate: Mutex::new(()),
-        out: Mutex::new(AcpOut {
+        output_gate: SessionLock::new(()),
+        out: SessionLock::new(AcpOut {
             client: None,
             watchers: Vec::new(),
         }),
-        launch_spec: Mutex::new(None),
-        runtime_spec_fingerprint: Mutex::new(None),
-        restore_state: Mutex::new(AcpRestoreState::Fresh),
-        ephemeral_env: Mutex::new(BTreeMap::new()),
-        conversation_binding: Mutex::new(Some(
+        launch_spec: SessionLock::new(None),
+        restore_state: SessionLock::new(AcpRestoreState::Fresh),
+        ephemeral_env: SessionLock::new(BTreeMap::new()),
+        conversation_binding: SessionLock::new(Some(
             smelt_core::conversation::ConversationBinding::Direct,
         )),
-        conversation_submit: Mutex::new(crate::acp_host::RecentSubmissions::default()),
-        pending_agent_preset: Mutex::new(None),
-        durable_history_session_id: Mutex::new(None),
+        conversation_submit: SessionLock::new(crate::acp_host::RecentSubmissions::default()),
+        pending_agent_preset: SessionLock::new(None),
+        durable_history_session_id: SessionLock::new(None),
         idle: Default::default(),
     }
 }

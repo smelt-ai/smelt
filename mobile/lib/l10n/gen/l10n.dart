@@ -2868,6 +2868,162 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Page down'**
   String get terminalKeyPageDown;
+
+  /// No description provided for @updateSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Updates'**
+  String get updateSection;
+
+  /// No description provided for @updateCurrentVersion.
+  ///
+  /// In en, this message translates to:
+  /// **'Version {version}'**
+  String updateCurrentVersion(String version);
+
+  /// No description provided for @updateChannelProd.
+  ///
+  /// In en, this message translates to:
+  /// **'Stable'**
+  String get updateChannelProd;
+
+  /// No description provided for @updateChannelDev.
+  ///
+  /// In en, this message translates to:
+  /// **'Beta'**
+  String get updateChannelDev;
+
+  /// No description provided for @updateChannelHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Beta gets test builds before they are released.'**
+  String get updateChannelHint;
+
+  /// No description provided for @updateIdle.
+  ///
+  /// In en, this message translates to:
+  /// **'Not checked yet'**
+  String get updateIdle;
+
+  /// No description provided for @updateChecking.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking for updates…'**
+  String get updateChecking;
+
+  /// No description provided for @updateUpToDate.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'re up to date'**
+  String get updateUpToDate;
+
+  /// No description provided for @updateAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Version {version} is available'**
+  String updateAvailable(String version);
+
+  /// No description provided for @updateDownloading.
+  ///
+  /// In en, this message translates to:
+  /// **'Downloading {version}…'**
+  String updateDownloading(String version);
+
+  /// No description provided for @updateDownloadingPercent.
+  ///
+  /// In en, this message translates to:
+  /// **'Downloading {version}… {percent}%'**
+  String updateDownloadingPercent(String version, int percent);
+
+  /// No description provided for @updateReady.
+  ///
+  /// In en, this message translates to:
+  /// **'Version {version} is ready to install'**
+  String updateReady(String version);
+
+  /// No description provided for @updateNeedsPermission.
+  ///
+  /// In en, this message translates to:
+  /// **'Allow Smelt to install apps, then come back here to finish.'**
+  String get updateNeedsPermission;
+
+  /// No description provided for @updateInstalling.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for the system installer…'**
+  String get updateInstalling;
+
+  /// No description provided for @updateFailedCheck.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t check for updates. Check your network and try again.'**
+  String get updateFailedCheck;
+
+  /// No description provided for @updateFailedDownload.
+  ///
+  /// In en, this message translates to:
+  /// **'The download didn\'t finish. Try again.'**
+  String get updateFailedDownload;
+
+  /// No description provided for @updateFailedVerify.
+  ///
+  /// In en, this message translates to:
+  /// **'The downloaded package didn\'t match the release checksum and was discarded. Try again later.'**
+  String get updateFailedVerify;
+
+  /// No description provided for @updateFailedInstall.
+  ///
+  /// In en, this message translates to:
+  /// **'The update wasn\'t installed. Try again.'**
+  String get updateFailedInstall;
+
+  /// No description provided for @updateCheck.
+  ///
+  /// In en, this message translates to:
+  /// **'Check for updates'**
+  String get updateCheck;
+
+  /// No description provided for @updateDownload.
+  ///
+  /// In en, this message translates to:
+  /// **'Download'**
+  String get updateDownload;
+
+  /// No description provided for @updateInstall.
+  ///
+  /// In en, this message translates to:
+  /// **'Install'**
+  String get updateInstall;
+
+  /// No description provided for @updateRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Try again'**
+  String get updateRetry;
+
+  /// No description provided for @updateGrantPermission.
+  ///
+  /// In en, this message translates to:
+  /// **'Allow installs'**
+  String get updateGrantPermission;
+
+  /// No description provided for @updateReleaseNotes.
+  ///
+  /// In en, this message translates to:
+  /// **'Release notes'**
+  String get updateReleaseNotes;
+
+  /// No description provided for @updateSnackAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Smelt {version} is available'**
+  String updateSnackAvailable(String version);
+
+  /// No description provided for @updateSnackReady.
+  ///
+  /// In en, this message translates to:
+  /// **'Smelt {version} is ready to install'**
+  String updateSnackReady(String version);
 }
 
 class _L10nDelegate extends LocalizationsDelegate<L10n> {

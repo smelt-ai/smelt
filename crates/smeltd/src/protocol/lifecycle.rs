@@ -76,16 +76,9 @@ pub(crate) fn graceful_shutdown(
         .unwrap_or_else(|error| error.into_inner());
     dlog("shutdown: 已拦住新会话和新的状态提交");
 
-    // 2. 把没写完的回合收成中断，并留下进行中的自动化对话。只有那几段要存全文，
-    // 才向宿主要回裁掉的前缀；普通会话的全文在 agent 自己的会话文件里，停机后用不到，
-    // 不为它们走一趟宿主。这一步因此不随会话数变长，调用方的读超时盖得住。
+    // 2. 把没写完的回合收成中断。自动化会话不挂起，全文就在内存里，停机时直接存。
     if let Some(server) = super::SERVER.get() {
-        let automation_sessions = active_automation_sessions(&server.automations);
-        for (id, slot) in server.acp_sessions.snapshot() {
-            if automation_sessions.contains(&id) {
-                dlog(&format!("shutdown: 拉回自动化会话 {id} 的全文"));
-                crate::acp_host::reassemble_hosted_transcript(&slot.value);
-            }
+        for (_id, slot) in server.acp_sessions.snapshot() {
             crate::acp_host::settle_acp_session_for_shutdown(&slot.value);
         }
         save_active_automation_transcripts(&server.automations, &server.acp_sessions);
@@ -173,27 +166,15 @@ pub(crate) fn graceful_shutdown(
             let mut successor = std::process::Command::new(&exe);
             successor.env(crate::PREDECESSOR_PID_ENV, std::process::id().to_string());
             if let Err(error) = smelt_sys::process::spawn_detached(&mut successor) {
-                dlog(&format!("shutdown: 拉起接班守护 {} 失败：{error}", exe.display()));
+                dlog(&format!(
+                    "shutdown: 拉起接班守护 {} 失败：{error}",
+                    exe.display()
+                ));
                 std::process::exit(1);
             }
         }
     }
     std::process::exit(0);
-}
-
-/// 进行中的自动化各自跑在哪个会话里。
-fn active_automation_sessions(
-    automations: &crate::AutomationStore,
-) -> std::collections::HashSet<String> {
-    automations
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .snapshot()
-        .runs
-        .into_iter()
-        .filter(|run| run.status.is_active())
-        .filter_map(|run| run.session_id)
-        .collect()
 }
 
 fn save_active_automation_transcripts(
@@ -212,7 +193,7 @@ fn save_active_automation_transcripts(
         let Some(slot) = acp_sessions.get(session_id) else {
             continue;
         };
-        let entries = slot.value.reduced.lock().unwrap().entries().to_vec();
+        let entries = slot.value.reduced.lock().entries().to_vec();
         if entries.is_empty() {
             continue;
         }

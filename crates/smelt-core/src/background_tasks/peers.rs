@@ -1,15 +1,14 @@
-//! 别的 Pi 对话发来的消息：会话宿主这一头。
+//! 别的 Pi 对话发来的消息：这个会话这一头。
 //!
-//! - 主 daemon 把消息交给宿主（`deliver`），宿主排队，和后台任务、子智能体的结果走同一条
+//! - 守护把消息交给这里（`deliver`），排队后和后台任务、子智能体的结果走同一条
 //!   监听交回会话：扩展写成 `smelt.peer_message` 自定义消息，`message_start` 时回 ack 才算送到；
-//!   `clear_queue` 清掉的、换了监听的，宿主再写一次。
-//! - 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn` 不在这里回答，经 [`crate::peer_link`]
-//!   转给主 daemon。来源由主 daemon 按这个宿主的控制连接认，扩展说什么都不算。
+//!   `clear_queue` 清掉的、换了监听的，再写一次。
+//! - 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn` 不在这里回答。
+//!   起会话时守护把应答函数装进这个会话；来源是那时候绑上的会话 id，请求体里的字段不算。
 //!
 //! 只认会话本身（空归属）：子智能体不收也不发。
 
 use std::io::Write;
-use std::time::Duration;
 
 use crate::acp_conn::ConversationEvent;
 use crate::acp_session::{PeerDelivery, PeerMessageStatus, PeerMessageView};
@@ -18,9 +17,6 @@ use super::{Inner, ModelNotice, State, TaskStream, now_ms, poke, request_owner};
 
 /// 送到的留最近这么多条，`session_list` 据此告诉发送方送到了没有。
 const KEEP_DELIVERED: usize = 64;
-/// 主 daemon 只做同步检查就回答（发送、起新对话都是先收下、后台再做），不用等对方。
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
 pub(super) struct LivePeer {
     view: PeerMessageView,
     delivery: PeerDelivery,
@@ -55,18 +51,34 @@ pub(super) fn deliver(inner: &Inner, delivery: PeerDelivery) {
     poke(inner);
 }
 
-/// 扩展的请求转给主 daemon，回答原样写回。子智能体不能用。
-pub(super) fn forward(mut stream: TaskStream, op: &str, request: &serde_json::Value) {
+/// 扩展的请求交给这个会话绑着的应答函数，回答原样写回。子智能体不能用。
+///
+/// 应答函数自己认来源会话。这里不从请求体里取来源，也不替它补一个。
+/// 应答自己 panic 只让这一次失败，不把套接字线程带走。
+pub(super) fn forward(
+    inner: &super::Inner,
+    mut stream: TaskStream,
+    op: &str,
+    request: &serde_json::Value,
+) {
     let reply = if !request_owner(request).is_empty() {
         serde_json::json!({"ok": false, "error": "子智能体不能和别的对话通信"})
     } else {
-        let mut body = request.clone();
-        if let Some(fields) = body.as_object_mut() {
-            fields.remove("op");
-            fields.remove("owner");
+        match inner.peer_handler.as_ref() {
+            Some(handler) => {
+                let mut body = request.clone();
+                if let Some(fields) = body.as_object_mut() {
+                    fields.remove("op");
+                    fields.remove("owner");
+                }
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(op, &body)))
+                {
+                    Ok(reply) => reply,
+                    Err(_) => serde_json::json!({"ok": false, "error": "处理这次请求时出了问题"}),
+                }
+            }
+            None => serde_json::json!({"ok": false, "error": "这个对话不能和别的对话通信"}),
         }
-        crate::peer_link::request(op, body, REQUEST_TIMEOUT)
-            .unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error}))
     };
     let _ = stream.write_all(reply.to_string().as_bytes());
     let _ = stream.write_all(b"\n");

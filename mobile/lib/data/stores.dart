@@ -8,6 +8,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import 'app_update.dart';
 import 'backend.dart';
 import 'models.dart';
 import 'preferences.dart';
@@ -139,10 +140,14 @@ class CatalogStore extends ChangeNotifier {
 
 /// 整个 App 的数据根：一个 [Backend] 和由它喂的几份状态。
 class AppModel {
-  AppModel(this.backend, this.prefs, {this.deviceId});
+  AppModel(this.backend, this.prefs, {this.deviceId, AppUpdater? updater})
+    : updater = updater ?? AppUpdater.unsupported();
 
   final Backend backend;
   final PreferencesStore prefs;
+
+  /// 安卓应用内更新。别的平台、演示模式是 [AppUpdater.unsupported]。
+  final AppUpdater updater;
 
   /// 这台手机的设备身份（iroh endpoint id）。电脑端的设备列表、撤销都认它。
   final String? deviceId;
@@ -179,6 +184,7 @@ class AppModel {
     pass.dispose();
     prefs.dispose();
     catalog.dispose();
+    updater.dispose();
   }
 }
 

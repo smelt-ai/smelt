@@ -281,7 +281,6 @@ impl Driver {
                     .value
                     .reduced
                     .lock()
-                    .unwrap()
                     .accepted_delivery_ids
                     .contains(&run.id);
                 if accepted {
@@ -530,7 +529,7 @@ impl Driver {
                 continue;
             };
             let (accepted, phase, provider_session_id) = {
-                let reduced = slot.value.reduced.lock().unwrap();
+                let reduced = slot.value.reduced.lock();
                 (
                     reduced.accepted_delivery_ids.contains(&run.id),
                     reduced.phase,
@@ -590,34 +589,23 @@ impl Driver {
                 }
                 continue;
             };
-            let (mut projection, entries_base) = {
-                let reduced = slot.value.reduced.lock().unwrap();
-                (
-                    RunProjection {
-                        phase: reduced.phase,
-                        accepted: reduced.accepted_delivery_ids.contains(&run.id),
-                        active: reduced.active_delivery_id.as_deref() == Some(run.id.as_str()),
-                        completed: reduced.completed_delivery_id.as_deref()
-                            == Some(run.id.as_str()),
-                        outcome: reduced.turn_outcome,
-                        output: completed_turn_output(reduced.entries()),
-                        error: (!reduced.end_reason.is_empty()).then(|| reduced.end_reason.clone()),
-                        provider_session_id: reduced
-                            .history_session_id
-                            .clone()
-                            .or_else(|| reduced.acp_session_id.clone()),
-                        entries: reduced.entries().to_vec(),
-                    },
-                    reduced.entries_base(),
-                )
+            let projection = {
+                let reduced = slot.value.reduced.lock();
+                RunProjection {
+                    phase: reduced.phase,
+                    accepted: reduced.accepted_delivery_ids.contains(&run.id),
+                    active: reduced.active_delivery_id.as_deref() == Some(run.id.as_str()),
+                    completed: reduced.completed_delivery_id.as_deref() == Some(run.id.as_str()),
+                    outcome: reduced.turn_outcome,
+                    output: completed_turn_output(reduced.entries()),
+                    error: (!reduced.end_reason.is_empty()).then(|| reduced.end_reason.clone()),
+                    provider_session_id: reduced
+                        .history_session_id
+                        .clone()
+                        .or_else(|| reduced.acp_session_id.clone()),
+                    entries: reduced.entries().to_vec(),
+                }
             };
-            // 父镜像只留着上一轮。失败存档要整段时向宿主分页要，要不到就用留下的那一轮。
-            if entries_base > 0
-                && (projection.completed || projection.phase == DaemonPhase::Dead)
-                && let Some(entries) = fetch_hosted_transcript(&slot.value)
-            {
-                projection.entries = entries;
-            }
             if projection.completed {
                 self.finish_from_projection(&run, projection);
                 continue;
@@ -1072,7 +1060,7 @@ fn ensure_run_conversation_binding(
     session: &super::AcpSession,
     run_id: &str,
 ) -> Result<bool, String> {
-    let mut binding = session.conversation_binding.lock().unwrap();
+    let mut binding = session.conversation_binding.lock();
     match binding.as_ref() {
         Some(ConversationBinding::Automation { run_id: bound }) if bound == run_id => Ok(false),
         None | Some(ConversationBinding::Direct) => {
@@ -1200,17 +1188,6 @@ fn defer_or_fail_delivery(
     }
 }
 
-/// 父镜像裁过前缀时，把宿主上的整段正文按页拼回来。失败则返回 None，调用方用本地留下的那一轮。
-fn fetch_hosted_transcript(session: &crate::acp_host::AcpSession) -> Option<Vec<AcpEntry>> {
-    let host = session.hosted_handle.lock().unwrap().clone()?;
-    let snapshot = host.read_snapshot_covering(0, usize::MAX).ok()?;
-    if snapshot.entries_offset != 0 || snapshot.entries.is_empty() {
-        None
-    } else {
-        Some(snapshot.entries)
-    }
-}
-
 fn completed_turn_output(entries: &[AcpEntry]) -> String {
     let turn_start = entries
         .iter()
@@ -1230,7 +1207,7 @@ fn completed_turn_output(entries: &[AcpEntry]) -> String {
 }
 
 fn provider_id(session: &super::AcpSession) -> Option<String> {
-    let reduced = session.reduced.lock().unwrap();
+    let reduced = session.reduced.lock();
     reduced
         .history_session_id
         .clone()
@@ -1328,7 +1305,7 @@ mod lifecycle_tests {
             reduced.accepted_delivery_ids.insert(run.id.clone());
             reduced.active_delivery_id = Some(run.id.clone());
         }
-        *slot.value.reduced.lock().unwrap() = reduced;
+        *slot.value.reduced.lock() = reduced;
         let driver = Driver::new(
             Arc::clone(&automations),
             new_sessions(),
@@ -1501,21 +1478,17 @@ mod lifecycle_tests {
             &*acknowledged_session
                 .value
                 .conversation_binding
-                .lock()
-                .unwrap(),
+                .lock(),
             Some(ConversationBinding::Automation { run_id })
                 if run_id == &acknowledged_run.id
         ));
 
         let (mut conflicting, conflicting_store, _) = dispatching_fixture(false);
         let conflicting_session = conflicting.acp_sessions.get("session-1").unwrap();
-        *conflicting_session
-            .value
-            .conversation_binding
-            .lock()
-            .unwrap() = Some(ConversationBinding::Automation {
-            run_id: "another-run".into(),
-        });
+        *conflicting_session.value.conversation_binding.lock() =
+            Some(ConversationBinding::Automation {
+                run_id: "another-run".into(),
+            });
         conflicting.recover_active_runs();
         let conflict = conflicting_store.lock().unwrap().snapshot();
         assert_eq!(conflict.runs[0].status, AutomationRunStatus::Failed);
@@ -1691,7 +1664,7 @@ mod lifecycle_tests {
         let mut reduced = AcpSessionState::default();
         reduced.phase = DaemonPhase::Idle;
         reduced.history_session_id = Some("provider-session".into());
-        *slot.value.reduced.lock().unwrap() = reduced;
+        *slot.value.reduced.lock() = reduced;
 
         let remote_sessions = Arc::new(Mutex::new(RemoteCatalogState::in_memory()));
         let event_hub = new_event_hub();
@@ -1719,7 +1692,7 @@ mod lifecycle_tests {
             )
             .unwrap();
         {
-            let mut reduced = slot.value.reduced.lock().unwrap();
+            let mut reduced = slot.value.reduced.lock();
             reduced.phase = DaemonPhase::AwaitingApproval;
             reduced.accepted_delivery_ids.insert(run.id.clone());
             reduced.active_delivery_id = Some(run.id.clone());
@@ -1749,7 +1722,7 @@ mod lifecycle_tests {
         );
 
         {
-            let mut reduced = slot.value.reduced.lock().unwrap();
+            let mut reduced = slot.value.reduced.lock();
             reduced.phase = DaemonPhase::Idle;
             reduced.active_delivery_id = None;
             reduced.completed_delivery_id = Some(run.id.clone());
@@ -1792,7 +1765,10 @@ mod lifecycle_tests {
                         trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
                             minutes: 30,
                         }),
-                        action: smelt_core::automation::AutomationAction::shell("exit 0", Vec::new()),
+                        action: smelt_core::automation::AutomationAction::shell(
+                            "exit 0",
+                            Vec::new(),
+                        ),
                         sinks: Vec::new(),
                     }),
                 },

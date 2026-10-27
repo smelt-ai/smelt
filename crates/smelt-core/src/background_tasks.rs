@@ -1,12 +1,12 @@
-//! 会话宿主里的后台任务、Pi 子智能体的登记（`subagents`），以及别的 Pi 对话发来的消息（`peers`）。
+//! 一个 Pi 会话的后台任务、子智能体登记（`subagents`），以及别的 Pi 对话发来的消息（`peers`）。
 //!
 //! 三者共用这里的套接字和「交回会话」的投递：结果写给扩展的监听，扩展回 ack
 //! 才算模型收到；`clear_queue` 清掉的静默重发；回退换了监听的由新监听再收一次。
 //!
-//! 进程归会话宿主所有，不放进 Pi 的进程组。Pi 扩展通过 Unix 套接字下命令；
-//! `/reload` 只拆掉扩展，任务继续跑。会话连接结束时宿主才把任务停掉。
+//! 进程归这个会话所有，不放进 Pi 的进程组。Pi 扩展通过 Unix 套接字下命令；
+//! `/reload` 只拆掉扩展，任务继续跑。会话连接结束时这里才把任务停掉。
 //! 任务什么时候结束看 shell 的 `wait`，不看管道何时关掉。shell 退出后，
-//! 同一进程组里剩下的进程一起收掉。宿主被硬杀掉时来不及做这件事，父进程
+//! 同一进程组里剩下的进程一起收掉。驱动被硬杀掉时来不及做这件事，守护
 //! 按任务目录里记下的进程组号来收。
 
 use std::fs::{self, File, OpenOptions};
@@ -72,6 +72,13 @@ const LOG_PUBLISH_GAP: Duration = Duration::from_millis(400);
 const MAX_WAIT_MS: u64 = 24 * 60 * 60 * 1000;
 /// 任务开始时还没有监听连接。这个观察不属于任何一条后来的连接。
 const UNBOUND_WATCH: u64 = 0;
+
+/// 这个会话的 `session_list` / `session_read` / `session_send` / `session_spawn`。
+///
+/// 由起会话的守护装上。来源会话 id 绑在闭包里，请求体里写什么都不算。
+/// 没装时这些操作直接失败（测试里的后台任务、不和别的对话通信的会话）。
+pub type PeerRequestHandler =
+    Arc<dyn Fn(&str, &serde_json::Value) -> serde_json::Value + Send + Sync>;
 
 struct UiNotice {
     id: String,
@@ -169,6 +176,7 @@ struct Inner {
     next_listener: AtomicU64,
     next_wait: AtomicU64,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    peer_handler: Option<PeerRequestHandler>,
 }
 
 /// 一个会话一份。`Drop` 停掉仍在跑的任务并删掉套接字。
@@ -182,6 +190,7 @@ impl BackgroundSupervisor {
         cwd: Option<String>,
         events: smol::channel::Sender<ConversationEvent>,
         outbound: smol::channel::Sender<serde_json::Value>,
+        peer_handler: Option<PeerRequestHandler>,
     ) -> Result<Self, String> {
         static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
         let nonce = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
@@ -223,6 +232,7 @@ impl BackgroundSupervisor {
             next_listener: AtomicU64::new(1),
             next_wait: AtomicU64::new(1),
             threads: Mutex::new(Vec::new()),
+            peer_handler,
         });
         let (accept_wake, accept_poke) =
             wake_pair().map_err(|error| format!("无法创建后台任务唤醒：{error}"))?;
@@ -413,7 +423,7 @@ fn handle_client(inner: Arc<Inner>, stream: TaskStream, session_cwd: &str) {
         Some("listen") => serve_listen(inner, stream, request_owner(&request)),
         Some("subagent_dispatch") => subagents::serve_dispatch(inner, stream, &request, pending),
         Some(op @ ("session_list" | "session_read" | "session_send" | "session_spawn")) => {
-            peers::forward(stream, op, &request);
+            peers::forward(&inner, stream, op, &request);
         }
         Some("wait") if wait_timeout(&request).is_some() => {
             serve_wait_until(inner, stream, &request);
@@ -2238,7 +2248,8 @@ mod tests {
         let (events, event_rx) = smol::channel::unbounded();
         let (outbound, outbound_rx) = smol::channel::unbounded();
         let cwd = std::env::current_dir().unwrap().display().to_string();
-        let supervisor = BackgroundSupervisor::start("test", Some(cwd), events, outbound).unwrap();
+        let supervisor =
+            BackgroundSupervisor::start("test", Some(cwd), events, outbound, None).unwrap();
         (supervisor, event_rx, outbound_rx)
     }
 
@@ -3439,6 +3450,58 @@ mod tests {
         assert!(
             refused["error"].as_str().unwrap().contains("子智能体"),
             "{refused}"
+        );
+    }
+
+    /// 应答函数是这个会话自己的。请求体里的来源字段原样交给它，由它决定信不信。
+    #[test]
+    fn peer_requests_are_answered_by_the_bound_handler() {
+        let seen = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&seen);
+        let handler: PeerRequestHandler = Arc::new(move |op, body| {
+            *record.lock().unwrap() = Some((op.to_string(), body.clone()));
+            serde_json::json!({"ok": true, "sessions": []})
+        });
+        let (events, _event_rx) = smol::channel::unbounded();
+        let (outbound, _outbound_rx) = smol::channel::unbounded();
+        let supervisor = BackgroundSupervisor::start(
+            "peer-handler",
+            Some(std::env::current_dir().unwrap().display().to_string()),
+            events,
+            outbound,
+            Some(handler),
+        )
+        .unwrap();
+        let reply = call(
+            supervisor.socket_path(),
+            serde_json::json!({
+                "op": "session_list",
+                "query": "e2e",
+                "sourceSessionId": "forged"
+            }),
+        );
+        assert_eq!(reply["ok"], true);
+        let (op, body) = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(op, "session_list");
+        assert_eq!(body["query"], "e2e");
+        assert!(body.get("op").is_none(), "op 是路径，不该再出现在请求体里");
+        assert_eq!(body["sourceSessionId"], "forged");
+    }
+
+    #[test]
+    fn peer_requests_fail_when_no_handler_is_bound() {
+        let (supervisor, _events) = supervisor();
+        let reply = call(
+            supervisor.socket_path(),
+            serde_json::json!({"op": "session_list"}),
+        );
+        assert_eq!(reply["ok"], false);
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("不能和别的对话通信"),
+            "{reply}"
         );
     }
 }

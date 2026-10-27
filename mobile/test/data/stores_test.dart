@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:smelt_mobile/data/app_update.dart';
 import 'package:smelt_mobile/data/models.dart';
 import 'package:smelt_mobile/data/preferences.dart';
 import 'package:smelt_mobile/data/stores.dart';
@@ -78,6 +79,27 @@ void main() {
       });
       expect(p.themeMode, ThemeMode.system);
       expect(p.terminalFontSize, Preferences.defaultTerminalFontSize);
+    });
+
+    test('更新通道是后加的：旧文件里没有、认不出都是生产版', () {
+      expect(
+        Preferences.fromJson({
+          'version': Preferences.version,
+          'themeMode': 'dark',
+        }).updateChannel,
+        UpdateChannel.prod,
+      );
+      expect(
+        Preferences.fromJson({
+          'version': Preferences.version,
+          'updateChannel': 'nightly',
+        }).updateChannel,
+        UpdateChannel.prod,
+      );
+      final dev = const Preferences().copyWith(
+        updateChannel: UpdateChannel.dev,
+      );
+      expect(Preferences.fromJson(dev.toJson()), dev);
     });
 
     test('落盘后能读回', () async {

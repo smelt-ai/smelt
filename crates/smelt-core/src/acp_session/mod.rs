@@ -101,10 +101,10 @@ pub struct HostedSnapshotMerge {
 pub struct AcpSessionState {
     /// 归约器的工作缓冲。重放期间它是从空缓冲重建的草稿，不是会话正文，
     /// 所以不对外公开：外部一律读 [`Self::entries`]（已发布正文）。
-    /// 父进程镜像在合并宿主快照后会丢掉已提交前缀，只留当前回合；
+    /// 挂起时会丢掉已提交前缀，只留当前回合；
     /// 这时 `entries[0]` 的绝对下标是 [`Self::entries_base`]。
-    /// 会话宿主的归约从 0 开始。死亡宿主的重启种子可能只是这一截后缀，
-    /// 重放提交后 [`Self::commit_replay`] 把下标清回 0。
+    /// 运行中的归约从 0 开始。往上翻历史会先唤醒，重放提交后
+    /// [`Self::commit_replay`] 把下标清回 0。
     entries: Vec<AcpEntry>,
     /// `entries` 之前还有这么多条已提交正文不在这个缓冲里。
     entries_base: usize,
@@ -543,8 +543,13 @@ impl AcpSessionState {
         })
     }
 
-    /// 父镜像不保留已提交前缀。进行中的回合从最后一条用户消息留到末尾；
+    /// 丢掉已提交前缀，只留当前回合。进行中的回合从最后一条用户消息留到末尾；
     /// 空闲时同样留下刚结束的那一轮，自动化要拿它的输出，恢复判断也才知道这不是空会话。
+    /// 绝对下标记进 [`Self::entries_base`]。挂起时调用，避免整段历史一直留在内存里。
+    pub fn trim_to_current_turn(&mut self) {
+        self.retain_mirror_suffix();
+    }
+
     fn retain_mirror_suffix(&mut self) {
         let active = self.turn_started_at_ms.is_some()
             || matches!(
@@ -626,7 +631,7 @@ impl AcpSessionState {
         self.replay_baseline.as_deref().unwrap_or(&self.entries)
     }
 
-    /// 父镜像丢掉的已提交前缀长度。宿主和同进程会话是 0。
+    /// 已经丢掉的已提交前缀长度。运行中是 0；挂起裁过之后大于 0。
     pub fn entries_base(&self) -> usize {
         self.entries_base
     }

@@ -100,7 +100,7 @@
 | 打开项目 | `workspace_sessions.rs` 的 `open_project` | 先选机器，只有一台就直接用 |
 | 历史页 | `session_history.rs`、`workspace_sessions.rs` | 待定，见末尾 |
 | 能力库、自动化 | `agents/workspace.rs` | 隐藏 |
-| 挂「只作用于本机运行时」标签的设置页 | `settings/workspace_view/render/mod.rs`、`agents/view.rs` | 隐藏 |
+| 「Agent」页（有远程运行时时，标题旁挂「只作用于本机运行时」） | `settings/workspace_view/render/mod.rs` | 隐藏 |
 | Pi 配置 | `settings/pi_config.rs` | 已按 `RuntimeKey` 选客户端，默认选第一个可用运行时 |
 | smeltd 升级、重启、过期探测 | `workspace_update.rs`，`main.rs` 的 `start_daemon_outdated_watch` | 不启动 |
 | smelt-notify 同步 | `settings/bundled_helpers.rs` | 不调用 |
