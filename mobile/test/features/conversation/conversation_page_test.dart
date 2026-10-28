@@ -463,7 +463,7 @@ void main() {
       expect(find.text('compaction failed'), findsOneWidget);
 
       await tester.tap(find.byTooltip('Dismiss notice'));
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(find.text('compaction failed'), findsNothing);
 
       backend.watch.add(
@@ -473,7 +473,7 @@ void main() {
           ),
         ),
       );
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(find.text('compaction failed'), findsNothing);
 
       backend.watch.add(
@@ -483,7 +483,7 @@ void main() {
           ),
         ),
       );
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(find.text('model rejected'), findsOneWidget);
     });
 
