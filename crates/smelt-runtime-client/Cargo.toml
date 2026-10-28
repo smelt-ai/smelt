@@ -24,6 +24,17 @@ base64 = "0.22"
 tungstenite = "0.29"
 rust-embed = { version = "8", features = ["debug-embed"] }
 
-# Windows 上 std 没有 UnixStream，连接流换成系统 AF_UNIX 的这个封装（见 stream 模块）。
+# Windows 上 std 没有 UnixStream，系统 AF_UNIX 由 stream/windows.rs 自己包：建连、
+# 读写、accept 的等待都走 AFD poll，要 windows-sys 的这些 API。
 [target.'cfg(windows)'.dependencies]
-uds_windows = "1.2"
+windows-sys = { version = "0.61", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Wdk_System_IO",
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }

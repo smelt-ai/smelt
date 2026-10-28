@@ -15,6 +15,8 @@ smelt-sys = { path = "../smelt-sys" }
 anyhow = "1"
 dirs = "5"
 reqwest = { version = "0.13", features = ["json"] }
+# 更新器按发版号比新旧（Windows 认编进程序的发版号）。
+semver = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 url = "2"
@@ -27,11 +29,15 @@ serde_json = "1"
 smol = "2"
 uuid = { version = "1", features = ["v4"] }
 
-# 「移到应用程序」和更新器的 flock / dlopen 只在 macOS 上编（设计文档 D4）。
+# 「移到应用程序」和 macOS 更新器的 flock / dlopen 只在 macOS 上编（设计文档 D4）。
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
+
+# Windows 的更新认编进程序的发版号，对着发版的 SHA256SUMS 校验安装程序。
+[target.'cfg(windows)'.dependencies]
+smelt-version = { path = "../smelt-version" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -9,9 +9,8 @@ pub mod runtime;
 pub mod runtime_path;
 pub mod session_kill;
 pub mod session_ops;
-// 更新器替换的是 macOS 的 .app 包（codesign、Info.plist、原子交换目录），桌面也只有
-// macOS 版。
-#[cfg(target_os = "macos")]
+// 桌面的在线更新：macOS 换 .app 包，Windows 拉起安装程序。
+#[cfg(any(target_os = "macos", windows))]
 pub mod updater;
 // 放的位置决定能不能自更新：被系统转移、只读的要先移到「应用程序」。
 #[cfg(target_os = "macos")]

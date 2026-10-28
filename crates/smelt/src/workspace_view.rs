@@ -9,7 +9,7 @@ use gpui_component::*;
 
 use crate::session_history::{HistoryListState, HistoryViewParams, history_view};
 use crate::{CloseConfirm, RenameTarget, Workspace, request_app_quit, ui_theme};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use crate::{UpdateInstallTrigger, updater};
 
 enum ModalRole {
@@ -375,15 +375,17 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let update_is_applying =
             matches!(self.update_status, updater::UpdateStatus::Applying { .. });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         let update_is_applying = false;
-        // 更新事务只在 macOS 上存在。
-        #[cfg(target_os = "macos")]
-        let installing = !update_is_applying && self.update_status.ready_update().is_some();
-        #[cfg(not(target_os = "macos"))]
+        // 「退出并安装」的提示讲的是停守护；不停守护的平台照普通退出说。
+        #[cfg(any(target_os = "macos", windows))]
+        let installing = updater::INSTALL_STOPS_LOCAL_DAEMON
+            && !update_is_applying
+            && self.update_status.ready_update().is_some();
+        #[cfg(not(any(target_os = "macos", windows)))]
         let installing = false;
         let prompt = super::daemon_restart_prompt::daemon_stop_prompt(
             super::daemon_restart_prompt::DaemonStopReason::QuitToInstall,
@@ -417,7 +419,7 @@ impl Workspace {
                 }
                 // Applying 表示 helper 已派生且当前 GUI 正在退出，不能再启动
                 // 第二条退出或安装流程。
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 if matches!(this.update_status, updater::UpdateStatus::Applying { .. }) {
                     return;
                 }
@@ -425,7 +427,7 @@ impl Workspace {
                 cx.notify();
                 // 退出只是统一安装驱动的一种触发策略：helper 派生成功后退出，
                 // 并在本进程完全消失后才提交同一份事务。
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 if let Some(update) = this.update_status.ready_update().cloned() {
                     this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
                     return;

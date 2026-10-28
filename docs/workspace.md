@@ -54,7 +54,7 @@ cargo run --bin smelt
   的定义在 `smelt-model`，这里只再导出。
 - **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
   `~/.smelt/client.sqlite3`（外观、每段对话的界面状态和分屏布局、连过哪些运行时）。`SCHEMA_VERSION = 4`。
-- **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（本机 socket 与 iroh）。Windows 上 Rust 客户端的本机 socket 是 `uds_windows` 的 AF_UNIX 文件 `smeltd.sock`；Bun / Pi 另走当前用户的命名管道。
+- **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（本机 socket 与 iroh）。Windows 上 Rust 客户端的本机 socket 是 AF_UNIX 文件 `smeltd.sock`（`stream/windows.rs` 自己包的非阻塞套接字）；Bun / Pi 另走当前用户的命名管道。
 - **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify`）：
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
 - **`crates/smelt-paths`** —— 统一环境路径推导（`~/.smelt`）与单用例测试隔离沙箱。
@@ -159,6 +159,8 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 | `Cmd+Q` | 退出（`cx.bind_keys`，也在应用菜单） |
 | `Cmd+,` | 打开设置窗口 |
 
+设置窗口聚焦时，`Cmd+W`（Windows / Linux 是 `Ctrl+W`）关掉设置窗口。`Esc` 不关它。
+
 > **会话两种通道**：**终端**（agent 跑在内嵌终端里，你看到的是它自带的 TUI，
 > 会话列表里是绿点）与**对话**（agent 经 ACP 或 provider 原生 RPC 接进 smelt 界面：结构化消息、
 > 工具卡片、内嵌 diff、按钮审批、PLAN 进度条，列表里是紫点）。引擎是同一个 CLI，
@@ -172,7 +174,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-pi` 跑 Pi 官方
 > JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。终端通道另有 **Antigravity** 与 **Crush**
 > （`settings::TerminalAgentKind`）。
-> 各条启动命令可在设置 →「Agent」改。provider 支持历史恢复时，
+> 各条启动命令在设置 →「Agent」→「高级」里改。provider 支持历史恢复时，
 > 「重新开始」是协议级续接而非摆样子的新对话（Pi 使用自身 session id）。
 >
 > 各家实测差异（决定了下面几个 UI 决策）：首块响应 Claude ~2.6s / Copilot ~7s /
@@ -190,7 +192,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > 舞台有两种覆盖模式：**详情**（从停靠面板点文件/变更 → 舞台只出内容或 diff，
 > 面板原样停靠）与**双栏全宽**（面板头 ⤢ → 树/列表 + 详情占满舞台，此时面板让位）；
 > 总览/历史仍是整页覆盖。Esc 或返回条收回。主题按名字切换（默认是库自带的
-> Default Dark / Default Light，同目录里还有 Ayu、Catppuccin 等），设置 → 外观 → 主题。
+> Default Dark / Default Light，同目录里还有 Ayu、Catppuccin 等），在设置 →「外观」里换。
 > 色板见 `ui_theme.rs`，切换入口 `settings::apply_named_theme`。
 
 ### 终端内（`TerminalView` 聚焦时，见 `terminal_view.rs`）
@@ -250,7 +252,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 桌面 GUI 和手机都是客户端。机器上的会话、项目、智能体、自动化在那台机器的 `smeltd` 里。
 一个桌面窗口可以同时挂上本机和多台远程运行时：侧栏按运行时分块，Git、文件、历史和额度打到会话所在的那一台。
-添加远程运行时是把一次性配对串粘进桌面。设置里标了「只作用于本机运行时」的页面不改远程机器。
+添加远程运行时是把一次性配对串粘进桌面「远程」页的「连到其他机器」。连着远程运行时，设置里的「Agent」页标题旁会标「只作用于本机运行时」，这一页不改远程机器。
 智能体列表按机器分组。桌面可以在已配对的远程机器上新建、编辑智能体。远程机器上的智能体对话进入侧栏「最近对话」，行上标出机器名。能力库里的「记忆」跟着当前选中的机器。
 
 ### Windows 桌面与本机运行时
@@ -266,7 +268,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
 
-数据目录是 `%USERPROFILE%\.smelt`。Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（`uds_windows` 的 AF_UNIX）。Bun / Pi 不连这个文件：交给它们的 `SMELT_SOCK` 是当前用户的命名管道 `\\.\pipe\smelt-<sid>-daemon`。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-pi-<指纹>/smelt-pi.exe`，启动名是 `smelt-pi.current` 指针文件。受管 Bun 取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `%USERPROFILE%\.smelt\runtime` 下的 `bin/bun.exe`。
+数据目录是 `%USERPROFILE%\.smelt`。Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（AF_UNIX，见 `smelt-runtime-client/src/stream/windows.rs`）。Bun / Pi 不连这个文件：交给它们的 `SMELT_SOCK` 是当前用户的命名管道 `\\.\pipe\smelt-<sid>-daemon`。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-pi-<指纹>/smelt-pi.exe`，启动名是 `smelt-pi.current` 指针文件。受管 Bun 取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `%USERPROFILE%\.smelt\runtime` 下的 `bin/bun.exe`。
 
 交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`，走 ConPTY。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。关掉桌面窗口本身不停守护，shell 还在。升级和其它平台一样先优雅停机再换新版本，进行中的终端会话和回合会中断；不同在于 Windows 不能 `exec`，旧进程拉起新映像当接班进程，接班进程等它退出再绑定监听。系统通知、状态栏图标、Dock 角标在 Windows 上没有。细节见 [`windows-support.md`](windows-support.md)。
 

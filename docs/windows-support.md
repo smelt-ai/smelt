@@ -5,7 +5,7 @@
 1. Windows 桌面端连远程运行时（Linux / macOS 上的 smeltd）。
 2. Windows 本机跑 smeltd：冷启动、Rust 客户端走 AF_UNIX、Bun 走命名管道、升级即重启。
 
-数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名，没有自动更新。发版起初是 zip 便携包，后来换成按用户安装的 Inno Setup 安装程序（`scripts/windows-installer.iss`）。
+数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名。发版起初是 zip 便携包，后来换成按用户安装的 Inno Setup 安装程序（`scripts/windows-installer.iss`）。
 
 ## 第 1 步的范围
 
@@ -41,7 +41,8 @@
 
 1. smelt-runtime-client 新增 `stream` 模块，定义 `RuntimeStream` 和 `stream_pair()`：
    - Unix：`std::os::unix::net::UnixStream` 的类型别名，行为不变。
-   - Windows：`uds_windows::UnixStream`（AF_UNIX，Windows 10 1803 起系统支持；该 crate 已在依赖树里）。它提供 `pair`、`connect`、`try_clone`、`set_read_timeout`、`set_write_timeout`、`shutdown`，覆盖调用方用到的全部方法。
+   - Windows：`stream/windows.rs` 自己的 `UnixStream` / `UnixListener`（系统 AF_UNIX，Windows 10 1803 起支持），提供 `pair`、`connect`、`try_clone`、`set_read_timeout`、`set_write_timeout`、`set_nonblocking`、`shutdown`、`incoming`，和 std 的语义一致。
+   - 不在驱动上挂任何阻塞调用：afunix.sys 在阻塞 `recv` 刚挂上、对端恰好写入或关闭时偶尔丢掉唤醒，读一直挂到超时（10060）；本地 `shutdown` 也叫不醒另一条线程里阻塞的 `recv`。所以套接字建出来就是非阻塞的，读、写、accept、connect 遇到 WouldBlock 都用 AFD poll（WSAPoll 底下那层，可取消）等就绪，和本地 `shutdown` 的事件、读写超时一起等。最早用的 `uds_windows` 是阻塞实现，已去掉。
 2. 所有签名里的 `UnixStream` 换成 `RuntimeStream`，是机械替换。
 3. iroh 搬运：Unix 保持现有 tokio 实现。Windows 上 AF_UNIX 套接字进不了 tokio，`bridge_tracked` 改为每个方向一条线程：一条阻塞读本地端、经 `Handle::block_on` 写 QUIC `SendStream`，另一条反过来。语义和现有 `pump` 一致：一方读到 EOF 只半关闭对应方向，另一方向继续；任一方向出错，两端一起关。
    - 每条远程流两条线程。桌面同时开着的流是事件订阅加每个打开的终端、对话各一条，几十条量级，可以接受。
@@ -100,7 +101,7 @@
 | 打开项目 | `workspace_sessions.rs` 的 `open_project` | 先选机器，只有一台就直接用 |
 | 历史页 | `session_history.rs`、`workspace_sessions.rs` | 待定，见末尾 |
 | 能力库、自动化 | `agents/workspace.rs` | 隐藏 |
-| 挂「只作用于本机运行时」标签的设置页 | `settings/workspace_view/render/mod.rs`、`agents/view.rs` | 隐藏 |
+| 「Agent」页（有远程运行时时，标题旁挂「只作用于本机运行时」） | `settings/workspace_view/render/mod.rs` | 隐藏 |
 | Pi 配置 | `settings/pi_config.rs` | 已按 `RuntimeKey` 选客户端，默认选第一个可用运行时 |
 | smeltd 升级、重启、过期探测 | `workspace_update.rs`，`main.rs` 的 `start_daemon_outdated_watch` | 不启动 |
 | smelt-notify 同步 | `settings/bundled_helpers.rs` | 不调用 |
@@ -119,7 +120,7 @@
 | `smelt-paths` `smelt_home()` | `dirs::home_dir().join(".smelt")` | 待定，见末尾 |
 | `smelt-iroh/src/lib.rs` 密钥文件权限 | `cfg(unix)` 设 0600，已有非 Unix 分支 | 不改，用户目录默认 ACL 只给本人 |
 | `smelt-client-store` `path_bytes` | Unix `OsStrExt` | 只服务更新器状态，随更新器 `cfg` |
-| `smelt-client/src/updater.rs`、`app_location.rs` | `.app` 替换，`flock`、`renamex_np`、`dlopen` | `cfg(target_os = "macos")`，设置页的更新入口在 Windows 上隐藏 |
+| `smelt-client/src/updater/macos.rs`、`app_location.rs` | `.app` 替换，`flock`、`renamex_np`、`dlopen` | `cfg(target_os = "macos")`；Windows 的更新另走 `updater/windows.rs`，见「待办」上面的「应用内更新」 |
 | `smelt/src/plugins/host_fs.rs` | 软链接、原子交换 | 软链接用 `std::os::windows::fs::symlink_file` / `symlink_dir`，失败按不支持报错；原子交换走现有的「不支持」分支 |
 | `smelt/src/terminal.rs` 其余部分 | 前端渲染与连接 | D1 换类型，smeltd 部分已在 D3 挪走 |
 
@@ -128,7 +129,7 @@
 - **CI**：`ci.yml` 加 `windows-latest` 任务，跑 `cargo check -p smelt` 和受影响 crate 的测试（smelt-runtime-client、smelt-iroh、smelt-client）。在 Windows runner 上原生编译，不交叉编译。桌面端在 Windows 上编过之前不设为必需检查，编过后加进 `ci-ok`。
 - **发版**：`release.yml` 加 Windows 任务，只编 `smelt`，产出 `smelt-<版本>-windows-x86_64.zip`，挂到同一个 Release，写进校验和清单。
 - **图标与清单**：Windows 清单由 `gpui-pre-platform` 的 `windows-manifest` 特性带上；exe 图标要新加 `crates/smelt/build.rs`，只在 Windows 目标上嵌资源。
-- **签名与更新**：第一版不签名，下载后有 SmartScreen 提示，在 Release 说明里写明。安装包已定为 Inno Setup 按用户安装；自动更新还没做。
+- **签名与更新**：第一版不签名，下载后有 SmartScreen 提示，在 Release 说明里写明。安装包已定为 Inno Setup 按用户安装；应用内更新见下面「应用内更新」。
 
 ## 施工顺序
 
@@ -145,7 +146,7 @@
 
 已实现。Unix 行为不变。Windows 是一套真的本机运行时，不是远程客户端的空壳。
 
-- **IPC**。Rust 客户端（桌面、`smelt-notify`、runtime client）继续连 AF_UNIX 文件 `~/.smelt/smeltd.sock`。Windows 上这个类型是 `uds_windows`，由 `smelt_runtime_client` 再导出。守护的 accept 循环是同步线程（`incoming` / `accept`），不把监听塞进 tokio，所以不要求 tokio 的 Windows AF_UNIX。Bun / Node 的 `net.connect(path)` 在 Windows 上连的是命名管道，不是这个文件。第二条监听只在 Windows 上建：`PipeListener::bind(user_pipe_path("daemon"))`，accept 之后进同一个连接处理函数。不把管道桥进 AF_UNIX，否则对端 pid 会变成 smeltd 自己，鉴权直接拒绝。交给 Bun / Pi / shell 的 `SMELT_SOCK` 在 Windows 上是 `\\.\pipe\smelt-<sid>-daemon` 这种管道名；Rust 代码连守护仍然用 sock 文件。
+- **IPC**。Rust 客户端（桌面、`smelt-notify`、runtime client）继续连 AF_UNIX 文件 `~/.smelt/smeltd.sock`。Windows 上这个类型是 `smelt_runtime_client::stream` 自己包的 AF_UNIX。守护的 accept 循环是同步线程（`incoming` / `accept`），不把监听塞进 tokio，所以不要求 tokio 的 Windows AF_UNIX。Bun / Node 的 `net.connect(path)` 在 Windows 上连的是命名管道，不是这个文件。第二条监听只在 Windows 上建：`PipeListener::bind(user_pipe_path("daemon"))`，accept 之后进同一个连接处理函数。不把管道桥进 AF_UNIX，否则对端 pid 会变成 smeltd 自己，鉴权直接拒绝。交给 Bun / Pi / shell 的 `SMELT_SOCK` 在 Windows 上是 `\\.\pipe\smelt-<sid>-daemon` 这种管道名；Rust 代码连守护仍然用 sock 文件。
 - **鉴权**。macOS 的 codesign 路径不动。Windows 走同一用户 SID：pid 来自 AF_UNIX 的 `SIO_AF_UNIX_GETPEERPID` 或管道的 `GetNamedPipeClientProcessId`，exe 来自 `process_executable`，必须 `same_user_as_current`，并且不能是守护自己的 pid。basename 和 `"smelt"` 比的时候去掉一个结尾的 `.exe`、大小写不敏感，不另加一行表，免得 macOS 的 signing-id 列分叉。路径要和守护目录旁边的 `smelt.exe` 相同，或者和 `SMELT_BUNDLE_DIR`（桌面拉起守护时写成 GUI exe 所在目录）旁边的 `smelt.exe` 相同。托管映像是 `~/.smelt/bin/smeltd-<指纹>.exe`，GUI 在安装目录，只认守护目录的兄弟会把桌面拒掉。不做 Authenticode。
 - **升级**。不交接 fd（`handoff_v2` 已删）。升级先拨启动名，再优雅停机：收割子进程、回写未完成回合、WAL checkpoint，最后回执。Unix 回执后在本进程里 `exec` 新映像；Windows 不能 `exec`，拉起目标映像当接班进程（`SMELTD_PREDECESSOR_PID` 告诉它前任是谁），接班进程等前任退出、放掉监听再绑定。没有桌面的运行时（推送升级、空闲自升级）也能换上新版。终端会话和进行中的回合会中断，历史还在。
 - **守护映像**。不建符号链接（那要额外权限）。发布是复制或硬链接到 `smeltd-<指纹>.exe`，启动名是旁边的 `smelt-image-v1` 指针文件。`launch_executable` 读出真正要执行的那份。
@@ -153,11 +154,22 @@
 - **Shell 和进程**。交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`。没有参数的自动化 Shell 脚本同样走 `cmd.exe /d /c`，不调用 bash。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。ConPTY 不能 `CREATE_SUSPENDED`，shell 起来之后立刻 `attach_running`。PTY 尺寸走 master 的 `resize`，不用 `as_raw_fd`。
 - **发版**。安装程序 `smelt-<版本>-windows-x86_64-setup.exe` 装进安装目录的是 `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。`smelt.com` 是控制台子系统的命令行入口（`smelt-cli.exe` 改名），cmd / PowerShell 敲 `smelt` 先找到它。
 
+## 应用内更新
+
+已实现。通道、查新版、设置页和 macOS 共用（`smelt-client/src/updater.rs`），Windows 只换「下什么、怎么装」（`updater/windows.rs`）：
+
+- **谁能更新**。只有安装程序装的发版构建：有发版号 `smelt_version::RELEASE`，exe 旁边有 Inno 的卸载程序 `unins000.exe`。开发构建、拷出来的 exe 停在「这个 Smelt 不能自动更新」，不检查、不下载。
+- **查**。认 Release 里的 `smelt-<版本>-windows-x86_64-setup.exe`，同一个 Release 还要有 `SHA256SUMS`，而且清单里已经有它（发版流水线等所有产物到齐才重写清单）；最新的还没齐就退到上一个，最多看三个。是不是新版比的是发版号：只有比装着的新才装，切回生产通道或退到比装着的旧时都不装回去（旧版读不了新版升级过的客户端库）。版本号认不出的候选跳过，所以更新清单要给出能解析的版本号。
+- **下**。下到 `%LOCALAPPDATA%\Smelt\update`，边下边算 SHA-256，对上清单才算下好；同一版本下过就不再下。不记持久化事务：下好的安装程序只在这次运行里等着装，重启后重新检查。启动时删掉已经装上的那个版本的安装程序和日志。
+- **装**。拉起前再校验一遍，再用 `spawn_detached` 拉起 `setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /WAITPID=<桌面 pid> /LOG=<日志> [/RELAUNCH=<桌面 exe>]`，脱离桌面的 Job，桌面随即退出。安装程序在 `InitializeSetup` 里等桌面进程退出（上限 2 分钟，超时这次不装），之后才查 `AppMutex`、换文件（Inno 源码里这两步就是这个顺序）。给了 `/RELAUNCH` 时，装好由 `[Run]` 打开新版；没装成（超时、文件被占用、又有 Smelt 开着）由 `DeinitializeSetup` 把原来那个打开。下次启动在 app.log 里记一笔，指向留下的安装日志。
+- **退出时装**。Quit 动作和关掉主窗口（Windows 上关主窗口就是退出，不走 Quit）都会装待装的更新，不重新打开。
+- **守护不停**。smeltd、smelt-pi、smelt-notify 跑的都是 `~/.smelt/bin` 里的副本，不占安装目录，换文件不用停守护，会话不断，也就不用像 macOS 那样先确认。新版桌面起来后照「守护落后就在空闲时重启」换守护。安装目录里还可能被占着的是 `smelt.com`（终端里开着的命令行），交给 Inno 的 Restart Manager 关。
+
 ## 已定
 
 原先写成「未定」的，按上面落地：
 
-- 本机通信是 Rust AF_UNIX（`uds_windows`，sock 文件）加 Bun 命名管道。不是回环 TCP，也不要求 tokio AF_UNIX。
+- 本机通信是 Rust AF_UNIX（自己包的非阻塞套接字，等待走 AFD poll，sock 文件）加 Bun 命名管道。不是回环 TCP，也不要求 tokio AF_UNIX。
 - 鉴权是同用户 SID、peer exe 的 basename、守护目录或 `SMELT_BUNDLE_DIR` 的兄弟。没有 Authenticode。
 - 交接不做。升级重启，终端会话丢失。
 - 数据目录沿用 `%USERPROFILE%\.smelt`。
@@ -165,4 +177,4 @@
 
 ## 待办
 
-- **远程升级与自动更新**（10-27 记）。现在 Windows 上的运行时回不了 `runtime_upgrade`：它跟桌面装在同一个安装程序里，只能到那台机器上手动跑新版的 `setup.exe` 覆盖安装。打算的做法：smeltd 收到升级请求后从 Release 下载 `smelt-<版本>-windows-x86_64-setup.exe`，按校验和清单核对哈希，拉起一个脱离自己的安装进程（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）后退出，好让 Inno Setup 替换正在用的 exe；装完重新拉起 smeltd，桌面那边照现有流程等它重启、重连。代价：终端会话不保留；那台机器上开着的 Smelt 桌面会被关掉。本机自动更新可以复用这套流程。做的时候要在 Windows 机器上实测。
+- **远程升级**（10-27 记）。现在 Windows 上的运行时回不了 `runtime_upgrade`：它跟桌面装在同一个安装程序里，只能到那台机器上手动跑新版的 `setup.exe` 覆盖安装。打算的做法：smeltd 收到升级请求后从 Release 下载 `smelt-<版本>-windows-x86_64-setup.exe`，按校验和清单核对哈希，拉起一个脱离自己的安装进程（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）后退出，好让 Inno Setup 替换正在用的 exe；装完重新拉起 smeltd，桌面那边照现有流程等它重启、重连。代价：终端会话不保留；那台机器上开着的 Smelt 桌面会被关掉。下载、校验、静默安装可以复用桌面应用内更新那套（`updater/windows.rs`、`.iss` 的 `/WAITPID`）。做的时候要在 Windows 机器上实测。

@@ -10852,6 +10852,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -10862,6 +10863,7 @@ dependencies = [
  "smelt-paths",
  "smelt-runtime-client",
  "smelt-sys",
+ "smelt-version",
  "smol",
  "tempfile",
  "tokio",
@@ -11015,8 +11017,8 @@ dependencies = [
  "similar 3.2.0",
  "smelt-paths",
  "tungstenite",
- "uds_windows",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

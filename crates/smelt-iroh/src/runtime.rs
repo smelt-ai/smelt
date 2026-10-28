@@ -343,10 +343,7 @@ mod threaded {
         recv: RecvStream,
     ) -> io::Result<(RuntimeStream, tokio::task::JoinHandle<()>)> {
         let (ours, theirs) = RuntimeStream::pair()?;
-        // 上下行共用这一个描述符。不要 `try_clone`：Windows 上它走 WSADuplicateSocketW，
-        // 复制出独立的 SOCKET。在其中一个上 `shutdown(SD_SEND)` 后立刻 `closesocket`，
-        // 另一个正堵在 `recv` 时，对端偶尔收不到 EOF。半关闭和读写必须落在同一个 SOCKET
-        // 上，最后一份 `Arc` 丢掉才关闭。
+        // 上下行共用这一个流，最后一份 `Arc` 丢掉才关闭。
         let ours = Arc::new(ours);
         let handle = Handle::current();
         let stop = Arc::new(Notify::new());

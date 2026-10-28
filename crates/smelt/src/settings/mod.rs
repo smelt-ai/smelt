@@ -15,7 +15,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use gpui_component::progress::Progress;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
@@ -23,7 +23,7 @@ use gpui_component::switch::Switch;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use crate::updater;
 use crate::{Workspace, liquid_glass, terminal, terminal_view};
 
@@ -223,8 +223,8 @@ pub fn apply_window_opacity(_window: &Window, _opacity: f32) {}
 /// 在线更新配置（全局单例，存 SQLite KV）。
 ///
 /// 通道只决定更新源给哪一路包（GitHub 上认不认预发布，或打包时指定的哪份清单）；
-/// 更新流程本身仍由 updater 统一处理。只在 macOS 上存在（设计文档 D4）。
-#[cfg(target_os = "macos")]
+/// 更新流程本身仍由 updater 统一处理。
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpdateSettings {
     #[serde(default)]
@@ -235,12 +235,12 @@ pub struct UpdateSettings {
     pub auto_install: bool,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn default_auto_install() -> bool {
     true
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl Default for UpdateSettings {
     fn default() -> Self {
         Self {
@@ -250,7 +250,7 @@ impl Default for UpdateSettings {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl Global for UpdateSettings {}
 
 /// 枚举在客户端库里存它的 serde 名（`dev`、`dark`、`session`……），和协议里的写法一致。
@@ -267,7 +267,7 @@ pub(crate) fn enum_from_name<T: serde::de::DeserializeOwned>(name: &str) -> Opti
 }
 
 /// 更新设置归客户端（每台设备各自管自己的更新），存在客户端库。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub fn load_update_settings() -> UpdateSettings {
     let record = match smelt_client_store::client_store().and_then(|store| store.update_settings())
     {
@@ -286,7 +286,7 @@ pub fn load_update_settings() -> UpdateSettings {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub fn save_update_settings(settings: &UpdateSettings) {
     let record = smelt_client_store::UpdateSettingsRecord {
         channel: enum_name(&settings.channel),
@@ -299,7 +299,7 @@ pub fn save_update_settings(settings: &UpdateSettings) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub fn apply_update_channel(channel: updater::UpdateChannel, cx: &mut App) {
     let mut settings = *cx.global::<UpdateSettings>();
     settings.channel = channel;
@@ -307,7 +307,7 @@ pub fn apply_update_channel(channel: updater::UpdateChannel, cx: &mut App) {
     cx.set_global(settings);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
     let mut settings = *cx.global::<UpdateSettings>();
     settings.auto_install = auto_install;
@@ -1335,7 +1335,7 @@ struct SettingsRenderSnapshot {
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
     agent_names_using_plugin: std::collections::HashMap<String, Vec<String>>,
     panel_plugins: PanelPluginsSnapshot,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     update_status: updater::UpdateStatus,
     /// 正在把 App 移到「应用程序」，见 `Workspace::move_app_to_applications`。
     #[cfg(target_os = "macos")]
@@ -1409,7 +1409,7 @@ impl SettingsContentView {
                 Self::observe_settings_global::<AgentHostState>(window, cx),
                 Self::observe_settings_global::<AgentHosts>(window, cx),
                 Self::observe_settings_global::<AcpRuntimeState>(window, cx),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 Self::observe_settings_global::<UpdateSettings>(window, cx),
                 Self::observe_settings_global::<CleanupState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),

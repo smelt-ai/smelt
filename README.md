@@ -15,7 +15,7 @@ Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, Crush — 
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20Windows%20desktop%20%2B%20Linux%20runtime-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **Status**: working prototype, under active development. The desktop app runs on macOS (Apple Silicon) and Windows 10 1803+ (x86_64). The runtime (`smeltd`) also runs headless on Linux. The Windows build is an unsigned installer without automatic updates.
+> **Status**: working prototype, under active development. The desktop app runs on macOS (Apple Silicon) and Windows 10 1803+ (x86_64). The runtime (`smeltd`) also runs headless on Linux. The Windows build is an unsigned installer.
 
 </div>
 
@@ -36,7 +36,7 @@ The app checks for updates on launch and on demand (stable/beta channel), showin
 
 ### Windows (x86_64)
 
-Download `smelt-<version>-windows-x86_64-setup.exe` from the same [Releases](https://github.com/smelt-ai/smelt/releases) page and run it. It installs for the current user without admin rights, into `%LOCALAPPDATA%\Programs\Smelt` by default, adds a Start menu entry, and can put the `smelt` command on your PATH. To upgrade, close Smelt and run the newer installer.
+Download `smelt-<version>-windows-x86_64-setup.exe` from the same [Releases](https://github.com/smelt-ai/smelt/releases) page and run it. It installs for the current user without admin rights, into `%LOCALAPPDATA%\Programs\Smelt` by default, adds a Start menu entry, and can put the `smelt` command on your PATH. Like macOS, the app checks for updates on launch and on demand (stable/beta channel); applying an update closes Smelt, runs the new installer silently, and reopens it. Running sessions are not interrupted.
 
 Data lives in `%USERPROFILE%\.smelt`.
 
@@ -44,7 +44,6 @@ This first Windows build:
 
 - x86_64 only, on Windows 10 version 1803 or later.
 - The installer and executables are unsigned. SmartScreen may warn about an unknown publisher; choose to run anyway.
-- There is no automatic update.
 - The interactive shell is `cmd.exe` (ConPTY), or the program named by `COMSPEC`.
 - There is no menu-bar icon, Dock badge, or system notification. Those stay macOS-only.
 
@@ -109,7 +108,7 @@ make test                   # cargo nextest（与 CI 同一运行器）
 Rust 2024 + [GPUI](https://github.com/zed-industries/zed) (`gpui-pre` 0.3.9) / [gpui-kit](https://github.com/longbridge/gpui-kit) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, and iroh for remote connections. axum for the automation webhook server (loopback only). Structured state is SQLite under `~/.smelt/` (on Windows, `%USERPROFILE%\.smelt`): `smelt.sqlite3` for the runtime and `client.sqlite3` for this desktop. See [`docs/local-storage.md`](docs/local-storage.md).
 
 The workspace contains `smelt` (the main GUI), `smeltd` (the runtime daemon: PTY sessions, in-process ACP drivers, and automations; the macOS and Windows desktops launch it on demand, and on Linux it can be installed as a systemd user service), `smelt-pi` (the Pi runtime binary), `smelt-notify` (status reports from agent hooks), and `smelt-installer` (the helper that swaps the macOS app in after quit). `smelt-iroh-connect` debugs the runtime's iroh path. Most users only interact with `smelt`; the GUI manages the local `smeltd`.
-On Windows, Rust clients (the desktop, `smelt-notify`, and the runtime client) connect to `%USERPROFILE%\.smelt\smeltd.sock` (AF_UNIX via `uds_windows`). Bun and Pi use the current user's named pipe. Child processes sit in a Job Object (`KILL_ON_JOB_CLOSE`). Managed Bun is downloaded as `bun-windows-x64.zip` into `%USERPROFILE%\.smelt\runtime`.
+On Windows, Rust clients (the desktop, `smelt-notify`, and the runtime client) connect to `%USERPROFILE%\.smelt\smeltd.sock` (AF_UNIX, a non-blocking socket wrapped in `smelt-runtime-client/src/stream/windows.rs`). Bun and Pi use the current user's named pipe. Child processes sit in a Job Object (`KILL_ON_JOB_CLOSE`). Managed Bun is downloaded as `bun-windows-x64.zip` into `%USERPROFILE%\.smelt\runtime`.
 The mobile client lives in `mobile/` (Flutter) and is the cross-machine pass called 出菜口. On launch it connects to every paired machine (recorded in `smelt-mobile.sqlite3`). The first screen is the decisions waiting on you and what each machine is doing. Navigation is four tabs — pass, sessions, agents, settings — with a three-column layout on tablets, in Chinese and English. `crates/smelt-mobile` is its Rust core and uses the same `smelt-runtime-client` as the desktop. Each GitHub Release includes a signed `Smelt-<version>-android-arm64.apk`. Release builds check for a newer APK on launch and when the app returns to the foreground (at most every six hours), and from Settings → Updates. The download is checked against that release's `SHA256SUMS` and handed to the system installer. Stable follows full releases; Beta also follows `-rc` builds. Development builds and iOS do not take part. `--dart-define=SMELT_UPDATE_MANIFEST_URL=…` can point updates at another server. iOS TestFlight archives are built with `make ios` (`scripts/build-ios.sh`). See [`mobile/README.md`](mobile/README.md).
 
 For architecture, directory layout, Linux install, multi-runtime windows, remote desktop, and the idle-suspend behavior, see [`docs/workspace.md`](docs/workspace.md).
