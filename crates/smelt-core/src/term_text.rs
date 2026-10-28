@@ -11,6 +11,7 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions; // Term::columns() 由它提供
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags;
+use smelt_model::kitty_graphics::{PLACEHOLDER, without_anchors};
 
 /// 可视区逐格拼成文本行（一行一个 String，行尾空白已裁）。
 pub fn text_lines<T: EventListener>(term: &Term<T>) -> Vec<String> {
@@ -20,10 +21,13 @@ pub fn text_lines<T: EventListener>(term: &Term<T>) -> Vec<String> {
     let mut count = 0usize;
     for indexed in term.renderable_content().display_iter {
         let cell = indexed.cell;
-        if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+        // kitty 图形的占位符读成空格，锚点标记不读（见 smelt_model::kitty_graphics）。
+        if cell.c == PLACEHOLDER {
+            cur.push(' ');
+        } else if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             cur.push(cell.c);
             if let Some(zw) = cell.zerowidth() {
-                cur.extend(zw);
+                cur.extend(without_anchors(zw).iter());
             }
         }
         count += 1;

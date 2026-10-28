@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Direction, Point, Side};
+use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
@@ -23,6 +23,11 @@ use alacritty_terminal::term::{
     viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use gpui::RenderImage;
+use smelt_model::kitty_graphics::{
+    GraphicsSplitter, Layout, PLACEHOLDER, Piece, PlaceholderCell, Relay, anchors_in,
+    placeholder_marks, resolve_placeholder, without_anchors, without_graphics,
+};
 use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::daemon::{DaemonOperation, TerminalOpenErrorCode};
 
@@ -231,6 +236,22 @@ pub struct Frame {
     /// 点击只拿到前/后半截、打开错误地址（#21）。用这个数组把同一条软换行链串起来的
     /// 物理行拼成一行再扫描，就不会切错。长度与 `rows` 一致。
     pub wrapped: Vec<bool>,
+    /// 这一帧要画的 kitty 图形，按层级从低到高。见 [`ImagePaint`]。
+    pub images: Vec<ImagePaint>,
+}
+
+/// 这一帧要画的一块 kitty 图形。坐标以格为单位、相对可视区左上角：锚点可能在可视区上方
+/// （行号为负），图片从那里伸进来。
+pub struct ImagePaint {
+    pub image: Arc<RenderImage>,
+    /// 原始像素尺寸，源图裁剪按它算。
+    pub image_size: (u32, u32),
+    pub layout: Layout,
+    /// 放置区域左上角那一格 (行, 列)。
+    pub anchor: (i32, i32),
+    /// 只画这一块格子 (起始行, 起始列, 行数, 列数)：直接放置是整个放置区域，占位符是同一行里
+    /// 连续的一段。
+    pub clip: (i32, i32, u32, u32),
 }
 
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
@@ -242,6 +263,88 @@ fn resolve(color: Color, is_fg: bool, overrides: &Colors) -> u32 {
         Color::Indexed(i) => overrides[i as usize].map_or_else(|| indexed_rgb(i), rgb_u32),
         Color::Named(n) => overrides[n].map_or_else(|| named_rgb(n, is_fg), rgb_u32),
     }
+}
+
+/// kitty 占位符把图片 id 记在前景色、放置 id 记在下划线颜色里：真彩是 24 位整数，256 色是下标。
+fn graphics_id(color: Color) -> u32 {
+    match color {
+        Color::Spec(rgb) => rgb_u32(rgb),
+        Color::Indexed(index) => u32::from(index),
+        Color::Named(_) => 0,
+    }
+}
+
+/// 一帧要画的 kitty 图形：可视区里的锚点、可视区上方还伸得进来的锚点，以及占位符格子
+/// （同一行里连续、属于同一放置的并成一段）。找不到图的跳过，格子本来就是空白。
+fn image_paints<T: EventListener>(
+    images: &crate::terminal_images::TerminalImages,
+    term: &Term<T>,
+    display_offset: usize,
+    cols: usize,
+    mut anchors_seen: Vec<(i32, i32, u64)>,
+    placeholders: &[(usize, usize, PlaceholderCell)],
+) -> Vec<ImagePaint> {
+    let reach = images.tallest_anchored_rows();
+    if reach > 1 {
+        let top = -(display_offset as i32);
+        let first = (top - (reach as i32 - 1)).max(term.topmost_line().0);
+        for line in first..top {
+            let grid_row = &term.grid()[Line(line)];
+            for column in 0..cols.min(term.columns()) {
+                if let Some(zw) = grid_row[Column(column)].zerowidth() {
+                    for anchor in anchors_in(zw) {
+                        anchors_seen.push((line - top, column as i32, anchor));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut paints = Vec::new();
+    for (row, column, anchor) in anchors_seen {
+        if let Some((image, layout)) = images.anchored(anchor) {
+            paints.push(ImagePaint {
+                image: Arc::clone(&image.render),
+                image_size: image.size,
+                layout: *layout,
+                anchor: (row, column),
+                clip: (row, column, layout.rows, layout.columns),
+            });
+        }
+    }
+
+    let mut i = 0;
+    while let Some(&(row, column, first)) = placeholders.get(i) {
+        let mut len = 1;
+        while placeholders
+            .get(i + len)
+            .is_some_and(|&(next_row, next_column, next)| {
+                next_row == row
+                    && next_column == column + len
+                    && next.image == first.image
+                    && next.placement == first.placement
+                    && next.row == first.row
+                    && next.column == first.column + len as u32
+            })
+        {
+            len += 1;
+        }
+        if let Some((image, layout)) = images.virtual_placement(first.image, first.placement) {
+            paints.push(ImagePaint {
+                image: Arc::clone(&image.render),
+                image_size: image.size,
+                layout: *layout,
+                anchor: (
+                    row as i32 - first.row as i32,
+                    column as i32 - first.column as i32,
+                ),
+                clip: (row as i32, column as i32, 1, len as u32),
+            });
+        }
+        i += len;
+    }
+    paints.sort_by_key(|paint| paint.layout.z);
+    paints
 }
 
 fn rgb_u32(rgb: Rgb) -> u32 {
@@ -953,6 +1056,8 @@ pub struct Terminal {
     /// 那个「底部画不出来、一敲键盘/框选才好」的 bug。`bounded(1)` 天然合并突发：
     /// 空闲无输出＝无唤醒（保住 P0 那条空闲不重绘的优化），有输出才唤醒。
     redraw_rx: smol::channel::Receiver<()>,
+    /// smeltd 转发来的 kitty 图形（读线程写、渲染读）。见 terminal_images。
+    images: Arc<Mutex<crate::terminal_images::TerminalImages>>,
 }
 
 impl Drop for Terminal {
@@ -1049,6 +1154,8 @@ pub(crate) fn open_request(
         "rows": rows,
         "initial_launch": launch,
         "create_if_missing": create_if_missing,
+        // 桌面能画 kitty 图形：smeltd 据此转发图片，否则给去掉图片的版本。
+        "graphics": "kitty",
     })
 }
 
@@ -1148,6 +1255,7 @@ impl Terminal {
             },
         );
         let term = Arc::new(Mutex::new(term));
+        let images = Arc::new(Mutex::new(crate::terminal_images::TerminalImages::default()));
 
         // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫几何标记。
         //    EOF = shell 退出或守护离线（网格冻结，重开会话即恢复）。
@@ -1163,9 +1271,13 @@ impl Terminal {
         let daemon_geometry_reader = Arc::clone(&daemon_geometry);
         let dead_reader = Arc::clone(&dead);
         let ack_writer = writer.clone();
+        let images_reader = Arc::clone(&images);
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
+            // smeltd 的 kitty 图形转发命令（APC，vte 本来就忽略）。只用来挑命令，字节照常交给
+            // vte；命令可能被 read 切断，状态跨 read 保持。
+            let mut graphics_scan = GraphicsSplitter::default();
             let mut geometry_osc = geometry_token
                 .map(smelt_model::osc::TerminalGeometryOscScan::new)
                 .unwrap_or_default();
@@ -1177,6 +1289,22 @@ impl Terminal {
                 match reader.read(&mut buf) {
                     Ok(0) => break, // EOF：shell 退出
                     Ok(n) => {
+                        // 图片先在锁外解码好，再进 store：这一批的网格画出来时图已经在了。
+                        let mut relays = Vec::new();
+                        graphics_scan.feed(&buf[..n], |piece| {
+                            if let Piece::Command(body) = piece
+                                && let Some(relay) = Relay::parse(body)
+                            {
+                                relays.push(crate::terminal_images::PreparedRelay::prepare(relay));
+                            }
+                        });
+                        if !relays.is_empty()
+                            && let Ok(mut images) = images_reader.lock()
+                        {
+                            for relay in relays {
+                                images.apply(relay);
+                            }
+                        }
                         let mut geometry_updates = Vec::new();
                         for (i, &b) in buf[..n].iter().enumerate() {
                             if let Some(geometry) = geometry_osc.feed(b)
@@ -1262,7 +1390,27 @@ impl Terminal {
             pending_step: Mutex::new(None),
             dead,
             redraw_rx,
+            images,
         })
+    }
+
+    /// 换下来、等前台 `drop_image` 的图片。
+    pub fn take_released_images(&self) -> Vec<Arc<RenderImage>> {
+        self.images
+            .lock()
+            .map(|mut images| images.take_released())
+            .unwrap_or_default()
+    }
+
+    /// 连接要换掉了：所有图片交给前台释放。
+    pub fn release_all_images(&self) -> Vec<Arc<RenderImage>> {
+        self.images
+            .lock()
+            .map(|mut images| {
+                images.release_all();
+                images.take_released()
+            })
+            .unwrap_or_default()
     }
 
     /// 重绘唤醒的接收端（clone 一份给 UI 侧的 `cx.spawn` 任务 await）。见 `redraw_rx` 字段。
@@ -1574,6 +1722,7 @@ impl Terminal {
                     cursor: None,
                     cursor_pos: None,
                     wrapped: Vec::new(),
+                    images: Vec::new(),
                 };
             }
         };
@@ -1592,8 +1741,39 @@ impl Terminal {
         let mut count = 0usize;
         // 当前行最后一格是不是 WRAPLINE——每格都刷新，行满时刚好是最后一格的值。
         let mut row_wraps;
+        // kitty 图形：可视区里挂锚点的格子 (行, 列, 锚点号) 和占位符格子。锁在网格锁之后拿，
+        // 读线程不会同时拿两把。
+        let images = self.images.lock().ok();
+        let graphics_live = images
+            .as_ref()
+            .is_some_and(|images| images.has_placements());
+        let mut anchors_seen: Vec<(i32, i32, u64)> = Vec::new();
+        let mut placeholders: Vec<(usize, usize, PlaceholderCell)> = Vec::new();
+        let mut left_placeholder: Option<PlaceholderCell> = None;
         for indexed in content.display_iter {
             let cell = indexed.cell;
+            let (row_index, column_index) = (rows.len(), row.len());
+            let zerowidth = cell.zerowidth().filter(|z| !z.is_empty());
+            let is_placeholder = cell.c == PLACEHOLDER;
+            if is_placeholder {
+                // 占位符按 kitty 的规则补全编号：省略的沿用同一行左边那格。
+                let left = left_placeholder.filter(|_| column_index > 0);
+                let resolved = resolve_placeholder(
+                    graphics_id(cell.fg),
+                    cell.underline_color().map_or(0, graphics_id),
+                    placeholder_marks(zerowidth.unwrap_or_default()),
+                    left.as_ref(),
+                );
+                left_placeholder = Some(resolved);
+                placeholders.push((row_index, column_index, resolved));
+            } else {
+                left_placeholder = None;
+                if graphics_live && let Some(zw) = zerowidth {
+                    for anchor in anchors_in(zw) {
+                        anchors_seen.push((row_index as i32, column_index as i32, anchor));
+                    }
+                }
+            }
             let selected = sel_range
                 .as_ref()
                 .is_some_and(|r| r.contains(indexed.point));
@@ -1617,6 +1797,9 @@ impl Terminal {
             // emoji」——那个区分只在「靠字形宽度自然占位」的旧渲染下才有意义。
             let ch = if flags.contains(Flags::WIDE_CHAR_SPACER) {
                 '\0'
+            } else if is_placeholder {
+                // 占位符格子画图不画字，图片缺了就是空白。
+                ' '
             } else {
                 cell.c
             };
@@ -1632,10 +1815,12 @@ impl Terminal {
                 underline: flags.intersects(Flags::ALL_UNDERLINES),
                 undercurl: flags.contains(Flags::UNDERCURL),
                 strikeout: flags.contains(Flags::STRIKEOUT),
-                zw: cell
-                    .zerowidth()
+                // 锚点标记和占位符的行列编号不交给排版器。
+                zw: zerowidth
+                    .filter(|_| !is_placeholder)
+                    .map(without_anchors)
                     .filter(|z| !z.is_empty())
-                    .map(|z| z.to_vec().into_boxed_slice()),
+                    .map(|z| z.into_owned().into_boxed_slice()),
                 link: cell.hyperlink().map(|h| Arc::from(h.uri())),
                 bg_default,
                 selected,
@@ -1678,11 +1863,24 @@ impl Terminal {
             }),
         };
 
+        let images = match images.as_ref().filter(|images| images.has_placements()) {
+            Some(images) => image_paints(
+                images,
+                &*term,
+                display_offset,
+                cols,
+                anchors_seen,
+                &placeholders,
+            ),
+            None => Vec::new(),
+        };
+
         Frame {
             rows,
             cursor,
             cursor_pos,
             wrapped,
+            images,
         }
     }
 
@@ -2096,7 +2294,9 @@ impl Terminal {
     /// scrollback），宽字符占位/软换行由它处理。空选区（单击未拖动）返回 None。
     pub fn selection_text(&self) -> Option<String> {
         let term = self.term.lock().ok()?;
-        term.selection_to_string().filter(|s| !s.is_empty())
+        term.selection_to_string()
+            .map(|text| without_graphics(&text).into_owned())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -2936,6 +3136,7 @@ mod resize_tests {
                 pending_step: Mutex::new(None),
                 dead: Arc::new(AtomicBool::new(false)),
                 redraw_rx,
+                images: Arc::default(),
             },
             peer,
         )
@@ -3166,6 +3367,7 @@ mod search_resync_tests {
                 let (_, rx) = smol::channel::bounded::<()>(1);
                 rx
             },
+            images: Arc::default(),
         }
     }
 

@@ -24,8 +24,8 @@ use base64::Engine as _;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use smelt_core::kitty_graphics::{
     Command, Controls, GraphicsSplitter, Layout, MAX_COMMAND_BYTES, Piece, PixelFormat,
-    PlacementCursor, PlacementKey, Relay, anchors_in, encode_image_relay, grid_size,
-    placement_bytes, png_dimensions, source_size,
+    PlacementCursor, PlacementKey, Relay, anchors_in, direct_layout, encode_image_relay,
+    placement_bytes, png_dimensions, virtual_layout,
 };
 
 /// 程序分块发的 base64 有的带填充有的不带，拼起来解码时两种都认。
@@ -312,21 +312,12 @@ impl TerminalGraphics {
             .get(&image)
             .ok_or("ENOENT: image not found")?
             .size;
-        let (columns, rows) = grid_size(
-            c.columns,
-            c.rows,
-            source_size(c.source, size),
-            (c.offset_x, c.offset_y),
-            cell,
-        );
-        let layout = Layout {
-            columns,
-            rows,
-            source: c.source,
-            offset_x: c.offset_x,
-            offset_y: c.offset_y,
-            z: c.z,
+        let layout = if c.virtual_placement {
+            virtual_layout(c, size, cell)
+        } else {
+            direct_layout(c, size, cell)
         };
+        let (columns, rows) = (layout.columns, layout.rows);
         let key = if c.virtual_placement {
             PlacementKey::Virtual {
                 image,

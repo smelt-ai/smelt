@@ -53,6 +53,7 @@ mod status_item;
 mod storage_cleanup;
 mod term_dock;
 mod terminal;
+mod terminal_images;
 mod terminal_view;
 mod workspace_attention;
 mod workspace_directory;
