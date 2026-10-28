@@ -46,7 +46,7 @@ iana-time-zone = "0.1"
 futures = "0.3"
 async-process = "2"
 libc = "0.2"
-base64 = "0.22"
+base64 = "0.23"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 # 项目搜索（project_files）遵守 .gitignore 等忽略规则。

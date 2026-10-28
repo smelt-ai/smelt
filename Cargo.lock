@@ -10823,7 +10823,7 @@ name = "smelt-acp-view"
 version = "0.0.0"
 dependencies = [
  "agent-client-protocol",
- "base64 0.22.1",
+ "base64 0.23.1",
  "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
@@ -10901,7 +10901,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "async-process",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "chrono-tz",
  "ctor",
@@ -10985,7 +10985,7 @@ version = "0.0.0"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "chrono-tz",
  "dirs 5.0.1",
@@ -11021,7 +11021,7 @@ dependencies = [
 name = "smelt-runtime-client"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "libc",
  "rust-embed",
  "serde",
@@ -11094,7 +11094,7 @@ name = "smelt_mobile"
 version = "0.1.0"
 dependencies = [
  "android_logger 0.14.1",
- "base64 0.22.1",
+ "base64 0.23.1",
  "flutter_rust_bridge",
  "iroh",
  "libc",
@@ -11118,7 +11118,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "core-foundation 0.10.1",
