@@ -993,6 +993,8 @@ mod tests {
         ));
     }
 
+    /// `/dev/zero` 只在 Unix 上是设备文件；Windows 上它连绝对路径都不算，先被另一条拦下。
+    #[cfg(unix)]
     #[test]
     fn refuses_device_files() {
         let mut h = Harness::new();
