@@ -95,8 +95,10 @@ fn preset_row(
             .into_any_element()
     } else {
         let entity = entity.clone();
+        // 点完会换成上面的「已添加」胶囊，按钮用同高的胶囊占同一个位置，各行右侧轮廓一致。
         Button::new(format!("pi-mcp-add-{}", preset.id))
-            .icon_size()
+            .compact()
+            .capsule()
             .label("添加")
             .tooltip(if preset.transport.needs_sign_in() {
                 "写入 ~/.pi/agent/mcp.json，之后点「登录」授权"
