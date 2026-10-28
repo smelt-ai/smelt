@@ -68,7 +68,7 @@ fn make_acp_session_value(
         })),
         output_gate: SessionLock::new(()),
         out: SessionLock::new(AcpOut {
-            client: None,
+            clients: Vec::new(),
             watchers: Vec::new(),
         }),
         launch_spec: SessionLock::new(None),

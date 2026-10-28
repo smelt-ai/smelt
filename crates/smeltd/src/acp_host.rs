@@ -73,7 +73,8 @@ pub(crate) use watched::Watched;
 pub(crate) struct AcpOut {
     /// 控制连接和旁观连接各自一条快照写线程。不复用终端的 8MB 字节邮箱：
     /// 快照是状态，排队副本超限会把还活着的宿主判成断线。
-    pub(crate) client: Option<AcpSnapshotLink>,
+    /// 控制连接可以有多条：本机和远程的桌面会同时开着同一段对话。
+    pub(crate) clients: Vec<AcpSnapshotLink>,
     pub(crate) watchers: Vec<AcpSnapshotLink>,
 }
 
@@ -1180,9 +1181,7 @@ fn note_snapshot_writer_stopped(
 pub(crate) fn detach_failed_snapshot_link(sess: &AcpSession, fd: ConnId) {
     let _output_gate = sess.output_gate.lock();
     let mut out = sess.out.lock();
-    if out.client.as_ref().is_some_and(|link| link.fd == fd) {
-        out.client.take();
-    }
+    out.clients.retain(|link| link.fd != fd);
     out.watchers.retain(|link| link.fd != fd);
 }
 
@@ -1386,7 +1385,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
         entries_offset.unwrap_or(reduced.entries_total())
     };
     let out = sess.out.lock();
-    if let Some(client) = out.client.as_ref() {
+    for client in &out.clients {
         client.mark(
             from,
             should_persist,
@@ -1409,7 +1408,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
 /// 对方要了完整快照：各连接下一帧改发整段帧，发送方镜像跟着重建。
 fn request_full_snapshot_frames(sess: &AcpSession) {
     let out = sess.out.lock();
-    for link in out.client.iter().chain(out.watchers.iter()) {
+    for link in out.clients.iter().chain(out.watchers.iter()) {
         link.request_full_frame();
     }
 }
@@ -2051,7 +2050,7 @@ pub(crate) fn make_acp_session(
         ))),
         output_gate: SessionLock::new(()),
         out: SessionLock::new(AcpOut {
-            client: None,
+            clients: Vec::new(),
             watchers: Vec::new(),
         }),
         launch_spec: SessionLock::new(None),
@@ -3486,11 +3485,9 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
                 return;
             };
             let fd = attachment.fd;
-            let mut out = sess.out.lock();
-            if let Some(old) = out.client.take() {
-                old.close(); // 顶掉旧连接（同 id 只允许一个控制连接）
-            }
-            out.client = Some(attachment);
+            // 不顶掉已有的控制连接：它们可能是另一台桌面。同一台桌面重连时
+            // 旧连接已先断开，读循环读到 EOF 后在下面摘掉自己。
+            sess.out.lock().clients.push(attachment);
             fd
         };
         drop(lifecycle);
@@ -3556,10 +3553,8 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
 
     let _output_gate = sess.output_gate.lock();
     let mut out = sess.out.lock();
-    if out.client.as_ref().is_some_and(|c| c.fd == attached_fd)
-        && let Some(client) = out.client.take()
-    {
-        client.close();
+    if let Some(pos) = out.clients.iter().position(|c| c.fd == attached_fd) {
+        out.clients.swap_remove(pos).close();
     }
 }
 
@@ -4117,7 +4112,7 @@ pub(crate) fn kill_acp_session(
             push_acp_snapshot_since(sess, false, None);
             let _output_gate = sess.output_gate.lock();
             let mut out = sess.out.lock();
-            if let Some(c) = out.client.take() {
+            for c in out.clients.drain(..) {
                 c.close_after_flush();
             }
             for w in out.watchers.drain(..) {
@@ -4278,7 +4273,7 @@ mod snapshot_link_tests {
             SnapshotProjection::FULL,
         )
         .unwrap();
-        slot.value.out.lock().client = Some(link);
+        slot.value.out.lock().clients.push(link);
 
         // 写线程卡在首包上。这段时间里的 mark 必须并成一份，而不是把连接摘掉。
         thread::sleep(Duration::from_millis(50));
@@ -4294,7 +4289,7 @@ mod snapshot_link_tests {
         }
         {
             let out = slot.value.out.lock();
-            let link = out.client.as_ref().unwrap();
+            let link = &out.clients[0];
             assert!(!link.has_failed(), "快照堆积不应摘掉 ACP 连接");
             assert_eq!(link.snapshots_sent(), 0, "写线程堵住时不应提前序列化");
         }
@@ -4332,14 +4327,7 @@ mod snapshot_link_tests {
             snapshots <= 2,
             "堵住期间的 40 次 mark 应并成一份更新，实际 snapshot 行约 {snapshots} 份:\n{text}"
         );
-        let sent = slot
-            .value
-            .out
-            .lock()
-            .client
-            .as_ref()
-            .unwrap()
-            .snapshots_sent();
+        let sent = slot.value.out.lock().clients[0].snapshots_sent();
         assert_eq!(sent, 1, "写线程恢复后只应序列化一次");
     }
 }
