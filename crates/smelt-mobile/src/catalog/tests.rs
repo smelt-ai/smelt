@@ -106,6 +106,7 @@ fn snapshot(
         sessions,
         remote_sessions: remote,
         workspace_menu: menu,
+        workspace: None,
         automations,
     }
 }

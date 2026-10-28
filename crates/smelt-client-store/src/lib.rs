@@ -114,6 +114,17 @@ pub struct ConversationRouteRecord {
     pub diff_scope: String,
 }
 
+/// 侧栏顺序：某个运行时上项目、对话从上到下的顺序。每台客户端自己记，不交给运行时。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SidebarOrderRecord {
+    /// `None` 是本机运行时（和 `ProjectKey::runtime_id`、`ConversationRouteRecord::runtime_id` 同一个约定）。
+    pub runtime_id: Option<String>,
+    /// 项目根目录，从上到下。
+    pub projects: Vec<String>,
+    /// 对话 id，从上到下。
+    pub conversations: Vec<String>,
+}
+
 /// 侧栏、路由这些界面状态。列表按原顺序存取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceUiRecord {
@@ -505,6 +516,94 @@ fn read_conversation_routes(
     Ok(records)
 }
 
+/// 侧栏顺序的两张表和各自的条目列。
+const SIDEBAR_ORDER_TABLES: [(&str, &str); 2] = [
+    ("sidebar_project_order", "root"),
+    ("sidebar_conversation_order", "conversation_id"),
+];
+
+fn sidebar_order_items<'a>(record: &'a SidebarOrderRecord, table: &str) -> &'a [String] {
+    match table {
+        "sidebar_project_order" => &record.projects,
+        _ => &record.conversations,
+    }
+}
+
+fn sidebar_order_items_mut<'a>(
+    record: &'a mut SidebarOrderRecord,
+    table: &str,
+) -> &'a mut Vec<String> {
+    match table {
+        "sidebar_project_order" => &mut record.projects,
+        _ => &mut record.conversations,
+    }
+}
+
+/// 只换给出的运行时：先删掉它们的旧行再按新顺序写。同一运行时里重复的条目留第一次出现的位置
+/// （`INSERT OR IGNORE` 撞主键就跳过）；同一个运行时给了两次，后一份为准。
+fn write_sidebar_orders(
+    connection: &Connection,
+    records: &[SidebarOrderRecord],
+) -> Result<(), String> {
+    for (table, column) in SIDEBAR_ORDER_TABLES {
+        let mut delete = connection
+            .prepare(&format!("DELETE FROM {table} WHERE runtime_id = ?1"))
+            .map_err(sql)?;
+        let mut insert = connection
+            .prepare(&format!(
+                "INSERT OR IGNORE INTO {table} (runtime_id, {column}, position) VALUES (?1, ?2, ?3)"
+            ))
+            .map_err(sql)?;
+        for record in records {
+            let runtime_id = record.runtime_id.as_deref().unwrap_or(LOCAL_RUNTIME_ID);
+            delete.execute(params![runtime_id]).map_err(sql)?;
+            for (position, item) in sidebar_order_items(record, table).iter().enumerate() {
+                insert
+                    .execute(params![runtime_id, item, position as i64])
+                    .map_err(sql)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 每个有顺序的运行时一条，按 `runtime_id` 排（本机在最前）。
+fn read_sidebar_orders(connection: &Connection) -> Result<Vec<SidebarOrderRecord>, String> {
+    let mut records: Vec<SidebarOrderRecord> = Vec::new();
+    for (table, column) in SIDEBAR_ORDER_TABLES {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT runtime_id, {column} FROM {table} ORDER BY runtime_id, position"
+            ))
+            .map_err(sql)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql)?;
+        for row in rows {
+            let (runtime_id, item) = row.map_err(sql)?;
+            let runtime_id = (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id);
+            let index = match records
+                .iter()
+                .position(|record| record.runtime_id == runtime_id)
+            {
+                Some(index) => index,
+                None => {
+                    records.push(SidebarOrderRecord {
+                        runtime_id,
+                        ..SidebarOrderRecord::default()
+                    });
+                    records.len() - 1
+                }
+            };
+            sidebar_order_items_mut(&mut records[index], table).push(item);
+        }
+    }
+    records.sort_by(|a, b| a.runtime_id.cmp(&b.runtime_id));
+    Ok(records)
+}
+
 pub(crate) fn write_workspace_ui(
     connection: &Connection,
     record: &WorkspaceUiRecord,
@@ -797,6 +896,20 @@ impl ClientStore {
         records: &[ConversationRouteRecord],
     ) -> Result<(), ClientStoreError> {
         self.write(|connection| write_conversation_routes(connection, records))
+    }
+
+    #[track_caller]
+    pub fn sidebar_orders(&self) -> Result<Vec<SidebarOrderRecord>, ClientStoreError> {
+        self.with(|connection| read_sidebar_orders(connection))
+    }
+
+    /// 替换给出的这些运行时的顺序；没给出的运行时原样保留。
+    #[track_caller]
+    pub fn put_sidebar_orders(
+        &self,
+        records: &[SidebarOrderRecord],
+    ) -> Result<(), ClientStoreError> {
+        self.write(|connection| write_sidebar_orders(connection, records))
     }
 
     #[track_caller]

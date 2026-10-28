@@ -8,8 +8,8 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// 行已经存在时，恢复身份以库里的值为准。窗口快照可以在第一次插入时填上，
-/// 之后不能改写或清空；换 id、放弃旧 id 只走守护进程的显式写入。
+/// 行已经存在时，恢复身份以库里的值为准。客户端新建对话时可以填上，之后它的修改
+/// 不能改写或清空；换 id、放弃旧 id 只走守护进程的显式写入。
 fn preserved_history_session_ids(
     transaction: &Transaction<'_>,
 ) -> Result<HashMap<String, Option<String>>, StoreError> {
@@ -34,118 +34,17 @@ fn normalize_history_id(id: Option<&str>) -> Option<String> {
 
 fn history_session_id_for_rewrite(
     session_id: &str,
-    window: Option<&str>,
+    client: Option<&str>,
     preserved: &HashMap<String, Option<String>>,
 ) -> Option<String> {
     match preserved.get(session_id) {
-        // 行已经在：确认过的 id 或守护进程放弃后的空，窗口都不能改。
+        // 行已经在：确认过的 id 或守护进程放弃后的空，客户端都不能改。
         Some(stored) => normalize_history_id(stored.as_deref()),
         // 第一次落库：和守护进程「没有行就用请求带的 id」是同一条规则。历史页「继续」
-        // 新开的槽位常常先被窗口存档落库、后才 acp_open，这里写空就会被读成「已放弃」，
+        // 新开的槽位常常先由客户端新建进目录、后才 acp_open，这里写空就会被读成「已放弃」，
         // 续接退化成一段空白新会话。
-        None => normalize_history_id(window),
+        None => normalize_history_id(client),
     }
-}
-
-/// 整份替换工作区目录。会话和 ACP 细节都挂在会话组上，删组即级联删光。
-pub(crate) fn write_workspace_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &WorkspaceSnapshot,
-) -> Result<(), StoreError> {
-    let preserved_history = preserved_history_session_ids(transaction)?;
-    transaction.execute("DELETE FROM session_group", [])?;
-    transaction.execute("DELETE FROM project", [])?;
-
-    let mut project_roots = Vec::new();
-    let mut seen_projects = HashSet::new();
-    for root in &snapshot.projects {
-        let root = root.trim();
-        if root.is_empty() || !seen_projects.insert(root.to_string()) {
-            continue;
-        }
-        let position = project_roots.len() as i64;
-        transaction.execute(
-            "INSERT INTO project(root, position) VALUES (?1, ?2)",
-            params![root, position],
-        )?;
-        project_roots.push(root.to_string());
-    }
-
-    let mut used_group_ids = HashSet::new();
-    let mut used_session_ids = HashSet::new();
-    for (position, session) in snapshot.sessions.iter().enumerate() {
-        write_session_record(
-            transaction,
-            session,
-            position,
-            &project_roots,
-            &mut used_group_ids,
-            &mut used_session_ids,
-            &preserved_history,
-        )?;
-    }
-    Ok(())
-}
-
-fn write_session_record(
-    transaction: &Transaction<'_>,
-    saved: &WorkspaceSessionRecord,
-    position: usize,
-    project_roots: &[String],
-    used_group_ids: &mut HashSet<String>,
-    used_session_ids: &mut HashSet<String>,
-    preserved_history: &HashMap<String, Option<String>>,
-) -> Result<(), StoreError> {
-    // 对话 id 由客户端定、之后不再变，客户端按它存这段对话的界面状态，所以这里不能改写。
-    let group_id = saved.id.trim();
-    if group_id.is_empty() {
-        return Err(StoreError::ConversationMissingId { position });
-    }
-    if !used_group_ids.insert(group_id.to_string()) {
-        return Err(StoreError::DuplicateConversationId {
-            id: group_id.to_string(),
-        });
-    }
-    if saved.acp.is_none() && saved.terminals.is_empty() {
-        return Err(StoreError::EmptyConversation {
-            id: group_id.to_string(),
-        });
-    }
-    let project_root =
-        conversation_cwd(saved).and_then(|cwd| matching_project_root(cwd, project_roots));
-    let acp_id = saved.acp.as_ref().map(|acp| {
-        let candidate = acp
-            .sid
-            .as_deref()
-            .or(acp.history_session_id.as_deref())
-            .unwrap_or("acp");
-        unique_id(
-            candidate.to_string(),
-            used_session_ids,
-            format!("{group_id}:acp"),
-        )
-    });
-    let terminal_ids = saved
-        .terminals
-        .iter()
-        .enumerate()
-        .map(|(index, terminal)| {
-            unique_id(
-                terminal.id.clone().unwrap_or_default(),
-                used_session_ids,
-                format!("{group_id}:terminal:{index}"),
-            )
-        })
-        .collect::<Vec<_>>();
-    insert_conversation(
-        transaction,
-        saved,
-        position as i64,
-        project_root,
-        acp_id.as_deref(),
-        &terminal_ids,
-        preserved_history,
-    )
 }
 
 /// 对话归哪个项目按它的 cwd 算：ACP 对话看 ACP 会话的，终端对话看第一个有 cwd 的终端。
@@ -386,7 +285,7 @@ pub(crate) fn close_project(transaction: &Transaction<'_>, root: &str) -> Result
 fn validated_conversation_id(saved: &WorkspaceSessionRecord) -> Result<&str, StoreError> {
     let group_id = saved.id.trim();
     if group_id.is_empty() {
-        return Err(StoreError::ConversationMissingId { position: 0 });
+        return Err(StoreError::ConversationMissingId);
     }
     if saved.acp.is_none() && saved.terminals.is_empty() {
         return Err(StoreError::EmptyConversation {
@@ -410,8 +309,7 @@ fn conversation_position(
         .map_err(StoreError::from)
 }
 
-/// 单条写入时会话 id 不能像整份保存那样撞了就改名：终端 id 是守护里 PTY 的 id，改了就
-/// 接不回去。ACP 会话必须带 `sid`；没起过的终端用对话 id 派生一个。撞上别的对话里的
+/// 会话 id 不能撞了就改名：终端 id 是守护里 PTY 的 id，改了就接不回去。ACP 会话必须带 `sid`；没起过的终端用对话 id 派生一个。撞上别的对话里的
 /// 会话、或同一段对话里写了两遍，都拒绝。
 fn conversation_session_ids(
     transaction: &Transaction<'_>,
@@ -510,36 +408,78 @@ fn reassign_project_roots(transaction: &Transaction<'_>) -> Result<(), StoreErro
     Ok(())
 }
 
+/// 守护确认了一份恢复身份。行还不在（这段对话还没进目录）或 id 为空时返回 `None`，不建行；
+/// 行在时返回库里是否真的变了。
 pub(crate) fn remember_history_session_id(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     session_id: &str,
     history_id: &str,
+) -> Result<Option<bool>, StoreError> {
+    let Some(session_id) = normalize_history_id(Some(session_id)) else {
+        return Ok(None);
+    };
+    let Some(history_id) = normalize_history_id(Some(history_id)) else {
+        return Ok(None);
+    };
+    if matches!(
+        stored_history_identity(transaction, &session_id)?,
+        StoredHistoryIdentity::NoRow
+    ) {
+        return Ok(None);
+    }
+    let updated = transaction.execute(
+        "UPDATE acp_detail SET history_session_id = ?1
+         WHERE session_id = ?2 AND history_session_id IS NOT ?1",
+        params![history_id, session_id],
+    )?;
+    Ok(Some(updated > 0))
+}
+
+/// 守护放弃一份恢复身份。返回库里是否真的变了：没有行、或本来就是空，都是 `false`。
+pub(crate) fn clear_history_session_id(
+    transaction: &Transaction<'_>,
+    session_id: &str,
 ) -> Result<bool, StoreError> {
     let Some(session_id) = normalize_history_id(Some(session_id)) else {
         return Ok(false);
     };
-    let Some(history_id) = normalize_history_id(Some(history_id)) else {
-        return Ok(false);
-    };
-    let updated = connection.execute(
-        "UPDATE acp_detail SET history_session_id = ?1 WHERE session_id = ?2",
-        params![history_id, session_id],
+    let updated = transaction.execute(
+        "UPDATE acp_detail SET history_session_id = NULL
+         WHERE session_id = ?1 AND history_session_id IS NOT NULL",
+        [session_id],
     )?;
     Ok(updated > 0)
 }
 
-pub(crate) fn clear_history_session_id(
-    connection: &Connection,
-    session_id: &str,
+/// 把以 `sid` 为 ACP 会话的那段对话改名：对话标题和 ACP 会话标题一起改。没有这段对话、
+/// 或两个标题本来就是它，返回 `false`。
+pub(crate) fn rename_acp_conversation(
+    transaction: &Transaction<'_>,
+    sid: &str,
+    title: &str,
 ) -> Result<bool, StoreError> {
-    let Some(session_id) = normalize_history_id(Some(session_id)) else {
+    let sid = sid.trim();
+    let Some(group_id) = transaction
+        .query_row(
+            "SELECT session.group_id FROM acp_detail
+             JOIN session ON session.id = acp_detail.session_id
+             WHERE acp_detail.session_id = ?1",
+            [sid],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
         return Ok(false);
     };
-    let updated = connection.execute(
-        "UPDATE acp_detail SET history_session_id = NULL WHERE session_id = ?1",
-        [session_id],
+    let conversation = transaction.execute(
+        "UPDATE session_group SET custom_title = ?1 WHERE id = ?2 AND custom_title IS NOT ?1",
+        params![title, group_id],
     )?;
-    Ok(updated > 0)
+    let acp = transaction.execute(
+        "UPDATE acp_detail SET session_title = ?1 WHERE session_id = ?2 AND session_title IS NOT ?1",
+        params![title, sid],
+    )?;
+    Ok(conversation + acp > 0)
 }
 
 pub(crate) fn history_session_id(
@@ -811,22 +751,4 @@ fn path_contains(root: &str, path: &str) -> bool {
         || path
             .strip_prefix(root)
             .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
-}
-
-fn unique_id(candidate: String, used: &mut HashSet<String>, fallback: String) -> String {
-    let base = if candidate.trim().is_empty() {
-        fallback
-    } else {
-        candidate
-    };
-    if used.insert(base.clone()) {
-        return base;
-    }
-    for suffix in 2usize.. {
-        let value = format!("{base}#{suffix}");
-        if used.insert(value.clone()) {
-            return value;
-        }
-    }
-    unreachable!()
 }

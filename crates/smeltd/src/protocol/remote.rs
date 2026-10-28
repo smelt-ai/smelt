@@ -36,10 +36,17 @@ pub(super) fn handle_conversation_rename<C: ClientSocket>(
                 Some(renamed.title.as_str()),
             )?;
         }
-        let _ = smelt_core::session_control::persist_workspace_conversation_title(
-            &renamed.id,
-            &renamed.title,
-        );
+        // 工作区目录里的标题跟着改：GUI 没开时，下次冷启动靠它。改不了不挡远程改名。
+        if let Err(error) = crate::workspace_directory::default_store().and_then(|store| {
+            crate::workspace_directory::rename_acp_conversation(
+                &store,
+                &renamed.id,
+                &renamed.title,
+                event_hub,
+            )
+        }) {
+            dlog(&format!("工作区目录里的对话改名失败：{}", error.message));
+        }
         acp_host::try_rename_running_acp_session(acp_sessions, &renamed.id, &renamed.title);
         let agent_definition_id = renamed.agent_definition_id().map(str::to_string);
         Ok(smelt_core::session_control::AgentConversationSummary {

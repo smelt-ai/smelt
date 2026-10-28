@@ -28,6 +28,17 @@ pub(crate) struct NewAcpSessionRequest {
     pub activate: bool,
 }
 
+/// 这一批会话为什么要恢复。
+enum RestoreKind {
+    /// 运行时的第一份目录：恢复上次的会话，恢复完定下活动会话、按需重试。
+    ColdStart {
+        active_session: usize,
+        active_session_id: Option<String>,
+    },
+    /// 别处新开的对话随推送到了：只接上，不动活动会话。
+    Incoming,
+}
+
 impl Workspace {
     /// 手机要看一段 daemon 里没在跑的对话（典型是 daemon 冷重启后桌面只放了占位）。
     /// 照「用户在桌面点开它」的语义拉起来，但不切舞台、不抢焦点。
@@ -84,11 +95,37 @@ impl Workspace {
         self.schedule_indexed_session_restore(
             runtime,
             pending.into_iter().enumerate().collect(),
-            active_session,
-            active_session_id,
+            RestoreKind::ColdStart {
+                active_session,
+                active_session_id,
+            },
             window,
             cx,
         );
+    }
+
+    /// 别处新开的对话随推送到了：接到侧栏最后。不动活动会话，失败的留到下次冷启动。
+    pub(crate) fn restore_incoming_conversations(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        pending: Vec<SessionState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = runtime.key().clone();
+        let members = self.space_members(&key, cx).len();
+        let Some(space) = self.space_mut(&key) else {
+            return;
+        };
+        // 编号接在已有的后面，和还在恢复的冷启动会话不撞。
+        let base = members + space.restore_pending.len();
+        let indexed = pending
+            .into_iter()
+            .enumerate()
+            .map(|(offset, state)| (base + offset, state))
+            .collect::<Vec<_>>();
+        space.restore_pending.extend(indexed.iter().cloned());
+        self.schedule_indexed_session_restore(runtime, indexed, RestoreKind::Incoming, window, cx);
     }
 
     /// 会话恢复到它们所在的运行时上。活动会话只按本机那份认；本机守护的拉起、升级
@@ -97,8 +134,7 @@ impl Workspace {
         &mut self,
         runtime: crate::runtimes::Runtime,
         pending: Vec<(usize, SessionState)>,
-        active_session: usize,
-        active_session_id: Option<String>,
+        kind: RestoreKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -179,6 +215,10 @@ impl Workspace {
                     for (original_index, ss) in acp_saved {
                         if this.restore_cancelled(&key) {
                             this.forget_pending_restore(&key, original_index);
+                            continue;
+                        }
+                        // 恢复期间别处关掉了：不再接回来。
+                        if !this.restore_still_pending(&key, original_index) {
                             continue;
                         }
                         let Some(saved) = ss.acp else { continue };
@@ -302,6 +342,10 @@ impl Workspace {
                         this.forget_pending_restore(&key, original_index);
                         return false;
                     }
+                    // 恢复期间别处关掉了：不再接回来，进程由关它的那边收。
+                    if !this.restore_still_pending(&key, original_index) {
+                        return false;
+                    }
                     let leaves = match result {
                         Ok(leaves) => leaves,
                         Err(e) => {
@@ -370,6 +414,17 @@ impl Workspace {
             }
 
             let _ = this.update_in(cx, |this, window, cx| {
+                let RestoreKind::ColdStart {
+                    active_session,
+                    active_session_id,
+                } = kind
+                else {
+                    eprintln!("[workspace] {key:?} 接上别处新开的会话：成功 {restored}");
+                    this.save_state(cx);
+                    this.schedule_visible_refresh(cx);
+                    cx.notify();
+                    return;
+                };
                 let Some(space) = this.space_mut(&key) else {
                     // 运行时在恢复期间被移除了，它的会话已经一起摘掉。
                     return;
@@ -443,8 +498,10 @@ impl Workspace {
                             this.schedule_indexed_session_restore(
                                 runtime,
                                 leftover,
-                                active_session,
-                                active_session_id,
+                                RestoreKind::ColdStart {
+                                    active_session,
+                                    active_session_id,
+                                },
                                 window,
                                 cx,
                             );
@@ -1923,6 +1980,16 @@ impl Workspace {
             self.close_session(ix, cx);
         }
         if let Some(space) = self.space_mut(&project.runtime) {
+            // 运行时目录里也关掉；项目下的会话上面已经逐个关过。
+            let closed = space
+                .projects
+                .iter()
+                .filter(|p| p.trim_end_matches('/') == root)
+                .cloned()
+                .collect::<Vec<_>>();
+            for project in &closed {
+                space.directory.close_project(project);
+            }
             space.projects.retain(|p| p.trim_end_matches('/') != root);
             space
                 .pinned_projects
@@ -2191,6 +2258,14 @@ impl Workspace {
             SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
         };
         if kill_runtime {
+            // 用户关掉的：运行时目录里也关掉它，别的设备随之摘掉。只摘本地投影的
+            // （运行时被移除、别处已经关掉）不走这里。
+            let session = &self.sessions[ix];
+            if crate::workspace_persist::in_workspace_directory(session) {
+                let key = session.runtime(cx).key().clone();
+                let id = session.conversation_id.clone();
+                self.close_directory_conversation(&key, &id);
+            }
             // 每个 pane 在自己的运行时上杀：远程会话的 shell 在那台机器上。
             let terminals = self.sessions[ix]
                 .term_leaves()

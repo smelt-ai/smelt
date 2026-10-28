@@ -65,11 +65,8 @@ pub enum StoreError {
     #[error("未知 KV value_type: {value_type}")]
     UnknownKvValueType { value_type: String },
 
-    #[error("工作区第 {position} 段对话缺少 id")]
-    ConversationMissingId { position: usize },
-
-    #[error("工作区里有两段对话用了同一个 id：{id}")]
-    DuplicateConversationId { id: String },
+    #[error("对话缺少 id")]
+    ConversationMissingId,
 
     #[error("对话 {id} 里既没有终端也不是 ACP 对话")]
     EmptyConversation { id: String },

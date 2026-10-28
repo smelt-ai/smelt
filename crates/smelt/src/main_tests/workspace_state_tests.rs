@@ -1,50 +1,3 @@
-use super::{SidebarGrouping, WsState};
-use smelt_model::workspace_menu::{
-    WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
-};
-
-#[test]
-fn collapsed_sidebar_groups_roundtrip() {
-    let state = WsState {
-        collapsed_projects: vec!["/repo/smelt".into(), "/repo/pulse".into()],
-        collapsed_agents: vec!["research".into(), "quant".into()],
-        ..Default::default()
-    };
-
-    let json = serde_json::to_string(&state).unwrap();
-    let restored: WsState = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(restored.collapsed_projects, state.collapsed_projects);
-    assert_eq!(restored.collapsed_agents, state.collapsed_agents);
-}
-
-#[test]
-fn shared_workspace_menu_roundtrips() {
-    let state = WsState {
-        menu: WorkspaceMenuSnapshot::current(
-            vec![],
-            vec![WorkspaceMenuSession {
-                id: "acp-stable".into(),
-                kind: WorkspaceMenuSessionKind::Acp,
-                title: "会话文本".into(),
-                custom_title: true,
-                cwd: Some("/repo".into()),
-                project_root: Some("/repo".into()),
-                project_title: Some("repo".into()),
-                project_order: 0,
-                session_order: 0,
-                leaf_order: 0,
-                agent: Some("codex".into()),
-            }],
-        ),
-        ..Default::default()
-    };
-
-    let json = serde_json::to_string(&state).unwrap();
-    let restored: WsState = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored.menu, state.menu);
-}
-
 #[cfg(test)]
 mod sidebar_group_tests {
     use crate::{AgentStatus, ProjectGroup, RuntimeKey, SidebarGrouping, sidebar_groups};
@@ -184,11 +137,11 @@ mod restore_order_tests {
     use std::time::Duration;
 
     use crate::{
-        AcpSaved, PaneState, RESTORE_RETRY_LIMIT, SessionState, merge_restore_pending,
-        persisted_active_position, planned_restore_insert_position, record_restored_index,
-        resolve_restored_active_session, restore_error_blocks_remaining, restore_retry_delay,
-        restored_active_position, restored_insert_position, session_state_persist_id,
-        should_auto_resume_active_acp, should_retry_failed_restore, split_indexed_restore_queue,
+        AcpSaved, PaneState, RESTORE_RETRY_LIMIT, SessionState, persisted_active_position,
+        planned_restore_insert_position, record_restored_index, resolve_restored_active_session,
+        restore_error_blocks_remaining, restore_retry_delay, restored_active_position,
+        restored_insert_position, should_auto_resume_active_acp, should_retry_failed_restore,
+        split_indexed_restore_queue, workspace_persist::merge_restore_pending,
     };
 
     fn state(name: &str, acp: bool) -> SessionState {
@@ -306,48 +259,6 @@ mod restore_order_tests {
         assert!(should_auto_resume_active_acp(true));
     }
 
-    /// 存档里出现两条指向同一个 smeltd 会话的记录时，读档就要收敛掉：它们会
-    /// 各自 attach 同一个 ACP 会话、互相顶掉对方，表现为反复断开重连。
-    #[test]
-    fn duplicate_saved_sessions_for_one_daemon_session_collapse_on_load() {
-        let twin = state("acp-1", true);
-        let saved = crate::WsState {
-            sessions: vec![twin.clone(), state("acp-2", true), twin],
-            active_session: 2,
-            ..Default::default()
-        };
-
-        let (sessions, active) = crate::normalize_saved_sessions(&saved);
-
-        assert_eq!(
-            sessions
-                .iter()
-                .map(|session| session_state_persist_id(session).unwrap())
-                .collect::<Vec<_>>(),
-            vec!["conv-acp-1", "conv-acp-2"]
-        );
-        // 当时停在被丢掉的那条上，就改停在它的双胞胎上，而不是滑到邻居。
-        assert_eq!(active, 0);
-    }
-
-    #[test]
-    fn dedupe_keeps_the_active_session_when_an_earlier_twin_is_dropped() {
-        let twin = state("acp-1", true);
-        let saved = crate::WsState {
-            sessions: vec![twin.clone(), twin, state("acp-2", true)],
-            active_session: 2,
-            ..Default::default()
-        };
-
-        let (sessions, active) = crate::normalize_saved_sessions(&saved);
-
-        assert_eq!(sessions.len(), 2);
-        assert_eq!(
-            session_state_persist_id(&sessions[active]).unwrap(),
-            "conv-acp-2"
-        );
-    }
-
     /// 启动时远程目录比存档恢复先到。排队中的会话必须算作「已占用这个 id」，
     /// 否则手机建的会话会被投影一份、恢复再装一份。
     #[test]
@@ -378,28 +289,6 @@ mod restore_order_tests {
         let mut restored = vec![1, 3];
         record_restored_index(&mut restored, 4, 2, false);
         assert_eq!(restored, vec![1, 3]);
-    }
-
-    /// 认人只认对话 id：切一下活动终端、ACP 换了会话进程，都不能换掉它。
-    #[test]
-    fn session_state_persist_id_is_the_conversation_id() {
-        assert_eq!(
-            session_state_persist_id(&state("acp-1", true)).as_deref(),
-            Some("conv-acp-1")
-        );
-
-        let mut term = state("term-0", false);
-        term.layout = PaneState::Tabs {
-            active: 1,
-            children: vec![term.layout.clone(), term.layout.clone()],
-        };
-        term.active = 1;
-        assert_eq!(
-            session_state_persist_id(&term).as_deref(),
-            Some("conv-term-0")
-        );
-        term.id = String::new();
-        assert_eq!(session_state_persist_id(&term), None);
     }
 
     #[test]
@@ -452,43 +341,4 @@ mod restore_order_tests {
             2
         );
     }
-}
-
-#[test]
-fn old_archive_without_collapsed_groups_still_loads() {
-    let restored: WsState = serde_json::from_str(r#"{"projects":["/repo/smelt"]}"#).unwrap();
-
-    assert!(restored.collapsed_projects.is_empty());
-    assert!(restored.collapsed_agents.is_empty());
-    assert!(restored.pinned_projects.is_empty());
-    assert!(!restored.sidebar_hide_empty_projects);
-    assert_eq!(restored.sidebar_grouping, SidebarGrouping::Project);
-}
-
-#[test]
-fn sidebar_grouping_roundtrip() {
-    let state = WsState {
-        sidebar_grouping: SidebarGrouping::Status,
-        ..Default::default()
-    };
-
-    let json = serde_json::to_string(&state).unwrap();
-    let restored: WsState = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(restored.sidebar_grouping, SidebarGrouping::Status);
-}
-
-#[test]
-fn pinned_projects_and_hide_empty_roundtrip() {
-    let state = WsState {
-        pinned_projects: vec!["/repo/smelt".into(), "/repo/pulse".into()],
-        sidebar_hide_empty_projects: true,
-        ..Default::default()
-    };
-
-    let json = serde_json::to_string(&state).unwrap();
-    let restored: WsState = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(restored.pinned_projects, state.pinned_projects);
-    assert!(restored.sidebar_hide_empty_projects);
 }

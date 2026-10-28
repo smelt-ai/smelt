@@ -37,25 +37,6 @@ pub struct WorkspaceSnapshot {
     pub sessions: Vec<WorkspaceSessionRecord>,
 }
 
-/// 提交工作区目录的一方：客户端每次运行生成的 id，加上它自己每次提交递增的序号。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceCatalogWriter {
-    pub id: String,
-    pub seq: u64,
-}
-
-/// 一次工作区目录提交的结果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkspaceCatalogCommit {
-    Committed {
-        revision: u64,
-    },
-    /// 基准版本之后有别人提交过，什么都没写。
-    Conflict {
-        current: u64,
-    },
-}
-
 /// 一次单条改动之后目录的版本。`changed` 为 false 时什么都没写，版本也没动。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkspaceDirectoryCommit {

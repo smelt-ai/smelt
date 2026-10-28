@@ -12,9 +12,14 @@ use serde_json::Value;
 
 use super::daemon::DaemonOperation;
 
-/// 控制协议版本。只加方法不升它：新方法记进 [`ControlMethod::OPTIONAL`]，客户端按
-/// `system.describe` 的方法清单看运行时有没有。删方法、改已有方法的参数或结果才升，同时抬
-/// [`CONTROL_API_MIN_SUPPORTED_VERSION`]，旧客户端据此知道该升级自己。
+/// 控制协议版本。加方法、删方法都不升它：客户端按 `system.describe` 的方法清单看运行时有没有
+/// 自己要的方法，缺了必需的就判运行时太旧。新方法缺了只是某项功能用不了的，记进
+/// [`ControlMethod::OPTIONAL`]；客户端离了它就用不了的，直接是必需方法。改已有方法的参数或
+/// 结果才升，同时抬 [`CONTROL_API_MIN_SUPPORTED_VERSION`]：同名方法换了形状，方法清单看不
+/// 出来，只能靠版本拦住。
+///
+/// 删方法不升：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下；不调它的客户端
+/// （手机、Pi）照常连。2026-10 删整份读写的 `workspace.load` / `workspace.save` 就是这样。
 ///
 /// v2：`workspace.load` / `workspace.save` 的文档改了形状（对话带稳定 id，终端平铺，
 /// 分屏归客户端）。旧桌面读写新文档、新桌面读写旧文档都会把终端对话存坏，两边都得拦住。
@@ -23,6 +28,7 @@ use super::daemon::DaemonOperation;
 /// v3：删掉 DeepSeek Harness 后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置
 /// 少了 `native_dsh_profiles`。旧运行时缺这个字段就拒收修改，新桌面改不了旧运行时上的
 /// 智能体配置，得让兼容检查拦住、提示升级运行时。
+///
 pub const CONTROL_API_VERSION: u16 = 3;
 pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
@@ -120,8 +126,6 @@ define_control_methods! {
     LaunchGet => (LAUNCH_GET_METHOD, "launch.get"),
     LaunchReplace => (LAUNCH_REPLACE_METHOD, "launch.replace"),
     MemoryTestEmbedding => (MEMORY_TEST_EMBEDDING_METHOD, "memory.test_embedding"),
-    WorkspaceLoad => (WORKSPACE_LOAD_METHOD, "workspace.load"),
-    WorkspaceSave => (WORKSPACE_SAVE_METHOD, "workspace.save"),
     WorkspaceConversationCreate => (WORKSPACE_CONVERSATION_CREATE_METHOD, "workspace.conversation.create"),
     WorkspaceConversationUpdate => (WORKSPACE_CONVERSATION_UPDATE_METHOD, "workspace.conversation.update"),
     WorkspaceConversationDelete => (WORKSPACE_CONVERSATION_DELETE_METHOD, "workspace.conversation.delete"),
@@ -190,18 +194,15 @@ define_control_methods! {
 }
 
 impl ControlMethod {
-    /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加的方法。运行时可以
-    /// 没有：客户端不因缺它们判不兼容，用到它们的功能调到 MethodNotFound 时自己降级。
-    /// 新加方法都先放进来；抬最低版本时清空，它们成了新基线里的必需方法。
+    /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加、缺了只是某项功能
+    /// 用不了的方法。运行时可以没有：客户端不因缺它们判不兼容，用到它们的功能调到
+    /// MethodNotFound 时自己降级。客户端离了就用不了的新方法不放这里（工作区目录的
+    /// `workspace.conversation.*` / `workspace.project.*`：桌面没有它们读不到目录）。
+    /// 抬最低版本时清空，它们成了新基线里的必需方法。
     pub const OPTIONAL: &'static [Self] = &[
         Self::AgentMemoryWatch,
         Self::RemoteStatusWait,
         Self::ResourceUsage,
-        Self::WorkspaceConversationCreate,
-        Self::WorkspaceConversationUpdate,
-        Self::WorkspaceConversationDelete,
-        Self::WorkspaceProjectOpen,
-        Self::WorkspaceProjectClose,
     ];
 
     /// 运行时必须有这个方法：缺了就是运行时比客户端旧。
@@ -644,7 +645,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 123);
+        assert_eq!(names.len(), 121);
     }
 
     #[test]

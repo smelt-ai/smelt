@@ -452,9 +452,7 @@ CREATE TABLE runtime_identity (
 );
 CREATE TABLE workspace_catalog (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  revision INTEGER NOT NULL CHECK (revision >= 0),
-  writer TEXT,
-  writer_seq INTEGER
+  revision INTEGER NOT NULL CHECK (revision >= 0)
 );
 CREATE TABLE launch_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1685,4 +1683,12 @@ DROP TABLE auto_model_provider_v23;
 /// 续接与否看这一列。新列加在表尾，和 `CREATE_SCHEMA` 逐字一致。
 pub const MIGRATE_V24_TO_V25: &str = "
 ALTER TABLE published_session ADD COLUMN cli_exited INTEGER NOT NULL DEFAULT 0 CHECK (cli_exited IN (0, 1));
+";
+
+/// v26 删掉工作区目录的写入方两列。整份保存（`workspace.save`）去掉后，目录只经单条改动写，
+/// 不再需要认出回执丢了的同一写入方。两列没有约束和索引，SQLite 的 DROP COLUMN 能删，
+/// 删完的建表语句去掉空白后和 `CREATE_SCHEMA` 一致。
+pub const MIGRATE_V25_TO_V26: &str = "
+ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
+ALTER TABLE workspace_catalog DROP COLUMN writer;
 ";

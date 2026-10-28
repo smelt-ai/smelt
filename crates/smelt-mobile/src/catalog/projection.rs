@@ -63,6 +63,8 @@ impl CatalogState {
                 sessions,
                 remote_sessions,
                 workspace_menu,
+                // 手机还在读菜单，之后改读工作区目录；`CATALOG` 也没订它，这里总是 None。
+                workspace: _,
                 automations,
             } => {
                 // 这一代的第一份快照是基线：冷启动前就在审批 / 失败的会话不算新提醒，
@@ -144,8 +146,10 @@ impl CatalogState {
                 self.automations = Some(automations);
                 applied.sessions_changed = true;
             }
-            // 目录订阅不订这些 topic（见 `SubscriptionShape::CATALOG`）。
-            DaemonStateEvent::ConversationWakeRequested { .. }
+            // 目录订阅不订这些 topic（见 `SubscriptionShape::CATALOG`）。工作区目录之后
+            // 手机改读它时再接。
+            DaemonStateEvent::Workspace(_)
+            | DaemonStateEvent::ConversationWakeRequested { .. }
             | DaemonStateEvent::ProjectChanged { .. }
             | DaemonStateEvent::AgentMemoryChanged { .. }
             | DaemonStateEvent::TerminalNotification { .. }
