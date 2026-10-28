@@ -129,7 +129,7 @@ impl UnixStream {
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {
-        Self::from_socket(self.socket.try_clone_to_owned()?, Arc::clone(&self.shared))
+        Self::from_socket(self.socket.try_clone()?, Arc::clone(&self.shared))
     }
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
