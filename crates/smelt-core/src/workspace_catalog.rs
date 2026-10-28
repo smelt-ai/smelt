@@ -211,30 +211,6 @@ pub fn directory() -> Result<WorkspaceDirectory, DirectoryError> {
     directory_on(&default_store()?)
 }
 
-pub fn create_conversation(
-    conversation: &WorkspaceConversation,
-) -> Result<DirectoryChange, DirectoryError> {
-    create_conversation_on(&default_store()?, conversation)
-}
-
-pub fn update_conversation(
-    conversation: &WorkspaceConversation,
-) -> Result<DirectoryChange, DirectoryError> {
-    update_conversation_on(&default_store()?, conversation)
-}
-
-pub fn delete_conversation(id: &str) -> Result<DirectoryChange, DirectoryError> {
-    delete_conversation_on(&default_store()?, id)
-}
-
-pub fn open_project(root: &str) -> Result<DirectoryChange, DirectoryError> {
-    open_project_on(&default_store()?, root)
-}
-
-pub fn close_project(root: &str) -> Result<DirectoryChange, DirectoryError> {
-    close_project_on(&default_store()?, root)
-}
-
 fn default_store() -> Result<smelt_store::Store, DirectoryError> {
     crate::sqlite_state::default_sqlite_store().map_err(DirectoryError::Store)
 }

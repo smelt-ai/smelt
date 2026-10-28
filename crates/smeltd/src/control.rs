@@ -748,7 +748,9 @@ fn dispatch_control(
             directory_response(
                 control_version,
                 request_id,
-                super::workspace_directory::create_conversation(&params, event_hub),
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::create_conversation(&store, &params, event_hub)
+                }),
             )
         }
         ControlMethod::WorkspaceConversationUpdate => {
@@ -760,7 +762,9 @@ fn dispatch_control(
             directory_response(
                 control_version,
                 request_id,
-                super::workspace_directory::update_conversation(&params, event_hub),
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::update_conversation(&store, &params, event_hub)
+                }),
             )
         }
         ControlMethod::WorkspaceConversationDelete => {
@@ -772,14 +776,17 @@ fn dispatch_control(
             directory_response(
                 control_version,
                 request_id,
-                super::workspace_directory::delete_conversation(
-                    &params.conversation_id,
-                    sessions,
-                    acp_sessions,
-                    remote_sessions,
-                    automations,
-                    event_hub,
-                ),
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::delete_conversation(
+                        &store,
+                        &params.conversation_id,
+                        sessions,
+                        acp_sessions,
+                        remote_sessions,
+                        automations,
+                        event_hub,
+                    )
+                }),
             )
         }
         ControlMethod::WorkspaceProjectOpen => {
@@ -791,7 +798,9 @@ fn dispatch_control(
             directory_response(
                 control_version,
                 request_id,
-                super::workspace_directory::open_project(&params.root, event_hub),
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::open_project(&store, &params.root, event_hub)
+                }),
             )
         }
         ControlMethod::WorkspaceProjectClose => {
@@ -803,7 +812,9 @@ fn dispatch_control(
             directory_response(
                 control_version,
                 request_id,
-                super::workspace_directory::close_project(&params.root, event_hub),
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::close_project(&store, &params.root, event_hub)
+                }),
             )
         }
         ControlMethod::WorkspaceSave => {
