@@ -11017,8 +11017,8 @@ dependencies = [
  "similar 3.2.0",
  "smelt-paths",
  "tungstenite",
- "uds_windows",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

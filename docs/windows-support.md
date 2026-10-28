@@ -41,7 +41,8 @@
 
 1. smelt-runtime-client 新增 `stream` 模块，定义 `RuntimeStream` 和 `stream_pair()`：
    - Unix：`std::os::unix::net::UnixStream` 的类型别名，行为不变。
-   - Windows：`uds_windows::UnixStream`（AF_UNIX，Windows 10 1803 起系统支持；该 crate 已在依赖树里）。它提供 `pair`、`connect`、`try_clone`、`set_read_timeout`、`set_write_timeout`、`shutdown`，覆盖调用方用到的全部方法。
+   - Windows：`stream/windows.rs` 自己的 `UnixStream` / `UnixListener`（系统 AF_UNIX，Windows 10 1803 起支持），提供 `pair`、`connect`、`try_clone`、`set_read_timeout`、`set_write_timeout`、`set_nonblocking`、`shutdown`、`incoming`，和 std 的语义一致。
+   - 不在驱动上挂任何阻塞调用：afunix.sys 在阻塞 `recv` 刚挂上、对端恰好写入或关闭时偶尔丢掉唤醒，读一直挂到超时（10060）；本地 `shutdown` 也叫不醒另一条线程里阻塞的 `recv`。所以套接字建出来就是非阻塞的，读、写、accept、connect 遇到 WouldBlock 都用 AFD poll（WSAPoll 底下那层，可取消）等就绪，和本地 `shutdown` 的事件、读写超时一起等。最早用的 `uds_windows` 是阻塞实现，已去掉。
 2. 所有签名里的 `UnixStream` 换成 `RuntimeStream`，是机械替换。
 3. iroh 搬运：Unix 保持现有 tokio 实现。Windows 上 AF_UNIX 套接字进不了 tokio，`bridge_tracked` 改为每个方向一条线程：一条阻塞读本地端、经 `Handle::block_on` 写 QUIC `SendStream`，另一条反过来。语义和现有 `pump` 一致：一方读到 EOF 只半关闭对应方向，另一方向继续；任一方向出错，两端一起关。
    - 每条远程流两条线程。桌面同时开着的流是事件订阅加每个打开的终端、对话各一条，几十条量级，可以接受。
@@ -145,7 +146,7 @@
 
 已实现。Unix 行为不变。Windows 是一套真的本机运行时，不是远程客户端的空壳。
 
-- **IPC**。Rust 客户端（桌面、`smelt-notify`、runtime client）继续连 AF_UNIX 文件 `~/.smelt/smeltd.sock`。Windows 上这个类型是 `uds_windows`，由 `smelt_runtime_client` 再导出。守护的 accept 循环是同步线程（`incoming` / `accept`），不把监听塞进 tokio，所以不要求 tokio 的 Windows AF_UNIX。Bun / Node 的 `net.connect(path)` 在 Windows 上连的是命名管道，不是这个文件。第二条监听只在 Windows 上建：`PipeListener::bind(user_pipe_path("daemon"))`，accept 之后进同一个连接处理函数。不把管道桥进 AF_UNIX，否则对端 pid 会变成 smeltd 自己，鉴权直接拒绝。交给 Bun / Pi / shell 的 `SMELT_SOCK` 在 Windows 上是 `\\.\pipe\smelt-<sid>-daemon` 这种管道名；Rust 代码连守护仍然用 sock 文件。
+- **IPC**。Rust 客户端（桌面、`smelt-notify`、runtime client）继续连 AF_UNIX 文件 `~/.smelt/smeltd.sock`。Windows 上这个类型是 `smelt_runtime_client::stream` 自己包的 AF_UNIX。守护的 accept 循环是同步线程（`incoming` / `accept`），不把监听塞进 tokio，所以不要求 tokio 的 Windows AF_UNIX。Bun / Node 的 `net.connect(path)` 在 Windows 上连的是命名管道，不是这个文件。第二条监听只在 Windows 上建：`PipeListener::bind(user_pipe_path("daemon"))`，accept 之后进同一个连接处理函数。不把管道桥进 AF_UNIX，否则对端 pid 会变成 smeltd 自己，鉴权直接拒绝。交给 Bun / Pi / shell 的 `SMELT_SOCK` 在 Windows 上是 `\\.\pipe\smelt-<sid>-daemon` 这种管道名；Rust 代码连守护仍然用 sock 文件。
 - **鉴权**。macOS 的 codesign 路径不动。Windows 走同一用户 SID：pid 来自 AF_UNIX 的 `SIO_AF_UNIX_GETPEERPID` 或管道的 `GetNamedPipeClientProcessId`，exe 来自 `process_executable`，必须 `same_user_as_current`，并且不能是守护自己的 pid。basename 和 `"smelt"` 比的时候去掉一个结尾的 `.exe`、大小写不敏感，不另加一行表，免得 macOS 的 signing-id 列分叉。路径要和守护目录旁边的 `smelt.exe` 相同，或者和 `SMELT_BUNDLE_DIR`（桌面拉起守护时写成 GUI exe 所在目录）旁边的 `smelt.exe` 相同。托管映像是 `~/.smelt/bin/smeltd-<指纹>.exe`，GUI 在安装目录，只认守护目录的兄弟会把桌面拒掉。不做 Authenticode。
 - **升级**。不交接 fd（`handoff_v2` 已删）。升级先拨启动名，再优雅停机：收割子进程、回写未完成回合、WAL checkpoint，最后回执。Unix 回执后在本进程里 `exec` 新映像；Windows 不能 `exec`，拉起目标映像当接班进程（`SMELTD_PREDECESSOR_PID` 告诉它前任是谁），接班进程等前任退出、放掉监听再绑定。没有桌面的运行时（推送升级、空闲自升级）也能换上新版。终端会话和进行中的回合会中断，历史还在。
 - **守护映像**。不建符号链接（那要额外权限）。发布是复制或硬链接到 `smeltd-<指纹>.exe`，启动名是旁边的 `smelt-image-v1` 指针文件。`launch_executable` 读出真正要执行的那份。
@@ -168,7 +169,7 @@
 
 原先写成「未定」的，按上面落地：
 
-- 本机通信是 Rust AF_UNIX（`uds_windows`，sock 文件）加 Bun 命名管道。不是回环 TCP，也不要求 tokio AF_UNIX。
+- 本机通信是 Rust AF_UNIX（自己包的非阻塞套接字，等待走 AFD poll，sock 文件）加 Bun 命名管道。不是回环 TCP，也不要求 tokio AF_UNIX。
 - 鉴权是同用户 SID、peer exe 的 basename、守护目录或 `SMELT_BUNDLE_DIR` 的兄弟。没有 Authenticode。
 - 交接不做。升级重启，终端会话丢失。
 - 数据目录沿用 `%USERPROFILE%\.smelt`。
