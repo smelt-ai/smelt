@@ -51,6 +51,8 @@ pub(crate) fn collect_subscription_snapshot(
         // state snapshot prevents clients from mistaking an unreadable durable catalog for empty.
         remote_sessions: remote_session_snapshot(remote_sessions).ok(),
         workspace_menu: Some(workspace_menu_snapshot(workspace_menu)),
+        // 读不出来同样不当成空目录：留着已经推过的那份，等下一次改动再推。
+        workspace: smelt_core::workspace_catalog::directory().ok(),
         automations: Some(automations),
     }
 }

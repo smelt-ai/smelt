@@ -199,6 +199,7 @@ fn projection_synchronization_cannot_regress_published_revisions() {
             sessions: Vec::new(),
         }),
         workspace_menu: None,
+        workspace: None,
         automations: None,
     });
 

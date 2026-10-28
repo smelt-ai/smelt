@@ -46,5 +46,6 @@ pub mod session_title;
 pub mod term_config;
 pub mod terminal_theme;
 pub mod theme_index;
+pub mod workspace_directory;
 pub mod workspace_menu;
 pub mod workspace_override;

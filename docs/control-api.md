@@ -143,7 +143,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 |---|---|
 | 远程与设备 | `remote.config.get` / `remote.config.set` / `remote.status` / `remote.status.wait`（状态和 `known` 不同就回，最多挂 20 秒）；`device.pair_begin` / `device.pair` / `device.list` / `device.revoke` |
 | 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`subagent.transcript` |
-| 工作区与文件 | `workspace.load` / `workspace.save` / `workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
+| 工作区与文件 | `workspace.conversation.create` / `update` / `delete`、`workspace.project.open` / `close`（单条改目录，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.load` / `workspace.save`（整份读写，桌面换到单条改动后删掉）；`workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
 | 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
 | Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`；`quota.get` / `quota.refresh` |

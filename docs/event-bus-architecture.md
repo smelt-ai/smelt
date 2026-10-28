@@ -252,6 +252,7 @@ attention.created
 attention.cleared
 remote_sessions.changed
 workspace_menu.changed
+workspace.changed
 automations.changed
 plugin.started
 plugin.stopped

@@ -66,6 +66,17 @@ fn params_or_error<T: serde::de::DeserializeOwned>(
     decode_params(params).map_err(|error| error_value(control_version, request_id, error))
 }
 
+fn directory_response(
+    control_version: u16,
+    request_id: String,
+    result: Result<smelt_core::workspace_directory::WorkspaceRevision, ControlError>,
+) -> serde_json::Value {
+    match result {
+        Ok(revision) => success_value(control_version, &request_id, revision),
+        Err(error) => error_value(control_version, request_id, error),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_control(
     envelope: ControlRequestEnvelope,
@@ -728,6 +739,73 @@ fn dispatch_control(
                 ),
             }
         }
+        ControlMethod::WorkspaceConversationCreate => {
+            let params: smelt_core::workspace_directory::WorkspaceConversation =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::create_conversation(&params, event_hub),
+            )
+        }
+        ControlMethod::WorkspaceConversationUpdate => {
+            let params: smelt_core::workspace_directory::WorkspaceConversation =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::update_conversation(&params, event_hub),
+            )
+        }
+        ControlMethod::WorkspaceConversationDelete => {
+            let params: smelt_core::workspace_directory::WorkspaceConversationIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::delete_conversation(
+                    &params.conversation_id,
+                    sessions,
+                    acp_sessions,
+                    remote_sessions,
+                    automations,
+                    event_hub,
+                ),
+            )
+        }
+        ControlMethod::WorkspaceProjectOpen => {
+            let params: smelt_core::workspace_directory::WorkspaceProjectParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::open_project(&params.root, event_hub),
+            )
+        }
+        ControlMethod::WorkspaceProjectClose => {
+            let params: smelt_core::workspace_directory::WorkspaceProjectParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::close_project(&params.root, event_hub),
+            )
+        }
         ControlMethod::WorkspaceSave => {
             let params: smelt_runtime_client::protocol::workspace::WorkspaceSaveParams =
                 match params_or_error(control_version, &request_id, params) {
@@ -735,11 +813,14 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             match smelt_core::workspace_catalog::save(&params) {
-                Ok(revision) => success_value(
-                    control_version,
-                    &request_id,
-                    smelt_runtime_client::protocol::workspace::WorkspaceSaveResult { revision },
-                ),
+                Ok(revision) => {
+                    super::workspace_directory::publish_current(event_hub);
+                    success_value(
+                        control_version,
+                        &request_id,
+                        smelt_runtime_client::protocol::workspace::WorkspaceSaveResult { revision },
+                    )
+                }
                 Err(error) => {
                     let code = match error {
                         smelt_core::workspace_catalog::CatalogError::Conflict { .. } => {

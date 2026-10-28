@@ -74,6 +74,18 @@ pub enum StoreError {
     #[error("对话 {id} 里既没有终端也不是 ACP 对话")]
     EmptyConversation { id: String },
 
+    #[error("工作区里没有这段对话：{id}")]
+    ConversationNotFound { id: String },
+
+    #[error("ACP 对话 {id} 缺少会话 id")]
+    AcpConversationMissingSid { id: String },
+
+    #[error("会话 id 已被别的对话占用：{id}")]
+    DuplicateSessionId { id: String },
+
+    #[error("项目根目录不能为空")]
+    EmptyProjectRoot,
+
     #[error("KV 数字 {path} 无效: {source}")]
     InvalidKvNumber {
         path: String,

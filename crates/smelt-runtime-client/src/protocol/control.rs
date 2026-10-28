@@ -122,6 +122,11 @@ define_control_methods! {
     MemoryTestEmbedding => (MEMORY_TEST_EMBEDDING_METHOD, "memory.test_embedding"),
     WorkspaceLoad => (WORKSPACE_LOAD_METHOD, "workspace.load"),
     WorkspaceSave => (WORKSPACE_SAVE_METHOD, "workspace.save"),
+    WorkspaceConversationCreate => (WORKSPACE_CONVERSATION_CREATE_METHOD, "workspace.conversation.create"),
+    WorkspaceConversationUpdate => (WORKSPACE_CONVERSATION_UPDATE_METHOD, "workspace.conversation.update"),
+    WorkspaceConversationDelete => (WORKSPACE_CONVERSATION_DELETE_METHOD, "workspace.conversation.delete"),
+    WorkspaceProjectOpen => (WORKSPACE_PROJECT_OPEN_METHOD, "workspace.project.open"),
+    WorkspaceProjectClose => (WORKSPACE_PROJECT_CLOSE_METHOD, "workspace.project.close"),
     AgentMemoryList => (AGENT_MEMORY_LIST_METHOD, "agent.memory.list"),
     AgentMemoryDelete => (AGENT_MEMORY_DELETE_METHOD, "agent.memory.delete"),
     AgentMemoryApprove => (AGENT_MEMORY_APPROVE_METHOD, "agent.memory.approve"),
@@ -192,6 +197,11 @@ impl ControlMethod {
         Self::AgentMemoryWatch,
         Self::RemoteStatusWait,
         Self::ResourceUsage,
+        Self::WorkspaceConversationCreate,
+        Self::WorkspaceConversationUpdate,
+        Self::WorkspaceConversationDelete,
+        Self::WorkspaceProjectOpen,
+        Self::WorkspaceProjectClose,
     ];
 
     /// 运行时必须有这个方法：缺了就是运行时比客户端旧。

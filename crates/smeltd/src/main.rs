@@ -140,6 +140,7 @@ mod terminal_resume;
 mod terminal_shell;
 mod terminal_snapshot;
 mod webhook;
+mod workspace_directory;
 
 use acp_host::*;
 use protocol::*;
@@ -914,6 +915,7 @@ struct DaemonProjectionSeed {
     sessions: Vec<SessionState>,
     remote_sessions: Option<RemoteSessionSnapshot>,
     workspace_menu: Option<WorkspaceMenuSnapshot>,
+    workspace: Option<smelt_core::workspace_directory::WorkspaceDirectory>,
     automations: Option<AutomationFile>,
 }
 

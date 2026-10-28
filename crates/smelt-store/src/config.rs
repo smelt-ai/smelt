@@ -47,6 +47,23 @@ pub(crate) fn write_workspace_catalog_revision(
     Ok(())
 }
 
+/// 单条改动（新建、改、删一段对话，开关项目）提交后推进版本。写入方清空：之后基于旧版本
+/// 的整份保存，哪怕来自上一个写入方，也必须被拒，不能盖掉这次改动。
+pub(crate) fn bump_workspace_catalog_revision(
+    transaction: &Transaction<'_>,
+) -> Result<u64, StoreError> {
+    let revision = read_workspace_catalog_head(transaction)?.revision + 1;
+    transaction.execute(
+        "INSERT INTO workspace_catalog(id, revision, writer, writer_seq) VALUES (1, ?1, NULL, NULL)
+         ON CONFLICT(id) DO UPDATE SET
+           revision = excluded.revision,
+           writer = NULL,
+           writer_seq = NULL",
+        [i64::try_from(revision).unwrap_or(i64::MAX)],
+    )?;
+    Ok(revision)
+}
+
 /// 工作区目录当前的版本，和提交这个版本的写入方。
 pub(crate) struct WorkspaceCatalogHead {
     pub(crate) revision: u64,

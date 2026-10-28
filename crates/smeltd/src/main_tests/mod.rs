@@ -38,6 +38,7 @@ mod state_listener_tests;
 mod test_owner_tests;
 #[cfg(unix)]
 mod watch_tests;
+mod workspace_directory_tests;
 mod workspace_menu_tests;
 
 /// 测一个 ACP 会话值：默认 Direct 绑定、无 launch，供各子模块复用。

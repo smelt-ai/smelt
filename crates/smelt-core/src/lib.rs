@@ -80,5 +80,6 @@ pub mod terminal_theme;
 pub use smelt_model::theme_index;
 pub use smelt_sys::tty_color;
 pub mod workspace_catalog;
+pub use smelt_model::workspace_directory;
 pub mod workspace_menu;
 pub use smelt_model::workspace_override;

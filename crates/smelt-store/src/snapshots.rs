@@ -30,7 +30,7 @@ pub struct HistoryTitleRecord {
 
 /// 运行时持有的工作区目录：打开的项目和会话。侧栏宽度、当前页、折叠/固定这些
 /// 界面状态归客户端，不在这里。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkspaceSnapshot {
     /// 项目根目录，按侧栏顺序。
     pub projects: Vec<String>,
@@ -54,6 +54,13 @@ pub enum WorkspaceCatalogCommit {
     Conflict {
         current: u64,
     },
+}
+
+/// 一次单条改动之后目录的版本。`changed` 为 false 时什么都没写，版本也没动。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkspaceDirectoryCommit {
+    pub revision: u64,
+    pub changed: bool,
 }
 
 /// 一段对话：侧栏里的一条。里面有哪些终端、是不是一段 ACP 对话归运行时；终端怎么分屏、

@@ -23,6 +23,8 @@ pub const CORE_TOPIC_SESSION_STATE_CHANGED: &str = "session.state_changed";
 pub const CORE_TOPIC_SESSION_REMOVED: &str = "session.removed";
 pub const CORE_TOPIC_REMOTE_SESSIONS_CHANGED: &str = "remote_sessions.changed";
 pub const CORE_TOPIC_WORKSPACE_MENU_CHANGED: &str = "workspace_menu.changed";
+/// 运行时的工作区目录（项目、对话）变了，载荷是改完的整份目录。
+pub const CORE_TOPIC_WORKSPACE_CHANGED: &str = "workspace.changed";
 pub const CORE_TOPIC_AUTOMATIONS_CHANGED: &str = "automations.changed";
 /// 有人要看一段 daemon 里还没在跑的对话（典型是 daemon 冷重启后手机点开）。
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
@@ -55,6 +57,7 @@ pub const CORE_CAPABILITY_APPEARANCE_CONTROL: &str = "appearance.control";
 pub const CORE_SNAPSHOT_SESSIONS: &str = "core.sessions.v1";
 pub const CORE_SNAPSHOT_REMOTE_SESSIONS: &str = "core.remote_sessions.v1";
 pub const CORE_SNAPSHOT_WORKSPACE_MENU: &str = "core.workspace_menu.v1";
+pub const CORE_SNAPSHOT_WORKSPACE: &str = "core.workspace.v1";
 pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
@@ -532,6 +535,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             1024 * 1024,
         )?,
         descriptor(
+            CORE_TOPIC_WORKSPACE_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            Some(CORE_SNAPSHOT_WORKSPACE),
+            4 * 1024 * 1024,
+        )?,
+        descriptor(
             CORE_TOPIC_AUTOMATIONS_CHANGED,
             CORE_CAPABILITY_AUTOMATION_READ,
             Some(CORE_SNAPSHOT_AUTOMATIONS),
@@ -748,6 +757,7 @@ mod tests {
                 Some(CORE_SNAPSHOT_WORKSPACE_MENU),
                 1,
             ),
+            (CORE_TOPIC_WORKSPACE_CHANGED, Some(CORE_SNAPSHOT_WORKSPACE), 1),
             (
                 CORE_TOPIC_AUTOMATIONS_CHANGED,
                 Some(CORE_SNAPSHOT_AUTOMATIONS),

@@ -918,6 +918,24 @@ pi_calls! {
     SessionCreate => SessionCreate(SessionCreateParams) -> SessionCreateResult;
     /// 删除一个会话。运行时自己判断是终端还是对话；自动化运行的会话拒绝删除。
     SessionDelete => SessionDelete(SessionIdParams) -> EmptyParams;
+    /// 在工作区目录里新建一段对话，排在最后。同 id 已经在时什么都不做（回执丢了的重发）。
+    WorkspaceConversationCreate => WorkspaceConversationCreate(
+        crate::workspace_directory::WorkspaceConversation
+    ) -> crate::workspace_directory::WorkspaceRevision;
+    /// 整段替换一段已有对话。对话已经被关掉时回 `not_found`，不写回来。
+    WorkspaceConversationUpdate => WorkspaceConversationUpdate(
+        crate::workspace_directory::WorkspaceConversation
+    ) -> crate::workspace_directory::WorkspaceRevision;
+    /// 关掉一段对话：从目录里删掉，收掉它的终端和 ACP 会话。已经不在时什么都不做。
+    WorkspaceConversationDelete => WorkspaceConversationDelete(
+        crate::workspace_directory::WorkspaceConversationIdParams
+    ) -> crate::workspace_directory::WorkspaceRevision;
+    /// 打开一个项目。已经开着时什么都不做。
+    WorkspaceProjectOpen => WorkspaceProjectOpen(crate::workspace_directory::WorkspaceProjectParams)
+        -> crate::workspace_directory::WorkspaceRevision;
+    /// 关闭一个项目。项目下的对话留着，不收进程。
+    WorkspaceProjectClose => WorkspaceProjectClose(crate::workspace_directory::WorkspaceProjectParams)
+        -> crate::workspace_directory::WorkspaceRevision;
     /// 会话 id → 它所属的产品智能体定义 id。
     SessionAgentBindings => SessionAgentBindings(EmptyParams) -> SessionAgentBindingsResult;
     /// 取对话里一张没有内联的图（`acp_watch` / `acp_snapshot` 带 `image_refs` 时帧里只有
