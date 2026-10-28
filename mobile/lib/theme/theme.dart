@@ -106,28 +106,6 @@ ThemeData buildGalleyTheme(Brightness brightness) {
               statusBarColor: Colors.transparent,
             ),
     ),
-    navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: c.shelf,
-      surfaceTintColor: Colors.transparent,
-      indicatorColor: c.control,
-      elevation: 0,
-      height: 64,
-      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-      labelTextStyle: WidgetStateProperty.resolveWith(
-        (states) => t.caption.copyWith(
-          color: states.contains(WidgetState.selected) ? c.ink : c.inkMuted,
-          fontWeight: states.contains(WidgetState.selected)
-              ? FontWeight.w600
-              : FontWeight.w400,
-        ),
-      ),
-      iconTheme: WidgetStateProperty.resolveWith(
-        (states) => IconThemeData(
-          size: 22,
-          color: states.contains(WidgetState.selected) ? c.ink : c.inkMuted,
-        ),
-      ),
-    ),
     navigationRailTheme: NavigationRailThemeData(
       backgroundColor: c.shelf,
       indicatorColor: c.control,

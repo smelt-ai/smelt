@@ -27,6 +27,8 @@ colors:
   control: "#E3E6E9"
   onControl: "#1E1E1E"
   controlSelected: "#FFFFFF"
+  glass: "#FFFFFFD9"
+  glassEdge: "#FFFFFFCC"
   solid: "#1E1E1E"
   onSolid: "#FFFFFF"
   shadow: "#0000001F"
@@ -53,6 +55,8 @@ colors:
   control-dark: "#2A2E33"
   onControl-dark: "#ECEEF0"
   controlSelected-dark: "#454B52"
+  glass-dark: "#1B1E22D9"
+  glassEdge-dark: "#FFFFFF1F"
   solid-dark: "#ECEEF0"
   onSolid-dark: "#1E1E1E"
   shadow-dark: "#00000052"
@@ -356,12 +360,13 @@ components:
 
 ### Neutral
 - **钢底**（`ground` / `ground-dark`）：所有页面背景、导航栏背景、详情栏背景。
-- **白色搁板**（`shelf` / `shelf-dark`）：分组列表、输入框底、底部导航与侧边导航栏底、输入胶囊。按下换成 `shelfPressed`。
+- **白色搁板**（`shelf` / `shelf-dark`）：分组列表、输入框底、侧边导航栏底、输入胶囊。按下换成 `shelfPressed`。
+- **玻璃**（`glass` / `glassEdge`）：只给手机底部导航胶囊。搁板色 85% 不透明，底下滚过的内容模糊后透出来；`glassEdge` 是一圈 1px 亮边。不透明度按最坏情况定：胶囊下滚过墨色或纸时，`inkMuted` 标签仍过 4.5:1。
 - **浮层**（`raised`）：底部弹层、对话框、菜单、终端选区工具条。
 - **发丝线**（`hairline`）：行间分隔、输入框描边、详情栏左边线、导航栏下滚动时出现的那道线。
 - **钢轨**（`rail`）：单据轨，一道 4px 平涂结构线。
 - **墨**（`ink` / `inkMuted` / `inkFaint`）：主字、副标题与分组标题、最弱的提示与 chevron。`inkFaint` 在钢底上也过 4.5:1。
-- **中性控件**（`control` / `onControl` / `controlSelected`）：次要按钮底、分段控件轨道与选中块、导航选中指示、平板列表选中行底。深色模式选中块比轨道亮一档。
+- **中性控件**（`control` / `onControl` / `controlSelected`）：次要按钮底、分段控件轨道与选中块、导航选中块、平板列表选中行底。深色模式选中块比轨道亮一档。
 - **实心墨**（`solid` / `onSolid`）：非「需要你」的主要动作（扫码配对、发送、完成）、选中的筛选芯片、开关轨道、Snackbar 与 Tooltip 底。
 - **终端底 / 终端字**（`termBg` / `termFg`）：终端固定深色，不跟 App 明暗走；ANSI 16 色沿用桌面 Tokyo Night 一套（见 sidecar）。
 
@@ -423,7 +428,7 @@ components:
 
 ### Shadow Vocabulary
 - **单据投影**（`canvas.drawShadow(outline, shadow, 3)`，浅色 `#0000001F`、深色 `#00000052`）：沿锯齿轮廓投下，只给 `TicketPaper`。
-- **浮动胶囊**（`0 2px 12px shadow`）：对话页输入胶囊；「回到最新」胶囊用 `0 2px 10px`。
+- **浮动胶囊**（`0 2px 12px shadow`）：对话页输入胶囊、底部导航胶囊；「回到最新」胶囊用 `0 2px 10px`。
 - **浮动工具条**（`0 0 16px shadow`）：终端选区操作条。
 - **拖动中的行**（Material elevation 8）：设置里长按拖动排序的机器行。
 - **滚动分隔**（`scrolledUnderElevation: 1`，阴影色取 `hairline`）：导航栏下有内容时的那道线。
@@ -473,7 +478,7 @@ components:
 - **Composer：** 对话页底部是 24 圆角的白色胶囊，`hairline` 描边加浮动胶囊阴影，左侧附图 / 命令图标按钮，下方一行用量小字。
 
 ### Navigation
-- **手机：** 底部标准导航栏，`shelf` 底，高 64，四项「指挥台 / 会话 / 智能体 / 设置」，标签常显；选中项 `ink` 字 600 + `control` 指示块，未选中 `inkMuted`。指挥台图标上的待办计数是琥珀徽标。
+- **手机：** 底部是浮在内容上的玻璃胶囊（`GlassNavBar`）：高 64、全圆角，左右离屏边 16，有 Home 指示条时压进安全区一截、没有时离底 8；`glass` 底加 20 的背景模糊、`glassEdge` 亮边、浮动胶囊阴影。内容滚到胶囊下面（`extendBody`），页面底部留白已含胶囊高度。四项「指挥台 / 会话 / 智能体 / 设置」，标签常显；选中项 `ink` 字 600，背后一块 `control` 胶囊在各项之间滑动（`Motion.standard`），未选中 `inkMuted`。指挥台图标上的待办计数是琥珀徽标。
 - **平板：** 同样四项改为左侧 `NavigationRail`，配色一致。
 - **顶层页：** `GalleyPage` 大标题栏（展开 116），收起为居中 `navTitle`，下方导词写当前滚到的机器；支持下拉刷新（重验连接）。
 - **详情：** 页面一律经 `DetailHost.open` 打开，手机压栈、平板替换右栏。返回手势跟随系统。
@@ -512,7 +517,7 @@ components:
 - **Don't** 做卡片墙、仪表盘大数字，或在搁板里再套卡片。
 - **Don't** 做满屏等宽、荧光绿的终端风界面；深色只属于终端。
 - **Don't** 给卡片或单据加 1px 以上的彩色侧边框（包括失败单据的琥珀 / 红色侧条）；失败用文字、计时颜色或章来区分。
-- **Don't** 加 eyebrow 小标签、渐变字或装饰性毛玻璃。
+- **Don't** 加 eyebrow 小标签、渐变字或装饰性毛玻璃。玻璃只有手机底部导航胶囊一处，不往搁板、弹层、单据上扩。
 - **Don't** 用 Material `Icons.*`、emoji 或 Unicode 字符当图标；只用 Lucide 与 `AgentGlyph`。
 - **Don't** 用水波纹或扩散反馈；按下只换底色。
 - **Don't** 为两个平台做两套控件；只有平台行为各随系统。

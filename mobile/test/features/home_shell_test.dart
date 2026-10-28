@@ -6,6 +6,8 @@ import 'package:smelt_mobile/features/conversation/conversation_page.dart';
 import 'package:smelt_mobile/features/home_shell.dart';
 import 'package:smelt_mobile/features/machines/machine_detail_page.dart';
 import 'package:smelt_mobile/features/sessions/sessions_page.dart';
+import 'package:smelt_mobile/ui/glass_nav_bar.dart';
+import 'package:smelt_mobile/ui/page.dart';
 
 import 'conversation/conversation_harness.dart';
 
@@ -125,7 +127,7 @@ void main() {
 
     await tester.tap(
       find.descendant(
-        of: find.byType(NavigationBar),
+        of: find.byType(GlassNavBar),
         matching: find.text('Sessions'),
       ),
     );
@@ -159,6 +161,28 @@ void main() {
     expect(_count(backend, 'watch s-copy'), 1);
     expect(_count(backend, 'unwatch s-md'), 1, reason: '换掉默认详情');
     expect(find.byType(ConversationPage), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _settle(tester);
+  });
+
+  testWidgets('手机：内容伸到玻璃底栏下面，页面底部留白让开它', (tester) async {
+    usePhone(tester);
+    tester.view.padding = const FakeViewPadding(bottom: 34 * 3);
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34 * 3);
+    final model = startModel(RecordingBackend());
+    await tester.pumpWidget(host(model, const HomeShell()));
+    await _settle(tester);
+
+    final screen = tester.getSize(find.byType(HomeShell));
+    final bar = tester.getRect(find.byType(GlassNavBar));
+    final page = find.byType(GalleyPage).first;
+    expect(tester.getRect(page).bottom, screen.height, reason: '页面铺到屏幕底，滚到胶囊下面');
+    expect(
+      MediaQuery.paddingOf(tester.element(page)).bottom,
+      greaterThanOrEqualTo(screen.height - bar.top),
+      reason: '最后一行能滚出胶囊',
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     await _settle(tester);

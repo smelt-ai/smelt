@@ -38,6 +38,8 @@ class GalleyColors extends ThemeExtension<GalleyColors> {
     required this.control,
     required this.onControl,
     required this.controlSelected,
+    required this.glass,
+    required this.glassEdge,
     required this.solid,
     required this.onSolid,
     required this.shadow,
@@ -98,6 +100,12 @@ class GalleyColors extends ThemeExtension<GalleyColors> {
   /// 分段控件等的选中块：浅色是白，深色要比中性底亮一档，选中才不像反了。
   final Color controlSelected;
 
+  /// 底部导航胶囊的半透明底：底下滚过的内容经模糊后透出来。只给底部导航用。
+  final Color glass;
+
+  /// 玻璃胶囊的 1px 亮边。
+  final Color glassEdge;
+
   /// 实心墨按钮（发送、主要但不是「需要你」的动作）。
   final Color solid;
   final Color onSolid;
@@ -142,6 +150,8 @@ class GalleyColors extends ThemeExtension<GalleyColors> {
     control: Primitives.steel90,
     onControl: Primitives.ink12,
     controlSelected: Primitives.white,
+    glass: Primitives.glassLight,
+    glassEdge: Primitives.glassEdgeLight,
     solid: Primitives.ink12,
     onSolid: Primitives.white,
     shadow: Primitives.shadow,
@@ -175,6 +185,8 @@ class GalleyColors extends ThemeExtension<GalleyColors> {
     control: Primitives.steel18,
     onControl: Primitives.ink93,
     controlSelected: Primitives.steel30,
+    glass: Primitives.glassDark,
+    glassEdge: Primitives.glassEdgeDark,
     solid: Primitives.ink93,
     onSolid: Primitives.ink12,
     shadow: Primitives.shadowDeep,
@@ -209,6 +221,8 @@ class GalleyColors extends ThemeExtension<GalleyColors> {
     Color? control,
     Color? onControl,
     Color? controlSelected,
+    Color? glass,
+    Color? glassEdge,
     Color? solid,
     Color? onSolid,
     Color? shadow,
@@ -240,6 +254,8 @@ class GalleyColors extends ThemeExtension<GalleyColors> {
     control: control ?? this.control,
     onControl: onControl ?? this.onControl,
     controlSelected: controlSelected ?? this.controlSelected,
+    glass: glass ?? this.glass,
+    glassEdge: glassEdge ?? this.glassEdge,
     solid: solid ?? this.solid,
     onSolid: onSolid ?? this.onSolid,
     shadow: shadow ?? this.shadow,
@@ -277,6 +293,8 @@ class GalleyColors extends ThemeExtension<GalleyColors> {
       control: c(control, other.control),
       onControl: c(onControl, other.onControl),
       controlSelected: c(controlSelected, other.controlSelected),
+      glass: c(glass, other.glass),
+      glassEdge: c(glassEdge, other.glassEdge),
       solid: c(solid, other.solid),
       onSolid: c(onSolid, other.onSolid),
       shadow: c(shadow, other.shadow),
