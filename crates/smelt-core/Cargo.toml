@@ -51,7 +51,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 # 项目搜索（project_files）遵守 .gitignore 等忽略规则。
 ignore = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 # 规范化路径不带 Windows 的 `\\?\` 前缀（std::fs::canonicalize 会带）。
 dunce = "1"
 
