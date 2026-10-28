@@ -23,8 +23,13 @@ use super::daemon::DaemonOperation;
 /// v3：删掉 DeepSeek Harness 后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置
 /// 少了 `native_dsh_profiles`。旧运行时缺这个字段就拒收修改，新桌面改不了旧运行时上的
 /// 智能体配置，得让兼容检查拦住、提示升级运行时。
-pub const CONTROL_API_VERSION: u16 = 3;
-pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
+///
+/// v4：删掉整份读写的 `workspace.load` / `workspace.save`。工作区目录只经
+/// `workspace.conversation.*` / `workspace.project.*` 单条改动，由运行时经
+/// `workspace.changed` 推送整份目录。旧桌面还在整份保存，连上新运行时会拿各自手里的
+/// 旧目录互相覆盖，两边都得拦住。
+pub const CONTROL_API_VERSION: u16 = 4;
+pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 4;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
 
 macro_rules! define_control_methods {
@@ -120,8 +125,6 @@ define_control_methods! {
     LaunchGet => (LAUNCH_GET_METHOD, "launch.get"),
     LaunchReplace => (LAUNCH_REPLACE_METHOD, "launch.replace"),
     MemoryTestEmbedding => (MEMORY_TEST_EMBEDDING_METHOD, "memory.test_embedding"),
-    WorkspaceLoad => (WORKSPACE_LOAD_METHOD, "workspace.load"),
-    WorkspaceSave => (WORKSPACE_SAVE_METHOD, "workspace.save"),
     WorkspaceConversationCreate => (WORKSPACE_CONVERSATION_CREATE_METHOD, "workspace.conversation.create"),
     WorkspaceConversationUpdate => (WORKSPACE_CONVERSATION_UPDATE_METHOD, "workspace.conversation.update"),
     WorkspaceConversationDelete => (WORKSPACE_CONVERSATION_DELETE_METHOD, "workspace.conversation.delete"),
@@ -193,16 +196,7 @@ impl ControlMethod {
     /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加的方法。运行时可以
     /// 没有：客户端不因缺它们判不兼容，用到它们的功能调到 MethodNotFound 时自己降级。
     /// 新加方法都先放进来；抬最低版本时清空，它们成了新基线里的必需方法。
-    pub const OPTIONAL: &'static [Self] = &[
-        Self::AgentMemoryWatch,
-        Self::RemoteStatusWait,
-        Self::ResourceUsage,
-        Self::WorkspaceConversationCreate,
-        Self::WorkspaceConversationUpdate,
-        Self::WorkspaceConversationDelete,
-        Self::WorkspaceProjectOpen,
-        Self::WorkspaceProjectClose,
-    ];
+    pub const OPTIONAL: &'static [Self] = &[];
 
     /// 运行时必须有这个方法：缺了就是运行时比客户端旧。
     pub fn required(self) -> bool {
@@ -644,7 +638,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 123);
+        assert_eq!(names.len(), 121);
     }
 
     #[test]

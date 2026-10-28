@@ -189,7 +189,9 @@ fn v2_session_routes_are_dropped() {
     let v2 = Connection::open(&path).unwrap();
     v2.execute_batch(schema::CREATE_SCHEMA).unwrap();
     v2.execute_batch(
-        "DROP TABLE conversation_route;
+        "DROP TABLE sidebar_project_order;
+         DROP TABLE sidebar_conversation_order;
+         DROP TABLE conversation_route;
          DROP TABLE conversation_route_path;
          CREATE TABLE session_route (
            runtime_id TEXT NOT NULL,
@@ -422,7 +424,9 @@ fn v1_projects_become_local_projects() {
     let v1 = Connection::open(&path).unwrap();
     v1.execute_batch(schema::CREATE_SCHEMA).unwrap();
     v1.execute_batch(
-        "DROP TABLE collapsed_project;
+        "DROP TABLE sidebar_project_order;
+         DROP TABLE sidebar_conversation_order;
+         DROP TABLE collapsed_project;
          DROP TABLE pinned_project;
          DROP TABLE conversation_route;
          DROP TABLE conversation_route_path;
@@ -471,7 +475,9 @@ fn v3_runtime_connections_gain_an_empty_smelt_home() {
     let v3 = Connection::open(&path).unwrap();
     v3.execute_batch(schema::CREATE_SCHEMA).unwrap();
     v3.execute_batch(
-        "ALTER TABLE runtime_connection DROP COLUMN os;
+        "DROP TABLE sidebar_project_order;
+         DROP TABLE sidebar_conversation_order;
+         ALTER TABLE runtime_connection DROP COLUMN os;
          ALTER TABLE runtime_connection DROP COLUMN smelt_home;
          INSERT INTO runtime_connection VALUES ('rt-linux', 'linux-box', 'aa', NULL, 0, 1);
          PRAGMA user_version = 3;",
@@ -507,7 +513,9 @@ fn v4_runtime_connections_gain_an_empty_os() {
     let v4 = Connection::open(&path).unwrap();
     v4.execute_batch(schema::CREATE_SCHEMA).unwrap();
     v4.execute_batch(
-        "ALTER TABLE runtime_connection DROP COLUMN os;
+        "DROP TABLE sidebar_project_order;
+         DROP TABLE sidebar_conversation_order;
+         ALTER TABLE runtime_connection DROP COLUMN os;
          INSERT INTO runtime_connection
            VALUES ('rt-win', 'DESKTOP-1', 'aa', NULL, 0, 1, 'C:\\Users\\w\\.smelt');
          PRAGMA user_version = 4;",
@@ -529,6 +537,143 @@ fn v4_runtime_connections_gain_an_empty_os() {
     assert_eq!(
         store.runtime_connections().unwrap()[0].os.as_deref(),
         Some("windows")
+    );
+    cleanup(&path);
+}
+
+fn sidebar_order(
+    runtime_id: Option<&str>,
+    projects: &[&str],
+    conversations: &[&str],
+) -> SidebarOrderRecord {
+    SidebarOrderRecord {
+        runtime_id: runtime_id.map(str::to_string),
+        projects: projects.iter().map(|item| item.to_string()).collect(),
+        conversations: conversations.iter().map(|item| item.to_string()).collect(),
+    }
+}
+
+/// 侧栏顺序按运行时存取：本机（`None`）和远程各记各的，读回来本机在最前。
+#[test]
+fn sidebar_orders_round_trip() {
+    let (store, path) = temp_store();
+    assert!(store.sidebar_orders().unwrap().is_empty());
+
+    let remote = sidebar_order(Some("rt-linux"), &["/home/a", "/home/b"], &["conv-9"]);
+    let local = sidebar_order(
+        None,
+        &["/repo/z", "/repo/a"],
+        &["conv-2", "conv-1", "conv-3"],
+    );
+    store
+        .put_sidebar_orders(&[remote.clone(), local.clone()])
+        .unwrap();
+    assert_eq!(store.sidebar_orders().unwrap(), vec![local, remote]);
+
+    // 只有对话、没有项目的运行时也读得回来。
+    let conversations_only = sidebar_order(Some("rt-win"), &[], &["conv-5"]);
+    store
+        .put_sidebar_orders(std::slice::from_ref(&conversations_only))
+        .unwrap();
+    assert!(store.sidebar_orders().unwrap().contains(&conversations_only));
+    cleanup(&path);
+}
+
+/// 只换给出的运行时：别的运行时的顺序原样留着；给出空列表就清掉这个运行时的顺序。
+#[test]
+fn putting_one_runtime_keeps_the_others() {
+    let (store, path) = temp_store();
+    let local = sidebar_order(None, &["/repo/a", "/repo/b"], &["conv-1", "conv-2"]);
+    let remote = sidebar_order(Some("rt-linux"), &["/home/a"], &["conv-9"]);
+    store.put_sidebar_orders(&[local, remote.clone()]).unwrap();
+
+    let reordered = sidebar_order(None, &["/repo/b", "/repo/c"], &["conv-2"]);
+    store
+        .put_sidebar_orders(std::slice::from_ref(&reordered))
+        .unwrap();
+    assert_eq!(
+        store.sidebar_orders().unwrap(),
+        vec![reordered, remote.clone()]
+    );
+
+    store
+        .put_sidebar_orders(&[sidebar_order(None, &[], &[])])
+        .unwrap();
+    assert_eq!(store.sidebar_orders().unwrap(), vec![remote.clone()]);
+
+    // 什么都不给就什么都不动。
+    store.put_sidebar_orders(&[]).unwrap();
+    assert_eq!(store.sidebar_orders().unwrap(), vec![remote]);
+    cleanup(&path);
+}
+
+/// 同一运行时里重复的条目只留第一次出现的位置。
+#[test]
+fn duplicate_sidebar_entries_keep_the_first() {
+    let (store, path) = temp_store();
+    store
+        .put_sidebar_orders(&[sidebar_order(
+            None,
+            &["/repo/a", "/repo/b", "/repo/a"],
+            &["conv-2", "conv-1", "conv-2", "conv-1"],
+        )])
+        .unwrap();
+    assert_eq!(
+        store.sidebar_orders().unwrap(),
+        vec![sidebar_order(
+            None,
+            &["/repo/a", "/repo/b"],
+            &["conv-2", "conv-1"]
+        )]
+    );
+    cleanup(&path);
+}
+
+/// v5 还没有侧栏顺序：升到 v6 时建两张空表，别的数据原样留下，迁移前留了备份。
+#[test]
+fn v5_gains_empty_sidebar_order_tables() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v5 = Connection::open(&path).unwrap();
+    v5.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    v5.execute_batch(
+        "DROP TABLE sidebar_project_order;
+         DROP TABLE sidebar_conversation_order;
+         INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);
+         INSERT INTO collapsed_project VALUES ('', '/repo/b', 0), ('', '/repo/a', 1);
+         INSERT INTO collapsed_agent VALUES ('writer', 0);
+         INSERT INTO pinned_project VALUES ('', '/repo/z', 0), ('', '/repo/a', 1);
+         INSERT INTO runtime_connection
+           VALUES ('rt-win', 'DESKTOP-1', 'aa', NULL, 0, 1, NULL, 'windows');
+         PRAGMA user_version = 5;",
+    )
+    .unwrap();
+    drop(v5);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.sidebar_orders().unwrap().is_empty());
+    assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
+    assert_eq!(
+        store.runtime_connections().unwrap()[0].os.as_deref(),
+        Some("windows")
+    );
+    let order = sidebar_order(Some("rt-win"), &["/repo"], &["conv-1"]);
+    store
+        .put_sidebar_orders(std::slice::from_ref(&order))
+        .unwrap();
+    assert_eq!(store.sidebar_orders().unwrap(), vec![order]);
+    drop(store);
+
+    let version: u32 = Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, schema::SCHEMA_VERSION);
+    assert_eq!(version, 6);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v5"))
+            .exists(),
+        "迁移前必须留下备份"
     );
     cleanup(&path);
 }

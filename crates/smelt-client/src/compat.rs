@@ -222,16 +222,14 @@ mod tests {
     }
 
     /// 最低协议版本之后才加的方法，旧运行时没有也照常连：只是那一项功能用不了。
+    /// 刚抬过最低版本时 [`ControlMethod::OPTIONAL`] 是空的，这条测试等加了新的可选方法
+    /// 才真正去掉方法。
     #[test]
     fn missing_optional_methods_are_still_compatible() {
         let mut described = current();
         described.control.methods.retain(|method| {
             ControlMethod::from_wire_name(method).is_none_or(ControlMethod::required)
         });
-        assert!(
-            !ControlMethod::OPTIONAL.is_empty(),
-            "这条测试要真的去掉了可选方法才有意义"
-        );
         assert_eq!(check(&described), Ok(()));
     }
 

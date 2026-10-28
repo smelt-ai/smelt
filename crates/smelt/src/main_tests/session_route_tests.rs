@@ -1,28 +1,9 @@
 use super::{
-    AcpSaved, GitTab, MIN_TOOL_PANEL_WIDTH, PaneState, SessionRouteArchive, SessionState,
-    SessionUiState, StageCover, WorkspaceRoute, WsState, agents::agent_engine_kinds,
-    normalize_saved_sessions, resync_session_with_project_ui, settings::ConversationAgentKind,
+    GitTab, MIN_TOOL_PANEL_WIDTH, SessionRouteArchive, SessionUiState, StageCover, WorkspaceRoute,
+    agents::agent_engine_kinds, resync_session_with_project_ui, settings::ConversationAgentKind,
     swap_session_ui_state, tool_panel,
 };
 use std::collections::{HashMap, HashSet};
-
-fn session_state_with_route(route: Option<SessionRouteArchive>) -> SessionState {
-    SessionState {
-        id: "conv-test".into(),
-        layout: PaneState::Leaf {
-            cwd: None,
-            id: None,
-            custom_title: None,
-            launch_label: None,
-            launch_cmd: None,
-        },
-        active: 0,
-        last_updated_at: 0,
-        custom_title: None,
-        acp: None,
-        route,
-    }
-}
 
 fn drawer_ui(tab: tool_panel::ToolPanelTab, git_tab: GitTab, expanded: &str) -> SessionUiState {
     SessionUiState {
@@ -231,34 +212,6 @@ fn legacy_route_without_open_flags_uses_current_defaults() {
 }
 
 #[test]
-fn legacy_workspace_panel_state_only_migrates_missing_session_routes() {
-    let mut state: WsState = serde_json::from_value(serde_json::json!({
-        "inspector_open": true,
-        "inspector_w": 512.0,
-        "file_tree_w": 280.0
-    }))
-    .unwrap();
-    state.sessions = vec![
-        session_state_with_route(None),
-        session_state_with_route(Some(SessionRouteArchive {
-            tool_panel_open: false,
-            tool_panel_w: 444.0,
-            ..Default::default()
-        })),
-    ];
-
-    let (sessions, _) = normalize_saved_sessions(&state);
-    let migrated = sessions[0].route.as_ref().unwrap();
-    let existing = sessions[1].route.as_ref().unwrap();
-
-    assert!(migrated.tool_panel_open);
-    assert_eq!(migrated.tool_panel_w, 512.0);
-    assert_eq!(migrated.file_tree_w, 280.0);
-    assert!(!existing.tool_panel_open);
-    assert_eq!(existing.tool_panel_w, 444.0);
-}
-
-#[test]
 fn legacy_bottom_drawer_fields_are_ignored_on_restore() {
     // 删除底部面板后，旧存档里的 bottom_drawer_* 字段不再反序列化到任何运行时状态，
     // 直接丢弃，恢复出的 route 不含底部面板痕迹。
@@ -352,83 +305,4 @@ fn agent_creation_engines_come_from_the_provider_registry() {
     let actual = agent_engine_kinds();
 
     assert_eq!(actual, vec![ConversationAgentKind::Pi]);
-}
-
-#[test]
-fn legacy_workspace_defaults_to_no_singleton_agent_runs() {
-    let state: WsState = serde_json::from_value(serde_json::json!({})).unwrap();
-
-    assert!(state.legacy_agent_runs.is_empty());
-    assert!(!state._legacy_agent_runtime_visible);
-}
-
-#[test]
-fn agent_conversation_binding_round_trips_with_the_conversation() {
-    let mut conversation = session_state_with_route(None);
-    conversation.acp = Some(AcpSaved {
-        cwd: Some("/repo".into()),
-        launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent"),
-        profile_id: None,
-        agent: Some("pi".into()),
-        agent_definition_id: Some("quant".into()),
-        history_session_id: None,
-        sid: Some("acp-agent-1".into()),
-        refresh_launch_from_settings: true,
-        conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
-        config_values: Vec::new(),
-        pending_prompt: None,
-        pending_delivery_id: None,
-        pending_agent_preset: Some("分析股票".into()),
-        automation_id: Some("open-scan".into()),
-        session_title: None,
-    });
-    let state = WsState {
-        sessions: vec![conversation],
-        ..Default::default()
-    };
-
-    let restored: WsState = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
-    assert_eq!(restored.sessions.len(), 1);
-    assert_eq!(
-        restored.sessions[0]
-            .acp
-            .as_ref()
-            .and_then(|saved| saved.agent_definition_id.as_deref()),
-        Some("quant")
-    );
-    assert_eq!(
-        restored.sessions[0]
-            .acp
-            .as_ref()
-            .and_then(|saved| saved.automation_id.as_deref()),
-        Some("open-scan")
-    );
-}
-
-#[test]
-fn legacy_singleton_agent_run_migrates_to_a_regular_conversation() {
-    let state: WsState = serde_json::from_value(serde_json::json!({
-        "agent_runs": [{
-            "definition_id": "quant",
-            "acp": {
-                "cwd": "/repo",
-                "launch": {"command": "smelt-pi-agent"},
-                "agent": "pi",
-                "sid": "acp-agent-1",
-                "pending_agent_preset": "分析股票"
-            }
-        }],
-        "agent_runtime_visible": true
-    }))
-    .unwrap();
-
-    let (sessions, _) = normalize_saved_sessions(&state);
-
-    assert_eq!(sessions.len(), 1);
-    let saved = sessions[0].acp.as_ref().unwrap();
-    assert_eq!(saved.agent_definition_id.as_deref(), Some("quant"));
-    assert_eq!(saved.sid.as_deref(), Some("acp-agent-1"));
-    let rewritten = serde_json::to_value(state).unwrap();
-    assert!(rewritten.get("agent_runs").is_none());
-    assert!(rewritten.get("agent_runtime_visible").is_none());
 }

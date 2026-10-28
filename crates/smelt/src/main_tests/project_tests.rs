@@ -1,7 +1,4 @@
-use super::{
-    AcpSaved, PaneState, PathStyle, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
-    project_name_for_cwd, project_root_of, session_state_cwd,
-};
+use super::{PathStyle, ProjectGroup, disambiguate_labels, project_name_for_cwd, project_root_of};
 
 fn group(root: &str, label: &str) -> ProjectGroup {
     ProjectGroup {
@@ -92,16 +89,6 @@ fn gives_up_instead_of_looping_forever() {
     );
 }
 
-fn leaf(cwd: &str) -> PaneState {
-    PaneState::Leaf {
-        cwd: Some(cwd.into()),
-        id: None,
-        custom_title: None,
-        launch_label: None,
-        launch_cmd: None,
-    }
-}
-
 fn projects(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
@@ -169,56 +156,6 @@ fn trailing_slashes_are_ignored() {
     assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b").as_deref(), Some("/a/b"));
     assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/").as_deref(), Some("/a/b"));
     assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/c").as_deref(), Some("/a/b"));
-}
-
-/// 旧存档迁移：项目列表从会话 cwd 反推，终端会话取分屏树里第一个叶子的 cwd。
-#[test]
-fn legacy_archive_cwd_comes_from_first_leaf() {
-    let ss = SessionState {
-        id: "conv-test".into(),
-        layout: PaneState::Split {
-            axis: SplitAxis::H,
-            children: vec![leaf("/a/proj"), leaf("/b/other")],
-            sizes: Vec::new(),
-        },
-        active: 0,
-        last_updated_at: 0,
-        custom_title: None,
-        acp: None,
-        route: None,
-    };
-    assert_eq!(session_state_cwd(&ss).as_deref(), Some("/a/proj"));
-}
-
-/// ACP 会话的 cwd 存在自己的元数据里，layout 只是占位叶子，别取错。
-#[test]
-fn acp_archive_cwd_comes_from_acp_meta() {
-    let ss = SessionState {
-        id: "conv-test".into(),
-        layout: leaf("/placeholder"),
-        active: 0,
-        last_updated_at: 0,
-        custom_title: None,
-        acp: Some(AcpSaved {
-            cwd: Some("/a/acp-proj".into()),
-            launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude --acp"),
-            profile_id: None,
-            agent: None,
-            agent_definition_id: None,
-            history_session_id: None,
-            sid: None,
-            refresh_launch_from_settings: false,
-            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
-            config_values: Vec::new(),
-            pending_prompt: None,
-            pending_delivery_id: None,
-            pending_agent_preset: None,
-            automation_id: None,
-            session_title: None,
-        }),
-        route: None,
-    };
-    assert_eq!(session_state_cwd(&ss).as_deref(), Some("/a/acp-proj"));
 }
 
 /// 面板（变更、文件树）跟着选中的项目走，舞台上的会话可能属于别的项目。
