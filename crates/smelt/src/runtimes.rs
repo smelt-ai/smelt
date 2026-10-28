@@ -1266,7 +1266,7 @@ pub(crate) fn set_runtime_relay(
     use smelt_model::control_api::{RemoteConfigGet, RemoteConfigSet};
     use smelt_runtime_client::protocol::control::EmptyParams;
 
-    let key = RuntimeKey::Remote(runtime_id.clone());
+    let key = RuntimeKey::Remote(runtime_id);
     let Some(remote) = remote_of(&key, cx).cloned() else {
         return gpui::Task::ready(Err("这台机器已经移除了".to_string()));
     };
@@ -1714,7 +1714,7 @@ mod tests {
             version,
             detail,
             fix,
-        } = status_of(&describe_without("workspace.load"))
+        } = status_of(&describe_without("workspace.conversation.create"))
         else {
             panic!("缺方法的运行时应判为不兼容");
         };
@@ -1726,7 +1726,7 @@ mod tests {
         assert_eq!(version, "0.0.1");
         assert!(detail.contains("0.0.1"), "{detail}");
         assert!(detail.contains("需要升级运行时"), "{detail}");
-        assert!(detail.contains("workspace.load"), "{detail}");
+        assert!(detail.contains("workspace.conversation.create"), "{detail}");
     }
 
     /// Windows 上的运行时随那台机器上的 Smelt 一起更新：旧了也不请它远程升级。
@@ -1735,7 +1735,7 @@ mod tests {
         use smelt_runtime_client::protocol::control::ControlResponse;
         let client = runtime_answering(|request| {
             let request_id = request["request_id"].as_str().unwrap();
-            let mut described = described_without("workspace.load");
+            let mut described = described_without("workspace.conversation.create");
             described.daemon.os = Some("windows".to_string());
             serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
         });
@@ -1978,14 +1978,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
-    /// 对着一台真实运行时走一遍桌面要用的远程链路：配对、读工作区目录、在那台机器上开
-    /// 终端、订阅里收到这个终端的状态，最后杀掉终端、撤销这台设备。默认不跑：
+    /// 对着一台真实运行时走一遍桌面要用的远程链路：配对、对版本、在那台机器上开终端、订阅
+    /// 首帧带着工作区目录、订阅里收到这个终端的状态，最后杀掉终端、撤销这台设备。默认不跑：
     /// `SMELT_TEST_PAIRING_URI='smelt+iroh://…' cargo test -p smelt runtimes -- --ignored`
     #[test]
     #[ignore = "需要一台真实运行时和一次性配对串"]
     fn drives_a_real_remote_runtime() {
-        use smelt_runtime_client::protocol::control::EmptyParams;
-        use smelt_runtime_client::protocol::workspace::WorkspaceLoadCall;
+        use smelt_runtime_client::protocol::control::{EmptyParams, SystemDescribe};
 
         let uri = std::env::var("SMELT_TEST_PAIRING_URI").expect("设置 SMELT_TEST_PAIRING_URI");
         let home = std::env::temp_dir().join(format!(
@@ -1999,7 +1998,7 @@ mod tests {
         let runtime = remote.runtime.clone();
         runtime
             .client()
-            .call::<WorkspaceLoadCall>(&EmptyParams::default(), std::time::Duration::from_secs(30))
+            .call::<SystemDescribe>(&EmptyParams::default(), std::time::Duration::from_secs(30))
             .unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2023,12 +2022,18 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut seen = false;
+        let mut directory = false;
         while !seen && std::time::Instant::now() < deadline {
             let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(1)) else {
                 continue;
             };
             seen = match event {
-                crate::terminal::DaemonStateEvent::Snapshot { sessions, .. } => {
+                crate::terminal::DaemonStateEvent::Snapshot {
+                    sessions,
+                    workspace,
+                    ..
+                } => {
+                    directory |= workspace.is_some();
                     sessions.iter().any(|state| state.id == sid)
                 }
                 crate::terminal::DaemonStateEvent::Update(state) => state.id == sid,
@@ -2036,6 +2041,7 @@ mod tests {
             };
         }
         assert!(seen, "订阅里没看到远程终端 {sid}");
+        assert!(directory, "订阅首帧没带工作区目录");
 
         drop(terminal);
         crate::terminal::kill_remote(&runtime, &sid);
@@ -2050,7 +2056,7 @@ mod tests {
         assert!(
             runtime
                 .client()
-                .call::<WorkspaceLoadCall>(
+                .call::<SystemDescribe>(
                     &EmptyParams::default(),
                     std::time::Duration::from_secs(30)
                 )

@@ -28,6 +28,17 @@ pub(crate) struct NewAcpSessionRequest {
     pub activate: bool,
 }
 
+/// 这一批会话为什么要恢复。
+enum RestoreKind {
+    /// 运行时的第一份目录：恢复上次的会话，恢复完定下活动会话、按需重试。
+    ColdStart {
+        active_session: usize,
+        active_session_id: Option<String>,
+    },
+    /// 别处新开的对话随推送到了：只接上，不动活动会话。
+    Incoming,
+}
+
 impl Workspace {
     /// 手机要看一段 daemon 里没在跑的对话（典型是 daemon 冷重启后桌面只放了占位）。
     /// 照「用户在桌面点开它」的语义拉起来，但不切舞台、不抢焦点。
@@ -84,11 +95,37 @@ impl Workspace {
         self.schedule_indexed_session_restore(
             runtime,
             pending.into_iter().enumerate().collect(),
-            active_session,
-            active_session_id,
+            RestoreKind::ColdStart {
+                active_session,
+                active_session_id,
+            },
             window,
             cx,
         );
+    }
+
+    /// 别处新开的对话随推送到了：接到侧栏最后。不动活动会话，失败的留到下次冷启动。
+    pub(crate) fn restore_incoming_conversations(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        pending: Vec<SessionState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = runtime.key().clone();
+        let members = self.space_members(&key, cx).len();
+        let Some(space) = self.space_mut(&key) else {
+            return;
+        };
+        // 编号接在已有的后面，和还在恢复的冷启动会话不撞。
+        let base = members + space.restore_pending.len();
+        let indexed = pending
+            .into_iter()
+            .enumerate()
+            .map(|(offset, state)| (base + offset, state))
+            .collect::<Vec<_>>();
+        space.restore_pending.extend(indexed.iter().cloned());
+        self.schedule_indexed_session_restore(runtime, indexed, RestoreKind::Incoming, window, cx);
     }
 
     /// 会话恢复到它们所在的运行时上。活动会话只按本机那份认；本机守护的拉起、升级
@@ -97,8 +134,7 @@ impl Workspace {
         &mut self,
         runtime: crate::runtimes::Runtime,
         pending: Vec<(usize, SessionState)>,
-        active_session: usize,
-        active_session_id: Option<String>,
+        kind: RestoreKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -179,6 +215,10 @@ impl Workspace {
                     for (original_index, ss) in acp_saved {
                         if this.restore_cancelled(&key) {
                             this.forget_pending_restore(&key, original_index);
+                            continue;
+                        }
+                        // 恢复期间别处关掉了：不再接回来。
+                        if !this.restore_still_pending(&key, original_index) {
                             continue;
                         }
                         let Some(saved) = ss.acp else { continue };
@@ -302,6 +342,10 @@ impl Workspace {
                         this.forget_pending_restore(&key, original_index);
                         return false;
                     }
+                    // 恢复期间别处关掉了：不再接回来，进程由关它的那边收。
+                    if !this.restore_still_pending(&key, original_index) {
+                        return false;
+                    }
                     let leaves = match result {
                         Ok(leaves) => leaves,
                         Err(e) => {
@@ -370,6 +414,17 @@ impl Workspace {
             }
 
             let _ = this.update_in(cx, |this, window, cx| {
+                let RestoreKind::ColdStart {
+                    active_session,
+                    active_session_id,
+                } = kind
+                else {
+                    eprintln!("[workspace] {key:?} 接上别处新开的会话：成功 {restored}");
+                    this.save_state(cx);
+                    this.schedule_visible_refresh(cx);
+                    cx.notify();
+                    return;
+                };
                 let Some(space) = this.space_mut(&key) else {
                     // 运行时在恢复期间被移除了，它的会话已经一起摘掉。
                     return;
@@ -443,8 +498,10 @@ impl Workspace {
                             this.schedule_indexed_session_restore(
                                 runtime,
                                 leftover,
-                                active_session,
-                                active_session_id,
+                                RestoreKind::ColdStart {
+                                    active_session,
+                                    active_session_id,
+                                },
                                 window,
                                 cx,
                             );
@@ -676,11 +733,13 @@ impl Workspace {
     /// 顺手删了项目。
     ///
     /// 已落在某个已打开项目之下时不新增子项目；只有完全无主的 cwd 才成为项目根。
+    /// 项目在运行时上打开，随推送进侧栏；运行时还没连上时不开，会话先按 cwd 自成一组，
+    /// 关掉它时还会再来这里一次。
     pub(crate) fn remember_session_project(
         &mut self,
         runtime: &RuntimeKey,
         cwd: Option<&str>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
             return;
@@ -689,16 +748,7 @@ impl Workspace {
         if self.project_root_for_cwd(runtime, root, cx).is_some() {
             return;
         }
-        let Some(space) = self.space_mut(runtime) else {
-            return;
-        };
-        if !space
-            .projects
-            .iter()
-            .any(|p| p.trim_end_matches('/') == root)
-        {
-            space.projects.push(root.to_string());
-        }
+        self.request_project_open(runtime, root, cx);
     }
 
     /// 侧栏分组（见 ProjectGroup）。骨架是 `self.local.projects`——项目独立于会话存在，所以
@@ -816,7 +866,7 @@ impl Workspace {
 
     /// 项目卡片拖拽排序。改的是 `projects` 骨架；会话仍挂在各自 cwd 下。
     /// 拖进固定区会固定、拖出则取消固定，避免置顶后拖下去又弹回顶部。
-    /// `save_state` 会把这份有序根目录写进工作区类型化快照。
+    /// 只改这台桌面的顺序：`save_state` 把它写进客户端库的侧栏顺序，运行时目录不动。
     /// 项目顺序是每个运行时各自的，跨运行时拖不动。
     pub(crate) fn move_project_near(
         &mut self,
@@ -1761,8 +1811,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 把一个目录加进这个运行时的项目列表并设为活动项目。已经在列表里就只切活动，不重复
-    /// 加。**不建会话**——项目和会话是两回事，建会话是调用方另外的事。
+    /// 在这个运行时上打开一个目录作为项目并设为活动项目。已经开着就只切活动。项目随
+    /// 运行时的推送进侧栏。**不建会话**——项目和会话是两回事，建会话是调用方另外的事。
     pub(crate) fn add_project(
         &mut self,
         runtime: RuntimeKey,
@@ -1773,15 +1823,16 @@ impl Workspace {
             return;
         }
         let root = root.trim_end_matches('/').to_string();
-        let Some(space) = self.space_mut(&runtime) else {
+        let Some(space) = self.space(&runtime) else {
             return;
         };
-        if !space
+        let open = space
             .projects
             .iter()
-            .any(|p| p.trim_end_matches('/') == root)
-        {
-            space.projects.push(root.clone());
+            .any(|p| p.trim_end_matches('/') == root);
+        if !open && !self.request_project_open(&runtime, &root, cx) {
+            self.report_background_error(format!("运行时还没连上，没能打开项目 {root}"));
+            return;
         }
         self.active_project = Some(ProjectRef { runtime, root });
         // 打开项目 = 想看这个项目，收掉盖在舞台上的覆盖页。
@@ -1909,7 +1960,7 @@ impl Workspace {
         self.close_session_pane(ix, view, window, cx);
     }
 
-    /// 关闭项目：从列表移除，并连带关掉挂在它下面的所有会话。认运行时加 **root 路径**
+    /// 关闭项目：在运行时上关掉，并连带关掉挂在它下面的所有会话。认运行时加 **root 路径**
     /// （分组身份，见 ProjectGroup）——用显示名的话，末段同名的另一个项目会被一起误伤。
     pub(crate) fn close_project(&mut self, project: &ProjectRef, cx: &mut Context<Self>) {
         let root = project.root.trim_end_matches('/').to_string();
@@ -1922,8 +1973,29 @@ impl Workspace {
         for ix in ixs {
             self.close_session(ix, cx);
         }
+        // 在运行时上关掉，侧栏随推送摘掉；项目下的会话上面已经逐个关过。只靠会话 cwd
+        // 撑起来的隐式组也按它的根发一次：上面关会话时已经把它实体化（发了打开），这条
+        // 排在后面，抵掉它。
+        let mut closed = self
+            .space(&project.runtime)
+            .map(|space| {
+                space
+                    .projects
+                    .iter()
+                    .filter(|p| p.trim_end_matches('/') == root)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if closed.is_empty() {
+            closed.push(root.clone());
+        }
+        for closed_root in &closed {
+            if !self.request_project_close(&project.runtime, closed_root, cx) {
+                self.report_background_error(format!("运行时还没连上，没能关闭项目 {root}"));
+            }
+        }
         if let Some(space) = self.space_mut(&project.runtime) {
-            space.projects.retain(|p| p.trim_end_matches('/') != root);
             space
                 .pinned_projects
                 .retain(|p| !crate::sidebar_order::same_project_root(p, &root));
@@ -2180,8 +2252,12 @@ impl Workspace {
         } else {
             None
         };
-        let project_root = group.map(|g| g.root);
-        self.remember_session_project(&runtime, project_root.as_deref(), cx);
+        // 只有用户自己关的才实体化。别处关掉的、运行时被移除的不算：别处可能连项目一起
+        // 关了，这里再开就把它开回来了。
+        if kill_runtime {
+            let project_root = group.map(|g| g.root);
+            self.remember_session_project(&runtime, project_root.as_deref(), cx);
+        }
         let attention_ids: Vec<String> = match &self.sessions[ix].kind {
             SessionKind::Term { .. } => self.sessions[ix]
                 .term_leaves()
@@ -2191,6 +2267,14 @@ impl Workspace {
             SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
         };
         if kill_runtime {
+            // 用户关掉的：运行时目录里也关掉它，别的设备随之摘掉。只摘本地投影的
+            // （运行时被移除、别处已经关掉）不走这里。
+            let session = &self.sessions[ix];
+            if crate::workspace_persist::in_workspace_directory(session) {
+                let key = session.runtime(cx).key().clone();
+                let id = session.conversation_id.clone();
+                self.close_directory_conversation(&key, &id);
+            }
             // 每个 pane 在自己的运行时上杀：远程会话的 shell 在那台机器上。
             let terminals = self.sessions[ix]
                 .term_leaves()

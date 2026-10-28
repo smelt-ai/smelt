@@ -571,17 +571,18 @@ pub(crate) fn durable_history_write(
     }
 }
 
-fn persist_confirmed_history_id(sess: &AcpSession) {
+fn persist_confirmed_history_id(sess: &AcpSession, subscribers: &EventHubHandle) {
     let Some(history_id) = ({
         let reduced = sess.reduced.lock();
         normalize_resume_id(reduced.history_session_id.clone())
     }) else {
         return;
     };
-    write_durable_history_id(sess, &history_id);
+    write_durable_history_id(sess, &history_id, subscribers);
 }
 
-fn write_durable_history_id(sess: &AcpSession, history_id: &str) {
+/// 恢复身份是工作区目录的一部分：库里真改了，就把新目录推给 `workspace.changed` 的订阅方。
+fn write_durable_history_id(sess: &AcpSession, history_id: &str, subscribers: &EventHubHandle) {
     if sess.durable_history_session_id.lock().as_deref() == Some(history_id) {
         return;
     }
@@ -590,31 +591,39 @@ fn write_durable_history_id(sess: &AcpSession, history_id: &str) {
         return;
     };
     match store.remember_history_session_id(&session_id, history_id) {
-        Ok(true) => {
+        Ok(Some(commit)) => {
             *sess.durable_history_session_id.lock() = Some(history_id.to_string());
+            if commit.changed {
+                crate::workspace_directory::publish_current(subscribers);
+            }
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             eprintln!("[acp] 写入对话恢复身份失败 id={session_id}: {error}");
         }
     }
 }
 
-fn clear_durable_history_id(sess: &AcpSession) {
+fn clear_durable_history_id(sess: &AcpSession, subscribers: &EventHubHandle) {
     *sess.durable_history_session_id.lock() = None;
     let session_id = sess.state.lock().id.clone();
     let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
         return;
     };
-    if let Err(error) = store.clear_history_session_id(&session_id) {
-        eprintln!("[acp] 放弃对话恢复身份失败 id={session_id}: {error}");
+    match store.clear_history_session_id(&session_id) {
+        Ok(commit) => {
+            if commit.changed {
+                crate::workspace_directory::publish_current(subscribers);
+            }
+        }
+        Err(error) => eprintln!("[acp] 放弃对话恢复身份失败 id={session_id}: {error}"),
     }
 }
 
 /// 把归约状态里的相位/待办问句同步进四色 `SessionState` 并广播。跟旧版 GUI
 /// `AcpView::sync_daemon_state` 是同一件事，只是现在算在 smeltd 侧。
 pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubHandle) {
-    persist_confirmed_history_id(sess);
+    persist_confirmed_history_id(sess, subscribers);
     let (phase, pending_question, title) = {
         let reduced = sess.reduced.lock();
         (
@@ -1783,7 +1792,7 @@ pub(crate) fn start_acp_event_drain(
                     &subscribers,
                     true,
                 );
-                clear_durable_history_id(sess);
+                clear_durable_history_id(sess, &subscribers);
                 return;
             }
             let already_ended = matches!(

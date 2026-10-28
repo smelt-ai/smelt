@@ -94,7 +94,19 @@ pub(crate) fn close_project(
     Ok(publish(&change, event_hub))
 }
 
-/// 整份保存（`workspace.save`）提交之后，同样把新目录推出去。
+/// 远程改名之后，把以 `sid` 为 ACP 会话的那段对话也改名，改了就推。
+pub(crate) fn rename_acp_conversation(
+    store: &Store,
+    sid: &str,
+    title: &str,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceRevision, ControlError> {
+    let change =
+        workspace_catalog::rename_acp_conversation_on(store, sid, title).map_err(control_error)?;
+    Ok(publish(&change, event_hub))
+}
+
+/// 存储层直接改了目录（守护确认或放弃一段对话的恢复身份）之后，把当前目录推出去。
 pub(crate) fn publish_current(event_hub: &EventHubHandle) {
     match workspace_catalog::directory() {
         Ok(directory) => {

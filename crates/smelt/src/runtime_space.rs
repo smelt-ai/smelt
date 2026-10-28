@@ -8,14 +8,15 @@ use std::collections::HashSet;
 
 use crate::SessionState;
 use crate::runtimes::{Runtime, RuntimeKey};
-use crate::workspace_persist::{WorkspaceCatalogSync, WorkspaceSnapshotWriteQueue};
+use crate::workspace_directory::DirectorySync;
+use crate::workspace_persist::WorkspaceSnapshotWriteQueue;
 
 pub(crate) struct RuntimeSpace {
     pub(crate) runtime: Runtime,
-    /// 已打开的项目根目录（有序）。「打开项目」只往这里加一条、不建会话；项目下最后一个
-    /// 会话关掉了，这一条也还在（侧栏显示 0 个会话的空项目）。要它消失只能显式「关闭
-    /// 项目」。会话按 cwd 挂到项目下；挂不上的仍按自己的 cwd 自建隐式分组，不污染这份
-    /// 列表。
+    /// 已打开的项目根目录，按这台桌面的侧栏顺序排。内容就是这个运行时最近一份目录里的
+    /// 项目，只在收到目录时整份换掉；打开、关闭项目发命令给运行时，不在这里先改。这里
+    /// 只改顺序（拖拽排序）。项目下最后一个会话关掉了，这一条也还在（侧栏显示 0 个会话
+    /// 的空项目）。会话按 cwd 挂到项目下；挂不上的仍按自己的 cwd 自建隐式分组。
     pub(crate) projects: Vec<String>,
     /// 侧栏里被折叠起来的项目（存 root 路径）。
     pub(crate) collapsed_projects: HashSet<String>,
@@ -24,20 +25,17 @@ pub(crate) struct RuntimeSpace {
     /// 侧栏里这台机器的分段，用户这次运行里亲手折起（`Some(true)`）或展开过。不落盘：
     /// 下次启动回到默认，见 [`crate::Workspace::runtime_folded`]。
     pub(crate) folded: Option<bool>,
-    /// 这个运行时那份工作区目录（项目、会话组）是否已经读到。读到之前不保存：内存里
-    /// 的空列表不代表用户关光了会话。
-    pub(crate) catalog_loaded: bool,
-    /// 和运行时目录的版本同步，保存在后台线程推进。
-    pub(crate) catalog: WorkspaceCatalogSync,
-    /// 这份目录的唯一写入队列。退出也必须排到这里，不能旁路另起写者。
+    /// 和这个运行时那份工作区目录（项目、对话）的同步账本。目录收到之前不发命令：内存里
+    /// 的空列表不代表运行时上没有对话。
+    pub(crate) directory: DirectorySync,
+    /// 这个运行时的唯一写入队列。退出也必须排到这里，不能旁路另起写者。
     pub(crate) write_queue: WorkspaceSnapshotWriteQueue,
-    /// 冷启动时恢复失败的会话（运行时未就绪等）。仍写回目录，避免「恢复失败 → 写空
-    /// 目录 → 会话永久蒸发」；当前进程会自动重试，用尽次数后下次冷启动再试。
+    /// 还没恢复上来的会话（运行时未就绪等）。它们仍在运行时的目录里；当前进程会自动
+    /// 重试，用尽次数后下次冷启动再试。
     pub(crate) restore_pending: Vec<(usize, SessionState)>,
     /// 已经完成的失败恢复轮次。用来限制握手超时后的自动重试。
     pub(crate) restore_retry_attempt: u32,
-    /// 冷启动的会话恢复是否已经跑完（没有待恢复会话时目录一到即为 true）。保存时的抹盘
-    /// 安全阀靠它区分「还没恢复上来的空」和「用户真把会话全关了」。
+    /// 冷启动的会话恢复是否已经跑完（没有待恢复会话时目录一到即为 true）。
     pub(crate) sessions_restored: bool,
 }
 
@@ -49,8 +47,7 @@ impl RuntimeSpace {
             collapsed_projects: HashSet::new(),
             pinned_projects: HashSet::new(),
             folded: None,
-            catalog_loaded: false,
-            catalog: WorkspaceCatalogSync::default(),
+            directory: DirectorySync::default(),
             write_queue: WorkspaceSnapshotWriteQueue::default(),
             restore_pending: Vec::new(),
             restore_retry_attempt: 0,
@@ -191,13 +188,9 @@ impl crate::Workspace {
 }
 
 impl crate::Workspace {
-    /// 远程运行时的空间跟着 [`crate::runtimes::RuntimeHub`] 走：新添加的建空间、读目录；
-    /// 移除的连同它的会话一起从侧栏摘掉（运行时上的进程不动，那台机器不归这台桌面管）。
-    pub(crate) fn sync_remote_spaces(
-        &mut self,
-        window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    /// 远程运行时的空间跟着 [`crate::runtimes::RuntimeHub`] 走：新添加的建空间，目录随订阅
+    /// 首帧到；移除的连同它的会话一起从侧栏摘掉（运行时上的进程不动，那台机器不归这台桌面管）。
+    pub(crate) fn sync_remote_spaces(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() else {
             return;
         };
@@ -235,8 +228,8 @@ impl crate::Workspace {
                 continue;
             }
             changed = true;
+            // 目录随订阅首帧到，到了再恢复会话（见 `apply_workspace_directory`）。
             self.spaces.push(RuntimeSpace::new(runtime.clone()));
-            self.start_space_catalog_load(runtime, window, cx);
             self.ensure_pi_library_runtime(cx);
         }
         if changed {
@@ -251,6 +244,16 @@ impl crate::Workspace {
     /// 恢复回来的会话已经不要了：运行时整个被移除了。
     pub(crate) fn restore_cancelled(&self, key: &RuntimeKey) -> bool {
         self.space(key).is_none()
+    }
+
+    /// 这一条还在等恢复。恢复期间别处关掉了它，推送会把它从待恢复里拿掉。
+    pub(crate) fn restore_still_pending(&self, key: &RuntimeKey, original_index: usize) -> bool {
+        self.space(key).is_some_and(|space| {
+            space
+                .restore_pending
+                .iter()
+                .any(|(index, _)| *index == original_index)
+        })
     }
 
     pub(crate) fn forget_pending_restore(&mut self, key: &RuntimeKey, original_index: usize) {

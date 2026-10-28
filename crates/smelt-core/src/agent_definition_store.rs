@@ -120,17 +120,32 @@ pub fn load_session_agent_definition_ids() -> BTreeMap<String, String> {
     store.session_agent_definition_ids().unwrap_or_default()
 }
 
-/// 测试用：工作区文档经运行时库落盘，再按库里的绑定读回来。
+/// 测试用：几段 ACP 对话（会话 id、cwd、智能体定义 id）逐条落进运行时库，再按库里的
+/// 绑定读回来。
 #[cfg(test)]
-fn session_agent_definition_ids(workspace: &serde_json::Value) -> BTreeMap<String, String> {
+fn session_agent_definition_ids(
+    conversations: &[(&str, &str, Option<&str>)],
+) -> BTreeMap<String, String> {
     let dir = tempfile::tempdir().expect("临时目录");
     let store =
         smelt_store::Store::open_or_create(dir.path().join(smelt_store::DATABASE_FILE_NAME))
             .expect("测试库");
-    let raw = serde_json::to_vec(workspace).expect("测试夹具应能序列化");
-    let snapshot =
-        smelt_store::Store::workspace_snapshot_from_json(&raw).expect("测试夹具应能转成工作区快照");
-    store.put_workspace_snapshot(&snapshot).expect("写入工作区");
+    for (index, (sid, cwd, agent_definition_id)) in conversations.iter().enumerate() {
+        store
+            .create_workspace_conversation(&smelt_store::WorkspaceSessionRecord {
+                id: format!("conv-{index}"),
+                custom_title: None,
+                last_updated_at: 0,
+                terminals: Vec::new(),
+                acp: Some(smelt_store::WorkspaceAcpRecord {
+                    cwd: Some(cwd.to_string()),
+                    sid: Some(sid.to_string()),
+                    agent_definition_id: agent_definition_id.map(str::to_string),
+                    ..smelt_store::WorkspaceAcpRecord::default()
+                }),
+            })
+            .expect("写入对话");
+    }
     store.session_agent_definition_ids().expect("读回绑定")
 }
 
@@ -991,20 +1006,11 @@ mod tests {
     /// 照样认得出主人」——正是 cwd 反推做不到的那一半。
     #[test]
     fn a_conversation_started_inside_a_plain_repo_still_resolves_its_agent() {
-        let workspace = serde_json::json!({
-            "sessions": [
-                {"id": "conv-1",
-                 "acp": {"sid": "acp-1", "cwd": "/Users/me/Desktop/novel",
-                         "agent_definition_id": "writer"}},
-                {"id": "conv-2",
-                 "acp": {"sid": "acp-2", "cwd": "/Users/me/.smelt/agents/quant",
-                         "agent_definition_id": "quant"}},
-                {"id": "conv-3", "acp": {"sid": "acp-3", "cwd": "/repo"}},
-                {"id": "conv-4", "terminals": [{"cwd": "/repo"}]}
-            ]
-        });
-
-        let map = session_agent_definition_ids(&workspace);
+        let map = session_agent_definition_ids(&[
+            ("acp-1", "/Users/me/Desktop/novel", Some("writer")),
+            ("acp-2", "/Users/me/.smelt/agents/quant", Some("quant")),
+            ("acp-3", "/repo", None),
+        ]);
 
         assert_eq!(map.get("acp-1").map(String::as_str), Some("writer"));
         assert_eq!(map.get("acp-2").map(String::as_str), Some("quant"));
@@ -1017,19 +1023,9 @@ mod tests {
     /// 最后显示成通用兜底标签，比干脆不标还费解。
     #[test]
     fn blank_bindings_are_not_treated_as_an_agent() {
-        let workspace = serde_json::json!({
-            "sessions": [
-                {"id": "conv-1", "acp": {"sid": "acp-1", "agent_definition_id": "  "}},
-                {"id": "conv-2", "acp": {"sid": "   ", "agent_definition_id": "writer"}}
-            ]
-        });
-
-        let map = session_agent_definition_ids(&workspace);
+        let map = session_agent_definition_ids(&[("acp-1", "/repo", Some("  "))]);
         assert_eq!(map.get("acp-1"), None);
-        assert!(
-            !map.contains_key("   "),
-            "空白会话 id 不能作为键：库里会换成生成的 id"
-        );
+        assert!(map.is_empty());
     }
 
     /// 历史页、工具面板只拿得到一个 cwd，靠反解认出「现在在某个智能体的上下文

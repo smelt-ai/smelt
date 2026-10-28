@@ -80,7 +80,7 @@ fn directory_commands_publish_the_changed_directory() {
         workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
     let published = published_directory(&event_hub).expect("新建之后推过目录");
     assert_eq!(published.revision, created.revision);
-    assert_eq!(published.conversations, [conversation.clone()]);
+    assert_eq!(published.conversations, std::slice::from_ref(&conversation));
 
     let deleted = delete(&temp.store, &conversation.id, &event_hub).unwrap();
     let published = published_directory(&event_hub).expect("关掉之后推过目录");

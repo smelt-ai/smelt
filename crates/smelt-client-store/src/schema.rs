@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 5;
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -131,6 +131,18 @@ CREATE TABLE runtime_connection (
   smelt_home TEXT,
   os TEXT
 ) WITHOUT ROWID;
+CREATE TABLE sidebar_project_order (
+  runtime_id TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, root)
+) WITHOUT ROWID;
+CREATE TABLE sidebar_conversation_order (
+  runtime_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, conversation_id)
+) WITHOUT ROWID;
 ";
 
 /// v1 → v2：折叠、置顶的项目加上所在运行时（v1 时只有本机运行时，空串）；会话的界面
@@ -228,6 +240,23 @@ const MIGRATE_V4_TO_V5: &str = "
 ALTER TABLE runtime_connection ADD COLUMN os TEXT;
 ";
 
+/// v5 → v6：侧栏里项目、对话的顺序从运行时搬回客户端，每台设备各记各的。旧顺序在运行时
+/// 的库里，不在这个库里，这一步只新建两张空表。
+const MIGRATE_V5_TO_V6: &str = "
+CREATE TABLE sidebar_project_order (
+  runtime_id TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, root)
+) WITHOUT ROWID;
+CREATE TABLE sidebar_conversation_order (
+  runtime_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, conversation_id)
+) WITHOUT ROWID;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -257,19 +286,24 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         }
         1 => transaction
             .execute_batch(&format!(
-                "{MIGRATE_V1_TO_V2}\n{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}"
+                "{MIGRATE_V1_TO_V2}\n{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"
             ))
             .map_err(|error| error.to_string())?,
         2 => transaction
             .execute_batch(&format!(
-                "{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}"
+                "{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"
             ))
             .map_err(|error| error.to_string())?,
         3 => transaction
-            .execute_batch(&format!("{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}"))
+            .execute_batch(&format!(
+                "{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"
+            ))
             .map_err(|error| error.to_string())?,
         4 => transaction
-            .execute_batch(MIGRATE_V4_TO_V5)
+            .execute_batch(&format!("{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"))
+            .map_err(|error| error.to_string())?,
+        5 => transaction
+            .execute_batch(MIGRATE_V5_TO_V6)
             .map_err(|error| error.to_string())?,
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }

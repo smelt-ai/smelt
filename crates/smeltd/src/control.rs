@@ -725,20 +725,6 @@ fn dispatch_control(
                 ),
             }
         }
-        ControlMethod::WorkspaceLoad => {
-            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
-                Ok(params) => params,
-                Err(response) => return response,
-            };
-            match smelt_core::workspace_catalog::load() {
-                Ok(result) => success_value(control_version, &request_id, result),
-                Err(error) => error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
-                ),
-            }
-        }
         ControlMethod::WorkspaceConversationCreate => {
             let params: smelt_core::workspace_directory::WorkspaceConversation =
                 match params_or_error(control_version, &request_id, params) {
@@ -816,41 +802,6 @@ fn dispatch_control(
                     super::workspace_directory::close_project(&store, &params.root, event_hub)
                 }),
             )
-        }
-        ControlMethod::WorkspaceSave => {
-            let params: smelt_runtime_client::protocol::workspace::WorkspaceSaveParams =
-                match params_or_error(control_version, &request_id, params) {
-                    Ok(params) => params,
-                    Err(response) => return response,
-                };
-            match smelt_core::workspace_catalog::save(&params) {
-                Ok(revision) => {
-                    super::workspace_directory::publish_current(event_hub);
-                    success_value(
-                        control_version,
-                        &request_id,
-                        smelt_runtime_client::protocol::workspace::WorkspaceSaveResult { revision },
-                    )
-                }
-                Err(error) => {
-                    let code = match error {
-                        smelt_core::workspace_catalog::CatalogError::Conflict { .. } => {
-                            ControlErrorCode::Conflict
-                        }
-                        smelt_core::workspace_catalog::CatalogError::Invalid(_) => {
-                            ControlErrorCode::InvalidParams
-                        }
-                        smelt_core::workspace_catalog::CatalogError::Store(_) => {
-                            ControlErrorCode::OperationFailed
-                        }
-                    };
-                    error_value(
-                        control_version,
-                        request_id,
-                        ControlError::new(code, error.to_string()),
-                    )
-                }
-            }
         }
         ControlMethod::LaunchGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {

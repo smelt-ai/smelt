@@ -1,34 +1,12 @@
 use std::collections::HashSet;
 
-use super::{SessionState, WsState, indices_share_group, reorder_vec, session_state_cwd};
+use super::{indices_share_group, reorder_vec};
 use crate::sidebar_order::{
     apply_pinned_project_drop, is_pinned_project, move_index_near, move_project_root_near,
     neighbor_in_group, pinned_projects_first, previous_viewed,
     project_header_click_toggles_collapse, project_header_is_dimmed, same_project_root,
     sidebar_empty_project_visible, toggle_pinned_project,
 };
-
-fn leaf(cwd: &str) -> crate::PaneState {
-    crate::PaneState::Leaf {
-        cwd: Some(cwd.into()),
-        id: None,
-        custom_title: None,
-        launch_label: None,
-        launch_cmd: None,
-    }
-}
-
-fn session(cwd: &str) -> SessionState {
-    SessionState {
-        id: "conv-test".into(),
-        layout: leaf(cwd),
-        active: 0,
-        last_updated_at: 0,
-        custom_title: None,
-        acp: None,
-        route: None,
-    }
-}
 
 #[test]
 fn move_index_near_rejects_noop_and_oob() {
@@ -105,32 +83,6 @@ fn project_drag_promotes_implicit_root_into_persisted_list() {
     assert_eq!(
         projects,
         vec!["/implicit/tmp".to_string(), "/a/smelt".into()]
-    );
-}
-
-#[test]
-fn workspace_state_roundtrip_keeps_manual_project_and_session_order() {
-    let state = WsState {
-        projects: vec!["/b".into(), "/a".into()],
-        sessions: vec![session("/a/one"), session("/b"), session("/a/two")],
-        ..Default::default()
-    };
-
-    let json = serde_json::to_string(&state).unwrap();
-    let restored: WsState = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(restored.projects, vec!["/b", "/a"]);
-    assert_eq!(
-        restored
-            .sessions
-            .iter()
-            .map(session_state_cwd)
-            .collect::<Vec<_>>(),
-        vec![
-            Some("/a/one".into()),
-            Some("/b".into()),
-            Some("/a/two".into())
-        ]
     );
 }
 
