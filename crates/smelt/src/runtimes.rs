@@ -1746,6 +1746,20 @@ mod tests {
         assert!(fix.runtime_outdated());
     }
 
+    /// 只缺最低协议版本之后才加的方法：照常在线，那一项功能自己降级。
+    #[test]
+    fn runtime_missing_only_optional_methods_is_online() {
+        use smelt_runtime_client::protocol::control::ControlMethod;
+        let optional = ControlMethod::OPTIONAL
+            .first()
+            .expect("至少有一个可选方法")
+            .as_str();
+        assert!(matches!(
+            status_of(&describe_without(optional)),
+            RuntimeStatus::Online { .. }
+        ));
+    }
+
     /// 运行时的控制协议比桌面新，拒绝桌面的版本：按它的版本再问一次，读出它是什么版本，
     /// 提示升级桌面。
     #[test]

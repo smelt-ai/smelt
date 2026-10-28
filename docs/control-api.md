@@ -6,7 +6,7 @@
 没有 `smelt-core/src/control_api.rs` 这个文件）。服务端分发在 `smeltd/src/control.rs`。
 
 Control API 是 smeltd 的**版本化短请求协议**，不是 HTTP 服务，也不取代 ACP。
-当前 `CONTROL_API_VERSION = 4`，`CONTROL_API_MIN_SUPPORTED_VERSION = 4`
+当前 `CONTROL_API_VERSION = 3`，`CONTROL_API_MIN_SUPPORTED_VERSION = 3`
 （`crates/smelt-runtime-client/src/protocol/control.rs`）。
 它复用 `~/.smelt/smeltd.sock` 的首帧分流，供桌面、Mobile、MCP、CLI 和未来的进程外
 插件共享同一份控制契约。
@@ -35,7 +35,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 ```json
 {
   "op": "control",
-  "control_version": 4,
+  "control_version": 3,
   "request_id": "request-abc",
   "method": "system.describe",
   "params": {}
@@ -48,14 +48,14 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 
 ```json
 {
-  "control_version": 4,
+  "control_version": 3,
   "request_id": "request-abc",
   "status": "ok",
   "result": {
     "control": {
-      "current_version": 4,
-      "min_supported_version": 4,
-      "max_supported_version": 4,
+      "current_version": 3,
+      "min_supported_version": 3,
+      "max_supported_version": 3,
       "methods": ["system.describe", "session.list"]
     },
     "daemon": {
@@ -89,7 +89,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 
 ```json
 {
-  "control_version": 4,
+  "control_version": 3,
   "request_id": "request-abc",
   "status": "error",
   "error": {
@@ -178,7 +178,7 @@ CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令
    旧桌面连新运行时的 Git 面板需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
    的文档形状，同时删掉跨 Agent 消息的 `agent.list` / `agent.send`，两边最低版本都抬到 2。
    v2 → v3：删掉 DeepSeek Harness 之后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置去掉 `native_dsh_profiles`。旧运行时缺这个字段会拒收修改，所以最低版本抬到 3。同一版 `system.describe` 的 daemon 信息增加 `smelt_home`。
-   v3 → v4：删掉整份读写的 `workspace.load` / `workspace.save`。工作区目录只经 `workspace.conversation.*` / `workspace.project.*` 单条改动，由运行时经 `workspace.changed` 推送整份目录；旧桌面还在整份保存，连上新运行时会拿各自手里的旧目录互相覆盖，所以最低版本抬到 4。之前记作可选的方法（`agent.memory.watch`、`remote.status.wait`、`resource.usage` 和这几条单条改动）随之成为必需方法。
+   删方法不升版本：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，这几条是必需方法，旧运行时没有就判为需要升级运行时。
 2. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
    条件、冲突、忙碌和临时不可用分别返回 `invalid_params`、`permission_denied`、
    `not_found`、`failed_precondition`、`conflict`、`busy`、
