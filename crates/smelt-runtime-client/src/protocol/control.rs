@@ -644,7 +644,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 118);
+        assert_eq!(names.len(), 123);
     }
 
     #[test]
