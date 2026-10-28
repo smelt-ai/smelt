@@ -130,6 +130,7 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
         output_gate: Mutex::new(()),
         color_replies,
         term: Mutex::new(new_daemon_term(rows, cols, listener)),
+        graphics: Mutex::default(),
         state,
     });
     (sess, read_end)

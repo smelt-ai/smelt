@@ -77,6 +77,7 @@ fn color_replies_for(script: &[u8]) -> String {
         output_gate: Mutex::new(()),
         color_replies,
         term: Mutex::new(term),
+        graphics: Mutex::default(),
         state,
     };
 

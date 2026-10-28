@@ -15,6 +15,8 @@
 //! 协议（Unix socket ~/.smelt/smeltd.sock）——连接后客户端先发一行 JSON：
 //!   {"op":"open","id":"..","cwd":"..","cols":120,"rows":30}  → 进入流模式（唯一 client，
 //!                                                              同 id 第二次 open 顶掉前一个）
+//!                                                              带 "graphics":"kitty" 表示能显示
+//!                                                              kitty 图形，见 terminal_graphics
 //!   {"op":"watch","id":".."}                                 → 进入**只读**流模式（旁观，见下）
 //!   {"op":"acp_action","id":"..","action":{...}}            → 对现有 ACP 会话执行一次动作，
 //!                                                              不占用或替换 control client
@@ -134,6 +136,7 @@ mod session_control;
 mod session_directory;
 mod session_state;
 mod terminal_names;
+mod terminal_graphics;
 mod terminal_output;
 mod terminal_progress;
 mod terminal_registry;
@@ -165,13 +168,15 @@ use smelt_core::automation_store::{
 use smelt_core::osc::{
     OscEvent, OscScan, TerminalGeometryOsc, program_status_reply, terminal_geometry_osc,
 };
+use smelt_core::kitty_graphics::GraphicsSplitter;
 use smelt_core::session_control::find_agent_option_for;
-use terminal_output::{KeyframeNeed, OutputAttachment, enqueue_session_streams};
+use terminal_graphics::{FedOutput, TerminalGraphics, feed_output};
+use terminal_output::{KeyframeNeed, OutputAttachment, SessionOutput, enqueue_session_streams};
 use terminal_progress::ProgressTracker;
 use terminal_registry::{TerminalRegistry, TerminalSlot};
 use terminal_snapshot::{
     SNAPSHOT_MAX_LINES, available_snapshot_lines, snapshot_ansi, snapshot_ansi_for_watch,
-    snapshot_ansi_screen,
+    snapshot_ansi_plain, snapshot_ansi_screen,
 };
 
 use client_conn::{ClientConn, ClientSocket, ConnId};
@@ -1777,6 +1782,23 @@ fn dispatch_session_outputs_under_gate(
     send_clients: bool,
     send_watchers: bool,
 ) {
+    dispatch_session_output_under_gate(
+        sess,
+        SessionOutput::same(bytes),
+        id,
+        send_clients,
+        send_watchers,
+    );
+}
+
+/// 同上，输出分「能显示图片」和「不显示图片」两个版本，各连接按自己的能力取一份。
+fn dispatch_session_output_under_gate(
+    sess: &Session,
+    output: SessionOutput<'_>,
+    id: &str,
+    send_clients: bool,
+    send_watchers: bool,
+) {
     let (clients, watchers) = {
         let mut out = sess.out.lock().unwrap();
         (
@@ -1785,12 +1807,12 @@ fn dispatch_session_outputs_under_gate(
         )
     };
     let live_clients = if send_clients {
-        enqueue_session_streams(clients, bytes, id, "attachment")
+        enqueue_session_streams(clients, output, id, "attachment")
     } else {
         clients
     };
     let live_watchers = if send_watchers {
-        enqueue_session_streams(watchers, bytes, id, "watcher")
+        enqueue_session_streams(watchers, output, id, "watcher")
     } else {
         watchers
     };
@@ -1804,8 +1826,11 @@ fn dispatch_session_outputs_under_gate(
 
 /// 交互连接的关键帧：几何标记 + 终端重置（RIS）+ 画面快照。客户端不管原来处在
 /// 什么状态，解析完都和刚附着时一样，所以它可以随时插进实时流，取代跳过的输出。
-/// 调用方持有 output_gate；这里依次拿 ctl、term，和 attach 的加锁顺序一致。
-fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
+/// 调用方持有 output_gate；这里依次拿 ctl、term、graphics，和 attach、PTY 泵的加锁顺序一致。
+///
+/// `graphics`：客户端能显示图片。能的话在快照前补上画面里用得到的图片和放置；不能的话快照
+/// 去掉锚点标记、占位符画成空格。
+fn terminal_keyframe(sess: &Session, need: KeyframeNeed, graphics: bool) -> Vec<u8> {
     let ctl = sess.ctl.lock().unwrap();
     let term = sess.term.lock().unwrap();
     let mut keyframe = terminal_geometry_osc(
@@ -1819,6 +1844,15 @@ fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
         },
     );
     keyframe.extend_from_slice(b"\x1bc");
+    let lines = match need {
+        KeyframeNeed::Screen => term.screen_lines(),
+        KeyframeNeed::Full => SNAPSHOT_MAX_LINES,
+    };
+    if !graphics {
+        keyframe.extend(snapshot_ansi_plain(&term, lines));
+        return keyframe;
+    }
+    keyframe.extend(sess.graphics.lock().unwrap().keyframe_relays(&term, lines));
     keyframe.extend(match need {
         KeyframeNeed::Screen => snapshot_ansi_screen(&term),
         KeyframeNeed::Full => snapshot_ansi(&term, None),
@@ -1829,18 +1863,18 @@ fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
 /// 客户端确认处理到第 `consumed` 个字节。合并中的连接追上来了，就补一帧关键帧。
 fn acknowledge_terminal_output(sess: &Session, fd: ConnId, consumed: u64) {
     let _output_gate = sess.output_gate.lock().unwrap();
-    let need = {
+    let (need, graphics) = {
         let mut out = sess.out.lock().unwrap();
         let Some(client) = out.clients.iter_mut().find(|client| client.fd == fd) else {
             return;
         };
-        client.acknowledge(consumed)
+        (client.acknowledge(consumed), client.graphics())
     };
     let Some(need) = need else {
         return;
     };
     // 生成快照要拿 ctl/term，不能在 `out` 锁里拿；output_gate 保证这期间没有新输出插进来。
-    let keyframe = terminal_keyframe(sess, need);
+    let keyframe = terminal_keyframe(sess, need, graphics);
     let mut out = sess.out.lock().unwrap();
     let Some(pos) = out.clients.iter().position(|client| client.fd == fd) else {
         return;
@@ -1904,6 +1938,8 @@ struct Session {
     /// 常驻网格：PTY 输出持续 advance；attach 时序列化成 ANSI 快照。挂的是
     /// `StateListener`（不再是 `VoidListener`）——守护自己也要看得见 Title/Bell。
     term: Mutex<Term<StateListener>>,
+    /// kitty 图形的图片和放置（见 terminal_graphics）。加锁顺序在 `term` 之后。
+    graphics: Mutex<TerminalGraphics>,
     /// 结构化状态（见 SessionState）。跟 `term` 的监听器共用同一个 Arc，
     /// `state` op（hook 直写）和 `subscribe` 的转发都读/改这一份。
     state: Arc<Mutex<SessionState>>,
@@ -3084,6 +3120,7 @@ fn spawn_session(
                 color_replies,
             ),
         )),
+        graphics: Mutex::default(),
         state,
     };
     Ok((sess, Box::new(pty_reader)))
@@ -3169,6 +3206,8 @@ fn start_pty_pump(
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut parser: Processor = Processor::new();
+        // kitty 图形命令可能被 PTY read 切断，切分状态跨 read 保持。
+        let mut graphics_splitter = GraphicsSplitter::default();
         // OSC 9/99/777 通知、9;4 进度和 7501 程序状态 alacritty 不解析，在这里逐字节扫
         // 一次。只扫实时输出：resume 喂进网格的旧 keyframe 不经过这里，历史通知不会被
         // 当成新的再发。
@@ -3213,20 +3252,51 @@ fn start_pty_pump(
                             }
                         }
                     }
+                    // 放置图片要按格子像素算占几格。先读出来再拿网格锁：resize 走 ctl -> term。
+                    let cell = {
+                        let ctl = sess.ctl.lock().unwrap();
+                        (u32::from(ctl.cell_w), u32::from(ctl.cell_h))
+                    };
                     // Claim the output sequence before advancing the grid. Resize uses
                     // the same gate, so its geometry marker cannot overtake bytes from
                     // this read. The gate is released before any potentially blocking
                     // PTY input or subscriber broadcast.
                     let output_gate = sess.output_gate.lock().unwrap();
-                    let mut term_guard = sess.term.lock().ok();
-                    if let Some(term) = term_guard.as_mut() {
-                        let _ = catch_unwind(AssertUnwindSafe(|| {
-                            parser.advance(&mut **term, chunk);
-                        }));
+                    let mut fed = FedOutput::default();
+                    match sess.term.lock() {
+                        Ok(mut term) => {
+                            let mut graphics = sess.graphics.lock().unwrap();
+                            let _ = catch_unwind(AssertUnwindSafe(|| {
+                                feed_output(
+                                    chunk,
+                                    &mut graphics_splitter,
+                                    &mut parser,
+                                    &mut *term,
+                                    &mut graphics,
+                                    cell,
+                                    &mut fed,
+                                );
+                            }));
+                        }
+                        Err(_) => {
+                            fed.graphics.extend_from_slice(chunk);
+                            fed.plain.extend_from_slice(chunk);
+                        }
                     }
-                    drop(term_guard);
-                    dispatch_session_outputs_under_gate(&sess, chunk, &id, true, true);
+                    dispatch_session_output_under_gate(
+                        &sess,
+                        SessionOutput {
+                            graphics: &fed.graphics,
+                            plain: &fed.plain,
+                        },
+                        &id,
+                        true,
+                        true,
+                    );
                     drop(output_gate);
+                    if !fed.reply.is_empty() {
+                        let _ = write_session_input(&sess, &fed.reply);
+                    }
                     // 颜色查询应答可能等待 PTY 输入队列变得可写；必须在释放网格锁后
                     // 再做，避免把 resize 的 ctl -> term 路径拖住。
                     flush_terminal_color_replies(&sess);

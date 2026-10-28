@@ -39,6 +39,7 @@ pub use smelt_model::font_config;
 pub use smelt_sys::fd_limit;
 pub mod fs;
 pub mod history_service;
+pub use smelt_model::kitty_graphics;
 pub mod launch_settings;
 pub mod login_env;
 pub mod managed_runtime;

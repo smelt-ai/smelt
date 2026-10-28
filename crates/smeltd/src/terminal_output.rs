@@ -205,6 +205,23 @@ impl FlowControl {
     }
 }
 
+/// 一段终端输出的两个版本：能显示图片的客户端收 `graphics`（带 kitty 图形的转发命令和锚点），
+/// 其余收 `plain`。这段输出里没有图形命令时两者相同。
+#[derive(Clone, Copy)]
+pub(crate) struct SessionOutput<'a> {
+    pub(crate) graphics: &'a [u8],
+    pub(crate) plain: &'a [u8],
+}
+
+impl<'a> SessionOutput<'a> {
+    pub(crate) fn same(bytes: &'a [u8]) -> Self {
+        Self {
+            graphics: bytes,
+            plain: bytes,
+        }
+    }
+}
+
 /// 一个客户端输出端。`shutdown` 是写线程 socket 的 duplicate，连接移除时用它同时
 /// 唤醒可能阻塞的写线程与 handle_open/handle_watch 的读循环。
 pub(crate) struct OutputAttachment {
@@ -213,6 +230,8 @@ pub(crate) struct OutputAttachment {
     shutdown: ClientConn,
     /// `None`：不回确认的旁观连接，仍按邮箱上限隔离。
     flow: Option<FlowControl>,
+    /// 客户端能显示 kitty 图形（桌面端 `open` 时声明）。
+    graphics: bool,
 }
 
 impl OutputAttachment {
@@ -223,12 +242,14 @@ impl OutputAttachment {
         header: Vec<u8>,
         keyframe: Vec<u8>,
         id: &str,
+        graphics: bool,
     ) -> std::io::Result<Self> {
         let flow = FlowControl::with_keyframe(keyframe.len() as u64);
         let mut initial = header;
         initial.extend_from_slice(&keyframe);
         let mut attachment = Self::new(stream, initial, id, "attachment")?;
         attachment.flow = Some(flow);
+        attachment.graphics = graphics;
         Ok(attachment)
     }
 
@@ -251,6 +272,7 @@ impl OutputAttachment {
             mailbox: Arc::clone(&mailbox),
             shutdown,
             flow: None,
+            graphics: false,
         };
         // 初始 header + keyframe 先入队；调用方仍持有 output_gate，因此后续实时输出
         // 不可能插到它前面。
@@ -288,8 +310,21 @@ impl OutputAttachment {
         self.mailbox.enqueue(bytes)
     }
 
+    pub(crate) fn graphics(&self) -> bool {
+        self.graphics
+    }
+
     /// 实时输出。流控判定要合并的就不发；返回 false 只表示这个连接已经死了。
-    fn send_output(&mut self, bytes: &[u8]) -> bool {
+    fn send_output(&mut self, output: SessionOutput<'_>) -> bool {
+        let bytes = if self.graphics {
+            output.graphics
+        } else {
+            output.plain
+        };
+        // 整段都是只给另一类客户端的图形命令时，这边没有要发的，也不该占流控窗口。
+        if bytes.is_empty() {
+            return !self.mailbox.is_closed();
+        }
         if let Some(flow) = self.flow.as_mut()
             && !flow.admit(bytes.len() as u64)
         {
@@ -354,13 +389,13 @@ impl Drop for OutputAttachment {
 /// 其它窗口或会话管理。
 pub(crate) fn enqueue_session_streams(
     streams: Vec<OutputAttachment>,
-    bytes: &[u8],
+    output: SessionOutput<'_>,
     id: &str,
     kind: &str,
 ) -> Vec<OutputAttachment> {
     let mut live = Vec::with_capacity(streams.len());
     for mut stream in streams {
-        if stream.send_output(bytes) {
+        if stream.send_output(output) {
             live.push(stream);
         } else {
             crate::dlog(&format!(
@@ -452,8 +487,14 @@ mod tests {
             mailbox: Arc::new(OutputMailbox::new(1024)),
             shutdown: server.into_client_conn(),
             flow: None,
+            graphics: false,
         };
-        let live = enqueue_session_streams(vec![attachment], b"x", "test", "attachment");
+        let live = enqueue_session_streams(
+            vec![attachment],
+            SessionOutput::same(b"x"),
+            "test",
+            "attachment",
+        );
         assert_eq!(live.len(), 1, "背压 attachment 不应阻塞或影响 PTY 转发");
     }
 

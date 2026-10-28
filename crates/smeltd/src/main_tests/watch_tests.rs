@@ -47,6 +47,7 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
         output_gate: Mutex::new(()),
         color_replies,
         term: Mutex::new(new_daemon_term(rows, cols, listener)),
+        graphics: Mutex::default(),
         state,
     })
 }

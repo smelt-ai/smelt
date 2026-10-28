@@ -78,10 +78,10 @@ fn a_client_that_falls_behind_is_coalesced_instead_of_detached() {
     let (server, stream) = UnixStream::pair().unwrap();
     let keyframe = {
         let _output_gate = sess.output_gate.lock().unwrap();
-        terminal_keyframe(&sess, KeyframeNeed::Full)
+        terminal_keyframe(&sess, KeyframeNeed::Full, false)
     };
     let attachment =
-        OutputAttachment::interactive(server, b"{}\n".to_vec(), keyframe, "t").unwrap();
+        OutputAttachment::interactive(server, b"{}\n".to_vec(), keyframe, "t", false).unwrap();
     let fd = attachment.fd;
     sess.out.lock().unwrap().clients.push(attachment);
     let mut client = Client {

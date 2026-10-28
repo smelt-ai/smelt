@@ -440,6 +440,8 @@ pub(crate) fn handle_open<C: ClientSocket>(
     }
     let cols = v["cols"].as_u64().unwrap_or(80) as u16;
     let rows = v["rows"].as_u64().unwrap_or(24) as u16;
+    // 客户端能显示 kitty 图形（桌面端）。不声明的拿到的输出和快照里不带图片。
+    let graphics = v["graphics"].as_str() == Some("kitty");
     let request = TerminalOpenRequest {
         id: id.clone(),
         cols,
@@ -469,7 +471,7 @@ pub(crate) fn handle_open<C: ClientSocket>(
             (ctl.cols, ctl.rows)
         };
         // 和流控合并后补的是同一种关键帧；快照分流只看真实 ALT_SCREEN。
-        let snapshot = terminal_keyframe(sess, KeyframeNeed::Full);
+        let snapshot = terminal_keyframe(sess, KeyframeNeed::Full, graphics);
 
         // replay_len = 快照字节数：客户端仍用它划「历史/实时」边界，跳过快照里的
         // 历史 OSC 9（网格快照本身不含旧通知序列，但边界语义保留兼容）。
@@ -485,7 +487,8 @@ pub(crate) fn handle_open<C: ClientSocket>(
             })
         )
         .into_bytes();
-        let attachment = OutputAttachment::interactive(c, header, snapshot, &id).ok()?;
+        let attachment =
+            OutputAttachment::interactive(c, header, snapshot, &id, graphics).ok()?;
         let fd = attachment.fd;
         sess.out.lock().unwrap().clients.push(attachment);
         Some((Arc::clone(sess), fd))

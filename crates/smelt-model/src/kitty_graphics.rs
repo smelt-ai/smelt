@@ -115,13 +115,7 @@ impl GraphicsSplitter {
         }
     }
 
-    fn after_esc(
-        &mut self,
-        b: u8,
-        i: usize,
-        start: &mut usize,
-        emit: &mut impl FnMut(Piece<'_>),
-    ) {
+    fn after_esc(&mut self, b: u8, i: usize, start: &mut usize, emit: &mut impl FnMut(Piece<'_>)) {
         match b {
             b'_' => {
                 self.state = SplitState::ApcStart;
@@ -344,7 +338,10 @@ pub enum PixelFormat {
 pub enum PlacementKey {
     /// 标记号不会是 0：转发命令里 `A` 缺省就是 0，靠它区分两种键。
     Anchor(u64),
-    Virtual { image: u32, placement: u32 },
+    Virtual {
+        image: u32,
+        placement: u32,
+    },
 }
 
 /// 放置的版面：占几列几行（守护已经算好，不会是 0）、源图裁剪、格内偏移和层级。
@@ -382,24 +379,26 @@ pub enum Relay {
     DropAll,
 }
 
+/// [`Relay::Image`] 的编码，借用图片数据，不必为了发一次先拷一份。
+pub fn encode_image_relay(id: u32, format: PixelFormat, data: &[u8]) -> Vec<u8> {
+    let mut out = b"\x1b_Gk=1,".to_vec();
+    let _ = write!(out, "a=t,i={id},");
+    let _ = match format {
+        PixelFormat::Png => write!(out, "f=100"),
+        PixelFormat::Rgb { width, height } => write!(out, "f=24,s={width},v={height}"),
+        PixelFormat::Rgba { width, height } => write!(out, "f=32,s={width},v={height}"),
+    };
+    out.push(b';');
+    out.extend_from_slice(STANDARD.encode(data).as_bytes());
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
 impl Relay {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = b"\x1b_Gk=1,".to_vec();
         match self {
-            Self::Image { id, format, data } => {
-                let _ = write!(out, "a=t,i={id},");
-                let _ = match format {
-                    PixelFormat::Png => write!(out, "f=100"),
-                    PixelFormat::Rgb { width, height } => {
-                        write!(out, "f=24,s={width},v={height}")
-                    }
-                    PixelFormat::Rgba { width, height } => {
-                        write!(out, "f=32,s={width},v={height}")
-                    }
-                };
-                out.push(b';');
-                out.extend_from_slice(STANDARD.encode(data).as_bytes());
-            }
+            Self::Image { id, format, data } => return encode_image_relay(*id, *format, data),
             Self::Place { key, image, layout } => {
                 let _ = write!(
                     out,
@@ -434,7 +433,10 @@ impl Relay {
 
     /// 只认转发命令；程序的原始命令（没有 `k=1`）返回 `None`。
     pub fn parse(body: &[u8]) -> Option<Self> {
-        let Command { controls: c, payload } = Command::parse(body);
+        let Command {
+            controls: c,
+            payload,
+        } = Command::parse(body);
         if !c.relay {
             return None;
         }
@@ -613,7 +615,8 @@ pub fn resolve_placeholder(
     left: Option<&PlaceholderCell>,
 ) -> PlaceholderCell {
     let image_low = image_low & 0xff_ffff;
-    let left = left.filter(|left| left.image & 0xff_ffff == image_low && left.placement == placement);
+    let left =
+        left.filter(|left| left.image & 0xff_ffff == image_low && left.placement == placement);
     let left_high = left.map_or(0, |left| left.image >> 24);
     let (row, column, high) = match (marks.row, marks.column) {
         (Some(row), Some(column)) => (row, column, marks.image_id_high.map(u32::from)),
@@ -847,10 +850,7 @@ mod tests {
 
     #[test]
     fn esc_inside_a_command_aborts_it_like_vte() {
-        assert_eq!(
-            merged(split(&[b"\x1b_Gi=1;ab\x1b[2Jc"])),
-            ["B:\x1b[2Jc"]
-        );
+        assert_eq!(merged(split(&[b"\x1b_Gi=1;ab\x1b[2Jc"])), ["B:\x1b[2Jc"]);
         assert_eq!(merged(split(&[b"\x1b_Gi=1\x18x"])), ["B:\x18x"]);
     }
 
@@ -862,7 +862,8 @@ mod tests {
 
     #[test]
     fn parses_controls_and_payload() {
-        let command = Command::parse(b"a=T,f=100,t=f,i=7,p=3,c=10,r=4,C=1,U=1,z=-2,q=2,m=1;cGF0aA==");
+        let command =
+            Command::parse(b"a=T,f=100,t=f,i=7,p=3,c=10,r=4,C=1,U=1,z=-2,q=2,m=1;cGF0aA==");
         let c = &command.controls;
         assert_eq!(c.action, b'T');
         assert_eq!(c.format, 100);
@@ -1099,7 +1100,11 @@ mod tests {
 
     #[test]
     fn diacritic_table_is_sorted() {
-        assert!(ROWCOLUMN_DIACRITICS.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            ROWCOLUMN_DIACRITICS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
         assert_eq!(diacritic_index('\u{0305}'), Some(0));
         assert_eq!(diacritic_index('\u{1D244}'), Some(296));
         assert_eq!(diacritic_index('a'), None);
