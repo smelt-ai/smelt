@@ -343,7 +343,13 @@ class DemoBackend implements Backend {
                       r.record.runtimeId,
                       (s) =>
                           s.status == SessionStatus.idle &&
-                          s.attention == null &&
+                          !const {
+                            AttentionKind.approval,
+                            AttentionKind.input,
+                            AttentionKind.failure,
+                          }.contains(s.attention?.kind) &&
+                          !(s.phase == SessionPhase.succeeded &&
+                              s.attention != null) &&
                           s.updatedAt > 0,
                     )..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)))
                     .take(5)

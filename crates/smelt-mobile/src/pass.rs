@@ -122,7 +122,7 @@ pub(crate) fn fingerprint(session: &SessionSummary) -> String {
 }
 
 /// 某一组：按最后活动时间从新到旧，同时间的保持列表次序（运行时按桌面菜单排好的，比
-/// 随机顺序有意义；从没动过的会话时间都是 0，全靠它）。
+/// 随机顺序有意义）。
 fn section(
     sessions: &[SessionSummary],
     predicate: impl Fn(&SessionSummary) -> bool,
