@@ -57,6 +57,7 @@
 | IME | preedit、行内拼音、`bounds_for_range` | `EntityInputHandler` |
 | 程序改色（OSC 4 / 10 / 11 / 12 及 104 / 110–112 复位） | 渲染和守护的颜色查询应答都优先用 `Term` 记下的覆盖色；关键帧先复位再写回覆盖色（alacritty 的 RIS 不复位颜色），重连、热交接不丢 | `terminal.rs` `resolve`，`terminal_snapshot.rs` `append_color_overrides`，`smeltd` `write_terminal_color_replies` |
 | OSC 9;4 进度 | smeltd 扫，变了就推 `terminal.progress`，进度条还在时每 5 秒重发、15 秒没新报告就清（同 Ghostty）；侧栏会话行底部 2px 细条，不确定进度画淡色满条、不做动画 | `smeltd/src/terminal_progress.rs`，`session_list/row.rs` `session_progress_bar` |
+| kitty 图形（桌面） | smeltd 是唯一解析程序图形命令的地方，照 Ghostty 语义处理（传输 d/f/t、PNG/RGB/RGBA、zlib、分块；放置后移光标；删除；应答），转成带 `k=1` 的转发命令发给 `open` 时声明 `graphics=kitty` 的客户端。直接放置只在左上角那格挂零宽锚点标记、图片作浮层（Pi 在 Ghostty 下逐行 `CUP+EL` 重绘，每格写占位符会被擦掉）；Unicode 占位符按格画图块。手机旁观和没声明的客户端收去掉锚点的版本，网格布局一致。关键帧补发画面里用得到的图 | `smelt-model/src/kitty_graphics.rs`，`smeltd/src/terminal_graphics.rs`，`smelt/src/terminal_images.rs`，`terminal.rs` `image_paints`，`terminal_view.rs` `paint_images` |
 
 **渲染侧相对 Zed 的主清单可以收工。** 下文只列仍开放的差距。
 
@@ -103,6 +104,7 @@
 | **Vi mode** | 驾驶舱低价值 | 不做 |
 | **OSC 52 非 macOS** | 仅 `pbcopy` | 平台 |
 | **搜索正则模式** | 目前固定字面量 | 增强 |
+| **kitty 图形未覆盖的部分** | 共享内存传输、动画、相对放置、按位置/层级删除不支持；负 z 也画在文字上面；smeltd 重启后图片数据丢失（格子里的锚点还在，画成空白）；手机端不画图 | 按需 |
 
 ---
 
