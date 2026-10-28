@@ -2465,6 +2465,8 @@ struct Workspace {
     /// `start_rename`/`confirm_rename`。
     rename_target: Option<RenameTarget>,
     rename_input: Option<Entity<gpui_component::input::InputState>>,
+    /// 打开时预填的名字。提交的和它一样就是没改，见 `submitted_title`。
+    rename_initial: Option<String>,
     /// 重命名文本框的事件订阅句柄，随 rename_input 一起换（回车/失焦提交）。
     _rename_sub: Option<Subscription>,
     /// 「中继…」弹窗（None = 没开）。见 `start_relay_edit`。
@@ -2899,6 +2901,7 @@ impl Workspace {
             status_menu_snapshot: None,
             rename_target: None,
             rename_input: None,
+            rename_initial: None,
             _rename_sub: None,
             relay_edit: None,
             repo_info: HashMap::new(),
