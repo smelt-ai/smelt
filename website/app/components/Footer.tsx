@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import icon from "@/public/icon.svg";
 
 const REPO_URL = "https://github.com/smelt-ai/smelt";
 
@@ -17,7 +18,7 @@ export function Footer() {
       <div className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-12 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <Image src="/icon.svg" alt="" width={20} height={20} unoptimized />
+            <Image src={icon} alt="" width={20} height={20} />
             <span className="text-sm font-semibold tracking-tight text-foreground">smelt</span>
           </div>
           <p className="mt-3 max-w-xs text-sm leading-6 text-muted">

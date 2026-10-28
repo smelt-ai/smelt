@@ -1,4 +1,8 @@
+import Link from "next/link";
 import type { Components } from "react-markdown";
+
+const linkClass =
+  "text-accent underline decoration-accent/30 underline-offset-2 hover:decoration-accent";
 
 export const mdComponents: Components = {
   h1: ({ id, children }) => (
@@ -28,16 +32,22 @@ export const mdComponents: Components = {
     </ul>
   ),
   li: ({ children }) => <li>{children}</li>,
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target={href?.startsWith("http") ? "_blank" : undefined}
-      rel={href?.startsWith("http") ? "noopener noreferrer" : undefined}
-      className="text-accent underline decoration-accent/30 underline-offset-2 hover:decoration-accent"
-    >
-      {children}
-    </a>
-  ),
+  // 站内链接（/docs、/develop）走 next/link，才会带上 basePath；外链和页内锚点用普通 <a>。
+  a: ({ href, children }) =>
+    href?.startsWith("/") ? (
+      <Link href={href} className={linkClass}>
+        {children}
+      </Link>
+    ) : (
+      <a
+        href={href}
+        target={href?.startsWith("http") ? "_blank" : undefined}
+        rel={href?.startsWith("http") ? "noopener noreferrer" : undefined}
+        className={linkClass}
+      >
+        {children}
+      </a>
+    ),
   strong: ({ children }) => (
     <strong className="font-semibold text-foreground">{children}</strong>
   ),
