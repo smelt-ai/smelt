@@ -1967,6 +1967,17 @@ fn acknowledge_terminal_output(sess: &Session, fd: ConnId, consumed: u64) {
     };
     // 生成快照要拿 ctl/term，不能在 `out` 锁里拿；output_gate 保证这期间没有新输出插进来。
     let keyframe = terminal_keyframe(sess, need, graphics);
+    // 客户端跟不上实时输出才会走到这里。关键帧会清掉客户端的图片再整张重发，频繁出现就是卡顿。
+    smelt_core::app_log::info(
+        "terminal-flow",
+        &format!(
+            "会话实例 {} 的客户端追上来，补 {:?} 关键帧 {} KB（图片：{}）",
+            sess.instance,
+            need,
+            keyframe.len() / 1024,
+            graphics
+        ),
+    );
     let mut out = sess.out.lock().unwrap();
     let Some(pos) = out.clients.iter().position(|client| client.fd == fd) else {
         return;

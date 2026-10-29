@@ -278,12 +278,45 @@ impl TerminalGraphics {
         } else {
             self.unused_image_id()
         };
-        // 同一个 id 再传一次就是换图，旧图的放置一起删掉。
+        self.stamp += 1;
+        // 同一个 id 再传一次就是换图，旧图的放置一起删掉。内容一模一样时不换图：Pi 滚动重绘时每帧
+        // 都把整张图重传一遍，换图就要再转发一遍，客户端每帧重新解码、换纹理，滚动就卡了。客户端
+        // 手里已经是这张，只照常删掉它的放置，效果和换成同样的图一样。
+        if let Some(stored) = self.images.get_mut(&id)
+            && stored.format == decoded.format
+            && stored.size == decoded.size
+            && stored.data == decoded.data
+        {
+            stored.stamp = self.stamp;
+            let placed: Vec<PlacementKey> = self
+                .placements
+                .iter()
+                .filter(|(_, placement)| placement.image == id)
+                .map(|(key, _)| *key)
+                .collect();
+            for key in placed {
+                self.unplace(key, out);
+            }
+            if c.image_id == 0 && c.image_number != 0 {
+                self.numbers.insert(c.image_number, id);
+            }
+            return Ok(id);
+        }
         self.remove_image(id, out);
         if c.image_id == 0 && c.image_number != 0 {
             self.numbers.insert(c.image_number, id);
         }
-        self.stamp += 1;
+        // 一张新图正常只传一次。滚动、重绘时反复出现这条，说明程序在不断换图，两端每次都要
+        // 重新解码、换纹理。
+        smelt_core::app_log::info(
+            "terminal-graphics",
+            &format!(
+                "收到图片 id={id} {}x{} {} KB",
+                decoded.size.0,
+                decoded.size.1,
+                decoded.data.len() / 1024
+            ),
+        );
         out.relay
             .extend(encode_image_relay(id, decoded.format, &decoded.data));
         self.stored_bytes += decoded.data.len();
@@ -850,6 +883,36 @@ mod tests {
         let mut h = Harness::new();
         let out = h.feed(b"\x1b[19t");
         assert_eq!(out.reply, format!("\x1b[9;{ROWS};{COLS}t").as_bytes());
+    }
+
+    /// Pi 滚动重绘时每帧都把同一张图整张重传。内容没变就不换图：不删图、不再转发，只照常删掉旧
+    /// 放置、挂上新的；内容变了才换。
+    #[test]
+    fn retransmitting_the_same_image_keeps_it() {
+        let mut h = Harness::new();
+        let png = fake_png(40, 40);
+        let first = h.feed(&apc("a=T,f=100,q=2,i=7,c=4,r=2", &png));
+        let first_anchor = anchor_placed(&relays_in(&first.graphics));
+
+        let again = h.feed(&apc("a=T,f=100,q=2,i=7,c=4,r=2", &png));
+        let relays = relays_in(&again.graphics);
+        assert!(
+            !relays
+                .iter()
+                .any(|relay| matches!(relay, Relay::Image { .. } | Relay::DropImage(_))),
+            "同一张图不该再转发：{relays:?}"
+        );
+        assert!(relays.contains(&Relay::Unplace(PlacementKey::Anchor(first_anchor))));
+        assert_ne!(anchor_placed(&relays), first_anchor);
+
+        let changed = h.feed(&apc("a=T,f=100,q=2,i=7,c=4,r=2", &fake_png(41, 40)));
+        let relays = relays_in(&changed.graphics);
+        assert!(relays.contains(&Relay::DropImage(7)));
+        assert!(
+            relays
+                .iter()
+                .any(|relay| matches!(relay, Relay::Image { id: 7, .. }))
+        );
     }
 
     #[test]
