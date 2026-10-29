@@ -11,10 +11,12 @@ use smelt_runtime_client::UnixStream;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use smelt_core::control_api::{DeviceList as DeviceListCall, DevicePair, DeviceRevoke};
+use smelt_core::control_api::{
+    DeviceList as DeviceListCall, DevicePair, DeviceRevoke, PushRegister,
+};
 use smelt_core::remote_config::{
-    DeviceIdParams, DeviceInfo, DeviceList, PairParams, PairingOffer, RemoteAccessState,
-    RevokeResult,
+    DeviceIdParams, DeviceInfo, DeviceList, PairParams, PairingOffer, PushRegisterParams,
+    RemoteAccessState, RevokeResult,
 };
 use smelt_runtime_client::protocol::control::{
     ControlCall, ControlError, ControlErrorCode, ControlMethod, EmptyParams, decode_params,
@@ -134,7 +136,7 @@ fn store_error(error: smelt_store::StoreError) -> ControlError {
     ControlError::new(ControlErrorCode::OperationFailed, error.to_string())
 }
 
-/// `method` 必须是 `device.*` 之一。
+/// `method` 必须是 `device.*`、`push.*` 之一。
 pub(crate) fn dispatch(
     method: ControlMethod,
     params: serde_json::Value,
@@ -157,6 +159,16 @@ pub(crate) fn dispatch(
         ControlMethod::DeviceRevoke => {
             let params = decode_params::<<DeviceRevoke as ControlCall>::Params>(params)?;
             encode(revoke(params)?)
+        }
+        ControlMethod::PushRegister => {
+            let params = decode_params::<<PushRegister as ControlCall>::Params>(params)?;
+            push_register(principal, params)?;
+            encode(EmptyParams::default())
+        }
+        ControlMethod::PushUnregister => {
+            decode_params::<EmptyParams>(params)?;
+            push_unregister(principal)?;
+            encode(EmptyParams::default())
         }
         other => Err(ControlError::new(
             ControlErrorCode::Internal,
@@ -269,6 +281,70 @@ fn revoke(params: DeviceIdParams) -> Result<RevokeResult, ControlError> {
     Ok(RevokeResult { revoked })
 }
 
+/// 推送登记只认已配对的远程设备自己：登记写到连接身份那一行，不看参数里自称是谁。
+fn calling_device(principal: &Principal) -> Result<&str, ControlError> {
+    match principal {
+        Principal::Device(id) => Ok(id),
+        Principal::Local | Principal::Unpaired(_) => Err(ControlError::new(
+            ControlErrorCode::FailedPrecondition,
+            "推送只能由已配对的远程设备登记",
+        )),
+    }
+}
+
+/// 句柄是中继发的不透明串，只检查长度。中继地址要是 https；本机回环地址允许 http，
+/// 方便在开发机上跑中继调试。
+fn validate_push_registration(params: &PushRegisterParams) -> Result<(), ControlError> {
+    let invalid = |message: &str| ControlError::new(ControlErrorCode::InvalidParams, message);
+    if params.handle.is_empty() || params.handle.len() > 4096 {
+        return Err(invalid("推送句柄为空或太长"));
+    }
+    let relay = params.relay_url.trim();
+    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+        .iter()
+        .any(|prefix| {
+            relay
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+        });
+    if !(relay.starts_with("https://") || loopback) || relay.len() > 512 {
+        return Err(invalid("推送中继地址必须是 https:// 开头"));
+    }
+    Ok(())
+}
+
+fn push_register(principal: &Principal, params: PushRegisterParams) -> Result<(), ControlError> {
+    let device = calling_device(principal)?;
+    validate_push_registration(&params)?;
+    let registered = store()?
+        .put_push_registration(&smelt_store::PushRegistration {
+            device_endpoint_id: device.to_string(),
+            handle: params.handle,
+            relay_url: params.relay_url.trim().to_string(),
+            notify_approval: params.approval,
+            notify_input: params.input,
+            notify_failure: params.failure,
+            updated_at_ms: now_ms(),
+        })
+        .map_err(store_error)?;
+    if !registered {
+        // 和撤销赛跑：设备刚被移出白名单。
+        return Err(ControlError::new(
+            ControlErrorCode::PermissionDenied,
+            "这台设备已不在配对列表里",
+        ));
+    }
+    Ok(())
+}
+
+fn push_unregister(principal: &Principal) -> Result<(), ControlError> {
+    let device = calling_device(principal)?;
+    store()?
+        .delete_push_registration(device)
+        .map_err(store_error)?;
+    Ok(())
+}
+
 /// 最近连接时间最多这么久写一次库：每个短请求都是一条新流，逐条写太频繁。
 const LAST_SEEN_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -349,6 +425,50 @@ mod tests {
                 .all(|ch| CODE_ALPHABET.contains(&(ch as u8)))
         );
         assert_eq!(normalize_code(" ab cd-efgh "), "ABCDEFGH");
+    }
+
+    fn registration(relay_url: &str) -> PushRegisterParams {
+        PushRegisterParams {
+            handle: "handle".into(),
+            relay_url: relay_url.into(),
+            approval: true,
+            input: true,
+            failure: true,
+        }
+    }
+
+    #[test]
+    fn push_relays_must_be_https_except_on_loopback() {
+        for ok in [
+            "https://push.example.com",
+            "http://127.0.0.1:8787",
+            "http://localhost",
+            "http://[::1]:8787/",
+        ] {
+            assert!(validate_push_registration(&registration(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://push.example.com",
+            "http://localhost.evil.com",
+            "ftp://x",
+            "",
+        ] {
+            assert!(validate_push_registration(&registration(bad)).is_err(), "{bad}");
+        }
+        let mut empty = registration("https://push.example.com");
+        empty.handle.clear();
+        assert!(validate_push_registration(&empty).is_err());
+    }
+
+    /// 推送登记只能由已配对的远程设备为自己做。
+    #[test]
+    fn only_paired_devices_register_push() {
+        assert_eq!(
+            calling_device(&Principal::Device("abc".into())).unwrap(),
+            "abc"
+        );
+        assert!(calling_device(&Principal::Local).is_err());
+        assert!(calling_device(&Principal::Unpaired("abc".into())).is_err());
     }
 
     /// 码只能用一次；连续猜错到上限，没用掉的码全部作废。

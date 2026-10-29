@@ -11,6 +11,7 @@ How the product works today.
 - [`workspace.md`](workspace.md) — Desktop workspace: terminals, agents, layout, multi-runtime windows, and shortcuts. Also the mobile client overview.
 - [`local-storage.md`](local-storage.md) — The two SQLite databases under `~/.smelt/` and what they store.
 - [`iroh-relay-deployment.md`](iroh-relay-deployment.md) — When and how to run a private iroh relay.
+- [`push-relay-deployment.md`](push-relay-deployment.md) — Running the push relay that forwards iOS notifications to APNs.
 - [`release.md`](release.md) — Tags, release artifacts, and stable versus pre-release.
 - [`ui-design-language.md`](ui-design-language.md) — Desktop visual language: theme tokens, surfaces, and chrome.
 - [`mobile/README.md`](../mobile/README.md) — Building the Flutter mobile client.

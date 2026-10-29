@@ -19,6 +19,7 @@ export '../src/rust/api/error.dart';
 export '../src/rust/api/fleet.dart';
 export '../src/rust/api/identity.dart';
 export '../src/rust/api/pass.dart';
+export '../src/rust/api/push.dart';
 export '../src/rust/api/terminal.dart';
 
 /// 空的工作区目录：拿到运行时的目录之前占位。

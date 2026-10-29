@@ -900,6 +900,11 @@ pi_calls! {
     /// 撤销并立即断开这台设备现有的全部连接。
     DeviceRevoke => DeviceRevoke(crate::remote_config::DeviceIdParams)
         -> crate::remote_config::RevokeResult;
+    /// 已配对的手机登记推送：推送中继和它发的句柄、要推的提醒类型。按连接的设备身份
+    /// 覆盖这台设备的登记，本机连接不能调。
+    PushRegister => PushRegister(crate::remote_config::PushRegisterParams) -> EmptyParams;
+    /// 取消调用方这台设备的推送登记。没有登记也算成功。
+    PushUnregister => PushUnregister(EmptyParams) -> EmptyParams;
     /// 新建菜单里用户标为「常用」的动作。桌面和手机共用这一份。
     NewSessionPinsGet => NewSessionPinsGet(EmptyParams) -> crate::new_session::NewSessionPreferences;
     NewSessionPinsToggle => NewSessionPinsToggle(crate::new_session::PinParams)

@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 38] = [
+pub const TABLES: [&str; 39] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -42,6 +42,7 @@ pub const TABLES: [&str; 38] = [
     "paired_device",
     "project",
     "published_session",
+    "push_registration",
     "quota_cache",
     "quota_cache_provider",
     "quota_cache_status",
@@ -419,6 +420,15 @@ CREATE TABLE paired_device (
   name TEXT NOT NULL,
   paired_at_ms INTEGER NOT NULL,
   last_seen_at_ms INTEGER
+) WITHOUT ROWID;
+CREATE TABLE push_registration (
+  device_endpoint_id TEXT PRIMARY KEY REFERENCES paired_device(endpoint_id) ON DELETE CASCADE,
+  handle TEXT NOT NULL,
+  relay_url TEXT NOT NULL,
+  notify_approval INTEGER NOT NULL CHECK (notify_approval IN (0, 1)),
+  notify_input INTEGER NOT NULL CHECK (notify_input IN (0, 1)),
+  notify_failure INTEGER NOT NULL CHECK (notify_failure IN (0, 1)),
+  updated_at_ms INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE runtime_identity (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1742,6 +1752,19 @@ DROP TABLE remote_terminal_session;
 pub const MIGRATE_V28_TO_V29: &str = "
 ALTER TABLE workspace_catalog ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
 UPDATE workspace_catalog SET epoch = lower(hex(randomblob(16))) WHERE epoch = '';
+";
+
+/// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。
+pub const MIGRATE_V29_TO_V30: &str = "
+CREATE TABLE push_registration (
+  device_endpoint_id TEXT PRIMARY KEY REFERENCES paired_device(endpoint_id) ON DELETE CASCADE,
+  handle TEXT NOT NULL,
+  relay_url TEXT NOT NULL,
+  notify_approval INTEGER NOT NULL CHECK (notify_approval IN (0, 1)),
+  notify_input INTEGER NOT NULL CHECK (notify_input IN (0, 1)),
+  notify_failure INTEGER NOT NULL CHECK (notify_failure IN (0, 1)),
+  updated_at_ms INTEGER NOT NULL
+) WITHOUT ROWID;
 ";
 
 /// 建库、迁移时把目录这一行连同随机身份一起写好：读目录的人永远拿得到 epoch。

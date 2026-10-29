@@ -2121,6 +2121,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -9616,6 +9617,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -11018,6 +11020,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-push"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "smelt-push-relay"
+version = "0.0.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "smelt-push",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "smelt-runtime-client"
 version = "0.0.0"
 dependencies = [
@@ -11131,6 +11159,7 @@ dependencies = [
  "objc",
  "portable-pty",
  "qrcode",
+ "reqwest",
  "security-framework-sys",
  "semver",
  "serde",
@@ -11144,6 +11173,7 @@ dependencies = [
  "smelt-iroh",
  "smelt-pairing",
  "smelt-paths",
+ "smelt-push",
  "smelt-runtime-client",
  "smelt-store",
  "smelt-sys",

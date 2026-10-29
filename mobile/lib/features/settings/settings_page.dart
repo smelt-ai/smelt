@@ -1,4 +1,4 @@
-/// 设置：机器（顺序、详情、配对新机器）、外观、终端、更新（只有安卓）、关于。
+/// 设置：机器（顺序、详情、配对新机器）、通知（只有 iOS）、外观、终端、更新（只有安卓）、关于。
 ///
 /// 机器的一切状态都从 [FleetStore] 读，偏好从 [PreferencesStore] 读；这里只把它们摆出来，
 /// 改动直接写回去，不自己另存一份。
@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../data/app_update.dart';
 import '../../data/models.dart';
 import '../../data/preferences.dart';
+import '../../data/push.dart';
 import '../../data/stores.dart';
 import '../../l10n/gen/l10n.dart';
 import '../../theme/galley.dart';
@@ -69,7 +70,12 @@ class _SettingsPageState extends State<SettingsPage> {
     final model = AppScope.of(context);
     final l10n = L10n.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([model.fleet, model.prefs, model.updater]),
+      listenable: Listenable.merge([
+        model.fleet,
+        model.prefs,
+        model.updater,
+        model.push,
+      ]),
       builder: (context, _) {
         final fleet = model.fleet.value;
         final prefs = model.prefs.value;
@@ -85,6 +91,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 onMove: (from, to) => _move(fleet, from, to),
               ),
             ),
+            if (model.push.supported)
+              SliverToBoxAdapter(
+                child: _PushSection(push: model.push, prefs: prefs),
+              ),
             SliverToBoxAdapter(
               child: _AppearanceSection(
                 mode: prefs.themeMode,
@@ -260,6 +270,105 @@ class _MachineRow extends StatelessWidget {
         semanticLabel: l10n.settingsOpenMachine(runtime.name),
         onTap: onOpen,
       ),
+    );
+  }
+}
+
+/// 推送通知：总开关、状态说明，开着时选要推哪几类。
+class _PushSection extends StatelessWidget {
+  const _PushSection({required this.push, required this.prefs});
+
+  final PushService push;
+  final Preferences prefs;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    final t = GalleyText.of(context);
+    final l10n = L10n.of(context);
+    final status = push.value;
+    final enabled = prefs.pushEnabled;
+    final text = switch (status) {
+      PushStatus.off => l10n.pushStatusOff,
+      PushStatus.registering => l10n.pushStatusRegistering,
+      PushStatus.on => l10n.pushStatusOn,
+      PushStatus.denied => l10n.pushStatusDenied,
+      PushStatus.failed => l10n.pushStatusFailed,
+      PushStatus.notConfigured => l10n.pushStatusNotConfigured,
+    };
+    final problem =
+        enabled &&
+        (status == PushStatus.denied ||
+            status == PushStatus.failed ||
+            status == PushStatus.notConfigured);
+
+    Widget kind(String label, bool value, ValueChanged<bool> onChanged) =>
+        ShelfRow(
+          title: Text(label),
+          titleStyle: t.body,
+          trailing: Switch.adaptive(value: value, onChanged: onChanged),
+          onTap: () => onChanged(!value),
+        );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ShelfHeader(title: l10n.pushSection),
+        Shelf(
+          children: [
+            ShelfRow(
+              leading: Icon(LucideIcons.bell, size: Strokes.icon, color: c.ink),
+              title: Text(l10n.pushToggle),
+              titleStyle: t.body,
+              // 拒绝、失败的说明比一行长，不截断。
+              subtitle: Text(
+                text,
+                maxLines: 3,
+                style: problem ? TextStyle(color: c.danger) : null,
+              ),
+              trailing: Switch.adaptive(
+                value: enabled,
+                onChanged: (value) => push.setEnabled(value),
+              ),
+              onTap: () => push.setEnabled(!enabled),
+            ),
+            if (enabled && status == PushStatus.denied)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Space.lg,
+                  0,
+                  Space.lg,
+                  Space.md,
+                ),
+                child: Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: TextButton(
+                    onPressed: push.openSettings,
+                    child: Text(l10n.pushOpenSettings),
+                  ),
+                ),
+              ),
+            if (enabled) ...[
+              kind(
+                l10n.pushKindApproval,
+                prefs.pushApproval,
+                (value) => push.setKinds(approval: value),
+              ),
+              kind(
+                l10n.pushKindInput,
+                prefs.pushInput,
+                (value) => push.setKinds(input: value),
+              ),
+              kind(
+                l10n.pushKindFailure,
+                prefs.pushFailure,
+                (value) => push.setKinds(failure: value),
+              ),
+            ],
+          ],
+        ),
+        if (enabled) _Footnote(text: l10n.pushFooter),
+      ],
     );
   }
 }

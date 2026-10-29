@@ -23,5 +23,6 @@ mod fleet;
 mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. */
 mod iroh_dialer;
 mod pass;
+mod push;
 mod store;
 mod terminal;

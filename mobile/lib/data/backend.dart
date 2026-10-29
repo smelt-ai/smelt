@@ -14,6 +14,7 @@ import '../src/rust/api/draft.dart' as draft;
 import '../src/rust/api/fleet.dart' as fleet;
 import '../src/rust/api/identity.dart' as identity;
 import '../src/rust/api/pass.dart' as pass;
+import '../src/rust/api/push.dart' as push;
 import '../src/rust/api/terminal.dart' as terminal;
 import 'models.dart';
 
@@ -33,6 +34,9 @@ abstract interface class Backend {
 
   /// 一次性迁移旧版钥匙串里的机器列表。
   Future<List<RuntimeRecord>> importRuntimes(List<RuntimeImport> runtimes);
+
+  /// 推送登记同步到每台机器；`null` 是关掉。见 `push.dart`。
+  void setPushRegistration(PushRegistration? registration);
 
   // 指挥台投影 ---------------------------------------------------------------
   Stream<Pass> passEvents();
@@ -201,6 +205,10 @@ class FrbBackend implements Backend {
   @override
   Future<List<RuntimeRecord>> importRuntimes(List<RuntimeImport> runtimes) =>
       fleet.importRuntimes(runtimes: runtimes);
+
+  @override
+  void setPushRegistration(PushRegistration? registration) =>
+      push.setPushRegistration(registration: registration);
 
   @override
   Stream<Pass> passEvents() => pass.passEvents();

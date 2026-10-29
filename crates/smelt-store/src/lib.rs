@@ -24,6 +24,8 @@ mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod devices;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod push;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod history;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod launch;
@@ -42,7 +44,7 @@ pub use snapshots::{
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
     MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
-    PublishedSessionSnapshot, QuotaCacheQuota, QuotaCacheSnapshot,
+    PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot,
     QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
     TerminalThemeSnapshot,
     WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord,
@@ -58,7 +60,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 29;
+pub const STORE_SCHEMA_VERSION: u32 = 30;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -612,6 +614,20 @@ impl Store {
 
     pub fn touch_paired_device(&self, endpoint_id: &str, now_ms: i64) -> Result<(), StoreError> {
         imp::touch_paired_device(&self.backend, endpoint_id, now_ms)
+    }
+
+    /// 登记或更新一台已配对设备的推送。设备不在白名单里时什么都不写，返回 false。
+    pub fn put_push_registration(&self, registration: &PushRegistration) -> Result<bool, StoreError> {
+        imp::put_push_registration(&self.backend, registration)
+    }
+
+    /// 取消一台设备的推送登记。返回是否真有这条登记。
+    pub fn delete_push_registration(&self, endpoint_id: &str) -> Result<bool, StoreError> {
+        imp::delete_push_registration(&self.backend, endpoint_id)
+    }
+
+    pub fn list_push_registrations(&self) -> Result<Vec<PushRegistration>, StoreError> {
+        imp::list_push_registrations(&self.backend)
     }
 
     pub fn get_published_session_snapshot(
@@ -1465,6 +1481,31 @@ mod imp {
         })
     }
 
+    pub(super) fn put_push_registration(
+        backend: &Backend,
+        registration: &super::PushRegistration,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::push::put(transaction, registration)
+        })
+    }
+
+    pub(super) fn delete_push_registration(
+        backend: &Backend,
+        endpoint_id: &str,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::push::delete(transaction, endpoint_id)
+        })
+    }
+
+    pub(super) fn list_push_registrations(
+        backend: &Backend,
+    ) -> Result<Vec<super::PushRegistration>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::push::list(&connection)
+    }
+
     pub(super) fn get_published_session_snapshot(
         backend: &Backend,
     ) -> Result<Option<super::PublishedSessionSnapshot>, StoreError> {
@@ -1856,6 +1897,16 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 29 {
+            apply_v30_push_registration(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v29 形状：补上推送登记表后与当前形状逐字一致，就说明原来正是 v29。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2386,9 +2437,21 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V28_TO_V29)?;
         }
-        transaction
-            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
-            .map_err(StoreError::from)
+        transaction.execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)?;
+        apply_v30_push_registration(transaction)
+    }
+
+    /// v30：已配对手机的推送登记表。已经有这张表的库跳过。
+    fn apply_v30_push_registration(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "push_registration")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V29_TO_V30)?;
+        }
+        Ok(())
     }
 
     /// 旧库里每段对话的会话顺序：ACP 会话在前，终端按布局树深度优先，布局树里没挂上的
@@ -6915,6 +6978,98 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let (reset, _) = rebuilt.workspace_directory().unwrap();
         assert_eq!(reset.revision, 0);
         assert_ne!(reset.epoch, fresh.epoch, "删了重建是另一份目录");
+    }
+
+    /// v29 的库：补上推送登记表，设备白名单原样保留，形状和新建的一样。
+    #[test]
+    fn migrates_v29_adding_push_registrations() {
+        let dir = temp_dir("migrate-v29-push");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE push_registration;
+                 INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 29).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        assert_eq!(store.list_paired_devices().unwrap().len(), 1);
+        assert!(store.list_push_registrations().unwrap().is_empty());
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// 推送登记只给白名单里的设备写；重复登记覆盖；撤销设备时跟着删。
+    #[test]
+    fn push_registrations_follow_their_paired_device() {
+        let dir = temp_dir("push-registrations");
+        let store = Store::open_or_create(&dir.join(DATABASE_FILE_NAME)).unwrap();
+        let registration = PushRegistration {
+            device_endpoint_id: "aa".to_string(),
+            handle: "handle-1".to_string(),
+            relay_url: "https://push.example.test".to_string(),
+            notify_approval: true,
+            notify_input: false,
+            notify_failure: true,
+            updated_at_ms: 10,
+        };
+        assert!(
+            !store.put_push_registration(&registration).unwrap(),
+            "没配对的设备不能登记"
+        );
+        assert!(store.list_push_registrations().unwrap().is_empty());
+
+        store
+            .put_paired_device(&PairedDevice {
+                endpoint_id: "aa".to_string(),
+                name: "iPhone".to_string(),
+                paired_at_ms: 1,
+                last_seen_at_ms: None,
+            })
+            .unwrap();
+        assert!(store.put_push_registration(&registration).unwrap());
+        let updated = PushRegistration {
+            handle: "handle-2".to_string(),
+            notify_input: true,
+            updated_at_ms: 20,
+            ..registration.clone()
+        };
+        assert!(store.put_push_registration(&updated).unwrap());
+        assert_eq!(store.list_push_registrations().unwrap(), vec![updated]);
+
+        // 重新配对只换名字，不动推送登记。
+        store
+            .put_paired_device(&PairedDevice {
+                endpoint_id: "aa".to_string(),
+                name: "iPhone 17".to_string(),
+                paired_at_ms: 30,
+                last_seen_at_ms: None,
+            })
+            .unwrap();
+        assert_eq!(store.list_push_registrations().unwrap().len(), 1);
+
+        assert!(store.delete_paired_device("aa").unwrap());
+        assert!(store.list_push_registrations().unwrap().is_empty());
+
+        store
+            .put_paired_device(&PairedDevice {
+                endpoint_id: "aa".to_string(),
+                name: "iPhone".to_string(),
+                paired_at_ms: 40,
+                last_seen_at_ms: None,
+            })
+            .unwrap();
+        assert!(store.put_push_registration(&registration).unwrap());
+        assert!(store.delete_push_registration("aa").unwrap());
+        assert!(!store.delete_push_registration("aa").unwrap());
+        drop(store);
     }
 
     /// v28 的库：目录表补上 epoch，版本号照旧，形状和新建的一样。

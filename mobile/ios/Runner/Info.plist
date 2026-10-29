@@ -37,6 +37,10 @@
 	<string>Scan the pairing code shown by Smelt on your computer.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to the Smelt gateway running on your local computer.</string>
+	<key>SmeltApnsEnvironment</key>
+	<string>$(SMELT_APNS_ENVIRONMENT)</string>
+	<key>SmeltPushRelayHost</key>
+	<string>$(SMELT_PUSH_RELAY_HOST)</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Attach screenshots and images to your agent messages.</string>
 	<key>UIApplicationSceneManifest</key>

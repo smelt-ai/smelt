@@ -1,0 +1,5 @@
+/* Push notification text. The push carries only a key (smelt-push PushKind::loc_key),
+   never session contents, so iOS shows these in the phone's language. */
+"SMELT_PUSH_APPROVAL" = "An agent is waiting for your approval";
+"SMELT_PUSH_INPUT" = "An agent is waiting for your reply";
+"SMELT_PUSH_FAILURE" = "An agent run failed";
