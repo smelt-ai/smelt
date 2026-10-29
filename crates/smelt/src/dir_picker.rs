@@ -466,7 +466,8 @@ fn system_prompt_options(purpose: &DirPickerPurpose) -> PathPromptOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // 不能 `use super::*`：上面 glob 了 `gpui::*`，`gpui::test` 会顶掉 `#[test]`，展开时无限递归。
+    use super::{DirPickerPurpose, system_prompt_options};
     use smelt_model::pi_plugin_catalog::PiPluginKind;
 
     #[test]
