@@ -91,6 +91,12 @@ struct PiState {
     models_refresh_request: Option<(String, Option<String>)>,
     /// 压缩已经结束。拒绝用的快照可能仍写着 `isCompacting`，不能再把它当成还在忙。
     compaction_idle_pending: bool,
+    /// 收到 `compaction_start` 后还没等到 `compaction_end`。
+    compacting: bool,
+    /// 收到过几次 `compaction_start`。
+    compaction_starts: u64,
+    /// 主循环发出的 `get_state`：id → 发出时的 `compaction_starts`。
+    state_requests: HashMap<String, u64>,
     /// 已发出、等 Pi 回执的 steer 请求。只用来把 `in_flight_rpc` 记账还回去；
     /// steer 不开新回合，不能碰 `prompt_request_id`。
     steer_request_ids: HashSet<String>,
@@ -1360,6 +1366,50 @@ where
     }
 }
 
+/// 发 `get_state`，记下此刻压缩开始过几次。回执里的 `isCompacting` 要靠它判断是否过期。
+async fn write_state_request<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &mut PiState,
+    id: &str,
+) -> Result<(), String> {
+    state
+        .state_requests
+        .insert(id.to_string(), state.compaction_starts);
+    let result = write_rpc(writer, &serde_json::json!({"id": id, "type": "get_state"})).await;
+    if result.is_err() {
+        state.state_requests.remove(id);
+    }
+    result
+}
+
+/// `compaction_end` 没送到时以 Pi 的状态为准收掉压缩。只收不设：开始事件丢了不归这里管，
+/// 而且 Pi 在失败路径上先发 `compaction_end` 再清标志，回执里的 `true` 可能是过期的。
+/// 发出请求后又开始了一次压缩，回执里的 `false` 可能读在开始之前，也不收。
+fn reconcile_compacting(
+    state: &mut PiState,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    response: &serde_json::Value,
+    starts_at_request: u64,
+) {
+    if !state.compacting || state.compaction_starts != starts_at_request {
+        return;
+    }
+    let idle = response_data(response)
+        .ok()
+        .and_then(|data| data.get("isCompacting"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false);
+    if !idle {
+        return;
+    }
+    state.compacting = false;
+    let _ = event_tx.try_send(ConversationEvent::Compaction {
+        running: false,
+        used: None,
+        size: None,
+    });
+}
+
 async fn write_rpc<W: AsyncWrite + Unpin>(
     writer: &mut W,
     value: &serde_json::Value,
@@ -2130,13 +2180,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             .await?;
             let state_id = state.request_id("cancel-state");
             state.cancel_state_request_id = Some(state_id.clone());
-            if write_rpc(
-                writer,
-                &serde_json::json!({"id": state_id, "type": "get_state"}),
-            )
-            .await
-            .is_err()
-            {
+            if write_state_request(writer, state, &state_id).await.is_err() {
                 state.cancel_state_request_id = None;
                 mark_provider_idle(state, event_tx);
             }
@@ -2361,6 +2405,9 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
+    if let Some(starts_at_request) = state.state_requests.remove(&id) {
+        reconcile_compacting(state, event_tx, &response, starts_at_request);
+    }
     if state.prompt_request_id.as_deref() == Some(&id) {
         state.prompt_request_id = None;
         // Pi 回这条 response 之前，这一轮还没真正开跑。首条通常最慢（扩展、MCP、
@@ -2381,13 +2428,7 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             state.pending_refusal_error = Some(error);
             let check_id = state.request_id("refusal-state");
             state.refusal_state_request_id = Some(check_id.clone());
-            if write_rpc(
-                writer,
-                &serde_json::json!({"id": check_id, "type": "get_state"}),
-            )
-            .await
-            .is_err()
-            {
+            if write_state_request(writer, state, &check_id).await.is_err() {
                 state.refusal_state_request_id = None;
                 let error = state
                     .pending_refusal_error
@@ -2406,11 +2447,7 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                 // 只等 agent_settled 导致这种 prompt 永远卡在 Running。
                 let check_id = state.request_id("prompt-state");
                 state.prompt_state_request_id = Some(check_id.clone());
-                write_rpc(
-                    writer,
-                    &serde_json::json!({"id": check_id, "type": "get_state"}),
-                )
-                .await?;
+                write_state_request(writer, state, &check_id).await?;
             }
         }
         return Ok(());
@@ -2861,13 +2898,7 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     // 热升级仍不得跨越。
     let state_id = state.request_id("rewind-state");
     state.rewind_state_request_id = Some(state_id.clone());
-    if write_rpc(
-        writer,
-        &serde_json::json!({"id": state_id, "type": "get_state"}),
-    )
-    .await
-    .is_err()
-    {
+    if write_state_request(writer, state, &state_id).await.is_err() {
         // 身份刷不上新 id 只是“下次重连恢复到旧分支”的退化，回退本身已成功。
         state.rewind_state_request_id = None;
         if let Some(prefill) = restore {
@@ -3352,6 +3383,8 @@ fn handle_event(
         }
         Some("compaction_start") => {
             state.compaction_idle_pending = false;
+            state.compacting = true;
+            state.compaction_starts += 1;
             let _ = event_tx.try_send(ConversationEvent::Compaction {
                 running: true,
                 used: None,
@@ -3359,6 +3392,7 @@ fn handle_event(
             });
         }
         Some("compaction_end") => {
+            state.compacting = false;
             let aborted = event
                 .get("aborted")
                 .and_then(serde_json::Value::as_bool)
@@ -7269,6 +7303,136 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
         assert!(state.active_turn);
         assert!(state.provider_busy);
+    }
+
+    /// 发出 prompt 后补问状态，返回 `get_state` 的请求。
+    fn accept_prompt_and_ask_state(
+        state: &mut PiState,
+        event_tx: &smol::channel::Sender<ConversationEvent>,
+        event_rx: &smol::channel::Receiver<ConversationEvent>,
+    ) -> String {
+        state.active_turn = true;
+        state.prompt_request_id = Some("prompt-1".to_string());
+        let checks = answer_pi(
+            state,
+            event_tx,
+            serde_json::json!({"id": "prompt-1", "success": true}),
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::PromptAccepted)
+        ));
+        assert_eq!(checks[0]["type"], "get_state");
+        checks[0]["id"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn idle_state_snapshot_ends_a_compaction_whose_end_never_arrived() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        handle_event(
+            serde_json::json!({"type": "compaction_start", "reason": "threshold"}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Compaction { running: true, .. })
+        ));
+
+        let state_id = accept_prompt_and_ask_state(&mut state, &event_tx, &event_rx);
+        answer_pi(
+            &mut state,
+            &event_tx,
+            serde_json::json!({
+                "id": state_id,
+                "success": true,
+                "data": {"isStreaming": true, "isCompacting": false}
+            }),
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Compaction {
+                running: false,
+                used: None,
+                ..
+            })
+        ));
+        assert!(event_rx.try_recv().is_err());
+        assert!(!state.compacting);
+        assert!(state.state_requests.is_empty());
+    }
+
+    #[test]
+    fn idle_state_snapshot_read_before_a_new_compaction_does_not_end_it() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+
+        let state_id = accept_prompt_and_ask_state(&mut state, &event_tx, &event_rx);
+        // 请求发出后压缩才开始；Pi 的回执可能在开始之前读的状态，晚于开始事件写出。
+        handle_event(
+            serde_json::json!({"type": "compaction_start", "reason": "threshold"}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Compaction { running: true, .. })
+        ));
+        answer_pi(
+            &mut state,
+            &event_tx,
+            serde_json::json!({
+                "id": state_id,
+                "success": true,
+                "data": {"isStreaming": true, "isCompacting": false}
+            }),
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "过期的空闲快照不能收掉新的压缩"
+        );
+        assert!(state.compacting);
+    }
+
+    #[test]
+    fn compacting_state_snapshot_does_not_restart_a_finished_compaction() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let state_id = accept_prompt_and_ask_state(&mut state, &event_tx, &event_rx);
+        handle_event(
+            serde_json::json!({"type": "compaction_end", "aborted": false}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Compaction { running: false, .. })
+        ));
+        // Pi 失败路径先发 compaction_end 再清标志，这时读到的 `true` 是过期的。
+        answer_pi(
+            &mut state,
+            &event_tx,
+            serde_json::json!({
+                "id": state_id,
+                "success": true,
+                "data": {"isStreaming": true, "isCompacting": true}
+            }),
+        );
+        assert!(event_rx.try_recv().is_err());
+        assert!(!state.compacting);
     }
 
     #[test]
