@@ -361,6 +361,9 @@ pub(crate) enum ImageInstall {
     Launched,
     /// 正在跑的运行时已经退出，新映像由接替进程拉起。进行中的回合会中断。
     Upgraded,
+    /// 启动名已经拨到新映像，正在跑的运行时却没换过去，还在跑旧版本。2026.1028 之前的
+    /// 守护按 fd 交接换代，新映像不再接交接，它等不到 READY 就回滚，落在这里。
+    SwitchFailed(String),
 }
 
 /// 把 `exe` 装进 `~/.smelt/bin`，用和桌面同一套受管布局：发布成不可变映像
@@ -396,7 +399,7 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
         match crate::request_self_upgrade(&image) {
             crate::SelfUpgradeOutcome::Upgraded => ImageInstall::Upgraded,
             crate::SelfUpgradeOutcome::Failed(error) => {
-                return Err(format!("运行时换到新版本失败：{error}"));
+                ImageInstall::SwitchFailed(format!("运行时换到新版本失败：{error}"))
             }
         }
     } else {
@@ -432,8 +435,65 @@ fn install_current_exe() -> Result<PathBuf, String> {
             println!("运行时已重启到新版本。进行中的回合会中断，历史记录还在")
         }
         ImageInstall::Launched => {}
+        // 安装器是另一个进程，停得了旧运行时：启动名已经拨好，看护（systemd 的
+        // Restart=always，或 smelt-up）按它拉起的就是新版本。守护内部的远程升级
+        // （runtime_upgrade）不走这里，那里停掉的是它自己。
+        ImageInstall::SwitchFailed(error) => {
+            println!("{error}；改为停掉旧运行时，由看护按新版本拉起");
+            stop_running_daemon()?;
+            println!("旧运行时已停止，看护会拉起新版本。进行中的回合已中断，历史记录还在")
+        }
     }
     Ok(bin_dir()?.join(smelt_core::daemon_image::LAUNCH_NAME))
+}
+
+/// 停机回执之后，运行时还要关 iroh、清会话目录才退出；等它退出的上限。
+#[cfg(target_os = "linux")]
+const STOP_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+#[cfg(target_os = "linux")]
+fn stop_running_daemon() -> Result<(), String> {
+    stop_daemon(
+        &smelt_runtime_client::local::local_runtime(),
+        STOP_EXIT_TIMEOUT,
+    )
+}
+
+/// 请运行时优雅停机，等它的进程真的退出。`shutdown` op 旧版本也认。
+#[cfg(any(target_os = "linux", test))]
+fn stop_daemon(
+    runtime: &smelt_runtime_client::RuntimeClient,
+    exit_timeout: std::time::Duration,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+
+    use smelt_runtime_client::protocol::daemon::DaemonOperation;
+
+    let pid = runtime
+        .describe()
+        .map_err(|error| format!("问不到正在跑的运行时：{error}"))?
+        .daemon
+        .pid;
+    let pid = i32::try_from(pid).map_err(|_| format!("运行时报的 pid 不对：{pid}"))?;
+    let mut stream = runtime
+        .connect_with_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| format!("连不上正在跑的运行时：{error}"))?;
+    let _ = stream.set_read_timeout(Some(exit_timeout));
+    smelt_runtime_client::protocol::write_json_line(
+        &mut stream,
+        &serde_json::json!({ "op": DaemonOperation::Shutdown }),
+    )
+    .map_err(|error| format!("请运行时停机失败：{error}"))?;
+    // 先回执再清理、退出；读到断开也一样，退没退以进程为准。
+    let mut reply = String::new();
+    let _ = BufReader::new(&stream).read_line(&mut reply);
+    if !smelt_sys::process_wait::wait_until_exit(pid, exit_timeout) {
+        return Err(format!(
+            "旧运行时（pid {pid}）{} 秒内没有退出",
+            exit_timeout.as_secs()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -543,5 +603,110 @@ mod tests {
             maybe_run(&["smeltd".to_string(), "--version".to_string()]),
             Some(0)
         );
+    }
+
+    /// 假运行时：`system.describe` 报 `pid`，收到 `shutdown` 先回执，再按 `exits` 决定
+    /// 杀不杀掉那个进程。记下收到的 op。
+    fn fake_runtime(
+        pid: u32,
+        child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
+        exits: bool,
+        ops: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> smelt_runtime_client::RuntimeClient {
+        use std::io::{BufRead, BufReader};
+
+        use smelt_runtime_client::RuntimeStream;
+        use smelt_runtime_client::protocol::control::ControlResponse;
+        use smelt_runtime_client::protocol::write_json_line;
+
+        smelt_runtime_client::RuntimeClient::new(move || {
+            let (client, server) = RuntimeStream::pair()?;
+            let child = std::sync::Arc::clone(&child);
+            let ops = std::sync::Arc::clone(&ops);
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                if BufReader::new(&server).read_line(&mut line).is_err() {
+                    return;
+                }
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let op = request["op"].as_str().unwrap_or_default().to_string();
+                ops.lock().unwrap().push(op.clone());
+                match op.as_str() {
+                    "control" => {
+                        let request_id = request["request_id"].as_str().unwrap_or_default();
+                        let described = serde_json::json!({
+                            "control": {
+                                "current_version": 1,
+                                "min_supported_version": 1,
+                                "max_supported_version": 1,
+                                "methods": ["system.describe"],
+                            },
+                            "daemon": {
+                                "version": "2026.1023.0-rc.1",
+                                "exe_mtime": 0,
+                                "exe": null,
+                                "pid": pid,
+                                "started_at": 0,
+                                "session_count": 0,
+                                "agent_event_version": 1,
+                            },
+                        });
+                        let _ = write_json_line(
+                            &mut &server,
+                            &ControlResponse::ok(request_id, described),
+                        );
+                    }
+                    "shutdown" => {
+                        let _ = write_json_line(&mut &server, &serde_json::json!({ "ok": true }));
+                        if exits && let Some(mut child) = child.lock().unwrap().take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                    other => panic!("假运行时不认识的 op：{other}"),
+                }
+            });
+            Ok(client)
+        })
+    }
+
+    /// 旧运行时换不了代时，安装器请它停机，等它的进程真的退出，看护才会按新启动名拉起。
+    #[test]
+    fn stop_daemon_shuts_the_runtime_down_and_waits_for_its_process() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let child = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+        let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = fake_runtime(pid, std::sync::Arc::clone(&child), true, ops.clone());
+
+        assert_eq!(
+            stop_daemon(&runtime, std::time::Duration::from_secs(5)),
+            Ok(())
+        );
+        assert_eq!(*ops.lock().unwrap(), ["control", "shutdown"]);
+        assert!(child.lock().unwrap().is_none(), "进程应已被停掉");
+    }
+
+    #[test]
+    fn stop_daemon_fails_when_the_runtime_does_not_exit() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let child = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+        let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = fake_runtime(pid, std::sync::Arc::clone(&child), false, ops);
+
+        let error = stop_daemon(&runtime, std::time::Duration::from_millis(200)).unwrap_err();
+
+        assert!(error.contains("没有退出"), "{error}");
+        if let Some(mut child) = child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
