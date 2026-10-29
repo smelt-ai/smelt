@@ -1,9 +1,9 @@
-//! 运行时目录选择器：在运行时那台机器上逐级浏览目录，选一个或几个路径。
+//! 选目录：项目、智能体绑定的目录、要导入的插件都在运行时那台机器上。
 //!
-//! 项目、智能体绑定的目录、要导入的插件都在运行时那台机器上，本机的系统选择框选出来
-//! 的是桌面上的路径，对远程运行时没有意义。本机运行时也走这里，保持同一条路径（设计
-//! 文档 P1）。列目录走 `workspace.browse_dirs`，渲染只读 [`DirPickerState`] 里缓存的
-//! 结果。
+//! 本机运行时用系统的选择框（macOS 是访达那个，Windows、Linux 是各自系统的），选出来的
+//! 就是运行时能用的路径，常用位置、最近使用、搜索都有。远程运行时在那台机器上逐级浏览：
+//! 系统选择框只看得到这台桌面，路径对远程没有意义。列目录走 `workspace.browse_dirs`，
+//! 渲染只读 [`DirPickerState`] 里缓存的结果。
 
 use std::collections::BTreeSet;
 
@@ -43,6 +43,15 @@ impl DirPickerPurpose {
         matches!(self, Self::AgentContextFolders { .. })
     }
 
+    /// 系统选择框的确认按钮。
+    fn confirm_label(&self) -> &'static str {
+        match self {
+            Self::OpenProject => "打开",
+            Self::AgentContextFolders { .. } => "绑定",
+            Self::PluginImport { .. } => "导入",
+        }
+    }
+
     fn include_files(&self) -> bool {
         matches!(
             self,
@@ -73,6 +82,10 @@ impl Workspace {
         purpose: DirPickerPurpose,
         cx: &mut Context<Self>,
     ) {
+        if runtime.is_local() {
+            self.prompt_local_paths(runtime, purpose, cx);
+            return;
+        }
         self.dir_picker = Some(DirPickerState {
             runtime,
             purpose,
@@ -82,6 +95,42 @@ impl Workspace {
             selected: BTreeSet::new(),
         });
         self.dir_picker_navigate(None, cx);
+    }
+
+    /// 本机运行时：弹系统的选择框。走 GPUI 的异步 `prompt_for_paths`，不能在回调里同步跑
+    /// 模态框（见对话输入栏「+」的注释）。
+    fn prompt_local_paths(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        purpose: DirPickerPurpose,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(system_prompt_options(&purpose));
+        cx.spawn(async move |this, cx| {
+            let paths = match rx.await {
+                Ok(Ok(Some(paths))) => paths,
+                // 用户取消。
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    crate::status_item::notify_error(format!("打不开系统选择框：{error}"));
+                    return;
+                }
+            };
+            let chosen: Vec<String> = paths
+                .iter()
+                .filter_map(|path| path.to_str().map(str::to_string))
+                .collect();
+            if chosen.len() < paths.len() {
+                crate::status_item::notify_error("有路径不是 UTF-8，没法用，已跳过".to_string());
+            }
+            if chosen.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.use_chosen_paths(&runtime, purpose, chosen, cx);
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn cancel_dir_picker(&mut self, cx: &mut Context<Self>) {
@@ -174,10 +223,21 @@ impl Workspace {
         } else {
             picker.selected.into_iter().collect()
         };
-        match picker.purpose {
+        self.use_chosen_paths(&picker.runtime, picker.purpose, chosen, cx);
+    }
+
+    /// 选好了：两种选择框都从这里收尾。
+    fn use_chosen_paths(
+        &mut self,
+        runtime: &crate::runtimes::Runtime,
+        purpose: DirPickerPurpose,
+        chosen: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match purpose {
             DirPickerPurpose::OpenProject => {
                 if let Some(dir) = chosen.into_iter().next() {
-                    self.add_project(picker.runtime.key().clone(), dir, cx);
+                    self.add_project(runtime.key().clone(), dir, cx);
                 }
             }
             DirPickerPurpose::AgentContextFolders { agent_id } => {
@@ -391,5 +451,42 @@ impl Workspace {
             crate::overlay::ModalLayer::DirPicker,
             cx,
         )
+    }
+}
+
+/// 系统选择框的选项：都能选目录；导入扩展还能选单个文件；绑定目录可以多选。
+fn system_prompt_options(purpose: &DirPickerPurpose) -> PathPromptOptions {
+    PathPromptOptions {
+        files: purpose.include_files(),
+        directories: true,
+        multiple: purpose.multiple(),
+        prompt: Some(purpose.confirm_label().into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_model::pi_plugin_catalog::PiPluginKind;
+
+    #[test]
+    fn system_prompt_options_follow_the_purpose() {
+        let project = system_prompt_options(&DirPickerPurpose::OpenProject);
+        assert!(project.directories && !project.files && !project.multiple);
+
+        let folders = system_prompt_options(&DirPickerPurpose::AgentContextFolders {
+            agent_id: "writer".to_string(),
+        });
+        assert!(folders.directories && !folders.files && folders.multiple);
+
+        let skill = system_prompt_options(&DirPickerPurpose::PluginImport {
+            kind: PiPluginKind::Skill,
+        });
+        assert!(skill.directories && !skill.files && !skill.multiple);
+
+        let extension = system_prompt_options(&DirPickerPurpose::PluginImport {
+            kind: PiPluginKind::Extension,
+        });
+        assert!(extension.directories && extension.files && !extension.multiple);
     }
 }
