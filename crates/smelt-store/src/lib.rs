@@ -7010,7 +7010,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
     #[test]
     fn push_registrations_follow_their_paired_device() {
         let dir = temp_dir("push-registrations");
-        let store = Store::open_or_create(&dir.join(DATABASE_FILE_NAME)).unwrap();
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
         let registration = PushRegistration {
             device_endpoint_id: "aa".to_string(),
             handle: "handle-1".to_string(),

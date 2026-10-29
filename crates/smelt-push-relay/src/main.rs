@@ -46,7 +46,12 @@ struct Args {
     #[arg(long, env = "SMELT_PUSH_TEAM_ID")]
     team_id: String,
     /// 允许推送的 App Bundle ID，逗号分隔。必须属于上面这个 Team。
-    #[arg(long, env = "SMELT_PUSH_TOPICS", value_delimiter = ',', required = true)]
+    #[arg(
+        long,
+        env = "SMELT_PUSH_TOPICS",
+        value_delimiter = ',',
+        required = true
+    )]
     topics: Vec<String>,
     /// 句柄密钥文件：32 字节随机数的 base64（`openssl rand -base64 32`）。换掉它所有句柄作废。
     #[arg(long, env = "SMELT_PUSH_HANDLE_KEY")]
@@ -133,7 +138,9 @@ async fn send(
     if !state.topics.contains(&device.topic) {
         return (StatusCode::GONE, "这个中继已不再给该 App 推送");
     }
-    if request.collapse_id.is_empty() || request.collapse_id.len() > 64 || !is_uuid(&request.apns_id)
+    if request.collapse_id.is_empty()
+        || request.collapse_id.len() > 64
+        || !is_uuid(&request.apns_id)
     {
         return (StatusCode::BAD_REQUEST, "collapse_id 或 apns_id 格式不对");
     }

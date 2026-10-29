@@ -445,7 +445,10 @@ mod tests {
             "http://localhost",
             "http://[::1]:8787/",
         ] {
-            assert!(validate_push_registration(&registration(ok)).is_ok(), "{ok}");
+            assert!(
+                validate_push_registration(&registration(ok)).is_ok(),
+                "{ok}"
+            );
         }
         for bad in [
             "http://push.example.com",
@@ -453,7 +456,10 @@ mod tests {
             "ftp://x",
             "",
         ] {
-            assert!(validate_push_registration(&registration(bad)).is_err(), "{bad}");
+            assert!(
+                validate_push_registration(&registration(bad)).is_err(),
+                "{bad}"
+            );
         }
         let mut empty = registration("https://push.example.com");
         empty.handle.clear();

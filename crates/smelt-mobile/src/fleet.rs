@@ -906,7 +906,10 @@ impl Shared {
         };
         let timeout = self.timings.push.call_timeout;
         let result = match &job.desired {
-            Desired::On(params) => current.client.call::<PushRegister>(params, timeout).map(drop),
+            Desired::On(params) => current
+                .client
+                .call::<PushRegister>(params, timeout)
+                .map(drop),
             Desired::Off => current
                 .client
                 .call::<PushUnregister>(&EmptyParams::default(), timeout)
@@ -933,9 +936,10 @@ impl Shared {
         let connected = {
             let view = lock(&self.view);
             matches!(view.push.desired(), Desired::On(_))
-                && view.statuses.get(runtime_id).is_some_and(|(_, status)| {
-                    status.state == ConnectionState::Connected
-                })
+                && view
+                    .statuses
+                    .get(runtime_id)
+                    .is_some_and(|(_, status)| status.state == ConnectionState::Connected)
         };
         if !connected {
             return;

@@ -1298,6 +1298,59 @@ class L10nZh extends L10n {
   String get elicitationTextHint => '输入你的回答';
 
   @override
+  String get pushSection => '通知';
+
+  @override
+  String get pushToggle => '推送通知';
+
+  @override
+  String get pushStatusOff => '智能体需要你时通知你，Smelt 没开着也能收到。';
+
+  @override
+  String get pushStatusRegistering => '正在开启…';
+
+  @override
+  String get pushStatusOn => '已开启。各台机器直接通知这台手机。';
+
+  @override
+  String get pushStatusDenied => '系统设置里关掉了 Smelt 的通知。';
+
+  @override
+  String get pushStatusFailed => '连不上推送服务，回到 App 时会再试。';
+
+  @override
+  String get pushStatusNotConfigured => '这个版本没有配置推送服务。';
+
+  @override
+  String get pushOpenSettings => '打开系统设置';
+
+  @override
+  String get pushKindApproval => '等你批准';
+
+  @override
+  String get pushKindInput => '等你回复';
+
+  @override
+  String get pushKindFailure => '运行失败';
+
+  @override
+  String get pushFooter =>
+      '智能体停下 30 秒后才推送，这期间在别的设备上处理掉了就不推。会话内容只留在你的机器上，通知里只说是哪类事在等你。';
+
+  @override
+  String get pushSessionGone => '这段会话已经不在了。';
+
+  @override
+  String pushMachineUnsupported(String name) {
+    return '$name 上的 Smelt 版本太旧，不能推送通知，升级后才能收到。';
+  }
+
+  @override
+  String pushForgetOffline(String name) {
+    return '$name 现在没连上，它还会继续给这台手机推送。要停止，到它的设备列表里移除这台手机。';
+  }
+
+  @override
   String get sessionsTitle => '会话';
 
   @override

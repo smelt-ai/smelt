@@ -184,13 +184,10 @@ impl Tracker {
 fn run_watcher(event_hub: &EventHubHandle, shared: &Shared) {
     let plugin_id = PluginId::new(PLUGIN_ID).expect("push plugin id is valid");
     let subscription_id = SubscriptionId::new(SUBSCRIPTION_ID).expect("push subscription id");
-    let topics: BTreeSet<Topic> = [
-        CORE_TOPIC_SESSION_STATE_CHANGED,
-        CORE_TOPIC_SESSION_REMOVED,
-    ]
-    .into_iter()
-    .map(|topic| Topic::new(topic).expect("core topic is valid"))
-    .collect();
+    let topics: BTreeSet<Topic> = [CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_SESSION_REMOVED]
+        .into_iter()
+        .map(|topic| Topic::new(topic).expect("core topic is valid"))
+        .collect();
     let capabilities = BTreeSet::from([
         Capability::new(CORE_CAPABILITY_SESSION_READ).expect("core capability is valid")
     ]);
@@ -324,7 +321,10 @@ impl Outbox {
         if self.live.get(&job.session_id) != Some(&job.serial) {
             return;
         }
-        let remaining = job.targets.as_ref().is_none_or(|targets| !targets.is_empty());
+        let remaining = job
+            .targets
+            .as_ref()
+            .is_none_or(|targets| !targets.is_empty());
         if remaining {
             job.attempt += 1;
             job.due = now + backoff(job.attempt);
@@ -461,7 +461,10 @@ fn deliver(client: &reqwest::blocking::Client, mut job: Job) -> Job {
             session_id: job.session_id.clone(),
             apns_id: job.apns_id.clone(),
         };
-        let url = format!("{}{RELAY_SEND_PATH}", target.relay_url.trim_end_matches('/'));
+        let url = format!(
+            "{}{RELAY_SEND_PATH}",
+            target.relay_url.trim_end_matches('/')
+        );
         let outcome = match client.post(&url).json(&request).send() {
             Ok(response) => outcome_of(response.status().as_u16()),
             Err(error) => {
@@ -476,13 +479,13 @@ fn deliver(client: &reqwest::blocking::Client, mut job: Job) -> Job {
                     "推送：设备 {} 的推送登记已失效，删掉",
                     target.device_endpoint_id
                 ));
-                if let Err(error) = smelt_core::sqlite_state::default_sqlite_store().and_then(
-                    |store| {
+                if let Err(error) =
+                    smelt_core::sqlite_state::default_sqlite_store().and_then(|store| {
                         store
                             .delete_push_registration(&target.device_endpoint_id)
                             .map_err(|error| error.to_string())
-                    },
-                ) {
+                    })
+                {
                     crate::dlog(&format!("推送：删失效登记失败：{error}"));
                 }
             }
@@ -628,10 +631,7 @@ mod tests {
             snapshot(vec![state("a", DaemonPhase::AwaitingApproval)]),
             now,
         );
-        assert_eq!(
-            commands,
-            vec![cancel("b"), notify("a", PushKind::Approval)]
-        );
+        assert_eq!(commands, vec![cancel("b"), notify("a", PushKind::Approval)]);
     }
 
     fn target(device: &str) -> Target {
@@ -648,7 +648,11 @@ mod tests {
         let start = Instant::now();
         outbox.notify("a".into(), PushKind::Approval, start);
         assert_eq!(outbox.next_due(), Some(start + DELAY));
-        assert!(outbox.take_due(start + DELAY - Duration::from_secs(1)).is_empty());
+        assert!(
+            outbox
+                .take_due(start + DELAY - Duration::from_secs(1))
+                .is_empty()
+        );
         let due = outbox.take_due(start + DELAY);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].session_id, "a");

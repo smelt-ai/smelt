@@ -121,7 +121,7 @@ void main() {
 
     await push.setKinds(input: false);
     expect(backend.registrations.last!.input, isFalse);
-    expect(platform.prompts, 1, '已经允许过，不再弹');
+    expect(platform.prompts, 1, reason: '已经允许过，不再弹');
 
     await push.setEnabled(false);
     expect(backend.registrations.last, isNull);
@@ -132,7 +132,7 @@ void main() {
     prefs.update(const Preferences(pushEnabled: true));
     await push.start();
     expect(platform.prompts, 0);
-    expect(push.value, PushStatus.off, '还没决定过权限：等用户在设置里开');
+    expect(push.value, PushStatus.off, reason: '还没决定过权限：等用户在设置里开');
     expect(backend.registrations, [null]);
   });
 

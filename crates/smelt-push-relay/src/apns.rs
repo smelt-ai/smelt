@@ -193,7 +193,10 @@ mod tests {
         assert_eq!(parts.len(), 3);
         let header: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
-        assert_eq!(header, serde_json::json!({ "alg": "ES256", "kid": "KEY123" }));
+        assert_eq!(
+            header,
+            serde_json::json!({ "alg": "ES256", "kid": "KEY123" })
+        );
         let claims: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
         assert_eq!(
@@ -220,10 +223,22 @@ mod tests {
     fn apns_statuses_map_to_outcomes() {
         assert_eq!(outcome_of(410, "Unregistered"), Outcome::Unregistered);
         assert_eq!(outcome_of(400, "BadDeviceToken"), Outcome::Unregistered);
-        assert_eq!(outcome_of(400, "DeviceTokenNotForTopic"), Outcome::Unregistered);
-        assert!(matches!(outcome_of(400, "PayloadTooLarge"), Outcome::BadRequest(_)));
-        assert!(matches!(outcome_of(403, "ExpiredProviderToken"), Outcome::Retry(_)));
-        assert!(matches!(outcome_of(429, "TooManyRequests"), Outcome::Retry(_)));
+        assert_eq!(
+            outcome_of(400, "DeviceTokenNotForTopic"),
+            Outcome::Unregistered
+        );
+        assert!(matches!(
+            outcome_of(400, "PayloadTooLarge"),
+            Outcome::BadRequest(_)
+        ));
+        assert!(matches!(
+            outcome_of(403, "ExpiredProviderToken"),
+            Outcome::Retry(_)
+        ));
+        assert!(matches!(
+            outcome_of(429, "TooManyRequests"),
+            Outcome::Retry(_)
+        ));
         assert!(matches!(outcome_of(503, ""), Outcome::Retry(_)));
     }
 

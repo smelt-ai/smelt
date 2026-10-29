@@ -511,6 +511,8 @@ fn re_pairing_a_reinstalled_runtime_drops_the_old_cache() {
         links: AtomicUsize::new(0),
         subscriptions: Mutex::new(Vec::new()),
         watchers: Mutex::new(Vec::new()),
+        push_methods: AtomicBool::new(true),
+        push_calls: Mutex::new(Vec::new()),
     });
     {
         let mut runtimes = h.transport.runtimes.lock().unwrap();
@@ -1014,7 +1016,9 @@ fn old_runtimes_report_push_unsupported() {
     h.wait_state("ra", ConnectionState::Connected);
     assert_eq!(h.push_supported("ra"), None);
     h.fleet.set_push(push_on());
-    wait_until("ra 不支持推送", || h.push_supported("ra") == Some(false));
+    wait_until("ra 不支持推送", || {
+        h.push_supported("ra") == Some(false)
+    });
 }
 
 /// 忘记一台连着的机器前先取消它上面的推送登记。
