@@ -497,6 +497,9 @@ pub struct AgentMemoryRecordWriteParams {
     pub file: String,
     pub trust: AgentMemoryTrust,
     pub reason: String,
+    /// 客户端声称这次覆盖了已有文件。服务端仍会查库，不能只信这个字段。
+    #[serde(default)]
+    pub overwrote_existing: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1061,4 +1064,3 @@ pub struct SubagentTranscriptResult {
     /// 整段子会话一共多少条。
     pub total: u64,
 }
-

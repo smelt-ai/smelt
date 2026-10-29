@@ -14,6 +14,41 @@ import type { MemoryLayer } from "./memory-files.ts";
 const CONTROL_API_VERSION = 3;
 const HOST_TIMEOUT_MS = 5_000;
 
+type SessionControl = {
+	socketPath?: string;
+	sessionId?: string;
+	token?: string;
+};
+
+let sessionControl: SessionControl | undefined;
+
+/**
+ * 读完会话控制变量就从环境里删掉。pi-agent 自己和之后用 `process.env` 拉起的子进程
+ * 都不应再看见 `SMELT_AGENT_TOKEN`。Linux `/proc/self/environ` 里的启动块删不掉，
+ * 那道闸靠 daemon 对端 pid 校验。
+ */
+export function scrubSessionControlEnv(environment: NodeJS.ProcessEnv = process.env): SessionControl {
+	if (sessionControl && environment === process.env) return sessionControl;
+	const next: SessionControl = {
+		socketPath: environment.SMELT_SOCK,
+		sessionId: environment.SMELT_SESSION_ID,
+		token: environment.SMELT_AGENT_TOKEN,
+	};
+	delete environment.SMELT_AGENT_TOKEN;
+	delete environment.SMELT_SESSION_ID;
+	delete environment.SMELT_SOCK;
+	if (environment === process.env) sessionControl = next;
+	return next;
+}
+
+export function resetSessionControlEnvForTests(): void {
+	sessionControl = undefined;
+}
+
+function currentSessionControl(): SessionControl {
+	return sessionControl ?? scrubSessionControlEnv();
+}
+
 export type MemoryUsage = { readCount: number; lastReadAtMs: number };
 export type MemoryTrust = "trusted" | "pending";
 export type MemoryProvenance = { trust: MemoryTrust; reason: string };
@@ -34,9 +69,7 @@ export type MemoryHostTransport = (method: string, params: Record<string, unknow
 
 function socketTransport(): MemoryHostTransport {
 	return (method, params) => {
-		const socketPath = process.env.SMELT_SOCK;
-		const sessionId = process.env.SMELT_SESSION_ID;
-		const token = process.env.SMELT_AGENT_TOKEN;
+		const { socketPath, sessionId, token } = currentSessionControl();
 		if (!socketPath || !sessionId || !token) return Promise.resolve(undefined);
 		return new Promise((resolve) => {
 			let buffer = "";
@@ -118,6 +151,18 @@ export async function recordMemoryRead(layer: MemoryLayer, file: string): Promis
 }
 
 /** 记下一次成功写入的来源。返回 false 时调用方应撤销待确认的写入，免得它被当成可信。 */
-export async function recordMemoryWrite(layer: MemoryLayer, file: string, provenance: MemoryProvenance): Promise<boolean> {
-	return (await transport("agent.memory.record_write", { layer, file, ...provenance })) !== undefined;
+export async function recordMemoryWrite(
+	layer: MemoryLayer,
+	file: string,
+	provenance: MemoryProvenance,
+	options?: { overwroteExisting?: boolean },
+): Promise<boolean> {
+	return (
+		(await transport("agent.memory.record_write", {
+			layer,
+			file,
+			...provenance,
+			overwrote_existing: options?.overwroteExisting === true,
+		})) !== undefined
+	);
 }

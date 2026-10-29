@@ -109,6 +109,7 @@ mod agent_memory_control;
 mod automation_runtime;
 mod client_conn;
 mod control;
+mod memory_peer_auth;
 mod conversation_image;
 mod desktop;
 mod devices;

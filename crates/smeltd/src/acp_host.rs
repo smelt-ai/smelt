@@ -290,6 +290,17 @@ pub(crate) fn acp_runtime_alive(sess: &AcpSession) -> bool {
     sess.handle.lock().is_some()
 }
 
+/// 这条会话的 pi-agent 子进程。spawn 成功后写在 `handle.stdio` 上。
+pub(crate) fn acp_agent_pid(sess: &AcpSession) -> Option<i32> {
+    sess.handle.lock().as_ref().and_then(|handle| {
+        handle
+            .stdio
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map(|stdio| stdio.pid)
+    })
+}
+
 #[derive(Clone)]
 pub(crate) struct AcpOpenRequest {
     pub(crate) id: String,
@@ -1313,13 +1324,7 @@ pub(crate) fn encode_acp_snapshot(
         // 整段帧的条目在上面已经算好摘要，这里只是就地替换副本。增量帧这里没有条目。
         apply_image_refs(&mut snap);
     }
-    let provider_pid = sess.handle.lock().as_ref().and_then(|handle| {
-        handle
-            .stdio
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .map(|stdio| stdio.pid)
-    });
+    let provider_pid = acp_agent_pid(sess);
     let frame = serde_json::to_value(smelt_core::acp_session::AcpSnapshotFrame {
         live: &live,
         snapshot: &snap,
@@ -3453,13 +3458,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
             snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
             drop(reduced);
             set_conversation_snapshot(sess, &mut snapshot);
-            let provider_pid = sess.handle.lock().as_ref().and_then(|handle| {
-                handle
-                    .stdio
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .map(|stdio| stdio.pid)
-            });
+            let provider_pid = acp_agent_pid(sess);
             let (initial, mirror) = full_frame(
                 &serde_json::to_value(smelt_core::acp_session::AcpSnapshotFrame {
                     live: &live,
