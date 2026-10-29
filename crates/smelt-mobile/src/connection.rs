@@ -671,6 +671,10 @@ fn runtime_info(
     target: &Target,
     described: SystemDescribeResult,
 ) -> Result<RuntimeInfo, SmeltError> {
+    // 事件协议对不上时会话目录订阅会被拒，重订也没用：在这里就判不兼容，停下来说清该升级
+    // 哪一边，而不是连着却一直「同步中」。
+    smelt_runtime_client::compat::check_events(&described)
+        .map_err(|incompatible| error(SmeltErrorKind::Incompatible, incompatible.to_string()))?;
     let daemon = described.daemon;
     let runtime_id = daemon.runtime_id.ok_or_else(|| {
         error(
