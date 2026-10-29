@@ -745,11 +745,17 @@ abstract class L10n {
   /// **'This phone was removed from this machine'**
   String get machineRevoked;
 
-  /// No description provided for @machineIncompatible.
+  /// No description provided for @machineRuntimeOutdated.
   ///
   /// In en, this message translates to:
   /// **'Machine needs an update'**
-  String get machineIncompatible;
+  String get machineRuntimeOutdated;
+
+  /// No description provided for @machineAppOutdated.
+  ///
+  /// In en, this message translates to:
+  /// **'App needs an update'**
+  String get machineAppOutdated;
 
   /// No description provided for @timeJustNow.
   ///
@@ -1879,11 +1885,17 @@ abstract class L10n {
   /// **'{name} no longer accepts this phone: it was removed on that machine, or its device list was reset. Make a new pairing code there and pair again. The name and label color stay.'**
   String machinesRevokedBody(String name);
 
-  /// No description provided for @machinesIncompatibleBody.
+  /// No description provided for @machinesRuntimeOutdatedBody.
   ///
   /// In en, this message translates to:
-  /// **'This app and Smelt on {name} are on incompatible versions. Update the older one, then reconnect. If it still fails, pair again.'**
-  String machinesIncompatibleBody(String name);
+  /// **'Smelt on {name} is older than this app, and the versions are incompatible. Update Smelt on that machine, then reconnect. If it still fails, pair again.'**
+  String machinesRuntimeOutdatedBody(String name);
+
+  /// No description provided for @machinesAppOutdatedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This app is older than Smelt on {name}, and the versions are incompatible. Update this app, then reconnect.'**
+  String machinesAppOutdatedBody(String name);
 
   /// No description provided for @machinesRepair.
   ///
@@ -2023,11 +2035,17 @@ abstract class L10n {
   /// **'This pairing code has expired or was already used. Make a new one on the machine and scan it.'**
   String get machinesPairErrorExpired;
 
-  /// No description provided for @machinesPairErrorIncompatible.
+  /// No description provided for @machinesPairErrorRuntimeOutdated.
   ///
   /// In en, this message translates to:
-  /// **'This app and Smelt on that machine are on incompatible versions. Update the older one, then pair with a new code.'**
-  String get machinesPairErrorIncompatible;
+  /// **'Smelt on that machine is older than this app, and the versions are incompatible. Update Smelt there, then pair with a new code.'**
+  String get machinesPairErrorRuntimeOutdated;
+
+  /// No description provided for @machinesPairErrorAppOutdated.
+  ///
+  /// In en, this message translates to:
+  /// **'This app is older than Smelt on that machine, and the versions are incompatible. Update this app, then pair with a new code.'**
+  String get machinesPairErrorAppOutdated;
 
   /// No description provided for @machinesPairErrorOffline.
   ///

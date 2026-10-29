@@ -420,7 +420,10 @@ class L10nEn extends L10n {
   String get machineRevoked => 'This phone was removed from this machine';
 
   @override
-  String get machineIncompatible => 'Machine needs an update';
+  String get machineRuntimeOutdated => 'Machine needs an update';
+
+  @override
+  String get machineAppOutdated => 'App needs an update';
 
   @override
   String get timeJustNow => 'just now';
@@ -1089,8 +1092,13 @@ class L10nEn extends L10n {
   }
 
   @override
-  String machinesIncompatibleBody(String name) {
-    return 'This app and Smelt on $name are on incompatible versions. Update the older one, then reconnect. If it still fails, pair again.';
+  String machinesRuntimeOutdatedBody(String name) {
+    return 'Smelt on $name is older than this app, and the versions are incompatible. Update Smelt on that machine, then reconnect. If it still fails, pair again.';
+  }
+
+  @override
+  String machinesAppOutdatedBody(String name) {
+    return 'This app is older than Smelt on $name, and the versions are incompatible. Update this app, then reconnect.';
   }
 
   @override
@@ -1177,8 +1185,12 @@ class L10nEn extends L10n {
       'This pairing code has expired or was already used. Make a new one on the machine and scan it.';
 
   @override
-  String get machinesPairErrorIncompatible =>
-      'This app and Smelt on that machine are on incompatible versions. Update the older one, then pair with a new code.';
+  String get machinesPairErrorRuntimeOutdated =>
+      'Smelt on that machine is older than this app, and the versions are incompatible. Update Smelt there, then pair with a new code.';
+
+  @override
+  String get machinesPairErrorAppOutdated =>
+      'This app is older than Smelt on that machine, and the versions are incompatible. Update this app, then pair with a new code.';
 
   @override
   String get machinesPairErrorOffline =>

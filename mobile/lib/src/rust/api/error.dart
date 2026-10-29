@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `error`
+// These functions are ignored because they are not marked as `pub`: `error`, `outdated_kind`, `outdated_side`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`
 
 class SmeltError implements FrbException {
@@ -39,8 +39,11 @@ enum SmeltErrorKind {
   /// 配对串格式不对、endpoint / relay 不合法，或配对码无效、已过期。
   invalidPairing,
 
-  /// 两端版本对不上（协议版本不兼容、运行时太旧缺方法或字段）。要升级其中一端。
-  incompatible,
+  /// 运行时比这个 App 旧：协议版本不够，或缺方法、缺字段。要升级那台机器上的 Smelt。
+  runtimeOutdated,
+
+  /// 这个 App 比运行时旧，认不了它的协议。要升级 App。
+  appOutdated,
 
   /// 这次连接请求被更新的 connect / pair / disconnect 取代，结果已作废。
   cancelled,

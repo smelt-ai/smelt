@@ -71,8 +71,12 @@ void main() {
         l10n.machinesPairErrorExpired,
       );
       expect(
-        pairingFailureText(l10n, e(SmeltErrorKind.incompatible)),
-        l10n.machinesPairErrorIncompatible,
+        pairingFailureText(l10n, e(SmeltErrorKind.runtimeOutdated)),
+        l10n.machinesPairErrorRuntimeOutdated,
+      );
+      expect(
+        pairingFailureText(l10n, e(SmeltErrorKind.appOutdated)),
+        l10n.machinesPairErrorAppOutdated,
       );
       expect(
         pairingFailureText(l10n, e(SmeltErrorKind.offline)),
@@ -106,11 +110,29 @@ void main() {
       );
       expect(
         checkPairingCode(
-          _ParseBackend(e(SmeltErrorKind.incompatible)),
+          _ParseBackend(e(SmeltErrorKind.appOutdated)),
           l10n,
           'smelt+iroh://new',
         ),
-        l10n.machinesPairErrorIncompatible,
+        l10n.machinesPairErrorAppOutdated,
+      );
+    });
+  });
+
+  group('版本不兼容说清该升级哪一边', () {
+    RuntimeStatus stopped(SmeltErrorKind kind) => RuntimeStatus(
+      state: ConnectionState.disconnected,
+      error: SmeltError(kind: kind, message: 'x'),
+    );
+
+    test('那台机器旧说机器要升级，App 旧说 App 要升级', () {
+      expect(
+        linkLabel(l10n, stopped(SmeltErrorKind.runtimeOutdated)),
+        l10n.machineRuntimeOutdated,
+      );
+      expect(
+        linkLabel(l10n, stopped(SmeltErrorKind.appOutdated)),
+        l10n.machineAppOutdated,
       );
     });
   });
