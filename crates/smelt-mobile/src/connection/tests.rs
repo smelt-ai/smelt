@@ -5,6 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
+use smelt_event_protocol::{
+    CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
+    EVENT_BUS_PROTOCOL_VERSION,
+};
 use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::control::{ControlError, ControlResponse};
 use smelt_runtime_client::protocol::write_json_line;
@@ -36,6 +40,8 @@ struct FakeRuntime {
     /// 各链路登记的连接变化回调。
     watchers: Mutex<Vec<OnLinkChange>>,
     rtt_ms: Mutex<Option<u32>>,
+    /// `system.describe` 报的事件总线协议版本，默认和这份构建相同。
+    event_protocol: Mutex<u16>,
 }
 
 impl FakeRuntime {
@@ -50,6 +56,7 @@ impl FakeRuntime {
             links: AtomicUsize::new(0),
             watchers: Mutex::new(Vec::new()),
             rtt_ms: Mutex::new(None),
+            event_protocol: Mutex::new(EVENT_BUS_PROTOCOL_VERSION),
         })
     }
 
@@ -137,6 +144,12 @@ impl FakeRuntime {
                             "runtime_id": self.runtime_id,
                             "os": "linux",
                             "hostname": "linux-box",
+                        },
+                        "events": {
+                            "protocol_version": *self.event_protocol.lock().unwrap(),
+                            "projection_version": CORE_PROJECTION_VERSION,
+                            "session_projection_version": CORE_SESSION_PROJECTION_VERSION,
+                            "session_state_schema_version": CORE_SESSION_STATE_SCHEMA_VERSION,
                         },
                     }),
                 ))
@@ -337,6 +350,72 @@ fn connect_to_an_unpaired_runtime_asks_for_pairing() {
     assert_eq!(stopped.endpoint_id.as_deref(), Some("ep-a"));
     assert_eq!(stopped.error.unwrap().kind, SmeltErrorKind::Unpaired);
     assert!(hub.current().is_none());
+}
+
+/// 运行时的事件协议和手机对不上时，会话目录订阅会一直被拒：连接时就判出该升级哪一边并
+/// 停下，不能连着却让界面一直「同步中」。
+struct Refused {
+    error: SmeltError,
+    stopped: ConnectionEvent,
+    runtime: Arc<FakeRuntime>,
+    /// 留着它，才看得出停下后还重不重连。
+    _hub: ConnectionHub,
+}
+
+fn connect_with_event_protocol(version: u16) -> Refused {
+    let runtime = FakeRuntime::paired("runtime-a");
+    *runtime.event_protocol.lock().unwrap() = version;
+    let dialer = FakeDialer(vec![("ep-a".into(), Arc::clone(&runtime))]);
+    let hub = ConnectionHub::new(FAST);
+    let events = record(&hub);
+
+    let error = hub.connect(&dialer, target("ep-a")).unwrap_err();
+
+    assert!(hub.current().is_none());
+    let stopped = last(&events);
+    assert_eq!(stopped.state, ConnectionState::Disconnected);
+    Refused {
+        error,
+        stopped,
+        runtime,
+        _hub: hub,
+    }
+}
+
+#[test]
+fn connect_to_an_older_runtime_stops_and_asks_to_upgrade_it() {
+    let refused = connect_with_event_protocol(EVENT_BUS_PROTOCOL_VERSION - 1);
+
+    assert_eq!(refused.error.kind, SmeltErrorKind::RuntimeOutdated);
+    assert!(
+        refused.error.message.contains("需要升级运行时"),
+        "{}",
+        refused.error.message
+    );
+    assert_eq!(
+        refused.stopped.error.unwrap().kind,
+        SmeltErrorKind::RuntimeOutdated
+    );
+    // 重试也不会好，不再重连。
+    let attempts = refused.runtime.links.load(Ordering::SeqCst);
+    std::thread::sleep(SETTLE);
+    assert_eq!(refused.runtime.links.load(Ordering::SeqCst), attempts);
+}
+
+#[test]
+fn connect_to_a_newer_runtime_stops_and_asks_to_upgrade_the_app() {
+    let refused = connect_with_event_protocol(EVENT_BUS_PROTOCOL_VERSION + 1);
+
+    assert_eq!(refused.error.kind, SmeltErrorKind::AppOutdated);
+    assert!(
+        refused.error.message.contains("需要升级客户端"),
+        "{}",
+        refused.error.message
+    );
+    assert_eq!(
+        refused.stopped.error.unwrap().kind,
+        SmeltErrorKind::AppOutdated
+    );
 }
 
 #[test]

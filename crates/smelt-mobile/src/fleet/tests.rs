@@ -206,6 +206,14 @@ impl FakeRuntime {
                             "os": "linux",
                             "hostname": self.hostname,
                         },
+                        "events": {
+                            "protocol_version": smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
+                            "projection_version": smelt_event_protocol::CORE_PROJECTION_VERSION,
+                            "session_projection_version":
+                                smelt_event_protocol::CORE_SESSION_PROJECTION_VERSION,
+                            "session_state_schema_version":
+                                smelt_event_protocol::CORE_SESSION_STATE_SCHEMA_VERSION,
+                        },
                     }),
                 ))
                 .unwrap()

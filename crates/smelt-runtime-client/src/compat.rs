@@ -1,7 +1,8 @@
-//! 桌面和运行时的版本协商（设计文档 D7）。连上运行时先读 `system.describe`，对照这个
-//! 桌面要用的控制方法和事件投影版本，对不上就是不兼容，并说清该升级哪一边。不对的话，
-//! 运行时较新时订阅解不出投影，断开重连没有尽头，会话状态永远到不了；较旧时各处零散地
-//! 报 MethodNotFound。说明里带着运行时的版本，看得出它是哪个版本。
+//! 客户端（桌面、手机）和运行时的版本协商（设计文档 D7）。连上运行时先读
+//! `system.describe`，对照客户端要用的控制方法和事件投影版本，对不上就是不兼容，并说清
+//! 该升级哪一边。不对的话，订阅被拒或解不出投影，重订没有尽头，会话目录永远到不了，界面
+//! 只能一直「同步中」；控制方法缺了则各处零散地报 MethodNotFound。说明里带着运行时的
+//! 版本，看得出它是哪个版本。
 
 use std::fmt;
 
@@ -9,15 +10,15 @@ use smelt_event_protocol::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
     EVENT_BUS_PROTOCOL_VERSION,
 };
-use smelt_runtime_client::protocol::control::{
-    CONTROL_API_VERSION, ControlMethod, SystemDescribeResult,
-};
+
+use crate::protocol::control::{CONTROL_API_VERSION, ControlMethod, SystemDescribeResult};
 
 /// 该升级的一边。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outdated {
     Runtime,
-    Desktop,
+    /// 这一端：桌面或手机。
+    Client,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,40 +37,58 @@ impl fmt::Display for Incompatibility {
                 "运行时 {} 较旧，需要升级运行时（{}）",
                 self.runtime_version, self.reason
             ),
-            Outdated::Desktop => write!(
+            Outdated::Client => write!(
                 f,
-                "运行时 {} 较新，需要升级桌面（{}）",
+                "运行时 {} 较新，需要升级客户端（{}）",
                 self.runtime_version, self.reason
             ),
         }
     }
 }
 
-/// 这个桌面能不能用这个运行时。
+/// 桌面能不能用这个运行时：控制方法加事件（[`check_events`]）。
 ///
-/// 控制方法：运行时支持的协议版本区间要包含桌面的，还要有全部必需方法（方法只增不改，
+/// 控制方法：运行时支持的协议版本区间要包含客户端的，还要有全部必需方法（方法只增不改，
 /// 缺了就是运行时旧）。可选方法（[`ControlMethod::OPTIONAL`]）缺了不算：只有那一项功能
-/// 用不了，由用它的地方降级，不能为此把整台机器的终端和对话都拦在外面。事件：总线协议和核心投影要相同，会话投影和会话状态事件
-/// 不能比桌面新（新字段都可缺省，桌面解得了更旧的）。
+/// 用不了，由用它的地方降级，不能为此把整台机器的终端和对话都拦在外面。
 pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
-    check_versions(described).map_err(|(outdated, reason)| Incompatibility {
+    with_runtime_version(
+        described,
+        check_control(described).and_then(|()| event_versions(described)),
+    )
+}
+
+/// 订阅解不解得了运行时推来的状态：总线协议和核心投影要相同，会话投影和会话状态事件不能比
+/// 客户端新（新字段都可缺省，解得了更旧的）。
+///
+/// 手机只对这一项：[`ControlMethod`] 的必需方法是按桌面的用法列的，手机只用其中一部分，
+/// 缺的方法由用到的地方报 MethodNotFound。
+pub fn check_events(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
+    with_runtime_version(described, event_versions(described))
+}
+
+fn with_runtime_version(
+    described: &SystemDescribeResult,
+    result: Result<(), (Outdated, String)>,
+) -> Result<(), Incompatibility> {
+    result.map_err(|(outdated, reason)| Incompatibility {
         outdated,
         runtime_version: described.daemon.version.clone(),
         reason,
     })
 }
 
-fn check_versions(described: &SystemDescribeResult) -> Result<(), (Outdated, String)> {
+fn check_control(described: &SystemDescribeResult) -> Result<(), (Outdated, String)> {
     let control = &described.control;
     if CONTROL_API_VERSION < control.min_supported_version {
-        return Err(desktop(format!(
+        return Err(client(format!(
             "控制协议 v{CONTROL_API_VERSION}，运行时至少要 v{}",
             control.min_supported_version
         )));
     }
     if CONTROL_API_VERSION > control.max_supported_version {
         return Err(runtime(format!(
-            "控制协议 v{}，桌面要 v{CONTROL_API_VERSION}",
+            "控制协议 v{}，客户端要 v{CONTROL_API_VERSION}",
             control.max_supported_version
         )));
     }
@@ -82,6 +101,10 @@ fn check_versions(described: &SystemDescribeResult) -> Result<(), (Outdated, Str
     if !missing.is_empty() {
         return Err(runtime(missing_methods(&missing)));
     }
+    Ok(())
+}
+
+fn event_versions(described: &SystemDescribeResult) -> Result<(), (Outdated, String)> {
     let Some(events) = &described.events else {
         return Err(runtime("没有声明事件协议版本".to_string()));
     };
@@ -112,27 +135,27 @@ fn runtime(reason: String) -> (Outdated, String) {
     (Outdated::Runtime, reason)
 }
 
-fn desktop(reason: String) -> (Outdated, String) {
-    (Outdated::Desktop, reason)
+fn client(reason: String) -> (Outdated, String) {
+    (Outdated::Client, reason)
 }
 
-fn same(label: &str, runtime_version: u16, desktop_version: u16) -> Result<(), (Outdated, String)> {
-    if runtime_version < desktop_version {
+fn same(label: &str, runtime_version: u16, client_version: u16) -> Result<(), (Outdated, String)> {
+    if runtime_version < client_version {
         return Err(runtime(format!(
-            "{label} v{runtime_version}，桌面要 v{desktop_version}"
+            "{label} v{runtime_version}，客户端要 v{client_version}"
         )));
     }
-    not_newer(label, runtime_version, desktop_version)
+    not_newer(label, runtime_version, client_version)
 }
 
 fn not_newer(
     label: &str,
     runtime_version: u16,
-    desktop_version: u16,
+    client_version: u16,
 ) -> Result<(), (Outdated, String)> {
-    if runtime_version > desktop_version {
-        return Err(desktop(format!(
-            "{label} v{runtime_version}，桌面只认到 v{desktop_version}"
+    if runtime_version > client_version {
+        return Err(client(format!(
+            "{label} v{runtime_version}，客户端只认到 v{client_version}"
         )));
     }
     Ok(())
@@ -150,14 +173,14 @@ fn missing_methods(missing: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use smelt_runtime_client::protocol::control::{
+    use crate::protocol::control::{
         CONTROL_API_MIN_SUPPORTED_VERSION, ControlProtocolDescription, DaemonRuntimeInfo,
         EventProtocolDescription,
     };
 
     use super::*;
 
-    /// 和这个桌面同一份构建的运行时会回的 describe。
+    /// 和这个客户端同一份构建的运行时会回的 describe。
     fn current() -> SystemDescribeResult {
         SystemDescribeResult {
             control: ControlProtocolDescription {
@@ -240,7 +263,7 @@ mod tests {
         let mut newer = current();
         newer.control.min_supported_version = CONTROL_API_VERSION + 1;
         newer.control.max_supported_version = CONTROL_API_VERSION + 1;
-        assert_eq!(outdated(&newer), Outdated::Desktop);
+        assert_eq!(outdated(&newer), Outdated::Client);
 
         let mut older = current();
         older.control.min_supported_version = 0;
@@ -260,7 +283,7 @@ mod tests {
     fn core_projection_must_match_exactly() {
         let mut newer = current();
         newer.events.as_mut().unwrap().projection_version = CORE_PROJECTION_VERSION + 1;
-        assert_eq!(outdated(&newer), Outdated::Desktop);
+        assert_eq!(outdated(&newer), Outdated::Client);
 
         let mut older = current();
         older.events.as_mut().unwrap().projection_version = CORE_PROJECTION_VERSION - 1;
@@ -268,7 +291,7 @@ mod tests {
 
         let mut bus = current();
         bus.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION + 1;
-        assert_eq!(outdated(&bus), Outdated::Desktop);
+        assert_eq!(outdated(&bus), Outdated::Client);
     }
 
     /// 会话投影的新字段都可缺省：旧的解得了，新的解不了。
@@ -282,7 +305,7 @@ mod tests {
         let mut newer = current();
         newer.events.as_mut().unwrap().session_projection_version =
             CORE_SESSION_PROJECTION_VERSION + 1;
-        assert_eq!(outdated(&newer), Outdated::Desktop);
+        assert_eq!(outdated(&newer), Outdated::Client);
 
         let mut newer_schema = current();
         newer_schema
@@ -290,7 +313,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .session_state_schema_version = CORE_SESSION_STATE_SCHEMA_VERSION + 1;
-        assert_eq!(outdated(&newer_schema), Outdated::Desktop);
+        assert_eq!(outdated(&newer_schema), Outdated::Client);
     }
 
     #[test]
@@ -301,5 +324,23 @@ mod tests {
             check(&described).unwrap_err().to_string(),
             "运行时 test 较旧，需要升级运行时（没有声明事件协议版本）"
         );
+    }
+
+    /// 手机只对事件：桌面的必需方法缺了不拦，事件协议对不上照样拦。
+    #[test]
+    fn check_events_ignores_control_methods_but_not_event_versions() {
+        let mut described = current();
+        described.control.methods.clear();
+        assert_eq!(check_events(&described), Ok(()));
+
+        let mut older = current();
+        older.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION - 1;
+        let error = check_events(&older).unwrap_err();
+        assert_eq!(error.outdated, Outdated::Runtime);
+        assert!(error.reason.contains("事件协议"), "{}", error.reason);
+
+        let mut newer = current();
+        newer.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION + 1;
+        assert_eq!(check_events(&newer).unwrap_err().outdated, Outdated::Client);
     }
 }

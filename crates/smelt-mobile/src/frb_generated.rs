@@ -3842,9 +3842,10 @@ impl SseDecode for crate::api::error::SmeltErrorKind {
             0 => crate::api::error::SmeltErrorKind::Unpaired,
             1 => crate::api::error::SmeltErrorKind::Offline,
             2 => crate::api::error::SmeltErrorKind::InvalidPairing,
-            3 => crate::api::error::SmeltErrorKind::Incompatible,
-            4 => crate::api::error::SmeltErrorKind::Cancelled,
-            5 => crate::api::error::SmeltErrorKind::Other,
+            3 => crate::api::error::SmeltErrorKind::RuntimeOutdated,
+            4 => crate::api::error::SmeltErrorKind::AppOutdated,
+            5 => crate::api::error::SmeltErrorKind::Cancelled,
+            6 => crate::api::error::SmeltErrorKind::Other,
             _ => unreachable!("Invalid variant for SmeltErrorKind: {}", inner),
         };
     }
@@ -5929,9 +5930,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::error::SmeltErrorKind {
             Self::Unpaired => 0.into_dart(),
             Self::Offline => 1.into_dart(),
             Self::InvalidPairing => 2.into_dart(),
-            Self::Incompatible => 3.into_dart(),
-            Self::Cancelled => 4.into_dart(),
-            Self::Other => 5.into_dart(),
+            Self::RuntimeOutdated => 3.into_dart(),
+            Self::AppOutdated => 4.into_dart(),
+            Self::Cancelled => 5.into_dart(),
+            Self::Other => 6.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -7868,9 +7870,10 @@ impl SseEncode for crate::api::error::SmeltErrorKind {
                 crate::api::error::SmeltErrorKind::Unpaired => 0,
                 crate::api::error::SmeltErrorKind::Offline => 1,
                 crate::api::error::SmeltErrorKind::InvalidPairing => 2,
-                crate::api::error::SmeltErrorKind::Incompatible => 3,
-                crate::api::error::SmeltErrorKind::Cancelled => 4,
-                crate::api::error::SmeltErrorKind::Other => 5,
+                crate::api::error::SmeltErrorKind::RuntimeOutdated => 3,
+                crate::api::error::SmeltErrorKind::AppOutdated => 4,
+                crate::api::error::SmeltErrorKind::Cancelled => 5,
+                crate::api::error::SmeltErrorKind::Other => 6,
                 _ => {
                     unimplemented!("");
                 }

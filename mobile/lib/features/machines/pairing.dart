@@ -48,7 +48,8 @@ String? checkPairingCode(Backend backend, L10n l10n, String uri) {
   } on SmeltError catch (error) {
     // 版本不兼容（配对串格式更新了）要说清楚是版本问题；其余一律是「这不是配对码」，
     // 用户扫到的多半是别的二维码，内核的英文细节对他没用。
-    return error.kind == SmeltErrorKind.incompatible
+    return error.kind == SmeltErrorKind.runtimeOutdated ||
+            error.kind == SmeltErrorKind.appOutdated
         ? pairingFailureText(l10n, error)
         : l10n.machinesPairNotACode;
   } catch (_) {

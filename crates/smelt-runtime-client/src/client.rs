@@ -135,7 +135,7 @@ impl RuntimeClient {
     ///
     /// 运行时不支持这个客户端的控制协议版本时，按它报的最高版本再问一次：
     /// `system.describe` 是冻结契约，哪个版本的回复都解得了。这样版本对不上的运行时也
-    /// 读得出它是什么版本，兼容与否交给调用方判断（`smelt_client::compat`）。
+    /// 读得出它是什么版本，兼容与否交给调用方判断（[`crate::compat`]）。
     pub fn describe(&self) -> Result<SystemDescribeResult, ControlClientError> {
         let params = EmptyParams::default();
         match self.call::<SystemDescribe>(&params, DEFAULT_REQUEST_TIMEOUT) {
