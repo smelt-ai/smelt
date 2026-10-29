@@ -610,6 +610,16 @@ impl AcpView {
                     composer_focus,
                     gpui::rgb(ui_theme::accent()),
                 ))
+                .debug_selector(|| "ACP_COMPOSER".into())
+                // 从访达拖进来的文件按「+」选文件处理：图片进待发缩略图，其它按 `@` 提及。
+                .drag_over::<gpui::ExternalPaths>(|style, _paths, _window, cx| {
+                    style
+                        .bg(cx.theme().drop_target)
+                        .border_color(cx.theme().drag_border)
+                })
+                .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                    this.attach_picked_paths(paths.paths().to_vec(), window, cx);
+                }))
                 .child(
                     div()
                         .id("acp-composer-input")

@@ -3397,6 +3397,71 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
     assert!(read.origin.y >= thought.origin.y + thought.size.height);
 }
 
+/// 访达里的图片拖到输入框上：收进待发缩略图，跟「+」选图一样。落在输入框外不收。
+#[gpui::test]
+fn image_dropped_on_the_composer_is_attached(cx: &mut gpui::TestAppContext) {
+    use gpui::{FileDropEvent, VisualTestContext};
+
+    let dir = std::env::temp_dir().join(format!("smelt-composer-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let image = dir.join("shot.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Claude,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: None,
+                reason: "composer drop".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-composer-drop".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view.init_input(window, cx);
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    draw_settled(cx);
+
+    let composer = cx
+        .debug_bounds("ACP_COMPOSER")
+        .expect("输入框应该画出来");
+    let outside = gpui::point(composer.origin.x + px(1.), composer.origin.y - px(20.));
+
+    let drop_at = |position: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext| {
+        cx.simulate_event(FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths(vec![image.clone()].into()),
+        });
+        draw_settled(cx);
+        cx.simulate_event(FileDropEvent::Submit { position });
+        draw_settled(cx);
+    };
+
+    drop_at(outside, cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.pending_images.len()),
+        0,
+        "落在输入框外不收"
+    );
+
+    drop_at(composer.center(), cx);
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.pending_images.len(), 1, "拖进来的图片进待发列表");
+        assert_eq!(view.pending_external_image_loads, 0);
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[gpui::test]
 fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext) {
     use gpui::VisualTestContext;

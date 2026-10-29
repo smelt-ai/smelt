@@ -3298,17 +3298,6 @@ impl Render for Workspace {
             .font_family(settings::resolved_ui_font_family(
                 cx.global::<Appearance>(),
             ))
-            .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
-                style
-                    .bg(cx.theme().drop_target)
-                    .border_2()
-                    .border_color(cx.theme().drag_border)
-            })
-            .on_drop::<ExternalPaths>(cx.listener(
-                |this, paths: &ExternalPaths, _window, cx| {
-                    this.open_paths(paths.paths(), cx);
-                },
-            ))
             // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
             // window 的 focus 兜底钉在这层，保证 Workspace 键位 context 在 dispatch 路径上。
             .track_focus(&self.focus_handle)

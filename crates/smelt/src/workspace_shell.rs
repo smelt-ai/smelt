@@ -7,15 +7,15 @@
 //! 终端分屏是舞台里另一个 Dock（`term_dock`），锁住外层它的标签才不会被放进侧栏。
 
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Pixels, Subscription,
-    WeakEntity, Window, div, prelude::*, px, rgb,
+    AnyElement, App, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, Pixels,
+    Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::dock::{
     BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle,
     register_panel,
 };
 
-use gpui_component::Icon;
+use gpui_component::{ActiveTheme, Icon};
 use gpui_component::empty::{
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
@@ -490,6 +490,13 @@ impl Workspace {
             .child(
                 workspace_frame::card(surface)
                     .pt(workspace_frame::TOP_BAR_HEIGHT)
+                    // 从访达拖文件夹进侧栏 = 打开项目。只认侧栏，不挂整个窗口：对话输入框要自己收文件。
+                    .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
+                        style.bg(cx.theme().drop_target)
+                    })
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                        this.open_paths(paths.paths(), cx);
+                    }))
                     .child(list)
                     .child(workspace_frame::with_window_drag(
                         div()
