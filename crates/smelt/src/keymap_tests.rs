@@ -103,9 +103,10 @@ fn unknown_actions_and_broken_keystrokes_fall_back_to_defaults() {
             action_id: "no_such_action".to_string(),
             keystroke: Some("cmd-l".to_string()),
         },
+        // 不认识的修饰键解析不了。`cmd-` 倒是合法的：⌘ 加减号键。
         KeyBindingRecord {
             action_id: "split_beside".to_string(),
-            keystroke: Some("cmd-".to_string()),
+            keystroke: Some("hyper-k".to_string()),
         },
     ]);
     assert_eq!(
