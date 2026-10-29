@@ -1281,8 +1281,11 @@ impl Render for TerminalView {
                 // 可用网格区 = 自身尺寸减去左右 / 上下各一份内边距。
                 let cols = (((w - 2.0 * PAD_X) / cell_w).floor() as usize).clamp(4, 1000);
                 let grid_rows = (((h - 2.0 * PAD_Y) / line_px()).floor() as usize).clamp(2, 1000);
-                let cell_w_px = cell_w.round().clamp(1.0, 64.0) as u16;
-                let cell_h_px = line_px().round().clamp(1.0, 128.0) as u16;
+                // 报给守护的格子尺寸是设备像素（同 Ghostty、kitty）：程序按它回答尺寸查询、算
+                // 图片原尺寸占几格、填 TIOCGWINSZ 的像素宽高。在设备像素上取整，比例误差也小。
+                let scale = window.scale_factor();
+                let cell_w_px = (cell_w * scale).round().clamp(1.0, 256.0) as u16;
+                let cell_h_px = (line_px() * scale).round().clamp(1.0, 256.0) as u16;
                 if self.pty_kick_pending || focus_claim {
                     // 首帧 / reattach：无条件发 resize（含真实 cell 像素）。
                     // 守护 jolt 用 cell=0；普通 resize 同尺寸会早退——两处都补不到像素。

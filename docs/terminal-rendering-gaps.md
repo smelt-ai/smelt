@@ -76,7 +76,7 @@
 | **鼠标 click/drag** | `MOUSE_MODE && !Shift`：press / drag / release；**Shift 旁路**本地框选；双击/三击永远本地 |
 | **中/右键** | button 1/2 转发给应用；中键未开鼠标时粘贴剪贴板 |
 | **MOUSE_MOTION 悬停** | 无键时 button 35（仅 `MOUSE_MOTION` 全开） |
-| **resize 像素** | type 1 帧 16 字节：cols/rows/cell_w/cell_h；smeltd 写 `ws_xpixel=cols*cw` |
+| **resize 像素** | type 1 帧 16 字节：cols/rows/cell_w/cell_h。格子尺寸是设备像素（同 Ghostty、kitty；桌面乘 `scale_factor`，手机乘 `devicePixelRatio`），在设备像素上取整；smeltd 写 `ws_xpixel=cols*cw` |
 | **OSC 52** | 只写：`ClipboardStore` → `pbcopy`（macOS）。读取在 `term_config` 里显式设 `Osc52::OnlyCopy` 关掉，有意不做：任何程序（含远程运行时上的）都能借它静默读走本机剪贴板 |
 | **程序查询的应答** | 守护的网格是唯一权威画面，查询都由它答（同 Ghostty 由终端自己答）：设备属性、光标位置、键盘和模式状态、`CSI 14/18 t` 走 alacritty 事件入队、泵释放网格锁后写回；vte 不认的 `CSI 16/19 t` 由切分器挑出。会话按 24×80、没有像素先起，桌面排版完才报格子尺寸；要格子像素的 `CSI 14/16 t` 赶在这之前就先记下，报来时按先后补答（Pi 一启动就问）。桌面开几个都只答一次，没桌面连着也有人答。握手声明 `daemon_answers_queries` 后桌面的 EventProxy 不再答；旧守护只声明颜色或什么都没声明时，没声明的那类仍由桌面兜底。尺寸变化主动上报（mode 2048）未做 |
 | **take_damage 光标** | 记上一帧光标；静止滤「仅光标格」，移动不算吞 |
