@@ -9,6 +9,7 @@ use smelt_core::agent_event::{
     AGENT_EVENT_MIN_VERSION, AGENT_EVENT_VERSION, AgentEvent, AgentEventKind, Occupancy,
 };
 use smelt_core::agent_kind::TerminalAgentKind;
+use smelt_core::osc::{ProgramBlockedKind, ProgramState, ProgramStatus};
 
 pub(crate) fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -18,8 +19,9 @@ pub(crate) fn now_unix() -> u64 {
 }
 
 /// 会话状态通道（见 docs/notification-architecture.md）。只有 hook 事件归约
-/// （`agent_event` op）和 ACP 投影能改变 phase。OSC 不是会话名，BEL 只作信息
-/// 通知。schema 定死，字段不够用再加，不删不改类型——远程端/GUI 都按这份 schema 解码。
+/// （`agent_event` op）、OSC 7501 程序状态和 ACP 投影能改变 phase。OSC 标题不是会话名，
+/// BEL 和 OSC 9/99/777 只作信息通知。schema 定死，字段不够用再加，不删不改类型——远程端/GUI
+/// 都按这份 schema 解码。
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct SessionState {
     pub(crate) id: String,
@@ -76,10 +78,10 @@ pub(crate) struct SessionState {
     /// 广播仍可能被线程调度倒序；订阅端用它拒绝旧快照覆盖新事实。
     pub(crate) revision: u64,
     pub(crate) updated_at: u64,
-    /// 已收到 smelt-notify 的结构化 hook 事件。SessionStart 就会置位，用来关掉
-    /// OSC/BEL 双通知；单独还不表示相位已经权威。
+    /// 已收到 smelt-notify 的结构化 hook 事件或 OSC 7501 程序状态。SessionStart 就会置位，
+    /// 用来关掉 OSC/BEL 双通知；单独还不表示相位已经权威。
     pub(crate) structured_events: bool,
-    /// 已收到回合级 hook / ACP 生命周期事件。
+    /// 已收到回合级 hook / OSC 7501 / ACP 生命周期事件。
     #[serde(default)]
     pub(crate) turn_events: bool,
     /// 最近收到的归一化 hook 协议版本；尚未收到结构化事件时为 None。
@@ -87,6 +89,11 @@ pub(crate) struct SessionState {
     /// 等待状态的来源身份，仅供 reducer 防止无关子任务/工具完成误清等待。
     #[serde(skip)]
     pub(crate) active_blocker: Option<AgentBlocker>,
+    /// 终端里的程序在用 OSC 7501 报状态，相位以它为准：它自己把后台子智能体、自动重试
+    /// 都算进去了。hook 这时只在「在跑」里细分思考 / 执行工具，以及报进程退出。
+    /// 根记录被 `clear`、进程退出时交还给 hook。
+    #[serde(skip)]
+    pub(crate) program_status: bool,
     /// 本进程是否仍持有 PTY/ACP 运行时。与客户端是否 attach（list 里的 connected）
     /// 正交。崩溃恢复的幽灵会话为 false；活会话缺省 true。
     pub(crate) runtime: bool,
@@ -141,6 +148,7 @@ impl Default for SessionState {
             turn_events: false,
             agent_event_version: None,
             active_blocker: None,
+            program_status: false,
             runtime: true,
         }
     }
@@ -203,6 +211,8 @@ impl Phase {
 pub(crate) enum PhaseSource {
     /// Claude / Codex / Copilot / Antigravity 的归一化 hook。
     Hook,
+    /// 终端里的程序用 OSC 7501 报的根记录。
+    ProgramStatus,
     /// ACP 归约结果投影到会话相位。
     AcpProjection,
 }
@@ -311,13 +321,25 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
         .active_blocker
         .as_ref()
         .is_none_or(|blocker| event_matches_blocker(blocker, event));
-    let allow = occupancy.allows_phase_change(
-        state.phase.is_dead(),
-        state.phase.turn_closed(),
-        state.phase.is_finished(),
-        waiting,
-        matching_blocker,
-    );
+    let allow = if state.program_status {
+        // 回合开始、等待、完成都由 7501 说了算；hook 只在它报「在跑」时细分思考和执行
+        // 工具（7501 不带工具名），以及报进程退出。迟到的工具事件碰上已完成也不会重开。
+        match occupancy {
+            Occupancy::ResumeWork { .. } | Occupancy::Progress { .. } => {
+                matches!(state.phase, Phase::Thinking | Phase::ExecutingTool)
+            }
+            Occupancy::EndProcess => !state.phase.is_finished(),
+            _ => false,
+        }
+    } else {
+        occupancy.allows_phase_change(
+            state.phase.is_dead(),
+            state.phase.turn_closed(),
+            state.phase.is_finished(),
+            waiting,
+            matching_blocker,
+        )
+    };
 
     if let Some(provider) = TerminalAgentKind::from_id(event.provider.trim()) {
         state.provider = Some(provider.id().to_string());
@@ -329,7 +351,9 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
     // 回合已关闭之后的迟到进度不放行，也不把退出标记抹掉。
     if occupancy == Occupancy::EndProcess {
         state.cli_exited = true;
-    } else if event.kind == AgentEventKind::SessionStarted || allow {
+        // 进程退出，它报的记录跟着作废（7501 规范要求丢掉 working / blocked）。
+        state.program_status = false;
+    } else if event.kind == AgentEventKind::SessionStarted || allow || state.program_status {
         state.cli_exited = false;
     }
 
@@ -344,9 +368,11 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
             }
         }
         Occupancy::OpenTurn => {
-            let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Thinking);
-            state.pending_question = None;
-            state.active_blocker = None;
+            if allow {
+                let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Thinking);
+                state.pending_question = None;
+                state.active_blocker = None;
+            }
             note_prompt_fallback(state, event);
         }
         Occupancy::ResumeWork {
@@ -422,6 +448,81 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
     if state.phase != previous_phase {
         state.phase_since = now_unix();
     }
+    state.updated_at = now_unix();
+    bump_state_revision(state);
+    true
+}
+
+/// 将终端里的程序用 OSC 7501 报的根记录归约进会话。返回是否有变化。
+///
+/// 规范：<https://www.superlogical.com/rex/docs/build/program-status>。报告内容不可信，
+/// 只决定显示的状态。`blocked` 会让远程审批快捷操作可用，那只是防误发按键的门闩，不是
+/// 权限边界（见 docs/notification-architecture.md）。报过一次之后相位就以它为准，见
+/// [`SessionState::program_status`]。
+pub(crate) fn apply_program_status(state: &mut SessionState, status: &ProgramStatus) -> bool {
+    let before = (
+        state.phase,
+        state.pending_question.clone(),
+        state.program_status,
+    );
+    let message = status.message.clone();
+    match status.state {
+        ProgramState::Working => {
+            // 已经在跑就留着 hook 细分出的执行工具和工具名，只在有说明时换说明。
+            if matches!(state.phase, Phase::Thinking | Phase::ExecutingTool) {
+                if message.is_some() {
+                    state.pending_question = message;
+                }
+            } else {
+                let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Thinking);
+                state.pending_question = message;
+            }
+        }
+        ProgramState::Blocked => {
+            let next = match status.kind {
+                Some(ProgramBlockedKind::Permission) => Phase::AwaitingApproval,
+                Some(ProgramBlockedKind::Question | ProgramBlockedKind::Auth) | None => {
+                    Phase::WaitingForUser
+                }
+            };
+            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, next);
+            state.pending_question = message;
+        }
+        ProgramState::Done => {
+            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Succeeded);
+            state.pending_question = message;
+        }
+        ProgramState::Error => {
+            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Failed);
+            state.pending_question = message;
+        }
+        ProgramState::Idle => {
+            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Idle);
+            state.pending_question = None;
+        }
+        // 程序撤掉了全部记录（退出前会这样做）：没有状态了，相位交还给 hook。进程已经退出
+        // 的不复活。
+        ProgramState::Clear => {
+            if !state.phase.is_dead() {
+                let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Idle);
+            }
+            state.pending_question = None;
+        }
+    }
+    state.active_blocker = None;
+    state.program_status = status.state != ProgramState::Clear;
+    if before
+        == (
+            state.phase,
+            state.pending_question.clone(),
+            state.program_status,
+        )
+    {
+        return false;
+    }
+    // 跟 hook 一样：这是程序明确报出的回合状态，客户端据此判断相位可信、关掉终端通知兜底。
+    state.structured_events = true;
+    state.turn_events = true;
     state.updated_at = now_unix();
     bump_state_revision(state);
     true
@@ -955,5 +1056,119 @@ mod agent_event_reducer_tests {
         );
         assert_eq!(state.conversation_id.as_deref(), Some("conv-2"));
         assert_eq!(state.title, None);
+    }
+}
+
+#[cfg(test)]
+mod program_status_tests {
+    use super::*;
+
+    fn report(state: ProgramState) -> ProgramStatus {
+        ProgramStatus {
+            state,
+            kind: None,
+            app: Some("claude-code".to_string()),
+            message: None,
+        }
+    }
+
+    fn hook(kind: AgentEventKind) -> AgentEvent {
+        AgentEvent::new("claude", kind)
+    }
+
+    /// 实测 Claude Code 2.1.312 派两个后台子智能体：主回合说完就发 Stop，7501 根记录却一直
+    /// working，等子智能体都结束、主回合汇总完才 done。相位跟 7501 走，hook 只细分工具。
+    #[test]
+    fn claude_background_subagents_stay_running_until_the_program_reports_done() {
+        let mut state = SessionState::default();
+        assert!(apply_program_status(
+            &mut state,
+            &report(ProgramState::Idle)
+        ));
+        assert!(state.program_status && state.structured_events && state.turn_events);
+        assert_eq!(state.phase, Phase::Idle);
+
+        apply_agent_event(&mut state, &hook(AgentEventKind::PromptSubmitted));
+        assert_eq!(state.phase, Phase::Idle, "回合开始由 7501 报");
+        apply_program_status(&mut state, &report(ProgramState::Working));
+        assert_eq!(state.phase, Phase::Thinking);
+
+        let mut tool = hook(AgentEventKind::ToolStarted);
+        tool.message = Some("Agent".into());
+        apply_agent_event(&mut state, &tool);
+        assert_eq!(state.phase, Phase::ExecutingTool, "hook 细分出执行工具");
+        assert_eq!(state.pending_question.as_deref(), Some("Agent"));
+        apply_agent_event(&mut state, &hook(AgentEventKind::ToolFinished));
+        assert_eq!(state.phase, Phase::Thinking);
+
+        // 主回合 Stop：没带后台快照的 Stop 也不能判完成。
+        apply_agent_event(&mut state, &hook(AgentEventKind::TurnSucceeded));
+        assert_eq!(state.phase, Phase::Thinking);
+        assert!(
+            !apply_program_status(&mut state, &report(ProgramState::Working)),
+            "同样的报告不重复广播"
+        );
+
+        assert!(apply_program_status(
+            &mut state,
+            &report(ProgramState::Done)
+        ));
+        assert_eq!(state.phase, Phase::Succeeded);
+        apply_agent_event(&mut state, &hook(AgentEventKind::ToolStarted));
+        assert_eq!(state.phase, Phase::Succeeded, "迟到的工具事件不重开");
+    }
+
+    #[test]
+    fn blocked_kinds_map_to_waits_and_keep_the_reason() {
+        let mut state = SessionState::default();
+        for (kind, phase) in [
+            (
+                Some(ProgramBlockedKind::Permission),
+                Phase::AwaitingApproval,
+            ),
+            (Some(ProgramBlockedKind::Question), Phase::WaitingForUser),
+            (Some(ProgramBlockedKind::Auth), Phase::WaitingForUser),
+            (None, Phase::WaitingForUser),
+        ] {
+            apply_program_status(
+                &mut state,
+                &ProgramStatus {
+                    kind,
+                    message: Some("运行 rm -rf build".into()),
+                    ..report(ProgramState::Blocked)
+                },
+            );
+            assert_eq!(state.phase, phase, "{kind:?}");
+            assert_eq!(state.pending_question.as_deref(), Some("运行 rm -rf build"));
+        }
+        // hook 的审批请求不改 7501 报的相位。
+        apply_program_status(&mut state, &report(ProgramState::Working));
+        apply_agent_event(&mut state, &hook(AgentEventKind::ApprovalRequested));
+        assert_eq!(state.phase, Phase::Thinking);
+        apply_program_status(&mut state, &report(ProgramState::Error));
+        assert_eq!(state.phase, Phase::Failed);
+    }
+
+    #[test]
+    fn clear_and_process_exit_hand_the_phase_back_to_hooks() {
+        let mut state = SessionState::default();
+        apply_program_status(&mut state, &report(ProgramState::Working));
+        apply_program_status(&mut state, &report(ProgramState::Clear));
+        assert!(!state.program_status);
+        assert_eq!(state.phase, Phase::Idle);
+        apply_agent_event(&mut state, &hook(AgentEventKind::PromptSubmitted));
+        assert_eq!(state.phase, Phase::Thinking, "交还后 hook 照旧开回合");
+
+        apply_program_status(&mut state, &report(ProgramState::Working));
+        apply_agent_event(&mut state, &hook(AgentEventKind::SessionEnded));
+        assert!(!state.program_status);
+        assert_eq!(state.phase, Phase::Dead, "进程退出时 working 作废");
+        assert!(state.cli_exited);
+        apply_program_status(&mut state, &report(ProgramState::Clear));
+        assert_eq!(state.phase, Phase::Dead, "退出后迟到的 clear 不复活");
+
+        apply_program_status(&mut state, &report(ProgramState::Idle));
+        assert_eq!(state.phase, Phase::Idle, "同一个 shell 里又起了程序");
+        assert!(state.program_status);
     }
 }

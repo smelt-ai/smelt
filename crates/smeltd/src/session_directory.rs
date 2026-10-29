@@ -124,6 +124,7 @@ impl SessionRecord {
             turn_events: self.turn_events,
             agent_event_version: self.agent_event_version,
             active_blocker: None,
+            program_status: false,
             runtime: false,
         };
         // 留下的终端也顶着用户给那段对话起的名字。
@@ -498,6 +499,7 @@ mod tests {
                 agent_id: None,
                 tool_name: None,
             }),
+            program_status: false,
             runtime: true,
         }
     }
