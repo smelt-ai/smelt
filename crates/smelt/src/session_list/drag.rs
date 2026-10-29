@@ -279,11 +279,7 @@ fn update_proj_drop_hint(
     }
 }
 
-pub(super) fn with_session_drag<E>(
-    row: E,
-    payload: SessionDrag,
-    workspace: Entity<Workspace>,
-) -> E
+pub(super) fn with_session_drag<E>(row: E, payload: SessionDrag, workspace: Entity<Workspace>) -> E
 where
     E: StatefulInteractiveElement,
 {
@@ -300,11 +296,7 @@ where
     })
 }
 
-pub(super) fn with_project_drag<E>(
-    row: E,
-    payload: ProjectDrag,
-    workspace: Entity<Workspace>,
-) -> E
+pub(super) fn with_project_drag<E>(row: E, payload: ProjectDrag, workspace: Entity<Workspace>) -> E
 where
     E: StatefulInteractiveElement,
 {

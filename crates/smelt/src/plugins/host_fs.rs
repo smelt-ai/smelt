@@ -580,7 +580,6 @@ mod tests {
         assert!(host.lstat(&escape).is_err());
     }
 
-
     #[test]
     fn lstat_readlink_and_unlink_act_on_the_link_itself() {
         let sandbox = Sandbox::new();
@@ -620,10 +619,17 @@ mod tests {
             comparable_path(&host.realpath(&sandbox.s("out")).unwrap()),
             outside.as_str()
         );
-        host.rename(&sandbox.s("out"), &sandbox.outside.join("moved").to_string_lossy())
-            .unwrap();
+        host.rename(
+            &sandbox.s("out"),
+            &sandbox.outside.join("moved").to_string_lossy(),
+        )
+        .unwrap();
         assert_eq!(
-            kind(host.lstat(&sandbox.outside.join("moved").to_string_lossy()).unwrap()).as_deref(),
+            kind(
+                host.lstat(&sandbox.outside.join("moved").to_string_lossy())
+                    .unwrap()
+            )
+            .as_deref(),
             Some("symlink")
         );
     }

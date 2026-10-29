@@ -1038,6 +1038,8 @@ pub fn force_end(state: &mut AcpSessionState, kind: AcpEndKind, msg: impl Into<S
     state.phase = DaemonPhase::Dead;
     state.end_reason = msg.into();
     state.end_kind = kind;
+    // 进程没了就不可能还在压缩。结束事件没送到时，这里不清会一直转圈。
+    state.compacting = false;
 }
 
 /// 「重新开始」/新建时的相位重置：跟旧版 `AcpView::restart` 里那几行对应（cmd/
@@ -1054,6 +1056,7 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.completed_unread = false;
     state.turn_outcome = None;
     state.provider_retry = None;
+    state.compacting = false;
     state.notice = None;
     state.awaiting_user_echo = false;
     state.cancelled_tool_call_ids.clear();
@@ -1206,10 +1209,11 @@ pub fn undo_prompt_sent(
 
 /// 换上一条新的用户提示。id 取毫秒时间且严格大于上一条：进程重启后也不会撞上
 /// 客户端已经关掉的那条。
-pub fn raise_notice(state: &mut AcpSessionState, text: String) {
+pub fn raise_notice(state: &mut AcpSessionState, kind: AcpNoticeKind, text: String) {
     let floor = state.notice.as_ref().map_or(0, |notice| notice.id + 1);
     state.notice = Some(AcpNoticeView {
         id: unix_time_ms().max(floor),
+        kind,
         text,
     });
 }
@@ -1236,6 +1240,24 @@ pub fn note_provider_still_running(state: &mut AcpSessionState) {
 pub fn clear_provider_queue_status(state: &mut AcpSessionState) {
     if state.status_line.as_deref() == Some(PROVIDER_STILL_RUNNING_STATUS) {
         state.status_line = None;
+    }
+}
+
+/// 压缩进度只看 `compacting`，不写状态行：状态行只放启动进度，结果和失败走提示。
+fn apply_compaction(
+    state: &mut AcpSessionState,
+    running: bool,
+    used: Option<u64>,
+    size: Option<u64>,
+) {
+    state.compacting = running;
+    // 驱动不知道模型窗口时，沿用已知用量的窗口。Pi 压缩后的统计会回空用量，
+    // 这里不更新的话，压缩前的用量要等下一次模型回复才换掉。
+    if let Some(used) = used
+        && let Some(size) = size.or(state.usage.map(|(_, window)| window))
+        && size > 0
+    {
+        state.usage = Some((used, size));
     }
 }
 

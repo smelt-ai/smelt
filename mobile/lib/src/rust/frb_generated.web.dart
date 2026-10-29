@@ -14,12 +14,9 @@ import 'api/fleet.dart';
 import 'api/identity.dart';
 import 'api/pass.dart';
 import 'api/terminal.dart';
-
 import 'dart:async';
 import 'dart:convert';
-
 import 'frb_generated.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_web.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
@@ -122,6 +119,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ConversationImage dco_decode_box_autoadd_conversation_image(dynamic raw);
 
   @protected
+  ConversationNotice dco_decode_box_autoadd_conversation_notice(dynamic raw);
+
+  @protected
   ConversationView dco_decode_box_autoadd_conversation_view(dynamic raw);
 
   @protected
@@ -204,6 +204,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage dco_decode_conversation_image(dynamic raw);
+
+  @protected
+  ConversationNotice dco_decode_conversation_notice(dynamic raw);
 
   @protected
   ConversationPhase dco_decode_conversation_phase(dynamic raw);
@@ -401,6 +404,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage? dco_decode_opt_box_autoadd_conversation_image(dynamic raw);
+
+  @protected
+  ConversationNotice? dco_decode_opt_box_autoadd_conversation_notice(
+    dynamic raw,
+  );
 
   @protected
   ConversationView? dco_decode_opt_box_autoadd_conversation_view(dynamic raw);
@@ -698,6 +706,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ConversationNotice sse_decode_box_autoadd_conversation_notice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ConversationView sse_decode_box_autoadd_conversation_view(
     SseDeserializer deserializer,
   );
@@ -798,6 +811,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage sse_decode_conversation_image(SseDeserializer deserializer);
+
+  @protected
+  ConversationNotice sse_decode_conversation_notice(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ConversationPhase sse_decode_conversation_phase(SseDeserializer deserializer);
@@ -1047,6 +1065,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage? sse_decode_opt_box_autoadd_conversation_image(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationNotice? sse_decode_opt_box_autoadd_conversation_notice(
     SseDeserializer deserializer,
   );
 
@@ -1409,6 +1432,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_conversation_notice(
+    ConversationNotice self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_conversation_view(
     ConversationView self,
     SseSerializer serializer,
@@ -1555,6 +1584,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_conversation_image(
     ConversationImage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_notice(
+    ConversationNotice self,
     SseSerializer serializer,
   );
 
@@ -1870,6 +1905,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_conversation_image(
     ConversationImage? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_conversation_notice(
+    ConversationNotice? self,
     SseSerializer serializer,
   );
 

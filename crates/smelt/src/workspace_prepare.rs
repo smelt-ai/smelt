@@ -95,7 +95,6 @@ impl Workspace {
         self.sync_capabilities_view(window, cx);
         self.sync_notification_surfaces(cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
-        self.refresh_history_titles(cx);
 
         if let Some(root) = self.active_project_root(cx) {
             self.ensure_git_watch(root, cx);

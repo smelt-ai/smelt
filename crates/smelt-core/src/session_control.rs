@@ -14,28 +14,8 @@ use crate::control_api::SessionList;
 use serde_json::{Value, json};
 use smelt_runtime_client::protocol::control::EmptyParams;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
-use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
 use std::time::Duration;
-
-/// The daemon-owned durable catalog for remote-created sessions.
-///
-/// 远程 ACP / 终端会话共用一份类型化快照。只有本对象写入；损坏数据会显式报错，
-/// 不能伪装成空目录。
-#[derive(Debug)]
-pub struct RemoteSessionCatalog {
-    acp_path: Option<PathBuf>,
-    terminal_path: Option<PathBuf>,
-    acp_sessions: Vec<RemoteAcpSession>,
-    terminal_sessions: Vec<RemoteTerminalSession>,
-    revision: u64,
-}
-
-fn smelt_path(name: &str) -> PathBuf {
-    smelt_paths::smelt_home()
-        .unwrap_or_else(|| std::env::temp_dir().join(".smelt"))
-        .join(name)
-}
 
 fn load_agent_ui_snapshot() -> Option<smelt_store::AgentUiSnapshot> {
     crate::sqlite_state::default_sqlite_store()
@@ -194,551 +174,6 @@ pub fn find_agent_option_for(
         .find(|option| option.kind == kind.id() && option.profile_id() == profile_id)
 }
 
-fn remote_sessions_path() -> PathBuf {
-    smelt_path(smelt_store::DATABASE_FILE_NAME)
-}
-
-fn remote_terminal_sessions_path() -> PathBuf {
-    smelt_path(smelt_store::DATABASE_FILE_NAME)
-}
-
-impl RemoteSessionCatalog {
-    /// Open the production catalog. Only `smeltd` should call this constructor.
-    pub fn load_default() -> Result<Self, String> {
-        Self::load_from_paths(
-            Some(remote_sessions_path()),
-            Some(remote_terminal_sessions_path()),
-        )
-    }
-
-    /// A non-persistent catalog for daemon protocol tests.
-    pub fn in_memory() -> Self {
-        Self {
-            acp_path: None,
-            terminal_path: None,
-            acp_sessions: Vec::new(),
-            terminal_sessions: Vec::new(),
-            revision: 0,
-        }
-    }
-
-    fn load_from_paths(
-        acp_path: Option<PathBuf>,
-        terminal_path: Option<PathBuf>,
-    ) -> Result<Self, String> {
-        let mut acp_sessions = Vec::new();
-        let mut terminal_sessions = Vec::new();
-        if let Some(path) = acp_path.as_ref().or(terminal_path.as_ref()) {
-            match crate::sqlite_state::open_sqlite_store(path) {
-                Ok(store) => {
-                    if let Some(snapshot) = store.get_remote_session_snapshot()? {
-                        acp_sessions = snapshot
-                            .acp
-                            .into_iter()
-                            .map(acp_from_record)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        terminal_sessions = snapshot
-                            .terminal
-                            .into_iter()
-                            .map(terminal_from_record)
-                            .collect::<Vec<_>>();
-                    }
-                }
-                Err(error) if path.is_file() => {
-                    return Err(format!(
-                        "invalid remote session catalog {}: {error}",
-                        path.display()
-                    ));
-                }
-                Err(_) => {}
-            }
-        }
-        validate_unique_remote_ids(&acp_sessions, &terminal_sessions)?;
-        Ok(Self {
-            acp_path,
-            terminal_path,
-            acp_sessions,
-            terminal_sessions,
-            revision: 0,
-        })
-    }
-
-    pub fn snapshot(&self) -> RemoteSessionSnapshot {
-        RemoteSessionSnapshot {
-            revision: self.revision,
-            sessions: self.records(),
-        }
-    }
-
-    pub fn records(&self) -> Vec<RemoteSessionRecord> {
-        self.acp_sessions
-            .iter()
-            .cloned()
-            .map(RemoteSessionRecord::from)
-            .chain(
-                self.terminal_sessions
-                    .iter()
-                    .cloned()
-                    .map(RemoteSessionRecord::from),
-            )
-            .collect()
-    }
-
-    pub fn remote_acp(&self, id: &str) -> Option<RemoteAcpSession> {
-        self.acp_sessions
-            .iter()
-            .find(|session| session.id == id)
-            .cloned()
-    }
-
-    pub fn remote_terminal(&self, id: &str) -> Option<RemoteTerminalSession> {
-        self.terminal_sessions
-            .iter()
-            .find(|session| session.id == id)
-            .cloned()
-    }
-
-    pub fn contains(&self, id: &str) -> bool {
-        self.kind_for(id).is_some()
-    }
-
-    pub fn kind_for(&self, id: &str) -> Option<RemoteSessionKind> {
-        if self.acp_sessions.iter().any(|session| session.id == id) {
-            return Some(RemoteSessionKind::Acp);
-        }
-        self.terminal_sessions
-            .iter()
-            .any(|session| session.id == id)
-            .then_some(RemoteSessionKind::Terminal)
-    }
-
-    /// 目录只保留当前仍有 runtime 的远程会话。活着的提升为 Active；没有进程的直接删掉，
-    /// 不要标 Failed 永久躺在磁盘上——客户端只投影 Active，Failed 既看不见也清不掉。
-    pub fn retain_live_runtimes(
-        &mut self,
-        live_acp_ids: &HashSet<String>,
-        live_terminal_ids: &HashSet<String>,
-    ) -> Result<bool, String> {
-        let acp_ids = self
-            .acp_sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>();
-        let terminal_ids = self
-            .terminal_sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>();
-        let mut changed = false;
-        for id in acp_ids {
-            if live_acp_ids.contains(&id) {
-                if self
-                    .remote_acp(&id)
-                    .is_some_and(|session| session.lifecycle != RemoteSessionLifecycle::Active)
-                {
-                    self.set_lifecycle_for_kind(
-                        RemoteSessionKind::Acp,
-                        &id,
-                        RemoteSessionLifecycle::Active,
-                    )?;
-                    changed = true;
-                }
-            } else {
-                self.remove_for_kind(RemoteSessionKind::Acp, &id)?;
-                changed = true;
-            }
-        }
-        for id in terminal_ids {
-            if live_terminal_ids.contains(&id) {
-                if self
-                    .remote_terminal(&id)
-                    .is_some_and(|session| session.lifecycle != RemoteSessionLifecycle::Active)
-                {
-                    self.set_lifecycle_for_kind(
-                        RemoteSessionKind::Terminal,
-                        &id,
-                        RemoteSessionLifecycle::Active,
-                    )?;
-                    changed = true;
-                }
-            } else {
-                self.remove_for_kind(RemoteSessionKind::Terminal, &id)?;
-                changed = true;
-            }
-        }
-        Ok(changed)
-    }
-
-    pub fn upsert_acp(&mut self, session: RemoteAcpSession) -> Result<(), String> {
-        if session.id.is_empty() {
-            return Err("remote session id must not be empty".to_string());
-        }
-        if self
-            .terminal_sessions
-            .iter()
-            .any(|existing| existing.id == session.id)
-        {
-            return Err(format!(
-                "remote session id {} already belongs to a terminal",
-                session.id
-            ));
-        }
-        let mut updated = self.acp_sessions.clone();
-        match updated
-            .iter_mut()
-            .find(|existing| existing.id == session.id)
-        {
-            Some(existing) => {
-                if existing.cwd != session.cwd
-                    || existing.agent_option_id != session.agent_option_id
-                    || existing.resume_id != session.resume_id
-                    || existing.agent != session.agent
-                {
-                    return Err("requestId is already bound to different session parameters".into());
-                }
-                existing.title = session.title;
-                existing.launch = session.launch;
-                existing.lifecycle = session.lifecycle;
-                existing.hidden = session.hidden;
-            }
-            None => updated.push(session),
-        }
-        self.save_acp(&updated)?;
-        self.acp_sessions = updated;
-        self.bump_revision();
-        Ok(())
-    }
-
-    pub fn upsert_terminal(&mut self, session: RemoteTerminalSession) -> Result<(), String> {
-        if session.id.is_empty() {
-            return Err("remote session id must not be empty".to_string());
-        }
-        if self
-            .acp_sessions
-            .iter()
-            .any(|existing| existing.id == session.id)
-        {
-            return Err(format!(
-                "remote session id {} already belongs to an ACP session",
-                session.id
-            ));
-        }
-        let mut updated = self.terminal_sessions.clone();
-        match updated
-            .iter_mut()
-            .find(|existing| existing.id == session.id)
-        {
-            Some(existing) => {
-                if existing.cwd != session.cwd {
-                    return Err("requestId is already bound to different session parameters".into());
-                }
-                existing.title = session.title;
-                existing.lifecycle = session.lifecycle;
-            }
-            None => updated.push(session),
-        }
-        self.save_terminal(&updated)?;
-        self.terminal_sessions = updated;
-        self.bump_revision();
-        Ok(())
-    }
-
-    pub fn set_lifecycle(
-        &mut self,
-        id: &str,
-        lifecycle: RemoteSessionLifecycle,
-    ) -> Result<Option<RemoteSessionRecord>, String> {
-        let Some(kind) = self.kind_for(id) else {
-            return Ok(None);
-        };
-        self.set_lifecycle_for_kind(kind, id, lifecycle)
-    }
-
-    pub fn set_lifecycle_for_kind(
-        &mut self,
-        kind: RemoteSessionKind,
-        id: &str,
-        lifecycle: RemoteSessionLifecycle,
-    ) -> Result<Option<RemoteSessionRecord>, String> {
-        match kind {
-            RemoteSessionKind::Acp => {
-                let Some(index) = self
-                    .acp_sessions
-                    .iter()
-                    .position(|session| session.id == id)
-                else {
-                    return Ok(None);
-                };
-                let mut updated = self.acp_sessions.clone();
-                updated[index].lifecycle = lifecycle;
-                self.save_acp(&updated)?;
-                self.acp_sessions = updated;
-                self.bump_revision();
-                Ok(self.remote_acp(id).map(RemoteSessionRecord::from))
-            }
-            RemoteSessionKind::Terminal => {
-                let Some(index) = self
-                    .terminal_sessions
-                    .iter()
-                    .position(|session| session.id == id)
-                else {
-                    return Ok(None);
-                };
-                let mut updated = self.terminal_sessions.clone();
-                updated[index].lifecycle = lifecycle;
-                self.save_terminal(&updated)?;
-                self.terminal_sessions = updated;
-                self.bump_revision();
-                Ok(self.remote_terminal(id).map(RemoteSessionRecord::from))
-            }
-        }
-    }
-
-    pub fn remove(&mut self, id: &str) -> Result<Option<RemoteSessionRecord>, String> {
-        let Some(kind) = self.kind_for(id) else {
-            return Ok(None);
-        };
-        self.remove_for_kind(kind, id)
-    }
-
-    pub fn remove_for_kind(
-        &mut self,
-        kind: RemoteSessionKind,
-        id: &str,
-    ) -> Result<Option<RemoteSessionRecord>, String> {
-        match kind {
-            RemoteSessionKind::Acp => {
-                let Some(index) = self
-                    .acp_sessions
-                    .iter()
-                    .position(|session| session.id == id)
-                else {
-                    return Ok(None);
-                };
-                let removed = self.acp_sessions[index].clone();
-                let mut updated = self.acp_sessions.clone();
-                updated.remove(index);
-                self.save_acp(&updated)?;
-                self.acp_sessions = updated;
-                self.bump_revision();
-                Ok(Some(removed.into()))
-            }
-            RemoteSessionKind::Terminal => {
-                let Some(index) = self
-                    .terminal_sessions
-                    .iter()
-                    .position(|session| session.id == id)
-                else {
-                    return Ok(None);
-                };
-                let removed = self.terminal_sessions[index].clone();
-                let mut updated = self.terminal_sessions.clone();
-                updated.remove(index);
-                self.save_terminal(&updated)?;
-                self.terminal_sessions = updated;
-                self.bump_revision();
-                Ok(Some(removed.into()))
-            }
-        }
-    }
-
-    /// Update titles for all remote ACP sessions resumed from the same provider session.
-    pub fn rename_acp_by_resume_id(
-        &mut self,
-        agent_option_id: &str,
-        resume_id: &str,
-        title: &str,
-    ) -> Result<bool, String> {
-        let mut updated = self.acp_sessions.clone();
-        let mut changed = false;
-        for session in &mut updated {
-            if session.agent_option_id == agent_option_id
-                && session.resume_id.as_deref() == Some(resume_id)
-                && session.title != title
-            {
-                session.title = title.to_string();
-                changed = true;
-            }
-        }
-        if changed {
-            self.save_acp(&updated)?;
-            self.acp_sessions = updated;
-            self.bump_revision();
-        }
-        Ok(changed)
-    }
-
-    /// 按 smeltd 会话 id 改产品对话标题。只改标题，不改 cwd、启动参数或归属。
-    pub fn rename_acp_by_id(&mut self, id: &str, title: &str) -> Result<RemoteAcpSession, String> {
-        let title = title.trim();
-        if id.trim().is_empty() {
-            return Err("对话 id 不能为空".to_string());
-        }
-        if title.is_empty() {
-            return Err("对话标题不能为空".to_string());
-        }
-        let Some(index) = self
-            .acp_sessions
-            .iter()
-            .position(|session| session.id == id)
-        else {
-            return Err(format!("对话不存在: {id}"));
-        };
-        let mut updated = self.acp_sessions.clone();
-        updated[index].title = title.to_string();
-        let renamed = updated[index].clone();
-        if renamed.title != self.acp_sessions[index].title {
-            self.save_acp(&updated)?;
-            self.acp_sessions = updated;
-            self.bump_revision();
-        }
-        Ok(renamed)
-    }
-
-    fn save_acp(&self, sessions: &[RemoteAcpSession]) -> Result<(), String> {
-        persist_remote_catalog_parts(
-            self.acp_path.as_ref(),
-            self.terminal_path.as_ref(),
-            sessions,
-            &self.terminal_sessions,
-        )
-    }
-
-    fn save_terminal(&self, sessions: &[RemoteTerminalSession]) -> Result<(), String> {
-        persist_remote_catalog_parts(
-            self.acp_path.as_ref(),
-            self.terminal_path.as_ref(),
-            &self.acp_sessions,
-            sessions,
-        )
-    }
-
-    fn bump_revision(&mut self) {
-        self.revision = self.revision.checked_add(1).unwrap_or(1);
-    }
-}
-
-/// 目录沿用两个历史逻辑文档，但 runtime 命名空间是共享的。若允许跨 kind 重名，
-/// 通用的 lifecycle/remove 请求就会按内部遍历顺序修改错误记录，因此在读盘和写入
-/// 两端都把“全目录唯一 ID”作为不变量。
-fn validate_unique_remote_ids(
-    acp_sessions: &[RemoteAcpSession],
-    terminal_sessions: &[RemoteTerminalSession],
-) -> Result<(), String> {
-    let mut ids = HashSet::with_capacity(acp_sessions.len() + terminal_sessions.len());
-    for id in acp_sessions
-        .iter()
-        .map(|session| session.id.as_str())
-        .chain(terminal_sessions.iter().map(|session| session.id.as_str()))
-    {
-        if id.is_empty() {
-            return Err("remote session catalog contains an empty id".to_string());
-        }
-        if !ids.insert(id) {
-            return Err(format!("duplicate remote session id in catalog: {id}"));
-        }
-    }
-    Ok(())
-}
-
-fn persist_remote_catalog_parts(
-    acp_path: Option<&PathBuf>,
-    terminal_path: Option<&PathBuf>,
-    acp_sessions: &[RemoteAcpSession],
-    terminal_sessions: &[RemoteTerminalSession],
-) -> Result<(), String> {
-    let Some(path) = acp_path.or(terminal_path) else {
-        return Ok(());
-    };
-    let store = crate::sqlite_state::open_sqlite_store(path)?;
-    store.put_remote_session_snapshot(&smelt_store::RemoteSessionCatalogSnapshot {
-        acp: acp_sessions
-            .iter()
-            .map(acp_to_record)
-            .collect::<Result<Vec<_>, _>>()?,
-        terminal: terminal_sessions.iter().map(terminal_to_record).collect(),
-    })?;
-    Ok(())
-}
-
-fn acp_to_record(
-    session: &RemoteAcpSession,
-) -> Result<smelt_store::RemoteAcpSessionRecord, String> {
-    Ok(smelt_store::RemoteAcpSessionRecord {
-        id: session.id.clone(),
-        cwd: session.cwd.clone(),
-        title: session.title.clone(),
-        agent_option_id: session.agent_option_id.clone(),
-        agent: session.agent.clone(),
-        launch_command: session.launch.command.clone(),
-        launch_env_json: serde_json::to_vec(&session.launch.env)
-            .map_err(|error| error.to_string())?,
-        resume_id: session.resume_id.clone(),
-        created_at: session.created_at,
-        lifecycle: remote_lifecycle_name(session.lifecycle).to_string(),
-        hidden: session.hidden,
-    })
-}
-
-fn acp_from_record(
-    record: smelt_store::RemoteAcpSessionRecord,
-) -> Result<RemoteAcpSession, String> {
-    Ok(RemoteAcpSession {
-        id: record.id,
-        cwd: record.cwd,
-        title: record.title,
-        agent_option_id: record.agent_option_id,
-        agent: record.agent,
-        launch: ConversationLaunchSpec {
-            command: record.launch_command,
-            env: serde_json::from_slice(&record.launch_env_json).unwrap_or_default(),
-        },
-        resume_id: record.resume_id,
-        created_at: record.created_at,
-        lifecycle: remote_lifecycle_from_name(&record.lifecycle)?,
-        hidden: record.hidden,
-    })
-}
-
-fn terminal_to_record(session: &RemoteTerminalSession) -> smelt_store::RemoteTerminalSessionRecord {
-    smelt_store::RemoteTerminalSessionRecord {
-        id: session.id.clone(),
-        cwd: session.cwd.clone(),
-        title: session.title.clone(),
-        created_at: session.created_at,
-        lifecycle: remote_lifecycle_name(session.lifecycle).to_string(),
-    }
-}
-
-fn terminal_from_record(record: smelt_store::RemoteTerminalSessionRecord) -> RemoteTerminalSession {
-    RemoteTerminalSession {
-        id: record.id,
-        cwd: record.cwd,
-        title: record.title,
-        created_at: record.created_at,
-        lifecycle: remote_lifecycle_from_name(&record.lifecycle).unwrap_or_default(),
-    }
-}
-
-fn remote_lifecycle_name(lifecycle: RemoteSessionLifecycle) -> &'static str {
-    match lifecycle {
-        RemoteSessionLifecycle::Creating => "creating",
-        RemoteSessionLifecycle::Active => "active",
-        RemoteSessionLifecycle::Closing => "closing",
-        RemoteSessionLifecycle::Failed => "failed",
-    }
-}
-
-fn remote_lifecycle_from_name(name: &str) -> Result<RemoteSessionLifecycle, String> {
-    match name {
-        "creating" => Ok(RemoteSessionLifecycle::Creating),
-        "active" => Ok(RemoteSessionLifecycle::Active),
-        "closing" => Ok(RemoteSessionLifecycle::Closing),
-        "failed" => Ok(RemoteSessionLifecycle::Failed),
-        other => Err(format!("未知远程会话 lifecycle: {other}")),
-    }
-}
-
 /// smeltd 当前活着的会话 id（终端 + ACP，靠前缀区分）。任务对账用：判断绑定会话
 /// 是否还活着，不活的任务标失败，避免「会话没了但任务永远卡 Running」。
 pub fn list_sessions() -> Result<Vec<String>, String> {
@@ -771,9 +206,9 @@ pub fn publish_automation_event(
     }))
 }
 
-/// 运行时开一场产品智能体对话之前，按定义组好它在远程目录里的那一条：校验定义能开
-/// 对话、建好智能体的 space 作为工作目录、按定义解析启动规格。
-pub fn agent_conversation_session(agent_definition_id: &str) -> Result<RemoteAcpSession, String> {
+/// 运行时开一场产品智能体对话之前，按定义组好它：校验定义能开对话、建好智能体的 space
+/// 作为工作目录、按定义解析启动规格。
+pub fn agent_conversation_session(agent_definition_id: &str) -> Result<DaemonConversation, String> {
     let agent_definition_id = agent_definition_id.trim();
     if agent_definition_id.is_empty() {
         return Err("智能体 id 不能为空".into());
@@ -789,67 +224,12 @@ pub fn agent_conversation_session(agent_definition_id: &str) -> Result<RemoteAcp
         .ok_or_else(|| "智能体不可开对话".to_string())?;
     let cwd = crate::agent_definition_store::ensure_agent_space(agent_definition_id)
         .ok_or_else(|| "无法创建智能体工作区".to_string())?;
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
-        .unwrap_or(0);
-    let title = if definition.name.trim().is_empty() {
-        "智能体对话".to_string()
-    } else {
-        definition.name
-    };
-    Ok(RemoteAcpSession {
-        id: format!("acp-{}", uuid::Uuid::new_v4()),
+    Ok(DaemonConversation {
+        sid: format!("acp-{}", uuid::Uuid::new_v4()),
         cwd: cwd.to_string_lossy().into_owned(),
-        title,
-        agent_option_id: option.id,
-        agent: option.kind,
-        launch: option.launch,
+        option,
         resume_id: None,
-        created_at,
-        lifecycle: RemoteSessionLifecycle::default(),
-        hidden: false,
     })
-}
-
-/// 把已经写进工作区快照的对话标题改掉。GUI 没开时，下次冷启动靠这份标题，
-/// 而不是远程目录里的种子标题。没有这份快照或这场对话还没落盘时返回 false。
-pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Result<bool, String> {
-    // 不推进版本：GUI 开着时也会收到同一个改名并在下次保存时写同样的标题，推进版本
-    // 只会让它的保存无谓地冲突。但读改写要和 workspace.save 互斥。
-    let _guard = crate::workspace_catalog::CATALOG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let store = crate::sqlite_state::default_sqlite_store()?;
-    let Some(mut snapshot) = store
-        .get_workspace_snapshot()
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(false);
-    };
-    let mut changed = false;
-    for session in &mut snapshot.sessions {
-        let Some(acp) = session.acp.as_mut() else {
-            continue;
-        };
-        if acp.sid.as_deref() != Some(session_id) {
-            continue;
-        }
-        if session.custom_title.as_deref() != Some(title) {
-            session.custom_title = Some(title.to_string());
-            changed = true;
-        }
-        if acp.session_title.as_deref() != Some(title) {
-            acp.session_title = Some(title.to_string());
-            changed = true;
-        }
-    }
-    if changed {
-        store
-            .put_workspace_snapshot(&snapshot)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(changed)
 }
 
 pub fn list_history(option: &AcpAgentOption, cwd: &str) -> Vec<HistorySessionSummary> {
@@ -898,7 +278,9 @@ pub fn list_history_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_menu::WorkspaceMenuSessionKind;
+    use smelt_model::workspace_directory::{
+        WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+    };
 
     #[test]
     fn agent_conversation_rejects_a_missing_definition() {
@@ -1016,215 +398,6 @@ mod tests {
         );
     }
 
-    fn catalog_test_paths(name: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "smelt-remote-session-catalog-{name}-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let database = root.join(smelt_store::DATABASE_FILE_NAME);
-        (root, database.clone(), database)
-    }
-
-    #[test]
-    fn rename_acp_by_id_changes_only_the_title() {
-        let mut catalog = RemoteSessionCatalog::in_memory();
-        catalog.upsert_acp(test_remote_acp("acp-1")).unwrap();
-        let renamed = catalog.rename_acp_by_id("acp-1", "  登录修复  ").unwrap();
-        assert_eq!(renamed.title, "登录修复");
-        assert_eq!(catalog.remote_acp("acp-1").unwrap().cwd, "/work/project");
-        let error = catalog.rename_acp_by_id("missing", "标题").unwrap_err();
-        assert!(error.contains("不存在"), "{error}");
-        assert!(catalog.rename_acp_by_id("acp-1", "   ").is_err());
-    }
-
-    fn test_remote_acp(id: &str) -> RemoteAcpSession {
-        RemoteAcpSession {
-            id: id.to_string(),
-            cwd: "/work/project".to_string(),
-            title: String::new(),
-            agent_option_id: "codex".to_string(),
-            agent: "codex".to_string(),
-            launch: ConversationLaunchSpec::from_command("codex".to_string()),
-            resume_id: None,
-            created_at: 1,
-            lifecycle: RemoteSessionLifecycle::Active,
-            hidden: false,
-        }
-    }
-
-    fn test_remote_terminal(id: &str) -> RemoteTerminalSession {
-        RemoteTerminalSession {
-            id: id.to_string(),
-            cwd: "/work/project".to_string(),
-            title: String::new(),
-            created_at: 1,
-            lifecycle: RemoteSessionLifecycle::Active,
-        }
-    }
-
-    #[test]
-    fn remote_catalog_rejects_malformed_existing_storage() {
-        let (root, acp_path, terminal_path) = catalog_test_paths("malformed");
-        std::fs::write(&acp_path, "{ not valid json").unwrap();
-
-        let error = RemoteSessionCatalog::load_from_paths(Some(acp_path), Some(terminal_path))
-            .expect_err("损坏目录不能被当成空目录");
-        assert!(error.contains("invalid remote session catalog"));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn remote_catalog_rejects_cross_kind_duplicate_ids_on_load_and_upsert() {
-        let (root, acp_path, terminal_path) = catalog_test_paths("duplicate-id");
-        let store = crate::sqlite_state::open_sqlite_store(&acp_path).unwrap();
-        store
-            .put_remote_session_snapshot(&smelt_store::RemoteSessionCatalogSnapshot {
-                acp: vec![acp_to_record(&test_remote_acp("shared")).unwrap()],
-                terminal: vec![terminal_to_record(&test_remote_terminal("shared"))],
-            })
-            .unwrap();
-        let error = RemoteSessionCatalog::load_from_paths(Some(acp_path), Some(terminal_path))
-            .expect_err("跨 kind 重名必须作为损坏目录拒绝加载");
-        assert!(error.contains("duplicate remote session id"));
-
-        let mut catalog = RemoteSessionCatalog::in_memory();
-        catalog
-            .upsert_terminal(test_remote_terminal("shared"))
-            .unwrap();
-        let error = catalog
-            .upsert_acp(test_remote_acp("shared"))
-            .expect_err("写入时也必须阻止跨 kind 覆盖");
-        assert!(error.contains("already belongs to a terminal"));
-        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
-        drop(store);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn upsert_rejects_conflicting_request_binding() {
-        let mut catalog = RemoteSessionCatalog::in_memory();
-        catalog.upsert_acp(test_remote_acp("acp-mobile-1")).unwrap();
-        let mut conflict = test_remote_acp("acp-mobile-1");
-        conflict.cwd = "/other".into();
-        let error = catalog
-            .upsert_acp(conflict)
-            .expect_err("不同参数不能覆盖已有绑定");
-        assert!(error.contains("already bound"));
-
-        let mut same = test_remote_acp("acp-mobile-1");
-        same.title = "新标题".into();
-        same.lifecycle = RemoteSessionLifecycle::Creating;
-        catalog.upsert_acp(same).expect("同参应幂等");
-        assert_eq!(catalog.remote_acp("acp-mobile-1").unwrap().title, "新标题");
-
-        catalog
-            .upsert_terminal(test_remote_terminal("term-1"))
-            .unwrap();
-        let mut term_conflict = test_remote_terminal("term-1");
-        term_conflict.cwd = "/other".into();
-        assert!(catalog.upsert_terminal(term_conflict).is_err());
-    }
-
-    #[test]
-    fn closing_records_are_visible_but_not_active() {
-        let mut record = RemoteSessionRecord::from(test_remote_acp("acp-1"));
-        assert!(record.is_active());
-        assert!(record.is_visible());
-        record.lifecycle = RemoteSessionLifecycle::Closing;
-        assert!(!record.is_active());
-        assert!(record.is_visible());
-        record.lifecycle = RemoteSessionLifecycle::Creating;
-        assert!(!record.is_visible());
-        record.lifecycle = RemoteSessionLifecycle::Active;
-        record.hidden = true;
-        assert!(!record.is_visible());
-        assert!(record.is_present());
-    }
-
-    #[test]
-    fn remote_catalog_ignores_leftover_json_when_snapshot_exists() {
-        let (root, acp_path, terminal_path) = catalog_test_paths("ignore-json");
-        let store = crate::sqlite_state::open_sqlite_store(&acp_path).unwrap();
-        store
-            .put_remote_session_snapshot(&smelt_store::RemoteSessionCatalogSnapshot {
-                acp: vec![smelt_store::RemoteAcpSessionRecord {
-                    id: "acp-1".into(),
-                    cwd: "/work/project".into(),
-                    title: String::new(),
-                    agent_option_id: "codex".into(),
-                    agent: "codex".into(),
-                    launch_command: "codex".into(),
-                    launch_env_json: b"{}".to_vec(),
-                    resume_id: None,
-                    created_at: 1,
-                    lifecycle: "active".into(),
-                    hidden: false,
-                }],
-                terminal: Vec::new(),
-            })
-            .unwrap();
-        std::fs::write(
-            root.join("remote_terminal_sessions.json"),
-            r#"{"sessions":[{"id":"term-1","cwd":"/work/project","created_at":1}]}"#,
-        )
-        .unwrap();
-
-        let catalog =
-            RemoteSessionCatalog::load_from_paths(Some(acp_path), Some(terminal_path)).unwrap();
-        assert_eq!(catalog.acp_sessions.len(), 1);
-        assert!(catalog.terminal_sessions.is_empty());
-        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
-        drop(store);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn remote_catalog_persists_lifecycle_before_advancing_snapshot() {
-        let (root, acp_path, terminal_path) = catalog_test_paths("lifecycle");
-        let mut catalog =
-            RemoteSessionCatalog::load_from_paths(Some(acp_path), Some(terminal_path.clone()))
-                .unwrap();
-        catalog
-            .upsert_terminal(RemoteTerminalSession {
-                id: "term-1".to_string(),
-                cwd: "/work/project".to_string(),
-                title: "Terminal".to_string(),
-                created_at: 42,
-                lifecycle: RemoteSessionLifecycle::Creating,
-            })
-            .unwrap();
-        assert_eq!(catalog.snapshot().revision, 1);
-
-        catalog
-            .set_lifecycle("term-1", RemoteSessionLifecycle::Active)
-            .unwrap();
-        let snapshot = catalog.snapshot();
-        assert_eq!(snapshot.revision, 2);
-        assert_eq!(snapshot.sessions.len(), 1);
-        assert!(snapshot.sessions[0].is_active());
-
-        let store = crate::sqlite_state::store_beside_json(&terminal_path).unwrap();
-        let persisted = store.get_remote_session_snapshot().unwrap().unwrap();
-        assert_eq!(persisted.terminal.len(), 1);
-        assert_eq!(persisted.terminal[0].lifecycle, "active");
-
-        catalog.remove("term-1").unwrap();
-        assert_eq!(catalog.snapshot().revision, 3);
-        assert!(catalog.snapshot().sessions.is_empty());
-        let persisted = store.get_remote_session_snapshot().unwrap();
-        assert!(persisted.is_none() || persisted.unwrap().terminal.is_empty());
-
-        // 先关掉库，Windows 才能删掉还被打开的数据库文件。
-        drop(store);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn default_agent_options_use_shared_agent_definitions() {
         let options = agent_options();
@@ -1323,26 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_session_carries_its_agent_ownership_in_the_option_id() {
-        let mut session = RemoteAcpSession {
-            id: "acp-mobile-1".to_string(),
-            cwd: "/tmp".to_string(),
-            title: String::new(),
-            agent_option_id: "agent:writer".to_string(),
-            agent: ConversationAgentKind::Pi.id().to_string(),
-            launch: ConversationLaunchSpec::from_command("pi".to_string()),
-            resume_id: None,
-            created_at: 0,
-            lifecycle: Default::default(),
-            hidden: false,
-        };
-        assert_eq!(session.agent_definition_id(), Some("writer"));
-
-        session.agent_option_id = ConversationAgentKind::Pi.id().to_string();
-        assert_eq!(session.agent_definition_id(), None);
-    }
-
-    #[test]
     fn display_title_prefers_the_user_name() {
         let mut session = HistorySessionSummary {
             path: "/tmp/session.jsonl".to_string(),
@@ -1371,131 +524,45 @@ mod tests {
         assert!(crate::session_history::truncate_title(&input).ends_with('…'));
     }
 
+    /// 桌面建的会话不在远程目录里，删它时按工作区目录认：终端按每格的 id，ACP 按会话 id。
     #[test]
-    fn delete_kind_prefers_catalog_over_menu() {
+    fn directory_knows_which_session_ids_are_terminals_and_acp() {
+        let directory = WorkspaceDirectory {
+            revision: 1,
+            epoch: String::new(),
+            projects: Vec::new(),
+            conversations: vec![
+                WorkspaceConversation {
+                    id: "c-term".into(),
+                    terminals: vec![
+                        WorkspaceTerminal {
+                            id: Some("t1".into()),
+                            ..WorkspaceTerminal::default()
+                        },
+                        WorkspaceTerminal::default(),
+                    ],
+                    ..WorkspaceConversation::default()
+                },
+                WorkspaceConversation {
+                    id: "c-acp".into(),
+                    acp: Some(WorkspaceAcp {
+                        sid: "a1".into(),
+                        ..WorkspaceAcp::default()
+                    }),
+                    ..WorkspaceConversation::default()
+                },
+            ],
+        };
         assert_eq!(
-            resolve_session_delete_kind(
-                Some(RemoteSessionKind::Terminal),
-                Some(WorkspaceMenuSessionKind::Acp)
-            )
-            .unwrap(),
-            SessionDeleteKind::Terminal
+            directory_session_kind(&directory, "t1"),
+            Some(SessionDeleteKind::Terminal)
         );
         assert_eq!(
-            resolve_session_delete_kind(None, Some(WorkspaceMenuSessionKind::Terminal)).unwrap(),
-            SessionDeleteKind::Terminal
+            directory_session_kind(&directory, "a1"),
+            Some(SessionDeleteKind::Acp)
         );
-        assert_eq!(
-            resolve_session_delete_kind(None, Some(WorkspaceMenuSessionKind::Acp)).unwrap(),
-            SessionDeleteKind::Acp
-        );
-        assert!(resolve_session_delete_kind(None, None).is_err());
+        assert_eq!(directory_session_kind(&directory, "c-term"), None);
+        assert_eq!(directory_session_kind(&directory, "missing"), None);
     }
 
-    #[test]
-    fn remote_terminal_projection_rejects_stale_reattach() {
-        let projected = HashSet::from(["term-1".to_string()]);
-        let local = HashSet::new();
-        assert!(accept_remote_terminal_projection(
-            "term-1", &projected, &local
-        ));
-
-        let withdrawn = HashSet::new();
-        assert!(
-            !accept_remote_terminal_projection("term-1", &withdrawn, &local),
-            "目录撤回后不能再把延迟 reattach 的结果插进侧栏"
-        );
-
-        let already_local = HashSet::from(["term-1".to_string()]);
-        assert!(!accept_remote_terminal_projection(
-            "term-1",
-            &projected,
-            &already_local
-        ));
-    }
-
-    #[test]
-    fn catalog_drops_records_without_runtime() {
-        let mut catalog = RemoteSessionCatalog::in_memory();
-        catalog
-            .upsert_terminal(RemoteTerminalSession {
-                id: "dead-active".to_string(),
-                cwd: "/work".to_string(),
-                title: String::new(),
-                created_at: 1,
-                lifecycle: RemoteSessionLifecycle::Active,
-            })
-            .unwrap();
-        catalog
-            .upsert_terminal(RemoteTerminalSession {
-                id: "dead-creating".to_string(),
-                cwd: "/work".to_string(),
-                title: String::new(),
-                created_at: 2,
-                lifecycle: RemoteSessionLifecycle::Creating,
-            })
-            .unwrap();
-        catalog
-            .upsert_acp(RemoteAcpSession {
-                id: "dead-failed".to_string(),
-                cwd: "/work".to_string(),
-                title: String::new(),
-                agent_option_id: "claude".to_string(),
-                agent: "claude".to_string(),
-                launch: ConversationLaunchSpec::from_command("claude".to_string()),
-                resume_id: None,
-                created_at: 3,
-                lifecycle: RemoteSessionLifecycle::Failed,
-                hidden: false,
-            })
-            .unwrap();
-
-        assert!(
-            catalog
-                .retain_live_runtimes(&HashSet::new(), &HashSet::new())
-                .unwrap()
-        );
-        assert!(
-            catalog.snapshot().sessions.is_empty(),
-            "冷启动没有 runtime 时目录应清空，不要把 Failed 留下当脏数据"
-        );
-    }
-
-    #[test]
-    fn catalog_promotes_live_creating_and_keeps_active() {
-        let mut catalog = RemoteSessionCatalog::in_memory();
-        catalog
-            .upsert_terminal(RemoteTerminalSession {
-                id: "live-creating".to_string(),
-                cwd: "/work".to_string(),
-                title: String::new(),
-                created_at: 1,
-                lifecycle: RemoteSessionLifecycle::Creating,
-            })
-            .unwrap();
-        catalog
-            .upsert_terminal(RemoteTerminalSession {
-                id: "live-active".to_string(),
-                cwd: "/work".to_string(),
-                title: String::new(),
-                created_at: 2,
-                lifecycle: RemoteSessionLifecycle::Active,
-            })
-            .unwrap();
-
-        let live = HashSet::from(["live-creating".to_string(), "live-active".to_string()]);
-        assert!(
-            catalog
-                .retain_live_runtimes(&HashSet::new(), &live)
-                .unwrap()
-        );
-        let snapshot = catalog.snapshot();
-        assert_eq!(snapshot.sessions.len(), 2);
-        assert!(
-            snapshot
-                .sessions
-                .iter()
-                .all(|session| session.lifecycle == RemoteSessionLifecycle::Active)
-        );
-    }
 }

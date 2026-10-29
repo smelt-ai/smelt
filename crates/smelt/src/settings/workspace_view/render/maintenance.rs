@@ -1,7 +1,7 @@
 //! 设置页：维护（后台服务、旧版本残留）和关于（版本、应用更新、帮助与反馈）。
 
 use super::*;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use gpui_component::tab::{Tab, TabBar};
 
 pub(super) fn maintenance_page(
@@ -29,24 +29,23 @@ pub(super) fn about_page(
     let page = SettingPage::new("关于").resettable(false).group(
         SettingGroup::new().item(SettingItem::render(|_, _, cx: &mut App| about_header(cx))),
     );
-    // 应用更新只存在于 macOS（设计文档 D4）：替换的是 .app 包。别的平台整节不出。
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let page = page.group(update_group(entity, snapshot, cx).title("更新"));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = (entity, snapshot, cx);
     page.group(help_group().title("帮助与反馈"))
 }
 
-/// 关于页头：名字、版本，macOS 上还有当前更新通道。版本号只在这里出现一次。
+/// 关于页头：名字、版本和当前更新通道。版本号只在这里出现一次。
 fn about_header(cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let version = format!(
         "v{} · {}",
         smelt_version::VERSION,
         cx.global::<UpdateSettings>().channel.label()
     );
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     let version = format!("v{}", smelt_version::VERSION);
     v_flex()
         .gap_1()
@@ -55,7 +54,7 @@ fn about_header(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn update_group(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -69,8 +68,13 @@ fn update_group(
     // —— 维护：更新、守护进程和残留数据清理 ——
     let update_entity = entity;
     let update_status = snapshot.update_status.clone();
+    // 「移到『应用程序』」只有 macOS 有；Windows 由安装程序装在固定位置。
+    #[cfg(target_os = "macos")]
     let moving_app = snapshot.moving_app;
+    #[cfg(target_os = "macos")]
     let move_app_error = snapshot.move_app_error.clone();
+    #[cfg(windows)]
+    let move_app_error: Option<SharedString> = None;
     SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
         let status = update_status.clone();
         let channel = cx.global::<UpdateSettings>().channel;
@@ -127,12 +131,12 @@ fn update_group(
             }
             updater::UpdateStatus::Installing { version } => (
                 "正在准备更新".to_string(),
-                format!("正在解压并准备更新包 {version}…"),
+                format!("正在校验并准备更新包 {version}…"),
                 Some(crate::ui_theme::blue()),
             ),
             updater::UpdateStatus::Applying { version } => (
                 "正在启动更新安装器".to_string(),
-                format!("正在为更新包 {version} 创建受控安装事务；成功后 App 才会退出"),
+                format!("正在为更新包 {version} 启动安装程序；启动成功后 App 才会退出"),
                 Some(crate::ui_theme::blue()),
             ),
             updater::UpdateStatus::ReadyToInstall(update) => (
@@ -280,6 +284,7 @@ fn update_group(
         });
 
         // 位置不对时唯一的前进入口，和启动时那个确认框是同一个动作。
+        #[cfg(target_os = "macos")]
         let move_btn = matches!(
             &status,
             updater::UpdateStatus::Failed(updater::UpdateFailure::Location)
@@ -299,6 +304,8 @@ fn update_group(
                     move_entity.update(cx, |this, cx| this.move_app_to_applications(cx));
                 })
         });
+        #[cfg(windows)]
+        let move_btn: Option<Button> = None;
 
         let mut action_row = h_flex().gap_2().items_center().child(check_btn);
         if let Some(move_btn) = move_btn {

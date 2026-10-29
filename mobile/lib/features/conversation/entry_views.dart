@@ -606,16 +606,18 @@ String conversationPhaseLabel(L10n l10n, ConversationPhase phase) =>
     });
 
 /// 对话尾巴上的一行状态：在做什么、做了多久；失败 / 结束时写原因。空闲和完成不画
-/// （完成的耗时写在最终回答下面）。
+/// （完成的耗时写在最终回答下面），空闲时手动压缩上下文除外。
 class TurnStatusLine extends StatelessWidget {
   const TurnStatusLine({super.key, required this.view});
 
   final ConversationView view;
 
-  static bool shows(ConversationPhase phase) => switch (phase) {
-    ConversationPhase.idle || ConversationPhase.succeeded => false,
-    _ => true,
-  };
+  static bool shows(ConversationView view) =>
+      view.compacting ||
+      switch (view.phase) {
+        ConversationPhase.idle || ConversationPhase.succeeded => false,
+        _ => true,
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -629,9 +631,14 @@ class TurnStatusLine extends StatelessWidget {
       ConversationPhase.failed ||
       ConversationPhase.dead when reason.isNotEmpty => reason,
       ConversationPhase.dead => l10n.conversationStatusEnded,
+      _ when view.compacting => l10n.conversationStatusCompacting,
       _ when status != null && status.isNotEmpty => status,
       _ => conversationPhaseLabel(l10n, phase),
     };
+    // 空闲时手动压缩也算在忙，标记跟着转。
+    final markPhase = view.compacting && !phase.isWorking
+        ? ConversationPhase.thinking
+        : phase;
     final started = view.turnStartedAtMs;
     final working = phase.isWorking || phase == ConversationPhase.connecting;
     final color = switch (phase) {
@@ -647,8 +654,8 @@ class TurnStatusLine extends StatelessWidget {
         child: Row(
           children: [
             StatusMark(
-              mark: conversationMark(phase),
-              label: conversationPhaseLabel(l10n, phase),
+              mark: conversationMark(markPhase),
+              label: conversationPhaseLabel(l10n, markPhase),
             ),
             const SizedBox(width: Space.sm),
             Expanded(

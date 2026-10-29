@@ -58,16 +58,20 @@ fn run() -> Option<()> {
 
     let provider = std::env::var("SMELT_HOOK_PROVIDER").unwrap_or_else(|_| "claude".into());
     let event = normalize_hook_event_for_provider(&hook, &provider)?;
+    // 生命周期事件先发：hook 有超时，守护卡住时宁可丢标题，不丢状态。
+    let title = claude_title_event(&hook, &provider);
 
-    let payload = serde_json::json!({
-        "op": DaemonOperation::AgentEvent,
-        "id": session_id,
-        "event": &event,
-    });
-    // 一条只发一次，并等 daemon 确认 reducer 已提交。provider 的 hooks 是同步
-    // 生命周期边沿；本 helper 退出后它才会继续下一步，因此确认把原始事件顺序
-    // 延伸到 daemon。超时/断线也绝不重放，避免“结果未知”变成重复事件。
-    let _ = send_once_and_confirm(&sock, &payload);
+    for event in std::iter::once(event).chain(title) {
+        let payload = serde_json::json!({
+            "op": DaemonOperation::AgentEvent,
+            "id": session_id,
+            "event": &event,
+        });
+        // 一条只发一次，并等 daemon 确认 reducer 已提交。provider 的 hooks 是同步
+        // 生命周期边沿；本 helper 退出后它才会继续下一步，因此确认把原始事件顺序
+        // 延伸到 daemon。超时/断线也绝不重放，避免“结果未知”变成重复事件。
+        let _ = send_once_and_confirm(&sock, &payload);
+    }
     Some(())
 }
 
@@ -126,19 +130,23 @@ fn normalize_hook_event_name(event: &str) -> &str {
     }
 }
 
+/// Grok 原生 payload 用 hookEventName + snake_case；其它兼容来源常用
+/// hook_event_name。安装器注入的环境变量只作为缺少原生字段时的兜底。
+fn hook_event_name(hook: &serde_json::Value) -> Option<String> {
+    hook["hook_event_name"]
+        .as_str()
+        .or_else(|| hook["hookEventName"].as_str())
+        .map(str::to_string)
+        .or_else(|| std::env::var("SMELT_HOOK_EVENT").ok())
+        .map(|event| normalize_hook_event_name(&event).to_string())
+}
+
 fn normalize_hook_event_for_provider(
     hook: &serde_json::Value,
     provider: &str,
 ) -> Option<AgentEvent> {
-    // Grok 原生 payload 用 hookEventName + snake_case；其它兼容来源常用
-    // hook_event_name。安装器注入的环境变量只作为缺少原生字段时的兜底。
-    let event_from_env = std::env::var("SMELT_HOOK_EVENT").ok();
-    let event = hook["hook_event_name"]
-        .as_str()
-        .or_else(|| hook["hookEventName"].as_str())
-        .or(event_from_env.as_deref())
-        .map(normalize_hook_event_name)?;
-    let kind_and_message = match event {
+    let event = hook_event_name(hook)?;
+    let kind_and_message = match event.as_str() {
         // 会话刚起、hooks 链路第一次有机会发声——不上报的话，Idle 态和「hooks
         // 根本没装/装的是旧配置/socket 连不上」在 UI 上长得一模一样；有这一条，
         // DaemonStates 里出现记录本身就是「链路确认通了」的信号。
@@ -256,8 +264,18 @@ fn normalize_hook_event_for_provider(
         "SubagentStop" | "subagentStop" => Some((AgentEventKind::SubagentStopped, None)),
         "Stop" | "stop" if provider == "antigravity" => normalize_antigravity_stop(hook),
         "Stop" | "stop" if provider == "cursor" => normalize_cursor_stop(hook),
+        // Claude 的子智能体默认在后台跑：派出去后主回合马上 Stop，子智能体还要跑上几分钟，
+        // 跑完再把主回合叫醒。Stop 带的 `background_tasks` 是此刻还在跑的任务快照，有子任务
+        // 就不算完成，等最后一次 Stop 的快照为空。只看快照不配对 SubagentStart/Stop：被
+        // TaskStop 停掉的子智能体不发 SubagentStop，配对计数会永远对不上。
         "Stop" | "stop" | "agentStop" | "StopCancelled" | "SessionStop" | "sessionStop" => {
-            Some((AgentEventKind::TurnSucceeded, None))
+            Some(match running_background_agents(hook) {
+                0 => (AgentEventKind::TurnSucceeded, None),
+                n => (
+                    AgentEventKind::ToolFinished,
+                    Some(format!("后台还有 {n} 个子任务在跑")),
+                ),
+            })
         }
         // 队友空闲 ≠ 主回合结束。当成子任务停下，主会话继续思考。
         "TeammateIdle" | "teammateIdle" => Some((AgentEventKind::SubagentStopped, None)),
@@ -303,8 +321,11 @@ fn build_agent_event(
     let mut event = AgentEvent::new(provider, kind);
     match kind {
         AgentEventKind::PromptSubmitted => {
+            // 后台子智能体跑完，Claude 用一条 `<task-notification>` prompt 叫醒主回合。它照样
+            // 打开回合，但不是用户说的话，不能拿来起名。
             event.conversation_title = hook["prompt"]
                 .as_str()
+                .filter(|prompt| !prompt.trim_start().starts_with("<task-notification>"))
                 .and_then(smelt_core::session_title::prompt_title);
         }
         AgentEventKind::SessionTitleChanged => {
@@ -470,6 +491,95 @@ fn normalize_antigravity_stop(
     }
 }
 
+/// Claude Stop / SubagentStop 的 `background_tasks` 里还在跑的子智能体和 workflow 个数。
+/// 后台 shell、monitor 不算：开发服务器、`tail -f` 会一直挂着，算上会话就永远不完成；
+/// teammate 空闲时也一直报 running。没有这个字段（旧版本、其它 provider）就是 0。
+/// Grok 的 Stop 带的是同样内容的 `backgroundTasks`。
+fn running_background_agents(hook: &serde_json::Value) -> usize {
+    let tasks = hook["background_tasks"]
+        .as_array()
+        .or_else(|| hook["backgroundTasks"].as_array());
+    tasks.map_or(0, |tasks| {
+        tasks
+            .iter()
+            .filter(|task| matches!(task["type"].as_str(), Some("subagent" | "workflow")))
+            .filter(|task| task["status"].as_str() == Some("running"))
+            .count()
+    })
+}
+
+/// Claude 的会话名，跟在 SessionStart / UserPromptSubmit / Stop 的生命周期事件后面发。
+///
+/// `/rename`、`--name` 起的名优先：SessionStart、UserPromptSubmit 的 `session_title`
+/// 直接带着，Stop 不带，从转录里读。其次是 Claude 自己生成的标题，只有转录里有。
+fn claude_title_event(hook: &serde_json::Value, provider: &str) -> Option<AgentEvent> {
+    if provider != "claude" {
+        return None;
+    }
+    if !matches!(
+        hook_event_name(hook)?.as_str(),
+        "SessionStart" | "UserPromptSubmit" | "Stop"
+    ) {
+        return None;
+    }
+    let title = hook["session_title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(String::from)
+        .or_else(|| transcript_title(std::path::Path::new(hook["transcript_path"].as_str()?)))?;
+    let mut event = build_agent_event(hook, provider, AgentEventKind::SessionTitleChanged, None);
+    event.conversation_title = Some(title);
+    Some(event)
+}
+
+/// 转录末尾读这么多就够：Claude 改写转录尾部时会把 `custom-title`、`ai-title` 重新追加。
+const TRANSCRIPT_TITLE_TAIL_BYTES: u64 = 256 * 1024;
+
+/// 从转录末尾往前找最新的 `custom-title`（`/rename` 起的名）和 `ai-title`（Claude 生成的
+/// 标题），前者优先。Claude 自己也是这么读的。这两种记录不在公开文档里，认不出就当没有，
+/// 会话名留在首条 prompt。
+fn transcript_title(path: &std::path::Path) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(
+        len.saturating_sub(TRANSCRIPT_TITLE_TAIL_BYTES),
+    ))
+    .ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    // 从中间截断的第一行解析不出来，下面会跳过。
+    let text = String::from_utf8_lossy(&bytes);
+    let mut custom = None;
+    let mut generated = None;
+    for line in text.lines().rev() {
+        if custom.is_none() && line.contains(r#""type":"custom-title""#) {
+            custom = transcript_title_record(line, "custom-title", "customTitle");
+        } else if generated.is_none() && line.contains(r#""type":"ai-title""#) {
+            generated = transcript_title_record(line, "ai-title", "aiTitle");
+        }
+        if custom.is_some() && generated.is_some() {
+            break;
+        }
+    }
+    custom.flatten().or(generated.flatten())
+}
+
+/// 这一行确实是 `kind` 记录时返回它带的名字，空名字是 `Some(None)`（名字被清掉了，不再往前找）。
+/// 工具输出里碰巧带着同样子串的行不是这种记录。
+fn transcript_title_record(line: &str, kind: &str, field: &str) -> Option<Option<String>> {
+    let row: serde_json::Value = serde_json::from_str(line).ok()?;
+    (row["type"].as_str() == Some(kind)).then(|| {
+        row[field]
+            .as_str()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(String::from)
+    })
+}
+
 fn normalize_cursor_stop(hook: &serde_json::Value) -> Option<(AgentEventKind, Option<String>)> {
     if hook["status"].as_str() != Some("error") {
         return Some((AgentEventKind::TurnSucceeded, None));
@@ -609,6 +719,17 @@ mod tests {
             Some("修复 Codex 标题 并保留用户 rename")
         );
         assert_eq!(event.message, None, "prompt 标题不应冒充 pending question");
+    }
+
+    #[test]
+    fn claude_task_notification_opens_the_turn_without_naming_it() {
+        let hook = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "<task-notification>\n<task-id>ac060de633f5fa7ff</task-id>\n<status>completed</status>"
+        });
+        let event = normalize_hook_event_for_provider(&hook, "claude").unwrap();
+        assert_eq!(event.kind, AgentEventKind::PromptSubmitted);
+        assert_eq!(event.conversation_title, None);
     }
 
     #[test]
@@ -1263,6 +1384,170 @@ mod tests {
                 Some("后台任务仍在运行".to_string())
             )),
             "Antigravity 小写 stop 也必须看 fullyIdle"
+        );
+    }
+
+    /// 实测顺序：派出后台子智能体 → 主回合 Stop（子智能体都还在跑）→ 几分钟后子智能体结束、
+    /// 主回合被叫醒 → 再 Stop。只有最后一次 Stop 的快照里没有子任务，才算完成。
+    #[test]
+    fn claude_stop_with_running_subagents_is_not_finished() {
+        let stop = |tasks: serde_json::Value| {
+            map_hook_event(&json!({ "hook_event_name": "Stop", "background_tasks": tasks }))
+        };
+        assert_eq!(
+            stop(json!([
+                { "id": "a1", "type": "subagent", "status": "running", "agent_type": "Explore" },
+                { "id": "a2", "type": "subagent", "status": "running", "agent_type": "Explore" },
+                { "id": "w1", "type": "workflow", "status": "running", "name": "review" },
+            ])),
+            Some((
+                AgentEventKind::ToolFinished,
+                Some("后台还有 3 个子任务在跑".to_string())
+            ))
+        );
+        assert_eq!(
+            stop(json!([])),
+            Some((AgentEventKind::TurnSucceeded, None)),
+            "子任务都结束了，这次 Stop 才是完成"
+        );
+        assert_eq!(
+            stop(json!([
+                { "id": "b1", "type": "shell", "status": "running", "command": "npm run dev" },
+                { "id": "m1", "type": "monitor", "status": "running" },
+                { "id": "t1", "type": "teammate", "status": "running" },
+                { "id": "a1", "type": "subagent", "status": "completed" },
+            ])),
+            Some((AgentEventKind::TurnSucceeded, None)),
+            "后台 shell、monitor、空闲 teammate 会一直挂着，不能拦住完成"
+        );
+        assert_eq!(
+            map_hook_event(&json!({ "hook_event_name": "Stop" })),
+            Some((AgentEventKind::TurnSucceeded, None)),
+            "不带快照的旧版本照旧"
+        );
+        assert_eq!(
+            map_hook_event_for_provider(
+                &json!({
+                    "hookEventName": "stop",
+                    "backgroundTasks": [
+                        { "id": "t1", "type": "subagent", "status": "running", "agentType": "explore" }
+                    ]
+                }),
+                "grok"
+            ),
+            Some((
+                AgentEventKind::ToolFinished,
+                Some("后台还有 1 个子任务在跑".to_string())
+            )),
+            "Grok 的快照字段是驼峰"
+        );
+    }
+
+    fn transcript(name: &str, lines: &[&str]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "smelt-notify-title-{}-{name}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn transcript_title_prefers_the_latest_rename_then_the_generated_title() {
+        // 别的记录里嵌着同样子串（比如工具结果里的结构化对象）不是标题记录。
+        let noise = r#"{"type":"user","toolUseResult":{"type":"ai-title","aiTitle":"误认的标题"}}"#;
+        let generated = [
+            r#"{"type":"ai-title","aiTitle":"旧的生成标题","sessionId":"s"}"#,
+            r#"{"type":"user","message":{"content":"继续"}}"#,
+            r#"{"type":"ai-title","aiTitle":"会话标题和状态逻辑","sessionId":"s"}"#,
+            noise,
+        ];
+        let path = transcript("generated", &generated);
+        assert_eq!(
+            transcript_title(&path).as_deref(),
+            Some("会话标题和状态逻辑")
+        );
+
+        let renamed: Vec<&str> = generated
+            .iter()
+            .copied()
+            .chain([
+                r#"{"type":"custom-title","customTitle":"我起的名","sessionId":"s"}"#,
+                r#"{"type":"ai-title","aiTitle":"更新的生成标题","sessionId":"s"}"#,
+            ])
+            .collect();
+        let path = transcript("renamed", &renamed);
+        assert_eq!(transcript_title(&path).as_deref(), Some("我起的名"));
+
+        let cleared: Vec<&str> = renamed
+            .iter()
+            .copied()
+            .chain([r#"{"type":"custom-title","customTitle":"","sessionId":"s"}"#])
+            .collect();
+        let path = transcript("cleared", &cleared);
+        assert_eq!(
+            transcript_title(&path).as_deref(),
+            Some("更新的生成标题"),
+            "名字被清掉后回到生成标题，不翻出更早的名字"
+        );
+
+        let path = transcript(
+            "untitled",
+            &[r#"{"type":"user","message":{"content":"hi"}}"#],
+        );
+        assert_eq!(transcript_title(&path), None);
+        assert_eq!(
+            transcript_title(std::path::Path::new("/nonexistent/smelt.jsonl")),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_title_event_follows_session_start_prompt_and_stop() {
+        let path = transcript(
+            "event",
+            &[r#"{"type":"ai-title","aiTitle":"压缩逻辑与显示","sessionId":"s"}"#],
+        );
+        let transcript_path = path.to_str().unwrap();
+        for name in ["SessionStart", "UserPromptSubmit", "Stop"] {
+            let hook = json!({
+                "hook_event_name": name,
+                "session_id": "s",
+                "transcript_path": transcript_path,
+            });
+            let event = claude_title_event(&hook, "claude").expect(name);
+            assert_eq!(event.kind, AgentEventKind::SessionTitleChanged);
+            assert_eq!(event.conversation_id.as_deref(), Some("s"));
+            assert_eq!(
+                event.conversation_title.as_deref(),
+                Some("压缩逻辑与显示"),
+                "{name}"
+            );
+        }
+
+        let renamed = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_title": " 我起的名 ",
+            "transcript_path": transcript_path,
+        });
+        assert_eq!(
+            claude_title_event(&renamed, "claude")
+                .and_then(|event| event.conversation_title)
+                .as_deref(),
+            Some("我起的名")
+        );
+
+        let tool = json!({ "hook_event_name": "PreToolUse", "transcript_path": transcript_path });
+        assert_eq!(
+            claude_title_event(&tool, "claude"),
+            None,
+            "工具事件不读转录"
+        );
+        let codex = json!({ "hook_event_name": "Stop", "transcript_path": transcript_path });
+        assert_eq!(
+            claude_title_event(&codex, "codex"),
+            None,
+            "转录格式只认 Claude 的"
         );
     }
 

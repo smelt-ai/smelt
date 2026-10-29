@@ -101,13 +101,14 @@ impl SessionRecord {
     /// 保留最后已知 phase（那是历史，不是当前活动），`runtime=false` 才表示
     /// 没有可 attach 的运行时。pending_question 清空，revision/instance 归零。
     fn into_state(self, now_unix: u64) -> SessionState {
-        SessionState {
+        let mut state = SessionState {
             id: self.id,
             instance: 0,
             cwd: self.cwd,
             launch: self.launch,
             provider: self.provider,
             conversation_id: self.conversation_id,
+            custom_title: None,
             cli_exited: self.cli_exited,
             agent_token: String::new(),
             title: self.title,
@@ -123,8 +124,12 @@ impl SessionRecord {
             turn_events: self.turn_events,
             agent_event_version: self.agent_event_version,
             active_blocker: None,
+            program_status: false,
             runtime: false,
-        }
+        };
+        // 留下的终端也顶着用户给那段对话起的名字。
+        state.custom_title = crate::terminal_names::lookup(&state);
+        state
     }
 }
 
@@ -474,6 +479,7 @@ mod tests {
             launch: Some("claude".to_string()),
             provider: Some("claude".to_string()),
             conversation_id: Some("conv-1".to_string()),
+            custom_title: None,
             cli_exited: false,
             agent_token: "secret-token".to_string(),
             title: Some("重构存储层".to_string()),
@@ -493,6 +499,7 @@ mod tests {
                 agent_id: None,
                 tool_name: None,
             }),
+            program_status: false,
             runtime: true,
         }
     }

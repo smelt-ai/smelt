@@ -295,6 +295,7 @@ ConversationView _view({
   sessionId: sessionId,
   phase: phase,
   statusLine: statusLine,
+  compacting: false,
   endReason: '',
   sessionTitle: title,
   turnStartedAtMs: turnStartedAtMs,
@@ -674,6 +675,7 @@ ConversationView _route(DateTime now) => _view(
 ConversationView _empty(String sessionId) => ConversationView(
   sessionId: sessionId,
   phase: ConversationPhase.idle,
+  compacting: false,
   endReason: '',
   plan: const [],
   pendingPermissions: const [],

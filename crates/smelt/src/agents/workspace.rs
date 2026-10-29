@@ -371,7 +371,9 @@ impl Workspace {
     /// [`Self::on_agent_memory_changed`]。先登记再取，登记之后的变化不会漏。
     pub(super) fn refresh_agent_memories(&mut self, cx: &mut Context<Self>) {
         use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call_on, error_text};
-        use smelt_model::control_api::{AgentDefinitionIdParams, AgentMemoryList, AgentMemoryWatch};
+        use smelt_model::control_api::{
+            AgentDefinitionIdParams, AgentMemoryList, AgentMemoryWatch,
+        };
 
         let Some(agent) = self.agent_surface.editor.as_ref().map(|e| e.agent.clone()) else {
             return;
@@ -1384,14 +1386,24 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(record) = self.remote_acp_record(session_id, cx) else {
+        // 运行的会话不进工作区目录：用的哪个 agent、开在哪看运行记录；守护里已经没有它
+        // （运行结束、runtime 已回收）就没有现场可看。
+        let live =
+            crate::daemon_state_for_session_id(&crate::runtimes::RuntimeKey::Local, session_id, cx)
+                .is_some();
+        if !live {
             self.automation_surface.live_view = None;
             self.automation_surface.live_sub = None;
             self.automation_surface.error = None;
             cx.notify();
             return;
-        };
-        let Some(agent) = settings::ConversationAgentKind::from_id(&record.agent) else {
+        }
+        let Some(agent) = run
+            .context
+            .engine_kind_id
+            .as_deref()
+            .and_then(settings::ConversationAgentKind::from_id)
+        else {
             self.automation_surface.live_view = None;
             self.automation_surface.live_sub = None;
             self.automation_surface.error = Some("无法识别该运行使用的智能体引擎".to_string());
@@ -1406,19 +1418,15 @@ impl Workspace {
                     runtime,
                     launch_prep: None,
                     agent,
-                    launch: record.launch,
+                    // 接的是守护里正在跑的会话，不按这份规格重新起。
+                    launch: agent.default_launch(),
                     refresh_launch_from_settings: false,
-                    profile_id: record
-                        .agent_option_id
-                        .strip_prefix("profile:")
-                        .map(String::from),
-                    cwd: Some(record.cwd),
+                    profile_id: None,
+                    cwd: Some(run.context.cwd.clone()),
                     reason: "正在打开自动化运行现场…".to_string(),
                     entries: Vec::new(),
-                    resume_session_id: record
-                        .resume_id
-                        .map(agent_client_protocol::schema::v1::SessionId::new),
-                    saved_sid: Some(record.id),
+                    resume_session_id: None,
+                    saved_sid: Some(session_id.to_string()),
                 },
             )
         });
@@ -2260,4 +2268,3 @@ impl Workspace {
             .count()
     }
 }
-

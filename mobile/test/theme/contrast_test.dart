@@ -41,6 +41,19 @@ void main() {
         expect(contrast(c.onControl, c.control), greaterThanOrEqualTo(4.5));
       });
 
+      test('底部导航玻璃胶囊下滚过任何底色，导航标签 ≥ 4.5', () {
+        for (final below in [c.ground, c.shelf, c.paper, c.ink, c.solid]) {
+          final glass = Color.alphaBlend(c.glass, below);
+          for (final fg in [c.ink, c.inkMuted]) {
+            expect(contrast(fg, glass), greaterThanOrEqualTo(4.5));
+          }
+          expect(
+            contrast(c.ink, Color.alphaBlend(c.control, glass)),
+            greaterThanOrEqualTo(4.5),
+          );
+        }
+      });
+
       test('灶台标签色（非文字图形）对底色 ≥ 3', () {
         for (final s in c.stations) {
           expect(contrast(s, c.ground), greaterThanOrEqualTo(3));

@@ -43,8 +43,7 @@ pub(crate) fn session_connection_counts(
     }
     if let Some(slot) = acp_sessions.get(id) {
         let out = slot.value.out.lock();
-        let interactive = usize::from(out.client.is_some());
-        return (interactive, out.watchers.len());
+        return (out.clients.len(), out.watchers.len());
     }
     (0, 0)
 }

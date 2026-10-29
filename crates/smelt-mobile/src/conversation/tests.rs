@@ -210,6 +210,7 @@ fn connection_event(state: ConnectionState) -> ConnectionEvent {
         endpoint_id: Some(ENDPOINT.to_string()),
         link: None,
         error: None,
+        os: None,
     }
 }
 
@@ -393,6 +394,9 @@ fn full_and_delta_frames_restore_the_view() {
     let mut next = snapshot_json(0, 3, 2, &list);
     next["phase"] = "thinking".into();
     next["status_line"] = "正在写".into();
+    next["compacting"] = true.into();
+    next["notice"] =
+        json!({"id": 7, "kind": "config_rejected", "text": "更新会话配置失败：timeout"});
     watcher.delta(next);
     let event = events.snapshot_where("增量帧", |event| texts(event).len() == 3);
     assert_eq!(texts(&event), ["你好", "第一句，第二句", "新的一条"]);
@@ -402,6 +406,10 @@ fn full_and_delta_frames_restore_the_view() {
         crate::api::conversation::ConversationPhase::Thinking
     );
     assert_eq!(view.status_line.as_deref(), Some("正在写"));
+    assert!(view.compacting);
+    let notice = view.notice.expect("提示要投影给手机");
+    assert_eq!(notice.id, 7);
+    assert_eq!(notice.text, "更新会话配置失败：timeout");
     assert!(runtime.actions().is_empty(), "镜像对得上不该要整段帧");
 }
 

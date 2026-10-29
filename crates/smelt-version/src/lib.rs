@@ -15,6 +15,18 @@ pub const RELEASE: Option<&str> = match option_env!("SMELT_BUILD_VERSION") {
     _ => None,
 };
 
+/// 从发版的校验和清单（`SHA256SUMS`，`sha256sum` 的输出）里找出这个文件的校验和。
+/// 每次发版的产物都列在同一个 Release 的这份清单里，远程运行时升级和桌面更新都对着它校验。
+pub fn checksum_for<'a>(sums: &'a str, file: &str) -> Option<&'a str> {
+    sums.lines().find_map(|line| {
+        let (sum, name) = line.split_once(char::is_whitespace)?;
+        // `sha256sum` 二进制模式在文件名前加 `*`。
+        let name = name.trim_start().trim_start_matches('*');
+        (name == file && sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then_some(sum)
+    })
+}
+
 const fn strip_build(version: &str) -> &str {
     let bytes = version.as_bytes();
     let mut i = 0;
@@ -29,12 +41,34 @@ const fn strip_build(version: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_build;
+    use super::{checksum_for, strip_build};
 
     #[test]
     fn strip_build_keeps_the_release_part() {
         assert_eq!(strip_build("2026.1027.0-rc.1"), "2026.1027.0-rc.1");
         assert_eq!(strip_build("2026.1027.0-rc.1+g32c3172"), "2026.1027.0-rc.1");
         assert_eq!(strip_build("2026.1027.0+g32c3172"), "2026.1027.0");
+    }
+
+    #[test]
+    fn finds_the_checksum_line_for_exactly_this_file() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let sums = format!(
+            "{a}  smeltd-0.9.1-linux-aarch64.tar.gz\n{b} *smeltd-0.9.1-linux-x86_64.tar.gz\n"
+        );
+        assert_eq!(
+            checksum_for(&sums, "smeltd-0.9.1-linux-x86_64.tar.gz"),
+            Some(b.as_str())
+        );
+        assert_eq!(
+            checksum_for(&sums, "smeltd-0.9.1-linux-aarch64.tar.gz"),
+            Some(a.as_str())
+        );
+        assert_eq!(checksum_for(&sums, "smeltd-0.9.1-linux-x86.tar.gz"), None);
+        assert_eq!(
+            checksum_for("short  smeltd.tar.gz\n", "smeltd.tar.gz"),
+            None
+        );
     }
 }

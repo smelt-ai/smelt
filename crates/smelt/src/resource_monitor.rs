@@ -149,8 +149,7 @@ impl Workspace {
                 if this
                     .update(cx, |ws, cx| {
                         ws.resource_monitor.desktop_memory = desktop_memory.flatten();
-                        ws.resource_monitor
-                            .apply(desktop, runtimes, Instant::now());
+                        ws.resource_monitor.apply(desktop, runtimes, Instant::now());
                         cx.notify();
                     })
                     .is_err()
@@ -356,8 +355,7 @@ fn group_sessions(
                 }
             },
             None => {
-                let (count, group) =
-                    others.get_or_insert_with(|| (0, empty(String::new(), None)));
+                let (count, group) = others.get_or_insert_with(|| (0, empty(String::new(), None)));
                 *count += 1;
                 group
             }
@@ -538,7 +536,11 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
     let owners = session_owners(ws, cx);
     let mut keys = vec![RuntimeKey::Local];
     if let Some(hub) = cx.try_global::<RuntimeHub>() {
-        keys.extend(hub.remotes.iter().map(|remote| remote.runtime.key().clone()));
+        keys.extend(
+            hub.remotes
+                .iter()
+                .map(|remote| remote.runtime.key().clone()),
+        );
     }
     keys.into_iter()
         .map(|key| {
@@ -624,10 +626,9 @@ pub(crate) fn resources_page(
             SettingGroup::new()
                 .title(snapshot.sections[ix].name.clone())
                 .item(SettingItem::render(move |_, window, cx: &mut App| {
-                    let sort =
-                        window.use_keyed_state("settings-resources-sort", cx, |_, _| {
-                            PanelSort::default()
-                        });
+                    let sort = window.use_keyed_state("settings-resources-sort", cx, |_, _| {
+                        PanelSort::default()
+                    });
                     let expanded =
                         window.use_keyed_state("settings-resources-expanded", cx, |_, _| {
                             ExpandedRows::default()
@@ -699,15 +700,10 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
             ),
         );
     }
-    view.child(
-        div()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .child(
-                "本机合计：Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
+    view.child(div().text_xs().text_color(theme.muted_foreground).child(
+        "本机合计：Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
                  包括智能体起的命令；CPU 按单核计，多核可超过 100%。",
-            ),
-    )
+    ))
     .into_any_element()
 }
 
@@ -788,7 +784,9 @@ fn section_view(
             None => format!("{}-others-{ix}", section.id_prefix),
         });
         let is_open = open.contains(&id);
-        table = table.child(session_row(id, group, is_open, &expanded, workspace, colors));
+        table = table.child(session_row(
+            id, group, is_open, &expanded, workspace, colors,
+        ));
     }
     if let Some(total) = section.total {
         table = table.child(
@@ -848,7 +846,13 @@ fn row_label(label: String, detail: Option<String>, colors: RowColors) -> Div {
     v_flex()
         .flex_1()
         .min_w_0()
-        .child(div().truncate().text_sm().text_color(colors.fg).child(label))
+        .child(
+            div()
+                .truncate()
+                .text_sm()
+                .text_color(colors.fg)
+                .child(label),
+        )
         .children(detail.map(|detail| {
             div()
                 .truncate()
@@ -986,8 +990,9 @@ fn session_row(
                     .icon_action("跳到会话")
                     .on_click(move |_, _, cx| {
                         let session_id = session_id.clone();
-                        workspace
-                            .update(cx, |ws, cx| ws.jump_to_session_from_settings(session_id, cx));
+                        workspace.update(cx, |ws, cx| {
+                            ws.jump_to_session_from_settings(session_id, cx)
+                        });
                     }),
             )
     });

@@ -155,17 +155,17 @@ impl Workspace {
         };
         // 自下而上展开祖先（不含文件自身）。路径属于本机运行时，按它的规则切。
         let mut ancestors = Vec::new();
-        let mut current = smelt_client::runtime_path::PathStyle::LOCAL.parent(path);
+        let mut current = smelt_model::runtime_path::PathStyle::LOCAL.parent(path);
         while let Some(ps) = current {
             if ps.is_empty() || ps == root {
                 // 根目录本身也要有 listing
                 self.ensure_dir_listing(root.clone(), cx);
                 break;
             }
-            if !smelt_client::runtime_path::PathStyle::LOCAL.starts_with(&ps, &root) {
+            if !smelt_model::runtime_path::PathStyle::LOCAL.starts_with(&ps, &root) {
                 break;
             }
-            current = smelt_client::runtime_path::PathStyle::LOCAL.parent(&ps);
+            current = smelt_model::runtime_path::PathStyle::LOCAL.parent(&ps);
             ancestors.push(ps);
         }
         // 先 ensure 近根的，再展开
@@ -215,7 +215,7 @@ impl Workspace {
     /// 当前可见树，下标和虚拟列表一致。
     fn file_tree_rows(&self, cx: &App) -> Vec<super::view::FileTreeRow> {
         collect_file_tree_rows(
-            smelt_client::runtime_path::PathStyle::LOCAL,
+            smelt_model::runtime_path::PathStyle::LOCAL,
             &self.workspace_roots(cx),
             &self.expanded,
             &self.collapsed_roots,
@@ -281,9 +281,9 @@ impl Workspace {
         let Some(root) = self.active_project_root(cx) else {
             return;
         };
-        if let Some(ps) = smelt_client::runtime_path::PathStyle::LOCAL.parent(&path) {
+        if let Some(ps) = smelt_model::runtime_path::PathStyle::LOCAL.parent(&path) {
             // 父目录在项目根之下（含根的直接子项的父 = root）
-            if ps == root || smelt_client::runtime_path::PathStyle::LOCAL.starts_with(&ps, &root) {
+            if ps == root || smelt_model::runtime_path::PathStyle::LOCAL.starts_with(&ps, &root) {
                 // 根本身不在列表里时，选中它没有对应行；只选非根父路径
                 if ps != root {
                     self.file_tree_selected = Some(ps);
@@ -387,7 +387,7 @@ impl Workspace {
         #[cfg(not(target_os = "macos"))]
         {
             // Linux：尽量打开所在目录。路径按运行时的 `/` 取父目录。
-            if let Some(parent) = smelt_client::runtime_path::PathStyle::LOCAL.parent(&path) {
+            if let Some(parent) = smelt_model::runtime_path::PathStyle::LOCAL.parent(&path) {
                 let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
             }
         }
@@ -530,7 +530,8 @@ impl Workspace {
                     }
                     Ok(FileOpenResult {
                         content: FileContent::Image { data },
-                    }) => match smelt_client::runtime_path::PathStyle::LOCAL.extension(&of.path)
+                    }) => match smelt_model::runtime_path::PathStyle::LOCAL
+                        .extension(&of.path)
                         .and_then(smelt_ui::image::format_for_extension)
                     {
                         Some(format) => {
@@ -778,7 +779,7 @@ impl Workspace {
     fn file_tree_root_for(&self, path: &str, cx: &App) -> Option<String> {
         self.workspace_roots(cx)
             .into_iter()
-            .filter(|root| smelt_client::runtime_path::PathStyle::LOCAL.starts_with(path, root))
+            .filter(|root| smelt_model::runtime_path::PathStyle::LOCAL.starts_with(path, root))
             .max_by_key(String::len)
     }
 
@@ -795,7 +796,8 @@ impl Workspace {
 
     /// 文件树右键「删除文件」：先弹二次确认，用户点确定后才真正删盘。
     pub fn start_delete_file(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
-        let label = smelt_client::runtime_path::PathStyle::LOCAL.file_name(&path)
+        let label = smelt_model::runtime_path::PathStyle::LOCAL
+            .file_name(&path)
             .unwrap_or(&path)
             .to_string();
         self.delete_file_target = Some(DeleteFileTarget {
@@ -825,7 +827,7 @@ impl Workspace {
     fn perform_delete_file(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
         let Some(root) = self
             .file_tree_root_for(&path, cx)
-            .or_else(|| smelt_client::runtime_path::PathStyle::LOCAL.parent(&path))
+            .or_else(|| smelt_model::runtime_path::PathStyle::LOCAL.parent(&path))
         else {
             return;
         };
@@ -885,7 +887,7 @@ impl Workspace {
         } else {
             self.expanded.remove(&path);
         }
-        if let Some(parent) = smelt_client::runtime_path::PathStyle::LOCAL.parent(&path) {
+        if let Some(parent) = smelt_model::runtime_path::PathStyle::LOCAL.parent(&path) {
             stale_dirs.push(parent);
         }
         stale_dirs.sort();
@@ -908,7 +910,7 @@ impl Workspace {
     ) {
         let root = self.active_project_root(cx);
         let rel = root
-            .and_then(|root| smelt_client::runtime_path::PathStyle::LOCAL.strip_prefix(&path, &root))
+            .and_then(|root| smelt_model::runtime_path::PathStyle::LOCAL.strip_prefix(&path, &root))
             .unwrap_or_else(|| path.clone());
         let msg = format!("@{rel} ");
         self.send_to_panel_session(&msg, window, cx);
@@ -924,7 +926,9 @@ impl Workspace {
         }
         let root = self.active_project_root(cx);
         let rel = root
-            .and_then(|root| smelt_client::runtime_path::PathStyle::LOCAL.strip_prefix(&of.path, &root))
+            .and_then(|root| {
+                smelt_model::runtime_path::PathStyle::LOCAL.strip_prefix(&of.path, &root)
+            })
             .unwrap_or_else(|| of.path.clone());
         let msg = format!("{rel} 里选中的这段：\n```\n{selected}\n```\n");
         self.send_to_panel_session(&msg, window, cx);

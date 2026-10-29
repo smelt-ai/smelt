@@ -94,7 +94,7 @@ smelt-store = { path = "../smelt-store" }
 # 版本协商的测试要按这个桌面的事件投影版本扮一台运行时。
 smelt-event-protocol = { path = "../smelt-event-protocol" }
 gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # smelt-core 是 smeltd 的进程和套接字层，第 1 步不移植到 Windows。测试里用到它的
 # 代码都在 Unix 上；Windows 的 `cargo check --all-targets` 不该把它编进来。

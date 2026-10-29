@@ -447,7 +447,10 @@ fn a_rejected_restore_does_not_hold_the_user_action() {
         })
     };
     std::thread::sleep(Duration::from_millis(200));
-    session.reduced.lock().status_line = Some("更新会话配置失败：不行".into());
+    smelt_core::acp_session::apply_event(
+        &mut session.reduced.lock(),
+        smelt_core::acp_conn::ConversationEvent::ConfigRejected("更新会话配置失败：不行".into()),
+    );
     let started = std::time::Instant::now();
     restoring.join().unwrap();
     assert!(
@@ -605,31 +608,6 @@ fn waking_without_a_launch_spec_stays_suspended() {
         error.contains("no launch spec") || error.contains("启动规格"),
         "{error}"
     );
-    assert!(slot.value.idle.is_suspended());
-}
-
-#[test]
-fn a_mobile_remote_session_still_suspends_when_idle() {
-    let acp_sessions = new_test_acp_sessions();
-    let remote_sessions = new_test_remote_sessions();
-    let (session, _cmd_rx) = direct_session(quiet_state());
-    let (slot, _) = acp_sessions.reserve_with("acp-mobile", || session);
-    mutate_remote_catalog(&remote_sessions, |catalog| {
-        catalog.upsert_acp(smelt_core::session_control::RemoteAcpSession {
-            id: "acp-mobile".into(),
-            cwd: "/work".into(),
-            title: "手机上建的".into(),
-            agent_option_id: "pi".into(),
-            agent: "pi".into(),
-            launch: smelt_core::agent_kind::ConversationAgentKind::Pi.default_launch(),
-            resume_id: None,
-            created_at: 1,
-            lifecycle: Default::default(),
-            hidden: false,
-        })
-    })
-    .unwrap();
-    acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
     assert!(slot.value.idle.is_suspended());
 }
 

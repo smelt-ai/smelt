@@ -33,10 +33,10 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use crate::ui_theme;
 use anyhow::Context as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
-use crate::ui_theme;
 use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
 use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
@@ -161,31 +161,38 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
 
     let panels: Vec<PluginPanel> = found
         .into_iter()
-        .filter_map(|Found { root, manifest, source }| {
-            let id = manifest.id().to_string();
-            let Some(slot) = REGISTRY.with(|registry| registry.borrow_mut().slot_of(&id)) else {
-                eprintln!("[plugins] 插件太多，{id} 没有加载");
-                return None;
-            };
-            // 开关挂在运行时上、加载时读，所以每个插件加载前按它的来源设一次。
-            runtime.set_editor_files(source.editor_files());
-            let content = runtime
-                .load_application(&root, manifest.entry())
-                .and_then(|application| runtime.mount_application(&application, window, cx))
-                .map_err(|error| format!("{error:#}"));
-            if let Err(error) = &content {
-                eprintln!("[plugins] {id} 加载失败：{error}");
-            }
-            Some(PluginPanel {
-                slot,
-                title: manifest.name().to_string(),
-                version: manifest.version().to_string(),
-                id,
-                root,
-                source,
-                content,
-            })
-        })
+        .filter_map(
+            |Found {
+                 root,
+                 manifest,
+                 source,
+             }| {
+                let id = manifest.id().to_string();
+                let Some(slot) = REGISTRY.with(|registry| registry.borrow_mut().slot_of(&id))
+                else {
+                    eprintln!("[plugins] 插件太多，{id} 没有加载");
+                    return None;
+                };
+                // 开关挂在运行时上、加载时读，所以每个插件加载前按它的来源设一次。
+                runtime.set_editor_files(source.editor_files());
+                let content = runtime
+                    .load_application(&root, manifest.entry())
+                    .and_then(|application| runtime.mount_application(&application, window, cx))
+                    .map_err(|error| format!("{error:#}"));
+                if let Err(error) = &content {
+                    eprintln!("[plugins] {id} 加载失败：{error}");
+                }
+                Some(PluginPanel {
+                    slot,
+                    title: manifest.name().to_string(),
+                    version: manifest.version().to_string(),
+                    id,
+                    root,
+                    source,
+                    content,
+                })
+            },
+        )
         .collect();
 
     REGISTRY.with(|registry| registry.borrow_mut().panels = panels);
@@ -238,7 +245,11 @@ fn discover() -> Vec<Found> {
             match PluginManifest::read(&root) {
                 Ok(manifest) => {
                     if !found.iter().any(|seen| seen.manifest.id() == manifest.id()) {
-                        found.push(Found { root, manifest, source });
+                        found.push(Found {
+                            root,
+                            manifest,
+                            source,
+                        });
                     }
                 }
                 Err(error) => eprintln!("[plugins] {error}"),
@@ -514,8 +525,11 @@ mod tests {
         .unwrap();
         assert_eq!(declared_hosts(&dir), ["api.github.com", "example.com"]);
 
-        std::fs::write(dir.join(MANIFEST_FILE), r#"{"id":"com.example.x","name":"X","entry":"main.js"}"#)
-            .unwrap();
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            r#"{"id":"com.example.x","name":"X","entry":"main.js"}"#,
+        )
+        .unwrap();
         assert!(declared_hosts(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

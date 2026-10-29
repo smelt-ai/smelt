@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use gpui::{App, BorrowAppContext, Global};
 
-use smelt_client::daemon_state::{DaemonSessionState, TerminalProgress};
+use smelt_client::daemon_state::{DaemonSessionState, RuntimePresence, TerminalProgress};
 use smelt_client::runtime::RuntimeKey;
 pub use smelt_model::attention::{AttentionItem, AttentionKind, AttentionStore};
 
@@ -230,12 +230,15 @@ impl DaemonStates {
         .unwrap_or_default()
     }
 
-    /// `None`：这个运行时的订阅未就绪，不能判死。`Some(false)`：当前 epoch 快照里没有可
-    /// attach 的运行时进程。
-    pub fn runtime_alive(runtime: &RuntimeKey, session_id: &str, cx: &App) -> Option<bool> {
+    /// `None`：这个运行时的订阅未就绪，不能判死。其余见 [`RuntimePresence`]。
+    pub fn runtime_presence(
+        runtime: &RuntimeKey,
+        session_id: &str,
+        cx: &App,
+    ) -> Option<RuntimePresence> {
         Self::read(cx, |runtimes| {
             let mirror = runtimes.get(runtime);
-            DaemonSessionState::runtime_alive_from_mirror(
+            DaemonSessionState::runtime_presence_from_mirror(
                 mirror.is_some_and(|m| m.subscription_live),
                 mirror.is_some_and(|m| m.primed),
                 mirror.and_then(|m| m.sessions.get(session_id)),
@@ -367,9 +370,9 @@ mod tests {
             assert!(DaemonStates::get(&remote, "t-remote", cx).is_some());
 
             DaemonStates::mark_subscription_disconnected(&remote, cx);
-            assert_eq!(DaemonStates::runtime_alive(&remote, "t-remote", cx), None);
+            assert_eq!(DaemonStates::runtime_presence(&remote, "t-remote", cx), None);
             assert_ne!(
-                DaemonStates::runtime_alive(&RuntimeKey::Local, "t-local", cx),
+                DaemonStates::runtime_presence(&RuntimeKey::Local, "t-local", cx),
                 None
             );
 

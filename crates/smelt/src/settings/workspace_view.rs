@@ -97,7 +97,7 @@ impl Workspace {
                 map
             },
             panel_plugins: self.panel_plugins_snapshot(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             update_status: self.update_status.clone(),
             #[cfg(target_os = "macos")]
             moving_app: self.moving_app,
@@ -139,7 +139,7 @@ impl Workspace {
     /// 设置里有没有要你处理的事，有的话落在哪一页：有新版本、后台服务旧了 → 系统；有机器
     /// 要处理 → 远程。侧栏「设置」上的红点和设置侧栏那一页的红点都看它。
     pub(crate) fn settings_attention(&self, cx: &App) -> Option<SettingsSection> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if self.update_available() {
             return Some(SettingsSection::app_update());
         }

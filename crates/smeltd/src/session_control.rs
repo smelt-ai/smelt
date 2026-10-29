@@ -1,8 +1,8 @@
 //! 远程客户端的会话生命周期控制方法：新建目录、新建、删除、智能体归属。
 //!
-//! 新建、删除和 `acp_create` / `open` / `kill` / `acp_kill` op 走同一套内部实现，
-//! 会话照常进远程目录，桌面侧栏也看得到。这里只负责把客户端的意图解析成运行时
-//! 自己的会话记录：用哪个 agent、开在哪个目录、会话 id 是什么、重试是不是同一个会话。
+//! 新建、删除和 `open` / `kill` / `acp_kill` op 走同一套内部实现。运行时起好会话之后
+//! 写进工作区目录，桌面、手机都按目录看到它。这里只负责把客户端的意图解析成要起的
+//! 会话：用哪个 agent、开在哪个目录、会话 id 是什么、重试是不是同一个会话。
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -15,17 +15,15 @@ use smelt_core::control_api::{
 };
 use smelt_core::new_session::NewSessionTarget;
 use smelt_core::session_control::{
-    AcpAgentOption, RemoteAcpSession, RemoteSessionKind, RemoteSessionRecord,
-    RemoteTerminalSession, SessionDeleteKind, is_background_acp_session_id,
-    resolve_session_delete_kind,
+    AcpAgentOption, DaemonConversation, SessionDeleteKind, directory_session_kind,
+    is_background_acp_session_id,
 };
-use smelt_core::workspace_menu::WorkspaceMenuSnapshot;
+use smelt_core::workspace_directory::{
+    WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+};
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 
-use super::{
-    AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceMenuStore, now_unix,
-    workspace_menu_snapshot,
-};
+use super::{AcpSessions, EventHubHandle, Sessions, WorkspaceDirectoryReader};
 
 /// 远程新建的终端先按这个尺寸起；客户端接上后按自己的视口 resize。
 const REMOTE_TERMINAL_COLS: u16 = 100;
@@ -104,26 +102,52 @@ fn error(code: ControlErrorCode, message: impl Into<String>) -> ControlError {
     ControlError::new(code, message)
 }
 
-/// 新建什么：对话（带解析好的 agent 选项）或终端（带首条命令）。
+/// 新建什么：对话（带解析好的 agent 选项）或终端（带首条命令和它在启动项里的名字）。
 enum CreateTarget {
     Acp(AcpAgentOption),
-    Terminal { launch: Option<String> },
+    Terminal {
+        launch: Option<String>,
+        label: Option<String>,
+    },
 }
 
-/// 规划好的新建：运行时要登记进远程目录的那条记录。重试命中已有记录时就是那条。
+/// 规划好的新建。重试命中工作区目录里已有的那一段时是 `Existing`，不再起。
 enum CreatePlan {
-    Acp(RemoteAcpSession),
-    Terminal {
-        session: RemoteTerminalSession,
-        launch: Option<String>,
-    },
+    Existing(String),
+    Acp(DaemonConversation),
+    Terminal(DaemonTerminal),
 }
 
 impl CreatePlan {
     fn session_id(&self) -> &str {
         match self {
-            Self::Acp(session) => &session.id,
-            Self::Terminal { session, .. } => &session.id,
+            Self::Existing(id) => id,
+            Self::Acp(conversation) => &conversation.sid,
+            Self::Terminal(terminal) => &terminal.id,
+        }
+    }
+}
+
+/// 运行时自己开的终端：起 PTY 用的参数，和起好之后写进工作区目录的那一段对话。
+struct DaemonTerminal {
+    id: String,
+    cwd: String,
+    launch: Option<String>,
+    label: Option<String>,
+}
+
+impl DaemonTerminal {
+    fn directory_entry(&self) -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: uuid::Uuid::new_v4().to_string(),
+            terminals: vec![WorkspaceTerminal {
+                id: Some(self.id.clone()),
+                cwd: Some(self.cwd.clone()),
+                launch_label: self.label.clone(),
+                launch_cmd: self.launch.clone(),
+                ..WorkspaceTerminal::default()
+            }],
+            ..WorkspaceConversation::default()
         }
     }
 }
@@ -140,12 +164,19 @@ fn resolve_target(params: &SessionCreateParams) -> Result<CreateTarget, ControlE
             } => find_option(&agent_option_id).map(CreateTarget::Acp),
             NewSessionTarget::Terminal { command, .. } => Ok(CreateTarget::Terminal {
                 launch: Some(command),
+                label: Some(action.label),
             }),
-            NewSessionTarget::BlankTerminal => Ok(CreateTarget::Terminal { launch: None }),
+            NewSessionTarget::BlankTerminal => Ok(CreateTarget::Terminal {
+                launch: None,
+                label: None,
+            }),
         };
     }
     match params.kind.unwrap_or_default() {
-        SessionCreateKind::Terminal => Ok(CreateTarget::Terminal { launch: None }),
+        SessionCreateKind::Terminal => Ok(CreateTarget::Terminal {
+            launch: None,
+            label: None,
+        }),
         SessionCreateKind::Acp => {
             let id = non_empty(params.agent_option_id.as_deref()).ok_or_else(|| {
                 error(
@@ -184,13 +215,14 @@ fn session_id(prefix: &str, request_id: Option<&str>) -> Result<String, ControlE
 }
 
 fn require_project<'a>(
-    menu: &'a WorkspaceMenuSnapshot,
+    directory: &'a WorkspaceDirectory,
     project_root: &str,
 ) -> Result<&'a str, ControlError> {
-    menu.projects
+    directory
+        .projects
         .iter()
-        .find(|project| project.root == project_root)
-        .map(|project| project.root.as_str())
+        .find(|root| *root == project_root)
+        .map(String::as_str)
         .ok_or_else(|| {
             error(
                 ControlErrorCode::FailedPrecondition,
@@ -204,7 +236,7 @@ fn require_project<'a>(
 fn resolve_acp_cwd(
     project_root: &str,
     option: &AcpAgentOption,
-    menu: &WorkspaceMenuSnapshot,
+    directory: &WorkspaceDirectory,
 ) -> Result<String, ControlError> {
     if project_root.is_empty() {
         let definition_id = option.agent_definition_id().ok_or_else(|| {
@@ -217,7 +249,7 @@ fn resolve_acp_cwd(
             .map(|dir| dir.to_string_lossy().into_owned())
             .ok_or_else(|| error(ControlErrorCode::OperationFailed, "无法创建智能体工作区"));
     }
-    require_project(menu, project_root).map(str::to_string)
+    require_project(directory, project_root).map(str::to_string)
 }
 
 fn already_bound(message: &str) -> ControlError {
@@ -227,219 +259,196 @@ fn already_bound(message: &str) -> ControlError {
     )
 }
 
-/// 把请求解析成要登记的会话记录。`existing` 按 id 查远程目录，`runtime_taken` 看这个
-/// id 是否已经有不在目录里的 runtime（本地会话）。
+/// 把请求解析成要起的会话。重试看工作区目录：同一个 `request_id` 推出来的会话 id 已经
+/// 在目录里，参数也一样，就是同一次新建；`runtime_taken` 看这个 id 是否被不在目录里的
+/// runtime 占着。
 fn plan_create(
     params: SessionCreateParams,
     target: CreateTarget,
-    menu: &WorkspaceMenuSnapshot,
-    existing: impl FnOnce(&str) -> Result<Option<RemoteSessionRecord>, ControlError>,
+    directory: &WorkspaceDirectory,
     runtime_taken: impl FnOnce(&str) -> bool,
 ) -> Result<CreatePlan, ControlError> {
     let project_root = params.project_root.trim();
     match target {
-        CreateTarget::Terminal { launch } => {
-            let cwd = require_project(menu, project_root)?.to_string();
+        CreateTarget::Terminal { launch, label } => {
+            let cwd = require_project(directory, project_root)?.to_string();
             let id = session_id("term", params.request_id.as_deref())?;
-            if let Some(record) = existing(&id)? {
-                let session = record
-                    .as_terminal()
+            if let Some(conversation) = conversation_of(directory, &id) {
+                let terminal = conversation
+                    .terminals
+                    .iter()
+                    .find(|terminal| terminal.id.as_deref() == Some(id.as_str()))
                     .ok_or_else(|| already_bound("另一种会话"))?;
-                if session.cwd != cwd {
+                if terminal.cwd.as_deref() != Some(cwd.as_str()) {
                     return Err(already_bound("另一个项目的会话"));
                 }
-                return Ok(CreatePlan::Terminal { session, launch });
+                return Ok(CreatePlan::Existing(id));
             }
             if runtime_taken(&id) {
                 return Err(already_bound("一个本地会话"));
             }
-            Ok(CreatePlan::Terminal {
-                session: RemoteTerminalSession {
-                    id,
-                    cwd,
-                    title: String::new(),
-                    created_at: now_unix() as i64,
-                    lifecycle: Default::default(),
-                },
+            Ok(CreatePlan::Terminal(DaemonTerminal {
+                id,
+                cwd,
                 launch,
-            })
+                label,
+            }))
         }
         CreateTarget::Acp(option) => {
-            let cwd = resolve_acp_cwd(project_root, &option, menu)?;
+            let cwd = resolve_acp_cwd(project_root, &option, directory)?;
             let resume_id = non_empty(params.resume_id.as_deref()).map(str::to_string);
             let id = session_id("acp", params.request_id.as_deref())?;
-            if let Some(record) = existing(&id)? {
-                let session = record.as_acp().ok_or_else(|| already_bound("另一种会话"))?;
-                if session.cwd != cwd
-                    || session.agent_option_id != option.id
-                    || session.resume_id != resume_id
+            if let Some(conversation) = conversation_of(directory, &id) {
+                let acp = conversation
+                    .acp
+                    .as_ref()
+                    .ok_or_else(|| already_bound("另一种会话"))?;
+                if acp.cwd.as_deref() != Some(cwd.as_str())
+                    || acp.agent != option.kind
+                    || acp.profile_id.as_deref() != option.profile_id()
+                    || acp.agent_definition_id.as_deref() != option.agent_definition_id()
+                    || acp.history_session_id != resume_id
                 {
                     return Err(already_bound("参数不同的另一次新建"));
                 }
-                return Ok(CreatePlan::Acp(session));
+                return Ok(CreatePlan::Existing(id));
             }
             if runtime_taken(&id) {
                 return Err(already_bound("一个本地会话"));
             }
-            let title = resume_id
-                .as_deref()
-                .and_then(|resume_id| {
-                    smelt_core::session_control::list_history(&option, &cwd)
-                        .into_iter()
-                        .find(|session| session.resume_id == resume_id)
-                        .map(|session| session.display_title().to_string())
-                })
-                .unwrap_or_else(|| format!("{} conversation", option.label));
-            Ok(CreatePlan::Acp(RemoteAcpSession {
-                id,
+            Ok(CreatePlan::Acp(DaemonConversation {
+                sid: id,
                 cwd,
-                title,
-                agent_option_id: option.id,
-                agent: option.kind,
-                launch: option.launch,
+                option,
                 resume_id,
-                created_at: now_unix() as i64,
-                lifecycle: Default::default(),
-                hidden: false,
             }))
         }
     }
 }
 
-fn remote_record(
-    remote_sessions: &RemoteSessions,
-    id: &str,
-) -> Result<Option<RemoteSessionRecord>, ControlError> {
-    let mut state = remote_sessions.lock().unwrap();
-    let catalog = state
-        .catalog()
-        .map_err(|message| error(ControlErrorCode::TemporarilyUnavailable, message))?;
-    Ok(catalog
-        .remote_acp(id)
-        .map(RemoteSessionRecord::from)
-        .or_else(|| catalog.remote_terminal(id).map(RemoteSessionRecord::from)))
+/// 目录里用着这个会话 id（ACP 会话或某一格终端）的那段对话。
+fn conversation_of<'a>(
+    directory: &'a WorkspaceDirectory,
+    session_id: &str,
+) -> Option<&'a WorkspaceConversation> {
+    directory.conversations.iter().find(|conversation| {
+        conversation
+            .acp
+            .as_ref()
+            .is_some_and(|acp| acp.sid == session_id)
+            || conversation
+                .terminals
+                .iter()
+                .any(|terminal| terminal.id.as_deref() == Some(session_id))
+    })
 }
 
 pub(crate) fn create_session(
     params: SessionCreateParams,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     event_hub: &EventHubHandle,
 ) -> Result<SessionCreateResult, ControlError> {
     let target = resolve_target(&params)?;
-    let menu = workspace_menu_snapshot(workspace_menu);
-    let plan = plan_create(
-        params,
-        target,
-        &menu,
-        |id| remote_record(remote_sessions, id),
-        |id| sessions.get(id).is_some() || acp_sessions.get(id).is_some(),
-    )?;
+    let directory = workspace_directory
+        .read()
+        .map_err(|message| error(ControlErrorCode::TemporarilyUnavailable, message))?;
+    let plan = plan_create(params, target, &directory, |id| {
+        sessions.get(id).is_some() || acp_sessions.get(id).is_some()
+    })?;
     let session_id = plan.session_id().to_string();
-    let created = match plan {
-        CreatePlan::Acp(session) => {
-            create_remote_acp_session(session, sessions, acp_sessions, event_hub, remote_sessions)
-                .map_err(|message| error(ControlErrorCode::OperationFailed, message))
+    match plan {
+        CreatePlan::Existing(_) => {}
+        CreatePlan::Acp(conversation) => {
+            super::acp_host::open_daemon_conversation(
+                &conversation,
+                sessions,
+                acp_sessions,
+                event_hub,
+            )
+            .map_err(|message| error(ControlErrorCode::OperationFailed, message))?;
         }
-        CreatePlan::Terminal { session, launch } => super::open_terminal_runtime(
-            super::TerminalOpenRequest {
-                id: session.id.clone(),
-                cols: REMOTE_TERMINAL_COLS,
-                rows: REMOTE_TERMINAL_ROWS,
-                cwd: Some(session.cwd.clone()),
-                launch,
-                create_if_missing: true,
-                remote_session: Some(session),
-            },
-            sessions,
-            acp_sessions,
-            event_hub,
-            remote_sessions,
-            |_, _| (),
-        )
-        .map(|_| ())
-        .map_err(|open_error| match open_error {
-            // 守护在停机：换了守护再建就行，不是这次请求本身有错。
-            super::TerminalOpenError::DaemonStopping => error(
-                ControlErrorCode::TemporarilyUnavailable,
-                super::DaemonStopping.to_string(),
-            ),
-            super::TerminalOpenError::Failed(message) => {
-                error(ControlErrorCode::OperationFailed, message)
-            }
-        }),
-    };
-    created?;
+        CreatePlan::Terminal(terminal) => {
+            open_daemon_terminal(&terminal, sessions, acp_sessions, event_hub)?;
+        }
+    }
     Ok(SessionCreateResult { session_id })
 }
 
-/// 起一个进远程目录的 ACP 会话（已有同 id 的 runtime 时重新激活）。
-pub(crate) fn create_remote_acp_session(
-    session: RemoteAcpSession,
+/// 起一个运行时自己开的终端，起好写进工作区目录；写不进就收掉。
+fn open_daemon_terminal(
+    terminal: &DaemonTerminal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     event_hub: &EventHubHandle,
-    remote_sessions: &RemoteSessions,
-) -> Result<(), String> {
-    let request = serde_json::json!({
-        "id": session.id,
-        "cwd": session.cwd,
-        "launch": session.launch,
-        "agent": session.agent,
-        "resume_id": session.resume_id,
-    });
-    let open = super::acp_host::parse_acp_open_request(&request)
-        .ok_or_else(|| "invalid ACP create request".to_string())?;
-    super::acp_host::create_daemon_acp_session(
-        &open,
-        Some(session),
+) -> Result<(), ControlError> {
+    super::open_terminal_runtime(
+        super::TerminalOpenRequest {
+            id: terminal.id.clone(),
+            cols: REMOTE_TERMINAL_COLS,
+            rows: REMOTE_TERMINAL_ROWS,
+            cwd: Some(terminal.cwd.clone()),
+            launch: terminal.launch.clone(),
+            create_if_missing: true,
+        },
         sessions,
         acp_sessions,
         event_hub,
-        remote_sessions,
-    )?;
+        |_, _| (),
+    )
+    .map_err(|open_error| match open_error {
+        // 守护在停机：换了守护再建就行，不是这次请求本身有错。
+        super::TerminalOpenError::DaemonStopping => error(
+            ControlErrorCode::TemporarilyUnavailable,
+            super::DaemonStopping.to_string(),
+        ),
+        super::TerminalOpenError::Failed(message) => {
+            error(ControlErrorCode::OperationFailed, message)
+        }
+    })?;
+    let entered = super::workspace_directory::default_store().and_then(|store| {
+        super::workspace_directory::enter_conversation(
+            &store,
+            terminal.directory_entry(),
+            event_hub,
+        )
+    });
+    if let Err(failure) = entered {
+        let _ = super::kill_terminal_session(&terminal.id, sessions, event_hub);
+        return Err(error(
+            ControlErrorCode::OperationFailed,
+            format!("终端没能写进工作区目录：{}", failure.message),
+        ));
+    }
     Ok(())
 }
 
-/// 这个 id 是终端还是对话。远程目录是所有权真相；不在目录里的看运行时自己的会话表，
-/// 最后才看桌面发布的菜单（桌面拥有、眼下没在跑的会话）。
+/// 这个 id 是终端还是对话。先看运行时自己的会话表（在跑的），再看工作区目录（眼下没在
+/// 跑的）。两边都没有就是不存在，不要默认当 ACP 杀。
 fn session_delete_kind(
     id: &str,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
 ) -> Option<SessionDeleteKind> {
-    let catalog_kind = remote_sessions
-        .lock()
-        .unwrap()
-        .catalog()
+    if sessions.get(id).is_some() {
+        return Some(SessionDeleteKind::Terminal);
+    }
+    if acp_sessions.get(id).is_some() {
+        return Some(SessionDeleteKind::Acp);
+    }
+    workspace_directory
+        .read()
         .ok()
-        .and_then(|catalog| catalog.kind_for(id));
-    let runtime_kind = if sessions.get(id).is_some() {
-        Some(RemoteSessionKind::Terminal)
-    } else if acp_sessions.get(id).is_some() {
-        Some(RemoteSessionKind::Acp)
-    } else {
-        None
-    };
-    let menu_kind = workspace_menu
-        .lock()
-        .unwrap()
-        .session(id)
-        .map(|session| session.kind);
-    resolve_session_delete_kind(catalog_kind.or(runtime_kind), menu_kind).ok()
+        .and_then(|directory| directory_session_kind(&directory, id))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn delete_session(
     id: &str,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
 ) -> Result<(), ControlError> {
@@ -458,17 +467,21 @@ pub(crate) fn delete_session(
             "自动化运行的会话由运行时管理，不能删除",
         ));
     }
-    let kind = session_delete_kind(id, sessions, acp_sessions, remote_sessions, workspace_menu)
+    let kind = session_delete_kind(id, sessions, acp_sessions, workspace_directory)
         .ok_or_else(|| error(ControlErrorCode::NotFound, format!("会话不存在：{id}")))?;
     match kind {
-        SessionDeleteKind::Terminal => {
-            super::kill_terminal_session(id, sessions, remote_sessions, event_hub)
-        }
-        SessionDeleteKind::Acp => {
-            super::kill_acp_session(id, acp_sessions, remote_sessions, event_hub)
-        }
+        SessionDeleteKind::Terminal => super::kill_terminal_session(id, sessions, event_hub),
+        SessionDeleteKind::Acp => super::kill_acp_session(id, acp_sessions, event_hub),
     }
-    .map_err(|message| error(ControlErrorCode::OperationFailed, message))
+    .map_err(|message| error(ControlErrorCode::OperationFailed, message))?;
+    // 工作区目录里也摘掉：列表跟着目录走，桌面重启也按目录恢复。进程已经收掉了，摘不掉
+    // 只记日志，不把这次删除报成失败。
+    if let Err(failure) = super::workspace_directory::default_store().and_then(|store| {
+        super::workspace_directory::forget_session(&store, id, event_hub)
+    }) {
+        super::dlog(&format!("删掉会话 {id} 后没能从工作区目录摘掉：{}", failure.message));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -479,21 +492,17 @@ mod tests {
     use smelt_core::agent_kind::{
         ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind,
     };
-    use smelt_core::workspace_menu::{
-        WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind,
+    use smelt_core::workspace_directory::{
+        WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal,
     };
 
     use super::*;
 
-    fn menu_with_project(root: &str) -> WorkspaceMenuSnapshot {
-        WorkspaceMenuSnapshot::current(
-            vec![WorkspaceMenuProject {
-                root: root.into(),
-                title: "repo".into(),
-                order: 0,
-            }],
-            Vec::new(),
-        )
+    fn directory_with_projects(roots: &[&str]) -> WorkspaceDirectory {
+        WorkspaceDirectory {
+            projects: roots.iter().map(|root| root.to_string()).collect(),
+            ..WorkspaceDirectory::default()
+        }
     }
 
     fn claude_option() -> AcpAgentOption {
@@ -521,16 +530,28 @@ mod tests {
 
     fn plan_acp(
         params: SessionCreateParams,
-        menu: &WorkspaceMenuSnapshot,
-        existing: Option<RemoteSessionRecord>,
+        directory: &WorkspaceDirectory,
     ) -> Result<CreatePlan, ControlError> {
-        plan_create(
-            params,
-            CreateTarget::Acp(claude_option()),
-            menu,
-            |_| Ok(existing),
-            |_| false,
-        )
+        plan_create(params, CreateTarget::Acp(claude_option()), directory, |_| false)
+    }
+
+    fn blank_terminal() -> CreateTarget {
+        CreateTarget::Terminal {
+            launch: None,
+            label: None,
+        }
+    }
+
+    /// 把规划好的对话写进目录，就像它已经起好了。
+    fn entered(directory: &WorkspaceDirectory, plan: CreatePlan) -> WorkspaceDirectory {
+        let CreatePlan::Acp(conversation) = plan else {
+            panic!("应规划成对话");
+        };
+        let mut directory = directory.clone();
+        directory
+            .conversations
+            .push(conversation.directory_entry("conv-1".into()));
+        directory
     }
 
     #[test]
@@ -548,55 +569,25 @@ mod tests {
         assert_eq!(error.code, ControlErrorCode::InvalidParams);
     }
 
+    /// 同一个 request_id 的重试：工作区目录里已经有它，就是同一次新建，不再起。
     #[test]
-    fn retry_with_the_same_request_reuses_the_recorded_session() {
-        let menu = menu_with_project("/repo");
-        let CreatePlan::Acp(first) = plan_acp(acp_params("/repo", REQUEST), &menu, None).unwrap()
-        else {
-            panic!("应规划成对话");
-        };
-        let recorded = RemoteSessionRecord::from(RemoteAcpSession {
-            title: "已改过的标题".into(),
-            ..first.clone()
-        });
+    fn retry_with_the_same_request_reuses_the_conversation_in_the_directory() {
+        let directory = directory_with_projects(&["/repo"]);
+        let first = plan_acp(acp_params("/repo", REQUEST), &directory).unwrap();
+        let first_id = first.session_id().to_string();
+        let directory = entered(&directory, first);
 
-        let CreatePlan::Acp(retry) =
-            plan_acp(acp_params("/repo", REQUEST), &menu, Some(recorded)).unwrap()
-        else {
-            panic!("应规划成对话");
-        };
-        assert_eq!(retry.id, first.id);
-        assert_eq!(retry.created_at, first.created_at);
-        assert_eq!(
-            retry.title, "已改过的标题",
-            "重试复用目录里那条，不新造记录"
-        );
+        let retry = plan_acp(acp_params("/repo", REQUEST), &directory).unwrap();
+        assert!(matches!(&retry, CreatePlan::Existing(id) if *id == first_id));
     }
 
     #[test]
     fn retry_with_different_parameters_is_a_conflict() {
-        let menu = WorkspaceMenuSnapshot::current(
-            vec![
-                WorkspaceMenuProject {
-                    root: "/repo".into(),
-                    title: "repo".into(),
-                    order: 0,
-                },
-                WorkspaceMenuProject {
-                    root: "/other".into(),
-                    title: "other".into(),
-                    order: 1,
-                },
-            ],
-            Vec::new(),
-        );
-        let CreatePlan::Acp(first) = plan_acp(acp_params("/repo", REQUEST), &menu, None).unwrap()
-        else {
-            panic!("应规划成对话");
-        };
-        let recorded = || Some(RemoteSessionRecord::from(first.clone()));
+        let directory = directory_with_projects(&["/repo", "/other"]);
+        let first = plan_acp(acp_params("/repo", REQUEST), &directory).unwrap();
+        let directory = entered(&directory, first);
 
-        let other_project = plan_acp(acp_params("/other", REQUEST), &menu, recorded());
+        let other_project = plan_acp(acp_params("/other", REQUEST), &directory);
         assert_eq!(
             other_project.err().unwrap().code,
             ControlErrorCode::Conflict
@@ -607,49 +598,40 @@ mod tests {
             ..acp_params("/repo", REQUEST)
         };
         assert_eq!(
-            plan_acp(resumed, &menu, recorded()).err().unwrap().code,
+            plan_acp(resumed, &directory).err().unwrap().code,
             ControlErrorCode::Conflict
         );
 
+        // 同一个 request_id 换成终端：推出来的终端 id 不在目录里，但对话那条用的是
+        // `acp-` 前缀，两者不撞，所以终端照常规划。
         let terminal = plan_create(
             SessionCreateParams {
                 kind: Some(SessionCreateKind::Terminal),
                 ..acp_params("/repo", REQUEST)
             },
-            CreateTarget::Terminal { launch: None },
-            &menu,
-            |id| {
-                Ok(Some(RemoteSessionRecord::from(RemoteAcpSession {
-                    id: id.to_string(),
-                    ..first.clone()
-                })))
-            },
+            blank_terminal(),
+            &directory,
             |_| false,
         );
-        assert_eq!(
-            terminal.err().unwrap().code,
-            ControlErrorCode::Conflict,
-            "同一个 request_id 不能换一种会话再来"
-        );
+        assert!(matches!(terminal.unwrap(), CreatePlan::Terminal(_)));
     }
 
     #[test]
     fn a_request_id_cannot_adopt_a_local_runtime() {
-        let menu = menu_with_project("/repo");
+        let directory = directory_with_projects(&["/repo"]);
         let plan = plan_create(
             acp_params("/repo", REQUEST),
             CreateTarget::Acp(claude_option()),
-            &menu,
-            |_| Ok(None),
+            &directory,
             |_| true,
         );
         assert_eq!(plan.err().unwrap().code, ControlErrorCode::Conflict);
     }
 
     #[test]
-    fn projects_outside_the_workspace_menu_are_rejected() {
-        let menu = menu_with_project("/repo");
-        let acp = plan_acp(acp_params("/etc", REQUEST), &menu, None);
+    fn projects_outside_the_workspace_directory_are_rejected() {
+        let directory = directory_with_projects(&["/repo"]);
+        let acp = plan_acp(acp_params("/etc", REQUEST), &directory);
         assert_eq!(
             acp.err().unwrap().code,
             ControlErrorCode::FailedPrecondition
@@ -660,9 +642,8 @@ mod tests {
                 project_root: "/etc".into(),
                 ..Default::default()
             },
-            CreateTarget::Terminal { launch: None },
-            &menu,
-            |_| Ok(None),
+            blank_terminal(),
+            &directory,
             |_| false,
         );
         assert_eq!(
@@ -671,14 +652,16 @@ mod tests {
         );
 
         // 只有智能体对话可以不带项目；普通对话不带项目是参数错误。
-        let missing = plan_acp(acp_params("", REQUEST), &menu, None);
+        let missing = plan_acp(acp_params("", REQUEST), &directory);
         assert_eq!(missing.err().unwrap().code, ControlErrorCode::InvalidParams);
     }
 
+    /// 终端开在项目里，带着首条命令和它在启动项里的名字；进目录时这两样都记上，守护
+    /// 重启后桌面按它们恢复。
     #[test]
     fn terminal_plan_uses_the_project_and_keeps_the_launch_command() {
-        let menu = menu_with_project("/repo");
-        let CreatePlan::Terminal { session, launch } = plan_create(
+        let directory = directory_with_projects(&["/repo"]);
+        let CreatePlan::Terminal(terminal) = plan_create(
             SessionCreateParams {
                 project_root: "/repo".into(),
                 request_id: Some(REQUEST.into()),
@@ -686,17 +669,40 @@ mod tests {
             },
             CreateTarget::Terminal {
                 launch: Some("claude".into()),
+                label: Some("Claude Code".into()),
             },
-            &menu,
-            |_| Ok(None),
+            &directory,
             |_| false,
         )
         .unwrap() else {
             panic!("应规划成终端");
         };
-        assert_eq!(session.id, "term-6f1c2b8e4d5a4f3b9c2d1e0f9a8b7c6d");
-        assert_eq!(session.cwd, "/repo");
-        assert_eq!(launch.as_deref(), Some("claude"));
+        assert_eq!(terminal.id, "term-6f1c2b8e4d5a4f3b9c2d1e0f9a8b7c6d");
+        assert_eq!(terminal.cwd, "/repo");
+        let entry = terminal.directory_entry();
+        let entry = &entry.terminals[0];
+        assert_eq!(entry.id.as_deref(), Some(terminal.id.as_str()));
+        assert_eq!(entry.cwd.as_deref(), Some("/repo"));
+        assert_eq!(entry.launch_cmd.as_deref(), Some("claude"));
+        assert_eq!(entry.launch_label.as_deref(), Some("Claude Code"));
+
+        // 重试：目录里已经有这个终端，就是同一次新建。
+        let directory = WorkspaceDirectory {
+            conversations: vec![terminal.directory_entry()],
+            ..directory
+        };
+        let retry = plan_create(
+            SessionCreateParams {
+                project_root: "/repo".into(),
+                request_id: Some(REQUEST.into()),
+                ..Default::default()
+            },
+            blank_terminal(),
+            &directory,
+            |_| false,
+        )
+        .unwrap();
+        assert!(matches!(retry, CreatePlan::Existing(_)));
     }
 
     #[test]
@@ -707,7 +713,13 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert!(matches!(target, CreateTarget::Terminal { launch: None }));
+        assert!(matches!(
+            target,
+            CreateTarget::Terminal {
+                launch: None,
+                label: None
+            }
+        ));
 
         let unknown = resolve_target(&SessionCreateParams {
             launch_key: Some("terminal:nope:rm -rf /".into()),
@@ -779,81 +791,72 @@ mod tests {
         assert_eq!(decoded.agents.len(), catalog.agents.len());
     }
 
-    fn remote_terminal(id: &str) -> RemoteTerminalSession {
-        RemoteTerminalSession {
-            id: id.into(),
-            cwd: "/repo".into(),
-            title: String::new(),
-            created_at: 1,
-            lifecycle: Default::default(),
+    fn acp_conversation(sid: &str) -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: format!("c-{sid}"),
+            acp: Some(WorkspaceAcp {
+                sid: sid.into(),
+                ..WorkspaceAcp::default()
+            }),
+            ..WorkspaceConversation::default()
         }
     }
 
-    fn menu_session(id: &str, kind: WorkspaceMenuSessionKind) -> WorkspaceMenuSession {
-        WorkspaceMenuSession {
-            id: id.into(),
-            kind,
-            title: String::new(),
-            custom_title: false,
-            cwd: None,
-            project_root: None,
-            project_title: None,
-            project_order: 0,
-            session_order: 0,
-            leaf_order: 0,
-            agent: None,
+    fn terminal_conversation(terminal_id: &str) -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: format!("c-{terminal_id}"),
+            terminals: vec![WorkspaceTerminal {
+                id: Some(terminal_id.into()),
+                ..WorkspaceTerminal::default()
+            }],
+            ..WorkspaceConversation::default()
         }
     }
 
     #[test]
-    fn delete_kind_comes_from_the_catalog_then_runtime_then_menu() {
+    fn delete_kind_comes_from_the_runtime_then_the_directory() {
         let sessions = super::super::new_sessions();
         let acp_sessions = super::super::new_test_acp_sessions();
-        let remote_sessions = super::super::new_test_remote_sessions();
-        let workspace_menu = super::super::new_test_workspace_menu();
-        super::super::mutate_remote_catalog(&remote_sessions, |catalog| {
-            catalog.upsert_terminal(remote_terminal("shared"))
-        })
-        .unwrap();
         acp_sessions.reserve_with("acp-live", || {
             super::super::make_acp_session("acp-live", None, None, None)
         });
-        *workspace_menu.lock().unwrap() = WorkspaceMenuSnapshot::current(
-            Vec::new(),
-            vec![
-                menu_session("shared", WorkspaceMenuSessionKind::Acp),
-                menu_session("acp-live", WorkspaceMenuSessionKind::Terminal),
-                menu_session("dormant", WorkspaceMenuSessionKind::Acp),
+        let workspace_directory = WorkspaceDirectoryReader::fixed(WorkspaceDirectory {
+            conversations: vec![
+                terminal_conversation("acp-live"),
+                acp_conversation("dormant"),
+                terminal_conversation("dormant-term"),
             ],
-        );
+            ..WorkspaceDirectory::default()
+        });
         let kind = |id| {
             session_delete_kind(
                 id,
                 &sessions,
                 &acp_sessions,
-                &remote_sessions,
-                &workspace_menu,
+                &workspace_directory,
             )
         };
 
-        assert_eq!(kind("shared"), Some(SessionDeleteKind::Terminal));
-        assert_eq!(kind("acp-live"), Some(SessionDeleteKind::Acp));
+        assert_eq!(
+            kind("acp-live"),
+            Some(SessionDeleteKind::Acp),
+            "在跑的 runtime 说了算"
+        );
         assert_eq!(kind("dormant"), Some(SessionDeleteKind::Acp));
+        assert_eq!(kind("dormant-term"), Some(SessionDeleteKind::Terminal));
         assert_eq!(kind("missing"), None);
     }
 
     fn delete(
         id: &str,
         acp_sessions: &AcpSessions,
-        remote_sessions: &RemoteSessions,
         automations: &AutomationStore,
     ) -> Result<(), ControlError> {
         delete_session(
             id,
             &super::super::new_sessions(),
             acp_sessions,
-            remote_sessions,
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             automations,
             &super::super::new_event_hub(),
         )
@@ -862,28 +865,15 @@ mod tests {
     #[test]
     fn delete_removes_the_runtime_it_resolved() {
         let acp_sessions = super::super::new_test_acp_sessions();
-        let remote_sessions = super::super::new_test_remote_sessions();
         let automations = super::super::new_test_automation_store();
         acp_sessions.reserve_with("acp-live", || {
             super::super::make_acp_session("acp-live", None, None, None)
         });
-        super::super::mutate_remote_catalog(&remote_sessions, |catalog| {
-            catalog.upsert_terminal(remote_terminal("term-orphan"))
-        })
-        .unwrap();
 
-        delete("acp-live", &acp_sessions, &remote_sessions, &automations).unwrap();
+        delete("acp-live", &acp_sessions, &automations).unwrap();
         assert!(acp_sessions.get("acp-live").is_none());
 
-        // 没有 runtime 的远程终端：按目录里的 kind 走终端那条，目录记录被清掉。
-        delete("term-orphan", &acp_sessions, &remote_sessions, &automations).unwrap();
-        assert!(
-            remote_record(&remote_sessions, "term-orphan")
-                .unwrap()
-                .is_none()
-        );
-
-        let missing = delete("nope", &acp_sessions, &remote_sessions, &automations);
+        let missing = delete("nope", &acp_sessions, &automations);
         assert_eq!(missing.err().unwrap().code, ControlErrorCode::NotFound);
     }
 
@@ -894,7 +884,6 @@ mod tests {
         };
 
         let acp_sessions = super::super::new_test_acp_sessions();
-        let remote_sessions = super::super::new_test_remote_sessions();
         let automations = super::super::new_test_automation_store();
         {
             let mut owner = automations.lock().unwrap();
@@ -946,7 +935,7 @@ mod tests {
         });
 
         for id in ["acp-run-bound", "acp-automation-legacy"] {
-            let error = delete(id, &acp_sessions, &remote_sessions, &automations).unwrap_err();
+            let error = delete(id, &acp_sessions, &automations).unwrap_err();
             assert_eq!(error.code, ControlErrorCode::FailedPrecondition, "{id}");
         }
         assert!(

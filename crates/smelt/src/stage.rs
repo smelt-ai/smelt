@@ -171,7 +171,6 @@ fn chrome_prompt_island(
 ) -> Stateful<Div> {
     chrome_island("stage-pinned-prompt", CHROME_PROMPT_ISLAND_MAX_WIDTH, tip)
         .gap_1p5()
-        
         .child(
             div()
                 .flex_shrink_0()

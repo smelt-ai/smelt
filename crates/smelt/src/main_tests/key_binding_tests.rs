@@ -4,14 +4,15 @@
 
 use gpui::{Action, KeyBinding, KeyContext, Keymap, Keystroke};
 
+use crate::keymap::{Overrides, app_key_bindings};
 use crate::{
     ActivateSession, ClosePane, CloseSettingsWindow, CyclePanePrev, DismissWorkspace,
     FileTreeActivate, FileTreeMoveUp, NextHunk, PrevHunk, Quit, SaveFile, SplitBelow, SplitBeside,
-    ToggleCommandPalette, app_key_bindings, workspace_key_context,
+    ToggleCommandPalette, workspace_key_context,
 };
 
 fn keymap() -> Keymap {
-    let mut keymap = Keymap::new(app_key_bindings());
+    let mut keymap = Keymap::new(app_key_bindings(&Overrides::new()));
     // 用 Quit 站在 Input 上，模拟编辑器更深的 Outdent / Replace / Escape。
     keymap.add_bindings([
         KeyBinding::new("cmd-[", Quit, Some("Input")),
@@ -168,6 +169,9 @@ fn migrated_chords_are_not_bound_at_the_root_context() {
 /// 设置窗口 Cmd+W（Windows / Linux 是 Ctrl+W）关窗；它是普通窗口，Esc 不关它。
 #[test]
 fn settings_window_closes_on_secondary_w_but_not_escape() {
-    assert!(first_is::<CloseSettingsWindow>("secondary-w", &["SettingsWindow"]));
+    assert!(first_is::<CloseSettingsWindow>(
+        "secondary-w",
+        &["SettingsWindow"]
+    ));
     assert!(matched("escape", &["SettingsWindow"]).is_empty());
 }

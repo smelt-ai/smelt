@@ -19,8 +19,7 @@ fn call_automation(
         ServerShared {
             sessions: new_sessions(),
             acp_sessions: new_test_acp_sessions(),
-            remote_sessions: new_test_remote_sessions(),
-            workspace_menu: new_test_workspace_menu(),
+            workspace_directory: new_test_workspace_directory(),
             automations: Arc::clone(automations),
             exe_mtime: 0,
             daemon_fingerprint: None,

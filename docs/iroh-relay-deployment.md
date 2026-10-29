@@ -162,7 +162,7 @@ Relay 配置属于**运行时**：每个运行时自己决定用哪个 Relay，�
 - **桌面端**：侧栏里那台远程机器的菜单点「中继…」，在弹窗里改。
 - **控制接口**：`remote.config.set`，字段是 `iroh_relay`（例如
   `{"enabled": true, "iroh_relay": "https://relay.example.com"}`）。设好后用
-  `remote.status` 确认。Mac 本机运行时也可以在桌面「设置 → 远程」的「远程访问」里填；省略协议时自动补 `https://`。
+  `remote.status` 确认。Mac 本机运行时也可以在桌面「设置 → 远程」里「让其他设备连进来」的「自建 relay」填写；省略协议时自动补 `https://`。
 
 换 Relay 之后，运行时不再通过 n0 的 DNS 公布地址，**已有的配对会连不上**：在客户端
 移除这个运行时，再用 `smeltd pair` 或设置页生成的新配对串重新添加。

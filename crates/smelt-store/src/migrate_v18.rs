@@ -6,9 +6,8 @@
 //! 不搬，随 `kv` 一起删掉。单项解析不了就跳过这一项，不让整次升级失败。
 
 use crate::{
-    MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
-    QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
-    StoreError, TerminalThemeSnapshot, WorkspaceMenuProjectRecord, WorkspaceMenuSessionRecord,
+    MemorySettingsRecord, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
+    QuotaCacheWindowRecord, RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Map, Number, Value};
@@ -40,7 +39,6 @@ pub(crate) struct V17RuntimeState {
     terminal_theme: Option<TerminalThemeSnapshot>,
     pi_auto_models: Vec<String>,
     quota_cache: Option<QuotaCacheSnapshot>,
-    workspace_menu: Option<PublishedWorkspaceMenuSnapshot>,
     launch_version: Option<u32>,
     agent_host_pref: Option<(bool, bool)>,
     acp: Vec<(String, AcpExtras)>,
@@ -139,8 +137,6 @@ pub(crate) fn read_v17_state(connection: &Connection) -> Result<V17RuntimeState,
     }
     state.quota_cache =
         scoped_object(connection, "quota_cache")?.map(|object| quota_cache(&object));
-    state.workspace_menu =
-        scoped_object(connection, "workspace_menu")?.map(|object| workspace_menu(&object));
     state.launch_version = read_scope_nodes(connection, "launch")
         .ok()
         .and_then(|nodes| decode_tree(&nodes, "version").ok().flatten())
@@ -213,7 +209,12 @@ pub(crate) fn write_v18_state(
         crate::config::write_runtime_id(transaction, id)?;
     }
     if let Some(revision) = state.workspace_catalog_revision {
-        crate::config::write_workspace_catalog_revision(transaction, revision)?;
+        // v18 的目录表还没有 epoch 列（v29 才加），按那时的形状写。
+        transaction.execute(
+            "INSERT INTO workspace_catalog(id, revision) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET revision = excluded.revision",
+            [i64::try_from(revision).unwrap_or(i64::MAX)],
+        )?;
     }
     for (agent, profile, resume, id) in &state.history_agent_bindings {
         crate::history::write_history_agent_binding(transaction, agent, profile, resume, id)?;
@@ -240,9 +241,6 @@ pub(crate) fn write_v18_state(
     }
     if let Some(quota) = &state.quota_cache {
         crate::config::write_quota_cache_snapshot(transaction, quota)?;
-    }
-    if let Some(menu) = &state.workspace_menu {
-        crate::config::write_workspace_menu_snapshot(transaction, menu)?;
     }
     if let Some(version) = state.launch_version {
         transaction.execute(
@@ -359,58 +357,6 @@ fn quota_cache(object: &Map<String, Value>) -> QuotaCacheSnapshot {
         schema_version: u32_field(object.get("schema_version")).unwrap_or(0),
         provider_ids: string_list(object.get("provider_ids")),
         statuses,
-    }
-}
-
-fn workspace_menu(object: &Map<String, Value>) -> PublishedWorkspaceMenuSnapshot {
-    let order = |value: &Value, key: &str| u32_field(value.get(key)).unwrap_or(0);
-    PublishedWorkspaceMenuSnapshot {
-        version: u32_field(object.get("version")).unwrap_or(0),
-        revision: object.get("revision").and_then(Value::as_u64).unwrap_or(0),
-        source_id: as_string(object.get("source_id")).unwrap_or_default(),
-        source_revision: object
-            .get("source_revision")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        projects: object
-            .get("projects")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|project| WorkspaceMenuProjectRecord {
-                root: as_string(project.get("root")).unwrap_or_default(),
-                title: as_string(project.get("title")).unwrap_or_default(),
-                order: order(project, "order"),
-            })
-            .collect(),
-        sessions: object
-            .get("sessions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|session| {
-                let kind = as_string(session.get("kind"))?;
-                if kind != "terminal" && kind != "acp" {
-                    return None;
-                }
-                Some(WorkspaceMenuSessionRecord {
-                    id: as_string(session.get("id"))?,
-                    kind,
-                    title: as_string(session.get("title")).unwrap_or_default(),
-                    custom_title: session
-                        .get("custom_title")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    cwd: as_string(session.get("cwd")),
-                    project_root: as_string(session.get("project_root")),
-                    project_title: as_string(session.get("project_title")),
-                    project_order: order(session, "project_order"),
-                    session_order: order(session, "session_order"),
-                    leaf_order: order(session, "leaf_order"),
-                    agent: as_string(session.get("agent")),
-                })
-            })
-            .collect(),
     }
 }
 

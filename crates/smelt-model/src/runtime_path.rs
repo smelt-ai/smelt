@@ -23,6 +23,14 @@ impl PathStyle {
         Self::Posix
     };
 
+    /// 运行时 `system.describe` 报的 `os`。没报（老运行时）按 POSIX。
+    pub fn of_os(os: Option<&str>) -> Self {
+        match os {
+            Some("windows") => Self::Windows,
+            _ => Self::Posix,
+        }
+    }
+
     /// 拼一段。绝对的 `child` 整段替换；空的 `child` 只补一个末尾分隔符。
     pub fn join(self, base: &str, child: &str) -> String {
         match self {

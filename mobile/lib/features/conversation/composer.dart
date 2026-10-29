@@ -105,6 +105,8 @@ class Composer extends StatelessWidget {
     this.onCommands,
     this.chips = const [],
     this.error,
+    this.notice,
+    this.onDismissNotice,
     this.footnote,
   });
 
@@ -129,6 +131,10 @@ class Composer extends StatelessWidget {
   final VoidCallback? onCommands;
   final List<Widget> chips;
   final String? error;
+
+  /// agent 那边来的一次性提示（压缩失败、改配置没生效等），可以关掉。
+  final String? notice;
+  final VoidCallback? onDismissNotice;
 
   /// 胶囊下面一行小字（上下文用量）。
   final String? footnote;
@@ -253,6 +259,40 @@ class Composer extends StatelessWidget {
                   image: images[i],
                   onRemove: readOnly ? null : () => onRemoveImage(i),
                 ),
+              ),
+            ),
+          ),
+        if (notice != null)
+          Padding(
+            padding: const EdgeInsets.only(left: Space.md),
+            child: Semantics(
+              liveRegion: true,
+              child: Row(
+                children: [
+                  Icon(
+                    LucideIcons.info,
+                    size: Strokes.iconSmall,
+                    color: c.inkMuted,
+                  ),
+                  const SizedBox(width: Space.sm),
+                  Expanded(
+                    child: Text(
+                      notice!,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: t.meta.copyWith(color: c.inkMuted),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: l10n.conversationNoticeDismiss,
+                    onPressed: onDismissNotice,
+                    icon: Icon(
+                      LucideIcons.x,
+                      size: Strokes.iconSmall,
+                      color: c.inkMuted,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),

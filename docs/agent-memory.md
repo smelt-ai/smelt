@@ -301,12 +301,13 @@ trusted、但 mtime 已经越界的）刷新 `written_at_ms = max(now, 文件 mt
 scope 为 `agent:<智能体 id>` 或 `user`。**没有来源记录的文件不注入**（见 5.4）；升级回填例外。
 删除智能体时同一事务里删掉它的元数据；删除记忆时删掉对应行。schema v13 引入。
 
-Pi 进程不链接 `smelt-store`、不直接打开数据库。所以 Pi 直接调主 daemon 的控制方法：连
-`SMELT_SOCK`，带上 daemon 注入的 `SMELT_SESSION_ID` 和 `SMELT_AGENT_TOKEN`（与跨会话消息同一套
-capability）。daemon 校验令牌、会话未结束、**且 Unix 对端就是该会话的 pi-agent 进程**
-（见 5.4）后，从该会话的启动规格取两个记忆目录，经 `smelt-store` 读写。调用方只能操作
-自己这个会话的两层记忆；普通会话没有记忆层。`agent.memory.approve` / `delete` 不走会话
-token：本机必须是签过名的桌面进程，并且不是智能体会话进程树里的进程；已配对的远程设备可以。
+Pi 进程不链接 `smelt-store`、不直接打开数据库。对话的驱动线程留在 `smeltd` 里，不再另起
+`smeltd --acp-session-host`。Pi 仍直接调主 daemon 的控制方法：连 `SMELT_SOCK`，带上 daemon
+注入的 `SMELT_SESSION_ID` 和 `SMELT_AGENT_TOKEN`（与跨会话消息同一套 capability）。daemon
+校验令牌、会话未结束、**且 Unix 对端就是该会话的 pi-agent 进程**（见 5.4）后，从该会话的
+启动规格取两个记忆目录，经 `smelt-store` 读写。调用方只能操作自己这个会话的两层记忆；普通
+会话没有记忆层。`agent.memory.approve` / `delete` 不走会话 token：本机必须是签过名的桌面
+进程，并且不是智能体会话进程树里的进程；已配对的远程设备可以。
 
 | 方法 | 参数（另带 `session_id`、`token`） | 返回 |
 |---|---|---|

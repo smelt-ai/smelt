@@ -194,9 +194,8 @@ fn watch_remote_status(cx: &mut App) {
 }
 
 // 运行时最多挂 REMOTE_STATUS_WAIT_MAX 就回，等它的读超时要比这长，不然没变化时会报超时。
-const _: () = assert!(
-    crate::runtime_call::RUNTIME_CALL_TIMEOUT.as_secs() > REMOTE_STATUS_WAIT_MAX.as_secs()
-);
+const _: () =
+    assert!(crate::runtime_call::RUNTIME_CALL_TIMEOUT.as_secs() > REMOTE_STATUS_WAIT_MAX.as_secs());
 
 /// 设置窗口还开着。远程访问的状态只在那里显示。
 fn settings_window_open(cx: &mut App) -> bool {

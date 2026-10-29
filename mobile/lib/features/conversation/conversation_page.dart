@@ -107,6 +107,9 @@ class _ConversationPageState extends State<ConversationPage> {
   String? _unconfirmedRequestId;
   String? _sendError;
 
+  /// 本页关掉的提示。快照里提示没了就忘掉，新提示照常出来。
+  int? _dismissedNoticeId;
+
   // 连接 ---------------------------------------------------------------------
   /// 这台机器的连接停过（disconnected）：内核的订阅随之停了，连回来要重新订。
   bool _linkStopped = false;
@@ -213,6 +216,7 @@ class _ConversationPageState extends State<ConversationPage> {
             (id) => !view.pendingPermissions.any((p) => p.toolCallId == id),
           );
           if (view.pendingElicitation == null) _answeredElicitation = null;
+          if (view.notice == null) _dismissedNoticeId = null;
           _rebuildRows();
           _refreshDock();
         });
@@ -231,8 +235,7 @@ class _ConversationPageState extends State<ConversationPage> {
     final view = _view!;
     final blocks = buildBlocks(view);
     final rows = <Object>[
-      if (view.plan.isNotEmpty || TurnStatusLine.shows(view.phase))
-        _Special.tail,
+      if (view.plan.isNotEmpty || TurnStatusLine.shows(view)) _Special.tail,
       ...blocks.reversed,
       if (view.hasMoreBefore) _Special.older,
     ];
@@ -1043,7 +1046,7 @@ class _ConversationPageState extends State<ConversationPage> {
         PlanChecklist(plan: view.plan),
         const SizedBox(height: Space.xs),
       ],
-      if (TurnStatusLine.shows(view.phase)) TurnStatusLine(view: view),
+      if (TurnStatusLine.shows(view)) TurnStatusLine(view: view),
     ],
   );
 
@@ -1116,6 +1119,10 @@ class _ConversationPageState extends State<ConversationPage> {
                       : null,
                   chips: view == null ? const [] : _chips(view, l10n),
                   error: _sendError,
+                  notice: _visibleNotice(view)?.text,
+                  onDismissNotice: () => setState(
+                    () => _dismissedNoticeId = _visibleNotice(view)?.id,
+                  ),
                   footnote: _usage(view, l10n),
                 );
               },
@@ -1124,6 +1131,11 @@ class _ConversationPageState extends State<ConversationPage> {
         ),
       ),
     );
+  }
+
+  ConversationNotice? _visibleNotice(ConversationView? view) {
+    final notice = view?.notice;
+    return notice == null || notice.id == _dismissedNoticeId ? null : notice;
   }
 
   List<Widget> _chips(ConversationView view, L10n l10n) {

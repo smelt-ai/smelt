@@ -1,10 +1,8 @@
 //! 运行时的设置与缓存：每项一张单行表（`id = 1`），列表另放子表，按 `position` 保序。
 
 use crate::{
-    MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
-    QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
-    StoreError, TerminalThemeSnapshot, WorkspaceCatalogWriter, WorkspaceMenuProjectRecord,
-    WorkspaceMenuSessionRecord,
+    MemorySettingsRecord, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
+    QuotaCacheWindowRecord, RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -32,7 +30,26 @@ pub(crate) fn write_runtime_id(
 }
 
 pub(crate) fn read_workspace_catalog_revision(connection: &Connection) -> Result<u64, StoreError> {
-    Ok(read_workspace_catalog_head(connection)?.revision)
+    Ok(read_workspace_catalog_version(connection)?.revision)
+}
+
+/// 目录这一行建库、迁移时就写好了；读不到（只有测试里手搭的库）按空目录算。
+pub(crate) fn read_workspace_catalog_version(
+    connection: &Connection,
+) -> Result<crate::WorkspaceCatalogVersion, StoreError> {
+    let row: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT revision, epoch FROM workspace_catalog WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row
+        .map(|(revision, epoch)| crate::WorkspaceCatalogVersion {
+            epoch,
+            revision: revision.max(0) as u64,
+        })
+        .unwrap_or_default())
 }
 
 pub(crate) fn write_workspace_catalog_revision(
@@ -40,71 +57,20 @@ pub(crate) fn write_workspace_catalog_revision(
     revision: u64,
 ) -> Result<(), StoreError> {
     transaction.execute(
-        "INSERT INTO workspace_catalog(id, revision) VALUES (1, ?1)
+        "INSERT INTO workspace_catalog(id, revision, epoch)
+         VALUES (1, ?1, lower(hex(randomblob(16))))
          ON CONFLICT(id) DO UPDATE SET revision = excluded.revision",
         [i64::try_from(revision).unwrap_or(i64::MAX)],
     )?;
     Ok(())
 }
 
-/// 工作区目录当前的版本，和提交这个版本的写入方。
-pub(crate) struct WorkspaceCatalogHead {
-    pub(crate) revision: u64,
-    writer: Option<(String, u64)>,
-}
-
-impl WorkspaceCatalogHead {
-    /// 规则见 [`crate::Store::commit_workspace_snapshot`]。
-    pub(crate) fn accepts(&self, base_revision: u64, writer: &WorkspaceCatalogWriter) -> bool {
-        match &self.writer {
-            Some((id, seq)) if *id == writer.id => {
-                writer.seq > *seq && base_revision <= self.revision
-            }
-            _ => base_revision == self.revision,
-        }
-    }
-}
-
-pub(crate) fn read_workspace_catalog_head(
-    connection: &Connection,
-) -> Result<WorkspaceCatalogHead, StoreError> {
-    let row: Option<(i64, Option<String>, Option<i64>)> = connection
-        .query_row(
-            "SELECT revision, writer, writer_seq FROM workspace_catalog WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let Some((revision, writer, writer_seq)) = row else {
-        return Ok(WorkspaceCatalogHead {
-            revision: 0,
-            writer: None,
-        });
-    };
-    Ok(WorkspaceCatalogHead {
-        revision: revision.max(0) as u64,
-        writer: writer.zip(writer_seq.map(|seq| seq.max(0) as u64)),
-    })
-}
-
-pub(crate) fn write_workspace_catalog_head(
+pub(crate) fn bump_workspace_catalog_revision(
     transaction: &Transaction<'_>,
-    revision: u64,
-    writer: &WorkspaceCatalogWriter,
-) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO workspace_catalog(id, revision, writer, writer_seq) VALUES (1, ?1, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET
-           revision = excluded.revision,
-           writer = excluded.writer,
-           writer_seq = excluded.writer_seq",
-        params![
-            i64::try_from(revision).unwrap_or(i64::MAX),
-            writer.id,
-            i64::try_from(writer.seq).unwrap_or(i64::MAX),
-        ],
-    )?;
-    Ok(())
+) -> Result<u64, StoreError> {
+    let revision = read_workspace_catalog_revision(transaction)? + 1;
+    write_workspace_catalog_revision(transaction, revision)?;
+    Ok(revision)
 }
 
 pub(crate) fn read_default_conversation_agent(
@@ -485,114 +451,6 @@ pub(crate) fn write_quota_cache_snapshot(
                 )?;
             }
         }
-    }
-    Ok(())
-}
-
-pub(crate) fn read_workspace_menu_snapshot(
-    connection: &Connection,
-) -> Result<Option<PublishedWorkspaceMenuSnapshot>, StoreError> {
-    let head: Option<(u32, i64, String, i64)> = connection
-        .query_row(
-            "SELECT version, revision, source_id, source_revision FROM workspace_menu WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    let Some((version, revision, source_id, source_revision)) = head else {
-        return Ok(None);
-    };
-    let projects = connection
-        .prepare("SELECT root, title, display_order FROM workspace_menu_project ORDER BY position")?
-        .query_map([], |row| {
-            Ok(WorkspaceMenuProjectRecord {
-                root: row.get(0)?,
-                title: row.get(1)?,
-                order: row.get(2)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let sessions = connection
-        .prepare(
-            "SELECT id, kind, title, custom_title, cwd, project_root, project_title,
-                    project_order, session_order, leaf_order, agent
-             FROM workspace_menu_session ORDER BY position",
-        )?
-        .query_map([], |row| {
-            Ok(WorkspaceMenuSessionRecord {
-                id: row.get(0)?,
-                kind: row.get(1)?,
-                title: row.get(2)?,
-                custom_title: row.get(3)?,
-                cwd: row.get(4)?,
-                project_root: row.get(5)?,
-                project_title: row.get(6)?,
-                project_order: row.get(7)?,
-                session_order: row.get(8)?,
-                leaf_order: row.get(9)?,
-                agent: row.get(10)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(PublishedWorkspaceMenuSnapshot {
-        version,
-        revision: revision.max(0) as u64,
-        source_id,
-        source_revision: source_revision.max(0) as u64,
-        projects,
-        sessions,
-    }))
-}
-
-pub(crate) fn write_workspace_menu_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &PublishedWorkspaceMenuSnapshot,
-) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO workspace_menu(id, version, revision, source_id, source_revision)
-         VALUES (1, ?1, ?2, ?3, ?4)
-         ON CONFLICT(id) DO UPDATE SET
-           version = excluded.version,
-           revision = excluded.revision,
-           source_id = excluded.source_id,
-           source_revision = excluded.source_revision",
-        params![
-            snapshot.version,
-            i64::try_from(snapshot.revision).unwrap_or(i64::MAX),
-            snapshot.source_id,
-            i64::try_from(snapshot.source_revision).unwrap_or(i64::MAX),
-        ],
-    )?;
-    transaction.execute("DELETE FROM workspace_menu_project", [])?;
-    for (position, project) in snapshot.projects.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO workspace_menu_project(position, root, title, display_order)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![position as i64, project.root, project.title, project.order],
-        )?;
-    }
-    transaction.execute("DELETE FROM workspace_menu_session", [])?;
-    for (position, session) in snapshot.sessions.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO workspace_menu_session(
-               position, id, kind, title, custom_title, cwd, project_root, project_title,
-               project_order, session_order, leaf_order, agent
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                position as i64,
-                session.id,
-                session.kind,
-                session.title,
-                session.custom_title,
-                session.cwd,
-                session.project_root,
-                session.project_title,
-                session.project_order,
-                session.session_order,
-                session.leaf_order,
-                session.agent,
-            ],
-        )?;
     }
     Ok(())
 }

@@ -2,15 +2,12 @@
 //! 会话该归到哪一栏的纯函数。读写目录、向守护发请求的部分分别在运行时（smelt-core）
 //! 和桌面客户端。
 
-use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::agent_kind::ConversationLaunchSpec;
-use crate::workspace_menu::{
-    WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
-};
+use crate::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory};
 
 /// 可开对话的 agent 选项。出线（`new_session.catalog`）只带展示与回传用的字段；
 /// 启动规格和历史目录只在运行时那台机器上有意义，不出线，客户端解出来是空的。
@@ -81,118 +78,48 @@ impl HistorySessionSummary {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteSessionLifecycle {
-    /// 目录已占坑，runtime 还没就绪。客户端不投影；提交失败或启动对账会删掉。
-    Creating,
-    #[default]
-    Active,
-    /// A close request is durably recorded while daemon tears down the runtime.
-    Closing,
-    /// 当次拆卸没完成（例如 ACP 未能证明进程已退出）。冷启动对账会删掉无 runtime 的记录。
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteSessionKind {
-    Acp,
-    Terminal,
-}
-
-/// A transport-safe, unified projection of a remote-owned session. The daemon publishes these
-/// through `subscribe`; clients never use it as a write model.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RemoteSessionRecord {
-    pub kind: RemoteSessionKind,
-    pub id: String,
+/// 运行时自己开的一段 ACP 对话（手机、命令行、Pi 派生、`conversation.create_for_agent`）：
+/// 起进程用的启动规格，和起好之后写进工作区目录的那一条。之后它跟桌面建的对话一样，
+/// 只存在工作区目录里。
+#[derive(Clone, Debug)]
+pub struct DaemonConversation {
+    /// 守护里的 ACP 会话 id。
+    pub sid: String,
     pub cwd: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub agent_option_id: Option<String>,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub launch: Option<ConversationLaunchSpec>,
-    #[serde(default)]
+    pub option: AcpAgentOption,
+    /// 接着哪段 provider 对话聊。
     pub resume_id: Option<String>,
-    pub created_at: i64,
-    #[serde(default)]
-    pub lifecycle: RemoteSessionLifecycle,
-    /// daemon 后台执行（自动化 Run）不进侧栏；用户显式打开后再投影。
-    #[serde(default)]
-    pub hidden: bool,
 }
 
-impl RemoteSessionRecord {
-    pub fn is_active(&self) -> bool {
-        self.lifecycle == RemoteSessionLifecycle::Active
+impl DaemonConversation {
+    /// 起进程的请求，`acp_host::parse_acp_open_request` 认的形状。
+    pub fn open_request(&self) -> Value {
+        serde_json::json!({
+            "id": self.sid,
+            "cwd": self.cwd,
+            "launch": self.option.launch,
+            "agent": self.option.kind,
+            "resume_id": self.resume_id,
+        })
     }
 
-    /// Active 正常投影；Closing 也要可见，否则目录删除失败后用户没法从 UI 再 kill。
-    /// hidden 的后台会话始终不进侧栏。
-    pub fn is_visible(&self) -> bool {
-        !self.hidden
-            && matches!(
-                self.lifecycle,
-                RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-            )
-    }
-
-    pub fn is_present(&self) -> bool {
-        matches!(
-            self.lifecycle,
-            RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-        )
-    }
-
-    pub fn as_acp(&self) -> Option<RemoteAcpSession> {
-        if self.kind != RemoteSessionKind::Acp {
-            return None;
+    /// 进工作区目录的那一条。不存名字：没人起过名的对话按智能体名、agent 显示。
+    pub fn directory_entry(&self, conversation_id: String) -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: conversation_id,
+            acp: Some(WorkspaceAcp {
+                cwd: Some(self.cwd.clone()),
+                sid: self.sid.clone(),
+                agent: self.option.kind.clone(),
+                profile_id: self.option.profile_id().map(str::to_string),
+                history_session_id: self.resume_id.clone(),
+                launch: self.option.launch.clone(),
+                agent_definition_id: self.option.agent_definition_id().map(str::to_string),
+                ..WorkspaceAcp::default()
+            }),
+            ..WorkspaceConversation::default()
         }
-        Some(RemoteAcpSession {
-            id: self.id.clone(),
-            cwd: self.cwd.clone(),
-            title: self.title.clone(),
-            agent_option_id: self.agent_option_id.clone()?,
-            agent: self.agent.clone()?,
-            launch: self.launch.clone()?,
-            resume_id: self.resume_id.clone(),
-            created_at: self.created_at,
-            lifecycle: self.lifecycle,
-            hidden: self.hidden,
-        })
     }
-
-    pub fn as_terminal(&self) -> Option<RemoteTerminalSession> {
-        (self.kind == RemoteSessionKind::Terminal).then(|| RemoteTerminalSession {
-            id: self.id.clone(),
-            cwd: self.cwd.clone(),
-            title: self.title.clone(),
-            created_at: self.created_at,
-            lifecycle: self.lifecycle,
-        })
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RemoteAcpSession {
-    pub id: String,
-    pub cwd: String,
-    #[serde(default)]
-    pub title: String,
-    pub agent_option_id: String,
-    pub agent: String,
-    pub launch: ConversationLaunchSpec,
-    #[serde(default)]
-    pub resume_id: Option<String>,
-    pub created_at: i64,
-    #[serde(default)]
-    pub lifecycle: RemoteSessionLifecycle,
-    #[serde(default)]
-    pub hidden: bool,
 }
 
 pub fn is_background_acp_session_id(id: &str) -> bool {
@@ -289,101 +216,6 @@ pub fn is_product_conversation_on(
         || acp_session_id.is_some_and(is_background_acp_session_id)
 }
 
-impl RemoteAcpSession {
-    /// 移动端建的智能体对话：归属编码在 `agent_option_id` 里，桌面接管时靠它
-    /// 把会话放回「对话」栏，而不是当成一场普通项目会话。
-    pub fn agent_definition_id(&self) -> Option<&str> {
-        agent_definition_id_from_option_id(&self.agent_option_id)
-    }
-
-    pub fn is_visible(&self) -> bool {
-        !self.hidden
-            && matches!(
-                self.lifecycle,
-                RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-            )
-    }
-
-    pub fn is_present(&self) -> bool {
-        matches!(
-            self.lifecycle,
-            RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-        )
-    }
-}
-
-impl From<RemoteAcpSession> for RemoteSessionRecord {
-    fn from(session: RemoteAcpSession) -> Self {
-        Self {
-            kind: RemoteSessionKind::Acp,
-            id: session.id,
-            cwd: session.cwd,
-            title: session.title,
-            agent_option_id: Some(session.agent_option_id),
-            agent: Some(session.agent),
-            launch: Some(session.launch),
-            resume_id: session.resume_id,
-            created_at: session.created_at,
-            lifecycle: session.lifecycle,
-            hidden: session.hidden,
-        }
-    }
-}
-
-/// 手机端远程新建的终端会话（不依赖 PC GUI 写工作区快照才能显示/管理）。
-/// 跟 `RemoteAcpSession` 是同一套思路，见文件顶部注释。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RemoteTerminalSession {
-    pub id: String,
-    pub cwd: String,
-    #[serde(default)]
-    pub title: String,
-    pub created_at: i64,
-    #[serde(default)]
-    pub lifecycle: RemoteSessionLifecycle,
-}
-
-impl From<RemoteTerminalSession> for RemoteSessionRecord {
-    fn from(session: RemoteTerminalSession) -> Self {
-        Self {
-            kind: RemoteSessionKind::Terminal,
-            id: session.id,
-            cwd: session.cwd,
-            title: session.title,
-            agent_option_id: None,
-            agent: None,
-            launch: None,
-            resume_id: None,
-            created_at: session.created_at,
-            lifecycle: session.lifecycle,
-            hidden: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct RemoteSessionSnapshot {
-    #[serde(default)]
-    pub revision: u64,
-    #[serde(default)]
-    pub sessions: Vec<RemoteSessionRecord>,
-}
-
-pub fn workspace_projects(menu: &WorkspaceMenuSnapshot) -> Vec<WorkspaceMenuProject> {
-    let mut projects = menu.projects.clone();
-    projects.sort_by_key(|project| project.order);
-    projects
-}
-
-/// 延迟 reattach 完成时是否还该插入桌面投影。目录已经撤回，或本地已有同 id，都丢弃。
-pub fn accept_remote_terminal_projection(
-    id: &str,
-    projected_ids: &HashSet<String>,
-    local_ids: &HashSet<String>,
-) -> bool {
-    projected_ids.contains(id) && !local_ids.contains(id)
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CreatedAgentConversation {
     pub session_id: String,
@@ -428,21 +260,28 @@ pub enum SessionDeleteKind {
     Acp,
 }
 
-/// 远程目录里的 kind 是所有权真相；菜单只覆盖未进目录的本地会话。
-/// 两边都没有就失败，不要默认当 ACP 杀——会把远程终端的目录摘掉却留下 PTY。
-pub fn resolve_session_delete_kind(
-    catalog_kind: Option<RemoteSessionKind>,
-    menu_kind: Option<WorkspaceMenuSessionKind>,
-) -> Result<SessionDeleteKind, String> {
-    match catalog_kind {
-        Some(RemoteSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
-        Some(RemoteSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
-        None => match menu_kind {
-            Some(WorkspaceMenuSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
-            Some(WorkspaceMenuSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
-            None => Err("session not found".to_string()),
-        },
-    }
+/// 工作区目录里这个会话 id 是终端还是 ACP 会话。不在目录里是 `None`。
+pub fn directory_session_kind(
+    directory: &WorkspaceDirectory,
+    session_id: &str,
+) -> Option<SessionDeleteKind> {
+    directory.conversations.iter().find_map(|conversation| {
+        if conversation
+            .acp
+            .as_ref()
+            .is_some_and(|acp| acp.sid == session_id)
+        {
+            Some(SessionDeleteKind::Acp)
+        } else if conversation
+            .terminals
+            .iter()
+            .any(|terminal| terminal.id.as_deref() == Some(session_id))
+        {
+            Some(SessionDeleteKind::Terminal)
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -506,5 +345,42 @@ mod machine_home_tests {
             None,
             None
         ));
+    }
+}
+
+#[cfg(test)]
+mod daemon_conversation_tests {
+    use super::*;
+
+    /// 运行时自己开的对话进工作区目录时带着启动规格、续接身份和智能体归属，不带名字：
+    /// 初始名不能当成用户起的名字存下来，不然 agent 后来报的标题永远显示不出来。
+    #[test]
+    fn a_daemon_conversation_enters_the_directory_without_a_title() {
+        let conversation = DaemonConversation {
+            sid: "acp-1".to_string(),
+            cwd: "/repo".to_string(),
+            option: AcpAgentOption {
+                id: "agent:writer".to_string(),
+                kind: "pi".to_string(),
+                label: "写作".to_string(),
+                profile: false,
+                agent_definition_id: Some("writer".to_string()),
+                launch: ConversationLaunchSpec::from_command("smelt-pi".to_string()),
+                history_dir: None,
+            },
+            resume_id: Some("r1".to_string()),
+        };
+        let entry = conversation.directory_entry("conv-1".to_string());
+        assert_eq!(entry.id, "conv-1");
+        assert_eq!(entry.custom_title, None);
+        let acp = entry.acp.unwrap();
+        assert_eq!(acp.sid, "acp-1");
+        assert_eq!(acp.agent, "pi");
+        assert_eq!(acp.cwd.as_deref(), Some("/repo"));
+        assert_eq!(acp.history_session_id.as_deref(), Some("r1"));
+        assert_eq!(acp.agent_definition_id.as_deref(), Some("writer"));
+        assert_eq!(acp.launch.command, "smelt-pi");
+        assert_eq!(acp.session_title, None);
+        assert_eq!(conversation.open_request()["id"], "acp-1");
     }
 }

@@ -11,7 +11,7 @@ workspace = true
 # 两边分成两个 crate，「GUI 不碰运行时库」才能由依赖关系保证（设计文档 D5）。
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -19,11 +19,11 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
         ..Default::default()
     }));
     let subscribers = new_event_hub();
-    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
-    let listener = StateListener::with_color_replies(
+    let replies = Arc::new(Mutex::new(VecDeque::new()));
+    let listener = StateListener::with_replies(
         Arc::clone(&state),
         subscribers,
-        Arc::clone(&color_replies),
+        Arc::clone(&replies),
     );
     Arc::new(Session {
         instance,
@@ -38,6 +38,7 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
+            waiting_for_cell: Vec::new(),
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {
@@ -45,8 +46,9 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
             watchers: Vec::new(),
         }),
         output_gate: Mutex::new(()),
-        color_replies,
+        replies,
         term: Mutex::new(new_daemon_term(rows, cols, listener)),
+        graphics: Mutex::default(),
         state,
     })
 }
@@ -422,7 +424,6 @@ impl TerminalGeometryParamsForTest {
 fn attach_only_open_does_not_create_a_missing_session() {
     let sessions = new_sessions();
     let subscribers = new_event_hub();
-    let remote_sessions = new_test_remote_sessions();
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
 
@@ -438,7 +439,6 @@ fn attach_only_open_does_not_create_a_missing_session() {
         Arc::clone(&sessions),
         new_test_acp_sessions(),
         subscribers,
-        remote_sessions,
     );
 
     let mut line = String::new();
@@ -455,10 +455,10 @@ fn runtime_ids_cannot_be_shared_across_terminal_and_acp() {
     let acp = new_test_acp_sessions();
     sessions.insert_for_test("shared", make_dummy_session(24, 80));
     assert!(
-        runtime_id_taken_by_other_kind("shared", &sessions, &acp, RemoteSessionKind::Acp).is_some()
+        runtime_id_taken_by_other_kind("shared", &sessions, &acp, RuntimeKind::Acp).is_some()
     );
     assert!(
-        runtime_id_taken_by_other_kind("shared", &sessions, &acp, RemoteSessionKind::Terminal)
+        runtime_id_taken_by_other_kind("shared", &sessions, &acp, RuntimeKind::Terminal)
             .is_none()
     );
 }
@@ -478,7 +478,6 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
         "t".to_string(),
         Arc::clone(&sessions),
         new_event_hub(),
-        None,
         slot,
     );
 
@@ -486,7 +485,6 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
     let (open_server, open_client) = UnixStream::pair().unwrap();
     let sessions_a = Arc::clone(&sessions);
     let subscribers_a = new_event_hub();
-    let remote_sessions_a = new_test_remote_sessions();
     thread::spawn(move || {
         let reader = BufReader::new(open_server.try_clone().unwrap());
         handle_open(
@@ -496,7 +494,6 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
             sessions_a,
             new_test_acp_sessions(),
             subscribers_a,
-            remote_sessions_a,
         );
     });
     let mut open_br = BufReader::new(open_client.try_clone().unwrap());
@@ -507,7 +504,6 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
     let (open2_server, open2_client) = UnixStream::pair().unwrap();
     let sessions_b = Arc::clone(&sessions);
     let subscribers_b = new_event_hub();
-    let remote_sessions_b = new_test_remote_sessions();
     thread::spawn(move || {
         let reader = BufReader::new(open2_server.try_clone().unwrap());
         handle_open(
@@ -522,7 +518,6 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
             sessions_b,
             new_test_acp_sessions(),
             subscribers_b,
-            remote_sessions_b,
         );
     });
     let mut open2_br = BufReader::new(open2_client.try_clone().unwrap());

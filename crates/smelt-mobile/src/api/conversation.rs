@@ -62,7 +62,12 @@ pub enum ConversationPhase {
 pub struct ConversationView {
     pub session_id: String,
     pub phase: ConversationPhase,
+    /// 启动进度、排队等「正在做什么」。一次性结果不在这里，在 `notice`。
     pub status_line: Option<String>,
+    /// 正在压缩上下文。空闲时手动压缩也为真。
+    pub compacting: bool,
+    /// 该给用户看的一次性提示（压缩失败、改配置没生效等）；新回合开始时清掉。
+    pub notice: Option<ConversationNotice>,
     /// `Dead` / `Failed` 时的原因，活会话为空串。
     pub end_reason: String,
     pub session_title: Option<String>,
@@ -343,6 +348,13 @@ pub struct PlanStep {
 pub struct SlashCommand {
     pub name: String,
     pub description: String,
+}
+
+/// 一次性提示。`id` 单调递增，按它记「这条已经关掉」。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationNotice {
+    pub id: i64,
+    pub text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

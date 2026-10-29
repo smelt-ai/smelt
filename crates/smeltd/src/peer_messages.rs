@@ -332,7 +332,7 @@ impl Courier {
         let slot = crate::acp_host::ensure_conversation_runtime(
             target,
             &self.acp_sessions,
-            &workspace_menu(),
+            &workspace_directory(),
             &self.subscribers,
         )?;
         let sess = &slot.value;
@@ -432,11 +432,22 @@ fn with_target(mut reply: serde_json::Value, id: &str, title: &str) -> serde_jso
     reply
 }
 
-fn workspace_menu() -> WorkspaceMenuStore {
+fn workspace_directory() -> WorkspaceDirectoryReader {
     SERVER
         .get()
-        .map(|server| Arc::clone(&server.workspace_menu))
+        .map(|server| server.workspace_directory.clone())
+        .unwrap_or_else(WorkspaceDirectoryReader::unavailable)
+}
+
+/// 工作区目录里一段对话的名字：用户起的，其次 ACP 会话自己的标题。
+fn directory_title(conversation: &smelt_core::workspace_directory::WorkspaceConversation) -> String {
+    conversation
+        .custom_title
+        .as_deref()
+        .or_else(|| conversation.acp.as_ref()?.session_title.as_deref())
+        .map(str::trim)
         .unwrap_or_default()
+        .to_string()
 }
 
 /// 对话目录里的一项。
@@ -481,25 +492,25 @@ fn live_peer(id: &str, sess: &AcpSession) -> Peer {
     }
 }
 
-/// 侧栏菜单里、这次 daemon 还没打开过的 Pi 对话。
+/// 工作区目录里、这次 daemon 还没打开过的 Pi 对话。
 fn dormant_peers(acp_sessions: &AcpSessions) -> Vec<Peer> {
     let pi = smelt_core::agent_kind::ConversationAgentKind::Pi.id();
-    let menu = workspace_menu();
-    let menu = menu.lock().unwrap();
-    menu.sessions
+    let Ok(directory) = workspace_directory().read() else {
+        return Vec::new();
+    };
+    directory
+        .conversations
         .iter()
-        .filter(|session| {
-            session.kind == smelt_core::workspace_menu::WorkspaceMenuSessionKind::Acp
-                && session.agent.as_deref() == Some(pi)
-                && !is_automation(&session.id)
-                && acp_sessions.get(&session.id).is_none()
-        })
-        .map(|session| Peer {
-            id: session.id.clone(),
-            title: session.title.trim().to_string(),
-            project: session.cwd.clone().or_else(|| session.project_root.clone()),
-            state: "dormant",
-            bypasses: None,
+        .filter_map(|conversation| {
+            let acp = conversation.acp.as_ref()?;
+            (acp.agent == pi && !is_automation(&acp.sid) && acp_sessions.get(&acp.sid).is_none())
+                .then(|| Peer {
+                    id: acp.sid.clone(),
+                    title: directory_title(conversation),
+                    project: acp.cwd.clone(),
+                    state: "dormant",
+                    bypasses: None,
+                })
         })
         .collect()
 }
@@ -536,29 +547,24 @@ fn not_found(id: &str) -> serde_json::Value {
     )
 }
 
-/// 侧栏上的名字：桌面菜单里的（含用户改过的），其次远程目录里的，再次会话自己的标题。
+/// 侧栏上的名字：工作区目录里的（含用户改过的），其次远程目录里的，再次会话自己的标题。
 fn title_of(id: &str, sess: &AcpSession) -> String {
     if let Some(server) = SERVER.get() {
-        let menu = server
-            .workspace_menu
-            .lock()
-            .unwrap()
-            .acp_session(id)
-            .map(|session| session.title.trim().to_string())
-            .filter(|title| !title.is_empty());
-        if let Some(title) = menu {
-            return title;
-        }
-        let catalog = server
-            .remote_sessions
-            .lock()
-            .unwrap()
-            .catalog()
+        let directory = server
+            .workspace_directory
+            .read()
             .ok()
-            .and_then(|catalog| catalog.remote_acp(id))
-            .map(|session| session.title.trim().to_string())
+            .and_then(|directory| {
+                directory
+                    .conversations
+                    .iter()
+                    .find(|conversation| {
+                        conversation.acp.as_ref().is_some_and(|acp| acp.sid == id)
+                    })
+                    .map(directory_title)
+            })
             .filter(|title| !title.is_empty());
-        if let Some(title) = catalog {
+        if let Some(title) = directory {
             return title;
         }
     }
@@ -897,17 +903,13 @@ fn spawn(
         .clone()
         .ok_or_else(|| rejected("invalid", "这个对话没有工作目录"))?;
     let ephemeral_env = source.ephemeral_env.lock().clone();
-    // 发起方在远程目录里就照抄它的选项；桌面开的对话不在目录里，按 Pi 记。
-    let agent_option_id = server
-        .remote_sessions
-        .lock()
-        .unwrap()
-        .catalog()
-        .ok()
-        .and_then(|catalog| catalog.remote_acp(source_id))
-        .map(|session| session.agent_option_id)
-        .or_else(|| find_agent_option_for(ConversationAgentKind::Pi, None).map(|option| option.id))
-        .ok_or_else(|| rejected("invalid", "没有可用的 Pi 配置"))?;
+    // 新对话跟发起方同一个 profile、同一个智能体：照抄发起方在工作区目录里的那一条。
+    let source_entry = workspace_directory().read().ok().and_then(|directory| {
+        directory
+            .conversations
+            .into_iter()
+            .find_map(|conversation| conversation.acp.filter(|acp| acp.sid == source_id))
+    });
 
     {
         let mut spawned = lock_spawned();
@@ -951,10 +953,23 @@ fn spawn(
     }
     lower_chain(&id, hops);
 
+    let entry = smelt_core::workspace_directory::WorkspaceConversation {
+        id: uuid::Uuid::new_v4().to_string(),
+        acp: Some(smelt_core::workspace_directory::WorkspaceAcp {
+            cwd: Some(cwd.clone()),
+            sid: id.clone(),
+            agent: ConversationAgentKind::Pi.id().to_string(),
+            profile_id: source_entry.as_ref().and_then(|acp| acp.profile_id.clone()),
+            launch: launch.clone(),
+            agent_definition_id: source_entry.and_then(|acp| acp.agent_definition_id),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let request = AcpOpenRequest {
         id: id.clone(),
-        cwd: Some(cwd.clone()),
-        launch: launch.clone(),
+        cwd: Some(cwd),
+        launch,
         ephemeral_env,
         resume_id: None,
         fork_id: None,
@@ -962,21 +977,6 @@ fn spawn(
         conversation_binding: None,
         pending_agent_preset: None,
         omit_history: false,
-    };
-    let remote = smelt_core::session_control::RemoteAcpSession {
-        id: id.clone(),
-        cwd,
-        title: title.clone(),
-        agent_option_id,
-        agent: ConversationAgentKind::Pi.id().to_string(),
-        launch,
-        resume_id: None,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs() as i64)
-            .unwrap_or(0),
-        lifecycle: Default::default(),
-        hidden: false,
     };
     let reply = accepted_reply(&message, &id, &title, hops);
     let source_slot = Arc::clone(source_slot);
@@ -986,7 +986,7 @@ fn spawn(
         .spawn(move || {
             let built = build_spawned(
                 &request,
-                remote,
+                entry,
                 &title,
                 &source_slot.value,
                 server,
@@ -1013,22 +1013,21 @@ fn spawn(
     Ok(reply)
 }
 
-/// 建新对话、写好配置和标题。哪一步失败就把建了一半的对话撤掉，侧栏上不留空对话。
+/// 建新对话、写好配置和标题、写进工作区目录。哪一步失败就把建了一半的对话撤掉，侧栏上
+/// 不留空对话。
 fn build_spawned(
     request: &AcpOpenRequest,
-    remote: smelt_core::session_control::RemoteAcpSession,
+    entry: smelt_core::workspace_directory::WorkspaceConversation,
     title: &str,
     source: &AcpSession,
     server: &crate::protocol::ServerShared,
     courier: &Courier,
 ) -> Result<(), String> {
-    let slot = create_daemon_acp_session(
+    let slot = ensure_acp_session(
         request,
-        Some(remote),
         &server.sessions,
         &courier.acp_sessions,
         &courier.subscribers,
-        &server.remote_sessions,
     )
     .map_err(|error| format!("起不来新对话：{error}"))?;
     let configured = crate::acp_idle::copy_session_config(
@@ -1047,12 +1046,19 @@ fn build_spawned(
             &courier.subscribers,
         )
         .map_err(|error| format!("改不了标题：{error}"))
+    })
+    .and_then(|()| {
+        crate::workspace_directory::default_store()
+            .and_then(|store| {
+                crate::workspace_directory::enter_conversation(&store, entry, &courier.subscribers)
+            })
+            .map(|_| ())
+            .map_err(|error| format!("写不进工作区目录：{}", error.message))
     });
     if let Err(reason) = configured {
         if let Err(error) = kill_acp_session(
             &request.id,
             &courier.acp_sessions,
-            &server.remote_sessions,
             &courier.subscribers,
         ) {
             eprintln!("[peer] 撤掉没建成的新对话 {} 失败：{error}", request.id);

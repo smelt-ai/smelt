@@ -163,7 +163,11 @@ impl Workspace {
         true
     }
 
-    fn finish_panel_plugin_change(&mut self, result: Result<String, String>, cx: &mut Context<Self>) {
+    fn finish_panel_plugin_change(
+        &mut self,
+        result: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
         self.panel_plugins.busy = false;
         match result {
             Ok(message) => {

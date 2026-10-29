@@ -1217,9 +1217,13 @@ fn render_add_trigger_button(entity: Entity<Workspace>) -> AnyElement {
 
 fn trigger_preset_icon(preset: settings::AutomationTriggerPresetId) -> Icon {
     match preset {
-        settings::AutomationTriggerPresetId::Webhook => Icon::new(gpui_kit_assets::IconName::Webhook),
+        settings::AutomationTriggerPresetId::Webhook => {
+            Icon::new(gpui_kit_assets::IconName::Webhook)
+        }
         settings::AutomationTriggerPresetId::Hourly
-        | settings::AutomationTriggerPresetId::Interval => Icon::new(gpui_kit_assets::IconName::Clock),
+        | settings::AutomationTriggerPresetId::Interval => {
+            Icon::new(gpui_kit_assets::IconName::Clock)
+        }
         settings::AutomationTriggerPresetId::Daily
         | settings::AutomationTriggerPresetId::Weekly => IconName::Calendar.into(),
     }
@@ -1439,7 +1443,9 @@ fn automation_access_note(is_agent: bool) -> &'static str {
 
 fn notification_preset_icon(preset: settings::AutomationNotificationPreset) -> Icon {
     match preset {
-        settings::AutomationNotificationPreset::Off => Icon::new(gpui_kit_assets::IconName::BellOff),
+        settings::AutomationNotificationPreset::Off => {
+            Icon::new(gpui_kit_assets::IconName::BellOff)
+        }
         settings::AutomationNotificationPreset::App => IconName::Bell.into(),
     }
 }
@@ -2296,7 +2302,9 @@ fn render_agent_plugin_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-plugins-refresh")
-        .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
+        .icon(gpui_component::Icon::new(
+            gpui_kit_assets::IconName::RefreshCw,
+        ))
         .icon_action("重新扫描插件目录")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));
@@ -2690,7 +2698,9 @@ fn render_agent_memory_card(
     let memory_enabled = agent.memory_enabled;
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-memory-refresh")
-        .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
+        .icon(gpui_component::Icon::new(
+            gpui_kit_assets::IconName::RefreshCw,
+        ))
         .icon_action("重新读取记忆")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_memories(cx));
@@ -3227,7 +3237,9 @@ fn render_agent_mcp_card(
 
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-mcp-refresh")
-        .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
+        .icon(gpui_component::Icon::new(
+            gpui_kit_assets::IconName::RefreshCw,
+        ))
         .icon_action("重新读取 mcp.json")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));

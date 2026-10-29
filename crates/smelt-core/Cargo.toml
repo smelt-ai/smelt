@@ -58,7 +58,7 @@ dunce = "1"
 # Antigravity（agy）把本地历史存成 SQLite，读它需要原生 sqlite。与 smelt-store
 # 同一条边界：移动端不编译，避免把 native SQLite 带进 iOS/Android FFI。
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Windows 上等 auth 锁目录被删：在父目录挂目录变化通知（pi_model_settings）。
 [target.'cfg(windows)'.dependencies]
@@ -75,5 +75,5 @@ serde_json = "1"
 chrono-tz = "0.10"
 # 测试程序在 main 之前冒充 ACP agent（见 acp_conn/fake_agent_tests.rs）。
 ctor = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"

@@ -1,34 +1,12 @@
 use std::collections::HashSet;
 
-use super::{SessionState, WsState, indices_share_group, reorder_vec, session_state_cwd};
+use super::{indices_share_group, reorder_vec};
 use crate::sidebar_order::{
     apply_pinned_project_drop, is_pinned_project, move_index_near, move_project_root_near,
     neighbor_in_group, pinned_projects_first, previous_viewed,
     project_header_click_toggles_collapse, project_header_is_dimmed, same_project_root,
-    sidebar_empty_project_visible, toggle_pinned_project,
+    sidebar_empty_project_visible, toggle_pinned_project, toggle_pinned_project_at_boundary,
 };
-
-fn leaf(cwd: &str) -> crate::PaneState {
-    crate::PaneState::Leaf {
-        cwd: Some(cwd.into()),
-        id: None,
-        custom_title: None,
-        launch_label: None,
-        launch_cmd: None,
-    }
-}
-
-fn session(cwd: &str) -> SessionState {
-    SessionState {
-        id: "conv-test".into(),
-        layout: leaf(cwd),
-        active: 0,
-        last_updated_at: 0,
-        custom_title: None,
-        acp: None,
-        route: None,
-    }
-}
 
 #[test]
 fn move_index_near_rejects_noop_and_oob() {
@@ -109,32 +87,6 @@ fn project_drag_promotes_implicit_root_into_persisted_list() {
 }
 
 #[test]
-fn workspace_state_roundtrip_keeps_manual_project_and_session_order() {
-    let state = WsState {
-        projects: vec!["/b".into(), "/a".into()],
-        sessions: vec![session("/a/one"), session("/b"), session("/a/two")],
-        ..Default::default()
-    };
-
-    let json = serde_json::to_string(&state).unwrap();
-    let restored: WsState = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(restored.projects, vec!["/b", "/a"]);
-    assert_eq!(
-        restored
-            .sessions
-            .iter()
-            .map(session_state_cwd)
-            .collect::<Vec<_>>(),
-        vec![
-            Some("/a/one".into()),
-            Some("/b".into()),
-            Some("/a/two".into())
-        ]
-    );
-}
-
-#[test]
 fn hide_empty_keeps_populated_and_pinned_or_active_empty() {
     assert!(sidebar_empty_project_visible(true, 2, false, false));
     assert!(sidebar_empty_project_visible(true, 0, true, false));
@@ -172,6 +124,55 @@ fn pinned_projects_sort_to_the_top_and_keep_relative_order() {
     let pinned = HashSet::from(["/smelt".to_string(), "/c".to_string()]);
     let ordered = pinned_projects_first(vec!["/a", "/smelt", "/b", "/c"], &pinned, |root| root);
     assert_eq!(ordered, vec!["/smelt", "/c", "/a", "/b"]);
+}
+
+fn roots(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| item.to_string()).collect()
+}
+
+#[test]
+fn pinning_from_menu_appends_to_the_end_of_the_pinned_section() {
+    // 骨架里 /c 在 /a 前面；不挪的话固定后会排在 /a 前，夹进已固定的中间。
+    let mut projects = roots(&["/c", "/a", "/b", "/d"]);
+    let mut pinned = HashSet::from(["/a".to_string(), "/b".to_string()]);
+    toggle_pinned_project_at_boundary(&mut projects, &mut pinned, "/c");
+    assert!(is_pinned_project(&pinned, "/c"));
+    assert_eq!(projects, roots(&["/a", "/b", "/c", "/d"]));
+    let ordered = pinned_projects_first(projects.clone(), &pinned, String::as_str);
+    assert_eq!(ordered, roots(&["/a", "/b", "/c", "/d"]));
+}
+
+#[test]
+fn unpinning_from_menu_moves_to_the_top_of_the_unpinned_section() {
+    let mut projects = roots(&["/a", "/b", "/c", "/d"]);
+    let mut pinned = HashSet::from(["/a".to_string(), "/b".to_string()]);
+    toggle_pinned_project_at_boundary(&mut projects, &mut pinned, "/a/");
+    assert!(!is_pinned_project(&pinned, "/a"));
+    assert_eq!(projects, roots(&["/b", "/a", "/c", "/d"]));
+}
+
+#[test]
+fn unpinning_with_pins_scattered_in_old_order_still_lands_at_the_boundary() {
+    // 旧数据：/x 没固定却排在固定的 /a、/b 前面，侧栏显示为 /a /b /x /y。
+    let mut projects = roots(&["/x", "/a", "/b", "/y"]);
+    let mut pinned = HashSet::from(["/a".to_string(), "/b".to_string()]);
+    toggle_pinned_project_at_boundary(&mut projects, &mut pinned, "/a");
+    let ordered = pinned_projects_first(projects.clone(), &pinned, String::as_str);
+    assert_eq!(ordered, roots(&["/b", "/a", "/x", "/y"]));
+    assert_eq!(projects, ordered, "存下来的顺序就是显示顺序");
+}
+
+#[test]
+fn pinning_the_first_project_or_an_implicit_group_lands_at_the_boundary() {
+    let mut projects = roots(&["/a", "/b"]);
+    let mut pinned = HashSet::new();
+    toggle_pinned_project_at_boundary(&mut projects, &mut pinned, "/b");
+    assert_eq!(projects, roots(&["/b", "/a"]));
+
+    // 隐式组（只因有会话才出现、不在骨架里）也补进骨架，排到固定区末尾。
+    toggle_pinned_project_at_boundary(&mut projects, &mut pinned, "/tmp/x/");
+    assert!(is_pinned_project(&pinned, "/tmp/x"));
+    assert_eq!(projects, roots(&["/b", "/tmp/x", "/a"]));
 }
 
 #[test]
@@ -228,7 +229,11 @@ fn closing_the_current_session_lands_on_its_neighbour_in_the_same_project() {
     // 侧栏顺序和 sessions 下标不是一回事。
     let order = [4, 1, 7];
     assert_eq!(neighbor_in_group(&order, 1), Some(7), "优先下面那个");
-    assert_eq!(neighbor_in_group(&order, 7), Some(1), "最后一个就落到上面那个");
+    assert_eq!(
+        neighbor_in_group(&order, 7),
+        Some(1),
+        "最后一个就落到上面那个"
+    );
     assert_eq!(neighbor_in_group(&[3], 3), None, "组里只剩它");
     assert_eq!(neighbor_in_group(&order, 9), None);
 }

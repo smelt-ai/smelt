@@ -13,4 +13,4 @@ thiserror.workspace = true
 # Smelt 自有持久化的底层边界。移动端会复用 smelt-core，但不需要桌面数据库，
 # 因此 rusqlite 只在桌面目标编译，避免把 native SQLite 带进 iOS/Android FFI。
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }

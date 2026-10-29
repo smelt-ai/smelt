@@ -29,9 +29,6 @@ pub(crate) fn dispatch(
             history_service::remember_agent(&p)?;
             Ok(EmptyParams::default())
         }),
-        ControlMethod::HistoryTitles => {
-            call::<HistoryTitlesCall>(params, |_| Ok(history_service::titles()))
-        }
         other => Err(ControlError::new(
             ControlErrorCode::Internal,
             format!("`{other}` is not a history method"),

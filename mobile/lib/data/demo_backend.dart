@@ -337,10 +337,23 @@ class DemoBackend implements Backend {
               r.record.runtimeId,
               (s) => s.phase == SessionPhase.succeeded && s.attention != null,
             ),
-            recent: pick(
-              r.record.runtimeId,
-              (s) => s.phase == SessionPhase.succeeded && s.attention == null,
-            ),
+            // 同内核 `pass::is_recent`：动过、不在别的组，不分相位，新的在前，最多 5 条。
+            recent:
+                (pick(
+                      r.record.runtimeId,
+                      (s) =>
+                          s.status == SessionStatus.idle &&
+                          !const {
+                            AttentionKind.approval,
+                            AttentionKind.input,
+                            AttentionKind.failure,
+                          }.contains(s.attention?.kind) &&
+                          !(s.phase == SessionPhase.succeeded &&
+                              s.attention != null) &&
+                          s.updatedAt > 0,
+                    )..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)))
+                    .take(5)
+                    .toList(),
             cached: r.status.state != ConnectionState.connected,
             savedAtMs: r.status.state == ConnectionState.connected
                 ? null

@@ -96,13 +96,15 @@ fn is_done(session: &SessionSummary) -> bool {
         && session.phase == SessionPhase::Succeeded
 }
 
-/// 最近跑过：成功结束、看过了。接住从「刚完成」里掉出来的，免得一次跑完的会话在指挥台
-/// 上凭空没了。运行时已结束的会话相位是 `Dead`，不在这一组。
+/// 最近跑过：动过、又不在单据、在做、刚完成里的会话。接住从这几组里掉出来的，免得跑过的
+/// 会话在指挥台上凭空没了。不看相位：`Succeeded` 留不住，ACP 对话被恢复或闲置回收后回到
+/// `Idle`，终端里的 CLI 退出后是 `Dead`（守护重启后全是），相位交给行首记号去表达。从没动过
+/// 的会话（时间是 0，比如刚开的空终端）不算。
 fn is_recent(session: &SessionSummary) -> bool {
     !needs_action(session)
         && !is_running(session)
         && !is_done(session)
-        && session.phase == SessionPhase::Succeeded
+        && session.updated_at > 0
 }
 
 /// 会话摘要里跟「在等什么」有关的部分。变了就要重取详情。
@@ -120,7 +122,7 @@ pub(crate) fn fingerprint(session: &SessionSummary) -> String {
 }
 
 /// 某一组：按最后活动时间从新到旧，同时间的保持列表次序（运行时按桌面菜单排好的，比
-/// 随机顺序有意义；从没动过的会话时间都是 0，全靠它）。
+/// 随机顺序有意义）。
 fn section(
     sessions: &[SessionSummary],
     predicate: impl Fn(&SessionSummary) -> bool,

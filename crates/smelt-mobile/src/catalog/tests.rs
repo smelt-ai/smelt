@@ -7,17 +7,18 @@ use std::io::{BufRead, BufReader, Read};
 use serde_json::{Value, json};
 use smelt_event_protocol::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SNAPSHOT_AUTOMATIONS,
-    CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE_MENU,
-    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_MENU_CHANGED, CoreProjectionEvent,
+    CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_TOPIC_SESSION_REMOVED,
+    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, CoreProjectionEvent,
     CoreSessionPhase, CorrelationId, EventEnvelope, EventId, EventSource, SessionStateChanged,
     SessionStatesSnapshot, SnapshotKind, SubscribeMessage, Topic,
 };
 use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::automation::{Automation, AutomationFile, AutomationRun};
 use smelt_model::daemon_state::{DaemonPhase, DaemonSessionState};
-use smelt_model::session_control::RemoteSessionSnapshot;
-use smelt_model::workspace_menu::WorkspaceMenuSnapshot;
+use smelt_model::workspace_directory::{
+    WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+};
 use smelt_runtime_client::protocol::control::{ControlError, ControlResponse};
 use smelt_runtime_client::protocol::write_json_line;
 
@@ -44,34 +45,53 @@ fn daemon(id: &str, phase: DaemonPhase) -> DaemonSessionState {
     }
 }
 
-fn menu(value: Value) -> WorkspaceMenuSnapshot {
+fn parse_directory(value: Value) -> WorkspaceDirectory {
     serde_json::from_value(value).unwrap()
 }
 
-fn menu_session(id: &str, kind: &str, project: Option<(&str, u32)>, order: u32) -> Value {
-    json!({
-        "id": id,
-        "kind": kind,
-        "title": format!("{id} 菜单名"),
-        "cwd": project.map(|(root, _)| root),
-        "project_root": project.map(|(root, _)| root),
-        "project_title": project.map(|(root, _)| root.trim_start_matches('/')),
-        "project_order": project.map_or(u32::MAX, |(_, order)| order),
-        "session_order": order,
-    })
+/// 目录里的一段对话：ACP 对话的会话 id、终端的终端 id 都是 `id`。`order` 是它在目录里的
+/// 先后，拼目录时按它排。没有用户名字时显示「`id` 目录名」（ACP 的会话标题、终端的启动名）。
+fn conversation(id: &str, kind: &str, project: Option<(&str, u32)>, order: u32) -> Value {
+    let cwd = project.map(|(root, _)| root.to_string());
+    let conversation = if kind == "acp" {
+        WorkspaceConversation {
+            id: format!("conv-{id}"),
+            acp: Some(WorkspaceAcp {
+                sid: id.into(),
+                agent: "pi".into(),
+                cwd,
+                session_title: Some(format!("{id} 目录名")),
+                ..WorkspaceAcp::default()
+            }),
+            ..WorkspaceConversation::default()
+        }
+    } else {
+        WorkspaceConversation {
+            id: format!("conv-{id}"),
+            terminals: vec![WorkspaceTerminal {
+                id: Some(id.into()),
+                cwd,
+                launch_label: Some(format!("{id} 目录名")),
+                ..WorkspaceTerminal::default()
+            }],
+            ..WorkspaceConversation::default()
+        }
+    };
+    let mut value = serde_json::to_value(conversation).unwrap();
+    value["_order"] = json!(order);
+    value
 }
 
-fn one_project_menu(sessions: Vec<Value>) -> Value {
+fn one_project_directory(mut conversations: Vec<Value>) -> Value {
+    conversations.sort_by_key(|conversation| conversation["_order"].as_u64());
+    for conversation in &mut conversations {
+        conversation.as_object_mut().unwrap().remove("_order");
+    }
     json!({
-        "version": 2,
         "revision": 3,
-        "projects": [{"root": "/repo", "title": "repo", "order": 0}],
-        "sessions": sessions,
+        "projects": ["/repo"],
+        "conversations": conversations,
     })
-}
-
-fn remote(value: Value) -> RemoteSessionSnapshot {
-    serde_json::from_value(value).unwrap()
 }
 
 fn automation_file(value: Value) -> AutomationFile {
@@ -98,14 +118,12 @@ fn run_json(id: &str, automation_id: &str, session_id: Option<&str>, created_at:
 
 fn snapshot(
     sessions: Vec<DaemonSessionState>,
-    menu: Option<WorkspaceMenuSnapshot>,
-    remote: Option<RemoteSessionSnapshot>,
+    workspace: Option<WorkspaceDirectory>,
     automations: Option<AutomationFile>,
 ) -> DaemonStateEvent {
     DaemonStateEvent::Snapshot {
         sessions,
-        remote_sessions: remote,
-        workspace_menu: menu,
+        workspace,
         automations,
     }
 }
@@ -122,61 +140,50 @@ fn find<'a>(sessions: &'a [SessionSummary], id: &str) -> &'a SessionSummary {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn projection_merges_menu_remote_sessions_and_automation_runs() {
+fn projection_lists_the_directory_and_live_automation_runs() {
     let mut state = CatalogState::default();
-    let menu = menu(one_project_menu(vec![
-        menu_session("menu-acp", "acp", Some(("/repo", 0)), 1),
-        menu_session("menu-term", "terminal", Some(("/repo", 0)), 0),
+    let mut directory = parse_directory(one_project_directory(vec![
+        conversation("dir-acp", "acp", Some(("/repo", 0)), 1),
+        conversation("dir-term", "terminal", Some(("/repo", 0)), 0),
+        conversation("outside", "acp", Some(("/work/other", 1)), 2),
     ]));
-    let remote = remote(json!({
-        "revision": 2,
-        "sessions": [
-            {"kind": "acp", "id": "remote-acp", "cwd": "/work/other", "agent": "codex", "created_at": 1},
-            {"kind": "terminal", "id": "remote-term", "cwd": "/repo", "created_at": 1},
-            {"kind": "acp", "id": "remote-hidden", "cwd": "/repo", "created_at": 1, "hidden": true},
-            {"kind": "acp", "id": "remote-creating", "cwd": "/repo", "created_at": 1, "lifecycle": "creating"},
-            {"kind": "acp", "id": "run-session", "cwd": "/auto", "created_at": 1, "hidden": true},
-        ],
-    }));
+    directory.conversations[2].acp.as_mut().unwrap().agent = "codex".into();
+    directory.conversations[2].acp.as_mut().unwrap().session_title = None;
     let automations = automation_file(json!({
         "schema_version": 2,
         "revision": 1,
-        "runs": [run_json("run-1", "a1", Some("run-session"), 100)],
+        "runs": [
+            run_json("run-1", "a1", Some("run-session"), 100),
+            run_json("run-2", "a1", Some("run-gone"), 90),
+        ],
     }));
     state.apply(
-        snapshot(Vec::new(), Some(menu), Some(remote), Some(automations)),
+        snapshot(
+            vec![daemon("run-session", DaemonPhase::AwaitingApproval)],
+            Some(directory),
+            Some(automations),
+        ),
         Instant::now(),
     );
 
     let sessions = state.summaries();
-    let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(
-        ids,
-        [
-            "menu-term",
-            "menu-acp",
-            "remote-term",
-            "remote-acp",
-            "run-session"
-        ],
-        "按项目、菜单次序排；新项目排在已有项目后；自动化运行没有项目，沉到最后"
+        ids_of(&sessions),
+        ["dir-term", "dir-acp", "outside", "run-session"],
+        "按项目、目录次序排；不在项目里的按 cwd 自成一组排在后面；自动化运行没有项目，沉到最后；\
+         守护里已经没有的运行不列"
     );
 
-    let remote_acp = find(&sessions, "remote-acp");
-    assert_eq!(remote_acp.title, "codex conversation");
-    assert_eq!(remote_acp.agent, "codex");
-    assert_eq!(remote_acp.project_root.as_deref(), Some("/work/other"));
-    assert_eq!(remote_acp.project_title.as_deref(), Some("other"));
-    assert_eq!(remote_acp.project_order, 1);
-    assert_eq!(find(&sessions, "remote-term").title, "Terminal");
-    assert_eq!(find(&sessions, "remote-term").kind, SessionKind::Terminal);
-    assert_eq!(
-        find(&sessions, "remote-term").project_root.as_deref(),
-        Some("/repo")
-    );
+    let outside = find(&sessions, "outside");
+    assert_eq!(outside.title, "codex conversation");
+    assert_eq!(outside.agent, "codex");
+    assert_eq!(outside.project_root.as_deref(), Some("/work/other"));
+    assert_eq!(outside.project_title.as_deref(), Some("other"));
+    assert_eq!(outside.project_order, 1);
 
     let run = find(&sessions, "run-session");
-    assert_eq!(run.title, "每日晨报", "远程标题为空时用自动化名");
+    assert_eq!(run.title, "每日晨报", "运行的会话叫自动化的名字");
+    assert_eq!(run.cwd.as_deref(), Some("/auto"));
     assert_eq!(run.project_root, None);
     assert_eq!(run.project_order, u32::MAX);
     assert_eq!(run.agent, "pi");
@@ -194,36 +201,39 @@ fn projection_merges_menu_remote_sessions_and_automation_runs() {
         .collect();
     assert_eq!(
         projects,
-        [("/repo".to_string(), 0), ("/work/other".to_string(), 1)]
+        [("/repo".to_string(), 0)],
+        "能在里面新建会话的只有目录里开着的项目，按 cwd 撑起来的分组不算"
     );
 }
 
+/// 运行时一个项目都没开：会话按 cwd 自成一组，但没有能新建会话的项目。
 #[test]
-fn a_runtime_without_a_desktop_menu_still_lists_remote_sessions() {
+fn conversations_outside_every_project_still_list() {
     let mut state = CatalogState::default();
-    let remote = remote(json!({
-        "revision": 1,
-        "sessions": [{"kind": "terminal", "id": "t1", "cwd": "/srv/app", "title": "构建", "created_at": 1}],
-    }));
-    state.apply(
-        snapshot(Vec::new(), None, Some(remote), None),
-        Instant::now(),
-    );
+    let mut directory = parse_directory(one_project_directory(vec![conversation(
+        "t1",
+        "terminal",
+        Some(("/srv/app", 0)),
+        0,
+    )]));
+    directory.projects.clear();
+    directory.conversations[0].custom_title = Some("构建".into());
+    state.apply(snapshot(Vec::new(), Some(directory), None), Instant::now());
     let sessions = state.summaries();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].title, "构建");
-    assert_eq!(state.projects()[0].root, "/srv/app");
+    assert_eq!(sessions[0].project_root.as_deref(), Some("/srv/app"));
+    assert!(state.projects().is_empty(), "运行时没开项目，就没有能新建会话的项目");
 }
 
 #[test]
-fn title_prefers_the_custom_name_then_the_session_title_then_the_menu() {
-    let mut custom = menu_session("custom", "acp", Some(("/repo", 0)), 0);
-    custom["custom_title"] = json!(true);
-    custom["title"] = json!("我起的名");
-    let menu = menu(one_project_menu(vec![
+fn title_prefers_the_custom_name_then_the_session_title_then_the_directory() {
+    let mut custom = conversation("custom", "acp", Some(("/repo", 0)), 0);
+    custom["custom_title"] = json!("我起的名");
+    let directory = parse_directory(one_project_directory(vec![
         custom,
-        menu_session("auto", "acp", Some(("/repo", 0)), 1),
-        menu_session("untitled", "acp", Some(("/repo", 0)), 2),
+        conversation("auto", "acp", Some(("/repo", 0)), 1),
+        conversation("untitled", "acp", Some(("/repo", 0)), 2),
     ]));
     let titled = |id: &str| DaemonSessionState {
         title: Some("agent 起的名".into()),
@@ -237,8 +247,7 @@ fn title_prefers_the_custom_name_then_the_session_title_then_the_menu() {
                 titled("auto"),
                 daemon("untitled", DaemonPhase::Idle),
             ],
-            Some(menu),
-            None,
+            Some(directory),
             None,
         ),
         Instant::now(),
@@ -246,19 +255,19 @@ fn title_prefers_the_custom_name_then_the_session_title_then_the_menu() {
     let sessions = state.summaries();
     assert_eq!(find(&sessions, "custom").title, "我起的名");
     assert_eq!(find(&sessions, "auto").title, "agent 起的名");
-    assert_eq!(find(&sessions, "untitled").title, "untitled 菜单名");
+    assert_eq!(find(&sessions, "untitled").title, "untitled 目录名");
 }
 
 #[test]
-fn agent_falls_back_from_the_menu_to_provider_then_launch_command() {
-    let mut with_agent = menu_session("menu", "acp", Some(("/repo", 0)), 0);
-    with_agent["agent"] = json!("claude");
-    let menu = menu(one_project_menu(vec![
+fn agent_falls_back_from_the_directory_to_provider_then_launch_command() {
+    let mut with_agent = conversation("dir", "acp", Some(("/repo", 0)), 0);
+    with_agent["acp"]["agent"] = json!("claude");
+    let directory = parse_directory(one_project_directory(vec![
         with_agent,
-        menu_session("provider", "terminal", Some(("/repo", 0)), 1),
-        menu_session("launch", "terminal", Some(("/repo", 0)), 2),
-        menu_session("unknown", "terminal", Some(("/repo", 0)), 3),
-        menu_session("idle", "terminal", Some(("/repo", 0)), 4),
+        conversation("provider", "terminal", Some(("/repo", 0)), 1),
+        conversation("launch", "terminal", Some(("/repo", 0)), 2),
+        conversation("unknown", "terminal", Some(("/repo", 0)), 3),
+        conversation("idle", "terminal", Some(("/repo", 0)), 4),
     ]));
     let mut state = CatalogState::default();
     state.apply(
@@ -266,7 +275,7 @@ fn agent_falls_back_from_the_menu_to_provider_then_launch_command() {
             vec![
                 DaemonSessionState {
                     provider: Some("codex".into()),
-                    ..daemon("menu", DaemonPhase::Idle)
+                    ..daemon("dir", DaemonPhase::Idle)
                 },
                 DaemonSessionState {
                     provider: Some("copilot".into()),
@@ -282,14 +291,13 @@ fn agent_falls_back_from_the_menu_to_provider_then_launch_command() {
                     ..daemon("unknown", DaemonPhase::Idle)
                 },
             ],
-            Some(menu),
-            None,
+            Some(directory),
             None,
         ),
         Instant::now(),
     );
     let sessions = state.summaries();
-    assert_eq!(find(&sessions, "menu").agent, "claude");
+    assert_eq!(find(&sessions, "dir").agent, "claude");
     assert_eq!(find(&sessions, "provider").agent, "copilot");
     assert_eq!(find(&sessions, "launch").agent, "claude");
     assert_eq!(find(&sessions, "unknown").agent, "other");
@@ -359,13 +367,12 @@ fn phase_and_status_follow_the_authoritative_daemon_phase() {
                 pending_question: Some("git push".into()),
                 ..daemon("s", DaemonPhase::AwaitingApproval)
             }],
-            Some(menu(one_project_menu(vec![menu_session(
+            Some(parse_directory(one_project_directory(vec![conversation(
                 "s",
                 "acp",
                 Some(("/repo", 0)),
                 0,
             )]))),
-            None,
             None,
         ),
         Instant::now(),
@@ -377,11 +384,11 @@ fn phase_and_status_follow_the_authoritative_daemon_phase() {
 
 #[test]
 fn first_snapshot_is_a_baseline_and_later_changes_are_edges() {
-    let menu = menu(one_project_menu(
+    let directory = parse_directory(one_project_directory(
         ["approval", "failed", "busy", "later"]
             .iter()
             .enumerate()
-            .map(|(i, id)| menu_session(id, "acp", Some(("/repo", 0)), i as u32))
+            .map(|(i, id)| conversation(id, "acp", Some(("/repo", 0)), i as u32))
             .collect(),
     ));
     let mut state = CatalogState::default();
@@ -394,8 +401,7 @@ fn first_snapshot_is_a_baseline_and_later_changes_are_edges() {
                 daemon("failed", DaemonPhase::Failed),
                 daemon("busy", DaemonPhase::Thinking),
             ],
-            Some(menu.clone()),
-            None,
+            Some(directory.clone()),
             None,
         ),
         now,
@@ -445,8 +451,7 @@ fn first_snapshot_is_a_baseline_and_later_changes_are_edges() {
                 daemon("busy", DaemonPhase::AwaitingApproval),
                 daemon("later", DaemonPhase::WaitingForUser),
             ],
-            Some(menu),
-            None,
+            Some(directory),
             None,
         ),
         now,
@@ -462,20 +467,17 @@ fn first_snapshot_is_a_baseline_and_later_changes_are_edges() {
 }
 
 #[test]
-fn removing_a_session_drops_it_from_the_menu_and_remote_catalog() {
+fn a_removed_session_stays_listed_while_in_the_directory() {
     let mut state = CatalogState::default();
     state.apply(
         snapshot(
             vec![daemon("gone", DaemonPhase::AwaitingApproval)],
-            Some(menu(one_project_menu(vec![menu_session(
+            Some(parse_directory(one_project_directory(vec![conversation(
                 "gone",
                 "acp",
                 Some(("/repo", 0)),
                 0,
             )]))),
-            Some(remote(json!({"sessions": [
-                {"kind": "terminal", "id": "gone", "cwd": "/repo", "created_at": 1}
-            ]}))),
             None,
         ),
         Instant::now(),
@@ -485,7 +487,23 @@ fn removing_a_session_drops_it_from_the_menu_and_remote_catalog() {
         Instant::now(),
     );
     assert_eq!(applied.resolved, ["gone"]);
+    // 守护里没了不等于对话没了：工作区目录里还有，就还列着（没在跑，能再唤醒）。
+    let sessions = state.summaries();
+    assert_eq!(ids_of(&sessions), ["gone"]);
+    assert_eq!(sessions[0].kind, SessionKind::Acp);
+    assert_eq!(sessions[0].attention, None);
+    assert_eq!(sessions[0].status, SessionStatus::Idle);
+
+    // 目录里也没了才从列表上消失。
+    state.apply(
+        DaemonStateEvent::Workspace(parse_directory(one_project_directory(Vec::new()))),
+        Instant::now(),
+    );
     assert!(state.summaries().is_empty());
+}
+
+fn ids_of(sessions: &[SessionSummary]) -> Vec<&str> {
+    sessions.iter().map(|session| session.id.as_str()).collect()
 }
 
 fn automation(value: Value) -> Automation {
@@ -784,6 +802,7 @@ impl FakeSource {
                     endpoint_id: None,
                     link: None,
                     error: None,
+                    os: None,
                 },
                 listeners: Vec::new(),
             }),
@@ -818,6 +837,7 @@ impl FakeSource {
             endpoint_id: endpoint.map(str::to_string),
             link: None,
             error: None,
+            os: None,
         };
         let event = inner.event.clone();
         inner
@@ -936,6 +956,7 @@ fn dto(id: &str, revision: u64, phase: CoreSessionPhase) -> SessionStateChanged 
         launch: None,
         provider: None,
         conversation_id: None,
+        custom_title: None,
         title: Some(format!("{id} r{revision}")),
         phase,
         phase_since_unix_seconds: 1,
@@ -972,8 +993,8 @@ fn projection_snapshot(kind: &str, data: Value) -> String {
     })
 }
 
-/// 完整的一批快照：会话、远程目录、菜单、自动化。
-fn snapshot_lines(sessions: Vec<SessionStateChanged>, menu: Value) -> String {
+/// 完整的一批快照：会话、工作区目录、自动化。
+fn snapshot_lines(sessions: Vec<SessionStateChanged>, directory: Value) -> String {
     let sessions = line(SubscribeMessage::Snapshot {
         kind: SnapshotKind(CORE_SNAPSHOT_SESSIONS.to_string()),
         watermark: 1,
@@ -987,8 +1008,7 @@ fn snapshot_lines(sessions: Vec<SessionStateChanged>, menu: Value) -> String {
     });
     [
         sessions,
-        projection_snapshot(CORE_SNAPSHOT_REMOTE_SESSIONS, Value::Null),
-        projection_snapshot(CORE_SNAPSHOT_WORKSPACE_MENU, menu),
+        projection_snapshot(CORE_SNAPSHOT_WORKSPACE, directory),
         projection_snapshot(CORE_SNAPSHOT_AUTOMATIONS, Value::Null),
     ]
     .concat()
@@ -1020,24 +1040,24 @@ fn update_line(state: SessionStateChanged) -> String {
     )
 }
 
-fn menu_line(menu: Value) -> String {
-    let revision = menu["revision"].as_u64().unwrap();
+fn directory_line(directory: Value) -> String {
+    let revision = directory["revision"].as_u64().unwrap();
     event_line(
-        CORE_TOPIC_WORKSPACE_MENU_CHANGED,
+        CORE_TOPIC_WORKSPACE_CHANGED,
         serde_json::to_value(CoreProjectionEvent {
             projection_version: CORE_PROJECTION_VERSION,
             revision,
-            data: menu,
+            data: directory,
         })
         .unwrap(),
     )
 }
 
-fn repo_menu(ids: &[&str]) -> Value {
-    one_project_menu(
+fn repo_directory(ids: &[&str]) -> Value {
+    one_project_directory(
         ids.iter()
             .enumerate()
-            .map(|(i, id)| menu_session(id, "acp", Some(("/repo", 0)), i as u32))
+            .map(|(i, id)| conversation(id, "acp", Some(("/repo", 0)), i as u32))
             .collect(),
     )
 }
@@ -1045,7 +1065,7 @@ fn repo_menu(ids: &[&str]) -> Value {
 /// 连上一个假运行时并收完首个快照。
 fn live(
     sessions: Vec<SessionStateChanged>,
-    menu: Value,
+    directory: Value,
 ) -> (Arc<FakeSource>, Arc<FakeRuntime>, Catalog, Events) {
     let source = FakeSource::new(Some(Arc::new(Cache::in_memory())));
     let runtime = FakeRuntime::new();
@@ -1053,7 +1073,7 @@ fn live(
     let events = record(&catalog);
     source.connect(1, "ep-a", &runtime);
     runtime.wait_subscriptions(1);
-    runtime.send(0, &snapshot_lines(sessions, menu));
+    runtime.send(0, &snapshot_lines(sessions, directory));
     wait_list(&events, "实时列表", |list| !list.cached);
     (source, runtime, catalog, events)
 }
@@ -1094,8 +1114,7 @@ fn subscribes_with_the_catalog_shape_and_pushes_the_live_list() {
         [
             CORE_TOPIC_SESSION_STATE_CHANGED,
             CORE_TOPIC_SESSION_REMOVED,
-            CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
-            CORE_TOPIC_WORKSPACE_MENU_CHANGED,
+            CORE_TOPIC_WORKSPACE_CHANGED,
             CORE_TOPIC_AUTOMATIONS_CHANGED,
         ],
         "不订唤醒请求和外观请求"
@@ -1105,7 +1124,7 @@ fn subscribes_with_the_catalog_shape_and_pushes_the_live_list() {
         0,
         &snapshot_lines(
             vec![dto("s1", 1, CoreSessionPhase::Thinking)],
-            repo_menu(&["s1"]),
+            repo_directory(&["s1"]),
         ),
     );
     let list = wait_list(&events, "带归属的实时列表", |list| {
@@ -1120,12 +1139,12 @@ fn subscribes_with_the_catalog_shape_and_pushes_the_live_list() {
     assert_eq!(list.sessions[0].status, SessionStatus::Running);
     assert_eq!(runtime.controls("session.agent_bindings").len(), 1);
 
-    // 菜单变了要重取归属；内容没变就不再推列表。
+    // 目录变了要重取归属；内容没变就不再推列表。
     let pushed = lists(&events).len();
-    let mut changed = repo_menu(&["s1"]);
+    let mut changed = repo_directory(&["s1"]);
     changed["revision"] = json!(4);
-    runtime.send(0, &menu_line(changed));
-    wait_until("菜单变化后重取归属", || {
+    runtime.send(0, &directory_line(changed));
+    wait_until("目录变化后重取归属", || {
         runtime.controls("session.agent_bindings").len() == 2
     });
     std::thread::sleep(FAST.push_delay * 3);
@@ -1144,7 +1163,7 @@ fn subscribes_with_the_catalog_shape_and_pushes_the_live_list() {
 fn close_stops_the_subscription_and_every_listener() {
     let (source, runtime, catalog, events) = live(
         vec![dto("s1", 1, CoreSessionPhase::Thinking)],
-        repo_menu(&["s1"]),
+        repo_directory(&["s1"]),
     );
     catalog.close();
     runtime.wait_closed(0);
@@ -1165,7 +1184,7 @@ fn close_stops_the_subscription_and_every_listener() {
 fn rapid_changes_are_merged_into_one_push() {
     let (_source, runtime, _catalog, events) = live(
         vec![dto("s1", 1, CoreSessionPhase::Thinking)],
-        repo_menu(&["s1"]),
+        repo_directory(&["s1"]),
     );
     let before = lists(&events).len();
     let burst: String = (2..=6)
@@ -1184,7 +1203,7 @@ fn rapid_changes_are_merged_into_one_push() {
 fn attention_arrives_after_the_list_and_mark_read_stays_local() {
     let (_source, runtime, catalog, events) = live(
         vec![dto("s1", 1, CoreSessionPhase::Thinking)],
-        repo_menu(&["s1"]),
+        repo_directory(&["s1"]),
     );
     runtime.send(
         0,
@@ -1270,7 +1289,7 @@ fn cached_list_shows_until_the_live_snapshot_then_the_live_list_is_saved() {
         0,
         &snapshot_lines(
             vec![dto("s1", 1, CoreSessionPhase::AwaitingApproval)],
-            repo_menu(&["s1"]),
+            repo_directory(&["s1"]),
         ),
     );
     let live = wait_list(&events, "实时列表", |list| !list.cached);
@@ -1295,7 +1314,7 @@ fn cached_list_shows_until_the_live_snapshot_then_the_live_list_is_saved() {
 fn switching_runtime_drops_the_old_state_and_subscription() {
     let (source, runtime_a, catalog, events) = live(
         vec![dto("a1", 1, CoreSessionPhase::AwaitingApproval)],
-        repo_menu(&["a1"]),
+        repo_directory(&["a1"]),
     );
     let runtime_b = FakeRuntime::new();
     source.connect(2, "ep-b", &runtime_b);
@@ -1308,7 +1327,7 @@ fn switching_runtime_drops_the_old_state_and_subscription() {
         0,
         &snapshot_lines(
             vec![dto("b1", 1, CoreSessionPhase::AwaitingApproval)],
-            repo_menu(&["b1"]),
+            repo_directory(&["b1"]),
         ),
     );
     let list = wait_list(&events, "新运行时的列表", |list| !list.cached);
@@ -1325,7 +1344,7 @@ fn switching_runtime_drops_the_old_state_and_subscription() {
 fn reconnecting_pauses_the_subscription_and_resumes_on_a_fresh_one() {
     let (source, runtime, _catalog, events) = live(
         vec![dto("s1", 1, CoreSessionPhase::Thinking)],
-        repo_menu(&["s1"]),
+        repo_directory(&["s1"]),
     );
     source.set_state(ConnectionState::Reconnecting);
     runtime.wait_closed(0);
@@ -1340,7 +1359,7 @@ fn reconnecting_pauses_the_subscription_and_resumes_on_a_fresh_one() {
         1,
         &snapshot_lines(
             vec![dto("s1", 1, CoreSessionPhase::AwaitingApproval)],
-            repo_menu(&["s1"]),
+            repo_directory(&["s1"]),
         ),
     );
     wait_until("断线期间的提醒", || {
@@ -1350,7 +1369,7 @@ fn reconnecting_pauses_the_subscription_and_resumes_on_a_fresh_one() {
 
 #[test]
 fn subscription_reconnects_when_the_runtime_closes_it() {
-    let (_source, runtime, _catalog, _events) = live(Vec::new(), repo_menu(&[]));
+    let (_source, runtime, _catalog, _events) = live(Vec::new(), repo_directory(&[]));
     runtime.subscriptions.lock().unwrap()[0]
         .shutdown(Shutdown::Both)
         .unwrap();
@@ -1359,7 +1378,7 @@ fn subscription_reconnects_when_the_runtime_closes_it() {
 
 #[test]
 fn protocol_errors_are_reported_once_and_the_subscription_retries() {
-    let (_source, runtime, _catalog, events) = live(Vec::new(), repo_menu(&[]));
+    let (_source, runtime, _catalog, events) = live(Vec::new(), repo_directory(&[]));
     runtime.send(0, "这不是 JSON\n");
     runtime.wait_subscriptions(2);
     runtime.send(1, "这不是 JSON\n");
@@ -1413,7 +1432,7 @@ fn calls_without_a_runtime_are_offline() {
 
 #[test]
 fn workspace_catalog_combines_projects_with_the_new_session_catalog() {
-    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_menu(&[]));
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
     runtime.result("new_session.catalog", new_session_catalog());
 
     let workspace = catalog.workspace_catalog().unwrap();
@@ -1458,13 +1477,13 @@ fn workspace_catalog_waits_for_the_first_snapshot() {
         std::thread::spawn(move || catalog.workspace_catalog())
     };
     runtime.wait_subscriptions(1);
-    runtime.send(0, &snapshot_lines(Vec::new(), repo_menu(&[])));
+    runtime.send(0, &snapshot_lines(Vec::new(), repo_directory(&[])));
     assert_eq!(pending.join().unwrap().unwrap().projects.len(), 1);
 }
 
 #[test]
 fn history_uses_the_engine_and_profile_of_the_agent_option() {
-    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_menu(&[]));
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
     runtime.result("new_session.catalog", new_session_catalog());
     runtime.result(
         "history.list",
@@ -1544,7 +1563,7 @@ fn history_uses_the_engine_and_profile_of_the_agent_option() {
 
 #[test]
 fn create_session_sends_only_the_given_fields() {
-    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_menu(&[]));
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
     runtime.result("session.create", json!({"session_id": "acp-mobile-1"}));
 
     let id = catalog
@@ -1580,10 +1599,10 @@ fn create_session_sends_only_the_given_fields() {
 }
 
 #[test]
-fn delete_session_removes_it_locally_and_drops_its_snapshot_cache() {
+fn delete_session_follows_the_runtime_directory_and_drops_its_snapshot_cache() {
     let (source, runtime, catalog, events) = live(
         vec![dto("x", 1, CoreSessionPhase::Idle)],
-        repo_menu(&["x", "y"]),
+        repo_directory(&["x", "y"]),
     );
     runtime.result("session.delete", json!({}));
     let cache = source.cache().unwrap();
@@ -1595,13 +1614,17 @@ fn delete_session_removes_it_locally_and_drops_its_snapshot_cache() {
         runtime.controls("session.delete"),
         [json!({"session_id": "x"})]
     );
-    assert_eq!(ids(&last_list(&events)), ["y"], "不等下一份菜单就划掉");
+    // 列表跟着运行时的工作区目录走：运行时删完推来新目录，列表才划掉。
+    let mut changed = repo_directory(&["y"]);
+    changed["revision"] = json!(4);
+    runtime.send(0, &directory_line(changed));
+    wait_list(&events, "目录推来后划掉", |list| ids(list) == ["y"]);
     assert!(cache.load_snapshot::<String>("ep-a", "x").is_none());
 }
 
 #[test]
 fn automation_commands_return_the_refreshed_catalog() {
-    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_menu(&[]));
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
     let automations = serde_json::to_value(sample_automations()).unwrap();
     runtime.result("automation.list", json!({"automations": automations}));
     runtime.result(

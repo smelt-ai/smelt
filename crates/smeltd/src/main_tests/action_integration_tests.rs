@@ -17,8 +17,7 @@ fn call_action(sessions: &Sessions, id: &str, kind: &str) -> serde_json::Value {
         ServerShared {
             sessions: Arc::clone(sessions),
             acp_sessions: new_test_acp_sessions(),
-            remote_sessions: new_test_remote_sessions(),
-            workspace_menu: new_test_workspace_menu(),
+            workspace_directory: new_test_workspace_directory(),
             automations: new_test_automation_store(),
             exe_mtime: 0,
             daemon_fingerprint: None,
