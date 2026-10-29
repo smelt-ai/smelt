@@ -331,7 +331,8 @@ fn second_control_client_does_not_evict_the_first() {
             .lock()
             .entries_mut()
             .push(AcpEntry::User(marker.to_string()));
-        push_acp_snapshot_since(&slot.value, true, None);
+        // 加了条目要从新条目推起；`None` 是「条目没变」，会把它跳过。
+        push_acp_snapshot(&slot.value, true);
     };
 
     let (mut first, first_worker) = open(&acp_sessions);
