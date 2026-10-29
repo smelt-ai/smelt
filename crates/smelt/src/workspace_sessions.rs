@@ -1045,21 +1045,24 @@ impl Workspace {
                             };
                             // 每次重连前退避（250ms 起、翻倍到 8s 上限）并等运行时在线：短故障
                             // （升级 exec 一两秒）很快重连，运行时不在线就不发；预算在 AcpView
-                            // 内（6 次）防风暴。Connecting 时不重试也不花预算，等相位变了再看。
-                            let mut retries = 0u32;
+                            // 内（6 次）防风暴，退避档位也取它的已用次数——连上就被断时每次
+                            // 都会新起一条循环，档位记在循环里会永远停在第一档。Connecting 时
+                            // 不重试也不花预算，等相位变了再看。
                             loop {
-                                let dead = view
+                                let dead_failures = view
                                     .update_in(cx, |view, _window, _cx| {
                                         matches!(
                                             view.phase(),
                                             smelt_client::daemon_state::DaemonPhase::Dead
                                         )
+                                        .then(|| view.auto_reconnect_failures())
                                     })
-                                    .unwrap_or(false);
-                                if dead
+                                    .ok()
+                                    .flatten();
+                                if let Some(failures) = dead_failures
                                     && !crate::runtime_events::wait_online(
                                         &runtime_key,
-                                        retries.saturating_add(1),
+                                        failures.saturating_add(1),
                                         cx,
                                     )
                                     .await
@@ -1101,9 +1104,7 @@ impl Workspace {
                                         }
                                         break;
                                     }
-                                    Ok(AcpReconnectStep::Retrying) => {
-                                        retries = retries.saturating_add(1);
-                                    }
+                                    Ok(AcpReconnectStep::Retrying) => {}
                                     Ok(AcpReconnectStep::Waiting) => {
                                         if changed_rx.recv().await.is_err() {
                                             break;

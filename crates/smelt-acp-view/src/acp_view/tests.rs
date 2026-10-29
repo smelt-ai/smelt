@@ -2,8 +2,9 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
-    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction, ViewHistoryIdentity,
+    AUTO_RECONNECT_ATTEMPTS, CachedDiff, ComposerMenuSection, LoadedSkillsRefresh,
+    LoadedSkillsSnapshot, OwnerIdCache, ProcessGroupInfo, RECONNECT_STABLE_AFTER,
+    RESTORED_ENTRY_HEIGHT_HINT_PX, ReconnectBudget, TurnOutcomeAction, ViewHistoryIdentity,
     append_prompt_text, apply_pending_config_selection, background_task_elapsed,
     background_task_one_line, background_task_output_lines, background_task_summary,
     build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
@@ -50,6 +51,7 @@ use smelt_model::acp_session::{
 use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
+use std::time::{Duration, Instant};
 
 #[test]
 fn cleanshot_external_png_is_treated_as_an_image_attachment() {
@@ -887,6 +889,50 @@ fn history_pagination_does_not_require_a_live_control_connection() {
     assert!(can_load_older_history(false, 900));
     assert!(!can_load_older_history(true, 900));
     assert!(!can_load_older_history(false, 0));
+}
+
+#[test]
+fn reconnect_budget_runs_out_when_every_connection_drops_right_after_its_first_snapshot() {
+    // 两台桌面在旧 smeltd 上互踢：每次都拿到 Idle 快照，紧接着又被断开。
+    let mut budget = ReconnectBudget::new();
+    let mut now = Instant::now();
+    let mut attempts = 0;
+    while budget.take() {
+        attempts += 1;
+        assert!(attempts <= AUTO_RECONNECT_ATTEMPTS, "重连停不下来");
+        assert_eq!(budget.failures(), attempts);
+        now += Duration::from_secs(5);
+        budget.connected(now);
+        now += Duration::from_millis(10);
+        budget.disconnected(now);
+    }
+    assert_eq!(attempts, AUTO_RECONNECT_ATTEMPTS);
+}
+
+#[test]
+fn reconnect_budget_refills_after_a_connection_stays_up() {
+    let mut budget = ReconnectBudget::new();
+    let start = Instant::now();
+    assert!(budget.take());
+    assert!(budget.take());
+    budget.connected(start);
+    budget.disconnected(start + RECONNECT_STABLE_AFTER);
+    assert_eq!(budget.failures(), 0);
+}
+
+#[test]
+fn reconnect_budget_keeps_counting_across_short_lived_connections() {
+    let mut budget = ReconnectBudget::new();
+    let start = Instant::now();
+    assert!(budget.take());
+    budget.connected(start);
+    budget.disconnected(start + RECONNECT_STABLE_AFTER - Duration::from_millis(1));
+    // 退避按失败次数翻倍：短命连接之后不能回到第一档。
+    assert_eq!(budget.failures(), 1);
+    // 再次连上时从这一次算起，上一次留下的起点不能顶替。
+    budget.connected(start + RECONNECT_STABLE_AFTER * 2);
+    budget.disconnected(start + RECONNECT_STABLE_AFTER * 2 + Duration::from_millis(1));
+    assert_eq!(budget.failures(), 1);
 }
 
 #[test]
