@@ -37,13 +37,14 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，`SCHEMA_VERSION = 6`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。
+只属于这台桌面，`SCHEMA_VERSION = 7`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。
 
 | 表 | 内容 |
 | --- | --- |
 | `appearance` | 主题、界面字号、终端字体、背景、透明度、玻璃 |
 | `update_settings` / `update_state` / `staged_update` / `installer_attempt` | 这台 App 的更新 |
 | `notify_prefs` | 通知开关 |
+| `key_binding` | 用户改过的快捷键：动作名 → 按键，按键为空是用户清掉了。没有行的动作用出厂键位 |
 | `workspace_ui` | 当前路由、侧栏宽度和开合 |
 | `collapsed_project` / `pinned_project` / `collapsed_agent` | 按 `runtime_id` 记住折叠和置顶 |
 | `sidebar_project_order` / `sidebar_conversation_order` | 按 `runtime_id` 记住侧栏里项目、对话从上到下的顺序。每台设备各记各的，运行时目录里只有新建的先后 |

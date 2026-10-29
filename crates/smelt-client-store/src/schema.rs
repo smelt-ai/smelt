@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+pub(crate) const SCHEMA_VERSION: u32 = 7;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -143,6 +143,10 @@ CREATE TABLE sidebar_conversation_order (
   position INTEGER NOT NULL,
   PRIMARY KEY (runtime_id, conversation_id)
 ) WITHOUT ROWID;
+CREATE TABLE key_binding (
+  action_id TEXT PRIMARY KEY,
+  keystroke TEXT
+) WITHOUT ROWID;
 ";
 
 /// v1 → v2：折叠、置顶的项目加上所在运行时（v1 时只有本机运行时，空串）；会话的界面
@@ -257,6 +261,14 @@ CREATE TABLE sidebar_conversation_order (
 ) WITHOUT ROWID;
 ";
 
+/// v6 → v7：用户改过的快捷键。只存改过的那几条，没有行就是出厂键位。
+const MIGRATE_V6_TO_V7: &str = "
+CREATE TABLE key_binding (
+  action_id TEXT PRIMARY KEY,
+  keystroke TEXT
+) WITHOUT ROWID;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -286,24 +298,29 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         }
         1 => transaction
             .execute_batch(&format!(
-                "{MIGRATE_V1_TO_V2}\n{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"
+                "{MIGRATE_V1_TO_V2}\n{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}\n{MIGRATE_V6_TO_V7}"
             ))
             .map_err(|error| error.to_string())?,
         2 => transaction
             .execute_batch(&format!(
-                "{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"
+                "{MIGRATE_V2_TO_V3}\n{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}\n{MIGRATE_V6_TO_V7}"
             ))
             .map_err(|error| error.to_string())?,
         3 => transaction
             .execute_batch(&format!(
-                "{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"
+                "{MIGRATE_V3_TO_V4}\n{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}\n{MIGRATE_V6_TO_V7}"
             ))
             .map_err(|error| error.to_string())?,
         4 => transaction
-            .execute_batch(&format!("{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}"))
+            .execute_batch(&format!(
+                "{MIGRATE_V4_TO_V5}\n{MIGRATE_V5_TO_V6}\n{MIGRATE_V6_TO_V7}"
+            ))
             .map_err(|error| error.to_string())?,
         5 => transaction
-            .execute_batch(MIGRATE_V5_TO_V6)
+            .execute_batch(&format!("{MIGRATE_V5_TO_V6}\n{MIGRATE_V6_TO_V7}"))
+            .map_err(|error| error.to_string())?,
+        6 => transaction
+            .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
