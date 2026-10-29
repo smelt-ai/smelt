@@ -24,8 +24,8 @@ use base64::Engine as _;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use smelt_core::kitty_graphics::{
     Command, Controls, GraphicsSplitter, Layout, MAX_COMMAND_BYTES, Piece, PixelFormat,
-    PlacementCursor, PlacementKey, Relay, anchors_in, direct_layout, encode_image_relay,
-    placement_bytes, png_dimensions, virtual_layout,
+    PlacementCursor, PlacementKey, Relay, SizeQuery, anchors_in, direct_layout,
+    encode_image_relay, placement_bytes, png_dimensions, virtual_layout,
 };
 
 /// 程序分块发的 base64 有的带填充有的不带，拼起来解码时两种都认。
@@ -51,6 +51,8 @@ pub(crate) struct FedOutput {
     pub(crate) plain: Vec<u8>,
     /// 写回 PTY 的应答。
     pub(crate) reply: Vec<u8>,
+    /// 程序问了几次格子像素（`CSI 16 t`）。格子尺寸可能还不知道，由泵按 `Ctl` 答或记下。
+    pub(crate) cell_size_queries: usize,
 }
 
 /// 推进守护网格。普通字节原样推进、原样转发；图形命令交给 `graphics`，它产生的网格字节也推进
@@ -86,17 +88,18 @@ pub(crate) fn feed_output<T: EventListener>(
             out.reply.extend_from_slice(&outcome.reply);
         }
         Piece::Reset => out.graphics.extend(graphics.reset()),
-        Piece::CellSizeQuery => write_cell_size_reply(cell, &mut out.reply),
+        Piece::SizeQuery(SizeQuery::Cell) => out.cell_size_queries += 1,
+        Piece::SizeQuery(SizeQuery::Screen) => {
+            let _ = write!(
+                out.reply,
+                "\x1b[9;{};{}t",
+                term.screen_lines(),
+                term.columns()
+            );
+        }
     });
 }
 
-/// 用排版图片的同一份格子尺寸回答 `CSI 16 t`：`CSI 6 ; 高 ; 宽 t`。桌面还没报过尺寸（0）时不答，
-/// 让程序用它自己的默认值，回 0 只会让它算错。
-fn write_cell_size_reply((width, height): (u32, u32), reply: &mut Vec<u8>) {
-    if width > 0 && height > 0 {
-        let _ = write!(reply, "\x1b[6;{height};{width}t");
-    }
-}
 
 /// 一条命令的结果。
 #[derive(Default)]
@@ -830,22 +833,23 @@ mod tests {
         assert!(!String::from_utf8_lossy(&out.plain).contains('\u{E0001}'));
     }
 
-    /// Pi 问格子多大（`CSI 16 t`），按排版图片的同一份尺寸答；查询本身照常转发给客户端。
+    /// Pi 问格子多大（`CSI 16 t`）：挑出来交给泵答；查询本身照常转发给客户端。
     #[test]
-    fn cell_size_query_is_answered_with_the_layout_cell() {
+    fn cell_size_query_is_handed_to_the_pump() {
         let mut h = Harness::new();
-        let out = h.feed(b"a\x1b[16tb");
-        assert_eq!(out.reply, b"\x1b[6;20;10t");
-        assert_eq!(out.graphics, b"a\x1b[16tb");
-        assert_eq!(out.plain, b"a\x1b[16tb");
+        let out = h.feed(b"a\x1b[16tb\x1b[16t");
+        assert_eq!(out.cell_size_queries, 2);
+        assert!(out.reply.is_empty());
+        assert_eq!(out.graphics, b"a\x1b[16tb\x1b[16t");
+        assert_eq!(out.plain, b"a\x1b[16tb\x1b[16t");
     }
 
+    /// `CSI 19 t` 同 Ghostty、VTE 报文字区的行列。
     #[test]
-    fn cell_size_query_is_left_unanswered_before_the_desktop_reports_a_size() {
-        let mut reply = Vec::new();
-        write_cell_size_reply((0, 0), &mut reply);
-        write_cell_size_reply((10, 0), &mut reply);
-        assert!(reply.is_empty());
+    fn screen_size_query_reports_the_text_area() {
+        let mut h = Harness::new();
+        let out = h.feed(b"\x1b[19t");
+        assert_eq!(out.reply, format!("\x1b[9;{ROWS};{COLS}t").as_bytes());
     }
 
     #[test]

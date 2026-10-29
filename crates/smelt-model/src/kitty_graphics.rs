@@ -13,8 +13,8 @@
 //!   [`placeholder_marks`] / [`resolve_placeholder`]。
 //!
 //! 程序按格子像素算图片占几行（Pi 发 `CSI 16 t` 问，没回答就按 9×18 算，图会被拉变形）。
-//! vte 不认这条查询，所以也由切分器挑出来（[`Piece::CellSizeQuery`]），smeltd 用排版图片的
-//! 同一份格子尺寸回答。
+//! vte 不认这条查询和 `CSI 19 t`，所以也由切分器挑出来（[`Piece::SizeQuery`]），smeltd 用
+//! 排版图片的同一份格子尺寸回答。
 
 use std::borrow::Cow;
 use std::io::Write as _;
@@ -28,8 +28,43 @@ use diacritics::ROWCOLUMN_DIACRITICS;
 
 const ESC: u8 = 0x1b;
 
-/// XTWINOPS 16：以像素报告单个字符格的大小，应答是 `CSI 6 ; 高 ; 宽 t`。
-const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
+/// vte 不认、由切分器挑出来的 XTWINOPS 查询的共同前缀。
+const SIZE_QUERY_PREFIX: &[u8] = b"\x1b[1";
+
+/// vte 不认的 XTWINOPS 尺寸查询。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SizeQuery {
+    /// `CSI 16 t`：一个字符格多少像素，应答 `CSI 6 ; 高 ; 宽 t`。
+    Cell,
+    /// `CSI 19 t`：屏幕多少行列。终端不知道物理屏幕，同 Ghostty、VTE 报文字区的行列，应答
+    /// `CSI 9 ; 行 ; 列 t`。
+    Screen,
+}
+
+impl SizeQuery {
+    fn from_digit(b: u8) -> Option<Self> {
+        match b {
+            b'6' => Some(Self::Cell),
+            b'9' => Some(Self::Screen),
+            _ => None,
+        }
+    }
+
+    /// 扣下的、还差最后的 `t` 的那段。
+    fn held(self) -> &'static [u8] {
+        match self {
+            Self::Cell => b"\x1b[16",
+            Self::Screen => b"\x1b[19",
+        }
+    }
+
+    fn sequence(self) -> &'static [u8] {
+        match self {
+            Self::Cell => b"\x1b[16t",
+            Self::Screen => b"\x1b[19t",
+        }
+    }
+}
 
 /// 一条图形命令（APC 正文）最多攒这么多字节，超了整条丢弃。程序按 4096 字节分块发；守护转发
 /// 给桌面端时一张图一条命令，所以上限按单张图来定。
@@ -44,19 +79,21 @@ pub enum Piece<'a> {
     Command(&'a [u8]),
     /// 刚交出的字节以 `ESC c`（RIS）结尾。kitty 在 RIS 时清掉所有图片。
     Reset,
-    /// 刚交出的字节以 `CSI 16 t` 结尾：程序问一个字符格多少像素。
-    CellSizeQuery,
+    /// 刚交出的字节以 `CSI 16 t` / `CSI 19 t` 结尾：程序问尺寸。
+    SizeQuery(SizeQuery),
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 enum SplitState {
     #[default]
     Ground,
-    /// 刚看到 ESC，先扣下：下一字节是 `_` 就可能是图形命令，是 `[` 就可能是格子尺寸查询。
+    /// 刚看到 ESC，先扣下：下一字节是 `_` 就可能是图形命令，是 `[` 就可能是尺寸查询。
     Esc,
-    /// 已经对上 [`CELL_SIZE_QUERY`] 的前这么多字节。扣下的就是它的这一段，对不上时原样交出，
+    /// 已经对上 [`SIZE_QUERY_PREFIX`] 的前这么多字节。扣下的就是它的这一段，对不上时原样交出，
     /// 不用另存。CSI 很多（颜色、光标），绝大多数在 `[` 后第一字节就对不上。
     Query(u8),
+    /// 对上了 `ESC [ 1 6` / `ESC [ 1 9`，还差 `t`。
+    SizeQuery(SizeQuery),
     /// 看到 `ESC _`，还差 `G`。
     ApcStart,
     Body,
@@ -93,16 +130,26 @@ impl GraphicsSplitter {
                 SplitState::Esc => self.after_esc(b, i, &mut start, &mut emit),
                 SplitState::Query(matched) => {
                     let matched = usize::from(matched);
-                    if b != CELL_SIZE_QUERY[matched] {
-                        emit(Piece::Bytes(&CELL_SIZE_QUERY[..matched]));
+                    if matched < SIZE_QUERY_PREFIX.len() && b == SIZE_QUERY_PREFIX[matched] {
+                        self.state = SplitState::Query(matched as u8 + 1);
+                    } else if let Some(query) = SizeQuery::from_digit(b)
+                        .filter(|_| matched == SIZE_QUERY_PREFIX.len())
+                    {
+                        self.state = SplitState::SizeQuery(query);
+                    } else {
+                        emit(Piece::Bytes(&SIZE_QUERY_PREFIX[..matched]));
                         self.ground_from(b, i, &mut start);
-                    } else if matched + 1 == CELL_SIZE_QUERY.len() {
-                        emit(Piece::Bytes(CELL_SIZE_QUERY));
-                        emit(Piece::CellSizeQuery);
+                    }
+                }
+                SplitState::SizeQuery(query) => {
+                    if b == b't' {
+                        emit(Piece::Bytes(query.sequence()));
+                        emit(Piece::SizeQuery(query));
                         self.state = SplitState::Ground;
                         start = i + 1;
                     } else {
-                        self.state = SplitState::Query(matched as u8 + 1);
+                        emit(Piece::Bytes(query.held()));
+                        self.ground_from(b, i, &mut start);
                     }
                 }
                 SplitState::ApcStart => {
@@ -952,7 +999,8 @@ mod tests {
                     Piece::Bytes(bytes) => format!("B:{}", String::from_utf8_lossy(bytes)),
                     Piece::Command(body) => format!("G:{}", String::from_utf8_lossy(body)),
                     Piece::Reset => "R".to_string(),
-                    Piece::CellSizeQuery => "Q".to_string(),
+                    Piece::SizeQuery(SizeQuery::Cell) => "Q16".to_string(),
+                    Piece::SizeQuery(SizeQuery::Screen) => "Q19".to_string(),
                 });
             });
         }
@@ -1004,17 +1052,19 @@ mod tests {
     }
 
     #[test]
-    fn cell_size_query_is_picked_out_wherever_reads_break() {
-        let stream: &[u8] = b"a\x1b[16tb\x1b[1mc\x1b[16;1td\x1b[14te\x1b[1\x1b[16tf";
+    fn size_queries_are_picked_out_wherever_reads_break() {
+        let stream: &[u8] =
+            b"a\x1b[16tb\x1b[1mc\x1b[16;1td\x1b[14te\x1b[1\x1b[19tf\x1b[19;2tg\x1b[16\x1b[16t";
         let whole = merged(split(&[stream]));
         assert_eq!(
             whole,
             [
                 "B:a\x1b[16t",
-                "Q",
-                "B:b\x1b[1mc\x1b[16;1td\x1b[14te\x1b[1\x1b[16t",
-                "Q",
-                "B:f",
+                "Q16",
+                "B:b\x1b[1mc\x1b[16;1td\x1b[14te\x1b[1\x1b[19t",
+                "Q19",
+                "B:f\x1b[19;2tg\x1b[16\x1b[16t",
+                "Q16",
             ]
         );
         let bytes: Vec<&[u8]> = stream.chunks(1).collect();

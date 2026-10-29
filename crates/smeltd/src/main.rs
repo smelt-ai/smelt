@@ -198,7 +198,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::vte::ansi::{NamedColor, Processor, Rgb};
@@ -510,12 +510,79 @@ struct Ctl {
     /// 会让 PTY 在「桌面尺寸 ↔ 手机尺寸」之间来回 resize，主屏 CLI 每次都把整段
     /// 对话重排重印一遍。见 `pause_remote_viewport`。
     remote_grace: u64,
+    /// 格子尺寸还不知道时程序问的像素尺寸。会话按 24×80、没有像素先起，桌面排版完才报
+    /// 格子尺寸；Pi 这类一启动就问的赶在这之前。拿到尺寸再答：不答它就按自己的默认值算，
+    /// 图会变形；答 0 更糟。
+    waiting_for_cell: Vec<PixelQuery>,
+}
+
+/// 要格子像素才答得了的查询。
+enum PixelQuery {
+    /// `CSI 16 t`：一个字符格多少像素，答 `CSI 6 ; 高 ; 宽 t`。
+    Cell,
+    /// `CSI 14 t`：文字区多少像素，用 alacritty 给的格式化函数答。
+    TextArea(Arc<dyn Fn(WindowSize) -> String + Send + Sync>),
+}
+
+impl PixelQuery {
+    fn answer(&self, window: WindowSize) -> String {
+        match self {
+            Self::Cell => format!(
+                "\x1b[6;{};{}t",
+                window.cell_height, window.cell_width
+            ),
+            Self::TextArea(format) => format(window),
+        }
+    }
 }
 
 impl Ctl {
     /// 尺寸是不是还握在远程手里：正在看的远程视口，或刚断开、还在宽限期内的那一个。
     fn remote_geometry_pinned(&self) -> bool {
         self.remote_viewports > 0 || self.remote_grace != 0
+    }
+
+    fn window_size(&self) -> WindowSize {
+        WindowSize {
+            num_lines: self.rows,
+            num_cols: self.cols,
+            cell_width: self.cell_w,
+            cell_height: self.cell_h,
+        }
+    }
+
+    fn knows_cell(&self) -> bool {
+        self.cell_w > 0 && self.cell_h > 0
+    }
+
+    /// 格子尺寸知道就给出应答，不知道先记下，等 [`Self::take_cell_answers`]。
+    fn answer_or_wait(&mut self, query: PixelQuery) -> Option<String> {
+        if self.knows_cell() {
+            return Some(query.answer(self.window_size()));
+        }
+        self.waiting_for_cell.push(query);
+        None
+    }
+
+    /// 格子尺寸刚知道：取出先前等着的应答。和记下时在同一把锁里，不会漏。
+    fn take_cell_answers(&mut self) -> Vec<String> {
+        if !self.knows_cell() || self.waiting_for_cell.is_empty() {
+            return Vec::new();
+        }
+        let window = self.window_size();
+        std::mem::take(&mut self.waiting_for_cell)
+            .iter()
+            .map(|query| query.answer(window))
+            .collect()
+    }
+}
+
+/// 写回程序问像素尺寸的应答。
+fn write_pixel_answers(sess: &Session, answers: Vec<String>) {
+    for answer in answers {
+        if write_session_input(sess, answer.as_bytes()).is_err() {
+            break;
+        }
     }
 }
 
@@ -1171,45 +1238,66 @@ fn handle_event_publish<C: ClientSocket>(
 }
 
 /// 常驻 Term 的事件监听。OSC 标题留在终端网格自己的标题栏，这里直接丢掉。
-/// Bell 只刷新活动时间并广播。颜色查询在网格锁内入队，泵释放锁后再写回。
+/// Bell 只刷新活动时间并广播。程序的查询（颜色、设备属性、光标位置、尺寸）在网格锁内入队，
+/// 泵释放锁后再写回。
 #[derive(Clone)]
 struct StateListener {
     state: Arc<Mutex<SessionState>>,
     event_hub: EventHubHandle,
-    /// `ColorRequest` 在 `Term` 网格锁内回调。这里只入队，等 PTY 泵释放网格锁后
-    /// 再经 `Ctl.master` 写入，避免与 resize 的 ctl -> term 锁序相反而死锁。
-    color_replies: PendingColorReplies,
+    /// 查询在 `Term` 网格锁内回调。这里只入队，等 PTY 泵释放网格锁后再经 `Ctl.master`
+    /// 写入，避免与 resize 的 ctl -> term 锁序相反而死锁。
+    replies: PendingTermReplies,
 }
 
-/// 一条待回应的颜色查询：查哪个颜色槽，和把颜色格式化成回应的函数。颜色到写回时
-/// 才定：程序用 OSC 4 / 10 / 11 改过的值要优先，而它记在 `Term` 里，入队时拿不到锁。
-type PendingColorReply = (usize, Arc<dyn Fn(Rgb) -> String + Send + Sync>);
-type PendingColorReplies = Arc<Mutex<VecDeque<PendingColorReply>>>;
+/// 常驻 Term 对程序查询的一条应答。守护的网格是这个会话唯一的权威画面，查询都由它答（同
+/// Ghostty 由终端自己答）：桌面开几个都只答一次，没有桌面连着也有人答。
+enum TermReply {
+    /// 现成的应答：设备属性、光标位置、行列数、键盘模式这类。
+    Text(String),
+    /// 颜色查询：查哪个颜色槽，和把颜色格式化成应答的函数。颜色到写回时才定：程序用
+    /// OSC 4 / 10 / 11 改过的值要优先，而它记在 `Term` 里，入队时拿不到锁。
+    Color(usize, Arc<dyn Fn(Rgb) -> String + Send + Sync>),
+    /// 要格子像素的查询（`CSI 14 t`、`CSI 16 t`）：格子尺寸在 `Ctl` 里，写回时再读，还不知道
+    /// 就等它。
+    Pixels(PixelQuery),
+}
+
+type PendingTermReplies = Arc<Mutex<VecDeque<TermReply>>>;
 
 impl StateListener {
     #[cfg(test)]
     fn new(state: Arc<Mutex<SessionState>>, event_hub: EventHubHandle) -> Self {
-        Self::with_color_replies(state, event_hub, Arc::new(Mutex::new(VecDeque::new())))
+        Self::with_replies(state, event_hub, Arc::new(Mutex::new(VecDeque::new())))
     }
 
-    fn with_color_replies(
+    fn with_replies(
         state: Arc<Mutex<SessionState>>,
         event_hub: EventHubHandle,
-        color_replies: PendingColorReplies,
+        replies: PendingTermReplies,
     ) -> Self {
         Self {
             state,
             event_hub,
-            color_replies,
+            replies,
         }
     }
 }
 
 impl EventListener for StateListener {
     fn send_event(&self, event: Event) {
-        if let Event::ColorRequest(index, format) = &event {
-            if let Ok(mut replies) = self.color_replies.lock() {
-                replies.push_back((*index, Arc::clone(format)));
+        let reply = match &event {
+            Event::PtyWrite(text) => Some(TermReply::Text(text.clone())),
+            Event::ColorRequest(index, format) => {
+                Some(TermReply::Color(*index, Arc::clone(format)))
+            }
+            Event::TextAreaSizeRequest(format) => Some(TermReply::Pixels(PixelQuery::TextArea(
+                Arc::clone(format),
+            ))),
+            _ => None,
+        };
+        if let Some(reply) = reply {
+            if let Ok(mut replies) = self.replies.lock() {
+                replies.push_back(reply);
             }
             return;
         }
@@ -1315,7 +1403,7 @@ fn resize_session_from(
     let cell_h = cell_h.min(MAX_SESSION_CELL_PX);
     // 先拿输出顺序门闩。PTY 泵、attach、watch 和 resize 必须共享同一条输出序列，
     // 但门闩与 `out` 列表锁分离，慢 socket 写不会阻塞其它会话管理操作。
-    let _output_gate = sess.output_gate.lock().unwrap();
+    let output_gate = sess.output_gate.lock().unwrap();
     let refused_marker = {
         let mut ctl = sess.ctl.lock().unwrap();
         if origin == ResizeOrigin::Desktop && ctl.remote_viewports > 0 {
@@ -1346,7 +1434,7 @@ fn resize_session_from(
         dispatch_session_outputs_under_gate(sess, &marker, "<resize-refused>", true, false);
         return false;
     }
-    let (resize_token, jolt, xpixel, ypixel, marker) = {
+    let (resize_token, jolt, xpixel, ypixel, marker, pixel_answers) = {
         let mut ctl = sess.ctl.lock().unwrap();
         if cell_w > 0 {
             ctl.cell_w = cell_w;
@@ -1363,6 +1451,7 @@ fn resize_session_from(
         let jolt = std::mem::take(&mut ctl.jolt);
         ctl.cols = cols;
         ctl.rows = rows;
+        let pixel_answers = ctl.take_cell_answers();
         let remote_controlled = ctl.remote_geometry_pinned();
 
         // Serialize the invisible geometry marker before SIGWINCH can produce
@@ -1391,7 +1480,7 @@ fn resize_session_from(
         #[cfg(windows)]
         let resize_token = ();
         let _ = (xpixel, ypixel);
-        (resize_token, jolt, xpixel, ypixel, marker)
+        (resize_token, jolt, xpixel, ypixel, marker, pixel_answers)
     };
     if let Some(marker) = marker {
         dispatch_session_outputs_under_gate(sess, &marker, "<resize>", true, false);
@@ -1419,6 +1508,9 @@ fn resize_session_from(
         }
         let _ = ctl.master.resize(size(rows));
     }
+    // 写 PTY 可能等程序读，放开输出门闩再写。
+    drop(output_gate);
+    write_pixel_answers(sess, pixel_answers);
     true
 }
 
@@ -1933,8 +2025,8 @@ struct Session {
     out: Mutex<Out>,
     /// 输出顺序锁。与 `out` 分离，禁止慢 socket 写操作阻塞连接集合和会话管理。
     output_gate: Mutex<()>,
-    /// 守护 Term 收到的 OSC 颜色查询应答；由 PTY 泵在网格锁释放后串行写回 child。
-    color_replies: PendingColorReplies,
+    /// 守护 Term 收到的查询要回的应答；由 PTY 泵在网格锁释放后串行写回 child。
+    replies: PendingTermReplies,
     /// 常驻网格：PTY 输出持续 advance；attach 时序列化成 ANSI 快照。挂的是
     /// `StateListener`（不再是 `VoidListener`）——守护自己也要看得见 Title/Bell。
     term: Mutex<Term<StateListener>>,
@@ -3087,7 +3179,7 @@ fn spawn_session(
         agent_token,
         ..Default::default()
     }));
-    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
+    let replies = Arc::new(Mutex::new(VecDeque::new()));
     let sess = Session {
         instance,
         geometry_token: uuid::Uuid::new_v4().simple().to_string(),
@@ -3103,6 +3195,7 @@ fn spawn_session(
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
+            waiting_for_cell: Vec::new(),
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {
@@ -3110,15 +3203,11 @@ fn spawn_session(
             watchers: Vec::new(),
         }),
         output_gate: Mutex::new(()),
-        color_replies: Arc::clone(&color_replies),
+        replies: Arc::clone(&replies),
         term: Mutex::new(new_daemon_term(
             rows,
             cols,
-            StateListener::with_color_replies(
-                Arc::clone(&state),
-                Arc::clone(event_hub),
-                color_replies,
-            ),
+            StateListener::with_replies(Arc::clone(&state), Arc::clone(event_hub), replies),
         )),
         graphics: Mutex::default(),
         state,
@@ -3126,9 +3215,9 @@ fn spawn_session(
     Ok((sess, Box::new(pty_reader)))
 }
 
-fn write_terminal_color_replies(sess: &Session) {
+fn write_terminal_replies(sess: &Session) {
     let pending = {
-        let Ok(mut pending) = sess.color_replies.lock() else {
+        let Ok(mut pending) = sess.replies.lock() else {
             return;
         };
         std::mem::take(&mut *pending)
@@ -3139,20 +3228,32 @@ fn write_terminal_color_replies(sess: &Session) {
     // 只为读改过的颜色短暂拿一下网格锁，写回 PTY 前放开。
     let overrides = sess.term.lock().ok().map(|term| *term.colors());
 
-    for (index, format) in pending {
-        let color = overrides
-            .and_then(|colors| colors[index])
-            .unwrap_or_else(|| resolve_terminal_color(index));
-        if write_session_input(sess, format(color).as_bytes()).is_err() {
+    for reply in pending {
+        let text = match reply {
+            TermReply::Text(text) => text,
+            TermReply::Color(index, format) => format(
+                overrides
+                    .and_then(|colors| colors[index])
+                    .unwrap_or_else(|| resolve_terminal_color(index)),
+            ),
+            TermReply::Pixels(query) => {
+                let answer = sess.ctl.lock().unwrap().answer_or_wait(query);
+                let Some(answer) = answer else {
+                    continue;
+                };
+                answer
+            }
+        };
+        if write_session_input(sess, text.as_bytes()).is_err() {
             break;
         }
     }
 }
 
-/// 常驻 Term 在解析 OSC 颜色查询时只能入队（它当时持有网格锁）。这里在网格锁释放后
-/// 统一写回 child，沿用 `Ctl` 的串行写入路径，避免与 resize 反向抢锁。
-fn flush_terminal_color_replies(sess: &Session) {
-    write_terminal_color_replies(sess);
+/// 常驻 Term 在解析查询时只能入队（它当时持有网格锁）。这里在网格锁释放后统一写回
+/// child，沿用 `Ctl` 的串行写入路径，避免与 resize 反向抢锁。
+fn flush_terminal_replies(sess: &Session) {
+    write_terminal_replies(sess);
 }
 
 /// 把一批输出里扫到的 OSC 通知发给订阅的客户端。会话已有结构化 hook 事件时不发：
@@ -3215,7 +3316,7 @@ fn start_pty_pump(
         let mut status_notices = ProgramStatusNotices::default();
         let mut progress = ProgressTracker::default();
         // resume 的旧 keyframe 理论上不含查询序列；即便有，也要在首次 read 前答复。
-        flush_terminal_color_replies(&sess);
+        flush_terminal_replies(&sess);
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
@@ -3243,9 +3344,9 @@ fn start_pty_pump(
                                 notifications.extend(status_notices.observe(status));
                             }
                             OscEvent::Progress(report) => progress.observe(report, Instant::now()),
-                            // 在这批输出交给客户端之前就回应：Pi 把探测和 DA 查询一起发，
-                            // 拿 DA 的回应当探测结束；DA 由客户端的终端回应，绕一圈回来
-                            // 一定在这之后。
+                            // 在这批输出推进网格之前就回应：Pi 把探测和 DA 查询一起发，
+                            // 拿 DA 的回应当探测结束；DA 由守护网格在这批输出处理完后才
+                            // 写回，一定在这之后。
                             OscEvent::ProgramStatusQuery(terminator) => {
                                 let _ =
                                     write_session_input(&sess, &program_status_reply(terminator));
@@ -3297,9 +3398,15 @@ fn start_pty_pump(
                     if !fed.reply.is_empty() {
                         let _ = write_session_input(&sess, &fed.reply);
                     }
+                    for _ in 0..fed.cell_size_queries {
+                        let answer = sess.ctl.lock().unwrap().answer_or_wait(PixelQuery::Cell);
+                        if let Some(answer) = answer {
+                            let _ = write_session_input(&sess, answer.as_bytes());
+                        }
+                    }
                     // 颜色查询应答可能等待 PTY 输入队列变得可写；必须在释放网格锁后
                     // 再做，避免把 resize 的 ctl -> term 路径拖住。
-                    flush_terminal_color_replies(&sess);
+                    flush_terminal_replies(&sess);
                     publish_terminal_notifications(&sess.state, &id, &event_hub, notifications);
                     publish_terminal_progress(&mut progress, &id, sess.instance, &event_hub);
                 }

@@ -102,11 +102,11 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
         ..Default::default()
     }));
     let subscribers = new_event_hub();
-    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
-    let listener = StateListener::with_color_replies(
+    let replies = Arc::new(Mutex::new(VecDeque::new()));
+    let listener = StateListener::with_replies(
         Arc::clone(&state),
         subscribers,
-        Arc::clone(&color_replies),
+        Arc::clone(&replies),
     );
     let sess = Arc::new(Session {
         instance: next_session_instance(),
@@ -121,6 +121,7 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
+            waiting_for_cell: Vec::new(),
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {
@@ -128,7 +129,7 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
             watchers: Vec::new(),
         }),
         output_gate: Mutex::new(()),
-        color_replies,
+        replies,
         term: Mutex::new(new_daemon_term(rows, cols, listener)),
         graphics: Mutex::default(),
         state,

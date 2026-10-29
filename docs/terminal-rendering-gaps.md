@@ -55,7 +55,7 @@
 | PtyWrite / ColorRequest | EventProxy 写回守护帧 | `EventListener` |
 | damage 节流 | `take_damage` 滤掉「仅静止光标格」 | `take_damage` + 定时刷新 |
 | IME | preedit、行内拼音、`bounds_for_range` | `EntityInputHandler` |
-| 程序改色（OSC 4 / 10 / 11 / 12 及 104 / 110–112 复位） | 渲染和守护的颜色查询应答都优先用 `Term` 记下的覆盖色；关键帧先复位再写回覆盖色（alacritty 的 RIS 不复位颜色），重连、热交接不丢 | `terminal.rs` `resolve`，`terminal_snapshot.rs` `append_color_overrides`，`smeltd` `write_terminal_color_replies` |
+| 程序改色（OSC 4 / 10 / 11 / 12 及 104 / 110–112 复位） | 渲染和守护的颜色查询应答都优先用 `Term` 记下的覆盖色；关键帧先复位再写回覆盖色（alacritty 的 RIS 不复位颜色），重连、热交接不丢 | `terminal.rs` `resolve`，`terminal_snapshot.rs` `append_color_overrides`，`smeltd` `write_terminal_replies` |
 | OSC 9;4 进度 | smeltd 扫，变了就推 `terminal.progress`，进度条还在时每 5 秒重发、15 秒没新报告就清（同 Ghostty）；侧栏会话行底部 2px 细条，不确定进度画淡色满条、不做动画 | `smeltd/src/terminal_progress.rs`，`session_list/row.rs` `session_progress_bar` |
 | kitty 图形（桌面） | smeltd 是唯一解析程序图形命令的地方，照 Ghostty 语义处理（传输 d/f/t、PNG/RGB/RGBA、zlib、分块；放置后移光标；删除；应答），转成带 `k=1` 的转发命令发给 `open` 时声明 `graphics=kitty` 的客户端。直接放置只在左上角那格挂零宽锚点标记、图片作浮层（Pi 在 Ghostty 下逐行 `CUP+EL` 重绘，每格写占位符会被擦掉）；Unicode 占位符按格画图块。手机旁观和没声明的客户端收去掉锚点的版本，网格布局一致。关键帧补发画面里用得到的图。程序问格子像素（`CSI 16 t`，Pi 没答复就按 9×18 算行数，图会变形）vte 不认，也由切分器挑出来，smeltd 用排版图片的同一份格子尺寸回答 | `smelt-model/src/kitty_graphics.rs`，`smeltd/src/terminal_graphics.rs`，`smelt/src/terminal_images.rs`，`terminal.rs` `image_paints`，`terminal_view.rs` `paint_images` |
 
@@ -78,7 +78,7 @@
 | **MOUSE_MOTION 悬停** | 无键时 button 35（仅 `MOUSE_MOTION` 全开） |
 | **resize 像素** | type 1 帧 16 字节：cols/rows/cell_w/cell_h；smeltd 写 `ws_xpixel=cols*cw` |
 | **OSC 52** | 只写：`ClipboardStore` → `pbcopy`（macOS）。读取在 `term_config` 里显式设 `Osc52::OnlyCopy` 关掉，有意不做：任何程序（含远程运行时上的）都能借它静默读走本机剪贴板 |
-| **TextAreaSizeRequest** | EventProxy 用共享 `TermMetrics` 应答 |
+| **程序查询的应答** | 守护的网格是唯一权威画面，查询都由它答（同 Ghostty 由终端自己答）：设备属性、光标位置、键盘和模式状态、`CSI 14/18 t` 走 alacritty 事件入队、泵释放网格锁后写回；vte 不认的 `CSI 16/19 t` 由切分器挑出。会话按 24×80、没有像素先起，桌面排版完才报格子尺寸；要格子像素的 `CSI 14/16 t` 赶在这之前就先记下，报来时按先后补答（Pi 一启动就问）。桌面开几个都只答一次，没桌面连着也有人答。握手声明 `daemon_answers_queries` 后桌面的 EventProxy 不再答；旧守护只声明颜色或什么都没声明时，没声明的那类仍由桌面兜底。尺寸变化主动上报（mode 2048）未做 |
 | **take_damage 光标** | 记上一帧光标；静止滤「仅光标格」，移动不算吞 |
 | **终端内搜索** | Cmd+F；字面量 RegexSearch；全部命中暗高亮 + 当前亮高亮；`3/12` 计数；Enter/Shift+Enter |
 | **滚动条** | 有 scrollback 时右侧自定义条；点轨道/拖 thumb 设 `display_offset` |

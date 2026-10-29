@@ -483,7 +483,10 @@ pub(crate) fn handle_open<C: ClientSocket>(
                 "rows": cur_rows,
                 "replay_len": replay_len,
                 "geometry_token": sess.geometry_token.as_str(),
+                // 旧桌面只认这一项：靠它不重复答颜色查询。
                 "daemon_handles_color_requests": true,
+                // 程序的查询（设备属性、光标位置、尺寸、颜色）全由守护答，桌面不再答。
+                "daemon_answers_queries": true,
             })
         )
         .into_bytes();

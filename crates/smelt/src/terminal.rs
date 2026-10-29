@@ -38,8 +38,28 @@ type HandshakeResult = (
     TermSize,
     usize,
     Option<String>,
-    bool,
+    DaemonAnswers,
 );
+
+/// 守护替桌面答了哪些程序查询，打开会话时守护声明。没声明的由桌面的终端自己答：远程机器
+/// 上的守护可能是旧版。新版守护全答，桌面开几个都只答一次。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DaemonAnswers {
+    /// 颜色查询（OSC 4 / 10 / 11 …）。
+    colors: bool,
+    /// 其余查询：设备属性、光标位置、键盘和模式状态、尺寸。
+    queries: bool,
+}
+
+impl DaemonAnswers {
+    fn from_handshake(v: &serde_json::Value) -> Self {
+        let queries = v["daemon_answers_queries"].as_bool().unwrap_or(false);
+        Self {
+            colors: queries || v["daemon_handles_color_requests"].as_bool().unwrap_or(false),
+            queries,
+        }
+    }
+}
 
 /// 深浅色模式：进程内只有一套主题（设置页全局切换），用一个原子量足够，不必给
 /// 每个 Terminal/EventProxy 各传一份——见 `set_dark_mode`（main.rs 在
@@ -663,8 +683,8 @@ impl TerminalWriter {
 
 /// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态。
 /// OSC 0/2 标题直接忽略：它不是会话名，这里也不保存。
-/// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
-/// 旧守护没有声明该能力时才在客户端兜底。
+/// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板。程序的查询由新守护
+/// 答，旧守护没声明的那类才由客户端兜底（见 [`DaemonAnswers`]）。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
 struct EventProxy {
@@ -674,9 +694,8 @@ struct EventProxy {
     writer: TerminalWriter,
     /// 当前网格/单元格尺寸（TextAreaSizeRequest 应答用）。
     metrics: Arc<Mutex<TermMetrics>>,
-    /// 新版 smeltd 在收到 PTY 输出时就应答 OSC 颜色查询，覆盖首个 GUI attachment
-    /// 还未挂上的窗口；能力位缺失说明是旧守护，继续由客户端兼容处理。
-    daemon_handles_color_requests: bool,
+    /// 守护替桌面答了哪些查询。
+    daemon_answers: DaemonAnswers,
 }
 
 impl EventProxy {
@@ -717,16 +736,17 @@ impl EventListener for EventProxy {
             }
             // 光标位置 / 设备属性等查询-应答协议：不回应会让依赖精确光标位置渲染
             // 的 TUI（如 Claude Code 的输入框 ghost-text 补全）拿不到定位信息。
-            Event::PtyWrite(text) => self.write_pty(text.as_bytes()),
-            Event::ColorRequest(index, format) if !self.daemon_handles_color_requests => {
+            Event::PtyWrite(text) if !self.daemon_answers.queries => {
+                self.write_pty(text.as_bytes())
+            }
+            Event::ColorRequest(index, format) if !self.daemon_answers.colors => {
                 self.write_pty(format(Self::resolve_color(index)).as_bytes())
             }
-            Event::ColorRequest(_, _) => {}
             // OSC 52：应用把文本写到系统剪贴板。远程会话、嵌套 tmux、部分 CLI 复制都靠
             // 它。走系统工具，不必绕到 UI 线程——EventProxy 跑在 PTY 读线程上。读剪贴板
             // 在 `term_config` 里关掉了，alacritty 不会发 ClipboardLoad。
             Event::ClipboardStore(_ty, data) => os_clipboard_write(&data),
-            Event::TextAreaSizeRequest(format) => {
+            Event::TextAreaSizeRequest(format) if !self.daemon_answers.queries => {
                 let m = self.metrics.lock().ok().map(|g| *g).unwrap_or(TermMetrics {
                     rows: 24,
                     cols: 80,
@@ -1216,7 +1236,7 @@ impl Terminal {
         let handshake = |writer: RuntimeStream| {
             Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing)
         };
-        let (buffered, size, replay_len, geometry_token, daemon_handles_color_requests) =
+        let (buffered, size, replay_len, geometry_token, daemon_answers) =
             match handshake(crate::runtimes::connect_terminal(runtime)?)? {
                 HandshakeReply::Opened(opened) => opened,
                 stopping_or_closed => {
@@ -1251,7 +1271,7 @@ impl Terminal {
                 bell_notify: bell_notify.clone(),
                 writer: writer.clone(),
                 metrics: metrics.clone(),
-                daemon_handles_color_requests,
+                daemon_answers,
             },
         );
         let term = Arc::new(Mutex::new(term));
@@ -1459,9 +1479,7 @@ impl Terminal {
         };
         let replay_len = v["replay_len"].as_u64().unwrap_or(0) as usize;
         let geometry_token = v["geometry_token"].as_str().map(str::to_owned);
-        let daemon_handles_color_requests = v["daemon_handles_color_requests"]
-            .as_bool()
-            .unwrap_or(false);
+        let daemon_answers = DaemonAnswers::from_handshake(&v);
         // 握手完必须清掉超时：这条 stream 接下来交给读线程长期读 PTY 输出（见
         // spawn 里 `let mut reader = buffered`），空闲终端半天没输出是常态，读循环
         // 对任何 Err 一律 break 当 EOF——超时留着就等于给每个安静的终端定时断线。
@@ -1471,7 +1489,7 @@ impl Terminal {
             size,
             replay_len,
             geometry_token,
-            daemon_handles_color_requests,
+            daemon_answers,
         )))
     }
 
@@ -2727,6 +2745,7 @@ mod handshake_timeout_tests {
                     "cols": 80,
                     "replay_len": 0,
                     "daemon_handles_color_requests": true,
+                    "daemon_answers_queries": true,
                 })
             )
             .unwrap();
@@ -2740,8 +2759,14 @@ mod handshake_timeout_tests {
         let Ok(HandshakeReply::Opened(opened)) = result else {
             panic!("能力位握手应成功");
         };
-        let (_buffered, _size, _replay, _geometry_token, daemon_handles_color_requests) = opened;
-        assert!(daemon_handles_color_requests);
+        let (_buffered, _size, _replay, _geometry_token, daemon_answers) = opened;
+        assert_eq!(
+            daemon_answers,
+            DaemonAnswers {
+                colors: true,
+                queries: true,
+            }
+        );
     }
 
     /// 守护停机时回的 daemon_stopping 要认成「等旧守护走了再连」，其它失败照旧报错；
@@ -2840,7 +2865,7 @@ mod handshake_timeout_tests {
         else {
             panic!("假守护正常回执，握手应成功");
         };
-        let (buffered, _size, _replay, _geometry_token, _daemon_handles_color_requests) = opened;
+        let (buffered, _size, _replay, _geometry_token, _daemon_answers) = opened;
 
         // 与 Terminal::spawn 同一条路径：后续写入进入后台单消费者队列。UI 线程只把
         // 4MB 输入请求投进去便返回；假守护不消费时，阻塞最多发生在 writer 线程。
@@ -2878,7 +2903,7 @@ mod event_proxy_answers_tests {
                 cell_w: 8,
                 cell_h: 16,
             })),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
         (proxy, probe)
     }
@@ -2944,22 +2969,44 @@ mod event_proxy_answers_tests {
         );
     }
 
+    /// 新版守护全答：设备属性、光标位置、尺寸、颜色都不该由客户端再写一份。
     #[test]
-    fn daemon_owned_color_query_is_not_answered_twice_by_client() {
+    fn daemon_owned_queries_are_not_answered_twice_by_client() {
         let (mut proxy, mut probe) = make_proxy();
-        proxy.daemon_handles_color_requests = true;
+        proxy.daemon_answers = DaemonAnswers {
+            colors: true,
+            queries: true,
+        };
         probe.set_nonblocking(true).unwrap();
         let size = TermSize { rows: 24, cols: 80 };
         let mut term = Term::new(Config::default(), &size, proxy);
         let mut parser: Processor = Processor::new();
 
-        parser.advance(&mut term, b"\x1b]11;?\x07");
+        parser.advance(&mut term, b"\x1b]11;?\x07\x1b[c\x1b[6n\x1b[14t\x1b[18t");
 
         let mut byte = [0u8; 1];
         let error = probe
             .read(&mut byte)
             .expect_err("新版守护已应答时客户端不该再写一份");
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    /// 只声明颜色的旧守护：设备属性仍要客户端答，颜色不再答。
+    #[test]
+    fn old_daemon_handshake_keeps_device_queries_on_the_client() {
+        assert_eq!(
+            DaemonAnswers::from_handshake(&serde_json::json!({
+                "daemon_handles_color_requests": true,
+            })),
+            DaemonAnswers {
+                colors: true,
+                queries: false,
+            }
+        );
+        assert_eq!(
+            DaemonAnswers::from_handshake(&serde_json::json!({})),
+            DaemonAnswers::default()
+        );
     }
 
     /// 用户在设置里自选了终端底色时，OSC 11 必须回**用户那个色**：TUI 就是靠这个
@@ -3076,7 +3123,7 @@ mod bell_notification_tests {
                 cell_w: 8,
                 cell_h: 16,
             })),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
 
         proxy.send_event(Event::Bell);
@@ -3108,7 +3155,7 @@ mod resize_tests {
             bell_notify: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
         let size = TermSize { rows, cols };
         let term = Term::new(term_config(), &size, proxy);
@@ -3339,7 +3386,7 @@ mod search_resync_tests {
             bell_notify: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
         let term = Term::new(term_config(), &TermSize { rows, cols }, proxy);
         Terminal {
