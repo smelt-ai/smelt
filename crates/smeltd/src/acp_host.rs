@@ -564,7 +564,7 @@ pub(crate) fn acp_pending_request(
     reduced: &smelt_core::acp_session::AcpSessionState,
 ) -> Option<String> {
     smelt_core::acp_session::pending_request_id(
-        reduced.permissions.first().map(|p| p.tool_call_id.as_str()),
+        reduced.permissions.first().map(|p| p.id.as_str()),
         reduced.elicitation.as_ref().map(|e| e.id.as_str()),
     )
 }

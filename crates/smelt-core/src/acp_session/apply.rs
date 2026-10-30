@@ -304,6 +304,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
                 state,
                 &mut outcome,
                 LivePermission {
+                    id: uuid::Uuid::new_v4().simple().to_string(),
                     question,
                     tool_call_id,
                     options: pub_options,

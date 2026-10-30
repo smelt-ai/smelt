@@ -310,7 +310,7 @@ impl Conversations {
             snapshot
                 .pending_permissions
                 .first()
-                .map(|permission| permission.tool_call_id.as_str()),
+                .map(|permission| permission.id.as_str()),
             snapshot
                 .pending_elicitation
                 .as_ref()

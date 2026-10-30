@@ -68,7 +68,7 @@ pub(crate) struct SessionState {
     pub(crate) phase_since: u64,
     /// 在问什么——远程遥控的命脉，Phase 6 的 action 门闩靠它判断能不能安全写入。
     pub(crate) pending_question: Option<String>,
-    /// 对话会话正在等的那个请求的身份（`permission:<工具调用 id>` / `elicitation:<卡片 id>`），
+    /// 对话会话正在等的那个请求的身份（`permission:<请求 id>` / `elicitation:<卡片 id>`），
     /// 客户端靠它分辨「还是不是同一个请求」。终端会话没有。只属于这个进程里的运行时，不落盘。
     #[serde(skip)]
     pub(crate) pending_request: Option<String>,

@@ -3214,6 +3214,7 @@ fn tool_image_output_is_expandable_and_decodes_once() {
 #[test]
 fn permission_selection_only_accepts_the_queue_head() {
     let permission = |tool_call_id: &str, option_id: &str| PendingPermission {
+        id: "p1".into(),
         question: tool_call_id.into(),
         tool_call_id: tool_call_id.into(),
         options: vec![PermissionOptionView {

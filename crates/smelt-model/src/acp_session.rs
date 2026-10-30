@@ -178,6 +178,9 @@ pub struct PermissionOptionView {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PendingPermission {
+    /// 请求身份，见 `LivePermission::id`。
+    #[serde(default)]
+    pub id: String,
     pub question: String,
     pub tool_call_id: String,
     pub options: Vec<PermissionOptionView>,
@@ -254,14 +257,14 @@ pub struct PendingElicitation {
     pub text_values: BTreeMap<usize, String>,
 }
 
-/// 会话正在等的那个请求的身份：先审批（`permission:<工具调用 id>`），再选择题
+/// 会话正在等的那个请求的身份：先审批（`permission:<请求 id>`），再选择题
 /// （`elicitation:<卡片 id>`）。守护推会话状态、客户端认取回的详情用的是同一个。
 pub fn pending_request_id(
     first_permission: Option<&str>,
     elicitation: Option<&str>,
 ) -> Option<String> {
     first_permission
-        .map(|tool_call_id| format!("permission:{tool_call_id}"))
+        .map(|id| format!("permission:{id}"))
         .or_else(|| elicitation.map(|id| format!("elicitation:{id}")))
 }
 

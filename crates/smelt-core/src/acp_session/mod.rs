@@ -54,6 +54,9 @@ pub(super) fn plan_view_from_acp(p: &Plan) -> PlanView {
 
 /// 待审批卡片：`responder` 只在收到 `AcpUserAction::PermissionSelect` 时消费。
 pub struct LivePermission {
+    /// 这次审批请求的身份，收到请求时生成。同一个工具调用答完又来一次审批是两个请求：
+    /// 客户端靠它分辨（见会话状态的 `pending_request`），回答仍按 `tool_call_id`。
+    pub id: String,
     pub question: String,
     pub tool_call_id: String,
     pub options: Vec<PermissionOptionView>,
@@ -483,6 +486,7 @@ impl AcpSessionState {
             self.permissions = pending_permissions
                 .into_iter()
                 .map(|permission| LivePermission {
+                    id: permission.id,
                     question: permission.question,
                     tool_call_id: permission.tool_call_id,
                     options: permission.options,
@@ -821,6 +825,7 @@ impl AcpSessionState {
                 self.permissions
                     .iter()
                     .map(|p| PendingPermission {
+                        id: p.id.clone(),
                         question: p.question.clone(),
                         tool_call_id: p.tool_call_id.clone(),
                         options: p.options.clone(),

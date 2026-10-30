@@ -405,7 +405,7 @@ pub struct SessionStateChanged {
     #[serde(rename = "phase_since")]
     pub phase_since_unix_seconds: u64,
     pub pending_question: Option<String>,
-    /// 对话会话正在等的那个请求的身份：`permission:<工具调用 id>` 或
+    /// 对话会话正在等的那个请求的身份：`permission:<请求 id>` 或
     /// `elicitation:<卡片 id>`。变了就是换了一个请求；终端会话没有。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_request: Option<String>,

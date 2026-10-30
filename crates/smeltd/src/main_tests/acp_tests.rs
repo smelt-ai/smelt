@@ -748,6 +748,7 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
         .lock()
         .permissions
         .push(smelt_core::acp_session::LivePermission {
+            id: "p1".into(),
             question: "允许执行？".into(),
             tool_call_id: "tool-1".into(),
             options: vec![smelt_core::acp_session::PermissionOptionView {
@@ -3811,6 +3812,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
     ended
         .permissions
         .push(smelt_core::acp_session::LivePermission {
+            id: "p1".into(),
             question: "旧审批问题".into(),
             tool_call_id: "tool".into(),
             options: Vec::new(),
@@ -3833,6 +3835,7 @@ fn pending_question_prefers_permission_over_elicitation() {
     assert_eq!(acp_pending_question(&s), None);
 
     s.permissions.push(LivePermission {
+        id: "p1".into(),
         question: "要不要覆盖这个文件？".into(),
         tool_call_id: "t1".into(),
         options: Vec::new(),
@@ -3846,7 +3849,7 @@ fn pending_question_prefers_permission_over_elicitation() {
     );
 }
 
-/// 会话状态里的 `pending_request` 跟问句取同一个请求：先审批，再选择题；身份换了请求就变。
+/// 会话状态里的 `pending_request` 跟问句取同一个请求：先审批，再选择题；身份是请求自己的。
 #[test]
 fn pending_request_names_the_request_the_question_comes_from() {
     use smelt_core::acp_session::{LiveElicitation, LivePermission};
@@ -3867,6 +3870,7 @@ fn pending_request_names_the_request_the_question_comes_from() {
     assert_eq!(acp_pending_request(&s).as_deref(), Some("elicitation:q1"));
 
     s.permissions.push(LivePermission {
+        id: "p1".into(),
         question: "要不要覆盖这个文件？".into(),
         tool_call_id: "t1".into(),
         options: Vec::new(),
@@ -3874,7 +3878,11 @@ fn pending_request_names_the_request_the_question_comes_from() {
         responder: None,
         raw_request_line: None,
     });
-    assert_eq!(acp_pending_request(&s).as_deref(), Some("permission:t1"));
+    assert_eq!(
+        acp_pending_request(&s).as_deref(),
+        Some("permission:p1"),
+        "认请求自己的 id，不认工具调用 id：同一个工具调用可能再来一次审批"
+    );
 }
 
 #[test]
