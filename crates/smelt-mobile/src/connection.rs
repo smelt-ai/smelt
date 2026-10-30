@@ -59,6 +59,9 @@ pub(crate) struct ConnectionEvent {
     /// `Reconnecting` 时是最近一次失败；`Disconnected` 时是停下来的原因（主动断开时为空）。
     /// `kind == Unpaired` 表示要重新配对。
     pub error: Option<SmeltError>,
+    /// 运行时所在的系统（`system.describe` 报的，如 `macos`、`windows`），只有 `Connected`
+    /// 时有。目录里的路径属于那台机器，按它的系统切。
+    pub os: Option<String>,
 }
 
 /// 一个运行时的地址。
@@ -217,6 +220,17 @@ struct Session {
     link: Mutex<Link>,
     /// 链路回调只碰它、不碰会话：会话持有链路，在传输层的线程上放掉链路会 `block_on`。
     signals: Arc<Signals>,
+    /// 最近一次 `system.describe` 报的系统。离线装上的会话等第一次连上才有。
+    os: Mutex<Option<String>>,
+}
+
+impl Session {
+    fn connected(&self, link: Option<LinkMetrics>) -> ConnectionEvent {
+        ConnectionEvent {
+            os: self.os.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            ..event(ConnectionState::Connected, Some(&self.target), link, None)
+        }
+    }
 }
 
 struct Signals {
@@ -345,6 +359,7 @@ fn event(
         endpoint_id: target.map(|target| target.endpoint_id.clone()),
         link,
         error,
+        os: None,
     }
 }
 
@@ -492,15 +507,11 @@ impl ConnectionHub {
                 state: Mutex::new(Signal::default()),
                 wake: Condvar::new(),
             }),
+            os: Mutex::new(outcome.as_ref().ok().and_then(|info| info.os.clone())),
         });
         inner.session = Some(Arc::clone(&session));
         match &outcome {
-            Ok(_) => inner.publish(event(
-                ConnectionState::Connected,
-                Some(&target),
-                metrics,
-                None,
-            )),
+            Ok(_) => inner.publish(session.connected(metrics)),
             Err(error) => inner.publish(event(
                 ConnectionState::Reconnecting,
                 Some(&target),
@@ -550,12 +561,7 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
                     if !inner.is_current(&session) {
                         return;
                     }
-                    inner.publish(event(
-                        ConnectionState::Connected,
-                        Some(&session.target),
-                        Some(metrics),
-                        None,
-                    ));
+                    inner.publish(session.connected(Some(metrics)));
                     continue;
                 }
                 Wake::Closed => {
@@ -591,8 +597,10 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
         } else {
             session.link()
         };
-        let outcome =
-            describe(&link, &session.target, timing.probe_timeout).map(|_| (link.metrics)());
+        let outcome = describe(&link, &session.target, timing.probe_timeout).map(|info| {
+            *session.os.lock().unwrap_or_else(|e| e.into_inner()) = info.os;
+            (link.metrics)()
+        });
 
         let mut inner = shared.lock();
         if !inner.is_current(&session) {
@@ -606,12 +614,7 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
                     log::info!("运行时已重新连上：{}", session.target.endpoint_id);
                 }
                 failures = 0;
-                inner.publish(event(
-                    ConnectionState::Connected,
-                    target,
-                    Some(metrics),
-                    None,
-                ));
+                inner.publish(session.connected(Some(metrics)));
                 drop(inner);
                 if watch.is_none() {
                     watch = Some(session.watch());
@@ -648,7 +651,7 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
 fn is_terminal(kind: SmeltErrorKind) -> bool {
     matches!(
         kind,
-        SmeltErrorKind::Unpaired | SmeltErrorKind::Incompatible
+        SmeltErrorKind::Unpaired | SmeltErrorKind::RuntimeOutdated | SmeltErrorKind::AppOutdated
     )
 }
 
@@ -668,10 +671,18 @@ fn runtime_info(
     target: &Target,
     described: SystemDescribeResult,
 ) -> Result<RuntimeInfo, SmeltError> {
+    // 事件协议对不上时会话目录订阅会被拒，重订也没用：在这里就判不兼容，停下来说清该升级
+    // 哪一边，而不是连着却一直「同步中」。
+    smelt_runtime_client::compat::check_events(&described).map_err(|incompatible| {
+        error(
+            crate::api::error::outdated_side(incompatible.outdated),
+            incompatible.to_string(),
+        )
+    })?;
     let daemon = described.daemon;
     let runtime_id = daemon.runtime_id.ok_or_else(|| {
         error(
-            SmeltErrorKind::Incompatible,
+            SmeltErrorKind::RuntimeOutdated,
             "这个运行时太旧，没有 runtime_id，先升级它",
         )
     })?;
@@ -695,10 +706,7 @@ fn control_error(error: ControlClientError, denied: SmeltErrorKind) -> SmeltErro
         ControlClientError::Protocol(error) => {
             let kind = match error.code {
                 ControlErrorCode::PermissionDenied => denied,
-                ControlErrorCode::UnsupportedVersion | ControlErrorCode::MethodNotFound => {
-                    SmeltErrorKind::Incompatible
-                }
-                _ => SmeltErrorKind::Other,
+                _ => crate::api::error::outdated_kind(&error).unwrap_or(SmeltErrorKind::Other),
             };
             crate::api::error::error(kind, error.message)
         }

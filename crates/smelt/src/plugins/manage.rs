@@ -71,7 +71,8 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
     // 复制到一半失败或重新加载，都不会出现一个半截的插件。
     let staging = plugins.join(format!(".importing-{}", manifest.id()));
     if fs::symlink_metadata(&staging).is_ok() {
-        fs::remove_dir_all(&staging).map_err(|error| format!("清理上次没导完的目录失败：{error}"))?;
+        fs::remove_dir_all(&staging)
+            .map_err(|error| format!("清理上次没导完的目录失败：{error}"))?;
     }
     let copied = copy_tree(source, &staging, true).and_then(|()| fs::rename(&staging, &target));
     if let Err(error) = copied {
@@ -87,7 +88,11 @@ fn installed_root(plugins: &Path, id: &str) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|entry| entry.path())
-        .filter(|root| !root.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')))
+        .filter(|root| {
+            !root
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        })
         .find(|root| PluginManifest::read(root).is_ok_and(|manifest| manifest.id() == id))
 }
 
@@ -118,7 +123,11 @@ fn uninstall_into(root: &Path, plugins: &Path, trash: &Path) -> Result<PathBuf, 
     if root.parent() != Some(plugins) {
         return Err("只能删除自己装的插件".to_string());
     }
-    let name = root.file_name().ok_or("插件路径不对")?.to_string_lossy().into_owned();
+    let name = root
+        .file_name()
+        .ok_or("插件路径不对")?
+        .to_string_lossy()
+        .into_owned();
     fs::create_dir_all(trash).map_err(|error| format!("创建回收目录失败：{error}"))?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -258,7 +267,8 @@ mod tests {
         let scratch = Scratch::new();
         let root = scratch.plugin("plugins/demo", "com.example.demo");
 
-        let moved = uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash")).unwrap();
+        let moved =
+            uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash")).unwrap();
 
         assert!(!root.exists());
         assert!(moved.starts_with(scratch.path("trash")));
@@ -287,8 +297,8 @@ mod tests {
         let nested = scratch.plugin("plugins/demo/inner", "com.example.inner");
 
         for root in [bundled, nested] {
-            let error =
-                uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash")).unwrap_err();
+            let error = uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash"))
+                .unwrap_err();
             assert!(error.contains("只能删除"), "{error}");
             assert!(root.join(MANIFEST_FILE).is_file());
         }

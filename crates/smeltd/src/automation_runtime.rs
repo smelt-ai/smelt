@@ -17,14 +17,13 @@ use smelt_core::automation::{AutomationFile, AutomationRun, AutomationRunStatus}
 use smelt_core::automation_store::{AutomationStore, local_timezone_fingerprint};
 use smelt_core::conversation::ConversationBinding;
 use smelt_core::daemon_state::DaemonPhase;
-use smelt_core::session_control::{RemoteAcpSession, RemoteSessionLifecycle};
 
 use smelt_core::acp_chat::AcpEntry;
 use smelt_core::pi_rpc::with_unpersisted_pi_session;
 
 use super::{
-    AcpOpenRequest, AcpSessions, EventHubHandle, RemoteSessions, Sessions, acp_runtime_alive,
-    apply_acp_user_action, create_daemon_acp_session, find_agent_option_for, kill_acp_session,
+    AcpOpenRequest, AcpSessions, EventHubHandle, Sessions, acp_runtime_alive,
+    apply_acp_user_action, ensure_acp_session, find_agent_option_for, kill_acp_session,
     push_acp_snapshot_since,
 };
 
@@ -43,7 +42,6 @@ pub(crate) fn spawn(
     automations: AutomationStore,
     sessions: Sessions,
     acp_sessions: AcpSessions,
-    remote_sessions: RemoteSessions,
     event_hub: EventHubHandle,
 ) {
     std::thread::spawn(move || {
@@ -51,7 +49,6 @@ pub(crate) fn spawn(
             automations,
             sessions,
             acp_sessions,
-            remote_sessions,
             event_hub,
         );
         // 测试直接构造 Driver，不能在 new 里换掉正在跑的守护的唤醒端。
@@ -88,7 +85,6 @@ struct Driver {
     automations: AutomationStore,
     sessions: Sessions,
     acp_sessions: AcpSessions,
-    remote_sessions: RemoteSessions,
     event_hub: EventHubHandle,
     timezone_fingerprint: String,
     last_error: Option<String>,
@@ -121,7 +117,6 @@ impl Driver {
         automations: AutomationStore,
         sessions: Sessions,
         acp_sessions: AcpSessions,
-        remote_sessions: RemoteSessions,
         event_hub: EventHubHandle,
     ) -> Self {
         let (shell_tx, shell_rx) = mpsc::channel();
@@ -129,7 +124,6 @@ impl Driver {
             automations,
             sessions,
             acp_sessions,
-            remote_sessions,
             event_hub,
             timezone_fingerprint: local_timezone_fingerprint(),
             last_error: None,
@@ -446,14 +440,14 @@ impl Driver {
         session_id: &str,
         execution: &AgentExecutionDefinition,
     ) -> Result<(), String> {
-        let option = find_agent_option_for(execution.kind, None)
+        // 运行的会话不进工作区目录（hidden，侧栏不被后台运行刷屏）：它叫什么、开在哪、
+        // 用的哪个 agent 都在运行记录里，这里只起 runtime。
+        find_agent_option_for(execution.kind, None)
             .ok_or_else(|| format!("没有可用的 {} ACP 配置", execution.kind.label()))?;
-        let cwd = run.context.cwd.clone();
-        let launch = launch_for_automation_run(execution);
         let request = AcpOpenRequest {
             id: session_id.to_string(),
-            cwd: Some(cwd.clone()),
-            launch: launch.clone(),
+            cwd: Some(run.context.cwd.clone()),
+            launch: launch_for_automation_run(execution),
             ephemeral_env: Default::default(),
             resume_id: None,
             fork_id: None,
@@ -464,33 +458,7 @@ impl Driver {
             pending_agent_preset: None,
             omit_history: false,
         };
-        let remote = RemoteAcpSession {
-            id: session_id.to_string(),
-            cwd,
-            title: format!(
-                "{} · {}",
-                run.context.automation_name,
-                run.context
-                    .agent_definition_name
-                    .as_deref()
-                    .unwrap_or(execution.definition.name.as_str())
-            ),
-            agent_option_id: option.id,
-            agent: execution.kind.id().to_string(),
-            launch,
-            resume_id: None,
-            created_at: run.created_at,
-            lifecycle: RemoteSessionLifecycle::Active,
-            hidden: true,
-        };
-        create_daemon_acp_session(
-            &request,
-            Some(remote),
-            &self.sessions,
-            &self.acp_sessions,
-            &self.event_hub,
-            &self.remote_sessions,
-        )?;
+        ensure_acp_session(&request, &self.sessions, &self.acp_sessions, &self.event_hub)?;
         Ok(())
     }
 
@@ -1003,7 +971,6 @@ impl Driver {
             match kill_acp_session(
                 session_id,
                 &self.acp_sessions,
-                &self.remote_sessions,
                 &self.event_hub,
             ) {
                 Ok(()) => {
@@ -1229,9 +1196,7 @@ mod lifecycle_tests {
     use smelt_core::automation_store::AutomationOwner;
 
     use super::*;
-    use crate::{
-        RemoteCatalogState, make_acp_session, new_event_hub, new_sessions, new_test_acp_sessions,
-    };
+    use crate::{make_acp_session, new_event_hub, new_sessions, new_test_acp_sessions};
 
     fn dispatching_fixture(accepted: bool) -> (Driver, AutomationStore, AutomationRun) {
         let mut owner = AutomationOwner::in_memory();
@@ -1310,7 +1275,6 @@ mod lifecycle_tests {
             Arc::clone(&automations),
             new_sessions(),
             acp_sessions,
-            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
             new_event_hub(),
         );
         (driver, automations, run)
@@ -1321,7 +1285,6 @@ mod lifecycle_tests {
             Arc::new(Mutex::new(owner)),
             new_sessions(),
             new_test_acp_sessions(),
-            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
             new_event_hub(),
         )
     }
@@ -1410,7 +1373,6 @@ mod lifecycle_tests {
             Arc::new(Mutex::new(AutomationOwner::in_memory())),
             new_sessions(),
             new_test_acp_sessions(),
-            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
             new_event_hub(),
         );
         let tx = driver.shell_tx.clone();
@@ -1666,13 +1628,11 @@ mod lifecycle_tests {
         reduced.history_session_id = Some("provider-session".into());
         *slot.value.reduced.lock() = reduced;
 
-        let remote_sessions = Arc::new(Mutex::new(RemoteCatalogState::in_memory()));
         let event_hub = new_event_hub();
         let mut driver = Driver::new(
             Arc::clone(&automations),
             new_sessions(),
             Arc::clone(&acp_sessions),
-            remote_sessions,
             Arc::clone(&event_hub),
         );
         driver.reconcile_runs();
@@ -1785,7 +1745,6 @@ mod lifecycle_tests {
             Arc::clone(&automations),
             new_sessions(),
             new_test_acp_sessions(),
-            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
             new_event_hub(),
         );
         driver.launch_unbound_runs();
@@ -1835,7 +1794,6 @@ mod lifecycle_tests {
             Arc::clone(&automations),
             new_sessions(),
             new_test_acp_sessions(),
-            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
             new_event_hub(),
         );
         let started = Instant::now();
@@ -1899,7 +1857,6 @@ mod lifecycle_tests {
             Arc::clone(&automations),
             new_sessions(),
             new_test_acp_sessions(),
-            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
             new_event_hub(),
         );
         driver.launch_unbound_runs();

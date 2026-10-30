@@ -666,7 +666,10 @@ fn ready_fresh_replaces_id_and_preserves_legacy_history_with_divider() {
     let mut s = fresh_state();
     s.entries.push(AcpEntry::User("old".into()));
     s.acp_session_id = Some("old-sid".into());
-    apply_event(&mut s, ConversationEvent::Status("正在恢复".into()));
+    apply_event(
+        &mut s,
+        ConversationEvent::StartupProgress("正在恢复".into()),
+    );
     assert_eq!(s.acp_session_id.as_deref(), Some("old-sid"));
     s.history_abandoned = true;
 
@@ -2997,7 +3000,6 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
         &mut state,
         ConversationEvent::Compaction {
             running: true,
-            detail: "正在压缩上下文…".into(),
             used: None,
             size: None,
         },
@@ -3005,19 +3007,19 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
     assert!(state.supports_compaction);
     assert!(state.supports_native_queue);
     assert!(state.compacting);
-    assert_eq!(state.status_line.as_deref(), Some("正在压缩上下文…"));
+    assert_eq!(state.status_line, None, "压缩进度只看 compacting");
 
     apply_event(
         &mut state,
         ConversationEvent::Compaction {
             running: false,
-            detail: "已压缩上下文：150000 → 32000 tokens".into(),
             used: Some(32_000),
             size: Some(200_000),
         },
     );
     assert!(!state.compacting);
     assert_eq!(state.usage, Some((32_000, 200_000)));
+    assert_eq!(state.status_line, None);
 
     apply_event(
         &mut state,
@@ -3046,6 +3048,91 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
             .any(|entry| matches!(entry, AcpEntry::User(text) if text == "换方向")),
         "撤回排队不得把中途插入写进会话"
     );
+}
+
+#[test]
+fn compaction_end_without_a_window_keeps_the_known_one() {
+    let mut state = fresh_state();
+    state.usage = Some((579_000, 1_000_000));
+    apply_event(
+        &mut state,
+        ConversationEvent::Compaction {
+            running: false,
+            used: Some(30_782),
+            size: None,
+        },
+    );
+    assert_eq!(
+        state.usage,
+        Some((30_782, 1_000_000)),
+        "驱动不知道模型窗口时沿用已知窗口，不能停在压缩前的用量"
+    );
+}
+
+/// 压缩中途进程没了，`compaction_end` 不会再来。转圈不能留到下一个进程。
+#[test]
+fn provider_gone_mid_compaction_stops_compacting() {
+    let compacting = || {
+        let mut state = fresh_state();
+        apply_event(
+            &mut state,
+            ConversationEvent::Compaction {
+                running: true,
+                used: None,
+                size: None,
+            },
+        );
+        assert!(state.compacting);
+        state
+    };
+
+    let mut state = compacting();
+    apply_event(
+        &mut state,
+        ConversationEvent::Fatal("Pi RPC 进程已关闭 stdout".into()),
+    );
+    assert!(!state.compacting, "进程异常退出");
+
+    let mut state = compacting();
+    force_end(
+        &mut state,
+        AcpEndKind::TransportDisconnected,
+        "连接意外中断",
+    );
+    assert!(!state.compacting, "连接断开");
+
+    let mut state = compacting();
+    reset_for_restart(&mut state);
+    assert!(!state.compacting, "重新开始换了新进程");
+}
+
+/// 改配置失败是一次性提示，带类别；不进状态行，不然下一轮一直挂着。
+/// 同一句失败连着来两次，两次都要认得出来。
+#[test]
+fn config_rejection_is_a_kinded_notice_not_a_status() {
+    let mut s = fresh_state();
+    s.phase = DaemonPhase::Idle;
+    apply_event(
+        &mut s,
+        ConversationEvent::ConfigRejected("更新会话配置失败：timeout".into()),
+    );
+    assert_eq!(s.status_line, None);
+    let first = s.notice.clone().expect("失败要进提示");
+    assert_eq!(first.kind, AcpNoticeKind::ConfigRejected);
+    assert_eq!(first.text, "更新会话配置失败：timeout");
+
+    apply_event(
+        &mut s,
+        ConversationEvent::ConfigRejected("更新会话配置失败：timeout".into()),
+    );
+    let second = s.notice.clone().unwrap();
+    assert!(second.id > first.id);
+
+    apply_event(
+        &mut s,
+        ConversationEvent::Notice("Pi Extension：boom".into()),
+    );
+    assert_eq!(s.notice.unwrap().kind, AcpNoticeKind::Info);
 }
 
 #[test]

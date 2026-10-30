@@ -612,7 +612,7 @@ mod tests {
 
             let fake = self.clone();
             RuntimeClient::new(move || {
-                let (client, server) = std::os::unix::net::UnixStream::pair()?;
+                let (client, server) = smelt_runtime_client::RuntimeStream::pair()?;
                 let fake = fake.clone();
                 std::thread::spawn(move || {
                     let mut line = String::new();

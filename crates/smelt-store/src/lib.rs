@@ -36,19 +36,16 @@ mod schema;
 mod snapshots;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod workspace;
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-mod workspace_document;
 
 pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
-    MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
-    PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota, QuotaCacheSnapshot,
-    QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteAcpSessionRecord, RemoteConfigSnapshot,
-    RemoteSessionCatalogSnapshot, RemoteTerminalSessionRecord, TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceCatalogCommit, WorkspaceCatalogWriter, WorkspaceMenuProjectRecord,
-    WorkspaceMenuSessionRecord, WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord,
+    MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
+    MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
+    QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
+    RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogVersion,
+    WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -60,7 +57,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 25;
+pub const STORE_SCHEMA_VERSION: u32 = 29;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -228,27 +225,117 @@ impl Store {
         imp::put_runtime_id(&self.backend, runtime_id)
     }
 
-    /// 工作区目录的版本号，每次保存加一。从没保存过是 0。
+    /// 工作区目录的版本号，每有一条改动加一。从没改过是 0。
     pub fn workspace_catalog_revision(&self) -> Result<u64, StoreError> {
         imp::workspace_catalog_revision(&self.backend)
     }
 
-    /// 基于 `base_revision` 提交整份工作区目录。比对版本、写快照、推进版本、记下写入方
-    /// 在同一个事务里，中途失败什么都不留下。
-    ///
-    /// 基准就是当前版本时照常提交。基准落后时，只有当前版本正是同一个写入方用更小的
-    /// 序号提交的，才算它自己的提交：回执在路上丢了，客户端还停在旧版本，这不是冲突。
-    /// 写入方的版本只在收到回执或重新读取时前进，它基于旧版本而当前版本是它写的，
-    /// 中间那些版本也都是它写的；别人写过一次，最后的写入方就不是它了。序号挡住超时后
-    /// 才到的旧请求，免得它盖掉后发先到的新提交。
-    pub fn commit_workspace_snapshot(
+    /// 工作区目录的当前版本和内容，在同一次读里取，两者对得上。从没写过时内容为空。
+    pub fn workspace_directory(
         &self,
-        base_revision: u64,
-        writer: &WorkspaceCatalogWriter,
-        snapshot: &WorkspaceSnapshot,
-    ) -> Result<WorkspaceCatalogCommit, StoreError> {
-        validate_name("workspace catalog writer", &writer.id)?;
-        imp::commit_workspace_snapshot(&self.backend, base_revision, writer, snapshot)
+    ) -> Result<(WorkspaceCatalogVersion, WorkspaceSnapshot), StoreError> {
+        imp::workspace_directory(&self.backend)
+    }
+
+    /// 新建一段对话，排在最后。同 id 已经在时不改动（`changed = false`）。
+    pub fn create_workspace_conversation(
+        &self,
+        conversation: &WorkspaceSessionRecord,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::create_workspace_conversation(&self.backend, conversation)
+    }
+
+    /// 替换一段已有对话。对话已经不在时回 [`StoreError::ConversationNotFound`]。
+    pub fn update_workspace_conversation(
+        &self,
+        conversation: &WorkspaceSessionRecord,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::update_workspace_conversation(&self.backend, conversation)
+    }
+
+    /// 删掉一段对话，连同删掉前的样子一起返回。已经不在时不改动，返回 `None`。
+    pub fn delete_workspace_conversation(
+        &self,
+        id: &str,
+    ) -> Result<(WorkspaceDirectoryCommit, Option<WorkspaceSessionRecord>), StoreError> {
+        imp::delete_workspace_conversation(&self.backend, id)
+    }
+
+    /// 打开一个项目。已经开着时不改动。
+    pub fn open_workspace_project(&self, root: &str) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::open_workspace_project(&self.backend, root)
+    }
+
+    /// 关闭一个项目，项目下的对话留着。没开着时不改动。
+    pub fn close_workspace_project(
+        &self,
+        root: &str,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::close_workspace_project(&self.backend, root)
+    }
+
+    /// 把以 `sid` 为 ACP 会话的那段对话改名，`None` 是清掉。没有这段对话、或名字本来就是它，
+    /// 不改动。名字写在哪见 [`Store::rename_workspace_conversation`]。
+    pub fn rename_workspace_acp_conversation(
+        &self,
+        sid: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::rename_workspace_acp_conversation(&self.backend, sid, title)
+    }
+
+    /// 给一段对话改名，`None` 是清掉。认得出 provider 身份的 ACP 对话写那段 provider 对话的
+    /// 名字（`history_title`），没有身份的写对话自己的。对话不在回 `ConversationNotFound`。
+    pub fn rename_workspace_conversation(
+        &self,
+        conversation_id: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::rename_conversation(transaction, conversation_id, title)
+        })
+    }
+
+    /// 给一格终端改名，`None` 是清掉。
+    pub fn rename_workspace_terminal(
+        &self,
+        terminal_id: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::rename_terminal(transaction, terminal_id, title)
+        })
+    }
+
+    /// agent 报的标题变了。只由守护写。
+    pub fn set_workspace_acp_session_title(
+        &self,
+        sid: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::set_acp_session_title(transaction, sid, title)
+        })
+    }
+
+    /// 一段 provider 对话的名字（历史页、侧栏、手机看到的同一份），`None` 是清掉。工作区目录
+    /// 里对话的名字按它现算，所以和目录改动一样推进版本号。
+    pub fn set_workspace_history_title(
+        &self,
+        agent: &str,
+        profile_id: Option<&str>,
+        resume_id: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::set_history_title(
+                transaction,
+                agent,
+                profile_id.unwrap_or_default(),
+                resume_id,
+                title,
+            )
+        })
     }
 
     /// 某条历史会话由哪个智能体定义创建。`profile_id` 为空表示没有 profile。
@@ -383,10 +470,6 @@ impl Store {
         imp::put_history_title_snapshot(&self.backend, snapshot)
     }
 
-    pub fn get_workspace_snapshot(&self) -> Result<Option<WorkspaceSnapshot>, StoreError> {
-        imp::get_workspace_snapshot(&self.backend)
-    }
-
     /// 会话 id → 智能体定义 id。
     pub fn session_agent_definition_ids(
         &self,
@@ -394,16 +477,13 @@ impl Store {
         imp::session_agent_definition_ids(&self.backend)
     }
 
-    pub fn put_workspace_snapshot(&self, snapshot: &WorkspaceSnapshot) -> Result<(), StoreError> {
-        imp::put_workspace_snapshot(&self.backend, snapshot)
-    }
-
-    /// 守护进程确认了一份可恢复的对话身份。行还不存在时返回 `false`，不建行。
+    /// 守护进程确认了一份可恢复的对话身份。行还不存在（这段对话还没进目录）时返回 `None`，
+    /// 不建行。恢复身份是目录的一部分：真改了才推进版本，`changed` 时调用方要推送目录。
     pub fn remember_history_session_id(
         &self,
         session_id: &str,
         history_id: &str,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<WorkspaceDirectoryCommit>, StoreError> {
         imp::remember_history_session_id(&self.backend, session_id, history_id)
     }
 
@@ -420,19 +500,13 @@ impl Store {
         imp::stored_history_identity(&self.backend, session_id)
     }
 
-    /// 守护进程明确放弃这份身份（历史文件已经读不出来）。窗口存档不能把它填回来。
-    pub fn clear_history_session_id(&self, session_id: &str) -> Result<bool, StoreError> {
+    /// 守护进程明确放弃这份身份（历史文件已经读不出来）。客户端改这段对话时不能把它填回来。
+    /// 真改了才推进版本，`changed` 时调用方要推送目录。
+    pub fn clear_history_session_id(
+        &self,
+        session_id: &str,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::clear_history_session_id(&self.backend, session_id)
-    }
-
-    /// `workspace.save` 发来的工作区文档转成类型化快照。文档只是传输格式。
-    pub fn workspace_snapshot_from_json(raw: &[u8]) -> Result<WorkspaceSnapshot, StoreError> {
-        imp::workspace_snapshot_from_json(raw)
-    }
-
-    /// 类型化快照转成 `workspace.load` 回给客户端的文档。
-    pub fn workspace_snapshot_to_json(snapshot: &WorkspaceSnapshot) -> Result<Vec<u8>, StoreError> {
-        imp::workspace_snapshot_to_json(snapshot)
     }
 
     pub fn get_agent_ui_snapshot(&self) -> Result<Option<AgentUiSnapshot>, StoreError> {
@@ -503,9 +577,45 @@ impl Store {
         )
     }
 
-    /// 用户采纳一条待确认的记忆。返回是否真有一条待确认被改成可信。
-    pub fn approve_memory(&self, scope: &str, file_name: &str) -> Result<bool, StoreError> {
-        imp::approve_memory(&self.backend, scope, file_name)
+    /// 用户采纳一条记忆。没有来源行时插入 trusted；已有行（含仍标着 trusted
+    /// 但文件已被外部改过的）刷新 `written_at_ms`。返回是否写入了行。
+    pub fn approve_memory(
+        &self,
+        scope: &str,
+        file_name: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        imp::approve_memory(&self.backend, scope, file_name, now_ms)
+    }
+
+    /// 升级迁移：无来源记录的存量记忆是否已回填为 trusted。
+    pub fn memory_legacy_trust_backfill_done(&self) -> Result<bool, StoreError> {
+        imp::memory_legacy_trust_backfill_done(&self.backend)
+    }
+
+    /// 标记存量记忆信任回填已完成（幂等）。
+    pub fn mark_memory_legacy_trust_backfill_done(&self, now_ms: i64) -> Result<(), StoreError> {
+        imp::mark_memory_legacy_trust_backfill_done(&self.backend, now_ms)
+    }
+
+    /// 一条记忆的来源行。文件名按 ASCII 大小写不敏感匹配。
+    pub fn get_memory_provenance(
+        &self,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<Option<MemoryProvenanceRecord>, StoreError> {
+        imp::get_memory_provenance(&self.backend, scope, file_name)
+    }
+
+    /// 把升级回填的来源行和哨兵放进同一个事务提交。
+    pub fn commit_legacy_memory_backfill(
+        &self,
+        files: &[(String, String, i64)],
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::commit_legacy_memory_backfill(&self.backend, files, reason, session_id, now_ms)
     }
 
     /// 删掉一条记忆的元数据（文件已删，或同名重建时不该继承）。
@@ -537,19 +647,6 @@ impl Store {
 
     pub fn touch_paired_device(&self, endpoint_id: &str, now_ms: i64) -> Result<(), StoreError> {
         imp::touch_paired_device(&self.backend, endpoint_id, now_ms)
-    }
-
-    pub fn get_remote_session_snapshot(
-        &self,
-    ) -> Result<Option<RemoteSessionCatalogSnapshot>, StoreError> {
-        imp::get_remote_session_snapshot(&self.backend)
-    }
-
-    pub fn put_remote_session_snapshot(
-        &self,
-        snapshot: &RemoteSessionCatalogSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_remote_session_snapshot(&self.backend, snapshot)
     }
 
     pub fn get_published_session_snapshot(
@@ -605,19 +702,6 @@ impl Store {
 
     pub fn put_auto_model_providers(&self, providers: &[String]) -> Result<(), StoreError> {
         imp::put_auto_model_providers(&self.backend, providers)
-    }
-
-    pub fn get_workspace_menu_snapshot(
-        &self,
-    ) -> Result<Option<PublishedWorkspaceMenuSnapshot>, StoreError> {
-        imp::get_workspace_menu_snapshot(&self.backend)
-    }
-
-    pub fn put_workspace_menu_snapshot(
-        &self,
-        snapshot: &PublishedWorkspaceMenuSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_workspace_menu_snapshot(&self.backend, snapshot)
     }
 }
 
@@ -878,24 +962,111 @@ mod imp {
         read(backend, crate::config::read_workspace_catalog_revision)
     }
 
-    pub(super) fn commit_workspace_snapshot(
+    pub(super) fn workspace_directory(
         backend: &Backend,
-        base_revision: u64,
-        writer: &super::WorkspaceCatalogWriter,
-        snapshot: &super::WorkspaceSnapshot,
-    ) -> Result<super::WorkspaceCatalogCommit, StoreError> {
-        write(backend, |transaction| {
-            let head = crate::config::read_workspace_catalog_head(transaction)?;
-            if !head.accepts(base_revision, writer) {
-                return Ok(super::WorkspaceCatalogCommit::Conflict {
-                    current: head.revision,
-                });
-            }
-            crate::workspace::write_workspace_snapshot(transaction, snapshot)?;
-            let revision = head.revision + 1;
-            crate::config::write_workspace_catalog_head(transaction, revision, writer)?;
-            Ok(super::WorkspaceCatalogCommit::Committed { revision })
+    ) -> Result<(super::WorkspaceCatalogVersion, super::WorkspaceSnapshot), StoreError> {
+        read(backend, |connection| {
+            let version = crate::config::read_workspace_catalog_version(connection)?;
+            let snapshot = crate::workspace::read_workspace_snapshot(connection)?;
+            Ok((version, snapshot.unwrap_or_default()))
         })
+    }
+
+    /// 单条改动的公共部分：改了才推进版本。
+    fn write_directory<T>(
+        backend: &Backend,
+        change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(bool, T), StoreError>,
+    ) -> Result<(super::WorkspaceDirectoryCommit, T), StoreError> {
+        write(backend, |transaction| {
+            let (changed, value) = change(transaction)?;
+            let revision = if changed {
+                crate::config::bump_workspace_catalog_revision(transaction)?
+            } else {
+                crate::config::read_workspace_catalog_revision(transaction)?
+            };
+            Ok((super::WorkspaceDirectoryCommit { revision, changed }, value))
+        })
+    }
+
+    pub(super) fn create_workspace_conversation(
+        backend: &Backend,
+        conversation: &super::WorkspaceSessionRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_directory(backend, |transaction| {
+            Ok((
+                crate::workspace::create_conversation(transaction, conversation)?,
+                (),
+            ))
+        })
+        .map(|(commit, ())| commit)
+    }
+
+    pub(super) fn update_workspace_conversation(
+        backend: &Backend,
+        conversation: &super::WorkspaceSessionRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_directory(backend, |transaction| {
+            Ok((
+                crate::workspace::update_conversation(transaction, conversation)?,
+                (),
+            ))
+        })
+        .map(|(commit, ())| commit)
+    }
+
+    pub(super) fn delete_workspace_conversation(
+        backend: &Backend,
+        id: &str,
+    ) -> Result<
+        (
+            super::WorkspaceDirectoryCommit,
+            Option<super::WorkspaceSessionRecord>,
+        ),
+        StoreError,
+    > {
+        write_directory(backend, |transaction| {
+            let removed = crate::workspace::delete_conversation(transaction, id)?;
+            Ok((removed.is_some(), removed))
+        })
+    }
+
+    pub(super) fn open_workspace_project(
+        backend: &Backend,
+        root: &str,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_directory(backend, |transaction| {
+            Ok((crate::workspace::open_project(transaction, root)?, ()))
+        })
+        .map(|(commit, ())| commit)
+    }
+
+    pub(super) fn close_workspace_project(
+        backend: &Backend,
+        root: &str,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_directory(backend, |transaction| {
+            Ok((crate::workspace::close_project(transaction, root)?, ()))
+        })
+        .map(|(commit, ())| commit)
+    }
+
+    pub(super) fn rename_workspace_acp_conversation(
+        backend: &Backend,
+        sid: &str,
+        title: Option<&str>,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_workspace(backend, |transaction| {
+            crate::workspace::rename_acp_conversation(transaction, sid, title)
+        })
+    }
+
+    /// 一次只改名字的目录改动：真改了才推进版本号。
+    pub(super) fn write_workspace(
+        backend: &Backend,
+        change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<bool, StoreError>,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_directory(backend, |transaction| Ok((change(transaction)?, ())))
+            .map(|(commit, ())| commit)
     }
 
     pub(super) fn history_agent_binding(
@@ -1094,13 +1265,6 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn get_workspace_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
-        let connection = lock_connection(backend)?;
-        crate::workspace::read_workspace_snapshot(&connection)
-    }
-
     pub(super) fn session_agent_definition_ids(
         backend: &Backend,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
@@ -1108,29 +1272,17 @@ mod imp {
         crate::workspace::read_session_agent_definition_ids(&connection)
     }
 
-    pub(super) fn put_workspace_snapshot(
-        backend: &Backend,
-        snapshot: &super::WorkspaceSnapshot,
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::workspace::write_workspace_snapshot(&transaction, snapshot)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
     pub(super) fn remember_history_session_id(
         backend: &Backend,
         session_id: &str,
         history_id: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let updated =
-            crate::workspace::remember_history_session_id(&transaction, session_id, history_id)?;
-        transaction.commit()?;
-        Ok(updated)
+    ) -> Result<Option<super::WorkspaceDirectoryCommit>, StoreError> {
+        write_directory(backend, |transaction| {
+            let remembered =
+                crate::workspace::remember_history_session_id(transaction, session_id, history_id)?;
+            Ok((remembered == Some(true), remembered.is_some()))
+        })
+        .map(|(commit, row_exists)| row_exists.then_some(commit))
     }
 
     pub(super) fn history_session_id(
@@ -1152,26 +1304,14 @@ mod imp {
     pub(super) fn clear_history_session_id(
         backend: &Backend,
         session_id: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let updated = crate::workspace::clear_history_session_id(&transaction, session_id)?;
-        transaction.commit()?;
-        Ok(updated)
-    }
-
-    pub(super) fn workspace_snapshot_from_json(
-        raw: &[u8],
-    ) -> Result<super::WorkspaceSnapshot, StoreError> {
-        let value: serde_json::Value = serde_json::from_slice(raw)?;
-        crate::workspace_document::workspace_from_document(&value)
-    }
-
-    pub(super) fn workspace_snapshot_to_json(
-        snapshot: &super::WorkspaceSnapshot,
-    ) -> Result<Vec<u8>, StoreError> {
-        let value = crate::workspace_document::json_from_workspace_snapshot(snapshot);
-        serde_json::to_vec(&value).map_err(StoreError::from)
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_directory(backend, |transaction| {
+            Ok((
+                crate::workspace::clear_history_session_id(transaction, session_id)?,
+                (),
+            ))
+        })
+        .map(|(commit, ())| commit)
     }
 
     pub(super) fn get_agent_ui_snapshot(
@@ -1293,9 +1433,45 @@ mod imp {
         backend: &Backend,
         scope: &str,
         file_name: &str,
+        now_ms: i64,
     ) -> Result<bool, StoreError> {
         write(backend, |transaction| {
-            crate::memory::approve(transaction, scope, file_name)
+            crate::memory::approve(transaction, scope, file_name, now_ms)
+        })
+    }
+
+    pub(super) fn get_memory_provenance(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<Option<super::MemoryProvenanceRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::memory::get_provenance(&connection, scope, file_name)
+    }
+
+    pub(super) fn commit_legacy_memory_backfill(
+        backend: &Backend,
+        files: &[(String, String, i64)],
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::memory::commit_legacy_backfill(transaction, files, reason, session_id, now_ms)
+        })
+    }
+
+    pub(super) fn memory_legacy_trust_backfill_done(backend: &Backend) -> Result<bool, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::memory::legacy_trust_backfill_done(&connection)
+    }
+
+    pub(super) fn mark_memory_legacy_trust_backfill_done(
+        backend: &Backend,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::memory::mark_legacy_trust_backfill_done(transaction, now_ms)
         })
     }
 
@@ -1358,25 +1534,6 @@ mod imp {
         write(backend, |transaction| {
             crate::devices::touch(transaction, endpoint_id, now_ms)
         })
-    }
-
-    pub(super) fn get_remote_session_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::RemoteSessionCatalogSnapshot>, StoreError> {
-        let connection = lock_connection(backend)?;
-        crate::catalog::read_remote_session_snapshot(&connection)
-    }
-
-    pub(super) fn put_remote_session_snapshot(
-        backend: &Backend,
-        snapshot: &super::RemoteSessionCatalogSnapshot,
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::catalog::write_remote_session_snapshot(&transaction, snapshot)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
     }
 
     pub(super) fn get_published_session_snapshot(
@@ -1464,23 +1621,6 @@ mod imp {
         snapshot: &super::QuotaCacheSnapshot,
     ) -> Result<(), StoreError> {
         put_config(backend, snapshot, crate::config::write_quota_cache_snapshot)
-    }
-
-    pub(super) fn get_workspace_menu_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::PublishedWorkspaceMenuSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_workspace_menu_snapshot)
-    }
-
-    pub(super) fn put_workspace_menu_snapshot(
-        backend: &Backend,
-        snapshot: &super::PublishedWorkspaceMenuSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_workspace_menu_snapshot,
-        )
     }
 
     pub(super) fn retain_automation_run_transcripts(
@@ -1790,10 +1930,52 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 28 {
+            apply_v29_workspace_epoch(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v28 形状：加上 epoch 列后与当前形状逐字一致，就说明原来正是 v28。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 27 {
+            apply_v28_drop_remote_session_catalog(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v27 形状：删完远程目录两张表后与当前形状逐字一致，就说明原来正是 v27。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 26 {
+            apply_v27_drop_derived_project_and_menu(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v26 形状：重建完会话那串表、删完菜单表后与当前形状逐字一致，就说明
+            // 原来正是 v26。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 25 {
+            apply_v26_drop_workspace_catalog_writer(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v25 形状：删掉写入方两列后与当前形状逐字一致，就说明原来正是 v25。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 24 {
             apply_v25_cli_exited(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
-            // 没有冻结的 v24 形状：补上 cli_exited 后与当前形状逐字一致，就说明原来正是 v24。
+            // 没有冻结的 v24 形状：补上 cli_exited、删掉写入方两列后与当前形状逐字一致，就说明
+            // 原来正是 v24。
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
             }
@@ -2219,7 +2401,7 @@ mod imp {
     }
 
     /// v25 记下 CLI 是否已经退出。对话 id 退出后仍留着，续接与否看这一列。
-    /// 已经有 `cli_exited` 列的库跳过。
+    /// 已经有 `cli_exited` 列的库跳过，接着补 v26。
     fn apply_v25_cli_exited(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
         if !table_columns(transaction, "published_session")?
             .iter()
@@ -2227,7 +2409,57 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V24_TO_V25)?;
         }
-        Ok(())
+        apply_v26_drop_workspace_catalog_writer(transaction)
+    }
+
+    /// v26 删掉工作区目录的写入方两列。已经没有 `writer` 列的库跳过。
+    fn apply_v26_drop_workspace_catalog_writer(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_columns(transaction, "workspace_catalog")?
+            .iter()
+            .any(|column| column == "writer")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V25_TO_V26)?;
+        }
+        apply_v27_drop_derived_project_and_menu(transaction)
+    }
+
+    /// v27 删掉会话组上存的所属项目和桌面发布的侧栏菜单表。已经没有 `project_root` 列的库跳过。
+    fn apply_v27_drop_derived_project_and_menu(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_columns(transaction, "session_group")?
+            .iter()
+            .any(|column| column == "project_root")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V26_TO_V27)?;
+        }
+        apply_v28_drop_remote_session_catalog(transaction)
+    }
+
+    /// v28 删掉远程会话目录两张表：远程新建的对话进工作区目录。已经没有这两张表的库跳过。
+    fn apply_v28_drop_remote_session_catalog(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "remote_acp_session")?.is_empty() {
+            transaction.execute_batch(crate::schema::MIGRATE_V27_TO_V28)?;
+        }
+        apply_v29_workspace_epoch(transaction)
+    }
+
+    /// v29：工作区目录带上这份库的随机身份（epoch）。客户端靠它认出库换过，版本号从头数
+    /// 时不把新目录当成旧的扔掉。
+    fn apply_v29_workspace_epoch(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_columns(transaction, "workspace_catalog")?
+            .iter()
+            .any(|column| column == "epoch")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V28_TO_V29)?;
+        }
+        transaction
+            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
+            .map_err(StoreError::from)
     }
 
     /// 旧库里每段对话的会话顺序：ACP 会话在前，终端按布局树深度优先，布局树里没挂上的
@@ -2676,7 +2908,7 @@ mod imp {
             (&[], &["root", "position"])
         };
         // v22 起布局树归客户端：没有 layout_node，会话多一列 `position`，会话组去掉
-        // `active_session_id`。v17 及更早的形状里都还在。
+        // `active_session_id`。v27 起会话组不再存 `project_root`。v17 及更早的形状里都还在。
         let (layout_node_columns, session_columns, session_group_columns): (
             &[&str],
             &[&str],
@@ -2724,13 +2956,7 @@ mod imp {
                     "launch_command",
                     "position",
                 ],
-                &[
-                    "id",
-                    "project_root",
-                    "position",
-                    "custom_title",
-                    "last_updated_at",
-                ],
+                &["id", "position", "custom_title", "last_updated_at"],
             )
         };
         Ok(table_columns(connection, "history_title")?
@@ -3114,8 +3340,9 @@ mod imp {
     }
 
     fn create_current_schema(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::CREATE_SCHEMA)?;
         transaction
-            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
             .map_err(StoreError::from)
     }
 
@@ -3210,12 +3437,58 @@ mod imp {
     pub(super) fn workspace_catalog_revision(_backend: &Backend) -> Result<u64, StoreError> {
         unsupported()
     }
-    pub(super) fn commit_workspace_snapshot(
+    pub(super) fn workspace_directory(
         _backend: &Backend,
-        _base_revision: u64,
-        _writer: &super::WorkspaceCatalogWriter,
-        _snapshot: &super::WorkspaceSnapshot,
-    ) -> Result<super::WorkspaceCatalogCommit, StoreError> {
+    ) -> Result<(super::WorkspaceCatalogVersion, super::WorkspaceSnapshot), StoreError> {
+        unsupported()
+    }
+    pub(super) fn create_workspace_conversation(
+        _backend: &Backend,
+        _conversation: &super::WorkspaceSessionRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn update_workspace_conversation(
+        _backend: &Backend,
+        _conversation: &super::WorkspaceSessionRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn delete_workspace_conversation(
+        _backend: &Backend,
+        _id: &str,
+    ) -> Result<
+        (
+            super::WorkspaceDirectoryCommit,
+            Option<super::WorkspaceSessionRecord>,
+        ),
+        StoreError,
+    > {
+        unsupported()
+    }
+    pub(super) fn open_workspace_project(
+        _backend: &Backend,
+        _root: &str,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn close_workspace_project(
+        _backend: &Backend,
+        _root: &str,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn rename_workspace_acp_conversation(
+        _backend: &Backend,
+        _sid: &str,
+        _title: Option<&str>,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn write_workspace(
+        _backend: &Backend,
+        _change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<bool, StoreError>,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
         unsupported()
     }
     pub(super) fn history_agent_binding(
@@ -3329,27 +3602,16 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn get_workspace_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
-        unsupported()
-    }
     pub(super) fn session_agent_definition_ids(
         _backend: &Backend,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_workspace_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::WorkspaceSnapshot,
-    ) -> Result<(), StoreError> {
         unsupported()
     }
     pub(super) fn remember_history_session_id(
         _backend: &Backend,
         _session_id: &str,
         _history_id: &str,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<super::WorkspaceDirectoryCommit>, StoreError> {
         unsupported()
     }
     pub(super) fn history_session_id(
@@ -3367,17 +3629,7 @@ mod imp {
     pub(super) fn clear_history_session_id(
         _backend: &Backend,
         _session_id: &str,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
-    pub(super) fn workspace_snapshot_from_json(
-        _raw: &[u8],
-    ) -> Result<super::WorkspaceSnapshot, StoreError> {
-        unsupported()
-    }
-    pub(super) fn workspace_snapshot_to_json(
-        _snapshot: &super::WorkspaceSnapshot,
-    ) -> Result<Vec<u8>, StoreError> {
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
         unsupported()
     }
     pub(super) fn get_agent_ui_snapshot(
@@ -3439,7 +3691,35 @@ mod imp {
         _backend: &Backend,
         _scope: &str,
         _file_name: &str,
+        _now_ms: i64,
     ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn get_memory_provenance(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+    ) -> Result<Option<super::MemoryProvenanceRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn commit_legacy_memory_backfill(
+        _backend: &Backend,
+        _files: &[(String, String, i64)],
+        _reason: &str,
+        _session_id: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn memory_legacy_trust_backfill_done(
+        _backend: &Backend,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn mark_memory_legacy_trust_backfill_done(
+        _backend: &Backend,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
         unsupported()
     }
     pub(super) fn forget_memory(
@@ -3485,17 +3765,6 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn get_remote_session_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::RemoteSessionCatalogSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_remote_session_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::RemoteSessionCatalogSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
     pub(super) fn get_published_session_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::PublishedSessionSnapshot>, StoreError> {
@@ -3537,17 +3806,6 @@ mod imp {
     pub(super) fn put_quota_cache_snapshot(
         _backend: &Backend,
         _snapshot: &super::QuotaCacheSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_workspace_menu_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::PublishedWorkspaceMenuSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_workspace_menu_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::PublishedWorkspaceMenuSnapshot,
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -3769,12 +4027,30 @@ mod tests {
             [("rule.md".to_string(), "外部内容".to_string())]
         );
 
-        assert!(store.approve_memory(&agent, "rule.md").unwrap());
+        assert!(store.approve_memory(&agent, "rule.md", 4_000).unwrap());
         assert!(
-            !store.approve_memory(&agent, "rule.md").unwrap(),
-            "已经可信的不算再采纳一次"
+            store.approve_memory(&agent, "rule.md", 5_000).unwrap(),
+            "再次采纳要刷新 written_at_ms，外部改过的 trusted 行才能重新生效"
         );
+        let trusted = store.memory_meta(&agent).unwrap().trusted;
+        assert_eq!(trusted.len(), 1);
+        assert_eq!(trusted[0].written_at_ms, 5_000);
+        assert_eq!(trusted[0].session_id, "s1");
         assert!(store.memory_meta(&agent).unwrap().pending.is_empty());
+
+        assert!(
+            store
+                .approve_memory(&agent, "hand-written.md", 6_000)
+                .unwrap(),
+            "没有来源行的文件也能采纳"
+        );
+        let adopted = store
+            .get_memory_provenance(&agent, "HAND-WRITTEN.md")
+            .unwrap()
+            .expect("大小写不同也能找到刚采纳的行");
+        assert_eq!(adopted.trust, MemoryTrust::Trusted);
+        assert_eq!(adopted.reason, "用户采纳");
+        assert_eq!(adopted.written_at_ms, 6_000);
 
         store.forget_memory(&agent, "fact.md").unwrap();
         assert!(store.memory_meta(&agent).unwrap().usage.is_empty());
@@ -4385,16 +4661,11 @@ mod tests {
                     },
                 ]
             );
-            let menu = store.get_workspace_menu_snapshot().unwrap().unwrap();
-            assert_eq!((menu.version, menu.revision), (2, 12132));
-            assert_eq!(menu.projects[0].root, "/repo");
-            assert_eq!(menu.sessions[0].title, "你知道 Godot 吗");
-            assert_eq!(menu.sessions[0].kind, "terminal");
             assert_eq!(store.get_launch_snapshot().unwrap().unwrap().version, 14);
             let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
             assert!(prefs.agent_hooks_enabled);
 
-            let workspace = store.get_workspace_snapshot().unwrap().unwrap();
+            let (_, workspace) = store.workspace_directory().unwrap();
             assert_eq!(workspace.projects, ["/repo"]);
             let acp = workspace.sessions[1].acp.as_ref().unwrap();
             assert_eq!(acp.sid.as_deref(), Some("acp-1"));
@@ -4575,8 +4846,8 @@ mod tests {
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        let workspace = store.get_workspace_snapshot().unwrap().unwrap();
-        assert_eq!(workspace.projects[0], "/repo");
+        let (_, workspace) = store.workspace_directory().unwrap();
+        assert_eq!(workspace.projects, ["/repo"]);
         store.record_memory_read("user", "a.md", 1).unwrap();
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
@@ -4658,6 +4929,7 @@ mod tests {
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
         // 当前形状加回 v22 才有的跨 Agent 消息表、开关列和持久事件表，就是一个 v22 库。
         connection
             .execute_batch(
@@ -4799,6 +5071,10 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
+        connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
+        connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
+        connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
         connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
         // 再把 auto_model_provider 换回带 harness 列的形状，就是一个 v23 库。
         connection
@@ -4896,6 +5172,7 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
         connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
         connection
             .execute_batch(
@@ -4922,6 +5199,51 @@ CREATE TABLE published_session (
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].conversation_id.as_deref(), Some("conv-1"));
         assert!(!sessions[0].cli_exited, "旧库里的会话按 CLI 未退出迁移");
+    }
+
+    /// v25 的库：工作区目录删掉写入方两列，版本号原样留着，升完和新建的库一个形状。
+    #[test]
+    fn v25_database_drops_the_workspace_catalog_writer() {
+        let dir = temp_dir("v25-migration");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V28_WORKSPACE_EPOCH}
+                 {V25_WORKSPACE_CATALOG_WRITER}
+                 INSERT INTO workspace_catalog(id, revision, writer, writer_seq)
+                 VALUES (1, 7, 'client-a', 3);"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 25).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 7);
+        assert_eq!(store.open_workspace_project("/a").unwrap().revision, 8);
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            imp::table_columns(&connection, "workspace_catalog").unwrap(),
+            ["id", "revision", "epoch"]
+        );
+        drop(connection);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v25 升上来的库要和新建的库一个形状"
+        );
+        assert!(
+            path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v25"))
+                .exists()
+        );
     }
 
     #[test]
@@ -5661,61 +5983,67 @@ CREATE TABLE published_session (
         transaction.commit().unwrap();
     }
 
+    /// 一段终端对话、一段 ACP 对话，各字段都填上。
+    fn full_conversations() -> Vec<WorkspaceSessionRecord> {
+        vec![
+            WorkspaceSessionRecord {
+                id: "conv-terminals".into(),
+                custom_title: Some("terminal group".into()),
+                last_updated_at: 42,
+                terminals: vec![
+                    WorkspaceTerminalRecord {
+                        id: Some("term-1".into()),
+                        cwd: Some("/repo".into()),
+                        custom_title: None,
+                        launch_label: None,
+                        launch_cmd: None,
+                    },
+                    WorkspaceTerminalRecord {
+                        id: Some("term-2".into()),
+                        cwd: Some("/repo/src".into()),
+                        custom_title: Some("tests".into()),
+                        launch_label: Some("Codex".into()),
+                        launch_cmd: Some("codex".into()),
+                    },
+                ],
+                acp: None,
+            },
+            WorkspaceSessionRecord {
+                id: "conv-acp".into(),
+                custom_title: Some("agent group".into()),
+                last_updated_at: 84,
+                terminals: Vec::new(),
+                acp: Some(WorkspaceAcpRecord {
+                    cwd: Some("/repo".into()),
+                    sid: Some("acp-1".into()),
+                    agent: "claude".into(),
+                    profile_id: Some("profile-1".into()),
+                    history_session_id: Some("history-1".into()),
+                    launch_command: "claude --acp".into(),
+                    launch_env: vec![("PROFILE".into(), "work".into())],
+                    refresh_launch_from_settings: true,
+                    agent_definition_id: Some("agent-def-1".into()),
+                    config_values: vec![("model".into(), "sonnet".into())],
+                    binding_automation_run_id: Some("run-1".into()),
+                    pending_agent_preset: Some("先检查正确性和回归风险".into()),
+                    session_title: Some("季度复盘".into()),
+                    ..WorkspaceAcpRecord::default()
+                }),
+            },
+        ]
+    }
+
     #[test]
     fn workspace_is_split_across_the_relational_state_tables() {
         let dir = temp_dir("relational-workspace");
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
-        let workspace = serde_json::json!({
-            "projects": ["/repo"],
-            "active_session": 1,
-            "route": "session",
-            "sidebar_w": 280.0,
-            "collapsed_projects": ["/repo"],
-            "collapsed_agents": ["agent-def-1"],
-            "sessions": [
-                {
-                    "id": "conv-terminals",
-                    "terminals": [
-                        {"cwd": "/repo", "id": "term-1"},
-                        {
-                            "cwd": "/repo/src",
-                            "id": "term-2",
-                            "custom_title": "tests",
-                            "launch_label": "Codex",
-                            "launch_cmd": "codex"
-                        }
-                    ],
-                    "last_updated_at": 42,
-                    "custom_title": "terminal group",
-                    "route": {"expanded": ["/repo/src"], "tool_panel_open": true}
-                },
-                {
-                    "id": "conv-acp",
-                    "last_updated_at": 84,
-                    "custom_title": "agent group",
-                    "acp": {
-                        "cwd": "/repo",
-                        "launch": {"command": "claude --acp", "env": {"PROFILE": "work"}},
-                        "profile_id": "profile-1",
-                        "agent": "claude",
-                        "history_session_id": "history-1",
-                        "sid": "acp-1",
-                        "agent_definition_id": "agent-def-1",
-                        "session_title": "季度复盘",
-                        "refresh_launch_from_settings": true,
-                        "config_values": [["model", "sonnet"]],
-                        "pending_agent_preset": "先检查正确性和回归风险",
-                        "conversation_binding": {
-                            "type": "automation",
-                            "run_id": "run-1"
-                        }
-                    },
-                    "route": null
-                }
-            ]
-        });
-        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
+        let conversations = full_conversations();
+        store.open_workspace_project("/repo").unwrap();
+        for conversation in &conversations {
+            store.create_workspace_conversation(conversation).unwrap();
+            apply_names(&store, conversation);
+        }
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         for (table, expected) in [
@@ -5759,34 +6087,11 @@ CREATE TABLE published_session (
             .unwrap();
         assert_eq!(old_payload_tables, 0);
 
-        let restored: serde_json::Value = workspace_json(&store);
-        assert_eq!(restored["sessions"][0]["id"], "conv-terminals");
-        assert_eq!(restored["sessions"][0]["terminals"][1]["id"], "term-2");
-        assert_eq!(
-            restored["sessions"][0]["terminals"][1]["launch_cmd"],
-            "codex"
-        );
-        assert_eq!(restored["sessions"][1]["acp"]["sid"], "acp-1");
-        assert_eq!(
-            restored["sessions"][1]["acp"]["config_values"][0][1],
-            "sonnet"
-        );
-        assert_eq!(
-            restored["sessions"][1]["acp"]["pending_agent_preset"],
-            "先检查正确性和回归风险"
-        );
-        assert_eq!(
-            restored["sessions"][1]["acp"]["conversation_binding"]["run_id"],
-            "run-1"
-        );
-        // 智能体归属必须活过落盘：丢了这一列，重启后对话会退化成按 cwd 成组的项目。
-        assert_eq!(
-            restored["sessions"][1]["acp"]["agent_definition_id"],
-            "agent-def-1"
-        );
-        assert!(restored["sessions"][1]["acp"]["automation_id"].is_null());
-        // 标题同样要活过落盘，否则重启后同一智能体的多段对话名字全一样。
-        assert_eq!(restored["sessions"][1]["acp"]["session_title"], "季度复盘");
+        // 每个字段都要活过落盘：智能体归属丢了，重启后对话会退化成按 cwd 成组的项目；
+        // 标题丢了，同一智能体的多段对话名字全一样。
+        let (_, restored) = store.workspace_directory().unwrap();
+        assert_eq!(restored.projects, ["/repo"]);
+        assert_eq!(restored.sessions, conversations);
         let acp_columns = connection
             .prepare("PRAGMA table_info(acp_detail)")
             .unwrap()
@@ -5812,13 +6117,13 @@ CREATE TABLE published_session (
                 "session_title",
             ]
         );
-        assert!(
-            restored.get("collapsed_projects").is_none() && restored.get("sidebar_w").is_none(),
-            "界面状态归客户端，运行时不存"
-        );
-        assert!(restored["sessions"][0].get("route").is_none());
+
         drop(connection);
-        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
+
+        // 改一段对话是整段替换，不能累积旧会话行。
+        store
+            .update_workspace_conversation(&conversations[0])
+            .unwrap();
         let connection = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(
             connection
@@ -5826,81 +6131,66 @@ CREATE TABLE published_session (
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            3,
-            "重复快照应原子替换，不能累积旧 session"
+            3
         );
     }
 
-    fn put_workspace_json(store: &Store, raw: &[u8]) {
-        store
-            .put_workspace_snapshot(&Store::workspace_snapshot_from_json(raw).unwrap())
-            .unwrap();
-    }
-
-    fn workspace_json(store: &Store) -> serde_json::Value {
-        let snapshot = store.get_workspace_snapshot().unwrap().unwrap();
-        serde_json::from_slice(&Store::workspace_snapshot_to_json(&snapshot).unwrap()).unwrap()
-    }
-
-    fn acp_workspace(history_session_id: Option<&str>) -> Vec<u8> {
-        let history = match history_session_id {
-            Some(id) => serde_json::json!(id),
-            None => serde_json::Value::Null,
-        };
-        serde_json::to_vec(&serde_json::json!({
-            "sessions": [{
-                "id": "conv-acp",
-                "acp": {
-                    "sid": "acp-1",
-                    "cwd": "/repo",
-                    "agent": "pi",
-                    "launch": {"command": "smelt-pi-agent"},
-                    "history_session_id": history
-                }
-            }]
-        }))
-        .unwrap()
-    }
-
     fn stored_history_id(store: &Store) -> Option<String> {
-        workspace_json(store)["sessions"][0]["acp"]["history_session_id"]
-            .as_str()
-            .map(str::to_string)
+        store.workspace_directory().unwrap().1.sessions[0]
+            .acp
+            .as_ref()
+            .unwrap()
+            .history_session_id
+            .clone()
     }
 
-    /// 历史页「继续」新开的槽位：窗口存档常常比 acp_open 先落库。第一次落库必须
-    /// 留下这次选中的 id，否则守护进程读到「行在、列空」，会当成已放弃、开一段空白会话。
+    /// 历史页「继续」新开的槽位：客户端新建对话常常比 acp_open 先落库。新建时必须留下
+    /// 这次选中的 id，否则守护进程读到「行在、列空」，会当成已放弃、开一段空白会话。
     #[test]
-    fn first_workspace_save_keeps_the_resumed_history_id() {
+    fn a_new_conversation_keeps_the_resumed_history_id() {
         let dir = temp_dir("history-first-save");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        put_workspace_json(&store, &acp_workspace(Some("pi-picked")));
+        store
+            .create_workspace_conversation(&acp_conversation(
+                "conv-acp",
+                Some("acp-1"),
+                Some("pi-picked"),
+            ))
+            .unwrap();
         assert_eq!(
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::Bound("pi-picked".into())
         );
-        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
+        store
+            .update_workspace_conversation(&acp_conversation(
+                "conv-acp",
+                Some("acp-1"),
+                Some("gui-stale"),
+            ))
+            .unwrap();
         assert_eq!(
             stored_history_id(&store).as_deref(),
             Some("pi-picked"),
-            "只有第一次落库采用窗口的 id"
+            "只有新建时采用客户端的 id"
         );
     }
 
     #[test]
-    fn daemon_confirmed_history_id_survives_workspace_rewrite() {
+    fn daemon_confirmed_history_id_survives_client_updates() {
         let dir = temp_dir("history-owner");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        assert!(
-            !store
+        let client = |history| acp_conversation("conv-acp", Some("acp-1"), history);
+        assert_eq!(
+            store
                 .remember_history_session_id("acp-1", "pi-confirmed")
-                .unwrap()
+                .unwrap(),
+            None
         );
         assert_eq!(
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::NoRow
         );
-        put_workspace_json(&store, &acp_workspace(None));
+        store.create_workspace_conversation(&client(None)).unwrap();
         assert_eq!(
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::Unbound
@@ -5909,40 +6199,51 @@ CREATE TABLE published_session (
             store
                 .remember_history_session_id("acp-1", "pi-confirmed")
                 .unwrap()
+                .unwrap()
+                .changed
         );
         assert_eq!(
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::Bound("pi-confirmed".into())
         );
-        assert!(!store.remember_history_session_id("acp-1", "  ").unwrap());
-
-        put_workspace_json(&store, &acp_workspace(None));
         assert_eq!(
-            stored_history_id(&store).as_deref(),
-            Some("pi-confirmed"),
-            "窗口存档没带恢复身份时，不能把守护进程已经确认的 id 写成空"
+            store.remember_history_session_id("acp-1", "  ").unwrap(),
+            None
         );
-        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
+
+        store.update_workspace_conversation(&client(None)).unwrap();
         assert_eq!(
             stored_history_id(&store).as_deref(),
             Some("pi-confirmed"),
-            "行已经存在后，窗口快照不能换成另一份 id"
+            "客户端改对话时没带恢复身份，不能把守护进程已经确认的 id 写成空"
+        );
+        store
+            .update_workspace_conversation(&client(Some("gui-stale")))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store).as_deref(),
+            Some("pi-confirmed"),
+            "行已经存在后，客户端不能换成另一份 id"
         );
 
         assert!(
             store
                 .remember_history_session_id("acp-1", "pi-next")
                 .unwrap()
+                .unwrap()
+                .changed
         );
-        put_workspace_json(&store, &acp_workspace(None));
+        store.update_workspace_conversation(&client(None)).unwrap();
         assert_eq!(stored_history_id(&store).as_deref(), Some("pi-next"));
 
-        assert!(store.clear_history_session_id("acp-1").unwrap());
-        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
+        assert!(store.clear_history_session_id("acp-1").unwrap().changed);
+        store
+            .update_workspace_conversation(&client(Some("gui-stale")))
+            .unwrap();
         assert_eq!(
             stored_history_id(&store),
             None,
-            "守护进程放弃的身份，窗口旧值不能再写回来"
+            "守护进程放弃的身份，客户端旧值不能再写回来"
         );
         assert_eq!(store.history_session_id("acp-1").unwrap(), None);
         assert_eq!(
@@ -5953,6 +6254,120 @@ CREATE TABLE published_session (
             store.stored_history_identity("acp-missing").unwrap(),
             StoredHistoryIdentity::NoRow
         );
+    }
+
+    /// 恢复身份是目录的一部分：守护真改了才推进版本，同一个 id 再确认、已经放弃再放弃、
+    /// 没有这一行，都不动。
+    #[test]
+    fn daemon_history_writes_bump_the_revision_only_on_change() {
+        let dir = temp_dir("history-revision");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        store
+            .create_workspace_conversation(&acp_conversation("c1", Some("acp-1"), None))
+            .unwrap();
+        let commit = |revision, changed| WorkspaceDirectoryCommit { revision, changed };
+
+        assert_eq!(
+            store.remember_history_session_id("acp-1", "h1").unwrap(),
+            Some(commit(2, true))
+        );
+        assert_eq!(
+            store.remember_history_session_id("acp-1", "h1").unwrap(),
+            Some(commit(2, false))
+        );
+        assert_eq!(
+            store.remember_history_session_id("acp-missing", "h1").unwrap(),
+            None
+        );
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 2);
+
+        assert_eq!(
+            store.clear_history_session_id("acp-1").unwrap(),
+            commit(3, true)
+        );
+        assert_eq!(
+            store.clear_history_session_id("acp-1").unwrap(),
+            commit(3, false)
+        );
+        assert_eq!(
+            store.clear_history_session_id("acp-missing").unwrap(),
+            commit(3, false)
+        );
+    }
+
+    /// 名字只存一处：还认不出 provider 身份时写在对话上；守护确认身份时搬进那段 provider
+    /// 对话的名字（`history_title`），对话上的清掉；之后改名写那边，读目录时合起来。真改了才
+    /// 推进版本。
+    #[test]
+    fn a_conversation_name_lives_in_one_place() {
+        let dir = temp_dir("directory-rename");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        store
+            .create_workspace_conversation(&acp_conversation("c1", Some("acp-1"), None))
+            .unwrap();
+        let revision = |store: &Store| store.workspace_catalog_revision().unwrap();
+        let title_of = |store: &Store| {
+            store.workspace_directory().unwrap().1.sessions[0]
+                .custom_title
+                .clone()
+        };
+        let history_titles = |store: &Store| {
+            store
+                .get_history_title_snapshot()
+                .unwrap()
+                .map(|snapshot| snapshot.sessions.len())
+                .unwrap_or_default()
+        };
+
+        let before = revision(&store);
+        assert!(store.rename_workspace_acp_conversation("acp-1", Some("草稿")).unwrap().changed);
+        assert_eq!(title_of(&store).as_deref(), Some("草稿"));
+        assert_eq!(history_titles(&store), 0, "没有身份时名字只在对话上");
+        assert!(!store.rename_workspace_acp_conversation("acp-1", Some("草稿")).unwrap().changed);
+        assert_eq!(revision(&store), before + 1);
+
+        store.remember_history_session_id("acp-1", "h1").unwrap();
+        assert_eq!(title_of(&store).as_deref(), Some("草稿"), "身份确认后名字照样在");
+        assert_eq!(history_titles(&store), 1, "搬进了 provider 对话的名字");
+        let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let group_title: Option<String> = connection
+            .query_row("SELECT custom_title FROM session_group WHERE id = 'c1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(group_title, None, "对话上的那份清掉了");
+
+        // 历史页改名（只知道 provider 身份）也改到了侧栏这段对话。
+        assert!(
+            store
+                .set_workspace_history_title("claude", None, "h1", Some("登录修复"))
+                .unwrap()
+                .changed
+        );
+        assert_eq!(title_of(&store).as_deref(), Some("登录修复"));
+
+        // 客户端带着旧名字、旧 agent 标题改对话，不算数。
+        let mut stale = acp_conversation("c1", Some("acp-1"), Some("h1"));
+        stale.custom_title = Some("客户端的旧名字".into());
+        stale.acp.as_mut().unwrap().session_title = Some("客户端的旧标题".into());
+        store.update_workspace_conversation(&stale).unwrap();
+        assert_eq!(title_of(&store).as_deref(), Some("登录修复"));
+        assert!(
+            store
+                .set_workspace_acp_session_title("acp-1", Some("agent 报的"))
+                .unwrap()
+                .changed
+        );
+        let acp = store.workspace_directory().unwrap().1.sessions[0].acp.clone().unwrap();
+        assert_eq!(acp.session_title.as_deref(), Some("agent 报的"));
+
+        // 清掉名字。
+        assert!(store.rename_workspace_conversation("c1", None).unwrap().changed);
+        assert_eq!(title_of(&store), None);
+        assert!(matches!(
+            store.rename_workspace_conversation("missing", Some("x")),
+            Err(StoreError::ConversationNotFound { .. })
+        ));
     }
 
     #[test]
@@ -6043,34 +6458,6 @@ CREATE TABLE published_session (
         assert_eq!(after_delete.agents.len(), 1);
         assert_eq!(after_delete.agents[0].id, "agent-1");
 
-        let remote = RemoteSessionCatalogSnapshot {
-            acp: vec![RemoteAcpSessionRecord {
-                id: "acp-1".into(),
-                cwd: "/work".into(),
-                title: "远程 Claude".into(),
-                agent_option_id: "claude".into(),
-                agent: "claude".into(),
-                launch_command: "claude --acp".into(),
-                launch_env_json: b"{}".to_vec(),
-                resume_id: Some("resume-1".into()),
-                created_at: 42,
-                lifecycle: "active".into(),
-                hidden: false,
-            }],
-            terminal: vec![RemoteTerminalSessionRecord {
-                id: "term-1".into(),
-                cwd: "/work".into(),
-                title: "远程终端".into(),
-                created_at: 43,
-                lifecycle: "creating".into(),
-            }],
-        };
-        store.put_remote_session_snapshot(&remote).unwrap();
-        assert_eq!(
-            store.get_remote_session_snapshot().unwrap().as_ref(),
-            Some(&remote)
-        );
-
         let published = PublishedSessionSnapshot {
             version: 1,
             sessions: vec![PublishedSessionRecord {
@@ -6106,8 +6493,6 @@ CREATE TABLE published_session (
             ("agent_acp_config_memory", 1),
             ("agent_definition", 1),
             ("agent_profile", 1),
-            ("remote_acp_session", 1),
-            ("remote_terminal_session", 1),
             ("published_session", 1),
         ] {
             let count: i64 = connection
@@ -6198,11 +6583,8 @@ CREATE TABLE published_session (
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        let workspace = store
-            .get_workspace_snapshot()
-            .unwrap()
-            .expect("v10→v11 不得丢掉已有项目");
-        assert_eq!(workspace.projects[0], "/repo");
+        let (_, workspace) = store.workspace_directory().unwrap();
+        assert_eq!(workspace.projects, ["/repo"], "v10→v11 不得丢掉已有项目");
         let snapshot = store.get_agent_ui_snapshot().unwrap().unwrap();
         assert_eq!(snapshot.env[0].engine_kind_id, "pi");
         assert_eq!(snapshot.config_memory[0].engine_kind_id, "pi");
@@ -6236,114 +6618,320 @@ CREATE TABLE published_session (
         );
     }
 
-    fn catalog_writer(id: &str, seq: u64) -> WorkspaceCatalogWriter {
-        WorkspaceCatalogWriter {
+    fn terminal_conversation(id: &str, terminal: &str, cwd: &str) -> WorkspaceSessionRecord {
+        WorkspaceSessionRecord {
             id: id.to_string(),
-            seq,
+            custom_title: None,
+            last_updated_at: 1,
+            terminals: vec![WorkspaceTerminalRecord {
+                id: Some(terminal.to_string()),
+                cwd: Some(cwd.to_string()),
+                custom_title: None,
+                launch_label: None,
+                launch_cmd: None,
+            }],
+            acp: None,
         }
     }
 
-    fn catalog_snapshot(project: &str) -> WorkspaceSnapshot {
-        WorkspaceSnapshot {
-            projects: vec![project.to_string()],
-            sessions: Vec::new(),
+    fn acp_conversation(id: &str, sid: Option<&str>, history: Option<&str>) -> WorkspaceSessionRecord {
+        WorkspaceSessionRecord {
+            id: id.to_string(),
+            custom_title: None,
+            last_updated_at: 1,
+            terminals: Vec::new(),
+            acp: Some(WorkspaceAcpRecord {
+                cwd: Some("/repo".to_string()),
+                sid: sid.map(str::to_string),
+                agent: "claude".to_string(),
+                history_session_id: history.map(str::to_string),
+                launch_command: "claude".to_string(),
+                ..WorkspaceAcpRecord::default()
+            }),
         }
     }
 
-    fn catalog_projects(store: &Store) -> Vec<String> {
-        store.get_workspace_snapshot().unwrap().unwrap().projects
+    /// 名字不随新建、更新写进来：照这段对话里的名字和 agent 标题，走改名命令和守护那条
+    /// 写一遍。
+    fn apply_names(store: &Store, conversation: &WorkspaceSessionRecord) {
+        store
+            .rename_workspace_conversation(&conversation.id, conversation.custom_title.as_deref())
+            .unwrap();
+        for terminal in &conversation.terminals {
+            if let Some(id) = &terminal.id {
+                store
+                    .rename_workspace_terminal(id, terminal.custom_title.as_deref())
+                    .unwrap();
+            }
+        }
+        if let Some(acp) = &conversation.acp
+            && let Some(sid) = &acp.sid
+        {
+            store
+                .set_workspace_acp_session_title(sid, acp.session_title.as_deref())
+                .unwrap();
+        }
     }
 
-    /// 回执丢了：运行时已经提交，客户端还停在旧版本。它下一次提交基于旧版本，
-    /// 但当前版本正是它自己写的，必须照常提交，不能当成别的设备改过。
-    #[test]
-    fn same_writer_resending_on_a_stale_base_after_a_lost_reply_commits() {
-        let dir = temp_dir("catalog-lost-reply");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let writer = |seq| catalog_writer("client-a", seq);
-
-        assert_eq!(
-            store
-                .commit_workspace_snapshot(0, &writer(1), &catalog_snapshot("/a1"))
-                .unwrap(),
-            WorkspaceCatalogCommit::Committed { revision: 1 }
-        );
-        // 回执丢了，客户端仍以 0 为基准，接连又丢了一次。
-        assert_eq!(
-            store
-                .commit_workspace_snapshot(0, &writer(2), &catalog_snapshot("/a2"))
-                .unwrap(),
-            WorkspaceCatalogCommit::Committed { revision: 2 }
-        );
-        assert_eq!(
-            store
-                .commit_workspace_snapshot(0, &writer(3), &catalog_snapshot("/a3"))
-                .unwrap(),
-            WorkspaceCatalogCommit::Committed { revision: 3 }
-        );
-        assert_eq!(store.workspace_catalog_revision().unwrap(), 3);
-        assert_eq!(catalog_projects(&store), ["/a3"]);
+    fn directory_ids(store: &Store) -> Vec<String> {
+        store
+            .workspace_directory()
+            .unwrap()
+            .1
+            .sessions
+            .into_iter()
+            .map(|session| session.id)
+            .collect()
     }
 
-    /// 别的写入方提交过一次，基于旧版本的提交就是真冲突，哪怕更早的版本是自己写的。
+    /// 新建排在最后；同 id 重发（回执丢了）不改动、不推进版本。
     #[test]
-    fn stale_base_after_another_writer_committed_is_a_conflict() {
-        let dir = temp_dir("catalog-other-writer");
+    fn creating_a_conversation_appends_and_a_resend_is_a_no_op() {
+        let dir = temp_dir("directory-create");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
 
-        store
-            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
+        let first = store
+            .create_workspace_conversation(&terminal_conversation("c1", "term-1", "/repo"))
             .unwrap();
-        store
-            .commit_workspace_snapshot(1, &catalog_writer("client-b", 1), &catalog_snapshot("/b"))
+        let second = store
+            .create_workspace_conversation(&terminal_conversation("c2", "term-2", "/repo"))
             .unwrap();
-
+        assert_eq!(
+            (first, second),
+            (
+                WorkspaceDirectoryCommit {
+                    revision: 1,
+                    changed: true
+                },
+                WorkspaceDirectoryCommit {
+                    revision: 2,
+                    changed: true
+                }
+            )
+        );
         assert_eq!(
             store
-                .commit_workspace_snapshot(
-                    0,
-                    &catalog_writer("client-a", 2),
-                    &catalog_snapshot("/mine")
-                )
+                .create_workspace_conversation(&terminal_conversation("c1", "term-1", "/repo"))
                 .unwrap(),
-            WorkspaceCatalogCommit::Conflict { current: 2 }
+            WorkspaceDirectoryCommit {
+                revision: 2,
+                changed: false
+            }
         );
-        // 新的写入方（比如重启后的客户端）基于旧版本也一样。
-        assert_eq!(
-            store
-                .commit_workspace_snapshot(
-                    1,
-                    &catalog_writer("client-c", 1),
-                    &catalog_snapshot("/mine")
-                )
-                .unwrap(),
-            WorkspaceCatalogCommit::Conflict { current: 2 }
-        );
-        assert_eq!(store.workspace_catalog_revision().unwrap(), 2);
-        assert_eq!(catalog_projects(&store), ["/b"]);
+        assert_eq!(directory_ids(&store), ["c1", "c2"]);
     }
 
-    /// 超时的旧请求在新提交之后才到：序号更小，不能盖掉更新的那份。
+    /// 别的客户端已经关掉的对话，晚到的修改不能把它写回来。
     #[test]
-    fn late_request_from_the_same_writer_cannot_overwrite_a_newer_commit() {
-        let dir = temp_dir("catalog-late-request");
+    fn updating_a_deleted_conversation_does_not_resurrect_it() {
+        let dir = temp_dir("directory-update-deleted");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let conversation = terminal_conversation("c1", "term-1", "/repo");
+        store.create_workspace_conversation(&conversation).unwrap();
 
+        let (commit, removed) = store.delete_workspace_conversation("c1").unwrap();
+        assert!(commit.changed);
+        assert_eq!(removed, Some(conversation.clone()));
+        assert!(matches!(
+            store.update_workspace_conversation(&conversation),
+            Err(StoreError::ConversationNotFound { id }) if id == "c1"
+        ));
+        assert!(directory_ids(&store).is_empty());
+        let (again, removed) = store.delete_workspace_conversation("c1").unwrap();
+        assert_eq!((again.changed, removed), (false, None));
+    }
+
+    /// 内容没变的修改不推进版本；变了的推进，位置不动。
+    #[test]
+    fn updating_keeps_the_position_and_only_bumps_on_change() {
+        let dir = temp_dir("directory-update");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
         store
-            .commit_workspace_snapshot(0, &catalog_writer("client-a", 2), &catalog_snapshot("/new"))
+            .create_workspace_conversation(&terminal_conversation("c1", "term-1", "/repo"))
+            .unwrap();
+        store
+            .create_workspace_conversation(&terminal_conversation("c2", "term-2", "/repo"))
+            .unwrap();
+
+        let same = store
+            .update_workspace_conversation(&terminal_conversation("c1", "term-1", "/repo"))
             .unwrap();
         assert_eq!(
-            store
-                .commit_workspace_snapshot(
-                    0,
-                    &catalog_writer("client-a", 1),
-                    &catalog_snapshot("/old")
-                )
-                .unwrap(),
-            WorkspaceCatalogCommit::Conflict { current: 1 }
+            same,
+            WorkspaceDirectoryCommit {
+                revision: 2,
+                changed: false
+            }
         );
-        assert_eq!(catalog_projects(&store), ["/new"]);
+
+        let mut renamed = terminal_conversation("c1", "term-1", "/repo");
+        renamed.custom_title = Some("新名字".to_string());
+        renamed.terminals.push(WorkspaceTerminalRecord {
+            id: Some("term-3".to_string()),
+            cwd: Some("/repo".to_string()),
+            custom_title: None,
+            launch_label: None,
+            launch_cmd: None,
+        });
+        let changed = store.update_workspace_conversation(&renamed).unwrap();
+        assert_eq!(
+            changed,
+            WorkspaceDirectoryCommit {
+                revision: 3,
+                changed: true
+            }
+        );
+        let (_, snapshot) = store.workspace_directory().unwrap();
+        // 终端改到了；名字不随更新改，只经改名命令写。
+        assert_eq!(
+            snapshot.sessions[0],
+            WorkspaceSessionRecord {
+                custom_title: None,
+                ..renamed
+            }
+        );
+        assert_eq!(directory_ids(&store), ["c1", "c2"]);
     }
+
+    /// 守护确认过的恢复身份，客户端的修改带着旧值也改不掉。
+    #[test]
+    fn updating_keeps_the_history_id_the_daemon_confirmed() {
+        let dir = temp_dir("directory-history");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        store
+            .create_workspace_conversation(&acp_conversation("c1", Some("acp-1"), Some("old")))
+            .unwrap();
+        assert!(
+            store
+                .remember_history_session_id("acp-1", "confirmed")
+                .unwrap()
+                .unwrap()
+                .changed
+        );
+
+        let commit = store
+            .update_workspace_conversation(&acp_conversation("c1", Some("acp-1"), Some("old")))
+            .unwrap();
+        assert!(!commit.changed);
+        assert_eq!(
+            store.history_session_id("acp-1").unwrap().as_deref(),
+            Some("confirmed")
+        );
+    }
+
+    /// 单条写入不改会话 id：撞上别的对话、ACP 不带 sid 都拒绝，什么都不写。
+    #[test]
+    fn conversation_session_ids_must_be_unique_and_explicit() {
+        let dir = temp_dir("directory-session-ids");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        store
+            .create_workspace_conversation(&terminal_conversation("c1", "term-1", "/repo"))
+            .unwrap();
+
+        assert!(matches!(
+            store.create_workspace_conversation(&terminal_conversation("c2", "term-1", "/repo")),
+            Err(StoreError::DuplicateSessionId { id }) if id == "term-1"
+        ));
+        assert!(matches!(
+            store.create_workspace_conversation(&acp_conversation("c3", None, Some("h"))),
+            Err(StoreError::AcpConversationMissingSid { id }) if id == "c3"
+        ));
+        assert_eq!(directory_ids(&store), ["c1"]);
+        assert_eq!(store.workspace_directory().unwrap().0.revision, 1);
+    }
+
+    /// 开关项目是单条改动：开过的再开不推进版本；关掉项目，项目下的对话还在。
+    #[test]
+    fn projects_open_and_close_without_touching_conversations() {
+        let dir = temp_dir("directory-projects");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        assert!(store.open_workspace_project("/repo").unwrap().changed);
+        assert!(!store.open_workspace_project("/repo").unwrap().changed);
+        assert!(store.open_workspace_project("/other").unwrap().changed);
+        store
+            .create_workspace_conversation(&terminal_conversation("c1", "term-1", "/repo/sub"))
+            .unwrap();
+
+        assert!(store.close_workspace_project("/repo").unwrap().changed);
+        assert!(!store.close_workspace_project("/repo").unwrap().changed);
+        let (version, snapshot) = store.workspace_directory().unwrap();
+        assert_eq!(version.revision, 4);
+        assert_eq!(snapshot.projects, ["/other"]);
+        assert_eq!(directory_ids(&store), ["c1"]);
+        assert!(matches!(
+            store.open_workspace_project("  "),
+            Err(StoreError::EmptyProjectRoot)
+        ));
+    }
+
+    /// v19 到 v25 的工作区目录记着写入方两列，v26 删掉。用当前结构的库退回这几个版本做
+    /// 夹具时补上；加在表尾，和当年 `ALTER TABLE … ADD COLUMN` 的结果一致。
+    const V25_WORKSPACE_CATALOG_WRITER: &str = "
+ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
+ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
+";
+
+    /// v28 及更早的目录表没有 epoch 列。用当前结构的库退回旧版本做夹具时先去掉。
+    const V28_WORKSPACE_EPOCH: &str = "
+ALTER TABLE workspace_catalog DROP COLUMN epoch;
+";
+
+    /// v27 及更早还在、v28 删掉的远程会话目录两张表。用当前结构的库退回旧版本做夹具时补上。
+    const V27_REMOTE_SESSION_TABLES: &str = "
+CREATE TABLE remote_acp_session (
+  id TEXT PRIMARY KEY,
+  cwd TEXT NOT NULL,
+  title TEXT NOT NULL,
+  agent_option_id TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  launch_command TEXT NOT NULL,
+  launch_env_json BLOB NOT NULL,
+  resume_id TEXT,
+  created_at INTEGER NOT NULL,
+  lifecycle TEXT NOT NULL,
+  hidden INTEGER NOT NULL CHECK (hidden IN (0, 1))
+);
+CREATE TABLE remote_terminal_session (
+  id TEXT PRIMARY KEY,
+  cwd TEXT NOT NULL,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  lifecycle TEXT NOT NULL
+);
+";
+
+    /// v26 及更早还在、v27 删掉的：会话组上存的所属项目，和桌面发布的侧栏菜单三张表。
+    /// 用当前结构的库退回旧版本做夹具时补上（`project_root` 只能补在最后一列）。
+    const V26_PROJECT_ROOT_AND_MENU: &str = "
+ALTER TABLE session_group ADD COLUMN project_root TEXT REFERENCES project(root) ON DELETE SET NULL;
+CREATE TABLE workspace_menu (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL CHECK (version >= 0),
+  revision INTEGER NOT NULL CHECK (revision >= 0),
+  source_id TEXT NOT NULL,
+  source_revision INTEGER NOT NULL CHECK (source_revision >= 0)
+);
+CREATE TABLE workspace_menu_project (
+  position INTEGER PRIMARY KEY CHECK (position >= 0),
+  root TEXT NOT NULL,
+  title TEXT NOT NULL,
+  display_order INTEGER NOT NULL CHECK (display_order >= 0)
+);
+CREATE TABLE workspace_menu_session (
+  position INTEGER PRIMARY KEY CHECK (position >= 0),
+  id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('terminal', 'acp')),
+  title TEXT NOT NULL,
+  custom_title INTEGER NOT NULL CHECK (custom_title IN (0, 1)),
+  cwd TEXT,
+  project_root TEXT,
+  project_title TEXT,
+  project_order INTEGER NOT NULL CHECK (project_order >= 0),
+  session_order INTEGER NOT NULL CHECK (session_order >= 0),
+  leaf_order INTEGER NOT NULL CHECK (leaf_order >= 0),
+  agent TEXT
+);
+";
 
     /// v18、v19 都有、v20 删掉的 worktree 继承两张表，原样照 v18 的建表语句。
     /// 用当前结构的库退回旧版本做夹具时补上。
@@ -6383,20 +6971,19 @@ CREATE TABLE worktree_inherit_skip_pattern (
             .unwrap()
     }
 
-    /// v18 的库：工作区目录补上写入方两列，原来的版本号留着；接着删掉 worktree 继承两张表。
+    /// v18 的库：工作区目录原来的版本号留着，单条改动接着往上加；worktree 继承两张表删掉。
     #[test]
-    fn migrates_v18_workspace_catalog_to_record_its_writer() {
-        let dir = temp_dir("migrate-v18-catalog-writer");
+    fn migrates_v18_keeping_the_workspace_catalog_revision() {
+        let dir = temp_dir("migrate-v18-catalog-revision");
         let path = dir.join(DATABASE_FILE_NAME);
         drop(Store::open_or_create(&path).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V21_SESSION_TABLES}
+                "{V28_WORKSPACE_EPOCH}
+                 {V21_SESSION_TABLES}
                  {V21_LAYOUT_NODE_TABLE}
-                 ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
-                 ALTER TABLE workspace_catalog DROP COLUMN writer;
-                 INSERT INTO workspace_catalog(id, revision) VALUES (1, 41);
+                 UPDATE workspace_catalog SET revision = 41;
                  {V19_WORKTREE_INHERIT_TABLES}
                  INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);"
             ))
@@ -6406,26 +6993,12 @@ CREATE TABLE worktree_inherit_skip_pattern (
 
         let store = Store::open_or_create(&path).unwrap();
         assert_eq!(store.workspace_catalog_revision().unwrap(), 41);
-        // 迁移来的版本没有写入方，只认基于当前版本的提交。
         assert_eq!(
-            store
-                .commit_workspace_snapshot(
-                    40,
-                    &catalog_writer("client-a", 1),
-                    &catalog_snapshot("/a")
-                )
-                .unwrap(),
-            WorkspaceCatalogCommit::Conflict { current: 41 }
-        );
-        assert_eq!(
-            store
-                .commit_workspace_snapshot(
-                    41,
-                    &catalog_writer("client-a", 1),
-                    &catalog_snapshot("/a")
-                )
-                .unwrap(),
-            WorkspaceCatalogCommit::Committed { revision: 42 }
+            store.open_workspace_project("/a").unwrap(),
+            WorkspaceDirectoryCommit {
+                revision: 42,
+                changed: true
+            }
         );
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
@@ -6438,6 +7011,129 @@ CREATE TABLE worktree_inherit_skip_pattern (
         );
     }
 
+    /// 目录带着这份库的身份：建库就有，改动不变；同一个路径删了重建是另一份。
+    #[test]
+    fn the_workspace_epoch_names_this_database() {
+        let dir = temp_dir("workspace-epoch");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let (fresh, _) = store.workspace_directory().unwrap();
+        assert_eq!(fresh.revision, 0);
+        assert_eq!(fresh.epoch.len(), 32, "{:?}", fresh.epoch);
+
+        store.open_workspace_project("/repo").unwrap();
+        let (changed, _) = store.workspace_directory().unwrap();
+        assert_eq!(changed.epoch, fresh.epoch, "改动不换身份");
+        assert_eq!(changed.revision, 1);
+
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
+        let rebuilt = Store::open_or_create(&path).unwrap();
+        let (reset, _) = rebuilt.workspace_directory().unwrap();
+        assert_eq!(reset.revision, 0);
+        assert_ne!(reset.epoch, fresh.epoch, "删了重建是另一份目录");
+    }
+
+    /// v28 的库：目录表补上 epoch，版本号照旧，形状和新建的一样。
+    #[test]
+    fn migrates_v28_adding_a_workspace_epoch() {
+        let dir = temp_dir("migrate-v28-epoch");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V28_WORKSPACE_EPOCH}
+                 UPDATE workspace_catalog SET revision = 41;"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 28).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let (version, _) = store.workspace_directory().unwrap();
+        assert_eq!(version.revision, 41);
+        assert_eq!(version.epoch.len(), 32, "{:?}", version.epoch);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// v26 的库：会话组上存的所属项目和侧栏菜单表删掉。会话那一串表要整串重建，
+    /// 对话、会话、ACP 明细、启动环境、配置值一行都不能少，外键也要接到新表上。
+    #[test]
+    fn migrates_v26_dropping_project_root_and_menu_without_losing_sessions() {
+        let dir = temp_dir("migrate-v26-project-root");
+        let path = dir.join(DATABASE_FILE_NAME);
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V28_WORKSPACE_EPOCH}
+                 {V27_REMOTE_SESSION_TABLES}
+                 {V26_PROJECT_ROOT_AND_MENU}
+                 INSERT INTO project(root, position) VALUES ('/repo', 0);
+                 INSERT INTO session_group(id, position, custom_title, last_updated_at, project_root)
+                 VALUES ('g-term', 0, '终端', 7, '/repo'), ('g-acp', 1, NULL, 8, NULL);
+                 INSERT INTO session(id, group_id, kind, cwd, position) VALUES
+                   ('t1', 'g-term', 'terminal', '/repo', 0),
+                   ('t2', 'g-term', 'terminal', '/repo/sub', 1),
+                   ('a1', 'g-acp', 'acp', '/repo', 0);
+                 INSERT INTO acp_detail(session_id, agent, launch_command, session_title)
+                 VALUES ('a1', 'pi', 'smelt-pi', '标题');
+                 INSERT INTO acp_launch_env(session_id, name, value) VALUES ('a1', 'K', 'v');
+                 INSERT INTO acp_config_value(session_id, position, config_id, value_id)
+                 VALUES ('a1', 0, 'model', 'm');
+                 INSERT INTO workspace_menu(id, version, revision, source_id, source_revision)
+                 VALUES (1, 2, 3, 'desktop', 4);"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 26).unwrap();
+        drop(connection);
+
+        drop(Store::open_or_create(&path).unwrap());
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let rows = |sql: &str| -> Vec<String> {
+            connection
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows("SELECT id || ':' || position || ':' || COALESCE(custom_title, '') FROM session_group ORDER BY position"),
+            ["g-term:0:终端", "g-acp:1:"]
+        );
+        assert_eq!(
+            rows("SELECT id || ':' || group_id || ':' || position FROM session ORDER BY id"),
+            ["a1:g-acp:0", "t1:g-term:0", "t2:g-term:1"]
+        );
+        assert_eq!(rows("SELECT session_title FROM acp_detail"), ["标题"]);
+        assert_eq!(rows("SELECT name || '=' || value FROM acp_launch_env"), ["K=v"]);
+        assert_eq!(rows("SELECT config_id || '=' || value_id FROM acp_config_value"), ["model=m"]);
+        assert!(rows("PRAGMA foreign_key_check").is_empty());
+        // 外键接在新表上：删一段对话，它的会话和 ACP 明细跟着走。
+        connection.pragma_update(None, "foreign_keys", "ON").unwrap();
+        connection
+            .execute("DELETE FROM session_group WHERE id = 'g-acp'", [])
+            .unwrap();
+        assert_eq!(rows("SELECT id FROM session ORDER BY id"), ["t1", "t2"]);
+        assert!(rows("SELECT session_id FROM acp_launch_env").is_empty());
+        drop(connection);
+
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v26 升上来的库要和新建的库一个形状"
+        );
+    }
+
     /// v19 的库：worktree 继承两张表随 git worktree 功能下线删掉，其余数据原样留着，
     /// 升级前留一份 `.bak-v19`。
     #[test]
@@ -6446,9 +7142,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
         store.put_runtime_id("runtime-1").unwrap();
-        store
-            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
-            .unwrap();
+        store.open_workspace_project("/a").unwrap();
         store
             .put_remote_config_snapshot(&RemoteConfigSnapshot {
                 enabled: true,
@@ -6459,8 +7153,11 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V21_SESSION_TABLES}
+                "{V28_WORKSPACE_EPOCH}
+                 {V21_SESSION_TABLES}
                  {V21_LAYOUT_NODE_TABLE}
+                 {V25_WORKSPACE_CATALOG_WRITER}
+                 UPDATE workspace_catalog SET writer = 'client-a', writer_seq = 1;
                  {V19_WORKTREE_INHERIT_TABLES}
                  INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);
                  INSERT INTO worktree_inherit_skip_pattern(position, pattern)
@@ -6472,25 +7169,21 @@ CREATE TABLE worktree_inherit_skip_pattern (
 
         let store = Store::open_or_create(&path).unwrap();
         assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
-        assert_eq!(store.workspace_catalog_revision().unwrap(), 1);
-        assert_eq!(catalog_projects(&store), ["/a"]);
+        let (version, snapshot) = store.workspace_directory().unwrap();
+        assert_eq!(version.revision, 1);
+        assert_eq!(
+            snapshot,
+            WorkspaceSnapshot {
+                projects: vec!["/a".to_string()],
+                sessions: Vec::new(),
+            }
+        );
         assert_eq!(
             store.get_remote_config_snapshot().unwrap(),
             Some(RemoteConfigSnapshot {
                 enabled: true,
                 iroh_relay: "relay.example".into(),
             })
-        );
-        // 写入方跟着留下：同一写入方基于旧版本的下一次提交，仍认得出是自己的。
-        assert_eq!(
-            store
-                .commit_workspace_snapshot(
-                    0,
-                    &catalog_writer("client-a", 2),
-                    &catalog_snapshot("/b")
-                )
-                .unwrap(),
-            WorkspaceCatalogCommit::Committed { revision: 2 }
         );
         drop(store);
 
@@ -6537,89 +7230,70 @@ CREATE TABLE worktree_inherit_skip_pattern (
         drop(backup);
     }
 
-    /// 一段终端对话、一段 ACP 对话。终端对话里三个终端故意不按 id 排。
-    fn conversations_json() -> serde_json::Value {
-        serde_json::json!({
-            "projects": ["/repo"],
-            "sessions": [
-                {
-                    "id": "conv-terminals",
-                    "custom_title": "terminal group",
-                    "last_updated_at": 7,
-                    "terminals": [
-                        {"id": "term-3", "cwd": "/repo"},
-                        {"id": "term-1", "cwd": "/repo/src", "custom_title": "tests",
-                         "launch_label": "Codex", "launch_cmd": "codex"},
-                        {"id": "term-2", "cwd": "/repo"}
-                    ]
-                },
-                {
-                    "id": "conv-acp",
-                    "last_updated_at": 8,
-                    "acp": {"sid": "acp-1", "cwd": "/repo", "agent": "pi",
-                            "launch": {"command": "smelt-pi-agent"}}
-                }
-            ]
-        })
-    }
-
+    /// 终端对话里三个终端故意不按 id 排：顺序是客户端给的。
     #[test]
     fn conversations_keep_their_id_and_terminal_order() {
         let dir = temp_dir("conversation-terminals");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        put_workspace_json(&store, &serde_json::to_vec(&conversations_json()).unwrap());
+        let terminal = |id: &str, cwd: &str| WorkspaceTerminalRecord {
+            id: Some(id.into()),
+            cwd: Some(cwd.into()),
+            custom_title: None,
+            launch_label: None,
+            launch_cmd: None,
+        };
+        let terminals = WorkspaceSessionRecord {
+            id: "conv-terminals".into(),
+            custom_title: Some("terminal group".into()),
+            last_updated_at: 7,
+            terminals: vec![
+                terminal("term-3", "/repo"),
+                WorkspaceTerminalRecord {
+                    custom_title: Some("tests".into()),
+                    launch_label: Some("Codex".into()),
+                    launch_cmd: Some("codex".into()),
+                    ..terminal("term-1", "/repo/src")
+                },
+                terminal("term-2", "/repo"),
+            ],
+            acp: None,
+        };
+        store.create_workspace_conversation(&terminals).unwrap();
+        apply_names(&store, &terminals);
+        store
+            .create_workspace_conversation(&acp_conversation("conv-acp", Some("acp-1"), None))
+            .unwrap();
 
-        let restored = workspace_json(&store);
-        let terminals = &restored["sessions"][0];
-        assert_eq!(terminals["id"], "conv-terminals");
-        assert_eq!(terminals["custom_title"], "terminal group");
-        let ids = terminals["terminals"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|terminal| terminal["id"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(ids, ["term-3", "term-1", "term-2"], "顺序是客户端给的");
-        assert_eq!(terminals["terminals"][1]["launch_cmd"], "codex");
-        assert_eq!(restored["sessions"][1]["id"], "conv-acp");
-        assert_eq!(restored["sessions"][1]["acp"]["sid"], "acp-1");
-        assert!(
-            restored["sessions"][1]["terminals"]
-                .as_array()
-                .unwrap()
-                .is_empty()
+        let (_, restored) = store.workspace_directory().unwrap();
+        assert_eq!(restored.sessions[0], terminals);
+        assert_eq!(
+            restored.sessions[0]
+                .terminals
+                .iter()
+                .map(|terminal| terminal.id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["term-3", "term-1", "term-2"],
+            "顺序是客户端给的"
         );
-        // 分屏和当前看的是哪个归客户端，运行时不收也不吐。
-        assert!(terminals.get("layout").is_none());
-        assert!(terminals.get("active").is_none());
+        assert_eq!(restored.sessions[1].id, "conv-acp");
+        assert!(restored.sessions[1].terminals.is_empty());
     }
 
     #[test]
-    fn documents_without_a_stable_conversation_id_are_rejected() {
-        let mut missing = conversations_json();
-        missing["sessions"][1].as_object_mut().unwrap().remove("id");
-        assert!(matches!(
-            Store::workspace_snapshot_from_json(&serde_json::to_vec(&missing).unwrap()),
-            Err(StoreError::ConversationMissingId { position: 1 })
-        ));
-
-        let mut duplicate = conversations_json();
-        duplicate["sessions"][1]["id"] = "conv-terminals".into();
-        assert!(matches!(
-            Store::workspace_snapshot_from_json(&serde_json::to_vec(&duplicate).unwrap()),
-            Err(StoreError::DuplicateConversationId { id }) if id == "conv-terminals"
-        ));
-
-        let dir = temp_dir("empty-conversation");
+    fn conversations_without_an_id_or_content_are_rejected() {
+        let dir = temp_dir("conversation-invalid");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let mut empty = conversations_json();
-        empty["sessions"][0]["terminals"] = serde_json::json!([]);
-        let snapshot =
-            Store::workspace_snapshot_from_json(&serde_json::to_vec(&empty).unwrap()).unwrap();
         assert!(matches!(
-            store.put_workspace_snapshot(&snapshot),
-            Err(StoreError::EmptyConversation { id }) if id == "conv-terminals"
+            store.create_workspace_conversation(&terminal_conversation(" ", "term-1", "/repo")),
+            Err(StoreError::ConversationMissingId)
         ));
+        let mut empty = terminal_conversation("conv-empty", "term-1", "/repo");
+        empty.terminals.clear();
+        assert!(matches!(
+            store.create_workspace_conversation(&empty),
+            Err(StoreError::EmptyConversation { id }) if id == "conv-empty"
+        ));
+        assert!(directory_ids(&store).is_empty());
     }
 
     /// v21 的会话和会话组：会话还没有 `position`，会话组还记着当前看的是哪个。从新建的库
@@ -6714,8 +7388,12 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             let connection = rusqlite::Connection::open(&path).unwrap();
             connection
                 .execute_batch(&format!(
-                    "{V21_SESSION_TABLES}
+                    "{V28_WORKSPACE_EPOCH}
+                 {V27_REMOTE_SESSION_TABLES}
+                     {V26_PROJECT_ROOT_AND_MENU}
+                     {V21_SESSION_TABLES}
                      {layout_node_table}
+                     {V25_WORKSPACE_CATALOG_WRITER}
                      BEGIN;
                      {OLD_LAYOUT_ROWS}
                      COMMIT;"
@@ -6727,7 +7405,7 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             drop(connection);
 
             let store = Store::open_or_create(&path).unwrap();
-            let workspace = store.get_workspace_snapshot().unwrap().unwrap();
+            let (_, workspace) = store.workspace_directory().unwrap();
             assert_eq!(workspace.sessions.len(), 2, "v{version}");
             let terminals = &workspace.sessions[0];
             assert_eq!(terminals.id, "group:0:term-1", "v{version}");
@@ -6773,9 +7451,7 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
 
         assert_eq!(store.workspace_catalog_revision().unwrap(), 0);
-        store
-            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
-            .unwrap();
+        store.open_workspace_project("/a").unwrap();
         assert_eq!(store.workspace_catalog_revision().unwrap(), 1);
 
         store
@@ -6838,33 +7514,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         };
         store.put_quota_cache_snapshot(&quota).unwrap();
         assert_eq!(store.get_quota_cache_snapshot().unwrap(), Some(quota));
-
-        let menu = PublishedWorkspaceMenuSnapshot {
-            version: 2,
-            revision: 12,
-            source_id: "desktop".into(),
-            source_revision: 3,
-            projects: vec![WorkspaceMenuProjectRecord {
-                root: "/repo".into(),
-                title: "repo".into(),
-                order: 0,
-            }],
-            sessions: vec![WorkspaceMenuSessionRecord {
-                id: "s1".into(),
-                kind: "acp".into(),
-                title: "对话".into(),
-                custom_title: true,
-                cwd: Some("/repo".into()),
-                project_root: Some("/repo".into()),
-                project_title: Some("repo".into()),
-                project_order: 0,
-                session_order: 1,
-                leaf_order: 0,
-                agent: Some("pi".into()),
-            }],
-        };
-        store.put_workspace_menu_snapshot(&menu).unwrap();
-        assert_eq!(store.get_workspace_menu_snapshot().unwrap(), Some(menu));
 
         assert_eq!(
             store.memory_settings().unwrap(),

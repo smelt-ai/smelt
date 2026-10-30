@@ -432,6 +432,61 @@ void main() {
       expect(find.byTooltip('Stop this turn'), findsNothing);
     });
 
+    testWidgets('压缩完了状态行回到阶段，空闲时手动压缩也有一行', (tester) async {
+      usePhone(tester);
+      final backend = RecordingBackend(manualWatch: true);
+      await tester.pumpWidget(host(startModel(backend), _page));
+      await tester.pump();
+      backend.watch.add(snapshot(view(compacting: true)));
+      await tester.pump();
+      expect(find.text('Compacting context…'), findsOneWidget);
+
+      backend.watch.add(snapshot(view(phase: ConversationPhase.thinking)));
+      await tester.pump();
+      expect(find.text('Compacting context…'), findsNothing);
+      expect(find.text('Thinking'), findsWidgets);
+    });
+
+    testWidgets('提示画在输入框上方，关掉后同一条不再出来，新的照常出来', (tester) async {
+      usePhone(tester);
+      final backend = RecordingBackend(manualWatch: true);
+      await tester.pumpWidget(host(startModel(backend), _page));
+      await tester.pump();
+      backend.watch.add(
+        snapshot(
+          view(
+            notice: const ConversationNotice(id: 10, text: 'compaction failed'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('compaction failed'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Dismiss notice'));
+      await tester.pumpAndSettle();
+      expect(find.text('compaction failed'), findsNothing);
+
+      backend.watch.add(
+        snapshot(
+          view(
+            notice: const ConversationNotice(id: 10, text: 'compaction failed'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('compaction failed'), findsNothing);
+
+      backend.watch.add(
+        snapshot(
+          view(
+            notice: const ConversationNotice(id: 11, text: 'model rejected'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('model rejected'), findsOneWidget);
+    });
+
     testWidgets('空闲时没有停止钮', (tester) async {
       usePhone(tester);
       final backend = RecordingBackend(manualWatch: true);

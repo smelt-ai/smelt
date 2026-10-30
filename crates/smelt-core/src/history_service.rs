@@ -8,7 +8,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use smelt_runtime_client::protocol::history::{
     HistoryDeleteParams, HistoryDetail, HistoryListParams, HistoryListResult,
-    HistoryRememberAgentParams, HistorySession, HistoryTitle, HistoryTitlesResult, HistoryTurn,
+    HistoryRememberAgentParams, HistorySession, HistoryTurn,
 };
 
 use crate::agent_kind::HistorySourceKind;
@@ -167,20 +167,6 @@ pub fn remember_agent(params: &HistoryRememberAgentParams) -> Result<(), History
         &params.agent_definition_id,
     )
     .map_err(HistoryError::Io)
-}
-
-pub fn titles() -> HistoryTitlesResult {
-    HistoryTitlesResult {
-        titles: crate::session_metadata::all_custom_titles()
-            .into_iter()
-            .map(|((agent, profile_id, resume_id), title)| HistoryTitle {
-                agent,
-                profile_id,
-                resume_id,
-                title,
-            })
-            .collect(),
-    }
 }
 
 #[cfg(test)]

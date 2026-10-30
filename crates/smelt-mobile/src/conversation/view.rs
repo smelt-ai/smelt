@@ -14,11 +14,11 @@ use smelt_model::daemon_state::DaemonPhase;
 
 use crate::api::conversation::{
     ApprovalDetails, ApprovalKind, ChoiceOption, ConfigOption, ContextUsage, ConversationEntry,
-    ConversationImage, ConversationPhase, ConversationView, DiffView, Elicitation,
-    ElicitationField, ElicitationFieldKind, EntryKind, ImageRef, ModelProvider, ModelSelector,
-    PermissionOption, PermissionOptionKind, PermissionRequest, PlanStep, PlanStepStatus,
-    SlashCommand, TaskNoteKind, TaskNoteView, ToolCallView, ToolKind, ToolOutput, ToolOutputKind,
-    ToolStatus,
+    ConversationImage, ConversationNotice, ConversationPhase, ConversationView, DiffView,
+    Elicitation, ElicitationField, ElicitationFieldKind, EntryKind, ImageRef, ModelProvider,
+    ModelSelector, PermissionOption, PermissionOptionKind, PermissionRequest, PlanStep,
+    PlanStepStatus, SlashCommand, TaskNoteKind, TaskNoteView, ToolCallView, ToolKind, ToolOutput,
+    ToolOutputKind, ToolStatus,
 };
 
 pub(crate) fn conversation_view(
@@ -37,6 +37,11 @@ pub(crate) fn conversation_view(
         session_id: session_id.to_string(),
         phase,
         status_line: snapshot.status_line.clone(),
+        compacting: snapshot.compacting,
+        notice: snapshot.notice.as_ref().map(|notice| ConversationNotice {
+            id: to_i64_u64(notice.id),
+            text: notice.text.clone(),
+        }),
         end_reason: snapshot.end_reason.clone(),
         session_title: snapshot.session_title.clone(),
         turn_started_at_ms: snapshot.turn_started_at_ms.map(to_i64_u64),

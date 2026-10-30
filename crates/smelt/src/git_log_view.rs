@@ -540,7 +540,6 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
                 .py(px(1.0))
                 .text_sm()
                 .rounded_sm()
-                
                 .hover(|d| d.bg(accent))
                 .when(is_sel, |d| d.bg(accent))
                 .on_click(move |_ev, _w, cx| {
@@ -638,7 +637,6 @@ pub fn branch_tree(
             .py(px(1.0))
             .text_sm()
             .rounded_sm()
-            
             .hover(|d| d.bg(accent))
             .when(on, |d| d.bg(accent))
             .on_click(move |_ev, _w, cx| {

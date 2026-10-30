@@ -12,9 +12,9 @@ use smelt_core::automation::{Automation, AutomationCommand, redact_automation_cr
 use smelt_core::automation_store::AutomationStore;
 use smelt_core::control_api::{
     AgentDefinitionGetResult, AgentDefinitionIdParams, AgentDefinitionListResult,
-    AgentDefinitionUpdateParams, AgentMemoryRecordReadParams,
-    AgentMemoryRecordWriteParams, AgentMemorySessionParams, AutomationGetResult,
-    AutomationListResult, AutomationRunOnceResult, AutomationSetEnabledParams, SessionListResult,
+    AgentDefinitionUpdateParams, AgentMemoryRecordReadParams, AgentMemoryRecordWriteParams,
+    AgentMemorySessionParams, AutomationGetResult, AutomationListResult, AutomationRunOnceResult,
+    AutomationSetEnabledParams, SessionListResult,
 };
 use smelt_runtime_client::protocol::control::{
     CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlError, ControlErrorCode,
@@ -24,7 +24,7 @@ use smelt_runtime_client::protocol::control::{
 };
 
 use super::session_catalog::published_session_states;
-use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceMenuStore};
+use super::{AcpSessions, EventHubHandle, Sessions, WorkspaceDirectoryReader};
 
 fn error_value(
     control_version: u16,
@@ -66,17 +66,31 @@ fn params_or_error<T: serde::de::DeserializeOwned>(
     decode_params(params).map_err(|error| error_value(control_version, request_id, error))
 }
 
+fn directory_response(
+    control_version: u16,
+    request_id: String,
+    result: Result<smelt_core::workspace_directory::WorkspaceRevision, ControlError>,
+) -> serde_json::Value {
+    match result {
+        Ok(revision) => success_value(control_version, &request_id, revision),
+        Err(error) => error_value(control_version, request_id, error),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_control(
     envelope: ControlRequestEnvelope,
     principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
+    // 控制连接对端 pid；记忆相关方法靠它区分「会话进程本身」与 bash 子孙 / GUI。
+    peer_pid: Option<u32>,
+    // 本机对端已经通过第一方桌面签名校验。采纳/删除的白名单用它，不靠进程树黑名单。
+    desktop_authenticated: bool,
 ) -> serde_json::Value {
     let ControlRequestEnvelope {
         control_version,
@@ -179,10 +193,16 @@ fn dispatch_control(
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
         | ControlMethod::HistoryDelete
-        | ControlMethod::HistoryTitles
         | ControlMethod::HistoryRememberAgent) => {
             match super::history_control::dispatch(history, params) {
-                Ok(result) => success_value(control_version, &request_id, result),
+                Ok(result) => {
+                    if history == ControlMethod::HistoryDelete {
+                        // 删存档连同名字一起清：侧栏里对这段对话的名字跟着变。
+                        super::workspace_directory::publish_current(event_hub);
+                        super::terminal_names::refresh_all(sessions, event_hub);
+                    }
+                    success_value(control_version, &request_id, result)
+                }
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
@@ -456,7 +476,6 @@ fn dispatch_control(
                 sessions,
                 acp_sessions,
                 event_hub,
-                remote_sessions,
             ) {
                 Ok(created) => success_value(control_version, &request_id, created),
                 Err(error) => error_value(
@@ -487,8 +506,7 @@ fn dispatch_control(
                 params,
                 sessions,
                 acp_sessions,
-                remote_sessions,
-                workspace_menu,
+                workspace_directory,
                 event_hub,
             ) {
                 Ok(result) => success_value(control_version, &request_id, result),
@@ -505,8 +523,7 @@ fn dispatch_control(
                 &params.session_id,
                 sessions,
                 acp_sessions,
-                remote_sessions,
-                workspace_menu,
+                workspace_directory,
                 automations,
                 event_hub,
             ) {
@@ -677,6 +694,18 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
+            // 本机：签过名的桌面进程，并且不是智能体会话进程树里的人。
+            // 已配对的远程设备直接放行。孤儿进程（PPID=1）靠黑名单认不出来，所以白名单是主闸。
+            // 单元测试走 dispatch_control(..., None, false)，允许没有对端。
+            if let Err(error) = crate::memory_peer_auth::authorize_memory_mutation(
+                acp_sessions,
+                principal,
+                peer_pid,
+                desktop_authenticated,
+                cfg!(test),
+            ) {
+                return error_value(control_version, request_id, error);
+            }
             let result = if known_method == ControlMethod::AgentMemoryDelete {
                 smelt_core::agent_memory::delete_for_agent(
                     &params.agent_id,
@@ -714,51 +743,112 @@ fn dispatch_control(
                 ),
             }
         }
-        ControlMethod::WorkspaceLoad => {
-            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
-                Ok(params) => params,
-                Err(response) => return response,
-            };
-            match smelt_core::workspace_catalog::load() {
-                Ok(result) => success_value(control_version, &request_id, result),
-                Err(error) => error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
-                ),
-            }
-        }
-        ControlMethod::WorkspaceSave => {
-            let params: smelt_runtime_client::protocol::workspace::WorkspaceSaveParams =
+        ControlMethod::WorkspaceConversationCreate => {
+            let params: smelt_core::workspace_directory::WorkspaceConversation =
                 match params_or_error(control_version, &request_id, params) {
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match smelt_core::workspace_catalog::save(&params) {
-                Ok(revision) => success_value(
-                    control_version,
-                    &request_id,
-                    smelt_runtime_client::protocol::workspace::WorkspaceSaveResult { revision },
-                ),
-                Err(error) => {
-                    let code = match error {
-                        smelt_core::workspace_catalog::CatalogError::Conflict { .. } => {
-                            ControlErrorCode::Conflict
-                        }
-                        smelt_core::workspace_catalog::CatalogError::Invalid(_) => {
-                            ControlErrorCode::InvalidParams
-                        }
-                        smelt_core::workspace_catalog::CatalogError::Store(_) => {
-                            ControlErrorCode::OperationFailed
-                        }
-                    };
-                    error_value(
-                        control_version,
-                        request_id,
-                        ControlError::new(code, error.to_string()),
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::create_conversation(&store, &params, event_hub)
+                }),
+            )
+        }
+        ControlMethod::WorkspaceConversationUpdate => {
+            let params: smelt_core::workspace_directory::WorkspaceConversation =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::update_conversation(&store, &params, event_hub)
+                }),
+            )
+        }
+        ControlMethod::WorkspaceConversationDelete => {
+            let params: smelt_core::workspace_directory::WorkspaceConversationIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::delete_conversation(
+                        &store,
+                        &params.conversation_id,
+                        sessions,
+                        acp_sessions,
+                        automations,
+                        event_hub,
                     )
-                }
+                }),
+            )
+        }
+        ControlMethod::WorkspaceProjectOpen => {
+            let params: smelt_core::workspace_directory::WorkspaceProjectParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::open_project(&store, &params.root, event_hub)
+                }),
+            )
+        }
+        ControlMethod::WorkspaceRename => {
+            let params: smelt_core::workspace_directory::WorkspaceRenameParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store()
+                    .and_then(|store| {
+                        super::workspace_directory::rename(&store, &params, acp_sessions, event_hub)
+                    })
+                    .inspect(|_| super::terminal_names::refresh_all(sessions, event_hub)),
+            )
+        }
+        ControlMethod::WorkspaceDirectoryGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match workspace_directory.read() {
+                Ok(directory) => success_value(control_version, &request_id, directory),
+                Err(message) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::TemporarilyUnavailable, message),
+                ),
             }
+        }
+        ControlMethod::WorkspaceProjectClose => {
+            let params: smelt_core::workspace_directory::WorkspaceProjectParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::close_project(&store, &params.root, event_hub)
+                }),
+            )
         }
         ControlMethod::LaunchGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
@@ -867,7 +957,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match super::agent_memory_control::meta(&params, acp_sessions) {
+            match super::agent_memory_control::meta(&params, acp_sessions, peer_pid) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => error_value(control_version, request_id, error),
             }
@@ -878,7 +968,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match super::agent_memory_control::record_read(&params, acp_sessions) {
+            match super::agent_memory_control::record_read(&params, acp_sessions, peer_pid) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(control_version, request_id, error),
             }
@@ -889,7 +979,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match super::agent_memory_control::record_write(&params, acp_sessions) {
+            match super::agent_memory_control::record_write(&params, acp_sessions, peer_pid) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(control_version, request_id, error),
             }
@@ -1254,54 +1344,51 @@ fn run_automation_once(
     Ok(applied.result)
 }
 
-/// 用产品智能体定义开一场对话：会话进运行时的远程目录，桌面会投影到「对话」栏。
+/// 用产品智能体定义开一场对话：起好写进工作区目录，桌面放进「对话」栏。
 fn create_agent_conversation(
     agent_definition_id: &str,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     event_hub: &EventHubHandle,
-    remote_sessions: &RemoteSessions,
 ) -> Result<smelt_core::session_control::CreatedAgentConversation, String> {
-    let session = smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
-    let created = smelt_core::session_control::CreatedAgentConversation {
-        session_id: session.id.clone(),
+    let conversation =
+        smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
+    super::acp_host::open_daemon_conversation(&conversation, sessions, acp_sessions, event_hub)?;
+    Ok(smelt_core::session_control::CreatedAgentConversation {
+        session_id: conversation.sid,
         agent_definition_id: agent_definition_id.trim().to_string(),
-        cwd: session.cwd.clone(),
-    };
-    super::session_control::create_remote_acp_session(
-        session,
-        sessions,
-        acp_sessions,
-        event_hub,
-        remote_sessions,
-    )?;
-    Ok(created)
+        cwd: conversation.cwd,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_control<C: ClientSocket>(
+pub(crate) fn handle_control<C: ClientSocket + crate::protocol::PeerSource>(
     mut conn: C,
     payload: serde_json::Value,
     principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
 ) {
+    // Unix 走 getsockopt，Windows 管道走 client pid + 映像路径。
+    // 取不到就当未认证：采纳/删除拒绝，会话记忆方法也拒绝。
+    let peer_pid = crate::memory_peer_auth::peer_pid(&conn).ok();
+    let desktop_authenticated = crate::protocol::authenticate_first_party_peer(&conn).is_ok();
     let response = match decode_request_envelope(payload) {
         Ok(envelope) => dispatch_control(
             envelope,
             principal,
             sessions,
             acp_sessions,
-            remote_sessions,
-            workspace_menu,
+            workspace_directory,
             automations,
             event_hub,
             exe_mtime,
+            peer_pid,
+            desktop_authenticated,
         ),
         Err(failure) => error_value(failure.response_version, failure.request_id, failure.error),
     };
@@ -1310,8 +1397,8 @@ pub(crate) fn handle_control<C: ClientSocket>(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader};
     use smelt_runtime_client::UnixStream;
+    use std::io::{BufRead, BufReader};
 
     use smelt_runtime_client::protocol::control::{
         CONTROL_API_VERSION, ControlErrorCode, ControlOutcome, ControlResponse, EmptyParams,
@@ -1343,8 +1430,7 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             123,
@@ -1392,11 +1478,12 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             0,
+            None,
+            false,
         );
 
         assert_eq!(response["control_version"], 2);
@@ -1417,11 +1504,12 @@ mod tests {
             &crate::devices::Principal::Local,
             &super::super::new_sessions(),
             &super::super::new_test_acp_sessions(),
-            &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &smelt_core::automation_store::new_automation_store(),
             &super::super::new_event_hub(),
             0,
+            None,
+            false,
         )
     }
 
@@ -1484,8 +1572,7 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             0,
@@ -1520,8 +1607,7 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             0,

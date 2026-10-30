@@ -80,6 +80,8 @@
   "conversationImageLoadFailed": "Couldn't load the original: {message}",
   "@conversationImageLoadFailed": {"placeholders": {"message": {"type": "String"}}},
   "conversationStatusEnded": "Session ended",
+  "conversationStatusCompacting": "Compacting context…",
+  "conversationNoticeDismiss": "Dismiss notice",
   "conversationHint": "Message {agent}",
   "@conversationHint": {"placeholders": {"agent": {"type": "String"}}},
   "conversationHintOffline": "Machine is offline. Your draft is kept.",

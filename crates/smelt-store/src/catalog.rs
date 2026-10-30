@@ -3,8 +3,7 @@
 use crate::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, PublishedSessionRecord,
-    PublishedSessionSnapshot, RemoteAcpSessionRecord, RemoteSessionCatalogSnapshot,
-    RemoteTerminalSessionRecord, StoreError,
+    PublishedSessionSnapshot, StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -191,60 +190,6 @@ pub(crate) fn delete_agent_definition(
 ) -> Result<bool, StoreError> {
     let changed = transaction.execute("DELETE FROM agent_definition WHERE id = ?1", [id])?;
     Ok(changed > 0)
-}
-
-pub(crate) fn read_remote_session_snapshot(
-    connection: &Connection,
-) -> Result<Option<RemoteSessionCatalogSnapshot>, StoreError> {
-    let acp = query_remote_acp(connection)?;
-    let terminal = query_remote_terminal(connection)?;
-    if acp.is_empty() && terminal.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(RemoteSessionCatalogSnapshot { acp, terminal }))
-}
-
-pub(crate) fn write_remote_session_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &RemoteSessionCatalogSnapshot,
-) -> Result<(), StoreError> {
-    transaction.execute("DELETE FROM remote_acp_session", [])?;
-    transaction.execute("DELETE FROM remote_terminal_session", [])?;
-    for session in &snapshot.acp {
-        transaction.execute(
-            "INSERT INTO remote_acp_session(
-                   id, cwd, title, agent_option_id, agent, launch_command, launch_env_json,
-                   resume_id, created_at, lifecycle, hidden
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                session.id,
-                session.cwd,
-                session.title,
-                session.agent_option_id,
-                session.agent,
-                session.launch_command,
-                &session.launch_env_json,
-                session.resume_id.as_deref(),
-                session.created_at,
-                session.lifecycle,
-                i64::from(session.hidden),
-            ],
-        )?;
-    }
-    for session in &snapshot.terminal {
-        transaction.execute(
-            "INSERT INTO remote_terminal_session(id, cwd, title, created_at, lifecycle)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                session.id,
-                session.cwd,
-                session.title,
-                session.created_at,
-                session.lifecycle,
-            ],
-        )?;
-    }
-    Ok(())
 }
 
 pub(crate) fn read_published_session_snapshot(
@@ -437,47 +382,3 @@ fn query_profiles(connection: &Connection) -> Result<Vec<AgentProfileRecord>, St
         .map_err(StoreError::from)
 }
 
-fn query_remote_acp(connection: &Connection) -> Result<Vec<RemoteAcpSessionRecord>, StoreError> {
-    let mut statement = connection.prepare(
-        "SELECT id, cwd, title, agent_option_id, agent, launch_command, launch_env_json,
-                    resume_id, created_at, lifecycle, hidden
-             FROM remote_acp_session ORDER BY created_at, id",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(RemoteAcpSessionRecord {
-            id: row.get(0)?,
-            cwd: row.get(1)?,
-            title: row.get(2)?,
-            agent_option_id: row.get(3)?,
-            agent: row.get(4)?,
-            launch_command: row.get(5)?,
-            launch_env_json: row.get(6)?,
-            resume_id: row.get(7)?,
-            created_at: row.get(8)?,
-            lifecycle: row.get(9)?,
-            hidden: row.get::<_, i64>(10)? != 0,
-        })
-    })?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
-}
-
-fn query_remote_terminal(
-    connection: &Connection,
-) -> Result<Vec<RemoteTerminalSessionRecord>, StoreError> {
-    let mut statement = connection.prepare(
-        "SELECT id, cwd, title, created_at, lifecycle
-             FROM remote_terminal_session ORDER BY created_at, id",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(RemoteTerminalSessionRecord {
-            id: row.get(0)?,
-            cwd: row.get(1)?,
-            title: row.get(2)?,
-            created_at: row.get(3)?,
-            lifecycle: row.get(4)?,
-        })
-    })?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
-}

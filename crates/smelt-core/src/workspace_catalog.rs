@@ -1,97 +1,348 @@
-//! `workspace.load` / `workspace.save` 背后的运行时实现：工作区目录的持久化和版本。
+//! 运行时的工作区目录：持久化、版本，和改它的单条改动。
 //!
-//! 版本号单独一行，每次保存加一。保存必须基于当前版本，否则拒绝：两个客户端
-//! 同时开着时，后到的那份不能悄悄盖掉先到的。唯一的例外是当前版本就是同一个写入方
-//! 提交的（回执丢了，它还停在旧版本），规则见 `Store::commit_workspace_snapshot`。
+//! 目录只经单条改动写：客户端发来的 `workspace.conversation.*`、`workspace.project.*`，
+//! 和运行时自己的改动（对话改名、守护确认或放弃恢复身份）。每条在存储层的一个事务里
+//! 原子执行，按 id 幂等，不带基准版本，多个客户端同时改不会互相覆盖；真改了才推进版本。
+//! 改完返回整份目录，由守护经 `workspace.changed` 推给所有客户端。
 
 use std::sync::Mutex;
 
-use smelt_runtime_client::protocol::workspace::{WorkspaceLoadResult, WorkspaceSaveParams};
+use smelt_model::agent_kind::ConversationLaunchSpec;
+use smelt_model::conversation::ConversationBinding;
+use smelt_model::workspace_directory::{
+    WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+};
 
-/// 读版本、比对、写快照、写版本在存储层的一个事务里完成。运行时里改工作区快照的
-/// 其它入口（比如持久化对话标题）是先读后写，要拿这把锁跟保存互斥。
-pub(crate) static CATALOG_LOCK: Mutex<()> = Mutex::new(());
+/// 改动和随后读回整份目录要连在一起，见 [`change_on`]。
+static CATALOG_LOCK: Mutex<()> = Mutex::new(());
 
+/// 单条改动（`workspace.conversation.*`、`workspace.project.*`）失败的原因。
 #[derive(Debug, PartialEq, Eq)]
-pub enum CatalogError {
-    /// 客户端基于的版本已经过时。
-    Conflict {
-        current: u64,
-    },
-    /// 文档不符合存储格式。
+pub enum DirectoryError {
+    /// 要改的对话已经不在（别的客户端关掉了）。
+    NotFound(String),
+    /// 参数不合法：缺 id、空对话、会话 id 撞了别的对话。
     Invalid(String),
     Store(String),
 }
 
-impl std::fmt::Display for CatalogError {
+impl std::fmt::Display for DirectoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { .. } => f.write_str("工作区已在别处被修改"),
-            Self::Invalid(message) => write!(f, "工作区文档无效：{message}"),
-            Self::Store(message) => f.write_str(message),
+            Self::NotFound(message) | Self::Invalid(message) | Self::Store(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
 
-fn revision_on(store: &smelt_store::Store) -> Result<u64, CatalogError> {
-    store
-        .workspace_catalog_revision()
-        .map_err(|e| CatalogError::Store(e.to_string()))
-}
-
-pub fn load_on(store: &smelt_store::Store) -> Result<WorkspaceLoadResult, CatalogError> {
-    let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let revision = revision_on(store)?;
-    let snapshot = store
-        .get_workspace_snapshot()
-        .map_err(|e| CatalogError::Store(e.to_string()))?;
-    let document = match snapshot {
-        Some(snapshot) => {
-            let raw = smelt_store::Store::workspace_snapshot_to_json(&snapshot)
-                .map_err(|e| CatalogError::Store(e.to_string()))?;
-            Some(serde_json::from_slice(&raw).map_err(|e| CatalogError::Store(e.to_string()))?)
+impl From<smelt_store::StoreError> for DirectoryError {
+    fn from(error: smelt_store::StoreError) -> Self {
+        use smelt_store::StoreError;
+        match error {
+            StoreError::ConversationNotFound { .. } => Self::NotFound(error.to_string()),
+            StoreError::ConversationMissingId
+            | StoreError::EmptyConversation { .. }
+            | StoreError::AcpConversationMissingSid { .. }
+            | StoreError::DuplicateSessionId { .. }
+            | StoreError::EmptyProjectRoot => Self::Invalid(error.to_string()),
+            error => Self::Store(error.to_string()),
         }
-        None => None,
-    };
-    Ok(WorkspaceLoadResult { revision, document })
+    }
 }
 
-pub fn save_on(
+/// 一次单条改动的结果：改完的整份目录（`changed` 时由调用方推送），和关掉的那段对话。
+pub struct DirectoryChange {
+    pub directory: WorkspaceDirectory,
+    pub changed: bool,
+    pub removed: Option<WorkspaceConversation>,
+}
+
+pub fn directory_on(store: &smelt_store::Store) -> Result<WorkspaceDirectory, DirectoryError> {
+    let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (version, snapshot) = store.workspace_directory()?;
+    Ok(directory_from_snapshot(version, snapshot))
+}
+
+pub fn create_conversation_on(
     store: &smelt_store::Store,
-    params: &WorkspaceSaveParams,
-) -> Result<u64, CatalogError> {
-    let raw =
-        serde_json::to_vec(&params.document).map_err(|e| CatalogError::Invalid(e.to_string()))?;
-    let snapshot = smelt_store::Store::workspace_snapshot_from_json(&raw)
-        .map_err(|e| CatalogError::Invalid(e.to_string()))?;
-    if params.writer.trim().is_empty() {
-        return Err(CatalogError::Invalid("缺少写入方".to_string()));
-    }
-    let writer = smelt_store::WorkspaceCatalogWriter {
-        id: params.writer.clone(),
-        seq: params.writer_seq,
-    };
-    let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    match store
-        .commit_workspace_snapshot(params.base_revision, &writer, &snapshot)
-        .map_err(|e| CatalogError::Store(e.to_string()))?
-    {
-        smelt_store::WorkspaceCatalogCommit::Committed { revision } => Ok(revision),
-        smelt_store::WorkspaceCatalogCommit::Conflict { current } => {
-            Err(CatalogError::Conflict { current })
+    conversation: &WorkspaceConversation,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let commit = store.create_workspace_conversation(&conversation_record(conversation))?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn update_conversation_on(
+    store: &smelt_store::Store,
+    conversation: &WorkspaceConversation,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let commit = store.update_workspace_conversation(&conversation_record(conversation))?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn delete_conversation_on(
+    store: &smelt_store::Store,
+    id: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let (commit, removed) = store.delete_workspace_conversation(id)?;
+        Ok((commit.changed, removed.map(conversation_from_record)))
+    })
+}
+
+pub fn open_project_on(
+    store: &smelt_store::Store,
+    root: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.open_workspace_project(root)?.changed, None))
+    })
+}
+
+pub fn close_project_on(
+    store: &smelt_store::Store,
+    root: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.close_workspace_project(root)?.changed, None))
+    })
+}
+
+/// 一个会话被删掉了（手机、命令行的 `session.delete`；进程调用方已经收掉）：从目录里摘掉。
+/// ACP 会话删整段对话；终端只摘这一格，摘完没有终端了删整段对话。不在目录里的会话
+/// （只在远程目录里的）不改。读和改在同一把锁里，不会夹进别的改动。
+pub fn forget_session_on(
+    store: &smelt_store::Store,
+    session_id: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let (version, snapshot) = store.workspace_directory()?;
+        let directory = directory_from_snapshot(version, snapshot);
+        let Some(conversation) = directory.conversations.into_iter().find(|conversation| {
+            conversation.acp.as_ref().is_some_and(|acp| acp.sid == session_id)
+                || conversation
+                    .terminals
+                    .iter()
+                    .any(|terminal| terminal.id.as_deref() == Some(session_id))
+        }) else {
+            return Ok((false, None));
+        };
+        let mut remaining = conversation.clone();
+        remaining
+            .terminals
+            .retain(|terminal| terminal.id.as_deref() != Some(session_id));
+        if remaining.acp.is_some() || remaining.terminals.is_empty() {
+            let (commit, removed) = store.delete_workspace_conversation(&conversation.id)?;
+            return Ok((commit.changed, removed.map(conversation_from_record)));
         }
+        let commit = store.update_workspace_conversation(&conversation_record(&remaining))?;
+        Ok((commit.changed, None))
+    })
+}
+
+/// 把以 `sid` 为 ACP 会话的那段对话改名（命令行、Pi 工具按会话 id 改），`None` 是清掉。
+/// 名字写在哪见 [`rename_conversation_on`]。没有这段对话不改动。
+pub fn rename_acp_conversation_on(
+    store: &smelt_store::Store,
+    sid: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.rename_workspace_acp_conversation(sid, title)?.changed, None))
+    })
+}
+
+/// 给一段对话改名，`None` 是清掉。认得出 provider 身份的 ACP 对话，名字属于那段 provider
+/// 对话（`history_title`，历史页、手机看到的同一份）；没有身份的写对话自己的。
+pub fn rename_conversation_on(
+    store: &smelt_store::Store,
+    conversation_id: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.rename_workspace_conversation(conversation_id, title)?.changed, None))
+    })
+}
+
+/// 给一格还认不出 provider 身份的终端改名。
+pub fn rename_terminal_on(
+    store: &smelt_store::Store,
+    terminal_id: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.rename_workspace_terminal(terminal_id, title)?.changed, None))
+    })
+}
+
+/// agent 报的标题变了。只由守护写，客户端改对话时带来的不算数。
+pub fn set_acp_session_title_on(
+    store: &smelt_store::Store,
+    sid: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.set_workspace_acp_session_title(sid, title)?.changed, None))
+    })
+}
+
+/// 一段 provider 对话的名字（历史页改名、认得出身份的终端分屏改名），`None` 是清掉。
+pub fn set_history_title_on(
+    store: &smelt_store::Store,
+    agent: &str,
+    profile_id: Option<&str>,
+    resume_id: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((
+            store
+                .set_workspace_history_title(agent, profile_id, resume_id, title)?
+                .changed,
+            None,
+        ))
+    })
+}
+
+/// 改动和随后读回整份目录在同一把锁里：推出去的那份正是这次改完的样子，不会夹进
+/// 别的改动又带着旧版本号。
+fn change_on(
+    store: &smelt_store::Store,
+    change: impl FnOnce(
+        &smelt_store::Store,
+    ) -> Result<(bool, Option<WorkspaceConversation>), smelt_store::StoreError>,
+) -> Result<DirectoryChange, DirectoryError> {
+    let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (changed, removed) = change(store)?;
+    let (version, snapshot) = store.workspace_directory()?;
+    Ok(DirectoryChange {
+        directory: directory_from_snapshot(version, snapshot),
+        changed,
+        removed,
+    })
+}
+
+pub fn directory() -> Result<WorkspaceDirectory, DirectoryError> {
+    directory_on(&default_store()?)
+}
+
+fn default_store() -> Result<smelt_store::Store, DirectoryError> {
+    crate::sqlite_state::default_sqlite_store().map_err(DirectoryError::Store)
+}
+
+fn directory_from_snapshot(
+    version: smelt_store::WorkspaceCatalogVersion,
+    snapshot: smelt_store::WorkspaceSnapshot,
+) -> WorkspaceDirectory {
+    WorkspaceDirectory {
+        epoch: version.epoch,
+        revision: version.revision,
+        projects: snapshot.projects,
+        conversations: snapshot
+            .sessions
+            .into_iter()
+            .map(conversation_from_record)
+            .collect(),
     }
 }
 
-pub fn load() -> Result<WorkspaceLoadResult, CatalogError> {
-    load_on(&crate::sqlite_state::default_sqlite_store().map_err(CatalogError::Store)?)
+fn conversation_record(conversation: &WorkspaceConversation) -> smelt_store::WorkspaceSessionRecord {
+    smelt_store::WorkspaceSessionRecord {
+        id: conversation.id.clone(),
+        custom_title: conversation.custom_title.clone(),
+        last_updated_at: conversation.last_updated_at,
+        terminals: conversation
+            .terminals
+            .iter()
+            .map(|terminal| smelt_store::WorkspaceTerminalRecord {
+                id: terminal.id.clone(),
+                cwd: terminal.cwd.clone(),
+                custom_title: terminal.custom_title.clone(),
+                launch_label: terminal.launch_label.clone(),
+                launch_cmd: terminal.launch_cmd.clone(),
+            })
+            .collect(),
+        acp: conversation.acp.as_ref().map(acp_record),
+    }
 }
 
-pub fn save(params: &WorkspaceSaveParams) -> Result<u64, CatalogError> {
-    save_on(
-        &crate::sqlite_state::default_sqlite_store().map_err(CatalogError::Store)?,
-        params,
-    )
+fn acp_record(acp: &WorkspaceAcp) -> smelt_store::WorkspaceAcpRecord {
+    smelt_store::WorkspaceAcpRecord {
+        cwd: acp.cwd.clone(),
+        sid: Some(acp.sid.clone()),
+        agent: acp.agent.clone(),
+        profile_id: acp.profile_id.clone(),
+        history_session_id: acp.history_session_id.clone(),
+        launch_command: acp.launch.command.clone(),
+        launch_env: acp
+            .launch
+            .env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        refresh_launch_from_settings: acp.refresh_launch_from_settings,
+        pending_prompt: acp.pending_prompt.clone(),
+        pending_delivery_id: acp.pending_delivery_id.clone(),
+        agent_definition_id: acp.agent_definition_id.clone(),
+        automation_id: acp.automation_id.clone(),
+        config_values: acp.config_values.clone(),
+        binding_automation_run_id: match &acp.conversation_binding {
+            ConversationBinding::Automation { run_id } => Some(run_id.clone()),
+            ConversationBinding::Direct => None,
+        },
+        pending_agent_preset: acp.pending_agent_preset.clone(),
+        session_title: acp.session_title.clone(),
+    }
+}
+
+fn conversation_from_record(record: smelt_store::WorkspaceSessionRecord) -> WorkspaceConversation {
+    WorkspaceConversation {
+        id: record.id,
+        custom_title: record.custom_title,
+        last_updated_at: record.last_updated_at,
+        terminals: record
+            .terminals
+            .into_iter()
+            .map(|terminal| WorkspaceTerminal {
+                id: terminal.id,
+                cwd: terminal.cwd,
+                custom_title: terminal.custom_title,
+                launch_label: terminal.launch_label,
+                launch_cmd: terminal.launch_cmd,
+            })
+            .collect(),
+        acp: record.acp.map(acp_from_record),
+    }
+}
+
+fn acp_from_record(acp: smelt_store::WorkspaceAcpRecord) -> WorkspaceAcp {
+    WorkspaceAcp {
+        cwd: acp.cwd,
+        sid: acp.sid.unwrap_or_default(),
+        agent: acp.agent,
+        profile_id: acp.profile_id,
+        history_session_id: acp.history_session_id,
+        launch: ConversationLaunchSpec {
+            command: acp.launch_command,
+            env: acp.launch_env.into_iter().collect(),
+        },
+        refresh_launch_from_settings: acp.refresh_launch_from_settings,
+        conversation_binding: match acp.binding_automation_run_id {
+            Some(run_id) => ConversationBinding::Automation { run_id },
+            None => ConversationBinding::Direct,
+        },
+        config_values: acp.config_values,
+        pending_prompt: acp.pending_prompt,
+        pending_delivery_id: acp.pending_delivery_id,
+        pending_agent_preset: acp.pending_agent_preset,
+        session_title: acp.session_title,
+        agent_definition_id: acp.agent_definition_id,
+        automation_id: acp.automation_id,
+    }
 }
 
 #[cfg(test)]
@@ -109,93 +360,92 @@ mod tests {
         (store, dir)
     }
 
-    fn document(project: &str) -> serde_json::Value {
-        serde_json::json!({ "projects": [project], "sessions": [] })
+    fn acp_conversation() -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: "conv-1".to_string(),
+            custom_title: Some("标题".to_string()),
+            last_updated_at: 7,
+            terminals: Vec::new(),
+            acp: Some(WorkspaceAcp {
+                cwd: Some("/repo".to_string()),
+                sid: "acp-1".to_string(),
+                agent: "claude".to_string(),
+                profile_id: Some("work".to_string()),
+                history_session_id: Some("history-1".to_string()),
+                launch: ConversationLaunchSpec::from_command("claude").with_env("A", "1"),
+                refresh_launch_from_settings: true,
+                conversation_binding: ConversationBinding::Automation {
+                    run_id: "run-1".to_string(),
+                },
+                config_values: vec![("model".to_string(), "opus".to_string())],
+                pending_prompt: Some("hi".to_string()),
+                pending_delivery_id: Some("delivery".to_string()),
+                pending_agent_preset: Some("preset".to_string()),
+                session_title: Some("会话".to_string()),
+                agent_definition_id: Some("agent-1".to_string()),
+                automation_id: Some("auto-1".to_string()),
+            }),
+        }
     }
 
-    fn save_as(
-        store: &smelt_store::Store,
-        writer: &str,
-        writer_seq: u64,
-        base_revision: u64,
-        project: &str,
-    ) -> Result<u64, CatalogError> {
-        save_on(
-            store,
-            &WorkspaceSaveParams {
-                base_revision,
-                writer: writer.to_string(),
-                writer_seq,
-                document: document(project),
-            },
-        )
-    }
-
+    /// 线上的对话类型和库里的记录来回转换不丢字段。名字和 agent 标题不随新建写进来（只经
+    /// 改名命令和守护写），所以夹具里不带。
     #[test]
-    fn fresh_runtime_has_no_document_at_revision_zero() {
+    fn a_created_conversation_reads_back_unchanged() {
         let (store, dir) = temp_store();
-        let loaded = load_on(&store).unwrap();
-        assert_eq!(loaded.revision, 0);
-        assert_eq!(loaded.document, None);
+        let mut conversation = acp_conversation();
+        conversation.custom_title = None;
+        conversation.acp.as_mut().unwrap().session_title = None;
+        let change = create_conversation_on(&store, &conversation).unwrap();
+        assert!(change.changed);
+        assert_eq!(change.directory.revision, 1);
+        assert_eq!(change.directory.conversations, [conversation.clone()]);
+
+        let removed = delete_conversation_on(&store, "conv-1").unwrap();
+        assert_eq!(removed.removed, Some(conversation));
+        assert!(removed.directory.conversations.is_empty());
+        assert_eq!(removed.directory.revision, 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 按会话 id 改名改的是那段对话的名字，agent 报的标题不动；同名再改一次不推进版本。
+    #[test]
+    fn renaming_an_acp_conversation_changes_only_its_name_once() {
+        let (store, dir) = temp_store();
+        create_conversation_on(&store, &acp_conversation()).unwrap();
+
+        let renamed = rename_acp_conversation_on(&store, "acp-1", Some("新标题")).unwrap();
+        assert!(renamed.changed);
+        assert_eq!(renamed.directory.revision, 2);
+        let conversation = &renamed.directory.conversations[0];
+        assert_eq!(conversation.custom_title.as_deref(), Some("新标题"));
+        assert_eq!(conversation.acp.as_ref().unwrap().session_title, None);
+
+        let again = rename_acp_conversation_on(&store, "acp-1", Some("新标题")).unwrap();
+        assert!(!again.changed);
+        assert_eq!(again.directory.revision, 2);
+        let missing = rename_acp_conversation_on(&store, "acp-missing", Some("x")).unwrap();
+        assert!(!missing.changed);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn saves_advance_the_revision_and_round_trip_projects() {
-        let (store, dir) = temp_store();
-        let first = save_as(&store, "client", 1, 0, "/repo/a").unwrap();
-        let second = save_as(&store, "client", 2, first, "/repo/b").unwrap();
-        assert_eq!((first, second), (1, 2));
-
-        let loaded = load_on(&store).unwrap();
-        assert_eq!(loaded.revision, 2);
-        assert_eq!(
-            loaded.document.unwrap()["projects"],
-            serde_json::json!(["/repo/b"])
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 另一个客户端已经保存过：基于旧版本的提交必须被拒，库里保持别人的那份。
-    #[test]
-    fn saving_against_a_stale_revision_is_a_conflict() {
-        let (store, dir) = temp_store();
-        save_as(&store, "theirs", 1, 0, "/repo/theirs").unwrap();
-
-        assert_eq!(
-            save_as(&store, "mine", 1, 0, "/repo/mine"),
-            Err(CatalogError::Conflict { current: 1 })
-        );
-        assert_eq!(
-            load_on(&store).unwrap().document.unwrap()["projects"],
-            serde_json::json!(["/repo/theirs"])
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 保存经远程中继超时：运行时其实已经提交，回执没回来，客户端的版本没动。
-    /// 本机下一次保存不能被当成别的设备改过而从此停掉。
-    #[test]
-    fn a_save_whose_reply_was_lost_does_not_block_the_next_one() {
-        let (store, dir) = temp_store();
-        save_as(&store, "client", 1, 0, "/repo/a").unwrap();
-
-        assert_eq!(save_as(&store, "client", 2, 0, "/repo/b"), Ok(2));
-        assert_eq!(
-            load_on(&store).unwrap().document.unwrap()["projects"],
-            serde_json::json!(["/repo/b"])
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn a_save_without_a_writer_is_invalid() {
+    fn single_change_errors_are_classified() {
         let (store, dir) = temp_store();
         assert!(matches!(
-            save_as(&store, " ", 1, 0, "/repo/a"),
-            Err(CatalogError::Invalid(_))
+            update_conversation_on(&store, &acp_conversation()),
+            Err(DirectoryError::NotFound(_))
         ));
-        assert_eq!(load_on(&store).unwrap().revision, 0);
+        let mut missing_sid = acp_conversation();
+        missing_sid.acp.as_mut().unwrap().sid = String::new();
+        assert!(matches!(
+            create_conversation_on(&store, &missing_sid),
+            Err(DirectoryError::Invalid(_))
+        ));
+        assert!(matches!(
+            open_project_on(&store, ""),
+            Err(DirectoryError::Invalid(_))
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

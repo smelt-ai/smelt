@@ -222,6 +222,7 @@ fn publish(state: &mut FakeState, connection: ConnectionState) {
         endpoint_id: None,
         link: None,
         error: None,
+        os: None,
     };
     state
         .listeners
@@ -244,6 +245,7 @@ impl RuntimeSource for FakeSource {
             endpoint_id: None,
             link: None,
             error: None,
+            os: None,
         };
         if listener(state.generation, &event) {
             state.listeners.push(listener);

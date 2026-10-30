@@ -800,7 +800,9 @@ fn config_files_footer(
             Button::new("pi-refresh-settings")
                 .quiet()
                 .icon_size()
-                .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RefreshCw))
+                .icon(gpui_component::Icon::new(
+                    gpui_kit_assets::IconName::RefreshCw,
+                ))
                 .icon_action("重新读取 ~/.pi/agent/ 下的配置")
                 .on_click(move |_, _, cx| {
                     refresh_entity.update(cx, |workspace, cx| {

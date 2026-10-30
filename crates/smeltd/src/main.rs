@@ -15,6 +15,8 @@
 //! 协议（Unix socket ~/.smelt/smeltd.sock）——连接后客户端先发一行 JSON：
 //!   {"op":"open","id":"..","cwd":"..","cols":120,"rows":30}  → 进入流模式（唯一 client，
 //!                                                              同 id 第二次 open 顶掉前一个）
+//!                                                              带 "graphics":"kitty" 表示能显示
+//!                                                              kitty 图形，见 terminal_graphics
 //!   {"op":"watch","id":".."}                                 → 进入**只读**流模式（旁观，见下）
 //!   {"op":"acp_action","id":"..","action":{...}}            → 对现有 ACP 会话执行一次动作，
 //!                                                              不占用或替换 control client
@@ -107,6 +109,7 @@ mod agent_memory_control;
 mod automation_runtime;
 mod client_conn;
 mod control;
+mod memory_peer_auth;
 mod conversation_image;
 mod desktop;
 mod devices;
@@ -122,7 +125,6 @@ mod pi_control;
 mod resource_usage;
 mod subagent_transcript;
 use devices::Principal;
-mod program_status;
 mod project_watch;
 mod protocol;
 mod remote;
@@ -133,6 +135,8 @@ mod session_catalog;
 mod session_control;
 mod session_directory;
 mod session_state;
+mod terminal_names;
+mod terminal_graphics;
 mod terminal_output;
 mod terminal_progress;
 mod terminal_registry;
@@ -140,6 +144,7 @@ mod terminal_resume;
 mod terminal_shell;
 mod terminal_snapshot;
 mod webhook;
+mod workspace_directory;
 
 use acp_host::*;
 use protocol::*;
@@ -147,13 +152,12 @@ use remote::*;
 
 use acp_registry::{AcpRegistry, AcpSlot};
 use event_hub::EventHubHandle;
-use program_status::ProgramStatusNotices;
 use session_directory::SessionDirectory;
 #[cfg(test)]
 pub(crate) use session_state::AgentBlocker;
 pub(crate) use session_state::{
-    Phase, PhaseSource, SessionState, apply_agent_event, bump_state_revision, commit_session_phase,
-    next_session_instance, now_unix,
+    Phase, PhaseSource, SessionState, apply_agent_event, apply_program_status, bump_state_revision,
+    commit_session_phase, next_session_instance, now_unix,
 };
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent};
 use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboundEvent};
@@ -163,19 +167,15 @@ use smelt_core::automation_store::{
 use smelt_core::osc::{
     OscEvent, OscScan, TerminalGeometryOsc, program_status_reply, terminal_geometry_osc,
 };
-use smelt_core::session_control::{
-    RemoteAcpSession, RemoteSessionCatalog, RemoteSessionKind, RemoteSessionLifecycle,
-    RemoteSessionSnapshot, RemoteTerminalSession, find_agent_option_for,
-};
-use smelt_core::workspace_menu::{
-    WorkspaceMenuSnapshot, load_published_workspace_menu, persist_published_workspace_menu,
-};
-use terminal_output::{KeyframeNeed, OutputAttachment, enqueue_session_streams};
+use smelt_core::kitty_graphics::GraphicsSplitter;
+use smelt_core::session_control::find_agent_option_for;
+use terminal_graphics::{FedOutput, TerminalGraphics, feed_output};
+use terminal_output::{KeyframeNeed, OutputAttachment, SessionOutput, enqueue_session_streams};
 use terminal_progress::ProgressTracker;
 use terminal_registry::{TerminalRegistry, TerminalSlot};
 use terminal_snapshot::{
     SNAPSHOT_MAX_LINES, available_snapshot_lines, snapshot_ansi, snapshot_ansi_for_watch,
-    snapshot_ansi_screen,
+    snapshot_ansi_plain, snapshot_ansi_screen,
 };
 
 use client_conn::{ClientConn, ClientSocket, ConnId};
@@ -197,7 +197,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::vte::ansi::{NamedColor, Processor, Rgb};
@@ -509,12 +509,79 @@ struct Ctl {
     /// 会让 PTY 在「桌面尺寸 ↔ 手机尺寸」之间来回 resize，主屏 CLI 每次都把整段
     /// 对话重排重印一遍。见 `pause_remote_viewport`。
     remote_grace: u64,
+    /// 格子尺寸还不知道时程序问的像素尺寸。会话按 24×80、没有像素先起，桌面排版完才报
+    /// 格子尺寸；Pi 这类一启动就问的赶在这之前。拿到尺寸再答：不答它就按自己的默认值算，
+    /// 图会变形；答 0 更糟。
+    waiting_for_cell: Vec<PixelQuery>,
+}
+
+/// 要格子像素才答得了的查询。
+enum PixelQuery {
+    /// `CSI 16 t`：一个字符格多少像素，答 `CSI 6 ; 高 ; 宽 t`。
+    Cell,
+    /// `CSI 14 t`：文字区多少像素，用 alacritty 给的格式化函数答。
+    TextArea(Arc<dyn Fn(WindowSize) -> String + Send + Sync>),
+}
+
+impl PixelQuery {
+    fn answer(&self, window: WindowSize) -> String {
+        match self {
+            Self::Cell => format!(
+                "\x1b[6;{};{}t",
+                window.cell_height, window.cell_width
+            ),
+            Self::TextArea(format) => format(window),
+        }
+    }
 }
 
 impl Ctl {
     /// 尺寸是不是还握在远程手里：正在看的远程视口，或刚断开、还在宽限期内的那一个。
     fn remote_geometry_pinned(&self) -> bool {
         self.remote_viewports > 0 || self.remote_grace != 0
+    }
+
+    fn window_size(&self) -> WindowSize {
+        WindowSize {
+            num_lines: self.rows,
+            num_cols: self.cols,
+            cell_width: self.cell_w,
+            cell_height: self.cell_h,
+        }
+    }
+
+    fn knows_cell(&self) -> bool {
+        self.cell_w > 0 && self.cell_h > 0
+    }
+
+    /// 格子尺寸知道就给出应答，不知道先记下，等 [`Self::take_cell_answers`]。
+    fn answer_or_wait(&mut self, query: PixelQuery) -> Option<String> {
+        if self.knows_cell() {
+            return Some(query.answer(self.window_size()));
+        }
+        self.waiting_for_cell.push(query);
+        None
+    }
+
+    /// 格子尺寸刚知道：取出先前等着的应答。和记下时在同一把锁里，不会漏。
+    fn take_cell_answers(&mut self) -> Vec<String> {
+        if !self.knows_cell() || self.waiting_for_cell.is_empty() {
+            return Vec::new();
+        }
+        let window = self.window_size();
+        std::mem::take(&mut self.waiting_for_cell)
+            .iter()
+            .map(|query| query.answer(window))
+            .collect()
+    }
+}
+
+/// 写回程序问像素尺寸的应答。
+fn write_pixel_answers(sess: &Session, answers: Vec<String>) {
+    for answer in answers {
+        if write_session_input(sess, answer.as_bytes()).is_err() {
+            break;
+        }
     }
 }
 
@@ -912,108 +979,11 @@ fn started_at() -> u64 {
 #[derive(Clone, Default)]
 struct DaemonProjectionSeed {
     sessions: Vec<SessionState>,
-    remote_sessions: Option<RemoteSessionSnapshot>,
-    workspace_menu: Option<WorkspaceMenuSnapshot>,
+    workspace: Option<smelt_core::workspace_directory::WorkspaceDirectory>,
     automations: Option<AutomationFile>,
 }
 
-type RemoteCatalogLoader = fn() -> Result<RemoteSessionCatalog, String>;
-
-/// A daemon owns this catalog for its entire lifetime. A broken historical file is fail-closed:
-/// normal terminal/ACP service continues, but remote commands cannot overwrite an unknown catalog.
-struct RemoteCatalogState {
-    catalog: Option<RemoteSessionCatalog>,
-    load_error: Option<String>,
-    loader: RemoteCatalogLoader,
-    /// Daemon-local catalog ownership. Active persistence and this generation bind under the
-    /// same mutex; delayed cleanup must compare it before an id-scoped catalog deletion.
-    runtime_instances: HashMap<(RemoteSessionKind, String), u64>,
-}
-
-impl RemoteCatalogState {
-    fn load_default() -> Self {
-        Self::with_loader(RemoteSessionCatalog::load_default)
-    }
-
-    fn with_loader(loader: RemoteCatalogLoader) -> Self {
-        let mut state = Self {
-            catalog: None,
-            load_error: None,
-            loader,
-            runtime_instances: HashMap::new(),
-        };
-        state.ensure_loaded();
-        state
-    }
-
-    #[cfg(test)]
-    fn in_memory() -> Self {
-        Self {
-            catalog: Some(RemoteSessionCatalog::in_memory()),
-            load_error: None,
-            loader: RemoteSessionCatalog::load_default,
-            runtime_instances: HashMap::new(),
-        }
-    }
-
-    /// 目录还没加载出来就再试一次。
-    ///
-    /// 打开失败往往只是**一瞬间**的事：磁盘临时不可写、sidecar 和主库对不上、
-    /// 另一个进程正在替换文件。把首次失败当成终局，代价是整个 daemon 生命周期
-    /// 里远程目录都不可用——手机端永远只有一句英文错误，桌面也发布不了菜单，
-    /// 而唯一的出路是重启进程。故障消失之后，下一次访问就该自己走出来。
-    ///
-    /// 不做节流：只有目录处于不可用状态时才会走到这里，而这条路上的调用（远程
-    /// 生命周期命令、订阅建立）本来就不是高频路径。
-    fn ensure_loaded(&mut self) {
-        if self.catalog.is_some() {
-            return;
-        }
-        match (self.loader)() {
-            Ok(catalog) => {
-                if self.load_error.take().is_some() {
-                    eprintln!("[remote] 远程会话目录已恢复，重新接受远程生命周期命令");
-                }
-                self.catalog = Some(catalog);
-            }
-            Err(error) => {
-                // 故障持续时每次访问都会重试，日志只在错况变化时记一条，不刷屏。
-                if self.load_error.as_deref() != Some(error.as_str()) {
-                    eprintln!("[remote] 远程会话目录不可用，拒绝远程生命周期命令：{error}");
-                }
-                self.load_error = Some(error);
-            }
-        }
-    }
-
-    fn catalog(&mut self) -> Result<&RemoteSessionCatalog, String> {
-        self.ensure_loaded();
-        self.catalog.as_ref().ok_or_else(|| {
-            self.load_error
-                .clone()
-                .unwrap_or_else(|| "remote session catalog unavailable".to_string())
-        })
-    }
-
-    fn catalog_mut(&mut self) -> Result<&mut RemoteSessionCatalog, String> {
-        self.ensure_loaded();
-        let error = self.load_error.clone();
-        self.catalog.as_mut().ok_or_else(|| {
-            error.unwrap_or_else(|| "remote session catalog unavailable".to_string())
-        })
-    }
-}
-
-type RemoteSessions = Arc<Mutex<RemoteCatalogState>>;
-type WorkspaceMenuStore = Arc<Mutex<WorkspaceMenuSnapshot>>;
-
-fn new_remote_sessions() -> RemoteSessions {
-    Arc::new(Mutex::new(RemoteCatalogState::load_default()))
-}
-
-fn new_workspace_menu() -> WorkspaceMenuStore {
-    Arc::new(Mutex::new(load_published_workspace_menu()))
-}
+pub(crate) use workspace_directory::WorkspaceDirectoryReader;
 
 #[cfg(test)]
 fn new_test_automation_store() -> AutomationStore {
@@ -1023,13 +993,8 @@ fn new_test_automation_store() -> AutomationStore {
 }
 
 #[cfg(test)]
-fn new_test_remote_sessions() -> RemoteSessions {
-    Arc::new(Mutex::new(RemoteCatalogState::in_memory()))
-}
-
-#[cfg(test)]
-fn new_test_workspace_menu() -> WorkspaceMenuStore {
-    Arc::new(Mutex::new(WorkspaceMenuSnapshot::default()))
+fn new_test_workspace_directory() -> WorkspaceDirectoryReader {
+    WorkspaceDirectoryReader::fixed(Default::default())
 }
 
 #[cfg(test)]
@@ -1110,219 +1075,24 @@ fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
 
 /// Remote ownership is a small catalog, so each change publishes a complete replacement. This
 /// gives lagging clients a convergent state without treating catalog events as a durable log.
-fn broadcast_remote_sessions(event_hub: &EventHubHandle, snapshot: &RemoteSessionSnapshot) {
-    if let Err(error) = event_hub.publish_remote_sessions(snapshot) {
-        eprintln!("[event-hub] remote sessions publish failed: {error}");
-    }
-}
-
-fn broadcast_workspace_menu(event_hub: &EventHubHandle, snapshot: &WorkspaceMenuSnapshot) {
-    if let Err(error) = event_hub.publish_workspace_menu(snapshot) {
-        eprintln!("[event-hub] workspace menu publish failed: {error}");
-    }
-}
-
-fn publish_workspace_menu_snapshot(
-    store: &WorkspaceMenuStore,
-    event_hub: &EventHubHandle,
-    mut menu: WorkspaceMenuSnapshot,
-) -> Result<WorkspaceMenuSnapshot, String> {
-    let mut stored = store.lock().unwrap();
-    // 同一桌面实例的 RPC 可能因断线重试或后台完成顺序而倒序抵达。daemon revision
-    // 只能表达“已接收顺序”，不能判断哪个 payload 更新，因此同时保存发布者序号。
-    if !menu.source_id.is_empty()
-        && menu.source_id == stored.source_id
-        && menu.source_revision != 0
-        && menu.source_revision <= stored.source_revision
-    {
-        return Ok(stored.clone());
-    }
-    menu.revision = stored.revision.saturating_add(1);
-    persist_published_workspace_menu(&menu)?;
-    *stored = menu.clone();
-    drop(stored);
-    broadcast_workspace_menu(event_hub, &menu);
-    Ok(menu)
-}
-
-fn workspace_menu_snapshot(store: &WorkspaceMenuStore) -> WorkspaceMenuSnapshot {
-    store.lock().unwrap().clone()
-}
-
-fn remote_session_snapshot(
-    remote_sessions: &RemoteSessions,
-) -> Result<RemoteSessionSnapshot, String> {
-    let mut catalog = remote_sessions.lock().unwrap();
-    Ok(catalog.catalog()?.snapshot())
-}
-
-fn mutate_remote_catalog<T>(
-    remote_sessions: &RemoteSessions,
-    mutation: impl FnOnce(&mut RemoteSessionCatalog) -> Result<T, String>,
-) -> Result<(T, RemoteSessionSnapshot), String> {
-    let mut state = remote_sessions.lock().unwrap();
-    let value = {
-        let catalog = state.catalog_mut()?;
-        mutation(catalog)?
-    };
-    let snapshot = state.catalog()?.snapshot();
-    Ok((value, snapshot))
-}
-
-fn set_remote_lifecycle(
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
-    kind: RemoteSessionKind,
-    id: &str,
-    lifecycle: RemoteSessionLifecycle,
-) -> Result<bool, String> {
-    let (record, snapshot) = mutate_remote_catalog(remote_sessions, |catalog| {
-        catalog.set_lifecycle_for_kind(kind, id, lifecycle)
-    })?;
-    let changed = record.is_some();
-    if changed {
-        broadcast_remote_sessions(event_hub, &snapshot);
-    }
-    Ok(changed)
-}
-
-#[cfg(test)]
-fn bind_remote_session_instance(
-    remote_sessions: &RemoteSessions,
-    kind: RemoteSessionKind,
-    id: &str,
-    instance: u64,
-) {
-    remote_sessions
-        .lock()
-        .unwrap()
-        .runtime_instances
-        .insert((kind, id.to_string()), instance);
-}
-
-fn activate_remote_session_instance(
-    remote_sessions: &RemoteSessions,
-    kind: RemoteSessionKind,
-    id: &str,
-    instance: u64,
-) -> Result<RemoteSessionSnapshot, String> {
-    let mut state = remote_sessions.lock().unwrap();
-    let record =
-        state
-            .catalog_mut()?
-            .set_lifecycle_for_kind(kind, id, RemoteSessionLifecycle::Active)?;
-    if record.is_none() {
-        return Err("remote session disappeared".to_string());
-    }
-    state
-        .runtime_instances
-        .insert((kind, id.to_string()), instance);
-    Ok(state.catalog()?.snapshot())
-}
-
-fn remove_remote_session_for_instance(
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
-    kind: RemoteSessionKind,
-    id: &str,
-    instance: u64,
-) -> Result<bool, String> {
-    let key = (kind, id.to_string());
-    let mut state = remote_sessions.lock().unwrap();
-    if state.runtime_instances.get(&key).copied() != Some(instance) {
-        return Ok(false);
-    }
-    // All production callers hold the slot lifecycle while retiring this instance. Once the
-    // generation matches, no replacement can bind the same id before this function returns.
-    // Release the in-memory binding even when durable deletion fails; otherwise a later
-    // no-runtime retry is rejected forever by `remove_remote_session_if_unbound`.
-    let remove_result = state
-        .catalog_mut()
-        .and_then(|catalog| catalog.remove_for_kind(kind, id));
-    state.runtime_instances.remove(&key);
-    let record = remove_result?;
-    let snapshot = state.catalog()?.snapshot();
-    drop(state);
-    let changed = record.is_some();
-    if changed {
-        broadcast_remote_sessions(event_hub, &snapshot);
-    }
-    Ok(changed)
-}
-
-fn remove_remote_session_if_unbound(
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
-    kind: RemoteSessionKind,
-    id: &str,
-) -> Result<bool, String> {
-    let key = (kind, id.to_string());
-    let mut state = remote_sessions.lock().unwrap();
-    if state.runtime_instances.contains_key(&key) {
-        return Ok(false);
-    }
-    let record = state.catalog_mut()?.remove_for_kind(kind, id)?;
-    let snapshot = state.catalog()?.snapshot();
-    drop(state);
-    let changed = record.is_some();
-    if changed {
-        broadcast_remote_sessions(event_hub, &snapshot);
-    }
-    Ok(changed)
-}
-
 fn apply_history_rename(
     kind: smelt_core::agent_kind::HistorySourceKind,
     profile_id: Option<&str>,
     resume_id: &str,
     title: Option<&str>,
-    cwd: Option<&str>,
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
 ) -> Result<(), String> {
     if resume_id.trim().is_empty() {
         return Err("missing resume_id".to_string());
     }
-    smelt_core::session_metadata::set_custom_title(kind, profile_id, resume_id, title)?;
-    // 远程会话目录只认 ACP 会话；纯终端来源（Antigravity）改的名只落在标题
-    // 覆盖层，不需要、也无法去同步一条并不存在的 ACP 记录。
-    let option = kind
-        .acp()
-        .and_then(|acp| find_agent_option_for(acp, profile_id));
-    let catalog_title = title
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            let option = option.as_ref()?;
-            let cwd = cwd.filter(|value| !value.trim().is_empty())?;
-            smelt_core::session_control::list_history_for(
-                kind,
-                profile_id,
-                cwd,
-                option.history_dir.as_deref(),
-            )
-            .into_iter()
-            .find(|session| session.resume_id == resume_id)
-            .map(|session| session.display_title().to_string())
-        });
-    if let (Some(option), Some(catalog_title)) = (option, catalog_title)
-        && !catalog_title.is_empty()
-    {
-        let (changed, snapshot) = mutate_remote_catalog(remote_sessions, |catalog| {
-            catalog.rename_acp_by_resume_id(&option.id, resume_id, &catalog_title)
-        })?;
-        if changed {
-            broadcast_remote_sessions(event_hub, &snapshot);
-        }
-    }
-    Ok(())
+    smelt_core::session_metadata::set_custom_title(kind, profile_id, resume_id, title)
 }
 
+/// 历史页改名（手机、桌面历史页，只知道 provider 身份）。侧栏里对应的对话名字按它现算，
+/// 改了就推目录。
 fn handle_history_rename<C: ClientSocket>(
     mut conn: C,
     v: &serde_json::Value,
-    remote_sessions: &RemoteSessions,
+    sessions: &Sessions,
     event_hub: &EventHubHandle,
 ) {
     let result = (|| -> Result<(), String> {
@@ -1332,44 +1102,13 @@ fn handle_history_rename<C: ClientSocket>(
         let resume_id = v["resume_id"].as_str().unwrap_or_default();
         let profile_id = v["profile_id"].as_str();
         let title = v.get("title").and_then(serde_json::Value::as_str);
-        let cwd = v["cwd"].as_str();
-        apply_history_rename(
-            kind,
-            profile_id,
-            resume_id,
-            title,
-            cwd,
-            remote_sessions,
-            event_hub,
-        )
+        apply_history_rename(kind, profile_id, resume_id, title)?;
+        workspace_directory::publish_current(event_hub);
+        terminal_names::refresh_all(sessions, event_hub);
+        Ok(())
     })();
     let response = match result {
         Ok(()) => serde_json::json!({ "ok": true }),
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    };
-    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
-}
-
-fn handle_workspace_menu<C: ClientSocket>(
-    mut conn: C,
-    v: &serde_json::Value,
-    store: &WorkspaceMenuStore,
-    event_hub: &EventHubHandle,
-) {
-    let result = (|| -> Result<WorkspaceMenuSnapshot, String> {
-        let menu = v
-            .get("menu")
-            .cloned()
-            .ok_or_else(|| "missing menu".to_string())?;
-        let menu: WorkspaceMenuSnapshot = serde_json::from_value(menu)
-            .map_err(|error| format!("invalid workspace menu: {error}"))?;
-        if menu.version == 0 {
-            return Err("workspace menu version must be current".to_string());
-        }
-        publish_workspace_menu_snapshot(store, event_hub, menu)
-    })();
-    let response = match result {
-        Ok(menu) => serde_json::json!({ "ok": true, "revision": menu.revision }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
@@ -1497,129 +1236,67 @@ fn handle_event_publish<C: ClientSocket>(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
-/// 落盘记录不能证明进程还在。对外服务之前，按
-/// `catalog ∩ runtime` 对账：活着的提成 Active，没有进程的删掉。
-fn reconcile_remote_catalog_runtime(
-    remote_sessions: &RemoteSessions,
-    sessions: &Sessions,
-    acp_sessions: &AcpSessions,
-    event_hub: &EventHubHandle,
-) {
-    let mut terminal_slots = sessions.snapshot_slots();
-    terminal_slots.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut terminal_lifecycles = Vec::with_capacity(terminal_slots.len());
-    let mut live_terminal_instances = HashMap::new();
-    for (id, slot) in &terminal_slots {
-        let lifecycle = slot.lifecycle.lock().unwrap();
-        if sessions.is_current(id, slot)
-            && let Some(session) = sessions.live_in_slot(slot)
-        {
-            live_terminal_instances.insert(id.clone(), session.instance);
-        }
-        terminal_lifecycles.push(lifecycle);
-    }
-
-    let mut acp_slots = acp_sessions.snapshot();
-    acp_slots.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut acp_lifecycles = Vec::with_capacity(acp_slots.len());
-    let mut live_acp_instances = HashMap::new();
-    for (id, slot) in &acp_slots {
-        let lifecycle = slot.lifecycle.lock();
-        if acp_sessions.is_current(id, slot) {
-            live_acp_instances.insert(id.clone(), slot.value.instance);
-        }
-        acp_lifecycles.push(lifecycle);
-    }
-    let live_terminal_ids = live_terminal_instances
-        .keys()
-        .cloned()
-        .collect::<HashSet<_>>();
-    let live_acp_ids = live_acp_instances.keys().cloned().collect::<HashSet<_>>();
-    let result = (|| -> Result<(bool, RemoteSessionSnapshot), String> {
-        let mut state = remote_sessions.lock().unwrap();
-        let changed = state
-            .catalog_mut()?
-            .retain_live_runtimes(&live_acp_ids, &live_terminal_ids)?;
-        let snapshot = state.catalog()?.snapshot();
-        state.runtime_instances.clear();
-        for record in &snapshot.sessions {
-            let instance = match record.kind {
-                RemoteSessionKind::Terminal => live_terminal_instances.get(&record.id),
-                RemoteSessionKind::Acp => live_acp_instances.get(&record.id),
-            };
-            if let Some(instance) = instance {
-                state
-                    .runtime_instances
-                    .insert((record.kind, record.id.clone()), *instance);
-            }
-        }
-        Ok((changed, snapshot))
-    })();
-    // 不要把 registry 生命周期锁带进广播；目录提交完成后，正常的 kill/cleanup
-    // 可以继续取得 slot 锁并观察到同一份 runtime 绑定。
-    drop(terminal_lifecycles);
-    drop(acp_lifecycles);
-    match result {
-        Ok((true, snapshot)) => broadcast_remote_sessions(event_hub, &snapshot),
-        Ok((false, _)) => {}
-        Err(error) => eprintln!("[remote] 启动时远程目录对账失败：{error}"),
-    }
-}
-
-/// `None` means the catalog itself is unavailable. Callers may still service an ordinary local
-/// runtime, but must not create a new remote-owned one in that state.
-fn is_known_remote_session(
-    remote_sessions: &RemoteSessions,
-    kind: RemoteSessionKind,
-    id: &str,
-) -> Option<bool> {
-    let state = remote_sessions.lock().unwrap();
-    state
-        .catalog
-        .as_ref()
-        .map(|catalog| catalog.kind_for(id) == Some(kind))
-}
-
 /// 常驻 Term 的事件监听。OSC 标题留在终端网格自己的标题栏，这里直接丢掉。
-/// Bell 只刷新活动时间并广播。颜色查询在网格锁内入队，泵释放锁后再写回。
+/// Bell 只刷新活动时间并广播。程序的查询（颜色、设备属性、光标位置、尺寸）在网格锁内入队，
+/// 泵释放锁后再写回。
 #[derive(Clone)]
 struct StateListener {
     state: Arc<Mutex<SessionState>>,
     event_hub: EventHubHandle,
-    /// `ColorRequest` 在 `Term` 网格锁内回调。这里只入队，等 PTY 泵释放网格锁后
-    /// 再经 `Ctl.master` 写入，避免与 resize 的 ctl -> term 锁序相反而死锁。
-    color_replies: PendingColorReplies,
+    /// 查询在 `Term` 网格锁内回调。这里只入队，等 PTY 泵释放网格锁后再经 `Ctl.master`
+    /// 写入，避免与 resize 的 ctl -> term 锁序相反而死锁。
+    replies: PendingTermReplies,
 }
 
-/// 一条待回应的颜色查询：查哪个颜色槽，和把颜色格式化成回应的函数。颜色到写回时
-/// 才定：程序用 OSC 4 / 10 / 11 改过的值要优先，而它记在 `Term` 里，入队时拿不到锁。
-type PendingColorReply = (usize, Arc<dyn Fn(Rgb) -> String + Send + Sync>);
-type PendingColorReplies = Arc<Mutex<VecDeque<PendingColorReply>>>;
+/// 常驻 Term 对程序查询的一条应答。守护的网格是这个会话唯一的权威画面，查询都由它答（同
+/// Ghostty 由终端自己答）：桌面开几个都只答一次，没有桌面连着也有人答。
+enum TermReply {
+    /// 现成的应答：设备属性、光标位置、行列数、键盘模式这类。
+    Text(String),
+    /// 颜色查询：查哪个颜色槽，和把颜色格式化成应答的函数。颜色到写回时才定：程序用
+    /// OSC 4 / 10 / 11 改过的值要优先，而它记在 `Term` 里，入队时拿不到锁。
+    Color(usize, Arc<dyn Fn(Rgb) -> String + Send + Sync>),
+    /// 要格子像素的查询（`CSI 14 t`、`CSI 16 t`）：格子尺寸在 `Ctl` 里，写回时再读，还不知道
+    /// 就等它。
+    Pixels(PixelQuery),
+}
+
+type PendingTermReplies = Arc<Mutex<VecDeque<TermReply>>>;
 
 impl StateListener {
     #[cfg(test)]
     fn new(state: Arc<Mutex<SessionState>>, event_hub: EventHubHandle) -> Self {
-        Self::with_color_replies(state, event_hub, Arc::new(Mutex::new(VecDeque::new())))
+        Self::with_replies(state, event_hub, Arc::new(Mutex::new(VecDeque::new())))
     }
 
-    fn with_color_replies(
+    fn with_replies(
         state: Arc<Mutex<SessionState>>,
         event_hub: EventHubHandle,
-        color_replies: PendingColorReplies,
+        replies: PendingTermReplies,
     ) -> Self {
         Self {
             state,
             event_hub,
-            color_replies,
+            replies,
         }
     }
 }
 
 impl EventListener for StateListener {
     fn send_event(&self, event: Event) {
-        if let Event::ColorRequest(index, format) = &event {
-            if let Ok(mut replies) = self.color_replies.lock() {
-                replies.push_back((*index, Arc::clone(format)));
+        let reply = match &event {
+            Event::PtyWrite(text) => Some(TermReply::Text(text.clone())),
+            Event::ColorRequest(index, format) => {
+                Some(TermReply::Color(*index, Arc::clone(format)))
+            }
+            Event::TextAreaSizeRequest(format) => Some(TermReply::Pixels(PixelQuery::TextArea(
+                Arc::clone(format),
+            ))),
+            _ => None,
+        };
+        if let Some(reply) = reply {
+            if let Ok(mut replies) = self.replies.lock() {
+                replies.push_back(reply);
             }
             return;
         }
@@ -1725,7 +1402,7 @@ fn resize_session_from(
     let cell_h = cell_h.min(MAX_SESSION_CELL_PX);
     // 先拿输出顺序门闩。PTY 泵、attach、watch 和 resize 必须共享同一条输出序列，
     // 但门闩与 `out` 列表锁分离，慢 socket 写不会阻塞其它会话管理操作。
-    let _output_gate = sess.output_gate.lock().unwrap();
+    let output_gate = sess.output_gate.lock().unwrap();
     let refused_marker = {
         let mut ctl = sess.ctl.lock().unwrap();
         if origin == ResizeOrigin::Desktop && ctl.remote_viewports > 0 {
@@ -1756,7 +1433,7 @@ fn resize_session_from(
         dispatch_session_outputs_under_gate(sess, &marker, "<resize-refused>", true, false);
         return false;
     }
-    let (resize_token, jolt, xpixel, ypixel, marker) = {
+    let (resize_token, jolt, xpixel, ypixel, marker, pixel_answers) = {
         let mut ctl = sess.ctl.lock().unwrap();
         if cell_w > 0 {
             ctl.cell_w = cell_w;
@@ -1773,6 +1450,7 @@ fn resize_session_from(
         let jolt = std::mem::take(&mut ctl.jolt);
         ctl.cols = cols;
         ctl.rows = rows;
+        let pixel_answers = ctl.take_cell_answers();
         let remote_controlled = ctl.remote_geometry_pinned();
 
         // Serialize the invisible geometry marker before SIGWINCH can produce
@@ -1801,7 +1479,7 @@ fn resize_session_from(
         #[cfg(windows)]
         let resize_token = ();
         let _ = (xpixel, ypixel);
-        (resize_token, jolt, xpixel, ypixel, marker)
+        (resize_token, jolt, xpixel, ypixel, marker, pixel_answers)
     };
     if let Some(marker) = marker {
         dispatch_session_outputs_under_gate(sess, &marker, "<resize>", true, false);
@@ -1829,6 +1507,9 @@ fn resize_session_from(
         }
         let _ = ctl.master.resize(size(rows));
     }
+    // 写 PTY 可能等程序读，放开输出门闩再写。
+    drop(output_gate);
+    write_pixel_answers(sess, pixel_answers);
     true
 }
 
@@ -2192,6 +1873,23 @@ fn dispatch_session_outputs_under_gate(
     send_clients: bool,
     send_watchers: bool,
 ) {
+    dispatch_session_output_under_gate(
+        sess,
+        SessionOutput::same(bytes),
+        id,
+        send_clients,
+        send_watchers,
+    );
+}
+
+/// 同上，输出分「能显示图片」和「不显示图片」两个版本，各连接按自己的能力取一份。
+fn dispatch_session_output_under_gate(
+    sess: &Session,
+    output: SessionOutput<'_>,
+    id: &str,
+    send_clients: bool,
+    send_watchers: bool,
+) {
     let (clients, watchers) = {
         let mut out = sess.out.lock().unwrap();
         (
@@ -2200,12 +1898,12 @@ fn dispatch_session_outputs_under_gate(
         )
     };
     let live_clients = if send_clients {
-        enqueue_session_streams(clients, bytes, id, "attachment")
+        enqueue_session_streams(clients, output, id, "attachment")
     } else {
         clients
     };
     let live_watchers = if send_watchers {
-        enqueue_session_streams(watchers, bytes, id, "watcher")
+        enqueue_session_streams(watchers, output, id, "watcher")
     } else {
         watchers
     };
@@ -2219,8 +1917,11 @@ fn dispatch_session_outputs_under_gate(
 
 /// 交互连接的关键帧：几何标记 + 终端重置（RIS）+ 画面快照。客户端不管原来处在
 /// 什么状态，解析完都和刚附着时一样，所以它可以随时插进实时流，取代跳过的输出。
-/// 调用方持有 output_gate；这里依次拿 ctl、term，和 attach 的加锁顺序一致。
-fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
+/// 调用方持有 output_gate；这里依次拿 ctl、term、graphics，和 attach、PTY 泵的加锁顺序一致。
+///
+/// `graphics`：客户端能显示图片。能的话在快照前补上画面里用得到的图片和放置；不能的话快照
+/// 去掉锚点标记、占位符画成空格。
+fn terminal_keyframe(sess: &Session, need: KeyframeNeed, graphics: bool) -> Vec<u8> {
     let ctl = sess.ctl.lock().unwrap();
     let term = sess.term.lock().unwrap();
     let mut keyframe = terminal_geometry_osc(
@@ -2234,6 +1935,15 @@ fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
         },
     );
     keyframe.extend_from_slice(b"\x1bc");
+    let lines = match need {
+        KeyframeNeed::Screen => term.screen_lines(),
+        KeyframeNeed::Full => SNAPSHOT_MAX_LINES,
+    };
+    if !graphics {
+        keyframe.extend(snapshot_ansi_plain(&term, lines));
+        return keyframe;
+    }
+    keyframe.extend(sess.graphics.lock().unwrap().keyframe_relays(&term, lines));
     keyframe.extend(match need {
         KeyframeNeed::Screen => snapshot_ansi_screen(&term),
         KeyframeNeed::Full => snapshot_ansi(&term, None),
@@ -2244,18 +1954,29 @@ fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
 /// 客户端确认处理到第 `consumed` 个字节。合并中的连接追上来了，就补一帧关键帧。
 fn acknowledge_terminal_output(sess: &Session, fd: ConnId, consumed: u64) {
     let _output_gate = sess.output_gate.lock().unwrap();
-    let need = {
+    let (need, graphics) = {
         let mut out = sess.out.lock().unwrap();
         let Some(client) = out.clients.iter_mut().find(|client| client.fd == fd) else {
             return;
         };
-        client.acknowledge(consumed)
+        (client.acknowledge(consumed), client.graphics())
     };
     let Some(need) = need else {
         return;
     };
     // 生成快照要拿 ctl/term，不能在 `out` 锁里拿；output_gate 保证这期间没有新输出插进来。
-    let keyframe = terminal_keyframe(sess, need);
+    let keyframe = terminal_keyframe(sess, need, graphics);
+    // 客户端跟不上实时输出才会走到这里。关键帧会清掉客户端的图片再整张重发，频繁出现就是卡顿。
+    smelt_core::app_log::info(
+        "terminal-flow",
+        &format!(
+            "会话实例 {} 的客户端追上来，补 {:?} 关键帧 {} KB（图片：{}）",
+            sess.instance,
+            need,
+            keyframe.len() / 1024,
+            graphics
+        ),
+    );
     let mut out = sess.out.lock().unwrap();
     let Some(pos) = out.clients.iter().position(|client| client.fd == fd) else {
         return;
@@ -2314,11 +2035,13 @@ struct Session {
     out: Mutex<Out>,
     /// 输出顺序锁。与 `out` 分离，禁止慢 socket 写操作阻塞连接集合和会话管理。
     output_gate: Mutex<()>,
-    /// 守护 Term 收到的 OSC 颜色查询应答；由 PTY 泵在网格锁释放后串行写回 child。
-    color_replies: PendingColorReplies,
+    /// 守护 Term 收到的查询要回的应答；由 PTY 泵在网格锁释放后串行写回 child。
+    replies: PendingTermReplies,
     /// 常驻网格：PTY 输出持续 advance；attach 时序列化成 ANSI 快照。挂的是
     /// `StateListener`（不再是 `VoidListener`）——守护自己也要看得见 Title/Bell。
     term: Mutex<Term<StateListener>>,
+    /// kitty 图形的图片和放置（见 terminal_graphics）。加锁顺序在 `term` 之后。
+    graphics: Mutex<TerminalGraphics>,
     /// 结构化状态（见 SessionState）。跟 `term` 的监听器共用同一个 Arc，
     /// `state` op（hook 直写）和 `subscribe` 的转发都读/改这一份。
     state: Arc<Mutex<SessionState>>,
@@ -2715,10 +2438,7 @@ fn main() {
             return;
         }
     };
-    // 远程目录是 daemon 独占的持久化状态，新进程重新打开
-    // 即可。读取异常时 fail-closed，绝不把损坏文档当成空目录发布给 GUI。
-    let remote_sessions = new_remote_sessions();
-    let workspace_menu = new_workspace_menu();
+    let workspace_directory = WorkspaceDirectoryReader::from_store();
     // 升级的接班进程：前任回执后才退出，退出前监听还在它手里。等它退了再绑。
     #[cfg(windows)]
     if let Some(pid) = predecessor_pid
@@ -2767,12 +2487,9 @@ fn main() {
 
     let automations = new_automation_store();
 
-    reconcile_remote_catalog_runtime(&remote_sessions, &sessions, &acp_sessions, &event_hub);
     event_hub.synchronize_projection(collect_subscription_snapshot(
         &sessions,
         &acp_sessions,
-        &remote_sessions,
-        &workspace_menu,
         automations.lock().unwrap().snapshot(),
     ));
 
@@ -2780,7 +2497,6 @@ fn main() {
         Arc::clone(&automations),
         Arc::clone(&sessions),
         Arc::clone(&acp_sessions),
-        Arc::clone(&remote_sessions),
         Arc::clone(&event_hub),
     );
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
@@ -2789,8 +2505,7 @@ fn main() {
         listener,
         sessions,
         acp_sessions,
-        remote_sessions,
-        workspace_menu,
+        workspace_directory,
         automations,
         event_hub,
         daemon_fingerprint,
@@ -3033,8 +2748,7 @@ fn run_serve_loop(
     listener: UnixListener,
     sessions: Sessions,
     acp_sessions: AcpSessions,
-    remote_sessions: RemoteSessions,
-    workspace_menu: WorkspaceMenuStore,
+    workspace_directory: WorkspaceDirectoryReader,
     automations: AutomationStore,
     event_hub: EventHubHandle,
     daemon_fingerprint: Option<String>,
@@ -3058,8 +2772,7 @@ fn run_serve_loop(
     let server = ServerShared {
         sessions,
         acp_sessions,
-        remote_sessions,
-        workspace_menu,
+        workspace_directory,
         automations,
         exe_mtime,
         daemon_fingerprint,
@@ -3476,7 +3189,7 @@ fn spawn_session(
         agent_token,
         ..Default::default()
     }));
-    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
+    let replies = Arc::new(Mutex::new(VecDeque::new()));
     let sess = Session {
         instance,
         geometry_token: uuid::Uuid::new_v4().simple().to_string(),
@@ -3492,6 +3205,7 @@ fn spawn_session(
             cell_h: 0,
             remote_viewports: 0,
             remote_grace: 0,
+            waiting_for_cell: Vec::new(),
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {
@@ -3499,24 +3213,21 @@ fn spawn_session(
             watchers: Vec::new(),
         }),
         output_gate: Mutex::new(()),
-        color_replies: Arc::clone(&color_replies),
+        replies: Arc::clone(&replies),
         term: Mutex::new(new_daemon_term(
             rows,
             cols,
-            StateListener::with_color_replies(
-                Arc::clone(&state),
-                Arc::clone(event_hub),
-                color_replies,
-            ),
+            StateListener::with_replies(Arc::clone(&state), Arc::clone(event_hub), replies),
         )),
+        graphics: Mutex::default(),
         state,
     };
     Ok((sess, Box::new(pty_reader)))
 }
 
-fn write_terminal_color_replies(sess: &Session) {
+fn write_terminal_replies(sess: &Session) {
     let pending = {
-        let Ok(mut pending) = sess.color_replies.lock() else {
+        let Ok(mut pending) = sess.replies.lock() else {
             return;
         };
         std::mem::take(&mut *pending)
@@ -3527,20 +3238,32 @@ fn write_terminal_color_replies(sess: &Session) {
     // 只为读改过的颜色短暂拿一下网格锁，写回 PTY 前放开。
     let overrides = sess.term.lock().ok().map(|term| *term.colors());
 
-    for (index, format) in pending {
-        let color = overrides
-            .and_then(|colors| colors[index])
-            .unwrap_or_else(|| resolve_terminal_color(index));
-        if write_session_input(sess, format(color).as_bytes()).is_err() {
+    for reply in pending {
+        let text = match reply {
+            TermReply::Text(text) => text,
+            TermReply::Color(index, format) => format(
+                overrides
+                    .and_then(|colors| colors[index])
+                    .unwrap_or_else(|| resolve_terminal_color(index)),
+            ),
+            TermReply::Pixels(query) => {
+                let answer = sess.ctl.lock().unwrap().answer_or_wait(query);
+                let Some(answer) = answer else {
+                    continue;
+                };
+                answer
+            }
+        };
+        if write_session_input(sess, text.as_bytes()).is_err() {
             break;
         }
     }
 }
 
-/// 常驻 Term 在解析 OSC 颜色查询时只能入队（它当时持有网格锁）。这里在网格锁释放后
-/// 统一写回 child，沿用 `Ctl` 的串行写入路径，避免与 resize 反向抢锁。
-fn flush_terminal_color_replies(sess: &Session) {
-    write_terminal_color_replies(sess);
+/// 常驻 Term 在解析查询时只能入队（它当时持有网格锁）。这里在网格锁释放后统一写回
+/// child，沿用 `Ctl` 的串行写入路径，避免与 resize 反向抢锁。
+fn flush_terminal_replies(sess: &Session) {
+    write_terminal_replies(sess);
 }
 
 /// 把一批输出里扫到的 OSC 通知发给订阅的客户端。会话已有结构化 hook 事件时不发：
@@ -3589,20 +3312,20 @@ fn start_pty_pump(
     id: String,
     sessions: Sessions,
     event_hub: EventHubHandle,
-    remote_sessions: Option<RemoteSessions>,
     slot: Arc<TerminalSlot<Session>>,
 ) {
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut parser: Processor = Processor::new();
+        // kitty 图形命令可能被 PTY read 切断，切分状态跨 read 保持。
+        let mut graphics_splitter = GraphicsSplitter::default();
         // OSC 9/99/777 通知、9;4 进度和 7501 程序状态 alacritty 不解析，在这里逐字节扫
         // 一次。只扫实时输出：resume 喂进网格的旧 keyframe 不经过这里，历史通知不会被
         // 当成新的再发。
         let mut osc_scan = OscScan::default();
-        let mut status_notices = ProgramStatusNotices::default();
         let mut progress = ProgressTracker::default();
         // resume 的旧 keyframe 理论上不含查询序列；即便有，也要在首次 read 前答复。
-        flush_terminal_color_replies(&sess);
+        flush_terminal_replies(&sess);
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
@@ -3621,41 +3344,87 @@ fn start_pty_pump(
                 Ok(n) => {
                     let chunk = &buf[..n];
                     let mut notifications = Vec::new();
+                    let mut program_status = None;
                     for event in chunk.iter().filter_map(|&byte| osc_scan.feed(byte)) {
                         match event {
                             OscEvent::Notification(notification) => {
                                 notifications.push(notification.text);
                             }
+                            // 程序自己报的状态直接进会话相位，跟 hook 一样走状态广播；
+                            // 关注事件由客户端按相位变化生成，不再另发终端通知。
                             OscEvent::ProgramStatus(status) => {
-                                notifications.extend(status_notices.observe(status));
+                                let mut state = sess.state.lock().unwrap();
+                                if apply_program_status(&mut state, &status) {
+                                    program_status = Some(state.clone());
+                                }
                             }
                             OscEvent::Progress(report) => progress.observe(report, Instant::now()),
-                            // 在这批输出交给客户端之前就回应：Pi 把探测和 DA 查询一起发，
-                            // 拿 DA 的回应当探测结束；DA 由客户端的终端回应，绕一圈回来
-                            // 一定在这之后。
+                            // 在这批输出推进网格之前就回应：Pi 把探测和 DA 查询一起发，
+                            // 拿 DA 的回应当探测结束；DA 由守护网格在这批输出处理完后才
+                            // 写回，一定在这之后。
                             OscEvent::ProgramStatusQuery(terminator) => {
                                 let _ =
                                     write_session_input(&sess, &program_status_reply(terminator));
                             }
                         }
                     }
+                    // 放置图片要按格子像素算占几格。先读出来再拿网格锁：resize 走 ctl -> term。
+                    let cell = {
+                        let ctl = sess.ctl.lock().unwrap();
+                        (u32::from(ctl.cell_w), u32::from(ctl.cell_h))
+                    };
                     // Claim the output sequence before advancing the grid. Resize uses
                     // the same gate, so its geometry marker cannot overtake bytes from
                     // this read. The gate is released before any potentially blocking
                     // PTY input or subscriber broadcast.
                     let output_gate = sess.output_gate.lock().unwrap();
-                    let mut term_guard = sess.term.lock().ok();
-                    if let Some(term) = term_guard.as_mut() {
-                        let _ = catch_unwind(AssertUnwindSafe(|| {
-                            parser.advance(&mut **term, chunk);
-                        }));
+                    let mut fed = FedOutput::default();
+                    match sess.term.lock() {
+                        Ok(mut term) => {
+                            let mut graphics = sess.graphics.lock().unwrap();
+                            let _ = catch_unwind(AssertUnwindSafe(|| {
+                                feed_output(
+                                    chunk,
+                                    &mut graphics_splitter,
+                                    &mut parser,
+                                    &mut *term,
+                                    &mut graphics,
+                                    cell,
+                                    &mut fed,
+                                );
+                            }));
+                        }
+                        Err(_) => {
+                            fed.graphics.extend_from_slice(chunk);
+                            fed.plain.extend_from_slice(chunk);
+                        }
                     }
-                    drop(term_guard);
-                    dispatch_session_outputs_under_gate(&sess, chunk, &id, true, true);
+                    dispatch_session_output_under_gate(
+                        &sess,
+                        SessionOutput {
+                            graphics: &fed.graphics,
+                            plain: &fed.plain,
+                        },
+                        &id,
+                        true,
+                        true,
+                    );
                     drop(output_gate);
+                    if !fed.reply.is_empty() {
+                        let _ = write_session_input(&sess, &fed.reply);
+                    }
+                    for _ in 0..fed.cell_size_queries {
+                        let answer = sess.ctl.lock().unwrap().answer_or_wait(PixelQuery::Cell);
+                        if let Some(answer) = answer {
+                            let _ = write_session_input(&sess, answer.as_bytes());
+                        }
+                    }
                     // 颜色查询应答可能等待 PTY 输入队列变得可写；必须在释放网格锁后
                     // 再做，避免把 resize 的 ctl -> term 路径拖住。
-                    flush_terminal_color_replies(&sess);
+                    flush_terminal_replies(&sess);
+                    if let Some(snapshot) = program_status {
+                        broadcast_state(&event_hub, &snapshot);
+                    }
                     publish_terminal_notifications(&sess.state, &id, &event_hub, notifications);
                     publish_terminal_progress(&mut progress, &id, sess.instance, &event_hub);
                 }
@@ -3663,20 +3432,9 @@ fn start_pty_pump(
         }
         event_hub.forget_terminal_progress(&id, sess.instance);
         // 主动 kill 可能已经摘掉并替换了同 ID slot。这里只能清理自己仍拥有的实例，
-        // 否则旧 PTY EOF 会删掉刚创建的新会话和它的远程目录。
+        // 否则旧 PTY EOF 会删掉刚创建的新会话。
         let _lifecycle = slot.lifecycle.lock().unwrap();
         let removed_current = if sessions.is_current(&id, &slot) {
-            if let Some(remote_sessions) = remote_sessions
-                && let Err(error) = remove_remote_session_for_instance(
-                    &remote_sessions,
-                    &event_hub,
-                    RemoteSessionKind::Terminal,
-                    &id,
-                    sess.instance,
-                )
-            {
-                eprintln!("[remote] 终端会话 {id} 退出后清理目录失败：{error}");
-            }
             sessions.remove_if_same(&id, &slot).is_some()
         } else {
             false

@@ -229,11 +229,15 @@ where
 
 /// 连接线程 → UI 的事件。schema 类型（ToolCall 等）原样透传，不造平行模型。
 pub enum ConversationEvent {
-    /// 启动阶段的进度文案（下载运行时 / 拉取适配器等），Starting 横幅显示。
-    Status(String),
+    /// 启动阶段的进度文案（下载运行时 / 拉取适配器等），Starting 横幅显示，
+    /// Ready 清掉。只有建连阶段能发：别的时候发出去没人清，会一直挂着。
+    StartupProgress(String),
     /// 用户该看到的一次性提示（插话、压缩、停后台任务失败等）。显示在输入框上方，
-    /// 下一回合开始时清掉；不能走 `Status`，那条只在启动横幅里显示。
+    /// 下一回合开始时清掉；不能走 `StartupProgress`，那条只在启动横幅里显示。
     Notice(String),
+    /// agent 没接受会话配置修改。和 `Notice` 一样给用户看，另带类别，
+    /// 好让客户端撤掉没生效的勾选、守护停止等待配置确认。
+    ConfigRejected(String),
     /// 冷恢复即将由 agent 重放完整历史。必须先清空 daemon 中的旧投影；Ready
     /// 到达时历史可能已经同步回放完，不能再在那里清空。
     HistoryReplayStarted,
@@ -373,11 +377,11 @@ pub enum ConversationEvent {
         /// 事件是进程内的，不存在旧数据，但为了语义完整仍随声明一起下发。
         rewind: bool,
     },
-    /// 上下文压缩进度。`running` 为真时 UI 显示「压缩中」；结束时 `detail`
-    /// 是结果摘要，可选带压缩后的用量。
+    /// 上下文压缩进度。`running` 为真时 UI 显示「压缩中」；结束时可选带压缩后的
+    /// 用量，`size` 缺省时沿用已知窗口。失败另走 `Notice`：结果是一次性提示，
+    /// 不能留在状态行里，否则下一轮一直挂着它。
     Compaction {
         running: bool,
-        detail: String,
         used: Option<u64>,
         size: Option<u64>,
     },
@@ -1231,7 +1235,7 @@ pub fn spawn_acp(
                 let (cmd, managed_bun) = {
                     let tx = event_tx.clone();
                     match resolve_runtime_command_with_bun(&launch.launch.command, &|msg| {
-                        let _ = tx.try_send(ConversationEvent::Status(msg.to_string()));
+                        let _ = tx.try_send(ConversationEvent::StartupProgress(msg.to_string()));
                     }) {
                         Ok(cmd) => cmd,
                         Err(e) => {
@@ -2318,25 +2322,25 @@ async fn drive_session<S: SessionDrive>(
             // 通用 ACP 不该收到 Steer（daemon 按 `supports_mid_turn_input` 过滤）。
             // 万一漏进来，当成新一轮 prompt 会破坏回合闸门，这里只出个提示。
             Next::Cmd(Some(ConversationCommand::Steer { .. })) => {
-                let _ = channels.event_tx.try_send(ConversationEvent::Status(
+                let _ = channels.event_tx.try_send(ConversationEvent::Notice(
                     "当前智能体不支持运行中插入消息".to_string(),
                 ));
             }
             Next::Cmd(Some(
                 ConversationCommand::FollowUp { .. } | ConversationCommand::ClearQueue,
             )) => {
-                let _ = channels.event_tx.try_send(ConversationEvent::Status(
+                let _ = channels.event_tx.try_send(ConversationEvent::Notice(
                     "当前智能体不支持原生消息队列".to_string(),
                 ));
             }
             Next::Cmd(Some(ConversationCommand::Compact { .. })) => {
-                let _ = channels.event_tx.try_send(ConversationEvent::Status(
+                let _ = channels.event_tx.try_send(ConversationEvent::Notice(
                     "当前智能体不支持压缩上下文".to_string(),
                 ));
             }
             // daemon 按 `supports_rewind` 过滤，这里只防漏进来。
             Next::Cmd(Some(ConversationCommand::Rewind { .. })) => {
-                let _ = channels.event_tx.try_send(ConversationEvent::Status(
+                let _ = channels.event_tx.try_send(ConversationEvent::Notice(
                     "当前智能体不支持回退消息".to_string(),
                 ));
             }
@@ -2542,7 +2546,9 @@ async fn send_config_option(
             publish_config_options(Some(&resp.config_options), event_tx);
         }
         Err(e) => {
-            let _ = event_tx.try_send(ConversationEvent::Status(format!("更新会话配置失败：{e}")));
+            let _ = event_tx.try_send(ConversationEvent::ConfigRejected(format!(
+                "更新会话配置失败：{e}"
+            )));
         }
     }
 }
@@ -6037,7 +6043,7 @@ mod prompt_failure_tests {
         assert!(ConversationEvent::TurnEnded(StopReason::EndTurn).ends_turn());
         assert!(ConversationEvent::TurnFailed("x".into()).ends_turn());
         assert!(!ConversationEvent::Fatal("x".into()).ends_turn());
-        assert!(!ConversationEvent::Status("x".into()).ends_turn());
+        assert!(!ConversationEvent::StartupProgress("x".into()).ends_turn());
         assert!(!ConversationEvent::PromptAccepted.ends_turn());
         assert!(!ConversationEvent::PromptNotAccepted.ends_turn());
         assert!(!ConversationEvent::ProviderIdle.ends_turn());

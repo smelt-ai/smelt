@@ -8,8 +8,7 @@ use std::time::Duration;
 pub use smelt_event_protocol::{TerminalProgress, TerminalProgressState};
 
 use crate::automation::AutomationFile;
-use crate::session_control::RemoteSessionSnapshot;
-use crate::workspace_menu::WorkspaceMenuSnapshot;
+use crate::workspace_directory::WorkspaceDirectory;
 
 mod event_client;
 
@@ -28,6 +27,18 @@ pub fn daemon_reconnect_backoff(attempt: u32) -> Duration {
         .saturating_mul(multiplier)
         .min(DAEMON_RECONNECT_MAX.as_millis());
     Duration::from_millis(millis.min(u64::MAX as u128) as u64)
+}
+
+/// 当前 epoch 的快照里，一个会话的运行时处在哪种状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimePresence {
+    /// 有活着的运行时，按 id attach。
+    Live,
+    /// 守护停过（崩溃、重启）后从会话目录恢复的条目：身份还在，进程没了。
+    /// 按原 id 重新打开，守护会把能续接的 CLI 接回原来的对话。
+    LeftOver,
+    /// 快照里没有这个 id：shell 已经退出，不再接。
+    Gone,
 }
 
 /// GUI 侧订阅状态通道的镜像（serde 反序列化；多出来的 JSON 字段自动忽略）。
@@ -59,6 +70,10 @@ pub struct DaemonSessionState {
     /// 对话切换走。旧守护不报该字段时为 None，退化成纯终端标题语义。
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// 用户给 `conversation_id` 那段对话起的名字（历史页、侧栏改名写的同一份），守护按
+    /// 身份查好推来。
+    #[serde(default)]
+    pub custom_title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
     /// unix 秒，进入当前 phase 的时刻。
@@ -113,6 +128,7 @@ impl Default for DaemonSessionState {
             launch: None,
             provider: None,
             conversation_id: None,
+            custom_title: None,
             cwd: None,
             phase_since: 0,
             updated_at: 0,
@@ -170,22 +186,25 @@ impl DaemonSessionState {
         }
     }
 
-    /// 用 subscribe 镜像判断会话是否还能 attach。
+    /// 用 subscribe 镜像判断会话的运行时还在不在、断了该怎么接。
     /// `None`：当前订阅还没给出可用快照，调用方不能当成已死。
-    /// `Some(false)`：当前 epoch 的快照里该 id 无运行时（已退出 / 幽灵条目）。
     ///
     /// `subscription_live` 必须是**这一条** subscribe 连接仍活着。守护 exec
     /// 换代后旧连接已死，上一 epoch 留下的 primed 快照不能再当权威答案，
     /// 否则会把「正在交接」误判成「shell 已死」并丢掉未发送输入。
-    pub fn runtime_alive_from_mirror(
+    pub fn runtime_presence_from_mirror(
         subscription_live: bool,
         primed: bool,
         state: Option<&Self>,
-    ) -> Option<bool> {
+    ) -> Option<RuntimePresence> {
         if !subscription_live || !primed {
             return None;
         }
-        Some(state.is_some_and(Self::has_runtime))
+        Some(match state {
+            Some(state) if state.has_runtime() => RuntimePresence::Live,
+            Some(_) => RuntimePresence::LeftOver,
+            None => RuntimePresence::Gone,
+        })
     }
 
     /// 结构面板副文案：工具名或审批问句。
@@ -242,11 +261,8 @@ pub enum DaemonStateEvent {
     /// 首帧：全量快照。
     Snapshot {
         sessions: Vec<DaemonSessionState>,
-        /// daemon 持有的远程目录复用同一条订阅连接下发，但与 agent runtime phase
-        /// 分开，避免消费者把“所有权”误当成“运行状态”。
-        remote_sessions: Option<RemoteSessionSnapshot>,
-        /// 桌面发布的侧栏菜单。远程客户端只消费这一份，不读工作区快照。
-        workspace_menu: Option<WorkspaceMenuSnapshot>,
+        /// 运行时的工作区目录。没订、或运行时还没有这份投影时为 `None`。
+        workspace: Option<WorkspaceDirectory>,
         /// daemon 唯一 owner 的自动化定义、状态与 Run 投影。
         automations: Option<AutomationFile>,
     },
@@ -255,11 +271,9 @@ pub enum DaemonStateEvent {
     /// 增量删除。不能做成完整 `sessions` 帧——客户端会把带 `sessions` 的行当成
     /// 新 epoch 并整表替换，订阅首帧之后的旧删除快照会把后来新建的会话抹掉。
     Removed { id: String },
-    /// 远程目录的完整替换。`revision` 仅在当前 daemon epoch 内有效；新的 subscribe
+    /// 工作区目录的完整替换。`revision` 仅在当前 daemon epoch 内有效；新的 subscribe
     /// 快照会重置消费者水位。
-    RemoteSessions(RemoteSessionSnapshot),
-    /// 桌面菜单的完整替换。水位规则与远程目录相同。
-    WorkspaceMenu(WorkspaceMenuSnapshot),
+    Workspace(WorkspaceDirectory),
     /// 自动化投影的完整替换。store_id 进一步保护跨 daemon epoch 的迟到响应。
     Automations(AutomationFile),
     /// 有人要看一段 daemon 里没在跑的对话，请持有启动规格的桌面端把它拉起来。
@@ -313,40 +327,47 @@ mod tests {
     }
 
     #[test]
-    fn runtime_alive_waits_until_mirror_is_primed() {
+    fn runtime_presence_waits_until_mirror_is_primed() {
         let live = DaemonSessionState {
             id: "s1".into(),
             runtime: true,
             ..Default::default()
         };
         assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(true, false, Some(&live)),
+            DaemonSessionState::runtime_presence_from_mirror(true, false, Some(&live)),
             None
         );
         assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(true, false, None),
+            DaemonSessionState::runtime_presence_from_mirror(true, false, None),
             None
         );
         assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(true, true, Some(&live)),
-            Some(true)
+            DaemonSessionState::runtime_presence_from_mirror(true, true, Some(&live)),
+            Some(RuntimePresence::Live)
         );
-        let ghost = DaemonSessionState {
+        assert_eq!(
+            DaemonSessionState::runtime_presence_from_mirror(true, true, None),
+            Some(RuntimePresence::Gone)
+        );
+    }
+
+    /// 守护崩溃后新守护从会话目录恢复的条目是 `runtime=false`：进程没了但身份还在，
+    /// 要和「shell 已退出、条目已删」分开，客户端才知道该重新打开而不是判死。
+    #[test]
+    fn runtime_presence_tells_left_over_from_gone() {
+        let left_over = DaemonSessionState {
+            id: "s1".into(),
             runtime: false,
-            ..live
+            ..Default::default()
         };
         assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(true, true, Some(&ghost)),
-            Some(false)
-        );
-        assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(true, true, None),
-            Some(false)
+            DaemonSessionState::runtime_presence_from_mirror(true, true, Some(&left_over)),
+            Some(RuntimePresence::LeftOver)
         );
     }
 
     #[test]
-    fn runtime_alive_ignores_stale_snapshot_while_subscription_is_down() {
+    fn runtime_presence_ignores_stale_snapshot_while_subscription_is_down() {
         let live = DaemonSessionState {
             id: "s1".into(),
             runtime: true,
@@ -359,15 +380,15 @@ mod tests {
         // 守护 exec 后旧 subscribe 已死：即使上一帧还写着 runtime=false / 缺 id，
         // 也不能判死，否则 make install 会把还活着的普通 shell 输入丢掉。
         assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(false, true, Some(&live)),
+            DaemonSessionState::runtime_presence_from_mirror(false, true, Some(&live)),
             None
         );
         assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(false, true, Some(&ghost)),
+            DaemonSessionState::runtime_presence_from_mirror(false, true, Some(&ghost)),
             None
         );
         assert_eq!(
-            DaemonSessionState::runtime_alive_from_mirror(false, true, None),
+            DaemonSessionState::runtime_presence_from_mirror(false, true, None),
             None
         );
     }

@@ -610,6 +610,16 @@ impl AcpView {
                     composer_focus,
                     gpui::rgb(ui_theme::accent()),
                 ))
+                .debug_selector(|| "ACP_COMPOSER".into())
+                // 从访达拖进来的文件按「+」选文件处理：图片进待发缩略图，其它按 `@` 提及。
+                .drag_over::<gpui::ExternalPaths>(|style, _paths, _window, cx| {
+                    style
+                        .bg(cx.theme().drop_target)
+                        .border_color(cx.theme().drag_border)
+                })
+                .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                    this.attach_picked_paths(paths.paths().to_vec(), window, cx);
+                }))
                 .child(
                     div()
                         .id("acp-composer-input")
@@ -912,25 +922,29 @@ impl AcpView {
                                 }))
                                 .child(thumb)
                                 .child(
-                                    // 右上角小 ×：点掉这张。
+                                    // 右上角小 ×：点掉这张。卡片裁边，按钮得落在卡片里面；
+                                    // 它压在图片上，底色不跟主题走，深浅截图上都要看得清。
                                     div()
                                         .id(("acp-pending-img-remove", image_key))
                                         .role(gpui::Role::Button)
                                         .aria_label("移除图片")
                                         .absolute()
-                                        .top(px(-4.))
-                                        .right(px(-4.))
-                                        .size(px(16.))
+                                        .top(px(4.))
+                                        .right(px(4.))
+                                        .size(px(18.))
                                         .rounded_full()
-                                        .bg(ui_theme::overlay(0xcc))
-                                        .text_xs()
-                                        .text_color(gpui::rgb(ui_theme::text_mid()))
+                                        .bg(ui_theme::tint(0x000000, 0xb3))
+                                        .border_1()
+                                        .border_color(ui_theme::tint(0xffffff, 0x40))
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        
-                                        .hover(|d| d.opacity(0.8))
-                                        .child("×")
+                                        .hover(|d| d.bg(ui_theme::tint(0x000000, 0xe6)))
+                                        .child(
+                                            Icon::new(IconName::Close)
+                                                .size(px(12.))
+                                                .text_color(gpui::rgb(0xffffff)),
+                                        )
                                         .on_mouse_down(
                                             gpui::MouseButton::Left,
                                             cx.listener(move |this, _ev, _window, cx| {

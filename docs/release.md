@@ -124,8 +124,10 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`。由 `windows-release` 挂到同一个 Release。
 校验和在 `checksums` 里和其它产物写在一起。
 
-这一版 exe 和安装程序都不签名。下载后 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。还没有自动更新，
-升级是运行新版本的安装程序覆盖安装。
+这一版 exe 和安装程序都不签名。下载后 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。
+桌面的应用内更新认的就是这个安装程序：发布里同时有它和 `SHA256SUMS`、清单里已经有它的校验和，才算这个发布能装。
+下载、校验后带 `/VERYSILENT /WAITPID=<桌面 pid> [/RELAUNCH=<桌面 exe>]` 拉起，桌面退出后安装程序覆盖安装，见
+`crates/smelt-client/src/updater/windows.rs`。
 本机守护可以冷启动。升级是关掉旧进程再拉起新的，终端会话不保留。Release 说明里有同样的一段。
 
 ## Android 签名

@@ -74,13 +74,27 @@ pub struct PendingPromptView {
     pub withdrawable: bool,
 }
 
-/// 给用户看的一次性提示（插话、压缩、停后台任务失败这类）。不是启动进度：
+/// 给用户看的一次性提示（插话、压缩、改配置失败这类）。不是启动进度：
 /// 启动进度走 `status_line`。新回合开始、会话重启时清掉。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AcpNoticeView {
     /// 单调递增，客户端按它记「这条已经关掉」，新提示不会被旧的关闭动作盖住。
     pub id: u64,
+    /// 旧快照没有这个字段，按普通提示读。
+    #[serde(default)]
+    pub kind: AcpNoticeKind,
     pub text: String,
+}
+
+/// 提示的来由。要据此动作的消费方（撤掉没生效的配置勾选、停止等待配置确认）
+/// 认类别，不认文案。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpNoticeKind {
+    #[default]
+    Info,
+    /// agent 没接受这次会话配置修改。
+    ConfigRejected,
 }
 
 /// ACP 回合终结原因的稳定投影。`DaemonPhase::Idle` 只描述当前没有运行中的回合，

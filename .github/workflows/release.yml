@@ -165,7 +165,7 @@ jobs:
 
           ## Windows
 
-          下载 \`smelt-${version}-windows-x86_64-setup.exe\` 运行即可。按用户安装，不要管理员权限，默认装到 \`%LOCALAPPDATA%\\Programs\\Smelt\`，可选把 \`smelt\` 命令加入 PATH。升级直接运行新版本的安装程序，覆盖安装前先关掉 Smelt。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。升级本机守护会重启进程，终端会话不保留。
+          下载 \`smelt-${version}-windows-x86_64-setup.exe\` 运行即可。按用户安装，不要管理员权限，默认装到 \`%LOCALAPPDATA%\\Programs\\Smelt\`，可选把 \`smelt\` 命令加入 PATH。装好后 Smelt 会在应用内检查更新（设置 → 关于 → 更新），也可以直接运行新版本的安装程序覆盖安装，覆盖前先关掉 Smelt。没有应用内更新的旧版要再手动装一次。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。升级本机守护会重启进程，终端会话不保留。
           EOF
           cat "$RUNNER_TEMP/release-notes.md"
 

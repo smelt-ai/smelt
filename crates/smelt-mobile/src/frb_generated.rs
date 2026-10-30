@@ -2288,6 +2288,18 @@ impl SseDecode for crate::api::conversation::ConversationImage {
     }
 }
 
+impl SseDecode for crate::api::conversation::ConversationNotice {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <i64>::sse_decode(deserializer);
+        let mut var_text = <String>::sse_decode(deserializer);
+        return crate::api::conversation::ConversationNotice {
+            id: var_id,
+            text: var_text,
+        };
+    }
+}
+
 impl SseDecode for crate::api::conversation::ConversationPhase {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2313,6 +2325,9 @@ impl SseDecode for crate::api::conversation::ConversationView {
         let mut var_sessionId = <String>::sse_decode(deserializer);
         let mut var_phase = <crate::api::conversation::ConversationPhase>::sse_decode(deserializer);
         let mut var_statusLine = <Option<String>>::sse_decode(deserializer);
+        let mut var_compacting = <bool>::sse_decode(deserializer);
+        let mut var_notice =
+            <Option<crate::api::conversation::ConversationNotice>>::sse_decode(deserializer);
         let mut var_endReason = <String>::sse_decode(deserializer);
         let mut var_sessionTitle = <Option<String>>::sse_decode(deserializer);
         let mut var_turnStartedAtMs = <Option<i64>>::sse_decode(deserializer);
@@ -2340,6 +2355,8 @@ impl SseDecode for crate::api::conversation::ConversationView {
             session_id: var_sessionId,
             phase: var_phase,
             status_line: var_statusLine,
+            compacting: var_compacting,
+            notice: var_notice,
             end_reason: var_endReason,
             session_title: var_sessionTitle,
             turn_started_at_ms: var_turnStartedAtMs,
@@ -3187,6 +3204,19 @@ impl SseDecode for Option<crate::api::conversation::ConversationImage> {
     }
 }
 
+impl SseDecode for Option<crate::api::conversation::ConversationNotice> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::ConversationNotice>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::conversation::ConversationView> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3812,9 +3842,10 @@ impl SseDecode for crate::api::error::SmeltErrorKind {
             0 => crate::api::error::SmeltErrorKind::Unpaired,
             1 => crate::api::error::SmeltErrorKind::Offline,
             2 => crate::api::error::SmeltErrorKind::InvalidPairing,
-            3 => crate::api::error::SmeltErrorKind::Incompatible,
-            4 => crate::api::error::SmeltErrorKind::Cancelled,
-            5 => crate::api::error::SmeltErrorKind::Other,
+            3 => crate::api::error::SmeltErrorKind::RuntimeOutdated,
+            4 => crate::api::error::SmeltErrorKind::AppOutdated,
+            5 => crate::api::error::SmeltErrorKind::Cancelled,
+            6 => crate::api::error::SmeltErrorKind::Other,
             _ => unreachable!("Invalid variant for SmeltErrorKind: {}", inner),
         };
     }
@@ -4759,6 +4790,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationIma
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationNotice {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.text.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationNotice
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationNotice>
+    for crate::api::conversation::ConversationNotice
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationNotice {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationPhase {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -4793,6 +4845,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationVie
             self.session_id.into_into_dart().into_dart(),
             self.phase.into_into_dart().into_dart(),
             self.status_line.into_into_dart().into_dart(),
+            self.compacting.into_into_dart().into_dart(),
+            self.notice.into_into_dart().into_dart(),
             self.end_reason.into_into_dart().into_dart(),
             self.session_title.into_into_dart().into_dart(),
             self.turn_started_at_ms.into_into_dart().into_dart(),
@@ -5876,9 +5930,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::error::SmeltErrorKind {
             Self::Unpaired => 0.into_dart(),
             Self::Offline => 1.into_dart(),
             Self::InvalidPairing => 2.into_dart(),
-            Self::Incompatible => 3.into_dart(),
-            Self::Cancelled => 4.into_dart(),
-            Self::Other => 5.into_dart(),
+            Self::RuntimeOutdated => 3.into_dart(),
+            Self::AppOutdated => 4.into_dart(),
+            Self::Cancelled => 5.into_dart(),
+            Self::Other => 6.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -6612,6 +6667,14 @@ impl SseEncode for crate::api::conversation::ConversationImage {
     }
 }
 
+impl SseEncode for crate::api::conversation::ConversationNotice {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.text, serializer);
+    }
+}
+
 impl SseEncode for crate::api::conversation::ConversationPhase {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6641,6 +6704,8 @@ impl SseEncode for crate::api::conversation::ConversationView {
         <String>::sse_encode(self.session_id, serializer);
         <crate::api::conversation::ConversationPhase>::sse_encode(self.phase, serializer);
         <Option<String>>::sse_encode(self.status_line, serializer);
+        <bool>::sse_encode(self.compacting, serializer);
+        <Option<crate::api::conversation::ConversationNotice>>::sse_encode(self.notice, serializer);
         <String>::sse_encode(self.end_reason, serializer);
         <Option<String>>::sse_encode(self.session_title, serializer);
         <Option<i64>>::sse_encode(self.turn_started_at_ms, serializer);
@@ -7293,6 +7358,16 @@ impl SseEncode for Option<crate::api::conversation::ConversationImage> {
     }
 }
 
+impl SseEncode for Option<crate::api::conversation::ConversationNotice> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ConversationNotice>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::conversation::ConversationView> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7795,9 +7870,10 @@ impl SseEncode for crate::api::error::SmeltErrorKind {
                 crate::api::error::SmeltErrorKind::Unpaired => 0,
                 crate::api::error::SmeltErrorKind::Offline => 1,
                 crate::api::error::SmeltErrorKind::InvalidPairing => 2,
-                crate::api::error::SmeltErrorKind::Incompatible => 3,
-                crate::api::error::SmeltErrorKind::Cancelled => 4,
-                crate::api::error::SmeltErrorKind::Other => 5,
+                crate::api::error::SmeltErrorKind::RuntimeOutdated => 3,
+                crate::api::error::SmeltErrorKind::AppOutdated => 4,
+                crate::api::error::SmeltErrorKind::Cancelled => 5,
+                crate::api::error::SmeltErrorKind::Other => 6,
                 _ => {
                     unimplemented!("");
                 }

@@ -68,6 +68,14 @@ pub struct NotifyPrefsRecord {
     pub terminal_bell: bool,
 }
 
+/// 用户改过的一条快捷键。`keystroke` 是 GPUI 的按键写法（`cmd-k`），`None` 是用户把这条
+/// 清掉了、不绑任何键。没有记录的动作用出厂键位。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyBindingRecord {
+    pub action_id: String,
+    pub keystroke: Option<String>,
+}
+
 /// 侧栏里的一个项目：哪个运行时上的哪个根目录。路径只在一个运行时里唯一。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectKey {
@@ -112,6 +120,17 @@ pub struct ConversationRouteRecord {
     pub diff_split: bool,
     pub git_tree_collapsed: Vec<String>,
     pub diff_scope: String,
+}
+
+/// 侧栏顺序：某个运行时上项目、对话从上到下的顺序。每台客户端自己记，不交给运行时。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SidebarOrderRecord {
+    /// `None` 是本机运行时（和 `ProjectKey::runtime_id`、`ConversationRouteRecord::runtime_id` 同一个约定）。
+    pub runtime_id: Option<String>,
+    /// 项目根目录，从上到下。
+    pub projects: Vec<String>,
+    /// 对话 id，从上到下。
+    pub conversations: Vec<String>,
 }
 
 /// 侧栏、路由这些界面状态。列表按原顺序存取。
@@ -505,6 +524,94 @@ fn read_conversation_routes(
     Ok(records)
 }
 
+/// 侧栏顺序的两张表和各自的条目列。
+const SIDEBAR_ORDER_TABLES: [(&str, &str); 2] = [
+    ("sidebar_project_order", "root"),
+    ("sidebar_conversation_order", "conversation_id"),
+];
+
+fn sidebar_order_items<'a>(record: &'a SidebarOrderRecord, table: &str) -> &'a [String] {
+    match table {
+        "sidebar_project_order" => &record.projects,
+        _ => &record.conversations,
+    }
+}
+
+fn sidebar_order_items_mut<'a>(
+    record: &'a mut SidebarOrderRecord,
+    table: &str,
+) -> &'a mut Vec<String> {
+    match table {
+        "sidebar_project_order" => &mut record.projects,
+        _ => &mut record.conversations,
+    }
+}
+
+/// 只换给出的运行时：先删掉它们的旧行再按新顺序写。同一运行时里重复的条目留第一次出现的位置
+/// （`INSERT OR IGNORE` 撞主键就跳过）；同一个运行时给了两次，后一份为准。
+fn write_sidebar_orders(
+    connection: &Connection,
+    records: &[SidebarOrderRecord],
+) -> Result<(), String> {
+    for (table, column) in SIDEBAR_ORDER_TABLES {
+        let mut delete = connection
+            .prepare(&format!("DELETE FROM {table} WHERE runtime_id = ?1"))
+            .map_err(sql)?;
+        let mut insert = connection
+            .prepare(&format!(
+                "INSERT OR IGNORE INTO {table} (runtime_id, {column}, position) VALUES (?1, ?2, ?3)"
+            ))
+            .map_err(sql)?;
+        for record in records {
+            let runtime_id = record.runtime_id.as_deref().unwrap_or(LOCAL_RUNTIME_ID);
+            delete.execute(params![runtime_id]).map_err(sql)?;
+            for (position, item) in sidebar_order_items(record, table).iter().enumerate() {
+                insert
+                    .execute(params![runtime_id, item, position as i64])
+                    .map_err(sql)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 每个有顺序的运行时一条，按 `runtime_id` 排（本机在最前）。
+fn read_sidebar_orders(connection: &Connection) -> Result<Vec<SidebarOrderRecord>, String> {
+    let mut records: Vec<SidebarOrderRecord> = Vec::new();
+    for (table, column) in SIDEBAR_ORDER_TABLES {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT runtime_id, {column} FROM {table} ORDER BY runtime_id, position"
+            ))
+            .map_err(sql)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql)?;
+        for row in rows {
+            let (runtime_id, item) = row.map_err(sql)?;
+            let runtime_id = (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id);
+            let index = match records
+                .iter()
+                .position(|record| record.runtime_id == runtime_id)
+            {
+                Some(index) => index,
+                None => {
+                    records.push(SidebarOrderRecord {
+                        runtime_id,
+                        ..SidebarOrderRecord::default()
+                    });
+                    records.len() - 1
+                }
+            };
+            sidebar_order_items_mut(&mut records[index], table).push(item);
+        }
+    }
+    records.sort_by(|a, b| a.runtime_id.cmp(&b.runtime_id));
+    Ok(records)
+}
+
 pub(crate) fn write_workspace_ui(
     connection: &Connection,
     record: &WorkspaceUiRecord,
@@ -800,6 +907,20 @@ impl ClientStore {
     }
 
     #[track_caller]
+    pub fn sidebar_orders(&self) -> Result<Vec<SidebarOrderRecord>, ClientStoreError> {
+        self.with(|connection| read_sidebar_orders(connection))
+    }
+
+    /// 替换给出的这些运行时的顺序；没给出的运行时原样保留。
+    #[track_caller]
+    pub fn put_sidebar_orders(
+        &self,
+        records: &[SidebarOrderRecord],
+    ) -> Result<(), ClientStoreError> {
+        self.write(|connection| write_sidebar_orders(connection, records))
+    }
+
+    #[track_caller]
     pub fn update_state(&self) -> Result<UpdateStateRecord, ClientStoreError> {
         self.with(|connection| {
             let (current_url, cleanup_app) = connection
@@ -888,6 +1009,58 @@ impl ClientStore {
     #[track_caller]
     pub fn mark_runtime_migrated(&self) -> Result<(), ClientStoreError> {
         self.write(write_runtime_migrated)
+    }
+
+    /// 用户改过的快捷键，按动作名排。
+    #[track_caller]
+    pub fn key_bindings(&self) -> Result<Vec<KeyBindingRecord>, ClientStoreError> {
+        self.with(|connection| {
+            let mut statement = connection
+                .prepare("SELECT action_id, keystroke FROM key_binding ORDER BY action_id")
+                .map_err(sql)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(KeyBindingRecord {
+                        action_id: row.get(0)?,
+                        keystroke: row.get(1)?,
+                    })
+                })
+                .map_err(sql)?;
+            rows.collect::<Result<_, _>>().map_err(sql)
+        })
+    }
+
+    /// 记下改过的快捷键，同一个动作覆盖旧的。几条一起写：改绑时清掉对方和换上自己要么都成，
+    /// 要么都不成。
+    #[track_caller]
+    pub fn put_key_bindings(&self, records: &[KeyBindingRecord]) -> Result<(), ClientStoreError> {
+        self.write(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "INSERT OR REPLACE INTO key_binding (action_id, keystroke) VALUES (?1, ?2)",
+                )
+                .map_err(sql)?;
+            for record in records {
+                statement
+                    .execute(params![record.action_id, record.keystroke])
+                    .map_err(sql)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// 回到出厂键位：删掉这个动作的记录。
+    #[track_caller]
+    pub fn delete_key_binding(&self, action_id: &str) -> Result<(), ClientStoreError> {
+        self.write(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM key_binding WHERE action_id = ?1",
+                    params![action_id],
+                )
+                .map(drop)
+                .map_err(sql)
+        })
     }
 
     /// 按添加顺序列出远程运行时。

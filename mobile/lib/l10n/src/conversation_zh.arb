@@ -71,6 +71,8 @@
   "conversationImageUndecodable": "这张图片无法显示。",
   "conversationImageLoadFailed": "原图加载失败：{message}",
   "conversationStatusEnded": "会话已结束",
+  "conversationStatusCompacting": "正在压缩上下文…",
+  "conversationNoticeDismiss": "关闭提示",
   "conversationHint": "给 {agent} 发消息",
   "conversationHintOffline": "机器离线，草稿会保留",
   "conversationHintTicket": "先处理上方的单据",

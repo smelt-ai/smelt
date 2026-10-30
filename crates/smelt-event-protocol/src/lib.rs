@@ -8,8 +8,18 @@ use std::{fmt, str::FromStr};
 /// 不带 `cursor`，没有 ack / nack 和 `cursor` 消息，`SessionStateChanged` 去掉 `agent_mcp`。
 /// 载荷都是 `deny_unknown_fields`，新旧两边谁也解不了谁，所以整条事件协议升版，在订阅
 /// 握手时就拦住。
-pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 2;
-pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 2;
+///
+/// v3：桌面发布的侧栏菜单下线，`workspace_menu.changed` 和它的快照删掉，客户端改订
+/// `workspace.changed`。订阅里带着未知话题会被整条拒掉，旧客户端只会反复重连，所以升版，
+/// 让它在握手时就拿到「版本不兼容」。
+///
+/// v4：远程会话目录下线，`remote_sessions.changed`、它的快照和读权限删掉。手机、命令行、
+/// 智能体新建的对话由运行时直接写进工作区目录，客户端只看 `workspace.changed`。
+///
+/// v5：会话状态多了 `custom_title`（终端当前那段对话的名字，守护按身份查好）。会话状态
+/// 严格解码，旧客户端认不出这个字段，所以升版。
+pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 5;
+pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 5;
 
 pub const CORE_PROJECTION_VERSION: u16 = 1;
 /// v2 起 SessionStateChanged 带 hook 检测到的 provider，v3 起再带 provider 自己的
@@ -21,8 +31,8 @@ pub const CORE_SESSION_PROJECTION_VERSION: u16 = 3;
 pub const CORE_SESSION_STATE_SCHEMA_VERSION: u16 = 3;
 pub const CORE_TOPIC_SESSION_STATE_CHANGED: &str = "session.state_changed";
 pub const CORE_TOPIC_SESSION_REMOVED: &str = "session.removed";
-pub const CORE_TOPIC_REMOTE_SESSIONS_CHANGED: &str = "remote_sessions.changed";
-pub const CORE_TOPIC_WORKSPACE_MENU_CHANGED: &str = "workspace_menu.changed";
+/// 运行时的工作区目录（项目、对话）变了，载荷是改完的整份目录。
+pub const CORE_TOPIC_WORKSPACE_CHANGED: &str = "workspace.changed";
 pub const CORE_TOPIC_AUTOMATIONS_CHANGED: &str = "automations.changed";
 /// 有人要看一段 daemon 里还没在跑的对话（典型是 daemon 冷重启后手机点开）。
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
@@ -43,7 +53,6 @@ pub const CORE_TOPIC_TERMINAL_NOTIFICATION: &str = "terminal.notification";
 pub const CORE_TOPIC_TERMINAL_PROGRESS: &str = "terminal.progress";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
-pub const CORE_CAPABILITY_REMOTE_SESSIONS_READ: &str = "remote_sessions.read";
 pub const CORE_CAPABILITY_WORKSPACE_READ: &str = "workspace.read";
 pub const CORE_CAPABILITY_AUTOMATION_READ: &str = "automation.read";
 /// 接收对话唤醒请求。只有持有对话启动规格的一方（桌面端）该拿这项能力：
@@ -53,8 +62,7 @@ pub const CORE_CAPABILITY_CONVERSATION_WAKE: &str = "conversation.wake";
 pub const CORE_CAPABILITY_APPEARANCE_CONTROL: &str = "appearance.control";
 
 pub const CORE_SNAPSHOT_SESSIONS: &str = "core.sessions.v1";
-pub const CORE_SNAPSHOT_REMOTE_SESSIONS: &str = "core.remote_sessions.v1";
-pub const CORE_SNAPSHOT_WORKSPACE_MENU: &str = "core.workspace_menu.v1";
+pub const CORE_SNAPSHOT_WORKSPACE: &str = "core.workspace.v1";
 pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
@@ -385,6 +393,10 @@ pub struct SessionStateChanged {
     /// 客户端据此把会话对上 provider 的历史存档（改名、显示名跟随对话）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// 用户给 `conversation_id` 那段对话起的名字（`history_title` 的投影），守护在换对话、
+    /// 改名时查好。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
     pub title: Option<String>,
     pub phase: CoreSessionPhase,
     #[serde(rename = "phase_since")]
@@ -520,16 +532,10 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             16 * 1024,
         )?,
         descriptor(
-            CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
-            CORE_CAPABILITY_REMOTE_SESSIONS_READ,
-            Some(CORE_SNAPSHOT_REMOTE_SESSIONS),
-            512 * 1024,
-        )?,
-        descriptor(
-            CORE_TOPIC_WORKSPACE_MENU_CHANGED,
+            CORE_TOPIC_WORKSPACE_CHANGED,
             CORE_CAPABILITY_WORKSPACE_READ,
-            Some(CORE_SNAPSHOT_WORKSPACE_MENU),
-            1024 * 1024,
+            Some(CORE_SNAPSHOT_WORKSPACE),
+            4 * 1024 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_AUTOMATIONS_CHANGED,
@@ -738,16 +744,7 @@ mod tests {
                 CORE_SESSION_STATE_SCHEMA_VERSION,
             ),
             (CORE_TOPIC_SESSION_REMOVED, Some(CORE_SNAPSHOT_SESSIONS), 1),
-            (
-                CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
-                Some(CORE_SNAPSHOT_REMOTE_SESSIONS),
-                1,
-            ),
-            (
-                CORE_TOPIC_WORKSPACE_MENU_CHANGED,
-                Some(CORE_SNAPSHOT_WORKSPACE_MENU),
-                1,
-            ),
+            (CORE_TOPIC_WORKSPACE_CHANGED, Some(CORE_SNAPSHOT_WORKSPACE), 1),
             (
                 CORE_TOPIC_AUTOMATIONS_CHANGED,
                 Some(CORE_SNAPSHOT_AUTOMATIONS),

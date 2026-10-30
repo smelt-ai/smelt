@@ -103,11 +103,12 @@ mod tests {
     fn capture(body: impl FnOnce()) -> Vec<(String, String)> {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = lines.clone();
-        let subscriber = tracing_subscriber::registry().with(PluginLog::new(move |level, message| {
-            sink.lock()
-                .unwrap()
-                .push((level.to_string(), message.to_string()));
-        }));
+        let subscriber =
+            tracing_subscriber::registry().with(PluginLog::new(move |level, message| {
+                sink.lock()
+                    .unwrap()
+                    .push((level.to_string(), message.to_string()));
+            }));
         tracing::subscriber::with_default(subscriber, body);
         let lines = lines.lock().unwrap().clone();
         lines

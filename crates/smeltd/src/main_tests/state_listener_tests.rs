@@ -36,19 +36,19 @@ fn next_session_event(
     }
 }
 
-/// 一个输出接到管道的会话：先把 `script` 喂给守护的终端，再按泵的顺序写回颜色查询，
-/// 返回写回 PTY 的全部字节。
-fn color_replies_for(script: &[u8]) -> String {
+/// 一个输出接到管道的会话：先把 `script` 喂给守护的终端，返回会话和管道读端（写回 PTY 的
+/// 字节从这里读）。`cell` 是桌面报来的格子像素，0 表示还没报。
+fn session_for(script: &[u8], cell: (u16, u16)) -> (Session, std::fs::File) {
     let mut fds = [0i32; 2];
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() 失败");
-    let mut probe = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let probe = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let master = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     let state = Arc::new(Mutex::new(SessionState::default()));
-    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
-    let listener = StateListener::with_color_replies(
+    let replies = Arc::new(Mutex::new(VecDeque::new()));
+    let listener = StateListener::with_replies(
         Arc::clone(&state),
         no_subscribers(),
-        Arc::clone(&color_replies),
+        Arc::clone(&replies),
     );
     let mut term = new_daemon_term(24, 80, listener);
     let mut parser: Processor = Processor::new();
@@ -64,10 +64,11 @@ fn color_replies_for(script: &[u8]) -> String {
             jolt: false,
             cols: 80,
             rows: 24,
-            cell_w: 0,
-            cell_h: 0,
+            cell_w: cell.0,
+            cell_h: cell.1,
             remote_viewports: 0,
             remote_grace: 0,
+            waiting_for_cell: Vec::new(),
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {
@@ -75,16 +76,63 @@ fn color_replies_for(script: &[u8]) -> String {
             watchers: Vec::new(),
         }),
         output_gate: Mutex::new(()),
-        color_replies,
+        replies,
         term: Mutex::new(term),
+        graphics: Mutex::default(),
         state,
     };
+    (session, probe)
+}
 
-    flush_terminal_color_replies(&session);
+/// 关掉会话（写端），读出写回 PTY 的全部字节。没有应答时读到 EOF 而不是一直等。
+fn written(session: Session, mut probe: std::fs::File) -> String {
+    drop(session);
+    let mut bytes = Vec::new();
+    probe.read_to_end(&mut bytes).expect("读应答");
+    String::from_utf8_lossy(&bytes).into_owned()
+}
 
-    let mut bytes = [0u8; 128];
-    let n = probe.read(&mut bytes).expect("应收到颜色查询的回应");
-    String::from_utf8_lossy(&bytes[..n]).into_owned()
+/// 喂完 `script` 按泵的顺序写回查询的应答，返回写回 PTY 的全部字节。
+fn replies_for(script: &[u8], cell: (u16, u16)) -> String {
+    let (session, probe) = session_for(script, cell);
+    flush_terminal_replies(&session);
+    written(session, probe)
+}
+
+fn color_replies_for(script: &[u8]) -> String {
+    replies_for(script, (0, 0))
+}
+
+/// 设备属性、光标位置、行列数由守护的网格答，不等桌面：桌面开几个都只答一次，没有桌面
+/// 连着也有人答。按程序问的先后答。
+#[test]
+fn device_queries_are_answered_by_the_daemon_grid() {
+    let reply = replies_for(b"ab\x1b[6n\x1b[c\x1b[18t", (10, 20));
+    assert_eq!(reply, "\x1b[1;3R\x1b[?6c\x1b[8;24;80t");
+}
+
+/// 文字区像素（CSI 14 t）按桌面报来的格子尺寸算；还没报过就先不答，别的查询照答。
+#[test]
+fn text_area_pixels_wait_for_a_reported_cell_size() {
+    assert_eq!(replies_for(b"\x1b[14t", (10, 20)), "\x1b[4;480;800t");
+    assert_eq!(replies_for(b"\x1b[14t\x1b[c", (0, 0)), "\x1b[?6c");
+}
+
+/// 会话按 24×80、没有像素先起，Pi 一启动就问格子像素，赶在桌面排版之前。记下来，桌面报来
+/// 格子尺寸时按问的先后补答，只答一次。
+#[test]
+fn pixel_queries_are_answered_once_the_desktop_reports_a_cell_size() {
+    let (session, probe) = session_for(b"\x1b[14t", (0, 0));
+    flush_terminal_replies(&session);
+    let early = session.ctl.lock().unwrap().answer_or_wait(PixelQuery::Cell);
+    assert!(early.is_none(), "格子尺寸还不知道，不能答");
+
+    resize_session(&session, 80, 24, 10, 20);
+    resize_session(&session, 80, 24, 10, 20);
+    assert_eq!(
+        written(session, probe),
+        "\x1b[4;480;800t\x1b[6;20;10t"
+    );
 }
 
 /// Grok 会在启动时查询 `OSC 11`。这个用例刻意不创建任何 desktop client：守护

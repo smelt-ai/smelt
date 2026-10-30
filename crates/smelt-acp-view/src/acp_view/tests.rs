@@ -2,8 +2,9 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
-    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction, ViewHistoryIdentity,
+    AUTO_RECONNECT_ATTEMPTS, CachedDiff, ComposerMenuSection, LoadedSkillsRefresh,
+    LoadedSkillsSnapshot, OwnerIdCache, ProcessGroupInfo, RECONNECT_STABLE_AFTER,
+    RESTORED_ENTRY_HEIGHT_HINT_PX, ReconnectBudget, TurnOutcomeAction, ViewHistoryIdentity,
     append_prompt_text, apply_pending_config_selection, background_task_elapsed,
     background_task_one_line, background_task_output_lines, background_task_summary,
     build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
@@ -11,8 +12,8 @@ use super::{
     compact_token_count, compact_tool_headline, compact_tool_run_label,
     composer_config_section_label, composer_menu_sections, composer_model_label,
     composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
-    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
-    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
+    composer_should_nest_models, composer_usage_breakdown, config_rejection_is_new,
+    config_selection_is_pending, consecutive_compact_tool_run, consume_composer_restore,
     conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
     diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
     entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
@@ -50,6 +51,7 @@ use smelt_model::acp_session::{
 use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
+use std::time::{Duration, Instant};
 
 #[test]
 fn cleanshot_external_png_is_treated_as_an_image_attachment() {
@@ -396,24 +398,28 @@ fn pending_model_stays_until_snapshot_uses_the_picker_value() {
 }
 
 #[test]
-fn config_update_failure_status_is_a_rising_edge() {
-    assert!(config_update_failure_is_new(
+fn config_rejection_is_recognized_by_kind_and_id() {
+    use smelt_model::acp_session::{AcpNoticeKind, AcpNoticeView};
+    let notice = |id, kind| AcpNoticeView {
+        id,
+        kind,
+        text: "更新会话配置失败：timeout".into(),
+    };
+    let rejected = notice(10, AcpNoticeKind::ConfigRejected);
+    assert!(config_rejection_is_new(None, Some(&rejected)));
+    assert!(!config_rejection_is_new(Some(&rejected), Some(&rejected)));
+    assert!(
+        config_rejection_is_new(
+            Some(&rejected),
+            Some(&notice(11, AcpNoticeKind::ConfigRejected))
+        ),
+        "同一句失败连来两次，第二次也要撤掉勾选"
+    );
+    assert!(!config_rejection_is_new(
         None,
-        Some("更新会话配置失败：agent rejected")
+        Some(&notice(12, AcpNoticeKind::Info))
     ));
-    assert!(config_update_failure_is_new(
-        Some("正在恢复"),
-        Some("更新会话配置失败：timeout")
-    ));
-    assert!(!config_update_failure_is_new(
-        Some("更新会话配置失败：timeout"),
-        Some("更新会话配置失败：timeout")
-    ));
-    assert!(!config_update_failure_is_new(
-        Some("正在恢复"),
-        Some("正在恢复")
-    ));
-    assert!(!config_update_failure_is_new(None, Some("正在启动 Grok")));
+    assert!(!config_rejection_is_new(Some(&rejected), None));
 }
 
 #[test]
@@ -886,6 +892,50 @@ fn history_pagination_does_not_require_a_live_control_connection() {
 }
 
 #[test]
+fn reconnect_budget_runs_out_when_every_connection_drops_right_after_its_first_snapshot() {
+    // 两台桌面在旧 smeltd 上互踢：每次都拿到 Idle 快照，紧接着又被断开。
+    let mut budget = ReconnectBudget::new();
+    let mut now = Instant::now();
+    let mut attempts = 0;
+    while budget.take() {
+        attempts += 1;
+        assert!(attempts <= AUTO_RECONNECT_ATTEMPTS, "重连停不下来");
+        assert_eq!(budget.failures(), attempts);
+        now += Duration::from_secs(5);
+        budget.connected(now);
+        now += Duration::from_millis(10);
+        budget.disconnected(now);
+    }
+    assert_eq!(attempts, AUTO_RECONNECT_ATTEMPTS);
+}
+
+#[test]
+fn reconnect_budget_refills_after_a_connection_stays_up() {
+    let mut budget = ReconnectBudget::new();
+    let start = Instant::now();
+    assert!(budget.take());
+    assert!(budget.take());
+    budget.connected(start);
+    budget.disconnected(start + RECONNECT_STABLE_AFTER);
+    assert_eq!(budget.failures(), 0);
+}
+
+#[test]
+fn reconnect_budget_keeps_counting_across_short_lived_connections() {
+    let mut budget = ReconnectBudget::new();
+    let start = Instant::now();
+    assert!(budget.take());
+    budget.connected(start);
+    budget.disconnected(start + RECONNECT_STABLE_AFTER - Duration::from_millis(1));
+    // 退避按失败次数翻倍：短命连接之后不能回到第一档。
+    assert_eq!(budget.failures(), 1);
+    // 再次连上时从这一次算起，上一次留下的起点不能顶替。
+    budget.connected(start + RECONNECT_STABLE_AFTER * 2);
+    budget.disconnected(start + RECONNECT_STABLE_AFTER * 2 + Duration::from_millis(1));
+    assert_eq!(budget.failures(), 1);
+}
+
+#[test]
 fn recovered_edge_requires_ended_to_non_ended_transition() {
     assert!(did_recover_from_ended(true, &DaemonPhase::Idle));
     assert!(did_recover_from_ended(true, &DaemonPhase::Thinking));
@@ -1157,12 +1207,14 @@ fn dismissed_notice_stays_hidden_until_a_new_one_arrives() {
     use smelt_model::acp_session::AcpNoticeView;
     let first = AcpNoticeView {
         id: 10,
+        kind: Default::default(),
         text: "压缩上下文失败：busy".into(),
     };
     assert_eq!(notice_to_show(Some(&first), None), Some(&first));
     assert_eq!(notice_to_show(Some(&first), Some(10)), None);
     let second = AcpNoticeView {
         id: 11,
+        kind: Default::default(),
         text: "Pi Extension：boom".into(),
     };
     assert_eq!(notice_to_show(Some(&second), Some(10)), Some(&second));
@@ -3343,6 +3395,71 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
     assert!(tool.origin.y >= progress.origin.y + progress.size.height);
     assert!(thought.origin.y >= tool.origin.y + tool.size.height);
     assert!(read.origin.y >= thought.origin.y + thought.size.height);
+}
+
+/// 访达里的图片拖到输入框上：收进待发缩略图，跟「+」选图一样。落在输入框外不收。
+#[gpui::test]
+fn image_dropped_on_the_composer_is_attached(cx: &mut gpui::TestAppContext) {
+    use gpui::{FileDropEvent, VisualTestContext};
+
+    let dir = std::env::temp_dir().join(format!("smelt-composer-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let image = dir.join("shot.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Claude,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: None,
+                reason: "composer drop".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-composer-drop".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view.init_input(window, cx);
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    draw_settled(cx);
+
+    let composer = cx
+        .debug_bounds("ACP_COMPOSER")
+        .expect("输入框应该画出来");
+    let outside = gpui::point(composer.origin.x + px(1.), composer.origin.y - px(20.));
+
+    let drop_at = |position: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext| {
+        cx.simulate_event(FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths(vec![image.clone()].into()),
+        });
+        draw_settled(cx);
+        cx.simulate_event(FileDropEvent::Submit { position });
+        draw_settled(cx);
+    };
+
+    drop_at(outside, cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.pending_images.len()),
+        0,
+        "落在输入框外不收"
+    );
+
+    drop_at(composer.center(), cx);
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.pending_images.len(), 1, "拖进来的图片进待发列表");
+        assert_eq!(view.pending_external_image_loads, 0);
+    });
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[gpui::test]

@@ -20,7 +20,8 @@ fn main() {
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let rc_path = out_dir.join("smelt-icon.rc");
-    std::fs::write(&rc_path, format!("1 ICON \"{icon_rc}\"\n")).expect("write icon resource script");
+    std::fs::write(&rc_path, format!("1 ICON \"{icon_rc}\"\n"))
+        .expect("write icon resource script");
 
     // 缺了资源编译器就失败，不要悄悄打出没有图标的 exe。
     embed_resource::compile(&rc_path, embed_resource::NONE)

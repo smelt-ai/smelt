@@ -1,8 +1,9 @@
-//! 会话目录的纯投影：订阅到的运行时状态（会话状态、远程目录、桌面菜单、自动化、
+//! 会话目录的纯投影：订阅到的运行时状态（会话状态、工作区目录、远程目录、自动化、
 //! 智能体归属）在手机本地拼成会话列表，并维护 attention。不做 IO，单测直接喂事件。
 //!
-//! 搬自已删除的手机网关（`MobileLifecycleState`、`mobile_workspace_menu`、
-//! `mobile_summary`、`automation_catalog`），行为不变，只是视图模型换成 FRB 类型。
+//! 列表每次现拼，不另存：名册来自运行时的工作区目录（项目和对话），加上自动化运行的
+//! 会话（它们不进工作区目录）；运行态来自会话状态。会话归哪个项目、项目叫什么，
+//! 和桌面侧栏用同一份算法（`smelt_model::workspace_directory`）现算。
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -19,9 +20,10 @@ use smelt_model::automation::{
 };
 use smelt_model::daemon_state::{DaemonPhase, DaemonSessionState, DaemonStateEvent};
 use smelt_model::new_session::{NewSessionAction, NewSessionSections, NewSessionTarget};
-use smelt_model::session_control::{AcpAgentOption, RemoteSessionKind, RemoteSessionSnapshot};
-use smelt_model::workspace_menu::{
-    WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
+use smelt_model::runtime_path::PathStyle;
+use smelt_model::session_control::AcpAgentOption;
+use smelt_model::workspace_directory::{
+    WorkspaceConversation, WorkspaceDirectory, project_labels, project_root_of,
 };
 
 use crate::api::catalog as view;
@@ -31,13 +33,14 @@ use crate::api::catalog as view;
 pub(crate) struct CatalogState {
     /// 收到过这一代的完整快照。之前列表不算实时数据。
     pub(crate) primed: bool,
-    /// 运行时的活动记录。会话名册在菜单里，这里只有动过的会话。
+    /// 运行时的活动记录。会话名册在工作区目录里，这里只有动过的会话。
     sessions: HashMap<String, DaemonSessionState>,
     /// 手机本地的提醒与已读。
     pub(crate) attention: AttentionStore,
-    /// 快照里为空表示运行时没有这份投影（例如没有桌面发布菜单的 Linux 运行时），按空处理。
-    remote_sessions: Option<RemoteSessionSnapshot>,
-    workspace_menu: Option<WorkspaceMenuSnapshot>,
+    /// 运行时的工作区目录：开着的项目和对话。
+    workspace: Option<WorkspaceDirectory>,
+    /// 运行时那台机器的系统（`system.describe` 的 `os`），路径按它切。连上之前不知道，按 POSIX。
+    os: Option<String>,
     pub(crate) automations: Option<AutomationFile>,
     /// 会话 → 智能体定义 id（`session.agent_bindings`）。
     agent_bindings: BTreeMap<String, String>,
@@ -61,8 +64,7 @@ impl CatalogState {
         match event {
             DaemonStateEvent::Snapshot {
                 sessions,
-                remote_sessions,
-                workspace_menu,
+                workspace,
                 automations,
             } => {
                 // 这一代的第一份快照是基线：冷启动前就在审批 / 失败的会话不算新提醒，
@@ -102,8 +104,7 @@ impl CatalogState {
                     .into_iter()
                     .map(|state| (state.id.clone(), state))
                     .collect();
-                self.remote_sessions = remote_sessions;
-                self.workspace_menu = workspace_menu;
+                self.workspace = workspace;
                 self.automations = automations;
                 self.primed = true;
                 applied.sessions_changed = true;
@@ -130,13 +131,8 @@ impl CatalogState {
                 self.remove_session(&id);
                 applied.sessions_changed = true;
             }
-            DaemonStateEvent::RemoteSessions(remote_sessions) => {
-                self.remote_sessions = Some(remote_sessions);
-                applied.sessions_changed = true;
-                applied.refresh_bindings = true;
-            }
-            DaemonStateEvent::WorkspaceMenu(menu) => {
-                self.workspace_menu = Some(menu);
+            DaemonStateEvent::Workspace(directory) => {
+                self.workspace = Some(directory);
                 applied.sessions_changed = true;
                 applied.refresh_bindings = true;
             }
@@ -172,36 +168,44 @@ impl CatalogState {
         true
     }
 
-    /// 会话没了：运行时报的，或刚在手机上删掉的。名册是菜单，所以菜单和远程目录里
-    /// 也要划掉，否则要等下一份菜单快照才会从列表上消失。
+    /// 连上运行时之后按它的系统切路径。
+    pub(crate) fn set_os(&mut self, os: Option<&str>) {
+        self.os = os.map(str::to_string);
+    }
+
+    /// 会话没了：运行时报的，或刚在手机上删掉的。列表的名册来自工作区目录，等运行时
+    /// 推来新目录再变，这里不改它。
     pub(crate) fn remove_session(&mut self, id: &str) {
         self.sessions.remove(id);
         self.attention.remove_session(id);
-        if let Some(menu) = self.workspace_menu.as_mut() {
-            menu.sessions.retain(|session| session.id != id);
-        }
-        if let Some(remote) = self.remote_sessions.as_mut() {
-            remote.sessions.retain(|session| session.id != id);
-        }
     }
 
-    /// 桌面菜单 + 可见的远程会话 + 自动化运行的会话。
-    fn projected_menu(&self) -> WorkspaceMenuSnapshot {
-        let empty_remote = RemoteSessionSnapshot::default();
-        let remote = self.remote_sessions.as_ref().unwrap_or(&empty_remote);
-        let mut menu = match self.workspace_menu.as_ref() {
-            Some(menu) => mobile_workspace_menu(menu, remote),
-            None => mobile_workspace_menu(&WorkspaceMenuSnapshot::default(), remote),
-        };
+    /// 现拼一份列表：工作区目录 + 自动化运行的会话。
+    fn listing(&self) -> Listing {
+        let empty_directory = WorkspaceDirectory::default();
+        let directory = self.workspace.as_ref().unwrap_or(&empty_directory);
+        let mut listing = Listing::new(PathStyle::of_os(self.os.as_deref()), &directory.projects);
+        for conversation in &directory.conversations {
+            listing.push_conversation(conversation);
+        }
         if let Some(automations) = self.automations.as_ref() {
-            append_automation_run_sessions(&mut menu, remote, automations);
+            listing.push_automation_runs(automations, &self.sessions);
         }
-        menu
+        listing
     }
 
+    /// 能在里面新建会话的项目：工作区目录里开着的。只靠会话 cwd 撑起来的分组不算，
+    /// 运行时新建会话只认开着的项目。
     pub(crate) fn projects(&self) -> Vec<view::WorkspaceProject> {
-        smelt_model::session_control::workspace_projects(&self.projected_menu())
+        let opened = self
+            .workspace
+            .as_ref()
+            .map(|directory| directory.projects.len())
+            .unwrap_or_default();
+        self.listing()
+            .projects
             .into_iter()
+            .take(opened)
             .map(|project| view::WorkspaceProject {
                 root: project.root,
                 title: project.title,
@@ -210,37 +214,37 @@ impl CatalogState {
             .collect()
     }
 
-    /// 会话列表，按菜单顺序排好。遍历菜单而不是运行时的会话表：名册在菜单，运行时
-    /// 只有活动记录。
+    /// 会话列表：项目按目录里打开的先后（没开成项目的分组排在后面），组里按新建的先后，
+    /// 同一段对话的几个终端按分屏顺序。
     pub(crate) fn summaries(&self) -> Vec<view::SessionSummary> {
-        let menu = self.projected_menu();
+        let listing = self.listing();
         let sources = self
             .automations
             .as_ref()
             .map(automation_sources)
             .unwrap_or_default();
-        let mut rows: Vec<(&WorkspaceMenuSession, view::SessionSummary)> = menu
-            .sessions
+        let mut rows: Vec<(&Row, view::SessionSummary)> = listing
+            .rows
             .iter()
-            .map(|session| {
+            .map(|row| {
                 (
-                    session,
+                    row,
                     mobile_summary(
-                        session,
-                        self.sessions.get(&session.id),
+                        row,
+                        listing.project(row),
+                        self.sessions.get(&row.id),
                         &self.attention,
-                        sources.get(&session.id).cloned(),
-                        self.agent_bindings.get(&session.id).cloned(),
+                        sources.get(&row.id).cloned(),
+                        self.agent_bindings.get(&row.id).cloned(),
                     ),
                 )
             })
             .collect();
-        rows.sort_by(|(a_menu, a), (b_menu, b)| {
-            a_menu
-                .project_order
-                .cmp(&b_menu.project_order)
-                .then(a_menu.session_order.cmp(&b_menu.session_order))
-                .then(a_menu.leaf_order.cmp(&b_menu.leaf_order))
+        rows.sort_by(|(a_row, a), (b_row, b)| {
+            a.project_order
+                .cmp(&b.project_order)
+                .then(a_row.order.cmp(&b_row.order))
+                .then(a_row.leaf.cmp(&b_row.leaf))
                 .then(a.title.cmp(&b.title))
                 .then(a.id.cmp(&b.id))
         });
@@ -248,130 +252,183 @@ impl CatalogState {
     }
 }
 
-fn path_title(path: &str) -> String {
-    std::path::Path::new(path.trim_end_matches('/'))
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(path)
-        .to_string()
+/// 列表里的一个项目分组。
+struct ListedProject {
+    root: String,
+    title: String,
+    order: u32,
 }
 
-/// 找到（或按 cwd 现造一个）菜单里的项目，返回下标。手机远程建的会话可能没有对应的
-/// 桌面项目。
-fn ensure_menu_project(menu: &mut WorkspaceMenuSnapshot, cwd: &str) -> usize {
-    menu.projects
-        .iter()
-        .position(|project| project.root == cwd)
-        .unwrap_or_else(|| {
-            let order = menu.projects.len();
-            menu.projects.push(WorkspaceMenuProject {
-                root: cwd.to_string(),
-                title: path_title(cwd),
-                order: u32::try_from(order).unwrap_or(u32::MAX),
-            });
-            order
-        })
+/// 列表里的一行：一段 ACP 对话，或一个终端。
+struct Row {
+    id: String,
+    kind: view::SessionKind,
+    /// 用户起的名字。
+    custom_title: Option<String>,
+    /// 没有用户名字、运行时也还没报标题时显示的。
+    fallback_title: String,
+    cwd: Option<String>,
+    /// 所在项目分组在 [`Listing::projects`] 里的下标；没有分组（智能体对话、自动化运行）
+    /// 是 `None`。
+    project: Option<usize>,
+    agent: Option<String>,
+    /// 在名册里的先后，和同一段对话里第几个终端。
+    order: u32,
+    leaf: u32,
 }
 
-/// 把运行时的远程目录投影到桌面发布的菜单上。
-fn mobile_workspace_menu(
-    desktop_menu: &WorkspaceMenuSnapshot,
-    remote_sessions: &RemoteSessionSnapshot,
-) -> WorkspaceMenuSnapshot {
-    let mut menu = desktop_menu.clone();
-    for remote in remote_sessions
-        .sessions
-        .iter()
-        .filter(|remote| remote.is_visible())
-    {
-        let project_index = ensure_menu_project(&mut menu, &remote.cwd);
-        if menu.sessions.iter().any(|session| session.id == remote.id) {
-            continue;
-        }
-        let project = &menu.projects[project_index];
-        let (kind, title, agent) = match remote.kind {
-            RemoteSessionKind::Acp => {
-                let agent = remote.agent.clone().unwrap_or_else(|| "Agent".to_string());
-                let title = if remote.title.trim().is_empty() {
-                    format!("{agent} conversation")
-                } else {
-                    remote.title.clone()
-                };
-                (WorkspaceMenuSessionKind::Acp, title, Some(agent))
-            }
-            RemoteSessionKind::Terminal => {
-                let title = if remote.title.trim().is_empty() {
-                    "Terminal".to_string()
-                } else {
-                    remote.title.clone()
-                };
-                (WorkspaceMenuSessionKind::Terminal, title, None)
-            }
+/// 现拼的列表。项目分组先是目录里开着的项目，之后是会话 cwd 撑起来的分组。
+struct Listing {
+    style: PathStyle,
+    opened: Vec<String>,
+    projects: Vec<ListedProject>,
+    rows: Vec<Row>,
+}
+
+impl Listing {
+    fn new(style: PathStyle, opened: &[String]) -> Self {
+        let mut listing = Self {
+            style,
+            opened: opened.to_vec(),
+            projects: Vec::new(),
+            rows: Vec::new(),
         };
-        menu.sessions.push(WorkspaceMenuSession {
-            id: remote.id.clone(),
-            kind,
-            title,
-            custom_title: false,
-            cwd: Some(remote.cwd.clone()),
-            project_root: Some(project.root.clone()),
-            project_title: Some(project.title.clone()),
-            project_order: project.order,
-            session_order: u32::try_from(menu.sessions.len()).unwrap_or(u32::MAX),
-            leaf_order: 0,
-            agent,
-        });
+        for root in opened {
+            listing.group_for_root(root);
+        }
+        listing
     }
-    menu
-}
 
-/// 自动化运行的对话在运行时目录里是 hidden（桌面侧栏不该被后台运行刷屏），但手机是
-/// 指挥台：运行停下来等审批时只有手机在场。所以按运行档案把它们补进来，不带项目归属
-/// （运行的工作区是运行时按自动化分配的目录，不是用户项目）。
-fn append_automation_run_sessions(
-    menu: &mut WorkspaceMenuSnapshot,
-    remote_sessions: &RemoteSessionSnapshot,
-    automations: &AutomationFile,
-) {
-    for run in &automations.runs {
-        let Some(session_id) = run.session_id.as_deref() else {
-            continue;
-        };
-        if menu.sessions.iter().any(|session| session.id == session_id) {
-            continue;
+    fn project(&self, row: &Row) -> Option<&ListedProject> {
+        row.project.map(|index| &self.projects[index])
+    }
+
+    fn group_for_root(&mut self, root: &str) -> usize {
+        let root = root.trim_end_matches('/');
+        if let Some(index) = self.projects.iter().position(|project| project.root == root) {
+            return index;
         }
-        let Some(remote) = remote_sessions
-            .sessions
-            .iter()
-            .find(|remote| remote.id == session_id)
-        else {
-            continue;
-        };
-        if !remote.is_present() || remote.kind != RemoteSessionKind::Acp {
-            continue;
-        }
-        let title = if remote.title.trim().is_empty() {
-            run.context.automation_name.clone()
-        } else {
-            remote.title.clone()
-        };
-        menu.sessions.push(WorkspaceMenuSession {
-            id: session_id.to_string(),
-            kind: WorkspaceMenuSessionKind::Acp,
-            title,
-            custom_title: false,
-            cwd: Some(remote.cwd.clone()),
-            project_root: None,
-            project_title: None,
-            project_order: u32::MAX,
-            session_order: u32::try_from(menu.sessions.len()).unwrap_or(u32::MAX),
-            leaf_order: 0,
-            agent: remote
-                .agent
-                .clone()
-                .or_else(|| run.context.engine_kind_id.clone()),
+        self.projects.push(ListedProject {
+            root: root.to_string(),
+            title: String::new(),
+            order: u32::try_from(self.projects.len()).unwrap_or(u32::MAX),
         });
+        let roots: Vec<&str> = self.projects.iter().map(|p| p.root.as_str()).collect();
+        let labels = project_labels(self.style, &roots);
+        for (project, label) in self.projects.iter_mut().zip(labels) {
+            project.title = label;
+        }
+        self.projects.len() - 1
+    }
+
+    /// 会话按 cwd 归到开着的项目；不在任何项目里的按自己的 cwd 自成一组，和桌面侧栏一样。
+    /// 智能体对话不在用户项目里时不分组（手机把它们放进「智能体对话」）。
+    fn group_for_cwd(&mut self, cwd: Option<&str>, agent_conversation: bool) -> Option<usize> {
+        let cwd = cwd.map(str::trim).filter(|cwd| !cwd.is_empty())?;
+        match project_root_of(self.style, &self.opened, cwd) {
+            Some(root) => {
+                let root = root.to_string();
+                Some(self.group_for_root(&root))
+            }
+            None if agent_conversation => None,
+            None => Some(self.group_for_root(cwd)),
+        }
+    }
+
+    fn next_order(&self) -> u32 {
+        u32::try_from(self.rows.len()).unwrap_or(u32::MAX)
+    }
+
+    fn push_conversation(&mut self, conversation: &WorkspaceConversation) {
+        let order = self.next_order();
+        if let Some(acp) = &conversation.acp {
+            let agent_conversation =
+                acp.agent_definition_id.is_some() || acp.automation_id.is_some();
+            let project = self.group_for_cwd(acp.cwd.as_deref(), agent_conversation);
+            self.rows.push(Row {
+                id: acp.sid.clone(),
+                kind: view::SessionKind::Acp,
+                custom_title: conversation.custom_title.clone(),
+                fallback_title: acp
+                    .session_title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| format!("{} conversation", acp.agent)),
+                cwd: acp.cwd.clone(),
+                project,
+                agent: Some(acp.agent.clone()),
+                order,
+                leaf: 0,
+            });
+            return;
+        }
+        let single = conversation.terminals.len() == 1;
+        for (leaf, terminal) in conversation.terminals.iter().enumerate() {
+            // 没起过的终端守护里没有，手机打不开。
+            let Some(id) = terminal.id.clone() else {
+                continue;
+            };
+            // 只有一个终端时，对话的名字就是这个终端的名字。
+            let custom_title = terminal.custom_title.clone().or_else(|| {
+                single
+                    .then(|| conversation.custom_title.clone())
+                    .flatten()
+            });
+            let project = self.group_for_cwd(terminal.cwd.as_deref(), false);
+            self.rows.push(Row {
+                id,
+                kind: view::SessionKind::Terminal,
+                custom_title,
+                fallback_title: terminal
+                    .launch_label
+                    .clone()
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or_else(|| "Terminal".to_string()),
+                cwd: terminal.cwd.clone(),
+                project,
+                agent: terminal
+                    .launch_cmd
+                    .as_deref()
+                    .map(|launch| agent_from_launch(launch).to_string()),
+                order,
+                leaf: u32::try_from(leaf).unwrap_or(u32::MAX),
+            });
+        }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.rows.iter().any(|row| row.id == id)
+    }
+
+    /// 自动化运行的对话不进工作区目录（桌面侧栏不该被后台运行刷屏），但手机是指挥台：
+    /// 运行停下来等审批时只有手机在场。所以按运行档案把守护里还在的那些补进来，不带项目
+    /// 归属（运行的工作区是运行时按自动化分配的目录，不是用户项目）。
+    fn push_automation_runs(
+        &mut self,
+        automations: &AutomationFile,
+        live: &HashMap<String, DaemonSessionState>,
+    ) {
+        for run in &automations.runs {
+            let Some(session_id) = run.session_id.as_deref() else {
+                continue;
+            };
+            if self.contains(session_id) || !live.contains_key(session_id) {
+                continue;
+            }
+            let order = self.next_order();
+            self.rows.push(Row {
+                id: session_id.to_string(),
+                kind: view::SessionKind::Acp,
+                custom_title: None,
+                fallback_title: run.context.automation_name.clone(),
+                cwd: Some(run.context.cwd.clone()),
+                project: None,
+                agent: run.context.engine_kind_id.clone(),
+                order,
+                leaf: 0,
+            });
+        }
+
     }
 }
 
@@ -460,39 +517,39 @@ pub(crate) fn attention_item(item: &ModelAttention) -> view::AttentionItem {
     }
 }
 
-/// 一条会话在手机上的样子。存在性来自菜单，运行态来自运行时；没有运行态只表示
-/// 还没动过（`updated_at` 为 0，阶段和状态都是空闲）。
+/// 一条会话在手机上的样子。存在性来自工作区目录（或远程目录、自动化运行），运行态来自
+/// 运行时；没有运行态只表示还没动过（`updated_at` 为 0，阶段和状态都是空闲）。
 fn mobile_summary(
-    menu_session: &WorkspaceMenuSession,
+    row: &Row,
+    project: Option<&ListedProject>,
     daemon: Option<&DaemonSessionState>,
     attention_store: &AttentionStore,
     automation: Option<view::AutomationSource>,
     agent_definition_id: Option<String>,
 ) -> view::SessionSummary {
-    let agent = menu_session
-        .agent
-        .clone()
-        .or_else(|| daemon.and_then(|state| state.provider.clone()))
-        .or_else(|| {
-            daemon
-                .and_then(|state| state.launch.as_deref())
-                .map(|launch| agent_from_launch(launch).to_string())
-        })
-        .unwrap_or_else(|| "other".to_string());
+    // ACP 对话的 agent 在目录里定死；终端以 hook 认出来的为准，其次运行时报的启动命令，
+    // 最后才看目录里记的启动命令（还没动过的终端）。
+    let agent = match row.kind {
+        view::SessionKind::Acp => row.agent.clone(),
+        view::SessionKind::Terminal => None,
+    }
+    .or_else(|| daemon.and_then(|state| state.provider.clone()))
+    .or_else(|| {
+        daemon
+            .and_then(|state| state.launch.as_deref())
+            .map(|launch| agent_from_launch(launch).to_string())
+    })
+    .or_else(|| row.agent.clone())
+    .unwrap_or_else(|| "other".to_string());
     let title = smelt_model::session_title::display_title(
-        menu_session
-            .custom_title
-            .then_some(menu_session.title.as_str()),
+        row.custom_title.as_deref(),
         daemon.and_then(|state| state.title.as_deref()),
         None,
-        Some(menu_session.title.as_str()),
+        Some(row.fallback_title.as_str()),
     );
     view::SessionSummary {
-        id: menu_session.id.clone(),
-        kind: match menu_session.kind {
-            WorkspaceMenuSessionKind::Acp => view::SessionKind::Acp,
-            WorkspaceMenuSessionKind::Terminal => view::SessionKind::Terminal,
-        },
+        id: row.id.clone(),
+        kind: row.kind,
         title,
         phase: daemon
             .map(session_phase)
@@ -501,18 +558,18 @@ fn mobile_summary(
             .map(session_status)
             .unwrap_or(view::SessionStatus::Idle),
         agent,
-        cwd: menu_session
+        cwd: row
             .cwd
             .clone()
             .or_else(|| daemon.and_then(|state| state.cwd.clone())),
-        project_root: menu_session.project_root.clone(),
-        project_title: menu_session.project_title.clone(),
-        project_order: menu_session.project_order,
+        project_root: project.map(|project| project.root.clone()),
+        project_title: project.map(|project| project.title.clone()),
+        project_order: project.map_or(u32::MAX, |project| project.order),
         updated_at: daemon
             .map(|state| i64::try_from(state.updated_at).unwrap_or(i64::MAX))
             .unwrap_or(0),
         detail: daemon.and_then(DaemonSessionState::detail_line),
-        attention: attention_store.unread(&menu_session.id).map(attention_item),
+        attention: attention_store.unread(&row.id).map(attention_item),
         automation,
         agent_definition_id,
     }

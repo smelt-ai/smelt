@@ -164,8 +164,7 @@ impl Workspace {
 
     /// 切换在线更新通道并立即检查一次。通道切换只影响后续更新来源，不改变当前包的
     /// 展示版本；若新通道指向不同发布包，仍按 URL 差异正常下载。
-    /// 更新通道只在 macOS 上存在（设计文档 D4）。
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub fn set_update_channel(&mut self, channel: updater::UpdateChannel, cx: &mut Context<Self>) {
         if cx.global::<UpdateSettings>().channel == channel {
             return;

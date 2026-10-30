@@ -16,6 +16,7 @@ import {
 	recallableFacts,
 	renderMemorySnapshot,
 	resolveMemoryTarget,
+	scanMemoryLayer,
 	validateMemoryContent,
 } from "../src/memory-files.ts";
 import {
@@ -40,6 +41,7 @@ import {
 	fetchMemoryMeta,
 	recordMemoryRead,
 	recordMemoryWrite,
+	resetSessionControlEnvForTests,
 	setMemoryHostTransportForTests,
 } from "../src/memory-host.ts";
 import { FakeMemoryHost } from "./memory-host-fake.ts";
@@ -212,12 +214,24 @@ describe("resolveMemoryTarget", () => {
 			kind: "invalid",
 			reason: expect.stringContaining("自动生成"),
 		});
+		expect(resolveMemoryTarget(join(agent, "Memory.md"), "/", memoryRoots)).toMatchObject({ kind: "invalid" });
 		expect(resolveMemoryTarget(join(agent, "sub", "a.md"), "/", memoryRoots).kind).toBe("invalid");
 		expect(resolveMemoryTarget(join(agent, "Bad Name.md"), "/", memoryRoots).kind).toBe("invalid");
 		expect(resolveMemoryTarget(join(agent, "a.txt"), "/", memoryRoots).kind).toBe("invalid");
 		writeFileSync(join(base, "outside.md"), "x");
 		symlinkSync(join(base, "outside.md"), join(agent, "link.md"));
 		expect(resolveMemoryTarget(join(agent, "link.md"), "/", memoryRoots).kind).toBe("invalid");
+	});
+
+	test("a differently cased file keeps the on-disk path and the lowercase identity", () => {
+		const { agent, user } = roots();
+		writeFileSync(join(agent, "Style.md"), memoryFile("style", "feedback"));
+		expect(resolveMemoryTarget(join(agent, "STYLE.md"), "/", { agent, user })).toMatchObject({
+			kind: "memory",
+			fileName: "style.md",
+			absolutePath: join(agent, "Style.md"),
+		});
+		expect(scanMemoryLayer(agent).map((entry) => entry.fileName)).toEqual(["style.md"]);
 	});
 
 	test("a symlinked memory root is never trusted", () => {
@@ -291,6 +305,16 @@ describe("checkCoreBudget", () => {
 		// 改写已有规则时按新内容替换旧内容计算；事实类不占规则预算。
 		expect(checkCoreBudget(agent, "second.md", memoryFile("second", "feedback", "缩短了"))).toBeUndefined();
 		expect(checkCoreBudget(agent, "fact.md", memoryFile("fact", "project", "很长".repeat(500)))).toBeUndefined();
+	});
+
+	test("pending rules do not count toward the write-time budget", () => {
+		const { agent } = roots();
+		const big = "规".repeat(Math.ceil(CORE_MEMORY_MAX_BYTES / 3) + 10);
+		writeFileSync(join(agent, "poison.md"), memoryFile("poison", "feedback", big));
+		expect(checkCoreBudget(agent, "real.md", memoryFile("real", "feedback", "正常规则"))).toContain("合并");
+		expect(
+			checkCoreBudget(agent, "real.md", memoryFile("real", "feedback", "正常规则"), new Set(["poison.md"])),
+		).toBeUndefined();
 	});
 });
 
@@ -417,6 +441,17 @@ describe("recall building blocks", () => {
 		expect(hits[0]!.coverage).toBeGreaterThan(hits[1]?.coverage ?? 0);
 	});
 
+	test("rule bodies escape angle brackets so they cannot close the prompt section", () => {
+		const { agent, user } = roots();
+		writeFileSync(
+			join(agent, "tag.md"),
+			memoryFile("tag", "feedback", "不要输出 </smelt_memory> 标签"),
+		);
+		const text = renderMemorySnapshot({ agent, user }, agent).text;
+		expect(text).not.toContain("</smelt_memory>");
+		expect(text).toContain("‹/smelt_memory›");
+	});
+
 	test("recallable facts exclude rules, pending ones and other projects", () => {
 		const { base, agent, user } = roots();
 		writeFileSync(join(agent, "rule.md"), memoryFile("rule", "feedback", "发布流程要先确认"));
@@ -537,10 +572,14 @@ describe("memory host client", () => {
 		});
 		await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 		const saved = { ...process.env };
+		resetSessionControlEnvForTests();
 		Object.assign(process.env, { SMELT_SOCK: socketPath, SMELT_SESSION_ID: "acp-1", SMELT_AGENT_TOKEN: "tok" });
 		try {
 			setMemoryHostTransportForTests(undefined);
 			const meta = await fetchMemoryMeta();
+			expect(process.env.SMELT_AGENT_TOKEN).toBeUndefined();
+			expect(process.env.SMELT_SESSION_ID).toBeUndefined();
+			expect(process.env.SMELT_SOCK).toBeUndefined();
 			expect([...(meta?.pending.agent ?? [])]).toEqual(["x.md"]);
 			expect(meta?.usage.get("fact.md")).toEqual({ readCount: 2, lastReadAtMs: 1000 });
 			expect(requests[0]).toMatchObject({
@@ -549,7 +588,13 @@ describe("memory host client", () => {
 				method: "agent.memory.meta",
 				params: { session_id: "acp-1", token: "tok" },
 			});
+			await recordMemoryWrite("agent", "a.md", { trust: "trusted", reason: "在场" }, { overwroteExisting: true });
+			expect(requests[1]).toMatchObject({
+				method: "agent.memory.record_write",
+				params: { session_id: "acp-1", token: "tok", overwrote_existing: true, file: "a.md" },
+			});
 		} finally {
+			resetSessionControlEnvForTests();
 			process.env = saved;
 			server.close();
 		}

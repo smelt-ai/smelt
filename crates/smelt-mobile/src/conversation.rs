@@ -46,7 +46,7 @@ use crate::api::conversation::{
     ConversationEntry, ConversationEvent, ConversationEventKind, ElicitationTextInput, ImageData,
     ImageInput, PendingActions, SendFailureKind, SendMessageError, SessionSkill, SessionSkills,
 };
-use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::error::{SmeltError, SmeltErrorKind, error, outdated_kind};
 use crate::api::fleet::ConnectionState;
 use crate::cache::Cache;
 use crate::connection::{ConnectionEvent, CurrentRuntime, Listener};
@@ -1233,10 +1233,7 @@ fn control_error(failure: ControlClientError) -> SmeltError {
         ControlClientError::Protocol(failure) => {
             let kind = match failure.code {
                 ControlErrorCode::PermissionDenied => SmeltErrorKind::Unpaired,
-                ControlErrorCode::UnsupportedVersion | ControlErrorCode::MethodNotFound => {
-                    SmeltErrorKind::Incompatible
-                }
-                _ => SmeltErrorKind::Other,
+                _ => outdated_kind(&failure).unwrap_or(SmeltErrorKind::Other),
             };
             error(kind, failure.message)
         }

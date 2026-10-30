@@ -4,6 +4,7 @@
 //! 序列化，备用屏只按 viewport 序列化；两者都用按行 CUP + 绝对 SGR，空 Term 解析后
 //! 即当前画面。
 
+use std::borrow::Cow;
 use std::io::Write;
 
 use alacritty_terminal::event::EventListener;
@@ -13,6 +14,7 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
+use smelt_core::kitty_graphics::{PLACEHOLDER, without_anchors};
 
 /// attach/handoff 快照最多带上的历史行数（含可视区）；避免超大会话一次吐爆客户端。
 pub(crate) const SNAPSHOT_MAX_LINES: usize = 10_000;
@@ -22,12 +24,18 @@ pub(crate) const SNAPSHOT_MAX_LINES: usize = 10_000;
 /// `launch` 只用于会话元数据，不能作为终端模式的替代品：Codex 等程序可能在
 /// 主屏上运行，而真正的 TUI 是否使用备用屏必须由 `TermMode::ALT_SCREEN` 决定。
 pub(crate) fn snapshot_ansi<T: EventListener>(term: &Term<T>, _launch: Option<&str>) -> Vec<u8> {
-    snapshot_for_terminal_mode(term, SNAPSHOT_MAX_LINES)
+    snapshot_for_terminal_mode(term, SNAPSHOT_MAX_LINES, true)
 }
 
 /// 流控合并时补的屏幕关键帧：只画可视区，不带滚动历史，刷屏中也传得动。
 pub(crate) fn snapshot_ansi_screen<T: EventListener>(term: &Term<T>) -> Vec<u8> {
-    snapshot_for_terminal_mode(term, term.screen_lines())
+    snapshot_for_terminal_mode(term, term.screen_lines(), true)
+}
+
+/// 给不显示图片的客户端（没声明 kitty 图形的连接、手机旁观）：kitty 图形的锚点标记去掉，
+/// Unicode 占位符画成空格，其余和上面两种一样。`max_lines` 取可视区行数时就是屏幕关键帧。
+pub(crate) fn snapshot_ansi_plain<T: EventListener>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
+    snapshot_for_terminal_mode(term, max_lines, false)
 }
 
 /// Read-only renderers and handoff use the same mode-aware keyframe as desktop attach.
@@ -45,7 +53,7 @@ pub(crate) fn snapshot_ansi_for_watch<T: EventListener>(
     _launch: Option<&str>,
     max_scrollback_lines: usize,
 ) -> Vec<u8> {
-    snapshot_for_terminal_mode(term, max_scrollback_lines)
+    snapshot_for_terminal_mode(term, max_scrollback_lines, false)
 }
 
 /// 这个会话当前能提供的最大历史行数（含可视区）。客户端据此判断「还有没有更老的
@@ -63,27 +71,36 @@ fn history_span<T: EventListener>(term: &Term<T>) -> usize {
     (bottom.0 - top.0 + 1).max(0) as usize
 }
 
-fn snapshot_for_terminal_mode<T: EventListener>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
+/// `graphics`：保留 kitty 图形在网格里的痕迹（锚点标记、占位符），给能显示图片的客户端。
+fn snapshot_for_terminal_mode<T: EventListener>(
+    term: &Term<T>,
+    max_lines: usize,
+    graphics: bool,
+) -> Vec<u8> {
     if term.mode().contains(TermMode::ALT_SCREEN) {
-        snapshot_viewport(term)
+        snapshot_viewport(term, graphics)
     } else {
-        snapshot_with_history(term, max_lines)
+        snapshot_with_history(term, max_lines, graphics)
     }
 }
 
-fn snapshot_viewport<T: EventListener>(term: &Term<T>) -> Vec<u8> {
+fn snapshot_viewport<T: EventListener>(term: &Term<T>, graphics: bool) -> Vec<u8> {
     let mut out = snapshot_mode_prefix(term, /*clear_scrollback=*/ false);
-    paint_viewport_keyframe(&mut out, term);
+    paint_viewport_keyframe(&mut out, term, graphics);
     snapshot_cursor_suffix(term, &mut out);
     out
 }
 
-fn snapshot_with_history<T: EventListener>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
+fn snapshot_with_history<T: EventListener>(
+    term: &Term<T>,
+    max_lines: usize,
+    graphics: bool,
+) -> Vec<u8> {
     let mut out = snapshot_mode_prefix(term, /*clear_scrollback=*/ true);
     // Disable autowrap while serializing full-width rows. Explicit CRLFs then
     // build real scrollback instead of CUP row numbers clamping to the screen.
     out.extend_from_slice(b"\x1b[?7l");
-    paint_history_keyframe(&mut out, term, max_lines);
+    paint_history_keyframe(&mut out, term, max_lines, graphics);
     if term.mode().contains(TermMode::LINE_WRAP) {
         out.extend_from_slice(b"\x1b[?7h");
     }
@@ -169,7 +186,7 @@ fn snapshot_cursor_suffix<T: EventListener>(term: &Term<T>, out: &mut Vec<u8>) {
 }
 
 /// TUI 可视区 keyframe：按行 CUP + 绝对 SGR（Codux `terminal_snapshot_data` 同构）。
-fn paint_viewport_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>) {
+fn paint_viewport_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>, graphics: bool) {
     let cols = term.columns().max(1);
     let rows = term.screen_lines().max(1);
     let display_offset = term.grid().display_offset();
@@ -192,17 +209,7 @@ fn paint_viewport_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>) 
         {
             continue;
         }
-        let mut text = String::new();
-        if cell.c != '\0' && !cell.c.is_control() {
-            text.push(cell.c);
-        }
-        if let Some(zw) = cell.zerowidth() {
-            for &ch in zw {
-                if !ch.is_control() {
-                    text.push(ch);
-                }
-            }
-        }
+        let text = cell_text(cell, graphics);
         let width = if cell.flags.contains(Flags::WIDE_CHAR) {
             2
         } else {
@@ -227,7 +234,12 @@ fn paint_viewport_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>) 
 }
 
 /// Shell：history + 可视区，按缓冲行顺序硬换行推进（绝对 SGR）。
-fn paint_history_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>, max_lines: usize) {
+fn paint_history_keyframe<T: EventListener>(
+    out: &mut Vec<u8>,
+    term: &Term<T>,
+    max_lines: usize,
+    graphics: bool,
+) {
     let cols = term.columns().max(1);
     let top = term.topmost_line();
     let bottom = term.bottommost_line();
@@ -253,17 +265,7 @@ fn paint_history_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>, m
             {
                 continue;
             }
-            let mut text = String::new();
-            if cell.c != '\0' && !cell.c.is_control() {
-                text.push(cell.c);
-            }
-            if let Some(zw) = cell.zerowidth() {
-                for &ch in zw {
-                    if !ch.is_control() {
-                        text.push(ch);
-                    }
-                }
-            }
+            let text = cell_text(cell, graphics);
             let width = if cell.flags.contains(Flags::WIDE_CHAR) {
                 2
             } else {
@@ -286,6 +288,28 @@ fn paint_history_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>, m
         line += 1;
     }
     emit_history_rows(out, &rows);
+}
+
+/// 一格要写出的字：基字符加零宽字符。`graphics` 为假时去掉 kitty 图形的痕迹：锚点标记
+/// 不写，占位符写成空格（它后面的行列编号也不写）。
+fn cell_text(cell: &Cell, graphics: bool) -> String {
+    let mut text = String::new();
+    if !graphics && cell.c == PLACEHOLDER {
+        text.push(' ');
+        return text;
+    }
+    if cell.c != '\0' && !cell.c.is_control() {
+        text.push(cell.c);
+    }
+    if let Some(zw) = cell.zerowidth() {
+        let zw = if graphics {
+            Cow::Borrowed(zw)
+        } else {
+            without_anchors(zw)
+        };
+        text.extend(zw.iter().filter(|ch| !ch.is_control()));
+    }
+    text
 }
 
 fn cell_has_visuals(cell: &Cell) -> bool {
@@ -315,6 +339,8 @@ pub(crate) struct CellStyle {
     dim: bool,
     italic: bool,
     underline: u8,
+    /// SGR 58。kitty 的 Unicode 占位符用它记放置 id，快照里不能丢。
+    underline_color: Option<Color>,
     inverse: bool,
     hidden: bool,
     strike: bool,
@@ -330,6 +356,7 @@ impl CellStyle {
             dim: false,
             italic: false,
             underline: 0,
+            underline_color: None,
             inverse: false,
             hidden: false,
             strike: false,
@@ -346,6 +373,7 @@ impl CellStyle {
             dim: f.contains(Flags::DIM) || f.contains(Flags::DIM_BOLD),
             italic: f.contains(Flags::ITALIC) || f.contains(Flags::BOLD_ITALIC),
             underline: underline_kind(f),
+            underline_color: cell.underline_color(),
             inverse: f.contains(Flags::INVERSE),
             hidden: f.contains(Flags::HIDDEN),
             strike: f.contains(Flags::STRIKEOUT),
@@ -539,6 +567,22 @@ fn emit_absolute_sgr(out: &mut Vec<u8>, style: &CellStyle) {
     // 颜色：绝对模式下总是写上（含默认 39/49），与 Codux 一致
     append_color_params_abs(&mut params, true, style.fg);
     append_color_params_abs(&mut params, false, style.bg);
+    match style.underline_color {
+        Some(Color::Indexed(i)) => {
+            params.extend_from_slice(b";58;5;");
+            push_u8(&mut params, i);
+        }
+        Some(Color::Spec(rgb)) => {
+            params.extend_from_slice(b";58;2;");
+            push_u8(&mut params, rgb.r);
+            params.push(b';');
+            push_u8(&mut params, rgb.g);
+            params.push(b';');
+            push_u8(&mut params, rgb.b);
+        }
+        // SGR 58 只有索引色和 RGB 两种写法。
+        Some(Color::Named(_)) | None => {}
+    }
 
     out.extend_from_slice(b"\x1b[");
     out.extend_from_slice(&params);

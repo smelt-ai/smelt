@@ -87,9 +87,7 @@ pub struct RepoSet {
 
 impl RepoSet {
     pub fn roots(&self) -> impl Iterator<Item = &str> {
-        self.repos
-            .iter()
-            .map(|r| r.root.as_str())
+        self.repos.iter().map(|r| r.root.as_str())
     }
 }
 
@@ -964,7 +962,8 @@ fn render_narrow_git_row(
                     let ws_menu = ws.clone();
                     let root_menu = root.to_string();
                     let path_menu = row.path.clone();
-                    let file_path = smelt_client::runtime_path::PathStyle::LOCAL.join(root, &row.path);
+                    let file_path =
+                        smelt_model::runtime_path::PathStyle::LOCAL.join(root, &row.path);
                     let file_path_copy = file_path.clone();
                     let file_path_finder = file_path;
                     let row_el = div()

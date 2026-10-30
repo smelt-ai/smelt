@@ -452,9 +452,21 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(typeahead_match(&labels, 0, false, "s"), Some(2), "新前缀从下一行找");
-        assert_eq!(typeahead_match(&labels, 2, false, "s"), Some(0), "找到底从头找");
-        assert_eq!(typeahead_match(&labels, 0, true, "SM"), Some(0), "不分大小写");
+        assert_eq!(
+            typeahead_match(&labels, 0, false, "s"),
+            Some(2),
+            "新前缀从下一行找"
+        );
+        assert_eq!(
+            typeahead_match(&labels, 2, false, "s"),
+            Some(0),
+            "找到底从头找"
+        );
+        assert_eq!(
+            typeahead_match(&labels, 0, true, "SM"),
+            Some(0),
+            "不分大小写"
+        );
         assert_eq!(typeahead_match(&labels, 0, true, "x"), None);
     }
 

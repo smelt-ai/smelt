@@ -255,7 +255,10 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(neutral_icon_mark(Icon::new(gpui_kit_assets::IconName::Workflow), 28.))
+                    .child(neutral_icon_mark(
+                        Icon::new(gpui_kit_assets::IconName::Workflow),
+                        28.,
+                    ))
                     .child(
                         div()
                             .flex_1()

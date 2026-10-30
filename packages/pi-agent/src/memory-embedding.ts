@@ -23,9 +23,21 @@ const EMBEDDING_BATCH = 64;
  */
 export const EMBEDDING_TEXT_MAX_CHARS = 1_000;
 
+/** 进程内向量缓存上限：超出时丢掉最旧的，避免记忆很多时内存无限涨。 */
+const EMBEDDING_CACHE_MAX = 512;
 const cache = new Map<string, Float32Array>();
 /** 这个进程里算不出来的文本（多半太长），不再重试。 */
 const unembeddable = new Set<string>();
+
+function cacheSet(key: string, vector: Float32Array): void {
+	if (cache.has(key)) cache.delete(key);
+	cache.set(key, vector);
+	while (cache.size > EMBEDDING_CACHE_MAX) {
+		const oldest = cache.keys().next().value;
+		if (oldest === undefined) break;
+		cache.delete(oldest);
+	}
+}
 
 function cacheKey(config: EmbeddingConfig, text: string): string {
 	return createHash("sha256").update(`${config.base_url}\n${config.model}\n${text}`).digest("hex");
@@ -104,7 +116,7 @@ export async function embedTexts(
 		const batch = missing.slice(start, start + EMBEDDING_BATCH);
 		try {
 			const vectors = await requestEmbeddings(config, batch.map((index) => texts[index]!), fetchImpl);
-			batch.forEach((index, offset) => cache.set(keys[index]!, vectors[offset]!));
+			batch.forEach((index, offset) => cacheSet(keys[index]!, vectors[offset]!));
 		} catch (error) {
 			// 服务不可用、鉴权失败、限流：整体失败，交给调用方降级。
 			if (!(error instanceof EmbeddingRequestError && error.contentRejected)) throw error;
@@ -116,7 +128,7 @@ export async function embedTexts(
 			for (const index of batch) {
 				try {
 					const [vector] = await requestEmbeddings(config, [texts[index]!], fetchImpl);
-					cache.set(keys[index]!, vector!);
+					cacheSet(keys[index]!, vector!);
 				} catch (single) {
 					if (!(single instanceof EmbeddingRequestError && single.contentRejected)) throw single;
 					unembeddable.add(keys[index]!);

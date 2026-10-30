@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
 import { GitHubIcon } from "./icons";
+import icon from "@/public/icon.svg";
 
 const REPO_URL = "https://github.com/smelt-ai/smelt";
 const RELEASE_URL = "https://github.com/smelt-ai/smelt/releases/latest";
@@ -24,7 +25,7 @@ export function Nav() {
     <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-[#08090a]/75 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center gap-4 px-6">
         <Link href="/" className="flex shrink-0 items-center gap-2">
-          <Image src="/icon.svg" alt="" width={22} height={22} unoptimized />
+          <Image src={icon} alt="" width={22} height={22} />
           <span className="text-[15px] font-semibold tracking-tight text-foreground">smelt</span>
         </Link>
 

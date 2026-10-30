@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use smelt_model::automation::{AutomationRun, AutomationRunStatus};
 use smelt_client::daemon_state::DaemonPhase;
+use smelt_model::automation::{AutomationRun, AutomationRunStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomationProjectionOrigin {

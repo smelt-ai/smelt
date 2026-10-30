@@ -4,10 +4,10 @@
 //! 终端网格、远程会话连接留在 `terminal`。
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 #[cfg(unix)]
 use std::sync::TryLockError;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -39,7 +39,11 @@ fn managed_daemon_dir() -> std::path::PathBuf {
 }
 
 pub(crate) fn bundled_daemon_file_name() -> &'static str {
-    if cfg!(windows) { "smeltd.exe" } else { "smeltd" }
+    if cfg!(windows) {
+        "smeltd.exe"
+    } else {
+        "smeltd"
+    }
 }
 
 pub fn managed_daemon_path() -> std::path::PathBuf {
@@ -118,7 +122,9 @@ fn distribution_exe() -> Option<std::path::PathBuf> {
 /// 分发物 smeltd 所在的目录（App 包的 `Contents/MacOS`、cargo 的 profile 目录）。那里
 /// 眼下还没有 smeltd 也照样给：盯着它，等它出现。
 pub(crate) fn bundled_daemon_dir() -> Option<std::path::PathBuf> {
-    distribution_exe()?.parent().map(std::path::Path::to_path_buf)
+    distribution_exe()?
+        .parent()
+        .map(std::path::Path::to_path_buf)
 }
 
 /// App 包 / cargo 同目录下的 smeltd（分发物，不是常驻运行路径）。
@@ -292,7 +298,8 @@ fn acquire_file_lock(path: &std::path::Path) -> std::io::Result<ManagedDaemonFil
 
 /// 单次更新尝试不能排队等别的进程的 handoff；拿不到锁时交还给 UI 的可取消等待态。
 fn try_acquire_file_lock(path: &std::path::Path) -> std::io::Result<Option<ManagedDaemonFileLock>> {
-    Ok(smelt_sys::file_lock::ExclusiveFile::try_lock(path)?.map(|file| ManagedDaemonFileLock { _file: file }))
+    Ok(smelt_sys::file_lock::ExclusiveFile::try_lock(path)?
+        .map(|file| ManagedDaemonFileLock { _file: file }))
 }
 
 fn acquire_managed_daemon_file_lock() -> std::io::Result<ManagedDaemonFileLock> {
@@ -1459,4 +1466,3 @@ mod managed_daemon_ensure_tests {
         }
     }
 }
-

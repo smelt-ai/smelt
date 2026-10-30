@@ -8,7 +8,6 @@ use crate::agent_kind::HistorySourceKind;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 static STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -22,7 +21,6 @@ struct SessionMetadata {
     updated_at_ms: u64,
 }
 
-const SESSION_METADATA_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SessionMetadataStore {
@@ -56,30 +54,6 @@ fn load(path: &Path) -> Result<SessionMetadataStore, String> {
     match store.get_history_title_snapshot()? {
         Some(snapshot) => Ok(store_from_snapshot(snapshot)),
         None => Ok(SessionMetadataStore::default()),
-    }
-}
-
-fn persist_store(path: &Path, loaded: &SessionMetadataStore) -> Result<(), String> {
-    let store = crate::sqlite_state::open_sqlite_store(&database_path(path))?;
-    store
-        .put_history_title_snapshot(&snapshot_from_store(loaded))
-        .map_err(Into::into)
-}
-
-fn snapshot_from_store(loaded: &SessionMetadataStore) -> smelt_store::HistoryTitleSnapshot {
-    smelt_store::HistoryTitleSnapshot {
-        schema_version: loaded.schema_version.max(1),
-        sessions: loaded
-            .sessions
-            .iter()
-            .map(|session| smelt_store::HistoryTitleRecord {
-                agent: session.agent.clone(),
-                profile_id: session.profile_id.clone().unwrap_or_default(),
-                resume_id: session.resume_id.clone(),
-                custom_title: session.custom_title.clone(),
-                updated_at_ms: i64::try_from(session.updated_at_ms).unwrap_or(0),
-            })
-            .collect(),
     }
 }
 
@@ -209,24 +183,10 @@ fn set_custom_title_at(
     resume_id: &str,
     custom_title: Option<&str>,
 ) -> Result<(), String> {
-    let mut store = load(path)?;
-    store
-        .sessions
-        .retain(|entry| !matches_identity(entry, agent, profile_id, resume_id));
-    if let Some(custom_title) = custom_title.filter(|title| !title.trim().is_empty()) {
-        let updated_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_millis() as u64);
-        store.sessions.push(SessionMetadata {
-            agent: agent.id().to_string(),
-            profile_id: profile_id.map(String::from),
-            resume_id: resume_id.to_string(),
-            custom_title: custom_title.trim().to_string(),
-            updated_at_ms,
-        });
-    }
-    store.schema_version = SESSION_METADATA_SCHEMA_VERSION;
-    persist_store(path, &store)
+    // 只改这一条，和工作区目录同一个事务推进版本号：侧栏里这段对话的名字按它现算。
+    crate::sqlite_state::open_sqlite_store(&database_path(path))?
+        .set_workspace_history_title(agent.id(), profile_id, resume_id, custom_title)?;
+    Ok(())
 }
 
 /// Set or clear the Smelt user title for one agent history session.

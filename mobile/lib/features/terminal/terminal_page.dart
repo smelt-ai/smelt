@@ -172,12 +172,17 @@ class _TerminalPageState extends State<TerminalPage>
     int cellHeight,
   ) {
     if (cols <= 0 || rows <= 0) return;
+    // 报给守护的格子尺寸是设备像素（同桌面、Ghostty）：程序按它回答尺寸查询、算图片占几格。
+    // xterm 给的是逻辑像素。这里在排版回调里，不经 context 查 MediaQuery，免得登记依赖。
+    final ratio =
+        WidgetsBinding.instance.platformDispatcher.implicitView?.devicePixelRatio ??
+        1.0;
     _stream.updateGeometry(
       TerminalGeometry(
         cols: cols,
         rows: rows,
-        cellWidth: cellWidth.clamp(1, 256),
-        cellHeight: cellHeight.clamp(1, 256),
+        cellWidth: (cellWidth * ratio).round().clamp(1, 256),
+        cellHeight: (cellHeight * ratio).round().clamp(1, 256),
       ),
     );
   }

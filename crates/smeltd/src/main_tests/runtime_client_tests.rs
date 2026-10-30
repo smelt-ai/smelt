@@ -24,8 +24,7 @@ fn in_process_runtime_as(principal: Principal) -> RuntimeClient {
     let server = ServerShared {
         sessions: new_sessions(),
         acp_sessions: new_test_acp_sessions(),
-        remote_sessions: new_test_remote_sessions(),
-        workspace_menu: new_test_workspace_menu(),
+        workspace_directory: new_test_workspace_directory(),
         automations: new_test_automation_store(),
         exe_mtime: TEST_EXE_MTIME,
         daemon_fingerprint: None,

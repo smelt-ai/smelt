@@ -23,7 +23,7 @@ pub enum SettingsSection {
     Resources,
     /// 后台服务、旧版本残留。
     Maintenance,
-    /// 版本、应用更新（仅 macOS）、帮助与反馈。
+    /// 版本、应用更新（macOS、Windows）、帮助与反馈。
     About,
 }
 
@@ -32,8 +32,8 @@ impl SettingsSection {
         Self::Appearance
     }
 
-    /// 检查更新的深链接。应用更新只在 macOS 上有。
-    #[cfg(target_os = "macos")]
+    /// 检查更新的深链接。
+    #[cfg(any(target_os = "macos", windows))]
     pub fn app_update() -> Self {
         Self::About
     }

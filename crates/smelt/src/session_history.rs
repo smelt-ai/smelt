@@ -1437,14 +1437,13 @@ mod tests {
     // 不用 `use super::*;`：本文件后半段引入了 gpui/gpui_component 的 glob 导入，
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
-    #[cfg(unix)]
-    use super::{HistoryMigrationSource, build_history_handoff_request};
     use super::{
         HistoryListSnapshot, HistorySourceTab, SessionDetail, SessionSummary, Turn,
-        current_profile_launch,
-        handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
-        history_source_tabs, tabs_with_sessions,
+        current_profile_launch, handoff_turns_from_history, history_continue_label,
+        history_row_is_agent_session, history_source_tabs, tabs_with_sessions,
     };
+    #[cfg(unix)]
+    use super::{HistoryMigrationSource, build_history_handoff_request};
     use crate::settings::AgentHostSettings;
     use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind};
     use smelt_model::session_handoff::HandoffTurn;

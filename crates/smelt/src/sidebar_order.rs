@@ -153,6 +153,37 @@ pub(crate) fn project_header_is_dimmed(is_active: bool, is_empty: bool) -> bool 
     is_empty && !is_active
 }
 
+/// 菜单里切换固定，并把项目挪到固定区与未固定区的交界：新固定的排在固定区末尾，
+/// 取消固定的排在未固定区开头。不挪的话它会落在两区里按原骨架顺序算出的位置，
+/// 点完要满屏找。隐式组先补进 `projects`，挪动才能落盘。
+///
+/// 旧数据（以前菜单固定不挪位置）里固定项可能散在骨架中间，所以先按显示顺序把
+/// 骨架整理成「固定在前」再插，存下来的顺序就是侧栏看到的顺序。
+pub(crate) fn toggle_pinned_project_at_boundary(
+    projects: &mut Vec<String>,
+    pinned: &mut HashSet<String>,
+    root: &str,
+) {
+    let root = normalize_project_root(root);
+    if root.is_empty() {
+        return;
+    }
+    toggle_pinned_project(pinned, &root);
+    let item = match projects
+        .iter()
+        .position(|item| same_project_root(item, &root))
+    {
+        Some(ix) => projects.remove(ix),
+        None => root,
+    };
+    let (mut ordered, unpinned): (Vec<String>, Vec<String>) = std::mem::take(projects)
+        .into_iter()
+        .partition(|item| is_pinned_project(pinned, item));
+    ordered.push(item);
+    ordered.extend(unpinned);
+    *projects = ordered;
+}
+
 /// 固定项目提到最前，组内相对顺序仍跟 `projects` 骨架走。
 pub(crate) fn pinned_projects_first<T>(
     items: Vec<T>,

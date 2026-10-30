@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 # 离线缓存（会话列表、最近对话的尾部）。业务持久化统一用 SQLite；bundled 自带源码，
 # iOS / Android 都能编，不依赖系统库版本。
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Logging
 log = "0.4"

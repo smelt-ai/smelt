@@ -341,9 +341,13 @@ fn stations_split_running_done_and_recent() {
     for i in 0..7 {
         sessions.push(succeeded(&format!("read-{i}"), 100 + i));
     }
-    // 从没动过的两条：时间都是 0，按列表次序。
-    sessions.push(succeeded("zero-1", 0));
-    sessions.push(succeeded("zero-2", 0));
+    // 从没动过的：时间是 0，不进最近跑过。
+    sessions.push(session(
+        "untouched",
+        SessionStatus::Idle,
+        SessionPhase::Idle,
+        0,
+    ));
     world.list("a", live(sessions));
 
     let pass = world.project();
@@ -372,12 +376,33 @@ fn stations_split_running_done_and_recent() {
     let mut world = World::new(&["a"]);
     world.list(
         "a",
-        live(vec![succeeded("zero-1", 0), succeeded("zero-2", 0)]),
+        live(vec![succeeded("same-1", 7), succeeded("same-2", 7)]),
     );
     assert_eq!(
         ids(&world.project().stations[0].recent),
-        ["zero-1", "zero-2"],
+        ["same-1", "same-2"],
         "同时间保持列表次序"
+    );
+}
+
+/// 守护重启后：ACP 对话恢复回 `Idle`，终端里的 CLI 退出成 `Dead`，看过的失败也不再是单据。
+/// 它们都跑过，得留在最近跑过里，不能只剩重启后才跑完的那一条。
+#[test]
+fn recent_keeps_sessions_that_left_succeeded() {
+    let mut world = World::new(&["a"]);
+    world.list(
+        "a",
+        live(vec![
+            session("acp-restored", SessionStatus::Idle, SessionPhase::Idle, 10),
+            session("cli-exited", SessionStatus::Idle, SessionPhase::Dead, 20),
+            session("failed-read", SessionStatus::Idle, SessionPhase::Failed, 30),
+            session("succeeded", SessionStatus::Idle, SessionPhase::Succeeded, 40),
+            session("empty-terminal", SessionStatus::Idle, SessionPhase::Idle, 0),
+        ]),
+    );
+    assert_eq!(
+        ids(&world.project().stations[0].recent),
+        ["succeeded", "failed-read", "cli-exited", "acp-restored"]
     );
 }
 

@@ -40,13 +40,16 @@ Builds the smelt_mobile Rust library used for the iroh P2P tunnel.
     'DEFINES_MODULE' => 'YES',
     # Flutter.framework does not contain a i386 slice.
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
-    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/libsmelt_mobile.a -framework Network -framework SystemConfiguration',
+    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/libsmelt_mobile.a -framework Network -framework SystemConfiguration -lresolv',
   }
   s.user_target_xcconfig = {
     # iroh 用 Network.framework 监测网络路径变化（切 Wi-Fi/蜂窝后要重新打洞），
-    # 用 SystemConfiguration 读系统 DNS 配置。因为上面用 -force_load 把静态库
-    # 并进了宿主 target，这两个框架也必须由宿主链接，否则报
-    # Undefined symbol: _nw_path_monitor_* 。
-    'OTHER_LDFLAGS' => '$(inherited) -framework Network -framework SystemConfiguration',
+    # netdev 用 libresolv 读系统 DNS 服务器。因为上面用 -force_load 把静态库
+    # 并进了宿主 target，这些库也必须由宿主链接，否则报
+    # Undefined symbol: _nw_path_monitor_* / _res_9_ninit 。
+    # Rust 依赖里 #[link] 声明的库不会传到 Xcode：加依赖后用
+    # cargo rustc -p smelt_mobile --target aarch64-apple-ios --crate-type staticlib -- --print native-static-libs
+    # 看要链接哪些，系统默认没带的补到这里。
+    'OTHER_LDFLAGS' => '$(inherited) -framework Network -framework SystemConfiguration -lresolv',
   }
 end

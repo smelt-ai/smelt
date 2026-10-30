@@ -42,8 +42,6 @@ const ACP_IDLE_RETRY_MAX: Duration = Duration::from_secs(60);
 const ACP_WAKE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// 唤醒后每一步配置恢复等 agent 确认的上限。超时只记日志，用户的动作照常送达。
 const ACP_CONFIG_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
-/// 驱动写配置失败时 `status_line` 的前缀（pi_rpc 与 acp_conn 同一句）。
-const CONFIG_UPDATE_FAILURE_PREFIX: &str = "更新会话配置失败";
 
 /// 会话的闲置账本。构造时记一次活动：刚建好的会话不能在第一轮扫描就被挂起。
 pub(crate) struct AcpIdleState {
@@ -532,7 +530,7 @@ fn apply_config_restore_step(
         return;
     }
     crate::dlog(&format!("acp 恢复闲置前的会话配置 id={id} {actions:?}"));
-    let status_before = sess.reduced.lock().status_line.clone();
+    let notice_before = sess.reduced.lock().notice.as_ref().map(|notice| notice.id);
     for action in actions {
         if let Err(error) = apply_acp_user_action(sess, action, subscribers) {
             eprintln!("[acp] 会话 {id} 恢复闲置前的配置失败：{error}");
@@ -540,11 +538,10 @@ fn apply_config_restore_step(
         }
     }
     let rejected = |reduced: &smelt_core::acp_session::AcpSessionState| {
-        reduced.status_line != status_before
-            && reduced
-                .status_line
-                .as_deref()
-                .is_some_and(|status| status.starts_with(CONFIG_UPDATE_FAILURE_PREFIX))
+        reduced.notice.as_ref().is_some_and(|notice| {
+            notice.kind == smelt_core::acp_session::AcpNoticeKind::ConfigRejected
+                && Some(notice.id) != notice_before
+        })
     };
     // `reduced` 每改一次醒一次，超时只是上限。
     let (reduced, _) = sess
@@ -556,8 +553,12 @@ fn apply_config_restore_step(
         return;
     }
     if rejected(&reduced) {
-        let status = reduced.status_line.as_deref().unwrap_or_default();
-        eprintln!("[acp] 会话 {id} 恢复闲置前的配置被拒绝：{status}");
+        let reason = reduced
+            .notice
+            .as_ref()
+            .map(|notice| notice.text.as_str())
+            .unwrap_or_default();
+        eprintln!("[acp] 会话 {id} 恢复闲置前的配置被拒绝：{reason}");
         return;
     }
     eprintln!("[acp] 会话 {id} 恢复闲置前的配置超时，未等到 agent 确认");

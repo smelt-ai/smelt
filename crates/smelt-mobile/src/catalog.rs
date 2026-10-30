@@ -47,7 +47,7 @@ use crate::api::catalog::{
     AutomationCatalog, CatalogEvent, CatalogEventKind, HistoryRenameResult, HistorySessionSummary,
     SessionKind, SessionList, SessionSummary, WorkspaceCatalog,
 };
-use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::error::{SmeltError, SmeltErrorKind, error, outdated_kind};
 use crate::api::fleet::ConnectionState;
 use crate::cache::{Cache, Cached};
 use crate::connection::{ConnectionEvent, CurrentRuntime, Listener};
@@ -671,6 +671,9 @@ fn on_connection(weak: &Weak<Shared>, generation: u64, event: &ConnectionEvent) 
         inner.signal = true;
     }
     inner.connected = event.state == ConnectionState::Connected;
+    if inner.connected {
+        inner.state.set_os(event.os.as_deref());
+    }
     if !inner.connected {
         inner.stop_worker();
     } else if inner.worker.is_none() {
@@ -994,10 +997,7 @@ fn control_error(call_error: ControlClientError) -> SmeltError {
         ControlClientError::Protocol(protocol_error) => {
             let kind = match protocol_error.code {
                 ControlErrorCode::PermissionDenied => SmeltErrorKind::Unpaired,
-                ControlErrorCode::UnsupportedVersion | ControlErrorCode::MethodNotFound => {
-                    SmeltErrorKind::Incompatible
-                }
-                _ => SmeltErrorKind::Other,
+                _ => outdated_kind(&protocol_error).unwrap_or(SmeltErrorKind::Other),
             };
             error(kind, protocol_error.message)
         }
@@ -1013,7 +1013,7 @@ fn request_error(request_error: RequestError) -> SmeltError {
             error(SmeltErrorKind::Offline, format!("连不上运行时：{io_error}"))
         }
         RequestError::Closed => error(
-            SmeltErrorKind::Incompatible,
+            SmeltErrorKind::RuntimeOutdated,
             "运行时不支持这个操作，先升级它",
         ),
         RequestError::InvalidResponse(message) => error(SmeltErrorKind::Other, message),

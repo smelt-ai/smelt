@@ -28,6 +28,17 @@ pub(crate) struct NewAcpSessionRequest {
     pub activate: bool,
 }
 
+/// 这一批会话为什么要恢复。
+enum RestoreKind {
+    /// 运行时的第一份目录：恢复上次的会话，恢复完定下活动会话、按需重试。
+    ColdStart {
+        active_session: usize,
+        active_session_id: Option<String>,
+    },
+    /// 别处新开的对话随推送到了：只接上，不动活动会话。
+    Incoming,
+}
+
 impl Workspace {
     /// 手机要看一段 daemon 里没在跑的对话（典型是 daemon 冷重启后桌面只放了占位）。
     /// 照「用户在桌面点开它」的语义拉起来，但不切舞台、不抢焦点。
@@ -84,21 +95,46 @@ impl Workspace {
         self.schedule_indexed_session_restore(
             runtime,
             pending.into_iter().enumerate().collect(),
-            active_session,
-            active_session_id,
+            RestoreKind::ColdStart {
+                active_session,
+                active_session_id,
+            },
             window,
             cx,
         );
     }
 
+    /// 别处新开的对话随推送到了：接到侧栏最后。不动活动会话，失败的留到下次冷启动。
+    pub(crate) fn restore_incoming_conversations(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        pending: Vec<SessionState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = runtime.key().clone();
+        let members = self.space_members(&key, cx).len();
+        let Some(space) = self.space_mut(&key) else {
+            return;
+        };
+        // 编号接在已有的后面，和还在恢复的冷启动会话不撞。
+        let base = members + space.restore_pending.len();
+        let indexed = pending
+            .into_iter()
+            .enumerate()
+            .map(|(offset, state)| (base + offset, state))
+            .collect::<Vec<_>>();
+        space.restore_pending.extend(indexed.iter().cloned());
+        self.schedule_indexed_session_restore(runtime, indexed, RestoreKind::Incoming, window, cx);
+    }
+
     /// 会话恢复到它们所在的运行时上。活动会话只按本机那份认；本机守护的拉起、升级
-    /// 检查、远程目录投影也只有本机才做。
+    /// 检查也只有本机才做。
     fn schedule_indexed_session_restore(
         &mut self,
         runtime: crate::runtimes::Runtime,
         pending: Vec<(usize, SessionState)>,
-        active_session: usize,
-        active_session_id: Option<String>,
+        kind: RestoreKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -179,6 +215,10 @@ impl Workspace {
                     for (original_index, ss) in acp_saved {
                         if this.restore_cancelled(&key) {
                             this.forget_pending_restore(&key, original_index);
+                            continue;
+                        }
+                        // 恢复期间别处关掉了：不再接回来。
+                        if !this.restore_still_pending(&key, original_index) {
                             continue;
                         }
                         let Some(saved) = ss.acp else { continue };
@@ -263,7 +303,6 @@ impl Workspace {
                                 custom_title: ss.custom_title,
                                 agent_definition_id,
                                 automation_id,
-                                remote_owned: false,
                                 _acp_persist_sub,
                                 ui_state: ss
                                     .route
@@ -300,6 +339,10 @@ impl Workspace {
                             }
                         }
                         this.forget_pending_restore(&key, original_index);
+                        return false;
+                    }
+                    // 恢复期间别处关掉了：不再接回来，进程由关它的那边收。
+                    if !this.restore_still_pending(&key, original_index) {
                         return false;
                     }
                     let leaves = match result {
@@ -341,7 +384,6 @@ impl Workspace {
                             custom_title: ss.custom_title,
                             agent_definition_id: None,
                             automation_id: None,
-                            remote_owned: false,
                             _acp_persist_sub: None,
                             ui_state: ss
                                 .route
@@ -370,6 +412,17 @@ impl Workspace {
             }
 
             let _ = this.update_in(cx, |this, window, cx| {
+                let RestoreKind::ColdStart {
+                    active_session,
+                    active_session_id,
+                } = kind
+                else {
+                    eprintln!("[workspace] {key:?} 接上别处新开的会话：成功 {restored}");
+                    this.save_state(cx);
+                    this.schedule_visible_refresh(cx);
+                    cx.notify();
+                    return;
+                };
                 let Some(space) = this.space_mut(&key) else {
                     // 运行时在恢复期间被移除了，它的会话已经一起摘掉。
                     return;
@@ -443,8 +496,10 @@ impl Workspace {
                             this.schedule_indexed_session_restore(
                                 runtime,
                                 leftover,
-                                active_session,
-                                active_session_id,
+                                RestoreKind::ColdStart {
+                                    active_session,
+                                    active_session_id,
+                                },
                                 window,
                                 cx,
                             );
@@ -473,12 +528,6 @@ impl Workspace {
                         });
                     })
                     .detach();
-                }
-                if is_local {
-                    // 恢复落定后再对一次远程目录：恢复期间我们故意跳过了还在排队的 id，
-                    // 真的没恢复成功的（比如终端 reattach 失败）得在这里被重新投影回来，
-                    // 不能干等下一次目录推送。
-                    this.reconcile_remote_catalog_projection(window, cx);
                 }
                 this.schedule_visible_refresh(cx);
                 cx.notify();
@@ -657,7 +706,7 @@ impl Workspace {
         }
     }
 
-    /// 某个 cwd 归属这个运行时里哪个已打开项目（见 project_root_of）。
+    /// 某个 cwd 归属这个运行时里哪个已打开项目（见 `project_root_of`）。
     pub(crate) fn project_root_for_cwd(
         &self,
         runtime: &crate::runtimes::RuntimeKey,
@@ -669,6 +718,7 @@ impl Workspace {
             &self.space(runtime)?.projects,
             cwd,
         )
+        .map(str::to_string)
     }
 
     /// 确保一个会话 cwd 背后的项目是实体，而不是只靠 `project_groups` 临时推导出来的
@@ -676,11 +726,13 @@ impl Workspace {
     /// 顺手删了项目。
     ///
     /// 已落在某个已打开项目之下时不新增子项目；只有完全无主的 cwd 才成为项目根。
+    /// 项目在运行时上打开，随推送进侧栏；运行时还没连上时不开，会话先按 cwd 自成一组，
+    /// 关掉它时还会再来这里一次。
     pub(crate) fn remember_session_project(
         &mut self,
         runtime: &RuntimeKey,
         cwd: Option<&str>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
             return;
@@ -689,16 +741,7 @@ impl Workspace {
         if self.project_root_for_cwd(runtime, root, cx).is_some() {
             return;
         }
-        let Some(space) = self.space_mut(runtime) else {
-            return;
-        };
-        if !space
-            .projects
-            .iter()
-            .any(|p| p.trim_end_matches('/') == root)
-        {
-            space.projects.push(root.to_string());
-        }
+        self.request_project_open(runtime, root, cx);
     }
 
     /// 侧栏分组（见 ProjectGroup）。骨架是 `self.local.projects`——项目独立于会话存在，所以
@@ -706,7 +749,7 @@ impl Workspace {
     /// 的（旧会话、临时目录）仍按自己的 cwd 自建隐式组接在后面。
     ///
     /// 分组身份一律用 **root 路径**：末段同名的两个目录是两个项目，各占一行、会话不混。
-    /// 显示名重复时由 disambiguate_labels 补父目录段区分。
+    /// 显示名重复时由 `project_labels` 补父目录段区分。
     ///
     /// 侧栏渲染和拖拽排序共用同一份算法，避免两处各算一遍、行为跑偏。
     pub(crate) fn project_groups(
@@ -729,7 +772,7 @@ impl Workspace {
             groups.push(ProjectGroup {
                 runtime: runtime.clone(),
                 root: root.clone(),
-                label: crate::project_name_for_cwd(style, root),
+                label: String::new(),
                 sessions: Vec::new(),
             });
         }
@@ -746,14 +789,20 @@ impl Workspace {
                 Some(g) => g.sessions.push(ix),
                 None => groups.push(ProjectGroup {
                     runtime: runtime.clone(),
-                    label: crate::project_name_for_cwd(style, &root),
+                    label: String::new(),
                     root,
                     sessions: vec![ix],
                 }),
             }
         }
 
-        disambiguate_labels(style, &mut groups);
+        let labels = project_labels(
+            style,
+            &groups.iter().map(|g| g.root.as_str()).collect::<Vec<_>>(),
+        );
+        for (group, label) in groups.iter_mut().zip(labels) {
+            group.label = label;
+        }
         groups
     }
 
@@ -816,7 +865,7 @@ impl Workspace {
 
     /// 项目卡片拖拽排序。改的是 `projects` 骨架；会话仍挂在各自 cwd 下。
     /// 拖进固定区会固定、拖出则取消固定，避免置顶后拖下去又弹回顶部。
-    /// `save_state` 会把这份有序根目录写进工作区类型化快照。
+    /// 只改这台桌面的顺序：`save_state` 把它写进客户端库的侧栏顺序，运行时目录不动。
     /// 项目顺序是每个运行时各自的，跨运行时拖不动。
     pub(crate) fn move_project_near(
         &mut self,
@@ -886,7 +935,6 @@ impl Workspace {
             |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
                 acp_view::AcpViewEvent::Changed => {
                     this.touch_acp_session(_view);
-                    this.persist_pending_history_title_for_view(_view, cx);
                     this.persist_history_agent_definition_for_view(_view, cx);
                     this.save_state(cx);
                     this.sync_notification_surfaces(cx);
@@ -997,21 +1045,24 @@ impl Workspace {
                             };
                             // 每次重连前退避（250ms 起、翻倍到 8s 上限）并等运行时在线：短故障
                             // （升级 exec 一两秒）很快重连，运行时不在线就不发；预算在 AcpView
-                            // 内（6 次）防风暴。Connecting 时不重试也不花预算，等相位变了再看。
-                            let mut retries = 0u32;
+                            // 内（6 次）防风暴，退避档位也取它的已用次数——连上就被断时每次
+                            // 都会新起一条循环，档位记在循环里会永远停在第一档。Connecting 时
+                            // 不重试也不花预算，等相位变了再看。
                             loop {
-                                let dead = view
+                                let dead_failures = view
                                     .update_in(cx, |view, _window, _cx| {
                                         matches!(
                                             view.phase(),
                                             smelt_client::daemon_state::DaemonPhase::Dead
                                         )
+                                        .then(|| view.auto_reconnect_failures())
                                     })
-                                    .unwrap_or(false);
-                                if dead
+                                    .ok()
+                                    .flatten();
+                                if let Some(failures) = dead_failures
                                     && !crate::runtime_events::wait_online(
                                         &runtime_key,
-                                        retries.saturating_add(1),
+                                        failures.saturating_add(1),
                                         cx,
                                     )
                                     .await
@@ -1053,9 +1104,7 @@ impl Workspace {
                                         }
                                         break;
                                     }
-                                    Ok(AcpReconnectStep::Retrying) => {
-                                        retries = retries.saturating_add(1);
-                                    }
+                                    Ok(AcpReconnectStep::Retrying) => {}
                                     Ok(AcpReconnectStep::Waiting) => {
                                         if changed_rx.recv().await.is_err() {
                                             break;
@@ -1175,7 +1224,6 @@ impl Workspace {
             custom_title: None,
             agent_definition_id,
             automation_id: None,
-            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -1277,7 +1325,6 @@ impl Workspace {
             custom_title: None,
             agent_definition_id,
             automation_id,
-            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -1369,14 +1416,8 @@ impl Workspace {
         } else {
             settings::initial_acp_config_for(&RuntimeKey::Local, agent, &[], cx)
         };
-        // 智能体名是动态身份，不是用户给某段会话的命名覆盖层。无用户标题时，
-        // Session::title 会按自动标题、当前智能体名依次回退。
-        let custom_title = crate::HistoryTitles::get(
-            settings::HistorySourceKind::from(agent).id(),
-            profile_id.as_deref(),
-            &resume_id,
-            cx,
-        );
+        // 用户给这段对话起的名字在运行时，建好后随工作区目录推来（按 provider 身份现算）。
+        let custom_title = None;
         let agent_definition_id = definition.map(|definition| definition.id);
         if let Some(id) = agent_definition_id.as_deref() {
             crate::session_history::remember_history_agent(
@@ -1422,7 +1463,6 @@ impl Workspace {
             custom_title,
             agent_definition_id,
             automation_id: None,
-            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -1633,111 +1673,6 @@ impl Workspace {
         .detach();
     }
 
-    /// 把 PC 当前真实侧栏投影成无 UI 的共享菜单。项目标签使用 project_groups 的
-    /// 消歧结果，会话标题直接使用 Session::title，因此移动端无需复制任何显示规则。
-    /// 一个运行时那段侧栏的跨端菜单投影，发给那个运行时，连它的手机按它显示。
-    pub(crate) fn workspace_menu_snapshot(
-        &self,
-        runtime: &RuntimeKey,
-        cx: &App,
-    ) -> smelt_model::workspace_menu::WorkspaceMenuSnapshot {
-        use smelt_model::workspace_menu::{
-            WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind,
-            WorkspaceMenuSnapshot,
-        };
-
-        let groups = self.project_groups(runtime, cx);
-        let projects = groups
-            .iter()
-            .enumerate()
-            .map(|(order, group)| WorkspaceMenuProject {
-                root: group.root.clone(),
-                title: group.label.clone(),
-                order: order.min(u32::MAX as usize) as u32,
-            })
-            .collect();
-        let mut membership = vec![None; self.sessions.len()];
-        for (project_order, group) in groups.iter().enumerate() {
-            for &session_index in &group.sessions {
-                if let Some(slot) = membership.get_mut(session_index) {
-                    *slot = Some((project_order, group));
-                }
-            }
-        }
-
-        let sessions = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, session)| session.runtime(cx).key() == runtime)
-            .flat_map(|(session_order, session)| {
-                let project = membership.get(session_order).and_then(|value| *value);
-                let project_root = project.map(|(_, group)| group.root.clone());
-                let project_title = project.map(|(_, group)| group.label.clone());
-                let project_order = project
-                    .map(|(order, _)| order.min(u32::MAX as usize) as u32)
-                    .unwrap_or(u32::MAX);
-                let session_order = session_order.min(u32::MAX as usize) as u32;
-
-                match &session.kind {
-                    SessionKind::Term { .. } => {
-                        let leaves = session.term_leaves();
-                        let single_pane = leaves.len() == 1;
-                        leaves
-                            .into_iter()
-                            .enumerate()
-                            .map(|(leaf_order, pane)| WorkspaceMenuSession {
-                                id: pane.read(cx).session_id().to_string(),
-                                kind: WorkspaceMenuSessionKind::Terminal,
-                                title: if single_pane {
-                                    session.title(cx)
-                                } else {
-                                    pane_title(&pane, cx)
-                                },
-                                custom_title: if single_pane {
-                                    session.custom_title.is_some()
-                                        || pane.read(cx).custom_title().is_some()
-                                } else {
-                                    pane.read(cx).custom_title().is_some()
-                                },
-                                cwd: pane.read(cx).cwd(),
-                                project_root: project_root.clone(),
-                                project_title: project_title.clone(),
-                                project_order,
-                                session_order,
-                                leaf_order: leaf_order.min(u32::MAX as usize) as u32,
-                                agent: pane_provider_kind(&pane, cx)
-                                    .map(|provider| provider.id().to_string()),
-                            })
-                            .collect::<Vec<_>>()
-                    }
-                    SessionKind::Conversation(view) => {
-                        let view = view.read(cx);
-                        vec![WorkspaceMenuSession {
-                            id: view.session_id().to_string(),
-                            kind: WorkspaceMenuSessionKind::Acp,
-                            title: session.title(cx),
-                            custom_title: session.custom_title.is_some(),
-                            cwd: view.cwd(),
-                            project_root,
-                            project_title,
-                            project_order,
-                            session_order,
-                            leaf_order: 0,
-                            agent: Some(view.agent_kind().id().to_string()),
-                        }]
-                    }
-                }
-            })
-            .collect();
-
-        WorkspaceMenuSnapshot::current(projects, sessions).with_source(
-            self.workspace_menu_source_id.clone(),
-            self.next_workspace_menu_source_revision
-                .fetch_add(1, Ordering::Relaxed),
-        )
-    }
-
     /// 「+」新建会话：继承当前会话的运行时和活动终端的目录。
     pub(crate) fn new_tab(&mut self, cx: &mut Context<Self>) {
         let runtime = self
@@ -1761,8 +1696,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 把一个目录加进这个运行时的项目列表并设为活动项目。已经在列表里就只切活动，不重复
-    /// 加。**不建会话**——项目和会话是两回事，建会话是调用方另外的事。
+    /// 在这个运行时上打开一个目录作为项目并设为活动项目。已经开着就只切活动。项目随
+    /// 运行时的推送进侧栏。**不建会话**——项目和会话是两回事，建会话是调用方另外的事。
     pub(crate) fn add_project(
         &mut self,
         runtime: RuntimeKey,
@@ -1773,15 +1708,16 @@ impl Workspace {
             return;
         }
         let root = root.trim_end_matches('/').to_string();
-        let Some(space) = self.space_mut(&runtime) else {
+        let Some(space) = self.space(&runtime) else {
             return;
         };
-        if !space
+        let open = space
             .projects
             .iter()
-            .any(|p| p.trim_end_matches('/') == root)
-        {
-            space.projects.push(root.clone());
+            .any(|p| p.trim_end_matches('/') == root);
+        if !open && !self.request_project_open(&runtime, &root, cx) {
+            self.report_background_error(format!("运行时还没连上，没能打开项目 {root}"));
+            return;
         }
         self.active_project = Some(ProjectRef { runtime, root });
         // 打开项目 = 想看这个项目，收掉盖在舞台上的覆盖页。
@@ -1909,7 +1845,7 @@ impl Workspace {
         self.close_session_pane(ix, view, window, cx);
     }
 
-    /// 关闭项目：从列表移除，并连带关掉挂在它下面的所有会话。认运行时加 **root 路径**
+    /// 关闭项目：在运行时上关掉，并连带关掉挂在它下面的所有会话。认运行时加 **root 路径**
     /// （分组身份，见 ProjectGroup）——用显示名的话，末段同名的另一个项目会被一起误伤。
     pub(crate) fn close_project(&mut self, project: &ProjectRef, cx: &mut Context<Self>) {
         let root = project.root.trim_end_matches('/').to_string();
@@ -1922,8 +1858,29 @@ impl Workspace {
         for ix in ixs {
             self.close_session(ix, cx);
         }
+        // 在运行时上关掉，侧栏随推送摘掉；项目下的会话上面已经逐个关过。只靠会话 cwd
+        // 撑起来的隐式组也按它的根发一次：上面关会话时已经把它实体化（发了打开），这条
+        // 排在后面，抵掉它。
+        let mut closed = self
+            .space(&project.runtime)
+            .map(|space| {
+                space
+                    .projects
+                    .iter()
+                    .filter(|p| p.trim_end_matches('/') == root)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if closed.is_empty() {
+            closed.push(root.clone());
+        }
+        for closed_root in &closed {
+            if !self.request_project_close(&project.runtime, closed_root, cx) {
+                self.report_background_error(format!("运行时还没连上，没能关闭项目 {root}"));
+            }
+        }
         if let Some(space) = self.space_mut(&project.runtime) {
-            space.projects.retain(|p| p.trim_end_matches('/') != root);
             space
                 .pinned_projects
                 .retain(|p| !crate::sidebar_order::same_project_root(p, &root));
@@ -1981,7 +1938,14 @@ impl Workspace {
         let Some(space) = self.space_mut(&project.runtime) else {
             return;
         };
-        crate::sidebar_order::toggle_pinned_project(&mut space.pinned_projects, &project.root);
+        crate::sidebar_order::toggle_pinned_project_at_boundary(
+            &mut space.projects,
+            &mut space.pinned_projects,
+            &project.root,
+        );
+        // 和拖拽排序一样滑到新位置，让人看得见它挪去了哪。
+        self.sidebar_reorder_generation += 1;
+        self.sidebar_drop_origin = None;
         self.save_state(cx);
         cx.notify();
     }
@@ -2032,7 +1996,7 @@ impl Workspace {
         );
     }
 
-    /// 从 Finder 拖入的路径 = 打开项目：文件夹直接用，文件取其父目录，各加一条项目。
+    /// 拖进侧栏、或拖到程序图标上的路径 = 打开项目：文件夹直接用，文件取其父目录，各加一条项目。
     /// **不自动建会话**——跟「+ 打开项目」同一套语义，开终端还是开对话由项目行的
     /// 「+」决定（两条路结果不一致的话，"打开项目"到底会发生什么就说不清了）。
     ///
@@ -2126,11 +2090,6 @@ impl Workspace {
             })
     }
 
-    /// 目录撤回后的投影拆除：只摘本地视图，不再发一遍 kill。拆卸已经在 daemon 完成。
-    pub(crate) fn unproject_remote_session(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.remove_session(ix, false, cx);
-    }
-
     /// 记下刚看过的会话，关掉当前会话时回到上一个（见 `remove_session`）。
     pub(crate) fn note_session_viewed(&mut self, ix: usize) {
         if let Some(ui_id) = self.sessions.get(ix).map(|session| session.ui_id) {
@@ -2180,8 +2139,12 @@ impl Workspace {
         } else {
             None
         };
-        let project_root = group.map(|g| g.root);
-        self.remember_session_project(&runtime, project_root.as_deref(), cx);
+        // 只有用户自己关的才实体化。别处关掉的、运行时被移除的不算：别处可能连项目一起
+        // 关了，这里再开就把它开回来了。
+        if kill_runtime {
+            let project_root = group.map(|g| g.root);
+            self.remember_session_project(&runtime, project_root.as_deref(), cx);
+        }
         let attention_ids: Vec<String> = match &self.sessions[ix].kind {
             SessionKind::Term { .. } => self.sessions[ix]
                 .term_leaves()
@@ -2191,6 +2154,12 @@ impl Workspace {
             SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
         };
         if kill_runtime {
+            // 用户关掉的：运行时目录里也关掉它，别的设备随之摘掉。只摘本地的（运行时被
+            // 移除、别处已经关掉）不走这里。
+            let session = &self.sessions[ix];
+            let key = session.runtime(cx).key().clone();
+            let id = session.conversation_id.clone();
+            self.close_directory_conversation(&key, &id);
             // 每个 pane 在自己的运行时上杀：远程会话的 shell 在那台机器上。
             let terminals = self.sessions[ix]
                 .term_leaves()
@@ -2212,8 +2181,6 @@ impl Workspace {
                 AttentionGlobal::remove_session(&id, cx);
             }
         }
-        self.pending_history_title_persist
-            .remove(&self.sessions[ix].ui_id);
         let closed_conversation_sid = match &self.sessions[ix].kind {
             SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
             SessionKind::Term { .. } => None,
@@ -2222,18 +2189,16 @@ impl Workspace {
             closed_conversation_sid.as_deref() == self.nav.agents().conversation_sid();
         // 关的是正在看的对话：回到上一个看过的对话，没有就落到最后一段。
         let next_conversation_ix = if closed_current_conversation {
-            self.previous_viewed_session(closed_ui_id, |session| {
-                session.is_agent_conversation(cx)
-            })
-            .or_else(|| {
-                self.sessions
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(other, session)| {
-                        (other != ix && session.is_agent_conversation(cx)).then_some(other)
-                    })
-            })
+            self.previous_viewed_session(closed_ui_id, |session| session.is_agent_conversation(cx))
+                .or_else(|| {
+                    self.sessions
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(other, session)| {
+                            (other != ix && session.is_agent_conversation(cx)).then_some(other)
+                        })
+                })
         } else {
             None
         };
@@ -2617,7 +2582,7 @@ impl Workspace {
                 crate::runtimes::runtime_name(&crate::RuntimeKey::Remote(runtime_id.clone()), cx)
             }
         };
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current.clone()));
         // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
         self.begin_main_modal_focus(window, cx);
         // 名字整段选中：直接打字就是换掉，按方向键才是在原名上改。
@@ -2639,10 +2604,11 @@ impl Workspace {
         ));
         self.rename_target = Some(target);
         self.rename_input = Some(input);
+        self.rename_initial = Some(current);
         cx.notify();
     }
 
-    /// 提交重命名：空输入等于清掉自定义名，回退到自动推导的标题。
+    /// 提交重命名：空输入等于清掉自定义名，回退到自动推导的标题；和打开时一样等于没改。
     pub(crate) fn confirm_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.rename_target.take() else {
             return;
@@ -2650,86 +2616,43 @@ impl Workspace {
         let Some(input) = self.rename_input.take() else {
             return;
         };
+        let initial = self.rename_initial.take().unwrap_or_default();
         self._rename_sub = None;
-        let text = input.read(cx).value().trim().to_string();
-        let custom_title = (!text.is_empty()).then_some(text);
+        let Some(custom_title) = submitted_title(&initial, &input.read(cx).value()) else {
+            cx.notify();
+            return;
+        };
         match target {
             RenameTarget::Session(ix) => {
-                let mut history_identity = None;
-                let mut pending_ui_id = None;
-                let terminal_identity = self.sessions.get(ix).and_then(|s| match &s.kind {
-                    SessionKind::Term { active, .. } => {
-                        let (agent, conversation_id) = pane_conversation_identity(active, cx)?;
-                        Some((agent, s.cwd(cx).unwrap_or_default(), conversation_id))
-                    }
+                let Some(session) = self.sessions.get(ix) else {
+                    return;
+                };
+                let runtime = session.runtime(cx);
+                let conversation_id = session.conversation_id.clone();
+                // 终端会话认得出当前对话时，名字属于那段对话而不是这个标签：用户中途
+                // 退出、换到别的对话，这一行就该跟着换名字。
+                let terminal_identity = match &session.kind {
+                    SessionKind::Term { active, .. } => pane_conversation_identity(active, cx)
+                        .map(|(agent, id)| (agent, session.cwd(cx).unwrap_or_default(), id)),
                     SessionKind::Conversation(_) => None,
-                });
-                if let Some(s) = self.sessions.get_mut(ix) {
-                    // 终端会话认得出当前对话时，名字属于那段对话而不是这个标签：
-                    // 用户中途退出、换到别的对话，这一行就该跟着换名字，所以
-                    // 这里不能再留下会话级 pin 把新对话的名字盖住。
-                    s.custom_title = if terminal_identity.is_some() {
-                        None
-                    } else {
-                        custom_title.clone()
-                    };
-                    if let SessionKind::Conversation(view) = &s.kind {
-                        let view = view.read(cx);
-                        if let Some(resume_id) = view.history_session_id_for_save() {
-                            history_identity = Some((
-                                settings::HistorySourceKind::from(view.agent_kind()),
-                                view.profile_id().map(String::from),
-                                view.cwd().unwrap_or_default(),
-                                resume_id.to_string(),
-                            ));
-                        } else {
-                            pending_ui_id = Some(s.ui_id);
-                        }
-                    }
-                }
-                // 智能体对话的名字属于这段会话本身，改名要同步给 agent，
-                // 让 agent 侧的会话档也叫这个名字；不支持改名的 agent 静默忽略。
-                if let Some(SessionKind::Conversation(view)) =
-                    self.sessions.get(ix).map(|session| &session.kind)
-                {
-                    let view = view.clone();
-                    let title = custom_title.clone();
-                    view.update(cx, |view, _cx| view.rename_session(title));
-                }
-                let runtime = self.sessions.get(ix).map(|session| session.runtime(cx));
-                if let Some((agent, cwd, conversation_id)) = terminal_identity
-                    && let Some(runtime) = runtime.as_ref()
-                {
-                    self.set_history_custom_title(
-                        runtime,
+                };
+                match terminal_identity {
+                    Some((agent, cwd, conversation)) => self.set_history_custom_title(
+                        &runtime,
                         agent,
                         None,
                         cwd,
-                        conversation_id,
+                        conversation,
                         custom_title.clone(),
                         cx,
-                    );
-                } else if let Some((agent, profile_id, cwd, resume_id)) = history_identity
-                    && let Some(runtime) = runtime.as_ref()
-                {
-                    if let Some(session) = self.sessions.get(ix) {
-                        self.pending_history_title_persist.remove(&session.ui_id);
-                    }
-                    self.set_history_custom_title(
+                    ),
+                    None => self.request_rename(
                         runtime,
-                        agent,
-                        profile_id,
-                        cwd,
-                        resume_id,
+                        conversation_id,
+                        None,
                         custom_title.clone(),
                         cx,
-                    );
-                } else if let Some(ui_id) = pending_ui_id {
-                    if custom_title.is_some() {
-                        self.pending_history_title_persist.insert(ui_id);
-                    } else {
-                        self.pending_history_title_persist.remove(&ui_id);
-                    }
+                    ),
                 }
             }
             RenameTarget::Pane(view) => {
@@ -2749,7 +2672,26 @@ impl Workspace {
                             cx,
                         );
                     }
-                    None => view.update(cx, |t, _| t.set_custom_title(custom_title)),
+                    None => {
+                        let terminal_id = view.read(cx).session_id().to_string();
+                        let owner = self.sessions.iter().find(|session| {
+                            session
+                                .term_leaves()
+                                .iter()
+                                .any(|pane| pane.entity_id() == view.entity_id())
+                        });
+                        if let Some(owner) = owner {
+                            let runtime = owner.runtime(cx);
+                            let conversation_id = owner.conversation_id.clone();
+                            self.request_rename(
+                                runtime,
+                                conversation_id,
+                                Some(terminal_id),
+                                custom_title,
+                                cx,
+                            );
+                        }
+                    }
                 }
             }
             // 留空不改：机器总得有个名字。
@@ -2781,55 +2723,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 把用户命名覆盖层读进 `HistoryTitles` 缓存。
-    ///
-    /// 改名走写穿，本地改完立即可见；这里只负责兜住不经过本窗口的写入（历史页、
-    /// 移动端、另一扇窗口），因此 5 秒一次足够，且必须在后台线程读存储——侧栏
-    /// 渲染路径上不允许出现同步存储访问。内容变了由 `HistoryTitles` 的观察者重绘
-    /// 工作台，这里不再单独 notify。
-    pub(crate) fn refresh_history_titles(&mut self, cx: &mut Context<Self>) {
-        let fresh = self
-            .history_titles_at
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5));
-        if fresh || self.history_titles_inflight {
-            return;
-        }
-        self.history_titles_inflight = true;
-        cx.spawn(async move |this, cx| {
-            let titles = cx
-                .background_executor()
-                .spawn(async move {
-                    use smelt_runtime_client::protocol::control::EmptyParams;
-                    use smelt_runtime_client::protocol::history::HistoryTitlesCall;
-                    crate::runtime_call::call::<HistoryTitlesCall>(
-                        EmptyParams::default(),
-                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                    )
-                    .map(|result| {
-                        result
-                            .titles
-                            .into_iter()
-                            .map(|t| ((t.agent, t.profile_id, t.resume_id), t.title))
-                            .collect::<std::collections::HashMap<_, _>>()
-                    })
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.history_titles_inflight = false;
-                this.history_titles_at = Some(Instant::now());
-                // 取不到时保留上一份，5 秒后再试；空表会把侧栏标题全打回原始值。
-                match titles {
-                    Ok(titles) => crate::HistoryTitles::replace_all(titles, cx),
-                    Err(error) => eprintln!(
-                        "[history] 读取会话标题失败：{}",
-                        crate::runtime_call::error_text(error)
-                    ),
-                }
-            });
-        })
-        .detach();
-    }
-
     /// `runtime`：这段对话的存档在哪台机器上。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_history_custom_title(
@@ -2853,13 +2746,6 @@ impl Workspace {
             eprintln!("[session-metadata] 保存会话名称失败: {error}");
             return;
         }
-        crate::HistoryTitles::set(
-            agent.id(),
-            profile_id.as_deref(),
-            &resume_id,
-            custom_title.as_deref(),
-            cx,
-        );
 
         let key = session_history::session_list_key(agent, profile_id.as_deref(), &cwd);
         if let Some((_, list)) = self.session_list.get_mut(&key) {
@@ -2875,64 +2761,8 @@ impl Workspace {
             *list = session_history::HistoryListSnapshot::new(updated);
         }
 
-        for session in &mut self.sessions {
-            let SessionKind::Conversation(view) = &session.kind else {
-                continue;
-            };
-            let view = view.read(cx);
-            if settings::HistorySourceKind::from(view.agent_kind()) == agent
-                && view.profile_id() == profile_id.as_deref()
-                && view
-                    .history_session_id_for_save()
-                    .as_ref()
-                    .map(ToString::to_string)
-                    == Some(resume_id.clone())
-            {
-                session.custom_title = custom_title.clone();
-            }
-        }
         self.save_state(cx);
         cx.notify();
-    }
-
-    pub(crate) fn persist_pending_history_title_for_view(
-        &mut self,
-        changed_view: &Entity<acp_view::AcpView>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self
-            .sessions
-            .iter()
-            .find(|session| session.anchor_id() == changed_view.entity_id())
-        else {
-            return;
-        };
-        if !self.pending_history_title_persist.contains(&session.ui_id) {
-            return;
-        }
-        let ui_id = session.ui_id;
-        let custom_title = session.custom_title.clone();
-        let view = changed_view.read(cx);
-        let Some(resume_id) = view.history_session_id_for_save() else {
-            return;
-        };
-        let identity = (
-            settings::HistorySourceKind::from(view.agent_kind()),
-            view.profile_id().map(String::from),
-            view.cwd().unwrap_or_default(),
-            resume_id.to_string(),
-        );
-        let runtime = view.runtime().clone();
-        self.pending_history_title_persist.remove(&ui_id);
-        self.set_history_custom_title(
-            &runtime,
-            identity.0,
-            identity.1,
-            identity.2,
-            identity.3,
-            custom_title,
-            cx,
-        );
     }
 
     pub(crate) fn persist_history_agent_definition_for_view(
@@ -2967,6 +2797,7 @@ impl Workspace {
     pub(crate) fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         self.rename_target = None;
         self.rename_input = None;
+        self.rename_initial = None;
         self._rename_sub = None;
         cx.notify();
     }
@@ -3080,4 +2911,37 @@ pub(crate) fn panel_send_target(
 /// 关它是用户看过之后的决定，不再多问一次。
 pub(crate) fn closing_needs_confirm(status: AgentStatus) -> bool {
     status == AgentStatus::Running
+}
+
+/// 改名框提交的内容要写成什么名字：`None` 是没改，什么都不写；`Some(None)` 是清掉。
+///
+/// 预填的多半是自动标题（agent 报的、目录名）。原样提交（行内改名点别处就会提交）若也
+/// 写进去，就把自动标题钉成了用户起的名字，之后不再跟着 agent 变。
+fn submitted_title(initial: &str, text: &str) -> Option<Option<String>> {
+    let text = text.trim();
+    if text == initial.trim() {
+        return None;
+    }
+    Some((!text.is_empty()).then(|| text.to_string()))
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::submitted_title;
+
+    #[test]
+    fn submitting_the_prefilled_name_changes_nothing() {
+        assert_eq!(submitted_title("smelt", "smelt"), None);
+        assert_eq!(submitted_title("smelt", "  smelt "), None);
+        assert_eq!(submitted_title("", "  "), None);
+    }
+
+    #[test]
+    fn a_new_name_is_written_and_an_empty_one_clears() {
+        assert_eq!(
+            submitted_title("smelt", " 修 CI "),
+            Some(Some("修 CI".into()))
+        );
+        assert_eq!(submitted_title("smelt", "  "), Some(None));
+    }
 }

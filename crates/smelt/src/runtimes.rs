@@ -1,7 +1,7 @@
 //! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自
 //! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
-use smelt_client::runtime_path::PathStyle;
+use smelt_model::runtime_path::PathStyle;
 use smelt_runtime_client::RuntimeClient;
 
 pub(crate) use smelt_client::runtime::{Runtime, RuntimeKey};
@@ -44,10 +44,7 @@ pub(crate) fn path_style(key: &RuntimeKey, cx: &gpui::App) -> PathStyle {
     match key {
         RuntimeKey::Local => PathStyle::LOCAL,
         RuntimeKey::Remote(_) => {
-            match remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()) {
-                Some("windows") => PathStyle::Windows,
-                _ => PathStyle::Posix,
-            }
+            PathStyle::of_os(remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()))
         }
     }
 }
@@ -135,7 +132,7 @@ pub(crate) enum RuntimeStatus {
         smelt_home: Option<String>,
     },
     Offline(String),
-    /// 连得上，但版本和这个桌面对不上（见 `smelt_client::compat`），说明里写着该升级
+    /// 连得上，但版本和这个桌面对不上（见 `smelt_runtime_client::compat`），说明里写着该升级
     /// 哪一边。这时不订阅它的事件：订阅了也解不出来，只会断开重连。
     Incompatible {
         /// 运行时自己报的版本。
@@ -699,13 +696,13 @@ pub(crate) fn status_of(client: &RuntimeClient) -> RuntimeStatus {
 }
 
 fn incompatible_status(
-    incompatible: &smelt_client::compat::Incompatibility,
+    incompatible: &smelt_runtime_client::compat::Incompatibility,
     os: Option<&str>,
 ) -> RuntimeStatus {
-    use smelt_client::compat::Outdated;
+    use smelt_runtime_client::compat::Outdated;
 
     let fix = match incompatible.outdated {
-        Outdated::Desktop => IncompatibleFix::UpdateDesktop,
+        Outdated::Client => IncompatibleFix::UpdateDesktop,
         Outdated::Runtime if upgrades_remotely(os) => IncompatibleFix::UpgradeRuntime,
         Outdated::Runtime => IncompatibleFix::UpdateSmeltThere,
     };
@@ -804,7 +801,7 @@ pub(crate) fn manual_upgrade_command() -> String {
 fn described_status(
     described: smelt_runtime_client::protocol::control::SystemDescribeResult,
 ) -> RuntimeStatus {
-    if let Err(incompatible) = smelt_client::compat::check(&described) {
+    if let Err(incompatible) = smelt_runtime_client::compat::check(&described) {
         return incompatible_status(&incompatible, described.daemon.os.as_deref());
     }
     RuntimeStatus::Online {
@@ -1266,7 +1263,7 @@ pub(crate) fn set_runtime_relay(
     use smelt_model::control_api::{RemoteConfigGet, RemoteConfigSet};
     use smelt_runtime_client::protocol::control::EmptyParams;
 
-    let key = RuntimeKey::Remote(runtime_id.clone());
+    let key = RuntimeKey::Remote(runtime_id);
     let Some(remote) = remote_of(&key, cx).cloned() else {
         return gpui::Task::ready(Err("这台机器已经移除了".to_string()));
     };
@@ -1569,7 +1566,7 @@ mod tests {
         );
         let incompatible = RuntimeStatus::Incompatible {
             version: "0.9.0-rc.3".into(),
-            detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，桌面要 v2）".into(),
+            detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，客户端要 v2）".into(),
             fix: IncompatibleFix::UpgradeRuntime,
         };
         assert_eq!(
@@ -1714,7 +1711,7 @@ mod tests {
             version,
             detail,
             fix,
-        } = status_of(&describe_without("workspace.load"))
+        } = status_of(&describe_without("workspace.conversation.create"))
         else {
             panic!("缺方法的运行时应判为不兼容");
         };
@@ -1726,7 +1723,7 @@ mod tests {
         assert_eq!(version, "0.0.1");
         assert!(detail.contains("0.0.1"), "{detail}");
         assert!(detail.contains("需要升级运行时"), "{detail}");
-        assert!(detail.contains("workspace.load"), "{detail}");
+        assert!(detail.contains("workspace.conversation.create"), "{detail}");
     }
 
     /// Windows 上的运行时随那台机器上的 Smelt 一起更新：旧了也不请它远程升级。
@@ -1735,7 +1732,7 @@ mod tests {
         use smelt_runtime_client::protocol::control::ControlResponse;
         let client = runtime_answering(|request| {
             let request_id = request["request_id"].as_str().unwrap();
-            let mut described = described_without("workspace.load");
+            let mut described = described_without("workspace.conversation.create");
             described.daemon.os = Some("windows".to_string());
             serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
         });
@@ -1802,7 +1799,7 @@ mod tests {
             "运行时比桌面新，只升不降，不能请它升级"
         );
         assert_eq!(version, "9.9.9");
-        assert!(detail.contains("需要升级桌面"), "{detail}");
+        assert!(detail.contains("需要升级客户端"), "{detail}");
     }
 
     /// 订阅线程把每次探测到的连通性报回来，订阅断开也报：侧栏的「离线」靠它更新，
@@ -1910,7 +1907,10 @@ mod tests {
     #[test]
     fn hanging_up_after_accepting_means_go_look_again() {
         assert_eq!(
-            push_upgrade_to(&runtime_replying(&[r#"{"state":"accepted"}"#]), UPGRADE_TARGET),
+            push_upgrade_to(
+                &runtime_replying(&[r#"{"state":"accepted"}"#]),
+                UPGRADE_TARGET
+            ),
             PushUpgrade::Restarting
         );
     }
@@ -1938,7 +1938,10 @@ mod tests {
             PushUpgrade::Staged("ACP 会话仍有未完成请求".into())
         );
         assert_eq!(
-            push_upgrade_to(&runtime_replying(&[r#"{"state":"current"}"#]), UPGRADE_TARGET),
+            push_upgrade_to(
+                &runtime_replying(&[r#"{"state":"current"}"#]),
+                UPGRADE_TARGET
+            ),
             PushUpgrade::Current
         );
     }
@@ -1978,14 +1981,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
-    /// 对着一台真实运行时走一遍桌面要用的远程链路：配对、读工作区目录、在那台机器上开
-    /// 终端、订阅里收到这个终端的状态，最后杀掉终端、撤销这台设备。默认不跑：
+    /// 对着一台真实运行时走一遍桌面要用的远程链路：配对、对版本、在那台机器上开终端、订阅
+    /// 首帧带着工作区目录、订阅里收到这个终端的状态，最后杀掉终端、撤销这台设备。默认不跑：
     /// `SMELT_TEST_PAIRING_URI='smelt+iroh://…' cargo test -p smelt runtimes -- --ignored`
     #[test]
     #[ignore = "需要一台真实运行时和一次性配对串"]
     fn drives_a_real_remote_runtime() {
-        use smelt_runtime_client::protocol::control::EmptyParams;
-        use smelt_runtime_client::protocol::workspace::WorkspaceLoadCall;
+        use smelt_runtime_client::protocol::control::{EmptyParams, SystemDescribe};
 
         let uri = std::env::var("SMELT_TEST_PAIRING_URI").expect("设置 SMELT_TEST_PAIRING_URI");
         let home = std::env::temp_dir().join(format!(
@@ -1999,7 +2001,7 @@ mod tests {
         let runtime = remote.runtime.clone();
         runtime
             .client()
-            .call::<WorkspaceLoadCall>(&EmptyParams::default(), std::time::Duration::from_secs(30))
+            .call::<SystemDescribe>(&EmptyParams::default(), std::time::Duration::from_secs(30))
             .unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2023,12 +2025,18 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut seen = false;
+        let mut directory = false;
         while !seen && std::time::Instant::now() < deadline {
             let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(1)) else {
                 continue;
             };
             seen = match event {
-                crate::terminal::DaemonStateEvent::Snapshot { sessions, .. } => {
+                crate::terminal::DaemonStateEvent::Snapshot {
+                    sessions,
+                    workspace,
+                    ..
+                } => {
+                    directory |= workspace.is_some();
                     sessions.iter().any(|state| state.id == sid)
                 }
                 crate::terminal::DaemonStateEvent::Update(state) => state.id == sid,
@@ -2036,6 +2044,7 @@ mod tests {
             };
         }
         assert!(seen, "订阅里没看到远程终端 {sid}");
+        assert!(directory, "订阅首帧没带工作区目录");
 
         drop(terminal);
         crate::terminal::kill_remote(&runtime, &sid);
@@ -2050,10 +2059,7 @@ mod tests {
         assert!(
             runtime
                 .client()
-                .call::<WorkspaceLoadCall>(
-                    &EmptyParams::default(),
-                    std::time::Duration::from_secs(30)
-                )
+                .call::<SystemDescribe>(&EmptyParams::default(), std::time::Duration::from_secs(30))
                 .is_err(),
             "撤销之后不该还能调"
         );

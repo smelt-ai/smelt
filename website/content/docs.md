@@ -1,7 +1,7 @@
 # 文档
 
 smelt 是跨机器、多智能体的原生 AI 编程指挥台：macOS（Apple Silicon）和 Windows 10 1803+（x86_64）上的 GPUI 桌面工作台，Linux 上的无头守护进程 `smeltd`，以及 iOS / Android 的手机和平板「出菜口」。
-Windows 第一版是不签名的安装包，没有自动更新。Linux 上可以只跑 `smeltd`，再用电脑或手机配对上去。
+Windows 第一版是不签名的安装包。Linux 上可以只跑 `smeltd`，再用电脑或手机配对上去。
 这页文档只讲怎么用，架构细节不在这——接口和默认行为可能会变。
 
 ## 快速开始
@@ -17,7 +17,7 @@ Windows 第一版是不签名的安装包，没有自动更新。Linux 上可以
 从同一个 [Releases](https://github.com/smelt-ai/smelt/releases) 页下载
 `smelt-<版本>-windows-x86_64-setup.exe` 运行。按当前用户安装，不要管理员权限，
 默认装到 `%LOCALAPPDATA%\Programs\Smelt`，建开始菜单项，可选把 `smelt` 命令加入 PATH。
-升级时先关掉 Smelt，再运行新版本的安装程序。
+和 macOS 一样，启动时和手动都会检查更新；应用更新时 Smelt 退出，新版安装程序静默装好后重新打开。
 
 数据目录是 `%USERPROFILE%\.smelt`。
 
@@ -25,7 +25,6 @@ Windows 第一版是不签名的安装包，没有自动更新。Linux 上可以
 
 - 只有 x86_64，系统是 Windows 10 1803 及以上。
 - 安装程序和 exe 都不签名。SmartScreen 可能提示未知发布者，选择仍要运行即可。
-- 没有自动更新。
 - 交互 shell 是 `cmd.exe`（ConPTY），或 `COMSPEC` 指向的程序。
 - 没有菜单栏图标、Dock 角标、系统通知。这些只在 macOS 上。
 
@@ -35,7 +34,7 @@ Windows 第一版是不签名的安装包，没有自动更新。Linux 上可以
 后台继续活着；重新打开 smelt，之前的分屏布局和终端会话都会自动恢复，不用重新
 `cd` 进项目、重新跑一遍命令。注意这只扛得住"关 smelt"，扛不住重启电脑——重启会
 把所有进程一起带走。升级或重启本机守护进程也一样：正在跑的 shell 会被关掉，进行中的
-回合会中断，对话历史保留（见[设置窗口](#设置窗口)里的「后台服务」）。
+回合会中断，对话历史保留（见[设置窗口](#设置窗口)「维护」里的「后台服务」）。
 
 想从源码构建、或者想搞清楚内部是怎么拼起来的，看[开发文档](/develop)。
 
@@ -49,7 +48,7 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
   目录浏览器（`crates/smelt/src/dir_picker.rs`），选中后开新会话。这不是系统原生的
   文件夹选择框；插件仍可以另要系统选择框。
 - **项目分组行右侧的 `+`**：在这个项目已有的 cwd 下继续开新的终端，或执行设置里
-  配置的启动命令。启动项在设置 →「新建与启动」里按显示名和命令增删改。
+  配置的启动命令。启动项在设置 →「Agent」的「新建菜单」里按显示名和命令增删改。
 - 顶栏的 `+` 新建标签：不弹选择框，直接继承当前会话的 cwd。
 
 侧栏里的项目分组按各会话的工作目录派生。会话存在运行时的
@@ -129,19 +128,22 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 
 > 早先的浏览器面板、Cloudflare 隧道、自建 WebRTC 信令、JSON-WS 网关都已下线。
 > 手机 App 在仓库的 `mobile/`（Flutter）。GitHub Releases 每次发版提供签名的 Android
-> 安装包 `Smelt-<版本>-android-arm64.apk`。iOS 用 `make ios`（`scripts/build-ios.sh`）
-> 打 TestFlight 归档。应用商店上架还没做。构建说明在
+> 安装包 `Smelt-<版本>-android-arm64.apk`。发版构建在启动和回到前台时检查更新（至少隔 6 小时），
+> 设置页「更新」也能手动查。查到新版只提示，点了才下载；下完对照同一份 `SHA256SUMS` 校验，
+> 再交给系统安装。生产版只跟正式发布，内测版也跟 `-rc`。开发构建和 iOS 不参与。
+> 自建分发可用 `--dart-define=SMELT_UPDATE_MANIFEST_URL=https://…/update.{channel}.json`。
+> iOS 用 `make ios`（`scripts/build-ios.sh`）打 TestFlight 归档。应用商店上架还没做。构建说明在
 > [`mobile/README.md`](https://github.com/smelt-ai/smelt/blob/main/mobile/README.md)。
 
 ### 开启
 
-设置（`Cmd+,`）→「工作区与远程」→「手机远程」：
+设置（`Cmd+,`）→「远程」→「让其他设备连进来」：
 
-- **开启远程访问**：打开后，配对过的设备可以连这台运行时。
-- **自建 relay**：留空用 n0 的公共 relay。填写域名、IP 或完整 URL 则只用它。
+- **远程访问**：打开后，配对过的设备可以连这台运行时。
+- **自建 relay**：留空用 n0 的公共 relay。填写域名、IP 或完整 URL 则只用它，省略协议时自动补 `https://`。
 - **配对新设备**：生成 `smelt+iroh://<endpoint>/?code=<一次性码>`，10 分钟、用一次。
   配对一台设备，就是把这台机器上你这个用户的 shell 交给它。
-- **已配对设备**：可以撤销，撤销后立刻断开。命令行等价物是 `smeltd devices revoke`。
+- **已配对的设备**：可以撤销，撤销后立刻断开。命令行等价物是 `smeltd devices revoke`。
 
 这台运行时的 iroh 身份在 `~/.smelt/iroh-secret`，重启不变。没有 `remote-token`，
 也没有 `collab.json`。远程开关记在运行时库里，守护重启之后自己恢复，
@@ -187,8 +189,9 @@ smeltd mcp add <id>              # 添加内置 MCP 预设
 ### 一个窗口里的多台机器
 
 桌面可以同时挂上本机和多台远程运行时。侧栏按运行时分块。在另一台机器上执行
-`smeltd pair`，把配对串粘进「手机远程」里的「添加运行时」。Git、文件、历史和额度
-打到会话所在的那一台。标了「只作用于本机运行时」的设置页不改远程机器。
+`smeltd pair`，把配对串粘进「远程」页的「连到其他机器」。Git、文件、历史和额度
+打到会话所在的那一台。连着远程运行时，「Agent」页标题旁会标「只作用于本机运行时」：
+这一页改的是本机 CLI、Hooks 和启动命令，不改远程机器。
 
 ### 远程桌面
 
@@ -220,13 +223,13 @@ smeltd mcp add <id>              # 添加内置 MCP 预设
 - 终端画面配色由手机自己定，不跟电脑下发
 - 断线后读本机缓存：每个运行时最近的会话列表，以及最近几个对话快照（最多 5 段、合计 32MB）
 
-Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归档用 `make ios`。
+Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。发版构建能在应用内更新：下载后对照 `SHA256SUMS` 校验，再交给系统安装。iOS 归档用 `make ios`，不参与这套更新。
 
 ### 闲置挂起
 
-结构化对话闲置 30 分钟后，`smeltd` 停掉那场会话的宿主进程。会话还在列表里。
-下次发消息、改配置或翻历史时先唤醒，并把挂起前的模型、权限模式和推理强度写回去。
-正在跑、等审批、排队、有后台任务，或属于自动化 / 手机建的会话，不会挂起。
+结构化对话闲置 30 分钟后，`smeltd` 停掉这场会话在同进程里的 runtime（agent 子进程），并丢掉内存里已经提交的历史前缀。会话还在列表里。
+下次发消息、改配置、翻历史或跨智能体投递时先唤醒，并把挂起前的模型、权限模式和推理强度写回去。
+正在跑、等审批、排队、有后台任务，或属于自动化 / 插件驱动的会话，不会挂起。手机建的会话同样会挂起。
 
 ### 还没做的
 
@@ -242,14 +245,17 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 
 ## 设置窗口
 
-`Cmd+,` 打开设置。左侧是四类，每类下面是独立的页：
+`Cmd+,` 打开设置，`Cmd+W`（Windows / Linux 是 `Ctrl+W`）关掉。左侧是三组，每组下面是独立的页：
 
-- **通用**：主题与界面、终端（字体和字号）、窗口与背景、键盘快捷键
-- **模型与 Agent**：Agent 运行环境、新建与启动、对话与工作区、通知、Agent Hooks
-- **工作区与远程**：手机远程
-- **系统**：应用更新、后台服务、存储清理
+- **通用**：外观、通知、快捷键、面板插件
+- **Agent 与远程**：Agent、远程
+- **系统**：资源占用、维护、关于
 
-「后台服务」里的「重启守护进程」和「重启以升级」会关掉后台守护进程。没有正在进行的会话时直接重启。有正在进行的会话时会先确认：这一轮回复会被中断，历史记录已保存，重启后可以继续对话。
+外观把主题、字号与字体、窗口与背景放在同一页，页内是「界面」「终端与代码」「窗口」。Agent 页是「本机 Agent」（CLI 和 Hooks）、「新建菜单」、「高级」（对话适配器命令）。远程页是「连到其他机器」和「让其他设备连进来」。维护页是「后台服务」和「旧版本残留」。关于页是版本、「更新」和「帮助与反馈」。
+
+连着远程运行时，「Agent」页标题旁会标「只作用于本机运行时」。没连远程就不标。
+
+「维护」里「后台服务」的「重启」和「重启以升级」会关掉后台守护进程。没有正在进行的会话时直接重启。有正在进行的会话时会先确认：这一轮回复会被中断，历史记录已保存，重启后可以继续对话。
 
 ## 快捷键
 
@@ -269,6 +275,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 | `Cmd+Shift+F` | 切换调试 HUD |
 | `Cmd+Q` | 退出 |
 | `Cmd+,` | 打开设置窗口 |
+| `Cmd+W`（设置窗口） | 关闭设置窗口（Windows / Linux 是 `Ctrl+W`） |
 
 同一格里叠着的终端用鼠标点 Dock 上的标签切换。`Cmd+D` / `Cmd+Shift+D` 仍是左右或上下分屏。
 
@@ -307,7 +314,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。iOS 归
 能。有 ACP 身份的来源可以选择「ACP 继续」或「CLI/TUI 继续」。
 
 **支持 Linux / Windows 吗？**
-支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`，有自动更新）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`）。Windows 这一版不签名，没有自动更新，也没有 arm64 包；交互 shell 是 `cmd.exe`。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
+支持。桌面有 macOS（Apple Silicon，`Smelt.dmg`）和 Windows 10 1803+ 的 x86_64 安装包（`smelt-<版本>-windows-x86_64-setup.exe`），都在应用内自动更新。Windows 这一版不签名，也没有 arm64 包；交互 shell 是 `cmd.exe`。Android 发版构建会在应用里查更新，下载 `Smelt-<版本>-android-arm64.apk`，对照 `SHA256SUMS` 校验后交给系统安装；开发构建和 iOS 不查。Linux 可以无头跑 `smeltd`，再用 macOS、Windows 或手机配对。
 
 **在哪反馈问题？**
 去 [GitHub Issues](https://github.com/smelt-ai/smelt/issues/new/choose) 提，有 Bug 反馈

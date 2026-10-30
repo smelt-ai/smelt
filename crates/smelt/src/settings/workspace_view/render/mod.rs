@@ -166,8 +166,8 @@ fn render_nav(
             } else {
                 SidebarMenu::new().pb_4()
             };
-            SidebarGroup::new(category.title).child(menu.children(
-                category.children.iter().map(|child| {
+            SidebarGroup::new(category.title).child(menu.children(category.children.iter().map(
+                |child| {
                     let entity = entity.clone();
                     let section = child.section.clone();
                     let item = SidebarMenuItem::new(child.title.clone())
@@ -185,8 +185,8 @@ fn render_nav(
                     } else {
                         item
                     }
-                }),
-            ))
+                },
+            )))
         }))
 }
 

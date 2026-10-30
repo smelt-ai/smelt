@@ -14,6 +14,7 @@ import '../data/stores.dart';
 import '../l10n/gen/l10n.dart';
 import '../theme/galley.dart';
 import '../ui/adaptive.dart';
+import '../ui/glass_nav_bar.dart';
 import '../ui/page.dart';
 import '../data/demo/demo_screens.dart';
 import 'agents/agents_page.dart';
@@ -363,20 +364,17 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
 
     return Scaffold(
       body: host,
+      // 内容滚到玻璃胶囊下面；页面底部留白已含胶囊高度，见 GlassNavBar。
+      extendBody: true,
       bottomNavigationBar: split
           ? null
-          : DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border(top: BorderSide(color: c.hairline)),
-              ),
-              child: NavigationBar(
-                selectedIndex: _tab.index,
-                onDestinationSelected: (i) => _selectTab(HomeTab.values[i]),
-                destinations: [
-                  for (final (tab, data, label) in destinations)
-                    NavigationDestination(icon: icon(tab, data), label: label),
-                ],
-              ),
+          : GlassNavBar(
+              selectedIndex: _tab.index,
+              onDestinationSelected: (i) => _selectTab(HomeTab.values[i]),
+              destinations: [
+                for (final (tab, data, label) in destinations)
+                  GlassNavDestination(icon: icon(tab, data), label: label),
+              ],
             ),
     );
   }

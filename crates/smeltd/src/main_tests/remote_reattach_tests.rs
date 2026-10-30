@@ -75,11 +75,11 @@ fn make_live_session(master: std::fs::File, pid: i32, rows: u16, cols: u16) -> A
         ..Default::default()
     }));
     let subscribers = new_event_hub();
-    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
-    let listener = StateListener::with_color_replies(
+    let replies = Arc::new(Mutex::new(VecDeque::new()));
+    let listener = StateListener::with_replies(
         Arc::clone(&state),
         subscribers,
-        Arc::clone(&color_replies),
+        Arc::clone(&replies),
     );
     Arc::new(Session {
         instance,
@@ -94,6 +94,7 @@ fn make_live_session(master: std::fs::File, pid: i32, rows: u16, cols: u16) -> A
             cell_h: 15,
             remote_viewports: 0,
             remote_grace: 0,
+            waiting_for_cell: Vec::new(),
         }),
         input_gate: Mutex::new(()),
         out: Mutex::new(Out {
@@ -101,8 +102,9 @@ fn make_live_session(master: std::fs::File, pid: i32, rows: u16, cols: u16) -> A
             watchers: Vec::new(),
         }),
         output_gate: Mutex::new(()),
-        color_replies,
+        replies,
         term: Mutex::new(new_daemon_term(rows, cols, listener)),
+        graphics: Mutex::default(),
         state,
     })
 }
@@ -172,7 +174,6 @@ fn a_reattach_at_the_same_geometry_never_signals_the_child() {
         "t".to_string(),
         Arc::clone(&sessions),
         new_event_hub(),
-        None,
         slot,
     );
     // 让 sh 起来把 trap 装好。

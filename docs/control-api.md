@@ -142,8 +142,8 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | 组 | 方法 |
 |---|---|
 | 远程与设备 | `remote.config.get` / `remote.config.set` / `remote.status` / `remote.status.wait`（状态和 `known` 不同就回，最多挂 20 秒）；`device.pair_begin` / `device.pair` / `device.list` / `device.revoke` |
-| 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`subagent.transcript` |
-| 工作区与文件 | `workspace.load` / `workspace.save` / `workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
+| 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`（删完进程顺带把它从工作区目录摘掉：终端摘这一格，最后一格或 ACP 会话删整段对话）、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`subagent.transcript` |
+| 工作区与文件 | `workspace.conversation.create` / `update` / `delete`、`workspace.project.open` / `close`、`workspace.rename`（改名的唯一入口，名字写在哪由运行时定，在跑的对话同步给 agent）、`workspace.directory`（只读整份目录；目录只经前面几条单条改动写，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
 | 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
 | Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`；`quota.get` / `quota.refresh` |
@@ -178,6 +178,7 @@ CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令
    旧桌面连新运行时的 Git 面板需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
    的文档形状，同时删掉跨 Agent 消息的 `agent.list` / `agent.send`，两边最低版本都抬到 2。
    v2 → v3：删掉 DeepSeek Harness 之后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置去掉 `native_dsh_profiles`。旧运行时缺这个字段会拒收修改，所以最低版本抬到 3。同一版 `system.describe` 的 daemon 信息增加 `smelt_home`。
+   删方法不升版本：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，这几条是必需方法，旧运行时没有就判为需要升级运行时。同月删掉桌面发布的侧栏菜单（`workspace_menu` 这条守护命令和 `workspace_menu.changed` 话题），手机和守护都改读工作区目录。订阅里带着运行时不认识的话题会被整条拒掉，所以事件总线协议升到 v3（`EVENT_BUS_PROTOCOL_VERSION`），新旧两边在订阅握手时就拿到版本不兼容。之后又删掉远程会话目录：守护命令 `remote_sessions`、`remote_rename_resume`、`acp_create`（后两条早已没人发）和 `remote_sessions.changed` 话题都下线，手机等新建的对话由运行时直接写进工作区目录，事件总线协议升到 v4。命令行这类不订推送的客户端用新增的 `workspace.directory` 读整份目录。再之后会话状态加了 `custom_title`（终端当前那段对话的名字，守护按身份查好推来，取代桌面轮询的 `history.titles`，后者删掉），会话状态严格解码，事件总线协议升到 v5。
 2. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
    条件、冲突、忙碌和临时不可用分别返回 `invalid_params`、`permission_denied`、
    `not_found`、`failed_precondition`、`conflict`、`busy`、

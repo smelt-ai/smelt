@@ -222,10 +222,14 @@ pub(super) fn handle_agent_event_op<C: ClientSocket>(
         sessions
             .with_live(id, |sess| {
                 let mut st = sess.state.lock().unwrap();
-                apply_agent_event(&mut st, &event).then(|| st.clone())
+                let conversation_before = st.conversation_id.clone();
+                apply_agent_event(&mut st, &event)
+                    .then(|| (st.clone(), st.conversation_id != conversation_before))
             })
             .flatten()
     });
+    let switched = snapshot.as_ref().is_some_and(|(_, switched)| *switched);
+    let snapshot = snapshot.map(|(snapshot, _)| snapshot);
     let accepted = snapshot.is_some();
     // ACK 表示 reducer 已提交。hook helper 收到后才退出，使 provider 的下一
     // 条同步 hook 不会越过本条；广播在 ACK 后进行，慢订阅者不阻塞事件顺序。
@@ -236,5 +240,8 @@ pub(super) fn handle_agent_event_op<C: ClientSocket>(
     );
     if let Some(snapshot) = snapshot {
         broadcast_state(event_hub, &snapshot);
+    }
+    if switched {
+        crate::terminal_names::refresh(sessions, id, event_hub);
     }
 }

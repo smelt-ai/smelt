@@ -28,6 +28,7 @@ fn recovered_state(id: &str) -> SessionState {
         launch: Some("claude".to_string()),
         provider: Some("claude".to_string()),
         conversation_id: Some("conv-1".to_string()),
+        custom_title: None,
         cli_exited: false,
         agent_token: "should-not-persist".to_string(),
         title: Some("崩溃前的会话".to_string()),
@@ -47,6 +48,7 @@ fn recovered_state(id: &str) -> SessionState {
             agent_id: None,
             tool_name: None,
         }),
+        program_status: false,
         runtime: true,
     }
 }
@@ -90,8 +92,7 @@ fn list_includes_recovered_sessions_as_disconnected() {
             ServerShared {
                 sessions: new_sessions(),
                 acp_sessions: new_test_acp_sessions(),
-                remote_sessions: new_test_remote_sessions(),
-                workspace_menu: new_test_workspace_menu(),
+                workspace_directory: new_test_workspace_directory(),
                 automations: new_test_automation_store(),
                 exe_mtime: 0,
                 daemon_fingerprint: None,
@@ -121,12 +122,9 @@ fn subscribe_snapshot_includes_recovered_sessions() {
 
         let sessions = new_sessions();
         let acp_sessions = new_test_acp_sessions();
-        let remote_sessions = new_test_remote_sessions();
         let snapshot = collect_subscription_snapshot(
             &sessions,
             &acp_sessions,
-            &remote_sessions,
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         assert_eq!(snapshot.sessions.len(), 1);
@@ -144,7 +142,6 @@ fn kill_recovered_session_removes_identity() {
         let sessions = new_sessions();
         let acp_sessions = new_test_acp_sessions();
         let subscribers = new_event_hub();
-        let remote_sessions = new_test_remote_sessions();
 
         let (server, mut client) = UnixStream::pair().unwrap();
         writeln!(
@@ -158,8 +155,7 @@ fn kill_recovered_session_removes_identity() {
             ServerShared {
                 sessions: Arc::clone(&sessions),
                 acp_sessions: Arc::clone(&acp_sessions),
-                remote_sessions: Arc::clone(&remote_sessions),
-                workspace_menu: new_test_workspace_menu(),
+                workspace_directory: new_test_workspace_directory(),
                 automations: new_test_automation_store(),
                 exe_mtime: 0,
                 daemon_fingerprint: None,
@@ -179,8 +175,6 @@ fn kill_recovered_session_removes_identity() {
         let snapshot = collect_subscription_snapshot(
             &sessions,
             &acp_sessions,
-            &remote_sessions,
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         assert!(snapshot.sessions.is_empty());
@@ -194,13 +188,11 @@ fn failed_open_keeps_recovered_identity() {
 
         let sessions = new_sessions();
         let subscribers = new_event_hub();
-        let remote_sessions = new_test_remote_sessions();
 
         let (server, client) = UnixStream::pair().unwrap();
         let reader = BufReader::new(server.try_clone().unwrap());
         let sessions_b = Arc::clone(&sessions);
         let subscribers_b = Arc::clone(&subscribers);
-        let remote_b = Arc::clone(&remote_sessions);
         let h = thread::spawn(move || {
             handle_open(
                 server,
@@ -215,7 +207,6 @@ fn failed_open_keeps_recovered_identity() {
                 sessions_b,
                 new_test_acp_sessions(),
                 subscribers_b,
-                remote_b,
             );
         });
 
@@ -256,8 +247,6 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
         let snapshot = collect_subscription_snapshot(
             &sessions,
             &acp_sessions,
-            &new_test_remote_sessions(),
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         let same_id = snapshot
@@ -281,13 +270,11 @@ fn acp_kill_removes_disconnected_identity() {
 
         let acp_sessions = new_test_acp_sessions();
         let subscribers = new_event_hub();
-        let remote_sessions = new_test_remote_sessions();
         let (server, client) = UnixStream::pair().unwrap();
         handle_acp_kill(
             server,
             &serde_json::json!({"id": "acp-1"}),
             &acp_sessions,
-            &remote_sessions,
             &subscribers,
         );
         let mut resp = String::new();
@@ -302,8 +289,6 @@ fn acp_kill_removes_disconnected_identity() {
         let snapshot = collect_subscription_snapshot(
             &new_sessions(),
             &acp_sessions,
-            &remote_sessions,
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         assert!(snapshot.sessions.is_empty());

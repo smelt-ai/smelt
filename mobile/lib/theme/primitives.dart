@@ -82,6 +82,12 @@ abstract final class Primitives {
     Color(0xFFC08D6E),
   ];
 
+  // 底部导航玻璃胶囊：搁板色 85% 不透明，下面滚过最深 / 最亮的内容时 inkMuted 仍过 4.5。
+  static const glassLight = Color(0xD9FFFFFF);
+  static const glassDark = Color(0xD91B1E22);
+  static const glassEdgeLight = Color(0xCCFFFFFF);
+  static const glassEdgeDark = Color(0x1FFFFFFF);
+
   // 阴影色（只用于真浮层与单据）
   static const shadow = Color(0x1F000000);
   static const shadowDeep = Color(0x52000000);

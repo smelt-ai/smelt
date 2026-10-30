@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use agent_client_protocol::schema::v1::{Plan, SessionId, StopReason, ToolCall, ToolCallUpdate};
 
-use super::{AcpEndKind, AcpSessionState, AcpTurnOutcome, LiveElicitation, LivePermission};
+use super::{
+    AcpEndKind, AcpNoticeKind, AcpSessionState, AcpTurnOutcome, LiveElicitation, LivePermission,
+};
 use crate::acp_chat::AcpEntry;
 use crate::acp_conn::{
     ConversationEvent, ConversationRestoreFailure, ElicitField, ElicitationResponder, PromptImage,
@@ -168,20 +170,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         }
         ConversationEvent::Compaction {
             running,
-            detail,
             used,
             size,
-        } => {
-            state.compacting = running;
-            if !detail.is_empty() {
-                state.status_line = Some(detail);
-            }
-            if let (Some(used), Some(size)) = (used, size)
-                && size > 0
-            {
-                state.usage = Some((used, size));
-            }
-        }
+        } => super::apply_compaction(state, running, used, size),
         ConversationEvent::PromptQueue {
             steering,
             follow_up,
@@ -208,8 +199,11 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
                 state.composer_restore_images = images.into_iter().flatten().collect();
             }
         }
-        ConversationEvent::Status(msg) => state.status_line = Some(msg),
-        ConversationEvent::Notice(msg) => super::raise_notice(state, msg),
+        ConversationEvent::StartupProgress(msg) => state.status_line = Some(msg),
+        ConversationEvent::Notice(msg) => super::raise_notice(state, AcpNoticeKind::Info, msg),
+        ConversationEvent::ConfigRejected(msg) => {
+            super::raise_notice(state, AcpNoticeKind::ConfigRejected, msg)
+        }
         ConversationEvent::ProviderRetry(retry) => state.provider_retry = retry,
         ConversationEvent::SessionTitle(title) => state.protocol_title = title,
         ConversationEvent::HistoryReplayStarted => {
@@ -438,6 +432,7 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
             | ConversationEvent::Compaction { .. }
             | ConversationEvent::ProviderRetry(_)
             | ConversationEvent::Notice(_)
+            | ConversationEvent::ConfigRejected(_)
             | ConversationEvent::PromptQueue { .. }
             | ConversationEvent::ComposerRestore { .. }
     )
@@ -448,8 +443,9 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
         ev,
         ConversationEvent::UserChunk(_)
             | ConversationEvent::UserImage(_)
-            | ConversationEvent::Status(_)
+            | ConversationEvent::StartupProgress(_)
             | ConversationEvent::Notice(_)
+            | ConversationEvent::ConfigRejected(_)
             | ConversationEvent::AvailableCommands(_)
             | ConversationEvent::Usage { .. }
             | ConversationEvent::RuntimeDebug(_)

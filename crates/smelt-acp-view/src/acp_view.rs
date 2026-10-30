@@ -74,6 +74,52 @@ mod trajectory;
 
 const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
 const AUTO_RECONNECT_ATTEMPTS: u32 = 6;
+/// 连上后撑过这么久再断，才算真恢复过、自动重连的预算回满。连上就被断（旧 smeltd 上
+/// 两台桌面互踢、对端拿到快照就崩）每次都能拿到一份可用快照，按快照回满就永远用不完。
+const RECONNECT_STABLE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 断连后自动重连的预算。只在断开那一刻结算：这条连接撑够了 [`RECONNECT_STABLE_AFTER`]
+/// 才回满，否则接着扣，退避也按已用次数接着翻倍。
+struct ReconnectBudget {
+    left: u32,
+    /// 当前连接第一次拿到可用相位的时刻；断开时清掉。
+    up_since: Option<std::time::Instant>,
+}
+
+impl ReconnectBudget {
+    fn new() -> Self {
+        Self {
+            left: AUTO_RECONNECT_ATTEMPTS,
+            up_since: None,
+        }
+    }
+
+    fn connected(&mut self, now: std::time::Instant) {
+        self.up_since.get_or_insert(now);
+    }
+
+    fn disconnected(&mut self, now: std::time::Instant) {
+        if let Some(since) = self.up_since.take()
+            && now.saturating_duration_since(since) >= RECONNECT_STABLE_AFTER
+        {
+            self.left = AUTO_RECONNECT_ATTEMPTS;
+        }
+    }
+
+    /// 扣一次；用完返回 false。
+    fn take(&mut self) -> bool {
+        let Some(left) = self.left.checked_sub(1) else {
+            return false;
+        };
+        self.left = left;
+        true
+    }
+
+    /// 自上次真恢复以来已经花掉的次数。
+    fn failures(&self) -> u32 {
+        AUTO_RECONNECT_ATTEMPTS - self.left
+    }
+}
 
 /// 可编辑重发只作用于活动记录里最近一条真实用户消息；agent 回显的中断标记不是输入。
 fn latest_user_message_index(entries: &[AcpEntry]) -> Option<usize> {
@@ -678,9 +724,15 @@ fn reconcile_pending_config_values(
         .retain(|(id, value)| confirmed_config_value(id, configs, model) != Some(value.as_str()));
 }
 
-fn config_update_failure_is_new(prev_status: Option<&str>, next_status: Option<&str>) -> bool {
-    const PREFIX: &str = "更新会话配置失败";
-    next_status.is_some_and(|status| status.starts_with(PREFIX)) && prev_status != next_status
+/// 快照带来了一条新的「配置没生效」提示。按提示 id 认新旧，同一句失败连来两次也算两次。
+fn config_rejection_is_new(
+    previous: Option<&smelt_model::acp_session::AcpNoticeView>,
+    next: Option<&smelt_model::acp_session::AcpNoticeView>,
+) -> bool {
+    next.is_some_and(|notice| {
+        notice.kind == smelt_model::acp_session::AcpNoticeKind::ConfigRejected
+            && previous.is_none_or(|previous| previous.id != notice.id)
+    })
 }
 
 fn config_selection_is_pending(pending: &[(String, String)], config_id: &str) -> bool {
@@ -1497,10 +1549,9 @@ pub struct AcpView {
     snapshot_stream_generation: u64,
     /// 当前 socket 已应用的最高 daemon 快照版本，0 表示尚未收到带版本的快照。
     last_snapshot_revision: u64,
-    /// 守护侧断连（smeltd 升级/重启）后自动重连的剩余预算。配合指数退避重试
-    /// （main.rs 里延迟 500ms 起、翻倍到 8s 上限），每次自动重连递减，收到活跃
-    /// 快照（连接成功）回满；耗尽则停止自动重连，等用户手动。
-    auto_reconnect_left: u32,
+    /// 守护侧断连（smeltd 升级/重启）后自动重连的预算。`workspace_sessions.rs` 的重连
+    /// 循环按它的已用次数退避；耗尽则停止自动重连，等用户手动。
+    reconnect_budget: ReconnectBudget,
     /// 重启用的启动规格（placeholder / restart 共用）。
     launch: ConversationLaunchSpec,
     /// 只在本进程内保留的启动环境变量；强制重启时也需要复用，但绝不持久化。
@@ -2026,7 +2077,7 @@ impl AcpView {
             handle: None,
             snapshot_stream_generation: 0,
             last_snapshot_revision: 0,
-            auto_reconnect_left: AUTO_RECONNECT_ATTEMPTS,
+            reconnect_budget: ReconnectBudget::new(),
             launch,
             ephemeral_env: Default::default(),
             refresh_launch_from_settings,
@@ -2276,12 +2327,16 @@ impl AcpView {
         if !matches!(self.phase, DaemonPhase::Dead) || self.handle.is_some() {
             return false;
         }
-        if self.auto_reconnect_left == 0 {
+        if !self.reconnect_budget.take() {
             return false;
         }
-        self.auto_reconnect_left -= 1;
         self.restart(window, cx);
         true
+    }
+
+    /// 自上次真恢复以来自动重连失败了几次，重连循环据此退避。
+    pub fn auto_reconnect_failures(&self) -> u32 {
+        self.reconnect_budget.failures()
     }
 
     fn visible_notice(&self) -> Option<&smelt_model::acp_session::AcpNoticeView> {
@@ -2796,6 +2851,8 @@ impl AcpView {
         self.snapshot_stream_generation = self.snapshot_stream_generation.wrapping_add(1);
         let stream_generation = self.snapshot_stream_generation;
         self.last_snapshot_revision = 0;
+        // 换连接就把旧连接结掉，新连接从自己第一份可用快照算起。
+        self.reconnect_budget.disconnected(std::time::Instant::now());
         self.handle = Some(handle);
         self.history_backfill_started = false;
         if !self.is_fresh_conversation_start() {
@@ -2993,28 +3050,6 @@ impl AcpView {
         if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
             self.session_title = Some(title);
         }
-    }
-
-    /// 用户在侧栏改名后同步给 agent。本地标题立即生效，不等 agent 回执；
-    /// agent 不支持改名时也只是没有回流，侧栏名字照样是新的。
-    pub fn rename_session(&mut self, title: Option<String>) {
-        let title = title
-            .map(|title| title.trim().to_string())
-            .filter(|title| !title.is_empty());
-        self.session_title = title.clone();
-        let (Some(handle), Some(title)) = (&self.handle, title) else {
-            return;
-        };
-        let _ = handle
-            .action_tx
-            .try_send(AcpUserAction::SetSessionTitle { title });
-    }
-
-    /// 存档快照：把当前生效的标题固化下来，重启后侧栏名字保持不变。
-    pub fn session_title_for_save(&self) -> Option<String> {
-        self.auto_title()
-            .map(|title| title.trim().to_string())
-            .filter(|title| !title.is_empty())
     }
 
     /// daemon 不存在时用 workspace 的最后镜像创建会话；热 attach 后首份快照会以
@@ -4290,13 +4325,9 @@ impl AcpView {
             {
                 prepare_surface_inputs = true;
             }
-            let previous_status_line = self.status_line.clone();
             self.status_line = snap.status_line;
             self.history_error = snap.history_error;
-            if config_update_failure_is_new(
-                previous_status_line.as_deref(),
-                self.status_line.as_deref(),
-            ) {
+            if config_rejection_is_new(self.notice.as_ref(), snap.notice.as_ref()) {
                 self.pending_config_values.clear();
             }
             if let Some(title) =
@@ -4376,7 +4407,7 @@ impl AcpView {
             self.completed_delivery_id = snap.completed_delivery_id;
         }
         if is_recovered_phase(&self.phase) {
-            self.auto_reconnect_left = AUTO_RECONNECT_ATTEMPTS;
+            self.reconnect_budget.connected(std::time::Instant::now());
         }
         let has_runtime_session_id = snap.acp_session_id.is_some();
         let runtime_session_id = snap.acp_session_id.map(SessionId::new);
@@ -4457,6 +4488,7 @@ impl AcpView {
 
         if matches!(self.phase, DaemonPhase::Dead) {
             self.handle = None;
+            self.reconnect_budget.disconnected(std::time::Instant::now());
         }
 
         if completed {

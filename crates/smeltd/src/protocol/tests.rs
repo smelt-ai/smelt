@@ -8,7 +8,7 @@ use super::*;
 use smelt_event_protocol::FirstPartyClientKind;
 use smelt_event_protocol::{
     CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
-    CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
+    CORE_CAPABILITY_SESSION_READ,
     CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
     EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, PluginId, ProtocolRange,
     SubscribeErrorCode, SubscribeMessage, SubscribeRequest, SubscriptionDeclaration,
@@ -253,7 +253,6 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
         desktop.capabilities,
         BTreeSet::from([
             Capability::new(CORE_CAPABILITY_SESSION_READ).unwrap(),
-            Capability::new(CORE_CAPABILITY_REMOTE_SESSIONS_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_WORKSPACE_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap(),

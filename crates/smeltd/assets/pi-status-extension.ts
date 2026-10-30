@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const NOTIFY_BIN = process.env.SMELT_NOTIFY_BIN;
-const ENABLED = Boolean(
-	NOTIFY_BIN && process.env.SMELT_SESSION_ID && process.env.SMELT_SOCK,
-);
+// 记忆扩展会在工厂函数里把这两个变量从 process.env 删掉。这里在模块加载时留下副本，
+// 通知子进程仍要靠它们找到会话。
+const SESSION_ID = process.env.SMELT_SESSION_ID;
+const SOCK = process.env.SMELT_SOCK;
+const ENABLED = Boolean(NOTIFY_BIN && SESSION_ID && SOCK);
 const REPORT_TIMEOUT_MS = 2500;
 
 type HookPayload = Record<string, unknown>;
@@ -36,6 +38,8 @@ function invokeNotify(eventName: string, payload: HookPayload): Promise<void> {
 					...process.env,
 					SMELT_HOOK_PROVIDER: "pi",
 					SMELT_HOOK_EVENT: eventName,
+					...(SESSION_ID ? { SMELT_SESSION_ID: SESSION_ID } : {}),
+					...(SOCK ? { SMELT_SOCK: SOCK } : {}),
 				},
 				stdio: ["pipe", "ignore", "ignore"],
 			});

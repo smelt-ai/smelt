@@ -340,8 +340,8 @@ jobs:
         shell: bash
         run: bash scripts/build-smelt-pi.sh --out target/smelt-pi
 
-  # 唯一的必需检查（分支保护里只要求它）。被跳过的 job 算通过；任何一个失败或被取消
-  # 就失败。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
+  # 唯一的必需检查（分支保护里只要求它）。只有成功和被跳过算通过，其余一律失败（失败、
+  # 取消，以及排不到机器被放弃的 abandoned）。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
   ci-ok:
     if: always()
     needs: [changes, cargo-deny, rust, mobile, android-build, ios-check, windows, pi-agent, pi-agent-windows]
@@ -352,7 +352,7 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          if echo "$RESULTS" | jq -e 'to_entries | any(.value.result == "failure" or .value.result == "cancelled")' >/dev/null; then
-            echo "✗ 有 job 失败或被取消"
+          if echo "$RESULTS" | jq -e 'to_entries | any(.value.result != "success" and .value.result != "skipped")' >/dev/null; then
+            echo "✗ 有 job 没有成功"
             exit 1
           fi

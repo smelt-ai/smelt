@@ -30,30 +30,26 @@ pub struct HistoryTitleRecord {
 
 /// 运行时持有的工作区目录：打开的项目和会话。侧栏宽度、当前页、折叠/固定这些
 /// 界面状态归客户端，不在这里。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkspaceSnapshot {
     /// 项目根目录，按侧栏顺序。
     pub projects: Vec<String>,
     pub sessions: Vec<WorkspaceSessionRecord>,
 }
 
-/// 提交工作区目录的一方：客户端每次运行生成的 id，加上它自己每次提交递增的序号。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceCatalogWriter {
-    pub id: String,
-    pub seq: u64,
+/// 工作区目录现在是哪一份、改到第几次。版本号只在同一个 `epoch` 里能比：库换过（删了
+/// 重建、换了一份）`epoch` 就不同，版本号从头数。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceCatalogVersion {
+    pub epoch: String,
+    pub revision: u64,
 }
 
-/// 一次工作区目录提交的结果。
+/// 一次单条改动之后目录的版本。`changed` 为 false 时什么都没写，版本也没动。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkspaceCatalogCommit {
-    Committed {
-        revision: u64,
-    },
-    /// 基准版本之后有别人提交过，什么都没写。
-    Conflict {
-        current: u64,
-    },
+pub struct WorkspaceDirectoryCommit {
+    pub revision: u64,
+    pub changed: bool,
 }
 
 /// 一段对话：侧栏里的一条。里面有哪些终端、是不是一段 ACP 对话归运行时；终端怎么分屏、
@@ -159,36 +155,6 @@ pub struct AgentProfileRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteSessionCatalogSnapshot {
-    pub acp: Vec<RemoteAcpSessionRecord>,
-    pub terminal: Vec<RemoteTerminalSessionRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteAcpSessionRecord {
-    pub id: String,
-    pub cwd: String,
-    pub title: String,
-    pub agent_option_id: String,
-    pub agent: String,
-    pub launch_command: String,
-    pub launch_env_json: Vec<u8>,
-    pub resume_id: Option<String>,
-    pub created_at: i64,
-    pub lifecycle: String,
-    pub hidden: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteTerminalSessionRecord {
-    pub id: String,
-    pub cwd: String,
-    pub title: String,
-    pub created_at: i64,
-    pub lifecycle: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishedSessionSnapshot {
     pub version: u32,
     pub sessions: Vec<PublishedSessionRecord>,
@@ -273,40 +239,6 @@ pub struct QuotaCacheWindowRecord {
     pub reset_after_seconds: Option<i64>,
 }
 
-/// 守护进程发布给移动端的侧栏菜单。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishedWorkspaceMenuSnapshot {
-    pub version: u32,
-    pub revision: u64,
-    pub source_id: String,
-    pub source_revision: u64,
-    pub projects: Vec<WorkspaceMenuProjectRecord>,
-    pub sessions: Vec<WorkspaceMenuSessionRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceMenuProjectRecord {
-    pub root: String,
-    pub title: String,
-    pub order: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceMenuSessionRecord {
-    pub id: String,
-    /// `terminal` 或 `acp`。
-    pub kind: String,
-    pub title: String,
-    pub custom_title: bool,
-    pub cwd: Option<String>,
-    pub project_root: Option<String>,
-    pub project_title: Option<String>,
-    pub project_order: u32,
-    pub session_order: u32,
-    pub leaf_order: u32,
-    pub agent: Option<String>,
-}
-
 /// 记忆召回的配置。空字符串表示没设。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemorySettingsRecord {
@@ -318,7 +250,8 @@ pub struct MemorySettingsRecord {
 }
 
 /// 记忆的来源可信度。`pending`：读过外部内容的那一轮或无人值守的运行写的，不注入、不召回，
-/// 用户采纳后变成 `trusted`。没有记录的记忆文件（用户手写、旧数据）按 `trusted` 处理。
+/// 用户采纳后变成 `trusted`。**没有来源记录的文件不再默认可信**（防 bash 直写绕过）；
+/// 升级时一次性把存量文件记成 trusted，见 `docs/agent-memory.md` 5.4。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryTrust {
     Trusted,
@@ -332,6 +265,24 @@ impl MemoryTrust {
             Self::Pending => "pending",
         }
     }
+}
+
+/// 一条已记为可信的记忆：注入前还要用文件 mtime 对照 `written_at_ms`，防止来源记下之后被直写覆盖。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTrustedRecord {
+    pub file_name: String,
+    pub written_at_ms: i64,
+    /// 写入这条来源的会话。升级回填是 `legacy-backfill-v1`，mtime 容差为 0。
+    pub session_id: String,
+}
+
+/// 一条记忆来源的完整行。覆盖写入前用它判断库里是否已经有记录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProvenanceRecord {
+    pub trust: MemoryTrust,
+    pub reason: String,
+    pub session_id: String,
+    pub written_at_ms: i64,
 }
 
 /// 一台已配对的远程设备。
@@ -355,6 +306,8 @@ pub struct MemoryUsageRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryMetaSnapshot {
     pub usage: Vec<MemoryUsageRecord>,
-    /// 待确认的文件名和原因。
+    /// 显式记为待确认的文件名和原因。
     pub pending: Vec<(String, String)>,
+    /// 显式记为可信的文件；注入方还要排除无记录的、以及 mtime 晚于 `written_at_ms` 的。
+    pub trusted: Vec<MemoryTrustedRecord>,
 }
