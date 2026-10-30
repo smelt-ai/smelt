@@ -23,7 +23,7 @@ similar = "3"
 base64 = "0.23"
 # 远程桌面的本机转发口：网页视图里的 noVNC 说 WebSocket；noVNC 和宿主页总是编进二进制
 # （debug 也一样，手机上没有源码目录可读）。
-tungstenite = "0.29"
+tungstenite = "0.30"
 rust-embed = { version = "8", features = ["debug-embed"] }
 
 # Unix 上读不阻塞在内核的 recv 里，用 poll + MSG_DONTWAIT，见 stream/unix.rs。
