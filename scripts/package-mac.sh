@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 把 workspace GUI 打包成可分发的 Smelt.app（Apple Silicon / arm64）。
-# 内层二进制和 .app 都签名：本机用 Smelt Local Signing，发布用 Developer ID。
+# 内层二进制和 .app 都签名：本机用 Smelt Local Signing，发布用 Developer ID（再公证 dmg）。
 #
 # 用法：
 #   ./scripts/package-mac.sh            # 用已有 release 产物组装，并打 dmg
@@ -14,6 +14,11 @@
 # 自己分发安装包时可设的环境变量：
 #   SMELT_UPDATE_URL            这个包本身的下载地址，写进包里，装好后不会把自己当成新版本
 #   SMELT_BUILD_NUMBER          Info.plist 的 CFBundleVersion（纯数字、只增不减），不设取打包时的 UTC 时间
+#   SMELT_CODESIGN_IDENTITY     签名身份（证书名或 SHA-1 指纹），不设用本机「Smelt Local Signing」；
+#                               发布给 "Developer ID Application"
+#   SMELT_ASC_KEY_PATH / SMELT_ASC_KEY_ID / SMELT_ASC_ISSUER_ID
+#                               App Store Connect API 密钥（和 make ios 同一把），Developer ID 打 dmg 时
+#                               用它提交公证，缺了直接失败
 #   以下几项在编译时生效，要配合 --build（或自己带着它们 cargo build --release）：
 #   SMELT_BUILD_VERSION         版本号；--build 时不设就由 scripts/version.sh 按 git tag 算
 #   SMELT_UPDATE_MANIFEST_URL   更新清单地址，`{channel}` 换成 dev / prod；不设则查 GitHub Releases
@@ -316,9 +321,15 @@ if [[ -z "$IDENTITY" || "$IDENTITY" == "-" ]]; then
   echo "  发布：设置 SMELT_CODESIGN_IDENTITY 为 Developer ID Application: … (TEAMID)" >&2
   exit 1
 fi
+IDENTITY_NAME="$IDENTITY"
 IDENTITY_FOUND=false
-if security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
+if identity_line="$(security find-identity -v -p codesigning | grep -F "$IDENTITY")"; then
   IDENTITY_FOUND=true
+  # 钥匙串里有几张同名证书（比如新旧两张 Developer ID）时按名字签会报 ambiguous，
+  # 这时用 SHA-1 指纹指定。下面按证书名判断走哪条签名路，所以把指纹换回证书名。
+  if [[ "$IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+    IDENTITY_NAME="$(sed -n 's/.*"\(.*\)".*/\1/p' <<<"$identity_line" | head -n 1)"
+  fi
 elif [[ "$IDENTITY" == "Smelt Local Signing" ]] \
   && security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
   # 自签名没有系统信任链，find-identity 可能不列出，但 codesign 仍能用导入的私钥。
@@ -338,6 +349,17 @@ if [[ "$IDENTITY_FOUND" != true ]]; then
   echo "  一次性修复：./scripts/setup-codesign-identity.sh" >&2
   exit 1
 fi
+# Developer ID 的 dmg 是对外分发件，必须公证，否则下载后 Gatekeeper 照样拦。
+# 凭据在签名前就查，别等编完、签完才发现缺。--no-dmg（make install）不出分发件，不公证。
+if [[ "$IDENTITY_NAME" == "Developer ID Application"* && "$SKIP_DMG" -eq 0 ]]; then
+  for var in SMELT_ASC_KEY_PATH SMELT_ASC_KEY_ID SMELT_ASC_ISSUER_ID; do
+    if [[ -z "${!var:-}" ]]; then
+      echo "✗ Developer ID 打 dmg 要公证，缺 ${var}（App Store Connect API 密钥，见 docs/release.md 的「macOS 签名」）。" >&2
+      exit 1
+    fi
+  done
+  [[ -f "$SMELT_ASC_KEY_PATH" ]] || { echo "✗ 找不到 SMELT_ASC_KEY_PATH：$SMELT_ASC_KEY_PATH" >&2; exit 1; }
+fi
 
 ENTITLEMENTS="$ROOT/scripts/entitlements.plist"
 JIT_ENTITLEMENTS="$ROOT/scripts/jit-entitlements.plist"
@@ -352,13 +374,13 @@ fi
 sign_one() {
   local entitlements="$1"
   local path="$2"
-  if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
+  if [[ "$IDENTITY_NAME" == "Developer ID Application"* ]]; then
     codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$IDENTITY" "$path"
   else
     codesign --force --entitlements "$entitlements" --sign "$IDENTITY" "$path"
   fi
 }
-if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
+if [[ "$IDENTITY_NAME" == "Developer ID Application"* ]]; then
   echo "▶ Developer ID 签名（Hardened Runtime + 时间戳）：${IDENTITY} …"
 else
   echo "▶ 自签名（身份：${IDENTITY}，仅稳定权限，过不了公证）…"
@@ -483,6 +505,34 @@ for attempt in 1 2 3; do
 done
 rm -f "$BG_TIFF"
 [[ "$built" == 1 ]] || { echo "✗ dmg 打包连续 3 次失败" >&2; exit 1; }
+
+# 公证只提交 dmg 一次：Apple 会连里面的 .app 和每个内层二进制一起登记，所以 dmg
+# 和 dist/Smelt.app 都能钉上票据。钉了票据，离线首次打开也能过 Gatekeeper；
+# 应用内更新的 Smelt.app.zip 是从钉好票据的 dist/Smelt.app 压的。
+if [[ "$IDENTITY_NAME" == "Developer ID Application"* ]]; then
+  DMG="$DIST/$APP_NAME.dmg"
+  echo "▶ 签 dmg …"
+  codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+  echo "▶ 提交公证（通常几分钟）…"
+  notary_auth=(--key "$SMELT_ASC_KEY_PATH" --key-id "$SMELT_ASC_KEY_ID" --issuer "$SMELT_ASC_ISSUER_ID")
+  # 不看退出码：被拒（Invalid）时 notarytool 也可能返回 0，以 JSON 里的 status 为准。
+  notary_result="$(xcrun notarytool submit "$DMG" "${notary_auth[@]}" --wait --output-format json)" || {
+    echo "✗ 提交公证失败：$notary_result" >&2
+    exit 1
+  }
+  notary_status="$(plutil -extract status raw -o - - <<<"$notary_result")"
+  if [[ "$notary_status" != "Accepted" ]]; then
+    notary_id="$(plutil -extract id raw -o - - <<<"$notary_result" || true)"
+    echo "✗ 公证没通过（${notary_status}）。Apple 给的日志：" >&2
+    [[ -n "$notary_id" ]] && xcrun notarytool log "$notary_id" "${notary_auth[@]}" >&2 || true
+    exit 1
+  fi
+  xcrun stapler staple "$DMG"
+  xcrun stapler staple "$APP"
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+  spctl --assess --type execute --verbose=2 "$APP"
+  echo "  ✓ 公证通过，票据已钉到 dmg 和 .app"
+fi
 
 echo ""
 echo "✅ 完成"

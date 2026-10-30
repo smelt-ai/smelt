@@ -70,20 +70,34 @@ jobs:
           shared-key: mac-release
           save-if: false
 
-      # 导入稳定签名身份（scripts/setup-codesign-identity.sh 本地生成、存进
-      # repo secrets 的自签名证书）：签名的 designated requirement 锚定在证书
-      # 哈希而非二进制内容，用户装上新版本后 TCC（完全磁盘访问权限等）授权不会
-      # 失效。没配置 secrets（比如 fork 出去的仓库）就跳过；package-mac.sh
-      # 找不到证书会失败，不会改用 ad-hoc（-）。
-      - name: Import codesign identity
+      # 导入 Developer ID Application 证书和公证用的 App Store Connect API 密钥（和 ios job
+      # 同一把）。签名的 designated requirement 锚定 Apple 证书链和 Team ID，用户装上新版本后
+      # TCC（完全磁盘访问权限等）授权不会失效；dmg 公证后下载打开不被 Gatekeeper 拦。
+      # 缺任何一个直接失败，不退回自签名或 ad-hoc。
+      - name: Import signing credentials
         env:
-          CODESIGN_P12_BASE64: ${{ secrets.CODESIGN_P12_BASE64 }}
-          CODESIGN_P12_PASSWORD: ${{ secrets.CODESIGN_P12_PASSWORD }}
+          DEVID_P12_BASE64: ${{ secrets.SMELT_MAC_DEVID_P12_BASE64 }}
+          DEVID_P12_PASSWORD: ${{ secrets.SMELT_MAC_DEVID_P12_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.SMELT_ASC_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.SMELT_ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.SMELT_ASC_API_ISSUER_ID }}
         run: |
-          if [[ -z "$CODESIGN_P12_BASE64" ]]; then
-            echo "未配置 CODESIGN_P12_BASE64，打包时会因缺少签名身份失败"
-            exit 0
-          fi
+          for var in DEVID_P12_BASE64 DEVID_P12_PASSWORD ASC_KEY_P8 ASC_KEY_ID ASC_ISSUER_ID; do
+            if [[ -z "${!var}" ]]; then
+              echo "✗ 没配置 macOS 签名的 secret（${var}），见 docs/release.md 的「macOS 签名」。"
+              exit 1
+            fi
+          done
+
+          umask 077
+          key_path="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          printf '%s\n' "$ASC_KEY_P8" > "$key_path"
+          {
+            echo "SMELT_ASC_KEY_PATH=$key_path"
+            echo "SMELT_ASC_KEY_ID=$ASC_KEY_ID"
+            echo "SMELT_ASC_ISSUER_ID=$ASC_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
           KEYCHAIN="$RUNNER_TEMP/codesign.keychain-db"
           KEYCHAIN_PW="$(uuidgen)"
           echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
@@ -92,15 +106,21 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
 
-          echo "$CODESIGN_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/codesign.p12"
-          security import "$RUNNER_TEMP/codesign.p12" -k "$KEYCHAIN" -P "$CODESIGN_P12_PASSWORD" \
+          echo "$DEVID_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/codesign.p12"
+          security import "$RUNNER_TEMP/codesign.p12" -k "$KEYCHAIN" -P "$DEVID_P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security
           rm -f "$RUNNER_TEMP/codesign.p12"
+          # 从钥匙串导出的 p12 一般不带中间证书，runner 上缺了 codesign 拼不出证书链。
+          # 新旧两个 Developer ID 中间证书都导：换证书时不管新证书挂在哪个下面，这里都不用改。
+          for ca in DeveloperIDG2CA DeveloperIDCA; do
+            curl -fsSL -o "$RUNNER_TEMP/$ca.cer" "https://www.apple.com/certificateauthority/$ca.cer"
+            security import "$RUNNER_TEMP/$ca.cer" -k "$KEYCHAIN"
+          done
 
           # codesign 非交互访问私钥必须显式放行分区列表，否则会卡在钥匙串授权弹窗
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN"
 
-          # 加进搜索列表：package-mac.sh 里 codesign/find-certificate 不带
+          # 加进搜索列表：package-mac.sh 里 codesign/find-identity 不带
           # --keychain 参数，得让这个临时钥匙串在默认搜索路径里才能被找到。
           EXISTING="$(security list-keychains -d user | sed 's/[\" ]//g')"
           security list-keychains -d user -s "$KEYCHAIN" $EXISTING
@@ -111,7 +131,8 @@ jobs:
       # 别再当成 CI 的预期行为。工具链由 package-mac.sh 自建 venv 装，无需在此预装。
       - name: Build & package
         env:
-          SMELT_CODESIGN_IDENTITY: "Smelt Local Signing"
+          # 前缀就够：临时钥匙串里只有这一张 Developer ID 证书，codesign 按前缀找到它。
+          SMELT_CODESIGN_IDENTITY: "Developer ID Application"
           SMELT_UPDATE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Smelt.app.zip
         run: make dist-build
 
@@ -129,9 +150,10 @@ jobs:
             || { echo "✗ App 缺少可执行的 smelt-notify"; exit 1; }
           echo "✅ 发布产物校验通过"
 
-      - name: Clean up codesign keychain
+      - name: Clean up signing credentials
         if: always()
         run: |
+          rm -f "${SMELT_ASC_KEY_PATH:-}"
           [[ -n "${KEYCHAIN_PATH:-}" ]] && security delete-keychain "$KEYCHAIN_PATH" || true
 
       # 发布说明的起点要自己算：GitHub 默认往回找上一个正式版，而 v0.6.6–v0.6.14 在改以
@@ -434,7 +456,7 @@ jobs:
             echo "SMELT_ASC_ISSUER_ID=$ASC_ISSUER_ID"
           } >> "$GITHUB_ENV"
 
-          # 钥匙串的做法同上面 build job 的 Import codesign identity。
+          # 钥匙串的做法同上面 build job 的 Import signing credentials。
           KEYCHAIN="$RUNNER_TEMP/ios-signing.keychain-db"
           KEYCHAIN_PW="$(uuidgen)"
           echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
