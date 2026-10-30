@@ -63,6 +63,9 @@ const FAST: Timings = Timings {
         retry_base: Duration::from_millis(20),
         retry_max: Duration::from_millis(80),
     },
+    push: crate::push::Timing {
+        call_timeout: Duration::from_millis(500),
+    },
 };
 
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -93,6 +96,10 @@ struct FakeRuntime {
     subscriptions: Mutex<Vec<RuntimeStream>>,
     /// 各链路登记的连接变化回调。
     watchers: Mutex<Vec<OnLinkChange>>,
+    /// 有没有 `push.*`（旧运行时没有）。
+    push_methods: AtomicBool,
+    /// 收到的 `push.*` 调用：方法名和参数。
+    push_calls: Mutex<Vec<(String, Value)>>,
 }
 
 impl FakeRuntime {
@@ -107,6 +114,8 @@ impl FakeRuntime {
             links: AtomicUsize::new(0),
             subscriptions: Mutex::new(Vec::new()),
             watchers: Mutex::new(Vec::new()),
+            push_methods: AtomicBool::new(true),
+            push_calls: Mutex::new(Vec::new()),
         })
     }
 
@@ -221,6 +230,15 @@ impl FakeRuntime {
                     }),
                 ))
                 .unwrap()
+            }
+            Some(method @ ("push.register" | "push.unregister"))
+                if self.push_methods.load(Ordering::SeqCst) =>
+            {
+                self.push_calls
+                    .lock()
+                    .unwrap()
+                    .push((method.to_string(), request["params"].clone()));
+                serde_json::to_value(ControlResponse::ok(id, json!({}))).unwrap()
             }
             Some("session.agent_bindings") => {
                 serde_json::to_value(ControlResponse::ok(id, json!({"bindings": {}}))).unwrap()
@@ -505,6 +523,8 @@ fn re_pairing_a_reinstalled_runtime_drops_the_old_cache() {
         links: AtomicUsize::new(0),
         subscriptions: Mutex::new(Vec::new()),
         watchers: Mutex::new(Vec::new()),
+        push_methods: AtomicBool::new(true),
+        push_calls: Mutex::new(Vec::new()),
     });
     {
         let mut runtimes = h.transport.runtimes.lock().unwrap();
@@ -931,4 +951,97 @@ fn init_client_is_idempotent_per_directory() {
     // 同一目录换一个进程（新的机队）读出同一身份。
     assert_eq!(Fleet::new(FAST).init_client(dir.clone()).unwrap(), device);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// 推送登记
+// ---------------------------------------------------------------------------
+
+fn push_on() -> Desired {
+    Desired::On(smelt_model::remote_config::PushRegisterParams {
+        handle: "handle-1".to_string(),
+        relay_url: "https://push.example.test".to_string(),
+        approval: true,
+        input: false,
+        failure: true,
+    })
+}
+
+fn push_calls(runtime: &FakeRuntime) -> Vec<String> {
+    runtime
+        .push_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect()
+}
+
+impl Harness {
+    fn push_supported(&self, runtime_id: &str) -> Option<bool> {
+        self.view()
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.record.runtime_id == runtime_id)
+            .and_then(|runtime| runtime.push_supported)
+    }
+}
+
+/// 设之前什么都不发；设了以后连着的立刻登记，没连着的连上时登记；关掉时取消。
+#[test]
+fn push_settings_reach_every_runtime_when_connected() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let b = FakeRuntime::new("rb", "mac-b");
+    b.online.store(false, Ordering::SeqCst);
+    let h = harness(&[(&a, None), (&b, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(push_calls(&a).is_empty(), "Dart 设之前不动登记");
+
+    h.fleet.set_push(push_on());
+    wait_until("ra 登记推送", || push_calls(&a) == ["push.register"]);
+    let params = a.push_calls.lock().unwrap()[0].1.clone();
+    assert_eq!(params["handle"], "handle-1");
+    assert_eq!(params["input"], false);
+    wait_until("ra 支持推送", || h.push_supported("ra") == Some(true));
+    assert!(push_calls(&b).is_empty());
+
+    b.online.store(true, Ordering::SeqCst);
+    h.fleet.verify();
+    h.wait_state("rb", ConnectionState::Connected);
+    wait_until("rb 连上后登记", || push_calls(&b) == ["push.register"]);
+
+    h.fleet.set_push(Desired::Off);
+    wait_until("ra 取消登记", || {
+        push_calls(&a) == ["push.register", "push.unregister"]
+    });
+    wait_until("rb 取消登记", || {
+        push_calls(&b) == ["push.register", "push.unregister"]
+    });
+}
+
+#[test]
+fn old_runtimes_report_push_unsupported() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    a.push_methods.store(false, Ordering::SeqCst);
+    let h = harness(&[(&a, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    assert_eq!(h.push_supported("ra"), None);
+    h.fleet.set_push(push_on());
+    wait_until("ra 不支持推送", || {
+        h.push_supported("ra") == Some(false)
+    });
+}
+
+/// 忘记一台连着的机器前先取消它上面的推送登记。
+#[test]
+fn forgetting_a_connected_runtime_unregisters_push() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[(&a, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    h.fleet.set_push(push_on());
+    wait_until("ra 登记推送", || push_calls(&a) == ["push.register"]);
+
+    h.fleet.forget("ra").unwrap();
+    assert_eq!(push_calls(&a), ["push.register", "push.unregister"]);
 }

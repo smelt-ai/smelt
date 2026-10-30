@@ -175,6 +175,37 @@ Smelt 进程后，smeltd 虽会继续执行自动化，但应用的 UserNotifica
 当前不会在下次冷启动时补发这段历史。若产品要求显式退出 App 后也立即通知，需要独立的
 签名通知 helper 或 daemon outbox，不能让无 app bundle 身份的 managed smeltd 直接冒充 GUI。
 
+### 手机推送
+
+iOS 把 App 挂起后 iroh 连接就断了，等批准、等输入、运行失败经 APNs 推到手机。推送由各台
+smeltd 自己产生，不依赖手机连着，也不依赖桌面 GUI 在线；APNs 的 `.p8` 私钥在推送中继
+（`smelt-push-relay`）上，部署见 [`push-relay-deployment.md`](push-relay-deployment.md)。
+
+- **同源判定**：smeltd 在进程内订阅自己的 `session.state_changed` / `session.removed`，用
+  客户端同一个 `DaemonStateEventClient` 解码，再用同一套 `apply_daemon_baseline` /
+  `apply_daemon_transition` 算边沿（`crates/smeltd/src/push.rs`）。首份快照只建基线；落后时
+  按快照重新对齐，之后照常比较边沿。只推需要用户处理的三种：审批、输入、失败；成功不推。
+- **登记**：手机先找中继用 APNs 令牌换**句柄**（中继用自己的密钥加密过的令牌，中继不存
+  设备表），再经 iroh 调 `push.register` 把句柄、中继地址和要推的类型登记到每台机器。
+  smeltd 按连接的设备身份写 `push_registration` 表（外键挂在 `paired_device` 上，撤销设备
+  时跟着删），不看参数里自称是谁。手机每次启动、每次连上一台机器、改了设置时重新登记；
+  关掉推送、忘记一台连着的机器时调 `push.unregister`。旧运行时没有这两个方法，手机在机器
+  详情里提示升级。
+- **outbox**：提醒先在内存里等 30 秒，期间这件事已经处理掉（行动项解决、会话删除）就取消，
+  同一会话的新提醒替换旧的。到点时按当时的登记展开到各台手机；`410` 删掉那台手机的登记，
+  `429` / `5xx` / 网络错误按 5 秒起翻倍、封顶 2 分钟退避重试，从提醒产生起超过 10 分钟丢弃，
+  已处理的停止重试。重试用同一个 `apns-id`。outbox 不落盘，smeltd 重启后不补发。发送线程
+  只在有提醒到点时醒来，没有待发的提醒时不醒。
+- **载荷**：只有提醒类型（APNs `loc-key`，文案在 App 的 `Localizable.strings`）和不透明的
+  `runtime_id`、`session_id`，不含标题、正文、命令、路径、机器名。`apns-collapse-id` 是
+  句柄和会话 id 的哈希：同一会话的新推送顶掉旧的，外面推不出会话 id。`thread-id` 按机器
+  分组。格式唯一定义在 `crates/smelt-push`。
+- **手机**：前台时不弹系统横幅，沿用应用内提示。点通知时记下目标，会话目录里出现那段
+  会话再打开（冷启动时目录还在路上）。行动项解决时、回到前台时，清掉通知中心里已经处理
+  掉的会话的推送（APNs 没法远程撤回）。
+- 通知栏里直接批准 / 回复、端到端加密带上具体内容（Notification Service Extension）是后续
+  工作，见 issue #18 的第二阶段。
+
 ### 应用内浮层
 
 插件 `WKWebView` 为隔离快捷键、IME 和 first responder 使用独立的 AppKit child window，
@@ -191,8 +222,8 @@ WebView child window 而 fork GPUI 不属于当前方案。
 
 ## 扩展约束
 
-手机推送、深链和远程审批必须订阅同一 store 或同源的 `AttentionItem` 流，不得重新解释
-daemon phase。新增事件类型时必须补齐状态转换、去重、已读/解决和投递渠道测试。
+手机推送（见上文「手机推送」）、深链和远程审批必须订阅同一 store 或同源的
+`AttentionItem` 流，不得重新解释 daemon phase。新增事件类型时必须补齐状态转换、去重、已读/解决和投递渠道测试。
 
 provider 安装器由同一注册表驱动状态探测、安装和卸载；新增官方事件接口时应增加注册项
 及独立适配器，不在设置页或批量操作路径继续追加 provider 分支。每个适配器只能移除自己

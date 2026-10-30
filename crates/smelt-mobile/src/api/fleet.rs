@@ -76,6 +76,9 @@ pub struct RuntimeStatus {
 pub struct FleetRuntime {
     pub record: RuntimeRecord,
     pub status: RuntimeStatus,
+    /// 这台机器能不能给手机推送：`Some(false)` 是运行时太旧，要升级；还没问过（没开推送、
+    /// 没连上过）是 `None`。
+    pub push_supported: Option<bool>,
 }
 
 /// 整份机队，按 `position` 排好。

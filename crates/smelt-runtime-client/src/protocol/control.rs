@@ -174,6 +174,8 @@ define_control_methods! {
     DevicePair => (DEVICE_PAIR_METHOD, "device.pair"),
     DeviceList => (DEVICE_LIST_METHOD, "device.list"),
     DeviceRevoke => (DEVICE_REVOKE_METHOD, "device.revoke"),
+    PushRegister => (PUSH_REGISTER_METHOD, "push.register"),
+    PushUnregister => (PUSH_UNREGISTER_METHOD, "push.unregister"),
     NewSessionPinsGet => (NEW_SESSION_PINS_GET_METHOD, "new_session.pins.get"),
     NewSessionPinsToggle => (NEW_SESSION_PINS_TOGGLE_METHOD, "new_session.pins.toggle"),
     TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
@@ -204,6 +206,9 @@ impl ControlMethod {
         Self::AgentMemoryWatch,
         Self::RemoteStatusWait,
         Self::ResourceUsage,
+        // 手机推送：旧运行时没有，手机提示「升级后才能推送」。
+        Self::PushRegister,
+        Self::PushUnregister,
     ];
 
     /// 运行时必须有这个方法：缺了就是运行时比客户端旧。
@@ -646,7 +651,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 122);
+        assert_eq!(names.len(), 124);
     }
 
     #[test]

@@ -2737,6 +2737,102 @@ abstract class L10n {
   /// **'Type your answer'**
   String get elicitationTextHint;
 
+  /// No description provided for @pushSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Notifications'**
+  String get pushSection;
+
+  /// No description provided for @pushToggle.
+  ///
+  /// In en, this message translates to:
+  /// **'Push notifications'**
+  String get pushToggle;
+
+  /// No description provided for @pushStatusOff.
+  ///
+  /// In en, this message translates to:
+  /// **'Get notified when an agent needs you, even while Smelt is closed.'**
+  String get pushStatusOff;
+
+  /// No description provided for @pushStatusRegistering.
+  ///
+  /// In en, this message translates to:
+  /// **'Turning on…'**
+  String get pushStatusRegistering;
+
+  /// No description provided for @pushStatusOn.
+  ///
+  /// In en, this message translates to:
+  /// **'On. Each machine notifies this phone directly.'**
+  String get pushStatusOn;
+
+  /// No description provided for @pushStatusDenied.
+  ///
+  /// In en, this message translates to:
+  /// **'Notifications for Smelt are turned off in Settings.'**
+  String get pushStatusDenied;
+
+  /// No description provided for @pushStatusFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t reach the push service. Smelt tries again when you come back to the app.'**
+  String get pushStatusFailed;
+
+  /// No description provided for @pushStatusNotConfigured.
+  ///
+  /// In en, this message translates to:
+  /// **'This build has no push service set up.'**
+  String get pushStatusNotConfigured;
+
+  /// No description provided for @pushOpenSettings.
+  ///
+  /// In en, this message translates to:
+  /// **'Open Settings'**
+  String get pushOpenSettings;
+
+  /// No description provided for @pushKindApproval.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for approval'**
+  String get pushKindApproval;
+
+  /// No description provided for @pushKindInput.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for your reply'**
+  String get pushKindInput;
+
+  /// No description provided for @pushKindFailure.
+  ///
+  /// In en, this message translates to:
+  /// **'Run failed'**
+  String get pushKindFailure;
+
+  /// No description provided for @pushFooter.
+  ///
+  /// In en, this message translates to:
+  /// **'A notification goes out 30 seconds after an agent stops, unless it was handled on another device by then. Session contents stay on your machines: a notification only says what kind of thing is waiting.'**
+  String get pushFooter;
+
+  /// No description provided for @pushSessionGone.
+  ///
+  /// In en, this message translates to:
+  /// **'That session no longer exists.'**
+  String get pushSessionGone;
+
+  /// No description provided for @pushMachineUnsupported.
+  ///
+  /// In en, this message translates to:
+  /// **'Smelt on {name} is too old to send push notifications. Update it to get them.'**
+  String pushMachineUnsupported(String name);
+
+  /// No description provided for @pushForgetOffline.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} isn\'t connected right now, so it will keep sending this phone notifications. To stop them, remove this phone from its device list.'**
+  String pushForgetOffline(String name);
+
   /// No description provided for @sessionsTitle.
   ///
   /// In en, this message translates to:

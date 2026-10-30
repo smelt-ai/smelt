@@ -15,6 +15,10 @@ class Preferences {
     this.themeMode = ThemeMode.system,
     this.terminalFontSize = defaultTerminalFontSize,
     this.updateChannel = UpdateChannel.prod,
+    this.pushEnabled = false,
+    this.pushApproval = true,
+    this.pushInput = true,
+    this.pushFailure = true,
   });
 
   static const version = 1;
@@ -30,14 +34,28 @@ class Preferences {
   /// 安卓应用内更新跟哪个通道（见 `app_update.dart`）。后加的字段：旧文件里没有就是生产版。
   final UpdateChannel updateChannel;
 
+  /// 推送通知（只有 iOS，见 `push.dart`）。后加的字段：旧文件里没有就是关着、三类全选。
+  final bool pushEnabled;
+  final bool pushApproval;
+  final bool pushInput;
+  final bool pushFailure;
+
   Preferences copyWith({
     ThemeMode? themeMode,
     double? terminalFontSize,
     UpdateChannel? updateChannel,
+    bool? pushEnabled,
+    bool? pushApproval,
+    bool? pushInput,
+    bool? pushFailure,
   }) => Preferences(
     themeMode: themeMode ?? this.themeMode,
     terminalFontSize: terminalFontSize ?? this.terminalFontSize,
     updateChannel: updateChannel ?? this.updateChannel,
+    pushEnabled: pushEnabled ?? this.pushEnabled,
+    pushApproval: pushApproval ?? this.pushApproval,
+    pushInput: pushInput ?? this.pushInput,
+    pushFailure: pushFailure ?? this.pushFailure,
   );
 
   factory Preferences.fromJson(Map<String, dynamic> json) {
@@ -52,6 +70,10 @@ class Preferences {
       terminalFontSize: font,
       updateChannel:
           parseUpdateChannel(json['updateChannel']) ?? UpdateChannel.prod,
+      pushEnabled: json['pushEnabled'] == true,
+      pushApproval: json['pushApproval'] != false,
+      pushInput: json['pushInput'] != false,
+      pushFailure: json['pushFailure'] != false,
     );
   }
 
@@ -60,6 +82,10 @@ class Preferences {
     'themeMode': themeMode.name,
     'terminalFontSize': terminalFontSize,
     'updateChannel': updateChannel.name,
+    'pushEnabled': pushEnabled,
+    'pushApproval': pushApproval,
+    'pushInput': pushInput,
+    'pushFailure': pushFailure,
   };
 
   @override
@@ -67,10 +93,22 @@ class Preferences {
       other is Preferences &&
       other.themeMode == themeMode &&
       other.terminalFontSize == terminalFontSize &&
-      other.updateChannel == updateChannel;
+      other.updateChannel == updateChannel &&
+      other.pushEnabled == pushEnabled &&
+      other.pushApproval == pushApproval &&
+      other.pushInput == pushInput &&
+      other.pushFailure == pushFailure;
 
   @override
-  int get hashCode => Object.hash(themeMode, terminalFontSize, updateChannel);
+  int get hashCode => Object.hash(
+    themeMode,
+    terminalFontSize,
+    updateChannel,
+    pushEnabled,
+    pushApproval,
+    pushInput,
+    pushFailure,
+  );
 }
 
 /// 偏好：改了立刻生效（界面监听这个 notifier），再排队落盘。

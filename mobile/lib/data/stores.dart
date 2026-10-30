@@ -12,6 +12,7 @@ import 'app_update.dart';
 import 'backend.dart';
 import 'models.dart';
 import 'preferences.dart';
+import 'push.dart';
 
 /// 单据和会话在界面里的统一键。
 String sessionKey(String runtimeId, String sessionId) =>
@@ -140,14 +141,29 @@ class CatalogStore extends ChangeNotifier {
 
 /// 整个 App 的数据根：一个 [Backend] 和由它喂的几份状态。
 class AppModel {
-  AppModel(this.backend, this.prefs, {this.deviceId, AppUpdater? updater})
-    : updater = updater ?? AppUpdater.unsupported();
+  AppModel(
+    this.backend,
+    this.prefs, {
+    this.deviceId,
+    AppUpdater? updater,
+    PushPlatform? pushPlatform,
+  }) : updater = updater ?? AppUpdater.unsupported(),
+       push = pushPlatform == null
+           ? PushService.unsupported(backend: backend, prefs: prefs)
+           : PushService(
+               backend: backend,
+               prefs: prefs,
+               platform: pushPlatform,
+             );
 
   final Backend backend;
   final PreferencesStore prefs;
 
   /// 安卓应用内更新。别的平台、演示模式是 [AppUpdater.unsupported]。
   final AppUpdater updater;
+
+  /// 推送通知。只有 iOS 有，别的平台、演示模式是 [PushService.unsupported]。
+  final PushService push;
 
   /// 这台手机的设备身份（iroh endpoint id）。电脑端的设备列表、撤销都认它。
   final String? deviceId;
@@ -173,7 +189,25 @@ class AppModel {
         }),
       )
       ..add(backend.passEvents().listen((p) => pass.value = p))
-      ..add(backend.catalogEvents().listen(catalog.apply));
+      ..add(backend.catalogEvents().listen(catalog.apply))
+      // 事情处理掉了，通知中心里那条推送也没用了（APNs 没法远程撤回）。
+      ..add(
+        catalog.resolved.listen(
+          (event) => push.clearHandled(
+            (target) =>
+                target.runtimeId != event.$1 || target.sessionId != event.$2,
+          ),
+        ),
+      );
+  }
+
+  /// 回到前台：通知中心里还留着、但已经不在等你的会话，把推送清掉。目录还是离线缓存、
+  /// 或还没这条会话时不算，等实时列表到了由 [CatalogStore.resolved] 清。
+  bool stillWaiting(PushTarget target) {
+    final list = catalog.list(target.runtimeId);
+    if (list == null || list.cached) return true;
+    final session = catalog.session(target.runtimeId, target.sessionId);
+    return session != null && session.status == SessionStatus.needsYou;
   }
 
   void dispose() {
@@ -185,6 +219,7 @@ class AppModel {
     prefs.dispose();
     catalog.dispose();
     updater.dispose();
+    push.dispose();
   }
 }
 

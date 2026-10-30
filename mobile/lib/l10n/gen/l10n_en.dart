@@ -1629,6 +1629,63 @@ class L10nEn extends L10n {
   String get elicitationTextHint => 'Type your answer';
 
   @override
+  String get pushSection => 'Notifications';
+
+  @override
+  String get pushToggle => 'Push notifications';
+
+  @override
+  String get pushStatusOff =>
+      'Get notified when an agent needs you, even while Smelt is closed.';
+
+  @override
+  String get pushStatusRegistering => 'Turning on…';
+
+  @override
+  String get pushStatusOn => 'On. Each machine notifies this phone directly.';
+
+  @override
+  String get pushStatusDenied =>
+      'Notifications for Smelt are turned off in Settings.';
+
+  @override
+  String get pushStatusFailed =>
+      'Couldn\'t reach the push service. Smelt tries again when you come back to the app.';
+
+  @override
+  String get pushStatusNotConfigured =>
+      'This build has no push service set up.';
+
+  @override
+  String get pushOpenSettings => 'Open Settings';
+
+  @override
+  String get pushKindApproval => 'Waiting for approval';
+
+  @override
+  String get pushKindInput => 'Waiting for your reply';
+
+  @override
+  String get pushKindFailure => 'Run failed';
+
+  @override
+  String get pushFooter =>
+      'A notification goes out 30 seconds after an agent stops, unless it was handled on another device by then. Session contents stay on your machines: a notification only says what kind of thing is waiting.';
+
+  @override
+  String get pushSessionGone => 'That session no longer exists.';
+
+  @override
+  String pushMachineUnsupported(String name) {
+    return 'Smelt on $name is too old to send push notifications. Update it to get them.';
+  }
+
+  @override
+  String pushForgetOffline(String name) {
+    return '$name isn\'t connected right now, so it will keep sending this phone notifications. To stop them, remove this phone from its device list.';
+  }
+
+  @override
   String get sessionsTitle => 'Sessions';
 
   @override

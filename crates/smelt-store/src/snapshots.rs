@@ -295,6 +295,21 @@ pub struct PairedDevice {
     pub last_seen_at_ms: Option<i64>,
 }
 
+/// 一台已配对手机的推送登记。推给它的时候，带着句柄发到它登记的中继。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PushRegistration {
+    /// 对应 [`PairedDevice::endpoint_id`]。
+    pub device_endpoint_id: String,
+    /// 推送中继发的句柄（加密过的 APNs 令牌），运行时解不开。
+    pub handle: String,
+    /// 推送中继的地址，如 `https://push.example.com`。
+    pub relay_url: String,
+    pub notify_approval: bool,
+    pub notify_input: bool,
+    pub notify_failure: bool,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryUsageRecord {
     pub file_name: String,
