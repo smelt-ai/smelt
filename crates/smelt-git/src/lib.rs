@@ -220,7 +220,17 @@ pub fn worktree_hash(root: &str, path: &str) -> Option<String> {
         );
     } else if meta.is_file() {
         hasher.update(b"file\0");
-        std::io::copy(&mut std::fs::File::open(&full).ok()?, &mut hasher).ok()?;
+        // sha2 0.11 的哈希器不再实现 io::Write，不能直接 io::copy 进去，分块读。
+        let mut file = std::fs::File::open(&full).ok()?;
+        let mut buf = vec![0; 64 * 1024];
+        loop {
+            match std::io::Read::read(&mut file, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buf[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
+        }
     } else {
         return None;
     }
