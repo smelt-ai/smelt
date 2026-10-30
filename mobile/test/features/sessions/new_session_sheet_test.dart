@@ -254,4 +254,36 @@ void main() {
     expect(_inSheet('Choose a folder'), findsOneWidget);
     expect(_inSheet('Pinned'), findsNothing);
   });
+
+  testWidgets('返回时上一层没列出来：留在原处写出原因，来路不丢', (tester) async {
+    final backend = TestBackend();
+    final filter = ValueNotifier<String?>('rt-mbp');
+    addTearDown(filter.dispose);
+    await pumpHarness(tester, backend, SessionsPage(filter: filter));
+
+    await tester.tap(find.byTooltip('New session'));
+    await settle(tester);
+    await tester.tap(_inSheet('Open another folder…'));
+    await settle(tester);
+    await tester.tap(_inSheet('playground'));
+    await settle(tester);
+    await tester.tap(_inSheet('rust-demo'));
+    await settle(tester);
+
+    backend.unreadableDir = '/Users/demo/code/playground';
+    await tester.tap(find.byTooltip('Back'));
+    await settle(tester);
+    expect(_inSheet('打不开 /Users/demo/code/playground'), findsOneWidget);
+    expect(_inSheet('~/code/playground/rust-demo'), findsOneWidget);
+
+    // 恢复后再返回，回到的还是上一层，不是跳过它。
+    backend.unreadableDir = null;
+    await tester.tap(find.byTooltip('Back'));
+    await settle(tester);
+    expect(_inSheet('~/code/playground'), findsOneWidget);
+    await tester.tap(find.byTooltip('Back'));
+    await settle(tester);
+    expect(_inSheet('~/code'), findsWidgets);
+    expect(_inSheet('Choose a folder'), findsOneWidget);
+  });
 }

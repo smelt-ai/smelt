@@ -1819,6 +1819,33 @@ fn open_project_returns_once_the_directory_lists_it() {
 }
 
 #[test]
+fn open_project_waits_for_the_new_database_after_the_runtime_switched_it() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    // 运行时换过库：回执是新库的版本，手上还是旧库（epoch ""、revision 3）的目录。
+    runtime.result(
+        "workspace.project.open",
+        json!({"epoch": "new", "revision": 1}),
+    );
+    let catalog = Arc::new(catalog);
+    let pending = {
+        let catalog = Arc::clone(&catalog);
+        std::thread::spawn(move || catalog.open_project("/srv/app"))
+    };
+    wait_until("发出打开项目", || {
+        !runtime.controls("workspace.project.open").is_empty()
+    });
+    assert!(!pending.is_finished(), "手上的旧库目录不算到了");
+
+    let mut changed = repo_directory(&[]);
+    changed["epoch"] = json!("new");
+    changed["revision"] = json!(1);
+    changed["projects"] = json!(["/srv/app"]);
+    runtime.send(0, &directory_line(changed));
+
+    assert_eq!(pending.join().unwrap().unwrap().root, "/srv/app");
+}
+
+#[test]
 fn opening_a_project_that_is_already_open_returns_it_right_away() {
     let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
     // 已经开着：运行时不改库，回执就是现在的版本。

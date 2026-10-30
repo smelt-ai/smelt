@@ -158,8 +158,13 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     unawaited(_browse(null));
   }
 
-  /// 列 [path]（为空时由内核挑起点）。[remember] 为真时把当前目录记进来路，返回能退回来。
-  Future<void> _browse(String? path, {bool remember = false}) async {
+  /// 列 [path]（为空时由内核挑起点）。来路只在列成功之后改：[remember] 把当前目录记进
+  /// 来路，返回能退回来；[backward] 是退回来路的最后一层，到了才把它摘掉。
+  Future<void> _browse(
+    String? path, {
+    bool remember = false,
+    bool backward = false,
+  }) async {
     final runtimeId = _runtimeId;
     if (runtimeId == null) return;
     final generation = ++_listingGeneration;
@@ -176,6 +181,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
       if (!mounted || generation != _listingGeneration) return;
       setState(() {
         if (remember && from != null) _trail.add(from);
+        if (backward && _trail.isNotEmpty) _trail.removeLast();
         _listing = listing;
         _listingBusy = false;
         _listingError = null;
@@ -241,7 +247,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
   void _back() {
     if (!_canGoBack) return;
     if (_step == _Step.browse && _trail.isNotEmpty) {
-      unawaited(_browse(_trail.removeLast()));
+      unawaited(_browse(_trail.last, backward: true));
       return;
     }
     setState(() {
@@ -330,7 +336,8 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     };
     return PopScope(
       // 系统返回先退一步，退到第一步再关弹层。
-      canPop: !_canGoBack,
+      // 正在打开项目时连弹层也不关：结果回来要接着选启动方式。
+      canPop: !_canGoBack && !_openingProject,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _back();
       },
@@ -503,7 +510,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     final listing = _listing;
     if (listing == null) {
       final error = _listingError;
-      if (error == null) return const _Busy();
+      if (error == null || _listingBusy) return const _Busy();
       return _scroll([
         EmptyNote(
           icon: LucideIcons.folderX,

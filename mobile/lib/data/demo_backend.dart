@@ -597,13 +597,11 @@ class DemoBackend implements Backend {
           DirShortcut(label: _display(s), path: s),
       ],
       entries: [
-        for (final child in children)
+        for (final path in children.map((c) => dir == '/' ? '/$c' : '$dir/$c'))
           DirEntry(
-            name: child,
-            path: dir == '/' ? '/$child' : '$dir/$child',
-            opened: _projectRoots.contains(
-              dir == '/' ? '/$child' : '$dir/$child',
-            ),
+            name: _name(path),
+            path: path,
+            opened: _projectRoots.contains(path),
           ),
       ],
     );

@@ -30,6 +30,9 @@ class TestBackend extends DemoBackend {
 
   /// 打开项目时抛这个。
   Object? openError;
+
+  /// 列这个目录时失败。
+  String? unreadableDir;
   final openedProjects = <(String, String)>[];
 
   @override
@@ -90,6 +93,14 @@ class TestBackend extends DemoBackend {
     final error = deleteError;
     if (error != null) throw error;
     await super.deleteSession(runtimeId, sessionId);
+  }
+
+  @override
+  Future<DirListing> browseDirs(String runtimeId, {String? path}) async {
+    if (path != null && path == unreadableDir) {
+      throw SmeltError(kind: SmeltErrorKind.other, message: '打不开 $path');
+    }
+    return super.browseDirs(runtimeId, path: path);
   }
 
   @override

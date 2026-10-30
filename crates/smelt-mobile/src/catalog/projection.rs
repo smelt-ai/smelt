@@ -212,12 +212,12 @@ impl CatalogState {
             .unwrap_or_default()
     }
 
-    /// 手上的目录已经是 `revision` 或更新的。运行时换过库（`epoch` 不同）时版本号比不了，
-    /// 推来的就是新库的目录，也算到了。
+    /// 手上的目录已经是 `revision` 或更新的。只比同一份库：`epoch` 不同说明手上的还是换库
+    /// 之前的那份，要等新库的推送。
     pub(crate) fn workspace_reached(&self, revision: &WorkspaceRevision) -> bool {
-        self.workspace
-            .as_ref()
-            .is_some_and(|directory| !directory.version().is_older_than(revision))
+        self.workspace.as_ref().is_some_and(|directory| {
+            directory.epoch == revision.epoch && directory.revision >= revision.revision
+        })
     }
 
     /// 能在里面新建会话的项目：工作区目录里开着的。只靠会话 cwd 撑起来的分组不算，
