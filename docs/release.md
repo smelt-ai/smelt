@@ -4,7 +4,7 @@
 
 | 产物 | job | 说明 |
 |---|---|---|
-| `Smelt.dmg` | `build`（macos-14） | `make dist-build`，用 secrets 里的自签名证书签名（`CODESIGN_P12_*`） |
+| `Smelt.dmg`、`Smelt.app.zip` | `build`（macos-14） | `make dist-build`，Developer ID 签名并公证，见下面的「macOS 签名」。`Smelt.app.zip` 给桌面应用内更新用 |
 | `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
 | `smelt-<版本>-windows-x86_64-setup.exe` | `windows` → `windows-release` | Inno Setup 安装程序，`smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe` 装在同一个目录。第一版不签名，见下面的「Windows」 |
@@ -129,6 +129,36 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 下载、校验后带 `/VERYSILENT /WAITPID=<桌面 pid> [/RELAUNCH=<桌面 exe>]` 拉起，桌面退出后安装程序覆盖安装，见
 `crates/smelt-client/src/updater/windows.rs`。
 本机守护可以冷启动。升级是关掉旧进程再拉起新的，终端会话不保留。Release 说明里有同样的一段。
+
+## macOS 签名
+
+发布包用 Developer ID Application 证书签名（Hardened Runtime + 时间戳），再把 dmg 提交 Apple 公证，票据钉到
+dmg 和 `Smelt.app` 上，下载后双击就能打开，不被 Gatekeeper 拦。团队和 iOS 同一个（`H3H5ULV8KR`）。
+CI 上用这些 repo secrets，缺任何一个 `build` job 都直接失败：
+
+- 一张 Developer ID Application 证书：只有账号持有人（Account Holder）能建。Xcode → Settings → Accounts →
+  Manage Certificates → + → Developer ID Application，或在开发者网站 Certificates 里建（选 G2 Sub-CA）。
+  建好后在钥匙串里把证书连同私钥导出成 .p12：
+  - `SMELT_MAC_DEVID_P12_BASE64`：`base64 -i devid.p12 | pbcopy`
+  - `SMELT_MAC_DEVID_P12_PASSWORD`：导出时设的密码
+
+  有效期约一年（现在这张 2027-11-29 到期），到期前建新的、更新这两个 secret。换证书不影响已装的用户：
+  Developer ID 包的签发身份认的是团队，不认具体哪张证书。Developer ID 证书团队里数量有限，私钥要离线备份。
+- 公证用的 App Store Connect API 密钥：和「iOS 签名」同一把（`SMELT_ASC_API_KEY_*`），不用另建。
+
+本地出一个公证过的 dmg：钥匙串里有上面那张证书，再设好和 `make ios` 一样的密钥变量：
+
+```sh
+SMELT_CODESIGN_IDENTITY="Developer ID Application" \
+SMELT_ASC_KEY_PATH=~/.private_keys/AuthKey_XXXX.p8 SMELT_ASC_KEY_ID=XXXX SMELT_ASC_ISSUER_ID=… \
+  make dist-build
+```
+
+本机开发（`make install`）照旧用 `scripts/setup-codesign-identity.sh` 生成的自签名身份，不公证。
+
+从自签名换到 Developer ID 的那一版：应用内更新会核对新包和已装的包是同一个签发身份，自签名的老版本认不出
+Developer ID 的新包，会报「更新包签发身份与当前 Smelt 不匹配」。老用户要手动下载 dmg 装一次，此后自动更新
+恢复正常；系统隐私权限（完全磁盘访问等）也要重新授权一次。这一版的发布说明里写上这件事。
 
 ## Android 签名
 
