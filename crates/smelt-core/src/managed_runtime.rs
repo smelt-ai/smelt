@@ -157,7 +157,7 @@ fn sha256_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
         digest.update((part.len() as u64).to_le_bytes());
         digest.update(part);
     }
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 #[cfg(any(

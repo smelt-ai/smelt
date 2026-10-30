@@ -35,7 +35,8 @@ merman = { version = "=0.9.2", default-features = false, features = ["all-diagra
 usvg = "=0.46.0"
 # usvg 0.46 已经依赖 rustybuzz 0.20.1，显式依赖是为了用 Face 量 advance。
 rustybuzz = "=0.20.1"
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 # 对话里 Markdown 文件链接点击时转成 smelt-file URL，见 markdown_links.rs。
 url = "2"
 # 图片显示统一抽象（image.rs）：ACP 图片解码 + 降采样。与 smelt 主 crate 同

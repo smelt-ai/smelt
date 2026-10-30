@@ -163,7 +163,7 @@ fn file_sha256(path: &Path) -> std::io::Result<String> {
         }
         hasher.update(&buf[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// 下载安装程序，边下边算校验和，对上了才算下好。
@@ -265,7 +265,7 @@ async fn download_verified(
     file.flush()?;
     drop(file);
 
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hex::encode(hasher.finalize());
     if actual != expected {
         anyhow::bail!("安装程序校验失败（期望 {expected}，实际 {actual}）");
     }

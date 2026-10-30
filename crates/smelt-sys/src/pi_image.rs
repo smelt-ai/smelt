@@ -168,7 +168,7 @@ fn bundle_fingerprint(src_dir: &Path, files: &[PathBuf]) -> io::Result<String> {
         digest.update(content_fingerprint(&src_dir.join(relative))?.as_bytes());
         digest.update(*b"\n");
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 
 /// 先在同目录的私有临时目录里写齐、落盘，再一次 rename 出去。别人抢先发布了同一套

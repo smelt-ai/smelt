@@ -1118,11 +1118,7 @@ fn derived_hex(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
         hasher.update([0]);
     }
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex::encode(hasher.finalize())
 }
 
 /// 这次工具调用发出的消息的 id。

@@ -85,7 +85,7 @@ pub fn delete_entry(root: &str, path: &str) -> Result<(), ProjectFileError> {
 }
 
 fn content_version(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// 打开文件查看或编辑。可预览的图片按扩展名认，给原始字节。
