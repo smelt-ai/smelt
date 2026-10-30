@@ -563,16 +563,10 @@ pub(crate) fn acp_pending_question(
 pub(crate) fn acp_pending_request(
     reduced: &smelt_core::acp_session::AcpSessionState,
 ) -> Option<String> {
-    reduced
-        .permissions
-        .first()
-        .map(|p| format!("permission:{}", p.tool_call_id))
-        .or_else(|| {
-            reduced
-                .elicitation
-                .as_ref()
-                .map(|e| format!("elicitation:{}", e.id))
-        })
+    smelt_core::acp_session::pending_request_id(
+        reduced.permissions.first().map(|p| p.tool_call_id.as_str()),
+        reduced.elicitation.as_ref().map(|e| e.id.as_str()),
+    )
 }
 
 /// 一份历史身份该怎么落到 `acp_detail.history_session_id`。
@@ -3109,6 +3103,9 @@ pub(crate) fn submit_acp_elicitation(
     };
     if let Some(text) = recovered_answer {
         smelt_core::acp_session::dismiss_elicitation(&mut sess.reduced.lock());
+        // 卡片撤掉了就同步会话状态：答案转成的提示可能只是排队，那条路不同步，客户端会
+        // 一直以为还在等这道题。
+        update_acp_daemon_state(sess, subscribers);
         return apply_acp_user_action_inner(
             sess,
             smelt_core::acp_session::AcpUserAction::Prompt {

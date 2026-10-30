@@ -4,8 +4,9 @@
 //! `pending_actions`（一问一答，不占对话订阅）。所以一张对话会话的单据先带着会话摘要出现
 //! （`details_loaded = false`），详情取回后再补全。详情认会话摘要里正在等的那个请求
 //! （`pending_request`，守护给的身份）：同一个请求只取一次，会话别的地方再怎么变都照样
-//! 显示；换了请求才重取，取回前不带按钮，旧单据不会挂着已经答过的问题。终端会话没有
-//! 对话历史可取，单据只有摘要。
+//! 显示；换了请求才重取，取回前不带按钮，旧单据不会挂着已经答过的问题。取回的详情记在
+//! 取的那一刻运行时实际在等的请求名下，不记在认领时的名下。详情只属于这一轮「在等你」，
+//! 单据下架就丢掉。终端会话没有对话历史可取，单据只有摘要。
 //!
 //! ```text
 //! 各节点 Catalog ──Sessions──> PassHub::update ──> project() ──变了──> Dart 订阅者
@@ -36,8 +37,10 @@ use crate::api::pass::{Pass, PassStation, PassTicket};
 /// 灶台「最近跑过」一组最多几条。
 pub(crate) const RECENT_LIMIT: usize = 5;
 
-/// 取一个会话在等的审批和询问：`(runtime_id, session_id)`。阻塞，只在取详情线程上调。
-pub(crate) type Fetch = Arc<dyn Fn(&str, &str) -> Result<PendingActions, SmeltError> + Send + Sync>;
+/// 取一个会话在等的审批和询问，连同取的那一刻它在等的请求身份：`(runtime_id, session_id)`。
+/// 阻塞，只在取详情线程上调。
+pub(crate) type Fetch =
+    Arc<dyn Fn(&str, &str) -> Result<(Option<String>, PendingActions), SmeltError> + Send + Sync>;
 
 /// 取详情失败后的重取退避。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
 #[derive(Clone, Copy, Debug)]
@@ -125,7 +128,7 @@ fn section(
     matched
 }
 
-/// 取回的详情，和取的时候会话正在等的那个请求。
+/// 取回的详情，和取的那一刻运行时实际在等的请求。
 #[derive(Clone, Debug)]
 pub(crate) struct Loaded {
     pub request: Option<String>,
@@ -239,9 +242,10 @@ struct Connectivity {
 struct Inner {
     order: Vec<String>,
     lists: HashMap<String, SessionList>,
-    /// 已取回的详情。会话从列表里消失时丢掉；只是暂时不是单据（机器重连中）的留着。
+    /// 已取回的详情。单据下架就丢掉；只是机器重连中、列表退回缓存的留着。
     details: HashMap<Key, Loaded>,
-    /// 正在取的单据和取的是哪个请求，避免同一个请求反复取。
+    /// 缺详情的单据认领的是摘要里的哪个请求：正在取，或者取回的是另一个请求、等摘要跟上。
+    /// 同一个请求不再认领，免得反复取。
     in_flight: HashMap<Key, Option<String>>,
     first_seen: HashMap<Key, i64>,
     listeners: Vec<PassListener>,
@@ -349,23 +353,24 @@ fn refresh(inner: &mut Inner) -> Pass {
         first_seen,
         now_ms: crate::store::now_ms(),
     });
-    let tickets: HashSet<Key> = pass
+    let key_of = |ticket: &PassTicket| (ticket.runtime_id.clone(), ticket.session.id.clone());
+    let tickets: HashSet<Key> = pass.tickets.iter().map(key_of).collect();
+    let missing: HashSet<Key> = pass
         .tickets
         .iter()
-        .map(|ticket| (ticket.runtime_id.clone(), ticket.session.id.clone()))
+        .filter(|ticket| !ticket.details_loaded)
+        .map(key_of)
         .collect();
-    // 详情留到会话从列表里消失：机器重连（换代）时列表先退回缓存、单据暂时下架，连回来
-    // 还在等同一个请求就直接用，不用整台重取一遍。
-    let sessions: HashSet<Key> = lists
-        .iter()
-        .flat_map(|(runtime_id, list)| {
-            list.sessions
-                .iter()
-                .map(move |session| (runtime_id.clone(), session.id.clone()))
-        })
-        .collect();
-    details.retain(|key, _| sessions.contains(key));
-    in_flight.retain(|key, _| tickets.contains(key));
+    // 详情只属于这一轮「在等你」：单据下架就丢掉，下次再成为单据时重取。失败、待输入这类
+    // 没有请求身份的单据也就不会挂着上一轮的上下文。机器重连（换代）时列表先退回缓存、
+    // 单据暂时下架，这时留着，连回来还在等同一个请求就直接用，不用整台重取一遍。
+    details.retain(|key, _| {
+        tickets.contains(key)
+            || lists.get(&key.0).is_some_and(|list| {
+                list.cached && list.sessions.iter().any(|session| session.id == key.1)
+            })
+    });
+    in_flight.retain(|key, _| missing.contains(key));
     if last.as_ref() != Some(&pass) {
         *last = Some(pass.clone());
         listeners.retain(|listener| listener(&pass));
@@ -433,9 +438,19 @@ fn fetch(shared: &Arc<Shared>, key: Key, request: Option<String>) {
             return;
         }
         let failure = match result {
-            Ok(actions) => {
-                inner.in_flight.remove(&key);
-                inner.details.insert(key, Loaded { request, actions });
+            Ok((fetched, actions)) => {
+                // 取回的是另一个请求（摘要还没跟上，或者刚又换了）：照样记下，这次认领挂着不再
+                // 重取，等摘要变了再说，免得原地反复请求。
+                if fetched == request {
+                    inner.in_flight.remove(&key);
+                }
+                inner.details.insert(
+                    key,
+                    Loaded {
+                        request: fetched,
+                        actions,
+                    },
+                );
                 let requests = update_locked(&mut inner);
                 drop(inner);
                 shared.wake.notify_all();

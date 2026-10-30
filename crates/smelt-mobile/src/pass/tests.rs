@@ -98,6 +98,26 @@ fn actions(tool_call_ids: &[&str]) -> PendingActions {
     }
 }
 
+/// 运行时那边在等这几个审批：取回的详情，连同取的那一刻它在等的请求身份。
+fn fetched(tool_call_ids: &[&str]) -> (Option<String>, PendingActions) {
+    (
+        tool_call_ids.first().map(|id| format!("permission:{id}")),
+        actions(tool_call_ids),
+    )
+}
+
+/// 假运行时现在在等的审批；测试改它来模拟换了请求。
+type Waiting = Arc<Mutex<Vec<String>>>;
+
+fn waits_for(ids: &[&str]) -> Waiting {
+    Arc::new(Mutex::new(ids.iter().map(|id| id.to_string()).collect()))
+}
+
+fn fetched_now(waiting: &Waiting) -> (Option<String>, PendingActions) {
+    let ids = waiting.lock().unwrap().clone();
+    fetched(&ids.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 fn key(runtime: &str, session: &str) -> Key {
     (runtime.to_string(), session.to_string())
 }
@@ -472,7 +492,10 @@ fn new_hub(fetch: Fetch) -> PassHub {
 /// 每次取详情都记一笔；`replies` 决定回什么。
 fn fetcher(
     calls: Arc<Mutex<Vec<Key>>>,
-    reply: impl Fn(&str, &str) -> Result<PendingActions, SmeltError> + Send + Sync + 'static,
+    reply: impl Fn(&str, &str) -> Result<(Option<String>, PendingActions), SmeltError>
+    + Send
+    + Sync
+    + 'static,
 ) -> Fetch {
     Arc::new(move |runtime_id, session_id| {
         calls
@@ -486,8 +509,10 @@ fn fetcher(
 #[test]
 fn details_are_fetched_once_per_request_and_pushed() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let hub = new_hub(fetcher(Arc::clone(&calls), |_, session| {
-        Ok(actions(&[session]))
+    let current = waits_for(&["s"]);
+    let runtime = Arc::clone(&current);
+    let hub = new_hub(fetcher(Arc::clone(&calls), move |_, _| {
+        Ok(fetched_now(&runtime))
     }));
     hub.set_order(vec!["a".to_string()]);
     let passes = record(&hub);
@@ -512,6 +537,7 @@ fn details_are_fetched_once_per_request_and_pushed() {
     assert!(passes.last().tickets[0].details_loaded, "不闪回骨架");
 
     // 换了一个请求：重取，取回前 details_loaded = false。
+    *current.lock().unwrap() = vec!["next".to_string()];
     let mut next = first.clone();
     next.updated_at = 200;
     next.pending_request = Some("permission:next".to_string());
@@ -529,6 +555,73 @@ fn details_are_fetched_once_per_request_and_pushed() {
     );
 }
 
+/// 没有请求身份的单据（回合失败）：会话恢复运行、单据下架就丢掉详情，再失败时重取，
+/// 不挂着上一轮的上下文。
+#[test]
+fn a_ticket_without_a_request_refetches_when_it_comes_back() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let hub = new_hub(fetcher(Arc::clone(&calls), |_, _| Ok(fetched(&[]))));
+    hub.set_order(vec!["a".to_string()]);
+    let passes = record(&hub);
+    let failed = || {
+        with_attention(
+            session("s", SessionStatus::Idle, SessionPhase::Failed, 100),
+            AttentionKind::Failure,
+        )
+    };
+    hub.update("a", live(vec![failed()]));
+    passes.wait("第一次失败的详情", |pass| {
+        pass.tickets.first().is_some_and(|t| t.details_loaded)
+    });
+
+    let running = session("s", SessionStatus::Running, SessionPhase::Thinking, 200);
+    hub.update("a", live(vec![running]));
+    assert!(passes.last().tickets.is_empty());
+    hub.update("a", live(vec![failed()]));
+    passes.wait("又失败了，重取", |pass| {
+        pass.tickets.first().is_some_and(|t| t.details_loaded)
+    });
+    assert_eq!(calls.lock().unwrap().len(), 2);
+}
+
+/// 详情记在取回那一刻运行时实际在等的请求名下：认领时摘要还没跟上、取回时已经来了审批，
+/// 这份不当成「没在等」的用，也不原地反复取；摘要跟上后直接用；审批在别处批掉、又回到
+/// 没在等时重取，不留着已经答过的按钮。
+#[test]
+fn details_are_filed_under_what_the_runtime_actually_waits_for() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let current = waits_for(&["t2"]);
+    let runtime = Arc::clone(&current);
+    let hub = new_hub(fetcher(Arc::clone(&calls), move |_, _| {
+        Ok(fetched_now(&runtime))
+    }));
+    hub.set_order(vec!["a".to_string()]);
+    let passes = record(&hub);
+
+    let mut behind = waiting("s", 100);
+    behind.pending_request = None;
+    hub.update("a", live(vec![behind.clone()]));
+    wait_until("取过一次", || calls.lock().unwrap().len() == 1);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(calls.lock().unwrap().len(), 1, "等摘要跟上，不原地反复取");
+    assert!(!passes.last().tickets[0].details_loaded);
+
+    behind.pending_request = Some("permission:t2".to_string());
+    hub.update("a", live(vec![behind.clone()]));
+    let ticket = passes.last().tickets[0].clone();
+    assert!(ticket.details_loaded, "摘要跟上了，直接用");
+    assert_eq!(ticket.permission.unwrap().tool_call_id, "t2");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    current.lock().unwrap().clear();
+    behind.pending_request = None;
+    hub.update("a", live(vec![behind]));
+    passes.wait("重取后没有按钮", |pass| {
+        pass.tickets[0].details_loaded && pass.tickets[0].permission.is_none()
+    });
+    assert_eq!(calls.lock().unwrap().len(), 2);
+}
+
 /// 在等你的会话列表不会再变：连着却取不到时要自己重取，不能等下一次推列表。
 #[test]
 fn failed_fetches_are_retried_with_backoff() {
@@ -539,7 +632,7 @@ fn failed_fetches_are_retried_with_backoff() {
         if counter.fetch_add(1, Ordering::SeqCst) < 2 {
             Err(error(SmeltErrorKind::Offline, "断线"))
         } else {
-            Ok(actions(&["t"]))
+            Ok(fetched(&["s"]))
         }
     }));
     hub.set_order(vec!["a".to_string()]);
@@ -585,7 +678,7 @@ fn fails_once(attempts: &Arc<AtomicUsize>) -> Fetch {
         if counter.fetch_add(1, Ordering::SeqCst) == 0 {
             Err(error(SmeltErrorKind::Offline, "断线"))
         } else {
-            Ok(actions(&["t"]))
+            Ok(fetched(&["s"]))
         }
     })
 }
@@ -632,7 +725,11 @@ fn a_reconnect_cuts_the_retry_backoff_short() {
 #[test]
 fn details_survive_a_reconnect() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let hub = new_hub(fetcher(Arc::clone(&calls), |_, _| Ok(actions(&["t"]))));
+    let current = waits_for(&["s"]);
+    let runtime = Arc::clone(&current);
+    let hub = new_hub(fetcher(Arc::clone(&calls), move |_, _| {
+        Ok(fetched_now(&runtime))
+    }));
     hub.set_order(vec!["a".to_string()]);
     let passes = record(&hub);
     hub.update("a", live(vec![waiting("s", 100)]));
@@ -652,6 +749,7 @@ fn details_survive_a_reconnect() {
     hub.update("a", live(vec![waiting("s", 100)]));
     assert!(passes.last().tickets[0].details_loaded, "连回来直接带着详情");
 
+    *current.lock().unwrap() = vec!["next".to_string()];
     let mut next = waiting("s", 200);
     next.pending_request = Some("permission:next".to_string());
     hub.update("a", live(vec![next]));
@@ -664,7 +762,9 @@ fn details_survive_a_reconnect() {
 #[test]
 fn nothing_is_fetched_without_a_subscriber() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let hub = new_hub(fetcher(Arc::clone(&calls), |_, _| Ok(actions(&[]))));
+    let hub = new_hub(fetcher(Arc::clone(&calls), |_, session| {
+        Ok(fetched(&[session]))
+    }));
     hub.set_order(vec!["a".to_string()]);
     hub.update("a", live(vec![waiting("s", 100)]));
     std::thread::sleep(Duration::from_millis(50));
@@ -679,7 +779,7 @@ fn nothing_is_fetched_without_a_subscriber() {
 
 #[test]
 fn order_changes_and_unknown_runtimes() {
-    let hub = new_hub(Arc::new(|_, _| Ok(actions(&[]))));
+    let hub = new_hub(Arc::new(|_, session| Ok(fetched(&[session]))));
     let passes = record(&hub);
     hub.update("a", live(vec![waiting("s", 1)]));
     assert!(passes.last().stations.is_empty(), "没登记的机器不算");
@@ -713,7 +813,7 @@ fn order_changes_and_unknown_runtimes() {
 
 #[test]
 fn a_cancelled_subscriber_is_dropped() {
-    let hub = new_hub(Arc::new(|_, _| Ok(actions(&[]))));
+    let hub = new_hub(Arc::new(|_, session| Ok(fetched(&[session]))));
     let (tx, rx) = mpsc::channel();
     hub.subscribe(Box::new(move |pass| tx.send(pass.clone()).is_ok()));
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
