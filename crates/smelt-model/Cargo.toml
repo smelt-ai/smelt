@@ -19,7 +19,7 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 # 不需要 `unstable_plan_operations`，也不开 `process` / `stdio` / `schemars`。
 agent-client-protocol = "=3.4.0"
 alacritty_terminal = { version = "0.26", default-features = false }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 semver = "1"
