@@ -9,8 +9,9 @@ CODE_SIGN_STYLE = Automatic
 // key for the team above and only pushes to the Bundle IDs it allows, so a
 // build must point at a relay run by its own team. Host only, no scheme: the
 // app always uses https, and "//" would start a comment here. Empty means the
-// build has no push; the official relay is not deployed yet.
-SMELT_PUSH_RELAY_HOST =
+// build has no push. This is the official relay, holding the key for the team
+// above and allowing ai.smelt.mobile.
+SMELT_PUSH_RELAY_HOST = push.smeltd.si
 // Which APNs environment the device token belongs to. Release is signed for
 // distribution (production); Debug and Profile override it to sandbox.
 SMELT_APNS_ENVIRONMENT = production
