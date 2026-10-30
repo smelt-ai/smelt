@@ -687,6 +687,7 @@ class _ConversationPageState extends State<ConversationPage> {
         view != null &&
         ((view.model?.currentName.isNotEmpty ?? false) ||
             view.configOptions.isNotEmpty);
+    final bottom = _bottom(context);
     return ConversationIdentity(
       runtimeId: widget.runtimeId,
       sessionId: widget.sessionId,
@@ -746,8 +747,18 @@ class _ConversationPageState extends State<ConversationPage> {
           children: [
             _banner(context),
             Expanded(child: _body(context)),
-            _bottom(context),
           ],
+        ),
+        // 输入框放在 bottomNavigationBar：浮动提示条（外壳弹的提醒、本页的提示）只会让开
+        // 这一栏，放在 body 里就会压住输入框。这一栏不随键盘抬起，键盘高度自己垫上；
+        // 在 Builder 里读键盘高度，键盘动画时只重排这一栏，不重建整页。
+        bottomNavigationBar: Builder(
+          builder: (context) => Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.viewInsetsOf(context).bottom,
+            ),
+            child: bottom,
+          ),
         ),
       ),
     );
@@ -1204,8 +1215,11 @@ class _Reading extends StatelessWidget {
   final Widget child;
   final EdgeInsets padding;
 
+  // 只横向居中、限阅读宽度；纵向始终贴着内容。输入框在 bottomNavigationBar 里，那里给的
+  // 高度约束是松的（0 到整屏），不带 heightFactor 的 Center 会撑满整屏，把正文挤没。
   @override
   Widget build(BuildContext context) => Center(
+    heightFactor: 1,
     child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: Space.readingMax),
       child: Padding(
