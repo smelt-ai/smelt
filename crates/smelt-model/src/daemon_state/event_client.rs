@@ -1358,7 +1358,7 @@ mod tests {
         }
     }
 
-    /// 比这个客户端新的运行时报了认不出的运行状态：自动化这一份跳过，订阅不断，之后的事件照常。
+    /// 自动化投影解不出：这一份跳过，订阅不断，之后的事件照常。
     #[test]
     fn undecodable_automations_event_keeps_the_subscription() {
         let mut client = desktop_client();

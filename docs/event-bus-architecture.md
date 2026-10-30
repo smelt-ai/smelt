@@ -568,7 +568,7 @@ provider hook 归一化仍保留。`AgentEvent` 是输入协议；smeltd reducer
 - 插件互相触发的循环会被 hop count、限流或熔断终止。
 - outbox 在 daemon 崩溃和重启后仍会完成投递。
 - dead-letter 可查询、可审计、可受控重放。
-- daemon、桌面端和 Mobile 版本错位时：加字段、加枚举值照常互通；破坏性改动在订阅握手时明确
+- daemon、桌面端和 Mobile 版本错位时：加字段、给标了「会增长」的枚举加值照常互通；其余要升版的改动在订阅握手时明确
   拒绝，而不是错误解析。
 - ephemeral 发布不产生 SQLite 写入。
 - durable outbox 不产生领域事务之外的第二次 commit。
