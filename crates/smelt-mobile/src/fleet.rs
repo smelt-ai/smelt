@@ -31,6 +31,7 @@ use crate::api::fleet::{
     ConnectionState, FleetRuntime, FleetView, RuntimeImport, RuntimeRecord, RuntimeStatus,
 };
 use crate::cache::Cache;
+use crate::agents::Agents;
 use crate::catalog::Catalog;
 use crate::connection::{
     ConnectionEvent, ConnectionHub, CurrentRuntime, Dialer, Listener, RuntimeInfo, Target,
@@ -56,6 +57,7 @@ pub(crate) trait Transport: Dialer {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Timings {
     pub connection: crate::connection::Timing,
+    pub agents: crate::agents::Timing,
     pub catalog: crate::catalog::Timing,
     pub conversation: crate::conversation::Timing,
     pub terminal: crate::terminal::Timing,
@@ -66,6 +68,7 @@ pub(crate) struct Timings {
 impl Timings {
     pub(crate) const PRODUCTION: Self = Self {
         connection: crate::connection::Timing::PRODUCTION,
+        agents: crate::agents::Timing::PRODUCTION,
         catalog: crate::catalog::Timing::PRODUCTION,
         conversation: crate::conversation::Timing::PRODUCTION,
         terminal: crate::terminal::Timing::PRODUCTION,
@@ -98,6 +101,7 @@ pub(crate) struct Node {
     serial: u64,
     pub hub: Arc<ConnectionHub>,
     pub catalog: Catalog,
+    pub agents: Agents,
     pub conversations: Conversations,
     pub terminals: TerminalHub,
 }
@@ -120,6 +124,12 @@ impl crate::catalog::RuntimeSource for NodeSource {
 
     fn cache(&self) -> Option<Arc<Cache>> {
         self.cache.clone()
+    }
+}
+
+impl crate::agents::RuntimeSource for NodeSource {
+    fn current(&self) -> Option<CurrentRuntime> {
+        self.hub.current()
     }
 }
 
@@ -164,6 +174,7 @@ impl Node {
         });
         Self {
             catalog: Catalog::new(runtime_id.clone(), source.clone(), timings.catalog),
+            agents: Agents::new(source.clone(), timings.agents),
             conversations: Conversations::new(source.clone(), timings.conversation),
             terminals: TerminalHub::new(source, timings.terminal),
             runtime_id,
@@ -324,7 +335,7 @@ impl Fleet {
                         shared
                             .node(runtime_id)?
                             .conversations
-                            .pending_actions(session_id)
+                            .pending_details(session_id)
                     }),
                     timings.pass,
                 ),

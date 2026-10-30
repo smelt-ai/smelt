@@ -32,6 +32,10 @@ const FAST: Timings = Timings {
         backoff_base: Duration::from_millis(20),
         backoff_max: Duration::from_millis(80),
     },
+    agents: crate::agents::Timing {
+        call_timeout: Duration::from_millis(500),
+        slow_call_timeout: Duration::from_millis(500),
+    },
     catalog: crate::catalog::Timing {
         push_delay: Duration::from_millis(20),
         save_delay: Duration::from_millis(40),
@@ -214,6 +218,14 @@ impl FakeRuntime {
                             "runtime_id": self.runtime_id,
                             "os": "linux",
                             "hostname": self.hostname,
+                        },
+                        "events": {
+                            "protocol_version": smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
+                            "projection_version": smelt_event_protocol::CORE_PROJECTION_VERSION,
+                            "session_projection_version":
+                                smelt_event_protocol::CORE_SESSION_PROJECTION_VERSION,
+                            "session_state_schema_version":
+                                smelt_event_protocol::CORE_SESSION_STATE_SCHEMA_VERSION,
                         },
                     }),
                 ))

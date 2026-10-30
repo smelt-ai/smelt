@@ -14,7 +14,8 @@ workspace = true
 smelt-paths = { path = "../smelt-paths" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 # 进程资源占用（process_usage）：列进程表、算 CPU 差值。只开 system，不要磁盘、网络、传感器。
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["full"] }

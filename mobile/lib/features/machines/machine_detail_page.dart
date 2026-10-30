@@ -80,7 +80,8 @@ class _MachineDetailPageState extends State<MachineDetailPage> {
           _say(l10n.machinesReconnectOffline(runtime.name));
         // 被撤销、版本不兼容：页面顶部的说明会跟着机队状态出来，不再弹一遍。
         case SmeltErrorKind.unpaired ||
-            SmeltErrorKind.incompatible ||
+            SmeltErrorKind.runtimeOutdated ||
+            SmeltErrorKind.appOutdated ||
             SmeltErrorKind.cancelled:
           break;
         case SmeltErrorKind.invalidPairing || SmeltErrorKind.other:
@@ -184,7 +185,7 @@ class _MachineDetailPageState extends State<MachineDetailPage> {
     final l10n = L10n.of(context);
     final record = runtime.record;
     final hostname = record.hostname?.trim();
-    final revoked = runtime.status.error?.kind == SmeltErrorKind.unpaired;
+    final kind = runtime.status.error?.kind;
 
     return ListView(
       padding: EdgeInsets.only(
@@ -193,15 +194,22 @@ class _MachineDetailPageState extends State<MachineDetailPage> {
       children: [
         if (runtime.needsAttention)
           _AttentionNote(
-            text: revoked
-                ? l10n.machinesRevokedBody(record.name)
-                : l10n.machinesIncompatibleBody(record.name),
-            // 被撤销只能重新配对；版本不兼容先升级再重连，重新配对是兜底。
-            action: GalleyButton.solid(
-              label: l10n.machinesRepair,
-              icon: LucideIcons.scanLine,
-              onPressed: () => startPairing(context),
-            ),
+            text: switch (kind) {
+              SmeltErrorKind.unpaired => l10n.machinesRevokedBody(record.name),
+              SmeltErrorKind.appOutdated => l10n.machinesAppOutdatedBody(
+                record.name,
+              ),
+              _ => l10n.machinesRuntimeOutdatedBody(record.name),
+            },
+            // 被撤销只能重新配对；那台机器旧，先升级它再重连，重新配对是兜底。App 旧时
+            // 重新配对也没用，只能先升级 App，不给按钮。
+            action: kind == SmeltErrorKind.appOutdated
+                ? null
+                : GalleyButton.solid(
+                    label: l10n.machinesRepair,
+                    icon: LucideIcons.scanLine,
+                    onPressed: () => startPairing(context),
+                  ),
           ),
         ShelfHeader(title: l10n.machinesName, first: !runtime.needsAttention),
         Shelf(
@@ -392,10 +400,10 @@ class _Title extends StatelessWidget {
 /// 被撤销 / 要升级时页面顶部的说明。不是单据（不是哪个 agent 在等你），只是一段话加一个
 /// 动作，放在钢底上，用失败红的图标提示「这台停了」。
 class _AttentionNote extends StatelessWidget {
-  const _AttentionNote({required this.text, required this.action});
+  const _AttentionNote({required this.text, this.action});
 
   final String text;
-  final Widget action;
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -428,8 +436,10 @@ class _AttentionNote extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: Space.md),
-          action,
+          if (action case final action?) ...[
+            const SizedBox(height: Space.md),
+            action,
+          ],
         ],
       ),
     );

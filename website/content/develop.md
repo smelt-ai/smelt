@@ -65,7 +65,7 @@ Linux 运行时包是 `scripts/package-linux.sh`。Windows 安装包不在这些
 ## 技术栈
 
 - Rust 2024，tokio async
-- GPUI（`gpui-pre` 0.3.9）+ gpui-component（桌面 UI，GPU 渲染；组件 crate 名仍是 gpui-component）
+- GPUI（`gpui-pre` 0.3.10）+ gpui-component（桌面 UI，GPU 渲染；组件 crate 名仍是 gpui-component）
 - portable-pty + alacritty_terminal（内嵌终端：PTY + ANSI 状态机）
 
 ## 打包发布

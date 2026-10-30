@@ -118,7 +118,8 @@ fn install_release(version: &semver::Version) -> RuntimeUpgradeReply {
         Ok(ImageInstall::Launched) => RuntimeUpgradeReply::Staged {
             reason: "新版本已装好，运行时下次重启时换过去".to_string(),
         },
-        Err(error) => RuntimeUpgradeReply::Failed { error },
+        // 换代请求发给的是自己：失败就是新映像起不来，原样报失败，不能像安装器那样停掉旧进程。
+        Ok(ImageInstall::SwitchFailed(error)) | Err(error) => RuntimeUpgradeReply::Failed { error },
     }
 }
 

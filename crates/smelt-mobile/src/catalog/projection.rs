@@ -23,8 +23,9 @@ use smelt_model::new_session::{NewSessionAction, NewSessionSections, NewSessionT
 use smelt_model::runtime_path::PathStyle;
 use smelt_model::session_control::AcpAgentOption;
 use smelt_model::workspace_directory::{
-    WorkspaceConversation, WorkspaceDirectory, project_labels, project_root_of,
+    WorkspaceConversation, WorkspaceDirectory, WorkspaceRevision, project_labels, project_root_of,
 };
+use smelt_runtime_client::protocol::workspace::BrowseDirsResult;
 
 use crate::api::catalog as view;
 
@@ -56,6 +57,8 @@ pub(crate) struct Applied {
     pub(crate) resolved: Vec<String>,
     /// 会话集合可能变了，智能体归属要重取。
     pub(crate) refresh_bindings: bool,
+    /// 收到了一份工作区目录（等目录推到某个版本的调用要醒）。
+    pub(crate) workspace_changed: bool,
 }
 
 impl CatalogState {
@@ -109,6 +112,7 @@ impl CatalogState {
                 self.primed = true;
                 applied.sessions_changed = true;
                 applied.refresh_bindings = true;
+                applied.workspace_changed = true;
             }
             DaemonStateEvent::Update(state) => {
                 let had_action = self.attention.has_unresolved_action(&state.id);
@@ -135,6 +139,7 @@ impl CatalogState {
                 self.workspace = Some(directory);
                 applied.sessions_changed = true;
                 applied.refresh_bindings = true;
+                applied.workspace_changed = true;
             }
             DaemonStateEvent::Automations(automations) => {
                 self.automations = Some(automations);
@@ -192,6 +197,27 @@ impl CatalogState {
             listing.push_automation_runs(automations, &self.sessions);
         }
         listing
+    }
+
+    /// 路径按运行时那台机器的系统切。
+    pub(crate) fn path_style(&self) -> PathStyle {
+        PathStyle::of_os(self.os.as_deref())
+    }
+
+    /// 目录里开着的项目根，按打开的先后。
+    pub(crate) fn opened_roots(&self) -> Vec<String> {
+        self.workspace
+            .as_ref()
+            .map(|directory| directory.projects.clone())
+            .unwrap_or_default()
+    }
+
+    /// 手上的目录已经是 `revision` 或更新的。只比同一份库：`epoch` 不同说明手上的还是换库
+    /// 之前的那份，要等新库的推送。
+    pub(crate) fn workspace_reached(&self, revision: &WorkspaceRevision) -> bool {
+        self.workspace.as_ref().is_some_and(|directory| {
+            directory.epoch == revision.epoch && directory.revision >= revision.revision
+        })
     }
 
     /// 能在里面新建会话的项目：工作区目录里开着的。只靠会话 cwd 撑起来的分组不算，
@@ -432,6 +458,71 @@ impl Listing {
     }
 }
 
+/// 同一个目录。Windows 不区分大小写，末尾的分隔符不算。
+pub(crate) fn same_dir(style: PathStyle, a: &str, b: &str) -> bool {
+    style.strip_prefix(a, b).is_some_and(|rest| rest.is_empty())
+}
+
+/// 给人看的路径：主目录下的缩写成 `~`。
+fn display_dir(style: PathStyle, path: &str, home: &str) -> String {
+    match style.strip_prefix(path, home) {
+        Some(rest) if rest.is_empty() => "~".to_string(),
+        Some(rest) => style.join("~", &rest),
+        None => path.to_string(),
+    }
+}
+
+/// 快捷位置最多几个（含主目录）。
+const DIR_SHORTCUTS: usize = 4;
+
+/// `workspace.browse_dirs` 的结果拼成浏览用的一层。`opened` 是开着的项目根，按打开的先后。
+pub(crate) fn dir_listing(
+    style: PathStyle,
+    listed: BrowseDirsResult,
+    opened: &[String],
+) -> view::DirListing {
+    let is_opened = |path: &str| opened.iter().any(|root| same_dir(style, root, path));
+    let home = listed.home.as_str();
+    let mut shortcuts = vec![view::DirShortcut {
+        label: "~".to_string(),
+        path: home.to_string(),
+    }];
+    // 最近打开的项目所在的目录在前。
+    for parent in opened.iter().rev().filter_map(|root| style.parent(root)) {
+        if shortcuts.len() >= DIR_SHORTCUTS {
+            break;
+        }
+        if parent.is_empty() || shortcuts.iter().any(|s| same_dir(style, &s.path, &parent)) {
+            continue;
+        }
+        shortcuts.push(view::DirShortcut {
+            label: display_dir(style, &parent, home),
+            path: parent,
+        });
+    }
+    view::DirListing {
+        display_path: display_dir(style, &listed.path, home),
+        name: style
+            .file_name(&listed.path)
+            .unwrap_or(&listed.path)
+            .to_string(),
+        opened: is_opened(&listed.path),
+        entries: listed
+            .entries
+            .into_iter()
+            .filter(|entry| entry.is_dir)
+            .map(|entry| view::DirEntry {
+                opened: is_opened(&entry.path),
+                name: entry.name,
+                path: entry.path,
+            })
+            .collect(),
+        parent: listed.parent,
+        path: listed.path,
+        shortcuts,
+    }
+}
+
 fn automation_source(run: &AutomationRun) -> view::AutomationSource {
     view::AutomationSource {
         automation_name: run.context.automation_name.clone(),
@@ -569,6 +660,7 @@ fn mobile_summary(
             .map(|state| i64::try_from(state.updated_at).unwrap_or(i64::MAX))
             .unwrap_or(0),
         detail: daemon.and_then(DaemonSessionState::detail_line),
+        pending_request: daemon.and_then(|state| state.pending_request.clone()),
         attention: attention_store.unread(&row.id).map(attention_item),
         automation,
         agent_definition_id,
@@ -720,8 +812,12 @@ pub(crate) fn agent_definition(definition: &AgentDefinition) -> view::AgentDefin
         engine_kind_id: definition.engine_kind_id.clone(),
         prompt: definition.prompt.clone(),
         plugins: definition.plugins.clone(),
+        mcp_servers: definition.mcp_servers.clone(),
         context_folders: definition.context_folders.clone(),
         context_links: definition.context_links.clone(),
+        model_provider: definition.model_provider.clone(),
+        model_id: definition.model_id.clone(),
+        memory_enabled: definition.memory_enabled,
     }
 }
 

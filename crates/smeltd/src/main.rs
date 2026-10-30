@@ -109,6 +109,7 @@ mod agent_memory_control;
 mod automation_runtime;
 mod client_conn;
 mod control;
+mod memory_peer_auth;
 mod conversation_image;
 mod desktop;
 mod devices;
@@ -125,7 +126,6 @@ mod push;
 mod resource_usage;
 mod subagent_transcript;
 use devices::Principal;
-mod program_status;
 mod project_watch;
 mod protocol;
 mod remote;
@@ -153,13 +153,12 @@ use remote::*;
 
 use acp_registry::{AcpRegistry, AcpSlot};
 use event_hub::EventHubHandle;
-use program_status::ProgramStatusNotices;
 use session_directory::SessionDirectory;
 #[cfg(test)]
 pub(crate) use session_state::AgentBlocker;
 pub(crate) use session_state::{
-    Phase, PhaseSource, SessionState, apply_agent_event, bump_state_revision, commit_session_phase,
-    next_session_instance, now_unix,
+    Phase, PhaseSource, SessionState, apply_agent_event, apply_program_status, bump_state_revision,
+    commit_session_phase, next_session_instance, now_unix,
 };
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent};
 use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboundEvent};
@@ -3326,7 +3325,6 @@ fn start_pty_pump(
         // 一次。只扫实时输出：resume 喂进网格的旧 keyframe 不经过这里，历史通知不会被
         // 当成新的再发。
         let mut osc_scan = OscScan::default();
-        let mut status_notices = ProgramStatusNotices::default();
         let mut progress = ProgressTracker::default();
         // resume 的旧 keyframe 理论上不含查询序列；即便有，也要在首次 read 前答复。
         flush_terminal_replies(&sess);
@@ -3348,13 +3346,19 @@ fn start_pty_pump(
                 Ok(n) => {
                     let chunk = &buf[..n];
                     let mut notifications = Vec::new();
+                    let mut program_status = None;
                     for event in chunk.iter().filter_map(|&byte| osc_scan.feed(byte)) {
                         match event {
                             OscEvent::Notification(notification) => {
                                 notifications.push(notification.text);
                             }
+                            // 程序自己报的状态直接进会话相位，跟 hook 一样走状态广播；
+                            // 关注事件由客户端按相位变化生成，不再另发终端通知。
                             OscEvent::ProgramStatus(status) => {
-                                notifications.extend(status_notices.observe(status));
+                                let mut state = sess.state.lock().unwrap();
+                                if apply_program_status(&mut state, &status) {
+                                    program_status = Some(state.clone());
+                                }
                             }
                             OscEvent::Progress(report) => progress.observe(report, Instant::now()),
                             // 在这批输出推进网格之前就回应：Pi 把探测和 DA 查询一起发，
@@ -3420,6 +3424,9 @@ fn start_pty_pump(
                     // 颜色查询应答可能等待 PTY 输入队列变得可写；必须在释放网格锁后
                     // 再做，避免把 resize 的 ctl -> term 路径拖住。
                     flush_terminal_replies(&sess);
+                    if let Some(snapshot) = program_status {
+                        broadcast_state(&event_hub, &snapshot);
+                    }
                     publish_terminal_notifications(&sess.state, &id, &event_hub, notifications);
                     publish_terminal_progress(&mut progress, &id, sess.instance, &event_hub);
                 }

@@ -14,9 +14,11 @@ import '../../ui/page.dart';
 import '../../ui/shelf.dart';
 import '../../ui/station.dart';
 import '../session/open_session.dart';
+import '../dirs/dir_browser.dart';
 import 'launch_flow.dart';
 
-/// 新建会话：底部弹层，分步选 机器 → 项目 → 启动方式。
+/// 新建会话：底部弹层，分步选 机器 → 项目 → 启动方式。选项目时可以在那台机器上逐级
+/// 浏览目录，把一个新目录打开为项目再接着选启动方式。
 ///
 /// [runtimeId] 给了且在线就从选项目开始（「会话」页筛到某台机器时）；只有一台在线时
 /// 跳过选机器。建好后等会话进目录再打开；弹层在等待期间被划掉也照样打开——用户已经
@@ -39,7 +41,7 @@ Future<void> showNewSessionSheet(BuildContext context, {String? runtimeId}) {
   );
 }
 
-enum _Step { machine, project, action, launching }
+enum _Step { machine, project, browse, action, launching }
 
 class NewSessionSheet extends StatefulWidget {
   const NewSessionSheet({
@@ -74,6 +76,11 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
   String? _workspaceError;
   int _workspaceGeneration = 0;
 
+  /// 选目录：浏览那台机器上的目录，选好了打开为项目。
+  DirBrowser? _browser;
+  bool _openingProject = false;
+  String? _openError;
+
   LaunchIntent? _intent;
   bool _waitingForList = false;
   String? _launchError;
@@ -92,6 +99,12 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
       _machineSkipped = true;
       _chooseMachine(online.single.id, animate: false);
     }
+  }
+
+  @override
+  void dispose() {
+    _browser?.dispose();
+    super.dispose();
   }
 
   // 步骤 ---------------------------------------------------------------------
@@ -135,9 +148,62 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     _step = _Step.action;
   });
 
+  // 选目录 -------------------------------------------------------------------
+
+  void _startBrowse() {
+    final runtimeId = _runtimeId;
+    if (runtimeId == null) return;
+    _browser?.dispose();
+    final browser = _browser = DirBrowser(widget.model.backend, runtimeId);
+    setState(() {
+      _step = _Step.browse;
+      _openError = null;
+    });
+    unawaited(browser.start());
+  }
+
+  Future<void> _openListed(DirListing listing) async {
+    final runtimeId = _runtimeId;
+    if (runtimeId == null || _openingProject) return;
+    final l10n = L10n.of(context);
+    setState(() {
+      _openingProject = true;
+      _openError = null;
+    });
+    try {
+      final project = await widget.model.backend.openProject(
+        runtimeId,
+        listing.path,
+      );
+      if (!mounted || _runtimeId != runtimeId) return;
+      final workspace = _workspace;
+      setState(() {
+        _openingProject = false;
+        // 退回选项目时也看得到它，不用重取整份目录。
+        if (workspace != null &&
+            !workspace.projects.any((p) => p.root == project.root)) {
+          _workspace = WorkspaceCatalog(
+            projects: [...workspace.projects, project],
+            agents: workspace.agents,
+            sections: workspace.sections,
+          );
+        }
+      });
+      _chooseProject(project);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _openingProject = false;
+        _openError = l10n.launchFolderOpenFailed(describeError(error));
+      });
+    }
+  }
+
   bool get _canGoBack => switch (_step) {
     _Step.machine => false,
     _Step.project => !_machineSkipped,
+    // 正在打开时不退：结果回来会落在一个已经不存在的步骤上。
+    _Step.browse => !_openingProject,
     _Step.action => true,
     // 发送中不往回退（结果回来时会落在一个已经不存在的步骤上）；失败了可以回去换一个。
     _Step.launching => _launchError != null,
@@ -145,10 +211,14 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
 
   void _back() {
     if (!_canGoBack) return;
+    if (_step == _Step.browse && (_browser?.back() ?? false)) {
+      setState(() => _openError = null);
+      return;
+    }
     setState(() {
       _step = switch (_step) {
         _Step.launching => _Step.action,
-        _Step.action => _Step.project,
+        _Step.action || _Step.browse => _Step.project,
         _ => _Step.machine,
       };
       _launchError = null;
@@ -225,12 +295,14 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     final body = switch (_step) {
       _Step.machine => _machineStep(context),
       _Step.project => _projectStep(context),
+      _Step.browse => _browseStep(context),
       _Step.action => _actionStep(context),
       _Step.launching => _launchingStep(context),
     };
     return PopScope(
       // 系统返回先退一步，退到第一步再关弹层。
-      canPop: !_canGoBack,
+      // 正在打开项目时连弹层也不关：结果回来要接着选启动方式。
+      canPop: !_canGoBack && !_openingProject,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _back();
       },
@@ -301,7 +373,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
                 style: GalleyText.of(context).note.copyWith(color: c.inkMuted),
               ),
             ),
-          _RowList(
+          HairlineRows(
             children: [
               for (final runtime in runtimes)
                 _MachineRow(
@@ -339,13 +411,21 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
         .toList();
     if (workspace.projects.isEmpty && agents.isEmpty) {
       return _scroll([
-        EmptyNote(icon: LucideIcons.folderX, title: l10n.launchNoProjects),
+        EmptyNote(
+          icon: LucideIcons.folderX,
+          title: l10n.launchNoProjects,
+          action: GalleyButton.solid(
+            label: l10n.launchStepFolder,
+            icon: LucideIcons.folderPlus,
+            onPressed: _startBrowse,
+          ),
+        ),
       ]);
     }
     final c = GalleyColors.of(context);
     return _scroll([
       ShelfHeader(title: l10n.launchStepProject, first: true),
-      _RowList(
+      HairlineRows(
         children: [
           // 不选项目（跟智能体对话）放最前：它不属于下面任何一个项目。
           if (agents.isNotEmpty)
@@ -372,9 +452,37 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
               trailing: _chevron(c),
               onTap: () => _chooseProject(project),
             ),
+          ShelfRow(
+            leading: Icon(
+              LucideIcons.folderPlus,
+              size: Strokes.icon,
+              color: c.inkMuted,
+            ),
+            title: Text(l10n.launchOpenFolder),
+            subtitle: Text(l10n.launchOpenFolderHint),
+            trailing: _chevron(c),
+            onTap: _startBrowse,
+          ),
         ],
       ),
     ]);
+  }
+
+  Widget _browseStep(BuildContext context) {
+    final l10n = L10n.of(context);
+    final browser = _browser;
+    if (browser == null) return const SizedBox.shrink();
+    return DirBrowserView(
+      browser: browser,
+      actionLabel: (listing) => _openingProject
+          ? l10n.launchFolderOpening
+          : listing.opened
+          ? l10n.launchFolderUse(listing.name)
+          : l10n.launchFolderOpen(listing.name),
+      onAction: _openListed,
+      actionBusy: _openingProject,
+      actionError: _openError,
+    );
   }
 
   Widget _actionStep(BuildContext context) {
@@ -397,7 +505,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
       children
         ..add(ShelfHeader(title: title, first: children.isEmpty))
         ..add(
-          _RowList(
+          HairlineRows(
             children: [
               for (final action in actions)
                 ShelfRow(
@@ -420,7 +528,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
           ShelfHeader(title: l10n.launchSectionAgents, first: children.isEmpty),
         )
         ..add(
-          _RowList(
+          HairlineRows(
             children: [
               for (final agent in agents)
                 ShelfRow(
@@ -602,31 +710,6 @@ class _MachineRow extends StatelessWidget {
             )
           : null,
       onTap: onTap,
-    );
-  }
-}
-
-/// 弹层里的一列行：行间发丝线，不再垫一层搁板底（弹层本身就是那块板）。
-class _RowList extends StatelessWidget {
-  const _RowList({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = GalleyColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final (index, child) in children.indexed) ...[
-          if (index > 0)
-            Padding(
-              padding: const EdgeInsetsDirectional.only(start: Space.lg),
-              child: Divider(height: Strokes.hairline, color: c.hairline),
-            ),
-          child,
-        ],
-      ],
     );
   }
 }

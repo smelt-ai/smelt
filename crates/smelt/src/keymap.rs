@@ -2,6 +2,8 @@
 //!
 //! 能改的动作列在 [`SHORTCUTS`]。`id` 是存库用的名字，定了就别改：改了旧覆盖就认不出。
 //! 用户改过的存在客户端库的 `key_binding` 表；读到认不出的动作或解析不了的按键，当没改。
+//! 存的是 `Keystroke::unparse` 按本机系统写出的显式修饰键（macOS `cmd-`、Linux `super-`），
+//! 动态的按键串都用 `Keystroke::parse_with_os` 解析：gpui 的 `Keystroke::parse` 只收静态串。
 //!
 //! 改键不能把整张键表清空重来：gpui-shell 插件第一次用到时才往键表里加自己的键，清掉就
 //! 回不来了。smelt 自己的键都打上 [`APP_KEYMAP`] 标记，改键时只把这一段原地换掉，前后别人
@@ -13,8 +15,8 @@
 use std::collections::BTreeMap;
 
 use gpui::{
-    Action, App, DummyKeyboardMapper, Global, KeyBinding, KeyBindingContextPredicate,
-    KeyBindingMetaIndex, Keystroke, Menu, MenuItem, NoAction, Subscription, Window,
+    Action, App, Global, KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, Keystroke,
+    Menu, MenuItem, NoAction, OperatingSystem, Subscription, Window,
 };
 use gpui_component::input::{
     DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart,
@@ -212,14 +214,19 @@ const RESERVED_KEYS: &[(&str, &str)] = &[
 ];
 
 /// 应用键位：改不了的固定键，加上 [`SHORTCUTS`] 按覆盖算出来的键。
-pub(crate) fn app_key_bindings(overrides: &Overrides) -> Vec<KeyBinding> {
+/// 覆盖是运行时的字符串，只能走 `KeyBinding::load`，它要 App 给键盘映射和本机系统。
+pub(crate) fn app_key_bindings(overrides: &Overrides, cx: &App) -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-shift-f", ToggleDebugHud, Some("Workspace")),
         KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
         // 设置窗口：Cmd+W（Windows / Linux 是 Ctrl+W）关窗。它是普通窗口，不是模态层，
-        // Esc 不关它，留给下拉框、弹出层和输入框。
-        KeyBinding::new("secondary-w", CloseSettingsWindow, Some("SettingsWindow")),
+        // Esc 不关它，留给下拉框、弹出层和输入框。`KeyBinding::new` 不解析 `secondary-`，
+        // 按目标平台写成显式修饰键。
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-w", CloseSettingsWindow, Some("SettingsWindow")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-w", CloseSettingsWindow, Some("SettingsWindow")),
         // 文件树只在自己的宿主上挂 FileTree。树没挂载（文件页不可见、树收起、
         // 搜索框有内容）时这条 context 不在焦点路径上。
         KeyBinding::new("up", FileTreeMoveUp, Some("FileTree")),
@@ -290,7 +297,7 @@ pub(crate) fn app_key_bindings(overrides: &Overrides) -> Vec<KeyBinding> {
             context,
             false,
             None,
-            &DummyKeyboardMapper,
+            cx,
         ) {
             Ok(binding) => bindings.push(binding),
             Err(error) => eprintln!("[keymap] {} 的按键 {keystroke} 解析不了：{error}", shortcut.id),
@@ -361,13 +368,13 @@ impl KeymapState {
 /// 这里两件一起做。
 pub(crate) fn init(cx: &mut App) {
     cx.set_global(KeymapState {
-        overrides: load_overrides(),
+        overrides: load_overrides(cx.platform_info().os),
         ..KeymapState::default()
     });
     install(cx);
 }
 
-fn load_overrides() -> Overrides {
+fn load_overrides(os: OperatingSystem) -> Overrides {
     let records = match smelt_client_store::client_store().and_then(|store| store.key_bindings()) {
         Ok(records) => records,
         Err(error) => {
@@ -375,11 +382,11 @@ fn load_overrides() -> Overrides {
             return Overrides::new();
         }
     };
-    overrides_from_records(records)
+    overrides_from_records(records, os)
 }
 
 /// 认不出的动作、解析不了的按键都丢掉，那一条回到出厂键位。
-fn overrides_from_records(records: Vec<KeyBindingRecord>) -> Overrides {
+fn overrides_from_records(records: Vec<KeyBindingRecord>, os: OperatingSystem) -> Overrides {
     records
         .into_iter()
         .filter_map(|record| {
@@ -388,7 +395,7 @@ fn overrides_from_records(records: Vec<KeyBindingRecord>) -> Overrides {
                 return None;
             };
             if let Some(keystroke) = &record.keystroke
-                && Keystroke::parse(keystroke).is_err()
+                && Keystroke::parse_with_os(keystroke, os).is_err()
             {
                 eprintln!("[keymap] {} 的按键 {keystroke} 解析不了，用出厂键位", shortcut.id);
                 return None;
@@ -404,7 +411,7 @@ pub(crate) fn shortcut(id: &str) -> Option<&'static Shortcut> {
 
 /// 把键表里 smelt 那一段换成按当前覆盖算出来的，再重设菜单。
 fn install(cx: &mut App) {
-    let app = app_key_bindings(&cx.global::<KeymapState>().overrides);
+    let app = app_key_bindings(&cx.global::<KeymapState>().overrides, cx);
     let rebuilt = {
         let keymap = cx.key_bindings();
         let keymap = keymap.borrow();
@@ -545,7 +552,13 @@ fn finish_recording(id: &'static str, keystroke: Keystroke, cx: &mut App) {
     let outcome = {
         let keymap = cx.key_bindings();
         let keymap = keymap.borrow();
-        recorded(id, &keystroke, &cx.global::<KeymapState>().overrides, keymap.bindings())
+        recorded(
+            id,
+            &keystroke,
+            &cx.global::<KeymapState>().overrides,
+            keymap.bindings(),
+            cx.platform_info().os,
+        )
     };
     match outcome {
         Recorded::Cancel => {}
@@ -588,6 +601,7 @@ fn recorded<'a>(
     keystroke: &Keystroke,
     overrides: &Overrides,
     keymap: impl IntoIterator<Item = &'a KeyBinding>,
+    os: OperatingSystem,
 ) -> Recorded {
     let modifiers = &keystroke.modifiers;
     let bare = !(modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift);
@@ -608,7 +622,7 @@ fn recorded<'a>(
     };
     if let Some((_, what)) = RESERVED_KEYS
         .iter()
-        .find(|(reserved, _)| same_key(reserved, &keystroke))
+        .find(|(reserved, _)| same_key(reserved, &keystroke, os))
     {
         return Recorded::Rejected(format!("{} 留给{what}", display(&keystroke)));
     }
@@ -616,11 +630,11 @@ fn recorded<'a>(
         other.id != id
             && other
                 .keystroke(overrides)
-                .is_some_and(|key| same_key(key, &keystroke))
+                .is_some_and(|key| same_key(key, &keystroke, os))
     }) {
         return Recorded::Taken {
             other: other.id,
-            keystroke: keystroke.unparse(),
+            keystroke: keystroke.unparse(os),
         };
     }
     let taken = keymap.into_iter().find(|binding| {
@@ -636,11 +650,11 @@ fn recorded<'a>(
             binding.action().name()
         ));
     }
-    if shortcut(id).is_some_and(|shortcut| same_key(shortcut.default, &keystroke)) {
+    if shortcut(id).is_some_and(|shortcut| same_key(shortcut.default, &keystroke, os)) {
         // 录回出厂键位就是没改，不留一条和出厂一样的覆盖。
         return Recorded::Reset;
     }
-    Recorded::Set(Some(keystroke.unparse()))
+    Recorded::Set(Some(keystroke.unparse(os)))
 }
 
 /// smelt 自己那段里、属于能改的那些。它们的冲突按 [`SHORTCUTS`] 和覆盖算，不看键表里的旧键。
@@ -651,8 +665,8 @@ fn is_rebindable(binding: &KeyBinding) -> bool {
             .any(|shortcut| binding.action().partial_eq(shortcut.action().as_ref()))
 }
 
-fn same_key(spec: &str, keystroke: &Keystroke) -> bool {
-    Keystroke::parse(spec).is_ok_and(|parsed| {
+fn same_key(spec: &str, keystroke: &Keystroke, os: OperatingSystem) -> bool {
+    Keystroke::parse_with_os(spec, os).is_ok_and(|parsed| {
         parsed.modifiers == keystroke.modifiers && parsed.key == keystroke.key
     })
 }

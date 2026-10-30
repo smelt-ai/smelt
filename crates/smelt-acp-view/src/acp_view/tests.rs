@@ -3214,6 +3214,7 @@ fn tool_image_output_is_expandable_and_decodes_once() {
 #[test]
 fn permission_selection_only_accepts_the_queue_head() {
     let permission = |tool_call_id: &str, option_id: &str| PendingPermission {
+        id: "p1".into(),
         question: tool_call_id.into(),
         tool_call_id: tool_call_id.into(),
         options: vec![PermissionOptionView {
@@ -3485,6 +3486,7 @@ fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext)
             },
         );
         view.elicitation = Some(PendingElicitation {
+            id: "q1".into(),
             message: "请输入访问令牌".into(),
             fields: vec![ElicitFieldView {
                 key: "token".into(),
@@ -3532,6 +3534,7 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
             },
         );
         view.elicitation = Some(PendingElicitation {
+            id: "q1".into(),
             message: "选几种水果看看".into(),
             fields: vec![ElicitFieldView {
                 key: "value".into(),
@@ -3612,6 +3615,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
             },
         );
         view.elicitation = Some(PendingElicitation {
+            id: "q1".into(),
             message: "下一步要我执行哪项？".into(),
             fields: vec![ElicitFieldView {
                 key: "answer".into(),
@@ -3928,11 +3932,12 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
         "line 40 is past the first screen and must not be built yet"
     );
 
-    cx.simulate_event(gpui::ScrollWheelEvent {
+    cx.simulate_event(gpui::ScrollEvent {
         position: viewport.center(),
         delta: ScrollDelta::Lines(point(0., -40.)),
         modifiers: Default::default(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     draw_settled(cx);
 
@@ -4307,12 +4312,13 @@ fn tail_snapshot(
     snapshot
 }
 
-fn wheel(position: gpui::Point<gpui::Pixels>, up: gpui::Pixels) -> gpui::ScrollWheelEvent {
-    gpui::ScrollWheelEvent {
+fn wheel(position: gpui::Point<gpui::Pixels>, up: gpui::Pixels) -> gpui::ScrollEvent {
+    gpui::ScrollEvent {
         position,
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), up)),
         modifiers: Default::default(),
         touch_phase: gpui::TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     }
 }
 
@@ -4461,7 +4467,7 @@ fn wheel_between_a_streaming_snapshot_and_the_next_frame_moves_by_its_delta(
             )
         });
         window.dispatch_event(
-            gpui::PlatformInput::ScrollWheel(wheel(viewport.center(), px(30.))),
+            gpui::PlatformInput::Scroll(wheel(viewport.center(), px(30.))),
             cx,
         );
     });

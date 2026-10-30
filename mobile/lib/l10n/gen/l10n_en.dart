@@ -9,6 +9,185 @@ class L10nEn extends L10n {
   L10nEn([String locale = 'en']) : super(locale);
 
   @override
+  String get agentEditNewTitle => 'New agent';
+
+  @override
+  String get agentEditTitle => 'Edit agent';
+
+  @override
+  String get agentEditWhichMachine => 'Create it on which machine?';
+
+  @override
+  String get agentEditName => 'Name';
+
+  @override
+  String get agentEditNameHint => 'e.g. Research assistant';
+
+  @override
+  String get agentEditPromptHint => 'How it should work, every time';
+
+  @override
+  String get agentEditModel => 'Model';
+
+  @override
+  String get agentEditModelDefault => 'Follow this machine\'s default model';
+
+  @override
+  String agentEditModelMissing(String label) {
+    return '$label (no longer on this machine)';
+  }
+
+  @override
+  String get agentEditPluginsNone => 'No plugins on this machine.';
+
+  @override
+  String get agentEditMissing => 'No longer on this machine';
+
+  @override
+  String get agentEditMcp => 'MCP';
+
+  @override
+  String get agentEditMcpNone => 'No MCP servers on this machine.';
+
+  @override
+  String get agentEditMcpDisabled => 'Turned off in the capability library';
+
+  @override
+  String agentEditChoicesFailed(String message) {
+    return 'Couldn\'t read this machine\'s capability library, so models, plugins and MCP may be incomplete: $message';
+  }
+
+  @override
+  String get agentEditFolders => 'Folders';
+
+  @override
+  String get agentEditAddFolder => 'Add folder';
+
+  @override
+  String agentEditFolderAdd(String name) {
+    return 'Add “$name”';
+  }
+
+  @override
+  String get agentEditLinks => 'Links';
+
+  @override
+  String get agentEditAddLink => 'Add link';
+
+  @override
+  String get agentEditRemove => 'Remove';
+
+  @override
+  String get agentEditMemory => 'Memory';
+
+  @override
+  String get agentEditMemoryHint =>
+      'When off, it neither uses nor writes memories. Existing ones are kept.';
+
+  @override
+  String get agentEditSaving => 'Saving…';
+
+  @override
+  String agentEditSaveFailed(String message) {
+    return 'Couldn\'t save: $message';
+  }
+
+  @override
+  String get agentEditLoadFailed => 'Couldn\'t open the editor';
+
+  @override
+  String get agentEditDiscardTitle => 'Discard changes?';
+
+  @override
+  String get agentEditDiscardBody => 'Your edits haven\'t been saved.';
+
+  @override
+  String get agentEditDiscard => 'Discard';
+
+  @override
+  String get agentEditDelete => 'Delete agent';
+
+  @override
+  String agentEditDeleteTitle(String name) {
+    return 'Delete “$name”?';
+  }
+
+  @override
+  String agentEditDeleteBody(String machine) {
+    return 'This removes it and its own memories from $machine. It can\'t be undone.';
+  }
+
+  @override
+  String agentEditDeleteFailed(String message) {
+    return 'Couldn\'t delete: $message';
+  }
+
+  @override
+  String memoryTitle(String name) {
+    return '$name · Memories';
+  }
+
+  @override
+  String get memoryLayerAgent => 'This agent\'s';
+
+  @override
+  String get memoryLayerUser => 'Shared by all agents';
+
+  @override
+  String get memoryEmpty => 'Nothing remembered yet.';
+
+  @override
+  String memoryPending(String reason) {
+    return 'Waiting for you · $reason';
+  }
+
+  @override
+  String get memoryRule => 'Rule';
+
+  @override
+  String get memoryFact => 'Fact';
+
+  @override
+  String get memoryStale => 'Unused for a long time';
+
+  @override
+  String memoryUsed(String ago) {
+    return 'Used $ago';
+  }
+
+  @override
+  String get memoryOverBudget =>
+      'Rules exceed the always-on budget, so only part of them is loaded each time.';
+
+  @override
+  String get memoryApprove => 'Approve';
+
+  @override
+  String memoryDeleteTitle(String name) {
+    return 'Delete “$name”?';
+  }
+
+  @override
+  String get memoryDeleteAgentBody => 'It can\'t be undone.';
+
+  @override
+  String get memoryDeleteUserBody =>
+      'This memory is shared, so every agent on this machine loses it. It can\'t be undone.';
+
+  @override
+  String memoryActionFailed(String message) {
+    return 'Couldn\'t do that: $message';
+  }
+
+  @override
+  String get memoryLoadFailed => 'Couldn\'t load memories';
+
+  @override
+  String memoryLoadFailedInline(String message) {
+    return 'Couldn\'t refresh: $message';
+  }
+
+  @override
   String get agentsTitle => 'Agents';
 
   @override
@@ -33,8 +212,7 @@ class L10nEn extends L10n {
   }
 
   @override
-  String get agentsEmptyAgents =>
-      'No agents on this machine yet. Create them in Smelt on the desktop.';
+  String get agentsEmptyAgents => 'No agents on this machine yet.';
 
   @override
   String get agentsEmptyAutomations =>
@@ -42,7 +220,7 @@ class L10nEn extends L10n {
 
   @override
   String get agentsReadOnly =>
-      'Agents and automations are edited in Smelt on the desktop.';
+      'Automations are edited in Smelt on the desktop.';
 
   @override
   String agentsGone(String machine) {
@@ -70,6 +248,38 @@ class L10nEn extends L10n {
 
   @override
   String get agentsContext => 'Context';
+
+  @override
+  String get agentsEdit => 'Edit';
+
+  @override
+  String get agentsMemories => 'Memories';
+
+  @override
+  String get agentsMemoryOff => 'Memory is off';
+
+  @override
+  String agentsMemoryPending(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n waiting for you',
+      one: '1 waiting for you',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String agentsMemoryCount(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n memories',
+      one: '1 memory',
+      zero: 'Nothing yet',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get agentsStartConversation => 'Start conversation';
@@ -337,6 +547,9 @@ class L10nEn extends L10n {
   String get commonSave => 'Save';
 
   @override
+  String get commonAdd => 'Add';
+
+  @override
   String get commonRetry => 'Retry';
 
   @override
@@ -420,7 +633,10 @@ class L10nEn extends L10n {
   String get machineRevoked => 'This phone was removed from this machine';
 
   @override
-  String get machineIncompatible => 'Machine needs an update';
+  String get machineRuntimeOutdated => 'Machine needs an update';
+
+  @override
+  String get machineAppOutdated => 'App needs an update';
 
   @override
   String get timeJustNow => 'just now';
@@ -660,6 +876,9 @@ class L10nEn extends L10n {
   String get conversationNewFile => 'New file';
 
   @override
+  String get conversationNoNewlineAtEnd => 'No newline at end of file';
+
+  @override
   String conversationPlan(int done, int total) {
     return 'Plan · $done/$total';
   }
@@ -877,8 +1096,47 @@ class L10nEn extends L10n {
   String get launchLoadFailed => 'Couldn\'t load this machine\'s projects';
 
   @override
-  String get launchNoProjects =>
-      'No projects open on this machine. Open one in Smelt on the computer first.';
+  String get launchNoProjects => 'No projects open on this machine yet.';
+
+  @override
+  String get launchOpenFolder => 'Open another folder…';
+
+  @override
+  String get launchOpenFolderHint =>
+      'Pick a folder on this machine as a project';
+
+  @override
+  String get launchStepFolder => 'Choose a folder';
+
+  @override
+  String get launchFolderUp => 'Up one level';
+
+  @override
+  String get launchFolderOpened => 'Already a project';
+
+  @override
+  String get launchFolderEmpty => 'No subfolders here';
+
+  @override
+  String get launchFolderLoadFailed => 'Couldn\'t open this folder';
+
+  @override
+  String launchFolderOpen(String name) {
+    return 'Open “$name” as a project';
+  }
+
+  @override
+  String launchFolderUse(String name) {
+    return 'Use “$name”';
+  }
+
+  @override
+  String get launchFolderOpening => 'Opening…';
+
+  @override
+  String launchFolderOpenFailed(String message) {
+    return 'Couldn\'t open the project: $message';
+  }
 
   @override
   String get launchNoProject => 'No project';
@@ -1089,8 +1347,13 @@ class L10nEn extends L10n {
   }
 
   @override
-  String machinesIncompatibleBody(String name) {
-    return 'This app and Smelt on $name are on incompatible versions. Update the older one, then reconnect. If it still fails, pair again.';
+  String machinesRuntimeOutdatedBody(String name) {
+    return 'Smelt on $name is older than this app, and the versions are incompatible. Update Smelt on that machine, then reconnect. If it still fails, pair again.';
+  }
+
+  @override
+  String machinesAppOutdatedBody(String name) {
+    return 'This app is older than Smelt on $name, and the versions are incompatible. Update this app, then reconnect.';
   }
 
   @override
@@ -1177,8 +1440,12 @@ class L10nEn extends L10n {
       'This pairing code has expired or was already used. Make a new one on the machine and scan it.';
 
   @override
-  String get machinesPairErrorIncompatible =>
-      'This app and Smelt on that machine are on incompatible versions. Update the older one, then pair with a new code.';
+  String get machinesPairErrorRuntimeOutdated =>
+      'Smelt on that machine is older than this app, and the versions are incompatible. Update Smelt there, then pair with a new code.';
+
+  @override
+  String get machinesPairErrorAppOutdated =>
+      'This app is older than Smelt on that machine, and the versions are incompatible. Update this app, then pair with a new code.';
 
   @override
   String get machinesPairErrorOffline =>

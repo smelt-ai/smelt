@@ -9,6 +9,7 @@
 
 ```text
 各 provider hook / ACP → AgentEvent v1 生命周期 / v2 会话名
+OSC 7501 程序状态根记录（smeltd 扫）──┐
                                       ↓
                                smeltd reducer → DaemonPhase + 会话名 → AgentStatus + AttentionItem
 OSC 9/99/777（smeltd 扫）/ BEL（TerminalView）──→ Informational AttentionItem
@@ -41,7 +42,7 @@ OpenCode 使用 `~/.config/opencode/plugins/smelt-notifications.js`（设置 `XD
 和排队 follow-up 尚未结束时不会提前报完成。Pi 的原生 RPC 对话驱动和其它以 ACP 方式启动的
 Agent 直接提供结构化状态，不重复注入终端桥。smeltd reducer 统一维护 phase，审批和输入
 等待保持粘性，只有对应工具完成、新 prompt 或明确回合终态才能解除，避免并行子任务消息覆盖。
-helper 每条 hook 只发送一次向后兼容的 `state + event` 信封：新 daemon 读取完整 event，
+helper 每个事件只发送一次向后兼容的 `state + event` 信封：新 daemon 读取完整 event，
 旧 daemon 忽略 event、读取 phase。helper 等 reducer 提交确认后才退出，不按超时重放同一
 事件。provider 的同步 hook 因此把生命周期顺序延伸到 daemon。占用意图是
 `Occupancy` 枚举：元数据不改相位，`OpenTurn`/`ResumeWork` 打开或重开回合，
@@ -57,13 +58,27 @@ helper 每条 hook 只发送一次向后兼容的 `state + event` 信封：新 d
 `PromptSubmitted` 可附带由首条用户请求压缩出的 `conversation_title`：它只在 provider
 尚未给出语义标题时充当本地兜底，不混入 `pending_question`。显式改名走 ACP `session_title`
 或 `SessionTitleChanged`，不走 OSC。
+
+Claude 不发改名事件，helper 在 SessionStart / UserPromptSubmit / Stop 的生命周期事件之后
+补发一条 `SessionTitleChanged`：`/rename`、`--name` 起的名优先（hook 的 `session_title`，
+Stop 不带就读转录里最新的 `custom-title`），其次是 Claude 生成的标题（转录里最新的
+`ai-title`，hook 里没有）。转录只读末尾一段；这两种记录不在公开文档里，认不出就不发，
+会话名留在首条 prompt。生命周期事件先发，hook 超时只会丢标题。
+
+Claude 的子智能体默认在后台跑，派出去后主回合马上 Stop。Stop 带的 `background_tasks` 是
+此刻在跑的任务快照：里面还有 `subagent` / `workflow` 时，这次 Stop 翻成带「后台还有 N 个
+子任务在跑」的工具完成，不算回合完成；子智能体跑完会把主回合叫醒，快照为空的那次 Stop 才
+是完成。只看快照，不配对 SubagentStart/Stop（TaskStop 停掉的不发 SubagentStop）。后台
+shell、monitor、teammate 会一直挂着，不计入。用户在任务面板手动停掉子智能体时 Claude 什么
+事件都不发，要等下一次 Stop 才对上。会报 OSC 7501 的 Claude 版本以 7501 为准（见下），
+这一条只给不报的版本兜底。
 provider 工具名只在适配层用于把原始 hook 判定为这些稳定语义之一，不进入 UI 的状态判断
 逻辑。
 
-结构化 hook/ACP 通过 `apply_daemon_transition` 写入 store。终端 OSC 标题不进入会话名；
-会话尚未收到有效结构化事件时，OSC/BEL 可以翻译成信息性 `AttentionItem`，但绝不能改变
-phase 或伪造完成。结构化事件一旦接通，低可信终端通知永久退出该会话的 agent 通知链路，
-避免重复投递。
+结构化 hook/OSC 7501/ACP 通过 `apply_daemon_transition` 写入 store。终端 OSC 标题不进入
+会话名；会话尚未收到有效结构化事件时，OSC 9/99/777 和 BEL 可以翻译成信息性
+`AttentionItem`，但绝不能改变 phase 或伪造完成。结构化事件一旦接通，低可信终端通知永久
+退出该会话的 agent 通知链路，避免重复投递。
 
 OSC 9/99/777 由 smeltd 在 PTY 输出泵里扫（alacritty 不解析），会话没有结构化事件时发
 `terminal.notification`，桌面收到后进同一个 store。只扫实时输出：reattach / resume 的
@@ -72,11 +87,26 @@ keyframe 不经过这里，历史通知不会被当成新的再弹。这样通�
 没开）时发生的通知直接丢弃，不补发。BEL 仍由 `TerminalView` 处理（有宽限期，受设置
 开关控制）。
 
-OSC 7501（Program Status Protocol）在同一处扫。smeltd 回应 `OSC 7501 ; ?` 探测（在把
-这批输出交给客户端之前写回 PTY，保证先于客户端回应的 DA），Claude Code、Pi 据此开始
-上报；Codex 不探测、直接发。只认根记录，状态变成 blocked / done / error 时转成一条
-`terminal.notification`（如「codex 等你批准：…」），同一状态重复上报只算一次。它和
-OSC 9 一样只是信息性通知：**不改 phase**，不打开任何需要「正在等待」的操作门闩。
+OSC 7501（[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)）
+在同一处扫。smeltd 回应 `OSC 7501 ; ?` 探测（在把这批输出交给客户端之前写回 PTY，保证
+先于客户端回应的 DA），Claude Code、Pi、Grok 据此开始上报；Codex 不探测、直接发。只认根
+记录，它直接改 phase：`working` → 思考中，`blocked` → 等批准（`kind=permission`）或等输入，
+`done` → 已完成，`error` → 失败，`idle` → 空闲。程序把后台子智能体、自动重试都算进了自己
+的状态：实测 Claude Code 派出后台子智能体后主回合马上 Stop，根记录却一直 `working`，等
+子智能体结束、主回合汇总完才 `done`。
+
+会话报过一次 7501 根记录，相位就以它为准（`SessionState::program_status`），同一会话不让
+hook 和 7501 两边各改一份：hook 的回合开始、等待、完成都不再改相位，只在 7501 报 `working`
+时把它细分成思考 / 执行工具（7501 不带工具名），以及在进程退出（`SessionEnded`）时置
+`Dead`。会话名、对话 id 照旧来自 hook，7501 不带对话 id。根记录被 `clear`（程序退出前会
+撤掉全部记录）或进程退出时，相位交还给 hook，`working` / `blocked` 作废。规范还要求新的
+shell 提示符（OSC 133 `A`）出现时作废，smelt 目前没有 shell 集成，靠 SessionEnd 兜底。
+
+7501 是 PTY 里任何程序都能写的低可信来源，规范要求不能据此授权。它只决定显示的状态；
+`blocked` 会打开远程审批快捷操作（`action` 只在等待相位下写入），这个门闩只防在 agent
+没在等的时候误发按键，不是权限边界：已配对设备本来就能经原始输入写任何内容，能伪造 7501
+的程序本来就控制着这块屏幕。它的状态边沿由客户端按相位变化生成关注事件，不再另发
+`terminal.notification`。
 
 hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在会话状态中，不改写不可变
 的启动命令 `launch`；它与标题通过 `session.state_changed` 的会话投影 v2 下发。客户端仍可
@@ -111,8 +141,9 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   保存在独立 `turn_outcome`，不会把所有 Idle 都猜成成功。
 - daemon 的每次状态提交带进程内全局单调 revision；唯一广播出口和每条订阅连接都拒绝
   旧/重复 revision。状态锁负责互斥，revision 负责锁外广播的可观察顺序。
-- 结构化 hook 一旦接通，OSC/BEL 不再参与该会话的 agent phase 或关注通知；终端原始
-  内容照常解析和显示，但不能反向覆盖 hook 事实。
+- 结构化 hook 或 OSC 7501 一旦接通，OSC 9/99/777 和 BEL 不再参与该会话的关注通知；终端
+  原始内容照常解析和显示。OSC 7501 根记录是唯一能改 phase 的终端序列，接通后由它而不是
+  hook 决定该会话的 phase（见上）。
 - 铃铛展示未读；Dock 数字统计未读或仍需行动的会话（每个会话计 1）。菜单栏图标右侧
   使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。
 - 用户看过审批/输入只会标记已读；daemon 离开等待 phase 后才真正解决行动项。

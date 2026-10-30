@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 订阅一个会话。可以同时订阅多个会话（含不同机器上的），各自独立。`watch_id` 是调用方
 /// 给这个订阅者取的编号（进程内不重复），退订时带回。同一会话可以有几个订阅者，共用一条
@@ -480,6 +480,7 @@ enum ConversationPhase {
 }
 
 /// 对话页要画的全部内容。条目是「已经在手里的连续窗口」：实时尾部加上翻出来的更早页。
+/// 每份视图只带从 `entries_from` 起的条目，前面的跟上一份一样，沿用手里的（见 `entries`）。
 class ConversationView {
   final String sessionId;
   final ConversationPhase phase;
@@ -508,16 +509,22 @@ class ConversationView {
   final List<PermissionRequest> pendingPermissions;
   final Elicitation? pendingElicitation;
 
-  /// 按时间正序。
+  /// 按时间正序，从 `entries_from` 起到窗口末尾。手里的窗口截到 `entries_from` 再接上它们，
+  /// 就是整个窗口。
   final List<ConversationEntry> entries;
 
-  /// `entries[0]` 在整段对话里的下标。
+  /// `entries[0]` 在整段对话里的下标。等于 `entries_offset` 时这份视图带着整个窗口：
+  /// 订阅后的第一份、翻页或换了一段对话之后都是这样。
+  final PlatformInt64 entriesFrom;
+
+  /// 窗口第一条在整段对话里的下标。
   final PlatformInt64 entriesOffset;
 
   /// 前面还有更早的条目可翻（[`load_older`]）。
   final bool hasMoreBefore;
 
-  /// 回合已结束时，「最终回答」在 `entries` 里的下标（最后一条非空正文或完成信号）。
+  /// 回合已结束时，「最终回答」在整个窗口里的下标（从 `entries_offset` 数起；最后一条
+  /// 非空正文或完成信号）。
   final int? finalAnswerIndex;
   final bool supportsImage;
   final List<SlashCommand> availableCommands;
@@ -541,6 +548,7 @@ class ConversationView {
     required this.pendingPermissions,
     this.pendingElicitation,
     required this.entries,
+    required this.entriesFrom,
     required this.entriesOffset,
     required this.hasMoreBefore,
     this.finalAnswerIndex,
@@ -566,6 +574,7 @@ class ConversationView {
       pendingPermissions.hashCode ^
       pendingElicitation.hashCode ^
       entries.hashCode ^
+      entriesFrom.hashCode ^
       entriesOffset.hashCode ^
       hasMoreBefore.hashCode ^
       finalAnswerIndex.hashCode ^
@@ -593,6 +602,7 @@ class ConversationView {
           pendingPermissions == other.pendingPermissions &&
           pendingElicitation == other.pendingElicitation &&
           entries == other.entries &&
+          entriesFrom == other.entriesFrom &&
           entriesOffset == other.entriesOffset &&
           hasMoreBefore == other.hasMoreBefore &&
           finalAnswerIndex == other.finalAnswerIndex &&
@@ -603,17 +613,52 @@ class ConversationView {
           configOptions == other.configOptions;
 }
 
+/// diff 的一行。
+class DiffLine {
+  final DiffOp op;
+  final String text;
+
+  /// 改动的这一行是文件末尾、后面没有换行。只补或只删末尾换行时靠它看出改了什么。
+  final bool noNewline;
+
+  const DiffLine({
+    required this.op,
+    required this.text,
+    required this.noNewline,
+  });
+
+  @override
+  int get hashCode => op.hashCode ^ text.hashCode ^ noNewline.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DiffLine &&
+          runtimeType == other.runtimeType &&
+          op == other.op &&
+          text == other.text &&
+          noNewline == other.noNewline;
+}
+
+enum DiffOp { equal, insert, delete }
+
 class DiffView {
   final String path;
 
-  /// 新文件没有旧内容。
-  final String? oldText;
-  final String newText;
+  /// 新文件（没有旧内容）。
+  final bool newFile;
 
-  const DiffView({required this.path, this.oldText, required this.newText});
+  /// 逐行 diff，内核按行对齐好（跟桌面同一个算法），界面只折叠、上色。
+  final List<DiffLine> lines;
+
+  const DiffView({
+    required this.path,
+    required this.newFile,
+    required this.lines,
+  });
 
   @override
-  int get hashCode => path.hashCode ^ oldText.hashCode ^ newText.hashCode;
+  int get hashCode => path.hashCode ^ newFile.hashCode ^ lines.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -621,8 +666,8 @@ class DiffView {
       other is DiffView &&
           runtimeType == other.runtimeType &&
           path == other.path &&
-          oldText == other.oldText &&
-          newText == other.newText;
+          newFile == other.newFile &&
+          lines == other.lines;
 }
 
 class Elicitation {

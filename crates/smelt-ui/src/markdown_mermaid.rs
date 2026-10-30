@@ -646,7 +646,7 @@ fn source_digest(source: &str, colors: &DiagramColors) -> String {
     hasher.update(source.as_bytes());
     hasher.update(b"\0");
     colors.feed(&mut hasher);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// SVG 根元素的 `viewBox="x y w h"`（兼容单双引号及多余空白）里取后两个数当自然像素尺寸。
@@ -1904,7 +1904,7 @@ mod tests {
         );
     }
 
-    /// gpui-pre 0.3.9 栅格化 SVG 用的就是 usvg 0.46。这里用同一份 crate 解析，
+    /// gpui-pre 0.3.10 栅格化 SVG 用的就是 usvg 0.46。这里用同一份 crate 解析，
     /// 确认 `resvg_safe` 的输出不会被这版 usvg 拒掉。
     fn assert_gpui_usvg_parses(name: &str, svg: &str) {
         let options = usvg::Options::default();

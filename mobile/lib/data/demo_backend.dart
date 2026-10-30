@@ -545,27 +545,90 @@ class DemoBackend implements Backend {
   @override
   void markRead(String runtimeId, String sessionId) {}
 
+  /// 开着的项目根（每台机器一样），按打开的先后。
+  final List<String> _projectRoots = [
+    '/Users/demo/code/smelt',
+    '/Users/demo/code/velum',
+    '/Users/demo/code/website',
+  ];
+
+  static const _home = '/Users/demo';
+
+  /// 合成的目录树：目录 → 子目录名。
+  static const Map<String, List<String>> _dirs = {
+    '/': ['Users'],
+    '/Users': ['demo'],
+    '/Users/demo': ['code', 'Documents', 'Downloads'],
+    '/Users/demo/code': ['playground', 'smelt', 'velum', 'website'],
+    '/Users/demo/code/playground': ['rust-demo'],
+    '/Users/demo/code/smelt': ['crates', 'docs', 'mobile'],
+  };
+
+  static String _name(String path) =>
+      path == '/' ? '/' : path.substring(path.lastIndexOf('/') + 1);
+
+  static String? _parent(String path) {
+    if (path == '/') return null;
+    final cut = path.lastIndexOf('/');
+    return cut == 0 ? '/' : path.substring(0, cut);
+  }
+
+  static String _display(String path) => path == _home
+      ? '~'
+      : path.startsWith('$_home/')
+      ? '~${path.substring(_home.length)}'
+      : path;
+
+  @override
+  Future<DirListing> browseDirs(String runtimeId, {String? path}) async {
+    final dir =
+        path ??
+        (_projectRoots.isEmpty ? _home : _parent(_projectRoots.last) ?? _home);
+    // 树里没列子目录的就是叶子。
+    final children = _dirs[dir] ?? const <String>[];
+    final shortcuts = <String>[_home];
+    for (final root in _projectRoots.reversed) {
+      final parent = _parent(root);
+      if (parent != null && !shortcuts.contains(parent)) shortcuts.add(parent);
+    }
+    return DirListing(
+      path: dir,
+      displayPath: _display(dir),
+      name: _name(dir),
+      parent: _parent(dir),
+      opened: _projectRoots.contains(dir),
+      shortcuts: [
+        for (final s in shortcuts.take(4))
+          DirShortcut(label: _display(s), path: s),
+      ],
+      entries: [
+        for (final path in children.map((c) => dir == '/' ? '/$c' : '$dir/$c'))
+          DirEntry(
+            name: _name(path),
+            path: path,
+            opened: _projectRoots.contains(path),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Future<WorkspaceProject> openProject(String runtimeId, String root) async {
+    if (!_projectRoots.contains(root)) _projectRoots.add(root);
+    return _projectOf(root);
+  }
+
+  WorkspaceProject _projectOf(String root) => WorkspaceProject(
+    root: root,
+    title: _name(root),
+    order: _projectRoots.indexOf(root),
+  );
+
   @override
   Future<WorkspaceCatalog> workspaceCatalog(String runtimeId) async =>
-      const WorkspaceCatalog(
-        projects: [
-          WorkspaceProject(
-            root: '/Users/demo/code/smelt',
-            title: 'smelt',
-            order: 0,
-          ),
-          WorkspaceProject(
-            root: '/Users/demo/code/velum',
-            title: 'velum',
-            order: 1,
-          ),
-          WorkspaceProject(
-            root: '/Users/demo/code/website',
-            title: 'website',
-            order: 2,
-          ),
-        ],
-        agents: [
+      WorkspaceCatalog(
+        projects: [for (final root in _projectRoots) _projectOf(root)],
+        agents: const [
           AcpAgentOption(id: 'claude', kind: 'claude', label: 'Claude Code'),
           AcpAgentOption(id: 'codex', kind: 'codex', label: 'Codex'),
           AcpAgentOption(id: 'pi', kind: 'pi', label: 'Pi'),
@@ -576,7 +639,7 @@ class DemoBackend implements Backend {
             agentDefinitionId: 'def-assistant',
           ),
         ],
-        sections: LaunchSections(
+        sections: const LaunchSections(
           common: [
             LaunchAction(
               key: 'claude',
@@ -742,23 +805,228 @@ class DemoBackend implements Backend {
             ),
       ),
     ],
-    agents: const [
-      AgentDefinitionSummary(
-        id: 'def-assistant',
-        name: '工作助手',
-        description: '开发和日常工作处理',
-        engineKindId: 'pi',
-        prompt: '你是工作助手，负责开发和日常工作处理。',
-        plugins: ['lark-cli', 'meegle'],
-        contextFolders: ['~/notes'],
-        contextLinks: [],
-      ),
-    ],
+    agents: List.of(_agents),
   );
 
   @override
   Future<AutomationCatalog> automationCatalog(String runtimeId) async =>
       _automations;
+
+  // 智能体 -------------------------------------------------------------------
+
+  final List<AgentDefinitionSummary> _agents = [
+    const AgentDefinitionSummary(
+      id: 'def-assistant',
+      name: '工作助手',
+      description: '开发和日常工作处理',
+      engineKindId: 'pi',
+      prompt: '你是工作助手，负责开发和日常工作处理。',
+      plugins: ['skill:lark-cli', 'skill:meegle'],
+      mcpServers: ['notion'],
+      contextFolders: ['/Users/demo/notes'],
+      contextLinks: [],
+      modelProvider: '',
+      modelId: '',
+      memoryEnabled: true,
+    ),
+  ];
+  int _agentSeq = 0;
+
+  static AgentDraft _draftOf(AgentDefinitionSummary a) => AgentDraft(
+    name: a.name,
+    prompt: a.prompt,
+    plugins: a.plugins,
+    mcpServers: a.mcpServers,
+    contextFolders: a.contextFolders,
+    contextLinks: a.contextLinks,
+    modelProvider: a.modelProvider,
+    modelId: a.modelId,
+    memoryEnabled: a.memoryEnabled,
+  );
+
+  static AgentDefinitionSummary _summaryOf(String id, AgentDraft d) =>
+      AgentDefinitionSummary(
+        id: id,
+        name: d.name.trim(),
+        description: '',
+        engineKindId: 'pi',
+        prompt: d.prompt,
+        plugins: d.plugins,
+        mcpServers: d.mcpServers,
+        contextFolders: d.contextFolders,
+        contextLinks: d.contextLinks,
+        modelProvider: d.modelProvider,
+        modelId: d.modelId,
+        memoryEnabled: d.memoryEnabled,
+      );
+
+  static const _demoChoices = AgentChoices(
+    models: [
+      ModelGroup(
+        provider: 'anthropic',
+        providerName: 'Anthropic',
+        models: [
+          ModelOption(
+            provider: 'anthropic',
+            id: 'claude-opus',
+            label: 'Anthropic / Claude Opus',
+          ),
+          ModelOption(
+            provider: 'anthropic',
+            id: 'claude-sonnet',
+            label: 'Anthropic / Claude Sonnet',
+          ),
+        ],
+      ),
+    ],
+    plugins: [
+      PluginOption(
+        id: 'skill:lark-cli',
+        kind: PluginKind.skill,
+        name: 'lark-cli',
+        description: '飞书文档、消息、任务',
+      ),
+      PluginOption(
+        id: 'skill:meegle',
+        kind: PluginKind.skill,
+        name: 'meegle',
+        description: '飞书项目工作项',
+      ),
+      PluginOption(
+        id: 'extension:notify',
+        kind: PluginKind.extension_,
+        name: 'notify',
+        description: '',
+        broken: '文件不存在',
+      ),
+    ],
+    mcpServers: [
+      McpOption(name: 'notion', description: '笔记', enabled: true),
+      McpOption(name: 'linear', enabled: false),
+    ],
+  );
+
+  @override
+  Future<AgentChoices> agentChoices(String runtimeId) async => _demoChoices;
+
+  @override
+  Future<AgentEditor> agentEditor(String runtimeId, {String? agentId}) async {
+    final agent = agentId == null
+        ? null
+        : _agents.firstWhere((a) => a.id == agentId);
+    return AgentEditor(
+      draft: agent == null
+          ? const AgentDraft(
+              name: '',
+              prompt: '',
+              plugins: [],
+              mcpServers: [],
+              contextFolders: [],
+              contextLinks: [],
+              modelProvider: '',
+              modelId: '',
+              memoryEnabled: true,
+            )
+          : _draftOf(agent),
+      choices: _demoChoices,
+    );
+  }
+
+  @override
+  Future<AgentDefinitionSummary> createAgent(
+    String runtimeId,
+    AgentDraft draft,
+  ) async {
+    final agent = _summaryOf('def-new-${++_agentSeq}', draft);
+    _agents.add(agent);
+    return agent;
+  }
+
+  @override
+  Future<AgentDefinitionSummary> updateAgent(
+    String runtimeId,
+    String agentId, {
+    required AgentDraft original,
+    required AgentDraft edited,
+  }) async {
+    final index = _agents.indexWhere((a) => a.id == agentId);
+    final agent = _summaryOf(agentId, edited);
+    _agents[index] = agent;
+    return agent;
+  }
+
+  @override
+  Future<void> deleteAgent(String runtimeId, String agentId) async {
+    _agents.removeWhere((a) => a.id == agentId);
+  }
+
+  late final List<MemoryItem> _agentMemories = [
+    MemoryItem(
+      fileName: 'deploy-window.md',
+      name: '发版窗口',
+      description: '周四晚上不发版',
+      rule: false,
+      pendingReason: '读过外部网页的那一轮写的',
+      stale: false,
+      readCount: BigInt.zero,
+      body: '周四晚上有例行维护，发版挪到周五上午。',
+    ),
+    MemoryItem(
+      fileName: 'reply-style.md',
+      name: '回复风格',
+      description: '先给结论再给细节',
+      rule: true,
+      stale: false,
+      readCount: BigInt.from(12),
+      lastUsedMs: _now
+          .subtract(const Duration(hours: 2))
+          .millisecondsSinceEpoch,
+      body: '回复先给结论，细节放后面。',
+    ),
+  ];
+
+  AgentMemories get _memories => AgentMemories(
+    agent: MemoryShelf(items: List.of(_agentMemories), coreOverBudget: false),
+    user: const MemoryShelf(items: [], coreOverBudget: false),
+    pending: _agentMemories.where((m) => m.pendingReason != null).length,
+  );
+
+  @override
+  Future<AgentMemories> agentMemories(String runtimeId, String agentId) async =>
+      _memories;
+
+  @override
+  Future<AgentMemories> approveMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  ) async {
+    final index = _agentMemories.indexWhere((m) => m.fileName == fileName);
+    final m = _agentMemories[index];
+    _agentMemories[index] = MemoryItem(
+      fileName: m.fileName,
+      name: m.name,
+      description: m.description,
+      rule: m.rule,
+      stale: m.stale,
+      readCount: m.readCount,
+      lastUsedMs: m.lastUsedMs,
+      body: m.body,
+    );
+    return _memories;
+  }
+
+  @override
+  Future<AgentMemories> deleteMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  ) async {
+    _agentMemories.removeWhere((m) => m.fileName == fileName);
+    return _memories;
+  }
 
   @override
   Future<AutomationCatalog> setAutomationEnabled(

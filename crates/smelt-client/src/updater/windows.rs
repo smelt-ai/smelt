@@ -163,7 +163,7 @@ fn file_sha256(path: &Path) -> std::io::Result<String> {
         }
         hasher.update(&buf[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// 下载安装程序，边下边算校验和，对上了才算下好。
@@ -265,7 +265,7 @@ async fn download_verified(
     file.flush()?;
     drop(file);
 
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hex::encode(hasher.finalize());
     if actual != expected {
         anyhow::bail!("安装程序校验失败（期望 {expected}，实际 {actual}）");
     }
@@ -342,8 +342,8 @@ fn failed_install_logs(dir: &Path, current_log: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// 安装失败后更新源换了包：删掉旧的安装程序。
-pub fn discard_failed_update(expected: &StagedUpdate) -> anyhow::Result<()> {
+/// 暂存着安装程序（待安装或安装失败）时更新源换了包：删掉旧的安装程序。
+pub fn discard_staged_update(expected: &StagedUpdate) -> anyhow::Result<()> {
     match std::fs::remove_file(&expected.installer) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

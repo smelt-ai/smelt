@@ -1,5 +1,146 @@
 {
   "@@locale": "en",
+  "agentEditNewTitle": "New agent",
+  "agentEditTitle": "Edit agent",
+  "agentEditWhichMachine": "Create it on which machine?",
+  "agentEditName": "Name",
+  "agentEditNameHint": "e.g. Research assistant",
+  "agentEditPromptHint": "How it should work, every time",
+  "agentEditModel": "Model",
+  "agentEditModelDefault": "Follow this machine's default model",
+  "agentEditModelMissing": "{label} (no longer on this machine)",
+  "@agentEditModelMissing": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
+  "agentEditPluginsNone": "No plugins on this machine.",
+  "agentEditMissing": "No longer on this machine",
+  "agentEditMcp": "MCP",
+  "agentEditMcpNone": "No MCP servers on this machine.",
+  "agentEditMcpDisabled": "Turned off in the capability library",
+  "agentEditChoicesFailed": "Couldn't read this machine's capability library, so models, plugins and MCP may be incomplete: {message}",
+  "@agentEditChoicesFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "agentEditFolders": "Folders",
+  "agentEditAddFolder": "Add folder",
+  "agentEditFolderAdd": "Add “{name}”",
+  "@agentEditFolderAdd": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "agentEditLinks": "Links",
+  "agentEditAddLink": "Add link",
+  "agentEditRemove": "Remove",
+  "agentEditMemory": "Memory",
+  "agentEditMemoryHint": "When off, it neither uses nor writes memories. Existing ones are kept.",
+  "agentEditSaving": "Saving…",
+  "agentEditSaveFailed": "Couldn't save: {message}",
+  "@agentEditSaveFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "agentEditLoadFailed": "Couldn't open the editor",
+  "agentEditDiscardTitle": "Discard changes?",
+  "agentEditDiscardBody": "Your edits haven't been saved.",
+  "agentEditDiscard": "Discard",
+  "agentEditDelete": "Delete agent",
+  "agentEditDeleteTitle": "Delete “{name}”?",
+  "@agentEditDeleteTitle": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "agentEditDeleteBody": "This removes it and its own memories from {machine}. It can't be undone.",
+  "@agentEditDeleteBody": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
+  "agentEditDeleteFailed": "Couldn't delete: {message}",
+  "@agentEditDeleteFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTitle": "{name} · Memories",
+  "@memoryTitle": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryLayerAgent": "This agent's",
+  "memoryLayerUser": "Shared by all agents",
+  "memoryEmpty": "Nothing remembered yet.",
+  "memoryPending": "Waiting for you · {reason}",
+  "@memoryPending": {
+    "placeholders": {
+      "reason": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryRule": "Rule",
+  "memoryFact": "Fact",
+  "memoryStale": "Unused for a long time",
+  "memoryUsed": "Used {ago}",
+  "@memoryUsed": {
+    "placeholders": {
+      "ago": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryOverBudget": "Rules exceed the always-on budget, so only part of them is loaded each time.",
+  "memoryApprove": "Approve",
+  "memoryDeleteTitle": "Delete “{name}”?",
+  "@memoryDeleteTitle": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryDeleteAgentBody": "It can't be undone.",
+  "memoryDeleteUserBody": "This memory is shared, so every agent on this machine loses it. It can't be undone.",
+  "memoryActionFailed": "Couldn't do that: {message}",
+  "@memoryActionFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryLoadFailed": "Couldn't load memories",
+  "memoryLoadFailedInline": "Couldn't refresh: {message}",
+  "@memoryLoadFailedInline": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
   "agentsTitle": "Agents",
   "agentsSegmentAgents": "Agents",
   "agentsSegmentAutomations": "Automations",
@@ -14,9 +155,9 @@
       }
     }
   },
-  "agentsEmptyAgents": "No agents on this machine yet. Create them in Smelt on the desktop.",
+  "agentsEmptyAgents": "No agents on this machine yet.",
   "agentsEmptyAutomations": "No automations on this machine yet. Create them in Smelt on the desktop.",
-  "agentsReadOnly": "Agents and automations are edited in Smelt on the desktop.",
+  "agentsReadOnly": "Automations are edited in Smelt on the desktop.",
   "agentsGone": "This item is no longer on {machine}.",
   "@agentsGone": {
     "placeholders": {
@@ -45,6 +186,25 @@
   "agentsNoPrompt": "No standing instructions.",
   "agentsPlugins": "Plugins",
   "agentsContext": "Context",
+  "agentsEdit": "Edit",
+  "agentsMemories": "Memories",
+  "agentsMemoryOff": "Memory is off",
+  "agentsMemoryPending": "{n, plural, =1{1 waiting for you} other{{n} waiting for you}}",
+  "@agentsMemoryPending": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "agentsMemoryCount": "{n, plural, =0{Nothing yet} =1{1 memory} other{{n} memories}}",
+  "@agentsMemoryCount": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
   "agentsStartConversation": "Start conversation",
   "agentsStarting": "Starting…",
   "agentsStartFailed": "Couldn't start the conversation: {message}",
@@ -271,6 +431,7 @@
   "commonCancel": "Cancel",
   "commonDone": "Done",
   "commonSave": "Save",
+  "commonAdd": "Add",
   "commonRetry": "Retry",
   "commonOpen": "Open",
   "commonClose": "Close",
@@ -327,7 +488,8 @@
     }
   },
   "machineRevoked": "This phone was removed from this machine",
-  "machineIncompatible": "Machine needs an update",
+  "machineRuntimeOutdated": "Machine needs an update",
+  "machineAppOutdated": "App needs an update",
   "timeJustNow": "just now",
   "timeMinutesAgo": "{n} min ago",
   "@timeMinutesAgo": {
@@ -466,6 +628,7 @@
     }
   },
   "conversationNewFile": "New file",
+  "conversationNoNewlineAtEnd": "No newline at end of file",
   "conversationPlan": "Plan · {done}/{total}",
   "@conversationPlan": {
     "placeholders": {
@@ -616,7 +779,39 @@
     }
   },
   "launchLoadFailed": "Couldn't load this machine's projects",
-  "launchNoProjects": "No projects open on this machine. Open one in Smelt on the computer first.",
+  "launchNoProjects": "No projects open on this machine yet.",
+  "launchOpenFolder": "Open another folder…",
+  "launchOpenFolderHint": "Pick a folder on this machine as a project",
+  "launchStepFolder": "Choose a folder",
+  "launchFolderUp": "Up one level",
+  "launchFolderOpened": "Already a project",
+  "launchFolderEmpty": "No subfolders here",
+  "launchFolderLoadFailed": "Couldn't open this folder",
+  "launchFolderOpen": "Open “{name}” as a project",
+  "@launchFolderOpen": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "launchFolderUse": "Use “{name}”",
+  "@launchFolderUse": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "launchFolderOpening": "Opening…",
+  "launchFolderOpenFailed": "Couldn't open the project: {message}",
+  "@launchFolderOpenFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
   "launchNoProject": "No project",
   "launchNoProjectHint": "Talk to one of your agents in its own space",
   "launchSectionPinned": "Pinned",
@@ -780,8 +975,16 @@
       }
     }
   },
-  "machinesIncompatibleBody": "This app and Smelt on {name} are on incompatible versions. Update the older one, then reconnect. If it still fails, pair again.",
-  "@machinesIncompatibleBody": {
+  "machinesRuntimeOutdatedBody": "Smelt on {name} is older than this app, and the versions are incompatible. Update Smelt on that machine, then reconnect. If it still fails, pair again.",
+  "@machinesRuntimeOutdatedBody": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesAppOutdatedBody": "This app is older than Smelt on {name}, and the versions are incompatible. Update this app, then reconnect.",
+  "@machinesAppOutdatedBody": {
     "placeholders": {
       "name": {
         "type": "String"
@@ -853,7 +1056,8 @@
   },
   "machinesPairFailed": "Couldn't pair",
   "machinesPairErrorExpired": "This pairing code has expired or was already used. Make a new one on the machine and scan it.",
-  "machinesPairErrorIncompatible": "This app and Smelt on that machine are on incompatible versions. Update the older one, then pair with a new code.",
+  "machinesPairErrorRuntimeOutdated": "Smelt on that machine is older than this app, and the versions are incompatible. Update Smelt there, then pair with a new code.",
+  "machinesPairErrorAppOutdated": "This app is older than Smelt on that machine, and the versions are incompatible. Update this app, then pair with a new code.",
   "machinesPairErrorOffline": "Couldn't reach the machine. Check that it's awake and both sides are online, then try again. If the code has expired, make a new one.",
   "machinesPairErrorRejected": "The machine turned this phone away. Make a new pairing code on it and try again.",
   "machinesPairErrorCancelled": "Pairing was interrupted. Try again.",

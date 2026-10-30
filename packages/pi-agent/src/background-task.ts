@@ -2,6 +2,7 @@ import { connect, type Socket } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import { createBashTool, defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { keepsForegroundTimeout, watchHostCommand } from "./bash-run.ts";
+import { stripSessionControlFromSpawnEnv } from "./session-control-env.ts";
 import { type PeerMessageKind, SMELT_PEER_MESSAGE_CUSTOM_TYPE, peerMessage, peerMessageKind } from "./peer-message.ts";
 import {
 	SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
@@ -505,7 +506,13 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 				}
 				const timeout = typeof params.timeout === "number" ? params.timeout : undefined;
 				if (inSubagent || keepsForegroundTimeout(timeout)) {
-					return createBashTool(ctx.cwd).execute(toolCallId, { command, timeout }, signal, onUpdate);
+					return createBashTool(ctx.cwd, {
+						spawnHook: ({ command: cmd, cwd, env }) => ({
+							command: cmd,
+							cwd,
+							env: stripSessionControlFromSpawnEnv(env),
+						}),
+					}).execute(toolCallId, { command, timeout }, signal, onUpdate);
 				}
 				const ran = await watchHostCommand({
 					signal,

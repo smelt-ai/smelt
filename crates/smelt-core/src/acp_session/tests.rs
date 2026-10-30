@@ -1126,6 +1126,7 @@ fn pending_permission_defers_dangling_tool_finalization() {
     );
     apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::EndTurn));
     s.permissions.push(LivePermission {
+        id: "p1".into(),
         tool_call_id: "shell".into(),
         question: "允许执行？".into(),
         options: Vec::new(),
@@ -2099,6 +2100,7 @@ fn selecting_one_permission_keeps_other_requests_visible() {
     let mut s = fresh_state();
     s.permissions = vec![
         LivePermission {
+            id: "p1".into(),
             question: "first".into(),
             tool_call_id: "tool-1".into(),
             options: vec![PermissionOptionView {
@@ -2111,6 +2113,7 @@ fn selecting_one_permission_keeps_other_requests_visible() {
             raw_request_line: None,
         },
         LivePermission {
+            id: "p1".into(),
             question: "second".into(),
             tool_call_id: "tool-2".into(),
             options: vec![PermissionOptionView {
@@ -2137,6 +2140,7 @@ fn permission_selection_needs_the_matching_tool_call() {
     let mut s = fresh_state();
     for tool_call_id in ["tool-1", "tool-2"] {
         s.permissions.push(LivePermission {
+            id: "p1".into(),
             question: tool_call_id.into(),
             tool_call_id: tool_call_id.into(),
             options: vec![PermissionOptionView {
@@ -2165,6 +2169,7 @@ fn streaming_updates_keep_awaiting_approval_while_a_card_is_pending() {
     let mut s = fresh_state();
     note_prompt_sent(&mut s, "hi".into(), Vec::new());
     s.permissions.push(LivePermission {
+        id: "p1".into(),
         question: "允许写文件？".into(),
         tool_call_id: "tool-1".into(),
         options: vec![PermissionOptionView {
@@ -2334,6 +2339,7 @@ fn force_end_sets_kind_and_clears_pending_cards() {
     let mut s = fresh_state();
     note_prompt_sent(&mut s, "hi".into(), Vec::new());
     s.permissions.push(LivePermission {
+        id: "p1".into(),
         tool_call_id: "tool".into(),
         question: "允许？".into(),
         options: Vec::new(),
@@ -2342,6 +2348,7 @@ fn force_end_sets_kind_and_clears_pending_cards() {
         raw_request_line: None,
     });
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "选一个".into(),
         raw_fields: Vec::new(),
         chosen: BTreeMap::new(),
@@ -2579,6 +2586,7 @@ fn choose_elicitation_single_select_signals_auto_submit() {
     use agent_client_protocol::schema::v1::ElicitationContentValue as V;
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "pick one".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),
@@ -2615,6 +2623,7 @@ fn choose_elicitation_multi_select_toggles() {
     use agent_client_protocol::schema::v1::ElicitationContentValue as V;
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "pick many".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),
@@ -2660,6 +2669,7 @@ fn submit_elicitation_custom_answer_wins_over_chosen_option() {
     let (select_tx, select_rx) = mpsc::channel();
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "两道题".into(),
         raw_fields: vec![
             ElicitField {
@@ -2720,6 +2730,7 @@ fn submit_elicitation_custom_answer_wins_over_chosen_option() {
 fn set_elicitation_text_rejects_fields_without_custom_input() {
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "普通单选".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),
@@ -2755,6 +2766,7 @@ fn set_elicitation_text_rejects_fields_without_custom_input() {
 fn recovered_elicitation_answer_appends_custom_text() {
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "恢复的题".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),
@@ -3067,6 +3079,43 @@ fn compaction_end_without_a_window_keeps_the_known_one() {
         Some((30_782, 1_000_000)),
         "驱动不知道模型窗口时沿用已知窗口，不能停在压缩前的用量"
     );
+}
+
+/// 压缩中途进程没了，`compaction_end` 不会再来。转圈不能留到下一个进程。
+#[test]
+fn provider_gone_mid_compaction_stops_compacting() {
+    let compacting = || {
+        let mut state = fresh_state();
+        apply_event(
+            &mut state,
+            ConversationEvent::Compaction {
+                running: true,
+                used: None,
+                size: None,
+            },
+        );
+        assert!(state.compacting);
+        state
+    };
+
+    let mut state = compacting();
+    apply_event(
+        &mut state,
+        ConversationEvent::Fatal("Pi RPC 进程已关闭 stdout".into()),
+    );
+    assert!(!state.compacting, "进程异常退出");
+
+    let mut state = compacting();
+    force_end(
+        &mut state,
+        AcpEndKind::TransportDisconnected,
+        "连接意外中断",
+    );
+    assert!(!state.compacting, "连接断开");
+
+    let mut state = compacting();
+    reset_for_restart(&mut state);
+    assert!(!state.compacting, "重新开始换了新进程");
 }
 
 /// 改配置失败是一次性提示，带类别；不进状态行，不然下一轮一直挂着。

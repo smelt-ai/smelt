@@ -50,9 +50,10 @@ axum = { version = "0.8.9", features = ["ws"] }
 agent-client-protocol = "=3.4.0"
 smol = "2"
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 # `conversation.image`：手机按需取对话里的图，缩略图在运行时这边解码、缩放、重新编码。
-base64 = "0.22"
+base64 = "0.23"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # 终端 kitty 图形：程序用 `o=z` 发 zlib 压缩的像素数据。
 flate2 = "1"

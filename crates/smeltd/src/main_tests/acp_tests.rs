@@ -19,9 +19,12 @@ fn nothing_sent() -> smelt_core::acp_wire::FrameMirror {
 fn decode_frame(mirror: &mut smelt_core::acp_wire::FrameMirror, line: &str) -> serde_json::Value {
     let frame: serde_json::Value = serde_json::from_str(line).unwrap();
     match frame.get("delta") {
-        Some(delta) => mirror
-            .apply(&serde_json::from_value(delta.clone()).unwrap())
-            .unwrap(),
+        Some(delta) => serde_json::from_str(
+            &mirror
+                .apply(&serde_json::from_value(delta.clone()).unwrap())
+                .unwrap(),
+        )
+        .unwrap(),
         None => {
             mirror.full(&frame);
             frame
@@ -745,6 +748,7 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
         .lock()
         .permissions
         .push(smelt_core::acp_session::LivePermission {
+            id: "p1".into(),
             question: "允许执行？".into(),
             tool_call_id: "tool-1".into(),
             options: vec![smelt_core::acp_session::PermissionOptionView {
@@ -843,6 +847,7 @@ fn automation_run_keeps_elicitation_actions() {
             run_id: "run-2".into(),
         });
     slot.value.reduced.lock().elicitation = Some(smelt_core::acp_session::LiveElicitation {
+        id: "q1".into(),
         message: "补充信息".into(),
         raw_fields: Vec::new(),
         chosen: BTreeMap::new(),
@@ -3807,6 +3812,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
     ended
         .permissions
         .push(smelt_core::acp_session::LivePermission {
+            id: "p1".into(),
             question: "旧审批问题".into(),
             tool_call_id: "tool".into(),
             options: Vec::new(),
@@ -3829,6 +3835,7 @@ fn pending_question_prefers_permission_over_elicitation() {
     assert_eq!(acp_pending_question(&s), None);
 
     s.permissions.push(LivePermission {
+        id: "p1".into(),
         question: "要不要覆盖这个文件？".into(),
         tool_call_id: "t1".into(),
         options: Vec::new(),
@@ -3839,6 +3846,42 @@ fn pending_question_prefers_permission_over_elicitation() {
     assert_eq!(
         acp_pending_question(&s).as_deref(),
         Some("要不要覆盖这个文件？")
+    );
+}
+
+/// 会话状态里的 `pending_request` 跟问句取同一个请求：先审批，再选择题；身份是请求自己的。
+#[test]
+fn pending_request_names_the_request_the_question_comes_from() {
+    use smelt_core::acp_session::{LiveElicitation, LivePermission};
+
+    let mut s = AcpSessionState::default();
+    assert_eq!(acp_pending_request(&s), None);
+
+    s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
+        message: "选一个".into(),
+        raw_fields: Vec::new(),
+        chosen: BTreeMap::new(),
+        text_values: BTreeMap::new(),
+        responder: None,
+        recovered_tool_call_id: None,
+        raw_request_line: None,
+    });
+    assert_eq!(acp_pending_request(&s).as_deref(), Some("elicitation:q1"));
+
+    s.permissions.push(LivePermission {
+        id: "p1".into(),
+        question: "要不要覆盖这个文件？".into(),
+        tool_call_id: "t1".into(),
+        options: Vec::new(),
+        details: smelt_core::acp_session::ApprovalDetailsView::Generic,
+        responder: None,
+        raw_request_line: None,
+    });
+    assert_eq!(
+        acp_pending_request(&s).as_deref(),
+        Some("permission:p1"),
+        "认请求自己的 id，不认工具调用 id：同一个工具调用可能再来一次审批"
     );
 }
 

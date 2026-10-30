@@ -1,6 +1,6 @@
 //! 改键：出厂键位、覆盖怎么生效、键表里怎么换段、录到的键怎么判。不拉窗口。
 
-use gpui::{KeyBinding, KeyContext, Keymap, Keystroke};
+use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, OperatingSystem, TestAppContext};
 use smelt_client_store::KeyBindingRecord;
 
 use super::{
@@ -9,8 +9,18 @@ use super::{
 };
 use crate::{OpenDocs, ReportIssue, ToggleCommandPalette, ToggleSidebar};
 
+/// 测试 App 的本机系统，录键判定和解析都按它来，跟 `app_key_bindings` 一致。
+fn os() -> OperatingSystem {
+    TestAppContext::single().update(|cx| cx.platform_info().os)
+}
+
 fn stroke(spec: &str) -> Keystroke {
-    Keystroke::parse(spec).expect("keystroke")
+    Keystroke::parse_with_os(spec, os()).expect("keystroke")
+}
+
+/// `KeyBinding::load` 要 App，用一个不开窗口的测试 App 算键位。
+fn app_bindings(overrides: &Overrides) -> Vec<KeyBinding> {
+    TestAppContext::single().update(|cx| app_key_bindings(overrides, cx))
 }
 
 fn overrides(pairs: &[(&str, Option<&str>)]) -> Overrides {
@@ -25,7 +35,7 @@ fn workspace() -> Vec<KeyContext> {
 }
 
 fn palette_keys(overrides: &Overrides) -> Vec<Keystroke> {
-    let keymap = Keymap::new(app_key_bindings(overrides));
+    let keymap = Keymap::new(app_bindings(overrides));
     keymap
         .bindings_for_action(&ToggleCommandPalette)
         .map(|binding| binding.keystrokes()[0].inner().clone())
@@ -41,8 +51,8 @@ fn assert_set(outcome: Recorded, spec: &str) {
 }
 
 fn judge(id: &str, spec: &str, overrides: &Overrides) -> Recorded {
-    let keymap = app_key_bindings(overrides);
-    recorded(id, &stroke(spec), overrides, &keymap)
+    let keymap = app_bindings(overrides);
+    recorded(id, &stroke(spec), overrides, &keymap, os())
 }
 
 #[test]
@@ -65,7 +75,7 @@ fn shortcut_ids_are_unique_and_defaults_do_not_collide() {
 #[test]
 fn every_app_binding_carries_the_app_marker() {
     assert!(
-        app_key_bindings(&Overrides::new())
+        app_bindings(&Overrides::new())
             .iter()
             .all(|binding| binding.meta() == Some(APP_KEYMAP))
     );
@@ -80,7 +90,7 @@ fn an_override_replaces_the_default_and_none_unbinds() {
     );
     assert!(palette_keys(&overrides(&[("command_palette", None)])).is_empty());
 
-    let keymap = Keymap::new(app_key_bindings(&overrides(&[(
+    let keymap = Keymap::new(app_bindings(&overrides(&[(
         "command_palette",
         Some("cmd-shift-p"),
     )])));
@@ -90,25 +100,28 @@ fn an_override_replaces_the_default_and_none_unbinds() {
 
 #[test]
 fn unknown_actions_and_broken_keystrokes_fall_back_to_defaults() {
-    let loaded = overrides_from_records(vec![
-        KeyBindingRecord {
-            action_id: "command_palette".to_string(),
-            keystroke: Some("cmd-j".to_string()),
-        },
-        KeyBindingRecord {
-            action_id: "toggle_sidebar".to_string(),
-            keystroke: None,
-        },
-        KeyBindingRecord {
-            action_id: "no_such_action".to_string(),
-            keystroke: Some("cmd-l".to_string()),
-        },
-        // 不认识的修饰键解析不了。`cmd-` 倒是合法的：⌘ 加减号键。
-        KeyBindingRecord {
-            action_id: "split_beside".to_string(),
-            keystroke: Some("hyper-k".to_string()),
-        },
-    ]);
+    let loaded = overrides_from_records(
+        vec![
+            KeyBindingRecord {
+                action_id: "command_palette".to_string(),
+                keystroke: Some("cmd-j".to_string()),
+            },
+            KeyBindingRecord {
+                action_id: "toggle_sidebar".to_string(),
+                keystroke: None,
+            },
+            KeyBindingRecord {
+                action_id: "no_such_action".to_string(),
+                keystroke: Some("cmd-l".to_string()),
+            },
+            // 不认识的修饰键解析不了。`cmd-` 倒是合法的：⌘ 加减号键。
+            KeyBindingRecord {
+                action_id: "split_beside".to_string(),
+                keystroke: Some("hyper-k".to_string()),
+            },
+        ],
+        os(),
+    );
     assert_eq!(
         loaded,
         overrides(&[("command_palette", Some("cmd-j")), ("toggle_sidebar", None)])
@@ -121,10 +134,10 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
     let before = KeyBinding::new("cmd-shift-x", OpenDocs, Some("Component"));
     let after = KeyBinding::new("cmd-shift-y", ReportIssue, Some("Plugin"));
     let mut existing = vec![before];
-    existing.extend(app_key_bindings(&Overrides::new()));
+    existing.extend(app_bindings(&Overrides::new()));
     existing.push(after);
 
-    let app = app_key_bindings(&overrides(&[("toggle_sidebar", Some("cmd-shift-b"))]));
+    let app = app_bindings(&overrides(&[("toggle_sidebar", Some("cmd-shift-b"))]));
     let app_len = app.len();
     let rebuilt = splice_app_bindings(existing, app);
 

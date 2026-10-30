@@ -199,3 +199,28 @@ class ShelfRow extends StatelessWidget {
     );
   }
 }
+
+/// 一列行：行间发丝线，不垫搁板底。用在弹层、整页列表这种本身就是那块板的地方。
+class HairlineRows extends StatelessWidget {
+  const HairlineRows({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final (index, child) in children.indexed) ...[
+          if (index > 0)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(start: Space.lg),
+              child: Divider(height: Strokes.hairline, color: c.hairline),
+            ),
+          child,
+        ],
+      ],
+    );
+  }
+}

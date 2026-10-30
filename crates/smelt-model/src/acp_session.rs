@@ -178,6 +178,9 @@ pub struct PermissionOptionView {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PendingPermission {
+    /// 请求身份，见 `LivePermission::id`。
+    #[serde(default)]
+    pub id: String,
     pub question: String,
     pub tool_call_id: String,
     pub options: Vec<PermissionOptionView>,
@@ -242,6 +245,9 @@ fn elicitation_field_required_by_default() -> bool {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PendingElicitation {
+    /// 卡片身份，见 `LiveElicitation::id`。
+    #[serde(default)]
+    pub id: String,
     pub message: String,
     pub fields: Vec<ElicitFieldView>,
     /// 已选中的 (字段下标 → 选项下标列表)，跟旧版 `ElicitCard.chosen` 同一份
@@ -249,6 +255,17 @@ pub struct PendingElicitation {
     pub chosen: BTreeMap<usize, Vec<usize>>,
     #[serde(default)]
     pub text_values: BTreeMap<usize, String>,
+}
+
+/// 会话正在等的那个请求的身份：先审批（`permission:<请求 id>`），再选择题
+/// （`elicitation:<卡片 id>`）。守护推会话状态、客户端认取回的详情用的是同一个。
+pub fn pending_request_id(
+    first_permission: Option<&str>,
+    elicitation: Option<&str>,
+) -> Option<String> {
+    first_permission
+        .map(|id| format!("permission:{id}"))
+        .or_else(|| elicitation.map(|id| format!("elicitation:{id}")))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

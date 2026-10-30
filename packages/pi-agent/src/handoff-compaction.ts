@@ -45,6 +45,25 @@ export function buildHandoffInstructions(customInstructions?: string): string {
 }
 
 /**
+ * 摘要请求用的模型：输出上限收到 `0.8 × reserveTokens`。
+ *
+ * Pi 的摘要请求不带 max_tokens（`generateSummary` 的 reserveTokens 参数没用上），
+ * 于是落到模型自身上限。
+ * 压缩在窗口快满时才触发，待摘要的历史已接近整个窗口，大输出模型（如 1M 窗口、
+ * 384K 输出）的「输入 + max_tokens」必然超窗，provider 直接 400，压缩永远失败。
+ */
+export function summarizationModel<M extends { maxTokens: number }>(
+	model: M,
+	settings: CompactionPreparation["settings"],
+): M {
+	const budget = Math.floor(0.8 * settings.reserveTokens);
+	if (model.maxTokens > 0 && model.maxTokens <= budget) {
+		return model;
+	}
+	return { ...model, maxTokens: budget };
+}
+
+/**
  * 执行结构化 Handoff 压缩。
  * 如果缺少模型或凭据，返回 undefined 自动回退到 Pi 默认压缩实现。
  */
@@ -65,7 +84,7 @@ export async function runHandoffCompaction(
 		const instructions = buildHandoffInstructions(customInstructions);
 		return await compact(
 			preparation,
-			ctx.model,
+			summarizationModel(ctx.model, preparation.settings),
 			auth.apiKey,
 			auth.headers as Record<string, string> | undefined,
 			instructions,

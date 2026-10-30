@@ -804,6 +804,9 @@ fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
                     });
                     body.push_str(line.text.trim_end_matches('\n'));
                     body.push('\n');
+                    if line.no_newline {
+                        body.push_str("\\ No newline at end of file\n");
+                    }
                 }
                 blocks.push(fenced_block("diff", body.trim_end()));
             }

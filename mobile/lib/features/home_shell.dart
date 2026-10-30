@@ -233,6 +233,8 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
       ..clearSnackBars()
       ..showSnackBar(
         SnackBar(
+          // 带「打开」的提示默认一直挂着，到时间就走，跟更新提示一样。
+          persist: false,
           // 提醒的 title 是阶段（「已完成」）；正文没有待答问题、daemon 也不知道标题时
           // 只剩「会话 + id 前缀」。目录里有这条会话就用它的标题。
           content: Text(

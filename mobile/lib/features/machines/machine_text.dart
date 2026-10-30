@@ -57,7 +57,8 @@ String pairingFailureText(L10n l10n, Object error) {
   }
   return switch (error.kind) {
     SmeltErrorKind.invalidPairing => l10n.machinesPairErrorExpired,
-    SmeltErrorKind.incompatible => l10n.machinesPairErrorIncompatible,
+    SmeltErrorKind.runtimeOutdated => l10n.machinesPairErrorRuntimeOutdated,
+    SmeltErrorKind.appOutdated => l10n.machinesPairErrorAppOutdated,
     SmeltErrorKind.offline => l10n.machinesPairErrorOffline,
     SmeltErrorKind.unpaired => l10n.machinesPairErrorRejected,
     SmeltErrorKind.cancelled => l10n.machinesPairErrorCancelled,

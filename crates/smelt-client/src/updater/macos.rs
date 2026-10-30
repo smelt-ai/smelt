@@ -149,7 +149,7 @@ impl StagedUpdate {
             let mut hasher = Sha256::new();
             hasher.update(self.url.as_bytes());
             hasher.update(self.staged_app.as_os_str().as_encoded_bytes());
-            self.id = format!("legacy-{:x}", hasher.finalize());
+            self.id = format!("legacy-{}", hex::encode(hasher.finalize()));
         }
     }
 
@@ -483,19 +483,19 @@ fn clear_preparing_update_in_state(state: &mut UpdateState, expected: &StagedUpd
     }
 }
 
-/// 返回允许由手动检查替换的精确失败作业。只认同一条 Ready 事务；若恢复流程已经
-/// 推进到另一条作业或 Applying，调用方必须停下，不能用过期 UI 状态清除它。
-fn failed_update_to_replace(
+/// 返回允许由检查替换的精确暂存作业（待安装或安装失败）。只认同一条 Ready 事务；若
+/// 恢复流程已经推进到另一条作业或 Applying，调用方必须停下，不能用过期 UI 状态清除它。
+fn staged_update_to_replace(
     state: &UpdateState,
     expected: &StagedUpdate,
 ) -> anyhow::Result<StagedUpdate> {
     if expected.phase != StagedUpdatePhase::Ready {
-        anyhow::bail!("安装失败作业不在 Ready 阶段");
+        anyhow::bail!("暂存的更新作业不在 Ready 阶段");
     }
     let pending = state
         .staged
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("安装失败作业已不存在"))?;
+        .ok_or_else(|| anyhow::anyhow!("暂存的更新作业已不存在"))?;
     if !same_update(&pending, expected) {
         anyhow::bail!("待安装更新已被另一条作业替换");
     }
@@ -536,9 +536,9 @@ fn clear_preparing_update(expected: &StagedUpdate) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 更新源已指向另一份发布包时，原子作废精确匹配的安装失败作业。状态先持久化
-/// 清空，再删除缓存；中途强杀至多留下可清理的缓存，不会让新旧作业同时生效。
-pub fn discard_failed_update(expected: &StagedUpdate) -> anyhow::Result<()> {
+/// 更新源已指向另一份发布包时，原子作废精确匹配的暂存作业（待安装或安装失败）。
+/// 状态先持久化清空，再删除缓存；中途强杀至多留下可清理的缓存，不会让新旧作业同时生效。
+pub fn discard_staged_update(expected: &StagedUpdate) -> anyhow::Result<()> {
     let _guard = acquire_update_lock()?;
     let state_path = update_state_path()?;
     let mut state = load_update_state_locked(&state_path)?;
@@ -546,10 +546,10 @@ pub fn discard_failed_update(expected: &StagedUpdate) -> anyhow::Result<()> {
         return Ok(());
     }
     let app_bundle = current_app_bundle()?;
-    discard_failed_update_locked(&state_path, &mut state, expected, &app_bundle)
+    discard_staged_update_locked(&state_path, &mut state, expected, &app_bundle)
 }
 
-fn discard_failed_update_locked(
+fn discard_staged_update_locked(
     state_path: &Path,
     state: &mut UpdateState,
     expected: &StagedUpdate,
@@ -558,7 +558,7 @@ fn discard_failed_update_locked(
     if state.staged.is_none() {
         return Ok(());
     }
-    let pending = failed_update_to_replace(state, expected)?;
+    let pending = staged_update_to_replace(state, expected)?;
     abandon_pending_update_locked(state_path, state, &pending, app_bundle, None)
 }
 
@@ -1148,8 +1148,8 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
         }
     }
     Ok(format!(
-        "{BUNDLE_FINGERPRINT_VERSION}:{:x}",
-        hasher.finalize()
+        "{BUNDLE_FINGERPRINT_VERSION}:{}",
+        hex::encode(hasher.finalize())
     ))
 }
 
@@ -1753,11 +1753,11 @@ mod tests {
         UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
         acquire_installer_runtime_lease_at, app_fingerprint, begin_staged_update_in_state,
         classify_applying_recovery, classify_bundle_use_output, clear_installer_attempt_in_state,
-        clear_preparing_update_in_state, decide_failed_update_check, discard_failed_update_locked,
-        failed_update_to_replace, installer_attempt_from_state, is_valid_update_id,
-        load_update_state_locked, promote_staged_update_in_state, reconcile_update_state_locked,
+        clear_preparing_update_in_state, decide_staged_update_check, discard_staged_update_locked,
+        installer_attempt_from_state, is_valid_update_id, load_update_state_locked,
+        promote_staged_update_in_state, reconcile_update_state_locked,
         record_installer_failure_in_state, safe_component, same_update, save_update_state_locked,
-        update_asset,
+        staged_update_to_replace, update_asset,
     };
     use std::path::PathBuf;
 
@@ -2097,9 +2097,10 @@ mod tests {
         assert_eq!(back.cleanup_app, state.cleanup_app);
     }
 
+    /// 暂存着包也能检查：更新源可能又发了更新的版本（#165）。
     #[test]
-    fn only_failed_install_jobs_allow_a_new_manual_check() {
-        assert!(!UpdateStatus::ReadyToInstall(staged_update("ready")).can_check());
+    fn staged_jobs_allow_a_new_manual_check() {
+        assert!(UpdateStatus::ReadyToInstall(staged_update("ready")).can_check());
         assert!(UpdateStatus::InstallFailed(staged_update("failed")).can_check());
         assert!(UpdateStatus::Idle.can_check());
         assert!(UpdateStatus::Failed(UpdateFailure::Download).can_check());
@@ -2108,17 +2109,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_install_check_keeps_the_same_release_but_replaces_a_changed_one() {
-        let failed = staged_update("failed");
+    fn staged_update_check_keeps_the_same_release_but_replaces_a_changed_one() {
+        let staged = staged_update("ready");
         let same = UpdateCandidate {
             version: "0.6.15".into(),
-            url: failed.url.clone(),
+            url: staged.url.clone(),
         };
         assert_eq!(
-            decide_failed_update_check(
+            decide_staged_update_check(
                 same,
                 &InstalledRelease::Url("https://example.test/releases/old".into()),
-                &failed,
+                &staged,
                 true
             ),
             None
@@ -2129,10 +2130,10 @@ mod tests {
             url: "https://example.test/releases/35040".into(),
         };
         assert_eq!(
-            decide_failed_update_check(
+            decide_staged_update_check(
                 replacement.clone(),
                 &InstalledRelease::Url("https://example.test/releases/old".into()),
-                &failed,
+                &staged,
                 true,
             ),
             Some(CheckOutcome::Download(replacement))
@@ -2143,10 +2144,10 @@ mod tests {
             url: "https://example.test/releases/current".into(),
         };
         assert_eq!(
-            decide_failed_update_check(
+            decide_staged_update_check(
                 rolled_back,
                 &InstalledRelease::Url("https://example.test/releases/current".into()),
-                &failed,
+                &staged,
                 true,
             ),
             Some(CheckOutcome::NoUpdate)
@@ -2154,17 +2155,17 @@ mod tests {
     }
 
     #[test]
-    fn replacing_a_failed_job_never_clears_a_different_or_applying_transaction() {
+    fn replacing_a_staged_job_never_clears_a_different_or_applying_transaction() {
         let failed = staged_update("failed");
         let mut state = UpdateState {
             staged: Some(failed.clone()),
             ..UpdateState::default()
         };
-        assert_eq!(failed_update_to_replace(&state, &failed).unwrap(), failed);
+        assert_eq!(staged_update_to_replace(&state, &failed).unwrap(), failed);
 
         let newer = staged_update("newer");
         state.staged = Some(newer.clone());
-        assert!(failed_update_to_replace(&state, &failed).is_err());
+        assert!(staged_update_to_replace(&state, &failed).is_err());
         assert_eq!(state.staged, Some(newer));
 
         let mut applying = failed.clone();
@@ -2173,12 +2174,12 @@ mod tests {
             "/Applications/.Smelt.smelt-update-failed.app",
         ));
         state.staged = Some(applying.clone());
-        assert!(failed_update_to_replace(&state, &failed).is_err());
+        assert!(staged_update_to_replace(&state, &failed).is_err());
         assert_eq!(state.staged, Some(applying));
     }
 
     #[test]
-    fn replacing_a_failed_job_persists_the_clear_before_the_next_download() {
+    fn replacing_a_staged_job_persists_the_clear_before_the_next_download() {
         let root = test_root("replace-failed");
         let app = fake_current_app(&root, b"current-version");
         let state_path = root.join("update-state.json");
@@ -2189,12 +2190,37 @@ mod tests {
             cleanup_app: None,
         };
 
-        discard_failed_update_locked(&state_path, &mut state, &failed, &app).unwrap();
+        discard_staged_update_locked(&state_path, &mut state, &failed, &app).unwrap();
 
         assert!(state.staged.is_none());
         let persisted = load_update_state_locked(&state_path).unwrap();
         assert!(persisted.staged.is_none());
         assert_eq!(persisted.current_url, state.current_url);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 暂存着 A（待安装）时更新源换成 B：A 挡着 B 下不下来，作废 A 之后 B 才能开始（#165）。
+    #[test]
+    fn discarding_a_ready_job_lets_the_newer_download_begin() {
+        let root = test_root("replace-ready");
+        let app = fake_current_app(&root, b"current-version");
+        let state_path = root.join("update-state.json");
+        let ready = staged_update("ready");
+        let mut state = UpdateState {
+            current_url: Some("https://example.test/releases/current".into()),
+            staged: Some(ready.clone()),
+            cleanup_app: None,
+        };
+        let mut newer = staged_update("newer");
+        newer.url = "https://example.test/releases/35040".into();
+        newer.phase = StagedUpdatePhase::Preparing;
+        newer.fingerprint.clear();
+        assert!(begin_staged_update_in_state(&mut state, &newer).is_err());
+
+        discard_staged_update_locked(&state_path, &mut state, &ready, &app).unwrap();
+        begin_staged_update_in_state(&mut state, &newer).unwrap();
+
+        assert_eq!(state.staged, Some(newer));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -60,6 +60,7 @@
   "conversationUnchangedLines": "{count, plural, =1{1 unchanged line} other{{count} unchanged lines}}",
   "@conversationUnchangedLines": {"placeholders": {"count": {"type": "int"}}},
   "conversationNewFile": "New file",
+  "conversationNoNewlineAtEnd": "No newline at end of file",
   "conversationPlan": "Plan · {done}/{total}",
   "@conversationPlan": {"placeholders": {"done": {"type": "int"}, "total": {"type": "int"}}},
   "conversationPlanPending": "To do",

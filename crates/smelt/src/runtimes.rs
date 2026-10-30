@@ -132,7 +132,7 @@ pub(crate) enum RuntimeStatus {
         smelt_home: Option<String>,
     },
     Offline(String),
-    /// 连得上，但版本和这个桌面对不上（见 `smelt_client::compat`），说明里写着该升级
+    /// 连得上，但版本和这个桌面对不上（见 `smelt_runtime_client::compat`），说明里写着该升级
     /// 哪一边。这时不订阅它的事件：订阅了也解不出来，只会断开重连。
     Incompatible {
         /// 运行时自己报的版本。
@@ -696,13 +696,13 @@ pub(crate) fn status_of(client: &RuntimeClient) -> RuntimeStatus {
 }
 
 fn incompatible_status(
-    incompatible: &smelt_client::compat::Incompatibility,
+    incompatible: &smelt_runtime_client::compat::Incompatibility,
     os: Option<&str>,
 ) -> RuntimeStatus {
-    use smelt_client::compat::Outdated;
+    use smelt_runtime_client::compat::Outdated;
 
     let fix = match incompatible.outdated {
-        Outdated::Desktop => IncompatibleFix::UpdateDesktop,
+        Outdated::Client => IncompatibleFix::UpdateDesktop,
         Outdated::Runtime if upgrades_remotely(os) => IncompatibleFix::UpgradeRuntime,
         Outdated::Runtime => IncompatibleFix::UpdateSmeltThere,
     };
@@ -801,7 +801,7 @@ pub(crate) fn manual_upgrade_command() -> String {
 fn described_status(
     described: smelt_runtime_client::protocol::control::SystemDescribeResult,
 ) -> RuntimeStatus {
-    if let Err(incompatible) = smelt_client::compat::check(&described) {
+    if let Err(incompatible) = smelt_runtime_client::compat::check(&described) {
         return incompatible_status(&incompatible, described.daemon.os.as_deref());
     }
     RuntimeStatus::Online {
@@ -1566,7 +1566,7 @@ mod tests {
         );
         let incompatible = RuntimeStatus::Incompatible {
             version: "0.9.0-rc.3".into(),
-            detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，桌面要 v2）".into(),
+            detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，客户端要 v2）".into(),
             fix: IncompatibleFix::UpgradeRuntime,
         };
         assert_eq!(
@@ -1799,7 +1799,7 @@ mod tests {
             "运行时比桌面新，只升不降，不能请它升级"
         );
         assert_eq!(version, "9.9.9");
-        assert!(detail.contains("需要升级桌面"), "{detail}");
+        assert!(detail.contains("需要升级客户端"), "{detail}");
     }
 
     /// 订阅线程把每次探测到的连通性报回来，订阅断开也报：侧栏的「离线」靠它更新，

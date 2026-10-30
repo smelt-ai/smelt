@@ -70,7 +70,7 @@ pub fn daemon_pipe_path(sock: &Path) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     // Windows 路径不区分大小写，同一个目录换个写法也得到同一个名字。
     let digest = Sha256::digest(sock.to_string_lossy().to_lowercase().as_bytes());
-    let short: String = digest[..8].iter().map(|byte| format!("{byte:02x}")).collect();
+    let short = hex::encode(&digest[..8]);
     user_pipe_path(&format!("daemon-{short}"))
 }
 

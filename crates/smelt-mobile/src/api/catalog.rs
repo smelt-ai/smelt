@@ -118,6 +118,9 @@ pub struct SessionSummary {
     pub updated_at: i64,
     /// 工具名或审批问句。
     pub detail: Option<String>,
+    /// 对话会话正在等的那个审批或选择题的身份，变了就是换了一个请求。终端会话、没在等的
+    /// 会话没有。
+    pub pending_request: Option<String>,
     /// 这台手机上还没读的提醒；有值就是未读。
     pub attention: Option<AttentionItem>,
     /// 只有自动化运行的会话才有。
@@ -279,6 +282,65 @@ pub fn delete_session(runtime_id: String, session_id: String) -> Result<(), Smel
 }
 
 // ---------------------------------------------------------------------------
+// 打开项目
+// ---------------------------------------------------------------------------
+
+/// 运行时那台机器上的一个目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    /// 绝对路径，原样回传给 [`browse_dirs`] / [`open_project`]。
+    pub path: String,
+    /// 已经是这台机器上开着的项目。
+    pub opened: bool,
+}
+
+/// 一个快捷位置：主目录、已打开项目所在的目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirShortcut {
+    /// 给人看的路径，主目录缩写成 `~`。
+    pub label: String,
+    pub path: String,
+}
+
+/// 逐级浏览时的一层：当前目录和它下面的子目录（隐藏目录不列）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirListing {
+    /// 规范化后的绝对路径。
+    pub path: String,
+    /// 给人看的路径，主目录缩写成 `~`。
+    pub display_path: String,
+    /// 目录名；根目录没有名字时是路径本身。
+    pub name: String,
+    /// 上一级；已经在根目录时为空。
+    pub parent: Option<String>,
+    /// 当前目录已经是开着的项目。
+    pub opened: bool,
+    /// 主目录在前，然后是最近打开的项目所在的目录，去重。
+    pub shortcuts: Vec<DirShortcut>,
+    /// 按名字排好。
+    pub entries: Vec<DirEntry>,
+}
+
+/// 列运行时那台机器上的一层目录。`path` 为空时从最近打开的项目所在的目录开始（新项目
+/// 多半和老项目放在一起），没有项目或那里进不去时从主目录开始。
+pub fn browse_dirs(runtime_id: String, path: Option<String>) -> Result<DirListing, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .browse_dirs(path.as_deref())
+}
+
+/// 在这台机器上打开一个目录作为项目。已经开着就什么都不改。等运行时推来的目录里出现它
+/// 再返回，拿到就能在里面新建会话。
+pub fn open_project(runtime_id: String, root: String) -> Result<WorkspaceProject, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .open_project(&root)
+}
+
+// ---------------------------------------------------------------------------
 // 自动化
 // ---------------------------------------------------------------------------
 
@@ -347,7 +409,7 @@ pub struct AutomationSummary {
     pub last_run: Option<AutomationRunSummary>,
 }
 
-/// 智能体定义的只读投影。
+/// 智能体定义。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentDefinitionSummary {
     pub id: String,
@@ -358,8 +420,13 @@ pub struct AgentDefinitionSummary {
     /// 长期工作方式。
     pub prompt: String,
     pub plugins: Vec<String>,
+    pub mcp_servers: Vec<String>,
     pub context_folders: Vec<String>,
     pub context_links: Vec<String>,
+    /// 和 `model_id` 成对；都空 = 跟随这台机器的默认模型。
+    pub model_provider: String,
+    pub model_id: String,
+    pub memory_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

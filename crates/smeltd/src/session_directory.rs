@@ -115,6 +115,7 @@ impl SessionRecord {
             phase: self.phase,
             phase_since: now_unix,
             pending_question: None,
+            pending_request: None,
             tokens_used: self.tokens_used,
             branch: self.branch,
             dirty_files: self.dirty_files,
@@ -124,6 +125,7 @@ impl SessionRecord {
             turn_events: self.turn_events,
             agent_event_version: self.agent_event_version,
             active_blocker: None,
+            program_status: false,
             runtime: false,
         };
         // 留下的终端也顶着用户给那段对话起的名字。
@@ -485,6 +487,7 @@ mod tests {
             phase: Phase::AwaitingApproval,
             phase_since: 100,
             pending_question: Some("要不要继续".to_string()),
+            pending_request: None,
             tokens_used: Some(1234),
             branch: Some("feat/ghost".to_string()),
             dirty_files: vec!["a.rs".to_string()],
@@ -498,6 +501,7 @@ mod tests {
                 agent_id: None,
                 tool_name: None,
             }),
+            program_status: false,
             runtime: true,
         }
     }

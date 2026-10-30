@@ -29,7 +29,7 @@ pub fn content_fingerprint(path: &Path) -> io::Result<String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 
 pub fn image_file_name(fingerprint: &str) -> String {

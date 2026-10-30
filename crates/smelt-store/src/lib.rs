@@ -43,12 +43,12 @@ pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
-    MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
-    PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot,
-    QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
-    TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord,
-    WorkspaceSnapshot, WorkspaceTerminalRecord,
+    MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
+    MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
+    PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
+    QuotaCacheWindowRecord, RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord,
+    WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceTerminalRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -580,9 +580,45 @@ impl Store {
         )
     }
 
-    /// 用户采纳一条待确认的记忆。返回是否真有一条待确认被改成可信。
-    pub fn approve_memory(&self, scope: &str, file_name: &str) -> Result<bool, StoreError> {
-        imp::approve_memory(&self.backend, scope, file_name)
+    /// 用户采纳一条记忆。没有来源行时插入 trusted；已有行（含仍标着 trusted
+    /// 但文件已被外部改过的）刷新 `written_at_ms`。返回是否写入了行。
+    pub fn approve_memory(
+        &self,
+        scope: &str,
+        file_name: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        imp::approve_memory(&self.backend, scope, file_name, now_ms)
+    }
+
+    /// 升级迁移：无来源记录的存量记忆是否已回填为 trusted。
+    pub fn memory_legacy_trust_backfill_done(&self) -> Result<bool, StoreError> {
+        imp::memory_legacy_trust_backfill_done(&self.backend)
+    }
+
+    /// 标记存量记忆信任回填已完成（幂等）。
+    pub fn mark_memory_legacy_trust_backfill_done(&self, now_ms: i64) -> Result<(), StoreError> {
+        imp::mark_memory_legacy_trust_backfill_done(&self.backend, now_ms)
+    }
+
+    /// 一条记忆的来源行。文件名按 ASCII 大小写不敏感匹配。
+    pub fn get_memory_provenance(
+        &self,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<Option<MemoryProvenanceRecord>, StoreError> {
+        imp::get_memory_provenance(&self.backend, scope, file_name)
+    }
+
+    /// 把升级回填的来源行和哨兵放进同一个事务提交。
+    pub fn commit_legacy_memory_backfill(
+        &self,
+        files: &[(String, String, i64)],
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::commit_legacy_memory_backfill(&self.backend, files, reason, session_id, now_ms)
     }
 
     /// 删掉一条记忆的元数据（文件已删，或同名重建时不该继承）。
@@ -1414,9 +1450,45 @@ mod imp {
         backend: &Backend,
         scope: &str,
         file_name: &str,
+        now_ms: i64,
     ) -> Result<bool, StoreError> {
         write(backend, |transaction| {
-            crate::memory::approve(transaction, scope, file_name)
+            crate::memory::approve(transaction, scope, file_name, now_ms)
+        })
+    }
+
+    pub(super) fn get_memory_provenance(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<Option<super::MemoryProvenanceRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::memory::get_provenance(&connection, scope, file_name)
+    }
+
+    pub(super) fn commit_legacy_memory_backfill(
+        backend: &Backend,
+        files: &[(String, String, i64)],
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::memory::commit_legacy_backfill(transaction, files, reason, session_id, now_ms)
+        })
+    }
+
+    pub(super) fn memory_legacy_trust_backfill_done(backend: &Backend) -> Result<bool, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::memory::legacy_trust_backfill_done(&connection)
+    }
+
+    pub(super) fn mark_memory_legacy_trust_backfill_done(
+        backend: &Backend,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::memory::mark_legacy_trust_backfill_done(transaction, now_ms)
         })
     }
 
@@ -3683,7 +3755,35 @@ mod imp {
         _backend: &Backend,
         _scope: &str,
         _file_name: &str,
+        _now_ms: i64,
     ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn get_memory_provenance(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+    ) -> Result<Option<super::MemoryProvenanceRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn commit_legacy_memory_backfill(
+        _backend: &Backend,
+        _files: &[(String, String, i64)],
+        _reason: &str,
+        _session_id: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn memory_legacy_trust_backfill_done(
+        _backend: &Backend,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn mark_memory_legacy_trust_backfill_done(
+        _backend: &Backend,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
         unsupported()
     }
     pub(super) fn forget_memory(
@@ -3991,12 +4091,30 @@ mod tests {
             [("rule.md".to_string(), "外部内容".to_string())]
         );
 
-        assert!(store.approve_memory(&agent, "rule.md").unwrap());
+        assert!(store.approve_memory(&agent, "rule.md", 4_000).unwrap());
         assert!(
-            !store.approve_memory(&agent, "rule.md").unwrap(),
-            "已经可信的不算再采纳一次"
+            store.approve_memory(&agent, "rule.md", 5_000).unwrap(),
+            "再次采纳要刷新 written_at_ms，外部改过的 trusted 行才能重新生效"
         );
+        let trusted = store.memory_meta(&agent).unwrap().trusted;
+        assert_eq!(trusted.len(), 1);
+        assert_eq!(trusted[0].written_at_ms, 5_000);
+        assert_eq!(trusted[0].session_id, "s1");
         assert!(store.memory_meta(&agent).unwrap().pending.is_empty());
+
+        assert!(
+            store
+                .approve_memory(&agent, "hand-written.md", 6_000)
+                .unwrap(),
+            "没有来源行的文件也能采纳"
+        );
+        let adopted = store
+            .get_memory_provenance(&agent, "HAND-WRITTEN.md")
+            .unwrap()
+            .expect("大小写不同也能找到刚采纳的行");
+        assert_eq!(adopted.trust, MemoryTrust::Trusted);
+        assert_eq!(adopted.reason, "用户采纳");
+        assert_eq!(adopted.written_at_ms, 6_000);
 
         store.forget_memory(&agent, "fact.md").unwrap();
         assert!(store.memory_meta(&agent).unwrap().usage.is_empty());

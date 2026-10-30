@@ -43,19 +43,17 @@ resolver = "3"
 version = "0.0.0"
 edition = "2024"
 # 与 rust-toolchain.toml 一致。成员 crate 未一律 inherit，钉编译器靠 toolchain 文件。
-rust-version = "1.97.0"
+# gpui-pre-macos 0.3.10 用了 1.98 才稳定的 `Option::map_or_default`。
+rust-version = "1.98.0"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 
 [patch.crates-io]
-# gpui-shell 的标准库（LLRT 模块）依赖 crates.io 的 `rquickjs`，gpui-kit 在它自己的
-# 工作区里把它 patch 成转发到 quickjs-jit 的兼容包，两边才是同一套类型和 VM。
-# patch 不随依赖传递，所以这里照抄一份，rev 必须和各 crate 里的 gpui-kit 一致。
-# 去掉会让 crates.io 的 rquickjs-core 和 quickjs-jit 同时进依赖图，gpui-shell 编不过
-# （2026-10-16 在 8a83be7e 上验证）。上游官方仓库，不是 fork。
-rquickjs = { git = "https://github.com/longbridge/gpui-kit", rev = "219fc1a9bdd6236c3a58f07c810e1b87079890c1" }
+# gpui-kit 0.8.1（611b55e331170ca375214d580b6c5409db858f83）起，gpui-shell 直接依赖
+# crates.io 的 `quickjs-jit` / `quickjs-jit-stdlib` =0.14.1，工作区里不再有
+# `rquickjs` 兼容门面。旧 patch 指向的包已从该修订删除。
 # netdev 0.46.x（iroh → netwatch 引入）在 iOS 上调用了 iOS 不开放的 SystemConfiguration API
 # （API_UNAVAILABLE(ios)，上架审核会拒），还用了 macOS 才有的 `in6_ifreq`。上游在 0.47.0 修了，
 # 但 netwatch 还要求 ^0.46.3，所以钉修复所在的提交：它的版本号仍是 0.46.3，之后的 0.47.0 只改了版本号。
@@ -76,7 +74,7 @@ redundant_clone = "warn"
 # 正确性闸门：空 dbg/todo 不应进主线。存量 style 警告不在这里 deny，避免一次清不完。
 dbg_macro = "deny"
 todo = "deny"
-# 手型光标只留给链接。路径是 gpui-pre 0.3.9 里 `Styled` 上由
+# 手型光标只留给链接。路径是 gpui-pre 0.3.10 里 `Styled` 上由
 # `cursor_style_methods!` 生成的方法（`gpui/src/styled.rs`，模块 `gpui::styled`）。
 # macOS CI 不跑 clippy，真正挡住调用点的是 scripts/lint-pointer.sh。
 disallowed_methods = "deny"

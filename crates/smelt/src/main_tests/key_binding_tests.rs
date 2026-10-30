@@ -2,7 +2,7 @@
 //!
 //! 不拉窗口。`Keymap::bindings_for_input` 就是分发时用的那套优先级。
 
-use gpui::{Action, KeyBinding, KeyContext, Keymap, Keystroke};
+use gpui::{Action, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
 
 use crate::keymap::{Overrides, app_key_bindings};
 use crate::{
@@ -12,7 +12,9 @@ use crate::{
 };
 
 fn keymap() -> Keymap {
-    let mut keymap = Keymap::new(app_key_bindings(&Overrides::new()));
+    let bindings =
+        TestAppContext::single().update(|cx| app_key_bindings(&Overrides::new(), cx));
+    let mut keymap = Keymap::new(bindings);
     // 用 Quit 站在 Input 上，模拟编辑器更深的 Outdent / Replace / Escape。
     keymap.add_bindings([
         KeyBinding::new("cmd-[", Quit, Some("Input")),
@@ -29,17 +31,17 @@ fn contexts(stack: &[&str]) -> Vec<KeyContext> {
         .collect()
 }
 
-fn stroke(spec: &str) -> Keystroke {
+fn stroke(spec: &'static str) -> Keystroke {
     Keystroke::parse(spec).expect("keystroke")
 }
 
-fn matched(spec: &str, stack: &[&str]) -> Vec<KeyBinding> {
+fn matched(spec: &'static str, stack: &[&str]) -> Vec<KeyBinding> {
     let (bindings, pending) = keymap().bindings_for_input(&[stroke(spec)], &contexts(stack));
     assert!(!pending, "{spec} 不该停在半截组合键上");
     bindings.into_vec()
 }
 
-fn first_is<T: Action>(spec: &str, stack: &[&str]) -> bool {
+fn first_is<T: Action>(spec: &'static str, stack: &[&str]) -> bool {
     matched(spec, stack)
         .first()
         .is_some_and(|binding| binding.action().as_any().is::<T>())
@@ -166,11 +168,17 @@ fn migrated_chords_are_not_bound_at_the_root_context() {
     }
 }
 
+/// 与 `app_key_bindings` 里关设置窗口的键一致。`Keystroke::parse` 不接受 `secondary-`。
+#[cfg(target_os = "macos")]
+const CLOSE_SETTINGS_CHORD: &str = "cmd-w";
+#[cfg(not(target_os = "macos"))]
+const CLOSE_SETTINGS_CHORD: &str = "ctrl-w";
+
 /// 设置窗口 Cmd+W（Windows / Linux 是 Ctrl+W）关窗；它是普通窗口，Esc 不关它。
 #[test]
 fn settings_window_closes_on_secondary_w_but_not_escape() {
     assert!(first_is::<CloseSettingsWindow>(
-        "secondary-w",
+        CLOSE_SETTINGS_CHORD,
         &["SettingsWindow"]
     ));
     assert!(matched("escape", &["SettingsWindow"]).is_empty());

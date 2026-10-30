@@ -16,10 +16,12 @@ use smelt_event_protocol::{
 use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::automation::{Automation, AutomationFile, AutomationRun};
 use smelt_model::daemon_state::{DaemonPhase, DaemonSessionState};
+use smelt_model::runtime_path::PathStyle;
 use smelt_model::workspace_directory::{
     WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
 };
 use smelt_runtime_client::protocol::control::{ControlError, ControlResponse};
+use smelt_runtime_client::protocol::workspace::{BrowseDirsResult, BrowseEntry};
 use smelt_runtime_client::protocol::write_json_line;
 
 use super::projection::{self, CatalogState};
@@ -659,6 +661,86 @@ fn automation_catalog_projects_triggers_states_and_the_last_run() {
 // 假运行时与连接状态
 // ---------------------------------------------------------------------------
 
+fn browse_entry(name: &str, path: &str, is_dir: bool) -> BrowseEntry {
+    BrowseEntry {
+        name: name.into(),
+        path: path.into(),
+        is_dir,
+    }
+}
+
+#[test]
+fn dir_listing_abbreviates_home_and_offers_where_projects_live() {
+    let opened = [
+        "/Users/me/code/a".to_string(),
+        "/srv/b".to_string(),
+        "/Users/me/code/c".to_string(),
+    ];
+    let listing = projection::dir_listing(
+        PathStyle::Posix,
+        BrowseDirsResult {
+            path: "/Users/me/code".into(),
+            parent: Some("/Users/me".into()),
+            home: "/Users/me".into(),
+            entries: vec![
+                browse_entry("a", "/Users/me/code/a", true),
+                browse_entry("new", "/Users/me/code/new", true),
+                browse_entry("notes.md", "/Users/me/code/notes.md", false),
+            ],
+        },
+        &opened,
+    );
+
+    assert_eq!(
+        (
+            listing.display_path.as_str(),
+            listing.name.as_str(),
+            listing.opened
+        ),
+        ("~/code", "code", false)
+    );
+    let shortcuts: Vec<(&str, &str)> = listing
+        .shortcuts
+        .iter()
+        .map(|s| (s.label.as_str(), s.path.as_str()))
+        .collect();
+    assert_eq!(
+        shortcuts,
+        [
+            ("~", "/Users/me"),
+            ("~/code", "/Users/me/code"),
+            ("/srv", "/srv")
+        ],
+        "主目录在前，然后按最近打开的项目，同一个目录只出现一次"
+    );
+    let entries: Vec<(&str, bool)> = listing
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.opened))
+        .collect();
+    assert_eq!(
+        entries,
+        [("a", true), ("new", false)],
+        "文件不列，开着的项目标出来"
+    );
+}
+
+#[test]
+fn dir_listing_compares_windows_paths_case_insensitively() {
+    let listing = projection::dir_listing(
+        PathStyle::Windows,
+        BrowseDirsResult {
+            path: r"C:\Users\Me\Dev".into(),
+            parent: Some(r"C:\Users\Me".into()),
+            home: r"C:\Users\Me".into(),
+            entries: Vec::new(),
+        },
+        &[r"c:\users\me\dev".to_string()],
+    );
+    assert_eq!(listing.display_path, r"~\Dev");
+    assert!(listing.opened);
+}
+
 const RUNTIME: &str = "runtime-a";
 
 const FAST: Timing = Timing {
@@ -961,6 +1043,7 @@ fn dto(id: &str, revision: u64, phase: CoreSessionPhase) -> SessionStateChanged 
         phase,
         phase_since_unix_seconds: 1,
         pending_question: None,
+        pending_request: None,
         tokens_used: None,
         branch: None,
         dirty_files: Vec::new(),
@@ -1269,6 +1352,7 @@ fn cached_list_shows_until_the_live_snapshot_then_the_live_list_is_saved() {
         project_order: 0,
         updated_at: 0,
         detail: None,
+        pending_request: None,
         attention: None,
         automation: None,
         agent_definition_id: None,
@@ -1665,4 +1749,111 @@ fn automation_commands_return_the_refreshed_catalog() {
         Some("s-now"),
         "刚触发的运行不等投影就出现在目录里"
     );
+}
+
+fn browse_result() -> Value {
+    json!({
+        "path": "/",
+        "parent": null,
+        "home": "/home/me",
+        "entries": [
+            {"name": "repo", "path": "/repo", "is_dir": true},
+            {"name": "srv", "path": "/srv", "is_dir": true},
+        ],
+    })
+}
+
+#[test]
+fn browsing_starts_where_the_latest_project_lives() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    runtime.result("workspace.browse_dirs", browse_result());
+
+    let listing = catalog.browse_dirs(None).unwrap();
+    catalog.browse_dirs(Some(" /srv ")).unwrap();
+
+    assert_eq!(
+        runtime.controls("workspace.browse_dirs"),
+        [
+            json!({"path": "/", "include_files": false}),
+            json!({"path": "/srv", "include_files": false}),
+        ],
+        "不给路径时从最近打开的项目（/repo）所在的目录开始"
+    );
+    let opened: Vec<(&str, bool)> = listing
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.opened))
+        .collect();
+    assert_eq!(opened, [("repo", true), ("srv", false)]);
+}
+
+#[test]
+fn open_project_returns_once_the_directory_lists_it() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    runtime.result(
+        "workspace.project.open",
+        json!({"epoch": "", "revision": 4}),
+    );
+    let catalog = Arc::new(catalog);
+    let pending = {
+        let catalog = Arc::clone(&catalog);
+        std::thread::spawn(move || catalog.open_project(" /srv/app "))
+    };
+    wait_until("发出打开项目", || {
+        !runtime.controls("workspace.project.open").is_empty()
+    });
+    assert!(!pending.is_finished(), "运行时的目录推来之前不返回");
+
+    let mut changed = repo_directory(&[]);
+    changed["revision"] = json!(4);
+    changed["projects"] = json!(["/repo", "/srv/app"]);
+    runtime.send(0, &directory_line(changed));
+
+    let project = pending.join().unwrap().unwrap();
+    assert_eq!(
+        (project.root.as_str(), project.title.as_str()),
+        ("/srv/app", "app")
+    );
+    assert_eq!(
+        runtime.controls("workspace.project.open"),
+        [json!({"root": "/srv/app"})]
+    );
+}
+
+#[test]
+fn open_project_waits_for_the_new_database_after_the_runtime_switched_it() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    // 运行时换过库：回执是新库的版本，手上还是旧库（epoch ""、revision 3）的目录。
+    runtime.result(
+        "workspace.project.open",
+        json!({"epoch": "new", "revision": 1}),
+    );
+    let catalog = Arc::new(catalog);
+    let pending = {
+        let catalog = Arc::clone(&catalog);
+        std::thread::spawn(move || catalog.open_project("/srv/app"))
+    };
+    wait_until("发出打开项目", || {
+        !runtime.controls("workspace.project.open").is_empty()
+    });
+    assert!(!pending.is_finished(), "手上的旧库目录不算到了");
+
+    let mut changed = repo_directory(&[]);
+    changed["epoch"] = json!("new");
+    changed["revision"] = json!(1);
+    changed["projects"] = json!(["/srv/app"]);
+    runtime.send(0, &directory_line(changed));
+
+    assert_eq!(pending.join().unwrap().unwrap().root, "/srv/app");
+}
+
+#[test]
+fn opening_a_project_that_is_already_open_returns_it_right_away() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    // 已经开着：运行时不改库，回执就是现在的版本。
+    runtime.result(
+        "workspace.project.open",
+        json!({"epoch": "", "revision": 3}),
+    );
+    assert_eq!(catalog.open_project("/repo").unwrap().root, "/repo");
 }

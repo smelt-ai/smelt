@@ -12,6 +12,7 @@ import '../src/rust/api/fleet.dart';
 import '../ui/agent_glyph.dart';
 import '../ui/status.dart';
 
+export '../src/rust/api/agents.dart';
 export '../src/rust/api/catalog.dart';
 export '../src/rust/api/conversation.dart';
 export '../src/rust/api/draft.dart';
@@ -107,7 +108,8 @@ extension FleetRuntimeView on FleetRuntime {
   bool get needsAttention =>
       status.state == ConnectionState.disconnected &&
       (status.error?.kind == SmeltErrorKind.unpaired ||
-          status.error?.kind == SmeltErrorKind.incompatible);
+          status.error?.kind == SmeltErrorKind.runtimeOutdated ||
+          status.error?.kind == SmeltErrorKind.appOutdated);
 }
 
 /// 链路的一句话：「局域网 · 12 ms」「中继 · 84 ms」「重连中…」。
@@ -130,7 +132,8 @@ String linkLabel(L10n l10n, RuntimeStatus status) {
     case ConnectionState.disconnected:
       return switch (status.error?.kind) {
         SmeltErrorKind.unpaired => l10n.machineRevoked,
-        SmeltErrorKind.incompatible => l10n.machineIncompatible,
+        SmeltErrorKind.runtimeOutdated => l10n.machineRuntimeOutdated,
+        SmeltErrorKind.appOutdated => l10n.machineAppOutdated,
         _ => l10n.machineOffline,
       };
   }
