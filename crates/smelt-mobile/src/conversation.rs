@@ -910,8 +910,13 @@ impl Watch {
             };
             let text = restored.as_deref().map_or(line.as_slice(), str::as_bytes);
             let Some(snapshot) = decode_frame(text) else {
-                // 还原出的帧读不出来，镜像可能已经坏了，同样要整段帧。
-                if restored.is_some() {
+                // 还原出的帧连 JSON 都不是：镜像坏了，作废它、要整段帧。只是按类型读不懂
+                // （比如运行时比手机新）就跟整段帧一样丢掉这一帧，要了整段帧也一样读不懂，
+                // 还会让运行时给这段对话的每条连接都重发整段。
+                if restored.is_some()
+                    && serde_json::from_slice::<serde::de::IgnoredAny>(text).is_err()
+                {
+                    mirror.invalidate();
                     self.ask_full_frame(client, &mut awaiting_full);
                 }
                 continue;

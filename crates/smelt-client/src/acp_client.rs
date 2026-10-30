@@ -290,12 +290,15 @@ fn read_snapshot_frame(
         return SnapshotFrame::Ignore;
     }
     // 按类型读不懂，才拆成 JSON 树找还能用的活状态。还原出的帧连 JSON 都不是，
-    // 说明镜像坏了，要整段帧。
+    // 说明镜像坏了：作废它，要整段帧。
     let value = match value {
         Some(value) => value,
         None => match serde_json::from_str::<serde_json::Value>(text) {
             Ok(value) => value,
-            Err(_) => return SnapshotFrame::NeedsFullFrame,
+            Err(_) => {
+                mirror.invalidate();
+                return SnapshotFrame::NeedsFullFrame;
+            }
         },
     };
     let live = value

@@ -5,7 +5,7 @@
 //! 来，远程链路上会远远落后于生成。
 //!
 //! 这里让连接两端各持一份 [`FrameMirror`]：发送方的那份记着「对方手里有什么」，接收方
-//! 的那份就是手里那份。两边用同一个 [`FrameMirror::apply`] 演进，不会漂移。发送方只发
+//! 的那份就是手里那份。条目镜像两边用同一个 [`EntryMirror::apply`] 演进，不会漂移。发送方只发
 //! 变化，条目和快照头都一样：按序列化后的 JSON 求公共前缀，只发「保留前几个字节 + 新
 //! 的尾巴」。正文、工具输出、子代理记录在哪里增长都是同一个机制，整条替换就是保留 0
 //! 字节；快照头逐字段比，没变的字段不发。
@@ -424,6 +424,12 @@ impl FrameMirror {
         fields
     }
 
+    /// 接收方发现还原出的帧连 JSON 都不是：镜像已经坏了，作废到下一份整段帧。不作废的话，
+    /// 之后只改了别的条目的增量照样拼得出合法的帧，坏条目旁边混进新条目。
+    pub fn invalidate(&mut self) {
+        self.entries.synced = false;
+    }
+
     /// 应用一帧增量，还原出完整快照帧的 JSON 文本，跟整段帧一样解析：`snapshot.entries`
     /// 是从第一个变化的条目到末尾，`snapshot.entries_offset` 是它的下标，正是视图按下标
     /// 合并要的那一段。对不上时镜像作废，直到下一份整段帧。
@@ -763,6 +769,24 @@ mod tests {
         let typed: Vec<AcpEntry> =
             serde_json::from_value(restored["snapshot"]["entries"].clone()).unwrap();
         assert_eq!(texts(&typed), texts(&entries));
+    }
+
+    #[test]
+    fn an_invalidated_mirror_rejects_deltas_until_a_full_frame() {
+        let first = frame(1, "thinking", &[assistant("a")]);
+        let (mut sender, mut receiver) = attached(&first);
+        receiver.invalidate();
+        let entries = vec![assistant("ab")];
+        let delta = sender
+            .encode(&frame(2, "thinking", &entries), 0, &entries, 0, 1, 0)
+            .unwrap();
+        assert_eq!(receiver.apply(&delta), Err(MirrorGap));
+        receiver.full(&frame(2, "thinking", &entries));
+        let entries = vec![assistant("abc")];
+        let delta = sender
+            .encode(&frame(3, "thinking", &entries), 0, &entries, 0, 1, 0)
+            .unwrap();
+        assert!(receiver.apply(&delta).is_ok());
     }
 
     #[test]
