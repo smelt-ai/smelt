@@ -512,15 +512,7 @@ impl DaemonStateEventClient {
                     .then_some(DaemonStateEvent::Workspace(directory)))
             }
             CORE_TOPIC_AUTOMATIONS_CHANGED if self.shape.automations => {
-                // 和快照一样：解不出只影响自动化，不断开整条订阅。比这个客户端新的运行时可能带着
-                // 认不出的运行状态。
-                let snapshot: AutomationFile = match decode_projection_event(payload, topic) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        eprintln!("[daemon-state] {error}");
-                        return Ok(None);
-                    }
-                };
+                let snapshot: AutomationFile = decode_projection_event(payload, topic)?;
                 Ok(self
                     .automation_revisions
                     .accept_update(snapshot.revision)
@@ -632,19 +624,12 @@ fn decode_payload<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn decode_projection(
-    payload: serde_json::Value,
-    label: &str,
-) -> Result<CoreProjectionEvent, DaemonEventClientError> {
-    decode_payload(payload, label)
-}
-
 fn decode_projection_snapshot<T: serde::de::DeserializeOwned>(
     payload: serde_json::Value,
     label: &str,
     revision: u64,
 ) -> Result<Option<T>, DaemonEventClientError> {
-    let projection = decode_projection(payload, label)?;
+    let projection: CoreProjectionEvent = decode_payload(payload, label)?;
     if projection.revision != revision {
         return Err(DaemonEventClientError::Protocol(format!(
             "{label} snapshot revision mismatch"
@@ -661,7 +646,7 @@ fn decode_projection_event<T: serde::de::DeserializeOwned>(
     payload: serde_json::Value,
     label: &str,
 ) -> Result<T, DaemonEventClientError> {
-    let projection = decode_projection(payload, label)?;
+    let projection: CoreProjectionEvent = decode_payload(payload, label)?;
     if projection.data.is_null() {
         return Err(DaemonEventClientError::Protocol(format!(
             "{label} event contains a null projection"
@@ -685,8 +670,6 @@ fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
             CoreSessionPhase::Failed => DaemonPhase::Failed,
             CoreSessionPhase::Idle => DaemonPhase::Idle,
             CoreSessionPhase::Dead => DaemonPhase::Dead,
-            // 比这个客户端新的运行时报的相位：不算在跑、不算等你，当空闲。
-            CoreSessionPhase::Unknown => DaemonPhase::Idle,
         },
         pending_question: state.pending_question,
         pending_request: state.pending_request,
@@ -1356,31 +1339,6 @@ mod tests {
             Some(DaemonStateEvent::Automations(got)) => assert_eq!(got.revision, 20),
             _ => panic!("late automations snapshot must not start a new batch"),
         }
-    }
-
-    /// 自动化投影解不出：这一份跳过，订阅不断，之后的事件照常。
-    #[test]
-    fn undecodable_automations_event_keeps_the_subscription() {
-        let mut client = desktop_client();
-        let _ = complete_snapshot(&mut client, 1, vec![session_dto("s1", 1, 1)]);
-        let newer = event_message(
-            CORE_TOPIC_AUTOMATIONS_CHANGED,
-            serde_json::json!({
-                "revision": 11,
-                "data": {
-                    "schema_version": 1,
-                    "revision": 11,
-                    "runs": [{"status": "some_future_status"}],
-                },
-            }),
-        );
-        assert!(client.decode_message(newer).unwrap().is_none());
-
-        let file = automation_file(12, "store-d");
-        assert!(matches!(
-            client.decode_message(automations_changed(&file)).unwrap(),
-            Some(DaemonStateEvent::Automations(got)) if got.revision == 12
-        ));
     }
 
     fn workspace_directory(revision: u64) -> WorkspaceDirectory {

@@ -3,16 +3,18 @@
 //! # 怎么演进
 //!
 //! 桌面、手机、各台机器上的守护各自发布，版本总会错开（手机要过商店审核，一部手机连好几台
-//! 机器）。所以载荷按「宽容读取」写：读的一方忽略认不出的字段，标了「会增长」的枚举认不出的
-//! 值落到 `Unknown`。据此：
+//! 机器）。所以运行时推给客户端的载荷按「宽容读取」写：读的一方忽略认不出的字段，标了「会增长」
+//! 的枚举认不出的值落到 `Unknown`。据此：
 //!
-//! - **不升版本**：加字段（一律可缺省，缺了有明确含义）、给标了「会增长」的枚举加值。
+//! - **不升版本**：响应和推送里加字段（一律可缺省，缺了有明确含义）、给标了「会增长」的枚举
+//!   （只有不影响判断的显示类枚举）加值、加订阅消息类型。
 //! - **升 [`EVENT_BUS_PROTOCOL_VERSION`]**：删字段、删话题、改字段含义（包括新字段改变了旧
 //!   字段该怎么读）、加必填字段、改握手。新旧两边在订阅握手时就拿到版本不兼容。
 //! - **加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会反复重连。
-//! - **其余枚举加值也要升**：它们解不出会让整条消息失败，比如工作区目录里的
-//!   `ConversationBinding`。例外是自动化投影：解不出只影响自动化，客户端跳过这一份，订阅不断，
-//!   所以不升版本，代价是旧客户端在升级前看不到新的自动化数据。
+//! - **其余枚举加值也要升**：它们解不出会让整条消息失败，比如相位、自动化状态。相位还决定客户端
+//!   怎么判断会话在不在忙，没有安全的兜底含义。
+//! - **请求不宽容**：客户端发给运行时的请求保持严格。旧运行时要是忽略新字段，用户的意图会悄悄
+//!   丢掉（比如发了附件没送到）；严格解码时它会明确拒绝。新字段没用上时不要序列化。
 //! - 删掉的字段名不再拿来表示别的东西：旧客户端可能还按原来的意思读。
 //! - 认证（[`EventClientAuth`]）保持严格：客户端不能在里面夹带运行时不认识的声明。
 
@@ -38,7 +40,7 @@ use std::{fmt, str::FromStr};
 /// v6：会话状态多了 `pending_request`（对话会话正在等的那个审批或选择题的身份）。同样
 /// 严格解码，所以升版。
 ///
-/// v7：载荷改成宽容读取（见模块文档），以后加字段、给标了「会增长」的枚举加值不再升版；投影事件和会话快照
+/// v7：推送载荷改成宽容读取（见模块文档），以后推送加字段不再升版；投影事件和会话快照
 /// 去掉 `projection_version`。v6 及更早的客户端严格解码，读不了加过字段的载荷，所以这一版
 /// 本身还要升。
 pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
@@ -379,7 +381,7 @@ pub struct TopicDescriptor {
 }
 
 /// Stable session phase vocabulary. Daemon-internal reducers may evolve independently.
-/// 会增长：认不出的值读成 [`Self::Unknown`]。
+/// 不设兜底值：相位决定客户端怎么判断会话在不在忙，所以加值要升协议版本。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreSessionPhase {
@@ -393,9 +395,6 @@ pub enum CoreSessionPhase {
     #[default]
     Idle,
     Dead,
-    /// 比这个客户端新的运行时报的相位。不算在跑、不算等你。
-    #[serde(other)]
-    Unknown,
 }
 
 /// Public session projection. Runtime locks, blocker identities, and capability tokens are
@@ -621,6 +620,7 @@ pub enum EventClientAuth {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProtocolRange {
     pub min: u16,
     pub max: u16,
@@ -633,18 +633,21 @@ impl ProtocolRange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubscriptionDeclaration {
     pub id: SubscriptionId,
     pub topics: Vec<Topic>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubscribeRequest {
     pub protocol: ProtocolRange,
     pub subscription: SubscriptionDeclaration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventSubscribeRequest {
     pub auth: EventClientAuth,
     pub request: SubscribeRequest,
@@ -716,7 +719,7 @@ mod tests {
         );
     }
 
-    /// 契约：新运行时加的字段、加的枚举值、加的消息类型，这一版读得了。
+    /// 契约：新运行时加的字段、给「会增长」的枚举加的值、加的消息类型，这一版读得了。
     #[test]
     fn a_newer_runtime_payload_is_readable() {
         let state: SessionStateChanged = serde_json::from_value(json!({
@@ -726,7 +729,7 @@ mod tests {
             "cwd": null,
             "launch": null,
             "title": null,
-            "phase": "some_future_phase",
+            "phase": "idle",
             "phase_since": 0,
             "pending_question": null,
             "tokens_used": null,
@@ -740,7 +743,7 @@ mod tests {
             "some_future_field": {"nested": [1, 2]},
         }))
         .unwrap();
-        assert_eq!(state.phase, CoreSessionPhase::Unknown);
+        assert_eq!(state.phase, CoreSessionPhase::Idle);
 
         let progress: TerminalProgress =
             serde_json::from_value(json!({"state": "some_future_state", "percent": 3})).unwrap();
@@ -761,6 +764,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// 契约：相位加值要升协议版本，不能被读成某个已有相位。
+    #[test]
+    fn an_unknown_phase_is_rejected() {
+        assert!(serde_json::from_value::<CoreSessionPhase>(json!("some_future_phase")).is_err());
+    }
+
+    /// 契约：订阅请求不宽容，旧运行时不能悄悄忽略新客户端的声明。
+    #[test]
+    fn subscribe_requests_reject_unknown_fields() {
+        let request = json!({
+            "protocol": {"min": 7, "max": 7},
+            "subscription": {"id": "s", "topics": []},
+            "some_future_field": true,
+        });
+        assert!(serde_json::from_value::<SubscribeRequest>(request).is_err());
     }
 
     /// 契约：旧运行时没带的可缺省字段，这一版读成缺省值。

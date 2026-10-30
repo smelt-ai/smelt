@@ -5,10 +5,10 @@
 
 use crate::acp_chat::AcpImage;
 
-/// 保持严格解码：它决定能不能往对话里发普通输入，还参与记忆、对端的身份判断。认不出的
-/// 绑定不能被悄悄读成 `Direct`，宁可整条读不出来。
+/// 不设兜底值：它决定能不能往对话里发普通输入，还参与记忆、对端的身份判断。认不出的类型不能被
+/// 悄悄读成 `Direct`，宁可整条读不出来，所以加类型要升协议版本；加字段不用。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationBinding {
     #[default]
     Direct,
@@ -17,8 +17,10 @@ pub enum ConversationBinding {
     Automation { run_id: String },
 }
 
-/// 客户端发给运行时；运行时常比手机旧，所以宽容读取，认不出的字段忽略。
+/// 客户端发给运行时，保持严格：旧运行时要是忽略新字段，用户的输入会悄悄丢掉一部分（比如附件），
+/// 严格解码时它会明确拒绝。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationInput {
     /// 一次用户提交跨 daemon 边界保持不变的身份。旧客户端缺失时 daemon 会补齐。
     #[serde(default)]
@@ -138,16 +140,22 @@ mod tests {
         assert!(state.binding.is_none());
     }
 
-    /// 跨版本传的这几样宽容读取：对端多出来的字段忽略，认不出的失败类别按「结果不明」。
+    /// 请求不宽容：旧运行时不能悄悄丢掉新客户端发的字段。
     #[test]
-    fn newer_peers_fields_are_ignored() {
-        let input: ConversationInput = serde_json::from_value(serde_json::json!({
-            "submission_id": "s1",
-            "text": "hi",
-            "some_future_field": true
-        }))
-        .unwrap();
-        assert_eq!(input.text, "hi");
+    fn input_rejects_unknown_fields() {
+        assert!(
+            serde_json::from_value::<ConversationInput>(serde_json::json!({
+                "submission_id": "s1",
+                "text": "hi",
+                "some_future_field": true
+            }))
+            .is_err()
+        );
+    }
+
+    /// 运行时回的这几样宽容读取：多出来的字段忽略，认不出的失败类别按「结果不明」。
+    #[test]
+    fn newer_runtime_fields_are_ignored() {
         let error: ConversationSubmitError = serde_json::from_value(serde_json::json!({
             "kind": "some_future_kind",
             "message": "x",
@@ -164,16 +172,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_binding_fields_are_rejected() {
-        // 内部标签枚举的单元变体（Direct）不受 deny_unknown_fields 约束，这是 serde 的
-        // 已知限制；带字段的变体会拒绝多余字段。
-        assert!(
+    fn unknown_binding_types_are_rejected_but_new_fields_are_ignored() {
+        assert_eq!(
             serde_json::from_value::<ConversationBinding>(serde_json::json!({
                 "type": "automation",
                 "run_id": "run-1",
                 "extra": 1
             }))
-            .is_err()
+            .unwrap(),
+            ConversationBinding::Automation {
+                run_id: "run-1".into()
+            }
         );
         assert!(
             serde_json::from_value::<ConversationBinding>(serde_json::json!({"type": "plugin"}))
