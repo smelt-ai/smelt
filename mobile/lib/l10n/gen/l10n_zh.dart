@@ -830,6 +830,9 @@ class L10nZh extends L10n {
   String get conversationNewFile => '新文件';
 
   @override
+  String get conversationNoNewlineAtEnd => '末尾没有换行';
+
+  @override
   String conversationPlan(int done, int total) {
     return '计划 · $done/$total';
   }

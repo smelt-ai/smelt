@@ -7275,7 +7275,16 @@ fn render_diff_lines(
                     .text_xs()
                     .font_family(smelt_model::font_config::font_family())
                     .text_color(fg),
-            ),
+            )
+            .when(line.no_newline, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(muted_color)
+                        .child("末尾没有换行"),
+                )
+            }),
         );
     }
     rows.into_any_element()

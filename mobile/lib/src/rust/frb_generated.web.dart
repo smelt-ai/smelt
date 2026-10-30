@@ -234,6 +234,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeviceIdentity dco_decode_device_identity(dynamic raw);
 
   @protected
+  DiffLine dco_decode_diff_line(dynamic raw);
+
+  @protected
+  DiffOp dco_decode_diff_op(dynamic raw);
+
+  @protected
   DiffView dco_decode_diff_view(dynamic raw);
 
   @protected
@@ -330,6 +336,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ConversationImage> dco_decode_list_conversation_image(dynamic raw);
+
+  @protected
+  List<DiffLine> dco_decode_list_diff_line(dynamic raw);
 
   @protected
   List<DirEntry> dco_decode_list_dir_entry(dynamic raw);
@@ -924,6 +933,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeviceIdentity sse_decode_device_identity(SseDeserializer deserializer);
 
   @protected
+  DiffLine sse_decode_diff_line(SseDeserializer deserializer);
+
+  @protected
+  DiffOp sse_decode_diff_op(SseDeserializer deserializer);
+
+  @protected
   DiffView sse_decode_diff_view(SseDeserializer deserializer);
 
   @protected
@@ -1042,6 +1057,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ConversationImage> sse_decode_list_conversation_image(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<DiffLine> sse_decode_list_diff_line(SseDeserializer deserializer);
 
   @protected
   List<DirEntry> sse_decode_list_dir_entry(SseDeserializer deserializer);
@@ -1799,6 +1817,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_diff_line(DiffLine self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_diff_op(DiffOp self, SseSerializer serializer);
+
+  @protected
   void sse_encode_diff_view(DiffView self, SseSerializer serializer);
 
   @protected
@@ -1935,6 +1959,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<ConversationImage> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_diff_line(List<DiffLine> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_dir_entry(List<DirEntry> self, SseSerializer serializer);

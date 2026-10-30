@@ -635,11 +635,17 @@ pub enum DiffLineTag {
 pub struct DiffLine {
     pub tag: DiffLineTag,
     pub text: String,
+    /// 改动的这一行是文件末尾、后面没有换行（git 的 `\ No newline at end of file`）。只补
+    /// 或只删末尾换行时，新旧两行文字一样，靠它才看得出改了什么。
+    pub no_newline: bool,
 }
 
-/// 把新旧文本切成逐行 diff。
+/// 把新旧文本切成逐行 diff。整份重写的大文件逐行对齐可能算很久：超过 0.2 秒就收手，
+/// similar 给出一份对齐没那么细、但增删仍然完整的结果。
 pub fn diff_lines(old: &str, new: &str) -> Vec<DiffLine> {
-    let diff = similar::TextDiff::from_lines(old, new);
+    let diff = similar::TextDiff::configure()
+        .timeout(std::time::Duration::from_millis(200))
+        .diff_lines(old, new);
     diff.iter_all_changes()
         .map(|change| {
             let tag = match change.tag() {
@@ -650,6 +656,7 @@ pub fn diff_lines(old: &str, new: &str) -> Vec<DiffLine> {
             DiffLine {
                 tag,
                 text: change.value().trim_end_matches('\n').to_string(),
+                no_newline: tag != DiffLineTag::Context && change.missing_newline(),
             }
         })
         .collect()
@@ -703,6 +710,7 @@ pub fn compact_diff_lines(lines: &[DiffLine], context: usize) -> Vec<DiffLine> {
             out.push(DiffLine {
                 tag: DiffLineTag::Context,
                 text: format!("... 省略 {} 行未修改内容 ...", start - previous_end),
+                no_newline: false,
             });
         }
         out.extend(lines[start..end].iter().cloned());
@@ -712,6 +720,7 @@ pub fn compact_diff_lines(lines: &[DiffLine], context: usize) -> Vec<DiffLine> {
         out.push(DiffLine {
             tag: DiffLineTag::Context,
             text: format!("... 省略 {} 行未修改内容 ...", lines.len() - previous_end),
+            no_newline: false,
         });
     }
     out
@@ -1458,6 +1467,29 @@ mod tests {
                 .iter()
                 .filter(|l| l.tag == DiffLineTag::Removed)
                 .count()
+        );
+    }
+
+    /// 只补末尾换行：新旧两行文字一样，靠「末尾没有换行」才看得出改了什么。
+    #[test]
+    fn a_trailing_newline_change_is_marked() {
+        let marks = |old: &str, new: &str| -> Vec<(DiffLineTag, String, bool)> {
+            diff_lines(old, new)
+                .into_iter()
+                .map(|line| (line.tag, line.text, line.no_newline))
+                .collect()
+        };
+        assert_eq!(
+            marks("a\nb", "a\nb\n"),
+            [
+                (DiffLineTag::Context, "a".to_string(), false),
+                (DiffLineTag::Removed, "b".to_string(), true),
+                (DiffLineTag::Added, "b".to_string(), false),
+            ]
+        );
+        assert!(
+            marks("a\nb", "a\nb").iter().all(|(_, _, mark)| !mark),
+            "没改动的行不标"
         );
     }
 

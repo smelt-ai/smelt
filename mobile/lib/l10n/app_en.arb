@@ -628,6 +628,7 @@
     }
   },
   "conversationNewFile": "New file",
+  "conversationNoNewlineAtEnd": "No newline at end of file",
   "conversationPlan": "Plan · {done}/{total}",
   "@conversationPlan": {
     "placeholders": {

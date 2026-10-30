@@ -876,6 +876,9 @@ class L10nEn extends L10n {
   String get conversationNewFile => 'New file';
 
   @override
+  String get conversationNoNewlineAtEnd => 'No newline at end of file';
+
+  @override
   String conversationPlan(int done, int total) {
     return 'Plan · $done/$total';
   }

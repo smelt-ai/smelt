@@ -53,6 +53,7 @@
   "conversationCollapse": "收起",
   "conversationUnchangedLines": "{count} 行未改动",
   "conversationNewFile": "新文件",
+  "conversationNoNewlineAtEnd": "末尾没有换行",
   "conversationPlan": "计划 · {done}/{total}",
   "conversationPlanPending": "待做",
   "conversationPlanInProgress": "进行中",

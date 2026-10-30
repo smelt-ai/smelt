@@ -2861,16 +2861,43 @@ impl SseDecode for crate::api::identity::DeviceIdentity {
     }
 }
 
+impl SseDecode for crate::api::conversation::DiffLine {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_op = <crate::api::conversation::DiffOp>::sse_decode(deserializer);
+        let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_noNewline = <bool>::sse_decode(deserializer);
+        return crate::api::conversation::DiffLine {
+            op: var_op,
+            text: var_text,
+            no_newline: var_noNewline,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::DiffOp {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::DiffOp::Equal,
+            1 => crate::api::conversation::DiffOp::Insert,
+            2 => crate::api::conversation::DiffOp::Delete,
+            _ => unreachable!("Invalid variant for DiffOp: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::conversation::DiffView {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_path = <String>::sse_decode(deserializer);
-        let mut var_oldText = <Option<String>>::sse_decode(deserializer);
-        let mut var_newText = <String>::sse_decode(deserializer);
+        let mut var_newFile = <bool>::sse_decode(deserializer);
+        let mut var_lines = <Vec<crate::api::conversation::DiffLine>>::sse_decode(deserializer);
         return crate::api::conversation::DiffView {
             path: var_path,
-            old_text: var_oldText,
-            new_text: var_newText,
+            new_file: var_newFile,
+            lines: var_lines,
         };
     }
 }
@@ -3299,6 +3326,20 @@ impl SseDecode for Vec<crate::api::conversation::ConversationImage> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::conversation::ConversationImage>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::DiffLine> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::DiffLine>::sse_decode(
                 deserializer,
             ));
         }
@@ -5780,12 +5821,56 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::identity::DeviceIdentity>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::DiffLine {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.op.into_into_dart().into_dart(),
+            self.text.into_into_dart().into_dart(),
+            self.no_newline.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::DiffLine
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::DiffLine>
+    for crate::api::conversation::DiffLine
+{
+    fn into_into_dart(self) -> crate::api::conversation::DiffLine {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::DiffOp {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Equal => 0.into_dart(),
+            Self::Insert => 1.into_dart(),
+            Self::Delete => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::DiffOp
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::DiffOp>
+    for crate::api::conversation::DiffOp
+{
+    fn into_into_dart(self) -> crate::api::conversation::DiffOp {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::conversation::DiffView {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.path.into_into_dart().into_dart(),
-            self.old_text.into_into_dart().into_dart(),
-            self.new_text.into_into_dart().into_dart(),
+            self.new_file.into_into_dart().into_dart(),
+            self.lines.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7916,12 +8001,38 @@ impl SseEncode for crate::api::identity::DeviceIdentity {
     }
 }
 
+impl SseEncode for crate::api::conversation::DiffLine {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::conversation::DiffOp>::sse_encode(self.op, serializer);
+        <String>::sse_encode(self.text, serializer);
+        <bool>::sse_encode(self.no_newline, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::DiffOp {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::DiffOp::Equal => 0,
+                crate::api::conversation::DiffOp::Insert => 1,
+                crate::api::conversation::DiffOp::Delete => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::conversation::DiffView {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.path, serializer);
-        <Option<String>>::sse_encode(self.old_text, serializer);
-        <String>::sse_encode(self.new_text, serializer);
+        <bool>::sse_encode(self.new_file, serializer);
+        <Vec<crate::api::conversation::DiffLine>>::sse_encode(self.lines, serializer);
     }
 }
 
@@ -8247,6 +8358,16 @@ impl SseEncode for Vec<crate::api::conversation::ConversationImage> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::conversation::ConversationImage>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::DiffLine> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::DiffLine>::sse_encode(item, serializer);
         }
     }
 }

@@ -212,9 +212,26 @@ pub struct ToolOutput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffView {
     pub path: String,
-    /// 新文件没有旧内容。
-    pub old_text: Option<String>,
-    pub new_text: String,
+    /// 新文件（没有旧内容）。
+    pub new_file: bool,
+    /// 逐行 diff，内核按行对齐好（跟桌面同一个算法），界面只折叠、上色。
+    pub lines: Vec<DiffLine>,
+}
+
+/// diff 的一行。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffLine {
+    pub op: DiffOp,
+    pub text: String,
+    /// 改动的这一行是文件末尾、后面没有换行。只补或只删末尾换行时靠它看出改了什么。
+    pub no_newline: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffOp {
+    Equal,
+    Insert,
+    Delete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

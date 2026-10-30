@@ -187,8 +187,24 @@ void main() {
                   text: '',
                   diff: DiffView(
                     path: 'lib/config.dart',
-                    oldText: 'keep\nbefore\n',
-                    newText: 'keep\nafter\n',
+                    newFile: false,
+                    lines: [
+                      DiffLine(
+                        op: DiffOp.equal,
+                        text: 'keep',
+                        noNewline: false,
+                      ),
+                      DiffLine(
+                        op: DiffOp.delete,
+                        text: 'before',
+                        noNewline: true,
+                      ),
+                      DiffLine(
+                        op: DiffOp.insert,
+                        text: 'after',
+                        noNewline: false,
+                      ),
+                    ],
                   ),
                   truncated: false,
                 ),
@@ -205,6 +221,11 @@ void main() {
       expect(find.text('lib/config.dart'), findsOneWidget);
       expect(find.text('+1'), findsOneWidget);
       expect(find.text('-1'), findsOneWidget);
+      expect(
+        find.textContaining('No newline at end of file', findRichText: true),
+        findsOneWidget,
+        reason: '末尾没有换行的那一行标出来',
+      );
     });
 
     testWidgets('终端输出写出退出码和截断', (tester) async {
@@ -236,13 +257,12 @@ void main() {
 
     testWidgets('长输出先收起，点了显示全部', (tester) async {
       final text = List.generate(20, (i) => 'line $i').join('\n');
-      await tester.pumpWidget(_host(FoldedText(text: '```\n$text\n```')));
+      await tester.pumpWidget(_host(FoldedText(text: text)));
       expect(find.textContaining('line 7'), findsOneWidget);
       expect(find.textContaining('line 12'), findsNothing);
       await tester.tap(find.text('Show all 20 lines'));
       await tester.pumpAndSettle();
       expect(find.textContaining('line 19'), findsOneWidget);
-      expect(find.textContaining('```'), findsNothing, reason: '代码围栏去掉');
     });
 
     testWidgets('没有输出的工具调用不可展开', (tester) async {
@@ -411,26 +431,29 @@ void main() {
       expect(indexes(entries), [9], reason: '窗口起点变了，整个换成视图里的');
     });
 
-    test('diff 按行对齐，新文件全是新增', () {
-      final lines = lineDiff('a\nb\nc\n', 'a\nB\nc\nd\n');
-      expect(lines.map((l) => '${l.op.name}:${l.text}'), [
-        'equal:a',
-        'delete:b',
-        'insert:B',
-        'equal:c',
-        'insert:d',
-      ]);
-      expect(diffTotals(lines), (2, 1));
+    test('diff 数增删行', () {
+      DiffLine line(DiffOp op) => DiffLine(op: op, text: '', noNewline: false);
       expect(
-        lineDiff(null, 'x\ny').every((l) => l.op == DiffOp.insert),
-        isTrue,
+        diffTotals([
+          line(DiffOp.equal),
+          line(DiffOp.delete),
+          line(DiffOp.insert),
+          line(DiffOp.insert),
+        ]),
+        (2, 1),
       );
     });
 
     test('长的未改动段收成一行', () {
-      final before = List.generate(20, (i) => 'l$i').join('\n');
-      final after = before.replaceFirst('l10', 'L10');
-      final folded = foldUnchanged(lineDiff(before, after));
+      final lines = [
+        for (var i = 0; i < 20; i++)
+          if (i == 10) ...[
+            DiffLine(op: DiffOp.delete, text: 'l10', noNewline: false),
+            DiffLine(op: DiffOp.insert, text: 'L10', noNewline: false),
+          ] else
+            DiffLine(op: DiffOp.equal, text: 'l$i', noNewline: false),
+      ];
+      final folded = foldUnchanged(lines);
       expect(folded.first, isA<DiffSkipped>());
       expect((folded.first as DiffSkipped).count, 7);
       expect(folded.last, isA<DiffSkipped>());
@@ -445,7 +468,6 @@ void main() {
       expect(formatTurnDuration(8400), '8.4s');
       expect(formatTurnDuration(102000), '1:42');
       expect(formatTurnDuration(3800000), '1:03:20');
-      expect(stripCodeFence('```dart\nx\n```'), 'x');
     });
   });
 }
