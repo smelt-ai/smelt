@@ -2972,8 +2972,8 @@ impl Workspace {
                 ws.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::Location);
                 ws.show_move_app_confirm = true;
             } else {
-                // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；恢复出待安装
-                // 作业后走与用户点击完全相同的安装驱动，没有待办才做常规静默检查。
+                // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；之后做常规静默
+                // 检查，恢复出的待安装作业由检查决定保留还是换成更新源上更新的包。
                 ws.recover_update_at_launch(true, cx);
             }
         }
