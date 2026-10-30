@@ -11,7 +11,7 @@
          actual "cleartext only on the local network" rule is enforced in
          lib/models/pairing_config.dart for both platforms. -->
     <application
-        android:label="Smelt Mobile"
+        android:label="Smelt"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
