@@ -10924,7 +10924,7 @@ dependencies = [
  "mach2",
  "sha2 0.11.1",
  "smelt-paths",
- "sysinfo 0.37.2",
+ "sysinfo 0.39.6",
  "tempfile",
  "tokio",
  "uuid",
@@ -11396,6 +11396,20 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.39.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "windows 0.62.2",
 ]
 
 [[package]]
