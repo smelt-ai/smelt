@@ -80,7 +80,7 @@ pub(crate) struct Timing {
     /// watch 断了之后重订的退避。
     pub backoff_base: Duration,
     pub backoff_max: Duration,
-    /// 两次推视图的最小间隔（条目多时按比例放宽）。
+    /// 两次推视图的最小间隔。
     pub emit_interval: Duration,
     /// 窗口变化后多久存一次缓存。流式输出期间最多这么久存一次。
     pub save_delay: Duration,
@@ -99,12 +99,6 @@ impl Timing {
         self.backoff_base
             .saturating_mul(factor)
             .min(self.backoff_max)
-    }
-
-    /// 每次推的是整个窗口：条目越多，Dart 解码越贵，间隔按每 200 条一倍放宽，最多十倍。
-    fn emit_interval_for(&self, entries: usize) -> Duration {
-        let factor = (entries / 200).clamp(1, 10) as u32;
-        self.emit_interval.saturating_mul(factor)
     }
 }
 
@@ -170,8 +164,13 @@ impl Conversations {
         {
             let mut snapshot = cached.value;
             merge::normalize(&mut snapshot);
-            let event =
-                snapshot_event(&watch.session_id, &snapshot, true, Some(cached.saved_at_ms));
+            let event = snapshot_event(
+                &watch.session_id,
+                &snapshot,
+                0,
+                true,
+                Some(cached.saved_at_ms),
+            );
             {
                 let mut state = watch.lock();
                 state.snapshot = Some(snapshot);
@@ -289,7 +288,7 @@ impl Conversations {
             return Ok(false);
         };
         state.snapshot = Some(merge::merge(current, page));
-        state.emit_pending = true;
+        state.changed_from(0);
         drop(state);
         watch.wake.notify_all();
         Ok(true)
@@ -506,10 +505,28 @@ struct Watch {
     timing: Timing,
     state: Mutex<WatchState>,
     wake: Condvar,
-    /// 各订阅者的推送出口，带订阅编号。全空了订阅就停。和状态锁一起拿时先拿状态锁。
-    sinks: Mutex<Vec<(u32, EventSink)>>,
+    /// 各订阅者的推送出口。全空了订阅就停。和状态锁一起拿时先拿状态锁。
+    sinks: Mutex<Vec<Outlet>>,
     /// 收尾存盘。推送线程看到停止后也会存一次；取消订阅的那次必须等这次写完再返回。
     flushing: Mutex<()>,
+}
+
+/// 一个订阅者的推送出口。
+struct Outlet {
+    watch_id: u32,
+    /// 收到过带整个窗口的视图。之后只带后面一段的视图才接得上；没收到前不发给它。
+    has_window: bool,
+    sink: EventSink,
+}
+
+impl Outlet {
+    fn new(watch_id: u32, sink: EventSink) -> Self {
+        Self {
+            watch_id,
+            has_window: false,
+            sink,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -532,8 +549,21 @@ struct WatchState {
     live: bool,
     saved_at_ms: Option<i64>,
     emit_pending: bool,
+    /// 上次推视图以来，窗口从这个绝对下标起的条目变了（`0` 即整个窗口）。下次只投影、
+    /// 只推这之后的条目。
+    entries_changed_from: Option<usize>,
     save_due: Option<Instant>,
     loading_older: bool,
+}
+
+impl WatchState {
+    /// 窗口从绝对下标 `from` 起的条目变了，要推一次视图。窗口起点挪了、或者有订阅者手里
+    /// 还没有窗口时传 `0`，整个窗口重推。
+    fn changed_from(&mut self, from: usize) {
+        self.entries_changed_from =
+            Some(self.entries_changed_from.map_or(from, |old| old.min(from)));
+        self.emit_pending = true;
+    }
 }
 
 enum StreamEnd {
@@ -553,7 +583,7 @@ impl Watch {
             timing,
             state: Mutex::new(WatchState::default()),
             wake: Condvar::new(),
-            sinks: Mutex::new(vec![(watch_id, sink)]),
+            sinks: Mutex::new(vec![Outlet::new(watch_id, sink)]),
             flushing: Mutex::new(()),
         }
     }
@@ -562,7 +592,7 @@ impl Watch {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn sinks(&self) -> MutexGuard<'_, Vec<(u32, EventSink)>> {
+    fn sinks(&self) -> MutexGuard<'_, Vec<Outlet>> {
         self.sinks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -612,10 +642,13 @@ impl Watch {
         // 先挂出口再放状态锁：推送线程推之前要拿状态锁，补推一定落到新出口上。
         {
             let mut sinks = self.sinks();
-            sinks.retain(|(id, _)| *id != watch_id);
-            sinks.push((watch_id, sink));
+            sinks.retain(|outlet| outlet.watch_id != watch_id);
+            sinks.push(Outlet::new(watch_id, sink));
         }
-        state.emit_pending = state.snapshot.is_some();
+        // 新出口手里还没有窗口：整个窗口补推（已有的出口收到同一份，照样接得上）。
+        if state.snapshot.is_some() {
+            state.changed_from(0);
+        }
         drop(state);
         self.wake.notify_all();
         Ok(())
@@ -626,7 +659,7 @@ impl Watch {
         let mut state = self.lock();
         let empty = {
             let mut sinks = self.sinks();
-            sinks.retain(|(id, _)| *id != watch_id);
+            sinks.retain(|outlet| outlet.watch_id != watch_id);
             sinks.is_empty()
         };
         if empty {
@@ -639,20 +672,37 @@ impl Watch {
 
     /// 推一个事件给每个出口。Dart 取消了的出口摘掉，全摘光了就停。不能在持有状态锁时调。
     fn emit(&self, event: ConversationEvent) {
+        // 只带后面一段的视图只发给手里有窗口的出口。刚挂上的出口等整个窗口那份：挂上时
+        // 已经要求整个窗口重推（`add_sink`），但这一份可能是在那之前算好的。
+        let (whole, partial) = match &event.view {
+            Some(view) => {
+                let whole = view.entries_from == view.entries_offset;
+                (whole, !whole)
+            }
+            None => (false, false),
+        };
         let emptied = {
             let mut sinks = self.sinks();
             // 只有一个出口（常态）时不克隆视图：最后一个出口拿走原件。
-            let count = sinks.len();
+            let count = sinks
+                .iter()
+                .filter(|outlet| !partial || outlet.has_window)
+                .count();
             let mut pending = Some(event);
             let mut seen = 0;
-            sinks.retain(|(_, sink)| {
+            sinks.retain_mut(|outlet| {
+                if partial && !outlet.has_window {
+                    return true;
+                }
                 seen += 1;
                 let event = if seen == count {
                     pending.take()
                 } else {
                     pending.clone()
                 };
-                event.is_some_and(sink)
+                let alive = event.is_some_and(&outlet.sink);
+                outlet.has_window |= alive && whole;
+                alive
             });
             sinks.is_empty()
         };
@@ -943,13 +993,29 @@ impl Watch {
         if state.stopped {
             return;
         }
-        state.snapshot = Some(match state.snapshot.take() {
-            Some(current) => merge::merge(current, snapshot),
-            None => snapshot,
-        });
+        // 收到的帧从它的 `entries_offset` 起是变了的条目（增量帧就是第一个变化的那条）。
+        // 窗口起点挪了（接不上换成实时尾部、换了一段对话）就整个窗口重推。
+        let from = match state.snapshot.take() {
+            Some(current) => {
+                let offset = current.entries_offset;
+                let incoming = snapshot.entries_offset;
+                let merged = merge::merge(current, snapshot);
+                let from = if merged.entries_offset == offset {
+                    incoming
+                } else {
+                    0
+                };
+                state.snapshot = Some(merged);
+                from
+            }
+            None => {
+                state.snapshot = Some(snapshot);
+                0
+            }
+        };
+        state.changed_from(from);
         state.live = true;
         state.saved_at_ms = None;
-        state.emit_pending = true;
         if state.save_due.is_none() {
             state.save_due = Some(Instant::now() + self.timing.save_delay);
         }
@@ -967,12 +1033,7 @@ impl Watch {
                     break;
                 }
                 let now = Instant::now();
-                let interval = self.timing.emit_interval_for(
-                    state
-                        .snapshot
-                        .as_ref()
-                        .map_or(0, |snapshot| snapshot.entries.len()),
-                );
+                let interval = self.timing.emit_interval;
                 let emit_at = state
                     .emit_pending
                     .then(|| last_emit.map_or(now, |last| last + interval));
@@ -988,17 +1049,20 @@ impl Watch {
                 return;
             }
             let now = Instant::now();
-            let interval = self.timing.emit_interval_for(
-                state
-                    .snapshot
-                    .as_ref()
-                    .map_or(0, |snapshot| snapshot.entries.len()),
-            );
+            let interval = self.timing.emit_interval;
             let mut event = None;
             if state.emit_pending && last_emit.is_none_or(|last| now >= last + interval) {
                 state.emit_pending = false;
+                // 没有条目变化（只是快照头变了）就一条也不带。
+                let from = state.entries_changed_from.take().unwrap_or(usize::MAX);
                 event = state.snapshot.as_ref().map(|snapshot| {
-                    snapshot_event(&self.session_id, snapshot, !state.live, state.saved_at_ms)
+                    snapshot_event(
+                        &self.session_id,
+                        snapshot,
+                        from,
+                        !state.live,
+                        state.saved_at_ms,
+                    )
                 });
             }
             let mut save = None;
@@ -1101,15 +1165,17 @@ fn decode_frame(text: &[u8]) -> Option<ConversationSnapshot> {
     Some(snapshot)
 }
 
+/// 推给 Dart 的一份视图，条目从绝对下标 `from` 起（见 [`view::conversation_view`]）。
 fn snapshot_event(
     session_id: &str,
     snapshot: &ConversationSnapshot,
+    from: usize,
     cached: bool,
     saved_at_ms: Option<i64>,
 ) -> ConversationEvent {
     ConversationEvent {
         kind: ConversationEventKind::Snapshot,
-        view: Some(view::conversation_view(session_id, snapshot)),
+        view: Some(view::conversation_view(session_id, snapshot, from)),
         cached,
         saved_at_ms: if cached { saved_at_ms } else { None },
         message: None,

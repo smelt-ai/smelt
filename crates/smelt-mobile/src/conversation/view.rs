@@ -21,16 +21,19 @@ use crate::api::conversation::{
     ToolOutputKind, ToolStatus,
 };
 
+/// 投影出视图，条目只投影从绝对下标 `from` 起的那段（落在窗口外就夹回窗口里）：前面的
+/// Dart 手里已经有了，不再重新转换、跨 FFI 拷贝。
 pub(crate) fn conversation_view(
     session_id: &str,
     snapshot: &ConversationSnapshot,
+    from: usize,
 ) -> ConversationView {
     let offset = snapshot.entries_offset;
-    let entries: Vec<ConversationEntry> = snapshot
-        .entries
+    let from = from.clamp(offset, offset + snapshot.entries.len());
+    let entries: Vec<ConversationEntry> = snapshot.entries[from - offset..]
         .iter()
         .enumerate()
-        .map(|(index, entry)| conversation_entry(to_i64(offset + index), entry))
+        .map(|(index, entry)| conversation_entry(to_i64(from + index), entry))
         .collect();
     let phase = phase(snapshot.phase);
     ConversationView {
@@ -65,8 +68,9 @@ pub(crate) fn conversation_view(
             .collect(),
         pending_permissions: permissions(&snapshot.pending_permissions),
         pending_elicitation: snapshot.pending_elicitation.as_ref().map(elicitation),
-        final_answer_index: final_answer_index(phase, &entries),
+        final_answer_index: final_answer_index(phase, snapshot),
         entries,
+        entries_from: to_i64(from),
         entries_offset: to_i64(offset),
         has_more_before: offset > 0,
         supports_image: snapshot.supports_image,
@@ -113,8 +117,9 @@ fn phase(phase: DaemonPhase) -> ConversationPhase {
     }
 }
 
-/// 回合结束后，最后一条非空正文或完成信号是「最终回答」。
-fn final_answer_index(phase: ConversationPhase, entries: &[ConversationEntry]) -> Option<u32> {
+/// 回合结束后，最后一条非空正文或完成信号是「最终回答」。直接在线格式条目上找（对应
+/// 投影后的 `Assistant` / `Completion`，见 [`conversation_entry`]），不用投影整个窗口。
+fn final_answer_index(phase: ConversationPhase, snapshot: &ConversationSnapshot) -> Option<u32> {
     let finished = matches!(
         phase,
         ConversationPhase::Idle
@@ -125,11 +130,12 @@ fn final_answer_index(phase: ConversationPhase, entries: &[ConversationEntry]) -
     if !finished {
         return None;
     }
-    entries
+    snapshot
+        .entries
         .iter()
-        .rposition(|entry| match entry.kind {
-            EntryKind::Assistant => !entry.thought && !entry.text.trim().is_empty(),
-            EntryKind::Completion => true,
+        .rposition(|entry| match entry {
+            AcpEntry::Assistant { text, thought } => !thought && !text.trim().is_empty(),
+            AcpEntry::ToolCall { title, .. } => acp_chat::is_task_completion_tool_title(title),
             _ => false,
         })
         .map(to_u32)
@@ -599,7 +605,7 @@ mod tests {
                 {"user_index": 10, "started_at_ms": 1000, "ended_at_ms": 4500},
             ],
         }));
-        let view = conversation_view("acp-1", &snapshot);
+        let view = conversation_view("acp-1", &snapshot, 0);
         assert_eq!(view.session_id, "acp-1");
         assert_eq!(view.entries_offset, 10);
         assert!(view.has_more_before);
@@ -672,7 +678,7 @@ mod tests {
             "turn_started_at_ms": 99,
             "entries": [{"Assistant": {"text": "还在写", "thought": false}}],
         }));
-        let view = conversation_view("acp-1", &snapshot);
+        let view = conversation_view("acp-1", &snapshot, 0);
         assert_eq!(view.phase, ConversationPhase::Thinking);
         assert_eq!(view.final_answer_index, None);
         assert_eq!(view.turn_started_at_ms, Some(99));
@@ -695,7 +701,7 @@ mod tests {
                 {"question": "旧快照", "tool_call_id": "t4", "options": []},
             ],
         }));
-        let view = conversation_view("acp-1", &snapshot);
+        let view = conversation_view("acp-1", &snapshot, 0);
         let permissions = &view.pending_permissions;
         assert_eq!(permissions.len(), 4);
         assert_eq!(permissions[0].details.kind, ApprovalKind::Command);
@@ -736,7 +742,7 @@ mod tests {
             "text_values": {},
         });
         let snapshot = snapshot_from(json!({"pending_elicitation": pending}));
-        let view = conversation_view("acp-1", &snapshot);
+        let view = conversation_view("acp-1", &snapshot, 0);
         let elicitation = view.pending_elicitation.unwrap();
         let fields = &elicitation.fields;
         assert_eq!(fields[0].kind, ElicitationFieldKind::Select);
@@ -753,7 +759,7 @@ mod tests {
         let mut filled = pending.clone();
         filled["text_values"] = json!({"2": "小明"});
         let snapshot = snapshot_from(json!({"pending_elicitation": filled}));
-        let elicitation = conversation_view("acp-1", &snapshot)
+        let elicitation = conversation_view("acp-1", &snapshot, 0)
             .pending_elicitation
             .unwrap();
         assert_eq!(elicitation.fields[2].text_value.as_deref(), Some("小明"));
@@ -784,7 +790,7 @@ mod tests {
             "usage": [1200, 200000],
             "available_commands": [["help", "帮助"]],
         }));
-        let view = conversation_view("acp-1", &snapshot);
+        let view = conversation_view("acp-1", &snapshot, 0);
         let model = view.model.unwrap();
         assert_eq!(model.current_provider, Some(1), "按值认出 openai");
         assert_eq!(model.providers[1].name, "openai", "没名字用 id");
@@ -818,6 +824,33 @@ mod tests {
             })
         );
         assert_eq!(view.available_commands[0].name, "help");
+    }
+
+    /// 只投影从变化处起的条目；「最终回答」仍按整个窗口数，哪怕它在投影的那段之前。
+    #[test]
+    fn only_entries_from_the_change_are_projected() {
+        let snapshot = snapshot_from(json!({
+            "entries_offset": 10,
+            "phase": "idle",
+            "entries": [
+                {"User": "问"},
+                {"Assistant": {"text": "答", "thought": false}},
+                {"Divider": "分隔"},
+            ],
+        }));
+        let view = conversation_view("acp-1", &snapshot, 12);
+        assert_eq!(view.entries_offset, 10);
+        assert_eq!(view.entries_from, 12);
+        let indexes: Vec<i64> = view.entries.iter().map(|entry| entry.index).collect();
+        assert_eq!(indexes, [12]);
+        assert_eq!(view.final_answer_index, Some(1));
+
+        let past_the_end = conversation_view("acp-1", &snapshot, 99);
+        assert_eq!(past_the_end.entries_from, 13);
+        assert!(past_the_end.entries.is_empty());
+        let full = conversation_view("acp-1", &snapshot, 0);
+        assert_eq!(full.entries_from, 10);
+        assert_eq!(full.entries.len(), 3);
     }
 
     #[test]

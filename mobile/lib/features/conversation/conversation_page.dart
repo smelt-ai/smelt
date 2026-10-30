@@ -62,6 +62,9 @@ class _ConversationPageState extends State<ConversationPage> {
 
   // 对话 ---------------------------------------------------------------------
   ConversationView? _view;
+
+  /// 手里的整个窗口。每份视图只带变了的那段（见 [mergeEntries]），接在这里。
+  List<ConversationEntry> _entries = const [];
   bool _cached = false;
   int? _savedAtMs;
 
@@ -200,8 +203,10 @@ class _ConversationPageState extends State<ConversationPage> {
         final view = event.view;
         if (view == null) return;
         final previousOffset = _view?.entriesOffset;
+        final entries = mergeEntries(_entries, previousOffset, view);
         setState(() {
           _view = view;
+          _entries = entries;
           _cached = event.cached;
           _savedAtMs = event.savedAtMs;
           _problemKind = null;
@@ -233,7 +238,10 @@ class _ConversationPageState extends State<ConversationPage> {
 
   void _rebuildRows() {
     final view = _view!;
-    final blocks = buildBlocks(view);
+    final blocks = buildBlocks(
+      _entries,
+      finalAnswerIndex: view.finalAnswerIndex,
+    );
     final rows = <Object>[
       if (view.plan.isNotEmpty || TurnStatusLine.shows(view)) _Special.tail,
       ...blocks.reversed,

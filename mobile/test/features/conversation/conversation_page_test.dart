@@ -37,6 +37,31 @@ void main() {
       expect(find.textContaining('Offline'), findsNothing);
     });
 
+    testWidgets('后来的快照只带变了的那段，接在手里的窗口后面', (tester) async {
+      usePhone(tester);
+      final backend = RecordingBackend(manualWatch: true);
+      await tester.pumpWidget(host(startModel(backend), _page));
+      await tester.pump();
+      backend.watch.add(snapshot(view()));
+      await tester.pumpAndSettle();
+
+      backend.watch.add(
+        snapshot(
+          view(
+            entries: [
+              entry(2, EntryKind.assistant, text: 'Done, and the tests pass.'),
+            ],
+            entriesFrom: 2,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Fix the login bug'), findsOneWidget);
+      expect(find.text('lib/auth.dart'), findsOneWidget);
+      expect(find.text('Done, and the tests pass.'), findsOneWidget);
+      expect(find.text('Done, the session cookie was stale.'), findsNothing);
+    });
+
     testWidgets('演示对话：连续的工具调用收成一组，失败的单独标出', (tester) async {
       usePhone(tester);
       final backend = RecordingBackend();

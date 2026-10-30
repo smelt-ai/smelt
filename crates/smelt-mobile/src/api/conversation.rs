@@ -58,6 +58,7 @@ pub enum ConversationPhase {
 }
 
 /// 对话页要画的全部内容。条目是「已经在手里的连续窗口」：实时尾部加上翻出来的更早页。
+/// 每份视图只带从 `entries_from` 起的条目，前面的跟上一份一样，沿用手里的（见 `entries`）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConversationView {
     pub session_id: String,
@@ -79,13 +80,18 @@ pub struct ConversationView {
     pub plan: Vec<PlanStep>,
     pub pending_permissions: Vec<PermissionRequest>,
     pub pending_elicitation: Option<Elicitation>,
-    /// 按时间正序。
+    /// 按时间正序，从 `entries_from` 起到窗口末尾。手里的窗口截到 `entries_from` 再接上它们，
+    /// 就是整个窗口。
     pub entries: Vec<ConversationEntry>,
-    /// `entries[0]` 在整段对话里的下标。
+    /// `entries[0]` 在整段对话里的下标。等于 `entries_offset` 时这份视图带着整个窗口：
+    /// 订阅后的第一份、翻页或换了一段对话之后都是这样。
+    pub entries_from: i64,
+    /// 窗口第一条在整段对话里的下标。
     pub entries_offset: i64,
     /// 前面还有更早的条目可翻（[`load_older`]）。
     pub has_more_before: bool,
-    /// 回合已结束时，「最终回答」在 `entries` 里的下标（最后一条非空正文或完成信号）。
+    /// 回合已结束时，「最终回答」在整个窗口里的下标（从 `entries_offset` 数起；最后一条
+    /// 非空正文或完成信号）。
     pub final_answer_index: Option<u32>,
     pub supports_image: bool,
     pub available_commands: Vec<SlashCommand>,
