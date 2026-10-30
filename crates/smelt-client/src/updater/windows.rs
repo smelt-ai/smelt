@@ -342,8 +342,8 @@ fn failed_install_logs(dir: &Path, current_log: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// 安装失败后更新源换了包：删掉旧的安装程序。
-pub fn discard_failed_update(expected: &StagedUpdate) -> anyhow::Result<()> {
+/// 暂存着安装程序（待安装或安装失败）时更新源换了包：删掉旧的安装程序。
+pub fn discard_staged_update(expected: &StagedUpdate) -> anyhow::Result<()> {
     match std::fs::remove_file(&expected.installer) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

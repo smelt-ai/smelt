@@ -193,7 +193,9 @@ fn update_group(
             updater::UpdateStatus::Downloading { .. } => "下载中…".into(),
             updater::UpdateStatus::Installing { .. } => "准备中…".into(),
             updater::UpdateStatus::Applying { .. } => "正在退出…".into(),
-            updater::UpdateStatus::InstallFailed(_) => "检查新版本".into(),
+            updater::UpdateStatus::ReadyToInstall(_) | updater::UpdateStatus::InstallFailed(_) => {
+                "检查新版本".into()
+            }
             updater::UpdateStatus::Failed(updater::UpdateFailure::Recovery) => "重试恢复".into(),
             _ => "检查更新".into(),
         };

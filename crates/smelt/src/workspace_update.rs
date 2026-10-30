@@ -123,10 +123,12 @@ impl Workspace {
         if !self.update_status.can_check() {
             return;
         }
-        let failed_update = match &self.update_status {
-            updater::UpdateStatus::InstallFailed(update) => Some(update.clone()),
-            _ => None,
-        };
+        // 暂存着包（待安装或安装失败）时记下原状态：检查失败、或更新源仍指向它，都回到原状态。
+        let staged = self
+            .update_status
+            .staged_update()
+            .cloned()
+            .map(|update| (self.update_status.clone(), update));
         self.update_status = updater::UpdateStatus::Checking;
         let channel = cx.global::<settings::UpdateSettings>().channel;
         let installed = match updater::installed_release() {
@@ -136,9 +138,9 @@ impl Workspace {
                     "updater",
                     &format!("读取本机更新状态失败，暂停检查：{error:#}"),
                 );
-                self.update_status = failed_update.map_or_else(
-                    || updater::UpdateStatus::Failed(updater::UpdateFailure::Recovery),
-                    updater::UpdateStatus::InstallFailed,
+                self.update_status = staged.map_or(
+                    updater::UpdateStatus::Failed(updater::UpdateFailure::Recovery),
+                    |(status, _)| status,
                 );
                 cx.notify();
                 return;
@@ -159,19 +161,20 @@ impl Workspace {
                         // 开关读的是"此刻"的值而不是发起检查时的快照：检查期间用户
                         // 若刚把自动更新关掉，就不该再被一个后台下载打脸。
                         let auto_install = cx.global::<settings::UpdateSettings>().auto_install;
-                        if let Some(failed) = failed_update {
-                            match updater::decide_failed_update_check(
+                        if let Some((status, update)) = staged {
+                            match updater::decide_staged_update_check(
                                 candidate,
                                 &installed,
-                                &failed,
+                                &update,
                                 auto_install,
                             ) {
                                 Some(outcome) => {
-                                    this.replace_failed_update_after_check(failed, outcome, cx);
+                                    this.replace_staged_update_after_check(
+                                        status, update, outcome, cx,
+                                    );
                                 }
                                 None => {
-                                    this.update_status =
-                                        updater::UpdateStatus::InstallFailed(failed);
+                                    this.update_status = status;
                                     cx.notify();
                                 }
                             }
@@ -187,8 +190,8 @@ impl Workspace {
                             "updater",
                             &format!("检查{}更新失败：{e:#}", channel.label()),
                         );
-                        this.update_status = if let Some(failed) = failed_update {
-                            updater::UpdateStatus::InstallFailed(failed)
+                        this.update_status = if let Some((status, _)) = staged {
+                            status
                         } else if silent {
                             updater::UpdateStatus::Idle
                         } else {
@@ -227,27 +230,29 @@ impl Workspace {
     }
 
     #[cfg(any(target_os = "macos", windows))]
-    /// 只在 manifest 已经指向另一份发布包后进入。持久化旧作业的清理放到后台线程，
-    /// 成功后才能开始新下载，保证 begin_staged_update 永远不会撞上旧事务。
-    fn replace_failed_update_after_check(
+    /// 只在 manifest 已经指向另一份发布包后进入。`status` 是检查前的待安装或安装失败
+    /// 状态。持久化旧作业的清理放到后台线程，成功后才能开始新下载，保证
+    /// begin_staged_update 永远不会撞上旧事务；作废失败就回到原状态。
+    fn replace_staged_update_after_check(
         &mut self,
-        failed: updater::StagedUpdate,
+        status: updater::UpdateStatus,
+        update: updater::StagedUpdate,
         outcome: updater::CheckOutcome,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
-            let failed_for_work = failed.clone();
+            let update_for_work = update.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { updater::discard_failed_update(&failed_for_work) })
+                .spawn(async move { updater::discard_staged_update(&update_for_work) })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
                     smelt_sys::app_log::info(
                         "updater",
                         &format!(
-                            "更新源已替换安装失败的包 {}，作废旧作业并继续检查结果",
-                            failed.version
+                            "更新源已换掉暂存的包 {}，作废旧作业并继续检查结果",
+                            update.version
                         ),
                     );
                     this.apply_update_check_outcome(outcome, cx);
@@ -255,9 +260,9 @@ impl Workspace {
                 Err(error) => {
                     smelt_sys::app_log::error(
                         "updater",
-                        &format!("作废安装失败的更新 {} 失败：{error:#}", failed.version),
+                        &format!("作废暂存的更新 {} 失败：{error:#}", update.version),
                     );
-                    this.update_status = updater::UpdateStatus::InstallFailed(failed);
+                    this.update_status = status;
                     cx.notify();
                 }
             });
@@ -266,8 +271,8 @@ impl Workspace {
     }
 
     #[cfg(any(target_os = "macos", windows))]
-    /// 恢复失败时先收敛原事务；安装失败则由 check_for_update 拉取 manifest，只有
-    /// 确认发布 URL 已变化后才作废旧作业，不能绕过持久化事务直接另起下载。
+    /// 恢复失败时先收敛原事务；暂存着包（待安装或安装失败）则由 check_for_update 拉取
+    /// manifest，只有确认发布 URL 已变化后才作废旧作业，不能绕过持久化事务直接另起下载。
     pub(crate) fn check_or_recover_update(&mut self, silent: bool, cx: &mut Context<Self>) {
         if self.blocked_by_app_location(cx) {
             return;
@@ -414,7 +419,8 @@ impl Workspace {
                     } else {
                         updater::UpdateStatus::ReadyToInstall(update)
                     };
-                    cx.notify();
+                    // 暂存后更新源可能又发了新版：照样检查，换了包就作废这条再下新的。
+                    this.check_for_update(silent_check, cx);
                 }
                 Ok(None) => {
                     this.update_status = updater::UpdateStatus::Idle;

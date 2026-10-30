@@ -159,6 +159,7 @@ impl UpdateStatus {
             Self::Idle
                 | Self::UpToDate
                 | Self::Available { .. }
+                | Self::ReadyToInstall(_)
                 | Self::InstallFailed(_)
                 | Self::Failed(UpdateFailure::Check | UpdateFailure::Download)
         )
@@ -246,15 +247,16 @@ pub fn decide_check_outcome(
     }
 }
 
-/// 安装失败后手动检查的决策：更新源仍指向同一包时保留已验证的暂存作业，避免
-/// 无意义地重新下载；URL 已变化（包括服务端回滚到当前版本）时返回替换后的常规落点。
-pub fn decide_failed_update_check(
+/// 有暂存包（待安装或安装失败）时检查的决策：更新源仍指向同一包时保留已验证的暂存
+/// 作业，避免无意义地重新下载；URL 已变化（更新的版本、或服务端回滚到当前版本）时
+/// 返回作废旧作业后的常规落点。
+pub fn decide_staged_update_check(
     candidate: UpdateCandidate,
     installed: &InstalledRelease,
-    failed: &StagedUpdate,
+    staged: &StagedUpdate,
     auto_install: bool,
 ) -> Option<CheckOutcome> {
-    if candidate.url.trim() == failed.url.trim() {
+    if candidate.url.trim() == staged.url.trim() {
         return None;
     }
     Some(decide_check_outcome(candidate, installed, auto_install))
