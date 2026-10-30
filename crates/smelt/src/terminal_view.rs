@@ -1482,7 +1482,7 @@ impl Render for TerminalView {
                     cx.stop_propagation();
                 }
             }))
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                 // 新的一次触控板手势开始时清空余数，避免上一次手势的残留跟这次叠加。
                 if matches!(ev.touch_phase, TouchPhase::Started) {
                     this.scroll_accum = 0.0;

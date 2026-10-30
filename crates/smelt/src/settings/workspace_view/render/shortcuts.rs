@@ -34,11 +34,12 @@ pub(super) fn shortcuts_page(
         SettingGroup::new().item(
             SettingItem::render(move |_, window, cx| {
                 let state = cx.global::<KeymapState>();
+                let os = cx.platform_info().os;
                 let editable = |group: ShortcutGroup| -> Vec<gpui::AnyElement> {
                     SHORTCUTS
                         .iter()
                         .filter(|shortcut| shortcut.group == group)
-                        .map(|shortcut| editable_row(shortcut, state, colors))
+                        .map(|shortcut| editable_row(shortcut, state, os, colors))
                         .collect()
                 };
                 let fixed = |label: &'static str, keys: &[&'static str]| {
@@ -134,7 +135,12 @@ fn row(label: &'static str, keys: Vec<gpui::AnyElement>, colors: Palette) -> gpu
 
 /// 能改的一行：键帽点了开始录，再点一次不录了；改过的旁边有「恢复默认」。录键时、没改成时、
 /// 撞上别的快捷键等确认改绑时，说明写在名字下面。
-fn editable_row(shortcut: &'static Shortcut, state: &KeymapState, colors: Palette) -> gpui::AnyElement {
+fn editable_row(
+    shortcut: &'static Shortcut,
+    state: &KeymapState,
+    os: gpui::OperatingSystem,
+    colors: Palette,
+) -> gpui::AnyElement {
     let id = shortcut.id;
     let recording = state.recording == Some(id);
     let overridden = state.overrides().contains_key(id);
@@ -150,7 +156,7 @@ fn editable_row(shortcut: &'static Shortcut, state: &KeymapState, colors: Palett
             colors.muted,
         ))
     } else if let Some(reassign) = reassign {
-        let key = gpui::Keystroke::parse(&reassign.keystroke)
+        let key = gpui::Keystroke::parse_with_os(&reassign.keystroke, os)
             .map(|stroke| keymap::display(&stroke))
             .unwrap_or_else(|_| reassign.keystroke.clone());
         let other = keymap::shortcut(reassign.other).map_or(reassign.other, |other| other.label);
@@ -168,7 +174,7 @@ fn editable_row(shortcut: &'static Shortcut, state: &KeymapState, colors: Palett
     } else {
         match shortcut
             .keystroke(state.overrides())
-            .and_then(|spec| gpui::Keystroke::parse(spec).ok())
+            .and_then(|spec| gpui::Keystroke::parse_with_os(spec, os).ok())
         {
             Some(stroke) => kbd_cap(gpui_component::kbd::Kbd::new(stroke), colors.border, colors),
             None => keycap_text("未设置", colors.border, colors),

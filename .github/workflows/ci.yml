@@ -97,7 +97,7 @@ jobs:
         uses: actions/checkout@v7
 
       # 跟 rust-toolchain.toml 对齐；cargo-deny-action 默认镜像的 rustc 偏旧，
-      # edition 2024 / rust-version 1.97 的 workspace 元数据解析会踩坑。
+      # edition 2024 / rust-version 1.98 的 workspace 元数据解析会踩坑。
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

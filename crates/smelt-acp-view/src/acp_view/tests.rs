@@ -3928,11 +3928,12 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
         "line 40 is past the first screen and must not be built yet"
     );
 
-    cx.simulate_event(gpui::ScrollWheelEvent {
+    cx.simulate_event(gpui::ScrollEvent {
         position: viewport.center(),
         delta: ScrollDelta::Lines(point(0., -40.)),
         modifiers: Default::default(),
         touch_phase: TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     });
     draw_settled(cx);
 
@@ -4307,12 +4308,13 @@ fn tail_snapshot(
     snapshot
 }
 
-fn wheel(position: gpui::Point<gpui::Pixels>, up: gpui::Pixels) -> gpui::ScrollWheelEvent {
-    gpui::ScrollWheelEvent {
+fn wheel(position: gpui::Point<gpui::Pixels>, up: gpui::Pixels) -> gpui::ScrollEvent {
+    gpui::ScrollEvent {
         position,
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), up)),
         modifiers: Default::default(),
         touch_phase: gpui::TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
     }
 }
 
@@ -4461,7 +4463,7 @@ fn wheel_between_a_streaming_snapshot_and_the_next_frame_moves_by_its_delta(
             )
         });
         window.dispatch_event(
-            gpui::PlatformInput::ScrollWheel(wheel(viewport.center(), px(30.))),
+            gpui::PlatformInput::Scroll(wheel(viewport.center(), px(30.))),
             cx,
         );
     });
