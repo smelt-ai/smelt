@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/data/models.dart';
 import 'package:smelt_mobile/data/stores.dart';
+import 'package:smelt_mobile/features/conversation/composer.dart';
 import 'package:smelt_mobile/features/conversation/conversation_page.dart';
 import 'package:smelt_mobile/features/home_shell.dart';
 import 'package:smelt_mobile/features/machines/machine_detail_page.dart';
@@ -146,6 +147,64 @@ void main() {
     await _settle(tester);
   });
 
+  testWidgets('提醒提示条带「打开」也会过几秒自己消失', (tester) async {
+    usePhone(tester);
+    final model = startModel(RecordingBackend());
+    await tester.pumpWidget(host(model, const HomeShell()));
+    await _settle(tester);
+
+    await _attention(tester, model);
+    expect(find.byType(SnackBar), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 5));
+    await _settle(tester);
+    expect(find.byType(SnackBar), findsNothing, reason: '不点也不该一直挂着');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _settle(tester);
+  });
+
+  testWidgets('手机：对话页上的提醒提示条浮在输入框上方，键盘弹起时也不压住', (tester) async {
+    usePhone(tester);
+    final model = startModel(RecordingBackend());
+    await tester.pumpWidget(host(model, const HomeShell()));
+    await _settle(tester);
+
+    await tester.tap(
+      find.descendant(
+        of: find.byType(GlassNavBar),
+        matching: find.text('Sessions'),
+      ),
+    );
+    await _settle(tester);
+    await _tapRow(tester, _latestTitle);
+    expect(find.byType(ConversationPage), findsOneWidget);
+
+    await _attention(tester, model);
+    expect(
+      tester.getRect(find.byType(SnackBar)).bottom,
+      lessThanOrEqualTo(tester.getRect(find.byType(Composer)).top),
+    );
+
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300 * 3);
+    await _settle(tester);
+    // 外壳压在对话页下面是 offstage 的，按屏幕量。
+    final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+    final composer = tester.getRect(find.byType(Composer));
+    expect(
+      composer.bottom,
+      lessThanOrEqualTo(screen.height - 300),
+      reason: '输入框跟着键盘抬起',
+    );
+    expect(
+      tester.getRect(find.byType(SnackBar)).bottom,
+      lessThanOrEqualTo(composer.top),
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _settle(tester);
+  });
+
   testWidgets('平板：提醒提示条点「打开」放进详情栏', (tester) async {
     _useTablet(tester);
     final backend = RecordingBackend();
@@ -177,7 +236,11 @@ void main() {
     final screen = tester.getSize(find.byType(HomeShell));
     final bar = tester.getRect(find.byType(GlassNavBar));
     final page = find.byType(GalleyPage).first;
-    expect(tester.getRect(page).bottom, screen.height, reason: '页面铺到屏幕底，滚到胶囊下面');
+    expect(
+      tester.getRect(page).bottom,
+      screen.height,
+      reason: '页面铺到屏幕底，滚到胶囊下面',
+    );
     expect(
       MediaQuery.paddingOf(tester.element(page)).bottom,
       greaterThanOrEqualTo(screen.height - bar.top),
