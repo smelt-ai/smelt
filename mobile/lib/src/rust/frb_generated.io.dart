@@ -219,6 +219,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiffView dco_decode_diff_view(dynamic raw);
 
   @protected
+  DirEntry dco_decode_dir_entry(dynamic raw);
+
+  @protected
+  DirListing dco_decode_dir_listing(dynamic raw);
+
+  @protected
+  DirShortcut dco_decode_dir_shortcut(dynamic raw);
+
+  @protected
   Elicitation dco_decode_elicitation(dynamic raw);
 
   @protected
@@ -303,6 +312,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ConversationImage> dco_decode_list_conversation_image(dynamic raw);
+
+  @protected
+  List<DirEntry> dco_decode_list_dir_entry(dynamic raw);
+
+  @protected
+  List<DirShortcut> dco_decode_list_dir_shortcut(dynamic raw);
 
   @protected
   List<ElicitationField> dco_decode_list_elicitation_field(dynamic raw);
@@ -828,6 +843,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiffView sse_decode_diff_view(SseDeserializer deserializer);
 
   @protected
+  DirEntry sse_decode_dir_entry(SseDeserializer deserializer);
+
+  @protected
+  DirListing sse_decode_dir_listing(SseDeserializer deserializer);
+
+  @protected
+  DirShortcut sse_decode_dir_shortcut(SseDeserializer deserializer);
+
+  @protected
   Elicitation sse_decode_elicitation(SseDeserializer deserializer);
 
   @protected
@@ -934,6 +958,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ConversationImage> sse_decode_list_conversation_image(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<DirEntry> sse_decode_list_dir_entry(SseDeserializer deserializer);
+
+  @protected
+  List<DirShortcut> sse_decode_list_dir_shortcut(SseDeserializer deserializer);
 
   @protected
   List<ElicitationField> sse_decode_list_elicitation_field(
@@ -1613,6 +1643,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_diff_view(DiffView self, SseSerializer serializer);
 
   @protected
+  void sse_encode_dir_entry(DirEntry self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dir_listing(DirListing self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dir_shortcut(DirShortcut self, SseSerializer serializer);
+
+  @protected
   void sse_encode_elicitation(Elicitation self, SseSerializer serializer);
 
   @protected
@@ -1735,6 +1774,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_conversation_image(
     List<ConversationImage> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_dir_entry(List<DirEntry> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_dir_shortcut(
+    List<DirShortcut> self,
     SseSerializer serializer,
   );
 

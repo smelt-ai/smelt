@@ -28,6 +28,10 @@ class TestBackend extends DemoBackend {
   /// 删除时抛这个（模拟运行时拒绝删除自动化运行的会话）。
   Object? deleteError;
 
+  /// 打开项目时抛这个。
+  Object? openError;
+  final openedProjects = <(String, String)>[];
+
   @override
   Stream<CatalogEvent> catalogEvents() => super.catalogEvents().map((event) {
     final more = extra[event.runtimeId];
@@ -86,6 +90,14 @@ class TestBackend extends DemoBackend {
     final error = deleteError;
     if (error != null) throw error;
     await super.deleteSession(runtimeId, sessionId);
+  }
+
+  @override
+  Future<WorkspaceProject> openProject(String runtimeId, String root) async {
+    openedProjects.add((runtimeId, root));
+    final error = openError;
+    if (error != null) throw error;
+    return super.openProject(runtimeId, root);
   }
 }
 

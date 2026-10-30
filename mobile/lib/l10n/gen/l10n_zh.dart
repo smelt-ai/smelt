@@ -831,7 +831,46 @@ class L10nZh extends L10n {
   String get launchLoadFailed => '这台机器的项目没取到';
 
   @override
-  String get launchNoProjects => '这台机器上没有打开的项目。先在电脑上的 Smelt 里打开一个。';
+  String get launchNoProjects => '这台机器上还没有打开的项目。';
+
+  @override
+  String get launchOpenFolder => '打开其他目录…';
+
+  @override
+  String get launchOpenFolderHint => '在这台机器上选一个目录作为项目';
+
+  @override
+  String get launchStepFolder => '选目录';
+
+  @override
+  String get launchFolderUp => '上一级';
+
+  @override
+  String get launchFolderOpened => '已是项目';
+
+  @override
+  String get launchFolderEmpty => '这里没有子目录';
+
+  @override
+  String get launchFolderLoadFailed => '打不开这个目录';
+
+  @override
+  String launchFolderOpen(String name) {
+    return '把「$name」打开为项目';
+  }
+
+  @override
+  String launchFolderUse(String name) {
+    return '用「$name」';
+  }
+
+  @override
+  String get launchFolderOpening => '正在打开…';
+
+  @override
+  String launchFolderOpenFailed(String message) {
+    return '项目没能打开：$message';
+  }
 
   @override
   String get launchNoProject => '不选项目';

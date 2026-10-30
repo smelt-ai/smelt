@@ -617,7 +617,39 @@
     }
   },
   "launchLoadFailed": "Couldn't load this machine's projects",
-  "launchNoProjects": "No projects open on this machine. Open one in Smelt on the computer first.",
+  "launchNoProjects": "No projects open on this machine yet.",
+  "launchOpenFolder": "Open another folder…",
+  "launchOpenFolderHint": "Pick a folder on this machine as a project",
+  "launchStepFolder": "Choose a folder",
+  "launchFolderUp": "Up one level",
+  "launchFolderOpened": "Already a project",
+  "launchFolderEmpty": "No subfolders here",
+  "launchFolderLoadFailed": "Couldn't open this folder",
+  "launchFolderOpen": "Open “{name}” as a project",
+  "@launchFolderOpen": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "launchFolderUse": "Use “{name}”",
+  "@launchFolderUse": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "launchFolderOpening": "Opening…",
+  "launchFolderOpenFailed": "Couldn't open the project: {message}",
+  "@launchFolderOpenFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
   "launchNoProject": "No project",
   "launchNoProjectHint": "Talk to one of your agents in its own space",
   "launchSectionPinned": "Pinned",

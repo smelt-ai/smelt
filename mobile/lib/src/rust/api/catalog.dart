@@ -8,7 +8,7 @@ import 'error.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 所有机器的会话目录事件流，事件带 `runtime_id`。订阅时每台机器先推一次当前已知的列表；
 /// 之后配对的机器同样会推。忘记一台机器时推一次它的空列表（`cached = true`、没有
@@ -57,6 +57,24 @@ Future<void> deleteSession({
 }) => RustLib.instance.api.crateApiCatalogDeleteSession(
   runtimeId: runtimeId,
   sessionId: sessionId,
+);
+
+/// 列运行时那台机器上的一层目录。`path` 为空时从最近打开的项目所在的目录开始（新项目
+/// 多半和老项目放在一起），没有项目或那里进不去时从主目录开始。
+Future<DirListing> browseDirs({required String runtimeId, String? path}) =>
+    RustLib.instance.api.crateApiCatalogBrowseDirs(
+      runtimeId: runtimeId,
+      path: path,
+    );
+
+/// 在这台机器上打开一个目录作为项目。已经开着就什么都不改。等运行时推来的目录里出现它
+/// 再返回，拿到就能在里面新建会话。
+Future<WorkspaceProject> openProject({
+  required String runtimeId,
+  required String root,
+}) => RustLib.instance.api.crateApiCatalogOpenProject(
+  runtimeId: runtimeId,
+  root: root,
 );
 
 /// 自动化与智能体定义。
@@ -519,6 +537,112 @@ enum CatalogEventKind {
 
   /// `message` 有值：会话目录的订阅出错（会自动重试），只给人看。
   error,
+}
+
+/// 运行时那台机器上的一个目录。
+class DirEntry {
+  final String name;
+
+  /// 绝对路径，原样回传给 [`browse_dirs`] / [`open_project`]。
+  final String path;
+
+  /// 已经是这台机器上开着的项目。
+  final bool opened;
+
+  const DirEntry({
+    required this.name,
+    required this.path,
+    required this.opened,
+  });
+
+  @override
+  int get hashCode => name.hashCode ^ path.hashCode ^ opened.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DirEntry &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          path == other.path &&
+          opened == other.opened;
+}
+
+/// 逐级浏览时的一层：当前目录和它下面的子目录（隐藏目录不列）。
+class DirListing {
+  /// 规范化后的绝对路径。
+  final String path;
+
+  /// 给人看的路径，主目录缩写成 `~`。
+  final String displayPath;
+
+  /// 目录名；根目录没有名字时是路径本身。
+  final String name;
+
+  /// 上一级；已经在根目录时为空。
+  final String? parent;
+
+  /// 当前目录已经是开着的项目。
+  final bool opened;
+
+  /// 主目录在前，然后是最近打开的项目所在的目录，去重。
+  final List<DirShortcut> shortcuts;
+
+  /// 按名字排好。
+  final List<DirEntry> entries;
+
+  const DirListing({
+    required this.path,
+    required this.displayPath,
+    required this.name,
+    this.parent,
+    required this.opened,
+    required this.shortcuts,
+    required this.entries,
+  });
+
+  @override
+  int get hashCode =>
+      path.hashCode ^
+      displayPath.hashCode ^
+      name.hashCode ^
+      parent.hashCode ^
+      opened.hashCode ^
+      shortcuts.hashCode ^
+      entries.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DirListing &&
+          runtimeType == other.runtimeType &&
+          path == other.path &&
+          displayPath == other.displayPath &&
+          name == other.name &&
+          parent == other.parent &&
+          opened == other.opened &&
+          shortcuts == other.shortcuts &&
+          entries == other.entries;
+}
+
+/// 一个快捷位置：主目录、已打开项目所在的目录。
+class DirShortcut {
+  /// 给人看的路径，主目录缩写成 `~`。
+  final String label;
+  final String path;
+
+  const DirShortcut({required this.label, required this.path});
+
+  @override
+  int get hashCode => label.hashCode ^ path.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DirShortcut &&
+          runtimeType == other.runtimeType &&
+          label == other.label &&
+          path == other.path;
 }
 
 /// 改名结果。恢复默认名时 `custom_title` 为空，`title` 是 agent 原始标题。

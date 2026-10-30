@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:smelt_mobile/data/models.dart';
 import 'package:smelt_mobile/data/preferences.dart';
 import 'package:smelt_mobile/data/stores.dart';
 import 'package:smelt_mobile/features/launch/launch_flow.dart';
@@ -172,5 +173,85 @@ void main() {
     expect(_inSheet('No project'), findsNothing);
     expect(_inSheet('Pinned'), findsOneWidget);
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('打开其他目录：逐级进去、返回退一层，打开后直接选启动方式', (tester) async {
+    final backend = TestBackend();
+    final filter = ValueNotifier<String?>('rt-mbp');
+    addTearDown(filter.dispose);
+    final harness = await pumpHarness(
+      tester,
+      backend,
+      SessionsPage(filter: filter),
+    );
+
+    await tester.tap(find.byTooltip('New session'));
+    await settle(tester);
+    // 入口在项目列表最后。
+    final lastProject = tester.getTopLeft(_inSheet('website')).dy;
+    expect(
+      tester.getTopLeft(_inSheet('Open another folder…')).dy,
+      greaterThan(lastProject),
+    );
+    await tester.tap(_inSheet('Open another folder…'));
+    await settle(tester);
+
+    // 从最近打开的项目所在的目录开始；开着的项目标出来。
+    expect(_inSheet('Choose a folder'), findsOneWidget);
+    expect(_inSheet('~/code'), findsWidgets);
+    expect(_inSheet('Already a project'), findsNWidgets(3));
+
+    await tester.tap(_inSheet('playground'));
+    await settle(tester);
+    await tester.tap(_inSheet('rust-demo'));
+    await settle(tester);
+    expect(_inSheet('~/code/playground/rust-demo'), findsOneWidget);
+    expect(_inSheet('No subfolders here'), findsOneWidget);
+
+    // 返回先退回上一层，不是退出选目录。
+    await tester.tap(find.byTooltip('Back'));
+    await settle(tester);
+    expect(_inSheet('~/code/playground'), findsOneWidget);
+    expect(_inSheet('Choose a folder'), findsOneWidget);
+
+    await tester.tap(_inSheet('rust-demo'));
+    await settle(tester);
+    await tester.tap(_inSheet('Open “rust-demo” as a project'));
+    await settle(tester);
+    expect(backend.openedProjects, [
+      ('rt-mbp', '/Users/demo/code/playground/rust-demo'),
+    ]);
+    expect(_inSheet('Pinned'), findsOneWidget);
+
+    await tester.tap(_inSheet('Codex'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await settle(tester);
+    expect(
+      backend.created.single.projectRoot,
+      '/Users/demo/code/playground/rust-demo',
+    );
+    expect(harness.opened, ['rt-mbp/demo-new-1']);
+  });
+
+  testWidgets('打开项目失败：留在选目录这一步，写出原因', (tester) async {
+    final backend = TestBackend()
+      ..openError = const SmeltError(
+        kind: SmeltErrorKind.offline,
+        message: '连接断了',
+      );
+    final filter = ValueNotifier<String?>('rt-mbp');
+    addTearDown(filter.dispose);
+    await pumpHarness(tester, backend, SessionsPage(filter: filter));
+
+    await tester.tap(find.byTooltip('New session'));
+    await settle(tester);
+    await tester.tap(_inSheet('Open another folder…'));
+    await settle(tester);
+    await tester.tap(_inSheet('Open “code” as a project'));
+    await settle(tester);
+
+    expect(_inSheet("Couldn't open the project: 连接断了"), findsOneWidget);
+    expect(_inSheet('Choose a folder'), findsOneWidget);
+    expect(_inSheet('Pinned'), findsNothing);
   });
 }
