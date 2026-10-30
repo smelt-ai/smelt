@@ -9,12 +9,15 @@
 //! - **不升版本**：响应和推送里加字段（一律可缺省，缺了有明确含义）、给标了「会增长」的枚举
 //!   （只有不影响判断的显示类枚举）加值、加订阅消息类型。
 //! - **升 [`EVENT_BUS_PROTOCOL_VERSION`]**：删字段、删话题、改字段含义（包括新字段改变了旧
-//!   字段该怎么读）、加必填字段、改握手。新旧两边在订阅握手时就拿到版本不兼容。
+//!   字段该怎么读）、加必填字段、改握手。升版时 [`MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION`]
+//!   一起抬到同一个值：客户端和运行时都只会说一个版本的协议，新旧两边才能在连接时就拿到版本
+//!   不兼容。
 //! - **加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会反复重连。
 //! - **其余枚举加值也要升**：它们解不出会让整条消息失败，比如相位、自动化状态。相位还决定客户端
 //!   怎么判断会话在不在忙，没有安全的兜底含义。
-//! - **请求不宽容**：客户端发给运行时的请求保持严格。旧运行时要是忽略新字段，用户的意图会悄悄
-//!   丢掉（比如发了附件没送到）；严格解码时它会明确拒绝。新字段没用上时不要序列化。
+//! - **请求不宽容**：订阅请求和 `ConversationInput` 保持严格。旧运行时要是忽略新字段，用户的
+//!   意图会悄悄丢掉（比如发了附件没送到）；严格解码时它会明确拒绝。新字段没用上时不要序列化。
+//!   控制接口的参数不在此列，规则见 `docs/control-api.md`。
 //! - 删掉的字段名不再拿来表示别的东西：旧客户端可能还按原来的意思读。
 //! - 认证（[`EventClientAuth`]）保持严格：客户端不能在里面夹带运行时不认识的声明。
 
@@ -48,7 +51,9 @@ pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
 
 /// 以下三个投影版本号**冻结**，不再递增，v7 起的客户端也不检查。只为 v6 及更早的客户端：
 /// 它们靠 `system.describe` 里的这几个数判断兼容，照旧报出来，旧客户端才能说清「需要升级
-/// 客户端」而不是解析失败。没有 v6 客户端之后连同 describe 里的字段一起删。
+/// 客户端」而不是解析失败。没有 v6 客户端之后连同 describe 里的字段一起删；
+/// `CORE_SESSION_STATE_SCHEMA_VERSION` 还填着信封的 `schema_version`（没有客户端读），到时
+/// 一起处理。
 pub const CORE_PROJECTION_VERSION: u16 = 1;
 pub const CORE_SESSION_PROJECTION_VERSION: u16 = 3;
 pub const CORE_SESSION_STATE_SCHEMA_VERSION: u16 = 3;
@@ -780,7 +785,8 @@ mod tests {
             "subscription": {"id": "s", "topics": []},
             "some_future_field": true,
         });
-        assert!(serde_json::from_value::<SubscribeRequest>(request).is_err());
+        let error = serde_json::from_value::<SubscribeRequest>(request).unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     /// 契约：旧运行时没带的可缺省字段，这一版读成缺省值。

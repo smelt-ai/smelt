@@ -143,14 +143,13 @@ mod tests {
     /// 请求不宽容：旧运行时不能悄悄丢掉新客户端发的字段。
     #[test]
     fn input_rejects_unknown_fields() {
-        assert!(
-            serde_json::from_value::<ConversationInput>(serde_json::json!({
-                "submission_id": "s1",
-                "text": "hi",
-                "some_future_field": true
-            }))
-            .is_err()
-        );
+        let error = serde_json::from_value::<ConversationInput>(serde_json::json!({
+            "submission_id": "s1",
+            "text": "hi",
+            "some_future_field": true
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     /// 运行时回的这几样宽容读取：多出来的字段忽略，认不出的失败类别按「结果不明」。
