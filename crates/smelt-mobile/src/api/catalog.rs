@@ -279,6 +279,65 @@ pub fn delete_session(runtime_id: String, session_id: String) -> Result<(), Smel
 }
 
 // ---------------------------------------------------------------------------
+// 打开项目
+// ---------------------------------------------------------------------------
+
+/// 运行时那台机器上的一个目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    /// 绝对路径，原样回传给 [`browse_dirs`] / [`open_project`]。
+    pub path: String,
+    /// 已经是这台机器上开着的项目。
+    pub opened: bool,
+}
+
+/// 一个快捷位置：主目录、已打开项目所在的目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirShortcut {
+    /// 给人看的路径，主目录缩写成 `~`。
+    pub label: String,
+    pub path: String,
+}
+
+/// 逐级浏览时的一层：当前目录和它下面的子目录（隐藏目录不列）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirListing {
+    /// 规范化后的绝对路径。
+    pub path: String,
+    /// 给人看的路径，主目录缩写成 `~`。
+    pub display_path: String,
+    /// 目录名；根目录没有名字时是路径本身。
+    pub name: String,
+    /// 上一级；已经在根目录时为空。
+    pub parent: Option<String>,
+    /// 当前目录已经是开着的项目。
+    pub opened: bool,
+    /// 主目录在前，然后是最近打开的项目所在的目录，去重。
+    pub shortcuts: Vec<DirShortcut>,
+    /// 按名字排好。
+    pub entries: Vec<DirEntry>,
+}
+
+/// 列运行时那台机器上的一层目录。`path` 为空时从最近打开的项目所在的目录开始（新项目
+/// 多半和老项目放在一起），没有项目或那里进不去时从主目录开始。
+pub fn browse_dirs(runtime_id: String, path: Option<String>) -> Result<DirListing, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .browse_dirs(path.as_deref())
+}
+
+/// 在这台机器上打开一个目录作为项目。已经开着就什么都不改。等运行时推来的目录里出现它
+/// 再返回，拿到就能在里面新建会话。
+pub fn open_project(runtime_id: String, root: String) -> Result<WorkspaceProject, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .open_project(&root)
+}
+
+// ---------------------------------------------------------------------------
 // 自动化
 // ---------------------------------------------------------------------------
 

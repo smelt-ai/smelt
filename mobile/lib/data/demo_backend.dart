@@ -540,27 +540,90 @@ class DemoBackend implements Backend {
   @override
   void markRead(String runtimeId, String sessionId) {}
 
+  /// 开着的项目根（每台机器一样），按打开的先后。
+  final List<String> _projectRoots = [
+    '/Users/demo/code/smelt',
+    '/Users/demo/code/velum',
+    '/Users/demo/code/website',
+  ];
+
+  static const _home = '/Users/demo';
+
+  /// 合成的目录树：目录 → 子目录名。
+  static const Map<String, List<String>> _dirs = {
+    '/': ['Users'],
+    '/Users': ['demo'],
+    '/Users/demo': ['code', 'Documents', 'Downloads'],
+    '/Users/demo/code': ['playground', 'smelt', 'velum', 'website'],
+    '/Users/demo/code/playground': ['rust-demo'],
+    '/Users/demo/code/smelt': ['crates', 'docs', 'mobile'],
+  };
+
+  static String _name(String path) =>
+      path == '/' ? '/' : path.substring(path.lastIndexOf('/') + 1);
+
+  static String? _parent(String path) {
+    if (path == '/') return null;
+    final cut = path.lastIndexOf('/');
+    return cut == 0 ? '/' : path.substring(0, cut);
+  }
+
+  static String _display(String path) => path == _home
+      ? '~'
+      : path.startsWith('$_home/')
+      ? '~${path.substring(_home.length)}'
+      : path;
+
+  @override
+  Future<DirListing> browseDirs(String runtimeId, {String? path}) async {
+    final dir =
+        path ??
+        (_projectRoots.isEmpty ? _home : _parent(_projectRoots.last) ?? _home);
+    // 树里没列子目录的就是叶子。
+    final children = _dirs[dir] ?? const <String>[];
+    final shortcuts = <String>[_home];
+    for (final root in _projectRoots.reversed) {
+      final parent = _parent(root);
+      if (parent != null && !shortcuts.contains(parent)) shortcuts.add(parent);
+    }
+    return DirListing(
+      path: dir,
+      displayPath: _display(dir),
+      name: _name(dir),
+      parent: _parent(dir),
+      opened: _projectRoots.contains(dir),
+      shortcuts: [
+        for (final s in shortcuts.take(4))
+          DirShortcut(label: _display(s), path: s),
+      ],
+      entries: [
+        for (final path in children.map((c) => dir == '/' ? '/$c' : '$dir/$c'))
+          DirEntry(
+            name: _name(path),
+            path: path,
+            opened: _projectRoots.contains(path),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Future<WorkspaceProject> openProject(String runtimeId, String root) async {
+    if (!_projectRoots.contains(root)) _projectRoots.add(root);
+    return _projectOf(root);
+  }
+
+  WorkspaceProject _projectOf(String root) => WorkspaceProject(
+    root: root,
+    title: _name(root),
+    order: _projectRoots.indexOf(root),
+  );
+
   @override
   Future<WorkspaceCatalog> workspaceCatalog(String runtimeId) async =>
-      const WorkspaceCatalog(
-        projects: [
-          WorkspaceProject(
-            root: '/Users/demo/code/smelt',
-            title: 'smelt',
-            order: 0,
-          ),
-          WorkspaceProject(
-            root: '/Users/demo/code/velum',
-            title: 'velum',
-            order: 1,
-          ),
-          WorkspaceProject(
-            root: '/Users/demo/code/website',
-            title: 'website',
-            order: 2,
-          ),
-        ],
-        agents: [
+      WorkspaceCatalog(
+        projects: [for (final root in _projectRoots) _projectOf(root)],
+        agents: const [
           AcpAgentOption(id: 'claude', kind: 'claude', label: 'Claude Code'),
           AcpAgentOption(id: 'codex', kind: 'codex', label: 'Codex'),
           AcpAgentOption(id: 'pi', kind: 'pi', label: 'Pi'),
@@ -571,7 +634,7 @@ class DemoBackend implements Backend {
             agentDefinitionId: 'def-assistant',
           ),
         ],
-        sections: LaunchSections(
+        sections: const LaunchSections(
           common: [
             LaunchAction(
               key: 'claude',

@@ -880,8 +880,47 @@ class L10nEn extends L10n {
   String get launchLoadFailed => 'Couldn\'t load this machine\'s projects';
 
   @override
-  String get launchNoProjects =>
-      'No projects open on this machine. Open one in Smelt on the computer first.';
+  String get launchNoProjects => 'No projects open on this machine yet.';
+
+  @override
+  String get launchOpenFolder => 'Open another folder…';
+
+  @override
+  String get launchOpenFolderHint =>
+      'Pick a folder on this machine as a project';
+
+  @override
+  String get launchStepFolder => 'Choose a folder';
+
+  @override
+  String get launchFolderUp => 'Up one level';
+
+  @override
+  String get launchFolderOpened => 'Already a project';
+
+  @override
+  String get launchFolderEmpty => 'No subfolders here';
+
+  @override
+  String get launchFolderLoadFailed => 'Couldn\'t open this folder';
+
+  @override
+  String launchFolderOpen(String name) {
+    return 'Open “$name” as a project';
+  }
+
+  @override
+  String launchFolderUse(String name) {
+    return 'Use “$name”';
+  }
+
+  @override
+  String get launchFolderOpening => 'Opening…';
+
+  @override
+  String launchFolderOpenFailed(String message) {
+    return 'Couldn\'t open the project: $message';
+  }
 
   @override
   String get launchNoProject => 'No project';

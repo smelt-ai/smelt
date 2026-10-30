@@ -32,20 +32,25 @@ use smelt_model::control_api::{
     AgentDefinitionIdParams, AgentDefinitionList, AutomationList, AutomationRunOnce,
     AutomationSetEnabled, AutomationSetEnabledParams, NewSessionCatalog, NewSessionCatalogResult,
     SessionAgentBindings, SessionCreate, SessionCreateKind, SessionCreateParams, SessionDelete,
-    SessionIdParams,
+    SessionIdParams, WorkspaceProjectOpen,
 };
 use smelt_model::daemon_state::{
     DaemonStateEvent, DaemonStateEventClient, SubscriptionShape, daemon_reconnect_backoff,
 };
 use smelt_model::session_control::AcpAgentOption;
+use smelt_model::workspace_directory::WorkspaceProjectParams;
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode, EmptyParams};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use smelt_runtime_client::protocol::history::{HistoryListCall, HistoryListParams, HistorySession};
+use smelt_runtime_client::protocol::workspace::{
+    BrowseDirsParams, BrowseDirsResult, WorkspaceBrowseDirsCall,
+};
 use smelt_runtime_client::{RequestError, RuntimeClient, RuntimeStream};
 
 use crate::api::catalog::{
-    AutomationCatalog, CatalogEvent, CatalogEventKind, HistoryRenameResult, HistorySessionSummary,
-    SessionKind, SessionList, SessionSummary, WorkspaceCatalog,
+    AutomationCatalog, CatalogEvent, CatalogEventKind, DirListing, HistoryRenameResult,
+    HistorySessionSummary, SessionKind, SessionList, SessionSummary, WorkspaceCatalog,
+    WorkspaceProject,
 };
 use crate::api::error::{SmeltError, SmeltErrorKind, error, outdated_kind};
 use crate::api::fleet::ConnectionState;
@@ -378,6 +383,92 @@ impl Catalog {
                 .collect(),
             sections: projection::launch_sections(catalog.sections),
         })
+    }
+
+    pub(crate) fn browse_dirs(&self, path: Option<&str>) -> Result<DirListing, SmeltError> {
+        let runtime = self.runtime()?;
+        // 起点和「已打开」要看开着哪些项目；没等到快照就当一个都没开。
+        self.wait_primed(runtime.generation);
+        let (style, opened) = {
+            let inner = self.shared.lock();
+            let opened = if inner.generation == Some(runtime.generation) {
+                inner.state.opened_roots()
+            } else {
+                Vec::new()
+            };
+            (inner.state.path_style(), opened)
+        };
+        let listed = match path.map(str::trim).filter(|path| !path.is_empty()) {
+            Some(path) => self.list_dir(&runtime, Some(path))?,
+            None => match opened
+                .last()
+                .and_then(|root| style.parent(root))
+                .filter(|parent| !parent.is_empty())
+            {
+                Some(start) => self.list_dir(&runtime, Some(&start)).or_else(|e| {
+                    log::info!("从 {start} 开始浏览失败，改从主目录开始：{}", e.message);
+                    self.list_dir(&runtime, None)
+                })?,
+                None => self.list_dir(&runtime, None)?,
+            },
+        };
+        Ok(projection::dir_listing(style, listed, &opened))
+    }
+
+    fn list_dir(
+        &self,
+        runtime: &CurrentRuntime,
+        path: Option<&str>,
+    ) -> Result<BrowseDirsResult, SmeltError> {
+        runtime
+            .client
+            .call::<WorkspaceBrowseDirsCall>(
+                &BrowseDirsParams {
+                    path: path.map(str::to_string),
+                    include_files: false,
+                },
+                self.shared.timing.call_timeout,
+            )
+            .map_err(control_error)
+    }
+
+    pub(crate) fn open_project(&self, root: &str) -> Result<WorkspaceProject, SmeltError> {
+        let root = root.trim();
+        if root.is_empty() {
+            return Err(error(SmeltErrorKind::Other, "缺少要打开的目录"));
+        }
+        let runtime = self.runtime()?;
+        let revision = runtime
+            .client
+            .call::<WorkspaceProjectOpen>(
+                &WorkspaceProjectParams {
+                    root: root.to_string(),
+                },
+                self.shared.timing.call_timeout,
+            )
+            .map_err(control_error)?;
+        // 运行时改完库就推整份目录；等它到了再从里面取，界面拿到的项目和列表里的是同一个。
+        let inner = self.shared.lock();
+        let (inner, _) = self
+            .shared
+            .wake
+            .wait_timeout_while(inner, self.shared.timing.sync_wait, |inner| {
+                !inner.closed
+                    && inner.generation == Some(runtime.generation)
+                    && !inner.state.workspace_reached(&revision)
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        if inner.generation != Some(runtime.generation) || !inner.state.workspace_reached(&revision)
+        {
+            return Err(not_synced());
+        }
+        let style = inner.state.path_style();
+        inner
+            .state
+            .projects()
+            .into_iter()
+            .find(|project| projection::same_dir(style, &project.root, root))
+            .ok_or_else(|| error(SmeltErrorKind::Other, format!("运行时的项目里没有 {root}")))
     }
 
     pub(crate) fn automation_catalog(&self) -> Result<AutomationCatalog, SmeltError> {
@@ -937,6 +1028,10 @@ impl Shared {
         }
         let was_primed = inner.state.primed;
         let applied = inner.state.apply(event, Instant::now());
+        if applied.workspace_changed {
+            // 叫醒等目录推到某个版本的调用（`open_project`）。
+            self.wake.notify_all();
+        }
         if inner.state.primed && !was_primed {
             inner.cached = None;
             inner.last_error = None;

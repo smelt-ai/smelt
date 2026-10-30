@@ -1534,8 +1534,74 @@ abstract class L10n {
   /// No description provided for @launchNoProjects.
   ///
   /// In en, this message translates to:
-  /// **'No projects open on this machine. Open one in Smelt on the computer first.'**
+  /// **'No projects open on this machine yet.'**
   String get launchNoProjects;
+
+  /// No description provided for @launchOpenFolder.
+  ///
+  /// In en, this message translates to:
+  /// **'Open another folder…'**
+  String get launchOpenFolder;
+
+  /// No description provided for @launchOpenFolderHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick a folder on this machine as a project'**
+  String get launchOpenFolderHint;
+
+  /// No description provided for @launchStepFolder.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose a folder'**
+  String get launchStepFolder;
+
+  /// No description provided for @launchFolderUp.
+  ///
+  /// In en, this message translates to:
+  /// **'Up one level'**
+  String get launchFolderUp;
+
+  /// No description provided for @launchFolderOpened.
+  ///
+  /// In en, this message translates to:
+  /// **'Already a project'**
+  String get launchFolderOpened;
+
+  /// No description provided for @launchFolderEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No subfolders here'**
+  String get launchFolderEmpty;
+
+  /// No description provided for @launchFolderLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open this folder'**
+  String get launchFolderLoadFailed;
+
+  /// No description provided for @launchFolderOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Open “{name}” as a project'**
+  String launchFolderOpen(String name);
+
+  /// No description provided for @launchFolderUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Use “{name}”'**
+  String launchFolderUse(String name);
+
+  /// No description provided for @launchFolderOpening.
+  ///
+  /// In en, this message translates to:
+  /// **'Opening…'**
+  String get launchFolderOpening;
+
+  /// No description provided for @launchFolderOpenFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open the project: {message}'**
+  String launchFolderOpenFailed(String message);
 
   /// No description provided for @launchNoProject.
   ///

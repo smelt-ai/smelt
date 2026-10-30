@@ -51,6 +51,12 @@ abstract interface class Backend {
     String? requestId,
   });
   Future<void> deleteSession(String runtimeId, String sessionId);
+
+  /// 逐级浏览这台机器上的目录；`path` 为空时由内核挑起点。
+  Future<DirListing> browseDirs(String runtimeId, {String? path});
+
+  /// 在这台机器上把一个目录打开为项目，返回进了目录之后的它。
+  Future<WorkspaceProject> openProject(String runtimeId, String root);
   Future<AutomationCatalog> automationCatalog(String runtimeId);
   Future<AutomationCatalog> setAutomationEnabled(
     String runtimeId,
@@ -238,6 +244,14 @@ class FrbBackend implements Backend {
   @override
   Future<void> deleteSession(String runtimeId, String sessionId) =>
       catalog.deleteSession(runtimeId: runtimeId, sessionId: sessionId);
+
+  @override
+  Future<DirListing> browseDirs(String runtimeId, {String? path}) =>
+      catalog.browseDirs(runtimeId: runtimeId, path: path);
+
+  @override
+  Future<WorkspaceProject> openProject(String runtimeId, String root) =>
+      catalog.openProject(runtimeId: runtimeId, root: root);
 
   @override
   Future<AutomationCatalog> automationCatalog(String runtimeId) =>
