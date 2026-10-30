@@ -327,7 +327,8 @@
     }
   },
   "machineRevoked": "This phone was removed from this machine",
-  "machineIncompatible": "Machine needs an update",
+  "machineRuntimeOutdated": "Machine needs an update",
+  "machineAppOutdated": "App needs an update",
   "timeJustNow": "just now",
   "timeMinutesAgo": "{n} min ago",
   "@timeMinutesAgo": {
@@ -780,8 +781,16 @@
       }
     }
   },
-  "machinesIncompatibleBody": "This app and Smelt on {name} are on incompatible versions. Update the older one, then reconnect. If it still fails, pair again.",
-  "@machinesIncompatibleBody": {
+  "machinesRuntimeOutdatedBody": "Smelt on {name} is older than this app, and the versions are incompatible. Update Smelt on that machine, then reconnect. If it still fails, pair again.",
+  "@machinesRuntimeOutdatedBody": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesAppOutdatedBody": "This app is older than Smelt on {name}, and the versions are incompatible. Update this app, then reconnect.",
+  "@machinesAppOutdatedBody": {
     "placeholders": {
       "name": {
         "type": "String"
@@ -853,7 +862,8 @@
   },
   "machinesPairFailed": "Couldn't pair",
   "machinesPairErrorExpired": "This pairing code has expired or was already used. Make a new one on the machine and scan it.",
-  "machinesPairErrorIncompatible": "This app and Smelt on that machine are on incompatible versions. Update the older one, then pair with a new code.",
+  "machinesPairErrorRuntimeOutdated": "Smelt on that machine is older than this app, and the versions are incompatible. Update Smelt there, then pair with a new code.",
+  "machinesPairErrorAppOutdated": "This app is older than Smelt on that machine, and the versions are incompatible. Update this app, then pair with a new code.",
   "machinesPairErrorOffline": "Couldn't reach the machine. Check that it's awake and both sides are online, then try again. If the code has expired, make a new one.",
   "machinesPairErrorRejected": "The machine turned this phone away. Make a new pairing code on it and try again.",
   "machinesPairErrorCancelled": "Pairing was interrupted. Try again.",

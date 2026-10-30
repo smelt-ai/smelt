@@ -263,6 +263,100 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
     worker.join().unwrap();
 }
 
+/// 读到含 `needle` 的一行为止；连接被关（EOF）或超时都算没读到。
+fn read_line_containing(reader: &mut BufReader<UnixStream>, needle: &str) -> bool {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) if line.contains(needle) => return true,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// 两台桌面（本机和远程）同时开着同一段对话：后来的不能顶掉先来的，否则两边断线
+/// 自动重连会互相踢个没完。两条都收更新，断开时只摘自己那条。
+#[test]
+fn second_control_client_does_not_evict_the_first() {
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-shared", || {
+        make_acp_session_value("acp-shared", reduced)
+    });
+    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: false,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: false,
+    });
+
+    let open = |acp_sessions: &AcpSessions| {
+        let (server, client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let reader = BufReader::new(server.try_clone().unwrap());
+        let sessions_for_open = Arc::clone(acp_sessions);
+        let worker = thread::spawn(move || {
+            handle_acp_open(
+                server,
+                reader,
+                &serde_json::json!({
+                    "id": "acp-shared",
+                    "launch": {"command": "/must/not/be/launched"},
+                }),
+                new_sessions(),
+                sessions_for_open,
+                new_event_hub(),
+            );
+        });
+        let mut reader = BufReader::new(client);
+        assert!(read_line_containing(&mut reader, "\"snapshot\""));
+        (reader, worker)
+    };
+    let push_marker = |marker: &str| {
+        slot.value
+            .reduced
+            .lock()
+            .entries_mut()
+            .push(AcpEntry::User(marker.to_string()));
+        // 加了条目要从新条目推起；`None` 是「条目没变」，会把它跳过。
+        push_acp_snapshot(&slot.value, true);
+    };
+
+    let (mut first, first_worker) = open(&acp_sessions);
+    let (mut second, second_worker) = open(&acp_sessions);
+
+    push_marker("after-second-open");
+    assert!(
+        read_line_containing(&mut first, "after-second-open"),
+        "第二台桌面接上后，第一台的连接不能被关掉"
+    );
+    assert!(read_line_containing(&mut second, "after-second-open"));
+
+    drop(first);
+    first_worker.join().unwrap();
+    push_marker("after-first-left");
+    assert!(
+        read_line_containing(&mut second, "after-first-left"),
+        "一台桌面断开只摘它自己那条"
+    );
+
+    drop(second);
+    second_worker.join().unwrap();
+}
+
 #[test]
 fn reopening_live_session_adopts_client_binding_when_unknown() {
     let mut reduced = AcpSessionState::default();
@@ -406,7 +500,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
 
     let (control_server, _control_client) = UnixStream::pair().unwrap();
     let control_fd = control_server.as_raw_fd();
-    slot.value.out.lock().client = Some(
+    slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
             control_server,
@@ -443,10 +537,11 @@ fn one_shot_action_keeps_existing_control_client_attached() {
         slot.value
             .out
             .lock()
-            .client
-            .as_ref()
-            .map(|client| client.fd),
-        Some(control_fd),
+            .clients
+            .iter()
+            .map(|client| client.fd)
+            .collect::<Vec<_>>(),
+        vec![control_fd],
         "one-shot action must not replace the PC control client"
     );
     match cmd_rx.try_recv().unwrap() {
@@ -2827,7 +2922,8 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
     let mut c_probe = c_server.try_clone().unwrap();
     {
         let mut out = sess.out.lock();
-        out.client = Some(test_acp_attachment(&sess, c_server, "acp-2-client"));
+        out.clients
+            .push(test_acp_attachment(&sess, c_server, "acp-2-client"));
         out.watchers
             .push(test_acp_attachment(&sess, w_server, "acp-2-watcher"));
     }
@@ -2842,20 +2938,20 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
     push_acp_snapshot(&sess, false);
 
     let deadline = Instant::now() + Duration::from_secs(1);
-    while sess.out.lock().client.is_some() && Instant::now() < deadline {
+    while !sess.out.lock().clients.is_empty() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(1));
     }
-    if sess.out.lock().client.is_some() {
+    if !sess.out.lock().clients.is_empty() {
         // Unix socket 的 orderly EOF 允许首个反向 write 成功；下一次入队会
         // 观察到写线程已经关闭的 mailbox，并完成摘除。
         push_acp_snapshot(&sess, false);
         let retry_deadline = Instant::now() + Duration::from_secs(1);
-        while sess.out.lock().client.is_some() && Instant::now() < retry_deadline {
+        while !sess.out.lock().clients.is_empty() && Instant::now() < retry_deadline {
             thread::sleep(Duration::from_millis(1));
         }
     }
     assert!(
-        sess.out.lock().client.is_none(),
+        sess.out.lock().clients.is_empty(),
         "写线程发现断线后应摘掉 client"
     );
     assert_eq!(
@@ -2937,7 +3033,10 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     };
     let sess = make_acp_session("acp-runtime-debug-wire", reduced);
     let (server, client) = UnixStream::pair().unwrap();
-    sess.out.lock().client = Some(test_acp_attachment(&sess, server, "acp-runtime-debug-wire"));
+    sess.out
+        .lock()
+        .clients
+        .push(test_acp_attachment(&sess, server, "acp-runtime-debug-wire"));
     let mut reader = BufReader::new(client);
 
     push_acp_snapshot_since(&sess, false, None);
@@ -2977,7 +3076,10 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
     }
     let sess = make_acp_session("acp-parallel", reduced);
     let (server, client) = UnixStream::pair().unwrap();
-    sess.out.lock().client = Some(test_acp_attachment(&sess, server, "acp-parallel"));
+    sess.out
+        .lock()
+        .clients
+        .push(test_acp_attachment(&sess, server, "acp-parallel"));
 
     let outcome = {
         let mut state = sess.reduced.lock();
@@ -3022,7 +3124,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
         reduced.turn_started_at_ms = Some(1);
     }
     let (server, client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().client = Some(
+    slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
             server,
@@ -3087,7 +3189,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
         .merge_hosted_snapshot(host.to_snapshot(false))
         .unwrap();
     let (server, client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().client = Some(
+    slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
             server,
@@ -3156,7 +3258,7 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
         .merge_hosted_snapshot(host.to_snapshot(false))
         .unwrap();
     let (server, client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().client = Some(
+    slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
             server,
@@ -3244,7 +3346,10 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
 fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     let sess = make_acp_session("acp-tool-debug", AcpSessionState::default());
     let (server, client) = UnixStream::pair().unwrap();
-    sess.out.lock().client = Some(test_acp_attachment(&sess, server, "acp-tool-debug"));
+    sess.out
+        .lock()
+        .clients
+        .push(test_acp_attachment(&sess, server, "acp-tool-debug"));
     let mut reader = BufReader::new(client);
 
     push_acp_snapshot_since(&sess, false, None);
@@ -3296,7 +3401,7 @@ fn kill_removes_session_and_closes_connections() {
     });
 
     let (c_server, c_client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().client = Some(
+    slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
             c_server,

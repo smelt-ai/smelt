@@ -250,7 +250,8 @@ pub struct MemorySettingsRecord {
 }
 
 /// 记忆的来源可信度。`pending`：读过外部内容的那一轮或无人值守的运行写的，不注入、不召回，
-/// 用户采纳后变成 `trusted`。没有记录的记忆文件（用户手写、旧数据）按 `trusted` 处理。
+/// 用户采纳后变成 `trusted`。**没有来源记录的文件不再默认可信**（防 bash 直写绕过）；
+/// 升级时一次性把存量文件记成 trusted，见 `docs/agent-memory.md` 5.4。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryTrust {
     Trusted,
@@ -264,6 +265,24 @@ impl MemoryTrust {
             Self::Pending => "pending",
         }
     }
+}
+
+/// 一条已记为可信的记忆：注入前还要用文件 mtime 对照 `written_at_ms`，防止来源记下之后被直写覆盖。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTrustedRecord {
+    pub file_name: String,
+    pub written_at_ms: i64,
+    /// 写入这条来源的会话。升级回填是 `legacy-backfill-v1`，mtime 容差为 0。
+    pub session_id: String,
+}
+
+/// 一条记忆来源的完整行。覆盖写入前用它判断库里是否已经有记录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProvenanceRecord {
+    pub trust: MemoryTrust,
+    pub reason: String,
+    pub session_id: String,
+    pub written_at_ms: i64,
 }
 
 /// 一台已配对的远程设备。
@@ -287,6 +306,8 @@ pub struct MemoryUsageRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryMetaSnapshot {
     pub usage: Vec<MemoryUsageRecord>,
-    /// 待确认的文件名和原因。
+    /// 显式记为待确认的文件名和原因。
     pub pending: Vec<(String, String)>,
+    /// 显式记为可信的文件；注入方还要排除无记录的、以及 mtime 晚于 `written_at_ms` 的。
+    pub trusted: Vec<MemoryTrustedRecord>,
 }

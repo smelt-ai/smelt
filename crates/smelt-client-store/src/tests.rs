@@ -191,6 +191,7 @@ fn v2_session_routes_are_dropped() {
     v2.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
+         DROP TABLE key_binding;
          DROP TABLE conversation_route;
          DROP TABLE conversation_route_path;
          CREATE TABLE session_route (
@@ -426,6 +427,7 @@ fn v1_projects_become_local_projects() {
     v1.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
+         DROP TABLE key_binding;
          DROP TABLE collapsed_project;
          DROP TABLE pinned_project;
          DROP TABLE conversation_route;
@@ -477,6 +479,7 @@ fn v3_runtime_connections_gain_an_empty_smelt_home() {
     v3.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
+         DROP TABLE key_binding;
          ALTER TABLE runtime_connection DROP COLUMN os;
          ALTER TABLE runtime_connection DROP COLUMN smelt_home;
          INSERT INTO runtime_connection VALUES ('rt-linux', 'linux-box', 'aa', NULL, 0, 1);
@@ -515,6 +518,7 @@ fn v4_runtime_connections_gain_an_empty_os() {
     v4.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
+         DROP TABLE key_binding;
          ALTER TABLE runtime_connection DROP COLUMN os;
          INSERT INTO runtime_connection
            VALUES ('rt-win', 'DESKTOP-1', 'aa', NULL, 0, 1, 'C:\\Users\\w\\.smelt');
@@ -639,6 +643,7 @@ fn v5_gains_empty_sidebar_order_tables() {
     v5.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
+         DROP TABLE key_binding;
          INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);
          INSERT INTO collapsed_project VALUES ('', '/repo/b', 0), ('', '/repo/a', 1);
          INSERT INTO collapsed_agent VALUES ('writer', 0);
@@ -669,9 +674,77 @@ fn v5_gains_empty_sidebar_order_tables() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, schema::SCHEMA_VERSION);
-    assert_eq!(version, 6);
     assert!(
         path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v5"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn key_bindings_override_and_reset_per_action() {
+    let (store, path) = temp_store();
+    assert!(store.key_bindings().unwrap().is_empty());
+
+    let palette = KeyBindingRecord {
+        action_id: "command_palette".to_string(),
+        keystroke: Some("cmd-j".to_string()),
+    };
+    let sidebar = KeyBindingRecord {
+        action_id: "toggle_sidebar".to_string(),
+        keystroke: None,
+    };
+    store
+        .put_key_bindings(&[palette.clone(), sidebar.clone()])
+        .unwrap();
+    assert_eq!(
+        store.key_bindings().unwrap(),
+        vec![palette.clone(), sidebar.clone()]
+    );
+
+    let moved = KeyBindingRecord {
+        keystroke: Some("cmd-shift-p".to_string()),
+        ..palette
+    };
+    store
+        .put_key_bindings(std::slice::from_ref(&moved))
+        .unwrap();
+    store.delete_key_binding("toggle_sidebar").unwrap();
+    assert_eq!(store.key_bindings().unwrap(), vec![moved]);
+    cleanup(&path);
+}
+
+/// v6 还没有快捷键表：升到 v7 时建空表，别的数据原样留下，迁移前留了备份。
+#[test]
+fn v6_gains_an_empty_key_binding_table() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v6 = Connection::open(&path).unwrap();
+    v6.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    v6.execute_batch(
+        "DROP TABLE key_binding;
+         INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);
+         INSERT INTO collapsed_project VALUES ('', '/repo/b', 0), ('', '/repo/a', 1);
+         INSERT INTO collapsed_agent VALUES ('writer', 0);
+         INSERT INTO pinned_project VALUES ('', '/repo/z', 0), ('', '/repo/a', 1);
+         PRAGMA user_version = 6;",
+    )
+    .unwrap();
+    drop(v6);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.key_bindings().unwrap().is_empty());
+    assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
+    drop(store);
+
+    let version: u32 = Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, schema::SCHEMA_VERSION);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v6"))
             .exists(),
         "迁移前必须留下备份"
     );

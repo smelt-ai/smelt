@@ -329,7 +329,7 @@ pub(super) fn static_cert_hash(path: &Path) -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
+pub(crate) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
     const LOCAL_PEERPID: libc::c_int = 0x002;
     const LOCAL_PEERTOKEN: libc::c_int = 0x006;
 
@@ -416,7 +416,7 @@ pub(super) fn process_executable(pid: u32) -> Result<PathBuf, String> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
+pub(crate) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -610,6 +610,43 @@ pub(super) fn authenticate_event_client_without_codesign(
     authenticate_first_party_sibling(kind, peer, daemon_pid, daemon_executable)
 }
 
+/// 本机控制连接的对端必须是经过签名校验的桌面进程（`smelt`）。
+/// 事件订阅那条路要客户端自报 kind；采纳/删除没有这帧，只认内核看到的对端身份。
+/// AF_UNIX 和 Windows 命名管道都走 [`PeerSource`]，管道不会被当成守护自己。
+pub(crate) fn authenticate_first_party_peer(
+    conn: &impl PeerSource,
+) -> Result<FirstPartyClientKind, String> {
+    authenticate_first_party_desktop(&conn.peer_identity()?)
+}
+
+pub(crate) fn authenticate_first_party_desktop(
+    peer: &PeerIdentity,
+) -> Result<FirstPartyClientKind, String> {
+    let daemon_executable = std::env::current_exe()
+        .map_err(|error| format!("cannot resolve daemon executable: {error}"))?;
+    let daemon_pid = std::process::id();
+    #[cfg(target_os = "macos")]
+    {
+        authenticate_first_party_macos(
+            FirstPartyClientKind::Desktop,
+            peer,
+            daemon_pid,
+            &daemon_executable,
+            &SystemPeerCodeIdentity,
+        )?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        authenticate_first_party_sibling(
+            FirstPartyClientKind::Desktop,
+            peer,
+            daemon_pid,
+            &daemon_executable,
+        )?;
+    }
+    Ok(FirstPartyClientKind::Desktop)
+}
+
 /// 正在看画面的活连接数。headless 自升级只在这是 0 时才动手——GUI 自己有空闲
 /// 门控（agent 忙不闪终端），有人连着就把升级时机让出去。
 ///
@@ -764,8 +801,9 @@ fn basename_matches(expected: &str, actual: &str) -> bool {
     }
 }
 
-#[cfg(windows)]
-fn strip_one_exe(name: &str) -> &str {
+/// 去掉恰好一个结尾的 `.exe`（大小写不敏感）。
+/// Windows 第一方 basename 和记忆鉴权里的 shell 名都用这一份，避免两套规则。
+pub(crate) fn strip_one_exe(name: &str) -> &str {
     let bytes = name.as_bytes();
     if bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
         &name[..name.len() - 4]

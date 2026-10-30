@@ -6,10 +6,12 @@
 //! - [`stream`]：连接的流类型 [`RuntimeStream`]，按平台选实现。
 //! - [`client`]：在连接器之上的帧收发和带类型的控制调用。
 //! - [`desktop`]：远程桌面的本机转发口（网页视图里的 noVNC 经它连到运行时）。
+//! - [`compat`]：连上后对照 `system.describe` 判断两边版本兼不兼容。
 //!
 //! 依赖约束：必须能编进 iOS / Android，不许引 GPUI、原生 SQLite 或 `smelt-core`。
 
 pub mod client;
+pub mod compat;
 pub mod connector;
 pub mod desktop;
 pub mod local;

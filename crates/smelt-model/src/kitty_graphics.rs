@@ -11,6 +11,10 @@
 //!   `CUP + EL`，图片下面那几行会被擦掉。
 //! - Unicode 占位符（程序自己打印 U+10EEEE）：本来就是普通文字，一格就是一块图，见
 //!   [`placeholder_marks`] / [`resolve_placeholder`]。
+//!
+//! 程序按格子像素算图片占几行（Pi 发 `CSI 16 t` 问，没回答就按 9×18 算，图会被拉变形）。
+//! vte 不认这条查询和 `CSI 19 t`，所以也由切分器挑出来（[`Piece::SizeQuery`]），smeltd 用
+//! 排版图片的同一份格子尺寸回答。
 
 use std::borrow::Cow;
 use std::io::Write as _;
@@ -23,6 +27,44 @@ mod diacritics;
 use diacritics::ROWCOLUMN_DIACRITICS;
 
 const ESC: u8 = 0x1b;
+
+/// vte 不认、由切分器挑出来的 XTWINOPS 查询的共同前缀。
+const SIZE_QUERY_PREFIX: &[u8] = b"\x1b[1";
+
+/// vte 不认的 XTWINOPS 尺寸查询。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SizeQuery {
+    /// `CSI 16 t`：一个字符格多少像素，应答 `CSI 6 ; 高 ; 宽 t`。
+    Cell,
+    /// `CSI 19 t`：屏幕多少行列。终端不知道物理屏幕，同 Ghostty、VTE 报文字区的行列，应答
+    /// `CSI 9 ; 行 ; 列 t`。
+    Screen,
+}
+
+impl SizeQuery {
+    fn from_digit(b: u8) -> Option<Self> {
+        match b {
+            b'6' => Some(Self::Cell),
+            b'9' => Some(Self::Screen),
+            _ => None,
+        }
+    }
+
+    /// 扣下的、还差最后的 `t` 的那段。
+    fn held(self) -> &'static [u8] {
+        match self {
+            Self::Cell => b"\x1b[16",
+            Self::Screen => b"\x1b[19",
+        }
+    }
+
+    fn sequence(self) -> &'static [u8] {
+        match self {
+            Self::Cell => b"\x1b[16t",
+            Self::Screen => b"\x1b[19t",
+        }
+    }
+}
 
 /// 一条图形命令（APC 正文）最多攒这么多字节，超了整条丢弃。程序按 4096 字节分块发；守护转发
 /// 给桌面端时一张图一条命令，所以上限按单张图来定。
@@ -37,14 +79,21 @@ pub enum Piece<'a> {
     Command(&'a [u8]),
     /// 刚交出的字节以 `ESC c`（RIS）结尾。kitty 在 RIS 时清掉所有图片。
     Reset,
+    /// 刚交出的字节以 `CSI 16 t` / `CSI 19 t` 结尾：程序问尺寸。
+    SizeQuery(SizeQuery),
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 enum SplitState {
     #[default]
     Ground,
-    /// 刚看到 ESC，先扣下：下一字节是 `_` 就可能是图形命令。
+    /// 刚看到 ESC，先扣下：下一字节是 `_` 就可能是图形命令，是 `[` 就可能是尺寸查询。
     Esc,
+    /// 已经对上 [`SIZE_QUERY_PREFIX`] 的前这么多字节。扣下的就是它的这一段，对不上时原样交出，
+    /// 不用另存。CSI 很多（颜色、光标），绝大多数在 `[` 后第一字节就对不上。
+    Query(u8),
+    /// 对上了 `ESC [ 1 6` / `ESC [ 1 9`，还差 `t`。
+    SizeQuery(SizeQuery),
     /// 看到 `ESC _`，还差 `G`。
     ApcStart,
     Body,
@@ -79,6 +128,30 @@ impl GraphicsSplitter {
                     }
                 }
                 SplitState::Esc => self.after_esc(b, i, &mut start, &mut emit),
+                SplitState::Query(matched) => {
+                    let matched = usize::from(matched);
+                    if matched < SIZE_QUERY_PREFIX.len() && b == SIZE_QUERY_PREFIX[matched] {
+                        self.state = SplitState::Query(matched as u8 + 1);
+                    } else if let Some(query) = SizeQuery::from_digit(b)
+                        .filter(|_| matched == SIZE_QUERY_PREFIX.len())
+                    {
+                        self.state = SplitState::SizeQuery(query);
+                    } else {
+                        emit(Piece::Bytes(&SIZE_QUERY_PREFIX[..matched]));
+                        self.ground_from(b, i, &mut start);
+                    }
+                }
+                SplitState::SizeQuery(query) => {
+                    if b == b't' {
+                        emit(Piece::Bytes(query.sequence()));
+                        emit(Piece::SizeQuery(query));
+                        self.state = SplitState::Ground;
+                        start = i + 1;
+                    } else {
+                        emit(Piece::Bytes(query.held()));
+                        self.ground_from(b, i, &mut start);
+                    }
+                }
                 SplitState::ApcStart => {
                     if b == b'G' {
                         self.state = SplitState::Body;
@@ -127,6 +200,7 @@ impl GraphicsSplitter {
                 self.state = SplitState::Ground;
                 *start = i + 1;
             }
+            b'[' => self.state = SplitState::Query(2),
             _ => {
                 emit(Piece::Bytes(b"\x1b"));
                 self.ground_from(b, i, start);
@@ -223,6 +297,9 @@ pub struct Controls {
     pub relay: bool,
     /// `A`：转发命令里的锚点标记号。kitty 没有这个键。
     pub anchor: u64,
+    /// `W` / `L`：转发命令里图片画多宽多高（千分之一格）。kitty 没有这两个键。
+    pub display_width: u32,
+    pub display_height: u32,
 }
 
 impl Default for Controls {
@@ -253,6 +330,8 @@ impl Default for Controls {
             delete: b'a',
             relay: false,
             anchor: 0,
+            display_width: 0,
+            display_height: 0,
         }
     }
 }
@@ -294,6 +373,8 @@ impl Controls {
             b'd' => self.delete = one_byte().unwrap_or(self.delete),
             b'k' => self.relay = number() == Some(1),
             b'A' => self.anchor = text.parse().unwrap_or(0),
+            b'W' => self.display_width = number().unwrap_or(0),
+            b'L' => self.display_height = number().unwrap_or(0),
             _ => {}
         }
     }
@@ -344,16 +425,28 @@ pub enum PlacementKey {
     },
 }
 
-/// 放置的版面：占几列几行（守护已经算好，不会是 0）、源图裁剪、格内偏移和层级。
+/// 放置的版面，由守护按 Ghostty 的规则算好，桌面端照着画。
+///
+/// 图片在格子里画多大、偏多少按「千分之一格」记：守护按它那边的格子像素算，桌面端乘上自己的
+/// 格子尺寸，两边字号不同也画得一致。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Layout {
+    /// 占几列几行（光标移动、清理都按它）。
     pub columns: u32,
     pub rows: u32,
+    /// 源图裁剪（像素）。
     pub source: SourceRect,
+    /// 图片左上角相对锚点格的偏移，千分之一格。
     pub offset_x: u32,
     pub offset_y: u32,
+    /// 裁剪后的源图画出来多宽多高，千分之一格。
+    pub width: u32,
+    pub height: u32,
     pub z: i32,
 }
+
+/// 每格的千分之一，[`Layout`] 里尺寸和偏移的单位。
+pub const MILLI_CELLS: u32 = 1000;
 
 /// smeltd → 桌面端的转发命令。编码成带 `k=1` 的 APC，混在终端输出里按顺序送达；vte 忽略 APC，
 /// 不认识它的终端也不受影响。
@@ -402,7 +495,7 @@ impl Relay {
             Self::Place { key, image, layout } => {
                 let _ = write!(
                     out,
-                    "a=p,i={image},c={},r={},x={},y={},w={},h={},X={},Y={},z={}",
+                    "a=p,i={image},c={},r={},x={},y={},w={},h={},X={},Y={},W={},L={},z={}",
                     layout.columns,
                     layout.rows,
                     layout.source.x,
@@ -411,6 +504,8 @@ impl Relay {
                     layout.source.height,
                     layout.offset_x,
                     layout.offset_y,
+                    layout.width,
+                    layout.height,
                     layout.z,
                 );
                 write_key(&mut out, key);
@@ -478,6 +573,8 @@ impl Relay {
                     source: c.source,
                     offset_x: c.offset_x,
                     offset_y: c.offset_y,
+                    width: c.display_width,
+                    height: c.display_height,
                     z: c.z,
                 },
             }),
@@ -555,6 +652,32 @@ pub fn without_anchors(zerowidth: &[char]) -> Cow<'_, [char]> {
         let c = zerowidth[i];
         if c == ANCHOR_INTRODUCER && parse_anchor_digits(&zerowidth[i + 1..]).is_some() {
             i += ANCHOR_DIGITS + 1;
+        } else {
+            kept.push(c);
+            i += 1;
+        }
+    }
+    Cow::Owned(kept)
+}
+
+/// 去掉文字里 kitty 图形留下的痕迹：锚点标记，以及占位符和紧跟其后的行列编号。复制选区、
+/// 把终端读成文字时用。
+pub fn without_graphics(text: &str) -> Cow<'_, str> {
+    if !text.contains([ANCHOR_INTRODUCER, PLACEHOLDER]) {
+        return Cow::Borrowed(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut kept = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == ANCHOR_INTRODUCER && parse_anchor_digits(&chars[i + 1..]).is_some() {
+            i += ANCHOR_DIGITS + 1;
+        } else if c == PLACEHOLDER {
+            i += 1;
+            while chars.get(i).is_some_and(|&c| diacritic_index(c).is_some()) {
+                i += 1;
+            }
         } else {
             kept.push(c);
             i += 1;
@@ -664,8 +787,40 @@ pub fn source_size(source: SourceRect, image: (u32, u32)) -> (u32, u32) {
     )
 }
 
-/// 放置占几列几行，照 Ghostty 的 `Placement.gridSize` / `pixelSize`：c、r 都给了就用；只给一个，
-/// 按源图比例算另一个；都没给，按源图原始像素算。格子像素未知时按不了像素算，返回 0。
+/// 格内偏移不超过一格，照 Ghostty 的 `Placement.cellOffset`。格子像素未知时没有偏移。
+fn clamp_offset(offset: (u32, u32), cell: (u32, u32)) -> (u32, u32) {
+    let clamp = |offset: u32, cell: u32| if cell == 0 { 0 } else { offset.min(cell - 1) };
+    (clamp(offset.0, cell.0), clamp(offset.1, cell.1))
+}
+
+fn scale(value: u32, num: u32, den: u32) -> u32 {
+    if den == 0 {
+        return 0;
+    }
+    u32::try_from(u64::from(value) * u64::from(num) / u64::from(den)).unwrap_or(u32::MAX)
+}
+
+/// 裁剪后的源图画出来多大（像素），照 Ghostty 的 `Placement.pixelSize`：c、r 都没给按原始像素；
+/// 都给了撑满这些格子（减去格内偏移）；只给一个，按源图比例算另一边。`offset` 已经截过。
+fn pixel_size(
+    columns: u32,
+    rows: u32,
+    source: (u32, u32),
+    offset: (u32, u32),
+    cell: (u32, u32),
+) -> (u32, u32) {
+    let width = || cell.0.saturating_mul(columns).saturating_sub(offset.0);
+    let height = || cell.1.saturating_mul(rows).saturating_sub(offset.1);
+    match (columns > 0, rows > 0) {
+        (false, false) => source,
+        (true, true) => (width(), height()),
+        (true, false) => (width(), scale(width(), source.1, source.0)),
+        (false, true) => (scale(height(), source.0, source.1), height()),
+    }
+}
+
+/// 放置占几列几行，照 Ghostty 的 `Placement.gridSize`：c、r 都给了就用；否则按画出来的像素
+/// （见 [`pixel_size`]）加上格内偏移向上取整。格子像素未知时算不了，没给的那边是 0。
 pub fn grid_size(
     columns: u32,
     rows: u32,
@@ -680,36 +835,82 @@ pub fn grid_size(
     if cell_w == 0 || cell_h == 0 {
         return (columns, rows);
     }
-    let offset_x = offset.0.min(cell_w - 1);
-    let offset_y = offset.1.min(cell_h - 1);
-    let scale = |value: u32, num: u32, den: u32| {
-        if den == 0 {
-            0
-        } else {
-            u32::try_from(u64::from(value) * u64::from(num) / u64::from(den)).unwrap_or(u32::MAX)
-        }
-    };
-    let (width, height) = if columns > 0 {
-        let width = cell_w.saturating_mul(columns).saturating_sub(offset_x);
-        (width, scale(width, source.1, source.0))
-    } else if rows > 0 {
-        let height = cell_h.saturating_mul(rows).saturating_sub(offset_y);
-        (scale(height, source.0, source.1), height)
-    } else {
-        source
-    };
+    let offset = clamp_offset(offset, cell);
+    let (width, height) = pixel_size(columns, rows, source, offset, cell);
     let cells = |pixels: u32, offset: u32, cell: u32| pixels.saturating_add(offset).div_ceil(cell);
     let columns = if columns > 0 {
         columns
     } else {
-        cells(width, offset_x, cell_w)
+        cells(width, offset.0, cell_w)
     };
     let rows = if rows > 0 {
         rows
     } else {
-        cells(height, offset_y, cell_h)
+        cells(height, offset.1, cell_h)
     };
     (columns, rows)
+}
+
+fn milli_cells(pixels: u32, cell: u32) -> u32 {
+    scale(pixels, MILLI_CELLS, cell)
+}
+
+/// 直接放置的版面：占几格、画多大、偏多少都照 Ghostty（见 [`grid_size`]、[`pixel_size`]）。
+/// 格子像素未知时只能撑满给定的格子。
+pub fn direct_layout(c: &Controls, image: (u32, u32), cell: (u32, u32)) -> Layout {
+    let source = source_size(c.source, image);
+    let offset = clamp_offset((c.offset_x, c.offset_y), cell);
+    let (columns, rows) = grid_size(c.columns, c.rows, source, offset, cell);
+    let (width, height, offset_x, offset_y) = if cell.0 == 0 || cell.1 == 0 {
+        (columns * MILLI_CELLS, rows * MILLI_CELLS, 0, 0)
+    } else {
+        let (width, height) = pixel_size(c.columns, c.rows, source, offset, cell);
+        (
+            milli_cells(width, cell.0),
+            milli_cells(height, cell.1),
+            milli_cells(offset.0, cell.0),
+            milli_cells(offset.1, cell.1),
+        )
+    };
+    Layout {
+        columns,
+        rows,
+        source: c.source,
+        offset_x,
+        offset_y,
+        width,
+        height,
+        z: c.z,
+    }
+}
+
+/// 虚拟放置（Unicode 占位符）的版面：占位区域是 c×r 格（没给的按图片算），图片等比缩进这块
+/// 区域并居中，跟 kitty 一样。格子像素未知时比例算不了，撑满。
+pub fn virtual_layout(c: &Controls, image: (u32, u32), cell: (u32, u32)) -> Layout {
+    let source = source_size(c.source, image);
+    let (columns, rows) = grid_size(c.columns, c.rows, source, (0, 0), cell);
+    let area = (columns * MILLI_CELLS, rows * MILLI_CELLS);
+    let (width, height) = if cell.0 == 0 || cell.1 == 0 || source.0 == 0 || source.1 == 0 {
+        area
+    } else {
+        // 源图换算成千分之一格，再等比缩进区域。
+        let (w, h) = (milli_cells(source.0, cell.0), milli_cells(source.1, cell.1));
+        if u64::from(w) * u64::from(area.1) <= u64::from(h) * u64::from(area.0) {
+            (scale(area.1, w, h), area.1)
+        } else {
+            (area.0, scale(area.0, h, w))
+        }
+    };
+    Layout {
+        columns,
+        rows,
+        source: c.source,
+        offset_x: (area.0 - width) / 2,
+        offset_y: (area.1 - height) / 2,
+        width,
+        height,
+        z: c.z,
+    }
 }
 
 /// 放置那一刻的光标和屏幕。
@@ -798,6 +999,8 @@ mod tests {
                     Piece::Bytes(bytes) => format!("B:{}", String::from_utf8_lossy(bytes)),
                     Piece::Command(body) => format!("G:{}", String::from_utf8_lossy(body)),
                     Piece::Reset => "R".to_string(),
+                    Piece::SizeQuery(SizeQuery::Cell) => "Q16".to_string(),
+                    Piece::SizeQuery(SizeQuery::Screen) => "Q19".to_string(),
                 });
             });
         }
@@ -846,6 +1049,37 @@ mod tests {
             let (head, tail) = stream.split_at(at);
             assert_eq!(merged(split(&[head, tail])), whole, "切在 {at}");
         }
+    }
+
+    #[test]
+    fn size_queries_are_picked_out_wherever_reads_break() {
+        let stream: &[u8] =
+            b"a\x1b[16tb\x1b[1mc\x1b[16;1td\x1b[14te\x1b[1\x1b[19tf\x1b[19;2tg\x1b[16\x1b[16t";
+        let whole = merged(split(&[stream]));
+        assert_eq!(
+            whole,
+            [
+                "B:a\x1b[16t",
+                "Q16",
+                "B:b\x1b[1mc\x1b[16;1td\x1b[14te\x1b[1\x1b[19t",
+                "Q19",
+                "B:f\x1b[19;2tg\x1b[16\x1b[16t",
+                "Q16",
+            ]
+        );
+        let bytes: Vec<&[u8]> = stream.chunks(1).collect();
+        assert_eq!(merged(split(&bytes)), whole);
+        for at in 0..stream.len() {
+            let (head, tail) = stream.split_at(at);
+            assert_eq!(merged(split(&[head, tail])), whole, "切在 {at}");
+        }
+    }
+
+    /// 对不上的 CSI 不多拆：和以前一样，ESC 开头交出一段，后面接着普通字节。
+    #[test]
+    fn other_csi_passes_through_in_as_few_pieces_as_before() {
+        assert_eq!(split(&[b"a\x1b[38;2;1;2;3mb"]), ["B:a", "B:\x1b[", "B:38;2;1;2;3mb"]);
+        assert_eq!(split(&[b"\x1b[1Hx"]), ["B:\x1b[1", "B:Hx"]);
     }
 
     #[test]
@@ -910,6 +1144,8 @@ mod tests {
                     },
                     offset_x: 5,
                     offset_y: 6,
+                    width: 8,
+                    height: 9,
                     z: -7,
                 },
             },
@@ -1065,6 +1301,16 @@ mod tests {
     }
 
     #[test]
+    fn graphics_traces_are_stripped_from_text() {
+        let text = format!(
+            "a{}b\u{10EEEE}\u{0305}\u{030D}\u{10EEEE}c\u{0301}",
+            anchor_marker(7)
+        );
+        assert_eq!(without_graphics(&text), "abc\u{0301}");
+        assert!(matches!(without_graphics("plain é"), Cow::Borrowed(_)));
+    }
+
+    #[test]
     fn placeholder_marks_and_inheritance() {
         let d = |i: usize| ROWCOLUMN_DIACRITICS[i];
         assert_eq!(
@@ -1117,6 +1363,43 @@ mod tests {
         png.extend_from_slice(&480u32.to_be_bytes());
         assert_eq!(png_dimensions(&png), Some((640, 480)));
         assert_eq!(png_dimensions(b"GIF89a"), None);
+    }
+
+    #[test]
+    fn direct_layout_follows_ghostty_pixel_size() {
+        let controls = |columns, rows| Controls {
+            columns,
+            rows,
+            ..Controls::default()
+        };
+        // 都没给：原始像素 35×30，格子 10×20 → 占 4×2 格，画 3.5×1.5 格。
+        let layout = direct_layout(&controls(0, 0), (35, 30), (10, 20));
+        assert_eq!((layout.columns, layout.rows), (4, 2));
+        assert_eq!((layout.width, layout.height), (3500, 1500));
+        // 都给了：撑满。
+        let layout = direct_layout(&controls(4, 2), (35, 30), (10, 20));
+        assert_eq!((layout.width, layout.height), (4000, 2000));
+        // 只给列数：按比例。40px 宽 → 34px 高 → 1.7 格。
+        let layout = direct_layout(&controls(4, 0), (35, 30), (10, 20));
+        assert_eq!((layout.columns, layout.rows), (4, 2));
+        assert_eq!((layout.width, layout.height), (4000, 1700));
+        // 格子像素未知：撑满给定的格子。
+        let layout = direct_layout(&controls(3, 2), (35, 30), (0, 0));
+        assert_eq!((layout.width, layout.height), (3000, 2000));
+    }
+
+    #[test]
+    fn virtual_layout_fits_and_centers() {
+        let controls = Controls {
+            columns: 10,
+            rows: 2,
+            virtual_placement: true,
+            ..Controls::default()
+        };
+        // 40×40 像素在 10×20 的格子里是 4×2 格，放进 10×2 格：高度顶满，宽 4 格，左右各留 3 格。
+        let layout = virtual_layout(&controls, (40, 40), (10, 20));
+        assert_eq!((layout.width, layout.height), (4000, 2000));
+        assert_eq!((layout.offset_x, layout.offset_y), (3000, 0));
     }
 
     #[test]

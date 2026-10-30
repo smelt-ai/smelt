@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Direction, Point, Side};
+use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
@@ -23,6 +23,11 @@ use alacritty_terminal::term::{
     viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use gpui::RenderImage;
+use smelt_model::kitty_graphics::{
+    GraphicsSplitter, Layout, PLACEHOLDER, Piece, PlaceholderCell, Relay, anchors_in,
+    placeholder_marks, resolve_placeholder, without_anchors, without_graphics,
+};
 use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::daemon::{DaemonOperation, TerminalOpenErrorCode};
 
@@ -33,8 +38,28 @@ type HandshakeResult = (
     TermSize,
     usize,
     Option<String>,
-    bool,
+    DaemonAnswers,
 );
+
+/// 守护替桌面答了哪些程序查询，打开会话时守护声明。没声明的由桌面的终端自己答：远程机器
+/// 上的守护可能是旧版。新版守护全答，桌面开几个都只答一次。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DaemonAnswers {
+    /// 颜色查询（OSC 4 / 10 / 11 …）。
+    colors: bool,
+    /// 其余查询：设备属性、光标位置、键盘和模式状态、尺寸。
+    queries: bool,
+}
+
+impl DaemonAnswers {
+    fn from_handshake(v: &serde_json::Value) -> Self {
+        let queries = v["daemon_answers_queries"].as_bool().unwrap_or(false);
+        Self {
+            colors: queries || v["daemon_handles_color_requests"].as_bool().unwrap_or(false),
+            queries,
+        }
+    }
+}
 
 /// 深浅色模式：进程内只有一套主题（设置页全局切换），用一个原子量足够，不必给
 /// 每个 Terminal/EventProxy 各传一份——见 `set_dark_mode`（main.rs 在
@@ -231,6 +256,22 @@ pub struct Frame {
     /// 点击只拿到前/后半截、打开错误地址（#21）。用这个数组把同一条软换行链串起来的
     /// 物理行拼成一行再扫描，就不会切错。长度与 `rows` 一致。
     pub wrapped: Vec<bool>,
+    /// 这一帧要画的 kitty 图形，按层级从低到高。见 [`ImagePaint`]。
+    pub images: Vec<ImagePaint>,
+}
+
+/// 这一帧要画的一块 kitty 图形。坐标以格为单位、相对可视区左上角：锚点可能在可视区上方
+/// （行号为负），图片从那里伸进来。
+pub struct ImagePaint {
+    pub image: Arc<RenderImage>,
+    /// 原始像素尺寸，源图裁剪按它算。
+    pub image_size: (u32, u32),
+    pub layout: Layout,
+    /// 放置区域左上角那一格 (行, 列)。
+    pub anchor: (i32, i32),
+    /// 只画这一块格子 (起始行, 起始列, 行数, 列数)：直接放置是整个放置区域，占位符是同一行里
+    /// 连续的一段。
+    pub clip: (i32, i32, u32, u32),
 }
 
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
@@ -242,6 +283,88 @@ fn resolve(color: Color, is_fg: bool, overrides: &Colors) -> u32 {
         Color::Indexed(i) => overrides[i as usize].map_or_else(|| indexed_rgb(i), rgb_u32),
         Color::Named(n) => overrides[n].map_or_else(|| named_rgb(n, is_fg), rgb_u32),
     }
+}
+
+/// kitty 占位符把图片 id 记在前景色、放置 id 记在下划线颜色里：真彩是 24 位整数，256 色是下标。
+fn graphics_id(color: Color) -> u32 {
+    match color {
+        Color::Spec(rgb) => rgb_u32(rgb),
+        Color::Indexed(index) => u32::from(index),
+        Color::Named(_) => 0,
+    }
+}
+
+/// 一帧要画的 kitty 图形：可视区里的锚点、可视区上方还伸得进来的锚点，以及占位符格子
+/// （同一行里连续、属于同一放置的并成一段）。找不到图的跳过，格子本来就是空白。
+fn image_paints<T: EventListener>(
+    images: &crate::terminal_images::TerminalImages,
+    term: &Term<T>,
+    display_offset: usize,
+    cols: usize,
+    mut anchors_seen: Vec<(i32, i32, u64)>,
+    placeholders: &[(usize, usize, PlaceholderCell)],
+) -> Vec<ImagePaint> {
+    let reach = images.tallest_anchored_rows();
+    if reach > 1 {
+        let top = -(display_offset as i32);
+        let first = (top - (reach as i32 - 1)).max(term.topmost_line().0);
+        for line in first..top {
+            let grid_row = &term.grid()[Line(line)];
+            for column in 0..cols.min(term.columns()) {
+                if let Some(zw) = grid_row[Column(column)].zerowidth() {
+                    for anchor in anchors_in(zw) {
+                        anchors_seen.push((line - top, column as i32, anchor));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut paints = Vec::new();
+    for (row, column, anchor) in anchors_seen {
+        if let Some((image, layout)) = images.anchored(anchor) {
+            paints.push(ImagePaint {
+                image: Arc::clone(&image.render),
+                image_size: image.size,
+                layout: *layout,
+                anchor: (row, column),
+                clip: (row, column, layout.rows, layout.columns),
+            });
+        }
+    }
+
+    let mut i = 0;
+    while let Some(&(row, column, first)) = placeholders.get(i) {
+        let mut len = 1;
+        while placeholders
+            .get(i + len)
+            .is_some_and(|&(next_row, next_column, next)| {
+                next_row == row
+                    && next_column == column + len
+                    && next.image == first.image
+                    && next.placement == first.placement
+                    && next.row == first.row
+                    && next.column == first.column + len as u32
+            })
+        {
+            len += 1;
+        }
+        if let Some((image, layout)) = images.virtual_placement(first.image, first.placement) {
+            paints.push(ImagePaint {
+                image: Arc::clone(&image.render),
+                image_size: image.size,
+                layout: *layout,
+                anchor: (
+                    row as i32 - first.row as i32,
+                    column as i32 - first.column as i32,
+                ),
+                clip: (row as i32, column as i32, 1, len as u32),
+            });
+        }
+        i += len;
+    }
+    paints.sort_by_key(|paint| paint.layout.z);
+    paints
 }
 
 fn rgb_u32(rgb: Rgb) -> u32 {
@@ -560,8 +683,8 @@ impl TerminalWriter {
 
 /// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态。
 /// OSC 0/2 标题直接忽略：它不是会话名，这里也不保存。
-/// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
-/// 旧守护没有声明该能力时才在客户端兜底。
+/// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板。程序的查询由新守护
+/// 答，旧守护没声明的那类才由客户端兜底（见 [`DaemonAnswers`]）。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
 struct EventProxy {
@@ -571,9 +694,8 @@ struct EventProxy {
     writer: TerminalWriter,
     /// 当前网格/单元格尺寸（TextAreaSizeRequest 应答用）。
     metrics: Arc<Mutex<TermMetrics>>,
-    /// 新版 smeltd 在收到 PTY 输出时就应答 OSC 颜色查询，覆盖首个 GUI attachment
-    /// 还未挂上的窗口；能力位缺失说明是旧守护，继续由客户端兼容处理。
-    daemon_handles_color_requests: bool,
+    /// 守护替桌面答了哪些查询。
+    daemon_answers: DaemonAnswers,
 }
 
 impl EventProxy {
@@ -614,16 +736,17 @@ impl EventListener for EventProxy {
             }
             // 光标位置 / 设备属性等查询-应答协议：不回应会让依赖精确光标位置渲染
             // 的 TUI（如 Claude Code 的输入框 ghost-text 补全）拿不到定位信息。
-            Event::PtyWrite(text) => self.write_pty(text.as_bytes()),
-            Event::ColorRequest(index, format) if !self.daemon_handles_color_requests => {
+            Event::PtyWrite(text) if !self.daemon_answers.queries => {
+                self.write_pty(text.as_bytes())
+            }
+            Event::ColorRequest(index, format) if !self.daemon_answers.colors => {
                 self.write_pty(format(Self::resolve_color(index)).as_bytes())
             }
-            Event::ColorRequest(_, _) => {}
             // OSC 52：应用把文本写到系统剪贴板。远程会话、嵌套 tmux、部分 CLI 复制都靠
             // 它。走系统工具，不必绕到 UI 线程——EventProxy 跑在 PTY 读线程上。读剪贴板
             // 在 `term_config` 里关掉了，alacritty 不会发 ClipboardLoad。
             Event::ClipboardStore(_ty, data) => os_clipboard_write(&data),
-            Event::TextAreaSizeRequest(format) => {
+            Event::TextAreaSizeRequest(format) if !self.daemon_answers.queries => {
                 let m = self.metrics.lock().ok().map(|g| *g).unwrap_or(TermMetrics {
                     rows: 24,
                     cols: 80,
@@ -953,6 +1076,8 @@ pub struct Terminal {
     /// 那个「底部画不出来、一敲键盘/框选才好」的 bug。`bounded(1)` 天然合并突发：
     /// 空闲无输出＝无唤醒（保住 P0 那条空闲不重绘的优化），有输出才唤醒。
     redraw_rx: smol::channel::Receiver<()>,
+    /// smeltd 转发来的 kitty 图形（读线程写、渲染读）。见 terminal_images。
+    images: Arc<Mutex<crate::terminal_images::TerminalImages>>,
 }
 
 impl Drop for Terminal {
@@ -1049,6 +1174,8 @@ pub(crate) fn open_request(
         "rows": rows,
         "initial_launch": launch,
         "create_if_missing": create_if_missing,
+        // 桌面能画 kitty 图形：smeltd 据此转发图片，否则给去掉图片的版本。
+        "graphics": "kitty",
     })
 }
 
@@ -1109,7 +1236,7 @@ impl Terminal {
         let handshake = |writer: RuntimeStream| {
             Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing)
         };
-        let (buffered, size, replay_len, geometry_token, daemon_handles_color_requests) =
+        let (buffered, size, replay_len, geometry_token, daemon_answers) =
             match handshake(crate::runtimes::connect_terminal(runtime)?)? {
                 HandshakeReply::Opened(opened) => opened,
                 stopping_or_closed => {
@@ -1144,10 +1271,11 @@ impl Terminal {
                 bell_notify: bell_notify.clone(),
                 writer: writer.clone(),
                 metrics: metrics.clone(),
-                daemon_handles_color_requests,
+                daemon_answers,
             },
         );
         let term = Arc::new(Mutex::new(term));
+        let images = Arc::new(Mutex::new(crate::terminal_images::TerminalImages::default()));
 
         // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫几何标记。
         //    EOF = shell 退出或守护离线（网格冻结，重开会话即恢复）。
@@ -1163,9 +1291,13 @@ impl Terminal {
         let daemon_geometry_reader = Arc::clone(&daemon_geometry);
         let dead_reader = Arc::clone(&dead);
         let ack_writer = writer.clone();
+        let images_reader = Arc::clone(&images);
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
+            // smeltd 的 kitty 图形转发命令（APC，vte 本来就忽略）。只用来挑命令，字节照常交给
+            // vte；命令可能被 read 切断，状态跨 read 保持。
+            let mut graphics_scan = GraphicsSplitter::default();
             let mut geometry_osc = geometry_token
                 .map(smelt_model::osc::TerminalGeometryOscScan::new)
                 .unwrap_or_default();
@@ -1177,6 +1309,22 @@ impl Terminal {
                 match reader.read(&mut buf) {
                     Ok(0) => break, // EOF：shell 退出
                     Ok(n) => {
+                        // 图片先在锁外解码好，再进 store：这一批的网格画出来时图已经在了。
+                        let mut relays = Vec::new();
+                        graphics_scan.feed(&buf[..n], |piece| {
+                            if let Piece::Command(body) = piece
+                                && let Some(relay) = Relay::parse(body)
+                            {
+                                relays.push(crate::terminal_images::PreparedRelay::prepare(relay));
+                            }
+                        });
+                        if !relays.is_empty()
+                            && let Ok(mut images) = images_reader.lock()
+                        {
+                            for relay in relays {
+                                images.apply(relay);
+                            }
+                        }
                         let mut geometry_updates = Vec::new();
                         for (i, &b) in buf[..n].iter().enumerate() {
                             if let Some(geometry) = geometry_osc.feed(b)
@@ -1262,7 +1410,27 @@ impl Terminal {
             pending_step: Mutex::new(None),
             dead,
             redraw_rx,
+            images,
         })
+    }
+
+    /// 换下来、等前台 `drop_image` 的图片。
+    pub fn take_released_images(&self) -> Vec<Arc<RenderImage>> {
+        self.images
+            .lock()
+            .map(|mut images| images.take_released())
+            .unwrap_or_default()
+    }
+
+    /// 连接要换掉了：所有图片交给前台释放。
+    pub fn release_all_images(&self) -> Vec<Arc<RenderImage>> {
+        self.images
+            .lock()
+            .map(|mut images| {
+                images.release_all();
+                images.take_released()
+            })
+            .unwrap_or_default()
     }
 
     /// 重绘唤醒的接收端（clone 一份给 UI 侧的 `cx.spawn` 任务 await）。见 `redraw_rx` 字段。
@@ -1311,9 +1479,7 @@ impl Terminal {
         };
         let replay_len = v["replay_len"].as_u64().unwrap_or(0) as usize;
         let geometry_token = v["geometry_token"].as_str().map(str::to_owned);
-        let daemon_handles_color_requests = v["daemon_handles_color_requests"]
-            .as_bool()
-            .unwrap_or(false);
+        let daemon_answers = DaemonAnswers::from_handshake(&v);
         // 握手完必须清掉超时：这条 stream 接下来交给读线程长期读 PTY 输出（见
         // spawn 里 `let mut reader = buffered`），空闲终端半天没输出是常态，读循环
         // 对任何 Err 一律 break 当 EOF——超时留着就等于给每个安静的终端定时断线。
@@ -1323,7 +1489,7 @@ impl Terminal {
             size,
             replay_len,
             geometry_token,
-            daemon_handles_color_requests,
+            daemon_answers,
         )))
     }
 
@@ -1574,6 +1740,7 @@ impl Terminal {
                     cursor: None,
                     cursor_pos: None,
                     wrapped: Vec::new(),
+                    images: Vec::new(),
                 };
             }
         };
@@ -1592,8 +1759,39 @@ impl Terminal {
         let mut count = 0usize;
         // 当前行最后一格是不是 WRAPLINE——每格都刷新，行满时刚好是最后一格的值。
         let mut row_wraps;
+        // kitty 图形：可视区里挂锚点的格子 (行, 列, 锚点号) 和占位符格子。锁在网格锁之后拿，
+        // 读线程不会同时拿两把。
+        let images = self.images.lock().ok();
+        let graphics_live = images
+            .as_ref()
+            .is_some_and(|images| images.has_placements());
+        let mut anchors_seen: Vec<(i32, i32, u64)> = Vec::new();
+        let mut placeholders: Vec<(usize, usize, PlaceholderCell)> = Vec::new();
+        let mut left_placeholder: Option<PlaceholderCell> = None;
         for indexed in content.display_iter {
             let cell = indexed.cell;
+            let (row_index, column_index) = (rows.len(), row.len());
+            let zerowidth = cell.zerowidth().filter(|z| !z.is_empty());
+            let is_placeholder = cell.c == PLACEHOLDER;
+            if is_placeholder {
+                // 占位符按 kitty 的规则补全编号：省略的沿用同一行左边那格。
+                let left = left_placeholder.filter(|_| column_index > 0);
+                let resolved = resolve_placeholder(
+                    graphics_id(cell.fg),
+                    cell.underline_color().map_or(0, graphics_id),
+                    placeholder_marks(zerowidth.unwrap_or_default()),
+                    left.as_ref(),
+                );
+                left_placeholder = Some(resolved);
+                placeholders.push((row_index, column_index, resolved));
+            } else {
+                left_placeholder = None;
+                if graphics_live && let Some(zw) = zerowidth {
+                    for anchor in anchors_in(zw) {
+                        anchors_seen.push((row_index as i32, column_index as i32, anchor));
+                    }
+                }
+            }
             let selected = sel_range
                 .as_ref()
                 .is_some_and(|r| r.contains(indexed.point));
@@ -1617,6 +1815,9 @@ impl Terminal {
             // emoji」——那个区分只在「靠字形宽度自然占位」的旧渲染下才有意义。
             let ch = if flags.contains(Flags::WIDE_CHAR_SPACER) {
                 '\0'
+            } else if is_placeholder {
+                // 占位符格子画图不画字，图片缺了就是空白。
+                ' '
             } else {
                 cell.c
             };
@@ -1632,10 +1833,12 @@ impl Terminal {
                 underline: flags.intersects(Flags::ALL_UNDERLINES),
                 undercurl: flags.contains(Flags::UNDERCURL),
                 strikeout: flags.contains(Flags::STRIKEOUT),
-                zw: cell
-                    .zerowidth()
+                // 锚点标记和占位符的行列编号不交给排版器。
+                zw: zerowidth
+                    .filter(|_| !is_placeholder)
+                    .map(without_anchors)
                     .filter(|z| !z.is_empty())
-                    .map(|z| z.to_vec().into_boxed_slice()),
+                    .map(|z| z.into_owned().into_boxed_slice()),
                 link: cell.hyperlink().map(|h| Arc::from(h.uri())),
                 bg_default,
                 selected,
@@ -1678,11 +1881,24 @@ impl Terminal {
             }),
         };
 
+        let images = match images.as_ref().filter(|images| images.has_placements()) {
+            Some(images) => image_paints(
+                images,
+                &*term,
+                display_offset,
+                cols,
+                anchors_seen,
+                &placeholders,
+            ),
+            None => Vec::new(),
+        };
+
         Frame {
             rows,
             cursor,
             cursor_pos,
             wrapped,
+            images,
         }
     }
 
@@ -2096,7 +2312,9 @@ impl Terminal {
     /// scrollback），宽字符占位/软换行由它处理。空选区（单击未拖动）返回 None。
     pub fn selection_text(&self) -> Option<String> {
         let term = self.term.lock().ok()?;
-        term.selection_to_string().filter(|s| !s.is_empty())
+        term.selection_to_string()
+            .map(|text| without_graphics(&text).into_owned())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -2527,6 +2745,7 @@ mod handshake_timeout_tests {
                     "cols": 80,
                     "replay_len": 0,
                     "daemon_handles_color_requests": true,
+                    "daemon_answers_queries": true,
                 })
             )
             .unwrap();
@@ -2540,8 +2759,14 @@ mod handshake_timeout_tests {
         let Ok(HandshakeReply::Opened(opened)) = result else {
             panic!("能力位握手应成功");
         };
-        let (_buffered, _size, _replay, _geometry_token, daemon_handles_color_requests) = opened;
-        assert!(daemon_handles_color_requests);
+        let (_buffered, _size, _replay, _geometry_token, daemon_answers) = opened;
+        assert_eq!(
+            daemon_answers,
+            DaemonAnswers {
+                colors: true,
+                queries: true,
+            }
+        );
     }
 
     /// 守护停机时回的 daemon_stopping 要认成「等旧守护走了再连」，其它失败照旧报错；
@@ -2640,7 +2865,7 @@ mod handshake_timeout_tests {
         else {
             panic!("假守护正常回执，握手应成功");
         };
-        let (buffered, _size, _replay, _geometry_token, _daemon_handles_color_requests) = opened;
+        let (buffered, _size, _replay, _geometry_token, _daemon_answers) = opened;
 
         // 与 Terminal::spawn 同一条路径：后续写入进入后台单消费者队列。UI 线程只把
         // 4MB 输入请求投进去便返回；假守护不消费时，阻塞最多发生在 writer 线程。
@@ -2678,7 +2903,7 @@ mod event_proxy_answers_tests {
                 cell_w: 8,
                 cell_h: 16,
             })),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
         (proxy, probe)
     }
@@ -2744,22 +2969,44 @@ mod event_proxy_answers_tests {
         );
     }
 
+    /// 新版守护全答：设备属性、光标位置、尺寸、颜色都不该由客户端再写一份。
     #[test]
-    fn daemon_owned_color_query_is_not_answered_twice_by_client() {
+    fn daemon_owned_queries_are_not_answered_twice_by_client() {
         let (mut proxy, mut probe) = make_proxy();
-        proxy.daemon_handles_color_requests = true;
+        proxy.daemon_answers = DaemonAnswers {
+            colors: true,
+            queries: true,
+        };
         probe.set_nonblocking(true).unwrap();
         let size = TermSize { rows: 24, cols: 80 };
         let mut term = Term::new(Config::default(), &size, proxy);
         let mut parser: Processor = Processor::new();
 
-        parser.advance(&mut term, b"\x1b]11;?\x07");
+        parser.advance(&mut term, b"\x1b]11;?\x07\x1b[c\x1b[6n\x1b[14t\x1b[18t");
 
         let mut byte = [0u8; 1];
         let error = probe
             .read(&mut byte)
             .expect_err("新版守护已应答时客户端不该再写一份");
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    /// 只声明颜色的旧守护：设备属性仍要客户端答，颜色不再答。
+    #[test]
+    fn old_daemon_handshake_keeps_device_queries_on_the_client() {
+        assert_eq!(
+            DaemonAnswers::from_handshake(&serde_json::json!({
+                "daemon_handles_color_requests": true,
+            })),
+            DaemonAnswers {
+                colors: true,
+                queries: false,
+            }
+        );
+        assert_eq!(
+            DaemonAnswers::from_handshake(&serde_json::json!({})),
+            DaemonAnswers::default()
+        );
     }
 
     /// 用户在设置里自选了终端底色时，OSC 11 必须回**用户那个色**：TUI 就是靠这个
@@ -2876,7 +3123,7 @@ mod bell_notification_tests {
                 cell_w: 8,
                 cell_h: 16,
             })),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
 
         proxy.send_event(Event::Bell);
@@ -2908,7 +3155,7 @@ mod resize_tests {
             bell_notify: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
         let size = TermSize { rows, cols };
         let term = Term::new(term_config(), &size, proxy);
@@ -2936,6 +3183,7 @@ mod resize_tests {
                 pending_step: Mutex::new(None),
                 dead: Arc::new(AtomicBool::new(false)),
                 redraw_rx,
+                images: Arc::default(),
             },
             peer,
         )
@@ -3138,7 +3386,7 @@ mod search_resync_tests {
             bell_notify: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
-            daemon_handles_color_requests: false,
+            daemon_answers: DaemonAnswers::default(),
         };
         let term = Term::new(term_config(), &TermSize { rows, cols }, proxy);
         Terminal {
@@ -3166,6 +3414,7 @@ mod search_resync_tests {
                 let (_, rx) = smol::channel::bounded::<()>(1);
                 rx
             },
+            images: Arc::default(),
         }
     }
 

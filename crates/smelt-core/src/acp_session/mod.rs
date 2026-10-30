@@ -1038,6 +1038,8 @@ pub fn force_end(state: &mut AcpSessionState, kind: AcpEndKind, msg: impl Into<S
     state.phase = DaemonPhase::Dead;
     state.end_reason = msg.into();
     state.end_kind = kind;
+    // 进程没了就不可能还在压缩。结束事件没送到时，这里不清会一直转圈。
+    state.compacting = false;
 }
 
 /// 「重新开始」/新建时的相位重置：跟旧版 `AcpView::restart` 里那几行对应（cmd/
@@ -1054,6 +1056,7 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.completed_unread = false;
     state.turn_outcome = None;
     state.provider_retry = None;
+    state.compacting = false;
     state.notice = None;
     state.awaiting_user_echo = false;
     state.cancelled_tool_call_ids.clear();

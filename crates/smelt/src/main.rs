@@ -30,6 +30,7 @@ mod git_log;
 mod git_log_view;
 mod git_panel;
 mod ide;
+mod keymap;
 mod liquid_glass;
 mod local_daemon;
 mod overlay;
@@ -53,6 +54,7 @@ mod status_item;
 mod storage_cleanup;
 mod term_dock;
 mod terminal;
+mod terminal_images;
 mod terminal_view;
 mod workspace_attention;
 mod workspace_directory;
@@ -86,9 +88,6 @@ use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
 use gpui::*;
 use gpui_component::color_picker::ColorPickerState;
-use gpui_component::input::{
-    DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart,
-};
 use gpui_component::resizable::ResizableState;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
@@ -220,7 +219,7 @@ impl WorkspaceDirectoriesGlobal {
 }
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
-// 工作区快捷键也走 Action：键位在 `app_key_bindings`，处理在 Workspace 根节点。
+// 工作区快捷键也走 Action：键位在 `keymap`，处理在 Workspace 根节点。
 // 不绑 `None`——无 context 的键位和最内层同深度，后注册会盖过 Input。
 gpui::actions!(
     smelt,
@@ -2465,6 +2464,8 @@ struct Workspace {
     /// `start_rename`/`confirm_rename`。
     rename_target: Option<RenameTarget>,
     rename_input: Option<Entity<gpui_component::input::InputState>>,
+    /// 打开时预填的名字。提交的和它一样就是没改，见 `submitted_title`。
+    rename_initial: Option<String>,
     /// 重命名文本框的事件订阅句柄，随 rename_input 一起换（回车/失焦提交）。
     _rename_sub: Option<Subscription>,
     /// 「中继…」弹窗（None = 没开）。见 `start_relay_edit`。
@@ -2899,6 +2900,7 @@ impl Workspace {
             status_menu_snapshot: None,
             rename_target: None,
             rename_input: None,
+            rename_initial: None,
             _rename_sub: None,
             relay_edit: None,
             repo_info: HashMap::new(),
@@ -3293,17 +3295,6 @@ impl Render for Workspace {
             .bg(shell_surface)
             .font_family(settings::resolved_ui_font_family(
                 cx.global::<Appearance>(),
-            ))
-            .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
-                style
-                    .bg(cx.theme().drop_target)
-                    .border_2()
-                    .border_color(cx.theme().drag_border)
-            })
-            .on_drop::<ExternalPaths>(cx.listener(
-                |this, paths: &ExternalPaths, _window, cx| {
-                    this.open_paths(paths.paths(), cx);
-                },
             ))
             // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
             // window 的 focus 兜底钉在这层，保证 Workspace 键位 context 在 dispatch 路径上。
@@ -3923,95 +3914,6 @@ fn workspace_key_context(files_visible: bool, git_changes_shown: bool) -> &'stat
     }
 }
 
-/// 应用键位。必须在 `set_menus` 之前注册，菜单项才会带上快捷键。
-///
-/// 新的工作区组合键绑在 `Workspace` 或更具体、但仍浅于 Terminal / Input 的
-/// context 上。`None` 与最内层同深度，后注册会抢走输入框的键，这里不再新增。
-/// Cmd+C / Cmd+V / Cmd+F 留在终端自己的按键监听里，不在这里绑。
-fn app_key_bindings() -> Vec<KeyBinding> {
-    let mut bindings = vec![
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
-        KeyBinding::new("alt-cmd-b", ToggleToolPanel, None),
-        // 会话上/下切换（跨项目按侧栏视觉顺序，到头循环）。
-        // None 和最内层 context 同深度，后注册会盖过 Input 的 cmd-up/down。
-        // 绑在 Workspace 上更浅：输入框里是文首/文末，其余工作区切会话。
-        KeyBinding::new("cmd-up", PrevSession, Some("Workspace")),
-        KeyBinding::new("cmd-down", NextSession, Some("Workspace")),
-        KeyBinding::new("cmd-k", ToggleCommandPalette, Some("Workspace")),
-        KeyBinding::new("cmd-n", NewConversation, Some("Workspace")),
-        KeyBinding::new("cmd-[", CyclePanePrev, Some("Workspace")),
-        KeyBinding::new("cmd-]", CyclePaneNext, Some("Workspace")),
-        KeyBinding::new("cmd-d", SplitBeside, Some("Workspace")),
-        KeyBinding::new("shift-cmd-d", SplitBelow, Some("Workspace")),
-        KeyBinding::new("cmd-w", ClosePane, Some("Workspace")),
-        KeyBinding::new("cmd-s", SaveFile, Some("Files")),
-        KeyBinding::new("cmd-shift-f", ToggleDebugHud, Some("Workspace")),
-        KeyBinding::new("f7", NextHunk, Some("GitChanges")),
-        KeyBinding::new("shift-f7", PrevHunk, Some("GitChanges")),
-        KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
-        // 设置窗口：Cmd+W（Windows / Linux 是 Ctrl+W）关窗。它是普通窗口，不是模态层，
-        // Esc 不关它，留给下拉框、弹出层和输入框。
-        KeyBinding::new("secondary-w", CloseSettingsWindow, Some("SettingsWindow")),
-        // 文件树只在自己的宿主上挂 FileTree。树没挂载（文件页不可见、树收起、
-        // 搜索框有内容）时这条 context 不在焦点路径上。
-        KeyBinding::new("up", FileTreeMoveUp, Some("FileTree")),
-        KeyBinding::new("down", FileTreeMoveDown, Some("FileTree")),
-        KeyBinding::new("left", FileTreeMoveLeft, Some("FileTree")),
-        KeyBinding::new("right", FileTreeMoveRight, Some("FileTree")),
-        KeyBinding::new("enter", FileTreeActivate, Some("FileTree")),
-        // 侧栏键盘操作，见 `session_list::keyboard`。⌘⇧E 跟 VS Code「聚焦资源管理器」一样。
-        KeyBinding::new("cmd-shift-e", FocusSidebar, Some("Workspace")),
-        KeyBinding::new("up", SidebarUp, Some("Sidebar")),
-        KeyBinding::new("down", SidebarDown, Some("Sidebar")),
-        KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
-        KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
-        KeyBinding::new("enter", SidebarOpen, Some("Sidebar")),
-        KeyBinding::new("escape", SidebarExit, Some("Sidebar")),
-        // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
-        // Ctrl+W 删词。绑在 Input context，所有输入框（ACP composer 等）生效。
-        KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),
-        KeyBinding::new("ctrl-k", DeleteToEndOfLine, Some("Input")),
-        KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
-        // 把 Tab/Shift-Tab 从 gpui-component Root 的全局焦点跳转手里要回来，
-        // 终端聚焦时改发给 shell（见 terminal_view.rs 里 TerminalTab 的注释）。
-        KeyBinding::new("tab", terminal_view::TerminalTab, Some("Terminal")),
-        KeyBinding::new(
-            "shift-tab",
-            terminal_view::TerminalBackTab,
-            Some("Terminal"),
-        ),
-    ];
-    for (index, key) in [
-        "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        bindings.push(KeyBinding::new(
-            key,
-            ActivateSession { index },
-            Some("Workspace"),
-        ));
-    }
-    // cmux：Ctrl+Backspace / Ctrl+Delete 也是删行（^U / ^K），不是删词。
-    #[cfg(target_os = "macos")]
-    {
-        bindings.push(KeyBinding::new(
-            "ctrl-backspace",
-            DeleteToBeginningOfLine,
-            Some("Input"),
-        ));
-        bindings.push(KeyBinding::new(
-            "ctrl-delete",
-            DeleteToEndOfLine,
-            Some("Input"),
-        ));
-    }
-    bindings
-}
-
 fn main() {
     #[cfg(target_os = "macos")]
     if let Some(code) = local_daemon::maybe_run_install_app(std::env::args()) {
@@ -4101,28 +4003,8 @@ fn main() {
                 ),
             ])
             .expect("加载内嵌字体失败");
-        // 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
-        // （跟侧栏「设置」一样开独立设置窗口，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
-        // 放「帮助」菜单。设置「关于」页也有这两项，没有菜单栏的平台从那里进。
-        cx.bind_keys(app_key_bindings());
-        cx.set_menus(vec![
-            Menu::new("Smelt").items([
-                MenuItem::action(format!("v{}", smelt_version::VERSION), gpui::NoAction)
-                    .disabled(true),
-                #[cfg(target_os = "macos")]
-                MenuItem::Separator,
-                #[cfg(target_os = "macos")]
-                MenuItem::action("检查更新…", CheckForUpdate),
-                MenuItem::Separator,
-                MenuItem::action("设置…", OpenSettings),
-                MenuItem::Separator,
-                MenuItem::action("退出 Smelt", Quit),
-            ]),
-            Menu::new("帮助").items([
-                MenuItem::action("帮助文档", OpenDocs),
-                MenuItem::action("反馈问题", ReportIssue),
-            ]),
-        ]);
+        // 快捷键（出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。
+        keymap::init(cx);
 
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。

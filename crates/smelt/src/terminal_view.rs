@@ -15,6 +15,7 @@ use smelt_ui::daemon_states_global::{AttentionGlobal, AttentionItem, AttentionKi
 use smol::Timer;
 
 use crate::terminal::{self, Terminal};
+use smelt_model::kitty_graphics::{MILLI_CELLS, source_size};
 
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
 /// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
@@ -444,6 +445,10 @@ impl TerminalView {
     /// PTY 读线程每批输出只唤醒一次。终端内容与 BEL 提醒在这里消费；OSC 通知由运行时
     /// 扫好走事件总线，不经过这里。
     fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
+        // kitty 图形换下来的纹理在前台释放（见 terminal_images）。
+        for image in self.terminal.take_released_images() {
+            cx.drop_image(image, None);
+        }
         let daemon_state = daemon_agent_state(&self.runtime, &self.session_id, cx);
         let structured_events = daemon_state
             .as_ref()
@@ -678,6 +683,10 @@ impl TerminalView {
     /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
     pub fn adopt_terminal(&mut self, terminal: Terminal, cx: &mut Context<Self>) {
         self.terminal_generation = self.terminal_generation.wrapping_add(1);
+        // 旧连接的 kitty 图形纹理随连接一起释放，新连接的关键帧会重新带上还用得到的图。
+        for image in self.terminal.release_all_images() {
+            cx.drop_image(image, None);
+        }
         self.terminal = terminal;
         // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 Err
         // 自行退出；这里给新连接挂一个新的重绘任务。
@@ -1272,8 +1281,11 @@ impl Render for TerminalView {
                 // 可用网格区 = 自身尺寸减去左右 / 上下各一份内边距。
                 let cols = (((w - 2.0 * PAD_X) / cell_w).floor() as usize).clamp(4, 1000);
                 let grid_rows = (((h - 2.0 * PAD_Y) / line_px()).floor() as usize).clamp(2, 1000);
-                let cell_w_px = cell_w.round().clamp(1.0, 64.0) as u16;
-                let cell_h_px = line_px().round().clamp(1.0, 128.0) as u16;
+                // 报给守护的格子尺寸是设备像素（同 Ghostty、kitty）：程序按它回答尺寸查询、算
+                // 图片原尺寸占几格、填 TIOCGWINSZ 的像素宽高。在设备像素上取整，比例误差也小。
+                let scale = window.scale_factor();
+                let cell_w_px = (cell_w * scale).round().clamp(1.0, 256.0) as u16;
+                let cell_h_px = (line_px() * scale).round().clamp(1.0, 256.0) as u16;
                 if self.pty_kick_pending || focus_claim {
                     // 首帧 / reattach：无条件发 resize（含真实 cell 像素）。
                     // 守护 jolt 用 cell=0；普通 resize 同尺寸会早退——两处都补不到像素。
@@ -1755,6 +1767,18 @@ impl Render for TerminalView {
                                 cx,
                             );
                         }
+                        // kitty 图形盖在文字上面，跨好几行，所以等所有行画完再画。
+                        if !frame.images.is_empty() {
+                            let columns = rows.first().map_or(0, Vec::len);
+                            let grid = Bounds::new(
+                                point(ox, oy),
+                                size(
+                                    px(columns as f32 * cell_w),
+                                    px(rows.len() as f32 * line_px()),
+                                ),
+                            );
+                            paint_images(&frame.images, grid, cell_w, line_px(), window);
+                        }
                     },
                 )
                 .absolute()
@@ -2026,6 +2050,74 @@ impl TerminalView {
 ///
 /// `ime`（预编辑串, 起始列）不为空时在行内叠一层：垫终端底色遮住底下的内容、下划线标示
 /// 「合成中」，光标跟在拼音末尾（合成中网格里的光标块不画，见 render 里 cursor 的取值）。
+/// 画 kitty 图形（见 [`terminal::ImagePaint`]）。`grid` 是整个网格的范围，伸出去的部分裁掉。
+/// 版面里的尺寸、偏移是千分之一格，乘上本地格子大小，跟 smeltd 那边按什么字号算的无关。
+fn paint_images(
+    images: &[terminal::ImagePaint],
+    grid: Bounds<Pixels>,
+    cell_w: f32,
+    line_h: f32,
+    window: &mut Window,
+) {
+    let at = |row: i32, column: i32| {
+        point(
+            grid.origin.x + px(column as f32 * cell_w),
+            grid.origin.y + px(row as f32 * line_h),
+        )
+    };
+    let milli = |value: u32, cell: f32| value as f32 / MILLI_CELLS as f32 * cell;
+    for paint in images {
+        let layout = &paint.layout;
+        let anchor = at(paint.anchor.0, paint.anchor.1);
+        // 裁剪后的源图画在这里。
+        let shown = Bounds::new(
+            point(
+                anchor.x + px(milli(layout.offset_x, cell_w)),
+                anchor.y + px(milli(layout.offset_y, line_h)),
+            ),
+            size(
+                px(milli(layout.width, cell_w)),
+                px(milli(layout.height, line_h)),
+            ),
+        );
+        let (image_w, image_h) = paint.image_size;
+        let (source_w, source_h) = source_size(layout.source, paint.image_size);
+        if source_w == 0 || source_h == 0 {
+            continue;
+        }
+        // 整张图摆在哪，才能让源图裁剪区正好落在 shown 上。
+        let scale_x = f32::from(shown.size.width) / source_w as f32;
+        let scale_y = f32::from(shown.size.height) / source_h as f32;
+        let whole = Bounds::new(
+            point(
+                shown.origin.x - px(layout.source.x.min(image_w) as f32 * scale_x),
+                shown.origin.y - px(layout.source.y.min(image_h) as f32 * scale_y),
+            ),
+            size(px(image_w as f32 * scale_x), px(image_h as f32 * scale_y)),
+        );
+        let (clip_row, clip_column, clip_rows, clip_columns) = paint.clip;
+        let cells = Bounds::new(
+            at(clip_row, clip_column),
+            size(
+                px(clip_columns as f32 * cell_w),
+                px(clip_rows as f32 * line_h),
+            ),
+        );
+        let visible = shown.intersect(&cells).intersect(&grid);
+        if visible.size.width <= px(0.) || visible.size.height <= px(0.) {
+            continue;
+        }
+        let _ = window.paint_image(
+            visible,
+            whole,
+            Corners::default(),
+            paint.image.clone(),
+            0,
+            false,
+        );
+    }
+}
+
 struct PaintRowParams<'a> {
     origin: Point<Pixels>,
     cursor: Option<(usize, terminal::CursorKind)>,
@@ -3013,6 +3105,7 @@ mod tests {
             cursor: None,
             cursor_pos: None,
             wrapped: vec![false],
+            images: Vec::new(),
         }
     }
 
@@ -3098,6 +3191,7 @@ mod tests {
             cursor: None,
             cursor_pos: None,
             wrapped: vec![true, false],
+            images: Vec::new(),
         };
 
         let full = "https://a.b/c123".to_string();

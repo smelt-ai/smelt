@@ -1416,6 +1416,7 @@ impl SettingsContentView {
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
                 Self::observe_settings_global::<RemoteSettingsState>(window, cx),
                 Self::observe_settings_global::<crate::runtimes::RuntimeHub>(window, cx),
+                Self::observe_settings_global::<crate::keymap::KeymapState>(window, cx),
             ],
             // 初始快照已经同步取好；避免刚打开就被第一条后台流式通知立即打穿缓存。
             last_refresh: Some(Instant::now()),

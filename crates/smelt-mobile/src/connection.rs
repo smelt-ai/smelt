@@ -651,7 +651,7 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
 fn is_terminal(kind: SmeltErrorKind) -> bool {
     matches!(
         kind,
-        SmeltErrorKind::Unpaired | SmeltErrorKind::Incompatible
+        SmeltErrorKind::Unpaired | SmeltErrorKind::RuntimeOutdated | SmeltErrorKind::AppOutdated
     )
 }
 
@@ -671,10 +671,18 @@ fn runtime_info(
     target: &Target,
     described: SystemDescribeResult,
 ) -> Result<RuntimeInfo, SmeltError> {
+    // 事件协议对不上时会话目录订阅会被拒，重订也没用：在这里就判不兼容，停下来说清该升级
+    // 哪一边，而不是连着却一直「同步中」。
+    smelt_runtime_client::compat::check_events(&described).map_err(|incompatible| {
+        error(
+            crate::api::error::outdated_side(incompatible.outdated),
+            incompatible.to_string(),
+        )
+    })?;
     let daemon = described.daemon;
     let runtime_id = daemon.runtime_id.ok_or_else(|| {
         error(
-            SmeltErrorKind::Incompatible,
+            SmeltErrorKind::RuntimeOutdated,
             "这个运行时太旧，没有 runtime_id，先升级它",
         )
     })?;
@@ -698,10 +706,7 @@ fn control_error(error: ControlClientError, denied: SmeltErrorKind) -> SmeltErro
         ControlClientError::Protocol(error) => {
             let kind = match error.code {
                 ControlErrorCode::PermissionDenied => denied,
-                ControlErrorCode::UnsupportedVersion | ControlErrorCode::MethodNotFound => {
-                    SmeltErrorKind::Incompatible
-                }
-                _ => SmeltErrorKind::Other,
+                _ => crate::api::error::outdated_kind(&error).unwrap_or(SmeltErrorKind::Other),
             };
             crate::api::error::error(kind, error.message)
         }

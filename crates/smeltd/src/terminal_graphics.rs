@@ -11,7 +11,7 @@
 //! 不支持：共享内存传输（`t=s`）、动画（`a=f/a/c`）、相对放置（`P`）、按位置或层级删除。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use alacritty_terminal::Term;
@@ -24,8 +24,8 @@ use base64::Engine as _;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use smelt_core::kitty_graphics::{
     Command, Controls, GraphicsSplitter, Layout, MAX_COMMAND_BYTES, Piece, PixelFormat,
-    PlacementCursor, PlacementKey, Relay, anchors_in, encode_image_relay, grid_size,
-    placement_bytes, png_dimensions, source_size,
+    PlacementCursor, PlacementKey, Relay, SizeQuery, anchors_in, direct_layout,
+    encode_image_relay, placement_bytes, png_dimensions, virtual_layout,
 };
 
 /// 程序分块发的 base64 有的带填充有的不带，拼起来解码时两种都认。
@@ -51,6 +51,8 @@ pub(crate) struct FedOutput {
     pub(crate) plain: Vec<u8>,
     /// 写回 PTY 的应答。
     pub(crate) reply: Vec<u8>,
+    /// 程序问了几次格子像素（`CSI 16 t`）。格子尺寸可能还不知道，由泵按 `Ctl` 答或记下。
+    pub(crate) cell_size_queries: usize,
 }
 
 /// 推进守护网格。普通字节原样推进、原样转发；图形命令交给 `graphics`，它产生的网格字节也推进
@@ -86,8 +88,18 @@ pub(crate) fn feed_output<T: EventListener>(
             out.reply.extend_from_slice(&outcome.reply);
         }
         Piece::Reset => out.graphics.extend(graphics.reset()),
+        Piece::SizeQuery(SizeQuery::Cell) => out.cell_size_queries += 1,
+        Piece::SizeQuery(SizeQuery::Screen) => {
+            let _ = write!(
+                out.reply,
+                "\x1b[9;{};{}t",
+                term.screen_lines(),
+                term.columns()
+            );
+        }
     });
 }
+
 
 /// 一条命令的结果。
 #[derive(Default)]
@@ -266,12 +278,45 @@ impl TerminalGraphics {
         } else {
             self.unused_image_id()
         };
-        // 同一个 id 再传一次就是换图，旧图的放置一起删掉。
+        self.stamp += 1;
+        // 同一个 id 再传一次就是换图，旧图的放置一起删掉。内容一模一样时不换图：Pi 滚动重绘时每帧
+        // 都把整张图重传一遍，换图就要再转发一遍，客户端每帧重新解码、换纹理，滚动就卡了。客户端
+        // 手里已经是这张，只照常删掉它的放置，效果和换成同样的图一样。
+        if let Some(stored) = self.images.get_mut(&id)
+            && stored.format == decoded.format
+            && stored.size == decoded.size
+            && stored.data == decoded.data
+        {
+            stored.stamp = self.stamp;
+            let placed: Vec<PlacementKey> = self
+                .placements
+                .iter()
+                .filter(|(_, placement)| placement.image == id)
+                .map(|(key, _)| *key)
+                .collect();
+            for key in placed {
+                self.unplace(key, out);
+            }
+            if c.image_id == 0 && c.image_number != 0 {
+                self.numbers.insert(c.image_number, id);
+            }
+            return Ok(id);
+        }
         self.remove_image(id, out);
         if c.image_id == 0 && c.image_number != 0 {
             self.numbers.insert(c.image_number, id);
         }
-        self.stamp += 1;
+        // 一张新图正常只传一次。滚动、重绘时反复出现这条，说明程序在不断换图，两端每次都要
+        // 重新解码、换纹理。
+        smelt_core::app_log::info(
+            "terminal-graphics",
+            &format!(
+                "收到图片 id={id} {}x{} {} KB",
+                decoded.size.0,
+                decoded.size.1,
+                decoded.data.len() / 1024
+            ),
+        );
         out.relay
             .extend(encode_image_relay(id, decoded.format, &decoded.data));
         self.stored_bytes += decoded.data.len();
@@ -312,21 +357,12 @@ impl TerminalGraphics {
             .get(&image)
             .ok_or("ENOENT: image not found")?
             .size;
-        let (columns, rows) = grid_size(
-            c.columns,
-            c.rows,
-            source_size(c.source, size),
-            (c.offset_x, c.offset_y),
-            cell,
-        );
-        let layout = Layout {
-            columns,
-            rows,
-            source: c.source,
-            offset_x: c.offset_x,
-            offset_y: c.offset_y,
-            z: c.z,
+        let layout = if c.virtual_placement {
+            virtual_layout(c, size, cell)
+        } else {
+            direct_layout(c, size, cell)
         };
+        let (columns, rows) = (layout.columns, layout.rows);
         let key = if c.virtual_placement {
             PlacementKey::Virtual {
                 image,
@@ -830,6 +866,55 @@ mod tests {
         assert!(!String::from_utf8_lossy(&out.plain).contains('\u{E0001}'));
     }
 
+    /// Pi 问格子多大（`CSI 16 t`）：挑出来交给泵答；查询本身照常转发给客户端。
+    #[test]
+    fn cell_size_query_is_handed_to_the_pump() {
+        let mut h = Harness::new();
+        let out = h.feed(b"a\x1b[16tb\x1b[16t");
+        assert_eq!(out.cell_size_queries, 2);
+        assert!(out.reply.is_empty());
+        assert_eq!(out.graphics, b"a\x1b[16tb\x1b[16t");
+        assert_eq!(out.plain, b"a\x1b[16tb\x1b[16t");
+    }
+
+    /// `CSI 19 t` 同 Ghostty、VTE 报文字区的行列。
+    #[test]
+    fn screen_size_query_reports_the_text_area() {
+        let mut h = Harness::new();
+        let out = h.feed(b"\x1b[19t");
+        assert_eq!(out.reply, format!("\x1b[9;{ROWS};{COLS}t").as_bytes());
+    }
+
+    /// Pi 滚动重绘时每帧都把同一张图整张重传。内容没变就不换图：不删图、不再转发，只照常删掉旧
+    /// 放置、挂上新的；内容变了才换。
+    #[test]
+    fn retransmitting_the_same_image_keeps_it() {
+        let mut h = Harness::new();
+        let png = fake_png(40, 40);
+        let first = h.feed(&apc("a=T,f=100,q=2,i=7,c=4,r=2", &png));
+        let first_anchor = anchor_placed(&relays_in(&first.graphics));
+
+        let again = h.feed(&apc("a=T,f=100,q=2,i=7,c=4,r=2", &png));
+        let relays = relays_in(&again.graphics);
+        assert!(
+            !relays
+                .iter()
+                .any(|relay| matches!(relay, Relay::Image { .. } | Relay::DropImage(_))),
+            "同一张图不该再转发：{relays:?}"
+        );
+        assert!(relays.contains(&Relay::Unplace(PlacementKey::Anchor(first_anchor))));
+        assert_ne!(anchor_placed(&relays), first_anchor);
+
+        let changed = h.feed(&apc("a=T,f=100,q=2,i=7,c=4,r=2", &fake_png(41, 40)));
+        let relays = relays_in(&changed.graphics);
+        assert!(relays.contains(&Relay::DropImage(7)));
+        assert!(
+            relays
+                .iter()
+                .any(|relay| matches!(relay, Relay::Image { id: 7, .. }))
+        );
+    }
+
     #[test]
     fn grid_size_comes_from_pixels_when_not_given() {
         let mut h = Harness::new();
@@ -1002,6 +1087,8 @@ mod tests {
         ));
     }
 
+    /// `/dev/zero` 只在 Unix 上是设备文件；Windows 上它连绝对路径都不算，先被另一条拦下。
+    #[cfg(unix)]
     #[test]
     fn refuses_device_files() {
         let mut h = Harness::new();

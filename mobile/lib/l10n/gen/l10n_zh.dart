@@ -396,7 +396,10 @@ class L10nZh extends L10n {
   String get machineRevoked => '这台手机已被这台机器移除';
 
   @override
-  String get machineIncompatible => '这台机器需要升级';
+  String get machineRuntimeOutdated => '这台机器需要升级';
+
+  @override
+  String get machineAppOutdated => 'App 需要升级';
 
   @override
   String get timeJustNow => '刚刚';
@@ -1036,8 +1039,13 @@ class L10nZh extends L10n {
   }
 
   @override
-  String machinesIncompatibleBody(String name) {
-    return '这个 App 和 $name 上的 Smelt 版本不兼容。升级较旧的一端后点立即重连；还不行再重新配对。';
+  String machinesRuntimeOutdatedBody(String name) {
+    return '$name 上的 Smelt 比这个 App 旧，版本不兼容。在那台机器上升级 Smelt 后点立即重连；还不行再重新配对。';
+  }
+
+  @override
+  String machinesAppOutdatedBody(String name) {
+    return '这个 App 比 $name 上的 Smelt 旧，版本不兼容。先升级这个 App，再点立即重连。';
   }
 
   @override
@@ -1123,8 +1131,12 @@ class L10nZh extends L10n {
   String get machinesPairErrorExpired => '这个配对码已过期或已用过。在那台机器上重新生成一个再扫。';
 
   @override
-  String get machinesPairErrorIncompatible =>
-      '这个 App 和那台机器上的 Smelt 版本不兼容。升级较旧的一端，再用新的配对码配对。';
+  String get machinesPairErrorRuntimeOutdated =>
+      '那台机器上的 Smelt 比这个 App 旧，版本不兼容。在那台机器上升级 Smelt，再用新的配对码配对。';
+
+  @override
+  String get machinesPairErrorAppOutdated =>
+      '这个 App 比那台机器上的 Smelt 旧，版本不兼容。先升级这个 App，再用新的配对码配对。';
 
   @override
   String get machinesPairErrorOffline =>

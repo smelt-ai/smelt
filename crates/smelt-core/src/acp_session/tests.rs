@@ -3069,6 +3069,43 @@ fn compaction_end_without_a_window_keeps_the_known_one() {
     );
 }
 
+/// 压缩中途进程没了，`compaction_end` 不会再来。转圈不能留到下一个进程。
+#[test]
+fn provider_gone_mid_compaction_stops_compacting() {
+    let compacting = || {
+        let mut state = fresh_state();
+        apply_event(
+            &mut state,
+            ConversationEvent::Compaction {
+                running: true,
+                used: None,
+                size: None,
+            },
+        );
+        assert!(state.compacting);
+        state
+    };
+
+    let mut state = compacting();
+    apply_event(
+        &mut state,
+        ConversationEvent::Fatal("Pi RPC 进程已关闭 stdout".into()),
+    );
+    assert!(!state.compacting, "进程异常退出");
+
+    let mut state = compacting();
+    force_end(
+        &mut state,
+        AcpEndKind::TransportDisconnected,
+        "连接意外中断",
+    );
+    assert!(!state.compacting, "连接断开");
+
+    let mut state = compacting();
+    reset_for_restart(&mut state);
+    assert!(!state.compacting, "重新开始换了新进程");
+}
+
 /// 改配置失败是一次性提示，带类别；不进状态行，不然下一轮一直挂着。
 /// 同一句失败连着来两次，两次都要认得出来。
 #[test]

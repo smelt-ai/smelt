@@ -4,6 +4,7 @@ import {
 	buildHandoffInstructions,
 	DEFAULT_HANDOFF_INSTRUCTIONS,
 	runHandoffCompaction,
+	summarizationModel,
 } from "../src/handoff-compaction.ts";
 
 describe("handoff compaction", () => {
@@ -65,5 +66,22 @@ describe("handoff compaction", () => {
 
 		const result = await runHandoffCompaction(dummyPreparation, ctxWithFailedAuth);
 		expect(result).toBeUndefined();
+	});
+
+	test("caps summary output so a nearly full window still fits", () => {
+		// 1M 窗口、384K 输出：82 万待摘要历史加上 384K 必然超窗。
+		const model = { id: "deepseek-v4.1-flash", contextWindow: 1_048_576, maxTokens: 384_000 };
+		const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 };
+		const capped = summarizationModel(model, settings);
+		expect(capped.maxTokens).toBe(13_107);
+		expect(capped.contextWindow).toBe(1_048_576);
+		expect(825_819 + capped.maxTokens).toBeLessThan(model.contextWindow);
+		expect(model.maxTokens).toBe(384_000);
+	});
+
+	test("keeps a model whose output limit already fits the budget", () => {
+		const model = { id: "small", maxTokens: 8_192 };
+		const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 };
+		expect(summarizationModel(model, settings)).toBe(model);
 	});
 });

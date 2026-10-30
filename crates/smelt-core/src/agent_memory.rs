@@ -24,6 +24,70 @@ pub fn is_memory_file_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// 磁盘上的 `Style.md` 和库里的 `style.md` 在大小写不敏感的文件系统上是同一个文件。
+/// 元数据一律用小写名。`MEMORY.md` 是索引，不因为大小写折叠变成合法记忆。
+pub fn canonical_memory_file_name(name: &str) -> Option<String> {
+    if name.eq_ignore_ascii_case("MEMORY.md") {
+        return None;
+    }
+    let canonical = name.to_ascii_lowercase();
+    is_memory_file_name(&canonical).then_some(canonical)
+}
+
+/// 目录里已有大小写不同的同名文件时，用磁盘上的真实名字打开，避免另建一行。
+fn memory_disk_path(dir: &Path, file_name: &str) -> PathBuf {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(file_name)
+            {
+                return entry.path();
+            }
+        }
+    }
+    dir.join(file_name)
+}
+
+/// 注入进 `<smelt_memory>` 之前，把可能被当成围栏的标签转义掉。
+///
+/// 匹配 `<` + 可选空白 + 可选 `/` + 可选空白 + `smelt_memory`（ASCII 大小写不敏感），
+/// 只把开头的 `<` 换成 `<\/`，正文其余部分保持原样。
+pub fn escape_memory_fence(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(index) = rest.find('<') {
+        out.push_str(&rest[..index]);
+        if fence_tag_at(&rest[index..]) {
+            out.push_str("<\\/");
+            rest = &rest[index + 1..];
+        } else {
+            out.push('<');
+            rest = &rest[index + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn fence_tag_at(text: &str) -> bool {
+    let Some(mut rest) = text.strip_prefix('<') else {
+        return false;
+    };
+    rest = trim_ascii_ws(rest);
+    if let Some(stripped) = rest.strip_prefix('/') {
+        rest = trim_ascii_ws(stripped);
+    }
+    let needle = "smelt_memory";
+    rest.get(..needle.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(needle))
+}
+
+fn trim_ascii_ws(text: &str) -> &str {
+    text.trim_start_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'))
+}
+
 /// 拆出 frontmatter 和正文；没有 frontmatter 时返回 None。
 fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     let rest = content.strip_prefix("---")?.trim_start_matches('\r');
@@ -81,9 +145,26 @@ impl MemoryScope {
 
 struct StoreMeta {
     usage: HashMap<String, Usage>,
-    /// 待确认的文件 → 原因。
+    /// 显式待确认：文件 → 原因。
     pending: HashMap<String, String>,
+    /// 显式可信：小写文件名 → 来源时间戳，以及是不是升级回填。
+    trusted: HashMap<String, TrustedStamp>,
 }
+
+struct TrustedStamp {
+    written_at_ms: i64,
+    legacy_backfill: bool,
+}
+
+/// 文件 mtime 比来源记录晚这么多，就当作来源记下之后被外部改过（含 bash 直写覆盖）。
+/// 给写入再记来源留一点文件系统时间戳粒度余量。
+const EXTERNAL_MODIFY_GRACE_MS: i64 = 5_000;
+
+const NO_PROVENANCE_REASON: &str = "无来源记录，需用户采纳后生效";
+const EXTERNAL_MODIFY_REASON: &str = "文件在记录来源后被外部修改，需重新采纳";
+const LEGACY_BACKFILL_REASON: &str = "升级迁移：升级前已有的记忆";
+/// 写在回填行的 `session_id` 上。这类行的 `written_at_ms` 就是当时的 mtime，不再留 5 秒余量。
+pub const LEGACY_BACKFILL_MARKER: &str = "legacy-backfill-v1";
 
 fn store_meta(store: Option<&smelt_store::Store>, scope: &MemoryScope) -> StoreMeta {
     let snapshot = store
@@ -104,7 +185,57 @@ fn store_meta(store: Option<&smelt_store::Store>, scope: &MemoryScope) -> StoreM
                 )
             })
             .collect(),
-        pending: snapshot.pending.into_iter().collect(),
+        pending: snapshot
+            .pending
+            .into_iter()
+            .map(|(name, reason)| (name.to_ascii_lowercase(), reason))
+            .collect(),
+        trusted: snapshot
+            .trusted
+            .into_iter()
+            .map(|record| {
+                (
+                    record.file_name.to_ascii_lowercase(),
+                    TrustedStamp {
+                        written_at_ms: record.written_at_ms,
+                        legacy_backfill: record.session_id == LEGACY_BACKFILL_MARKER,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn mtime_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(
+        modified
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis()
+            .min(i64::MAX as u128) as i64,
+    )
+}
+
+/// 一条磁盘上的记忆是否应视为待确认，以及原因。
+fn pending_reason_for(file_name: &str, path: &Path, meta: &StoreMeta) -> Option<String> {
+    if let Some(reason) = meta.pending.get(file_name) {
+        return Some(reason.clone());
+    }
+    match meta.trusted.get(file_name) {
+        Some(stamp) => {
+            let Some(mtime) = mtime_ms(path) else {
+                return Some(EXTERNAL_MODIFY_REASON.to_string());
+            };
+            // 回填的时间戳就是当时的 mtime，没有写入落盘延迟，容差收到 0。
+            let grace = if stamp.legacy_backfill {
+                0
+            } else {
+                EXTERNAL_MODIFY_GRACE_MS
+            };
+            (mtime > stamp.written_at_ms + grace).then(|| EXTERNAL_MODIFY_REASON.to_string())
+        }
+        None => Some(NO_PROVENANCE_REASON.to_string()),
     }
 }
 
@@ -112,8 +243,105 @@ fn store() -> std::io::Result<smelt_store::Store> {
     crate::sqlite_state::default_sqlite_store().map_err(std::io::Error::other)
 }
 
+/// 升级时一次性：把磁盘上还没有来源记录的记忆文件记成 trusted。
+/// 哨兵行保证只跑一次；之后新出现的无记录文件一律待确认。
+pub fn ensure_legacy_trust_backfill(store: &smelt_store::Store) -> Result<(), MemoryRequestError> {
+    if store
+        .memory_legacy_trust_backfill_done()
+        .map_err(|error| MemoryRequestError::Store(error.to_string()))?
+    {
+        return Ok(());
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut scopes: Vec<(MemoryScope, PathBuf)> = Vec::new();
+    if let Some(dir) = crate::agent_definition_store::user_memory_dir() {
+        scopes.push((MemoryScope::User, dir));
+    }
+    if let Ok(agents) = crate::agent_definition_store::list_agent_definitions_on(store) {
+        for agent in agents {
+            if let Some(dir) = crate::agent_definition_store::agent_memory_dir(&agent.id) {
+                scopes.push((MemoryScope::Agent(agent.id), dir));
+            }
+        }
+    }
+    // 先收齐再一次性写入。目录读失败就不要写哨兵，否则这次漏掉的文件再也回填不了。
+    let mut files = Vec::new();
+    for (scope, dir) in scopes {
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(MemoryRequestError::Store(format!(
+                    "读取记忆目录 {} 失败：{error}",
+                    dir.display()
+                )));
+            }
+        };
+        let meta = store
+            .memory_meta(&scope.key())
+            .map_err(|error| MemoryRequestError::Store(error.to_string()))?;
+        let known: std::collections::HashSet<String> = meta
+            .pending
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .chain(
+                meta.trusted
+                    .iter()
+                    .map(|record| record.file_name.to_ascii_lowercase()),
+            )
+            .collect();
+        for entry in read_dir.flatten() {
+            let disk_name = entry.file_name().to_string_lossy().into_owned();
+            let Some(file_name) = canonical_memory_file_name(&disk_name) else {
+                continue;
+            };
+            if known.contains(&file_name) {
+                continue;
+            }
+            let written_at = mtime_ms(&entry.path()).unwrap_or(now_ms);
+            files.push((scope.key(), file_name, written_at));
+        }
+    }
+    store
+        .commit_legacy_memory_backfill(
+            &files,
+            LEGACY_BACKFILL_REASON,
+            LEGACY_BACKFILL_MARKER,
+            now_ms,
+        )
+        .map_err(|error| MemoryRequestError::Store(error.to_string()))?;
+    Ok(())
+}
+
+/// 一层记忆里不应注入的文件名（显式 pending + 无记录 + 来源后被外部改过）。
+pub fn effective_pending_files(
+    dir: &Path,
+    store: &smelt_store::Store,
+    scope: &MemoryScope,
+) -> Result<Vec<String>, MemoryRequestError> {
+    let _ = ensure_legacy_trust_backfill(store);
+    let meta = store_meta(Some(store), scope);
+    let mut pending: std::collections::BTreeSet<String> = meta.pending.keys().cloned().collect();
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        for entry in read_dir.flatten() {
+            let disk_name = entry.file_name().to_string_lossy().into_owned();
+            let Some(file_name) = canonical_memory_file_name(&disk_name) else {
+                continue;
+            };
+            if pending_reason_for(&file_name, &entry.path(), &meta).is_some() {
+                pending.insert(file_name);
+            }
+        }
+    }
+    Ok(pending.into_iter().collect())
+}
+
 pub fn list_memories(dir: &Path, scope: &MemoryScope) -> MemoryListing {
-    list_memories_with(dir, store().ok().as_ref(), scope, SystemTime::now())
+    let store = store().ok();
+    if let Some(store) = store.as_ref() {
+        let _ = ensure_legacy_trust_backfill(store);
+    }
+    list_memories_with(dir, store.as_ref(), scope, SystemTime::now())
 }
 
 fn list_memories_with(
@@ -127,10 +355,10 @@ fn list_memories_with(
     let mut core_bytes = 0;
     if let Ok(read_dir) = std::fs::read_dir(dir) {
         for entry in read_dir.flatten() {
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            if !is_memory_file_name(&file_name) {
+            let disk_name = entry.file_name().to_string_lossy().into_owned();
+            let Some(file_name) = canonical_memory_file_name(&disk_name) else {
                 continue;
-            }
+            };
             let path = entry.path();
             let Ok(content) = std::fs::read_to_string(&path) else {
                 continue;
@@ -145,7 +373,7 @@ fn list_memories_with(
             let kind = field("type").map(str::to_string);
             let modified = entry.metadata().and_then(|meta| meta.modified()).ok();
             let used = meta.usage.get(&file_name).copied();
-            let pending_reason = meta.pending.get(&file_name).cloned();
+            let pending_reason = pending_reason_for(&file_name, &path, &meta);
             let last_used = match (modified, used.map(|usage| usage.last_read)) {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
@@ -182,17 +410,6 @@ fn list_memories_with(
     }
 }
 
-fn ensure_memory_file_name(file_name: &str) -> std::io::Result<()> {
-    if is_memory_file_name(file_name) {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("不是记忆文件：{file_name}"),
-        ))
-    }
-}
-
 /// 删掉一条记忆和它的元数据。索引由启动器按 frontmatter 生成，不用另外改。
 pub fn delete_memory(dir: &Path, scope: &MemoryScope, file_name: &str) -> std::io::Result<()> {
     delete_memory_with(&store()?, dir, scope, file_name)
@@ -204,14 +421,19 @@ fn delete_memory_with(
     scope: &MemoryScope,
     file_name: &str,
 ) -> std::io::Result<()> {
-    ensure_memory_file_name(file_name)?;
-    match std::fs::remove_file(dir.join(file_name)) {
+    let file_name = canonical_memory_file_name(file_name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("不是记忆文件：{file_name}"),
+        )
+    })?;
+    match std::fs::remove_file(memory_disk_path(dir, &file_name)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
     // 同名记忆以后重建时，不该继承这条的使用次数和待确认状态。
     store
-        .forget_memory(&scope.key(), file_name)
+        .forget_memory(&scope.key(), &file_name)
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
@@ -261,15 +483,46 @@ pub fn approve_for_agent(
     layer: crate::control_api::AgentMemoryLayer,
     file_name: &str,
 ) -> std::io::Result<()> {
-    let (scope, _) = layer_scope_and_dir(agent_id, layer)
+    let (scope, dir) = layer_scope_and_dir(agent_id, layer)
         .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
-    approve_memory(&scope, file_name)
+    approve_memory_in(&store()?, &scope, &dir, file_name)
 }
 
 pub fn approve_memory(scope: &MemoryScope, file_name: &str) -> std::io::Result<()> {
-    ensure_memory_file_name(file_name)?;
-    store()?
-        .approve_memory(&scope.key(), file_name)
+    let dir = match scope {
+        MemoryScope::Agent(id) => crate::agent_definition_store::agent_memory_dir(id),
+        MemoryScope::User => crate::agent_definition_store::user_memory_dir(),
+    }
+    .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+    approve_memory_in(&store()?, scope, &dir, file_name)
+}
+
+/// 采纳前确认文件还在磁盘上，并用 `max(now, mtime)` 盖住来源时间，
+/// 这样无记录的新文件、以及外部改过但仍标 trusted 的文件都能重新生效。
+fn approve_memory_in(
+    store: &smelt_store::Store,
+    scope: &MemoryScope,
+    dir: &Path,
+    file_name: &str,
+) -> std::io::Result<()> {
+    let file_name = canonical_memory_file_name(file_name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("不是记忆文件：{file_name}"),
+        )
+    })?;
+    let path = memory_disk_path(dir, &file_name);
+    if !path.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "记忆文件不存在，无法采纳",
+        ));
+    }
+    let file_mtime_ms =
+        mtime_ms(&path).ok_or_else(|| std::io::Error::other("读不到记忆文件的修改时间"))?;
+    let stamp_ms = chrono::Utc::now().timestamp_millis().max(file_mtime_ms);
+    store
+        .approve_memory(&scope.key(), &file_name, stamp_ms)
         .map(|_| ())
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
@@ -321,6 +574,8 @@ pub fn launch_memory_enabled(store: &smelt_store::Store, agent_dir: Option<&Path
 }
 
 /// 两层的使用统计和待确认列表，以及记忆是否还开着。关着时两层都为空。
+///
+/// `pending` 是**不应注入**的文件名：显式 pending、无来源记录、以及来源记下后被外部改过的。
 pub fn launch_memory_meta(
     store: &smelt_store::Store,
     agent_dir: Option<&Path>,
@@ -329,13 +584,18 @@ pub fn launch_memory_meta(
     if !launch_memory_enabled(store, agent_dir) {
         return Ok(crate::control_api::AgentMemoryMetaResult::default());
     }
-    let layer = |scope: Result<MemoryScope, MemoryRequestError>| {
+    let _ = ensure_legacy_trust_backfill(store);
+    let layer = |scope: Result<MemoryScope, MemoryRequestError>, dir: Option<&Path>| {
         let Ok(scope) = scope else {
             return Ok(crate::control_api::AgentMemoryLayerMeta::default());
         };
         let meta = store
             .memory_meta(&scope.key())
             .map_err(|error| MemoryRequestError::Store(error.to_string()))?;
+        let pending = match dir {
+            Some(dir) => effective_pending_files(dir, store, &scope)?,
+            None => meta.pending.into_iter().map(|(file, _)| file).collect(),
+        };
         Ok(crate::control_api::AgentMemoryLayerMeta {
             usage: meta
                 .usage
@@ -346,7 +606,7 @@ pub fn launch_memory_meta(
                     last_read_at_ms: record.last_read_at_ms,
                 })
                 .collect(),
-            pending: meta.pending.into_iter().map(|(file, _)| file).collect(),
+            pending,
         })
     };
     let embedding = crate::memory_settings::load_on(store)
@@ -368,8 +628,8 @@ pub fn launch_memory_meta(
         enabled: true,
         embedding,
         rerank_model,
-        agent: layer(launch_scope(agent_dir, false))?,
-        user: layer(launch_scope(user_dir, true))?,
+        agent: layer(launch_scope(agent_dir, false), agent_dir)?,
+        user: layer(launch_scope(user_dir, true), user_dir)?,
     })
 }
 
@@ -379,11 +639,11 @@ pub fn record_launch_read(
     file: &str,
     now_ms: i64,
 ) -> Result<(), MemoryRequestError> {
-    if !is_memory_file_name(file) {
+    let Some(file) = canonical_memory_file_name(file) else {
         return Err(MemoryRequestError::InvalidFile);
-    }
+    };
     store
-        .record_memory_read(&scope.key(), file, now_ms)
+        .record_memory_read(&scope.key(), &file, now_ms)
         .map_err(|error| MemoryRequestError::Store(error.to_string()))
 }
 
@@ -396,15 +656,15 @@ pub fn record_launch_write(
     session_id: &str,
     now_ms: i64,
 ) -> Result<(), MemoryRequestError> {
-    if !is_memory_file_name(file) {
+    let Some(file) = canonical_memory_file_name(file) else {
         return Err(MemoryRequestError::InvalidFile);
-    }
+    };
     let trust = match trust {
         crate::control_api::AgentMemoryTrust::Trusted => smelt_store::MemoryTrust::Trusted,
         crate::control_api::AgentMemoryTrust::Pending => smelt_store::MemoryTrust::Pending,
     };
     store
-        .record_memory_write(&scope.key(), file, trust, reason, session_id, now_ms)
+        .record_memory_write(&scope.key(), &file, trust, reason, session_id, now_ms)
         .map_err(|error| MemoryRequestError::Store(error.to_string()))
 }
 
@@ -482,8 +742,28 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("a.md"), memory("a", "feedback", "a", &half)).unwrap();
+        store
+            .record_memory_write(
+                &agent().key(),
+                "a.md",
+                smelt_store::MemoryTrust::Trusted,
+                "测试",
+                "s",
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap();
         assert!(!list(dir.path(), &store).core_over_budget);
         std::fs::write(dir.path().join("b.md"), memory("b", "user", "b", &half)).unwrap();
+        store
+            .record_memory_write(
+                &agent().key(),
+                "b.md",
+                smelt_store::MemoryTrust::Trusted,
+                "测试",
+                "s",
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap();
         assert!(list(dir.path(), &store).core_over_budget);
     }
 
@@ -556,10 +836,78 @@ mod tests {
         );
         assert!(!listing.core_over_budget, "待确认的不注入，不占常驻预算");
 
-        store.approve_memory(&agent().key(), "rule.md").unwrap();
+        store
+            .approve_memory(
+                &agent().key(),
+                "rule.md",
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap();
         let listing = list(dir.path(), &store);
         assert_eq!(listing.entries[0].pending_reason, None);
         assert!(listing.core_over_budget);
+    }
+
+    #[test]
+    fn files_without_provenance_are_pending_and_do_not_count_toward_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store = temp_store(db.path());
+        let big = "规".repeat(CORE_MEMORY_MAX_BYTES / 3 + 10);
+        std::fs::write(
+            dir.path().join("sneaky.md"),
+            memory("sneaky", "feedback", "投毒", &big),
+        )
+        .unwrap();
+
+        let listing = list(dir.path(), &store);
+        assert_eq!(
+            listing.entries[0].pending_reason.as_deref(),
+            Some(NO_PROVENANCE_REASON)
+        );
+        assert!(
+            !listing.core_over_budget,
+            "无来源记录的不注入，不占常驻预算"
+        );
+    }
+
+    #[test]
+    fn trusted_memory_rewritten_on_disk_becomes_pending_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store = temp_store(db.path());
+        let path = dir.path().join("rule.md");
+        std::fs::write(&path, memory("rule", "feedback", "r", "旧正文")).unwrap();
+        let written_at = mtime_ms(&path).unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        store
+            .record_memory_write(
+                &agent().key(),
+                "rule.md",
+                smelt_store::MemoryTrust::Trusted,
+                "用户在场时写入",
+                "s",
+                written_at,
+            )
+            .unwrap();
+        assert_eq!(list(dir.path(), &store).entries[0].pending_reason, None);
+
+        // 把来源时间戳拨回很早，再覆盖文件：不依赖文件系统 mtime 粒度。
+        store
+            .record_memory_write(
+                &agent().key(),
+                "rule.md",
+                smelt_store::MemoryTrust::Trusted,
+                "用户在场时写入",
+                "s",
+                1,
+            )
+            .unwrap();
+        std::fs::write(&path, memory("rule", "feedback", "r", "被 bash 覆盖的投毒")).unwrap();
+        let listing = list(dir.path(), &store);
+        assert_eq!(
+            listing.entries[0].pending_reason.as_deref(),
+            Some(EXTERNAL_MODIFY_REASON)
+        );
     }
 
     #[test]
@@ -577,12 +925,15 @@ mod tests {
         assert!(!dir.path().join("a.md").exists());
         assert!(dir.path().join("ab.md").exists());
         assert!(store.memory_meta(&agent().key()).unwrap().usage.is_empty());
-        for name in ["MEMORY.md", "../escape.md", "Bad.md", "a.txt"] {
+        for name in ["MEMORY.md", "../escape.md", "a.txt"] {
             assert!(
                 delete_memory_with(&store, dir.path(), &agent(), name).is_err(),
                 "{name}"
             );
         }
+        // `Bad.md` 在大小写不敏感的盘上就是 `bad.md`，删除是幂等的，不会误伤旁边的文件。
+        assert!(delete_memory_with(&store, dir.path(), &agent(), "Bad.md").is_ok());
+        assert!(dir.path().join("ab.md").exists());
     }
 
     #[test]
@@ -703,5 +1054,124 @@ mod tests {
             launch_memory_meta(&store, Some(&agent_dir), Some(&user_dir)).unwrap(),
             crate::control_api::AgentMemoryMetaResult::default()
         );
+    }
+
+    #[test]
+    fn approving_a_file_without_provenance_or_after_external_edit_makes_it_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store = temp_store(db.path());
+        let fresh = dir.path().join("sneaky.md");
+        std::fs::write(&fresh, memory("sneaky", "feedback", "手写", "正文")).unwrap();
+        assert_eq!(
+            list(dir.path(), &store).entries[0]
+                .pending_reason
+                .as_deref(),
+            Some(NO_PROVENANCE_REASON)
+        );
+        approve_memory_in(&store, &agent(), dir.path(), "sneaky.md").unwrap();
+        assert_eq!(list(dir.path(), &store).entries[0].pending_reason, None);
+
+        let stale = dir.path().join("rule.md");
+        std::fs::write(&stale, memory("rule", "feedback", "r", "旧正文")).unwrap();
+        store
+            .record_memory_write(
+                &agent().key(),
+                "rule.md",
+                smelt_store::MemoryTrust::Trusted,
+                "用户在场时写入",
+                "s",
+                1,
+            )
+            .unwrap();
+        std::fs::write(&stale, memory("rule", "feedback", "r", "外部改过")).unwrap();
+        assert_eq!(
+            list(dir.path(), &store)
+                .entries
+                .iter()
+                .find(|e| e.file_name == "rule.md")
+                .unwrap()
+                .pending_reason
+                .as_deref(),
+            Some(EXTERNAL_MODIFY_REASON)
+        );
+        approve_memory_in(&store, &agent(), dir.path(), "rule.md").unwrap();
+        let listing = list(dir.path(), &store);
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .find(|e| e.file_name == "rule.md")
+                .unwrap()
+                .pending_reason,
+            None
+        );
+        assert!(
+            approve_memory_in(&store, &agent(), dir.path(), "missing.md").is_err(),
+            "磁盘上没有的文件不能采纳"
+        );
+    }
+
+    #[test]
+    fn legacy_backfill_uses_zero_mtime_grace_and_case_variants_share_one_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store = temp_store(db.path());
+        let path = dir.path().join("Style.md");
+        std::fs::write(&path, memory("style", "feedback", "r", "正文")).unwrap();
+        let mtime = mtime_ms(&path).unwrap();
+        store
+            .record_memory_write(
+                &agent().key(),
+                "style.md",
+                smelt_store::MemoryTrust::Trusted,
+                LEGACY_BACKFILL_REASON,
+                LEGACY_BACKFILL_MARKER,
+                mtime - 1,
+            )
+            .unwrap();
+        assert_eq!(
+            list(dir.path(), &store).entries[0]
+                .pending_reason
+                .as_deref(),
+            Some(EXTERNAL_MODIFY_REASON),
+            "回填行晚 1ms 也算被改过"
+        );
+        store
+            .record_memory_write(
+                &agent().key(),
+                "style.md",
+                smelt_store::MemoryTrust::Trusted,
+                "用户在场时写入",
+                "s",
+                mtime - 1,
+            )
+            .unwrap();
+        assert_eq!(
+            list(dir.path(), &store).entries[0].pending_reason,
+            None,
+            "普通来源仍有 5 秒余量"
+        );
+    }
+
+    #[test]
+    fn memory_fences_are_escaped_regardless_of_case_and_whitespace() {
+        let escaped = escape_memory_fence(
+            "keep <b> and </SMELT_MEMORY> plus </ smelt_memory > and < /smelt_memory attr>",
+        );
+        assert!(escaped.contains("<b>"));
+        assert!(!escaped.contains("</SMELT_MEMORY>"));
+        // 只替换开头的 `<`。`</SMELT_MEMORY>` 变成 `<\//SMELT_MEMORY>`，空白和多余的 `/` 留在原处。
+        assert_eq!(escape_memory_fence("</SMELT_MEMORY>"), "<\\//SMELT_MEMORY>");
+        assert_eq!(
+            escape_memory_fence("</ smelt_memory >"),
+            "<\\// smelt_memory >"
+        );
+        assert_eq!(escape_memory_fence("< /smelt_memory"), "<\\/ /smelt_memory");
+        assert!(escaped.contains("<\\//SMELT_MEMORY>"));
+        assert!(escaped.contains("<\\// smelt_memory >"));
+        assert!(escaped.contains("<\\/ /smelt_memory attr>"));
+        assert!(!escaped.to_ascii_lowercase().contains("</smelt_memory"));
+        assert_eq!(escape_memory_fence("plain"), "plain");
     }
 }

@@ -227,6 +227,9 @@ fn summarize_session_with(fs: &dyn FileSystem, path: &Path) -> Option<SessionSum
         .to_string();
 
     let mut title: Option<String> = None;
+    // `/rename` 起的名和 Claude 生成的标题，都是后写的算数；名字被清掉记成空。
+    let mut renamed: Option<String> = None;
+    let mut generated: Option<String> = None;
     let mut started_at: Option<DateTime<Utc>> = None;
     let mut last_active_at: Option<DateTime<Utc>> = None;
     let mut message_count = 0usize;
@@ -247,6 +250,18 @@ fn summarize_session_with(fs: &dyn FileSystem, path: &Path) -> Option<SessionSum
         let Some(kind) = row.get("type").and_then(|v| v.as_str()) else {
             continue;
         };
+        let title_of = |field: &str| {
+            row.get(field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(String::from)
+        };
+        match kind {
+            "custom-title" => renamed = title_of("customTitle"),
+            "ai-title" => generated = title_of("aiTitle"),
+            _ => {}
+        }
         if kind != "user" && kind != "assistant" {
             continue;
         }
@@ -302,7 +317,12 @@ fn summarize_session_with(fs: &dyn FileSystem, path: &Path) -> Option<SessionSum
 
     // Claude ACP omits local-command-only transcripts during session/load. Do
     // not advertise those files as resumable conversations in the first place.
-    let title = title?;
+    let first_prompt = title?;
+    // 跟 Claude 状态栏的 `session_name` 一样：起的名 > 生成的标题，都没有才用首条消息。
+    let title = renamed
+        .or(generated)
+        .map(|title| truncate(&title, 80))
+        .unwrap_or(first_prompt);
     Some(SessionSummary {
         title: title.clone(),
         agent_title: title,
@@ -2025,6 +2045,67 @@ mod tests {
         assert_eq!(sessions[0].title, "second session");
         assert_eq!(Path::new(&sessions[1].path).file_stem().unwrap(), "older");
         assert_eq!(sessions[1].message_count, 2);
+    }
+
+    #[test]
+    fn claude_session_title_prefers_rename_then_generated_title() {
+        let tmp = test_sandbox("claude-titles");
+        let config_dir = tmp.join(".claude");
+        let proj_root = config_dir.join("projects").join(project_dir("/x/y"));
+        std::fs::create_dir_all(&proj_root).unwrap();
+
+        let prompt = r#"{"type":"user","timestamp":"2026-07-01T00:00:00Z","message":{"content":"切换到main"}}"#;
+        write_lines(&proj_root, "plain.jsonl", &[prompt]);
+        write_lines(
+            &proj_root,
+            "generated.jsonl",
+            &[
+                prompt,
+                r#"{"type":"ai-title","aiTitle":"旧标题","sessionId":"g"}"#,
+                r#"{"type":"ai-title","aiTitle":"会话标题和状态逻辑","sessionId":"g"}"#,
+            ],
+        );
+        write_lines(
+            &proj_root,
+            "renamed.jsonl",
+            &[
+                prompt,
+                r#"{"type":"custom-title","customTitle":"我起的名","sessionId":"r"}"#,
+                r#"{"type":"ai-title","aiTitle":"会话标题和状态逻辑","sessionId":"r"}"#,
+            ],
+        );
+        write_lines(
+            &proj_root,
+            "cleared.jsonl",
+            &[
+                prompt,
+                r#"{"type":"custom-title","customTitle":"我起的名","sessionId":"c"}"#,
+                r#"{"type":"ai-title","aiTitle":"会话标题和状态逻辑","sessionId":"c"}"#,
+                r#"{"type":"custom-title","customTitle":"","sessionId":"c"}"#,
+            ],
+        );
+
+        let sessions = list_sessions("/x/y", config_dir.to_str());
+        std::fs::remove_dir_all(&tmp).unwrap();
+        let title_of = |stem: &str| {
+            sessions
+                .iter()
+                .find(|session| Path::new(&session.path).file_stem().unwrap() == stem)
+                .map(|session| (session.title.as_str(), session.agent_title.as_str()))
+                .unwrap()
+        };
+
+        assert_eq!(title_of("plain"), ("切换到main", "切换到main"));
+        assert_eq!(
+            title_of("generated"),
+            ("会话标题和状态逻辑", "会话标题和状态逻辑")
+        );
+        assert_eq!(title_of("renamed"), ("我起的名", "我起的名"));
+        assert_eq!(
+            title_of("cleared"),
+            ("会话标题和状态逻辑", "会话标题和状态逻辑"),
+            "名字清掉后回到生成标题"
+        );
     }
 
     #[test]

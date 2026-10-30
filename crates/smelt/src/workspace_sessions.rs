@@ -1045,21 +1045,24 @@ impl Workspace {
                             };
                             // 每次重连前退避（250ms 起、翻倍到 8s 上限）并等运行时在线：短故障
                             // （升级 exec 一两秒）很快重连，运行时不在线就不发；预算在 AcpView
-                            // 内（6 次）防风暴。Connecting 时不重试也不花预算，等相位变了再看。
-                            let mut retries = 0u32;
+                            // 内（6 次）防风暴，退避档位也取它的已用次数——连上就被断时每次
+                            // 都会新起一条循环，档位记在循环里会永远停在第一档。Connecting 时
+                            // 不重试也不花预算，等相位变了再看。
                             loop {
-                                let dead = view
+                                let dead_failures = view
                                     .update_in(cx, |view, _window, _cx| {
                                         matches!(
                                             view.phase(),
                                             smelt_client::daemon_state::DaemonPhase::Dead
                                         )
+                                        .then(|| view.auto_reconnect_failures())
                                     })
-                                    .unwrap_or(false);
-                                if dead
+                                    .ok()
+                                    .flatten();
+                                if let Some(failures) = dead_failures
                                     && !crate::runtime_events::wait_online(
                                         &runtime_key,
-                                        retries.saturating_add(1),
+                                        failures.saturating_add(1),
                                         cx,
                                     )
                                     .await
@@ -1101,9 +1104,7 @@ impl Workspace {
                                         }
                                         break;
                                     }
-                                    Ok(AcpReconnectStep::Retrying) => {
-                                        retries = retries.saturating_add(1);
-                                    }
+                                    Ok(AcpReconnectStep::Retrying) => {}
                                     Ok(AcpReconnectStep::Waiting) => {
                                         if changed_rx.recv().await.is_err() {
                                             break;
@@ -1995,7 +1996,7 @@ impl Workspace {
         );
     }
 
-    /// 从 Finder 拖入的路径 = 打开项目：文件夹直接用，文件取其父目录，各加一条项目。
+    /// 拖进侧栏、或拖到程序图标上的路径 = 打开项目：文件夹直接用，文件取其父目录，各加一条项目。
     /// **不自动建会话**——跟「+ 打开项目」同一套语义，开终端还是开对话由项目行的
     /// 「+」决定（两条路结果不一致的话，"打开项目"到底会发生什么就说不清了）。
     ///
@@ -2581,7 +2582,7 @@ impl Workspace {
                 crate::runtimes::runtime_name(&crate::RuntimeKey::Remote(runtime_id.clone()), cx)
             }
         };
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current.clone()));
         // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
         self.begin_main_modal_focus(window, cx);
         // 名字整段选中：直接打字就是换掉，按方向键才是在原名上改。
@@ -2603,10 +2604,11 @@ impl Workspace {
         ));
         self.rename_target = Some(target);
         self.rename_input = Some(input);
+        self.rename_initial = Some(current);
         cx.notify();
     }
 
-    /// 提交重命名：空输入等于清掉自定义名，回退到自动推导的标题。
+    /// 提交重命名：空输入等于清掉自定义名，回退到自动推导的标题；和打开时一样等于没改。
     pub(crate) fn confirm_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.rename_target.take() else {
             return;
@@ -2614,9 +2616,12 @@ impl Workspace {
         let Some(input) = self.rename_input.take() else {
             return;
         };
+        let initial = self.rename_initial.take().unwrap_or_default();
         self._rename_sub = None;
-        let text = input.read(cx).value().trim().to_string();
-        let custom_title = (!text.is_empty()).then_some(text);
+        let Some(custom_title) = submitted_title(&initial, &input.read(cx).value()) else {
+            cx.notify();
+            return;
+        };
         match target {
             RenameTarget::Session(ix) => {
                 let Some(session) = self.sessions.get(ix) else {
@@ -2792,6 +2797,7 @@ impl Workspace {
     pub(crate) fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         self.rename_target = None;
         self.rename_input = None;
+        self.rename_initial = None;
         self._rename_sub = None;
         cx.notify();
     }
@@ -2905,4 +2911,37 @@ pub(crate) fn panel_send_target(
 /// 关它是用户看过之后的决定，不再多问一次。
 pub(crate) fn closing_needs_confirm(status: AgentStatus) -> bool {
     status == AgentStatus::Running
+}
+
+/// 改名框提交的内容要写成什么名字：`None` 是没改，什么都不写；`Some(None)` 是清掉。
+///
+/// 预填的多半是自动标题（agent 报的、目录名）。原样提交（行内改名点别处就会提交）若也
+/// 写进去，就把自动标题钉成了用户起的名字，之后不再跟着 agent 变。
+fn submitted_title(initial: &str, text: &str) -> Option<Option<String>> {
+    let text = text.trim();
+    if text == initial.trim() {
+        return None;
+    }
+    Some((!text.is_empty()).then(|| text.to_string()))
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::submitted_title;
+
+    #[test]
+    fn submitting_the_prefilled_name_changes_nothing() {
+        assert_eq!(submitted_title("smelt", "smelt"), None);
+        assert_eq!(submitted_title("smelt", "  smelt "), None);
+        assert_eq!(submitted_title("", "  "), None);
+    }
+
+    #[test]
+    fn a_new_name_is_written_and_an_empty_one_clears() {
+        assert_eq!(
+            submitted_title("smelt", " 修 CI "),
+            Some(Some("修 CI".into()))
+        );
+        assert_eq!(submitted_title("smelt", "  "), Some(None));
+    }
 }

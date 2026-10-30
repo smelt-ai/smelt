@@ -12,6 +12,8 @@ workspace = true
 # 依赖不对会在那里失败。
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
+# 版本协商（compat）对照事件总线和核心投影的版本号。
+smelt-event-protocol = { path = "../smelt-event-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }

@@ -2,7 +2,6 @@
 //! 只走协议，不碰运行时的库。
 
 pub mod acp_client;
-pub mod compat;
 pub mod daemon_state;
 pub mod daemon_stop;
 pub mod runtime;
