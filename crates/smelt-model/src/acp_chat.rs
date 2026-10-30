@@ -637,9 +637,12 @@ pub struct DiffLine {
     pub text: String,
 }
 
-/// 把新旧文本切成逐行 diff。
+/// 把新旧文本切成逐行 diff。整份重写的大文件逐行对齐可能算很久：超过 0.2 秒就收手，
+/// similar 给出一份对齐没那么细、但增删仍然完整的结果。
 pub fn diff_lines(old: &str, new: &str) -> Vec<DiffLine> {
-    let diff = similar::TextDiff::from_lines(old, new);
+    let diff = similar::TextDiff::configure()
+        .timeout(std::time::Duration::from_millis(200))
+        .diff_lines(old, new);
     diff.iter_all_changes()
         .map(|change| {
             let tag = match change.tag() {

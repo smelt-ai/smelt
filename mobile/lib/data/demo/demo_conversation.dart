@@ -397,8 +397,8 @@ ConversationView _fleet(DateTime now) => _view(
       ToolKind.read,
       ToolStatus.completed,
       [
+        // 演示数据不经过内核投影：围栏在内核里去，这里直接写去掉之后的样子。
         _text(
-          '```rust\n'
           'pub struct ConnectionHub {\n'
           '    state: Mutex<HubState>,\n'
           '    source: Arc<dyn RuntimeSource>,\n'
@@ -408,8 +408,7 @@ ConversationView _fleet(DateTime now) => _view(
           '    pub fn current(&self) -> Option<Arc<Session>> {\n'
           '        self.state.lock().session.clone()\n'
           '    }\n'
-          '}\n'
-          '```',
+          '}\n',
         ),
       ],
     ),

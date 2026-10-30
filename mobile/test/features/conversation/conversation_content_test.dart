@@ -240,13 +240,12 @@ void main() {
 
     testWidgets('长输出先收起，点了显示全部', (tester) async {
       final text = List.generate(20, (i) => 'line $i').join('\n');
-      await tester.pumpWidget(_host(FoldedText(text: '```\n$text\n```')));
+      await tester.pumpWidget(_host(FoldedText(text: text)));
       expect(find.textContaining('line 7'), findsOneWidget);
       expect(find.textContaining('line 12'), findsNothing);
       await tester.tap(find.text('Show all 20 lines'));
       await tester.pumpAndSettle();
       expect(find.textContaining('line 19'), findsOneWidget);
-      expect(find.textContaining('```'), findsNothing, reason: '代码围栏去掉');
     });
 
     testWidgets('没有输出的工具调用不可展开', (tester) async {
