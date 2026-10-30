@@ -178,6 +178,14 @@ chmod +x "$MACOS/smelt-notify"
 # 绝不能从即将被交换的 Bundle 内直接运行。
 cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
 chmod +x "$MACOS/smelt-installer"
+# 剥掉符号表再签名（必须在 codesign 之前，否则改了 Mach-O 签名就失效）。
+# 只剥 App 里这份：target/release 下的原件保留符号，本地调试不受影响。
+# 体积：Contents/MacOS 四个二进制合计 221MB → 181MB，dmg 少约 8MB。
+# 代价：用户发来的 macOS 崩溃报告里 Rust 帧会变成 `smelt + 0x…`，要还原得配 dSYM。
+for exe in "$EXEC_NAME" smeltd smelt-notify smelt-installer; do
+  echo "  … strip：$exe"
+  strip "$MACOS/$exe"
+done
 # smelt-pi 连同 wasm、native/ 整套放 Resources：Contents/MacOS 里每个文件都必须是签过的
 # 代码，wasm 签不了。App 只是载体，安装和 GUI 启动时把这一套发布到 ~/.smelt/bin，
 # 守护从那里起 Pi。
