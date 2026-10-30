@@ -9,6 +9,182 @@ class L10nZh extends L10n {
   L10nZh([String locale = 'zh']) : super(locale);
 
   @override
+  String get agentEditNewTitle => '新建智能体';
+
+  @override
+  String get agentEditTitle => '编辑智能体';
+
+  @override
+  String get agentEditWhichMachine => '建在哪台机器上？';
+
+  @override
+  String get agentEditName => '名字';
+
+  @override
+  String get agentEditNameHint => '比如：调研助手';
+
+  @override
+  String get agentEditPromptHint => '它每次做事都要遵守的工作方式';
+
+  @override
+  String get agentEditModel => '模型';
+
+  @override
+  String get agentEditModelDefault => '跟随这台机器的默认模型';
+
+  @override
+  String agentEditModelMissing(String label) {
+    return '$label（这台机器上已经没有）';
+  }
+
+  @override
+  String get agentEditPluginsNone => '这台机器上没有插件。';
+
+  @override
+  String get agentEditMissing => '这台机器上已经没有了';
+
+  @override
+  String get agentEditMcp => 'MCP';
+
+  @override
+  String get agentEditMcpNone => '这台机器上没有 MCP 服务器。';
+
+  @override
+  String get agentEditMcpDisabled => '能力库里已停用';
+
+  @override
+  String agentEditChoicesFailed(String message) {
+    return '这台机器的能力库没读到，模型、插件、MCP 可能列不全：$message';
+  }
+
+  @override
+  String get agentEditFolders => '参考目录';
+
+  @override
+  String get agentEditAddFolder => '添加目录';
+
+  @override
+  String agentEditFolderAdd(String name) {
+    return '添加「$name」';
+  }
+
+  @override
+  String get agentEditLinks => '参考链接';
+
+  @override
+  String get agentEditAddLink => '添加链接';
+
+  @override
+  String get agentEditRemove => '移除';
+
+  @override
+  String get agentEditMemory => '记忆';
+
+  @override
+  String get agentEditMemoryHint => '关掉后不用也不写记忆，已有的留着。';
+
+  @override
+  String get agentEditSaving => '正在保存…';
+
+  @override
+  String agentEditSaveFailed(String message) {
+    return '没能保存：$message';
+  }
+
+  @override
+  String get agentEditLoadFailed => '编辑页没打开';
+
+  @override
+  String get agentEditDiscardTitle => '放弃修改？';
+
+  @override
+  String get agentEditDiscardBody => '改动还没保存。';
+
+  @override
+  String get agentEditDiscard => '放弃';
+
+  @override
+  String get agentEditDelete => '删除智能体';
+
+  @override
+  String agentEditDeleteTitle(String name) {
+    return '删除「$name」？';
+  }
+
+  @override
+  String agentEditDeleteBody(String machine) {
+    return '会从 $machine 上删掉它和它自己的记忆，删了就找不回来。';
+  }
+
+  @override
+  String agentEditDeleteFailed(String message) {
+    return '没能删除：$message';
+  }
+
+  @override
+  String memoryTitle(String name) {
+    return '$name · 记忆';
+  }
+
+  @override
+  String get memoryLayerAgent => '这个智能体的';
+
+  @override
+  String get memoryLayerUser => '所有智能体共用';
+
+  @override
+  String get memoryEmpty => '还没有记下什么。';
+
+  @override
+  String memoryPending(String reason) {
+    return '待确认 · $reason';
+  }
+
+  @override
+  String get memoryRule => '规则';
+
+  @override
+  String get memoryFact => '事实';
+
+  @override
+  String get memoryStale => '很久没用过';
+
+  @override
+  String memoryUsed(String ago) {
+    return '$ago用过';
+  }
+
+  @override
+  String get memoryOverBudget => '规则超出常驻预算，每次只会带上一部分。';
+
+  @override
+  String get memoryApprove => '采纳';
+
+  @override
+  String memoryDeleteTitle(String name) {
+    return '删除「$name」？';
+  }
+
+  @override
+  String get memoryDeleteAgentBody => '删了就找不回来。';
+
+  @override
+  String get memoryDeleteUserBody => '这是共用的记忆，删了这台机器上所有智能体都不再有它，也找不回来。';
+
+  @override
+  String memoryActionFailed(String message) {
+    return '没能完成：$message';
+  }
+
+  @override
+  String get memoryLoadFailed => '记忆没取到';
+
+  @override
+  String memoryLoadFailedInline(String message) {
+    return '没能刷新：$message';
+  }
+
+  @override
   String get agentsTitle => '智能体';
 
   @override
@@ -32,13 +208,13 @@ class L10nZh extends L10n {
   }
 
   @override
-  String get agentsEmptyAgents => '这台机器上还没有智能体，可以在桌面端 Smelt 里创建。';
+  String get agentsEmptyAgents => '这台机器上还没有智能体。';
 
   @override
   String get agentsEmptyAutomations => '这台机器上还没有自动化，可以在桌面端 Smelt 里创建。';
 
   @override
-  String get agentsReadOnly => '智能体和自动化在桌面端 Smelt 里编辑。';
+  String get agentsReadOnly => '自动化在电脑上的 Smelt 里编辑。';
 
   @override
   String agentsGone(String machine) {
@@ -66,6 +242,31 @@ class L10nZh extends L10n {
 
   @override
   String get agentsContext => '上下文';
+
+  @override
+  String get agentsEdit => '编辑';
+
+  @override
+  String get agentsMemories => '记忆';
+
+  @override
+  String get agentsMemoryOff => '记忆已关闭';
+
+  @override
+  String agentsMemoryPending(int n) {
+    return '$n 条待确认';
+  }
+
+  @override
+  String agentsMemoryCount(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n 条',
+      zero: '还没有',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get agentsStartConversation => '开始对话';
@@ -311,6 +512,9 @@ class L10nZh extends L10n {
 
   @override
   String get commonSave => '保存';
+
+  @override
+  String get commonAdd => '添加';
 
   @override
   String get commonRetry => '重试';

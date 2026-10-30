@@ -57,6 +57,7 @@ use crate::api::fleet::ConnectionState;
 use crate::cache::{Cache, Cached};
 use crate::connection::{ConnectionEvent, CurrentRuntime, Listener};
 use projection::CatalogState;
+pub(crate) use projection::agent_definition as agent_summary;
 
 /// 这台机器的连接、连接状态与离线缓存从哪来。生产用节点的 `NodeSource`（见
 /// `crate::fleet`），测试注入假的。
@@ -1084,7 +1085,7 @@ fn not_synced() -> SmeltError {
 }
 
 /// Control 调用失败归类。
-fn control_error(call_error: ControlClientError) -> SmeltError {
+pub(crate) fn control_error(call_error: ControlClientError) -> SmeltError {
     match call_error {
         ControlClientError::Transport(message) => {
             error(SmeltErrorKind::Offline, format!("连不上运行时：{message}"))

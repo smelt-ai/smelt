@@ -14,6 +14,7 @@ import '../../ui/page.dart';
 import '../../ui/shelf.dart';
 import '../../ui/station.dart';
 import '../session/open_session.dart';
+import '../dirs/dir_browser.dart';
 import 'launch_flow.dart';
 
 /// 新建会话：底部弹层，分步选 机器 → 项目 → 启动方式。选项目时可以在那台机器上逐级
@@ -75,12 +76,8 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
   String? _workspaceError;
   int _workspaceGeneration = 0;
 
-  /// 选目录：当前列出的一层，和一路点进来的目录（返回时一层层退回去）。
-  DirListing? _listing;
-  final List<String> _trail = [];
-  bool _listingBusy = false;
-  String? _listingError;
-  int _listingGeneration = 0;
+  /// 选目录：浏览那台机器上的目录，选好了打开为项目。
+  DirBrowser? _browser;
   bool _openingProject = false;
   String? _openError;
 
@@ -102,6 +99,12 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
       _machineSkipped = true;
       _chooseMachine(online.single.id, animate: false);
     }
+  }
+
+  @override
+  void dispose() {
+    _browser?.dispose();
+    super.dispose();
   }
 
   // 步骤 ---------------------------------------------------------------------
@@ -148,58 +151,20 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
   // 选目录 -------------------------------------------------------------------
 
   void _startBrowse() {
-    setState(() {
-      _step = _Step.browse;
-      _listing = null;
-      _trail.clear();
-      _listingError = null;
-      _openError = null;
-    });
-    unawaited(_browse(null));
-  }
-
-  /// 列 [path]（为空时由内核挑起点）。来路只在列成功之后改：[remember] 把当前目录记进
-  /// 来路，返回能退回来；[backward] 是退回来路的最后一层，到了才把它摘掉。
-  Future<void> _browse(
-    String? path, {
-    bool remember = false,
-    bool backward = false,
-  }) async {
     final runtimeId = _runtimeId;
     if (runtimeId == null) return;
-    final generation = ++_listingGeneration;
-    final from = _listing?.path;
+    _browser?.dispose();
+    final browser = _browser = DirBrowser(widget.model.backend, runtimeId);
     setState(() {
-      _listingBusy = true;
+      _step = _Step.browse;
       _openError = null;
     });
-    try {
-      final listing = await widget.model.backend.browseDirs(
-        runtimeId,
-        path: path,
-      );
-      if (!mounted || generation != _listingGeneration) return;
-      setState(() {
-        if (remember && from != null) _trail.add(from);
-        if (backward && _trail.isNotEmpty) _trail.removeLast();
-        _listing = listing;
-        _listingBusy = false;
-        _listingError = null;
-      });
-    } catch (error) {
-      if (!mounted || generation != _listingGeneration) return;
-      // 进不去的目录：留在原地，把原因写出来。
-      setState(() {
-        _listingBusy = false;
-        _listingError = describeError(error);
-      });
-    }
+    unawaited(browser.start());
   }
 
-  Future<void> _openListed() async {
-    final listing = _listing;
+  Future<void> _openListed(DirListing listing) async {
     final runtimeId = _runtimeId;
-    if (listing == null || runtimeId == null || _openingProject) return;
+    if (runtimeId == null || _openingProject) return;
     final l10n = L10n.of(context);
     setState(() {
       _openingProject = true;
@@ -246,8 +211,8 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
 
   void _back() {
     if (!_canGoBack) return;
-    if (_step == _Step.browse && _trail.isNotEmpty) {
-      unawaited(_browse(_trail.last, backward: true));
+    if (_step == _Step.browse && (_browser?.back() ?? false)) {
+      setState(() => _openError = null);
       return;
     }
     setState(() {
@@ -408,7 +373,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
                 style: GalleyText.of(context).note.copyWith(color: c.inkMuted),
               ),
             ),
-          _RowList(
+          HairlineRows(
             children: [
               for (final runtime in runtimes)
                 _MachineRow(
@@ -460,7 +425,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
     final c = GalleyColors.of(context);
     return _scroll([
       ShelfHeader(title: l10n.launchStepProject, first: true),
-      _RowList(
+      HairlineRows(
         children: [
           // 不选项目（跟智能体对话）放最前：它不属于下面任何一个项目。
           if (agents.isNotEmpty)
@@ -505,140 +470,18 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
 
   Widget _browseStep(BuildContext context) {
     final l10n = L10n.of(context);
-    final c = GalleyColors.of(context);
-    final t = GalleyText.of(context);
-    final listing = _listing;
-    if (listing == null) {
-      final error = _listingError;
-      if (error == null || _listingBusy) return const _Busy();
-      return _scroll([
-        EmptyNote(
-          icon: LucideIcons.folderX,
-          title: l10n.launchFolderLoadFailed,
-          body: error,
-          action: GalleyButton.solid(
-            label: l10n.commonRetry,
-            onPressed: () => _browse(null),
-          ),
-        ),
-      ]);
-    }
-    final busy = _listingBusy || _openingProject;
-    void go(String path) => _browse(path, remember: true);
-    final parent = listing.parent;
-    final error = _openError ?? _listingError;
-    final folder = Icon(
-      LucideIcons.folder,
-      size: Strokes.icon,
-      color: c.inkMuted,
-    );
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        ShelfHeader(
-          title: l10n.launchStepFolder,
-          first: true,
-          trailing: _listingBusy
-              ? const SizedBox.square(
-                  dimension: Strokes.iconSmall,
-                  child: CircularProgressIndicator.adaptive(strokeWidth: 2),
-                )
-              : null,
-        ),
-        _ShortcutBar(
-          shortcuts: listing.shortcuts,
-          current: listing.path,
-          onTap: busy ? null : go,
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Space.page + Space.xs,
-            Space.sm,
-            Space.page + Space.xs,
-            Space.sm,
-          ),
-          child: Text(
-            listing.displayPath,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: t.code.copyWith(color: c.inkMuted),
-          ),
-        ),
-        if (error != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Space.page + Space.xs,
-              0,
-              Space.page + Space.xs,
-              Space.sm,
-            ),
-            child: Semantics(
-              liveRegion: true,
-              child: Text(error, style: t.note.copyWith(color: c.danger)),
-            ),
-          ),
-        Flexible(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              _RowList(
-                children: [
-                  if (parent != null)
-                    ShelfRow(
-                      leading: Icon(
-                        LucideIcons.cornerLeftUp,
-                        size: Strokes.icon,
-                        color: c.inkMuted,
-                      ),
-                      title: Text(l10n.launchFolderUp),
-                      onTap: busy ? null : () => go(parent),
-                    ),
-                  for (final entry in listing.entries)
-                    ShelfRow(
-                      leading: folder,
-                      title: Text(entry.name),
-                      subtitle: entry.opened
-                          ? Text(l10n.launchFolderOpened)
-                          : null,
-                      trailing: _chevron(c),
-                      onTap: busy ? null : () => go(entry.path),
-                    ),
-                ],
-              ),
-              if (listing.entries.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Space.page + Space.xs,
-                    vertical: Space.lg,
-                  ),
-                  child: Text(
-                    l10n.launchFolderEmpty,
-                    style: t.note.copyWith(color: c.inkMuted),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        Padding(
-          padding: EdgeInsets.fromLTRB(
-            Space.page,
-            Space.md,
-            Space.page,
-            MediaQuery.paddingOf(context).bottom + Space.lg,
-          ),
-          // 打开的是当前这一层：点行是进去，不是选中。
-          child: GalleyButton.solid(
-            expand: true,
-            label: _openingProject
-                ? l10n.launchFolderOpening
-                : listing.opened
-                ? l10n.launchFolderUse(listing.name)
-                : l10n.launchFolderOpen(listing.name),
-            onPressed: busy ? null : _openListed,
-          ),
-        ),
-      ],
+    final browser = _browser;
+    if (browser == null) return const SizedBox.shrink();
+    return DirBrowserView(
+      browser: browser,
+      actionLabel: (listing) => _openingProject
+          ? l10n.launchFolderOpening
+          : listing.opened
+          ? l10n.launchFolderUse(listing.name)
+          : l10n.launchFolderOpen(listing.name),
+      onAction: _openListed,
+      actionBusy: _openingProject,
+      actionError: _openError,
     );
   }
 
@@ -662,7 +505,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
       children
         ..add(ShelfHeader(title: title, first: children.isEmpty))
         ..add(
-          _RowList(
+          HairlineRows(
             children: [
               for (final action in actions)
                 ShelfRow(
@@ -685,7 +528,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
           ShelfHeader(title: l10n.launchSectionAgents, first: children.isEmpty),
         )
         ..add(
-          _RowList(
+          HairlineRows(
             children: [
               for (final agent in agents)
                 ShelfRow(
@@ -867,76 +710,6 @@ class _MachineRow extends StatelessWidget {
             )
           : null,
       onTap: onTap,
-    );
-  }
-}
-
-/// 选目录时的快捷位置：主目录、已打开项目所在的目录。横向一排，所在的那个高亮。
-class _ShortcutBar extends StatelessWidget {
-  const _ShortcutBar({
-    required this.shortcuts,
-    required this.current,
-    required this.onTap,
-  });
-
-  final List<DirShortcut> shortcuts;
-  final String current;
-  final ValueChanged<String>? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = GalleyColors.of(context);
-    final t = GalleyText.of(context);
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: Space.page),
-      child: Row(
-        children: [
-          for (final shortcut in shortcuts)
-            Padding(
-              padding: const EdgeInsetsDirectional.only(end: Space.sm),
-              child: ChoiceChip(
-                label: Text(shortcut.label),
-                selected: shortcut.path == current,
-                // 所在的那个不置灰，点了也不动。
-                onSelected: onTap == null
-                    ? null
-                    : (_) {
-                        if (shortcut.path != current) onTap!(shortcut.path);
-                      },
-                // 选中底是实心墨，字要跟着反白（主题的 labelStyle 只管未选中）。
-                labelStyle: t.label.copyWith(
-                  color: shortcut.path == current ? c.onSolid : c.ink,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 弹层里的一列行：行间发丝线，不再垫一层搁板底（弹层本身就是那块板）。
-class _RowList extends StatelessWidget {
-  const _RowList({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = GalleyColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final (index, child) in children.indexed) ...[
-          if (index > 0)
-            Padding(
-              padding: const EdgeInsetsDirectional.only(start: Space.lg),
-              child: Divider(height: Strokes.hairline, color: c.hairline),
-            ),
-          child,
-        ],
-      ],
     );
   }
 }

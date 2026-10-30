@@ -12,6 +12,7 @@ import '../src/rust/api/fleet.dart';
 import '../ui/agent_glyph.dart';
 import '../ui/status.dart';
 
+export '../src/rust/api/agents.dart';
 export '../src/rust/api/catalog.dart';
 export '../src/rust/api/conversation.dart';
 export '../src/rust/api/draft.dart';

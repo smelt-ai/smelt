@@ -2,10 +2,12 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../data/models.dart';
 import '../../l10n/gen/l10n.dart';
 import '../../theme/galley.dart';
+import '../../ui/shelf.dart';
 import '../../ui/station.dart';
 import 'agents_board.dart';
 
@@ -212,6 +214,186 @@ Future<void> runAutomationNow(
           l10n.agentsRunNowFailed(automation.name, describeError(error)),
         ),
       ),
+    );
+  }
+}
+
+/// 智能体用的模型给人看的名字。[groups] 是这台机器能力库里的可选模型，还没取到时为 null，
+/// 先显示原值；取到了却找不到，说明这台机器上已经没有它了。
+String agentModelLabel(
+  L10n l10n,
+  List<ModelGroup>? groups,
+  String provider,
+  String id,
+) {
+  if (provider.isEmpty || id.isEmpty) return l10n.agentEditModelDefault;
+  if (groups == null) return '$provider / $id';
+  for (final group in groups) {
+    for (final option in group.models) {
+      if (option.provider == provider && option.id == id) return option.label;
+    }
+  }
+  return l10n.agentEditModelMissing('$provider / $id');
+}
+
+IconData pluginIcon(PluginKind kind) => switch (kind) {
+  PluginKind.skill => LucideIcons.sparkles,
+  PluginKind.extension_ => LucideIcons.puzzle,
+};
+
+/// 插件、MCP 的一行要显示什么。编辑页和详情页都按它画，规则只在这一处。
+@immutable
+class ChoiceItem {
+  const ChoiceItem({
+    required this.key,
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    this.danger = false,
+    this.canSelect = true,
+  });
+
+  /// 插件 id / MCP 服务器名，也是勾选时存的值。
+  final String key;
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final bool danger;
+
+  /// 坏了的插件不能新勾（已经勾着的照样能取消）。
+  final bool canSelect;
+}
+
+/// [options] 为 null 是没读到能力库：选了的照原值列出，不能标成「已经没有了」。
+/// [includeUnchosen] 为真时列出全部可选项（编辑页），否则只列选了的（详情页，按选的顺序）。
+List<ChoiceItem> _choiceItems<T>({
+  required L10n l10n,
+  required List<T>? options,
+  required List<String> chosen,
+  required bool includeUnchosen,
+  required String Function(T) keyOf,
+  required ChoiceItem Function(T) itemOf,
+  required IconData unreadIcon,
+}) {
+  if (options == null) {
+    return [
+      for (final key in chosen)
+        ChoiceItem(key: key, icon: unreadIcon, title: key),
+    ];
+  }
+  final byKey = {for (final option in options) keyOf(option): option};
+  ChoiceItem gone(String key) => ChoiceItem(
+    key: key,
+    icon: LucideIcons.circleSlash,
+    title: key,
+    subtitle: l10n.agentEditMissing,
+    danger: true,
+  );
+  if (!includeUnchosen) {
+    return [
+      for (final key in chosen)
+        if (byKey[key] case final option?) itemOf(option) else gone(key),
+    ];
+  }
+  return [
+    for (final option in options) itemOf(option),
+    // 勾着、但这台机器上已经没有的：列出来能取消，不悄悄丢掉。
+    for (final key in chosen)
+      if (!byKey.containsKey(key)) gone(key),
+  ];
+}
+
+String? _nonEmpty(String? text) {
+  final trimmed = text?.trim() ?? '';
+  return trimmed.isEmpty ? null : trimmed;
+}
+
+List<ChoiceItem> pluginChoiceItems(
+  L10n l10n,
+  List<PluginOption>? options,
+  List<String> chosen, {
+  required bool includeUnchosen,
+}) => _choiceItems(
+  l10n: l10n,
+  options: options,
+  chosen: chosen,
+  includeUnchosen: includeUnchosen,
+  keyOf: (plugin) => plugin.id,
+  unreadIcon: LucideIcons.plug,
+  itemOf: (plugin) => ChoiceItem(
+    key: plugin.id,
+    icon: pluginIcon(plugin.kind),
+    title: plugin.name,
+    subtitle: plugin.broken ?? _nonEmpty(plugin.description),
+    danger: plugin.broken != null,
+    canSelect: plugin.broken == null,
+  ),
+);
+
+List<ChoiceItem> mcpChoiceItems(
+  L10n l10n,
+  List<McpOption>? options,
+  List<String> chosen, {
+  required bool includeUnchosen,
+}) => _choiceItems(
+  l10n: l10n,
+  options: options,
+  chosen: chosen,
+  includeUnchosen: includeUnchosen,
+  keyOf: (server) => server.name,
+  unreadIcon: LucideIcons.server,
+  itemOf: (server) => ChoiceItem(
+    key: server.name,
+    icon: LucideIcons.server,
+    title: server.name,
+    subtitle: server.enabled
+        ? _nonEmpty(server.description)
+        : l10n.agentEditMcpDisabled,
+  ),
+);
+
+/// 插件、MCP 的一行。给了 [onChanged] 就是能勾的（编辑页），否则只看（详情页）。
+class ChoiceRow extends StatelessWidget {
+  const ChoiceRow({
+    super.key,
+    required this.item,
+    this.checked = false,
+    this.onChanged,
+    this.selectable = false,
+  });
+
+  final ChoiceItem item;
+  final bool checked;
+  final ValueChanged<bool>? onChanged;
+
+  /// 画勾选框（编辑页）。为假时只看。
+  final bool selectable;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    final t = GalleyText.of(context);
+    final sub = item.subtitle;
+    return ShelfRow(
+      leading: Icon(item.icon, size: Strokes.icon, color: c.inkMuted),
+      title: Text(item.title),
+      subtitle: sub == null
+          ? null
+          : Text(
+              sub,
+              maxLines: 2,
+              style: item.danger ? t.meta.copyWith(color: c.danger) : null,
+            ),
+      semanticLabel: item.title,
+      trailing: selectable
+          ? Checkbox(
+              value: checked,
+              onChanged: onChanged == null
+                  ? null
+                  : (v) => onChanged!(v ?? false),
+            )
+          : null,
+      onTap: onChanged == null ? null : () => onChanged!(!checked),
     );
   }
 }

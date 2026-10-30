@@ -406,7 +406,7 @@ pub struct AutomationSummary {
     pub last_run: Option<AutomationRunSummary>,
 }
 
-/// 智能体定义的只读投影。
+/// 智能体定义。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentDefinitionSummary {
     pub id: String,
@@ -417,8 +417,13 @@ pub struct AgentDefinitionSummary {
     /// 长期工作方式。
     pub prompt: String,
     pub plugins: Vec<String>,
+    pub mcp_servers: Vec<String>,
     pub context_folders: Vec<String>,
     pub context_links: Vec<String>,
+    /// 和 `model_id` 成对；都空 = 跟随这台机器的默认模型。
+    pub model_provider: String,
+    pub model_id: String,
+    pub memory_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

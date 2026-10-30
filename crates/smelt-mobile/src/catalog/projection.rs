@@ -811,8 +811,12 @@ pub(crate) fn agent_definition(definition: &AgentDefinition) -> view::AgentDefin
         engine_kind_id: definition.engine_kind_id.clone(),
         prompt: definition.prompt.clone(),
         plugins: definition.plugins.clone(),
+        mcp_servers: definition.mcp_servers.clone(),
         context_folders: definition.context_folders.clone(),
         context_links: definition.context_links.clone(),
+        model_provider: definition.model_provider.clone(),
+        model_id: definition.model_id.clone(),
+        memory_enabled: definition.memory_enabled,
     }
 }
 

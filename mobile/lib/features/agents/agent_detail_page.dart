@@ -14,11 +14,14 @@ import '../../ui/buttons.dart';
 import '../../ui/page.dart';
 import '../../ui/shelf.dart';
 import '../session/open_session.dart';
+import 'agent_edit_page.dart';
+import 'agent_memory_page.dart';
 import 'agents_board.dart';
 import 'agents_widgets.dart';
 
-/// 智能体定义的只读页：回答「它为什么这么干」——长期指令、插件、绑定的上下文；
-/// 底部「开始对话」在这台机器上开一场不绑项目的对话（落在智能体自己的 space）。
+/// 智能体详情：回答「它为什么这么干」——长期指令、模型、插件、MCP、绑定的上下文，和它记下
+/// 的东西；右上角编辑，底部「开始对话」在这台机器上开一场不绑项目的对话（落在智能体自己的
+/// space）。
 ///
 /// 长期指令全文展示不截断：排查时被截掉的那半句往往就是原因所在。
 class AgentDetailPage extends StatefulWidget {
@@ -42,6 +45,83 @@ const _sessionAppearTimeout = Duration(seconds: 15);
 
 class _AgentDetailPageState extends State<AgentDetailPage> {
   bool _starting = false;
+
+  /// 记忆没有推送：进页面取一次，从记忆页、编辑页回来再取。null = 还没取到或取不到。
+  AgentMemories? _memories;
+  bool _memoriesFailed = false;
+
+  /// 这台机器能力库里的模型、插件、MCP，用来把定义里的 id 显示成和编辑页一样的名字。
+  /// 进页面、编辑回来时取；取到之前（或取不到）显示 id 原文。
+  AgentChoices? _choices;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadMemories());
+    unawaited(_loadChoices());
+  }
+
+  Future<void> _loadChoices() async {
+    try {
+      final choices = await AppScope.of(
+        context,
+      ).backend.agentChoices(widget.runtimeId);
+      if (mounted) setState(() => _choices = choices);
+    } catch (_) {
+      // 取不到就显示 id 原文，不挡详情本身。
+    }
+  }
+
+  Future<void> _loadMemories() async {
+    try {
+      final memories = await AppScope.of(
+        context,
+      ).backend.agentMemories(widget.runtimeId, widget.agentId);
+      if (mounted) {
+        setState(() {
+          _memories = memories;
+          _memoriesFailed = false;
+        });
+      }
+    } catch (_) {
+      // 只说没取到；原因和重试在记忆页里（进去会再取一次）。
+      if (mounted) setState(() => _memoriesFailed = true);
+    }
+  }
+
+  Future<void> _edit() async {
+    final navigator = Navigator.of(context);
+    final result = await navigator.push<AgentEditResult>(
+      MaterialPageRoute(
+        builder: (_) => AgentEditPage(
+          board: widget.board,
+          runtimeId: widget.runtimeId,
+          agentId: widget.agentId,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (result == AgentEditResult.deleted) {
+      navigator.pop();
+      return;
+    }
+    unawaited(_loadMemories());
+    unawaited(_loadChoices());
+  }
+
+  Future<void> _openMemories(AgentDefinitionSummary agent) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => AgentMemoryPage(
+          runtimeId: widget.runtimeId,
+          agentId: agent.id,
+          agentName: agent.name,
+          initial: _memories,
+        ),
+      ),
+    );
+    if (mounted) unawaited(_loadMemories());
+  }
 
   /// 这次「开始对话」意图的请求 id。失败重试沿用同一个，运行时据此落到同一个会话，
   /// 不会因为第一次其实已经建好而多开一场。成功后清掉，下一次是新意图。
@@ -114,8 +194,23 @@ class _AgentDetailPageState extends State<AgentDetailPage> {
           appBar: AppBar(
             backgroundColor: c.ground,
             title: DetailTitle(title: agent.name, runtime: runtime),
+            actions: [
+              IconButton(
+                tooltip: l10n.agentsEdit,
+                icon: const Icon(LucideIcons.pencil),
+                onPressed: online ? _edit : null,
+              ),
+            ],
           ),
-          body: _AgentBody(agent: agent, runtime: runtime, online: online),
+          body: _AgentBody(
+            agent: agent,
+            runtime: runtime,
+            online: online,
+            memories: _memories,
+            memoriesFailed: _memoriesFailed,
+            choices: _choices,
+            onMemories: online ? () => _openMemories(agent) : null,
+          ),
           bottomNavigationBar: switch ((options, optionId)) {
             (_, final id?) => BottomActionBar(
               child: GalleyButton.solid(
@@ -149,11 +244,19 @@ class _AgentBody extends StatelessWidget {
     required this.agent,
     required this.runtime,
     required this.online,
+    required this.memories,
+    required this.memoriesFailed,
+    required this.choices,
+    required this.onMemories,
   });
 
   final AgentDefinitionSummary agent;
   final FleetRuntime? runtime;
   final bool online;
+  final AgentMemories? memories;
+  final bool memoriesFailed;
+  final AgentChoices? choices;
+  final VoidCallback? onMemories;
 
   @override
   Widget build(BuildContext context) {
@@ -224,12 +327,45 @@ class _AgentBody extends StatelessWidget {
             ),
           ],
         ),
+        ShelfHeader(title: l10n.agentEditModel),
+        Shelf(
+          children: [
+            _Line(
+              icon: LucideIcons.cpu,
+              text: agentModelLabel(
+                l10n,
+                choices?.models,
+                agent.modelProvider,
+                agent.modelId,
+              ),
+            ),
+          ],
+        ),
         if (agent.plugins.isNotEmpty) ...[
           ShelfHeader(title: l10n.agentsPlugins),
           Shelf(
             children: [
-              for (final plugin in agent.plugins)
-                _Line(icon: LucideIcons.plug, text: plugin),
+              for (final item in pluginChoiceItems(
+                l10n,
+                choices?.plugins,
+                agent.plugins,
+                includeUnchosen: false,
+              ))
+                ChoiceRow(item: item),
+            ],
+          ),
+        ],
+        if (agent.mcpServers.isNotEmpty) ...[
+          ShelfHeader(title: l10n.agentEditMcp),
+          Shelf(
+            children: [
+              for (final item in mcpChoiceItems(
+                l10n,
+                choices?.mcpServers,
+                agent.mcpServers,
+                includeUnchosen: false,
+              ))
+                ChoiceRow(item: item),
             ],
           ),
         ],
@@ -248,20 +384,42 @@ class _AgentBody extends StatelessWidget {
             ],
           ),
         ],
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Space.page + Space.xs,
-            Space.lg,
-            Space.page + Space.xs,
-            0,
-          ),
-          child: Text(
-            l10n.agentsReadOnly,
-            style: t.meta.copyWith(color: c.inkMuted),
-          ),
+        ShelfHeader(title: l10n.agentEditMemory),
+        Shelf(
+          children: [
+            ShelfRow(
+              leading: Icon(
+                LucideIcons.brain,
+                size: Strokes.icon,
+                color: c.inkMuted,
+              ),
+              title: Text(l10n.agentsMemories),
+              subtitle: Text(_memorySummary(l10n)),
+              trailing: Icon(
+                LucideIcons.chevronRight,
+                size: Strokes.iconSmall,
+                color: c.inkFaint,
+              ),
+              onTap: onMemories,
+            ),
+          ],
         ),
       ],
     );
+  }
+
+  String _memorySummary(L10n l10n) {
+    final m = memories;
+    final parts = [
+      if (!agent.memoryEnabled) l10n.agentsMemoryOff,
+      if (m != null && m.pending > 0) l10n.agentsMemoryPending(m.pending),
+      if (m != null && m.pending == 0)
+        l10n.agentsMemoryCount(m.agent.items.length + m.user.items.length),
+    ];
+    if (m == null) {
+      parts.add(memoriesFailed ? l10n.memoryLoadFailed : l10n.commonLoading);
+    }
+    return parts.join(' · ');
   }
 
   /// 只有 http(s) 链接能点开；别的（内部 id、相对路径）原样展示。

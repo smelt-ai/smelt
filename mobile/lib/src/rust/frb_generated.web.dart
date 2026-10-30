@@ -6,6 +6,7 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
+import 'api/agents.dart';
 import 'api/catalog.dart';
 import 'api/conversation.dart';
 import 'api/draft.dart';
@@ -57,7 +58,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AcpAgentOption dco_decode_acp_agent_option(dynamic raw);
 
   @protected
+  AgentChoices dco_decode_agent_choices(dynamic raw);
+
+  @protected
   AgentDefinitionSummary dco_decode_agent_definition_summary(dynamic raw);
+
+  @protected
+  AgentDraft dco_decode_agent_draft(dynamic raw);
+
+  @protected
+  AgentEditor dco_decode_agent_editor(dynamic raw);
+
+  @protected
+  AgentMemories dco_decode_agent_memories(dynamic raw);
 
   @protected
   ApprovalDetails dco_decode_approval_details(dynamic raw);
@@ -97,6 +110,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AgentDraft dco_decode_box_autoadd_agent_draft(dynamic raw);
 
   @protected
   AttentionItem dco_decode_box_autoadd_attention_item(dynamic raw);
@@ -344,6 +360,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<LaunchAction> dco_decode_list_launch_action(dynamic raw);
 
   @protected
+  List<McpOption> dco_decode_list_mcp_option(dynamic raw);
+
+  @protected
+  List<MemoryItem> dco_decode_list_memory_item(dynamic raw);
+
+  @protected
+  List<ModelGroup> dco_decode_list_model_group(dynamic raw);
+
+  @protected
+  List<ModelOption> dco_decode_list_model_option(dynamic raw);
+
+  @protected
   List<ModelProvider> dco_decode_list_model_provider(dynamic raw);
 
   @protected
@@ -360,6 +388,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<PlanStep> dco_decode_list_plan_step(dynamic raw);
+
+  @protected
+  List<PluginOption> dco_decode_list_plugin_option(dynamic raw);
 
   @protected
   Uint32List dco_decode_list_prim_u_32_strict(dynamic raw);
@@ -389,7 +420,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<WorkspaceProject> dco_decode_list_workspace_project(dynamic raw);
 
   @protected
+  McpOption dco_decode_mcp_option(dynamic raw);
+
+  @protected
+  MemoryItem dco_decode_memory_item(dynamic raw);
+
+  @protected
+  MemoryLayer dco_decode_memory_layer(dynamic raw);
+
+  @protected
+  MemoryShelf dco_decode_memory_shelf(dynamic raw);
+
+  @protected
   MessageDraft dco_decode_message_draft(dynamic raw);
+
+  @protected
+  ModelGroup dco_decode_model_group(dynamic raw);
+
+  @protected
+  ModelOption dco_decode_model_option(dynamic raw);
 
   @protected
   ModelProvider dco_decode_model_provider(dynamic raw);
@@ -477,6 +526,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
+  List<McpOption>? dco_decode_opt_list_mcp_option(dynamic raw);
+
+  @protected
+  List<ModelGroup>? dco_decode_opt_list_model_group(dynamic raw);
+
+  @protected
+  List<PluginOption>? dco_decode_opt_list_plugin_option(dynamic raw);
+
+  @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -508,6 +566,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlanStepStatus dco_decode_plan_step_status(dynamic raw);
+
+  @protected
+  PluginKind dco_decode_plugin_kind(dynamic raw);
+
+  @protected
+  PluginOption dco_decode_plugin_option(dynamic raw);
 
   @protected
   RuntimeImport dco_decode_runtime_import(dynamic raw);
@@ -594,6 +658,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_u_32(dynamic raw);
 
   @protected
+  BigInt dco_decode_u_64(dynamic raw);
+
+  @protected
   int dco_decode_u_8(dynamic raw);
 
   @protected
@@ -639,9 +706,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AcpAgentOption sse_decode_acp_agent_option(SseDeserializer deserializer);
 
   @protected
+  AgentChoices sse_decode_agent_choices(SseDeserializer deserializer);
+
+  @protected
   AgentDefinitionSummary sse_decode_agent_definition_summary(
     SseDeserializer deserializer,
   );
+
+  @protected
+  AgentDraft sse_decode_agent_draft(SseDeserializer deserializer);
+
+  @protected
+  AgentEditor sse_decode_agent_editor(SseDeserializer deserializer);
+
+  @protected
+  AgentMemories sse_decode_agent_memories(SseDeserializer deserializer);
 
   @protected
   ApprovalDetails sse_decode_approval_details(SseDeserializer deserializer);
@@ -691,6 +770,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AgentDraft sse_decode_box_autoadd_agent_draft(SseDeserializer deserializer);
 
   @protected
   AttentionItem sse_decode_box_autoadd_attention_item(
@@ -996,6 +1078,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<McpOption> sse_decode_list_mcp_option(SseDeserializer deserializer);
+
+  @protected
+  List<MemoryItem> sse_decode_list_memory_item(SseDeserializer deserializer);
+
+  @protected
+  List<ModelGroup> sse_decode_list_model_group(SseDeserializer deserializer);
+
+  @protected
+  List<ModelOption> sse_decode_list_model_option(SseDeserializer deserializer);
+
+  @protected
   List<ModelProvider> sse_decode_list_model_provider(
     SseDeserializer deserializer,
   );
@@ -1018,6 +1112,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<PlanStep> sse_decode_list_plan_step(SseDeserializer deserializer);
+
+  @protected
+  List<PluginOption> sse_decode_list_plugin_option(
+    SseDeserializer deserializer,
+  );
 
   @protected
   Uint32List sse_decode_list_prim_u_32_strict(SseDeserializer deserializer);
@@ -1059,7 +1158,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  McpOption sse_decode_mcp_option(SseDeserializer deserializer);
+
+  @protected
+  MemoryItem sse_decode_memory_item(SseDeserializer deserializer);
+
+  @protected
+  MemoryLayer sse_decode_memory_layer(SseDeserializer deserializer);
+
+  @protected
+  MemoryShelf sse_decode_memory_shelf(SseDeserializer deserializer);
+
+  @protected
   MessageDraft sse_decode_message_draft(SseDeserializer deserializer);
+
+  @protected
+  ModelGroup sse_decode_model_group(SseDeserializer deserializer);
+
+  @protected
+  ModelOption sse_decode_model_option(SseDeserializer deserializer);
 
   @protected
   ModelProvider sse_decode_model_provider(SseDeserializer deserializer);
@@ -1179,6 +1296,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  List<McpOption>? sse_decode_opt_list_mcp_option(SseDeserializer deserializer);
+
+  @protected
+  List<ModelGroup>? sse_decode_opt_list_model_group(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<PluginOption>? sse_decode_opt_list_plugin_option(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -1212,6 +1342,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlanStepStatus sse_decode_plan_step_status(SseDeserializer deserializer);
+
+  @protected
+  PluginKind sse_decode_plugin_kind(SseDeserializer deserializer);
+
+  @protected
+  PluginOption sse_decode_plugin_option(SseDeserializer deserializer);
 
   @protected
   RuntimeImport sse_decode_runtime_import(SseDeserializer deserializer);
@@ -1300,6 +1436,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer);
 
   @protected
@@ -1357,10 +1496,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_agent_choices(AgentChoices self, SseSerializer serializer);
+
+  @protected
   void sse_encode_agent_definition_summary(
     AgentDefinitionSummary self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_agent_draft(AgentDraft self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_agent_editor(AgentEditor self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_agent_memories(AgentMemories self, SseSerializer serializer);
 
   @protected
   void sse_encode_approval_details(
@@ -1427,6 +1578,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_agent_draft(
+    AgentDraft self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_attention_item(
@@ -1825,6 +1982,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_mcp_option(
+    List<McpOption> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_memory_item(
+    List<MemoryItem> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_model_group(
+    List<ModelGroup> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_model_option(
+    List<ModelOption> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_model_provider(
     List<ModelProvider> self,
     SseSerializer serializer,
@@ -1856,6 +2037,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_plan_step(List<PlanStep> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_plugin_option(
+    List<PluginOption> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_32_strict(
@@ -1912,7 +2099,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_mcp_option(McpOption self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_memory_item(MemoryItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_memory_layer(MemoryLayer self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_memory_shelf(MemoryShelf self, SseSerializer serializer);
+
+  @protected
   void sse_encode_message_draft(MessageDraft self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_model_group(ModelGroup self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_model_option(ModelOption self, SseSerializer serializer);
 
   @protected
   void sse_encode_model_provider(ModelProvider self, SseSerializer serializer);
@@ -2059,6 +2264,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_list_mcp_option(
+    List<McpOption>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_model_group(
+    List<ModelGroup>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_plugin_option(
+    List<PluginOption>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_list_prim_u_8_strict(
     Uint8List? self,
     SseSerializer serializer,
@@ -2108,6 +2331,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     PlanStepStatus self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_plugin_kind(PluginKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_plugin_option(PluginOption self, SseSerializer serializer);
 
   @protected
   void sse_encode_runtime_import(RuntimeImport self, SseSerializer serializer);
@@ -2213,6 +2442,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
