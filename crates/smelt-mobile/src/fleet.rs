@@ -326,7 +326,7 @@ impl Fleet {
                         shared
                             .node(runtime_id)?
                             .conversations
-                            .pending_actions(session_id)
+                            .pending_details(session_id)
                     }),
                     timings.pass,
                 ),

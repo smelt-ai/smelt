@@ -35,6 +35,7 @@ fn recovered_state(id: &str) -> SessionState {
         phase: Phase::AwaitingApproval,
         phase_since: 100,
         pending_question: Some("要不要继续".to_string()),
+        pending_request: None,
         tokens_used: Some(42),
         branch: Some("feat/ghost".to_string()),
         dirty_files: vec!["a.rs".to_string()],

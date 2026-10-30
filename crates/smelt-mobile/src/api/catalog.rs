@@ -118,6 +118,9 @@ pub struct SessionSummary {
     pub updated_at: i64,
     /// 工具名或审批问句。
     pub detail: Option<String>,
+    /// 对话会话正在等的那个审批或选择题的身份，变了就是换了一个请求。终端会话、没在等的
+    /// 会话没有。
+    pub pending_request: Option<String>,
     /// 这台手机上还没读的提醒；有值就是未读。
     pub attention: Option<AttentionItem>,
     /// 只有自动化运行的会话才有。

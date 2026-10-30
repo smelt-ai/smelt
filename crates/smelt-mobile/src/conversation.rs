@@ -295,13 +295,33 @@ impl Conversations {
     }
 
     pub(crate) fn pending_actions(&self, session_id: &str) -> Result<PendingActions, SmeltError> {
+        self.pending_details(session_id).map(|(_, actions)| actions)
+    }
+
+    /// 在等的审批和询问，连同取的那一刻它在等的请求身份（跟会话状态的 `pending_request`
+    /// 同一个算法）。指挥台按这个身份认详情，不按认领时摘要里的那个。
+    pub(crate) fn pending_details(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<String>, PendingActions), SmeltError> {
         let client = self.client()?;
         let snapshot = history_page(&client, session_id, usize::MAX, PENDING_ACTIONS_LIMIT)?;
-        Ok(PendingActions {
+        let request = smelt_model::acp_session::pending_request_id(
+            snapshot
+                .pending_permissions
+                .first()
+                .map(|permission| permission.id.as_str()),
+            snapshot
+                .pending_elicitation
+                .as_ref()
+                .map(|elicitation| elicitation.id.as_str()),
+        );
+        let actions = PendingActions {
             permissions: view::permissions(&snapshot.pending_permissions),
             elicitation: snapshot.pending_elicitation.as_ref().map(view::elicitation),
             recent: recent_context(&snapshot),
-        })
+        };
+        Ok((request, actions))
     }
 
     pub(crate) fn send_message(

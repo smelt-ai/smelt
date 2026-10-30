@@ -54,6 +54,9 @@ pub(super) fn plan_view_from_acp(p: &Plan) -> PlanView {
 
 /// 待审批卡片：`responder` 只在收到 `AcpUserAction::PermissionSelect` 时消费。
 pub struct LivePermission {
+    /// 这次审批请求的身份，收到请求时生成。同一个工具调用答完又来一次审批是两个请求：
+    /// 客户端靠它分辨（见会话状态的 `pending_request`），回答仍按 `tool_call_id`。
+    pub id: String,
     pub question: String,
     pub tool_call_id: String,
     pub options: Vec<PermissionOptionView>,
@@ -66,6 +69,10 @@ pub struct LivePermission {
 /// 选择题卡片：字段原始形态保留在 `raw_fields`（翻译回
 /// `ElicitationContentValue` 要用），`chosen` 是当前选择态。
 pub struct LiveElicitation {
+    /// 这张卡的身份：协议发来的创建时生成，从工具调用恢复的取那个工具调用。审批卡认
+    /// `tool_call_id`，选择题卡认它：客户端靠它分辨「还是不是同一个问题」（见会话状态的
+    /// `pending_request`）。
+    pub id: String,
     pub message: String,
     pub raw_fields: Vec<ElicitField>,
     pub chosen: BTreeMap<usize, Vec<usize>>,
@@ -479,6 +486,7 @@ impl AcpSessionState {
             self.permissions = pending_permissions
                 .into_iter()
                 .map(|permission| LivePermission {
+                    id: permission.id,
                     question: permission.question,
                     tool_call_id: permission.tool_call_id,
                     options: permission.options,
@@ -488,6 +496,7 @@ impl AcpSessionState {
                 })
                 .collect();
             self.elicitation = pending_elicitation.map(|elicitation| LiveElicitation {
+                id: elicitation.id,
                 message: elicitation.message,
                 raw_fields: elicitation
                     .fields
@@ -816,6 +825,7 @@ impl AcpSessionState {
                 self.permissions
                     .iter()
                     .map(|p| PendingPermission {
+                        id: p.id.clone(),
                         question: p.question.clone(),
                         tool_call_id: p.tool_call_id.clone(),
                         options: p.options.clone(),
@@ -827,6 +837,7 @@ impl AcpSessionState {
             },
             pending_elicitation: if include_envelope {
                 self.elicitation.as_ref().map(|e| PendingElicitation {
+                    id: e.id.clone(),
                     message: e.message.clone(),
                     fields: e.raw_fields.iter().map(elicit_field_view).collect(),
                     chosen: e.chosen.clone(),

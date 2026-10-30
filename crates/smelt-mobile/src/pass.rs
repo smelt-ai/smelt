@@ -1,9 +1,12 @@
 //! 指挥台投影：把所有机器的会话列表拼成单据与灶台。Dart 入口见 `crate::api::pass`。
 //!
 //! 「谁在等你」由各机器的会话列表直接给出；「在等什么」要对那个会话做一次
-//! `pending_actions`（一问一答，不占对话订阅）。所以一张单据先带着会话摘要出现
-//! （`details_loaded = false`），详情取回后再补全。会话摘要里和「在等什么」相关的字段
-//! （[`fingerprint`]）一变就重取，旧单据不会挂着已经答过的问题。
+//! `pending_actions`（一问一答，不占对话订阅）。所以一张对话会话的单据先带着会话摘要出现
+//! （`details_loaded = false`），详情取回后再补全。详情认会话摘要里正在等的那个请求
+//! （`pending_request`，守护给的身份）：同一个请求只取一次，会话别的地方再怎么变都照样
+//! 显示；换了请求才重取，取回前不带按钮，旧单据不会挂着已经答过的问题。取回的详情记在
+//! 取的那一刻运行时实际在等的请求名下，不记在认领时的名下。详情只属于这一轮「在等你」，
+//! 单据下架就丢掉。终端会话没有对话历史可取，单据只有摘要。
 //!
 //! ```text
 //! 各节点 Catalog ──Sessions──> PassHub::update ──> project() ──变了──> Dart 订阅者
@@ -12,7 +15,7 @@
 //!                     取详情线程（pending_actions）──> 记下详情、再投影一次
 //! ```
 //!
-//! 取详情失败就在取详情线程里重取，直到取到、单据没了或指纹变了：在等你的会话列表不会
+//! 取详情失败就在取详情线程里重取，直到取到、单据没了或换了请求：在等你的会话列表不会
 //! 再变，等不来下一次推送替它重取。机器没连上时不重取，等它重新连上（[`PassHub::set_connected`]）；
 //! 连着却取不到（会话唤醒超时）才退避，期间重新连上也立刻重取。
 //!
@@ -25,7 +28,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::api::catalog::{
-    AttentionKind, SessionList, SessionPhase, SessionStatus, SessionSummary,
+    AttentionKind, SessionKind, SessionList, SessionPhase, SessionStatus, SessionSummary,
 };
 use crate::api::conversation::PendingActions;
 use crate::api::error::SmeltError;
@@ -34,8 +37,10 @@ use crate::api::pass::{Pass, PassStation, PassTicket};
 /// 灶台「最近跑过」一组最多几条。
 pub(crate) const RECENT_LIMIT: usize = 5;
 
-/// 取一个会话在等的审批和询问：`(runtime_id, session_id)`。阻塞，只在取详情线程上调。
-pub(crate) type Fetch = Arc<dyn Fn(&str, &str) -> Result<PendingActions, SmeltError> + Send + Sync>;
+/// 取一个会话在等的审批和询问，连同取的那一刻它在等的请求身份：`(runtime_id, session_id)`。
+/// 阻塞，只在取详情线程上调。
+pub(crate) type Fetch =
+    Arc<dyn Fn(&str, &str) -> Result<(Option<String>, PendingActions), SmeltError> + Send + Sync>;
 
 /// 取详情失败后的重取退避。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
 #[derive(Clone, Copy, Debug)]
@@ -107,20 +112,6 @@ fn is_recent(session: &SessionSummary) -> bool {
         && session.updated_at > 0
 }
 
-/// 会话摘要里跟「在等什么」有关的部分。变了就要重取详情。
-pub(crate) fn fingerprint(session: &SessionSummary) -> String {
-    let attention = session.attention.as_ref();
-    [
-        format!("{:?}", session.phase),
-        format!("{:?}", session.status),
-        session.updated_at.to_string(),
-        session.detail.clone().unwrap_or_default(),
-        attention.map_or(String::new(), |a| format!("{:?}", a.kind)),
-        attention.map_or(String::new(), |a| a.message.clone()),
-    ]
-    .join("\u{1}")
-}
-
 /// 某一组：按最后活动时间从新到旧，同时间的保持列表次序（运行时按桌面菜单排好的，比
 /// 随机顺序有意义）。
 fn section(
@@ -137,10 +128,10 @@ fn section(
     matched
 }
 
-/// 取回的详情和取的时候会话摘要的指纹。
+/// 取回的详情，和取的那一刻运行时实际在等的请求。
 #[derive(Clone, Debug)]
 pub(crate) struct Loaded {
-    pub fingerprint: String,
+    pub request: Option<String>,
     pub actions: PendingActions,
 }
 
@@ -155,7 +146,7 @@ pub(crate) struct Inputs<'a> {
     pub now_ms: i64,
 }
 
-/// 投影出整份指挥台。缺详情（或详情已过时）的单据 `details_loaded = false`。
+/// 投影出整份指挥台。缺详情（或详情是上一个请求的）的单据 `details_loaded = false`。
 pub(crate) fn project(inputs: Inputs<'_>) -> Pass {
     let empty = SessionList {
         sessions: Vec::new(),
@@ -183,11 +174,12 @@ pub(crate) fn project(inputs: Inputs<'_>) -> Pass {
                 } else {
                     seen
                 };
-                let fingerprint = fingerprint(session);
                 let loaded = inputs
                     .details
                     .get(&key)
-                    .filter(|loaded| loaded.fingerprint == fingerprint);
+                    .filter(|loaded| loaded.request == session.pending_request);
+                // 终端会话没有对话历史可取：只有摘要，没有要等的详情。
+                let terminal = session.kind == SessionKind::Terminal;
                 current.insert(key);
                 tickets.push((
                     (waiting_since, runtime_index, session_index),
@@ -197,7 +189,7 @@ pub(crate) fn project(inputs: Inputs<'_>) -> Pass {
                         permission: loaded
                             .and_then(|loaded| loaded.actions.permissions.first().cloned()),
                         elicitation: loaded.and_then(|loaded| loaded.actions.elicitation.clone()),
-                        details_loaded: loaded.is_some(),
+                        details_loaded: terminal || loaded.is_some(),
                         recent: loaded
                             .map(|loaded| loaded.actions.recent.clone())
                             .unwrap_or_default(),
@@ -250,10 +242,11 @@ struct Connectivity {
 struct Inner {
     order: Vec<String>,
     lists: HashMap<String, SessionList>,
-    /// 已取回的详情。会话从列表里消失时丢掉；只是暂时不是单据（机器重连中）的留着。
+    /// 已取回的详情。单据下架就丢掉；只是机器重连中、列表退回缓存的留着。
     details: HashMap<Key, Loaded>,
-    /// 正在取的单据和取的时候的指纹，避免同一状态反复请求。
-    in_flight: HashMap<Key, String>,
+    /// 缺详情的单据认领的是摘要里的哪个请求：正在取，或者取回的是另一个请求、等摘要跟上。
+    /// 同一个请求不再认领，免得反复取。
+    in_flight: HashMap<Key, Option<String>>,
     first_seen: HashMap<Key, i64>,
     listeners: Vec<PassListener>,
     last: Option<Pass>,
@@ -329,14 +322,14 @@ impl PassHub {
         inner.lists.insert(runtime_id.to_string(), list);
         let requests = update_locked(&mut inner);
         drop(inner);
-        // 单据可能没了或指纹变了，等着重取的线程据此退出。
+        // 单据可能没了或换了请求，等着重取的线程据此退出。
         self.shared.wake.notify_all();
         spawn_fetches(&self.shared, requests);
     }
 }
 
 /// 重新投影，变了就推，返回要发出的取详情请求。
-fn update_locked(inner: &mut Inner) -> Vec<(Key, String)> {
+fn update_locked(inner: &mut Inner) -> Vec<(Key, Option<String>)> {
     let pass = refresh(inner);
     claim_missing(inner, &pass)
 }
@@ -360,23 +353,24 @@ fn refresh(inner: &mut Inner) -> Pass {
         first_seen,
         now_ms: crate::store::now_ms(),
     });
-    let tickets: HashSet<Key> = pass
+    let key_of = |ticket: &PassTicket| (ticket.runtime_id.clone(), ticket.session.id.clone());
+    let tickets: HashSet<Key> = pass.tickets.iter().map(key_of).collect();
+    let missing: HashSet<Key> = pass
         .tickets
         .iter()
-        .map(|ticket| (ticket.runtime_id.clone(), ticket.session.id.clone()))
+        .filter(|ticket| !ticket.details_loaded)
+        .map(key_of)
         .collect();
-    // 详情留到会话从列表里消失：机器重连（换代）时列表先退回缓存、单据暂时下架，连回来
-    // 指纹没变就直接用，不用整台重取一遍。指纹带着最后活动时间，变过就会重取。
-    let sessions: HashSet<Key> = lists
-        .iter()
-        .flat_map(|(runtime_id, list)| {
-            list.sessions
-                .iter()
-                .map(move |session| (runtime_id.clone(), session.id.clone()))
-        })
-        .collect();
-    details.retain(|key, _| sessions.contains(key));
-    in_flight.retain(|key, _| tickets.contains(key));
+    // 详情只属于这一轮「在等你」：单据下架就丢掉，下次再成为单据时重取。失败、待输入这类
+    // 没有请求身份的单据也就不会挂着上一轮的上下文。机器重连（换代）时列表先退回缓存、
+    // 单据暂时下架，这时留着，连回来还在等同一个请求就直接用，不用整台重取一遍。
+    details.retain(|key, _| {
+        tickets.contains(key)
+            || lists.get(&key.0).is_some_and(|list| {
+                list.cached && list.sessions.iter().any(|session| session.id == key.1)
+            })
+    });
+    in_flight.retain(|key, _| missing.contains(key));
     if last.as_ref() != Some(&pass) {
         *last = Some(pass.clone());
         listeners.retain(|listener| listener(&pass));
@@ -384,8 +378,8 @@ fn refresh(inner: &mut Inner) -> Pass {
     pass
 }
 
-/// 挑出缺详情、又没在用同一指纹取的单据，记为在取。没有订阅者时不取。
-fn claim_missing(inner: &mut Inner, pass: &Pass) -> Vec<(Key, String)> {
+/// 挑出缺详情、又没在取同一个请求的单据，记为在取。没有订阅者时不取。
+fn claim_missing(inner: &mut Inner, pass: &Pass) -> Vec<(Key, Option<String>)> {
     if inner.listeners.is_empty() {
         return Vec::new();
     }
@@ -396,27 +390,27 @@ fn claim_missing(inner: &mut Inner, pass: &Pass) -> Vec<(Key, String)> {
         .map(|ticket| {
             (
                 (ticket.runtime_id.clone(), ticket.session.id.clone()),
-                fingerprint(&ticket.session),
+                ticket.session.pending_request.clone(),
             )
         });
     let mut requests = Vec::new();
-    for (key, fingerprint) in missing {
-        if inner.in_flight.get(&key) == Some(&fingerprint) {
+    for (key, request) in missing {
+        if inner.in_flight.get(&key) == Some(&request) {
             continue;
         }
-        inner.in_flight.insert(key.clone(), fingerprint.clone());
-        requests.push((key, fingerprint));
+        inner.in_flight.insert(key.clone(), request.clone());
+        requests.push((key, request));
     }
     requests
 }
 
-fn spawn_fetches(shared: &Arc<Shared>, requests: Vec<(Key, String)>) {
-    for (key, fingerprint) in requests {
+fn spawn_fetches(shared: &Arc<Shared>, requests: Vec<(Key, Option<String>)>) {
+    for (key, request) in requests {
         let thread_shared = Arc::clone(shared);
         let thread_key = key.clone();
         let spawned = std::thread::Builder::new()
             .name("smelt-pass-details".to_string())
-            .spawn(move || fetch(&thread_shared, thread_key, fingerprint));
+            .spawn(move || fetch(&thread_shared, thread_key, request));
         if let Err(spawn_error) = spawned {
             log::error!("起不了取单据详情的线程：{spawn_error}");
             shared.lock().in_flight.remove(&key);
@@ -424,32 +418,36 @@ fn spawn_fetches(shared: &Arc<Shared>, requests: Vec<(Key, String)>) {
     }
 }
 
-/// 取一张单据的详情，失败就重取。期间一直占着 `in_flight`：同一指纹不会另起请求。
-fn fetch(shared: &Arc<Shared>, key: Key, fingerprint: String) {
+/// 取一张单据的详情，失败就重取。期间一直占着 `in_flight`：同一个请求不会另起一次。
+fn fetch(shared: &Arc<Shared>, key: Key, request: Option<String>) {
     let mut failures = 0u32;
     loop {
         // 线程刚起来（或重取前）先看单据还在不在。先打再看的话，单据已经清掉的那一轮
         // 仍会发出去。连接状态在发请求前记下：取的期间重新连上的话，失败后立刻重取。
         let seen = {
             let inner = shared.lock();
-            if inner.in_flight.get(&key) != Some(&fingerprint) {
+            if inner.in_flight.get(&key) != Some(&request) {
                 return;
             }
             inner.links.get(&key.0).copied().unwrap_or_default()
         };
         let result = (shared.fetch)(&key.0, &key.1);
         let mut inner = shared.lock();
-        if inner.in_flight.get(&key) != Some(&fingerprint) {
-            // 取的期间指纹又变了（已有新的请求），或单据没了：这份作废。
+        if inner.in_flight.get(&key) != Some(&request) {
+            // 取的期间换了请求（已有新的一次在取），或单据没了：这份作废。
             return;
         }
         let failure = match result {
-            Ok(actions) => {
-                inner.in_flight.remove(&key);
+            Ok((fetched, actions)) => {
+                // 取回的是另一个请求（摘要还没跟上，或者刚又换了）：照样记下，这次认领挂着不再
+                // 重取，等摘要变了再说，免得原地反复请求。
+                if fetched == request {
+                    inner.in_flight.remove(&key);
+                }
                 inner.details.insert(
                     key,
                     Loaded {
-                        fingerprint,
+                        request: fetched,
                         actions,
                     },
                 );
@@ -469,7 +467,7 @@ fn fetch(shared: &Arc<Shared>, key: Key, fingerprint: String) {
         );
         let retry_at = Instant::now() + shared.timing.retry_delay(failures);
         loop {
-            if inner.in_flight.get(&key) != Some(&fingerprint) {
+            if inner.in_flight.get(&key) != Some(&request) {
                 return;
             }
             let link = inner.links.get(&key.0).copied().unwrap_or_default();

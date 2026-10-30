@@ -559,6 +559,16 @@ pub(crate) fn acp_pending_question(
         .or_else(|| reduced.elicitation.as_ref().map(|e| e.message.clone()))
 }
 
+/// 正在等的那个请求的身份，跟 [`acp_pending_question`] 取同一个：先审批，再选择题。
+pub(crate) fn acp_pending_request(
+    reduced: &smelt_core::acp_session::AcpSessionState,
+) -> Option<String> {
+    smelt_core::acp_session::pending_request_id(
+        reduced.permissions.first().map(|p| p.id.as_str()),
+        reduced.elicitation.as_ref().map(|e| e.id.as_str()),
+    )
+}
+
 /// 一份历史身份该怎么落到 `acp_detail.history_session_id`。
 /// 有确认过的 id 就记住，哪怕同时还带着放弃标志（新身份胜出）。
 /// 没有 id、也没有放弃，就不能动库：重新开始会先把内存清掉，崩溃后仍要回到旧对话。
@@ -636,11 +646,12 @@ fn clear_durable_history_id(sess: &AcpSession, subscribers: &EventHubHandle) {
 /// `AcpView::sync_daemon_state` 是同一件事，只是现在算在 smeltd 侧。
 pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubHandle) {
     persist_confirmed_history_id(sess, subscribers);
-    let (phase, pending_question, title) = {
+    let (phase, pending_question, pending_request, title) = {
         let reduced = sess.reduced.lock();
         (
             compute_acp_daemon_phase(&reduced),
             acp_pending_question(&reduced),
+            acp_pending_request(&reduced),
             reduced.resolved_session_title(),
         )
     };
@@ -653,13 +664,15 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         let mut st = sess.state.lock();
         let phase_changed = commit_session_phase(&mut st, PhaseSource::AcpProjection, phase);
         let question_changed = st.pending_question != pending_question;
+        let request_changed = st.pending_request != pending_request;
         title_changed = st.title != title;
-        if !phase_changed && !question_changed && !title_changed {
+        if !phase_changed && !question_changed && !request_changed && !title_changed {
             None
         } else {
             if question_changed {
                 st.pending_question = pending_question;
             }
+            st.pending_request = pending_request;
             if title_changed {
                 st.title = title.clone();
             }
@@ -3090,6 +3103,9 @@ pub(crate) fn submit_acp_elicitation(
     };
     if let Some(text) = recovered_answer {
         smelt_core::acp_session::dismiss_elicitation(&mut sess.reduced.lock());
+        // 卡片撤掉了就同步会话状态：答案转成的提示可能只是排队，那条路不同步，客户端会
+        // 一直以为还在等这道题。
+        update_acp_daemon_state(sess, subscribers);
         return apply_acp_user_action_inner(
             sess,
             smelt_core::acp_session::AcpUserAction::Prompt {

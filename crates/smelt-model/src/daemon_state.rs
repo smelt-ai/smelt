@@ -57,6 +57,9 @@ pub struct DaemonSessionState {
     /// hook 上报的问句 / 当前工具名（PreToolUse 时 question 常是 tool_name）。
     #[serde(default)]
     pub pending_question: Option<String>,
+    /// 对话会话正在等的那个审批或选择题的身份，变了就是换了一个请求。终端会话没有。
+    #[serde(default)]
+    pub pending_request: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     /// 守护下发的启动命令；远程客户端在菜单快照缺少 agent 信息时用它兜底识别 provider。
@@ -124,6 +127,7 @@ impl Default for DaemonSessionState {
             revision: 0,
             phase: DaemonPhase::default(),
             pending_question: None,
+            pending_request: None,
             title: None,
             launch: None,
             provider: None,
