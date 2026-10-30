@@ -347,7 +347,7 @@ class _FoldedTextState extends State<FoldedText> {
     final c = GalleyColors.of(context);
     final t = GalleyText.of(context);
     final l10n = L10n.of(context);
-    final text = stripCodeFence(widget.text).trimRight();
+    final text = widget.text.trimRight();
     final lines = text.split('\n');
     final long = lines.length > _foldLines;
     final shown = _all || !long ? text : lines.take(_foldLines).join('\n');
@@ -425,9 +425,9 @@ class _DiffBlockState extends State<DiffBlock> {
     if (old.diff != widget.diff) _compute();
   }
 
-  /// diff 只在内容变了时算一次，不放在 build 里：流式快照每秒能来好几份。
+  /// 折叠只在内容变了时算一次，不放在 build 里：流式快照每秒能来好几份。
   void _compute() {
-    final lines = lineDiff(widget.diff.oldText, widget.diff.newText);
+    final lines = widget.diff.lines;
     final (added, removed) = diffTotals(lines);
     _added = added;
     _removed = removed;
@@ -521,7 +521,7 @@ class _DiffBlockState extends State<DiffBlock> {
                       style: t.monoHead.copyWith(color: c.ink),
                     ),
                   ),
-                  if (widget.diff.oldText == null) ...[
+                  if (widget.diff.newFile) ...[
                     Text(
                       l10n.conversationNewFile,
                       style: t.caption.copyWith(color: c.inkMuted),

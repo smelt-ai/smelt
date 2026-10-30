@@ -206,9 +206,40 @@ ToolOutput _terminal(String text, {int? exitCode, bool truncated = false}) =>
 ToolOutput _diff(String path, String? before, String after) => ToolOutput(
   kind: ToolOutputKind.diff,
   text: '',
-  diff: DiffView(path: path, oldText: before, newText: after),
+  diff: DiffView(
+    path: path,
+    newFile: before == null,
+    lines: _demoLines(before ?? '', after),
+  ),
   truncated: false,
 );
+
+/// 演示用的逐行 diff：首尾相同的行算没改，中间整段先删后加。真实数据由内核按行对齐好。
+List<DiffLine> _demoLines(String before, String after) {
+  List<String> split(String text) =>
+      text.isEmpty ? [] : text.replaceFirst(RegExp(r'\n$'), '').split('\n');
+  final old = split(before);
+  final now = split(after);
+  var head = 0;
+  while (head < old.length && head < now.length && old[head] == now[head]) {
+    head++;
+  }
+  var tail = 0;
+  while (tail < old.length - head &&
+      tail < now.length - head &&
+      old[old.length - 1 - tail] == now[now.length - 1 - tail]) {
+    tail++;
+  }
+  DiffLine line(DiffOp op, String text) => DiffLine(op: op, text: text);
+  return [
+    for (final text in old.take(head)) line(DiffOp.equal, text),
+    for (final text in old.sublist(head, old.length - tail))
+      line(DiffOp.delete, text),
+    for (final text in now.sublist(head, now.length - tail))
+      line(DiffOp.insert, text),
+    for (final text in now.skip(now.length - tail)) line(DiffOp.equal, text),
+  ];
+}
 
 const _model = ModelSelector(
   configId: 'model',

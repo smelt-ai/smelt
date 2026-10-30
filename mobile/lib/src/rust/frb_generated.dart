@@ -17,6 +17,7 @@ import 'dart:convert';
 import 'frb_generated.dart';
 import 'frb_generated.io.dart'
     if (dart.library.js_interop) 'frb_generated.web.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// Main entrypoint of the Rust API
@@ -3010,6 +3011,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DiffLine dco_decode_diff_line(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DiffLine(
+      op: dco_decode_diff_op(arr[0]),
+      text: dco_decode_String(arr[1]),
+    );
+  }
+
+  @protected
+  DiffOp dco_decode_diff_op(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DiffOp.values[raw as int];
+  }
+
+  @protected
   DiffView dco_decode_diff_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -3017,8 +3036,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return DiffView(
       path: dco_decode_String(arr[0]),
-      oldText: dco_decode_opt_String(arr[1]),
-      newText: dco_decode_String(arr[2]),
+      newFile: dco_decode_bool(arr[1]),
+      lines: dco_decode_list_diff_line(arr[2]),
     );
   }
 
@@ -3324,6 +3343,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<ConversationImage> dco_decode_list_conversation_image(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_conversation_image).toList();
+  }
+
+  @protected
+  List<DiffLine> dco_decode_list_diff_line(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_diff_line).toList();
   }
 
   @protected
@@ -5063,12 +5088,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DiffLine sse_decode_diff_line(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_op = sse_decode_diff_op(deserializer);
+    var var_text = sse_decode_String(deserializer);
+    return DiffLine(op: var_op, text: var_text);
+  }
+
+  @protected
+  DiffOp sse_decode_diff_op(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DiffOp.values[inner];
+  }
+
+  @protected
   DiffView sse_decode_diff_view(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_path = sse_decode_String(deserializer);
-    var var_oldText = sse_decode_opt_String(deserializer);
-    var var_newText = sse_decode_String(deserializer);
-    return DiffView(path: var_path, oldText: var_oldText, newText: var_newText);
+    var var_newFile = sse_decode_bool(deserializer);
+    var var_lines = sse_decode_list_diff_line(deserializer);
+    return DiffView(path: var_path, newFile: var_newFile, lines: var_lines);
   }
 
   @protected
@@ -5425,6 +5465,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <ConversationImage>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_conversation_image(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DiffLine> sse_decode_list_diff_line(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DiffLine>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_diff_line(deserializer));
     }
     return ans_;
   }
@@ -7486,11 +7538,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_diff_line(DiffLine self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_diff_op(self.op, serializer);
+    sse_encode_String(self.text, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_op(DiffOp self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_diff_view(DiffView self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.path, serializer);
-    sse_encode_opt_String(self.oldText, serializer);
-    sse_encode_String(self.newText, serializer);
+    sse_encode_bool(self.newFile, serializer);
+    sse_encode_list_diff_line(self.lines, serializer);
   }
 
   @protected
@@ -7781,6 +7846,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_conversation_image(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_diff_line(
+    List<DiffLine> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_diff_line(item, serializer);
     }
   }
 

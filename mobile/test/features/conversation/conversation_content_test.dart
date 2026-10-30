@@ -187,8 +187,12 @@ void main() {
                   text: '',
                   diff: DiffView(
                     path: 'lib/config.dart',
-                    oldText: 'keep\nbefore\n',
-                    newText: 'keep\nafter\n',
+                    newFile: false,
+                    lines: [
+                      DiffLine(op: DiffOp.equal, text: 'keep'),
+                      DiffLine(op: DiffOp.delete, text: 'before'),
+                      DiffLine(op: DiffOp.insert, text: 'after'),
+                    ],
                   ),
                   truncated: false,
                 ),
@@ -411,26 +415,29 @@ void main() {
       expect(indexes(entries), [9], reason: '窗口起点变了，整个换成视图里的');
     });
 
-    test('diff 按行对齐，新文件全是新增', () {
-      final lines = lineDiff('a\nb\nc\n', 'a\nB\nc\nd\n');
-      expect(lines.map((l) => '${l.op.name}:${l.text}'), [
-        'equal:a',
-        'delete:b',
-        'insert:B',
-        'equal:c',
-        'insert:d',
-      ]);
-      expect(diffTotals(lines), (2, 1));
+    test('diff 数增删行', () {
+      DiffLine line(DiffOp op) => DiffLine(op: op, text: '');
       expect(
-        lineDiff(null, 'x\ny').every((l) => l.op == DiffOp.insert),
-        isTrue,
+        diffTotals([
+          line(DiffOp.equal),
+          line(DiffOp.delete),
+          line(DiffOp.insert),
+          line(DiffOp.insert),
+        ]),
+        (2, 1),
       );
     });
 
     test('长的未改动段收成一行', () {
-      final before = List.generate(20, (i) => 'l$i').join('\n');
-      final after = before.replaceFirst('l10', 'L10');
-      final folded = foldUnchanged(lineDiff(before, after));
+      final lines = [
+        for (var i = 0; i < 20; i++)
+          if (i == 10) ...[
+            DiffLine(op: DiffOp.delete, text: 'l10'),
+            DiffLine(op: DiffOp.insert, text: 'L10'),
+          ] else
+            DiffLine(op: DiffOp.equal, text: 'l$i'),
+      ];
+      final folded = foldUnchanged(lines);
       expect(folded.first, isA<DiffSkipped>());
       expect((folded.first as DiffSkipped).count, 7);
       expect(folded.last, isA<DiffSkipped>());
@@ -445,7 +452,6 @@ void main() {
       expect(formatTurnDuration(8400), '8.4s');
       expect(formatTurnDuration(102000), '1:42');
       expect(formatTurnDuration(3800000), '1:03:20');
-      expect(stripCodeFence('```dart\nx\n```'), 'x');
     });
   });
 }

@@ -1,9 +1,8 @@
-/// 对话页的纯计算：条目分块、diff 按行对齐、几处数字的说法。
+/// 对话页的纯计算：条目分块、diff 折叠、几处数字的说法。diff 的逐行对齐由内核算好
+/// （`DiffView.lines`，跟桌面同一个算法），这里只管怎么摆。
 ///
 /// 都是确定的纯函数，结果缓存在页面状态上（快照到达时算一次），`build` 只取缓存。
 library;
-
-import 'package:diff_match_patch/diff_match_patch.dart' as dmp;
 
 import '../../data/models.dart';
 
@@ -107,15 +106,6 @@ ToolStatus groupStatus(List<ToolCallView> calls) {
   return ToolStatus.completed;
 }
 
-/// 工具输出常被 agent 包在一对代码围栏里，界面已经是等宽块，去掉围栏。
-String stripCodeFence(String text) {
-  final trimmed = text.trim();
-  if (!trimmed.startsWith('```') || !trimmed.endsWith('```')) return text;
-  final newline = trimmed.indexOf('\n');
-  if (newline < 0) return text;
-  return trimmed.substring(newline + 1, trimmed.length - 3).trimRight();
-}
-
 /// 「84k」「1.2M」：上下文用量那一行用，数字小就原样。
 String compactCount(int n) {
   if (n < 1000) return '$n';
@@ -139,83 +129,6 @@ String formatTurnDuration(int milliseconds) {
   final m = d.inMinutes.remainder(60);
   final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
   return h > 0 ? '$h:${m.toString().padLeft(2, '0')}:$s' : '$m:$s';
-}
-
-enum DiffOp { equal, insert, delete }
-
-class DiffLine {
-  const DiffLine(this.op, this.text);
-
-  final DiffOp op;
-  final String text;
-}
-
-/// 按行对齐的 diff：先把每个不同的行映射成一个字符，在字符串上做 diff 再还原成行
-/// （diff_match_patch 的行模式，它没把这一步导出）。逐字比对会把一行拆成碎片，手机窄屏
-/// 上读不出来改了什么。
-List<DiffLine> lineDiff(String? oldText, String newText) {
-  final before = _lines(oldText ?? '');
-  final after = _lines(newText);
-  if (oldText == null) {
-    return [for (final l in after) DiffLine(DiffOp.insert, l)];
-  }
-  final table = <String, int>{};
-  final lines = <String>[];
-  String encode(List<String> source) {
-    final codes = <int>[];
-    for (final line in source) {
-      final code = table.putIfAbsent(line, () {
-        lines.add(line);
-        return _codeFor(lines.length - 1);
-      });
-      codes.add(code);
-    }
-    return String.fromCharCodes(codes);
-  }
-
-  // 不同的行太多编不进单个 UTF-16 码元时（极少见），退到「全删全加」，不画错的对齐。
-  if (before.toSet().union(after.toSet()).length > _maxCodes) {
-    return [
-      for (final l in before) DiffLine(DiffOp.delete, l),
-      for (final l in after) DiffLine(DiffOp.insert, l),
-    ];
-  }
-  final a = encode(before);
-  final b = encode(after);
-  final diffs = dmp.diff(a, b, timeout: 0.2, checklines: false);
-  final out = <DiffLine>[];
-  for (final d in diffs) {
-    final op = switch (d.operation) {
-      dmp.DIFF_INSERT => DiffOp.insert,
-      dmp.DIFF_DELETE => DiffOp.delete,
-      _ => DiffOp.equal,
-    };
-    for (final unit in d.text.codeUnits) {
-      out.add(DiffLine(op, lines[_indexFor(unit)]));
-    }
-  }
-  return out;
-}
-
-/// 码元从 1 开始（0 是 NUL，调试器不喜欢），跳过代理对区间。
-const _surrogateStart = 0xD800;
-const _surrogateSize = 0x800;
-const _maxCodes = 0xFFFF - _surrogateSize - 1;
-
-int _codeFor(int index) {
-  final code = index + 1;
-  return code >= _surrogateStart ? code + _surrogateSize : code;
-}
-
-int _indexFor(int code) =>
-    (code >= _surrogateStart + _surrogateSize ? code - _surrogateSize : code) -
-    1;
-
-List<String> _lines(String text) {
-  if (text.isEmpty) return const [];
-  final parts = text.split('\n');
-  if (parts.last.isEmpty) parts.removeLast();
-  return parts;
 }
 
 /// diff 里新增 / 删除了几行。

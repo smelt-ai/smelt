@@ -14,11 +14,11 @@ use smelt_model::daemon_state::DaemonPhase;
 
 use crate::api::conversation::{
     ApprovalDetails, ApprovalKind, ChoiceOption, ConfigOption, ContextUsage, ConversationEntry,
-    ConversationImage, ConversationNotice, ConversationPhase, ConversationView, DiffView,
-    Elicitation, ElicitationField, ElicitationFieldKind, EntryKind, ImageRef, ModelProvider,
-    ModelSelector, PermissionOption, PermissionOptionKind, PermissionRequest, PlanStep,
-    PlanStepStatus, SlashCommand, TaskNoteKind, TaskNoteView, ToolCallView, ToolKind, ToolOutput,
-    ToolOutputKind, ToolStatus,
+    ConversationImage, ConversationNotice, ConversationPhase, ConversationView, DiffLine, DiffOp,
+    DiffView, Elicitation, ElicitationField, ElicitationFieldKind, EntryKind, ImageRef,
+    ModelProvider, ModelSelector, PermissionOption, PermissionOptionKind, PermissionRequest,
+    PlanStep, PlanStepStatus, SlashCommand, TaskNoteKind, TaskNoteView, ToolCallView, ToolKind,
+    ToolOutput, ToolOutputKind, ToolStatus,
 };
 
 /// 投影出视图，条目只投影从绝对下标 `from` 起的那段（落在窗口外就夹回窗口里）：前面的
@@ -275,8 +275,9 @@ fn blank_output(kind: ToolOutputKind) -> ToolOutput {
 
 fn tool_output(part: &ToolOutputPart) -> ToolOutput {
     match part {
+        // 整段包在代码围栏里的输出去掉围栏：界面已经是等宽块。跟桌面一样只对文字输出。
         ToolOutputPart::Text(text) => ToolOutput {
-            text: text.clone(),
+            text: acp_chat::strip_code_fence(text).to_string(),
             ..blank_output(ToolOutputKind::Text)
         },
         ToolOutputPart::Diff {
@@ -286,8 +287,18 @@ fn tool_output(part: &ToolOutputPart) -> ToolOutput {
         } => ToolOutput {
             diff: Some(DiffView {
                 path: path.clone(),
-                old_text: old_text.clone(),
-                new_text: new_text.clone(),
+                new_file: old_text.is_none(),
+                lines: acp_chat::diff_lines(old_text.as_deref().unwrap_or(""), new_text)
+                    .into_iter()
+                    .map(|line| DiffLine {
+                        op: match line.tag {
+                            acp_chat::DiffLineTag::Context => DiffOp::Equal,
+                            acp_chat::DiffLineTag::Added => DiffOp::Insert,
+                            acp_chat::DiffLineTag::Removed => DiffOp::Delete,
+                        },
+                        text: line.text,
+                    })
+                    .collect(),
             }),
             ..blank_output(ToolOutputKind::Diff)
         },
@@ -653,7 +664,15 @@ mod tests {
                 ToolOutputKind::Terminal
             ]
         );
-        assert_eq!(tool.output[1].diff.as_ref().unwrap().old_text, None);
+        let diff = tool.output[1].diff.as_ref().unwrap();
+        assert!(diff.new_file);
+        assert_eq!(
+            diff.lines,
+            [DiffLine {
+                op: DiffOp::Insert,
+                text: "fn main() {}".into()
+            }]
+        );
         assert!(tool.output[2].image.as_ref().unwrap().bytes.is_some());
         assert_eq!(tool.output[3].text, "ok\n");
         assert_eq!(tool.output[3].exit_code, Some(0));
@@ -824,6 +843,39 @@ mod tests {
             })
         );
         assert_eq!(view.available_commands[0].name, "help");
+    }
+
+    /// diff 在内核里按行对齐好；整段包在围栏里的文字输出去掉围栏。
+    #[test]
+    fn diffs_come_aligned_and_fenced_text_comes_bare() {
+        let snapshot = snapshot_from(json!({
+            "entries": [
+                {"ToolCall": {"id": "t1", "title": "改文件", "kind": "edit", "status": "completed", "output": [
+                    {"Text": "```console\nhello\n```"},
+                    {"Diff": {"path": "a.rs", "old_text": "a\nb\nc\n", "new_text": "a\nB\nc\nd\n"}},
+                ]}},
+            ],
+        }));
+        let view = conversation_view("acp-1", &snapshot, 0);
+        let tool = view.entries[0].tool_call.as_ref().unwrap();
+        assert_eq!(tool.output[0].text, "hello");
+        let diff = tool.output[1].diff.as_ref().unwrap();
+        assert!(!diff.new_file);
+        let lines: Vec<(DiffOp, &str)> = diff
+            .lines
+            .iter()
+            .map(|line| (line.op, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (DiffOp::Equal, "a"),
+                (DiffOp::Delete, "b"),
+                (DiffOp::Insert, "B"),
+                (DiffOp::Equal, "c"),
+                (DiffOp::Insert, "d"),
+            ]
+        );
     }
 
     /// 只投影从变化处起的条目；「最终回答」仍按整个窗口数，哪怕它在投影的那段之前。
