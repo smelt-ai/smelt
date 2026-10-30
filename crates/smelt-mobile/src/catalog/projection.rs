@@ -660,6 +660,7 @@ fn mobile_summary(
             .map(|state| i64::try_from(state.updated_at).unwrap_or(i64::MAX))
             .unwrap_or(0),
         detail: daemon.and_then(DaemonSessionState::detail_line),
+        pending_request: daemon.and_then(|state| state.pending_request.clone()),
         attention: attention_store.unread(&row.id).map(attention_item),
         automation,
         agent_definition_id,

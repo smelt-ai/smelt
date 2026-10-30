@@ -2342,6 +2342,7 @@ fn force_end_sets_kind_and_clears_pending_cards() {
         raw_request_line: None,
     });
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "选一个".into(),
         raw_fields: Vec::new(),
         chosen: BTreeMap::new(),
@@ -2579,6 +2580,7 @@ fn choose_elicitation_single_select_signals_auto_submit() {
     use agent_client_protocol::schema::v1::ElicitationContentValue as V;
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "pick one".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),
@@ -2615,6 +2617,7 @@ fn choose_elicitation_multi_select_toggles() {
     use agent_client_protocol::schema::v1::ElicitationContentValue as V;
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "pick many".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),
@@ -2660,6 +2663,7 @@ fn submit_elicitation_custom_answer_wins_over_chosen_option() {
     let (select_tx, select_rx) = mpsc::channel();
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "两道题".into(),
         raw_fields: vec![
             ElicitField {
@@ -2720,6 +2724,7 @@ fn submit_elicitation_custom_answer_wins_over_chosen_option() {
 fn set_elicitation_text_rejects_fields_without_custom_input() {
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "普通单选".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),
@@ -2755,6 +2760,7 @@ fn set_elicitation_text_rejects_fields_without_custom_input() {
 fn recovered_elicitation_answer_appends_custom_text() {
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
         message: "恢复的题".into(),
         raw_fields: vec![ElicitField {
             key: "k".into(),

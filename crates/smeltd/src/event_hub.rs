@@ -725,6 +725,7 @@ fn session_dto(state: &SessionState) -> SessionStateChanged {
         },
         phase_since_unix_seconds: state.phase_since,
         pending_question: state.pending_question.clone(),
+        pending_request: state.pending_request.clone(),
         tokens_used: state.tokens_used,
         branch: state.branch.clone(),
         dirty_files: state.dirty_files.clone(),

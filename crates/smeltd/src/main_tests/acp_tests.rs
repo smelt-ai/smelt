@@ -846,6 +846,7 @@ fn automation_run_keeps_elicitation_actions() {
             run_id: "run-2".into(),
         });
     slot.value.reduced.lock().elicitation = Some(smelt_core::acp_session::LiveElicitation {
+        id: "q1".into(),
         message: "补充信息".into(),
         raw_fields: Vec::new(),
         chosen: BTreeMap::new(),
@@ -3843,6 +3844,37 @@ fn pending_question_prefers_permission_over_elicitation() {
         acp_pending_question(&s).as_deref(),
         Some("要不要覆盖这个文件？")
     );
+}
+
+/// 会话状态里的 `pending_request` 跟问句取同一个请求：先审批，再选择题；身份换了请求就变。
+#[test]
+fn pending_request_names_the_request_the_question_comes_from() {
+    use smelt_core::acp_session::{LiveElicitation, LivePermission};
+
+    let mut s = AcpSessionState::default();
+    assert_eq!(acp_pending_request(&s), None);
+
+    s.elicitation = Some(LiveElicitation {
+        id: "q1".into(),
+        message: "选一个".into(),
+        raw_fields: Vec::new(),
+        chosen: BTreeMap::new(),
+        text_values: BTreeMap::new(),
+        responder: None,
+        recovered_tool_call_id: None,
+        raw_request_line: None,
+    });
+    assert_eq!(acp_pending_request(&s).as_deref(), Some("elicitation:q1"));
+
+    s.permissions.push(LivePermission {
+        question: "要不要覆盖这个文件？".into(),
+        tool_call_id: "t1".into(),
+        options: Vec::new(),
+        details: smelt_core::acp_session::ApprovalDetailsView::Generic,
+        responder: None,
+        raw_request_line: None,
+    });
+    assert_eq!(acp_pending_request(&s).as_deref(), Some("permission:t1"));
 }
 
 #[test]

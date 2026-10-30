@@ -4104,8 +4104,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionSummary dco_decode_session_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 15)
-      throw Exception('unexpected arr length: expect 15 but see ${arr.length}');
+    if (arr.length != 16)
+      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
     return SessionSummary(
       id: dco_decode_String(arr[0]),
       kind: dco_decode_session_kind(arr[1]),
@@ -4119,9 +4119,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       projectOrder: dco_decode_u_32(arr[9]),
       updatedAt: dco_decode_i_64(arr[10]),
       detail: dco_decode_opt_String(arr[11]),
-      attention: dco_decode_opt_box_autoadd_attention_item(arr[12]),
-      automation: dco_decode_opt_box_autoadd_automation_source(arr[13]),
-      agentDefinitionId: dco_decode_opt_String(arr[14]),
+      pendingRequest: dco_decode_opt_String(arr[12]),
+      attention: dco_decode_opt_box_autoadd_attention_item(arr[13]),
+      automation: dco_decode_opt_box_autoadd_automation_source(arr[14]),
+      agentDefinitionId: dco_decode_opt_String(arr[15]),
     );
   }
 
@@ -6611,6 +6612,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_projectOrder = sse_decode_u_32(deserializer);
     var var_updatedAt = sse_decode_i_64(deserializer);
     var var_detail = sse_decode_opt_String(deserializer);
+    var var_pendingRequest = sse_decode_opt_String(deserializer);
     var var_attention = sse_decode_opt_box_autoadd_attention_item(deserializer);
     var var_automation = sse_decode_opt_box_autoadd_automation_source(
       deserializer,
@@ -6629,6 +6631,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       projectOrder: var_projectOrder,
       updatedAt: var_updatedAt,
       detail: var_detail,
+      pendingRequest: var_pendingRequest,
       attention: var_attention,
       automation: var_automation,
       agentDefinitionId: var_agentDefinitionId,
@@ -8868,6 +8871,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.projectOrder, serializer);
     sse_encode_i_64(self.updatedAt, serializer);
     sse_encode_opt_String(self.detail, serializer);
+    sse_encode_opt_String(self.pendingRequest, serializer);
     sse_encode_opt_box_autoadd_attention_item(self.attention, serializer);
     sse_encode_opt_box_autoadd_automation_source(self.automation, serializer);
     sse_encode_opt_String(self.agentDefinitionId, serializer);

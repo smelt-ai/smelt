@@ -3485,6 +3485,7 @@ fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext)
             },
         );
         view.elicitation = Some(PendingElicitation {
+            id: "q1".into(),
             message: "请输入访问令牌".into(),
             fields: vec![ElicitFieldView {
                 key: "token".into(),
@@ -3532,6 +3533,7 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
             },
         );
         view.elicitation = Some(PendingElicitation {
+            id: "q1".into(),
             message: "选几种水果看看".into(),
             fields: vec![ElicitFieldView {
                 key: "value".into(),
@@ -3612,6 +3614,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
             },
         );
         view.elicitation = Some(PendingElicitation {
+            id: "q1".into(),
             message: "下一步要我执行哪项？".into(),
             fields: vec![ElicitFieldView {
                 key: "answer".into(),

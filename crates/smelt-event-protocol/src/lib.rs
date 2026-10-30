@@ -18,8 +18,11 @@ use std::{fmt, str::FromStr};
 ///
 /// v5：会话状态多了 `custom_title`（终端当前那段对话的名字，守护按身份查好）。会话状态
 /// 严格解码，旧客户端认不出这个字段，所以升版。
-pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 5;
-pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 5;
+///
+/// v6：会话状态多了 `pending_request`（对话会话正在等的那个审批或选择题的身份）。同样
+/// 严格解码，所以升版。
+pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 6;
+pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 6;
 
 pub const CORE_PROJECTION_VERSION: u16 = 1;
 /// v2 起 SessionStateChanged 带 hook 检测到的 provider，v3 起再带 provider 自己的
@@ -402,6 +405,10 @@ pub struct SessionStateChanged {
     #[serde(rename = "phase_since")]
     pub phase_since_unix_seconds: u64,
     pub pending_question: Option<String>,
+    /// 对话会话正在等的那个请求的身份：`permission:<工具调用 id>` 或
+    /// `elicitation:<卡片 id>`。变了就是换了一个请求；终端会话没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_request: Option<String>,
     pub tokens_used: Option<u64>,
     pub branch: Option<String>,
     pub dirty_files: Vec<String>,

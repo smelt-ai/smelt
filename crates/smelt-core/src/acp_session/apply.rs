@@ -1120,6 +1120,7 @@ fn apply_elicitation(
         return;
     }
     state.elicitation = Some(LiveElicitation {
+        id: uuid::Uuid::new_v4().simple().to_string(),
         message: message.clone(),
         raw_fields: fields,
         chosen: Default::default(),
@@ -1608,6 +1609,8 @@ pub(super) fn recovered_elicitation(
         });
     }
     (!fields.is_empty()).then(|| LiveElicitation {
+        // 恢复的卡跟着工具调用走，工具调用每更新一次就重建一次：身份取工具调用 id 才稳定。
+        id: format!("tool-{tool_call_id}"),
         message: title.to_string(),
         raw_fields: fields,
         chosen: Default::default(),

@@ -1,4 +1,4 @@
-//! 指挥台投影单测：排序、分段、指纹变了重取详情、非实时列表不出单据。
+//! 指挥台投影单测：排序、分段、换了请求才重取详情、非实时列表不出单据。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -30,6 +30,7 @@ fn session(
         project_order: 0,
         updated_at,
         detail: None,
+        pending_request: None,
         attention: None,
         automation: None,
         agent_definition_id: None,
@@ -46,8 +47,9 @@ fn with_attention(mut session: SessionSummary, kind: AttentionKind) -> SessionSu
     session
 }
 
+/// 在等审批的对话会话，等的是 `permission:<id>`。
 fn waiting(id: &str, updated_at: i64) -> SessionSummary {
-    with_attention(
+    let mut session = with_attention(
         session(
             id,
             SessionStatus::NeedsYou,
@@ -55,7 +57,9 @@ fn waiting(id: &str, updated_at: i64) -> SessionSummary {
             updated_at,
         ),
         AttentionKind::Approval,
-    )
+    );
+    session.pending_request = Some(format!("permission:{id}"));
+    session
 }
 
 fn live(sessions: Vec<SessionSummary>) -> SessionList {
@@ -242,14 +246,14 @@ fn a_ticket_without_activity_time_waits_since_it_was_first_seen() {
 }
 
 #[test]
-fn details_only_count_for_the_same_fingerprint() {
+fn details_belong_to_the_request_they_were_fetched_for() {
     let mut world = World::new(&["a"]);
     let first = waiting("s", 100);
     world.list("a", live(vec![first.clone()]));
     world.details.insert(
         key("a", "s"),
         Loaded {
-            fingerprint: fingerprint(&first),
+            request: first.pending_request.clone(),
             actions: actions(&["tool-1", "tool-2"]),
         },
     );
@@ -261,35 +265,40 @@ fn details_only_count_for_the_same_fingerprint() {
         "带第一个待批的审批"
     );
 
-    // 新的审批来了：摘要变了，旧详情不能再用（按钮会批到已经答过的那个）。
+    // 还在等同一个请求，会话别的地方变了（时间、问句、提醒）：详情照样显示，不闪回骨架。
+    let mut busy = first.clone();
+    busy.updated_at = 150;
+    busy.detail = Some("⚠ 还是那个问题".to_string());
+    busy.attention.as_mut().unwrap().message = "又提醒了一次".to_string();
+    world.list("a", live(vec![busy]));
+    let ticket = &world.project().tickets[0];
+    assert!(ticket.details_loaded);
+    assert!(ticket.permission.is_some());
+
+    // 换了一个请求：旧详情不能再用（按钮会批到已经答过的那个）。
     let mut next = first.clone();
-    next.updated_at = 200;
-    next.detail = Some("rm -rf build".to_string());
+    next.pending_request = Some("permission:tool-3".to_string());
     world.list("a", live(vec![next]));
     let ticket = &world.project().tickets[0];
     assert!(!ticket.details_loaded);
     assert!(ticket.permission.is_none());
 }
 
+/// 终端会话没有对话历史可取：单据只有摘要，不等详情。
 #[test]
-fn fingerprint_tracks_only_what_the_session_waits_for() {
-    let base = waiting("s", 100);
-    let mut renamed = base.clone();
-    renamed.title = "改了名".to_string();
-    renamed.project_order = 7;
-    assert_eq!(fingerprint(&base), fingerprint(&renamed));
-    for change in [
-        |s: &mut SessionSummary| s.phase = SessionPhase::WaitingForUser,
-        |s: &mut SessionSummary| s.status = SessionStatus::Idle,
-        |s: &mut SessionSummary| s.updated_at = 101,
-        |s: &mut SessionSummary| s.detail = Some("x".to_string()),
-        |s: &mut SessionSummary| s.attention.as_mut().unwrap().kind = AttentionKind::Input,
-        |s: &mut SessionSummary| s.attention.as_mut().unwrap().message = "另一个问题".to_string(),
-    ] {
-        let mut changed = base.clone();
-        change(&mut changed);
-        assert_ne!(fingerprint(&base), fingerprint(&changed));
-    }
+fn terminal_tickets_have_nothing_to_load() {
+    let mut world = World::new(&["a"]);
+    let mut terminal = session(
+        "t",
+        SessionStatus::NeedsYou,
+        SessionPhase::AwaitingApproval,
+        100,
+    );
+    terminal.kind = SessionKind::Terminal;
+    world.list("a", live(vec![terminal]));
+    let ticket = &world.project().tickets[0];
+    assert!(ticket.details_loaded);
+    assert!(ticket.permission.is_none());
 }
 
 #[test]
@@ -475,7 +484,7 @@ fn fetcher(
 }
 
 #[test]
-fn details_are_fetched_once_per_fingerprint_and_pushed() {
+fn details_are_fetched_once_per_request_and_pushed() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let hub = new_hub(fetcher(Arc::clone(&calls), |_, session| {
         Ok(actions(&[session]))
@@ -493,16 +502,19 @@ fn details_are_fetched_once_per_fingerprint_and_pushed() {
         pass.tickets[0].permission.as_ref().unwrap().tool_call_id,
         "s"
     );
-    // 摘要里无关的字段变了：不重取。
+    // 还在等同一个请求，会话改了名、又有了动静：不重取，详情一直在。
     let mut renamed = first.clone();
     renamed.title = "新名字".to_string();
+    renamed.updated_at = 150;
     hub.update("a", live(vec![renamed]));
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(passes.last().tickets[0].details_loaded, "不闪回骨架");
 
-    // 在等的东西变了：重取，取回前 details_loaded = false。
+    // 换了一个请求：重取，取回前 details_loaded = false。
     let mut next = first.clone();
     next.updated_at = 200;
+    next.pending_request = Some("permission:next".to_string());
     hub.update("a", live(vec![next]));
     passes.wait("重取后又到了", |pass| {
         pass.tickets[0].details_loaded && pass.tickets[0].session.updated_at == 200
@@ -616,7 +628,7 @@ fn a_reconnect_cuts_the_retry_backoff_short() {
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
-/// 机器重连（换代）时列表先退回缓存、单据暂时下架；连回来状态没变就不重取。
+/// 机器重连（换代）时列表先退回缓存、单据暂时下架；连回来还在等同一个请求就不重取。
 #[test]
 fn details_survive_a_reconnect() {
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -640,8 +652,10 @@ fn details_survive_a_reconnect() {
     hub.update("a", live(vec![waiting("s", 100)]));
     assert!(passes.last().tickets[0].details_loaded, "连回来直接带着详情");
 
-    hub.update("a", live(vec![waiting("s", 200)]));
-    passes.wait("状态变了才重取", |pass| {
+    let mut next = waiting("s", 200);
+    next.pending_request = Some("permission:next".to_string());
+    hub.update("a", live(vec![next]));
+    passes.wait("换了请求才重取", |pass| {
         pass.tickets.first().is_some_and(|ticket| ticket.details_loaded)
     });
     assert_eq!(calls.lock().unwrap().len(), 2);

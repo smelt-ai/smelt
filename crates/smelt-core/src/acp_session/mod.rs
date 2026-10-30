@@ -66,6 +66,10 @@ pub struct LivePermission {
 /// 选择题卡片：字段原始形态保留在 `raw_fields`（翻译回
 /// `ElicitationContentValue` 要用），`chosen` 是当前选择态。
 pub struct LiveElicitation {
+    /// 这张卡的身份：协议发来的创建时生成，从工具调用恢复的取那个工具调用。审批卡认
+    /// `tool_call_id`，选择题卡认它：客户端靠它分辨「还是不是同一个问题」（见会话状态的
+    /// `pending_request`）。
+    pub id: String,
     pub message: String,
     pub raw_fields: Vec<ElicitField>,
     pub chosen: BTreeMap<usize, Vec<usize>>,
@@ -488,6 +492,7 @@ impl AcpSessionState {
                 })
                 .collect();
             self.elicitation = pending_elicitation.map(|elicitation| LiveElicitation {
+                id: elicitation.id,
                 message: elicitation.message,
                 raw_fields: elicitation
                     .fields
@@ -827,6 +832,7 @@ impl AcpSessionState {
             },
             pending_elicitation: if include_envelope {
                 self.elicitation.as_ref().map(|e| PendingElicitation {
+                    id: e.id.clone(),
                     message: e.message.clone(),
                     fields: e.raw_fields.iter().map(elicit_field_view).collect(),
                     chosen: e.chosen.clone(),

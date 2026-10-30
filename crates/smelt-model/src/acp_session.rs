@@ -242,6 +242,9 @@ fn elicitation_field_required_by_default() -> bool {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PendingElicitation {
+    /// 卡片身份，见 `LiveElicitation::id`。
+    #[serde(default)]
+    pub id: String,
     pub message: String,
     pub fields: Vec<ElicitFieldView>,
     /// 已选中的 (字段下标 → 选项下标列表)，跟旧版 `ElicitCard.chosen` 同一份

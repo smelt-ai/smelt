@@ -68,6 +68,10 @@ pub(crate) struct SessionState {
     pub(crate) phase_since: u64,
     /// 在问什么——远程遥控的命脉，Phase 6 的 action 门闩靠它判断能不能安全写入。
     pub(crate) pending_question: Option<String>,
+    /// 对话会话正在等的那个请求的身份（`permission:<工具调用 id>` / `elicitation:<卡片 id>`），
+    /// 客户端靠它分辨「还是不是同一个请求」。终端会话没有。只属于这个进程里的运行时，不落盘。
+    #[serde(skip)]
+    pub(crate) pending_request: Option<String>,
     /// 累计花费口径（各轮 cache_read 都加了），**不是**上下文占用，不能当余量分母。
     /// 见 session_history::SessionSummary.total_tokens；目前没接，先占位。
     pub(crate) tokens_used: Option<u64>,
@@ -139,6 +143,7 @@ impl Default for SessionState {
             phase: Phase::Idle,
             phase_since: 0,
             pending_question: None,
+            pending_request: None,
             tokens_used: None,
             branch: None,
             dirty_files: Vec::new(),

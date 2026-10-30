@@ -878,6 +878,10 @@ class SessionSummary {
   /// 工具名或审批问句。
   final String? detail;
 
+  /// 对话会话正在等的那个审批或选择题的身份，变了就是换了一个请求。终端会话、没在等的
+  /// 会话没有。
+  final String? pendingRequest;
+
   /// 这台手机上还没读的提醒；有值就是未读。
   final AttentionItem? attention;
 
@@ -900,6 +904,7 @@ class SessionSummary {
     required this.projectOrder,
     required this.updatedAt,
     this.detail,
+    this.pendingRequest,
     this.attention,
     this.automation,
     this.agentDefinitionId,
@@ -919,6 +924,7 @@ class SessionSummary {
       projectOrder.hashCode ^
       updatedAt.hashCode ^
       detail.hashCode ^
+      pendingRequest.hashCode ^
       attention.hashCode ^
       automation.hashCode ^
       agentDefinitionId.hashCode;
@@ -940,6 +946,7 @@ class SessionSummary {
           projectOrder == other.projectOrder &&
           updatedAt == other.updatedAt &&
           detail == other.detail &&
+          pendingRequest == other.pendingRequest &&
           attention == other.attention &&
           automation == other.automation &&
           agentDefinitionId == other.agentDefinitionId;
