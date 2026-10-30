@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::daemon_state::DaemonPhase;
+use serde::Deserialize as _;
 use smelt_model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
-use smelt_model::acp_wire::FrameMirror;
+use smelt_model::acp_wire::{FrameDelta, FrameMirror};
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use smelt_runtime_client::{RuntimeClient, RuntimeStream};
@@ -249,25 +250,27 @@ fn read_snapshot_frame(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
         return SnapshotFrame::Ignore;
     };
-    // 增量帧经镜像还原成完整的快照帧，之后和整段帧一样解析；整段帧顺手重建镜像。
-    let value = match value.get("delta") {
-        Some(delta) => {
-            let restored = serde_json::from_value(delta.clone())
-                .ok()
-                .and_then(|delta| mirror.apply(&delta).ok());
-            match restored {
-                Some(frame) => frame,
-                None => return SnapshotFrame::NeedsFullFrame,
-            }
-        }
+    // 增量帧经镜像还原成完整快照帧的文本，之后和整段帧一样按类型解析；整段帧顺手重建镜像。
+    let restored = match value.get("delta") {
+        Some(delta) => match FrameDelta::deserialize(delta)
+            .ok()
+            .and_then(|delta| mirror.apply(&delta).ok())
+        {
+            Some(text) => Some(text),
+            None => return SnapshotFrame::NeedsFullFrame,
+        },
+        None => None,
+    };
+    let (text, value) = match &restored {
+        Some(text) => (text.as_str(), None),
         None => {
             if value.get("snapshot").is_some() {
                 mirror.full(&value);
             }
-            value
+            (line.trim(), Some(value))
         }
     };
-    if let Ok(frame) = serde_json::from_value::<DecodedAcpSnapshotFrame>(value.clone()) {
+    if let Ok(frame) = serde_json::from_str::<DecodedAcpSnapshotFrame>(text) {
         if let Some(mut snapshot) = frame.snapshot {
             // 快照对象缺了恢复身份时，活状态头里的那份仍然有效。
             // 不能因为这一帧没带字段，就把已经确认的对话 id 丢掉。
@@ -286,6 +289,18 @@ fn read_snapshot_frame(
         }
         return SnapshotFrame::Ignore;
     }
+    // 按类型读不懂，才拆成 JSON 树找还能用的活状态。还原出的帧连 JSON 都不是，
+    // 说明镜像坏了：作废它，要整段帧。
+    let value = match value {
+        Some(value) => value,
+        None => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => value,
+            Err(_) => {
+                mirror.invalidate();
+                return SnapshotFrame::NeedsFullFrame;
+            }
+        },
+    };
     let live = value
         .get("live")
         .and_then(|live| smelt_model::acp_session::SessionLive::from_json(live).ok())

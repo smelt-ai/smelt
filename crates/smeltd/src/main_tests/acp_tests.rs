@@ -19,9 +19,12 @@ fn nothing_sent() -> smelt_core::acp_wire::FrameMirror {
 fn decode_frame(mirror: &mut smelt_core::acp_wire::FrameMirror, line: &str) -> serde_json::Value {
     let frame: serde_json::Value = serde_json::from_str(line).unwrap();
     match frame.get("delta") {
-        Some(delta) => mirror
-            .apply(&serde_json::from_value(delta.clone()).unwrap())
-            .unwrap(),
+        Some(delta) => serde_json::from_str(
+            &mirror
+                .apply(&serde_json::from_value(delta.clone()).unwrap())
+                .unwrap(),
+        )
+        .unwrap(),
         None => {
             mirror.full(&frame);
             frame

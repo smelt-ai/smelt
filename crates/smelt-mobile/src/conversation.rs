@@ -888,38 +888,53 @@ impl Watch {
             if let Some(reason) = unavailable_reason(&value) {
                 return StreamEnd::Unavailable(reason);
             }
-            let frame = if let Some(delta) = value.get_mut("delta").map(Value::take) {
-                let restored = serde_json::from_value::<FrameDelta>(delta)
+            // 增量帧经镜像还原成完整快照帧的文本，跟整段帧一样按类型解析一次。
+            let restored = if let Some(delta) = value.get_mut("delta").map(Value::take) {
+                match serde_json::from_value::<FrameDelta>(delta)
                     .ok()
-                    .and_then(|delta| mirror.apply(&delta).ok());
-                match restored {
-                    Some(frame) => frame,
+                    .and_then(|delta| mirror.apply(&delta).ok())
+                {
+                    Some(frame) => Some(frame),
                     None => {
-                        // 镜像对不上：这一帧作废，要一份整段帧。等它来之前不重复要。
-                        if !awaiting_full {
-                            awaiting_full = true;
-                            if let Err(e) =
-                                action_on(client, &self.session_id, &AcpUserAction::Refresh)
-                            {
-                                log::warn!("请求整段快照失败：{}", e.message);
-                                awaiting_full = false;
-                            }
-                        }
+                        // 镜像对不上：这一帧作废，要一份整段帧。
+                        self.ask_full_frame(client, &mut awaiting_full);
                         continue;
                     }
                 }
             } else if value.get("snapshot").is_some() {
                 mirror.full(&value);
                 awaiting_full = false;
-                value
+                None
             } else {
                 continue;
             };
-            let Some(snapshot) = decode_frame(frame) else {
+            let text = restored.as_deref().map_or(line.as_slice(), str::as_bytes);
+            let Some(snapshot) = decode_frame(text) else {
+                // 还原出的帧连 JSON 都不是：镜像坏了，作废它、要整段帧。只是按类型读不懂
+                // （比如运行时比手机新）就跟整段帧一样丢掉这一帧，要了整段帧也一样读不懂，
+                // 还会让运行时给这段对话的每条连接都重发整段。
+                if restored.is_some()
+                    && serde_json::from_slice::<serde::de::IgnoredAny>(text).is_err()
+                {
+                    mirror.invalidate();
+                    self.ask_full_frame(client, &mut awaiting_full);
+                }
                 continue;
             };
             frames += 1;
             self.apply_live(snapshot);
+        }
+    }
+
+    /// 要一份整段帧。等它来之前不重复要。
+    fn ask_full_frame(&self, client: &RuntimeClient, awaiting_full: &mut bool) {
+        if *awaiting_full {
+            return;
+        }
+        *awaiting_full = true;
+        if let Err(e) = action_on(client, &self.session_id, &AcpUserAction::Refresh) {
+            log::warn!("请求整段快照失败：{}", e.message);
+            *awaiting_full = false;
         }
     }
 
@@ -1054,24 +1069,33 @@ fn unavailable_reason(value: &Value) -> Option<String> {
     )
 }
 
-/// 一份完整的快照帧 → 快照。快照里缺恢复身份时用活状态头里的那份。
-fn decode_frame(mut frame: Value) -> Option<ConversationSnapshot> {
-    let live_history = frame
-        .get("live")
-        .and_then(|live| live.get("history_session_id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_string);
-    let snapshot = frame.get_mut("snapshot")?.take();
-    let mut snapshot: ConversationSnapshot = match serde_json::from_value(snapshot) {
-        Ok(snapshot) => snapshot,
+/// 一份完整快照帧的 JSON 文本 → 快照。快照里缺恢复身份时用活状态头里的那份。
+fn decode_frame(text: &[u8]) -> Option<ConversationSnapshot> {
+    /// 帧里只用得到这两样，活状态头的其余字段不读。
+    #[derive(serde::Deserialize)]
+    struct Frame {
+        #[serde(default)]
+        live: Option<Live>,
+        snapshot: Option<ConversationSnapshot>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Live {
+        #[serde(default)]
+        history_session_id: Option<String>,
+    }
+    let frame: Frame = match serde_json::from_slice(text) {
+        Ok(frame) => frame,
         Err(e) => {
             log::warn!("对话快照解析失败：{e}");
             return None;
         }
     };
+    let mut snapshot = frame.snapshot?;
     if snapshot.history_session_id.is_none() {
-        snapshot.history_session_id = live_history;
+        snapshot.history_session_id = frame
+            .live
+            .and_then(|live| live.history_session_id)
+            .filter(|id| !id.trim().is_empty());
     }
     merge::normalize(&mut snapshot);
     Some(snapshot)
