@@ -322,10 +322,7 @@ pub(super) fn static_cert_hash(path: &Path) -> Result<Option<String>, String> {
         ));
     }
     let certificate_data = unsafe { CFData::wrap_under_create_rule(certificate_data) };
-    Ok(Some(format!(
-        "{:x}",
-        Sha256::digest(certificate_data.bytes())
-    )))
+    Ok(Some(hex::encode(Sha256::digest(certificate_data.bytes()))))
 }
 
 #[cfg(target_os = "macos")]

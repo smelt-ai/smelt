@@ -224,7 +224,7 @@ pub fn worktree_hash(root: &str, path: &str) -> Option<String> {
     } else {
         return None;
     }
-    Some(format!("{:x}", hasher.finalize()))
+    Some(hex::encode(hasher.finalize()))
 }
 
 /// 丢弃前的校验失败时给人看的话。

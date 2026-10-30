@@ -149,7 +149,7 @@ impl StagedUpdate {
             let mut hasher = Sha256::new();
             hasher.update(self.url.as_bytes());
             hasher.update(self.staged_app.as_os_str().as_encoded_bytes());
-            self.id = format!("legacy-{:x}", hasher.finalize());
+            self.id = format!("legacy-{}", hex::encode(hasher.finalize()));
         }
     }
 
@@ -1148,8 +1148,8 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
         }
     }
     Ok(format!(
-        "{BUNDLE_FINGERPRINT_VERSION}:{:x}",
-        hasher.finalize()
+        "{BUNDLE_FINGERPRINT_VERSION}:{}",
+        hex::encode(hasher.finalize())
     ))
 }
 

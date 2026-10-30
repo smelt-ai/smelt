@@ -646,7 +646,7 @@ fn source_digest(source: &str, colors: &DiagramColors) -> String {
     hasher.update(source.as_bytes());
     hasher.update(b"\0");
     colors.feed(&mut hasher);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// SVG 根元素的 `viewBox="x y w h"`（兼容单双引号及多余空白）里取后两个数当自然像素尺寸。

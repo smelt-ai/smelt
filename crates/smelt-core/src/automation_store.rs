@@ -819,7 +819,7 @@ fn automation_workspace_path(root: &Path, automation_id: &str) -> PathBuf {
     digest.update(AUTOMATION_WORKSPACE_HASH_DOMAIN);
     digest.update((automation_id.len() as u64).to_be_bytes());
     digest.update(automation_id.as_bytes());
-    let encoded = format!("{:x}", digest.finalize());
+    let encoded = hex::encode(digest.finalize());
     root.join(encoded)
 }
 

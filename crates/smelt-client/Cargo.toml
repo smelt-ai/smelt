@@ -18,6 +18,7 @@ reqwest = { version = "0.13", features = ["json"] }
 # 更新器按发版号比新旧（Windows 认编进程序的发版号）。
 semver = "1"
 sha2 = "0.11"
+hex = "0.4"
 tokio = { version = "1", features = ["full"] }
 url = "2"
 smelt-event-protocol = { path = "../smelt-event-protocol" }

@@ -63,7 +63,7 @@ fn is_ours(dir: &Path, ours: &[&str]) -> bool {
 }
 
 fn sha256(contents: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(contents))
+    hex::encode(Sha256::digest(contents))
 }
 
 #[cfg(test)]
