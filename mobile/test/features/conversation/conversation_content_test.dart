@@ -362,22 +362,53 @@ void main() {
 
   group('纯计算', () {
     test('连续的工具调用收成一组，中间的空正文不拆组', () {
-      final blocks = buildBlocks(
-        h.view(
-          entries: [
-            h.entry(0, EntryKind.user, text: 'go'),
-            h.entry(1, EntryKind.toolCall, tool: h.tool('a', 'a')),
-            h.entry(2, EntryKind.assistant, text: '  '),
-            h.entry(3, EntryKind.toolCall, tool: h.tool('b', 'b')),
-            h.entry(4, EntryKind.assistant, text: 'done'),
-            h.entry(5, EntryKind.toolCall, tool: h.tool('c', 'c')),
-          ],
-          finalAnswerIndex: 4,
-        ),
-      );
+      final blocks = buildBlocks([
+        h.entry(0, EntryKind.user, text: 'go'),
+        h.entry(1, EntryKind.toolCall, tool: h.tool('a', 'a')),
+        h.entry(2, EntryKind.assistant, text: '  '),
+        h.entry(3, EntryKind.toolCall, tool: h.tool('b', 'b')),
+        h.entry(4, EntryKind.assistant, text: 'done'),
+        h.entry(5, EntryKind.toolCall, tool: h.tool('c', 'c')),
+      ], finalAnswerIndex: 4);
       expect(blocks.map((b) => b.key), ['e0', 't1', 'e4', 't5']);
       expect((blocks[1] as ToolGroupBlock).calls.map((c) => c.id), ['a', 'b']);
       expect((blocks[2] as EntryBlock).isFinal, isTrue);
+    });
+
+    test('视图只带变了的那段：截到 entriesFrom 接上，窗口起点变了就整个换', () {
+      List<int> indexes(List<ConversationEntry> entries) => [
+        for (final e in entries) e.index,
+      ];
+      var entries = mergeEntries(const [], null, h.view());
+      expect(indexes(entries), [0, 1, 2]);
+
+      entries = mergeEntries(
+        entries,
+        0,
+        h.view(
+          entries: [
+            h.entry(2, EntryKind.assistant, text: 'longer'),
+            h.entry(3, EntryKind.user, text: 'next'),
+          ],
+          entriesFrom: 2,
+        ),
+      );
+      expect(indexes(entries), [0, 1, 2, 3]);
+      expect(entries[2].text, 'longer');
+
+      entries = mergeEntries(entries, 0, h.view(entries: [], entriesFrom: 4));
+      expect(indexes(entries), [0, 1, 2, 3], reason: '只变了快照头，条目原样');
+
+      entries = mergeEntries(
+        entries,
+        0,
+        h.view(
+          entries: [h.entry(9, EntryKind.user, text: 'other')],
+          entriesOffset: 9,
+          entriesFrom: 9,
+        ),
+      );
+      expect(indexes(entries), [9], reason: '窗口起点变了，整个换成视图里的');
     });
 
     test('diff 按行对齐，新文件全是新增', () {

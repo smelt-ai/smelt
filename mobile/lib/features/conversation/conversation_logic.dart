@@ -46,8 +46,25 @@ bool _invisible(ConversationEntry e) => switch (e.kind) {
   _ => false,
 };
 
-/// 把快照里的条目分块。连续的工具调用（中间只隔着空条目）收成一组。
-List<ConversationBlock> buildBlocks(ConversationView view) {
+/// 视图只带从 `entriesFrom` 起的条目，前面的沿用手里的窗口：截到那里再接上。视图带着
+/// 整个窗口（`entriesFrom == entriesOffset`），或手里的窗口起点对不上时，直接用视图里的。
+List<ConversationEntry> mergeEntries(
+  List<ConversationEntry> current,
+  int? currentOffset,
+  ConversationView view,
+) {
+  final keep = view.entriesFrom - view.entriesOffset;
+  if (keep <= 0 || currentOffset != view.entriesOffset) return view.entries;
+  assert(keep <= current.length, '视图从 ${view.entriesFrom} 起，手里的窗口接不上');
+  return [...current.take(keep), ...view.entries];
+}
+
+/// 把窗口里的条目分块。连续的工具调用（中间只隔着空条目）收成一组。
+/// `finalAnswerIndex` 是「最终回答」在窗口里的下标。
+List<ConversationBlock> buildBlocks(
+  List<ConversationEntry> entries, {
+  int? finalAnswerIndex,
+}) {
   final blocks = <ConversationBlock>[];
   List<ToolCallView>? group;
   var groupStart = 0;
@@ -56,7 +73,7 @@ List<ConversationBlock> buildBlocks(ConversationView view) {
     group = null;
   }
 
-  for (final (i, entry) in view.entries.indexed) {
+  for (final (i, entry) in entries.indexed) {
     if (_invisible(entry)) continue;
     final call = entry.toolCall;
     if (entry.kind == EntryKind.toolCall && call != null) {
@@ -68,7 +85,7 @@ List<ConversationBlock> buildBlocks(ConversationView view) {
       continue;
     }
     flush();
-    blocks.add(EntryBlock(entry, isFinal: view.finalAnswerIndex == i));
+    blocks.add(EntryBlock(entry, isFinal: finalAnswerIndex == i));
   }
   flush();
   return blocks;

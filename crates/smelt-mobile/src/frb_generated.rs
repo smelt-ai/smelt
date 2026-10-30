@@ -2811,6 +2811,7 @@ impl SseDecode for crate::api::conversation::ConversationView {
             <Option<crate::api::conversation::Elicitation>>::sse_decode(deserializer);
         let mut var_entries =
             <Vec<crate::api::conversation::ConversationEntry>>::sse_decode(deserializer);
+        let mut var_entriesFrom = <i64>::sse_decode(deserializer);
         let mut var_entriesOffset = <i64>::sse_decode(deserializer);
         let mut var_hasMoreBefore = <bool>::sse_decode(deserializer);
         let mut var_finalAnswerIndex = <Option<u32>>::sse_decode(deserializer);
@@ -2837,6 +2838,7 @@ impl SseDecode for crate::api::conversation::ConversationView {
             pending_permissions: var_pendingPermissions,
             pending_elicitation: var_pendingElicitation,
             entries: var_entries,
+            entries_from: var_entriesFrom,
             entries_offset: var_entriesOffset,
             has_more_before: var_hasMoreBefore,
             final_answer_index: var_finalAnswerIndex,
@@ -5736,6 +5738,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationVie
             self.pending_permissions.into_into_dart().into_dart(),
             self.pending_elicitation.into_into_dart().into_dart(),
             self.entries.into_into_dart().into_dart(),
+            self.entries_from.into_into_dart().into_dart(),
             self.entries_offset.into_into_dart().into_dart(),
             self.has_more_before.into_into_dart().into_dart(),
             self.final_answer_index.into_into_dart().into_dart(),
@@ -7891,6 +7894,7 @@ impl SseEncode for crate::api::conversation::ConversationView {
             serializer,
         );
         <Vec<crate::api::conversation::ConversationEntry>>::sse_encode(self.entries, serializer);
+        <i64>::sse_encode(self.entries_from, serializer);
         <i64>::sse_encode(self.entries_offset, serializer);
         <bool>::sse_encode(self.has_more_before, serializer);
         <Option<u32>>::sse_encode(self.final_answer_index, serializer);

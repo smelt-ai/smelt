@@ -1,6 +1,7 @@
 //! 订阅与动作的单测：假运行时在 `RuntimeStream::pair()` 上按线格式回包，假连接状态源可以
 //! 随时换代、掉线。
 
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
@@ -12,6 +13,7 @@ use smelt_runtime_client::protocol::control::ControlResponse;
 
 use super::merge::tests::{assistant, snapshot, snapshot_json};
 use super::*;
+use crate::api::conversation::ConversationPhase;
 
 const SESSION: &str = "acp-1";
 const ENDPOINT: &str = "runtime-endpoint";
@@ -281,12 +283,47 @@ impl RuntimeSource for FakeSource {
 // 订阅端
 // ---------------------------------------------------------------------------
 
-/// 一个订阅者收到的事件，带它的订阅编号。
-struct Events(mpsc::Receiver<ConversationEvent>, u32);
+/// 一个订阅者收到的事件，带它的订阅编号，和它手里的窗口（窗口起点、条目）。
+///
+/// 视图只带从 `entries_from` 起的条目，这里按 Dart 的做法接上手里的窗口，把
+/// `view.entries` 换成整个窗口，断言照常看整个窗口；接不上就是推错了，直接失败。
+struct Events(
+    mpsc::Receiver<ConversationEvent>,
+    u32,
+    RefCell<Option<(i64, Vec<ConversationEntry>)>>,
+);
 
 impl Events {
     fn next(&self) -> ConversationEvent {
-        self.0.recv_timeout(WAIT).expect("等不到事件")
+        self.assemble(self.0.recv_timeout(WAIT).expect("等不到事件"))
+    }
+
+    fn assemble(&self, mut event: ConversationEvent) -> ConversationEvent {
+        let Some(view) = event.view.as_mut() else {
+            return event;
+        };
+        let keep = usize::try_from(view.entries_from - view.entries_offset).unwrap();
+        let mut window = self.2.borrow_mut();
+        let mut entries = match window.take() {
+            Some((offset, mut entries)) if offset == view.entries_offset && keep > 0 => {
+                assert!(
+                    keep <= entries.len(),
+                    "视图从 {} 起，手里的窗口只到 {}",
+                    view.entries_from,
+                    offset + entries.len() as i64
+                );
+                entries.truncate(keep);
+                entries
+            }
+            _ => {
+                assert_eq!(keep, 0, "手里没有这个窗口，视图却只带了后面一段");
+                Vec::new()
+            }
+        };
+        entries.append(&mut view.entries);
+        *window = Some((view.entries_offset, entries.clone()));
+        view.entries = entries;
+        event
     }
 
     /// 下一个满足条件的快照（跳过中间被合并掉的）。
@@ -298,10 +335,11 @@ impl Events {
         let deadline = Instant::now() + WAIT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let event = self
-                .0
-                .recv_timeout(left)
-                .unwrap_or_else(|_| panic!("等不到快照：{what}"));
+            let event = self.assemble(
+                self.0
+                    .recv_timeout(left)
+                    .unwrap_or_else(|_| panic!("等不到快照：{what}")),
+            );
             if event.kind == ConversationEventKind::Snapshot && accept(&event) {
                 return event;
             }
@@ -310,7 +348,10 @@ impl Events {
 
     fn quiet(&self) -> Vec<ConversationEvent> {
         std::thread::sleep(Duration::from_millis(100));
-        self.0.try_iter().collect()
+        self.0
+            .try_iter()
+            .map(|event| self.assemble(event))
+            .collect()
     }
 }
 
@@ -343,7 +384,7 @@ fn watch_session(conversations: &Conversations, session_id: &str) -> Events {
         id,
         Box::new(move |event| tx.send(event).is_ok()),
     );
-    Events(rx, id)
+    Events(rx, id, RefCell::new(None))
 }
 
 fn labels(range: std::ops::Range<usize>) -> Vec<String> {
@@ -364,6 +405,33 @@ fn setup() -> (Arc<FakeRuntime>, Arc<FakeSource>, Conversations) {
 // ---------------------------------------------------------------------------
 // 订阅
 // ---------------------------------------------------------------------------
+
+/// 流式输出时只推变了的条目，只变了快照头时一条也不推。
+#[test]
+fn only_changed_entries_are_pushed() {
+    let (runtime, _source, conversations) = setup();
+    let events = watch(&conversations);
+    let watcher = runtime.watcher(1);
+    let mut all = labels(0..50);
+    watcher.full(snapshot_json(0, 50, 1, &entries(&all)));
+    let event = events.snapshot_where("整段", |event| texts(event).len() == 50);
+    assert_eq!(event.view.unwrap().entries_from, 0, "第一份带整个窗口");
+
+    all[49] = "e49 接着说".into();
+    let mut grown = snapshot_json(0, 50, 2, &entries(&all));
+    watcher.delta(grown.clone());
+    let event = events.snapshot_where("最后一条变长", |event| texts(event) == all);
+    assert_eq!(event.view.unwrap().entries_from, 49, "只推变了的那条");
+
+    grown["phase"] = "thinking".into();
+    grown["snapshot_revision"] = 3.into();
+    watcher.delta(grown);
+    let event = events.snapshot_where("相位变了", |event| {
+        event.view.as_ref().unwrap().phase == ConversationPhase::Thinking
+    });
+    assert_eq!(texts(&event), all);
+    assert_eq!(event.view.unwrap().entries_from, 50, "条目没变，一条也不带");
+}
 
 #[test]
 fn full_and_delta_frames_restore_the_view() {
@@ -576,6 +644,7 @@ fn load_older_merges_the_previous_page_into_the_stream() {
     let view = event.view.unwrap();
     assert!(!view.has_more_before);
     assert_eq!(view.entries_offset, 0);
+    assert_eq!(view.entries_from, 0, "窗口起点挪了，整个窗口重推");
 
     assert_eq!(conversations.load_older(SESSION), Ok(false), "到头了");
     assert_eq!(

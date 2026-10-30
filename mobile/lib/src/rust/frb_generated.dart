@@ -2972,8 +2972,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ConversationView dco_decode_conversation_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 21)
-      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
+    if (arr.length != 22)
+      throw Exception('unexpected arr length: expect 22 but see ${arr.length}');
     return ConversationView(
       sessionId: dco_decode_String(arr[0]),
       phase: dco_decode_conversation_phase(arr[1]),
@@ -2988,14 +2988,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       pendingPermissions: dco_decode_list_permission_request(arr[10]),
       pendingElicitation: dco_decode_opt_box_autoadd_elicitation(arr[11]),
       entries: dco_decode_list_conversation_entry(arr[12]),
-      entriesOffset: dco_decode_i_64(arr[13]),
-      hasMoreBefore: dco_decode_bool(arr[14]),
-      finalAnswerIndex: dco_decode_opt_box_autoadd_u_32(arr[15]),
-      supportsImage: dco_decode_bool(arr[16]),
-      availableCommands: dco_decode_list_slash_command(arr[17]),
-      usage: dco_decode_opt_box_autoadd_context_usage(arr[18]),
-      model: dco_decode_opt_box_autoadd_model_selector(arr[19]),
-      configOptions: dco_decode_list_config_option(arr[20]),
+      entriesFrom: dco_decode_i_64(arr[13]),
+      entriesOffset: dco_decode_i_64(arr[14]),
+      hasMoreBefore: dco_decode_bool(arr[15]),
+      finalAnswerIndex: dco_decode_opt_box_autoadd_u_32(arr[16]),
+      supportsImage: dco_decode_bool(arr[17]),
+      availableCommands: dco_decode_list_slash_command(arr[18]),
+      usage: dco_decode_opt_box_autoadd_context_usage(arr[19]),
+      model: dco_decode_opt_box_autoadd_model_selector(arr[20]),
+      configOptions: dco_decode_list_config_option(arr[21]),
     );
   }
 
@@ -5019,6 +5020,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       deserializer,
     );
     var var_entries = sse_decode_list_conversation_entry(deserializer);
+    var var_entriesFrom = sse_decode_i_64(deserializer);
     var var_entriesOffset = sse_decode_i_64(deserializer);
     var var_hasMoreBefore = sse_decode_bool(deserializer);
     var var_finalAnswerIndex = sse_decode_opt_box_autoadd_u_32(deserializer);
@@ -5041,6 +5043,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       pendingPermissions: var_pendingPermissions,
       pendingElicitation: var_pendingElicitation,
       entries: var_entries,
+      entriesFrom: var_entriesFrom,
       entriesOffset: var_entriesOffset,
       hasMoreBefore: var_hasMoreBefore,
       finalAnswerIndex: var_finalAnswerIndex,
@@ -7462,6 +7465,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_permission_request(self.pendingPermissions, serializer);
     sse_encode_opt_box_autoadd_elicitation(self.pendingElicitation, serializer);
     sse_encode_list_conversation_entry(self.entries, serializer);
+    sse_encode_i_64(self.entriesFrom, serializer);
     sse_encode_i_64(self.entriesOffset, serializer);
     sse_encode_bool(self.hasMoreBefore, serializer);
     sse_encode_opt_box_autoadd_u_32(self.finalAnswerIndex, serializer);

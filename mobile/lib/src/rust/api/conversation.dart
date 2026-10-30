@@ -480,6 +480,7 @@ enum ConversationPhase {
 }
 
 /// 对话页要画的全部内容。条目是「已经在手里的连续窗口」：实时尾部加上翻出来的更早页。
+/// 每份视图只带从 `entries_from` 起的条目，前面的跟上一份一样，沿用手里的（见 `entries`）。
 class ConversationView {
   final String sessionId;
   final ConversationPhase phase;
@@ -508,16 +509,22 @@ class ConversationView {
   final List<PermissionRequest> pendingPermissions;
   final Elicitation? pendingElicitation;
 
-  /// 按时间正序。
+  /// 按时间正序，从 `entries_from` 起到窗口末尾。手里的窗口截到 `entries_from` 再接上它们，
+  /// 就是整个窗口。
   final List<ConversationEntry> entries;
 
-  /// `entries[0]` 在整段对话里的下标。
+  /// `entries[0]` 在整段对话里的下标。等于 `entries_offset` 时这份视图带着整个窗口：
+  /// 订阅后的第一份、翻页或换了一段对话之后都是这样。
+  final PlatformInt64 entriesFrom;
+
+  /// 窗口第一条在整段对话里的下标。
   final PlatformInt64 entriesOffset;
 
   /// 前面还有更早的条目可翻（[`load_older`]）。
   final bool hasMoreBefore;
 
-  /// 回合已结束时，「最终回答」在 `entries` 里的下标（最后一条非空正文或完成信号）。
+  /// 回合已结束时，「最终回答」在整个窗口里的下标（从 `entries_offset` 数起；最后一条
+  /// 非空正文或完成信号）。
   final int? finalAnswerIndex;
   final bool supportsImage;
   final List<SlashCommand> availableCommands;
@@ -541,6 +548,7 @@ class ConversationView {
     required this.pendingPermissions,
     this.pendingElicitation,
     required this.entries,
+    required this.entriesFrom,
     required this.entriesOffset,
     required this.hasMoreBefore,
     this.finalAnswerIndex,
@@ -566,6 +574,7 @@ class ConversationView {
       pendingPermissions.hashCode ^
       pendingElicitation.hashCode ^
       entries.hashCode ^
+      entriesFrom.hashCode ^
       entriesOffset.hashCode ^
       hasMoreBefore.hashCode ^
       finalAnswerIndex.hashCode ^
@@ -593,6 +602,7 @@ class ConversationView {
           pendingPermissions == other.pendingPermissions &&
           pendingElicitation == other.pendingElicitation &&
           entries == other.entries &&
+          entriesFrom == other.entriesFrom &&
           entriesOffset == other.entriesOffset &&
           hasMoreBefore == other.hasMoreBefore &&
           finalAnswerIndex == other.finalAnswerIndex &&
