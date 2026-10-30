@@ -54,6 +54,10 @@ List<ConversationEntry> mergeEntries(
   ConversationView view,
 ) {
   final keep = view.entriesFrom - view.entriesOffset;
+  assert(
+    keep <= 0 || currentOffset == view.entriesOffset,
+    '视图只带后面一段，手里的窗口起点却对不上',
+  );
   if (keep <= 0 || currentOffset != view.entriesOffset) return view.entries;
   assert(keep <= current.length, '视图从 ${view.entriesFrom} 起，手里的窗口接不上');
   return [...current.take(keep), ...view.entries];
