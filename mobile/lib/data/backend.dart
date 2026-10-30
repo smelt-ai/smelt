@@ -8,6 +8,7 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import '../src/rust/api/agents.dart' as agents;
 import '../src/rust/api/catalog.dart' as catalog;
 import '../src/rust/api/conversation.dart' as conversation;
 import '../src/rust/api/draft.dart' as draft;
@@ -79,6 +80,36 @@ abstract interface class Backend {
     required String resumeId,
     String? title,
   });
+
+  // 智能体 -------------------------------------------------------------------
+  /// 编辑页要的配置和可选项；`agentId` 为空是新建。
+  Future<AgentEditor> agentEditor(String runtimeId, {String? agentId});
+  Future<AgentDefinitionSummary> createAgent(
+    String runtimeId,
+    AgentDraft draft,
+  );
+
+  /// 只把 [edited] 里和 [original] 不同的字段发给运行时。
+  Future<AgentDefinitionSummary> updateAgent(
+    String runtimeId,
+    String agentId, {
+    required AgentDraft original,
+    required AgentDraft edited,
+  });
+  Future<void> deleteAgent(String runtimeId, String agentId);
+  Future<AgentMemories> agentMemories(String runtimeId, String agentId);
+  Future<AgentMemories> approveMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  );
+  Future<AgentMemories> deleteMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  );
 
   // 对话 ---------------------------------------------------------------------
   /// 订阅一个会话。每次调用是一个独立的订阅者：同一会话可以同时有几个（新页先订、旧页
@@ -305,6 +336,63 @@ class FrbBackend implements Backend {
 
   /// 订阅者编号，进程内不重复。
   static int _nextWatchId = 0;
+
+  @override
+  Future<AgentEditor> agentEditor(String runtimeId, {String? agentId}) =>
+      agents.agentEditor(runtimeId: runtimeId, agentId: agentId);
+
+  @override
+  Future<AgentDefinitionSummary> createAgent(
+    String runtimeId,
+    AgentDraft draft,
+  ) => agents.createAgent(runtimeId: runtimeId, draft: draft);
+
+  @override
+  Future<AgentDefinitionSummary> updateAgent(
+    String runtimeId,
+    String agentId, {
+    required AgentDraft original,
+    required AgentDraft edited,
+  }) => agents.updateAgent(
+    runtimeId: runtimeId,
+    agentId: agentId,
+    original: original,
+    edited: edited,
+  );
+
+  @override
+  Future<void> deleteAgent(String runtimeId, String agentId) =>
+      agents.deleteAgent(runtimeId: runtimeId, agentId: agentId);
+
+  @override
+  Future<AgentMemories> agentMemories(String runtimeId, String agentId) =>
+      agents.agentMemories(runtimeId: runtimeId, agentId: agentId);
+
+  @override
+  Future<AgentMemories> approveMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  ) => agents.approveMemory(
+    runtimeId: runtimeId,
+    agentId: agentId,
+    layer: layer,
+    fileName: fileName,
+  );
+
+  @override
+  Future<AgentMemories> deleteMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  ) => agents.deleteMemory(
+    runtimeId: runtimeId,
+    agentId: agentId,
+    layer: layer,
+    fileName: fileName,
+  );
 
   @override
   Stream<ConversationEvent> watchConversation(

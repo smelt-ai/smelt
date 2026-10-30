@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../data/models.dart';
 import '../../l10n/gen/l10n.dart';
@@ -215,3 +216,26 @@ Future<void> runAutomationNow(
     );
   }
 }
+
+/// 智能体用的模型给人看的名字。[groups] 是这台机器能力库里的可选模型，还没取到时为 null，
+/// 先显示原值；取到了却找不到，说明这台机器上已经没有它了。
+String agentModelLabel(
+  L10n l10n,
+  List<ModelGroup>? groups,
+  String provider,
+  String id,
+) {
+  if (provider.isEmpty || id.isEmpty) return l10n.agentEditModelDefault;
+  if (groups == null) return '$provider / $id';
+  for (final group in groups) {
+    for (final option in group.models) {
+      if (option.provider == provider && option.id == id) return option.label;
+    }
+  }
+  return l10n.agentEditModelMissing('$provider / $id');
+}
+
+IconData pluginIcon(PluginKind kind) => switch (kind) {
+  PluginKind.skill => LucideIcons.sparkles,
+  PluginKind.extension_ => LucideIcons.puzzle,
+};

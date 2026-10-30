@@ -6,6 +6,7 @@
 //! - `iroh_dialer`：真实传输，经 iroh `smelt/runtime/1` 连运行时，按所有机器的 relay 定形态。
 //! - `store`：本机业务数据（SQLite，按版本迁移）：机器登记、消息草稿。
 //! - `cache`：离线缓存（SQLite，坏了重建）。
+//! - `agents`：一台机器上智能体的新建、编辑、删除和记忆审阅（一问一答）。
 //! - `catalog`：一台机器的事件订阅 → 会话摘要、attention、工作区、自动化、历史、新建删除。
 //! - `conversation`：一台机器的 acp_watch 镜像 → 对话视图模型，分页、动作、图片。
 //! - `terminal`：一台机器的终端 watch 字节流、输入、尺寸。
@@ -14,6 +15,7 @@
 // 对 Rust 新版属于「未知 cfg」,这里显式允许(宏自身维护,非手写代码)。
 #![allow(unexpected_cfgs)]
 
+mod agents;
 pub mod api;
 mod cache;
 mod catalog;

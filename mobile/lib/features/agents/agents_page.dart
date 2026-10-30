@@ -13,6 +13,7 @@ import '../../ui/station.dart';
 import '../../ui/status.dart';
 import '../../ui/time.dart';
 import 'agent_detail_page.dart';
+import 'agent_edit_page.dart';
 import 'agents_board.dart';
 import 'agents_widgets.dart';
 import 'automation_detail_page.dart';
@@ -23,8 +24,8 @@ enum _Segment { agents, automations }
 /// 「智能体」：每台机器上的智能体定义与自动化，按机器分组。
 ///
 /// 回答两个问题：它**为什么这么干**（智能体的长期指令、插件、上下文），以及它**什么时候
-/// 会自己动**（自动化的触发条件、上次结果）。手机是展示层，只开放开关、立即运行一次、
-/// 和智能体开始对话这几个动作；创建与编辑留在桌面。
+/// 会自己动**（自动化的触发条件、上次结果）。智能体可以在这里新建、编辑、删除、审阅记忆；
+/// 自动化只开放开关和立即运行一次，创建与编辑留在桌面。
 class AgentsPage extends StatefulWidget {
   const AgentsPage({super.key});
 
@@ -72,6 +73,29 @@ class _AgentsPageState extends State<AgentsPage> {
     if (current != _guide) setState(() => _guide = current);
   }
 
+  /// 新建智能体：只有一台在线就直接建在它上面，几台在线先选机器。
+  Future<void> _create() async {
+    final navigator = Navigator.of(context);
+    final online = AppScope.of(
+      context,
+    ).fleet.value.runtimes.where((r) => r.online).toList();
+    final runtimeId = switch (online) {
+      [] => null,
+      [final only] => only.id,
+      _ => await showModalBottomSheet<String>(
+        context: context,
+        useSafeArea: true,
+        builder: (_) => _MachinePicker(runtimes: online),
+      ),
+    };
+    if (runtimeId == null || !mounted) return;
+    await navigator.push<AgentEditResult>(
+      MaterialPageRoute(
+        builder: (_) => AgentEditPage(board: _board, runtimeId: runtimeId),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = L10n.of(context);
@@ -97,11 +121,20 @@ class _AgentsPageState extends State<AgentsPage> {
             ],
           );
         }
+        final anyOnline = runtimes.any((r) => r.online);
         return GalleyPage(
           title: l10n.agentsTitle,
           controller: _scroll,
           guide: _guide,
           onRefresh: _board.refresh,
+          actions: [
+            if (_segment == _Segment.agents)
+              IconButton(
+                tooltip: l10n.agentEditNewTitle,
+                icon: const Icon(LucideIcons.plus),
+                onPressed: anyOnline ? _create : null,
+              ),
+          ],
           slivers: [
             SliverToBoxAdapter(
               child: Padding(
@@ -377,6 +410,41 @@ class _AutomationRow extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 新建智能体时选建在哪台机器上。只列在线的。
+class _MachinePicker extends StatelessWidget {
+  const _MachinePicker({required this.runtimes});
+
+  final List<FleetRuntime> runtimes;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    final l10n = L10n.of(context);
+    return ListView(
+      shrinkWrap: true,
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.paddingOf(context).bottom + Space.lg,
+      ),
+      children: [
+        ShelfHeader(title: l10n.agentEditWhichMachine, first: true),
+        HairlineRows(
+          children: [
+            for (final runtime in runtimes)
+              ShelfRow(
+                leading: StationTape(
+                  color: c.station(runtime.record.accent),
+                  height: 28,
+                ),
+                title: Text(runtime.name),
+                onTap: () => Navigator.pop(context, runtime.id),
+              ),
+          ],
+        ),
+      ],
     );
   }
 }

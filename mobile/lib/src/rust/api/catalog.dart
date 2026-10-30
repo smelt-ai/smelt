@@ -160,7 +160,7 @@ class AcpAgentOption {
           agentDefinitionId == other.agentDefinitionId;
 }
 
-/// 智能体定义的只读投影。
+/// 智能体定义。
 class AgentDefinitionSummary {
   final String id;
   final String name;
@@ -172,8 +172,14 @@ class AgentDefinitionSummary {
   /// 长期工作方式。
   final String prompt;
   final List<String> plugins;
+  final List<String> mcpServers;
   final List<String> contextFolders;
   final List<String> contextLinks;
+
+  /// 和 `model_id` 成对；都空 = 跟随这台机器的默认模型。
+  final String modelProvider;
+  final String modelId;
+  final bool memoryEnabled;
 
   const AgentDefinitionSummary({
     required this.id,
@@ -182,8 +188,12 @@ class AgentDefinitionSummary {
     required this.engineKindId,
     required this.prompt,
     required this.plugins,
+    required this.mcpServers,
     required this.contextFolders,
     required this.contextLinks,
+    required this.modelProvider,
+    required this.modelId,
+    required this.memoryEnabled,
   });
 
   @override
@@ -194,8 +204,12 @@ class AgentDefinitionSummary {
       engineKindId.hashCode ^
       prompt.hashCode ^
       plugins.hashCode ^
+      mcpServers.hashCode ^
       contextFolders.hashCode ^
-      contextLinks.hashCode;
+      contextLinks.hashCode ^
+      modelProvider.hashCode ^
+      modelId.hashCode ^
+      memoryEnabled.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -208,8 +222,12 @@ class AgentDefinitionSummary {
           engineKindId == other.engineKindId &&
           prompt == other.prompt &&
           plugins == other.plugins &&
+          mcpServers == other.mcpServers &&
           contextFolders == other.contextFolders &&
-          contextLinks == other.contextLinks;
+          contextLinks == other.contextLinks &&
+          modelProvider == other.modelProvider &&
+          modelId == other.modelId &&
+          memoryEnabled == other.memoryEnabled;
 }
 
 /// 一条需要告诉用户的事。`Approval` / `Input` / `Failure` 是要处理的事。

@@ -32,6 +32,10 @@ const FAST: Timings = Timings {
         backoff_base: Duration::from_millis(20),
         backoff_max: Duration::from_millis(80),
     },
+    agents: crate::agents::Timing {
+        call_timeout: Duration::from_millis(500),
+        slow_call_timeout: Duration::from_millis(500),
+    },
     catalog: crate::catalog::Timing {
         push_delay: Duration::from_millis(20),
         save_delay: Duration::from_millis(40),

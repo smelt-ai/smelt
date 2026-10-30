@@ -6,6 +6,7 @@ import 'package:smelt_mobile/data/demo_backend.dart';
 import 'package:smelt_mobile/data/models.dart';
 import 'package:smelt_mobile/data/preferences.dart';
 import 'package:smelt_mobile/data/stores.dart';
+import 'package:smelt_mobile/features/agents/agent_edit_page.dart';
 import 'package:smelt_mobile/features/agents/agents_page.dart';
 import 'package:smelt_mobile/l10n/gen/l10n.dart';
 import 'package:smelt_mobile/theme/theme.dart';
@@ -85,6 +86,43 @@ class _Backend extends DemoBackend {
       agentOptionId: agentOptionId,
       requestId: requestId,
     );
+  }
+
+  final createdAgents = <(String, AgentDraft)>[];
+  final updatedAgents = <(String, String, AgentDraft, AgentDraft)>[];
+  final deletedAgents = <(String, String)>[];
+  Object? deleteAgentError;
+
+  @override
+  Future<AgentDefinitionSummary> createAgent(
+    String runtimeId,
+    AgentDraft draft,
+  ) {
+    createdAgents.add((runtimeId, draft));
+    return super.createAgent(runtimeId, draft);
+  }
+
+  @override
+  Future<AgentDefinitionSummary> updateAgent(
+    String runtimeId,
+    String agentId, {
+    required AgentDraft original,
+    required AgentDraft edited,
+  }) {
+    updatedAgents.add((runtimeId, agentId, original, edited));
+    return super.updateAgent(
+      runtimeId,
+      agentId,
+      original: original,
+      edited: edited,
+    );
+  }
+
+  @override
+  Future<void> deleteAgent(String runtimeId, String agentId) async {
+    deletedAgents.add((runtimeId, agentId));
+    if (deleteAgentError case final error?) throw error;
+    await super.deleteAgent(runtimeId, agentId);
   }
 }
 
@@ -245,8 +283,15 @@ void main() {
     expect(opened, ['agent:rt-mbp/def-assistant']);
     expect(find.text('长期指令'), findsOneWidget);
     expect(find.text('你是工作助手，负责开发和日常工作处理。'), findsOneWidget);
+    // 插件、MCP 和编辑页一样显示名字和说明，不是 id 原文。
     expect(find.text('lark-cli'), findsOneWidget);
-    expect(find.text('~/notes'), findsOneWidget);
+    expect(find.text('飞书文档、消息、任务'), findsOneWidget);
+    expect(find.text('skill:lark-cli'), findsNothing);
+    expect(find.text('notion'), findsOneWidget);
+    expect(find.text('笔记'), findsOneWidget);
+    expect(find.text('/Users/demo/notes'), findsOneWidget);
+    expect(find.text('跟随这台机器的默认模型'), findsOneWidget);
+    expect(find.text('1 条待确认'), findsOneWidget);
 
     await tester.tap(find.text('开始对话'));
     await tester.pumpAndSettle();
@@ -260,5 +305,157 @@ void main() {
     expect(optionId, 'assistant');
     expect(requestId, isNotNull);
     expect(opened.last, 'rt-mbp/demo-new-1');
+  });
+
+  testWidgets('新建智能体：先选机器，填名字、勾插件，存完出现在列表里', (tester) async {
+    final backend = _Backend();
+    await _pump(tester, backend);
+
+    await tester.tap(find.byTooltip('新建智能体'));
+    await tester.pumpAndSettle();
+    // 两台在线：先选建在哪台。
+    expect(find.text('建在哪台机器上？'), findsOneWidget);
+    await tester.tap(find.text('MacBook Pro').last);
+    await tester.pumpAndSettle();
+
+    final save = find.widgetWithText(TextButton, '保存');
+    expect(tester.widget<TextButton>(save).onPressed, isNull, reason: '名字空不能存');
+    await tester.enterText(find.byType(TextField).first, '调研助手');
+    await tester.enterText(find.byType(TextField).at(1), '先查资料再下结论');
+    await tester.tap(find.text('lark-cli'));
+    await tester.pump();
+    // 坏了的插件不能新勾。
+    await tester.tap(find.text('notify'));
+    await tester.pump();
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    final (runtimeId, draft) = backend.createdAgents.single;
+    expect(runtimeId, 'rt-mbp');
+    expect(draft.name, '调研助手');
+    expect(draft.prompt, '先查资料再下结论');
+    expect(draft.plugins, ['skill:lark-cli']);
+    expect(draft.memoryEnabled, isTrue);
+    expect(find.text('调研助手'), findsWidgets);
+  });
+
+  testWidgets('编辑智能体：改指令后保存，带上打开时的那份；没存就退要确认', (tester) async {
+    final backend = _Backend();
+    await _pump(tester, backend);
+    await tester.tap(find.text('工作助手').first);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('编辑'));
+    await tester.pumpAndSettle();
+    expect(find.text('编辑智能体'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).at(1), '只做开发相关的事。');
+    await tester.pump();
+
+    // 有改动时返回先问。
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('放弃修改？'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, '保存'));
+    await tester.pumpAndSettle();
+    final (runtimeId, agentId, original, edited) = backend.updatedAgents.single;
+    expect((runtimeId, agentId), ('rt-mbp', 'def-assistant'));
+    expect(original.prompt, '你是工作助手，负责开发和日常工作处理。');
+    expect(edited.prompt, '只做开发相关的事。');
+    expect(edited.plugins, original.plugins);
+    // 回到详情，看到的是新指令。
+    expect(find.text('只做开发相关的事。'), findsOneWidget);
+  });
+
+  testWidgets('删除智能体：被拒绝时说原因；删掉后详情一起退', (tester) async {
+    final backend = _Backend()
+      ..deleteAgentError = const SmeltError(
+        kind: SmeltErrorKind.other,
+        message: '请先删除该智能体关联的 1 条自动化',
+      );
+    await _pump(tester, backend);
+    await tester.tap(find.text('工作助手').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('编辑'));
+    await tester.pumpAndSettle();
+
+    Future<void> deleteIt() async {
+      await tester.scrollUntilVisible(
+        find.text('删除智能体'),
+        300,
+        scrollable: find
+            .descendant(
+              of: find.byType(AgentEditPage),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.tap(find.text('删除智能体'));
+      await tester.pumpAndSettle();
+      expect(find.text('删除「工作助手」？'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, '删除'));
+      await tester.pumpAndSettle();
+    }
+
+    await deleteIt();
+    expect(find.text('没能删除：请先删除该智能体关联的 1 条自动化'), findsOneWidget);
+    expect(find.text('编辑智能体'), findsOneWidget, reason: '留在编辑页');
+
+    tester
+        .state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger))
+        .hideCurrentSnackBar();
+    await tester.pumpAndSettle();
+    backend.deleteAgentError = null;
+    await deleteIt();
+    expect(backend.deletedAgents, hasLength(2));
+    expect(find.text('编辑智能体'), findsNothing);
+    expect(find.text('长期指令'), findsNothing, reason: '详情页也退了');
+  });
+
+  testWidgets('记忆：待确认的排最前，采纳后详情里的条数跟着变', (tester) async {
+    await _pump(tester, _Backend());
+    await tester.tap(find.text('工作助手').first);
+    await tester.pumpAndSettle();
+    expect(find.text('1 条待确认'), findsOneWidget);
+
+    await tester.tap(find.text('1 条待确认'));
+    await tester.pumpAndSettle();
+    expect(find.text('工作助手 · 记忆'), findsOneWidget);
+    final pending = tester.getTopLeft(find.text('发版窗口')).dy;
+    expect(pending, lessThan(tester.getTopLeft(find.text('回复风格')).dy));
+    expect(find.text('待确认 · 读过外部网页的那一轮写的'), findsOneWidget);
+
+    await tester.tap(find.text('发版窗口'));
+    await tester.pumpAndSettle();
+    expect(find.text('周四晚上有例行维护，发版挪到周五上午。'), findsOneWidget);
+    await tester.tap(find.text('采纳'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('待确认'), findsNothing);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('2 条'), findsOneWidget);
+  });
+
+  testWidgets('编辑页：点输入框外面、拖动列表都收起键盘', (tester) async {
+    await _pump(tester, _Backend());
+    await tester.tap(find.byTooltip('新建智能体'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('MacBook Pro').last);
+    await tester.pumpAndSettle();
+
+    await tester.showKeyboard(find.byType(TextField).first);
+    expect(tester.testTextInput.isVisible, isTrue);
+    await tester.tap(find.text('长期指令'));
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isFalse, reason: '点外面收起');
+
+    await tester.showKeyboard(find.byType(TextField).at(1));
+    expect(tester.testTextInput.isVisible, isTrue);
+    await tester.drag(find.text('模型'), const Offset(0, -200));
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isFalse, reason: '拖动列表收起');
   });
 }

@@ -97,6 +97,306 @@ abstract class L10n {
     Locale('zh'),
   ];
 
+  /// No description provided for @agentEditNewTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'New agent'**
+  String get agentEditNewTitle;
+
+  /// No description provided for @agentEditTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit agent'**
+  String get agentEditTitle;
+
+  /// No description provided for @agentEditWhichMachine.
+  ///
+  /// In en, this message translates to:
+  /// **'Create it on which machine?'**
+  String get agentEditWhichMachine;
+
+  /// No description provided for @agentEditName.
+  ///
+  /// In en, this message translates to:
+  /// **'Name'**
+  String get agentEditName;
+
+  /// No description provided for @agentEditNameHint.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Research assistant'**
+  String get agentEditNameHint;
+
+  /// No description provided for @agentEditPromptHint.
+  ///
+  /// In en, this message translates to:
+  /// **'How it should work, every time'**
+  String get agentEditPromptHint;
+
+  /// No description provided for @agentEditModel.
+  ///
+  /// In en, this message translates to:
+  /// **'Model'**
+  String get agentEditModel;
+
+  /// No description provided for @agentEditModelDefault.
+  ///
+  /// In en, this message translates to:
+  /// **'Follow this machine\'s default model'**
+  String get agentEditModelDefault;
+
+  /// No description provided for @agentEditModelMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'{label} (no longer on this machine)'**
+  String agentEditModelMissing(String label);
+
+  /// No description provided for @agentEditPluginsNone.
+  ///
+  /// In en, this message translates to:
+  /// **'No plugins on this machine.'**
+  String get agentEditPluginsNone;
+
+  /// No description provided for @agentEditMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'No longer on this machine'**
+  String get agentEditMissing;
+
+  /// No description provided for @agentEditMcp.
+  ///
+  /// In en, this message translates to:
+  /// **'MCP'**
+  String get agentEditMcp;
+
+  /// No description provided for @agentEditMcpNone.
+  ///
+  /// In en, this message translates to:
+  /// **'No MCP servers on this machine.'**
+  String get agentEditMcpNone;
+
+  /// No description provided for @agentEditMcpDisabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Turned off in the capability library'**
+  String get agentEditMcpDisabled;
+
+  /// No description provided for @agentEditChoicesFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t read this machine\'s capability library, so models, plugins and MCP may be incomplete: {message}'**
+  String agentEditChoicesFailed(String message);
+
+  /// No description provided for @agentEditFolders.
+  ///
+  /// In en, this message translates to:
+  /// **'Folders'**
+  String get agentEditFolders;
+
+  /// No description provided for @agentEditAddFolder.
+  ///
+  /// In en, this message translates to:
+  /// **'Add folder'**
+  String get agentEditAddFolder;
+
+  /// No description provided for @agentEditFolderAdd.
+  ///
+  /// In en, this message translates to:
+  /// **'Add “{name}”'**
+  String agentEditFolderAdd(String name);
+
+  /// No description provided for @agentEditLinks.
+  ///
+  /// In en, this message translates to:
+  /// **'Links'**
+  String get agentEditLinks;
+
+  /// No description provided for @agentEditAddLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Add link'**
+  String get agentEditAddLink;
+
+  /// No description provided for @agentEditRemove.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove'**
+  String get agentEditRemove;
+
+  /// No description provided for @agentEditMemory.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory'**
+  String get agentEditMemory;
+
+  /// No description provided for @agentEditMemoryHint.
+  ///
+  /// In en, this message translates to:
+  /// **'When off, it neither uses nor writes memories. Existing ones are kept.'**
+  String get agentEditMemoryHint;
+
+  /// No description provided for @agentEditSaving.
+  ///
+  /// In en, this message translates to:
+  /// **'Saving…'**
+  String get agentEditSaving;
+
+  /// No description provided for @agentEditSaveFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t save: {message}'**
+  String agentEditSaveFailed(String message);
+
+  /// No description provided for @agentEditLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open the editor'**
+  String get agentEditLoadFailed;
+
+  /// No description provided for @agentEditDiscardTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Discard changes?'**
+  String get agentEditDiscardTitle;
+
+  /// No description provided for @agentEditDiscardBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Your edits haven\'t been saved.'**
+  String get agentEditDiscardBody;
+
+  /// No description provided for @agentEditDiscard.
+  ///
+  /// In en, this message translates to:
+  /// **'Discard'**
+  String get agentEditDiscard;
+
+  /// No description provided for @agentEditDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete agent'**
+  String get agentEditDelete;
+
+  /// No description provided for @agentEditDeleteTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete “{name}”?'**
+  String agentEditDeleteTitle(String name);
+
+  /// No description provided for @agentEditDeleteBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This removes it and its own memories from {machine}. It can\'t be undone.'**
+  String agentEditDeleteBody(String machine);
+
+  /// No description provided for @agentEditDeleteFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t delete: {message}'**
+  String agentEditDeleteFailed(String message);
+
+  /// No description provided for @memoryTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} · Memories'**
+  String memoryTitle(String name);
+
+  /// No description provided for @memoryLayerAgent.
+  ///
+  /// In en, this message translates to:
+  /// **'This agent\'s'**
+  String get memoryLayerAgent;
+
+  /// No description provided for @memoryLayerUser.
+  ///
+  /// In en, this message translates to:
+  /// **'Shared by all agents'**
+  String get memoryLayerUser;
+
+  /// No description provided for @memoryEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'Nothing remembered yet.'**
+  String get memoryEmpty;
+
+  /// No description provided for @memoryPending.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for you · {reason}'**
+  String memoryPending(String reason);
+
+  /// No description provided for @memoryRule.
+  ///
+  /// In en, this message translates to:
+  /// **'Rule'**
+  String get memoryRule;
+
+  /// No description provided for @memoryFact.
+  ///
+  /// In en, this message translates to:
+  /// **'Fact'**
+  String get memoryFact;
+
+  /// No description provided for @memoryStale.
+  ///
+  /// In en, this message translates to:
+  /// **'Unused for a long time'**
+  String get memoryStale;
+
+  /// No description provided for @memoryUsed.
+  ///
+  /// In en, this message translates to:
+  /// **'Used {ago}'**
+  String memoryUsed(String ago);
+
+  /// No description provided for @memoryOverBudget.
+  ///
+  /// In en, this message translates to:
+  /// **'Rules exceed the always-on budget, so only part of them is loaded each time.'**
+  String get memoryOverBudget;
+
+  /// No description provided for @memoryApprove.
+  ///
+  /// In en, this message translates to:
+  /// **'Approve'**
+  String get memoryApprove;
+
+  /// No description provided for @memoryDeleteTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete “{name}”?'**
+  String memoryDeleteTitle(String name);
+
+  /// No description provided for @memoryDeleteAgentBody.
+  ///
+  /// In en, this message translates to:
+  /// **'It can\'t be undone.'**
+  String get memoryDeleteAgentBody;
+
+  /// No description provided for @memoryDeleteUserBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This memory is shared, so every agent on this machine loses it. It can\'t be undone.'**
+  String get memoryDeleteUserBody;
+
+  /// No description provided for @memoryActionFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t do that: {message}'**
+  String memoryActionFailed(String message);
+
+  /// No description provided for @memoryLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load memories'**
+  String get memoryLoadFailed;
+
+  /// No description provided for @memoryLoadFailedInline.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t refresh: {message}'**
+  String memoryLoadFailedInline(String message);
+
   /// No description provided for @agentsTitle.
   ///
   /// In en, this message translates to:
@@ -142,7 +442,7 @@ abstract class L10n {
   /// No description provided for @agentsEmptyAgents.
   ///
   /// In en, this message translates to:
-  /// **'No agents on this machine yet. Create them in Smelt on the desktop.'**
+  /// **'No agents on this machine yet.'**
   String get agentsEmptyAgents;
 
   /// No description provided for @agentsEmptyAutomations.
@@ -154,7 +454,7 @@ abstract class L10n {
   /// No description provided for @agentsReadOnly.
   ///
   /// In en, this message translates to:
-  /// **'Agents and automations are edited in Smelt on the desktop.'**
+  /// **'Automations are edited in Smelt on the desktop.'**
   String get agentsReadOnly;
 
   /// No description provided for @agentsGone.
@@ -198,6 +498,36 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Context'**
   String get agentsContext;
+
+  /// No description provided for @agentsEdit.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit'**
+  String get agentsEdit;
+
+  /// No description provided for @agentsMemories.
+  ///
+  /// In en, this message translates to:
+  /// **'Memories'**
+  String get agentsMemories;
+
+  /// No description provided for @agentsMemoryOff.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory is off'**
+  String get agentsMemoryOff;
+
+  /// No description provided for @agentsMemoryPending.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{1 waiting for you} other{{n} waiting for you}}'**
+  String agentsMemoryPending(int n);
+
+  /// No description provided for @agentsMemoryCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =0{Nothing yet} =1{1 memory} other{{n} memories}}'**
+  String agentsMemoryCount(int n);
 
   /// No description provided for @agentsStartConversation.
   ///
@@ -594,6 +924,12 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Save'**
   String get commonSave;
+
+  /// No description provided for @commonAdd.
+  ///
+  /// In en, this message translates to:
+  /// **'Add'**
+  String get commonAdd;
 
   /// No description provided for @commonRetry.
   ///
