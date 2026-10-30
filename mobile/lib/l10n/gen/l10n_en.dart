@@ -1,5 +1,6 @@
 // ignore: unused_import
 import 'package:intl/intl.dart' as intl;
+
 import 'l10n.dart';
 
 // ignore_for_file: type=lint
@@ -874,6 +875,9 @@ class L10nEn extends L10n {
 
   @override
   String get conversationNewFile => 'New file';
+
+  @override
+  String get conversationNoNewlineAtEnd => 'No newline at end of file';
 
   @override
   String conversationPlan(int done, int total) {

@@ -189,9 +189,21 @@ void main() {
                     path: 'lib/config.dart',
                     newFile: false,
                     lines: [
-                      DiffLine(op: DiffOp.equal, text: 'keep'),
-                      DiffLine(op: DiffOp.delete, text: 'before'),
-                      DiffLine(op: DiffOp.insert, text: 'after'),
+                      DiffLine(
+                        op: DiffOp.equal,
+                        text: 'keep',
+                        noNewline: false,
+                      ),
+                      DiffLine(
+                        op: DiffOp.delete,
+                        text: 'before',
+                        noNewline: true,
+                      ),
+                      DiffLine(
+                        op: DiffOp.insert,
+                        text: 'after',
+                        noNewline: false,
+                      ),
                     ],
                   ),
                   truncated: false,
@@ -209,6 +221,11 @@ void main() {
       expect(find.text('lib/config.dart'), findsOneWidget);
       expect(find.text('+1'), findsOneWidget);
       expect(find.text('-1'), findsOneWidget);
+      expect(
+        find.textContaining('No newline at end of file', findRichText: true),
+        findsOneWidget,
+        reason: '末尾没有换行的那一行标出来',
+      );
     });
 
     testWidgets('终端输出写出退出码和截断', (tester) async {
@@ -415,7 +432,7 @@ void main() {
     });
 
     test('diff 数增删行', () {
-      DiffLine line(DiffOp op) => DiffLine(op: op, text: '');
+      DiffLine line(DiffOp op) => DiffLine(op: op, text: '', noNewline: false);
       expect(
         diffTotals([
           line(DiffOp.equal),
@@ -431,10 +448,10 @@ void main() {
       final lines = [
         for (var i = 0; i < 20; i++)
           if (i == 10) ...[
-            DiffLine(op: DiffOp.delete, text: 'l10'),
-            DiffLine(op: DiffOp.insert, text: 'L10'),
+            DiffLine(op: DiffOp.delete, text: 'l10', noNewline: false),
+            DiffLine(op: DiffOp.insert, text: 'L10', noNewline: false),
           ] else
-            DiffLine(op: DiffOp.equal, text: 'l$i'),
+            DiffLine(op: DiffOp.equal, text: 'l$i', noNewline: false),
       ];
       final folded = foldUnchanged(lines);
       expect(folded.first, isA<DiffSkipped>());

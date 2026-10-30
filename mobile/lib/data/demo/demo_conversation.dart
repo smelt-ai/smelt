@@ -230,7 +230,8 @@ List<DiffLine> _demoLines(String before, String after) {
       old[old.length - 1 - tail] == now[now.length - 1 - tail]) {
     tail++;
   }
-  DiffLine line(DiffOp op, String text) => DiffLine(op: op, text: text);
+  DiffLine line(DiffOp op, String text) =>
+      DiffLine(op: op, text: text, noNewline: false);
   return [
     for (final text in old.take(head)) line(DiffOp.equal, text),
     for (final text in old.sublist(head, old.length - tail))

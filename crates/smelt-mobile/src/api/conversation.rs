@@ -223,6 +223,8 @@ pub struct DiffView {
 pub struct DiffLine {
     pub op: DiffOp,
     pub text: String,
+    /// 改动的这一行是文件末尾、后面没有换行。只补或只删末尾换行时靠它看出改了什么。
+    pub no_newline: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

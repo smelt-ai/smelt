@@ -1501,6 +1501,12 @@ abstract class L10n {
   /// **'New file'**
   String get conversationNewFile;
 
+  /// No description provided for @conversationNoNewlineAtEnd.
+  ///
+  /// In en, this message translates to:
+  /// **'No newline at end of file'**
+  String get conversationNoNewlineAtEnd;
+
   /// No description provided for @conversationPlan.
   ///
   /// In en, this message translates to:

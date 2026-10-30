@@ -486,6 +486,11 @@ class _DiffBlockState extends State<DiffBlock> {
                       ? code.copyWith(color: c.inkMuted)
                       : code,
                 ),
+                if (line.noNewline)
+                  TextSpan(
+                    text: '  ${l10n.conversationNoNewlineAtEnd}',
+                    style: t.caption.copyWith(color: c.inkFaint),
+                  ),
               ],
             ),
             softWrap: false,

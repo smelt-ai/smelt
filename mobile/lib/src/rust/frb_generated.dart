@@ -3014,11 +3014,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DiffLine dco_decode_diff_line(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return DiffLine(
       op: dco_decode_diff_op(arr[0]),
       text: dco_decode_String(arr[1]),
+      noNewline: dco_decode_bool(arr[2]),
     );
   }
 
@@ -5092,7 +5093,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_op = sse_decode_diff_op(deserializer);
     var var_text = sse_decode_String(deserializer);
-    return DiffLine(op: var_op, text: var_text);
+    var var_noNewline = sse_decode_bool(deserializer);
+    return DiffLine(op: var_op, text: var_text, noNewline: var_noNewline);
   }
 
   @protected
@@ -7542,6 +7544,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_diff_op(self.op, serializer);
     sse_encode_String(self.text, serializer);
+    sse_encode_bool(self.noNewline, serializer);
   }
 
   @protected

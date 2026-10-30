@@ -297,6 +297,7 @@ fn tool_output(part: &ToolOutputPart) -> ToolOutput {
                             acp_chat::DiffLineTag::Removed => DiffOp::Delete,
                         },
                         text: line.text,
+                        no_newline: line.no_newline,
                     })
                     .collect(),
             }),
@@ -670,7 +671,8 @@ mod tests {
             diff.lines,
             [DiffLine {
                 op: DiffOp::Insert,
-                text: "fn main() {}".into()
+                text: "fn main() {}".into(),
+                no_newline: true,
             }]
         );
         assert!(tool.output[2].image.as_ref().unwrap().bytes.is_some());

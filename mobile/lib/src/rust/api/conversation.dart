@@ -618,10 +618,17 @@ class DiffLine {
   final DiffOp op;
   final String text;
 
-  const DiffLine({required this.op, required this.text});
+  /// 改动的这一行是文件末尾、后面没有换行。只补或只删末尾换行时靠它看出改了什么。
+  final bool noNewline;
+
+  const DiffLine({
+    required this.op,
+    required this.text,
+    required this.noNewline,
+  });
 
   @override
-  int get hashCode => op.hashCode ^ text.hashCode;
+  int get hashCode => op.hashCode ^ text.hashCode ^ noNewline.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -629,7 +636,8 @@ class DiffLine {
       other is DiffLine &&
           runtimeType == other.runtimeType &&
           op == other.op &&
-          text == other.text;
+          text == other.text &&
+          noNewline == other.noNewline;
 }
 
 enum DiffOp { equal, insert, delete }

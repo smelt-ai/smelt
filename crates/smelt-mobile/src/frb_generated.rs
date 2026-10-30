@@ -2866,9 +2866,11 @@ impl SseDecode for crate::api::conversation::DiffLine {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_op = <crate::api::conversation::DiffOp>::sse_decode(deserializer);
         let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_noNewline = <bool>::sse_decode(deserializer);
         return crate::api::conversation::DiffLine {
             op: var_op,
             text: var_text,
+            no_newline: var_noNewline,
         };
     }
 }
@@ -5824,6 +5826,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::conversation::DiffLine {
         [
             self.op.into_into_dart().into_dart(),
             self.text.into_into_dart().into_dart(),
+            self.no_newline.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -8003,6 +8006,7 @@ impl SseEncode for crate::api::conversation::DiffLine {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <crate::api::conversation::DiffOp>::sse_encode(self.op, serializer);
         <String>::sse_encode(self.text, serializer);
+        <bool>::sse_encode(self.no_newline, serializer);
     }
 }
 
