@@ -110,7 +110,10 @@ impl std::error::Error for ConversationSubmitError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversationBinding, ConversationStateSnapshot, merge_agent_preset};
+    use super::{
+        ConversationBinding, ConversationInput, ConversationStateSnapshot, ConversationSubmitError,
+        ConversationSubmitErrorKind, merge_agent_preset,
+    };
 
     #[test]
     fn agent_preset_and_first_input_share_one_prompt() {
