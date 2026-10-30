@@ -153,6 +153,14 @@ void main() {
     await tester.pumpWidget(host(model, const HomeShell()));
     await _settle(tester);
 
+    // 首屏是待办：那里本来就列着这条，外壳不弹提示条。切到会话页才弹。
+    await tester.tap(
+      find.descendant(
+        of: find.byType(GlassNavBar),
+        matching: find.text('Sessions'),
+      ),
+    );
+    await _settle(tester);
     await _attention(tester, model);
     expect(find.byType(SnackBar), findsOneWidget);
 
