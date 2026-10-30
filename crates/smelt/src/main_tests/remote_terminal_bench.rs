@@ -490,6 +490,7 @@ fn measure_conversation_wire(
             Some(delta) => serde_json::from_value(delta.clone())
                 .ok()
                 .and_then(|delta| mirror.apply(&delta).ok())
+                .and_then(|frame| serde_json::from_str(&frame).ok())
                 .unwrap_or_default(),
             None => {
                 mirror.full(&frame);

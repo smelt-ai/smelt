@@ -12,14 +12,16 @@
 //!
 //! 线路上只有两种帧：整段帧（附着时的首帧、`Refresh` 之后的帧，形状就是完整的快照帧），
 //! 两端用 [`FrameMirror::full`] 重建镜像；增量帧 `{"delta": FrameDelta}`，接收方还原出
-//! 完整的帧再照常解析。镜像对不上增量帧时（例如守护交接后接手的读端）这一帧作废，
-//! 等下一份整段帧。
+//! 完整帧的 JSON 文本，跟整段帧一样按类型解析一次。镜像本来就存着 JSON 文本，还原时
+//! 直接拼，不经过中间的 JSON 树；发送方只推进镜像，不解析条目。镜像对不上增量帧时
+//! （例如守护交接后接手的读端）这一帧作废，等下一份整段帧。
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::acp_chat::AcpEntry;
 
@@ -156,21 +158,31 @@ impl EntryMirror {
             keep_from,
             patches,
         };
-        self.apply(&delta)?;
+        // 发送方只要镜像跟上，不要还原出的条目。
+        self.apply(&delta, |_, _| {})?;
         Ok(delta)
     }
 
-    /// 应用一帧增量，返回 `(第一个变化的下标, 从它到末尾的条目)`，正好是视图按下标
-    /// 合并要的那一段。镜像缺了要改的条目就作废，直到下一份整段帧。
-    pub fn apply(&mut self, delta: &EntriesDelta) -> Result<(usize, Vec<AcpEntry>), MirrorGap> {
-        let result = self.apply_inner(delta);
+    /// 应用一帧增量。`changed` 拿到第一个变化的下标和从它到末尾每条的 JSON，正好是
+    /// 视图按下标合并要的那一段；在丢掉 `keep_from` 之前的镜像前调用。镜像缺了要改的
+    /// 条目就作废，直到下一份整段帧。
+    pub fn apply(
+        &mut self,
+        delta: &EntriesDelta,
+        changed: impl FnOnce(usize, &[String]),
+    ) -> Result<(), MirrorGap> {
+        let result = self.apply_inner(delta, changed);
         if result.is_err() {
             self.synced = false;
         }
         result
     }
 
-    fn apply_inner(&mut self, delta: &EntriesDelta) -> Result<(usize, Vec<AcpEntry>), MirrorGap> {
+    fn apply_inner(
+        &mut self,
+        delta: &EntriesDelta,
+        changed: impl FnOnce(usize, &[String]),
+    ) -> Result<(), MirrorGap> {
         if !self.synced || delta.from > delta.end {
             return Err(MirrorGap);
         }
@@ -181,7 +193,7 @@ impl EntryMirror {
         };
         let mut patches = delta.patches.iter().peekable();
         let mut json = Vec::with_capacity(delta.end.saturating_sub(start));
-        let mut changed = Vec::new();
+        let mut first_patched = None;
         for index in start..delta.end {
             let old = self.get(index);
             let patch = patches.next_if(|patch| patch.index == index);
@@ -197,14 +209,14 @@ impl EntryMirror {
                 (None, _) => return Err(MirrorGap),
             };
             if patch.is_some() {
-                changed.push(index);
+                first_patched.get_or_insert(index);
             }
             json.push(next);
         }
         if patches.next().is_some() {
             return Err(MirrorGap);
         }
-        let first = changed.first().copied().unwrap_or(delta.end).min(
+        let first = first_patched.unwrap_or(delta.end).min(
             // 镜像比这一帧长：末尾被删掉了，视图要从 `end` 截断。
             if self.end() > delta.end {
                 delta.end
@@ -212,14 +224,11 @@ impl EntryMirror {
                 usize::MAX
             },
         );
-        let entries = json[first.saturating_sub(start).min(json.len())..]
-            .iter()
-            .map(|text| serde_json::from_str(text).map_err(|_| MirrorGap))
-            .collect::<Result<Vec<AcpEntry>, _>>()?;
+        changed(first, &json[first.saturating_sub(start).min(json.len())..]);
         let keep_from = delta.keep_from.clamp(start, delta.end);
         self.offset = keep_from;
         self.json = json.split_off(keep_from - start);
-        Ok((first.min(delta.end), entries))
+        Ok(())
     }
 }
 
@@ -264,25 +273,64 @@ fn header_fields(frame: &Value) -> BTreeMap<String, String> {
     fields
 }
 
-fn frame_from_fields(fields: &BTreeMap<String, String>) -> Result<Map<String, Value>, MirrorGap> {
-    let mut frame = Map::new();
+/// 快照头各字段加上条目，拼回整段帧的 JSON 文本：`snapshot.entries` 是从 `first` 起
+/// 的条目，`snapshot.entries_offset` 是 `first`。
+fn frame_text(
+    fields: &BTreeMap<String, String>,
+    first: usize,
+    entries: &[String],
+) -> Result<String, MirrorGap> {
+    let mut top = Vec::new();
+    let mut objects: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::from([("snapshot", Vec::new())]);
     for (key, json) in fields {
-        let value: Value = serde_json::from_str(json).map_err(|_| MirrorGap)?;
         match key.split_once('.') {
-            Some((outer, field)) => {
-                frame
-                    .entry(outer)
-                    .or_insert_with(|| Value::Object(Map::new()))
-                    .as_object_mut()
-                    .ok_or(MirrorGap)?
-                    .insert(field.to_string(), value);
-            }
-            None => {
-                frame.insert(key.clone(), value);
-            }
+            Some((outer, field)) => objects
+                .entry(outer)
+                .or_default()
+                .push((field, json.as_str())),
+            None => top.push((key.as_str(), json.as_str())),
         }
     }
-    Ok(frame)
+    // 同一个键既是整个值又拆成了字段：拼不出合法的帧。
+    if top.iter().any(|(key, _)| objects.contains_key(key)) {
+        return Err(MirrorGap);
+    }
+    let key = |key: &str| serde_json::to_string(key).expect("字符串总能序列化");
+    let size = fields
+        .iter()
+        .map(|(k, v)| k.len() + v.len() + 4)
+        .sum::<usize>()
+        + entries.iter().map(|entry| entry.len() + 1).sum::<usize>()
+        + 64;
+    let mut text = String::with_capacity(size);
+    text.push('{');
+    let mut sep = "";
+    for (name, json) in top {
+        let _ = write!(text, "{sep}{}:{json}", key(name));
+        sep = ",";
+    }
+    for (outer, inner) in &objects {
+        let _ = write!(text, "{sep}{}:{{", key(outer));
+        sep = ",";
+        let mut inner_sep = "";
+        for (field, json) in inner {
+            let _ = write!(text, "{inner_sep}{}:{json}", key(field));
+            inner_sep = ",";
+        }
+        if *outer == "snapshot" {
+            let _ = write!(text, "{inner_sep}\"entries_offset\":{first},\"entries\":[");
+            for (index, entry) in entries.iter().enumerate() {
+                if index > 0 {
+                    text.push(',');
+                }
+                text.push_str(entry);
+            }
+            text.push(']');
+        }
+        text.push('}');
+    }
+    text.push('}');
+    Ok(text)
 }
 
 /// 连接一端持有的整帧镜像：快照头各字段的 JSON，加上条目镜像。
@@ -298,7 +346,7 @@ impl FrameMirror {
         self.header = header_fields(frame);
         let snapshot = &frame["snapshot"];
         let offset = snapshot["entries_offset"].as_u64().unwrap_or(0) as usize;
-        match serde_json::from_value::<Vec<AcpEntry>>(snapshot["entries"].clone()) {
+        match Vec::<AcpEntry>::deserialize(&snapshot["entries"]) {
             Ok(entries) => self.entries.splice(offset, &entries),
             Err(_) => self.entries.synced = false,
         }
@@ -376,40 +424,42 @@ impl FrameMirror {
         fields
     }
 
-    /// 应用一帧增量，还原出完整的快照帧：`snapshot.entries` 是从第一个变化的条目到末尾，
-    /// `snapshot.entries_offset` 是它的下标，正是视图按下标合并要的那一段。
-    pub fn apply(&mut self, delta: &FrameDelta) -> Result<Value, MirrorGap> {
-        let mut header = self.header.clone();
+    /// 应用一帧增量，还原出完整快照帧的 JSON 文本，跟整段帧一样解析：`snapshot.entries`
+    /// 是从第一个变化的条目到末尾，`snapshot.entries_offset` 是它的下标，正是视图按下标
+    /// 合并要的那一段。对不上时镜像作废，直到下一份整段帧。
+    pub fn apply(&mut self, delta: &FrameDelta) -> Result<String, MirrorGap> {
+        let result = self.apply_inner(delta);
+        if result.is_err() {
+            self.entries.synced = false;
+        }
+        result
+    }
+
+    fn apply_inner(&mut self, delta: &FrameDelta) -> Result<String, MirrorGap> {
+        // 失败时镜像整个作废，等整段帧重建，快照头改到一半也无妨，不用先复制一份。
         for (key, patch) in &delta.fields {
             match patch {
                 None => {
-                    header.remove(key);
+                    self.header.remove(key);
                 }
-                Some(patch) => {
-                    let old = header.get(key).map(String::as_str).unwrap_or("");
-                    if patch.keep > old.len() || !old.is_char_boundary(patch.keep) {
-                        self.entries.synced = false;
-                        return Err(MirrorGap);
+                Some(patch) => match self.header.get_mut(key) {
+                    Some(old) if patch.keep <= old.len() && old.is_char_boundary(patch.keep) => {
+                        old.truncate(patch.keep);
+                        old.push_str(&patch.tail);
                     }
-                    let new = format!("{}{}", &old[..patch.keep], patch.tail);
-                    header.insert(key.clone(), new);
-                }
+                    None if patch.keep == 0 => {
+                        self.header.insert(key.clone(), patch.tail.clone());
+                    }
+                    _ => return Err(MirrorGap),
+                },
             }
         }
-        let mut frame = frame_from_fields(&header)?;
-        let (first, entries) = self.entries.apply(&delta.entries)?;
-        let snapshot = frame
-            .entry("snapshot")
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .ok_or(MirrorGap)?;
-        snapshot.insert("entries_offset".into(), first.into());
-        snapshot.insert(
-            "entries".into(),
-            serde_json::to_value(entries).map_err(|_| MirrorGap)?,
-        );
-        self.header = header;
-        Ok(Value::Object(frame))
+        let mut frame = Err(MirrorGap);
+        let header = &self.header;
+        self.entries.apply(&delta.entries, |first, entries| {
+            frame = frame_text(header, first, entries);
+        })?;
+        frame
     }
 }
 
@@ -427,6 +477,24 @@ mod tests {
 
     fn texts(entries: &[AcpEntry]) -> Vec<String> {
         entries.iter().map(entry_json).collect()
+    }
+
+    /// 接收方应用一帧增量，返回 `(第一个变化的下标, 从它到末尾的条目)`。
+    fn receive(
+        receiver: &mut EntryMirror,
+        delta: &EntriesDelta,
+    ) -> Result<(usize, Vec<AcpEntry>), MirrorGap> {
+        let mut tail = (0, Vec::new());
+        receiver.apply(delta, |first, entries| {
+            tail = (
+                first,
+                entries
+                    .iter()
+                    .map(|text| serde_json::from_str(text).unwrap())
+                    .collect(),
+            );
+        })?;
+        Ok(tail)
     }
 
     /// 发送方和接收方各一份镜像，接收方的结果拼回视图里的条目。
@@ -455,7 +523,7 @@ mod tests {
                 .unwrap();
             let wire: EntriesDelta =
                 serde_json::from_str(&serde_json::to_string(&delta).unwrap()).unwrap();
-            let (first, tail) = self.receiver.apply(&wire).unwrap();
+            let (first, tail) = receive(&mut self.receiver, &wire).unwrap();
             self.view.truncate(first);
             self.view.extend(tail);
             delta
@@ -567,14 +635,14 @@ mod tests {
 
         let mut receiver = EntryMirror::default();
         assert_eq!(
-            receiver.apply(&delta),
+            receive(&mut receiver, &delta),
             Err(MirrorGap),
             "没收到过整段帧，增量要作废"
         );
         receiver.splice(0, &entries);
         entries[0] = assistant("abc");
         let delta = sender.encode(0, &entries, 0, 1, 0).unwrap();
-        let (_, tail) = receiver.apply(&delta).unwrap();
+        let (_, tail) = receive(&mut receiver, &delta).unwrap();
         assert_eq!(texts(&tail), texts(&entries));
     }
 
@@ -646,7 +714,8 @@ mod tests {
         let decoded: FrameDelta =
             serde_json::from_value(serde_json::from_str::<Value>(&wire).unwrap()["delta"].clone())
                 .unwrap();
-        (wire.len(), receiver.apply(&decoded).unwrap())
+        let restored = receiver.apply(&decoded).unwrap();
+        (wire.len(), serde_json::from_str(&restored).unwrap())
     }
 
     fn attached(frame: &Value) -> (FrameMirror, FrameMirror) {
@@ -675,6 +744,25 @@ mod tests {
         assert_eq!(restored["live"], next["live"]);
         assert_eq!(restored["provider_pid"], 42);
         assert_eq!(restored["snapshot"]["entries"], next["snapshot"]["entries"]);
+    }
+
+    /// 还原出的文本就是那一帧完整的样子，接收方按类型解析一次就行；要转义的字符原样
+    /// 回来。
+    #[test]
+    fn a_restored_frame_is_the_full_frame_text() {
+        let first = frame(1, "thinking", &[assistant("a")]);
+        let (mut sender, mut receiver) = attached(&first);
+        let entries = vec![
+            assistant("a\"引号\"\n换行 🦀"),
+            AcpEntry::User("\\反斜杠".into()),
+        ];
+        let mut next = frame(2, "thinking", &entries);
+        next["snapshot"]["status_line"] = "\"状态\"\t🦀".into();
+        let (_, restored) = round_trip(&mut sender, &mut receiver, &next);
+        assert_eq!(restored, next);
+        let typed: Vec<AcpEntry> =
+            serde_json::from_value(restored["snapshot"]["entries"].clone()).unwrap();
+        assert_eq!(texts(&typed), texts(&entries));
     }
 
     #[test]
