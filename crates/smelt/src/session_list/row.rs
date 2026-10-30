@@ -54,11 +54,11 @@ pub(crate) fn session_row_status_label(status: AgentStatus) -> Option<&'static s
     (status == AgentStatus::NeedsYou).then(|| status_text(status))
 }
 
-/// 进度条填满的比例：没有数值的出错画满一条，其余按百分比。不确定进度不画条（`None`），
-/// 见 [`session_progress_bar`]。
+/// 进度条填满的比例：没有数值的出错画满一条，其余按百分比。不确定进度、比这个桌面新的运行时
+/// 报的认不出的状态都不画条（`None`），见 [`session_progress_bar`]。
 pub(super) fn progress_fraction(progress: TerminalProgress) -> Option<f32> {
     match (progress.state, progress.percent) {
-        (TerminalProgressState::Indeterminate, _) => None,
+        (TerminalProgressState::Indeterminate | TerminalProgressState::Unknown, _) => None,
         (TerminalProgressState::Error, None | Some(0)) => Some(1.0),
         (_, percent) => Some(f32::from(percent.unwrap_or(0).min(100)) / 100.0),
     }
@@ -75,7 +75,9 @@ pub(super) fn session_progress_bar(ui_id: u64, progress: TerminalProgress) -> Op
         .with_size(px(2.))
         .value(fraction * 100.);
     let bar = match progress.state {
-        TerminalProgressState::Normal | TerminalProgressState::Indeterminate => bar,
+        TerminalProgressState::Normal
+        | TerminalProgressState::Indeterminate
+        | TerminalProgressState::Unknown => bar,
         TerminalProgressState::Error => bar.color(rgb(ui_theme::red())),
         TerminalProgressState::Paused => bar.color(rgb(ui_theme::yellow())),
     };
@@ -468,6 +470,11 @@ mod tests {
         let close = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-6);
         assert!(close(bar(TerminalProgressState::Normal, Some(42)), 0.42));
         assert!(close(bar(TerminalProgressState::Paused, Some(100)), 1.0));
+        assert_eq!(
+            bar(TerminalProgressState::Unknown, Some(60)),
+            None,
+            "认不出的状态不画条"
+        );
         assert_eq!(
             bar(TerminalProgressState::Indeterminate, Some(60)),
             None,

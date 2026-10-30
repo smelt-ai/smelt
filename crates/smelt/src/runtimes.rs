@@ -1830,7 +1830,7 @@ mod tests {
         let newer = runtime_answering(|request| {
             let request_id = request["request_id"].as_str().unwrap();
             let mut described = described_without("no.such.method");
-            described.events.as_mut().unwrap().projection_version += 1;
+            described.events.as_mut().unwrap().protocol_version += 1;
             serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
         });
         let (events, _events_rx) = smol::channel::unbounded();

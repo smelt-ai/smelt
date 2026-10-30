@@ -9,13 +9,10 @@ use smelt_event_bus::{
     Delivery, EventBusError, EventHub, Snapshot, SnapshotProvider, StoredEvent, TopicRegistry,
 };
 use smelt_event_protocol::{
-    AggregateRef, CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION,
-    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS,
-    CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AUTOMATIONS_CHANGED,
-    CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_WORKSPACE_CHANGED,
-    CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
-    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
+    AggregateRef, CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
+    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+    CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED,
+    Capability, ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
     EventEnvelope, EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged,
     SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
@@ -55,7 +52,6 @@ impl SnapshotProvider for ProjectionSnapshotProvider {
                 (
                     projection.sessions_revision,
                     serde_json::to_value(SessionStatesSnapshot {
-                        projection_version: CORE_SESSION_PROJECTION_VERSION,
                         revision: projection.sessions_revision,
                         sessions,
                     })
@@ -89,7 +85,6 @@ fn projection_value(projection: &Option<CoreProjectionEvent>) -> (u64, serde_jso
         None => (
             0,
             serde_json::to_value(CoreProjectionEvent {
-                projection_version: CORE_PROJECTION_VERSION,
                 revision: 0,
                 data: serde_json::Value::Null,
             })
@@ -314,11 +309,7 @@ impl DaemonEventHub {
         {
             return Ok(false);
         }
-        let event = CoreProjectionEvent {
-            projection_version: CORE_PROJECTION_VERSION,
-            revision,
-            data,
-        };
+        let event = CoreProjectionEvent { revision, data };
         let aggregate = (revision != 0).then(|| {
             (
                 AggregateRef::new("projection", topic.replace('.', "-"))
@@ -657,11 +648,7 @@ fn projection_event<T: serde::Serialize>(value: T) -> CoreProjectionEvent {
         .get("revision")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    CoreProjectionEvent {
-        projection_version: CORE_PROJECTION_VERSION,
-        revision,
-        data,
-    }
+    CoreProjectionEvent { revision, data }
 }
 
 fn session_projection_changed(

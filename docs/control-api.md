@@ -74,7 +74,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
       "smelt_home": "/home/me/.smelt"
     },
     "events": {
-      "protocol_version": 2,
+      "protocol_version": 7,
       "projection_version": 1,
       "session_projection_version": 3,
       "session_state_schema_version": 3
@@ -178,7 +178,7 @@ CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令
    旧桌面连新运行时的 Git 面板需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
    的文档形状，同时删掉跨 Agent 消息的 `agent.list` / `agent.send`，两边最低版本都抬到 2。
    v2 → v3：删掉 DeepSeek Harness 之后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置去掉 `native_dsh_profiles`。旧运行时缺这个字段会拒收修改，所以最低版本抬到 3。同一版 `system.describe` 的 daemon 信息增加 `smelt_home`。
-   删方法不升版本：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，这几条是必需方法，旧运行时没有就判为需要升级运行时。同月删掉桌面发布的侧栏菜单（`workspace_menu` 这条守护命令和 `workspace_menu.changed` 话题），手机和守护都改读工作区目录。订阅里带着运行时不认识的话题会被整条拒掉，所以事件总线协议升到 v3（`EVENT_BUS_PROTOCOL_VERSION`），新旧两边在订阅握手时就拿到版本不兼容。之后又删掉远程会话目录：守护命令 `remote_sessions`、`remote_rename_resume`、`acp_create`（后两条早已没人发）和 `remote_sessions.changed` 话题都下线，手机等新建的对话由运行时直接写进工作区目录，事件总线协议升到 v4。命令行这类不订推送的客户端用新增的 `workspace.directory` 读整份目录。再之后会话状态加了 `custom_title`（终端当前那段对话的名字，守护按身份查好推来，取代桌面轮询的 `history.titles`，后者删掉），会话状态严格解码，事件总线协议升到 v5。会话状态又加了 `pending_request`（对话会话正在等的那个审批或选择题的身份，手机指挥台按它判断单据详情还是不是同一个请求），事件总线协议升到 v6。
+   删方法不升版本：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，这几条是必需方法，旧运行时没有就判为需要升级运行时。同月删掉桌面发布的侧栏菜单（`workspace_menu` 这条守护命令和 `workspace_menu.changed` 话题），手机和守护都改读工作区目录。订阅里带着运行时不认识的话题会被整条拒掉，所以事件总线协议升到 v3（`EVENT_BUS_PROTOCOL_VERSION`），新旧两边在订阅握手时就拿到版本不兼容。之后又删掉远程会话目录：守护命令 `remote_sessions`、`remote_rename_resume`、`acp_create`（后两条早已没人发）和 `remote_sessions.changed` 话题都下线，手机等新建的对话由运行时直接写进工作区目录，事件总线协议升到 v4。命令行这类不订推送的客户端用新增的 `workspace.directory` 读整份目录。再之后会话状态加了 `custom_title`（终端当前那段对话的名字，守护按身份查好推来，取代桌面轮询的 `history.titles`，后者删掉），会话状态严格解码，事件总线协议升到 v5。会话状态又加了 `pending_request`（对话会话正在等的那个审批或选择题的身份，手机指挥台按它判断单据详情还是不是同一个请求），事件总线协议升到 v6。v7 起推送载荷改成宽容读取（规则见 `smelt-event-protocol` 的模块文档），推送加字段不再升版本，相位这类枚举加值、加话题仍然要升；客户端只看 `system.describe` 里 `events.protocol_version` 是否落在自己支持的区间，`projection_version`、`session_projection_version`、`session_state_schema_version` 冻结、不再检查，只为 v6 及更早的客户端照旧报出。
 2. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
    条件、冲突、忙碌和临时不可用分别返回 `invalid_params`、`permission_denied`、
    `not_found`、`failed_precondition`、`conflict`、`busy`、

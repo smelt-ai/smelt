@@ -1,4 +1,25 @@
 //! smeltd 事件总线的 wire 协议：话题、事件信封、订阅与投递确认。
+//!
+//! # 怎么演进
+//!
+//! 桌面、手机、各台机器上的守护各自发布，版本总会错开（手机要过商店审核，一部手机连好几台
+//! 机器）。所以运行时推给客户端的载荷按「宽容读取」写：读的一方忽略认不出的字段，标了「会增长」
+//! 的枚举认不出的值落到 `Unknown`。据此：
+//!
+//! - **不升版本**：响应和推送里加字段（一律可缺省，缺了有明确含义）、给标了「会增长」的枚举
+//!   （只有不影响判断的显示类枚举）加值、加订阅消息类型。
+//! - **升 [`EVENT_BUS_PROTOCOL_VERSION`]**：删字段、删话题、改字段含义（包括新字段改变了旧
+//!   字段该怎么读）、加必填字段、改握手。升版时 [`MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION`]
+//!   一起抬到同一个值：客户端和运行时都只会说一个版本的协议，新旧两边才能在连接时就拿到版本
+//!   不兼容。
+//! - **加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会反复重连。
+//! - **其余枚举加值也要升**：它们解不出会让整条消息失败，比如相位、自动化状态。相位还决定客户端
+//!   怎么判断会话在不在忙，没有安全的兜底含义。
+//! - **请求不宽容**：订阅请求和 `ConversationInput` 保持严格。旧运行时要是忽略新字段，用户的
+//!   意图会悄悄丢掉（比如发了附件没送到）；严格解码时它会明确拒绝。新字段没用上时不要序列化。
+//!   控制接口的参数不在此列，规则见 `docs/control-api.md`。
+//! - 删掉的字段名不再拿来表示别的东西：旧客户端可能还按原来的意思读。
+//! - 认证（[`EventClientAuth`]）保持严格：客户端不能在里面夹带运行时不认识的声明。
 
 use serde::{Deserialize, Serialize};
 
@@ -21,15 +42,19 @@ use std::{fmt, str::FromStr};
 ///
 /// v6：会话状态多了 `pending_request`（对话会话正在等的那个审批或选择题的身份）。同样
 /// 严格解码，所以升版。
-pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 6;
-pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 6;
-
-pub const CORE_PROJECTION_VERSION: u16 = 1;
-/// v2 起 SessionStateChanged 带 hook 检测到的 provider，v3 起再带 provider 自己的
-/// 对话 id；只演进会话投影，不连带 workspace 等仍为 v1 的核心投影。
 ///
-/// 新增字段都是 `Option` + `serde(default)`，所以新客户端能解码任意更低版本的
-/// 载荷；解码端因此接受 `1..=当前版本`，而不是只认「1 或当前」。
+/// v7：推送载荷改成宽容读取（见模块文档），以后推送加字段不再升版；投影事件和会话快照
+/// 去掉 `projection_version`。v6 及更早的客户端严格解码，读不了加过字段的载荷，所以这一版
+/// 本身还要升。
+pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
+pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
+
+/// 以下三个投影版本号**冻结**，不再递增，v7 起的客户端也不检查。只为 v6 及更早的客户端：
+/// 它们靠 `system.describe` 里的这几个数判断兼容，照旧报出来，旧客户端才能说清「需要升级
+/// 客户端」而不是解析失败。没有 v6 客户端之后连同 describe 里的字段一起删；
+/// `CORE_SESSION_STATE_SCHEMA_VERSION` 还填着信封的 `schema_version`（没有客户端读），到时
+/// 一起处理。
+pub const CORE_PROJECTION_VERSION: u16 = 1;
 pub const CORE_SESSION_PROJECTION_VERSION: u16 = 3;
 pub const CORE_SESSION_STATE_SCHEMA_VERSION: u16 = 3;
 pub const CORE_TOPIC_SESSION_STATE_CHANGED: &str = "session.state_changed";
@@ -283,7 +308,6 @@ impl fmt::Display for Capability {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AggregateRef {
     pub kind: String,
     pub id: String,
@@ -300,7 +324,7 @@ impl AggregateRef {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventSource {
     Core,
     Plugin { plugin_id: PluginId },
@@ -324,7 +348,6 @@ impl PublisherIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EventEnvelope<P> {
     pub event_id: EventId,
     pub topic: Topic,
@@ -352,7 +375,6 @@ pub enum DataSensitivity {
 pub struct SnapshotKind(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TopicDescriptor {
     pub topic: Topic,
     pub schema_version: u16,
@@ -364,6 +386,7 @@ pub struct TopicDescriptor {
 }
 
 /// Stable session phase vocabulary. Daemon-internal reducers may evolve independently.
+/// 不设兜底值：相位决定客户端怎么判断会话在不在忙，所以加值要升协议版本。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreSessionPhase {
@@ -382,7 +405,6 @@ pub enum CoreSessionPhase {
 /// Public session projection. Runtime locks, blocker identities, and capability tokens are
 /// intentionally absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionStateChanged {
     #[serde(rename = "id")]
     pub session_id: String,
@@ -421,7 +443,6 @@ pub struct SessionStateChanged {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionStateRemoved {
     pub session_id: String,
     pub generation: u64,
@@ -430,51 +451,44 @@ pub struct SessionStateRemoved {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionStatesSnapshot {
-    pub projection_version: u16,
     pub revision: u64,
     pub sessions: Vec<SessionStateChanged>,
 }
 
-/// Versioned escape hatch for projections whose complete domain DTO is not yet stabilized.
+/// Escape hatch for projections whose complete domain DTO is not yet stabilized.
 /// `data` is the projection snapshot, never a provider hook or command envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CoreProjectionEvent {
-    pub projection_version: u16,
     pub revision: u64,
     pub data: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConversationWakeRequested {
     pub session_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectChanged {
     /// 关注时传入的项目根目录（运行时那台机器上的路径）。
     pub root: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AgentMemoryChanged {
     /// 哪个智能体自己的记忆变了。`None` 是用户全局记忆，所有智能体都读它。
     pub agent_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TerminalNotification {
     pub session_id: String,
     /// 通知正文，已从 OSC 载荷里取出（777 取最后一段，99 已解 base64）。
     pub message: String,
 }
 
+/// 会增长：认不出的值读成 [`Self::Unknown`]。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalProgressState {
@@ -482,10 +496,12 @@ pub enum TerminalProgressState {
     Error,
     Indeterminate,
     Paused,
+    /// 比这个客户端新的运行时报的状态。按不确定进度画。
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TerminalProgress {
     pub state: TerminalProgressState,
     /// 0..=100。不确定进度（indeterminate）时没有。
@@ -493,7 +509,6 @@ pub struct TerminalProgress {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TerminalProgressChanged {
     pub session_id: String,
     /// `None`：进度条清掉了。
@@ -501,7 +516,6 @@ pub struct TerminalProgressChanged {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppearanceChangeRequested {
     /// 已由运行时按可脚本目录校验过的外观键值。
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
@@ -644,16 +658,19 @@ pub struct EventSubscribeRequest {
     pub request: SubscribeRequest,
 }
 
+/// 会增长：认不出的值读成 [`Self::Unknown`]。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscribeErrorCode {
     Rejected,
     Protocol,
     Internal,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SubscribeMessage<P = serde_json::Value> {
     Snapshot {
         kind: SnapshotKind,
@@ -673,6 +690,9 @@ pub enum SubscribeMessage<P = serde_json::Value> {
         code: SubscribeErrorCode,
         message: String,
     },
+    /// 比这个客户端新的运行时发的消息类型，读的一方跳过。
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -704,13 +724,98 @@ mod tests {
         );
     }
 
+    /// 契约：新运行时加的字段、给「会增长」的枚举加的值、加的消息类型，这一版读得了。
     #[test]
-    fn stable_structs_reject_unknown_fields() {
-        let error = serde_json::from_value::<AggregateRef>(json!({
-            "kind": "session", "id": "1", "future": true
+    fn a_newer_runtime_payload_is_readable() {
+        let state: SessionStateChanged = serde_json::from_value(json!({
+            "id": "s1",
+            "generation": 1,
+            "revision": 2,
+            "cwd": null,
+            "launch": null,
+            "title": null,
+            "phase": "idle",
+            "phase_since": 0,
+            "pending_question": null,
+            "tokens_used": null,
+            "branch": null,
+            "dirty_files": [],
+            "updated_at": 0,
+            "structured_events": true,
+            "turn_events": true,
+            "agent_event_version": null,
+            "runtime": true,
+            "some_future_field": {"nested": [1, 2]},
         }))
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown field"));
+        .unwrap();
+        assert_eq!(state.phase, CoreSessionPhase::Idle);
+
+        let progress: TerminalProgress =
+            serde_json::from_value(json!({"state": "some_future_state", "percent": 3})).unwrap();
+        assert_eq!(progress.state, TerminalProgressState::Unknown);
+
+        let message: SubscribeMessage =
+            serde_json::from_value(json!({"type": "some_future_message", "anything": 1})).unwrap();
+        assert_eq!(message, SubscribeMessage::Unknown);
+
+        let error: SubscribeMessage = serde_json::from_value(
+            json!({"type": "error", "code": "some_future_code", "message": "x"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            error,
+            SubscribeMessage::Error {
+                code: SubscribeErrorCode::Unknown,
+                ..
+            }
+        ));
+    }
+
+    /// 契约：相位加值要升协议版本，不能被读成某个已有相位。
+    #[test]
+    fn an_unknown_phase_is_rejected() {
+        assert!(serde_json::from_value::<CoreSessionPhase>(json!("some_future_phase")).is_err());
+    }
+
+    /// 契约：订阅请求不宽容，旧运行时不能悄悄忽略新客户端的声明。
+    #[test]
+    fn subscribe_requests_reject_unknown_fields() {
+        let request = json!({
+            "protocol": {"min": 7, "max": 7},
+            "subscription": {"id": "s", "topics": []},
+            "some_future_field": true,
+        });
+        let error = serde_json::from_value::<SubscribeRequest>(request).unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    /// 契约：旧运行时没带的可缺省字段，这一版读成缺省值。
+    #[test]
+    fn an_older_runtime_payload_reads_defaults() {
+        let state: SessionStateChanged = serde_json::from_value(json!({
+            "id": "s1",
+            "generation": 1,
+            "revision": 2,
+            "cwd": null,
+            "launch": null,
+            "title": null,
+            "phase": "idle",
+            "phase_since": 0,
+            "pending_question": null,
+            "tokens_used": null,
+            "branch": null,
+            "dirty_files": [],
+            "updated_at": 0,
+            "structured_events": false,
+            "turn_events": false,
+            "agent_event_version": null,
+            "runtime": true,
+        }))
+        .unwrap();
+        assert_eq!(state.provider, None);
+        assert_eq!(state.conversation_id, None);
+        assert_eq!(state.custom_title, None);
+        assert_eq!(state.pending_request, None);
     }
 
     #[test]

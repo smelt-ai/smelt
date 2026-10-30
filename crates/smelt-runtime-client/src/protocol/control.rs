@@ -279,17 +279,19 @@ pub struct DaemonRuntimeInfo {
     pub smelt_home: Option<String>,
 }
 
-/// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：版本对不上，
+/// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：协议对不上，
 /// 客户端订阅了也解不出来，只会断开再连。所以运行时在这里报出来，客户端订阅前先对。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventProtocolDescription {
-    /// `event_subscribe` 握手的事件总线协议版本。
+    /// `event_subscribe` 握手的事件总线协议版本。客户端只看它（见 `compat`）。
     pub protocol_version: u16,
-    /// 会话以外的核心投影（远程会话目录、菜单、自动化）的版本。
+    /// 以下三个冻结、不再检查，只给 v6 及更早的客户端判不兼容用（见
+    /// `smelt_event_protocol::CORE_PROJECTION_VERSION`）。缺了读成 0。
+    #[serde(default)]
     pub projection_version: u16,
-    /// 会话投影快照的版本。
+    #[serde(default)]
     pub session_projection_version: u16,
-    /// `session.state_changed` 事件的 schema 版本。
+    #[serde(default)]
     pub session_state_schema_version: u16,
 }
 

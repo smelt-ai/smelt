@@ -7,17 +7,16 @@ use std::collections::HashMap;
 use std::fmt;
 
 use smelt_event_protocol::{
-    CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
-    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS,
-    CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
-    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
-    CORE_TOPIC_PROJECT_CHANGED, CORE_TOPIC_SESSION_REMOVED,
+    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
+    CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_PROJECT_CHANGED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_TERMINAL_NOTIFICATION,
-    CORE_TOPIC_TERMINAL_PROGRESS, CORE_TOPIC_WORKSPACE_CHANGED,
-    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, EVENT_BUS_PROTOCOL_VERSION,
-    EventClientAuth, EventSource, EventSubscribeRequest, FirstPartyClientKind, ProtocolRange,
-    SessionStateChanged, SessionStateRemoved, SessionStatesSnapshot, SubscribeErrorCode,
-    SubscribeMessage, SubscribeRequest, SubscriptionDeclaration, SubscriptionId, Topic,
+    CORE_TOPIC_TERMINAL_PROGRESS, CORE_TOPIC_WORKSPACE_CHANGED, ConversationWakeRequested,
+    CoreProjectionEvent, CoreSessionPhase, EVENT_BUS_PROTOCOL_VERSION, EventClientAuth,
+    EventSource, EventSubscribeRequest, FirstPartyClientKind,
+    MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION, ProtocolRange, SessionStateChanged,
+    SessionStateRemoved, SessionStatesSnapshot, SubscribeErrorCode, SubscribeMessage,
+    SubscribeRequest, SubscriptionDeclaration, SubscriptionId, Topic,
 };
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
@@ -329,7 +328,7 @@ impl DaemonStateEventClient {
             },
             request: SubscribeRequest {
                 protocol: ProtocolRange {
-                    min: EVENT_BUS_PROTOCOL_VERSION,
+                    min: MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION,
                     max: EVENT_BUS_PROTOCOL_VERSION,
                 },
                 subscription: SubscriptionDeclaration {
@@ -396,21 +395,7 @@ impl DaemonStateEventClient {
                 if self.pending.active && !replacement_projection_topic(envelope.topic.as_str()) {
                     return Ok(None);
                 }
-                let schema_supported =
-                    if envelope.topic.as_str() == CORE_TOPIC_SESSION_STATE_CHANGED {
-                        matches!(
-                            envelope.schema_version,
-                            1..=CORE_SESSION_STATE_SCHEMA_VERSION
-                        )
-                    } else {
-                        envelope.schema_version == 1
-                    };
-                if !schema_supported {
-                    return Err(DaemonEventClientError::Protocol(format!(
-                        "unsupported schema version {} for {}",
-                        envelope.schema_version, envelope.topic
-                    )));
-                }
+                // 载荷宽容读取，不看话题的 schema 版本：破坏性改动升的是握手时对过的协议版本。
                 if envelope.source != EventSource::Core {
                     return Err(DaemonEventClientError::Protocol(
                         "daemon projection event did not come from core".to_string(),
@@ -425,6 +410,8 @@ impl DaemonStateEventClient {
             SubscribeMessage::Error { code, message } => {
                 Err(DaemonEventClientError::Server { code, message })
             }
+            // 比这个客户端新的运行时发的消息类型，跳过。
+            SubscribeMessage::Unknown => Ok(None),
         }
     }
 
@@ -445,13 +432,9 @@ impl DaemonStateEventClient {
         match kind {
             CORE_SNAPSHOT_SESSIONS => {
                 let snapshot: SessionStatesSnapshot = decode_payload(payload, kind)?;
-                if !matches!(
-                    snapshot.projection_version,
-                    1..=CORE_SESSION_PROJECTION_VERSION
-                ) || snapshot.revision != revision
-                {
+                if snapshot.revision != revision {
                     return Err(DaemonEventClientError::Protocol(format!(
-                        "invalid {kind} projection version or revision"
+                        "{kind} snapshot revision mismatch"
                     )));
                 }
                 self.pending.sessions = Some(
@@ -628,8 +611,7 @@ impl DaemonStateEventClient {
 fn replacement_projection_topic(topic: &str) -> bool {
     matches!(
         topic,
-        CORE_TOPIC_AUTOMATIONS_CHANGED
-            | CORE_TOPIC_WORKSPACE_CHANGED
+        CORE_TOPIC_AUTOMATIONS_CHANGED | CORE_TOPIC_WORKSPACE_CHANGED
     )
 }
 
@@ -642,26 +624,12 @@ fn decode_payload<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn decode_projection(
-    payload: serde_json::Value,
-    label: &str,
-) -> Result<CoreProjectionEvent, DaemonEventClientError> {
-    let projection: CoreProjectionEvent = decode_payload(payload, label)?;
-    if projection.projection_version != CORE_PROJECTION_VERSION {
-        return Err(DaemonEventClientError::Protocol(format!(
-            "unsupported {label} projection version {}",
-            projection.projection_version
-        )));
-    }
-    Ok(projection)
-}
-
 fn decode_projection_snapshot<T: serde::de::DeserializeOwned>(
     payload: serde_json::Value,
     label: &str,
     revision: u64,
 ) -> Result<Option<T>, DaemonEventClientError> {
-    let projection = decode_projection(payload, label)?;
+    let projection: CoreProjectionEvent = decode_payload(payload, label)?;
     if projection.revision != revision {
         return Err(DaemonEventClientError::Protocol(format!(
             "{label} snapshot revision mismatch"
@@ -678,7 +646,7 @@ fn decode_projection_event<T: serde::de::DeserializeOwned>(
     payload: serde_json::Value,
     label: &str,
 ) -> Result<T, DaemonEventClientError> {
-    let projection = decode_projection(payload, label)?;
+    let projection: CoreProjectionEvent = decode_payload(payload, label)?;
     if projection.data.is_null() {
         return Err(DaemonEventClientError::Protocol(format!(
             "{label} event contains a null projection"
@@ -774,12 +742,7 @@ mod tests {
             kind: smelt_event_protocol::SnapshotKind(CORE_SNAPSHOT_SESSIONS.to_string()),
             watermark: 1,
             revision,
-            payload: serde_json::to_value(SessionStatesSnapshot {
-                projection_version: CORE_SESSION_PROJECTION_VERSION,
-                revision,
-                sessions,
-            })
-            .unwrap(),
+            payload: serde_json::to_value(SessionStatesSnapshot { revision, sessions }).unwrap(),
         }
     }
 
@@ -792,12 +755,7 @@ mod tests {
             kind: smelt_event_protocol::SnapshotKind(kind.to_string()),
             watermark: 1,
             revision,
-            payload: serde_json::to_value(CoreProjectionEvent {
-                projection_version: CORE_PROJECTION_VERSION,
-                revision,
-                data,
-            })
-            .unwrap(),
+            payload: serde_json::to_value(CoreProjectionEvent { revision, data }).unwrap(),
         }
     }
 
@@ -834,10 +792,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        for kind in [
-            CORE_SNAPSHOT_WORKSPACE,
-            CORE_SNAPSHOT_AUTOMATIONS,
-        ] {
+        for kind in [CORE_SNAPSHOT_WORKSPACE, CORE_SNAPSHOT_AUTOMATIONS] {
             let event = client
                 .decode_message(projection_snapshot(kind, 0, serde_json::Value::Null))
                 .unwrap();
@@ -1059,7 +1014,7 @@ mod tests {
         older.as_object_mut().unwrap().remove("conversation_id");
         let mut message = event_message(CORE_TOPIC_SESSION_STATE_CHANGED, older);
         if let SubscribeMessage::Event { envelope, .. } = &mut message {
-            envelope.schema_version = CORE_SESSION_STATE_SCHEMA_VERSION - 1;
+            envelope.schema_version = 1;
         }
         assert!(matches!(
             client.decode_message(message).unwrap(),
@@ -1138,7 +1093,6 @@ mod tests {
             ..Default::default()
         };
         let projection = CoreProjectionEvent {
-            projection_version: CORE_PROJECTION_VERSION,
             revision: 10,
             data: serde_json::to_value(&automations).unwrap(),
         };
@@ -1304,7 +1258,6 @@ mod tests {
         event_message(
             CORE_TOPIC_AUTOMATIONS_CHANGED,
             serde_json::to_value(CoreProjectionEvent {
-                projection_version: CORE_PROJECTION_VERSION,
                 revision: file.revision,
                 data: serde_json::to_value(file).unwrap(),
             })
@@ -1401,7 +1354,6 @@ mod tests {
         event_message(
             CORE_TOPIC_WORKSPACE_CHANGED,
             serde_json::to_value(CoreProjectionEvent {
-                projection_version: CORE_PROJECTION_VERSION,
                 revision: directory.revision,
                 data: serde_json::to_value(directory).unwrap(),
             })
