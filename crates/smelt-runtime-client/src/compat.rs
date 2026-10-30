@@ -1,15 +1,12 @@
 //! 客户端（桌面、手机）和运行时的版本协商（设计文档 D7）。连上运行时先读
-//! `system.describe`，对照客户端要用的控制方法和事件投影版本，对不上就是不兼容，并说清
+//! `system.describe`，对照客户端要用的控制方法和事件协议版本，对不上就是不兼容，并说清
 //! 该升级哪一边。不对的话，订阅被拒或解不出投影，重订没有尽头，会话目录永远到不了，界面
 //! 只能一直「同步中」；控制方法缺了则各处零散地报 MethodNotFound。说明里带着运行时的
 //! 版本，看得出它是哪个版本。
 
 use std::fmt;
 
-use smelt_event_protocol::{
-    CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
-    EVENT_BUS_PROTOCOL_VERSION,
-};
+use smelt_event_protocol::{EVENT_BUS_PROTOCOL_VERSION, MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION};
 
 use crate::protocol::control::{CONTROL_API_VERSION, ControlMethod, SystemDescribeResult};
 
@@ -58,8 +55,9 @@ pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
     )
 }
 
-/// 订阅解不解得了运行时推来的状态：总线协议和核心投影要相同，会话投影和会话状态事件不能比
-/// 客户端新（新字段都可缺省，解得了更旧的）。
+/// 订阅解不解得了运行时推来的状态：只看事件总线协议版本落不落在客户端支持的区间里。载荷
+/// 宽容读取，加字段、加枚举值不升版本，所以运行时比客户端新、旧都照常连（见
+/// `smelt_event_protocol` 的模块文档）。
 ///
 /// 手机只对这一项：[`ControlMethod`] 的必需方法是按桌面的用法列的，手机只用其中一部分，
 /// 缺的方法由用到的地方报 MethodNotFound。
@@ -108,26 +106,17 @@ fn event_versions(described: &SystemDescribeResult) -> Result<(), (Outdated, Str
     let Some(events) = &described.events else {
         return Err(runtime("没有声明事件协议版本".to_string()));
     };
-    same(
-        "事件协议",
-        events.protocol_version,
-        EVENT_BUS_PROTOCOL_VERSION,
-    )?;
-    same(
-        "核心投影",
-        events.projection_version,
-        CORE_PROJECTION_VERSION,
-    )?;
-    not_newer(
-        "会话投影",
-        events.session_projection_version,
-        CORE_SESSION_PROJECTION_VERSION,
-    )?;
-    not_newer(
-        "会话状态事件",
-        events.session_state_schema_version,
-        CORE_SESSION_STATE_SCHEMA_VERSION,
-    )?;
+    let version = events.protocol_version;
+    if version < MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION {
+        return Err(runtime(format!(
+            "事件协议 v{version}，客户端至少要 v{MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION}"
+        )));
+    }
+    if version > EVENT_BUS_PROTOCOL_VERSION {
+        return Err(client(format!(
+            "事件协议 v{version}，客户端只认到 v{EVENT_BUS_PROTOCOL_VERSION}"
+        )));
+    }
     Ok(())
 }
 
@@ -137,28 +126,6 @@ fn runtime(reason: String) -> (Outdated, String) {
 
 fn client(reason: String) -> (Outdated, String) {
     (Outdated::Client, reason)
-}
-
-fn same(label: &str, runtime_version: u16, client_version: u16) -> Result<(), (Outdated, String)> {
-    if runtime_version < client_version {
-        return Err(runtime(format!(
-            "{label} v{runtime_version}，客户端要 v{client_version}"
-        )));
-    }
-    not_newer(label, runtime_version, client_version)
-}
-
-fn not_newer(
-    label: &str,
-    runtime_version: u16,
-    client_version: u16,
-) -> Result<(), (Outdated, String)> {
-    if runtime_version > client_version {
-        return Err(client(format!(
-            "{label} v{runtime_version}，客户端只认到 v{client_version}"
-        )));
-    }
-    Ok(())
 }
 
 fn missing_methods(missing: &[&str]) -> String {
@@ -173,6 +140,10 @@ fn missing_methods(missing: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use smelt_event_protocol::{
+        CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
+    };
+
     use crate::protocol::control::{
         CONTROL_API_MIN_SUPPORTED_VERSION, ControlProtocolDescription, DaemonRuntimeInfo,
         EventProtocolDescription,
@@ -279,41 +250,28 @@ mod tests {
         assert_eq!(outdated(&described), Outdated::Runtime);
     }
 
+    /// 事件总线协议落在客户端支持的区间外才拦，按高低说清该升级哪一边。
     #[test]
-    fn core_projection_must_match_exactly() {
+    fn event_protocol_outside_the_supported_range_decides_the_direction() {
         let mut newer = current();
-        newer.events.as_mut().unwrap().projection_version = CORE_PROJECTION_VERSION + 1;
+        newer.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION + 1;
         assert_eq!(outdated(&newer), Outdated::Client);
 
         let mut older = current();
-        older.events.as_mut().unwrap().projection_version = CORE_PROJECTION_VERSION - 1;
+        older.events.as_mut().unwrap().protocol_version =
+            MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION - 1;
         assert_eq!(outdated(&older), Outdated::Runtime);
-
-        let mut bus = current();
-        bus.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION + 1;
-        assert_eq!(outdated(&bus), Outdated::Client);
     }
 
-    /// 会话投影的新字段都可缺省：旧的解得了，新的解不了。
+    /// 投影版本号冻结了，不再参与判断：载荷宽容读取，运行时比客户端新也读得了。
     #[test]
-    fn session_projection_may_be_older_but_not_newer() {
-        let mut older = current();
-        older.events.as_mut().unwrap().session_projection_version = 1;
-        older.events.as_mut().unwrap().session_state_schema_version = 1;
-        assert_eq!(check(&older), Ok(()));
-
-        let mut newer = current();
-        newer.events.as_mut().unwrap().session_projection_version =
-            CORE_SESSION_PROJECTION_VERSION + 1;
-        assert_eq!(outdated(&newer), Outdated::Client);
-
-        let mut newer_schema = current();
-        newer_schema
-            .events
-            .as_mut()
-            .unwrap()
-            .session_state_schema_version = CORE_SESSION_STATE_SCHEMA_VERSION + 1;
-        assert_eq!(outdated(&newer_schema), Outdated::Client);
+    fn projection_versions_no_longer_decide_compatibility() {
+        let mut described = current();
+        let events = described.events.as_mut().unwrap();
+        events.projection_version = CORE_PROJECTION_VERSION + 1;
+        events.session_projection_version = CORE_SESSION_PROJECTION_VERSION + 1;
+        events.session_state_schema_version = CORE_SESSION_STATE_SCHEMA_VERSION + 1;
+        assert_eq!(check(&described), Ok(()));
     }
 
     #[test]

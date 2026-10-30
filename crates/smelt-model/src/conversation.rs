@@ -5,6 +5,8 @@
 
 use crate::acp_chat::AcpImage;
 
+/// 保持严格解码：它决定能不能往对话里发普通输入，还参与记忆、对端的身份判断。认不出的
+/// 绑定不能被悄悄读成 `Direct`，宁可整条读不出来。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConversationBinding {
@@ -15,8 +17,8 @@ pub enum ConversationBinding {
     Automation { run_id: String },
 }
 
+/// 客户端发给运行时；运行时常比手机旧，所以宽容读取，认不出的字段忽略。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConversationInput {
     /// 一次用户提交跨 daemon 边界保持不变的身份。旧客户端缺失时 daemon 会补齐。
     #[serde(default)]
@@ -45,7 +47,6 @@ impl ConversationInput {
 /// daemon 拥有的会话输入状态镜像。`ConversationSnapshot` 里外层使用 `Option`：缺失表示
 /// 对端版本尚不支持该状态，不能据此把客户端已有的待发预设清空。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConversationStateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<ConversationBinding>,
@@ -71,12 +72,13 @@ pub fn merge_agent_preset(preset: Option<&str>, input: &str) -> String {
 pub enum ConversationSubmitErrorKind {
     /// 请求被明确拒绝，远端没有接受本次提交。
     Rejected,
-    /// 已越过可能产生副作用的边界，但结果无法证明；直接重试可能重复。
+    /// 已越过可能产生副作用的边界，但结果无法证明；直接重试可能重复。比这个客户端新的
+    /// 运行时报的认不出的类别也读成它：不能当成明确拒绝去重试。
+    #[serde(other)]
     Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConversationSubmitError {
     pub kind: ConversationSubmitErrorKind,
     pub message: String,
@@ -131,6 +133,31 @@ mod tests {
         .unwrap();
 
         assert!(state.binding.is_none());
+    }
+
+    /// 跨版本传的这几样宽容读取：对端多出来的字段忽略，认不出的失败类别按「结果不明」。
+    #[test]
+    fn newer_peers_fields_are_ignored() {
+        let input: ConversationInput = serde_json::from_value(serde_json::json!({
+            "submission_id": "s1",
+            "text": "hi",
+            "some_future_field": true
+        }))
+        .unwrap();
+        assert_eq!(input.text, "hi");
+        let error: ConversationSubmitError = serde_json::from_value(serde_json::json!({
+            "kind": "some_future_kind",
+            "message": "x",
+            "some_future_field": 1
+        }))
+        .unwrap();
+        assert_eq!(error.kind, ConversationSubmitErrorKind::Unknown);
+        let state: ConversationStateSnapshot = serde_json::from_value(serde_json::json!({
+            "pending_agent_preset": "review",
+            "some_future_field": 1
+        }))
+        .unwrap();
+        assert_eq!(state.pending_agent_preset.as_deref(), Some("review"));
     }
 
     #[test]
