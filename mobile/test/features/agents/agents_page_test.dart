@@ -88,6 +88,36 @@ class _Backend extends DemoBackend {
     );
   }
 
+  /// 能力库读不到：模型、插件、MCP 都是 null，带原因。
+  bool choicesUnreadable = false;
+  bool memoriesFail = false;
+
+  /// 记忆列表晚回来：等它放行。
+  Completer<void>? memoriesGate;
+
+  static const _unread = AgentChoices(error: 'Pi 没装');
+
+  @override
+  Future<AgentChoices> agentChoices(String runtimeId) async =>
+      choicesUnreadable ? _unread : super.agentChoices(runtimeId);
+
+  @override
+  Future<AgentEditor> agentEditor(String runtimeId, {String? agentId}) async {
+    final editor = await super.agentEditor(runtimeId, agentId: agentId);
+    if (!choicesUnreadable) return editor;
+    return AgentEditor(draft: editor.draft, choices: _unread);
+  }
+
+  @override
+  Future<AgentMemories> agentMemories(String runtimeId, String agentId) async {
+    final memories = await super.agentMemories(runtimeId, agentId);
+    await memoriesGate?.future;
+    if (memoriesFail) {
+      throw const SmeltError(kind: SmeltErrorKind.offline, message: '断了');
+    }
+    return memories;
+  }
+
   final createdAgents = <(String, AgentDraft)>[];
   final updatedAgents = <(String, String, AgentDraft, AgentDraft)>[];
   final deletedAgents = <(String, String)>[];
@@ -457,5 +487,71 @@ void main() {
     await tester.drag(find.text('模型'), const Offset(0, -200));
     await tester.pumpAndSettle();
     expect(tester.testTextInput.isVisible, isFalse, reason: '拖动列表收起');
+  });
+
+  testWidgets('能力库读不到：选了的照原样显示，不说成「已经没有了」', (tester) async {
+    await _pump(tester, _Backend()..choicesUnreadable = true);
+    await tester.tap(find.text('工作助手').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('skill:lark-cli'), findsOneWidget);
+    expect(find.text('notion'), findsOneWidget);
+    expect(find.text('这台机器上已经没有了'), findsNothing);
+
+    await tester.tap(find.byTooltip('编辑'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Pi 没装'), findsOneWidget, reason: '编辑页说明原因');
+    expect(find.text('这台机器上已经没有了'), findsNothing);
+    expect(find.text('skill:lark-cli'), findsOneWidget);
+  });
+
+  testWidgets('勾上再取消不算改动：保存不亮、返回不问', (tester) async {
+    await _pump(tester, _Backend());
+    await tester.tap(find.text('工作助手').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('编辑'));
+    await tester.pumpAndSettle();
+
+    final save = find.widgetWithText(TextButton, '保存');
+    await tester.tap(find.text('lark-cli'));
+    await tester.pump();
+    expect(tester.widget<TextButton>(save).onPressed, isNotNull);
+    await tester.tap(find.text('lark-cli'));
+    await tester.pump();
+    expect(tester.widget<TextButton>(save).onPressed, isNull);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('放弃修改？'), findsNothing);
+    expect(find.text('编辑智能体'), findsNothing);
+  });
+
+  testWidgets('记忆没取到时详情里说没取到，不一直转圈', (tester) async {
+    await _pump(tester, _Backend()..memoriesFail = true);
+    await tester.tap(find.text('工作助手').first);
+    await tester.pumpAndSettle();
+    expect(find.text('记忆没取到'), findsOneWidget);
+  });
+
+  testWidgets('记忆页：晚回来的旧列表不盖掉采纳后的新列表', (tester) async {
+    final backend = _Backend();
+    await _pump(tester, backend);
+    await tester.tap(find.text('工作助手').first);
+    await tester.pumpAndSettle();
+
+    // 进记忆页时的那次取列表卡住，先显示详情页带过去的那份。
+    backend.memoriesGate = Completer<void>();
+    await tester.tap(find.text('1 条待确认'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('发版窗口'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('采纳'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('待确认'), findsNothing);
+
+    // 旧的那次取列表现在才回来（演示后端取的是采纳前的快照）。
+    backend.memoriesGate!.complete();
+    await tester.pumpAndSettle();
+    expect(find.textContaining('待确认'), findsNothing);
   });
 }

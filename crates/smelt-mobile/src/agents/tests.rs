@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Value, json};
 use smelt_model::agent_memory::{AgentMemories as ModelMemories, MemoryEntry, MemoryListing};
 use smelt_model::pi_mcp::{PiMcpServer, PiMcpTransport};
-use smelt_model::pi_model_settings::{PiModelChoice, group_pi_model_choices};
+use smelt_model::pi_model_settings::{PiModelChoice, PiModelSettings, group_pi_model_choices};
 use smelt_model::pi_plugin_catalog::PiPlugin;
 use smelt_model::pi_service::PiConfigPaths;
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode, ControlResponse};
@@ -149,6 +149,13 @@ fn agent_result(agent: &AgentDefinition) -> Value {
 }
 
 fn pi_config(mcp: Result<Vec<PiMcpServer>, String>) -> Value {
+    pi_config_with(Ok(PiModelSettings::default()), mcp)
+}
+
+fn pi_config_with(
+    model_settings: Result<PiModelSettings, String>,
+    mcp: Result<Vec<PiMcpServer>, String>,
+) -> Value {
     let choice = |provider: &str, provider_name: &str, id: &str, name: &str| PiModelChoice {
         provider: provider.into(),
         provider_name: provider_name.into(),
@@ -156,7 +163,7 @@ fn pi_config(mcp: Result<Vec<PiMcpServer>, String>) -> Value {
         name: name.into(),
     };
     serde_json::to_value(PiConfig {
-        model_settings: Err("没读".into()),
+        model_settings,
         settings_summary: Err("没读".into()),
         mcp_servers: mcp,
         plugins: vec![
@@ -241,14 +248,17 @@ fn editor_shows_the_definition_and_what_this_machine_offers() {
         ),
         ("anthropic", "opus")
     );
-    let labels: Vec<&str> = editor
+    let choices = &editor.choices;
+    let labels: Vec<&str> = choices
         .models
+        .as_deref()
+        .unwrap()
         .iter()
         .flat_map(|group| group.models.iter().map(|m| m.label.as_str()))
         .collect();
     assert_eq!(labels, ["Anthropic / Claude Opus", "Local / qwen"]);
     assert_eq!(
-        editor.plugins[1],
+        choices.plugins.as_deref().unwrap()[1],
         PluginOption {
             id: "extension:gone".into(),
             kind: PluginKind::Extension,
@@ -258,14 +268,14 @@ fn editor_shows_the_definition_and_what_this_machine_offers() {
         }
     );
     assert_eq!(
-        editor.mcp_servers,
+        choices.mcp_servers.as_deref().unwrap(),
         [McpOption {
             name: "notion".into(),
             description: Some("笔记".into()),
             enabled: false,
         }]
     );
-    assert_eq!(editor.choices_error, None);
+    assert_eq!(choices.error, None);
 }
 
 #[test]
@@ -294,20 +304,45 @@ fn editor_still_opens_when_the_capability_library_cannot_be_read() {
     let editor = connected(&runtime).editor(Some("quant")).unwrap();
 
     assert_eq!(editor.draft.name, "量化");
-    assert!(editor.models.is_empty() && editor.plugins.is_empty());
-    assert_eq!(editor.choices_error.as_deref(), Some("Pi 没装"));
+    // 没读到 ≠ 这台机器上没有：都是 None，界面不能把选了的标成「已经没有了」。
+    let choices = editor.choices;
+    assert_eq!(
+        (choices.models, choices.plugins, choices.mcp_servers),
+        (None, None, None)
+    );
+    assert_eq!(choices.error.as_deref(), Some("Pi 没装"));
+}
 
-    // 只有 MCP 那份坏了：模型和插件照常，原因照样说出来。
+#[test]
+fn a_broken_config_file_marks_only_its_part_as_unread() {
+    let runtime = FakeRuntime::new();
     runtime.result(
         "pi.config.get",
-        pi_config(Err("mcp.json 不是合法 JSON".into())),
+        pi_config_with(
+            Err("models.json 不是合法 JSON".into()),
+            Err("mcp.json 不是合法 JSON".into()),
+        ),
     );
-    let editor = connected(&runtime).editor(Some("quant")).unwrap();
-    assert_eq!(editor.plugins.len(), 2);
+
+    let choices = connected(&runtime).choices().unwrap();
+
+    assert_eq!(runtime.methods(), ["pi.config.get"], "只取选项不读定义");
+    assert!(
+        choices.models.is_none(),
+        "models.json 坏了，可选模型只剩一部分，当没读到"
+    );
+    assert!(choices.mcp_servers.is_none());
+    assert_eq!(choices.plugins.map(|p| p.len()), Some(2), "插件照常");
     assert_eq!(
-        editor.choices_error.as_deref(),
-        Some("mcp.json 不是合法 JSON")
+        choices.error.as_deref(),
+        Some("mcp.json 不是合法 JSON；models.json 不是合法 JSON")
     );
+
+    // 真的一个 MCP 都没有：是空列表，不是 None。
+    runtime.result("pi.config.get", pi_config(Ok(Vec::new())));
+    let choices = connected(&runtime).choices().unwrap();
+    assert_eq!(choices.mcp_servers, Some(Vec::new()));
+    assert_eq!(choices.error, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +415,50 @@ fn update_sends_only_the_fields_that_changed() {
         })],
         "模型成对发；没改的名字、插件、MCP、链接、记忆开关都不发"
     );
+}
+
+#[test]
+fn whitespace_in_stored_lists_does_not_count_as_a_change() {
+    let runtime = FakeRuntime::new();
+    runtime.result("agent.definition.update", agent_result(&definition()));
+    // 命令行写进去的条目带空白：手机上只改名字，不能把整张插件列表也发出去。
+    let original = AgentDraft {
+        plugins: vec![" skill:charts ".into(), "".into()],
+        ..draft_of(&definition())
+    };
+    let edited = AgentDraft {
+        name: "量化研究".into(),
+        ..original.clone()
+    };
+
+    connected(&runtime)
+        .update("quant", &original, &edited)
+        .unwrap();
+
+    assert_eq!(
+        runtime.params("agent.definition.update"),
+        [json!({"id": "quant", "name": "量化研究"})]
+    );
+}
+
+#[test]
+fn reordered_plugins_are_not_a_change() {
+    let runtime = FakeRuntime::new();
+    runtime.result("agent.definition.get", agent_result(&definition()));
+    let original = AgentDraft {
+        plugins: vec!["skill:a".into(), "skill:b".into()],
+        ..draft_of(&definition())
+    };
+    let edited = AgentDraft {
+        plugins: vec!["skill:b".into(), "skill:a".into()],
+        ..original.clone()
+    };
+
+    connected(&runtime)
+        .update("quant", &original, &edited)
+        .unwrap();
+
+    assert_eq!(runtime.methods(), ["agent.definition.get"], "没改动只重读");
 }
 
 #[test]

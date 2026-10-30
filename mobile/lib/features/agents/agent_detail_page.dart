@@ -48,10 +48,11 @@ class _AgentDetailPageState extends State<AgentDetailPage> {
 
   /// 记忆没有推送：进页面取一次，从记忆页、编辑页回来再取。null = 还没取到或取不到。
   AgentMemories? _memories;
+  bool _memoriesFailed = false;
 
   /// 这台机器能力库里的模型、插件、MCP，用来把定义里的 id 显示成和编辑页一样的名字。
   /// 进页面、编辑回来时取；取到之前（或取不到）显示 id 原文。
-  AgentEditor? _choices;
+  AgentChoices? _choices;
 
   @override
   void initState() {
@@ -64,7 +65,7 @@ class _AgentDetailPageState extends State<AgentDetailPage> {
     try {
       final choices = await AppScope.of(
         context,
-      ).backend.agentEditor(widget.runtimeId, agentId: widget.agentId);
+      ).backend.agentChoices(widget.runtimeId);
       if (mounted) setState(() => _choices = choices);
     } catch (_) {
       // 取不到就显示 id 原文，不挡详情本身。
@@ -76,9 +77,15 @@ class _AgentDetailPageState extends State<AgentDetailPage> {
       final memories = await AppScope.of(
         context,
       ).backend.agentMemories(widget.runtimeId, widget.agentId);
-      if (mounted) setState(() => _memories = memories);
+      if (mounted) {
+        setState(() {
+          _memories = memories;
+          _memoriesFailed = false;
+        });
+      }
     } catch (_) {
-      // 取不到就不显示条数；进记忆页会再取一次并说明原因。
+      // 只说没取到；原因和重试在记忆页里（进去会再取一次）。
+      if (mounted) setState(() => _memoriesFailed = true);
     }
   }
 
@@ -200,6 +207,7 @@ class _AgentDetailPageState extends State<AgentDetailPage> {
             runtime: runtime,
             online: online,
             memories: _memories,
+            memoriesFailed: _memoriesFailed,
             choices: _choices,
             onMemories: online ? () => _openMemories(agent) : null,
           ),
@@ -237,6 +245,7 @@ class _AgentBody extends StatelessWidget {
     required this.runtime,
     required this.online,
     required this.memories,
+    required this.memoriesFailed,
     required this.choices,
     required this.onMemories,
   });
@@ -245,7 +254,8 @@ class _AgentBody extends StatelessWidget {
   final FleetRuntime? runtime;
   final bool online;
   final AgentMemories? memories;
-  final AgentEditor? choices;
+  final bool memoriesFailed;
+  final AgentChoices? choices;
   final VoidCallback? onMemories;
 
   @override
@@ -334,14 +344,28 @@ class _AgentBody extends StatelessWidget {
         if (agent.plugins.isNotEmpty) ...[
           ShelfHeader(title: l10n.agentsPlugins),
           Shelf(
-            children: [for (final id in agent.plugins) _pluginRow(l10n, id)],
+            children: [
+              for (final item in pluginChoiceItems(
+                l10n,
+                choices?.plugins,
+                agent.plugins,
+                includeUnchosen: false,
+              ))
+                ChoiceRow(item: item),
+            ],
           ),
         ],
         if (agent.mcpServers.isNotEmpty) ...[
           ShelfHeader(title: l10n.agentEditMcp),
           Shelf(
             children: [
-              for (final name in agent.mcpServers) _mcpRow(l10n, name),
+              for (final item in mcpChoiceItems(
+                l10n,
+                choices?.mcpServers,
+                agent.mcpServers,
+                includeUnchosen: false,
+              ))
+                ChoiceRow(item: item),
             ],
           ),
         ],
@@ -384,48 +408,6 @@ class _AgentBody extends StatelessWidget {
     );
   }
 
-  /// 和编辑页一样：类型图标、名字、说明；坏了的写原因，机器上没有了的照实说。
-  Widget _pluginRow(L10n l10n, String id) {
-    final loaded = choices;
-    final plugin = loaded?.plugins.where((p) => p.id == id).firstOrNull;
-    if (plugin == null) {
-      return _ChoiceLine(
-        icon: loaded == null ? LucideIcons.plug : LucideIcons.circleSlash,
-        title: id,
-        subtitle: loaded == null ? null : l10n.agentEditMissing,
-        danger: loaded != null,
-      );
-    }
-    final description = plugin.description.trim();
-    return _ChoiceLine(
-      icon: pluginIcon(plugin.kind),
-      title: plugin.name,
-      subtitle: plugin.broken ?? (description.isEmpty ? null : description),
-      danger: plugin.broken != null,
-    );
-  }
-
-  Widget _mcpRow(L10n l10n, String name) {
-    final loaded = choices;
-    final server = loaded?.mcpServers.where((s) => s.name == name).firstOrNull;
-    if (loaded != null && server == null) {
-      return _ChoiceLine(
-        icon: LucideIcons.circleSlash,
-        title: name,
-        subtitle: l10n.agentEditMissing,
-        danger: true,
-      );
-    }
-    final description = server?.description?.trim() ?? '';
-    return _ChoiceLine(
-      icon: LucideIcons.server,
-      title: name,
-      subtitle: server != null && !server.enabled
-          ? l10n.agentEditMcpDisabled
-          : (description.isEmpty ? null : description),
-    );
-  }
-
   String _memorySummary(L10n l10n) {
     final m = memories;
     final parts = [
@@ -434,7 +416,10 @@ class _AgentBody extends StatelessWidget {
       if (m != null && m.pending == 0)
         l10n.agentsMemoryCount(m.agent.items.length + m.user.items.length),
     ];
-    return parts.isEmpty ? l10n.commonLoading : parts.join(' · ');
+    if (m == null) {
+      parts.add(memoriesFailed ? l10n.memoryLoadFailed : l10n.commonLoading);
+    }
+    return parts.join(' · ');
   }
 
   /// 只有 http(s) 链接能点开；别的（内部 id、相对路径）原样展示。
@@ -445,39 +430,6 @@ class _AgentBody extends StatelessWidget {
     }
     return () =>
         unawaited(launchUrl(uri, mode: LaunchMode.externalApplication));
-  }
-}
-
-/// 插件、MCP 的一行：和编辑页同样的图标、名字和说明，只是不能勾。
-class _ChoiceLine extends StatelessWidget {
-  const _ChoiceLine({
-    required this.icon,
-    required this.title,
-    this.subtitle,
-    this.danger = false,
-  });
-
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = GalleyColors.of(context);
-    final t = GalleyText.of(context);
-    final sub = subtitle;
-    return ShelfRow(
-      leading: Icon(icon, size: Strokes.icon, color: c.inkMuted),
-      title: Text(title),
-      subtitle: sub == null
-          ? null
-          : Text(
-              sub,
-              maxLines: 2,
-              style: danger ? t.meta.copyWith(color: c.danger) : null,
-            ),
-    );
   }
 }
 

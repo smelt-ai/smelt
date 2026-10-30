@@ -84,6 +84,9 @@ abstract interface class Backend {
   // 智能体 -------------------------------------------------------------------
   /// 编辑页要的配置和可选项；`agentId` 为空是新建。
   Future<AgentEditor> agentEditor(String runtimeId, {String? agentId});
+
+  /// 只取能力库里的模型、插件、MCP（把 id 显示成名字用）。
+  Future<AgentChoices> agentChoices(String runtimeId);
   Future<AgentDefinitionSummary> createAgent(
     String runtimeId,
     AgentDraft draft,
@@ -340,6 +343,10 @@ class FrbBackend implements Backend {
   @override
   Future<AgentEditor> agentEditor(String runtimeId, {String? agentId}) =>
       agents.agentEditor(runtimeId: runtimeId, agentId: agentId);
+
+  @override
+  Future<AgentChoices> agentChoices(String runtimeId) =>
+      agents.agentChoices(runtimeId: runtimeId);
 
   @override
   Future<AgentDefinitionSummary> createAgent(

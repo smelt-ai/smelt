@@ -56,6 +56,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AcpAgentOption dco_decode_acp_agent_option(dynamic raw);
 
   @protected
+  AgentChoices dco_decode_agent_choices(dynamic raw);
+
+  @protected
   AgentDefinitionSummary dco_decode_agent_definition_summary(dynamic raw);
 
   @protected
@@ -521,6 +524,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
+  List<McpOption>? dco_decode_opt_list_mcp_option(dynamic raw);
+
+  @protected
+  List<ModelGroup>? dco_decode_opt_list_model_group(dynamic raw);
+
+  @protected
+  List<PluginOption>? dco_decode_opt_list_plugin_option(dynamic raw);
+
+  @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -690,6 +702,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AcpAgentOption sse_decode_acp_agent_option(SseDeserializer deserializer);
+
+  @protected
+  AgentChoices sse_decode_agent_choices(SseDeserializer deserializer);
 
   @protected
   AgentDefinitionSummary sse_decode_agent_definition_summary(
@@ -1279,6 +1294,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  List<McpOption>? sse_decode_opt_list_mcp_option(SseDeserializer deserializer);
+
+  @protected
+  List<ModelGroup>? sse_decode_opt_list_model_group(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<PluginOption>? sse_decode_opt_list_plugin_option(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -1464,6 +1492,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     AcpAgentOption self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_agent_choices(AgentChoices self, SseSerializer serializer);
 
   @protected
   void sse_encode_agent_definition_summary(
@@ -2229,6 +2260,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_list_mcp_option(
+    List<McpOption>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_model_group(
+    List<ModelGroup>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_plugin_option(
+    List<PluginOption>? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_list_prim_u_8_strict(

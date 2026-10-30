@@ -66,16 +66,30 @@ pub struct McpOption {
     pub enabled: bool,
 }
 
-/// 编辑页要的全部：当前配置（新建时是空白草稿），和这台机器上能选的模型、插件、MCP。
+/// 这台机器能力库里能选的模型、插件、MCP。
+///
+/// 每一项为 `None` 是**没读到**，不是「这台机器上没有」：界面这时照原值显示智能体选了的
+/// 东西，不能把它们标成「已经没有了」。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentChoices {
+    pub models: Option<Vec<ModelGroup>>,
+    pub plugins: Option<Vec<PluginOption>>,
+    pub mcp_servers: Option<Vec<McpOption>>,
+    /// 没读到（或读到一部分）的原因，几条用「；」连起来。
+    pub error: Option<String>,
+}
+
+/// 编辑页要的全部：当前配置（新建时是空白草稿），和这台机器上能选的东西。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentEditor {
     pub draft: AgentDraft,
-    pub models: Vec<ModelGroup>,
-    pub plugins: Vec<PluginOption>,
-    pub mcp_servers: Vec<McpOption>,
-    /// 能力库没取到（或其中一部分坏了）的原因。选项为空时界面要说明，不能让人以为这台
-    /// 机器上什么都没有。
-    pub choices_error: Option<String>,
+    pub choices: AgentChoices,
+}
+
+/// 只取能力库里的选项（详情页把 id 显示成名字用）。连不上才报错；能力库读不到时照样
+/// 返回，原因在 `error` 里。
+pub fn agent_choices(runtime_id: String) -> Result<AgentChoices, SmeltError> {
+    crate::fleet::fleet().node(&runtime_id)?.agents.choices()
 }
 
 /// 打开编辑页。`agent_id` 为空是新建。

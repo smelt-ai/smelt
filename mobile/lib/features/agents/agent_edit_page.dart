@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -114,9 +115,22 @@ class _AgentEditPageState extends State<AgentEditPage> {
     memoryEnabled: _memoryEnabled,
   );
 
+  /// 按内容比：生成的 `AgentDraft ==` 对列表只比引用，勾上再取消也会算改过。
   bool get _dirty {
     final editor = _editor;
-    return editor != null && _draft != editor.draft;
+    if (editor == null) return false;
+    final a = _draft;
+    final b = editor.draft;
+    return a.name != b.name ||
+        a.prompt != b.prompt ||
+        // 插件和 MCP 是勾选集合：取消再勾回来顺序会变，不算改动。
+        !setEquals(a.plugins.toSet(), b.plugins.toSet()) ||
+        !setEquals(a.mcpServers.toSet(), b.mcpServers.toSet()) ||
+        !listEquals(a.contextFolders, b.contextFolders) ||
+        !listEquals(a.contextLinks, b.contextLinks) ||
+        a.modelProvider != b.modelProvider ||
+        a.modelId != b.modelId ||
+        a.memoryEnabled != b.memoryEnabled;
   }
 
   bool get _canSave =>
@@ -231,7 +245,7 @@ class _AgentEditPageState extends State<AgentEditPage> {
       isScrollControlled: true,
       useSafeArea: true,
       builder: (context) => _ModelSheet(
-        groups: editor.models,
+        groups: editor.choices.models ?? const [],
         provider: _modelProvider,
         id: _modelId,
       ),
@@ -317,7 +331,7 @@ class _AgentEditPageState extends State<AgentEditPage> {
     final c = GalleyColors.of(context);
     final t = GalleyText.of(context);
     final enabled = !_saving && !_deleting;
-    final choicesError = editor.choicesError;
+    final choicesError = editor.choices.error;
     return ListView(
       // 键盘收不起来的输入法（没有收起键）也能走：拖动列表或点输入框外面都收起。
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
@@ -373,7 +387,12 @@ class _AgentEditPageState extends State<AgentEditPage> {
                 color: c.inkMuted,
               ),
               title: Text(
-                agentModelLabel(l10n, editor.models, _modelProvider, _modelId),
+                agentModelLabel(
+                  l10n,
+                  editor.choices.models,
+                  _modelProvider,
+                  _modelId,
+                ),
               ),
               trailing: _chevron(c),
               onTap: enabled ? _pickModel : null,
@@ -468,43 +487,17 @@ class _AgentEditPageState extends State<AgentEditPage> {
     bool enabled,
   ) {
     final l10n = L10n.of(context);
-    final known = {for (final p in editor.plugins) p.id};
-    // 勾着、但这台机器上已经没有的：列出来，能取消，不悄悄丢掉。
-    final missing = _plugins.where((id) => !known.contains(id));
-    void toggle(String id, bool on) => setState(
-      () => _plugins = on
-          ? [..._plugins, id]
-          : [
-              for (final p in _plugins)
-                if (p != id) p,
-            ],
+    final items = pluginChoiceItems(
+      l10n,
+      editor.choices.plugins,
+      _plugins,
+      includeUnchosen: true,
     );
-    final rows = <Widget>[
-      for (final plugin in editor.plugins)
-        _CheckRow(
-          icon: pluginIcon(plugin.kind),
-          title: plugin.name,
-          subtitle: plugin.broken ?? _nonEmpty(plugin.description),
-          danger: plugin.broken != null,
-          checked: _plugins.contains(plugin.id),
-          // 坏了的不能新勾，已经勾着的可以取消。
-          onChanged:
-              enabled && (plugin.broken == null || _plugins.contains(plugin.id))
-              ? (on) => toggle(plugin.id, on)
-              : null,
-        ),
-      for (final id in missing)
-        _CheckRow(
-          icon: LucideIcons.circleSlash,
-          title: id,
-          subtitle: l10n.agentEditMissing,
-          danger: true,
-          checked: true,
-          onChanged: enabled ? (on) => toggle(id, on) : null,
-        ),
+    if (items.isEmpty) return [NoteRow(text: l10n.agentEditPluginsNone)];
+    return [
+      for (final item in items)
+        _checkRow(item, _plugins, enabled, (next) => _plugins = next),
     ];
-    if (rows.isEmpty) return [NoteRow(text: l10n.agentEditPluginsNone)];
-    return rows;
   }
 
   List<Widget> _mcpRows(
@@ -513,39 +506,44 @@ class _AgentEditPageState extends State<AgentEditPage> {
     bool enabled,
   ) {
     final l10n = L10n.of(context);
-    final known = {for (final s in editor.mcpServers) s.name};
-    final missing = _mcpServers.where((name) => !known.contains(name));
-    void toggle(String name, bool on) => setState(
-      () => _mcpServers = on
-          ? [..._mcpServers, name]
-          : [
-              for (final s in _mcpServers)
-                if (s != name) s,
-            ],
+    final items = mcpChoiceItems(
+      l10n,
+      editor.choices.mcpServers,
+      _mcpServers,
+      includeUnchosen: true,
     );
-    final rows = <Widget>[
-      for (final server in editor.mcpServers)
-        _CheckRow(
-          icon: LucideIcons.server,
-          title: server.name,
-          subtitle: server.enabled
-              ? _nonEmpty(server.description ?? '')
-              : l10n.agentEditMcpDisabled,
-          checked: _mcpServers.contains(server.name),
-          onChanged: enabled ? (on) => toggle(server.name, on) : null,
-        ),
-      for (final name in missing)
-        _CheckRow(
-          icon: LucideIcons.circleSlash,
-          title: name,
-          subtitle: l10n.agentEditMissing,
-          danger: true,
-          checked: true,
-          onChanged: enabled ? (on) => toggle(name, on) : null,
-        ),
+    if (items.isEmpty) return [NoteRow(text: l10n.agentEditMcpNone)];
+    return [
+      for (final item in items)
+        _checkRow(item, _mcpServers, enabled, (next) => _mcpServers = next),
     ];
-    if (rows.isEmpty) return [NoteRow(text: l10n.agentEditMcpNone)];
-    return rows;
+  }
+
+  Widget _checkRow(
+    ChoiceItem item,
+    List<String> chosen,
+    bool enabled,
+    void Function(List<String>) assign,
+  ) {
+    final checked = chosen.contains(item.key);
+    return ChoiceRow(
+      item: item,
+      selectable: true,
+      checked: checked,
+      // 不能新勾的（坏了的插件）只能取消。
+      onChanged: enabled && (item.canSelect || checked)
+          ? (on) => setState(
+              () => assign(
+                on
+                    ? [...chosen, item.key]
+                    : [
+                        for (final key in chosen)
+                          if (key != item.key) key,
+                      ],
+              ),
+            )
+          : null,
+    );
   }
 
   Widget _chevron(GalleyColors c) => Icon(
@@ -554,8 +552,6 @@ class _AgentEditPageState extends State<AgentEditPage> {
     color: c.inkFaint,
   );
 }
-
-String? _nonEmpty(String text) => text.trim().isEmpty ? null : text.trim();
 
 /// 一个输入框：用主题的输入框样式（白底、描边、内边距），左右和搁板对齐。不再套搁板，
 /// 免得白板里再嵌一个框。
@@ -569,45 +565,6 @@ class _Field extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: Space.page),
     child: child,
   );
-}
-
-/// 能勾的一行：插件、MCP。
-class _CheckRow extends StatelessWidget {
-  const _CheckRow({
-    required this.icon,
-    required this.title,
-    required this.checked,
-    required this.onChanged,
-    this.subtitle,
-    this.danger = false,
-  });
-
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final bool danger;
-  final bool checked;
-  final ValueChanged<bool>? onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = GalleyColors.of(context);
-    final t = GalleyText.of(context);
-    final sub = subtitle;
-    return ShelfRow(
-      leading: Icon(icon, size: Strokes.icon, color: c.inkMuted),
-      title: Text(title),
-      subtitle: sub == null
-          ? null
-          : Text(sub, style: danger ? t.meta.copyWith(color: c.danger) : null),
-      semanticLabel: title,
-      trailing: Checkbox(
-        value: checked,
-        onChanged: onChanged == null ? null : (v) => onChanged!(v ?? false),
-      ),
-      onTap: onChanged == null ? null : () => onChanged!(!checked),
-    );
-  }
 }
 
 /// 一项绑定的目录或链接：全文展示，尾部移除。

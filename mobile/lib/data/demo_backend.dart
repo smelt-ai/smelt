@@ -855,6 +855,55 @@ class DemoBackend implements Backend {
         memoryEnabled: d.memoryEnabled,
       );
 
+  static const _demoChoices = AgentChoices(
+    models: [
+      ModelGroup(
+        provider: 'anthropic',
+        providerName: 'Anthropic',
+        models: [
+          ModelOption(
+            provider: 'anthropic',
+            id: 'claude-opus',
+            label: 'Anthropic / Claude Opus',
+          ),
+          ModelOption(
+            provider: 'anthropic',
+            id: 'claude-sonnet',
+            label: 'Anthropic / Claude Sonnet',
+          ),
+        ],
+      ),
+    ],
+    plugins: [
+      PluginOption(
+        id: 'skill:lark-cli',
+        kind: PluginKind.skill,
+        name: 'lark-cli',
+        description: '飞书文档、消息、任务',
+      ),
+      PluginOption(
+        id: 'skill:meegle',
+        kind: PluginKind.skill,
+        name: 'meegle',
+        description: '飞书项目工作项',
+      ),
+      PluginOption(
+        id: 'extension:notify',
+        kind: PluginKind.extension_,
+        name: 'notify',
+        description: '',
+        broken: '文件不存在',
+      ),
+    ],
+    mcpServers: [
+      McpOption(name: 'notion', description: '笔记', enabled: true),
+      McpOption(name: 'linear', enabled: false),
+    ],
+  );
+
+  @override
+  Future<AgentChoices> agentChoices(String runtimeId) async => _demoChoices;
+
   @override
   Future<AgentEditor> agentEditor(String runtimeId, {String? agentId}) async {
     final agent = agentId == null
@@ -874,49 +923,7 @@ class DemoBackend implements Backend {
               memoryEnabled: true,
             )
           : _draftOf(agent),
-      models: const [
-        ModelGroup(
-          provider: 'anthropic',
-          providerName: 'Anthropic',
-          models: [
-            ModelOption(
-              provider: 'anthropic',
-              id: 'claude-opus',
-              label: 'Anthropic / Claude Opus',
-            ),
-            ModelOption(
-              provider: 'anthropic',
-              id: 'claude-sonnet',
-              label: 'Anthropic / Claude Sonnet',
-            ),
-          ],
-        ),
-      ],
-      plugins: const [
-        PluginOption(
-          id: 'skill:lark-cli',
-          kind: PluginKind.skill,
-          name: 'lark-cli',
-          description: '飞书文档、消息、任务',
-        ),
-        PluginOption(
-          id: 'skill:meegle',
-          kind: PluginKind.skill,
-          name: 'meegle',
-          description: '飞书项目工作项',
-        ),
-        PluginOption(
-          id: 'extension:notify',
-          kind: PluginKind.extension_,
-          name: 'notify',
-          description: '',
-          broken: '文件不存在',
-        ),
-      ],
-      mcpServers: const [
-        McpOption(name: 'notion', description: '笔记', enabled: true),
-        McpOption(name: 'linear', enabled: false),
-      ],
+      choices: _demoChoices,
     );
   }
 

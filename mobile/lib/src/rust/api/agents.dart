@@ -9,7 +9,12 @@ import 'error.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+
+/// 只取能力库里的选项（详情页把 id 显示成名字用）。连不上才报错；能力库读不到时照样
+/// 返回，原因在 `error` 里。
+Future<AgentChoices> agentChoices({required String runtimeId}) =>
+    RustLib.instance.api.crateApiAgentsAgentChoices(runtimeId: runtimeId);
 
 /// 打开编辑页。`agent_id` 为空是新建。
 Future<AgentEditor> agentEditor({required String runtimeId, String? agentId}) =>
@@ -82,6 +87,35 @@ Future<AgentMemories> deleteMemory({
   fileName: fileName,
 );
 
+/// 这台机器能力库里能选的模型、插件、MCP。
+///
+/// 每一项为 `None` 是**没读到**，不是「这台机器上没有」：界面这时照原值显示智能体选了的
+/// 东西，不能把它们标成「已经没有了」。
+class AgentChoices {
+  final List<ModelGroup>? models;
+  final List<PluginOption>? plugins;
+  final List<McpOption>? mcpServers;
+
+  /// 没读到（或读到一部分）的原因，几条用「；」连起来。
+  final String? error;
+
+  const AgentChoices({this.models, this.plugins, this.mcpServers, this.error});
+
+  @override
+  int get hashCode =>
+      models.hashCode ^ plugins.hashCode ^ mcpServers.hashCode ^ error.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AgentChoices &&
+          runtimeType == other.runtimeType &&
+          models == other.models &&
+          plugins == other.plugins &&
+          mcpServers == other.mcpServers &&
+          error == other.error;
+}
+
 /// 编辑页上的一份智能体配置。新建、保存都用它；执行引擎眼下只有 Pi，不在这里选。
 class AgentDraft {
   final String name;
@@ -149,32 +183,15 @@ class AgentDraft {
           memoryEnabled == other.memoryEnabled;
 }
 
-/// 编辑页要的全部：当前配置（新建时是空白草稿），和这台机器上能选的模型、插件、MCP。
+/// 编辑页要的全部：当前配置（新建时是空白草稿），和这台机器上能选的东西。
 class AgentEditor {
   final AgentDraft draft;
-  final List<ModelGroup> models;
-  final List<PluginOption> plugins;
-  final List<McpOption> mcpServers;
+  final AgentChoices choices;
 
-  /// 能力库没取到（或其中一部分坏了）的原因。选项为空时界面要说明，不能让人以为这台
-  /// 机器上什么都没有。
-  final String? choicesError;
-
-  const AgentEditor({
-    required this.draft,
-    required this.models,
-    required this.plugins,
-    required this.mcpServers,
-    this.choicesError,
-  });
+  const AgentEditor({required this.draft, required this.choices});
 
   @override
-  int get hashCode =>
-      draft.hashCode ^
-      models.hashCode ^
-      plugins.hashCode ^
-      mcpServers.hashCode ^
-      choicesError.hashCode;
+  int get hashCode => draft.hashCode ^ choices.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -182,10 +199,7 @@ class AgentEditor {
       other is AgentEditor &&
           runtimeType == other.runtimeType &&
           draft == other.draft &&
-          models == other.models &&
-          plugins == other.plugins &&
-          mcpServers == other.mcpServers &&
-          choicesError == other.choicesError;
+          choices == other.choices;
 }
 
 class AgentMemories {

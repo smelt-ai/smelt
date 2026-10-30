@@ -48,6 +48,9 @@ class _AgentMemoryPageState extends State<AgentMemoryPage> {
   /// 正在采纳或删除的那条。
   (MemoryLayer, String)? _busy;
 
+  /// 每次取列表、每次操作加一：晚回来的旧列表不能盖掉操作刚带回来的新列表。
+  int _generation = 0;
+
   @override
   void initState() {
     super.initState();
@@ -56,18 +59,21 @@ class _AgentMemoryPageState extends State<AgentMemoryPage> {
   }
 
   Future<void> _load() async {
+    final generation = ++_generation;
     try {
       final memories = await AppScope.of(
         context,
       ).backend.agentMemories(widget.runtimeId, widget.agentId);
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           _memories = memories;
           _error = null;
         });
       }
     } catch (error) {
-      if (mounted) setState(() => _error = describeError(error));
+      if (mounted && generation == _generation) {
+        setState(() => _error = describeError(error));
+      }
     }
   }
 
@@ -78,10 +84,13 @@ class _AgentMemoryPageState extends State<AgentMemoryPage> {
   ) async {
     final messenger = ScaffoldMessenger.of(context);
     final l10n = L10n.of(context);
+    final generation = ++_generation;
     setState(() => _busy = (layer, item.fileName));
     try {
       final memories = await action();
-      if (mounted) setState(() => _memories = memories);
+      if (mounted && generation == _generation) {
+        setState(() => _memories = memories);
+      }
     } catch (error) {
       messenger.showSnackBar(
         SnackBar(content: Text(l10n.memoryActionFailed(describeError(error)))),

@@ -22,8 +22,8 @@ use smelt_model::pi_service::PiConfig;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 use crate::api::agents::{
-    AgentDraft, AgentEditor, AgentMemories, McpOption, MemoryItem, MemoryLayer, MemoryShelf,
-    ModelGroup, ModelOption, PluginKind, PluginOption,
+    AgentChoices, AgentDraft, AgentEditor, AgentMemories, McpOption, MemoryItem, MemoryLayer,
+    MemoryShelf, ModelGroup, ModelOption, PluginKind, PluginOption,
 };
 use crate::api::catalog::AgentDefinitionSummary;
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
@@ -75,20 +75,30 @@ impl Agents {
                 ..AgentDraft::default()
             },
         };
-        let config = runtime
+        Ok(AgentEditor {
+            draft,
+            choices: self.choices_on(&runtime),
+        })
+    }
+
+    pub(crate) fn choices(&self) -> Result<AgentChoices, SmeltError> {
+        let runtime = self.runtime()?;
+        Ok(self.choices_on(&runtime))
+    }
+
+    fn choices_on(&self, runtime: &CurrentRuntime) -> AgentChoices {
+        match runtime
             .client
             .call::<PiConfigGet>(&EmptyParams::default(), self.timing.slow_call_timeout)
-            .map_err(control_error);
-        Ok(match config {
-            Ok(config) => editor_with(draft, config),
-            Err(failure) => AgentEditor {
-                draft,
-                models: Vec::new(),
-                plugins: Vec::new(),
-                mcp_servers: Vec::new(),
-                choices_error: Some(failure.message),
+        {
+            Ok(config) => choices_of(config),
+            Err(failure) => AgentChoices {
+                models: None,
+                plugins: None,
+                mcp_servers: None,
+                error: Some(control_error(failure).message),
             },
-        })
+        }
     }
 
     fn definition(
@@ -246,11 +256,16 @@ fn draft_of(definition: &AgentDefinition) -> AgentDraft {
 }
 
 /// 名字不能空；列表去掉空项和首尾空白。长期指令原样保留（缩进、空行都是用户写的）。
-fn tidy(mut draft: AgentDraft) -> Result<AgentDraft, SmeltError> {
-    draft.name = draft.name.trim().to_string();
+fn tidy(draft: AgentDraft) -> Result<AgentDraft, SmeltError> {
+    let draft = tidy_lists(draft);
     if draft.name.is_empty() {
         return Err(error(SmeltErrorKind::Other, "智能体要有名字"));
     }
+    Ok(draft)
+}
+
+fn tidy_lists(mut draft: AgentDraft) -> AgentDraft {
+    draft.name = draft.name.trim().to_string();
     for list in [
         &mut draft.plugins,
         &mut draft.mcp_servers,
@@ -263,7 +278,7 @@ fn tidy(mut draft: AgentDraft) -> Result<AgentDraft, SmeltError> {
             .filter(|item| !item.is_empty())
             .collect();
     }
-    Ok(draft)
+    draft
 }
 
 /// 模型要成对：只填了一半当没填，跟随默认。
@@ -282,15 +297,25 @@ fn patch_between(original: &AgentDraft, edited: &AgentDraft) -> AgentDefinitionP
     fn changed<T: PartialEq + Clone>(before: &T, after: &T) -> Option<T> {
         (before != after).then(|| after.clone())
     }
+    // 打开时那份也照保存时一样整理再比：存档里带空白的旧条目（命令行写的）不算改动，
+    // 否则只改了名字也会把整张列表发出去，盖掉桌面同时对这张列表的改动。
+    let original = &tidy_lists(original.clone());
+    // 插件和 MCP 是勾选集合：取消再勾回来只是顺序变了，不算改动。
+    fn changed_set(before: &[String], after: &[String]) -> Option<Vec<String>> {
+        let set = |items: &[String]| -> std::collections::BTreeSet<String> {
+            items.iter().cloned().collect()
+        };
+        (set(before) != set(after)).then(|| after.to_vec())
+    }
     let (provider_before, id_before) = model_pair(original);
     let (provider_after, id_after) = model_pair(edited);
     let model_changed = (provider_before, id_before) != (provider_after.clone(), id_after.clone());
     AgentDefinitionPatch {
-        name: changed(&original.name.trim().to_string(), &edited.name),
+        name: changed(&original.name, &edited.name),
         prompt: changed(&original.prompt, &edited.prompt),
         engine_kind_id: None,
-        plugins: changed(&original.plugins, &edited.plugins),
-        mcp_servers: changed(&original.mcp_servers, &edited.mcp_servers),
+        plugins: changed_set(&original.plugins, &edited.plugins),
+        mcp_servers: changed_set(&original.mcp_servers, &edited.mcp_servers),
         context_folders: changed(&original.context_folders, &edited.context_folders),
         context_links: changed(&original.context_links, &edited.context_links),
         model_provider: model_changed.then_some(provider_after),
@@ -299,9 +324,12 @@ fn patch_between(original: &AgentDraft, edited: &AgentDraft) -> AgentDefinitionP
     }
 }
 
-fn editor_with(draft: AgentDraft, config: PiConfig) -> AgentEditor {
-    let (mcp_servers, mcp_error) = match config.mcp_servers {
-        Ok(servers) => (
+/// 能力库快照投成选项。`models.json` 坏了时可选模型只剩一部分，当作没读到：否则智能体
+/// 绑的自定义模型会被说成「已经没有了」。`mcp.json` 坏了同理。
+fn choices_of(config: PiConfig) -> AgentChoices {
+    let mut errors = Vec::new();
+    let mcp_servers = match config.mcp_servers {
+        Ok(servers) => Some(
             servers
                 .into_iter()
                 .map(|server| McpOption {
@@ -310,13 +338,21 @@ fn editor_with(draft: AgentDraft, config: PiConfig) -> AgentEditor {
                     enabled: server.enabled,
                 })
                 .collect(),
-            None,
         ),
-        Err(message) => (Vec::new(), Some(message)),
+        Err(message) => {
+            errors.push(message);
+            None
+        }
     };
-    AgentEditor {
-        draft,
-        models: config
+    let models_readable = match &config.model_settings {
+        Ok(_) => true,
+        Err(message) => {
+            errors.push(message.clone());
+            false
+        }
+    };
+    let models = models_readable.then(|| {
+        config
             .model_choice_groups
             .into_iter()
             .map(|group| ModelGroup {
@@ -332,23 +368,28 @@ fn editor_with(draft: AgentDraft, config: PiConfig) -> AgentEditor {
                 provider: group.provider,
                 provider_name: group.provider_name,
             })
-            .collect(),
-        plugins: config
-            .plugins
-            .into_iter()
-            .map(|plugin| PluginOption {
-                id: plugin.id,
-                kind: match plugin.kind {
-                    PiPluginKind::Skill => PluginKind::Skill,
-                    PiPluginKind::Extension => PluginKind::Extension,
-                },
-                name: plugin.name,
-                description: plugin.description,
-                broken: plugin.broken,
-            })
-            .collect(),
+            .collect()
+    });
+    AgentChoices {
+        models,
+        plugins: Some(
+            config
+                .plugins
+                .into_iter()
+                .map(|plugin| PluginOption {
+                    id: plugin.id,
+                    kind: match plugin.kind {
+                        PiPluginKind::Skill => PluginKind::Skill,
+                        PiPluginKind::Extension => PluginKind::Extension,
+                    },
+                    name: plugin.name,
+                    description: plugin.description,
+                    broken: plugin.broken,
+                })
+                .collect(),
+        ),
         mcp_servers,
-        choices_error: mcp_error,
+        error: (!errors.is_empty()).then(|| errors.join("；")),
     }
 }
 

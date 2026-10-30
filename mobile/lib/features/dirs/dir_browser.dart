@@ -41,6 +41,9 @@ class DirBrowser extends ChangeNotifier {
   int _generation = 0;
   bool _disposed = false;
 
+  /// 正在退回上一层。来路要等列成功才摘，退的路上再按返回不能又去列同一层。
+  bool _backing = false;
+
   /// 从头列：[path] 为空时由内核挑起点（最近打开的项目所在的目录，或主目录）。
   Future<void> start([String? path]) {
     _trail.clear();
@@ -55,7 +58,7 @@ class DirBrowser extends ChangeNotifier {
   /// 退回来路的上一层。来路空了返回 false，由调用方决定退到哪。
   bool back() {
     if (_trail.isEmpty) return false;
-    unawaited(_list(_trail.last, backward: true));
+    if (!_backing) unawaited(_list(_trail.last, backward: true));
     return true;
   }
 
@@ -67,6 +70,7 @@ class DirBrowser extends ChangeNotifier {
   }) async {
     final generation = ++_generation;
     final from = _listing?.path;
+    _backing = backward;
     _busy = true;
     _notify();
     try {
@@ -82,6 +86,7 @@ class DirBrowser extends ChangeNotifier {
       _error = describeError(error);
     }
     _busy = false;
+    _backing = false;
     _notify();
   }
 
