@@ -623,6 +623,10 @@ mod agent_definition_ui_tests {
         assert_eq!(format_relative_since(100, 100 + 3 * 60), "3 分钟前");
         assert_eq!(format_relative_since(100, 100 + 5 * 3600), "5 小时前");
         assert_eq!(format_relative_since(100, 100 + 2 * 86400), "2 天前");
+        assert_eq!(format_relative_since(100, 100 + 40 * 86400), "1 个月前");
+        assert_eq!(format_relative_since(100, 100 + 400 * 86400), "1 年前");
+        // 远程机器的时钟可能比本机快，不写成负数。
+        assert_eq!(format_relative_since(100 + 3600, 100), "刚刚");
         assert_eq!(format_last_run_cell(None, 100), "—");
         assert_eq!(
             format_last_run_cell(Some((AutomationRunStatus::Failed, 100)), 100 + 3600),

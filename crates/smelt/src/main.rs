@@ -2998,6 +2998,8 @@ impl Workspace {
             if window.is_window_active() {
                 this.recheck_date(cx);
                 this.check_daemon_outdated_on_event(cx);
+                // 侧栏的「N 分钟前」只在重画时更新，人回来时按当前时间画一次。
+                cx.notify();
             }
         });
         ws._window_activation_sub = Some(activation);
