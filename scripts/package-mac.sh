@@ -18,7 +18,7 @@
 #                               发布给 "Developer ID Application"
 #   SMELT_ASC_KEY_PATH / SMELT_ASC_KEY_ID / SMELT_ASC_ISSUER_ID
 #                               App Store Connect API 密钥（和 make ios 同一把），Developer ID 打 dmg 时
-#                               用它提交公证，缺了直接失败
+#                               用它提交公证；都不设就不公证，只设一部分直接失败
 #   以下几项在编译时生效，要配合 --build（或自己带着它们 cargo build --release）：
 #   SMELT_BUILD_VERSION         版本号；--build 时不设就由 scripts/version.sh 按 git tag 算
 #   SMELT_UPDATE_MANIFEST_URL   更新清单地址，`{channel}` 换成 dev / prod；不设则查 GitHub Releases
@@ -349,16 +349,24 @@ if [[ "$IDENTITY_FOUND" != true ]]; then
   echo "  一次性修复：./scripts/setup-codesign-identity.sh" >&2
   exit 1
 fi
-# Developer ID 的 dmg 是对外分发件，必须公证，否则下载后 Gatekeeper 照样拦。
+# Developer ID 的 dmg 没公证的话，下载后 Gatekeeper 照样拦。三个密钥变量都设了就在这里公证；
+# 都没设就不公证，交给调用方（自己分发的人可能有别的公证流程），GitHub 发版的 secret 由
+# release.yml 把关。只设一部分多半是配错了，直接失败。
 # 凭据在签名前就查，别等编完、签完才发现缺。--no-dmg（make install）不出分发件，不公证。
+NOTARIZE=0
 if [[ "$IDENTITY_NAME" == "Developer ID Application"* && "$SKIP_DMG" -eq 0 ]]; then
-  for var in SMELT_ASC_KEY_PATH SMELT_ASC_KEY_ID SMELT_ASC_ISSUER_ID; do
-    if [[ -z "${!var:-}" ]]; then
-      echo "✗ Developer ID 打 dmg 要公证，缺 ${var}（App Store Connect API 密钥，见 docs/release.md 的「macOS 签名」）。" >&2
-      exit 1
-    fi
-  done
-  [[ -f "$SMELT_ASC_KEY_PATH" ]] || { echo "✗ 找不到 SMELT_ASC_KEY_PATH：$SMELT_ASC_KEY_PATH" >&2; exit 1; }
+  if [[ -z "${SMELT_ASC_KEY_PATH:-}${SMELT_ASC_KEY_ID:-}${SMELT_ASC_ISSUER_ID:-}" ]]; then
+    echo "⚠ 没设 SMELT_ASC_KEY_*，这次不公证，dmg 需要另行公证后才能分发。" >&2
+  else
+    for var in SMELT_ASC_KEY_PATH SMELT_ASC_KEY_ID SMELT_ASC_ISSUER_ID; do
+      if [[ -z "${!var:-}" ]]; then
+        echo "✗ 公证的 App Store Connect API 密钥不全，缺 ${var}（见 docs/release.md 的「macOS 签名」）。" >&2
+        exit 1
+      fi
+    done
+    [[ -f "$SMELT_ASC_KEY_PATH" ]] || { echo "✗ 找不到 SMELT_ASC_KEY_PATH：$SMELT_ASC_KEY_PATH" >&2; exit 1; }
+    NOTARIZE=1
+  fi
 fi
 
 ENTITLEMENTS="$ROOT/scripts/entitlements.plist"
@@ -509,7 +517,7 @@ rm -f "$BG_TIFF"
 # 公证只提交 dmg 一次：Apple 会连里面的 .app 和每个内层二进制一起登记，所以 dmg
 # 和 dist/Smelt.app 都能钉上票据。钉了票据，离线首次打开也能过 Gatekeeper；
 # 应用内更新的 Smelt.app.zip 是从钉好票据的 dist/Smelt.app 压的。
-if [[ "$IDENTITY_NAME" == "Developer ID Application"* ]]; then
+if [[ "$NOTARIZE" -eq 1 ]]; then
   DMG="$DIST/$APP_NAME.dmg"
   echo "▶ 签 dmg …"
   codesign --force --timestamp --sign "$IDENTITY" "$DMG"

@@ -154,6 +154,8 @@ SMELT_ASC_KEY_PATH=~/.private_keys/AuthKey_XXXX.p8 SMELT_ASC_KEY_ID=XXXX SMELT_A
   make dist-build
 ```
 
+三个 `SMELT_ASC_*` 都不设时 `package-mac.sh` 只签名、不公证，给有自己公证流程的分发方用；这样出的 dmg 未经公证不能直接分发。
+
 本机开发（`make install`）照旧用 `scripts/setup-codesign-identity.sh` 生成的自签名身份，不公证。
 
 从自签名换到 Developer ID 的那一版：应用内更新会核对新包和已装的包是同一个签发身份，自签名的老版本认不出
