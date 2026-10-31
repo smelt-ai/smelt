@@ -113,7 +113,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     # 整个 workspace 都编（GPUI 在 Linux 上编不过），runner 要 Apple Silicon（同 release.yml）。
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -184,7 +184,7 @@ jobs:
   mobile:
     needs: changes
     if: needs.changes.outputs.mobile == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: mobile
@@ -287,7 +287,7 @@ jobs:
   ios-check:
     needs: changes
     if: needs.changes.outputs.android == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
