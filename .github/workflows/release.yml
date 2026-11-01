@@ -15,8 +15,8 @@ permissions:
 jobs:
   build:
     # 必须 arm64：package-mac.sh 会用 file 校验产物是 arm64，Intel 直接拒绝。
-    # macos-15 默认就是 Apple Silicon。
-    runs-on: macos-15
+    # macos-26 默认就是 Apple Silicon。
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v7
