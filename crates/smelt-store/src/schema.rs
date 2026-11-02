@@ -1781,11 +1781,11 @@ CREATE TABLE push_registration (
 ) WITHOUT ROWID;
 ";
 
-/// v31：workspace profile 换成自定义 Agent（自带启动命令和环境变量）。旧的 workspace
-/// profile 不迁移，整表重建。
+/// v31：workspace profile 换成自定义 Agent（自带启动命令和环境变量）。保留旧配置和
+/// 顺序；空命令表示沿用底层 Agent 的命令。
 pub const MIGRATE_V30_TO_V31: &str = "
 DROP TABLE IF EXISTS agent_profile_env;
-DROP TABLE agent_profile;
+ALTER TABLE agent_profile RENAME TO agent_profile_v30;
 CREATE TABLE agent_profile (
   id TEXT PRIMARY KEY,
   kind_id TEXT NOT NULL,
@@ -1794,6 +1794,9 @@ CREATE TABLE agent_profile (
   workspace_dir TEXT NOT NULL,
   position INTEGER NOT NULL CHECK (position >= 0)
 );
+INSERT INTO agent_profile(id, kind_id, label, command, workspace_dir, position)
+  SELECT id, kind_id, label, '', workspace_dir, position FROM agent_profile_v30;
+DROP TABLE agent_profile_v30;
 CREATE TABLE agent_profile_env (
   profile_id TEXT NOT NULL REFERENCES agent_profile(id) ON DELETE CASCADE,
   name TEXT NOT NULL,

@@ -2598,7 +2598,7 @@ mod imp {
         apply_v31_custom_agent(transaction)
     }
 
-    /// v31：workspace profile 换成自定义 Agent。旧 profile 不迁移，两张表按当前形状重建。
+    /// v31：workspace profile 换成自定义 Agent，保留旧 profile 和排序。
     fn apply_v31_custom_agent(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
         transaction.execute_batch(crate::schema::MIGRATE_V30_TO_V31)?;
         apply_v32_quota_provider_pref(transaction)
@@ -7257,10 +7257,18 @@ CREATE TABLE worktree_inherit_skip_pattern (
         connection
             .execute_batch(
                 "DROP TABLE push_registration;
-                 INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);",
+                 INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);
+                 INSERT INTO agent_host_pref(id, hooks_enabled) VALUES (1, 1);",
             )
             .unwrap();
         connection.execute_batch(V30_AGENT_PROFILE).unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_profile(id, kind_id, label, workspace_dir, position)
+                 VALUES ('old', 'claude', '量化', '/tmp/quant', 0)",
+                [],
+            )
+            .unwrap();
         connection.pragma_update(None, "user_version", 29).unwrap();
         drop(connection);
 
@@ -7268,13 +7276,19 @@ CREATE TABLE worktree_inherit_skip_pattern (
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
         assert_eq!(store.list_paired_devices().unwrap().len(), 1);
         assert!(store.list_push_registrations().unwrap().is_empty());
+        let profiles = store.get_agent_ui_snapshot().unwrap().unwrap().profiles;
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "old");
+        assert_eq!(profiles[0].workspace_dir, "/tmp/quant");
+        assert!(profiles[0].command.is_empty());
+        assert!(profiles[0].env.is_empty());
         drop(store);
         assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
     }
 
-    /// v30 的库：workspace profile 表按自定义 Agent 的形状重建，旧 profile 不迁移。
+    /// v30 的 workspace profile 升级后保留身份、数据目录和顺序，沿用内置 Agent 的命令。
     #[test]
-    fn migrates_v30_rebuilding_profiles_as_custom_agents() {
+    fn migrates_v30_preserving_workspace_profiles() {
         let dir = temp_dir("migrate-v30-custom-agent");
         let path = dir.join(DATABASE_FILE_NAME);
         let fresh = dir.join("fresh.sqlite3");
@@ -7284,8 +7298,10 @@ CREATE TABLE worktree_inherit_skip_pattern (
         connection
             .execute_batch(&format!(
                 "{V30_AGENT_PROFILE}
+                 INSERT INTO agent_host_pref(id, hooks_enabled) VALUES (1, 1);
                  INSERT INTO agent_profile(id, kind_id, label, workspace_dir, position)
-                 VALUES ('old', 'claude', '量化', '/tmp/quant', 0);"
+                 VALUES ('old', 'claude', '量化', '/tmp/quant', 1),
+                        ('second', 'codex', '工作', '/tmp/work', 0);"
             ))
             .unwrap();
         connection.pragma_update(None, "user_version", 30).unwrap();
@@ -7298,9 +7314,26 @@ CREATE TABLE worktree_inherit_skip_pattern (
             .unwrap()
             .map(|snapshot| snapshot.profiles)
             .unwrap_or_default();
-        assert!(
-            profiles.is_empty(),
-            "旧 workspace profile 不迁移：{profiles:?}"
+        assert_eq!(
+            profiles,
+            vec![
+                AgentProfileRecord {
+                    id: "second".into(),
+                    kind_id: "codex".into(),
+                    label: "工作".into(),
+                    command: String::new(),
+                    workspace_dir: "/tmp/work".into(),
+                    env: vec![],
+                },
+                AgentProfileRecord {
+                    id: "old".into(),
+                    kind_id: "claude".into(),
+                    label: "量化".into(),
+                    command: String::new(),
+                    workspace_dir: "/tmp/quant".into(),
+                    env: vec![],
+                },
+            ],
         );
         drop(store);
         assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
