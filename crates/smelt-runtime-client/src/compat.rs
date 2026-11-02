@@ -304,7 +304,8 @@ mod tests {
         assert_eq!(check_events(&described), Ok(()));
 
         let mut older = current();
-        older.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION - 1;
+        older.events.as_mut().unwrap().protocol_version =
+            MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION - 1;
         let error = check_events(&older).unwrap_err();
         assert_eq!(error.outdated, Outdated::Runtime);
         assert!(error.reason.contains("事件协议"), "{}", error.reason);
