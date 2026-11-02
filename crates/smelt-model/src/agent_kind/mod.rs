@@ -1395,9 +1395,11 @@ pub struct AcpProfile {
     pub kind_id: String,
     /// 新建菜单、会话标题、历史页 tab 上显示的名字，比如「Til」。
     pub label: String,
-    /// 启动命令。空 = 沿用底层 agent 当前生效的命令；通用 ACP 必填。
+    /// 启动命令。空 = 沿用底层 agent 当前生效的命令；通用 ACP 必填。旧运行时不报，读成空。
+    #[serde(default)]
     pub command: String,
-    /// 额外注入的环境变量，覆盖底层 agent 的同名变量。
+    /// 额外注入的环境变量，覆盖底层 agent 的同名变量。旧运行时不报，读成空。
+    #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// 数据目录，允许 `~` 开头（展开逻辑见 `crate::workspace_override`）。空 = 不覆盖；
     /// 只有底层 agent 有数据目录变量（如 `CLAUDE_CONFIG_DIR`）时才能填。
@@ -1490,6 +1492,20 @@ impl AcpProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 已发布的运行时报的 profile 没有 `command`、`env`，读不出来就连不上那些机器。
+    #[test]
+    fn a_profile_from_a_released_runtime_is_readable() {
+        let profile: AcpProfile = serde_json::from_value(serde_json::json!({
+            "id": "quant",
+            "kind_id": "claude",
+            "label": "量化",
+            "workspace_dir": "~/.quant",
+        }))
+        .unwrap();
+        assert_eq!(profile.command, "");
+        assert!(profile.env.is_empty());
+    }
 
     /// 表下标 = 枚举变体序号，`descriptor()` 的索引访问依赖这条；表和枚举
     /// 顺序一旦对不上，所有显示名/命令会整体错位，所以在这里钉死。

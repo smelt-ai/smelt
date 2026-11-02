@@ -16,7 +16,8 @@ use super::daemon::DaemonOperation;
 /// 自己要的方法，缺了必需的就判运行时太旧。新方法缺了只是某项功能用不了的，记进
 /// [`ControlMethod::OPTIONAL`]；客户端离了它就用不了的，直接是必需方法。改已有方法的参数或
 /// 结果才升，同时抬 [`CONTROL_API_MIN_SUPPORTED_VERSION`]：同名方法换了形状，方法清单看不
-/// 出来，只能靠版本拦住。
+/// 出来，只能靠版本拦住。但用户的 Linux 机器打成了镜像，运行时升不了，升它就连不上这些机器：
+/// 优先让改动可缺省、新旧两边都读得了，不升版本。
 ///
 /// 删方法不升：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下；不调它的客户端
 /// （手机、Pi）照常连。2026-10 删整份读写的 `workspace.load` / `workspace.save` 就是这样。
@@ -29,11 +30,10 @@ use super::daemon::DaemonOperation;
 /// 少了 `native_dsh_profiles`。旧运行时缺这个字段就拒收修改，新桌面改不了旧运行时上的
 /// 智能体配置，得让兼容检查拦住、提示升级运行时。
 ///
-/// v4：workspace profile 换成自定义 Agent，`agent.host.get` / `agent.host.apply_edit` 里的
-/// profile 多了启动命令和环境变量。新旧两边互相解析不了对方的 profile，一样得拦住。
-///
-pub const CONTROL_API_VERSION: u16 = 4;
-pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 4;
+/// 自定义 Agent 的 profile 多了启动命令和环境变量，没有升版：两个字段可缺省，旧运行时也
+/// 不拒绝多出来的字段。
+pub const CONTROL_API_VERSION: u16 = 3;
+pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
 
 macro_rules! define_control_methods {
