@@ -442,13 +442,26 @@ policy 必须声明超时、失败策略、执行顺序和 capability。普通�
 
 - plugin API version：整体连接和能力协议。
 - event bus protocol version：subscribe/ack/cursor wire 协议。
-- topic schema version：单个事件 payload 版本。
+- topic schema version：单个事件 payload 版本（已冻结，见下）。
 
-连接建立时协商支持范围。未知 topic 可以按订阅过滤忽略；已订阅 topic 的未知 schema 必须
-nack 并报告不兼容，不能尝试按旧结构解析。
+连接建立时协商支持范围。daemon、桌面端、手机各自发布，手机还要过商店审核、一部手机连
+好几台机器，版本错开是常态，所以推送载荷按「宽容读取」演进（`smelt-event-protocol` 的模块
+文档是准绳）：
 
-即使所有组件在同一发布中切换，仍必须支持 daemon 与 GUI/Mobile 在升级瞬间短暂版本错位。
-版本协商是正式架构的一部分，不是保留旧内部总线。
+- 读的一方忽略认不出的字段；标了「会增长」的枚举认不出的值落到 `Unknown`，客户端有兜底
+  分支；认不出的订阅消息类型跳过。
+- 响应和推送加字段（一律可缺省）、给标了「会增长」的枚举加值：不升任何版本。
+- 删字段、删话题、改字段含义（包括新字段改变了旧字段该怎么读）、加必填字段、改握手：
+  升 event bus protocol version，最低支持版本一起抬到同一个值（两边都只会说一个版本的协议），
+  连接时就拿到版本不兼容，不错误解析。
+- 加话题也要升：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会反复重连。
+- 其余枚举加值也要升（比如相位、自动化状态），它们解不出会让整条消息失败。
+- 订阅请求和 `ConversationInput` 不宽容：旧运行时要是忽略新字段，用户的意图会悄悄丢掉，严格
+  解码时它会明确拒绝。控制接口的参数规则见 `docs/control-api.md`。
+- 删掉的字段名不再拿来表示别的东西。
+- 认证载荷保持严格：客户端不能夹带运行时不认识的声明。
+
+topic schema version 和会话投影版本号已冻结，客户端不再检查（v7 起）。
 
 ## 安全模型
 
@@ -557,7 +570,8 @@ provider hook 归一化仍保留。`AgentEvent` 是输入协议；smeltd reducer
 - 插件互相触发的循环会被 hop count、限流或熔断终止。
 - outbox 在 daemon 崩溃和重启后仍会完成投递。
 - dead-letter 可查询、可审计、可受控重放。
-- daemon、桌面端和 Mobile 版本错位时明确拒绝不兼容协议，而不是错误解析。
+- daemon、桌面端和 Mobile 版本错位时：推送加字段、给标了「会增长」的枚举加值照常互通；其余要升版的改动在订阅握手时明确
+  拒绝，而不是错误解析。
 - ephemeral 发布不产生 SQLite 写入。
 - durable outbox 不产生领域事务之外的第二次 commit。
 - 微批 writer 和 cursor batching 在目标负载下不会阻塞事件生产者。

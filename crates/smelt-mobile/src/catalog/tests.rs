@@ -6,8 +6,8 @@ use std::io::{BufRead, BufReader, Read};
 
 use serde_json::{Value, json};
 use smelt_event_protocol::{
-    CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SNAPSHOT_AUTOMATIONS,
-    CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
+    CORE_TOPIC_AUTOMATIONS_CHANGED,
     CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, CoreProjectionEvent,
     CoreSessionPhase, CorrelationId, EventEnvelope, EventId, EventSource, SessionStateChanged,
@@ -1067,12 +1067,7 @@ fn projection_snapshot(kind: &str, data: Value) -> String {
         kind: SnapshotKind(kind.to_string()),
         watermark: 1,
         revision,
-        payload: serde_json::to_value(CoreProjectionEvent {
-            projection_version: CORE_PROJECTION_VERSION,
-            revision,
-            data,
-        })
-        .unwrap(),
+        payload: serde_json::to_value(CoreProjectionEvent { revision, data }).unwrap(),
     })
 }
 
@@ -1083,7 +1078,6 @@ fn snapshot_lines(sessions: Vec<SessionStateChanged>, directory: Value) -> Strin
         watermark: 1,
         revision: 1,
         payload: serde_json::to_value(SessionStatesSnapshot {
-            projection_version: CORE_SESSION_PROJECTION_VERSION,
             revision: 1,
             sessions,
         })
@@ -1128,7 +1122,6 @@ fn directory_line(directory: Value) -> String {
     event_line(
         CORE_TOPIC_WORKSPACE_CHANGED,
         serde_json::to_value(CoreProjectionEvent {
-            projection_version: CORE_PROJECTION_VERSION,
             revision,
             data: directory,
         })

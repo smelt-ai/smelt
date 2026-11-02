@@ -5,8 +5,10 @@
 
 use crate::acp_chat::AcpImage;
 
+/// 不设兜底值：它决定能不能往对话里发普通输入，还参与记忆、对端的身份判断。认不出的类型不能被
+/// 悄悄读成 `Direct`，宁可整条读不出来，所以加类型要升协议版本；加字段不用。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationBinding {
     #[default]
     Direct,
@@ -15,6 +17,8 @@ pub enum ConversationBinding {
     Automation { run_id: String },
 }
 
+/// 客户端发给运行时，保持严格：旧运行时要是忽略新字段，用户的输入会悄悄丢掉一部分（比如附件），
+/// 严格解码时它会明确拒绝。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationInput {
@@ -45,7 +49,6 @@ impl ConversationInput {
 /// daemon 拥有的会话输入状态镜像。`ConversationSnapshot` 里外层使用 `Option`：缺失表示
 /// 对端版本尚不支持该状态，不能据此把客户端已有的待发预设清空。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConversationStateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<ConversationBinding>,
@@ -71,12 +74,13 @@ pub fn merge_agent_preset(preset: Option<&str>, input: &str) -> String {
 pub enum ConversationSubmitErrorKind {
     /// 请求被明确拒绝，远端没有接受本次提交。
     Rejected,
-    /// 已越过可能产生副作用的边界，但结果无法证明；直接重试可能重复。
+    /// 已越过可能产生副作用的边界，但结果无法证明；直接重试可能重复。比这个客户端新的
+    /// 运行时报的认不出的类别也读成它：不能当成明确拒绝去重试。
+    #[serde(other)]
     Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConversationSubmitError {
     pub kind: ConversationSubmitErrorKind,
     pub message: String,
@@ -108,7 +112,10 @@ impl std::error::Error for ConversationSubmitError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversationBinding, ConversationStateSnapshot, merge_agent_preset};
+    use super::{
+        ConversationBinding, ConversationInput, ConversationStateSnapshot, ConversationSubmitError,
+        ConversationSubmitErrorKind, merge_agent_preset,
+    };
 
     #[test]
     fn agent_preset_and_first_input_share_one_prompt() {
@@ -133,17 +140,48 @@ mod tests {
         assert!(state.binding.is_none());
     }
 
+    /// 请求不宽容：旧运行时不能悄悄丢掉新客户端发的字段。
     #[test]
-    fn unknown_binding_fields_are_rejected() {
-        // 内部标签枚举的单元变体（Direct）不受 deny_unknown_fields 约束，这是 serde 的
-        // 已知限制；带字段的变体会拒绝多余字段。
-        assert!(
+    fn input_rejects_unknown_fields() {
+        let error = serde_json::from_value::<ConversationInput>(serde_json::json!({
+            "submission_id": "s1",
+            "text": "hi",
+            "some_future_field": true
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    /// 运行时回的这几样宽容读取：多出来的字段忽略，认不出的失败类别按「结果不明」。
+    #[test]
+    fn newer_runtime_fields_are_ignored() {
+        let error: ConversationSubmitError = serde_json::from_value(serde_json::json!({
+            "kind": "some_future_kind",
+            "message": "x",
+            "some_future_field": 1
+        }))
+        .unwrap();
+        assert_eq!(error.kind, ConversationSubmitErrorKind::Unknown);
+        let state: ConversationStateSnapshot = serde_json::from_value(serde_json::json!({
+            "pending_agent_preset": "review",
+            "some_future_field": 1
+        }))
+        .unwrap();
+        assert_eq!(state.pending_agent_preset.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn unknown_binding_types_are_rejected_but_new_fields_are_ignored() {
+        assert_eq!(
             serde_json::from_value::<ConversationBinding>(serde_json::json!({
                 "type": "automation",
                 "run_id": "run-1",
                 "extra": 1
             }))
-            .is_err()
+            .unwrap(),
+            ConversationBinding::Automation {
+                run_id: "run-1".into()
+            }
         );
         assert!(
             serde_json::from_value::<ConversationBinding>(serde_json::json!({"type": "plugin"}))

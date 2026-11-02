@@ -301,13 +301,16 @@ mod tests {
         );
     }
 
+    /// 偏好按行存在 SQLite 里，不再从 JSON 文件读；JSON 只出现在 `new_session.pins` 的回包里。
+    /// 回包宽容读取：比客户端新的运行时多带的字段忽略，不能让新建菜单读不出 Pin。
     #[test]
-    fn preferences_do_not_accept_the_legacy_versioned_shape() {
-        let legacy = serde_json::json!({
-            "version": 1,
-            "pinned": ["conversation:claude"]
+    fn preferences_from_a_newer_runtime_still_read() {
+        let newer = serde_json::json!({
+            "pinned": ["conversation:claude"],
+            "some_future_field": 1
         });
-        assert!(serde_json::from_value::<NewSessionPreferences>(legacy).is_err());
+        let preferences = serde_json::from_value::<NewSessionPreferences>(newer).unwrap();
+        assert_eq!(preferences.pinned, ["conversation:claude"]);
     }
 
     #[test]

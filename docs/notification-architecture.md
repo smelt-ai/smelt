@@ -109,8 +109,8 @@ shell 提示符（OSC 133 `A`）出现时作废，smelt 目前没有 shell 集�
 `terminal.notification`。
 
 hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在会话状态中，不改写不可变
-的启动命令 `launch`；它与标题通过 `session.state_changed` 的会话投影 v2 下发。客户端仍可
-读取旧 daemon 的 v1 会话投影，其他核心投影继续保持 v1。
+的启动命令 `launch`；它与标题通过 `session.state_changed` 下发。会话状态宽容读取，旧 daemon
+没带的字段读成缺省。
 
 所有出口读取同一个 store：
 

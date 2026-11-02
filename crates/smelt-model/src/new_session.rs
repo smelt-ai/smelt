@@ -144,8 +144,8 @@ impl NewSessionSections {
 }
 
 /// 新建菜单的用户偏好单独存档，直接写入 SQLite；不读取旧 JSON，也不做旧格式迁移。
+/// 也经控制接口回给客户端，所以宽容读取。
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NewSessionPreferences {
     pub pinned: Vec<String>,
 }
