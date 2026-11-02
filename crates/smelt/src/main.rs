@@ -1894,19 +1894,6 @@ fn restored_active_position(restored_indices: &[usize], saved_active: usize) -> 
         .unwrap_or_else(|position| position.min(restored_indices.len() - 1))
 }
 
-pub(crate) fn pane_state_leaf_ids(pane: &PaneState) -> Vec<String> {
-    match pane {
-        PaneState::Leaf { id, .. } => id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .map(|id| vec![id.to_string()])
-            .unwrap_or_default(),
-        PaneState::Split { children, .. } | PaneState::Tabs { children, .. } => {
-            children.iter().flat_map(pane_state_leaf_ids).collect()
-        }
-    }
-}
-
 /// 新对话的稳定 id。
 pub(crate) fn new_conversation_id() -> String {
     uuid::Uuid::new_v4().to_string()

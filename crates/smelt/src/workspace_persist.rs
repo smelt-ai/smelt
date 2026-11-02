@@ -1294,6 +1294,15 @@ mod agent_conversation_persist_tests {
         );
     }
 
+    fn leaf_ids(pane: &crate::PaneState) -> Vec<String> {
+        match pane {
+            crate::PaneState::Leaf { id, .. } => id.iter().cloned().collect(),
+            crate::PaneState::Split { children, .. } | crate::PaneState::Tabs { children, .. } => {
+                children.iter().flat_map(leaf_ids).collect()
+            }
+        }
+    }
+
     /// 终端对话恢复时按默认摆法铺开目录里的终端。
     #[test]
     fn terminal_conversation_restores_its_terminals() {
@@ -1310,7 +1319,7 @@ mod agent_conversation_persist_tests {
         });
         assert!(state.acp.is_none());
         assert_eq!(state.last_updated_at, 42);
-        assert_eq!(crate::pane_state_leaf_ids(&state.layout), ["t-1", "t-2"]);
+        assert_eq!(leaf_ids(&state.layout), ["t-1", "t-2"]);
     }
 
     /// 对话的界面状态存进客户端库再读回来一样不少。
