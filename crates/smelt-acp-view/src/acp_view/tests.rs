@@ -2274,6 +2274,8 @@ fn restart_uses_updated_profile_launch_spec_when_profile_still_exists() {
         id: "quant".into(),
         kind_id: "claude".into(),
         label: "Quant".into(),
+        command: String::new(),
+        env: Default::default(),
         workspace_dir: "~/Claude Workspaces/new quant".into(),
     });
 
@@ -2321,6 +2323,8 @@ fn restart_keeps_persisted_launch_when_profile_agent_is_unknown() {
         id: "future-profile".into(),
         kind_id: "future-agent".into(),
         label: "Future Agent".into(),
+        command: String::new(),
+        env: Default::default(),
         workspace_dir: "~/.future-agent".into(),
     });
 

@@ -629,14 +629,25 @@ class DemoBackend implements Backend {
       WorkspaceCatalog(
         projects: [for (final root in _projectRoots) _projectOf(root)],
         agents: const [
-          AcpAgentOption(id: 'claude', kind: 'claude', label: 'Claude Code'),
-          AcpAgentOption(id: 'codex', kind: 'codex', label: 'Codex'),
-          AcpAgentOption(id: 'pi', kind: 'pi', label: 'Pi'),
+          AcpAgentOption(
+            id: 'claude',
+            kind: 'claude',
+            label: 'Claude Code',
+            hasHistory: true,
+          ),
+          AcpAgentOption(
+            id: 'codex',
+            kind: 'codex',
+            label: 'Codex',
+            hasHistory: true,
+          ),
+          AcpAgentOption(id: 'pi', kind: 'pi', label: 'Pi', hasHistory: true),
           AcpAgentOption(
             id: 'assistant',
             kind: 'pi',
             label: '工作助手',
             agentDefinitionId: 'def-assistant',
+            hasHistory: true,
           ),
         ],
         sections: const LaunchSections(

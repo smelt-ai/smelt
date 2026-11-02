@@ -2467,13 +2467,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   AcpAgentOption dco_decode_acp_agent_option(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return AcpAgentOption(
       id: dco_decode_String(arr[0]),
       kind: dco_decode_String(arr[1]),
       label: dco_decode_String(arr[2]),
       agentDefinitionId: dco_decode_opt_String(arr[3]),
+      hasHistory: dco_decode_bool(arr[4]),
     );
   }
 
@@ -4446,11 +4447,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_kind = sse_decode_String(deserializer);
     var var_label = sse_decode_String(deserializer);
     var var_agentDefinitionId = sse_decode_opt_String(deserializer);
+    var var_hasHistory = sse_decode_bool(deserializer);
     return AcpAgentOption(
       id: var_id,
       kind: var_kind,
       label: var_label,
       agentDefinitionId: var_agentDefinitionId,
+      hasHistory: var_hasHistory,
     );
   }
 
@@ -7059,6 +7062,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.kind, serializer);
     sse_encode_String(self.label, serializer);
     sse_encode_opt_String(self.agentDefinitionId, serializer);
+    sse_encode_bool(self.hasHistory, serializer);
   }
 
   @protected

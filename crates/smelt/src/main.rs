@@ -1222,13 +1222,15 @@ impl Session {
                 let dir = cwd.as_deref().and_then(|cwd| {
                     crate::runtimes::path_style(view.runtime().key(), cx).file_name(cwd.trim())
                 });
+                // 自定义 Agent 的会话用它自己的名字（「Til 对话 · smelt」），不用底层种类名。
+                let agent_label = view.agent_label(cx);
                 let fallback = self
                     .agent_definition_id
                     .as_deref()
                     .and_then(|id| settings::agent_hosts(cx)?.agent(view.runtime().key(), id))
                     .map(|definition| definition.name.trim())
                     .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| view.agent_kind().short_label());
+                    .unwrap_or(&agent_label);
                 if self.agent_definition_id.is_some() {
                     title
                         .as_deref()

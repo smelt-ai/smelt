@@ -28,3 +28,6 @@ Pi 仓库以 MIT License 发布（Copyright (c) 2025 Mario Zechner）；SVG 仅�
 
 `monitor.svg` 来自 [Lucide](https://lucide.dev/icons/monitor)，以 ISC License 发布，
 未改动图形。
+
+`agent-custom.svg`（自定义 ACP Agent 的通用图标）来自 [Lucide](https://lucide.dev/icons/bot)
+的 `bot` 图标，以 ISC License 发布，未改动图形。

@@ -203,6 +203,8 @@ pub struct AcpAgentOption {
     pub label: String,
     /// 产品智能体选项才有。这种对话可以不选项目，开在智能体自己的 space。
     pub agent_definition_id: Option<String>,
+    /// 历史页能不能把它当来源。通用 ACP 的自定义 Agent 没有本地 transcript 可读。
+    pub has_history: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::agent_kind::{AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind};
 
-fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
+pub(crate) fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
     let mut commands = BTreeMap::new();
     for command in snapshot.commands {
         if let Some(descriptor) = CONVERSATION_AGENTS
@@ -48,12 +48,7 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
         profiles: snapshot
             .profiles
             .into_iter()
-            .map(|profile| AcpProfile {
-                id: profile.id,
-                kind_id: profile.kind_id,
-                label: profile.label,
-                workspace_dir: profile.workspace_dir,
-            })
+            .map(profile_from_record)
             .collect(),
         agents: Vec::new(),
         default_conversation_agent: None,
@@ -108,9 +103,33 @@ fn prefs_snapshot(settings: &AgentHostSettings) -> smelt_store::AgentUiSnapshot 
                 id: profile.id.clone(),
                 kind_id: profile.kind_id.clone(),
                 label: profile.label.clone(),
+                command: profile.command.clone(),
                 workspace_dir: profile.workspace_dir.clone(),
+                env: profile
+                    .env
+                    .iter()
+                    .map(|(name, value)| smelt_store::AgentProfileEnvRecord {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
+    }
+}
+
+pub(crate) fn profile_from_record(profile: smelt_store::AgentProfileRecord) -> AcpProfile {
+    AcpProfile {
+        id: profile.id,
+        kind_id: profile.kind_id,
+        label: profile.label,
+        command: profile.command,
+        env: profile
+            .env
+            .into_iter()
+            .map(|var| (var.name, var.value))
+            .collect(),
+        workspace_dir: profile.workspace_dir,
     }
 }
 
@@ -346,6 +365,8 @@ mod tests {
             id: id.into(),
             kind_id: "claude".into(),
             label: label.into(),
+            command: String::new(),
+            env: BTreeMap::new(),
             workspace_dir: format!("~/.claude-{id}"),
         }
     }

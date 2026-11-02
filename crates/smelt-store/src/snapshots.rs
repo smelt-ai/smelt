@@ -151,7 +151,18 @@ pub struct AgentProfileRecord {
     pub id: String,
     pub kind_id: String,
     pub label: String,
+    /// 空 = 沿用底层 agent 的命令。
+    pub command: String,
+    /// 空 = 不覆盖数据目录。
     pub workspace_dir: String,
+    /// 额外环境变量，按变量名排序。
+    pub env: Vec<AgentProfileEnvRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentProfileEnvRecord {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

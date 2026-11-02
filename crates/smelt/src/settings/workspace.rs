@@ -394,27 +394,29 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 手动添加 workspace 条数变了就重建输入框（增删后调用）。
+    /// 自定义 Agent 条数变了就重建输入框（增删后调用）。
     pub fn reset_profile_inputs(&mut self) {
         self.profile_inputs = None;
     }
 
-    /// 懒创建 workspace 列表编辑器（需要 window）。
+    /// 懒创建自定义 Agent 编辑器（需要 window）。
     pub fn ensure_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let count = super::agent_host_settings(&crate::RuntimeKey::Local, cx)
+        let ids: Vec<String> = super::agent_host_settings(&crate::RuntimeKey::Local, cx)
             .profiles
-            .len();
-        let stale = self
-            .profile_inputs
-            .as_ref()
-            .is_none_or(|i| i.rows.len() != count);
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        let stale = self.profile_inputs.as_ref().is_none_or(|inputs| {
+            inputs.rows.len() != ids.len()
+                || inputs.rows.iter().zip(&ids).any(|(row, id)| &row.id != id)
+        });
         if stale {
             self.init_profile_inputs(window, cx);
         }
     }
 
     fn init_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_component::input::{InputEvent, InputState};
+        use gpui_component::input::{InputEvent, InputState, TextareaState};
 
         let profiles = super::agent_host_settings(&crate::RuntimeKey::Local, cx)
             .profiles
@@ -422,68 +424,102 @@ impl Workspace {
         let save_on = |ev: &InputEvent| matches!(ev, InputEvent::Change | InputEvent::Blur);
         let mut rows = Vec::new();
         let mut subs = Vec::new();
-        for (i, p) in profiles.iter().enumerate() {
-            let id = p.id.clone();
-            let label_input = cx.new(|cx| {
+        for p in &profiles {
+            let label = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("显示名称")
+                    .placeholder("名称")
                     .default_value(p.label.clone())
             });
-            let dir_input = cx.new(|cx| {
+            let command_placeholder = match p.kind() {
+                Some(ConversationAgentKind::Custom) | None => {
+                    "ACP 启动命令，如 my-agent --acp".to_string()
+                }
+                Some(kind) => format!("留空沿用 {} 的命令", kind.label()),
+            };
+            let command = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("workspace 目录，如 ~/.claude-quant")
+                    .placeholder(command_placeholder)
+                    .default_value(p.command.clone())
+            });
+            let env = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(1, 8)
+                    .placeholder("每行一个 KEY=VALUE")
+                    .default_value(format_env_lines(&p.env))
+            });
+            let dir = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("留空用默认目录")
                     .default_value(p.workspace_dir.clone())
             });
-            let id_for_label = id.clone();
-            subs.push(
-                cx.subscribe(&label_input, move |_, s, ev: &InputEvent, cx| {
-                    if save_on(ev) {
-                        let v = s.read(cx).value().to_string();
-                        let id = id_for_label.clone();
-                        apply_agent_host(
-                            &crate::RuntimeKey::Local,
-                            move |c| {
-                                if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
-                                    p.label = v;
-                                }
-                            },
-                            cx,
-                        );
-                    }
-                }),
-            );
-            let id_for_dir = id.clone();
-            subs.push(cx.subscribe(&dir_input, move |_, s, ev: &InputEvent, cx| {
-                if save_on(ev) {
-                    let v = s.read(cx).value().to_string();
-                    let id = id_for_dir.clone();
+            subs.push(subscribe_profile_text(&label, p.id.clone(), cx, |p, v| {
+                p.label = v;
+            }));
+            subs.push(subscribe_profile_text(
+                &command,
+                p.id.clone(),
+                cx,
+                |p, v| {
+                    p.command = v;
+                },
+            ));
+            subs.push(subscribe_profile_text(&dir, p.id.clone(), cx, |p, v| {
+                p.workspace_dir = v;
+            }));
+            let id = p.id.clone();
+            subs.push(cx.subscribe(&env, move |this, s, ev: &InputEvent, cx| {
+                if !save_on(ev) {
+                    return;
+                }
+                // 写到一半的变量名不合法很正常：只在能解析时存盘，错误挂在这一行上显示。
+                let parsed = parse_env_lines(&s.read(cx).value());
+                let error = parsed.as_ref().err().cloned();
+                if let Some(row) = this
+                    .profile_inputs
+                    .as_mut()
+                    .and_then(|inputs| inputs.rows.iter_mut().find(|row| row.id == id))
+                    && row.env_error != error
+                {
+                    row.env_error = error;
+                    cx.notify();
+                }
+                if let Ok(env) = parsed {
+                    let id = id.clone();
                     apply_agent_host(
                         &crate::RuntimeKey::Local,
                         move |c| {
                             if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
-                                p.workspace_dir = v;
+                                p.env = env;
                             }
                         },
                         cx,
                     );
                 }
             }));
-            let _ = i;
-            rows.push((label_input, dir_input));
+            rows.push(ProfileRow {
+                id: p.id.clone(),
+                label,
+                command,
+                env,
+                dir,
+                env_error: None,
+            });
         }
         self.profile_inputs = Some(ProfileInputs { rows, _subs: subs });
     }
 
-    /// 新增一个手动 workspace：默认接 Claude（用户改目录之前就得选个 agent，
-    /// Claude 是最常见的场景，跟「新建 ACP 对话」菜单的默认排位一致）。
+    /// 新增一个自定义 Agent：默认是通用 ACP，要用户自己填启动命令；想沿用某个内置
+    /// Agent 的适配器和历史，在类型里换过去即可。
     pub fn add_profile(&mut self, cx: &mut Context<Self>) {
         apply_agent_host(
             &crate::RuntimeKey::Local,
             |c| {
                 c.profiles.push(AcpProfile {
                     id: uuid::Uuid::new_v4().to_string(),
-                    kind_id: ConversationAgentKind::Claude.id().to_string(),
-                    label: "新 workspace".into(),
+                    kind_id: ConversationAgentKind::Custom.id().to_string(),
+                    label: "新 Agent".into(),
+                    command: String::new(),
+                    env: Default::default(),
                     workspace_dir: String::new(),
                 });
             },
@@ -493,36 +529,38 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn remove_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// 按 id 删：配置可能在渲染和点击之间被整份换掉，下标会指到别的 Agent。
+    pub fn remove_profile(&mut self, id: String, cx: &mut Context<Self>) {
         apply_agent_host(
             &crate::RuntimeKey::Local,
-            |c| {
-                if index < c.profiles.len() {
-                    c.profiles.remove(index);
-                }
-            },
+            move |c| c.profiles.retain(|p| p.id != id),
             cx,
         );
         self.reset_profile_inputs();
         cx.notify();
     }
 
-    /// 改某个 workspace 接的 agent 种类（下拉菜单选中项回调）。
+    /// 改某个自定义 Agent 的类型（下拉菜单选中项回调）。换到不支持数据目录的类型时
+    /// 一并清掉目录，否则这一项就成了起不来的配置。
     pub fn set_profile_kind(
         &mut self,
-        index: usize,
+        id: String,
         kind: ConversationAgentKind,
         cx: &mut Context<Self>,
     ) {
         apply_agent_host(
             &crate::RuntimeKey::Local,
             move |c| {
-                if let Some(p) = c.profiles.get_mut(index) {
+                if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
                     p.kind_id = kind.id().to_string();
+                    if p.workspace_env_var().is_none() {
+                        p.workspace_dir.clear();
+                    }
                 }
             },
             cx,
         );
+        self.reset_profile_inputs();
         cx.notify();
     }
 
@@ -1250,4 +1288,30 @@ fn inspect_agent_clis() -> Option<smelt_model::acp_conn::AcpRuntimeDiagnostics> 
     )
     .inspect_err(|error| eprintln!("[settings] 探测 agent CLI 失败：{error}"))
     .ok()
+}
+
+/// 自定义 Agent 的单行输入框：改动和失焦都直接写回对应字段。
+fn subscribe_profile_text(
+    input: &Entity<gpui_component::input::InputState>,
+    id: String,
+    cx: &mut Context<Workspace>,
+    apply: fn(&mut AcpProfile, String),
+) -> Subscription {
+    use gpui_component::input::InputEvent;
+    cx.subscribe(input, move |_, s, ev: &InputEvent, cx| {
+        if !matches!(ev, InputEvent::Change | InputEvent::Blur) {
+            return;
+        }
+        let value = s.read(cx).value().to_string();
+        let id = id.clone();
+        apply_agent_host(
+            &crate::RuntimeKey::Local,
+            move |c| {
+                if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
+                    apply(p, value);
+                }
+            },
+            cx,
+        );
+    })
 }

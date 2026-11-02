@@ -137,16 +137,24 @@ class AcpAgentOption {
   /// 产品智能体选项才有。这种对话可以不选项目，开在智能体自己的 space。
   final String? agentDefinitionId;
 
+  /// 历史页能不能把它当来源。通用 ACP 的自定义 Agent 没有本地 transcript 可读。
+  final bool hasHistory;
+
   const AcpAgentOption({
     required this.id,
     required this.kind,
     required this.label,
     this.agentDefinitionId,
+    required this.hasHistory,
   });
 
   @override
   int get hashCode =>
-      id.hashCode ^ kind.hashCode ^ label.hashCode ^ agentDefinitionId.hashCode;
+      id.hashCode ^
+      kind.hashCode ^
+      label.hashCode ^
+      agentDefinitionId.hashCode ^
+      hasHistory.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -156,7 +164,8 @@ class AcpAgentOption {
           id == other.id &&
           kind == other.kind &&
           label == other.label &&
-          agentDefinitionId == other.agentDefinitionId;
+          agentDefinitionId == other.agentDefinitionId &&
+          hasHistory == other.hasHistory;
 }
 
 /// 智能体定义。

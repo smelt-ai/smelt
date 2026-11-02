@@ -2285,11 +2285,13 @@ impl SseDecode for crate::api::catalog::AcpAgentOption {
         let mut var_kind = <String>::sse_decode(deserializer);
         let mut var_label = <String>::sse_decode(deserializer);
         let mut var_agentDefinitionId = <Option<String>>::sse_decode(deserializer);
+        let mut var_hasHistory = <bool>::sse_decode(deserializer);
         return crate::api::catalog::AcpAgentOption {
             id: var_id,
             kind: var_kind,
             label: var_label,
             agent_definition_id: var_agentDefinitionId,
+            has_history: var_hasHistory,
         };
     }
 }
@@ -5114,6 +5116,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::catalog::AcpAgentOption {
             self.kind.into_into_dart().into_dart(),
             self.label.into_into_dart().into_dart(),
             self.agent_definition_id.into_into_dart().into_dart(),
+            self.has_history.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7645,6 +7648,7 @@ impl SseEncode for crate::api::catalog::AcpAgentOption {
         <String>::sse_encode(self.kind, serializer);
         <String>::sse_encode(self.label, serializer);
         <Option<String>>::sse_encode(self.agent_definition_id, serializer);
+        <bool>::sse_encode(self.has_history, serializer);
     }
 }
 

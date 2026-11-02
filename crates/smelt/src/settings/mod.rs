@@ -746,10 +746,10 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // 智能体配置（启动命令、env、profile、定义）归运行时，每台机器一份：读、改都要说明是
 // 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
 pub use smelt_model::agent_host::AgentHostSettings;
-use smelt_model::agent_kind::ConversationLaunchSpec;
 pub use smelt_model::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
+use smelt_model::agent_kind::{ConversationLaunchSpec, format_env_lines, parse_env_lines};
 pub use smelt_ui::agent_host_state::{
     AgentDefinition, AgentHostState, AgentHosts, agent_host_loaded, agent_host_settled,
     agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host, initial_agent_host_state,
@@ -1032,14 +1032,22 @@ pub struct LaunchInputs {
     _subs: Vec<Subscription>,
 }
 
-/// 手动添加 workspace 列表编辑器：每项一对 label/workspace_dir 输入框；agent
-/// 种类走下拉选择（离散值，不需要输入框），选完直接存盘不用另外的 InputState。
+/// 自定义 Agent 列表编辑器：每项一组名称 / 启动命令 / 环境变量 / 数据目录输入框；
+/// 类型走下拉选择（离散值，不需要输入框），选完直接存盘。
 pub struct ProfileInputs {
-    rows: Vec<(
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
-    )>,
+    rows: Vec<ProfileRow>,
     _subs: Vec<Subscription>,
+}
+
+/// 设置页上一个自定义 Agent 的输入框。环境变量写不对时不存盘，错误挂在这里给页面显示。
+#[derive(Clone)]
+pub struct ProfileRow {
+    pub(crate) id: String,
+    pub(crate) label: Entity<gpui_component::input::InputState>,
+    pub(crate) command: Entity<gpui_component::input::InputState>,
+    pub(crate) env: Entity<gpui_component::input::TextareaState>,
+    pub(crate) dir: Entity<gpui_component::input::InputState>,
+    pub(crate) env_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1303,10 +1311,7 @@ struct SettingsRenderSnapshot {
         Entity<gpui_component::input::InputState>,
         bool,
     )>,
-    profile_rows: Vec<(
-        Entity<gpui_component::input::InputState>,
-        Entity<gpui_component::input::InputState>,
-    )>,
+    profile_rows: Vec<ProfileRow>,
     pi_model_editor: Option<PiModelEditor>,
     pi_custom_provider_editor: Option<PiCustomProviderEditor>,
     /// Pi 内置 provider 的登录状态；`None` 表示这台机器上还没问过。

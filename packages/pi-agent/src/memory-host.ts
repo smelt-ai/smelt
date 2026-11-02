@@ -11,7 +11,7 @@ import type { MemoryLayer } from "./memory-files.ts";
  * 信封版本与 Rust `CONTROL_API_VERSION` 对齐：daemon 只接受不低于它最低支持版本的请求，
  * 两边一起升（v3 起不再接受 v2）。
  */
-const CONTROL_API_VERSION = 3;
+const CONTROL_API_VERSION = 4;
 const HOST_TIMEOUT_MS = 5_000;
 
 type SessionControl = {

@@ -30,3 +30,6 @@ MIT License 发布。Kiro 名称与商标归 Amazon / AWS 所有。
 Copyright 2025–2026 Charmbracelet, Inc.，随 Crush 以
 [FSL-1.1-MIT](https://github.com/charmbracelet/crush/blob/main/LICENSE.md) 发布。
 图形仅用于在 Smelt 中标识对应客户端，Crush 名称与商标归其权利人所有。
+
+`agent-custom.svg`（自定义 ACP Agent 的通用图标）来自 [Lucide](https://lucide.dev/icons/bot)
+的 `bot` 图标，以 ISC License 发布，未改动图形。

@@ -75,8 +75,10 @@ impl AgentDefinition {
         !self.id.trim().is_empty() && self.engine_kind().is_some()
     }
 
+    /// 执行引擎。通用 ACP 只属于自定义 Agent（命令跟着 profile 走），不能当智能体的引擎。
     pub fn engine_kind(&self) -> Option<ConversationAgentKind> {
         ConversationAgentKind::from_id(&self.engine_kind_id)
+            .filter(|kind| *kind != ConversationAgentKind::Custom)
     }
 
     /// 能不能真的用这个定义开一场对话：引擎认得出，而且已注册为产品级引擎。
@@ -118,6 +120,17 @@ pub fn agent_engine_kinds() -> Vec<ConversationAgentKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_acp_is_not_an_agent_engine() {
+        let definition = AgentDefinition {
+            id: "writer".into(),
+            engine_kind_id: ConversationAgentKind::Custom.id().into(),
+            ..AgentDefinition::default()
+        };
+        assert_eq!(definition.engine_kind(), None);
+        assert!(!definition.is_ready());
+    }
 
     #[test]
     fn memory_is_on_unless_explicitly_turned_off() {

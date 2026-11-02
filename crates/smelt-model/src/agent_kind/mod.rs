@@ -488,8 +488,35 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
     },
 ];
 
+/// 通用 ACP：用户在「自定义 Agent」里填的任意 ACP stdio 命令。它不在
+/// `CONVERSATION_AGENTS` 里——没有出厂命令、不参与本机检测和安装、没有终端 CLI、
+/// 没有本地 transcript 可读，命令和环境变量都由具体的 [`AcpProfile`] 提供。
+pub static CUSTOM_AGENT: ConversationAgentDescriptor = ConversationAgentDescriptor {
+    id: "custom",
+    label: "自定义 Agent",
+    short_label: "自定义",
+    // 命令跟着每个 profile 走，不存在按种类保存的那一份。
+    config_key: "",
+    // 认不出能力时按 ACP 的常见情况处理；真不收图的 agent 会在 prompt 时报错。
+    accepts_images: true,
+    default_cmd: String::new,
+    previous_default_cmds: &[],
+    managed_adapter: None,
+    default_env: &[],
+    homebrew_cask: None,
+    npm_package: None,
+    task_params: TaskAgentParams {
+        thinking_key: None,
+        fast_mode_key: None,
+        full_access_mode: None,
+    },
+    cli_resume: None,
+    task_cli: TaskCliPatch::None,
+    engine_owns_model_defaults: false,
+};
+
 /// 按存档标识查描述符；认不出返回 None。配置层拿它把「命令存在哪个键」
-/// 这类问题也变成查表。
+/// 这类问题也变成查表。只查内置表，通用 ACP 没有按种类保存的配置。
 pub fn conversation_descriptor(id: &str) -> Option<&'static ConversationAgentDescriptor> {
     CONVERSATION_AGENTS.iter().find(|d| d.id == id)
 }
@@ -508,10 +535,13 @@ pub enum ConversationAgentKind {
     OpenCode,
     Kiro,
     Pi,
+    /// 通用 ACP（见 [`CUSTOM_AGENT`]）。只经由 [`AcpProfile`] 启动，不在 `ALL` 里。
+    Custom,
 }
 
 impl ConversationAgentKind {
-    /// 新建菜单 / 设置页的排列顺序。
+    /// 内置 agent，新建菜单 / 设置页的排列顺序。不含 [`Self::Custom`]：凡是
+    /// 「每一家都检测 / 安装 / 配一条命令」的地方都只该遍历内置的这些。
     pub const ALL: [Self; 8] = [
         Self::Claude,
         Self::Copilot,
@@ -525,7 +555,10 @@ impl ConversationAgentKind {
 
     /// 这一家的静态属性。变体序号即表下标，见 `CONVERSATION_AGENTS` 的顺序约定。
     pub fn descriptor(self) -> &'static ConversationAgentDescriptor {
-        &CONVERSATION_AGENTS[self as usize]
+        match self {
+            Self::Custom => &CUSTOM_AGENT,
+            builtin => &CONVERSATION_AGENTS[builtin as usize],
+        }
     }
 
     /// 存档标识（稳定，别改）。
@@ -535,6 +568,9 @@ impl ConversationAgentKind {
 
     /// 存档标识 → 种类；认不出（旧存档 / 手改坏了）返回 None，调用方自己兜底。
     pub fn from_id(s: &str) -> Option<Self> {
+        if s == CUSTOM_AGENT.id {
+            return Some(Self::Custom);
+        }
         Self::ALL.into_iter().find(|k| k.id() == s)
     }
 
@@ -606,6 +642,11 @@ impl ConversationAgentKind {
     /// 用户在对话里选的这项配置要不要记成这家的「最近选择」，带给下一个新对话。
     /// 默认值归引擎自己配置的那几项（模型、推理档位）不记。
     pub fn remembers_config(self, config_id: &str) -> bool {
+        // 「最近选择」按种类存，所有自定义 Agent 共用 `custom` 一份；把一家的模型 id
+        // 带给另一家只会换来一次失败的 set_config，所以通用 ACP 一律不记。
+        if self == Self::Custom {
+            return false;
+        }
         let descriptor = self.descriptor();
         !(descriptor.engine_owns_model_defaults
             && (config_id == "model" || descriptor.task_params.thinking_key == Some(config_id)))
@@ -1338,22 +1379,28 @@ pub fn format_env_lines(env: &BTreeMap<String, String>) -> String {
         .join("\n")
 }
 
-/// 手动添加的一个 workspace：底层还是基础 agent 之一，只是换了个数据目录
-/// （比如 Claude 的 `CLAUDE_CONFIG_DIR`）。命令不用手填——按 `kind` 的出厂命令
-/// 加一段 `ENV=workspace_dir` 前缀自动拼出来（见 `command()`），用户只需要选
-/// agent 类型 + 填目录，不用记环境变量名和 shell 语法。
+/// 用户添加的一个自定义 Agent。两种用法：
+///
+/// - **基于内置 agent**（`kind_id` 是内置 id）：沿用那一家的适配器、历史读取、续接和
+///   图标，只换启动命令、加环境变量或换数据目录（比如把 Claude 适配器指到另一个
+///   兼容 CLI：`CLAUDE_CODE_EXECUTABLE=…`）。
+/// - **通用 ACP**（`kind_id` 是 `custom`）：任意 ACP stdio 命令，必须填 `command`。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AcpProfile {
-    /// 稳定 id（新建时生成，不随 label/kind 改变），历史会话页拿它当 tab key、
-    /// 区分"同一个 kind 下的哪一个 workspace"。
+    /// 稳定 id（新建时生成，不随 label/kind 改变），会话存档和历史页 tab 都用它
+    /// 区分「同一个 kind 下的哪一个自定义 Agent」。
     pub id: String,
     /// 底层 agent 种类，存 `ConversationAgentKind::id()`（跟 `AcpSaved.agent` 同一份规则）。
-    /// 未知 id 原样保留，供新版配置降级读取；消费方不得改认成另一种 Agent。
+    /// 未知 id 原样保留；消费方不得改认成另一种 Agent。
     pub kind_id: String,
-    /// 设置页 / 历史页 tab 上显示的名字，比如「Claude Quant」。
+    /// 新建菜单、会话标题、历史页 tab 上显示的名字，比如「Til」。
     pub label: String,
-    /// workspace 目录，允许 `~` 开头（展开逻辑跟 build_agent 共用一份，见
-    /// `crate::workspace_override`）。
+    /// 启动命令。空 = 沿用底层 agent 当前生效的命令；通用 ACP 必填。
+    pub command: String,
+    /// 额外注入的环境变量，覆盖底层 agent 的同名变量。
+    pub env: BTreeMap<String, String>,
+    /// 数据目录，允许 `~` 开头（展开逻辑见 `crate::workspace_override`）。空 = 不覆盖；
+    /// 只有底层 agent 有数据目录变量（如 `CLAUDE_CONFIG_DIR`）时才能填。
     pub workspace_dir: String,
 }
 
@@ -1365,37 +1412,78 @@ impl AcpProfile {
     fn required_kind(&self) -> Result<ConversationAgentKind, String> {
         self.kind().ok_or_else(|| {
             format!(
-                "workspace profile `{}` 使用了未知 ACP Agent `{}`",
-                self.id, self.kind_id
+                "自定义 Agent「{}」使用了未知类型 `{}`",
+                self.label, self.kind_id
             )
         })
     }
 
-    /// 该 profile 底层 agent 用来覆盖数据目录的环境变量名。
-    pub fn env_var(&self) -> Result<&'static str, String> {
-        let kind = self.required_kind()?;
-        crate::workspace_override::config_dir_env_var(kind.id())
-            .ok_or_else(|| format!("{} 不支持自定义 workspace 目录", kind.label()))
+    /// 底层 agent 用来覆盖数据目录的环境变量名；不支持换目录的返回 None。
+    pub fn workspace_env_var(&self) -> Option<&'static str> {
+        crate::workspace_override::config_dir_env_var(&self.kind_id)
     }
 
-    /// 该 profile 的结构化启动规格：命令仍跟着 kind 的出厂值走，workspace 目录
-    /// 作为独立环境变量保留原样（包括空格），由下游统一处理兼容旧字符串前缀。
-    pub fn launch_spec(&self) -> Result<ConversationLaunchSpec, String> {
-        let kind = self.required_kind()?;
-        Ok(kind
-            .default_launch()
-            .with_env(self.env_var()?, self.workspace_dir.clone()))
+    /// 填了数据目录时展开后的路径，历史页按它读这个 Agent 自己的 transcript。
+    pub fn history_dir(&self) -> Option<String> {
+        let dir = self.workspace_dir.trim();
+        (!dir.is_empty() && self.workspace_env_var().is_some())
+            .then(|| crate::workspace_override::expand_tilde(dir))
     }
 
-    /// 兼容旧调用方的字符串命令。保留到 GUI/daemon 全链路升级完成为止。
-    pub fn command(&self) -> Result<String, String> {
+    /// 能不能启动：类型认得出、通用 ACP 填了命令、数据目录只填在支持的类型上。
+    /// 设置页保存前和每次启动都走这一条，错误文案直接给人看。
+    pub fn validate(&self) -> Result<ConversationAgentKind, String> {
         let kind = self.required_kind()?;
-        Ok(format!(
-            "{}={} {}",
-            self.env_var()?,
-            self.workspace_dir,
-            kind.default_cmd()
-        ))
+        if self.label.trim().is_empty() {
+            return Err("自定义 Agent 需要一个名字".into());
+        }
+        if kind == ConversationAgentKind::Custom && self.command.trim().is_empty() {
+            return Err(format!("自定义 Agent「{}」还没填启动命令", self.label));
+        }
+        if !self.workspace_dir.trim().is_empty() && self.workspace_env_var().is_none() {
+            return Err(format!("{} 不支持自定义数据目录", kind.label()));
+        }
+        // 数据目录决定历史从哪读，只能有「数据目录」一栏这一个来源；写在环境变量里
+        // agent 会写到那个目录，历史页却还读默认目录。
+        if let Some(var) = self.workspace_env_var()
+            && self.env.contains_key(var)
+        {
+            return Err(format!("`{var}` 请填在「数据目录」里，不要写在环境变量中"));
+        }
+        // 设置页解析时已拦过，这里再拦一次经 CLI / 控制 API 写进来的配置。
+        if let Some(name) = self
+            .env
+            .keys()
+            .find(|name| LAUNCH_ONLY_ENV.contains(&name.as_str()) || !is_env_name(name))
+        {
+            return Err(format!("环境变量 `{name}` 不能在这里设置"));
+        }
+        Ok(kind)
+    }
+
+    /// 在底层 agent 当前生效的启动规格 `base` 上叠加这个自定义 Agent 的配置：
+    /// 命令（填了才换）→ 环境变量 → 数据目录。数据目录变量最后写，它决定这个
+    /// Agent 的身份（读哪份历史），不能被同名的普通变量顶掉。
+    pub fn launch_spec(
+        &self,
+        base: ConversationLaunchSpec,
+    ) -> Result<ConversationLaunchSpec, String> {
+        self.validate()?;
+        let mut launch = base;
+        if !self.command.trim().is_empty() {
+            launch.command = self.command.trim().to_string();
+        }
+        for (name, value) in &self.env {
+            launch.env.insert(name.clone(), value.clone());
+        }
+        if let Some(name) = self.workspace_env_var()
+            && !self.workspace_dir.trim().is_empty()
+        {
+            launch
+                .env
+                .insert(name.to_string(), self.workspace_dir.trim().to_string());
+        }
+        Ok(launch)
     }
 }
 
@@ -1602,6 +1690,7 @@ mod tests {
         let ids: std::collections::BTreeSet<&str> = ConversationAgentKind::ALL
             .iter()
             .map(|kind| kind.id())
+            .chain([ConversationAgentKind::Custom.id()])
             .chain(TerminalAgentKind::ALL.iter().map(|kind| kind.id()))
             .collect();
 
@@ -2016,39 +2105,53 @@ mod tests {
         );
     }
 
+    fn profile(kind_id: &str) -> AcpProfile {
+        AcpProfile {
+            id: format!("{kind_id}-profile"),
+            kind_id: kind_id.to_string(),
+            label: "自定义".to_string(),
+            command: String::new(),
+            env: BTreeMap::new(),
+            workspace_dir: String::new(),
+        }
+    }
+
     #[test]
     fn profile_launch_spec_keeps_workspace_path_with_spaces_in_one_env_value() {
         let profile = AcpProfile {
-            id: "claude-quant".to_string(),
-            kind_id: "claude".to_string(),
-            label: "Claude Quant".to_string(),
             workspace_dir: "~/Library/Application Support/Claude Quant".to_string(),
+            ..profile("claude")
         };
 
-        let spec = profile.launch_spec().expect("有效 profile");
+        let base = ConversationAgentKind::Claude.default_launch();
+        let spec = profile.launch_spec(base.clone()).expect("有效 profile");
+        assert_eq!(spec.command, base.command, "没填命令就沿用底层 agent 的");
         assert_eq!(
-            spec.command,
-            profile.kind().expect("已知 Agent").default_cmd()
+            spec.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("~/Library/Application Support/Claude Quant")
         );
         assert_eq!(
-            spec.env
-                .get(profile.env_var().expect("支持 workspace 覆盖"))
-                .map(String::as_str),
-            Some("~/Library/Application Support/Claude Quant")
+            profile.history_dir().as_deref(),
+            Some(
+                crate::workspace_override::expand_tilde(
+                    "~/Library/Application Support/Claude Quant"
+                )
+                .as_str()
+            )
         );
     }
 
     #[test]
     fn pi_profile_uses_the_agent_directory_override_for_tui_and_acp() {
         let profile = AcpProfile {
-            id: "pi-team".to_string(),
-            kind_id: "pi".to_string(),
-            label: "Pi Team".to_string(),
             workspace_dir: "~/.pi/team".to_string(),
+            ..profile("pi")
         };
 
-        assert_eq!(profile.env_var().unwrap(), "PI_CODING_AGENT_DIR");
-        let launch = profile.launch_spec().expect("Pi profile 应可启动");
+        assert_eq!(profile.workspace_env_var(), Some("PI_CODING_AGENT_DIR"));
+        let launch = profile
+            .launch_spec(ConversationAgentKind::Pi.default_launch())
+            .expect("Pi profile 应可启动");
         assert_eq!(launch.command, ConversationAgentKind::Pi.default_cmd());
         assert_eq!(
             launch.env.get("PI_CODING_AGENT_DIR").map(String::as_str),
@@ -2056,18 +2159,140 @@ mod tests {
         );
     }
 
+    /// 基于内置 agent：换命令、加环境变量都叠在底层规格上；数据目录变量最后写，
+    /// 底层 agent 设置里的同名变量顶不掉它。
+    #[test]
+    fn builtin_based_profile_overrides_command_and_env_but_keeps_its_data_dir() {
+        let profile = AcpProfile {
+            command: "  claude-agent-acp --verbose ".to_string(),
+            env: BTreeMap::from([
+                (
+                    "CLAUDE_CODE_EXECUTABLE".to_string(),
+                    "~/.til/bin/til".to_string(),
+                ),
+                ("SHARED".to_string(), "profile".to_string()),
+            ]),
+            workspace_dir: "~/.til-claude".to_string(),
+            ..profile("claude")
+        };
+        let base = ConversationAgentKind::Claude
+            .default_launch()
+            .with_env("SHARED", "kind")
+            .with_env("KIND_ONLY", "1")
+            .with_env("CLAUDE_CONFIG_DIR", "/from-kind-settings");
+
+        let launch = profile.launch_spec(base).unwrap();
+        assert_eq!(launch.command, "claude-agent-acp --verbose");
+        assert_eq!(
+            launch.env.get("CLAUDE_CODE_EXECUTABLE").map(String::as_str),
+            Some("~/.til/bin/til")
+        );
+        assert_eq!(
+            launch.env.get("SHARED").map(String::as_str),
+            Some("profile")
+        );
+        assert_eq!(launch.env.get("KIND_ONLY").map(String::as_str), Some("1"));
+        assert_eq!(
+            launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("~/.til-claude")
+        );
+    }
+
+    /// 没填数据目录就不覆盖：历史照读底层 agent 的默认目录。
+    #[test]
+    fn profile_without_data_dir_keeps_the_default_one() {
+        let profile = profile("claude");
+        let launch = profile
+            .launch_spec(ConversationAgentKind::Claude.default_launch())
+            .unwrap();
+        assert!(!launch.env.contains_key("CLAUDE_CONFIG_DIR"));
+        assert_eq!(profile.history_dir(), None);
+    }
+
+    #[test]
+    fn custom_acp_profile_runs_its_own_command() {
+        let profile = AcpProfile {
+            command: "my-agent --acp".to_string(),
+            env: BTreeMap::from([("TOKEN".to_string(), "x".to_string())]),
+            ..profile("custom")
+        };
+        assert_eq!(profile.kind(), Some(ConversationAgentKind::Custom));
+        let launch = profile
+            .launch_spec(ConversationAgentKind::Custom.default_launch())
+            .unwrap();
+        assert_eq!(launch.command, "my-agent --acp");
+        assert_eq!(launch.env.get("TOKEN").map(String::as_str), Some("x"));
+        assert_eq!(profile.history_dir(), None);
+    }
+
+    #[test]
+    fn invalid_profiles_are_rejected_with_a_readable_reason() {
+        let error = profile("custom")
+            .validate()
+            .expect_err("通用 ACP 必须填命令");
+        assert!(error.contains("启动命令"), "{error}");
+
+        let error = AcpProfile {
+            workspace_dir: "~/.kiro-2".to_string(),
+            ..profile("kiro")
+        }
+        .validate()
+        .expect_err("Kiro 没有数据目录变量");
+        assert!(error.contains("数据目录"), "{error}");
+
+        let error = AcpProfile {
+            label: "  ".to_string(),
+            ..profile("claude")
+        }
+        .validate()
+        .expect_err("名字不能空");
+        assert!(error.contains("名字"), "{error}");
+
+        // 数据目录只能有「数据目录」一个来源，否则 agent 写一处、历史页读另一处。
+        let error = AcpProfile {
+            env: BTreeMap::from([("CLAUDE_CONFIG_DIR".to_string(), "~/.x".to_string())]),
+            ..profile("claude")
+        }
+        .validate()
+        .expect_err("数据目录变量不能写在环境变量里");
+        assert!(error.contains("数据目录"), "{error}");
+
+        // 设置页之外（CLI / 控制 API）写进来的启动专用变量也要拦。
+        let error = AcpProfile {
+            command: "x --acp".to_string(),
+            env: BTreeMap::from([("PATH".to_string(), "/tmp".to_string())]),
+            ..profile("custom")
+        }
+        .validate()
+        .expect_err("PATH 只能由启动环境提供");
+        assert!(error.contains("PATH"), "{error}");
+    }
+
     #[test]
     fn unknown_profile_kind_cannot_be_launched_as_claude() {
-        let profile = AcpProfile {
-            id: "future-profile".to_string(),
-            kind_id: "future-agent".to_string(),
-            label: "Future Agent".to_string(),
-            workspace_dir: "~/.future-agent".to_string(),
-        };
-
+        let profile = profile("future-agent");
         assert_eq!(profile.kind(), None);
-        let error = profile.launch_spec().expect_err("未知 Agent 必须拒绝启动");
+        let error = profile
+            .launch_spec(ConversationAgentKind::Claude.default_launch())
+            .expect_err("未知 Agent 必须拒绝启动");
         assert!(error.contains("future-agent"));
+    }
+
+    /// 通用 ACP 只经由自定义 Agent 出现：不在内置列表、终端表和历史来源里，
+    /// 但存档里的 `custom` 认得回来。
+    #[test]
+    fn custom_kind_is_not_a_builtin_agent() {
+        let custom = ConversationAgentKind::Custom;
+        assert!(!ConversationAgentKind::ALL.contains(&custom));
+        assert_eq!(ConversationAgentKind::from_id("custom"), Some(custom));
+        assert!(conversation_descriptor("custom").is_none());
+        assert_eq!(custom.terminal(), None);
+        assert_eq!(custom.cli_resume_syntax(), None);
+        assert!(!custom.supports_headless_runtime());
+        assert!(!HistorySourceKind::ALL.contains(&custom.into()));
+        assert!(!custom.remembers_config("model"));
+        assert!(!custom.remembers_config("mode"));
+        assert_eq!(custom.default_cmd(), "");
     }
 }
 

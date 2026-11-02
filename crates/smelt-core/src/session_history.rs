@@ -109,15 +109,22 @@ pub(crate) static SESSION_HISTORY_PROVIDERS: &[SessionHistoryProvider] = &[
     },
 ];
 
-pub(crate) fn history_provider(agent: HistorySourceKind) -> &'static SessionHistoryProvider {
+/// 这一种来源的历史 Provider。通用 ACP（自定义 Agent）没有本地 transcript 可读，返回 None。
+pub(crate) fn history_provider(
+    agent: HistorySourceKind,
+) -> Option<&'static SessionHistoryProvider> {
     SESSION_HISTORY_PROVIDERS
         .iter()
         .find(|provider| provider.agent == agent)
-        .unwrap_or_else(|| panic!("{} 未注册历史 Provider", agent.id()))
+}
+
+/// 能不能读这一种来源的历史。历史页按它决定要不要给自定义 Agent 开 tab。
+pub fn has_history(agent: HistorySourceKind) -> bool {
+    history_provider(agent).is_some()
 }
 
 pub fn load_agent_session_detail(agent: HistorySourceKind, path: &Path) -> Option<SessionDetail> {
-    history_provider(agent).load_detail(path)
+    history_provider(agent)?.load_detail(path)
 }
 
 /// 从工具入参里挑出看着像文件/目录路径的值。只认各家实测存在的结构化参数名，
@@ -1857,9 +1864,12 @@ mod tests {
         for kind in ConversationAgentKind::ALL {
             let source = HistorySourceKind::from(kind);
             assert_eq!(source.acp(), Some(kind), "{}", kind.id());
-            // 没注册会在这里 panic。
-            history_provider(source);
+            assert!(has_history(source), "{} 没注册历史 Provider", kind.id());
         }
+        assert!(
+            !has_history(ConversationAgentKind::Custom.into()),
+            "通用 ACP 没有本地 transcript"
+        );
     }
 
     /// Antigravity 只有 TUI，它必须能读历史、但不能被当成 ACP 对象。

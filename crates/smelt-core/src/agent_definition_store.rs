@@ -771,7 +771,10 @@ fn normalize_engine_kind(engine_kind_id: Option<&str>) -> Result<String, AgentDe
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| ConversationAgentKind::Pi.id());
-    if ConversationAgentKind::from_id(engine_kind_id).is_none() {
+    // 通用 ACP 只属于自定义 Agent，没有可用的命令，不能当智能体的引擎。
+    if ConversationAgentKind::from_id(engine_kind_id)
+        .is_none_or(|kind| kind == ConversationAgentKind::Custom)
+    {
         return Err(AgentDefinitionError::Invalid(format!(
             "不支持的智能体执行引擎: {engine_kind_id}"
         )));
@@ -1479,6 +1482,19 @@ mod tests {
             },
         );
         assert!(matches!(unknown, Err(AgentDefinitionError::Invalid(_))));
+
+        let custom = create_agent_definition_on(
+            &store,
+            AgentDefinitionCreate {
+                engine_kind_id: Some(ConversationAgentKind::Custom.id().into()),
+                name: "通用 ACP".into(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(custom, Err(AgentDefinitionError::Invalid(_))),
+            "通用 ACP 不能当智能体的引擎"
+        );
     }
 
     #[test]
