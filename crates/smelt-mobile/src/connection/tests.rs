@@ -7,7 +7,7 @@ use std::time::Instant;
 use serde_json::{Value, json};
 use smelt_event_protocol::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
-    EVENT_BUS_PROTOCOL_VERSION,
+    EVENT_BUS_PROTOCOL_VERSION, MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION,
 };
 use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::control::{ControlError, ControlResponse};
@@ -384,7 +384,7 @@ fn connect_with_event_protocol(version: u16) -> Refused {
 
 #[test]
 fn connect_to_an_older_runtime_stops_and_asks_to_upgrade_it() {
-    let refused = connect_with_event_protocol(EVENT_BUS_PROTOCOL_VERSION - 1);
+    let refused = connect_with_event_protocol(MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION - 1);
 
     assert_eq!(refused.error.kind, SmeltErrorKind::RuntimeOutdated);
     assert!(

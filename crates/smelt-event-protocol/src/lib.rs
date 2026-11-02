@@ -9,9 +9,10 @@
 //! - **不升版本**：响应和推送里加字段（一律可缺省，缺了有明确含义）、给标了「会增长」的枚举
 //!   （只有不影响判断的显示类枚举）加值、加订阅消息类型。
 //! - **升 [`EVENT_BUS_PROTOCOL_VERSION`]**：删字段、删话题、改字段含义（包括新字段改变了旧
-//!   字段该怎么读）、加必填字段、改握手。升版时 [`MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION`]
-//!   一起抬到同一个值：客户端和运行时都只会说一个版本的协议，新旧两边才能在连接时就拿到版本
-//!   不兼容。
+//!   字段该怎么读）、加必填字段、改握手。这些改动要先想清楚已发布的运行时怎么办，见下一条。
+//! - **运行时是基线**：用户的 Linux 机器打成了镜像，运行时升不了。所以
+//!   [`MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION`] 是已发布运行时的版本，不跟着当前版本抬：新
+//!   客户端必须连得上它。以后做了自升级才可能抬。
 //! - **加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会反复重连。
 //! - **其余枚举加值也要升**：它们解不出会让整条消息失败，比如相位、自动化状态。相位还决定客户端
 //!   怎么判断会话在不在忙，没有安全的兜底含义。
@@ -44,10 +45,12 @@ use std::{fmt, str::FromStr};
 /// 严格解码，所以升版。
 ///
 /// v7：推送载荷改成宽容读取（见模块文档），以后推送加字段不再升版；投影事件和会话快照
-/// 去掉 `projection_version`。v6 及更早的客户端严格解码，读不了加过字段的载荷，所以这一版
-/// 本身还要升。
+/// 去掉 `projection_version`。v6 的客户端严格解码，读不了这一版运行时的载荷，所以运行时要
+/// 升版拦住它们。反过来 v7 的客户端读得了 v6 运行时：多出来的 `projection_version` 忽略，
+/// 没带的字段读成缺省。
 pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
-pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
+/// 客户端接受的最低运行时版本，见模块文档「运行时是基线」。
+pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 6;
 
 /// 以下三个投影版本号**冻结**，不再递增，v7 起的客户端也不检查。只为 v6 及更早的客户端：
 /// 它们靠 `system.describe` 里的这几个数判断兼容，照旧报出来，旧客户端才能说清「需要升级
@@ -793,6 +796,25 @@ mod tests {
         });
         let error = serde_json::from_value::<SubscribeRequest>(request).unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    /// 契约：已发布的 v6 运行时还带着 `projection_version`，这一版读得了。
+    #[test]
+    fn a_v6_runtime_projection_payload_is_readable() {
+        let snapshot: SessionStatesSnapshot = serde_json::from_value(json!({
+            "projection_version": 3,
+            "revision": 4,
+            "sessions": [],
+        }))
+        .unwrap();
+        assert_eq!(snapshot.revision, 4);
+        let projection: CoreProjectionEvent = serde_json::from_value(json!({
+            "projection_version": 1,
+            "revision": 5,
+            "data": null,
+        }))
+        .unwrap();
+        assert_eq!(projection.revision, 5);
     }
 
     /// 契约：旧运行时没带的可缺省字段，这一版读成缺省值。

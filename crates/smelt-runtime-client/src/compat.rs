@@ -285,6 +285,18 @@ mod tests {
     }
 
     /// 手机只对事件：桌面的必需方法缺了不拦，事件协议对不上照样拦。
+    /// 用户的 Linux 打成了镜像，运行时升不了：这里写死已发布的版本，谁抬最低版本这条就失败。
+    #[test]
+    fn the_released_runtime_baseline_stays_compatible() {
+        let mut baseline = current();
+        baseline.control.current_version = 3;
+        baseline.control.min_supported_version = 3;
+        baseline.control.max_supported_version = 3;
+        let events = baseline.events.as_mut().unwrap();
+        events.protocol_version = 6;
+        assert_eq!(check(&baseline), Ok(()));
+    }
+
     #[test]
     fn check_events_ignores_control_methods_but_not_event_versions() {
         let mut described = current();
@@ -292,7 +304,8 @@ mod tests {
         assert_eq!(check_events(&described), Ok(()));
 
         let mut older = current();
-        older.events.as_mut().unwrap().protocol_version = EVENT_BUS_PROTOCOL_VERSION - 1;
+        older.events.as_mut().unwrap().protocol_version =
+            MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION - 1;
         let error = check_events(&older).unwrap_err();
         assert_eq!(error.outdated, Outdated::Runtime);
         assert!(error.reason.contains("事件协议"), "{}", error.reason);
