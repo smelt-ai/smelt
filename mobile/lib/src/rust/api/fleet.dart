@@ -5,7 +5,6 @@
 
 import '../frb_generated.dart';
 import 'error.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
@@ -76,10 +75,19 @@ class FleetRuntime {
   final RuntimeRecord record;
   final RuntimeStatus status;
 
-  const FleetRuntime({required this.record, required this.status});
+  /// 这台机器能不能给手机推送：`Some(false)` 是运行时太旧，要升级；还没问过（没开推送、
+  /// 没连上过）是 `None`。
+  final bool? pushSupported;
+
+  const FleetRuntime({
+    required this.record,
+    required this.status,
+    this.pushSupported,
+  });
 
   @override
-  int get hashCode => record.hashCode ^ status.hashCode;
+  int get hashCode =>
+      record.hashCode ^ status.hashCode ^ pushSupported.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -87,7 +95,8 @@ class FleetRuntime {
       other is FleetRuntime &&
           runtimeType == other.runtimeType &&
           record == other.record &&
-          status == other.status;
+          status == other.status &&
+          pushSupported == other.pushSupported;
 }
 
 /// 整份机队，按 `position` 排好。

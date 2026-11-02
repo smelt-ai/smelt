@@ -57,6 +57,18 @@ tag; to build one locally, run `make ios` (or `scripts/build-ios.sh --upload`)
 from the repository root on the release tag. Both stamp the release version
 (see `docs/release.md`, section 移动端).
 
+## iOS push notifications
+
+Push goes through a relay that holds the APNs key of the team the app is signed
+with (see `docs/push-relay-deployment.md`). The relay host is compiled in:
+`SMELT_PUSH_RELAY_HOST` in `ios/Flutter/SigningDefaults.xcconfig` for release
+builds, and optionally in your `Developer.xcconfig` for your own builds (host
+only, no scheme). A build without a relay shows push as not configured.
+
+Debug and Profile builds register sandbox device tokens, Release builds
+production ones (`SMELT_APNS_ENVIRONMENT`), matching the `aps-environment`
+entitlement each configuration signs with.
+
 ## Android development
 
 Requirements (the versions come from the Flutter template; `flutter doctor`

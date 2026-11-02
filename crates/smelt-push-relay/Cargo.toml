@@ -1,0 +1,29 @@
+[package]
+name = "smelt-push-relay"
+version.workspace = true
+edition.workspace = true
+description = "Smelt push relay: holds the APNs key and forwards runtime pushes to Apple"
+
+# 推送中继：持有 APNs 的 .p8 私钥，替各台 smeltd 把推送转给 Apple。部署见
+# docs/push-relay-deployment.md。不存设备表，手机拿到的句柄就是它自己加密过的令牌。
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-push = { path = "../smelt-push" }
+axum = "0.8.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+# APNs 只说 HTTP/2；reqwest 默认开着 http2，经 TLS ALPN 协商。
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# 句柄加密。
+aes-gcm = "0.10"
+# APNs 提供方令牌（ES256 JWT）。
+ring = "0.17"
+clap = { workspace = true, features = ["env"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -22,6 +22,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
 
+use smelt_model::control_api::{PushRegister, PushUnregister};
+use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode, EmptyParams};
+
 use crate::api::catalog::{CatalogEvent, CatalogEventKind, SessionList};
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
 use crate::api::fleet::{
@@ -35,6 +38,7 @@ use crate::connection::{
 };
 use crate::conversation::Conversations;
 use crate::pass::{PassHub, PassListener};
+use crate::push::{Desired, PushState, SyncJob, SyncResult};
 use crate::store::Store;
 use crate::terminal::TerminalHub;
 
@@ -58,6 +62,7 @@ pub(crate) struct Timings {
     pub conversation: crate::conversation::Timing,
     pub terminal: crate::terminal::Timing,
     pub pass: crate::pass::Timing,
+    pub push: crate::push::Timing,
 }
 
 impl Timings {
@@ -68,6 +73,7 @@ impl Timings {
         conversation: crate::conversation::Timing::PRODUCTION,
         terminal: crate::terminal::Timing::PRODUCTION,
         pass: crate::pass::Timing::PRODUCTION,
+        push: crate::push::Timing::PRODUCTION,
     };
 }
 
@@ -245,6 +251,8 @@ struct View {
     statuses: HashMap<String, (u64, RuntimeStatus)>,
     listeners: Vec<FleetListener>,
     last: Option<FleetView>,
+    /// 推送设置同步到各台机器的进度。
+    push: PushState,
 }
 
 impl View {
@@ -260,6 +268,7 @@ impl View {
                         .get(&record.runtime_id)
                         .map(|(_, status)| status.clone())
                         .unwrap_or_else(idle_status),
+                    push_supported: self.push.supported(&record.runtime_id),
                 })
                 .collect(),
         }
@@ -419,6 +428,14 @@ impl Fleet {
         self.shared.pass.subscribe(listener);
     }
 
+    /// 改推送设置，同步到所有连着的机器；没连着的等连上再同步。见 `crate::push`。
+    pub(crate) fn set_push(&self, desired: Desired) {
+        let jobs = lock(&self.shared.view).push.set(desired);
+        for job in jobs {
+            self.shared.spawn_push_sync(job);
+        }
+    }
+
     /// 配对。见 `crate::api::identity::pair`。
     pub(crate) fn pair(
         &self,
@@ -534,6 +551,7 @@ impl Fleet {
             .iter()
             .find(|record| record.runtime_id == runtime_id)
             .map(|record| record.endpoint_id.clone());
+        shared.unregister_push_before_forget(runtime_id);
         if !env.store.delete_runtime(runtime_id)? {
             return Err(crate::store::unknown_runtime(runtime_id));
         }
@@ -701,7 +719,15 @@ impl Shared {
             match view.statuses.get_mut(&status_id) {
                 Some((current, status)) if *current == serial => {
                     *status = status_of(event);
+                    let push = view.push.on_connection(
+                        &status_id,
+                        serial,
+                        event.state == ConnectionState::Connected,
+                    );
                     view.publish();
+                    if let Some(job) = push {
+                        shared.spawn_push_sync(job);
+                    }
                     // 在视图锁里告诉指挥台：节点被撤掉、替换后，旧节点晚到的状态进不来。
                     shared
                         .pass
@@ -749,6 +775,7 @@ impl Shared {
                 .is_some_and(|(serial, _)| *serial == node.serial)
             {
                 view.statuses.remove(runtime_id);
+                view.push.remove(runtime_id);
             }
         }
         node.shutdown();
@@ -847,6 +874,99 @@ impl Shared {
             });
         if let Err(spawn_error) = spawned {
             log::error!("起不了连接线程：{spawn_error}");
+        }
+    }
+}
+
+impl Shared {
+    /// 在后台线程上把推送设置同步到一台机器；做完时设置又变了就接着做。
+    fn spawn_push_sync(self: &Arc<Self>, job: SyncJob) {
+        let shared = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("smelt-push-sync".to_string())
+            .spawn(move || {
+                let mut job = job;
+                loop {
+                    let result = shared.sync_push(&job);
+                    let next = {
+                        let mut view = lock(&shared.view);
+                        let next = view.push.finish(&job, result);
+                        view.publish();
+                        next
+                    };
+                    match next {
+                        Some(next) => job = next,
+                        None => break,
+                    }
+                }
+            });
+        if let Err(spawn_error) = spawned {
+            log::error!("起不了推送同步线程：{spawn_error}");
+        }
+    }
+
+    fn sync_push(&self, job: &SyncJob) -> SyncResult {
+        let Ok(node) = self.node(&job.runtime_id) else {
+            return SyncResult::Failed;
+        };
+        if node.serial != job.serial {
+            return SyncResult::Failed;
+        }
+        let Some(current) = node.hub.current() else {
+            return SyncResult::Failed;
+        };
+        let timeout = self.timings.push.call_timeout;
+        let result = match &job.desired {
+            Desired::On(params) => current
+                .client
+                .call::<PushRegister>(params, timeout)
+                .map(drop),
+            Desired::Off => current
+                .client
+                .call::<PushUnregister>(&EmptyParams::default(), timeout)
+                .map(drop),
+            Desired::Unknown => return SyncResult::Done,
+        };
+        match result {
+            Ok(()) => SyncResult::Done,
+            Err(ControlClientError::Protocol(protocol_error))
+                if protocol_error.code == ControlErrorCode::MethodNotFound =>
+            {
+                SyncResult::Unsupported
+            }
+            Err(call_error) => {
+                log::info!("同步推送设置到 {} 失败：{call_error}", job.runtime_id);
+                SyncResult::Failed
+            }
+        }
+    }
+
+    /// 忘记一台机器之前，它还连着就先取消推送登记；连不上的要到那台机器上撤销这台手机。
+    /// 调用方持有 `ops`。
+    fn unregister_push_before_forget(&self, runtime_id: &str) {
+        let connected = {
+            let view = lock(&self.view);
+            matches!(view.push.desired(), Desired::On(_))
+                && view
+                    .statuses
+                    .get(runtime_id)
+                    .is_some_and(|(_, status)| status.state == ConnectionState::Connected)
+        };
+        if !connected {
+            return;
+        }
+        let Some(current) = self
+            .node(runtime_id)
+            .ok()
+            .and_then(|node| node.hub.current())
+        else {
+            return;
+        };
+        if let Err(call_error) = current
+            .client
+            .call::<PushUnregister>(&EmptyParams::default(), self.timings.push.call_timeout)
+        {
+            log::info!("忘记 {runtime_id} 前取消推送登记失败：{call_error}");
         }
     }
 }

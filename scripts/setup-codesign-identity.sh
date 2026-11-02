@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 生成一个稳定的自签名代码签名身份，供 package-mac.sh 使用。
+# 生成一个稳定的自签名代码签名身份，供本机 package-mac.sh / make install 使用。
+# 发布包不用它：CI 用 Developer ID 签名并公证，见 docs/release.md 的「macOS 签名」。
 #
 # 解决的问题：ad-hoc 签名（--sign -）的身份直接从二进制内容算哈希，每次重新编译
 # /升级二进制内容一变，身份跟着变，macOS TCC（完全磁盘访问权限等）就认不出是同一个
@@ -15,7 +16,6 @@
 # 产出：
 #   - 登录钥匙串里一个名为 "${CERT_CN}" 的代码签名身份（codesign 直接可用）
 #   - ~/.smelt/codesign/smelt-codesign.p12（备份，导入密码见同目录 .password 文件）
-#     —— 需要在 CI 里签名时，把这个 p12 base64 后存进 GitHub secrets。
 set -euo pipefail
 
 CERT_CN="Smelt Local Signing"
@@ -78,6 +78,3 @@ echo "p12 备份：  ${P12_PATH}"
 echo "导入密码：  $PASS_PATH"
 echo ""
 echo "下一步：scripts/package-mac.sh 会自动探测「${CERT_CN}」这个身份并用它签名，无需额外配置。"
-echo "要接入 CI（GitHub Actions）签名，把这两个存进 repo secrets："
-echo "  gh secret set CODESIGN_P12_BASE64 < <(base64 -i \"${P12_PATH}\")"
-echo "  gh secret set CODESIGN_P12_PASSWORD < \"$PASS_PATH\""

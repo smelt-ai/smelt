@@ -113,7 +113,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     # 整个 workspace 都编（GPUI 在 Linux 上编不过），runner 要 Apple Silicon（同 release.yml）。
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -162,8 +162,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
-    # 不用缓存：仓库缓存上限 10GB，macOS 那份已经 3GB，再存一份 Windows 的会互相挤掉。
-    # 于是每次全量编译；不要调试信息，链接快得多。测试只看通过与否。
+    # 不要调试信息：链接快得多，缓存也小。测试只看通过与否。
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
@@ -172,6 +171,13 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      # 全量编译占这个 job 大半时间。只在 main 上写，见文件头。仓库缓存顶到上限时先淘汰
+      # 最久没用的，也就是旧 Cargo.lock 留下的那几代，正在用的不会被挤掉。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -184,7 +190,7 @@ jobs:
   mobile:
     needs: changes
     if: needs.changes.outputs.mobile == 'true'
-    runs-on: macos-14
+    runs-on: macos-26
     defaults:
       run:
         working-directory: mobile
@@ -287,7 +293,7 @@ jobs:
   ios-check:
     needs: changes
     if: needs.changes.outputs.android == 'true'
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v7

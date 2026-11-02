@@ -10,6 +10,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../data/app_update.dart';
 import '../data/models.dart';
+import '../data/push.dart';
 import '../data/stores.dart';
 import '../l10n/gen/l10n.dart';
 import '../theme/galley.dart';
@@ -82,6 +83,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   final _pinnedDefault = ValueNotifier<(String, String)?>(null);
   StreamSubscription<(String, AttentionItem)>? _attention;
   AppUpdater? _updater;
+  AppModel? _model;
 
   /// 每个版本只提示一次：查到了、下好了各一次。
   String? _promptedAvailable;
@@ -110,6 +112,45 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
     super.didChangeDependencies();
     _attention ??= AppScope.of(context).catalog.attention.listen(_onAttention);
     _updater ??= AppScope.of(context).updater..addListener(_onUpdate);
+    if (_model == null) {
+      final model = _model = AppScope.of(context);
+      // 点开的推送要等会话目录里有了那段会话才能打开（冷启动时目录还在路上）。
+      final listenable = Listenable.merge([
+        model.push.pendingOpen,
+        model.catalog,
+      ])..addListener(_openPushTarget);
+      _pushListenable = listenable;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openPushTarget());
+    }
+  }
+
+  Listenable? _pushListenable;
+
+  /// 打开点开的那条推送要去的会话。目录里还没有就等；实时列表到了还没有，就是会话已经
+  /// 不在了，说一声。
+  void _openPushTarget() {
+    final model = _model;
+    if (!mounted || model == null) return;
+    final target = model.push.pendingOpen.value;
+    if (target == null) return;
+    final session = model.catalog.session(target.runtimeId, target.sessionId);
+    if (session != null) {
+      model.push.pendingOpen.value = null;
+      unawaited(
+        model.push.clearHandled(
+          (t) => t != PushTarget(target.runtimeId, target.sessionId),
+        ),
+      );
+      _openSession(target.runtimeId, session, split: isSplitLayout(context));
+      return;
+    }
+    final list = model.catalog.list(target.runtimeId);
+    if (list != null && !list.cached) {
+      model.push.pendingOpen.value = null;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(L10n.of(context).pushSessionGone)));
+    }
   }
 
   /// 外壳里面（DetailHost 之下）的 context：从外面打开要用详情去处的弹层时用它。
@@ -128,6 +169,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   void dispose() {
     _attention?.cancel();
     _updater?.removeListener(_onUpdate);
+    _pushListenable?.removeListener(_openPushTarget);
     _sessionFilter.dispose();
     _tabNotifier.dispose();
     _pinnedDefault.dispose();

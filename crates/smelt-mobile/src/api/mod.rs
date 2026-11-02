@@ -11,6 +11,7 @@ pub mod error;
 pub mod fleet;
 pub mod identity;
 pub mod pass;
+pub mod push;
 pub mod terminal;
 
 /// App 启动时由 FRB 调用一次。

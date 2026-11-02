@@ -122,6 +122,7 @@ mod memory_watch;
 mod menubar;
 mod peer_messages;
 mod pi_control;
+mod push;
 mod resource_usage;
 mod subagent_transcript;
 use devices::Principal;
@@ -2500,6 +2501,7 @@ fn main() {
         Arc::clone(&event_hub),
     );
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
+    push::spawn(&event_hub);
 
     run_serve_loop(
         listener,

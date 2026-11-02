@@ -102,6 +102,22 @@ void main() {
       expect(Preferences.fromJson(dev.toJson()), dev);
     });
 
+    test('推送是后加的：旧文件里没有就是关着、三类全选', () {
+      final legacy = Preferences.fromJson({
+        'version': Preferences.version,
+        'themeMode': 'dark',
+      });
+      expect(legacy.pushEnabled, isFalse);
+      expect(legacy.pushApproval, isTrue);
+      expect(legacy.pushInput, isTrue);
+      expect(legacy.pushFailure, isTrue);
+      final custom = const Preferences().copyWith(
+        pushEnabled: true,
+        pushInput: false,
+      );
+      expect(Preferences.fromJson(custom.toJson()), custom);
+    });
+
     test('落盘后能读回', () async {
       final dir = await Directory.systemTemp.createTemp('smelt-prefs');
       addTearDown(() => dir.delete(recursive: true));

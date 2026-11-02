@@ -1864,7 +1864,7 @@ fn format_next_run_cell(next_run_at: Option<i64>, enabled: bool, now: i64) -> St
     }
 }
 
-fn format_relative_since(ts: i64, now: i64) -> String {
+pub(crate) fn format_relative_since(ts: i64, now: i64) -> String {
     let delta = now - ts;
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
@@ -1875,8 +1875,12 @@ fn format_relative_since(ts: i64, now: i64) -> String {
         format!("{} 分钟前", delta / MINUTE)
     } else if delta < DAY {
         format!("{} 小时前", delta / HOUR)
-    } else {
+    } else if delta < 30 * DAY {
         format!("{} 天前", delta / DAY)
+    } else if delta < 365 * DAY {
+        format!("{} 个月前", delta / (30 * DAY))
+    } else {
+        format!("{} 年前", delta / (365 * DAY))
     }
 }
 

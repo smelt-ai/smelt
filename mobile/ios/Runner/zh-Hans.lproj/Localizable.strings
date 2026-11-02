@@ -1,0 +1,5 @@
+/* 推送文案。推送里只有键（smelt-push 的 PushKind::loc_key），不带会话内容，
+   系统按手机语言显示。 */
+"SMELT_PUSH_APPROVAL" = "有智能体在等你批准";
+"SMELT_PUSH_INPUT" = "有智能体在等你回复";
+"SMELT_PUSH_FAILURE" = "有智能体运行失败了";

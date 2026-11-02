@@ -1206,6 +1206,36 @@
   "elicitationRequired": "Required",
   "elicitationOpenLink": "Open link",
   "elicitationTextHint": "Type your answer",
+  "pushSection": "Notifications",
+  "pushToggle": "Push notifications",
+  "pushStatusOff": "Get notified when an agent needs you, even while Smelt is closed.",
+  "pushStatusRegistering": "Turning on…",
+  "pushStatusOn": "On. Each machine notifies this phone directly.",
+  "pushStatusDenied": "Notifications for Smelt are turned off in Settings.",
+  "pushStatusFailed": "Couldn't reach the push service. Smelt tries again when you come back to the app.",
+  "pushStatusNotConfigured": "This build has no push service set up.",
+  "pushOpenSettings": "Open Settings",
+  "pushKindApproval": "Waiting for approval",
+  "pushKindInput": "Waiting for your reply",
+  "pushKindFailure": "Run failed",
+  "pushFooter": "A notification goes out 30 seconds after an agent stops, unless it was handled on another device by then. Session contents stay on your machines: a notification only says what kind of thing is waiting.",
+  "pushSessionGone": "That session no longer exists.",
+  "pushMachineUnsupported": "Smelt on {name} is too old to send push notifications. Update it to get them.",
+  "@pushMachineUnsupported": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "pushForgetOffline": "{name} isn't connected right now, so it will keep sending this phone notifications. To stop them, remove this phone from its device list.",
+  "@pushForgetOffline": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "sessionsTitle": "Sessions",
   "sessionsNewSession": "New session",
   "sessionsFilterAll": "All",

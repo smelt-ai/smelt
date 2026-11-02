@@ -11,6 +11,7 @@ import 'data/app_update.dart';
 import 'data/backend.dart';
 import 'data/demo_backend.dart';
 import 'data/preferences.dart';
+import 'data/push.dart';
 import 'data/stores.dart';
 import 'migration/legacy_import.dart';
 import 'rust_lib.dart';
@@ -34,6 +35,7 @@ Future<void> main() async {
   final Backend backend;
   final PreferencesStore prefs;
   AppUpdater? updater;
+  PushPlatform? pushPlatform;
   String? deviceId;
   if (_demo) {
     deviceId = 'demo0device0id0synthetic';
@@ -60,10 +62,19 @@ Future<void> main() async {
         channel: () => prefs.value.updateChannel,
       );
     }
+    // 推送通知只有 iOS 有（APNs）。
+    if (Platform.isIOS) pushPlatform = MethodChannelPushPlatform();
   }
 
-  final model = AppModel(backend, prefs, deviceId: deviceId, updater: updater)
-    ..start();
+  final model = AppModel(
+    backend,
+    prefs,
+    deviceId: deviceId,
+    updater: updater,
+    pushPlatform: pushPlatform,
+  )..start();
+  // 不等它：换推送句柄要联网。
+  unawaited(model.push.start());
   // 不等它：查更新要联网，不能拖住首屏。
   unawaited(model.updater.start());
   final demoScreen = _demo ? await _demoScreen() : null;
@@ -121,8 +132,11 @@ class _LifecycleState extends State<_Lifecycle> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      widget.model.backend.verifyConnections();
-      unawaited(widget.model.updater.resumed());
+      final model = widget.model;
+      model.backend.verifyConnections();
+      unawaited(model.updater.resumed());
+      unawaited(model.push.resumed());
+      unawaited(model.push.clearHandled(model.stillWaiting));
     }
   }
 

@@ -25,6 +25,10 @@ smelt-store = { path = "../smelt-store" }
 # 远程访问：iroh endpoint 直接接收运行时协议的流。
 smelt-iroh = { path = "../smelt-iroh" }
 smelt-pairing = { path = "../smelt-pairing" }
+# 手机推送：发给推送中继的格式。
+smelt-push = { path = "../smelt-push" }
+# 推送线程是普通线程，用阻塞客户端；版本与 smelt-core 的一致，不多一份依赖树。
+reqwest = { version = "0.13", features = ["blocking", "json"] }
 # `smeltd pair` 在终端里打印配对二维码。
 qrcode = { version = "0.14", default-features = false }
 tokio = { version = "1", features = ["full"] }

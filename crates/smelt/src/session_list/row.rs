@@ -1,6 +1,6 @@
 //! 会话行展示所需的图标、状态、外部链接与额度文案。
 
-use chrono::{DateTime, Datelike, Local, TimeZone};
+use chrono::{DateTime, Local};
 
 use super::*;
 use smelt_client::daemon_state::{TerminalProgress, TerminalProgressState};
@@ -91,25 +91,13 @@ pub(super) fn session_progress_bar(ui_id: u64, progress: TerminalProgress) -> Op
     )
 }
 
-/// 侧栏行尾的最近活动时间。用不会随分钟流逝而过期的本地日历文案，侧栏不必为它
-/// 定时重画：今天只写时分，昨天写「昨天」，今年更早的写月日，再早的写年月日；旧存档
-/// 没有时间时写「未知」。行尾一格放不下「今天 14:05」这种长写法。
+/// 侧栏行尾的最近活动时间，写成「N 分钟前」。不为它定时重画，文案在每次重画时按当前
+/// 时间算，空闲时可能滞后。旧存档没有时间时写「未知」。
 pub(crate) fn session_updated_at_text(timestamp: u64, now: &DateTime<Local>) -> String {
     if timestamp == 0 {
         return "未知".to_string();
     }
-    let Some(updated) = Local
-        .timestamp_opt(timestamp.min(i64::MAX as u64) as i64, 0)
-        .single()
-    else {
-        return "未知".to_string();
-    };
-    match (now.date_naive() - updated.date_naive()).num_days() {
-        days if days <= 0 => updated.format("%H:%M").to_string(),
-        1 => "昨天".to_string(),
-        _ if updated.year() == now.year() => updated.format("%m-%d").to_string(),
-        _ => updated.format("%Y-%m-%d").to_string(),
-    }
+    crate::agents::format_relative_since(timestamp.min(i64::MAX as u64) as i64, now.timestamp())
 }
 
 /// 键盘焦点环：盖在行上的一圈描边，不占排版，前后的行不会挪。
@@ -512,19 +500,19 @@ mod tests {
 
         assert_eq!(
             session_updated_at_text(today.timestamp() as u64, &now),
-            "14:05"
+            "1 小时前"
         );
         assert_eq!(
             session_updated_at_text(yesterday.timestamp() as u64, &now),
-            "昨天"
+            "16 小时前"
         );
         assert_eq!(
             session_updated_at_text(earlier.timestamp() as u64, &now),
-            "08-01"
+            "23 天前"
         );
         assert_eq!(
             session_updated_at_text(previous_year.timestamp() as u64, &now),
-            "2025-12-31"
+            "7 个月前"
         );
         assert_eq!(session_updated_at_text(0, &now), "未知");
     }

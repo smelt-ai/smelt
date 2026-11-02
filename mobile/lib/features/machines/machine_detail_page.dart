@@ -94,16 +94,27 @@ class _MachineDetailPageState extends State<MachineDetailPage> {
     }
   }
 
-  Future<void> _forget(RuntimeRecord record) async {
+  Future<void> _forget(FleetRuntime runtime) async {
+    final record = runtime.record;
     final model = AppScope.of(context);
     final l10n = L10n.of(context);
+    // 连着的机器忘记前会顺带取消推送登记；连不上的只能到那台机器上撤销。
+    final keepsPushing =
+        model.push.supported &&
+        model.prefs.value.pushEnabled &&
+        runtime.status.state != ConnectionState.connected;
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(l10n.machinesForgetTitle(record.name)),
-        content: Text(l10n.machinesForgetBody(record.name)),
+        content: Text(
+          [
+            l10n.machinesForgetBody(record.name),
+            if (keepsPushing) l10n.pushForgetOffline(record.name),
+          ].join('\n\n'),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
@@ -230,6 +241,8 @@ class _MachineDetailPageState extends State<MachineDetailPage> {
         _Footnote(text: l10n.machinesAccentFooter),
         ShelfHeader(title: l10n.machinesLink),
         Shelf(children: _linkRows(context, runtime)),
+        if (runtime.pushSupported == false)
+          _Footnote(text: l10n.pushMachineUnsupported(record.name)),
         // 中继设置混用时 iOS 上自建中继可能受系统代理影响（见 relaySetupMixed）。只在
         // iOS、且这台机器自己指定了中继时说：没指定中继的机器走默认预设，不受影响。
         if (relayMixed &&
@@ -275,7 +288,7 @@ class _MachineDetailPageState extends State<MachineDetailPage> {
                 style: TextStyle(color: c.danger),
               ),
               titleStyle: t.body,
-              onTap: () => _forget(record),
+              onTap: () => _forget(runtime),
             ),
           ],
         ),

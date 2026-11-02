@@ -449,6 +449,7 @@ class DemoBackend implements Backend {
           pairedAtMs: r.record.pairedAtMs,
         ),
         status: r.status,
+        pushSupported: r.pushSupported,
       );
 
   @override
@@ -500,6 +501,10 @@ class DemoBackend implements Backend {
   Future<List<RuntimeRecord>> importRuntimes(
     List<RuntimeImport> runtimes,
   ) async => const [];
+
+  /// 演示数据里没有真机器，登记无处可去。
+  @override
+  void setPushRegistration(PushRegistration? registration) {}
 
   // 指挥台 -------------------------------------------------------------------
   @override

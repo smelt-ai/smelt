@@ -79,3 +79,15 @@ pub struct RevokeResult {
     /// 是否真有这台设备。
     pub revoked: bool,
 }
+
+/// `push.register` 的参数。哪台设备由连接的身份决定，不在参数里。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushRegisterParams {
+    /// 推送中继发的句柄（加密过的 APNs 令牌）。运行时只转交，解不开。
+    pub handle: String,
+    /// 推送中继的地址，`https://` 开头。手机编译时定好，运行时往这里发。
+    pub relay_url: String,
+    pub approval: bool,
+    pub input: bool,
+    pub failure: bool,
+}

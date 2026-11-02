@@ -358,7 +358,9 @@ fn dispatch_control(
         device @ (ControlMethod::DevicePairBegin
         | ControlMethod::DevicePair
         | ControlMethod::DeviceList
-        | ControlMethod::DeviceRevoke) => {
+        | ControlMethod::DeviceRevoke
+        | ControlMethod::PushRegister
+        | ControlMethod::PushUnregister) => {
             match super::devices::dispatch(device, params, principal) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => error_value(control_version, request_id, error),

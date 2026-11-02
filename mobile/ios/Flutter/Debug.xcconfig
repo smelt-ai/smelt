@@ -1,4 +1,6 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
 #include "Generated.xcconfig"
 #include "SigningDefaults.xcconfig"
+// Development signing: device tokens belong to the APNs sandbox.
+SMELT_APNS_ENVIRONMENT = sandbox
 #include? "Developer.xcconfig"

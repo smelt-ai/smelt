@@ -1,6 +1,8 @@
 # 虚拟 workspace：所有代码住 crates/ 下，根不再有 package。
 # - crates/smelt-store  —— 桌面 SQLite/KV 与 legacy 导入事务原语（移动端不编 native SQLite）
 # - crates/smelt-pairing —— 桌面/移动端共用的配对码格式
+# - crates/smelt-push  —— 手机推送的线上格式（运行时、手机 → 推送中继）
+# - crates/smelt-push-relay —— 推送中继：持有 APNs 私钥，替 smeltd 转发推送
 # - crates/smelt-version —— 编译时从 SMELT_VERSION 注入的版本号（见 scripts/version.sh）
 # - crates/smelt-runtime-client —— smeltd wire 契约与协议客户端（桌面/移动端共用，能编进移动端）
 # - crates/smelt-client-store —— 桌面客户端自己的库 client.sqlite3（外观、界面状态等）
@@ -20,6 +22,8 @@ members = [
     "crates/smelt-event-bus",
     "crates/smelt-store",
     "crates/smelt-pairing",
+    "crates/smelt-push",
+    "crates/smelt-push-relay",
     "crates/smelt-runtime-client",
     "crates/smelt-client-store",
     "crates/smelt-core",

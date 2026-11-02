@@ -14,6 +14,7 @@ import 'api/error.dart';
 import 'api/fleet.dart';
 import 'api/identity.dart';
 import 'api/pass.dart';
+import 'api/push.dart';
 import 'api/terminal.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -166,6 +167,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PermissionRequest dco_decode_box_autoadd_permission_request(dynamic raw);
+
+  @protected
+  PushRegistration dco_decode_box_autoadd_push_registration(dynamic raw);
 
   @protected
   SessionKind dco_decode_box_autoadd_session_kind(dynamic raw);
@@ -514,6 +518,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PermissionRequest? dco_decode_opt_box_autoadd_permission_request(dynamic raw);
 
   @protected
+  PushRegistration? dco_decode_opt_box_autoadd_push_registration(dynamic raw);
+
+  @protected
   SessionKind? dco_decode_opt_box_autoadd_session_kind(dynamic raw);
 
   @protected
@@ -581,6 +588,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PluginOption dco_decode_plugin_option(dynamic raw);
+
+  @protected
+  PushRegistration dco_decode_push_registration(dynamic raw);
 
   @protected
   RuntimeImport dco_decode_runtime_import(dynamic raw);
@@ -851,6 +861,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PermissionRequest sse_decode_box_autoadd_permission_request(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PushRegistration sse_decode_box_autoadd_push_registration(
     SseDeserializer deserializer,
   );
 
@@ -1281,6 +1296,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PushRegistration? sse_decode_opt_box_autoadd_push_registration(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   SessionKind? sse_decode_opt_box_autoadd_session_kind(
     SseDeserializer deserializer,
   );
@@ -1366,6 +1386,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PluginOption sse_decode_plugin_option(SseDeserializer deserializer);
+
+  @protected
+  PushRegistration sse_decode_push_registration(SseDeserializer deserializer);
 
   @protected
   RuntimeImport sse_decode_runtime_import(SseDeserializer deserializer);
@@ -1696,6 +1719,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_permission_request(
     PermissionRequest self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_push_registration(
+    PushRegistration self,
     SseSerializer serializer,
   );
 
@@ -2252,6 +2281,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_push_registration(
+    PushRegistration? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_session_kind(
     SessionKind? self,
     SseSerializer serializer,
@@ -2364,6 +2399,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_plugin_option(PluginOption self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_push_registration(
+    PushRegistration self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_runtime_import(RuntimeImport self, SseSerializer serializer);
