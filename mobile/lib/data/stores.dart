@@ -8,6 +8,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import '../l10n/gen/l10n.dart';
+import '../ui/agent_glyph.dart';
 import 'app_update.dart';
 import 'backend.dart';
 import 'models.dart';
@@ -139,6 +141,81 @@ class CatalogStore extends ChangeNotifier {
   }
 }
 
+/// 各台机器的工作区目录：补上还没有会话的项目，给智能体和自定义 Agent 的对话配名字。
+/// 机器上线时取一次，下拉刷新再取；只是锦上添花，取不到不影响列表。会话页和指挥台
+/// 共用这一份，两边写出来的名字才一致。
+class WorkspaceStore extends ChangeNotifier {
+  WorkspaceStore(this._backend);
+
+  final Backend _backend;
+  final Map<String, WorkspaceCatalog> _catalogs = {};
+  final Set<String> _loading = {};
+  Set<String> _online = const {};
+
+  WorkspaceCatalog? catalog(String runtimeId) => _catalogs[runtimeId];
+
+  Map<String, WorkspaceCatalog> get catalogs => Map.unmodifiable(_catalogs);
+
+  /// 机器刚连上时取它的工作区目录；忘掉的机器丢掉缓存。
+  void onFleet(FleetView view) {
+    final online = {
+      for (final r in view.runtimes)
+        if (r.online) r.record.runtimeId,
+    };
+    for (final id in online.difference(_online)) {
+      unawaited(load(id));
+    }
+    _online = online;
+    final known = {for (final r in view.runtimes) r.record.runtimeId};
+    final before = _catalogs.length;
+    _catalogs.removeWhere((id, _) => !known.contains(id));
+    if (_catalogs.length != before) notifyListeners();
+  }
+
+  /// 重取在线机器的目录（下拉刷新）。
+  Future<void> reloadOnline() => Future.wait([for (final id in _online) load(id)]);
+
+  Future<void> load(String runtimeId) async {
+    if (!_loading.add(runtimeId)) return;
+    try {
+      _catalogs[runtimeId] = await _backend.workspaceCatalog(runtimeId);
+      notifyListeners();
+    } catch (_) {
+      // 取不到就少几个空项目、名字退回引擎名，列表本身照常；下次上线或下拉再取。
+    } finally {
+      _loading.remove(runtimeId);
+    }
+  }
+
+  /// 会话归属的智能体或自定义 Agent 的名字；裸引擎会话、配不到时为空。
+  /// 自定义 Agent 的选项 id 是 `profile:<id>`。
+  String? agentName(String runtimeId, SessionSummary session) {
+    final definitionId = session.agentDefinitionId?.trim();
+    final profileId = session.profileId?.trim();
+    for (final a in _catalogs[runtimeId]?.agents ?? const <AcpAgentOption>[]) {
+      final hit = definitionId != null && definitionId.isNotEmpty
+          ? a.agentDefinitionId == definitionId
+          : profileId != null &&
+                profileId.isNotEmpty &&
+                a.id == 'profile:$profileId';
+      if (hit && a.label.trim().isNotEmpty) return a.label.trim();
+    }
+    return null;
+  }
+
+  /// 句子里提到「谁」（想执行、在问、发给谁）：配得到名字写名字，否则写引擎名，
+  /// 自定义 Agent 写「自定义」。
+  String agentDisplay(String runtimeId, SessionSummary session) =>
+      agentName(runtimeId, session) ??
+      agentDisplayName(
+        session.profileId == null ? session.agent : customAgentGlyph,
+      );
+
+  /// 行副标题里「谁在干活」：配得到名字写名字，否则按引擎（自定义 Agent 写自定义）。
+  String agentLabel(L10n l10n, String runtimeId, SessionSummary session) =>
+      agentName(runtimeId, session) ?? sessionAgentLabel(l10n, session);
+}
+
 /// 整个 App 的数据根：一个 [Backend] 和由它喂的几份状态。
 class AppModel {
   AppModel(
@@ -170,6 +247,7 @@ class AppModel {
   final fleet = FleetStore();
   final pass = PassStore();
   final catalog = CatalogStore();
+  late final workspaces = WorkspaceStore(backend);
   final _subscriptions = <StreamSubscription<Object?>>[];
 
   /// 内核初始化（`initClient`）之后调一次。
@@ -186,6 +264,7 @@ class AppModel {
             catalog.forget(gone);
           }
           fleet.value = view;
+          workspaces.onFleet(view);
         }),
       )
       ..add(backend.passEvents().listen((p) => pass.value = p))
@@ -218,6 +297,7 @@ class AppModel {
     pass.dispose();
     prefs.dispose();
     catalog.dispose();
+    workspaces.dispose();
     updater.dispose();
     push.dispose();
   }

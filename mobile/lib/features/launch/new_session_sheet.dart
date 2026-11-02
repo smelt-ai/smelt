@@ -533,7 +533,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
               for (final agent in agents)
                 ShelfRow(
                   leading: AgentGlyph(
-                    agent: agent.kind,
+                    agent: optionGlyphAgent(agent),
                     color: c.ink,
                     size: Strokes.icon,
                   ),

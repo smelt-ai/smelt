@@ -1349,6 +1349,7 @@ fn cached_list_shows_until_the_live_snapshot_then_the_live_list_is_saved() {
         attention: None,
         automation: None,
         agent_definition_id: None,
+        profile_id: None,
     };
     cache.save_session_list("ep-a", &vec![old.clone()]);
     let source = FakeSource::new(Some(Arc::clone(&cache)));
@@ -1866,4 +1867,25 @@ fn only_agents_with_readable_history_are_history_sources() {
     };
     assert!(projection::agent_option(&option("claude")).has_history);
     assert!(!projection::agent_option(&option("custom")).has_history);
+}
+
+/// 自定义 Agent 开的对话带上它的 id，手机按它配名字；终端和裸引擎对话没有。
+#[test]
+fn projection_carries_the_custom_agent_of_a_conversation() {
+    let mut state = CatalogState::default();
+    let mut directory = parse_directory(one_project_directory(vec![
+        conversation("custom", "acp", Some(("/repo", 0)), 0),
+        conversation("raw", "acp", Some(("/repo", 0)), 1),
+        conversation("term", "terminal", Some(("/repo", 0)), 2),
+    ]));
+    let acp = directory.conversations[0].acp.as_mut().unwrap();
+    acp.agent = "custom".into();
+    acp.profile_id = Some("p-til".into());
+    state.apply(snapshot(Vec::new(), Some(directory), None), Instant::now());
+
+    let sessions = state.summaries();
+    assert_eq!(find(&sessions, "custom").profile_id.as_deref(), Some("p-til"));
+    assert_eq!(find(&sessions, "custom").agent, "custom");
+    assert_eq!(find(&sessions, "raw").profile_id, None);
+    assert_eq!(find(&sessions, "term").profile_id, None);
 }

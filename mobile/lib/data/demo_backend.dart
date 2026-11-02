@@ -404,6 +404,8 @@ class DemoBackend implements Backend {
           projectTitle: s.projectTitle,
           projectOrder: s.projectOrder,
           updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          agentDefinitionId: s.agentDefinitionId,
+          profileId: s.profileId,
         );
       }
     }
@@ -647,6 +649,12 @@ class DemoBackend implements Backend {
             kind: 'pi',
             label: '工作助手',
             agentDefinitionId: 'def-assistant',
+            hasHistory: true,
+          ),
+          AcpAgentOption(
+            id: 'profile:til',
+            kind: 'claude',
+            label: 'Til',
             hasHistory: true,
           ),
         ],

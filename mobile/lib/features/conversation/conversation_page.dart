@@ -411,7 +411,8 @@ class _ConversationPageState extends State<ConversationPage> {
       _title(l10n),
       [
         ?runtime?.name,
-        if (session != null) agentDisplayName(session.agent),
+        if (session != null)
+          _model.workspaces.agentDisplay(widget.runtimeId, session),
         ?session?.placeLabel,
       ].join(' · '),
       ?session?.cwd,
@@ -704,7 +705,11 @@ class _ConversationPageState extends State<ConversationPage> {
         appBar: AppBar(
           toolbarHeight: _titleBarHeight(context),
           title: ListenableBuilder(
-            listenable: Listenable.merge([_model.fleet, _model.catalog]),
+            listenable: Listenable.merge([
+              _model.fleet,
+              _model.catalog,
+              _model.workspaces,
+            ]),
             builder: (context, _) => _TitleBlock(
               title: _title(l10n),
               runtime: _model.fleet.runtime(widget.runtimeId),
@@ -1091,7 +1096,11 @@ class _ConversationPageState extends State<ConversationPage> {
               onAnswered: _onDockAnswered,
             ),
             ListenableBuilder(
-              listenable: Listenable.merge([_model.fleet, _model.catalog]),
+              listenable: Listenable.merge([
+              _model.fleet,
+              _model.catalog,
+              _model.workspaces,
+            ]),
               builder: (context, _) {
                 final runtime = _model.fleet.runtime(widget.runtimeId);
                 final online = runtime?.online ?? false;
@@ -1116,7 +1125,12 @@ class _ConversationPageState extends State<ConversationPage> {
                     : waiting
                     ? l10n.conversationHintTicket
                     : l10n.conversationHint(
-                        agentDisplayName(session?.agent ?? ''),
+                        session == null
+                            ? agentDisplayName('')
+                            : _model.workspaces.agentDisplay(
+                                widget.runtimeId,
+                                session,
+                              ),
                       );
                 return Composer(
                   controller: _text,
@@ -1260,7 +1274,8 @@ class _TitleBlock extends StatelessWidget {
     final s = session;
     final line = [
       runtime?.name ?? runtimeId,
-      if (s != null && s.agent.trim().isNotEmpty) agentDisplayName(s.agent),
+      if (s != null && s.agent.trim().isNotEmpty)
+        AppScope.of(context).workspaces.agentDisplay(runtimeId, s),
       ?s?.placeLabel,
     ].join(' · ');
     return Column(

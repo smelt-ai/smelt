@@ -3163,17 +3163,20 @@ impl AcpView {
         self.profile_id.as_deref()
     }
 
-    /// 给人看的 agent 名：自定义 Agent 用它自己的名字，其余用种类短名。只读内存里的配置。
-    pub fn agent_label(&self, cx: &App) -> String {
-        self.profile_id
-            .as_deref()
-            .and_then(|id| {
-                smelt_ui::agent_host_state::agent_hosts(cx)?
-                    .settings(self.runtime.key())?
-                    .find_profile(id)
-                    .map(|profile| profile.label.trim().to_string())
-            })
+    /// 自定义 Agent 开的会话返回它的名字；裸引擎会话、名字为空或配置已删返回 None。
+    /// 只读内存里的配置，render 里可以调。
+    pub fn custom_agent_label(&self, cx: &App) -> Option<String> {
+        let id = self.profile_id.as_deref()?;
+        smelt_ui::agent_host_state::agent_hosts(cx)?
+            .settings(self.runtime.key())?
+            .find_profile(id)
+            .map(|profile| profile.label.trim().to_string())
             .filter(|label| !label.is_empty())
+    }
+
+    /// 给人看的 agent 名：自定义 Agent 用它自己的名字，其余用种类短名。
+    pub fn agent_label(&self, cx: &App) -> String {
+        self.custom_agent_label(cx)
             .unwrap_or_else(|| self.agent.short_label().to_string())
     }
 

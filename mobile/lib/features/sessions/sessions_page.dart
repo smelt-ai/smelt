@@ -42,62 +42,28 @@ class _SessionsPageState extends State<SessionsPage> {
   String _query = '';
   String? _guide;
 
-  /// 各台机器的工作区目录：补上还没有会话的项目、给智能体对话配名字。
-  /// 机器上线时取一次，下拉刷新再取；只是锦上添花，取不到不影响列表。
-  final _workspaces = <String, WorkspaceCatalog>{};
-  final _loading = <String>{};
-  Set<String> _online = const {};
   AppModel? _model;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (_model != null) return;
-    _model = AppScope.of(context)..fleet.addListener(_onFleet);
+    _model = AppScope.of(context);
     _scroll.addListener(_updateGuide);
-    _onFleet();
   }
 
   @override
   void dispose() {
-    _model?.fleet.removeListener(_onFleet);
     _search.dispose();
     _scroll.dispose();
     super.dispose();
-  }
-
-  /// 机器刚连上时取它的工作区目录；忘掉的机器丢掉缓存。
-  void _onFleet() {
-    final runtimes = _model!.fleet.value.runtimes;
-    final online = {
-      for (final r in runtimes)
-        if (r.online) r.id,
-    };
-    for (final id in online.difference(_online)) {
-      unawaited(_loadWorkspace(id));
-    }
-    _online = online;
-    final known = {for (final r in runtimes) r.id};
-    _workspaces.removeWhere((id, _) => !known.contains(id));
-  }
-
-  Future<void> _loadWorkspace(String runtimeId) async {
-    if (!_loading.add(runtimeId)) return;
-    try {
-      final catalog = await _model!.backend.workspaceCatalog(runtimeId);
-      if (mounted) setState(() => _workspaces[runtimeId] = catalog);
-    } catch (_) {
-      // 取不到就少几个空项目、智能体对话退回引擎名，列表本身照常；下次上线或下拉再取。
-    } finally {
-      _loading.remove(runtimeId);
-    }
   }
 
   Future<void> _refresh() async {
     final model = _model!;
     await Future.wait([
       model.backend.verifyConnections(),
-      for (final id in _online) _loadWorkspace(id),
+      model.workspaces.reloadOnline(),
     ]);
   }
 
@@ -117,14 +83,6 @@ class _SessionsPageState extends State<SessionsPage> {
       }
     }
     if (current != _guide) setState(() => _guide = current);
-  }
-
-  String? _agentName(String runtimeId, String definitionId) {
-    for (final a
-        in _workspaces[runtimeId]?.agents ?? const <AcpAgentOption>[]) {
-      if (a.agentDefinitionId == definitionId) return a.label;
-    }
-    return null;
   }
 
   Future<void> _delete(FleetRuntime runtime, SessionSummary session) =>
@@ -207,7 +165,12 @@ class _SessionsPageState extends State<SessionsPage> {
     final l10n = L10n.of(context);
     final model = _model!;
     return ListenableBuilder(
-      listenable: Listenable.merge([model.fleet, model.catalog, widget.filter]),
+      listenable: Listenable.merge([
+        model.fleet,
+        model.catalog,
+        model.workspaces,
+        widget.filter,
+      ]),
       builder: (context, _) {
         final runtimes = model.fleet.value.runtimes;
         // 筛到的机器被忘掉了：按全部显示，不留一个筛不出东西的芯片状态。
@@ -218,10 +181,10 @@ class _SessionsPageState extends State<SessionsPage> {
         final machines = groupSessions(
           runtimes: runtimes,
           listOf: model.catalog.list,
-          workspaces: _workspaces,
+          workspaces: model.workspaces.catalogs,
           machine: filter,
           query: _query,
-          agentName: _agentName,
+          agentName: model.workspaces.agentName,
         );
 
         final List<Widget> body;
@@ -260,7 +223,7 @@ class _SessionsPageState extends State<SessionsPage> {
                   machine: machine,
                   first: index == 0,
                   searching: _query.trim().isNotEmpty,
-                  agentName: (id) => _agentName(machine.runtime.id, id),
+                  agentName: (s) => model.workspaces.agentName(machine.runtime.id, s),
                   onDelete: (s) => _delete(machine.runtime, s),
                   onActions: (s) => _showActions(machine.runtime, s),
                   onHistory: (g) => _openHistory(machine.runtime, g),
@@ -444,7 +407,7 @@ class _MachineSection extends StatelessWidget {
   final MachineSessions machine;
   final bool first;
   final bool searching;
-  final String? Function(String definitionId) agentName;
+  final String? Function(SessionSummary session) agentName;
   final void Function(SessionSummary) onDelete;
   final void Function(SessionSummary) onActions;
   final void Function(SessionGroup) onHistory;
@@ -577,9 +540,7 @@ class _MachineSection extends StatelessWidget {
                   session: s,
                   stale: list?.cached ?? false,
                   group: group.kind,
-                  agentName: s.agentDefinitionId == null
-                      ? null
-                      : agentName(s.agentDefinitionId!),
+                  agentName: agentName(s),
                   onDelete: () => onDelete(s),
                   onActions: () => onActions(s),
                 ),
@@ -667,7 +628,7 @@ class _SessionRow extends StatelessWidget {
   final bool stale;
   final SessionGroupKind group;
 
-  /// 智能体对话的智能体名（工作区目录里配到的）；配不到为空。
+  /// 智能体或自定义 Agent 的名字（工作区目录里配到的）；裸引擎会话、配不到为空。
   final String? agentName;
   final VoidCallback onDelete;
   final VoidCallback onActions;
@@ -694,9 +655,8 @@ class _SessionRow extends StatelessWidget {
             : phaseLabel(l10n, session.phase),
       _ => null,
     };
-    final who = group == SessionGroupKind.agentChats
-        ? (agentName ?? sessionAgentLabel(l10n, session))
-        : sessionAgentLabel(l10n, session);
+    // 智能体和自定义 Agent 的对话写它们自己的名字，不写底层引擎名。
+    final who = agentName ?? sessionAgentLabel(l10n, session);
     final subtitle = [
       who,
       if (group == SessionGroupKind.automationRuns)
@@ -716,7 +676,7 @@ class _SessionRow extends StatelessWidget {
         subtitle: Row(
           children: [
             AgentGlyph(
-              agent: session.agent,
+              agent: sessionGlyphAgent(session),
               terminal: session.isTerminal,
               color: c.inkMuted,
               size: Strokes.glyphSmall,

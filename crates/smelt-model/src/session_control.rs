@@ -29,11 +29,11 @@ pub struct AcpAgentOption {
 }
 
 impl AcpAgentOption {
-    /// 手动添加的 workspace profile 在 option id 里带 `profile:` 前缀，而
-    /// `session_metadata` 的身份三元组要的是裸 profile id——两边不是同一个字符串，
-    /// 转换只此一处，别在调用方各切各的。
+    /// 自定义 Agent 在 option id 里带 `profile:` 前缀，而 `session_metadata` 的身份
+    /// 三元组要的是裸 profile id——两边不是同一个字符串，转换只走
+    /// [`profile_id_from_option_id`]，别在调用方各切各的。
     pub fn profile_id(&self) -> Option<&str> {
-        self.id.strip_prefix("profile:")
+        profile_id_from_option_id(&self.id)
     }
 
     /// 产品智能体的选项在 id 里带 `agent:` 前缀。归属只编码在 id 里，不另存一份：
@@ -41,6 +41,11 @@ impl AcpAgentOption {
     pub fn agent_definition_id(&self) -> Option<&str> {
         agent_definition_id_from_option_id(&self.id)
     }
+}
+
+/// 「这个 agent option 是不是自定义 Agent、是哪一个」的唯一判据。
+pub fn profile_id_from_option_id(option_id: &str) -> Option<&str> {
+    option_id.strip_prefix("profile:")
 }
 
 /// 「这个 agent option 属于哪个产品智能体」的唯一判据。选项、落盘的会话记录、

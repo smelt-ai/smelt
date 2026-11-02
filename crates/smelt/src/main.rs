@@ -1179,6 +1179,30 @@ impl Session {
         }
     }
 
+    /// 侧栏画哪家的图标。自定义 Agent 开的对话一律画通用图标（配置删了也一样）：
+    /// 基于 Claude 的自定义 Agent 画成 Claude，会被当成 Claude。
+    pub(crate) fn icon_kind(&self, cx: &App) -> Option<settings::ConversationAgentKind> {
+        match &self.kind {
+            SessionKind::Conversation(view) => {
+                let view = view.read(cx);
+                Some(if view.profile_id().is_some() {
+                    settings::ConversationAgentKind::Custom
+                } else {
+                    view.agent_kind()
+                })
+            }
+            SessionKind::Term { .. } => None,
+        }
+    }
+
+    /// 自定义 Agent 开的对话返回它的名字（侧栏首字徽标和悬停提示用）。
+    pub(crate) fn custom_agent_label(&self, cx: &App) -> Option<String> {
+        match &self.kind {
+            SessionKind::Conversation(view) => view.read(cx).custom_agent_label(cx),
+            SessionKind::Term { .. } => None,
+        }
+    }
+
     /// 状态栏菜单项的 logo 标识。ACP 身份优先：只能 ACP 跑的 agent 在终端表里
     /// 没有变体，`provider_kind` 对它只能给 None。两张表的 id 是同一套（有不变量
     /// 测试守着），所以同一家 agent 无论哪条路径跑，拿到的都是同一枚 logo。
@@ -3792,6 +3816,8 @@ const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
     ("kiro", include_bytes!("../assets/icons/agent-kiro.svg")),
     ("pi", include_bytes!("../assets/icons/agent-pi.svg")),
     ("crush", include_bytes!("../assets/icons/agent-crush.svg")),
+    // 通用 ACP 的自定义 Agent 名字为空时的兜底；有名字时侧栏画首字徽标。
+    ("custom", include_bytes!("../assets/icons/agent-custom.svg")),
 ];
 
 /// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。

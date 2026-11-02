@@ -899,6 +899,9 @@ class SessionSummary {
   /// 这是一条产品智能体的对话时，智能体定义的 id。名字到自动化目录的 `agents` 里配。
   final String? agentDefinitionId;
 
+  /// 自定义 Agent 开的对话：它的 id。名字到工作区目录的 `agents` 里按 `profile:<id>` 配。
+  final String? profileId;
+
   const SessionSummary({
     required this.id,
     required this.kind,
@@ -916,6 +919,7 @@ class SessionSummary {
     this.attention,
     this.automation,
     this.agentDefinitionId,
+    this.profileId,
   });
 
   @override
@@ -935,7 +939,8 @@ class SessionSummary {
       pendingRequest.hashCode ^
       attention.hashCode ^
       automation.hashCode ^
-      agentDefinitionId.hashCode;
+      agentDefinitionId.hashCode ^
+      profileId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -957,7 +962,8 @@ class SessionSummary {
           pendingRequest == other.pendingRequest &&
           attention == other.attention &&
           automation == other.automation &&
-          agentDefinitionId == other.agentDefinitionId;
+          agentDefinitionId == other.agentDefinitionId &&
+          profileId == other.profileId;
 }
 
 class WorkspaceCatalog {

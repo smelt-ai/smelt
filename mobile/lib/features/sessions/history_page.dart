@@ -388,7 +388,7 @@ class _AgentPicker extends StatelessWidget {
                     // 选中底是实心墨，字和图标跟着反白（主题的 labelStyle 只管未选中）。
                     labelStyle: t.label.copyWith(color: ink),
                     avatar: AgentGlyph(
-                      agent: agent.kind,
+                      agent: optionGlyphAgent(agent),
                       color: ink,
                       size: Strokes.iconSmall,
                     ),

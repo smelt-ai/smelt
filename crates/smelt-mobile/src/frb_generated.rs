@@ -4667,6 +4667,7 @@ impl SseDecode for crate::api::catalog::SessionSummary {
         let mut var_automation =
             <Option<crate::api::catalog::AutomationSource>>::sse_decode(deserializer);
         let mut var_agentDefinitionId = <Option<String>>::sse_decode(deserializer);
+        let mut var_profileId = <Option<String>>::sse_decode(deserializer);
         return crate::api::catalog::SessionSummary {
             id: var_id,
             kind: var_kind,
@@ -4684,6 +4685,7 @@ impl SseDecode for crate::api::catalog::SessionSummary {
             attention: var_attention,
             automation: var_automation,
             agent_definition_id: var_agentDefinitionId,
+            profile_id: var_profileId,
         };
     }
 }
@@ -7180,6 +7182,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionSummary {
             self.attention.into_into_dart().into_dart(),
             self.automation.into_into_dart().into_dart(),
             self.agent_definition_id.into_into_dart().into_dart(),
+            self.profile_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -9484,6 +9487,7 @@ impl SseEncode for crate::api::catalog::SessionSummary {
         <Option<crate::api::catalog::AttentionItem>>::sse_encode(self.attention, serializer);
         <Option<crate::api::catalog::AutomationSource>>::sse_encode(self.automation, serializer);
         <Option<String>>::sse_encode(self.agent_definition_id, serializer);
+        <Option<String>>::sse_encode(self.profile_id, serializer);
     }
 }
 
