@@ -107,8 +107,8 @@ fn runtime_name_with_indicator(
         .min_w_0()
         .gap_1p5()
         .items_center()
-        .child(name)
         .child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(light)))
+        .child(name)
         .when_some(indicator.label, |d, label| {
             d.child(
                 div()
@@ -133,21 +133,19 @@ fn runtime_name_with_indicator(
         .into_any_element()
 }
 
-/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器名字后一盏连接灯（绿：在线；
+/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器名字前一盏连接灯（绿：在线；
 /// 黄：慢、连接中、升级中；红：离线、版本不兼容），悬停名字看走哪条路、多慢、什么版本，
-/// 要人处理的状态名字后再写几个字；折起时组里有对话在跑或在等你，挂一个状态点，免得
-/// 「需要你」被折没了。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
+/// 要人处理的状态名字后再写几个字。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
 /// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。`grouping` 是侧栏的「筛选与
 /// 分组」按钮：分了机器段就没有「项目」标题了，它挂在第一段的标题上。
 ///
-/// 28 高，文字和下面各行的图标落在同一条左缘。多台机器时它是最上面一层，第二段起上面再隔一条
+/// 28 高，本机文字、远程连接灯和下面各行的图标落在同一条左缘。多台机器时它是最上面一层，第二段起上面再隔一条
 /// 线（见 `header_for`）。
 /// 折叠箭头跟在名字后面，折起时常显，展开时悬停才出现。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
     folded: bool,
-    alert: Option<AgentStatus>,
     grouping: Option<Div>,
     // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
     extras: Vec<AnyElement>,
@@ -196,15 +194,6 @@ fn runtime_section_header(
                     .text_color(rgb(ui_theme::text_muted())),
                 ),
         )
-        .when_some(alert.filter(|_| folded), |d, status| {
-            d.child(
-                div()
-                    .flex_none()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(ui_theme::session_dot_color(status)),
-            )
-        })
         .child(div().flex_1())
         .children(grouping.map(|grouping| {
             grouping
@@ -922,25 +911,6 @@ impl Workspace {
         // ---- 运行时标题行：挂了远程运行时才分段 ----
         // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
         // 「打开项目」就在上面。
-        // 折起的机器分段挂上组里最要紧的状态：在跑、在等你，折起来也看得见。
-        let mut runtime_alerts: std::collections::HashMap<RuntimeKey, AgentStatus> =
-            Default::default();
-        for group in groups.iter() {
-            for status in group
-                .sessions
-                .iter()
-                .filter_map(|&i| statuses.get(i).copied())
-            {
-                runtime_alerts
-                    .entry(group.runtime.clone())
-                    .and_modify(|current| {
-                        if status.rank() < current.rank() {
-                            *current = status;
-                        }
-                    })
-                    .or_insert(status);
-            }
-        }
         let first_header = std::cell::Cell::new(true);
         let header_for = |runtime: crate::runtimes::Runtime, grouping: Option<Div>, cx: &App| {
             let separated = !first_header.replace(false);
@@ -975,10 +945,6 @@ impl Workspace {
                     runtime,
                     this.clone(),
                     self.runtime_folded(&key),
-                    runtime_alerts
-                        .get(&key)
-                        .copied()
-                        .filter(|status| *status != AgentStatus::Idle),
                     grouping,
                     extras,
                     cx,
