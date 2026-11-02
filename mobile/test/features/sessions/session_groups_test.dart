@@ -9,6 +9,7 @@ SessionSummary _s(
   int order = 0,
   String agent = 'claude',
   String? definition,
+  String? profile,
   AutomationSource? automation,
   String? cwd,
 }) => SessionSummary(
@@ -24,6 +25,7 @@ SessionSummary _s(
   projectOrder: order,
   updatedAt: 0,
   agentDefinitionId: definition,
+  profileId: profile,
   automation: automation,
 );
 
@@ -81,7 +83,7 @@ void main() {
     workspaces: workspaces,
     machine: machine,
     query: query,
-    agentName: (rt, def) => def == 'def-x' ? '工作助手' : null,
+    agentName: (rt, s) => s.agentDefinitionId == 'def-x' ? '工作助手' : null,
   );
 
   test('按机器 → 项目分组；不在项目里的智能体对话放最前，自动化运行单独成组', () {
@@ -156,5 +158,24 @@ void main() {
     // 多个词要都出现。
     expect(group(query: 'web codex').single.groups.single.sessions.length, 1);
     expect(group(query: 'nothing-like-this'), isEmpty);
+  });
+
+  test('自定义 Agent 的对话按它自己的名字也能搜到', () {
+    final machines = groupSessions(
+      runtimes: [_runtime('a')],
+      listOf: (_) => SessionList(
+        cached: false,
+        sessions: [
+          _s('1', root: '/code/web', project: 'web', profile: 'p-z'),
+          _s('2', root: '/code/web', project: 'web'),
+        ],
+      ),
+      query: 'zeta',
+      agentName: (rt, s) => s.profileId == 'p-z' ? 'Zeta' : null,
+    );
+    expect(
+      machines.single.groups.expand((g) => g.sessions).map((s) => s.id),
+      ['1'],
+    );
   });
 }

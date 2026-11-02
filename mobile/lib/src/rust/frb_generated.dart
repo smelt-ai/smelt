@@ -4164,8 +4164,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionSummary dco_decode_session_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 16)
-      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
+    if (arr.length != 17)
+      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
     return SessionSummary(
       id: dco_decode_String(arr[0]),
       kind: dco_decode_session_kind(arr[1]),
@@ -4183,6 +4183,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       attention: dco_decode_opt_box_autoadd_attention_item(arr[13]),
       automation: dco_decode_opt_box_autoadd_automation_source(arr[14]),
       agentDefinitionId: dco_decode_opt_String(arr[15]),
+      profileId: dco_decode_opt_String(arr[16]),
     );
   }
 
@@ -6723,6 +6724,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       deserializer,
     );
     var var_agentDefinitionId = sse_decode_opt_String(deserializer);
+    var var_profileId = sse_decode_opt_String(deserializer);
     return SessionSummary(
       id: var_id,
       kind: var_kind,
@@ -6740,6 +6742,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       attention: var_attention,
       automation: var_automation,
       agentDefinitionId: var_agentDefinitionId,
+      profileId: var_profileId,
     );
   }
 
@@ -9017,6 +9020,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_attention_item(self.attention, serializer);
     sse_encode_opt_box_autoadd_automation_source(self.automation, serializer);
     sse_encode_opt_String(self.agentDefinitionId, serializer);
+    sse_encode_opt_String(self.profileId, serializer);
   }
 
   @protected

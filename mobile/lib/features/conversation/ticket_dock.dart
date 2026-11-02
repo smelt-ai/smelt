@@ -208,14 +208,21 @@ class _DockTicket extends StatelessWidget {
     final l10n = L10n.of(context);
     final model = AppScope.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([model.fleet, model.pass, model.catalog]),
+      listenable: Listenable.merge([
+        model.fleet,
+        model.pass,
+        model.catalog,
+        model.workspaces,
+      ]),
       builder: (context, _) {
         final runtime = model.fleet.runtime(runtimeId);
         final session = model.catalog.session(runtimeId, sessionId);
         final ticket = model.pass.value.tickets
             .where((t) => t.runtimeId == runtimeId && t.session.id == sessionId)
             .firstOrNull;
-        final agent = agentDisplayName(session?.agent ?? '');
+        final agent = session == null
+            ? agentDisplayName('')
+            : model.workspaces.agentDisplay(runtimeId, session);
         final permission = item.permission;
         final ask = permission != null
             ? (permission.details.command != null
@@ -290,7 +297,7 @@ class _DockTicket extends StatelessWidget {
                   Row(
                     children: [
                       AgentGlyph(
-                        agent: session?.agent ?? '',
+                        agent: session == null ? '' : sessionGlyphAgent(session),
                         color: c.onPaperMuted,
                         size: 14,
                       ),

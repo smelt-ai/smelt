@@ -1,5 +1,6 @@
 use super::{
-    MemoryFilter, agent_catalog_monogram, bound_agent_definition_id, conversation_agent_mark,
+    MemoryFilter, agent_catalog_monogram, bound_agent_definition_id, bound_agent_identity,
+    conversation_agent_mark,
     conversation_icon_color, conversation_row_title, memory_summary_text,
     new_conversation_row_label, recent_conversation_order, session_phase_settled, visible_memories,
 };
@@ -138,6 +139,30 @@ fn conversation_mark_uses_the_first_character_or_pi() {
     assert_eq!(conversation_agent_mark(Some("  研究助理")), "研");
     assert_eq!(conversation_agent_mark(None), "Pi");
     assert_eq!(conversation_agent_mark(Some("  ")), "Pi");
+}
+
+/// 侧栏悬停显示智能体的名字，不是底层引擎名；定义已删时退回 id。
+#[test]
+fn bound_agent_identity_pairs_the_mark_with_the_agent_name() {
+    let agents = [crate::settings::AgentDefinition {
+        id: "writer".into(),
+        name: "写作助手".into(),
+        ..Default::default()
+    }];
+    assert_eq!(
+        bound_agent_identity(Some("writer"), None, &agents),
+        Some(("写".to_string(), "写作助手".to_string()))
+    );
+    assert_eq!(
+        bound_agent_identity(Some("gone"), None, &agents),
+        Some(("g".to_string(), "gone".to_string()))
+    );
+    assert_eq!(bound_agent_identity(None, None, &agents), None);
+    assert_eq!(
+        bound_agent_identity(Some("writer"), Some("auto-1"), &agents),
+        None,
+        "自动化 Run 不是对话"
+    );
 }
 
 #[test]

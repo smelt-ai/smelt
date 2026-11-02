@@ -127,6 +127,8 @@ pub struct SessionSummary {
     pub automation: Option<AutomationSource>,
     /// 这是一条产品智能体的对话时，智能体定义的 id。名字到自动化目录的 `agents` 里配。
     pub agent_definition_id: Option<String>,
+    /// 自定义 Agent 开的对话：它的 id。名字到工作区目录的 `agents` 里按 `profile:<id>` 配。
+    pub profile_id: Option<String>,
 }
 
 /// 当前已知的会话列表。

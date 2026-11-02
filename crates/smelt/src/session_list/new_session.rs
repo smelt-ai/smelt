@@ -218,11 +218,15 @@ fn toggle_new_session_pin(key: &str, cx: &mut App) {
 
 fn picker_item_icon(target: &NewSessionTarget) -> Icon {
     match target {
-        NewSessionTarget::Conversation { agent_kind, .. } => {
-            ConversationAgentKind::from_id(agent_kind)
-                .map(acp_provider_icon)
-                .unwrap_or_else(|| Icon::new(IconName::Bot))
-        }
+        // 自定义 Agent 一律画通用图标，和侧栏一致。
+        NewSessionTarget::Conversation {
+            agent_option_id,
+            agent_kind,
+        } => smelt_model::session_control::profile_id_from_option_id(agent_option_id)
+            .map(|_| ConversationAgentKind::Custom)
+            .or_else(|| ConversationAgentKind::from_id(agent_kind))
+            .map(acp_provider_icon)
+            .unwrap_or_else(|| Icon::new(IconName::Bot)),
         NewSessionTarget::Terminal { command, provider } => provider
             .as_deref()
             .and_then(TerminalAgentKind::from_id)

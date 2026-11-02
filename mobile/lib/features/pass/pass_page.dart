@@ -103,7 +103,7 @@ class _PassPageState extends State<PassPage> {
     final l10n = L10n.of(context);
     final model = AppScope.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([model.fleet, model.pass]),
+      listenable: Listenable.merge([model.fleet, model.pass, model.workspaces]),
       builder: (context, _) {
         final fleet = model.fleet.value;
         final pass = model.pass.value;
@@ -359,7 +359,7 @@ class _SessionLine extends StatelessWidget {
         subtitle: Row(
           children: [
             AgentGlyph(
-              agent: session.agent,
+              agent: sessionGlyphAgent(session),
               terminal: session.isTerminal,
               color: c.inkMuted,
               size: Strokes.glyphSmall,
@@ -370,7 +370,10 @@ class _SessionLine extends StatelessWidget {
                 [
                   live
                       ? (session.detail ?? phaseLabel(l10n, session.phase))
-                      : sessionAgentLabel(l10n, session),
+                      // 智能体和自定义 Agent 写它们自己的名字，和会话页一致。
+                      : AppScope.of(
+                          context,
+                        ).workspaces.agentLabel(l10n, runtime.id, session),
                   ?session.placeLabel,
                 ].join(' · '),
                 maxLines: 1,

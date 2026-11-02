@@ -96,7 +96,7 @@ List<MachineSessions> groupSessions({
   Map<String, WorkspaceCatalog> workspaces = const {},
   String? machine,
   String query = '',
-  String? Function(String runtimeId, String definitionId)? agentName,
+  String? Function(String runtimeId, SessionSummary session)? agentName,
 }) {
   final searching = query.trim().isNotEmpty;
   final out = <MachineSessions>[];
@@ -113,9 +113,7 @@ List<MachineSessions> groupSessions({
 
     for (final s in list?.sessions ?? const <SessionSummary>[]) {
       final definition = s.agentDefinitionId?.trim();
-      final name = definition == null || definition.isEmpty
-          ? null
-          : agentName?.call(id, definition);
+      final name = agentName?.call(id, s);
       if (!matchesQuery(s, query, agentName: name)) continue;
       // 自动化运行的工作区是运行时按自动化分配的目录，按 cwd 归项目会凭空造出一个
       // 用户没打开过的「项目」。

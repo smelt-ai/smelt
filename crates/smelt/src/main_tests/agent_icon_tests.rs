@@ -25,7 +25,11 @@ fn every_agent_has_a_sidebar_icon() {
             kind.id()
         );
     }
-    for kind in ConversationAgentKind::ALL {
+    // 通用 ACP 不在 ALL 里，但它的会话照样要有图标可画。
+    for kind in ConversationAgentKind::ALL
+        .into_iter()
+        .chain([ConversationAgentKind::Custom])
+    {
         let path = format!("smelt-icons/agent-{}.svg", kind.id());
         assert!(
             crate::agent_icon_svg(&path).is_some(),

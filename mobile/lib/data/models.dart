@@ -75,9 +75,23 @@ extension SessionSummaryView on SessionSummary {
   }
 }
 
+/// 自定义 Agent 一律画通用图标（机器人）：基于 Claude 的自定义 Agent 画成 Claude，
+/// 会被当成 Claude。
+const customAgentGlyph = 'custom';
+
+/// 会话行、对话页上画哪家的图标。
+String sessionGlyphAgent(SessionSummary session) =>
+    session.profileId == null ? session.agent : customAgentGlyph;
+
+/// 新建、历史页的 agent 选项画哪家的图标。自定义 Agent 的选项 id 带 `profile:` 前缀。
+String optionGlyphAgent(AcpAgentOption option) =>
+    option.id.startsWith('profile:') ? customAgentGlyph : option.kind;
+
 /// 行副标题里「谁在干活」：认得出 agent 用 agent 名；认不出的终端就是「终端」，
-/// 不能说成「Agent」。
+/// 不能说成「Agent」。自定义 Agent 和图标一样按「自定义」算，不写底层引擎名；
+/// 配得到它自己名字的页面在外面换成名字。
 String sessionAgentLabel(L10n l10n, SessionSummary session) {
+  if (session.profileId != null) return agentDisplayName(customAgentGlyph);
   final agent = session.agent.trim().toLowerCase();
   if (session.isTerminal &&
       (agent.isEmpty || agent == 'other') &&

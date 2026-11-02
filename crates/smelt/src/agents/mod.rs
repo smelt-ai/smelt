@@ -641,22 +641,24 @@ pub(crate) fn recent_conversation_order(updated_at: &[u64]) -> Vec<usize> {
     ixes
 }
 
-/// 行首头像：智能体取显示名第一个字；没绑智能体的工作台对话标 Pi。
-/// 绑了智能体的会话行首头像。没绑（工作台「新对话」、裸引擎）返回 `None`。
-pub(crate) fn bound_agent_mark(
+/// 绑了智能体的会话在侧栏上的身份：行首头像（显示名第一个字）和悬停时的名字。
+/// 没绑（工作台「新对话」、裸引擎）返回 `None`。定义找不到时退回 id。
+pub(crate) fn bound_agent_identity(
     definition_id: Option<&str>,
     automation_id: Option<&str>,
     agents: &[settings::AgentDefinition],
-) -> Option<String> {
+) -> Option<(String, String)> {
     let id = bound_agent_definition_id(definition_id, automation_id)?;
     let name = agents
         .iter()
         .find(|agent| agent.id == id)
-        .map(|agent| agent_display_name(&agent.name));
-    Some(conversation_agent_mark(name.as_deref().or(Some(id))))
+        .map(|agent| agent_display_name(&agent.name))
+        .unwrap_or_else(|| id.to_string());
+    Some((conversation_agent_mark(Some(&name)), name))
 }
 
-fn conversation_agent_mark(agent_name: Option<&str>) -> String {
+/// 行首头像：取名字第一个字；没有名字的工作台对话标 Pi。
+pub(crate) fn conversation_agent_mark(agent_name: Option<&str>) -> String {
     match agent_name.map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) => name.chars().next().unwrap_or('智').to_string(),
         None => "Pi".to_string(),

@@ -37,7 +37,7 @@ class PassTicketCard extends StatelessWidget {
     final model = AppScope.of(context);
     final session = ticket.session;
     final runtime = model.fleet.runtime(ticket.runtimeId);
-    final agent = agentDisplayName(session.agent);
+    final agent = model.workspaces.agentDisplay(ticket.runtimeId, session);
     final failed =
         ticket.permission == null &&
         ticket.elicitation == null &&
@@ -123,7 +123,7 @@ class PassTicketCard extends StatelessWidget {
               Row(
                 children: [
                   AgentGlyph(
-                    agent: session.agent,
+                    agent: sessionGlyphAgent(session),
                     terminal: session.isTerminal,
                     color: c.onPaperMuted,
                     size: 14,

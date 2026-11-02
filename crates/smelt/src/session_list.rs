@@ -1474,16 +1474,27 @@ impl Workspace {
                 // ACP 身份优先：只有 ACP 的 agent 在终端表里查不到，
                 // 走 `provider` 会把它显示成一个普通终端。
                 let acp_provider = self.sessions[ix].acp_kind(cx);
+                let icon_provider = self.sessions[ix].icon_kind(cx);
                 let provider_label: &'static str = acp_provider
                     .map(|agent| agent.label())
                     .or_else(|| provider.map(|agent| agent.label()))
                     .unwrap_or("终端");
-                let agent_mark = crate::agents::bound_agent_mark(
+                // 绑了智能体的会话画名字首字；自定义 Agent 一律画通用机器人图标（基于 Claude 的
+                // 画成 Claude 会被当成 Claude，画首字又会被当成产品智能体）。两者悬停都显示名字。
+                let custom_agent = self.sessions[ix].custom_agent_label(cx);
+                let (agent_mark, identity_label) = match crate::agents::bound_agent_identity(
                     self.sessions[ix].agent_definition_id.as_deref(),
                     self.sessions[ix].automation_id.as_deref(),
                     crate::settings::agents_on(self.sessions[ix].runtime(cx).key(), cx),
-                );
-                let identity_label = provider_label.to_string();
+                ) {
+                    Some((mark, name)) => (Some(mark), name),
+                    None => (
+                        None,
+                        custom_agent
+                            .clone()
+                            .unwrap_or_else(|| provider_label.to_string()),
+                    ),
+                };
                 let project_context_matches = !is_project_group || is_active_group;
                 let is_active = session_row_is_selected(
                     session_route_active,
@@ -1579,7 +1590,7 @@ impl Workspace {
                                 .justify_center()
                                 .text_color(Self::session_icon_color(status, Some(phase)))
                                 .child(
-                                    acp_provider
+                                    icon_provider
                                         .map(acp_provider_icon)
                                         .unwrap_or_else(|| provider_icon(provider))
                                         .size(px(SESSION_AGENT_ICON_SIZE)),
@@ -1601,7 +1612,7 @@ impl Workspace {
                         .justify_center()
                         .text_color(Self::session_icon_color(status, None))
                         .child(
-                            acp_provider
+                            icon_provider
                                 .map(acp_provider_icon)
                                 .unwrap_or_else(|| provider_icon(provider))
                                 .size(px(SESSION_AGENT_ICON_SIZE)),
@@ -1728,7 +1739,7 @@ impl Workspace {
                             SessionDrag {
                                 id: ui_id,
                                 title: drag_title.clone(),
-                                acp: acp_provider,
+                                acp: icon_provider,
                                 terminal: provider,
                                 status,
                                 subtitle: subtitle.as_deref().map(SharedString::from),
@@ -1978,7 +1989,7 @@ impl Workspace {
                                         SessionDrag {
                                             id: ui_id,
                                             title: drag_title.clone(),
-                                            acp: acp_provider,
+                                            acp: icon_provider,
                                             terminal: provider,
                                             status,
                                             subtitle: subtitle.as_deref().map(SharedString::from),

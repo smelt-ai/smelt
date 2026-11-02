@@ -298,6 +298,8 @@ struct Row {
     /// 是 `None`。
     project: Option<usize>,
     agent: Option<String>,
+    /// 自定义 Agent 开的对话：它的 id。
+    profile_id: Option<String>,
     /// 在名册里的先后，和同一段对话里第几个终端。
     order: u32,
     leaf: u32,
@@ -383,6 +385,7 @@ impl Listing {
                 cwd: acp.cwd.clone(),
                 project,
                 agent: Some(acp.agent.clone()),
+                profile_id: acp.profile_id.clone(),
                 order,
                 leaf: 0,
             });
@@ -416,6 +419,7 @@ impl Listing {
                     .launch_cmd
                     .as_deref()
                     .map(|launch| agent_from_launch(launch).to_string()),
+                profile_id: None,
                 order,
                 leaf: u32::try_from(leaf).unwrap_or(u32::MAX),
             });
@@ -450,6 +454,7 @@ impl Listing {
                 cwd: Some(run.context.cwd.clone()),
                 project: None,
                 agent: run.context.engine_kind_id.clone(),
+                profile_id: None,
                 order,
                 leaf: 0,
             });
@@ -664,6 +669,7 @@ fn mobile_summary(
         attention: attention_store.unread(&row.id).map(attention_item),
         automation,
         agent_definition_id,
+        profile_id: row.profile_id.clone(),
     }
 }
 
@@ -683,8 +689,21 @@ pub(crate) fn agent_option(option: &AcpAgentOption) -> view::AcpAgentOption {
 
 fn launch_action(action: NewSessionAction) -> view::LaunchAction {
     let (target, agent) = match action.target {
-        NewSessionTarget::Conversation { agent_kind, .. } => {
-            (view::LaunchTarget::Conversation, agent_kind)
+        // 自定义 Agent 一律画通用图标：基于 Claude 的自定义 Agent 画成 Claude，会被当成 Claude。
+        NewSessionTarget::Conversation {
+            agent_option_id,
+            agent_kind,
+        } => {
+            let agent = if smelt_model::session_control::profile_id_from_option_id(
+                &agent_option_id,
+            )
+            .is_some()
+            {
+                ConversationAgentKind::Custom.id().to_string()
+            } else {
+                agent_kind
+            };
+            (view::LaunchTarget::Conversation, agent)
         }
         NewSessionTarget::Terminal { provider, .. } => {
             (view::LaunchTarget::Terminal, provider.unwrap_or_default())

@@ -34,6 +34,7 @@ fn session(
         attention: None,
         automation: None,
         agent_definition_id: None,
+        profile_id: None,
     }
 }
 
