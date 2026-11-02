@@ -81,14 +81,20 @@ fn runtime_name_with_indicator(
     key: &RuntimeKey,
     name: impl IntoElement,
     indicator: Option<crate::runtimes::RuntimeIndicator>,
+    active: bool,
 ) -> AnyElement {
-    // 机器名是分段标题，跟「项目」「对话」这些标题同一个样子：小号、中等字重、灰。
+    // 机器是项目上面一层，字号不小于项目名。只有当前对话所在的机器才亮：高亮表示焦点在哪，
+    // 层级靠字重和分隔线。
     let name = div()
         .min_w_0()
         .truncate()
-        .text_xs()
-        .font_medium()
-        .text_color(rgb(ui_theme::text_muted()))
+        .text_sm()
+        .when(active, |d| {
+            d.font_semibold().text_color(rgb(ui_theme::text_bright()))
+        })
+        .when(!active, |d| {
+            d.font_medium().text_color(rgb(ui_theme::text_muted()))
+        })
         .child(name);
     let Some(indicator) = indicator else {
         return name.into_any_element();
@@ -139,12 +145,14 @@ fn runtime_name_with_indicator(
 /// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。`grouping` 是侧栏的「筛选与
 /// 分组」按钮：分了机器段就没有「项目」标题了，它挂在第一段的标题上。
 ///
-/// 跟「项目」「对话」标题同一套尺寸：28 高，文字和下面各行的图标落在同一条左缘。
+/// 28 高，文字和下面各行的图标落在同一条左缘。多台机器时它是最上面一层，第二段起上面再隔一条
+/// 线（见 `header_for`）。
 /// 折叠箭头跟在名字后面，折起时常显，展开时悬停才出现。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
     folded: bool,
+    active: bool,
     alert: Option<AgentStatus>,
     grouping: Option<Div>,
     // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
@@ -178,7 +186,7 @@ fn runtime_section_header(
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
-        .child(runtime_name_with_indicator(&key, name, indicator))
+        .child(runtime_name_with_indicator(&key, name, indicator, active))
         .child(
             div()
                 .flex_none()
@@ -939,7 +947,9 @@ impl Workspace {
                     .or_insert(status);
             }
         }
+        let first_header = std::cell::Cell::new(true);
         let header_for = |runtime: crate::runtimes::Runtime, grouping: Option<Div>, cx: &App| {
+            let separated = !first_header.replace(false);
             let key = runtime.key().clone();
             let item_key = SidebarItem::Runtime(key.clone()).key();
             let mut extras = Vec::new();
@@ -957,18 +967,31 @@ impl Workspace {
                     .into_any_element(),
                 );
             }
-            runtime_section_header(
-                runtime,
-                this.clone(),
-                self.runtime_folded(&key),
-                runtime_alerts
-                    .get(&key)
-                    .copied()
-                    .filter(|status| *status != AgentStatus::Idle),
-                grouping,
-                extras,
-                cx,
-            )
+            div()
+                .when(separated, |d| {
+                    d.child(
+                        div()
+                            .mx_2()
+                            .mt_3()
+                            .h(px(1.))
+                            .bg(rgb(ui_theme::border_dim())),
+                    )
+                })
+                .child(runtime_section_header(
+                    runtime,
+                    this.clone(),
+                    self.runtime_folded(&key),
+                    active_project
+                        .as_ref()
+                        .is_some_and(|active| active.runtime == key),
+                    runtime_alerts
+                        .get(&key)
+                        .copied()
+                        .filter(|status| *status != AgentStatus::Idle),
+                    grouping,
+                    extras,
+                    cx,
+                ))
         };
         let mut headers_left: std::collections::VecDeque<crate::runtimes::Runtime> =
             if !runtime_sections {
