@@ -81,20 +81,15 @@ fn runtime_name_with_indicator(
     key: &RuntimeKey,
     name: impl IntoElement,
     indicator: Option<crate::runtimes::RuntimeIndicator>,
-    active: bool,
 ) -> AnyElement {
-    // 机器是项目上面一层，字号不小于项目名。只有当前对话所在的机器才亮：高亮表示焦点在哪，
-    // 层级靠字重和分隔线。
+    // 机器是项目上面一层，层级靠字号和分隔线，不靠高亮。每台机器一个样子：焦点在哪由选中的
+    // 对话说明，机器再亮一档只会抢眼。
     let name = div()
         .min_w_0()
         .truncate()
         .text_sm()
-        .when(active, |d| {
-            d.font_semibold().text_color(rgb(ui_theme::text_bright()))
-        })
-        .when(!active, |d| {
-            d.font_medium().text_color(rgb(ui_theme::text_muted()))
-        })
+        .font_medium()
+        .text_color(rgb(ui_theme::text_muted()))
         .child(name);
     let Some(indicator) = indicator else {
         return name.into_any_element();
@@ -152,7 +147,6 @@ fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
     folded: bool,
-    active: bool,
     alert: Option<AgentStatus>,
     grouping: Option<Div>,
     // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
@@ -186,7 +180,7 @@ fn runtime_section_header(
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
-        .child(runtime_name_with_indicator(&key, name, indicator, active))
+        .child(runtime_name_with_indicator(&key, name, indicator))
         .child(
             div()
                 .flex_none()
@@ -981,9 +975,6 @@ impl Workspace {
                     runtime,
                     this.clone(),
                     self.runtime_folded(&key),
-                    active_project
-                        .as_ref()
-                        .is_some_and(|active| active.runtime == key),
                     runtime_alerts
                         .get(&key)
                         .copied()
