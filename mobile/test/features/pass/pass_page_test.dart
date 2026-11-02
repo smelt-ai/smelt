@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/data/demo_backend.dart';
 import 'package:smelt_mobile/data/preferences.dart';
@@ -8,6 +9,8 @@ import 'package:smelt_mobile/l10n/gen/l10n.dart';
 import 'package:smelt_mobile/theme/galley.dart';
 import 'package:smelt_mobile/theme/theme.dart';
 import 'package:smelt_mobile/ui/adaptive.dart';
+
+import '../sessions/harness.dart' show TestBackend, settle;
 
 Future<AppModel> _pump(WidgetTester tester, {DemoBackend? backend}) async {
   final model = AppModel(backend ?? DemoBackend(), PreferencesStore.memory())
@@ -90,6 +93,53 @@ void main() {
     await tester.pumpAndSettle();
     expect(model.pass.value.tickets, hasLength(2));
     expect(find.text('第 2 / 3 张'), findsOneWidget);
+  });
+
+  testWidgets('灶台上的会话左滑出删除，确认后才删', (tester) async {
+    final backend = TestBackend();
+    await _pump(tester, backend: backend);
+    final row = find.text('整理 workspace 文档');
+    final inDialog = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.text('删除'),
+    );
+
+    Future<void> askToDelete() async {
+      await tester.scrollUntilVisible(
+        row,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.drag(row, const Offset(-400, 0));
+      await settle(tester);
+      await tester.tap(find.text('删除'));
+      await settle(tester);
+      expect(find.text('删除这段对话？'), findsOneWidget);
+    }
+
+    await askToDelete();
+    await tester.tap(find.text('取消'));
+    await settle(tester);
+    expect(backend.deleted, isEmpty);
+
+    await askToDelete();
+    await tester.tap(inDialog);
+    await settle(tester);
+    expect(backend.deleted, [('rt-mbp', 's-docs')]);
+  });
+
+  testWidgets('离线机器的缓存行不给滑：删不了', (tester) async {
+    await _pump(tester, backend: TestBackend());
+    final row = find.text('cargo build --release');
+    await tester.scrollUntilVisible(
+      row,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      find.ancestor(of: row, matching: find.byType(Slidable)),
+      findsNothing,
+    );
   });
 
   testWidgets('没有机器时只谈怎么配对', (tester) async {

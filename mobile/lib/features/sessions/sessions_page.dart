@@ -11,13 +11,13 @@ import '../../l10n/gen/l10n.dart';
 import '../../theme/galley.dart';
 import '../../ui/adaptive.dart';
 import '../../ui/agent_glyph.dart';
-import '../../ui/buttons.dart';
 import '../../ui/page.dart';
 import '../../ui/shelf.dart';
 import '../../ui/station.dart';
 import '../../ui/status.dart';
 import '../../ui/time.dart';
 import '../launch/new_session_sheet.dart';
+import '../session/delete_session.dart';
 import '../session/open_session.dart';
 import 'history_page.dart';
 import 'session_groups.dart';
@@ -127,48 +127,8 @@ class _SessionsPageState extends State<SessionsPage> {
     return null;
   }
 
-  Future<void> _delete(FleetRuntime runtime, SessionSummary session) async {
-    final l10n = L10n.of(context);
-    final model = _model!;
-    final messenger = ScaffoldMessenger.of(context);
-    final title = _rowTitle(l10n, session);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          session.isTerminal
-              ? l10n.sessionsDeleteTerminalTitle
-              : l10n.sessionsDeleteConversationTitle,
-        ),
-        content: Text(
-          session.isTerminal
-              ? l10n.sessionsDeleteTerminalBody(title, runtime.name)
-              : l10n.sessionsDeleteConversationBody(title, runtime.name),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text(l10n.commonCancel),
-          ),
-          GalleyButton.danger(
-            label: l10n.commonDelete,
-            onPressed: () => Navigator.pop(context, true),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    try {
-      // 删掉后运行时推新列表，行自己消失；自动化运行的会话运行时会拒绝，原话转给用户。
-      await model.backend.deleteSession(runtime.id, session.id);
-    } catch (error) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(l10n.sessionsDeleteFailed(describeError(error))),
-        ),
-      );
-    }
-  }
+  Future<void> _delete(FleetRuntime runtime, SessionSummary session) =>
+      confirmDeleteSession(context, runtime, session);
 
   /// 长按：一个小弹层，打开 / 删除。左滑之外的第二条路，也给读屏和不习惯滑动的人。
   Future<void> _showActions(
@@ -194,7 +154,7 @@ class _SessionsPageState extends State<SessionsPage> {
                 Space.sm,
               ),
               child: Text(
-                _rowTitle(l10n, session),
+                sessionRowTitle(l10n, session),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: t.title.copyWith(color: c.ink),
@@ -342,14 +302,6 @@ class _SessionsPageState extends State<SessionsPage> {
       },
     );
   }
-}
-
-String _rowTitle(L10n l10n, SessionSummary s) {
-  final title = s.title.trim();
-  if (title.isNotEmpty) return title;
-  return s.isTerminal
-      ? l10n.sessionsUntitledTerminal
-      : l10n.sessionsUntitledConversation;
 }
 
 /// 搜索框 + 机器筛选芯片。只有一台机器时不出芯片：「全部」和它是同一回事。
@@ -760,7 +712,7 @@ class _SessionRow extends StatelessWidget {
           label: phaseLabel(l10n, session.phase),
           stale: stale,
         ),
-        title: Text(_rowTitle(l10n, session)),
+        title: Text(sessionRowTitle(l10n, session)),
         subtitle: Row(
           children: [
             AgentGlyph(

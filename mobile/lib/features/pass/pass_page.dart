@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../data/models.dart';
@@ -17,6 +19,7 @@ import '../../ui/time.dart';
 import '../actions/ticket_bodies.dart';
 import '../launch/new_session_sheet.dart';
 import '../machines/pairing.dart';
+import '../session/delete_session.dart';
 import '../session/open_session.dart';
 import 'pass_ticket.dart';
 import 'triage_page.dart';
@@ -128,86 +131,88 @@ class _PassPageState extends State<PassPage> {
         }
 
         final stations = {for (final s in pass.stations) s.runtimeId: s};
-        return GalleyPage(
-          title: l10n.passTitle,
-          controller: _scroll,
-          guide: _guide,
-          onRefresh: () => model.backend.verifyConnections(),
-          actions: [
-            IconButton(
-              tooltip: l10n.passNewSession,
-              icon: const Icon(LucideIcons.plus),
-              onPressed: () => showNewSessionSheet(context),
-            ),
-          ],
-          slivers: [
-            // 平板分栏：单据就在右侧详情栏里逐张摆着，左栏不再挂一份轨（同一张单据不在
-            // 一屏上出现两次），只留一行告诉你有几件事、点了把右栏切到第一张。
-            if (isSplitLayout(context))
-              SliverToBoxAdapter(
-                child: _TicketSummary(
-                  count: pass.tickets.length,
-                  onOpen: pass.tickets.isEmpty
-                      ? null
-                      : () => _openTriage(context, 0),
-                ),
-              )
-            else
-              SliverLayoutBuilder(
-                // 单据宽度跟着所在栏走（平板上指挥台只占列表栏），给下一张留出露边，
-                // 一眼看出轨上不止一张。
-                builder: (context, constraints) => SliverToBoxAdapter(
-                  child: TicketRail(
-                    ticketWidth:
-                        (constraints.crossAxisExtent -
-                                2 * Space.page -
-                                Space.ticketPeek)
-                            .clamp(Space.ticketMin, Space.ticketMax),
-                    stamps: {
-                      for (final entry in model.pass.stamps.entries)
-                        entry.key: ?stampFor(l10n, entry.value),
-                    },
-                    emptyChild: Row(
-                      children: [
-                        Icon(
-                          LucideIcons.check,
-                          size: Strokes.iconSmall,
-                          color: GalleyColors.of(context).inkMuted,
-                        ),
-                        const SizedBox(width: Space.sm),
-                        Text(
-                          l10n.passRailEmpty,
-                          style: GalleyText.of(context).note.copyWith(
+        return SlidableAutoCloseBehavior(
+          child: GalleyPage(
+            title: l10n.passTitle,
+            controller: _scroll,
+            guide: _guide,
+            onRefresh: () => model.backend.verifyConnections(),
+            actions: [
+              IconButton(
+                tooltip: l10n.passNewSession,
+                icon: const Icon(LucideIcons.plus),
+                onPressed: () => showNewSessionSheet(context),
+              ),
+            ],
+            slivers: [
+              // 平板分栏：单据就在右侧详情栏里逐张摆着，左栏不再挂一份轨（同一张单据不在
+              // 一屏上出现两次），只留一行告诉你有几件事、点了把右栏切到第一张。
+              if (isSplitLayout(context))
+                SliverToBoxAdapter(
+                  child: _TicketSummary(
+                    count: pass.tickets.length,
+                    onOpen: pass.tickets.isEmpty
+                        ? null
+                        : () => _openTriage(context, 0),
+                  ),
+                )
+              else
+                SliverLayoutBuilder(
+                  // 单据宽度跟着所在栏走（平板上指挥台只占列表栏），给下一张留出露边，
+                  // 一眼看出轨上不止一张。
+                  builder: (context, constraints) => SliverToBoxAdapter(
+                    child: TicketRail(
+                      ticketWidth:
+                          (constraints.crossAxisExtent -
+                                  2 * Space.page -
+                                  Space.ticketPeek)
+                              .clamp(Space.ticketMin, Space.ticketMax),
+                      stamps: {
+                        for (final entry in model.pass.stamps.entries)
+                          entry.key: ?stampFor(l10n, entry.value),
+                      },
+                      emptyChild: Row(
+                        children: [
+                          Icon(
+                            LucideIcons.check,
+                            size: Strokes.iconSmall,
                             color: GalleyColors.of(context).inkMuted,
                           ),
-                        ),
+                          const SizedBox(width: Space.sm),
+                          Text(
+                            l10n.passRailEmpty,
+                            style: GalleyText.of(context).note.copyWith(
+                              color: GalleyColors.of(context).inkMuted,
+                            ),
+                          ),
+                        ],
+                      ),
+                      entries: [
+                        for (final (index, ticket) in pass.tickets.indexed)
+                          RailEntry(
+                            id: sessionKey(ticket.runtimeId, ticket.session.id),
+                            child: PassTicketCard(
+                              ticket: ticket,
+                              number: index + 1,
+                              onOpen: () => _openTriage(context, index),
+                            ),
+                          ),
                       ],
                     ),
-                    entries: [
-                      for (final (index, ticket) in pass.tickets.indexed)
-                        RailEntry(
-                          id: sessionKey(ticket.runtimeId, ticket.session.id),
-                          child: PassTicketCard(
-                            ticket: ticket,
-                            number: index + 1,
-                            onOpen: () => _openTriage(context, index),
-                          ),
-                        ),
-                    ],
                   ),
                 ),
-              ),
-            for (final (index, runtime) in fleet.runtimes.indexed)
-              SliverToBoxAdapter(
-                child: _StationSection(
-                  key: _stationKeys.putIfAbsent(runtime.id, GlobalKey.new),
-                  runtime: runtime,
-                  station: stations[runtime.id],
-                  first: index == 0,
-                  onShowAll: () => widget.onShowAllSessions?.call(runtime.id),
+              for (final (index, runtime) in fleet.runtimes.indexed)
+                SliverToBoxAdapter(
+                  child: _StationSection(
+                    key: _stationKeys.putIfAbsent(runtime.id, GlobalKey.new),
+                    runtime: runtime,
+                    station: stations[runtime.id],
+                    first: index == 0,
+                    onShowAll: () => widget.onShowAllSessions?.call(runtime.id),
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         );
       },
     );
@@ -341,7 +346,7 @@ class _SessionLine extends StatelessWidget {
     final key = sessionKey(runtime.id, session.id);
     final updated = fromUnixSeconds(session.updatedAt);
     final selected = host.selectedKey == key;
-    return ColoredBox(
+    final row = ColoredBox(
       color: selected ? c.control : Colors.transparent,
       child: ShelfRow(
         leading: StatusMark(
@@ -387,6 +392,35 @@ class _SessionLine extends StatelessWidget {
                 ),
               ),
         onTap: () => openSession(context, runtime.id, session),
+      ),
+    );
+
+    // 机器离线时这一行只是缓存，删不了，不给滑。
+    if (!runtime.online) return row;
+    void delete() => confirmDeleteSession(context, runtime, session);
+    return Semantics(
+      // 左滑是藏起来的手势，读屏滑不出按钮：删除另给一条读屏动作。
+      customSemanticsActions: {
+        CustomSemanticsAction(label: l10n.commonDelete): delete,
+      },
+      child: Slidable(
+        key: ValueKey(key),
+        groupTag: 'pass',
+        endActionPane: ActionPane(
+          motion: const DrawerMotion(),
+          extentRatio: 0.28,
+          // 不给一划到底就删：删除会结束进程，滑出按钮 → 点 → 确认，三步都留着。
+          children: [
+            SlidableAction(
+              onPressed: (_) => delete(),
+              backgroundColor: c.danger,
+              foregroundColor: c.onSolid,
+              icon: LucideIcons.trash2,
+              label: l10n.commonDelete,
+            ),
+          ],
+        ),
+        child: row,
       ),
     );
   }
