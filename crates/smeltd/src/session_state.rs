@@ -66,6 +66,10 @@ pub(crate) struct SessionState {
     pub(crate) phase: Phase,
     /// unix 秒。「空转多久了」靠它算——作战地图用。
     pub(crate) phase_since: u64,
+    /// unix 秒，这一轮从什么时候开始忙（见 [`Phase::in_turn`]）；不在一轮里时为 0。
+    /// 各端会话列表上的「本轮已运行」都按它算：一轮里思考、跑工具、等审批来回切换
+    /// 不重置，回到空闲 / 结束才清掉。`phase_since` 每换一个阶段就变，不能拿来算。
+    pub(crate) turn_started_at: u64,
     /// 在问什么——远程遥控的命脉，Phase 6 的 action 门闩靠它判断能不能安全写入。
     pub(crate) pending_question: Option<String>,
     /// 对话会话正在等的那个请求的身份（`permission:<请求 id>` / `elicitation:<卡片 id>`），
@@ -142,6 +146,7 @@ impl Default for SessionState {
             cli_exited: false,
             phase: Phase::Idle,
             phase_since: 0,
+            turn_started_at: 0,
             pending_question: None,
             pending_request: None,
             tokens_used: None,
@@ -209,6 +214,15 @@ impl Phase {
     fn is_waiting(self) -> bool {
         matches!(self, Self::AwaitingApproval | Self::WaitingForUser)
     }
+
+    /// 在一轮里：从开始忙到这一轮结束，中间等审批、等回答也算（这一轮还没完）。
+    /// 连接中是会话在起，不是一轮。
+    pub(crate) fn in_turn(self) -> bool {
+        matches!(
+            self,
+            Self::Thinking | Self::ExecutingTool | Self::AwaitingApproval | Self::WaitingForUser
+        )
+    }
 }
 
 /// 谁在改 [`SessionState::phase`]。生产路径不得直接赋值。
@@ -232,8 +246,14 @@ pub(crate) fn commit_session_phase(
     if state.phase == next {
         return false;
     }
+    let now = now_unix();
+    if !next.in_turn() {
+        state.turn_started_at = 0;
+    } else if !state.phase.in_turn() {
+        state.turn_started_at = now;
+    }
     state.phase = next;
-    state.phase_since = now_unix();
+    state.phase_since = now;
     true
 }
 
@@ -1024,6 +1044,42 @@ mod agent_event_reducer_tests {
             Phase::Thinking
         ));
         assert_eq!(hook.phase, Phase::Thinking);
+    }
+
+    /// 「本轮已运行」的起点：从不忙变忙时记下，一轮里思考、跑工具、等审批来回切换
+    /// 不动，回到空闲 / 结束 / 断开就清掉；连接中不算一轮。
+    #[test]
+    fn turn_start_survives_phase_changes_within_a_turn() {
+        let mut state = SessionState::default();
+        assert!(commit_session_phase(
+            &mut state,
+            PhaseSource::AcpProjection,
+            Phase::Connecting
+        ));
+        assert_eq!(state.turn_started_at, 0, "连接中不是一轮");
+
+        commit_session_phase(&mut state, PhaseSource::AcpProjection, Phase::Thinking);
+        let started = state.turn_started_at;
+        assert!(started > 0);
+
+        // 把起点拨早，确认后面的切换没有把它改成「现在」。
+        state.turn_started_at = started - 100;
+        for next in [
+            Phase::ExecutingTool,
+            Phase::AwaitingApproval,
+            Phase::Thinking,
+            Phase::WaitingForUser,
+        ] {
+            commit_session_phase(&mut state, PhaseSource::AcpProjection, next);
+            assert_eq!(state.turn_started_at, started - 100, "{next:?}");
+        }
+
+        for end in [Phase::Succeeded, Phase::Failed, Phase::Idle, Phase::Dead] {
+            commit_session_phase(&mut state, PhaseSource::AcpProjection, Phase::Thinking);
+            assert!(state.turn_started_at > 0);
+            commit_session_phase(&mut state, PhaseSource::AcpProjection, end);
+            assert_eq!(state.turn_started_at, 0, "{end:?} 结束了这一轮");
+        }
     }
 
     #[test]

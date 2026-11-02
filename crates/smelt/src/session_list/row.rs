@@ -100,6 +100,20 @@ pub(crate) fn session_updated_at_text(timestamp: u64, now: &DateTime<Local>) -> 
     crate::agents::format_relative_since(timestamp.min(i64::MAX as u64) as i64, now.timestamp())
 }
 
+/// 在跑的会话行尾写「本轮已运行」多久，到分钟（侧栏不为它每秒重画）；手机上同一个
+/// 字段写成走秒的 `03:12`。没在一轮里（或运行时太旧不报）返回 None，行尾照旧写最后活动时间。
+pub(crate) fn session_turn_text(turn_started_at: u64, now: &DateTime<Local>) -> Option<String> {
+    if turn_started_at == 0 {
+        return None;
+    }
+    let minutes = (now.timestamp().max(0) as u64).saturating_sub(turn_started_at) / 60;
+    Some(match minutes {
+        0 => "不到 1 分钟".to_string(),
+        1..=59 => format!("{minutes} 分钟"),
+        _ => format!("{} 小时 {} 分", minutes / 60, minutes % 60),
+    })
+}
+
 /// 键盘焦点环：盖在行上的一圈描边，不占排版，前后的行不会挪。
 pub(crate) fn focus_ring() -> Div {
     div()
@@ -390,7 +404,8 @@ pub(super) fn provider_quota_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_pane_updated_at, progress_fraction, provider_quota_row, session_updated_at_text,
+        effective_pane_updated_at, progress_fraction, provider_quota_row, session_turn_text,
+        session_updated_at_text,
     };
     use crate::provider_quota::{ProviderQuotaData, QuotaStatus, QuotaTarget};
     use crate::settings::ConversationAgentKind;
@@ -473,6 +488,23 @@ mod tests {
             "出错没数值也要看得见"
         );
         assert!(close(bar(TerminalProgressState::Error, Some(30)), 0.3));
+    }
+
+    /// 在跑的会话写本轮跑了多久，到分钟；不在一轮里不写（行尾退回最后活动时间）。
+    #[test]
+    fn turn_text_counts_whole_minutes_of_this_turn() {
+        let now = Local
+            .with_ymd_and_hms(2026, 8, 24, 15, 30, 0)
+            .single()
+            .unwrap();
+        let at = |seconds_ago: u64| now.timestamp() as u64 - seconds_ago;
+        assert_eq!(session_turn_text(0, &now), None);
+        assert_eq!(session_turn_text(at(59), &now).as_deref(), Some("不到 1 分钟"));
+        assert_eq!(session_turn_text(at(60), &now).as_deref(), Some("1 分钟"));
+        assert_eq!(session_turn_text(at(59 * 60 + 59), &now).as_deref(), Some("59 分钟"));
+        assert_eq!(session_turn_text(at(65 * 60), &now).as_deref(), Some("1 小时 5 分"));
+        // 时钟回拨，起点比现在还晚：按刚开始算，不出负数。
+        assert_eq!(session_turn_text(at(0) + 30, &now).as_deref(), Some("不到 1 分钟"));
     }
 
     #[test]

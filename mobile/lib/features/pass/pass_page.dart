@@ -345,6 +345,9 @@ class _SessionLine extends StatelessWidget {
     final host = DetailHost.of(context);
     final key = sessionKey(runtime.id, session.id);
     final updated = fromUnixSeconds(session.updatedAt);
+    // 运行中计的是这一轮跑了多久，不是「上次有动静到现在」：后者每换一个阶段就归零。
+    // 运行时太旧不报本轮开始时间时不计时，退回写最后活动时间。
+    final turnStarted = fromUnixSeconds(session.turnStartedAt);
     final selected = host.selectedKey == key;
     final row = ColoredBox(
       color: selected ? c.control : Colors.transparent,
@@ -382,9 +385,9 @@ class _SessionLine extends StatelessWidget {
             ),
           ],
         ),
-        trailing: live && updated != null
+        trailing: live && turnStarted != null
             ? ElapsedLabel(
-                since: updated,
+                since: turnStarted,
                 style: GalleyText.of(context).monoTime.copyWith(color: c.ok),
               )
             : ListenableBuilder(

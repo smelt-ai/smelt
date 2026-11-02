@@ -21,6 +21,7 @@ SessionSummary _extra(
   cwd: '/Users/demo/spaces/$id',
   projectOrder: 0xFFFFFFFF,
   updatedAt: 0,
+  turnStartedAt: 0,
   agentDefinitionId: definition,
   automation: automation,
 );

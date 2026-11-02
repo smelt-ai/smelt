@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone, Utc};
 
-use crate::{event_touches_file, until_next_midnight};
+use crate::{event_touches_file, until_next_midnight, until_turn_minute_changes};
 
 /// 一次性计时器排到下一个本地零点，按所在时区算，不按 UTC。
 #[test]
@@ -25,6 +25,29 @@ fn next_midnight_is_local() {
         .unwrap()
         .with_timezone(&shanghai);
     assert_eq!(until_next_midnight(&local), Duration::from_secs(3600));
+}
+
+/// 侧栏「本轮已运行 N 分钟」的一次性计时器排到分钟数下一次变的时候；没在一轮里不排。
+#[test]
+fn turn_clock_wakes_when_the_minute_changes() {
+    assert_eq!(until_turn_minute_changes(0, 1_000), None);
+    assert_eq!(
+        until_turn_minute_changes(1_000, 1_000),
+        Some(Duration::from_secs(60))
+    );
+    assert_eq!(
+        until_turn_minute_changes(1_000, 1_045),
+        Some(Duration::from_secs(15))
+    );
+    assert_eq!(
+        until_turn_minute_changes(1_000, 1_120),
+        Some(Duration::from_secs(60))
+    );
+    // 起点比现在还晚（时钟回拨）：一分钟后再看，不出零或负数。
+    assert_eq!(
+        until_turn_minute_changes(2_000, 1_000),
+        Some(Duration::from_secs(60))
+    );
 }
 
 fn event_at(path: &str) -> notify::Event {

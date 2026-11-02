@@ -116,6 +116,9 @@ pub struct SessionSummary {
     pub project_order: u32,
     /// unix 秒，最后一次活动；从没动过的会话是 0。
     pub updated_at: i64,
+    /// unix 秒，这一轮从什么时候开始忙；不在一轮里（或运行时太旧不报）是 0。
+    /// 「本轮已运行」按它算，一轮里换阶段不变。
+    pub turn_started_at: i64,
     /// 工具名或审批问句。
     pub detail: Option<String>,
     /// 对话会话正在等的那个审批或选择题的身份，变了就是换了一个请求。终端会话、没在等的

@@ -6,6 +6,7 @@ fn pane(progress: Option<TerminalProgress>) -> PaneFacts {
         title: "cargo".into(),
         status: AgentStatus::Running,
         updated_at: 100,
+        turn_started_at: 0,
         icon: None,
         progress,
     }
@@ -16,6 +17,7 @@ fn session(status: AgentStatus, updated_at: u64, panes: Vec<PaneFacts>) -> Sessi
         title: "修侧栏".into(),
         status,
         updated_at,
+        turn_started_at: 0,
         cwd: Some("/repo".into()),
         session_id: Some("sid-1".into()),
         icon: Some("claude"),

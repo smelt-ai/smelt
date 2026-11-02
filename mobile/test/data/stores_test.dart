@@ -16,6 +16,7 @@ SessionSummary _session(String id) => SessionSummary(
   agent: 'claude',
   projectOrder: 0,
   updatedAt: 0,
+  turnStartedAt: 0,
 );
 
 void main() {

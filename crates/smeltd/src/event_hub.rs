@@ -711,6 +711,7 @@ fn session_dto(state: &SessionState) -> SessionStateChanged {
             Phase::Dead => CoreSessionPhase::Dead,
         },
         phase_since_unix_seconds: state.phase_since,
+        turn_started_at_unix_seconds: state.turn_started_at,
         pending_question: state.pending_question.clone(),
         pending_request: state.pending_request.clone(),
         tokens_used: state.tokens_used,

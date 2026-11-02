@@ -452,7 +452,7 @@ use row::{
     FooterQuota, acp_provider_icon, effective_pane_updated_at, focus_ring, group_disclosure,
     inline_rename_input, new_row_flash, project_header_is_selected, provider_icon,
     provider_quota_row, row_trailing_slot, session_progress_bar, session_row_is_selected,
-    session_row_status_label, session_updated_at_text, status_text,
+    session_row_status_label, session_turn_text, session_updated_at_text, status_text,
 };
 
 /// 工具面板（文件树 / 变更 / 历史 / 技能 / 插件）绑定的上下文根。
@@ -1527,6 +1527,10 @@ impl Workspace {
                 };
                 let session_updated_at = last_updated_at.get(ix).copied().unwrap_or_default();
                 let updated_text = session_updated_at_text(session_updated_at, &now);
+                // 在跑的会话写这一轮跑了多久（和手机同一个字段），而不是最后活动时间。
+                let turn_text = (status == AgentStatus::Running)
+                    .then(|| session_turn_text(self.sessions[ix].turn_started_at(cx), &now))
+                    .flatten();
                 let project_context = (grouping != SidebarGrouping::Project)
                     .then(|| session_projects.get(ix).cloned().flatten())
                     .flatten();
@@ -1720,7 +1724,10 @@ impl Workspace {
                         SESSION_ROW_GROUP,
                         Some(match status_label {
                             Some(label) => (label.into(), ui_theme::session_dot_color(status).into()),
-                            None => (updated_text.into(), rgb(ui_theme::text_muted()).into()),
+                            None => match turn_text {
+                                Some(text) => (text.into(), ui_theme::session_dot_color(status).into()),
+                                None => (updated_text.into(), rgb(ui_theme::text_muted()).into()),
+                            },
                         }),
                         Button::new(("close-session", ui_id))
                             .dismiss()
@@ -1843,6 +1850,13 @@ impl Workspace {
                             effective_pane_updated_at(pane_updated_at, session_updated_at),
                             &now,
                         );
+                        let pane_turn_text = (p_status == AgentStatus::Running)
+                            .then(|| {
+                                crate::daemon_state_for(&view, cx).and_then(|state| {
+                                    session_turn_text(state.turn_started_at, &now)
+                                })
+                            })
+                            .flatten();
                         let pane_provider = pane_provider_kind(&view, cx);
                         let pane_tooltip = format!(
                             "{} · {}",
@@ -1967,10 +1981,16 @@ impl Workspace {
                                 // 跟会话行一样跟时间共用行尾那一格，悬停才换出来。
                                 .child(row_trailing_slot(
                                     SESSION_ROW_GROUP,
-                                    Some((
-                                        pane_updated_text.into(),
-                                        rgb(ui_theme::text_muted()).into(),
-                                    )),
+                                    Some(match pane_turn_text {
+                                        Some(text) => (
+                                            text.into(),
+                                            ui_theme::session_dot_color(p_status).into(),
+                                        ),
+                                        None => (
+                                            pane_updated_text.into(),
+                                            rgb(ui_theme::text_muted()).into(),
+                                        ),
+                                    }),
                                     Button::new(("close-pane", pane_entity_id))
                                         .dismiss()
                                         .icon(IconName::Close)

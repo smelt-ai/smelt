@@ -644,6 +644,9 @@ class _SessionRow extends StatelessWidget {
     final mark = session.mark;
     final live = mark == SessionMark.running && !stale;
     final updated = fromUnixSeconds(session.updatedAt);
+    // 运行中计的是这一轮跑了多久，不是「上次有动静到现在」：后者每换一个阶段就归零。
+    // 运行时太旧不报本轮开始时间时不计时，退回写最后活动时间。
+    final turnStarted = fromUnixSeconds(session.turnStartedAt);
 
     // 副标题：谁 · 在哪 / 在做什么。项目组里项目名就是组头，不再写一遍；有事的会话写
     // 它此刻在做什么（工具名、审批问句），闲着的不写「空闲」（状态记号已经说了）。
@@ -691,9 +694,9 @@ class _SessionRow extends StatelessWidget {
             ),
           ],
         ),
-        trailing: live && updated != null
+        trailing: live && turnStarted != null
             ? ElapsedLabel(
-                since: updated,
+                since: turnStarted,
                 style: t.monoTime.copyWith(color: c.ok),
               )
             : ListenableBuilder(

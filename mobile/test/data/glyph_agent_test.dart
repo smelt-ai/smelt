@@ -13,6 +13,7 @@ SessionSummary _session({required String agent, String? profile}) =>
       agent: agent,
       projectOrder: 0,
       updatedAt: 0,
+      turnStartedAt: 0,
       profileId: profile,
     );
 

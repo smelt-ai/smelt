@@ -1042,6 +1042,7 @@ fn dto(id: &str, revision: u64, phase: CoreSessionPhase) -> SessionStateChanged 
         title: Some(format!("{id} r{revision}")),
         phase,
         phase_since_unix_seconds: 1,
+        turn_started_at_unix_seconds: 1,
         pending_question: None,
         pending_request: None,
         tokens_used: None,
@@ -1344,6 +1345,7 @@ fn cached_list_shows_until_the_live_snapshot_then_the_live_list_is_saved() {
         project_title: None,
         project_order: 0,
         updated_at: 0,
+        turn_started_at: 0,
         detail: None,
         pending_request: None,
         attention: None,
@@ -1888,4 +1890,27 @@ fn projection_carries_the_custom_agent_of_a_conversation() {
     assert_eq!(find(&sessions, "custom").agent, "custom");
     assert_eq!(find(&sessions, "raw").profile_id, None);
     assert_eq!(find(&sessions, "term").profile_id, None);
+}
+
+/// 会话行上的「本轮已运行」按守护报的本轮开始时间算，不按最后活动时间。
+#[test]
+fn projection_carries_the_turn_start() {
+    let mut state = CatalogState::default();
+    let directory = parse_directory(one_project_directory(vec![
+        conversation("busy", "acp", Some(("/repo", 0)), 0),
+        conversation("idle", "acp", Some(("/repo", 0)), 1),
+    ]));
+    let busy = DaemonSessionState {
+        turn_started_at: 20,
+        ..daemon("busy", DaemonPhase::ExecutingTool)
+    };
+    state.apply(
+        snapshot(vec![busy, daemon("idle", DaemonPhase::Idle)], Some(directory), None),
+        Instant::now(),
+    );
+
+    let sessions = state.summaries();
+    assert_eq!(find(&sessions, "busy").turn_started_at, 20);
+    assert_eq!(find(&sessions, "busy").updated_at, 50);
+    assert_eq!(find(&sessions, "idle").turn_started_at, 0);
 }

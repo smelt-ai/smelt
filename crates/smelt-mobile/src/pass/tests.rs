@@ -29,6 +29,7 @@ fn session(
         project_title: None,
         project_order: 0,
         updated_at,
+        turn_started_at: 0,
         detail: None,
         pending_request: None,
         attention: None,

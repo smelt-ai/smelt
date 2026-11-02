@@ -19,6 +19,7 @@ SessionSummary _session({
   agent: agent,
   projectOrder: 0,
   updatedAt: 0,
+  turnStartedAt: 0,
   agentDefinitionId: definition,
   profileId: profile,
 );
