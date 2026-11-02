@@ -99,7 +99,8 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 
   脚本只在当前提交正好是发版 tag、`mobile/` 和 `crates/` 没有未提交改动时出包，保证包和发版的代码对得上。
   签名用 `mobile/ios/Flutter/SigningDefaults.xcconfig` 里的正式团队和 Bundle ID，导出设置在
-  `mobile/ios/ExportOptions.plist`。本地用 Xcode 里登录的账号签名。
+  `mobile/ios/ExportOptions.plist`。本地用 Xcode 里登录的账号签名。推送中继地址要先设好环境变量
+  `SMELT_PUSH_RELAY_HOST`，见下面的「iOS 签名」，没设脚本不出包。
 
 ## Windows
 
@@ -193,5 +194,8 @@ cd mobile && flutter build apk --release --target-platform android-arm64 \
   - `SMELT_IOS_DEV_CERT_P12_PASSWORD`：导出时设的密码
 
   证书一年过期，到期换一张、更新这两个 secret。
+- `SMELT_PUSH_RELAY_HOST`：官方推送中继的主机名（只写主机名，不带 `https://`）。它不进仓库，
+  `scripts/build-ios.sh` 从这个环境变量取，传给 xcodebuild。放 secret 而不是 variable，是因为公开仓库的
+  流水线日志谁都能看，secret 会在日志里被遮掉。本地出包也要先 `export SMELT_PUSH_RELAY_HOST=<主机名>`。
 
 缺任何一个 `ios` job 都直接失败。

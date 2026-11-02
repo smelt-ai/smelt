@@ -111,7 +111,8 @@ Bundle ID 推送。
 
 中继地址编译进 App（Info.plist 的 `SmeltPushRelayHost`），只写主机名，App 一律用 https：
 
-- 正式版：`mobile/ios/Flutter/SigningDefaults.xcconfig` 的 `SMELT_PUSH_RELAY_HOST`。
+- 正式版：出包时的环境变量 `SMELT_PUSH_RELAY_HOST`，`scripts/build-ios.sh` 把它传给 xcodebuild；
+  发版流水线从同名 repo secret 取。地址不写进仓库，`SigningDefaults.xcconfig` 里这一项留空。
 - 自己签名的开发版：在 `mobile/ios/Flutter/Developer.xcconfig` 里加
   `SMELT_PUSH_RELAY_HOST = push.example.com`，并把自己的 Bundle ID 加进中继的
   `SMELT_PUSH_TOPICS`。

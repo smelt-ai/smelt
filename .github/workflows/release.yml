@@ -473,6 +473,9 @@ jobs:
 
       # 出包前会核对当前提交就是这个 tag、代码没有改动。
       - name: Build and upload to TestFlight
+        env:
+          # 推送中继的主机名不进仓库，放在 secret 里（日志里会被遮掉）。
+          SMELT_PUSH_RELAY_HOST: ${{ secrets.SMELT_PUSH_RELAY_HOST }}
         run: scripts/build-ios.sh --upload
 
       - name: Clean up signing credentials

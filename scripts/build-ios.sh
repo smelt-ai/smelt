@@ -11,6 +11,9 @@
 #
 # 签名是自动签名：本地用 Xcode 里登录的账号；没登录账号的机器（CI）设 SMELT_ASC_KEY_PATH、
 # SMELT_ASC_KEY_ID、SMELT_ASC_ISSUER_ID，用 App Store Connect API 密钥代替账号。
+#
+# 推送中继地址不进仓库，由 SMELT_PUSH_RELAY_HOST 给出（只写主机名，见 docs/push-relay-deployment.md），
+# 发版流水线从 repo secret 里取。没设就不出包，免得发出一个收不到推送的版本。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +39,11 @@ git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse "${tag}^{commit}")" ]] \
   || die "当前提交不是 ${tag}：先 git checkout ${tag} 再出包"
 git diff --quiet HEAD -- mobile crates || die "mobile/ 或 crates/ 有未提交的改动，出的包会对不上 ${tag}"
+
+push_host="${SMELT_PUSH_RELAY_HOST:-}"
+[[ -n "${push_host}" ]] || die "没设 SMELT_PUSH_RELAY_HOST（推送中继的主机名），见 docs/release.md 的「iOS 签名」"
+[[ "${push_host}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] \
+  || die "SMELT_PUSH_RELAY_HOST 只写主机名（可带 :端口），不带协议和路径：${push_host}"
 
 build_name="${version%%-*}"
 build_number="${SMELT_IOS_BUILD_NUMBER:-$(date -u +%y%j%H%M)}"
@@ -71,7 +79,8 @@ echo "▶ iOS ${build_name} (${build_number})，出自 ${tag}"
 rm -rf "${archive}" "${export_dir}"
 xcodebuild archive -quiet \
   -workspace mobile/ios/Runner.xcworkspace -scheme Runner -configuration Release \
-  -destination generic/platform=iOS -archivePath "${archive}" "${signing[@]}"
+  -destination generic/platform=iOS -archivePath "${archive}" "${signing[@]}" \
+  SMELT_PUSH_RELAY_HOST="${push_host}"
 xcodebuild -exportArchive -quiet \
   -archivePath "${archive}" -exportPath "${export_dir}" \
   -exportOptionsPlist "${export_options}" "${signing[@]}"
