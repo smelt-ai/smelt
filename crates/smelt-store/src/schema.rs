@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 40] = [
+pub const TABLES: [&str; 41] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -48,6 +48,7 @@ pub const TABLES: [&str; 40] = [
     "quota_cache_provider",
     "quota_cache_status",
     "quota_cache_window",
+    "quota_provider_pref",
     "remote_config",
     "runtime_identity",
     "session",
@@ -528,6 +529,11 @@ CREATE TABLE quota_cache_window (
   resets_at_ms INTEGER,
   reset_after_seconds INTEGER,
   PRIMARY KEY (provider_id, position)
+) WITHOUT ROWID;
+CREATE TABLE quota_provider_pref (
+  provider_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  keychain_denied INTEGER NOT NULL DEFAULT 0 CHECK (keychain_denied IN (0, 1))
 ) WITHOUT ROWID;
 ";
 
@@ -1793,6 +1799,15 @@ CREATE TABLE agent_profile_env (
   name TEXT NOT NULL,
   value TEXT NOT NULL,
   PRIMARY KEY (profile_id, name)
+) WITHOUT ROWID;
+";
+
+/// v32：每家额度账户的开关和钥匙串拒绝状态。没有行就是默认：开启、未被拒绝。
+pub const MIGRATE_V31_TO_V32: &str = "
+CREATE TABLE quota_provider_pref (
+  provider_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  keychain_denied INTEGER NOT NULL DEFAULT 0 CHECK (keychain_denied IN (0, 1))
 ) WITHOUT ROWID;
 ";
 

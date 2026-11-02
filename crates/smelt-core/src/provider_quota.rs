@@ -13,6 +13,12 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+use crate::quota_credentials::{
+    CredentialAccess, KeychainLookup, KeychainRead, find_generic_password, keychain_token,
+    keychain_token_after_rejection,
+};
+use crate::quota_http::{QuotaEndpointError, is_unauthorized, quota_http_client};
+
 #[derive(Debug, Deserialize)]
 struct CodexUsageResponse {
     #[serde(default)]
@@ -72,9 +78,7 @@ pub async fn fetch_codex_quota_with_token(
     token: &str,
     account_id: &str,
 ) -> anyhow::Result<Option<ProviderQuota>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()?;
+    let client = quota_http_client()?;
     let mut request = client
         .get(CODEX_USAGE_ENDPOINT)
         .bearer_auth(token)
@@ -94,21 +98,34 @@ pub async fn fetch_codex_quota_with_token(
 }
 
 /// 使用 Claude Code 的 OAuth 凭据查询账户限额。
-pub async fn fetch_claude_quota() -> anyhow::Result<Option<ProviderQuota>> {
+pub async fn fetch_claude_quota(access: CredentialAccess) -> anyhow::Result<Option<ProviderQuota>> {
     // `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` 可能属于自定义兼容网关，
     // 不能拿去请求 claude.ai 的订阅额度接口。这里只接受 Claude Code 的
     // 官方 OAuth 凭据；没有该凭据时表示当前账户没有可查询的官方额度。
-    let Some(token) = local_claude_access_token() else {
+    let Some(credential) = local_claude_credential(access)? else {
         return Ok(None);
     };
-    fetch_claude_quota_with_token(&token).await
+    let result = fetch_claude_quota_with_token(&credential.token).await;
+    match result {
+        // 缓存的令牌过期了：Claude Code 刷新后写回钥匙串，重读一次。
+        Err(error) if credential.from_keychain && is_unauthorized(&error) => {
+            match keychain_token_after_rejection(
+                CLAUDE_QUOTA_PROVIDER,
+                CLAUDE_KEYCHAIN_SERVICE,
+                &credential.token,
+                read_claude_keychain,
+            ) {
+                Some(token) => fetch_claude_quota_with_token(&token).await,
+                None => Err(error),
+            }
+        }
+        other => other,
+    }
 }
 
 /// 用调用方给定的 Claude OAuth 令牌查限额，供 Pi 这类把凭据存在别处的宿主复用。
 pub async fn fetch_claude_quota_with_token(token: &str) -> anyhow::Result<Option<ProviderQuota>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()?;
+    let client = quota_http_client()?;
     let response = client
         .get(CLAUDE_USAGE_ENDPOINT)
         .bearer_auth(token)
@@ -123,9 +140,11 @@ pub async fn fetch_claude_quota_with_token(token: &str) -> anyhow::Result<Option
         .await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Claude quota endpoint returned HTTP {status}"
-        ));
+        return Err(QuotaEndpointError {
+            provider: "Claude",
+            status,
+        }
+        .into());
     }
     parse_claude_quota(&response.text().await?)
 }
@@ -145,9 +164,7 @@ pub async fn fetch_grok_quota() -> anyhow::Result<Option<ProviderQuota>> {
 
 /// 用调用方给定的 grok.com 会话令牌查额度，供 Pi 这类把凭据存在别处的宿主复用。
 pub async fn fetch_grok_quota_with_token(token: &str) -> anyhow::Result<Option<ProviderQuota>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()?;
+    let client = quota_http_client()?;
     let response = client
         .get(GROK_BILLING_ENDPOINT)
         .bearer_auth(token)
@@ -177,9 +194,7 @@ pub async fn fetch_cursor_quota() -> anyhow::Result<Option<ProviderQuota>> {
     let Some(token) = local_cursor_access_token() else {
         return Ok(None);
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()?;
+    let client = quota_http_client()?;
     let response = client
         .post(CURSOR_USAGE_ENDPOINT)
         .bearer_auth(token)
@@ -655,30 +670,49 @@ fn grok_token_from_auth_json(value: &serde_json::Value) -> Option<String> {
     legacy.or(fallback)
 }
 
-fn local_claude_access_token() -> Option<String> {
+/// 钥匙串熔断状态用的账户 id，和 `QuotaTarget::id()` 一致。
+pub(crate) const CLAUDE_QUOTA_PROVIDER: &str = "claude";
+const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+struct ClaudeCredential {
+    token: String,
+    /// 来自钥匙串缓存的令牌过期后能重读。
+    from_keychain: bool,
+}
+
+impl ClaudeCredential {
+    fn plain(token: String) -> Self {
+        Self {
+            token,
+            from_keychain: false,
+        }
+    }
+}
+
+/// 没有凭据时是 `Ok(None)`。钥匙串被拒绝或正在等授权，又没有别的凭据时报错，让这家显示
+/// 查询失败而不是「没有额度」。
+fn local_claude_credential(access: CredentialAccess) -> anyhow::Result<Option<ClaudeCredential>> {
     if let Some(token) = non_empty_env("CLAUDE_CODE_OAUTH_TOKEN") {
-        return Some(token);
+        return Ok(Some(ClaudeCredential::plain(token)));
     }
 
     // Claude Code macOS builds keep this JSON in the login keychain. `security -w`
     // prints only the selected secret to stdout; we parse it in memory and never log it.
-    // 兼容 cc-statusline 和旧版 Claude Code：先按 service 查询，再按当前用户
-    // account 查询新版 Claude Code 写入的条目。
+    let mut blocked = None;
     if cfg!(target_os = "macos") {
-        let account = env::var("USER")
-            .ok()
-            .filter(|value| {
-                !value.is_empty()
-                    && value.chars().all(|character| {
-                        character.is_ascii_alphanumeric() || "._-".contains(character)
-                    })
-            })
-            .unwrap_or_else(|| "claude-code-user".to_string());
-        if let Some(token) =
-            read_claude_keychain_token(None).or_else(|| read_claude_keychain_token(Some(&account)))
-        {
-            return Some(token);
+        let lookup = keychain_token(
+            CLAUDE_QUOTA_PROVIDER,
+            CLAUDE_KEYCHAIN_SERVICE,
+            access,
+            read_claude_keychain,
+        );
+        if let KeychainLookup::Token(token) = lookup {
+            return Ok(Some(ClaudeCredential {
+                token,
+                from_keychain: true,
+            }));
         }
+        blocked = lookup.blocked_error();
     }
 
     for path in claude_credential_paths() {
@@ -699,7 +733,7 @@ fn local_claude_access_token() -> Option<String> {
                 .map(str::trim)
                 .filter(|token| !token.is_empty())
             {
-                return Some(token.to_string());
+                return Ok(Some(ClaudeCredential::plain(token.to_string())));
             }
         }
     }
@@ -711,34 +745,58 @@ fn local_claude_access_token() -> Option<String> {
                 "secret-tool",
                 "lookup",
                 "service",
-                "Claude Code-credentials",
+                CLAUDE_KEYCHAIN_SERVICE,
             ])
             .output();
         if let Ok(output) = output
             && output.status.success()
             && let Some(token) = claude_token_from_json(&output.stdout)
         {
-            return Some(token);
+            return Ok(Some(ClaudeCredential::plain(token)));
         }
     }
 
-    None
+    match blocked {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
 }
 
-fn read_claude_keychain_token(account: Option<&str>) -> Option<String> {
-    let mut command = Command::new("security");
-    command.args(["find-generic-password"]);
-    if let Some(account) = account {
-        command.args(["-a", account]);
+fn read_claude_keychain() -> KeychainRead {
+    let account = env::var("USER")
+        .ok()
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        })
+        .unwrap_or_else(|| "claude-code-user".to_string());
+    read_claude_keychain_with(&account, |account| {
+        find_generic_password(CLAUDE_KEYCHAIN_SERVICE, account)
+    })
+}
+
+/// 兼容 cc-statusline 和旧版 Claude Code：先只按 service 查，再按当前用户 account 查新版
+/// 写入的条目。只按 service 查已经覆盖全部 account，所以只有查到的内容不能用时才查第二次。
+/// 被拒绝就到此为止：再查一次就是连着弹第二个窗口。
+fn read_claude_keychain_with(
+    account: &str,
+    mut find: impl FnMut(Option<&str>) -> KeychainRead,
+) -> KeychainRead {
+    match find(None) {
+        KeychainRead::Secret(body) => {
+            if let Some(token) = claude_token_from_json(body.as_bytes()) {
+                return KeychainRead::Secret(token);
+            }
+        }
+        other => return other,
     }
-    let output = command
-        .args(["-s", "Claude Code-credentials", "-w"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    match find(Some(account)) {
+        KeychainRead::Secret(body) => claude_token_from_json(body.as_bytes())
+            .map_or(KeychainRead::NotFound, KeychainRead::Secret),
+        other => other,
     }
-    claude_token_from_json(&output.stdout)
 }
 
 fn claude_token_from_json(body: &[u8]) -> Option<String> {
@@ -773,6 +831,53 @@ fn non_empty_env(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 依次回答的假钥匙串，记下每次查询带的 account。
+    fn claude_reads(answers: Vec<KeychainRead>) -> (KeychainRead, Vec<Option<String>>) {
+        let mut answers = answers.into_iter();
+        let mut queries = Vec::new();
+        let result = read_claude_keychain_with("me", |account| {
+            queries.push(account.map(str::to_string));
+            answers.next().expect("查询次数超出预期")
+        });
+        (result, queries)
+    }
+
+    const CLAUDE_JSON: &str = r#"{"claudeAiOauth":{"accessToken":"t1"}}"#;
+
+    /// 点一次拒绝只能弹一个窗口。
+    #[test]
+    fn claude_keychain_denial_does_not_query_again() {
+        let (result, queries) = claude_reads(vec![KeychainRead::Denied]);
+        assert_eq!(result, KeychainRead::Denied);
+        assert_eq!(queries, vec![None]);
+    }
+
+    /// 只按 service 查不到，按 account 也查不到，不用再调一次。
+    #[test]
+    fn claude_keychain_missing_item_does_not_query_again() {
+        let (result, queries) = claude_reads(vec![KeychainRead::NotFound]);
+        assert_eq!(result, KeychainRead::NotFound);
+        assert_eq!(queries, vec![None]);
+    }
+
+    #[test]
+    fn claude_keychain_extracts_the_token_from_the_first_item() {
+        let (result, queries) = claude_reads(vec![KeychainRead::Secret(CLAUDE_JSON.to_string())]);
+        assert_eq!(result, KeychainRead::Secret("t1".to_string()));
+        assert_eq!(queries, vec![None]);
+    }
+
+    /// 查到的是不能用的旧条目时，才按当前用户的 account 查新版条目。
+    #[test]
+    fn claude_keychain_tries_the_account_item_when_the_first_is_unusable() {
+        let (result, queries) = claude_reads(vec![
+            KeychainRead::Secret("{}".to_string()),
+            KeychainRead::Secret(CLAUDE_JSON.to_string()),
+        ]);
+        assert_eq!(result, KeychainRead::Secret("t1".to_string()));
+        assert_eq!(queries, vec![None, Some("me".to_string())]);
+    }
 
     #[test]
     fn parses_codex_primary_and_secondary_windows() {

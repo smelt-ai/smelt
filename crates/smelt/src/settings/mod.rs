@@ -35,11 +35,14 @@ mod panel_plugins;
 mod pi_auth;
 mod pi_config;
 mod pi_mcp;
+mod quota;
 mod remote;
 mod workspace;
 mod workspace_view;
 
 pub(crate) use nav::{SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav};
+pub(crate) use quota::refresh_quota_settings;
+pub(super) use quota::{QuotaSettingsState, set_quota_enabled};
 pub(super) use remote::*;
 
 /// 「反馈问题」入口统一跳转的链接。菜单栏「帮助」和设置「关于」页共用。
@@ -1420,6 +1423,7 @@ impl SettingsContentView {
                 Self::observe_settings_global::<CopyFlash>(window, cx),
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
                 Self::observe_settings_global::<RemoteSettingsState>(window, cx),
+                Self::observe_settings_global::<QuotaSettingsState>(window, cx),
                 Self::observe_settings_global::<crate::runtimes::RuntimeHub>(window, cx),
                 Self::observe_settings_global::<crate::keymap::KeymapState>(window, cx),
             ],

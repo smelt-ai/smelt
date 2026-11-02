@@ -4311,6 +4311,7 @@ fn main() {
         // 不卡首帧。
         cx.set_global(settings::RemoteConfig::default());
         cx.set_global(settings::RemoteSettingsState::default());
+        cx.set_global(settings::QuotaSettingsState::default());
         // ACP 会话不需要在退出时做任何事：agent 子进程现在是 smeltd 托管的
         // （见 smelt_client::acp_client），GUI 这边只是个薄客户端，Cmd+Q 直接杀
         // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题。

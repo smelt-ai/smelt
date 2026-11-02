@@ -884,6 +884,11 @@ pi_calls! {
     /// 查一轮额度（全部或一家）并更新缓存。每家一次网络往返。
     QuotaRefresh => QuotaRefresh(crate::quota_service::QuotaRefreshParams)
         -> crate::quota_service::QuotaRefreshResult;
+    /// 全部账户的额度开关和钥匙串拒绝状态。
+    QuotaSettingsGet => QuotaSettingsGet(EmptyParams) -> crate::quota_service::QuotaSettings;
+    /// 打开或关掉一家的额度查询。关掉后不读它的凭据，也不发请求。
+    QuotaSetEnabled => QuotaSetEnabled(crate::quota_service::QuotaSetEnabledParams)
+        -> crate::quota_service::QuotaSettings;
     /// 远程访问的开关和自建 relay。存在运行时库，守护按它自愈。
     RemoteConfigGet => RemoteConfigGet(EmptyParams) -> crate::remote_config::RemoteConfig;
     /// 保存并照着开关 endpoint；绑定在后台进行，回的是保存后的状态。

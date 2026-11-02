@@ -2,7 +2,8 @@
 
 use crate::{
     MemorySettingsRecord, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot,
+    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, StoreError,
+    TerminalThemeSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -302,6 +303,49 @@ pub(crate) fn write_auto_model_providers(
             [provider],
         )?;
     }
+    Ok(())
+}
+
+pub(crate) fn read_quota_provider_prefs(
+    connection: &Connection,
+) -> Result<Vec<QuotaProviderPref>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT provider_id, enabled, keychain_denied FROM quota_provider_pref
+         ORDER BY provider_id",
+    )?;
+    let prefs = statement
+        .query_map([], |row| {
+            Ok(QuotaProviderPref {
+                provider_id: row.get(0)?,
+                enabled: row.get(1)?,
+                keychain_denied: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(prefs)
+}
+
+pub(crate) fn write_quota_provider_enabled(
+    transaction: &Transaction<'_>,
+    value: &(&str, bool),
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO quota_provider_pref(provider_id, enabled) VALUES (?1, ?2)
+         ON CONFLICT(provider_id) DO UPDATE SET enabled = excluded.enabled",
+        params![value.0, value.1],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn write_quota_keychain_denied(
+    transaction: &Transaction<'_>,
+    value: &(&str, bool),
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO quota_provider_pref(provider_id, keychain_denied) VALUES (?1, ?2)
+         ON CONFLICT(provider_id) DO UPDATE SET keychain_denied = excluded.keychain_denied",
+        params![value.0, value.1],
+    )?;
     Ok(())
 }
 

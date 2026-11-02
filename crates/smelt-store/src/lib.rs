@@ -46,7 +46,8 @@ pub use snapshots::{
     MemoryMetaSnapshot, MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust,
     MemoryTrustedRecord, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
     PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot,
-    QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot, TerminalThemeSnapshot,
+    QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot,
+    TerminalThemeSnapshot,
     WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord,
     WorkspaceSnapshot, WorkspaceTerminalRecord,
 };
@@ -60,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 31;
+pub const STORE_SCHEMA_VERSION: u32 = 32;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -710,6 +711,27 @@ impl Store {
         snapshot: &QuotaCacheSnapshot,
     ) -> Result<(), StoreError> {
         imp::put_quota_cache_snapshot(&self.backend, snapshot)
+    }
+
+    /// 改过默认值的额度账户。不在列表里的就是默认：开启、未被拒绝。
+    pub fn quota_provider_prefs(&self) -> Result<Vec<QuotaProviderPref>, StoreError> {
+        imp::quota_provider_prefs(&self.backend)
+    }
+
+    pub fn set_quota_provider_enabled(
+        &self,
+        provider_id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        imp::set_quota_provider_enabled(&self.backend, provider_id, enabled)
+    }
+
+    pub fn set_quota_keychain_denied(
+        &self,
+        provider_id: &str,
+        denied: bool,
+    ) -> Result<(), StoreError> {
+        imp::set_quota_keychain_denied(&self.backend, provider_id, denied)
     }
 
     /// 模型目录由 Smelt 维护的 Pi 自定义 provider，按 id 排序。
@@ -1665,6 +1687,37 @@ mod imp {
         put_config(backend, snapshot, crate::config::write_quota_cache_snapshot)
     }
 
+    pub(super) fn quota_provider_prefs(
+        backend: &Backend,
+    ) -> Result<Vec<super::QuotaProviderPref>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::config::read_quota_provider_prefs(&connection)
+    }
+
+    pub(super) fn set_quota_provider_enabled(
+        backend: &Backend,
+        provider_id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        put_config(
+            backend,
+            &(provider_id, enabled),
+            crate::config::write_quota_provider_enabled,
+        )
+    }
+
+    pub(super) fn set_quota_keychain_denied(
+        backend: &Backend,
+        provider_id: &str,
+        denied: bool,
+    ) -> Result<(), StoreError> {
+        put_config(
+            backend,
+            &(provider_id, denied),
+            crate::config::write_quota_keychain_denied,
+        )
+    }
+
     pub(super) fn retain_automation_run_transcripts(
         backend: &Backend,
         keep: &HashSet<String>,
@@ -1969,6 +2022,15 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 31 {
+            apply_v32_quota_provider_pref(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2539,6 +2601,19 @@ mod imp {
     /// v31：workspace profile 换成自定义 Agent。旧 profile 不迁移，两张表按当前形状重建。
     fn apply_v31_custom_agent(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
         transaction.execute_batch(crate::schema::MIGRATE_V30_TO_V31)?;
+        apply_v32_quota_provider_pref(transaction)
+    }
+
+    /// v32：每家额度账户的开关和钥匙串拒绝状态。已经有这张表的库跳过。
+    fn apply_v32_quota_provider_pref(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "quota_provider_pref")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V31_TO_V32)?;
+        }
         Ok(())
     }
 
@@ -3886,6 +3961,25 @@ mod imp {
     pub(super) fn put_quota_cache_snapshot(
         _backend: &Backend,
         _snapshot: &super::QuotaCacheSnapshot,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn quota_provider_prefs(
+        _backend: &Backend,
+    ) -> Result<Vec<super::QuotaProviderPref>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn set_quota_provider_enabled(
+        _backend: &Backend,
+        _provider_id: &str,
+        _enabled: bool,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn set_quota_keychain_denied(
+        _backend: &Backend,
+        _provider_id: &str,
+        _denied: bool,
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -7211,6 +7305,61 @@ CREATE TABLE worktree_inherit_skip_pattern (
         drop(store);
         assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
     }
+
+    #[test]
+    fn migrates_v31_adding_quota_provider_prefs() {
+        let dir = temp_dir("migrate-v31-quota-prefs");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE quota_provider_pref;")
+            .unwrap();
+        connection.pragma_update(None, "user_version", 31).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        assert!(store.quota_provider_prefs().unwrap().is_empty());
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// 开关和拒绝状态各改各的：关掉开关不能抹掉拒绝记录，反过来也一样。
+    #[test]
+    fn quota_provider_prefs_keep_each_field_independent() {
+        let dir = temp_dir("quota-provider-prefs");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        assert!(store.quota_provider_prefs().unwrap().is_empty());
+
+        store.set_quota_keychain_denied("claude", true).unwrap();
+        store.set_quota_provider_enabled("claude", false).unwrap();
+        store.set_quota_provider_enabled("copilot", false).unwrap();
+        assert_eq!(
+            store.quota_provider_prefs().unwrap(),
+            vec![
+                QuotaProviderPref {
+                    provider_id: "claude".to_string(),
+                    enabled: false,
+                    keychain_denied: true,
+                },
+                QuotaProviderPref {
+                    provider_id: "copilot".to_string(),
+                    enabled: false,
+                    keychain_denied: false,
+                },
+            ]
+        );
+
+        store.set_quota_keychain_denied("claude", false).unwrap();
+        store.set_quota_provider_enabled("copilot", true).unwrap();
+        let prefs = store.quota_provider_prefs().unwrap();
+        assert!(!prefs[0].enabled && !prefs[0].keychain_denied);
+        assert!(prefs[1].enabled && !prefs[1].keychain_denied);
+    }
+
     #[test]
     fn push_registrations_follow_their_paired_device() {
         let dir = temp_dir("push-registrations");

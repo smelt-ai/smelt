@@ -24,6 +24,7 @@ use crate::provider_quota::{
     ProviderQuotaData, ProviderQuotaStatus as CachedWindowQuotaStatus, fetch_claude_quota,
     fetch_codex_quota, fetch_cursor_quota, fetch_grok_quota,
 };
+use crate::quota_credentials::{CredentialAccess, KeychainBusy, forget_keychain_tokens};
 
 /// 缓存比这个新就跳过启动首查。额度是慢变化的账户状态，1 小时内直接展示
 /// 上次结果不会让用户看到明显过期的数据。
@@ -31,7 +32,7 @@ const CACHE_STALE_AFTER: Duration = Duration::from_secs(3600);
 
 type QuotaFetchFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<Option<ProviderQuotaData>>> + Send + 'static>>;
-type QuotaFetcher = fn() -> QuotaFetchFuture;
+type QuotaFetcher = fn(CredentialAccess) -> QuotaFetchFuture;
 
 struct StaticQuotaProvider {
     agent: ConversationAgentKind,
@@ -63,10 +64,64 @@ static QUOTA_PROVIDERS: &[StaticQuotaProvider] = &[
     },
 ];
 
-/// 本次要查的全部账户：固定的几家 CLI，加上 Pi 当前登录过的订阅型 provider。
+/// 开着查询的账户：[`all_quota_targets`] 去掉用户关掉的。只在刷新路径上调用，不进渲染。
+pub fn quota_targets() -> Vec<QuotaTarget> {
+    settings().enabled_targets()
+}
+
+/// 全部账户的开关和钥匙串拒绝状态。
+pub fn settings() -> QuotaSettings {
+    settings_from(all_quota_targets(), &load_prefs())
+}
+
+/// 打开或关掉一家的额度查询，返回更新后的设置。
+///
+/// 关掉时丢掉内存里的令牌：这家之后不读凭据、不发请求。打开时不查，由客户端按用户手动
+/// 刷新发起（可能要弹钥匙串窗口，得是用户的操作）。
+pub fn set_enabled(params: QuotaSetEnabledParams) -> Result<QuotaSettings, String> {
+    let provider = params.target.id();
+    let store = crate::sqlite_state::default_sqlite_store()?;
+    store
+        .set_quota_provider_enabled(&provider, params.enabled)
+        .map_err(|error| error.to_string())?;
+    if !params.enabled {
+        forget_keychain_tokens(&provider);
+    }
+    Ok(settings())
+}
+
+fn load_prefs() -> Vec<smelt_store::QuotaProviderPref> {
+    crate::sqlite_state::default_sqlite_store()
+        .ok()
+        .and_then(|store| store.quota_provider_prefs().ok())
+        .unwrap_or_default()
+}
+
+/// 没有偏好行就是默认：开启、未被拒绝。
+fn settings_from(
+    targets: Vec<QuotaTarget>,
+    prefs: &[smelt_store::QuotaProviderPref],
+) -> QuotaSettings {
+    QuotaSettings {
+        providers: targets
+            .into_iter()
+            .map(|target| {
+                let id = target.id();
+                let pref = prefs.iter().find(|pref| pref.provider_id == id);
+                QuotaProviderSetting {
+                    target,
+                    enabled: pref.is_none_or(|pref| pref.enabled),
+                    keychain_denied: pref.is_some_and(|pref| pref.keychain_denied),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// 全部账户：固定的几家 CLI，加上 Pi 当前登录过的订阅型 provider。
 ///
 /// Pi 那部分要读 `auth.json`，所以这个函数只在刷新路径上调用，不进渲染。
-pub fn quota_targets() -> Vec<QuotaTarget> {
+fn all_quota_targets() -> Vec<QuotaTarget> {
     QUOTA_PROVIDERS
         .iter()
         .map(|provider| QuotaTarget::agent(provider.agent))
@@ -78,7 +133,7 @@ pub fn quota_targets() -> Vec<QuotaTarget> {
         .collect()
 }
 
-fn fetch_quota(target: QuotaTarget) -> QuotaFetchFuture {
+fn fetch_quota(target: QuotaTarget, access: CredentialAccess) -> QuotaFetchFuture {
     if let Some(provider) = target.provider {
         return Box::pin(async move { fetch_pi_provider_quota(provider).await });
     }
@@ -86,7 +141,7 @@ fn fetch_quota(target: QuotaTarget) -> QuotaFetchFuture {
         .iter()
         .find(|provider| provider.agent == target.agent)
     {
-        Some(provider) => (provider.fetch)(),
+        Some(provider) => (provider.fetch)(access),
         None => {
             let id = target.id();
             Box::pin(async move { Err(anyhow::anyhow!("no quota fetcher registered for {id}")) })
@@ -94,23 +149,31 @@ fn fetch_quota(target: QuotaTarget) -> QuotaFetchFuture {
     }
 }
 
-fn fetch_codex_quota_data() -> QuotaFetchFuture {
+fn fetch_codex_quota_data(_access: CredentialAccess) -> QuotaFetchFuture {
     Box::pin(async { Ok(fetch_codex_quota().await?.map(ProviderQuotaData::Windows)) })
 }
 
-fn fetch_claude_quota_data() -> QuotaFetchFuture {
-    Box::pin(async { Ok(fetch_claude_quota().await?.map(ProviderQuotaData::Windows)) })
+fn fetch_claude_quota_data(access: CredentialAccess) -> QuotaFetchFuture {
+    Box::pin(async move {
+        Ok(fetch_claude_quota(access)
+            .await?
+            .map(ProviderQuotaData::Windows))
+    })
 }
 
-fn fetch_copilot_quota_data() -> QuotaFetchFuture {
-    Box::pin(async { Ok(fetch_copilot_quota().await?.map(ProviderQuotaData::Copilot)) })
+fn fetch_copilot_quota_data(access: CredentialAccess) -> QuotaFetchFuture {
+    Box::pin(async move {
+        Ok(fetch_copilot_quota(access)
+            .await?
+            .map(ProviderQuotaData::Copilot))
+    })
 }
 
-fn fetch_grok_quota_data() -> QuotaFetchFuture {
+fn fetch_grok_quota_data(_access: CredentialAccess) -> QuotaFetchFuture {
     Box::pin(async { Ok(fetch_grok_quota().await?.map(ProviderQuotaData::Windows)) })
 }
 
-fn fetch_cursor_quota_data() -> QuotaFetchFuture {
+fn fetch_cursor_quota_data(_access: CredentialAccess) -> QuotaFetchFuture {
     Box::pin(async { Ok(fetch_cursor_quota().await?.map(ProviderQuotaData::Windows)) })
 }
 
@@ -245,24 +308,39 @@ impl ProviderQuotaFetchResult {
         let checked_at_ms = unix_time_ms();
         self.0
             .into_iter()
+            // 还在等钥匙串授权：这一轮没有结果，不写状态，上次的额度和缓存保持原样。
+            .filter(|(_, outcome)| {
+                !matches!(outcome, Err(error) if error.downcast_ref::<KeychainBusy>().is_some())
+            })
             .map(|(target, outcome)| (target, apply_quota_result(outcome, checked_at_ms)))
             .collect()
     }
 }
 
-/// 一轮刷新实际覆盖的账户：`Some` = 用户点的那一个，`None` = 当前注册的全部。
+/// 一轮刷新实际覆盖的账户：`Some` = 用户点的那一个，`None` = 开着查询的全部。关掉的账户
+/// 就算点名也不查：请求可能是开关改动之前发出的。
 fn refresh_scope(target: Option<QuotaTarget>) -> Vec<QuotaTarget> {
+    let enabled = quota_targets();
     match target {
-        Some(target) => vec![target],
-        None => quota_targets(),
+        Some(target) => enabled.into_iter().filter(|it| *it == target).collect(),
+        None => enabled,
+    }
+}
+
+/// 点名查一家才算用户发起，只有这时才可能弹钥匙串窗口。
+fn credential_access(target: Option<QuotaTarget>) -> CredentialAccess {
+    match target {
+        Some(_) => CredentialAccess::UserInitiated,
+        None => CredentialAccess::Background,
     }
 }
 
 async fn fetch_provider_quotas(target: Option<QuotaTarget>) -> ProviderQuotaFetchResult {
+    let access = credential_access(target);
     let results = join_all(
         refresh_scope(target)
             .into_iter()
-            .map(|target| async move { (target, fetch_quota(target).await) }),
+            .map(|target| async move { (target, fetch_quota(target, access).await) }),
     )
     .await;
     ProviderQuotaFetchResult(results)
@@ -438,7 +516,13 @@ pub fn snapshot() -> QuotaSnapshot {
         fresh: cache
             .as_ref()
             .is_some_and(|cache| cache.can_skip_startup_fetch(&targets)),
-        statuses: cache.as_ref().map(QuotaCache::statuses).unwrap_or_default(),
+        statuses: cache
+            .as_ref()
+            .map(QuotaCache::statuses)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(target, _)| targets.contains(target))
+            .collect(),
         targets,
     }
 }
@@ -463,6 +547,8 @@ pub fn refresh(params: QuotaRefreshParams) -> QuotaRefreshResult {
     let merged = merged
         .into_iter()
         .filter_map(|(id, status)| Some((QuotaTarget::from_id(&id)?, status)))
+        // 关掉的账户不留在缓存里，下次打开时不会先露出一个旧数字。
+        .filter(|(target, _)| targets.contains(target))
         .collect::<Vec<_>>();
     save_quota_cache(&QuotaCache::from_statuses(&targets, &merged));
     QuotaRefreshResult { targets, statuses }
@@ -498,6 +584,66 @@ mod tests {
                 reset_after_seconds: None,
             }],
         })
+    }
+
+    fn pref(id: &str, enabled: bool, keychain_denied: bool) -> smelt_store::QuotaProviderPref {
+        smelt_store::QuotaProviderPref {
+            provider_id: id.to_string(),
+            enabled,
+            keychain_denied,
+        }
+    }
+
+    /// 熔断状态按这个 id 存，和设置页按 `QuotaTarget::id()` 读的必须是同一个。
+    #[test]
+    fn keychain_provider_ids_match_their_quota_targets() {
+        assert_eq!(
+            QuotaTarget::agent(ConversationAgentKind::Claude).id(),
+            crate::provider_quota::CLAUDE_QUOTA_PROVIDER
+        );
+        assert_eq!(
+            QuotaTarget::agent(ConversationAgentKind::Copilot).id(),
+            crate::copilot_quota::COPILOT_QUOTA_PROVIDER
+        );
+    }
+
+    #[test]
+    fn providers_default_to_enabled_and_not_denied() {
+        let settings = settings_from(agent_targets(), &[]);
+        assert_eq!(settings.enabled_targets(), agent_targets());
+        assert!(settings.providers.iter().all(|it| !it.keychain_denied));
+    }
+
+    #[test]
+    fn a_disabled_provider_stays_listed_but_leaves_the_enabled_targets() {
+        let settings = settings_from(
+            agent_targets(),
+            &[pref("claude", false, false), pref("copilot", true, true)],
+        );
+        let claude = QuotaTarget::agent(ConversationAgentKind::Claude);
+        let copilot = QuotaTarget::agent(ConversationAgentKind::Copilot);
+        assert_eq!(settings.providers.len(), agent_targets().len());
+        assert!(!settings.enabled_targets().contains(&claude));
+        assert!(settings.enabled_targets().contains(&copilot));
+        let row = |target| {
+            settings
+                .providers
+                .iter()
+                .find(|it| it.target == target)
+                .unwrap()
+        };
+        assert!(row(copilot).keychain_denied);
+        assert!(!row(claude).keychain_denied);
+    }
+
+    /// 只有点名一家才可能弹窗；定时的全量刷新不行。
+    #[test]
+    fn only_a_targeted_refresh_may_prompt() {
+        assert_eq!(credential_access(None), CredentialAccess::Background);
+        assert_eq!(
+            credential_access(Some(QuotaTarget::agent(ConversationAgentKind::Claude))),
+            CredentialAccess::UserInitiated
+        );
     }
 
     #[test]
@@ -555,6 +701,22 @@ mod tests {
             !cache.providers.contains_key("codex"),
             "失效的额度不能留在缓存里，下次启动又显示出来"
         );
+    }
+
+    /// 等授权窗口不是额度失效：这一家不出现在结果里，客户端和缓存都保留上次的数字。
+    #[test]
+    fn waiting_for_keychain_approval_keeps_the_previous_quota() {
+        let claude = QuotaTarget::agent(ConversationAgentKind::Claude);
+        let codex = QuotaTarget::agent(ConversationAgentKind::Codex);
+
+        let statuses = ProviderQuotaFetchResult(vec![
+            (claude, Err(KeychainBusy.into())),
+            (codex, Err(anyhow::anyhow!("offline"))),
+        ])
+        .into_statuses();
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].0, codex);
     }
 
     #[test]
