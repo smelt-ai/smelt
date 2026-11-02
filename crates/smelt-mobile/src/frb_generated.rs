@@ -4660,6 +4660,7 @@ impl SseDecode for crate::api::catalog::SessionSummary {
         let mut var_projectTitle = <Option<String>>::sse_decode(deserializer);
         let mut var_projectOrder = <u32>::sse_decode(deserializer);
         let mut var_updatedAt = <i64>::sse_decode(deserializer);
+        let mut var_turnStartedAt = <i64>::sse_decode(deserializer);
         let mut var_detail = <Option<String>>::sse_decode(deserializer);
         let mut var_pendingRequest = <Option<String>>::sse_decode(deserializer);
         let mut var_attention =
@@ -4680,6 +4681,7 @@ impl SseDecode for crate::api::catalog::SessionSummary {
             project_title: var_projectTitle,
             project_order: var_projectOrder,
             updated_at: var_updatedAt,
+            turn_started_at: var_turnStartedAt,
             detail: var_detail,
             pending_request: var_pendingRequest,
             attention: var_attention,
@@ -7177,6 +7179,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionSummary {
             self.project_title.into_into_dart().into_dart(),
             self.project_order.into_into_dart().into_dart(),
             self.updated_at.into_into_dart().into_dart(),
+            self.turn_started_at.into_into_dart().into_dart(),
             self.detail.into_into_dart().into_dart(),
             self.pending_request.into_into_dart().into_dart(),
             self.attention.into_into_dart().into_dart(),
@@ -9482,6 +9485,7 @@ impl SseEncode for crate::api::catalog::SessionSummary {
         <Option<String>>::sse_encode(self.project_title, serializer);
         <u32>::sse_encode(self.project_order, serializer);
         <i64>::sse_encode(self.updated_at, serializer);
+        <i64>::sse_encode(self.turn_started_at, serializer);
         <Option<String>>::sse_encode(self.detail, serializer);
         <Option<String>>::sse_encode(self.pending_request, serializer);
         <Option<crate::api::catalog::AttentionItem>>::sse_encode(self.attention, serializer);

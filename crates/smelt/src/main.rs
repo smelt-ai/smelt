@@ -1148,6 +1148,26 @@ impl Session {
         self.last_updated_at.max(daemon_updated_at)
     }
 
+    /// 这一轮从什么时候开始忙（unix 秒），侧栏「本轮已运行」按它算；没在一轮里是 0。
+    /// 和手机端读的是守护同一个字段。终端会话取各分屏里最早开始的那一轮。
+    fn turn_started_at(&self, cx: &App) -> u64 {
+        match &self.kind {
+            SessionKind::Conversation(view) => {
+                let view = view.read(cx);
+                daemon_state_for_session_id(view.runtime().key(), view.session_id(), cx)
+                    .map_or(0, |state| state.turn_started_at)
+            }
+            SessionKind::Term { .. } => self
+                .term_leaves()
+                .iter()
+                .filter_map(|view| daemon_state_for(view, cx))
+                .map(|state| state.turn_started_at)
+                .filter(|started| *started > 0)
+                .min()
+                .unwrap_or(0),
+        }
+    }
+
     /// 终端会话的分屏 Dock；ACP 会话没有。
     fn term_dock(&self) -> Option<&term_dock::TermDock> {
         match &self.kind {
@@ -1323,6 +1343,7 @@ impl Session {
             title: self.title(cx),
             status: self.status(cx),
             updated_at: self.effective_updated_at(cx),
+            turn_started_at: self.turn_started_at(cx),
             cwd: self.cwd(cx),
             session_id: live_daemon_session_id(self, cx),
             icon: self.agent_icon_id(cx),
@@ -1338,6 +1359,8 @@ impl Session {
                     updated_at: daemon_state_for(view, cx)
                         .map(|state| state.updated_at)
                         .unwrap_or_default(),
+                    turn_started_at: daemon_state_for(view, cx)
+                        .map_or(0, |state| state.turn_started_at),
                     icon: pane_provider_kind(view, cx).map(|kind| kind.id()),
                     progress: {
                         let view = view.read(cx);
@@ -1362,6 +1385,8 @@ struct SessionFacts {
     status: AgentStatus,
     /// 留到秒：侧栏按时间分组和最近对话都按它排序，不只显示到分钟。
     updated_at: u64,
+    /// 这一轮从什么时候开始（unix 秒），侧栏「本轮已运行」按它算；没在一轮里是 0。
+    turn_started_at: u64,
     cwd: Option<String>,
     session_id: Option<String>,
     icon: Option<&'static str>,
@@ -1375,8 +1400,18 @@ struct PaneFacts {
     title: String,
     status: AgentStatus,
     updated_at: u64,
+    turn_started_at: u64,
     icon: Option<&'static str>,
     progress: Option<smelt_client::daemon_state::TerminalProgress>,
+}
+
+/// 从 `now` 到这一轮的「已运行分钟数」下一次变化还有多久；没在一轮里返回 None。
+fn until_turn_minute_changes(turn_started_at: u64, now: u64) -> Option<std::time::Duration> {
+    if turn_started_at == 0 {
+        return None;
+    }
+    let elapsed = now.saturating_sub(turn_started_at);
+    Some(std::time::Duration::from_secs(60 - elapsed % 60))
 }
 
 /// 换上这次看到的事实，返回它们变没变。
@@ -2568,6 +2603,8 @@ struct Workspace {
     shown_date: chrono::NaiveDate,
     /// 到下一个本地零点的一次性计时器，到点重画再排下一个。
     _date_change_timer: Option<Task<()>>,
+    /// 侧栏「本轮已运行 N 分钟」到下一次变数的一次性计时器，见 `arm_turn_clock`。
+    _turn_clock: Option<Task<()>>,
     /// 系统醒来时补查跨日：睡眠那段计时器不走。
     _system_wake_sub: Option<Subscription>,
     /// 主窗口激活时补查跨日、守护是否落后。
@@ -2961,6 +2998,7 @@ impl Workspace {
             _appearance_sub: None,
             shown_date: Local::now().date_naive(),
             _date_change_timer: None,
+            _turn_clock: None,
             _system_wake_sub: None,
             _window_activation_sub: None,
             local_runtime_online: false,
@@ -3234,7 +3272,38 @@ impl Workspace {
             .collect();
         if replace_changed_facts(&mut self.shown_session_facts, current) {
             cx.notify();
+            self.arm_turn_clock(cx);
         }
+    }
+
+    /// 侧栏上在跑的会话写「本轮已运行 N 分钟」，到分钟才变。时间流逝本身没有事件：
+    /// 有会话在一轮里时，排一个到最近那个分钟数要变的一次性计时器，到点重画再排下一个；
+    /// 都不在一轮里就不排（空闲时没有唤醒）。轮次开始、结束会改会话事实，从上面重排。
+    fn arm_turn_clock(&mut self, cx: &mut Context<Self>) {
+        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let wait = self
+            .shown_session_facts
+            .iter()
+            .flat_map(|facts| {
+                std::iter::once((facts.status, facts.turn_started_at)).chain(
+                    facts
+                        .panes
+                        .iter()
+                        .map(|pane| (pane.status, pane.turn_started_at)),
+                )
+            })
+            .filter(|(status, _)| *status == AgentStatus::Running)
+            .filter_map(|(_, started)| until_turn_minute_changes(started, now))
+            .min();
+        self._turn_clock = wait.map(|wait| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.arm_turn_clock(cx);
+                });
+            })
+        });
     }
 }
 

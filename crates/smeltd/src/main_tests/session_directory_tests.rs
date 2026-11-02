@@ -34,6 +34,7 @@ fn recovered_state(id: &str) -> SessionState {
         title: Some("崩溃前的会话".to_string()),
         phase: Phase::AwaitingApproval,
         phase_since: 100,
+        turn_started_at: 0,
         pending_question: Some("要不要继续".to_string()),
         pending_request: None,
         tokens_used: Some(42),

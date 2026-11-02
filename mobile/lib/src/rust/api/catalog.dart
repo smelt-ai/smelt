@@ -883,6 +883,10 @@ class SessionSummary {
   /// unix 秒，最后一次活动；从没动过的会话是 0。
   final PlatformInt64 updatedAt;
 
+  /// unix 秒，这一轮从什么时候开始忙；不在一轮里（或运行时太旧不报）是 0。
+  /// 「本轮已运行」按它算，一轮里换阶段不变。
+  final PlatformInt64 turnStartedAt;
+
   /// 工具名或审批问句。
   final String? detail;
 
@@ -914,6 +918,7 @@ class SessionSummary {
     this.projectTitle,
     required this.projectOrder,
     required this.updatedAt,
+    required this.turnStartedAt,
     this.detail,
     this.pendingRequest,
     this.attention,
@@ -935,6 +940,7 @@ class SessionSummary {
       projectTitle.hashCode ^
       projectOrder.hashCode ^
       updatedAt.hashCode ^
+      turnStartedAt.hashCode ^
       detail.hashCode ^
       pendingRequest.hashCode ^
       attention.hashCode ^
@@ -958,6 +964,7 @@ class SessionSummary {
           projectTitle == other.projectTitle &&
           projectOrder == other.projectOrder &&
           updatedAt == other.updatedAt &&
+          turnStartedAt == other.turnStartedAt &&
           detail == other.detail &&
           pendingRequest == other.pendingRequest &&
           attention == other.attention &&

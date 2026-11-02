@@ -114,6 +114,8 @@ impl SessionRecord {
             title: self.title,
             phase: self.phase,
             phase_since: now_unix,
+            // 崩溃前那一轮已经随进程没了，恢复出来的是历史，不在一轮里。
+            turn_started_at: 0,
             pending_question: None,
             pending_request: None,
             tokens_used: self.tokens_used,
@@ -486,6 +488,7 @@ mod tests {
             title: Some("重构存储层".to_string()),
             phase: Phase::AwaitingApproval,
             phase_since: 100,
+            turn_started_at: 0,
             pending_question: Some("要不要继续".to_string()),
             pending_request: None,
             tokens_used: Some(1234),

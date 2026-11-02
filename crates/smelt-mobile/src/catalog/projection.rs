@@ -664,6 +664,9 @@ fn mobile_summary(
         updated_at: daemon
             .map(|state| i64::try_from(state.updated_at).unwrap_or(i64::MAX))
             .unwrap_or(0),
+        turn_started_at: daemon
+            .map(|state| i64::try_from(state.turn_started_at).unwrap_or(i64::MAX))
+            .unwrap_or(0),
         detail: daemon.and_then(DaemonSessionState::detail_line),
         pending_request: daemon.and_then(|state| state.pending_request.clone()),
         attention: attention_store.unread(&row.id).map(attention_item),

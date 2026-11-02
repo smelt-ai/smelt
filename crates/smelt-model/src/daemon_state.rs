@@ -82,6 +82,10 @@ pub struct DaemonSessionState {
     /// unix 秒，进入当前 phase 的时刻。
     #[serde(default)]
     pub phase_since: u64,
+    /// unix 秒，这一轮从什么时候开始忙；不在一轮里（或运行时太旧不报）是 0。
+    /// 各端会话列表上的「本轮已运行」都按它算，一轮里换阶段不变。
+    #[serde(default)]
+    pub turn_started_at: u64,
     /// unix 秒，守护最后一次更新该会话状态的时刻。
     #[serde(default)]
     pub updated_at: u64,
@@ -135,6 +139,7 @@ impl Default for DaemonSessionState {
             custom_title: None,
             cwd: None,
             phase_since: 0,
+            turn_started_at: 0,
             updated_at: 0,
             structured_events: false,
             turn_events: false,

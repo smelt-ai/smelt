@@ -426,6 +426,10 @@ pub struct SessionStateChanged {
     pub phase: CoreSessionPhase,
     #[serde(rename = "phase_since")]
     pub phase_since_unix_seconds: u64,
+    /// 这一轮从什么时候开始忙（unix 秒），会话列表上「本轮已运行」按它算；一轮里换阶段
+    /// 不变，不在一轮里是 0。旧运行时不报，读成 0：客户端就不显示本轮时长。
+    #[serde(rename = "turn_started_at", default)]
+    pub turn_started_at_unix_seconds: u64,
     pub pending_question: Option<String>,
     /// 对话会话正在等的那个请求的身份：`permission:<请求 id>` 或
     /// `elicitation:<卡片 id>`。变了就是换了一个请求；终端会话没有。
@@ -749,6 +753,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(state.phase, CoreSessionPhase::Idle);
+        // 这一版之前的运行时不报本轮开始时间：读成 0，客户端不显示本轮时长。
+        assert_eq!(state.turn_started_at_unix_seconds, 0);
 
         let progress: TerminalProgress =
             serde_json::from_value(json!({"state": "some_future_state", "percent": 3})).unwrap();

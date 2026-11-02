@@ -55,6 +55,10 @@ class DemoBackend implements Backend {
     projectTitle: project,
     projectOrder: 0,
     updatedAt: _ago(ago),
+    // 演示里在跑的会话，这一轮比最后一次动静早开始几分钟。
+    turnStartedAt: status == SessionStatus.running
+        ? _ago(ago + const Duration(minutes: 4))
+        : 0,
     detail: detail,
     attention: attention,
   );
@@ -406,6 +410,9 @@ class DemoBackend implements Backend {
           updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
           agentDefinitionId: s.agentDefinitionId,
           profileId: s.profileId,
+          turnStartedAt: s.turnStartedAt > 0
+              ? s.turnStartedAt
+              : DateTime.now().millisecondsSinceEpoch ~/ 1000,
         );
       }
     }
@@ -746,6 +753,7 @@ class DemoBackend implements Backend {
       projectTitle: project,
       projectOrder: 0,
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      turnStartedAt: 0,
     );
     (_sessions[runtimeId] ??= []).insert(0, session);
     await Future<void>.delayed(const Duration(milliseconds: 300));

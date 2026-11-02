@@ -24,6 +24,7 @@ SessionSummary _s(
   projectTitle: project,
   projectOrder: order,
   updatedAt: 0,
+  turnStartedAt: 0,
   agentDefinitionId: definition,
   profileId: profile,
   automation: automation,
