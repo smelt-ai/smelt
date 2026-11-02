@@ -3,8 +3,8 @@
 //! 额度是账户状态，不属于 ACP 会话。凭据在运行时那台机器上，查询和跨启动缓存都由
 //! 运行时做（`quota.*`，见 [`smelt_model::quota_service`]）。这里只管节奏：启动先显示
 //! 运行时缓存里的结果，缓存不新鲜才立即查；之后每 [`REFRESH_INTERVAL`] 全量查一次，
-//! 用户点哪家就单查哪家。侧栏和对话模型菜单都从 `ProviderStatus` 读，并靠
-//! `observe_global` 收到更新。
+//! 用户点哪家就单查哪家（只有这时运行时才可能弹钥匙串窗口）。侧栏和对话模型菜单都从
+//! `ProviderStatus` 读，并靠 `observe_global` 收到更新。
 
 use std::time::Duration;
 
@@ -68,14 +68,26 @@ impl Workspace {
                 // 本轮要刷新的账户：None = 全部（定时刷新）；Some = 只刷那家。
                 let mut target: Option<QuotaTarget> = None;
                 if !first {
+                    // 全关了就没有要定时查的：只等用户重新打开时发来的信号。
+                    let nothing_to_poll = this
+                        .update(cx, |_workspace, cx| {
+                            ProviderStatus::quota_targets(cx).is_empty()
+                        })
+                        .unwrap_or(false);
                     // 唤醒：用户点击的信号或定时器。race 里的 recv 会**消费**信号，
                     // 所以必须把 recv 拿到的值直接当作本轮信号用，不能事后再 try_recv
                     // （信号已被取走，会退化成「点谁查谁 = 全部刷新」）。
-                    let wake = smol::future::race(async { refresh_rx.recv().await.ok() }, async {
-                        smol::Timer::after(REFRESH_INTERVAL).await;
-                        None
-                    })
-                    .await;
+                    let wake = if nothing_to_poll {
+                        refresh_rx.recv().await.ok()
+                    } else {
+                        smol::future::race(async { refresh_rx.recv().await.ok() }, async {
+                            // 轮询例外：额度在远端账户上变化，没有事件可等；周期 5 分钟，
+                            // 用户关掉全部账户后不再醒。
+                            smol::Timer::after(REFRESH_INTERVAL).await;
+                            None
+                        })
+                        .await
+                    };
                     target = wake;
                     // 合并积压信号：race 只消费了第一个，剩下的补进来（最后点击优先）。
                     while let Ok(kind) = refresh_rx.try_recv() {
@@ -117,6 +129,8 @@ impl Workspace {
                                 ProviderStatus::restore_quota(&result.targets, Vec::new(), cx);
                             }
                             ProviderStatus::apply_quota(result.statuses, cx);
+                            // 这一轮可能触发或解除钥匙串熔断。
+                            crate::settings::refresh_quota_settings(cx);
                         }
                         // 连不上运行时不是额度失效：保留上次的数字，只结束「查询中」。
                         Err(error) => {

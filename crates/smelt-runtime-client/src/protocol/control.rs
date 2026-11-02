@@ -169,6 +169,8 @@ define_control_methods! {
     PiAuthLoginCancel => (PI_AUTH_LOGIN_CANCEL_METHOD, "pi.auth.login_cancel"),
     QuotaGet => (QUOTA_GET_METHOD, "quota.get"),
     QuotaRefresh => (QUOTA_REFRESH_METHOD, "quota.refresh"),
+    QuotaSettingsGet => (QUOTA_SETTINGS_GET_METHOD, "quota.settings.get"),
+    QuotaSetEnabled => (QUOTA_SET_ENABLED_METHOD, "quota.set_enabled"),
     RemoteConfigGet => (REMOTE_CONFIG_GET_METHOD, "remote.config.get"),
     RemoteConfigSet => (REMOTE_CONFIG_SET_METHOD, "remote.config.set"),
     RemoteStatus => (REMOTE_STATUS_METHOD, "remote.status"),
@@ -212,6 +214,9 @@ impl ControlMethod {
         // 手机推送：旧运行时没有，手机提示「升级后才能推送」。
         Self::PushRegister,
         Self::PushUnregister,
+        // 额度开关：旧运行时没有，设置页显示读取失败，侧栏额度照常。
+        Self::QuotaSettingsGet,
+        Self::QuotaSetEnabled,
     ];
 
     /// 运行时必须有这个方法：缺了就是运行时比客户端旧。
@@ -656,7 +661,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 124);
+        assert_eq!(names.len(), 126);
     }
 
     #[test]

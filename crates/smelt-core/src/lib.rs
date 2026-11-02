@@ -65,6 +65,8 @@ pub mod project_catalog;
 pub mod project_files;
 pub use smelt_model::provider_api;
 pub mod provider_quota;
+pub mod quota_credentials;
+mod quota_http;
 pub mod quota_service;
 pub mod remote_config;
 pub mod session_control;

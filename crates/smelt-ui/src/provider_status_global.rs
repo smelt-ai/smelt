@@ -104,7 +104,8 @@ impl ProviderStatus {
         });
     }
 
-    /// 启动时用缓存恢复上次结果。失败态不进缓存，所以这里只会写入有数据的项。
+    /// 换一份账户范围，并写入缓存里的结果。失败态不进缓存，所以这里只会写入有数据的项。
+    /// 不在范围里的账户（用户关掉了、Pi 登出了）连同旧数字一起去掉。
     pub fn restore_quota(
         targets: &[QuotaTarget],
         cached: Vec<(QuotaTarget, QuotaStatus)>,
@@ -112,6 +113,7 @@ impl ProviderStatus {
     ) {
         let targets = targets.to_vec();
         Self::update_data(cx, |data| {
+            data.quota.retain(|target, _| targets.contains(target));
             data.order = targets;
             for (target, status) in cached {
                 data.quota.insert(target, status);

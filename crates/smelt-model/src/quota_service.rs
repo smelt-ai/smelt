@@ -57,6 +57,14 @@ impl QuotaTarget {
     pub fn label(self) -> &'static str {
         self.agent.short_label()
     }
+
+    /// 设置页列表里的名字。Pi 底下有多家，要带上 provider 才分得清。
+    pub fn display_name(self) -> String {
+        match self.provider {
+            Some(provider) => format!("{} · {provider}", self.label()),
+            None => self.label().to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -81,7 +89,7 @@ impl<'de> Deserialize<'de> for QuotaTarget {
     }
 }
 
-/// 客户端启动时要的：当前全部账户（决定展示顺序）、缓存里的结果、要不要立刻查一次。
+/// 客户端启动时要的：开着查询的全部账户（决定展示顺序）、缓存里的结果、要不要立刻查一次。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct QuotaSnapshot {
     pub targets: Vec<QuotaTarget>,
@@ -92,14 +100,46 @@ pub struct QuotaSnapshot {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct QuotaRefreshParams {
-    /// `None`：全部账户；否则只查这一个。
+    /// `None`：后台刷新全部账户；否则是用户点了这一个，可以弹钥匙串窗口。
     pub target: Option<QuotaTarget>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct QuotaRefreshResult {
-    /// 当前全部账户。全量刷新时客户端据此更新展示顺序（新登录的 Pi provider 由此出现）。
+    /// 开着查询的全部账户。全量刷新时客户端据此更新展示顺序（新登录的 Pi provider 由此出现）。
     pub targets: Vec<QuotaTarget>,
     /// 这一轮实际查到的账户的结果。
     pub statuses: Vec<(QuotaTarget, QuotaStatus)>,
+}
+
+/// 设置页的一行。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuotaProviderSetting {
+    pub target: QuotaTarget,
+    pub enabled: bool,
+    /// 钥匙串访问被拒绝，后台不再读。手动刷新这一家后解除。
+    pub keychain_denied: bool,
+}
+
+/// 全部账户的额度开关，含关掉的。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QuotaSettings {
+    pub providers: Vec<QuotaProviderSetting>,
+}
+
+impl QuotaSettings {
+    /// 开着查询的账户，顺序和列表一致。
+    pub fn enabled_targets(&self) -> Vec<QuotaTarget> {
+        self.providers
+            .iter()
+            .filter(|provider| provider.enabled)
+            .map(|provider| provider.target)
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuotaSetEnabledParams {
+    pub target: QuotaTarget,
+    pub enabled: bool,
 }

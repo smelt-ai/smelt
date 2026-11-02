@@ -187,6 +187,8 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                     SettingsSection::Agents,
                     &[
                         "智能体",
+                        "额度",
+                        "钥匙串",
                         "AI",
                         "会话",
                         "运行环境",

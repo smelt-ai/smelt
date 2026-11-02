@@ -57,7 +57,7 @@ pub struct PairingOfferView {
 }
 
 /// 在后台调一次运行时，回到主线程处理。
-fn run_call<C>(
+pub(super) fn run_call<C>(
     params: C::Params,
     cx: &mut App,
     done: impl FnOnce(Result<C::Result, String>, &mut App) + 'static,

@@ -1,5 +1,5 @@
 //! 设置页：Agent。本机 Agent（CLI 和 Hooks）、自定义 Agent、新建菜单（「+」菜单项）、
-//! 高级（对话适配器命令，默认折叠）。
+//! 账户额度（每家的查询开关）、高级（对话适配器命令，默认折叠）。
 
 use super::*;
 use smelt_ui::IconAction as _;
@@ -23,7 +23,84 @@ pub(super) fn agents_page(
                 .item(items.profiles),
         )
         .group(SettingGroup::new().title("新建菜单").item(items.launch))
+        .group(quota_group(entity.clone(), cx))
         .group(advanced_group(entity, snapshot.acp_commands_open, cx))
+}
+
+/// 每家账户一行：查询开关，钥匙串被拒绝时再带一个重试。状态在设置窗口打开时和每轮刷新后取好，
+/// 这里只读全局。
+fn quota_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
+    let state = cx
+        .try_global::<QuotaSettingsState>()
+        .cloned()
+        .unwrap_or_default();
+    let group = SettingGroup::new().title("账户额度");
+    let group = match state.error {
+        Some(error) => group.item(SettingItem::new(
+            "读取失败",
+            SettingField::render(move |_, _, cx: &mut App| {
+                div()
+                    .max_w(px(320.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(error.clone())
+            }),
+        )),
+        None => group,
+    };
+    group.items(
+        state
+            .providers
+            .into_iter()
+            .map(|provider| quota_setting_item(provider, entity.clone())),
+    )
+}
+
+fn quota_setting_item(
+    provider: smelt_model::quota_service::QuotaProviderSetting,
+    entity: Entity<Workspace>,
+) -> SettingItem {
+    let target = provider.target;
+    let denied = provider.enabled && provider.keychain_denied;
+    let item = SettingItem::new(
+        target.display_name(),
+        SettingField::render(move |_, _, _cx: &mut App| {
+            let id = target.id();
+            let retry_workspace = entity.clone();
+            let toggle_workspace = entity.clone();
+            h_flex()
+                .gap_2()
+                .items_center()
+                .when(denied, |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("quota-retry-{id}")))
+                            .quiet()
+                            .compact()
+                            .label("重试")
+                            .on_click(move |_, _, cx| {
+                                retry_workspace.update(cx, |ws, _| {
+                                    ws.request_provider_quota_refresh(target);
+                                });
+                            }),
+                    )
+                })
+                .child(
+                    Switch::new(SharedString::from(format!("quota-enabled-{id}")))
+                        .checked(provider.enabled)
+                        .accessibility_label(format!("查询 {} 的额度", target.display_name()))
+                        .on_click(move |checked, _window, cx: &mut App| {
+                            set_quota_enabled(target, *checked, toggle_workspace.clone(), cx);
+                        }),
+                )
+        }),
+    )
+    .keywords(["额度", "用量", "钥匙串", "keychain"]);
+    if denied {
+        item.description("钥匙串访问被拒绝或不可用，已停止自动读取。点重试会再请求一次授权。")
+    } else {
+        item
+    }
 }
 
 /// 对话适配器命令：几乎没人改，默认折起来只露一行摘要。每家一项的说明都一样，写在标题行

@@ -211,6 +211,15 @@ pub struct TerminalThemeSnapshot {
     pub search_hit_current: u32,
 }
 
+/// 一家额度账户改过默认值的本机偏好。`keychain_denied` 跨重启保留：拒绝过之后，升级或
+/// 重启守护都不能再弹钥匙串窗口，直到用户手动重试。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuotaProviderPref {
+    pub provider_id: String,
+    pub enabled: bool,
+    pub keychain_denied: bool,
+}
+
 /// 跨启动的额度缓存。只缓存真正拿到额度的项。
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuotaCacheSnapshot {
