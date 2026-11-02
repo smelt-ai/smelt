@@ -1,7 +1,8 @@
 <!doctype html>
 <!--
   Smelt 远程桌面页：noVNC 的 RFB 客户端，经本机转发口（见 smelt-runtime-client 的 desktop 模块）
-  连到运行时那台机器的 VNC。宿主调 window.smelt.setControl(on) 切换接管和只看。
+  连到运行时那台机器的 VNC。宿主调 window.smelt.setControl(on) 切换接管和只看，断线后调
+  window.smelt.reconnect() 重连；什么时候重连由宿主决定，页面自己不重试。
   事件经 window.ipc.postMessage 报给宿主（wry 的 IPC），没有宿主时静默：
     connected / disconnected：连接状态；clipboard：远端复制的文字；
     text：本机输入法上屏的文字，宿主交给运行时整段注入。
@@ -47,33 +48,41 @@ function post(message) {
   } catch (_) {}
 }
 
-const rfb = new RFB(screen, url, { shared: true });
-rfb.scaleViewport = true;
-// 远端分辨率跟着这一页的大小走，画面铺满不留边。只看时 noVNC 不发调整请求，不会因为有人
-// 旁观就改掉别人正在用的分辨率。
-rfb.resizeSession = true;
-rfb.showDotCursor = true;
-rfb.qualityLevel = 6;
-rfb.compressionLevel = 2;
-// 点画面时焦点给 #ime，不给画布（见下）。
-rfb.focusOnClick = false;
-// noVNC 的键盘只能挂在画布上，而画布不是可编辑元素，本机输入法没法在上面拼字。把它改挂到
-// #ime 上：普通按键照旧由 noVNC 换成 keysym 发出去，拼字交给输入法。改的是 noVNC 1.6.0 的
-// 私有字段，noVNC 固定在仓库里，升级时要回来看一眼。
-rfb._keyboard._target = ime;
-rfb.viewOnly = !controlling;
+let rfb = null;
+let disconnected = true;
 
-rfb.addEventListener('connect', () => {
-  status.style.display = 'none';
-  post({ event: 'connected' });
-  if (controlling) ime.focus({ preventScroll: true });
-});
-rfb.addEventListener('disconnect', (event) => {
-  status.style.display = 'flex';
-  status.textContent = event.detail.clean ? '远程桌面已断开' : '和远程桌面的连接断了';
-  post({ event: 'disconnected', clean: event.detail.clean });
-});
-rfb.addEventListener('clipboard', (event) => post({ event: 'clipboard', text: event.detail.text }));
+function connect() {
+  disconnected = false;
+  rfb = new RFB(screen, url, { shared: true });
+  rfb.scaleViewport = true;
+  // 远端分辨率跟着这一页的大小走，画面铺满不留边。只看时 noVNC 不发调整请求，不会因为有人
+  // 旁观就改掉别人正在用的分辨率。
+  rfb.resizeSession = true;
+  rfb.showDotCursor = true;
+  rfb.qualityLevel = 6;
+  rfb.compressionLevel = 2;
+  // 点画面时焦点给 #ime，不给画布（见下）。
+  rfb.focusOnClick = false;
+  // noVNC 的键盘只能挂在画布上，而画布不是可编辑元素，本机输入法没法在上面拼字。把它改挂到
+  // #ime 上：普通按键照旧由 noVNC 换成 keysym 发出去，拼字交给输入法。改的是 noVNC 1.7.0 的
+  // 私有字段，noVNC 固定在仓库里，升级时要回来看一眼。
+  rfb._keyboard._target = ime;
+  rfb.viewOnly = !controlling;
+
+  rfb.addEventListener('connect', () => {
+    status.style.display = 'none';
+    post({ event: 'connected' });
+    if (controlling) ime.focus({ preventScroll: true });
+  });
+  rfb.addEventListener('disconnect', (event) => {
+    disconnected = true;
+    status.style.display = 'flex';
+    status.textContent = event.detail.clean ? '远程桌面已断开' : '和远程桌面的连接断了';
+    post({ event: 'disconnected', clean: event.detail.clean });
+  });
+  rfb.addEventListener('clipboard', (event) => post({ event: 'clipboard', text: event.detail.text }));
+}
+connect();
 
 // 点哪里，输入元素就挪到哪里并拿到焦点；鼠标本身照常由 noVNC 发给远端。
 screen.addEventListener('pointerdown', (event) => {
@@ -116,6 +125,12 @@ window.smelt = {
     rfb.viewOnly = !on;
     if (on) ime.focus({ preventScroll: true });
     else ime.blur();
+  },
+  /** 断线后重连，接管或只看的状态不变。上一次还没结束时不动。 */
+  reconnect() {
+    if (!disconnected) return;
+    status.textContent = '正在重新连接…';
+    connect();
   },
 };
 </script>

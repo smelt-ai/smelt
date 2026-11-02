@@ -1,0 +1,4 @@
+noVNC v1.7.0，来自上游，core/、vendor/、LICENSE.txt 未做改动。
+source: https://github.com/novnc/noVNC/archive/refs/tags/v1.7.0.tar.gz
+commit: 63107bd06d9e1f6136ff21aeda8cd62cbf0d433e
+tarball-sha256: b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6
