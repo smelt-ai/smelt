@@ -58,6 +58,8 @@ curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh
 
 Or download `smeltd-<version>-linux-<arch>.tar.gz` and run `./install.sh`. `--with-desktop` also installs TigerVNC, XFCE, and a resident Chrome, then runs `smeltd mcp add playwright`. `--relay=<url>` sets the initial iroh relay. `--apt-mirror=<mirror>` selects an apt mirror for this install.
 
+Run as root, the installer creates a `smelt` user for the runtime and adds `/usr/local/bin/smeltd`, which switches to that user. Run as a normal user, it links `~/.local/bin/smeltd` and tells you if that directory isn't on `PATH`. There is no `smelt` command on Linux; that's the desktop app. Running the installer again upgrades.
+
 ```sh
 smeltd status
 smeltd pair

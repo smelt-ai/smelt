@@ -16,6 +16,9 @@
 # （默认 smelt，SMELT_USER 可改），运行时和桌面都装在它名下；以普通用户执行时装在自己名下，
 # 装系统包、开 linger 时用 sudo。
 #
+# 怎么敲到命令：以 root 执行时生成 /usr/local/bin/smeltd，切到那个用户再跑（见
+# root_command_script）；以普通用户执行时在 ~/.local/bin 放一个软链接，不改 shell 配置。
+#
 # 怎么常驻：有 systemd 的机器装成 systemd 用户服务（smeltd、smelt-display、smelt-desktop、
 # smelt-chrome），开 linger 让它们开机就起、退出登录也不停。没有 systemd 的（多半是 Docker
 # 容器）由 ~/.smelt/bin/smelt-up 拉起并看着，装完在后台起一份。
@@ -272,7 +275,65 @@ install_as_root() {
   runuser -u "$user" -- env -i "${env[@]}" \
     bash "$stage/install.sh" --phase=user "${FLAGS[@]}" || rc=$?
   rm -rf "$stage"
-  return "$rc"
+  ((rc == 0)) || return "$rc"
+
+  local runtime_dir=""
+  has_systemd && runtime_dir="/run/user/$uid"
+  install_root_command "$user" "$uid" "$home" "$runtime_dir"
+  echo
+  say "运行时在用户 $user 名下。常用命令（root 或 sudo 都行）：smeltd status、smeltd pair"
+}
+
+ROOT_COMMAND=/usr/local/bin/smeltd
+ROOT_COMMAND_MARKER="由 Smelt 的 install.sh 生成"
+
+# /usr/local/bin/smeltd 的内容。不能用软链接：root 的 ~ 和权限都不对，运行时连不上。root
+# 调用时一定先切用户再执行：那份程序在普通用户目录里，它能改，以 root 执行就等于提权。指向
+# 启动名而不是带指纹的映像，运行时自己升级后还能用。
+root_command_script() {
+  local user="$1" uid="$2" home="$3" runtime_dir="$4"
+  local env_args="HOME=$(printf %q "$home") USER=$(printf %q "$user") LOGNAME=$(printf %q "$user")"
+  if [[ -n "$runtime_dir" ]]; then
+    env_args+=" XDG_RUNTIME_DIR=$(printf %q "$runtime_dir")"
+    env_args+=" DBUS_SESSION_BUS_ADDRESS=$(printf %q "unix:path=$runtime_dir/bus")"
+  fi
+  cat <<WRAPPER
+#!/bin/bash
+# $ROOT_COMMAND_MARKER，重新安装时会覆盖。
+bin=$(printf %q "$home/.smelt/bin/smeltd")
+user=$(printf %q "$user")
+case "\$(id -u)" in
+  0 | $uid) ;;
+  *)
+    echo "smeltd 在用户 \$user 名下运行，请用 sudo smeltd \$*" >&2
+    exit 1
+    ;;
+esac
+if [[ ! -x "\$bin" ]]; then
+  echo "找不到 \$bin，运行时可能已经卸载；不用了可以删掉 \$0" >&2
+  exit 1
+fi
+if [[ "\$(id -u)" == $uid ]]; then
+  exec "\$bin" "\$@"
+fi
+# 调用者的目录那个用户多半进不去。
+cd $(printf %q "$home")
+exec runuser -u "\$user" -- env -i $env_args SHELL=/bin/bash \\
+  PATH=/usr/local/bin:/usr/bin:/bin TERM="\${TERM:-dumb}" "\$bin" "\$@"
+WRAPPER
+}
+
+# 已经有一个不是我们生成的同名文件时不覆盖。
+install_root_command() {
+  if [[ -e "$ROOT_COMMAND" ]] && ! grep -qF "$ROOT_COMMAND_MARKER" "$ROOT_COMMAND" 2>/dev/null; then
+    warn "$ROOT_COMMAND 已存在且不是安装脚本生成的，没有覆盖；用 runuser -u $1 -- $3/.smelt/bin/smeltd 调用"
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp "$ROOT_COMMAND.XXXXXX")"
+  root_command_script "$@" >"$tmp"
+  chmod 0755 "$tmp"
+  mv -f "$tmp" "$ROOT_COMMAND"
 }
 
 # 普通用户执行：要 root 的那部分经 sudo 做。
@@ -295,6 +356,29 @@ install_as_user() {
     sudo loginctl enable-linger "$USER" || warn "开 linger 失败，退出登录后运行时会停"
   fi
   user_phase
+  link_user_command
+}
+
+# 普通用户：~/.local/bin 放一个软链接，不改 shell 配置。自定义了 SMELT_HOME 时不放：软链接带不
+# 上这个变量，会连到另一份运行时。
+link_user_command() {
+  echo
+  if [[ "$SMELT_HOME" != "$HOME/.smelt" ]]; then
+    say "SMELT_HOME 是自定义的，调用时带上它：SMELT_HOME=$SMELT_HOME $BIN/smeltd status"
+    return 0
+  fi
+  local link="$HOME/.local/bin/smeltd"
+  if [[ -e "$link" && ! -L "$link" ]]; then
+    warn "$link 已存在且不是软链接，没有覆盖；用 $BIN/smeltd 调用"
+    return 0
+  fi
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$BIN/smeltd" "$link"
+  say "常用命令：smeltd status、smeltd pair"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) say "~/.local/bin 不在 PATH 里，加上后才能直接敲：export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+  esac
 }
 
 # ── 用户部分（普通用户）──────────────────────────────────────────────────────
