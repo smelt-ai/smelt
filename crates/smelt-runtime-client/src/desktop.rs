@@ -7,6 +7,7 @@
 //! 这个口本机任何程序、浏览器里任何网页都连得到，所以 WebSocket 必须带上启动时生成的
 //! 令牌，且来源必须是这个口自己的页面。
 
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -23,14 +24,20 @@ use crate::protocol::desktop::DesktopAttachReply;
 use crate::protocol::write_json_line;
 use crate::{RuntimeClient, RuntimeStream};
 
-/// noVNC（Debian 的 1.6.0 包，MPL-2.0，见 COPYRIGHT）和 Smelt 自己的宿主页 `desktop.html`。
+/// noVNC（上游 1.7.0，版本和校验值见 VERSION，许可见 LICENSE.txt）和 Smelt 自己的宿主页
+/// `desktop.html`。
 #[derive(RustEmbed)]
 #[folder = "assets/novnc/"]
 struct Assets;
 
-/// WebSocket 一边的读超时：一个线程在读网页发来的帧和转发运行时的字节之间轮转，这也是
-/// 鼠标键盘的最长额外延迟。
-const POLL: Duration = Duration::from_millis(10);
+/// 连上运行时、等它答复的时限。只管握手，之后的长连接不设时限。
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
+/// 单次从网页或运行时读取的上限。
+const CHUNK_BYTES: usize = 64 * 1024;
+/// 转发队列最多排几块。页面跟不上时读线程停在这里，压力一路传回运行时，内存不会涨；
+/// 键鼠和画面共用这条队列，所以不能排太多，否则操作要等排在前面的画面发完。写运行时不走
+/// 这条队列，见 [`spawn_runtime_writer`]。
+const QUEUE_CHUNKS: usize = 8;
 
 pub struct DesktopProxy {
     port: u16,
@@ -177,10 +184,14 @@ fn bridge(stream: TcpStream, shared: &Shared) {
             Err(refused)
         }
     };
-    let Ok(mut ws) = tungstenite::accept_hdr(stream, check) else {
+    // 键鼠事件很小，不能让 Nagle 攒着等上一个包的确认。
+    if stream.set_nodelay(true).is_err() {
+        return;
+    }
+    let Ok(mut ws) = tungstenite::accept_hdr(PageSocket::new(stream), check) else {
         return;
     };
-    let runtime = match attach(&shared.client) {
+    let runtime = match attach(&shared.client, ATTACH_TIMEOUT) {
         Ok(runtime) => runtime,
         Err(reason) => {
             let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
@@ -194,10 +205,11 @@ fn bridge(stream: TcpStream, shared: &Shared) {
     pump(ws, runtime);
 }
 
-/// 连上运行时的远程桌面，回 ok 之后这条连接就是 RFB 字节流。
-fn attach(client: &RuntimeClient) -> Result<RuntimeStream, String> {
+/// 连上运行时的远程桌面，回 ok 之后这条连接就是 RFB 字节流。`timeout` 只管握手：画面静止时
+/// 运行时可以很久不发数据，留着时限会把静止的桌面当成断线。
+fn attach(client: &RuntimeClient, timeout: Duration) -> Result<RuntimeStream, String> {
     let mut stream = client
-        .connect_with_timeout(Duration::from_secs(10))
+        .connect_with_timeout(timeout)
         .map_err(|error| format!("连不上运行时：{error}"))?;
     write_json_line(
         &mut stream,
@@ -217,70 +229,177 @@ fn attach(client: &RuntimeClient) -> Result<RuntimeStream, String> {
     let reply: DesktopAttachReply =
         serde_json::from_slice(&line).map_err(|_| "运行时不支持远程桌面，需要升级".to_string())?;
     if reply.ok {
+        stream
+            .set_read_timeout(None)
+            .and_then(|()| stream.set_write_timeout(None))
+            .map_err(|error| format!("连不上运行时：{error}"))?;
         Ok(stream)
     } else {
         Err(reply.error.unwrap_or_else(|| "运行时拒绝了".to_string()))
     }
 }
 
-/// 一个线程把运行时的字节读进通道，另一个（当前）线程轮流读网页的帧、把通道里的字节
-/// 发给网页。WebSocket 不能拆成两半分别读写，所以写都在这一个线程。
-fn pump(mut ws: WebSocket<TcpStream>, runtime: RuntimeStream) {
-    if ws.get_ref().set_read_timeout(Some(POLL)).is_err() {
-        return;
+/// WebSocket 用的底层连接。握手时直接读 TCP；握手之后读线程把收到的字节喂进 `inbound`，
+/// 这里读空了报 WouldBlock，tungstenite 会留着半帧等下次。写一直直接写 TCP。
+struct PageSocket {
+    tcp: TcpStream,
+    fed: bool,
+    inbound: VecDeque<u8>,
+}
+
+impl PageSocket {
+    fn new(tcp: TcpStream) -> Self {
+        Self {
+            tcp,
+            fed: false,
+            inbound: VecDeque::new(),
+        }
     }
-    let (chunks, inbox) = mpsc::channel::<Vec<u8>>();
-    let Ok(mut from_runtime) = runtime.try_clone() else {
-        return;
-    };
+}
+
+impl Read for PageSocket {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.fed {
+            return self.tcp.read(buf);
+        }
+        if self.inbound.is_empty() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.inbound.read(buf)
+    }
+}
+
+impl Write for PageSocket {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.tcp.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.tcp.flush()
+    }
+}
+
+enum PumpEvent {
+    FromPage(Vec<u8>),
+    FromRuntime(Vec<u8>),
+    /// 有一边读到头或出错了。排在它前面的字节都已经处理完。
+    Closed,
+}
+
+/// 把 `source` 读到的字节按顺序放进事件队列，结束时放一个 `Closed`。
+fn spawn_reader(
+    name: &str,
+    mut source: impl Read + Send + 'static,
+    wrap: fn(Vec<u8>) -> PumpEvent,
+    events: mpsc::SyncSender<PumpEvent>,
+) -> io::Result<()> {
     std::thread::Builder::new()
-        .name("smelt-desktop-down".into())
+        .name(name.into())
         .spawn(move || {
-            let mut buf = vec![0u8; 64 * 1024];
+            let mut buf = vec![0u8; CHUNK_BYTES];
             loop {
-                match from_runtime.read(&mut buf) {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => {
-                        if chunks.send(buf[..n].to_vec()).is_err() {
-                            return;
-                        }
-                    }
+                let event = match source.read(&mut buf) {
+                    Ok(0) => PumpEvent::Closed,
+                    Ok(n) => wrap(buf[..n].to_vec()),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => PumpEvent::Closed,
+                };
+                let closed = matches!(event, PumpEvent::Closed);
+                if events.send(event).is_err() || closed {
+                    return;
                 }
             }
         })
-        .ok();
-    let mut to_runtime = runtime;
-    'pump: loop {
-        loop {
-            match inbox.try_recv() {
-                Ok(chunk) => {
-                    if ws.send(Message::binary(chunk)).is_err() {
-                        break 'pump;
-                    }
+        .map(drop)
+}
+
+fn spawn_readers(
+    page: &TcpStream,
+    runtime: &RuntimeStream,
+    events: mpsc::SyncSender<PumpEvent>,
+) -> io::Result<()> {
+    let page = page.try_clone()?;
+    let runtime = runtime.try_clone()?;
+    spawn_reader(
+        "smelt-desktop-up",
+        page,
+        PumpEvent::FromPage,
+        events.clone(),
+    )?;
+    spawn_reader(
+        "smelt-desktop-down",
+        runtime,
+        PumpEvent::FromRuntime,
+        events,
+    )
+}
+
+/// 写运行时单开一个线程，转发线程不能卡在这里：对端可能要等自己的数据被读走才接着读，而读
+/// 它的数据正要靠转发线程腾出队列，三方就互相等死了。这条队列不设上限：上行只有本机页面的
+/// 键鼠和剪贴板，量很小。写失败就关掉连接，下行读线程读到头后整条转发随之结束。
+fn spawn_runtime_writer(runtime: &RuntimeStream) -> io::Result<mpsc::Sender<Vec<u8>>> {
+    let mut to_runtime = runtime.try_clone()?;
+    let (sender, chunks) = mpsc::channel::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("smelt-desktop-write".into())
+        .spawn(move || {
+            for chunk in chunks {
+                if to_runtime.write_all(&chunk).is_err() {
+                    let _ = to_runtime.shutdown(Shutdown::Both);
+                    return;
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break 'pump,
             }
-        }
-        match ws.read() {
-            Ok(Message::Binary(bytes)) => {
-                if to_runtime.write_all(&bytes).is_err() {
-                    break;
+        })?;
+    Ok(sender)
+}
+
+/// 两个读线程各自阻塞在自己的连接上，把字节放进同一条有界队列；当前线程阻塞在队列上，
+/// 独占 WebSocket 做帧的编解码和写入。WebSocket 不能拆成两半分别读写，这样不用定时醒来
+/// 就能同时等两边。
+fn pump(mut ws: WebSocket<PageSocket>, runtime: RuntimeStream) {
+    ws.get_mut().fed = true;
+    let (events, inbox) = mpsc::sync_channel(QUEUE_CHUNKS);
+    let to_runtime = spawn_readers(&ws.get_ref().tcp, &runtime, events)
+        .and_then(|()| spawn_runtime_writer(&runtime));
+    if let Ok(to_runtime) = to_runtime {
+        // 握手时可能连带读到了第一帧，它在 WebSocket 自己的缓冲里，先处理掉。
+        let mut open = forward_page_frames(&mut ws, &to_runtime);
+        while open {
+            open = match inbox.recv() {
+                Ok(PumpEvent::FromPage(bytes)) => {
+                    ws.get_mut().inbound.extend(bytes);
+                    forward_page_frames(&mut ws, &to_runtime)
                 }
-            }
-            Ok(Message::Close(_)) => break,
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error))
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(_) => break,
+                Ok(PumpEvent::FromRuntime(chunk)) => ws.send(Message::binary(chunk)).is_ok(),
+                Ok(PumpEvent::Closed) | Err(_) => false,
+            };
         }
     }
-    let _ = to_runtime.shutdown(Shutdown::Both);
+    // 写线程和下行读线程手里都有这条连接，关掉才能把它们叫醒。
+    let _ = runtime.shutdown(Shutdown::Both);
     let _ = ws.close(None);
     let _ = ws.flush();
+    // 读线程手里还有一份连接，关掉才能把它们从阻塞的读里叫醒。
+    let _ = ws.get_ref().tcp.shutdown(Shutdown::Both);
+}
+
+/// 把已经收到的完整帧转给运行时。连接还能继续用时返回 `true`。
+fn forward_page_frames(ws: &mut WebSocket<PageSocket>, to_runtime: &mpsc::Sender<Vec<u8>>) -> bool {
+    loop {
+        match ws.read() {
+            Ok(Message::Binary(bytes)) => {
+                if to_runtime.send(bytes.to_vec()).is_err() {
+                    return false;
+                }
+            }
+            Ok(Message::Close(_)) => return false,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                return true;
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +467,95 @@ mod tests {
             }
         }
         assert_eq!(got, b"RFB 003.008\n");
+    }
+
+    /// 画面静止时运行时很久不发数据：握手的时限不能留在长连接上，否则静止的桌面会被当成断线。
+    #[test]
+    fn the_attach_timeout_does_not_outlive_the_handshake() {
+        const SHORT: Duration = Duration::from_millis(50);
+        let mut stream = attach(&echo_runtime(), SHORT).unwrap();
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut byte = [0u8; 1];
+            let _ = done.send(
+                stream
+                    .read(&mut byte)
+                    .map(drop)
+                    .map_err(|error| error.kind()),
+            );
+        });
+        assert_eq!(
+            finished.recv_timeout(SHORT * 10),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "没有数据时读应该一直等着"
+        );
+    }
+
+    /// 一条消息要分好几次读才能收齐：半帧要留到下次，不能丢。
+    ///
+    /// 回声运行时写不完就不读，这条同时盯着转发不能和它互相等死。
+    #[test]
+    fn a_message_split_across_reads_round_trips() {
+        let proxy = DesktopProxy::start(echo_runtime()).unwrap();
+        let (port, token) = port_and_token(&proxy);
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (mut ws, _) = tungstenite::client(
+            ws_request(port, &token, &format!("http://127.0.0.1:{port}")),
+            stream,
+        )
+        .unwrap();
+        let payload: Vec<u8> = (0..200 * 1024).map(|i| i as u8).collect();
+        ws.send(Message::binary(payload.clone())).unwrap();
+        let mut got = Vec::new();
+        while got.len() < payload.len() {
+            if let Message::Binary(bytes) = ws.read().unwrap() {
+                got.extend_from_slice(&bytes);
+            }
+        }
+        assert_eq!(got, payload);
+    }
+
+    /// 网页不读了，运行时那头要被堵住，而不是全堆进转发口的内存。
+    #[test]
+    fn a_page_that_stops_reading_stalls_the_runtime() {
+        const LIMIT: usize = 256 * 1024 * 1024;
+        let (done, finished) = mpsc::channel();
+        let client = RuntimeClient::new(move || {
+            let (client, mut server) = RuntimeStream::pair()?;
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let mut byte = [0u8; 1];
+                while server.read(&mut byte).unwrap_or(0) == 1 && byte[0] != b'\n' {}
+                write_json_line(
+                    &mut server,
+                    &DesktopAttachReply {
+                        ok: true,
+                        error: None,
+                    },
+                )
+                .unwrap();
+                server
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let chunk = vec![0u8; CHUNK_BYTES];
+                let mut sent = 0;
+                while sent < LIMIT && server.write_all(&chunk).is_ok() {
+                    sent += chunk.len();
+                }
+                let _ = done.send(sent);
+            });
+            Ok(client)
+        });
+        let proxy = DesktopProxy::start(client).unwrap();
+        let (port, token) = port_and_token(&proxy);
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (_ws, _) = tungstenite::client(
+            ws_request(port, &token, &format!("http://127.0.0.1:{port}")),
+            stream,
+        )
+        .unwrap();
+        let sent = finished.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert!(sent < LIMIT, "运行时一直写得进去：{sent} 字节");
     }
 
     /// 本机别的网页或程序拿不到令牌、来源也不对，连不上。

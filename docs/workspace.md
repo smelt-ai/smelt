@@ -313,7 +313,7 @@ smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea�
 
 ### 远程桌面
 
-配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。中文直接打在画面上。`install.sh --with-desktop` 装上 Xvnc（起始 1440×900）、XFCE 和常驻 Chrome（调试端口 `127.0.0.1:9222`）。内置 `playwright` 预设看到 `~/.smelt/desktop/bin/display` 就用 `--cdp-endpoint http://127.0.0.1:9222`，否则用 `--extension`。见 `docs/archive/remote-runtime.html` 的 D9。
+配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。断线后按 1、2、4、8、16、30 秒退避自动重连，运行时重新上线时立刻重连，接管或只看的状态不变；次数用完后等运行时上线或手动重连。中文直接打在画面上。`install.sh --with-desktop` 装上 Xvnc（起始 1440×900）、XFCE 和常驻 Chrome（调试端口 `127.0.0.1:9222`）。内置 `playwright` 预设看到 `~/.smelt/desktop/bin/display` 就用 `--cdp-endpoint http://127.0.0.1:9222`，否则用 `--extension`。见 `docs/archive/remote-runtime.html` 的 D9。
 
 ### 终端 Dock
 
