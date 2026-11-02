@@ -1223,6 +1223,27 @@ mod tests {
         ));
     }
 
+    /// 契约：比这个客户端新的运行时发的消息类型跳过，订阅不断，后面的事件照常解。
+    #[test]
+    fn unknown_message_types_are_skipped_without_breaking_the_subscription() {
+        let mut client = desktop_client();
+        let _ = complete_snapshot(&mut client, 7, vec![session_dto("session-1", 1, 10)]);
+        assert!(
+            client
+                .decode_line(r#"{"type":"some_future_message","anything":1}"#)
+                .unwrap()
+                .is_none()
+        );
+        let next = event_message(
+            CORE_TOPIC_SESSION_STATE_CHANGED,
+            serde_json::to_value(session_dto("session-1", 1, 11)).unwrap(),
+        );
+        assert!(matches!(
+            client.decode_message(next).unwrap(),
+            Some(DaemonStateEvent::Update(state)) if state.revision == 11
+        ));
+    }
+
     #[test]
     fn error_and_legacy_frames_are_not_treated_as_state_events() {
         let mut client = desktop_client();
