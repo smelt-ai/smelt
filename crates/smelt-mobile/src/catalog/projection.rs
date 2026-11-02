@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use smelt_model::agent_definition::AgentDefinition;
-use smelt_model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
+use smelt_model::agent_kind::{ConversationAgentKind, HistorySourceKind, TerminalAgentKind};
 use smelt_model::agent_status::AgentStatus;
 use smelt_model::attention::{
     self, AttentionItem as ModelAttention, AttentionKind as ModelAttentionKind, AttentionStore,
@@ -677,6 +677,7 @@ pub(crate) fn agent_option(option: &AcpAgentOption) -> view::AcpAgentOption {
         kind: option.kind.clone(),
         label: option.label.clone(),
         agent_definition_id: option.agent_definition_id().map(str::to_string),
+        has_history: HistorySourceKind::from_id(&option.kind).is_some(),
     }
 }
 

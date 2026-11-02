@@ -8,7 +8,7 @@
 
 use super::*;
 use gpui_component::group_box::GroupBoxVariant;
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputState, Textarea};
 use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_component::tag::Tag;
 

@@ -82,6 +82,8 @@ String? agentIconAsset(String agent) {
   if (ids.contains(key)) return '$agentIconDir/agent-$key.svg';
   final ordered = ids.toList()..sort((a, b) => b.length.compareTo(a.length));
   for (final id in ordered) {
+    // 通用 ACP 的图标只给精确的 `custom`：它不是品牌，别让带 custom 字样的名字误中。
+    if (id == 'custom') continue;
     final hit = id.length > 2
         ? key.contains(id)
         : RegExp(

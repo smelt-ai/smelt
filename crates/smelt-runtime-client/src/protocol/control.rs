@@ -29,8 +29,11 @@ use super::daemon::DaemonOperation;
 /// 少了 `native_dsh_profiles`。旧运行时缺这个字段就拒收修改，新桌面改不了旧运行时上的
 /// 智能体配置，得让兼容检查拦住、提示升级运行时。
 ///
-pub const CONTROL_API_VERSION: u16 = 3;
-pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
+/// v4：workspace profile 换成自定义 Agent，`agent.host.get` / `agent.host.apply_edit` 里的
+/// profile 多了启动命令和环境变量。新旧两边互相解析不了对方的 profile，一样得拦住。
+///
+pub const CONTROL_API_VERSION: u16 = 4;
+pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 4;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
 
 macro_rules! define_control_methods {

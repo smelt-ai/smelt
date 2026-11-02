@@ -406,7 +406,7 @@ impl AcpView {
                                 .text_size(px(28.))
                                 .font_semibold()
                                 .text_color(t.foreground)
-                                .child(self.agent.short_label().to_string()),
+                                .child(self.agent_label(cx)),
                         )
                         .child(
                             div()

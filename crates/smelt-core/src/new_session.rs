@@ -398,6 +398,10 @@ mod runtime_detection_tests {
             ConversationAgentKind::Claude,
             Some(&diagnostics)
         ));
+        assert!(
+            acp_agent_detected(ConversationAgentKind::Custom, Some(&diagnostics)),
+            "通用 ACP 没有可探测的 CLI，配了就显示"
+        );
         assert!(!terminal_agent_detected(
             TerminalAgentKind::Antigravity,
             Some(&diagnostics)

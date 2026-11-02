@@ -58,7 +58,8 @@ class _HistoryPageState extends State<HistoryPage> {
     try {
       final catalog = await _model.backend.workspaceCatalog(widget.runtimeId);
       if (!mounted) return;
-      final agents = catalog.agents;
+      // 通用 ACP 的自定义 Agent 没有可读的历史，不当来源。
+      final agents = catalog.agents.where((a) => a.hasHistory).toList();
       // 默认选第一个裸引擎：项目里的历史多半是它们的；产品智能体通常开在自己的 space。
       final first =
           agents.where((a) => a.agentDefinitionId == null).firstOrNull ??

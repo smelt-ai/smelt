@@ -17,7 +17,7 @@ pub struct AgentHostSettings {
     pub env: BTreeMap<String, BTreeMap<String, String>>,
     /// agent id → 用户最近显式选择的配置 `(config_id, value_id)`。
     pub config_memory: BTreeMap<String, Vec<(String, String)>>,
-    /// 手动添加的 workspace profile。
+    /// 用户添加的自定义 Agent。
     pub profiles: Vec<AcpProfile>,
     pub agents: Vec<AgentDefinition>,
     /// 侧栏「新对话」默认用哪个智能体。指向这台运行时上的定义，所以跟着运行时走。
@@ -155,24 +155,8 @@ impl AgentHostSettings {
         &self,
         profile: &AcpProfile,
     ) -> Result<ConversationLaunchSpec, String> {
-        let kind = profile.kind().ok_or_else(|| {
-            format!(
-                "workspace profile `{}` 使用了未知 ACP Agent `{}`",
-                profile.id, profile.kind_id
-            )
-        })?;
-        let mut launch = profile.launch_spec()?;
-        launch.command = self.acp_cmd_for(kind);
-        // workspace 目录那条环境变量是 profile 的立身之本，不能被用户配的同名
-        // 变量顶掉；其余按 kind 继承并允许显式覆盖出厂环境，这样既能默认全权限，
-        // 也能在设置里把某个 OpenCode workspace 降权。
-        let workspace_env = profile.env_var()?;
-        for (name, value) in self.acp_env_for(kind) {
-            if name != workspace_env {
-                launch.env.insert(name, value);
-            }
-        }
-        Ok(launch)
+        let kind = profile.validate()?;
+        profile.launch_spec(self.acp_launch_for(kind))
     }
 
     /// 将智能体定义解析成执行引擎启动规格。工作目录、账号/profile 与模型属于
@@ -420,19 +404,21 @@ mod tests {
         assert!(config.env.is_empty());
     }
 
-    /// workspace profile 继承 kind 的环境变量（给某家配一次 key，它的每个
-    /// workspace 都能用），但 profile 自己那条数据目录变量不能被顶掉。
+    /// 自定义 Agent 继承底层 agent 的环境变量（给某家配一次 key，基于它的自定义
+    /// Agent 都能用），但自己那条数据目录变量不能被顶掉。
     #[test]
     fn profile_inherits_kind_env_without_losing_its_workspace_dir() {
         let profile = AcpProfile {
             id: "p1".into(),
             kind_id: ConversationAgentKind::Claude.id().into(),
             label: "Claude Quant".into(),
+            command: String::new(),
+            env: BTreeMap::new(),
             workspace_dir: "/tmp/quant".into(),
         };
         let dir_var = profile
-            .env_var()
-            .expect("Claude 支持 workspace")
+            .workspace_env_var()
+            .expect("Claude 支持数据目录")
             .to_string();
         let mut config = settings();
         config.set_acp_env_for(
@@ -473,6 +459,8 @@ mod tests {
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
+            command: String::new(),
+            env: BTreeMap::new(),
             workspace_dir: "~/Claude Workspaces/quant".into(),
         };
 
@@ -491,12 +479,39 @@ mod tests {
             id: "future-profile".into(),
             kind_id: "future-agent".into(),
             label: "Future Agent".into(),
-            workspace_dir: "~/.future-agent".into(),
+            command: String::new(),
+            env: BTreeMap::new(),
+            workspace_dir: String::new(),
         };
 
         let error = settings()
             .profile_launch_spec(&profile)
             .expect_err("未知 Agent 不能借用默认启动规格");
         assert!(error.contains("future-agent"));
+    }
+
+    /// 通用 ACP：只用自定义 Agent 自己的命令和变量，不会捡到任何内置 agent 的配置。
+    #[test]
+    fn custom_acp_profile_launches_only_its_own_command() {
+        let profile = AcpProfile {
+            id: "til".into(),
+            kind_id: ConversationAgentKind::Custom.id().into(),
+            label: "Til".into(),
+            command: "til-acp".into(),
+            env: BTreeMap::from([("TOKEN".to_string(), "x".to_string())]),
+            workspace_dir: String::new(),
+        };
+        let launch = settings().profile_launch_spec(&profile).unwrap();
+        assert_eq!(launch.command, "til-acp");
+        assert_eq!(
+            launch.env,
+            BTreeMap::from([("TOKEN".to_string(), "x".to_string())])
+        );
+        assert!(
+            !AgentHostSettings::fresh()
+                .commands
+                .contains_key(ConversationAgentKind::Custom.id()),
+            "通用 ACP 没有按种类保存的命令"
+        );
     }
 }

@@ -185,6 +185,11 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > 各条启动命令在设置 →「Agent」→「高级」里改。provider 支持历史恢复时，
 > 「重新开始」是协议级续接而非摆样子的新对话（Pi 使用自身 session id）。
 >
+> 设置 →「Agent」→「自定义 Agent」可以再加对话入口（`AcpProfile`）：类型选**通用 ACP**
+> 时跑任意 ACP stdio 命令（`ConversationAgentKind::Custom`，没有历史页、终端续接和「最近选择」）；
+> 选**基于某个内置 Agent** 时沿用它的适配器、历史和续接，只换启动命令、加环境变量或换数据
+> 目录（例如基于 Claude Code、加 `CLAUDE_CODE_EXECUTABLE=~/.til/bin/til`，就把兼容的 CLI 接进来）。
+>
 > 各家实测差异（决定了下面几个 UI 决策）：首块响应 Claude ~2.6s / Copilot ~7s /
 > Codex ~15s——所以回合跑着但还没出正文时，消息流末尾必须有个转着的 spinner，
 > 否则那十几秒是一整屏纯黑。`promptCapabilities.image` 只有 Grok 是 false，

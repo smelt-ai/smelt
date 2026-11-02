@@ -2,8 +2,8 @@
 
 use crate::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, PublishedSessionRecord,
-    PublishedSessionSnapshot, StoreError,
+    AgentDefinitionRecord, AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot,
+    PublishedSessionRecord, PublishedSessionSnapshot, StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -49,6 +49,7 @@ pub(crate) fn write_agent_ui_prefs(
     transaction.execute("DELETE FROM agent_acp_command", [])?;
     transaction.execute("DELETE FROM agent_acp_env", [])?;
     transaction.execute("DELETE FROM agent_acp_config_memory", [])?;
+    transaction.execute("DELETE FROM agent_profile_env", [])?;
     transaction.execute("DELETE FROM agent_profile", [])?;
     transaction.execute(
         "INSERT INTO agent_host_pref(id, hooks_enabled) VALUES (1, ?1)
@@ -81,16 +82,23 @@ pub(crate) fn write_agent_ui_prefs(
     }
     for (position, profile) in snapshot.profiles.iter().enumerate() {
         transaction.execute(
-            "INSERT INTO agent_profile(id, kind_id, label, workspace_dir, position)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO agent_profile(id, kind_id, label, command, workspace_dir, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 profile.id,
                 profile.kind_id,
                 profile.label,
+                profile.command,
                 profile.workspace_dir,
                 position as i64,
             ],
         )?;
+        for var in &profile.env {
+            transaction.execute(
+                "INSERT INTO agent_profile_env(profile_id, name, value) VALUES (?1, ?2, ?3)",
+                params![profile.id, var.name, var.value],
+            )?;
+        }
     }
     Ok(())
 }
@@ -368,17 +376,31 @@ pub(crate) fn query_agent_definition(
 }
 
 fn query_profiles(connection: &Connection) -> Result<Vec<AgentProfileRecord>, StoreError> {
-    let mut statement = connection
-        .prepare("SELECT id, kind_id, label, workspace_dir FROM agent_profile ORDER BY position")?;
+    let mut statement = connection.prepare(
+        "SELECT id, kind_id, label, command, workspace_dir FROM agent_profile ORDER BY position",
+    )?;
     let rows = statement.query_map([], |row| {
         Ok(AgentProfileRecord {
             id: row.get(0)?,
             kind_id: row.get(1)?,
             label: row.get(2)?,
-            workspace_dir: row.get(3)?,
+            command: row.get(3)?,
+            workspace_dir: row.get(4)?,
+            env: Vec::new(),
         })
     })?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
+    let mut profiles = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut statement = connection
+        .prepare("SELECT name, value FROM agent_profile_env WHERE profile_id = ?1 ORDER BY name")?;
+    for profile in &mut profiles {
+        profile.env = statement
+            .query_map([&profile.id], |row| {
+                Ok(AgentProfileEnvRecord {
+                    name: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    Ok(profiles)
 }
-

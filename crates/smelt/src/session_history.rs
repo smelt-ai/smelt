@@ -130,7 +130,7 @@ pub struct DeleteHistoryTarget {
 
 /// 历史会话页：列出当前项目下各家 agent 保存的历史会话，并显示选中会话的
 /// 对话内容（只读浏览，支持右键「继续」恢复该对话）。
-/// 历史页顶部一个来源 tab：基础 agent 槽或手动 workspace profile。
+/// 历史页顶部一个来源 tab：基础 agent 槽或自定义 Agent。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HistorySourceTab {
     pub kind: HistorySourceKind,
@@ -139,7 +139,7 @@ pub(crate) struct HistorySourceTab {
 }
 
 /// 历史页该展示哪些来源 tab。智能体上下文只留当前引擎；普通项目列出所有裸种类
-/// 再加上手动 profile。纯数据，不碰 GPUI。
+/// 再加上能读历史的自定义 Agent。纯数据，不碰 GPUI。
 ///
 /// 遍历 [`HistorySourceKind::ALL`] 而不是 `ConversationAgentKind::ALL`：能不能读历史
 /// 取决于本机有没有落盘 transcript，与有没有 ACP 无关。
@@ -161,11 +161,16 @@ pub(crate) fn history_source_tabs(
     }
     if restrict_to_kind.is_none() {
         for profile in profiles {
-            let Some(kind) = profile.kind() else {
+            // 通用 ACP 的自定义 Agent 没有本地 transcript，不在历史来源里，不给它开 tab。
+            let Some(kind) = profile
+                .kind()
+                .map(HistorySourceKind::from)
+                .filter(|kind| HistorySourceKind::ALL.contains(kind))
+            else {
                 continue;
             };
             tabs.push(HistorySourceTab {
-                kind: kind.into(),
+                kind,
                 profile_id: Some(profile.id.clone()),
                 label: profile.label,
             });
@@ -1504,6 +1509,8 @@ mod tests {
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
+            command: String::new(),
+            env: Default::default(),
             workspace_dir: "~/Claude Workspaces/quant".into(),
         };
         let mut config = AgentHostSettings::fresh();

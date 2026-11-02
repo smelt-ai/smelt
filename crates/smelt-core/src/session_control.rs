@@ -7,9 +7,7 @@
 pub use smelt_model::session_control::*;
 pub use smelt_runtime_client::local::daemon_request;
 
-use crate::agent_kind::{
-    AcpProfile, ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind,
-};
+use crate::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind};
 use crate::control_api::SessionList;
 use serde_json::{Value, json};
 use smelt_runtime_client::protocol::control::EmptyParams;
@@ -89,30 +87,20 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
             snapshot
                 .profiles
                 .iter()
-                .map(|profile| AcpProfile {
-                    id: profile.id.clone(),
-                    kind_id: profile.kind_id.clone(),
-                    label: profile.label.clone(),
-                    workspace_dir: profile.workspace_dir.clone(),
-                })
+                .cloned()
+                .map(crate::agent_host::profile_from_record)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     for profile in profiles {
-        let Some(kind) = profile.kind() else {
+        // 配坏了的自定义 Agent（类型认不出、通用 ACP 没填命令）不进菜单；设置页保存时已拦过一次。
+        let Ok(kind) = profile.validate() else {
             continue;
         };
-        let Ok(mut launch) = profile.launch_spec() else {
+        let Ok(launch) = profile.launch_spec(configured_launch(snapshot_ref, kind)) else {
             continue;
         };
-        launch.command = configured_command(snapshot_ref, kind);
-        launch.env.extend(configured_env(snapshot_ref, kind));
-        // profile 的 workspace 变量定义身份，必须在通用 agent 环境之后写回。
-        if let Ok(name) = profile.env_var() {
-            launch
-                .env
-                .insert(name.into(), profile.workspace_dir.clone());
-        }
+        let history_dir = profile.history_dir();
         options.push(AcpAgentOption {
             id: format!("profile:{}", profile.id),
             kind: kind.id().to_string(),
@@ -120,9 +108,7 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
             profile: true,
             agent_definition_id: None,
             launch,
-            history_dir: Some(crate::workspace_override::expand_tilde(
-                &profile.workspace_dir,
-            )),
+            history_dir,
         });
     }
     options
@@ -250,7 +236,10 @@ pub fn list_history_for(
     cwd: &str,
     override_dir: Option<&str>,
 ) -> Vec<HistorySessionSummary> {
-    let mut sessions = crate::session_history::history_provider(kind)
+    let Some(provider) = crate::session_history::history_provider(kind) else {
+        return Vec::new();
+    };
+    let mut sessions = provider
         .list_sessions(cwd, override_dir)
         .into_iter()
         .map(|session| HistorySessionSummary {

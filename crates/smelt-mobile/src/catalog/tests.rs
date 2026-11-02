@@ -1857,3 +1857,20 @@ fn opening_a_project_that_is_already_open_returns_it_right_away() {
     );
     assert_eq!(catalog.open_project("/repo").unwrap().root, "/repo");
 }
+
+/// 通用 ACP 的自定义 Agent 没有本地 transcript：手机历史页不能把它当来源，
+/// 基于内置 Agent 的照常可以。
+#[test]
+fn only_agents_with_readable_history_are_history_sources() {
+    let option = |kind: &str| smelt_model::session_control::AcpAgentOption {
+        id: format!("profile:{kind}"),
+        kind: kind.into(),
+        label: "自定义".into(),
+        profile: true,
+        agent_definition_id: None,
+        launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("x --acp"),
+        history_dir: None,
+    };
+    assert!(projection::agent_option(&option("claude")).has_history);
+    assert!(!projection::agent_option(&option("custom")).has_history);
+}

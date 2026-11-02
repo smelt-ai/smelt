@@ -41,14 +41,14 @@ mod workspace;
 
 pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
-    HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
-    MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
-    MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
-    PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord,
-    WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot,
-    WorkspaceTerminalRecord,
+    AgentDefinitionRecord, AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot,
+    HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
+    MemoryMetaSnapshot, MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust,
+    MemoryTrustedRecord, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
+    PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot,
+    QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot, TerminalThemeSnapshot,
+    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord,
+    WorkspaceSnapshot, WorkspaceTerminalRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -60,7 +60,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 30;
+pub const STORE_SCHEMA_VERSION: u32 = 31;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -1972,6 +1972,16 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 30 {
+            apply_v31_custom_agent(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v30 形状：重建 profile 表后与当前形状逐字一致，就说明原来正是 v30。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 29 {
             apply_v30_push_registration(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2523,6 +2533,12 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V29_TO_V30)?;
         }
+        apply_v31_custom_agent(transaction)
+    }
+
+    /// v31：workspace profile 换成自定义 Agent。旧 profile 不迁移，两张表按当前形状重建。
+    fn apply_v31_custom_agent(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::MIGRATE_V30_TO_V31)?;
         Ok(())
     }
 
@@ -5135,6 +5151,7 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V30_AGENT_PROFILE).unwrap();
         connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
         connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
         connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
@@ -6469,12 +6486,33 @@ CREATE TABLE published_session (
                 model_id: String::new(),
                 memory_enabled: true,
             }],
-            profiles: vec![AgentProfileRecord {
-                id: "profile-1".into(),
-                kind_id: "claude".into(),
-                label: "量化".into(),
-                workspace_dir: "/tmp/quant".into(),
-            }],
+            profiles: vec![
+                AgentProfileRecord {
+                    id: "profile-1".into(),
+                    kind_id: "claude".into(),
+                    label: "量化".into(),
+                    command: String::new(),
+                    workspace_dir: "/tmp/quant".into(),
+                    env: vec![
+                        AgentProfileEnvRecord {
+                            name: "A".into(),
+                            value: "1".into(),
+                        },
+                        AgentProfileEnvRecord {
+                            name: "CLAUDE_CODE_EXECUTABLE".into(),
+                            value: "~/.til/bin/til".into(),
+                        },
+                    ],
+                },
+                AgentProfileRecord {
+                    id: "profile-2".into(),
+                    kind_id: "custom".into(),
+                    label: "任意 ACP".into(),
+                    command: "my-agent --acp".into(),
+                    workspace_dir: String::new(),
+                    env: Vec::new(),
+                },
+            ],
         };
         store.put_agent_ui_snapshot(&agent_ui).unwrap();
         assert_eq!(
@@ -6556,7 +6594,8 @@ CREATE TABLE published_session (
             ("agent_acp_env", 1),
             ("agent_acp_config_memory", 1),
             ("agent_definition", 1),
-            ("agent_profile", 1),
+            ("agent_profile", 2),
+            ("agent_profile_env", 2),
             ("published_session", 1),
         ] {
             let count: i64 = connection
@@ -6935,6 +6974,20 @@ ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
 ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
 ";
 
+    /// v30 及更早的 workspace profile 表：没有启动命令列，也没有环境变量子表。
+    /// 用当前结构的库退回旧版本做夹具时换回去。
+    const V30_AGENT_PROFILE: &str = "
+DROP TABLE agent_profile_env;
+DROP TABLE agent_profile;
+CREATE TABLE agent_profile (
+  id TEXT PRIMARY KEY,
+  kind_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  workspace_dir TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+";
+
     /// v28 及更早的目录表没有 epoch 列。用当前结构的库退回旧版本做夹具时先去掉。
     const V28_WORKSPACE_EPOCH: &str = "
 ALTER TABLE workspace_catalog DROP COLUMN epoch;
@@ -7113,6 +7166,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
                  INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);",
             )
             .unwrap();
+        connection.execute_batch(V30_AGENT_PROFILE).unwrap();
         connection.pragma_update(None, "user_version", 29).unwrap();
         drop(connection);
 
@@ -7124,7 +7178,39 @@ CREATE TABLE worktree_inherit_skip_pattern (
         assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
     }
 
-    /// 推送登记只给白名单里的设备写；重复登记覆盖；撤销设备时跟着删。
+    /// v30 的库：workspace profile 表按自定义 Agent 的形状重建，旧 profile 不迁移。
+    #[test]
+    fn migrates_v30_rebuilding_profiles_as_custom_agents() {
+        let dir = temp_dir("migrate-v30-custom-agent");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V30_AGENT_PROFILE}
+                 INSERT INTO agent_profile(id, kind_id, label, workspace_dir, position)
+                 VALUES ('old', 'claude', '量化', '/tmp/quant', 0);"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 30).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let profiles = store
+            .get_agent_ui_snapshot()
+            .unwrap()
+            .map(|snapshot| snapshot.profiles)
+            .unwrap_or_default();
+        assert!(
+            profiles.is_empty(),
+            "旧 workspace profile 不迁移：{profiles:?}"
+        );
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
     #[test]
     fn push_registrations_follow_their_paired_device() {
         let dir = temp_dir("push-registrations");

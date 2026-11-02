@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 39] = [
+pub const TABLES: [&str; 40] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -26,6 +26,7 @@ pub const TABLES: [&str; 39] = [
     "agent_memory_provenance",
     "agent_memory_usage",
     "agent_profile",
+    "agent_profile_env",
     "auto_model_provider",
     "automation",
     "automation_meta",
@@ -394,9 +395,16 @@ CREATE TABLE agent_profile (
   id TEXT PRIMARY KEY,
   kind_id TEXT NOT NULL,
   label TEXT NOT NULL,
+  command TEXT NOT NULL,
   workspace_dir TEXT NOT NULL,
   position INTEGER NOT NULL CHECK (position >= 0)
 );
+CREATE TABLE agent_profile_env (
+  profile_id TEXT NOT NULL REFERENCES agent_profile(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (profile_id, name)
+) WITHOUT ROWID;
 CREATE TABLE published_session (
   id TEXT PRIMARY KEY,
   cwd TEXT,
@@ -1764,6 +1772,27 @@ CREATE TABLE push_registration (
   notify_input INTEGER NOT NULL CHECK (notify_input IN (0, 1)),
   notify_failure INTEGER NOT NULL CHECK (notify_failure IN (0, 1)),
   updated_at_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+";
+
+/// v31：workspace profile 换成自定义 Agent（自带启动命令和环境变量）。旧的 workspace
+/// profile 不迁移，整表重建。
+pub const MIGRATE_V30_TO_V31: &str = "
+DROP TABLE IF EXISTS agent_profile_env;
+DROP TABLE agent_profile;
+CREATE TABLE agent_profile (
+  id TEXT PRIMARY KEY,
+  kind_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  command TEXT NOT NULL,
+  workspace_dir TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+CREATE TABLE agent_profile_env (
+  profile_id TEXT NOT NULL REFERENCES agent_profile(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (profile_id, name)
 ) WITHOUT ROWID;
 ";
 

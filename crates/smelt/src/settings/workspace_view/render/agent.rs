@@ -1,4 +1,4 @@
-//! 设置页：Agent。本机 Agent（CLI 和 Hooks）、新建菜单（「+」菜单项和额外 workspace）、
+//! 设置页：Agent。本机 Agent（CLI 和 Hooks）、自定义 Agent、新建菜单（「+」菜单项）、
 //! 高级（对话适配器命令，默认折叠）。
 
 use super::*;
@@ -19,10 +19,10 @@ pub(super) fn agents_page(
         )
         .group(
             SettingGroup::new()
-                .title("新建菜单")
-                .item(items.launch)
+                .title("自定义 Agent")
                 .item(items.profiles),
         )
+        .group(SettingGroup::new().title("新建菜单").item(items.launch))
         .group(advanced_group(entity, snapshot.acp_commands_open, cx))
 }
 
@@ -392,123 +392,164 @@ fn agent_groups(
             move |_, window, cx: &mut App| {
                 let muted = cx.theme().muted_foreground;
                 let border = cx.theme().border;
-                let fg = cx.theme().foreground;
                 let secondary = cx.theme().secondary;
+                let danger = cx.theme().danger;
                 let field_w = {
                     let vw = f32::from(window.viewport_size().width);
                     let w = (vw - 250. - 80.).clamp(360., 720.);
                     px(w)
                 };
-                let mut col = v_flex().w(field_w).gap_3().child(
-                    v_flex()
-                        .w(field_w)
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(fg)
-                                .child("「新建对话」菜单里的额外 workspace"),
-                        )
-                        .child(div().w(field_w).text_sm().text_color(muted).child(
-                            "同一家 Agent 再开一个配置目录（如 ~/.claude-quant），\
-                                                     「新建对话」菜单和历史会话页都会多一项。",
-                        )),
-                );
-
-                let kind_w = px(120.);
-                let name_w = px(140.);
+                let kind_w = px(150.);
                 let del_w = px(28.);
-                let dir_w = field_w - kind_w - name_w - del_w - px(56.);
+                let caption_w = px(72.);
                 let mono = terminal_view::font_family();
-
-                let mut list = v_flex()
-                    .w(field_w)
-                    .gap_2()
-                    .p_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(border)
-                    .bg(secondary)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(div().w(kind_w).child("Agent"))
-                            .child(div().w(name_w).child("名称"))
-                            .child(div().w(dir_w).child("Workspace 目录"))
-                            .child(div().w(del_w)),
-                    );
-
                 let profiles = agent_host_settings(&crate::RuntimeKey::Local, cx)
                     .profiles
                     .clone();
-                for (ix, ((label, dir), p)) in profile_rows.iter().zip(profiles.iter()).enumerate()
-                {
-                    let row_ix = ix;
-                    let row_key = label.entity_id();
+
+                let mut col = v_flex().w(field_w).gap_3().child(
+                    div().w(field_w).text_sm().text_color(muted).child(
+                        "接入任意 ACP Agent，或在内置 Agent 上换命令、加环境变量、换数据目录。\
+                         「新建对话」菜单会多一项；基于内置 Agent 的还会出现在历史会话页。",
+                    ),
+                );
+                for p in &profiles {
+                    let Some(row) = profile_rows.iter().find(|row| row.id == p.id) else {
+                        continue;
+                    };
+                    let row_key = row.label.entity_id();
                     let kind_entity = profile_editor_entity.clone();
                     let del_entity = profile_editor_entity.clone();
-                    let current_kind_label = p
-                        .kind()
-                        .map(|kind| kind.short_label().to_string())
-                        .unwrap_or_else(|| format!("未知 ({})", p.kind_id));
-                    list = list.child(
-                        h_flex()
-                            .id(("profile-row", row_key))
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                Button::new(("profile-kind", row_key))
-                                    .quiet()
-                                    .compact()
-                                    .w(kind_w)
-                                    .label(current_kind_label)
-                                    .dropdown_menu(move |mut menu, _window, _cx| {
-                                        for kind in ConversationAgentKind::ALL {
-                                            let kind_entity = kind_entity.clone();
-                                            menu = menu.item(
-                                                PopupMenuItem::new(kind.label()).on_click(
-                                                    move |_ev, _window, cx| {
-                                                        kind_entity.update(cx, |ws, cx| {
-                                                            ws.set_profile_kind(row_ix, kind, cx);
-                                                        });
-                                                    },
-                                                ),
-                                            );
-                                        }
-                                        menu
-                                    }),
-                            )
-                            .child(Input::new(label).w(name_w))
-                            .child(Input::new(dir).w(dir_w).font_family(mono.clone()))
-                            .child(
-                                Button::new(("del-profile", row_key))
-                                    .quiet()
-                                    .compact()
-                                    .icon(IconName::Close)
-                                    .icon_action("删除 workspace")
-                                    .w(del_w)
-                                    .flex_none()
-                                    .on_click(move |_, _, cx: &mut App| {
-                                        del_entity.update(cx, |ws, cx| {
-                                            ws.remove_profile(row_ix, cx);
-                                        });
-                                    }),
-                            ),
-                    );
+                    let kind_id = p.id.clone();
+                    let del_id = p.id.clone();
+                    let kind_label = match p.kind() {
+                        Some(ConversationAgentKind::Custom) => "通用 ACP".to_string(),
+                        Some(kind) => format!("基于 {}", kind.short_label()),
+                        None => format!("未知 ({})", p.kind_id),
+                    };
+                    let caption = move |text: &'static str| {
+                        div()
+                            .w(caption_w)
+                            .flex_none()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(text)
+                    };
+                    let mut card = v_flex()
+                        .id(("profile-row", row_key))
+                        .w(field_w)
+                        .gap_2()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(secondary)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Button::new(("profile-kind", row_key))
+                                        .outline()
+                                        .compact()
+                                        .w(kind_w)
+                                        .flex_none()
+                                        .label(kind_label)
+                                        .dropdown_menu(move |mut menu, _window, _cx| {
+                                            let pick =
+                                                |kind: ConversationAgentKind, label: String| {
+                                                    let kind_entity = kind_entity.clone();
+                                                    let id = kind_id.clone();
+                                                    PopupMenuItem::new(label).on_click(
+                                                        move |_ev, _window, cx| {
+                                                            let id = id.clone();
+                                                            kind_entity.update(cx, |ws, cx| {
+                                                                ws.set_profile_kind(id, kind, cx);
+                                                            });
+                                                        },
+                                                    )
+                                                };
+                                            menu = menu
+                                                .item(pick(
+                                                    ConversationAgentKind::Custom,
+                                                    "通用 ACP".into(),
+                                                ))
+                                                .separator();
+                                            for kind in ConversationAgentKind::ALL {
+                                                menu = menu.item(pick(
+                                                    kind,
+                                                    format!("基于 {}", kind.label()),
+                                                ));
+                                            }
+                                            menu
+                                        }),
+                                )
+                                .child(div().flex_1().child(Input::new(&row.label)))
+                                .child(
+                                    Button::new(("del-profile", row_key))
+                                        .quiet()
+                                        .compact()
+                                        .icon(IconName::Close)
+                                        .icon_action("删除这个自定义 Agent")
+                                        .w(del_w)
+                                        .flex_none()
+                                        .on_click(move |_, _, cx: &mut App| {
+                                            let id = del_id.clone();
+                                            del_entity.update(cx, |ws, cx| {
+                                                ws.remove_profile(id, cx);
+                                            });
+                                        }),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .child(caption("启动命令"))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(Input::new(&row.command).font_family(mono.clone())),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .items_start()
+                                .child(caption("环境变量").pt_1())
+                                .child(div().flex_1().child(Textarea::new(&row.env))),
+                        );
+                    if let Some(var) = p.workspace_env_var() {
+                        card = card.child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .items_center()
+                                .child(caption("数据目录"))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(Input::new(&row.dir).font_family(mono.clone())),
+                                )
+                                .child(div().text_xs().text_color(muted).child(var)),
+                        );
+                    }
+                    // 环境变量写错时它没存盘，先报这条；其余按存下来的配置判断能不能启动。
+                    let problem = row.env_error.clone().or_else(|| p.validate().err());
+                    if let Some(problem) = problem {
+                        card = card.child(div().text_xs().text_color(danger).child(problem));
+                    }
+                    col = col.child(card);
                 }
-                col = col.child(list);
                 let add_entity = profile_editor_entity.clone();
                 col.child(
                     Button::new("add-profile")
                         .outline()
                         .icon(IconName::Plus)
-                        .label("添加 workspace")
+                        .label("添加自定义 Agent")
                         .w(field_w)
                         .on_click(move |_, _, cx: &mut App| {
                             add_entity.update(cx, |ws, cx| ws.add_profile(cx));
@@ -518,10 +559,11 @@ fn agent_groups(
             }
         })
         .keywords([
+            "自定义 agent",
+            "acp",
             "workspace",
-            "claude-quant",
+            "环境变量",
             "config dir",
-            "多工作区",
             "agent",
         ]),
         hooks: SettingItem::render(move |_, _, cx: &mut App| {

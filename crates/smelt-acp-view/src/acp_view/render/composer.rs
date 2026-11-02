@@ -361,7 +361,7 @@ impl AcpView {
                 .as_ref()
                 .map(|model| model.current_value.clone());
             let model_config_id = model_state.as_ref().map(|model| model.config_id.clone());
-            let model_label = composer_model_label(model_state.as_ref(), self.agent.short_label());
+            let model_label = composer_model_label(model_state.as_ref(), &self.agent_label(cx));
             let usage_pct = self.usage.map(|(used, size)| usage_percent(used, size));
             let usage_color = if self.compacting {
                 ui_theme::yellow()

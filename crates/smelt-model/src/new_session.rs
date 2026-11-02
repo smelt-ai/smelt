@@ -49,6 +49,10 @@ pub fn acp_agent_detected(
     kind: ConversationAgentKind,
     diagnostics: Option<&AcpRuntimeDiagnostics>,
 ) -> bool {
+    // 通用 ACP 跑的是用户自己填的任意命令，没有可探测的 CLI；配了就显示，起不来由会话报错。
+    if kind == ConversationAgentKind::Custom {
+        return true;
+    }
     match diagnostics {
         Some(diag) => diag
             .for_agent(kind)
