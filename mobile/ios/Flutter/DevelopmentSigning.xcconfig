@@ -1,0 +1,13 @@
+// Debug / Profile signing defaults, included before Developer.xcconfig so a
+// developer can override any of them there.
+
+// Development signing: device tokens belong to the APNs sandbox.
+SMELT_APNS_ENVIRONMENT = sandbox
+
+// Push capability. A free Apple ID (Personal Team) cannot sign the
+// aps-environment entitlement, so its Developer.xcconfig sets this to NO and
+// the build signs without push. Release always signs with push.
+SMELT_PUSH_CAPABILITY = YES
+SMELT_ENTITLEMENTS_YES = Runner/DebugProfile.entitlements
+SMELT_ENTITLEMENTS_NO = Runner/DebugProfileNoPush.entitlements
+CODE_SIGN_ENTITLEMENTS = $(SMELT_ENTITLEMENTS_$(SMELT_PUSH_CAPABILITY))
