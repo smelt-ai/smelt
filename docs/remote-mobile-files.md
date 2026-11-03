@@ -239,7 +239,7 @@ FilePreview
 
 | crate | 情况 |
 |---|---|
-| `syntect` 5.3 | Sublime 语法，bat、delta、zola 在用；`regex-fancy` 特性下纯 Rust，无 C 依赖 |
+| `syntect` 5.3 | Sublime 语法，bat、delta、zola 在用；正则引擎可选 oniguruma（C）或 fancy-regex（纯 Rust） |
 | `two-face` 0.5（跟随 bat 0.26） | 给 syntect 补上 bat 那套语法（TypeScript、TOML、Dockerfile、Kotlin、Swift 等）和主题；少数语法在 fancy-regex 下不可用，需按其文档核对 |
 | `tree-sitter-highlight` / `arborium` / `lumis` | Tree-sitter 方案；每种语言一份 C 解析器，几十种语言会让手机库多出数十 MB |
 
@@ -248,8 +248,10 @@ FilePreview
 服务端高亮是 GitHub 的做法，但放在我们这里要给运行时加协议、要求运行时升级，还会给 smeltd 加一套语法库；
 而手机本身就有 Rust 内核，离数据最近又不占 UI 线程，取舍下来放在 `smelt-mobile`：
 
-- **依赖**：`syntect`（`default-features = false`，开 `parsing`、`default-syntaxes`、`regex-fancy`）+ `two-face`（`syntect-fancy`）。
-  不引 onig，免去 iOS / Android 交叉编译 C 库。不用 syntect 的主题。
+- **依赖**：`syntect`（`default-features = false`，开 `parsing`、`default-syntaxes`、`regex-onig`）+ `two-face`
+  （`syntect-onig`）。正则引擎选 oniguruma，理由见 5.5 的实测：比 fancy-regex 快 4.6 倍、包还小、语法多 7 种。
+  手机库本来就在交叉编译 C 代码（`libsqlite3-sys` 的内置 SQLite、`ring`），不增加新的工具链要求。
+  不用 syntect 的主题。
 - **语义类别**：把 TextMate scope 归并成十几个类别（comment、string、number、constant、keyword、operator、type、
   function、variable、tag、attribute、punctuation、markup.heading、markup.link、diff.added、diff.removed…），
   Dart 在 `lib/theme/` 里映射成颜色，亮暗两套主题各自定义，`lib/theme/` 之外不出现颜色值。
@@ -265,12 +267,26 @@ FilePreview
 - **线程**：FRB 的普通 `pub fn` 本来就跑在线程池，`lines()` 不阻塞 UI。
 - **后续可复用**：对话里 Markdown 代码块、diff 卡片也能接同一个高亮器（`flutter_markdown_plus` 支持自定义代码块构建）。
 
-### 5.5 待实测
+### 5.5 实测（2026-11）
 
-- 手机库体积增量：`syntect` + `two-face` 的语法包压缩后预计在 1–2MB 量级，开工前用 `cargo bloat` 在 aarch64 iOS / Android 上量一次。
-- `two-face` 在 fancy-regex 下不可用的语法清单，确认不含常用语言。
-- 首次加载语法集（反序列化）耗时，放在第一次打开文本文件时懒加载，测一下中端 Android 机上的时间。
-- 2MB 上限和检查点间隔在真机上的手感。
+量法：单独一个 cdylib，`opt-level = "z"`、LTO、`codegen-units = 1`、strip，`aarch64-apple-ios` release；
+速度在 M 系列 Mac 上跑 release。
+
+| 组合 | iOS 动态库增量 | 语法数 | 加载语法集 | 首次编译全部语法的正则 | 2 万行 Rust 逐行解析 |
+|---|---|---|---|---|---|
+| syntect 默认语法 + fancy | 0.63 MB | 75 | 2 ms | — | — |
+| syntect + two-face + fancy | 2.2 MB | 213 | 5 ms | 2.5 s | 3.7 s |
+| syntect + two-face + onig | 1.7 MB | 220 | 5 ms | 0.17 s | 0.8 s |
+
+- syntect 自带的 75 种缺 TypeScript、TSX、TOML、Kotlin、Swift、Dart、Vue、Svelte、Dockerfile、Zig、Nix、HCL 等，
+  必须配 two-face。
+- fancy 版少的 7 种里有 JSX（Babel 语法），onig 版都有。
+- 正则是第一次用到某种语法时才编译；fancy 平均每种约 12 ms，onig 不到 1 ms。
+- 按手机比 Mac 慢 2–3 倍估：onig 解析约 100 µs/行，2 万行要两秒左右。所以不能整篇一次高亮，
+  只按可见窗口取、靠检查点续着解析；跳到文件末尾时先显示纯文本，解析到了再上色。
+- iOS 交叉编译 onig 要设 `IPHONEOS_DEPLOYMENT_TARGET`，否则链接报目标版本不符；手机构建脚本要确认带着它。
+  Android（NDK）还没实测，开工第一步先在两端各构建一次。
+- 上限和检查点间隔（暂定 2 MB、1000 行）到真机上再校准。
 
 ---
 
