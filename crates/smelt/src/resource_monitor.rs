@@ -25,6 +25,7 @@ use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::EmptyParams;
 use smelt_sys::process_usage::{MemoryBreakdown, ProcessSampler};
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 use smelt_ui::{Button, ListRow};
 
 use crate::runtimes::RuntimeHub;
@@ -848,17 +849,17 @@ fn row_label(label: String, detail: Option<String>, colors: RowColors) -> Div {
         .min_w_0()
         .child(
             div()
-                .truncate()
+                .overflow_hidden()
                 .text_sm()
                 .text_color(colors.fg)
-                .child(label),
+                .child(truncated_line(label)),
         )
         .children(detail.map(|detail| {
             div()
-                .truncate()
+                .overflow_hidden()
                 .text_xs()
                 .text_color(colors.muted)
-                .child(detail)
+                .child(truncated_line(detail))
         }))
 }
 
@@ -1049,10 +1050,10 @@ fn process_row(process: &ProcessEntry, colors: RowColors) -> impl IntoElement + 
                         .items_baseline()
                         .child(
                             div()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(colors.fg)
-                                .child(process.name.clone()),
+                                .child(truncated_line(process.name.clone())),
                         )
                         .child(
                             div()
@@ -1065,11 +1066,11 @@ fn process_row(process: &ProcessEntry, colors: RowColors) -> impl IntoElement + 
                 )
                 .children(command.map(|command| {
                     div()
-                        .truncate()
+                        .overflow_hidden()
                         .text_xs()
                         .font_family(crate::terminal_view::font_family())
                         .text_color(colors.muted)
-                        .child(command)
+                        .child(truncated_line(command))
                 })),
         )
         .child(usage_columns(process.usage, colors.muted))

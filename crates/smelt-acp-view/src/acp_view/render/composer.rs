@@ -3,6 +3,7 @@
 use super::*;
 use gpui_component::popover::PopoverState;
 use smelt_client::daemon_state::DaemonPhase;
+use smelt_ui::truncated_line::truncated_line;
 
 /// 排队条目用正文当身份。相同正文按出现次序分开，删掉前面一条时后面的格子跟着正文走。
 fn queue_row_id<'a>(
@@ -89,10 +90,10 @@ fn capabilities_panel(
             .child(
                 div()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(gpui::rgb(ui_theme::text_faint()))
-                    .child(source),
+                    .child(truncated_line(source)),
             )
             .child(
                 Button::new("acp-capabilities-manage")
@@ -134,28 +135,28 @@ fn capability_row(name: String, detail: String, tag: Option<String>) -> impl Int
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_sm()
                         .text_color(gpui::rgb(ui_theme::text_mid()))
-                        .child(name),
+                        .child(truncated_line(name)),
                 )
                 .children(tag.map(|tag| {
                     div()
                         .flex_none()
                         .max_w(px(140.))
-                        .truncate()
+                        .overflow_hidden()
                         .text_xs()
                         .text_color(gpui::rgb(ui_theme::text_faint()))
-                        .child(tag)
+                        .child(truncated_line(tag))
                 })),
         )
         .when(!detail.is_empty(), |row| {
             row.child(
                 div()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(gpui::rgb(ui_theme::text_muted()))
-                    .child(detail),
+                    .child(truncated_line(detail)),
             )
         })
 }
@@ -317,8 +318,8 @@ impl AcpView {
                                 } else {
                                     muted
                                 })
-                                .truncate()
-                                .child(item.hint.clone()),
+                                .overflow_hidden()
+                                .child(truncated_line(item.hint.clone())),
                         )
                     })
                     .on_click(cx.listener(move |this, _ev, window, cx| {
@@ -851,13 +852,13 @@ impl AcpView {
                                         div()
                                             .flex_1()
                                             .min_w(px(0.))
-                                            .truncate()
+                                            .overflow_hidden()
                                             .text_xs()
                                             .text_color(muted)
-                                            .child(format!(
+                                            .child(truncated_line(format!(
                                                 "〈{from}〉{} · 还没送到，手上的工具调用做完就送进来",
                                                 message.kind.received()
-                                            )),
+                                            ))),
                                     ),
                             );
                         }
@@ -1423,10 +1424,10 @@ impl AcpView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(gpui::rgb(ui_theme::text_bright()))
-                                .child(title_line),
+                                .child(truncated_line(title_line)),
                         )
                         .child(
                             div()
@@ -1462,10 +1463,10 @@ impl AcpView {
                     div()
                         .pl(px(4.))
                         .text_xs()
-                        .truncate()
+                        .overflow_hidden()
                         .font_family(mono.clone())
                         .text_color(gpui::rgb(ui_theme::text_muted()))
-                        .child(background_task_one_line(&task.command)),
+                        .child(truncated_line(background_task_one_line(&task.command))),
                 );
             if self.expanded_background_tasks.contains(&task.id) && !task.output.is_empty() {
                 let mut output = v_flex()
@@ -1474,7 +1475,7 @@ impl AcpView {
                     .text_xs()
                     .text_color(gpui::rgb(ui_theme::text_mid()));
                 for line in background_task_output_lines(&task.output) {
-                    output = output.child(div().truncate().child(line.to_string()));
+                    output = output.child(div().overflow_hidden().child(truncated_line(line.to_string())));
                 }
                 row = row.child(output);
             }

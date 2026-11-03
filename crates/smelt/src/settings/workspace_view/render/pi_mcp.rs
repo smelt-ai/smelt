@@ -6,6 +6,7 @@ use super::*;
 use crate::settings::workspace::PiConfigFileKind;
 use smelt_model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 const PAGE_MAX_WIDTH: f32 = 760.;
 
@@ -51,18 +52,18 @@ fn row(index: usize, palette: Palette) -> Div {
 
 fn row_title(text: impl Into<SharedString>, palette: Palette) -> Div {
     div()
-        .truncate()
+        .overflow_hidden()
         .text_sm()
         .text_color(palette.fg)
-        .child(text.into())
+        .child(truncated_line(text))
 }
 
 fn row_detail(text: impl Into<SharedString>, palette: Palette) -> Div {
     div()
-        .truncate()
+        .overflow_hidden()
         .text_xs()
         .text_color(palette.muted)
-        .child(text.into())
+        .child(truncated_line(text))
 }
 
 fn presets_section(

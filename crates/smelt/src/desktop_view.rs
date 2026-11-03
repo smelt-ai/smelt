@@ -12,6 +12,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{StyledExt as _, h_flex};
+use smelt_ui::truncated_line::truncated_line;
 use smelt_runtime_client::desktop::DesktopProxy;
 use smelt_runtime_client::protocol::desktop::{DesktopTypeTextCall, DesktopTypeTextParams};
 pub(crate) use smelt_ui::Button;
@@ -302,10 +303,10 @@ impl DesktopView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(rgb(color))
-                    .child(label),
+                    .child(truncated_line(label)),
             )
             .when(closed, |d| {
                 d.child(

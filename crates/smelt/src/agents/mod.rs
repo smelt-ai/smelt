@@ -27,6 +27,7 @@ use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
 use smelt_model::pi_plugin_catalog::PiPlugin;
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 /// 一个智能体：在哪台机器上、叫什么。定义存在那台机器的运行时里，不同机器上的 id 互不
 /// 相干，所以读、改、开对话都要连机器一起说。
@@ -2672,16 +2673,16 @@ fn render_agent_memory_summary(
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(rgb(crate::ui_theme::text_muted()))
-                        .child(if agent.memory_enabled {
+                        .child(truncated_line(if agent.memory_enabled {
                             memory_summary_text(
                                 editor.memories.agent.entries.len(),
                                 editor.memories.user.entries.len(),
                             )
                         } else {
                             "已关闭：不注入、不写入，已有记忆保留".to_string()
-                        }),
+                        })),
                 )
                 .when(pending > 0, |row| {
                     row.child(
@@ -3055,8 +3056,8 @@ fn agent_memory_row(
                                 .min_w_0()
                                 .text_xs()
                                 .text_color(rgb(crate::ui_theme::text_bright()))
-                                .truncate()
-                                .child(entry.name.clone()),
+                                .overflow_hidden()
+                                .child(truncated_line(entry.name.clone())),
                         ),
                 )
                 .child(
@@ -3207,8 +3208,8 @@ fn agent_context_row(
                 .min_w_0()
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_bright()))
-                .truncate()
-                .child(value.to_string()),
+                .overflow_hidden()
+                .child(truncated_line(value.to_string())),
         )
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
@@ -3469,9 +3470,9 @@ fn agent_plugin_row(
                 .child(
                     div()
                         .text_xs()
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(subtitle_color)
-                        .child(subtitle),
+                        .child(truncated_line(subtitle)),
                 ),
         )
         .into_any_element()
@@ -3550,21 +3551,21 @@ fn automation_run_lines(title: String, detail: String, error: Option<String>) ->
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_sm().font_medium().truncate().child(title))
+        .child(div().text_sm().font_medium().overflow_hidden().child(truncated_line(title)))
         .child(
             div()
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_muted()))
-                .truncate()
-                .child(detail),
+                .overflow_hidden()
+                .child(truncated_line(detail)),
         )
         .when_some(error, |column, error| {
             column.child(
                 div()
                     .text_xs()
                     .text_color(rgb(crate::ui_theme::red()))
-                    .truncate()
-                    .child(error),
+                    .overflow_hidden()
+                    .child(truncated_line(error)),
             )
         })
 }

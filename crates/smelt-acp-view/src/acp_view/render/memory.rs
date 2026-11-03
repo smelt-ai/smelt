@@ -140,7 +140,6 @@ impl AcpView {
             .min_w(px(0.))
             .gap_1p5()
             .items_center()
-            .cursor_pointer()
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.toggle_memory_expanded(toggle_key.clone(), cx);
             }))
@@ -211,14 +210,13 @@ impl AcpView {
                 .compact()
                 .disabled(any_busy);
             let delete = if armed {
-                delete
-                    .danger()
-                    .label("确认删除")
-                    .tooltip(if entry.layer == AgentMemoryLayer::User {
+                delete.danger().label("确认删除").tooltip(
+                    if entry.layer == AgentMemoryLayer::User {
                         "全局记忆删了会从所有智能体里消失"
                     } else {
                         "删了就没了"
-                    })
+                    },
+                )
             } else {
                 delete.outline().label("删除")
             };

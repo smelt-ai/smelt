@@ -4,6 +4,7 @@ use super::*;
 use gpui_component::IndexPath;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use smelt_ui::theme_catalog::ThemeSwatch;
+use smelt_ui::truncated_line::truncated_line;
 use std::collections::HashMap;
 
 pub(super) fn appearance_page(
@@ -199,7 +200,7 @@ impl SelectItem for ThemeOption {
             .items_center()
             .gap_2()
             .children(self.swatch.map(|swatch| theme_dots(swatch, border)))
-            .child(div().flex_1().min_w_0().truncate().child(self.name.clone()))
+            .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(self.name.clone())))
             .child(
                 div()
                     .flex_none()

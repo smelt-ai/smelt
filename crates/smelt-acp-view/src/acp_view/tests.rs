@@ -2033,6 +2033,39 @@ fn progress_summary_is_visible_but_long_details_stay_expandable() {
     assert!(!progress_has_details("只需一句简短进展"));
 }
 
+/// 摘要是纯文本：正文里成对的加粗、行内代码标记要剥掉，落单的照原样留着。
+#[test]
+fn progress_summary_strips_paired_inline_markdown() {
+    assert_eq!(
+        progress_summary("找到关键线索：返回**一模一样**的空正文"),
+        "找到关键线索：返回一模一样的空正文"
+    );
+    assert_eq!(
+        progress_summary("Interesting: `api.ipify.org` reports overseas"),
+        "Interesting: api.ipify.org reports overseas"
+    );
+    // 代码里的星号是正文，不是标记。
+    assert_eq!(progress_summary("看 `a**b` 和 **重点**"), "看 a**b 和 重点");
+    // 落单的标记不动。
+    assert_eq!(progress_summary("算 2**10 的值"), "算 2**10 的值");
+    assert_eq!(progress_summary("半个 `反引号"), "半个 `反引号");
+}
+
+/// 摘要按剥掉标记后的字数截断，是否有详情也按同一把尺子量。
+#[test]
+fn progress_details_are_measured_after_stripping_markers() {
+    let exactly_72 = "字".repeat(72);
+    let marked = format!("**{}**{}", "字".repeat(10), "字".repeat(62));
+    assert_eq!(progress_summary(&marked), exactly_72);
+    assert!(!progress_has_details(&marked), "剥掉标记后正好 72 字，没有可展开的内容");
+
+    let long = format!("开头{}结尾", "很长".repeat(40));
+    let summary = progress_summary(&long);
+    assert!(summary.ends_with('…'));
+    assert_eq!(summary.chars().count(), 73);
+    assert!(progress_has_details(&long));
+}
+
 #[test]
 fn plan_summary_surfaces_the_current_step_in_collapsed_mode() {
     let plan = PlanView {
@@ -4917,6 +4950,88 @@ fn a_subagent_row_is_named_and_timed_by_its_own_record() {
             .collect::<Vec<_>>(),
         ["sa-2"],
         "输入栏只数在跑的"
+    );
+}
+
+
+/// 过程组里跑完的长思考只露出一行摘要，必须能点开看全文。
+#[gpui::test]
+fn long_thought_inside_a_process_group_can_be_expanded(cx: &mut gpui::TestAppContext) {
+    use gpui::VisualTestContext;
+
+    cx.update(gpui_component::init);
+    let long_thought = format!(
+        "I found a key clue: a similar project reported this exact issue two days ago. {}",
+        "The fix is to retry with a fresh identity. ".repeat(4)
+    );
+    let entries = vec![
+        AcpEntry::User("查一下".into()),
+        AcpEntry::Assistant {
+            text: "先看看".into(),
+            thought: false,
+        },
+        AcpEntry::ToolCall {
+            id: "search-1".into(),
+            title: "issues".into(),
+            kind: ToolKind::Search,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+            subagents: Vec::new(),
+            peer: None,
+        },
+        AcpEntry::Assistant {
+            text: long_thought,
+            thought: true,
+        },
+        AcpEntry::ToolCall {
+            id: "read-1".into(),
+            title: "notes.md".into(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+            subagents: Vec::new(),
+            peer: None,
+        },
+        AcpEntry::Assistant {
+            text: "结论".into(),
+            thought: false,
+        },
+    ];
+    let (view, cx) = cx.add_window_view(move |_window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Claude,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "visual test".into(),
+                entries,
+                resume_session_id: None,
+                saved_sid: Some("acp-process-thought-expand".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view.expanded_process_groups.insert(1);
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    draw_settled(cx);
+
+    let row = cx
+        .debug_bounds("ACP_PROGRESS_3")
+        .expect("thought summary should paint in the process group");
+    cx.simulate_click(row.center(), Default::default());
+    draw_settled(cx);
+
+    assert!(
+        view.read_with(cx, |view, _| view.expanded_thoughts.contains(&3)),
+        "过程组里的长思考点了要展开"
     );
 }
 

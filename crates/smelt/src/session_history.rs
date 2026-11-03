@@ -22,6 +22,7 @@ use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::*;
+use smelt_ui::truncated_line::truncated_line;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -428,16 +429,16 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                             div()
                                                 .w_full()
                                                 .text_sm()
-                                                .truncate()
-                                                .child(title),
+                                                .overflow_hidden()
+                                                .child(truncated_line(title)),
                                         )
                                         .child(
                                             div()
                                                 .w_full()
                                                 .text_xs()
                                                 .text_color(muted)
-                                                .truncate()
-                                                .child(secondary_title),
+                                                .overflow_hidden()
+                                                .child(truncated_line(secondary_title)),
                                         )
                                         .on_mouse_down(MouseButton::Left, move |_, _, app| {
                                             ws_for_detail.update(app, |this, cx| {
@@ -662,8 +663,8 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                         .text_sm()
                         .font_semibold()
                         .text_color(fg)
-                        .truncate()
-                        .child(s.title.clone()),
+                        .overflow_hidden()
+                        .child(truncated_line(s.title.clone())),
                 )
                 .child(
                     div()

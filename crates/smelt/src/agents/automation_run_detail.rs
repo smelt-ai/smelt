@@ -9,6 +9,7 @@ use smelt_model::acp_chat::{AcpEntry, DiffLineTag, ToolCallStatus, ToolOutputPar
 use smelt_model::automation::{AutomationRun, AutomationRunStatus};
 
 use super::*;
+use smelt_ui::truncated_line::truncated_line;
 
 /// 单块工具输出最多展示的行数。这里供排查，不是完整日志。
 const TOOL_OUTPUT_MAX_LINES: usize = 400;
@@ -720,10 +721,10 @@ fn transcript_step(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
+                .overflow_hidden()
                 .text_xs()
                 .text_color(rgb(ink))
-                .child(headline),
+                .child(truncated_line(headline)),
         )
         .children(flag.map(|flag| {
             div()
