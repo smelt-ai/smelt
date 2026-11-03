@@ -1,7 +1,10 @@
-# Smelt Pi Runtime
+# Smelt Agent
 
-Smelt 的受管 Pi 运行时包。它由 Smelt 内置 Bun 启动，标准输入输出直接使用 Pi
-官方 `--mode rpc` JSONL 协议；这里没有 ACP Agent，也没有 Smelt 自定义智能体协议。
+`smelt-agent` 的源码包，用 Bun 编成单个可执行文件随 Smelt 发布。里面有两样东西：
+
+- Smelt 受管的 Pi 运行时（默认入口）：标准输入输出直接使用 Pi 官方 `--mode rpc` JSONL
+  协议，没有 Smelt 自定义智能体协议。
+- Claude、Codex 的官方 ACP 适配器（`acp-claude` / `acp-codex` 子命令），见「运行与安全」。
 
 `src/main.ts` 只提供稳定入口。Smelt 随运行时内置加载权限闸门、选择题工具
 `smelt_ask_user` 和隔离子 Agent 工具 `subagent`。子 Agent 扩展不依赖用户全局安装；
