@@ -3105,7 +3105,9 @@ fn inject_local_adapter_cli_path(
     }
 }
 
-/// 编进 smelt-agent 的官方 ACP 适配器。
+/// 编进 smelt-agent 的官方 ACP 适配器。每一份 smelt-agent 都带着它们：这个名字从改名
+/// （#220）才有，适配器在那之前（#208）就编进去了；守护也只认 `smelt-agent`，不会落到
+/// 改名前的 smelt-pi 上。所以不用先运行它问带了什么，省掉一次上百 MB 程序的冷启动。
 ///
 /// 启动命令仍是 `bunx --bun 包@版本`：设置和会话里存的都是它，新客户端也会把它发给已经
 /// 冻结、不认识子命令的旧运行时，所以不换命令，由运行时在启动这一刻决定怎么跑。
@@ -3141,7 +3143,7 @@ fn plan_embedded_adapter_command(
     ephemeral_env: &BTreeMap<String, String>,
     search_path: &str,
     process_has_env: &dyn Fn(&str) -> bool,
-    smelt_pi: impl FnOnce() -> Option<(String, Vec<String>)>,
+    smelt_agent: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
     let tokens: Vec<&str> = launch.command.split_whitespace().collect();
     let program_at = tokens
@@ -3169,15 +3171,10 @@ fn plan_embedded_adapter_command(
     if !has_explicit_cli && resolve_in_path(adapter.cli_program, search_path).is_none() {
         return None;
     }
-    let (executable, bundled) = smelt_pi()?;
-    let package = adapter.agent.managed_adapter()?.current_release().package;
-    // 只认包名、不比版本：跑的是这份 smelt-agent 编进来的那一版。
-    let has_adapter = bundled.iter().any(|spec| {
-        spec.rsplit_once('@')
-            .is_some_and(|(name, _version)| name == package)
-    });
+    // 跑的是这份 smelt-agent 编进来的那一版，不比启动命令里写的版本。
+    let executable = smelt_agent()?;
     // 启动命令按空白分词，带空格的路径传不过去。
-    if !has_adapter || executable.split_whitespace().count() != 1 {
+    if executable.split_whitespace().count() != 1 {
         return None;
     }
     let mut rewritten: Vec<&str> = prefix.to_vec();
@@ -3197,37 +3194,9 @@ fn resolve_embedded_adapter_command(
         &|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()),
         || {
             let executable = crate::managed_runtime::locate_smelt_agent().ok()?;
-            let bundled = embedded_adapter_specs(&executable);
-            Some((executable.to_str()?.to_string(), bundled))
+            executable.to_str().map(str::to_string)
         },
     )
-}
-
-/// 这份 smelt-agent 带着哪些适配器。smelt-agent 和守护分开发布，守护可能遇到更旧的一份：
-/// 不认识 `acp-adapters` 的旧版不会输出这份清单，也就不认识 `acp-claude`，这时走 `bunx`。
-/// 发布目录按内容指纹命名、发布后不再改动，同一路径的结果可以一直用；探测失败不缓存。
-fn embedded_adapter_specs(executable: &std::path::Path) -> Vec<String> {
-    static CACHE: Mutex<Option<(std::path::PathBuf, Vec<String>)>> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((path, specs)) = cache.as_ref()
-        && path == executable
-    {
-        return specs.clone();
-    }
-    let Ok(output) = run_probe_command(executable, "acp-adapters") else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let specs: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect();
-    *cache = Some((executable.to_path_buf(), specs.clone()));
-    specs
 }
 
 /// Ask Claude's adapter to include raw SDK messages so usage/cache-token
@@ -4124,14 +4093,10 @@ fn inspect_runtime_path(program: &str, path: Option<std::path::PathBuf>) -> Runt
 /// 「检测中」。stdout / stderr 各由一条线程边跑边读，输出再多也不会把子进程卡在写
 /// 管道上；进程退出由 `wait` 告知，超过上限便杀掉并收回。
 fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, String> {
-    run_probe_command(path, "--version")
-}
-
-fn run_probe_command(path: &std::path::Path, arg: &str) -> Result<std::process::Output, String> {
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
     let mut command = std::process::Command::new(path);
     command
-        .arg(arg)
+        .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4142,7 +4107,7 @@ fn run_probe_command(path: &std::path::Path, arg: &str) -> Result<std::process::
     crate::login_env::apply_login_environment(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("无法执行 `{arg}`：{error}"))?;
+        .map_err(|error| format!("无法执行 `--version`：{error}"))?;
     let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
     let stdout = read_pipe_in_background(child.stdout.take());
     let stderr = read_pipe_in_background(child.stderr.take());
@@ -4154,9 +4119,9 @@ fn run_probe_command(path: &std::path::Path, arg: &str) -> Result<std::process::
             let _ = smelt_sys::process::terminate_pid(pid);
         })
     }
-    .map_err(|error| format!("等待 `{arg}` 失败：{error}"))?;
+    .map_err(|error| format!("等待 `--version` 失败：{error}"))?;
     if timed_out.load(Ordering::SeqCst) {
-        return Err(format!("`{arg}` 检测超时（5 秒）"));
+        return Err("`--version` 检测超时（5 秒）".to_string());
     }
     // 子进程已经退出。它派生的后代可能还握着管道，读的一侧也只等到同一个截止。
     let collect = |pipe: std::sync::mpsc::Receiver<Vec<u8>>| {
@@ -5119,9 +5084,6 @@ mod embedded_adapter_tests {
     use crate::agent_kind::ConversationLaunchSpec;
     use std::collections::BTreeMap;
 
-    const CLAUDE_SPEC: &str = "@agentclientprotocol/claude-agent-acp@0.78.0";
-    const CODEX_SPEC: &str = "@agentclientprotocol/codex-acp@1.12.0";
-
     fn spec(command: String) -> ConversationLaunchSpec {
         ConversationLaunchSpec {
             command,
@@ -5176,12 +5138,7 @@ mod embedded_adapter_tests {
             &BTreeMap::new(),
             search_path,
             &|_| false,
-            || {
-                Some((
-                    "/home/me/.smelt/bin/smelt-agent-abc/smelt-agent".to_string(),
-                    vec![CLAUDE_SPEC.to_string(), CODEX_SPEC.to_string()],
-                ))
-            },
+            || Some("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent".to_string()),
         )
     }
 
@@ -5228,7 +5185,7 @@ mod embedded_adapter_tests {
                 &ephemeral,
                 empty.path(),
                 &|_| false,
-                || Some(("/bin/smelt-agent".to_string(), vec![CODEX_SPEC.to_string()])),
+                || Some("/bin/smelt-agent".to_string()),
             )
             .is_some()
         );
@@ -5238,7 +5195,7 @@ mod embedded_adapter_tests {
                 &BTreeMap::new(),
                 empty.path(),
                 &|name| name == "CLAUDE_CODE_EXECUTABLE",
-                || Some(("/bin/smelt-agent".to_string(), vec![CLAUDE_SPEC.to_string()])),
+                || Some("/bin/smelt-agent".to_string()),
             )
             .is_some()
         );
@@ -5268,24 +5225,9 @@ mod embedded_adapter_tests {
         }
     }
 
-    /// 更旧的 smelt-agent 没有内置适配器，或者只带了别家的。
     #[test]
-    fn smelt_pi_without_the_adapter_stays_on_bunx() {
+    fn no_smelt_agent_stays_on_bunx() {
         let claude = CliDir::with("claude");
-        for bundled in [vec![], vec![CODEX_SPEC.to_string()]] {
-            assert_eq!(
-                plan_embedded_adapter_command(
-                    &spec(claude_default()),
-                    &BTreeMap::new(),
-                    claude.path(),
-                    &|_| false,
-                    || Some(("/bin/smelt-agent".to_string(), bundled.clone())),
-                ),
-                None,
-                "{bundled:?}"
-            );
-        }
-        // 没装 smelt-agent。
         assert_eq!(
             plan_embedded_adapter_command(
                 &spec(claude_default()),
@@ -5295,26 +5237,6 @@ mod embedded_adapter_tests {
                 || None,
             ),
             None
-        );
-    }
-
-    /// 内置的是哪一版就用哪一版，不要求和启动命令里写的版本一致。
-    #[test]
-    fn bundled_adapter_is_used_whatever_its_version() {
-        let claude = CliDir::with("claude");
-        assert_eq!(
-            plan_embedded_adapter_command(
-                &spec(claude_default()),
-                &BTreeMap::new(),
-                claude.path(),
-                &|_| false,
-                || Some((
-                    "/bin/smelt-agent".to_string(),
-                    vec!["@agentclientprotocol/claude-agent-acp@9.9.9".to_string()]
-                )),
-            )
-            .as_deref(),
-            Some("/bin/smelt-agent acp-claude")
         );
     }
 
@@ -5328,10 +5250,7 @@ mod embedded_adapter_tests {
                 &BTreeMap::new(),
                 claude.path(),
                 &|_| false,
-                || Some((
-                    "/home/first last/.smelt/bin/smelt-agent".to_string(),
-                    vec![CLAUDE_SPEC.to_string()]
-                )),
+                || Some("/home/first last/.smelt/bin/smelt-agent".to_string()),
             ),
             None
         );

@@ -51,17 +51,6 @@ for (const [subcommand, name] of [
 		process.exit(1);
 	}
 }
-const adapters = Bun.spawnSync([binary, "acp-adapters"], { cwd: dir, timeout: 30_000 });
-const adapterList = adapters.stdout.toString();
-if (
-	adapters.exitCode !== 0 ||
-	!adapterList.includes(`@agentclientprotocol/claude-agent-acp@${pkg.dependencies["@agentclientprotocol/claude-agent-acp"]}`) ||
-	!adapterList.includes(`@agentclientprotocol/codex-acp@${pkg.dependencies["@agentclientprotocol/codex-acp"]}`)
-) {
-	console.error(`acp-adapters 输出不对，退出码 ${adapters.exitCode}：${adapterList}${adapters.stderr.toString()}`);
-	rmSync(dir, { recursive: true, force: true });
-	process.exit(1);
-}
 
 const probe = spawn(binary, [], {
 	cwd: dir,
