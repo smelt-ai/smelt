@@ -114,7 +114,7 @@ class L10nEn extends L10n {
 
   @override
   String agentEditDeleteBody(String machine) {
-    return 'This removes it and its own memories from $machine. It can\'t be undone.';
+    return 'This removes it and its own memories from $machine. It can\'t be undone. Existing conversations are kept.';
   }
 
   @override

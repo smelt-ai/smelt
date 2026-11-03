@@ -113,7 +113,7 @@ class L10nZh extends L10n {
 
   @override
   String agentEditDeleteBody(String machine) {
-    return '会从 $machine 上删掉它和它自己的记忆，删了就找不回来。';
+    return '会从 $machine 上删掉它和它自己的记忆，删了就找不回来。已有对话会保留。';
   }
 
   @override

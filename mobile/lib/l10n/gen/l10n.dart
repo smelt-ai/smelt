@@ -286,7 +286,7 @@ abstract class L10n {
   /// No description provided for @agentEditDeleteBody.
   ///
   /// In en, this message translates to:
-  /// **'This removes it and its own memories from {machine}. It can\'t be undone.'**
+  /// **'This removes it and its own memories from {machine}. It can\'t be undone. Existing conversations are kept.'**
   String agentEditDeleteBody(String machine);
 
   /// No description provided for @agentEditDeleteFailed.
