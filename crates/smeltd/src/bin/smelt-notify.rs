@@ -59,7 +59,8 @@ fn run() -> Option<()> {
     let provider = std::env::var("SMELT_HOOK_PROVIDER").unwrap_or_else(|_| "claude".into());
     let event = normalize_hook_event_for_provider(&hook, &provider)?;
     // 生命周期事件先发：hook 有超时，守护卡住时宁可丢标题，不丢状态。
-    let title = claude_title_event(&hook, &provider);
+    let title = claude_title_event(&hook, &provider)
+        .or_else(|| antigravity_title_event(&hook, &provider, None));
 
     for event in std::iter::once(event).chain(title) {
         let payload = serde_json::json!({
@@ -528,6 +529,30 @@ fn claude_title_event(hook: &serde_json::Value, provider: &str) -> Option<AgentE
         .filter(|title| !title.is_empty())
         .map(String::from)
         .or_else(|| transcript_title(std::path::Path::new(hook["transcript_path"].as_str()?)))?;
+    let mut event = build_agent_event(hook, provider, AgentEventKind::SessionTitleChanged, None);
+    event.conversation_title = Some(title);
+    Some(event)
+}
+
+/// Antigravity 的 hook 不带用户输入，也不发标题事件；标题只在它的会话索引库里。
+/// agy 第一轮前后才生成标题，所以每轮开头（PreInvocation）和结束（Stop）都查一次。
+/// `root` 只给测试指定数据目录；正常运行时跟 agy 一样认 `GEMINI_HOME`。
+fn antigravity_title_event(
+    hook: &serde_json::Value,
+    provider: &str,
+    root: Option<&str>,
+) -> Option<AgentEvent> {
+    if provider != "antigravity" {
+        return None;
+    }
+    if !matches!(
+        hook_event_name(hook)?.as_str(),
+        "PreInvocation" | "Stop" | "stop"
+    ) {
+        return None;
+    }
+    let conversation_id = hook_conversation_id(hook)?;
+    let title = smelt_core::antigravity_history::conversation_title(root, &conversation_id)?;
     let mut event = build_agent_event(hook, provider, AgentEventKind::SessionTitleChanged, None);
     event.conversation_title = Some(title);
     Some(event)
@@ -1549,6 +1574,35 @@ mod tests {
             None,
             "转录格式只认 Claude 的"
         );
+    }
+
+    #[test]
+    fn antigravity_title_event_reads_the_summary_title_on_invocation_and_stop() {
+        let root = std::env::temp_dir().join(format!("smelt-notify-agy-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = rusqlite::Connection::open(root.join("conversation_summaries.db")).unwrap();
+        conn.execute_batch(
+            "create table if not exists conversation_summaries \
+             (conversation_id text primary key, title text not null default '');
+             insert or replace into conversation_summaries values ('c1', 'Scheduled Post');",
+        )
+        .unwrap();
+        drop(conn);
+        let dir = root.to_str();
+        for name in ["PreInvocation", "Stop"] {
+            let hook = json!({ "hook_event_name": name, "conversationId": "c1" });
+            let event = antigravity_title_event(&hook, "antigravity", dir).expect(name);
+            assert_eq!(event.kind, AgentEventKind::SessionTitleChanged);
+            assert_eq!(event.conversation_id.as_deref(), Some("c1"));
+            assert_eq!(event.conversation_title.as_deref(), Some("Scheduled Post"));
+        }
+        let tool = json!({ "hook_event_name": "PostToolUse", "conversationId": "c1" });
+        assert_eq!(antigravity_title_event(&tool, "antigravity", dir), None);
+        let other = json!({ "hook_event_name": "Stop", "conversationId": "c1" });
+        assert_eq!(antigravity_title_event(&other, "claude", dir), None);
+        let unknown = json!({ "hook_event_name": "Stop", "conversationId": "c2" });
+        assert_eq!(antigravity_title_event(&unknown, "antigravity", dir), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
