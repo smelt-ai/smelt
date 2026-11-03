@@ -12,6 +12,7 @@ import 'dart:typed_data';
 
 import 'backend.dart';
 import 'demo/demo_conversation.dart';
+import 'demo/demo_files.dart';
 import 'demo/demo_terminal.dart';
 import 'models.dart';
 
@@ -626,6 +627,31 @@ class DemoBackend implements Backend {
     if (!_projectRoots.contains(root)) _projectRoots.add(root);
     return _projectOf(root);
   }
+
+  @override
+  Future<List<FileEntry>> listProjectDir(
+    String runtimeId, {
+    required String root,
+    required String dir,
+  }) async => demoProjectDir(root, dir);
+
+  @override
+  Future<FileSearch> searchProject(
+    String runtimeId, {
+    required String root,
+    required String query,
+  }) async => demoProjectSearch(root, query);
+
+  @override
+  Future<OpenedFile> openFile(String runtimeId, String path) async =>
+      demoOpenFile(path);
+
+  @override
+  FileLinkTarget? resolveFileLink(
+    String runtimeId, {
+    String? cwd,
+    required String target,
+  }) => demoResolveFileLink(cwd, target);
 
   WorkspaceProject _projectOf(String root) => WorkspaceProject(
     root: root,

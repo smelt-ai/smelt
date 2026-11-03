@@ -31,6 +31,13 @@ base64 = "0.23"
 # iOS / Android 都能编，不依赖系统库版本。
 rusqlite = { version = "0.40", features = ["bundled"] }
 
+# 文件预览的语法高亮。syntect 解析 Sublime / TextMate 语法，two-face 补上 bat 那套语法
+# （TypeScript、TOML、Kotlin、Swift、Dart、Vue 等 syntect 自带的没有）。正则用 oniguruma：
+# 比纯 Rust 的 fancy-regex 快约 4.6 倍、包还小，实测见 docs/remote-mobile-files.md 第 5.5 节。
+# 主题不要，颜色由 Dart 的主题按语义类别给。
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
+
 # Logging
 log = "0.4"
 

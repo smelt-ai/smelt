@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/theme/galley.dart';
+import 'package:smelt_mobile/theme/syntax.dart';
 
 double contrast(Color a, Color b) {
   final la = a.computeLuminance();
@@ -11,11 +12,18 @@ double contrast(Color a, Color b) {
 }
 
 void main() {
-  for (final (name, c) in [
-    ('light', GalleyColors.light),
-    ('dark', GalleyColors.dark),
+  for (final (name, c, syntax) in [
+    ('light', GalleyColors.light, SyntaxColors.light),
+    ('dark', GalleyColors.dark, SyntaxColors.dark),
   ]) {
     group('$name 对比度（WCAG AA）', () {
+      test('代码高亮各色在搁板和钢底上 ≥ 4.5', () {
+        for (final fg in syntax.all) {
+          expect(contrast(fg, c.shelf), greaterThanOrEqualTo(4.5));
+          expect(contrast(fg, c.ground), greaterThanOrEqualTo(4.5));
+        }
+      });
+
       test('正文与各级文字在钢底和搁板上 ≥ 4.5', () {
         for (final fg in [c.ink, c.inkMuted, c.inkFaint, c.heatInk, c.link]) {
           expect(contrast(fg, c.ground), greaterThanOrEqualTo(4.5));

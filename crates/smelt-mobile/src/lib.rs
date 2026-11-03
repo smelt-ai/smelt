@@ -7,6 +7,8 @@
 //! - `store`：本机业务数据（SQLite，按版本迁移）：机器登记、消息草稿。
 //! - `cache`：离线缓存（SQLite，坏了重建）。
 //! - `agents`：一台机器上智能体的新建、编辑、删除和记忆审阅（一问一答）。
+//! - `files`：一台机器上的项目文件：列目录、搜索、打开预览（一问一答）。
+//! - `highlight`：文件预览的语法高亮，按行窗口解析。
 //! - `catalog`：一台机器的事件订阅 → 会话摘要、attention、工作区、自动化、历史、新建删除。
 //! - `conversation`：一台机器的 acp_watch 镜像 → 对话视图模型，分页、动作、图片。
 //! - `terminal`：一台机器的终端 watch 字节流、输入、尺寸。
@@ -21,8 +23,10 @@ mod cache;
 mod catalog;
 mod connection;
 mod conversation;
+mod files;
 mod fleet;
 mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. */
+mod highlight;
 mod iroh_dialer;
 mod pass;
 mod push;

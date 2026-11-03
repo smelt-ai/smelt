@@ -337,6 +337,19 @@ impl Catalog {
             .ok_or_else(|| error(SmeltErrorKind::Offline, "还没有连上这台机器"))
     }
 
+    /// 这台机器的路径规则（看它报的系统）。还没等到快照时等一会儿；连不上就按 POSIX。
+    pub(crate) fn path_style(&self) -> smelt_model::runtime_path::PathStyle {
+        if let Ok(runtime) = self.runtime() {
+            self.wait_primed(runtime.generation);
+        }
+        self.cached_path_style()
+    }
+
+    /// 同 [`Self::path_style`]，但不等快照：给不能阻塞的同步入口用。
+    pub(crate) fn cached_path_style(&self) -> smelt_model::runtime_path::PathStyle {
+        self.shared.lock().state.path_style()
+    }
+
     /// 等这一代的首个快照。代号已变或超时返回 false。
     fn wait_primed(&self, generation: u64) -> bool {
         let inner = self.shared.lock();

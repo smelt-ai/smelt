@@ -7,6 +7,8 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../features/conversation/conversation_page.dart';
+import '../../features/files/file_preview_page.dart';
+import '../../features/files/project_files_page.dart';
 import '../stores.dart';
 import '../../features/home_shell.dart';
 import '../../features/launch/new_session_sheet.dart';
@@ -87,5 +89,31 @@ void openDemoScreen(DemoShell shell, String screen) {
       );
     case 'launch':
       showNewSessionSheet(shell.innerContext);
+    case 'files':
+      shell.openDetail(
+        'files/smelt',
+        (_) => const ProjectFilesPage(
+          runtimeId: 'rt-mbp',
+          root: '/Users/demo/code/smelt',
+          title: 'smelt',
+        ),
+      );
+    case 'file':
+      shell.openDetail(
+        'file/main.rs',
+        (_) => const FilePreviewPage(
+          runtimeId: 'rt-mbp',
+          path: '/Users/demo/code/smelt/src/main.rs',
+          line: 6,
+        ),
+      );
+    case 'file-md':
+      shell.openDetail(
+        'file/README.md',
+        (_) => const FilePreviewPage(
+          runtimeId: 'rt-mbp',
+          path: '/Users/demo/code/smelt/README.md',
+        ),
+      );
   }
 }

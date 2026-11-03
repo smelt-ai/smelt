@@ -1062,6 +1062,75 @@ class L10nZh extends L10n {
   String get conversationMemoryEmptyBody => '（正文为空）';
 
   @override
+  String get filesTitle => '文件';
+
+  @override
+  String get filesOpen => '项目文件';
+
+  @override
+  String get filesSearchHint => '搜文件名和内容';
+
+  @override
+  String get filesEmptyDir => '这个目录是空的';
+
+  @override
+  String get filesLoadFailed => '这个目录没取到';
+
+  @override
+  String get filesSearchNone => '没有匹配的';
+
+  @override
+  String get filesSearchTruncated => '只显示了前面一部分，换个更具体的词能看到更多。';
+
+  @override
+  String filesSearchLine(int line) {
+    return '第 $line 行';
+  }
+
+  @override
+  String get filesOpenFailed => '这个文件没打开';
+
+  @override
+  String get filesBinary => '不是文本文件';
+
+  @override
+  String get filesBinaryBody => '这个文件不是文本，也不是能显示的图片。';
+
+  @override
+  String get filesTooLarge => '太大了，不预览';
+
+  @override
+  String filesTooLargeBody(String size, String limit) {
+    return '$size，超过 $limit 的文件不加载。';
+  }
+
+  @override
+  String get filesWrap => '自动换行';
+
+  @override
+  String get filesNoWrap => '不换行';
+
+  @override
+  String get filesShowSource => '看源码';
+
+  @override
+  String get filesShowPreview => '看预览';
+
+  @override
+  String get filesCopyPath => '复制路径';
+
+  @override
+  String get filesPathCopied => '已复制路径';
+
+  @override
+  String get filesPlain => '纯文本 · 文件太大，不上色';
+
+  @override
+  String filesLines(int count) {
+    return '$count 行';
+  }
+
+  @override
   String get launchTitle => '新建会话';
 
   @override

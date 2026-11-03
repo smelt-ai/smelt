@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'galley.dart';
+import 'syntax.dart';
 
 ThemeData buildGalleyTheme(Brightness brightness) {
   final c = brightness == Brightness.dark
@@ -59,7 +60,11 @@ ThemeData buildGalleyTheme(Brightness brightness) {
     colorScheme: scheme,
     scaffoldBackgroundColor: c.ground,
     canvasColor: c.ground,
-    extensions: [c, t],
+    extensions: [
+      c,
+      t,
+      brightness == Brightness.dark ? SyntaxColors.dark : SyntaxColors.light,
+    ],
     // 统一语言：不要 Android 的水波纹，也不要 iOS 上格格不入的扩散；按下只换底色。
     splashFactory: NoSplash.splashFactory,
     highlightColor: c.shelfPressed,

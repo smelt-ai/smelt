@@ -88,6 +88,26 @@ abstract final class Primitives {
   static const glassEdgeLight = Color(0xCCFFFFFF);
   static const glassEdgeDark = Color(0x1FFFFFFF);
 
+  // 代码高亮（文件预览）。取 GitHub 亮 / 暗两套的取值，对各自的搁板与钢底都 ≥ 4.5。
+  static const synComment70 = Color(0xFF636C76);
+  static const synString20 = Color(0xFF0A3069);
+  static const synNumber35 = Color(0xFF0550AE);
+  static const synKeyword47 = Color(0xFFCF222E);
+  static const synType33 = Color(0xFF953800);
+  static const synFunction45 = Color(0xFF6F42C1);
+  static const synTag28 = Color(0xFF116329);
+  static const synLink40 = Color(0xFF0757BA);
+  static const synDeleted27 = Color(0xFF82071E);
+  static const synCommentDark62 = Color(0xFF8B949E);
+  static const synStringDark82 = Color(0xFFA5D6FF);
+  static const synNumberDark72 = Color(0xFF79C0FF);
+  static const synKeywordDark72 = Color(0xFFFF7B72);
+  static const synTypeDark70 = Color(0xFFFFA657);
+  static const synFunctionDark82 = Color(0xFFD2A8FF);
+  static const synTagDark70 = Color(0xFF7EE787);
+  static const synLinkDark65 = Color(0xFF58A6FF);
+  static const synDeletedDark80 = Color(0xFFFFA198);
+
   // 阴影色（只用于真浮层与单据）
   static const shadow = Color(0x1F000000);
   static const shadowDeep = Color(0x52000000);

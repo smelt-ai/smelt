@@ -12,6 +12,7 @@ import '../src/rust/api/agents.dart' as agents;
 import '../src/rust/api/catalog.dart' as catalog;
 import '../src/rust/api/conversation.dart' as conversation;
 import '../src/rust/api/draft.dart' as draft;
+import '../src/rust/api/files.dart' as files;
 import '../src/rust/api/fleet.dart' as fleet;
 import '../src/rust/api/identity.dart' as identity;
 import '../src/rust/api/pass.dart' as pass;
@@ -62,6 +63,31 @@ abstract interface class Backend {
 
   /// 在这台机器上把一个目录打开为项目，返回进了目录之后的它。
   Future<WorkspaceProject> openProject(String runtimeId, String root);
+
+  // 项目文件 -----------------------------------------------------------------
+  /// 列项目里的一层：目录在前。`dir` 必须在 `root` 里面。
+  Future<List<FileEntry>> listProjectDir(
+    String runtimeId, {
+    required String root,
+    required String dir,
+  });
+
+  /// 按文件名和内容搜。
+  Future<FileSearch> searchProject(
+    String runtimeId, {
+    required String root,
+    required String query,
+  });
+
+  /// 打开一个文件预览。文本用完要 [TextSource.dispose]。
+  Future<OpenedFile> openFile(String runtimeId, String path);
+
+  /// 对话里 Markdown 链接的目标是不是那台机器上的文件。同步、不走网络。
+  FileLinkTarget? resolveFileLink(
+    String runtimeId, {
+    String? cwd,
+    required String target,
+  });
   Future<AutomationCatalog> automationCatalog(String runtimeId);
   Future<AutomationCatalog> setAutomationEnabled(
     String runtimeId,
@@ -294,6 +320,31 @@ class FrbBackend implements Backend {
   @override
   Future<WorkspaceProject> openProject(String runtimeId, String root) =>
       catalog.openProject(runtimeId: runtimeId, root: root);
+
+  @override
+  Future<List<FileEntry>> listProjectDir(
+    String runtimeId, {
+    required String root,
+    required String dir,
+  }) => files.listProjectDir(runtimeId: runtimeId, root: root, dir: dir);
+
+  @override
+  Future<FileSearch> searchProject(
+    String runtimeId, {
+    required String root,
+    required String query,
+  }) => files.searchProject(runtimeId: runtimeId, root: root, query: query);
+
+  @override
+  Future<OpenedFile> openFile(String runtimeId, String path) async =>
+      openedFromPreview(await files.openFile(runtimeId: runtimeId, path: path));
+
+  @override
+  FileLinkTarget? resolveFileLink(
+    String runtimeId, {
+    String? cwd,
+    required String target,
+  }) => files.resolveFileLink(runtimeId: runtimeId, cwd: cwd, target: target);
 
   @override
   Future<AutomationCatalog> automationCatalog(String runtimeId) =>

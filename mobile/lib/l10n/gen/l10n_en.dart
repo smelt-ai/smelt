@@ -1119,6 +1119,77 @@ class L10nEn extends L10n {
   String get conversationMemoryEmptyBody => '(empty)';
 
   @override
+  String get filesTitle => 'Files';
+
+  @override
+  String get filesOpen => 'Project files';
+
+  @override
+  String get filesSearchHint => 'Search file names and contents';
+
+  @override
+  String get filesEmptyDir => 'This folder is empty';
+
+  @override
+  String get filesLoadFailed => 'Couldn\'t load this folder';
+
+  @override
+  String get filesSearchNone => 'Nothing matches';
+
+  @override
+  String get filesSearchTruncated =>
+      'Showing the first matches only. Narrow the search to see more.';
+
+  @override
+  String filesSearchLine(int line) {
+    return 'Line $line';
+  }
+
+  @override
+  String get filesOpenFailed => 'Couldn\'t open this file';
+
+  @override
+  String get filesBinary => 'Not a text file';
+
+  @override
+  String get filesBinaryBody =>
+      'This file isn\'t text or an image this app can show.';
+
+  @override
+  String get filesTooLarge => 'Too large to preview';
+
+  @override
+  String filesTooLargeBody(String size, String limit) {
+    return '$size. Files over $limit aren\'t loaded.';
+  }
+
+  @override
+  String get filesWrap => 'Wrap lines';
+
+  @override
+  String get filesNoWrap => 'Don\'t wrap';
+
+  @override
+  String get filesShowSource => 'Show source';
+
+  @override
+  String get filesShowPreview => 'Show preview';
+
+  @override
+  String get filesCopyPath => 'Copy path';
+
+  @override
+  String get filesPathCopied => 'Path copied';
+
+  @override
+  String get filesPlain => 'Plain text · too large to highlight';
+
+  @override
+  String filesLines(int count) {
+    return '$count lines';
+  }
+
+  @override
   String get launchTitle => 'New session';
 
   @override

@@ -11,6 +11,7 @@ import 'api/catalog.dart';
 import 'api/conversation.dart';
 import 'api/draft.dart';
 import 'api/error.dart';
+import 'api/files.dart';
 import 'api/fleet.dart';
 import 'api/identity.dart';
 import 'api/pass.dart';
@@ -29,8 +30,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     required super.portManager,
   });
 
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_TextDocumentPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument;
+
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  TextDocument
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    dynamic raw,
+  );
+
+  @protected
+  TextDocument
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    dynamic raw,
+  );
+
+  @protected
+  TextDocument
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    dynamic raw,
+  );
 
   @protected
   RustStreamSink<CatalogEvent> dco_decode_StreamSink_catalog_event_Sse(
@@ -113,6 +136,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  TextDocument
+  dco_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    dynamic raw,
+  );
+
+  @protected
   AgentDraft dco_decode_box_autoadd_agent_draft(dynamic raw);
 
   @protected
@@ -151,6 +180,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Elicitation dco_decode_box_autoadd_elicitation(dynamic raw);
+
+  @protected
+  FileLinkTarget dco_decode_box_autoadd_file_link_target(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_i_32(dynamic raw);
@@ -199,6 +231,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  BigInt dco_decode_box_autoadd_u_64(dynamic raw);
 
   @protected
   CatalogEvent dco_decode_catalog_event(dynamic raw);
@@ -282,10 +317,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   EntryKind dco_decode_entry_kind(dynamic raw);
 
   @protected
+  FileEntry dco_decode_file_entry(dynamic raw);
+
+  @protected
+  FileLinkTarget dco_decode_file_link_target(dynamic raw);
+
+  @protected
+  FilePreview dco_decode_file_preview(dynamic raw);
+
+  @protected
+  FilePreviewKind dco_decode_file_preview_kind(dynamic raw);
+
+  @protected
+  FileSearch dco_decode_file_search(dynamic raw);
+
+  @protected
+  FileSearchHit dco_decode_file_search_hit(dynamic raw);
+
+  @protected
   FleetRuntime dco_decode_fleet_runtime(dynamic raw);
 
   @protected
   FleetView dco_decode_fleet_view(dynamic raw);
+
+  @protected
+  HighlightedLine dco_decode_highlighted_line(dynamic raw);
 
   @protected
   HistoryRenameResult dco_decode_history_rename_result(dynamic raw);
@@ -375,7 +431,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<FileEntry> dco_decode_list_file_entry(dynamic raw);
+
+  @protected
+  List<FileSearchHit> dco_decode_list_file_search_hit(dynamic raw);
+
+  @protected
   List<FleetRuntime> dco_decode_list_fleet_runtime(dynamic raw);
+
+  @protected
+  List<HighlightedLine> dco_decode_list_highlighted_line(dynamic raw);
 
   @protected
   List<HistorySessionSummary> dco_decode_list_history_session_summary(
@@ -443,6 +508,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SlashCommand> dco_decode_list_slash_command(dynamic raw);
 
   @protected
+  List<TokenSpan> dco_decode_list_token_span(dynamic raw);
+
+  @protected
   List<ToolOutput> dco_decode_list_tool_output(dynamic raw);
 
   @protected
@@ -477,6 +545,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  TextDocument?
+  dco_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    dynamic raw,
+  );
 
   @protected
   AttentionItem? dco_decode_opt_box_autoadd_attention_item(dynamic raw);
@@ -515,6 +589,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Elicitation? dco_decode_opt_box_autoadd_elicitation(dynamic raw);
+
+  @protected
+  FileLinkTarget? dco_decode_opt_box_autoadd_file_link_target(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
@@ -560,6 +637,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
 
   @protected
   List<McpOption>? dco_decode_opt_list_mcp_option(dynamic raw);
@@ -679,6 +759,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TerminalReady dco_decode_terminal_ready(dynamic raw);
 
   @protected
+  TokenKind dco_decode_token_kind(dynamic raw);
+
+  @protected
+  TokenSpan dco_decode_token_span(dynamic raw);
+
+  @protected
   ToolCallView dco_decode_tool_call_view(dynamic raw);
 
   @protected
@@ -706,6 +792,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  BigInt dco_decode_usize(dynamic raw);
+
+  @protected
   WorkspaceCatalog dco_decode_workspace_catalog(dynamic raw);
 
   @protected
@@ -713,6 +802,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  TextDocument
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TextDocument
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TextDocument
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<CatalogEvent> sse_decode_StreamSink_catalog_event_Sse(
@@ -811,6 +918,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  TextDocument
+  sse_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   AgentDraft sse_decode_box_autoadd_agent_draft(SseDeserializer deserializer);
 
   @protected
@@ -861,6 +974,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Elicitation sse_decode_box_autoadd_elicitation(SseDeserializer deserializer);
+
+  @protected
+  FileLinkTarget sse_decode_box_autoadd_file_link_target(
+    SseDeserializer deserializer,
+  );
 
   @protected
   int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
@@ -925,6 +1043,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
   CatalogEvent sse_decode_catalog_event(SseDeserializer deserializer);
@@ -1020,10 +1141,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   EntryKind sse_decode_entry_kind(SseDeserializer deserializer);
 
   @protected
+  FileEntry sse_decode_file_entry(SseDeserializer deserializer);
+
+  @protected
+  FileLinkTarget sse_decode_file_link_target(SseDeserializer deserializer);
+
+  @protected
+  FilePreview sse_decode_file_preview(SseDeserializer deserializer);
+
+  @protected
+  FilePreviewKind sse_decode_file_preview_kind(SseDeserializer deserializer);
+
+  @protected
+  FileSearch sse_decode_file_search(SseDeserializer deserializer);
+
+  @protected
+  FileSearchHit sse_decode_file_search_hit(SseDeserializer deserializer);
+
+  @protected
   FleetRuntime sse_decode_fleet_runtime(SseDeserializer deserializer);
 
   @protected
   FleetView sse_decode_fleet_view(SseDeserializer deserializer);
+
+  @protected
+  HighlightedLine sse_decode_highlighted_line(SseDeserializer deserializer);
 
   @protected
   HistoryRenameResult sse_decode_history_rename_result(
@@ -1133,7 +1275,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<FileEntry> sse_decode_list_file_entry(SseDeserializer deserializer);
+
+  @protected
+  List<FileSearchHit> sse_decode_list_file_search_hit(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<FleetRuntime> sse_decode_list_fleet_runtime(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<HighlightedLine> sse_decode_list_highlighted_line(
     SseDeserializer deserializer,
   );
 
@@ -1223,6 +1378,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<TokenSpan> sse_decode_list_token_span(SseDeserializer deserializer);
+
+  @protected
   List<ToolOutput> sse_decode_list_tool_output(SseDeserializer deserializer);
 
   @protected
@@ -1259,6 +1417,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  TextDocument?
+  sse_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    SseDeserializer deserializer,
+  );
 
   @protected
   AttentionItem? sse_decode_opt_box_autoadd_attention_item(
@@ -1309,6 +1473,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Elicitation? sse_decode_opt_box_autoadd_elicitation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FileLinkTarget? sse_decode_opt_box_autoadd_file_link_target(
     SseDeserializer deserializer,
   );
 
@@ -1378,6 +1547,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
   List<McpOption>? sse_decode_opt_list_mcp_option(SseDeserializer deserializer);
@@ -1505,6 +1677,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TerminalReady sse_decode_terminal_ready(SseDeserializer deserializer);
 
   @protected
+  TokenKind sse_decode_token_kind(SseDeserializer deserializer);
+
+  @protected
+  TokenSpan sse_decode_token_span(SseDeserializer deserializer);
+
+  @protected
   ToolCallView sse_decode_tool_call_view(SseDeserializer deserializer);
 
   @protected
@@ -1532,6 +1710,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
+  BigInt sse_decode_usize(SseDeserializer deserializer);
+
+  @protected
   WorkspaceCatalog sse_decode_workspace_catalog(SseDeserializer deserializer);
 
   @protected
@@ -1540,6 +1721,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    TextDocument self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    TextDocument self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    TextDocument self,
     SseSerializer serializer,
   );
 
@@ -1667,6 +1869,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void
+  sse_encode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    TextDocument self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_agent_draft(
     AgentDraft self,
     SseSerializer serializer,
@@ -1732,6 +1941,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_elicitation(
     Elicitation self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_file_link_target(
+    FileLinkTarget self,
     SseSerializer serializer,
   );
 
@@ -1824,6 +2039,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
 
   @protected
   void sse_encode_catalog_event(CatalogEvent self, SseSerializer serializer);
@@ -1952,10 +2170,40 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_entry_kind(EntryKind self, SseSerializer serializer);
 
   @protected
+  void sse_encode_file_entry(FileEntry self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_file_link_target(
+    FileLinkTarget self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_file_preview(FilePreview self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_file_preview_kind(
+    FilePreviewKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_file_search(FileSearch self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_file_search_hit(FileSearchHit self, SseSerializer serializer);
+
+  @protected
   void sse_encode_fleet_runtime(FleetRuntime self, SseSerializer serializer);
 
   @protected
   void sse_encode_fleet_view(FleetView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_highlighted_line(
+    HighlightedLine self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_history_rename_result(
@@ -2084,8 +2332,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_file_entry(
+    List<FileEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_file_search_hit(
+    List<FileSearchHit> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_fleet_runtime(
     List<FleetRuntime> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_highlighted_line(
+    List<HighlightedLine> self,
     SseSerializer serializer,
   );
 
@@ -2213,6 +2479,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_token_span(
+    List<TokenSpan> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_tool_output(
     List<ToolOutput> self,
     SseSerializer serializer,
@@ -2253,6 +2525,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void
+  sse_encode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    TextDocument? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_attention_item(
@@ -2314,6 +2593,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_elicitation(
     Elicitation? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_file_link_target(
+    FileLinkTarget? self,
     SseSerializer serializer,
   );
 
@@ -2400,6 +2685,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_list_mcp_option(
@@ -2567,6 +2855,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_terminal_ready(TerminalReady self, SseSerializer serializer);
 
   @protected
+  void sse_encode_token_kind(TokenKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_token_span(TokenSpan self, SseSerializer serializer);
+
+  @protected
   void sse_encode_tool_call_view(ToolCallView self, SseSerializer serializer);
 
   @protected
@@ -2597,6 +2891,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
+  void sse_encode_usize(BigInt self, SseSerializer serializer);
+
+  @protected
   void sse_encode_workspace_catalog(
     WorkspaceCatalog self,
     SseSerializer serializer,
@@ -2613,6 +2910,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
 class RustLibWire implements BaseWire {
   RustLibWire.fromExternalLibrary(ExternalLibrary lib);
+
+  void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+        ptr,
+      );
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+        ptr,
+      );
 }
 
 @JS('wasm_bindgen')
@@ -2620,4 +2933,14 @@ external RustLibWasmModule get wasmModule;
 
 @JS()
 @anonymous
-extension type RustLibWasmModule._(JSObject _) implements JSObject {}
+extension type RustLibWasmModule._(JSObject _) implements JSObject {
+  external void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    int ptr,
+  );
+
+  external void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTextDocument(
+    int ptr,
+  );
+}

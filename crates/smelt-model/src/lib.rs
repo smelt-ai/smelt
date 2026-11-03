@@ -20,6 +20,7 @@ pub mod control_api;
 pub mod conversation;
 pub mod copilot_quota;
 pub mod daemon_state;
+pub mod file_link;
 pub mod default_conversation;
 pub mod font_config;
 pub mod kitty_graphics;

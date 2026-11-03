@@ -32,6 +32,7 @@ use crate::api::fleet::{
 };
 use crate::cache::Cache;
 use crate::agents::Agents;
+use crate::files::Files;
 use crate::catalog::Catalog;
 use crate::connection::{
     ConnectionEvent, ConnectionHub, CurrentRuntime, Dialer, Listener, RuntimeInfo, Target,
@@ -58,6 +59,7 @@ pub(crate) trait Transport: Dialer {
 pub(crate) struct Timings {
     pub connection: crate::connection::Timing,
     pub agents: crate::agents::Timing,
+    pub files: crate::files::Timing,
     pub catalog: crate::catalog::Timing,
     pub conversation: crate::conversation::Timing,
     pub terminal: crate::terminal::Timing,
@@ -69,6 +71,7 @@ impl Timings {
     pub(crate) const PRODUCTION: Self = Self {
         connection: crate::connection::Timing::PRODUCTION,
         agents: crate::agents::Timing::PRODUCTION,
+        files: crate::files::Timing::PRODUCTION,
         catalog: crate::catalog::Timing::PRODUCTION,
         conversation: crate::conversation::Timing::PRODUCTION,
         terminal: crate::terminal::Timing::PRODUCTION,
@@ -102,6 +105,7 @@ pub(crate) struct Node {
     pub hub: Arc<ConnectionHub>,
     pub catalog: Catalog,
     pub agents: Agents,
+    pub files: Files,
     pub conversations: Conversations,
     pub terminals: TerminalHub,
 }
@@ -128,6 +132,12 @@ impl crate::catalog::RuntimeSource for NodeSource {
 }
 
 impl crate::agents::RuntimeSource for NodeSource {
+    fn current(&self) -> Option<CurrentRuntime> {
+        self.hub.current()
+    }
+}
+
+impl crate::files::RuntimeSource for NodeSource {
     fn current(&self) -> Option<CurrentRuntime> {
         self.hub.current()
     }
@@ -175,6 +185,7 @@ impl Node {
         Self {
             catalog: Catalog::new(runtime_id.clone(), source.clone(), timings.catalog),
             agents: Agents::new(source.clone(), timings.agents),
+            files: Files::new(source.clone(), timings.files),
             conversations: Conversations::new(source.clone(), timings.conversation),
             terminals: TerminalHub::new(source, timings.terminal),
             runtime_id,

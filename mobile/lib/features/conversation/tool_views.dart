@@ -8,6 +8,7 @@ import '../../data/models.dart';
 import '../../l10n/gen/l10n.dart';
 import '../../theme/galley.dart';
 import '../../ui/status.dart';
+import '../files/file_links.dart';
 import 'conversation_images.dart';
 import 'conversation_logic.dart';
 import 'conversation_markdown.dart';
@@ -499,6 +500,7 @@ class _DiffBlockState extends State<DiffBlock> {
       ),
     };
 
+    final linkable = FileLinkScope.maybeOf(context) != null;
     return DecoratedBox(
       decoration: BoxDecoration(
         color: c.shelf,
@@ -518,12 +520,21 @@ class _DiffBlockState extends State<DiffBlock> {
               ),
               child: Row(
                 children: [
+                  // 能解析成那台机器上的文件时，点文件名在 App 里打开它现在的样子。
                   Expanded(
-                    child: Text(
-                      widget.diff.path,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: t.monoHead.copyWith(color: c.ink),
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: linkable
+                          ? () => openFileLink(context, widget.diff.path)
+                          : null,
+                      child: Text(
+                        widget.diff.path,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: t.monoHead.copyWith(
+                          color: linkable ? c.link : c.ink,
+                        ),
+                      ),
                     ),
                   ),
                   if (widget.diff.newFile) ...[

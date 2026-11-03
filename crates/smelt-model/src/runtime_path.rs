@@ -39,6 +39,14 @@ impl PathStyle {
         }
     }
 
+    /// 绝对路径。Windows 认盘符开头和 `\` 开头，也认 `/` 开头（运行时有时这样报）。
+    pub fn is_absolute(self, path: &str) -> bool {
+        match self {
+            Self::Posix => is_absolute(path),
+            Self::Windows => is_windows_absolute(path) || is_absolute(path),
+        }
+    }
+
     /// 去掉最后一段。根和空路径没有父目录；相对路径只剩一段时父目录是空串。
     pub fn parent(self, path: &str) -> Option<String> {
         match self {

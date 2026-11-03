@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
-import 'package:url_launcher/url_launcher.dart';
+
+import '../files/file_links.dart';
 
 import '../../theme/galley.dart';
 
@@ -33,10 +34,8 @@ class ConversationMarkdown extends StatelessWidget {
     return MarkdownBody(
       data: data,
       selectable: true,
-      onTapLink: (_, href, _) {
-        final uri = href == null ? null : Uri.tryParse(href);
-        if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
-      },
+      // 外面有 [FileLinkScope] 时，指向那台机器上文件的链接在 App 里预览。
+      onTapLink: (_, href, _) => openMarkdownLink(context, href),
       styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
         p: body,
         a: body.copyWith(
