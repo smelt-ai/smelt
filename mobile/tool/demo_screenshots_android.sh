@@ -12,7 +12,7 @@ settle=${SETTLE:-2}
 prefix=${1:?输出前缀，如 review/phone-android}
 shift
 screens=("$@")
-[ ${#screens[@]} -eq 0 ] && screens=(pass triage conversation approval stamped terminal terminal-offline sessions agents settings machine launch)
+[ ${#screens[@]} -eq 0 ] && screens=(pass triage conversation approval stamped terminal terminal-offline sessions agents settings machine launch files file file-md)
 pkg=ai.smelt.mobile
 adb install -r build/app/outputs/flutter-apk/app-debug.apk >/dev/null
 activity=$(adb shell cmd package resolve-activity --brief "${pkg}" | tail -1 | tr -d '\r')
