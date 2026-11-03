@@ -562,24 +562,38 @@ fn discard_staged_update_locked(
     abandon_pending_update_locked(state_path, state, &pending, app_bundle, None)
 }
 
-/// 读取当前包对应的发布 URL。先读升级成功后写入的用户状态，再读打包时可选携带的
-/// `Contents/Resources/SmeltUpdateURL`，兼容已经发布但没有状态文档的安装包。
+/// 读取当前包对应的发布 URL。
+///
+/// 打包时写进 `Contents/Resources/SmeltUpdateURL` 的地址描述的就是正在运行的这个包，
+/// 优先认它。用户状态里的 `current_url` 是上次自更新成功时记下的，用户之后手动装了
+/// 别的包（拖 dmg、make install）它不会跟着变，只在包里没带地址时兜底。
 pub fn installed_release() -> anyhow::Result<InstalledRelease> {
-    let _guard = acquire_update_lock()?;
-    let state = load_update_state_locked(&update_state_path()?)?;
-    if let Some(url) = state.current_url.filter(|url| !url.trim().is_empty()) {
-        return Ok(InstalledRelease::Url(url));
-    }
-
     let bundled_path = current_app_bundle()?.join(BUNDLED_RELEASE_URL_FILE);
-    match std::fs::read_to_string(&bundled_path) {
-        Ok(url) if !url.trim().is_empty() => Ok(InstalledRelease::Url(url.trim().to_string())),
-        Ok(_) => Ok(InstalledRelease::Unknown),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(InstalledRelease::Unknown),
+    let bundled_url = match std::fs::read_to_string(&bundled_path) {
+        Ok(url) => Some(url),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            Err(error).with_context(|| format!("读取当前发布 URL 失败：{}", bundled_path.display()))
+            return Err(error)
+                .with_context(|| format!("读取当前发布 URL 失败：{}", bundled_path.display()));
         }
-    }
+    };
+    let state_url = {
+        let _guard = acquire_update_lock()?;
+        load_update_state_locked(&update_state_path()?)?.current_url
+    };
+    Ok(resolve_installed_release(bundled_url, state_url))
+}
+
+fn resolve_installed_release(
+    bundled_url: Option<String>,
+    state_url: Option<String>,
+) -> InstalledRelease {
+    [bundled_url, state_url]
+        .into_iter()
+        .flatten()
+        .map(|url| url.trim().to_string())
+        .find(|url| !url.is_empty())
+        .map_or(InstalledRelease::Unknown, InstalledRelease::Url)
 }
 
 fn installer_root() -> anyhow::Result<PathBuf> {
@@ -1756,10 +1770,36 @@ mod tests {
         clear_preparing_update_in_state, decide_staged_update_check, discard_staged_update_locked,
         installer_attempt_from_state, is_valid_update_id, load_update_state_locked,
         promote_staged_update_in_state, reconcile_update_state_locked,
-        record_installer_failure_in_state, safe_component, same_update, save_update_state_locked,
-        staged_update_to_replace, update_asset,
+        record_installer_failure_in_state, resolve_installed_release, safe_component, same_update,
+        save_update_state_locked, staged_update_to_replace, update_asset,
     };
     use std::path::PathBuf;
+
+    /// 自更新记下 1031 之后手动装了 1102：认包里的地址，不认状态里的旧地址。
+    #[test]
+    fn bundled_url_wins_over_stale_state_url() {
+        let bundled = "https://example.test/v2026.1102.0/Smelt.app.zip";
+        let stale = "https://example.test/v2026.1031.0/Smelt.app.zip";
+        assert_eq!(
+            resolve_installed_release(Some(format!("{bundled}\n")), Some(stale.into())),
+            InstalledRelease::Url(bundled.into())
+        );
+    }
+
+    #[test]
+    fn state_url_is_fallback_when_bundle_has_none() {
+        let state = "https://example.test/current.zip";
+        for bundled in [None, Some("  \n".to_string())] {
+            assert_eq!(
+                resolve_installed_release(bundled, Some(state.into())),
+                InstalledRelease::Url(state.into())
+            );
+        }
+        assert_eq!(
+            resolve_installed_release(None, None),
+            InstalledRelease::Unknown
+        );
+    }
 
     fn staged_update(id: &str) -> StagedUpdate {
         StagedUpdate {
