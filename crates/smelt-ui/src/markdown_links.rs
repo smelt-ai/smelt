@@ -52,70 +52,24 @@ fn opens_link(event: &ClickEvent) -> bool {
 }
 
 fn resolve_relative_file_link(target: &str, links: FileLinks<'_>) -> Option<String> {
-    let target = target.trim();
-    if target.is_empty()
-        || target.starts_with('#')
-        || target.starts_with('~')
-        || target.contains("://")
-        || target.starts_with("mailto:")
-        || target.starts_with("data:")
-    {
-        return None;
-    }
-    let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
-    // Agent 引用文件常写成 grep/编译器诊断那种 `path:行号` 或 `path:行号:列号`
-    // 格式（不是 `#L行号` 片段）。这种没有 `#` 片段时，才尝试从冒号后缀里抠
-    // 行号出来——不然会把 `:2765` 当成文件名的一部分拼进路径，读不到文件时
-    // 还误报“可能是二进制文件”。
-    let (path, fragment) = if fragment.is_empty() {
-        match extract_trailing_line_number(path) {
-            Some((base, line)) => (base, format!("L{line}")),
-            None => (path, String::new()),
-        }
-    } else {
-        (path, fragment.to_string())
-    };
-    let path = std::path::Path::new(path);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::path::Path::new(links.cwd?).join(path)
-    };
-    let mut url = url::Url::from_file_path(absolute).ok()?;
+    // 哪些算文件链接、相对路径怎么补全、`path:行号` 怎么拆，和手机共用 smelt-model 的规则。
+    let link = smelt_model::file_link::parse_file_link(
+        target,
+        links.cwd,
+        smelt_model::runtime_path::PathStyle::LOCAL,
+    )?;
+    let mut url = url::Url::from_file_path(&link.path).ok()?;
     // 远程运行时上的文件：host 写运行时 id。本机的不带 host。
     if let Some(runtime) = links.runtime {
         url.set_host(Some(runtime)).ok()?;
     }
-    if !fragment.is_empty() {
-        url.set_fragment(Some(&fragment));
+    if !link.fragment.is_empty() {
+        url.set_fragment(Some(&link.fragment));
     }
     // `Url::set_scheme` 会把自定义 scheme 序列化成 `smelt-file:/path`
     // （单斜杠），而 macOS URL scheme 与主进程解析器都按 authority 形式接收。
     // 从标准 file URL 替换前缀可稳定保留 `smelt-file:///absolute/path`。
     Some(url.to_string().replacen("file://", "smelt-file://", 1))
-}
-
-/// 从 `path:行号` / `path:行号:列号` 里拆出末尾的行号：从右往左数，只要是纯
-/// 数字的 segment 就一直往前吞（列号可选，最多吞两段），吞到的最后一个数字
-/// segment 就是行号；一段数字都没吃到就说明不是这种格式，返回 None 原样处理
-/// （比如 Windows 盘符 `C:\...`，虽然本 app 只跑 macOS，多判一下无妨）。
-fn extract_trailing_line_number(path: &str) -> Option<(&str, u32)> {
-    let mut rest = path;
-    let mut line = None;
-    for _ in 0..2 {
-        let Some((head, tail)) = rest.rsplit_once(':') else {
-            break;
-        };
-        if head.is_empty() {
-            break;
-        }
-        let Ok(n) = tail.parse::<u32>() else {
-            break;
-        };
-        line = Some(n);
-        rest = head;
-    }
-    line.map(|n| (rest, n))
 }
 
 #[cfg(test)]

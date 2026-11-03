@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod conversation;
 pub mod draft;
 pub mod error;
+pub mod files;
 pub mod fleet;
 pub mod identity;
 pub mod pass;

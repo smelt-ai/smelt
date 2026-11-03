@@ -36,6 +36,10 @@ const FAST: Timings = Timings {
         call_timeout: Duration::from_millis(500),
         slow_call_timeout: Duration::from_millis(500),
     },
+    files: crate::files::Timing {
+        call_timeout: Duration::from_millis(500),
+        open_timeout: Duration::from_millis(500),
+    },
     catalog: crate::catalog::Timing {
         push_delay: Duration::from_millis(20),
         save_delay: Duration::from_millis(40),
