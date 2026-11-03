@@ -521,7 +521,7 @@ describe("smelt-memory extension", () => {
 			return toolResult(runner, id, "write", { path, content });
 		}
 
-		test("a clean turn writes trusted memory and reports it when the run ends", async () => {
+		test("a clean turn writes trusted memory without a text notice (smeltd shows the card)", async () => {
 			const { agent } = setupRoots();
 			const { runner, notices, host } = await createRunner();
 			await turn(runner);
@@ -530,7 +530,7 @@ describe("smelt-memory extension", () => {
 
 			expect(result?.content).toBeUndefined();
 			expect(host.provenance.agent.get("clean.md")?.trust).toBe("trusted");
-			expect(notices.at(-1)).toBe("记忆：记住了 1 条");
+			expect(notices.filter((notice) => notice.startsWith("记忆："))).toEqual([]);
 		});
 
 		test("after an external tool result in the same turn, writes are pending and not injected", async () => {
@@ -552,7 +552,7 @@ describe("smelt-memory extension", () => {
 				reason: expect.stringContaining("web_search"),
 			});
 			expect(JSON.stringify(result?.content)).toContain("待确认");
-			expect(notices.at(-1)).toBe("记忆：记住了 1 条；1 条待确认，在智能体的记忆卡片里采纳后生效");
+			expect(notices.filter((notice) => notice.startsWith("记忆："))).toEqual([]);
 
 			const section = (await turn(runner))?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION];
 			expect(section).toContain("before-search");

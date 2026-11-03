@@ -173,6 +173,8 @@ pub struct AcpSessionState {
     pub provider_retry: Option<ProviderRetryView>,
     /// 给用户看的一次性提示。启动进度不在这里，在 `status_line`。
     pub notice: Option<AcpNoticeView>,
+    /// 这一轮写下或改过的记忆。smeltd 在记忆写入落库、用户采纳或删除时改；开新一轮收起。
+    pub memory_changes: Option<MemoryChangesView>,
     /// smeltd 回合闸门后面那条队列的展示投影。队列本体（附图、投递 id）在 smeltd，
     /// 它每次改队列都整份重写这里；归约器不碰。
     pub pending_prompts: Vec<PendingPromptView>,
@@ -247,6 +249,7 @@ impl Default for AcpSessionState {
             compacting: false,
             provider_retry: None,
             notice: None,
+            memory_changes: None,
             pending_prompts: Vec::new(),
             queued_steering: Vec::new(),
             queued_steering_images: Vec::new(),
@@ -342,6 +345,7 @@ impl AcpSessionState {
             compacting: snap.compacting,
             provider_retry: snap.provider_retry,
             notice: snap.notice,
+            memory_changes: snap.memory_changes,
             // 队列本体不随进程交接（交接会等队列先清空），新进程从空队列开始。
             pending_prompts: Vec::new(),
             queued_steering: snap.queued_steering,
@@ -420,6 +424,7 @@ impl AcpSessionState {
             compacting,
             provider_retry,
             notice,
+            memory_changes,
             pending_prompts,
             queued_steering,
             queued_follow_up,
@@ -527,6 +532,7 @@ impl AcpSessionState {
             self.compacting = compacting;
             self.provider_retry = provider_retry;
             self.notice = notice;
+            self.memory_changes = memory_changes;
             self.pending_prompts = pending_prompts;
             self.queued_steering = queued_steering;
             self.queued_steering_images.clear();
@@ -891,6 +897,9 @@ impl AcpSessionState {
             compacting: self.compacting,
             provider_retry: self.provider_retry.clone(),
             notice: include_envelope.then(|| self.notice.clone()).flatten(),
+            memory_changes: include_envelope
+                .then(|| self.memory_changes.clone())
+                .flatten(),
             pending_prompts: if include_envelope {
                 self.pending_prompts.clone()
             } else {
@@ -1069,6 +1078,7 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.provider_retry = None;
     state.compacting = false;
     state.notice = None;
+    state.memory_changes = None;
     state.awaiting_user_echo = false;
     state.cancelled_tool_call_ids.clear();
     state.cancelled_turn_seq = None;
@@ -1167,6 +1177,7 @@ pub fn note_prompt_sent_with_delivery(
     state.turn_outcome = None;
     state.provider_retry = None;
     state.notice = None;
+    state.memory_changes = None;
     let started_at_ms = unix_time_ms();
     state.turn_started_at_ms = Some(started_at_ms);
     state.turn_timings.push(TurnTiming {
@@ -1227,6 +1238,79 @@ pub fn raise_notice(state: &mut AcpSessionState, kind: AcpNoticeKind, text: Stri
         kind,
         text,
     });
+}
+
+/// 记下这一轮的一次记忆写入。同一条记忆改多次只占一行：保留「这一轮新建的」，其余取最新。
+/// 每次都换更大的 id，被关掉的卡片因新写入重新出现。
+pub fn note_memory_write(state: &mut AcpSessionState, agent_id: &str, change: MemoryChangeView) {
+    let floor = state
+        .memory_changes
+        .as_ref()
+        .map_or(0, |changes| changes.id + 1);
+    let id = unix_time_ms().max(floor);
+    let changes = state.memory_changes.get_or_insert_with(|| MemoryChangesView {
+        id,
+        agent_id: agent_id.to_string(),
+        entries: Vec::new(),
+    });
+    changes.id = id;
+    changes.agent_id = agent_id.to_string();
+    match changes
+        .entries
+        .iter_mut()
+        .find(|entry| entry.layer == change.layer && entry.file_name == change.file_name)
+    {
+        Some(entry) => {
+            let created = entry.created || change.created;
+            *entry = MemoryChangeView { created, ..change };
+        }
+        None => changes.entries.push(change),
+    }
+}
+
+/// 用户在某一端处理了一条记忆后，卡片上的那一行怎么变。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryResolution {
+    Approved,
+    Deleted,
+}
+
+/// 把用户的采纳、删除同步到卡片上。不换 id：关掉的卡片不因此重新出现。删光了卡片就收起。
+/// 返回卡片是否变了。
+pub fn resolve_memory_change(
+    state: &mut AcpSessionState,
+    agent_id: &str,
+    layer: crate::control_api::AgentMemoryLayer,
+    file_name: &str,
+    resolution: MemoryResolution,
+) -> bool {
+    use crate::control_api::AgentMemoryLayer;
+    let Some(changes) = state.memory_changes.as_mut() else {
+        return false;
+    };
+    // 用户全局层所有智能体共用，谁的卡片上有都要同步；智能体自己的层只认它自己。
+    if layer == AgentMemoryLayer::Agent && changes.agent_id != agent_id {
+        return false;
+    }
+    let Some(index) = changes.entries.iter().position(|entry| {
+        entry.layer == layer && entry.file_name.eq_ignore_ascii_case(file_name)
+    }) else {
+        return false;
+    };
+    match resolution {
+        MemoryResolution::Approved => {
+            if changes.entries[index].pending_reason.take().is_none() {
+                return false;
+            }
+        }
+        MemoryResolution::Deleted => {
+            changes.entries.remove(index);
+            if changes.entries.is_empty() {
+                state.memory_changes = None;
+            }
+        }
+    }
+    true
 }
 
 const PROVIDER_STILL_RUNNING_STATUS: &str = "已排队，这一轮结束后再发";

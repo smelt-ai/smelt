@@ -4,10 +4,11 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+import 'agents.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 订阅一个会话。可以同时订阅多个会话（含不同机器上的），各自独立。`watch_id` 是调用方
 /// 给这个订阅者取的编号（进程内不重复），退订时带回。同一会话可以有几个订阅者，共用一条
@@ -447,6 +448,83 @@ class ConversationImage {
           original == other.original;
 }
 
+class ConversationMemoryChange {
+  final MemoryLayer layer;
+  final String fileName;
+  final String name;
+  final String description;
+
+  /// 这一轮新建的；否则是改了已有的。
+  final bool created;
+
+  /// 待确认的原因；空是已经生效。
+  final String? pendingReason;
+
+  /// 正文（去掉 frontmatter），过长时截断。
+  final String body;
+
+  const ConversationMemoryChange({
+    required this.layer,
+    required this.fileName,
+    required this.name,
+    required this.description,
+    required this.created,
+    this.pendingReason,
+    required this.body,
+  });
+
+  @override
+  int get hashCode =>
+      layer.hashCode ^
+      fileName.hashCode ^
+      name.hashCode ^
+      description.hashCode ^
+      created.hashCode ^
+      pendingReason.hashCode ^
+      body.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConversationMemoryChange &&
+          runtimeType == other.runtimeType &&
+          layer == other.layer &&
+          fileName == other.fileName &&
+          name == other.name &&
+          description == other.description &&
+          created == other.created &&
+          pendingReason == other.pendingReason &&
+          body == other.body;
+}
+
+/// 这一轮写下或改过的记忆。`id` 在有新写入时变大，按它记「这张卡片已经关掉」；
+/// 用户采纳、删除后 id 不变，只有行变。
+class ConversationMemoryChanges {
+  final PlatformInt64 id;
+
+  /// 写入这些记忆的智能体，采纳、删除按它寻址（用户全局层也一样）。
+  final String agentId;
+  final List<ConversationMemoryChange> entries;
+
+  const ConversationMemoryChanges({
+    required this.id,
+    required this.agentId,
+    required this.entries,
+  });
+
+  @override
+  int get hashCode => id.hashCode ^ agentId.hashCode ^ entries.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConversationMemoryChanges &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          agentId == other.agentId &&
+          entries == other.entries;
+}
+
 /// 一次性提示。`id` 单调递增，按它记「这条已经关掉」。
 class ConversationNotice {
   final PlatformInt64 id;
@@ -494,6 +572,9 @@ class ConversationView {
   /// 该给用户看的一次性提示（压缩失败、改配置没生效等）；新回合开始时清掉。
   final ConversationNotice? notice;
 
+  /// 这一轮写下或改过的记忆，输入框上方的卡片；新回合开始时清掉。
+  final ConversationMemoryChanges? memoryChanges;
+
   /// `Dead` / `Failed` 时的原因，活会话为空串。
   final String endReason;
   final String? sessionTitle;
@@ -540,6 +621,7 @@ class ConversationView {
     this.statusLine,
     required this.compacting,
     this.notice,
+    this.memoryChanges,
     required this.endReason,
     this.sessionTitle,
     this.turnStartedAtMs,
@@ -566,6 +648,7 @@ class ConversationView {
       statusLine.hashCode ^
       compacting.hashCode ^
       notice.hashCode ^
+      memoryChanges.hashCode ^
       endReason.hashCode ^
       sessionTitle.hashCode ^
       turnStartedAtMs.hashCode ^
@@ -594,6 +677,7 @@ class ConversationView {
           statusLine == other.statusLine &&
           compacting == other.compacting &&
           notice == other.notice &&
+          memoryChanges == other.memoryChanges &&
           endReason == other.endReason &&
           sessionTitle == other.sessionTitle &&
           turnStartedAtMs == other.turnStartedAtMs &&

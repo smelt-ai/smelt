@@ -69,6 +69,8 @@ pub struct ConversationView {
     pub compacting: bool,
     /// 该给用户看的一次性提示（压缩失败、改配置没生效等）；新回合开始时清掉。
     pub notice: Option<ConversationNotice>,
+    /// 这一轮写下或改过的记忆，输入框上方的卡片；新回合开始时清掉。
+    pub memory_changes: Option<ConversationMemoryChanges>,
     /// `Dead` / `Failed` 时的原因，活会话为空串。
     pub end_reason: String,
     pub session_title: Option<String>,
@@ -378,6 +380,30 @@ pub struct SlashCommand {
 pub struct ConversationNotice {
     pub id: i64,
     pub text: String,
+}
+
+/// 这一轮写下或改过的记忆。`id` 在有新写入时变大，按它记「这张卡片已经关掉」；
+/// 用户采纳、删除后 id 不变，只有行变。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationMemoryChanges {
+    pub id: i64,
+    /// 写入这些记忆的智能体，采纳、删除按它寻址（用户全局层也一样）。
+    pub agent_id: String,
+    pub entries: Vec<ConversationMemoryChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationMemoryChange {
+    pub layer: crate::api::agents::MemoryLayer,
+    pub file_name: String,
+    pub name: String,
+    pub description: String,
+    /// 这一轮新建的；否则是改了已有的。
+    pub created: bool,
+    /// 待确认的原因；空是已经生效。
+    pub pending_reason: Option<String>,
+    /// 正文（去掉 frontmatter），过长时截断。
+    pub body: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

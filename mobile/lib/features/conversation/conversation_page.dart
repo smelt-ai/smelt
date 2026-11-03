@@ -15,11 +15,13 @@ import '../../ui/buttons.dart';
 import '../../ui/page.dart';
 import '../../ui/station.dart';
 import '../../ui/time.dart';
+import '../agents/agent_memory_page.dart';
 import '../../utils/image_processing.dart';
 import 'composer.dart';
 import 'conversation_logic.dart';
 import 'conversation_sheets.dart';
 import 'entry_views.dart';
+import 'memory_changes_card.dart';
 import 'ticket_dock.dart';
 import 'tool_views.dart';
 
@@ -112,6 +114,9 @@ class _ConversationPageState extends State<ConversationPage> {
 
   /// 本页关掉的提示。快照里提示没了就忘掉，新提示照常出来。
   int? _dismissedNoticeId;
+
+  /// 本页关掉的记忆卡片。有新写入时 id 变大，卡片重新出现；快照里没了就忘掉。
+  int? _dismissedMemoryChangesId;
 
   // 连接 ---------------------------------------------------------------------
   /// 这台机器的连接停过（disconnected）：内核的订阅随之停了，连回来要重新订。
@@ -222,6 +227,7 @@ class _ConversationPageState extends State<ConversationPage> {
           );
           if (view.pendingElicitation == null) _answeredElicitation = null;
           if (view.notice == null) _dismissedNoticeId = null;
+          if (view.memoryChanges == null) _dismissedMemoryChangesId = null;
           _rebuildRows();
           _refreshDock();
         });
@@ -1097,10 +1103,10 @@ class _ConversationPageState extends State<ConversationPage> {
             ),
             ListenableBuilder(
               listenable: Listenable.merge([
-              _model.fleet,
-              _model.catalog,
-              _model.workspaces,
-            ]),
+                _model.fleet,
+                _model.catalog,
+                _model.workspaces,
+              ]),
               builder: (context, _) {
                 final runtime = _model.fleet.runtime(widget.runtimeId);
                 final online = runtime?.online ?? false;
@@ -1152,6 +1158,7 @@ class _ConversationPageState extends State<ConversationPage> {
                       : null,
                   chips: view == null ? const [] : _chips(view, l10n),
                   error: _sendError,
+                  memoryCard: _memoryCard(view, session),
                   notice: _visibleNotice(view)?.text,
                   onDismissNotice: () => setState(
                     () => _dismissedNoticeId = _visibleNotice(view)?.id,
@@ -1161,6 +1168,33 @@ class _ConversationPageState extends State<ConversationPage> {
               },
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget? _memoryCard(ConversationView? view, SessionSummary? session) {
+    final changes = view?.memoryChanges;
+    if (changes == null ||
+        changes.entries.isEmpty ||
+        changes.id == _dismissedMemoryChangesId) {
+      return null;
+    }
+    return MemoryChangesCard(
+      runtimeId: widget.runtimeId,
+      changes: changes,
+      onDismiss: () => setState(() => _dismissedMemoryChangesId = changes.id),
+      onOpenMemoryPage: () => unawaited(
+        Navigator.of(context).push<void>(
+          MaterialPageRoute(
+            builder: (_) => AgentMemoryPage(
+              runtimeId: widget.runtimeId,
+              agentId: changes.agentId,
+              agentName: session == null
+                  ? agentDisplayName('')
+                  : _model.workspaces.agentDisplay(widget.runtimeId, session),
+            ),
+          ),
         ),
       ),
     );

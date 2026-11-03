@@ -2750,6 +2750,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ConversationMemoryChanges dco_decode_box_autoadd_conversation_memory_changes(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_conversation_memory_changes(raw);
+  }
+
+  @protected
   ConversationNotice dco_decode_box_autoadd_conversation_notice(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_conversation_notice(raw);
@@ -2990,6 +2998,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ConversationMemoryChange dco_decode_conversation_memory_change(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return ConversationMemoryChange(
+      layer: dco_decode_memory_layer(arr[0]),
+      fileName: dco_decode_String(arr[1]),
+      name: dco_decode_String(arr[2]),
+      description: dco_decode_String(arr[3]),
+      created: dco_decode_bool(arr[4]),
+      pendingReason: dco_decode_opt_String(arr[5]),
+      body: dco_decode_String(arr[6]),
+    );
+  }
+
+  @protected
+  ConversationMemoryChanges dco_decode_conversation_memory_changes(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return ConversationMemoryChanges(
+      id: dco_decode_i_64(arr[0]),
+      agentId: dco_decode_String(arr[1]),
+      entries: dco_decode_list_conversation_memory_change(arr[2]),
+    );
+  }
+
+  @protected
   ConversationNotice dco_decode_conversation_notice(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -3011,31 +3051,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ConversationView dco_decode_conversation_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 22)
-      throw Exception('unexpected arr length: expect 22 but see ${arr.length}');
+    if (arr.length != 23)
+      throw Exception('unexpected arr length: expect 23 but see ${arr.length}');
     return ConversationView(
       sessionId: dco_decode_String(arr[0]),
       phase: dco_decode_conversation_phase(arr[1]),
       statusLine: dco_decode_opt_String(arr[2]),
       compacting: dco_decode_bool(arr[3]),
       notice: dco_decode_opt_box_autoadd_conversation_notice(arr[4]),
-      endReason: dco_decode_String(arr[5]),
-      sessionTitle: dco_decode_opt_String(arr[6]),
-      turnStartedAtMs: dco_decode_opt_box_autoadd_i_64(arr[7]),
-      lastTurnDurationMs: dco_decode_opt_box_autoadd_i_64(arr[8]),
-      plan: dco_decode_list_plan_step(arr[9]),
-      pendingPermissions: dco_decode_list_permission_request(arr[10]),
-      pendingElicitation: dco_decode_opt_box_autoadd_elicitation(arr[11]),
-      entries: dco_decode_list_conversation_entry(arr[12]),
-      entriesFrom: dco_decode_i_64(arr[13]),
-      entriesOffset: dco_decode_i_64(arr[14]),
-      hasMoreBefore: dco_decode_bool(arr[15]),
-      finalAnswerIndex: dco_decode_opt_box_autoadd_u_32(arr[16]),
-      supportsImage: dco_decode_bool(arr[17]),
-      availableCommands: dco_decode_list_slash_command(arr[18]),
-      usage: dco_decode_opt_box_autoadd_context_usage(arr[19]),
-      model: dco_decode_opt_box_autoadd_model_selector(arr[20]),
-      configOptions: dco_decode_list_config_option(arr[21]),
+      memoryChanges: dco_decode_opt_box_autoadd_conversation_memory_changes(
+        arr[5],
+      ),
+      endReason: dco_decode_String(arr[6]),
+      sessionTitle: dco_decode_opt_String(arr[7]),
+      turnStartedAtMs: dco_decode_opt_box_autoadd_i_64(arr[8]),
+      lastTurnDurationMs: dco_decode_opt_box_autoadd_i_64(arr[9]),
+      plan: dco_decode_list_plan_step(arr[10]),
+      pendingPermissions: dco_decode_list_permission_request(arr[11]),
+      pendingElicitation: dco_decode_opt_box_autoadd_elicitation(arr[12]),
+      entries: dco_decode_list_conversation_entry(arr[13]),
+      entriesFrom: dco_decode_i_64(arr[14]),
+      entriesOffset: dco_decode_i_64(arr[15]),
+      hasMoreBefore: dco_decode_bool(arr[16]),
+      finalAnswerIndex: dco_decode_opt_box_autoadd_u_32(arr[17]),
+      supportsImage: dco_decode_bool(arr[18]),
+      availableCommands: dco_decode_list_slash_command(arr[19]),
+      usage: dco_decode_opt_box_autoadd_context_usage(arr[20]),
+      model: dco_decode_opt_box_autoadd_model_selector(arr[21]),
+      configOptions: dco_decode_list_config_option(arr[22]),
     );
   }
 
@@ -3386,6 +3429,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<ConversationMemoryChange> dco_decode_list_conversation_memory_change(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_conversation_memory_change)
+        .toList();
+  }
+
+  @protected
   List<DiffLine> dco_decode_list_diff_line(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_diff_line).toList();
@@ -3733,6 +3786,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_conversation_image(raw);
+  }
+
+  @protected
+  ConversationMemoryChanges?
+  dco_decode_opt_box_autoadd_conversation_memory_changes(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_conversation_memory_changes(raw);
   }
 
   @protected
@@ -4791,6 +4853,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ConversationMemoryChanges sse_decode_box_autoadd_conversation_memory_changes(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_conversation_memory_changes(deserializer));
+  }
+
+  @protected
   ConversationNotice sse_decode_box_autoadd_conversation_notice(
     SseDeserializer deserializer,
   ) {
@@ -5079,6 +5149,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ConversationMemoryChange sse_decode_conversation_memory_change(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_layer = sse_decode_memory_layer(deserializer);
+    var var_fileName = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_description = sse_decode_String(deserializer);
+    var var_created = sse_decode_bool(deserializer);
+    var var_pendingReason = sse_decode_opt_String(deserializer);
+    var var_body = sse_decode_String(deserializer);
+    return ConversationMemoryChange(
+      layer: var_layer,
+      fileName: var_fileName,
+      name: var_name,
+      description: var_description,
+      created: var_created,
+      pendingReason: var_pendingReason,
+      body: var_body,
+    );
+  }
+
+  @protected
+  ConversationMemoryChanges sse_decode_conversation_memory_changes(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_agentId = sse_decode_String(deserializer);
+    var var_entries = sse_decode_list_conversation_memory_change(deserializer);
+    return ConversationMemoryChanges(
+      id: var_id,
+      agentId: var_agentId,
+      entries: var_entries,
+    );
+  }
+
+  @protected
   ConversationNotice sse_decode_conversation_notice(
     SseDeserializer deserializer,
   ) {
@@ -5107,6 +5215,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_notice = sse_decode_opt_box_autoadd_conversation_notice(
       deserializer,
     );
+    var var_memoryChanges =
+        sse_decode_opt_box_autoadd_conversation_memory_changes(deserializer);
     var var_endReason = sse_decode_String(deserializer);
     var var_sessionTitle = sse_decode_opt_String(deserializer);
     var var_turnStartedAtMs = sse_decode_opt_box_autoadd_i_64(deserializer);
@@ -5134,6 +5244,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       statusLine: var_statusLine,
       compacting: var_compacting,
       notice: var_notice,
+      memoryChanges: var_memoryChanges,
       endReason: var_endReason,
       sessionTitle: var_sessionTitle,
       turnStartedAtMs: var_turnStartedAtMs,
@@ -5545,6 +5656,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <ConversationImage>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_conversation_image(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ConversationMemoryChange> sse_decode_list_conversation_memory_change(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ConversationMemoryChange>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_conversation_memory_change(deserializer));
     }
     return ans_;
   }
@@ -6123,6 +6248,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_conversation_image(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  ConversationMemoryChanges?
+  sse_decode_opt_box_autoadd_conversation_memory_changes(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_conversation_memory_changes(deserializer));
     } else {
       return null;
     }
@@ -7329,6 +7468,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_conversation_memory_changes(
+    ConversationMemoryChanges self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_conversation_memory_changes(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_conversation_notice(
     ConversationNotice self,
     SseSerializer serializer,
@@ -7606,6 +7754,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_conversation_memory_change(
+    ConversationMemoryChange self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_memory_layer(self.layer, serializer);
+    sse_encode_String(self.fileName, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.description, serializer);
+    sse_encode_bool(self.created, serializer);
+    sse_encode_opt_String(self.pendingReason, serializer);
+    sse_encode_String(self.body, serializer);
+  }
+
+  @protected
+  void sse_encode_conversation_memory_changes(
+    ConversationMemoryChanges self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_String(self.agentId, serializer);
+    sse_encode_list_conversation_memory_change(self.entries, serializer);
+  }
+
+  @protected
   void sse_encode_conversation_notice(
     ConversationNotice self,
     SseSerializer serializer,
@@ -7635,6 +7809,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.statusLine, serializer);
     sse_encode_bool(self.compacting, serializer);
     sse_encode_opt_box_autoadd_conversation_notice(self.notice, serializer);
+    sse_encode_opt_box_autoadd_conversation_memory_changes(
+      self.memoryChanges,
+      serializer,
+    );
     sse_encode_String(self.endReason, serializer);
     sse_encode_opt_String(self.sessionTitle, serializer);
     sse_encode_opt_box_autoadd_i_64(self.turnStartedAtMs, serializer);
@@ -7974,6 +8152,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_conversation_image(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_conversation_memory_change(
+    List<ConversationMemoryChange> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_conversation_memory_change(item, serializer);
     }
   }
 
@@ -8483,6 +8673,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_conversation_image(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_conversation_memory_changes(
+    ConversationMemoryChanges? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_conversation_memory_changes(self, serializer);
     }
   }
 

@@ -1261,6 +1261,59 @@ pub enum AcpViewEvent {
     ManageCapabilities {
         by_agent: bool,
     },
+    /// 用户在记忆卡片上采纳或删除一条记忆。上层调运行时，完了用
+    /// [`AcpView::finish_memory_action`] 回报。
+    MemoryAction(AcpMemoryAction),
+    /// 用户在记忆卡片上点了「记忆页」：去这个智能体编辑页的记忆页签。
+    OpenAgentMemory {
+        agent_id: String,
+    },
+}
+
+/// 记忆卡片上的一次操作。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcpMemoryAction {
+    pub agent_id: String,
+    pub layer: smelt_model::control_api::AgentMemoryLayer,
+    pub file_name: String,
+    pub kind: AcpMemoryActionKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcpMemoryActionKind {
+    Approve,
+    Delete,
+}
+
+/// 记忆卡片上一行的身份：层 + 文件名。
+type MemoryRowKey = (smelt_model::control_api::AgentMemoryLayer, String);
+
+/// 记忆卡片标题行：这一轮记了几条、改了几条、几条要人处理。
+fn memory_changes_summary(entries: &[smelt_model::acp_session::MemoryChangeView]) -> String {
+    let created = entries.iter().filter(|entry| entry.created).count();
+    let updated = entries.len() - created;
+    let pending = entries
+        .iter()
+        .filter(|entry| entry.pending_reason.is_some())
+        .count();
+    let mut parts = vec!["记忆".to_string()];
+    if created > 0 {
+        parts.push(format!("新记住 {created} 条"));
+    }
+    if updated > 0 {
+        parts.push(format!("更新 {updated} 条"));
+    }
+    if pending > 0 {
+        parts.push(format!("{pending} 条待确认"));
+    }
+    parts.join(" · ")
+}
+
+fn memory_changes_to_show(
+    changes: Option<&smelt_model::acp_session::MemoryChangesView>,
+    dismissed_id: Option<u64>,
+) -> Option<&smelt_model::acp_session::MemoryChangesView> {
+    changes.filter(|changes| Some(changes.id) != dismissed_id && !changes.entries.is_empty())
 }
 
 /// 上一轮没正常结束后能做的事。
@@ -1731,6 +1784,18 @@ pub struct AcpView {
     notice: Option<smelt_model::acp_session::AcpNoticeView>,
     /// 本窗口已经关掉的那条提示。只藏这一条，新提示照常出来。
     dismissed_notice_id: Option<u64>,
+    /// 这一轮写下或改过的记忆，输入框上方的卡片。
+    memory_changes: Option<smelt_model::acp_session::MemoryChangesView>,
+    /// 本窗口关掉的那张记忆卡片。有新写入时 id 变大，卡片重新出现。
+    dismissed_memory_changes_id: Option<u64>,
+    /// 记忆卡片上展开看正文的那一行。
+    memory_expanded: Option<MemoryRowKey>,
+    /// 点过一次删除、等再点一次确认的那一行。
+    memory_delete_armed: Option<MemoryRowKey>,
+    /// 正在采纳或删除的那一行。
+    memory_busy: Option<MemoryRowKey>,
+    /// 上一次采纳、删除失败的原因。
+    memory_error: Option<String>,
     /// 上一份快照的 `completed_unread` 与相位是否已处于 Ended：用于检测完成/失败
     /// 上升沿（绑定任务的边沿），避免每个 Idle 快照都重复触发。
     was_completed_unread: bool,
@@ -2164,6 +2229,12 @@ impl AcpView {
             provider_retry: None,
             notice: None,
             dismissed_notice_id: None,
+            memory_changes: None,
+            dismissed_memory_changes_id: None,
+            memory_expanded: None,
+            memory_delete_armed: None,
+            memory_busy: None,
+            memory_error: None,
             was_completed_unread: false,
             was_ended: false,
             expanded_tools: std::collections::HashSet::new(),
@@ -2341,6 +2412,71 @@ impl AcpView {
 
     fn visible_notice(&self) -> Option<&smelt_model::acp_session::AcpNoticeView> {
         notice_to_show(self.notice.as_ref(), self.dismissed_notice_id)
+    }
+
+    fn visible_memory_changes(&self) -> Option<&smelt_model::acp_session::MemoryChangesView> {
+        memory_changes_to_show(
+            self.memory_changes.as_ref(),
+            self.dismissed_memory_changes_id,
+        )
+    }
+
+    fn toggle_memory_expanded(&mut self, key: MemoryRowKey, cx: &mut Context<Self>) {
+        self.memory_expanded = if self.memory_expanded.as_ref() == Some(&key) {
+            None
+        } else {
+            Some(key)
+        };
+        self.memory_delete_armed = None;
+        cx.notify();
+    }
+
+    fn dismiss_memory_changes(&mut self, cx: &mut Context<Self>) {
+        self.dismissed_memory_changes_id = self.memory_changes.as_ref().map(|changes| changes.id);
+        self.memory_delete_armed = None;
+        self.memory_error = None;
+        cx.notify();
+    }
+
+    /// 采纳直接做；删除第一次只是武装，同一行再点一次才发出去。
+    fn request_memory_action(
+        &mut self,
+        key: MemoryRowKey,
+        kind: AcpMemoryActionKind,
+        cx: &mut Context<Self>,
+    ) {
+        if self.memory_busy.is_some() {
+            return;
+        }
+        let Some(agent_id) = self
+            .memory_changes
+            .as_ref()
+            .map(|changes| changes.agent_id.clone())
+        else {
+            return;
+        };
+        if kind == AcpMemoryActionKind::Delete && self.memory_delete_armed.as_ref() != Some(&key) {
+            self.memory_delete_armed = Some(key);
+            cx.notify();
+            return;
+        }
+        self.memory_delete_armed = None;
+        self.memory_error = None;
+        self.memory_busy = Some(key.clone());
+        cx.emit(AcpViewEvent::MemoryAction(AcpMemoryAction {
+            agent_id,
+            layer: key.0,
+            file_name: key.1,
+            kind,
+        }));
+        cx.notify();
+    }
+
+    /// 上层做完了记忆卡片上的操作。成功时卡片随 smeltd 推来的快照更新，这里只收起忙碌态。
+    pub fn finish_memory_action(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        self.memory_busy = None;
+        self.memory_error = error;
+        cx.notify();
     }
 
     /// 舞台头状态胶囊用的相位：ACP 当前活动，与守护相位同一枚举。
@@ -4366,6 +4502,13 @@ impl AcpView {
                 self.dismissed_notice_id = None;
             }
             self.notice = snap.notice;
+            if snap.memory_changes.is_none() {
+                self.dismissed_memory_changes_id = None;
+                self.memory_expanded = None;
+                self.memory_delete_armed = None;
+                self.memory_error = None;
+            }
+            self.memory_changes = snap.memory_changes;
             self.queued_steering = snap.queued_steering;
             self.queued_follow_up = snap.queued_follow_up;
             self.peer_inbox = snap.peer_inbox;

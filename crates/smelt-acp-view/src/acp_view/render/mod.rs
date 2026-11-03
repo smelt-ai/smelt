@@ -11,6 +11,7 @@ use super::ConversationTranscript;
 mod cards;
 mod composer;
 mod conversation;
+mod memory;
 mod subagents;
 
 impl Render for AcpView {
@@ -619,6 +620,7 @@ impl AcpView {
             )
             .children(permission)
             .children(elicitation)
+            .children(self.render_memory_changes(cx))
             .children(self.visible_notice().map(|notice| {
                 let id = notice.id;
                 h_flex()

@@ -65,6 +65,8 @@ pub(crate) struct AgentsSurface {
     /// 已经请运行时监听记忆目录的智能体（见 `agent.memory.watch`）。监听在运行时进程里，
     /// 运行时断线（换了进程）时清掉那台机器的，下次重取记忆时重新登记。
     pub(crate) watched_memories: std::collections::HashSet<AgentRef>,
+    /// 下一次建编辑器时先停在哪个页签。从对话里的记忆卡片进来时是记忆页。
+    pub(crate) open_editor_tab: Option<AgentEditorTab>,
 }
 
 impl AgentsSurface {
@@ -78,6 +80,7 @@ impl AgentsSurface {
             arm_conversation_on_create: false,
             conversation_draft: None,
             watched_memories: std::collections::HashSet::new(),
+            open_editor_tab: None,
         }
     }
 }
