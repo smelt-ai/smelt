@@ -15,7 +15,7 @@ use smelt_core::control_api::{
 };
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 
-use super::{AcpSessions, Phase, acp_runtime_alive};
+use super::{AcpSessions, Phase, acp_runtime_alive, push_acp_snapshot_since};
 
 /// 一次通过认证的会话：它的两层记忆目录。
 struct MemoryLaunch {
@@ -246,7 +246,92 @@ pub(crate) fn record_write(
     if params.overwrote_existing || existing.is_some() {
         consume_read(&params.session_id, &scope.key(), &file);
     }
+    let created = !params.overwrote_existing && existing.is_none();
+    let pending_reason = (params.trust == smelt_core::control_api::AgentMemoryTrust::Pending)
+        .then(|| params.reason.clone());
+    show_memory_write(
+        acp_sessions,
+        &params.session_id,
+        &launch,
+        params.layer,
+        &file,
+        created,
+        pending_reason,
+    );
     Ok(())
+}
+
+/// 把这次写入挂到会话的记忆卡片上，客户端在输入框上方就地查看、处理。
+/// 来源已经落库，卡片只是展示：会话正好没了就不挂。
+fn show_memory_write(
+    acp_sessions: &AcpSessions,
+    session_id: &str,
+    launch: &MemoryLaunch,
+    layer: AgentMemoryLayer,
+    file: &str,
+    created: bool,
+    pending_reason: Option<String>,
+) {
+    let Ok(MemoryScope::Agent(agent_id)) = scope(launch, AgentMemoryLayer::Agent) else {
+        return;
+    };
+    let dir = match layer {
+        AgentMemoryLayer::Agent => launch.agent_dir.as_deref(),
+        AgentMemoryLayer::User => launch.user_dir.as_deref(),
+    };
+    let (name, description, body) = dir
+        .and_then(|dir| agent_memory::describe_memory_file(dir, file))
+        .unwrap_or_else(|| {
+            (
+                file.trim_end_matches(".md").to_string(),
+                String::new(),
+                String::new(),
+            )
+        });
+    let change = smelt_core::acp_session::MemoryChangeView {
+        layer,
+        file_name: file.to_string(),
+        name,
+        description,
+        created,
+        pending_reason,
+        body,
+    };
+    let Some(slot) = acp_sessions.get(session_id) else {
+        return;
+    };
+    acp_sessions.with_current(session_id, &slot, |session| {
+        smelt_core::acp_session::note_memory_write(
+            &mut session.reduced.lock(),
+            &agent_id,
+            change,
+        );
+        push_acp_snapshot_since(session, false, None);
+    });
+}
+
+/// 用户在某一端采纳或删除了一条记忆：各个对话卡片上的那一行跟着变。
+pub(crate) fn sync_memory_resolution(
+    acp_sessions: &AcpSessions,
+    agent_id: &str,
+    layer: AgentMemoryLayer,
+    file: &str,
+    resolution: smelt_core::acp_session::MemoryResolution,
+) {
+    for (id, slot) in acp_sessions.snapshot() {
+        acp_sessions.with_current(&id, &slot, |session| {
+            let changed = smelt_core::acp_session::resolve_memory_change(
+                &mut session.reduced.lock(),
+                agent_id,
+                layer,
+                file,
+                resolution,
+            );
+            if changed {
+                push_acp_snapshot_since(session, false, None);
+            }
+        });
+    }
 }
 
 #[cfg(test)]

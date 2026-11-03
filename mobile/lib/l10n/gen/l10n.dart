@@ -1831,6 +1831,84 @@ abstract class L10n {
   /// **'Couldn\'t send: {message}'**
   String conversationActionFailed(String message);
 
+  /// No description provided for @conversationMemoryTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory'**
+  String get conversationMemoryTitle;
+
+  /// No description provided for @conversationMemoryCreated.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} new'**
+  String conversationMemoryCreated(int count);
+
+  /// No description provided for @conversationMemoryUpdated.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} updated'**
+  String conversationMemoryUpdated(int count);
+
+  /// No description provided for @conversationMemoryPendingCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} to review'**
+  String conversationMemoryPendingCount(int count);
+
+  /// No description provided for @conversationMemoryOpenPage.
+  ///
+  /// In en, this message translates to:
+  /// **'All memories'**
+  String get conversationMemoryOpenPage;
+
+  /// No description provided for @conversationMemoryDismiss.
+  ///
+  /// In en, this message translates to:
+  /// **'Hide memory card'**
+  String get conversationMemoryDismiss;
+
+  /// No description provided for @conversationMemoryNew.
+  ///
+  /// In en, this message translates to:
+  /// **'New'**
+  String get conversationMemoryNew;
+
+  /// No description provided for @conversationMemoryChanged.
+  ///
+  /// In en, this message translates to:
+  /// **'Edited'**
+  String get conversationMemoryChanged;
+
+  /// No description provided for @conversationMemoryShared.
+  ///
+  /// In en, this message translates to:
+  /// **'Shared'**
+  String get conversationMemoryShared;
+
+  /// No description provided for @conversationMemoryActive.
+  ///
+  /// In en, this message translates to:
+  /// **'Active'**
+  String get conversationMemoryActive;
+
+  /// No description provided for @conversationMemoryPending.
+  ///
+  /// In en, this message translates to:
+  /// **'To review'**
+  String get conversationMemoryPending;
+
+  /// No description provided for @conversationMemoryPendingReason.
+  ///
+  /// In en, this message translates to:
+  /// **'To review: {reason}'**
+  String conversationMemoryPendingReason(String reason);
+
+  /// No description provided for @conversationMemoryEmptyBody.
+  ///
+  /// In en, this message translates to:
+  /// **'(empty)'**
+  String get conversationMemoryEmptyBody;
+
   /// No description provided for @launchTitle.
   ///
   /// In en, this message translates to:

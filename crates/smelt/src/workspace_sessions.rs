@@ -1150,6 +1150,21 @@ impl Workspace {
                         this.open_agent_definition(agent, window, cx);
                     }
                 }
+                acp_view::AcpViewEvent::MemoryAction(action) => {
+                    let runtime = _view.read(cx).runtime().key().clone();
+                    this.run_conversation_memory_action(_view.clone(), runtime, action.clone(), cx);
+                }
+                acp_view::AcpViewEvent::OpenAgentMemory { agent_id } => {
+                    let runtime = _view.read(cx).runtime().key().clone();
+                    this.open_agents_route(window, cx);
+                    if settings::agent_definition(&runtime, agent_id, cx).is_some() {
+                        this.open_agent_memory(
+                            crate::agents::AgentRef::new(runtime, agent_id.clone()),
+                            window,
+                            cx,
+                        );
+                    }
+                }
                 acp_view::AcpViewEvent::OpenConversation { sid } => {
                     // 互发消息的事件行上点了对方的标题。不在侧栏里的（别处托管的）不动。
                     let target = this.sessions.iter().position(|session| {

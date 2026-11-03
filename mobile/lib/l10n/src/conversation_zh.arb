@@ -107,5 +107,18 @@
   "conversationTicketCount": "第 {index} / {count} 张",
   "conversationTicketCollapse": "把单据收下去",
   "conversationTicketExpand": "展开单据",
-  "conversationActionFailed": "没发出去：{message}"
+  "conversationActionFailed": "没发出去：{message}",
+  "conversationMemoryTitle": "记忆",
+  "conversationMemoryCreated": "新记住 {count} 条",
+  "conversationMemoryUpdated": "更新 {count} 条",
+  "conversationMemoryPendingCount": "{count} 条待确认",
+  "conversationMemoryOpenPage": "记忆页",
+  "conversationMemoryDismiss": "收起记忆卡片",
+  "conversationMemoryNew": "新",
+  "conversationMemoryChanged": "改",
+  "conversationMemoryShared": "全局",
+  "conversationMemoryActive": "已生效",
+  "conversationMemoryPending": "待确认",
+  "conversationMemoryPendingReason": "待确认：{reason}",
+  "conversationMemoryEmptyBody": "（正文为空）"
 }

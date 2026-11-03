@@ -2795,6 +2795,43 @@ impl SseDecode for crate::api::conversation::ConversationImage {
     }
 }
 
+impl SseDecode for crate::api::conversation::ConversationMemoryChange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_layer = <crate::api::agents::MemoryLayer>::sse_decode(deserializer);
+        let mut var_fileName = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_description = <String>::sse_decode(deserializer);
+        let mut var_created = <bool>::sse_decode(deserializer);
+        let mut var_pendingReason = <Option<String>>::sse_decode(deserializer);
+        let mut var_body = <String>::sse_decode(deserializer);
+        return crate::api::conversation::ConversationMemoryChange {
+            layer: var_layer,
+            file_name: var_fileName,
+            name: var_name,
+            description: var_description,
+            created: var_created,
+            pending_reason: var_pendingReason,
+            body: var_body,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConversationMemoryChanges {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <i64>::sse_decode(deserializer);
+        let mut var_agentId = <String>::sse_decode(deserializer);
+        let mut var_entries =
+            <Vec<crate::api::conversation::ConversationMemoryChange>>::sse_decode(deserializer);
+        return crate::api::conversation::ConversationMemoryChanges {
+            id: var_id,
+            agent_id: var_agentId,
+            entries: var_entries,
+        };
+    }
+}
+
 impl SseDecode for crate::api::conversation::ConversationNotice {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2835,6 +2872,8 @@ impl SseDecode for crate::api::conversation::ConversationView {
         let mut var_compacting = <bool>::sse_decode(deserializer);
         let mut var_notice =
             <Option<crate::api::conversation::ConversationNotice>>::sse_decode(deserializer);
+        let mut var_memoryChanges =
+            <Option<crate::api::conversation::ConversationMemoryChanges>>::sse_decode(deserializer);
         let mut var_endReason = <String>::sse_decode(deserializer);
         let mut var_sessionTitle = <Option<String>>::sse_decode(deserializer);
         let mut var_turnStartedAtMs = <Option<i64>>::sse_decode(deserializer);
@@ -2865,6 +2904,7 @@ impl SseDecode for crate::api::conversation::ConversationView {
             status_line: var_statusLine,
             compacting: var_compacting,
             notice: var_notice,
+            memory_changes: var_memoryChanges,
             end_reason: var_endReason,
             session_title: var_sessionTitle,
             turn_started_at_ms: var_turnStartedAtMs,
@@ -3365,6 +3405,20 @@ impl SseDecode for Vec<crate::api::conversation::ConversationImage> {
             ans_.push(<crate::api::conversation::ConversationImage>::sse_decode(
                 deserializer,
             ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ConversationMemoryChange> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(
+                <crate::api::conversation::ConversationMemoryChange>::sse_decode(deserializer),
+            );
         }
         return ans_;
     }
@@ -3974,6 +4028,19 @@ impl SseDecode for Option<crate::api::conversation::ConversationImage> {
             return Some(<crate::api::conversation::ConversationImage>::sse_decode(
                 deserializer,
             ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::ConversationMemoryChanges> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(
+                <crate::api::conversation::ConversationMemoryChanges>::sse_decode(deserializer),
+            );
         } else {
             return None;
         }
@@ -5790,6 +5857,54 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationIma
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationMemoryChange {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.layer.into_into_dart().into_dart(),
+            self.file_name.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+            self.created.into_into_dart().into_dart(),
+            self.pending_reason.into_into_dart().into_dart(),
+            self.body.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationMemoryChange
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationMemoryChange>
+    for crate::api::conversation::ConversationMemoryChange
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationMemoryChange {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationMemoryChanges {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.agent_id.into_into_dart().into_dart(),
+            self.entries.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationMemoryChanges
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationMemoryChanges>
+    for crate::api::conversation::ConversationMemoryChanges
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationMemoryChanges {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationNotice {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -5847,6 +5962,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationVie
             self.status_line.into_into_dart().into_dart(),
             self.compacting.into_into_dart().into_dart(),
             self.notice.into_into_dart().into_dart(),
+            self.memory_changes.into_into_dart().into_dart(),
             self.end_reason.into_into_dart().into_dart(),
             self.session_title.into_into_dart().into_dart(),
             self.turn_started_at_ms.into_into_dart().into_dart(),
@@ -8031,6 +8147,31 @@ impl SseEncode for crate::api::conversation::ConversationImage {
     }
 }
 
+impl SseEncode for crate::api::conversation::ConversationMemoryChange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::agents::MemoryLayer>::sse_encode(self.layer, serializer);
+        <String>::sse_encode(self.file_name, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.description, serializer);
+        <bool>::sse_encode(self.created, serializer);
+        <Option<String>>::sse_encode(self.pending_reason, serializer);
+        <String>::sse_encode(self.body, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConversationMemoryChanges {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.agent_id, serializer);
+        <Vec<crate::api::conversation::ConversationMemoryChange>>::sse_encode(
+            self.entries,
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::conversation::ConversationNotice {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -8070,6 +8211,10 @@ impl SseEncode for crate::api::conversation::ConversationView {
         <Option<String>>::sse_encode(self.status_line, serializer);
         <bool>::sse_encode(self.compacting, serializer);
         <Option<crate::api::conversation::ConversationNotice>>::sse_encode(self.notice, serializer);
+        <Option<crate::api::conversation::ConversationMemoryChanges>>::sse_encode(
+            self.memory_changes,
+            serializer,
+        );
         <String>::sse_encode(self.end_reason, serializer);
         <Option<String>>::sse_encode(self.session_title, serializer);
         <Option<i64>>::sse_encode(self.turn_started_at_ms, serializer);
@@ -8464,6 +8609,16 @@ impl SseEncode for Vec<crate::api::conversation::ConversationImage> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::conversation::ConversationImage>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ConversationMemoryChange> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ConversationMemoryChange>::sse_encode(item, serializer);
         }
     }
 }
@@ -8922,6 +9077,16 @@ impl SseEncode for Option<crate::api::conversation::ConversationImage> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::conversation::ConversationImage>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::ConversationMemoryChanges> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ConversationMemoryChanges>::sse_encode(value, serializer);
         }
     }
 }

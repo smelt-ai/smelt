@@ -110,6 +110,7 @@ fn keep_envelope(target: &mut ConversationSnapshot, previous: ConversationSnapsh
     target.conversation_state = previous.conversation_state;
     target.provider_retry = previous.provider_retry;
     target.notice = previous.notice;
+    target.memory_changes = previous.memory_changes;
     target.pending_prompts = previous.pending_prompts;
     target.queued_steering = previous.queued_steering;
     target.queued_follow_up = previous.queued_follow_up;

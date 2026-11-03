@@ -160,6 +160,67 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 打开智能体编辑页并停在记忆页签。
+    pub(crate) fn open_agent_memory(
+        &mut self,
+        agent: AgentRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_agent_definition(agent, window, cx);
+        self.agent_surface.open_editor_tab = Some(AgentEditorTab::Memory);
+    }
+
+    /// 对话里记忆卡片上的采纳、删除。成功后卡片随 smeltd 推来的快照更新；
+    /// 开着的记忆页靠目录监听刷新，这里也顺手重取一次。
+    pub(crate) fn run_conversation_memory_action(
+        &mut self,
+        view: Entity<crate::acp_view::AcpView>,
+        runtime: crate::RuntimeKey,
+        action: crate::acp_view::AcpMemoryAction,
+        cx: &mut Context<Self>,
+    ) {
+        let client = crate::runtime_call::target(&runtime, cx);
+        let params = smelt_model::control_api::AgentMemoryFileParams {
+            agent_id: action.agent_id,
+            layer: action.layer,
+            file_name: action.file_name,
+        };
+        let kind = action.kind;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = client?;
+                    let timeout = crate::runtime_call::RUNTIME_CALL_TIMEOUT;
+                    match kind {
+                        crate::acp_view::AcpMemoryActionKind::Approve => {
+                            crate::runtime_call::call_on::<
+                                smelt_model::control_api::AgentMemoryApprove,
+                            >(&client, params, timeout)
+                            .map(|_| ())
+                        }
+                        crate::acp_view::AcpMemoryActionKind::Delete => {
+                            crate::runtime_call::call_on::<
+                                smelt_model::control_api::AgentMemoryDelete,
+                            >(&client, params, timeout)
+                            .map(|_| ())
+                        }
+                    }
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let failure = match kind {
+                crate::acp_view::AcpMemoryActionKind::Approve => "采纳失败",
+                crate::acp_view::AcpMemoryActionKind::Delete => "删除失败",
+            };
+            let error = result.err().map(|error| format!("{failure}：{error}"));
+            let _ = view.update(cx, |view, cx| view.finish_memory_action(error, cx));
+            let _ = this.update(cx, |this, cx| this.refresh_agent_memories(cx));
+        })
+        .detach();
+    }
+
     pub(super) fn finish_agent_name_edit(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.agent_surface.editor.as_mut() {
             editor.name_editing = false;
@@ -822,7 +883,7 @@ impl Workspace {
             plugins,
             mcp_servers,
             memories,
-            tab: AgentEditorTab::default(),
+            tab: self.agent_surface.open_editor_tab.take().unwrap_or_default(),
             memory_query,
             memory_filter: MemoryFilter::default(),
             expanded_memory: None,

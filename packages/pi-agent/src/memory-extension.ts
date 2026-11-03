@@ -304,7 +304,6 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 	const turnMemoryReads = new Set<string>();
 	/** 本轮用户消息原文，供规则类可信写入做原话校验。 */
 	let turnUserPrompt: string | undefined;
-	const turnWrites = { trusted: 0, pending: 0 };
 	let cached: { key: string; snapshot: MemorySnapshot } | undefined;
 	let warnedTruncation = false;
 	/** 下一轮走完整召回（会话开始、压缩之后）。 */
@@ -586,8 +585,6 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		if (userTurn) {
 			turnTaint.clear();
 			turnMemoryReads.clear();
-			turnWrites.trusted = 0;
-			turnWrites.pending = 0;
 			turnUserPrompt = event.prompt;
 		}
 		const meta = await currentMeta();
@@ -696,15 +693,10 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		approvedMemoryWrites.add(event.toolCallId);
 	});
 
-	pi.on("agent_end", async (_event, context) => {
+	pi.on("agent_end", async () => {
 		// 被后续处理拦下或中途取消的调用可能没有 tool_result；一轮结束时清掉，免得永远占着。
+		// 这一轮写了哪些记忆由 smeltd 在记录来源时挂到对话的记忆卡片上，这里不再另发提示。
 		inFlight.clear();
-		const { trusted, pending } = turnWrites;
-		if (trusted + pending === 0) return;
-		const parts = [];
-		if (trusted > 0) parts.push(`记住了 ${trusted} 条`);
-		if (pending > 0) parts.push(`${pending} 条待确认，在智能体的记忆卡片里采纳后生效`);
-		context.ui.notify(`记忆：${parts.join("；")}`, "info");
 	});
 
 	pi.on("tool_result", async (event, context) => {
@@ -788,7 +780,6 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 					? errorResult("记忆来源记录失败，为安全起见这次写入已撤销")
 					: errorResult(`记忆来源记录失败，且恢复原文件失败，请手动检查 ${write.absolutePath}`);
 			}
-			turnWrites.trusted++;
 			return;
 		}
 		// 待确认却没记下来，就会被当成可信注入：宁可撤销这次写入。
@@ -797,13 +788,12 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				? errorResult("记忆来源记录失败，为安全起见这次写入已撤销")
 				: errorResult(`记忆来源记录失败，且恢复原文件失败，请手动检查 ${write.absolutePath}`);
 		}
-		turnWrites.pending++;
 		return {
 			content: [
 				...(content as Array<{ type: "text"; text: string }>),
 				{
 					type: "text" as const,
-					text: `这条记忆已暂存为待确认（${write.provenance.reason}），不会生效，直到用户在智能体的记忆卡片里采纳。请在回复里告诉用户。`,
+					text: `这条记忆已暂存为待确认（${write.provenance.reason}），不会生效，直到用户采纳（对话输入框上方的记忆卡片、或智能体的记忆页里都能采纳）。请在回复里告诉用户。`,
 				},
 			],
 		};

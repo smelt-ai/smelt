@@ -66,6 +66,36 @@ class RecordingBackend extends DemoBackend {
   }
 
   @override
+  Future<AgentMemories> approveMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  ) async {
+    calls.add('approve memory $agentId ${layer.name} $fileName');
+    return const AgentMemories(
+      agent: MemoryShelf(items: [], coreOverBudget: false),
+      user: MemoryShelf(items: [], coreOverBudget: false),
+      pending: 0,
+    );
+  }
+
+  @override
+  Future<AgentMemories> deleteMemory(
+    String runtimeId,
+    String agentId,
+    MemoryLayer layer,
+    String fileName,
+  ) async {
+    calls.add('delete memory $agentId ${layer.name} $fileName');
+    return const AgentMemories(
+      agent: MemoryShelf(items: [], coreOverBudget: false),
+      user: MemoryShelf(items: [], coreOverBudget: false),
+      pending: 0,
+    );
+  }
+
+  @override
   void markRead(String runtimeId, String sessionId) =>
       calls.add('read $sessionId');
 
@@ -226,12 +256,14 @@ ConversationView view({
   String? statusLine,
   bool compacting = false,
   ConversationNotice? notice,
+  ConversationMemoryChanges? memoryChanges,
 }) => ConversationView(
   sessionId: 's-fleet',
   phase: phase,
   statusLine: statusLine,
   compacting: compacting,
   notice: notice,
+  memoryChanges: memoryChanges,
   endReason: '',
   plan: const [],
   pendingPermissions: permissions,

@@ -512,6 +512,72 @@ void main() {
       expect(find.text('model rejected'), findsOneWidget);
     });
 
+    testWidgets('记忆卡片列出这一轮的记忆，行上采纳，点开能删，关掉后有新写入再出来', (tester) async {
+      usePhone(tester);
+      final backend = RecordingBackend(manualWatch: true);
+      await tester.pumpWidget(host(startModel(backend), _page));
+      await tester.pump();
+      ConversationMemoryChange change(String file, {String? pending}) =>
+          ConversationMemoryChange(
+            layer: MemoryLayer.agent,
+            fileName: '$file.md',
+            name: file,
+            description: 'about $file',
+            created: true,
+            pendingReason: pending,
+            body: 'body of $file',
+          );
+      ConversationMemoryChanges changes(
+        int id,
+        List<ConversationMemoryChange> entries,
+      ) => ConversationMemoryChanges(id: id, agentId: 'a1', entries: entries);
+
+      backend.watch.add(
+        snapshot(
+          view(
+            memoryChanges: changes(5, [
+              change('reply-lang', pending: 'read external content'),
+              change('repo-layout'),
+            ]),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Memory · 2 new · 1 to review'), findsOneWidget);
+      expect(find.text('reply-lang'), findsOneWidget);
+      expect(find.text('repo-layout'), findsOneWidget);
+
+      await tester.tap(find.text('Approve'));
+      await tester.pumpAndSettle();
+      expect(backend.calls, contains('approve memory a1 agent reply-lang.md'));
+
+      await tester.tap(find.text('repo-layout'));
+      await tester.pumpAndSettle();
+      expect(find.text('body of repo-layout'), findsOneWidget);
+      await tester.tap(find.text('Delete').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete').last);
+      await tester.pumpAndSettle();
+      expect(backend.calls, contains('delete memory a1 agent repo-layout.md'));
+      expect(find.text('body of repo-layout'), findsNothing);
+
+      await tester.tap(find.byTooltip('Hide memory card'));
+      await tester.pumpAndSettle();
+      expect(find.text('reply-lang'), findsNothing);
+
+      backend.watch.add(
+        snapshot(view(memoryChanges: changes(5, [change('reply-lang')]))),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('reply-lang'), findsNothing);
+
+      backend.watch.add(
+        snapshot(view(memoryChanges: changes(6, [change('reply-lang')]))),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('reply-lang'), findsOneWidget);
+    });
+
     testWidgets('空闲时没有停止钮', (tester) async {
       usePhone(tester);
       final backend = RecordingBackend(manualWatch: true);

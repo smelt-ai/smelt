@@ -124,5 +124,22 @@
   "conversationTicketCollapse": "Fold the ticket down",
   "conversationTicketExpand": "Open the ticket",
   "conversationActionFailed": "Couldn't send: {message}",
-  "@conversationActionFailed": {"placeholders": {"message": {"type": "String"}}}
+  "@conversationActionFailed": {"placeholders": {"message": {"type": "String"}}},
+  "conversationMemoryTitle": "Memory",
+  "conversationMemoryCreated": "{count} new",
+  "@conversationMemoryCreated": {"placeholders": {"count": {"type": "int"}}},
+  "conversationMemoryUpdated": "{count} updated",
+  "@conversationMemoryUpdated": {"placeholders": {"count": {"type": "int"}}},
+  "conversationMemoryPendingCount": "{count} to review",
+  "@conversationMemoryPendingCount": {"placeholders": {"count": {"type": "int"}}},
+  "conversationMemoryOpenPage": "All memories",
+  "conversationMemoryDismiss": "Hide memory card",
+  "conversationMemoryNew": "New",
+  "conversationMemoryChanged": "Edited",
+  "conversationMemoryShared": "Shared",
+  "conversationMemoryActive": "Active",
+  "conversationMemoryPending": "To review",
+  "conversationMemoryPendingReason": "To review: {reason}",
+  "@conversationMemoryPendingReason": {"placeholders": {"reason": {"type": "String"}}},
+  "conversationMemoryEmptyBody": "(empty)"
 }
