@@ -96,7 +96,7 @@ make dist-build             # Build a release and package dist/Smelt.dmg
 make help                   # Show all available build targets
 ```
 
-The Windows installer is built on Windows, not by `make dist-build`. The release job runs `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`, then `bash scripts/build-smelt-pi.sh`. See [`docs/release.md`](docs/release.md).
+The Windows installer is built on Windows, not by `make dist-build`. The release job runs `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`, then `bash agent/scripts/build-smelt-pi.sh`. See [`docs/release.md`](docs/release.md).
 
 Run tests and type checks:
 

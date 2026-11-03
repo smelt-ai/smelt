@@ -105,7 +105,7 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 ## Windows
 
 `windows` job 在 `windows-latest` 上 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用
-`scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`（Bun 1.4.3，`bun-windows-x64`）。下面这些文件放进暂存目录，
+`agent/scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`（Bun 1.4.3，`bun-windows-x64`）。下面这些文件放进暂存目录，
 再用 Inno Setup 7（钉 7.1.0、对哈希）按 `scripts/windows-installer.iss` 编成
 `smelt-<版本>-windows-x86_64-setup.exe`：
 

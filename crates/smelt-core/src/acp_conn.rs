@@ -5329,7 +5329,7 @@ mod embedded_adapter_tests {
                 claude.path(),
                 &|_| false,
                 || Some((
-                    "/Users/First Last/.smelt/bin/smelt-pi".to_string(),
+                    "/home/first last/.smelt/bin/smelt-pi".to_string(),
                     vec![CLAUDE_SPEC.to_string()]
                 )),
             ),

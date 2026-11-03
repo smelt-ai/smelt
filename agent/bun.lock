@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@smelt-ai/pi-agent",
+      "name": "@smelt-ai/agent",
       "dependencies": {
         "@agentclientprotocol/claude-agent-acp": "0.78.0",
         "@agentclientprotocol/codex-acp": "1.12.0",

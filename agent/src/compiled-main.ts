@@ -2,7 +2,7 @@ import "./quickjs-embed.ts";
 import pkg from "../package.json" with { type: "json" };
 import { checksDaemonProtocol, embeddedAdapterSpecs, parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
 
-// 和 scripts/compile-smelt-pi.ts 里改写进 Pi 的路径一致：嵌入文件的根目录分平台。
+// 和 agent/scripts/compile-smelt-pi.ts 里改写进 Pi 的路径一致：嵌入文件的根目录分平台。
 const BUNFS_ROOT = process.platform === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/";
 const IMAGE_WORKER = `${BUNFS_ROOT}utils/image-resize-worker.js`;
 const CODEMODE_WORKER = `${BUNFS_ROOT}extensions/codemode/worker.js`;

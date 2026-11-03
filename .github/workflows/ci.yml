@@ -37,7 +37,7 @@ jobs:
         id: filter
         uses: dorny/paths-filter@v4
         with:
-          # rust：整个 workspace 的输入。smelt-core 的 build.rs 只读 packages/pi-agent 的版本号，
+          # rust：整个 workspace 的输入。smelt-core 的 build.rs 只读 agent 的版本号，
           # 桌面与 smeltd 会嵌 assets/，所以这两处也算。
           # android：手机内核 smelt_mobile 及其依赖的 crate（`cargo tree -p smelt_mobile`
           # 里的本地 crate，加依赖时同步这里）和 Flutter 工程。ios-check 也看它。
@@ -55,7 +55,7 @@ jobs:
               - *workflow
               - *toolchain
               - 'crates/**'
-              - 'packages/**'
+              - 'agent/**'
               - 'assets/**'
             advisories:
               - *workflow
@@ -81,10 +81,7 @@ jobs:
             pi-agent:
               - *workflow
               - 'scripts/fetch-bun.sh'
-              - 'scripts/build-smelt-pi.sh'
-              - 'scripts/compile-smelt-pi.ts'
-              - 'scripts/compiled-smoke.ts'
-              - 'packages/pi-agent/**'
+              - 'agent/**'
 
   # RustSec：只查 advisories，不跑 license/bans（那些噪声大、与本 PR 目标无关）。
   # ubuntu 上跑：不编代码，只要 cargo metadata + advisory-db，通常几十秒内结束。
@@ -315,7 +312,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: packages/pi-agent
+        working-directory: agent
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -344,7 +341,7 @@ jobs:
 
       - name: Build and smoke smelt-pi
         shell: bash
-        run: bash scripts/build-smelt-pi.sh --out target/smelt-pi
+        run: bash agent/scripts/build-smelt-pi.sh --out target/smelt-pi
 
   # 唯一的必需检查（分支保护里只要求它）。只有成功和被跳过算通过，其余一律失败（失败、
   # 取消，以及排不到机器被放弃的 abandoned）。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。

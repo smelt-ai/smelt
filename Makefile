@@ -7,7 +7,7 @@ DAEMON := smeltd
 .PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-pi ios
 
 SMELT_PI := target/smelt-pi/smelt-pi
-PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts') $(shell find packages/pi-agent/skills -type f)
+PI_AGENT_SOURCES := $(shell find agent/src -type f -name '*.ts') $(shell find agent/skills -type f)
 
 build install: SHELL := /bin/bash
 
@@ -59,7 +59,7 @@ pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 	@bun="$$(./scripts/bun.sh --managed-only)" || { \
 		echo "✗ 取不到钉死版本的 Bun（scripts/fetch-bun.sh）"; exit 1; }; \
 	export PATH="$$(dirname "$$bun"):$$PATH"; \
-	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent \
+	cd agent && "$$bun" install --frozen-lockfile --silent \
 		&& "$$bun" run check \
 		&& "$$bun" run production-smoke
 
@@ -69,8 +69,8 @@ test-sh: ## 运行打包、安装、部署脚本的 shell 测试（scripts/test-
 # 不含 fmt-check：仓库还没整体 rustfmt 干净过，CI 也不查格式（见 ci.yml）。
 check-all: lint lint-sh lint-paths test test-sh pi-agent-check ## 完整检查 (Clippy + shell + 路径合规 + Rust/TS/脚本测试)
 
-$(SMELT_PI): packages/pi-agent/package.json packages/pi-agent/bun.lock scripts/compile-smelt-pi.ts scripts/build-smelt-pi.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
-	./scripts/build-smelt-pi.sh
+$(SMELT_PI): agent/package.json agent/bun.lock agent/scripts/compile-smelt-pi.ts agent/scripts/build-smelt-pi.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
+	./agent/scripts/build-smelt-pi.sh
 
 ios: ## 在发版 tag 上出 iOS 发布包（版本号跟发版统一，见 docs/release.md）
 	scripts/build-ios.sh

@@ -1,17 +1,17 @@
 /**
  * 编译出来的 smelt-pi 必须在没有 node_modules 的目录里走完 RPC 握手。
- * 用法：bun scripts/compiled-smoke.ts <path-to-smelt-pi>
+ * 用法：bun agent/scripts/compiled-smoke.ts <path-to-smelt-pi>
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, copyFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, dirname } from "node:path";
 import { createInterface } from "node:readline";
-import pkg from "../packages/pi-agent/package.json" with { type: "json" };
+import pkg from "../package.json" with { type: "json" };
 
 const source = process.argv[2];
 if (!source) {
-	console.error("用法：bun scripts/compiled-smoke.ts <smelt-pi>");
+	console.error("用法：bun agent/scripts/compiled-smoke.ts <smelt-pi>");
 	process.exit(2);
 }
 

@@ -409,7 +409,7 @@ mod tests {
 
     /// 每一种事件都要能整条落地。
     ///
-    /// 这些 JSON 逐字对应 `packages/pi-agent/src/auth-protocol.ts` 里的
+    /// 这些 JSON 逐字对应 `agent/src/auth-protocol.ts` 里的
     /// `HostEvent`。曾经 `device_code` 的字段在 TS 那边是 camelCase、在这边是
     /// snake_case，解析失败被当成噪声丢掉，界面就永远停在等待上——所以每个
     /// 可选字段这里都断言成 `Some`：只测「解析没报错」抓不到少一个键。

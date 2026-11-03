@@ -100,7 +100,7 @@ fn parse_servers(doc: &Value, signed_in: &HashSet<String>) -> Vec<PiMcpServer> {
 /// 不是会话里的连接结果：连没连上、要不要登录要等 Pi 报上来。
 ///
 /// 产品智能体（带 `SMELT_AGENT_PLUGIN_ARGS`）只连 `SMELT_AGENT_MCP_SERVERS` 里勾了、`mcp.json`
-/// 里还在且没停用的，规则同 `packages/pi-agent/src/mcp-selection.ts`；裸 Pi 连 `mcp.json` 里
+/// 里还在且没停用的，规则同 `agent/src/mcp-selection.ts`；裸 Pi 连 `mcp.json` 里
 /// 所有启用的。受信任项目里的 `.pi/mcp.json` 不算：项目受不受信任只有 Pi 自己知道。
 pub fn loaded_mcp_servers_for_launch(launch: &ConversationLaunchSpec) -> Vec<PiMcpServer> {
     loaded_mcp_servers_for_launch_at(launch, &pi_agent_dir())

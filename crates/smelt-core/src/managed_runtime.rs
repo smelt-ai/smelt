@@ -779,10 +779,10 @@ mod tests {
     #[test]
     fn packaged_version_matches_package_json_and_oauth_stays_static() {
         let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../../../packages/pi-agent/package.json")).unwrap();
+            serde_json::from_str(include_str!("../../../agent/package.json")).unwrap();
         assert_eq!(manifest["version"], pi_runtime_version());
-        let main = include_str!("../../../packages/pi-agent/src/main.ts");
-        let auth = include_str!("../../../packages/pi-agent/src/auth-main.ts");
+        let main = include_str!("../../../agent/src/main.ts");
+        let auth = include_str!("../../../agent/src/auth-main.ts");
         assert!(main.contains("registerBunOAuthFlows()"));
         assert!(auth.contains("registerBunOAuthFlows()"));
         let fetch = include_str!("../../../scripts/fetch-bun.sh");

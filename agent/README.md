@@ -25,7 +25,7 @@ Extension / Tool / Skill 交付。
 
 ## 运行与安全
 
-发布时 `packages/pi-agent` 编成单个 `smelt-pi`，和对应的 `smeltd-<指纹>` 放在一起。
+发布时 `agent/` 编成单个 `smelt-pi`，和对应的 `smeltd-<指纹>` 放在一起。
 不再把源码嵌进 `smelt-core`，也不再在用户机器上 `bun install`。
 Claude、Codex 的官方 ACP 适配器也编在里面（`smelt-pi acp-claude` / `acp-codex`，
 `acp-adapters` 列出内置版本）。设置里存的仍是 `bunx --bun 包@版本`，守护在本机装了对应 CLI
