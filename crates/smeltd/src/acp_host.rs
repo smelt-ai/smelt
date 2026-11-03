@@ -546,17 +546,45 @@ pub(crate) fn acp_pending_question(
     }
     if matches!(reduced.phase, smelt_core::daemon_state::DaemonPhase::Idle)
         && reduced.completed_unread
-        && let Some(message) = reduced
+    {
+        if let Some(message) = reduced
             .turn_outcome
             .and_then(smelt_core::acp_session::AcpTurnOutcome::failure_message)
-    {
-        return Some(message.to_string());
+        {
+            return Some(message.to_string());
+        }
+        if reduced
+            .turn_outcome
+            .is_some_and(smelt_core::acp_session::AcpTurnOutcome::is_success)
+        {
+            return last_reply_line(reduced.entries());
+        }
     }
     reduced
         .permissions
         .first()
         .map(|p| p.question.clone())
         .or_else(|| reduced.elicitation.as_ref().map(|e| e.message.clone()))
+}
+
+/// 回合成功时的一行摘要：这一轮智能体最后一段正文（不算思考）的开头。会话列表、桌面通知和手机
+/// 推送都读它；终端会话的对应位置是 hook 完成事件带的 message。
+fn last_reply_line(entries: &[smelt_core::acp_chat::AcpEntry]) -> Option<String> {
+    use smelt_core::acp_chat::AcpEntry;
+    let turn_start = entries
+        .iter()
+        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
+        .map_or(0, |index| index + 1);
+    entries[turn_start..]
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            AcpEntry::Assistant {
+                text,
+                thought: false,
+            } => smelt_push::excerpt(text, smelt_push::DETAIL_MAX_CHARS),
+            _ => None,
+        })
 }
 
 /// 正在等的那个请求的身份，跟 [`acp_pending_question`] 取同一个：先审批，再选择题。

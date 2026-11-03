@@ -5,8 +5,8 @@ import UserNotifications
 /// 推送通知的原生一侧（`lib/data/push.dart` 的 `MethodChannelPushPlatform`）：通知权限、
 /// APNs 令牌、通知点击、通知中心里已送达的推送。
 ///
-/// 推送载荷只有提醒类型（`loc-key`，文案在 Localizable.strings）和 `smelt` 里的
-/// `runtime_id`、`session_id`，见 `crates/smelt-push`。
+/// 推送载荷的 `smelt` 里有提醒类型 `kind` 和 `runtime_id`、`session_id`；正文的提醒类型文案
+/// 由 `loc-key` 在 Localizable.strings 里取。格式见 `crates/smelt-push`。
 final class PushChannel {
   static let shared = PushChannel()
 
@@ -59,23 +59,20 @@ final class PushChannel {
       result(launchTarget)
       launchTarget = nil
     case "delivered":
+      // 每条带上系统给的 identifier 和提醒类型：同一会话留着多条，撤哪条由 Dart 按类型挑。
       UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
-        let targets = notifications.compactMap { Self.target(of: $0) }
-        DispatchQueue.main.async { result(targets) }
+        let delivered = notifications.compactMap { notification -> [String: String]? in
+          guard var target = Self.target(of: notification) else { return nil }
+          target["id"] = notification.request.identifier
+          target["kind"] = Self.kind(of: notification)
+          return target
+        }
+        DispatchQueue.main.async { result(delivered) }
       }
     case "removeDelivered":
-      let wanted = Set(
-        (call.arguments as? [[String: String]] ?? []).map { "\($0["runtimeId"] ?? "")/\($0["sessionId"] ?? "")" })
-      UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
-        let ids = notifications.compactMap { notification -> String? in
-          guard let target = Self.target(of: notification),
-            wanted.contains("\(target["runtimeId"]!)/\(target["sessionId"]!)")
-          else { return nil }
-          return notification.request.identifier
-        }
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
-        DispatchQueue.main.async { result(nil) }
-      }
+      let ids = call.arguments as? [String] ?? []
+      UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
+      result(nil)
     case "openSettings":
       let url: URL?
       if #available(iOS 16.0, *) {
@@ -125,6 +122,10 @@ final class PushChannel {
     } else {
       launchTarget = target
     }
+  }
+
+  private static func kind(of notification: UNNotification) -> String? {
+    (notification.request.content.userInfo["smelt"] as? [String: Any])?["kind"] as? String
   }
 
   private static func target(of notification: UNNotification) -> [String: String]? {

@@ -18,6 +18,7 @@ pub struct PushRegistration {
     pub approval: bool,
     pub input: bool,
     pub failure: bool,
+    pub success: bool,
 }
 
 /// 设推送：`None` 是关掉。每次启动都要设一次（句柄可能换了）；设之前不动机器上的登记。
@@ -31,6 +32,8 @@ pub fn set_push_registration(registration: Option<PushRegistration>) {
             approval: registration.approval,
             input: registration.input,
             failure: registration.failure,
+            success: registration.success,
+            payload_version: smelt_model::remote_config::PUSH_PAYLOAD_VERSION,
         }),
         None => Desired::Off,
     };

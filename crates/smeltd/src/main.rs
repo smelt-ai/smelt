@@ -122,6 +122,7 @@ mod memory_watch;
 mod menubar;
 mod peer_messages;
 mod pi_control;
+mod presence;
 mod push;
 mod resource_usage;
 mod subagent_transcript;

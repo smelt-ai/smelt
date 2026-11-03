@@ -1678,7 +1678,7 @@ class L10nZh extends L10n {
   String get pushToggle => '推送通知';
 
   @override
-  String get pushStatusOff => '智能体需要你时通知你，Smelt 没开着也能收到。';
+  String get pushStatusOff => '智能体需要你或跑完时通知你，Smelt 没开着也能收到。';
 
   @override
   String get pushStatusRegistering => '正在开启…';
@@ -1708,8 +1708,11 @@ class L10nZh extends L10n {
   String get pushKindFailure => '运行失败';
 
   @override
+  String get pushKindSuccess => '跑完一轮';
+
+  @override
   String get pushFooter =>
-      '智能体停下 30 秒后才推送，这期间在别的设备上处理掉了就不推。会话内容只留在你的机器上，通知里只说是哪类事在等你。';
+      '你在 Mac 前用着 Smelt 时，提醒弹在 Mac 上，手机不响；锁屏或 5 分钟没碰键鼠后，还没处理的审批和提问会马上推到手机。通知会显示会话名、项目名和一行摘要（等批准的命令、智能体最后一条回复的开头等），这几行字会经过推送服务和 Apple。完整的会话内容只留在你的机器上。';
 
   @override
   String get pushSessionGone => '这段会话已经不在了。';

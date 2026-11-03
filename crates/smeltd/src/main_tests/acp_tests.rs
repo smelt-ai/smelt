@@ -3828,6 +3828,62 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
 }
 
 #[test]
+fn pending_question_on_success_is_the_last_reply_of_the_turn() {
+    use smelt_core::acp_session::AcpTurnOutcome;
+
+    let mut s = AcpSessionState::default();
+    s.phase = DaemonPhase::Idle;
+    s.completed_unread = true;
+    s.turn_outcome = Some(AcpTurnOutcome::Succeeded);
+    s.entries_mut().extend([
+        AcpEntry::User("上一轮".into()),
+        AcpEntry::Assistant {
+            text: "上一轮的回复".into(),
+            thought: false,
+        },
+        AcpEntry::User("修一下推送".into()),
+    ]);
+    assert_eq!(
+        acp_pending_question(&s),
+        None,
+        "这一轮还没有正文，不拿上一轮的"
+    );
+
+    s.entries_mut().extend([
+        AcpEntry::Assistant {
+            text: "先看看代码".into(),
+            thought: false,
+        },
+        AcpEntry::ToolCall {
+            id: "t1".into(),
+            title: "read".into(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+            subagents: Vec::new(),
+            peer: None,
+        },
+        AcpEntry::Assistant {
+            text: "改好了：\n\n- 推送不再延迟".into(),
+            thought: false,
+        },
+        AcpEntry::Assistant {
+            text: "收尾的思考".into(),
+            thought: true,
+        },
+    ]);
+    assert_eq!(
+        acp_pending_question(&s).as_deref(),
+        Some("改好了： - 推送不再延迟"),
+        "最后一段正文压成一行，跳过思考"
+    );
+
+    s.turn_outcome = Some(AcpTurnOutcome::Cancelled);
+    assert_eq!(acp_pending_question(&s), None, "取消不算完成");
+}
+
+#[test]
 fn pending_question_prefers_permission_over_elicitation() {
     use smelt_core::acp_session::LivePermission;
 

@@ -144,6 +144,9 @@ async fn send(
     {
         return (StatusCode::BAD_REQUEST, "collapse_id 或 apns_id 格式不对");
     }
+    if !request.text_within_limits() {
+        return (StatusCode::BAD_REQUEST, "标题、副标题或摘要太长");
+    }
     if !state.limiter.allow(&device.token, Instant::now()) {
         return (StatusCode::TOO_MANY_REQUESTS, "这台手机的推送太频繁");
     }
@@ -300,6 +303,21 @@ mod tests {
         });
         let mut body = send_body(&handle);
         body["apns_id"] = "not-a-uuid".into();
+        let (status, _) = post_json(state, RELAY_SEND_PATH, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// 运行时本该截好；超长的在调 APNs 之前就拒掉，不拿去撞 4KB 上限。
+    #[tokio::test]
+    async fn send_rejects_overlong_text_before_calling_apns() {
+        let state = state();
+        let handle = state.handles.seal(&Device {
+            token: "ab".repeat(32),
+            environment: smelt_push::ApnsEnvironment::Sandbox,
+            topic: TOPIC.into(),
+        });
+        let mut body = send_body(&handle);
+        body["detail"] = "x".repeat(smelt_push::DETAIL_MAX_CHARS + 1).into();
         let (status, _) = post_json(state, RELAY_SEND_PATH, body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }

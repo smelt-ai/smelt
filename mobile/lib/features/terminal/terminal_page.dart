@@ -88,6 +88,8 @@ class _TerminalPageState extends State<TerminalPage>
     WidgetsBinding.instance.addObserver(this);
     final model = AppScope.of(context);
     _prefs = model.prefs;
+    // 通知中心里这段会话的那一组推送都看过了。
+    unawaited(model.push.clearSession(widget.runtimeId, widget.sessionId));
     // 偏好在 runApp 之前就读好了，第一帧就是对的字号：附着前行列就能落定。
     _fontSize = _prefs.value.terminalFontSize;
     _prefs.addListener(_onPrefsChanged);

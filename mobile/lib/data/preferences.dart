@@ -19,6 +19,7 @@ class Preferences {
     this.pushApproval = true,
     this.pushInput = true,
     this.pushFailure = true,
+    this.pushSuccess = true,
   });
 
   static const version = 1;
@@ -34,11 +35,12 @@ class Preferences {
   /// 安卓应用内更新跟哪个通道（见 `app_update.dart`）。后加的字段：旧文件里没有就是生产版。
   final UpdateChannel updateChannel;
 
-  /// 推送通知（只有 iOS，见 `push.dart`）。后加的字段：旧文件里没有就是关着、三类全选。
+  /// 推送通知（只有 iOS，见 `push.dart`）。后加的字段：旧文件里没有就是关着、各类全选。
   final bool pushEnabled;
   final bool pushApproval;
   final bool pushInput;
   final bool pushFailure;
+  final bool pushSuccess;
 
   Preferences copyWith({
     ThemeMode? themeMode,
@@ -48,6 +50,7 @@ class Preferences {
     bool? pushApproval,
     bool? pushInput,
     bool? pushFailure,
+    bool? pushSuccess,
   }) => Preferences(
     themeMode: themeMode ?? this.themeMode,
     terminalFontSize: terminalFontSize ?? this.terminalFontSize,
@@ -56,6 +59,7 @@ class Preferences {
     pushApproval: pushApproval ?? this.pushApproval,
     pushInput: pushInput ?? this.pushInput,
     pushFailure: pushFailure ?? this.pushFailure,
+    pushSuccess: pushSuccess ?? this.pushSuccess,
   );
 
   factory Preferences.fromJson(Map<String, dynamic> json) {
@@ -74,6 +78,7 @@ class Preferences {
       pushApproval: json['pushApproval'] != false,
       pushInput: json['pushInput'] != false,
       pushFailure: json['pushFailure'] != false,
+      pushSuccess: json['pushSuccess'] != false,
     );
   }
 
@@ -86,6 +91,7 @@ class Preferences {
     'pushApproval': pushApproval,
     'pushInput': pushInput,
     'pushFailure': pushFailure,
+    'pushSuccess': pushSuccess,
   };
 
   @override
@@ -97,7 +103,8 @@ class Preferences {
       other.pushEnabled == pushEnabled &&
       other.pushApproval == pushApproval &&
       other.pushInput == pushInput &&
-      other.pushFailure == pushFailure;
+      other.pushFailure == pushFailure &&
+      other.pushSuccess == pushSuccess;
 
   @override
   int get hashCode => Object.hash(
@@ -108,6 +115,7 @@ class Preferences {
     pushApproval,
     pushInput,
     pushFailure,
+    pushSuccess,
   );
 }
 
