@@ -5223,12 +5223,14 @@ impl SseDecode for crate::api::push::PushRegistration {
         let mut var_approval = <bool>::sse_decode(deserializer);
         let mut var_input = <bool>::sse_decode(deserializer);
         let mut var_failure = <bool>::sse_decode(deserializer);
+        let mut var_success = <bool>::sse_decode(deserializer);
         return crate::api::push::PushRegistration {
             handle: var_handle,
             relay_url: var_relayUrl,
             approval: var_approval,
             input: var_input,
             failure: var_failure,
+            success: var_success,
         };
     }
 }
@@ -7915,6 +7917,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::push::PushRegistration {
             self.approval.into_into_dart().into_dart(),
             self.input.into_into_dart().into_dart(),
             self.failure.into_into_dart().into_dart(),
+            self.success.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -10612,6 +10615,7 @@ impl SseEncode for crate::api::push::PushRegistration {
         <bool>::sse_encode(self.approval, serializer);
         <bool>::sse_encode(self.input, serializer);
         <bool>::sse_encode(self.failure, serializer);
+        <bool>::sse_encode(self.success, serializer);
     }
 }
 

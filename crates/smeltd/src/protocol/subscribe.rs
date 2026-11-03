@@ -36,6 +36,11 @@ pub(super) fn handle_event_subscribe_op<C: ClientSocket + PeerSource>(
                 &daemon_executable,
             )
         });
+    // 本机桌面 App 连着：推送据此判断人可能就在这台 Mac 前（见 `crate::presence`）。
+    let _local_desktop = identity
+        .as_ref()
+        .is_ok_and(|identity| identity.plugin_id.as_str() == FIRST_PARTY_DESKTOP_PLUGIN_ID)
+        .then(crate::presence::LocalDesktopLease::acquire);
     handle_event_subscribe(conn, v.get("request"), identity, event_hub);
 }
 pub(crate) fn collect_subscription_snapshot(

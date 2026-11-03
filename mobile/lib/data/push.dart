@@ -2,8 +2,9 @@
 /// APNs 叫醒手机。
 ///
 /// 这里串起整条登记：申请通知权限 → 拿 APNs 令牌（Swift，`smelt/push` 通道）→ 找推送中继
-/// 换句柄 → 交给 Rust 内核登记到每台机器。推送只带提醒类型和会话 id，文案由系统按
-/// `Localizable.strings` 本地化；会话内容仍然只走 iroh。设计见
+/// 换句柄 → 交给 Rust 内核登记到每台机器。推送带会话名、项目名和一行摘要，提醒类型的文案
+/// 由系统按 `Localizable.strings` 本地化；完整的会话内容仍然只走 iroh。通知中心里一段会话
+/// 叠成一组、保留历史：等批准、等回复处理掉就撤，完成、失败留到打开那段会话。设计见
 /// `docs/notification-architecture.md` 的「手机推送」。
 library;
 
@@ -56,6 +57,22 @@ class PushTarget {
   int get hashCode => Object.hash(runtimeId, sessionId);
 }
 
+/// 通知中心里还留着的一条推送。
+@immutable
+class DeliveredPush {
+  const DeliveredPush({required this.id, required this.target, this.kind});
+
+  /// 系统给这条通知的 identifier，撤回时用。
+  final String id;
+  final PushTarget target;
+
+  /// `approval` / `input` / `failure` / `success`（`smelt-push` 的 `PushKind`）。
+  final String? kind;
+
+  /// 等你批准、等你回复：处理掉就过时了。完成、失败是结果，留作记录。
+  bool get isRequest => kind == 'approval' || kind == 'input';
+}
+
 /// 这个构建的推送配置（Info.plist 里编译期写好的）。
 @immutable
 class PushConfig {
@@ -96,8 +113,10 @@ abstract interface class PushPlatform {
   Stream<PushTarget> get taps;
 
   /// 通知中心里还留着的推送。
-  Future<List<PushTarget>> delivered();
-  Future<void> removeDelivered(List<PushTarget> targets);
+  Future<List<DeliveredPush>> delivered();
+
+  /// 按 [DeliveredPush.id] 撤掉。
+  Future<void> removeDelivered(List<String> ids);
 
   /// 打开系统设置里 Smelt 的那一页。
   Future<void> openSettings();
@@ -153,12 +172,18 @@ class PushService extends ValueNotifier<PushStatus> {
   }
 
   /// 设置里选要推哪几类提醒。
-  Future<void> setKinds({bool? approval, bool? input, bool? failure}) async {
+  Future<void> setKinds({
+    bool? approval,
+    bool? input,
+    bool? failure,
+    bool? success,
+  }) async {
     prefs.update(
       prefs.value.copyWith(
         pushApproval: approval,
         pushInput: input,
         pushFailure: failure,
+        pushSuccess: success,
       ),
     );
     await _sync(prompt: false);
@@ -170,19 +195,28 @@ class PushService extends ValueNotifier<PushStatus> {
     await _sync(prompt: false);
   }
 
-  /// 清掉通知中心里已经处理掉的会话的推送（APNs 没法远程撤回）。`stillWaiting` 是还在等
-  /// 用户处理的会话。
-  Future<void> clearHandled(bool Function(PushTarget) stillWaiting) async {
+  /// 撤掉通知中心里已经处理掉的请求（等批准、等回复；APNs 没法远程撤回）。`stillWaiting`
+  /// 是还在等用户处理的会话。完成、失败不在这里撤，见 [clearSession]。
+  Future<void> clearHandled(bool Function(PushTarget) stillWaiting) =>
+      _remove((push) => push.isRequest && !stillWaiting(push.target));
+
+  /// 打开了这段会话：它在通知中心里的那一组都看过了，整组撤掉。
+  Future<void> clearSession(String runtimeId, String sessionId) {
+    final target = PushTarget(runtimeId, sessionId);
+    return _remove((push) => push.target == target);
+  }
+
+  Future<void> _remove(bool Function(DeliveredPush) stale) async {
     final platform = this.platform;
     if (platform == null) return;
     try {
-      final handled = [
-        for (final target in await platform.delivered())
-          if (!stillWaiting(target)) target,
+      final ids = [
+        for (final push in await platform.delivered())
+          if (stale(push)) push.id,
       ];
-      if (handled.isNotEmpty) await platform.removeDelivered(handled);
+      if (ids.isNotEmpty) await platform.removeDelivered(ids);
     } catch (error) {
-      debugPrint('[push] 清理已送达的通知失败：$error');
+      debugPrint('[push] 撤回已送达的通知失败：$error');
     }
   }
 
@@ -234,6 +268,7 @@ class PushService extends ValueNotifier<PushStatus> {
           approval: p.pushApproval,
           input: p.pushInput,
           failure: p.pushFailure,
+          success: p.pushSuccess,
         ),
       );
       value = PushStatus.on;
@@ -353,18 +388,28 @@ class MethodChannelPushPlatform implements PushPlatform {
   Stream<PushTarget> get taps => _taps.stream;
 
   @override
-  Future<List<PushTarget>> delivered() async => [
+  Future<List<DeliveredPush>> delivered() async => [
     for (final value
         in await _channel.invokeListMethod<Object?>('delivered') ?? const [])
-      ?_target(value),
+      ?_delivered(value),
   ];
 
+  static DeliveredPush? _delivered(Object? value) {
+    final target = _target(value);
+    if (target == null || value is! Map) return null;
+    final id = value['id'];
+    if (id is! String) return null;
+    final kind = value['kind'];
+    return DeliveredPush(
+      id: id,
+      target: target,
+      kind: kind is String ? kind : null,
+    );
+  }
+
   @override
-  Future<void> removeDelivered(List<PushTarget> targets) =>
-      _channel.invokeMethod<void>('removeDelivered', [
-        for (final target in targets)
-          {'runtimeId': target.runtimeId, 'sessionId': target.sessionId},
-      ]);
+  Future<void> removeDelivered(List<String> ids) =>
+      _channel.invokeMethod<void>('removeDelivered', ids);
 
   @override
   Future<void> openSettings() => _channel.invokeMethod<void>('openSettings');

@@ -10,7 +10,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../data/app_update.dart';
 import '../data/models.dart';
-import '../data/push.dart';
 import '../data/stores.dart';
 import '../l10n/gen/l10n.dart';
 import '../theme/galley.dart';
@@ -136,11 +135,6 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
     final session = model.catalog.session(target.runtimeId, target.sessionId);
     if (session != null) {
       model.push.pendingOpen.value = null;
-      unawaited(
-        model.push.clearHandled(
-          (t) => t != PushTarget(target.runtimeId, target.sessionId),
-        ),
-      );
       _openSession(target.runtimeId, session, split: isSplitLayout(context));
       return;
     }

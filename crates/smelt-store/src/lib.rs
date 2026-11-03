@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 32;
+pub const STORE_SCHEMA_VERSION: u32 = 33;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -2025,6 +2025,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 32 {
+            apply_v33_push_success(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 31 {
             apply_v32_quota_provider_pref(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2613,6 +2622,17 @@ mod imp {
             .any(|table| table == "quota_provider_pref")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V31_TO_V32)?;
+        }
+        apply_v33_push_success(transaction)
+    }
+
+    /// v33：推送登记加「完成」开关和载荷版本。已经有这两列的库跳过。
+    fn apply_v33_push_success(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_columns(transaction, "push_registration")?
+            .iter()
+            .any(|column| column == "notify_success")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V32_TO_V33)?;
         }
         Ok(())
     }
@@ -7393,6 +7413,49 @@ CREATE TABLE worktree_inherit_skip_pattern (
         assert!(prefs[1].enabled && !prefs[1].keychain_denied);
     }
 
+    /// v32 的登记来自旧版 App：迁移后不推完成，载荷按版本 1 发。
+    #[test]
+    fn migrates_v32_adding_push_success() {
+        let dir = temp_dir("migrate-v32-push-success");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "DROP TABLE push_registration;
+                 {}
+                 INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);
+                 INSERT INTO push_registration(device_endpoint_id, handle, relay_url,
+                   notify_approval, notify_input, notify_failure, updated_at_ms)
+                 VALUES ('aa', 'h', 'https://push.example.test', 1, 0, 1, 5);",
+                crate::schema::MIGRATE_V29_TO_V30
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 32).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        assert_eq!(
+            store.list_push_registrations().unwrap(),
+            vec![PushRegistration {
+                device_endpoint_id: "aa".to_string(),
+                handle: "h".to_string(),
+                relay_url: "https://push.example.test".to_string(),
+                notify_approval: true,
+                notify_input: false,
+                notify_failure: true,
+                notify_success: false,
+                payload_version: 1,
+                updated_at_ms: 5,
+            }]
+        );
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
     #[test]
     fn push_registrations_follow_their_paired_device() {
         let dir = temp_dir("push-registrations");
@@ -7404,6 +7467,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
             notify_approval: true,
             notify_input: false,
             notify_failure: true,
+            notify_success: false,
+            payload_version: 1,
             updated_at_ms: 10,
         };
         assert!(
@@ -7424,6 +7489,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let updated = PushRegistration {
             handle: "handle-2".to_string(),
             notify_input: true,
+            notify_success: true,
+            payload_version: 2,
             updated_at_ms: 20,
             ..registration.clone()
         };

@@ -310,6 +310,9 @@ fn validate_push_registration(params: &PushRegisterParams) -> Result<(), Control
     if !(relay.starts_with("https://") || loopback) || relay.len() > 512 {
         return Err(invalid("推送中继地址必须是 https:// 开头"));
     }
+    if params.payload_version == 0 {
+        return Err(invalid("推送载荷版本至少是 1"));
+    }
     Ok(())
 }
 
@@ -324,6 +327,8 @@ fn push_register(principal: &Principal, params: PushRegisterParams) -> Result<()
             notify_approval: params.approval,
             notify_input: params.input,
             notify_failure: params.failure,
+            notify_success: params.success,
+            payload_version: params.payload_version,
             updated_at_ms: now_ms(),
         })
         .map_err(store_error)?;
@@ -434,6 +439,8 @@ mod tests {
             approval: true,
             input: true,
             failure: true,
+            success: true,
+            payload_version: smelt_core::remote_config::PUSH_PAYLOAD_VERSION,
         }
     }
 

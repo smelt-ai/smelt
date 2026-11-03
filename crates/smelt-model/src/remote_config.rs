@@ -80,6 +80,14 @@ pub struct RevokeResult {
     pub revoked: bool,
 }
 
+/// 这一版手机认得的推送载荷版本，随 `push.register` 登记到各台机器。
+///
+/// - 1（旧版 App 不带这个字段）：只认四个提醒类型的 loc-key，不认「完成」。
+/// - 2：认得带摘要的 loc-key（`SMELT_PUSH_*_DETAIL`）和「完成」。
+///
+/// 运行时按登记的版本挑载荷：给旧 App 发它的文案文件里没有的键，iOS 会把键名原样显示出来。
+pub const PUSH_PAYLOAD_VERSION: u32 = 2;
+
 /// `push.register` 的参数。哪台设备由连接的身份决定，不在参数里。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PushRegisterParams {
@@ -90,4 +98,34 @@ pub struct PushRegisterParams {
     pub approval: bool,
     pub input: bool,
     pub failure: bool,
+    /// 跑完一轮。旧版手机没有这个开关，不带就是不推。
+    #[serde(default)]
+    pub success: bool,
+    /// 见 [`PUSH_PAYLOAD_VERSION`]。旧版手机不带，就是 1。
+    #[serde(default = "legacy_push_payload_version")]
+    pub payload_version: u32,
+}
+
+fn legacy_push_payload_version() -> u32 {
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧版手机的登记不带「完成」和载荷版本：不推完成，载荷按版本 1 发。
+    #[test]
+    fn legacy_push_registration_reads_as_version_one_without_success() {
+        let params: PushRegisterParams = serde_json::from_value(serde_json::json!({
+            "handle": "h",
+            "relay_url": "https://push.example.test",
+            "approval": true,
+            "input": true,
+            "failure": true,
+        }))
+        .unwrap();
+        assert!(!params.success);
+        assert_eq!(params.payload_version, 1);
+    }
 }

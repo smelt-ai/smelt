@@ -364,6 +364,11 @@ class _PushSection extends StatelessWidget {
                 prefs.pushFailure,
                 (value) => push.setKinds(failure: value),
               ),
+              kind(
+                l10n.pushKindSuccess,
+                prefs.pushSuccess,
+                (value) => push.setKinds(success: value),
+              ),
             ],
           ],
         ),

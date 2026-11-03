@@ -103,7 +103,7 @@ void main() {
       expect(Preferences.fromJson(dev.toJson()), dev);
     });
 
-    test('推送是后加的：旧文件里没有就是关着、三类全选', () {
+    test('推送是后加的：旧文件里没有就是关着、各类全选', () {
       final legacy = Preferences.fromJson({
         'version': Preferences.version,
         'themeMode': 'dark',
@@ -112,9 +112,11 @@ void main() {
       expect(legacy.pushApproval, isTrue);
       expect(legacy.pushInput, isTrue);
       expect(legacy.pushFailure, isTrue);
+      expect(legacy.pushSuccess, isTrue);
       final custom = const Preferences().copyWith(
         pushEnabled: true,
         pushInput: false,
+        pushSuccess: false,
       );
       expect(Preferences.fromJson(custom.toJson()), custom);
     });

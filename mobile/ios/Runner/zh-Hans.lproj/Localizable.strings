@@ -1,5 +1,11 @@
-/* 推送文案。推送里只有键（smelt-push 的 PushKind::loc_key），不带会话内容，
-   系统按手机语言显示。 */
+/* 推送文案（smelt-push 的 PushKind::loc_key / detail_loc_key）。标题、副标题是会话名和
+   项目名，正文取这里的一条，系统按手机语言显示提醒类型。%@ 是一行摘要：等批准的命令、
+   等回复的问题、失败原因、智能体最后一条回复的开头。 */
 "SMELT_PUSH_APPROVAL" = "有智能体在等你批准";
 "SMELT_PUSH_INPUT" = "有智能体在等你回复";
 "SMELT_PUSH_FAILURE" = "有智能体运行失败了";
+"SMELT_PUSH_SUCCESS" = "有智能体跑完了";
+"SMELT_PUSH_APPROVAL_DETAIL" = "等你批准：%@";
+"SMELT_PUSH_INPUT_DETAIL" = "等你回复：%@";
+"SMELT_PUSH_FAILURE_DETAIL" = "失败：%@";
+"SMELT_PUSH_SUCCESS_DETAIL" = "完成：%@";

@@ -26,8 +26,8 @@ class _Platform implements PushPlatform {
   int prompts = 0;
   PushTarget? launch;
   final tapController = StreamController<PushTarget>.broadcast();
-  List<PushTarget> shown = [];
-  final removed = <PushTarget>[];
+  List<DeliveredPush> shown = [];
+  final removed = <String>[];
 
   @override
   Future<PushConfig?> configuration() async => config;
@@ -56,11 +56,10 @@ class _Platform implements PushPlatform {
   Stream<PushTarget> get taps => tapController.stream;
 
   @override
-  Future<List<PushTarget>> delivered() async => shown;
+  Future<List<DeliveredPush>> delivered() async => shown;
 
   @override
-  Future<void> removeDelivered(List<PushTarget> targets) async =>
-      removed.addAll(targets);
+  Future<void> removeDelivered(List<String> ids) async => removed.addAll(ids);
 
   @override
   Future<void> openSettings() async {}
@@ -115,12 +114,19 @@ void main() {
     expect(registration.handle, 'handle-1');
     expect(registration.relayUrl, 'https://push.example.test');
     expect(
-      [registration.approval, registration.input, registration.failure],
-      [true, true, true],
+      [
+        registration.approval,
+        registration.input,
+        registration.failure,
+        registration.success,
+      ],
+      [true, true, true, true],
     );
 
     await push.setKinds(input: false);
     expect(backend.registrations.last!.input, isFalse);
+    await push.setKinds(success: false);
+    expect(backend.registrations.last!.success, isFalse);
     expect(platform.prompts, 1, reason: '已经允许过，不再弹');
 
     await push.setEnabled(false);
@@ -174,9 +180,28 @@ void main() {
     expect(push.pendingOpen.value, const PushTarget('r2', 's2'));
   });
 
-  test('只清掉已经不在等的会话的通知', () async {
-    platform.shown = const [PushTarget('r1', 's1'), PushTarget('r1', 's2')];
+  DeliveredPush shown(String id, String sessionId, String kind) =>
+      DeliveredPush(id: id, target: PushTarget('r1', sessionId), kind: kind);
+
+  test('只撤掉已经不在等的会话里的请求，完成和失败留着', () async {
+    platform.shown = [
+      shown('a', 's1', 'approval'),
+      shown('b', 's2', 'approval'),
+      shown('c', 's2', 'input'),
+      shown('d', 's2', 'success'),
+      shown('e', 's2', 'failure'),
+    ];
     await push.clearHandled((target) => target.sessionId == 's1');
-    expect(platform.removed, const [PushTarget('r1', 's2')]);
+    expect(platform.removed, ['b', 'c']);
+  });
+
+  test('打开会话时撤掉它的整组通知', () async {
+    platform.shown = [
+      shown('a', 's1', 'approval'),
+      shown('b', 's1', 'success'),
+      shown('c', 's2', 'success'),
+    ];
+    await push.clearSession('r1', 's1');
+    expect(platform.removed, ['a', 'b']);
   });
 }

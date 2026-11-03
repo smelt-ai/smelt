@@ -25,6 +25,7 @@ class PushRegistration {
   final bool approval;
   final bool input;
   final bool failure;
+  final bool success;
 
   const PushRegistration({
     required this.handle,
@@ -32,6 +33,7 @@ class PushRegistration {
     required this.approval,
     required this.input,
     required this.failure,
+    required this.success,
   });
 
   @override
@@ -40,7 +42,8 @@ class PushRegistration {
       relayUrl.hashCode ^
       approval.hashCode ^
       input.hashCode ^
-      failure.hashCode;
+      failure.hashCode ^
+      success.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -51,5 +54,6 @@ class PushRegistration {
           relayUrl == other.relayUrl &&
           approval == other.approval &&
           input == other.input &&
-          failure == other.failure;
+          failure == other.failure &&
+          success == other.success;
 }
