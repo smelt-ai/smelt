@@ -11,7 +11,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-dirs = "5"
+dirs = "6"
 notify = "8"
 smelt-paths = { path = "../smelt-paths" }
 smelt-version = { path = "../smelt-version" }
