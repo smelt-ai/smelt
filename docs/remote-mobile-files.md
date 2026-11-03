@@ -135,23 +135,20 @@
 
 | 接口 | 背后的方法 | 返回 |
 |---|---|---|
-| `project_tree(runtime_id, root, dir)` | `project.tree` | `Vec<FileEntry{name, path, is_dir}>` |
-| `project_search(runtime_id, root, query)` | `project.search` | `{hits: Vec<{path, rel, line: Option<(行号, 预览)>}>, truncated}` |
+| `list_project_dir(runtime_id, root, dir)` | `project.tree` | `Vec<FileEntry{name, path, is_dir}>`，子项路径按那台机器的 `PathStyle` 拼 |
+| `search_project(runtime_id, root, query)` | `project.search` | `FileSearch{hits: Vec<{path, rel, line, preview}>, truncated}` |
 | `open_file(runtime_id, path)` | `file.open` | `FilePreview`，见下 |
-| `resolve_file_link(cwd, href)` | 无，纯计算 | `Option<String>`，对话里的链接是不是本地文件、绝对路径是什么 |
+| `resolve_file_link(runtime_id, cwd, target)` | 无，同步纯计算 | `Option<FileLinkTarget{path, line}>` |
 
-```text
-FilePreview
-  Text(TextDocument)          // 不透明句柄，见第 5 节
-  Image { bytes, is_svg }
-  Binary
-  TooLarge { size, limit }
-```
+`FilePreview` 是「`kind` 枚举 + 可选字段」的结构体（`document` / `image` + `svg` / `size` + `limit`）：
+FRB 没开 freezed，带数据的 enum 生成不了 Dart 的 sealed class。文本的 `document` 是不透明的 `TextDocument`
+（见第 5 节），Dart 侧再包一层接口 `TextSource`（`mobile/lib/data/files.dart`），演示和测试用纯 Dart 实现，
+不加载 Rust 库。
 
 - 目录浏览用 `project.tree`，不用 `workspace.browse_dirs`：后者隐藏所有点开头的项，项目里的 `.github`、`.env` 会看不到；
   前者只藏 `.git` 等四项，并保证不出项目根。
-- `resolve_file_link` 的规则和桌面一致：把 `crates/smelt-ui/src/markdown_links.rs` 里不依赖 GPUI 的路径解析
-  挪到 `smelt-model`，桌面和手机共用一份。
+- `resolve_file_link` 的规则和桌面一致：`crates/smelt-ui/src/markdown_links.rs` 里不依赖 GPUI 的路径解析
+  挪到 `smelt-model::file_link`，桌面改为调用它，手机按那台机器的 `PathStyle` 补全。
 - 第一版不订阅 `project.changed`：手机上看文件是短时、主动的行为，进页面和下拉刷新时重取即可，也不做定时刷新。
 
 ### 3.2 Dart 侧
@@ -165,7 +162,7 @@ FilePreview
 
 ---
 
-## 4 · 手机：界面（PR3）
+## 4 · 手机：界面（PR2）
 
 目录 `mobile/lib/features/files/`。
 
@@ -175,9 +172,11 @@ FilePreview
 
 ### 4.2 浏览
 
-- `DirBrowser` 的数据来源抽成调用方传入的加载函数：选目录继续用 `browse_dirs`，看项目用 `project_tree`，
-  列表界面共用（issue 要求目录浏览可复用，#78 选绑定目录已在用）。
-- 顶部搜索框走 `project_search`：文件名命中和内容命中分两组，点内容命中跳到对应行。
+- 单独一页 `ProjectFilesPage`，不改 `DirBrowser`：后者是「选一个目录」的流程（快捷位置、已打开标记、
+  底部动作按钮），#78 选绑定目录已经在用；看项目文件是「限定在项目根里、点文件打开」，硬并成一个组件
+  两边都要绕。共用的是行组件（`ShelfRow`、`HairlineRows`）。
+- 返回键先退目录，退到项目根才离开页面。
+- 顶部搜索框走 `search_project`，停手 350 ms 才发；内容命中带行号，点了跳到那一行。
 - 下拉刷新。
 
 ### 4.3 预览
@@ -191,8 +190,9 @@ FilePreview
 
 ### 4.4 从对话跳转
 
-- Markdown 链接：`onTapLink` 先调 `resolve_file_link`，是本地文件就在 App 里预览，否则照旧外部打开。
-- diff 卡片的文件头可点。
+- 对话页给子树挂 `FileLinkScope`（机器 + 对话的 cwd）。Markdown 链接先调 `resolve_file_link`，是文件就在
+  App 里预览，否则照旧外部打开；文件预览里的 Markdown 也挂一层，cwd 是文件所在目录。
+- diff 卡片的文件头可点（有 `FileLinkScope` 时显示成链接色）。
 - 读写文件的工具调用暂不可点：要把 ACP 的 `locations` 带进 `AcpEntry::ToolCall`，会改动两端共用的数据模型，单独做。
 
 ### 4.5 不做
@@ -202,7 +202,9 @@ FilePreview
 
 ### 4.6 测试
 
-用 `RecordingBackend` 写组件测试：逐层浏览与返回、搜索、四种预览、Markdown 源码切换、对话链接跳转。
+`test/features/files/files_test.dart`，演示后端的子类记录调用：逐层浏览与返回、搜索防抖与跳行、文本预览离开时
+释放、Markdown 渲染 / 源码切换与相对链接、二进制、过大、对话链接带行号。代码高亮配色进
+`test/theme/contrast_test.dart`，亮暗两套在搁板和钢底上都 ≥ 4.5。
 
 ---
 
@@ -295,8 +297,7 @@ FilePreview
 | PR | 内容 | 依赖 |
 |---|---|---|
 | PR1 | 桌面工具面板按机器（第 2 节） | 无 |
-| PR2 | 手机 Rust 层、高亮、Dart 接口（第 3、5 节） | 无，可与 PR1 并行 |
-| PR3 | 手机界面（第 4 节） | PR2 |
+| PR2 | 手机端：Rust 层、高亮、Dart 接口和界面（第 3、4、5 节） | 无，可与 PR1 并行 |
 
 `resolve_file_link` 挪到 `smelt-model` 放在 PR2，桌面改为调用新位置也在 PR2 一并完成。
 
