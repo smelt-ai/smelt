@@ -1,6 +1,6 @@
 import "./quickjs-embed.ts";
 import pkg from "../package.json" with { type: "json" };
-import { checksDaemonProtocol, embeddedAdapterSpecs, parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
+import { checksDaemonProtocol, parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
 
 // 和 agent/scripts/compile-smelt-agent.ts 里改写进 Pi 的路径一致：嵌入文件的根目录分平台。
 const BUNFS_ROOT = process.platform === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/";
@@ -107,9 +107,6 @@ switch (command.kind) {
 	case "acp-codex":
 		presentAs(command.args);
 		await import("@agentclientprotocol/codex-acp/dist/index.js");
-		break;
-	case "acp-adapters":
-		console.log(embeddedAdapterSpecs(pkg.dependencies).join("\n"));
 		break;
 	case "rpc":
 		await import("./main.ts");
