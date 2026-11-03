@@ -9,6 +9,7 @@ use crate::settings::workspace::PiConfigFileKind;
 use smelt_model::pi_auth::PiAuthProvider;
 use smelt_model::pi_model_settings::{PiCustomProvider, PiModelSettings};
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
 const PAGE_MAX_WIDTH: f32 = 760.;
@@ -188,11 +189,11 @@ fn default_model_section(
                         .gap_1()
                         .child(
                             div()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .font_medium()
                                 .text_color(palette.fg)
-                                .child(title),
+                                .child(truncated_line(title)),
                         )
                         .child(status),
                 )
@@ -615,10 +616,10 @@ fn provider_list_footer(
             .child(
                 div()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(palette.danger)
-                    .child(format!("读取内置 Provider 失败：{error}")),
+                    .child(truncated_line(format!("读取内置 Provider 失败：{error}"))),
             )
             .child(retry("重试")),
         Some(PiAuthProvidersState::Ready(_)) => {
@@ -683,10 +684,10 @@ fn custom_provider_row(
                         .items_center()
                         .child(
                             div()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(palette.fg)
-                                .child(name),
+                                .child(truncated_line(name)),
                         )
                         .child(Tag::secondary().rounded_full().flex_none().child("自定义"))
                         .children(
@@ -696,15 +697,15 @@ fn custom_provider_row(
                 )
                 .child(
                     div()
-                        .truncate()
+                        .overflow_hidden()
                         .text_xs()
                         .text_color(palette.muted)
-                        .child(format!(
+                        .child(truncated_line(format!(
                             "{} · {} 个模型 · {}",
                             provider.id,
                             provider.models.len(),
                             credential
-                        )),
+                        ))),
                 ),
         )
         .child(

@@ -3,6 +3,7 @@
 
 use super::*;
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 pub(super) fn agents_page(
     entity: Entity<Workspace>,
@@ -41,10 +42,10 @@ fn quota_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
             SettingField::render(move |_, _, cx: &mut App| {
                 div()
                     .max_w(px(320.))
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(error.clone())
+                    .child(truncated_line(error.clone()))
             }),
         )),
         None => group,
@@ -419,10 +420,10 @@ fn agent_groups(
                                     .min_w_0()
                                     .gap(px(2.))
                                     .child(
-                                        div().truncate().text_xs().text_color(color).child(status),
+                                        div().overflow_hidden().text_xs().text_color(color).child(truncated_line(status)),
                                     )
                                     .child(
-                                        div().truncate().text_xs().text_color(muted).child(path),
+                                        div().overflow_hidden().text_xs().text_color(muted).child(truncated_line(path)),
                                     ),
                             )
                             .children(install_button)

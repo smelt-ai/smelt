@@ -10967,6 +10967,7 @@ dependencies = [
  "gpui-base",
  "gpui-component",
  "gpui-pre",
+ "gpui-pre-apple",
  "hex",
  "image",
  "merman",

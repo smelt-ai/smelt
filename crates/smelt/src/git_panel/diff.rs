@@ -383,9 +383,9 @@ impl GitDiffBody {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(name),
+                            .child(truncated_line(name)),
                     ),
             )
             .child(

@@ -7,6 +7,7 @@ use super::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::separator::Separator;
 use gpui_component::tab::{Tab, TabBar};
+use smelt_ui::truncated_line::truncated_line;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InspectorTab {
@@ -690,10 +691,10 @@ fn render_ledger_row(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_sm()
                         .text_color(gpui::rgb(ui_theme::text_mid()))
-                        .child(event.text.clone()),
+                        .child(truncated_line(event.text.clone())),
                 ),
         )
         .child(

@@ -3,6 +3,7 @@
 use super::*;
 use gpui_component::scroll::AutoScroll;
 use smelt_model::agent_kind::TerminalAgentKind;
+use smelt_ui::truncated_line::truncated_line;
 
 /// 指针在侧栏视口顶/底边缘时的滚动量。正数往下，负数往上。
 /// 横向上离开侧栏太远就停，避免拖到舞台区还在滚列表。
@@ -119,8 +120,8 @@ fn session_drag_preview(drag: &SessionDrag) -> Div {
                 .min_w_0()
                 .text_size(px(13.))
                 .text_color(rgb(ui_theme::text_bright()))
-                .truncate()
-                .child(drag.title.clone()),
+                .overflow_hidden()
+                .child(truncated_line(drag.title.clone())),
         )
         .children(drag.subtitle.clone().map(|subtitle| {
             div()
@@ -196,11 +197,11 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                         .children(drag.branch.clone().map(|branch| {
                             div()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_size(px(11.))
                                 .font_family(crate::terminal_view::font_family())
                                 .text_color(rgb(ui_theme::text_faint()))
-                                .child(branch)
+                                .child(truncated_line(branch))
                         })),
                 )
                 .child(

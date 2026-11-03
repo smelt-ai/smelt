@@ -25,6 +25,7 @@ pub use smelt_runtime_client::protocol::git::{
     build_git_tree, full_file_path, parse_diff,
 };
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 mod diff;
 pub(crate) use diff::*;
@@ -636,20 +637,20 @@ fn render_narrow_git_row(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .font_semibold()
                         .text_color(rgb(ui_theme::text_bright()))
-                        .child(label.clone()),
+                        .child(truncated_line(label.clone())),
                 )
                 .child(
                     div()
                         .id(git_repo_id("git-repo-branch", root))
                         .flex_shrink_0()
                         .max_w(px(96.))
-                        .truncate()
+                        .overflow_hidden()
                         .text_xs()
                         .text_color(rgb(ui_theme::text_faint()))
-                        .child(branch.clone())
+                        .child(truncated_line(branch.clone()))
                         .tooltip({
                             let b = branch.clone();
                             move |window, cx| {
@@ -816,7 +817,7 @@ fn render_narrow_git_row(
                 .text_xs()
                 .font_semibold()
                 .text_color(rgb(ui_theme::text_faint()))
-                .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(title.clone())))
                 .children(batch.as_ref().map(|batch| {
                     let batch = batch.clone();
                     let ws_batch = ws.clone();
@@ -901,7 +902,7 @@ fn render_narrow_git_row(
                             .size(px(10.))
                             .flex_shrink_0(),
                         )
-                        .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(row.name.clone())))
                         .child(batch_action)
                         .on_click(move |_ev, _window, cx| {
                             let path = toggle_path.clone();
@@ -996,9 +997,9 @@ fn render_narrow_git_row(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_color(rgb(ui_theme::text()))
-                                .child(row.name.clone()),
+                                .child(truncated_line(row.name.clone())),
                         )
                         .when(*gitlink, |line| {
                             line.child(

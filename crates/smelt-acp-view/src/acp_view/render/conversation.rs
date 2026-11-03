@@ -2,6 +2,7 @@
 
 use super::*;
 use gpui_base::motion::MotionReveal;
+use smelt_ui::truncated_line::truncated_line;
 
 fn owner_id(name: &'static str, owner: &gpui::SharedString) -> gpui::ElementId {
     gpui::ElementId::from((gpui::ElementId::from(name), owner.clone()))
@@ -134,9 +135,9 @@ fn peer_preview_hover(
                 .trigger(
                     div()
                         .max_w(px(360.))
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(muted)
-                        .child(preview),
+                        .child(truncated_line(preview)),
                 )
                 .child(
                     div()
@@ -804,7 +805,7 @@ impl AcpView {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_xs()
                                         .text_color(ink)
                                         .when(can_expand, |label| {
@@ -812,7 +813,7 @@ impl AcpView {
                                                 s.text_color(gpui::rgb(ui_theme::text_bright()))
                                             })
                                         })
-                                        .child(headline.clone()),
+                                        .child(truncated_line(headline.clone())),
                                 );
                             if failed {
                                 row = row.child(
@@ -970,10 +971,10 @@ impl AcpView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .truncate()
+                                    .overflow_hidden()
                                     .text_xs()
                                     .text_color(ink)
-                                    .child(compact_tool_headline(*kind, title)),
+                                    .child(truncated_line(compact_tool_headline(*kind, title))),
                             )
                             .child(header_right)
                             .when_some(row_elapsed, |header, elapsed_ms| {
@@ -1163,7 +1164,7 @@ impl AcpView {
                         };
                         let mut row = event_line(muted)
                             .child(Icon::new(icon).size(px(13.)).text_color(muted))
-                            .child(div().min_w_0().truncate().child(note.summary()));
+                            .child(div().min_w_0().overflow_hidden().child(truncated_line(note.summary())));
                         if has_output {
                             row = row.child(this.render_event_toggle(
                                 owner_id("acp-task-note-row", &note_owner),
@@ -1372,9 +1373,9 @@ impl AcpView {
                 col.child(
                     div()
                         .pl(px(14.))
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(gpui::rgb(ui_theme::text_muted()))
-                        .child(retry.error.clone()),
+                        .child(truncated_line(retry.error.clone())),
                 )
             })
             .into_any_element()
@@ -1562,10 +1563,10 @@ impl AcpView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(muted)
-                    .child(run_label),
+                    .child(truncated_line(run_label)),
             )
             .when_some(live_elapsed, |header, elapsed_ms| {
                 header.child(elapsed_suffix(elapsed_ms, muted))
@@ -1624,7 +1625,7 @@ impl AcpView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .text_xs()
                             .text_color(faint)
                             .when(can_expand, |label| {
@@ -1632,7 +1633,7 @@ impl AcpView {
                                     s.text_color(gpui::rgb(ui_theme::text_bright()))
                                 })
                             })
-                            .child(headline.clone()),
+                            .child(truncated_line(headline.clone())),
                     );
                 col = col.child(if can_expand {
                     self.tool_output_popover(
@@ -1699,7 +1700,7 @@ impl AcpView {
                 .error
                 .as_deref()
                 .map_or_else(|| "失败".to_string(), |error| format!("失败：{error}"));
-            row = row.child(div().min_w_0().truncate().text_color(red).child(reason));
+            row = row.child(div().min_w_0().overflow_hidden().text_color(red).child(truncated_line(reason)));
         }
         if has_body {
             row = row
@@ -1929,10 +1930,10 @@ impl AcpView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_sm()
                     .text_color(ink)
-                    .child(headline),
+                    .child(truncated_line(headline)),
             );
         if !progress.is_empty() {
             header = header.child(
@@ -2087,19 +2088,19 @@ impl AcpView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_sm()
                     .text_color(ink)
-                    .child(headline.clone()),
+                    .child(truncated_line(headline.clone())),
             )
             .child(
                 div()
                     .flex_shrink_0()
                     .max_w(px(360.))
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(if progress.problem { red } else { faint })
-                    .child(progress.text),
+                    .child(truncated_line(progress.text)),
             )
             .child(subagent_status_icon(
                 header_status,
@@ -2220,19 +2221,19 @@ impl AcpView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(muted)
-                    .child(run_title.clone()),
+                    .child(truncated_line(run_title.clone())),
             )
             .child(
                 div()
                     .flex_shrink_0()
                     .max_w(px(280.))
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(if problem { red } else { faint })
-                    .child(detail),
+                    .child(truncated_line(detail)),
             )
             .when_some(view.map(|view| subagent_elapsed_ms(view, now)), |row, elapsed_ms| {
                 row.child(elapsed_suffix(elapsed_ms, muted))
@@ -2317,12 +2318,12 @@ impl AcpView {
                             .pl(px(21.))
                             .text_xs()
                             .text_color(muted)
-                            .truncate()
-                            .child(if *thought {
+                            .overflow_hidden()
+                            .child(truncated_line(if *thought {
                                 format!("思考  {line}")
                             } else {
                                 line.to_string()
-                            })
+                            }))
                             .into_any_element()
                     }
                 }
@@ -2389,10 +2390,10 @@ impl AcpView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .text_xs()
                             .text_color(ink)
-                            .child(name),
+                            .child(truncated_line(name)),
                     );
                     if has_nested && expanded {
                         v_flex()
@@ -2487,8 +2488,10 @@ impl AcpView {
             preview = "正在想".to_string();
         }
         let has_details = progress_has_details(text);
-        // 进行中的摘要不展开：悬停底和点击同一条件，避免看起来不能点却还能点。
-        let interactive = has_details && !in_process;
+        // `in_process` 是「在过程组里」，不是「还在跑」：过程组里的思考和中间说明跑完也
+        // 一直在组里，摘要只有一行，长文必须能点开，否则后半段永远看不到。
+        // 悬停底和点击同一条件，避免看起来不能点却还能点。
+        let interactive = has_details;
         let settled = if !in_process && live_elapsed.is_none() {
             settled_thought_elapsed(
                 &self.entries,
@@ -2515,16 +2518,11 @@ impl AcpView {
         .when(!in_process, |row| row.px_2().rounded_md())
         .gap_2()
         .disabled(!interactive)
+        .when(in_process && interactive, |row| row.group(EXPAND_ICON_GROUP))
         .child(if in_process {
+            // 过程组里的行不另加尾部箭头，和工具行一样：指上去时左侧图标换成箭头。
             let thought = matches!(entry, AcpEntry::Assistant { thought: true, .. });
-            if thought && live_elapsed.is_some() {
-                quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
-            } else if thought {
-                Icon::new(IconName::Asterisk)
-                    .size(px(13.))
-                    .text_color(muted)
-                    .into_any_element()
-            } else {
+            let circle = || {
                 div()
                     .size(px(8.))
                     .flex_shrink_0()
@@ -2532,6 +2530,20 @@ impl AcpView {
                     .border_1()
                     .border_color(muted)
                     .into_any_element()
+            };
+            if thought && live_elapsed.is_some() {
+                quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
+            } else if thought && interactive {
+                expandable_lead_icon(IconName::Asterisk, expanded, muted)
+            } else if thought {
+                Icon::new(IconName::Asterisk)
+                    .size(px(13.))
+                    .text_color(muted)
+                    .into_any_element()
+            } else if interactive {
+                expandable_lead(circle(), expanded, muted)
+            } else {
+                circle()
             }
         } else if live_elapsed.is_some() {
                 quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
@@ -2545,13 +2557,14 @@ impl AcpView {
                     .into_any_element()
             })
             .child(
+                // 摘要常是中英混排，GPUI 的 `.truncate()` 会把省略号裁掉，见 `truncated_line`。
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(muted)
-                    .child(preview.clone()),
+                    .child(smelt_ui::truncated_line::truncated_line(preview.clone())),
             )
             .when_some(live_elapsed, |row, elapsed_ms| {
                 row.child(elapsed_suffix(elapsed_ms, muted))
@@ -2570,13 +2583,15 @@ impl AcpView {
                 .card()
                 .role(gpui::Role::Button)
                 .aria_label(preview)
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(if expanded { "▾" } else { "▸" }),
-                )
+                .when(!in_process, |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(if expanded { "▾" } else { "▸" }),
+                    )
+                })
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     let open = if this.expanded_thoughts.remove(&entry_ix) {
                         false
@@ -3009,12 +3024,12 @@ pub(super) fn render_nested_transcript(children: &[AcpEntry], muted: gpui::Hsla)
                     div()
                         .text_xs()
                         .text_color(muted)
-                        .truncate()
-                        .child(if *thought {
+                        .overflow_hidden()
+                        .child(truncated_line(if *thought {
                             format!("思考  {line}")
                         } else {
                             line.to_string()
-                        })
+                        }))
                         .into_any_element()
                 }
             }
@@ -3068,10 +3083,10 @@ fn nested_tool_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
+                .overflow_hidden()
                 .text_xs()
                 .text_color(ink)
-                .child(headline),
+                .child(truncated_line(headline)),
         );
     if failed {
         row = row.child(

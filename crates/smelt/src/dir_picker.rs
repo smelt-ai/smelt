@@ -11,6 +11,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
+use smelt_ui::truncated_line::truncated_line;
 use smelt_runtime_client::protocol::workspace::{
     BrowseDirsParams, BrowseDirsResult, WorkspaceBrowseDirsCall,
 };
@@ -297,14 +298,14 @@ impl Workspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(muted)
-                    .child(
+                    .child(truncated_line(
                         current
                             .map(|listing| listing.path.clone())
                             .unwrap_or_else(|| "…".to_string()),
-                    ),
+                    )),
             );
 
         let body: AnyElement = match listing {
@@ -359,10 +360,10 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(fg)
-                                .child(entry.name.clone()),
+                                .child(truncated_line(entry.name.clone())),
                         )
                         // 多选时目录行右侧单独一个勾选；点名字进入目录。
                         .when(multiple && is_dir, |row| {
