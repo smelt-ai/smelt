@@ -1287,10 +1287,11 @@ pub fn spawn_acp(
                 ));
                 if let Err(e) = result {
                     let tail = stderr_tail.lock().unwrap().join("\n");
+                    let msg = with_auth_required_hint(&e, &launch.launch.command, format!("{e}"));
                     let msg = if tail.is_empty() {
-                        format!("{e}")
+                        msg
                     } else {
-                        format!("{e}\n--- agent stderr ---\n{tail}")
+                        format!("{msg}\n--- agent stderr ---\n{tail}")
                     };
                     crate::app_log::error(
                         "acp",
@@ -1544,7 +1545,10 @@ fn signal_acp_handshake_complete(completed: &Arc<(Mutex<bool>, Condvar)>) {
     wake.notify_one();
 }
 
-fn classify_restore_failure(error: &agent_client_protocol::Error) -> ConversationRestoreFailure {
+fn classify_restore_failure(
+    error: &agent_client_protocol::Error,
+    command: &str,
+) -> ConversationRestoreFailure {
     if is_missing_history_error(error) {
         return ConversationRestoreFailure::HistoryMissing;
     }
@@ -1552,7 +1556,11 @@ fn classify_restore_failure(error: &agent_client_protocol::Error) -> Conversatio
         agent_client_protocol::ErrorCode::MethodNotFound => {
             ConversationRestoreFailure::UnsupportedLoad
         }
-        _ => ConversationRestoreFailure::Failed(format!("恢复历史对话失败，可重试：{error}")),
+        _ => ConversationRestoreFailure::Failed(with_auth_required_hint(
+            error,
+            command,
+            format!("恢复历史对话失败，可重试：{error}"),
+        )),
     }
 }
 
@@ -2021,7 +2029,7 @@ async fn run_connection(
                         Err(error) => {
                             signal_acp_handshake_complete(&handshake_complete);
                             let _ = channels.event_tx.try_send(ConversationEvent::RestoreFailed(
-                                classify_restore_failure(&error),
+                                classify_restore_failure(&error, &launch.launch.command),
                             ));
                             return Ok(());
                         }
@@ -2447,6 +2455,39 @@ const PROMPT_ERROR_HINTS: &[(&[&str], &str)] = &[
         "被服务端限流了，等一会儿再发；持续出现就要看账号配额。",
     ),
 ];
+
+/// agent 用 ACP 标准错误码 `auth_required`（-32000）表示「CLI 没登录或登录失效」。
+/// 按错误码判断，不看文案：各家措辞不同，码是协议约定的。
+///
+/// 建议放在最前面，原始错误原样保留在后面：码也可能被 agent 用错，排查时要能
+/// 看到 agent 实际回了什么。
+fn with_auth_required_hint(
+    error: &agent_client_protocol::Error,
+    command: &str,
+    original: String,
+) -> String {
+    if error.code != agent_client_protocol::ErrorCode::AuthRequired {
+        return original;
+    }
+    format!("{}\n\n原始错误：{original}", auth_required_hint(command))
+}
+
+/// 各家 CLI 的登录方式。只写确认过的几家，其余给通用说法，免得把人支错地方。
+fn auth_required_hint(command: &str) -> String {
+    let login = match ConversationAgentKind::from_command_loose(command) {
+        Some(ConversationAgentKind::Copilot) => {
+            "GitHub Copilot 还没登录或登录已失效：在终端运行 `copilot`，输入 `/login` 完成 GitHub 登录（账号需要有 Copilot 订阅）"
+        }
+        Some(ConversationAgentKind::Claude) => {
+            "Claude Code 还没登录或登录已失效：在终端运行 `claude`，输入 `/login` 完成登录"
+        }
+        Some(ConversationAgentKind::Codex) => {
+            "Codex 还没登录或登录已失效：在终端运行 `codex login` 完成登录"
+        }
+        _ => "agent 要求先登录：在终端里用这个 agent 的 CLI 完成登录",
+    };
+    format!("{login}，然后新建会话。")
+}
 
 /// 给错误文本配一条可操作的建议，配不上就不配。
 fn prompt_error_hint(text: &str) -> Option<&'static str> {
@@ -4758,6 +4799,7 @@ mod session_info_update_tests {
 mod restore_failure_tests {
     use super::{
         ConversationRestoreFailure, SessionStart, classify_restore_failure, select_session_start,
+        with_auth_required_hint,
     };
     use agent_client_protocol::Error;
 
@@ -4783,7 +4825,7 @@ mod restore_failure_tests {
     #[test]
     fn missing_history_is_an_explicit_restore_failure() {
         assert_eq!(
-            classify_restore_failure(&Error::resource_not_found(None)),
+            classify_restore_failure(&Error::resource_not_found(None), ""),
             ConversationRestoreFailure::HistoryMissing
         );
     }
@@ -4794,7 +4836,7 @@ mod restore_failure_tests {
             "details": "no rollout found for thread id deadbeef"
         }));
         assert_eq!(
-            classify_restore_failure(&error),
+            classify_restore_failure(&error, ""),
             ConversationRestoreFailure::HistoryMissing
         );
     }
@@ -4802,7 +4844,7 @@ mod restore_failure_tests {
     #[test]
     fn unsupported_load_is_an_explicit_restore_failure() {
         assert_eq!(
-            classify_restore_failure(&Error::method_not_found()),
+            classify_restore_failure(&Error::method_not_found(), ""),
             ConversationRestoreFailure::UnsupportedLoad
         );
     }
@@ -4810,7 +4852,7 @@ mod restore_failure_tests {
     #[test]
     fn transient_load_failure_remains_retryable_and_does_not_start_fresh() {
         let error = Error::internal_error();
-        let failure = classify_restore_failure(&error);
+        let failure = classify_restore_failure(&error, "");
         assert_eq!(
             failure,
             ConversationRestoreFailure::Failed(format!("恢复历史对话失败，可重试：{error}"))
@@ -4819,6 +4861,47 @@ mod restore_failure_tests {
             failure,
             ConversationRestoreFailure::HistoryMissing
         ));
+    }
+
+    /// Copilot 没登录时 `session/new` 回 -32000。提示按错误码给，原始错误
+    /// （含 SDK 附带的 data）必须原样留着，方便排查提示是否给错。
+    #[test]
+    fn auth_required_gets_login_hint_and_keeps_original_error() {
+        let error = Error::auth_required().data(serde_json::json!({"spawned_at": "session.rs:1018:28"}));
+        let original = format!("{error}");
+        let text = with_auth_required_hint(&error, "copilot --acp --allow-all", original.clone());
+        assert!(text.starts_with("GitHub Copilot"), "{text}");
+        assert!(text.contains("/login"), "{text}");
+        assert!(text.ends_with(&format!("原始错误：{original}")), "{text}");
+        assert!(text.contains("spawned_at"), "{text}");
+    }
+
+    #[test]
+    fn auth_required_hint_falls_back_for_unknown_agents() {
+        let text = with_auth_required_hint(&Error::auth_required(), "my-agent --acp", "x".into());
+        assert!(text.starts_with("agent 要求先登录"), "{text}");
+        assert!(text.ends_with("原始错误：x"), "{text}");
+    }
+
+    #[test]
+    fn other_errors_are_left_untouched() {
+        let error = Error::internal_error();
+        assert_eq!(
+            with_auth_required_hint(&error, "copilot --acp", "boom".into()),
+            "boom"
+        );
+    }
+
+    #[test]
+    fn auth_required_on_restore_also_gets_login_hint() {
+        let error = Error::auth_required();
+        let ConversationRestoreFailure::Failed(text) =
+            classify_restore_failure(&error, "copilot --acp --allow-all")
+        else {
+            panic!("auth_required 不是缺历史，应走可重试的失败");
+        };
+        assert!(text.starts_with("GitHub Copilot"), "{text}");
+        assert!(text.contains(&format!("恢复历史对话失败，可重试：{error}")), "{text}");
     }
 }
 
