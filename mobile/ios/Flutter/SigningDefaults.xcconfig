@@ -4,6 +4,9 @@
 PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile
 DEVELOPMENT_TEAM = H3H5ULV8KR
 CODE_SIGN_STYLE = Automatic
+// Home-screen name. Developer.xcconfig can rename local builds (e.g. "Smelt Dev")
+// so they are told apart from the TestFlight build installed alongside.
+SMELT_DISPLAY_NAME = Smelt
 
 // Push notifications (docs/push-relay-deployment.md). The relay holds the APNs
 // key for the team above and only pushes to the Bundle IDs it allows, so a

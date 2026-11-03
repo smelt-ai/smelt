@@ -2,6 +2,8 @@
 // and a Bundle ID registered by that team. Developer.xcconfig is gitignored.
 DEVELOPMENT_TEAM = YOUR_TEAM_ID
 PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile.yourname
+// Optional: home-screen name, to tell it apart from the TestFlight build.
+// SMELT_DISPLAY_NAME = Smelt Dev
 
 // Optional: push notifications need a relay holding an APNs key of YOUR team
 // (docs/push-relay-deployment.md). Host only, no scheme.
