@@ -31,7 +31,7 @@
   "agentEditDiscard": "放弃",
   "agentEditDelete": "删除智能体",
   "agentEditDeleteTitle": "删除「{name}」？",
-  "agentEditDeleteBody": "会从 {machine} 上删掉它和它自己的记忆，删了就找不回来。",
+  "agentEditDeleteBody": "会从 {machine} 上删掉它和它自己的记忆，删了就找不回来。已有对话会保留。",
   "agentEditDeleteFailed": "没能删除：{message}",
   "memoryTitle": "{name} · 记忆",
   "memoryLayerAgent": "这个智能体的",

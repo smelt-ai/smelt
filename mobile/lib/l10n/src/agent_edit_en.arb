@@ -36,7 +36,7 @@
   "agentEditDelete": "Delete agent",
   "agentEditDeleteTitle": "Delete “{name}”?",
   "@agentEditDeleteTitle": {"placeholders": {"name": {"type": "String"}}},
-  "agentEditDeleteBody": "This removes it and its own memories from {machine}. It can't be undone.",
+  "agentEditDeleteBody": "This removes it and its own memories from {machine}. It can't be undone. Existing conversations are kept.",
   "@agentEditDeleteBody": {"placeholders": {"machine": {"type": "String"}}},
   "agentEditDeleteFailed": "Couldn't delete: {message}",
   "@agentEditDeleteFailed": {"placeholders": {"message": {"type": "String"}}},
