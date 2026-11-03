@@ -10,6 +10,7 @@
 
 use super::*;
 use smelt_model::pi_auth::{PiAuthProvider, PiAuthStatus, PiLoginMethod, PiPromptKind};
+use smelt_ui::truncated_line::truncated_line;
 
 /// 内置 Provider 的一行。按钮区只放当下最该点的那一个，其余动作收进「⋯」：
 /// 原来一行最多五个按钮，扫一眼分不出哪个是正路。
@@ -166,10 +167,10 @@ pub(super) fn builtin_provider_row(
                         .items_center()
                         .child(
                             div()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(palette.fg)
-                                .child(provider.name.clone()),
+                                .child(truncated_line(provider.name.clone())),
                         )
                         .children(
                             provider
@@ -183,10 +184,10 @@ pub(super) fn builtin_provider_row(
                 )
                 .child(
                     div()
-                        .truncate()
+                        .overflow_hidden()
                         .text_xs()
                         .text_color(palette.muted)
-                        .child(detail),
+                        .child(truncated_line(detail)),
                 ),
         )
         .child(
@@ -511,10 +512,10 @@ fn model_choices(
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_xs()
                         .text_color(fg)
-                        .child(model.label().to_string()),
+                        .child(truncated_line(model.label().to_string())),
                 )
                 .child(if is_current {
                     div()

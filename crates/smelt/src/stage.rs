@@ -16,6 +16,7 @@ pub(crate) use smelt_ui::Button;
 
 use crate::{StageCover, Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 /// 共用顶栏标题槽。目录/编辑器/自动化钻取都有页头，那些面必须是 `Hidden`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,8 +158,7 @@ fn chrome_title_island(title: String, tip: String) -> Stateful<Div> {
                 .text_sm()
                 .font_semibold()
                 .text_color(rgb(ui_theme::text_bright()))
-                .truncate()
-                .child(title),
+                .child(truncated_line(title)),
         ),
     )
 }
@@ -184,8 +184,7 @@ fn chrome_prompt_island(
                 .overflow_hidden()
                 .text_sm()
                 .text_color(rgb(ui_theme::text()))
-                .truncate()
-                .child(prompt),
+                .child(truncated_line(prompt)),
         )
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             cx.stop_propagation();

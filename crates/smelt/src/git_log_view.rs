@@ -20,6 +20,7 @@ use gpui_component::diff::Diff;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Sizable as _, h_flex, v_flex};
+use smelt_ui::truncated_line::truncated_line;
 pub(crate) use smelt_ui::Button;
 
 use crate::git_log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
@@ -210,24 +211,24 @@ fn commit_row(
                 .small()
                 .flex_none()
                 .max_w(px(120.))
-                .child(div().min_w_0().truncate().child(r.clone()))
+                .child(div().min_w_0().overflow_hidden().child(truncated_line(r.clone())))
         }))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
+                .overflow_hidden()
                 .text_color(fg)
-                .child(commit.subject.clone()),
+                .child(truncated_line(commit.subject.clone())),
         )
         .child(
             div()
                 .flex_none()
                 .w(px(110.))
-                .truncate()
+                .overflow_hidden()
                 .text_xs()
                 .text_color(muted)
-                .child(commit.author.clone()),
+                .child(truncated_line(commit.author.clone())),
         )
         .child(
             div()
@@ -426,10 +427,10 @@ pub fn commit_detail_pane(
                     div()
                         .w_full()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_sm()
                         .text_color(fg)
-                        .child(c.subject.clone()),
+                        .child(truncated_line(c.subject.clone())),
                 )
                 .child(
                     h_flex()
@@ -438,7 +439,7 @@ pub fn commit_detail_pane(
                         .gap_2()
                         .text_xs()
                         .text_color(muted)
-                        .child(div().flex_1().min_w_0().truncate().child(c.author.clone()))
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(c.author.clone())))
                         .child(div().flex_none().child(fmt_time(c.time)))
                         .child(
                             div()
@@ -562,9 +563,9 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(fg)
-                        .child(path),
+                        .child(truncated_line(path)),
                 )
         }));
 
@@ -647,7 +648,7 @@ pub fn branch_tree(
                     }
                 });
             })
-            .child(div().min_w_0().truncate().text_color(fg).child(label))
+            .child(div().min_w_0().overflow_hidden().text_color(fg).child(truncated_line(label)))
     };
 
     let group = |title: &'static str,
@@ -711,9 +712,9 @@ pub fn branch_tree(
                         div()
                             .id("branch-name")
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .text_color(fg)
-                            .child(name.clone())
+                            .child(truncated_line(name.clone()))
                             .tooltip({
                                 let n = name.clone();
                                 move |window, cx| {

@@ -24,6 +24,7 @@ use gpui_component::*;
 pub(crate) use smelt_ui::Button;
 use smelt_ui::IconAction as _;
 use smelt_ui::ListRow;
+use smelt_ui::truncated_line::truncated_line;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
 
@@ -79,18 +80,18 @@ fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
 /// 机器名字，远程的带连接灯和要人处理时的几个字；悬停看完整的连接说明。
 fn runtime_name_with_indicator(
     key: &RuntimeKey,
-    name: impl IntoElement,
+    name: impl Into<SharedString>,
     indicator: Option<crate::runtimes::RuntimeIndicator>,
 ) -> AnyElement {
     // 机器是项目上面一层，层级靠字号和分隔线，不靠高亮。每台机器一个样子：焦点在哪由选中的
     // 对话说明，机器再亮一档只会抢眼。
     let name = div()
         .min_w_0()
-        .truncate()
+        .overflow_hidden()
         .text_sm()
         .font_medium()
         .text_color(rgb(ui_theme::text_muted()))
-        .child(name);
+        .child(truncated_line(name));
     let Some(indicator) = indicator else {
         return name.into_any_element();
     };
@@ -359,9 +360,9 @@ fn quota_popover(quotas: Vec<FooterQuota>, workspace: Entity<Workspace>) -> Div 
                     div()
                         .w(px(64.))
                         .flex_shrink_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(rgb(ui_theme::text()))
-                        .child(target.label()),
+                        .child(truncated_line(target.label())),
                 )
                 .child(
                     div()
@@ -1158,7 +1159,7 @@ impl Workspace {
                                     div()
                                         .id(project_element_id("proj-branch", &project))
                                         .min_w_0()
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_xs()
                                         .font_family(crate::terminal_view::font_family())
                                         .text_color(rgb(ui_theme::text_faint()))
@@ -1168,7 +1169,7 @@ impl Workspace {
                                             )
                                             .build(window, cx)
                                         })
-                                        .child(b.clone())
+                                        .child(truncated_line(b.clone()))
                                 })),
                         )
                         .child(
@@ -1654,8 +1655,8 @@ impl Workspace {
                                         )
                                     }
                                 })
-                                .truncate()
-                                .child(title.clone())
+                                .overflow_hidden()
+                                .child(truncated_line(title.clone()))
                                 .into_any_element(),
                         },
                     )
@@ -1952,8 +1953,8 @@ impl Workspace {
                                                         })
                                                 }
                                             })
-                                            .truncate()
-                                            .child(p_title)
+                                            .overflow_hidden()
+                                            .child(truncated_line(p_title))
                                             .into_any_element(),
                                     },
                                 )

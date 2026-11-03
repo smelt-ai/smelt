@@ -17,6 +17,7 @@ use crate::git_panel::GitStatusData;
 use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
 use smelt_model::runtime_path::PathStyle;
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 use super::*;
 
@@ -80,7 +81,7 @@ fn search_tree_rows(
                         .size(px(16.))
                         .text_color(context.fg),
                 )
-                .child(div().min_w_0().truncate().child(label))
+                .child(div().min_w_0().overflow_hidden().child(truncated_line(label)))
                 .into_any_element(),
         );
         rows.extend(search_tree_rows(visible_child, depth + 1, &rel, context));
@@ -115,7 +116,7 @@ fn search_tree_rows(
                         .size(px(16.))
                         .text_color(context.muted),
                 )
-                .child(div().min_w_0().truncate().child(name))
+                .child(div().min_w_0().overflow_hidden().child(truncated_line(name)))
                 .on_click(move |_event, window, cx| {
                     open_view.update(cx, |workspace, cx| {
                         workspace.view_file_at(path.clone(), line, window, cx);
@@ -191,7 +192,7 @@ pub fn search_results_view(
 
 // ===================== 目录树 =====================
 
-/// 估算文件名在文件树列里是否会被 `.truncate()` 裁切，用来决定要不要挂 hover tooltip。
+/// 估算文件名在文件树列里是否会被截短，用来决定要不要挂 hover tooltip。
 fn name_likely_truncated(name: &str, depth: usize, panel_w: f32) -> bool {
     // 左内边距 8 + 每层缩进 14 + 箭头 14 + 图标 14 + gap + 右内边距 8
     let chrome = 56.0 + depth as f32 * 14.0;
@@ -612,7 +613,7 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
                     ),
                 )
                 .child(Icon::new(IconName::FolderOpen).size(px(14.)).text_color(fg))
-                .child(div().flex_1().min_w_0().truncate().child(name))
+                .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(name)))
                 .into_any_element()
         }
         FileTreeRow::Entry {
@@ -738,8 +739,8 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
                         .id("file-name")
                         .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .child(name_label.clone())
+                        .overflow_hidden()
+                        .child(truncated_line(name_label.clone()))
                         .when(show_name_tip, |el| {
                             el.tooltip(move |window, cx| {
                                 Tooltip::new(name_label.clone()).build(window, cx)

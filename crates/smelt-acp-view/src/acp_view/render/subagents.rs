@@ -3,6 +3,7 @@
 
 use super::conversation::{render_nested_transcript, subagent_status_icon};
 use super::*;
+use smelt_ui::truncated_line::truncated_line;
 
 impl AcpView {
     /// 输入栏入口：只在有子智能体在跑时出现，和「后台任务」分开计数。
@@ -69,17 +70,17 @@ impl AcpView {
                         .min_w_0()
                         .child(
                             div()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(gpui::rgb(ui_theme::text_bright()))
-                                .child(title.clone()),
+                                .child(truncated_line(title.clone())),
                         )
                         .child(
                             div()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_xs()
                                 .text_color(faint)
-                                .child(view.last_activity.clone().unwrap_or_else(|| "准备中".into())),
+                                .child(truncated_line(view.last_activity.clone().unwrap_or_else(|| "准备中".into()))),
                         ),
                 )
                 .child(
@@ -267,13 +268,13 @@ impl AcpView {
                                 .min_w_0()
                                 .child(
                                     div()
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_sm()
                                         .font_medium()
                                         .text_color(gpui::rgb(ui_theme::text_bright()))
-                                        .child(inspector.title.clone()),
+                                        .child(truncated_line(inspector.title.clone())),
                                 )
-                                .child(div().truncate().text_xs().text_color(faint).child(status_line)),
+                                .child(div().overflow_hidden().text_xs().text_color(faint).child(truncated_line(status_line))),
                         )
                         .children(stop)
                         .child(

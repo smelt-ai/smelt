@@ -6,6 +6,7 @@ use super::automation_templates::{
     AutomationTemplate, AutomationTemplateCategory, AutomationTemplateGlyph, filtered_templates,
 };
 use super::*;
+use smelt_ui::truncated_line::truncated_line;
 
 const CATALOG_MAX_WIDTH: f32 = 960.;
 const TEMPLATE_COLUMNS: usize = 3;
@@ -271,15 +272,15 @@ impl Workspace {
                                     .text_sm()
                                     .font_semibold()
                                     .text_color(rgb(crate::ui_theme::text_bright()))
-                                    .truncate()
-                                    .child(display_name),
+                                    .overflow_hidden()
+                                    .child(truncated_line(display_name)),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(rgb(crate::ui_theme::text_faint()))
-                                    .truncate()
-                                    .child(action_summary),
+                                    .overflow_hidden()
+                                    .child(truncated_line(action_summary)),
                             ),
                     ),
             )
@@ -287,8 +288,8 @@ impl Workspace {
                 automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                     .text_xs()
                     .text_color(rgb(crate::ui_theme::text_muted()))
-                    .truncate()
-                    .child(schedule),
+                    .overflow_hidden()
+                    .child(truncated_line(schedule)),
             )
             .child(
                 automation_fixed_col(AUTOMATION_COL_LAST)
@@ -309,16 +310,16 @@ impl Workspace {
                             .min_w_0()
                             .text_xs()
                             .text_color(rgb(crate::ui_theme::text_muted()))
-                            .truncate()
-                            .child(last_run),
+                            .overflow_hidden()
+                            .child(truncated_line(last_run)),
                     ),
             )
             .child(
                 automation_fixed_col(AUTOMATION_COL_NEXT)
                     .text_xs()
                     .text_color(rgb(crate::ui_theme::text_muted()))
-                    .truncate()
-                    .child(next_run),
+                    .overflow_hidden()
+                    .child(truncated_line(next_run)),
             )
             .child(
                 automation_fixed_col(AUTOMATION_COL_STATUS).child(automation_status_cell(status)),

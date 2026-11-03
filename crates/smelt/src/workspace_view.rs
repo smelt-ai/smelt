@@ -6,6 +6,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::*;
+use smelt_ui::truncated_line::truncated_line;
 
 use crate::session_history::{HistoryListState, HistoryViewParams, history_view};
 use crate::{CloseConfirm, RenameTarget, Workspace, request_app_quit, ui_theme};
@@ -160,7 +161,7 @@ impl Workspace {
                                             .min_w_0()
                                             .text_sm()
                                             .text_color(fg)
-                                            .truncate()
+                                            .overflow_hidden()
                                             .tooltip({
                                                 let tip = label.clone();
                                                 move |window, cx| {
@@ -170,7 +171,7 @@ impl Workspace {
                                                     .build(window, cx)
                                                 }
                                             })
-                                            .child(label.clone()),
+                                            .child(truncated_line(label.clone())),
                                     )
                                     .children(is_detached.then(|| {
                                         div()

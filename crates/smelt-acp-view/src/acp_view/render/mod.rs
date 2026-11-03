@@ -5,6 +5,7 @@
 
 use super::*;
 use smelt_client::daemon_state::DaemonPhase;
+use smelt_ui::truncated_line::truncated_line;
 
 use super::ConversationTranscript;
 
@@ -142,10 +143,10 @@ impl AcpView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(muted)
-                                .child(detail.clone()),
+                                .child(truncated_line(detail.clone())),
                         )
                         .child(
                             div()

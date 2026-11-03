@@ -18,6 +18,7 @@ use gpui_component::popover::{Popover, PopoverState};
 use gpui_component::{Icon, IconName, IndexPath, StyledExt as _};
 use smelt_ui::Button;
 use smelt_ui::IconAction as _;
+use smelt_ui::truncated_line::truncated_line;
 
 use crate::settings::{
     AcpRuntimeState, AgentDefinition, LaunchEntry, active_launch_entries, icon_for_launch_command,
@@ -691,10 +692,9 @@ impl Render for NewSessionPickerState {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .overflow_x_hidden()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_size(px(12.))
-                                .child(row_label),
+                                .child(truncated_line(row_label)),
                         )
                         .child(pin_button),
                 );

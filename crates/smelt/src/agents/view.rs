@@ -3,6 +3,7 @@
 //! 只组 UI。写配置、开对话、改 Workspace 字段的方法在 `workspace.rs`。
 use super::*;
 use gpui::StatefulInteractiveElement;
+use smelt_ui::truncated_line::truncated_line;
 
 impl Workspace {
     pub(crate) fn render_delete_agent_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -228,10 +229,10 @@ impl Workspace {
                                 .child(
                                     div()
                                         .min_w_0()
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_xs()
                                         .text_color(rgb(crate::ui_theme::text_mid()))
-                                        .child(name),
+                                        .child(truncated_line(name)),
                                 )
                                 .child(
                                     Icon::new(IconName::ChevronDown)
@@ -505,8 +506,8 @@ impl Workspace {
                             } else {
                                 crate::ui_theme::text()
                             }))
-                            .truncate()
-                            .child(title)
+                            .overflow_hidden()
+                            .child(truncated_line(title))
                             .into_any_element(),
                     })
                     .child(crate::session_list::row::row_trailing_slot(
@@ -681,8 +682,8 @@ impl Workspace {
                             .text_lg()
                             .font_semibold()
                             .text_color(rgb(crate::ui_theme::text_bright()))
-                            .truncate()
-                            .child(agent_display_name(name)),
+                            .overflow_hidden()
+                            .child(truncated_line(agent_display_name(name))),
                     )
                     .child(
                         div()
@@ -813,8 +814,8 @@ impl Workspace {
                                     .text_sm()
                                     .font_semibold()
                                     .text_color(rgb(crate::ui_theme::text_bright()))
-                                    .truncate()
-                                    .child(name.clone()),
+                                    .overflow_hidden()
+                                    .child(truncated_line(name.clone())),
                             )
                             .when(show_engine, |row| {
                                 row.child(

@@ -5,6 +5,7 @@ use super::*;
 use gpui_component::dialog::Dialog;
 use gpui_component::input::{Input, InputEvent, InputState};
 use smelt_model::remote_config::RemoteAccessState;
+use smelt_ui::truncated_line::truncated_line;
 
 fn short_id(id: &str) -> String {
     if id.len() > 16 {
@@ -271,10 +272,10 @@ fn incoming_group() -> SettingGroup {
                                 .child(
                                     div()
                                         .max_w(px(320.))
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_xs()
                                         .text_color(color)
-                                        .child(text),
+                                        .child(truncated_line(text)),
                                 ),
                         )
                         .child(

@@ -55,6 +55,7 @@ use smelt_ui::motion::{
 };
 use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
+use smelt_ui::truncated_line::truncated_line;
 
 /// 消息流数据模型（AcpEntry/ToolOutputPart/ToolKind/ToolCallStatus）与 diff/
 /// markdown 围栏这批纯逻辑现在都活在 `smelt_model::acp_chat`——不依赖 GPUI 也不
@@ -5182,10 +5183,10 @@ impl AcpView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_sm()
                                 .text_color(gpui::rgb(ui_theme::text_bright()))
-                                .child(current_step),
+                                .child(truncated_line(current_step)),
                         )
                         .child(
                             div()
@@ -5780,21 +5781,67 @@ fn strip_thought_heading_markers(line: &str) -> &str {
     line
 }
 
-/// 对话过程里的思考与中间说明都先归约成一条可扫描的进展摘要。默认只取首个
-/// 非空行，避免把模型的长篇过程说明重新铺满消息流；完整内容仍可按需展开。
-fn progress_summary(text: &str) -> String {
-    const MAX_CHARS: usize = 72;
+/// 摘要是纯文本，正文里成对的 `**加粗**` 和 `` `代码` `` 标记照原样露出来，读着像
+/// 漏渲染。只剥成对出现的：代码里的内容原样保留，落单的标记（`2**10`、半个反引号）
+/// 不动，免得改掉正文本来的字。
+fn strip_inline_markdown(line: &str) -> String {
+    let strip_code = line.matches('`').count() % 2 == 0;
+    // 代码段外的 `**` 数量，决定加粗标记是否成对。
+    let mut bold_markers = 0;
+    let mut in_code = false;
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        if strip_code && c == '`' {
+            in_code = !in_code;
+        } else if !in_code && rest.starts_with("**") {
+            bold_markers += 1;
+            rest = &rest[2..];
+            continue;
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    let strip_bold = bold_markers % 2 == 0;
+    let mut out = String::with_capacity(line.len());
+    let mut in_code = false;
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        if strip_code && c == '`' {
+            in_code = !in_code;
+            rest = &rest[1..];
+            continue;
+        }
+        if strip_bold && !in_code && rest.starts_with("**") {
+            rest = &rest[2..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+const PROGRESS_SUMMARY_MAX_CHARS: usize = 72;
+
+/// 进展摘要的整行原文：首个非空行，剥掉标记、压平空白，还没按长度截。
+fn progress_line(text: &str) -> String {
     let line = text
         .lines()
         .find(|line| !line.trim().is_empty())
         .map(str::trim)
         .map(strip_thought_heading_markers)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    strip_inline_markdown(line)
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
+
+/// 对话过程里的思考与中间说明都先归约成一条可扫描的进展摘要。默认只取首个
+/// 非空行，避免把模型的长篇过程说明重新铺满消息流；完整内容仍可按需展开。
+fn progress_summary(text: &str) -> String {
+    let line = progress_line(text);
     let mut chars = line.chars();
-    let preview: String = chars.by_ref().take(MAX_CHARS).collect();
+    let preview: String = chars.by_ref().take(PROGRESS_SUMMARY_MAX_CHARS).collect();
     if chars.next().is_some() {
         format!("{preview}…")
     } else {
@@ -5805,19 +5852,8 @@ fn progress_summary(text: &str) -> String {
 /// 单行短进展已经完整展示，不再提供一个点开后内容完全相同的空操作。多段内容
 /// 或超过摘要长度的长句才显示展开入口。
 fn progress_has_details(text: &str) -> bool {
-    const MAX_CHARS: usize = 72;
-    let mut meaningful = text.lines().filter(|line| !line.trim().is_empty());
-    let Some(first) = meaningful.next() else {
-        return false;
-    };
-    meaningful.next().is_some()
-        || strip_thought_heading_markers(first.trim())
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .count()
-            > MAX_CHARS
+    text.lines().filter(|line| !line.trim().is_empty()).nth(1).is_some()
+        || progress_line(text).chars().count() > PROGRESS_SUMMARY_MAX_CHARS
 }
 
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。

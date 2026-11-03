@@ -3,6 +3,7 @@
 //! 运行记录留在编辑器左侧。选中一次运行后，右侧是详情；有会话时这块详情就是现场。
 //! 只组 UI。触发器/Run 的写入在 `workspace.rs`。
 use super::*;
+use smelt_ui::truncated_line::truncated_line;
 
 impl Workspace {
     pub(crate) fn render_delete_automation_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -131,8 +132,8 @@ impl Workspace {
                             .text_lg()
                             .font_semibold()
                             .text_color(rgb(crate::ui_theme::text_bright()))
-                            .truncate()
-                            .child(title.into()),
+                            .overflow_hidden()
+                            .child(truncated_line(title)),
                     )
                     .when_some(subtitle, |column, (text, color)| {
                         column.child(
@@ -140,8 +141,8 @@ impl Workspace {
                                 .min_w_0()
                                 .text_xs()
                                 .text_color(rgb(color))
-                                .truncate()
-                                .child(text),
+                                .overflow_hidden()
+                                .child(truncated_line(text)),
                         )
                     }),
             )
@@ -536,8 +537,8 @@ impl Workspace {
                             .text_sm()
                             .font_medium()
                             .text_color(cx.theme().foreground)
-                            .truncate()
-                            .child(format!("{source} · {status}")),
+                            .overflow_hidden()
+                            .child(truncated_line(format!("{source} · {status}"))),
                     )
                     .when(can_cancel, |bar| {
                         let run_id = run_id.clone();
