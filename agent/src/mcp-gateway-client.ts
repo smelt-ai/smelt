@@ -183,7 +183,7 @@ function spawnGateway(dir: string): ChildProcess {
 	} catch {}
 	const output = openSync(log, "a", 0o600);
 	try {
-		// 编译后的 smelt-pi 认子命令 `gateway`。源码模式没有这条子命令：
+		// 编译后的 smelt-agent 认子命令 `gateway`。源码模式没有这条子命令：
 		// `src/main.ts` 会在前面塞上 `--mode rpc`，所以这里直接跑网关入口。
 		const gatewayArgs = import.meta.url.includes("$bunfs")
 			? ["gateway"]

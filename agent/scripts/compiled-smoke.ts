@@ -1,6 +1,6 @@
 /**
- * 编译出来的 smelt-pi 必须在没有 node_modules 的目录里走完 RPC 握手。
- * 用法：bun agent/scripts/compiled-smoke.ts <path-to-smelt-pi>
+ * 编译出来的 smelt-agent 必须在没有 node_modules 的目录里走完 RPC 握手。
+ * 用法：bun agent/scripts/compiled-smoke.ts <path-to-smelt-agent>
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, copyFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
@@ -11,11 +11,11 @@ import pkg from "../package.json" with { type: "json" };
 
 const source = process.argv[2];
 if (!source) {
-	console.error("用法：bun agent/scripts/compiled-smoke.ts <smelt-pi>");
+	console.error("用法：bun agent/scripts/compiled-smoke.ts <smelt-agent>");
 	process.exit(2);
 }
 
-const dir = mkdtempSync(join(tmpdir(), "smelt-pi-smoke-"));
+const dir = mkdtempSync(join(tmpdir(), "smelt-agent-smoke-"));
 const agentDir = join(dir, "agent");
 const extensionDir = join(agentDir, "extensions");
 mkdirSync(extensionDir, { recursive: true });
@@ -65,7 +65,7 @@ if (
 
 const probe = spawn(binary, [], {
 	cwd: dir,
-	env: { ...process.env, SMELT_PI_PROBE_WORKERS: "1", PI_CODING_AGENT_DIR: agentDir },
+	env: { ...process.env, SMELT_AGENT_PROBE_WORKERS: "1", PI_CODING_AGENT_DIR: agentDir },
 	stdio: ["ignore", "pipe", "pipe"],
 });
 const probeResult = await new Promise<{ text: string; code: number | null }>((resolve) => {
@@ -107,7 +107,7 @@ const child = spawn(binary, ["--offline", "--no-approve"], {
 		...process.env,
 		PI_CODING_AGENT_DIR: agentDir,
 		PATH: process.env.PATH ?? "",
-		// 守护起 smelt-pi 时一定带这个；不带它会拒绝启动。
+		// 守护起 smelt-agent 时一定带这个；不带它会拒绝启动。
 		SMELT_PI_PROTOCOL: String(pkg.smeltProtocol),
 	},
 	stdio: ["pipe", "pipe", "pipe"],
@@ -132,12 +132,12 @@ function fail(message: string): never {
 	process.exit(1);
 }
 
-child.on("error", (error) => fail(`smelt-pi 起不来：${error.message}`));
+child.on("error", (error) => fail(`smelt-agent 起不来：${error.message}`));
 
 child.on("exit", (code, signal) => {
 	if (failed || pending.size === 0) return;
 	const waiting = [...pending.keys()].join(", ");
-	fail(`smelt-pi 在请求 ${waiting} 尚未回执时退出（code=${code ?? "null"} signal=${signal ?? "null"}）`);
+	fail(`smelt-agent 在请求 ${waiting} 尚未回执时退出（code=${code ?? "null"} signal=${signal ?? "null"}）`);
 });
 
 lines.on("line", (line) => {
@@ -226,4 +226,4 @@ if (!REACHED_MODEL.test(trailed)) {
 child.kill("SIGTERM");
 await new Promise((resolve) => child.once("exit", resolve));
 rmSync(dir, { recursive: true, force: true });
-console.log(`smelt-pi RPC get_state ${readyMs.toFixed(1)}ms`);
+console.log(`smelt-agent RPC get_state ${readyMs.toFixed(1)}ms`);

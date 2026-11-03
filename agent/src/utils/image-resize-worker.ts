@@ -5,5 +5,5 @@ import { parentPort } from "node:worker_threads";
 import "../../node_modules/@earendil-works/pi-coding-agent/dist/utils/image-resize-worker.js";
 
 if (!parentPort) {
-	throw new Error("smelt-pi image resize worker requires parentPort");
+	throw new Error("smelt-agent image resize worker requires parentPort");
 }

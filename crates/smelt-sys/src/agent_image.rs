@@ -1,10 +1,10 @@
-//! 编译好的 smelt-pi 发布在 `~/.smelt/bin/smelt-pi-<指纹>/`，同目录的 `smelt-pi` 是指向
+//! 编译好的 smelt-agent 发布在 `~/.smelt/bin/smelt-agent-<指纹>/`，同目录的 `smelt-agent` 是指向
 //! 当前那份可执行文件的符号链接。
 //!
-//! 指纹按 smelt-pi、photon wasm、`native/` 和内置技能 `skills/` 这一整套算，和守护映像无关：只改了 Pi
+//! 指纹按 smelt-agent、photon wasm、`native/` 和内置技能 `skills/` 这一整套算，和守护映像无关：只改了 Pi
 //! 也能换上新的一份，不用等守护交接。目录发布后不再改动。守护每次起 Pi 都解析
 //! 链接、exec 解析出来的真实路径，所以拨链接不影响已经在跑的 Pi；旧目录等里面的
-//! smelt-pi 没人映射了再删。
+//! smelt-agent 没人映射了再删。
 
 use std::fs;
 use std::io;
@@ -14,12 +14,12 @@ use sha2::{Digest, Sha256};
 
 use crate::daemon_image::{MappedState, content_fingerprint, probe_image_mapped};
 
-/// 启动链接名。目录里的可执行文件在 Windows 上是 `smelt-pi.exe`，见 [`binary_file_name`]。
-pub const LAUNCH_NAME: &str = "smelt-pi";
+/// 启动链接名。目录里的可执行文件在 Windows 上是 `smelt-agent.exe`，见 [`binary_file_name`]。
+pub const LAUNCH_NAME: &str = "smelt-agent";
 
 pub fn binary_file_name() -> &'static str {
     if cfg!(windows) {
-        "smelt-pi.exe"
+        "smelt-agent.exe"
     } else {
         LAUNCH_NAME
     }
@@ -28,12 +28,12 @@ const WASM_NAME: &str = "photon_rs_bg.wasm";
 const NATIVE_DIR: &str = "native";
 /// 内置技能目录。只在智能体勾选时用 `--skill` 传给 Pi，不在 Pi 的自动发现路径上。
 pub const SKILLS_DIR: &str = "skills";
-const DIR_PREFIX: &str = "smelt-pi-";
+const DIR_PREFIX: &str = "smelt-agent-";
 /// App 里这一整套相对 `Contents` 的位置。wasm 不是代码，不能放进只收签名代码的 `Contents/MacOS`。
-pub const APP_BUNDLE_DIR: &str = "Resources/smelt-pi";
+pub const APP_BUNDLE_DIR: &str = "Resources/smelt-agent";
 
-/// 把 `src_dir`（App 的 `Contents/Resources/smelt-pi` 或 Linux 包目录）里的这一整套发布到 `dir`，
-/// 再把 `dir/smelt-pi` 拨过去。同一套内容只发布一次。返回发布出的 smelt-pi。
+/// 把 `src_dir`（App 的 `Contents/Resources/smelt-agent` 或 Linux 包目录）里的这一整套发布到 `dir`，
+/// 再把 `dir/smelt-agent` 拨过去。同一套内容只发布一次。返回发布出的 smelt-agent。
 pub fn publish(dir: &Path, src_dir: &Path) -> io::Result<PathBuf> {
     let files = bundle_files(src_dir)?;
     let fingerprint = bundle_fingerprint(src_dir, &files)?;
@@ -46,7 +46,7 @@ pub fn publish(dir: &Path, src_dir: &Path) -> io::Result<PathBuf> {
     Ok(target.join(binary_file_name()))
 }
 
-/// `dir/smelt-pi` 现在指向的、能执行的那份，解析成真实路径。链接缺了、指空了都是 `None`。
+/// `dir/smelt-agent` 现在指向的、能执行的那份，解析成真实路径。链接缺了、指空了都是 `None`。
 /// 拿真实路径去 exec：之后链接拨到新版本，已经起来的 Pi 还在原来的目录里。
 pub fn current(dir: &Path) -> Option<PathBuf> {
     #[cfg(unix)]
@@ -58,7 +58,7 @@ pub fn current(dir: &Path) -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
-        read_pi_pointer(dir)
+        read_pointer(dir)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -67,12 +67,12 @@ pub fn current(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// `src_dir` 里有没有一整套可以发布的 smelt-pi（不跟符号链接）。
+/// `src_dir` 里有没有一整套可以发布的 smelt-agent（不跟符号链接）。
 pub fn bundled(src_dir: &Path) -> bool {
     fs::symlink_metadata(src_dir.join(binary_file_name())).is_ok_and(|meta| meta.is_file())
 }
 
-/// 删掉启动链接没指向、里面的 smelt-pi 也证明没人映射的旧目录。证明不了就留下。
+/// 删掉启动链接没指向、里面的 smelt-agent 也证明没人映射的旧目录。证明不了就留下。
 pub fn reap_unused(dir: &Path) -> io::Result<()> {
     reap_unused_with(dir, probe_image_mapped)
 }
@@ -116,7 +116,11 @@ fn reap_unused_with(dir: &Path, mut probe: impl FnMut(&Path) -> MappedState) -> 
 }
 
 fn is_published_dir_name(name: &str) -> bool {
-    name.strip_prefix(DIR_PREFIX).is_some_and(|rest| {
+    is_fingerprint_dir_name(name, DIR_PREFIX)
+}
+
+fn is_fingerprint_dir_name(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|rest| {
         rest.len() == 64
             && rest
                 .bytes()
@@ -124,7 +128,68 @@ fn is_published_dir_name(name: &str) -> bool {
     })
 }
 
-/// 这一套里的文件，相对 `src_dir`、排好序。smelt-pi 和 wasm 必须有，`native/` 可选。
+/// 改名前叫 smelt-pi 时留下的启动链接（Windows 上是指针文件）和发布目录。
+const LEGACY_LINKS: [&str; 2] = ["smelt-pi", "smelt-pi.current"];
+const LEGACY_DIR_PREFIX: &str = "smelt-pi-";
+
+fn legacy_binary_file_name() -> &'static str {
+    if cfg!(windows) { "smelt-pi.exe" } else { "smelt-pi" }
+}
+
+/// 清掉改名前（smelt-pi）留下的链接和目录。只能由新守护在启动后调用：App 更新后、守护
+/// 交接前，旧守护还靠 `smelt-pi` 链接起 Pi，桌面发布时清会让它在交接前起不来 Pi。
+/// 旧目录里的 smelt-pi 还被映射着（交接前起的 Pi 还在跑）或证明不了没人用就留下，下次启动再清。
+pub fn reap_legacy(dir: &Path) -> io::Result<()> {
+    reap_legacy_with(dir, probe_image_mapped)
+}
+
+fn reap_legacy_with(dir: &Path, mut probe: impl FnMut(&Path) -> MappedState) -> io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut first_error = None;
+    let mut keep_first = |result: io::Result<()>| {
+        if let Err(error) = result
+            && error.kind() != io::ErrorKind::NotFound
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    };
+    for name in LEGACY_LINKS {
+        let link = dir.join(name);
+        if fs::symlink_metadata(&link).is_ok_and(|meta| !meta.is_dir()) {
+            keep_first(fs::remove_file(&link));
+        }
+    }
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !is_fingerprint_dir_name(&name, LEGACY_DIR_PREFIX) {
+            continue;
+        }
+        let path = entry.path();
+        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        let binary = path.join(legacy_binary_file_name());
+        if fs::symlink_metadata(&binary).is_ok_and(|meta| meta.is_file())
+            && probe(&binary) != MappedState::Unused
+        {
+            continue;
+        }
+        keep_first(fs::remove_dir_all(&path));
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// 这一套里的文件，相对 `src_dir`、排好序。smelt-agent 和 wasm 必须有，`native/` 可选。
 /// 符号链接一律不跟。
 fn bundle_files(src_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
@@ -221,13 +286,13 @@ fn publish_tree(dir: &Path, src_dir: &Path, files: &[PathBuf], name: &str) -> io
     Ok(())
 }
 
-/// 原子地把 `dir/smelt-pi` 指向 `<name>/smelt-pi`。链接只写相对路径。
+/// 原子地把 `dir/smelt-agent` 指向 `<name>/smelt-agent`。链接只写相对路径。
 fn retarget(dir: &Path, name: &str) -> io::Result<()> {
     let relative = format!("{name}/{}", binary_file_name());
     #[cfg(unix)]
     let link = dir.join(LAUNCH_NAME);
     #[cfg(windows)]
-    let link = dir.join("smelt-pi.current");
+    let link = dir.join("smelt-agent.current");
     #[cfg(not(any(unix, windows)))]
     let link = dir.join(LAUNCH_NAME);
     #[cfg(unix)]
@@ -235,7 +300,7 @@ fn retarget(dir: &Path, name: &str) -> io::Result<()> {
         return Ok(());
     }
     #[cfg(windows)]
-    if read_pi_pointer(dir).is_some_and(|path| path.ends_with(Path::new(&relative))) {
+    if read_pointer(dir).is_some_and(|path| path.ends_with(Path::new(&relative))) {
         return Ok(());
     }
     let tmp = dir.join(format!(
@@ -255,7 +320,7 @@ fn retarget(dir: &Path, name: &str) -> io::Result<()> {
         #[cfg(not(any(unix, windows)))]
         {
             let _ = &relative;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "不能发布 smelt-pi"))
+            Err(io::Error::new(io::ErrorKind::Unsupported, "不能发布 smelt-agent"))
         }
     })();
     if let Err(error) = written {
@@ -283,7 +348,7 @@ fn current_dir_name(dir: &Path) -> Option<String> {
     }
     #[cfg(windows)]
     {
-        let text = fs::read_to_string(dir.join("smelt-pi.current")).ok()?;
+        let text = fs::read_to_string(dir.join("smelt-agent.current")).ok()?;
         let mut lines = text.lines();
         if lines.next()? != "smelt-image-v1" {
             return None;
@@ -299,8 +364,8 @@ fn current_dir_name(dir: &Path) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn read_pi_pointer(dir: &Path) -> Option<PathBuf> {
-    let text = fs::read_to_string(dir.join("smelt-pi.current")).ok()?;
+fn read_pointer(dir: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(dir.join("smelt-agent.current")).ok()?;
     let mut lines = text.lines();
     if lines.next()? != "smelt-image-v1" {
         return None;
@@ -326,7 +391,7 @@ mod tests {
 
     fn scratch(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "smelt-pi-image-{label}-{}-{}",
+            "smelt-agent-image-{label}-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
@@ -378,7 +443,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = fs::metadata(&first).unwrap().permissions().mode();
-            assert_ne!(mode & 0o111, 0, "smelt-pi 必须可执行");
+            assert_ne!(mode & 0o111, 0, "smelt-agent 必须可执行");
         }
 
         assert_eq!(publish(&bin, &pkg).unwrap(), first, "同一套内容只发布一次");
@@ -404,7 +469,7 @@ mod tests {
         assert!(bundled(&pkg));
         let published = publish(&bin, &pkg).unwrap();
         assert_eq!(current(&bin), Some(fs::canonicalize(&published).unwrap()));
-        assert!(!bundled(&bin), "bin 里的 smelt-pi 是链接，不能当成一套包再发布");
+        assert!(!bundled(&bin), "bin 里的 smelt-agent 是链接，不能当成一套包再发布");
         fs::remove_dir_all(published.parent().unwrap()).unwrap();
         assert!(current(&bin).is_none(), "链接指空了");
         fs::remove_dir_all(root).unwrap();
@@ -449,6 +514,52 @@ mod tests {
         assert!(mapped.is_file(), "还在跑的 Pi 用着的要留");
         assert!(unknown.is_file(), "证明不了没人用的要留");
         assert!(live.is_file(), "链接指着的当前版本要留");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 改名前的 smelt-pi：链接和没人用的目录删掉，还在跑的留着；新名字的目录不碰。
+    #[test]
+    fn legacy_smelt_pi_leftovers_are_reaped_but_running_ones_stay() {
+        let root = scratch("legacy");
+        let (pkg, bin) = (root.join("pkg"), root.join("bin"));
+        package(&pkg, b"agent", b"wasm", None);
+        let current_agent = publish(&bin, &pkg).unwrap();
+
+        let legacy_dir = |fill: char| {
+            let dir = bin.join(format!("{LEGACY_DIR_PREFIX}{}", fill.to_string().repeat(64)));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(legacy_binary_file_name()), b"old pi").unwrap();
+            dir
+        };
+        let stale = legacy_dir('a');
+        let running = legacy_dir('b');
+        let unknown = legacy_dir('c');
+        for link in LEGACY_LINKS {
+            fs::write(bin.join(link), b"old pointer").unwrap();
+        }
+        // 名字像但不是指纹目录的不碰。
+        let lookalike = bin.join("smelt-pi-notes");
+        fs::create_dir_all(&lookalike).unwrap();
+
+        reap_legacy_with(&bin, |path| {
+            if path.starts_with(&running) {
+                MappedState::InUse
+            } else if path.starts_with(&unknown) {
+                MappedState::Unknown
+            } else {
+                MappedState::Unused
+            }
+        })
+        .unwrap();
+
+        assert!(!stale.exists(), "没人用的旧目录要删");
+        assert!(running.is_dir(), "交接前起的 Pi 还在用，要留");
+        assert!(unknown.is_dir(), "证明不了没人用的要留");
+        for link in LEGACY_LINKS {
+            assert!(fs::symlink_metadata(bin.join(link)).is_err(), "旧链接 {link} 要删");
+        }
+        assert!(lookalike.is_dir());
+        assert_eq!(current(&bin), Some(fs::canonicalize(&current_agent).unwrap()));
         fs::remove_dir_all(root).unwrap();
     }
 }

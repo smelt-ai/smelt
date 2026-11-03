@@ -4,9 +4,9 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-pi ios
+.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-agent ios
 
-SMELT_PI := target/smelt-pi/smelt-pi
+SMELT_AGENT := target/smelt-agent/smelt-agent
 PI_AGENT_SOURCES := $(shell find agent/src -type f -name '*.ts') $(shell find agent/skills -type f)
 
 build install: SHELL := /bin/bash
@@ -69,15 +69,15 @@ test-sh: ## 运行打包、安装、部署脚本的 shell 测试（scripts/test-
 # 不含 fmt-check：仓库还没整体 rustfmt 干净过，CI 也不查格式（见 ci.yml）。
 check-all: lint lint-sh lint-paths test test-sh pi-agent-check ## 完整检查 (Clippy + shell + 路径合规 + Rust/TS/脚本测试)
 
-$(SMELT_PI): agent/package.json agent/bun.lock agent/scripts/compile-smelt-pi.ts agent/scripts/build-smelt-pi.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
-	./agent/scripts/build-smelt-pi.sh
+$(SMELT_AGENT): agent/package.json agent/bun.lock agent/scripts/compile-smelt-agent.ts agent/scripts/build-smelt-agent.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
+	./agent/scripts/build-smelt-agent.sh
 
 ios: ## 在发版 tag 上出 iOS 发布包（版本号跟发版统一，见 docs/release.md）
 	scripts/build-ios.sh
 
-smelt-pi: $(SMELT_PI) ## 编译 smelt-pi；源码、锁和编译脚本没变就跳过
+smelt-agent: $(SMELT_AGENT) ## 编译 smelt-agent；源码、锁和编译脚本没变就跳过
 
-build: $(SMELT_PI) ## 编译 release 二进制（GUI + 守护 + helpers + smelt-pi）
+build: $(SMELT_AGENT) ## 编译 release 二进制（GUI + 守护 + helpers + smelt-agent）
 	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
@@ -89,7 +89,7 @@ dist: ## 用已有 release 产物打包 app + dmg
 dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
 
-install: $(SMELT_PI) ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
+install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
 	@# 旧包再装一遍，守护永远跑不到新代码。插件脚本没有 cargo binary，因此同时
 	@# 检查 plugins 的源内容（按 .gitignore 排除编辑器生成文件和本地 clone 的外部仓库）。
@@ -122,10 +122,10 @@ install: $(SMELT_PI) ## 原子安装到 /Applications（不打 dmg）；活跃 A
 		|| [ target/release/$(BIN) -nt dist/Smelt.app/Contents/MacOS/$(BIN) ] \
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
-		|| [ ! -x dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
-		|| [ target/smelt-pi/smelt-pi -nt dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
-		|| [ target/smelt-pi/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/Resources/smelt-pi/photon_rs_bg.wasm ] \
-		|| ! diff -rq target/smelt-pi/skills dist/Smelt.app/Contents/Resources/smelt-pi/skills >/dev/null 2>&1 \
+		|| [ ! -x dist/Smelt.app/Contents/Resources/smelt-agent/smelt-agent ] \
+		|| [ target/smelt-agent/smelt-agent -nt dist/Smelt.app/Contents/Resources/smelt-agent/smelt-agent ] \
+		|| [ target/smelt-agent/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/Resources/smelt-agent/photon_rs_bg.wasm ] \
+		|| ! diff -rq target/smelt-agent/skills dist/Smelt.app/Contents/Resources/smelt-agent/skills >/dev/null 2>&1 \
 		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
 		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \

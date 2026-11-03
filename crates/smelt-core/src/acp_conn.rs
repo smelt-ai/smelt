@@ -1231,13 +1231,13 @@ pub fn spawn_acp(
                 // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
                 // 失败的真实原因都在 stderr 里，别让用户猜）。
                 let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
-                // 装了本机 CLI 就跑 smelt-pi 里内置的适配器，否则把 bunx / bun 指到应用里的
+                // 装了本机 CLI 就跑 smelt-agent 里内置的适配器，否则把 bunx / bun 指到应用里的
                 // Bun，再进连接循环。改写只在这条连接线程里生效，存下来的启动规格不变。
                 let embedded = resolve_embedded_adapter_command(&launch.launch, &launch.ephemeral_env);
                 let (cmd, managed_bun) = if let Some(cmd) = embedded {
                     crate::app_log::info(
                         "acp",
-                        &format!("会话 {} 用 smelt-pi 内置适配器：{cmd}", launch.sid),
+                        &format!("会话 {} 用 smelt-agent 内置适配器：{cmd}", launch.sid),
                     );
                     (cmd, None)
                 } else {
@@ -3105,7 +3105,7 @@ fn inject_local_adapter_cli_path(
     }
 }
 
-/// 编进 smelt-pi 的官方 ACP 适配器。
+/// 编进 smelt-agent 的官方 ACP 适配器。
 ///
 /// 启动命令仍是 `bunx --bun 包@版本`：设置和会话里存的都是它，新客户端也会把它发给已经
 /// 冻结、不认识子命令的旧运行时，所以不换命令，由运行时在启动这一刻决定怎么跑。
@@ -3171,7 +3171,7 @@ fn plan_embedded_adapter_command(
     }
     let (executable, bundled) = smelt_pi()?;
     let package = adapter.agent.managed_adapter()?.current_release().package;
-    // 只认包名、不比版本：跑的是这份 smelt-pi 编进来的那一版。
+    // 只认包名、不比版本：跑的是这份 smelt-agent 编进来的那一版。
     let has_adapter = bundled.iter().any(|spec| {
         spec.rsplit_once('@')
             .is_some_and(|(name, _version)| name == package)
@@ -3196,14 +3196,14 @@ fn resolve_embedded_adapter_command(
         &extended_search_path(),
         &|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()),
         || {
-            let executable = crate::managed_runtime::locate_smelt_pi().ok()?;
+            let executable = crate::managed_runtime::locate_smelt_agent().ok()?;
             let bundled = embedded_adapter_specs(&executable);
             Some((executable.to_str()?.to_string(), bundled))
         },
     )
 }
 
-/// 这份 smelt-pi 带着哪些适配器。smelt-pi 和守护分开发布，守护可能遇到更旧的一份：
+/// 这份 smelt-agent 带着哪些适配器。smelt-agent 和守护分开发布，守护可能遇到更旧的一份：
 /// 不认识 `acp-adapters` 的旧版不会输出这份清单，也就不认识 `acp-claude`，这时走 `bunx`。
 /// 发布目录按内容指纹命名、发布后不再改动，同一路径的结果可以一直用；探测失败不缓存。
 fn embedded_adapter_specs(executable: &std::path::Path) -> Vec<String> {
@@ -4178,7 +4178,7 @@ fn read_pipe_in_background(
     let (tx, rx) = std::sync::mpsc::channel();
     if let Some(mut pipe) = pipe {
         let _ = std::thread::Builder::new()
-            .name("smelt-pipe-read".to_string())
+            .name("smelt-agentpe-read".to_string())
             .spawn(move || {
                 let mut buf = Vec::new();
                 let _ = pipe.read_to_end(&mut buf);
@@ -5178,7 +5178,7 @@ mod embedded_adapter_tests {
             &|_| false,
             || {
                 Some((
-                    "/home/me/.smelt/bin/smelt-pi-abc/smelt-pi".to_string(),
+                    "/home/me/.smelt/bin/smelt-agent-abc/smelt-agent".to_string(),
                     vec![CLAUDE_SPEC.to_string(), CODEX_SPEC.to_string()],
                 ))
             },
@@ -5190,12 +5190,12 @@ mod embedded_adapter_tests {
         let claude = CliDir::with("claude");
         assert_eq!(
             plan(&spec(claude_default()), claude.path()).as_deref(),
-            Some("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude")
+            Some("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude")
         );
         let codex = CliDir::with("codex");
         assert_eq!(
             plan(&spec(ConversationAgentKind::Codex.default_cmd()), codex.path()).as_deref(),
-            Some("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-codex")
+            Some("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-codex")
         );
     }
 
@@ -5212,7 +5212,7 @@ mod embedded_adapter_tests {
         let prefixed = format!("CLAUDE_CODE_EXECUTABLE=/opt/claude {}", claude_default());
         assert_eq!(
             plan(&spec(prefixed), empty.path()).as_deref(),
-            Some("CLAUDE_CODE_EXECUTABLE=/opt/claude /home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude")
+            Some("CLAUDE_CODE_EXECUTABLE=/opt/claude /home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude")
         );
 
         let mut launch = spec(claude_default());
@@ -5228,7 +5228,7 @@ mod embedded_adapter_tests {
                 &ephemeral,
                 empty.path(),
                 &|_| false,
-                || Some(("/bin/smelt-pi".to_string(), vec![CODEX_SPEC.to_string()])),
+                || Some(("/bin/smelt-agent".to_string(), vec![CODEX_SPEC.to_string()])),
             )
             .is_some()
         );
@@ -5238,7 +5238,7 @@ mod embedded_adapter_tests {
                 &BTreeMap::new(),
                 empty.path(),
                 &|name| name == "CLAUDE_CODE_EXECUTABLE",
-                || Some(("/bin/smelt-pi".to_string(), vec![CLAUDE_SPEC.to_string()])),
+                || Some(("/bin/smelt-agent".to_string(), vec![CLAUDE_SPEC.to_string()])),
             )
             .is_some()
         );
@@ -5250,7 +5250,7 @@ mod embedded_adapter_tests {
         let command = format!("CLAUDE_CONFIG_DIR=~/.claude-work {}", claude_default());
         assert_eq!(
             plan(&spec(command), claude.path()).as_deref(),
-            Some("CLAUDE_CONFIG_DIR=~/.claude-work /home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude")
+            Some("CLAUDE_CONFIG_DIR=~/.claude-work /home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude")
         );
     }
 
@@ -5268,7 +5268,7 @@ mod embedded_adapter_tests {
         }
     }
 
-    /// 更旧的 smelt-pi 没有内置适配器，或者只带了别家的。
+    /// 更旧的 smelt-agent 没有内置适配器，或者只带了别家的。
     #[test]
     fn smelt_pi_without_the_adapter_stays_on_bunx() {
         let claude = CliDir::with("claude");
@@ -5279,13 +5279,13 @@ mod embedded_adapter_tests {
                     &BTreeMap::new(),
                     claude.path(),
                     &|_| false,
-                    || Some(("/bin/smelt-pi".to_string(), bundled.clone())),
+                    || Some(("/bin/smelt-agent".to_string(), bundled.clone())),
                 ),
                 None,
                 "{bundled:?}"
             );
         }
-        // 没装 smelt-pi。
+        // 没装 smelt-agent。
         assert_eq!(
             plan_embedded_adapter_command(
                 &spec(claude_default()),
@@ -5309,12 +5309,12 @@ mod embedded_adapter_tests {
                 claude.path(),
                 &|_| false,
                 || Some((
-                    "/bin/smelt-pi".to_string(),
+                    "/bin/smelt-agent".to_string(),
                     vec!["@agentclientprotocol/claude-agent-acp@9.9.9".to_string()]
                 )),
             )
             .as_deref(),
-            Some("/bin/smelt-pi acp-claude")
+            Some("/bin/smelt-agent acp-claude")
         );
     }
 
@@ -5329,7 +5329,7 @@ mod embedded_adapter_tests {
                 claude.path(),
                 &|_| false,
                 || Some((
-                    "/home/first last/.smelt/bin/smelt-pi".to_string(),
+                    "/home/first last/.smelt/bin/smelt-agent".to_string(),
                     vec![CLAUDE_SPEC.to_string()]
                 )),
             ),
@@ -5343,7 +5343,7 @@ mod embedded_adapter_tests {
         let dir = CliDir::with("claude");
         let mut env = BTreeMap::new();
         inject_local_adapter_cli_path(
-            "/bin/smelt-pi acp-claude",
+            "/bin/smelt-agent acp-claude",
             "@agentclientprotocol/claude-agent-acp",
             "CLAUDE_CODE_EXECUTABLE",
             "claude",
@@ -5356,9 +5356,9 @@ mod embedded_adapter_tests {
     /// 连接失败时拿到的是改写后的命令，登录提示仍要认出是哪家。
     #[test]
     fn rewritten_command_keeps_the_right_login_hint() {
-        let claude = auth_required_hint("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude");
+        let claude = auth_required_hint("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude");
         assert!(claude.contains("Claude Code"), "{claude}");
-        let codex = auth_required_hint("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-codex");
+        let codex = auth_required_hint("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-codex");
         assert!(codex.contains("codex login"), "{codex}");
     }
 }

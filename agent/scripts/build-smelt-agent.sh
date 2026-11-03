@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 把 agent/ 编成单个 smelt-pi。
-# 用法：agent/scripts/build-smelt-pi.sh [--target bun-...] [--out dir]
+# 把 agent/ 编成单个 smelt-agent。
+# 用法：agent/scripts/build-smelt-agent.sh [--target bun-...] [--out dir]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="$ROOT/target/smelt-pi"
+OUT="$ROOT/target/smelt-agent"
 TARGET=""
 
 while [[ $# -gt 0 ]]; do
@@ -60,18 +60,18 @@ native_layout() {
 TARGET="${TARGET:-$(host_target)}"
 BUN="$("$ROOT/scripts/fetch-bun.sh")"
 mkdir -p "$OUT"
-OUT_BIN="$OUT/smelt-pi"
+OUT_BIN="$OUT/smelt-agent"
 if [[ "$TARGET" == bun-windows-x64 ]]; then
-  OUT_BIN="$OUT/smelt-pi.exe"
+  OUT_BIN="$OUT/smelt-agent.exe"
 fi
 
 (
   cd "$ROOT/agent"
   "$BUN" install --frozen-lockfile
 )
-# --splitting 在 compile-smelt-pi.ts 里打开。Bun 1.4.3 上图片 worker 和
+# --splitting 在 compile-smelt-agent.ts 里打开。Bun 1.4.3 上图片 worker 和
 # codemode worker 都过了冒烟。说明符改写也在那个脚本里：相对的 ./src 路径仍然找不到。
-"$BUN" "$ROOT/agent/scripts/compile-smelt-pi.ts" "$OUT_BIN" "$TARGET"
+"$BUN" "$ROOT/agent/scripts/compile-smelt-agent.ts" "$OUT_BIN" "$TARGET"
 
 WASM="$ROOT/agent/node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"
 if [[ ! -f "$WASM" ]]; then
@@ -82,7 +82,7 @@ cp "$WASM" "$OUT/photon_rs_bg.wasm"
 if [[ "$TARGET" != bun-windows-x64 ]]; then
   chmod +x "$OUT_BIN"
 fi
-# 内置技能跟 smelt-pi 一起发布，智能体勾选了才用 --skill 传进去，不进 Pi 的自动发现。
+# 内置技能跟 smelt-agent 一起发布，智能体勾选了才用 --skill 传进去，不进 Pi 的自动发现。
 rm -rf "$OUT/skills"
 cp -R "$ROOT/agent/skills" "$OUT/skills"
 

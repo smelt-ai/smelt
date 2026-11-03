@@ -1,7 +1,7 @@
-//! Pi 运行时的版本号和守护与 smelt-pi 之间的约定版本（`smeltProtocol`）都跟
+//! Pi 运行时的版本号和守护与 smelt-agent 之间的约定版本（`smeltProtocol`）都跟
 //! `agent/package.json` 走。
 //!
-//! 源码、`bun.lock` 不再嵌进 Rust 二进制。用户机器上跑的是编译好的 `smelt-pi`。
+//! 源码、`bun.lock` 不再嵌进 Rust 二进制。用户机器上跑的是编译好的 `smelt-agent`。
 
 use std::env;
 use std::fs;

@@ -1,8 +1,8 @@
 //! 受管 Bun 仍按 generation 下载到 `~/.smelt/runtime`。
-//! Pi 不再物化源码：跑的是 `~/.smelt/bin/smelt-pi` 指向的那份编译好的 smelt-pi（见 `pi_image`）。
+//! Pi 不再物化源码：跑的是 `~/.smelt/bin/smelt-agent` 指向的那份编译好的 smelt-agent（见 `agent_image`）。
 //!
 //! Bun 只留给 MCP 预设的 `bun x`，以及没装本机 CLI 或用了自定义命令时 Claude/Codex 的
-//! `bunx`（装了本机 CLI 时跑 smelt-pi 里内置的适配器，见 `acp_conn`）。固定入口指向当前
+//! `bunx`（装了本机 CLI 时跑 smelt-agent 里内置的适配器，见 `acp_conn`）。固定入口指向当前
 //! generation，`mcp.json` 里写的还是 `MANAGED_BUN_LAUNCHER_HOME_PATH`。
 
 use crate::runtime_generation::{
@@ -119,8 +119,8 @@ impl ManagedBunRuntime {
     }
 }
 
-/// 起 smelt-pi 时用这个环境变量告诉它守护这边的约定版本（`PI_SMELT_PROTOCOL`）。
-/// smelt-pi 和守护分开发布，对不上它会拒绝启动，并在 stderr 说明。
+/// 起 smelt-agent 时用这个环境变量告诉它守护这边的约定版本（`PI_SMELT_PROTOCOL`）。
+/// smelt-agent 和守护分开发布，对不上它会拒绝启动，并在 stderr 说明。
 pub(crate) const PI_PROTOCOL_ENV: &str = "SMELT_PI_PROTOCOL";
 
 pub(crate) fn pi_protocol() -> String {
@@ -139,7 +139,7 @@ impl ManagedPiRuntime {
             .collect()
     }
 
-    /// 起 smelt-pi 的子命令（登录、MCP 登录）。和 Pi 会话一样铺 login shell 环境：
+    /// 起 smelt-agent 的子命令（登录、MCP 登录）。和 Pi 会话一样铺 login shell 环境：
     /// 守护拿不到用户 rc 里的代理变量，子命令要联网，缺了它在只放行代理的网络里会挂住。
     pub(crate) fn command(&self, subcommand: Option<&str>) -> Command {
         let mut command = Command::new(&self.executable);
@@ -226,7 +226,7 @@ fn bun_tree_matches(root: &Path, expected: &BunGenerationManifest) -> bool {
             == Some(expected)
 }
 
-/// 旧版把 Pi 源码连整份 node_modules 物化在 `runtime/store/pi` 下，现在跑的是编译好的 smelt-pi。
+/// 旧版把 Pi 源码连整份 node_modules 物化在 `runtime/store/pi` 下，现在跑的是编译好的 smelt-agent。
 const RETIRED_PI_GENERATIONS: &str = "pi";
 
 /// 守护启动后在后台调一次，删掉旧的 Pi 源码 generation。别的进程正管着 runtime 目录就
@@ -527,35 +527,46 @@ pub(crate) fn pi_runtime_version() -> &'static str {
     PI_AGENT_RUNTIME_VERSION
 }
 
-/// 定位编译好的 `smelt-pi`。不下载、不写 `settings.json`。
+/// 定位编译好的 `smelt-agent`。不下载、不写 `settings.json`。
 pub(crate) fn sync_managed_pi_agent(_status: &dyn Fn(&str)) -> Result<ManagedPiRuntime, String> {
-    let executable = locate_smelt_pi()?;
+    let executable = locate_smelt_agent()?;
     require_photon_wasm(&executable)?;
     Ok(ManagedPiRuntime { executable })
 }
 
-/// 当前这一套 smelt-pi 里的内置技能目录。还没装 smelt-pi 时没有。
+/// 当前这一套 smelt-agent 里的内置技能目录。还没装 smelt-agent 时没有。
 pub(crate) fn builtin_skills_dir() -> Option<PathBuf> {
-    let executable = locate_smelt_pi().ok()?;
-    Some(executable.parent()?.join(crate::pi_image::SKILLS_DIR))
+    let executable = locate_smelt_agent().ok()?;
+    Some(executable.parent()?.join(crate::agent_image::SKILLS_DIR))
 }
 
 /// 诊断用：不下载、不写启动器。二进制在且旁边有 photon wasm 才算就绪。
 pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
-    let executable = locate_smelt_pi()?;
+    let executable = locate_smelt_agent()?;
     Ok((executable.clone(), photon_wasm(&executable).is_file()))
 }
 
-pub(crate) fn locate_smelt_pi() -> Result<PathBuf, String> {
+pub(crate) fn locate_smelt_agent() -> Result<PathBuf, String> {
     let home = smelt_paths::smelt_home().ok_or("找不到 home 目录")?;
-    locate_smelt_pi_in(&home.join("bin"))
+    locate_smelt_agent_in(&home.join("bin"))
 }
 
-fn locate_smelt_pi_in(bin: &Path) -> Result<PathBuf, String> {
-    crate::pi_image::current(bin).ok_or_else(|| {
+/// 守护启动后在后台调一次，清掉改名前 smelt-pi 留下的链接和目录（见
+/// `agent_image::reap_legacy`）。只能由守护调：它在跑说明旧守护已经交接走了。
+pub fn reap_legacy_smelt_pi() {
+    let Some(home) = smelt_paths::smelt_home() else {
+        return;
+    };
+    if let Err(error) = crate::agent_image::reap_legacy(&home.join("bin")) {
+        crate::app_log::error("smeltd", &format!("清理旧 smelt-pi 失败：{error}"));
+    }
+}
+
+fn locate_smelt_agent_in(bin: &Path) -> Result<PathBuf, String> {
+    crate::agent_image::current(bin).ok_or_else(|| {
         format!(
-            "找不到 smelt-pi（{}）。桌面重新打开 Smelt 会从 App 里装上；Linux 上运行时启动时会按自己的版本补上，或重新运行安装脚本。",
-            bin.join(crate::pi_image::LAUNCH_NAME).display()
+            "找不到 smelt-agent（{}）。桌面重新打开 Smelt 会从 App 里装上；Linux 上运行时启动时会按自己的版本补上，或重新运行安装脚本。",
+            bin.join(crate::agent_image::LAUNCH_NAME).display()
         )
     })
 }
@@ -570,7 +581,7 @@ fn require_photon_wasm(executable: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "smelt-pi 旁边缺少 photon_rs_bg.wasm（{}）",
+            "smelt-agent 旁边缺少 photon_rs_bg.wasm（{}）",
             wasm.display()
         ))
     }
@@ -595,19 +606,19 @@ mod tests {
     #[test]
     fn process_args_are_the_binary_then_the_existing_flags() {
         let runtime = ManagedPiRuntime {
-            executable: PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smelt-pi"),
+            executable: PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smelt-agent"),
         };
         assert_eq!(
             runtime.process_args(["--offline".into(), "--no-approve".into()]),
             vec![
-                "/Applications/Smelt.app/Contents/MacOS/smelt-pi",
+                "/Applications/Smelt.app/Contents/MacOS/smelt-agent",
                 "--offline",
                 "--no-approve",
             ]
         );
         assert_eq!(
             runtime.command(Some("auth")).get_program(),
-            "/Applications/Smelt.app/Contents/MacOS/smelt-pi"
+            "/Applications/Smelt.app/Contents/MacOS/smelt-agent"
         );
         let args = runtime
             .command(Some("auth"))
@@ -623,7 +634,7 @@ mod tests {
         assert_eq!(
             protocol.map(|value| value.to_string_lossy().into_owned()),
             Some(pi_protocol()),
-            "子命令也要带约定版本，不然 smelt-pi 会拒绝启动"
+            "子命令也要带约定版本，不然 smelt-agent 会拒绝启动"
         );
     }
 
@@ -633,7 +644,7 @@ mod tests {
     #[test]
     fn subcommands_run_with_the_login_shell_environment() {
         let runtime = ManagedPiRuntime {
-            executable: PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smelt-pi"),
+            executable: PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smelt-agent"),
         };
         let command = runtime.command(Some("auth"));
         let env = |name: &str| {
@@ -659,23 +670,23 @@ mod tests {
     #[test]
     fn smelt_pi_resolves_through_the_launch_link_to_its_real_path() {
         let root = std::env::temp_dir().join(format!(
-            "smelt-pi-locate-{}",
+            "smelt-agent-locate-{}",
             uuid::Uuid::new_v4().simple()
         ));
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let error = locate_smelt_pi_in(&bin).expect_err("没发布过必须失败");
-        assert!(error.contains("找不到 smelt-pi"), "实际错误：{error}");
+        let error = locate_smelt_agent_in(&bin).expect_err("没发布过必须失败");
+        assert!(error.contains("找不到 smelt-agent"), "实际错误：{error}");
 
-        let published = bin.join(format!("smelt-pi-{}", "ab".repeat(32))).join("smelt-pi");
+        let published = bin.join(format!("smelt-agent-{}", "ab".repeat(32))).join("smelt-agent");
         executable(&published, b"pi");
         std::os::unix::fs::symlink(
             published.strip_prefix(&bin).unwrap(),
-            bin.join("smelt-pi"),
+            bin.join("smelt-agent"),
         )
         .unwrap();
         assert_eq!(
-            locate_smelt_pi_in(&bin).unwrap(),
+            locate_smelt_agent_in(&bin).unwrap(),
             fs::canonicalize(&published).unwrap(),
             "要 exec 解析后的真实路径，链接换了也不影响已经起来的 Pi"
         );
@@ -766,9 +777,9 @@ mod tests {
 
     #[test]
     fn photon_wasm_must_sit_beside_the_binary() {
-        let dir = std::env::temp_dir().join(format!("smelt-pi-wasm-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("smelt-agent-wasm-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        let executable = dir.join("smelt-pi");
+        let executable = dir.join("smelt-agent");
         fs::write(&executable, b"pi").unwrap();
         assert!(require_photon_wasm(&executable).is_err());
         fs::write(photon_wasm(&executable), b"wasm").unwrap();

@@ -8611,7 +8611,7 @@ mod tests {
     /// 从 Smelt 的统一运行时入口走完受管 Bun -> Pi RPC -> Ready，
     /// 避免逻辑命令意外落回 ACP parser 却只有单元测试通过。
     #[test]
-    #[ignore = "需要先编出 smelt-pi（agent/scripts/build-smelt-pi.sh）"]
+    #[ignore = "需要先编出 smelt-agent（agent/scripts/build-smelt-agent.sh）"]
     fn managed_native_driver_reaches_ready() {
         let agent_dir =
             std::env::temp_dir().join(format!("smelt-pi-rpc-driver-{}", uuid::Uuid::new_v4()));
@@ -8655,7 +8655,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "需要先编出 smelt-pi（agent/scripts/build-smelt-pi.sh）"]
+    #[ignore = "需要先编出 smelt-agent（agent/scripts/build-smelt-agent.sh）"]
     fn missing_native_session_is_classified_for_fresh_fallback() {
         let agent_dir = std::env::temp_dir().join(format!(
             "smelt-pi-rpc-missing-session-{}",

@@ -79,8 +79,8 @@ if [[ "$BUILD" -eq 1 ]]; then
   export SMELT_BUILD_VERSION
   echo "▶ 编译 release（v${SMELT_BUILD_VERSION}）…"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-installer
-  echo "▶ 编译 smelt-pi …"
-  make -C "$ROOT" smelt-pi
+  echo "▶ 编译 smelt-agent …"
+  make -C "$ROOT" smelt-agent
 fi
 
 if [[ ! -f "$BIN" ]]; then
@@ -104,18 +104,18 @@ if ! file "$BIN" | grep -q "arm64"; then
   echo "✗ $BIN 不是 arm64，同事的 Apple Silicon Mac 会闪退。请在 Apple Silicon 上编译。" >&2
   exit 1
 fi
-PI_BIN="$ROOT/target/smelt-pi/smelt-pi"
-PI_WASM="$ROOT/target/smelt-pi/photon_rs_bg.wasm"
+PI_BIN="$ROOT/target/smelt-agent/smelt-agent"
+PI_WASM="$ROOT/target/smelt-agent/photon_rs_bg.wasm"
 if [[ ! -x "$PI_BIN" || ! -f "$PI_WASM" ]]; then
-  echo "✗ 缺少 smelt-pi 或 photon_rs_bg.wasm。先 make smelt-pi，或给本脚本加 --build。" >&2
+  echo "✗ 缺少 smelt-agent 或 photon_rs_bg.wasm。先 make smelt-agent，或给本脚本加 --build。" >&2
   exit 1
 fi
 if [[ -d "$ROOT/agent/src" ]]; then
   newer="$(find "$ROOT/agent/src" "$ROOT/agent/skills" "$ROOT/agent/package.json" "$ROOT/agent/bun.lock" \
-    "$ROOT/agent/scripts/compile-smelt-pi.ts" "$ROOT/agent/scripts/build-smelt-pi.sh" "$ROOT/scripts/fetch-bun.sh" \
+    "$ROOT/agent/scripts/compile-smelt-agent.ts" "$ROOT/agent/scripts/build-smelt-agent.sh" "$ROOT/scripts/fetch-bun.sh" \
     -type f -newer "$PI_BIN" -print -quit 2>/dev/null || true)"
   if [[ -n "$newer" ]]; then
-    echo "✗ smelt-pi 比源码旧（${newer}）。先 make smelt-pi。" >&2
+    echo "✗ smelt-agent 比源码旧（${newer}）。先 make smelt-agent。" >&2
     exit 1
   fi
 fi
@@ -183,20 +183,20 @@ chmod +x "$MACOS/smelt-notify"
 # 绝不能从即将被交换的 Bundle 内直接运行。
 cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
 chmod +x "$MACOS/smelt-installer"
-# smelt-pi 连同 wasm、native/ 整套放 Resources：Contents/MacOS 里每个文件都必须是签过的
+# smelt-agent 连同 wasm、native/ 整套放 Resources：Contents/MacOS 里每个文件都必须是签过的
 # 代码，wasm 签不了。App 只是载体，安装和 GUI 启动时把这一套发布到 ~/.smelt/bin，
 # 守护从那里起 Pi。
-PI_DIR="$RES/smelt-pi"
+PI_DIR="$RES/smelt-agent"
 mkdir -p "$PI_DIR"
-cp "$PI_BIN" "$PI_DIR/smelt-pi"
+cp "$PI_BIN" "$PI_DIR/smelt-agent"
 cp "$PI_WASM" "$PI_DIR/photon_rs_bg.wasm"
-chmod +x "$PI_DIR/smelt-pi"
-if [[ -d "$ROOT/target/smelt-pi/native" ]]; then
+chmod +x "$PI_DIR/smelt-agent"
+if [[ -d "$ROOT/target/smelt-agent/native" ]]; then
   mkdir -p "$PI_DIR/native"
-  cp -R "$ROOT/target/smelt-pi/native/." "$PI_DIR/native/"
+  cp -R "$ROOT/target/smelt-agent/native/." "$PI_DIR/native/"
 fi
-if [[ -d "$ROOT/target/smelt-pi/skills" ]]; then
-  cp -R "$ROOT/target/smelt-pi/skills" "$PI_DIR/skills"
+if [[ -d "$ROOT/target/smelt-agent/skills" ]]; then
+  cp -R "$ROOT/target/smelt-agent/skills" "$PI_DIR/skills"
 fi
 # 插件（gpui-shell 脚本应用，见 crates/smelt/src/plugins）：整目录随 App
 # 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell 加载时写编辑器文件的行为，
@@ -306,7 +306,7 @@ xattr -cr "$APP" || true
 #
 # 1) Developer ID Application 身份（名字以 "Developer ID Application" 开头）：走可对外
 #    分发的完整签名——Hardened Runtime（--options runtime）+ secure timestamp + 授权
-#    清单（scripts/entitlements.plist，smelt-pi 用 scripts/jit-entitlements.plist）。
+#    清单（scripts/entitlements.plist，smelt-agent 用 scripts/jit-entitlements.plist）。
 #    这是公证的前置：Apple 要求包里每个 Mach-O 都带 Hardened Runtime。
 #
 # 2) 自签名（scripts/setup-codesign-identity.sh 生成的 "Smelt Local Signing"）：
@@ -373,7 +373,7 @@ ENTITLEMENTS="$ROOT/scripts/entitlements.plist"
 JIT_ENTITLEMENTS="$ROOT/scripts/jit-entitlements.plist"
 # 普通 entitlements 只放 library validation 例外。GPUI 的图形/字体栈会在运行时
 # dlopen 系统库；Hardened Runtime 默认只允许同 Team 的库。
-# smelt-pi 跑 JavaScriptCore，还要 JIT 那一组授权。
+# smelt-agent 跑 JavaScriptCore，还要 JIT 那一组授权。
 # plist 不能带 XML 注释，codesign 的解析器比 plutil 严。
 if [[ ! -f "$ENTITLEMENTS" || ! -f "$JIT_ENTITLEMENTS" ]]; then
   echo "✗ 缺少 $ENTITLEMENTS 或 $JIT_ENTITLEMENTS" >&2
@@ -399,8 +399,8 @@ for inner in smelt-notify smelt-installer; do
   echo "  … 签内层：$inner"
   sign_one "$ENTITLEMENTS" "$MACOS/$inner"
 done
-echo "  … 签内层：smelt-pi"
-sign_one "$JIT_ENTITLEMENTS" "$PI_DIR/smelt-pi"
+echo "  … 签内层：smelt-agent"
+sign_one "$JIT_ENTITLEMENTS" "$PI_DIR/smelt-agent"
 if [[ -d "$PI_DIR/native" ]]; then
   while IFS= read -r -d '' node; do
     echo "  … 签内层：${node#"$RES/"}"

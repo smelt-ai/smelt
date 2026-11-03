@@ -7,7 +7,7 @@ pub mod fd_limit;
 pub mod file_lock;
 #[cfg(windows)]
 pub mod named_pipe;
-pub mod pi_image;
+pub mod agent_image;
 pub mod process;
 pub mod process_usage;
 pub mod process_wait;

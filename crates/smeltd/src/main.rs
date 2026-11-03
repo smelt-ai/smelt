@@ -2760,8 +2760,9 @@ fn run_serve_loop(
     let _ = runtime_identity::runtime_id();
     thread::spawn(smelt_core::managed_runtime::retire_pi_source_generations);
     thread::spawn(smelt_core::control_skill::remove_legacy_copy);
+    thread::spawn(smelt_core::managed_runtime::reap_legacy_smelt_pi);
     #[cfg(target_os = "linux")]
-    thread::spawn(runtime_upgrade::ensure_smelt_pi);
+    thread::spawn(runtime_upgrade::ensure_smelt_agent);
     // 远程访问每次进程启动都是空的，按落盘配置重新拉起。
     // 菜单栏 quit / 任何路径 cleanup 都要够得着它。
     let remote_state = new_remote_state();
@@ -2799,7 +2800,7 @@ fn run_serve_loop(
         client_conn::remember_daemon_pipe(pipe_name.clone());
         let pipe_server = server.clone();
         thread::Builder::new()
-            .name("smelt-pipe-accept".into())
+            .name("smelt-agentpe-accept".into())
             .spawn(move || {
                 let listener = match smelt_sys::named_pipe::PipeListener::bind(pipe_name) {
                     Ok(listener) => listener,

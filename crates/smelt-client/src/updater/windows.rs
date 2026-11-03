@@ -2,7 +2,7 @@
 //! 应用时拉起它静默覆盖安装，桌面随即退出。安装程序先等桌面进程退出再换文件，装完（或
 //! 没装成）重新打开 Smelt（`scripts/windows-installer.iss` 的 `/WAITPID`、`/RELAUNCH`）。
 //!
-//! 本机守护不用停：smeltd、smelt-pi、smelt-notify 跑的都是 `~/.smelt/bin` 里的副本，
+//! 本机守护不用停：smeltd、smelt-agent、smelt-notify 跑的都是 `~/.smelt/bin` 里的副本，
 //! 不占安装目录。新版桌面起来后照「守护落后就在空闲时重启」的老规矩换守护，会话不断。
 //!
 //! 换文件、出错回滚是安装程序的事，这里不记持久化事务：下好的安装程序只在这次运行里
