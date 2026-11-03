@@ -274,13 +274,20 @@ verify_profile_refresh "$PREVIOUS_PROFILE_EXPIRY"
 
 echo
 echo "安装到设备…"
-# flutter install 会先卸载旧版再装。旧版签名已失效时这一步是必须的，
-# 覆盖安装在签名变化时会被系统拒绝。
-flutter install "--${BUILD_MODE}" -d "$DEVICE_ID"
+# 用 devicectl 原地覆盖安装，保留 App 沙盒里的数据（配置、连接、本地库）。
+# 不用 flutter install：它在设备上已有同 Bundle ID 时会先卸载，每次安装都清空数据。
+# 同一 Team 换 profile 可以直接覆盖；只有签名 Team 变了系统才会拒绝，
+# 那时按提示手动删掉旧 App 再重跑，不在脚本里自动卸载。
+if ! xcrun devicectl device install app --device "$DEVICE_ID" "$APP_PATH"; then
+  echo "⚠️  覆盖安装失败。若设备上的 $BUNDLE_ID 是别的 Team 签的，" >&2
+  echo "    先在手机上删掉它（会清空它的数据）再重跑本脚本。" >&2
+  exit 1
+fi
 
-# flutter install 偶尔会在装成功后仍然静默退出，实际有没有装上以设备为准。
 echo
-if xcrun devicectl device info apps --device "$DEVICE_ID" 2>/dev/null | grep -q "$BUNDLE_ID"; then
+# 先存下输出再匹配：pipefail 下 grep -q 提前退出会让 devicectl 吃 SIGPIPE，整条管道判失败。
+INSTALLED_APPS="$(xcrun devicectl device info apps --device "$DEVICE_ID" --bundle-id "$BUNDLE_ID" 2>/dev/null || true)"
+if grep -qF "$BUNDLE_ID" <<<"$INSTALLED_APPS"; then
   echo "✓ 已安装到设备：$BUNDLE_ID"
 else
   echo "⚠️  设备上没查到 ${BUNDLE_ID}，安装可能没成功。" >&2
