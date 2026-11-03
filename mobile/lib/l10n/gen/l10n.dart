@@ -1909,6 +1909,132 @@ abstract class L10n {
   /// **'(empty)'**
   String get conversationMemoryEmptyBody;
 
+  /// No description provided for @filesTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Files'**
+  String get filesTitle;
+
+  /// No description provided for @filesOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Project files'**
+  String get filesOpen;
+
+  /// No description provided for @filesSearchHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Search file names and contents'**
+  String get filesSearchHint;
+
+  /// No description provided for @filesEmptyDir.
+  ///
+  /// In en, this message translates to:
+  /// **'This folder is empty'**
+  String get filesEmptyDir;
+
+  /// No description provided for @filesLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load this folder'**
+  String get filesLoadFailed;
+
+  /// No description provided for @filesSearchNone.
+  ///
+  /// In en, this message translates to:
+  /// **'Nothing matches'**
+  String get filesSearchNone;
+
+  /// No description provided for @filesSearchTruncated.
+  ///
+  /// In en, this message translates to:
+  /// **'Showing the first matches only. Narrow the search to see more.'**
+  String get filesSearchTruncated;
+
+  /// No description provided for @filesSearchLine.
+  ///
+  /// In en, this message translates to:
+  /// **'Line {line}'**
+  String filesSearchLine(int line);
+
+  /// No description provided for @filesOpenFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open this file'**
+  String get filesOpenFailed;
+
+  /// No description provided for @filesBinary.
+  ///
+  /// In en, this message translates to:
+  /// **'Not a text file'**
+  String get filesBinary;
+
+  /// No description provided for @filesBinaryBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This file isn\'t text or an image this app can show.'**
+  String get filesBinaryBody;
+
+  /// No description provided for @filesTooLarge.
+  ///
+  /// In en, this message translates to:
+  /// **'Too large to preview'**
+  String get filesTooLarge;
+
+  /// No description provided for @filesTooLargeBody.
+  ///
+  /// In en, this message translates to:
+  /// **'{size}. Files over {limit} aren\'t loaded.'**
+  String filesTooLargeBody(String size, String limit);
+
+  /// No description provided for @filesWrap.
+  ///
+  /// In en, this message translates to:
+  /// **'Wrap lines'**
+  String get filesWrap;
+
+  /// No description provided for @filesNoWrap.
+  ///
+  /// In en, this message translates to:
+  /// **'Don\'t wrap'**
+  String get filesNoWrap;
+
+  /// No description provided for @filesShowSource.
+  ///
+  /// In en, this message translates to:
+  /// **'Show source'**
+  String get filesShowSource;
+
+  /// No description provided for @filesShowPreview.
+  ///
+  /// In en, this message translates to:
+  /// **'Show preview'**
+  String get filesShowPreview;
+
+  /// No description provided for @filesCopyPath.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy path'**
+  String get filesCopyPath;
+
+  /// No description provided for @filesPathCopied.
+  ///
+  /// In en, this message translates to:
+  /// **'Path copied'**
+  String get filesPathCopied;
+
+  /// No description provided for @filesPlain.
+  ///
+  /// In en, this message translates to:
+  /// **'Plain text · too large to highlight'**
+  String get filesPlain;
+
+  /// No description provided for @filesLines.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} lines'**
+  String filesLines(int count);
+
   /// No description provided for @launchTitle.
   ///
   /// In en, this message translates to:

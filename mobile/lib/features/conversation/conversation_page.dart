@@ -16,6 +16,8 @@ import '../../ui/page.dart';
 import '../../ui/station.dart';
 import '../../ui/time.dart';
 import '../agents/agent_memory_page.dart';
+import '../files/file_links.dart';
+import '../files/project_files_page.dart';
 import '../../utils/image_processing.dart';
 import 'composer.dart';
 import 'conversation_logic.dart';
@@ -706,77 +708,113 @@ class _ConversationPageState extends State<ConversationPage> {
     return ConversationIdentity(
       runtimeId: widget.runtimeId,
       sessionId: widget.sessionId,
-      child: Scaffold(
-        backgroundColor: c.ground,
-        appBar: AppBar(
-          toolbarHeight: _titleBarHeight(context),
-          title: ListenableBuilder(
-            listenable: Listenable.merge([
-              _model.fleet,
-              _model.catalog,
-              _model.workspaces,
-            ]),
-            builder: (context, _) => _TitleBlock(
-              title: _title(l10n),
-              runtime: _model.fleet.runtime(widget.runtimeId),
-              runtimeId: widget.runtimeId,
-              session: _model.catalog.session(
-                widget.runtimeId,
-                widget.sessionId,
+      // 消息里的文件链接、diff 文件头按对话的工作目录解析，点了在 App 里预览。
+      child: FileLinkScope(
+        runtimeId: widget.runtimeId,
+        cwd: _model.catalog.session(widget.runtimeId, widget.sessionId)?.cwd,
+        child: Scaffold(
+          backgroundColor: c.ground,
+          appBar: AppBar(
+            toolbarHeight: _titleBarHeight(context),
+            title: ListenableBuilder(
+              listenable: Listenable.merge([
+                _model.fleet,
+                _model.catalog,
+                _model.workspaces,
+              ]),
+              builder: (context, _) => _TitleBlock(
+                title: _title(l10n),
+                runtime: _model.fleet.runtime(widget.runtimeId),
+                runtimeId: widget.runtimeId,
+                session: _model.catalog.session(
+                  widget.runtimeId,
+                  widget.sessionId,
+                ),
               ),
             ),
+            actions: [
+              ListenableBuilder(
+                listenable: _model.catalog,
+                builder: (context, _) => _filesButton(context, l10n),
+              ),
+              PopupMenuButton<_More>(
+                tooltip: l10n.commonMore,
+                icon: const Icon(LucideIcons.ellipsis),
+                onSelected: (action) => switch (action) {
+                  _More.settings => showSettingsSheet(
+                    context,
+                    view: _view!,
+                    set: _setConfig,
+                  ),
+                  _More.skills => showSkillsSheet(
+                    context,
+                    skills: _skills ?? [],
+                  ),
+                  _More.copyInfo => _copyInfo(),
+                },
+                itemBuilder: (context) => [
+                  if (hasSettings)
+                    _menuItem(
+                      _More.settings,
+                      LucideIcons.slidersHorizontal,
+                      l10n.conversationModelAndSettings,
+                    ),
+                  if (_skills != null)
+                    _menuItem(
+                      _More.skills,
+                      LucideIcons.sparkles,
+                      l10n.conversationSkills,
+                    ),
+                  _menuItem(
+                    _More.copyInfo,
+                    LucideIcons.copy,
+                    l10n.conversationCopyInfo,
+                  ),
+                ],
+              ),
+              const SizedBox(width: Space.xs),
+            ],
           ),
-          actions: [
-            PopupMenuButton<_More>(
-              tooltip: l10n.commonMore,
-              icon: const Icon(LucideIcons.ellipsis),
-              onSelected: (action) => switch (action) {
-                _More.settings => showSettingsSheet(
-                  context,
-                  view: _view!,
-                  set: _setConfig,
-                ),
-                _More.skills => showSkillsSheet(context, skills: _skills ?? []),
-                _More.copyInfo => _copyInfo(),
-              },
-              itemBuilder: (context) => [
-                if (hasSettings)
-                  _menuItem(
-                    _More.settings,
-                    LucideIcons.slidersHorizontal,
-                    l10n.conversationModelAndSettings,
-                  ),
-                if (_skills != null)
-                  _menuItem(
-                    _More.skills,
-                    LucideIcons.sparkles,
-                    l10n.conversationSkills,
-                  ),
-                _menuItem(
-                  _More.copyInfo,
-                  LucideIcons.copy,
-                  l10n.conversationCopyInfo,
-                ),
-              ],
+          body: Column(
+            children: [
+              _banner(context),
+              Expanded(child: _body(context)),
+            ],
+          ),
+          // 输入框放在 bottomNavigationBar：浮动提示条（外壳弹的提醒、本页的提示）只会让开
+          // 这一栏，放在 body 里就会压住输入框。这一栏不随键盘抬起，键盘高度自己垫上；
+          // 在 Builder 里读键盘高度，键盘动画时只重排这一栏，不重建整页。
+          bottomNavigationBar: Builder(
+            builder: (context) => Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.viewInsetsOf(context).bottom,
+              ),
+              child: bottom,
             ),
-            const SizedBox(width: Space.xs),
-          ],
+          ),
         ),
-        body: Column(
-          children: [
-            _banner(context),
-            Expanded(child: _body(context)),
-          ],
-        ),
-        // 输入框放在 bottomNavigationBar：浮动提示条（外壳弹的提醒、本页的提示）只会让开
-        // 这一栏，放在 body 里就会压住输入框。这一栏不随键盘抬起，键盘高度自己垫上；
-        // 在 Builder 里读键盘高度，键盘动画时只重排这一栏，不重建整页。
-        bottomNavigationBar: Builder(
-          builder: (context) => Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.viewInsetsOf(context).bottom,
+      ),
+    );
+  }
+
+  /// 「项目文件」：项目根优先，没有项目就用工作目录；都没有不显示。
+  Widget _filesButton(BuildContext context, L10n l10n) {
+    final session = _model.catalog.session(widget.runtimeId, widget.sessionId);
+    final root = [session?.projectRoot, session?.cwd]
+        .map((dir) => dir?.trim())
+        .firstWhere((dir) => dir != null && dir.isNotEmpty, orElse: () => null);
+    if (session == null || root == null) return const SizedBox.shrink();
+    return IconButton(
+      tooltip: l10n.filesOpen,
+      icon: const Icon(LucideIcons.folderTree),
+      onPressed: () => unawaited(
+        Navigator.of(context).push<void>(
+          MaterialPageRoute(
+            builder: (_) => ProjectFilesPage(
+              runtimeId: widget.runtimeId,
+              root: root,
+              title: session.placeLabel ?? root,
             ),
-            child: bottom,
           ),
         ),
       ),

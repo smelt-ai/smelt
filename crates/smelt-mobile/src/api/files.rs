@@ -91,6 +91,12 @@ impl TextDocument {
         self.inner.line_count() as u32
     }
 
+    /// 最长一行有几个字。不换行显示时据此定横向宽度。
+    #[frb(sync, getter)]
+    pub fn max_line_chars(&self) -> u32 {
+        self.inner.max_line_chars() as u32
+    }
+
     #[frb(sync, getter)]
     pub fn byte_len(&self) -> u64 {
         self.inner.byte_len() as u64

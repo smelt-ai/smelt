@@ -113,11 +113,17 @@ fn listing_joins_child_paths_with_the_machines_rules() {
     );
     let files = connected(&runtime);
 
-    let posix = files.list_dir("/home/u/app", "/home/u/app", PathStyle::Posix).unwrap();
+    let posix = files
+        .list_dir("/home/u/app", "/home/u/app", PathStyle::Posix)
+        .unwrap();
     assert_eq!(
         posix,
         vec![
-            FileEntry { name: "src".into(), path: "/home/u/app/src".into(), is_dir: true },
+            FileEntry {
+                name: "src".into(),
+                path: "/home/u/app/src".into(),
+                is_dir: true
+            },
             FileEntry {
                 name: "README.md".into(),
                 path: "/home/u/app/README.md".into(),
@@ -130,7 +136,9 @@ fn listing_joins_child_paths_with_the_machines_rules() {
         vec![json!({ "root": "/home/u/app", "dir": "/home/u/app" })]
     );
 
-    let windows = files.list_dir(r"C:\app", r"C:\app\src", PathStyle::Windows).unwrap();
+    let windows = files
+        .list_dir(r"C:\app", r"C:\app\src", PathStyle::Windows)
+        .unwrap();
     assert_eq!(windows[1].path, r"C:\app\src\README.md");
 }
 
@@ -151,14 +159,20 @@ fn opening_maps_each_kind_of_content() {
     assert_eq!(document.full_text(), "fn a() {}\n");
 
     // `data` 是 base64：`PNG` → `UE5H`。
-    runtime.result("file.open", json!({ "content": { "kind": "image", "data": "UE5H" } }));
+    runtime.result(
+        "file.open",
+        json!({ "content": { "kind": "image", "data": "UE5H" } }),
+    );
     let image = files.open("/p/logo.SVG").unwrap();
     assert_eq!(image.kind, FilePreviewKind::Image);
     assert_eq!(image.image.as_deref(), Some(&b"PNG"[..]));
     assert!(image.svg);
 
     runtime.result("file.open", json!({ "content": { "kind": "binary" } }));
-    assert_eq!(files.open("/p/a.bin").unwrap().kind, FilePreviewKind::Binary);
+    assert_eq!(
+        files.open("/p/a.bin").unwrap().kind,
+        FilePreviewKind::Binary
+    );
 
     runtime.result(
         "file.open",
@@ -201,10 +215,15 @@ fn search_hits_keep_line_previews_and_blank_queries_skip_the_call() {
 #[test]
 fn offline_and_old_runtimes_explain_themselves() {
     let offline = Files::new(Arc::new(FakeSource(None)), FAST);
-    assert_eq!(offline.open("/p/a").err().unwrap().kind, SmeltErrorKind::Offline);
+    assert_eq!(
+        offline.open("/p/a").err().unwrap().kind,
+        SmeltErrorKind::Offline
+    );
 
     // 老运行时不认这个方法。
     let runtime = FakeRuntime::new();
-    let error = connected(&runtime).list_dir("/p", "/p", PathStyle::Posix).unwrap_err();
+    let error = connected(&runtime)
+        .list_dir("/p", "/p", PathStyle::Posix)
+        .unwrap_err();
     assert_eq!(error.kind, SmeltErrorKind::RuntimeOutdated);
 }

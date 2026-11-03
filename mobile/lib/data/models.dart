@@ -17,6 +17,9 @@ export '../src/rust/api/catalog.dart';
 export '../src/rust/api/conversation.dart';
 export '../src/rust/api/draft.dart';
 export '../src/rust/api/error.dart';
+export '../src/rust/api/files.dart'
+    hide TextDocument, FilePreview, FilePreviewKind;
+export 'files.dart';
 export '../src/rust/api/fleet.dart';
 export '../src/rust/api/identity.dart';
 export '../src/rust/api/pass.dart';

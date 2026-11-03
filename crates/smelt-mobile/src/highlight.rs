@@ -37,6 +37,8 @@ pub(crate) struct Document {
     lines: Vec<Range<usize>>,
     /// 认出来的语言名（给人看）；认不出是 `None`。
     language: Option<String>,
+    /// 最长一行的字数，建文档时数一次（Dart 在界面线程上同步取）。
+    max_line_chars: usize,
     /// 语法在语法集里的下标；`None` 不高亮（认不出、太大、行太长）。
     syntax: Option<usize>,
     parser: Mutex<Parser>,
@@ -68,17 +70,18 @@ impl Document {
             || lines.iter().any(|range| range.len() > HIGHLIGHT_MAX_LINE);
         let syntax = syntax.filter(|_| !too_big);
         let checkpoints = syntax
-            .map(|index| {
-                vec![(
-                    ParseState::new(&set.syntaxes()[index]),
-                    ScopeStack::new(),
-                )]
-            })
+            .map(|index| vec![(ParseState::new(&set.syntaxes()[index]), ScopeStack::new())])
             .unwrap_or_default();
+        let max_line_chars = lines
+            .iter()
+            .map(|range| text[range.clone()].chars().count())
+            .max()
+            .unwrap_or(0);
         Self {
             text,
             lines,
             language,
+            max_line_chars,
             syntax,
             parser: Mutex::new(Parser {
                 checkpoints,
@@ -99,6 +102,11 @@ impl Document {
     /// 会不会上色。认出了语言但文件太大时是 `false`。
     pub(crate) fn highlighted(&self) -> bool {
         self.syntax.is_some()
+    }
+
+    /// 最长一行有几个字（Unicode 标量）。不换行显示时用来定横向能滚多宽。
+    pub(crate) fn max_line_chars(&self) -> usize {
+        self.max_line_chars
     }
 
     pub(crate) fn byte_len(&self) -> usize {

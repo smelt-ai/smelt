@@ -71,6 +71,9 @@ abstract class TextDocument implements RustOpaqueInterface {
 
   /// `[start, end)` 行，0 基。在后台线程解析，跳到很靠后的位置时要等一会儿。
   Future<List<HighlightedLine>> lines({required int start, required int end});
+
+  /// 最长一行有几个字。不换行显示时据此定横向宽度。
+  int get maxLineChars;
 }
 
 /// 目录里的一项。

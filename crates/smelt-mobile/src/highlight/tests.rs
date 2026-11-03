@@ -20,9 +20,18 @@ fn languages_are_detected_by_name_extension_and_shebang() {
             .language()
             .map(str::to_string)
     };
-    assert_eq!(language("/p/src/main.rs", "fn main() {}").as_deref(), Some("Rust"));
-    assert_eq!(language("/p/web/app.ts", "let a = 1").as_deref(), Some("TypeScript"));
-    assert_eq!(language("/p/Cargo.toml", "[package]").as_deref(), Some("TOML"));
+    assert_eq!(
+        language("/p/src/main.rs", "fn main() {}").as_deref(),
+        Some("Rust")
+    );
+    assert_eq!(
+        language("/p/web/app.ts", "let a = 1").as_deref(),
+        Some("TypeScript")
+    );
+    assert_eq!(
+        language("/p/Cargo.toml", "[package]").as_deref(),
+        Some("TOML")
+    );
     assert!(language("/p/Dockerfile", "FROM alpine").is_some());
     assert_eq!(
         language("/p/bin/run", "#!/bin/bash\necho hi\n").as_deref(),
@@ -45,7 +54,10 @@ fn rust_lines_get_semantic_kinds_and_keep_their_text() {
     assert_eq!(kinds(&lines[0]), vec![("// hi", TokenKind::Comment)]);
     let second = kinds(&lines[1]);
     assert!(second.contains(&("fn", TokenKind::Keyword)), "{second:?}");
-    assert!(second.contains(&("main", TokenKind::Function)), "{second:?}");
+    assert!(
+        second.contains(&("main", TokenKind::Function)),
+        "{second:?}"
+    );
     let third = kinds(&lines[2]);
     // 引号跟着字符串走，不单独算标点。
     assert!(third.contains(&("\"x\"", TokenKind::String)), "{third:?}");
@@ -72,7 +84,10 @@ fn a_late_window_continues_from_a_checkpoint_and_matches_a_full_parse() {
     let late = windowed.lines(1495, 1505);
     let full = Document::new("/p/a.js", source).lines(0, 1505);
     assert_eq!(late, full[1495..1505].to_vec());
-    assert!(late.iter().all(|line| kinds(line) == vec![("still comment", TokenKind::Comment)]));
+    assert!(
+        late.iter()
+            .all(|line| kinds(line) == vec![("still comment", TokenKind::Comment)])
+    );
     // 再取前面的窗口也没问题（从第 0 份检查点重新来）。
     assert_eq!(windowed.lines(0, 3), full[0..3].to_vec());
 }
@@ -81,7 +96,11 @@ fn a_late_window_continues_from_a_checkpoint_and_matches_a_full_parse() {
 fn big_files_and_minified_lines_fall_back_to_plain_text() {
     let long_line = format!("var a = \"{}\";\n", "x".repeat(HIGHLIGHT_MAX_LINE + 1));
     let minified = Document::new("/p/app.min.js", long_line);
-    assert!(minified.language().is_some_and(|name| name.starts_with("JavaScript")));
+    assert!(
+        minified
+            .language()
+            .is_some_and(|name| name.starts_with("JavaScript"))
+    );
     assert!(!minified.highlighted());
     assert_eq!(minified.lines(0, 1)[0].spans[0].kind, TokenKind::Plain);
 
@@ -96,6 +115,12 @@ fn windows_line_endings_and_empty_files() {
     assert_eq!(lines.len(), 2);
     assert_eq!(text_of(&lines[0]), "x = 1");
     assert_eq!(text_of(&lines[1]), "y = 2");
+    // 横向宽度按字数算，不按字节：中文一个字是三个字节。
+    assert_eq!(crlf.max_line_chars(), 5);
+    assert_eq!(
+        Document::new("/p/a.md", "中文标题\nab\n".to_string()).max_line_chars(),
+        4
+    );
 
     let empty = Document::new("/p/empty.rs", String::new());
     assert_eq!(empty.line_count(), 1);
@@ -105,14 +130,32 @@ fn windows_line_endings_and_empty_files() {
 
 #[test]
 fn scope_rules_prefer_the_specific_category() {
-    assert_eq!(kind_of_scope("string.other.link.title.markdown"), Some(TokenKind::Link));
-    assert_eq!(kind_of_scope("string.quoted.double.rust"), Some(TokenKind::String));
-    assert_eq!(kind_of_scope("constant.numeric.integer"), Some(TokenKind::Number));
-    assert_eq!(kind_of_scope("constant.language.boolean"), Some(TokenKind::Constant));
-    assert_eq!(kind_of_scope("keyword.operator.arithmetic"), Some(TokenKind::Operator));
+    assert_eq!(
+        kind_of_scope("string.other.link.title.markdown"),
+        Some(TokenKind::Link)
+    );
+    assert_eq!(
+        kind_of_scope("string.quoted.double.rust"),
+        Some(TokenKind::String)
+    );
+    assert_eq!(
+        kind_of_scope("constant.numeric.integer"),
+        Some(TokenKind::Number)
+    );
+    assert_eq!(
+        kind_of_scope("constant.language.boolean"),
+        Some(TokenKind::Constant)
+    );
+    assert_eq!(
+        kind_of_scope("keyword.operator.arithmetic"),
+        Some(TokenKind::Operator)
+    );
     assert_eq!(kind_of_scope("keyword.control"), Some(TokenKind::Keyword));
     assert_eq!(kind_of_scope("punctuation.definition.string.begin"), None);
-    assert_eq!(kind_of_scope("punctuation.separator"), Some(TokenKind::Punctuation));
+    assert_eq!(
+        kind_of_scope("punctuation.separator"),
+        Some(TokenKind::Punctuation)
+    );
     // 前缀要按整段比：`stringy` 不是 `string`。
     assert_eq!(kind_of_scope("stringy.thing"), None);
     assert_eq!(kind_of_scope("source.rust"), None);
@@ -125,6 +168,18 @@ fn markdown_source_marks_headings_and_links() {
         "# Title\n\nSee [docs](https://x.y).\n".to_string(),
     );
     let lines = document.lines(0, 3);
-    assert!(kinds(&lines[0]).iter().all(|(_, kind)| *kind == TokenKind::Heading), "{:?}", kinds(&lines[0]));
-    assert!(kinds(&lines[2]).iter().any(|(_, kind)| *kind == TokenKind::Link), "{:?}", kinds(&lines[2]));
+    assert!(
+        kinds(&lines[0])
+            .iter()
+            .all(|(_, kind)| *kind == TokenKind::Heading),
+        "{:?}",
+        kinds(&lines[0])
+    );
+    assert!(
+        kinds(&lines[2])
+            .iter()
+            .any(|(_, kind)| *kind == TokenKind::Link),
+        "{:?}",
+        kinds(&lines[2])
+    );
 }

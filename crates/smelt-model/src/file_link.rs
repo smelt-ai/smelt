@@ -125,7 +125,11 @@ mod tests {
             "data:text/plain,hi",
             "  ",
         ] {
-            assert_eq!(parse_file_link(target, Some("/p"), PathStyle::Posix), None, "{target}");
+            assert_eq!(
+                parse_file_link(target, Some("/p"), PathStyle::Posix),
+                None,
+                "{target}"
+            );
         }
         // 没有 cwd 补不全的相对路径不猜。
         assert_eq!(parse_file_link("docs/a.md", None, PathStyle::Posix), None);
@@ -134,7 +138,13 @@ mod tests {
     #[test]
     fn colon_line_refs_become_a_line_fragment() {
         let parsed = parse_file_link("src/main.rs:10:5", Some("/p"), PathStyle::Posix).unwrap();
-        assert_eq!(parsed, FileLink { path: "/p/src/main.rs".into(), fragment: "L10".into() });
+        assert_eq!(
+            parsed,
+            FileLink {
+                path: "/p/src/main.rs".into(),
+                fragment: "L10".into()
+            }
+        );
         assert_eq!(parsed.line(), Some(10));
         assert_eq!(
             parse_file_link("a.rs#L7-L9", Some("/p"), PathStyle::Posix)
