@@ -46,6 +46,19 @@ DEVELOPMENT_TEAM = YOUR_TEAM_ID
 PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile.yourname
 ```
 
+A free Apple ID (Personal Team) works too, with three limits: it cannot sign
+the push notification entitlement, so also add
+
+```xcconfig
+SMELT_PUSH_CAPABILITY = NO
+```
+
+(the build then signs without push and shows push as not configured); its
+provisioning profile expires after 7 days; and it can register only a few
+Bundle IDs per week. Install and renew with `scripts/install-ios-profile.sh`
+from the repository root, rerunning it before the 7 days are up. Paid teams'
+development profiles last a year.
+
 `Developer.xcconfig` is ignored by Git, so developers can install independent
 copies without changing `project.pbxproj`. Keep the same Bundle ID to preserve
 that developer build's Keychain pairing data across upgrades.
