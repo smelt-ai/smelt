@@ -23,7 +23,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "611b55
 gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "611b55e331170ca375214d580b6c5409db858f83" }
 # 仅用于 SessionId 这一个类型（acp_session_id 字段/存档边界），协议本身的连接
 # 驱动已经不在这层了。3.x 默认 feature 全关，这里一个都不需要。
-agent-client-protocol = "=3.4.0"
+agent-client-protocol = "=3.6.0"
 smol = "2"
 uuid = { version = "1", features = ["v4"] }
 # ACP 对话粘贴图片：协议要 base64 后的字节（见 PromptImage）。

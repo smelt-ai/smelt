@@ -64,7 +64,7 @@ notify = "8"
 # project-report.md 第 5 节）。官方 SDK（Apache-2.0），executor 无关，锁 3.4 防漂移。
 # 这里只用稳定 schema 类型（SessionId）。线协议由 smelt-core 握手钉在 V1；
 # crate 大版本升级不等于协商 wire v2。
-agent-client-protocol = "=3.4.0"
+agent-client-protocol = "=3.6.0"
 # Git 状态改用文件监听而非轮询：macOS 走 FSEvents，仓库一有变化就标脏触发刷新。
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
