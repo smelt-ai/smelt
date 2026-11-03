@@ -1436,6 +1436,8 @@ enum RenameTarget {
     /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
     History {
+        /// 存档在哪台机器上。
+        runtime: RuntimeKey,
         agent: settings::HistorySourceKind,
         profile_id: Option<String>,
         cwd: String,
@@ -2455,7 +2457,7 @@ struct Workspace {
     /// `Some(profile_id)`；`history_agent` 这时候是该 profile 底层接的种类。
     history_profile: Option<String>,
     /// 上一次渲染历史时使用的项目根。项目切换后在下一次历史渲染前失效旧详情。
-    history_project_root: Option<String>,
+    history_project_root: Option<ProjectRef>,
     /// 调试 HUD 开关（Cmd+Shift+F 切换），见 `overlay::debug_hud`。
     debug_hud: bool,
     /// 退出确认拦截弹窗开关

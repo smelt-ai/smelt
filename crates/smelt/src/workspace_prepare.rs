@@ -144,7 +144,7 @@ impl Workspace {
                     }));
                 self.history_filter = Some(state);
             }
-            let cwd = self.active_local_project_root(cx);
+            let cwd = self.active_project_ref(cx);
             if self.history_project_root.as_ref() != cwd.as_ref() {
                 self.history_project_root = cwd.clone();
                 self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
@@ -152,10 +152,10 @@ impl Workspace {
                 self.history_detail_list_state.reset(0);
             }
             if let Some(root) = cwd {
-                let (agent, pid) = self.history_source(Some(root.as_str()), cx);
+                let (agent, pid) = self.history_source(Some(&root), cx);
                 let tabs = crate::session_history::history_source_tabs(
-                    self.history_engine_override(Some(root.as_str()), cx),
-                    crate::settings::agent_host_settings(&crate::RuntimeKey::Local, cx)
+                    self.history_engine_override(Some(&root), cx),
+                    crate::settings::agent_host_settings(&root.runtime, cx)
                         .profiles
                         .iter()
                         .cloned(),

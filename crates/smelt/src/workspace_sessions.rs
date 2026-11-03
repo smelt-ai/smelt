@@ -3,6 +3,8 @@
 use super::*;
 
 pub(crate) struct AcpResumeRequest {
+    /// 存档在哪台机器上，续接也开在那里。
+    pub runtime: RuntimeKey,
     pub agent: settings::ConversationAgentKind,
     pub launch_override: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
     pub profile_id: Option<String>,
@@ -244,7 +246,7 @@ impl Workspace {
                             saved.history_session_id.as_ref(),
                             agent_definition_id.as_deref(),
                         ) {
-                            crate::session_history::remember_history_agent(agent.into(),
+                            crate::session_history::remember_history_agent(&key, agent.into(),
                                 saved.profile_id.as_deref(),
                                 &resume_id.to_string(),
                                 definition_id, cx);
@@ -565,7 +567,7 @@ impl Workspace {
         )
     }
 
-    /// 活动项目在远程运行时上时，只支持本机的面板（插件、历史）该说的话。不能说成
+    /// 活动项目在远程运行时上时，只支持本机的插件面板该说的话。不能说成
     /// 「没有项目」：项目明明打开着，只是在另一台机器上。
     pub(crate) fn remote_project_notice(&self, cx: &App) -> Option<String> {
         let project = self.active_project_ref(cx)?;
@@ -1388,12 +1390,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let AcpResumeRequest {
+            runtime: runtime_key,
             agent,
             launch_override,
             profile_id,
             cwd,
             resume_id,
         } = request;
+        let Some(runtime) = crate::runtimes::runtime(&runtime_key, cx) else {
+            self.report_background_error("这台机器已经移除，没法在上面继续这段对话");
+            return;
+        };
         // 已经开着的必须是**这一条**历史会话（比对 agent + cwd + 具体 session id），
         // 不能只认 agent+cwd——同项目同 agent 可能同时开着好几条不同的历史会话，
         // 之前只按 agent+cwd 找，点哪条「继续」都会跳到"第一个凑巧匹配的"那条。
@@ -1412,32 +1419,37 @@ impl Workspace {
 
         // 续接必须按原来的智能体定义启动：space 目录或历史绑定都能认出主人。
         // 只认 space 的话，项目里开的智能体对话会退化成裸引擎，插件和人设全丢。
-        let definition =
-            smelt_model::agent_paths::agent_definition_id_for_space(std::path::Path::new(&cwd))
-                .or_else(|| {
-                    // 历史列表加载时运行时一并给了「这段会话属于哪个智能体」。
-                    self.history_agent_bindings
-                        .get(&crate::session_history::session_list_key(
-                            agent.into(),
-                            profile_id.as_deref(),
-                            &cwd,
-                        ))
-                        .and_then(|bindings| bindings.get(&resume_id).cloned())
-                })
-                .and_then(|id| settings::agent_definition(&RuntimeKey::Local, &id, cx));
-        // 历史会话只在本机列出、在本机续接。
-        let launch = launch_override
-            .unwrap_or_else(|| settings::acp_launch_for(&RuntimeKey::Local, agent, cx));
+        let project = ProjectRef {
+            runtime: runtime_key.clone(),
+            root: cwd.clone(),
+        };
+        let definition = crate::workspace_view::space_agent_id(&project, cx)
+            .or_else(|| {
+                // 历史列表加载时运行时一并给了「这段会话属于哪个智能体」。
+                self.history_agent_bindings
+                    .get(&crate::session_history::session_list_key(
+                        &runtime_key,
+                        agent.into(),
+                        profile_id.as_deref(),
+                        &cwd,
+                    ))
+                    .and_then(|bindings| bindings.get(&resume_id).cloned())
+            })
+            .and_then(|id| settings::agent_definition(&runtime_key, &id, cx));
+        // 启动命令、初始配置都按存档所在那台机器的设置。
+        let launch =
+            launch_override.unwrap_or_else(|| settings::acp_launch_for(&runtime_key, agent, cx));
         let initial_config = if definition.is_some() {
-            settings::initial_agent_conversation_config_for(&RuntimeKey::Local, agent, cx)
+            settings::initial_agent_conversation_config_for(&runtime_key, agent, cx)
         } else {
-            settings::initial_acp_config_for(&RuntimeKey::Local, agent, &[], cx)
+            settings::initial_acp_config_for(&runtime_key, agent, &[], cx)
         };
         // 用户给这段对话起的名字在运行时，建好后随工作区目录推来（按 provider 身份现算）。
         let custom_title = None;
         let agent_definition_id = definition.map(|definition| definition.id);
         if let Some(id) = agent_definition_id.as_deref() {
             crate::session_history::remember_history_agent(
+                &runtime_key,
                 agent.into(),
                 profile_id.as_deref(),
                 &resume_id,
@@ -1445,7 +1457,6 @@ impl Workspace {
                 cx,
             );
         }
-        let runtime = crate::runtimes::Runtime::local();
         let view_profile_id = profile_id;
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
@@ -1494,6 +1505,7 @@ impl Workspace {
     /// store 恢复原会话。profile 的环境变量沿用历史页当前 tab 的 ACP 配置。
     pub fn resume_cli_session(
         &mut self,
+        runtime: RuntimeKey,
         agent: settings::HistorySourceKind,
         launch_override: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
         cwd: String,
@@ -1512,9 +1524,13 @@ impl Workspace {
                 command = format!("{name}={} {command}", shell_quote(&value));
             }
         }
-        // 历史页读的是本机运行时的会话存档。
+        // 存档在哪台机器上，CLI 就在哪台机器上恢复。
+        let Some(runtime) = crate::runtimes::runtime(&runtime, cx) else {
+            self.report_background_error("这台机器已经移除，没法在上面继续这段对话");
+            return;
+        };
         self.add_session_with_launch(
-            crate::runtimes::Runtime::local(),
+            runtime,
             Some(cwd),
             Some(settings::LaunchEntry {
                 label: format!("{} TUI", agent.short_label()),
@@ -2715,15 +2731,19 @@ impl Workspace {
                 }
             }
             RenameTarget::History {
+                runtime,
                 agent,
                 profile_id,
                 cwd,
                 resume_id,
                 ..
             } => {
-                // 历史页目前只读本机运行时的存档。
+                let Some(runtime) = crate::runtimes::runtime(&runtime, cx) else {
+                    self.report_background_error("这台机器已经移除，改不了名字");
+                    return;
+                };
                 self.set_history_custom_title(
-                    &crate::runtimes::Runtime::local(),
+                    &runtime,
                     agent,
                     profile_id,
                     cwd,
@@ -2761,7 +2781,8 @@ impl Workspace {
             return;
         }
 
-        let key = session_history::session_list_key(agent, profile_id.as_deref(), &cwd);
+        let key =
+            session_history::session_list_key(runtime.key(), agent, profile_id.as_deref(), &cwd);
         if let Some((_, list)) = self.session_list.get_mut(&key) {
             let mut updated = list.sessions.as_ref().clone();
             for session in &mut updated {
@@ -2799,6 +2820,7 @@ impl Workspace {
             return;
         };
         crate::session_history::remember_history_agent(
+            session.runtime(cx).key(),
             view.agent_kind().into(),
             view.profile_id(),
             &resume_id.to_string(),
