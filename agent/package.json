@@ -1,5 +1,5 @@
 {
-  "name": "@smelt-ai/pi-agent",
+  "name": "@smelt-ai/agent",
   "version": "0.4.9",
   "smeltProtocol": 1,
   "private": true,
@@ -16,6 +16,8 @@
     "production-smoke": "bun scripts/production-smoke.ts"
   },
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.78.0",
+    "@agentclientprotocol/codex-acp": "1.12.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-mcp": "1.4.0",

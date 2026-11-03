@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	SMELT_PROTOCOL_ENV,
 	checksDaemonProtocol,
+	embeddedAdapterSpecs,
 	parseCompiledCommand,
 	protocolMismatch,
 } from "../src/compiled-command.ts";
@@ -29,8 +30,40 @@ describe("compiled command router", () => {
 		expect(parseCompiledCommand(["bun", "/src/compiled-main.ts", "mcp-gateway"])).toEqual({ kind: "gateway" });
 	});
 
+	// 复现：Windows 上虚拟脚本是 B:/~BUN/root/...，没认出来时子命令被当成 Pi 的 RPC 参数。
+	test("drops the Windows bunfs entry", () => {
+		for (const entry of ["B:/~BUN/root/smelt-pi.exe", "B:\\~BUN\\root\\smelt-pi.exe"]) {
+			expect(parseCompiledCommand(["C:\\smelt\\smelt-pi.exe", entry, "acp-claude", "--version"])).toEqual({
+				kind: "acp-claude",
+				args: ["--version"],
+			});
+			expect(parseCompiledCommand(["smelt-pi.exe", entry, "auth", "list"])).toEqual({ kind: "auth", args: ["list"] });
+		}
+	});
+
 	test("a flag in argv[1] is a user argument", () => {
 		expect(parseCompiledCommand(["smelt-pi", "--offline"])).toEqual({ kind: "rpc", args: ["--offline"] });
+	});
+
+	test("acp adapters drop the subcommand word", () => {
+		expect(parseCompiledCommand(["bun", "/$bunfs/root/smelt-pi", "acp-claude"])).toEqual({
+			kind: "acp-claude",
+			args: [],
+		});
+		expect(parseCompiledCommand(["bun", "/$bunfs/root/smelt-pi", "acp-codex", "--version"])).toEqual({
+			kind: "acp-codex",
+			args: ["--version"],
+		});
+		expect(parseCompiledCommand(["smelt-pi", "acp-adapters"])).toEqual({ kind: "acp-adapters" });
+	});
+
+	test("the adapter probe reports the versions pinned in package.json", () => {
+		const specs = embeddedAdapterSpecs({
+			"@agentclientprotocol/claude-agent-acp": "1.2.3",
+			"@agentclientprotocol/codex-acp": "4.5.6",
+			unrelated: "9.9.9",
+		});
+		expect(specs).toEqual(["@agentclientprotocol/claude-agent-acp@1.2.3", "@agentclientprotocol/codex-acp@4.5.6"]);
 	});
 });
 
@@ -55,5 +88,8 @@ describe("daemon protocol", () => {
 		expect(checksDaemonProtocol(parse("auth", "list"))).toBe(true);
 		expect(checksDaemonProtocol(parse("mcp", "login", "figma"))).toBe(true);
 		expect(checksDaemonProtocol(parse("gateway"))).toBe(false);
+		expect(checksDaemonProtocol(parse("acp-claude"))).toBe(false);
+		expect(checksDaemonProtocol(parse("acp-codex"))).toBe(false);
+		expect(checksDaemonProtocol(parse("acp-adapters"))).toBe(false);
 	});
 });

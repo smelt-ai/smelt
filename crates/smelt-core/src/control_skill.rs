@@ -1,4 +1,4 @@
-//! 教智能体用 `smelt` 命令行的技能现在随 smelt-pi 发布（`packages/pi-agent/skills/smelt`），
+//! 教智能体用 `smelt` 命令行的技能现在随 smelt-pi 发布（`agent/skills/smelt`），
 //! 智能体勾选了才传给 Pi。以前每次启动都把它写进 `~/.agents/skills/smelt`，那是 Pi、
 //! Codex、Cursor 等共用的发现目录，等于替用户全局装上了。这里把那份旧副本清掉。
 //!

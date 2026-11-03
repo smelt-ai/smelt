@@ -36,7 +36,7 @@ const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
 const SMELT_CODEMODE_COMMAND: &str = "smelt-codemode";
-/// 让会话重读 models.json 的扩展命令（`packages/pi-agent/src/model-refresh.ts`）。
+/// 让会话重读 models.json 的扩展命令（`agent/src/model-refresh.ts`）。
 const SMELT_REFRESH_MODELS_COMMAND: &str = "smelt-refresh-models";
 const SMELT_CODEMODE_WIDGET: &str = "smelt-codemode";
 
@@ -4541,7 +4541,7 @@ fn absolute_tool_path(path: &str, cwd: Option<&str>) -> String {
         .into_owned()
 }
 
-/// 与 `packages/pi-agent/src/elicitation.ts` 的 `MULTI_SELECT_TITLE_MARK` 同一份。
+/// 与 `agent/src/elicitation.ts` 的 `MULTI_SELECT_TITLE_MARK` 同一份。
 const MULTI_SELECT_TITLE_MARK: &str = "\u{200B}\u{200C}\u{200B}";
 
 fn strip_multi_select_title(title: &str) -> (bool, String) {
@@ -8611,7 +8611,7 @@ mod tests {
     /// 从 Smelt 的统一运行时入口走完受管 Bun -> Pi RPC -> Ready，
     /// 避免逻辑命令意外落回 ACP parser 却只有单元测试通过。
     #[test]
-    #[ignore = "需要先编出 smelt-pi（scripts/build-smelt-pi.sh）"]
+    #[ignore = "需要先编出 smelt-pi（agent/scripts/build-smelt-pi.sh）"]
     fn managed_native_driver_reaches_ready() {
         let agent_dir =
             std::env::temp_dir().join(format!("smelt-pi-rpc-driver-{}", uuid::Uuid::new_v4()));
@@ -8655,7 +8655,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "需要先编出 smelt-pi（scripts/build-smelt-pi.sh）"]
+    #[ignore = "需要先编出 smelt-pi（agent/scripts/build-smelt-pi.sh）"]
     fn missing_native_session_is_classified_for_fresh_fallback() {
         let agent_dir = std::env::temp_dir().join(format!(
             "smelt-pi-rpc-missing-session-{}",

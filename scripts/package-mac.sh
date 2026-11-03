@@ -110,9 +110,9 @@ if [[ ! -x "$PI_BIN" || ! -f "$PI_WASM" ]]; then
   echo "✗ 缺少 smelt-pi 或 photon_rs_bg.wasm。先 make smelt-pi，或给本脚本加 --build。" >&2
   exit 1
 fi
-if [[ -d "$ROOT/packages/pi-agent/src" ]]; then
-  newer="$(find "$ROOT/packages/pi-agent/src" "$ROOT/packages/pi-agent/skills" "$ROOT/packages/pi-agent/package.json" "$ROOT/packages/pi-agent/bun.lock" \
-    "$ROOT/scripts/compile-smelt-pi.ts" "$ROOT/scripts/build-smelt-pi.sh" "$ROOT/scripts/fetch-bun.sh" \
+if [[ -d "$ROOT/agent/src" ]]; then
+  newer="$(find "$ROOT/agent/src" "$ROOT/agent/skills" "$ROOT/agent/package.json" "$ROOT/agent/bun.lock" \
+    "$ROOT/agent/scripts/compile-smelt-pi.ts" "$ROOT/agent/scripts/build-smelt-pi.sh" "$ROOT/scripts/fetch-bun.sh" \
     -type f -newer "$PI_BIN" -print -quit 2>/dev/null || true)"
   if [[ -n "$newer" ]]; then
     echo "✗ smelt-pi 比源码旧（${newer}）。先 make smelt-pi。" >&2

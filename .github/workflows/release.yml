@@ -34,7 +34,7 @@ jobs:
             scripts/package-mac.sh \
             scripts/package-linux.sh \
             scripts/version.sh \
-            scripts/build-smelt-pi.sh \
+            agent/scripts/build-smelt-pi.sh \
             scripts/fetch-bun.sh \
             scripts/entitlements.plist \
             scripts/jit-entitlements.plist \
@@ -506,7 +506,7 @@ jobs:
       # GitHub 的 windows-latest 默认是 PowerShell，仓库里的 Bun 脚本是 bash。
       - name: Build smelt-pi
         shell: bash
-        run: bash scripts/build-smelt-pi.sh --out target/smelt-pi
+        run: bash agent/scripts/build-smelt-pi.sh --out target/smelt-pi
 
       # Inno Setup 7 自带简体中文界面。钉版本、对哈希，不用 choco 装「最新版」。
       - name: Install Inno Setup

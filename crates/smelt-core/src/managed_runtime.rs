@@ -1,7 +1,8 @@
 //! 受管 Bun 仍按 generation 下载到 `~/.smelt/runtime`。
 //! Pi 不再物化源码：跑的是 `~/.smelt/bin/smelt-pi` 指向的那份编译好的 smelt-pi（见 `pi_image`）。
 //!
-//! Bun 只留给 MCP 预设的 `bun x` 和 Claude/Codex 的 `bunx`。固定入口指向当前
+//! Bun 只留给 MCP 预设的 `bun x`，以及没装本机 CLI 或用了自定义命令时 Claude/Codex 的
+//! `bunx`（装了本机 CLI 时跑 smelt-pi 里内置的适配器，见 `acp_conn`）。固定入口指向当前
 //! generation，`mcp.json` 里写的还是 `MANAGED_BUN_LAUNCHER_HOME_PATH`。
 
 use crate::runtime_generation::{
@@ -545,7 +546,7 @@ pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
     Ok((executable.clone(), photon_wasm(&executable).is_file()))
 }
 
-fn locate_smelt_pi() -> Result<PathBuf, String> {
+pub(crate) fn locate_smelt_pi() -> Result<PathBuf, String> {
     let home = smelt_paths::smelt_home().ok_or("找不到 home 目录")?;
     locate_smelt_pi_in(&home.join("bin"))
 }
@@ -778,10 +779,10 @@ mod tests {
     #[test]
     fn packaged_version_matches_package_json_and_oauth_stays_static() {
         let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../../../packages/pi-agent/package.json")).unwrap();
+            serde_json::from_str(include_str!("../../../agent/package.json")).unwrap();
         assert_eq!(manifest["version"], pi_runtime_version());
-        let main = include_str!("../../../packages/pi-agent/src/main.ts");
-        let auth = include_str!("../../../packages/pi-agent/src/auth-main.ts");
+        let main = include_str!("../../../agent/src/main.ts");
+        let auth = include_str!("../../../agent/src/auth-main.ts");
         assert!(main.contains("registerBunOAuthFlows()"));
         assert!(auth.contains("registerBunOAuthFlows()"));
         let fetch = include_str!("../../../scripts/fetch-bun.sh");

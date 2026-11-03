@@ -93,7 +93,7 @@ make dist-build             # 编译 release 并打包出 dist/Smelt.dmg
 make help                   # 查看全部构建目标
 ```
 
-Windows 的安装包在 Windows 上编，不走 `make dist-build`。发版任务是 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再跑 `bash scripts/build-smelt-pi.sh`。见 [`docs/release.md`](docs/release.md)。
+Windows 的安装包在 Windows 上编，不走 `make dist-build`。发版任务是 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再跑 `bash agent/scripts/build-smelt-pi.sh`。见 [`docs/release.md`](docs/release.md)。
 
 跑测试与类型检查：
 

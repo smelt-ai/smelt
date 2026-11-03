@@ -15,7 +15,7 @@ process.env.SMELT_SESSION_ID = "pi-status-test";
 process.env.SMELT_SOCK = path.join(dir, "smeltd.sock");
 
 // 资源在 Rust crate 里，不在本包的类型解析范围内，按路径动态加载。
-const extensionPath = path.resolve(import.meta.dir, "../../../crates/smeltd/assets/pi-status-extension.ts");
+const extensionPath = path.resolve(import.meta.dir, "../../crates/smeltd/assets/pi-status-extension.ts");
 const { default: statusExtension } = await import(extensionPath);
 
 type Handler = (event?: unknown) => unknown;

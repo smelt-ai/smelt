@@ -1231,8 +1231,16 @@ pub fn spawn_acp(
                 // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
                 // 失败的真实原因都在 stderr 里，别让用户猜）。
                 let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
-                // 先把 bunx / bun 指到应用里的 Bun，再进连接循环。
-                let (cmd, managed_bun) = {
+                // 装了本机 CLI 就跑 smelt-pi 里内置的适配器，否则把 bunx / bun 指到应用里的
+                // Bun，再进连接循环。改写只在这条连接线程里生效，存下来的启动规格不变。
+                let embedded = resolve_embedded_adapter_command(&launch.launch, &launch.ephemeral_env);
+                let (cmd, managed_bun) = if let Some(cmd) = embedded {
+                    crate::app_log::info(
+                        "acp",
+                        &format!("会话 {} 用 smelt-pi 内置适配器：{cmd}", launch.sid),
+                    );
+                    (cmd, None)
+                } else {
                     let tx = event_tx.clone();
                     match resolve_runtime_command_with_bun(&launch.launch.command, &|msg| {
                         let _ = tx.try_send(ConversationEvent::StartupProgress(msg.to_string()));
@@ -3083,7 +3091,10 @@ fn inject_local_adapter_cli_path(
     user_env: &mut BTreeMap<String, String>,
     search_path: &str,
 ) {
-    if !command.contains(adapter_package)
+    let runs_embedded = EMBEDDED_ADAPTERS.iter().any(|adapter| {
+        adapter.cli_env == env_var && command.split_whitespace().last() == Some(adapter.subcommand)
+    });
+    if !(command.contains(adapter_package) || runs_embedded)
         || user_env.contains_key(env_var)
         || std::env::var_os(env_var).is_some()
     {
@@ -3092,6 +3103,131 @@ fn inject_local_adapter_cli_path(
     if let Some(path) = resolve_in_path(program, search_path) {
         user_env.insert(env_var.to_string(), path);
     }
+}
+
+/// 编进 smelt-pi 的官方 ACP 适配器。
+///
+/// 启动命令仍是 `bunx --bun 包@版本`：设置和会话里存的都是它，新客户端也会把它发给已经
+/// 冻结、不认识子命令的旧运行时，所以不换命令，由运行时在启动这一刻决定怎么跑。
+struct EmbeddedAdapter {
+    agent: ConversationAgentKind,
+    subcommand: &'static str,
+    cli_env: &'static str,
+    cli_program: &'static str,
+}
+
+const EMBEDDED_ADAPTERS: &[EmbeddedAdapter] = &[
+    EmbeddedAdapter {
+        agent: ConversationAgentKind::Claude,
+        subcommand: "acp-claude",
+        cli_env: "CLAUDE_CODE_EXECUTABLE",
+        cli_program: "claude",
+    },
+    EmbeddedAdapter {
+        agent: ConversationAgentKind::Codex,
+        subcommand: "acp-codex",
+        cli_env: "CODEX_PATH",
+        cli_program: "codex",
+    },
+];
+
+/// 能用内置适配器时返回改写后的命令；否则 `None`，照旧走 `bunx`。
+///
+/// 只接管逐字的出厂默认命令（可带 `VAR=value` 前缀）：别的版本、额外参数都是用户自定义。
+/// 必须已有 CLI：适配器在编译产物里找不到自己依赖的原生二进制，没有 CLI 时让 `bunx`
+/// 连同原生包一起下载。
+fn plan_embedded_adapter_command(
+    launch: &ConversationLaunchSpec,
+    ephemeral_env: &BTreeMap<String, String>,
+    search_path: &str,
+    process_has_env: &dyn Fn(&str) -> bool,
+    smelt_pi: impl FnOnce() -> Option<(String, Vec<String>)>,
+) -> Option<String> {
+    let tokens: Vec<&str> = launch.command.split_whitespace().collect();
+    let program_at = tokens
+        .iter()
+        .position(|token| crate::workspace_override::split_env_assignment(token).is_none())?;
+    let (prefix, command) = tokens.split_at(program_at);
+    let command = command.join(" ");
+    let adapter = EMBEDDED_ADAPTERS.iter().find(|adapter| {
+        adapter
+            .agent
+            .managed_adapter()
+            .is_some_and(|managed| managed.current_command() == command)
+    })?;
+    let has_explicit_cli = prefix.iter().any(|token| {
+        crate::workspace_override::split_env_assignment(token)
+            .is_some_and(|(name, value)| name == adapter.cli_env && !value.is_empty())
+    }) || launch
+        .env
+        .iter()
+        .any(|(name, value)| name == adapter.cli_env && !value.is_empty())
+        || ephemeral_env
+            .get(adapter.cli_env)
+            .is_some_and(|value| !value.is_empty())
+        || process_has_env(adapter.cli_env);
+    if !has_explicit_cli && resolve_in_path(adapter.cli_program, search_path).is_none() {
+        return None;
+    }
+    let (executable, bundled) = smelt_pi()?;
+    let package = adapter.agent.managed_adapter()?.current_release().package;
+    // 只认包名、不比版本：跑的是这份 smelt-pi 编进来的那一版。
+    let has_adapter = bundled.iter().any(|spec| {
+        spec.rsplit_once('@')
+            .is_some_and(|(name, _version)| name == package)
+    });
+    // 启动命令按空白分词，带空格的路径传不过去。
+    if !has_adapter || executable.split_whitespace().count() != 1 {
+        return None;
+    }
+    let mut rewritten: Vec<&str> = prefix.to_vec();
+    rewritten.push(&executable);
+    rewritten.push(adapter.subcommand);
+    Some(rewritten.join(" "))
+}
+
+fn resolve_embedded_adapter_command(
+    launch: &ConversationLaunchSpec,
+    ephemeral_env: &BTreeMap<String, String>,
+) -> Option<String> {
+    plan_embedded_adapter_command(
+        launch,
+        ephemeral_env,
+        &extended_search_path(),
+        &|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()),
+        || {
+            let executable = crate::managed_runtime::locate_smelt_pi().ok()?;
+            let bundled = embedded_adapter_specs(&executable);
+            Some((executable.to_str()?.to_string(), bundled))
+        },
+    )
+}
+
+/// 这份 smelt-pi 带着哪些适配器。smelt-pi 和守护分开发布，守护可能遇到更旧的一份：
+/// 不认识 `acp-adapters` 的旧版不会输出这份清单，也就不认识 `acp-claude`，这时走 `bunx`。
+/// 发布目录按内容指纹命名、发布后不再改动，同一路径的结果可以一直用；探测失败不缓存。
+fn embedded_adapter_specs(executable: &std::path::Path) -> Vec<String> {
+    static CACHE: Mutex<Option<(std::path::PathBuf, Vec<String>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((path, specs)) = cache.as_ref()
+        && path == executable
+    {
+        return specs.clone();
+    }
+    let Ok(output) = run_probe_command(executable, "acp-adapters") else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let specs: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    *cache = Some((executable.to_path_buf(), specs.clone()));
+    specs
 }
 
 /// Ask Claude's adapter to include raw SDK messages so usage/cache-token
@@ -3988,10 +4124,14 @@ fn inspect_runtime_path(program: &str, path: Option<std::path::PathBuf>) -> Runt
 /// 「检测中」。stdout / stderr 各由一条线程边跑边读，输出再多也不会把子进程卡在写
 /// 管道上；进程退出由 `wait` 告知，超过上限便杀掉并收回。
 fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, String> {
+    run_probe_command(path, "--version")
+}
+
+fn run_probe_command(path: &std::path::Path, arg: &str) -> Result<std::process::Output, String> {
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
     let mut command = std::process::Command::new(path);
     command
-        .arg("--version")
+        .arg(arg)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4002,7 +4142,7 @@ fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, S
     crate::login_env::apply_login_environment(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("无法执行 `--version`：{error}"))?;
+        .map_err(|error| format!("无法执行 `{arg}`：{error}"))?;
     let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
     let stdout = read_pipe_in_background(child.stdout.take());
     let stderr = read_pipe_in_background(child.stderr.take());
@@ -4014,9 +4154,9 @@ fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, S
             let _ = smelt_sys::process::terminate_pid(pid);
         })
     }
-    .map_err(|error| format!("等待 `--version` 失败：{error}"))?;
+    .map_err(|error| format!("等待 `{arg}` 失败：{error}"))?;
     if timed_out.load(Ordering::SeqCst) {
-        return Err("`--version` 检测超时（5 秒）".to_string());
+        return Err(format!("`{arg}` 检测超时（5 秒）"));
     }
     // 子进程已经退出。它派生的后代可能还握着管道，读的一侧也只等到同一个截止。
     let collect = |pipe: std::sync::mpsc::Receiver<Vec<u8>>| {
@@ -4967,6 +5107,259 @@ mod spawn_gate_tests {
             gate.try_write().is_ok(),
             "spawn read permit must be released after the gated section"
         );
+    }
+}
+
+#[cfg(test)]
+mod embedded_adapter_tests {
+    use super::{
+        ConversationAgentKind, auth_required_hint, inject_local_adapter_cli_path,
+        plan_embedded_adapter_command,
+    };
+    use crate::agent_kind::ConversationLaunchSpec;
+    use std::collections::BTreeMap;
+
+    const CLAUDE_SPEC: &str = "@agentclientprotocol/claude-agent-acp@0.78.0";
+    const CODEX_SPEC: &str = "@agentclientprotocol/codex-acp@1.12.0";
+
+    fn spec(command: String) -> ConversationLaunchSpec {
+        ConversationLaunchSpec {
+            command,
+            env: Default::default(),
+        }
+    }
+
+    fn claude_default() -> String {
+        ConversationAgentKind::Claude.default_cmd()
+    }
+
+    /// 一个真实存在、带可执行位的假 CLI 所在目录。
+    struct CliDir(std::path::PathBuf);
+
+    impl CliDir {
+        fn with(program: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "smelt-embedded-adapter-{program}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let name = if cfg!(windows) {
+                format!("{program}.exe")
+            } else {
+                program.to_string()
+            };
+            let path = dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            Self(dir)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for CliDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn plan(launch: &ConversationLaunchSpec, search_path: &str) -> Option<String> {
+        plan_embedded_adapter_command(
+            launch,
+            &BTreeMap::new(),
+            search_path,
+            &|_| false,
+            || {
+                Some((
+                    "/home/me/.smelt/bin/smelt-pi-abc/smelt-pi".to_string(),
+                    vec![CLAUDE_SPEC.to_string(), CODEX_SPEC.to_string()],
+                ))
+            },
+        )
+    }
+
+    #[test]
+    fn default_commands_run_the_embedded_adapter_when_the_cli_exists() {
+        let claude = CliDir::with("claude");
+        assert_eq!(
+            plan(&spec(claude_default()), claude.path()).as_deref(),
+            Some("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude")
+        );
+        let codex = CliDir::with("codex");
+        assert_eq!(
+            plan(&spec(ConversationAgentKind::Codex.default_cmd()), codex.path()).as_deref(),
+            Some("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-codex")
+        );
+    }
+
+    /// 编译产物里找不到适配器自带的原生二进制，没有 CLI 时必须留给 bunx 去下载。
+    #[test]
+    fn no_cli_stays_on_bunx() {
+        let empty = CliDir::with("not-the-cli");
+        assert_eq!(plan(&spec(claude_default()), empty.path()), None);
+    }
+
+    #[test]
+    fn explicit_cli_path_counts_as_having_the_cli() {
+        let empty = CliDir::with("not-the-cli");
+        let prefixed = format!("CLAUDE_CODE_EXECUTABLE=/opt/claude {}", claude_default());
+        assert_eq!(
+            plan(&spec(prefixed), empty.path()).as_deref(),
+            Some("CLAUDE_CODE_EXECUTABLE=/opt/claude /home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude")
+        );
+
+        let mut launch = spec(claude_default());
+        launch
+            .env
+            .insert("CLAUDE_CODE_EXECUTABLE".to_string(), "/opt/claude".to_string());
+        assert!(plan(&launch, empty.path()).is_some());
+
+        let ephemeral = BTreeMap::from([("CODEX_PATH".to_string(), "/opt/codex".to_string())]);
+        assert!(
+            plan_embedded_adapter_command(
+                &spec(ConversationAgentKind::Codex.default_cmd()),
+                &ephemeral,
+                empty.path(),
+                &|_| false,
+                || Some(("/bin/smelt-pi".to_string(), vec![CODEX_SPEC.to_string()])),
+            )
+            .is_some()
+        );
+        assert!(
+            plan_embedded_adapter_command(
+                &spec(claude_default()),
+                &BTreeMap::new(),
+                empty.path(),
+                &|name| name == "CLAUDE_CODE_EXECUTABLE",
+                || Some(("/bin/smelt-pi".to_string(), vec![CLAUDE_SPEC.to_string()])),
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn env_prefix_is_kept() {
+        let claude = CliDir::with("claude");
+        let command = format!("CLAUDE_CONFIG_DIR=~/.claude-work {}", claude_default());
+        assert_eq!(
+            plan(&spec(command), claude.path()).as_deref(),
+            Some("CLAUDE_CONFIG_DIR=~/.claude-work /home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude")
+        );
+    }
+
+    #[test]
+    fn custom_commands_are_left_alone() {
+        let claude = CliDir::with("claude");
+        for command in [
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0".to_string(),
+            format!("{} --verbose", claude_default()),
+            "bunx @agentclientprotocol/claude-agent-acp@0.78.0".to_string(),
+            "claude-agent-acp".to_string(),
+            "copilot --acp --allow-all".to_string(),
+        ] {
+            assert_eq!(plan(&spec(command.clone()), claude.path()), None, "{command}");
+        }
+    }
+
+    /// 更旧的 smelt-pi 没有内置适配器，或者只带了别家的。
+    #[test]
+    fn smelt_pi_without_the_adapter_stays_on_bunx() {
+        let claude = CliDir::with("claude");
+        for bundled in [vec![], vec![CODEX_SPEC.to_string()]] {
+            assert_eq!(
+                plan_embedded_adapter_command(
+                    &spec(claude_default()),
+                    &BTreeMap::new(),
+                    claude.path(),
+                    &|_| false,
+                    || Some(("/bin/smelt-pi".to_string(), bundled.clone())),
+                ),
+                None,
+                "{bundled:?}"
+            );
+        }
+        // 没装 smelt-pi。
+        assert_eq!(
+            plan_embedded_adapter_command(
+                &spec(claude_default()),
+                &BTreeMap::new(),
+                claude.path(),
+                &|_| false,
+                || None,
+            ),
+            None
+        );
+    }
+
+    /// 内置的是哪一版就用哪一版，不要求和启动命令里写的版本一致。
+    #[test]
+    fn bundled_adapter_is_used_whatever_its_version() {
+        let claude = CliDir::with("claude");
+        assert_eq!(
+            plan_embedded_adapter_command(
+                &spec(claude_default()),
+                &BTreeMap::new(),
+                claude.path(),
+                &|_| false,
+                || Some((
+                    "/bin/smelt-pi".to_string(),
+                    vec!["@agentclientprotocol/claude-agent-acp@9.9.9".to_string()]
+                )),
+            )
+            .as_deref(),
+            Some("/bin/smelt-pi acp-claude")
+        );
+    }
+
+    /// 启动命令按空白分词，带空格的路径会被拆坏。
+    #[test]
+    fn smelt_pi_path_with_spaces_stays_on_bunx() {
+        let claude = CliDir::with("claude");
+        assert_eq!(
+            plan_embedded_adapter_command(
+                &spec(claude_default()),
+                &BTreeMap::new(),
+                claude.path(),
+                &|_| false,
+                || Some((
+                    "/home/first last/.smelt/bin/smelt-pi".to_string(),
+                    vec![CLAUDE_SPEC.to_string()]
+                )),
+            ),
+            None
+        );
+    }
+
+    /// 改写后命令里没有包名了，CLI 路径还得注入，否则适配器在 bunfs 里找不到原生二进制。
+    #[test]
+    fn rewritten_command_still_gets_the_cli_path() {
+        let dir = CliDir::with("claude");
+        let mut env = BTreeMap::new();
+        inject_local_adapter_cli_path(
+            "/bin/smelt-pi acp-claude",
+            "@agentclientprotocol/claude-agent-acp",
+            "CLAUDE_CODE_EXECUTABLE",
+            "claude",
+            &mut env,
+            dir.path(),
+        );
+        assert!(env.contains_key("CLAUDE_CODE_EXECUTABLE"));
+    }
+
+    /// 连接失败时拿到的是改写后的命令，登录提示仍要认出是哪家。
+    #[test]
+    fn rewritten_command_keeps_the_right_login_hint() {
+        let claude = auth_required_hint("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-claude");
+        assert!(claude.contains("Claude Code"), "{claude}");
+        let codex = auth_required_hint("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-codex");
+        assert!(codex.contains("codex login"), "{codex}");
     }
 }
 

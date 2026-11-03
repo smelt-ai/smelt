@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 把 packages/pi-agent 编成单个 smelt-pi。
-# 用法：scripts/build-smelt-pi.sh [--target bun-...] [--out dir]
+# 把 agent/ 编成单个 smelt-pi。
+# 用法：agent/scripts/build-smelt-pi.sh [--target bun-...] [--out dir]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/target/smelt-pi"
 TARGET=""
 
@@ -66,14 +66,14 @@ if [[ "$TARGET" == bun-windows-x64 ]]; then
 fi
 
 (
-  cd "$ROOT/packages/pi-agent"
+  cd "$ROOT/agent"
   "$BUN" install --frozen-lockfile
 )
 # --splitting 在 compile-smelt-pi.ts 里打开。Bun 1.4.3 上图片 worker 和
 # codemode worker 都过了冒烟。说明符改写也在那个脚本里：相对的 ./src 路径仍然找不到。
-"$BUN" "$ROOT/scripts/compile-smelt-pi.ts" "$OUT_BIN" "$TARGET"
+"$BUN" "$ROOT/agent/scripts/compile-smelt-pi.ts" "$OUT_BIN" "$TARGET"
 
-WASM="$ROOT/packages/pi-agent/node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"
+WASM="$ROOT/agent/node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"
 if [[ ! -f "$WASM" ]]; then
   echo "✗ 找不到 photon_rs_bg.wasm" >&2
   exit 1
@@ -84,10 +84,10 @@ if [[ "$TARGET" != bun-windows-x64 ]]; then
 fi
 # 内置技能跟 smelt-pi 一起发布，智能体勾选了才用 --skill 传进去，不进 Pi 的自动发现。
 rm -rf "$OUT/skills"
-cp -R "$ROOT/packages/pi-agent/skills" "$OUT/skills"
+cp -R "$ROOT/agent/skills" "$OUT/skills"
 
 read -r platform arch suffix <<<"$(native_layout "$TARGET")"
-node_src="$ROOT/packages/pi-agent/node_modules/@earendil-works/pi-tui/native/${platform}/prebuilds/${platform}-${arch}/${platform}-platform${suffix}.node"
+node_src="$ROOT/agent/node_modules/@earendil-works/pi-tui/native/${platform}/prebuilds/${platform}-${arch}/${platform}-platform${suffix}.node"
 native_dest="$OUT/native/${platform}/prebuilds/${platform}-${arch}"
 if [[ -f "$node_src" ]]; then
   mkdir -p "$native_dest"
@@ -96,6 +96,6 @@ fi
 
 host="$(host_target)"
 if [[ "$TARGET" == "$host" ]]; then
-  "$BUN" "$ROOT/scripts/compiled-smoke.ts" "$OUT_BIN"
+  "$BUN" "$ROOT/agent/scripts/compiled-smoke.ts" "$OUT_BIN"
 fi
 printf '%s\n' "$OUT_BIN"

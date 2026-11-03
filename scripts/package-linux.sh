@@ -33,8 +33,8 @@ if [[ ! -x "$bin" || ! -f "$wasm" ]]; then
   echo "✗ 缺少 smelt-pi 或 photon_rs_bg.wasm" >&2
   exit 1
 fi
-newer="$(find packages/pi-agent/src packages/pi-agent/skills packages/pi-agent/package.json packages/pi-agent/bun.lock \
-  scripts/compile-smelt-pi.ts scripts/build-smelt-pi.sh scripts/fetch-bun.sh \
+newer="$(find agent/src agent/skills agent/package.json agent/bun.lock \
+  agent/scripts/compile-smelt-pi.ts agent/scripts/build-smelt-pi.sh scripts/fetch-bun.sh \
   -type f -newer "$bin" -print -quit || true)"
 if [[ -n "$newer" ]]; then
   echo "✗ smelt-pi 比源码旧：$newer" >&2

@@ -35,7 +35,7 @@ cargo build --bin smeltd
   照样把 shell 养着；重开 GUI 按会话 id 自动 reattach。升级守护是先优雅停机再换
   新版本，不交接 fd，进行中的终端会话和回合会中断。手机和另一台桌面经 iroh 连的也是它。
 - **smelt-pi** —— Pi 运行时单二进制，跑官方 JSONL RPC。`make smelt-pi` 走
-  `scripts/build-smelt-pi.sh`。装到用户机器上是 `~/.smelt/bin/smelt-pi`。受管 Bun
+  `agent/scripts/build-smelt-pi.sh`。装到用户机器上是 `~/.smelt/bin/smelt-pi`。受管 Bun
   在 `~/.smelt/runtime`，只负责按需启动 ACP 适配器和 MCP 服务器。
 
 辅助二进制：`smelt-notify`（agent hook 状态上报，在
@@ -54,7 +54,7 @@ make ios          # scripts/build-ios.sh，在发版 tag 上出 iOS 包
 make dist-build   # macOS dmg
 ```
 
-Linux 运行时包是 `scripts/package-linux.sh`。Windows 安装包不在这些 Make 目标里：发版的 `windows` job 在 `windows-latest` 上执行 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用 `scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`，用 Inno Setup 按 `scripts/windows-installer.iss` 编成 `smelt-<版本>-windows-x86_64-setup.exe`。第一版不签名；桌面的应用内更新下载的就是它。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)，Windows 行为见 [`docs/windows-support.md`](https://github.com/smelt-ai/smelt/blob/main/docs/windows-support.md)。
+Linux 运行时包是 `scripts/package-linux.sh`。Windows 安装包不在这些 Make 目标里：发版的 `windows` job 在 `windows-latest` 上执行 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用 `agent/scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`，用 Inno Setup 按 `scripts/windows-installer.iss` 编成 `smelt-<版本>-windows-x86_64-setup.exe`。第一版不签名；桌面的应用内更新下载的就是它。日期版本号是 `YYYY.MDD.N`（当天第 N 个号，预发布加 `-rc.N`），由 `scripts/release.sh` 取号。规则见 [`docs/release.md`](https://github.com/smelt-ai/smelt/blob/main/docs/release.md)，Windows 行为见 [`docs/windows-support.md`](https://github.com/smelt-ai/smelt/blob/main/docs/windows-support.md)。
 
 两者解耦：`smelt` 可以单独跑（这时终端会话就跟着 GUI 生命周期走），也可以接上
 `smeltd` 拿到跨重启的会话持久化。打包发布时核心二进制会被塞进同一个
@@ -108,7 +108,7 @@ Windows 没有对应的 `package-windows.sh`。安装包由 `.github/workflows/r
 - `scripts/package-mac.sh` —— macOS 打包；`make dist` / `make dist-build` 是入口
 - `scripts/package-linux.sh` —— Linux 运行时 tar.gz
 - `.github/workflows/release.yml` 的 `windows` job —— Windows x86_64 zip，没有单独的打包脚本
-- `scripts/build-smelt-pi.sh` —— 编译 `smelt-pi`
+- `agent/scripts/build-smelt-pi.sh` —— 编译 `smelt-pi`
 - `scripts/build-ios.sh` —— `make ios`
 - `scripts/release.sh` —— 日期版本号 `YYYY.MDD.N`
 - `docs/workspace.md` —— 现行架构

@@ -6,7 +6,7 @@ updates:
       interval: weekly
 
   - package-ecosystem: bun
-    directory: /packages/pi-agent
+    directory: /agent
     schedule:
       interval: weekly
 

@@ -1,17 +1,17 @@
 /**
  * 编译出来的 smelt-pi 必须在没有 node_modules 的目录里走完 RPC 握手。
- * 用法：bun scripts/compiled-smoke.ts <path-to-smelt-pi>
+ * 用法：bun agent/scripts/compiled-smoke.ts <path-to-smelt-pi>
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, copyFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, dirname } from "node:path";
 import { createInterface } from "node:readline";
-import pkg from "../packages/pi-agent/package.json" with { type: "json" };
+import pkg from "../package.json" with { type: "json" };
 
 const source = process.argv[2];
 if (!source) {
-	console.error("用法：bun scripts/compiled-smoke.ts <smelt-pi>");
+	console.error("用法：bun agent/scripts/compiled-smoke.ts <smelt-pi>");
 	process.exit(2);
 }
 
@@ -35,6 +35,33 @@ copyFileSync(source, binary);
 copyFileSync(join(dirname(source), "photon_rs_bg.wasm"), join(dir, "photon_rs_bg.wasm"));
 const { chmodSync } = await import("node:fs");
 chmodSync(binary, 0o755);
+
+// 编进来的适配器要真的能从 bunfs 里加载。`--version` 在两个适配器里都先于拉起 CLI 返回，
+// 不需要本机装 claude / codex。
+for (const [subcommand, name] of [
+	["acp-claude", "@agentclientprotocol/claude-agent-acp"],
+	["acp-codex", "@agentclientprotocol/codex-acp"],
+] as const) {
+	const expected = pkg.dependencies[name];
+	const result = Bun.spawnSync([binary, subcommand, "--version"], { cwd: dir, timeout: 30_000 });
+	const output = `${result.stdout.toString()}${result.stderr.toString()}`;
+	if (result.exitCode !== 0 || !output.includes(expected)) {
+		console.error(`${subcommand} --version 应输出 ${expected}，退出码 ${result.exitCode}：${output}`);
+		rmSync(dir, { recursive: true, force: true });
+		process.exit(1);
+	}
+}
+const adapters = Bun.spawnSync([binary, "acp-adapters"], { cwd: dir, timeout: 30_000 });
+const adapterList = adapters.stdout.toString();
+if (
+	adapters.exitCode !== 0 ||
+	!adapterList.includes(`@agentclientprotocol/claude-agent-acp@${pkg.dependencies["@agentclientprotocol/claude-agent-acp"]}`) ||
+	!adapterList.includes(`@agentclientprotocol/codex-acp@${pkg.dependencies["@agentclientprotocol/codex-acp"]}`)
+) {
+	console.error(`acp-adapters 输出不对，退出码 ${adapters.exitCode}：${adapterList}${adapters.stderr.toString()}`);
+	rmSync(dir, { recursive: true, force: true });
+	process.exit(1);
+}
 
 const probe = spawn(binary, [], {
 	cwd: dir,

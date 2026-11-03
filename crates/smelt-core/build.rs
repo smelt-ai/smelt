@@ -1,5 +1,5 @@
 //! Pi 运行时的版本号和守护与 smelt-pi 之间的约定版本（`smeltProtocol`）都跟
-//! `packages/pi-agent/package.json` 走。
+//! `agent/package.json` 走。
 //!
 //! 源码、`bun.lock` 不再嵌进 Rust 二进制。用户机器上跑的是编译好的 `smelt-pi`。
 
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let package_json = manifest.join("../../packages/pi-agent/package.json");
+    let package_json = manifest.join("../../agent/package.json");
     println!("cargo:rerun-if-changed={}", package_json.display());
 
     let manifest_json: serde_json::Value =
