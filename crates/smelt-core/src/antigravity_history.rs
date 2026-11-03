@@ -117,6 +117,29 @@ pub fn list_conversations(override_dir: Option<&str>, want_cwd: &str) -> Vec<Con
         .collect()
 }
 
+/// agy 给这个会话起的标题。没有这一行、标题还没生成（空串）或库打不开都是 `None`。
+///
+/// agy 第一轮跑完前后才写标题，调用方要在之后的生命周期事件里再问一次。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub fn conversation_title(override_dir: Option<&str>, conversation_id: &str) -> Option<String> {
+    let conn = open_readonly(&summaries_db(override_dir))?;
+    let title: String = conn
+        .query_row(
+            "select title from conversation_summaries where conversation_id = ?1",
+            [conversation_id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+/// 移动端不编译原生 SQLite，见 [`list_conversations`]。
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub fn conversation_title(_override_dir: Option<&str>, _conversation_id: &str) -> Option<String> {
+    None
+}
+
 /// 移动端不编译原生 SQLite（见 Cargo.toml 的目标门），历史页在那边本来就不存在。
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub fn list_conversations(_override_dir: Option<&str>, _want_cwd: &str) -> Vec<ConversationRow> {
@@ -491,5 +514,32 @@ mod tests {
         let uris = r#"["file:///Users/a/one","file:///Users/a/two"]"#;
         assert!(workspace_matches(uris, "/Users/a/one"));
         assert!(workspace_matches(uris, "/Users/a/two"));
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[test]
+    fn 按会话_id_取标题_空标题当没有() {
+        let root = std::env::temp_dir().join(format!("smelt-agy-title-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("conversation_summaries.db");
+        let _ = std::fs::remove_file(&db);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "create table conversation_summaries (conversation_id text primary key, \
+             title text not null default '');
+             insert into conversation_summaries values ('named', '  Scheduled Post  ');
+             insert into conversation_summaries values ('pending', '');",
+        )
+        .unwrap();
+        drop(conn);
+        let dir = root.to_str();
+        assert_eq!(
+            conversation_title(dir, "named").as_deref(),
+            Some("Scheduled Post")
+        );
+        assert_eq!(conversation_title(dir, "pending"), None, "标题还没生成");
+        assert_eq!(conversation_title(dir, "missing"), None);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(conversation_title(dir, "named"), None, "库不存在");
     }
 }

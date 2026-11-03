@@ -61,6 +61,7 @@ flate2 = "1"
 semver = "1"
 
 [dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
 smelt-core = { path = "../smelt-core", features = ["test-support"] }
 tower = { version = "0.5", features = ["util"] }
 
