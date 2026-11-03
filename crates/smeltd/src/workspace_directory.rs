@@ -40,6 +40,13 @@ impl WorkspaceDirectoryReader {
         Self(Arc::new(move || Ok(directory.clone())))
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_fn(
+        read: impl Fn() -> Result<WorkspaceDirectory, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(read))
+    }
+
     pub(crate) fn read(&self) -> Result<WorkspaceDirectory, String> {
         (self.0)()
     }

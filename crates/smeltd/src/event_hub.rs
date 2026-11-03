@@ -17,7 +17,9 @@ use smelt_event_protocol::{
     SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
 
-use super::{AutomationFile, DaemonProjectionSeed, Phase, SessionState};
+use super::{
+    AutomationFile, DaemonProjectionSeed, Phase, SessionState, WorkspaceDirectoryReader,
+};
 
 const MAILBOX_CAPACITY: usize = 256;
 
@@ -34,10 +36,41 @@ struct ProjectionState {
 
 struct ProjectionSnapshotProvider {
     projection: Arc<Mutex<ProjectionState>>,
+    workspace: WorkspaceDirectoryReader,
+}
+
+impl ProjectionSnapshotProvider {
+    /// 守护起来时库读不出来（例：库的形状认不出），缓存里就没有工作区目录，订阅首帧也就
+    /// 不带。库修好以后没有改动可等，所以新订阅进来时再读一次：重连或重启的桌面马上拿到
+    /// 目录、恢复对话，不用重启守护。读库不占投影锁；这期间推出去的更新版本更大，合并时
+    /// 不会被这份盖掉。
+    fn load_missing_workspace(&self) -> Result<(), EventBusError> {
+        let missing = self
+            .projection
+            .lock()
+            .map_err(|_| EventBusError::new("daemon projection lock poisoned"))?
+            .workspace
+            .is_none();
+        if !missing {
+            return Ok(());
+        }
+        let Ok(directory) = self.workspace.read() else {
+            return Ok(());
+        };
+        let mut projection = self
+            .projection
+            .lock()
+            .map_err(|_| EventBusError::new("daemon projection lock poisoned"))?;
+        merge_projection(&mut projection.workspace, Some(projection_event(directory)));
+        Ok(())
+    }
 }
 
 impl SnapshotProvider for ProjectionSnapshotProvider {
     fn snapshot(&self, kind: &SnapshotKind, watermark: u64) -> Result<Snapshot, EventBusError> {
+        if kind.0 == CORE_SNAPSHOT_WORKSPACE {
+            self.load_missing_workspace()?;
+        }
         let projection = self
             .projection
             .lock()
@@ -102,7 +135,8 @@ pub(crate) struct DaemonEventHub {
 }
 
 impl DaemonEventHub {
-    pub(crate) fn new() -> Result<EventHubHandle, String> {
+    /// `workspace`：缓存里还没有工作区目录时，订阅首帧从这里现读。
+    pub(crate) fn new(workspace: WorkspaceDirectoryReader) -> Result<EventHubHandle, String> {
         let mut registry = TopicRegistry::default();
         for descriptor in smelt_event_protocol::core_topic_descriptors()
             .map_err(|error| format!("invalid core topic descriptor: {error}"))?
@@ -113,7 +147,7 @@ impl DaemonEventHub {
         }
         let hub = Arc::new(EventHub::new(registry));
         let projection = Arc::new(Mutex::new(ProjectionState::default()));
-        register_snapshot_providers(&hub, &projection)
+        register_snapshot_providers(&hub, &projection, workspace)
             .map_err(|error| format!("register core snapshot provider: {error}"))?;
         Ok(Arc::new(Self {
             hub,
@@ -625,9 +659,11 @@ enum ProjectionTarget {
 fn register_snapshot_providers(
     hub: &EventHub,
     projection: &Arc<Mutex<ProjectionState>>,
+    workspace: WorkspaceDirectoryReader,
 ) -> Result<(), EventBusError> {
     let projection_provider: Arc<dyn SnapshotProvider> = Arc::new(ProjectionSnapshotProvider {
         projection: Arc::clone(projection),
+        workspace,
     });
     for kind in [
         CORE_SNAPSHOT_SESSIONS,
@@ -762,7 +798,7 @@ mod tests {
 
     #[test]
     fn automation_projection_is_available_to_snapshot_recovery() {
-        let event_hub = DaemonEventHub::new().unwrap();
+        let event_hub = DaemonEventHub::new(WorkspaceDirectoryReader::unavailable()).unwrap();
         let snapshot = AutomationFile {
             revision: 7,
             ..Default::default()
@@ -778,7 +814,7 @@ mod tests {
 
     #[test]
     fn automation_live_projection_omits_run_bodies() {
-        let event_hub = DaemonEventHub::new().unwrap();
+        let event_hub = DaemonEventHub::new(WorkspaceDirectoryReader::unavailable()).unwrap();
         let mut snapshot = AutomationFile {
             revision: 4,
             ..Default::default()

@@ -1001,7 +1001,8 @@ fn new_test_workspace_directory() -> WorkspaceDirectoryReader {
 
 #[cfg(test)]
 pub(crate) fn new_event_hub() -> EventHubHandle {
-    event_hub::DaemonEventHub::new().unwrap()
+    // 测试不开默认主库：缓存里没有目录时读不到，跟以前一样首帧不带。
+    event_hub::DaemonEventHub::new(WorkspaceDirectoryReader::unavailable()).unwrap()
 }
 
 /// 已发布身份目录。只在 main() 里初始化一次；测试默认不初始化，
@@ -2432,7 +2433,8 @@ fn main() {
 
     let path = sock_path();
     // EventHub 的实时连接列表不跨进程保留；每个进程从空列表开始。
-    let event_hub = match event_hub::DaemonEventHub::new() {
+    let workspace_directory = WorkspaceDirectoryReader::from_store();
+    let event_hub = match event_hub::DaemonEventHub::new(workspace_directory.clone()) {
         Ok(event_hub) => event_hub,
         Err(error) => {
             eprintln!("[event-hub] 初始化失败，守护退出：{error}");
@@ -2440,7 +2442,6 @@ fn main() {
             return;
         }
     };
-    let workspace_directory = WorkspaceDirectoryReader::from_store();
     // 升级的接班进程：前任回执后才退出，退出前监听还在它手里。等它退了再绑。
     #[cfg(windows)]
     if let Some(pid) = predecessor_pid
