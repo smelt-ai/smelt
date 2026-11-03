@@ -479,6 +479,7 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
         Arc::clone(&sessions),
         new_event_hub(),
         slot,
+        Instant::now(),
     );
 
     // 第一路：桌面 attachment。

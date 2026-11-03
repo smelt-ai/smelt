@@ -175,6 +175,7 @@ fn a_reattach_at_the_same_geometry_never_signals_the_child() {
         Arc::clone(&sessions),
         new_event_hub(),
         slot,
+        Instant::now(),
     );
     // 让 sh 起来把 trap 装好。
     thread::sleep(Duration::from_millis(300));

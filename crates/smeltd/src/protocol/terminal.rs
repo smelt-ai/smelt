@@ -368,6 +368,7 @@ pub(crate) fn open_terminal_runtime<R>(
                     recorded: launch.as_deref(),
                 },
             };
+            let spawned_at = Instant::now();
             let result = spawn_session(
                 &id,
                 instance,
@@ -388,7 +389,13 @@ pub(crate) fn open_terminal_runtime<R>(
                     return Err(format!("终端启动失败：{error:#}").into());
                 }
             };
-            smelt_core::app_log::info("session", &format!("会话 {id} 已创建"));
+            smelt_core::app_log::info(
+                "session",
+                &format!(
+                    "会话 {id} 已创建，起进程用时 {}ms",
+                    spawned_at.elapsed().as_millis()
+                ),
+            );
             let sess = Arc::new(sess);
             // lifecycle 锁同时挡住 kill，提交之前没人看得到这个 runtime。
             if !sessions.commit_if_current(&id, &slot, Arc::clone(&sess)) {
@@ -406,12 +413,12 @@ pub(crate) fn open_terminal_runtime<R>(
                 state.clone()
             };
             broadcast_state(event_hub, &opened_state);
-            pty_pump = Some((Arc::clone(&sess), pty_reader));
+            pty_pump = Some((Arc::clone(&sess), pty_reader, spawned_at));
             sess
         }
     };
 
-    if let Some((pump_session, pty_reader)) = pty_pump {
+    if let Some((pump_session, pty_reader, spawned_at)) = pty_pump {
         start_pty_pump(
             pump_session,
             pty_reader,
@@ -419,6 +426,7 @@ pub(crate) fn open_terminal_runtime<R>(
             Arc::clone(sessions),
             Arc::clone(event_hub),
             Arc::clone(&slot),
+            spawned_at,
         );
     }
     let attached = attach(&sess, reattached);

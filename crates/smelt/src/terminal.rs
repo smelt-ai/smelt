@@ -1225,6 +1225,7 @@ impl Terminal {
         launch: Option<&str>,
         create_if_missing: bool,
     ) -> anyhow::Result<Self> {
+        let started = Instant::now();
         // 1) 连守护（不在则自动拉起）并声明要打开的会话。
         //
         // 守护停机（升级换映像，或退出）期间来的请求，新守护立刻回 daemon_stopping，并把
@@ -1252,6 +1253,9 @@ impl Terminal {
                     }
                 }
             };
+        // 带启动命令的新会话（如 Claude 终端）记一行多久出字，对照守护的「网格第一次有字」：
+        // 守护早有字而这里晚，就是慢在连接或显示。恢复、重连不带命令，不记。
+        let mut first_text_timer = launch.map(|_| (id.to_string(), started.elapsed()));
         let writer = TerminalWriter::start(buffered.get_ref().try_clone()?)?;
 
         // 2) alacritty 终端状态机。EventProxy 把 PTY 自动应答写回共享写端。
@@ -1336,6 +1340,7 @@ impl Terminal {
                             }
                         }
                         bytes_seen += n;
+                        let mut first_text_at = None;
                         if let Ok(mut term) = term_reader.lock() {
                             // A geometry marker is serialized before PTY
                             // output at the new size. Split this read at each
@@ -1366,6 +1371,22 @@ impl Terminal {
                                 replay_finalized = true;
                                 finalize_reattach_term(&mut term);
                             }
+                            if first_text_timer.is_some()
+                                && term
+                                    .renderable_content()
+                                    .display_iter
+                                    .any(|indexed| !matches!(indexed.cell.c, ' ' | '\0'))
+                            {
+                                first_text_at = first_text_timer.take();
+                            }
+                        }
+                        // 放开网格锁再写日志。
+                        if let Some((id, handshake)) = first_text_at {
+                            eprintln!(
+                                "[terminal] 会话 {id} 距发起 {}ms 网格第一次有字（握手 {}ms，重放 {replay_len} 字节）",
+                                started.elapsed().as_millis(),
+                                handshake.as_millis()
+                            );
                         }
                         // 喂完这批立刻请求一次重绘（Zed 式：内容生产者驱动重绘）。
                         // bounded(1) + try_send：已有待处理唤醒就丢弃，天然合并。
