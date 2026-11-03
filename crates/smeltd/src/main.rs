@@ -3316,10 +3316,15 @@ fn start_pty_pump(
     sessions: Sessions,
     event_hub: EventHubHandle,
     slot: Arc<TerminalSlot<Session>>,
+    spawned_at: Instant,
 ) {
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut parser: Processor = Processor::new();
+        // 新终端多久出字：第一次读到输出、网格上第一次有可见字符各记一行。对照客户端
+        // 「网格第一次有字」那行，分得清慢在终端里的程序，还是慢在显示。
+        let mut first_output_logged = false;
+        let mut first_text_logged = false;
         // kitty 图形命令可能被 PTY read 切断，切分状态跨 read 保持。
         let mut graphics_splitter = GraphicsSplitter::default();
         // OSC 9/99/777 通知、9;4 进度和 7501 程序状态 alacritty 不解析，在这里逐字节扫
@@ -3345,6 +3350,17 @@ fn start_pty_pump(
                 }
                 Err(_) => break,
                 Ok(n) => {
+                    if !first_output_logged {
+                        first_output_logged = true;
+                        smelt_core::app_log::info(
+                            "session",
+                            &format!(
+                                "会话 {id} 起进程后 {}ms 第一次有输出（{n} 字节）",
+                                spawned_at.elapsed().as_millis()
+                            ),
+                        );
+                    }
+                    let mut first_text_at = None;
                     let chunk = &buf[..n];
                     let mut notifications = Vec::new();
                     let mut program_status = None;
@@ -3396,6 +3412,15 @@ fn start_pty_pump(
                                     &mut fed,
                                 );
                             }));
+                            if !first_text_logged
+                                && term
+                                    .renderable_content()
+                                    .display_iter
+                                    .any(|indexed| !matches!(indexed.cell.c, ' ' | '\0'))
+                            {
+                                first_text_logged = true;
+                                first_text_at = Some(spawned_at.elapsed());
+                            }
                         }
                         Err(_) => {
                             fed.graphics.extend_from_slice(chunk);
@@ -3413,6 +3438,16 @@ fn start_pty_pump(
                         true,
                     );
                     drop(output_gate);
+                    // 网格锁、输出闸都放开了再写日志。
+                    if let Some(elapsed) = first_text_at {
+                        smelt_core::app_log::info(
+                            "session",
+                            &format!(
+                                "会话 {id} 起进程后 {}ms 网格第一次有字",
+                                elapsed.as_millis()
+                            ),
+                        );
+                    }
                     if !fed.reply.is_empty() {
                         let _ = write_session_input(&sess, &fed.reply);
                     }
