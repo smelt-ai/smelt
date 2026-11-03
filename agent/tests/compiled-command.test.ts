@@ -30,6 +30,17 @@ describe("compiled command router", () => {
 		expect(parseCompiledCommand(["bun", "/src/compiled-main.ts", "mcp-gateway"])).toEqual({ kind: "gateway" });
 	});
 
+	// 复现：Windows 上虚拟脚本是 B:/~BUN/root/...，没认出来时子命令被当成 Pi 的 RPC 参数。
+	test("drops the Windows bunfs entry", () => {
+		for (const entry of ["B:/~BUN/root/smelt-pi.exe", "B:\\~BUN\\root\\smelt-pi.exe"]) {
+			expect(parseCompiledCommand(["C:\\smelt\\smelt-pi.exe", entry, "acp-claude", "--version"])).toEqual({
+				kind: "acp-claude",
+				args: ["--version"],
+			});
+			expect(parseCompiledCommand(["smelt-pi.exe", entry, "auth", "list"])).toEqual({ kind: "auth", args: ["list"] });
+		}
+	});
+
 	test("a flag in argv[1] is a user argument", () => {
 		expect(parseCompiledCommand(["smelt-pi", "--offline"])).toEqual({ kind: "rpc", args: ["--offline"] });
 	});

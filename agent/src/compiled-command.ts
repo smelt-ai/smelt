@@ -19,16 +19,20 @@ export function embeddedAdapterSpecs(dependencies: Readonly<Record<string, strin
 	return EMBEDDED_ACP_ADAPTERS.map((name) => `${name}@${dependencies[name]}`);
 }
 
+/** Windows 上编译产物的虚拟根是 `B:/~BUN/root/`，路径分隔符两种都可能出现。 */
+const WINDOWS_BUNFS = /^[A-Za-z]:[\\/]~BUN[\\/]/;
+
 function isCompileEntry(value: string | undefined): boolean {
 	if (!value) return false;
 	return (
 		value.startsWith("/$bunfs/") ||
+		WINDOWS_BUNFS.test(value) ||
 		value.includes("compiled-main.ts") ||
 		value.includes("compiled-main.js")
 	);
 }
 
-/** 丢掉 argv0，以及 bun compile 插进来的 `/$bunfs/root/...` 虚拟脚本。 */
+/** 丢掉 argv0，以及 bun compile 插进来的虚拟脚本（`/$bunfs/root/...`，Windows 上 `B:/~BUN/root/...`）。 */
 export function userArguments(argv: readonly string[]): string[] {
 	const rest = argv.slice(1);
 	if (isCompileEntry(rest[0])) return rest.slice(1);
