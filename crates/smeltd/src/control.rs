@@ -748,7 +748,20 @@ fn dispatch_control(
                 )
             };
             match result {
-                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Ok(()) => {
+                    super::agent_memory_control::sync_memory_resolution(
+                        acp_sessions,
+                        &params.agent_id,
+                        params.layer,
+                        &params.file_name,
+                        if known_method == ControlMethod::AgentMemoryDelete {
+                            smelt_core::acp_session::MemoryResolution::Deleted
+                        } else {
+                            smelt_core::acp_session::MemoryResolution::Approved
+                        },
+                    );
+                    success_value(control_version, &request_id, EmptyParams::default())
+                }
                 Err(error) => error_value(
                     control_version,
                     request_id,

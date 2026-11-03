@@ -410,6 +410,36 @@ fn list_memories_with(
     }
 }
 
+/// 卡片上展示一条记忆用的：名字、描述、正文。正文过长截断。读不到就是 `None`。
+pub fn describe_memory_file(dir: &Path, file_name: &str) -> Option<(String, String, String)> {
+    const BODY_LIMIT: usize = 8 * 1024;
+    let file_name = canonical_memory_file_name(file_name)?;
+    let content = std::fs::read_to_string(memory_disk_path(dir, &file_name)).ok()?;
+    let (frontmatter, body) = split_frontmatter(&content).unwrap_or(("", ""));
+    let shown_body = if frontmatter.is_empty() {
+        content.trim()
+    } else {
+        body.trim()
+    };
+    let field = |key| frontmatter_field(frontmatter, key).filter(|value| !value.is_empty());
+    let mut body = shown_body.to_string();
+    if body.len() > BODY_LIMIT {
+        let mut end = BODY_LIMIT;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
+        body.push_str("\n…");
+    }
+    Some((
+        field("name")
+            .unwrap_or(file_name.trim_end_matches(".md"))
+            .to_string(),
+        field("description").unwrap_or_default().to_string(),
+        body,
+    ))
+}
+
 /// 删掉一条记忆和它的元数据。索引由启动器按 frontmatter 生成，不用另外改。
 pub fn delete_memory(dir: &Path, scope: &MemoryScope, file_name: &str) -> std::io::Result<()> {
     delete_memory_with(&store()?, dir, scope, file_name)

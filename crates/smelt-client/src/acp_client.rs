@@ -181,6 +181,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         compacting: false,
         provider_retry: None,
         notice: None,
+        memory_changes: None,
         pending_prompts: Vec::new(),
         queued_steering: Vec::new(),
         queued_follow_up: Vec::new(),

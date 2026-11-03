@@ -22,7 +22,7 @@ use super::{
     latest_user_message_index, loaded_capabilities_summary, loaded_entries_end,
     loaded_skills_refresh, merge_rejected_prompt, merge_snapshot_entries,
     model_label_with_provider, native_queue_item_kind_label, next_prompt_dispatch_pending,
-    notice_to_show, overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
+    memory_changes_summary, memory_changes_to_show, notice_to_show, overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
     pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
     process_group_label, progress_has_details, progress_summary, provider_menu_label,
     provider_retry_label, provider_switch_value, reconcile_pending_config_values,
@@ -5033,4 +5033,38 @@ fn long_thought_inside_a_process_group_can_be_expanded(cx: &mut gpui::TestAppCon
         view.read_with(cx, |view, _| view.expanded_thoughts.contains(&3)),
         "过程组里的长思考点了要展开"
     );
+}
+
+#[test]
+fn memory_card_summary_counts_new_updated_and_pending() {
+    use smelt_model::acp_session::{MemoryChangeView, MemoryChangesView};
+    use smelt_model::control_api::AgentMemoryLayer;
+    let entry = |file: &str, created, pending: Option<&str>| MemoryChangeView {
+        layer: AgentMemoryLayer::Agent,
+        file_name: file.into(),
+        name: file.into(),
+        description: String::new(),
+        created,
+        pending_reason: pending.map(str::to_string),
+        body: String::new(),
+    };
+    let entries = vec![
+        entry("a.md", true, None),
+        entry("b.md", true, Some("外部内容")),
+        entry("c.md", false, None),
+    ];
+    assert_eq!(
+        memory_changes_summary(&entries),
+        "记忆 · 新记住 2 条 · 更新 1 条 · 1 条待确认"
+    );
+    assert_eq!(memory_changes_summary(&entries[2..]), "记忆 · 更新 1 条");
+
+    let changes = MemoryChangesView {
+        id: 7,
+        agent_id: "a1".into(),
+        entries,
+    };
+    assert!(memory_changes_to_show(Some(&changes), None).is_some());
+    assert!(memory_changes_to_show(Some(&changes), Some(7)).is_none());
+    assert!(memory_changes_to_show(Some(&changes), Some(6)).is_some());
 }

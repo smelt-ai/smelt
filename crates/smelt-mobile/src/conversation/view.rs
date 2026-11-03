@@ -14,7 +14,7 @@ use smelt_model::daemon_state::DaemonPhase;
 
 use crate::api::conversation::{
     ApprovalDetails, ApprovalKind, ChoiceOption, ConfigOption, ContextUsage, ConversationEntry,
-    ConversationImage, ConversationNotice, ConversationPhase, ConversationView, DiffLine, DiffOp,
+    ConversationImage, ConversationMemoryChange, ConversationMemoryChanges, ConversationNotice, ConversationPhase, ConversationView, DiffLine, DiffOp,
     DiffView, Elicitation, ElicitationField, ElicitationFieldKind, EntryKind, ImageRef,
     ModelProvider, ModelSelector, PermissionOption, PermissionOptionKind, PermissionRequest,
     PlanStep, PlanStepStatus, SlashCommand, TaskNoteKind, TaskNoteView, ToolCallView, ToolKind,
@@ -45,6 +45,33 @@ pub(crate) fn conversation_view(
             id: to_i64_u64(notice.id),
             text: notice.text.clone(),
         }),
+        memory_changes: snapshot
+            .memory_changes
+            .as_ref()
+            .map(|changes| ConversationMemoryChanges {
+                id: to_i64_u64(changes.id),
+                agent_id: changes.agent_id.clone(),
+                entries: changes
+                    .entries
+                    .iter()
+                    .map(|entry| ConversationMemoryChange {
+                        layer: match entry.layer {
+                            smelt_model::control_api::AgentMemoryLayer::Agent => {
+                                crate::api::agents::MemoryLayer::Agent
+                            }
+                            smelt_model::control_api::AgentMemoryLayer::User => {
+                                crate::api::agents::MemoryLayer::User
+                            }
+                        },
+                        file_name: entry.file_name.clone(),
+                        name: entry.name.clone(),
+                        description: entry.description.clone(),
+                        created: entry.created,
+                        pending_reason: entry.pending_reason.clone(),
+                        body: entry.body.clone(),
+                    })
+                    .collect(),
+            }),
         end_reason: snapshot.end_reason.clone(),
         session_title: snapshot.session_title.clone(),
         turn_started_at_ms: snapshot.turn_started_at_ms.map(to_i64_u64),

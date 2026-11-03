@@ -1015,6 +1015,53 @@ class L10nZh extends L10n {
   }
 
   @override
+  String get conversationMemoryTitle => '记忆';
+
+  @override
+  String conversationMemoryCreated(int count) {
+    return '新记住 $count 条';
+  }
+
+  @override
+  String conversationMemoryUpdated(int count) {
+    return '更新 $count 条';
+  }
+
+  @override
+  String conversationMemoryPendingCount(int count) {
+    return '$count 条待确认';
+  }
+
+  @override
+  String get conversationMemoryOpenPage => '记忆页';
+
+  @override
+  String get conversationMemoryDismiss => '收起记忆卡片';
+
+  @override
+  String get conversationMemoryNew => '新';
+
+  @override
+  String get conversationMemoryChanged => '改';
+
+  @override
+  String get conversationMemoryShared => '全局';
+
+  @override
+  String get conversationMemoryActive => '已生效';
+
+  @override
+  String get conversationMemoryPending => '待确认';
+
+  @override
+  String conversationMemoryPendingReason(String reason) {
+    return '待确认：$reason';
+  }
+
+  @override
+  String get conversationMemoryEmptyBody => '（正文为空）';
+
+  @override
   String get launchTitle => '新建会话';
 
   @override

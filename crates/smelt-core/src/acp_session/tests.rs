@@ -4109,3 +4109,79 @@ fn undo_prompt_sent_refuses_a_finished_turn() {
     assert!(crate::acp_session::undo_prompt_sent(&mut state).is_none());
     assert_eq!(state.entries().len(), 1);
 }
+
+fn memory_change(
+    layer: crate::control_api::AgentMemoryLayer,
+    file: &str,
+    created: bool,
+    pending: Option<&str>,
+) -> MemoryChangeView {
+    MemoryChangeView {
+        layer,
+        file_name: file.into(),
+        name: file.trim_end_matches(".md").into(),
+        description: String::new(),
+        created,
+        pending_reason: pending.map(str::to_string),
+        body: "正文".into(),
+    }
+}
+
+#[test]
+fn memory_writes_in_a_turn_share_one_card_row_per_file_and_keep_created() {
+    use crate::control_api::AgentMemoryLayer::{Agent, User};
+    let mut state = fresh_state();
+    note_memory_write(&mut state, "a1", memory_change(Agent, "x.md", true, Some("外部内容")));
+    let first_id = state.memory_changes.as_ref().unwrap().id;
+    // 同一轮里又改了一次：仍是一行，「新建」保留，状态取最新。
+    note_memory_write(&mut state, "a1", memory_change(Agent, "x.md", false, None));
+    note_memory_write(&mut state, "a1", memory_change(User, "x.md", false, None));
+    let changes = state.memory_changes.as_ref().unwrap();
+    assert!(changes.id > first_id, "新写入要换更大的 id，关掉的卡片才会重新出现");
+    assert_eq!(changes.agent_id, "a1");
+    assert_eq!(changes.entries.len(), 2, "两层同名是两条记忆");
+    assert!(changes.entries[0].created);
+    assert_eq!(changes.entries[0].pending_reason, None);
+    assert!(!changes.entries[1].created);
+
+    assert_eq!(state.to_snapshot(false).memory_changes.as_ref(), Some(changes));
+    // 流式正文帧不带信封，卡片不跟着来回拷。
+    let total = state.entries_total();
+    let body_only = state.to_snapshot_range_selective(false, 0, total, false, false, false);
+    assert_eq!(body_only.memory_changes, None);
+    // 快照恢复（交接、重连）后卡片还在。
+    let restored = AcpSessionState::from_snapshot(state.to_snapshot(false));
+    assert_eq!(restored.memory_changes.as_ref(), Some(changes));
+}
+
+#[test]
+fn resolving_memory_updates_the_card_without_reshowing_it() {
+    use crate::control_api::AgentMemoryLayer::{Agent, User};
+    let mut state = fresh_state();
+    note_memory_write(&mut state, "a1", memory_change(Agent, "x.md", true, Some("外部内容")));
+    note_memory_write(&mut state, "a1", memory_change(User, "u.md", true, Some("外部内容")));
+    let id = state.memory_changes.as_ref().unwrap().id;
+
+    // 别的智能体自己的层同名文件不相干；用户全局层谁的卡片上有都同步。
+    assert!(!resolve_memory_change(&mut state, "a2", Agent, "x.md", MemoryResolution::Approved));
+    assert!(resolve_memory_change(&mut state, "a2", User, "U.md", MemoryResolution::Approved));
+    assert!(resolve_memory_change(&mut state, "a1", Agent, "x.md", MemoryResolution::Approved));
+    assert!(!resolve_memory_change(&mut state, "a1", Agent, "x.md", MemoryResolution::Approved));
+    let changes = state.memory_changes.as_ref().unwrap();
+    assert_eq!(changes.id, id, "处理不换 id");
+    assert!(changes.entries.iter().all(|entry| entry.pending_reason.is_none()));
+
+    assert!(resolve_memory_change(&mut state, "a1", Agent, "x.md", MemoryResolution::Deleted));
+    assert_eq!(state.memory_changes.as_ref().unwrap().entries.len(), 1);
+    assert!(resolve_memory_change(&mut state, "a1", User, "u.md", MemoryResolution::Deleted));
+    assert_eq!(state.memory_changes, None, "删光了卡片就收起");
+}
+
+#[test]
+fn a_new_prompt_clears_the_memory_card() {
+    use crate::control_api::AgentMemoryLayer::Agent;
+    let mut state = fresh_state();
+    note_memory_write(&mut state, "a1", memory_change(Agent, "x.md", true, None));
+    note_prompt_sent(&mut state, "下一轮".into(), Vec::new());
+    assert_eq!(state.memory_changes, None);
+}

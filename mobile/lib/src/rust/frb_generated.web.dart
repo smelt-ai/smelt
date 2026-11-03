@@ -136,6 +136,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ConversationImage dco_decode_box_autoadd_conversation_image(dynamic raw);
 
   @protected
+  ConversationMemoryChanges dco_decode_box_autoadd_conversation_memory_changes(
+    dynamic raw,
+  );
+
+  @protected
   ConversationNotice dco_decode_box_autoadd_conversation_notice(dynamic raw);
 
   @protected
@@ -224,6 +229,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage dco_decode_conversation_image(dynamic raw);
+
+  @protected
+  ConversationMemoryChange dco_decode_conversation_memory_change(dynamic raw);
+
+  @protected
+  ConversationMemoryChanges dco_decode_conversation_memory_changes(dynamic raw);
 
   @protected
   ConversationNotice dco_decode_conversation_notice(dynamic raw);
@@ -340,6 +351,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ConversationImage> dco_decode_list_conversation_image(dynamic raw);
+
+  @protected
+  List<ConversationMemoryChange> dco_decode_list_conversation_memory_change(
+    dynamic raw,
+  );
 
   @protected
   List<DiffLine> dco_decode_list_diff_line(dynamic raw);
@@ -481,6 +497,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage? dco_decode_opt_box_autoadd_conversation_image(dynamic raw);
+
+  @protected
+  ConversationMemoryChanges?
+  dco_decode_opt_box_autoadd_conversation_memory_changes(dynamic raw);
 
   @protected
   ConversationNotice? dco_decode_opt_box_autoadd_conversation_notice(
@@ -822,6 +842,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ConversationMemoryChanges sse_decode_box_autoadd_conversation_memory_changes(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ConversationNotice sse_decode_box_autoadd_conversation_notice(
     SseDeserializer deserializer,
   );
@@ -932,6 +957,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage sse_decode_conversation_image(SseDeserializer deserializer);
+
+  @protected
+  ConversationMemoryChange sse_decode_conversation_memory_change(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationMemoryChanges sse_decode_conversation_memory_changes(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ConversationNotice sse_decode_conversation_notice(
@@ -1070,6 +1105,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ConversationImage> sse_decode_list_conversation_image(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ConversationMemoryChange> sse_decode_list_conversation_memory_change(
     SseDeserializer deserializer,
   );
 
@@ -1245,6 +1285,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConversationImage? sse_decode_opt_box_autoadd_conversation_image(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationMemoryChanges?
+  sse_decode_opt_box_autoadd_conversation_memory_changes(
     SseDeserializer deserializer,
   );
 
@@ -1660,6 +1706,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_conversation_memory_changes(
+    ConversationMemoryChanges self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_conversation_notice(
     ConversationNotice self,
     SseSerializer serializer,
@@ -1818,6 +1870,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_conversation_image(
     ConversationImage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_memory_change(
+    ConversationMemoryChange self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_memory_changes(
+    ConversationMemoryChanges self,
     SseSerializer serializer,
   );
 
@@ -1986,6 +2050,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_conversation_image(
     List<ConversationImage> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_conversation_memory_change(
+    List<ConversationMemoryChange> self,
     SseSerializer serializer,
   );
 
@@ -2214,6 +2284,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_conversation_image(
     ConversationImage? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_conversation_memory_changes(
+    ConversationMemoryChanges? self,
     SseSerializer serializer,
   );
 

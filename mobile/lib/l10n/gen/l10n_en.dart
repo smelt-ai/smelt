@@ -1072,6 +1072,53 @@ class L10nEn extends L10n {
   }
 
   @override
+  String get conversationMemoryTitle => 'Memory';
+
+  @override
+  String conversationMemoryCreated(int count) {
+    return '$count new';
+  }
+
+  @override
+  String conversationMemoryUpdated(int count) {
+    return '$count updated';
+  }
+
+  @override
+  String conversationMemoryPendingCount(int count) {
+    return '$count to review';
+  }
+
+  @override
+  String get conversationMemoryOpenPage => 'All memories';
+
+  @override
+  String get conversationMemoryDismiss => 'Hide memory card';
+
+  @override
+  String get conversationMemoryNew => 'New';
+
+  @override
+  String get conversationMemoryChanged => 'Edited';
+
+  @override
+  String get conversationMemoryShared => 'Shared';
+
+  @override
+  String get conversationMemoryActive => 'Active';
+
+  @override
+  String get conversationMemoryPending => 'To review';
+
+  @override
+  String conversationMemoryPendingReason(String reason) {
+    return 'To review: $reason';
+  }
+
+  @override
+  String get conversationMemoryEmptyBody => '(empty)';
+
+  @override
   String get launchTitle => 'New session';
 
   @override

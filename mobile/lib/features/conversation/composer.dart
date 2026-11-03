@@ -105,6 +105,7 @@ class Composer extends StatelessWidget {
     this.onCommands,
     this.chips = const [],
     this.error,
+    this.memoryCard,
     this.notice,
     this.onDismissNotice,
     this.footnote,
@@ -131,6 +132,9 @@ class Composer extends StatelessWidget {
   final VoidCallback? onCommands;
   final List<Widget> chips;
   final String? error;
+
+  /// 这一轮写下或改过的记忆（[MemoryChangesCard]），画在提示上方。
+  final Widget? memoryCard;
 
   /// agent 那边来的一次性提示（压缩失败、改配置没生效等），可以关掉。
   final String? notice;
@@ -262,6 +266,7 @@ class Composer extends StatelessWidget {
               ),
             ),
           ),
+        ?memoryCard,
         if (notice != null)
           Padding(
             padding: const EdgeInsets.only(left: Space.md),

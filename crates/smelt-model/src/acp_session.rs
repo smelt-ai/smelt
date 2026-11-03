@@ -86,6 +86,33 @@ pub struct AcpNoticeView {
     pub text: String,
 }
 
+/// 这一轮里智能体写下或改过的记忆，显示在输入框上方，可以就地查看、采纳、删除。
+/// smeltd 在每次记忆写入落库时更新；用户开新一轮时收起。用户在任何一端采纳或删除，
+/// smeltd 同步改这里，所以各端看到的状态一致。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MemoryChangesView {
+    /// 每次内容变化都换一个更大的 id：客户端按它记「这张卡片已经关掉」，有新写入时重新出现。
+    pub id: u64,
+    /// 写入这些记忆的智能体。采纳、删除按智能体寻址，用户全局层也一样。
+    pub agent_id: String,
+    pub entries: Vec<MemoryChangeView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MemoryChangeView {
+    pub layer: crate::control_api::AgentMemoryLayer,
+    pub file_name: String,
+    /// frontmatter 的 name；读不出来时是文件名去掉扩展名。
+    pub name: String,
+    pub description: String,
+    /// 这一轮新建的（否则是改了已有的）。
+    pub created: bool,
+    /// 待确认的原因；`None` 是已经生效。
+    pub pending_reason: Option<String>,
+    /// 去掉 frontmatter 的正文，展开时看；过长时截断。
+    pub body: String,
+}
+
 /// 提示的来由。要据此动作的消费方（撤掉没生效的配置勾选、停止等待配置确认）
 /// 认类别，不认文案。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -945,6 +972,9 @@ pub struct ConversationSnapshot {
     /// 用户该看到的一次性提示。旧快照缺省为 None。
     #[serde(default)]
     pub notice: Option<AcpNoticeView>,
+    /// 这一轮的记忆变更。旧快照缺省为 None。
+    #[serde(default)]
+    pub memory_changes: Option<MemoryChangesView>,
     /// 守护进程闸门后面排队的消息。旧快照缺省为空。
     #[serde(default)]
     pub pending_prompts: Vec<PendingPromptView>,
@@ -1067,6 +1097,8 @@ pub struct ConversationSnapshotDe {
     #[serde(default)]
     pub notice: Option<AcpNoticeView>,
     #[serde(default)]
+    pub memory_changes: Option<MemoryChangesView>,
+    #[serde(default)]
     pub pending_prompts: Vec<PendingPromptView>,
     #[serde(default)]
     pub queued_steering: Vec<String>,
@@ -1140,6 +1172,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             compacting: de.compacting,
             provider_retry: de.provider_retry,
             notice: de.notice,
+            memory_changes: de.memory_changes,
             pending_prompts: de.pending_prompts,
             queued_steering: de.queued_steering,
             queued_follow_up: de.queued_follow_up,
@@ -1203,6 +1236,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             compacting: snap.compacting,
             provider_retry: snap.provider_retry,
             notice: snap.notice,
+            memory_changes: snap.memory_changes,
             pending_prompts: snap.pending_prompts,
             queued_steering: snap.queued_steering,
             queued_follow_up: snap.queued_follow_up,
