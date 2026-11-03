@@ -36,6 +36,33 @@ copyFileSync(join(dirname(source), "photon_rs_bg.wasm"), join(dir, "photon_rs_bg
 const { chmodSync } = await import("node:fs");
 chmodSync(binary, 0o755);
 
+// 编进来的适配器要真的能从 bunfs 里加载。`--version` 在两个适配器里都先于拉起 CLI 返回，
+// 不需要本机装 claude / codex。
+for (const [subcommand, name] of [
+	["acp-claude", "@agentclientprotocol/claude-agent-acp"],
+	["acp-codex", "@agentclientprotocol/codex-acp"],
+] as const) {
+	const expected = pkg.dependencies[name];
+	const result = Bun.spawnSync([binary, subcommand, "--version"], { cwd: dir, timeout: 30_000 });
+	const output = `${result.stdout.toString()}${result.stderr.toString()}`;
+	if (result.exitCode !== 0 || !output.includes(expected)) {
+		console.error(`${subcommand} --version 应输出 ${expected}，退出码 ${result.exitCode}：${output}`);
+		rmSync(dir, { recursive: true, force: true });
+		process.exit(1);
+	}
+}
+const adapters = Bun.spawnSync([binary, "acp-adapters"], { cwd: dir, timeout: 30_000 });
+const adapterList = adapters.stdout.toString();
+if (
+	adapters.exitCode !== 0 ||
+	!adapterList.includes(`@agentclientprotocol/claude-agent-acp@${pkg.dependencies["@agentclientprotocol/claude-agent-acp"]}`) ||
+	!adapterList.includes(`@agentclientprotocol/codex-acp@${pkg.dependencies["@agentclientprotocol/codex-acp"]}`)
+) {
+	console.error(`acp-adapters 输出不对，退出码 ${adapters.exitCode}：${adapterList}${adapters.stderr.toString()}`);
+	rmSync(dir, { recursive: true, force: true });
+	process.exit(1);
+}
+
 const probe = spawn(binary, [], {
 	cwd: dir,
 	env: { ...process.env, SMELT_PI_PROBE_WORKERS: "1", PI_CODING_AGENT_DIR: agentDir },
