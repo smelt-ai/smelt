@@ -1,7 +1,9 @@
 /// 一个项目的文件：逐层浏览、按文件名和内容搜，点文件打开预览。第一版只读。
 ///
-/// 文件在那台机器上、随时在变，这里不缓存跨页面的结果：进页面、换目录、下拉时重取。
-/// 返回键先退目录，退到项目根才离开页面。
+/// 每一层目录是一页，进目录是推一页：右滑、返回键都退回上一层，和系统的层级导航
+/// 一致。深层的页面右上角有「关闭」，一次退出整个文件浏览，回到进来之前的页面。
+///
+/// 文件在那台机器上、随时在变，这里不缓存跨页面的结果：进页面、下拉时重取。
 library;
 
 import 'dart:async';
@@ -21,12 +23,38 @@ import 'file_preview_page.dart';
 /// 搜索框停手多久才发请求：不是轮询，只是别每敲一个字就让那台机器遍历一遍项目。
 const _searchDebounce = Duration(milliseconds: 350);
 
+/// 文件浏览里每一页（各层目录、从这里打开的预览）的路由名。「关闭」退到第一个不叫
+/// 这个名字的页面。
+const projectFilesRoute = 'project-files';
+
+/// 从别处（对话页）进入一个项目的文件浏览。
+void openProjectFiles(
+  BuildContext context, {
+  required String runtimeId,
+  required String root,
+  required String title,
+}) => unawaited(
+  Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      settings: const RouteSettings(name: projectFilesRoute),
+      builder: (_) =>
+          ProjectFilesPage(runtimeId: runtimeId, root: root, title: title),
+    ),
+  ),
+);
+
+/// 退出整个文件浏览。
+void closeProjectFiles(BuildContext context) => Navigator.of(
+  context,
+).popUntil((route) => route.settings.name != projectFilesRoute);
+
 class ProjectFilesPage extends StatefulWidget {
   const ProjectFilesPage({
     super.key,
     required this.runtimeId,
     required this.root,
     required this.title,
+    this.dir,
   });
 
   final String runtimeId;
@@ -37,13 +65,14 @@ class ProjectFilesPage extends StatefulWidget {
   /// 项目名，根目录那一层的标题。
   final String title;
 
+  /// 这一页列的目录；null 是项目根。
+  final String? dir;
+
   @override
   State<ProjectFilesPage> createState() => _ProjectFilesPageState();
 }
 
 class _ProjectFilesPageState extends State<ProjectFilesPage> {
-  /// 一路点进来的目录，最后一个是当前这层。第一个是项目根。
-  late final List<String> _trail = [widget.root];
   List<FileEntry>? _entries;
   String? _error;
   int _generation = 0;
@@ -55,7 +84,9 @@ class _ProjectFilesPageState extends State<ProjectFilesPage> {
   String? _searchError;
   bool _searching = false;
 
-  String get _dir => _trail.last;
+  String get _dir => widget.dir ?? widget.root;
+
+  bool get _atRoot => _dir == widget.root;
 
   @override
   void initState() {
@@ -89,23 +120,19 @@ class _ProjectFilesPageState extends State<ProjectFilesPage> {
     }
   }
 
-  void _enter(String dir) {
-    setState(() {
-      _trail.add(dir);
-      _entries = null;
-      _error = null;
-    });
-    unawaited(_list());
-  }
-
-  void _up() {
-    setState(() {
-      _trail.removeLast();
-      _entries = null;
-      _error = null;
-    });
-    unawaited(_list());
-  }
+  void _enter(String dir) => unawaited(
+    Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        settings: const RouteSettings(name: projectFilesRoute),
+        builder: (_) => ProjectFilesPage(
+          runtimeId: widget.runtimeId,
+          root: widget.root,
+          title: widget.title,
+          dir: dir,
+        ),
+      ),
+    ),
+  );
 
   void _onQuery() {
     final query = _query.text.trim();
@@ -156,17 +183,18 @@ class _ProjectFilesPageState extends State<ProjectFilesPage> {
     runtimeId: widget.runtimeId,
     path: path,
     line: line,
+    routeName: projectFilesRoute,
   );
 
   String get _title {
-    if (_trail.length == 1) return widget.title;
+    if (_atRoot) return widget.title;
     final cut = _dir.lastIndexOf(RegExp(r'[/\\]'));
     return cut < 0 ? _dir : _dir.substring(cut + 1);
   }
 
   /// 当前目录相对项目根的路径，给人看。
   String get _relative {
-    if (_trail.length == 1) return widget.root;
+    if (_atRoot) return widget.root;
     final rest = _dir.substring(widget.root.length);
     return rest.replaceFirst(RegExp(r'^[/\\]'), '');
   }
@@ -176,58 +204,61 @@ class _ProjectFilesPageState extends State<ProjectFilesPage> {
     final l10n = L10n.of(context);
     final c = GalleyColors.of(context);
     final t = GalleyText.of(context);
-    return PopScope(
-      canPop: _trail.length == 1,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) _up();
-      },
-      child: Scaffold(
-        backgroundColor: c.ground,
-        appBar: AppBar(
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis),
-              Text(
-                _relative,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: t.caption.copyWith(color: c.inkMuted),
-              ),
-            ],
-          ),
-          bottom: PreferredSize(
-            preferredSize: const Size.fromHeight(Space.touch + Space.md),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                Space.page,
-                0,
-                Space.page,
-                Space.md,
-              ),
-              child: TextField(
-                controller: _query,
-                textInputAction: TextInputAction.search,
-                decoration: InputDecoration(
-                  hintText: l10n.filesSearchHint,
-                  prefixIcon: const Icon(LucideIcons.search),
-                  suffixIcon: _query.text.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: MaterialLocalizations.of(
-                            context,
-                          ).deleteButtonTooltip,
-                          icon: const Icon(LucideIcons.x),
-                          onPressed: _query.clear,
-                        ),
-                  isDense: true,
-                ),
+    return Scaffold(
+      backgroundColor: c.ground,
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            Text(
+              _relative,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: t.caption.copyWith(color: c.inkMuted),
+            ),
+          ],
+        ),
+        // 深层目录一键退出整个文件浏览；根目录的返回键本来就是离开。
+        actions: [
+          if (!_atRoot)
+            IconButton(
+              tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+              icon: const Icon(LucideIcons.x),
+              onPressed: () => closeProjectFiles(context),
+            ),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(Space.touch + Space.md),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Space.page,
+              0,
+              Space.page,
+              Space.md,
+            ),
+            child: TextField(
+              controller: _query,
+              textInputAction: TextInputAction.search,
+              decoration: InputDecoration(
+                hintText: l10n.filesSearchHint,
+                prefixIcon: const Icon(LucideIcons.search),
+                suffixIcon: _query.text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: MaterialLocalizations.of(
+                          context,
+                        ).deleteButtonTooltip,
+                        icon: const Icon(LucideIcons.x),
+                        onPressed: _query.clear,
+                      ),
+                isDense: true,
               ),
             ),
           ),
         ),
-        body: _searched.isEmpty ? _listing(context, l10n) : _results(l10n),
       ),
+      body: _searched.isEmpty ? _listing(context, l10n) : _results(l10n),
     );
   }
 

@@ -807,16 +807,11 @@ class _ConversationPageState extends State<ConversationPage> {
     return IconButton(
       tooltip: l10n.filesOpen,
       icon: const Icon(LucideIcons.folderTree),
-      onPressed: () => unawaited(
-        Navigator.of(context).push<void>(
-          MaterialPageRoute(
-            builder: (_) => ProjectFilesPage(
-              runtimeId: widget.runtimeId,
-              root: root,
-              title: session.placeLabel ?? root,
-            ),
-          ),
-        ),
+      onPressed: () => openProjectFiles(
+        context,
+        runtimeId: widget.runtimeId,
+        root: root,
+        title: session.placeLabel ?? root,
       ),
     );
   }

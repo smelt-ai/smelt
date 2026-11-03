@@ -109,15 +109,39 @@ void _tapLink(WidgetTester tester, String href) {
   body.onTapLink!(href, href, '');
 }
 
+/// 对话页的替身：一个按钮进文件浏览。
+class _Host extends StatelessWidget {
+  const _Host();
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: TextButton(
+        onPressed: () => openProjectFiles(
+          context,
+          runtimeId: 'r1',
+          root: _root,
+          title: 'smelt',
+        ),
+        child: const Text('host'),
+      ),
+    ),
+  );
+}
+
+Future<void> _enterFiles(WidgetTester tester, FilesBackend backend) async {
+  await _pump(tester, backend, const _Host());
+  await tester.tap(find.text('host'));
+  await tester.pumpAndSettle();
+}
+
 void main() {
-  testWidgets('逐层浏览：进目录、返回键先退目录再离开', (tester) async {
+  testWidgets('每层目录一页：返回（含右滑）退回上一层', (tester) async {
     final backend = FilesBackend();
-    await _pump(
-      tester,
-      backend,
-      const ProjectFilesPage(runtimeId: 'r1', root: _root, title: 'smelt'),
-    );
+    await _enterFiles(tester, backend);
     expect(find.text('smelt'), findsOneWidget);
+    // 根目录不放「关闭」，返回键就是离开。
+    expect(find.byTooltip('Close'), findsNothing);
     // 目录在前。
     expect(
       tester.getTopLeft(find.text('src')).dy,
@@ -128,14 +152,38 @@ void main() {
     await tester.pumpAndSettle();
     expect(backend.listed, [_root, '$_root/src']);
     expect(find.text('main.rs'), findsOneWidget);
-    expect(find.text('README.md'), findsNothing);
 
-    // 系统返回：先回到项目根，不离开页面。
-    final handled = await tester.binding.handlePopRoute();
+    // iOS 从屏幕左缘右滑退回上一层。
+    await tester.dragFrom(const Offset(4, 600), const Offset(600, 0));
     await tester.pumpAndSettle();
-    expect(handled, isTrue);
     expect(find.text('README.md'), findsOneWidget);
     expect(find.byType(ProjectFilesPage), findsOneWidget);
+
+    // 返回键同样只退一层；在根目录再退就离开文件浏览。
+    await tester.tap(find.text('src'));
+    await tester.pumpAndSettle();
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(ProjectFilesPage), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('host'), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('深层目录和预览里「关闭」一次退出整个文件浏览', (tester) async {
+    final backend = FilesBackend();
+    await _enterFiles(tester, backend);
+    await tester.tap(find.text('src'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('main.rs'));
+    await tester.pumpAndSettle();
+    expect(find.byType(FilePreviewPage), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ProjectFilesPage), findsNothing);
+    expect(find.byType(FilePreviewPage), findsNothing);
+    expect(find.text('host'), findsOneWidget);
   });
 
   testWidgets('搜索：停手后才发请求，点内容命中带行号打开', (tester) async {

@@ -18,16 +18,21 @@ import '../../ui/page.dart';
 import '../conversation/conversation_markdown.dart';
 import 'code_view.dart';
 import 'file_links.dart';
+import 'project_files_page.dart';
 
 /// 推一页预览。对话里的链接、diff 文件头、文件页都从这里进。
+///
+/// `routeName` 让预览算进某个浏览流程（文件浏览里打开的，「关闭」时一起退掉）。
 void openFilePreview(
   BuildContext context, {
   required String runtimeId,
   required String path,
   int? line,
+  String? routeName,
 }) => unawaited(
   Navigator.of(context).push<void>(
     MaterialPageRoute(
+      settings: RouteSettings(name: routeName),
       builder: (_) =>
           FilePreviewPage(runtimeId: runtimeId, path: path, line: line),
     ),
@@ -160,6 +165,13 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
             icon: const Icon(LucideIcons.copy),
             onPressed: _copyPath,
           ),
+          // 从文件浏览里打开的预览，也能一键退出整个浏览。
+          if (ModalRoute.of(context)?.settings.name == projectFilesRoute)
+            IconButton(
+              tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+              icon: const Icon(LucideIcons.x),
+              onPressed: () => closeProjectFiles(context),
+            ),
           const SizedBox(width: Space.xs),
         ],
       ),
