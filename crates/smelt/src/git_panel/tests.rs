@@ -158,8 +158,12 @@ fn authoritative_status_only_clears_completed_operations_for_its_root() {
 fn stale_aggregate_is_not_ready_for_a_missing_navigation_target() {
     let raw = "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n";
     let parsed = parse_diff_with_file_headers(raw);
-    let diff = GitDiff {
+    let repo = crate::ProjectRef {
+        runtime: crate::RuntimeKey::Local,
         root: "/repo".into(),
+    };
+    let diff = GitDiff {
+        root: repo.clone(),
         path: "全部更改".into(),
         aggregate: true,
         worktree_file: None,
@@ -173,12 +177,12 @@ fn stale_aggregate_is_not_ready_for_a_missing_navigation_target() {
     };
 
     assert!(
-        !aggregate_diff_ready_for_file(&diff, "/repo", DiffScope::All, "two.rs"),
+        !aggregate_diff_ready_for_file(&diff, &repo, DiffScope::All, "two.rs"),
         "文件树比聚合 diff 新时，不能把任意非空旧快照误判为目标已就绪"
     );
     assert!(aggregate_diff_ready_for_file(
         &diff,
-        "/repo",
+        &repo,
         DiffScope::All,
         "one.rs"
     ));

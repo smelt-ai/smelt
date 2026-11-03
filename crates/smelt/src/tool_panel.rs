@@ -148,11 +148,11 @@ fn builtin_panel(tab: ToolPanelTab) -> Option<&'static BuiltinPanel> {
 /// 只数项目根一个仓库会让子仓里的改动在角标上隐形，而角标正是用户判断
 /// “要不要点进去看”的唯一依据。
 fn git_changes_badge(ws: &Workspace, cx: &mut Context<Workspace>) -> usize {
-    let Some(cwd) = ws.current_local_cwd(cx) else {
+    let Some(cwd) = ws.current_cwd(cx) else {
         return 0;
     };
-    let roots: Vec<String> = match ws.git_repos.get(&cwd) {
-        Some((_, set)) if !set.repos.is_empty() => set.roots().map(str::to_string).collect(),
+    let roots: Vec<crate::ProjectRef> = match ws.git_repos.get(&cwd) {
+        Some((_, set)) if !set.repos.is_empty() => set.roots().map(|root| cwd.at(root)).collect(),
         _ => vec![cwd],
     };
     roots
@@ -470,7 +470,7 @@ impl Workspace {
                         .into_any_element();
                 }
                 // 插件经 smelt-workspace.context() 读当前项目；这里只写内存。
-                crate::plugins::set_project_root(self.active_project_root(cx));
+                crate::plugins::set_project_root(self.active_local_project_root(cx));
                 crate::plugins::render(slot, cx)
             }
             builtin => match builtin_panel(builtin) {
@@ -508,18 +508,17 @@ impl Workspace {
             .file_tree_w
             .clamp(MIN_FILE_TREE_WIDTH, MAX_FILE_TREE_WIDTH);
         let tree_open = self.file_tree_open;
-        // 远程项目：本机没有它的目录，搜索也搜不到；没钉别的本机目录时直接说明。
-        let remote_notice = self
-            .active_project_root(cx)
-            .is_none()
-            .then(|| self.remote_project_notice(cx))
-            .flatten();
-        let tree = if let Some(notice) = remote_notice
-            .as_ref()
-            .filter(|_| has_query || roots.is_empty())
-        {
-            crate::placeholder_view(notice, cx.theme().muted_foreground).into_any_element()
-        } else if has_query {
+        let runtime = self.file_tree_runtime(cx);
+        let empty_dirs = crate::file_tree::DirCache::new();
+        let git_status = |root: &str| {
+            self.git_status
+                .get(&crate::ProjectRef {
+                    runtime: runtime.clone(),
+                    root: root.to_string(),
+                })
+                .map(|(_, status)| status)
+        };
+        let tree = if has_query {
             match &self.search_results {
                 Some(state) => {
                     crate::file_tree::search_results_view(state, &self.file_tree_scroll, cx)
@@ -533,12 +532,14 @@ impl Workspace {
                     roots: &roots,
                     expanded: &self.expanded,
                     collapsed_roots: &self.collapsed_roots,
-                    dir_cache: &self.dir_cache,
+                    dir_cache: self.dir_cache.get(&runtime).unwrap_or(&empty_dirs),
                     scroll: &self.file_tree_scroll,
                     open_path,
                     selected_path: selected,
                     panel_w: tree_w,
-                    git_status: &self.git_status,
+                    style: crate::runtimes::path_style(&runtime, cx),
+                    local: runtime == crate::RuntimeKey::Local,
+                    git_status: &git_status,
                     focus_handle: &self.file_tree_focus_handle,
                 },
                 cx,

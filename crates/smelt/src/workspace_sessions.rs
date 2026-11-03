@@ -541,12 +541,14 @@ impl Workspace {
         self.sessions.get(self.active_session)
     }
 
-    /// 当前会话在本机上的工作目录。本机 git、文件这些查询只能用它：远程会话的路径
-    /// 在另一台机器上，拿来问本机要么查不到，要么查到同名的另一个目录。
-    pub(crate) fn current_local_cwd(&self, cx: &App) -> Option<String> {
-        self.cur()
-            .filter(|session| session.runtime(cx).is_local())
-            .and_then(|session| session.cwd(cx))
+    /// 当前会话的工作目录，连同它在哪台机器上。git、文件这些查询要发给那台机器：
+    /// 远程会话的路径拿去问本机，要么查不到，要么查到同名的另一个目录。
+    pub(crate) fn current_cwd(&self, cx: &App) -> Option<ProjectRef> {
+        let session = self.cur()?;
+        Some(ProjectRef {
+            runtime: session.runtime(cx).key().clone(),
+            root: session.cwd(cx)?,
+        })
     }
 
     /// 会话标题，远程会话后面跟上运行时名字。舞台、命令面板、通知这些地方没有侧栏那样
@@ -563,8 +565,8 @@ impl Workspace {
         )
     }
 
-    /// 活动项目在远程运行时上时，工具面板该说的话。面板目前只读本机，这时拿不到项目
-    /// 根，但不能说成「没有项目」：项目明明打开着，只是在另一台机器上。
+    /// 活动项目在远程运行时上时，只支持本机的面板（插件、历史）该说的话。不能说成
+    /// 「没有项目」：项目明明打开着，只是在另一台机器上。
     pub(crate) fn remote_project_notice(&self, cx: &App) -> Option<String> {
         let project = self.active_project_ref(cx)?;
         if project.runtime == crate::RuntimeKey::Local {
@@ -658,13 +660,13 @@ impl Workspace {
         self.schedule_visible_refresh(cx);
     }
 
-    fn project_ui_key(&self, cx: &App) -> Option<String> {
-        self.active_project_root(cx)
-            .map(|root| crate::sidebar_order::normalize_project_root(&root))
-            .filter(|root| !root.is_empty())
+    fn project_ui_key(&self, cx: &App) -> Option<ProjectRef> {
+        self.active_project_ref(cx)
+            .map(|project| project.at(crate::sidebar_order::normalize_project_root(&project.root)))
+            .filter(|project| !project.root.is_empty())
     }
 
-    fn park_active_project_ui(&mut self) -> Option<String> {
+    fn park_active_project_ui(&mut self) -> Option<ProjectRef> {
         park_project_ui(
             &mut self.active_session_ui,
             &mut self.project_ui,
@@ -1906,14 +1908,11 @@ impl Workspace {
         }) {
             self.active_project = None;
         }
-        // 项目抽屉（文件树等）的界面状态目前只有本机项目有。
-        if project.runtime == RuntimeKey::Local {
-            let project_key = crate::sidebar_order::normalize_project_root(&root);
-            self.project_ui.remove(&project_key);
-            if self.active_project_ui_key.as_deref() == Some(project_key.as_str()) {
-                self.active_project_ui_key = None;
-                let _ = self.active_session_ui.take_project_ui();
-            }
+        let project_key = project.at(crate::sidebar_order::normalize_project_root(&root));
+        self.project_ui.remove(&project_key);
+        if self.active_project_ui_key.as_ref() == Some(&project_key) {
+            self.active_project_ui_key = None;
+            let _ = self.active_session_ui.take_project_ui();
         }
         self.save_state(cx);
         self.schedule_visible_refresh(cx);

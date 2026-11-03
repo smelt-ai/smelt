@@ -1,9 +1,16 @@
 use super::{
-    GitTab, MIN_TOOL_PANEL_WIDTH, SessionRouteArchive, SessionUiState, StageCover, WorkspaceRoute,
-    agents::agent_engine_kinds, resync_session_with_project_ui, settings::ConversationAgentKind,
-    swap_session_ui_state, tool_panel,
+    GitTab, MIN_TOOL_PANEL_WIDTH, ProjectRef, RuntimeKey, SessionRouteArchive, SessionUiState,
+    StageCover, WorkspaceRoute, agents::agent_engine_kinds, resync_session_with_project_ui,
+    settings::ConversationAgentKind, swap_session_ui_state, tool_panel,
 };
 use std::collections::{HashMap, HashSet};
+
+fn local(root: &str) -> ProjectRef {
+    ProjectRef {
+        runtime: RuntimeKey::Local,
+        root: root.to_string(),
+    }
+}
 
 fn drawer_ui(tab: tool_panel::ToolPanelTab, git_tab: GitTab, expanded: &str) -> SessionUiState {
     SessionUiState {
@@ -50,14 +57,14 @@ fn same_project_session_switch_keeps_live_drawer() {
     );
 
     let mut project_ui = HashMap::new();
-    let mut active_key = Some("/tmp/project-a".into());
+    let mut active_key = Some(local("/tmp/project-a"));
     resync_session_with_project_ui(
         &mut active,
         &mut old_session,
         &mut new_session,
         &mut project_ui,
         &mut active_key,
-        Some("/tmp/project-a".into()),
+        Some(local("/tmp/project-a")),
     );
 
     assert!(matches!(active.git_tab, GitTab::Log));
@@ -71,7 +78,7 @@ fn same_project_session_switch_keeps_live_drawer() {
         Some("/tmp/project-a/src/main.rs")
     );
     assert!(matches!(old_session.git_tab, GitTab::Log));
-    assert_eq!(active_key.as_deref(), Some("/tmp/project-a"));
+    assert_eq!(active_key, Some(local("/tmp/project-a")));
 }
 
 #[test]
@@ -90,14 +97,14 @@ fn different_project_session_switch_restores_each_drawer() {
     );
 
     let mut project_ui = HashMap::new();
-    let mut active_key = Some("/tmp/project-a".into());
+    let mut active_key = Some(local("/tmp/project-a"));
     resync_session_with_project_ui(
         &mut active,
         &mut session_a,
         &mut session_b,
         &mut project_ui,
         &mut active_key,
-        Some("/tmp/project-b".into()),
+        Some(local("/tmp/project-b")),
     );
 
     assert!(matches!(
@@ -114,7 +121,7 @@ fn different_project_session_switch_restores_each_drawer() {
         &mut session_a,
         &mut project_ui,
         &mut active_key,
-        Some("/tmp/project-a".into()),
+        Some(local("/tmp/project-a")),
     );
 
     assert!(matches!(active.git_tab, GitTab::Log));
@@ -123,6 +130,41 @@ fn different_project_session_switch_restores_each_drawer() {
         tool_panel::ToolPanelTab::Git
     ));
     assert!(active.expanded.contains("/tmp/project-a/src"));
+}
+
+#[test]
+fn same_path_on_another_machine_parks_its_own_drawer() {
+    let mut active = drawer_ui(
+        tool_panel::ToolPanelTab::Git,
+        GitTab::Log,
+        "/home/u/app/src",
+    );
+    let mut local_session = SessionUiState::default();
+    let mut remote_session = drawer_ui(
+        tool_panel::ToolPanelTab::Files,
+        GitTab::Changes,
+        "/home/u/app/lib",
+    );
+    let remote = ProjectRef {
+        runtime: RuntimeKey::Remote("box".into()),
+        root: "/home/u/app".into(),
+    };
+
+    let mut project_ui = HashMap::new();
+    let mut active_key = Some(local("/home/u/app"));
+    resync_session_with_project_ui(
+        &mut active,
+        &mut local_session,
+        &mut remote_session,
+        &mut project_ui,
+        &mut active_key,
+        Some(remote.clone()),
+    );
+
+    // 另一台机器上同一路径的项目没有停放过抽屉，不能拿本机那份盖上来。
+    assert!(active.expanded.contains("/home/u/app/lib"));
+    assert!(project_ui.contains_key(&local("/home/u/app")));
+    assert_eq!(active_key, Some(remote));
 }
 
 #[test]

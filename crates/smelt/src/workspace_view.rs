@@ -718,9 +718,10 @@ impl Workspace {
     /// 保存并切换。与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩）。
     pub(crate) fn render_unsaved_file_confirm(
         &self,
-        target: String,
+        target: crate::file_tree::FileRef,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let target = target.path;
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -825,7 +826,7 @@ impl Workspace {
     /// 历史内容由 Tool Panel 统一承载；停靠和全屏只改变外层容器尺寸，
     /// 不在历史视图内部做特殊布局分支。
     pub(crate) fn render_history_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let cwd = self.active_project_root(cx);
+        let cwd = self.active_local_project_root(cx);
         let restrict_to_kind = self.history_engine_override(cwd.as_deref(), cx);
         let (agent, profile_id) = self.history_source(cwd.as_deref(), cx);
         let list_key = cwd

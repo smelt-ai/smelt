@@ -34,7 +34,7 @@ impl Workspace {
     ///
     /// 同时记下用户此刻在列表里看到的这条改动（状态码 + 运行时算好的内容指纹），确认
     /// 时原样带过去：agent 在这之后又写了什么，运行时对不上就拒绝，不跟着一起丢。
-    pub fn start_discard_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
+    pub fn start_discard_file(&mut self, root: ProjectRef, path: String, cx: &mut Context<Self>) {
         let Some(seen) = self
             .git_status
             .get(&root)
@@ -79,11 +79,14 @@ impl Workspace {
             &root,
             GitWrite::DiscardFile,
             // 行自带仓库根，直接在它自己的仓库里丢弃。
-            move || {
-                git_call::<GitDiscardFileCall>(GitDiscardFileParams {
-                    root: git_root,
-                    seen: git_seen,
-                })
+            move |client: &RuntimeClient| {
+                git_call::<GitDiscardFileCall>(
+                    client,
+                    GitDiscardFileParams {
+                        root: git_root.root,
+                        seen: git_seen,
+                    },
+                )
                 .map(drop)
             },
             move |this, result, cx| {
@@ -128,7 +131,7 @@ impl Workspace {
     }
 
     /// 点「丢弃块」：先弹确认，不直接动文件。
-    pub fn start_discard_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) {
+    pub fn start_discard_hunk(&mut self, root: ProjectRef, idx: usize, cx: &mut Context<Self>) {
         self.discard_hunk_target = Some((root, idx));
         cx.notify();
     }
@@ -165,33 +168,33 @@ impl Workspace {
     /// 请运行时监听某个项目（文件在运行时那台机器上）：之后有真实文件变化，运行时发
     /// `project.changed`，见 [`Self::on_project_changed`]。每个 root 只登记一次；运行时
     /// 重连后监听随旧进程没了，清空重新登记。活动项目被选中时就装上，不必等打开 Git 页。
-    pub fn ensure_git_watch(&mut self, root: String, cx: &mut Context<Self>) {
+    pub fn ensure_git_watch(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         if !self.watched_projects.insert(root.clone()) {
             return;
         }
         // 立刻拉一次初值：之后纯靠文件事件驱动，但首帧得先有数据，
         // 否则文件一直不变时侧栏 GIT 角标永远出不来。
         self.ensure_git_status(root.clone(), cx);
+        let client = crate::runtime_call::target(&root.runtime, cx);
         cx.spawn(async move |this, cx| {
-            let watch_root = root.clone();
+            let watch_root = root.root.clone();
             let watched = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::runtime_call::call::<
+                    crate::runtime_call::call_on::<
                         smelt_runtime_client::protocol::files::ProjectWatchCall,
                     >(
+                        &client?,
                         smelt_runtime_client::protocol::files::ProjectRootParams {
                             root: watch_root,
                         },
                         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                     )
+                    .map_err(crate::runtime_call::error_text)
                 })
                 .await;
             if let Err(error) = watched {
-                eprintln!(
-                    "[git] 请运行时监听 {root} 失败：{}",
-                    crate::runtime_call::error_text(error)
-                );
+                eprintln!("[git] 请运行时监听 {} 失败：{error}", root.root);
                 // 下次刷新再试。
                 let _ = this.update(cx, |this, _| this.watched_projects.remove(&root));
             }
@@ -203,13 +206,49 @@ impl Workspace {
     /// 即时刷新。监听是递归的，子仓里的改动也会到这里——所以要把该项目下**所有**仓库
     /// 的 status 都标脏，只刷项目根会让子仓改动在面板里冻结。ensure_* 内部有 inflight
     /// 去重，重复通知不会叠并发。
-    pub(crate) fn on_project_changed(&mut self, root: String, cx: &mut Context<Self>) {
+    ///
+    /// 文件树的目录列表也在这里标旧；打开着的文件没改过就重读，改过就提示。
+    pub(crate) fn on_project_changed(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         if !self.watched_projects.contains(&root) {
             return;
         }
+        self.mark_project_dirs_stale(&root, cx);
+        self.on_open_file_project_changed(&root, cx);
+        self.forget_repo_info_under(&root, cx);
         self.invalidate_project_git_status(&root, cx);
         self.ensure_git_repos(root, cx);
         cx.notify();
+    }
+
+    /// 某台机器断开：它替我们建的监听随连接没了，重连后重新登记。断线期间分支可能变了，
+    /// 仓库信息也一并重取。
+    pub(crate) fn forget_project_watches(&mut self, runtime: &crate::RuntimeKey) {
+        self.watched_projects
+            .retain(|project| &project.runtime != runtime);
+        self.repo_info_stale.extend(
+            self.repo_info
+                .keys()
+                .filter(|cwd| &cwd.runtime == runtime)
+                .cloned(),
+        );
+    }
+
+    /// 远程项目里的文件变了（可能切了分支）：这个项目下各会话目录的仓库信息下次刷新重取，
+    /// 取回来之前旧分支名照常显示。本机的按 5 秒过期，不用管。
+    fn forget_repo_info_under(&mut self, project: &ProjectRef, cx: &App) {
+        if project.runtime == crate::RuntimeKey::Local {
+            return;
+        }
+        let style = crate::runtimes::path_style(&project.runtime, cx);
+        let stale: Vec<ProjectRef> = self
+            .repo_info
+            .keys()
+            .filter(|cwd| {
+                cwd.runtime == project.runtime && style.starts_with(&cwd.root, &project.root)
+            })
+            .cloned()
+            .collect();
+        self.repo_info_stale.extend(stale);
     }
 
     /// 确保某 cwd 的当前分支缓存新鲜（>5s 或缺失就后台刷新），供侧栏显示分支名。跟
@@ -217,30 +256,41 @@ impl Workspace {
     /// 当前打开的那个），所以单独走一套缓存，TTL 也放宽到 5s——分支不常变，没必要跟
     /// git status 一样 1.5s 就重跑。非 git 目录（比如临时终端的 $HOME）缓存 None，
     /// 同样不重复重试。
-    pub fn ensure_repo_info(&mut self, cwd: String, cx: &mut Context<Self>) {
-        if cwd.is_empty() {
+    ///
+    /// 远程机器上的取一次就留着：每 5 秒给每个远程会话过一趟网络不值得。那台机器报
+    /// 项目文件变化、或断线重连时才重取（见 [`Self::forget_repo_info_under`]）。
+    pub fn ensure_repo_info(&mut self, cwd: ProjectRef, cx: &mut Context<Self>) {
+        if cwd.root.is_empty() {
             return;
         }
-        let fresh = self
-            .repo_info
-            .get(&cwd)
-            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(5));
+        let remote = cwd.runtime != crate::RuntimeKey::Local;
+        let fresh = self.repo_info.get(&cwd).is_some_and(|(t, _)| {
+            if remote {
+                !self.repo_info_stale.contains(&cwd)
+            } else {
+                t.elapsed() < std::time::Duration::from_secs(5)
+            }
+        });
         if fresh || self.repo_info_inflight.contains(&cwd) {
             return;
         }
+        let Ok(client) = crate::runtime_call::target(&cwd.runtime, cx) else {
+            return;
+        };
         self.repo_info_inflight.insert(cwd.clone());
         cx.spawn(async move |this, cx| {
-            let c = cwd.clone();
+            let params = root_params(&cwd);
             let info = cx
                 .background_executor()
                 .spawn(async move {
-                    git_call::<GitRepoInfoCall>(root_params(&c))
+                    git_call::<GitRepoInfoCall>(&client, params)
                         .ok()
                         .and_then(|result| result.info)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.repo_info_inflight.remove(&cwd);
+                this.repo_info_stale.remove(&cwd);
                 this.repo_info.insert(cwd, (Instant::now(), info));
                 cx.notify();
             });
@@ -253,18 +303,15 @@ impl Workspace {
     /// 不直接 `.remove()`：旧数据留着继续显示，新数据到达后无缝替换。代数用于识别
     /// 请求执行期间是否又发生了变化：成功的中间快照可以先显示，但仍保持过期并立即
     /// 补拉当前代，不能把它写成“新鲜”后再等一轮 TTL。
-    fn mark_git_status_dirty(&mut self, root: &str) {
-        let generation = self
-            .git_status_generation
-            .entry(root.to_string())
-            .or_default();
+    fn mark_git_status_dirty(&mut self, root: &ProjectRef) {
+        let generation = self.git_status_generation.entry(root.clone()).or_default();
         *generation = generation.wrapping_add(1);
         if let Some((t, _)) = self.git_status.get_mut(root) {
             *t = Instant::now() - std::time::Duration::from_secs(3600);
         }
     }
 
-    pub fn invalidate_git_status(&mut self, root: &str, cx: &mut Context<Self>) {
+    pub fn invalidate_git_status(&mut self, root: &ProjectRef, cx: &mut Context<Self>) {
         self.mark_git_status_dirty(root);
         self.schedule_visible_refresh(cx);
     }
@@ -273,10 +320,16 @@ impl Workspace {
     ///
     /// 文件监听是整棵目录递归的，一次事件分不出是哪个仓库变了；全部标脏交给
     /// `ensure_git_status` 的 TTL 与 inflight 去重去抓实际开销。
-    pub fn invalidate_project_git_status(&mut self, project_root: &str, cx: &mut Context<Self>) {
-        let roots: Vec<String> = match self.git_repos.get(project_root) {
-            Some((_, set)) if !set.repos.is_empty() => set.roots().map(str::to_string).collect(),
-            _ => vec![project_root.to_string()],
+    pub fn invalidate_project_git_status(
+        &mut self,
+        project_root: &ProjectRef,
+        cx: &mut Context<Self>,
+    ) {
+        let roots: Vec<ProjectRef> = match self.git_repos.get(project_root) {
+            Some((_, set)) if !set.repos.is_empty() => {
+                set.roots().map(|root| project_root.at(root)).collect()
+            }
+            _ => vec![project_root.clone()],
         };
         for root in roots {
             self.mark_git_status_dirty(&root);
@@ -288,20 +341,24 @@ impl Workspace {
     ///
     /// 发现比 status 稳定得多（新增/删除一个仓库是低频事件），所以 TTL 取 15s，
     /// 而不是跟 status 一样 1.5s——它要扫目录还要跑多次 rev-parse，往返成本高。
-    pub fn ensure_git_repos(&mut self, project_root: String, cx: &mut Context<Self>) {
+    pub fn ensure_git_repos(&mut self, project_root: ProjectRef, cx: &mut Context<Self>) {
         let fresh = self
             .git_repos
             .get(&project_root)
             .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(15));
-        if !fresh && !self.git_repos_inflight.contains(&project_root) {
+        let client = crate::runtime_call::target(&project_root.runtime, cx);
+        if !fresh
+            && !self.git_repos_inflight.contains(&project_root)
+            && let Ok(client) = client
+        {
             self.git_repos_inflight.insert(project_root.clone());
             let root_for_task = project_root.clone();
             cx.spawn(async move |this, cx| {
-                let r = root_for_task.clone();
+                let params = root_params(&root_for_task);
                 let found = cx
                     .background_executor()
                     .spawn(async move {
-                        git_call::<GitDiscoverCall>(root_params(&r)).unwrap_or_default()
+                        git_call::<GitDiscoverCall>(&client, params).unwrap_or_default()
                     })
                     .await;
                 let _ = this.update(cx, |this, cx| {
@@ -326,8 +383,10 @@ impl Workspace {
 
         // 每个已知仓库都要有自己的 status；发现还没回来时至少先拉项目根的，
         // 首帧不至于空白。
-        let roots: Vec<String> = match self.git_repos.get(&project_root) {
-            Some((_, set)) if !set.repos.is_empty() => set.roots().map(str::to_string).collect(),
+        let roots: Vec<ProjectRef> = match self.git_repos.get(&project_root) {
+            Some((_, set)) if !set.repos.is_empty() => {
+                set.roots().map(|root| project_root.at(root)).collect()
+            }
             _ => vec![project_root.clone()],
         };
         for root in roots {
@@ -339,8 +398,8 @@ impl Workspace {
     ///
     /// 切仓库要重置提交框：提交信息是写给某个仓库的，把上一个仓库的描述
     /// 留在输入框里只会造成误提交。diff 预览同理，它属于旧仓库的文件。
-    pub fn set_active_git_repo(&mut self, root: String, cx: &mut Context<Self>) {
-        if self.active_git_repo.as_deref() == Some(root.as_str()) {
+    pub fn set_active_git_repo(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
+        if self.active_git_repo.as_ref() == Some(&root) {
             return;
         }
         self.active_git_repo = Some(root);
@@ -352,23 +411,21 @@ impl Workspace {
     /// 项目里第一个有未提交改动的仓库（按发现顺序，项目根在前）。
     ///
     /// 只在用户还没亲自选过仓库时用。
-    fn first_repo_with_changes(&self, project_root: &str) -> Option<String> {
+    fn first_repo_with_changes(&self, project_root: &ProjectRef) -> Option<ProjectRef> {
         let (_, set) = self.git_repos.get(project_root)?;
-        set.roots()
-            .find(|root| {
-                self.git_status
-                    .get(*root)
-                    .is_some_and(|(_, status)| status.ok && !status.files.is_empty())
-            })
-            .map(str::to_string)
+        set.roots().map(|root| project_root.at(root)).find(|root| {
+            self.git_status
+                .get(root)
+                .is_some_and(|(_, status)| status.ok && !status.files.is_empty())
+        })
     }
 
     /// 当前写操作（提交/推送/分支）的目标仓库根。没打开项目时为 None。
-    /// 所有会改仓库状态的入口都走这里，不得直接用 `active_project_root`：
+    /// 所有会改仓库状态的入口都走这里，不得直接用 `active_project_ref`：
     /// 多仓工作区里项目根只是其中一个仓库，把它当成唯一写入点正是
     /// “子仓改动能暂存却提交不出去”的根因。
-    pub fn git_write_target(&self, cx: &mut Context<Self>) -> Option<String> {
-        let project_root = self.active_project_root(cx)?;
+    pub fn git_write_target(&self, cx: &mut Context<Self>) -> Option<ProjectRef> {
+        let project_root = self.active_project_ref(cx)?;
         Some(self.active_git_repo_root(&project_root))
     }
 
@@ -376,17 +433,23 @@ impl Workspace {
     ///
     /// 选中的仓库已经不在发现结果里（删了、或换了项目）就回退到项目根，
     /// 不能拿着一个不存在的路径去跑 git。
-    pub fn active_git_repo_root(&self, project_root: &str) -> String {
+    pub fn active_git_repo_root(&self, project_root: &ProjectRef) -> ProjectRef {
         // 没选过就落在第一个有改动的仓库上。不把这个落点写进 `active_git_repo`：
         // 写进去等于替用户做了选择，那个仓库提交干净之后就再也不会挪窝，
         // 别的仓库有改动也看不到 diff 预览。
         let fallback = self.first_repo_with_changes(project_root);
-        resolve_git_write_target(
-            project_root,
-            self.active_git_repo.as_deref(),
+        // 选过的仓库在别的机器上（换了项目）就当没选过。
+        let selected = self
+            .active_git_repo
+            .as_ref()
+            .filter(|repo| repo.runtime == project_root.runtime)
+            .map(|repo| repo.root.as_str());
+        project_root.at(resolve_git_write_target(
+            &project_root.root,
+            selected,
             self.git_repos.get(project_root).map(|(_, set)| set),
-            fallback.as_deref(),
-        )
+            fallback.as_ref().map(|repo| repo.root.as_str()),
+        ))
     }
 
     /// Git 视图：查看某个改动文件的 diff。已跟踪文件用 `git diff HEAD`，
@@ -394,7 +457,7 @@ impl Workspace {
     /// 确保某 root 的 git status 缓存新鲜（>1.5s 或缺失就后台刷新；ensure_git_watch
     /// 建的监听命中时会主动标脏缓存，比 1.5s 轮询更快触发这里重新拉取）。
     /// 绝不阻塞 render：git status 在大仓要 ~90ms，同步跑就是掉帧元凶。
-    pub fn ensure_git_status(&mut self, root: String, cx: &mut Context<Self>) {
+    pub fn ensure_git_status(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         let fresh = self
             .git_status
             .get(&root)
@@ -402,6 +465,9 @@ impl Workspace {
         if fresh || self.git_status_inflight.contains(&root) {
             return;
         }
+        let Ok(client) = crate::runtime_call::target(&root.runtime, cx) else {
+            return;
+        };
         let request_generation = self
             .git_status_generation
             .get(&root)
@@ -409,11 +475,11 @@ impl Workspace {
             .unwrap_or_default();
         self.git_status_inflight.insert(root.clone());
         cx.spawn(async move |this, cx| {
-            let r = root.clone();
+            let params = root_params(&root);
             let data = cx
                 .background_executor()
                 .spawn(
-                    async move { git_call::<GitStatusCall>(root_params(&r)).unwrap_or_default() },
+                    async move { git_call::<GitStatusCall>(&client, params).unwrap_or_default() },
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -495,7 +561,7 @@ impl Workspace {
     /// 确保某 root 的分支列表缓存新鲜（>1.5s 或缺失就后台刷新），Git 页头部分支切换
     /// 下拉用。`for-each-ref` 一次传两个 pattern 拿全 `refs/heads` + `refs/remotes`，
     /// 靠 refname 前缀区分本地/远程，不用起两次 git 进程。
-    pub fn ensure_branches(&mut self, root: String, cx: &mut Context<Self>) {
+    pub fn ensure_branches(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         let fresh = self
             .branches
             .get(&root)
@@ -503,14 +569,17 @@ impl Workspace {
         if fresh || self.branches_inflight.contains(&root) {
             return;
         }
+        let Ok(client) = crate::runtime_call::target(&root.runtime, cx) else {
+            return;
+        };
         let request_generation = self.branches_generation.get(&root).copied().unwrap_or(0);
         self.branches_inflight.insert(root.clone());
         cx.spawn(async move |this, cx| {
-            let r = root.clone();
+            let params = root_params(&root);
             let list = cx
                 .background_executor()
                 .spawn(
-                    async move { git_call::<GitBranchesCall>(root_params(&r)).unwrap_or_default() },
+                    async move { git_call::<GitBranchesCall>(&client, params).unwrap_or_default() },
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -529,18 +598,15 @@ impl Workspace {
     }
 
     /// 分支集合变了。在途的 `for-each-ref` 不得再把旧列表标成新鲜。
-    fn bump_branches_generation(&mut self, root: &str) {
-        let generation = self
-            .branches_generation
-            .entry(root.to_string())
-            .or_default();
+    fn bump_branches_generation(&mut self, root: &ProjectRef) {
+        let generation = self.branches_generation.entry(root.clone()).or_default();
         *generation = generation.wrapping_add(1);
     }
 
     /// Git 页组页面前的数据准备：失效跨仓库 diff、默认打开全部改动、懒建输入框。
     /// 缓存刷新（status / branches / watch）由可见数据刷新统一调度。
     pub(crate) fn prepare_git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project_root) = self.active_project_root(cx) else {
+        let Some(project_root) = self.active_project_ref(cx) else {
             return;
         };
         // 预览与历史都跟随当前提交目标仓库，而不是恒为项目根。
@@ -553,8 +619,10 @@ impl Workspace {
         }
         // 每个仓库一个提交框：提交信息属于仓库，不能跨仓库串味。
         // 同时回收已经不在发现结果里的仓库，避免关掉项目后输入框实体一直挂着。
-        let live_roots: Vec<String> = match self.git_repos.get(&project_root) {
-            Some((_, set)) if !set.repos.is_empty() => set.roots().map(str::to_string).collect(),
+        let live_roots: Vec<ProjectRef> = match self.git_repos.get(&project_root) {
+            Some((_, set)) if !set.repos.is_empty() => {
+                set.roots().map(|root| project_root.at(root)).collect()
+            }
             _ => vec![project_root.clone()],
         };
         self.commit_msg_inputs
@@ -620,13 +688,22 @@ impl Workspace {
     /// Git 页分支切换下拉：checkout 目标分支（本地分支直接切；远程分支传短名，靠 git
     /// 内建 DWIM 自动建好跟踪分支）。
     /// 成功后清掉 status/分支缓存并刷新可见数据（文件、ahead/behind 全变了）。
-    pub fn checkout_branch(&mut self, root: String, branch: String, cx: &mut Context<Self>) {
+    pub fn checkout_branch(&mut self, root: ProjectRef, branch: String, cx: &mut Context<Self>) {
         let key = root.clone();
         let status_root = root.clone();
         self.spawn_git(
             &key,
             GitWrite::Checkout,
-            move || git_call::<GitCheckoutCall>(GitBranchParams { root, branch }).map(drop),
+            move |client: &RuntimeClient| {
+                git_call::<GitCheckoutCall>(
+                    client,
+                    GitBranchParams {
+                        root: root.root,
+                        branch,
+                    },
+                )
+                .map(drop)
+            },
             move |this, result, cx| match result {
                 // 切分支后文件列表、ahead/behind 都变了，标脏再刷新；
                 // 分支列表本身（有哪些分支）不受切换影响，不用跟着失效。
@@ -641,7 +718,7 @@ impl Workspace {
     /// 会受影响），文案要分开写。
     pub fn start_delete_branch(
         &mut self,
-        root: String,
+        root: ProjectRef,
         branch: String,
         remote: bool,
         cx: &mut Context<Self>,
@@ -686,12 +763,15 @@ impl Workspace {
         let started = self.spawn_git(
             &root,
             op,
-            move || {
-                git_network_call::<GitBranchDeleteCall>(GitBranchDeleteParams {
-                    root: git_root,
-                    branch: git_branch,
-                    remote,
-                })
+            move |client: &RuntimeClient| {
+                git_network_call::<GitBranchDeleteCall>(
+                    client,
+                    GitBranchDeleteParams {
+                        root: git_root.root,
+                        branch: git_branch,
+                        remote,
+                    },
+                )
                 .map(drop)
             },
             move |this, result, cx| match result {
@@ -715,13 +795,22 @@ impl Workspace {
     ///
     /// 冲突时 git 会以非 0 退出并把冲突文件写进工作区——此时**不自动 abort**，
     /// 保留现场让人去解，只把提示报出来（自动回滚会让人措手不及）。
-    pub fn merge_branch(&mut self, root: String, branch: String, cx: &mut Context<Self>) {
+    pub fn merge_branch(&mut self, root: ProjectRef, branch: String, cx: &mut Context<Self>) {
         let key = root.clone();
         let done_root = root.clone();
         self.spawn_git(
             &key,
             GitWrite::Merge,
-            move || git_call::<GitMergeCall>(GitBranchParams { root, branch }).map(drop),
+            move |client: &RuntimeClient| {
+                git_call::<GitMergeCall>(
+                    client,
+                    GitBranchParams {
+                        root: root.root,
+                        branch,
+                    },
+                )
+                .map(drop)
+            },
             move |this, result, cx| match result {
                 Ok(()) => {
                     this.invalidate_git_status(&done_root, cx);
@@ -736,13 +825,13 @@ impl Workspace {
     /// Git 页文件列表勾选框：把某个改动文件加入暂存区（`git add --`，untracked/修改/
     /// 删除都适用）。纯本地索引改动、可逆，不像 commit/push 那样需要走"发到终端让人
     /// 确认"那一套，直接执行。成功后清 git_status 缓存并刷新状态。
-    pub fn stage_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
+    pub fn stage_file(&mut self, root: ProjectRef, path: String, cx: &mut Context<Self>) {
         self.run_git_index_op(root, path, true, cx);
     }
 
     /// 文件列表取消勾选：把已暂存的改动移出暂存区（`git reset --`），不影响工作区
     /// 内容本身，随时能重新勾选加回去。
-    pub fn unstage_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
+    pub fn unstage_file(&mut self, root: ProjectRef, path: String, cx: &mut Context<Self>) {
         self.run_git_index_op(root, path, false, cx);
     }
 
@@ -750,7 +839,7 @@ impl Workspace {
     /// 几十个文件就是几十个进程，而且每个都会各自失效一次 status。
     pub fn stage_paths(
         &mut self,
-        root: String,
+        root: ProjectRef,
         paths: Vec<String>,
         stage: bool,
         cx: &mut Context<Self>,
@@ -769,7 +858,7 @@ impl Workspace {
         self.spawn_git(
             &key,
             op,
-            move || stage_or_unstage(root, paths, stage),
+            move |client: &RuntimeClient| stage_or_unstage(client, root.root, paths, stage),
             move |this, result, cx| {
                 if let Err(err) = result {
                     this.report_background_error(format!("{failure}失败：{err}"));
@@ -788,7 +877,7 @@ impl Workspace {
     /// stage_file/unstage_file 共用的后台执行 + 缓存失效逻辑。
     fn run_git_index_op(
         &mut self,
-        root: String,
+        root: ProjectRef,
         path: String,
         stage: bool,
         cx: &mut Context<Self>,
@@ -802,7 +891,9 @@ impl Workspace {
         let started = self.spawn_git(
             &key,
             GitWrite::IndexFile,
-            move || stage_or_unstage(root, vec![git_path], stage),
+            move |client: &RuntimeClient| {
+                stage_or_unstage(client, root.root, vec![git_path], stage)
+            },
             move |this, result, cx| match result {
                 Ok(()) => {
                     this.mark_git_status_dirty(&done_root);
@@ -838,10 +929,7 @@ impl Workspace {
             .git_diff
             .as_ref()
             .map(|diff| (diff.path.clone(), diff.aggregate))
-            .and_then(|(path, aggregate)| {
-                self.current_local_cwd(cx)
-                    .map(|root| (root, path, aggregate))
-            })
+            .and_then(|(path, aggregate)| self.current_cwd(cx).map(|root| (root, path, aggregate)))
         {
             if aggregate {
                 self.open_all_diffs(root, cx);
@@ -855,7 +943,7 @@ impl Workspace {
 
     /// 右侧文件树是聚合 diff 的导航，不应把主面板切成只能看到一个文件的视图。
     /// 聚合 diff 尚未返回时先记住目标，下一帧在文件标题处定位。
-    pub fn open_aggregate_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
+    pub fn open_aggregate_file(&mut self, root: ProjectRef, path: String, cx: &mut Context<Self>) {
         // 点哪个仓库的文件，提交目标就跟到哪个仓库：diff 预览、提交框、头部分支
         // 必须指向同一个仓库，否则看着 A 的 diff 却提交到了 B。
         self.set_active_git_repo(root.clone(), cx);
@@ -998,7 +1086,7 @@ impl Workspace {
     ///
     /// 只暂存一块、其余留在工作区，是 agent 写的代码「对一半」时最需要的动作：挑出
     /// 对的先存下来，剩下的继续让它改。
-    pub fn stage_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) {
+    pub fn stage_hunk(&mut self, root: ProjectRef, idx: usize, cx: &mut Context<Self>) {
         self.apply_hunk(root, idx, GitPatchAction::Stage, GitWrite::StageHunk, cx);
     }
 
@@ -1006,7 +1094,7 @@ impl Workspace {
     ///
     /// 只在「已暂存」视图下给：那时 diff 就是索引相对 HEAD 的差异，reverse 回去
     /// 正好把这一块退回工作区，文件内容不受影响。
-    pub fn unstage_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) {
+    pub fn unstage_hunk(&mut self, root: ProjectRef, idx: usize, cx: &mut Context<Self>) {
         self.apply_hunk(
             root,
             idx,
@@ -1021,7 +1109,7 @@ impl Workspace {
     /// **会真的改用户的文件且不进 reflog**，调用方必须先让用户确认过。
     ///
     /// 返回 false 表示没有占住这个仓库：确认弹窗要留着。
-    fn discard_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) -> bool {
+    fn discard_hunk(&mut self, root: ProjectRef, idx: usize, cx: &mut Context<Self>) -> bool {
         self.apply_hunk(
             root,
             idx,
@@ -1037,7 +1125,7 @@ impl Workspace {
     /// 下标去点第二块，改的就是别的地方（`-U0` 那次错位是同一类问题）。
     fn apply_hunk(
         &mut self,
-        root: String,
+        root: ProjectRef,
         idx: usize,
         action: GitPatchAction,
         op: GitWrite,
@@ -1064,12 +1152,15 @@ impl Workspace {
         self.spawn_git(
             &key,
             op,
-            move || {
-                let Err(raw) = git_call::<GitApplyPatchCall>(GitApplyPatchParams {
-                    root,
-                    action,
-                    patch,
-                }) else {
+            move |client: &RuntimeClient| {
+                let Err(raw) = git_call::<GitApplyPatchCall>(
+                    client,
+                    GitApplyPatchParams {
+                        root: root.root,
+                        action,
+                        patch,
+                    },
+                ) else {
                     return Ok(());
                 };
                 // apply 失败最常见的原因是这个文件已经部分暂存过：当前 diff 是
@@ -1097,7 +1188,7 @@ impl Workspace {
     /// 跑 git + 着色放后台，用 file_gen 丢弃过期结果。
     pub fn open_diff(
         &mut self,
-        root: String,
+        root: ProjectRef,
         path: String,
         untracked: bool,
         cx: &mut Context<Self>,
@@ -1129,8 +1220,9 @@ impl Workspace {
         self.schedule_visible_refresh(cx);
         cx.notify();
 
+        let client = crate::runtime_call::target(&root.runtime, cx);
         cx.spawn(async move |this, cx| {
-            let (r, p) = (root.clone(), path.clone());
+            let (r, p) = (root.root.clone(), path.clone());
             let parsed = cx
                 .background_executor()
                 .spawn(async move {
@@ -1140,16 +1232,22 @@ impl Workspace {
                         has_staged,
                         is_gitlink,
                         worktree_file,
-                    } = git_call::<GitFileDiffCall>(GitFileDiffParams {
-                        root: r,
-                        path: p,
-                        untracked,
-                        scope,
-                    })
-                    .unwrap_or_else(|err| GitFileDiffResult {
-                        text: format!("无法执行 git diff：{err}"),
-                        ..Default::default()
-                    });
+                    } = client
+                        .and_then(|client| {
+                            git_call::<GitFileDiffCall>(
+                                &client,
+                                GitFileDiffParams {
+                                    root: r,
+                                    path: p,
+                                    untracked,
+                                    scope,
+                                },
+                            )
+                        })
+                        .unwrap_or_else(|err| GitFileDiffResult {
+                            text: format!("无法执行 git diff：{err}"),
+                            ..Default::default()
+                        });
                     let files = parse_diff_files(&text);
                     let parsed = parse_diff(&text);
                     (
@@ -1191,12 +1289,12 @@ impl Workspace {
 
     /// 默认预览工作区的全部改动。聚合视图只读，避免把跨文件的 hunk 误用于
     /// stage/discard；右侧文件树只负责在聚合列表中定位。
-    pub(super) fn open_all_diffs(&mut self, root: String, cx: &mut Context<Self>) {
+    pub(super) fn open_all_diffs(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         self.pending_diff_file = None;
         self.open_all_diffs_at(root, cx);
     }
 
-    fn open_all_diffs_at(&mut self, root: String, cx: &mut Context<Self>) {
+    fn open_all_diffs_at(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         let scope = self.diff_scope;
         let status_files = self
             .git_status
@@ -1232,18 +1330,25 @@ impl Workspace {
         self.schedule_visible_refresh(cx);
         cx.notify();
 
+        let client = crate::runtime_call::target(&root.runtime, cx);
         cx.spawn(async move |this, cx| {
-            let r = root.clone();
+            let r = root.root.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let text = git_call::<GitAllDiffCall>(GitAllDiffParams {
-                        root: r,
-                        scope,
-                        untracked_paths,
-                    })
-                    .map(|result| result.text)
-                    .unwrap_or_else(|err| format!("无法执行 git diff：{err}"));
+                    let text = client
+                        .and_then(|client| {
+                            git_call::<GitAllDiffCall>(
+                                &client,
+                                GitAllDiffParams {
+                                    root: r,
+                                    scope,
+                                    untracked_paths,
+                                },
+                            )
+                        })
+                        .map(|result| result.text)
+                        .unwrap_or_else(|err| format!("无法执行 git diff：{err}"));
                     let parsed = parse_diff_with_file_headers(&text);
                     let files = parse_diff_files(&text);
                     (text, parsed, files)
@@ -1310,11 +1415,11 @@ impl Workspace {
     /// 当前这份已经读完的聚合 diff 里，组件是否认这个状态路径。
     ///
     /// 读取中的视图还是上一份补丁，不能算数，否则会把待定位清掉，新补丁装上后不再滚。
-    fn loaded_aggregate_has_file(&self, root: &str, path: &str, cx: &App) -> bool {
+    fn loaded_aggregate_has_file(&self, root: &ProjectRef, path: &str, cx: &App) -> bool {
         let Some(diff) = self.git_diff.as_ref() else {
             return false;
         };
-        if diff.root != root
+        if &diff.root != root
             || !diff.aggregate
             || diff.scope != self.diff_scope
             || diff.patch.is_none()
@@ -1372,7 +1477,7 @@ impl Workspace {
     /// 不会忘记放开这个仓库，也不会用字符串对上一次的操作名。
     fn spawn_git<T, Make, Done>(
         &mut self,
-        root: &str,
+        root: &ProjectRef,
         op: GitWrite,
         make: Make,
         done: Done,
@@ -1380,16 +1485,26 @@ impl Workspace {
     ) -> bool
     where
         T: Send + 'static,
-        Make: FnOnce() -> T + Send + 'static,
+        Make: FnOnce(&RuntimeClient) -> T + Send + 'static,
         Done: FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
     {
+        let client = match crate::runtime_call::target(&root.runtime, cx) {
+            Ok(client) => client,
+            Err(error) => {
+                self.report_background_error(error);
+                return false;
+            }
+        };
         if !reserve_git_write(&mut self.git_writes, root, op) {
             return false;
         }
         cx.notify();
-        let root_key = root.to_string();
+        let root_key = root.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { make() }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { make(&client) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 release_git_write(&mut this.git_writes, &root_key, op);
                 done(this, result, cx);
@@ -1403,7 +1518,7 @@ impl Workspace {
     /// 同 [`Self::spawn_git`]，收尾时还拿得到点按钮的那个窗口（清提交框要用）。
     fn spawn_git_in<T, Make, Done>(
         &mut self,
-        root: &str,
+        root: &ProjectRef,
         op: GitWrite,
         window: &mut Window,
         make: Make,
@@ -1412,16 +1527,26 @@ impl Workspace {
     ) -> bool
     where
         T: Send + 'static,
-        Make: FnOnce() -> T + Send + 'static,
+        Make: FnOnce(&RuntimeClient) -> T + Send + 'static,
         Done: FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
     {
+        let client = match crate::runtime_call::target(&root.runtime, cx) {
+            Ok(client) => client,
+            Err(error) => {
+                self.report_background_error(error);
+                return false;
+            }
+        };
         if !reserve_git_write(&mut self.git_writes, root, op) {
             return false;
         }
         cx.notify();
-        let root_key = root.to_string();
+        let root_key = root.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { make() }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { make(&client) })
+                .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 release_git_write(&mut this.git_writes, &root_key, op);
                 done(this, result, window, cx);
@@ -1449,7 +1574,16 @@ impl Workspace {
         if self.spawn_git(
             &key,
             GitWrite::Push,
-            move || git_network_call::<GitPushCall>(GitBranchParams { root, branch }).map(drop),
+            move |client: &RuntimeClient| {
+                git_network_call::<GitPushCall>(
+                    client,
+                    GitBranchParams {
+                        root: root.root,
+                        branch,
+                    },
+                )
+                .map(drop)
+            },
             move |this, result, cx| match result {
                 Ok(()) => this.invalidate_git_status(&done_root, cx),
                 Err(err) => {
@@ -1474,7 +1608,7 @@ impl Workspace {
         work: F,
         cx: &mut Context<Self>,
     ) where
-        F: FnOnce(&str) -> Result<(), String> + Send + 'static,
+        F: FnOnce(&RuntimeClient, &ProjectRef) -> Result<(), String> + Send + 'static,
     {
         let Some(root) = self.git_write_target(cx) else {
             return;
@@ -1484,7 +1618,7 @@ impl Workspace {
         self.spawn_git(
             &key,
             op,
-            move || work(&root),
+            move |client: &RuntimeClient| work(client, &root),
             move |this, result, cx| match result {
                 Ok(()) => {
                     this.invalidate_git_status(&done_root, cx);
@@ -1536,7 +1670,7 @@ impl Workspace {
     ///
     /// 同时记下用户此刻看到的整份改动列表；运行时发现多了没见过的新文件、或哪个文件
     /// 内容又变了，就整体拒绝。
-    pub fn start_discard_all(&mut self, root: String, cx: &mut Context<Self>) {
+    pub fn start_discard_all(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         let Some(seen) = self
             .git_status
             .get(&root)
@@ -1572,14 +1706,14 @@ impl Workspace {
         };
         let key = root.clone();
         let params = GitDiscardAllParams {
-            root: root.clone(),
+            root: root.root.clone(),
             seen: seen.clone(),
         };
         let done_root = root.clone();
         let started = self.spawn_git(
             &key,
             GitWrite::DiscardChanges,
-            move || git_call::<GitDiscardAllCall>(params).map(drop),
+            move |client: &RuntimeClient| git_call::<GitDiscardAllCall>(client, params).map(drop),
             move |this, result, cx| {
                 // 被拒绝多半是列表已经过时，也要刷新，让用户看到现在的样子。
                 this.invalidate_git_status(&done_root, cx);
@@ -1638,13 +1772,16 @@ impl Workspace {
             &key,
             op,
             window,
-            move || {
-                git_network_call::<GitCommitCall>(GitCommitParams {
-                    root,
-                    message,
-                    push,
-                    branch,
-                })
+            move |client: &RuntimeClient| {
+                git_network_call::<GitCommitCall>(
+                    client,
+                    GitCommitParams {
+                        root: root.root,
+                        message,
+                        push,
+                        branch,
+                    },
+                )
                 .map(drop)
             },
             move |this, result, window, cx| match result {
@@ -1706,27 +1843,32 @@ impl Workspace {
     }
 }
 
-fn stage_or_unstage(root: String, paths: Vec<String>, stage: bool) -> Result<(), String> {
+fn stage_or_unstage(
+    client: &RuntimeClient,
+    root: String,
+    paths: Vec<String>,
+    stage: bool,
+) -> Result<(), String> {
     let params = GitPathsParams { root, paths };
     if stage {
-        git_call::<GitStageCall>(params).map(drop)
+        git_call::<GitStageCall>(client, params).map(drop)
     } else {
-        git_call::<GitUnstageCall>(params).map(drop)
+        git_call::<GitUnstageCall>(client, params).map(drop)
     }
 }
 
-fn fetch_remote(root: &str) -> Result<(), String> {
-    git_network_call::<GitFetchCall>(root_params(root)).map(drop)
+fn fetch_remote(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
+    git_network_call::<GitFetchCall>(client, root_params(root)).map(drop)
 }
 
-fn pull_rebase(root: &str) -> Result<(), String> {
-    git_network_call::<GitPullCall>(root_params(root)).map(drop)
+fn pull_rebase(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
+    git_network_call::<GitPullCall>(client, root_params(root)).map(drop)
 }
 
-fn stash_push(root: &str) -> Result<(), String> {
-    git_call::<GitStashPushCall>(root_params(root)).map(drop)
+fn stash_push(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
+    git_call::<GitStashPushCall>(client, root_params(root)).map(drop)
 }
 
-fn stash_pop(root: &str) -> Result<(), String> {
-    git_call::<GitStashPopCall>(root_params(root)).map(drop)
+fn stash_pop(client: &RuntimeClient, root: &ProjectRef) -> Result<(), String> {
+    git_call::<GitStashPopCall>(client, root_params(root)).map(drop)
 }

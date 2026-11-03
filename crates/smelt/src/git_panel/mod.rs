@@ -17,7 +17,8 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
 
-use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable};
+use crate::{GitTab, ProjectRef, Workspace, placeholder_view, resizable_split::h_resizable};
+use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::ControlCall;
 use smelt_runtime_client::protocol::git::*;
 pub use smelt_runtime_client::protocol::git::{
@@ -39,21 +40,28 @@ mod workspace;
 /// 推送、拉取、提交（可能跑 hook、可能顺带推送）这类可能等网络的操作。
 const GIT_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// git 由运行时执行，面板只发请求。必须在后台线程调用。失败给人看的原因：git 的
+/// git 由仓库所在那台机器的运行时执行，面板只发请求。客户端在主线程用
+/// [`crate::runtime_call::target`] 取，必须在后台线程调用。失败给人看的原因：git 的
 /// stderr 原样带回来，连不上运行时则是传输错误。
-pub(crate) fn git_call<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
-    crate::runtime_call::call::<C>(params, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
+pub(crate) fn git_call<C: ControlCall>(
+    client: &RuntimeClient,
+    params: C::Params,
+) -> Result<C::Result, String> {
+    crate::runtime_call::call_on::<C>(client, params, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
         .map_err(crate::runtime_call::error_text)
 }
 
-pub(crate) fn git_network_call<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
-    crate::runtime_call::call::<C>(params, GIT_NETWORK_TIMEOUT)
+pub(crate) fn git_network_call<C: ControlCall>(
+    client: &RuntimeClient,
+    params: C::Params,
+) -> Result<C::Result, String> {
+    crate::runtime_call::call_on::<C>(client, params, GIT_NETWORK_TIMEOUT)
         .map_err(crate::runtime_call::error_text)
 }
 
-fn root_params(root: &str) -> GitRootParams {
+fn root_params(root: &ProjectRef) -> GitRootParams {
     GitRootParams {
-        root: root.to_string(),
+        root: root.root.clone(),
     }
 }
 
@@ -61,7 +69,7 @@ fn root_params(root: &str) -> GitRootParams {
 
 /// diff 预览的视图状态。
 pub struct GitDiff {
-    pub root: String,
+    pub root: ProjectRef,
     pub path: String,
     pub aggregate: bool,
     pub worktree_file: Option<String>,
@@ -304,11 +312,16 @@ fn git_status_retry_delay(failure_count: u8) -> Option<std::time::Duration> {
     ))
 }
 
-fn clear_confirmed_git_index_ops(
-    pending: &mut HashMap<(String, String), PendingGitIndexOp>,
-    root: &str,
-) {
-    pending.retain(|(pending_root, _), operation| pending_root != root || !operation.completed);
+fn clear_confirmed_git_index_ops<K, Q>(
+    pending: &mut HashMap<(K, String), PendingGitIndexOp>,
+    root: &Q,
+) where
+    K: std::borrow::Borrow<Q>,
+    Q: PartialEq + ?Sized,
+{
+    pending.retain(|(pending_root, _), operation| {
+        pending_root.borrow() != root || !operation.completed
+    });
 }
 
 /// 选出写操作（提交/推送/分支）的目标仓库。
@@ -506,24 +519,32 @@ impl GitWrite {
 }
 
 /// 占住 `root` 这一个仓库。已经有写入时返回 false，调用方不要再起 git 进程。
-pub(crate) fn reserve_git_write(
-    writes: &mut HashMap<String, GitWrite>,
-    root: &str,
+pub(crate) fn reserve_git_write<K, Q>(
+    writes: &mut HashMap<K, GitWrite>,
+    root: &Q,
     op: GitWrite,
-) -> bool {
+) -> bool
+where
+    K: std::borrow::Borrow<Q> + std::hash::Hash + Eq,
+    Q: std::hash::Hash + Eq + ToOwned<Owned = K> + ?Sized,
+{
     if writes.contains_key(root) {
         return false;
     }
-    writes.insert(root.to_string(), op);
+    writes.insert(root.to_owned(), op);
     true
 }
 
 /// 只释放自己占的那一格。别的操作已经换进去时不动。
-pub(crate) fn release_git_write(
-    writes: &mut HashMap<String, GitWrite>,
-    root: &str,
+pub(crate) fn release_git_write<K, Q>(
+    writes: &mut HashMap<K, GitWrite>,
+    root: &Q,
     op: GitWrite,
-) -> bool {
+) -> bool
+where
+    K: std::borrow::Borrow<Q> + std::hash::Hash + Eq,
+    Q: std::hash::Hash + Eq + ?Sized,
+{
     if writes.get(root) != Some(&op) {
         return false;
     }
@@ -561,8 +582,15 @@ fn render_narrow_git_row(
     ws: &Entity<Workspace>,
     collapsed: &HashSet<String>,
     index_pending: &HashMap<String, HashMap<String, PendingGitIndexOp>>,
+    runtime: &crate::RuntimeKey,
 ) -> AnyElement {
     use crate::ui_theme;
+
+    // 行里只存仓库根的路径；交给 Workspace 时带上它在哪台机器上。
+    let at = |root: &str| ProjectRef {
+        runtime: runtime.clone(),
+        root: root.to_string(),
+    };
 
     match entry {
         NarrowGitRow::RepoHeader {
@@ -578,11 +606,11 @@ fn render_narrow_git_row(
             has_changes,
         } => {
             let ws_pick = ws.clone();
-            let root_pick = root.to_string();
+            let root_pick = at(root);
             let ws_toggle = ws.clone();
-            let root_toggle = root.to_string();
+            let root_toggle = at(root);
             let ws_ops = ws.clone();
-            let root_ops = root.to_string();
+            let root_ops = at(root);
             let (ahead, behind, stash_n, has_changes) = (*ahead, *behind, *stash_n, *has_changes);
             let sync_label = if ahead + behind > 0 {
                 format!("↑{ahead} ↓{behind}")
@@ -709,11 +737,11 @@ fn render_narrow_git_row(
             let can_commit = has_text && has_staged && git_write.is_none();
             let can_push = ahead > 0 && git_write.is_none();
             let ws_target = ws.clone();
-            let root_target = root.to_string();
+            let root_target = at(root);
             let ws_commit = ws.clone();
-            let root_commit = root.to_string();
+            let root_commit = at(root);
             let ws_push = ws.clone();
-            let root_push = root.to_string();
+            let root_push = at(root);
             let commit_label = commit_button_label(git_write);
             v_flex()
                 .gap_1p5()
@@ -820,6 +848,7 @@ fn render_narrow_git_row(
                 .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(title.clone())))
                 .children(batch.as_ref().map(|batch| {
                     let batch = batch.clone();
+                    let batch_root = at(&batch.root);
                     let ws_batch = ws.clone();
                     stage_toggle_button(
                         git_scoped_id("git-group-stage", key, &header_root, title),
@@ -830,7 +859,7 @@ fn render_narrow_git_row(
                         let batch = batch.clone();
                         ws_batch.update(cx, |workspace, cx| {
                             workspace.stage_paths(
-                                batch.root.to_string(),
+                                batch_root.clone(),
                                 batch.paths.clone(),
                                 !batch.staged,
                                 cx,
@@ -865,7 +894,7 @@ fn render_narrow_git_row(
                     // 以及目录的乐观状态跟它下面文件的真实状态对不上。
                     let batch_staged = *is_staged_group;
                     let ws_batch = ws.clone();
-                    let root_batch = root.to_string();
+                    let root_batch = at(root);
                     let path_batch = row.path.clone();
                     let batch_action = stage_toggle_button(
                         git_scoped_id("git-dir-stage", key, root, &row.path),
@@ -933,7 +962,7 @@ fn render_narrow_git_row(
                     // 复选框在这里是错的隐喻：它读起来像“选中若干文件再做点什么”，
                     // 而它其实是立即生效的 git add / git reset。丢弃留在右键菜单。
                     let ws_stage = ws.clone();
-                    let root_stage = root.to_string();
+                    let root_stage = at(root);
                     let path_stage = row.path.clone();
                     // 只在 git 真的还在跑时禁用。等权威 status 确认的那一段必须
                     // 可点：pending 会因为迟到回包、读取失败重试、期间切项目而滞留，
@@ -958,10 +987,10 @@ fn render_narrow_git_row(
                     });
 
                     let ws_row = ws.clone();
-                    let root_row = root.to_string();
+                    let root_row = at(root);
                     let path_row = row.path.clone();
                     let ws_menu = ws.clone();
-                    let root_menu = root.to_string();
+                    let root_menu = at(root);
                     let path_menu = row.path.clone();
                     let file_path =
                         smelt_model::runtime_path::PathStyle::LOCAL.join(root, &row.path);
@@ -1104,7 +1133,7 @@ fn render_narrow_git_row(
 fn git_ops_menu_items(
     mut menu: gpui_component::menu::PopupMenu,
     ws: Entity<Workspace>,
-    root: String,
+    root: ProjectRef,
     ahead: u32,
     behind: u32,
     stash_n: u32,
@@ -1113,12 +1142,12 @@ fn git_ops_menu_items(
     /// 菜单项统一入口：先认仓库，再干活。
     fn item(
         ws: &Entity<Workspace>,
-        root: &str,
+        root: &ProjectRef,
         label: impl Into<gpui::SharedString>,
         run: fn(&mut Workspace, &mut Context<Workspace>),
     ) -> PopupMenuItem {
         let ws = ws.clone();
-        let root = root.to_string();
+        let root = root.clone();
         PopupMenuItem::new(label).on_click(move |_ev, _window, cx| {
             let root = root.clone();
             ws.update(cx, |w, cx| {

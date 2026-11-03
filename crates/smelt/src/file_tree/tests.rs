@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
 use super::view::{
     BreadcrumbSeg, FileTreeRow, breadcrumb_segments, collect_file_tree_rows, file_tree_row_id,
 };
-use super::{DirCache, SearchHit, build_search_tree};
+use super::{DirCache, DirListing, SearchHit, build_search_tree};
 use crate::git_panel::GitStatusData;
 use smelt_model::runtime_path::PathStyle;
 
@@ -76,16 +75,20 @@ fn breadcrumb_segments_falls_back_to_filename_outside_roots() {
     );
 }
 
-fn cached(entries: Vec<(&str, bool)>) -> (Instant, Rc<Vec<(String, bool)>>) {
-    (
-        Instant::now(),
-        Rc::new(
+fn cached(entries: Vec<(&str, bool)>) -> DirListing {
+    DirListing {
+        entries: Rc::new(
             entries
                 .into_iter()
                 .map(|(name, is_dir)| (name.to_string(), is_dir))
                 .collect(),
         ),
-    )
+        stale: false,
+    }
+}
+
+fn no_git(_root: &str) -> Option<&'static GitStatusData> {
+    None
 }
 
 #[test]
@@ -102,7 +105,7 @@ fn file_tree_rows_single_root_keeps_walk_order_without_header() {
         (" M".into(), "src/lib.rs".into()),
         ("??".into(), "a.txt".into()),
     ];
-    let git = HashMap::from([("/repo".into(), (Instant::now(), status))]);
+    let git: HashMap<String, GitStatusData> = HashMap::from([("/repo".into(), status)]);
 
     assert_eq!(
         collect_file_tree_rows(
@@ -111,7 +114,7 @@ fn file_tree_rows_single_root_keeps_walk_order_without_header() {
             &expanded,
             &HashSet::new(),
             &cache,
-            &git,
+            &|root: &str| git.get(root),
         ),
         vec![
             FileTreeRow::Entry {
@@ -156,7 +159,7 @@ fn file_tree_row_identity_follows_path_when_a_directory_expands() {
         &HashSet::new(),
         &HashSet::new(),
         &cache,
-        &HashMap::new(),
+        &no_git,
     );
     let expanded_dirs = HashSet::from(["/repo/src".into()]);
     let expanded = collect_file_tree_rows(
@@ -165,7 +168,7 @@ fn file_tree_row_identity_follows_path_when_a_directory_expands() {
         &expanded_dirs,
         &HashSet::new(),
         &cache,
-        &HashMap::new(),
+        &no_git,
     );
 
     fn id_of(rows: &[FileTreeRow], path: &str) -> Option<(&'static str, String)> {
@@ -206,7 +209,7 @@ fn file_tree_rows_multi_root_header_collapses_children() {
             &HashSet::new(),
             &collapsed,
             &cache,
-            &HashMap::new(),
+            &no_git,
         ),
         vec![
             FileTreeRow::RootHeader {

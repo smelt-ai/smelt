@@ -1150,7 +1150,7 @@ impl Workspace {
         {
             self.agent_surface.selected_id = Some(agent_id);
         }
-        // 右侧文件树/变更/历史/技能都读 active_project_root；对话的托管工作目录
+        // 右侧文件树/变更/历史/技能都读 active_project_ref；对话的托管工作目录
         // 就是它这一刻的上下文，不写进去工具面板会停在上一个项目上。
         if let Some(cwd) = self
             .sessions
