@@ -175,7 +175,7 @@ fn commit_row(
     gw: f32,
     is_sel: bool,
     ws: &Entity<Workspace>,
-    root: &Rc<String>,
+    root: &Rc<crate::ProjectRef>,
     fg: Hsla,
     muted: Hsla,
     accent: Hsla,
@@ -246,7 +246,7 @@ fn commit_row(
 
 /// 「日志」页主视图。状态一律由调用方传入，理由见文件头注释。
 pub fn git_log_view(
-    root: Option<String>,
+    root: Option<crate::ProjectRef>,
     state: &GitLogState,
     head_branch: Option<String>,
     cx: &mut Context<Workspace>,
@@ -352,7 +352,7 @@ pub fn git_log_view(
                         .icon_size()
                         .label("刷新")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let root = this.current_local_cwd(cx);
+                            let root = this.current_cwd(cx);
                             if let Some(r) = root {
                                 this.reload_git_log(r, cx);
                             }
@@ -392,7 +392,7 @@ fn fmt_time(ts: i64) -> String {
 
 /// 右侧「提交详细信息」：标题 + 作者 + 完整 sha + 该提交的 diff。
 pub fn commit_detail_pane(
-    root: Option<String>,
+    root: Option<crate::ProjectRef>,
     state: &GitLogState,
     cx: &mut Context<Workspace>,
 ) -> Div {
@@ -510,7 +510,11 @@ impl Render for GitLogDiffBody {
 }
 
 /// 提交详情里的文件列表：点一个文件在下方看它的 diff。
-fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<Workspace>) -> Div {
+fn commit_diff_list(
+    root: Option<crate::ProjectRef>,
+    state: &GitLogState,
+    cx: &mut Context<Workspace>,
+) -> Div {
     let (muted, fg, accent) = {
         let t = cx.theme();
         (t.muted_foreground, t.foreground, t.accent)
@@ -607,7 +611,7 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
 /// 远程列出具体分支，当前检出的那个带 ● 标记——不然一堆分支名摆在那儿，根本看不
 /// 出自己站在哪条线上。
 pub fn branch_tree(
-    root: Option<String>,
+    root: Option<crate::ProjectRef>,
     branches: Option<&crate::git_panel::BranchList>,
     scope: &LogScope,
     // head_branch：当前检出的分支名，用于打 ● 标记。
@@ -630,7 +634,7 @@ pub fn branch_tree(
                  target: LogScope,
                  on: bool,
                  ws: Entity<Workspace>,
-                 root: Option<String>| {
+                 root: Option<crate::ProjectRef>| {
         h_flex()
             .id(id)
             .gap_1()
@@ -656,7 +660,7 @@ pub fn branch_tree(
                  scope: LogScope,
                  head: Option<String>,
                  ws: Entity<Workspace>,
-                 root: Option<String>,
+                 root: Option<crate::ProjectRef>,
                  is_remote: bool| {
         v_flex()
             .child(

@@ -102,6 +102,14 @@ pub fn is_workbench_conversation_workspace_in(smelt_home: &str, path: &str) -> b
     )
 }
 
+/// 同 [`agent_definition_id_for_space`]，`smelt_home` 是路径所在那台机器的 `SMELT_HOME`。
+/// 远程机器上的 cwd 要拿那台机器的主目录去比；两条都是运行时路径，不经过 `std::path`。
+pub fn agent_definition_id_for_space_in(smelt_home: &str, path: &str) -> Option<String> {
+    let root = format!("{}/agents/", slash_form(smelt_home));
+    let id = slash_form(path).strip_prefix(&root)?.to_string();
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
 fn trim_slash(path: &str) -> &str {
     path.trim_end_matches(['/', '\\'])
 }
@@ -142,7 +150,9 @@ pub fn subagent_session_file_in(dir: &Path, subagent_id: &str) -> Option<PathBuf
 
 #[cfg(test)]
 mod tests {
-    use super::{is_agent_space_in, is_workbench_conversation_workspace_in};
+    use super::{
+        agent_definition_id_for_space_in, is_agent_space_in, is_workbench_conversation_workspace_in,
+    };
 
     #[test]
     fn backslash_paths_count_as_the_same_space() {
@@ -167,5 +177,26 @@ mod tests {
             "/Users/me/.smelt",
             "/Users/me/.smelt/agents/space-agent"
         ));
+    }
+
+    #[test]
+    fn space_agent_id_on_another_machine_uses_that_machines_home() {
+        let home = "/home/u/.smelt";
+        assert_eq!(
+            agent_definition_id_for_space_in(home, "/home/u/.smelt/agents/writer/").as_deref(),
+            Some("writer")
+        );
+        // 子目录是智能体的工作产物，不是另一个智能体。
+        assert_eq!(
+            agent_definition_id_for_space_in(home, "/home/u/.smelt/agents/writer/notes"),
+            None
+        );
+        assert_eq!(agent_definition_id_for_space_in(home, "/home/u/.smelt/agents"), None);
+        assert_eq!(agent_definition_id_for_space_in(home, "/home/u/code/app"), None);
+        assert_eq!(
+            agent_definition_id_for_space_in(r"C:\Users\me\.smelt", r"C:\Users\me\.smelt\agents\a")
+                .as_deref(),
+            Some("a")
+        );
     }
 }

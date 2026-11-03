@@ -579,9 +579,9 @@ impl Workspace {
         .map(|root| ProjectRef { runtime, root })
     }
 
-    /// 工具面板（文件树、变更、历史……）绑定的本机项目根。面板目前只读本机文件，活动
-    /// 项目在远程运行时上就没有。
-    pub(crate) fn active_project_root(&self, cx: &App) -> Option<String> {
+    /// 活动项目在本机上时的项目根。只读本机的插件面板用；文件、变更、历史面板按
+    /// [`Self::active_project_ref`] 发给项目所在的机器。
+    pub(crate) fn active_local_project_root(&self, cx: &App) -> Option<String> {
         self.active_project_ref(cx)
             .filter(|project| project.runtime == RuntimeKey::Local)
             .map(|project| project.root)
@@ -647,11 +647,12 @@ impl Workspace {
         let groups =
             self.sidebar_display_groups(statuses, &last_updated_at, cx, |key, project_groups| {
                 for group in project_groups {
-                    // 仓库信息目前只有本机项目有。
                     let branch = self
                         .repo_info
-                        .get(group.root.as_str())
-                        .filter(|_| *key == RuntimeKey::Local)
+                        .get(&ProjectRef {
+                            runtime: key.clone(),
+                            root: group.root.clone(),
+                        })
                         .and_then(|(_, info)| info.as_ref())
                         .map(|info| info.branch.clone());
                     for &ix in &group.sessions {
@@ -1032,8 +1033,7 @@ impl Workspace {
             // 分支名：git 仓库都显示，跟项目名并排（淡色）。
             let branch_label = self
                 .repo_info
-                .get(cwd.as_str())
-                .filter(|_| is_local_group)
+                .get(&project)
                 .and_then(|(_, info)| info.as_ref())
                 .map(|info| info.branch.clone());
 
@@ -1276,8 +1276,8 @@ impl Workspace {
                                 if !is_project_group {
                                     return menu;
                                 }
-                                // 远程项目的文件不在这台机器上：打开方式、文件树都还做不了，
-                                // 只给通用的几项。
+                                // 远程项目的文件不在这台机器上：用本机程序打开、钉进文件树
+                                // 都做不了，只给通用的几项。
                                 if !is_local_group {
                                     return remote_project_menu(
                                         menu,

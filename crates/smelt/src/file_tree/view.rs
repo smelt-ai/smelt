@@ -213,10 +213,10 @@ pub(super) fn walk_dir_cached(
     depth: usize,
     out: &mut Vec<(usize, String, bool, String, bool)>,
 ) {
-    let Some((_, entries)) = dir_cache.get(dir) else {
+    let Some(listing) = dir_cache.get(dir) else {
         return;
     };
-    for (name, is_dir) in entries.iter() {
+    for (name, is_dir) in listing.entries.iter() {
         let path = style.join(dir, name);
         let is_expanded = expanded.contains(&path);
         out.push((depth, name.clone(), *is_dir, path.clone(), is_expanded));
@@ -316,21 +316,20 @@ fn git_mark_index(files: &[(String, String)]) -> HashMap<&str, char> {
 
 /// 展平当前可见树。只读缓存，不碰文件系统。单根不插标题行，和以前键盘导航的
 /// 下标一致；多根才有可折叠的根标题。
-/// `style` 是这些路径所属运行时的规则。界面传本机的；测试固定一种，结果不随宿主平台变。
-pub(super) fn collect_file_tree_rows(
+/// `style` 是这些路径所属运行时的规则；测试固定一种，结果不随宿主平台变。
+/// `git_status` 按根取那个仓库的状态。
+pub(super) fn collect_file_tree_rows<'a>(
     style: PathStyle,
     roots: &[String],
     expanded: &HashSet<String>,
     collapsed_roots: &HashSet<String>,
     dir_cache: &DirCache,
-    git_status: &HashMap<String, (Instant, GitStatusData)>,
+    git_status: &dyn Fn(&str) -> Option<&'a GitStatusData>,
 ) -> Vec<FileTreeRow> {
     let multi = roots.len() > 1;
     let mut rows = Vec::new();
     for root in roots {
-        let marks = git_status
-            .get(root)
-            .map(|(_, data)| git_mark_index(&data.files));
+        let marks = git_status(root).map(|data| git_mark_index(&data.files));
         let root_open = !collapsed_roots.contains(root);
         if multi {
             rows.push(FileTreeRow::RootHeader {
@@ -397,8 +396,12 @@ pub(crate) struct FileTreeParams<'a> {
     /// 键盘选中的条目路径（高亮边框，区别于「当前打开文件」的底色）。
     pub selected_path: Option<&'a str>,
     pub panel_w: f32,
-    /// 各根的 git status（root 绝对路径 → 状态数据）。
-    pub git_status: &'a HashMap<String, (Instant, GitStatusData)>,
+    /// 这些路径在哪台机器上，按它的规则切路径。
+    pub style: PathStyle,
+    /// 路径在这台电脑上。「在 Finder 中显示」只对它有意义。
+    pub local: bool,
+    /// 各根的 git status（按根的绝对路径取）。
+    pub git_status: &'a dyn Fn(&str) -> Option<&'a GitStatusData>,
     /// 文件树自己的键盘焦点。只有点进树后，工作区才把方向键交给文件树。
     pub focus_handle: &'a FocusHandle,
 }
@@ -413,6 +416,8 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
         open_path,
         selected_path,
         panel_w,
+        style,
+        local,
         git_status,
         focus_handle,
     } = params;
@@ -436,7 +441,7 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
     }
 
     let rows = Rc::new(collect_file_tree_rows(
-        PathStyle::LOCAL,
+        style,
         roots,
         expanded,
         collapsed_roots,
@@ -464,6 +469,7 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
                     focus: list_focus.clone(),
                     open_path,
                     selected_path,
+                    local,
                     panel_w,
                     row_w,
                     row_h,
@@ -535,6 +541,7 @@ struct FileTreeRowPaint<'a> {
     focus: FocusHandle,
     open_path: Option<&'a str>,
     selected_path: Option<&'a str>,
+    local: bool,
     panel_w: f32,
     row_w: Pixels,
     row_h: Pixels,
@@ -552,6 +559,7 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
         focus,
         open_path,
         selected_path,
+        local,
         panel_w,
         row_w,
         row_h,
@@ -717,13 +725,15 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
                             });
                         }),
                     )
-                    .item(PopupMenuItem::new("在 Finder 中显示").on_click(
-                        move |_ev, _window, cx| {
-                            this_finder.update(cx, |ws, cx| {
-                                ws.reveal_path_in_finder(p_finder.clone(), cx);
-                            });
-                        },
-                    ))
+                    .when(local, |menu| {
+                        menu.item(PopupMenuItem::new("在 Finder 中显示").on_click(
+                            move |_ev, _window, cx| {
+                                this_finder.update(cx, |ws, cx| {
+                                    ws.reveal_path_in_finder(p_finder.clone(), cx);
+                                });
+                            },
+                        ))
+                    })
                     .item(
                         PopupMenuItem::new("删除文件").on_click(move |_ev, _window, cx| {
                             this_del.update(cx, |ws, cx| {
@@ -922,7 +932,11 @@ pub fn file_content_parts(
                                 .map(|msg| div().text_xs().text_color(warning).child(msg)),
                         ),
                 )
-                .when(preview_kind == Some(PreviewKind::Html), |el| {
+                // 浏览器只能打开这台电脑上的文件。
+                .when(
+                    preview_kind == Some(PreviewKind::Html)
+                        && of.runtime == crate::RuntimeKey::Local,
+                    |el| {
                     el.child(
                         Button::new("file-open-in-browser")
                             .quiet()

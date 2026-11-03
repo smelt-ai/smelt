@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
 use gpui::*;
 
@@ -19,7 +18,24 @@ pub use view::{file_content_parts, file_tree, search_results_view};
 
 // ===================== 类型 =====================
 
-pub(super) type DirCache = HashMap<String, (Instant, Rc<Vec<(String, bool)>>)>;
+/// 一台机器上的目录列表缓存：目录绝对路径 → 已排序过滤的直接子项。
+pub(crate) type DirCache = HashMap<String, DirListing>;
+
+/// 一个目录的直接子项 (名, 是否目录)。
+///
+/// 没有过期时间：运行时监听着项目，`project.changed` 到了才标 `stale`，下一次刷新重取，
+/// 取回来之前旧列表照常显示。远程机器上按时间重取就是每隔几秒过一次网络。
+pub(crate) struct DirListing {
+    pub(crate) entries: Rc<Vec<(String, bool)>>,
+    pub(crate) stale: bool,
+}
+
+/// 打开的文件：在哪台机器上、绝对路径。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileRef {
+    pub(crate) runtime: crate::RuntimeKey,
+    pub(crate) path: String,
+}
 
 /// 文件树右键「删除文件」的二次确认目标。
 #[derive(Clone)]
@@ -33,6 +49,8 @@ pub struct DeleteFileTarget {
 /// 打开查看的文件：路径 + 可编辑的代码编辑器状态（gpui-component 的 Editor：
 /// tree-sitter 语法高亮 + 行号 + 搜索，直接可编辑，不再是只读预览）。
 pub struct OpenFile {
+    /// 文件在哪台机器上。读写都发给它，跟当前项目在哪台机器上无关。
+    pub(crate) runtime: crate::RuntimeKey,
     pub path: String,
     pub(crate) editor: Entity<gpui_component::input::EditorState>,
     /// 磁盘上（或最近一次保存后）的内容快照，跟编辑器当前内容一比就知道是否有未保存
@@ -50,6 +68,10 @@ pub struct OpenFile {
     /// 上次保存时检测到磁盘内容跟 saved_content 对不上（外部改过）。为 true 时
     /// 再按一次 Cmd+S 会跳过冲突检查强制覆盖——用"再按一次"当作用户已确认覆盖。
     pub(super) conflict_pending: bool,
+    /// 运行时报项目里有文件变了，正在重读这个文件看它变没变。同一时刻只读一次。
+    pub(super) reload_inflight: bool,
+    /// 重读期间又来了变化通知：读完再读一次，不并发。
+    pub(super) reload_again: bool,
     /// 「预览」开关（只对 [`PreviewKind`] 认得的文件生效，见 file_content_parts）；切换
     /// 打开的文件不带过去，open_file_now 每次按文件类型重置（能预览的默认进预览）。
     pub(super) preview: bool,

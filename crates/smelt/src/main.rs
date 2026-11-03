@@ -800,9 +800,9 @@ impl ProjectUiState {
 /// 把当前热场抽屉按项目根停走。返回刚停放的 key，供写回被换出的会话存档。
 fn park_project_ui(
     active: &mut SessionUiState,
-    project_ui: &mut HashMap<String, ProjectUiState>,
-    active_key: &mut Option<String>,
-) -> Option<String> {
+    project_ui: &mut HashMap<ProjectRef, ProjectUiState>,
+    active_key: &mut Option<ProjectRef>,
+) -> Option<ProjectRef> {
     let key = active_key.take()?;
     project_ui.insert(key.clone(), active.take_project_ui());
     Some(key)
@@ -811,9 +811,9 @@ fn park_project_ui(
 /// 把目标项目已停放的抽屉盖回热场；没有停放记录时保留刚换上来的会话抽屉。
 fn apply_project_ui_for_root(
     active: &mut SessionUiState,
-    project_ui: &mut HashMap<String, ProjectUiState>,
-    active_key: &mut Option<String>,
-    new_key: Option<String>,
+    project_ui: &mut HashMap<ProjectRef, ProjectUiState>,
+    active_key: &mut Option<ProjectRef>,
+    new_key: Option<ProjectRef>,
 ) {
     if let Some(key) = new_key.as_ref()
         && let Some(ui) = project_ui.remove(key)
@@ -830,9 +830,9 @@ fn resync_session_with_project_ui(
     active: &mut SessionUiState,
     old_session: &mut SessionUiState,
     new_session: &mut SessionUiState,
-    project_ui: &mut HashMap<String, ProjectUiState>,
-    active_key: &mut Option<String>,
-    new_key: Option<String>,
+    project_ui: &mut HashMap<ProjectRef, ProjectUiState>,
+    active_key: &mut Option<ProjectRef>,
+    new_key: Option<ProjectRef>,
 ) {
     let parked_key = park_project_ui(active, project_ui, active_key);
     swap_session_ui_state(active, old_session);
@@ -1436,6 +1436,8 @@ enum RenameTarget {
     /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
     History {
+        /// 存档在哪台机器上。
+        runtime: RuntimeKey,
         agent: settings::HistorySourceKind,
         profile_id: Option<String>,
         cwd: String,
@@ -2162,18 +2164,18 @@ struct Workspace {
     /// 当前会话的 UI 状态。Workspace 只切换这一整个对象，不理解其中有哪些页面或控件。
     active_session_ui: SessionUiState,
     /// 各项目的抽屉现场。切会话时覆盖回当前项目，避免每个对话各带一份文件树/Git。
-    project_ui: HashMap<String, ProjectUiState>,
-    /// `project_ui` 里正在热场的那个项目根。
-    active_project_ui_key: Option<String>,
+    project_ui: HashMap<ProjectRef, ProjectUiState>,
+    /// `project_ui` 里正在热场的那个项目。
+    active_project_ui_key: Option<ProjectRef>,
     /// 文件树里已展开的文件夹绝对路径。
     /// 目录列表缓存（绝对路径 → 已排序过滤的直接子项 (名, 是否目录)）。后台读盘填充，
     /// render 只读；此前 file_tree 在 render 里同步 fs::read_dir，大目录会像 git
     /// status 那样掉帧，这里改用同款「后台刷新 + 缓存 + render 只读」模式修复。
-    dir_cache: file_tree::DirCache,
+    dir_cache: HashMap<RuntimeKey, file_tree::DirCache>,
     /// 正在后台读取的目录（防重复并发 spawn）。
-    dir_inflight: HashSet<String>,
+    dir_inflight: HashSet<ProjectRef>,
     /// 目录列表失效代数。删除发生在读取期间时，旧回包不得再把缓存标成新鲜。
-    dir_generation: HashMap<String, u64>,
+    dir_generation: HashMap<ProjectRef, u64>,
     /// 文件树键盘选中的条目绝对路径（↑↓ 导航用）。
     /// 打开文件后要 reveal 的路径：祖先目录缓存齐了再 scroll_to_item。
     file_tree_pending_reveal: Option<String>,
@@ -2189,12 +2191,12 @@ struct Workspace {
     preview_epoch: u64,
     /// 当前文件有未保存改动时，用户又点了别的文件——先记下目标路径弹确认弹窗，
     /// 等用户选了"不保存"/"保存并切换"才真正打开，见 render_unsaved_file_confirm。
-    pending_file_switch: Option<String>,
+    pending_file_switch: Option<file_tree::FileRef>,
     /// 文件树右键「删除文件」的二次确认目标（None = 没在删）。
     delete_file_target: Option<DeleteFileTarget>,
     /// 「保存并切换」选择后，等这次 save_open_file 存盘成功再打开的目标路径；
     /// 存盘失败/冲突则放弃切换，留在当前文件上让用户处理。
-    pending_switch_after_save: Option<String>,
+    pending_switch_after_save: Option<file_tree::FileRef>,
     /// diff 是否用并排（split）视图；false 为统一（unified）视图。
     /// F7/Shift+F7 当前跳到第几个改动块（None = 还没跳过）。换文件重开 diff 时清空。
     /// Git 页变更文件树里被折叠的目录（存相对仓库根的路径）。默认全展开——改动
@@ -2205,7 +2207,7 @@ struct Workspace {
     /// Git 页当前在看哪个子页（改动 / 日志）。
 
     /// 正在确认删除的分支：(仓库根, 分支名, 是否远端分支)。
-    delete_branch_target: Option<(String, String, bool)>,
+    delete_branch_target: Option<(ProjectRef, String, bool)>,
     /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
     git_log_resize: Entity<ResizableState>,
     /// 左侧会话栏是否展开。
@@ -2232,7 +2234,7 @@ struct Workspace {
     ///
     /// 多仓工作区里提交信息天然属于某一个仓库：共用一个框会把写给子仓的
     /// 描述带到父仓去。懒建，仓库从发现结果里消失时跟着回收。
-    commit_msg_inputs: HashMap<String, Entity<gpui_component::input::TextareaState>>,
+    commit_msg_inputs: HashMap<ProjectRef, Entity<gpui_component::input::TextareaState>>,
     /// 提交/推送失败的原因，按**仓库根**分开，直接显示在该仓库的提交框下方。
     ///
     /// 提交失败必须在用户正盯着的地方说清楚：它是对一次明确点击的直接回应。
@@ -2240,7 +2242,7 @@ struct Workspace {
     /// 「文件还在暂存区、什么都没发生」和成功毫无区别——pre-commit hook 因
     /// PATH 缺失而失败正是这样被当成「按钮没反应」。
     /// 下次对同一仓库发起提交/推送时清掉，不留过期错误。
-    commit_errors: HashMap<String, String>,
+    commit_errors: HashMap<ProjectRef, String>,
     /// 关闭前的二次确认弹窗。Some = 弹窗开着。
     close_confirm: Option<CloseConfirm>,
     /// 远程桌面页正在看的那台运行时（`WorkspaceRoute::Desktop`）。离开这一页就丢掉，
@@ -2249,7 +2251,7 @@ struct Workspace {
     /// 已打开的项目根目录（有序，就是侧栏分组的骨架）。项目是**独立于会话**的实体：
     /// 活动项目的 **root 路径**（不是显示名——同名目录是两个项目，见 ProjectGroup）：
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
-    /// 已消失时回退到活动会话所在组（见 active_project_root）。
+    /// 已消失时回退到活动会话所在组（见 active_project_ref）。
     active_project: Option<ProjectRef>,
     /// 侧栏里的运行时空间。本机在前，然后是配对的远程机器。
     spaces: Vec<crate::runtime_space::RuntimeSpace>,
@@ -2386,43 +2388,43 @@ struct Workspace {
     ///
     /// key 是**仓库**根而不是项目根：一个项目里可能有多个仓库（submodule、
     /// vendor 里的独立仓库、被 .gitignore 忽略的仓库），每个都独立跑自己的 status。
-    git_status: HashMap<String, (Instant, GitStatusData)>,
+    git_status: HashMap<ProjectRef, (Instant, GitStatusData)>,
     /// 项目根 → 该项目里发现的仓库列表（含发现是否被上限截断）。
     /// 发现本身要跑 git，所以跟 status 一样走缓存 + 后台刷新。
-    git_repos: HashMap<String, (Instant, git_panel::RepoSet)>,
+    git_repos: HashMap<ProjectRef, (Instant, git_panel::RepoSet)>,
     /// 正在后台做仓库发现的项目根（防重复并发 spawn）。
-    git_repos_inflight: HashSet<String>,
+    git_repos_inflight: HashSet<ProjectRef>,
     /// 当前提交操作的目标仓库（仓库根）。多仓工作区里，提交框、推送、分支菜单
     /// 都作用于它；None = 跟随项目根。
     ///
     /// 没有它的话写操作只能落回项目根，于是子仓的改动能暂存却永远提交不出去。
-    active_git_repo: Option<String>,
+    active_git_repo: Option<ProjectRef>,
     /// 变更栏里被折起来的仓库根。多仓工作区里不折叠就是一面墙的文件。
-    git_repo_collapsed: HashSet<String>,
+    git_repo_collapsed: HashSet<ProjectRef>,
     /// root → status 失效代数。请求只可提交与当前代数一致的结果；操作过程中迟到的
     /// 旧回包会被丢弃并自动补拉，不能把新索引状态覆盖回去。
-    git_status_generation: HashMap<String, u64>,
+    git_status_generation: HashMap<ProjectRef, u64>,
     /// 正在后台刷新 status 的 root（防重复并发 spawn）。
-    git_status_inflight: HashSet<String>,
+    git_status_inflight: HashSet<ProjectRef>,
     /// root → 连续读取失败次数。失败数据不能冒充“工作区干净”；前三次按短退避
     /// 自动重试，持续失败则等文件事件或后续界面交互再尝试。
-    git_status_failures: HashMap<String, u8>,
+    git_status_failures: HashMap<ProjectRef, u8>,
     /// 单文件 git add/reset 的即时 UI 状态。进程是否在跑看 `git_writes`，
     /// 这里只在进程返回后保留到权威 status 回包，避免复选框先回弹再延迟移动分组。
-    git_index_pending: HashMap<(String, String), git_panel::PendingGitIndexOp>,
+    git_index_pending: HashMap<(ProjectRef, String), git_panel::PendingGitIndexOp>,
     /// 分支列表缓存（root → (取得时刻, 数据)），Git 页头部分支切换下拉用；同
     /// git_status 一套只在 Git 页打开时后台刷新。
-    branches: HashMap<String, (Instant, BranchList)>,
+    branches: HashMap<ProjectRef, (Instant, BranchList)>,
     /// 分支列表失效代数。删除分支发生在 `for-each-ref` 期间时，旧回包不得再写回。
-    branches_generation: HashMap<String, u64>,
+    branches_generation: HashMap<ProjectRef, u64>,
     /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
-    branches_inflight: HashSet<String>,
+    branches_inflight: HashSet<ProjectRef>,
     /// 已经请运行时监听的项目根，见 ensure_git_watch。运行时重连后清空重新登记。
-    watched_projects: HashSet<String>,
+    watched_projects: HashSet<ProjectRef>,
     /// 每个 root 上次「进 Git 页自动 fetch」的时刻：进 Git 页会主动 fetch 一次刷新
     /// ahead/behind，但 render 每帧都满足「在 Git 页」，靠这个时间戳去抖（同一 root
     /// 60s 内不重复自动 fetch），避免每帧狂发网络请求。
-    git_autofetch_at: HashMap<String, Instant>,
+    git_autofetch_at: HashMap<ProjectRef, Instant>,
     /// 历史会话列表缓存（`"{agent_id}:{cwd}"` → (取得时刻, 数据)）：后台扫描该 agent
     /// 在该项目下的本地存储，render 只读。key 带上 agent_id 是因为四家 agent 的历史
     /// 各存各的，同一个 cwd 换个 tab 就是完全不同的一份数据。
@@ -2455,7 +2457,7 @@ struct Workspace {
     /// `Some(profile_id)`；`history_agent` 这时候是该 profile 底层接的种类。
     history_profile: Option<String>,
     /// 上一次渲染历史时使用的项目根。项目切换后在下一次历史渲染前失效旧详情。
-    history_project_root: Option<String>,
+    history_project_root: Option<ProjectRef>,
     /// 调试 HUD 开关（Cmd+Shift+F 切换），见 `overlay::debug_hud`。
     debug_hud: bool,
     /// 退出确认拦截弹窗开关
@@ -2520,25 +2522,27 @@ struct Workspace {
     relay_edit: Option<workspace_sessions::RelayEdit>,
     /// 仓库身份缓存（cwd → 当前分支）：侧栏项目行和会话行显示分支名靠它。None = 探测过
     /// 但不是 git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
-    repo_info: HashMap<String, (Instant, Option<RepoInfo>)>,
+    repo_info: HashMap<ProjectRef, (Instant, Option<RepoInfo>)>,
     /// 正在后台探测仓库身份、避免重复起进程的 cwd 集合。
-    repo_info_inflight: HashSet<String>,
+    repo_info_inflight: HashSet<ProjectRef>,
+    /// 远程机器上要重取的仓库信息。远程的不按时间过期，见 `ensure_repo_info`。
+    repo_info_stale: HashSet<ProjectRef>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
     /// reflog，找不回来，所以必须过一道确认。
-    discard_hunk_target: Option<(String, usize)>,
+    discard_hunk_target: Option<(ProjectRef, usize)>,
     /// 正在确认丢弃整个文件的改动：(仓库根, 用户点丢弃时看到的那条改动)。未跟踪
     /// 文件是直接删盘，比 restore 更狠，文案要分开写。
-    discard_file_target: Option<(String, git_panel::GitSeenChange)>,
+    discard_file_target: Option<(ProjectRef, git_panel::GitSeenChange)>,
     /// 「丢弃全部改动」确认弹窗（Some = 弹窗开着）：(仓库根, 用户点丢弃时看到的整份
     /// 改动列表)。见 git_panel 模块。
-    discard_all_target: Option<(String, Vec<git_panel::GitSeenChange>)>,
+    discard_all_target: Option<(ProjectRef, Vec<git_panel::GitSeenChange>)>,
     /// 每个仓库正在跑的 git 写入。键是这次命令的仓库根。
     ///
     /// `index.lock` 属于这一个仓库，所以另一个仓库可以同时写。同一个根上的
     /// 提交、推送、获取、暂存都进这一张表，由 `spawn_git` 占用和释放。
-    git_writes: HashMap<String, git_panel::GitWrite>,
+    git_writes: HashMap<ProjectRef, git_panel::GitWrite>,
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
@@ -2955,6 +2959,7 @@ impl Workspace {
             relay_edit: None,
             repo_info: HashMap::new(),
             repo_info_inflight: HashSet::new(),
+            repo_info_stale: HashSet::new(),
             dir_picker: None,
             discard_hunk_target: None,
             discard_file_target: None,
@@ -4190,8 +4195,8 @@ fn main() {
         });
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
-        // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求、项目文件
-        // 变化这些投影目前只认本机；各运行时都有的是会话状态。
+        // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求这些投影
+        // 目前只认本机；会话状态、项目文件变化、智能体记忆变化各运行时都有。
         let daemon_state_rx = runtime_events::start(cx);
         let current_ws_for_events = current_ws.clone();
         cx.spawn(async move |cx| {
@@ -4208,17 +4213,24 @@ fn main() {
                     }
                     continue;
                 }
-                // 运行时换了进程，它替我们建的项目监听也没了：清空，下次刷新重新登记。
-                if is_local
-                    && matches!(event, terminal::DaemonStateEvent::Disconnected)
+                // 运行时断开（换了进程或网络断了），它替我们建的项目监听也没了：清掉这台
+                // 机器的，下次刷新重新登记。
+                if matches!(event, terminal::DaemonStateEvent::Disconnected)
                     && let Some(ws) = current_workspace(&current_ws_for_events)
                 {
-                    let _ = ws.update(cx, |ws, _| ws.watched_projects.clear());
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.forget_project_watches(&runtime);
+                        ws.schedule_visible_refresh(cx);
+                    });
                 }
+                // 项目文件在报事件的那台机器上。
                 if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
-                    if is_local && let Some(ws) = current_workspace(&current_ws_for_events) {
-                        let root = root.clone();
-                        let _ = ws.update(cx, |ws, cx| ws.on_project_changed(root, cx));
+                    if let Some(ws) = current_workspace(&current_ws_for_events) {
+                        let project = ProjectRef {
+                            runtime: runtime.clone(),
+                            root: root.clone(),
+                        };
+                        let _ = ws.update(cx, |ws, cx| ws.on_project_changed(project, cx));
                     }
                     continue;
                 }
@@ -4467,17 +4479,13 @@ fn main() {
                     main.workspace
                 });
                 for link in internal_files {
-                    let _ = workspace.update_in(cx, |ws, window, cx| match link.runtime {
-                        // 内置编辑器只读本机文件。远程的文件在另一台机器上，打开本机同路径
-                        // 的文件是错的，先说明；面板按运行时分以后改成去那台机器读。
-                        Some(runtime) => {
-                            let name = runtimes::runtime_name(&RuntimeKey::Remote(runtime), cx);
-                            ws.report_background_error(format!(
-                                "「{name}」上的文件暂时不能在这里打开：{}",
-                                link.path
-                            ));
-                        }
-                        None => ws.view_file_at(link.path, link.line, window, cx),
+                    // 链接带着文件所在的机器：远程的就去那台机器读，不能打开本机同路径的文件。
+                    let file = file_tree::FileRef {
+                        runtime: link.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
+                        path: link.path,
+                    };
+                    let _ = workspace.update_in(cx, |ws, window, cx| {
+                        ws.view_file_on(file, link.line, window, cx)
                     });
                 }
             }

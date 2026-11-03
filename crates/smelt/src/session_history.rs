@@ -8,7 +8,9 @@ use smelt_runtime_client::protocol::history::{
     HistoryListCall, HistoryListParams,
 };
 
-use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
+use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call_on, error_text, target as runtime_target};
+use crate::{ProjectRef, RuntimeKey};
+use smelt_runtime_client::RuntimeClient;
 
 // ===================== GPUI 面板 =====================
 //
@@ -111,8 +113,6 @@ impl HistoryListSnapshot {
 /// 主行优先显示用户名称，副行保留 Agent 原始标题或时间信息。
 pub enum HistoryListState {
     NoProject,
-    /// 活动项目在远程运行时上，历史页目前只读本机存档。带着给人看的说明。
-    RemoteProject(String),
     Loading,
     Empty,
     Ready(Rc<Vec<SessionSummary>>),
@@ -121,6 +121,8 @@ pub enum HistoryListState {
 /// 历史会话右键「删除」的确认目标。
 #[derive(Clone)]
 pub struct DeleteHistoryTarget {
+    /// 存档在哪台机器上。
+    pub runtime: RuntimeKey,
     pub agent: HistorySourceKind,
     pub profile_id: Option<String>,
     pub cwd: String,
@@ -198,6 +200,8 @@ pub(crate) struct HistoryViewParams<'a> {
     pub agent: HistorySourceKind,
     /// 手动添加的 workspace profile；基础 agent 槽位为 `None`。
     pub profile_id: Option<String>,
+    /// 项目在哪台机器上。历史存档、续接、改名、删除都发给它。
+    pub runtime: RuntimeKey,
     pub cwd: Option<String>,
     pub list: HistoryListState,
     pub detail: &'a Option<OpenedHistory>,
@@ -239,6 +243,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
     let HistoryViewParams {
         agent,
         profile_id,
+        runtime,
         cwd,
         list,
         detail,
@@ -312,9 +317,6 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         (HistoryListState::NoProject, _) => {
             placeholder_view("当前没有活动项目", muted).into_any_element()
         }
-        (HistoryListState::RemoteProject(notice), _) => {
-            placeholder_view(notice, muted).into_any_element()
-        }
         (HistoryListState::Loading, _) => placeholder_view("加载中…", muted).into_any_element(),
         (HistoryListState::Empty, _) | (_, None) => {
             placeholder_view("这个项目还没有本地保存的历史会话", muted).into_any_element()
@@ -353,6 +355,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                 let row_text = row_text.clone();
                 let row_keys = row_keys.clone();
                 let cwd_for_rows = cwd.clone();
+                let runtime = runtime.clone();
                 uniform_list("session-list", row_count, move |range, _window, _app| {
                     range
                         .map(|row_ix| {
@@ -378,6 +381,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                 .clone()
                                 .filter(|_| supports_delete)
                                 .map(|cwd| DeleteHistoryTarget {
+                                    runtime: runtime.clone(),
                                     agent,
                                     profile_id: profile_id.clone(),
                                     cwd,
@@ -390,6 +394,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                     .clone()
                                     .zip(migrate_agent)
                                     .map(|(cwd, agent)| HistoryMigrationSource {
+                                        runtime: runtime.clone(),
                                         agent,
                                         profile_label: profile_label.clone(),
                                         title: s.title.clone(),
@@ -408,6 +413,8 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                             let row_key = row_keys.get(ix).cloned().unwrap_or_else(|| history_row_key(s));
                             let ws_for_detail = workspace.clone();
                             let detail_path = path;
+                            let detail_runtime = runtime.clone();
+                            let row_runtime = runtime.clone();
                             div()
                                 .w_full()
                                 .px_2()
@@ -443,6 +450,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                         .on_mouse_down(MouseButton::Left, move |_, _, app| {
                                             ws_for_detail.update(app, |this, cx| {
                                                 this.open_session_detail(
+                                                    detail_runtime.clone(),
                                                     agent,
                                                     detail_path.clone(),
                                                     cx,
@@ -460,6 +468,10 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                             let acp_row_cwd = row_cwd.clone();
                                             let acp_launch_override = row_launch_override.clone();
                                             let acp_agent = agent.acp();
+                                            let acp_runtime = row_runtime.clone();
+                                            let cli_runtime = row_runtime.clone();
+                                            let rename_runtime = row_runtime.clone();
+                                            let reset_runtime = row_runtime.clone();
                                             // ACP 续接要求对方有 ACP 服务。纯终端来源只能
                                             // 走下面的 CLI/TUI 续接，这里不能给一个点了没反应的菜单项。
                                             if let Some(acp_agent) = acp_agent {
@@ -482,6 +494,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                             ws.update(cx, |this, cx| {
                                                                 this.resume_acp_session(
                                                                 crate::workspace_sessions::AcpResumeRequest {
+                                                                    runtime: acp_runtime.clone(),
                                                                     agent: acp_agent,
                                                                     launch_override,
                                                                     profile_id,
@@ -515,6 +528,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                                 cli_launch_override.clone();
                                                             ws.update(cx, |this, cx| {
                                                                 this.resume_cli_session(
+                                                                    cli_runtime.clone(),
                                                                     agent,
                                                                     launch_override,
                                                                     cwd,
@@ -561,6 +575,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                             ws.update(cx, |this, cx| {
                                                                 this.start_rename(
                                                                     crate::RenameTarget::History {
+                                                                        runtime: rename_runtime.clone(),
                                                                         agent,
                                                                         profile_id,
                                                                         cwd,
@@ -581,9 +596,14 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                         PopupMenuItem::new("恢复默认名称")
                                                             .on_click(move |_ev, _window, cx| {
                                                                 ws.update(cx, |this, cx| {
-                                                                    // 历史页读的是本机运行时的存档。
-                                                                    let runtime =
-                                                                        crate::runtimes::Runtime::local();
+                                                                    let Some(runtime) =
+                                                                        crate::runtimes::runtime(
+                                                                            &reset_runtime,
+                                                                            cx,
+                                                                        )
+                                                                    else {
+                                                                        return;
+                                                                    };
                                                                     this.set_history_custom_title(
                                                                         &runtime,
                                                                         agent,
@@ -700,13 +720,19 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
             let detail = opened.detail.clone();
             let turn_markdown = opened.turn_markdown.clone();
             let remeasure = detail_list_state.clone();
-            // 历史页只读本机存档（远程项目给的是说明，见 `HistoryListState::RemoteProject`），
-            // 文件链接按项目目录补全，不带运行时。
+            // 文件链接按项目目录补全；远程项目的链接带上机器，点开时去那台机器读。
             let link_cwd = cwd.clone();
+            let link_runtime = match &runtime {
+                RuntimeKey::Local => None,
+                RuntimeKey::Remote(id) => Some(id.clone()),
+            };
             // 和对话页同一套排版：居中限宽的阅读栏，间距算在虚拟项自己身上。
             gpui::list(detail_list_state, move |i, _window, app| {
                 let turn = &detail.turns[i];
-                let links = smelt_ui::markdown_links::FileLinks::new(link_cwd.as_deref(), None);
+                let links = smelt_ui::markdown_links::FileLinks::new(
+                    link_cwd.as_deref(),
+                    link_runtime.as_deref(),
+                );
                 let body = turn_markdown.view(i, &turn.text, links, &remeasure, app);
                 h_flex()
                     .w_full()
@@ -939,12 +965,23 @@ use crate::settings::{ConversationAgentKind, HistorySourceKind};
 /// workspace profile 跟同 kind 的默认 workspace 也是两份完全不同的数据，
 /// `profile_id` 折进 key 里，同一个 kind 下的不同 profile 才不会互相顶掉
 /// （`profile_id` 本身已经唯一决定了 override 目录，不用再单独编码目录值）。
+///
+/// 存档在各台机器上各有一份，机器也折进 key：两台机器上同一路径的项目历史是两回事。
 pub(crate) fn session_list_key(
+    runtime: &RuntimeKey,
     agent: HistorySourceKind,
     profile_id: Option<&str>,
     cwd: &str,
 ) -> String {
-    format!("{}:{}:{cwd}", agent.id(), profile_id.unwrap_or("default"))
+    let machine = match runtime {
+        RuntimeKey::Local => "local",
+        RuntimeKey::Remote(id) => id.as_str(),
+    };
+    format!(
+        "{machine}:{}:{}:{cwd}",
+        agent.id(),
+        profile_id.unwrap_or("default")
+    )
 }
 
 fn current_profile_launch(
@@ -956,6 +993,7 @@ fn current_profile_launch(
 
 /// 向运行时要历史列表。读不到（运行时没起、版本旧）就当没有历史，原因打到日志里。
 fn load_history_list(
+    client: &RuntimeClient,
     agent: HistorySourceKind,
     profile_id: Option<String>,
     cwd: String,
@@ -965,7 +1003,7 @@ fn load_history_list(
         profile_id,
         cwd,
     };
-    match call::<HistoryListCall>(params, RUNTIME_CALL_TIMEOUT) {
+    match call_on::<HistoryListCall>(client, params, RUNTIME_CALL_TIMEOUT) {
         Ok(result) => (
             result
                 .sessions
@@ -1000,7 +1038,9 @@ fn load_history_list(
 
 /// 记下一段历史会话属于哪个产品智能体，以后「继续」时按原来的智能体启动。交给
 /// 运行时异步写，失败只记日志：漏记的后果只是继续时退回裸引擎。
+/// `runtime` 是存档所在的机器。
 pub(crate) fn remember_history_agent(
+    runtime: &RuntimeKey,
     agent: HistorySourceKind,
     profile_id: Option<&str>,
     resume_id: &str,
@@ -1013,11 +1053,14 @@ pub(crate) fn remember_history_agent(
         resume_id: resume_id.to_string(),
         agent_definition_id: agent_definition_id.to_string(),
     };
+    let Ok(client) = runtime_target(runtime, cx) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            if let Err(error) = call::<
+            if let Err(error) = call_on::<
                 smelt_runtime_client::protocol::history::HistoryRememberAgentCall,
-            >(params, RUNTIME_CALL_TIMEOUT)
+            >(&client, params, RUNTIME_CALL_TIMEOUT)
             {
                 eprintln!("[history] 记录会话归属失败：{}", error_text(error));
             }
@@ -1026,12 +1069,20 @@ pub(crate) fn remember_history_agent(
 }
 
 /// 向运行时要一份历史会话的对话内容。存档被删、格式认不出、或运行时连不上都是 `None`。
-fn load_history_detail(agent: HistorySourceKind, path: &str) -> Option<SessionDetail> {
+fn load_history_detail(
+    client: &Result<RuntimeClient, String>,
+    agent: HistorySourceKind,
+    path: &str,
+) -> Option<SessionDetail> {
     let params = HistoryDetailParams {
         agent: agent.id().to_string(),
         path: path.to_string(),
     };
-    let detail = call::<HistoryDetailCall>(params, RUNTIME_CALL_TIMEOUT)
+    let client = client
+        .as_ref()
+        .map_err(|error| eprintln!("[history] 读取会话内容失败：{error}"))
+        .ok()?;
+    let detail = call_on::<HistoryDetailCall>(client, params, RUNTIME_CALL_TIMEOUT)
         .map_err(|error| eprintln!("[history] 读取会话内容失败：{}", error_text(error)))
         .ok()?
         .detail?;
@@ -1062,7 +1113,7 @@ impl Workspace {
         &mut self,
         agent: HistorySourceKind,
         profile_id: Option<String>,
-        cwd: String,
+        cwd: ProjectRef,
         cx: &mut Context<Self>,
     ) {
         self.ensure_session_list_within(agent, profile_id, cwd, Duration::from_secs(10), cx);
@@ -1075,7 +1126,7 @@ impl Workspace {
         &mut self,
         agent: HistorySourceKind,
         profile_id: Option<String>,
-        cwd: String,
+        cwd: ProjectRef,
         cx: &mut Context<Self>,
     ) {
         self.ensure_session_list_within(agent, profile_id, cwd, Duration::from_secs(60), cx);
@@ -1085,11 +1136,11 @@ impl Workspace {
         &mut self,
         agent: HistorySourceKind,
         profile_id: Option<String>,
-        cwd: String,
+        cwd: ProjectRef,
         max_age: Duration,
         cx: &mut Context<Self>,
     ) {
-        let key = session_list_key(agent, profile_id.as_deref(), &cwd);
+        let key = session_list_key(&cwd.runtime, agent, profile_id.as_deref(), &cwd.root);
         let fresh = self
             .session_list
             .get(&key)
@@ -1097,13 +1148,16 @@ impl Workspace {
         if fresh || self.session_list_inflight.contains(&key) {
             return;
         }
+        let Ok(client) = runtime_target(&cwd.runtime, cx) else {
+            return;
+        };
         self.session_list_inflight.insert(key.clone());
         cx.spawn(async move |this, cx| {
-            let c = cwd.clone();
+            let c = cwd.root.clone();
             let pid = profile_id.clone();
             let (sessions, bindings) = cx
                 .background_executor()
-                .spawn(async move { load_history_list(agent, pid, c) })
+                .spawn(async move { load_history_list(&client, agent, pid, c) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_list_inflight.remove(&key);
@@ -1127,10 +1181,12 @@ impl Workspace {
     /// Turn 列表。用自增 gen 丢弃过期结果（解析期间又点了别的会话，或切了 tab）。
     pub fn open_session_detail(
         &mut self,
+        runtime: RuntimeKey,
         agent: HistorySourceKind,
         path: String,
         cx: &mut Context<Self>,
     ) {
+        let client = runtime_target(&runtime, cx);
         self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
         let r#gen = self.session_detail_gen;
         self.session_detail = None;
@@ -1141,7 +1197,7 @@ impl Workspace {
             let p = path.clone();
             let detail = cx
                 .background_executor()
-                .spawn(async move { load_history_detail(agent, &p) })
+                .spawn(async move { load_history_detail(&client, agent, &p) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.session_detail_gen != r#gen {
@@ -1191,6 +1247,11 @@ impl Workspace {
 
         let agent = target.agent;
         let profile_id = target.profile_id.clone();
+        let project = ProjectRef {
+            runtime: target.runtime.clone(),
+            root: target.cwd.clone(),
+        };
+        let client = runtime_target(&project.runtime, cx);
         let cwd = target.cwd.clone();
         let resume_id = target.resume_id.clone();
         let path = target.path.clone();
@@ -1199,7 +1260,7 @@ impl Workspace {
         let params = HistoryDeleteParams {
             agent: agent.id().to_string(),
             profile_id: profile_id.clone(),
-            cwd: cwd.clone(),
+            cwd,
             resume_id,
             path,
         };
@@ -1207,19 +1268,20 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    call::<HistoryDeleteCall>(params, RUNTIME_CALL_TIMEOUT)
+                    call_on::<HistoryDeleteCall>(&client?, params, RUNTIME_CALL_TIMEOUT)
                         .map(drop)
                         .map_err(error_text)
                 })
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
-                let key = session_list_key(agent, profile_id.as_deref(), &cwd);
+                let key =
+                    session_list_key(&project.runtime, agent, profile_id.as_deref(), &project.root);
                 if result.is_ok() {
                     this.session_list.remove(&key);
                     if this.session_list_inflight.contains(&key) {
                         this.session_list_invalidated.insert(key.clone());
                     } else {
-                        this.ensure_session_list(agent, profile_id.clone(), cwd.clone(), cx);
+                        this.ensure_session_list(agent, profile_id.clone(), project.clone(), cx);
                     }
                     crate::status_item::notify_success(format!("已删除历史会话「{title}」"));
                 } else if let Err(error) = result {
@@ -1289,11 +1351,12 @@ impl Workspace {
     ) {
         let path = source.path.clone();
         let source_agent = source.agent;
+        let client = runtime_target(&source.runtime, cx);
         cx.spawn(async move |this, cx| {
             let p = path.clone();
             let detail = cx
                 .background_executor()
-                .spawn(async move { load_history_detail(source_agent.into(), &p) })
+                .spawn(async move { load_history_detail(&client, source_agent.into(), &p) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let Some(detail) = detail else {
@@ -1304,7 +1367,12 @@ impl Workspace {
                     ));
                     return;
                 };
-                let request = build_history_handoff_request(&source, &detail, target);
+                // 交接会话开在存档所在的那台机器上，cwd 是那台机器上的路径。
+                let Some(runtime) = crate::runtimes::runtime(&source.runtime, cx) else {
+                    crate::status_item::notify_error("这台机器已经移除，迁移取消");
+                    return;
+                };
+                let request = build_history_handoff_request(runtime, &source, &detail, target);
                 this.add_acp_handoff_session(request, window, cx);
             });
         })
@@ -1322,8 +1390,8 @@ fn migration_menu(
     source_profile_id: Option<&str>,
     cx: &App,
 ) -> gpui_component::menu::PopupMenu {
-    // 历史会话只在本机，迁移目标也用本机的启动命令和 workspace。
-    let config = crate::settings::agent_host_settings(&crate::RuntimeKey::Local, cx).into_owned();
+    // 迁移目标开在存档所在的机器上，用那台机器的启动命令和 workspace。
+    let config = crate::settings::agent_host_settings(&source.runtime, cx).into_owned();
     let mut menu = menu.separator().item(PopupMenuItem::label("迁移到"));
     for target_agent in ConversationAgentKind::ALL {
         if target_agent == source.agent && source_profile_id.is_none() {
@@ -1381,6 +1449,8 @@ fn migration_menu(
 /// 发起一次历史会话迁移需要知道的源信息（都在历史页那一行上现成拿得到）。
 #[derive(Clone)]
 pub struct HistoryMigrationSource {
+    /// 存档在哪台机器上。
+    pub runtime: RuntimeKey,
     pub agent: ConversationAgentKind,
     /// 源 workspace profile 名；默认 workspace 为 `None`。
     pub profile_label: Option<String>,
@@ -1395,6 +1465,7 @@ pub struct HistoryMigrationSource {
 /// 组装历史迁移的交接请求。抽出来是为了能脱离 GPUI 单测：这里决定了目标会话
 /// 拿到的第一句话长什么样。
 fn build_history_handoff_request(
+    runtime: crate::runtimes::Runtime,
     source: &HistoryMigrationSource,
     detail: &SessionDetail,
     target: acp_view::AcpHandoffTarget,
@@ -1412,7 +1483,7 @@ fn build_history_handoff_request(
     let prompt = build_handoff_prompt(&context);
 
     acp_view::AcpHandoffRequest {
-        runtime: crate::runtimes::Runtime::local(),
+        runtime,
         launch_prep: None,
         source: Some(acp_view::AcpForkOrigin {
             session_id: source.resume_id.clone(),
@@ -1446,7 +1517,7 @@ mod tests {
     use super::{
         HistoryListSnapshot, HistorySourceTab, SessionDetail, SessionSummary, Turn,
         current_profile_launch, handoff_turns_from_history, history_continue_label,
-        history_row_is_agent_session, history_source_tabs, tabs_with_sessions,
+        history_row_is_agent_session, history_source_tabs, session_list_key, tabs_with_sessions,
     };
     #[cfg(unix)]
     use super::{HistoryMigrationSource, build_history_handoff_request};
@@ -1466,6 +1537,23 @@ mod tests {
             message_count: 0,
             total_tokens: 0,
         }
+    }
+
+    #[test]
+    fn history_list_key_separates_machines() {
+        let local = session_list_key(
+            &crate::RuntimeKey::Local,
+            ConversationAgentKind::Claude.into(),
+            None,
+            "/home/u/app",
+        );
+        let remote = session_list_key(
+            &crate::RuntimeKey::Remote("box".into()),
+            ConversationAgentKind::Claude.into(),
+            None,
+            "/home/u/app",
+        );
+        assert_ne!(local, remote);
     }
 
     #[test]
@@ -1594,6 +1682,7 @@ mod tests {
             }],
         };
         let source = HistoryMigrationSource {
+            runtime: crate::RuntimeKey::Local,
             agent: ConversationAgentKind::Grok,
             profile_label: None,
             title: "老会话".into(),
@@ -1608,7 +1697,12 @@ mod tests {
             profile_label: None,
         };
 
-        let request = build_history_handoff_request(&source, &detail, target);
+        let request = build_history_handoff_request(
+            crate::runtimes::Runtime::local(),
+            &source,
+            &detail,
+            target,
+        );
         let origin = request
             .source
             .expect("创建时要知道源会话，才能跳过本机定义继承");
