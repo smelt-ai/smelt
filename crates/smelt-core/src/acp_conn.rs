@@ -3170,10 +3170,14 @@ fn plan_embedded_adapter_command(
         return None;
     }
     let (executable, bundled) = smelt_pi()?;
-    let release = adapter.agent.managed_adapter()?.current_release();
-    let wanted = format!("{}@{}", release.package, release.version);
+    let package = adapter.agent.managed_adapter()?.current_release().package;
+    // 只认包名、不比版本：跑的是这份 smelt-pi 编进来的那一版。
+    let has_adapter = bundled.iter().any(|spec| {
+        spec.rsplit_once('@')
+            .is_some_and(|(name, _version)| name == package)
+    });
     // 启动命令按空白分词，带空格的路径传不过去。
-    if !bundled.contains(&wanted) || executable.split_whitespace().count() != 1 {
+    if !has_adapter || executable.split_whitespace().count() != 1 {
         return None;
     }
     let mut rewritten: Vec<&str> = prefix.to_vec();
@@ -3200,7 +3204,7 @@ fn resolve_embedded_adapter_command(
 }
 
 /// 这份 smelt-pi 带着哪些适配器。smelt-pi 和守护分开发布，守护可能遇到更旧的一份：
-/// 不认识 `acp-adapters` 的旧版不会输出这份清单，版本对不上的也匹配不到，都走 `bunx`。
+/// 不认识 `acp-adapters` 的旧版不会输出这份清单，也就不认识 `acp-claude`，这时走 `bunx`。
 /// 发布目录按内容指纹命名、发布后不再改动，同一路径的结果可以一直用；探测失败不缓存。
 fn embedded_adapter_specs(executable: &std::path::Path) -> Vec<String> {
     static CACHE: Mutex<Option<(std::path::PathBuf, Vec<String>)>> = Mutex::new(None);
@@ -5109,8 +5113,8 @@ mod spawn_gate_tests {
 #[cfg(test)]
 mod embedded_adapter_tests {
     use super::{
-        ConversationAgentKind, EMBEDDED_ADAPTERS, auth_required_hint,
-        inject_local_adapter_cli_path, plan_embedded_adapter_command,
+        ConversationAgentKind, auth_required_hint, inject_local_adapter_cli_path,
+        plan_embedded_adapter_command,
     };
     use crate::agent_kind::ConversationLaunchSpec;
     use std::collections::BTreeMap;
@@ -5264,15 +5268,11 @@ mod embedded_adapter_tests {
         }
     }
 
-    /// 更旧的 smelt-pi 没有内置适配器，或者内置的版本和守护要的不一样。
+    /// 更旧的 smelt-pi 没有内置适配器，或者只带了别家的。
     #[test]
-    fn smelt_pi_without_the_right_adapter_stays_on_bunx() {
+    fn smelt_pi_without_the_adapter_stays_on_bunx() {
         let claude = CliDir::with("claude");
-        for bundled in [
-            vec![],
-            vec!["@agentclientprotocol/claude-agent-acp@0.70.0".to_string()],
-            vec![CODEX_SPEC.to_string()],
-        ] {
+        for bundled in [vec![], vec![CODEX_SPEC.to_string()]] {
             assert_eq!(
                 plan_embedded_adapter_command(
                     &spec(claude_default()),
@@ -5295,6 +5295,26 @@ mod embedded_adapter_tests {
                 || None,
             ),
             None
+        );
+    }
+
+    /// 内置的是哪一版就用哪一版，不要求和启动命令里写的版本一致。
+    #[test]
+    fn bundled_adapter_is_used_whatever_its_version() {
+        let claude = CliDir::with("claude");
+        assert_eq!(
+            plan_embedded_adapter_command(
+                &spec(claude_default()),
+                &BTreeMap::new(),
+                claude.path(),
+                &|_| false,
+                || Some((
+                    "/bin/smelt-pi".to_string(),
+                    vec!["@agentclientprotocol/claude-agent-acp@9.9.9".to_string()]
+                )),
+            )
+            .as_deref(),
+            Some("/bin/smelt-pi acp-claude")
         );
     }
 
@@ -5340,21 +5360,6 @@ mod embedded_adapter_tests {
         assert!(claude.contains("Claude Code"), "{claude}");
         let codex = auth_required_hint("/home/me/.smelt/bin/smelt-pi-abc/smelt-pi acp-codex");
         assert!(codex.contains("codex login"), "{codex}");
-    }
-
-    /// 改了默认版本、忘了改 package.json，就会悄悄退回 bunx。
-    #[test]
-    fn bundled_versions_match_the_default_commands() {
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../../../packages/pi-agent/package.json")).unwrap();
-        for adapter in EMBEDDED_ADAPTERS {
-            let release = adapter.agent.managed_adapter().unwrap().current_release();
-            assert_eq!(
-                manifest["dependencies"][release.package], release.version,
-                "{}",
-                release.package
-            );
-        }
     }
 }
 

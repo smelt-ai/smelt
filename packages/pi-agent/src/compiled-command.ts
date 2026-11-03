@@ -8,7 +8,7 @@ export type CompiledCommand =
 	| { kind: "acp-codex"; args: string[] }
 	| { kind: "acp-adapters" };
 
-/** 编进 smelt-pi 的官方 ACP 适配器。版本钉在 package.json，和 smelt-model 的默认版本是同一个。 */
+/** 编进 smelt-pi 的官方 ACP 适配器，版本钉在 package.json。守护只认包名，内置哪版就跑哪版。 */
 export const EMBEDDED_ACP_ADAPTERS = [
 	"@agentclientprotocol/claude-agent-acp",
 	"@agentclientprotocol/codex-acp",
