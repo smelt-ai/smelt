@@ -99,6 +99,8 @@ impl ManagedAcpAdapterRelease {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ManagedAcpAdapter {
     current: ManagedAcpAdapterRelease,
+    /// 发布过的旧默认版本。升级 `agent/package.json` 里的适配器时把旧版本加进来：存着旧
+    /// 默认命令的设置靠它迁移到新版本，否则会一直走 `bunx` 旧版，也用不上内置的那份。
     previous_releases: &'static [ManagedAcpAdapterRelease],
     /// 曾作为默认值发布、但不是 `bunx package@version` 形态的命令。
     legacy_default_commands: &'static [&'static str],
@@ -129,10 +131,13 @@ impl ManagedAcpAdapter {
     }
 }
 
+// 当前版本取自 `agent/package.json`（见 build.rs），那里是唯一的出处。
+include!(concat!(env!("OUT_DIR"), "/acp_adapter_versions.rs"));
+
 const CLAUDE_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
     current: ManagedAcpAdapterRelease {
         package: "@agentclientprotocol/claude-agent-acp",
-        version: "0.78.0",
+        version: CLAUDE_AGENT_ACP_VERSION,
     },
     previous_releases: &[
         ManagedAcpAdapterRelease {
@@ -150,7 +155,7 @@ const CLAUDE_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
 const CODEX_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
     current: ManagedAcpAdapterRelease {
         package: "@agentclientprotocol/codex-acp",
-        version: "1.12.0",
+        version: CODEX_ACP_VERSION,
     },
     previous_releases: &[
         ManagedAcpAdapterRelease {
@@ -1976,6 +1981,8 @@ mod tests {
         );
     }
 
+    /// 版本取自 `agent/package.json`。这里故意写死：那边一改（包括 Dependabot），这条就失败，
+    /// 提醒把旧版本加进 `previous_releases` 再更新这里。
     #[test]
     fn managed_adapter_defaults_pin_the_verified_latest_versions() {
         assert_eq!(
