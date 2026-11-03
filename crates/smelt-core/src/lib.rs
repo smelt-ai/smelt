@@ -51,7 +51,7 @@ pub use smelt_model::osc;
 pub mod pi_auth;
 pub mod pi_auth_service;
 pub mod pi_auto_models;
-pub use smelt_sys::pi_image;
+pub use smelt_sys::agent_image;
 pub mod pi_mcp;
 pub mod pi_model_discovery;
 pub mod pi_model_settings;

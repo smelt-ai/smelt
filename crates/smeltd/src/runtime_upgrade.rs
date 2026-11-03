@@ -74,10 +74,10 @@ fn check_target(requested: &str, current: &str) -> Result<Option<semver::Version
     Ok(Some(target))
 }
 
-/// 守护启动后在后台调一次，见 `linux::ensure_smelt_pi`。只有装在 `~/.smelt/bin` 的映像
+/// 守护启动后在后台调一次，见 `linux::ensure_smelt_agent`。只有装在 `~/.smelt/bin` 的映像
 /// 才这样补：开发、测试里直接跑的 smeltd 不去 Release 下载。macOS 上由桌面从 App 里发布。
 #[cfg(target_os = "linux")]
-pub(crate) fn ensure_smelt_pi() {
+pub(crate) fn ensure_smelt_agent() {
     let managed = std::env::current_exe().ok().is_some_and(|exe| {
         exe.file_name()
             .and_then(|name| name.to_str())
@@ -89,8 +89,8 @@ pub(crate) fn ensure_smelt_pi() {
     let Some(Ok(version)) = smelt_version::RELEASE.map(semver::Version::parse) else {
         return;
     };
-    if let Err(error) = linux::ensure_smelt_pi(&version) {
-        smelt_core::app_log::error("smeltd", &format!("补齐 smelt-pi 失败：{error}"));
+    if let Err(error) = linux::ensure_smelt_agent(&version) {
+        smelt_core::app_log::error("smeltd", &format!("补齐 smelt-agent 失败：{error}"));
     }
 }
 
@@ -151,7 +151,7 @@ mod linux {
     /// 下载、解包用的临时目录，用完删掉。放在 `~/.smelt` 下：和 `~/.smelt/bin` 同一个
     /// 文件系统，`/tmp` 常是容量很小的 tmpfs。按用途分名字、每次先清空：交接成功时旧进程
     /// 直接退出，`Drop` 来不及跑，留下的这份由下一次同一用途清掉。同一用途同一时间只有
-    /// 一次（升级有 `IN_PROGRESS`，补 smelt-pi 只在启动时跑一次），不会互相清掉。
+    /// 一次（升级有 `IN_PROGRESS`，补 smelt-agent 只在启动时跑一次），不会互相清掉。
     pub(super) struct Staging(PathBuf);
 
     impl Staging {
@@ -272,19 +272,19 @@ mod linux {
     }
 
     /// 同安装脚本的 `put`：先写到旁边再改名盖过去，正在跑的旧版本不受影响。
-    /// Linux 上没有桌面替运行时发布 smelt-pi，运行时自己保证它在位。链接已经指向能执行的
-    /// 一份就不动；缺了（旧版运行时代为升级时还不认识 smelt-pi、文件被删、从没有 smelt-pi
+    /// Linux 上没有桌面替运行时发布 smelt-agent，运行时自己保证它在位。链接已经指向能执行的
+    /// 一份就不动；缺了（旧版运行时代为升级时还不认识 smelt-agent、文件被删、从没有 smelt-agent
     /// 的目录 install）就按自己的版本取 Release 包，校验后发布。顺带回收没人用的旧版本。
-    pub(super) fn ensure_smelt_pi(version: &semver::Version) -> Result<(), String> {
+    pub(super) fn ensure_smelt_agent(version: &semver::Version) -> Result<(), String> {
         let bin = crate::service::bin_dir()?;
-        if smelt_core::pi_image::current(&bin).is_none() {
-            let staging = Staging::new("smelt-pi")?;
+        if smelt_core::agent_image::current(&bin).is_none() {
+            let staging = Staging::new("smelt-agent")?;
             let package = fetch_package(&staging, version, &super::release_url(version))?;
-            smelt_core::pi_image::publish(&bin, &package)
-                .map_err(|error| format!("发布 smelt-pi 失败：{error}"))?;
+            smelt_core::agent_image::publish(&bin, &package)
+                .map_err(|error| format!("发布 smelt-agent 失败：{error}"))?;
         }
-        smelt_core::pi_image::reap_unused(&bin)
-            .map_err(|error| format!("回收旧 smelt-pi 失败：{error}"))
+        smelt_core::agent_image::reap_unused(&bin)
+            .map_err(|error| format!("回收旧 smelt-agent 失败：{error}"))
     }
 
     pub(super) fn install_helpers(package: &Path) -> Result<(), String> {

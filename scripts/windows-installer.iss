@@ -2,7 +2,7 @@
 ;
 ;   ISCC /DAppVersion=<版本> /DAppVersionNumeric=<x.y.z> /DStageDir=<暂存目录> /DOutputDir=<输出目录> scripts\windows-installer.iss
 ;
-; 暂存目录里是 smelt.exe、smelt.com、smeltd.exe、smelt-notify.exe、smelt-pi.exe 和 Pi 要的文件，
+; 暂存目录里是 smelt.exe、smelt.com、smeltd.exe、smelt-notify.exe、smelt-agent.exe 和 Pi 要的文件，
 ; 原样装进安装目录。按用户安装，不要管理员权限，默认装到 %LOCALAPPDATA%\Programs\Smelt。
 ; 数据目录 %USERPROFILE%\.smelt 不归安装程序管，卸载也不删。
 ;
@@ -66,6 +66,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; 这两个目录随 Pi 整份发布，旧版本多出来的文件要清掉，不能和新文件混在一起。
 Type: filesandordirs; Name: "{app}\skills"
 Type: filesandordirs; Name: "{app}\native"
+; 改名前叫 smelt-pi.exe，覆盖安装不会删掉它。
+Type: files; Name: "{app}\smelt-pi.exe"
 
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

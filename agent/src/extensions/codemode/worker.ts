@@ -6,9 +6,9 @@ import "../../quickjs-embed.ts";
 import "../../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/codemode/worker.js";
 
 if (!parentPort) {
-	throw new Error("smelt-pi codemode worker requires parentPort");
+	throw new Error("smelt-agent codemode worker requires parentPort");
 }
-// 编译冒烟（compiled-main.ts 的 SMELT_PI_PROBE_WORKERS）：走到这里时依赖都已求值完，回一声说明能用。
+// 编译冒烟（compiled-main.ts 的 SMELT_AGENT_PROBE_WORKERS）：走到这里时依赖都已求值完，回一声说明能用。
 if (workerData?.smeltProbe === true) {
 	parentPort.postMessage({ smeltProbe: "ready" });
 }

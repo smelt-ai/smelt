@@ -423,7 +423,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
     }
 }
 
-/// 把 App 里的 smelt-pi 发布到 `~/.smelt/bin` 并拨好 `smelt-pi` 链接，再回收没人用的旧版本。
+/// 把 App 里的 smelt-agent 发布到 `~/.smelt/bin` 并拨好 `smelt-agent` 链接，再回收没人用的旧版本。
 /// 和守护版本无关：只换了 Pi 时守护不用交接，之后新起的 Pi 就是新的。要读一遍约
 /// 120MB 算指纹，每个 GUI 进程只做一次。
 fn sync_bundled_pi(bundled_daemon: &std::path::Path) {
@@ -443,19 +443,19 @@ fn sync_bundled_pi(bundled_daemon: &std::path::Path) {
             bundled_daemon
                 .parent()
                 .and_then(std::path::Path::parent)
-                .map(|contents| contents.join(smelt_sys::pi_image::APP_BUNDLE_DIR))
+                .map(|contents| contents.join(smelt_sys::agent_image::APP_BUNDLE_DIR))
         }
     };
     let Some(src) = src else {
         return;
     };
     let dir = managed_daemon_dir();
-    match smelt_sys::pi_image::publish(&dir, &src) {
+    match smelt_sys::agent_image::publish(&dir, &src) {
         Ok(_) => SYNCED.store(true, Ordering::Relaxed),
-        Err(error) => eprintln!("[workspace] 发布 smelt-pi 失败：{error}"),
+        Err(error) => eprintln!("[workspace] 发布 smelt-agent 失败：{error}"),
     }
-    if let Err(error) = smelt_sys::pi_image::reap_unused(&dir) {
-        eprintln!("[workspace] 回收旧 smelt-pi 失败：{error}");
+    if let Err(error) = smelt_sys::agent_image::reap_unused(&dir) {
+        eprintln!("[workspace] 回收旧 smelt-agent 失败：{error}");
     }
 }
 
@@ -977,13 +977,13 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
     if !daemon.is_file() {
         anyhow::bail!("候选 App 缺少守护程序：{}", daemon.display());
     }
-    // smelt-pi 和守护分开发布。安装会当场交接守护，交接上来的新守护起 Pi 时链接必须已经
+    // smelt-agent 和守护分开发布。安装会当场交接守护，交接上来的新守护起 Pi 时链接必须已经
     // 就位；发布不上就不换 App。
     let pi_bundle = candidate_app
         .join("Contents")
-        .join(smelt_sys::pi_image::APP_BUNDLE_DIR);
-    smelt_sys::pi_image::publish(&managed_daemon_dir(), &pi_bundle)
-        .map_err(|error| anyhow::anyhow!("发布 smelt-pi 失败：{error}"))?;
+        .join(smelt_sys::agent_image::APP_BUNDLE_DIR);
+    smelt_sys::agent_image::publish(&managed_daemon_dir(), &pi_bundle)
+        .map_err(|error| anyhow::anyhow!("发布 smelt-agent 失败：{error}"))?;
     Ok(daemon)
 }
 

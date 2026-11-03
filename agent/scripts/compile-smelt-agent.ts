@@ -1,5 +1,5 @@
 /**
- * 把 agent/ 编成 smelt-pi。
+ * 把 agent/ 编成 smelt-agent。
  * Bun 1.4.3 仍然打不开 `./src/...worker.ts`（Cannot find module）。
  * 嵌入文件落在 Bun 的虚拟文件系统里：macOS / Linux 是 /$bunfs/root/，Windows 是
  * B:/~BUN/root/。这里按编译目标把 Pi 写死的两条说明符改成对应平台上的那两个路径。
@@ -8,14 +8,14 @@
  * --splitting 在 Bun 1.4.3 上和图片 worker、codemode worker 一起通过了冒烟。
  * Bun 1.4.0 上拆块会让 photon 报 `exports_photon_rs is not defined`，1.4.3 没有。
  *
- * 用法：bun agent/scripts/compile-smelt-pi.ts <outfile> <bun-target>
+ * 用法：bun agent/scripts/compile-smelt-agent.ts <outfile> <bun-target>
  */
 import { join } from "node:path";
 
 const outfile = process.argv[2];
 const compileTarget = process.argv[3];
 if (!outfile || !compileTarget) {
-	console.error("用法：bun agent/scripts/compile-smelt-pi.ts <outfile> <bun-target>");
+	console.error("用法：bun agent/scripts/compile-smelt-agent.ts <outfile> <bun-target>");
 	process.exit(2);
 }
 
@@ -32,7 +32,7 @@ function posixPath(path: string): string {
 const rewritten = new Set<string>();
 
 const workerPaths: BunPlugin = {
-	name: "smelt-pi-worker-paths",
+	name: "smelt-agent-worker-paths",
 	setup(build) {
 		build.onLoad({ filter: /image-resize\.js$/ }, async (args) => {
 			if (!posixPath(args.path).includes("pi-coding-agent/dist/utils/image-resize.js")) return;

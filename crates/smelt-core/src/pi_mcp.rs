@@ -4,7 +4,7 @@
 //! Smelt 只做配置界面：增删、启停、登录，格式和 Pi 文档（`docs/mcp.md`）一致，写回时
 //! 保留文件里与本次操作无关的内容。会话里怎么连、怎么调用都交给 Pi。
 //!
-//! 登录走 `smelt-pi mcp login <name>`：OAuth 流程
+//! 登录走 `smelt-agent mcp login <name>`：OAuth 流程
 //! （动态注册、PKCE、回环回调、令牌落盘到 `mcp-auth.json`）全在 Pi 里，这里不重写。
 
 pub use smelt_model::pi_mcp::*;
@@ -324,7 +324,7 @@ mod tests {
     }
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("smelt-pi-mcp-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("smelt-agent-mcp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

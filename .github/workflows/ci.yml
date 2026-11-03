@@ -329,7 +329,7 @@ jobs:
       - name: Check
         run: bun run check
 
-  # Windows 上把 smelt-pi 编出来跑一遍冒烟：嵌入文件的路径、可执行文件后缀都和
+  # Windows 上把 smelt-agent 编出来跑一遍冒烟：嵌入文件的路径、可执行文件后缀都和
   # macOS / Linux 不一样，本地开发机上测不到，不在这里跑就只能等发版时才暴露。
   pi-agent-windows:
     needs: changes
@@ -339,9 +339,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Build and smoke smelt-pi
+      - name: Build and smoke smelt-agent
         shell: bash
-        run: bash agent/scripts/build-smelt-pi.sh --out target/smelt-pi
+        run: bash agent/scripts/build-smelt-agent.sh --out target/smelt-agent
 
   # 唯一的必需检查（分支保护里只要求它）。只有成功和被跳过算通过，其余一律失败（失败、
   # 取消，以及排不到机器被放弃的 abandoned）。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。

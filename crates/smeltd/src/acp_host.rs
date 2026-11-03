@@ -1,7 +1,7 @@
 //! ACP 会话托管：open/watch/action/kill/restart。
 //!
 //! 从 `main.rs` 整块搬出。连接与归约仍在 `smelt_core::acp_session`；这里只跑守护侧的会话活体。
-//! 对话和它的驱动线程都在 smeltd 里。agent（`smelt-pi` 或外部 ACP）是这个进程的子进程。
+//! 对话和它的驱动线程都在 smeltd 里。agent（`smelt-agent` 或外部 ACP）是这个进程的子进程。
 
 use super::*;
 use crate::acp_registry::SessionLock;

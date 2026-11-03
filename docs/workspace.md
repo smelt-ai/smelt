@@ -101,7 +101,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - 新建自动化不自动保存：名称、触发器、智能体（定时还要指令）填齐后点「创建」才落库，缺什么就在表单顶部列出来；创建之后的修改照常自动保存，缺项时提示「补齐后自动保存」。模板「添加」只预填新建表单，模板指令用「填写…」留出要读的路径或对象，因为运行目录在智能体的 space 里，用户的项目不会自动带上。
 - Run 在 claim 时固化智能体身份与指令、输入和 daemon 托管工作区。投递时 daemon 固定启用 `FullAccess`，使用稳定 Run ID 并等待 ACP 接收账本确认；可重试故障按指数退避，最多尝试 5 次后明确失败。终态结果有界保存，执行器在终态后由 daemon 回收。
 - GUI 通过 EventHub 的首帧快照和 `automations.changed` 增量接收自动化投影，不再按秒轮询。自动化页保留有界 Run 历史，每条 Run 可查看固化输入、执行上下文、时间线、完整结果和错误。
-- Pi 由应用里的 `smelt-pi` 启动，直接使用官方 JSONL RPC。智能体本身不启动进程；用户每次选择它都会创建一段独立的普通对话，同一定义可以同时拥有多段上下文。
+- Pi 由应用里的 `smelt-agent` 启动，直接使用官方 JSONL RPC。智能体本身不启动进程；用户每次选择它都会创建一段独立的普通对话，同一定义可以同时拥有多段上下文。
 - 对话继续由 `WsState.sessions` 持久化，并在 ACP 元数据中保存 `agent_definition_id`。自动化权威状态在主库 `~/.smelt/smelt.sqlite3` 的关系表中；旧 `agent_ui.json` 自动化数据不再读取，新功能从空存储开始。0.8.0 开发版写出的单例 `agent_runs` 会在读取时迁移为普通对话，之后不再写回。
 - 自动化通知只有「应用内通知」和「不通知」，仍受设置里任务完成 / 失败通知的总开关约束。存储 schema v2 删掉了从未投递过的飞书 / Webhook sink，载入 v1 数据时剔除，剩下为空就回到默认的应用内通知。
 - 股票、飞书监听与输出目标属于后续 Smelt capability/plugin 层，不写进 Pi 引擎或智能体核心。
@@ -179,7 +179,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > 自动使用本机 `claude` CLI）、**GitHub Copilot**（CLI 自带 `copilot --acp`）、
 > **Codex**（经 `@agentclientprotocol/codex-acp` 标准 ACP 通道）、**Grok**（CLI 自带
 > `grok agent stdio`，凭据 `~/.grok/auth.json`）、**Cursor** / **OpenCode** /
-> **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-pi` 跑 Pi 官方
+> **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-agent` 跑 Pi 官方
 > JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。终端通道另有 **Antigravity** 与 **Crush**
 > （`settings::TerminalAgentKind`）。
 > 各条启动命令在设置 →「Agent」→「高级」里改。provider 支持历史恢复时，
@@ -276,12 +276,12 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - `smelt.com`：`smelt-cli.exe` 改名。`smelt.exe` 是 GUI 子系统；cmd / PowerShell 敲 `smelt` 先找到 `.com`，子命令才有控制台输出
 - `smeltd.exe`
 - `smelt-notify.exe`
-- `smelt-pi.exe`
+- `smelt-agent.exe`
 - Pi 要的 `photon_rs_bg.wasm`（打出来的 `skills/`、`native/` 也在）
 
-不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
+不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
 
-数据目录是 `%USERPROFILE%\.smelt`。Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（AF_UNIX，见 `smelt-runtime-client/src/stream/windows.rs`）。Bun / Pi 不连这个文件：交给它们的 `SMELT_SOCK` 是当前用户的命名管道 `\\.\pipe\smelt-<sid>-daemon`。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-pi-<指纹>/smelt-pi.exe`，启动名是 `smelt-pi.current` 指针文件。受管 Bun 取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `%USERPROFILE%\.smelt\runtime` 下的 `bin/bun.exe`。
+数据目录是 `%USERPROFILE%\.smelt`。Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（AF_UNIX，见 `smelt-runtime-client/src/stream/windows.rs`）。Bun / Pi 不连这个文件：交给它们的 `SMELT_SOCK` 是当前用户的命名管道 `\\.\pipe\smelt-<sid>-daemon`。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-agent-<指纹>/smelt-agent.exe`，启动名是 `smelt-agent.current` 指针文件。受管 Bun 取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `%USERPROFILE%\.smelt\runtime` 下的 `bin/bun.exe`。
 
 交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`，走 ConPTY。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。关掉桌面窗口本身不停守护，shell 还在。升级和其它平台一样先优雅停机再换新版本，进行中的终端会话和回合会中断；不同在于 Windows 不能 `exec`，旧进程拉起新映像当接班进程，接班进程等它退出再绑定监听。系统通知、状态栏图标、Dock 角标在 Windows 上没有。细节见 [`windows-support.md`](windows-support.md)。
 
@@ -296,7 +296,7 @@ curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh
 
 `install.sh` 会下载对应架构的 tar.gz、对照 `SHA256SUMS` 校验，再调用包里的脚本。也可以自己解包后在包目录执行 `./install.sh`。参数：`--with-desktop`（TigerVNC / Xvnc、XFCE、Chrome 或 Chromium，用户级 systemd 服务 `smelt-display`、`smelt-desktop`、`smelt-chrome`，并执行 `smeltd mcp add playwright`）、`--relay=<地址>`（初始 iroh 中继，域名、IP 或 URL）、`--apt-mirror=<镜像>`（这次安装用的 apt 源；不给时官方源连不上就自动换阿里云 / 清华 / 中科大）、`--no-pair`。
 
-脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-pi`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-pi-<指纹>/`，`~/.smelt/bin/smelt-pi` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-pi）。已经在跑就停掉旧进程、换上新版本：进行中的终端会话和回合会中断，对话历史保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`，供 ACP 适配器和 MCP 使用。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
+脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-agent`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-agent-<指纹>/`，`~/.smelt/bin/smelt-agent` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-agent）。已经在跑就停掉旧进程、换上新版本：进行中的终端会话和回合会中断，对话历史保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`，供 ACP 适配器和 MCP 使用。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
 
 ```bash
 smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码

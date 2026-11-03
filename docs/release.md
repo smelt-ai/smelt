@@ -7,7 +7,7 @@
 | `Smelt.dmg`、`Smelt.app.zip` | `build`（macos-14） | `make dist-build`，Developer ID 签名并公证，见下面的「macOS 签名」。`Smelt.app.zip` 给桌面应用内更新用 |
 | `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
-| `smelt-<版本>-windows-x86_64-setup.exe` | `windows` → `windows-release` | Inno Setup 安装程序，`smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe` 装在同一个目录。第一版不签名，见下面的「Windows」 |
+| `smelt-<版本>-windows-x86_64-setup.exe` | `windows` → `windows-release` | Inno Setup 安装程序，`smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe` 装在同一个目录。第一版不签名，见下面的「Windows」 |
 | iOS 构建（TestFlight） | `ios`（macos-26） | 传到 App Store Connect，处理完自动发给 TestFlight 内部测试组，不挂 Release。签名见下面的「iOS 签名」 |
 | `SHA256SUMS` | `linux-release` → `checksums` | 先只含 Linux 包（一键安装和运行时自动升级马上能用），全部产物到齐后重写成覆盖所有产物 |
 
@@ -105,7 +105,7 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 ## Windows
 
 `windows` job 在 `windows-latest` 上 `cargo build --release -p smelt -p smelt-cli -p smeltd --locked`，再用
-`agent/scripts/build-smelt-pi.sh` 编 `smelt-pi.exe`（Bun 1.4.3，`bun-windows-x64`）。下面这些文件放进暂存目录，
+`agent/scripts/build-smelt-agent.sh` 编 `smelt-agent.exe`（Bun 1.4.3，`bun-windows-x64`）。下面这些文件放进暂存目录，
 再用 Inno Setup 7（钉 7.1.0、对哈希）按 `scripts/windows-installer.iss` 编成
 `smelt-<版本>-windows-x86_64-setup.exe`：
 
@@ -114,7 +114,7 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
   里没有输出；敲 `smelt` 时先找到 `.com`，子命令在它里面跑，不带子命令就拉起 `smelt.exe`
 - `smeltd.exe`
 - `smelt-notify.exe`
-- `smelt-pi.exe`
+- `smelt-agent.exe`
 - Pi 运行要的 `photon_rs_bg.wasm`（以及打出来的 `skills/`、`native/`）
 
 安装程序按用户安装，不要管理员权限，默认装到 `%LOCALAPPDATA%\Programs\Smelt`，建开始菜单项，可选把安装目录
@@ -122,7 +122,7 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 提示先关掉 Smelt。卸载会停掉本机守护（它跑的是 `%USERPROFILE%\.smelt\bin` 里的副本，不在安装目录），数据目录
 不删。
 
-桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`。由 `windows-release` 挂到同一个 Release。
+桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`。由 `windows-release` 挂到同一个 Release。
 校验和在 `checksums` 里和其它产物写在一起。
 
 这一版 exe 和安装程序都不签名。下载后 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。

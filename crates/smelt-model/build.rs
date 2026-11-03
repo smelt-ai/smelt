@@ -1,4 +1,4 @@
-//! 编进 smelt-pi 的官方 ACP 适配器，版本只在 `agent/package.json` 写一处。
+//! 编进 smelt-agent 的官方 ACP 适配器，版本只在 `agent/package.json` 写一处。
 //! 出厂默认命令 `bunx --bun 包@版本` 从这里取版本，`bunx` 那条路和内置的那份就不会对不上。
 
 use std::env;

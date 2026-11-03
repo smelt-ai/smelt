@@ -1,4 +1,4 @@
-/** 编译产物 `smelt-pi` 的子命令。没有子命令时走现在的 RPC 入口。 */
+/** 编译产物 `smelt-agent` 的子命令。没有子命令时走现在的 RPC 入口。 */
 export type CompiledCommand =
 	| { kind: "rpc"; args: string[] }
 	| { kind: "auth"; args: string[] }
@@ -8,13 +8,13 @@ export type CompiledCommand =
 	| { kind: "acp-codex"; args: string[] }
 	| { kind: "acp-adapters" };
 
-/** 编进 smelt-pi 的官方 ACP 适配器，版本钉在 package.json。守护只认包名，内置哪版就跑哪版。 */
+/** 编进 smelt-agent 的官方 ACP 适配器，版本钉在 package.json。守护只认包名，内置哪版就跑哪版。 */
 export const EMBEDDED_ACP_ADAPTERS = [
 	"@agentclientprotocol/claude-agent-acp",
 	"@agentclientprotocol/codex-acp",
 ] as const;
 
-/** `acp-adapters` 的输出，一行一个 `包名@版本`。守护靠它判断这份 smelt-pi 带着哪些适配器。 */
+/** `acp-adapters` 的输出，一行一个 `包名@版本`。守护靠它判断这份 smelt-agent 带着哪些适配器。 */
 export function embeddedAdapterSpecs(dependencies: Readonly<Record<string, string>>): string[] {
 	return EMBEDDED_ACP_ADAPTERS.map((name) => `${name}@${dependencies[name]}`);
 }
@@ -39,11 +39,11 @@ export function userArguments(argv: readonly string[]): string[] {
 	return rest;
 }
 
-/** 守护起 smelt-pi 时用这个环境变量告诉它自己的握手约定版本。 */
+/** 守护起 smelt-agent 时用这个环境变量告诉它自己的握手约定版本。 */
 export const SMELT_PROTOCOL_ENV = "SMELT_PI_PROTOCOL";
 
 /**
- * smelt-pi 和守护分开发布：App 升级后、守护交接前，会是旧守护起新 Pi。约定对不上时
+ * smelt-agent 和守护分开发布：App 升级后、守护交接前，会是旧守护起新 Pi。约定对不上时
  * 返回要写进 stderr 的说明，不让握手莫名失败。改了守护和 Pi 之间的约定（RPC 扩展命令、
  * 握手、auth / mcp 子命令的输出），就把 package.json 的 smeltProtocol 加一。
  */
@@ -53,12 +53,12 @@ export function protocolMismatch(
 ): string | undefined {
 	const wanted = env[SMELT_PROTOCOL_ENV];
 	if (wanted === String(own)) return undefined;
-	return `smelt-pi 的协议是 ${own}，守护要的是 ${wanted ?? "（没给）"}。重新打开 Smelt，让守护换到同一版本。`;
+	return `smelt-agent 的协议是 ${own}，守护要的是 ${wanted ?? "（没给）"}。重新打开 Smelt，让守护换到同一版本。`;
 }
 
 /**
- * 约定版本管的是守护调用 smelt-pi 的接口，所以只有守护直接调用的入口（RPC 会话、auth、mcp）
- * 才校验。`gateway` 是 smelt-pi 自己拉起的同一份二进制，没有版本错配可言；它的环境也按
+ * 约定版本管的是守护调用 smelt-agent 的接口，所以只有守护直接调用的入口（RPC 会话、auth、mcp）
+ * 才校验。`gateway` 是 smelt-agent 自己拉起的同一份二进制，没有版本错配可言；它的环境也按
  * MCP server 的规矩去掉了 SMELT_* 变量，本来就拿不到守护给的版本。
  *
  * ACP 适配器说的是 ACP，不是守护和 Pi 之间的约定；`acp-adapters` 正是守护用来探测

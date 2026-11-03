@@ -6,7 +6,7 @@
 //! Smelt 的产品智能体则用勾选式加载：先关掉自动发现，再显式传入勾选插件和工作区技能。
 //!
 //! `discover_plugins` 只扫 Pi 自己也会自动发现的全局插件目录。智能体能勾选的是
-//! `selectable_plugins`：再加上随 smelt-pi 发布的内置技能，它们不在 Pi 的发现路径上，
+//! `selectable_plugins`：再加上随 smelt-agent 发布的内置技能，它们不在 Pi 的发现路径上，
 //! 只有勾选了才传。智能体 space 和绑定目录里的技能由 `workspace_skill_args` 单独显式加载，
 //! 避免依赖 Pi 的 cwd / 项目信任推断。
 
@@ -56,7 +56,7 @@ pub fn discover_plugins() -> Vec<PiPlugin> {
     dedupe(plugins)
 }
 
-/// 智能体可以勾选的插件：随 smelt-pi 发布的内置技能，加上全局目录里的。
+/// 智能体可以勾选的插件：随 smelt-agent 发布的内置技能，加上全局目录里的。
 pub fn selectable_plugins() -> Vec<PiPlugin> {
     let builtin = crate::managed_runtime::builtin_skills_dir()
         .map(|dir| builtin_skills_in(&dir))

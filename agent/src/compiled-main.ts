@@ -2,13 +2,13 @@ import "./quickjs-embed.ts";
 import pkg from "../package.json" with { type: "json" };
 import { checksDaemonProtocol, embeddedAdapterSpecs, parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
 
-// 和 agent/scripts/compile-smelt-pi.ts 里改写进 Pi 的路径一致：嵌入文件的根目录分平台。
+// 和 agent/scripts/compile-smelt-agent.ts 里改写进 Pi 的路径一致：嵌入文件的根目录分平台。
 const BUNFS_ROOT = process.platform === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/";
 const IMAGE_WORKER = `${BUNFS_ROOT}utils/image-resize-worker.js`;
 const CODEMODE_WORKER = `${BUNFS_ROOT}extensions/codemode/worker.js`;
 
 // 只给编译冒烟用。正常启动不设置这个变量。
-if (process.env.SMELT_PI_PROBE_WORKERS === "1") {
+if (process.env.SMELT_AGENT_PROBE_WORKERS === "1") {
 	const { Worker } = await import("node:worker_threads");
 	const png = new Uint8Array(
 		Buffer.from(
@@ -85,7 +85,7 @@ if (mismatch) {
 function presentAs(rest: string[]): void {
 	// auth-main / mcp-main 用 process.argv.slice(2)，所以 argv 要摆成
 	// [argv0, 虚拟脚本, ...用户参数]。编译器插进来的 /$bunfs 路径已经丢掉。
-	process.argv = [process.argv[0] ?? "smelt-pi", "smelt-pi", ...rest];
+	process.argv = [process.argv[0] ?? "smelt-agent", "smelt-agent", ...rest];
 }
 
 switch (command.kind) {

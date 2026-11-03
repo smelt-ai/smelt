@@ -165,7 +165,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | `agent.memory.watch` | 关注某个智能体的两层记忆：之后目录里有文件变化，运行时推 `agent_memory.changed`（`agent_id` 为空是用户全局层），客户端据此重取列表。幂等，监听保持到运行时退出 |
 | `memory.test_embedding` | 试一次向量检索服务。`api_key` 省略时用已存密钥，响应不回密钥本身 |
 
-CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用这组 CLI 的技能（`agent/skills/smelt`）随 smelt-pi 发布，产品智能体勾选了才传给 Pi，不写进 `~/.agents/skills`。无头机器上的安装、配对、中继和 MCP 预设是 `smeltd install` / `smeltd pair` / `smeltd devices` / `smeltd relay` / `smeltd mcp`，不是这组 CLI。
+CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用这组 CLI 的技能（`agent/skills/smelt`）随 smelt-agent 发布，产品智能体勾选了才传给 Pi，不写进 `~/.agents/skills`。无头机器上的安装、配对、中继和 MCP 预设是 `smeltd install` / `smeltd pair` / `smeltd devices` / `smeltd relay` / `smeltd mcp`，不是这组 CLI。
 
 ## 版本与重试
 
