@@ -115,11 +115,22 @@ impl crate::Workspace {
     }
 }
 
-/// 一个项目：所在运行时 + 根路径。
+/// 某台机器上的一个目录：项目根，或项目里的仓库根、文件夹。工具面板的缓存都按它存，
+/// 两台机器上同一路径是两回事，只认路径会把一台的数据显示到另一台的项目上。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ProjectRef {
     pub(crate) runtime: crate::runtimes::RuntimeKey,
     pub(crate) root: String,
+}
+
+impl ProjectRef {
+    /// 同一台机器上的另一个目录。
+    pub(crate) fn at(&self, root: impl Into<String>) -> ProjectRef {
+        ProjectRef {
+            runtime: self.runtime.clone(),
+            root: root.into(),
+        }
+    }
 }
 
 impl crate::Workspace {

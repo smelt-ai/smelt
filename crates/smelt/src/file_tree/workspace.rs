@@ -5,7 +5,6 @@
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
 use gpui_component::input::InputEvent;
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode};
@@ -15,8 +14,9 @@ use smelt_runtime_client::protocol::files::{
     ProjectSearchParams, ProjectTreeCall,
 };
 
-use crate::Workspace;
-use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
+use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call_on, error_text, target};
+use crate::{ProjectRef, RuntimeKey, Workspace};
+use smelt_model::runtime_path::PathStyle;
 
 use super::view::{FileTreeRow, collect_file_tree_rows, editor_language_for_path};
 use super::*;
@@ -89,6 +89,9 @@ impl Workspace {
     /// 文件树：展开/收起一个文件夹。
     pub fn toggle_expand(&mut self, path: String, cx: &mut Context<Self>) {
         if !self.expanded.remove(&path) {
+            // 运行时的监听不报 target、node_modules 这类目录里的变化，展开时重取一次
+            // 这一层；取回来之前先显示缓存。
+            self.mark_dir_stale(&path, cx);
             self.expanded.insert(path);
         }
         self.schedule_visible_refresh(cx);
@@ -126,54 +129,77 @@ impl Workspace {
         self.pinned_roots.iter().any(|p| p == cwd)
     }
 
-    /// 文件树要同时挂出来的根目录集合：按项目分组聚合（顺序跟侧栏项目列表一致），去空
-    /// 去重。单项目时就一个根、行为跟以前一样；多项目时文件树把这些根一起铺开，右侧
-    /// 文件不用再切项目来回换。
+    /// 文件树显示的是哪台机器上的目录：跟着活动项目走，没有项目时是本机。
+    pub(crate) fn file_tree_runtime(&self, cx: &App) -> RuntimeKey {
+        self.active_project_ref(cx)
+            .map(|project| project.runtime)
+            .unwrap_or(RuntimeKey::Local)
+    }
+
+    /// 文件树里的路径按哪种系统的规则切。
+    pub(crate) fn file_tree_path_style(&self, cx: &App) -> PathStyle {
+        crate::runtimes::path_style(&self.file_tree_runtime(cx), cx)
+    }
+
+    /// 文件树要同时挂出来的根目录集合，都在 [`Self::file_tree_runtime`] 那台机器上：
+    /// 按项目分组聚合（顺序跟侧栏项目列表一致），去空去重。单项目时就一个根；多项目时
+    /// 文件树把这些根一起铺开，右侧文件不用再切项目来回换。
     pub fn workspace_roots(&self, cx: &App) -> Vec<String> {
         let mut roots: Vec<String> = Vec::new();
         // 当前选中项目根永远在第一位。跟侧栏点选走，不跟当前会话 cwd，
         // 否则点空项目/切项目时文件树还停在旧会话上。
-        if let Some(cur) = self.active_project_root(cx)
+        let project = self.active_project_ref(cx);
+        if let Some(cur) = project.as_ref().map(|project| project.root.clone())
             && !cur.is_empty()
         {
             roots.push(cur);
         }
         // 用户从「+ 项目」主动 pin 进来的额外根（去重、跳过已是当前项目的那个）。
-        // 默认 pinned_roots 为空 → 就一个当前项目根，不显示根标题、不折腾。
-        for p in &self.pinned_roots {
-            if !p.is_empty() && !roots.contains(p) {
-                roots.push(p.clone());
+        // 只有本机项目能钉，远程项目的文件树里不混进本机目录。
+        if project.is_none_or(|project| project.runtime == RuntimeKey::Local) {
+            for p in &self.pinned_roots {
+                if !p.is_empty() && !roots.contains(p) {
+                    roots.push(p.clone());
+                }
             }
         }
         roots
     }
 
+    /// 文件树里一个目录的缓存 key。
+    fn file_tree_dir(&self, dir: impl Into<String>, cx: &App) -> ProjectRef {
+        ProjectRef {
+            runtime: self.file_tree_runtime(cx),
+            root: dir.into(),
+        }
+    }
+
     /// 在文件树中定位 path：展开所有祖先目录、选中、并排队滚动到该行。
     pub fn reveal_in_file_tree(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(root) = self.active_project_root(cx) else {
+        let Some(project) = self.active_project_ref(cx) else {
             return;
         };
-        // 自下而上展开祖先（不含文件自身）。路径属于本机运行时，按它的规则切。
+        let root = project.root.clone();
+        // 自下而上展开祖先（不含文件自身）。路径按项目所在机器的规则切。
+        let style = crate::runtimes::path_style(&project.runtime, cx);
         let mut ancestors = Vec::new();
-        let mut current = smelt_model::runtime_path::PathStyle::LOCAL.parent(path);
+        let mut current = style.parent(path);
         while let Some(ps) = current {
             if ps.is_empty() || ps == root {
-                // 根目录本身也要有 listing
-                self.ensure_dir_listing(root.clone(), cx);
                 break;
             }
-            if !smelt_model::runtime_path::PathStyle::LOCAL.starts_with(&ps, &root) {
+            if !style.starts_with(&ps, &root) {
                 break;
             }
-            current = smelt_model::runtime_path::PathStyle::LOCAL.parent(&ps);
+            current = style.parent(&ps);
             ancestors.push(ps);
         }
         // 先 ensure 近根的，再展开
         for dir in ancestors.iter().rev() {
             self.expanded.insert(dir.clone());
-            self.ensure_dir_listing(dir.clone(), cx);
+            self.ensure_dir_listing(project.at(dir.clone()), cx);
         }
-        self.ensure_dir_listing(root, cx);
+        self.ensure_dir_listing(project, cx);
         self.file_tree_selected = Some(path.to_string());
         self.file_tree_pending_reveal = Some(path.to_string());
         self.try_flush_file_tree_reveal(cx);
@@ -191,7 +217,8 @@ impl Workspace {
         self.reveal_in_file_tree(&path, cx);
         if is_dir {
             self.expanded.insert(path.clone());
-            self.ensure_dir_listing(path, cx);
+            let dir = self.file_tree_dir(path, cx);
+            self.ensure_dir_listing(dir, cx);
         }
     }
 
@@ -214,13 +241,22 @@ impl Workspace {
 
     /// 当前可见树，下标和虚拟列表一致。
     fn file_tree_rows(&self, cx: &App) -> Vec<super::view::FileTreeRow> {
+        let runtime = self.file_tree_runtime(cx);
+        let empty = DirCache::new();
         collect_file_tree_rows(
-            smelt_model::runtime_path::PathStyle::LOCAL,
+            crate::runtimes::path_style(&runtime, cx),
             &self.workspace_roots(cx),
             &self.expanded,
             &self.collapsed_roots,
-            &self.dir_cache,
-            &self.git_status,
+            self.dir_cache.get(&runtime).unwrap_or(&empty),
+            &|root: &str| {
+                self.git_status
+                    .get(&ProjectRef {
+                        runtime: runtime.clone(),
+                        root: root.to_string(),
+                    })
+                    .map(|(_, status)| status)
+            },
         )
     }
 
@@ -278,12 +314,13 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(root) = self.active_project_root(cx) else {
+        let Some(root) = self.active_project_ref(cx).map(|project| project.root) else {
             return;
         };
-        if let Some(ps) = smelt_model::runtime_path::PathStyle::LOCAL.parent(&path) {
+        let style = self.file_tree_path_style(cx);
+        if let Some(ps) = style.parent(&path) {
             // 父目录在项目根之下（含根的直接子项的父 = root）
-            if ps == root || smelt_model::runtime_path::PathStyle::LOCAL.starts_with(&ps, &root) {
+            if ps == root || style.starts_with(&ps, &root) {
                 // 根本身不在列表里时，选中它没有对应行；只选非根父路径
                 if ps != root {
                     self.file_tree_selected = Some(ps);
@@ -311,9 +348,7 @@ impl Workspace {
                 self.toggle_root_collapsed(path, cx);
             }
             FileTreeRow::Entry { is_dir: true, .. } if !self.expanded.contains(&path) => {
-                self.expanded.insert(path.clone());
-                self.ensure_dir_listing(path, cx);
-                cx.notify();
+                self.toggle_expand(path, cx);
             }
             FileTreeRow::Entry { is_dir: false, .. } => self.view_file(path, window, cx),
             FileTreeRow::RootHeader { open: true, .. } | FileTreeRow::Entry { .. } => {
@@ -364,6 +399,10 @@ impl Workspace {
         let Some(of) = &self.open_file else {
             return;
         };
+        // 浏览器只能打开这台电脑上的文件。
+        if of.runtime != RuntimeKey::Local {
+            return;
+        }
         match url::Url::from_file_path(&of.path) {
             Ok(url) => cx.open_url(url.as_str()),
             Err(()) => {
@@ -396,14 +435,30 @@ impl Workspace {
     /// 文件树：打开一个文件查看/编辑内容。当前文件有未保存改动时不直接切换——先弹
     /// 确认弹窗（见 pending_file_switch / render_unsaved_file_confirm），用户选了
     /// "不保存"或"保存并切换"才真正调用 open_file_now。
+    /// 文件在文件树所在的那台机器上。
     pub fn view_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.view_file_at(path, None, window, cx);
     }
 
-    /// 打开文件并可跳到指定行（1 基，搜索命中用）。
+    /// 打开文件树那台机器上的文件，并可跳到指定行（1 基，搜索命中用）。
     pub fn view_file_at(
         &mut self,
         path: String,
+        line: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let file = FileRef {
+            runtime: self.file_tree_runtime(cx),
+            path,
+        };
+        self.view_file_on(file, line, window, cx);
+    }
+
+    /// 打开某台机器上的文件（对话里的文件链接可能指向别的机器）。
+    pub fn view_file_on(
+        &mut self,
+        file: FileRef,
         line: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -414,11 +469,11 @@ impl Workspace {
         if dirty {
             // 脏切换暂不带行号（确认后再 open 整文件即可）
             self.begin_main_modal_focus(window, cx);
-            self.pending_file_switch = Some(path);
+            self.pending_file_switch = Some(file);
             cx.notify();
             return;
         }
-        self.open_file_now(path, line, window, cx);
+        self.open_file_now(file, line, window, cx);
     }
 
     /// 实际打开文件：用 gpui-component 的 Editor（InputState 的 code_editor 模式）：
@@ -428,14 +483,18 @@ impl Workspace {
     /// `goto_line`：1 基行号，读完后定位光标。
     pub fn open_file_now(
         &mut self,
-        path: String,
+        file: FileRef,
         goto_line: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use gpui_component::input::{EditorState, Position};
 
-        self.reveal_in_file_tree(&path, cx);
+        let FileRef { runtime, path } = file;
+        // 文件树只显示活动项目那台机器的目录，别的机器上的文件定位不到。
+        if runtime == self.file_tree_runtime(cx) {
+            self.reveal_in_file_tree(&path, cx);
+        }
         // 点文件不再抢占舞台：Tool Panel 的 FILES tab 自己就能分
         // 左右两栏显示内容 + 树，中间舞台的终端/ACP 对话完全不受影响。只有
         // 已经把 Files 提升到舞台全宽（双栏）时，才保持那个双栏视图跟着切换
@@ -466,7 +525,10 @@ impl Workspace {
                 // 多行输入默认开软换行，这里显式关掉。
                 .soft_wrap(false)
         });
+        let style = crate::runtimes::path_style(&runtime, cx);
+        let client = target(&runtime, cx);
         self.open_file = Some(OpenFile {
+            runtime,
             path: path.clone(),
             editor: editor.clone(),
             saved_content: Rc::new(String::new()),
@@ -475,6 +537,8 @@ impl Workspace {
             save_error: None,
             readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
             conflict_pending: false,
+            reload_inflight: false,
+            reload_again: false,
             preview: preview_kind.is_some(),
             preview_source: SharedString::default(),
             html_preview: (preview_kind == Some(PreviewKind::Html))
@@ -494,7 +558,13 @@ impl Workspace {
             let read = cx
                 .background_executor()
                 .spawn(async move {
-                    call::<FileOpenCall>(FilePathParams { path: p }, RUNTIME_CALL_TIMEOUT)
+                    let client = client?;
+                    call_on::<FileOpenCall>(
+                        &client,
+                        FilePathParams { path: p },
+                        RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(error_text)
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -530,7 +600,7 @@ impl Workspace {
                     }
                     Ok(FileOpenResult {
                         content: FileContent::Image { data },
-                    }) => match smelt_model::runtime_path::PathStyle::LOCAL
+                    }) => match style
                         .extension(&of.path)
                         .and_then(smelt_ui::image::format_for_extension)
                     {
@@ -550,7 +620,7 @@ impl Workspace {
                         size as f64 / (1024.0 * 1024.0),
                         limit / (1024 * 1024)
                     )),
-                    Err(error) => Some(format!("（无法读取：{}）", error_text(error))),
+                    Err(error) => Some(format!("（无法读取：{error}）")),
                 };
                 if let Some(placeholder) = unreadable {
                     editor.update(cx, |state, cx| state.set_value(placeholder, window, cx));
@@ -583,6 +653,7 @@ impl Workspace {
             return;
         }
         let path = of.path.clone();
+        let client = target(&of.runtime, cx);
         let content = of.editor.read(cx).value().to_string();
         let force = of.conflict_pending;
         let base_version = if force {
@@ -598,12 +669,16 @@ impl Workspace {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
+                    let client = match client {
+                        Ok(client) => client,
+                        Err(error) => return SaveOutcome::Error(error),
+                    };
                     let params = FileSaveParams {
                         path: check_path,
                         text: write_content,
                         base_version,
                     };
-                    match call::<FileSaveCall>(params, RUNTIME_CALL_TIMEOUT) {
+                    match call_on::<FileSaveCall>(&client, params, RUNTIME_CALL_TIMEOUT) {
                         Ok(saved) => SaveOutcome::Saved(saved.version),
                         Err(ControlClientError::Protocol(error))
                             if error.code == ControlErrorCode::Conflict =>
@@ -646,13 +721,96 @@ impl Workspace {
         .detach();
     }
 
+    /// 运行时报项目里有文件变了。打开着的文件在这个项目里就重读一次：没改过就换成新内容，
+    /// 有未保存的改动就提示，保存时照常走冲突检测。事件只带项目根，分不出是不是这个文件，
+    /// 内容版本没变时什么也不动。
+    pub(crate) fn on_open_file_project_changed(
+        &mut self,
+        project: &ProjectRef,
+        cx: &mut Context<Self>,
+    ) {
+        let style = crate::runtimes::path_style(&project.runtime, cx);
+        let Some(of) = self.open_file.as_mut() else {
+            return;
+        };
+        if of.runtime != project.runtime
+            || !of.readable
+            || !style.starts_with(&of.path, &project.root)
+        {
+            return;
+        }
+        if of.reload_inflight {
+            of.reload_again = true;
+            return;
+        }
+        self.reload_open_file(cx);
+    }
+
+    fn reload_open_file(&mut self, cx: &mut Context<Self>) {
+        let Some(of) = self.open_file.as_mut() else {
+            return;
+        };
+        let Ok(client) = target(&of.runtime, cx) else {
+            return;
+        };
+        of.reload_inflight = true;
+        of.reload_again = false;
+        let path = of.path.clone();
+        let r#gen = self.file_gen;
+        let handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    call_on::<FileOpenCall>(&client, FilePathParams { path }, RUNTIME_CALL_TIMEOUT)
+                })
+                .await;
+            let _ = cx.update_window(handle, |_root, window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.file_gen != r#gen {
+                        return;
+                    }
+                    let Some(of) = this.open_file.as_mut() else {
+                        return;
+                    };
+                    of.reload_inflight = false;
+                    let again = std::mem::take(&mut of.reload_again);
+                    if let Ok(FileOpenResult {
+                        content: FileContent::Text { text, version },
+                    }) = read
+                        && of.saved_version.as_deref() != Some(version.as_str())
+                    {
+                        let dirty =
+                            of.editor.read(cx).value().as_ref() != of.saved_content.as_str();
+                        if dirty {
+                            of.save_error =
+                                Some("这个文件已在别处被改过；保存时会提示冲突".to_string());
+                        } else {
+                            of.editor
+                                .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+                            of.saved_content = Rc::new(text.clone());
+                            of.saved_version = Some(version);
+                            of.preview_source = text.into();
+                            of.sync_html_preview(cx);
+                        }
+                        cx.notify();
+                    }
+                    if again {
+                        this.reload_open_file(cx);
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
     /// 文件树搜索：按 query 匹配文件名 + 文件内容，后台遍历项目、命中写回 search_results。
     /// 与 view_file 同款「background_executor + 自增 gen 丢弃过期结果」模式，绝不阻塞 render。
     /// query 未变（已有对应结果或正在跑同一 query）就跳过，避免每帧重扫。
     ///
     /// 换查询时替换 `search_task`，并在遍历的每个文件边界看 `search_cancel`。
     /// 只递增代次会让旧扫描继续占着 worker。
-    pub fn ensure_search(&mut self, root: String, query: String, cx: &mut Context<Self>) {
+    pub fn ensure_search(&mut self, root: ProjectRef, query: String, cx: &mut Context<Self>) {
         // 已有本 query 的结果、或正有一次针对本 query 的遍历在跑，就不重复触发。
         if self
             .search_results
@@ -662,6 +820,7 @@ impl Workspace {
             return;
         }
         self.cancel_file_search();
+        let client = target(&root.runtime, cx);
         self.search_gen = self.search_gen.wrapping_add(1);
         let generation = self.search_gen;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -677,11 +836,15 @@ impl Workspace {
         cx.notify();
 
         self.search_task = Some(cx.spawn(async move |this, cx| {
-            let (r, q) = (root, query.clone());
+            let (r, q) = (root.root, query.clone());
             let walked = cx
                 .background_executor()
                 .spawn(async move {
-                    call::<ProjectSearchCall>(
+                    let Ok(client) = client else {
+                        return Default::default();
+                    };
+                    call_on::<ProjectSearchCall>(
+                        &client,
                         ProjectSearchParams { root: r, query: q },
                         RUNTIME_CALL_TIMEOUT,
                     )
@@ -725,48 +888,75 @@ impl Workspace {
         self.search_task.take();
     }
 
-    /// 确保某目录的直接子项列表缓存新鲜（>2s 或缺失就后台刷新）。
-    /// 绝不阻塞 render：此前 file_tree 在 render 里同步 fs::read_dir，大目录会
-    /// 像 git status 那样掉帧，这里挪到后台执行器 + 缓存，render 只读。
-    pub fn ensure_dir_listing(&mut self, dir: String, cx: &mut Context<Self>) {
-        let fresh = self
+    /// 确保某目录的直接子项列表在缓存里且没被标旧，否则后台重取。
+    /// 绝不阻塞 render：读目录交给运行时，render 只读缓存。
+    pub fn ensure_dir_listing(&mut self, dir: ProjectRef, cx: &mut Context<Self>) {
+        let current = self
             .dir_cache
-            .get(&dir)
-            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_millis(2000));
-        if fresh || self.dir_inflight.contains(&dir) {
+            .get(&dir.runtime)
+            .and_then(|cache| cache.get(&dir.root))
+            .is_some_and(|listing| !listing.stale);
+        if current || self.dir_inflight.contains(&dir) {
             return;
         }
+        let Ok(client) = target(&dir.runtime, cx) else {
+            return;
+        };
         let request_generation = self.dir_generation.get(&dir).copied().unwrap_or(0);
         self.dir_inflight.insert(dir.clone());
         // 根之外的目录（面包屑点到项目外）以它自己为范围。
         let root = self
             .file_tree_root_for(&dir, cx)
-            .unwrap_or_else(|| dir.clone());
+            .unwrap_or_else(|| dir.root.clone());
         cx.spawn(async move |this, cx| {
-            let d = dir.clone();
+            let d = dir.root.clone();
             let entries = cx
                 .background_executor()
                 .spawn(async move {
                     // 排序与噪音目录过滤由运行时做，桌面和手机看到的是同一份规则。
-                    call::<ProjectTreeCall>(ProjectDirParams { root, dir: d }, RUNTIME_CALL_TIMEOUT)
-                        .map(|tree| {
-                            tree.entries
-                                .into_iter()
-                                .map(|entry| (entry.name, entry.is_dir))
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default()
+                    call_on::<ProjectTreeCall>(
+                        &client,
+                        ProjectDirParams { root, dir: d },
+                        RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map(|tree| {
+                        tree.entries
+                            .into_iter()
+                            .map(|entry| (entry.name, entry.is_dir))
+                            .collect::<Vec<_>>()
+                    })
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.dir_inflight.remove(&dir);
                 let current_generation = this.dir_generation.get(&dir).copied().unwrap_or(0);
-                // 删除发生在列目录期间时，这一包是旧快照。不写回，再排一次刷新去读新代次。
-                if current_generation == request_generation {
-                    this.dir_cache
-                        .insert(dir, (Instant::now(), Rc::new(entries)));
-                } else {
-                    this.schedule_visible_refresh(cx);
+                match entries {
+                    // 删除发生在列目录期间时，这一包是旧快照。不写回，再排一次刷新去读新代次。
+                    Ok(_) if current_generation != request_generation => {
+                        this.schedule_visible_refresh(cx);
+                    }
+                    Ok(entries) => {
+                        this.dir_cache.entry(dir.runtime).or_default().insert(
+                            dir.root,
+                            DirListing {
+                                entries: Rc::new(entries),
+                                stale: false,
+                            },
+                        );
+                    }
+                    // 连不上或目录没了：有旧列表就留着（仍标旧，下次刷新再试），
+                    // 没有就记一份空的，免得一直转「加载中」。
+                    Err(error) => {
+                        eprintln!("[files] 列目录 {} 失败：{}", dir.root, error_text(error));
+                        this.dir_cache
+                            .entry(dir.runtime)
+                            .or_default()
+                            .entry(dir.root)
+                            .or_insert_with(|| DirListing {
+                                entries: Rc::new(Vec::new()),
+                                stale: false,
+                            });
+                    }
                 }
                 this.try_flush_file_tree_reveal(cx);
                 cx.notify();
@@ -775,17 +965,47 @@ impl Workspace {
         .detach();
     }
 
-    /// `path` 归哪个文件树根：取包含它的最长根。运行时按这个根限定范围。
-    fn file_tree_root_for(&self, path: &str, cx: &App) -> Option<String> {
+    /// 标旧一个目录的列表，下一次可见数据刷新重取。
+    fn mark_dir_stale(&mut self, dir: &str, cx: &App) {
+        let runtime = self.file_tree_runtime(cx);
+        if let Some(listing) = self
+            .dir_cache
+            .get_mut(&runtime)
+            .and_then(|cache| cache.get_mut(dir))
+        {
+            listing.stale = true;
+        }
+    }
+
+    /// 运行时说项目里有文件变了：把这台机器上这个项目下的目录列表都标旧。事件只带项目
+    /// 根，分不出是哪个目录。只有界面上看得到的目录会在下一次刷新时重取。
+    pub(crate) fn mark_project_dirs_stale(&mut self, project: &ProjectRef, cx: &App) {
+        let style = crate::runtimes::path_style(&project.runtime, cx);
+        let Some(cache) = self.dir_cache.get_mut(&project.runtime) else {
+            return;
+        };
+        for (dir, listing) in cache.iter_mut() {
+            if style.starts_with(dir, &project.root) {
+                listing.stale = true;
+            }
+        }
+    }
+
+    /// `dir` 归哪个文件树根：取包含它的最长根。运行时按这个根限定范围。
+    fn file_tree_root_for(&self, dir: &ProjectRef, cx: &App) -> Option<String> {
+        if dir.runtime != self.file_tree_runtime(cx) {
+            return None;
+        }
+        let style = crate::runtimes::path_style(&dir.runtime, cx);
         self.workspace_roots(cx)
             .into_iter()
-            .filter(|root| smelt_model::runtime_path::PathStyle::LOCAL.starts_with(path, root))
+            .filter(|root| style.starts_with(&dir.root, root))
             .max_by_key(String::len)
     }
 
     /// 目录列表失效。在途的那一次读完后不得再把旧条目标成新鲜。
-    fn bump_dir_generation(&mut self, dir: &str) {
-        let generation = self.dir_generation.entry(dir.to_string()).or_default();
+    fn bump_dir_generation(&mut self, dir: &ProjectRef) {
+        let generation = self.dir_generation.entry(dir.clone()).or_default();
         *generation = generation.wrapping_add(1);
     }
 
@@ -796,7 +1016,8 @@ impl Workspace {
 
     /// 文件树右键「删除文件」：先弹二次确认，用户点确定后才真正删盘。
     pub fn start_delete_file(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
-        let label = smelt_model::runtime_path::PathStyle::LOCAL
+        let label = self
+            .file_tree_path_style(cx)
             .file_name(&path)
             .unwrap_or(&path)
             .to_string();
@@ -825,18 +1046,27 @@ impl Workspace {
 
     /// 交给运行时删除文件或目录，成功后刷新文件树缓存。
     fn perform_delete_file(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
+        let entry = self.file_tree_dir(path.clone(), cx);
         let Some(root) = self
-            .file_tree_root_for(&path, cx)
-            .or_else(|| smelt_model::runtime_path::PathStyle::LOCAL.parent(&path))
+            .file_tree_root_for(&entry, cx)
+            .or_else(|| self.file_tree_path_style(cx).parent(&path))
         else {
             return;
+        };
+        let client = match target(&entry.runtime, cx) {
+            Ok(client) => client,
+            Err(error) => {
+                self.report_background_error(format!("删除失败：{error}"));
+                return;
+            }
         };
         cx.spawn(async move |this, cx| {
             let target = path.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    call::<ProjectDeleteEntryCall>(
+                    call_on::<ProjectDeleteEntryCall>(
+                        &client,
                         ProjectPathParams { root, path: target },
                         RUNTIME_CALL_TIMEOUT,
                     )
@@ -855,21 +1085,21 @@ impl Workspace {
 
     /// 删除成功后清掉指向它的打开文件、展开状态和目录缓存。
     fn forget_deleted_entry(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
-        let under = |base: &str, candidate: &str| {
-            candidate == base || candidate.starts_with(&format!("{base}/"))
-        };
+        let runtime = self.file_tree_runtime(cx);
+        let style = crate::runtimes::path_style(&runtime, cx);
+        let under = |base: &str, candidate: &str| style.starts_with(candidate, base);
 
         if self
             .open_file
             .as_ref()
-            .is_some_and(|of| under(&path, &of.path))
+            .is_some_and(|of| of.runtime == runtime && under(&path, &of.path))
         {
             self.open_file = None;
         }
         if self
             .pending_file_switch
             .as_ref()
-            .is_some_and(|p| under(&path, p))
+            .is_some_and(|p| p.runtime == runtime && under(&path, &p.path))
         {
             self.pending_file_switch = None;
         }
@@ -877,24 +1107,32 @@ impl Workspace {
         let mut stale_dirs: Vec<String> = Vec::new();
         if is_dir {
             self.expanded.retain(|p| !under(&path, p));
-            stale_dirs.extend(
-                self.dir_cache
-                    .keys()
-                    .filter(|candidate| under(&path, candidate))
-                    .cloned(),
-            );
+            if let Some(cache) = self.dir_cache.get(&runtime) {
+                stale_dirs.extend(
+                    cache
+                        .keys()
+                        .filter(|candidate| under(&path, candidate))
+                        .cloned(),
+                );
+            }
             stale_dirs.push(path.clone());
         } else {
             self.expanded.remove(&path);
         }
-        if let Some(parent) = smelt_model::runtime_path::PathStyle::LOCAL.parent(&path) {
+        if let Some(parent) = style.parent(&path) {
             stale_dirs.push(parent);
         }
         stale_dirs.sort();
         stale_dirs.dedup();
         for dir in stale_dirs {
-            self.bump_dir_generation(&dir);
-            self.dir_cache.remove(&dir);
+            let key = ProjectRef {
+                runtime: runtime.clone(),
+                root: dir,
+            };
+            self.bump_dir_generation(&key);
+            if let Some(cache) = self.dir_cache.get_mut(&runtime) {
+                cache.remove(&key.root);
+            }
         }
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -908,9 +1146,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let root = self.active_project_root(cx);
-        let rel = root
-            .and_then(|root| smelt_model::runtime_path::PathStyle::LOCAL.strip_prefix(&path, &root))
+        let style = self.file_tree_path_style(cx);
+        let rel = self
+            .active_project_ref(cx)
+            .and_then(|project| style.strip_prefix(&path, &project.root))
             .unwrap_or_else(|| path.clone());
         let msg = format!("@{rel} ");
         self.send_to_panel_session(&msg, window, cx);
@@ -924,11 +1163,11 @@ impl Workspace {
         if selected.trim().is_empty() {
             return;
         }
-        let root = self.active_project_root(cx);
-        let rel = root
-            .and_then(|root| {
-                smelt_model::runtime_path::PathStyle::LOCAL.strip_prefix(&of.path, &root)
-            })
+        let style = crate::runtimes::path_style(&of.runtime, cx);
+        let rel = self
+            .active_project_ref(cx)
+            .filter(|project| project.runtime == of.runtime)
+            .and_then(|project| style.strip_prefix(&of.path, &project.root))
             .unwrap_or_else(|| of.path.clone());
         let msg = format!("{rel} 里选中的这段：\n```\n{selected}\n```\n");
         self.send_to_panel_session(&msg, window, cx);

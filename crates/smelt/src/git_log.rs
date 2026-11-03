@@ -179,7 +179,7 @@ pub struct GitLogState {
     /// 正文的缓存视图。渲染提交列表时不读 `detail_view`。
     pub detail_body: Option<gpui::Entity<crate::git_log_view::GitLogDiffBody>>,
     /// 已加载的仓库根，切项目时用来判断要不要重拉。
-    pub loaded_root: Option<String>,
+    pub loaded_root: Option<crate::ProjectRef>,
     /// 提交列表（uniform_list）的滚动句柄。分支图是列表装饰，不再读这个偏移。
     pub scroll: gpui::UniformListScrollHandle,
 }
@@ -213,36 +213,40 @@ pub const LOG_LIMIT: usize = 500;
 
 /// 拼 `git log` 的参数。
 // ===================== Workspace 方法 =====================
-use crate::Workspace;
 use crate::git_panel::git_call;
+use crate::{ProjectRef, Workspace};
 use gpui::{AppContext, Context};
 
 impl Workspace {
     /// 进「日志」页时确保数据在（换了仓库也重拉）。可见数据刷新调用，必须便宜：
     /// 已经是这个 root 就直接返回，真正的 git 调用都在后台。
-    pub fn ensure_git_log(&mut self, root: String, cx: &mut Context<Self>) {
-        if self.git_log.loading || self.git_log.loaded_root.as_deref() == Some(root.as_str()) {
+    pub fn ensure_git_log(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
+        if self.git_log.loading || self.git_log.loaded_root.as_ref() == Some(&root) {
             return;
         }
         self.reload_git_log(root, cx);
     }
 
     /// 强制重拉提交列表（「刷新」按钮、切分支）。
-    pub fn reload_git_log(&mut self, root: String, cx: &mut Context<Self>) {
+    pub fn reload_git_log(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
+        let client = crate::runtime_call::target(&root.runtime, cx);
         self.git_log.loading = true;
         self.git_log.loaded_root = Some(root.clone());
         cx.notify();
         let scope = self.git_log.scope.clone();
         cx.spawn(async move |this, cx| {
-            let r = root.clone();
+            let r = root.root;
             let commits = cx
                 .background_executor()
                 .spawn(async move {
-                    git_call::<GitLogCall>(GitLogParams {
-                        root: r,
-                        scope,
-                        limit: LOG_LIMIT,
-                    })
+                    git_call::<GitLogCall>(
+                        &client?,
+                        GitLogParams {
+                            root: r,
+                            scope,
+                            limit: LOG_LIMIT,
+                        },
+                    )
                     .map(|result| result.commits)
                 })
                 .await
@@ -262,7 +266,7 @@ impl Workspace {
     }
 
     /// 切换日志范围（当前分支 / 全部分支 / 指定分支）。
-    pub fn set_log_scope(&mut self, root: String, scope: LogScope, cx: &mut Context<Self>) {
+    pub fn set_log_scope(&mut self, root: ProjectRef, scope: LogScope, cx: &mut Context<Self>) {
         if self.git_log.scope == scope {
             return;
         }
@@ -271,19 +275,23 @@ impl Workspace {
     }
 
     /// 点某条提交：拉它改了哪些文件。
-    pub fn select_commit(&mut self, root: String, hash: String, cx: &mut Context<Self>) {
+    pub fn select_commit(&mut self, root: ProjectRef, hash: String, cx: &mut Context<Self>) {
+        let client = crate::runtime_call::target(&root.runtime, cx);
         self.git_log.selected = Some(hash.clone());
         self.git_log.detail_loading = true;
         self.git_log.detail_files.clear();
         self.clear_commit_file_diff();
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let (r, h) = (root.clone(), hash.clone());
+            let (r, h) = (root.root, hash.clone());
             let files = cx
                 .background_executor()
                 .spawn(async move {
-                    git_call::<GitCommitFilesCall>(GitCommitRefParams { root: r, hash: h })
-                        .map(|result| result.files)
+                    git_call::<GitCommitFilesCall>(
+                        &client?,
+                        GitCommitRefParams { root: r, hash: h },
+                    )
+                    .map(|result| result.files)
                 })
                 .await
                 .unwrap_or_default();
@@ -300,26 +308,33 @@ impl Workspace {
     }
 
     /// 点提交详情里的某个文件：拉它在这次提交里的 diff。
-    pub fn select_commit_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
+    pub fn select_commit_file(&mut self, root: ProjectRef, path: String, cx: &mut Context<Self>) {
         let Some(hash) = self.git_log.selected.clone() else {
             return;
         };
+        let client = crate::runtime_call::target(&root.runtime, cx);
         self.git_log.detail_selected_file = Some(path.clone());
         self.git_log.detail_patch = None;
         self.git_log.detail_error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let (r, h, p) = (root.clone(), hash.clone(), path.clone());
+            let (r, h, p) = (root.root, hash.clone(), path.clone());
             let loaded = cx
                 .background_executor()
                 .spawn(async move {
-                    let text = git_call::<GitCommitFileDiffCall>(GitCommitFileParams {
-                        root: r,
-                        hash: h,
-                        path: p,
-                    })
-                    .map(|result| result.text)
-                    .unwrap_or_else(|err| format!("无法执行 git show：{err}"));
+                    let text = client
+                        .and_then(|client| {
+                            git_call::<GitCommitFileDiffCall>(
+                                &client,
+                                GitCommitFileParams {
+                                    root: r,
+                                    hash: h,
+                                    path: p,
+                                },
+                            )
+                        })
+                        .map(|result| result.text)
+                        .unwrap_or_else(|err| format!("无法执行 git show：{err}"));
                     let files = gpui_component::diff::DiffFile::parse(&text).map_err(|err| {
                         crate::git_panel::diff_parse_failure(&text, &err.to_string())
                     });

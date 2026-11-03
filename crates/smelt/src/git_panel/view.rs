@@ -244,12 +244,8 @@ impl Workspace {
     ) -> AnyElement {
         use crate::ui_theme;
 
-        let Some(root) = self.active_project_root(cx) else {
-            let remote = self.remote_project_notice(cx);
-            let (title, hint) = match remote.as_deref() {
-                Some(notice) => ("远程项目", notice.to_string()),
-                None => ("没有项目", "打开一个项目后再看更改".to_string()),
-            };
+        let Some(project) = self.active_project_ref(cx) else {
+            let (title, hint) = ("没有项目", "打开一个项目后再看更改".to_string());
             return v_flex()
                 .flex_1()
                 .min_h_0()
@@ -281,7 +277,9 @@ impl Workspace {
         // ---- 列表 ----
         // 头部（分支、↑N↓M、stash、同步菜单）展示的是**当前提交目标仓库**的状态，
         // 不是项目根的。否则在子仓上提交时，头部会显示另一个仓库的分支与领先/落后。
-        let active_repo = self.active_git_repo_root(&root);
+        let root = project.root.clone();
+        let style = crate::runtimes::path_style(&project.runtime, cx);
+        let active_repo = self.active_git_repo_root(&project);
         let status = self.git_status.get(&active_repo).map(|(_, d)| d);
         let status_refreshing = self.git_status_inflight.contains(&active_repo);
         let status_failure_count = self
@@ -296,7 +294,7 @@ impl Workspace {
         let stash_n = status.as_ref().map(|d| d.stash_count).unwrap_or(0);
         let has_changes = status.as_ref().is_some_and(|d| !d.files.is_empty());
         let ws_ops = cx.entity();
-        let root_ops = root.clone();
+        let root_ops = active_repo.clone();
         // 进行中反馈：点了拉取/获取几秒内没动静会以为没反应，op 跑着时按钮直接显示
         // 「拉取中…」。
         let busy = self.git_writes.get(&active_repo).copied();
@@ -315,7 +313,7 @@ impl Workspace {
         };
         let tab_view = cx.entity();
         // 仓库集合要在头部之前算好：历史页的仓库选择器和改动页的分组都用它。
-        let repo_set = self.git_repos.get(&root).map(|(_, set)| set.clone());
+        let repo_set = self.git_repos.get(&project).map(|(_, set)| set.clone());
         let repos: Vec<DiscoveredRepo> = match &repo_set {
             Some(set) if !set.repos.is_empty() => set.repos.clone(),
             // 发现还没回来：先当单仓渲染，首帧不至于空白。
@@ -329,23 +327,20 @@ impl Workspace {
         // 仓库选择器的选项：(显示名, 仓库根)。
         let repo_label_of = |repo: &DiscoveredRepo| -> String {
             if repo.rel_path.is_empty() {
-                smelt_model::runtime_path::PathStyle::LOCAL
-                    .file_name(&root)
-                    .unwrap_or(root.as_str())
-                    .to_string()
+                style.file_name(&root).unwrap_or(root.as_str()).to_string()
             } else {
                 repo.rel_path.clone()
             }
         };
-        let repo_choices: Vec<(String, String)> = repos
+        let repo_choices: Vec<(String, ProjectRef)> = repos
             .iter()
-            .map(|repo| (repo_label_of(repo), repo.root.clone()))
+            .map(|repo| (repo_label_of(repo), project.at(repo.root.clone())))
             .collect();
         let active_repo_label = repos
             .iter()
-            .find(|repo| repo.root == active_repo)
+            .find(|repo| repo.root == active_repo.root)
             .map(repo_label_of)
-            .unwrap_or_else(|| active_repo.clone());
+            .unwrap_or_else(|| active_repo.root.clone());
         let ws_log_repo = cx.entity();
 
         let view_tabs = TabBar::new("git-view-tabs")
@@ -476,8 +471,11 @@ impl Workspace {
         // 取内层 map 再查 path，不用每行拼 tuple key 分配两个 String。
         let mut index_pending: HashMap<String, HashMap<String, PendingGitIndexOp>> = HashMap::new();
         for ((pending_root, path), pending) in &self.git_index_pending {
+            if pending_root.runtime != project.runtime {
+                continue;
+            }
             index_pending
-                .entry(pending_root.clone())
+                .entry(pending_root.root.clone())
                 .or_default()
                 .insert(path.clone(), *pending);
         }
@@ -501,8 +499,8 @@ impl Workspace {
         // 有没有任何值得让列表存在的事：改动、待推送、待拉取、压着的 stash。
         let mut anything_to_do = false;
         for repo in &repos {
-            let repo_root = repo.root.clone();
-            let repo_status = self.git_status.get(&repo_root).map(|(_, d)| d);
+            let repo_ref = project.at(repo.root.clone());
+            let repo_status = self.git_status.get(&repo_ref).map(|(_, d)| d);
             let (staged, changed) = match repo_status {
                 Some(d) => split_staged_and_changed(&d.files),
                 None => (Vec::new(), Vec::new()),
@@ -511,22 +509,19 @@ impl Workspace {
 
             // 干净的仓库不占列表空间，但当前提交目标除外——否则用户看不到
             // 自己正在往哪个仓库提交。
-            let is_active = repo_root == active_repo;
+            let is_active = repo_ref == active_repo;
             let has_changes = !staged.is_empty() || !changed.is_empty();
             anything_to_do |= repo_status.is_some_and(|d| {
                 repo_needs_attention(has_changes, d.ahead, d.behind, d.stash_count)
             });
 
-            let repo_root: Rc<str> = Rc::from(repo_root.as_str());
-            let repo_collapsed = self.git_repo_collapsed.contains(repo_root.as_ref());
+            let repo_root: Rc<str> = Rc::from(repo.root.as_str());
+            let repo_collapsed = self.git_repo_collapsed.contains(&repo_ref);
             if show_repo_headers {
                 narrow_rows.push(NarrowGitRow::RepoHeader {
                     root: repo_root.clone(),
                     label: if repo.rel_path.is_empty() {
-                        smelt_model::runtime_path::PathStyle::LOCAL
-                            .file_name(&root)
-                            .unwrap_or(root.as_str())
-                            .to_string()
+                        style.file_name(&root).unwrap_or(root.as_str()).to_string()
                     } else {
                         repo.rel_path.clone()
                     },
@@ -553,13 +548,13 @@ impl Workspace {
             let show_commit_box = has_changes || is_active;
             if let Some(input) = self
                 .commit_msg_inputs
-                .get(repo_root.as_ref())
+                .get(&repo_ref)
                 .filter(|_| show_commit_box)
             {
                 let commit_text = input.read(cx).value().to_string();
                 let has_text = !commit_text.trim().is_empty();
                 let has_staged = !staged.is_empty();
-                let error = self.commit_errors.get(repo_root.as_ref()).cloned();
+                let error = self.commit_errors.get(&repo_ref).cloned();
                 let (input_h, row_h) =
                     commit_box_metrics(&commit_text, error.as_deref(), has_text && !has_staged);
                 narrow_rows.push(NarrowGitRow::CommitBox {
@@ -567,7 +562,7 @@ impl Workspace {
                     input: input.clone(),
                     has_text,
                     has_staged,
-                    git_write: self.git_writes.get(repo_root.as_ref()).copied(),
+                    git_write: self.git_writes.get(&repo_ref).copied(),
                     ahead: repo_status.map(|d| d.ahead).unwrap_or(0),
                     error,
                     depth: usize::from(show_repo_headers),
@@ -664,6 +659,7 @@ impl Workspace {
             let ws_for_rows = ws.clone();
             let collapsed_for_rows = collapsed;
             let index_pending = Rc::new(index_pending);
+            let runtime = project.runtime;
             div()
                 .id("narrow-git-list-host")
                 .flex_1()
@@ -687,6 +683,7 @@ impl Workspace {
                                         &ws_for_rows,
                                         &collapsed_for_rows,
                                         &index_pending,
+                                        &runtime,
                                     ))
                                     .into_any_element()
                             })
@@ -795,7 +792,7 @@ impl Workspace {
     /// 停靠 / 舞台展开态共用（root 由调用方保证非空）。
     pub(crate) fn render_git_log_tab(
         &mut self,
-        root: String,
+        root: ProjectRef,
         cx: &mut Context<Workspace>,
     ) -> AnyElement {
         // `root` 现在是当前选中的仓库根（不是项目根），分支与 HEAD 都读它自己的缓存。

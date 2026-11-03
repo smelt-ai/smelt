@@ -718,9 +718,10 @@ impl Workspace {
     /// 保存并切换。与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩）。
     pub(crate) fn render_unsaved_file_confirm(
         &self,
-        target: String,
+        target: crate::file_tree::FileRef,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let target = target.path;
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -798,14 +799,13 @@ impl Workspace {
     /// 存在。返回 `Some(kind)` 表示当前处在某个智能体的上下文里。
     pub(crate) fn history_engine_override(
         &self,
-        cwd: Option<&str>,
+        project: Option<&crate::ProjectRef>,
         cx: &App,
     ) -> Option<crate::settings::ConversationAgentKind> {
-        let id =
-            smelt_model::agent_paths::agent_definition_id_for_space(std::path::Path::new(cwd?))?;
-        // 历史只在本机。
+        let project = project?;
+        let id = space_agent_id(project, cx)?;
         crate::settings::agent_hosts(cx)?
-            .agent(&crate::RuntimeKey::Local, &id)
+            .agent(&project.runtime, &id)
             .and_then(|agent| agent.engine_kind())
     }
 
@@ -813,10 +813,10 @@ impl Workspace {
     /// 否则扫的是 A 的数据、显示的是 B 的 tab，列表会永远空着。
     pub(crate) fn history_source(
         &self,
-        cwd: Option<&str>,
+        project: Option<&crate::ProjectRef>,
         cx: &App,
     ) -> (crate::settings::HistorySourceKind, Option<String>) {
-        match self.history_engine_override(cwd, cx) {
+        match self.history_engine_override(project, cx) {
             Some(kind) => (kind.into(), None),
             None => (self.history_agent, self.history_profile.clone()),
         }
@@ -825,12 +825,17 @@ impl Workspace {
     /// 历史内容由 Tool Panel 统一承载；停靠和全屏只改变外层容器尺寸，
     /// 不在历史视图内部做特殊布局分支。
     pub(crate) fn render_history_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let cwd = self.active_project_root(cx);
-        let restrict_to_kind = self.history_engine_override(cwd.as_deref(), cx);
-        let (agent, profile_id) = self.history_source(cwd.as_deref(), cx);
-        let list_key = cwd
+        // 历史存档在项目所在的那台机器上，列表、profile 和智能体定义都按它认。
+        let project = self.active_project_ref(cx);
+        let runtime = project
             .as_ref()
-            .map(|c| crate::session_history::session_list_key(agent, profile_id.as_deref(), c));
+            .map_or(crate::RuntimeKey::Local, |project| project.runtime.clone());
+        let cwd = project.as_ref().map(|project| project.root.clone());
+        let restrict_to_kind = self.history_engine_override(project.as_ref(), cx);
+        let (agent, profile_id) = self.history_source(project.as_ref(), cx);
+        let list_key = cwd.as_ref().map(|c| {
+            crate::session_history::session_list_key(&runtime, agent, profile_id.as_deref(), c)
+        });
         let (sessions, row_text, row_keys) =
             match list_key.as_ref().and_then(|key| self.session_list.get(key)) {
                 Some((_, list)) => (
@@ -845,17 +850,13 @@ impl Workspace {
                 ),
             };
         let list_state = match (cwd.as_ref(), sessions) {
-            (None, _) => match self.remote_project_notice(cx) {
-                Some(notice) => HistoryListState::RemoteProject(notice),
-                None => HistoryListState::NoProject,
-            },
+            (None, _) => HistoryListState::NoProject,
             (Some(_), None) => HistoryListState::Loading,
             (Some(_), Some(s)) if s.is_empty() => HistoryListState::Empty,
             (Some(_), Some(s)) => HistoryListState::Ready(s),
         };
         let (source_tabs, launch_override, profile_label, history_agent_ids) = {
-            // 历史只在本机，profile 和智能体定义也按本机的认。
-            let config = crate::settings::agent_host_settings(&crate::RuntimeKey::Local, cx);
+            let config = crate::settings::agent_host_settings(&runtime, cx);
             let source_tabs = crate::session_history::tabs_with_sessions(
                 crate::session_history::history_source_tabs(
                     restrict_to_kind,
@@ -865,6 +866,7 @@ impl Workspace {
                 |tab| {
                     cwd.as_deref().is_some_and(|cwd| {
                         let key = crate::session_history::session_list_key(
+                            &runtime,
                             tab.kind,
                             tab.profile_id.as_deref(),
                             cwd,
@@ -905,6 +907,7 @@ impl Workspace {
             HistoryViewParams {
                 agent,
                 profile_id,
+                runtime,
                 cwd,
                 list: list_state,
                 detail: &self.session_detail,
@@ -921,5 +924,19 @@ impl Workspace {
             cx,
         )
         .into_any_element()
+    }
+}
+
+/// 项目是不是某个智能体的 space，是的话返回智能体 id。space 在那台机器的 `SMELT_HOME`
+/// 下面，远程项目要拿那台机器的主目录去比。
+pub(crate) fn space_agent_id(project: &crate::ProjectRef, cx: &App) -> Option<String> {
+    match &project.runtime {
+        crate::RuntimeKey::Local => smelt_model::agent_paths::agent_definition_id_for_space(
+            std::path::Path::new(&project.root),
+        ),
+        remote => smelt_model::agent_paths::agent_definition_id_for_space_in(
+            &crate::runtimes::smelt_home(remote, cx)?,
+            &project.root,
+        ),
     }
 }

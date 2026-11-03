@@ -88,7 +88,7 @@ struct DiffChrome {
     view: Entity<gpui_component::diff::DiffState>,
     name: String,
     aggregate: bool,
-    root: String,
+    root: ProjectRef,
     path: String,
     worktree_file: Option<String>,
     lines: Rc<Vec<DiffLine>>,
@@ -128,11 +128,11 @@ impl Render for GitDiffBody {
 /// 只看 Smelt 自己的文件标题行，不读 Diff 组件的滚动位置。
 pub(crate) fn aggregate_diff_ready_for_file(
     diff: &GitDiff,
-    root: &str,
+    root: &ProjectRef,
     scope: DiffScope,
     path: &str,
 ) -> bool {
-    diff.root == root
+    &diff.root == root
         && diff.aggregate
         && diff.scope == scope
         && diff
@@ -490,7 +490,7 @@ fn diff_header_suffix(
     file: &gpui_component::diff::DiffFile,
     ops: HunkOps,
     stage_path: Option<String>,
-    root: &str,
+    root: &ProjectRef,
     host: &WeakEntity<Workspace>,
 ) -> Div {
     let mut row = div().flex().items_center().gap_2();
@@ -502,7 +502,7 @@ fn diff_header_suffix(
         };
         if let Some(label) = label {
             let host = host.clone();
-            let root = root.to_string();
+            let root = root.clone();
             row = row.child(
                 Button::new("diff-stage-file")
                     .quiet()
@@ -522,9 +522,10 @@ fn diff_header_suffix(
         }
     }
     if let Some(rel) = file.modified_path() {
-        let Some(full) = full_file_path(root, rel, false) else {
+        let Some(full) = full_file_path(&root.root, rel, false) else {
             return row;
         };
+        let runtime = root.runtime.clone();
         let host = host.clone();
         row = row.child(
             Button::new((ElementId::from("diff-open-header"), rel.clone()))
@@ -535,12 +536,15 @@ fn diff_header_suffix(
                     let Some(host) = host.upgrade() else {
                         return;
                     };
-                    let path = full.clone();
+                    let file = crate::file_tree::FileRef {
+                        runtime: runtime.clone(),
+                        path: full.clone(),
+                    };
                     host.update(cx, |this, cx| {
                         this.tool_panel_tab = crate::tool_panel::ToolPanelTab::Files;
                         this.set_tool_panel_open(true, cx);
                         this.schedule_visible_refresh(cx);
-                        this.view_file(path, window, cx);
+                        this.view_file_on(file, None, window, cx);
                         this.save_state(cx);
                     });
                 }),
@@ -552,7 +556,7 @@ fn diff_header_suffix(
 fn render_diff_annotation(
     annotation: &DiffAnnotation,
     ops: HunkOps,
-    root: String,
+    root: ProjectRef,
     comment_label: Option<String>,
     input: Option<Entity<gpui_component::input::TextareaState>>,
     host: WeakEntity<Workspace>,
@@ -575,7 +579,7 @@ fn render_diff_annotation(
 fn hunk_ops_row(
     idx: usize,
     ops: HunkOps,
-    root: String,
+    root: ProjectRef,
     host: WeakEntity<Workspace>,
     _cx: &App,
 ) -> Div {

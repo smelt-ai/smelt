@@ -96,23 +96,27 @@ impl Workspace {
         self.sync_notification_surfaces(cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
 
-        if let Some(root) = self.active_project_root(cx) {
-            self.ensure_git_watch(root, cx);
+        if let Some(project) = self.active_project_ref(cx) {
+            self.ensure_git_watch(project, cx);
         }
 
-        // 仓库信息问的是本机运行时，只收本机会话的目录。
-        let repo_cwds: HashSet<String> = self
+        // 仓库信息发给会话所在的那台机器。
+        let repo_cwds: HashSet<crate::ProjectRef> = self
             .sessions
             .iter()
-            .filter(|s| s.runtime(cx).is_local())
-            .filter_map(|s| s.cwd(cx))
+            .filter_map(|s| {
+                Some(crate::ProjectRef {
+                    runtime: s.runtime(cx).key().clone(),
+                    root: s.cwd(cx)?,
+                })
+            })
             .collect();
         for cwd in repo_cwds {
             self.ensure_repo_info(cwd, cx);
         }
 
         if self.git_page_visible()
-            && let Some(root) = self.active_project_root(cx)
+            && let Some(root) = self.active_project_ref(cx)
         {
             let now = Instant::now();
             if git_autofetch_due(self.git_autofetch_at.get(&root).copied(), now, true) {
@@ -140,7 +144,7 @@ impl Workspace {
                     }));
                 self.history_filter = Some(state);
             }
-            let cwd = self.active_project_root(cx);
+            let cwd = self.active_project_ref(cx);
             if self.history_project_root.as_ref() != cwd.as_ref() {
                 self.history_project_root = cwd.clone();
                 self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
@@ -148,10 +152,10 @@ impl Workspace {
                 self.history_detail_list_state.reset(0);
             }
             if let Some(root) = cwd {
-                let (agent, pid) = self.history_source(Some(root.as_str()), cx);
+                let (agent, pid) = self.history_source(Some(&root), cx);
                 let tabs = crate::session_history::history_source_tabs(
-                    self.history_engine_override(Some(root.as_str()), cx),
-                    crate::settings::agent_host_settings(&crate::RuntimeKey::Local, cx)
+                    self.history_engine_override(Some(&root), cx),
+                    crate::settings::agent_host_settings(&root.runtime, cx)
                         .profiles
                         .iter()
                         .cloned(),
@@ -184,19 +188,35 @@ impl Workspace {
                 .as_ref()
                 .map(|s| s.read(cx).value().trim().to_string())
                 .unwrap_or_default();
-            let roots = self.workspace_roots(cx);
+            let runtime = self.file_tree_runtime(cx);
+            let roots: Vec<crate::ProjectRef> = self
+                .workspace_roots(cx)
+                .into_iter()
+                .map(|root| crate::ProjectRef {
+                    runtime: runtime.clone(),
+                    root,
+                })
+                .collect();
             if query.is_empty() {
                 self.search_results = None;
                 self.cancel_file_search();
                 for root in &roots {
+                    // 目录列表靠运行时的变化通知失效，每个挂出来的根都要有监听。
+                    self.ensure_git_watch(root.clone(), cx);
                     self.ensure_git_status(root.clone(), cx);
                     self.ensure_dir_listing(root.clone(), cx);
                 }
                 for dir in self.expanded.clone() {
-                    self.ensure_dir_listing(dir, cx);
+                    self.ensure_dir_listing(
+                        crate::ProjectRef {
+                            runtime: runtime.clone(),
+                            root: dir,
+                        },
+                        cx,
+                    );
                 }
                 self.try_flush_file_tree_reveal(cx);
-            } else if let Some(root) = self.active_project_root(cx) {
+            } else if let Some(root) = self.active_project_ref(cx) {
                 self.ensure_git_status(root.clone(), cx);
                 self.ensure_search(root, query, cx);
             }
