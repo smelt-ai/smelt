@@ -32,6 +32,7 @@ fn recovered_state(id: &str) -> SessionState {
         cli_exited: false,
         agent_token: "should-not-persist".to_string(),
         title: Some("崩溃前的会话".to_string()),
+        title_source: Default::default(),
         phase: Phase::AwaitingApproval,
         phase_since: 100,
         turn_started_at: 0,
