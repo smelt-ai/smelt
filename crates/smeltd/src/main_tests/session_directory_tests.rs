@@ -331,3 +331,93 @@ fn rejected_bus_updates_cannot_resurrect_directory_entries() {
         assert!(SessionDirectory::restore_from_disk().snapshot().is_empty());
     });
 }
+
+/// 守护重启后桌面用原 id 重新 open，启动续接命令；之后 CLI 一直没发 hook
+/// （续接后 CLI 不一定再报 SessionStarted）。新 PTY 的初始状态不能把目录里的
+/// provider / 对话 id 覆盖成空，否则再停一次机，这个终端就不再被保留、无法续接。
+#[cfg(unix)]
+#[test]
+fn reopened_terminal_without_hooks_keeps_resume_identity_across_another_restart() {
+    with_directory_env(|| {
+        use std::os::unix::fs::PermissionsExt;
+
+        // 用阻塞读取的假 CLI 避免依赖本机安装和真实 agent；停机时由测试回收。
+        let bin = std::path::PathBuf::from(std::env::var_os("SMELT_GHOST_SESSIONS_DIR").unwrap());
+        let cli = bin.join("agy");
+        std::fs::write(&cli, "#!/bin/sh\nread value\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = format!(
+            "env PATH={} agy",
+            shell_words::quote(&bin.to_string_lossy())
+        );
+        let mut previous = recovered_state("resume-term");
+        previous.launch = Some(launch.clone());
+        previous.provider = Some("antigravity".to_string());
+        previous.pending_question = None;
+        previous.active_blocker = None;
+        let directory = SessionDirectory::new();
+        directory.upsert(&previous);
+        directory.keep_resumable_terminals(&HashSet::from(["resume-term".to_string()]));
+
+        // 第一次重启：条目以 runtime=false 恢复，可以续接。
+        set_session_directory_for_test(SessionDirectory::restore_from_disk());
+        let expected_run = format!("{launch} --conversation conv-1");
+        assert_eq!(
+            with_session_directory(|d| d.resume_launch("resume-term"))
+                .flatten()
+                .map(|resume| resume.run),
+            Some(expected_run.clone())
+        );
+
+        // 桌面用原 id 重新 open：新建 PTY，走续接命令。
+        let sessions = new_sessions();
+        let acp_sessions = new_test_acp_sessions();
+        let event_hub = new_event_hub();
+        let (_, session) = open_terminal_runtime(
+            TerminalOpenRequest {
+                id: "resume-term".to_string(),
+                cols: 80,
+                rows: 24,
+                cwd: None,
+                launch: None,
+                create_if_missing: true,
+            },
+            &sessions,
+            &acp_sessions,
+            &event_hub,
+            |session, reattached| {
+                assert!(!reattached, "目录条目没有运行时，应新建 PTY");
+                Arc::clone(session)
+            },
+        )
+        .unwrap_or_else(|_| panic!("重新打开留下的终端失败"));
+        assert_eq!(
+            session.state.lock().unwrap().launch.as_deref(),
+            Some(launch.as_str()),
+            "会话状态记原启动命令，不叠 --resume"
+        );
+
+        // 不收到任何 hook，直接停机保存（与停机流程一样，只保留还开着的终端）。
+        let open_terminals: HashSet<String> =
+            sessions.snapshot().into_iter().map(|(id, _)| id).collect();
+        assert!(open_terminals.contains("resume-term"));
+        with_session_directory(|d| d.keep_resumable_terminals(&open_terminals));
+        let _ = session.child.terminate_and_wait(TERMINAL_CHILD_REAP_TIMEOUT);
+
+        // 第二次重启：续接身份和续接命令都还在。
+        let next = SessionDirectory::restore_from_disk();
+        let entry = next
+            .snapshot()
+            .into_iter()
+            .find(|entry| entry.id == "resume-term")
+            .expect("续接后没收到 hook 的终端，再停一次机不能丢");
+        assert_eq!(entry.provider.as_deref(), Some("antigravity"));
+        assert_eq!(entry.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(entry.launch.as_deref(), Some(launch.as_str()));
+        assert!(!entry.cli_exited);
+        assert_eq!(
+            next.resume_launch("resume-term").map(|resume| resume.run),
+            Some(expected_run)
+        );
+    });
+}

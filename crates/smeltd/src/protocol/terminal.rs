@@ -396,6 +396,13 @@ pub(crate) fn open_terminal_runtime<R>(
                     spawned_at.elapsed().as_millis()
                 ),
             );
+            if let Some(resume) = &resume {
+                // 新 runtime 的第一条状态会覆盖恢复记录；保留续接身份，避免 CLI 还没
+                // 上报 hook 就再次停机时丢掉对话。只在实际选择续接时继承。
+                let mut state = sess.state.lock().unwrap();
+                state.provider = Some(resume.provider.clone());
+                state.conversation_id = Some(resume.conversation_id.clone());
+            }
             let sess = Arc::new(sess);
             // lifecycle 锁同时挡住 kill，提交之前没人看得到这个 runtime。
             if !sessions.commit_if_current(&id, &slot, Arc::clone(&sess)) {
