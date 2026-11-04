@@ -120,9 +120,13 @@ pub fn list_conversations(override_dir: Option<&str>, want_cwd: &str) -> Vec<Con
 /// agy 给这个会话起的标题。没有这一行、标题还没生成（空串）或库打不开都是 `None`。
 ///
 /// agy 第一轮跑完前后才写标题，调用方要在之后的生命周期事件里再问一次。
+///
+/// 在 hook 里同步调用：agy 正写着库时最多等 250ms 就放弃（rusqlite 默认要等 5 秒，比
+/// hook 的超时还长），下一次 hook 再问。
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub fn conversation_title(override_dir: Option<&str>, conversation_id: &str) -> Option<String> {
     let conn = open_readonly(&summaries_db(override_dir))?;
+    conn.busy_timeout(std::time::Duration::from_millis(250)).ok()?;
     let title: String = conn
         .query_row(
             "select title from conversation_summaries where conversation_id = ?1",

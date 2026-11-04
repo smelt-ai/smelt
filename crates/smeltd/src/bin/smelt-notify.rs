@@ -58,20 +58,25 @@ fn run() -> Option<()> {
 
     let provider = std::env::var("SMELT_HOOK_PROVIDER").unwrap_or_else(|_| "claude".into());
     let event = normalize_hook_event_for_provider(&hook, &provider)?;
-    // 生命周期事件先发：hook 有超时，守护卡住时宁可丢标题，不丢状态。
-    let title = claude_title_event(&hook, &provider)
-        .or_else(|| antigravity_title_event(&hook, &provider, None));
-
-    for event in std::iter::once(event).chain(title) {
+    // 一条只发一次，并等 daemon 确认 reducer 已提交。provider 的 hooks 是同步
+    // 生命周期边沿；本 helper 退出后它才会继续下一步，因此确认把原始事件顺序
+    // 延伸到 daemon。超时/断线也绝不重放，避免“结果未知”变成重复事件。
+    let send = |event: &AgentEvent| {
         let payload = serde_json::json!({
             "op": DaemonOperation::AgentEvent,
             "id": session_id,
-            "event": &event,
+            "event": event,
         });
-        // 一条只发一次，并等 daemon 确认 reducer 已提交。provider 的 hooks 是同步
-        // 生命周期边沿；本 helper 退出后它才会继续下一步，因此确认把原始事件顺序
-        // 延伸到 daemon。超时/断线也绝不重放，避免“结果未知”变成重复事件。
         let _ = send_once_and_confirm(&sock, &payload);
+    };
+    // 生命周期事件先发，再去查标题：标题要读文件或别人的库，hook 有超时，被拖住时宁可
+    // 丢标题，不丢状态。
+    send(&event);
+    let title = claude_title_event(&hook, &provider)
+        .or_else(|| antigravity_title_event(&hook, &provider, None))
+        .or_else(|| codex_title_event(&hook, &provider, None));
+    if let Some(title) = title {
+        send(&title);
     }
     Some(())
 }
@@ -553,6 +558,31 @@ fn antigravity_title_event(
     }
     let conversation_id = hook_conversation_id(hook)?;
     let title = smelt_core::antigravity_history::conversation_title(root, &conversation_id)?;
+    let mut event = build_agent_event(hook, provider, AgentEventKind::SessionTitleChanged, None);
+    event.conversation_title = Some(title);
+    Some(event)
+}
+
+/// Codex 的 hook 不带标题；它自动生成的名字和 `/rename` 都存在自己的状态库里，见
+/// `session_history::codex_thread_title`。名字在首条消息之后异步生成，所以会话开始
+/// （续接时已有名字）、每轮开头和结束都查一次。`codex_home` 只给测试指定目录；正常运行时
+/// 跟 Codex 一样认 `CODEX_HOME`。
+fn codex_title_event(
+    hook: &serde_json::Value,
+    provider: &str,
+    codex_home: Option<&str>,
+) -> Option<AgentEvent> {
+    if provider != "codex" {
+        return None;
+    }
+    if !matches!(
+        hook_event_name(hook)?.as_str(),
+        "SessionStart" | "UserPromptSubmit" | "Stop"
+    ) {
+        return None;
+    }
+    let thread_id = hook_conversation_id(hook)?;
+    let title = smelt_core::session_history::codex_thread_title(codex_home, &thread_id)?;
     let mut event = build_agent_event(hook, provider, AgentEventKind::SessionTitleChanged, None);
     event.conversation_title = Some(title);
     Some(event)
@@ -1574,6 +1604,35 @@ mod tests {
             None,
             "转录格式只认 Claude 的"
         );
+    }
+
+    #[test]
+    fn codex_title_event_reads_the_thread_name_on_start_prompt_and_stop() {
+        let home = std::env::temp_dir().join(format!("smelt-notify-codex-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let conn = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+        conn.execute_batch(
+            "create table if not exists threads (id text primary key, title text not null \
+             default '', name text, archived integer not null default 0);
+             insert or replace into threads (id, title, name) values ('t1', '帮我看下', '修复侧栏标题');",
+        )
+        .unwrap();
+        drop(conn);
+        let dir = home.to_str();
+        for name in ["SessionStart", "UserPromptSubmit", "Stop"] {
+            let hook = json!({ "hook_event_name": name, "session_id": "t1" });
+            let event = codex_title_event(&hook, "codex", dir).expect(name);
+            assert_eq!(event.kind, AgentEventKind::SessionTitleChanged);
+            assert_eq!(event.conversation_id.as_deref(), Some("t1"));
+            assert_eq!(event.conversation_title.as_deref(), Some("修复侧栏标题"));
+        }
+        let tool = json!({ "hook_event_name": "PostToolUse", "session_id": "t1" });
+        assert_eq!(codex_title_event(&tool, "codex", dir), None);
+        let other = json!({ "hook_event_name": "Stop", "session_id": "t1" });
+        assert_eq!(codex_title_event(&other, "claude", dir), None);
+        let unknown = json!({ "hook_event_name": "Stop", "session_id": "t2" });
+        assert_eq!(codex_title_event(&unknown, "codex", dir), None);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
