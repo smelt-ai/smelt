@@ -219,10 +219,6 @@ class L10nEn extends L10n {
       'No automations on this machine yet. Create them in Smelt on the desktop.';
 
   @override
-  String get agentsReadOnly =>
-      'Automations are edited in Smelt on the desktop.';
-
-  @override
   String agentsGone(String machine) {
     return 'This item is no longer on $machine.';
   }
@@ -521,6 +517,203 @@ class L10nEn extends L10n {
   String agentsRunNowFailed(String name, String message) {
     return 'Couldn\'t run “$name”: $message';
   }
+
+  @override
+  String get autoRunTitle => 'Run';
+
+  @override
+  String get autoRunOpen => 'View this run';
+
+  @override
+  String get autoRunHistory => 'Recent runs';
+
+  @override
+  String get autoRunInstructions => 'Instruction';
+
+  @override
+  String get autoRunOutput => 'Output';
+
+  @override
+  String get autoRunTranscript => 'Conversation';
+
+  @override
+  String get autoRunLoadFailed => 'Couldn\'t load this run';
+
+  @override
+  String get autoRunNothing => 'This run left no output.';
+
+  @override
+  String get autoEditNewTitle => 'New automation';
+
+  @override
+  String get autoEditTitle => 'Edit automation';
+
+  @override
+  String get autoEditEdit => 'Edit';
+
+  @override
+  String get autoEditName => 'Name';
+
+  @override
+  String get autoEditNameHint => 'e.g. Morning briefing';
+
+  @override
+  String get autoEditAction => 'What it does';
+
+  @override
+  String get autoEditActionAgent => 'Agent';
+
+  @override
+  String get autoEditActionShell => 'Command';
+
+  @override
+  String get autoEditAgent => 'Agent';
+
+  @override
+  String get autoEditAgentNone =>
+      'No agent on this machine yet. Create one first.';
+
+  @override
+  String get autoEditAgentPick => 'Choose an agent';
+
+  @override
+  String get autoEditPrompt => 'Instruction';
+
+  @override
+  String get autoEditPromptHint =>
+      'e.g. Summarize yesterday\'s progress and list today\'s to-dos';
+
+  @override
+  String get autoEditCommand => 'Command';
+
+  @override
+  String get autoEditCommandHint => 'e.g. curl -fsS https://example.com/health';
+
+  @override
+  String get autoEditSchedules => 'When it runs';
+
+  @override
+  String get autoEditAddSchedule => 'Add a time';
+
+  @override
+  String get autoEditEvents => 'Event triggers (edit on the desktop)';
+
+  @override
+  String get autoEditWebhook => 'Webhook';
+
+  @override
+  String get autoEditWebhookHint =>
+      'Run it with an HTTP call. The address contains a secret; copy it from Smelt on the desktop.';
+
+  @override
+  String get autoEditNotify => 'Notify when done';
+
+  @override
+  String autoEditMissing(String fields) {
+    return 'Still needed: $fields';
+  }
+
+  @override
+  String get autoEditMissingName => 'name';
+
+  @override
+  String get autoEditMissingTrigger => 'a time or webhook';
+
+  @override
+  String get autoEditMissingAgent => 'agent';
+
+  @override
+  String get autoEditMissingPrompt =>
+      'instruction (timed runs bring nothing else)';
+
+  @override
+  String get autoEditMissingCommand => 'command';
+
+  @override
+  String get autoEditSaving => 'Saving…';
+
+  @override
+  String autoEditSaveFailed(String message) {
+    return 'Couldn\'t save: $message';
+  }
+
+  @override
+  String get autoEditLoadFailed => 'Couldn\'t load this automation';
+
+  @override
+  String get autoEditDelete => 'Delete automation';
+
+  @override
+  String autoEditDeleteTitle(String name) {
+    return 'Delete “$name”?';
+  }
+
+  @override
+  String autoEditDeleteBody(String machine) {
+    return 'This removes it and its run history from $machine. It can\'t be undone.';
+  }
+
+  @override
+  String autoEditDeleteFailed(String message) {
+    return 'Couldn\'t delete: $message';
+  }
+
+  @override
+  String get autoEditDiscardTitle => 'Discard changes?';
+
+  @override
+  String get autoEditDiscardBody =>
+      'Your edits to this automation haven\'t been saved.';
+
+  @override
+  String get autoEditDiscard => 'Discard';
+
+  @override
+  String get autoEditScheduleTitle => 'When';
+
+  @override
+  String get autoEditKindDaily => 'Daily';
+
+  @override
+  String get autoEditKindWeekly => 'Weekly';
+
+  @override
+  String get autoEditKindEvery => 'Every';
+
+  @override
+  String get autoEditKindDuring => 'Within hours';
+
+  @override
+  String get autoEditTime => 'Time';
+
+  @override
+  String get autoEditStart => 'From';
+
+  @override
+  String get autoEditEnd => 'Until';
+
+  @override
+  String get autoEditDays => 'Days';
+
+  @override
+  String get autoEditInterval => 'Interval';
+
+  @override
+  String get autoEditMinutes => 'minutes';
+
+  @override
+  String get autoEditHours => 'hours';
+
+  @override
+  String autoEditIntervalRange(int min, int max) {
+    return '$min–$max';
+  }
+
+  @override
+  String get autoEditDone => 'Done';
+
+  @override
+  String get autoEditRemoveSchedule => 'Remove';
 
   @override
   String get appName => 'Smelt';

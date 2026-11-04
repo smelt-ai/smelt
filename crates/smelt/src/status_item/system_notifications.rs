@@ -5,6 +5,7 @@
 //! attention coordinator hands them off, and only retires them after the completion handler.
 
 use super::{StatusItemEvent, SystemNotificationAuthorization, SystemNotificationStatus};
+use crate::RuntimeKey;
 use block2::{DynBlock, RcBlock};
 use objc2::AnyThread;
 use objc2::rc::Retained;
@@ -22,14 +23,30 @@ use std::sync::{Mutex, OnceLock};
 
 const SESSION_IDENTIFIER_PREFIX: &str = "smelt.session.";
 const AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.run.";
+/// 远程机器上的运行：前缀后面是 `运行时 id.运行 id`。本机的沿用老格式，已经挂在通知中心
+/// 里的旧通知点了照样能跳。
+const REMOTE_AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.remote-run.";
+const AUTOMATION_THREAD_PREFIX: &str = "automation:";
+const REMOTE_AUTOMATION_THREAD_PREFIX: &str = "automation@";
 const APP_IDENTIFIER: &str = "smelt.app";
 
 fn notification_identifier(session_id: &str) -> String {
     format!("{SESSION_IDENTIFIER_PREFIX}{session_id}")
 }
 
-fn automation_notification_identifier(run_id: &str) -> String {
-    format!("{AUTOMATION_RUN_IDENTIFIER_PREFIX}{run_id}")
+fn automation_notification_identifier(runtime: &RuntimeKey, run_id: &str) -> String {
+    match runtime {
+        RuntimeKey::Local => format!("{AUTOMATION_RUN_IDENTIFIER_PREFIX}{run_id}"),
+        RuntimeKey::Remote(id) => format!("{REMOTE_AUTOMATION_RUN_IDENTIFIER_PREFIX}{id}.{run_id}"),
+    }
+}
+
+/// 同一条自动化的通知在通知中心里归一组。
+fn automation_thread_identifier(runtime: &RuntimeKey, automation_id: &str) -> String {
+    match runtime {
+        RuntimeKey::Local => format!("{AUTOMATION_THREAD_PREFIX}{automation_id}"),
+        RuntimeKey::Remote(id) => format!("{REMOTE_AUTOMATION_THREAD_PREFIX}{id}:{automation_id}"),
+    }
 }
 
 fn session_id_from_identifier(identifier: &str) -> Option<&str> {
@@ -38,16 +55,31 @@ fn session_id_from_identifier(identifier: &str) -> Option<&str> {
         .filter(|session_id| !session_id.is_empty())
 }
 
-fn automation_run_id_from_identifier(identifier: &str) -> Option<&str> {
+/// 运行时 id 是 UUID，不含 `.` 和 `:`，从第一个分隔符切开就是机器和后半段。
+fn split_machine(rest: &str, separator: char) -> Option<(RuntimeKey, &str)> {
+    let (machine, tail) = rest.split_once(separator)?;
+    (!machine.is_empty() && !tail.is_empty())
+        .then(|| (RuntimeKey::Remote(machine.to_string()), tail))
+}
+
+fn automation_run_from_identifier(identifier: &str) -> Option<(RuntimeKey, &str)> {
+    if let Some(rest) = identifier.strip_prefix(REMOTE_AUTOMATION_RUN_IDENTIFIER_PREFIX) {
+        return split_machine(rest, '.');
+    }
     identifier
         .strip_prefix(AUTOMATION_RUN_IDENTIFIER_PREFIX)
         .filter(|run_id| !run_id.is_empty())
+        .map(|run_id| (RuntimeKey::Local, run_id))
 }
 
-fn automation_id_from_thread_identifier(identifier: &str) -> Option<&str> {
+fn automation_from_thread_identifier(identifier: &str) -> Option<(RuntimeKey, &str)> {
+    if let Some(rest) = identifier.strip_prefix(REMOTE_AUTOMATION_THREAD_PREFIX) {
+        return split_machine(rest, ':');
+    }
     identifier
-        .strip_prefix("automation:")
+        .strip_prefix(AUTOMATION_THREAD_PREFIX)
         .filter(|automation_id| !automation_id.is_empty())
+        .map(|automation_id| (RuntimeKey::Local, automation_id))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,14 +116,15 @@ impl NotificationQueue {
 
     fn enqueue_automation_run(
         &mut self,
+        runtime: &RuntimeKey,
         automation_id: &str,
         run_id: &str,
         subtitle: &str,
         body: &str,
     ) {
         self.enqueue_with_identifier(
-            automation_notification_identifier(run_id),
-            format!("automation:{automation_id}"),
+            automation_notification_identifier(runtime, run_id),
+            automation_thread_identifier(runtime, automation_id),
             subtitle,
             body,
         );
@@ -197,13 +230,14 @@ impl NotificationQueue {
         });
     }
 
-    fn retain_automation_runs(&mut self, run_ids: &[String]) {
+    /// 只动这台机器的运行通知：别的机器上的运行不在这份快照里，不能当成已删除。
+    fn retain_automation_runs(&mut self, runtime: &RuntimeKey, run_ids: &[String]) {
         let retained = run_ids
             .iter()
-            .map(|run_id| automation_notification_identifier(run_id))
+            .map(|run_id| automation_notification_identifier(runtime, run_id))
             .collect::<HashSet<_>>();
         self.retain_scope(&retained, |identifier| {
-            automation_run_id_from_identifier(identifier).is_some()
+            automation_run_from_identifier(identifier).is_some_and(|(owner, _)| owner == *runtime)
         });
     }
 
@@ -225,8 +259,8 @@ impl NotificationQueue {
         self.remove_identifier(&notification_identifier(session_id));
     }
 
-    fn remove_automation_run(&mut self, run_id: &str) {
-        self.remove_identifier(&automation_notification_identifier(run_id));
+    fn remove_automation_run(&mut self, runtime: &RuntimeKey, run_id: &str) {
+        self.remove_identifier(&automation_notification_identifier(runtime, run_id));
     }
 
     fn remove_identifier(&mut self, identifier: &str) {
@@ -334,26 +368,27 @@ objc2::define_class!(
                     .queue
                     .remove_session(&session_id);
                 Some(StatusItemEvent::JumpToDaemonSession(session_id))
-            } else if let Some(run_id) =
-                automation_run_id_from_identifier(&identifier).map(str::to_string)
+            } else if let Some((runtime, run_id)) = automation_run_from_identifier(&identifier)
+                .map(|(runtime, run_id)| (runtime, run_id.to_string()))
             {
                 state()
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .queue
-                    .remove_automation_run(&run_id);
-                let automation_id = response
+                    .remove_automation_run(&runtime, &run_id);
+                let thread = response
                     .notification()
                     .request()
                     .content()
                     .threadIdentifier()
                     .to_string();
-                automation_id_from_thread_identifier(&automation_id).map(|automation_id| {
-                    StatusItemEvent::JumpToAutomationRun {
+                automation_from_thread_identifier(&thread)
+                    .filter(|(owner, _)| *owner == runtime)
+                    .map(|(_, automation_id)| StatusItemEvent::JumpToAutomationRun {
+                        runtime,
                         automation_id: automation_id.to_string(),
                         run_id,
-                    }
-                })
+                    })
             } else if identifier == APP_IDENTIFIER {
                 state()
                     .lock()
@@ -637,6 +672,7 @@ pub fn notify_success(message: impl AsRef<str>) {
 }
 
 pub fn deliver_automation_notification(
+    runtime: &RuntimeKey,
     automation_id: &str,
     run_id: &str,
     subtitle: &str,
@@ -648,7 +684,7 @@ pub fn deliver_automation_notification(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state
             .queue
-            .enqueue_automation_run(automation_id, run_id, subtitle, body);
+            .enqueue_automation_run(runtime, automation_id, run_id, subtitle, body);
         prepare_queued_notification(&mut state);
     }
     sync_system_notifications();
@@ -664,12 +700,12 @@ pub fn retain_system_notifications(session_ids: &[String]) {
     sync_system_notifications();
 }
 
-pub fn retain_automation_notifications(run_ids: &[String]) {
+pub fn retain_automation_notifications(runtime: &RuntimeKey, run_ids: &[String]) {
     state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .queue
-        .retain_automation_runs(run_ids);
+        .retain_automation_runs(runtime, run_ids);
     sync_system_notifications();
 }
 
@@ -682,12 +718,12 @@ pub fn remove_system_notification(session_id: &str) {
     sync_system_notifications();
 }
 
-pub fn remove_automation_notification(run_id: &str) {
+pub fn remove_automation_notification(runtime: &RuntimeKey, run_id: &str) {
     state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .queue
-        .remove_automation_run(run_id);
+        .remove_automation_run(runtime, run_id);
     sync_system_notifications();
 }
 
@@ -733,9 +769,11 @@ pub fn take_system_notification_errors() -> Vec<String> {
 mod tests {
     use super::{
         APP_IDENTIFIER, NotificationQueue, authorization_from_settings,
-        automation_id_from_thread_identifier, automation_notification_identifier,
-        automation_run_id_from_identifier, notification_identifier, session_id_from_identifier,
+        automation_from_thread_identifier, automation_notification_identifier,
+        automation_run_from_identifier, automation_thread_identifier, notification_identifier,
+        session_id_from_identifier,
     };
+    use crate::RuntimeKey;
     use crate::status_item::SystemNotificationAuthorization;
     use objc2_user_notifications::UNAuthorizationStatus;
 
@@ -770,21 +808,40 @@ mod tests {
         assert_eq!(session_id_from_identifier("unrelated"), None);
         assert_eq!(session_id_from_identifier("smelt.session."), None);
 
-        let automation = automation_notification_identifier("event:auto-1:evt-9");
+        // 本机沿用老格式：升级前发出的通知点了照样能跳。
+        let automation =
+            automation_notification_identifier(&RuntimeKey::Local, "event:auto-1:evt-9");
         assert_eq!(automation, "smelt.automation.run.event:auto-1:evt-9");
         assert_eq!(
-            automation_run_id_from_identifier(&automation),
-            Some("event:auto-1:evt-9")
+            automation_run_from_identifier(&automation),
+            Some((RuntimeKey::Local, "event:auto-1:evt-9"))
         );
         assert_eq!(
-            automation_run_id_from_identifier("smelt.automation.run."),
+            automation_run_from_identifier("smelt.automation.run."),
             None
         );
         assert_eq!(
-            automation_id_from_thread_identifier("automation:automation-1"),
-            Some("automation-1")
+            automation_from_thread_identifier("automation:automation-1"),
+            Some((RuntimeKey::Local, "automation-1"))
         );
-        assert_eq!(automation_id_from_thread_identifier("automation:"), None);
+        assert_eq!(automation_from_thread_identifier("automation:"), None);
+
+        // 远程机器上的运行带着机器，解回来跳到那台机器。
+        let remote = RuntimeKey::Remote("39fafd41-9942-49b0-b9ec-7eb670d2711e".into());
+        let identifier = automation_notification_identifier(&remote, "event:auto-1:evt-9");
+        assert_eq!(
+            automation_run_from_identifier(&identifier),
+            Some((remote.clone(), "event:auto-1:evt-9"))
+        );
+        let thread = automation_thread_identifier(&remote, "auto-1");
+        assert_eq!(
+            automation_from_thread_identifier(&thread),
+            Some((remote, "auto-1"))
+        );
+        assert_eq!(
+            automation_run_from_identifier("smelt.automation.remote-run.no-run"),
+            None
+        );
     }
 
     #[test]
@@ -901,21 +958,33 @@ mod tests {
     #[test]
     fn session_and_automation_retention_are_isolated() {
         let mut automation_queue = NotificationQueue::default();
-        automation_queue.enqueue_automation_run("automation-1", "run-1", "done", "body");
+        automation_queue.enqueue_automation_run(
+            &RuntimeKey::Local,
+            "automation-1",
+            "run-1",
+            "done",
+            "body",
+        );
         let request = automation_queue.take_ready().pop().unwrap();
         assert_eq!(
             request.identifier,
-            automation_notification_identifier("run-1")
+            automation_notification_identifier(&RuntimeKey::Local, "run-1")
         );
         assert_eq!(request.thread_identifier, "automation:automation-1");
         automation_queue.complete(&request.identifier, request.generation, None);
 
         automation_queue.retain_sessions(&[]);
         assert!(automation_queue.take_retractions().is_empty());
-        automation_queue.retain_automation_runs(&[]);
+        // 别的机器的快照不撤本机的运行通知。
+        automation_queue.retain_automation_runs(&RuntimeKey::Remote("box".into()), &[]);
+        assert!(automation_queue.take_retractions().is_empty());
+        automation_queue.retain_automation_runs(&RuntimeKey::Local, &[]);
         assert_eq!(
             automation_queue.take_retractions(),
-            vec![automation_notification_identifier("run-1")]
+            vec![automation_notification_identifier(
+                &RuntimeKey::Local,
+                "run-1"
+            )]
         );
 
         let mut session_queue = NotificationQueue::default();
@@ -923,7 +992,7 @@ mod tests {
         let request = session_queue.take_ready().pop().unwrap();
         session_queue.complete(&request.identifier, request.generation, None);
 
-        session_queue.retain_automation_runs(&[]);
+        session_queue.retain_automation_runs(&RuntimeKey::Local, &[]);
         assert!(session_queue.take_retractions().is_empty());
         session_queue.retain_sessions(&[]);
         assert_eq!(

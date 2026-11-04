@@ -46,6 +46,8 @@ FleetRuntime _runtime(String id, {bool online = true}) => FleetRuntime(
 );
 
 const _automation = AutomationSource(
+  automationId: 'auto-1',
+  runId: 'run-1',
   automationName: '每日站会摘要',
   runStatus: AutomationRunStatus.completed,
   runSource: AutomationRunSource.scheduled,

@@ -340,7 +340,7 @@ class _AgentEditPageState extends State<AgentEditPage> {
       ),
       children: [
         ShelfHeader(title: l10n.agentEditName, first: true),
-        _Field(
+        EditField(
           child: TextField(
             controller: _name,
             enabled: enabled,
@@ -352,7 +352,7 @@ class _AgentEditPageState extends State<AgentEditPage> {
           ),
         ),
         ShelfHeader(title: l10n.agentsPrompt),
-        _Field(
+        EditField(
           child: TextField(
             controller: _prompt,
             enabled: enabled,
@@ -419,7 +419,7 @@ class _AgentEditPageState extends State<AgentEditPage> {
                       )
                     : null,
               ),
-            _AddRow(
+            AddRow(
               label: l10n.agentEditAddFolder,
               onTap: enabled ? _addFolder : null,
             ),
@@ -441,7 +441,7 @@ class _AgentEditPageState extends State<AgentEditPage> {
                       )
                     : null,
               ),
-            _AddRow(
+            AddRow(
               label: l10n.agentEditAddLink,
               onTap: enabled ? _addLink : null,
             ),
@@ -553,20 +553,6 @@ class _AgentEditPageState extends State<AgentEditPage> {
   );
 }
 
-/// 一个输入框：用主题的输入框样式（白底、描边、内边距），左右和搁板对齐。不再套搁板，
-/// 免得白板里再嵌一个框。
-class _Field extends StatelessWidget {
-  const _Field({required this.child});
-
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: Space.page),
-    child: child,
-  );
-}
-
 /// 一项绑定的目录或链接：全文展示，尾部移除。
 class _RemovableRow extends StatelessWidget {
   const _RemovableRow({
@@ -599,23 +585,6 @@ class _RemovableRow extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _AddRow extends StatelessWidget {
-  const _AddRow({required this.label, required this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = GalleyColors.of(context);
-    return ShelfRow(
-      leading: Icon(LucideIcons.plus, size: Strokes.icon, color: c.inkMuted),
-      title: Text(label),
-      onTap: onTap,
     );
   }
 }

@@ -451,12 +451,6 @@ abstract class L10n {
   /// **'No automations on this machine yet. Create them in Smelt on the desktop.'**
   String get agentsEmptyAutomations;
 
-  /// No description provided for @agentsReadOnly.
-  ///
-  /// In en, this message translates to:
-  /// **'Automations are edited in Smelt on the desktop.'**
-  String get agentsReadOnly;
-
   /// No description provided for @agentsGone.
   ///
   /// In en, this message translates to:
@@ -876,6 +870,366 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Couldn\'t run “{name}”: {message}'**
   String agentsRunNowFailed(String name, String message);
+
+  /// No description provided for @autoRunTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Run'**
+  String get autoRunTitle;
+
+  /// No description provided for @autoRunOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'View this run'**
+  String get autoRunOpen;
+
+  /// No description provided for @autoRunHistory.
+  ///
+  /// In en, this message translates to:
+  /// **'Recent runs'**
+  String get autoRunHistory;
+
+  /// No description provided for @autoRunInstructions.
+  ///
+  /// In en, this message translates to:
+  /// **'Instruction'**
+  String get autoRunInstructions;
+
+  /// No description provided for @autoRunOutput.
+  ///
+  /// In en, this message translates to:
+  /// **'Output'**
+  String get autoRunOutput;
+
+  /// No description provided for @autoRunTranscript.
+  ///
+  /// In en, this message translates to:
+  /// **'Conversation'**
+  String get autoRunTranscript;
+
+  /// No description provided for @autoRunLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load this run'**
+  String get autoRunLoadFailed;
+
+  /// No description provided for @autoRunNothing.
+  ///
+  /// In en, this message translates to:
+  /// **'This run left no output.'**
+  String get autoRunNothing;
+
+  /// No description provided for @autoEditNewTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'New automation'**
+  String get autoEditNewTitle;
+
+  /// No description provided for @autoEditTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit automation'**
+  String get autoEditTitle;
+
+  /// No description provided for @autoEditEdit.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit'**
+  String get autoEditEdit;
+
+  /// No description provided for @autoEditName.
+  ///
+  /// In en, this message translates to:
+  /// **'Name'**
+  String get autoEditName;
+
+  /// No description provided for @autoEditNameHint.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Morning briefing'**
+  String get autoEditNameHint;
+
+  /// No description provided for @autoEditAction.
+  ///
+  /// In en, this message translates to:
+  /// **'What it does'**
+  String get autoEditAction;
+
+  /// No description provided for @autoEditActionAgent.
+  ///
+  /// In en, this message translates to:
+  /// **'Agent'**
+  String get autoEditActionAgent;
+
+  /// No description provided for @autoEditActionShell.
+  ///
+  /// In en, this message translates to:
+  /// **'Command'**
+  String get autoEditActionShell;
+
+  /// No description provided for @autoEditAgent.
+  ///
+  /// In en, this message translates to:
+  /// **'Agent'**
+  String get autoEditAgent;
+
+  /// No description provided for @autoEditAgentNone.
+  ///
+  /// In en, this message translates to:
+  /// **'No agent on this machine yet. Create one first.'**
+  String get autoEditAgentNone;
+
+  /// No description provided for @autoEditAgentPick.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose an agent'**
+  String get autoEditAgentPick;
+
+  /// No description provided for @autoEditPrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'Instruction'**
+  String get autoEditPrompt;
+
+  /// No description provided for @autoEditPromptHint.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Summarize yesterday\'s progress and list today\'s to-dos'**
+  String get autoEditPromptHint;
+
+  /// No description provided for @autoEditCommand.
+  ///
+  /// In en, this message translates to:
+  /// **'Command'**
+  String get autoEditCommand;
+
+  /// No description provided for @autoEditCommandHint.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. curl -fsS https://example.com/health'**
+  String get autoEditCommandHint;
+
+  /// No description provided for @autoEditSchedules.
+  ///
+  /// In en, this message translates to:
+  /// **'When it runs'**
+  String get autoEditSchedules;
+
+  /// No description provided for @autoEditAddSchedule.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a time'**
+  String get autoEditAddSchedule;
+
+  /// No description provided for @autoEditEvents.
+  ///
+  /// In en, this message translates to:
+  /// **'Event triggers (edit on the desktop)'**
+  String get autoEditEvents;
+
+  /// No description provided for @autoEditWebhook.
+  ///
+  /// In en, this message translates to:
+  /// **'Webhook'**
+  String get autoEditWebhook;
+
+  /// No description provided for @autoEditWebhookHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Run it with an HTTP call. The address contains a secret; copy it from Smelt on the desktop.'**
+  String get autoEditWebhookHint;
+
+  /// No description provided for @autoEditNotify.
+  ///
+  /// In en, this message translates to:
+  /// **'Notify when done'**
+  String get autoEditNotify;
+
+  /// No description provided for @autoEditMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'Still needed: {fields}'**
+  String autoEditMissing(String fields);
+
+  /// No description provided for @autoEditMissingName.
+  ///
+  /// In en, this message translates to:
+  /// **'name'**
+  String get autoEditMissingName;
+
+  /// No description provided for @autoEditMissingTrigger.
+  ///
+  /// In en, this message translates to:
+  /// **'a time or webhook'**
+  String get autoEditMissingTrigger;
+
+  /// No description provided for @autoEditMissingAgent.
+  ///
+  /// In en, this message translates to:
+  /// **'agent'**
+  String get autoEditMissingAgent;
+
+  /// No description provided for @autoEditMissingPrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'instruction (timed runs bring nothing else)'**
+  String get autoEditMissingPrompt;
+
+  /// No description provided for @autoEditMissingCommand.
+  ///
+  /// In en, this message translates to:
+  /// **'command'**
+  String get autoEditMissingCommand;
+
+  /// No description provided for @autoEditSaving.
+  ///
+  /// In en, this message translates to:
+  /// **'Saving…'**
+  String get autoEditSaving;
+
+  /// No description provided for @autoEditSaveFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t save: {message}'**
+  String autoEditSaveFailed(String message);
+
+  /// No description provided for @autoEditLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load this automation'**
+  String get autoEditLoadFailed;
+
+  /// No description provided for @autoEditDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete automation'**
+  String get autoEditDelete;
+
+  /// No description provided for @autoEditDeleteTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete “{name}”?'**
+  String autoEditDeleteTitle(String name);
+
+  /// No description provided for @autoEditDeleteBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This removes it and its run history from {machine}. It can\'t be undone.'**
+  String autoEditDeleteBody(String machine);
+
+  /// No description provided for @autoEditDeleteFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t delete: {message}'**
+  String autoEditDeleteFailed(String message);
+
+  /// No description provided for @autoEditDiscardTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Discard changes?'**
+  String get autoEditDiscardTitle;
+
+  /// No description provided for @autoEditDiscardBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Your edits to this automation haven\'t been saved.'**
+  String get autoEditDiscardBody;
+
+  /// No description provided for @autoEditDiscard.
+  ///
+  /// In en, this message translates to:
+  /// **'Discard'**
+  String get autoEditDiscard;
+
+  /// No description provided for @autoEditScheduleTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'When'**
+  String get autoEditScheduleTitle;
+
+  /// No description provided for @autoEditKindDaily.
+  ///
+  /// In en, this message translates to:
+  /// **'Daily'**
+  String get autoEditKindDaily;
+
+  /// No description provided for @autoEditKindWeekly.
+  ///
+  /// In en, this message translates to:
+  /// **'Weekly'**
+  String get autoEditKindWeekly;
+
+  /// No description provided for @autoEditKindEvery.
+  ///
+  /// In en, this message translates to:
+  /// **'Every'**
+  String get autoEditKindEvery;
+
+  /// No description provided for @autoEditKindDuring.
+  ///
+  /// In en, this message translates to:
+  /// **'Within hours'**
+  String get autoEditKindDuring;
+
+  /// No description provided for @autoEditTime.
+  ///
+  /// In en, this message translates to:
+  /// **'Time'**
+  String get autoEditTime;
+
+  /// No description provided for @autoEditStart.
+  ///
+  /// In en, this message translates to:
+  /// **'From'**
+  String get autoEditStart;
+
+  /// No description provided for @autoEditEnd.
+  ///
+  /// In en, this message translates to:
+  /// **'Until'**
+  String get autoEditEnd;
+
+  /// No description provided for @autoEditDays.
+  ///
+  /// In en, this message translates to:
+  /// **'Days'**
+  String get autoEditDays;
+
+  /// No description provided for @autoEditInterval.
+  ///
+  /// In en, this message translates to:
+  /// **'Interval'**
+  String get autoEditInterval;
+
+  /// No description provided for @autoEditMinutes.
+  ///
+  /// In en, this message translates to:
+  /// **'minutes'**
+  String get autoEditMinutes;
+
+  /// No description provided for @autoEditHours.
+  ///
+  /// In en, this message translates to:
+  /// **'hours'**
+  String get autoEditHours;
+
+  /// No description provided for @autoEditIntervalRange.
+  ///
+  /// In en, this message translates to:
+  /// **'{min}–{max}'**
+  String autoEditIntervalRange(int min, int max);
+
+  /// No description provided for @autoEditDone.
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get autoEditDone;
+
+  /// No description provided for @autoEditRemoveSchedule.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove'**
+  String get autoEditRemoveSchedule;
 
   /// No description provided for @appName.
   ///

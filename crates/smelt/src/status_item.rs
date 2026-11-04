@@ -15,7 +15,9 @@ pub enum StatusItemEvent {
     /// 跳到某个会话。菜单项和系统通知都只带守护会话 id：主窗口可能已经关了、
     /// 会话可能重排，到点击时再按 id 找当前位置。
     JumpToDaemonSession(String),
+    /// 跳到某台机器上某条自动化的一次运行。
     JumpToAutomationRun {
+        runtime: crate::RuntimeKey,
         automation_id: String,
         run_id: String,
     },
@@ -529,6 +531,7 @@ mod imp {
         deliver_app_notification("完成", message.as_ref());
     }
     pub fn deliver_automation_notification(
+        _runtime: &crate::RuntimeKey,
         _automation_id: &str,
         _run_id: &str,
         _subtitle: &str,
@@ -536,9 +539,9 @@ mod imp {
     ) {
     }
     pub fn retain_system_notifications(_session_ids: &[String]) {}
-    pub fn retain_automation_notifications(_run_ids: &[String]) {}
+    pub fn retain_automation_notifications(_runtime: &crate::RuntimeKey, _run_ids: &[String]) {}
     pub fn remove_system_notification(_session_id: &str) {}
-    pub fn remove_automation_notification(_run_id: &str) {}
+    pub fn remove_automation_notification(_runtime: &crate::RuntimeKey, _run_id: &str) {}
     pub fn refresh_system_notification_authorization() {}
     pub fn sync_system_notifications() {}
     pub fn system_notification_status() -> SystemNotificationStatus {

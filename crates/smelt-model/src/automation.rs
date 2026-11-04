@@ -600,6 +600,12 @@ impl Automation {
         Ok(())
     }
 
+    /// 客户端保存前的检查，和运行时收到保存时的规则一致（工作区由运行时分配，不在这里查）。
+    pub fn validate_for_save(&self) -> Result<(), String> {
+        self.validate()?;
+        self.validate_scheduled_instruction()
+    }
+
     /// 定时触发不带外部内容，智能体只能从指令里知道这次要做什么。只在保存时
     /// 检查：放进 `validate` 会让一条旧数据拖垮整库载入，旧数据到点时由
     /// [`AutomationRunContext::validate_input`] 记成失败。

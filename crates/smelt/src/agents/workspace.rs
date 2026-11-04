@@ -883,7 +883,11 @@ impl Workspace {
             plugins,
             mcp_servers,
             memories,
-            tab: self.agent_surface.open_editor_tab.take().unwrap_or_default(),
+            tab: self
+                .agent_surface
+                .open_editor_tab
+                .take()
+                .unwrap_or_default(),
             memory_query,
             memory_filter: MemoryFilter::default(),
             expanded_memory: None,
@@ -1305,21 +1309,22 @@ impl Workspace {
 
     fn delete_agent(&mut self, agent: AgentRef, cx: &mut Context<Self>) {
         self.agent_surface.error = None;
-        // 自动化眼下只在本机，只有本机的智能体可能被自动化引用。
-        if agent.runtime == crate::RuntimeKey::Local {
+        // 引用它的自动化只可能在同一台机器上。
+        {
             let config = cx.global::<settings::AgentHostState>();
-            if let Some(error) = &config.automation_store_error {
+            let machine = config.automations_on(&agent.runtime);
+            if let Some(error) = machine.and_then(|machine| machine.store_error.as_ref()) {
                 self.agent_surface.error =
                     Some(format!("自动化存储不可用，暂时不能删除智能体：{error}"));
                 cx.notify();
                 return;
             }
-            if config.automation_store_id.is_empty() {
+            if machine.is_none_or(|machine| machine.store_id.is_empty()) {
                 self.agent_surface.error = Some("正在读取关联自动化，请稍后再试".to_string());
                 cx.notify();
                 return;
             }
-            let automation_count = config.automations_for(&agent.id).len();
+            let automation_count = config.automations_for(&agent.runtime, &agent.id).len();
             if automation_count != 0 {
                 self.agent_surface.error = Some(format!(
                     "请先删除该智能体关联的 {automation_count} 条自动化"
@@ -1350,15 +1355,17 @@ impl Workspace {
         if is_default_conversation_agent(&agent, cx) {
             clear_default_conversation_agent(&agent.runtime, cx);
         }
+        if self
+            .automation_surface
+            .editor
+            .as_ref()
+            .is_some_and(|editor| {
+                editor.automation.runtime == agent.runtime && editor.agent_id == agent.id
+            })
+        {
+            self.automation_surface.editor = None;
+        }
         if agent.runtime == crate::RuntimeKey::Local {
-            if self
-                .automation_surface
-                .editor
-                .as_ref()
-                .is_some_and(|editor| editor.agent_id == agent.id)
-            {
-                self.automation_surface.editor = None;
-            }
             self.agent_surface.selected_id = None;
         }
         self.nav.agents_mut().pop_to_root();
@@ -1369,26 +1376,40 @@ impl Workspace {
 
     pub(super) fn automation_snapshot_is_current_store(
         &self,
+        runtime: &crate::RuntimeKey,
         snapshot: &smelt_model::automation::AutomationFile,
         cx: &App,
     ) -> bool {
-        let config = cx.global::<settings::AgentHostState>();
-        !config.is_retired_automation_store(&snapshot.store_id)
-            && (config.automation_store_id.is_empty()
-                || config.automation_store_id == snapshot.store_id)
+        let Some(machine) = cx
+            .global::<settings::AgentHostState>()
+            .automations_on(runtime)
+        else {
+            return true;
+        };
+        !machine.is_retired_store(&snapshot.store_id)
+            && (machine.store_id.is_empty() || machine.store_id == snapshot.store_id)
     }
 
+    /// 发给自动化所在的那台机器。
     pub(super) fn submit_automation_command(
         &mut self,
+        runtime: &crate::RuntimeKey,
         command: smelt_model::automation::AutomationCommand,
         cx: &mut Context<Self>,
     ) {
         self.automation_surface.error = None;
+        let client = match crate::runtime_call::target(runtime, cx) {
+            Ok(client) => client,
+            Err(error) => {
+                self.automation_surface.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let client = crate::runtimes::local();
                     smelt_client::session_ops::submit_automation_command(&client, &command)
                 })
                 .await;
@@ -1406,32 +1427,59 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn run_automation_once(&mut self, automation_id: String, cx: &mut Context<Self>) {
+    pub(super) fn run_automation_once(
+        &mut self,
+        automation: AutomationRef,
+        cx: &mut Context<Self>,
+    ) {
         self.submit_automation_command(
-            smelt_model::automation::AutomationCommand::RunOnce { automation_id },
+            &automation.runtime,
+            smelt_model::automation::AutomationCommand::RunOnce {
+                automation_id: automation.id,
+            },
             cx,
         );
     }
 
-    pub(super) fn cancel_automation_run(&mut self, run_id: String, cx: &mut Context<Self>) {
+    pub(super) fn cancel_automation_run(
+        &mut self,
+        runtime: &crate::RuntimeKey,
+        run_id: String,
+        cx: &mut Context<Self>,
+    ) {
         self.submit_automation_command(
+            runtime,
             smelt_model::automation::AutomationCommand::CancelRun { run_id },
             cx,
         );
     }
 
+    /// 某台机器上的一次运行（快照里的）。
+    fn automation_run(
+        runtime: &crate::RuntimeKey,
+        matches: impl Fn(&smelt_model::automation::AutomationRun) -> bool,
+        cx: &App,
+    ) -> Option<smelt_model::automation::AutomationRun> {
+        cx.global::<settings::AgentHostState>()
+            .automations_on(runtime)?
+            .runs
+            .iter()
+            .find(|run| matches(run))
+            .cloned()
+    }
+
     fn attach_automation_run_session(
         &mut self,
+        runtime_key: &crate::RuntimeKey,
         session_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let run = cx
-            .global::<settings::AgentHostState>()
-            .automation_runs
-            .iter()
-            .find(|run| run.session_id.as_deref() == Some(session_id))
-            .cloned();
+        let run = Self::automation_run(
+            runtime_key,
+            |run| run.session_id.as_deref() == Some(session_id),
+            cx,
+        );
         let Some(run) = run else {
             self.automation_surface.error = Some("找不到对应的运行记录".to_string());
             cx.notify();
@@ -1449,9 +1497,7 @@ impl Workspace {
         }
         // 运行的会话不进工作区目录：用的哪个 agent、开在哪看运行记录；守护里已经没有它
         // （运行结束、runtime 已回收）就没有现场可看。
-        let live =
-            crate::daemon_state_for_session_id(&crate::runtimes::RuntimeKey::Local, session_id, cx)
-                .is_some();
+        let live = crate::daemon_state_for_session_id(runtime_key, session_id, cx).is_some();
         if !live {
             self.automation_surface.live_view = None;
             self.automation_surface.live_sub = None;
@@ -1471,7 +1517,14 @@ impl Workspace {
             cx.notify();
             return;
         };
-        let runtime = crate::runtimes::Runtime::local();
+        // 现场在跑这次运行的那台机器上。
+        let Some(runtime) = crate::runtimes::runtime(runtime_key, cx) else {
+            self.automation_surface.live_view = None;
+            self.automation_surface.live_sub = None;
+            self.automation_surface.error = Some("这台机器已经移除".to_string());
+            cx.notify();
+            return;
+        };
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
                 cx,
@@ -1506,22 +1559,17 @@ impl Workspace {
     /// 停在编辑器里，并选中这一次运行。有会话时右侧详情就是现场。
     pub(super) fn select_automation_run(
         &mut self,
+        runtime: &crate::RuntimeKey,
         run_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(run) = cx
-            .global::<settings::AgentHostState>()
-            .automation_runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-        else {
+        let Some(run) = Self::automation_run(runtime, |run| run.id == run_id, cx) else {
             return;
         };
         self.automation_surface.selected_run_id = Some(run.id);
         if let Some(session_id) = run.session_id {
-            self.attach_automation_run_session(&session_id, window, cx);
+            self.attach_automation_run_session(runtime, &session_id, window, cx);
         } else {
             self.automation_surface.live_view = None;
             self.automation_surface.live_sub = None;
@@ -1540,32 +1588,29 @@ impl Workspace {
 
     pub(super) fn open_catalog_automation_run(
         &mut self,
+        runtime: crate::RuntimeKey,
         run_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(automation_id) = cx
-            .global::<settings::AgentHostState>()
-            .automation_runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .map(|run| run.automation_id.clone())
-        else {
+        let Some(run) = Self::automation_run(&runtime, |run| run.id == run_id, cx) else {
             return;
         };
-        self.navigate_to_automation_run(automation_id, run_id, window, cx);
+        let automation = AutomationRef::new(runtime, run.automation_id);
+        self.navigate_to_automation_run(automation, run_id, window, cx);
     }
 
     pub(crate) fn navigate_to_automation_run(
         &mut self,
-        automation_id: String,
+        automation: AutomationRef,
         run_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.reveal_workspace_tab(WorkspaceRoute::Automations, cx);
-        self.nav.automations_mut().open_editor(automation_id);
-        self.select_automation_run(run_id, window, cx);
+        let runtime = automation.runtime.clone();
+        self.nav.automations_mut().open_editor(automation);
+        self.select_automation_run(&runtime, run_id, window, cx);
     }
 
     pub(super) fn close_automation_editor(&mut self, cx: &mut Context<Self>) {
@@ -1577,9 +1622,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 新建自动化默认用哪个智能体。自动化眼下只在本机，只挑本机的。
-    fn ready_automation_agent_id(&self, cx: &App) -> Option<String> {
-        let ready_ids = settings::agents_on(&crate::RuntimeKey::Local, cx)
+    /// 在某台机器上新建自动化默认用哪个智能体：只挑那台机器上就绪的，工作台选中的本机
+    /// 智能体优先。
+    fn ready_automation_agent_id(&self, runtime: &crate::RuntimeKey, cx: &App) -> Option<String> {
+        let ready_ids = settings::agents_on(runtime, cx)
             .iter()
             .filter(|agent| agent.is_ready())
             .map(|agent| agent.id.clone())
@@ -1587,6 +1633,7 @@ impl Workspace {
         self.agent_surface
             .selected_id
             .as_ref()
+            .filter(|_| *runtime == crate::RuntimeKey::Local)
             .filter(|id| ready_ids.iter().any(|ready| ready == *id))
             .cloned()
             .or_else(|| ready_ids.into_iter().next())
@@ -1610,18 +1657,31 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn add_automation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let agent_id = self.ready_automation_agent_id(cx).unwrap_or_default();
-        self.add_automation_for_agent(agent_id, window, cx);
-    }
-
-    /// 为指定智能体新建自动化。绑定的就是这一个，不改用当前选中或列表里的第一个。
-    pub(super) fn add_automation_for_agent(
+    /// 在某台机器上新建自动化。
+    pub(super) fn add_automation(
         &mut self,
-        agent_id: String,
+        runtime: crate::RuntimeKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let agent_id = self
+            .ready_automation_agent_id(&runtime, cx)
+            .unwrap_or_default();
+        self.add_automation_for_agent(AgentRef::new(runtime, agent_id), window, cx);
+    }
+
+    /// 为指定智能体新建自动化，建在智能体所在的机器上。绑定的就是这一个，不改用当前
+    /// 选中或列表里的第一个；`agent.id` 为空时是命令动作。
+    pub(super) fn add_automation_for_agent(
+        &mut self,
+        agent: AgentRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let AgentRef {
+            runtime,
+            id: agent_id,
+        } = agent;
         self.automation_surface.catalog_tab = AutomationCatalogTab::Tasks;
         let action = if agent_id.trim().is_empty() {
             settings::AutomationAction::shell(String::new(), Vec::new())
@@ -1640,11 +1700,12 @@ impl Workspace {
             action,
             sinks: vec![settings::AutomationSink::Local],
         };
-        self.open_automation_editor_for(automation, true, window, cx);
+        self.open_automation_editor_for(runtime, automation, true, window, cx);
     }
 
     pub(super) fn add_automation_from_template(
         &mut self,
+        runtime: crate::RuntimeKey,
         template_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1660,12 +1721,14 @@ impl Workspace {
             workspace_dir: None,
             trigger: settings::AutomationTrigger::schedule(template.schedule),
             action: settings::AutomationAction::Agent {
-                agent_definition_id: self.ready_automation_agent_id(cx).unwrap_or_default(),
+                agent_definition_id: self
+                    .ready_automation_agent_id(&runtime, cx)
+                    .unwrap_or_default(),
                 prompt: Some(template.prompt.to_string()),
             },
             sinks: vec![settings::AutomationSink::Local],
         };
-        self.open_automation_editor_for(automation, true, window, cx);
+        self.open_automation_editor_for(runtime, automation, true, window, cx);
     }
 
     pub(super) fn create_automation_from_editor(&mut self, cx: &mut Context<Self>) {
@@ -1681,15 +1744,16 @@ impl Workspace {
 
     pub(super) fn start_delete_automation(
         &mut self,
-        automation_id: String,
+        target: AutomationRef,
         cx: &mut Context<Self>,
     ) {
-        let state = cx.global::<settings::AgentHostState>();
-        let Some(automation) = state
-            .automations
-            .iter()
-            .find(|automation| automation.id == automation_id)
+        let Some(machine) = cx
+            .global::<settings::AgentHostState>()
+            .automations_on(&target.runtime)
         else {
+            return;
+        };
+        let Some(automation) = machine.automation(&target.id) else {
             return;
         };
         let name = if automation.name.trim().is_empty() {
@@ -1697,9 +1761,9 @@ impl Workspace {
         } else {
             automation.name.clone()
         };
-        let runs = state.automation_runs_for(&automation_id).len();
+        let runs = machine.runs_for(&target.id).len();
         self.automation_surface.pending_delete = Some(AutomationDeleteTarget {
-            id: automation_id,
+            automation: target,
             name,
             runs,
         });
@@ -1713,41 +1777,45 @@ impl Workspace {
 
     pub(crate) fn confirm_delete_automation(&mut self, cx: &mut Context<Self>) {
         if let Some(target) = self.automation_surface.pending_delete.take() {
-            self.delete_automation(target.id, cx);
+            self.delete_automation(target.automation, cx);
         }
         cx.notify();
     }
 
-    fn delete_automation(&mut self, automation_id: String, cx: &mut Context<Self>) {
+    fn delete_automation(&mut self, target: AutomationRef, cx: &mut Context<Self>) {
         if self
             .automation_surface
             .editor
             .as_ref()
-            .is_some_and(|editor| editor.automation_id == automation_id)
+            .is_some_and(|editor| editor.automation == target)
         {
             self.automation_surface.editor = None;
         }
-        if self.nav.automations().automation_id() == Some(automation_id.as_str()) {
+        if self.nav.automations().editor() == Some(&target) {
             self.nav.automations_mut().pop_to_root();
             self.automation_surface.selected_run_id = None;
             self.automation_surface.live_view = None;
             self.automation_surface.live_sub = None;
         }
         self.submit_automation_command(
-            smelt_model::automation::AutomationCommand::Delete { automation_id },
+            &target.runtime,
+            smelt_model::automation::AutomationCommand::Delete {
+                automation_id: target.id,
+            },
             cx,
         );
     }
 
     pub(super) fn set_automation_enabled(
         &mut self,
-        automation_id: String,
+        target: AutomationRef,
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
         self.submit_automation_command(
+            &target.runtime,
             smelt_model::automation::AutomationCommand::SetEnabled {
-                automation_id,
+                automation_id: target.id,
                 enabled,
             },
             cx,
@@ -1756,7 +1824,7 @@ impl Workspace {
 
     pub(super) fn open_automation_editor(
         &mut self,
-        automation_id: String,
+        target: AutomationRef,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1764,43 +1832,47 @@ impl Workspace {
             .automation_surface
             .editor
             .as_ref()
-            .is_some_and(|editor| editor.automation_id == automation_id)
+            .is_some_and(|editor| editor.automation == target)
         {
             return;
         }
         let Some(automation) = cx
             .global::<settings::AgentHostState>()
-            .automations
-            .iter()
-            .find(|automation| automation.id == automation_id)
+            .automations_on(&target.runtime)
+            .and_then(|machine| machine.automation(&target.id))
             .cloned()
         else {
             self.automation_surface.editor = None;
             return;
         };
-        self.open_automation_editor_for(automation, false, window, cx);
+        self.open_automation_editor_for(target.runtime, automation, false, window, cx);
     }
 
+    /// 打开编辑器。`runtime` 是这条自动化所在（新建时是要建在）的那台机器。
     pub(super) fn open_automation_editor_for(
         &mut self,
+        runtime: crate::RuntimeKey,
         automation: settings::Automation,
         is_new: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let automation_ref = AutomationRef::new(runtime, automation.id.clone());
         let automation_id = automation.id.clone();
         self.nav
             .automations_mut()
-            .open_editor(automation_id.clone());
+            .open_editor(automation_ref.clone());
         let keep_run = self
             .automation_surface
             .selected_run_id
             .as_ref()
             .is_some_and(|run_id| {
-                cx.global::<settings::AgentHostState>()
-                    .automation_runs
-                    .iter()
-                    .any(|run| run.id == *run_id && run.automation_id == automation_id)
+                Self::automation_run(
+                    &automation_ref.runtime,
+                    |run| run.id == *run_id && run.automation_id == automation_id,
+                    cx,
+                )
+                .is_some()
             });
         if !keep_run {
             self.automation_surface.selected_run_id = None;
@@ -1906,7 +1978,7 @@ impl Workspace {
             instance_id: uuid::Uuid::new_v4(),
             action_kind,
             agent_id,
-            automation_id: automation.id,
+            automation: automation_ref,
             is_new,
             name,
             name_editing: is_new && automation.name.trim().is_empty(),
@@ -2166,20 +2238,16 @@ impl Workspace {
         kind: settings::AutomationActionKindId,
         cx: &mut Context<Self>,
     ) {
-        let fallback_agent = if kind == settings::AutomationActionKindId::Agent {
-            let ready_ids = settings::agents_on(&crate::RuntimeKey::Local, cx)
-                .iter()
-                .filter(|agent| agent.is_ready())
-                .map(|agent| agent.id.clone())
-                .collect::<Vec<_>>();
-            self.agent_surface
-                .selected_id
-                .as_ref()
-                .filter(|id| ready_ids.iter().any(|ready| ready == *id))
-                .cloned()
-                .or_else(|| ready_ids.into_iter().next())
-        } else {
-            None
+        let runtime = self
+            .automation_surface
+            .editor
+            .as_ref()
+            .map(|editor| editor.automation.runtime.clone());
+        let fallback_agent = match runtime {
+            Some(runtime) if kind == settings::AutomationActionKindId::Agent => {
+                self.ready_automation_agent_id(&runtime, cx)
+            }
+            _ => None,
         };
         if let Some(editor) = self.automation_surface.editor.as_mut() {
             editor.action_kind = kind;
@@ -2200,13 +2268,12 @@ impl Workspace {
     }
 
     pub(super) fn test_automation_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(automation_id) = self.automation_surface.editor.as_ref().and_then(|editor| {
-            (!editor.is_new && editor.saving_revision.is_none())
-                .then(|| editor.automation_id.clone())
+        let Some(automation) = self.automation_surface.editor.as_ref().and_then(|editor| {
+            (!editor.is_new && editor.saving_revision.is_none()).then(|| editor.automation.clone())
         }) else {
             return;
         };
-        self.run_automation_once(automation_id, cx);
+        self.run_automation_once(automation, cx);
     }
 
     pub(super) fn persist_automation_editor(
@@ -2224,16 +2291,25 @@ impl Workspace {
             return;
         };
 
-        let automation_id = editor.automation_id.clone();
+        let target = editor.automation.clone();
         let enabled = cx
             .global::<settings::AgentHostState>()
-            .automations
-            .iter()
-            .find(|automation| automation.id == automation_id)
+            .automations_on(&target.runtime)
+            .and_then(|machine| machine.automation(&target.id))
             .map(|automation| automation.enabled)
             .unwrap_or(true);
+        let client = match crate::runtime_call::target(&target.runtime, cx) {
+            Ok(client) => client,
+            Err(error) => {
+                if let Some(editor) = self.automation_surface.editor.as_mut() {
+                    editor.error = Some(error);
+                }
+                cx.notify();
+                return;
+            }
+        };
         let automation = settings::Automation {
-            id: automation_id.clone(),
+            id: target.id.clone(),
             name: editor.name.read(cx).value().trim().to_string(),
             enabled,
             workspace_dir: None,
@@ -2257,18 +2333,20 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let client = crate::runtimes::local();
                     smelt_client::session_ops::submit_automation_command(&client, &command)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let retry = match result {
                     Ok((_result, snapshot)) => {
-                        let current_store =
-                            this.automation_snapshot_is_current_store(&snapshot, cx);
+                        let current_store = this.automation_snapshot_is_current_store(
+                            &target.runtime,
+                            &snapshot,
+                            cx,
+                        );
                         if let Some(editor) =
                             this.automation_surface.editor.as_mut().filter(|editor| {
-                                editor.automation_id == automation_id
+                                editor.automation == target
                                     && editor.instance_id == editor_instance_id
                             })
                         {
@@ -2296,7 +2374,7 @@ impl Workspace {
                     Err(error) => {
                         if let Some(editor) =
                             this.automation_surface.editor.as_mut().filter(|editor| {
-                                editor.automation_id == automation_id
+                                editor.automation == target
                                     && editor.instance_id == editor_instance_id
                             })
                         {

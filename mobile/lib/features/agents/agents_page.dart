@@ -17,6 +17,7 @@ import 'agent_edit_page.dart';
 import 'agents_board.dart';
 import 'agents_widgets.dart';
 import 'automation_detail_page.dart';
+import 'automation_edit_page.dart';
 import 'automation_text.dart';
 
 enum _Segment { agents, automations }
@@ -73,7 +74,7 @@ class _AgentsPageState extends State<AgentsPage> {
     if (current != _guide) setState(() => _guide = current);
   }
 
-  /// 新建智能体：只有一台在线就直接建在它上面，几台在线先选机器。
+  /// 新建智能体或自动化（看当前分段）：只有一台在线就直接建在它上面，几台在线先选机器。
   Future<void> _create() async {
     final navigator = Navigator.of(context);
     final online = AppScope.of(
@@ -89,9 +90,15 @@ class _AgentsPageState extends State<AgentsPage> {
       ),
     };
     if (runtimeId == null || !mounted) return;
-    await navigator.push<AgentEditResult>(
+    await navigator.push<Object?>(
       MaterialPageRoute(
-        builder: (_) => AgentEditPage(board: _board, runtimeId: runtimeId),
+        builder: (_) => switch (_segment) {
+          _Segment.agents => AgentEditPage(board: _board, runtimeId: runtimeId),
+          _Segment.automations => AutomationEditPage(
+            board: _board,
+            runtimeId: runtimeId,
+          ),
+        },
       ),
     );
   }
@@ -128,12 +135,13 @@ class _AgentsPageState extends State<AgentsPage> {
           guide: _guide,
           onRefresh: _board.refresh,
           actions: [
-            if (_segment == _Segment.agents)
-              IconButton(
-                tooltip: l10n.agentEditNewTitle,
-                icon: const Icon(LucideIcons.plus),
-                onPressed: anyOnline ? _create : null,
-              ),
+            IconButton(
+              tooltip: _segment == _Segment.agents
+                  ? l10n.agentEditNewTitle
+                  : l10n.autoEditNewTitle,
+              icon: const Icon(LucideIcons.plus),
+              onPressed: anyOnline ? _create : null,
+            ),
           ],
           slivers: [
             SliverToBoxAdapter(

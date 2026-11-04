@@ -168,3 +168,12 @@ String lastRunLine(L10n l10n, AutomationRunSummary? run, DateTime now) {
   final ago = secs == null ? null : formatAgo(l10n, fromUnixSeconds(secs), now);
   return [runStatusLabel(l10n, run.status), ?ago].join(' · ');
 }
+
+/// 运行还没结束：会话可能还在，能进执行现场。
+bool runIsActive(AutomationRunStatus status) => switch (status) {
+  AutomationRunStatus.completed ||
+  AutomationRunStatus.failed ||
+  AutomationRunStatus.cancelled ||
+  AutomationRunStatus.skipped => false,
+  _ => true,
+};

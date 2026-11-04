@@ -6,9 +6,12 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../features/agents/agents_board.dart';
+import '../../features/agents/automation_edit_page.dart';
 import '../../features/conversation/conversation_page.dart';
 import '../../features/files/file_preview_page.dart';
 import '../../features/files/project_files_page.dart';
+import '../models.dart';
 import '../stores.dart';
 import '../../features/home_shell.dart';
 import '../../features/launch/new_session_sheet.dart';
@@ -89,6 +92,34 @@ void openDemoScreen(DemoShell shell, String screen) {
       );
     case 'launch':
       showNewSessionSheet(shell.innerContext);
+    case 'automation-edit':
+      final board = AgentsBoard(AppScope.of(context));
+      shell.openDetail(
+        'automation-edit/auto-standup',
+        (_) => AutomationEditPage(
+          board: board,
+          runtimeId: 'rt-mbp',
+          automationId: 'auto-standup',
+        ),
+      );
+    case 'automation-schedule':
+      shell.openDetail(
+        'automation-schedule',
+        (_) => const Scaffold(
+          body: ScheduleSheet(
+            initial: AutomationSchedule(
+              kind: ScheduleKind.during,
+              hour: 9,
+              minute: 0,
+              minutes: 30,
+              hours: 0,
+              days: 0x1f,
+              endHour: 18,
+              endMinute: 0,
+            ),
+          ),
+        ),
+      );
     case 'files':
       shell.openDetail(
         'files/smelt',
