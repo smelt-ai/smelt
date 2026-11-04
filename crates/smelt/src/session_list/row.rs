@@ -20,6 +20,14 @@ pub(super) fn acp_provider_icon(agent: ConversationAgentKind) -> Icon {
     Icon::empty().path(agent.icon_asset())
 }
 
+pub(super) fn pinned_marker(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .text_color(rgb(ui_theme::text_faint()))
+        .child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(11.)))
+}
+
 /// 任务页会保留上次活动会话，方便返回时恢复；但它不是任务页中的选中项。
 pub(super) fn session_row_is_selected(
     session_route_active: bool,

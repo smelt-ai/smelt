@@ -443,7 +443,7 @@ use machines::machine_menu;
 use new_session::new_session_picker;
 use row::{
     FooterQuota, acp_provider_icon, effective_pane_updated_at, focus_ring, group_disclosure,
-    inline_rename_input, new_row_flash, project_header_is_selected, provider_icon,
+    inline_rename_input, new_row_flash, pinned_marker, project_header_is_selected, provider_icon,
     provider_quota_row, row_trailing_slot, session_progress_bar, session_row_is_selected,
     session_row_status_label, session_turn_text, session_updated_at_text, status_text,
 };
@@ -1143,13 +1143,7 @@ impl Workspace {
                                         .child(group_name.clone()),
                                 )
                                 .when(is_pinned, |row| {
-                                    row.child(
-                                        div()
-                                            .id(project_element_id("proj-pin", &project))
-                                            .flex_shrink_0()
-                                            .text_color(rgb(ui_theme::text_faint()))
-                                            .child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(11.))),
-                                    )
+                                    row.child(pinned_marker(project_element_id("proj-pin", &project)))
                                 })
                                 .when(agg != AgentStatus::Idle, |row| {
                                     row.child(
@@ -1646,8 +1640,6 @@ impl Workspace {
                     // 选中靠整张会话卡亮起来，不再靠左侧白条。悬停底由 ListRow 铺。
                     // Grok 对话列表：小图标，不套色块。状态只给图标上色。
                     .child(session_icon)
-                    .when(is_pinned,
-                        |row| row.child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(12.))))
                     // 一行：会话名占满，最近活动时间在行尾那一格里。改名时这一格换成输入框。
                     .child(
                         match rename_input.as_ref().filter(|_| renaming_session == Some(ix)) {
@@ -1678,6 +1670,9 @@ impl Workspace {
                                 .into_any_element(),
                         },
                     )
+                    .when(is_pinned, |row| {
+                        row.child(pinned_marker(("session-pin", ui_id)))
+                    })
                     // 分屏数用行尾小角标，跟在时间前面。
                     .children(subtitle.as_ref().map(|s| {
                         div()
@@ -1946,9 +1941,6 @@ impl Workspace {
                                     ))
                                 })
                                 .child(pane_icon)
-                                .when(is_pinned && lix == 0, |row| {
-                                    row.child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(12.)))
-                                })
                                 .child(
                                     match rename_input
                                         .as_ref()
@@ -1980,6 +1972,9 @@ impl Workspace {
                                             .into_any_element(),
                                     },
                                 )
+                                .when(is_pinned && lix == 0, |row| {
+                                    row.child(pinned_marker(("pane-pin", pane_entity_id)))
+                                })
                                 // 每个 pane 自己的关闭键：只关这一个 pane，剩下的照常活着。
                                 // 跟会话行一样跟时间共用行尾那一格，悬停才换出来。
                                 .child(row_trailing_slot(

@@ -98,10 +98,19 @@ fn archiving_a_copilot_terminal_keeps_the_exact_resume_identity() {
             SessionDirectory::restore_from_disk().resume_launch(&original.id).map(|launch| launch.run),
             Some("copilot --allow-all --resume=original-copilot-session".into()),
         );
+        workspace_directory::archive_conversation(
+            &store, &conversation.id, true, &sessions, &acp_sessions, &automations, &hub,
+        ).unwrap();
         workspace_directory::delete_conversation(
             &store, &conversation.id, &sessions, &acp_sessions, &automations, &hub,
         ).unwrap();
         assert!(!with_session_directory(|d| d.contains(&original.id)).unwrap());
+        assert!(store.workspace_directory().unwrap().1.sessions.is_empty());
+        assert!(SessionDirectory::restore_from_disk().resume_launch(&original.id).is_none());
+        let restore = workspace_directory::archive_conversation(
+            &store, &conversation.id, false, &sessions, &acp_sessions, &automations, &hub,
+        ).unwrap_err();
+        assert_eq!(restore.code, smelt_runtime_client::protocol::control::ControlErrorCode::NotFound);
     });
 }
 

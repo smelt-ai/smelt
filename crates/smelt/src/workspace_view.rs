@@ -39,9 +39,9 @@ impl Workspace {
                 "归档",
             ),
             CloseConfirm::DeleteArchived { title, .. } => (
-                "确定删除归档会话吗？",
-                format!("「{title}」将从工作区移除，不能再从归档中恢复。"),
-                "删除",
+                "确定永久删除归档会话吗？",
+                format!("「{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再从归档恢复。不会删除项目文件或 Copilot、Claude 等工具自行保存的历史。"),
+                "永久删除",
             ),
             CloseConfirm::Project {
                 label, sessions, ..

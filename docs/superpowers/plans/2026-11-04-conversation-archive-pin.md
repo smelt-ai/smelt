@@ -56,6 +56,26 @@
   Update `docs/workspace.md` and the design where implementation details were corrected.
   Inspect diffs and whitespace; hand off focused test/format/check commands for human execution.
 
+## PR follow-up
+
+- [x] Reproduce all six client-store migration fixture failures, pin the legacy
+  `workspace_ui` definition in `create_v7_schema`, and add a direct v7 upgrade test.
+  `cargo test --release --locked -p smelt-client-store --lib -- --test-threads=1`:
+  21 tests passed.
+- [x] In `session_list/archive.rs`, replace the restore label with an icon-only
+  action and add an icon-only permanent-delete action using the existing confirmation.
+  Both actions must have tooltips and accessibility names; deletion must not touch
+  project files or provider-owned history.
+- [x] In `session_list/row.rs`, share `pinned_marker` across project, session,
+  and pane titles: 11px Pin, `text_faint`, no shrinking, after the title.
+- [x] Extend the daemon archive regression to verify that permanent deletion
+  removes directory and persisted resume identity, and subsequent restore fails.
+- [x] Compile the desktop and run the focused client-store and archive regressions:
+  the release GUI build succeeded, all 21 client-store tests passed, and the archive
+  lifecycle test passed with permanent-deletion assertions.
+- [ ] Submit the validated changes to the existing PR branch; CI on other platforms
+  and manual acceptance of the updated icons remain to be checked.
+
 ## Human verification
 
 Implementation and focused test cases have been written on the feature branch.

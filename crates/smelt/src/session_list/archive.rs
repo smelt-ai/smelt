@@ -111,6 +111,17 @@ impl Workspace {
         self.request_conversation_op(&key, ConversationOp::Archive { id, archived: true }, cx);
     }
 
+    fn request_delete_archived(
+        &mut self,
+        runtime: RuntimeKey,
+        id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_confirm = Some(crate::CloseConfirm::DeleteArchived { runtime, id, title });
+        cx.notify();
+    }
+
     pub(super) fn render_archive_section(&self, this: Entity<Self>, cx: &App) -> Option<Div> {
         let mut archived = self
             .spaces
@@ -186,10 +197,14 @@ impl Workspace {
             let element_id = SharedString::from(format!("archive-{:?}-{}", key, conversation.id));
             let restore_key = key.clone();
             let restore_id = conversation.id.clone();
+            let delete_key = key.clone();
+            let delete_id = conversation.id.clone();
+            let delete_title = title.clone();
             let menu_key = key.clone();
             let menu_id = conversation.id.clone();
             let menu_title = title.clone();
             let e_restore = this.clone();
+            let e_delete = this.clone();
             let e_menu = this.clone();
             let supported = self.space(key).is_some_and(|space| {
                 !space
@@ -216,10 +231,12 @@ impl Workspace {
                 .child(
                     Button::new(SharedString::from(format!("{element_id}-restore")))
                         .quiet()
-                        .compact()
-                        .label("恢复")
+                        .icon_size()
+                        .icon(Icon::new(gpui_kit_assets::IconName::RotateCw))
+                        .icon_action("恢复")
                         .disabled(!supported)
                         .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
                             e_restore.update(cx, |ws, cx| {
                                 ws.request_conversation_op(
                                     &restore_key,
@@ -229,6 +246,23 @@ impl Workspace {
                                     },
                                     cx,
                                 )
+                            });
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("{element_id}-delete")))
+                        .dismiss()
+                        .icon(crate::trash_icon())
+                        .icon_action("永久删除")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            e_delete.update(cx, |ws, cx| {
+                                ws.request_delete_archived(
+                                    delete_key.clone(),
+                                    delete_id.clone(),
+                                    delete_title.clone(),
+                                    cx,
+                                );
                             });
                         }),
                 )
@@ -254,16 +288,20 @@ impl Workspace {
                             });
                         },
                     ))
-                    .item(PopupMenuItem::new("删除").on_click(move |_, _, cx| {
-                        e_delete.update(cx, |ws, cx| {
-                            ws.close_confirm = Some(crate::CloseConfirm::DeleteArchived {
-                                runtime: delete_key.clone(),
-                                id: delete_id.clone(),
-                                title: delete_title.clone(),
-                            });
-                            cx.notify();
-                        });
-                    }))
+                    .item(
+                        PopupMenuItem::new("永久删除")
+                            .icon(crate::trash_icon())
+                            .on_click(move |_, _, cx| {
+                                e_delete.update(cx, |ws, cx| {
+                                    ws.request_delete_archived(
+                                        delete_key.clone(),
+                                        delete_id.clone(),
+                                        delete_title.clone(),
+                                        cx,
+                                    );
+                                });
+                            }),
+                    )
                 });
             section = section.child(row);
         }
