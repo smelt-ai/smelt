@@ -9,7 +9,6 @@
   "agentsLoadFailed": "没能读取：{message}",
   "agentsEmptyAgents": "这台机器上还没有智能体。",
   "agentsEmptyAutomations": "这台机器上还没有自动化，可以在桌面端 Smelt 里创建。",
-  "agentsReadOnly": "自动化在电脑上的 Smelt 里编辑。",
   "agentsGone": "{machine} 上已经没有这一项了。",
   "agentsMachineOffline": "{machine} 离线，连上后才能操作。",
   "agentsEngine": "执行引擎：{engine}",

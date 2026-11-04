@@ -157,7 +157,6 @@
   },
   "agentsEmptyAgents": "No agents on this machine yet.",
   "agentsEmptyAutomations": "No automations on this machine yet. Create them in Smelt on the desktop.",
-  "agentsReadOnly": "Automations are edited in Smelt on the desktop.",
   "agentsGone": "This item is no longer on {machine}.",
   "@agentsGone": {
     "placeholders": {
@@ -420,6 +419,103 @@
       }
     }
   },
+  "autoEditNewTitle": "New automation",
+  "autoEditTitle": "Edit automation",
+  "autoEditEdit": "Edit",
+  "autoEditName": "Name",
+  "autoEditNameHint": "e.g. Morning briefing",
+  "autoEditAction": "What it does",
+  "autoEditActionAgent": "Agent",
+  "autoEditActionShell": "Command",
+  "autoEditAgent": "Agent",
+  "autoEditAgentNone": "No agent on this machine yet. Create one first.",
+  "autoEditAgentPick": "Choose an agent",
+  "autoEditPrompt": "Instruction",
+  "autoEditPromptHint": "e.g. Summarize yesterday's progress and list today's to-dos",
+  "autoEditCommand": "Command",
+  "autoEditCommandHint": "e.g. curl -fsS https://example.com/health",
+  "autoEditSchedules": "When it runs",
+  "autoEditAddSchedule": "Add a time",
+  "autoEditEvents": "Event triggers (edit on the desktop)",
+  "autoEditWebhook": "Webhook",
+  "autoEditWebhookHint": "Run it with an HTTP call. The address contains a secret; copy it from Smelt on the desktop.",
+  "autoEditNotify": "Notify when done",
+  "autoEditMissing": "Still needed: {fields}",
+  "@autoEditMissing": {
+    "placeholders": {
+      "fields": {
+        "type": "String"
+      }
+    }
+  },
+  "autoEditMissingName": "name",
+  "autoEditMissingTrigger": "a time or webhook",
+  "autoEditMissingAgent": "agent",
+  "autoEditMissingPrompt": "instruction (timed runs bring nothing else)",
+  "autoEditMissingCommand": "command",
+  "autoEditSaving": "Saving…",
+  "autoEditSaveFailed": "Couldn't save: {message}",
+  "@autoEditSaveFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "autoEditLoadFailed": "Couldn't load this automation",
+  "autoEditDelete": "Delete automation",
+  "autoEditDeleteTitle": "Delete “{name}”?",
+  "@autoEditDeleteTitle": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "autoEditDeleteBody": "This removes it and its run history from {machine}. It can't be undone.",
+  "@autoEditDeleteBody": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
+  "autoEditDeleteFailed": "Couldn't delete: {message}",
+  "@autoEditDeleteFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "autoEditDiscardTitle": "Discard changes?",
+  "autoEditDiscardBody": "Your edits to this automation haven't been saved.",
+  "autoEditDiscard": "Discard",
+  "autoEditScheduleTitle": "When",
+  "autoEditKindDaily": "Daily",
+  "autoEditKindWeekly": "Weekly",
+  "autoEditKindEvery": "Every",
+  "autoEditKindDuring": "Within hours",
+  "autoEditTime": "Time",
+  "autoEditStart": "From",
+  "autoEditEnd": "Until",
+  "autoEditDays": "Days",
+  "autoEditInterval": "Interval",
+  "autoEditMinutes": "minutes",
+  "autoEditHours": "hours",
+  "autoEditIntervalRange": "{min}–{max}",
+  "@autoEditIntervalRange": {
+    "placeholders": {
+      "min": {
+        "type": "int"
+      },
+      "max": {
+        "type": "int"
+      }
+    }
+  },
+  "autoEditDone": "Done",
+  "autoEditRemoveSchedule": "Remove",
   "appName": "Smelt",
   "navPass": "Now",
   "@navPass": {

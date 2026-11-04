@@ -9,6 +9,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import '../src/rust/api/agents.dart' as agents;
+import '../src/rust/api/automations.dart' as automations;
 import '../src/rust/api/catalog.dart' as catalog;
 import '../src/rust/api/conversation.dart' as conversation;
 import '../src/rust/api/draft.dart' as draft;
@@ -95,6 +96,25 @@ abstract interface class Backend {
     bool enabled,
   );
   Future<AutomationCatalog> runAutomationOnce(
+    String runtimeId,
+    String automationId,
+  );
+
+  /// 编辑器：要编辑的那条和这台机器上的智能体。[automationId] 为空是新建。
+  Future<AutomationEditor> automationEditor(
+    String runtimeId, {
+    String? automationId,
+  });
+
+  /// 保存，返回保存后的目录。[automationId] 为空是新建。
+  Future<AutomationCatalog> saveAutomation(
+    String runtimeId, {
+    String? automationId,
+    required AutomationDraft draft,
+  });
+
+  /// 删除，连同运行记录。返回删除后的目录。
+  Future<AutomationCatalog> deleteAutomation(
     String runtimeId,
     String automationId,
   );
@@ -366,6 +386,35 @@ class FrbBackend implements Backend {
     String runtimeId,
     String automationId,
   ) => catalog.runAutomationOnce(
+    runtimeId: runtimeId,
+    automationId: automationId,
+  );
+
+  @override
+  Future<AutomationEditor> automationEditor(
+    String runtimeId, {
+    String? automationId,
+  }) => automations.automationEditor(
+    runtimeId: runtimeId,
+    automationId: automationId,
+  );
+
+  @override
+  Future<AutomationCatalog> saveAutomation(
+    String runtimeId, {
+    String? automationId,
+    required AutomationDraft draft,
+  }) => automations.saveAutomation(
+    runtimeId: runtimeId,
+    automationId: automationId,
+    draft: draft,
+  );
+
+  @override
+  Future<AutomationCatalog> deleteAutomation(
+    String runtimeId,
+    String automationId,
+  ) => automations.deleteAutomation(
     runtimeId: runtimeId,
     automationId: automationId,
   );

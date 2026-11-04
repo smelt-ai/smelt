@@ -761,7 +761,7 @@ fn run_source(source: model_automation::AutomationRunSource) -> view::Automation
     }
 }
 
-fn schedule(schedule: &model_automation::AutomationSchedule) -> view::AutomationSchedule {
+pub(super) fn schedule(schedule: &model_automation::AutomationSchedule) -> view::AutomationSchedule {
     use model_automation::AutomationSchedule as S;
     let blank = view::AutomationSchedule {
         kind: view::ScheduleKind::Daily,

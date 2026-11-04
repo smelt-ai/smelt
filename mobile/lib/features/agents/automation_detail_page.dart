@@ -13,12 +13,12 @@ import '../../ui/time.dart';
 import '../session/open_session.dart';
 import 'agents_board.dart';
 import 'agents_widgets.dart';
+import 'automation_edit_page.dart';
 import 'automation_text.dart';
 
-/// 一条自动化的详情：它什么时候跑、跑的是什么、上次怎么样；能开关、能立即跑一次。
-///
-/// 手机是展示层：这里不编辑触发条件和动作，只开放两个幂等、可在桌面撤销的写操作。
-/// 数据从 [AgentsBoard] 读，列表和详情看的是同一份。
+/// 一条自动化的详情：它什么时候跑、跑的是什么、上次怎么样；能开关、能立即跑一次，
+/// 右上角进编辑（改名称、动作、时间，或删除）。数据从 [AgentsBoard] 读，列表和详情看的
+/// 是同一份。
 class AutomationDetailPage extends StatelessWidget {
   const AutomationDetailPage({
     super.key,
@@ -111,6 +111,13 @@ class _AutomationDetail extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: c.ground,
         title: DetailTitle(title: automation.name, runtime: runtime),
+        actions: [
+          IconButton(
+            tooltip: l10n.autoEditEdit,
+            icon: const Icon(LucideIcons.pencil),
+            onPressed: online ? () => _edit(context) : null,
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.only(bottom: Space.xxl),
@@ -207,18 +214,6 @@ class _AutomationDetail extends StatelessWidget {
             runtimeId: runtimeId,
             session: runSession,
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Space.page + Space.xs,
-              Space.lg,
-              Space.page + Space.xs,
-              0,
-            ),
-            child: Text(
-              l10n.agentsReadOnly,
-              style: t.meta.copyWith(color: c.inkMuted),
-            ),
-          ),
         ],
       ),
       bottomNavigationBar: BottomActionBar(
@@ -232,6 +227,23 @@ class _AutomationDetail extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+extension on _AutomationDetail {
+  /// 进编辑页；在那里删掉了，详情也跟着退。
+  Future<void> _edit(BuildContext context) async {
+    final navigator = Navigator.of(context);
+    final result = await navigator.push<AutomationEditResult>(
+      MaterialPageRoute(
+        builder: (_) => AutomationEditPage(
+          board: board,
+          runtimeId: runtimeId,
+          automationId: automation.id,
+        ),
+      ),
+    );
+    if (result == AutomationEditResult.deleted) await navigator.maybePop();
   }
 }
 

@@ -18,6 +18,7 @@
 //! [`RuntimeSource::current`] / [`RuntimeSource::cache`]，也不做网络和 SQLite IO。
 //! 状态里不存 `RuntimeClient`（它的 Drop 会 block_on），客户端只活在订阅线程和 FRB 工作线程上。
 
+mod automation_edit;
 mod projection;
 
 use std::collections::BTreeMap;
@@ -29,7 +30,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use smelt_model::automation::AutomationRun;
 use smelt_model::control_api::{
-    AgentDefinitionIdParams, AgentDefinitionList, AutomationList, AutomationRunOnce,
+    AgentDefinitionIdParams, AgentDefinitionList, AutomationDelete, AutomationGet, AutomationList,
+    AutomationRunOnce, AutomationUpsertCall,
     AutomationSetEnabled, AutomationSetEnabledParams, NewSessionCatalog, NewSessionCatalogResult,
     SessionAgentBindings, SessionCreate, SessionCreateKind, SessionCreateParams, SessionDelete,
     SessionIdParams, WorkspaceProjectOpen,
@@ -524,6 +526,81 @@ impl Catalog {
             )
             .map_err(control_error)?;
         self.automation_catalog_with(&runtime, result.result.run().as_ref())
+    }
+
+    /// 编辑器：要编辑的那条（新建时没有）和这台机器上的智能体。
+    pub(crate) fn automation_editor(
+        &self,
+        automation_id: Option<&str>,
+    ) -> Result<crate::api::automations::AutomationEditor, SmeltError> {
+        let runtime = self.runtime()?;
+        let timeout = self.shared.timing.call_timeout;
+        let automation = automation_id
+            .map(|id| self.automation(&runtime, id))
+            .transpose()?;
+        let agents = runtime
+            .client
+            .call::<AgentDefinitionList>(&EmptyParams::default(), timeout)
+            .map_err(control_error)?
+            .agents;
+        Ok(automation_edit::editor(automation.as_ref(), &agents))
+    }
+
+    /// 保存表单。编辑时先取完整的那条再换字段：运行时整条覆盖，手机不编辑的字段要原样带回。
+    pub(crate) fn save_automation(
+        &self,
+        automation_id: Option<&str>,
+        draft: &crate::api::automations::AutomationDraft,
+    ) -> Result<AutomationCatalog, SmeltError> {
+        let runtime = self.runtime()?;
+        let base = automation_id
+            .map(|id| self.automation(&runtime, id))
+            .transpose()?;
+        let automation =
+            automation_edit::apply_draft(base, || uuid::Uuid::new_v4().to_string(), draft);
+        // 运行时会再校验一遍；先在这里挡住，错误说法和桌面一致。
+        automation
+            .validate_for_save()
+            .map_err(|message| error(SmeltErrorKind::Other, message))?;
+        runtime
+            .client
+            .call::<AutomationUpsertCall>(&automation, self.shared.timing.call_timeout)
+            .map_err(control_error)?;
+        self.automation_catalog_with(&runtime, None)
+    }
+
+    pub(crate) fn delete_automation(
+        &self,
+        automation_id: &str,
+    ) -> Result<AutomationCatalog, SmeltError> {
+        let runtime = self.runtime()?;
+        runtime
+            .client
+            .call::<AutomationDelete>(
+                &AgentDefinitionIdParams {
+                    id: automation_id.to_string(),
+                },
+                self.shared.timing.call_timeout,
+            )
+            .map_err(control_error)?;
+        self.automation_catalog_with(&runtime, None)
+    }
+
+    fn automation(
+        &self,
+        runtime: &CurrentRuntime,
+        automation_id: &str,
+    ) -> Result<smelt_model::automation::Automation, SmeltError> {
+        Ok(runtime
+            .client
+            .call::<AutomationGet>(
+                &AgentDefinitionIdParams {
+                    id: automation_id.to_string(),
+                },
+                self.shared.timing.call_timeout,
+            )
+            .map_err(control_error)?
+            .automation)
     }
 
     /// 定义取 `automation.list`（命令刚改过也是新的），状态和运行记录取订阅到的投影。

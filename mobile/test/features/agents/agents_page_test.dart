@@ -154,6 +154,34 @@ class _Backend extends DemoBackend {
     if (deleteAgentError case final error?) throw error;
     await super.deleteAgent(runtimeId, agentId);
   }
+
+  final savedAutomations = <(String, String?, AutomationDraft)>[];
+  final deletedAutomations = <(String, String)>[];
+
+  @override
+  Future<AutomationCatalog> saveAutomation(
+    String runtimeId, {
+    String? automationId,
+    required AutomationDraft draft,
+  }) async {
+    savedAutomations.add((runtimeId, automationId, draft));
+    await super.saveAutomation(
+      runtimeId,
+      automationId: automationId,
+      draft: draft,
+    );
+    return automationCatalog(runtimeId);
+  }
+
+  @override
+  Future<AutomationCatalog> deleteAutomation(
+    String runtimeId,
+    String automationId,
+  ) async {
+    deletedAutomations.add((runtimeId, automationId));
+    await super.deleteAutomation(runtimeId, automationId);
+    return automationCatalog(runtimeId);
+  }
 }
 
 /// 打开过的详情键。智能体 / 自动化详情真的压栈；会话只记下键（对话页不在本测试范围）。
@@ -202,7 +230,120 @@ Future<List<String>> _pump(WidgetTester tester, _Backend backend) async {
 Switch _switchAt(WidgetTester tester, int index) =>
     tester.widget<Switch>(find.byType(Switch).at(index));
 
+Finder _saveButton() => find.widgetWithText(TextButton, '保存');
+
 void main() {
+  testWidgets('新建自动化：先选机器；缺指令时说还差什么、保存不亮；存完出现在列表里', (tester) async {
+    final backend = _Backend();
+    await _pump(tester, backend);
+    await tester.tap(find.text('自动化'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('新建自动化'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('MacBook Pro').last);
+    await tester.pumpAndSettle();
+    expect(find.text('新建自动化'), findsOneWidget);
+    // 默认：智能体「工作助手」、每天 09:00。
+    expect(find.text('工作助手'), findsOneWidget);
+    expect(find.text('每天 09:00'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField).first, '晨报');
+    await tester.pump();
+    expect(find.textContaining('还差：指令'), findsOneWidget);
+    expect(tester.widget<TextButton>(_saveButton()).onPressed, isNull);
+
+    await tester.enterText(find.byType(TextField).at(1), '写今天的晨报');
+    await tester.pump();
+    expect(find.textContaining('还差'), findsNothing);
+    await tester.tap(_saveButton());
+    await tester.pumpAndSettle();
+
+    final (runtimeId, automationId, draft) = backend.savedAutomations.single;
+    expect((runtimeId, automationId), ('rt-mbp', null));
+    expect(draft.name, '晨报');
+    expect(draft.agentDefinitionId, 'def-assistant');
+    expect(draft.prompt, '写今天的晨报');
+    expect(draft.schedules.single.kind, ScheduleKind.daily);
+    expect(find.text('新建自动化'), findsNothing, reason: '存完回到列表');
+    expect(find.text('晨报'), findsWidgets);
+  });
+
+  testWidgets('编辑自动化：改成每周一、三 09:30 跑的命令，带着 id 保存', (tester) async {
+    final backend = _Backend();
+    await _pump(tester, backend);
+    await tester.tap(find.text('自动化'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('每日站会摘要').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('编辑'));
+    await tester.pumpAndSettle();
+    expect(find.text('编辑自动化'), findsOneWidget);
+    expect(
+      tester.widget<TextButton>(_saveButton()).onPressed,
+      isNull,
+      reason: '没改不能存',
+    );
+
+    // 改时间：每周、只留周一和周三。
+    await tester.tap(find.text('每天 09:30'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('每周'));
+    await tester.pump();
+    for (final day in ['周二', '周四', '周五']) {
+      await tester.tap(find.text(day));
+      await tester.pump();
+    }
+    await tester.tap(find.text('完成'));
+    await tester.pumpAndSettle();
+    expect(find.text('周一、周三 09:30'), findsOneWidget);
+
+    // 改成命令。
+    await tester.tap(find.text('命令'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField).at(1), 'make report');
+    await tester.pump();
+    await tester.tap(_saveButton());
+    await tester.pumpAndSettle();
+
+    final (_, automationId, draft) = backend.savedAutomations.single;
+    expect(automationId, 'auto-standup');
+    expect(draft.action, AutomationActionKind.shell);
+    expect(draft.command, 'make report');
+    final schedule = draft.schedules.single;
+    expect(schedule.kind, ScheduleKind.weekly);
+    expect(schedule.days, 0x05);
+    expect((schedule.hour, schedule.minute), (9, 30));
+    // 回到详情，看到的是新的。
+    expect(find.text('周一、周三 09:30'), findsOneWidget);
+  });
+
+  testWidgets('删除自动化要确认；删掉后详情一起退', (tester) async {
+    final backend = _Backend();
+    await _pump(tester, backend);
+    await tester.tap(find.text('自动化'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('夜间备份检查').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('编辑'));
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('删除自动化'),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(find.text('删除自动化'));
+    await tester.pumpAndSettle();
+    expect(find.text('删除「夜间备份检查」？'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+
+    expect(backend.deletedAutomations, [('rt-mbp', 'auto-backup')]);
+    expect(find.text('编辑自动化'), findsNothing);
+    expect(find.text('立即运行一次'), findsNothing, reason: '详情页也退了');
+  });
+
   testWidgets('按机器分组；分段在智能体与自动化之间切换；离线机器不取', (tester) async {
     await _pump(tester, _Backend());
 

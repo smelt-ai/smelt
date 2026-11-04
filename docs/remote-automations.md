@@ -115,18 +115,19 @@ MachineAutomations
 
 | 接口 | 背后 | 说明 |
 |---|---|---|
-| `automation_editor(runtime_id, id?)` | `automation.get` + `agent_definition.list` | 返回 `{draft, choices}`；`id` 为空给新建的默认草稿 |
-| `create_automation(runtime_id, draft)` | `automation.upsert` | 内核生成 id |
-| `update_automation(runtime_id, id, draft)` | `automation.get` → 合并 → `automation.upsert` | 见下 |
-| `delete_automation(runtime_id, id)` | `automation.delete` | |
-| `next_runs(draft, count)` | 纯计算 `AutomationTrigger::next_after` | 编辑时预览接下来几次运行时间 |
+| `automation_editor(runtime_id, id?)` | `automation.get` + `agent_definition.list` | 返回 `{draft, agents, event_topics}`；`id` 为空给新建的默认草稿（每天 09:00、第一个智能体） |
+| `save_automation(runtime_id, id?, draft)` | （编辑时 `automation.get` → 合并）→ `automation.upsert` | 新建时内核生成 id；返回保存后的目录 |
+| `delete_automation(runtime_id, id)` | `automation.delete` | 返回删除后的目录 |
+
+不做「接下来几次运行时间」的预览：调度按那台机器的时区算，手机和机器可能不在同一个时区，算出来会错。
+保存后详情页显示运行时给的下次运行时间。
 
 - **整对象覆盖下不丢字段**：upsert 没有 patch。更新时先 `get` 拿完整对象，只把表单里有的字段换上去
   （名称、动作、定时规则、webhook 开关、通知），`events` 等手机不编辑的字段原样带回；webhook 令牌保持
   `<redacted>`，运行时按位置换回。
-- 校验以 `smelt-model` 里已有的 `Automation::validate` 为准（名称、至少一条触发、定时的智能体动作要有
-  提示词、间隔范围），两端规则一致。它的错误文案只有中文，所以表单上能当场看出来的（名字空、没有规则、
-  缺提示词）由 Dart 按 l10n 提示并禁用保存，`validate` 只做最后一道关。
+- 校验用 `smelt-model` 新加的 `Automation::validate_for_save`（`validate` + 定时的智能体动作要有指令，和
+  运行时收到保存时的规则一致）。它的错误文案只有中文，所以表单上能当场看出来的（名字空、没有触发、
+  缺智能体 / 指令 / 命令）由 Dart 按 l10n 提示「还差：…」并禁用保存，`validate_for_save` 只做最后一道关。
 - 草稿 `AutomationDraft`：`name`、`action_kind`（智能体 / 命令）、`agent_definition_id`、`prompt`、
   `command`、`schedules: Vec<ScheduleDraft>`（沿用 `AutomationSummary` 那种扁平结构：kind + 小时 / 分钟 /
   间隔 / 星期位掩码 / 时段）、`webhook: bool`、`notify: bool`。
@@ -139,11 +140,10 @@ MachineAutomations
   - 名称；动作（智能体 + 提示词的多行编辑器 / 命令）；
   - 定时规则可多条：类型用分段按钮（每天、每周、每隔、时段内），时间用系统的时间选择器
     （`showTimePicker`，iOS 上是滚轮），星期用一排可多选的标签，间隔用步进 + 单位；
-  - 规则下面显示「接下来：今天 18:00、明天 09:00…」（内核算）；
-  - Webhook 开关，开着时显示地址可复制；
+  - Webhook 开关。地址里带密钥，运行时下发时已隐去，手机上不显示，说明去电脑上复制；
   - 通知开关。
   - 保存后刷新列表、返回；有未保存改动离开时确认（同智能体编辑页）。
-- 从 `agent_edit_page.dart` 把可复用的私有组件（字段行、底部选择面板）提到 `ui/` 下共用。
+- 从 `agent_edit_page.dart` 把输入框和「添加」行提成 `agents_widgets.dart` 里的 `EditField`、`AddRow` 共用。
 
 ### 3.3 不做
 
@@ -152,8 +152,8 @@ MachineAutomations
 
 ### 3.4 测试
 
-- 内核：用假运行时验证 `update` 先 `get` 再整对象 `upsert`、手机不编辑的字段原样带回、令牌不被替换；
-  校验错误的文案；`next_runs`。
+- 内核：用假运行时验证编辑时先 `get` 再整对象 `upsert`、手机不编辑的字段原样带回、令牌不被替换；新建
+  时缺指令不发；表单和定时规则互转。
 - Flutter：新建、编辑、删除确认、未保存离开确认、时间选择后草稿正确。
 
 ---
