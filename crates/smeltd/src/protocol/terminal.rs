@@ -397,11 +397,18 @@ pub(crate) fn open_terminal_runtime<R>(
                 ),
             );
             if let Some(resume) = &resume {
+                dlog(&format!(
+                    "terminal: 会话 {id} 续接 {} 对话 {}",
+                    resume.provider, resume.conversation_id
+                ));
                 // 新 runtime 的第一条状态会覆盖恢复记录；保留续接身份，避免 CLI 还没
                 // 上报 hook 就再次停机时丢掉对话。只在实际选择续接时继承。
                 let mut state = sess.state.lock().unwrap();
                 state.provider = Some(resume.provider.clone());
                 state.conversation_id = Some(resume.conversation_id.clone());
+                // 名字只在对话 id 变了时才查（`terminal_names::refresh`）。身份是带进来的，
+                // 之后 hook 报的还是这段对话，不会再查，所以这里先查上。
+                state.custom_title = crate::terminal_names::lookup(&state);
             }
             let sess = Arc::new(sess);
             // lifecycle 锁同时挡住 kill，提交之前没人看得到这个 runtime。

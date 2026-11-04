@@ -341,6 +341,23 @@ fn reopened_terminal_without_hooks_keeps_resume_identity_across_another_restart(
     with_directory_env(|| {
         use std::os::unix::fs::PermissionsExt;
 
+        let _env = super::SESSION_METADATA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 用户给这段对话起过名字：续接后的终端要顺着它。
+        let metadata_dir =
+            std::path::PathBuf::from(std::env::var_os("SMELT_GHOST_SESSIONS_DIR").unwrap())
+                .join("metadata");
+        std::fs::create_dir_all(&metadata_dir).unwrap();
+        unsafe { std::env::set_var("SMELT_SESSION_METADATA_DIR", &metadata_dir) };
+        smelt_core::session_metadata::set_custom_title(
+            smelt_core::agent_kind::TerminalAgentKind::Antigravity.into(),
+            None,
+            "conv-1",
+            Some("夜里那次排查"),
+        )
+        .unwrap();
+
         // 用阻塞读取的假 CLI 避免依赖本机安装和真实 agent；停机时由测试回收。
         let bin = std::path::PathBuf::from(std::env::var_os("SMELT_GHOST_SESSIONS_DIR").unwrap());
         let cli = bin.join("agy");
@@ -396,6 +413,11 @@ fn reopened_terminal_without_hooks_keeps_resume_identity_across_another_restart(
             Some(launch.as_str()),
             "会话状态记原启动命令，不叠 --resume"
         );
+        // 身份是带进来的，之后 hook 报同一段对话不算换对话、不会再查名字，开的时候就要有。
+        assert_eq!(
+            session.state.lock().unwrap().custom_title.as_deref(),
+            Some("夜里那次排查")
+        );
 
         // 不收到任何 hook，直接停机保存（与停机流程一样，只保留还开着的终端）。
         let open_terminals: HashSet<String> =
@@ -419,5 +441,6 @@ fn reopened_terminal_without_hooks_keeps_resume_identity_across_another_restart(
             next.resume_launch("resume-term").map(|resume| resume.run),
             Some(expected_run)
         );
+        unsafe { std::env::remove_var("SMELT_SESSION_METADATA_DIR") };
     });
 }

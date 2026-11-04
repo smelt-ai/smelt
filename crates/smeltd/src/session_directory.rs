@@ -387,6 +387,25 @@ impl SessionDirectory {
             .values()
             .filter(|entry| terminal_ids.contains(&entry.id) || !entry.runtime)
             .filter(|entry| resume_of(entry).is_some())
+            .collect::<Vec<_>>();
+        let kept = sessions
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{} {}",
+                    entry.id,
+                    entry.provider.as_deref().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::dlog(&format!(
+            "停机保留 {} 个可续接终端（停机前开着 {} 个）：[{}]",
+            kept.len(),
+            terminal_ids.len(),
+            kept.join(", ")
+        ));
+        let sessions = sessions
+            .into_iter()
             .map(|entry| published_from_record(&SessionRecord::from_state(entry)))
             .collect();
         let path = session_directory_path();
