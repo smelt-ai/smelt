@@ -292,7 +292,6 @@ fn agent_terminal_title_renames_the_session_and_is_broadcast() {
             id: provider.into(),
             provider: Some(provider.into()),
             title: Some("UAT 问题修复".into()),
-            revision: 3,
             updated_at: 9,
             ..Default::default()
         }));
@@ -310,7 +309,8 @@ fn agent_terminal_title_renames_the_session_and_is_broadcast() {
             "{provider}"
         );
         let st = state.lock().unwrap();
-        assert!(st.revision > 3);
+        // revision 取自进程内的全局计数器，只能断言它被推进过。
+        assert!(st.revision > 0);
         assert_eq!(st.updated_at, 9, "改名不是会话活动");
     }
 }
