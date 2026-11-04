@@ -73,8 +73,21 @@
 - [x] Compile the desktop and run the focused client-store and archive regressions:
   the release GUI build succeeded, all 21 client-store tests passed, and the archive
   lifecycle test passed with permanent-deletion assertions.
-- [ ] Submit the validated changes to the existing PR branch; CI on other platforms
-  and manual acceptance of the updated icons remain to be checked.
+- [x] Submit the validated changes to the existing PR branch (`f80d63e7`, `c216d225`);
+  CI on other platforms and manual acceptance of the updated icons remain to be checked.
+
+### Archive header follow-up
+
+- [x] Cover the Archive icon through `SmeltAssets.load` in the existing icon tests,
+  then register `Archive` in `LucideExtras` so the SVG is included in release builds.
+- [x] Replace the archive header's permanent Chevron with `group_disclosure`,
+  using a header-specific hover group, the Archive icon, and `!archive_expanded`.
+  Preserve the count, click handler, and persistent expansion state.
+- [x] Run the focused icon tests and desktop release build: all 4 icon tests and
+  the release GUI build passed. Before registration, the new icon-resource test
+  reproduced a missing `icons/archive.svg` failure.
+- [ ] Check the archive header's hover and fold animation manually in the updated
+  test application. Do not restart the user's test application without a separate request.
 
 ## Human verification
 

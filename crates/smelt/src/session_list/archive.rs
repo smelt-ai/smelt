@@ -3,6 +3,8 @@ use crate::workspace_persist::ConversationOp;
 use smelt_model::workspace_directory::WorkspaceConversation;
 use smelt_runtime_client::protocol::control::ControlMethod;
 
+const ARCHIVE_HEADER_GROUP: &str = "archive-header-hover";
+
 pub(super) fn organization_menu(
     menu: PopupMenu,
     workspace: Entity<Workspace>,
@@ -140,6 +142,7 @@ impl Workspace {
         archived.sort_by(|(_, a), (_, b)| b.archived_at.cmp(&a.archived_at));
         let e_toggle = this.clone();
         let header = ListRow::new("archive-section-header")
+            .group(ARCHIVE_HEADER_GROUP)
             .mx_2()
             .mt_3()
             .px(px(PROJECT_HEADER_PAD_X))
@@ -150,14 +153,14 @@ impl Workspace {
             .text_xs()
             .font_medium()
             .text_color(rgb(ui_theme::text_muted()))
-            .child(
-                Icon::new(if self.archive_expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(px(12.)),
-            )
+            .child(group_disclosure(
+                "archive-disclosure",
+                ARCHIVE_HEADER_GROUP,
+                Icon::new(gpui_kit_assets::IconName::Archive)
+                    .size(px(PROJECT_DISCLOSURE_ICON_SIZE)),
+                !self.archive_expanded,
+                true,
+            ))
             .child(format!("归档 ({})", archived.len()))
             .on_click(move |_, _, cx| {
                 e_toggle.update(cx, |ws, cx| {

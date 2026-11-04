@@ -46,3 +46,15 @@ fn non_agent_paths_are_not_claimed() {
     assert!(crate::agent_icon_svg("smelt-icons/trash.svg").is_none());
     assert!(crate::agent_icon_svg("smelt-icons/agent-nope.svg").is_none());
 }
+
+#[test]
+fn archive_sidebar_icon_is_bundled_with_the_application() {
+    use gpui::AssetSource as _;
+
+    let path = gpui_kit_assets::IconName::Archive.path();
+    let icon = crate::SmeltAssets
+        .load(path.as_ref())
+        .unwrap()
+        .expect("归档分组的图标必须打包进应用资源");
+    assert!(!icon.is_empty());
+}

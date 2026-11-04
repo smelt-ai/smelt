@@ -3914,6 +3914,7 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
 gpui_kit_assets::icon_assets!(
     LucideExtras,
     [
+        Archive,
         BellOff,
         Clock,
         Coffee,
