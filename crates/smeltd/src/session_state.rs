@@ -39,10 +39,14 @@ pub(crate) struct SessionState {
     /// 受控子进程环境和 handoff，不进 list/subscribe，其它 agent 知道 session id 也冒充不了。
     #[serde(skip)]
     pub(crate) agent_token: String,
-    /// 会话名。非空的 provider 标题（`SessionTitleChanged`，或 ACP 的
-    /// `session_title`）直接替换。还没有名字时，首条能抽出标题的 prompt 写一次。
-    /// 已有名字不被后来的 prompt 改掉。换对话时清空。OSC 0/2 不是会话名。
+    /// 会话名。非空的 provider 标题（`SessionTitleChanged`、OSC 7501 的 `title`，或 ACP 的
+    /// `session_title`）直接替换。agent CLI 前台运行时用 OSC 0/2 写的窗口标题，清洗后在
+    /// 还没有 provider 标题时替换。都没有时，首条能抽出标题的 prompt 写一次，之后的 prompt
+    /// 不改它。换对话时清空。谁能盖谁看 [`Self::title_source`]。
     pub(crate) title: Option<String>,
+    /// `title` 是从哪来的。只在守护内部决定覆盖关系，不进协议。
+    #[serde(skip)]
+    pub(crate) title_source: TitleSource,
     /// 该终端绑定的 provider 会话 id（Copilot `sessionId` 等）。由每条 hook 携带，
     /// 因此 TUI 内部 `/resume`、退出重开都会自动改写，不需要另外的握手或代次推断。
     /// None = 这家 provider 的 hook 不带 id，或还没有事件到达。
@@ -141,6 +145,7 @@ impl Default for SessionState {
             provider: None,
             agent_token: String::new(),
             title: None,
+            title_source: TitleSource::Prompt,
             conversation_id: None,
             custom_title: None,
             cli_exited: false,
@@ -162,6 +167,18 @@ impl Default for SessionState {
             runtime: true,
         }
     }
+}
+
+/// 会话名的来源，按可信程度从低到高排。高的不会被低的覆盖。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TitleSource {
+    /// 首条 prompt 兜底（没有名字时也是这个）。
+    #[default]
+    Prompt,
+    /// agent CLI 用 OSC 0/2 写的窗口标题。
+    Terminal,
+    /// CLI 用结构化协议报的标题：hook `SessionTitleChanged`、OSC 7501 `title`。
+    Provider,
 }
 
 static NEXT_STATE_REVISION: AtomicU64 = AtomicU64::new(1);
@@ -307,6 +324,7 @@ fn switch_conversation(state: &mut SessionState, event: &AgentEvent) -> BindingT
     }
     if state.conversation_id.is_some() {
         state.title = None;
+        state.title_source = TitleSource::Prompt;
     }
     // 名字属于上一段对话；这一段的由 `terminal_names::refresh` 随后查上来。
     state.custom_title = None;
@@ -326,7 +344,51 @@ fn note_prompt_fallback(state: &mut SessionState, event: &AgentEvent) {
         .and_then(smelt_core::session_title::prompt_title)
     {
         state.title = Some(title);
+        state.title_source = TitleSource::Prompt;
     }
+}
+
+/// agent CLI 用 OSC 0/2 写的窗口标题。返回会话名是否变了。
+///
+/// 只在确认是 agent CLI 在前台时收：hook 报过 provider，且它还没报退出。shell 自己写的
+/// 标题（当前目录、正在跑的命令）不是会话名。不发 SessionEnd 的 CLI 退出后守护分不出来，
+/// 见 `terminal_resume`。已经有 provider 标题时不覆盖；CLI 退出后不清掉已有的名字，跟
+/// provider 标题一样留着。
+pub(crate) fn apply_terminal_title(state: &mut SessionState, raw: &str) -> bool {
+    let Some(provider) = state
+        .provider
+        .as_deref()
+        .and_then(TerminalAgentKind::from_id)
+    else {
+        return false;
+    };
+    if state.cli_exited || state.title_source == TitleSource::Provider {
+        return false;
+    }
+    let project = state.cwd.as_deref().and_then(|cwd| {
+        std::path::Path::new(cwd.trim_end_matches(['/', '\\']))
+            .file_name()
+            .and_then(|name| name.to_str())
+    });
+    let mut generic = vec![
+        provider.label(),
+        provider.cli_program(),
+        provider.id(),
+        provider.quick_terminal_label(),
+    ];
+    generic.extend(project);
+    let Some(title) = smelt_core::session_title::terminal_program_title(raw, &generic) else {
+        return false;
+    };
+    if state.title.as_deref() == Some(title.as_str()) {
+        state.title_source = TitleSource::Terminal;
+        return false;
+    }
+    state.title = Some(title);
+    state.title_source = TitleSource::Terminal;
+    // 改名不是会话活动，不动 `updated_at`，侧栏不会因为标题变了重新排序。
+    bump_state_revision(state);
+    true
 }
 
 /// 将 provider 适配器产出的统一事件归约进会话。
@@ -390,6 +452,7 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
                 )
             {
                 state.title = Some(title.to_string());
+                state.title_source = TitleSource::Provider;
             }
         }
         Occupancy::OpenTurn => {
@@ -489,7 +552,14 @@ pub(crate) fn apply_program_status(state: &mut SessionState, status: &ProgramSta
         state.phase,
         state.pending_question.clone(),
         state.program_status,
+        state.title.clone(),
     );
+    // 程序给根记录起的名字就是它对这段会话的命名，跟 hook 报的标题同级。报告里没带
+    // 不等于改名成空，名字留着。
+    if let Some(title) = status.title.as_deref() {
+        state.title = Some(title.to_string());
+        state.title_source = TitleSource::Provider;
+    }
     let message = status.message.clone();
     match status.state {
         ProgramState::Working => {
@@ -541,6 +611,7 @@ pub(crate) fn apply_program_status(state: &mut SessionState, status: &ProgramSta
             state.phase,
             state.pending_question.clone(),
             state.program_status,
+            state.title.clone(),
         )
     {
         return false;
@@ -1130,6 +1201,7 @@ mod program_status_tests {
             kind: None,
             app: Some("claude-code".to_string()),
             message: None,
+            title: None,
         }
     }
 
@@ -1231,5 +1303,142 @@ mod program_status_tests {
         apply_program_status(&mut state, &report(ProgramState::Idle));
         assert_eq!(state.phase, Phase::Idle, "同一个 shell 里又起了程序");
         assert!(state.program_status);
+    }
+
+    #[test]
+    fn program_status_title_names_the_session_like_a_hook_title() {
+        let mut state = SessionState {
+            title: Some("首条需求".into()),
+            ..Default::default()
+        };
+        let named = ProgramStatus {
+            title: Some("修复侧栏标题".into()),
+            ..report(ProgramState::Working)
+        };
+        assert!(apply_program_status(&mut state, &named));
+        assert_eq!(state.title.as_deref(), Some("修复侧栏标题"));
+        assert_eq!(state.title_source, TitleSource::Provider);
+
+        // 没带 title 的报告不是改名成空。
+        let revision = state.revision;
+        assert!(
+            !apply_program_status(&mut state, &named),
+            "同名同状态不算变化"
+        );
+        assert_eq!(state.revision, revision);
+        apply_program_status(&mut state, &report(ProgramState::Done));
+        assert_eq!(state.title.as_deref(), Some("修复侧栏标题"));
+    }
+}
+
+#[cfg(test)]
+mod terminal_title_tests {
+    use super::*;
+
+    fn claude_running() -> SessionState {
+        SessionState {
+            cwd: Some("/Users/me/code/smelt".into()),
+            provider: Some("claude".into()),
+            title: Some("帮我看下侧栏".into()),
+            updated_at: 9,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_title_replaces_the_prompt_fallback_and_spinner_frames_are_one_change() {
+        let mut state = claude_running();
+        assert!(apply_terminal_title(&mut state, "✳ 侧栏标题排查"));
+        assert_eq!(state.title.as_deref(), Some("侧栏标题排查"));
+        assert_eq!(state.title_source, TitleSource::Terminal);
+        assert_eq!(state.updated_at, 9, "改名不是会话活动");
+
+        let revision = state.revision;
+        for frame in [
+            "✢ 侧栏标题排查",
+            "✶ 侧栏标题排查",
+            "· 侧栏标题排查",
+            "侧栏标题排查",
+        ] {
+            assert!(!apply_terminal_title(&mut state, frame), "{frame}");
+        }
+        assert_eq!(state.revision, revision, "转圈动画不触发广播");
+
+        assert!(apply_terminal_title(&mut state, "✳ 改过的名字"));
+        assert_eq!(state.title.as_deref(), Some("改过的名字"));
+    }
+
+    #[test]
+    fn program_and_project_names_are_not_session_names() {
+        let mut state = claude_running();
+        for raw in [
+            "Claude Code",
+            "✳ Claude Code",
+            "claude",
+            "⠙ smelt",
+            "  ",
+            "✳",
+        ] {
+            assert!(!apply_terminal_title(&mut state, raw), "{raw:?}");
+        }
+        assert_eq!(state.title.as_deref(), Some("帮我看下侧栏"));
+    }
+
+    #[test]
+    fn shell_titles_are_ignored_without_a_running_agent_cli() {
+        // 还没有 hook 报过 provider：只是个 shell。
+        let mut shell = SessionState {
+            launch: Some("codex".into()),
+            ..Default::default()
+        };
+        assert!(!apply_terminal_title(&mut shell, "me@host:~/code/smelt"));
+        assert_eq!(shell.title, None);
+
+        // CLI 报了退出，回到 shell：名字留着，不再跟着 shell 改。
+        let mut exited = claude_running();
+        assert!(apply_terminal_title(&mut exited, "✳ 侧栏标题排查"));
+        apply_agent_event(
+            &mut exited,
+            &AgentEvent::new("claude", AgentEventKind::SessionEnded),
+        );
+        assert!(!apply_terminal_title(&mut exited, "vim main.rs"));
+        assert_eq!(exited.title.as_deref(), Some("侧栏标题排查"));
+    }
+
+    #[test]
+    fn provider_titles_outrank_terminal_titles() {
+        let mut state = claude_running();
+        let mut renamed = AgentEvent::new("claude", AgentEventKind::SessionTitleChanged);
+        renamed.conversation_title = Some("用户 /rename 的名字".into());
+        apply_agent_event(&mut state, &renamed);
+        assert_eq!(state.title_source, TitleSource::Provider);
+
+        assert!(!apply_terminal_title(&mut state, "✳ 窗口标题"));
+        assert_eq!(state.title.as_deref(), Some("用户 /rename 的名字"));
+
+        // 终端标题之后再来的 prompt 也不覆盖它。
+        let mut state = claude_running();
+        assert!(apply_terminal_title(&mut state, "✳ 窗口标题"));
+        let mut prompt = AgentEvent::new("claude", AgentEventKind::PromptSubmitted);
+        prompt.conversation_title = Some("第二条需求".into());
+        apply_agent_event(&mut state, &prompt);
+        assert_eq!(state.title.as_deref(), Some("窗口标题"));
+    }
+
+    #[test]
+    fn switching_conversation_lets_the_terminal_title_name_the_new_one() {
+        let mut state = claude_running();
+        let mut renamed = AgentEvent::new("claude", AgentEventKind::SessionTitleChanged);
+        renamed.conversation_id = Some("conv-1".into());
+        renamed.conversation_title = Some("上一段".into());
+        apply_agent_event(&mut state, &renamed);
+
+        let mut next = AgentEvent::new("claude", AgentEventKind::SessionStarted);
+        next.conversation_id = Some("conv-2".into());
+        apply_agent_event(&mut state, &next);
+        assert_eq!(state.title, None);
+        assert_eq!(state.title_source, TitleSource::Prompt);
+        assert!(apply_terminal_title(&mut state, "✳ 新的一段"));
+        assert_eq!(state.title.as_deref(), Some("新的一段"));
     }
 }

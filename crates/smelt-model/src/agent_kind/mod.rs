@@ -781,7 +781,7 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         cli_program: "codex",
         label: "Codex",
         quick_terminal_label: "Codex",
-        // 启动命令不改写 CLI 自己的标题配置。侧栏不读 OSC。
+        // 启动命令不改写 CLI 自己的标题配置；守护会收它默认写的窗口标题（见 `apply_terminal_title`）。
         // 旧的 `tui.terminal_title=["thread-title"]` 只留在下面的迁移名单里。
         quick_terminal_cmd: "codex --dangerously-bypass-approvals-and-sandbox",
         previous_quick_terminal_cmds: &[concat!(

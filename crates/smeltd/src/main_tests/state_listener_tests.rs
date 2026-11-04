@@ -220,12 +220,12 @@ fn osc_title_parser_preserves_the_complete_visible_payload() {
     );
     parser.advance(&mut term, "\x1b]2;✳ 审查权限门闩\x1b\\".as_bytes());
     let st = state.lock().unwrap();
-    assert_eq!(st.title, None, "OSC 原文不是会话名");
+    assert_eq!(st.title, None, "没有 agent CLI 在跑时，窗口标题不是会话名");
     assert_eq!(st.revision, 0);
     assert_eq!(st.updated_at, 0);
 }
 
-/// OSC 标题不进会话状态：不改 phase、活动时间、revision，也不写会话名。
+/// 窗口标题只可能改会话名：不改 phase、开始时间和活动时间。
 #[test]
 fn terminal_titles_never_change_phase_or_phase_since() {
     for phase in [
@@ -239,6 +239,7 @@ fn terminal_titles_never_change_phase_or_phase_since() {
         Phase::Dead,
     ] {
         let state = Arc::new(Mutex::new(SessionState {
+            provider: Some("grok".into()),
             phase,
             phase_since: 1,
             updated_at: 9,
@@ -254,13 +255,13 @@ fn terminal_titles_never_change_phase_or_phase_since() {
         assert_eq!(st.phase, phase, "标题不该改变 {phase:?}");
         assert_eq!(st.phase_since, 1, "标题不该刷新 {phase:?} 的开始时间");
         assert_eq!(st.updated_at, 9, "标题帧不是会话活动");
-        assert_eq!(st.title, None, "OSC 不写入会话名");
-        assert_eq!(st.revision, 0);
+        assert_eq!(st.title.as_deref(), Some("doing work"));
     }
 }
 
+/// hook 还没报过 provider：只看启动命令认不出前台是不是那个 CLI，窗口标题不收。
 #[test]
-fn terminal_title_does_not_replace_the_session_name() {
+fn terminal_title_without_a_reported_provider_is_ignored() {
     let state = Arc::new(Mutex::new(SessionState {
         cwd: Some("/Users/me/code/smelt".into()),
         launch: Some("codex --dangerously-bypass-approvals-and-sandbox".into()),
@@ -278,32 +279,39 @@ fn terminal_title_does_not_replace_the_session_name() {
 
     let st = state.lock().unwrap();
     assert_eq!(st.title.as_deref(), Some("修复 Codex 标题"));
-    assert_eq!(st.revision, 7, "OSC 不发布新会话名");
+    assert_eq!(st.revision, 7, "不发布新会话名");
     assert_eq!(st.updated_at, 9, "OSC 标题帧不应刷新会话活动时间");
 }
 
 #[test]
-fn terminal_title_does_not_rename_any_provider() {
+fn agent_terminal_title_renames_the_session_and_is_broadcast() {
     for provider in ["grok", "codex", "claude", "copilot", "opencode"] {
+        let subscribers = new_event_hub();
+        let events = session_events(&subscribers);
         let state = Arc::new(Mutex::new(SessionState {
+            id: provider.into(),
             provider: Some(provider.into()),
             title: Some("UAT 问题修复".into()),
             revision: 3,
             updated_at: 9,
             ..Default::default()
         }));
-        let listener = StateListener::new(Arc::clone(&state), no_subscribers());
+        let listener = StateListener::new(Arc::clone(&state), subscribers);
         listener.send_event(Event::Title(
-            "Action Required - 等你批准 - grok".to_string(),
-        ));
-        listener.send_event(Event::Title(
-            "⠼ - Thinking - CPXM-1479 DVP UAT 前端修复并撤回后端 - grok".to_string(),
+            "⠼ - CPXM-1479 DVP UAT 前端修复并撤回后端 - grok".to_string(),
         ));
 
+        let event = next_session_event(&events);
+        let changed: SessionStateChanged =
+            serde_json::from_value(event.envelope.payload.clone()).unwrap();
+        assert_eq!(
+            changed.title.as_deref(),
+            Some("CPXM-1479 DVP UAT 前端修复并撤回后端 - grok"),
+            "{provider}"
+        );
         let st = state.lock().unwrap();
-        assert_eq!(st.title.as_deref(), Some("UAT 问题修复"));
-        assert_eq!(st.revision, 3, "{provider} 的终端标题不是会话名");
-        assert_eq!(st.updated_at, 9);
+        assert!(st.revision > 3);
+        assert_eq!(st.updated_at, 9, "改名不是会话活动");
     }
 }
 
@@ -344,7 +352,7 @@ fn send_event_broadcasts_to_subscribers() {
 }
 
 #[test]
-fn osc_title_broadcast_is_not_persisted_in_identity_directory() {
+fn shell_title_is_not_persisted_in_identity_directory() {
     let _guard = session_directory::DIRECTORY_TEST_LOCK.lock().unwrap();
     let temp =
         std::env::temp_dir().join(format!("smelt-title-transient-test-{}", std::process::id()));
@@ -373,7 +381,7 @@ fn osc_title_broadcast_is_not_persisted_in_identity_directory() {
 
     assert!(
         directory_snapshot.is_empty(),
-        "OSC 标题不进会话状态，也不进崩溃恢复目录"
+        "没有 agent CLI 在跑时，窗口标题不进会话状态，也不进崩溃恢复目录"
     );
 }
 

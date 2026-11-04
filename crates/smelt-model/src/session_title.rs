@@ -1,13 +1,76 @@
 //! 侧栏、菜单、手机共用的会话展示名。
 //!
-//! 会话名来自 provider 标题或首条 prompt 兜底，用户手改名优先。
-//! OSC 0/2 不进入这里，也不参与「在不在跑」的判断。
-//! 调用方传入的已经是决定好的会话名；这里只判断是否为空，不识别、不改写内容。
+//! 会话名的来源，从高到低：用户手改名、provider 标题（hook / ACP / OSC 7501 `title`）、
+//! agent CLI 用 OSC 0/2 写的窗口标题、首条 prompt 兜底。谁能覆盖谁由守护归约时定。
+//! OSC 0/2 只在 agent CLI 前台运行时收，先经 [`terminal_program_title`] 清洗；它不参与
+//! 「在不在跑」的判断。
+//! 展示时调用方传入的已经是决定好的会话名；[`display_title`] 只判断是否为空，不识别、不改写内容。
 
 const AUTO_TITLE_MAX_CHARS: usize = 36;
+/// 窗口标题清洗后最多留几个字。
+const TERMINAL_TITLE_MAX_CHARS: usize = 80;
 
-/// 从首条用户请求生成各端一致的本地兜底标题。它不是 provider 的显式命名。
-/// 显式改名只走 ACP `session_title` 或 hook `SessionTitleChanged`，不走 OSC。
+/// agent CLI 用 OSC 0/2 写的窗口标题，清洗成会话名。不是名字的返回 `None`。
+///
+/// 内容来自 PTY 里任意程序，只拿来给人看。参照 cmux 的做法：
+/// - 控制字符、改变文字方向和不可见的格式字符去掉，压成一行，限长；
+/// - 单独成词的转圈字符（Claude 的星号、盲文点阵、半圆）去掉，动画的每一帧就是同一个名字，
+///   不会反复广播；去掉后首尾剩下的分隔符也去掉；
+/// - 清洗后是空的，或只是 `generic` 里的某一个（程序名、项目目录名，不分大小写），不是名字。
+pub fn terminal_program_title(raw: &str, generic: &[&str]) -> Option<String> {
+    let visible: String = raw
+        .chars()
+        .filter(|ch| !is_invisible_format(*ch))
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let words: Vec<&str> = visible
+        .split_whitespace()
+        .filter(|word| !is_spinner_frame(word))
+        .collect();
+    let joined = words.join(" ");
+    let title =
+        joined.trim_matches(|ch: char| ch.is_whitespace() || TITLE_EDGE_SEPARATORS.contains(&ch));
+    if title.is_empty()
+        || generic
+            .iter()
+            .any(|name| !name.trim().is_empty() && name.trim().eq_ignore_ascii_case(title))
+    {
+        return None;
+    }
+    let mut chars = title.chars();
+    let bounded: String = chars.by_ref().take(TERMINAL_TITLE_MAX_CHARS).collect();
+    Some(if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    })
+}
+
+/// 去掉转圈字符后留在首尾的分隔符，如 Grok 的 `⠼ - … - grok` 开头那个 `-`。
+const TITLE_EDGE_SEPARATORS: &[char] = &['-', '–', '—', '|', '·', ':', '•'];
+
+/// 改变文字方向、零宽之类看不见但会改变显示的字符。
+fn is_invisible_format(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
+/// 一个单独成词的转圈字符。两个以上连在一起的不算，那是文字或字符画。
+fn is_spinner_frame(word: &str) -> bool {
+    let mut chars = word.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    // 盲文点阵（Codex、Grok、Gemini 等）。
+    ('\u{2800}'..='\u{28FF}').contains(&ch)
+        // Claude Code 的星号帧；半圆、四分圆。
+        || "✢✳✶✻✽✸✹✺*·◐◓◑◒◴◷◶◵".contains(ch)
+}
+
+/// 从首条用户请求生成各端一致的本地兜底标题。它不是 provider 的显式命名，
+/// 排在所有其它来源之后。
 pub fn prompt_title(prompt: &str) -> Option<String> {
     let single_line = without_image_placeholders(prompt)
         .split_whitespace()
@@ -48,8 +111,8 @@ fn without_image_placeholders(prompt: &str) -> String {
 
 /// 用户手改名 > 已经决定的会话名 > 启动项显示名 > 兜底（cwd / 旧菜单名）。
 ///
-/// `session_title` 是调用方已经决定的会话名（provider 标题或首条 prompt 兜底），
-/// 不是 OSC 原文。这里只判断是否为空，不改写可见内容。
+/// `session_title` 是调用方已经决定的会话名（见模块文档的来源顺序），窗口标题
+/// 在守护里已经清洗过。这里只判断是否为空，不改写可见内容。
 pub fn display_title(
     custom_title: Option<&str>,
     session_title: Option<&str>,
@@ -110,6 +173,56 @@ pub fn session_name(provider_title: Option<&str>, prompt_fallback: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_program_title_strips_spinner_frames_so_animation_is_one_name() {
+        // Claude Code 忙的时候在会话名前轮换星号帧。
+        for frame in ["✳", "✢", "✶", "✻", "✽", "·"] {
+            assert_eq!(
+                terminal_program_title(&format!("{frame} 审查权限门闩"), &[]).as_deref(),
+                Some("审查权限门闩")
+            );
+        }
+        assert_eq!(
+            terminal_program_title("⠼ - Preparing read_file... - Reviewing gates - grok", &[])
+                .as_deref(),
+            Some("Preparing read_file... - Reviewing gates - grok")
+        );
+        assert_eq!(
+            terminal_program_title("◐ 重构存储层 ◓", &[]).as_deref(),
+            Some("重构存储层")
+        );
+        // 两个以上连在一起的是文字，不是转圈。
+        assert_eq!(
+            terminal_program_title("⠓⠠ 盲文", &[]).as_deref(),
+            Some("⠓⠠ 盲文")
+        );
+    }
+
+    #[test]
+    fn terminal_program_title_rejects_program_and_project_names() {
+        let generic = ["Claude Code", "claude", "smelt"];
+        assert_eq!(terminal_program_title("✳ Claude Code", &generic), None);
+        assert_eq!(terminal_program_title("claude code", &generic), None);
+        assert_eq!(terminal_program_title("⠐ smelt", &generic), None);
+        assert_eq!(terminal_program_title("  ✳  ", &generic), None);
+        assert_eq!(terminal_program_title("", &generic), None);
+        assert_eq!(
+            terminal_program_title("smelt 标题重做", &generic).as_deref(),
+            Some("smelt 标题重做")
+        );
+    }
+
+    #[test]
+    fn terminal_program_title_drops_controls_and_direction_overrides_and_is_bounded() {
+        assert_eq!(
+            terminal_program_title("修\u{202E}复\t标\n题\u{200B}", &[]).as_deref(),
+            Some("修复 标 题")
+        );
+        let long = terminal_program_title(&"标".repeat(200), &[]).unwrap();
+        assert_eq!(long.chars().count(), TERMINAL_TITLE_MAX_CHARS + 1);
+        assert!(long.ends_with('…'));
+    }
 
     #[test]
     fn provider_title_replaces_only_when_nonempty_and_prompt_is_the_fallback() {
