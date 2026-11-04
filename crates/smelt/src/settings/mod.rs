@@ -754,9 +754,9 @@ pub use smelt_model::agent_kind::{
 };
 use smelt_model::agent_kind::{ConversationLaunchSpec, format_env_lines, parse_env_lines};
 pub use smelt_ui::agent_host_state::{
-    AgentDefinition, AgentHostState, AgentHosts, agent_host_loaded, agent_host_settled,
-    agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host, initial_agent_host_state,
-    reload_agent_hosts, try_apply_agent_host,
+    AgentDefinition, AgentHostState, AgentHosts, MachineAutomations, agent_host_loaded,
+    agent_host_settled, agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host,
+    initial_agent_host_state, reload_agent_hosts, try_apply_agent_host,
 };
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,

@@ -95,8 +95,8 @@ MachineAutomations
 
 ### 2.5 通知
 
-- 通知标识编进机器：`smelt.automation.run.{machine}.{run_id}`（`machine` 是 `local` 或远程 id），
-  `JumpToAutomationRun` 带上 `runtime`，点进去打开那台机器上的运行。
+- 通知标识编进机器（格式见第 5 节），`JumpToAutomationRun` 带上 `runtime`，点进去打开那台机器上的运行；
+  远程运行的通知标题前写上机器名。按机器撤回通知：一台机器的快照只撤它自己的运行通知。
 - 终态提醒去重按「机器 + session_id」比。
 
 ### 2.6 测试
@@ -121,10 +121,9 @@ MachineAutomations
 | `delete_automation(runtime_id, id)` | `automation.delete` | |
 | `next_runs(draft, count)` | 纯计算 `AutomationTrigger::next_after` | 编辑时预览接下来几次运行时间 |
 
-- **整对象覆盖下不丢字段**：upsert 没有 patch，也没有版本检查。更新时先 `get` 拿最新的完整对象，只把
-  表单里有的字段换上去（名称、动作、定时规则、webhook 开关、通知），`events` 等手机不编辑的字段原样带回；
-  webhook 令牌保持 `<redacted>`，运行时按位置换回。保存前再 `get` 一次是为了缩小和桌面同时编辑时互相覆盖
-  的窗口；彻底解决要给 upsert 加版本检查，不在本 issue 范围。
+- **整对象覆盖下不丢字段**：upsert 没有 patch。更新时先 `get` 拿完整对象，只把表单里有的字段换上去
+  （名称、动作、定时规则、webhook 开关、通知），`events` 等手机不编辑的字段原样带回；webhook 令牌保持
+  `<redacted>`，运行时按位置换回。
 - 校验以 `smelt-model` 里已有的 `Automation::validate` 为准（名称、至少一条触发、定时的智能体动作要有
   提示词、间隔范围），两端规则一致。它的错误文案只有中文，所以表单上能当场看出来的（名字空、没有规则、
   缺提示词）由 Dart 按 l10n 提示并禁用保存，`validate` 只做最后一道关。
@@ -166,9 +165,9 @@ MachineAutomations
 | PR1 | 桌面（第 2 节） | 无 |
 | PR2 | 手机（第 3 节） | 无，可与 PR1 并行 |
 
-## 5 · 风险
+## 5 · 风险与取舍
 
-- **并发编辑会互相覆盖**：upsert 整对象覆盖、没有版本检查，桌面边打字边自动保存，手机保存时如果桌面
-  也开着同一条，后保存的赢。本方案只把窗口缩小（保存前重取），彻底解决要给 `automation.upsert` 加
-  `expected_revision`，需要运行时升级，建议另开 issue。
-- **通知标识格式变了**：已经发出、还挂在通知中心的旧标识点了要能兜底（解析不出机器时按本机处理）。
+- **并发编辑不处理**：upsert 整对象覆盖、没有版本检查，两端同时改同一条时后保存的赢。正常用户不会同时在
+  多端操作同一条自动化，不为此加版本检查（2026-11 定）。
+- **通知标识**：本机运行沿用老格式（`smelt.automation.run.{run_id}`），已经挂在通知中心里的旧通知点了照样能
+  跳；远程运行用 `smelt.automation.remote-run.{运行时 id}.{run_id}`，线程标识 `automation@{运行时 id}:{id}`。

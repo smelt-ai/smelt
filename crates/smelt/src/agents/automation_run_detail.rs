@@ -22,14 +22,17 @@ const BLOCK_META: &str = "meta";
 /// 落库内容对应的运行版本：运行没换、状态没推进，读过的就还算数。
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RunDetailKey {
+    /// 运行在哪台机器上：两台机器上的运行 id 互不相干。
+    runtime: crate::RuntimeKey,
     run_id: String,
     status: AutomationRunStatus,
     finished_at: Option<i64>,
 }
 
 impl RunDetailKey {
-    fn of(run: &AutomationRun) -> Self {
+    fn of(runtime: &crate::RuntimeKey, run: &AutomationRun) -> Self {
         Self {
+            runtime: runtime.clone(),
             run_id: run.id.clone(),
             status: run.status,
             finished_at: run.finished_at,
@@ -99,10 +102,11 @@ impl Workspace {
     /// 渲染里调用，自身不碰 SQLite。
     pub(super) fn sync_automation_run_detail(
         &mut self,
+        runtime: &crate::RuntimeKey,
         run: &AutomationRun,
         cx: &mut Context<Self>,
     ) {
-        let key = RunDetailKey::of(run);
+        let key = RunDetailKey::of(runtime, run);
         let surface = &mut self.automation_surface;
         if surface
             .run_detail
@@ -112,7 +116,9 @@ impl Workspace {
         {
             return;
         }
-        surface.run_detail_loading = Some(key.clone());
+        // 运行记录在跑它的那台机器的库里。
+        let client = crate::runtime_call::target(runtime, cx);
+        self.automation_surface.run_detail_loading = Some(key.clone());
         let need_archive = run.output.is_none() || run.context.agent_instructions.is_none();
         let run = run.clone();
         cx.spawn(async move |this, cx| {
@@ -120,15 +126,22 @@ impl Workspace {
             let (archived, transcript) = cx
                 .background_executor()
                 .spawn(async move {
-                    // 运行记录在运行时库里；读不到时按「没有归档、没有对话记录」显示。
-                    let detail =
-                        crate::runtime_call::call::<smelt_model::control_api::AutomationRunDetail>(
-                            smelt_model::control_api::AutomationRunDetailParams {
-                                run_id,
-                                include_archived_run: need_archive,
-                            },
-                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                        )
+                    // 读不到（机器移除、连不上）时按「没有归档、没有对话记录」显示。
+                    let detail = client
+                        .ok()
+                        .and_then(|client| {
+                            crate::runtime_call::call_on::<
+                                smelt_model::control_api::AutomationRunDetail,
+                            >(
+                                &client,
+                                smelt_model::control_api::AutomationRunDetailParams {
+                                    run_id,
+                                    include_archived_run: need_archive,
+                                },
+                                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                            )
+                            .ok()
+                        })
                         .unwrap_or_default();
                     (detail.archived_run, detail.transcript)
                 })
@@ -986,6 +999,7 @@ mod tests {
     fn detail(output: Option<&str>, transcript: Vec<AcpEntry>) -> AutomationRunDetail {
         AutomationRunDetail {
             key: RunDetailKey {
+                runtime: crate::RuntimeKey::Local,
                 run_id: "run".into(),
                 status: AutomationRunStatus::Completed,
                 finished_at: None,
