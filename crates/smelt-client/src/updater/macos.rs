@@ -1352,16 +1352,28 @@ fn classify_bundle_use_output(
     if code == Some(1) && stdout.is_empty() && stderr.is_empty() {
         return Ok(BundleUseState::Unused);
     }
+    // 原样带上输出：没有它就查不到是哪个进程占着旧 App。
     anyhow::bail!(
-        "无法证明旧 App 已空闲（lsof code={code:?} stdout={}B stderr={}B）",
-        stdout.len(),
-        stderr.len()
+        "无法证明旧 App 已空闲（lsof code={code:?} stdout={:?} stderr={:?}）",
+        lsof_excerpt(stdout),
+        lsof_excerpt(stderr)
     )
 }
 
+fn lsof_excerpt(bytes: &[u8]) -> String {
+    const LIMIT: usize = 1024;
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).into_owned();
+    if bytes.len() > LIMIT {
+        format!("{text}…（共 {}B）", bytes.len())
+    } else {
+        text
+    }
+}
+
 fn bundle_use_state(app: &Path) -> anyhow::Result<BundleUseState> {
+    // p/c/n：进程号、命令名、文件路径，失败时日志里能看出是谁占着。
     let output = std::process::Command::new("/usr/sbin/lsof")
-        .arg("-Fn")
+        .arg("-Fpcn")
         .arg("+D")
         .arg(app)
         .output()
@@ -1987,6 +1999,27 @@ mod tests {
         assert!(classify_bundle_use_output(false, Some(1), b"", b"warning").is_err());
         assert!(classify_bundle_use_output(false, Some(2), b"", b"").is_err());
         assert!(classify_bundle_use_output(false, None, b"", b"").is_err());
+    }
+
+    #[test]
+    fn lsof_failure_names_the_holder() {
+        let error = classify_bundle_use_output(
+            false,
+            Some(1),
+            b"p4242\ncsmelt\nn/Applications/Smelt.app/Contents/MacOS/smelt\n",
+            b"",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("p4242"), "{error}");
+        assert!(error.contains("Contents/MacOS/smelt"), "{error}");
+
+        let long = vec![b'x'; 5000];
+        let error = classify_bundle_use_output(false, Some(1), &long, b"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("（共 5000B）"), "{error}");
+        assert!(error.len() < 2000, "输出要截断：{}B", error.len());
     }
 
     #[test]

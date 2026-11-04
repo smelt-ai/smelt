@@ -1,24 +1,25 @@
 # 部署推送中继
 
-iOS 把 App 挂起后，手机和各台机器之间的 iroh 连接就断了。等批准、等输入、运行失败这些
-提醒要送到锁屏上，只能走 Apple 的推送服务（APNs）。APNs 只认持有开发者 `.p8` 私钥的
+iOS 把 App 挂起后，手机和各台机器之间的 iroh 连接就断了。等批准、等输入、运行失败、跑完
+一轮这些提醒要送到锁屏上，只能走 Apple 的推送服务（APNs）。APNs 只认持有开发者 `.p8` 私钥的
 发送方，这把私钥不能随开源的 smeltd 分发，所以由推送中继 `smelt-push-relay` 代发：
 
 ```text
 手机 ──令牌──▶ 中继 /v1/register ──句柄──▶ 手机 ──push.register（iroh）──▶ 各台 smeltd
-smeltd ──句柄 + 提醒类型 + 会话 id──▶ 中继 /v1/send ──签名──▶ APNs ──▶ 手机
+smeltd ──句柄 + 提醒类型 + 会话 id + 一行文字──▶ 中继 /v1/send ──签名──▶ APNs ──▶ 手机
 ```
 
 - 中继不存设备表。它用自己的**句柄密钥**把 APNs 令牌加密成句柄交给手机，smeltd 发推送时
   只带句柄。拿到裸令牌的人没法借这个中继给别人的手机发推送；smeltd 库里也没有裸令牌。
-- 推送里没有会话内容：只有提醒类型（手机按 `Localizable.strings` 显示本地化文案）和
-  不透明的 `runtime_id`、`session_id`（点开后跳到对应会话）。会话内容仍然只走 iroh。
+- 推送带会话名、项目名和一行摘要（明文，有长度上限），提醒类型由手机按
+  `Localizable.strings` 本地化，`runtime_id`、`session_id` 用来点开后跳到对应会话。完整的
+  会话内容仍然只走 iroh。
 - 中继按设备令牌限流（连着 10 条，之后每分钟 6 条），日志里不出现令牌、句柄和提供方令牌。
 - 中继只给配置里允许的 Bundle ID 推送，而且这些 App 必须和 `.p8` 属于同一个 Team。所以
   **一个 App 构建对应一个中继**：App Store / TestFlight 版用官方中继；自己用开发者账号签名
   的版本，要用自己 Team 的 `.p8` 部署一个中继。
 
-推送判定、延迟窗口和重试见 [`notification-architecture.md`](notification-architecture.md)
+推送判定、载荷和重试见 [`notification-architecture.md`](notification-architecture.md)
 的「手机推送」。
 
 ## Apple 后台
@@ -130,4 +131,5 @@ Bundle ID 推送。
   InvalidProviderToken` 是 Key ID / Team ID 不对；`TopicDisallowed` 是这把 key 不属于
   App 所在的 Team；`BadDeviceToken` 多半是开发版的令牌发到了 production（或反过来），检查
   `SMELT_APNS_ENVIRONMENT`。再看 smeltd 日志里以「推送：」开头的行。
-- 在电脑前处理掉的审批不会推送：提醒产生后先等 30 秒，这期间处理掉就取消。
+- 提醒一产生就推，在电脑前处理掉的事手机也会响一次。推送里的会话名、项目名和一行摘要是明文，
+  经过中继；中继日志不记这些内容。

@@ -176,6 +176,8 @@ mod tests {
             approval: true,
             input: true,
             failure: true,
+            success: true,
+            payload_version: smelt_model::remote_config::PUSH_PAYLOAD_VERSION,
         })
     }
 

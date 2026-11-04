@@ -1923,7 +1923,7 @@ class L10nEn extends L10n {
 
   @override
   String get pushStatusOff =>
-      'Get notified when an agent needs you, even while Smelt is closed.';
+      'Get notified when an agent needs you or finishes, even while Smelt is closed.';
 
   @override
   String get pushStatusRegistering => 'Turning on…';
@@ -1956,8 +1956,11 @@ class L10nEn extends L10n {
   String get pushKindFailure => 'Run failed';
 
   @override
+  String get pushKindSuccess => 'Finished a turn';
+
+  @override
   String get pushFooter =>
-      'A notification goes out 30 seconds after an agent stops, unless it was handled on another device by then. Session contents stay on your machines: a notification only says what kind of thing is waiting.';
+      'While you\'re using Smelt on your Mac, alerts show up there and your phone stays quiet. Once the Mac is locked or idle for 5 minutes, approvals and questions you haven\'t handled come to your phone right away. Notifications show the session name, the project and a one-line summary (the command waiting for approval, the start of the agent\'s last reply, and so on). That text passes through the push service and Apple. Full session contents stay on your machines.';
 
   @override
   String get pushSessionGone => 'That session no longer exists.';

@@ -5,6 +5,10 @@ PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile.yourname
 // Optional: home-screen name, to tell it apart from the TestFlight build.
 // SMELT_DISPLAY_NAME = Smelt Dev
 
+// Free Apple ID (Personal Team): it cannot sign the push entitlement, so
+// uncomment this. Paid teams leave push on.
+// SMELT_PUSH_CAPABILITY = NO
+
 // Optional: push notifications need a relay holding an APNs key of YOUR team
 // (docs/push-relay-deployment.md). Host only, no scheme.
 // SMELT_PUSH_RELAY_HOST = push.example.com

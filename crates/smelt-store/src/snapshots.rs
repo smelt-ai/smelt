@@ -327,6 +327,9 @@ pub struct PushRegistration {
     pub notify_approval: bool,
     pub notify_input: bool,
     pub notify_failure: bool,
+    pub notify_success: bool,
+    /// 手机认得的推送载荷版本（`smelt_model::remote_config::PUSH_PAYLOAD_VERSION`）。
+    pub payload_version: u32,
     pub updated_at_ms: i64,
 }
 

@@ -177,34 +177,51 @@ Smelt 进程后，smeltd 虽会继续执行自动化，但应用的 UserNotifica
 
 ### 手机推送
 
-iOS 把 App 挂起后 iroh 连接就断了，等批准、等输入、运行失败经 APNs 推到手机。推送由各台
+iOS 把 App 挂起后 iroh 连接就断了，等批准、等输入、运行失败、跑完一轮经 APNs 推到手机。推送由各台
 smeltd 自己产生，不依赖手机连着，也不依赖桌面 GUI 在线；APNs 的 `.p8` 私钥在推送中继
 （`smelt-push-relay`）上，部署见 [`push-relay-deployment.md`](push-relay-deployment.md)。
 
 - **同源判定**：smeltd 在进程内订阅自己的 `session.state_changed` / `session.removed`，用
   客户端同一个 `DaemonStateEventClient` 解码，再用同一套 `apply_daemon_baseline` /
   `apply_daemon_transition` 算边沿（`crates/smeltd/src/push.rs`）。首份快照只建基线；落后时
-  按快照重新对齐，之后照常比较边沿。只推需要用户处理的三种：审批、输入、失败；成功不推。
+  按快照重新对齐，之后照常比较边沿。推审批、输入、失败、成功四种，响铃和普通提示不推。
 - **登记**：手机先找中继用 APNs 令牌换**句柄**（中继用自己的密钥加密过的令牌，中继不存
   设备表），再经 iroh 调 `push.register` 把句柄、中继地址和要推的类型登记到每台机器。
   smeltd 按连接的设备身份写 `push_registration` 表（外键挂在 `paired_device` 上，撤销设备
   时跟着删），不看参数里自称是谁。手机每次启动、每次连上一台机器、改了设置时重新登记；
   关掉推送、忘记一台连着的机器时调 `push.unregister`。旧运行时没有这两个方法，手机在机器
   详情里提示升级。
-- **outbox**：提醒先在内存里等 30 秒，期间这件事已经处理掉（行动项解决、会话删除）就取消，
-  同一会话的新提醒替换旧的。到点时按当时的登记展开到各台手机；`410` 删掉那台手机的登记，
-  `429` / `5xx` / 网络错误按 5 秒起翻倍、封顶 2 分钟退避重试，从提醒产生起超过 10 分钟丢弃，
-  已处理的停止重试。重试用同一个 `apns-id`。outbox 不落盘，smeltd 重启后不补发。发送线程
-  只在有提醒到点时醒来，没有待发的提醒时不醒。
-- **载荷**：只有提醒类型（APNs `loc-key`，文案在 App 的 `Localizable.strings`）和不透明的
-  `runtime_id`、`session_id`，不含标题、正文、命令、路径、机器名。`apns-collapse-id` 是
-  句柄和会话 id 的哈希：同一会话的新推送顶掉旧的，外面推不出会话 id。`thread-id` 按机器
-  分组。格式唯一定义在 `crates/smelt-push`。
+- **人在不在 Mac 前**（`crates/smeltd/src/presence.rs`，照 Slack / Discord 的做法）：本机
+  桌面 App 订阅着状态通道、没锁屏、显示器没睡、当前会话在前台，且 5 分钟内碰过键鼠（整台
+  Mac 的 HID 闲置时间，不要权限），才算在。读数是要发时现读；读不到的项按不在算。人在时
+  Mac 上已经弹了系统通知，手机不响：等批准、等输入先扣着，人一离开（notify(3) 的
+  `com.apple.sessionagent.screenIsLocked`、本机桌面 App 全部断开，或闲置满 5 分钟）还没
+  处理就补推；完成、失败不推。闲置满几分钟没有系统事件，只在有扣着的提醒时按剩余时间定一次
+  闹钟。只认本机桌面：远程桌面连着的运行时、非 macOS 的运行时一律按不在处理。
+- **outbox**：人不在时提醒一产生就发，不等。按当时的登记展开到各台手机；
+  `410` 删掉那台手机的登记，`429` / `5xx` / 网络错误按 5 秒起翻倍、封顶 2 分钟退避重试，从
+  提醒产生起超过 10 分钟丢弃；重试期间事情处理掉（行动项解决、会话删除）就停，同一会话的
+  新提醒替换还在重试的旧提醒。重试用同一个 `apns-id`。outbox 不落盘，smeltd 重启后不补发。
+  发送线程只在有提醒要发、或重试到点时醒来。每次送到、中继回非 2xx、放弃都在 `daemon.log`
+  记一行「推送：」，不记内容。
+- **载荷**：标题是会话名（用户起的优先），副标题是项目名（工作目录末段），正文是 APNs
+  `loc-key` + `loc-args`：手机按自己的语言拼成「等你批准：<摘要>」，文案在 App 的
+  `Localizable.strings`。摘要就是会话状态的 `pending_question`，和桌面通知、手机会话列表
+  同一份：审批 / 输入是问句，失败是原因，成功是这一轮智能体最后一段正文的开头（对话会话由
+  smeltd 从正文里取；终端会话是 hook 完成事件带的 message，多数没有，只显示类型）。三段文字
+  按 `smelt-push` 的上限截断，明文经过中继和 APNs。手机登记时带上它认得的载荷版本
+  （`PUSH_PAYLOAD_VERSION`）：旧版 App 只收类型和会话名、不收完成，免得它把认不得的
+  loc-key 原样显示。`thread-id` 是会话 id：通知中心里一段
+  会话一组，保留历史；`apns-collapse-id` 是句柄和 `apns-id` 的哈希，只让同一条提醒的重试
+  顶掉自己。等批准、等输入是 `time-sensitive`（专注模式下也提醒，需要 App 有 Time Sensitive
+  Notifications 能力），失败、成功是 `active`；`relevance-score` 让行动项排在通知摘要前面。
+  格式唯一定义在 `crates/smelt-push`。
 - **手机**：前台时不弹系统横幅，沿用应用内提示。点通知时记下目标，会话目录里出现那段
-  会话再打开（冷启动时目录还在路上）。行动项解决时、回到前台时，清掉通知中心里已经处理
-  掉的会话的推送（APNs 没法远程撤回）。
-- 通知栏里直接批准 / 回复、端到端加密带上具体内容（Notification Service Extension）是后续
-  工作，见 issue #18 的第二阶段。
+  会话再打开（冷启动时目录还在路上）。打开一段会话（对话页、终端页）时撤掉它在通知中心的
+  整组；行动项解决时、回到前台时，只撤已经不在等的等批准 / 等输入，失败、完成留到打开那段
+  会话（APNs 没法远程撤回）。
+- 通知栏里直接批准 / 回复、端到端加密带内容（Notification Service Extension）是后续工作，
+  见 issue #18 的第二阶段。
 
 ### 应用内浮层
 

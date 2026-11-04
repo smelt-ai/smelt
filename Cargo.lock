@@ -10819,10 +10819,12 @@ dependencies = [
  "smelt-sys",
  "smelt-version",
  "smol",
+ "system-configuration 0.7.0",
  "tempfile",
  "tokio",
  "url",
  "uuid",
+ "windows-registry 0.6.1",
  "windows-sys 0.61.2",
 ]
 

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # 把 profile 版 Smelt Mobile 重新构建并装到 iPhone 上。
 #
-# 免费 Apple ID 签名的 provisioning profile 只有 7 天有效期；Xcode 默认会复用
-# 尚未过期的 profile，所以单纯重建并不会延长有效期。本脚本每次安装前清除该 App
-# 的 Xcode 自动签名缓存，让 Xcode 重新申请 profile，并在未确认续期时拒绝安装。
+# 签名 Team 和 Bundle ID 来自 mobile/ios/Flutter/Developer.xcconfig（每人一份，
+# 不进 Git），首次使用先按 mobile/README.md「iOS development signing」建好。
+#
+# 免费 Apple ID（Personal Team）签的 provisioning profile 只有 7 天有效期，
+# 付费账号的开发 profile 是一年；Xcode 默认会复用尚未过期的 profile，所以单纯
+# 重建并不会延长有效期。本脚本每次安装前清除该 App 的 Xcode 自动签名缓存，让
+# Xcode 重新申请 profile，并在未确认续期时拒绝安装。免费账号每 7 天重跑一次。
 #
 # 用法：
 #   ./scripts/install-ios-profile.sh              # 自动挑唯一一台已连接的 iPhone
@@ -205,6 +209,20 @@ resolve_bundle_id() {
 }
 BUNDLE_ID=$(resolve_bundle_id)
 
+# Debug/Profile 没有 Developer.xcconfig 时会退回生产 Team，别人的 Xcode 里没有
+# 这个账号，构建要跑一轮才报 "No Account for Team"。提前拦下并给出做法。
+preflight_developer_xcconfig() {
+  [[ "$BUILD_MODE" == "release" ]] && return 0
+  [[ -f "$MOBILE_DIR/ios/Flutter/Developer.xcconfig" ]] && return 0
+  echo "缺少 mobile/ios/Flutter/Developer.xcconfig（本机签名配置）。先执行：" >&2
+  echo >&2
+  echo "  cp mobile/ios/Flutter/Developer.xcconfig.example mobile/ios/Flutter/Developer.xcconfig" >&2
+  echo >&2
+  echo "然后填自己的 DEVELOPMENT_TEAM 和唯一的 PRODUCT_BUNDLE_IDENTIFIER；" >&2
+  echo "免费 Apple ID 还要加一行 SMELT_PUSH_CAPABILITY = NO。详见 mobile/README.md。" >&2
+  exit 1
+}
+
 APP_PATH="$MOBILE_DIR/build/ios/iphoneos/Runner.app"
 
 if [[ "$CHECK_ONLY" == true ]]; then
@@ -221,6 +239,7 @@ ensure_flutter() {
   exit 1
 }
 
+preflight_developer_xcconfig
 preflight_xcode_account
 ensure_flutter
 

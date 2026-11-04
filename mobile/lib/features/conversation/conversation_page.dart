@@ -136,6 +136,8 @@ class _ConversationPageState extends State<ConversationPage> {
         ConnectionState.disconnected;
     _subscribe();
     _model.backend.markRead(widget.runtimeId, widget.sessionId);
+    // 通知中心里这段会话的那一组推送都看过了。
+    unawaited(_model.push.clearSession(widget.runtimeId, widget.sessionId));
     unawaited(_loadSkills());
     unawaited(_restoreDraft());
   }

@@ -3262,7 +3262,7 @@ abstract class L10n {
   /// No description provided for @pushStatusOff.
   ///
   /// In en, this message translates to:
-  /// **'Get notified when an agent needs you, even while Smelt is closed.'**
+  /// **'Get notified when an agent needs you or finishes, even while Smelt is closed.'**
   String get pushStatusOff;
 
   /// No description provided for @pushStatusRegistering.
@@ -3319,10 +3319,16 @@ abstract class L10n {
   /// **'Run failed'**
   String get pushKindFailure;
 
+  /// No description provided for @pushKindSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Finished a turn'**
+  String get pushKindSuccess;
+
   /// No description provided for @pushFooter.
   ///
   /// In en, this message translates to:
-  /// **'A notification goes out 30 seconds after an agent stops, unless it was handled on another device by then. Session contents stay on your machines: a notification only says what kind of thing is waiting.'**
+  /// **'While you\'re using Smelt on your Mac, alerts show up there and your phone stays quiet. Once the Mac is locked or idle for 5 minutes, approvals and questions you haven\'t handled come to your phone right away. Notifications show the session name, the project and a one-line summary (the command waiting for approval, the start of the agent\'s last reply, and so on). That text passes through the push service and Apple. Full session contents stay on your machines.'**
   String get pushFooter;
 
   /// No description provided for @pushSessionGone.

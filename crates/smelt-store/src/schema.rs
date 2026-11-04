@@ -437,7 +437,9 @@ CREATE TABLE push_registration (
   notify_approval INTEGER NOT NULL CHECK (notify_approval IN (0, 1)),
   notify_input INTEGER NOT NULL CHECK (notify_input IN (0, 1)),
   notify_failure INTEGER NOT NULL CHECK (notify_failure IN (0, 1)),
-  updated_at_ms INTEGER NOT NULL
+  updated_at_ms INTEGER NOT NULL,
+  notify_success INTEGER NOT NULL DEFAULT 0 CHECK (notify_success IN (0, 1)),
+  payload_version INTEGER NOT NULL DEFAULT 1 CHECK (payload_version >= 1)
 ) WITHOUT ROWID;
 CREATE TABLE runtime_identity (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1812,6 +1814,13 @@ CREATE TABLE quota_provider_pref (
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   keychain_denied INTEGER NOT NULL DEFAULT 0 CHECK (keychain_denied IN (0, 1))
 ) WITHOUT ROWID;
+";
+
+/// v33：推送登记加「完成」开关和手机认得的载荷版本。已有的登记都来自旧版 App：不推完成，
+/// 载荷按版本 1 发；手机升级后下次登记时写成它自己的设置。
+pub const MIGRATE_V32_TO_V33: &str = "
+ALTER TABLE push_registration ADD COLUMN notify_success INTEGER NOT NULL DEFAULT 0 CHECK (notify_success IN (0, 1));
+ALTER TABLE push_registration ADD COLUMN payload_version INTEGER NOT NULL DEFAULT 1 CHECK (payload_version >= 1);
 ";
 
 /// 建库、迁移时把目录这一行连同随机身份一起写好：读目录的人永远拿得到 epoch。

@@ -24,6 +24,9 @@ pub(crate) struct ResumeLaunch {
     pub(crate) run: String,
     /// 记进会话状态的启动命令，仍是原来那条。下次再续接时在它后面接，不会越接越长。
     pub(crate) launch: Option<String>,
+    /// 续接的新终端沿用原来的身份，不等下一次 hook 才能再次续接。
+    pub(crate) provider: String,
+    pub(crate) conversation_id: String,
 }
 
 /// 这个终端能不能续接、怎么续接。
@@ -39,9 +42,11 @@ pub(crate) fn resume_launch(
     provider: Option<&str>,
     conversation_id: Option<&str>,
 ) -> Option<ResumeLaunch> {
-    let kind = TerminalAgentKind::from_id(provider?)?;
+    let provider = provider?;
+    let kind = TerminalAgentKind::from_id(provider)?;
     let syntax = kind.cli_resume_syntax()?;
-    let id = quote_id(conversation_id?.trim())?;
+    let conversation_id = conversation_id?.trim();
+    let id = quote_id(conversation_id)?;
     let launch = launch.map(str::trim).filter(|launch| !launch.is_empty());
     let base = match launch {
         Some(launch) if launch_program(launch) == Some(kind) => launch,
@@ -51,6 +56,8 @@ pub(crate) fn resume_launch(
     Some(ResumeLaunch {
         run: format!("{base} {}", syntax.suffix(&id)),
         launch: launch.map(str::to_string),
+        provider: provider.to_string(),
+        conversation_id: conversation_id.to_string(),
     })
 }
 

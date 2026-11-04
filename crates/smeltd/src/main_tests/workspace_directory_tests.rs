@@ -181,3 +181,32 @@ fn a_daemon_opened_conversation_enters_the_directory_once() {
     let published = published_directory(&event_hub).expect("写进去之后推过目录");
     assert_eq!(published.conversations.len(), 1);
 }
+
+/// 守护起来时库读不出来（例：开发构建留下认不出形状的库），订阅首帧没有目录。库修好以后
+/// 没有改动可等，新订阅进来要现读一次：重启桌面就能拿回对话，不用重启守护。
+#[test]
+fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let temp = TempStore::new();
+    let conversation = terminal_conversation();
+    smelt_core::workspace_catalog::create_conversation_on(&temp.store, &conversation).unwrap();
+    let readable = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let readable = Arc::clone(&readable);
+        let store = temp.store.clone();
+        WorkspaceDirectoryReader::from_fn(move || {
+            if !readable.load(Ordering::Acquire) {
+                return Err("数据库 schema 33 形状无法识别".to_string());
+            }
+            smelt_core::workspace_catalog::directory_on(&store).map_err(|error| error.to_string())
+        })
+    };
+    let event_hub = crate::event_hub::DaemonEventHub::new(reader).unwrap();
+    assert_eq!(published_directory(&event_hub), None, "库读不出来时首帧不带目录");
+
+    readable.store(true, Ordering::Release);
+    let published = published_directory(&event_hub).expect("库好了，新订阅拿到目录");
+    assert_eq!(published.conversations, std::slice::from_ref(&conversation));
+}
