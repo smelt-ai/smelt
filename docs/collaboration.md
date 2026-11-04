@@ -56,12 +56,12 @@ hook `SessionTitleChanged`，没有时用首条用户请求。状态必须来自
 
 ### 信源
 
-1. **ACP `session_title` / hook `SessionTitleChanged`，以及首条 prompt 兜底** —— 会话名。OSC 0/2 不进入会话名。
+1. **ACP `session_title` / hook `SessionTitleChanged` / OSC 7501 `title`，agent CLI 写的 OSC 0/2 窗口标题，以及首条 prompt 兜底** —— 会话名，按这个顺序谁高谁说了算。OSC 0/2 只在 agent CLI 前台运行时收，去掉转圈字符、程序名和项目名之后才算名字，见 `smelt_model::session_title`。
 2. **agent hook → `smelt-notify` 直写 smeltd socket，以及 ACP 生命周期事件** —— 状态的协议事实。
 3. **OSC 9/99/777 与响铃** —— 只作信息通知，不推断状态，也不改会话名。
 4. **`~/.claude/projects/*.jsonl` 的 watcher** —— 用量与历史浏览，不是实时会话名。
 
-先把 schema 定死；只有协议事实进入状态通道和会话名。OSC 0/2 不在其中。
+先把 schema 定死；只有协议事实进入状态通道。OSC 0/2 只能改会话名，不进状态。
 
 ### schema 草案
 

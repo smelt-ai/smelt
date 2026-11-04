@@ -75,8 +75,8 @@ shell、monitor、teammate 会一直挂着，不计入。用户在任务面板�
 provider 工具名只在适配层用于把原始 hook 判定为这些稳定语义之一，不进入 UI 的状态判断
 逻辑。
 
-结构化 hook/OSC 7501/ACP 通过 `apply_daemon_transition` 写入 store。终端 OSC 标题不进入
-会话名；会话尚未收到有效结构化事件时，OSC 9/99/777 和 BEL 可以翻译成信息性
+结构化 hook/OSC 7501/ACP 通过 `apply_daemon_transition` 写入 store。OSC 0/2 窗口标题只在 agent CLI
+前台运行时、清洗后进入会话名，不参与状态；会话尚未收到有效结构化事件时，OSC 9/99/777 和 BEL 可以翻译成信息性
 `AttentionItem`，但绝不能改变 phase 或伪造完成。结构化事件一旦接通，低可信终端通知永久
 退出该会话的 agent 通知链路，避免重复投递。
 
