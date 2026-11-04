@@ -1754,6 +1754,37 @@ fn automation_commands_return_the_refreshed_catalog() {
 }
 
 #[test]
+fn a_finished_run_reads_its_archived_record_and_transcript() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    let mut run = run_json("r-1", "a1", Some("s-gone"), 50);
+    run["status"] = json!("completed");
+    run["output"] = json!("今天要做三件事");
+    run["context"]["agent_instructions"] = json!("总结昨天");
+    runtime.result(
+        "automation.run_detail",
+        json!({
+            "archived_run": run,
+            "transcript": [
+                {"User": "总结昨天"},
+                {"Assistant": {"text": "今天要做三件事", "thought": false}},
+            ],
+        }),
+    );
+
+    let detail = catalog.automation_run_detail("r-1").unwrap();
+    assert_eq!(
+        runtime.controls("automation.run_detail"),
+        [json!({"run_id": "r-1", "include_archived_run": true})]
+    );
+    assert_eq!(detail.run.id, "r-1");
+    assert_eq!(detail.automation_id, "a1");
+    assert_eq!(detail.automation_name, "每日晨报");
+    assert_eq!(detail.instructions.as_deref(), Some("总结昨天"));
+    assert_eq!(detail.output.as_deref(), Some("今天要做三件事"));
+    assert_eq!(detail.transcript.len(), 2);
+}
+
+#[test]
 fn editing_an_automation_keeps_what_the_phone_does_not_edit() {
     let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
     let automations = serde_json::to_value(sample_automations()).unwrap();

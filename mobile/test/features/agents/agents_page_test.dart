@@ -8,6 +8,7 @@ import 'package:smelt_mobile/data/preferences.dart';
 import 'package:smelt_mobile/data/stores.dart';
 import 'package:smelt_mobile/features/agents/agent_edit_page.dart';
 import 'package:smelt_mobile/features/agents/agents_page.dart';
+import 'package:smelt_mobile/features/agents/automation_run_page.dart';
 import 'package:smelt_mobile/l10n/gen/l10n.dart';
 import 'package:smelt_mobile/theme/theme.dart';
 import 'package:smelt_mobile/ui/adaptive.dart';
@@ -430,6 +431,29 @@ void main() {
     await tester.pumpAndSettle();
     expect(backend.runs, [('rt-mbp', 'auto-standup')]);
     expect(find.text('已开始运行「每日站会摘要」'), findsOneWidget);
+  });
+
+  testWidgets('跑完的运行看记录：指令、回复对话都在，不去开已经没了的会话', (tester) async {
+    await _pump(tester, _Backend());
+    await tester.tap(find.text('自动化'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('每日站会摘要').first);
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('查看这次运行'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(find.text('查看这次运行'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AutomationRunPage), findsOneWidget);
+    expect(find.text('成功'), findsOneWidget);
+    expect(find.text('指令'), findsOneWidget);
+    expect(find.text('对话'), findsOneWidget);
+    expect(find.textContaining('验收手机文件预览'), findsOneWidget);
+    expect(find.text('打开这次运行的会话'), findsNothing, reason: '跑完了没有现场');
   });
 
   testWidgets('自动化详情写出上次运行的错误', (tester) async {

@@ -530,6 +530,8 @@ pub(crate) fn dir_listing(
 
 fn automation_source(run: &AutomationRun) -> view::AutomationSource {
     view::AutomationSource {
+        automation_id: run.automation_id.clone(),
+        run_id: run.id.clone(),
         automation_name: run.context.automation_name.clone(),
         run_status: run_status(run.status),
         run_source: run_source(run.source),
@@ -816,8 +818,9 @@ pub(super) fn schedule(schedule: &model_automation::AutomationSchedule) -> view:
     }
 }
 
-fn run_summary(run: &AutomationRun) -> view::AutomationRunSummary {
+pub(super) fn run_summary(run: &AutomationRun) -> view::AutomationRunSummary {
     view::AutomationRunSummary {
+        id: run.id.clone(),
         status: run_status(run.status),
         source: run_source(run.source),
         started_at: run.started_at.or(Some(run.created_at)),

@@ -118,6 +118,18 @@ abstract interface class Backend {
     String runtimeId,
     String automationId,
   );
+
+  /// 一条自动化最近的运行，新的在前。
+  Future<List<AutomationRunSummary>> automationRuns(
+    String runtimeId,
+    String automationId,
+  );
+
+  /// 一次运行的完整记录：指令、输出、对话。跑完以后会话就没有了，看这里。
+  Future<AutomationRunDetail> automationRunDetail(
+    String runtimeId,
+    String runId,
+  );
   Future<List<HistorySessionSummary>> listHistory(
     String runtimeId,
     String projectRoot,
@@ -418,6 +430,21 @@ class FrbBackend implements Backend {
     runtimeId: runtimeId,
     automationId: automationId,
   );
+
+  @override
+  Future<List<AutomationRunSummary>> automationRuns(
+    String runtimeId,
+    String automationId,
+  ) => automations.automationRuns(
+    runtimeId: runtimeId,
+    automationId: automationId,
+  );
+
+  @override
+  Future<AutomationRunDetail> automationRunDetail(
+    String runtimeId,
+    String runId,
+  ) => automations.automationRunDetail(runtimeId: runtimeId, runId: runId);
 
   @override
   Future<List<HistorySessionSummary>> listHistory(

@@ -519,6 +519,30 @@ class L10nEn extends L10n {
   }
 
   @override
+  String get autoRunTitle => 'Run';
+
+  @override
+  String get autoRunOpen => 'View this run';
+
+  @override
+  String get autoRunHistory => 'Recent runs';
+
+  @override
+  String get autoRunInstructions => 'Instruction';
+
+  @override
+  String get autoRunOutput => 'Output';
+
+  @override
+  String get autoRunTranscript => 'Conversation';
+
+  @override
+  String get autoRunLoadFailed => 'Couldn\'t load this run';
+
+  @override
+  String get autoRunNothing => 'This run left no output.';
+
+  @override
   String get autoEditNewTitle => 'New automation';
 
   @override

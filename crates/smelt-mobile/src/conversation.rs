@@ -21,7 +21,7 @@
 //! 运行时、连接状态与离线缓存经 [`RuntimeSource`] 注入，测试用假运行时。
 
 mod merge;
-mod view;
+pub(crate) mod view;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};

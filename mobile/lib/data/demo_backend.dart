@@ -838,20 +838,71 @@ class DemoBackend implements Backend {
   AutomationRunSummary? _runningNow(String id) =>
       _automationRunning.contains(id)
       ? AutomationRunSummary(
+          id: 'run-now-$id',
           status: AutomationRunStatus.running,
           source: AutomationRunSource.manual,
           startedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
         )
       : null;
 
+  @override
+  Future<List<AutomationRunSummary>> automationRuns(
+    String runtimeId,
+    String automationId,
+  ) async => [?_runningNow(automationId), ?_demoLastRun(automationId)];
+
+  @override
+  Future<AutomationRunDetail> automationRunDetail(
+    String runtimeId,
+    String runId,
+  ) async {
+    final automationId = runId.replaceFirst(RegExp(r'^run-(now-)?'), '');
+    final run = (await automationRuns(
+      runtimeId,
+      automationId,
+    )).firstWhere((run) => run.id == runId);
+    final draft = _automationDrafts[automationId];
+    final agent = draft?.action == AutomationActionKind.agent;
+    return AutomationRunDetail(
+      run: run,
+      automationId: automationId,
+      automationName: draft?.name ?? '',
+      instructions: agent ? draft?.prompt : null,
+      output: agent
+          ? null
+          : (run.error == null ? 'no errors were found' : null),
+      transcript: agent
+          ? [
+              ConversationEntry(
+                index: 0,
+                kind: EntryKind.user,
+                text: draft!.prompt,
+                thought: false,
+                images: const [],
+              ),
+              const ConversationEntry(
+                index: 1,
+                kind: EntryKind.assistant,
+                text:
+                    '**昨天**：smelt 合了两个 PR，velum 修了登录。\n\n**今天**：\n- 审 #239\n- 验收手机文件预览',
+                thought: false,
+                images: [],
+              ),
+            ]
+          : const [],
+    );
+  }
+
   AutomationRunSummary? _demoLastRun(String id) => switch (id) {
     'auto-standup' => AutomationRunSummary(
+      id: 'run-auto-standup',
       status: AutomationRunStatus.completed,
       source: AutomationRunSource.scheduled,
       startedAt: _ago(const Duration(hours: 10)),
       finishedAt: _ago(const Duration(hours: 10, minutes: -2)),
     ),
     'auto-backup' => AutomationRunSummary(
+      id: 'run-auto-backup',
       status: AutomationRunStatus.failed,
       source: AutomationRunSource.webhook,
       startedAt: _ago(const Duration(days: 1)),

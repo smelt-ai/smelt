@@ -586,6 +586,79 @@ impl Catalog {
         self.automation_catalog_with(&runtime, None)
     }
 
+    /// 一条自动化最近的运行，取订阅到的投影，新的在前。
+    pub(crate) fn automation_runs(
+        &self,
+        automation_id: &str,
+    ) -> Result<Vec<crate::api::catalog::AutomationRunSummary>, SmeltError> {
+        let runtime = self.runtime()?;
+        self.wait_primed(runtime.generation);
+        let inner = self.shared.lock();
+        let mut runs = inner
+            .state
+            .automations
+            .iter()
+            .flat_map(|file| file.runs.iter())
+            .filter(|run| run.automation_id == automation_id)
+            .collect::<Vec<_>>();
+        runs.sort_by(|a, b| (b.created_at, &b.id).cmp(&(a.created_at, &a.id)));
+        Ok(runs.into_iter().map(projection::run_summary).collect())
+    }
+
+    /// 一次运行的完整记录。投影里裁掉了输出、指令，向运行时要归档的那份和对话记录。
+    pub(crate) fn automation_run_detail(
+        &self,
+        run_id: &str,
+    ) -> Result<crate::api::automations::AutomationRunDetail, SmeltError> {
+        let runtime = self.runtime()?;
+        let detail = runtime
+            .client
+            .call::<smelt_model::control_api::AutomationRunDetail>(
+                &smelt_model::control_api::AutomationRunDetailParams {
+                    run_id: run_id.to_string(),
+                    include_archived_run: true,
+                },
+                self.shared.timing.call_timeout,
+            )
+            .map_err(control_error)?;
+        let run = match detail.archived_run {
+            Some(run) => run,
+            None => {
+                let inner = self.shared.lock();
+                inner
+                    .state
+                    .automations
+                    .iter()
+                    .flat_map(|file| file.runs.iter())
+                    .find(|run| run.id == run_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        error(SmeltErrorKind::Other, "这次运行的记录已经没有了")
+                    })?
+            }
+        };
+        Ok(crate::api::automations::AutomationRunDetail {
+            run: projection::run_summary(&run),
+            automation_id: run.automation_id.clone(),
+            automation_name: run.context.automation_name.clone(),
+            instructions: run
+                .context
+                .agent_instructions
+                .clone()
+                .or_else(|| run.context.prompt.clone())
+                .filter(|text| !text.trim().is_empty()),
+            output: run.output.clone().filter(|text| !text.trim().is_empty()),
+            transcript: detail
+                .transcript
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    crate::conversation::view::conversation_entry(index as i64, entry)
+                })
+                .collect(),
+        })
+    }
+
     fn automation(
         &self,
         runtime: &CurrentRuntime,

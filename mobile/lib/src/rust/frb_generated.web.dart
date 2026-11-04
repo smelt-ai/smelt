@@ -125,6 +125,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AutomationEditor dco_decode_automation_editor(dynamic raw);
 
   @protected
+  AutomationRunDetail dco_decode_automation_run_detail(dynamic raw);
+
+  @protected
   AutomationRunSource dco_decode_automation_run_source(dynamic raw);
 
   @protected
@@ -405,6 +408,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<AutomationAgentChoice> dco_decode_list_automation_agent_choice(
+    dynamic raw,
+  );
+
+  @protected
+  List<AutomationRunSummary> dco_decode_list_automation_run_summary(
     dynamic raw,
   );
 
@@ -918,6 +926,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AutomationEditor sse_decode_automation_editor(SseDeserializer deserializer);
 
   @protected
+  AutomationRunDetail sse_decode_automation_run_detail(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   AutomationRunSource sse_decode_automation_run_source(
     SseDeserializer deserializer,
   );
@@ -1256,6 +1269,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<AutomationAgentChoice> sse_decode_list_automation_agent_choice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<AutomationRunSummary> sse_decode_list_automation_run_summary(
     SseDeserializer deserializer,
   );
 
@@ -1887,6 +1905,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_automation_run_detail(
+    AutomationRunDetail self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_automation_run_source(
     AutomationRunSource self,
     SseSerializer serializer,
@@ -2331,6 +2355,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_automation_agent_choice(
     List<AutomationAgentChoice> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_automation_run_summary(
+    List<AutomationRunSummary> self,
     SseSerializer serializer,
   );
 

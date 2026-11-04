@@ -89,6 +89,9 @@ pub enum AutomationRunSource {
 /// 这条会话是某条自动化的一次运行现场。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomationSource {
+    pub automation_id: String,
+    /// 这次运行；跑完以后会话就没有了，打开它看的是运行记录。
+    pub run_id: String,
     pub automation_name: String,
     pub run_status: AutomationRunStatus,
     pub run_source: AutomationRunSource,
@@ -388,6 +391,7 @@ pub enum AutomationActionKind {
 /// 目录行上的「上次结果」。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutomationRunSummary {
+    pub id: String,
     pub status: AutomationRunStatus,
     pub source: AutomationRunSource,
     /// unix 秒。

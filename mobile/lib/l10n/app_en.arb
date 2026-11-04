@@ -419,6 +419,14 @@
       }
     }
   },
+  "autoRunTitle": "Run",
+  "autoRunOpen": "View this run",
+  "autoRunHistory": "Recent runs",
+  "autoRunInstructions": "Instruction",
+  "autoRunOutput": "Output",
+  "autoRunTranscript": "Conversation",
+  "autoRunLoadFailed": "Couldn't load this run",
+  "autoRunNothing": "This run left no output.",
   "autoEditNewTitle": "New automation",
   "autoEditTitle": "Edit automation",
   "autoEditEdit": "Edit",

@@ -487,6 +487,30 @@ class L10nZh extends L10n {
   }
 
   @override
+  String get autoRunTitle => '运行记录';
+
+  @override
+  String get autoRunOpen => '查看这次运行';
+
+  @override
+  String get autoRunHistory => '最近的运行';
+
+  @override
+  String get autoRunInstructions => '指令';
+
+  @override
+  String get autoRunOutput => '输出';
+
+  @override
+  String get autoRunTranscript => '对话';
+
+  @override
+  String get autoRunLoadFailed => '这次运行的记录没取到';
+
+  @override
+  String get autoRunNothing => '这次运行没有留下输出。';
+
+  @override
   String get autoEditNewTitle => '新建自动化';
 
   @override

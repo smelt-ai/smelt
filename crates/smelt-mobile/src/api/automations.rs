@@ -4,7 +4,10 @@
 //! 目录刷新列表。运行时的保存是整条覆盖，编辑时先取完整的那条，只换表单里有的字段，手机
 //! 不编辑的（事件触发、已有的 webhook 令牌）原样带回。
 
-use crate::api::catalog::{AutomationActionKind, AutomationCatalog, AutomationSchedule};
+use crate::api::catalog::{
+    AutomationActionKind, AutomationCatalog, AutomationRunSummary, AutomationSchedule,
+};
+use crate::api::conversation::ConversationEntry;
 use crate::api::error::SmeltError;
 
 /// 编辑页的表单。
@@ -62,6 +65,41 @@ pub fn save_automation(
         .node(&runtime_id)?
         .catalog
         .save_automation(automation_id.as_deref(), &draft)
+}
+
+/// 一次运行的记录：给它的指令、输出或错误、对话。跑完以后会话就没有了，看这里。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutomationRunDetail {
+    pub run: AutomationRunSummary,
+    pub automation_id: String,
+    pub automation_name: String,
+    /// 这次运行实际交给智能体的指令（固化在运行里，不是自动化现在的定义）。
+    pub instructions: Option<String>,
+    /// 命令的输出，或智能体最后的回复。
+    pub output: Option<String>,
+    /// 智能体运行的对话，命令运行没有。
+    pub transcript: Vec<ConversationEntry>,
+}
+
+/// 一条自动化最近的运行，新的在前。运行时每条最多留 50 次。
+pub fn automation_runs(
+    runtime_id: String,
+    automation_id: String,
+) -> Result<Vec<AutomationRunSummary>, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .automation_runs(&automation_id)
+}
+
+pub fn automation_run_detail(
+    runtime_id: String,
+    run_id: String,
+) -> Result<AutomationRunDetail, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .automation_run_detail(&run_id)
 }
 
 /// 删除，连同它的运行记录。返回删除后的目录。

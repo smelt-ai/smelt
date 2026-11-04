@@ -5,10 +5,11 @@
 
 import '../frb_generated.dart';
 import 'catalog.dart';
+import 'conversation.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 取编辑器。`automation_id` 为空是新建：给一份默认草稿（每天 09:00、第一个智能体）。
 Future<AutomationEditor> automationEditor({
@@ -28,6 +29,23 @@ Future<AutomationCatalog> saveAutomation({
   runtimeId: runtimeId,
   automationId: automationId,
   draft: draft,
+);
+
+/// 一条自动化最近的运行，新的在前。运行时每条最多留 50 次。
+Future<List<AutomationRunSummary>> automationRuns({
+  required String runtimeId,
+  required String automationId,
+}) => RustLib.instance.api.crateApiAutomationsAutomationRuns(
+  runtimeId: runtimeId,
+  automationId: automationId,
+);
+
+Future<AutomationRunDetail> automationRunDetail({
+  required String runtimeId,
+  required String runId,
+}) => RustLib.instance.api.crateApiAutomationsAutomationRunDetail(
+  runtimeId: runtimeId,
+  runId: runId,
 );
 
 /// 删除，连同它的运行记录。返回删除后的目录。
@@ -142,4 +160,50 @@ class AutomationEditor {
           draft == other.draft &&
           agents == other.agents &&
           eventTopics == other.eventTopics;
+}
+
+/// 一次运行的记录：给它的指令、输出或错误、对话。跑完以后会话就没有了，看这里。
+class AutomationRunDetail {
+  final AutomationRunSummary run;
+  final String automationId;
+  final String automationName;
+
+  /// 这次运行实际交给智能体的指令（固化在运行里，不是自动化现在的定义）。
+  final String? instructions;
+
+  /// 命令的输出，或智能体最后的回复。
+  final String? output;
+
+  /// 智能体运行的对话，命令运行没有。
+  final List<ConversationEntry> transcript;
+
+  const AutomationRunDetail({
+    required this.run,
+    required this.automationId,
+    required this.automationName,
+    this.instructions,
+    this.output,
+    required this.transcript,
+  });
+
+  @override
+  int get hashCode =>
+      run.hashCode ^
+      automationId.hashCode ^
+      automationName.hashCode ^
+      instructions.hashCode ^
+      output.hashCode ^
+      transcript.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AutomationRunDetail &&
+          runtimeType == other.runtimeType &&
+          run == other.run &&
+          automationId == other.automationId &&
+          automationName == other.automationName &&
+          instructions == other.instructions &&
+          output == other.output &&
+          transcript == other.transcript;
 }

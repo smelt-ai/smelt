@@ -871,6 +871,54 @@ abstract class L10n {
   /// **'Couldn\'t run “{name}”: {message}'**
   String agentsRunNowFailed(String name, String message);
 
+  /// No description provided for @autoRunTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Run'**
+  String get autoRunTitle;
+
+  /// No description provided for @autoRunOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'View this run'**
+  String get autoRunOpen;
+
+  /// No description provided for @autoRunHistory.
+  ///
+  /// In en, this message translates to:
+  /// **'Recent runs'**
+  String get autoRunHistory;
+
+  /// No description provided for @autoRunInstructions.
+  ///
+  /// In en, this message translates to:
+  /// **'Instruction'**
+  String get autoRunInstructions;
+
+  /// No description provided for @autoRunOutput.
+  ///
+  /// In en, this message translates to:
+  /// **'Output'**
+  String get autoRunOutput;
+
+  /// No description provided for @autoRunTranscript.
+  ///
+  /// In en, this message translates to:
+  /// **'Conversation'**
+  String get autoRunTranscript;
+
+  /// No description provided for @autoRunLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load this run'**
+  String get autoRunLoadFailed;
+
+  /// No description provided for @autoRunNothing.
+  ///
+  /// In en, this message translates to:
+  /// **'This run left no output.'**
+  String get autoRunNothing;
+
   /// No description provided for @autoEditNewTitle.
   ///
   /// In en, this message translates to:

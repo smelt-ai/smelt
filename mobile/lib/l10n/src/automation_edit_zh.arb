@@ -1,5 +1,13 @@
 {
   "@@locale": "zh",
+  "autoRunTitle": "运行记录",
+  "autoRunOpen": "查看这次运行",
+  "autoRunHistory": "最近的运行",
+  "autoRunInstructions": "指令",
+  "autoRunOutput": "输出",
+  "autoRunTranscript": "对话",
+  "autoRunLoadFailed": "这次运行的记录没取到",
+  "autoRunNothing": "这次运行没有留下输出。",
   "autoEditNewTitle": "新建自动化",
   "autoEditTitle": "编辑自动化",
   "autoEditEdit": "编辑",

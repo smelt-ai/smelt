@@ -307,6 +307,7 @@ enum AutomationRunStatus {
 
 /// 目录行上的「上次结果」。
 class AutomationRunSummary {
+  final String id;
   final AutomationRunStatus status;
   final AutomationRunSource source;
 
@@ -319,6 +320,7 @@ class AutomationRunSummary {
   final String? error;
 
   const AutomationRunSummary({
+    required this.id,
     required this.status,
     required this.source,
     this.startedAt,
@@ -329,6 +331,7 @@ class AutomationRunSummary {
 
   @override
   int get hashCode =>
+      id.hashCode ^
       status.hashCode ^
       source.hashCode ^
       startedAt.hashCode ^
@@ -341,6 +344,7 @@ class AutomationRunSummary {
       identical(this, other) ||
       other is AutomationRunSummary &&
           runtimeType == other.runtimeType &&
+          id == other.id &&
           status == other.status &&
           source == other.source &&
           startedAt == other.startedAt &&
@@ -409,6 +413,10 @@ class AutomationSchedule {
 
 /// 这条会话是某条自动化的一次运行现场。
 class AutomationSource {
+  final String automationId;
+
+  /// 这次运行；跑完以后会话就没有了，打开它看的是运行记录。
+  final String runId;
   final String automationName;
   final AutomationRunStatus runStatus;
   final AutomationRunSource runSource;
@@ -420,6 +428,8 @@ class AutomationSource {
   final PlatformInt64? startedAt;
 
   const AutomationSource({
+    required this.automationId,
+    required this.runId,
     required this.automationName,
     required this.runStatus,
     required this.runSource,
@@ -429,6 +439,8 @@ class AutomationSource {
 
   @override
   int get hashCode =>
+      automationId.hashCode ^
+      runId.hashCode ^
       automationName.hashCode ^
       runStatus.hashCode ^
       runSource.hashCode ^
@@ -440,6 +452,8 @@ class AutomationSource {
       identical(this, other) ||
       other is AutomationSource &&
           runtimeType == other.runtimeType &&
+          automationId == other.automationId &&
+          runId == other.runId &&
           automationName == other.automationName &&
           runStatus == other.runStatus &&
           runSource == other.runSource &&
