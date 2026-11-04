@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 7;
+pub(crate) const SCHEMA_VERSION: u32 = 8;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -50,7 +50,8 @@ CREATE TABLE workspace_ui (
   sidebar_w REAL,
   sidebar_open INTEGER CHECK (sidebar_open IN (0, 1)),
   sidebar_grouping TEXT NOT NULL,
-  sidebar_hide_empty_projects INTEGER NOT NULL CHECK (sidebar_hide_empty_projects IN (0, 1))
+  sidebar_hide_empty_projects INTEGER NOT NULL CHECK (sidebar_hide_empty_projects IN (0, 1)),
+  archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1))
 );
 CREATE TABLE collapsed_project (
   runtime_id TEXT NOT NULL,
@@ -269,6 +270,12 @@ CREATE TABLE key_binding (
 ) WITHOUT ROWID;
 ";
 
+/// v8：归档分段默认折叠。
+const MIGRATE_V7_TO_V8: &str = "
+ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
+  CHECK (archive_expanded IN (0, 1));
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -322,7 +329,13 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
+        7 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
+    }
+    if (1..=7).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V7_TO_V8)
+            .map_err(|error| error.to_string())?;
     }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -598,6 +611,7 @@ mod legacy {
                         .map(crate::ProjectKey::local)
                         .collect(),
                     sidebar_hide_empty_projects: old.sidebar_hide_empty_projects,
+                    archive_expanded: false,
                 },
             )?;
         }

@@ -56,6 +56,56 @@ fn recovered_state(id: &str) -> SessionState {
 }
 
 #[test]
+fn archiving_a_copilot_terminal_keeps_the_exact_resume_identity() {
+    with_directory_env(|| {
+        let store = smelt_store::Store::open_or_create(session_directory::session_directory_path())
+            .unwrap();
+        let directory = SessionDirectory::new();
+        let mut original = recovered_state("copilot-term");
+        original.launch = Some("copilot --allow-all".into());
+        original.provider = Some("copilot".into());
+        original.conversation_id = Some("original-copilot-session".into());
+        original.instance = 0;
+        original.runtime = false;
+        directory.upsert(&original);
+        set_session_directory_for_test(directory);
+        let conversation = smelt_core::workspace_directory::WorkspaceConversation {
+            id: "copilot-group".into(),
+            terminals: vec![smelt_core::workspace_directory::WorkspaceTerminal {
+                id: Some(original.id.clone()),
+                launch_cmd: original.launch.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let hub = new_event_hub();
+        workspace_directory::create_conversation(&store, &conversation, &hub).unwrap();
+        let sessions = new_sessions();
+        let acp_sessions = new_test_acp_sessions();
+        let automations = new_test_automation_store();
+        for archived in [true, true, false] {
+            workspace_directory::archive_conversation(
+                &store, &conversation.id, archived, &sessions, &acp_sessions, &automations, &hub,
+            ).unwrap();
+            assert_eq!(
+                with_session_directory(|d| d.resume_launch(&original.id)).flatten()
+                    .map(|launch| launch.run),
+                Some("copilot --allow-all --resume=original-copilot-session".into()),
+                "归档/恢复不能把 provider 对话 ID 当成已删除的终端身份清掉",
+            );
+        }
+        assert_eq!(
+            SessionDirectory::restore_from_disk().resume_launch(&original.id).map(|launch| launch.run),
+            Some("copilot --allow-all --resume=original-copilot-session".into()),
+        );
+        workspace_directory::delete_conversation(
+            &store, &conversation.id, &sessions, &acp_sessions, &automations, &hub,
+        ).unwrap();
+        assert!(!with_session_directory(|d| d.contains(&original.id)).unwrap());
+    });
+}
+
+#[test]
 fn crash_recovery_restores_disconnected_sessions() {
     with_directory_env(|| {
         let directory = SessionDirectory::new();
@@ -79,6 +129,71 @@ fn crash_recovery_restores_disconnected_sessions() {
         assert_eq!(snap[0].pending_question, None);
         assert_eq!(snap[0].agent_token, "");
         assert!(snap[0].active_blocker.is_none());
+    });
+}
+
+#[test]
+fn archiving_a_live_terminal_saves_identity_before_stopping_the_process() {
+    with_directory_env(|| {
+        let path = session_directory::session_directory_path();
+        let store = smelt_store::Store::open_or_create(&path).unwrap();
+        set_session_directory_for_test(SessionDirectory::new());
+        let sessions = new_sessions();
+        let acp_sessions = new_test_acp_sessions();
+        let hub = new_event_hub();
+        let id = "live-copilot-terminal";
+        open_terminal_runtime(
+            TerminalOpenRequest {
+                id: id.into(),
+                cols: 80,
+                rows: 24,
+                cwd: path.parent().map(|path| path.to_string_lossy().into_owned()),
+                launch: None,
+                create_if_missing: true,
+            },
+            &sessions,
+            &acp_sessions,
+            &hub,
+            |_, _| (),
+        ).unwrap();
+        let live = sessions.live(id).unwrap();
+        let before = {
+            let mut state = live.state.lock().unwrap();
+            state.launch = Some("copilot --allow-all".into());
+            state.provider = Some("copilot".into());
+            state.conversation_id = Some("original-live-copilot-session".into());
+            state.revision += 1;
+            state.clone()
+        };
+        broadcast_state(&hub, &before);
+        let conversation = smelt_core::workspace_directory::WorkspaceConversation {
+            id: "live-copilot-group".into(),
+            terminals: vec![smelt_core::workspace_directory::WorkspaceTerminal {
+                id: Some(id.into()),
+                launch_cmd: before.launch.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        workspace_directory::create_conversation(&store, &conversation, &hub).unwrap();
+        let result = workspace_directory::archive_conversation(
+            &store, &conversation.id, true, &sessions, &acp_sessions,
+            &new_test_automation_store(), &hub,
+        );
+        if result.is_err() {
+            let _ = kill_terminal_session(id, &sessions, &hub);
+        }
+        result.unwrap();
+        assert!(sessions.live(id).is_none());
+        assert_eq!(
+            with_session_directory(|d| d.resume_launch(id)).flatten().map(|launch| launch.run),
+            Some("copilot --allow-all --resume=original-live-copilot-session".into()),
+        );
+        forget_session(&hub, id, before.instance);
+        assert_eq!(
+            SessionDirectory::restore_from_disk().resume_launch(id).unwrap().run,
+            "copilot --allow-all --resume=original-live-copilot-session",
+        );
     });
 }
 

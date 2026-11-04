@@ -37,6 +37,8 @@ pub(crate) struct DirectorySync {
     confirmed: Option<WorkspaceRevision>,
     /// 上一份目录里各段对话、各格终端的名字。下一份里变了才报。
     names: HashMap<String, Option<String>>,
+    archived: Vec<WorkspaceConversation>,
+    pinned: HashSet<String>,
 }
 
 /// 收到一份目录之后本地要做的事。
@@ -94,6 +96,14 @@ fn latest(current: Option<WorkspaceRevision>, next: WorkspaceRevision) -> Worksp
 }
 
 impl DirectorySync {
+    pub(crate) fn archived(&self) -> &[WorkspaceConversation] {
+        &self.archived
+    }
+
+    pub(crate) fn is_pinned(&self, id: &str) -> bool {
+        self.pinned.contains(id)
+    }
+
     pub(crate) fn loaded(&self) -> bool {
         self.listed.is_some()
     }
@@ -132,11 +142,35 @@ impl DirectorySync {
             .iter()
             .map(|conversation| conversation.id.clone())
             .collect::<HashSet<_>>();
-        let removed = local_conversations
+        self.pinned = conversations
             .iter()
-            .filter(|id| self.known_conversations.contains(*id) && !ids.contains(*id))
+            .filter(|c| c.archived_at.is_none() && c.pinned_at.is_some())
+            .map(|c| c.id.clone())
+            .collect();
+        let (mut archived, conversations): (Vec<_>, Vec<_>) = conversations
+            .into_iter()
+            .partition(|c| c.archived_at.is_some());
+        archived.sort_by(|a, b| b.archived_at.cmp(&a.archived_at).then(a.id.cmp(&b.id)));
+        let previous_archived = self
+            .archived
+            .iter()
+            .map(|c| c.id.clone())
+            .collect::<Vec<_>>();
+        self.archived = archived;
+        let archived_ids: HashSet<_> = self.archived.iter().map(|c| c.id.as_str()).collect();
+        let mut removed = local_conversations
+            .iter()
+            .filter(|id| {
+                archived_ids.contains(id.as_str())
+                    || (self.known_conversations.contains(*id) && !ids.contains(*id))
+            })
             .cloned()
             .collect::<Vec<_>>();
+        for id in previous_archived {
+            if !ids.contains(&id) && !removed.contains(&id) {
+                removed.push(id);
+            }
+        }
         let mut added = Vec::new();
         let mut retitled = Vec::new();
         let mut renamed_terminals = Vec::new();
@@ -201,6 +235,9 @@ impl DirectorySync {
             if self.pending_deletes.contains(&conversation.id) {
                 continue;
             }
+            if self.archived.iter().any(|c| c.id == conversation.id) {
+                continue;
+            }
             if listed.contains(&conversation.id) {
                 if self.sent.get(&conversation.id) != Some(conversation) {
                     commands.updates.push(conversation.clone());
@@ -248,6 +285,8 @@ impl DirectorySync {
 /// 这段对话不带名字的样子：发给运行时、和上次发出的比，都不看名字（名字只从目录来）。
 pub(crate) fn without_names(conversation: &WorkspaceConversation) -> WorkspaceConversation {
     let mut conversation = conversation.clone();
+    conversation.archived_at = None;
+    conversation.pinned_at = None;
     conversation.custom_title = None;
     for terminal in &mut conversation.terminals {
         terminal.custom_title = None;
@@ -302,6 +341,58 @@ mod tests {
 
     fn ids(items: &[&str]) -> HashSet<String> {
         items.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn archive_removes_local_views_without_recreating_them_and_restore_adds_them() {
+        let mut sync = DirectorySync::default();
+        let active = conversation("c1", Some("title"));
+        sync.receive(at(1), vec![active.clone()], &ids(&["c1"]));
+        let mut archived = active.clone();
+        archived.archived_at = Some(10);
+        let inbound = sync.receive(at(2), vec![archived.clone()], &ids(&["c1"]));
+        assert_eq!(inbound.removed, ["c1"]);
+        assert!(inbound.added.is_empty());
+        assert_eq!(sync.archived(), &[archived]);
+        assert!(sync.commands(&[active.clone()]).unwrap().is_empty());
+        let restored = sync.receive(at(3), vec![active], &ids(&[]));
+        assert_eq!(restored.added.len(), 1);
+        assert!(sync.archived().is_empty());
+    }
+
+    #[test]
+    fn cold_start_does_not_materialize_archives_or_leave_pending_views() {
+        let mut sync = DirectorySync::default();
+        let mut archived = conversation("c1", None);
+        archived.archived_at = Some(10);
+        let inbound = sync.receive(at(1), vec![archived], &ids(&["c1"]));
+        assert!(inbound.added.is_empty());
+        assert_eq!(inbound.removed, ["c1"]);
+    }
+
+    #[test]
+    fn deleting_an_archive_reports_removal_for_client_metadata_cleanup() {
+        let mut sync = DirectorySync::default();
+        let mut archived = conversation("c1", None);
+        archived.archived_at = Some(10);
+        sync.receive(at(1), vec![archived], &ids(&[]));
+        let inbound = sync.receive(at(2), vec![], &ids(&[]));
+        assert_eq!(inbound.removed, ["c1"]);
+        assert!(sync.archived().is_empty());
+    }
+
+    #[test]
+    fn pin_state_is_authoritative_but_not_part_of_client_updates() {
+        let mut sync = DirectorySync::default();
+        let mut pinned = conversation("c1", None);
+        pinned.pinned_at = Some(10);
+        sync.receive(at(1), vec![pinned.clone()], &ids(&[]));
+        assert!(sync.is_pinned("c1"));
+        assert!(sync.commands(&[without_names(&pinned)]).unwrap().is_empty());
+        pinned.pinned_at = None;
+        sync.receive(at(2), vec![pinned.clone()], &ids(&["c1"]));
+        assert!(!sync.is_pinned("c1"));
+        assert!(sync.commands(&[without_names(&pinned)]).unwrap().is_empty());
     }
 
     fn roots(items: &[&str]) -> Vec<String> {

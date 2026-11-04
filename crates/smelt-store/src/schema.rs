@@ -242,7 +242,9 @@ CREATE TABLE session_group (
   id TEXT PRIMARY KEY,
   position INTEGER NOT NULL UNIQUE CHECK (position >= 0),
   custom_title TEXT,
-  last_updated_at INTEGER NOT NULL DEFAULT 0
+  last_updated_at INTEGER NOT NULL DEFAULT 0,
+  archived_at INTEGER,
+  pinned_at INTEGER
 );
 
 CREATE TABLE session (
@@ -1768,6 +1770,12 @@ DROP TABLE remote_terminal_session;
 pub const MIGRATE_V28_TO_V29: &str = "
 ALTER TABLE workspace_catalog ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
 UPDATE workspace_catalog SET epoch = lower(hex(randomblob(16))) WHERE epoch = '';
+";
+
+/// v34：归档与置顶是运行时目录的属性，旧对话默认都未设置。
+pub const MIGRATE_V33_TO_V34: &str = "
+ALTER TABLE session_group ADD COLUMN archived_at INTEGER;
+ALTER TABLE session_group ADD COLUMN pinned_at INTEGER;
 ";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。

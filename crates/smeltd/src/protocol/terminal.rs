@@ -58,7 +58,25 @@ pub(crate) fn kill_terminal_session(
     sessions: &Sessions,
     event_hub: &EventHubHandle,
 ) -> Result<(), String> {
+    stop_terminal_session(id, sessions, event_hub, false)
+}
+
+pub(crate) fn archive_terminal_session(
+    id: &str,
+    sessions: &Sessions,
+    event_hub: &EventHubHandle,
+) -> Result<(), String> {
+    stop_terminal_session(id, sessions, event_hub, true)
+}
+
+fn stop_terminal_session(
+    id: &str,
+    sessions: &Sessions,
+    event_hub: &EventHubHandle,
+    keep_resume_identity: bool,
+) -> Result<(), String> {
     let mut removed = None;
+    let mut resume_state = None;
     if let Some(slot) = sessions.get(id) {
         // 与 Starting/commit 共用同一 slot 锁。kill 要么看到完整 Live runtime，
         // 要么等创建回滚。
@@ -67,9 +85,12 @@ pub(crate) fn kill_terminal_session(
             if let Some(s) = sessions.live_in_slot(&slot) {
                 let _output_gate = s.output_gate.lock().unwrap();
                 let _input_gate = s.input_gate.lock().unwrap();
+                if keep_resume_identity {
+                    resume_state = Some(s.state.lock().unwrap().clone());
+                }
                 if !s.child.terminate_and_wait(TERMINAL_CHILD_REAP_TIMEOUT) {
-                    dlog(&format!(
-                        "terminal: kill 后未能确认 pid={} 已由唯一 owner 回收",
+                    return Err(format!(
+                        "无法确认终端进程 pid={} 已退出，请重试",
                         s.child.pid()
                     ));
                 }
@@ -83,6 +104,17 @@ pub(crate) fn kill_terminal_session(
             }
             removed = sessions.remove_if_same(id, &slot);
         }
+    }
+    if keep_resume_identity {
+        let resume_state = resume_state.or_else(|| {
+            with_session_directory(|directory| {
+                directory.snapshot().into_iter().find(|state| state.id == id)
+            }).flatten()
+        });
+        if let Some(state) = resume_state {
+            suspend_terminal_identity(event_hub, &state)?;
+        }
+        return Ok(());
     }
     match removed {
         Some(session) => forget_session(event_hub, id, session.instance),

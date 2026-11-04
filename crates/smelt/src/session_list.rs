@@ -420,6 +420,7 @@ fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
     }
 }
 
+mod archive;
 mod drag;
 mod keyboard;
 mod machines;
@@ -508,6 +509,13 @@ impl Workspace {
                     &space.pinned_projects,
                     |group| group.root.as_str(),
                 );
+            }
+            for group in &mut space_groups {
+                group.sessions.sort_by_key(|&ix| {
+                    !space
+                        .directory
+                        .is_pinned(&self.sessions[ix].conversation_id)
+                });
             }
             groups.extend(space_groups);
         }
@@ -1522,7 +1530,15 @@ impl Workspace {
                 let e_close = this.clone();
                 let e_rename = this.clone();
                 let e_restart = this.clone();
+                let e_organization = this.clone();
                 let ui_id = self.sessions[ix].ui_id;
+                let is_pinned =
+                    self.space(self.sessions[ix].runtime(cx).key())
+                        .is_some_and(|space| {
+                            space
+                                .directory
+                                .is_pinned(&self.sessions[ix].conversation_id)
+                        });
                 let drag_title: SharedString = title.clone().into();
                 let is_drag_source_session = dragging_session == Some(ui_id);
                 let sess_hint_before = can_drag
@@ -1630,6 +1646,8 @@ impl Workspace {
                     // 选中靠整张会话卡亮起来，不再靠左侧白条。悬停底由 ListRow 铺。
                     // Grok 对话列表：小图标，不套色块。状态只给图标上色。
                     .child(session_icon)
+                    .when(is_pinned,
+                        |row| row.child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(12.))))
                     // 一行：会话名占满，最近活动时间在行尾那一格里。改名时这一格换成输入框。
                     .child(
                         match rename_input.as_ref().filter(|_| renaming_session == Some(ix)) {
@@ -1747,7 +1765,8 @@ impl Workspace {
                             }
                         });
                     })
-                    .context_menu(move |menu, _window, _cx| {
+                    .context_menu(move |menu, _window, cx| {
+                        let menu = archive::organization_menu(menu, e_organization.clone(), ui_id, cx);
                         let e_rename = e_rename.clone();
                         let e_restart = e_restart.clone();
                         let copy_id_source = copy_id_source.clone();
@@ -1927,6 +1946,9 @@ impl Workspace {
                                     ))
                                 })
                                 .child(pane_icon)
+                                .when(is_pinned && lix == 0, |row| {
+                                    row.child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(12.)))
+                                })
                                 .child(
                                     match rename_input
                                         .as_ref()
@@ -2011,6 +2033,9 @@ impl Workspace {
                                     });
                                 })
                                 .context_menu(move |menu, _window, _cx| {
+                                    let menu = archive::organization_menu(
+                                        menu, e_pane_menu.clone(), ui_id, _cx,
+                                    );
                                     let e_rename = e_pane_menu.clone();
                                     let e_close_all = e_pane_menu.clone();
                                     let rename_pane = menu_pane.clone();
@@ -2138,6 +2163,8 @@ impl Workspace {
                     .child(format!("已隐藏 {hidden_empty} 个无会话项目")),
             );
         }
+
+        rows = rows.children(self.render_archive_section(this.clone(), cx));
 
         // ---- 底部操作条：设置 ----
         // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。「设置」点一下直接

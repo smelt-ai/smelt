@@ -30,14 +30,16 @@
 
 ## 数据模型
 
-### 运行时库（`smelt-store`，schema 28 → 29）
+### 运行时库（`smelt-store`，schema 33 → 34）
+
+（`docs/workspace.md` 里写的「schema 28」已经过时，`STORE_SCHEMA_VERSION` 当前是 33，本次顺手改掉那一处。）
 
 ```sql
 ALTER TABLE session_group ADD COLUMN archived_at INTEGER;  -- NULL = 未归档
 ALTER TABLE session_group ADD COLUMN pinned_at   INTEGER;  -- NULL = 未置顶
 ```
 
-存 unix 秒而不是 bool：归档分段按归档时间倒序排，置顶区按置顶时间排，不必再加排序字段。
+存 unix 秒而不是 bool：归档分段按归档时间倒序排；置顶只决定分区，分区内保持客户端已有顺序。
 
 迁移是纯加列，旧行两列都是 NULL，等于「既没归档也没置顶」，语义正确，不需要数据搬运。
 
@@ -87,19 +89,28 @@ ALTER TABLE session_group ADD COLUMN pinned_at   INTEGER;  -- NULL = 未置顶
 
 `smeltd` 收到 `archive: true` 时，按顺序：
 
-1. 写库：`archived_at = now`，`pinned_at = NULL`。
-2. 收掉进程：这段对话的 ACP 会话走 `kill_acp_session`，每个终端走 `kill_terminal_session`
+1. 校验对话存在且不属于自动化运行。
+2. 收掉进程：这段对话的 ACP 会话走 `kill_acp_session`，每个终端走 `archive_terminal_session`
    （`session_control.rs` 里现成的）。**不调 `forget_session`**——目录行要留着，归档分段
    还要列它。
-3. 广播 `workspace.changed`。
+3. 写库：`archived_at = now`，`pinned_at = NULL`，广播 `workspace.changed`。
 
-收进程失败只记日志，不把归档报成失败：库已经写了，列表状态是用户看得见的那个，进程收不掉
-是运行时内部的事，下次重启自然就没了。
+收进程失败必须返回错误，目录保留原状态，允许重试，不能把后台仍运行报成归档成功。
+停止多个终端不具备进程级事务：中途失败时已经停止的终端不会自动重新启动。
+重复归档不重写归档时间。归档中的会话拒绝普通打开和 ACP 唤醒请求。
 
 ### 恢复
 
-写库 `archived_at = NULL` 并广播即可，**不预先起进程**。对话回到项目分组里，用户点进去时
-按既有的恢复路径起——和桌面重启后点一条没在跑的对话是同一条路。
+运行时清除 `archived_at` 并广播，不主动启动进程。桌面收到目录后使用现有恢复流程：
+终端按保存的启动参数建立新 shell，ACP 使用保存的恢复身份续接。原终端的进程、环境和
+运行中任务不可能恢复；保留的是目录记录、启动参数、本机分屏布局以及已有的 provider 历史。
+
+终端里的 CLI 对话与 shell 进程是两种身份。归档停止 PTY 前，必须保存 hook 已上报的
+`provider`、`conversation_id` 和原启动命令到现有的持久身份目录，标记为无 runtime。
+不能复用会删除该身份的 `kill_terminal_session`。恢复复用 `terminal_resume` 按原 ID
+拼接命令，例如 `copilot --allow-all --resume=<原ID>`，不得使用“最近一次对话”作为替代。
+退休实例的迟到 hook 和 PTY 退出回调不能清掉归档身份；正常删除仍需清理它。
+CLI 已主动退出时沿用原规则，不自动续接那段已结束的对话。
 
 ### 自动化运行中的会话不能归档
 
@@ -112,20 +123,20 @@ ALTER TABLE session_group ADD COLUMN pinned_at   INTEGER;  -- NULL = 未置顶
 ### 对账：归档的对话不实体化
 
 `workspace_directory.rs` 的 `receive()` 是目录推送和本地会话对账的地方。归档的对话在这里
-**从名册里摘掉**：不进 `ids`，因而
+**从活动列表摘掉，但保留完整目录的身份集合**，因而
 
 - 本地开着它 → 落进 `removed` → 桌面自动关掉这个会话的视图。别的设备归档了，这台机器跟着收。
 - 本地没有它 → 不进 `added` → 启动时不会把几十条归档对话全恢复成活动会话。
-- 恢复时它重新出现在 `ids` 里而本地没有 → 进 `added` → 自动实体化回来。
+- 恢复时它重新成为活动对话而本地没有 → 进 `added` → 自动实体化回来。
 
 对称且不需要额外的状态机。
 
-但归档分段要把它们列出来，所以 `WorkspaceDirectoryState` 另存一份
-`archived: Vec<WorkspaceConversation>`，**只用于渲染归档分段**，不参与 `commands()` 的对账，
-也不建会话实体。
+`DirectorySync` 另存 `archived: Vec<WorkspaceConversation>` 供归档分段使用，
+不建立会话实体。`commands()` 跳过归档项，防止晚到的客户端更新重新创建或改写它们。
 
-本机发起归档时，先本地 `close_session`（收掉视图），再发 `archive` 命令——不发
-`conversation.delete`。等推送回来时本地已经没有它，`removed` 为空，不会重复收一次。
+本机发起归档时不先关视图：操作与对话新建/修改一起进入该运行时的串行后台队列。
+成功后按目录推送走 `remove_session(..., false)`，不发 `conversation.delete`。
+移除前缓存本机路由、分屏布局和活动终端，恢复时填回；失败时保留视图并显示错误。
 
 ### 侧栏
 
@@ -144,9 +155,9 @@ ALTER TABLE session_group ADD COLUMN pinned_at   INTEGER;  -- NULL = 未置顶
 ```
 
 - 分段标题右侧写归档条数；没有归档的对话时整个分段不画。
-- 折叠状态存客户端库（`workspace_ui` 加一列 `archive_collapsed`，schema 7 → 8）。
+- 折叠状态存客户端库（`workspace_ui` 加一列 `archive_expanded`，默认 0，schema 7 → 8）。
 - 归档行比普通行暗一档，不显示状态点和「需要你」提示——它们都已经停了。
-- 行尾的 × 换成「恢复」图标；右键菜单是「恢复 / 删除」。
+- 行尾显示「恢复」按钮；右键菜单是「恢复 / 删除」，删除前确认。
 - 归档行不参与拖拽排序。
 
 ### 置顶
@@ -166,7 +177,7 @@ ALTER TABLE session_group ADD COLUMN pinned_at   INTEGER;  -- NULL = 未置顶
 - 「置顶」/「取消置顶」
 - 「归档」
 
-归档正在跑的对话先确认：复用现有的 `CloseConfirm` 机制和 `closing_needs_confirm(status)`，加一个
+归档正在跑或等待处理的对话先确认（检查全部终端 pane）：复用现有的 `CloseConfirm` 机制，加一个
 `CloseConfirm::Archive { ui_id, title }` 变体，文案写明「归档会终止这一轮，对话和历史会留在归档里」。
 
 运行时不支持这两个方法时（`MethodNotFound`），菜单项置灰。
@@ -192,7 +203,7 @@ for conversation in &directory.conversations {
 
 | 层 | 用例 |
 |---|---|
-| `smelt-store` | 归档写 `archived_at` 并清 `pinned_at`；客户端的 update 改不动这两个字段；v28 → v29 迁移后旧行两列为 NULL |
+| `smelt-store` | 归档写 `archived_at` 并清 `pinned_at`；客户端的 update 改不动这两个字段；v33 → v34 迁移后旧行两列为 NULL |
 | `smelt-core` | `archive_conversation_on` / `pin_conversation_on` 改完目录版本号推进 |
 | `smeltd` | 归档收掉进程但目录行还在；自动化 Run 的会话拒绝归档 |
 | `smelt`（桌面） | `receive()` 摘掉归档对话：本地开着的落进 `removed`、本地没有的不进 `added`、恢复时进 `added`；`without_names()` 剥掉两个字段后不产生无谓 update；置顶排序在项目组内生效 |

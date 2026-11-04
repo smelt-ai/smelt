@@ -46,7 +46,21 @@ fn workspace_ui() -> WorkspaceUiRecord {
         sidebar_grouping: "project".to_string(),
         pinned_projects: vec![ProjectKey::local("/repo/z"), ProjectKey::local("/repo/a")],
         sidebar_hide_empty_projects: true,
+        archive_expanded: false,
     }
+}
+
+#[test]
+fn archive_expansion_round_trips() {
+    let (store, path) = temp_store();
+    let mut record = workspace_ui();
+    record.archive_expanded = true;
+    store.put_workspace_ui(&record).unwrap();
+    drop(store);
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.workspace_ui().unwrap().unwrap().archive_expanded);
+    drop(store);
+    cleanup(&path);
 }
 
 #[test]

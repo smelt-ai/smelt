@@ -943,6 +943,12 @@ pi_calls! {
     WorkspaceConversationDelete => WorkspaceConversationDelete(
         crate::workspace_directory::WorkspaceConversationIdParams
     ) -> crate::workspace_directory::WorkspaceRevision;
+    WorkspaceConversationArchive => WorkspaceConversationArchive(
+        crate::workspace_directory::WorkspaceConversationArchiveParams
+    ) -> crate::workspace_directory::WorkspaceRevision;
+    WorkspaceConversationPin => WorkspaceConversationPin(
+        crate::workspace_directory::WorkspaceConversationPinParams
+    ) -> crate::workspace_directory::WorkspaceRevision;
     /// 打开一个项目。已经开着时什么都不做。
     WorkspaceProjectOpen => WorkspaceProjectOpen(crate::workspace_directory::WorkspaceProjectParams)
         -> crate::workspace_directory::WorkspaceRevision;

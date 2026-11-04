@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 33;
+pub const STORE_SCHEMA_VERSION: u32 = 34;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -297,6 +297,26 @@ impl Store {
     ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::write_workspace(&self.backend, |transaction| {
             crate::workspace::rename_conversation(transaction, conversation_id, title)
+        })
+    }
+
+    pub fn set_workspace_conversation_archived(
+        &self,
+        id: &str,
+        archived_at: Option<i64>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::set_conversation_archived(transaction, id, archived_at)
+        })
+    }
+
+    pub fn set_workspace_conversation_pinned(
+        &self,
+        id: &str,
+        pinned_at: Option<i64>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::set_conversation_pinned(transaction, id, pinned_at)
         })
     }
 
@@ -2025,6 +2045,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 33 {
+            apply_v34_conversation_archive(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 32 {
             apply_v33_push_success(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2634,6 +2663,18 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V32_TO_V33)?;
         }
+        apply_v34_conversation_archive(transaction)
+    }
+
+    fn apply_v34_conversation_archive(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "session_group")?
+            .iter()
+            .any(|column| column == "archived_at")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V33_TO_V34)?;
+        }
         Ok(())
     }
 
@@ -3131,7 +3172,14 @@ mod imp {
                     "launch_command",
                     "position",
                 ],
-                &["id", "position", "custom_title", "last_updated_at"],
+                &[
+                    "id",
+                    "position",
+                    "custom_title",
+                    "last_updated_at",
+                    "archived_at",
+                    "pinned_at",
+                ],
             )
         };
         Ok(table_columns(connection, "history_title")?
@@ -6185,6 +6233,8 @@ CREATE TABLE published_session (
                 id: "conv-terminals".into(),
                 custom_title: Some("terminal group".into()),
                 last_updated_at: 42,
+                archived_at: None,
+                pinned_at: None,
                 terminals: vec![
                     WorkspaceTerminalRecord {
                         id: Some("term-1".into()),
@@ -6207,6 +6257,8 @@ CREATE TABLE published_session (
                 id: "conv-acp".into(),
                 custom_title: Some("agent group".into()),
                 last_updated_at: 84,
+                archived_at: None,
+                pinned_at: None,
                 terminals: Vec::new(),
                 acp: Some(WorkspaceAcpRecord {
                     cwd: Some("/repo".into()),
@@ -6840,6 +6892,8 @@ CREATE TABLE published_session (
             id: id.to_string(),
             custom_title: None,
             last_updated_at: 1,
+            archived_at: None,
+            pinned_at: None,
             terminals: vec![WorkspaceTerminalRecord {
                 id: Some(terminal.to_string()),
                 cwd: Some(cwd.to_string()),
@@ -6851,11 +6905,17 @@ CREATE TABLE published_session (
         }
     }
 
-    fn acp_conversation(id: &str, sid: Option<&str>, history: Option<&str>) -> WorkspaceSessionRecord {
+    fn acp_conversation(
+        id: &str,
+        sid: Option<&str>,
+        history: Option<&str>,
+    ) -> WorkspaceSessionRecord {
         WorkspaceSessionRecord {
             id: id.to_string(),
             custom_title: None,
             last_updated_at: 1,
+            archived_at: None,
+            pinned_at: None,
             terminals: Vec::new(),
             acp: Some(WorkspaceAcpRecord {
                 cwd: Some("/repo".to_string()),
@@ -6899,6 +6959,83 @@ CREATE TABLE published_session (
             .into_iter()
             .map(|session| session.id)
             .collect()
+    }
+
+    #[test]
+    fn archive_and_pin_survive_stale_updates_and_reopening() {
+        let dir = temp_dir("directory-archive");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let stale = terminal_conversation("c1", "t1", "/repo");
+        store.create_workspace_conversation(&stale).unwrap();
+        store
+            .set_workspace_conversation_pinned("c1", Some(10))
+            .unwrap();
+        assert!(
+            !store
+                .set_workspace_conversation_pinned("c1", Some(20))
+                .unwrap()
+                .changed
+        );
+        store.update_workspace_conversation(&stale).unwrap();
+        assert_eq!(
+            store.workspace_directory().unwrap().1.sessions[0].pinned_at,
+            Some(10)
+        );
+
+        store
+            .set_workspace_conversation_archived("c1", Some(30))
+            .unwrap();
+        assert!(
+            !store
+                .set_workspace_conversation_archived("c1", Some(40))
+                .unwrap()
+                .changed
+        );
+        store.update_workspace_conversation(&stale).unwrap();
+        assert!(matches!(
+            store.set_workspace_conversation_pinned("c1", Some(50)),
+            Err(StoreError::ConversationArchived { .. })
+        ));
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        let archived = &store.workspace_directory().unwrap().1.sessions[0];
+        assert_eq!(archived.archived_at, Some(30));
+        assert_eq!(archived.pinned_at, None);
+        assert_eq!(archived.terminals, stale.terminals);
+        store
+            .set_workspace_conversation_archived("c1", None)
+            .unwrap();
+        let restored = &store.workspace_directory().unwrap().1.sessions[0];
+        assert_eq!(restored.archived_at, None);
+        assert_eq!(restored.pinned_at, None);
+        assert_eq!(restored.id, "c1");
+    }
+
+    #[test]
+    fn v33_conversations_gain_empty_archive_and_pin_columns() {
+        let dir = temp_dir("directory-v33-archive");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        store
+            .create_workspace_conversation(&terminal_conversation("c1", "t1", "/repo"))
+            .unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE session_group DROP COLUMN archived_at;
+             ALTER TABLE session_group DROP COLUMN pinned_at;
+             PRAGMA user_version = 33;",
+            )
+            .unwrap();
+        drop(connection);
+        let store = Store::open(&path).unwrap();
+        let record = &store.workspace_directory().unwrap().1.sessions[0];
+        assert_eq!(record.archived_at, None);
+        assert_eq!(record.pinned_at, None);
+        assert_eq!(record.id, "c1");
     }
 
     /// 新建排在最后；同 id 重发（回执丢了）不改动、不推进版本。
@@ -7737,6 +7874,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
             id: "conv-terminals".into(),
             custom_title: Some("terminal group".into()),
             last_updated_at: 7,
+            archived_at: None,
+            pinned_at: None,
             terminals: vec![
                 terminal("term-3", "/repo"),
                 WorkspaceTerminalRecord {

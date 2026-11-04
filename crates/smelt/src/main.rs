@@ -1725,6 +1725,15 @@ pub(crate) enum PaneState {
 /// 关闭前要确认的东西。关掉就找不回来：终端里正在跑的命令、对话里正在跑的回合都会被终止。
 #[derive(Clone)]
 pub(crate) enum CloseConfirm {
+    Archive {
+        ui_id: u64,
+        title: String,
+    },
+    DeleteArchived {
+        runtime: RuntimeKey,
+        id: String,
+        title: String,
+    },
     /// 关项目，连带关掉下面的全部会话。显示名只用来写文案，真正关哪个项目认 root。
     /// 空项目不走确认（无损），会话数恒 > 0。
     Project {
@@ -2261,6 +2270,7 @@ struct Workspace {
     sidebar_grouping: SidebarGrouping,
     /// 按项目分组时是否把无会话的项目从侧栏藏起来（固定的 / 当前项目除外）。
     sidebar_hide_empty_projects: bool,
+    archive_expanded: bool,
     /// 侧栏「对话」分组是否收起。只在本次运行内记住。
     sidebar_conversations_collapsed: bool,
     /// 会话拖拽悬停中的插入位置：(目标会话 ui_id, 插它前面?)。
@@ -2841,6 +2851,7 @@ impl Workspace {
             collapsed_agents: ui.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: ui.sidebar_grouping,
             sidebar_hide_empty_projects: ui.sidebar_hide_empty_projects,
+            archive_expanded: ui.archive_expanded,
             sidebar_conversations_collapsed: false,
             sess_drop_hint: None,
             proj_drop_hint: None,

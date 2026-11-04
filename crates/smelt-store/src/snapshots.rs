@@ -60,6 +60,8 @@ pub struct WorkspaceSessionRecord {
     pub id: String,
     pub custom_title: Option<String>,
     pub last_updated_at: i64,
+    pub archived_at: Option<i64>,
+    pub pinned_at: Option<i64>,
     /// 这段对话里的终端，按客户端给的顺序。
     pub terminals: Vec<WorkspaceTerminalRecord>,
     pub acp: Option<WorkspaceAcpRecord>,
