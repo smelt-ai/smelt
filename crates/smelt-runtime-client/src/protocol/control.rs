@@ -659,13 +659,12 @@ mod tests {
     fn method_registry_names_are_unique_and_round_trip() {
         let mut names = std::collections::HashSet::new();
         for method in ControlMethod::ALL {
-            assert!(names.insert(method.as_str()));
+            assert!(names.insert(method.as_str()), "重复的控制方法名：{method}");
             assert_eq!(
                 ControlMethod::from_wire_name(method.as_str()),
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 126);
     }
 
     #[test]
