@@ -77,6 +77,7 @@ pub use smelt_model::session_title;
 pub mod sqlite_state;
 pub mod subagent_sessions;
 pub mod subprocess;
+mod system_proxy;
 pub use smelt_model::term_config;
 pub mod term_text;
 pub mod terminal_theme;
