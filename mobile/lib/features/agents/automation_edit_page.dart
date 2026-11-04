@@ -349,6 +349,8 @@ class _AutomationEditPageState extends State<AutomationEditPage> {
         bottom: MediaQuery.paddingOf(context).bottom + Space.xxl,
       ),
       children: [
+        // 这一格始终占着位置：列表的子项按位置对应，提示一出一没，下面输入框就会被
+        // 当成新的重建，正在输入的那个随之失焦、键盘收起。
         if (missing.isNotEmpty && (_dirty || !_creating))
           Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -361,7 +363,9 @@ class _AutomationEditPageState extends State<AutomationEditPage> {
               l10n.autoEditMissing(missing.join(l10n.agentsDaysSeparator)),
               style: t.note.copyWith(color: c.inkMuted),
             ),
-          ),
+          )
+        else
+          const SizedBox.shrink(),
         ShelfHeader(title: l10n.autoEditName, first: true),
         EditField(
           child: TextField(

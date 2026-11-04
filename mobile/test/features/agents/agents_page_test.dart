@@ -254,9 +254,26 @@ void main() {
     expect(find.textContaining('还差：指令'), findsOneWidget);
     expect(tester.widget<TextButton>(_saveButton()).onPressed, isNull);
 
-    await tester.enterText(find.byType(TextField).at(1), '写今天的晨报');
+    // 打第一个字时「还差」那行消失；输入框不能因此被重建、丢了焦点收起键盘。
+    final prompt = find.byType(TextField).at(1);
+    await tester.showKeyboard(prompt);
+    await tester.enterText(prompt, '写');
     await tester.pump();
     expect(find.textContaining('还差'), findsNothing);
+    bool promptFocused() => tester
+        .widget<EditableText>(
+          find.descendant(of: prompt, matching: find.byType(EditableText)),
+        )
+        .focusNode
+        .hasFocus;
+    expect(promptFocused(), isTrue);
+    await tester.enterText(prompt, '');
+    await tester.pump();
+    expect(find.textContaining('还差：指令'), findsOneWidget);
+    expect(promptFocused(), isTrue, reason: '删空时提示回来，也不收起键盘');
+
+    await tester.enterText(prompt, '写今天的晨报');
+    await tester.pump();
     await tester.tap(_saveButton());
     await tester.pumpAndSettle();
 
