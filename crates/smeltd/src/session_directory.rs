@@ -112,7 +112,6 @@ impl SessionRecord {
             cli_exited: self.cli_exited,
             agent_token: String::new(),
             title: self.title,
-            title_source: Default::default(),
             phase: self.phase,
             phase_since: now_unix,
             // 崩溃前那一轮已经随进程没了，恢复出来的是历史，不在一轮里。
@@ -506,7 +505,6 @@ mod tests {
             cli_exited: false,
             agent_token: "secret-token".to_string(),
             title: Some("重构存储层".to_string()),
-            title_source: Default::default(),
             phase: Phase::AwaitingApproval,
             phase_since: 100,
             turn_started_at: 0,

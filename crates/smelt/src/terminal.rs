@@ -682,8 +682,7 @@ impl TerminalWriter {
 }
 
 /// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态。
-/// OSC 0/2 标题这里不用：会话名由守护从 agent CLI 写的窗口标题里取（`apply_terminal_title`），
-/// 随会话状态推送。
+/// OSC 0/2 标题直接忽略：它不是会话名，这里也不保存。
 /// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板。程序的查询由新守护
 /// 答，旧守护没声明的那类才由客户端兜底（见 [`DaemonAnswers`]）。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
@@ -1260,7 +1259,7 @@ impl Terminal {
         let writer = TerminalWriter::start(buffered.get_ref().try_clone()?)?;
 
         // 2) alacritty 终端状态机。EventProxy 把 PTY 自动应答写回共享写端。
-        //    OSC 0/2 不在这里处理，见守护的 `apply_terminal_title`。
+        //    OSC 0/2 不保存。
         let bell_notify: NotifySlot = Arc::new(Mutex::new(None));
         let metrics = Arc::new(Mutex::new(TermMetrics {
             rows: size.rows as u16,

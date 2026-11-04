@@ -158,8 +158,8 @@ use session_directory::SessionDirectory;
 #[cfg(test)]
 pub(crate) use session_state::AgentBlocker;
 pub(crate) use session_state::{
-    Phase, PhaseSource, SessionState, apply_agent_event, apply_program_status, apply_terminal_title,
-    bump_state_revision, commit_session_phase, next_session_instance, now_unix,
+    Phase, PhaseSource, SessionState, apply_agent_event, apply_program_status, bump_state_revision,
+    commit_session_phase, next_session_instance, now_unix,
 };
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent};
 use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboundEvent};
@@ -1239,7 +1239,7 @@ fn handle_event_publish<C: ClientSocket>(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
-/// 常驻 Term 的事件监听。OSC 0/2 窗口标题只有 agent CLI 写的才进会话名（`apply_terminal_title`）。
+/// 常驻 Term 的事件监听。OSC 标题留在终端网格自己的标题栏，这里直接丢掉。
 /// Bell 只刷新活动时间并广播。程序的查询（颜色、设备属性、光标位置、尺寸）在网格锁内入队，
 /// 泵释放锁后再写回。
 #[derive(Clone)]
@@ -1303,27 +1303,18 @@ impl EventListener for StateListener {
             }
             return;
         }
-        // 窗口标题（OSC 0/2）只有 agent CLI 写的、清洗后还是名字的才当会话名，见
-        // `apply_terminal_title`；没变就不广播。恢复标题（ResetTitle）不清会话名。
-        let snapshot = match event {
-            Event::Title(title) => {
-                let Ok(mut st) = self.state.lock() else {
-                    return;
-                };
-                if !apply_terminal_title(&mut st, &title) {
-                    return;
-                }
-                st.clone()
-            }
-            Event::Bell => {
-                let Ok(mut st) = self.state.lock() else {
-                    return;
-                };
-                st.updated_at = now_unix();
-                bump_state_revision(&mut st);
-                st.clone()
-            }
-            _ => return,
+        // OSC 0/2 不是会话名，也不广播。
+        let Event::Bell = event else {
+            return;
+        };
+
+        let snapshot = {
+            let Ok(mut st) = self.state.lock() else {
+                return;
+            };
+            st.updated_at = now_unix();
+            bump_state_revision(&mut st);
+            st.clone()
         };
         broadcast_state(&self.event_hub, &snapshot);
     }

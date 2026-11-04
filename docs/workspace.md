@@ -5,7 +5,7 @@
 
 外壳不绑死某一家 agent。会话状态来自 agent hook（`smelt-notify`）和结构化协议
 （ACP 或 provider 原生 RPC），不靠轮询 transcript。会话名来自 ACP `session_title` 或 hook
-`SessionTitleChanged`，其次是 agent CLI 写的 OSC 0/2 窗口标题（清洗后），都没有时用首条用户请求。shell 自己写的窗口标题不是会话名。OSC 9/99/777 通知与响铃只用于信息提示。
+`SessionTitleChanged`，没有时用首条用户请求；OSC 0/2 不是会话名。OSC 9/99/777 通知与响铃只用于信息提示。
 用量是账户状态，按 provider 查询（Claude、Copilot、Codex、Cursor、Grok）。历史会话按来源读各家本机存档，
 不只 Claude Code。
 
