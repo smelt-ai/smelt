@@ -457,6 +457,79 @@ pub struct ResourceUsageResult {
     pub sessions: Vec<SessionResourceUsage>,
     /// 这台机器的物理内存总量；读不到是 0。
     pub total_memory_bytes: u64,
+    /// 本机模型的独立进程（含其子进程）。不算在 `daemon` 和 `sessions` 里。
+    /// 没有这个字段（`None`）是还不报它的旧运行时：界面显示「不可用」，不当成「未运行」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_model: Option<LocalModelUsage>,
+    /// 本机模型起标题的推理统计，只算成功的那几次，只在本次守护进程生命周期内存里。
+    /// `None` 是不报它的旧运行时；新运行时总是带上（还没成功过一次时里面是空的）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_model_inference: Option<LocalModelInferenceStats>,
+}
+
+/// 本机模型推理统计。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct LocalModelInferenceStats {
+    /// 最近一次成功推理；还没有过是 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<LocalModelInference>,
+    /// 按模型分开的平均值，按模型 id 排序。不同模型不混在一起平均。
+    #[serde(default)]
+    pub averages: Vec<LocalModelInferenceAverage>,
+}
+
+/// 一次成功推理。
+///
+/// - `wall_time_us`：守护进程里从启动模型子进程前到拿到并解析完结果（子进程已回收），微秒；
+///   含模型加载。
+/// - `cpu_time_us`：模型子进程自己（所有线程）从启动到写结果前的用户态 + 内核态 CPU 时间，
+///   微秒；不含它的子进程。
+/// - `peak_memory_bytes`：模型子进程自己的内存峰值，口径同实时占用：macOS 为峰值
+///   phys_footprint，Linux 为 VmHWM（峰值常驻集），Windows 为峰值工作集。不含独立显存。
+///
+/// 平台读不到的是 `None`；CPU 时间的 `Some(0)` 是真的 0，不表示没数据。
+/// 内存峰值为 0 时无法确认有效性，按不可用处理。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalModelInference {
+    /// 本机标题模型 id（如 `qwen3.5-0.8b`）。
+    pub model: String,
+    pub wall_time_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
+}
+
+/// 某个模型成功推理的平均值。各字段分别只在有数据的那几次上平均。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LocalModelInferenceAverage {
+    pub model: String,
+    /// 成功推理次数（也是 `wall_time_us` 的样本数）。
+    pub inferences: u64,
+    pub wall_time_us: f64,
+    /// 有 CPU 数据的那几次；一次都没有是 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time_us: Option<InferenceMean>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<InferenceMean>,
+}
+
+/// 均值和参与平均的样本数。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct InferenceMean {
+    pub samples: u64,
+    pub mean: f64,
+}
+
+/// 本机模型进程此刻的状态。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LocalModelUsage {
+    /// 没有模型进程在跑（没装、空闲时已退出，或采样前后都没登记）。
+    NotRunning,
+    Running { usage: ProcessUsage },
+    /// 模型进程登记为在跑，但这次没采到它的占用。不编数字。
+    Unsampled,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -594,6 +667,88 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use smelt_runtime_client::protocol::control::*;
+
+    /// 旧运行时不带 `local_model`：读成 `None`（不可用），不是「未运行」。
+    #[test]
+    fn resource_usage_local_model_is_optional_and_tagged() {
+        let old: ResourceUsageResult = serde_json::from_value(serde_json::json!({
+            "daemon": {"cpu_percent": 0.0, "memory_bytes": 1, "process_count": 1},
+            "sessions": [],
+            "total_memory_bytes": 2
+        }))
+        .unwrap();
+        assert_eq!(old.local_model, None);
+        assert!(serde_json::to_value(&old).unwrap().get("local_model").is_none());
+
+        for model in [
+            LocalModelUsage::NotRunning,
+            LocalModelUsage::Unsampled,
+            LocalModelUsage::Running {
+                usage: ProcessUsage {
+                    cpu_percent: 50.0,
+                    memory_bytes: 700,
+                    process_count: 1,
+                },
+            },
+        ] {
+            let result = ResourceUsageResult {
+                local_model: Some(model),
+                ..Default::default()
+            };
+            let value = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ResourceUsageResult>(value).unwrap(),
+                result
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(LocalModelUsage::NotRunning).unwrap(),
+            serde_json::json!({"state": "not_running"})
+        );
+        assert_eq!(
+            serde_json::to_value(LocalModelUsage::Unsampled).unwrap(),
+            serde_json::json!({"state": "unsampled"})
+        );
+    }
+    #[test]
+    fn local_model_inference_stats_are_optional_and_round_trip() {
+        let old: ResourceUsageResult = serde_json::from_value(serde_json::json!({
+            "daemon": {"cpu_percent": 0.0, "memory_bytes": 1, "process_count": 1},
+            "sessions": [],
+            "total_memory_bytes": 2,
+            "local_model": {"state": "not_running"}
+        }))
+        .unwrap();
+        assert_eq!(old.local_model_inference, None);
+        assert!(serde_json::to_value(&old).unwrap().get("local_model_inference").is_none());
+
+        let result = ResourceUsageResult {
+            local_model_inference: Some(LocalModelInferenceStats {
+                last: Some(LocalModelInference {
+                    model: "qwen3.5-0.8b".into(),
+                    wall_time_us: 1_500,
+                    cpu_time_us: Some(0),
+                    peak_memory_bytes: None,
+                }),
+                averages: vec![LocalModelInferenceAverage {
+                    model: "qwen3.5-0.8b".into(),
+                    inferences: 2,
+                    wall_time_us: 1_250.0,
+                    cpu_time_us: Some(InferenceMean { samples: 1, mean: 0.0 }),
+                    peak_memory_bytes: None,
+                }],
+            }),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        // 0 是真数据，照样带上；没数据的字段不出现。
+        assert_eq!(value["local_model_inference"]["last"]["cpu_time_us"], 0);
+        assert!(value["local_model_inference"]["last"].get("peak_memory_bytes").is_none());
+        assert_eq!(serde_json::from_value::<ResourceUsageResult>(value).unwrap(), result);
+
+        let empty: LocalModelInferenceStats = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty, LocalModelInferenceStats::default());
+    }
 
     /// Pi 启动器（`agent/src/memory-host.ts`）按这份样例解析 daemon 的回复。
     /// 两边共用同一个文件，任何一边改了线上格式都会让对方的测试失败。

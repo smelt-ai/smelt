@@ -51,6 +51,8 @@ fn make_acp_session_value(
     AcpSession {
         instance,
         reduced: Watched::new(reduced),
+        persisted_titles: SessionLock::new(None),
+        local_title: SessionLock::new(Default::default()),
         snapshot_revision: AtomicU64::new(0),
         connection_generation: AtomicU64::new(0),
         turn_completion: SessionLock::new(()),

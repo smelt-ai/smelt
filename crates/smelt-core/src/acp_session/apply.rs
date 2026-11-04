@@ -482,6 +482,8 @@ fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut Apply
     state.tool_debug.clear();
     state.note_tool_debug_changed();
     state.replaying_history = true;
+    // 正文整份重建：重放前冻结的起名输入不再代表当前内容。
+    state.discard_local_title_input();
     state.cancelled_tool_call_ids.clear();
     state.cancelled_turn_seq = None;
     state.tool_turn_seq.clear();
@@ -1357,6 +1359,9 @@ fn apply_rewound(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, trunca
         return;
     }
     state.entries.truncate(truncate_from);
+    // 冻结的起名输入可能含被截掉的用户消息：在跑的结果作废，回退本身不排新任务。
+    // 回退后重发的那条走正常发送，到时再按它起名。
+    state.discard_local_title_input();
     let mut remaining_tool_ids = std::collections::BTreeSet::new();
     collect_tool_ids(&state.entries, &mut remaining_tool_ids);
     state

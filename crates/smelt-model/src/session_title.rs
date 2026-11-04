@@ -100,6 +100,38 @@ pub fn provider_session_title(incoming: Option<&str>) -> Option<&str> {
     nonempty(incoming)
 }
 
+/// ACP 会话名的各个来源，分开保存，不把已经决定好的名字倒灌回某一个来源。
+///
+/// 用户手改名不在这里：它存在工作区目录 / `history_title`，由展示层最先采用
+/// （[`display_title`] 的 `custom_title`）。这里的顺序是 provider > 旧版标题 > 本机模型 > 首条 prompt。
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionTitleSources {
+    /// Agent 通过 ACP `session_info_update` 上报的标题。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 分来源保存之前的版本只存了决定好的展示名，分不出是 provider 标题还是 prompt
+    /// 兜底。原样留着，不冒充 provider、也不冒充本机模型；有它就不再让本机模型起名。
+    #[serde(default)]
+    pub legacy: Option<String>,
+    /// 本机已安装的小模型为这段对话生成的标题。
+    #[serde(default)]
+    pub local_model: Option<String>,
+    /// 首条用户请求生成的兜底标题。
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+impl SessionTitleSources {
+    /// provider > 旧版标题 > 本机模型 > 首条 prompt；空白不算名字。
+    pub fn resolved(&self) -> Option<String> {
+        nonempty(self.provider.as_deref())
+            .or_else(|| nonempty(self.legacy.as_deref()))
+            .or_else(|| nonempty(self.local_model.as_deref()))
+            .or_else(|| nonempty(self.prompt.as_deref()))
+            .map(str::to_string)
+    }
+}
+
 /// 会话名：非空的提供方标题优先，否则用首条请求兜底。
 pub fn session_name(provider_title: Option<&str>, prompt_fallback: Option<&str>) -> Option<String> {
     provider_session_title(provider_title)
@@ -128,6 +160,24 @@ mod tests {
             Some("首条问题")
         );
         assert_eq!(session_name(None, None), None);
+    }
+
+    #[test]
+    fn title_sources_resolve_provider_then_local_model_then_prompt() {
+        let mut sources = SessionTitleSources {
+            provider: Some("协议标题".into()),
+            legacy: Some("旧版标题".into()),
+            local_model: Some("本机标题".into()),
+            prompt: Some("首条问题".into()),
+        };
+        assert_eq!(sources.resolved().as_deref(), Some("协议标题"));
+        sources.provider = Some("  ".into());
+        assert_eq!(sources.resolved().as_deref(), Some("旧版标题"));
+        sources.legacy = None;
+        assert_eq!(sources.resolved().as_deref(), Some("本机标题"));
+        sources.local_model = None;
+        assert_eq!(sources.resolved().as_deref(), Some("首条问题"));
+        assert_eq!(SessionTitleSources::default().resolved(), None);
     }
 
     #[test]

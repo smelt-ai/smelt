@@ -3540,7 +3540,7 @@ fn hosted_mirror_drops_committed_history_and_keeps_the_open_turn() {
 }
 
 #[test]
-fn hosted_mirror_keeps_protocol_title_when_a_streaming_frame_omits_it() {
+fn hosted_mirror_keeps_title_sources_when_a_streaming_frame_omits_the_envelope() {
     let mut state = AcpSessionState::default();
     let mut snapshot = state.to_snapshot(false);
     snapshot.entries_offset = 0;
@@ -3552,7 +3552,10 @@ fn hosted_mirror_keeps_protocol_title_when_a_streaming_frame_omits_it() {
             thought: false,
         },
     ];
-    snapshot.session_title = Some("UAT 问题修复".into());
+    snapshot.title_sources = Some(crate::session_title::SessionTitleSources {
+        provider: Some("UAT 问题修复".into()),
+        ..Default::default()
+    });
     snapshot.phase = DaemonPhase::Thinking;
     state
         .merge_hosted_snapshot(snapshot)
@@ -3562,26 +3565,23 @@ fn hosted_mirror_keeps_protocol_title_when_a_streaming_frame_omits_it() {
         Some("UAT 问题修复")
     );
 
-    let mut tail = state.to_snapshot(false);
-    tail.entries_offset = 1;
-    tail.entries_total = 2;
+    let mut tail = state.to_snapshot_range_selective(false, 1, 2, false, false, false);
     tail.entries = vec![AcpEntry::Assistant {
         text: "正在看日志".into(),
         thought: false,
     }];
-    tail.session_title = None;
-    tail.phase = DaemonPhase::Thinking;
+    assert!(tail.envelope_omitted && tail.title_sources.is_none());
     state
         .merge_hosted_snapshot(tail)
         .expect("只改正文的流式帧应能合并");
     assert_eq!(
         state.resolved_session_title().as_deref(),
         Some("UAT 问题修复"),
-        "流式帧没带标题不能把协议标题盖成空，否则侧栏会落到当前回合的提问"
+        "流式帧省略信封不能把标题来源清空，否则侧栏会落到当前回合的提问"
     );
 
     let mut renamed = state.to_snapshot(false);
-    renamed.session_title = Some("登录失败定位".into());
+    renamed.title_sources.as_mut().unwrap().provider = Some("登录失败定位".into());
     state
         .merge_hosted_snapshot(renamed)
         .expect("带新标题的帧应能合并");
@@ -3590,6 +3590,469 @@ fn hosted_mirror_keeps_protocol_title_when_a_streaming_frame_omits_it() {
         Some("登录失败定位"),
         "新的非空标题仍然要换上"
     );
+}
+
+#[test]
+fn hosted_mirror_does_not_promote_resolved_title_to_provider_title() {
+    let mut host = AcpSessionState::default();
+    note_prompt_sent(&mut host, "帮我排查登录接口为什么超时".into(), Vec::new());
+    let snapshot = host.to_snapshot(false);
+    assert_eq!(
+        snapshot.session_title.as_deref(),
+        Some("帮我排查登录接口为什么超时")
+    );
+
+    let mut mirror = AcpSessionState::default();
+    mirror
+        .merge_hosted_snapshot(snapshot)
+        .expect("宿主快照应能合并");
+    assert_eq!(
+        mirror.protocol_title, None,
+        "首条 prompt 兜底不是 provider 标题"
+    );
+    let restored = AcpSessionState::from_snapshot(mirror.to_snapshot(true));
+    assert_eq!(restored.protocol_title, None);
+    assert_eq!(restored.local_title, None);
+    assert_eq!(
+        restored.resolved_session_title().as_deref(),
+        Some("帮我排查登录接口为什么超时")
+    );
+}
+
+#[test]
+fn snapshot_round_trip_preserves_each_title_source() {
+    let mut state = fresh_state();
+    let (revision, input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    assert!(state.apply_local_title(revision, &input, "登录超时排查".into()));
+    let snapshot = state.to_snapshot(true);
+    assert_eq!(snapshot.session_title.as_deref(), Some("登录超时排查"));
+    let json = serde_json::to_string(&snapshot).unwrap();
+    let decoded: ConversationSnapshot = serde_json::from_str(&json).unwrap();
+    let mut restored = AcpSessionState::from_snapshot(decoded);
+    assert_eq!(restored.protocol_title, None);
+    assert_eq!(restored.local_title.as_deref(), Some("登录超时排查"));
+    assert_eq!(
+        restored.resolved_session_title().as_deref(),
+        Some("登录超时排查")
+    );
+
+    apply_event(
+        &mut restored,
+        ConversationEvent::SessionTitle(Some("定位登录接口超时".into())),
+    );
+    assert_eq!(
+        restored.resolved_session_title().as_deref(),
+        Some("定位登录接口超时"),
+        "provider 标题优先于本机模型标题"
+    );
+    apply_event(&mut restored, ConversationEvent::SessionTitle(None));
+    assert_eq!(
+        restored.resolved_session_title().as_deref(),
+        Some("登录超时排查"),
+        "provider 清空后回到本机模型标题，而不是首条 prompt"
+    );
+}
+
+/// 用户真正发出一条消息：归约当场冻结起名输入，返回这一版请求。
+fn send_for_local_title(state: &mut AcpSessionState, text: &str) -> (u64, String) {
+    note_prompt_sent(state, text.into(), Vec::new());
+    state
+        .local_title_request()
+        .expect("用户消息一发出就应能按对话内容起名")
+}
+
+fn reply(state: &mut AcpSessionState, thought: bool, text: &str) {
+    apply_event(
+        state,
+        ConversationEvent::AgentChunk {
+            thought,
+            text: text.into(),
+            parent_id: None,
+        },
+    );
+}
+
+#[test]
+fn local_title_is_requested_as_soon_as_the_user_sends_and_uses_recent_dialogue() {
+    let mut state = fresh_state();
+    assert_eq!(state.local_title_request(), None, "没有用户消息就不生成");
+    let (first, input) = send_for_local_title(&mut state, "  帮我排查登录接口为什么超时 ");
+    assert_eq!(input, "用户：帮我排查登录接口为什么超时", "不等助手回复");
+    reply(&mut state, true, "先想想要看哪些日志");
+    reply(&mut state, false, "超时来自数据库连接池耗尽。");
+    state.entries_mut().push(AcpEntry::ToolCall {
+        id: "tool-1".into(),
+        title: "读取 pool.rs".into(),
+        kind: crate::acp_chat::ToolKind::Read,
+        status: crate::acp_chat::ToolCallStatus::Completed,
+        output: Vec::new(),
+        children: vec![AcpEntry::Assistant {
+            text: "子代理在 pool.rs 里翻到的正文".into(),
+            thought: false,
+        }],
+        subagents: Vec::new(),
+        peer: None,
+    });
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    assert_eq!(
+        state.local_title_request(),
+        Some((first, input)),
+        "助手增量和回合结束都不换版本、不改冻结输入"
+    );
+
+    let (second, input) = send_for_local_title(&mut state, "把连接池调大");
+    assert!(second > first, "每条用户消息换一个新版本");
+    assert_eq!(
+        input,
+        "用户：帮我排查登录接口为什么超时\n助手：超时来自数据库连接池耗尽。\n\n\
+         用户：把连接池调大"
+    );
+    assert!(!input.contains("先想想"), "思考块不进输入");
+    assert!(!input.contains("pool.rs"), "工具调用不进输入");
+}
+
+#[test]
+fn local_title_input_is_bounded_and_keeps_the_latest_turns() {
+    let mut state = fresh_state();
+    for index in 0..20 {
+        note_prompt_sent(&mut state, format!("问题{index}：{}", "长".repeat(1000)), Vec::new());
+        reply(&mut state, false, &"答".repeat(2000));
+        apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    }
+    let (_, input) = send_for_local_title(&mut state, "最后一个问题");
+    assert!(input.chars().count() <= 1200, "输入有上限：{}", input.chars().count());
+    assert!(input.contains("最后一个问题"), "最新的消息一定在里面");
+    assert!(!input.contains("问题0："), "太早的回合被挤掉");
+}
+
+#[test]
+fn local_title_is_replaced_on_later_messages_and_stale_results_are_dropped() {
+    let mut state = fresh_state();
+    let (first, first_input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    assert!(!state.apply_local_title(first, &first_input, "   ".into()), "空标题不写");
+    assert!(!state.apply_local_title(first + 1, &first_input, "版本不对".into()));
+    assert!(!state.apply_local_title(first, "别的内容", "内容不对".into()));
+    assert!(state.apply_local_title(first, &first_input, "登录超时排查".into()));
+    assert!(
+        !state.apply_local_title(first, &first_input, "登录超时排查".into()),
+        "同样的标题不算变化"
+    );
+
+    // 生成期间用户又发了一条：旧结果作废，新消息的结果可以替换已有的本机标题。
+    reply(&mut state, false, "看日志");
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    let (second, second_input) = send_for_local_title(&mut state, "顺便把重试加上退避");
+    assert!(
+        !state.apply_local_title(first, &first_input, "旧结果".into()),
+        "旧版本的迟到结果不能覆盖新内容"
+    );
+    assert_eq!(state.local_title.as_deref(), Some("登录超时排查"));
+    assert!(state.apply_local_title(second, &second_input, "登录超时与重试退避".into()));
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("登录超时与重试退避")
+    );
+}
+
+/// 回合进行中 steer 被 provider 吃进当前回合：这才是用户消息真正进入对话，
+/// 当场换一版输入；还在 steering 队列里时不算。
+#[test]
+fn consumed_steering_requests_a_local_title_but_queued_steering_does_not() {
+    let mut state = fresh_state();
+    let (first, _) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    reply(&mut state, false, "正在看日志");
+    queue_mid_turn_input(&mut state, "顺便看下重试".into(), Vec::new());
+    apply_event(
+        &mut state,
+        ConversationEvent::PromptQueue {
+            steering: vec!["顺便看下重试".into()],
+            follow_up: Vec::new(),
+        },
+    );
+    assert_eq!(
+        state.local_title_revision(),
+        Some(first),
+        "还在队列里的 steer 不进对话、不起名"
+    );
+    apply_event(
+        &mut state,
+        ConversationEvent::PromptQueue {
+            steering: Vec::new(),
+            follow_up: Vec::new(),
+        },
+    );
+    let (second, input) = state.local_title_request().expect("steer 进入对话就起名");
+    assert!(second > first);
+    assert_eq!(
+        input,
+        "用户：帮我排查登录接口为什么超时\n助手：正在看日志\n\n用户：顺便看下重试"
+    );
+}
+
+/// 用户把刚发出的消息撤回输入框：冻结输入里有已撤回的正文，在跑的结果作废；
+/// 撤回本身不排新任务。
+#[test]
+fn undone_prompt_rejects_its_local_title_and_requests_nothing() {
+    let mut state = fresh_state();
+    let (first, first_input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    reply(&mut state, false, "看日志");
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    let (second, second_input) = send_for_local_title(&mut state, "其实是想问别的");
+    undo_prompt_sent(&mut state).expect("刚写下的那条可撤回");
+    assert_eq!(state.local_title_request(), None, "撤回不排新任务");
+    assert!(
+        !state.apply_local_title(second, &second_input, "已撤回内容的标题".into()),
+        "按已撤回内容起的名不能用"
+    );
+    assert!(!state.apply_local_title(first, &first_input, "更早的结果".into()));
+    assert_eq!(state.local_title, None);
+}
+
+/// 回退截掉用户消息：冻结输入作废，回退本身不排新任务；没截到东西时原样保留。
+#[test]
+fn rewind_rejects_local_title_from_rewound_content_and_requests_nothing() {
+    let mut state = fresh_state();
+    let (revision, input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    apply_event(
+        &mut state,
+        ConversationEvent::Rewound {
+            truncate_from: 99,
+            then: crate::acp_conn::AfterRewind::RestoreComposer,
+        },
+    );
+    assert_eq!(
+        state.local_title_request(),
+        Some((revision, input.clone())),
+        "越界的回退没改正文，输入照旧"
+    );
+    apply_event(
+        &mut state,
+        ConversationEvent::Rewound {
+            truncate_from: 0,
+            then: crate::acp_conn::AfterRewind::RestoreComposer,
+        },
+    );
+    assert_eq!(state.local_title_request(), None, "回退不排新任务");
+    assert!(!state.apply_local_title(revision, &input, "回退前的标题".into()));
+    assert_eq!(state.local_title, None);
+}
+
+/// 第一条消息起名的结果在助手回复、回合结束之后才回来：照常写上，回合进行中的
+/// 增量不影响它。第二条消息发出后，第一条迟到的结果盖不回去。
+#[test]
+fn local_title_result_survives_streaming_but_not_a_newer_message() {
+    let mut state = fresh_state();
+    let (first, first_input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    reply(&mut state, false, "超时来自连接池耗尽。");
+    assert!(
+        state.apply_local_title(first, &first_input, "登录超时排查".into()),
+        "助手在写时，按发出那一刻冻结的结果照常显示"
+    );
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+
+    let (second, second_input) = send_for_local_title(&mut state, "顺便把重试加上退避");
+    assert!(second > first);
+    assert!(second_input.contains("超时来自连接池耗尽。"));
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("登录超时排查"),
+        "新结果回来前仍显示上一次的名字"
+    );
+    assert!(state.apply_local_title(second, &second_input, "登录超时与重试退避".into()));
+    assert!(
+        !state.apply_local_title(first, &first_input, "登录超时排查".into()),
+        "旧版本不覆盖新版本"
+    );
+}
+
+/// 重启、重放清掉冻结输入：已在跑的结果作废，也不再为它起名。
+#[test]
+fn discarded_local_title_input_rejects_in_flight_results() {
+    let mut state = fresh_state();
+    let (revision, input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    reset_for_restart(&mut state);
+    assert_eq!(state.local_title_request(), None);
+    assert!(!state.apply_local_title(revision, &input, "登录超时排查".into()));
+
+    let mut state = fresh_state();
+    let (revision, input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    assert_eq!(state.local_title_request(), None);
+    assert!(!state.apply_local_title(revision, &input, "登录超时排查".into()));
+    assert_eq!(state.local_title, None);
+}
+
+#[test]
+fn local_title_never_replaces_provider_title_and_stays_out_of_it() {
+    let mut state = fresh_state();
+    let (revision, input) = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    apply_event(
+        &mut state,
+        ConversationEvent::SessionTitle(Some("定位登录接口超时".into())),
+    );
+    assert_eq!(state.local_title_revision(), None, "已有 provider 标题就不再生成");
+    assert!(
+        !state.apply_local_title(revision, &input, "登录超时排查".into()),
+        "迟到的本机结果不能盖住 provider 标题"
+    );
+    assert_eq!(state.local_title, None);
+    assert_eq!(state.protocol_title.as_deref(), Some("定位登录接口超时"));
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("定位登录接口超时")
+    );
+}
+
+/// 重放出来的历史用户消息（回声）不是用户这次发的，不起名。
+#[test]
+fn replayed_user_messages_do_not_request_a_local_title() {
+    let mut state = fresh_state();
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    apply_event(
+        &mut state,
+        ConversationEvent::UserChunk("帮我排查登录接口为什么超时".into()),
+    );
+    reply(&mut state, false, "看日志");
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    assert_eq!(state.local_title_revision(), None, "重放里的消息不算");
+}
+
+/// 自己刚发那条的回声不再记一版：同一条消息只起一次名。
+#[test]
+fn user_echo_does_not_request_a_second_local_title() {
+    let mut state = fresh_state();
+    let request = send_for_local_title(&mut state, "帮我排查登录接口为什么超时");
+    apply_event(
+        &mut state,
+        ConversationEvent::UserChunk("帮我排查登录接口为什么超时".into()),
+    );
+    assert_eq!(state.local_title_request(), Some(request));
+}
+
+#[test]
+fn trimmed_buffer_keeps_first_prompt_fallback() {
+    let mut state = fresh_state();
+    note_prompt_sent(&mut state, "第一个问题".into(), Vec::new());
+    apply_event(
+        &mut state,
+        ConversationEvent::AgentChunk {
+            thought: false,
+            text: "第一个回答".into(),
+            parent_id: None,
+        },
+    );
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    note_prompt_sent(&mut state, "第二个问题".into(), Vec::new());
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    state.trim_to_current_turn();
+    assert!(state.entries_base() > 0);
+    assert_eq!(
+        state.local_title_request().map(|(_, input)| input).as_deref(),
+        Some("用户：第一个问题\n助手：第一个回答\n\n用户：第二个问题"),
+        "输入在用户消息发出时冻结，之后裁前缀不改它"
+    );
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("第一个问题"),
+        "裁掉前缀后兜底仍是首条消息，不是当前回合的提问"
+    );
+}
+
+#[test]
+fn seeded_title_sources_fill_only_missing_values() {
+    let mut state = fresh_state();
+    state.seed_title_sources(Some("库里的协议标题"), Some("旧版标题"), Some("库里的本机标题"));
+    assert_eq!(state.protocol_title.as_deref(), Some("库里的协议标题"));
+    assert_eq!(state.legacy_title.as_deref(), Some("旧版标题"));
+    assert_eq!(state.local_title.as_deref(), Some("库里的本机标题"));
+    state.seed_title_sources(Some("另一份"), Some("另一份"), Some("另一份"));
+    assert_eq!(state.protocol_title.as_deref(), Some("库里的协议标题"));
+    assert_eq!(state.legacy_title.as_deref(), Some("旧版标题"));
+    assert_eq!(state.local_title.as_deref(), Some("库里的本机标题"));
+    state.seed_title_sources(Some("  "), None, None);
+    assert_eq!(state.protocol_title.as_deref(), Some("库里的协议标题"));
+}
+
+/// 旧版标题来源不明：排在 provider 之后、本机模型和 prompt 之前，不冒充 provider，
+/// 有它就不再请本机模型起名；快照往返后还在。
+#[test]
+fn legacy_title_ranks_between_provider_and_local_model_and_blocks_local_generation() {
+    let mut state = fresh_state();
+    state.seed_title_sources(None, Some("旧版的 provider 标题"), None);
+    note_prompt_sent(&mut state, "帮我排查登录接口为什么超时".into(), Vec::new());
+    assert_eq!(state.protocol_title, None);
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("旧版的 provider 标题"),
+        "旧版标题优先于首条 prompt"
+    );
+    apply_event(&mut state, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    assert_eq!(state.local_title_request(), None, "有旧版标题就不再生成");
+    assert!(!state.apply_local_title(1, "用户：帮我排查登录接口为什么超时", "登录超时排查".into()));
+    assert_eq!(state.local_title, None);
+
+    let json = serde_json::to_string(&state.to_snapshot(true)).unwrap();
+    let decoded: ConversationSnapshot = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        decoded.title_sources.as_ref().and_then(|s| s.legacy.as_deref()),
+        Some("旧版的 provider 标题")
+    );
+    let mut restored = AcpSessionState::from_snapshot(decoded);
+    assert_eq!(restored.protocol_title, None);
+    assert_eq!(restored.legacy_title.as_deref(), Some("旧版的 provider 标题"));
+    assert_eq!(
+        restored.resolved_session_title().as_deref(),
+        Some("旧版的 provider 标题")
+    );
+
+    let mut mirror = AcpSessionState::default();
+    mirror
+        .merge_hosted_snapshot(restored.to_snapshot(true))
+        .expect("宿主快照应能合并");
+    assert_eq!(mirror.legacy_title.as_deref(), Some("旧版的 provider 标题"));
+    assert_eq!(mirror.protocol_title, None);
+
+    apply_event(
+        &mut restored,
+        ConversationEvent::SessionTitle(Some("新的 provider 标题".into())),
+    );
+    assert_eq!(
+        restored.resolved_session_title().as_deref(),
+        Some("新的 provider 标题"),
+        "provider 标题优先于旧版标题"
+    );
+}
+
+/// 分来源之前的快照（热升级、旧落盘）只有 `session_title`：恢复后名字不能丢，
+/// 当旧版标题留着，不当 provider 标题，也不让本机模型换掉。
+#[test]
+fn snapshot_without_title_sources_keeps_session_title_as_legacy() {
+    let mut state = fresh_state();
+    note_prompt_sent(&mut state, "帮我排查登录接口为什么超时".into(), Vec::new());
+    let mut snapshot = state.to_snapshot(true);
+    snapshot.title_sources = None;
+    snapshot.session_title = Some("旧快照里的标题".into());
+    let json = serde_json::to_value(&snapshot).unwrap();
+    let mut json = json;
+    json.as_object_mut().unwrap().remove("title_sources");
+    let decoded: ConversationSnapshot = serde_json::from_value(json).unwrap();
+    assert!(decoded.title_sources.is_none());
+
+    let restored = AcpSessionState::from_snapshot(decoded);
+    assert_eq!(restored.protocol_title, None);
+    assert_eq!(restored.local_title, None);
+    assert_eq!(restored.legacy_title.as_deref(), Some("旧快照里的标题"));
+    assert_eq!(
+        restored.resolved_session_title().as_deref(),
+        Some("旧快照里的标题")
+    );
+    assert_eq!(restored.local_title_revision(), None);
+
+    // 没有标题的旧快照不凭空造旧版标题。
+    let mut empty = fresh_state().to_snapshot(true);
+    empty.title_sources = None;
+    empty.session_title = Some("   ".into());
+    assert_eq!(AcpSessionState::from_snapshot(empty).legacy_title, None);
 }
 
 #[test]
@@ -3611,7 +4074,10 @@ fn hosted_mirror_keeps_the_last_turn_when_idle() {
             thought: false,
         },
     ];
-    snapshot.session_title = Some("来自宿主的标题".into());
+    snapshot.title_sources = Some(crate::session_title::SessionTitleSources {
+        provider: Some("来自宿主的标题".into()),
+        ..Default::default()
+    });
 
     state
         .merge_hosted_snapshot(snapshot)

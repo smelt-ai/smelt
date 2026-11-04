@@ -211,6 +211,11 @@ pub(crate) struct AcpSession {
     /// 已经写进 `acp_detail.history_session_id` 的身份。
     /// 和内存里的确认值一样就不再写库；行还不在时保持空，下一帧再试。
     pub(crate) durable_history_session_id: SessionLock<Option<String>>,
+    /// 已经写进 `acp_detail` 的标题和来源。一样就不再写库。
+    pub(crate) persisted_titles: SessionLock<Option<smelt_store::AcpSessionTitles>>,
+    /// 本机模型起名的排期：用户每发一条消息就按最新内容重起，每段会话至多一个任务在排队或在跑。
+    /// 见 `local_title`。
+    pub(crate) local_title: SessionLock<crate::local_title::LocalTitleSchedule>,
     /// 闲置挂起的账本，见 `acp_idle`。
     pub(crate) idle: crate::acp_idle::AcpIdleState,
 }
@@ -710,17 +715,74 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         }
     };
     if let Some(snapshot) = snapshot {
-        // agent 报的标题是对话的一部分：变了才记进工作区目录，GUI 没开时冷启动也看得到。
-        if title_changed {
-            crate::workspace_directory::remember_acp_session_title(
-                &snapshot.id,
-                title.as_deref(),
-                subscribers,
-            );
-        }
         broadcast_state(subscribers, &snapshot);
     }
+    persist_session_titles(sess, subscribers);
     note_automation_watch(sess);
+}
+
+/// 会话标题和来源是对话的一部分：变了才记进工作区目录，GUI 没开时冷启动也看得到，
+/// 守护重启后恢复会话也靠它，不把本机模型起过的名字丢掉、也不重新生成。
+/// 还没有展示名（刚连上、重放还没到）不是一次决定，不写，免得把库里的名字冲成空。
+fn persist_session_titles(sess: &AcpSession, subscribers: &EventHubHandle) {
+    let id = sess.state.lock().id.clone();
+    // 锁顺序：persisted_titles → reduced。标题必须在持有 persisted_titles 时现读：
+    // 两个线程同时更新时，先读到旧标题的那个若在锁外排队，会在后来者写入新标题之后
+    // 再把旧标题写回库里，并把「已写入」记成旧值。现读保证落库的永远是最新的一份。
+    // 任何地方都不能持有 reduced 再取 persisted_titles。
+    let mut persisted = sess.persisted_titles.lock();
+    let titles = session_titles_of(&sess.reduced.lock());
+    if titles.session_title.is_none() {
+        return;
+    }
+    if persisted.as_ref() == Some(&titles) {
+        return;
+    }
+    if crate::workspace_directory::remember_acp_session_titles(&id, &titles, subscribers) {
+        *persisted = Some(titles);
+    }
+}
+
+fn session_titles_of(
+    reduced: &smelt_core::acp_session::AcpSessionState,
+) -> smelt_store::AcpSessionTitles {
+    smelt_store::AcpSessionTitles {
+        session_title: reduced.resolved_session_title(),
+        provider_title: smelt_core::session_title::provider_session_title(
+            reduced.protocol_title.as_deref(),
+        )
+        .map(str::to_string),
+        local_model_title: reduced.local_title.clone(),
+        legacy_title: reduced.legacy_title.clone(),
+    }
+}
+
+/// 从库里读上次保存的标题来源（守护重启、闲置挂起后重开）。读库在登记槽位之前、
+/// 任何锁之外做；结果交给 [`seed_session_titles`] 在新会话登记前填进去。
+fn load_session_titles_from_store(id: &str) -> Option<smelt_store::AcpSessionTitles> {
+    let store = smelt_core::sqlite_state::default_sqlite_store().ok()?;
+    match store.acp_session_titles(id) {
+        Ok(titles) => titles,
+        Err(error) => {
+            eprintln!("[acp] 读取对话标题失败 id={id}: {error}");
+            None
+        }
+    }
+}
+
+/// 把库里的标题来源填进一段还没登记、别人看不见的新会话。必须在 `reserve_with`
+/// 的构造闭包里调用：登记之后再填，别的线程会先看到没有标题的会话（推出空标题快照、
+/// 或排上本机模型起名）。库里的值同时记成「已写入」，没变就不再写回。
+fn seed_session_titles(sess: &AcpSession, titles: Option<smelt_store::AcpSessionTitles>) {
+    let Some(titles) = titles else {
+        return;
+    };
+    sess.reduced.lock().seed_title_sources(
+        titles.provider_title.as_deref(),
+        titles.legacy_title.as_deref(),
+        titles.local_model_title.as_deref(),
+    );
+    *sess.persisted_titles.lock() = Some(titles);
 }
 
 #[derive(Clone, PartialEq)]
@@ -1591,6 +1653,8 @@ pub(crate) fn start_acp_event_drain(
     acp_sessions: AcpSessions,
     generation: u64,
 ) {
+    // 发送路径只拿得到 `&AcpSession`：先登记槽位，用户消息一发出就能排本机起名。
+    crate::local_title::attach(&slot);
     thread::spawn(move || {
         let slot_for_panic = Arc::clone(&slot);
         let session_id_for_panic = session_id.clone();
@@ -1719,6 +1783,7 @@ pub(crate) fn start_acp_event_drain(
                         }
                         let (outcome, owner_ids) = {
                             let mut st = sess.reduced.lock();
+                            // steer 被吃进当前回合时归约会给本机起名记一版，排期在推送之后。
                             let outcome = smelt_core::acp_session::apply_event(&mut st, ev);
                             let owner_ids = live_acp_owner_ids(&st);
                             (outcome, owner_ids)
@@ -1732,6 +1797,8 @@ pub(crate) fn start_acp_event_drain(
                                 smelt_core::acp_session::AcpEndKind::SessionOwnershipConflict,
                                 error.to_string(),
                             );
+                            // 这段对话归别的会话了：本批冻结的起名输入作废，迟到结果也认不上。
+                            reduced.discard_local_title_input();
                             drop(reduced);
                             offsets.push(outcome.entries_offset);
                             push_acp_snapshot_since(
@@ -1771,6 +1838,7 @@ pub(crate) fn start_acp_event_drain(
                             None,
                         );
                         update_acp_daemon_state(sess, &subscribers);
+                        crate::local_title::request_if_needed(&slot, &subscribers);
                         if let Some((text, images)) = resend.take() {
                             queue_retry_prompt(sess, text, images);
                         }
@@ -2106,6 +2174,8 @@ pub(crate) fn make_acp_session(
         conversation_submit: SessionLock::new(RecentSubmissions::default()),
         pending_agent_preset: SessionLock::new(pending_agent_preset),
         durable_history_session_id: SessionLock::new(None),
+        persisted_titles: SessionLock::new(None),
+        local_title: SessionLock::new(Default::default()),
         idle: Default::default(),
     }
 }
@@ -2236,6 +2306,8 @@ pub(crate) fn send_acp_prompt_reserved(
         if remember_outgoing_prompt(sess, shown_text, shown_images, delivery_id, origin, echoed) {
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
+            // 用户消息已经写进对话：本机起名立即排队，不等助手回复。重发不走这里。
+            crate::local_title::request_for_session(sess, subscribers);
         }
         Ok(())
     } else {
@@ -3316,7 +3388,7 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
         crate::peer_messages::reset_chain(id);
         let slot = ensure_conversation_runtime(id, acp_sessions, workspace_directory, subscribers)
             .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
-        acp_sessions
+        let submitted = acp_sessions
             .with_current(id, &slot, |session| {
                 apply_submit_config_values(session, &config_values, subscribers)?;
                 dispatch_conversation_input(session, input, subscribers)
@@ -3325,7 +3397,8 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
                 smelt_core::conversation::ConversationSubmitError::rejected(
                     "ACP session was replaced",
                 )
-            })?
+            })?;
+        submitted
     });
     let response = conversation_submit_response(result);
     // 用户按下回车到这里是 Smelt 自己的开销；气泡落地还要等 Pi 的 admission
@@ -3653,13 +3726,18 @@ pub(crate) fn ensure_acp_session(
     subscribers: &EventHubHandle,
 ) -> Result<Arc<AcpSlot<AcpSession>>, String> {
     loop {
+        // 每次都读：先查「槽位已在」再决定不读，查完到登记之间槽位可能被关掉重建，
+        // 新会话就会少了库里的标题。
+        let stored_titles = load_session_titles_from_store(&req.id);
         let (slot, created) = acp_sessions.reserve_with(&req.id, || {
-            make_acp_session(
+            let sess = make_acp_session(
                 &req.id,
                 req.cwd.clone(),
                 req.conversation_binding.clone(),
                 req.pending_agent_preset.clone(),
-            )
+            );
+            seed_session_titles(&sess, stored_titles);
+            sess
         });
         if !created {
             adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
@@ -4372,5 +4450,156 @@ mod snapshot_link_tests {
         );
         let sent = slot.value.out.lock().clients[0].snapshots_sent();
         assert_eq!(sent, 1, "写线程恢复后只应序列化一次");
+    }
+}
+
+#[cfg(test)]
+mod session_title_tests {
+    use super::*;
+
+    fn stored_titles() -> smelt_store::AcpSessionTitles {
+        smelt_store::AcpSessionTitles {
+            session_title: Some("库里的本机标题".into()),
+            provider_title: None,
+            local_model_title: Some("库里的本机标题".into()),
+            legacy_title: None,
+        }
+    }
+
+    /// v35 迁移留下的旧标题（来源不明）：重开会话时它就是展示名，不当成 provider
+    /// 标题，也不再请本机模型起名；保存来源时原样带着。
+    #[test]
+    fn seeded_legacy_title_wins_over_prompt_and_blocks_local_model() {
+        let acp_sessions = new_test_acp_sessions();
+        let stored = smelt_store::AcpSessionTitles {
+            session_title: Some("旧版的 provider 标题".into()),
+            provider_title: None,
+            local_model_title: None,
+            legacy_title: Some("旧版的 provider 标题".into()),
+        };
+        let (slot, created) = acp_sessions.reserve_with("acp-legacy", || {
+            let sess = make_acp_session("acp-legacy", None, None, None);
+            seed_session_titles(&sess, Some(stored.clone()));
+            sess
+        });
+        assert!(created);
+        smelt_core::acp_session::note_prompt_sent(
+            &mut slot.value.reduced.lock(),
+            "帮我排查登录接口为什么超时".into(),
+            Vec::new(),
+        );
+        {
+            let reduced = slot.value.reduced.lock();
+            assert_eq!(
+                reduced.resolved_session_title().as_deref(),
+                Some("旧版的 provider 标题")
+            );
+            assert_eq!(reduced.protocol_title, None, "不冒充 provider 标题");
+        }
+        {
+            // 发了消息、回合结束都不请本机模型：旧版标题保持原样。
+            let mut reduced = slot.value.reduced.lock();
+            smelt_core::acp_session::apply_event(
+                &mut reduced,
+                smelt_core::acp_conn::ConversationEvent::TurnEnded(
+                    agent_client_protocol::schema::v1::StopReason::EndTurn,
+                ),
+            );
+            assert_eq!(reduced.local_title_revision(), None);
+            assert_eq!(reduced.local_title_request(), None);
+        }
+        crate::local_title::request_if_needed(&slot, &crate::new_event_hub());
+        assert_eq!(slot.value.local_title.lock().wanted(), 0);
+        assert_eq!(session_titles_of(&slot.value.reduced.lock()), stored);
+    }
+
+    /// 别的线程一看到槽位登记，就必须同时看到库里恢复的标题：登记后再填会有一段
+    /// 空标题窗口，期间推出的快照没有名字，本机起名也会被重复排上。
+    #[test]
+    fn seeded_titles_are_visible_the_moment_the_slot_is_registered() {
+        let acp_sessions = new_test_acp_sessions();
+        let observer = {
+            let acp_sessions = Arc::clone(&acp_sessions);
+            std::thread::spawn(move || {
+                let slot = acp_sessions
+                    .wait_for("acp-seeded", std::time::Duration::from_secs(10))
+                    .expect("槽位登记");
+                let reduced = slot.value.reduced.lock();
+                (reduced.local_title.clone(), reduced.resolved_session_title())
+            })
+        };
+        let stored = Some(stored_titles());
+        let (slot, created) = acp_sessions.reserve_with("acp-seeded", || {
+            let sess = make_acp_session("acp-seeded", None, None, None);
+            seed_session_titles(&sess, stored);
+            sess
+        });
+        assert!(created);
+        let (local, resolved) = observer.join().unwrap();
+        assert_eq!(local.as_deref(), Some("库里的本机标题"));
+        assert_eq!(resolved.as_deref(), Some("库里的本机标题"));
+        assert_eq!(
+            slot.value.persisted_titles.lock().as_ref(),
+            Some(&stored_titles())
+        );
+        // 已有本机标题、这次还没发过消息：不排起名，库里的名字先用着。
+        crate::local_title::request_if_needed(&slot, &crate::new_event_hub());
+        assert_eq!(slot.value.local_title.lock().wanted(), 0);
+    }
+
+    /// 标题在持有 persisted_titles 时现读，锁顺序是 persisted_titles → reduced。
+    /// 本机标题写回、状态同步与持锁读标题并发时都不能死锁，最后的展示名是最新值。
+    #[test]
+    fn concurrent_title_updates_do_not_deadlock_and_end_on_the_latest_title() {
+        let acp_sessions = new_test_acp_sessions();
+        let (slot, _) = acp_sessions.reserve_with("acp-title-race", || {
+            make_acp_session("acp-title-race", None, None, None)
+        });
+        let (revision, input) = {
+            let mut reduced = slot.value.reduced.lock();
+            smelt_core::acp_session::note_prompt_sent(
+                &mut reduced,
+                "帮我排查登录接口为什么超时".into(),
+                Vec::new(),
+            );
+            reduced.local_title_request().expect("用户消息发出后可以起名")
+        };
+        let hub = crate::new_event_hub();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let slot = Arc::clone(&slot);
+                let hub = hub.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        update_acp_daemon_state(&slot.value, &hub);
+                        let _persisted = slot.value.persisted_titles.lock();
+                        let _ = session_titles_of(&slot.value.reduced.lock());
+                    }
+                })
+            })
+            .collect();
+        {
+            let _turn = slot.value.turn_completion.lock();
+            assert!(
+                slot.value
+                    .reduced
+                    .lock()
+                    .apply_local_title(revision, &input, "登录接口超时排查".into())
+            );
+        }
+        update_acp_daemon_state(&slot.value, &hub);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            slot.value.state.lock().title.as_deref(),
+            Some("登录接口超时排查")
+        );
+        assert_eq!(
+            session_titles_of(&slot.value.reduced.lock())
+                .local_model_title
+                .as_deref(),
+            Some("登录接口超时排查")
+        );
     }
 }

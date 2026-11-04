@@ -40,7 +40,7 @@ mod snapshots;
 mod workspace;
 
 pub use snapshots::{
-    AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
+    AcpSessionTitles, AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
     AgentDefinitionRecord, AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot,
     HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
     MemoryMetaSnapshot, MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust,
@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 33;
+pub const STORE_SCHEMA_VERSION: u32 = 37;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -311,15 +311,19 @@ impl Store {
         })
     }
 
-    /// agent 报的标题变了。只由守护写。
-    pub fn set_workspace_acp_session_title(
+    /// ACP 会话的标题和它的来源变了。只由守护写。只有展示名变了才推进目录版本：
+    /// 来源不在目录里。没有这段 ACP 会话（`acp_detail` 还没有这一行）返回 `None`，什么都没写。
+    pub fn set_workspace_acp_session_titles(
         &self,
         sid: &str,
-        title: Option<&str>,
-    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
-        imp::write_workspace(&self.backend, |transaction| {
-            crate::workspace::set_acp_session_title(transaction, sid, title)
-        })
+        titles: &AcpSessionTitles,
+    ) -> Result<Option<WorkspaceDirectoryCommit>, StoreError> {
+        imp::set_workspace_acp_session_titles(&self.backend, sid, titles)
+    }
+
+    /// 读一段 ACP 会话上次保存的标题。没有这一行返回 `None`。
+    pub fn acp_session_titles(&self, sid: &str) -> Result<Option<AcpSessionTitles>, StoreError> {
+        imp::acp_session_titles(&self.backend, sid)
     }
 
     /// 一段 provider 对话的名字（历史页、侧栏、手机看到的同一份），`None` 是清掉。工作区目录
@@ -394,6 +398,16 @@ impl Store {
             validate_name("agent_definition_id", id)?;
         }
         imp::put_default_conversation_agent(&self.backend, agent_definition_id)
+    }
+
+    /// 本机标题模型的 id；没选过返回 `None`（用缺省模型）。取值是否合法由运行时判断。
+    pub fn local_title_model(&self) -> Result<Option<String>, StoreError> {
+        imp::local_title_model(&self.backend)
+    }
+
+    /// 记下本机标题模型的 id。调用方先校验取值。
+    pub fn put_local_title_model(&self, model: &str) -> Result<(), StoreError> {
+        imp::put_local_title_model(&self.backend, model)
     }
 
     /// 新建菜单里置顶的动作 key，按置顶顺序。
@@ -1162,6 +1176,16 @@ mod imp {
         })
     }
 
+    pub(super) fn local_title_model(backend: &Backend) -> Result<Option<String>, StoreError> {
+        read(backend, crate::config::read_local_title_model)
+    }
+
+    pub(super) fn put_local_title_model(backend: &Backend, model: &str) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_local_title_model(transaction, model)
+        })
+    }
+
     pub(super) fn new_session_pins(backend: &Backend) -> Result<Vec<String>, StoreError> {
         read(backend, crate::config::read_new_session_pins)
     }
@@ -1330,6 +1354,28 @@ mod imp {
     ) -> Result<Option<String>, StoreError> {
         let connection = lock_connection(backend)?;
         crate::workspace::history_session_id(&connection, session_id)
+    }
+
+    pub(super) fn set_workspace_acp_session_titles(
+        backend: &Backend,
+        sid: &str,
+        titles: &super::AcpSessionTitles,
+    ) -> Result<Option<super::WorkspaceDirectoryCommit>, StoreError> {
+        let (commit, found) = write_directory(backend, |transaction| {
+            Ok(match crate::workspace::set_acp_session_titles(transaction, sid, titles)? {
+                Some(changed) => (changed, true),
+                None => (false, false),
+            })
+        })?;
+        Ok(found.then_some(commit))
+    }
+
+    pub(super) fn acp_session_titles(
+        backend: &Backend,
+        sid: &str,
+    ) -> Result<Option<super::AcpSessionTitles>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::workspace::acp_session_titles(&connection, sid)
     }
 
     pub(super) fn stored_history_identity(
@@ -2025,6 +2071,42 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 36 {
+            apply_v37_retire_qwen3_0_6b(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 35 {
+            apply_v36_local_title_settings(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 34 {
+            apply_v35_acp_legacy_title(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 33 {
+            apply_v34_acp_title_sources(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 32 {
             apply_v33_push_success(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2634,6 +2716,53 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V32_TO_V33)?;
         }
+        apply_v34_acp_title_sources(transaction)
+    }
+
+    /// v34：ACP 会话标题的来源（provider、本机模型）分列保存。已经有这两列的库跳过。
+    fn apply_v34_acp_title_sources(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "acp_detail")?
+            .iter()
+            .any(|column| column == "provider_title")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V33_TO_V34)?;
+        }
+        apply_v35_acp_legacy_title(transaction)
+    }
+
+    /// v35：把来源不明的旧 `session_title` 留成 `legacy_title`。已经有这一列的库跳过。
+    fn apply_v35_acp_legacy_title(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "acp_detail")?
+            .iter()
+            .any(|column| column == "legacy_title")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V34_TO_V35)?;
+        }
+        apply_v36_local_title_settings(transaction)
+    }
+
+    /// v36：本机标题模型的选择表。已经有这张表的库跳过。
+    fn apply_v36_local_title_settings(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "local_title_settings")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V35_TO_V36)?;
+        }
+        apply_v37_retire_qwen3_0_6b(transaction)
+    }
+
+    /// v37：已存的 Qwen3-0.6B 选择迁到 Qwen3.5-0.8B。只改表数据，重复执行无副作用。
+    fn apply_v37_retire_qwen3_0_6b(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::MIGRATE_V36_TO_V37)?;
         Ok(())
     }
 
@@ -2995,7 +3124,7 @@ mod imp {
             && v1_schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V1)?)
     }
 
-    const CURRENT_ACP_COLUMNS: [&str; 13] = [
+    const CURRENT_ACP_COLUMNS: [&str; 16] = [
         "session_id",
         "agent",
         "profile_id",
@@ -3009,6 +3138,9 @@ mod imp {
         "binding_automation_run_id",
         "pending_agent_preset",
         "session_title",
+        "provider_title",
+        "local_model_title",
+        "legacy_title",
     ];
 
     /// v7..v17 的 `acp_detail` 形状：还带着分叉列，会话的其余字段散在 `kv` 里。
@@ -3701,6 +3833,12 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
+    pub(super) fn local_title_model(_backend: &Backend) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_local_title_model(_backend: &Backend, _model: &str) -> Result<(), StoreError> {
+        unsupported()
+    }
     pub(super) fn new_session_pins(_backend: &Backend) -> Result<Vec<String>, StoreError> {
         unsupported()
     }
@@ -3793,6 +3931,19 @@ mod imp {
         _backend: &Backend,
         _session_id: &str,
     ) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn set_workspace_acp_session_titles(
+        _backend: &Backend,
+        _sid: &str,
+        _titles: &super::AcpSessionTitles,
+    ) -> Result<Option<super::WorkspaceDirectoryCommit>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn acp_session_titles(
+        _backend: &Backend,
+        _sid: &str,
+    ) -> Result<Option<super::AcpSessionTitles>, StoreError> {
         unsupported()
     }
     pub(super) fn stored_history_identity(
@@ -6310,6 +6461,9 @@ CREATE TABLE published_session (
                 "binding_automation_run_id",
                 "pending_agent_preset",
                 "session_title",
+                "provider_title",
+                "local_model_title",
+                "legacy_title",
             ]
         );
 
@@ -6549,12 +6703,68 @@ CREATE TABLE published_session (
         assert_eq!(title_of(&store).as_deref(), Some("登录修复"));
         assert!(
             store
-                .set_workspace_acp_session_title("acp-1", Some("agent 报的"))
+                .set_workspace_acp_session_titles(
+                    "acp-1",
+                    &AcpSessionTitles {
+                        session_title: Some("agent 报的".into()),
+                        provider_title: Some("agent 报的".into()),
+                        local_model_title: None,
+                        legacy_title: None,
+                    },
+                )
+                .unwrap()
                 .unwrap()
                 .changed
         );
         let acp = store.workspace_directory().unwrap().1.sessions[0].acp.clone().unwrap();
         assert_eq!(acp.session_title.as_deref(), Some("agent 报的"));
+
+        // 标题来源分列保存；客户端整段改对话也不会把它们冲掉。
+        assert!(
+            !store
+                .set_workspace_acp_session_titles(
+                    "acp-1",
+                    &AcpSessionTitles {
+                        session_title: Some("agent 报的".into()),
+                        provider_title: None,
+                        local_model_title: Some("本机起的".into()),
+                        legacy_title: None,
+                    },
+                )
+                .unwrap()
+                .unwrap()
+                .changed,
+            "展示名没变，只改来源不推进目录版本"
+        );
+        store.update_workspace_conversation(&stale).unwrap();
+        assert_eq!(
+            store.acp_session_titles("acp-1").unwrap(),
+            Some(AcpSessionTitles {
+                session_title: Some("agent 报的".into()),
+                provider_title: None,
+                local_model_title: Some("本机起的".into()),
+                legacy_title: None,
+            })
+        );
+        assert_eq!(store.acp_session_titles("missing").unwrap(), None);
+        // 没有这一行不是「没变」：什么都没写，调用方据此不把它记成已保存，之后还会再写。
+        let revision_before = store.workspace_directory().unwrap().0.revision;
+        assert_eq!(
+            store
+                .set_workspace_acp_session_titles(
+                    "missing",
+                    &AcpSessionTitles {
+                        session_title: Some("还没落库".into()),
+                        provider_title: None,
+                        local_model_title: Some("还没落库".into()),
+                        legacy_title: None,
+                    },
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.acp_session_titles("missing").unwrap(), None);
+        assert_eq!(store.workspace_directory().unwrap().0.revision, revision_before);
 
         // 清掉名字。
         assert!(store.rename_workspace_conversation("c1", None).unwrap().changed);
@@ -6563,6 +6773,53 @@ CREATE TABLE published_session (
             store.rename_workspace_conversation("missing", Some("x")),
             Err(StoreError::ConversationNotFound { .. })
         ));
+    }
+
+    /// 整段改写对话时标题来源跟着 ACP 会话走：同一个会话 id 原样补回，换了会话 id
+    /// 旧会话的展示名、provider / 本机模型 / 旧版来源都不能挂到新会话上。
+    #[test]
+    fn rewriting_a_conversation_keeps_title_sources_only_for_the_same_acp_session() {
+        let dir = temp_dir("rewrite-acp-title-sources");
+        let store = Store::open_or_create(&dir.join(DATABASE_FILE_NAME)).unwrap();
+        let conversation = acp_conversation("c1", Some("acp-1"), None);
+        store.create_workspace_conversation(&conversation).unwrap();
+        let titles = AcpSessionTitles {
+            session_title: Some("旧会话标题".into()),
+            provider_title: Some("旧会话标题".into()),
+            local_model_title: Some("本机起的".into()),
+            legacy_title: None,
+        };
+        store.set_workspace_acp_session_titles("acp-1", &titles).unwrap();
+        let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
+        connection
+            .execute(
+                "UPDATE acp_detail SET legacy_title = '旧版' WHERE session_id = 'acp-1'",
+                [],
+            )
+            .unwrap();
+        let stored = AcpSessionTitles {
+            legacy_title: Some("旧版".into()),
+            ..titles
+        };
+
+        // 同一个会话：客户端带着别的标题改写，库里的原样补回。
+        let mut same = conversation.clone();
+        same.acp.as_mut().unwrap().session_title = Some("客户端的旧标题".into());
+        store.update_workspace_conversation(&same).unwrap();
+        assert_eq!(store.acp_session_titles("acp-1").unwrap(), Some(stored));
+
+        // 换了会话 id：新会话没有任何标题和来源，客户端带来的旧展示名也不算数。
+        let mut replaced = acp_conversation("c1", Some("acp-2"), None);
+        replaced.acp.as_mut().unwrap().session_title = Some("旧会话标题".into());
+        store.update_workspace_conversation(&replaced).unwrap();
+        assert_eq!(
+            store.acp_session_titles("acp-2").unwrap(),
+            Some(AcpSessionTitles::default())
+        );
+        assert_eq!(store.acp_session_titles("acp-1").unwrap(), None);
+        let acp = store.workspace_directory().unwrap().1.sessions[0].acp.clone().unwrap();
+        assert_eq!(acp.sid.as_deref(), Some("acp-2"));
+        assert_eq!(acp.session_title, None);
     }
 
     #[test]
@@ -6885,7 +7142,13 @@ CREATE TABLE published_session (
             && let Some(sid) = &acp.sid
         {
             store
-                .set_workspace_acp_session_title(sid, acp.session_title.as_deref())
+                .set_workspace_acp_session_titles(
+                    sid,
+                    &AcpSessionTitles {
+                        session_title: acp.session_title.clone(),
+                        ..AcpSessionTitles::default()
+                    },
+                )
                 .unwrap();
         }
     }
@@ -7454,6 +7717,177 @@ CREATE TABLE worktree_inherit_skip_pattern (
         );
         drop(store);
         assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// v33 的 `session_title` 分不出是 provider 标题还是首条 prompt 兜底：原样留着当展示名，
+    /// 同时搬成单独的 `legacy_title`，不冒充 provider 或本机模型。重开会话、整段改写
+    /// 对话、守护保存来源都不能把它冲掉。
+    #[test]
+    fn migrates_v33_keeping_legacy_session_title_as_its_own_source() {
+        let dir = temp_dir("migrate-v33-acp-title-sources");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        let store = Store::open_or_create(&path).unwrap();
+        let mut conversation = acp_conversation("c1", Some("acp-1"), None);
+        conversation.acp.as_mut().unwrap().session_title = None;
+        store.create_workspace_conversation(&conversation).unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE local_title_settings;
+                 ALTER TABLE acp_detail DROP COLUMN legacy_title;
+                 ALTER TABLE acp_detail DROP COLUMN local_model_title;
+                 ALTER TABLE acp_detail DROP COLUMN provider_title;
+                 UPDATE acp_detail SET session_title = '旧标题' WHERE session_id = 'acp-1';",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 33).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let legacy = AcpSessionTitles {
+            session_title: Some("旧标题".into()),
+            provider_title: None,
+            local_model_title: None,
+            legacy_title: Some("旧标题".into()),
+        };
+        assert_eq!(store.acp_session_titles("acp-1").unwrap(), Some(legacy.clone()));
+
+        // 守护保存来源时不带它（读库失败时手里就没有）：不能冲掉。
+        store
+            .set_workspace_acp_session_titles(
+                "acp-1",
+                &AcpSessionTitles {
+                    session_title: Some("首条问题".into()),
+                    ..AcpSessionTitles::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.acp_session_titles("acp-1").unwrap().unwrap().legacy_title.as_deref(),
+            Some("旧标题")
+        );
+        // 客户端整段改写对话（删行重建）也照库里原样补回。
+        store.update_workspace_conversation(&conversation).unwrap();
+        assert_eq!(
+            store.acp_session_titles("acp-1").unwrap().unwrap().legacy_title.as_deref(),
+            Some("旧标题")
+        );
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// v34 已经记下来源的行不动；只有展示名、没有任何来源的行搬成旧版标题。
+    #[test]
+    fn migrates_v34_moving_only_sourceless_session_titles_to_legacy() {
+        let dir = temp_dir("migrate-v34-acp-legacy-title");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        let store = Store::open_or_create(&path).unwrap();
+        for (group, sid) in [("c1", "acp-1"), ("c2", "acp-2")] {
+            let mut conversation = acp_conversation(group, Some(sid), None);
+            conversation.acp.as_mut().unwrap().session_title = None;
+            store.create_workspace_conversation(&conversation).unwrap();
+        }
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE local_title_settings;
+                 ALTER TABLE acp_detail DROP COLUMN legacy_title;
+                 UPDATE acp_detail SET session_title = '旧标题' WHERE session_id = 'acp-1';
+                 UPDATE acp_detail SET session_title = '本机起的', local_model_title = '本机起的'
+                   WHERE session_id = 'acp-2';",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 34).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        assert_eq!(
+            store.acp_session_titles("acp-1").unwrap(),
+            Some(AcpSessionTitles {
+                session_title: Some("旧标题".into()),
+                provider_title: None,
+                local_model_title: None,
+                legacy_title: Some("旧标题".into()),
+            })
+        );
+        assert_eq!(
+            store.acp_session_titles("acp-2").unwrap(),
+            Some(AcpSessionTitles {
+                session_title: Some("本机起的".into()),
+                provider_title: None,
+                local_model_title: Some("本机起的".into()),
+                legacy_title: None,
+            })
+        );
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// v35 → v36 只加本机标题模型的选择表：没有这一行就是缺省模型，写进去能读回。
+    #[test]
+    fn migrates_v35_by_adding_local_title_settings() {
+        let dir = temp_dir("migrate-v35-local-title-settings");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE local_title_settings;")
+            .unwrap();
+        connection.pragma_update(None, "user_version", 35).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        assert_eq!(store.local_title_model().unwrap(), None);
+        store.put_local_title_model("model-a").unwrap();
+        store.put_local_title_model("qwen3.5-0.8b").unwrap();
+        assert_eq!(
+            store.local_title_model().unwrap().as_deref(),
+            Some("qwen3.5-0.8b")
+        );
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// v36 → v37：已存的 Qwen3-0.6B 选择显式迁到 Qwen3.5-0.8B；其它值（含认不出的）原样保留。
+    #[test]
+    fn migrates_v36_by_moving_qwen3_0_6b_selection_to_qwen3_5_0_8b() {
+        for (stored, expected) in [
+            ("qwen3-0.6b", "qwen3.5-0.8b"),
+            ("qwen3.5-0.8b", "qwen3.5-0.8b"),
+            ("qwen9-huge", "qwen9-huge"),
+        ] {
+            let dir = temp_dir("migrate-v36-retire-qwen3-0-6b");
+            let path = dir.join(DATABASE_FILE_NAME);
+            let fresh = dir.join("fresh.sqlite3");
+            drop(Store::open_or_create(&fresh).unwrap());
+            drop(Store::open_or_create(&path).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO local_title_settings(id, model) VALUES (1, ?1)",
+                    [stored],
+                )
+                .unwrap();
+            connection.pragma_update(None, "user_version", 36).unwrap();
+            drop(connection);
+
+            let store = Store::open_or_create(&path).unwrap();
+            assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+            assert_eq!(store.local_title_model().unwrap().as_deref(), Some(expected));
+            drop(store);
+            assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+        }
     }
 
     #[test]

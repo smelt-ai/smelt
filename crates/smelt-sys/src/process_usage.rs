@@ -261,9 +261,144 @@ pub fn own_memory() -> Option<MemoryBreakdown> {
     None
 }
 
+/// 本进程从启动到此刻累计的资源用量。只算本进程（含所有线程），不含子进程。
+/// 读不到或平台不支持的字段是 `None`，不拿 0 充数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LifetimeUsage {
+    /// 用户态 + 内核态 CPU 时间，微秒。
+    /// macOS / Linux：`getrusage(RUSAGE_SELF)` 的 `ru_utime + ru_stime`；
+    /// Windows：`GetProcessTimes` 的 user + kernel。
+    pub cpu_time_us: Option<u64>,
+    /// 内存峰值，字节，和 [`Usage::memory_bytes`] 的实时口径对应：
+    /// macOS：`proc_pid_rusage(V4).ri_lifetime_max_phys_footprint`（峰值 phys_footprint）；
+    /// Linux：`/proc/self/status` 的 `VmHWM`（本次 exec 之后的峰值常驻集）。不用
+    /// `ru_maxrss`：它跨 exec 保留，vfork/posix_spawn 出来的进程会带上父进程的峰值；
+    /// Windows：`PeakWorkingSetSize`（峰值工作集）。
+    pub peak_memory_bytes: Option<u64>,
+}
+
+/// 读本进程的 [`LifetimeUsage`]。几次系统调用，不阻塞。
+pub fn own_lifetime_usage() -> LifetimeUsage {
+    LifetimeUsage {
+        cpu_time_us: own_cpu_time_us(),
+        peak_memory_bytes: own_peak_memory_bytes(),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn own_cpu_time_us() -> Option<u64> {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: usage 是一份完整的 rusage。
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    let us = |t: libc::timeval| -> Option<u64> {
+        let secs = u64::try_from(t.tv_sec).ok()?;
+        let micros = u64::try_from(t.tv_usec).ok()?;
+        secs.checked_mul(1_000_000)?.checked_add(micros)
+    };
+    us(usage.ru_utime)?.checked_add(us(usage.ru_stime)?)
+}
+
+#[cfg(windows)]
+fn own_cpu_time_us() -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: 伪句柄 GetCurrentProcess 无需关闭；四个输出都是完整的 FILETIME。
+    let ok = unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    if ok == 0 {
+        return None;
+    }
+    // FILETIME 单位是 100 纳秒。
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    Some(ticks(kernel).checked_add(ticks(user))? / 10)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn own_cpu_time_us() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn own_peak_memory_bytes() -> Option<u64> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: info 是一份完整的 rusage_info_v4，flavor 与之对应。
+    let read = unsafe {
+        libc::proc_pid_rusage(
+            std::process::id() as i32,
+            libc::RUSAGE_INFO_V4,
+            (&mut info as *mut libc::rusage_info_v4).cast(),
+        )
+    };
+    (read == 0 && info.ri_lifetime_max_phys_footprint > 0).then_some(info.ri_lifetime_max_phys_footprint)
+}
+
+#[cfg(target_os = "linux")]
+fn own_peak_memory_bytes() -> Option<u64> {
+    parse_vm_hwm(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// `/proc/<pid>/status` 里的 `VmHWM:   12345 kB`。
+#[cfg(any(target_os = "linux", test))]
+fn parse_vm_hwm(status: &str) -> Option<u64> {
+    let line = status.lines().find_map(|line| line.strip_prefix("VmHWM:"))?;
+    let mut parts = line.split_whitespace();
+    let kib: u64 = parts.next()?.parse().ok()?;
+    if parts.next()? != "kB" {
+        return None;
+    }
+    kib.checked_mul(1024).filter(|bytes| *bytes > 0)
+}
+
+#[cfg(windows)]
+fn own_peak_memory_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    counters.cb = size;
+    // SAFETY: counters 是完整的一份，cb 给的就是它的大小。
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
+    (ok != 0 && counters.PeakWorkingSetSize > 0).then_some(counters.PeakWorkingSetSize as u64)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn own_peak_memory_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_hwm_is_parsed_in_bytes_and_bad_lines_are_none() {
+        assert_eq!(parse_vm_hwm("Name:\tx\nVmHWM:\t   2048 kB\nVmRSS:\t 1 kB\n"), Some(2048 * 1024));
+        assert_eq!(parse_vm_hwm("VmRSS:\t 1 kB\n"), None);
+        assert_eq!(parse_vm_hwm("VmHWM:\t 0 kB\n"), None);
+        assert_eq!(parse_vm_hwm("VmHWM:\t 12 MB\n"), None);
+        assert_eq!(parse_vm_hwm("VmHWM:\t abc kB\n"), None);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[test]
+    fn own_lifetime_usage_is_available_and_monotonic_on_supported_platforms() {
+        let before = own_lifetime_usage();
+        let cpu_before = before.cpu_time_us.expect("cpu time");
+        assert!(before.peak_memory_bytes.expect("peak memory") > 0);
+        let buf = vec![1u8; 32 * 1024 * 1024];
+        let mut sum = 0u64;
+        for _ in 0..4 {
+            sum = buf.iter().fold(sum, |acc, b| acc.wrapping_add(u64::from(*b)));
+        }
+        std::hint::black_box(sum);
+        let after = own_lifetime_usage();
+        assert!(after.cpu_time_us.unwrap() >= cpu_before);
+        assert!(after.peak_memory_bytes.unwrap() >= before.peak_memory_bytes.unwrap());
+        assert!(after.peak_memory_bytes.unwrap() >= 32 * 1024 * 1024);
+    }
 
     #[test]
     fn a_process_reports_memory_and_a_missing_one_is_none() {

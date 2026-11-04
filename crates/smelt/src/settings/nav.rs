@@ -289,6 +289,9 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                     Icon::new(gpui_kit_assets::IconName::Wrench),
                     SettingsSection::Maintenance,
                     &[
+                        "本地模型",
+                        "Qwen",
+                        "模型下载",
                         "smeltd",
                         "守护进程",
                         "守护",

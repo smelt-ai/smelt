@@ -2,7 +2,7 @@
 //! 分屏归客户端，不在这里（设计文档 D1）。
 
 use crate::{
-    StoreError, StoredHistoryIdentity, WorkspaceAcpRecord, WorkspaceSessionRecord,
+    AcpSessionTitles, StoreError, StoredHistoryIdentity, WorkspaceAcpRecord, WorkspaceSessionRecord,
     WorkspaceSnapshot, WorkspaceTerminalRecord,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -158,7 +158,7 @@ pub(crate) fn create_conversation(
     saved: &WorkspaceSessionRecord,
 ) -> Result<bool, StoreError> {
     let group_id = validated_conversation_id(saved)?;
-    let saved = &with_names(saved, &StoredNames::default());
+    let saved = &with_names(saved, &StoredNames::default(), None);
     if conversation_position(transaction, group_id)?.is_some() {
         return Ok(false);
     }
@@ -197,7 +197,8 @@ pub(crate) fn update_conversation(
     let before = read_conversation(transaction, group_id)?;
     // 恢复身份、名字、agent 标题都以库里的为准，要在删行之前读出来。
     let preserved_history = preserved_history_session_ids(transaction)?;
-    let saved = &with_names(saved, &stored_names(transaction, group_id)?);
+    let names = stored_names(transaction, group_id)?;
+    let saved = &with_names(saved, &names, acp_id.as_deref());
     transaction.execute("DELETE FROM session_group WHERE id = ?1", [group_id])?;
     insert_conversation(
         transaction,
@@ -207,6 +208,16 @@ pub(crate) fn update_conversation(
         &terminal_ids,
         &preserved_history,
     )?;
+    // 标题来源只由守护写、不在目录记录里，删行重建后照库里原来的补回去。只补回同一段
+    // ACP 会话的：换了会话 id，旧会话的标题和来源不属于新会话。
+    if let Some((acp_id, titles)) = names.acp_titles_for(acp_id.as_deref()) {
+        set_acp_session_titles(transaction, acp_id, titles)?;
+        // 旧版留下的来源不明的标题只由迁移写，守护保存来源时不碰它；这里原样补回。
+        transaction.execute(
+            "UPDATE acp_detail SET legacy_title = ?1 WHERE session_id = ?2",
+            params![titles.legacy_title.as_deref(), acp_id],
+        )?;
+    }
     Ok(read_conversation(transaction, group_id)? != before)
 }
 
@@ -420,7 +431,16 @@ fn now_ms() -> i64 {
 struct StoredNames {
     conversation: Option<String>,
     terminals: HashMap<String, Option<String>>,
-    acp_session_title: Option<String>,
+    /// 库里这段对话的 ACP 会话 id 和它的标题。标题跟着会话走，不跟着对话走。
+    acp_titles: Option<(String, AcpSessionTitles)>,
+}
+
+impl StoredNames {
+    /// 库里那段 ACP 会话就是 `sid` 时才返回它的标题；换了会话或没有会话返回 `None`。
+    fn acp_titles_for(&self, sid: Option<&str>) -> Option<(&str, &AcpSessionTitles)> {
+        let (stored, titles) = self.acp_titles.as_ref()?;
+        (Some(stored.as_str()) == sid).then_some((stored.as_str(), titles))
+    }
 }
 
 fn stored_names(transaction: &Transaction<'_>, group_id: &str) -> Result<StoredNames, StoreError> {
@@ -445,24 +465,40 @@ fn stored_names(transaction: &Transaction<'_>, group_id: &str) -> Result<StoredN
             terminals.insert(id, title);
         }
     }
-    let acp_session_title = transaction
+    let acp_titles = transaction
         .query_row(
-            "SELECT a.session_title FROM acp_detail a JOIN session s ON s.id = a.session_id
+            "SELECT a.session_id, a.session_title, a.provider_title, a.local_model_title,
+                    a.legacy_title
+             FROM acp_detail a JOIN session s ON s.id = a.session_id
              WHERE s.group_id = ?1",
             [group_id],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    AcpSessionTitles {
+                        session_title: row.get(1)?,
+                        provider_title: row.get(2)?,
+                        local_model_title: row.get(3)?,
+                        legacy_title: row.get(4)?,
+                    },
+                ))
+            },
         )
-        .optional()?
-        .flatten();
+        .optional()?;
     Ok(StoredNames {
         conversation,
         terminals,
-        acp_session_title,
+        acp_titles,
     })
 }
 
-/// 客户端带来的对话，名字和 agent 标题换成库里的。
-fn with_names(saved: &WorkspaceSessionRecord, names: &StoredNames) -> WorkspaceSessionRecord {
+/// 客户端带来的对话，名字和 agent 标题换成库里的。agent 标题只取同一段 ACP 会话
+/// （`acp_id`）的；换了会话就是空的，等守护给新会话写。
+fn with_names(
+    saved: &WorkspaceSessionRecord,
+    names: &StoredNames,
+    acp_id: Option<&str>,
+) -> WorkspaceSessionRecord {
     let mut saved = saved.clone();
     saved.custom_title = names.conversation.clone();
     for terminal in &mut saved.terminals {
@@ -472,7 +508,9 @@ fn with_names(saved: &WorkspaceSessionRecord, names: &StoredNames) -> WorkspaceS
             .and_then(|id| names.terminals.get(id).cloned().flatten());
     }
     if let Some(acp) = &mut saved.acp {
-        acp.session_title = names.acp_session_title.clone();
+        acp.session_title = names
+            .acp_titles_for(acp_id)
+            .and_then(|(_, titles)| titles.session_title.clone());
     }
     saved
 }
@@ -560,17 +598,64 @@ pub(crate) fn rename_terminal(
     )? > 0)
 }
 
-/// agent 报的标题变了（只由守护写）。没有这段 ACP 会话返回 `false`。
-pub(crate) fn set_acp_session_title(
+/// ACP 会话的标题和来源变了（只由守护写）。`legacy_title` 只由迁移写，这里不碰：
+/// 守护读库失败时手里没有它，写回去会把旧名字冲掉。返回展示名是否变了：来源不在目录里，
+/// 只改来源不推进目录版本。没有这段 ACP 会话返回 `None`（和「没变」区分开，
+/// 调用方不能把它当成已保存）。
+pub(crate) fn set_acp_session_titles(
     transaction: &Transaction<'_>,
     sid: &str,
-    title: Option<&str>,
-) -> Result<bool, StoreError> {
-    let title = title.map(str::trim).filter(|title| !title.is_empty());
-    Ok(transaction.execute(
-        "UPDATE acp_detail SET session_title = ?1 WHERE session_id = ?2 AND session_title IS NOT ?1",
-        params![title, sid.trim()],
-    )? > 0)
+    titles: &AcpSessionTitles,
+) -> Result<Option<bool>, StoreError> {
+    let clean = |title: &Option<String>| {
+        title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+    };
+    let sid = sid.trim();
+    let exists = transaction
+        .query_row("SELECT 1 FROM acp_detail WHERE session_id = ?1", [sid], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !exists {
+        return Ok(None);
+    }
+    transaction.execute(
+        "UPDATE acp_detail SET provider_title = ?1, local_model_title = ?2
+         WHERE session_id = ?3
+           AND (provider_title IS NOT ?1 OR local_model_title IS NOT ?2)",
+        params![clean(&titles.provider_title), clean(&titles.local_model_title), sid],
+    )?;
+    Ok(Some(
+        transaction.execute(
+            "UPDATE acp_detail SET session_title = ?1 WHERE session_id = ?2 AND session_title IS NOT ?1",
+            params![clean(&titles.session_title), sid],
+        )? > 0,
+    ))
+}
+
+/// 一段 ACP 会话上次保存的标题。没有这一行返回 `None`。
+pub(crate) fn acp_session_titles(
+    connection: &Connection,
+    sid: &str,
+) -> Result<Option<AcpSessionTitles>, StoreError> {
+    Ok(connection
+        .query_row(
+            "SELECT session_title, provider_title, local_model_title, legacy_title
+             FROM acp_detail WHERE session_id = ?1",
+            [sid.trim()],
+            |row| {
+                Ok(AcpSessionTitles {
+                    session_title: row.get(0)?,
+                    provider_title: row.get(1)?,
+                    local_model_title: row.get(2)?,
+                    legacy_title: row.get(3)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 /// 一段 provider 对话的名字（历史页、侧栏、手机看到的同一份），`None` 是清掉。

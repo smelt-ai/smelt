@@ -8,6 +8,7 @@
 # - crates/smelt-client-store —— 桌面客户端自己的库 client.sqlite3（外观、界面状态等）
 # - crates/smelt-core   —— GUI 与守护共用的无 UI 逻辑（不许引 GPUI）
 # - crates/smelt-git    —— Git 领域层（仓库发现/状态/diff/写操作，不含 UI）
+# - crates/smelt-local-model —— 本地小模型（Qwen3.5-0.8B）下载/校验/卸载与一次性推理（桌面专用，不进移动端）
 # - crates/smeltd       —— 守护侧两个二进制（smeltd / smelt-notify）
 # - crates/smelt        —— GUI 主程序（bin 名 smelt，与产品名统一）
 [workspace]
@@ -28,6 +29,7 @@ members = [
     "crates/smelt-client-store",
     "crates/smelt-core",
     "crates/smelt-git",
+    "crates/smelt-local-model",
     "crates/smeltd",
     "crates/smelt-ui",
     "crates/smelt-acp-view",

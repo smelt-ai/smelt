@@ -102,6 +102,27 @@ pub(crate) fn write_default_conversation_agent(
     Ok(())
 }
 
+pub(crate) fn read_local_title_model(connection: &Connection) -> Result<Option<String>, StoreError> {
+    connection
+        .query_row("SELECT model FROM local_title_settings WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(StoreError::from)
+}
+
+pub(crate) fn write_local_title_model(
+    transaction: &Transaction<'_>,
+    model: &str,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO local_title_settings(id, model) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET model = excluded.model",
+        [model],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn read_new_session_pins(connection: &Connection) -> Result<Vec<String>, StoreError> {
     let mut statement =
         connection.prepare("SELECT action_key FROM new_session_pin ORDER BY position")?;

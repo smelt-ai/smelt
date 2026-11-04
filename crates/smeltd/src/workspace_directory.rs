@@ -232,16 +232,27 @@ pub(crate) fn rename(
     Ok(publish(&change, event_hub))
 }
 
-/// agent 报的标题变了：写进目录（冷启动时靠它显示），改了就推。只由守护调用。
-pub(crate) fn remember_acp_session_title(sid: &str, title: Option<&str>, event_hub: &EventHubHandle) {
+/// 会话的标题或它的来源变了：写进目录（冷启动时靠展示名显示，恢复会话时靠来源），
+/// 展示名改了就推。只由守护调用。写成了返回 `true`。
+pub(crate) fn remember_acp_session_titles(
+    sid: &str,
+    titles: &smelt_store::AcpSessionTitles,
+    event_hub: &EventHubHandle,
+) -> bool {
     let result = default_store().and_then(|store| {
-        workspace_catalog::set_acp_session_title_on(&store, sid, title).map_err(control_error)
+        workspace_catalog::set_acp_session_titles_on(&store, sid, titles).map_err(control_error)
     });
     match result {
-        Ok(change) => {
+        Ok(Some(change)) => {
             publish(&change, event_hub);
+            true
         }
-        Err(error) => dlog(&format!("记下对话 {sid} 的标题失败：{}", error.message)),
+        // 库里还没有这段会话：没写上，不算已保存，下一次状态变化再写。
+        Ok(None) => false,
+        Err(error) => {
+            dlog(&format!("记下对话 {sid} 的标题失败：{}", error.message));
+            false
+        }
     }
 }
 

@@ -229,6 +229,7 @@ impl Workspace {
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
         super::refresh_quota_settings(cx);
+        super::local_model::refresh_local_model(cx);
         crate::runtime_events::probe_remotes(cx);
         if self.settings_section == SettingsSection::Remote {
             // 延迟平时只在连接换路径时读；停在远程页时重读一次，看到的是现在的数。

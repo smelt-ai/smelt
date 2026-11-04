@@ -1,0 +1,26 @@
+[package]
+name = "smelt-local-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "本地小模型（Qwen3.5-0.8B GGUF）的下载、校验、卸载与一次性同步推理"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+smelt-model = { path = "../smelt-model" }
+# 不开绑定库的默认 feature，省掉 OpenMP 链接依赖；sys crate 仍默认构建 common。
+llama-cpp-2 = { version = "0.1.161", default-features = false }
+reqwest = "0.13"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["macros", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt"] }
+
+[lints]
+workspace = true

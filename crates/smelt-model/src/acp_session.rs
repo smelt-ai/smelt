@@ -888,9 +888,14 @@ pub struct ConversationSnapshot {
     pub entries_total: usize,
     /// Monotonic version assigned by smeltd whenever it publishes this session.
     pub snapshot_revision: u64,
-    /// Agent 通过通用 ACP 上报的标题优先，否则从完整历史首条用户消息生成稳定
-    /// 兜底。分页快照可能不包含首条消息，客户端不能只靠当前页反推标题。
+    /// 决定好的会话名：provider 标题 > 旧版标题 > 本机模型标题 > 完整历史首条用户消息兜底。
+    /// 用户手改名不在快照里，由展示层优先。分页快照可能不包含首条消息，客户端不能只靠当前页反推标题。
     pub session_title: Option<String>,
+    /// 会话名的各个来源（provider / 旧版 / 本机模型 / 首条 prompt）。`session_title` 是按它们
+    /// 决定好的名字，只给展示用；镜像和恢复必须从这里还原来源，不能把决定好的名字
+    /// 当成 provider 标题。`None` 表示这帧省略了会话信封，接收方保留已知值；分来源之前的
+    /// 旧快照恢复时把 `session_title` 当旧版标题。
+    pub title_sources: Option<crate::session_title::SessionTitleSources>,
     /// `session/load` 正在用协议通知重建历史。客户端可据此为批量恢复的未测量
     /// 条目提供高度提示，而不必同步布局整段历史。
     pub replaying_history: bool,
@@ -1037,6 +1042,8 @@ pub struct ConversationSnapshotDe {
     pub snapshot_revision: u64,
     #[serde(default)]
     pub session_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_sources: Option<crate::session_title::SessionTitleSources>,
     #[serde(default)]
     pub replaying_history: bool,
     pub entries: Vec<AcpEntry>,
@@ -1133,6 +1140,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             entries_total: de.entries_total,
             snapshot_revision: de.snapshot_revision,
             session_title: de.session_title,
+            title_sources: de.title_sources,
             replaying_history: de.replaying_history,
             entries: de.entries,
             tool_debug: de.tool_debug,
@@ -1198,6 +1206,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             entries_total: snap.entries_total,
             snapshot_revision: snap.snapshot_revision,
             session_title: snap.session_title,
+            title_sources: snap.title_sources,
             replaying_history: snap.replaying_history,
             entries: snap.entries,
             tool_debug: snap.tool_debug,

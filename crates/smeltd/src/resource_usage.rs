@@ -10,7 +10,7 @@
 use std::sync::{LazyLock, Mutex};
 
 use smelt_core::control_api::{
-    ProcessEntry, ProcessUsage, ResourceUsageResult, SESSION_PROCESS_LIMIT, SessionResourceUsage,
+    LocalModelUsage, ProcessEntry, ProcessUsage, ResourceUsageResult, SESSION_PROCESS_LIMIT, SessionResourceUsage,
 };
 use smelt_sys::process_usage::{ProcessSampler, Usage};
 
@@ -29,6 +29,7 @@ pub(crate) fn resource_usage(
 ) -> ResourceUsageResult {
     // 先取完根进程再锁采样器：取根进程要碰会话自己的锁，不和扫进程表叠在一起。
     let roots = session_roots(sessions, acp_sessions);
+    let model_pid = super::local_model_process::current();
     let mut sampler = SAMPLER.lock().unwrap_or_else(|error| error.into_inner());
     let total_memory_bytes = sampler.total_memory();
     let table = sampler.refresh_all();
@@ -36,6 +37,13 @@ pub(crate) fn resource_usage(
         .process(std::process::id())
         .map(wire)
         .unwrap_or_default();
+    // 模型进程按整棵树算。采样期间它可能起停，所以采不到时再看一次登记：
+    // 前后都没登记才是没在跑；还登记着（或刚起来）就是在跑但没采到，不编数字。
+    let local_model = Some(match model_pid.and_then(|pid| table.tree(pid)) {
+        Some(usage) => LocalModelUsage::Running { usage: wire(usage) },
+        None if super::local_model_process::current().is_some() => LocalModelUsage::Unsampled,
+        None => LocalModelUsage::NotRunning,
+    });
     let sessions = roots
         .into_iter()
         .filter_map(|(session_id, pid)| {
@@ -64,6 +72,9 @@ pub(crate) fn resource_usage(
         daemon,
         sessions,
         total_memory_bytes,
+        local_model,
+        // 内存里的累计数，不做 IO。
+        local_model_inference: Some(super::local_model_process::inference_stats()),
     }
 }
 
@@ -123,5 +134,50 @@ mod tests {
         assert_eq!(result.daemon.process_count, 1);
         assert!(result.daemon.memory_bytes > 0);
         assert!(result.total_memory_bytes > 0);
+        // 新运行时总是带上推理统计（可能还是空的），好和不报它的旧运行时区分开。
+        assert!(result.local_model_inference.is_some());
+    }
+
+    #[test]
+    fn the_local_model_process_is_reported_only_while_registered() {
+        let _guard = crate::local_model_process::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let sessions = super::super::new_sessions();
+        let acp_sessions = super::super::new_test_acp_sessions();
+        assert_eq!(
+            resource_usage(&sessions, &acp_sessions).local_model,
+            Some(LocalModelUsage::NotRunning)
+        );
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        crate::local_model_process::set_running(child.id());
+        let result = resource_usage(&sessions, &acp_sessions);
+        crate::local_model_process::clear(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        match result.local_model {
+            Some(LocalModelUsage::Running { usage }) => {
+                assert_eq!(usage.process_count, 1);
+                assert!(usage.memory_bytes > 0);
+            }
+            other => panic!("应报模型进程：{other:?}"),
+        }
+        // 登记着但进程表里采不到：报在跑但没采到，不当成未运行。
+        crate::local_model_process::set_running(child.id());
+        assert_eq!(
+            resource_usage(&sessions, &acp_sessions).local_model,
+            Some(LocalModelUsage::Unsampled)
+        );
+        crate::local_model_process::clear(child.id());
+        // 守护自己那一行不含模型进程。
+        assert_eq!(result.daemon.process_count, 1);
+        assert_eq!(
+            resource_usage(&sessions, &acp_sessions).local_model,
+            Some(LocalModelUsage::NotRunning)
+        );
     }
 }

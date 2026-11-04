@@ -122,6 +122,16 @@ pub struct AcpSessionState {
     /// Agent 通过通用 ACP `session_info_update` 上报的标题。没有时由首条用户消息
     /// 生成稳定兜底；这不是某个 provider 的专属能力。
     pub protocol_title: Option<String>,
+    /// 本机已安装的小模型按这段对话最近内容生成的标题，用户每发一条消息后可被新结果替换。
+    /// 排在 provider、旧版标题之后、首条 prompt 兜底之前；只由
+    /// [`Self::apply_local_title`] 和恢复路径写。
+    pub local_title: Option<String>,
+    /// 分来源保存之前留下的展示名，分不出是 provider 标题还是 prompt 兜底。排在
+    /// provider 之后、本机模型之前；有它就不请本机模型起名，保持原样。只由恢复路径写。
+    pub legacy_title: Option<String>,
+    /// `entries` 裁掉前缀后看不到首条用户消息，这里留着它生成的兜底标题。
+    /// 缓冲从 0 开始时以正文为准。
+    prompt_title: Option<String>,
     pub phase: DaemonPhase,
     /// `phase == Dead` 时给对话页看的原因；活会话为空。
     pub end_reason: String,
@@ -203,6 +213,14 @@ pub struct AcpSessionState {
     cancel_requested: bool,
     /// `terminal/create` 的输出可能早于引用它的 tool_call 到达。
     terminal_buffers: BTreeMap<String, crate::acp_terminal::TerminalSnapshot>,
+    /// 本机起名的内容版本：用户每条消息真正写进消息流（发出 prompt、steer 被吃进
+    /// 当前回合）时加一，只增不减（重连重置也不清），只在内存里。0 表示这段生命周期
+    /// 里用户还没发过消息。生成结果带着它回来，版本不是当前值就作废，旧结果盖不住新内容。
+    local_title_revision: u64,
+    /// 最近一条用户消息写进消息流那一刻按当时正文冻结的起名输入（有界，见
+    /// [`local_title_context`]）。之后助手增量、回合结束都不改它，只有下一条用户消息
+    /// 换掉它；撤回、回退、重启、重放、所有权冲突时清空，迟到结果对不上就作废。
+    local_title_input: Option<String>,
 }
 
 impl Default for AcpSessionState {
@@ -214,6 +232,9 @@ impl Default for AcpSessionState {
             tool_debug_generation: 0,
             runtime_debug: RuntimeDebug::default(),
             protocol_title: None,
+            local_title: None,
+            legacy_title: None,
+            prompt_title: None,
             phase: DaemonPhase::Connecting,
             end_reason: String::new(),
             end_kind: AcpEndKind::Unknown,
@@ -265,6 +286,8 @@ impl Default for AcpSessionState {
             tool_turn_seq: BTreeMap::new(),
             cancel_requested: false,
             terminal_buffers: BTreeMap::new(),
+            local_title_revision: 0,
+            local_title_input: None,
         }
     }
 }
@@ -294,6 +317,18 @@ impl AcpSessionState {
     }
 
     pub fn from_snapshot(snap: ConversationSnapshot) -> Self {
+        // 只认来源。`session_title` 是决定好的展示名，不能倒灌成 provider 标题。
+        // 分来源之前的快照只有 `session_title`：原样当旧版标题留着，不然恢复后名字
+        // 会被本机模型或首条 prompt 换掉。
+        let title_sources = snap.title_sources.clone().unwrap_or_else(|| {
+            crate::session_title::SessionTitleSources {
+                legacy: crate::session_title::provider_session_title(
+                    snap.session_title.as_deref(),
+                )
+                .map(str::to_string),
+                ..Default::default()
+            }
+        });
         // Running 必须有对应的活跃回合。旧版可能先收到 TurnEnded、再收到 SDK
         // 迟交付的工具通知，把 phase 重新写成 Running，却已经清掉了开始时间。
         // 无缝升级时在边界上修复这种非法组合，避免把僵尸回合继续带进新进程。
@@ -309,7 +344,10 @@ impl AcpSessionState {
             tool_debug: snap.tool_debug.unwrap_or_default(),
             tool_debug_generation: 0,
             runtime_debug: snap.runtime_debug.unwrap_or_default(),
-            protocol_title: snap.session_title,
+            protocol_title: title_sources.provider,
+            local_title: title_sources.local_model,
+            legacy_title: title_sources.legacy,
+            prompt_title: title_sources.prompt,
             phase,
             end_reason: snap.end_reason,
             end_kind: snap.end_kind,
@@ -362,6 +400,8 @@ impl AcpSessionState {
             tool_turn_seq: BTreeMap::new(),
             cancel_requested: false,
             terminal_buffers: BTreeMap::new(),
+            local_title_revision: 0,
+            local_title_input: None,
         };
         // 上一段连接已经消失，它欠的工具终态不会再来了。回合已结束却留着
         // 未结束工具时，工具卡会一直停在「执行中」，所以在进程边界上一并收尾。
@@ -388,7 +428,8 @@ impl AcpSessionState {
             entries_offset,
             entries_total,
             snapshot_revision: _,
-            session_title,
+            session_title: _,
+            title_sources,
             replaying_history,
             entries,
             tool_debug,
@@ -475,11 +516,14 @@ impl AcpSessionState {
         } else {
             None
         };
-        // 没带标题不是清空。流式尾巴经常省略标题，盖掉已有协议标题后，
-        // 父镜像只会用当前这一截的提问当兜底，侧栏就闪成另一串字再跳回来。
-        if let Some(title) = crate::session_title::provider_session_title(session_title.as_deref())
-        {
-            self.protocol_title = Some(title.to_string());
+        // 省略信封的流式尾巴不带标题来源，那不是清空：保留已知值，否则父镜像只会用
+        // 当前这一截的提问当兜底，侧栏就闪成另一串字再跳回来。带了来源就整份照搬，
+        // provider 明确清空也跟着清。决定好的 `session_title` 不当来源用。
+        if let Some(sources) = title_sources {
+            self.protocol_title = sources.provider;
+            self.local_title = sources.local_model;
+            self.legacy_title = sources.legacy;
+            self.prompt_title = sources.prompt;
         }
         self.phase = phase;
         self.end_reason = end_reason;
@@ -583,6 +627,11 @@ impl AcpSessionState {
         if keep_from == 0 {
             return;
         }
+        if self.entries_base == 0
+            && let Some(title) = crate::acp_chat::auto_title(&self.entries)
+        {
+            self.prompt_title = Some(title);
+        }
         self.entries.drain(0..keep_from);
         self.entries.shrink_to_fit();
         self.entries_base += keep_from;
@@ -601,16 +650,129 @@ impl AcpSessionState {
             })
     }
 
-    /// 协议标题优先；Agent 尚未上报或明确清空时，用首条用户消息兜底。
-    /// 标题已经在协议里时不再扫描正文。
+    /// 协议标题 > 旧版标题 > 本机模型标题 > 首条用户消息兜底。用户手改名由展示层优先。
+    /// 前面的来源已有名字时不再扫描正文。
     pub fn resolved_session_title(&self) -> Option<String> {
         if let Some(title) =
             crate::session_title::provider_session_title(self.protocol_title.as_deref())
+                .or_else(|| {
+                    crate::session_title::provider_session_title(self.legacy_title.as_deref())
+                })
+                .or_else(|| {
+                    crate::session_title::provider_session_title(self.local_title.as_deref())
+                })
         {
             return Some(title.to_string());
         }
-        let fallback = crate::acp_chat::auto_title(self.entries());
-        crate::session_title::session_name(None, fallback.as_deref())
+        self.prompt_fallback_title()
+    }
+
+    /// 会话名的各个来源，快照和持久化按它分开保存。
+    pub fn title_sources(&self) -> crate::session_title::SessionTitleSources {
+        crate::session_title::SessionTitleSources {
+            provider: self.protocol_title.clone(),
+            legacy: self.legacy_title.clone(),
+            local_model: self.local_title.clone(),
+            prompt: self.prompt_fallback_title(),
+        }
+    }
+
+    fn prompt_fallback_title(&self) -> Option<String> {
+        if self.entries_base == 0
+            && let Some(title) = crate::acp_chat::auto_title(self.entries())
+        {
+            return Some(title);
+        }
+        self.prompt_title.clone()
+    }
+
+    /// 一条用户消息刚写进消息流（[`note_prompt_sent_with_delivery`]、
+    /// [`note_mid_turn_input`]）：版本加一，并按此刻正文冻结起名输入，不等助手回复。
+    /// 之后的助手增量不会混进这份输入。重放历史时不算；重发、回声不经过这里。
+    fn note_local_title_user_input(&mut self) {
+        if self.replaying_history {
+            return;
+        }
+        self.local_title_revision = self.local_title_revision.saturating_add(1);
+        self.local_title_input = local_title_context(self.entries());
+    }
+
+    /// 丢掉冻结的起名输入：用户消息被撤回、正文被回退，会话被重启、重放或因所有权
+    /// 冲突被强制结束时调用，
+    /// 已在跑的结果因输入对不上作废，也不会再为它排推理。版本不动。
+    pub fn discard_local_title_input(&mut self) {
+        self.local_title_input = None;
+    }
+
+    /// 当前该按哪一版内容起名。用户还没发过消息、冻结的输入为空、正在重放历史，
+    /// 或已有 provider 标题、旧版标题时返回 `None`。只读计数，不扫正文，可以在每批
+    /// 事件后调用。已有本机标题不挡：每条新消息都可以换成按新内容起的名。
+    pub fn local_title_revision(&self) -> Option<u64> {
+        if self.local_title_revision == 0
+            || self.local_title_input.is_none()
+            || self.replaying_history
+            || crate::session_title::provider_session_title(self.protocol_title.as_deref())
+                .is_some()
+            || self.has_legacy_title()
+        {
+            return None;
+        }
+        Some(self.local_title_revision)
+    }
+
+    /// 起名请求：（内容版本，最近一条用户消息发出时冻结的模型输入）。只克隆有界的那份输入，
+    /// 不扫正文。输入取最近几轮用户消息和助手正文，不含工具调用、思考块、
+    /// 后台状态行，见 [`local_title_context`]。
+    pub fn local_title_request(&self) -> Option<(u64, String)> {
+        let revision = self.local_title_revision()?;
+        let input = self.local_title_input.clone()?;
+        Some((revision, input))
+    }
+
+    /// 本机模型的结果到了。只核对版本和冻结输入：生成期间助手在写、回合结束都不影响
+    /// （结果对应的仍是最近那条用户消息）；又发了一条用户消息、输入因撤回/回退等被
+    /// 清空、provider 报了标题或有旧版标题，结果作废。标题真的变了返回 `true`。
+    pub fn apply_local_title(&mut self, revision: u64, input: &str, title: String) -> bool {
+        let title = title.trim();
+        if title.is_empty()
+            || self.local_title_revision() != Some(revision)
+            || self.local_title_input.as_deref() != Some(input)
+        {
+            return false;
+        }
+        if self.local_title.as_deref() == Some(title) {
+            return false;
+        }
+        self.local_title = Some(title.to_string());
+        true
+    }
+
+    fn has_legacy_title(&self) -> bool {
+        crate::session_title::provider_session_title(self.legacy_title.as_deref()).is_some()
+    }
+
+    /// 从库里恢复上次保存的标题来源。只填还空着的：这次连接已经收到的值更新。
+    pub fn seed_title_sources(
+        &mut self,
+        provider: Option<&str>,
+        legacy: Option<&str>,
+        local_model: Option<&str>,
+    ) {
+        if self.legacy_title.is_none()
+            && let Some(title) = crate::session_title::provider_session_title(legacy)
+        {
+            self.legacy_title = Some(title.to_string());
+        }
+        if self.protocol_title.is_none()
+            && let Some(title) = crate::session_title::provider_session_title(provider)
+        {
+            self.protocol_title = Some(title.to_string());
+        }
+        if self.local_title.is_none()
+            && let Some(title) = crate::session_title::provider_session_title(local_model)
+        {
+            self.local_title = Some(title.to_string());
+        }
     }
 
     /// 回合成功结束了，「完成」还压着没报。后台任务、后台子智能体还在跑时压着，
@@ -809,6 +971,7 @@ impl AcpSessionState {
             session_title: include_envelope
                 .then(|| self.resolved_session_title())
                 .flatten(),
+            title_sources: include_envelope.then(|| self.title_sources()),
             replaying_history: self.replaying_history,
             entries,
             tool_debug: include_tool_debug.then(|| self.tool_debug.clone()),
@@ -1066,6 +1229,8 @@ pub fn force_end(state: &mut AcpSessionState, kind: AcpEndKind, msg: impl Into<S
 /// spawn 那部分是 smeltd 的事，不在这个纯状态函数里）。
 pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.abandon_replay_scratch();
+    // 换了一段对话：上一段冻结的起名输入不能再被迟到结果认领。
+    state.discard_local_title_input();
     state.permissions.clear();
     state.runtime_debug = RuntimeDebug::default();
     state.elicitation = None;
@@ -1090,6 +1255,86 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.phase = DaemonPhase::Connecting;
     state.end_reason.clear();
     state.end_kind = AcpEndKind::Unknown;
+}
+
+/// 本机起名输入的总长上限（字符）。模型上下文只有 1024 token，中文约一字一 token。
+const LOCAL_TITLE_INPUT_MAX_CHARS: usize = 1200;
+/// 一轮里用户消息、助手正文各自最多取的字符数。
+const LOCAL_TITLE_USER_MAX_CHARS: usize = 300;
+const LOCAL_TITLE_REPLY_MAX_CHARS: usize = 500;
+
+/// 从最近的回合往前取「用户：…\n助手：…」，按时间顺序拼好，总长不超过上限。
+/// 只看顶层的用户消息和非思考的助手正文；工具调用（含子代理正文）、思考、
+/// 后台状态行都不算。遇到「重新开始」分割线就停：线之前是另一段对话。
+/// 一轮用户正文都没有时返回 `None`。
+fn local_title_context(entries: &[AcpEntry]) -> Option<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    // 当前这一轮已经见到的助手正文，倒序。
+    let mut replies: Vec<&str> = Vec::new();
+    for entry in entries.iter().rev() {
+        let user = match entry {
+            AcpEntry::Assistant {
+                text,
+                thought: false,
+            } => {
+                let text = text.trim();
+                if !text.is_empty() {
+                    replies.push(text);
+                }
+                continue;
+            }
+            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => text.trim(),
+            AcpEntry::Divider(_) => break,
+            _ => continue,
+        };
+        let reply_parts = std::mem::take(&mut replies);
+        if user.is_empty() {
+            // 只有图片的消息：这轮没有能起名的用户正文，助手回复也一并略过。
+            continue;
+        }
+        let mut block = format!("用户：{}", clip_chars(user, LOCAL_TITLE_USER_MAX_CHARS));
+        let mut reply = String::new();
+        let mut reply_chars = 0usize;
+        for part in reply_parts.iter().rev() {
+            if reply_chars >= LOCAL_TITLE_REPLY_MAX_CHARS {
+                break;
+            }
+            if !reply.is_empty() {
+                reply.push('\n');
+                reply_chars += 1;
+            }
+            let clipped = clip_chars(part, LOCAL_TITLE_REPLY_MAX_CHARS - reply_chars);
+            reply_chars += clipped.chars().count();
+            reply.push_str(clipped);
+        }
+        if !reply.trim().is_empty() {
+            block.push_str("\n助手：");
+            block.push_str(reply.trim());
+        }
+        let len = block.chars().count() + 2;
+        if used + len > LOCAL_TITLE_INPUT_MAX_CHARS {
+            if blocks.is_empty() {
+                blocks.push(clip_chars(&block, LOCAL_TITLE_INPUT_MAX_CHARS).to_string());
+            }
+            break;
+        }
+        used += len;
+        blocks.push(block);
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+    blocks.reverse();
+    Some(blocks.join("\n\n"))
+}
+
+/// 取前 `max` 个字符（按 char 边界）。
+fn clip_chars(text: &str, max: usize) -> &str {
+    match text.char_indices().nth(max) {
+        Some((index, _)) => text[..index].trim_end(),
+        None => text,
+    }
 }
 
 /// 用户发的一条 prompt（本地立即回显 + 打开等回声窗口），跟旧版 `send_prompt`
@@ -1131,6 +1376,8 @@ pub fn note_mid_turn_input(
             .entries
             .push(AcpEntry::UserWithImages { text, images });
     }
+    // 插入的这条已经进了对话：本机起名按它重起。
+    state.note_local_title_user_input();
 }
 
 /// 与 [`note_prompt_sent`] 相同，但把外部任务的稳定投递 id 绑定到本回合。
@@ -1168,6 +1415,8 @@ pub fn note_prompt_sent_with_delivery(
             .entries
             .push(AcpEntry::UserWithImages { text, images });
     }
+    // 用户这条真正发出去了：本机起名按它重起，不等助手回复。
+    state.note_local_title_user_input();
     state.awaiting_user_echo = true;
     state.phase = DaemonPhase::Thinking;
     state.end_reason.clear();
@@ -1221,6 +1470,8 @@ pub fn undo_prompt_sent(
         }
     };
     state.turn_timings.pop();
+    // 冻结输入里有这条已撤回的正文：在跑的结果作废，撤回本身不排新任务。
+    state.discard_local_title_input();
     state.turn_seq = state.turn_seq.saturating_sub(1);
     state.awaiting_user_echo = false;
     state.turn_started_at_ms = None;
