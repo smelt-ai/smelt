@@ -39,6 +39,9 @@ mod test_owner_tests;
 mod watch_tests;
 mod workspace_directory_tests;
 
+/// `SMELT_SESSION_METADATA_DIR` 是进程级环境变量，并行的测试改它前先拿这把锁。
+static SESSION_METADATA_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 测一个 ACP 会话值：默认 Direct 绑定、无 launch，供各子模块复用。
 fn make_acp_session_value(
     id: &str,

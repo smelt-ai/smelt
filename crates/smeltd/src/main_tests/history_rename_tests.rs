@@ -2,6 +2,9 @@ use super::*;
 
 #[test]
 fn history_rename_writes_metadata_overlay() {
+    let _env = super::SESSION_METADATA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!(
         "smelt-history-rename-{}-{}",
         std::process::id(),
