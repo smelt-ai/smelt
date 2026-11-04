@@ -29,6 +29,7 @@ use crate::{Workspace, liquid_glass, terminal, terminal_view};
 
 mod agent_hooks;
 mod bundled_helpers;
+mod local_model;
 mod memory;
 mod nav;
 mod panel_plugins;
@@ -1420,6 +1421,7 @@ impl SettingsContentView {
                 #[cfg(any(target_os = "macos", windows))]
                 Self::observe_settings_global::<UpdateSettings>(window, cx),
                 Self::observe_settings_global::<CleanupState>(window, cx),
+                Self::observe_settings_global::<local_model::LocalModelState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
                 Self::observe_settings_global::<RemoteSettingsState>(window, cx),

@@ -332,12 +332,16 @@ pub fn task_note_from_pi_custom(message: &serde_json::Value) -> Option<TaskNote>
 /// Agent 尚未通过通用 ACP 上报标题时，从首条用户消息生成稳定兜底。桌面侧栏、
 /// 守护状态广播和移动端列表共用这一份规则，避免不同端显示成不同名字。
 pub fn auto_title(entries: &[AcpEntry]) -> Option<String> {
-    let prompt = entries.iter().find_map(|entry| match entry {
+    crate::session_title::prompt_title(first_user_prompt(entries)?)
+}
+
+/// 第一条非空用户消息原文（去掉首尾空白）。标题都从它来。
+pub fn first_user_prompt(entries: &[AcpEntry]) -> Option<&str> {
+    entries.iter().find_map(|entry| match entry {
         AcpEntry::User(text) if !text.trim().is_empty() => Some(text.trim()),
         AcpEntry::UserWithImages { text, .. } if !text.trim().is_empty() => Some(text.trim()),
         _ => None,
-    })?;
-    crate::session_title::prompt_title(prompt)
+    })
 }
 
 /// ACP/app-server 图片的传输与热升级快照表示。长期历史仍以 agent

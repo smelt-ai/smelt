@@ -222,7 +222,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git libssl-dev pkg-config unzip
+            build-essential ca-certificates cmake curl git libclang-dev libssl-dev pkg-config unzip
 
       - name: Checkout
         uses: actions/checkout@v7

@@ -22,6 +22,8 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-git = { path = "../smelt-git" }
 smelt-event-bus = { path = "../smelt-event-bus" }
 smelt-store = { path = "../smelt-store" }
+# 本地小模型：会话标题等一次性推理（阻塞，放后台线程）。
+smelt-local-model = { path = "../smelt-local-model" }
 # 远程访问：iroh endpoint 直接接收运行时协议的流。
 smelt-iroh = { path = "../smelt-iroh" }
 smelt-pairing = { path = "../smelt-pairing" }

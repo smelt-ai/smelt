@@ -1477,6 +1477,67 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     );
 }
 
+/// 本机起名在用户消息真正发出时就排上，不等回复；Pi 拒收后重发同一条（回显已在）
+/// 不再排第二次；取消后正文还回输入框，冻结输入作废，也不排新任务。
+#[test]
+fn local_title_is_queued_on_send_once_and_not_on_resend_or_cancel() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-local-title", || {
+        let session = make_acp_session_value("acp-pi-local-title", reduced);
+        *session.launch_spec.lock() = Some(pi_launch());
+        session
+    });
+    crate::local_title::attach(&slot);
+    // 占住排队标记：只看排期是否前进，不真的交给工作线程。
+    slot.value.local_title.lock().mark_queued();
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    let subscribers = new_event_hub();
+    let _turn_completion = slot.value.turn_completion.lock();
+
+    send_acp_prompt_reserved(
+        &slot.value,
+        "帮我排查登录接口为什么超时".into(),
+        Vec::new(),
+        None,
+        AcpPromptOrigin::User,
+        false,
+        &subscribers,
+    )
+    .unwrap();
+    assert!(cmd_rx.try_recv().is_ok());
+    assert_eq!(slot.value.local_title.lock().wanted(), 1, "发出就排，不等回复");
+
+    // Pi 拒收、随即空闲：同一条原样重发。
+    requeue_unaccepted_prompt(&slot.value);
+    // 只模拟「Pi 空闲」让闸门放行；回合计时保持打开，后面的取消仍能撤回这条。
+    slot.value.reduced.lock().phase = DaemonPhase::Idle;
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    assert!(cmd_rx.try_recv().is_ok(), "重发同一条");
+    assert_eq!(user_bubbles(&slot.value, "帮我排查登录接口为什么超时"), 1);
+    crate::local_title::request_for_session(&slot.value, &subscribers);
+    assert_eq!(slot.value.local_title.lock().wanted(), 1, "重发不重复起名");
+    let frozen = slot.value.reduced.lock().local_title_request();
+    assert!(frozen.is_some());
+
+    // 用户取消：这条还没被收下，正文回输入框，起名输入作废，也不排新任务。
+    park_unaccepted_after_cancel(&slot.value);
+    assert_eq!(user_bubbles(&slot.value, "帮我排查登录接口为什么超时"), 0);
+    assert_eq!(slot.value.reduced.lock().local_title_request(), None);
+    crate::local_title::request_for_session(&slot.value, &subscribers);
+    assert_eq!(slot.value.local_title.lock().wanted(), 1, "取消不排新任务");
+    let (revision, input) = frozen.unwrap();
+    assert!(
+        !slot
+            .value
+            .reduced
+            .lock()
+            .apply_local_title(revision, &input, "已撤回内容的标题".into()),
+        "按已撤回内容起的名不能用"
+    );
+}
+
 #[test]
 fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
     let acp_sessions = new_test_acp_sessions();

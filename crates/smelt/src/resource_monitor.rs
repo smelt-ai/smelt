@@ -19,7 +19,8 @@ use gpui_component::chart::AreaChart;
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use smelt_model::control_api::{
-    ProcessEntry, ProcessUsage, ResourceUsage, ResourceUsageResult, SessionResourceUsage,
+    LocalModelInferenceStats, LocalModelUsage, ProcessEntry, ProcessUsage, ResourceUsage,
+    ResourceUsageResult, SessionResourceUsage,
 };
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::EmptyParams;
@@ -67,7 +68,7 @@ impl ResourceMonitor {
             .map(|(_, result)| result)
     }
 
-    /// 本机合计：桌面进程、本机守护和本机会话。本机运行时没回话时只有桌面。
+    /// 本机合计：桌面进程、本机守护、本机会话和本机模型进程。本机运行时没回话时只有桌面。
     fn local_total(&self) -> Option<ProcessUsage> {
         let mut total = self.desktop?;
         if let Some(Ok(local)) = self.result(&RuntimeKey::Local) {
@@ -286,13 +287,131 @@ fn add(total: &mut ProcessUsage, usage: ProcessUsage) {
     total.process_count += usage.process_count;
 }
 
-/// 一台运行时的合计：守护进程和全部会话。
+/// 一台运行时的合计：守护进程、全部会话和在跑的模型进程。模型是守护起的独立进程，
+/// 运行时报的 `daemon` 只算守护自己，不含它，所以这里加一次不会重复。
 fn runtime_total(result: &ResourceUsageResult) -> ProcessUsage {
     let mut total = result.daemon;
     for session in &result.sessions {
         add(&mut total, session.usage);
     }
+    if let Some(LocalModelUsage::Running { usage }) = result.local_model {
+        add(&mut total, usage);
+    }
     total
+}
+
+/// 本地模型那一行。旧运行时不报这一项（`None`），显示「不可用」而不是「未运行」。
+fn local_model_row(model: Option<LocalModelUsage>) -> Row {
+    let (detail, value) = match model {
+        Some(LocalModelUsage::Running { usage }) => {
+            ("独立进程".to_string(), RowValue::Usage(usage))
+        }
+        Some(LocalModelUsage::NotRunning) => ("空闲时不常驻".to_string(), RowValue::Text("未运行")),
+        Some(LocalModelUsage::Unsampled) => ("运行中，这次没采到占用".to_string(), RowValue::Text("采样不可用")),
+        None => (
+            "这台机器的后台服务版本较旧，不报本地模型".to_string(),
+            RowValue::Text("不可用"),
+        ),
+    };
+    Row {
+        label: "本地模型".to_string(),
+        detail: Some(detail),
+        value,
+        parts: Vec::new(),
+    }
+}
+
+/// 本地模型推理统计里的一行：名字一行，数字一行。
+#[derive(Debug, PartialEq)]
+struct InferenceLine {
+    label: String,
+    detail: String,
+}
+
+/// 推理统计怎么显示：要么一段空状态说明，要么上次 + 各模型平均。
+#[derive(Debug, PartialEq)]
+enum InferenceView {
+    Empty(&'static str),
+    Lines(Vec<InferenceLine>),
+}
+
+const INFERENCE_NOTE: &str = "耗时从启动模型进程算到拿到结果，含模型加载；CPU 是模型进程所有线程累计的用时，\
+     可超过耗时；峰值内存口径同上面的实时占用（macOS 峰值 phys_footprint、Linux VmHWM、\
+     Windows 峰值工作集），不含独立显存。只记成功的推理，重启后台服务后清空。";
+
+/// 没数据写「—」；`Some(0)` 是真的 0，照常写。
+fn or_dash(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "—".to_string())
+}
+
+/// 微秒写成人读的时长。均值是小数，所以收 f64。
+fn format_duration_us(us: f64) -> String {
+    let us = us.max(0.);
+    if us == 0. {
+        "0 ms".to_string()
+    } else if us < 1_000. {
+        format!("{us:.0} µs")
+    } else if us < 1_000_000. {
+        format!("{:.0} ms", us / 1_000.)
+    } else if us < 60_000_000. {
+        format!("{:.1} s", us / 1_000_000.)
+    } else {
+        let secs = (us / 1_000_000.).round() as u64;
+        format!("{} 分 {} 秒", secs / 60, secs % 60)
+    }
+}
+
+/// 均值；只有部分次有数据时注明几次。
+fn format_mean(
+    mean: Option<smelt_model::control_api::InferenceMean>,
+    inferences: u64,
+    format: impl Fn(f64) -> String,
+) -> String {
+    or_dash(mean.map(|mean| {
+        let text = format(mean.mean);
+        if mean.samples == inferences {
+            text
+        } else {
+            format!("{text}（{} 次有数据）", mean.samples)
+        }
+    }))
+}
+
+/// 后台服务没报（旧版本）是 `None`；报了但还没成功推理过是空统计。
+fn inference_view(stats: Option<&LocalModelInferenceStats>) -> InferenceView {
+    let Some(stats) = stats else {
+        return InferenceView::Empty("这台机器的后台服务版本较旧，不报推理统计");
+    };
+    if stats.last.is_none() && stats.averages.is_empty() {
+        return InferenceView::Empty("后台服务启动以来还没有成功的本地模型推理");
+    }
+    let mut lines = Vec::with_capacity(stats.averages.len() + 1);
+    if let Some(last) = &stats.last {
+        lines.push(InferenceLine {
+            label: format!("上次推理 · {}", last.model),
+            detail: format!(
+                "耗时 {} · CPU {} · 峰值内存 {}",
+                format_duration_us(last.wall_time_us as f64),
+                or_dash(last.cpu_time_us.map(|us| format_duration_us(us as f64))),
+                or_dash(last.peak_memory_bytes.map(format_bytes)),
+            ),
+        });
+    }
+    // 每个模型各自一行，不混在一起平均。
+    for average in &stats.averages {
+        lines.push(InferenceLine {
+            label: format!("{} · 成功 {} 次", average.model, average.inferences),
+            detail: format!(
+                "平均耗时 {} · CPU {} · 峰值内存 {}",
+                format_duration_us(average.wall_time_us),
+                format_mean(average.cpu_time_us, average.inferences, format_duration_us),
+                format_mean(average.peak_memory_bytes, average.inferences, |bytes| {
+                    format_bytes(bytes.max(0.).round() as u64)
+                }),
+            ),
+        });
+    }
+    InferenceView::Lines(lines)
 }
 
 /// 曲线的点：从 `now` 往回每隔 [`INTERVAL`] 取一刻，取那一刻之前最近的样本，老的在前。
@@ -459,16 +578,25 @@ pub(crate) struct PanelSnapshot {
     sections: Vec<Section>,
 }
 
-/// 不跟着排序走的一行：桌面进程、守护进程。它们就是单个进程；桌面进程能展开看内存花在哪。
+/// 不跟着排序走的一行：桌面进程、守护进程、本地模型。桌面进程能展开看内存花在哪。
+#[derive(Debug, PartialEq)]
 struct Row {
     label: String,
     detail: Option<String>,
-    usage: ProcessUsage,
+    value: RowValue,
     /// 内存拆成的几块，空的就不能展开。
     parts: Vec<MemoryPart>,
 }
 
+/// 一行右边显示什么：量到的数，或者没有数时的状态（「未运行」「不可用」）。
+#[derive(Debug, PartialEq)]
+enum RowValue {
+    Usage(ProcessUsage),
+    Text(&'static str),
+}
+
 /// 内存里的一块。
+#[derive(Debug, PartialEq)]
 struct MemoryPart {
     label: &'static str,
     detail: &'static str,
@@ -508,6 +636,8 @@ struct Section {
     others: Option<SessionGroup>,
     /// 读取中、离线或出错时的说明。
     note: Option<String>,
+    /// 本地模型推理统计；这台机器没回话时没有。
+    inference: Option<InferenceView>,
 }
 
 /// 每个守护会话属于侧栏哪个会话：(运行时, 守护会话 id) → (会话下标, 标题)。
@@ -553,6 +683,7 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
                 sessions: Vec::new(),
                 others: None,
                 note: None,
+                inference: None,
             };
             if key == RuntimeKey::Local
                 && let Some(desktop) = monitor.desktop
@@ -560,7 +691,7 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
                 section.fixed.push(Row {
                     label: "Smelt 界面".to_string(),
                     detail: Some("GPUI 主进程".to_string()),
-                    usage: desktop,
+                    value: RowValue::Usage(desktop),
                     parts: monitor.desktop_memory.map(memory_parts).unwrap_or_default(),
                 });
                 section.total = Some(desktop);
@@ -573,9 +704,12 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
                     section.fixed.push(Row {
                         label: "smeltd 后台服务".to_string(),
                         detail: None,
-                        usage: result.daemon,
+                        value: RowValue::Usage(result.daemon),
                         parts: Vec::new(),
                     });
+                    section.fixed.push(local_model_row(result.local_model));
+                    section.inference =
+                        Some(inference_view(result.local_model_inference.as_ref()));
                     let (groups, others) = group_sessions(&result.sessions, |id| {
                         owners.get(&(key.clone(), id.to_string())).cloned()
                     });
@@ -702,8 +836,10 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
         );
     }
     view.child(div().text_xs().text_color(theme.muted_foreground).child(
-        "本机合计：Smelt 界面、后台服务和本机会话，曲线最多两分钟。会话按整棵进程树计，\
-                 包括智能体起的命令；CPU 按单核计，多核可超过 100%。",
+        "本机合计：Smelt 界面、后台服务、本机会话和本地模型，曲线最多两分钟。会话按整棵进程树计，\
+                 包括智能体起的命令；CPU 按单核计，多核可超过 100%。本地模型是独立进程，\
+                 不算在后台服务里；它只在用时运行，短任务可能在两次采样之间跑完而采不到；\
+                 GPU 占用不单独统计。",
     ))
     .into_any_element()
 }
@@ -777,6 +913,9 @@ fn section_view(
         let is_open = open.contains(&id);
         table = table.child(fixed_row(id, row, is_open, &expanded, colors));
     }
+    if let Some(inference) = &section.inference {
+        table = table.child(inference_block(inference, colors));
+    }
     let mut sessions: Vec<&SessionGroup> = section.sessions.iter().collect();
     sort_by.sort(&mut sessions);
     for (ix, group) in sessions.into_iter().chain(&section.others).enumerate() {
@@ -813,6 +952,43 @@ fn section_view(
     table.into_any_element()
 }
 
+/// 本地模型推理统计：跟在固定行后面，名字和固定行对齐，只读快照里拼好的字。
+fn inference_block(view: &InferenceView, colors: RowColors) -> Div {
+    let line = |label: String, detail: Option<String>| {
+        h_flex()
+            .px_2()
+            .py_1()
+            .gap_3()
+            .items_center()
+            .child(div().flex_none().w(px(DISCLOSURE_COLUMN)))
+            .child(row_label(label, detail, colors))
+    };
+    let mut block = v_flex().child(line("本地模型推理".to_string(), None));
+    block = match view {
+        InferenceView::Empty(text) => block.child(line("—".to_string(), Some(text.to_string()))),
+        InferenceView::Lines(lines) => block.children(
+            lines
+                .iter()
+                .map(|l| line(l.label.clone(), Some(l.detail.clone()))),
+        ),
+    };
+    block.child(
+        h_flex()
+            .px_2()
+            .pb_1()
+            .gap_3()
+            .child(div().flex_none().w(px(DISCLOSURE_COLUMN)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(INFERENCE_NOTE),
+            ),
+    )
+}
+
 /// 展开箭头那一列的宽度。没有明细的行也空出这一列，名字才对得齐。
 const DISCLOSURE_COLUMN: f32 = 20.;
 
@@ -841,6 +1017,20 @@ fn usage_columns(usage: ProcessUsage, color: Hsla) -> Div {
                 .text_right()
                 .child(format_bytes(usage.memory_bytes)),
         )
+}
+
+/// 固定行右边：有数就是两列数字，没有就在两列的位置写状态。
+fn row_value_columns(value: &RowValue, colors: RowColors) -> Div {
+    match value {
+        RowValue::Usage(usage) => usage_columns(*usage, colors.fg),
+        RowValue::Text(text) => h_flex()
+            .flex_none()
+            .w(px(CPU_COLUMN + MEMORY_COLUMN))
+            .justify_end()
+            .text_sm()
+            .text_color(colors.muted)
+            .child(*text),
+    }
 }
 
 fn row_label(label: String, detail: Option<String>, colors: RowColors) -> Div {
@@ -880,7 +1070,7 @@ fn fixed_row(
             .items_center()
             .child(div().w(px(DISCLOSURE_COLUMN)))
             .child(label)
-            .child(usage_columns(row.usage, colors.fg))
+            .child(row_value_columns(&row.value, colors))
             .into_any_element();
     }
     let head = ListRow::new(ElementId::from(id.clone()))
@@ -894,7 +1084,7 @@ fn fixed_row(
         .on_click(toggle_row(expanded, id))
         .child(disclosure(is_open, colors))
         .child(label)
-        .child(usage_columns(row.usage, colors.fg));
+        .child(row_value_columns(&row.value, colors));
     if !is_open {
         return head.into_any_element();
     }
@@ -1084,12 +1274,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use smelt_model::control_api::{
-        ProcessEntry, ProcessUsage, ResourceUsageResult, SessionResourceUsage,
+        InferenceMean, LocalModelInference, LocalModelInferenceAverage, LocalModelInferenceStats,
+        LocalModelUsage, ProcessEntry, ProcessUsage, ResourceUsageResult, SessionResourceUsage,
     };
 
     use super::{
-        ResourceMonitor, SessionGroup, SortBy, format_bytes, format_cpu, group_sessions,
-        memory_series, process_summary,
+        InferenceLine, InferenceView, ResourceMonitor, RowValue, SessionGroup, SortBy,
+        format_bytes, format_cpu, format_duration_us, group_sessions, inference_view,
+        local_model_row, memory_series, process_summary, runtime_total,
     };
     use crate::RuntimeKey;
 
@@ -1237,6 +1429,8 @@ mod tests {
             daemon: usage(1., 10, 1),
             sessions: vec![session("s", usage(2., 20, 3))],
             total_memory_bytes: 1000,
+            local_model: None,
+            local_model_inference: None,
         };
         monitor.apply(
             Some(usage(4., 40, 1)),
@@ -1246,6 +1440,58 @@ mod tests {
         assert_eq!(monitor.local_total(), Some(usage(7., 70, 5)));
     }
 
+    /// 模型进程不在 daemon 里，合计里加且只加一次；没在跑、旧运行时不报都不加。
+    #[test]
+    fn a_running_local_model_counts_once_in_the_total() {
+        let result = |local_model| ResourceUsageResult {
+            daemon: usage(1., 10, 1),
+            sessions: vec![session("s", usage(2., 20, 3))],
+            total_memory_bytes: 1000,
+            local_model,
+            local_model_inference: None,
+        };
+        let running = Some(LocalModelUsage::Running {
+            usage: usage(50., 700, 1),
+        });
+        assert_eq!(runtime_total(&result(running)), usage(53., 730, 5));
+        assert_eq!(
+            runtime_total(&result(Some(LocalModelUsage::NotRunning))),
+            usage(3., 30, 4)
+        );
+        assert_eq!(runtime_total(&result(None)), usage(3., 30, 4));
+        assert_eq!(
+            runtime_total(&result(Some(LocalModelUsage::Unsampled))),
+            usage(3., 30, 4)
+        );
+
+        let mut monitor = ResourceMonitor::default();
+        monitor.apply(
+            Some(usage(4., 40, 1)),
+            vec![(RuntimeKey::Local, Ok(result(running)))],
+            Instant::now(),
+        );
+        assert_eq!(monitor.local_total(), Some(usage(57., 770, 6)));
+    }
+
+    #[test]
+    fn the_local_model_row_says_running_stopped_or_unavailable() {
+        let running = usage(50., 700, 1);
+        assert_eq!(
+            local_model_row(Some(LocalModelUsage::Running { usage: running })).value,
+            RowValue::Usage(running)
+        );
+        assert_eq!(
+            local_model_row(Some(LocalModelUsage::NotRunning)).value,
+            RowValue::Text("未运行")
+        );
+        assert_eq!(
+            local_model_row(Some(LocalModelUsage::Unsampled)).value,
+            RowValue::Text("采样不可用")
+        );
+        assert_eq!(local_model_row(None).value, RowValue::Text("不可用"));
+        assert_eq!(local_model_row(None).label, "本地模型");
+    }
+
     #[test]
     fn numbers_read_like_activity_monitor() {
         assert_eq!(format_bytes(512 * 1024), "512 KB");
@@ -1253,5 +1499,73 @@ mod tests {
         assert_eq!(format_bytes(1288 * 1024 * 1024), "1.3 GB");
         assert_eq!(format_cpu(0.34), "0.3%");
         assert_eq!(format_cpu(135.4), "135%");
+    }
+
+    #[test]
+    fn durations_read_naturally_and_zero_stays_zero() {
+        assert_eq!(format_duration_us(0.), "0 ms");
+        assert_eq!(format_duration_us(320.), "320 µs");
+        assert_eq!(format_duration_us(850_000.), "850 ms");
+        assert_eq!(format_duration_us(1_500_000.), "1.5 s");
+        assert_eq!(format_duration_us(65_000_000.), "1 分 5 秒");
+    }
+
+    #[test]
+    fn inference_stats_have_empty_states() {
+        assert_eq!(
+            inference_view(None),
+            InferenceView::Empty("这台机器的后台服务版本较旧，不报推理统计")
+        );
+        assert_eq!(
+            inference_view(Some(&LocalModelInferenceStats::default())),
+            InferenceView::Empty("后台服务启动以来还没有成功的本地模型推理")
+        );
+    }
+
+    /// 缺的写「—」，真的 0 写 0；每个模型各自一行平均，部分有数据时注明次数。
+    #[test]
+    fn inference_stats_show_last_and_per_model_averages() {
+        let stats = LocalModelInferenceStats {
+            last: Some(LocalModelInference {
+                model: "qwen3.5-0.8b".into(),
+                wall_time_us: 1_500_000,
+                cpu_time_us: Some(0),
+                peak_memory_bytes: None,
+            }),
+            averages: vec![
+                LocalModelInferenceAverage {
+                    model: "a".into(),
+                    inferences: 2,
+                    wall_time_us: 850_000.,
+                    cpu_time_us: Some(InferenceMean { samples: 1, mean: 2_000_000. }),
+                    peak_memory_bytes: Some(InferenceMean {
+                        samples: 2,
+                        mean: 820. * 1024. * 1024.,
+                    }),
+                },
+                LocalModelInferenceAverage {
+                    model: "b".into(),
+                    inferences: 1,
+                    wall_time_us: 0.,
+                    cpu_time_us: None,
+                    peak_memory_bytes: Some(InferenceMean { samples: 1, mean: 0. }),
+                },
+            ],
+        };
+        let line = |label: &str, detail: &str| InferenceLine {
+            label: label.to_string(),
+            detail: detail.to_string(),
+        };
+        assert_eq!(
+            inference_view(Some(&stats)),
+            InferenceView::Lines(vec![
+                line("上次推理 · qwen3.5-0.8b", "耗时 1.5 s · CPU 0 ms · 峰值内存 —"),
+                line(
+                    "a · 成功 2 次",
+                    "平均耗时 850 ms · CPU 2.0 s（1 次有数据） · 峰值内存 820 MB"
+                ),
+                line("b · 成功 1 次", "平均耗时 0 ms · CPU — · 峰值内存 0 KB"),
+            ])
+        );
     }
 }

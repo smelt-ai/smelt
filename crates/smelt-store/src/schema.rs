@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 41] = [
+pub const TABLES: [&str; 42] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -38,6 +38,7 @@ pub const TABLES: [&str; 41] = [
     "history_title",
     "launch_entry",
     "launch_settings",
+    "local_title_settings",
     "memory_settings",
     "new_session_pin",
     "paired_device",
@@ -271,7 +272,10 @@ CREATE TABLE acp_detail (
   automation_id TEXT,
   binding_automation_run_id TEXT,
   pending_agent_preset TEXT,
-  session_title TEXT
+  session_title TEXT,
+  provider_title TEXT,
+  local_model_title TEXT,
+  legacy_title TEXT
 );
 CREATE TABLE acp_launch_env (
   session_id TEXT NOT NULL REFERENCES acp_detail(session_id) ON DELETE CASCADE,
@@ -476,6 +480,10 @@ CREATE TABLE memory_settings (
   embedding_api_key TEXT NOT NULL,
   rerank_model_provider TEXT NOT NULL,
   rerank_model_id TEXT NOT NULL
+);
+CREATE TABLE local_title_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  model TEXT NOT NULL
 );
 CREATE TABLE remote_config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1821,6 +1829,40 @@ CREATE TABLE quota_provider_pref (
 pub const MIGRATE_V32_TO_V33: &str = "
 ALTER TABLE push_registration ADD COLUMN notify_success INTEGER NOT NULL DEFAULT 0 CHECK (notify_success IN (0, 1));
 ALTER TABLE push_registration ADD COLUMN payload_version INTEGER NOT NULL DEFAULT 1 CHECK (payload_version >= 1);
+";
+
+/// v34：ACP 会话标题的来源分列保存。`session_title` 仍是决定好的展示名；旧库里它可能是
+/// provider 标题也可能是首条 prompt 兜底，分不出来，所以不搬进来源列：会话下次连上时
+/// provider 重新上报、本机模型重新生成。
+pub const MIGRATE_V33_TO_V34: &str = "
+ALTER TABLE acp_detail ADD COLUMN provider_title TEXT;
+ALTER TABLE acp_detail ADD COLUMN local_model_title TEXT;
+";
+
+/// v35：v34 之前只存了决定好的 `session_title`，分不出来源。v34 没搬它，守护重开会话时
+/// 只按来源算名字，旧标题就被本机模型或首条 prompt 换掉。这里把它原样搬进单独的
+/// `legacy_title`：不冒充 provider 也不冒充本机模型，排在 provider 之后、本机模型之前，
+/// 有它就不再让本机模型起名。只搬还没有任何来源的行（v34 里已经记下来源的不动）。
+pub const MIGRATE_V34_TO_V35: &str = "
+ALTER TABLE acp_detail ADD COLUMN legacy_title TEXT;
+UPDATE acp_detail SET legacy_title = trim(session_title)
+WHERE session_title IS NOT NULL AND trim(session_title) <> ''
+  AND provider_title IS NULL AND local_model_title IS NULL;
+";
+
+/// v36：本机标题模型的选择，单行表。没有这一行就是缺省模型；合法取值由运行时校验，
+/// 换模型清单不用改表。
+pub const MIGRATE_V35_TO_V36: &str = "
+CREATE TABLE local_title_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  model TEXT NOT NULL
+);
+";
+
+/// v37：不再提供 Qwen3-0.6B，已存的这个选择显式迁到 Qwen3.5-0.8B。只改这一个已知旧值，
+/// 其它取值原样保留，由运行时校验时报错，不静默改成默认。用户已下载的模型文件不动。
+pub const MIGRATE_V36_TO_V37: &str = "
+UPDATE local_title_settings SET model = 'qwen3.5-0.8b' WHERE model = 'qwen3-0.6b';
 ";
 
 /// 建库、迁移时把目录这一行连同随机身份一起写好：读目录的人永远拿得到 epoch。

@@ -1130,7 +1130,10 @@ fn dispatch_control(
             let wants_appearance = params
                 .settings
                 .keys()
-                .any(|key| !smelt_core::memory_settings::is_memory_key(key));
+                .any(|key| {
+                    !smelt_core::memory_settings::is_memory_key(key)
+                        && !appearance_settings::is_local_title_key(key)
+                });
             if wants_appearance && !event_hub.has_appearance_listener().unwrap_or(false) {
                 return error_value(
                     control_version,

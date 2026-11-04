@@ -98,6 +98,19 @@ pub struct WorkspaceAcpRecord {
     pub session_title: Option<String>,
 }
 
+/// 一段 ACP 会话的标题。`session_title` 是守护按来源决定好的展示名（目录、侧栏、
+/// 手机读它）；`provider_title`、`local_model_title` 是它的来源，只给守护恢复会话用，
+/// 不进工作区目录。首条 prompt 兜底随时能从正文重算，不落库。用户手改名不在这里。
+/// `legacy_title` 是 v35 迁移从旧 `session_title` 搬来的来源不明的名字，只由迁移写，
+/// 守护保存来源时不改它。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AcpSessionTitles {
+    pub session_title: Option<String>,
+    pub provider_title: Option<String>,
+    pub local_model_title: Option<String>,
+    pub legacy_title: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentUiSnapshot {
     pub agent_hooks_enabled: bool,

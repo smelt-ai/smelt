@@ -179,15 +179,20 @@ pub fn rename_terminal_on(
     })
 }
 
-/// agent 报的标题变了。只由守护写，客户端改对话时带来的不算数。
-pub fn set_acp_session_title_on(
+/// ACP 会话的标题和来源变了。只由守护写，客户端改对话时带来的不算数。
+/// 没有这段 ACP 会话（库里还没有它的一行）返回 `None`：什么都没写，调用方之后要再写。
+pub fn set_acp_session_titles_on(
     store: &smelt_store::Store,
     sid: &str,
-    title: Option<&str>,
-) -> Result<DirectoryChange, DirectoryError> {
-    change_on(store, |store| {
-        Ok((store.set_workspace_acp_session_title(sid, title)?.changed, None))
-    })
+    titles: &smelt_store::AcpSessionTitles,
+) -> Result<Option<DirectoryChange>, DirectoryError> {
+    let mut found = true;
+    let change = change_on(store, |store| {
+        let commit = store.set_workspace_acp_session_titles(sid, titles)?;
+        found = commit.is_some();
+        Ok((commit.is_some_and(|commit| commit.changed), None))
+    })?;
+    Ok(found.then_some(change))
 }
 
 /// 一段 provider 对话的名字（历史页改名、认得出身份的终端分屏改名），`None` 是清掉。

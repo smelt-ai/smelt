@@ -117,6 +117,8 @@ mod event_hub;
 mod files_control;
 mod git_control;
 mod history_control;
+mod local_model_process;
+mod local_title;
 mod memory_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
@@ -2369,6 +2371,10 @@ fn main() {
     // 钉住自己映射的那份文件。钉晚了，启动名若已被拨走，再去解析
     // `current_exe()` 就会拿到下一份映像。
     pin_running_daemon_image();
+    // 本机模型推理子进程：跑完就退，不碰守护任何状态。
+    if std::env::args().nth(1).as_deref() == Some(local_model_process::TITLE_SUBCOMMAND) {
+        std::process::exit(local_model_process::run_title_subcommand());
+    }
     // `smeltd install` / `status` 这类子命令跑完就退出，不起守护。
     if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);

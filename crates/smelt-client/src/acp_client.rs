@@ -146,6 +146,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         entries_total: entries_offset,
         snapshot_revision: 0,
         session_title: None,
+        title_sources: None,
         replaying_history: false,
         entries: Vec::new(),
         tool_debug: Default::default(),

@@ -12,9 +12,14 @@ pub(super) fn maintenance_page(
     SettingPage::new("维护")
         .resettable(false)
         .group(
-            daemon_group(entity, snapshot)
+            daemon_group(entity.clone(), snapshot)
                 .title("后台服务")
                 .description("smeltd 承载本机的终端和 Agent 会话。"),
+        )
+        .group(
+            crate::settings::local_model::local_model_group(entity, cx)
+                .title("本地模型")
+                .description("可选的本地小模型，装在 ~/.smelt/models，卸载即删除模型文件。"),
         )
         .group(storage_group(cx).title("旧版本残留").description(
             "升级后没人再读写的文件。废弃文件启动时自动删；旧版 worktree 目录要你在这里确认。",
