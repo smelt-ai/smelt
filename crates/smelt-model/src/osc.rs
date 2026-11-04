@@ -240,8 +240,6 @@ pub struct ProgramStatus {
     pub app: Option<String>,
     /// 已解 base64 的说明文字。
     pub message: Option<String>,
-    /// 已解 base64 的标题：程序给这条记录起的名字，根记录上就是它对当前会话的命名。
-    pub title: Option<String>,
 }
 
 /// 回应 OSC 7501 探测，表示支持规范里的全部状态和阻塞种类。
@@ -253,9 +251,6 @@ pub fn program_status_reply(terminator: OscTerminator) -> Vec<u8> {
 
 /// 规范对 `msg` 编码后长度的上限（解码后 2048 字节）。
 const PROGRAM_STATUS_MSG_MAX_ENCODED: usize = 2732;
-/// 规范对 `title` 的上限：编码后 256 字节，解码后 192 字节。
-const PROGRAM_STATUS_TITLE_MAX_ENCODED: usize = 256;
-const PROGRAM_STATUS_TITLE_MAX_DECODED: usize = 192;
 
 /// 解析 `7501;` 之后的部分。不合规范的整条丢掉（规范要求终端这样做）。只认根记录：
 /// 带 `id` 的子记录是程序内部的分项进度，这里用不上。
@@ -264,7 +259,6 @@ fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
     let mut kind = None;
     let mut app = None;
     let mut message = None;
-    let mut title = None;
     for pair in pt.split(':').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=')?;
         if !value
@@ -307,18 +301,6 @@ fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
                 }
                 message = Some(text.trim().to_string()).filter(|text| !text.is_empty());
             }
-            "title" if !value.is_empty() => {
-                if value.len() > PROGRAM_STATUS_TITLE_MAX_ENCODED {
-                    return None;
-                }
-                let text = decode_base64_utf8(value)?;
-                if text.len() > PROGRAM_STATUS_TITLE_MAX_DECODED
-                    || text.chars().any(char::is_control)
-                {
-                    return None;
-                }
-                title = Some(text.trim().to_string()).filter(|text| !text.is_empty());
-            }
             "id" if !value.is_empty() => return None,
             _ => {}
         }
@@ -329,7 +311,6 @@ fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
         kind: kind.filter(|_| state == ProgramState::Blocked),
         app,
         message,
-        title,
     })
 }
 
@@ -697,20 +678,6 @@ mod tests {
         );
         let oversized = format!("\x1b]7501;state=done:msg={}\x07", "A".repeat(2800));
         assert_eq!(status(oversized.as_bytes()), None);
-        // 标题带控制字符、超长，都整条丢掉。
-        assert_eq!(status(b"\x1b]7501;state=done:title=YQpi\x07"), None);
-        let oversized = format!("\x1b]7501;state=done:title={}\x07", "A".repeat(260));
-        assert_eq!(status(oversized.as_bytes()), None);
-    }
-
-    #[test]
-    fn program_status_reads_base64_title() {
-        // "修复侧栏标题"
-        let report =
-            status(b"\x1b]7501;state=working:app=codex:title=5L+u5aSN5L6n5qCP5qCH6aKY\x07")
-                .unwrap();
-        assert_eq!(report.title.as_deref(), Some("修复侧栏标题"));
-        assert_eq!(status(b"\x1b]7501;state=working\x07").unwrap().title, None);
     }
 
     #[test]
