@@ -31,6 +31,18 @@ impl Workspace {
             (t.foreground, t.muted_foreground)
         };
         let (title, body, confirm_label) = match &target {
+            CloseConfirm::Archive { title, .. } => (
+                "确定归档这个会话吗？",
+                format!(
+                    "「{title}」正在运行或等待处理。归档会停止进程，对话记录和启动参数会保留；恢复终端将启动新 shell，不会恢复原进程。"
+                ),
+                "归档",
+            ),
+            CloseConfirm::DeleteArchived { title, .. } => (
+                "确定永久删除归档会话吗？",
+                format!("「{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再从归档恢复。不会删除项目文件或 Copilot、Claude 等工具自行保存的历史。"),
+                "永久删除",
+            ),
             CloseConfirm::Project {
                 label, sessions, ..
             } => (

@@ -58,13 +58,15 @@ fn insert_conversation(
 ) -> Result<(), StoreError> {
     let group_id = saved.id.trim();
     transaction.execute(
-        "INSERT INTO session_group(id, position, custom_title, last_updated_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO session_group(id, position, custom_title, last_updated_at, archived_at, pinned_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             group_id,
             position,
             saved.custom_title.as_deref(),
             saved.last_updated_at,
+            saved.archived_at,
+            saved.pinned_at,
         ],
     )?;
 
@@ -158,7 +160,10 @@ pub(crate) fn create_conversation(
     saved: &WorkspaceSessionRecord,
 ) -> Result<bool, StoreError> {
     let group_id = validated_conversation_id(saved)?;
-    let saved = &with_names(saved, &StoredNames::default());
+    let mut saved = with_names(saved, &StoredNames::default());
+    saved.archived_at = None;
+    saved.pinned_at = None;
+    let saved = &saved;
     if conversation_position(transaction, group_id)?.is_some() {
         return Ok(false);
     }
@@ -197,11 +202,15 @@ pub(crate) fn update_conversation(
     let before = read_conversation(transaction, group_id)?;
     // 恢复身份、名字、agent 标题都以库里的为准，要在删行之前读出来。
     let preserved_history = preserved_history_session_ids(transaction)?;
-    let saved = &with_names(saved, &stored_names(transaction, group_id)?);
+    let mut saved = with_names(saved, &stored_names(transaction, group_id)?);
+    if let Some(before) = &before {
+        saved.archived_at = before.archived_at;
+        saved.pinned_at = before.pinned_at;
+    }
     transaction.execute("DELETE FROM session_group WHERE id = ?1", [group_id])?;
     insert_conversation(
         transaction,
-        saved,
+        &saved,
         position,
         acp_id.as_deref(),
         &terminal_ids,
@@ -214,8 +223,51 @@ fn read_conversation(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<WorkspaceSessionRecord>, StoreError> {
-    Ok(read_workspace_snapshot(connection)?
-        .and_then(|snapshot| snapshot.sessions.into_iter().find(|session| session.id == id)))
+    Ok(read_workspace_snapshot(connection)?.and_then(|snapshot| {
+        snapshot
+            .sessions
+            .into_iter()
+            .find(|session| session.id == id)
+    }))
+}
+
+pub(crate) fn set_conversation_archived(
+    transaction: &Transaction<'_>,
+    id: &str,
+    archived_at: Option<i64>,
+) -> Result<bool, StoreError> {
+    let id = id.trim();
+    let current = read_conversation(transaction, id)?
+        .ok_or_else(|| StoreError::ConversationNotFound { id: id.into() })?;
+    if current.archived_at.is_some() == archived_at.is_some() {
+        return Ok(false);
+    }
+    transaction.execute(
+        "UPDATE session_group SET archived_at = ?2, pinned_at = NULL WHERE id = ?1",
+        params![id, archived_at],
+    )?;
+    Ok(true)
+}
+
+pub(crate) fn set_conversation_pinned(
+    transaction: &Transaction<'_>,
+    id: &str,
+    pinned_at: Option<i64>,
+) -> Result<bool, StoreError> {
+    let id = id.trim();
+    let current = read_conversation(transaction, id)?
+        .ok_or_else(|| StoreError::ConversationNotFound { id: id.into() })?;
+    if current.archived_at.is_some() {
+        return Err(StoreError::ConversationArchived { id: id.into() });
+    }
+    if current.pinned_at.is_some() == pinned_at.is_some() {
+        return Ok(false);
+    }
+    transaction.execute(
+        "UPDATE session_group SET pinned_at = ?2 WHERE id = ?1",
+        params![id, pinned_at],
+    )?;
+    Ok(true)
 }
 
 /// 删掉一段对话，返回删掉前的样子（调用方据此收掉它的终端和 ACP 会话）。已经不在时
@@ -694,7 +746,8 @@ pub(crate) fn read_workspace_snapshot(
         // 对话的名字：认得出 provider 身份的 ACP 对话用那段对话的名字（`history_title`），
         // 没有身份的用对话自己的。一个名字只存在其中一处，读的时候合起来。
         .prepare(
-            "SELECT g.id, COALESCE(h.custom_title, g.custom_title), g.last_updated_at
+            "SELECT g.id, COALESCE(h.custom_title, g.custom_title), g.last_updated_at,
+                    g.archived_at, g.pinned_at
              FROM session_group g
              LEFT JOIN session s ON s.group_id = g.id AND s.kind = 'acp'
              LEFT JOIN acp_detail a ON a.session_id = s.id
@@ -709,12 +762,14 @@ pub(crate) fn read_workspace_snapshot(
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut cache = WorkspaceReadCache::load(connection)?;
     let mut sessions = Vec::new();
-    for (group_id, custom_title, last_updated_at) in groups {
+    for (group_id, custom_title, last_updated_at, archived_at, pinned_at) in groups {
         let terminals = cache
             .terminals_by_group
             .remove(&group_id)
@@ -727,6 +782,8 @@ pub(crate) fn read_workspace_snapshot(
             id: group_id,
             custom_title,
             last_updated_at: last_updated_at.max(0),
+            archived_at,
+            pinned_at,
             terminals,
             acp,
         });
@@ -880,4 +937,3 @@ impl WorkspaceReadCache {
         Ok(record)
     }
 }
-

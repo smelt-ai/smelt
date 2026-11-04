@@ -46,6 +46,7 @@ impl From<smelt_store::StoreError> for DirectoryError {
             | StoreError::AcpConversationMissingSid { .. }
             | StoreError::DuplicateSessionId { .. }
             | StoreError::EmptyProjectRoot => Self::Invalid(error.to_string()),
+            StoreError::ConversationArchived { .. } => Self::Invalid(error.to_string()),
             error => Self::Store(error.to_string()),
         }
     }
@@ -103,6 +104,38 @@ pub fn open_project_on(
     })
 }
 
+pub fn archive_conversation_on(
+    store: &smelt_store::Store,
+    id: &str,
+    archived: bool,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let timestamp = archived.then(|| chrono::Utc::now().timestamp());
+        Ok((
+            store
+                .set_workspace_conversation_archived(id, timestamp)?
+                .changed,
+            None,
+        ))
+    })
+}
+
+pub fn pin_conversation_on(
+    store: &smelt_store::Store,
+    id: &str,
+    pinned: bool,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let timestamp = pinned.then(|| chrono::Utc::now().timestamp());
+        Ok((
+            store
+                .set_workspace_conversation_pinned(id, timestamp)?
+                .changed,
+            None,
+        ))
+    })
+}
+
 pub fn close_project_on(
     store: &smelt_store::Store,
     root: &str,
@@ -152,7 +185,10 @@ pub fn rename_acp_conversation_on(
     title: Option<&str>,
 ) -> Result<DirectoryChange, DirectoryError> {
     change_on(store, |store| {
-        Ok((store.rename_workspace_acp_conversation(sid, title)?.changed, None))
+        Ok((
+            store.rename_workspace_acp_conversation(sid, title)?.changed,
+            None,
+        ))
     })
 }
 
@@ -164,7 +200,12 @@ pub fn rename_conversation_on(
     title: Option<&str>,
 ) -> Result<DirectoryChange, DirectoryError> {
     change_on(store, |store| {
-        Ok((store.rename_workspace_conversation(conversation_id, title)?.changed, None))
+        Ok((
+            store
+                .rename_workspace_conversation(conversation_id, title)?
+                .changed,
+            None,
+        ))
     })
 }
 
@@ -175,7 +216,10 @@ pub fn rename_terminal_on(
     title: Option<&str>,
 ) -> Result<DirectoryChange, DirectoryError> {
     change_on(store, |store| {
-        Ok((store.rename_workspace_terminal(terminal_id, title)?.changed, None))
+        Ok((
+            store.rename_workspace_terminal(terminal_id, title)?.changed,
+            None,
+        ))
     })
 }
 
@@ -186,7 +230,10 @@ pub fn set_acp_session_title_on(
     title: Option<&str>,
 ) -> Result<DirectoryChange, DirectoryError> {
     change_on(store, |store| {
-        Ok((store.set_workspace_acp_session_title(sid, title)?.changed, None))
+        Ok((
+            store.set_workspace_acp_session_title(sid, title)?.changed,
+            None,
+        ))
     })
 }
 
@@ -250,11 +297,15 @@ fn directory_from_snapshot(
     }
 }
 
-fn conversation_record(conversation: &WorkspaceConversation) -> smelt_store::WorkspaceSessionRecord {
+fn conversation_record(
+    conversation: &WorkspaceConversation,
+) -> smelt_store::WorkspaceSessionRecord {
     smelt_store::WorkspaceSessionRecord {
         id: conversation.id.clone(),
         custom_title: conversation.custom_title.clone(),
         last_updated_at: conversation.last_updated_at,
+        archived_at: conversation.archived_at,
+        pinned_at: conversation.pinned_at,
         terminals: conversation
             .terminals
             .iter()
@@ -304,6 +355,8 @@ fn conversation_from_record(record: smelt_store::WorkspaceSessionRecord) -> Work
         id: record.id,
         custom_title: record.custom_title,
         last_updated_at: record.last_updated_at,
+        archived_at: record.archived_at,
+        pinned_at: record.pinned_at,
         terminals: record
             .terminals
             .into_iter()
@@ -365,6 +418,8 @@ mod tests {
             id: "conv-1".to_string(),
             custom_title: Some("标题".to_string()),
             last_updated_at: 7,
+            archived_at: None,
+            pinned_at: None,
             terminals: Vec::new(),
             acp: Some(WorkspaceAcp {
                 cwd: Some("/repo".to_string()),

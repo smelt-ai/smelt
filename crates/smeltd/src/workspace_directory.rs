@@ -54,10 +54,10 @@ impl WorkspaceDirectoryReader {
     /// 目录里有没有以 `sid` 为 ACP 会话的对话。读不到目录按没有算。
     pub(crate) fn has_acp(&self, sid: &str) -> bool {
         self.read().is_ok_and(|directory| {
-            directory
-                .conversations
-                .iter()
-                .any(|conversation| conversation.acp.as_ref().is_some_and(|acp| acp.sid == sid))
+            directory.conversations.iter().any(|conversation| {
+                conversation.archived_at.is_none()
+                    && conversation.acp.as_ref().is_some_and(|acp| acp.sid == sid)
+            })
         })
     }
 }
@@ -132,6 +132,63 @@ pub(crate) fn open_project(
     Ok(publish(&change, event_hub))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn archive_conversation(
+    store: &Store,
+    id: &str,
+    archived: bool,
+    sessions: &Sessions,
+    acp_sessions: &AcpSessions,
+    automations: &AutomationStore,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceRevision, ControlError> {
+    let id = id.trim();
+    let directory = workspace_catalog::directory_on(store).map_err(control_error)?;
+    let conversation = directory
+        .conversations
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "对话不存在"))?;
+    if archived {
+        if conversation.acp.as_ref().is_some_and(|acp| {
+            is_background_acp_session_id(&acp.sid)
+                || automations.lock().unwrap().is_run_session(&acp.sid)
+                || acp.automation_id.is_some()
+        }) {
+            return Err(ControlError::new(
+                ControlErrorCode::FailedPrecondition,
+                "自动化运行的会话由运行时管理，不能归档",
+            ));
+        }
+        for terminal in conversation
+            .terminals
+            .iter()
+            .filter_map(|t| t.id.as_deref())
+        {
+            super::archive_terminal_session(terminal, sessions, event_hub)
+                .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
+        }
+        if let Some(acp) = &conversation.acp {
+            super::kill_acp_session(&acp.sid, acp_sessions, event_hub)
+                .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
+        }
+    }
+    let change =
+        workspace_catalog::archive_conversation_on(store, id, archived).map_err(control_error)?;
+    Ok(publish(&change, event_hub))
+}
+
+pub(crate) fn pin_conversation(
+    store: &Store,
+    id: &str,
+    pinned: bool,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceRevision, ControlError> {
+    let change =
+        workspace_catalog::pin_conversation_on(store, id.trim(), pinned).map_err(control_error)?;
+    Ok(publish(&change, event_hub))
+}
+
 pub(crate) fn close_project(
     store: &Store,
     root: &str,
@@ -150,9 +207,11 @@ pub(crate) fn enter_conversation(
 ) -> Result<WorkspaceConversation, ControlError> {
     let directory = workspace_catalog::directory_on(store).map_err(control_error)?;
     let session_ids = session_ids(&conversation);
-    if let Some(existing) = directory.conversations.into_iter().find(|existing| {
-        session_ids_of(existing).any(|id| session_ids.contains(&id))
-    }) {
+    if let Some(existing) = directory
+        .conversations
+        .into_iter()
+        .find(|existing| session_ids_of(existing).any(|id| session_ids.contains(&id)))
+    {
         return Ok(existing);
     }
     create_conversation(store, &conversation, event_hub)?;
@@ -164,11 +223,12 @@ fn session_ids(conversation: &WorkspaceConversation) -> Vec<String> {
 }
 
 fn session_ids_of(conversation: &WorkspaceConversation) -> impl Iterator<Item = String> + '_ {
-    conversation
-        .acp
-        .iter()
-        .map(|acp| acp.sid.clone())
-        .chain(conversation.terminals.iter().filter_map(|terminal| terminal.id.clone()))
+    conversation.acp.iter().map(|acp| acp.sid.clone()).chain(
+        conversation
+            .terminals
+            .iter()
+            .filter_map(|terminal| terminal.id.clone()),
+    )
 }
 
 /// `session.delete` 删掉的会话从目录里摘掉，改了就推（见 [`workspace_catalog::forget_session_on`]）。
@@ -233,7 +293,11 @@ pub(crate) fn rename(
 }
 
 /// agent 报的标题变了：写进目录（冷启动时靠它显示），改了就推。只由守护调用。
-pub(crate) fn remember_acp_session_title(sid: &str, title: Option<&str>, event_hub: &EventHubHandle) {
+pub(crate) fn remember_acp_session_title(
+    sid: &str,
+    title: Option<&str>,
+    event_hub: &EventHubHandle,
+) {
     let result = default_store().and_then(|store| {
         workspace_catalog::set_acp_session_title_on(&store, sid, title).map_err(control_error)
     });

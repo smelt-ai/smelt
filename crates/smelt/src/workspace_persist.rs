@@ -12,12 +12,10 @@ use smelt_model::workspace_directory::{
     WorkspaceAcp, WorkspaceConversation, WorkspaceConversationIdParams, WorkspaceDirectory,
     WorkspaceProjectParams, WorkspaceTerminal,
 };
-use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode, ControlMethod};
 
 use crate::runtimes::Runtime;
-use crate::workspace_directory::{
-    DirectoryCommands, DirectoryOutcome, order_by_saved, without_names,
-};
+use crate::workspace_directory::{DirectoryCommands, DirectoryOutcome, order_by_saved, without_names};
 use crate::{
     AcpSaved, PaneState, RuntimeKey, SessionKind, SessionRouteArchive, SessionState,
     SidebarGrouping, Workspace, WorkspaceRoute,
@@ -168,6 +166,7 @@ pub(crate) struct WorkspaceUiState {
     pub(crate) sidebar_grouping: SidebarGrouping,
     pub(crate) pinned_projects: Vec<ProjectKey>,
     pub(crate) sidebar_hide_empty_projects: bool,
+    pub(crate) archive_expanded: bool,
 }
 
 /// 项目在客户端库里的身份。
@@ -338,6 +337,7 @@ pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
             .unwrap_or_default(),
         pinned_projects: record.pinned_projects,
         sidebar_hide_empty_projects: record.sidebar_hide_empty_projects,
+        archive_expanded: record.archive_expanded,
     }
 }
 
@@ -354,6 +354,7 @@ fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
         sidebar_grouping: crate::settings::enum_name(&ui.sidebar_grouping),
         pinned_projects: ui.pinned_projects.clone(),
         sidebar_hide_empty_projects: ui.sidebar_hide_empty_projects,
+        archive_expanded: ui.archive_expanded,
     };
     smelt_client_store::client_store()
         .and_then(|store| store.put_workspace_ui(&record))
@@ -390,6 +391,24 @@ struct SnapshotJob {
     commands: Option<DirectoryCommands>,
     /// 用户打开、关闭的项目，按发生的先后。跟在对话命令后面发。
     project_ops: Vec<ProjectOp>,
+    conversation_ops: Vec<ConversationOp>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ConversationOp {
+    Archive { id: String, archived: bool },
+    Pin { id: String, pinned: bool },
+    Delete { id: String },
+}
+
+impl ConversationOp {
+    pub(crate) fn method(&self) -> ControlMethod {
+        match self {
+            Self::Archive { .. } => ControlMethod::WorkspaceConversationArchive,
+            Self::Pin { .. } => ControlMethod::WorkspaceConversationPin,
+            Self::Delete { .. } => ControlMethod::WorkspaceConversationDelete,
+        }
+    }
 }
 
 /// 打开或关闭一个项目。项目列表不在本地另记一份，发出去等推送回来再变。
@@ -423,6 +442,9 @@ impl WorkspaceSnapshotWriteQueue {
             let mut ops = replaced.project_ops;
             ops.append(&mut job.project_ops);
             job.project_ops = ops;
+            let mut ops = replaced.conversation_ops;
+            ops.append(&mut job.conversation_ops);
+            job.conversation_ops = ops;
         }
         self.pending = Some(job);
         if self.in_flight {
@@ -456,8 +478,8 @@ impl WorkspaceSnapshotWriteQueue {
 }
 
 /// 后台线程提交：客户端那份写客户端库，目录命令按顺序发给运行时。返回发成功的对话
-/// 命令（主线程据此记账，没发成功的下一轮再发），和没做成的项目操作的错误文案。
-fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
+/// 命令（主线程据此记账，没发成功的下一轮再发）、显式操作的错误文案和不支持的方法。
+fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>, Vec<ControlMethod>) {
     if let Some(client) = &job.ui {
         if let Err(error) = save_workspace_ui(&client.ui) {
             eprintln!("[workspace] 保存界面状态失败：{error}");
@@ -474,13 +496,62 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
             Err(error) => eprintln!("[workspace] 打开客户端库失败：{error}"),
         }
     }
-    let outcome = job
+    let mut outcome = job
         .commands
         .as_ref()
         .map(|commands| send_directory_commands(&job.runtime, commands))
         .unwrap_or_default();
-    let project_errors = send_project_ops(&job.runtime, &job.project_ops);
-    (outcome, project_errors)
+    let mut errors = send_project_ops(&job.runtime, &job.project_ops);
+    let mut unsupported = Vec::new();
+    for op in &job.conversation_ops {
+        use smelt_model::control_api::{
+            WorkspaceConversationArchive, WorkspaceConversationDelete, WorkspaceConversationPin,
+        };
+        use smelt_model::workspace_directory::{
+            WorkspaceConversationArchiveParams, WorkspaceConversationPinParams,
+        };
+        let client = job.runtime.client();
+        let timeout = crate::runtime_call::RUNTIME_CALL_TIMEOUT;
+        let result = match op {
+            ConversationOp::Archive { id, archived } => client
+                .call::<WorkspaceConversationArchive>(
+                    &WorkspaceConversationArchiveParams {
+                        conversation_id: id.clone(),
+                        archived: *archived,
+                    },
+                    timeout,
+                ),
+            ConversationOp::Pin { id, pinned } => client.call::<WorkspaceConversationPin>(
+                &WorkspaceConversationPinParams {
+                    conversation_id: id.clone(),
+                    pinned: *pinned,
+                },
+                timeout,
+            ),
+            ConversationOp::Delete { id } => client.call::<WorkspaceConversationDelete>(
+                &WorkspaceConversationIdParams {
+                    conversation_id: id.clone(),
+                },
+                timeout,
+            ),
+        };
+        match result {
+            Ok(revision) => outcome.confirm(revision),
+            Err(error) => {
+                if matches!(&error, ControlClientError::Protocol(error)
+                    if error.code == ControlErrorCode::MethodNotFound)
+                {
+                    unsupported.push(op.method());
+                }
+                errors.push(format!(
+                    "{} 失败：{}",
+                    op.method(),
+                    crate::runtime_call::error_text(error)
+                ));
+            }
+        }
+    }
+    (outcome, errors, unsupported)
 }
 
 /// 项目操作不重发：运行时连不上就告诉用户，项目列表保持运行时那边的样子。
@@ -682,21 +753,44 @@ impl Workspace {
             saved_order.projects.clone()
         };
         space.projects = order_by_saved(directory.projects, &order, String::as_str);
-        let inbound = space.directory.receive(
-            version,
-            directory.conversations,
-            &local_conversations,
-        );
+        let inbound =
+            space
+                .directory
+                .receive(version, directory.conversations, &local_conversations);
         let runtime = space.runtime.clone();
+        let archived_ids = space
+            .directory
+            .archived()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect::<HashSet<_>>();
+        let archived_pending = space
+            .restore_pending
+            .iter()
+            .filter(|(_, state)| archived_ids.contains(&state.id))
+            .map(|(_, state)| (state.id.clone(), SavedConversationUi::of_state(state)))
+            .collect::<Vec<_>>();
 
         space
             .restore_pending
             .retain(|(_, state)| !inbound.removed.contains(&state.id));
 
+        for (id, saved) in archived_pending {
+            self.saved_conversation_ui.insert((key.clone(), id), saved);
+        }
         for id in &inbound.removed {
+            if !archived_ids.contains(id) {
+                self.saved_conversation_ui
+                    .remove(&(key.clone(), id.clone()));
+            }
             if let Some(ix) = self.sessions.iter().position(|session| {
                 session.conversation_id == *id && session.runtime(cx).key() == key
             }) {
+                if archived_ids.contains(id) {
+                    let saved = self.saved_ui_of_session(&self.sessions[ix], cx);
+                    self.saved_conversation_ui
+                        .insert((key.clone(), id.clone()), saved);
+                }
                 self.remove_session(ix, false, cx);
             }
         }
@@ -747,6 +841,7 @@ impl Workspace {
             self.restore_incoming_conversations(runtime, added, window, cx);
         }
         self.save_state(cx);
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
         cx.notify();
     }
 
@@ -836,17 +931,19 @@ impl Workspace {
                     }
                     break;
                 };
-                let (outcome, project_errors) = executor
+                let (outcome, operation_errors, unsupported) = executor
                     .spawn(async move { persist_ws_snapshot(&job) })
                     .await;
-                let _ = workspace.update(cx, |this, _| {
+                let _ = workspace.update(cx, |this, cx| {
                     if let Some(space) = this.space_mut(&key) {
                         space.directory.record(outcome);
+                        space.unsupported_conversation_methods.extend(unsupported);
                     }
-                    for error in project_errors {
+                    for error in operation_errors {
                         eprintln!("[workspace] {error}");
                         this.report_background_error(error);
                     }
+                    cx.notify();
                 });
             }
         })
@@ -888,6 +985,8 @@ impl Workspace {
             last_updated_at,
             terminals,
             acp,
+            archived_at: None,
+            pinned_at: None,
         }))
     }
 
@@ -944,6 +1043,21 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         self.request_project_op(key, ProjectOp::Close(root.to_string()), cx)
+    }
+
+    pub(crate) fn request_conversation_op(
+        &mut self,
+        key: &RuntimeKey,
+        op: ConversationOp,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut job) = self.build_ws_snapshot(key, cx) else {
+            self.report_background_error("运行时还没连上，无法修改对话".to_string());
+            return;
+        };
+        job.conversation_ops.push(op);
+        let epoch = self.ws_snapshot_epoch;
+        self.enqueue_ws_snapshot(key, job, epoch, cx);
     }
 
     /// 项目操作和这一轮快照一起进这个运行时的写入队列，排在已经入队的改动后面。
@@ -1005,6 +1119,7 @@ impl Workspace {
             ui,
             commands,
             project_ops: Vec::new(),
+            conversation_ops: Vec::new(),
         })
     }
 
@@ -1036,6 +1151,7 @@ impl Workspace {
             sidebar_grouping: self.sidebar_grouping,
             pinned_projects: Vec::new(),
             sidebar_hide_empty_projects: self.sidebar_hide_empty_projects,
+            archive_expanded: self.archive_expanded,
         };
         for space_key in self.space_keys() {
             let Some(space) = self.space(&space_key) else {
@@ -1107,36 +1223,37 @@ impl Workspace {
             }
         }
         for session in &self.sessions {
-            let route = if self.ui_session_id == Some(session.ui_id) {
-                self.active_session_ui.archive()
-            } else {
-                session.ui_state.archive()
-            };
-            let (dock_layout, active_terminal_id) = match &session.kind {
-                SessionKind::Term { dock, active } => (
-                    dock.pane_state(cx)
-                        .and_then(|layout| crate::conversation_layout::encode(&layout)),
-                    Some(active.read(cx).session_id().to_string()).filter(|id| !id.is_empty()),
-                ),
-                SessionKind::Conversation(_) => (None, None),
-            };
             let key = (
                 session.runtime(cx).key().clone(),
                 session.conversation_id.clone(),
             );
             records.insert(
                 key.clone(),
-                conversation_record(
-                    &key,
-                    &SavedConversationUi {
-                        route,
-                        dock_layout,
-                        active_terminal_id,
-                    },
-                ),
+                conversation_record(&key, &self.saved_ui_of_session(session, cx)),
             );
         }
         records.into_values().collect()
+    }
+
+    fn saved_ui_of_session(&self, session: &crate::Session, cx: &App) -> SavedConversationUi {
+        let route = if self.ui_session_id == Some(session.ui_id) {
+            self.active_session_ui.archive()
+        } else {
+            session.ui_state.archive()
+        };
+        let (dock_layout, active_terminal_id) = match &session.kind {
+            SessionKind::Term { dock, active } => (
+                dock.pane_state(cx)
+                    .and_then(|layout| crate::conversation_layout::encode(&layout)),
+                Some(active.read(cx).session_id().to_string()).filter(|id| !id.is_empty()),
+            ),
+            SessionKind::Conversation(_) => (None, None),
+        };
+        SavedConversationUi {
+            route,
+            dock_layout,
+            active_terminal_id,
+        }
     }
 
     /// 退出阶段强制构建一份最新快照，并等待现有写盘循环自然清空。不能把 pending
@@ -1185,6 +1302,7 @@ mod workspace_snapshot_write_queue_tests {
                 ..Default::default()
             }),
             project_ops: Vec::new(),
+            conversation_ops: Vec::new(),
         }
     }
 
@@ -1211,6 +1329,40 @@ mod workspace_snapshot_write_queue_tests {
             [ProjectOp::Close("/p".into()), ProjectOp::Open("/p".into())]
         );
         assert_eq!(name(next), "c");
+    }
+
+    #[test]
+    fn conversation_ops_are_serialized_and_survive_snapshot_replacement() {
+        use super::ConversationOp;
+        let mut queue = WorkspaceSnapshotWriteQueue::default();
+        queue.enqueue(job("running"));
+        queue.take_next_or_finish();
+        let mut archive = job("archive");
+        archive.conversation_ops.push(ConversationOp::Archive {
+            id: "c1".into(),
+            archived: true,
+        });
+        queue.enqueue(archive);
+        let mut restore = job("restore");
+        restore.conversation_ops.push(ConversationOp::Archive {
+            id: "c1".into(),
+            archived: false,
+        });
+        queue.enqueue(restore);
+        queue.enqueue(job("ordinary-save"));
+        assert_eq!(
+            queue.take_next_or_finish().0.unwrap().conversation_ops,
+            [
+                ConversationOp::Archive {
+                    id: "c1".into(),
+                    archived: true
+                },
+                ConversationOp::Archive {
+                    id: "c1".into(),
+                    archived: false
+                },
+            ],
+        );
     }
 
     fn name(job: SnapshotJob) -> String {
@@ -1248,9 +1400,7 @@ mod agent_conversation_persist_tests {
         conversation_from_record, conversation_record, project_key, project_roots_of,
         session_state_from_conversation,
     };
-    use smelt_model::workspace_directory::{
-        WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal,
-    };
+    use smelt_model::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal};
 
     /// 智能体 space 上的 ACP 对话经运行时目录走一趟，恢复用到的字段都还在。
     #[test]

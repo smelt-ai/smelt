@@ -74,6 +74,9 @@ pub enum StoreError {
     #[error("工作区里没有这段对话：{id}")]
     ConversationNotFound { id: String },
 
+    #[error("对话已归档，请先恢复：{id}")]
+    ConversationArchived { id: String },
+
     #[error("ACP 对话 {id} 缺少会话 id")]
     AcpConversationMissingSid { id: String },
 

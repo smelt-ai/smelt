@@ -136,6 +136,8 @@ fn session_agent_definition_ids(
                 id: format!("conv-{index}"),
                 custom_title: None,
                 last_updated_at: 0,
+                archived_at: None,
+                pinned_at: None,
                 terminals: Vec::new(),
                 acp: Some(smelt_store::WorkspaceAcpRecord {
                     cwd: Some(cwd.to_string()),

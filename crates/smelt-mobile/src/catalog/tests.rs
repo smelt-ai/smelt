@@ -142,6 +142,29 @@ fn find<'a>(sessions: &'a [SessionSummary], id: &str) -> &'a SessionSummary {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn archives_are_hidden_and_pins_stay_within_their_project() {
+    let mut state = CatalogState::default();
+    let mut archived = conversation("archived", "terminal", Some(("/repo", 0)), 0);
+    archived["archived_at"] = json!(20);
+    let mut pinned = conversation("pinned", "acp", Some(("/repo", 0)), 2);
+    pinned["pinned_at"] = json!(10);
+    state.apply(
+        snapshot(
+            Vec::new(),
+            Some(parse_directory(one_project_directory(vec![
+                archived,
+                conversation("normal", "terminal", Some(("/repo", 0)), 1),
+                pinned,
+                conversation("outside", "acp", Some(("/other", 1)), 3),
+            ]))),
+            None,
+        ),
+        Instant::now(),
+    );
+    assert_eq!(ids_of(&state.summaries()), ["pinned", "normal", "outside"]);
+}
+
+#[test]
 fn projection_lists_the_directory_and_live_automation_runs() {
     let mut state = CatalogState::default();
     let mut directory = parse_directory(one_project_directory(vec![
@@ -1905,7 +1928,11 @@ fn projection_carries_the_turn_start() {
         ..daemon("busy", DaemonPhase::ExecutingTool)
     };
     state.apply(
-        snapshot(vec![busy, daemon("idle", DaemonPhase::Idle)], Some(directory), None),
+        snapshot(
+            vec![busy, daemon("idle", DaemonPhase::Idle)],
+            Some(directory),
+            None,
+        ),
         Instant::now(),
     );
 

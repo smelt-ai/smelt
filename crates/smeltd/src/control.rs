@@ -499,12 +499,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match create_agent_conversation(
-                &params.id,
-                sessions,
-                acp_sessions,
-                event_hub,
-            ) {
+            match create_agent_conversation(&params.id, sessions, acp_sessions, event_hub) {
                 Ok(created) => success_value(control_version, &request_id, created),
                 Err(error) => error_value(
                     control_version,
@@ -828,6 +823,47 @@ fn dispatch_control(
                         sessions,
                         acp_sessions,
                         automations,
+                        event_hub,
+                    )
+                }),
+            )
+        }
+        ControlMethod::WorkspaceConversationArchive => {
+            let params: smelt_core::workspace_directory::WorkspaceConversationArchiveParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::archive_conversation(
+                        &store,
+                        &params.conversation_id,
+                        params.archived,
+                        sessions,
+                        acp_sessions,
+                        automations,
+                        event_hub,
+                    )
+                }),
+            )
+        }
+        ControlMethod::WorkspaceConversationPin => {
+            let params: smelt_core::workspace_directory::WorkspaceConversationPinParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::pin_conversation(
+                        &store,
+                        &params.conversation_id,
+                        params.pinned,
                         event_hub,
                     )
                 }),

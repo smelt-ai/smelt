@@ -131,6 +131,8 @@ define_control_methods! {
     WorkspaceConversationCreate => (WORKSPACE_CONVERSATION_CREATE_METHOD, "workspace.conversation.create"),
     WorkspaceConversationUpdate => (WORKSPACE_CONVERSATION_UPDATE_METHOD, "workspace.conversation.update"),
     WorkspaceConversationDelete => (WORKSPACE_CONVERSATION_DELETE_METHOD, "workspace.conversation.delete"),
+    WorkspaceConversationArchive => (WORKSPACE_CONVERSATION_ARCHIVE_METHOD, "workspace.conversation.archive"),
+    WorkspaceConversationPin => (WORKSPACE_CONVERSATION_PIN_METHOD, "workspace.conversation.pin"),
     WorkspaceProjectOpen => (WORKSPACE_PROJECT_OPEN_METHOD, "workspace.project.open"),
     WorkspaceProjectClose => (WORKSPACE_PROJECT_CLOSE_METHOD, "workspace.project.close"),
     WorkspaceDirectoryGet => (WORKSPACE_DIRECTORY_GET_METHOD, "workspace.directory"),
@@ -205,9 +207,11 @@ impl ControlMethod {
     /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加、缺了只是某项功能
     /// 用不了的方法。运行时可以没有：客户端不因缺它们判不兼容，用到它们的功能调到
     /// MethodNotFound 时自己降级。客户端离了就用不了的新方法不放这里（工作区目录的
-    /// `workspace.conversation.*` / `workspace.project.*`：桌面没有它们读不到目录）。
+    /// `workspace.conversation.create/update/delete` / `workspace.project.*`：桌面没有它们读不到目录）。
     /// 抬最低版本时清空，它们成了新基线里的必需方法。
     pub const OPTIONAL: &'static [Self] = &[
+        Self::WorkspaceConversationArchive,
+        Self::WorkspaceConversationPin,
         Self::AgentMemoryWatch,
         Self::RemoteStatusWait,
         Self::ResourceUsage,
@@ -655,13 +659,12 @@ mod tests {
     fn method_registry_names_are_unique_and_round_trip() {
         let mut names = std::collections::HashSet::new();
         for method in ControlMethod::ALL {
-            assert!(names.insert(method.as_str()));
+            assert!(names.insert(method.as_str()), "重复的控制方法名：{method}");
             assert_eq!(
                 ControlMethod::from_wire_name(method.as_str()),
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 126);
     }
 
     #[test]

@@ -1,7 +1,5 @@
 use super::*;
-use smelt_core::workspace_directory::{
-    WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
-};
+use smelt_core::workspace_directory::{WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal};
 use smelt_event_protocol::{CORE_SNAPSHOT_WORKSPACE, CoreProjectionEvent, SnapshotKind};
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 
@@ -66,6 +64,65 @@ fn delete(
         &new_test_automation_store(),
         event_hub,
     )
+}
+
+#[test]
+fn archiving_preserves_the_record_and_restoring_publishes_it_again() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let conversation = terminal_conversation();
+    workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
+    workspace_directory::pin_conversation(&temp.store, &conversation.id, true, &event_hub).unwrap();
+    for archived in [true, false] {
+        workspace_directory::archive_conversation(
+            &temp.store,
+            &conversation.id,
+            archived,
+            &new_sessions(),
+            &new_acp_sessions(),
+            &new_test_automation_store(),
+            &event_hub,
+        )
+        .unwrap();
+        let directory = published_directory(&event_hub).unwrap();
+        assert_eq!(directory.conversations.len(), 1);
+        let stored = &directory.conversations[0];
+        assert_eq!(stored.archived_at.is_some(), archived);
+        assert_eq!(stored.pinned_at, None);
+        assert_eq!(stored.terminals, conversation.terminals);
+    }
+}
+
+#[test]
+fn automation_owned_conversations_cannot_be_archived() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let conversation = WorkspaceConversation {
+        id: "automation".into(),
+        acp: Some(smelt_core::workspace_directory::WorkspaceAcp {
+            sid: "automation-session".into(),
+            automation_id: Some("a1".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
+    let error = workspace_directory::archive_conversation(
+        &temp.store,
+        &conversation.id,
+        true,
+        &new_sessions(),
+        &new_acp_sessions(),
+        &new_test_automation_store(),
+        &event_hub,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ControlErrorCode::FailedPrecondition);
+    assert!(
+        published_directory(&event_hub).unwrap().conversations[0]
+            .archived_at
+            .is_none()
+    );
 }
 
 /// 一台客户端新建、关掉对话，订阅方拿到的目录跟着变；关掉之后晚到的修改不能把它写回来。

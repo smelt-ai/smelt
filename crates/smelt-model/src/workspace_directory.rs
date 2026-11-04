@@ -2,8 +2,8 @@
 //!
 //! 运行时是唯一的写入方。客户端用单条命令改它（`workspace.conversation.*`、
 //! `workspace.project.*`），经 `workspace.changed` 收整份投影，订阅首帧就带着当前这份。
-//! 侧栏怎么排、折叠和固定、终端怎么分屏、当前看哪个，是每台客户端自己的界面状态，
-//! 不在这里。
+//! 对话归档、置顶跨客户端共享；侧栏手动序、折叠和项目固定、终端分屏、当前看哪个，
+//! 是每台客户端自己的界面状态，不在这里。
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,12 @@ pub struct WorkspaceConversation {
     /// 最近一次内容变化的 unix 秒。
     #[serde(default)]
     pub last_updated_at: i64,
+    /// 只由运行时的归档命令修改，整段更新不能覆盖。
+    #[serde(default)]
+    pub archived_at: Option<i64>,
+    /// 项目组内置顶；归档时清除。
+    #[serde(default)]
+    pub pinned_at: Option<i64>,
     /// 这段对话里的终端，按客户端给的顺序。ACP 对话没有。
     #[serde(default)]
     pub terminals: Vec<WorkspaceTerminal>,
@@ -96,6 +102,18 @@ pub struct WorkspaceAcp {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConversationIdParams {
     pub conversation_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceConversationArchiveParams {
+    pub conversation_id: String,
+    pub archived: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceConversationPinParams {
+    pub conversation_id: String,
+    pub pinned: bool,
 }
 
 /// `workspace.rename` 的参数。带 `terminal_id` 是给这段对话里的这一格终端改名，不带是给
