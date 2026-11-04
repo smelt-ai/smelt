@@ -63,7 +63,14 @@ Claude 不发改名事件，helper 在 SessionStart / UserPromptSubmit / Stop �
 补发一条 `SessionTitleChanged`：`/rename`、`--name` 起的名优先（hook 的 `session_title`，
 Stop 不带就读转录里最新的 `custom-title`），其次是 Claude 生成的标题（转录里最新的
 `ai-title`，hook 里没有）。转录只读末尾一段；这两种记录不在公开文档里，认不出就不发，
-会话名留在首条 prompt。生命周期事件先发，hook 超时只会丢标题。
+会话名留在首条 prompt。生命周期事件先发，标题之后才查，hook 超时只会丢标题。
+
+Codex 和 Antigravity 的 hook 也不带标题，名字在它们自己的 SQLite 里：Codex 在
+`$CODEX_HOME/state_<N>.sqlite` 的 `threads`（先 `name`，再 `title`，同 cmux 的
+`CodexNativeTitleStore`），SessionStart / UserPromptSubmit / Stop 时查；agy 在
+`conversation_summaries`，PreInvocation / Stop 时查。都是只读打开、碰到锁最多等 250ms，
+没读到就等下一次 hook。窗口标题（OSC 0/2）里混着状态（Codex 等批准时是
+`[ ! ] Action Required | …`），不拿来当会话名。
 
 Claude 的子智能体默认在后台跑，派出去后主回合马上 Stop。Stop 带的 `background_tasks` 是
 此刻在跑的任务快照：里面还有 `subagent` / `workflow` 时，这次 Stop 翻成带「后台还有 N 个
