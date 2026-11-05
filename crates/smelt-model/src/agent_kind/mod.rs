@@ -83,6 +83,47 @@ pub enum TaskCliPatch {
 /// 的真实路径（见 `acp_conn`），不要求用户 PATH 里有同名程序。
 pub const SMELT_AGENT_COMMAND: &str = "smelt-agent";
 
+/// 内置 Claude / Codex 适配器的启动名。和 [`SMELT_PI_AGENT_COMMAND`] 一样是逻辑名：运行时
+/// 把它换成自己编进 smelt-agent 的那份适配器（见 `acp_conn`），不按字面执行。怎么启动由
+/// 运行时决定，换适配器只改运行时，桌面、存档都不用动。
+///
+/// 每个适配器有两个名字，都不能改：
+///
+/// - `legacy`：2026.1104 及更早的运行时出厂写的那条命令。那些运行时只认它：装了 CLI 走
+///   自己内嵌的适配器，没装用 bunx 跑。出厂命令现在写它，旧运行时不用升级也能开对话。
+/// - `name`：以后的出厂名。等兼容基线越过第一个认识它的运行时，出厂命令换成它；`legacy`
+///   照样认，旧存档还能开。
+pub struct BuiltinAdapterCommand {
+    pub agent: ConversationAgentKind,
+    pub name: &'static str,
+    pub legacy: &'static str,
+}
+
+impl BuiltinAdapterCommand {
+    /// 命令（已去掉 `VAR=值` 前缀、按空白分好词）以它的名字开头时，给出名字后面的参数。
+    pub fn args_after<'w, 'a>(&self, words: &'w [&'a str]) -> Option<&'w [&'a str]> {
+        [self.name, self.legacy].into_iter().find_map(|name| {
+            let name: Vec<&str> = name.split_whitespace().collect();
+            words.starts_with(&name).then(|| &words[name.len()..])
+        })
+    }
+}
+
+pub const CLAUDE_ADAPTER_COMMAND: BuiltinAdapterCommand = BuiltinAdapterCommand {
+    agent: ConversationAgentKind::Claude,
+    name: "smelt-claude-agent",
+    legacy: "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
+};
+
+pub const CODEX_ADAPTER_COMMAND: BuiltinAdapterCommand = BuiltinAdapterCommand {
+    agent: ConversationAgentKind::Codex,
+    name: "smelt-codex-agent",
+    legacy: "bunx --bun @agentclientprotocol/codex-acp@1.12.0",
+};
+
+pub const BUILTIN_ADAPTER_COMMANDS: &[BuiltinAdapterCommand] =
+    &[CLAUDE_ADAPTER_COMMAND, CODEX_ADAPTER_COMMAND];
+
 /// Smelt 自带的 Pi 原生 RPC 逻辑入口。不要求用户 PATH 中真的存在同名
 /// 程序；连接层会把它解析成 smelt-agent 的 RPC 入口。
 pub const SMELT_PI_AGENT_COMMAND: &str = "smelt-pi-agent";
@@ -186,7 +227,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         previous_default_cmds: &[
             "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
             "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0",
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
         ],
         default_env: &[],
         homebrew_cask: Some("claude-code"),
@@ -234,7 +274,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             "bunx --bun @zed-industries/codex-acp@0.16.0",
             "bunx --bun @agentclientprotocol/codex-acp@1.1.7",
             "bunx --bun @agentclientprotocol/codex-acp@1.6.2",
-            "bunx --bun @agentclientprotocol/codex-acp@1.12.0",
             "codex app-server",
         ],
         default_env: &[],
@@ -1081,15 +1120,16 @@ mod history_source_tests {
 }
 
 pub fn default_acp_cmd() -> String {
-    // 跑 smelt-agent 里编进去的官方适配器 `@agentclientprotocol/claude-agent-acp`，版本由
-    // `agent/package.json` 锁定，方言适配与回归测试都对着这个版本做，升级是主动行为。
-    // 启动层把本机 `claude` 注入 CLAUDE_CODE_EXECUTABLE；本机没有 CLI 时直接请用户安装。
+    // 逻辑名，见 `BuiltinAdapterCommand`。运行时跑 smelt-agent 里编进去的官方适配器
+    // `@agentclientprotocol/claude-agent-acp`，版本由 `agent/package.json` 锁定，方言适配与
+    // 回归测试都对着这个版本做，升级是主动行为。启动层把本机 `claude` 注入
+    // CLAUDE_CODE_EXECUTABLE；本机没有 CLI 时直接请用户安装。
     //
     // 0.100.0 已用 Bun 1.4.4 + 本机 Claude CLI 实测 initialize：协议版本 1、
     // 图片与 MCP 能力正常，`agentCapabilities.loadSession: true`。0.77 删掉的
     // agent-picker / `claudeCode.options.agent` Smelt 没用；不要广告
     // native subagent / session fork，适配器声明了却没实现。
-    format!("{SMELT_AGENT_COMMAND} acp-claude")
+    CLAUDE_ADAPTER_COMMAND.legacy.to_string()
 }
 
 pub fn default_acp_copilot_cmd() -> String {
@@ -1102,14 +1142,15 @@ pub fn default_acp_copilot_cmd() -> String {
 }
 
 pub fn default_acp_codex_cmd() -> String {
-    // 标准 ACP 通道：跑 smelt-agent 里编进去的官方 `@agentclientprotocol/codex-acp`，它把
-    // Codex app-server 包了一层 ACP，跟 Claude/Copilot/Grok 走同一套 AcpAgent 驱动。
+    // 逻辑名，见 `BuiltinAdapterCommand`。标准 ACP 通道：运行时跑 smelt-agent 里编进去的
+    // 官方 `@agentclientprotocol/codex-acp`，它把 Codex app-server 包了一层 ACP，跟
+    // Claude/Copilot/Grok 走同一套 AcpAgent 驱动。
     // 2.5.0 已用 Bun 1.4.4 + Codex CLI 0.165 实测 initialize：协议版本 1、
     // 图片/MCP 与 `loadSession` 能力正常。2.0 起工具调用按 AIR 协定上报、diff 是
     // 精确补丁，仍是标准 ACP 内容块。1.7+ 原生 subagent / fork / 后台任务
     // 未协商则退回现有 tool call。启动层把本机 `codex` 注入 CODEX_PATH；本机没有
     // CLI 时直接请用户安装。
-    format!("{SMELT_AGENT_COMMAND} acp-codex")
+    CODEX_ADAPTER_COMMAND.legacy.to_string()
 }
 
 pub fn default_acp_grok_cmd() -> String {
@@ -1828,18 +1869,38 @@ mod tests {
     }
 
     #[test]
-    fn builtin_adapters_run_inside_smelt_agent() {
-        assert_eq!(default_acp_cmd(), "smelt-agent acp-claude");
-        assert_eq!(default_acp_codex_cmd(), "smelt-agent acp-codex");
+    fn builtin_adapters_are_named_by_what_released_runtimes_understand() {
+        // 2026.1104 及更早的运行时只认这两条。改了，没升级的运行时就开不了 Claude / Codex。
+        assert_eq!(
+            default_acp_cmd(),
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"
+        );
+        assert_eq!(
+            default_acp_codex_cmd(),
+            "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
+        );
         assert_eq!(default_acp_pi_cmd(), "smelt-pi-agent");
-        assert_eq!(
-            ConversationAgentKind::from_command_loose(&default_acp_cmd()),
-            Some(ConversationAgentKind::Claude)
-        );
-        assert_eq!(
-            ConversationAgentKind::from_command_loose(&default_acp_codex_cmd()),
-            Some(ConversationAgentKind::Codex)
-        );
+        for adapter in BUILTIN_ADAPTER_COMMANDS {
+            for name in [adapter.name, adapter.legacy] {
+                assert_eq!(
+                    ConversationAgentKind::from_command_loose(name),
+                    Some(adapter.agent)
+                );
+                let mut words: Vec<&str> = name.split_whitespace().collect();
+                assert_eq!(adapter.args_after(&words), Some(&[][..]));
+                words.push("--verbose");
+                assert_eq!(adapter.args_after(&words), Some(&["--verbose"][..]));
+            }
+            assert!(
+                adapter
+                    .agent
+                    .upgrade_released_default_command(adapter.legacy)
+                    .is_none()
+            );
+        }
+        let codex: Vec<&str> = CODEX_ADAPTER_COMMAND.legacy.split_whitespace().collect();
+        assert_eq!(CLAUDE_ADAPTER_COMMAND.args_after(&codex), None);
+        assert_eq!(CLAUDE_ADAPTER_COMMAND.args_after(&["smelt-claude"]), None);
     }
 
     #[test]
@@ -1848,37 +1909,25 @@ mod tests {
             ConversationAgentKind::Claude.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0"
             ),
-            Some("smelt-agent acp-claude".into())
+            Some(CLAUDE_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Claude.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0"
             ),
-            Some("smelt-agent acp-claude".into())
-        );
-        assert_eq!(
-            ConversationAgentKind::Claude.upgrade_released_default_command(
-                "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"
-            ),
-            Some("smelt-agent acp-claude".into())
+            Some(CLAUDE_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/codex-acp@1.1.7"
             ),
-            Some("smelt-agent acp-codex".into())
+            Some(CODEX_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/codex-acp@1.6.2"
             ),
-            Some("smelt-agent acp-codex".into())
-        );
-        assert_eq!(
-            ConversationAgentKind::Codex.upgrade_released_default_command(
-                "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
-            ),
-            Some("smelt-agent acp-codex".into())
+            Some(CODEX_ADAPTER_COMMAND.legacy.into())
         );
         assert!(
             ConversationAgentKind::Codex
@@ -1889,7 +1938,7 @@ mod tests {
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command("  codex app-server  "),
-            Some("smelt-agent acp-codex".into())
+            Some(CODEX_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Copilot.upgrade_released_default_command("copilot --acp"),

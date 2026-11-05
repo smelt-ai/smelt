@@ -44,8 +44,8 @@ flowchart TB
 
 | Provider | 协议形态 | smelt 怎么交付 | 启动（出厂默认） |
 |----------|----------|----------------|------------------|
-| **Claude** | **适配器**（`claude-agent-acp`） | 编在 `smelt-agent` 里，跑本机 Claude CLI | `smelt-agent acp-claude` |
-| **Codex** | **标准 ACP 通道**（`codex-acp`） | 编在 `smelt-agent` 里，跑本机 Codex CLI | `smelt-agent acp-codex` |
+| **Claude** | **适配器**（`claude-agent-acp`） | 编在 `smelt-agent` 里，跑本机 Claude CLI | 逻辑名，运行时换成 `smelt-agent acp-claude` |
+| **Codex** | **标准 ACP 通道**（`codex-acp`） | 编在 `smelt-agent` 里，跑本机 Codex CLI | 逻辑名，运行时换成 `smelt-agent acp-codex` |
 | **Copilot** | **原生**（CLI 内置 ACP server） | 用户本机已装 `copilot`；smelt 不代装 CLI | `copilot --acp --stdio` |
 | **Grok** | **原生**（Grok Build 官方 ACP） | 用户本机已装 / 官方入口；smelt 不代装 CLI | 以官方 `agent stdio` 为准 |
 | **Pi** | **官方 JSONL RPC** | Smelt 原生驱动；Pi 编成 `smelt-agent`，复用 Pi 配置/凭据 | `smelt-pi-agent` |

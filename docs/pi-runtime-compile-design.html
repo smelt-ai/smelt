@@ -409,7 +409,7 @@
       <code>./src/...worker.ts</code> 在 bunfs 里仍然是 <code>Cannot find module</code>，所以编译时还是把这两条说明符改成 <code>/$bunfs/root/...</code>。
     </li>
     <li>
-      后来（2026-11）不再另外下载 Bun。Claude/Codex 的默认命令直接是 <code>smelt-agent acp-claude</code> / <code>acp-codex</code>；
+      后来（2026-11）不再另外下载 Bun。Claude/Codex 的默认命令是逻辑名（沿用旧运行时认得的那条 bunx 命令），运行时把它换成 <code>smelt-agent acp-claude</code> / <code>acp-codex</code>；
       MCP 预设写 <code>~/.smelt/bin/smelt-agent</code> 加 <code>BUN_BE_BUN=1</code>，smelt-agent 起 MCP 时换成它自己。
       守护启动时删掉整个 <code>~/.smelt/runtime</code>，把 <code>mcp.json</code> 里指着 <code>~/.smelt/runtime/bin/bun</code> 的条目改过来。
       下文关于 <code>~/.smelt/runtime</code> 的内容是当时的设计，留作记录。

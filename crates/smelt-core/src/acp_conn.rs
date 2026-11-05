@@ -52,8 +52,8 @@ use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, Lines};
 
 pub use crate::acp_chat::AcpImage as PromptImage;
 use crate::agent_kind::{
-    ConversationAgentKind, ConversationLaunchSpec, SMELT_AGENT_COMMAND, SMELT_PI_AGENT_COMMAND,
-    TerminalAgentKind,
+    BUILTIN_ADAPTER_COMMANDS, ConversationAgentKind, ConversationLaunchSpec, SMELT_AGENT_COMMAND,
+    SMELT_PI_AGENT_COMMAND, TerminalAgentKind,
 };
 
 /// 一次 ACP 会话的启动参数。
@@ -2400,15 +2400,15 @@ async fn drain_ready_updates<S: SessionDrive>(
 const PROMPT_ERROR_HINTS: &[(&[&str], &str)] = &[
     (
         &["no api key"],
-        "还没配 API key：打开 设置 → Agent 对话 → 对应 agent 的「环境变量」，按 `KEY=值` 每行一条填好后新建会话即可（比如 DEEPSEEK_API_KEY=sk-...）。",
+        "还没配 API key：在「设置 → Agent → 自定义 Agent」新建一个基于这个 agent 的 Agent，在「环境变量」里按 `KEY=值` 每行一条填好（比如 OPENAI_API_KEY=sk-...），再用它新建对话。",
     ),
     (
         &["api key", "invalid"],
-        "API key 被服务端拒绝了：到 设置 → Agent 对话 → 「环境变量」里核对一遍，注意别把前后空格或引号一起粘进去。",
+        "API key 被服务端拒绝了：到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」核对一遍，注意别把前后空格或引号一起粘进去。",
     ),
     (
         &["econnrefused"],
-        "连不上模型服务：如果配了自定义 base URL（如 DEEPSEEK_BASE_URL），到 设置 → Agent 对话 → 「环境变量」确认地址和端口，以及本机能否访问。",
+        "连不上模型服务：如果配了自定义 base URL（如 OPENAI_BASE_URL），到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」确认地址和端口，以及本机能否访问。",
     ),
     (
         &["rate limit"],
@@ -2965,7 +2965,8 @@ fn build_agent_args(
     })
 }
 
-/// `smelt_agent` 给出当前发布的 smelt-agent：命令的程序名是 [`SMELT_AGENT_COMMAND`] 时换成它。
+/// `smelt_agent` 给出当前发布的 smelt-agent：命令的程序名是 [`SMELT_AGENT_COMMAND`] 时换成它；
+/// 命令是内置适配器的逻辑名（[`BUILTIN_ADAPTER_COMMANDS`]）时换成它里面的适配器。
 fn build_agent_args_with_ephemeral_env(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,
@@ -2998,21 +2999,26 @@ fn build_agent_args_with_ephemeral_env(
     for (name, value) in ephemeral_env {
         user_env.insert(name.clone(), value.clone());
     }
-    let resolved: Vec<String> = match prog_token {
-        // smelt-agent 不在用户 PATH 上，换成当前发布的那份。路径作为单独一个参数交给 SDK，
-        // 带空格也不怕。
-        Some(SMELT_AGENT_COMMAND) => {
-            let rest: Vec<String> = tokens.map(String::from).collect();
-            if let Some(adapter) = rest.first().and_then(|sub| embedded_adapter(sub)) {
-                use_local_adapter_cli(adapter, &mut user_env, search_path)?;
-            }
-            let executable = smelt_agent()
-                .map_err(|error| agent_client_protocol::Error::internal_error().data(error))?;
-            std::iter::once(executable.to_string_lossy().into_owned())
-                .chain(rest)
-                .collect()
+    let rest: Vec<&str> = tokens.collect();
+    let words: Vec<&str> = prog_token.into_iter().chain(rest.iter().copied()).collect();
+    let builtin = BUILTIN_ADAPTER_COMMANDS.iter().find_map(|builtin| {
+        let args = builtin.args_after(&words)?;
+        let adapter = EMBEDDED_ADAPTERS
+            .iter()
+            .find(|adapter| adapter.agent == builtin.agent)?;
+        Some((adapter, args))
+    });
+    let resolved: Vec<String> = match (builtin, prog_token) {
+        (Some((adapter, args)), _) => {
+            let args: Vec<&str> = std::iter::once(adapter.subcommand)
+                .chain(args.iter().copied())
+                .collect();
+            smelt_agent_invocation(&args, &mut user_env, search_path, smelt_agent)?
         }
-        Some(prog) => {
+        (None, Some(SMELT_AGENT_COMMAND)) => {
+            smelt_agent_invocation(&rest, &mut user_env, search_path, smelt_agent)?
+        }
+        (None, Some(prog)) => {
             let prog = if prog.contains('/') {
                 prog.to_string()
             } else {
@@ -3020,16 +3026,16 @@ fn build_agent_args_with_ephemeral_env(
                     agent_client_protocol::Error::internal_error().data(format!(
                         "未找到命令 `{prog}`。这类对话 agent 是各自独立的 CLI，需要先自行\
                          安装并登录。如果确定装了，多半是它的目录没进登录 shell 的 PATH——\
-                         可在「设置 → Agent 集成」把启动命令换成绝对路径（如 \
-                         `~/.grok/bin/{prog} …`）。"
+                         可以在「设置 → Agent → 自定义 Agent」新建一个基于它的 Agent，启动命令\
+                         写绝对路径（如 `~/.grok/bin/{prog} …`）。"
                     ))
                 })?
             };
             std::iter::once(prog)
-                .chain(tokens.map(String::from))
+                .chain(rest.iter().map(|arg| arg.to_string()))
                 .collect()
         }
-        None => Vec::new(),
+        (None, None) => Vec::new(),
     };
     let mut args = vec![format!("PATH={search_path}")];
     args.extend(
@@ -3039,6 +3045,24 @@ fn build_agent_args_with_ephemeral_env(
     );
     args.extend(resolved);
     Ok(args)
+}
+
+/// smelt-agent 不在用户 PATH 上，换成当前发布的那份。路径作为单独一个参数交给 SDK，带空格
+/// 也不怕。跑内置适配器时把本机 CLI 的位置交给它。
+fn smelt_agent_invocation(
+    args: &[&str],
+    user_env: &mut BTreeMap<String, String>,
+    search_path: &str,
+    smelt_agent: &dyn Fn() -> Result<std::path::PathBuf, String>,
+) -> Result<Vec<String>, agent_client_protocol::Error> {
+    if let Some(adapter) = args.first().and_then(|sub| embedded_adapter(sub)) {
+        use_local_adapter_cli(adapter, user_env, search_path)?;
+    }
+    let executable =
+        smelt_agent().map_err(|error| agent_client_protocol::Error::internal_error().data(error))?;
+    Ok(std::iter::once(executable.to_string_lossy().into_owned())
+        .chain(args.iter().map(|arg| arg.to_string()))
+        .collect())
 }
 
 /// 编进 smelt-agent 的官方 ACP 适配器（`smelt-agent <子命令>`）。适配器没带自己依赖的
@@ -3089,7 +3113,8 @@ fn use_local_adapter_cli(
         return Err(agent_client_protocol::Error::internal_error().data(format!(
             "未找到命令 `{program}`。{agent} 对话要先安装 {agent} 的 CLI 并登录，装好后重新\
              打开这个对话。如果确定装了，多半是它的目录没进登录 shell 的 PATH，可以在\
-             「设置 → Agent 集成」里设置 `{env}` 指向它。",
+             「设置 → Agent → 自定义 Agent」新建一个基于 {agent} 的 Agent，环境变量里写\
+             `{env}=<{program} 的绝对路径>`。",
             program = adapter.cli_program,
             agent = adapter.agent.label(),
             env = adapter.cli_env,
@@ -4681,7 +4706,9 @@ mod spawn_gate_tests {
 #[cfg(test)]
 mod embedded_adapter_tests {
     use super::{ConversationAgentKind, auth_required_hint, build_agent_args_with_ephemeral_env};
-    use crate::agent_kind::ConversationLaunchSpec;
+    use crate::agent_kind::{
+        CLAUDE_ADAPTER_COMMAND, CODEX_ADAPTER_COMMAND, ConversationLaunchSpec,
+    };
     use std::collections::BTreeMap;
 
     const SMELT_AGENT: &str = "/home/me/.smelt/bin/smelt-agent-abc/smelt-agent";
@@ -4789,6 +4816,23 @@ mod embedded_adapter_tests {
         .unwrap();
         assert_eq!(program_and_args(&built), [SMELT_AGENT, "acp-codex"]);
         assert!(built.contains(&format!("CODEX_PATH={}", codex.program("codex"))));
+    }
+
+    /// 旧名字（旧运行时写下的存档、旧桌面发来的请求）和以后的新名字都换成内置适配器。
+    #[test]
+    fn both_names_of_a_builtin_adapter_run_it() {
+        let claude = CliDir::with("claude");
+        let codex = CliDir::with("codex");
+        for (adapter, cli, subcommand) in [
+            (&CLAUDE_ADAPTER_COMMAND, &claude, "acp-claude"),
+            (&CODEX_ADAPTER_COMMAND, &codex, "acp-codex"),
+        ] {
+            for name in [adapter.name, adapter.legacy] {
+                let spaced = format!("  {}  ", name.replace(' ', "   "));
+                let built = args(&spec(spaced), cli.path()).unwrap();
+                assert_eq!(program_and_args(&built), [SMELT_AGENT, subcommand]);
+            }
+        }
     }
 
     /// 路径作为单独一个参数交出去，Windows 用户名带空格也不会被拆开。
@@ -5956,6 +6000,8 @@ mod prompt_failure_tests {
         let text = describe_prompt_error(&e);
         assert!(text.contains("设置"), "要指到设置页：{text}");
         assert!(text.contains("环境变量"), "要指到具体那个输入框：{text}");
+        // 只有自定义 Agent 能填环境变量，内置的没有这个输入框。
+        assert!(text.contains("自定义 Agent"), "{text}");
         // 原文仍然保留：诊断信息不能因为「友好」就被吞掉。
         assert!(text.contains("no API key"), "{text}");
     }

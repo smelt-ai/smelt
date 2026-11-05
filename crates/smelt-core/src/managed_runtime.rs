@@ -114,6 +114,9 @@ fn require_photon_wasm(executable: &Path) -> Result<(), String> {
 /// 整个 `runtime` 目录、旧版 `bunx` 下载的适配器缓存。`runtime` 里只剩遗留物：Bun 和 Pi
 /// 源码的 generation，已删除的 DeepSeek Harness（`dsh-npx`）和旧插件体系（`shell-plugins`）
 /// 留下的目录。Windows 上还有交接前的 MCP 进程占着旧 `bun.exe` 时删不干净，留到下次启动。
+///
+/// 整个删不会拽掉还在跑的进程：升级不交接子进程，旧守护在交出回执前已经收掉所有 ACP 进程组
+/// 和终端，新守护起来时没有谁还在用旧 Bun；漏网的只有上面说的 Windows 那种，下次再删。
 pub fn retire_managed_bun() {
     crate::pi_mcp::retire_managed_bun_entries();
     if let Some(home) = smelt_paths::smelt_home() {
@@ -233,10 +236,15 @@ fn cleanup_adapter_release(cache_root: &std::path::Path, package: &str, version:
 
 /// 清掉旧版出厂默认命令（`bunx --bun 包@版本`）下载过的适配器包，不碰别的版本和共享依赖。
 fn cleanup_retired_adapter_cache(cache_root: &std::path::Path) -> usize {
+    // 内置适配器的旧名字仍是出厂命令，但运行时不再按字面用 bunx 跑它，缓存也是遗留物。
+    let builtin = crate::agent_kind::BUILTIN_ADAPTER_COMMANDS
+        .iter()
+        .map(|adapter| adapter.legacy);
     crate::agent_kind::ConversationAgentKind::ALL
         .into_iter()
-        .flat_map(|agent| agent.descriptor().previous_default_cmds)
-        .filter_map(|command| bunx_package(command))
+        .flat_map(|agent| agent.descriptor().previous_default_cmds.iter().copied())
+        .chain(builtin)
+        .filter_map(bunx_package)
         .map(|(package, version)| cleanup_adapter_release(cache_root, package, version))
         .sum()
 }
