@@ -60,7 +60,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 
 ## 继续留在文件系统上的
 
-- 日志、socket（`~/.smelt/smeltd.sock`）、lock、skills、受管运行时映像（`~/.smelt/runtime/store/`）
+- 日志、socket（`~/.smelt/smeltd.sock`）、lock、skills
 - `~/.smelt/iroh-secret`：这台运行时的 iroh 身份，重启不变。没有 `remote-token`
 - 手机上的 `client-iroh-secret`：那台设备的身份，在 App 数据目录
 - `.claude/settings.json`、`.codex/hooks.json` 等外部产品自己的配置
