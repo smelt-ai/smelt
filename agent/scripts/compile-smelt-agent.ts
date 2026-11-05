@@ -5,7 +5,7 @@
  * B:/~BUN/root/。这里按编译目标把 Pi 写死的两条说明符改成对应平台上的那两个路径。
  * Pi 在这条路径失败时会退回进程内缩放，冒烟就看不出 worker 没起来。
  *
- * --splitting 在 Bun 1.4.3 上和图片 worker、codemode worker 一起通过了冒烟。
+ * --splitting 在 Bun 1.4.4 上和图片 worker、codemode worker 一起通过了冒烟。
  * Bun 1.4.0 上拆块会让 photon 报 `exports_photon_rs is not defined`，1.4.3 没有。
  *
  * 用法：bun agent/scripts/compile-smelt-agent.ts <outfile> <bun-target>

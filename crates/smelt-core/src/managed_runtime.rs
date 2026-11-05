@@ -17,7 +17,7 @@ use std::{
     process::Command,
 };
 
-pub(crate) const BUN_VERSION: &str = "1.4.3";
+pub(crate) const BUN_VERSION: &str = "1.4.4";
 
 /// 当前受管 Bun 的固定入口，相对 runtime 根目录。generation 目录名带哈希、随版本变，
 /// 写进外部配置（如 `mcp.json` 的 `command`）的路径必须是这一条。
@@ -32,55 +32,55 @@ include!(concat!(env!("OUT_DIR"), "/pi_agent_version.rs"));
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-darwin-aarch64.zip",
-    "80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-darwin-aarch64.zip",
+    "c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510",
 );
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-darwin-x64.zip",
-    "62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-darwin-x64.zip",
+    "50a3491f73abc2fe81673171a85762d3bc2cc1680ccecadd983de99adf77977e",
 );
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-aarch64";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "28c7dd0a06916aba284d570ef44a2d70e9c538eaf2ba58dfe0910525563b3f79";
+    "0a2237cdcfa0d16ef501d9acca9f0026309ef348bea7393a64e8d1e3609565cc";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-x64";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "c2a945a9d33f9088b32ac3550d1d1fd485a7fc10d71c66f91ef0d33b41cefa7c";
+    "c35307c7d45d65c5a385a58c4a6cb0bb9499e4e626abdee207c177a77ba666ab";
 // Linux x64 用 baseline 版：不要求 AVX2，云主机的老 CPU 也能跑。
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-x64-baseline.zip",
-    "1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip",
+    "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76",
 );
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const BUN_ZIP_DIR: &str = "bun-linux-x64-baseline";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "7ce7d6b654eddeec20afddf2396317fba6dc19ab52788a27e894e1806bf8f24b";
+    "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-aarch64.zip",
-    "efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip",
+    "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e",
 );
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const BUN_ZIP_DIR: &str = "bun-linux-aarch64";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe";
+    "354c2b049c716aca07b2e5cddb887928ac58950675d1258bb6312083917793b6";
 #[cfg(all(windows, target_arch = "x86_64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-windows-x64.zip",
-    "0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-windows-x64.zip",
+    "cd2c0fccc78f3ede1f50ca827a15f063eda13d4d150a3d0674f4f6e323d864a5",
 );
 #[cfg(all(windows, target_arch = "x86_64"))]
 const BUN_ZIP_DIR: &str = "bun-windows-x64";
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "095db4abae203d42f29fdec26da4a882fcde6333cdd84e40c0c7828c0cf543f6";
+    "cb1d8e6564e655e49d30cead359750a1cbbd12f42651caa4b62244d7bd93c244";
 
 /// npmmirror 按 GitHub Release 原样同步的 Bun 包，连不上 GitHub 时从这里下。
 #[cfg(any(
