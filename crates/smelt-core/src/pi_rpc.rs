@@ -583,8 +583,6 @@ fn spawn_process(
     let program = process_args.remove(0);
     let mut command = std::process::Command::new(program);
     command.args(process_args);
-    crate::login_env::apply_login_environment(&mut command);
-
     let mut environment = inline_env;
     for (name, value) in &launch.launch.env {
         environment.insert(name.clone(), runtime_env_value(name, value));
@@ -592,11 +590,16 @@ fn spawn_process(
     for (name, value) in &launch.ephemeral_env {
         environment.insert(name.clone(), value.clone());
     }
-    let path = environment
-        .remove("PATH")
-        .unwrap_or_else(crate::acp_conn::extended_search_path);
-    command.env("PATH", path);
-    command.envs(environment);
+    if !environment.contains_key("PATH") {
+        environment.insert("PATH".to_string(), crate::acp_conn::extended_search_path());
+    }
+    // 启动配置的 env 作为覆盖交给统一入口，补系统代理时才看得到它们。
+    crate::login_env::apply_login_environment(
+        &mut command,
+        environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
     // 会话身份与 capability token 必须由 daemon 决定；用户在旧式命令
     // 前缀或配置 env 中写了同名变量也不能覆盖。
     command.env("SMELT_SESSION_ID", &launch.sid);

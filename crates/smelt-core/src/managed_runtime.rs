@@ -146,8 +146,11 @@ impl ManagedPiRuntime {
         if let Some(subcommand) = subcommand {
             command.arg(subcommand);
         }
-        crate::login_env::apply_login_environment(&mut command);
-        command.env(PI_PROTOCOL_ENV, pi_protocol());
+        let protocol = pi_protocol();
+        crate::login_env::apply_login_environment(
+            &mut command,
+            [(PI_PROTOCOL_ENV, protocol.as_str())],
+        );
         command
     }
 }
@@ -404,7 +407,7 @@ fn bun_download_command(archive: &Path, url: &str) -> Command {
         .arg(archive)
         .arg(url);
     // curl 只认代理环境变量；用户的代理配在 rc 或系统设置里都要跟上。
-    crate::login_env::apply_login_environment(&mut download);
+    crate::login_env::apply_login_environment(&mut download, []);
     download
 }
 

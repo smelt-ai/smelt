@@ -262,10 +262,22 @@ pub fn login_environment() -> &'static HashMap<String, String> {
 /// 他真正在用的那套工具链。npm 官方源连不上、用户又没配源时补上国内镜像，
 /// 见 `mirrors`。
 ///
-/// 用户只在系统设置里配了代理时，按系统代理补上 `HTTP(S)_PROXY` / `NO_PROXY`，
-/// 见 `system_proxy`。放在这里而不是各调用点：起子进程的地方一多，逐个补总会漏。
-/// 调用方之后再设的变量（启动配置里的代理等）照常覆盖这里补的。
-pub fn apply_login_environment(command: &mut Command) -> &mut Command {
+/// 顺序是「login 环境 → 调用方覆盖 `overrides`（启动配置、ACP 规格里的 env，含 PATH）→
+/// 用户只在系统设置里配了代理时补 `HTTP(S)_PROXY` / `NO_PROXY`」，见 `system_proxy`。
+/// 调用方自己的 env 一律经 `overrides` 传进来，不要在返回后再铺：补系统代理时要看到
+/// 子进程最终的环境，启动配置里写了 `ALL_PROXY` 就不能再补 `HTTPS_PROXY` 把它盖掉。
+pub fn apply_login_environment<'a>(
+    command: &mut Command,
+    overrides: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> &mut Command {
+    apply_environment(command, overrides, crate::system_proxy::read_system_proxy)
+}
+
+fn apply_environment<'a>(
+    command: &mut Command,
+    overrides: impl IntoIterator<Item = (&'a str, &'a str)>,
+    read_system_proxy: impl FnOnce() -> Option<crate::system_proxy::SystemProxy>,
+) -> &mut Command {
     for (key, value) in login_environment() {
         command.env(key, value);
     }
@@ -273,7 +285,10 @@ pub fn apply_login_environment(command: &mut Command) -> &mut Command {
         command.env("NPM_CONFIG_REGISTRY", registry);
     }
     command.env("PATH", login_path());
-    crate::system_proxy::apply_system_proxy_fallback(command);
+    for (key, value) in overrides {
+        command.env(key, value);
+    }
+    crate::system_proxy::apply_system_proxy_fallback(command, read_system_proxy);
     command
 }
 
@@ -337,6 +352,78 @@ pub fn xdg_config_home() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{extract_marked, parse_env_block};
+
+    mod system_proxy_order {
+        use super::super::apply_environment;
+        use crate::system_proxy::SystemProxy;
+        use std::process::Command;
+
+        fn system_proxy() -> Option<SystemProxy> {
+            Some(SystemProxy {
+                http: Some("http://sys:8080".to_string()),
+                https: Some("http://sys:8080".to_string()),
+                bypass: Vec::new(),
+            })
+        }
+
+        fn env_of(command: &Command, name: &str) -> Option<String> {
+            command
+                .get_envs()
+                .filter(|(key, _)| *key == name)
+                .last()
+                .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+        }
+
+        /// 启动配置里写了 `ALL_PROXY`：判断时要看得到它，不能再补 `HTTPS_PROXY` 把它盖掉。
+        #[test]
+        fn caller_all_proxy_suppresses_system_https_proxy() {
+            let mut command = Command::new("x");
+            apply_environment(
+                &mut command,
+                [("ALL_PROXY", "socks5://mine:1080")],
+                system_proxy,
+            );
+            assert_eq!(
+                env_of(&command, "ALL_PROXY").as_deref(),
+                Some("socks5://mine:1080")
+            );
+            assert_ne!(
+                env_of(&command, "HTTPS_PROXY").as_deref(),
+                Some("http://sys:8080")
+            );
+            assert_ne!(
+                env_of(&command, "HTTP_PROXY").as_deref(),
+                Some("http://sys:8080")
+            );
+        }
+
+        /// 调用方没配（空串算没配）时照常补上系统代理。显式置空是为了不受跑测试那台机器
+        /// login 环境里的代理变量影响。
+        #[test]
+        fn system_proxy_fills_in_after_caller_overrides() {
+            let mut command = Command::new("x");
+            apply_environment(
+                &mut command,
+                [
+                    ("HTTPS_PROXY", ""),
+                    ("https_proxy", ""),
+                    ("HTTP_PROXY", ""),
+                    ("http_proxy", ""),
+                    ("ALL_PROXY", ""),
+                    ("all_proxy", ""),
+                ],
+                system_proxy,
+            );
+            assert_eq!(
+                env_of(&command, "HTTPS_PROXY").as_deref(),
+                Some("http://sys:8080")
+            );
+            assert_eq!(
+                env_of(&command, "http_proxy").as_deref(),
+                Some("http://sys:8080")
+            );
+        }
+    }
 
     /// 交互式 zsh 会在输出前粘一段 shell-integration 的 OSC 噪音（实测形如
     /// `\e]1337;…;shell=zsh`）。抠取逻辑必须只取标记之间的内容——那段噪音里

@@ -239,7 +239,7 @@ mod linux {
             .arg(to)
             .arg(url);
         // curl 只认代理环境变量；用户的代理配在 rc 或系统设置里都要跟上。
-        smelt_core::login_env::apply_login_environment(&mut command);
+        smelt_core::login_env::apply_login_environment(&mut command, []);
         let output = command
             .output()
             .map_err(|error| format!("无法执行 curl：{error}"))?;

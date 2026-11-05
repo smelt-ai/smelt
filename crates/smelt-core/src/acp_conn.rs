@@ -2690,7 +2690,7 @@ fn kiro_cli_get_kas_token(force_refresh: bool) -> Result<serde_json::Value, Stri
     let search_path = extended_search_path();
     let program = resolve_in_path("kiro-cli", &search_path).unwrap_or_else(|| "kiro-cli".into());
     let mut command = std::process::Command::new(program);
-    crate::login_env::apply_login_environment(&mut command);
+    crate::login_env::apply_login_environment(&mut command, []);
     command.args(["chat", "_", "get-kas-token"]);
     if force_refresh {
         command.arg("--force-refresh");
@@ -2942,12 +2942,14 @@ fn spawn_agent_process(
     // volta/asdf/mise 这类 shim 式版本管理器，PATH 里那个 `node` 只是转发器，
     // 真正的版本决策靠 `VOLTA_HOME` 一类的环境变量；代理设置同理。GUI 是
     // Finder 拉起的，这些变量一个都没有，于是"终端里跑得动、点图标跑不动"。
-    // 放在 config.env 之前，让启动规格里显式写的 `VAR=value` 前缀（含 PATH）
-    // 始终覆盖它。
-    crate::login_env::apply_login_environment(&mut std_cmd);
-    for (name, value) in config.environment() {
-        std_cmd.env(name, value);
-    }
+    // 启动规格里显式写的 `VAR=value` 前缀（含 PATH）作为覆盖传进去，始终盖过它。
+    crate::login_env::apply_login_environment(
+        &mut std_cmd,
+        config
+            .environment()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
     if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
         std_cmd.current_dir(cwd);
     }
@@ -4104,7 +4106,7 @@ fn run_runtime_version(path: &std::path::Path) -> Result<std::process::Output, S
     // 版本探测也要完整环境：volta 一类的 shim 缺 `VOLTA_HOME` 时连 `--version`
     // 都会失败，设置页于是把"装好了但环境没带全"误报成"未安装"，把用户引向
     // 重装这条完全错误的路。
-    crate::login_env::apply_login_environment(&mut command);
+    crate::login_env::apply_login_environment(&mut command, []);
     let mut child = command
         .spawn()
         .map_err(|error| format!("无法执行 `--version`：{error}"))?;
@@ -4278,8 +4280,7 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
         .env("NO_COLOR", "1");
     // 完整登录环境 + 扩展 PATH：npm 走 registry，缺代理设置时不会报错而是重试到
     // 超时；brew 同理。PATH 放在最后，覆盖快照里那份。
-    crate::login_env::apply_login_environment(&mut command);
-    command.env("PATH", search_path);
+    crate::login_env::apply_login_environment(&mut command, [("PATH", search_path)]);
     let child = command
         .spawn()
         .map_err(|error| format!("无法启动 {}：{error}", report.installer))?;

@@ -1854,7 +1854,7 @@ fn shell_command(command: &str) -> Command {
         command_process.arg("/d").arg("/c").arg(command);
         command_process
     };
-    crate::login_env::apply_login_environment(&mut command_process);
+    crate::login_env::apply_login_environment(&mut command_process, []);
     command_process
 }
 

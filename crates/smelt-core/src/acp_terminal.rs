@@ -112,10 +112,11 @@ impl AcpTerminals {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        crate::login_env::apply_login_environment(&mut cmd);
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
+        crate::login_env::apply_login_environment(
+            &mut cmd,
+            env.iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        );
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }

@@ -3011,12 +3011,12 @@ fn apply_interactive_pty_env(cmd: &mut CommandBuilder) {
     }
 }
 
-/// 内置终端也跟随系统代理（见 `smelt_core::system_proxy`），和 agent 起的子进程一致。
+/// 内置终端也跟随系统代理（见 `smelt_core::system_proxy_env`），和 agent 起的子进程一致。
 /// shell 起来后会再读 rc，所以「用户配过没有」除了看守护自己的环境，还要看 login shell
 /// 快照：rc 里只配了 `ALL_PROXY` 时补上 `HTTPS_PROXY` 会把它盖掉。
 fn apply_system_proxy_pty_env(cmd: &mut CommandBuilder) {
     let login = smelt_core::login_env::login_environment();
-    let env = smelt_core::system_proxy::system_proxy_env(|name| {
+    let env = smelt_core::system_proxy_env(|name| {
         cmd.get_env(name)
             .map(ToOwned::to_owned)
             .or_else(|| login.get(name).map(Into::into))

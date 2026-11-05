@@ -16,9 +16,11 @@
 //! - **只认固定代理**：系统代理没开、配了 PAC 自动配置脚本、只有 SOCKS，都不注入。
 //!   PAC 和手动代理同时开着时浏览器优先用 PAC，补手动那条会和浏览器走不同出口；
 //!   Bun 跑不了 PAC。开了 TUN 的代理工具不需要环境变量也能通。
-//! - **入口只有一个**：`login_env::apply_login_environment` 铺完用户环境后调这里，所有走它
-//!   起的子进程（Pi、ACP agent、agent 代跑的命令、后台任务、git、安装 CLI）都跟随系统代理，
-//!   规则和浏览器一致：绕过列表里的地址直连。不要在调用点单独再调。
+//! - **入口只有一个**：`login_env::apply_login_environment` 按「login 环境 → 调用方覆盖 →
+//!   补系统代理」铺环境，所有走它起的子进程（Pi、ACP agent、agent 代跑的命令、后台任务、
+//!   git、安装 CLI、下载用的 curl）都跟随系统代理，规则和浏览器一致：绕过列表里的地址直连。
+//!   调用方自己的 env 必须交给它，不能在它返回后再铺：异名变量（启动配置里的 `ALL_PROXY`）
+//!   判断时看不到，补上的 `HTTPS_PROXY` 会把它盖掉。
 //!   用户自己打开的内置终端用 portable_pty 起，不是 `Command`，由 smeltd 调
 //!   [`system_proxy_env`] 补，规则相同。
 //! - **绕过列表一起翻译**，并始终带上回环地址：OAuth 回调服务器、内网地址不能被塞进代理。
@@ -43,11 +45,11 @@ const LOOPBACK: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
 /// 系统里配的固定代理，已规整成带 scheme 的 URL。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SystemProxy {
-    http: Option<String>,
-    https: Option<String>,
+pub(crate) struct SystemProxy {
+    pub(crate) http: Option<String>,
+    pub(crate) https: Option<String>,
     /// `NO_PROXY` 格式的条目，不含回环地址。
-    bypass: Vec<String>,
+    pub(crate) bypass: Vec<String>,
 }
 
 /// 子进程最终环境里用户已经配了哪些。
@@ -58,10 +60,16 @@ struct Configured {
     no_proxy: bool,
 }
 
-/// 子进程环境里缺哪个协议的代理，就按系统代理补哪个。要在命令的环境都设完之后调用。
-pub(crate) fn apply_system_proxy_fallback(command: &mut Command) {
-    let env =
-        system_proxy_env(|name| command_env(command, name, &|name: &str| std::env::var_os(name)));
+/// 子进程环境里缺哪个协议的代理，就按系统代理补哪个。要在命令的环境都设完之后调用，
+/// 只由 `login_env::apply_login_environment` 调。`read` 是读系统代理，测试里换成假的。
+pub(crate) fn apply_system_proxy_fallback(
+    command: &mut Command,
+    read: impl FnOnce() -> Option<SystemProxy>,
+) {
+    let env = fallback_env(
+        |name| command_env(command, name, &|name: &str| std::env::var_os(name)),
+        read,
+    );
     for (name, value) in env {
         command.env(name, value);
     }
@@ -71,11 +79,18 @@ pub(crate) fn apply_system_proxy_fallback(command: &mut Command) {
 /// 给不是 `std::process::Command` 起的子进程用（内置终端的 PTY）；`Command` 直接走
 /// `login_env::apply_login_environment`。
 pub fn system_proxy_env(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str, String)> {
+    fallback_env(lookup, read_system_proxy)
+}
+
+fn fallback_env(
+    lookup: impl Fn(&str) -> Option<OsString>,
+    read: impl FnOnce() -> Option<SystemProxy>,
+) -> Vec<(&'static str, String)> {
     let configured = configured(&lookup);
     if configured.http && configured.https {
         return Vec::new();
     }
-    let Some(proxy) = read_system_proxy() else {
+    let Some(proxy) = read() else {
         return Vec::new();
     };
     proxy_env(&proxy, configured)
@@ -258,7 +273,7 @@ fn finish(proxy: SystemProxy) -> Option<SystemProxy> {
 }
 
 #[cfg(windows)]
-fn read_system_proxy() -> Option<SystemProxy> {
+pub(crate) fn read_system_proxy() -> Option<SystemProxy> {
     let settings = windows_registry::CURRENT_USER
         .open("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
         .ok()?;
@@ -285,7 +300,7 @@ fn read_system_proxy() -> Option<SystemProxy> {
 }
 
 #[cfg(target_os = "macos")]
-fn read_system_proxy() -> Option<SystemProxy> {
+pub(crate) fn read_system_proxy() -> Option<SystemProxy> {
     use system_configuration::core_foundation::array::CFArray;
     use system_configuration::core_foundation::base::{CFType, CFTypeRef, TCFType as _};
     use system_configuration::core_foundation::dictionary::CFDictionary;
@@ -382,7 +397,7 @@ fn read_system_proxy() -> Option<SystemProxy> {
 
 /// 其它平台没有统一的系统代理设置（Linux 桌面各家不同），只认环境变量。
 #[cfg(not(any(windows, target_os = "macos")))]
-fn read_system_proxy() -> Option<SystemProxy> {
+pub(crate) fn read_system_proxy() -> Option<SystemProxy> {
     None
 }
 
