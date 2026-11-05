@@ -366,10 +366,18 @@ mod tests {
             })
         }
 
+        /// Windows 环境变量名不分大小写：先设了 `HTTP_PROXY` 再设 `http_proxy`，`Command` 里只留一项、
+        /// 键名是先设的那个。
         fn env_of(command: &Command, name: &str) -> Option<String> {
             command
                 .get_envs()
-                .filter(|(key, _)| *key == name)
+                .filter(|(key, _)| {
+                    if cfg!(windows) {
+                        key.eq_ignore_ascii_case(name)
+                    } else {
+                        *key == name
+                    }
+                })
                 .last()
                 .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
         }
