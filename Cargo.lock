@@ -2364,7 +2364,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.9",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -10661,7 +10661,7 @@ dependencies = [
  "anyhow",
  "block2 0.6.2",
  "chrono",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "embed-resource",
  "futures-util",
  "gpui-base",
@@ -10749,7 +10749,7 @@ name = "smelt-client"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "hex",
  "libc",
  "objc2 0.6.5",
@@ -10797,7 +10797,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "ctor",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "dunce",
  "futures",
  "hex",
@@ -10884,7 +10884,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "chrono-tz",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "semver",
  "serde",
  "serde_json",
@@ -10908,7 +10908,7 @@ dependencies = [
 name = "smelt-paths"
 version = "0.0.0"
 dependencies = [
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "libc",
  "windows-sys 0.61.2",
 ]
@@ -11051,7 +11051,7 @@ dependencies = [
  "clap",
  "core-foundation 0.10.1",
  "core-foundation-sys",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "flate2",
  "hex",
  "image",

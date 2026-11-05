@@ -13,7 +13,7 @@ workspace = true
 smelt-client-store = { path = "../smelt-client-store" }
 smelt-sys = { path = "../smelt-sys" }
 anyhow = "1"
-dirs = "5"
+dirs = "6"
 reqwest = { version = "0.13", features = ["json"] }
 # 更新器按发版号比新旧（Windows 认编进程序的发版号）。
 semver = "1"
