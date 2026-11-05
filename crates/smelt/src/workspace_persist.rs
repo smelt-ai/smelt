@@ -479,7 +479,7 @@ impl WorkspaceSnapshotWriteQueue {
 
 /// 后台线程提交：客户端那份写客户端库，目录命令按顺序发给运行时。返回发成功的对话
 /// 命令（主线程据此记账，没发成功的下一轮再发）、显式操作的错误文案和不支持的方法。
-fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>, Vec<ControlMethod>) {
+fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
     if let Some(client) = &job.ui {
         if let Err(error) = save_workspace_ui(&client.ui) {
             eprintln!("[workspace] 保存界面状态失败：{error}");
@@ -502,7 +502,6 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>, Vec
         .map(|commands| send_directory_commands(&job.runtime, commands))
         .unwrap_or_default();
     let mut errors = send_project_ops(&job.runtime, &job.project_ops);
-    let mut unsupported = Vec::new();
     for op in &job.conversation_ops {
         use smelt_model::control_api::{
             WorkspaceConversationArchive, WorkspaceConversationDelete, WorkspaceConversationPin,
@@ -538,11 +537,6 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>, Vec
         match result {
             Ok(revision) => outcome.confirm(revision),
             Err(error) => {
-                if matches!(&error, ControlClientError::Protocol(error)
-                    if error.code == ControlErrorCode::MethodNotFound)
-                {
-                    unsupported.push(op.method());
-                }
                 errors.push(format!(
                     "{} 失败：{}",
                     op.method(),
@@ -551,7 +545,7 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>, Vec
             }
         }
     }
-    (outcome, errors, unsupported)
+    (outcome, errors)
 }
 
 /// 项目操作不重发：运行时连不上就告诉用户，项目列表保持运行时那边的样子。
@@ -931,13 +925,12 @@ impl Workspace {
                     }
                     break;
                 };
-                let (outcome, operation_errors, unsupported) = executor
+                let (outcome, operation_errors) = executor
                     .spawn(async move { persist_ws_snapshot(&job) })
                     .await;
                 let _ = workspace.update(cx, |this, cx| {
                     if let Some(space) = this.space_mut(&key) {
                         space.directory.record(outcome);
-                        space.unsupported_conversation_methods.extend(unsupported);
                     }
                     for error in operation_errors {
                         eprintln!("[workspace] {error}");

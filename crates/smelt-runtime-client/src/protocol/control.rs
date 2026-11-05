@@ -13,11 +13,9 @@ use serde_json::Value;
 use super::daemon::DaemonOperation;
 
 /// 控制协议版本。加方法、删方法都不升它：客户端按 `system.describe` 的方法清单看运行时有没有
-/// 自己要的方法，缺了必需的就判运行时太旧。新方法缺了只是某项功能用不了的，记进
-/// [`ControlMethod::OPTIONAL`]；客户端离了它就用不了的，直接是必需方法。改已有方法的参数或
-/// 结果才升，同时抬 [`CONTROL_API_MIN_SUPPORTED_VERSION`]：同名方法换了形状，方法清单看不
-/// 出来，只能靠版本拦住。但用户的 Linux 机器打成了镜像，运行时升不了，升它就连不上这些机器：
-/// 优先让改动可缺省、新旧两边都读得了，不升版本。
+/// 自己要的方法，缺了就判运行时太旧，请它升级（运行时会自升级）。改已有方法的参数或结果才升，
+/// 同时抬 [`CONTROL_API_MIN_SUPPORTED_VERSION`]：同名方法换了形状，方法清单看不出来，只能靠
+/// 版本拦住。
 ///
 /// 删方法不升：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下；不调它的客户端
 /// （手机、Pi）照常连。2026-10 删整份读写的 `workspace.load` / `workspace.save` 就是这样。
@@ -30,8 +28,6 @@ use super::daemon::DaemonOperation;
 /// 少了 `native_dsh_profiles`。旧运行时缺这个字段就拒收修改，新桌面改不了旧运行时上的
 /// 智能体配置，得让兼容检查拦住、提示升级运行时。
 ///
-/// 自定义 Agent 的 profile 多了启动命令和环境变量，没有升版：两个字段可缺省，旧运行时也
-/// 不拒绝多出来的字段。
 pub const CONTROL_API_VERSION: u16 = 3;
 pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
@@ -201,32 +197,6 @@ define_control_methods! {
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
-}
-
-impl ControlMethod {
-    /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加、缺了只是某项功能
-    /// 用不了的方法。运行时可以没有：客户端不因缺它们判不兼容，用到它们的功能调到
-    /// MethodNotFound 时自己降级。客户端离了就用不了的新方法不放这里（工作区目录的
-    /// `workspace.conversation.create/update/delete` / `workspace.project.*`：桌面没有它们读不到目录）。
-    /// 抬最低版本时清空，它们成了新基线里的必需方法。
-    pub const OPTIONAL: &'static [Self] = &[
-        Self::WorkspaceConversationArchive,
-        Self::WorkspaceConversationPin,
-        Self::AgentMemoryWatch,
-        Self::RemoteStatusWait,
-        Self::ResourceUsage,
-        // 手机推送：旧运行时没有，手机提示「升级后才能推送」。
-        Self::PushRegister,
-        Self::PushUnregister,
-        // 额度开关：旧运行时没有，设置页显示读取失败，侧栏额度照常。
-        Self::QuotaSettingsGet,
-        Self::QuotaSetEnabled,
-    ];
-
-    /// 运行时必须有这个方法：缺了就是运行时比客户端旧。
-    pub fn required(self) -> bool {
-        !Self::OPTIONAL.contains(&self)
-    }
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
