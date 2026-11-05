@@ -185,13 +185,12 @@ impl Workspace {
         let header_saving = saving && !editor.quiet_save;
         let enabled = cx
             .global::<settings::AgentHostState>()
-            .automations
-            .iter()
-            .find(|automation| automation.id == editor.automation_id)
+            .automations_on(&editor.automation.runtime)
+            .and_then(|machine| machine.automation(&editor.automation.id))
             .map(|automation| automation.enabled)
             .unwrap_or(true);
-        let delete_id = editor.automation_id.clone();
-        let toggle_id = editor.automation_id.clone();
+        let delete_id = editor.automation.clone();
+        let toggle_id = editor.automation.clone();
         div()
             .flex_shrink_0()
             .child(
@@ -250,6 +249,11 @@ impl Workspace {
         let selected_run_id = self.automation_surface.selected_run_id.clone();
         let task_selected = selected_run_id.is_none();
         let task_entity = entity.clone();
+        let runtime = self
+            .nav
+            .automations()
+            .editor()
+            .map(|auto| auto.runtime.clone());
         let rows = runs
             .iter()
             .map(|run| {
@@ -263,6 +267,7 @@ impl Workspace {
                     .map(compact_instructions);
                 let open_entity = entity.clone();
                 let run_id = run.id.clone();
+                let run_runtime = runtime.clone();
                 let selected = selected_run_id.as_deref() == Some(run.id.as_str());
                 ListRow::new(format!("automation-editor-run-{run_id}"))
                     .selected(selected)
@@ -283,8 +288,11 @@ impl Workspace {
                     )
                     .on_click(move |_, window, cx| {
                         let run_id = run_id.clone();
+                        let Some(runtime) = run_runtime.clone() else {
+                            return;
+                        };
                         open_entity.update(cx, |workspace, cx| {
-                            workspace.select_automation_run(run_id, window, cx)
+                            workspace.select_automation_run(&runtime, run_id, window, cx)
                         });
                     })
                     .into_any_element()
@@ -338,8 +346,8 @@ impl Workspace {
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        // 自动化眼下只在本机，只能选本机的智能体。
-        let ready_agents = settings::agents_on(&crate::RuntimeKey::Local, cx)
+        // 只能选自动化所在那台机器上的智能体。
+        let ready_agents = settings::agents_on(&editor.automation.runtime, cx)
             .iter()
             .filter(|agent| agent.is_ready())
             .cloned()
@@ -513,6 +521,11 @@ impl Workspace {
         let status = run_status_label(run.status);
         let run_id = run.id.clone();
         let cancel_entity = entity.clone();
+        let cancel_runtime = self
+            .nav
+            .automations()
+            .editor()
+            .map(|auto| auto.runtime.clone());
         div()
             .flex_1()
             .min_w_0()
@@ -550,8 +563,11 @@ impl Workspace {
                                 .label("停止")
                                 .on_click(move |_, _, cx| {
                                     let run_id = run_id.clone();
+                                    let Some(runtime) = cancel_runtime.clone() else {
+                                        return;
+                                    };
                                     cancel_entity.update(cx, |workspace, cx| {
-                                        workspace.cancel_automation_run(run_id, cx)
+                                        workspace.cancel_automation_run(&runtime, run_id, cx)
                                     });
                                 }),
                         )
@@ -585,38 +601,46 @@ impl Workspace {
     ) -> AnyElement {
         // 只借用全局状态、按需取值。整份克隆会连带所有运行的输出，每帧重绘都复制一遍。
         let config = cx.global::<settings::AgentHostState>();
+        // 列表页的错误：本机的自动化库读不了。远程机器的在它那一组的标题上说。
         let error = self
             .automation_surface
             .error
             .clone()
             .or_else(|| config.persistence_error.clone())
-            .or_else(|| config.automation_store_error.clone());
-        let store_ready = !config.automation_store_id.is_empty();
-        if let Some(automation_id) = self.nav.automations().editor_id().map(str::to_string) {
+            .or_else(|| {
+                config
+                    .automations_on(&crate::RuntimeKey::Local)
+                    .and_then(|machine| machine.store_error.clone())
+            });
+        if let Some(automation) = self.nav.automations().editor().cloned() {
             let config = cx.global::<settings::AgentHostState>();
-            let automation_exists = config
-                .automations
-                .iter()
-                .any(|automation| automation.id == automation_id);
-            let runs_exist = config
-                .automation_runs
-                .iter()
-                .any(|run| run.automation_id == automation_id);
+            let machine = config.automations_on(&automation.runtime);
+            let store_ready = machine.is_some_and(|machine| !machine.store_id.is_empty());
+            let automation_exists =
+                machine.is_some_and(|machine| machine.automation(&automation.id).is_some());
+            let runs_exist = machine.is_some_and(|machine| {
+                machine
+                    .runs
+                    .iter()
+                    .any(|run| run.automation_id == automation.id)
+            });
             let selected_run_gone = self
                 .automation_surface
                 .selected_run_id
                 .as_ref()
                 .is_some_and(|run_id| {
-                    !config
-                        .automation_runs
-                        .iter()
-                        .any(|run| run.id == *run_id && run.automation_id == automation_id)
+                    !machine.is_some_and(|machine| {
+                        machine
+                            .runs
+                            .iter()
+                            .any(|run| run.id == *run_id && run.automation_id == automation.id)
+                    })
                 });
             let new_draft = self
                 .automation_surface
                 .editor
                 .as_ref()
-                .is_some_and(|editor| editor.is_new && editor.automation_id == automation_id);
+                .is_some_and(|editor| editor.is_new && editor.automation == automation);
             if store_ready && !automation_exists && !runs_exist && !new_draft {
                 self.nav.automations_mut().pop_to_root();
                 self.automation_surface.editor = None;
@@ -628,21 +652,21 @@ impl Workspace {
                 self.automation_surface.live_view = None;
                 self.automation_surface.live_sub = None;
             }
-            if self.nav.automations().editor_id() == Some(automation_id.as_str())
+            if self.nav.automations().editor() == Some(&automation)
                 && automation_exists
                 && self
                     .automation_surface
                     .editor
                     .as_ref()
-                    .is_none_or(|editor| editor.automation_id != automation_id)
+                    .is_none_or(|editor| editor.automation != automation)
             {
-                self.open_automation_editor(automation_id, window, cx);
+                self.open_automation_editor(automation, window, cx);
             }
         }
 
         let entity = cx.entity();
         let left_guard = self.chrome_left_guard(window);
-        let Some(automation_id) = self.nav.automations().editor_id().map(str::to_string) else {
+        let Some(automation) = self.nav.automations().editor().cloned() else {
             return div()
                 .flex_1()
                 .min_w_0()
@@ -650,17 +674,22 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .bg(rgb(crate::ui_theme::bg_stage()))
-                .child(self.render_automations_catalog_header(entity.clone(), left_guard))
+                .child(self.render_automations_catalog_header(entity.clone(), left_guard, cx))
                 .child(self.render_automations_catalog(error, entity, cx))
                 .into_any_element();
         };
 
         let runs = cx
             .global::<settings::AgentHostState>()
-            .automation_runs_for(&automation_id)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+            .automations_on(&automation.runtime)
+            .map(|machine| {
+                machine
+                    .runs_for(&automation.id)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let selected_run = self
             .automation_surface
             .selected_run_id
@@ -675,18 +704,18 @@ impl Workspace {
                 .and_then(|view| (view.read(cx).session_id() == session_id).then(|| view.clone()))
         });
         if let Some(run) = selected_run.as_ref().filter(|_| live_view.is_none()) {
-            self.sync_automation_run_detail(run, cx);
+            self.sync_automation_run_detail(&automation.runtime, run, cx);
         }
         let show_task = self
             .automation_surface
             .editor
             .as_ref()
-            .is_some_and(|editor| editor.automation_id == automation_id);
+            .is_some_and(|editor| editor.automation == automation);
         let title = self
             .automation_surface
             .editor
             .as_ref()
-            .filter(|editor| editor.automation_id == automation_id)
+            .filter(|editor| editor.automation == automation)
             .map(|editor| {
                 if editor.is_new {
                     "新建自动化".to_string()
@@ -702,9 +731,8 @@ impl Workspace {
             })
             .or_else(|| {
                 cx.global::<settings::AgentHostState>()
-                    .automations
-                    .iter()
-                    .find(|automation| automation.id == automation_id)
+                    .automations_on(&automation.runtime)
+                    .and_then(|machine| machine.automation(&automation.id))
                     .map(|automation| automation.name.clone())
                     .filter(|name| !name.trim().is_empty())
             })
@@ -718,12 +746,12 @@ impl Workspace {
             .automation_surface
             .editor
             .as_ref()
-            .is_some_and(|editor| editor.is_new && editor.automation_id == automation_id);
+            .is_some_and(|editor| editor.is_new && editor.automation == automation);
         let subtitle = self
             .automation_surface
             .editor
             .as_ref()
-            .filter(|editor| editor.automation_id == automation_id)
+            .filter(|editor| editor.automation == automation)
             .and_then(|editor| {
                 let text = automation_save_hint(&editor.missing_fields(cx), editor.is_new)?;
                 let color = if editor.is_new {
@@ -737,7 +765,7 @@ impl Workspace {
             .automation_surface
             .editor
             .as_ref()
-            .filter(|editor| editor.automation_id == automation_id)
+            .filter(|editor| editor.automation == automation)
         {
             Some(self.render_automation_editor_actions(editor, entity.clone(), cx))
         } else {
@@ -756,7 +784,7 @@ impl Workspace {
                 .automation_surface
                 .editor
                 .as_ref()
-                .filter(|editor| editor.automation_id == automation_id)
+                .filter(|editor| editor.automation == automation)
             {
                 self.render_automation_editor(editor, entity, cx)
             } else {
@@ -776,7 +804,7 @@ impl Workspace {
                 .automation_surface
                 .editor
                 .as_ref()
-                .filter(|editor| editor.automation_id == automation_id)
+                .filter(|editor| editor.automation == automation)
             {
                 self.render_automation_editor(editor, entity, cx)
             } else {

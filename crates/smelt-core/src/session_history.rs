@@ -471,6 +471,66 @@ fn codex_home(override_dir: Option<&str>) -> PathBuf {
         .join(".codex")
 }
 
+/// Codex 给这段对话的名字，读它自己的状态库 `state_<N>.sqlite` 的 `threads` 表。
+///
+/// Codex 在首条消息后自动生成名字，`/rename` 也写这里：新的对话写 `name`，老的（legacy
+/// history mode）写 `title`。`title` 没起名时就是首条消息原文，可能很长、带换行，按首条
+/// prompt 兜底的规则（`session_title::prompt_title`）截成一行，跟没读到时的兜底一致。
+/// 同 cmux 的 `CodexNativeTitleStore`（它只读 `title`）。
+///
+/// 在 hook 里同步调用，只读打开，碰到锁最多等 250ms 就放弃，下一次 hook 再问。
+/// 库版本号会变，取编号最大的那个；库、表、列对不上都是 `None`。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub fn codex_thread_title(override_dir: Option<&str>, thread_id: &str) -> Option<String> {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return None;
+    }
+    let path = codex_state_db(&codex_home(override_dir))?;
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(250)).ok()?;
+    let (name, title): (Option<String>, Option<String>) = conn
+        .query_row(
+            "select name, title from threads where id = ?1 and archived = 0",
+            [thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    let name = name.map(|name| name.trim().to_string());
+    name.filter(|name| !name.is_empty())
+        .or_else(|| crate::session_title::prompt_title(title.as_deref()?))
+}
+
+/// 移动端不编译原生 SQLite。
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub fn codex_thread_title(_override_dir: Option<&str>, _thread_id: &str) -> Option<String> {
+    None
+}
+
+/// `state_<N>.sqlite` 里编号最大的那个。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn codex_state_db(codex_home: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(codex_home)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let version: u32 = name
+                .to_str()?
+                .strip_prefix("state_")?
+                .strip_suffix(".sqlite")?
+                .parse()
+                .ok()?;
+            Some((version, entry.path()))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, path)| path)
+}
+
 pub fn list_codex_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
     list_codex_sessions_with(&LocalFs, cwd, override_dir)
 }
@@ -1842,6 +1902,65 @@ pub fn load_antigravity_session_detail(path: &Path) -> Option<SessionDetail> {
 mod tests {
     use super::*;
     use crate::fs::MemFs;
+
+    fn codex_state(home: &Path, file: &str, rows: &[(&str, Option<&str>, &str, i64)]) {
+        let conn = rusqlite::Connection::open(home.join(file)).unwrap();
+        conn.execute_batch(
+            "create table threads (id text primary key, title text not null default '', \
+             name text, archived integer not null default 0);",
+        )
+        .unwrap();
+        for (id, name, title, archived) in rows {
+            conn.execute(
+                "insert into threads (id, name, title, archived) values (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, name, title, archived],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn codex_thread_title_prefers_the_name_then_the_title_from_the_newest_state_db() {
+        let home = tempfile::tempdir().unwrap();
+        // 旧版本的库留着也不读。
+        codex_state(
+            home.path(),
+            "state_4.sqlite",
+            &[("t1", Some("旧库里的名字"), "", 0)],
+        );
+        codex_state(
+            home.path(),
+            "state_5.sqlite",
+            &[
+                ("t1", Some("修复侧栏标题"), "帮我看下侧栏", 0),
+                ("legacy", None, "重构存储层", 0),
+                ("unnamed", Some("  "), "第一行\n第二行", 0),
+                ("archived", Some("归档了"), "", 1),
+                ("empty", None, "", 0),
+            ],
+        );
+        let dir = home.path().to_str();
+        assert_eq!(
+            codex_thread_title(dir, "t1").as_deref(),
+            Some("修复侧栏标题")
+        );
+        assert_eq!(
+            codex_thread_title(dir, "legacy").as_deref(),
+            Some("重构存储层")
+        );
+        // 没起名时 title 是首条消息原文，按首条 prompt 兜底的规则压成一行。
+        assert_eq!(
+            codex_thread_title(dir, "unnamed").as_deref(),
+            Some("第一行 第二行")
+        );
+        assert_eq!(codex_thread_title(dir, "archived"), None);
+        assert_eq!(codex_thread_title(dir, "empty"), None);
+        assert_eq!(codex_thread_title(dir, "missing"), None);
+        assert_eq!(codex_thread_title(dir, "  "), None);
+
+        let nothing = tempfile::tempdir().unwrap();
+        assert_eq!(codex_thread_title(nothing.path().to_str(), "t1"), None);
+    }
 
     fn write(fs: &dyn FileSystem, path: &Path, contents: &str) {
         fs.create_dir_all(path.parent().unwrap()).unwrap();

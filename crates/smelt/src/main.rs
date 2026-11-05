@@ -384,20 +384,24 @@ fn ensure_main_window(current: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) -
     main
 }
 
+/// 收下一台机器推来的自动化投影。每台机器的库、运行和通知各算各的。
 fn apply_automation_projection(
+    runtime: &RuntimeKey,
     snapshot: smelt_model::automation::AutomationFile,
     origin: automation_notifications::AutomationProjectionOrigin,
     current_ws: &Rc<RefCell<Option<MainWindow>>>,
     cx: &mut gpui::App,
 ) {
     let mut config = cx.global::<settings::AgentHostState>().clone();
+    let empty = settings::MachineAutomations::default();
+    let previous = config.automations_on(runtime).unwrap_or(&empty);
     let origin = automation_notifications::effective_projection_origin(
         origin,
-        &config.automation_store_id,
+        &previous.store_id,
         &snapshot.store_id,
     );
     let notifications = automation_notifications::automation_run_notifications(
-        &config.automation_runs,
+        &previous.runs,
         &snapshot.runs,
         origin,
     );
@@ -411,14 +415,19 @@ fn apply_automation_projection(
         .iter()
         .map(|run| run.id.clone())
         .collect::<Vec<_>>();
-    if !config.replace_automation_snapshot(snapshot) {
+    if !config.replace_automation_snapshot(runtime, snapshot) {
         return;
     }
     let notify_success = config.notify_success;
     let notify_failure = config.notify_failure;
     cx.set_global(config);
 
-    status_item::retain_automation_notifications(&retained_run_ids);
+    // 远程机器上的运行，通知标题前写上机器名。
+    let machine = match runtime {
+        RuntimeKey::Local => None,
+        RuntimeKey::Remote(_) => Some(runtimes::runtime_name(runtime, cx)),
+    };
+    status_item::retain_automation_notifications(runtime, &retained_run_ids);
     for notification in notifications {
         let enabled = match notification.kind {
             automation_notifications::AutomationRunNotificationKind::Success => notify_success,
@@ -429,14 +438,19 @@ fn apply_automation_projection(
             .copied()
             .unwrap_or(true);
         if enabled && app_ok {
+            let subtitle = match &machine {
+                Some(machine) => format!("{machine} · {}", notification.subtitle),
+                None => notification.subtitle.clone(),
+            };
             status_item::deliver_automation_notification(
+                runtime,
                 &notification.automation_id,
                 &notification.run_id,
-                &notification.subtitle,
+                &subtitle,
                 &notification.body,
             );
         } else {
-            status_item::remove_automation_notification(&notification.run_id);
+            status_item::remove_automation_notification(runtime, &notification.run_id);
         }
     }
 
@@ -900,11 +914,18 @@ fn agent_notification_enabled(config: &settings::AgentHostState, kind: Attention
     }
 }
 
-fn daemon_attention_suppressed(state: &terminal::DaemonSessionState, cx: &App) -> bool {
+/// 自动化运行的会话结束时不另发会话提醒：运行结果由自动化通知负责。按会话所在的机器
+/// 找运行，别的机器上同 id 的会话不相干。
+fn daemon_attention_suppressed(
+    runtime: &RuntimeKey,
+    state: &terminal::DaemonSessionState,
+    cx: &App,
+) -> bool {
     cx.try_global::<settings::AgentHostState>()
-        .is_some_and(|config| {
+        .and_then(|config| config.automations_on(runtime))
+        .is_some_and(|machine| {
             automation_notifications::suppress_runtime_terminal_attention(
-                &config.automation_runs,
+                &machine.runs,
                 &state.id,
                 state.effective_phase(),
             )
@@ -912,12 +933,13 @@ fn daemon_attention_suppressed(state: &terminal::DaemonSessionState, cx: &App) -
 }
 
 fn apply_daemon_attention(
+    runtime: &RuntimeKey,
     previous: Option<&terminal::DaemonSessionState>,
     state: &terminal::DaemonSessionState,
     now: Instant,
     cx: &mut App,
 ) {
-    if daemon_attention_suppressed(state, cx) {
+    if daemon_attention_suppressed(runtime, state, cx) {
         // AutomationRun is the notification authority for automation results. The hidden ACP runtime
         // disappears immediately after completion and cannot be a stable notification target.
         AttentionGlobal::remove_session(&state.id, cx);
@@ -926,8 +948,12 @@ fn apply_daemon_attention(
     AttentionGlobal::apply_daemon_transition(previous, state, now, cx);
 }
 
-fn apply_daemon_attention_baseline(state: &terminal::DaemonSessionState, cx: &mut App) {
-    if daemon_attention_suppressed(state, cx) {
+fn apply_daemon_attention_baseline(
+    runtime: &RuntimeKey,
+    state: &terminal::DaemonSessionState,
+    cx: &mut App,
+) {
+    if daemon_attention_suppressed(runtime, state, cx) {
         AttentionGlobal::remove_session(&state.id, cx);
         return;
     }
@@ -1725,6 +1751,15 @@ pub(crate) enum PaneState {
 /// 关闭前要确认的东西。关掉就找不回来：终端里正在跑的命令、对话里正在跑的回合都会被终止。
 #[derive(Clone)]
 pub(crate) enum CloseConfirm {
+    Archive {
+        ui_id: u64,
+        title: String,
+    },
+    DeleteArchived {
+        runtime: RuntimeKey,
+        id: String,
+        title: String,
+    },
     /// 关项目，连带关掉下面的全部会话。显示名只用来写文案，真正关哪个项目认 root。
     /// 空项目不走确认（无损），会话数恒 > 0。
     Project {
@@ -2266,6 +2301,7 @@ struct Workspace {
     sidebar_grouping: SidebarGrouping,
     /// 按项目分组时是否把无会话的项目从侧栏藏起来（固定的 / 当前项目除外）。
     sidebar_hide_empty_projects: bool,
+    archive_expanded: bool,
     /// 侧栏「对话」分组是否收起。只在本次运行内记住。
     sidebar_conversations_collapsed: bool,
     /// 会话拖拽悬停中的插入位置：(目标会话 ui_id, 插它前面?)。
@@ -2849,6 +2885,7 @@ impl Workspace {
             collapsed_agents: ui.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: ui.sidebar_grouping,
             sidebar_hide_empty_projects: ui.sidebar_hide_empty_projects,
+            archive_expanded: ui.archive_expanded,
             sidebar_conversations_collapsed: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
@@ -3912,6 +3949,7 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
 gpui_kit_assets::icon_assets!(
     LucideExtras,
     [
+        Archive,
         BellOff,
         Clock,
         Coffee,
@@ -4316,13 +4354,6 @@ fn main() {
                 }
                 cx.update(|cx| {
                     match &event {
-                        // 刚连上一个运行时：把还没发出去的目录命令重新交给它（见下）。
-                        terminal::DaemonStateEvent::Snapshot { .. } if !is_local => {
-                            if let Some(ws) = current_workspace(&current_ws_for_events) {
-                                let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
-                            }
-                        }
-                        terminal::DaemonStateEvent::Automations(_) if !is_local => {}
                         terminal::DaemonStateEvent::Snapshot { automations, .. } => {
                             // subscribe 的首帧意味着刚连上一个 daemon epoch：还没发出去的目录
                             // 命令重新放进保存队列。
@@ -4331,6 +4362,7 @@ fn main() {
                             }
                             if let Some(automations) = automations {
                                 apply_automation_projection(
+                                    &runtime,
                                     automations.clone(),
                                     automation_notifications::AutomationProjectionOrigin::InitialSnapshot,
                                     &current_ws_for_events,
@@ -4340,6 +4372,7 @@ fn main() {
                         }
                         terminal::DaemonStateEvent::Automations(automations) => {
                             apply_automation_projection(
+                                &runtime,
                                 automations.clone(),
                                 automation_notifications::AutomationProjectionOrigin::Incremental,
                                 &current_ws_for_events,
@@ -4369,9 +4402,15 @@ fn main() {
                             let now = Instant::now();
                             for (state, previous) in list.iter().zip(previous.iter()) {
                                 if initial_snapshot {
-                                    apply_daemon_attention_baseline(state, cx);
+                                    apply_daemon_attention_baseline(&runtime, state, cx);
                                 } else {
-                                    apply_daemon_attention(previous.as_ref(), state, now, cx);
+                                    apply_daemon_attention(
+                                        &runtime,
+                                        previous.as_ref(),
+                                        state,
+                                        now,
+                                        cx,
+                                    );
                                 }
                             }
                             let stale_attention_ids =
@@ -4383,6 +4422,7 @@ fn main() {
                         terminal::DaemonStateEvent::Update(s) => {
                             let previous = DaemonStates::get(&runtime, &s.id, cx);
                             apply_daemon_attention(
+                                &runtime,
                                 previous.as_ref(),
                                 &s,
                                 Instant::now(),
@@ -4533,11 +4573,12 @@ fn main() {
                             ws.request_notification_session_jump(id.clone(), window, cx);
                         }
                         status_item::StatusItemEvent::JumpToAutomationRun {
+                            runtime,
                             automation_id,
                             run_id,
                         } => {
                             ws.navigate_to_automation_run(
-                                automation_id.clone(),
+                                agents::AutomationRef::new(runtime.clone(), automation_id.clone()),
                                 run_id.clone(),
                                 window,
                                 cx,

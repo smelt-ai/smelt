@@ -7,6 +7,7 @@
 // ignore_for_file: argument_type_not_assignable
 
 import 'api/agents.dart';
+import 'api/automations.dart';
 import 'api/catalog.dart';
 import 'api/conversation.dart';
 import 'api/draft.dart';
@@ -112,7 +113,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AutomationActionKind dco_decode_automation_action_kind(dynamic raw);
 
   @protected
+  AutomationAgentChoice dco_decode_automation_agent_choice(dynamic raw);
+
+  @protected
   AutomationCatalog dco_decode_automation_catalog(dynamic raw);
+
+  @protected
+  AutomationDraft dco_decode_automation_draft(dynamic raw);
+
+  @protected
+  AutomationEditor dco_decode_automation_editor(dynamic raw);
+
+  @protected
+  AutomationRunDetail dco_decode_automation_run_detail(dynamic raw);
 
   @protected
   AutomationRunSource dco_decode_automation_run_source(dynamic raw);
@@ -146,6 +159,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AttentionItem dco_decode_box_autoadd_attention_item(dynamic raw);
+
+  @protected
+  AutomationDraft dco_decode_box_autoadd_automation_draft(dynamic raw);
 
   @protected
   AutomationRunSummary dco_decode_box_autoadd_automation_run_summary(
@@ -387,6 +403,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<AgentDefinitionSummary> dco_decode_list_agent_definition_summary(
+    dynamic raw,
+  );
+
+  @protected
+  List<AutomationAgentChoice> dco_decode_list_automation_agent_choice(
+    dynamic raw,
+  );
+
+  @protected
+  List<AutomationRunSummary> dco_decode_list_automation_run_summary(
     dynamic raw,
   );
 
@@ -886,7 +912,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  AutomationAgentChoice sse_decode_automation_agent_choice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   AutomationCatalog sse_decode_automation_catalog(SseDeserializer deserializer);
+
+  @protected
+  AutomationDraft sse_decode_automation_draft(SseDeserializer deserializer);
+
+  @protected
+  AutomationEditor sse_decode_automation_editor(SseDeserializer deserializer);
+
+  @protected
+  AutomationRunDetail sse_decode_automation_run_detail(
+    SseDeserializer deserializer,
+  );
 
   @protected
   AutomationRunSource sse_decode_automation_run_source(
@@ -928,6 +970,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AttentionItem sse_decode_box_autoadd_attention_item(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationDraft sse_decode_box_autoadd_automation_draft(
     SseDeserializer deserializer,
   );
 
@@ -1217,6 +1264,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<AgentDefinitionSummary> sse_decode_list_agent_definition_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<AutomationAgentChoice> sse_decode_list_automation_agent_choice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<AutomationRunSummary> sse_decode_list_automation_run_summary(
     SseDeserializer deserializer,
   );
 
@@ -1824,8 +1881,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_automation_agent_choice(
+    AutomationAgentChoice self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_automation_catalog(
     AutomationCatalog self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_draft(
+    AutomationDraft self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_editor(
+    AutomationEditor self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_run_detail(
+    AutomationRunDetail self,
     SseSerializer serializer,
   );
 
@@ -1884,6 +1965,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_attention_item(
     AttentionItem self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_automation_draft(
+    AutomationDraft self,
     SseSerializer serializer,
   );
 
@@ -2262,6 +2349,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_agent_definition_summary(
     List<AgentDefinitionSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_automation_agent_choice(
+    List<AutomationAgentChoice> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_automation_run_summary(
+    List<AutomationRunSummary> self,
     SseSerializer serializer,
   );
 

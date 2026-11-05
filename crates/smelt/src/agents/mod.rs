@@ -48,10 +48,27 @@ impl AgentRef {
     }
 }
 
+/// 一条自动化：在哪台机器上、id 是什么。每台运行时有自己的自动化库，不同机器上的 id
+/// 互不相干。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct AutomationRef {
+    pub(crate) runtime: crate::RuntimeKey,
+    pub(crate) id: String,
+}
+
+impl AutomationRef {
+    pub(crate) fn new(runtime: crate::RuntimeKey, id: impl Into<String>) -> Self {
+        Self {
+            runtime,
+            id: id.into(),
+        }
+    }
+}
+
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
 pub(crate) struct AgentsSurface {
-    /// 落盘：工作台最后选中的本机定义，新建自动化拿它当默认。自动化眼下只在本机，
-    /// 选中远程机器上的智能体不记。
+    /// 落盘：工作台最后选中的本机定义，在本机新建自动化拿它当默认。选中远程机器上的
+    /// 智能体不记。
     pub(crate) selected_id: Option<String>,
     pub(crate) editor: Option<AgentEditor>,
     pub(crate) error: Option<String>,
@@ -100,7 +117,7 @@ pub(crate) struct MemoryDeleteTarget {
 }
 
 pub(crate) struct AutomationDeleteTarget {
-    id: String,
+    automation: AutomationRef,
     name: String,
     runs: usize,
 }
@@ -407,7 +424,8 @@ pub(crate) struct AutomationEditor {
     instance_id: uuid::Uuid,
     action_kind: settings::AutomationActionKindId,
     agent_id: String,
-    automation_id: String,
+    /// 自动化在哪台机器上；保存、运行、智能体选项都按它。
+    automation: AutomationRef,
     is_new: bool,
     name: Entity<InputState>,
     /// 名字平时当标题看，点一下才变成输入框，避免一进编辑器就闪光标。
@@ -577,13 +595,10 @@ fn agent_host_error(runtime: &crate::RuntimeKey, cx: &App) -> Option<String> {
     settings::agent_hosts(cx)?.machine(runtime)?.error.clone()
 }
 
-/// 引用它的自动化有几条。自动化眼下只在本机，别的机器上的智能体没有。
+/// 引用它的自动化有几条（只可能在同一台机器上）。
 fn agent_automation_count(agent: &AgentRef, cx: &App) -> usize {
-    if agent.runtime != crate::RuntimeKey::Local {
-        return 0;
-    }
     cx.global::<settings::AgentHostState>()
-        .automations_for(&agent.id)
+        .automations_for(&agent.runtime, &agent.id)
         .len()
 }
 
@@ -929,9 +944,9 @@ impl AutomationEditor {
     }
 
     fn missing_fields(&self, cx: &App) -> Vec<&'static str> {
-        // 自动化眼下只在本机，引用的是本机的智能体。
+        // 引用的是自动化所在那台机器上的智能体。
         let agent_exists = !self.agent_id.is_empty()
-            && settings::agent_definition(&crate::RuntimeKey::Local, &self.agent_id, cx).is_some();
+            && settings::agent_definition(&self.automation.runtime, &self.agent_id, cx).is_some();
         let has_schedule = self
             .entries
             .iter()
@@ -1463,16 +1478,14 @@ fn render_webhook_entry(
     entity: Entity<Workspace>,
     cx: &App,
 ) -> AnyElement {
-    let base = cx
+    // webhook 打到自动化所在的那台机器，地址前缀用它自己推来的。
+    let machine = cx
         .global::<settings::AgentHostState>()
-        .webhook_base_url
-        .clone()
+        .automations_on(&editor.automation.runtime);
+    let base = machine
+        .and_then(|machine| machine.webhook_base_url.clone())
         .unwrap_or_else(|| smelt_model::automation::DEFAULT_WEBHOOK_BASE_URL.to_string());
-    let stored = cx
-        .global::<settings::AgentHostState>()
-        .automations
-        .iter()
-        .find(|automation| automation.id == editor.automation_id);
+    let stored = machine.and_then(|machine| machine.automation(&editor.automation.id));
     let paused = stored.is_some_and(|automation| !automation.enabled);
     let live_url = (!editor.is_new && !entry.webhook_secret.is_empty())
         .then(|| smelt_model::automation::webhook_url(&base, &entry.webhook_secret));
@@ -2057,14 +2070,15 @@ fn automation_enabled_toggle_item(enabled: bool) -> PopupMenuItem {
     }
 }
 
+/// 任何一台机器上有开着的自动化最近一次运行失败了。
 fn automation_nav_needs_attention(config: &settings::AgentHostState) -> bool {
-    config.automations.iter().any(|automation| {
-        automation.enabled
-            && config
-                .latest_automation_run(&automation.id)
-                .is_some_and(|run| {
+    config.automations.values().any(|machine| {
+        machine.automations.iter().any(|automation| {
+            automation.enabled
+                && machine.latest_run(&automation.id).is_some_and(|run| {
                     run.status == smelt_model::automation::AutomationRunStatus::Failed
                 })
+        })
     })
 }
 
@@ -3551,7 +3565,13 @@ fn automation_run_lines(title: String, detail: String, error: Option<String>) ->
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_sm().font_medium().overflow_hidden().child(truncated_line(title)))
+        .child(
+            div()
+                .text_sm()
+                .font_medium()
+                .overflow_hidden()
+                .child(truncated_line(title)),
+        )
         .child(
             div()
                 .text_xs()

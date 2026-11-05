@@ -440,6 +440,7 @@ fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
     }
 }
 
+mod archive;
 mod drag;
 mod keyboard;
 mod machines;
@@ -494,7 +495,7 @@ use machines::machine_menu;
 use new_session::new_session_picker;
 use row::{
     FooterQuota, acp_provider_icon, effective_pane_updated_at, focus_ring, group_disclosure,
-    inline_rename_input, new_row_flash, project_header_is_selected, provider_icon,
+    inline_rename_input, new_row_flash, pinned_marker, project_header_is_selected, provider_icon,
     provider_quota_row, row_trailing_slot, session_progress_bar, session_row_is_selected,
     session_row_status_label, session_turn_text, session_updated_at_text, status_text,
 };
@@ -560,6 +561,13 @@ impl Workspace {
                     &space.pinned_projects,
                     |group| group.root.as_str(),
                 );
+            }
+            for group in &mut space_groups {
+                group.sessions.sort_by_key(|&ix| {
+                    !space
+                        .directory
+                        .is_pinned(&self.sessions[ix].conversation_id)
+                });
             }
             groups.extend(space_groups);
         }
@@ -1149,13 +1157,7 @@ impl Workspace {
                                         .child(group_name.clone()),
                                 )
                                 .when(is_pinned, |row| {
-                                    row.child(
-                                        div()
-                                            .id(project_element_id("proj-pin", &project))
-                                            .flex_shrink_0()
-                                            .text_color(rgb(ui_theme::text_faint()))
-                                            .child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(11.))),
-                                    )
+                                    row.child(pinned_marker(project_element_id("proj-pin", &project)))
                                 })
                                 .when(agg != AgentStatus::Idle, |row| {
                                     row.child(
@@ -1550,7 +1552,15 @@ impl Workspace {
                 let e_close = this.clone();
                 let e_rename = this.clone();
                 let e_restart = this.clone();
+                let e_organization = this.clone();
                 let ui_id = self.sessions[ix].ui_id;
+                let is_pinned =
+                    self.space(self.sessions[ix].runtime(cx).key())
+                        .is_some_and(|space| {
+                            space
+                                .directory
+                                .is_pinned(&self.sessions[ix].conversation_id)
+                        });
                 let drag_title: SharedString = title.clone().into();
                 let is_drag_source_session = dragging_session == Some(ui_id);
                 let sess_hint_before = can_drag
@@ -1688,6 +1698,9 @@ impl Workspace {
                                 .into_any_element(),
                         },
                     )
+                    .when(is_pinned, |row| {
+                        row.child(pinned_marker(("session-pin", ui_id)))
+                    })
                     // 分屏数用行尾小角标，跟在时间前面。
                     .children(subtitle.as_ref().map(|s| {
                         div()
@@ -1775,7 +1788,8 @@ impl Workspace {
                             }
                         });
                     })
-                    .context_menu(move |menu, _window, _cx| {
+                    .context_menu(move |menu, _window, cx| {
+                        let menu = archive::organization_menu(menu, e_organization.clone(), ui_id, cx);
                         let e_rename = e_rename.clone();
                         let e_restart = e_restart.clone();
                         let copy_id_source = copy_id_source.clone();
@@ -1986,6 +2000,9 @@ impl Workspace {
                                             .into_any_element(),
                                     },
                                 )
+                                .when(is_pinned && lix == 0, |row| {
+                                    row.child(pinned_marker(("pane-pin", pane_entity_id)))
+                                })
                                 // 每个 pane 自己的关闭键：只关这一个 pane，剩下的照常活着。
                                 // 跟会话行一样跟时间共用行尾那一格，悬停才换出来。
                                 .child(row_trailing_slot(
@@ -2039,6 +2056,9 @@ impl Workspace {
                                     });
                                 })
                                 .context_menu(move |menu, _window, _cx| {
+                                    let menu = archive::organization_menu(
+                                        menu, e_pane_menu.clone(), ui_id, _cx,
+                                    );
                                     let e_rename = e_pane_menu.clone();
                                     let e_close_all = e_pane_menu.clone();
                                     let rename_pane = menu_pane.clone();
@@ -2436,6 +2456,8 @@ impl Workspace {
         } else {
             None
         };
+
+        rows = rows.children(self.render_archive_section(this.clone(), cx));
 
         // ---- 底部操作条：设置 ----
         // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。「设置」点一下直接

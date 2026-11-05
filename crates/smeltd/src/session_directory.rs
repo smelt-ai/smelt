@@ -328,7 +328,8 @@ impl SessionDirectory {
             if instance == 0 {
                 current.instance != 0
             } else {
-                current.instance != 0 && current.instance > instance
+                (!current.runtime && current.instance == 0)
+                    || (current.instance != 0 && current.instance > instance)
             }
         });
         let removed = if blocked_by_live_instance {
@@ -340,6 +341,29 @@ impl SessionDirectory {
             self.persist_locked(&mut state);
         }
         removed
+    }
+
+    /// 归档停止 runtime，但保留精确的 provider 对话身份。水位挡住旧实例的迟到 hook，
+    /// 无 runtime 的条目也不能被旧 PTY 的退出清理删掉。
+    pub(crate) fn suspend_instance(&self, incoming: &SessionState) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        if state.entries.get(&incoming.id).is_some_and(|current| {
+            current.instance != 0 && current.instance > incoming.instance
+        }) {
+            return Err("终端实例已替换，不能归档旧实例".to_string());
+        }
+        if incoming.instance != 0 {
+            let watermark = state.retired_instances.entry(incoming.id.clone()).or_default();
+            *watermark = (*watermark).max(incoming.instance);
+        }
+        let dormant = SessionRecord::from_state(incoming).into_state(now_unix());
+        state.entries.insert(incoming.id.clone(), dormant);
+        let records = state.entries.values().map(SessionRecord::from_state).collect::<Vec<_>>();
+        if !persist_records(&records) {
+            return Err("保存归档终端的续接身份失败".to_string());
+        }
+        state.last_persist = Some(Instant::now());
+        Ok(())
     }
 
     #[cfg(test)]
@@ -688,6 +712,44 @@ mod tests {
             assert_eq!(snapshot.len(), 1);
             assert_eq!(snapshot[0].revision, 12);
             assert_eq!(snapshot[0].title.as_deref(), Some("new"));
+        });
+    }
+
+    #[test]
+    fn archived_identity_survives_late_exit_callbacks_and_new_runtime_can_replace_it() {
+        with_test_dir(|| {
+            let directory = SessionDirectory::with_interval(Duration::ZERO);
+            let old = sample_state("s1");
+            directory.upsert(&old);
+            directory.suspend_instance(&old).unwrap();
+            assert_eq!(directory.resume_launch("s1").unwrap().run, "claude --resume conv-1");
+            assert!(!directory.remove_instance("s1", old.instance));
+            assert!(!directory.upsert(&old));
+            assert_eq!(
+                SessionDirectory::restore_from_disk().resume_launch("s1").unwrap().run,
+                "claude --resume conv-1",
+            );
+            let mut next = old.clone();
+            next.instance += 1;
+            next.revision = 1;
+            assert!(directory.upsert(&next));
+            assert!(directory.resume_launch("s1").is_none());
+            assert!(directory.suspend_instance(&old).is_err());
+            assert!(directory.remove_instance("s1", next.instance));
+            assert!(directory.snapshot().is_empty());
+        });
+    }
+
+    #[test]
+    fn archiving_an_exited_cli_does_not_resume_a_finished_conversation() {
+        with_test_dir(|| {
+            let directory = SessionDirectory::with_interval(Duration::ZERO);
+            let mut state = sample_state("s1");
+            state.cli_exited = true;
+            directory.upsert(&state);
+            directory.suspend_instance(&state).unwrap();
+            assert!(directory.resume_launch("s1").is_none());
+            assert!(directory.remove_instance("s1", 0));
         });
     }
 

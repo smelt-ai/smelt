@@ -397,3 +397,35 @@ class ChoiceRow extends StatelessWidget {
     );
   }
 }
+
+/// 一个输入框：用主题的输入框样式（白底、描边、内边距），左右和搁板对齐。不再套搁板，
+/// 免得白板里再嵌一个框。
+class EditField extends StatelessWidget {
+  const EditField({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: Space.page),
+    child: child,
+  );
+}
+
+/// 列表末尾「添加 xx」那一行。
+class AddRow extends StatelessWidget {
+  const AddRow({super.key, required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = GalleyColors.of(context);
+    return ShelfRow(
+      leading: Icon(LucideIcons.plus, size: Strokes.icon, color: c.inkMuted),
+      title: Text(label),
+      onTap: onTap,
+    );
+  }
+}

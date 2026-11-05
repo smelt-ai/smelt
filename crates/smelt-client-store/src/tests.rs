@@ -12,6 +12,28 @@ fn temp_store() -> (ClientStore, PathBuf) {
     (store, path)
 }
 
+// 固定旧版 workspace_ui 的形状，不能把当前 schema 的新列带进旧版本迁移夹具。
+fn create_v7_schema(connection: &Connection) {
+    connection.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE workspace_ui;
+             CREATE TABLE workspace_ui (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               active_session INTEGER NOT NULL CHECK (active_session >= 0),
+               active_session_id TEXT,
+               route TEXT NOT NULL,
+               selected_agent_id TEXT,
+               sidebar_w REAL,
+               sidebar_open INTEGER CHECK (sidebar_open IN (0, 1)),
+               sidebar_grouping TEXT NOT NULL,
+               sidebar_hide_empty_projects INTEGER NOT NULL
+                 CHECK (sidebar_hide_empty_projects IN (0, 1))
+             );",
+        )
+        .unwrap();
+}
+
 fn cleanup(path: &Path) {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
@@ -46,7 +68,60 @@ fn workspace_ui() -> WorkspaceUiRecord {
         sidebar_grouping: "project".to_string(),
         pinned_projects: vec![ProjectKey::local("/repo/z"), ProjectKey::local("/repo/a")],
         sidebar_hide_empty_projects: true,
+        archive_expanded: false,
     }
+}
+
+#[test]
+fn archive_expansion_round_trips() {
+    let (store, path) = temp_store();
+    let mut record = workspace_ui();
+    record.archive_expanded = true;
+    store.put_workspace_ui(&record).unwrap();
+    drop(store);
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.workspace_ui().unwrap().unwrap().archive_expanded);
+    drop(store);
+    cleanup(&path);
+}
+
+#[test]
+fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v7 = Connection::open(&path).unwrap();
+    create_v7_schema(&v7);
+    v7.execute_batch(
+        "INSERT INTO workspace_ui VALUES
+           (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);
+         PRAGMA user_version = 7;",
+    )
+    .unwrap();
+    drop(v7);
+
+    let store = ClientStore::open(&path).unwrap();
+    let migrated = store.workspace_ui().unwrap().unwrap();
+    let expected = WorkspaceUiRecord {
+        collapsed_projects: Vec::new(),
+        collapsed_agents: Vec::new(),
+        pinned_projects: Vec::new(),
+        ..workspace_ui()
+    };
+    assert_eq!(migrated, expected);
+    assert!(!migrated.archive_expanded);
+    drop(store);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(store.workspace_ui().unwrap(), Some(expected));
+    drop(store);
+    let backup = Connection::open(path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v7")))
+        .expect("迁移前必须留下备份");
+    let backup_version: u32 = backup
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(backup_version, 7);
+    drop(backup);
+    cleanup(&path);
 }
 
 #[test]
@@ -187,7 +262,7 @@ fn v2_session_routes_are_dropped() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v2 = Connection::open(&path).unwrap();
-    v2.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    create_v7_schema(&v2);
     v2.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
@@ -423,7 +498,7 @@ fn v1_projects_become_local_projects() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v1 = Connection::open(&path).unwrap();
-    v1.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    create_v7_schema(&v1);
     v1.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
@@ -475,7 +550,7 @@ fn v3_runtime_connections_gain_an_empty_smelt_home() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v3 = Connection::open(&path).unwrap();
-    v3.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    create_v7_schema(&v3);
     v3.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
@@ -514,7 +589,7 @@ fn v4_runtime_connections_gain_an_empty_os() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v4 = Connection::open(&path).unwrap();
-    v4.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    create_v7_schema(&v4);
     v4.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
@@ -639,7 +714,7 @@ fn v5_gains_empty_sidebar_order_tables() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v5 = Connection::open(&path).unwrap();
-    v5.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    create_v7_schema(&v5);
     v5.execute_batch(
         "DROP TABLE sidebar_project_order;
          DROP TABLE sidebar_conversation_order;
@@ -721,7 +796,7 @@ fn v6_gains_an_empty_key_binding_table() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let v6 = Connection::open(&path).unwrap();
-    v6.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    create_v7_schema(&v6);
     v6.execute_batch(
         "DROP TABLE key_binding;
          INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);

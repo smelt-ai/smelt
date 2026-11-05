@@ -799,67 +799,200 @@ class DemoBackend implements Backend {
   };
   final Set<String> _automationRunning = {};
 
+  /// 演示的自动化：表单原样存着，列表从它算出来，编辑后看得到变化。
+  final Map<String, AutomationDraft> _automationDrafts = {
+    'auto-standup': const AutomationDraft(
+      name: '每日站会摘要',
+      action: AutomationActionKind.agent,
+      agentDefinitionId: 'def-assistant',
+      prompt: '汇总昨天各项目的进展，列出今天的待办。',
+      command: '',
+      schedules: [
+        AutomationSchedule(
+          kind: ScheduleKind.daily,
+          hour: 9,
+          minute: 30,
+          minutes: 0,
+          hours: 0,
+          days: 0,
+          endHour: 0,
+          endMinute: 0,
+        ),
+      ],
+      webhook: false,
+      notify: true,
+    ),
+    'auto-backup': const AutomationDraft(
+      name: '夜间备份检查',
+      action: AutomationActionKind.shell,
+      agentDefinitionId: '',
+      prompt: '',
+      command: 'restic check --read-data-subset=5%',
+      schedules: [],
+      webhook: true,
+      notify: true,
+    ),
+  };
+  int _automationSeq = 0;
+
   AutomationRunSummary? _runningNow(String id) =>
       _automationRunning.contains(id)
       ? AutomationRunSummary(
+          id: 'run-now-$id',
           status: AutomationRunStatus.running,
           source: AutomationRunSource.manual,
           startedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
         )
       : null;
 
+  @override
+  Future<List<AutomationRunSummary>> automationRuns(
+    String runtimeId,
+    String automationId,
+  ) async => [?_runningNow(automationId), ?_demoLastRun(automationId)];
+
+  @override
+  Future<AutomationRunDetail> automationRunDetail(
+    String runtimeId,
+    String runId,
+  ) async {
+    final automationId = runId.replaceFirst(RegExp(r'^run-(now-)?'), '');
+    final run = (await automationRuns(
+      runtimeId,
+      automationId,
+    )).firstWhere((run) => run.id == runId);
+    final draft = _automationDrafts[automationId];
+    final agent = draft?.action == AutomationActionKind.agent;
+    return AutomationRunDetail(
+      run: run,
+      automationId: automationId,
+      automationName: draft?.name ?? '',
+      instructions: agent ? draft?.prompt : null,
+      output: agent
+          ? null
+          : (run.error == null ? 'no errors were found' : null),
+      transcript: agent
+          ? [
+              ConversationEntry(
+                index: 0,
+                kind: EntryKind.user,
+                text: draft!.prompt,
+                thought: false,
+                images: const [],
+              ),
+              const ConversationEntry(
+                index: 1,
+                kind: EntryKind.assistant,
+                text:
+                    '**昨天**：smelt 合了两个 PR，velum 修了登录。\n\n**今天**：\n- 审 #239\n- 验收手机文件预览',
+                thought: false,
+                images: [],
+              ),
+            ]
+          : const [],
+    );
+  }
+
+  AutomationRunSummary? _demoLastRun(String id) => switch (id) {
+    'auto-standup' => AutomationRunSummary(
+      id: 'run-auto-standup',
+      status: AutomationRunStatus.completed,
+      source: AutomationRunSource.scheduled,
+      startedAt: _ago(const Duration(hours: 10)),
+      finishedAt: _ago(const Duration(hours: 10, minutes: -2)),
+    ),
+    'auto-backup' => AutomationRunSummary(
+      id: 'run-auto-backup',
+      status: AutomationRunStatus.failed,
+      source: AutomationRunSource.webhook,
+      startedAt: _ago(const Duration(days: 1)),
+      error: '磁盘空间不足',
+    ),
+    _ => null,
+  };
+
   AutomationCatalog get _automations => AutomationCatalog(
     automations: [
-      AutomationSummary(
-        id: 'auto-standup',
-        name: '每日站会摘要',
-        enabled: _automationEnabled['auto-standup']!,
-        schedules: const [
-          AutomationSchedule(
-            kind: ScheduleKind.daily,
-            hour: 9,
-            minute: 30,
-            minutes: 0,
-            hours: 0,
-            days: 0,
-            endHour: 0,
-            endMinute: 0,
-          ),
-        ],
-        eventTopics: const [],
-        webhook: false,
-        action: AutomationActionKind.agent,
-        agentName: '工作助手',
-        nextRunAt: _ago(const Duration(hours: -14)),
-        lastRun:
-            _runningNow('auto-standup') ??
-            AutomationRunSummary(
-              status: AutomationRunStatus.completed,
-              source: AutomationRunSource.scheduled,
-              startedAt: _ago(const Duration(hours: 10)),
-              finishedAt: _ago(const Duration(hours: 10, minutes: -2)),
-            ),
-      ),
-      AutomationSummary(
-        id: 'auto-backup',
-        name: '夜间备份检查',
-        enabled: _automationEnabled['auto-backup']!,
-        schedules: const [],
-        eventTopics: const [],
-        webhook: true,
-        action: AutomationActionKind.shell,
-        lastRun:
-            _runningNow('auto-backup') ??
-            AutomationRunSummary(
-              status: AutomationRunStatus.failed,
-              source: AutomationRunSource.webhook,
-              startedAt: _ago(const Duration(days: 1)),
-              error: '磁盘空间不足',
-            ),
-      ),
+      for (final MapEntry(key: id, value: d) in _automationDrafts.entries)
+        AutomationSummary(
+          id: id,
+          name: d.name,
+          enabled: _automationEnabled[id] ?? true,
+          schedules: d.schedules,
+          eventTopics: const [],
+          webhook: d.webhook,
+          action: d.action,
+          agentName: d.action == AutomationActionKind.agent
+              ? _agents
+                    .where((a) => a.id == d.agentDefinitionId)
+                    .map((a) => a.name)
+                    .firstOrNull
+              : null,
+          nextRunAt: d.schedules.isEmpty
+              ? null
+              : _ago(const Duration(hours: -14)),
+          lastRun: _runningNow(id) ?? _demoLastRun(id),
+        ),
     ],
     agents: List.of(_agents),
   );
+
+  @override
+  Future<AutomationEditor> automationEditor(
+    String runtimeId, {
+    String? automationId,
+  }) async => AutomationEditor(
+    draft:
+        _automationDrafts[automationId] ??
+        AutomationDraft(
+          name: '',
+          action: AutomationActionKind.agent,
+          agentDefinitionId: _agents.firstOrNull?.id ?? '',
+          prompt: '',
+          command: '',
+          schedules: const [
+            AutomationSchedule(
+              kind: ScheduleKind.daily,
+              hour: 9,
+              minute: 0,
+              minutes: 0,
+              hours: 0,
+              days: 0,
+              endHour: 0,
+              endMinute: 0,
+            ),
+          ],
+          webhook: false,
+          notify: true,
+        ),
+    agents: [
+      for (final a in _agents) AutomationAgentChoice(id: a.id, name: a.name),
+    ],
+    eventTopics: const [],
+  );
+
+  @override
+  Future<AutomationCatalog> saveAutomation(
+    String runtimeId, {
+    String? automationId,
+    required AutomationDraft draft,
+  }) async {
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    final id = automationId ?? 'auto-demo-${++_automationSeq}';
+    _automationDrafts[id] = draft;
+    return _automations;
+  }
+
+  @override
+  Future<AutomationCatalog> deleteAutomation(
+    String runtimeId,
+    String automationId,
+  ) async {
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    _automationDrafts.remove(automationId);
+    _automationEnabled.remove(automationId);
+    return _automations;
+  }
 
   @override
   Future<AutomationCatalog> automationCatalog(String runtimeId) async =>

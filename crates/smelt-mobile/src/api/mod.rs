@@ -4,6 +4,7 @@
 use flutter_rust_bridge::frb;
 
 pub mod agents;
+pub mod automations;
 pub mod catalog;
 pub mod conversation;
 pub mod draft;

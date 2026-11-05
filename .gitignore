@@ -15,6 +15,12 @@ dist/
 # macOS 目录元数据
 .DS_Store
 
+# Java 语言服务生成的 Android IDE 配置
+/mobile/android/.project
+/mobile/android/.settings/
+/mobile/rust_builder/android/.project
+/mobile/rust_builder/android/.settings/
+
 # Python 脚本缓存
 __pycache__/
 

@@ -242,9 +242,12 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
                   label: l10n.commonOpen,
                   onPressed: () {
                     if (!mounted) return;
+                    // 提示挂着的这段时间里会话可能变了（跑完了、运行记录更新了），按点下去
+                    // 那一刻的去打开。
                     _openSession(
                       runtimeId,
-                      session,
+                      model.catalog.session(runtimeId, item.sessionId) ??
+                          session,
                       split: isSplitLayout(context),
                     );
                   },

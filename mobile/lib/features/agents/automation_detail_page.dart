@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -10,15 +12,15 @@ import '../../ui/page.dart';
 import '../../ui/shelf.dart';
 import '../../ui/status.dart';
 import '../../ui/time.dart';
-import '../session/open_session.dart';
 import 'agents_board.dart';
 import 'agents_widgets.dart';
+import 'automation_edit_page.dart';
+import 'automation_run_page.dart';
 import 'automation_text.dart';
 
-/// 一条自动化的详情：它什么时候跑、跑的是什么、上次怎么样；能开关、能立即跑一次。
-///
-/// 手机是展示层：这里不编辑触发条件和动作，只开放两个幂等、可在桌面撤销的写操作。
-/// 数据从 [AgentsBoard] 读，列表和详情看的是同一份。
+/// 一条自动化的详情：它什么时候跑、跑的是什么、上次怎么样；能开关、能立即跑一次，
+/// 右上角进编辑（改名称、动作、时间，或删除）。数据从 [AgentsBoard] 读，列表和详情看的
+/// 是同一份。
 class AutomationDetailPage extends StatelessWidget {
   const AutomationDetailPage({
     super.key,
@@ -47,10 +49,6 @@ class AutomationDetailPage extends StatelessWidget {
           runtime: runtime,
           runtimeId: runtimeId,
           automation: automation,
-          runSession: switch (automation.lastRun?.sessionId) {
-            final id? => model.catalog.session(runtimeId, id),
-            null => null,
-          },
         );
       },
     );
@@ -81,16 +79,12 @@ class _AutomationDetail extends StatelessWidget {
     required this.runtime,
     required this.runtimeId,
     required this.automation,
-    required this.runSession,
   });
 
   final AgentsBoard board;
   final FleetRuntime? runtime;
   final String runtimeId;
   final AutomationSummary automation;
-
-  /// 上次运行的会话，还在会话目录里才有。
-  final SessionSummary? runSession;
 
   @override
   Widget build(BuildContext context) {
@@ -111,6 +105,13 @@ class _AutomationDetail extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: c.ground,
         title: DetailTitle(title: automation.name, runtime: runtime),
+        actions: [
+          IconButton(
+            tooltip: l10n.autoEditEdit,
+            icon: const Icon(LucideIcons.pencil),
+            onPressed: online ? () => _edit(context) : null,
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.only(bottom: Space.xxl),
@@ -202,22 +203,12 @@ class _AutomationDetail extends StatelessWidget {
             ],
           ),
           ShelfHeader(title: l10n.agentsLastRun),
-          _LastRun(
-            run: automation.lastRun,
+          _LastRun(run: automation.lastRun, runtimeId: runtimeId),
+          _RecentRuns(
             runtimeId: runtimeId,
-            session: runSession,
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Space.page + Space.xs,
-              Space.lg,
-              Space.page + Space.xs,
-              0,
-            ),
-            child: Text(
-              l10n.agentsReadOnly,
-              style: t.meta.copyWith(color: c.inkMuted),
-            ),
+            automationId: automation.id,
+            // 最近一次换了（新跑了一次、跑完了），列表跟着重取。
+            latest: automation.lastRun,
           ),
         ],
       ),
@@ -235,17 +226,29 @@ class _AutomationDetail extends StatelessWidget {
   }
 }
 
+extension on _AutomationDetail {
+  /// 进编辑页；在那里删掉了，详情也跟着退。
+  Future<void> _edit(BuildContext context) async {
+    final navigator = Navigator.of(context);
+    final result = await navigator.push<AutomationEditResult>(
+      MaterialPageRoute(
+        builder: (_) => AutomationEditPage(
+          board: board,
+          runtimeId: runtimeId,
+          automationId: automation.id,
+        ),
+      ),
+    );
+    if (result == AutomationEditResult.deleted) await navigator.maybePop();
+  }
+}
+
 /// 最近一次运行：状态、来源、起止时间、错误，以及能跳进那次执行现场的入口。
 class _LastRun extends StatelessWidget {
-  const _LastRun({
-    required this.run,
-    required this.runtimeId,
-    required this.session,
-  });
+  const _LastRun({required this.run, required this.runtimeId});
 
   final AutomationRunSummary? run;
   final String runtimeId;
-  final SessionSummary? session;
 
   @override
   Widget build(BuildContext context) {
@@ -263,7 +266,6 @@ class _LastRun extends StatelessWidget {
         : fromUnixSeconds(r.finishedAt!);
     final status = runStatusLabel(l10n, r.status);
     final error = r.error?.trim();
-    final s = session;
     return Shelf(
       children: [
         ShelfRow(
@@ -301,22 +303,107 @@ class _LastRun extends StatelessWidget {
               style: t.body.copyWith(color: c.danger),
             ),
           ),
-        if (s != null)
-          ShelfRow(
-            leading: Icon(
-              LucideIcons.messageSquare,
-              size: Strokes.icon,
-              color: c.ink,
-            ),
-            title: Text(l10n.agentsOpenRun),
-            titleStyle: t.body,
-            trailing: Icon(
-              LucideIcons.chevronRight,
-              size: Strokes.iconSmall,
-              color: c.inkFaint,
-            ),
-            onTap: () => openSession(context, runtimeId, s),
+        // 跑完以后会话就没了，看运行记录；还在跑时记录页里能进执行现场。
+        ShelfRow(
+          leading: Icon(
+            LucideIcons.fileClock,
+            size: Strokes.icon,
+            color: c.ink,
           ),
+          title: Text(l10n.autoRunOpen),
+          titleStyle: t.body,
+          trailing: Icon(
+            LucideIcons.chevronRight,
+            size: Strokes.iconSmall,
+            color: c.inkFaint,
+          ),
+          onTap: () => openAutomationRun(context, runtimeId, r.id),
+        ),
+      ],
+    );
+  }
+}
+
+/// 除了最近一次以外的运行，新的在前，点进去看记录。只显示几条，运行时每条最多留 50 次。
+class _RecentRuns extends StatefulWidget {
+  const _RecentRuns({
+    required this.runtimeId,
+    required this.automationId,
+    required this.latest,
+  });
+
+  final String runtimeId;
+  final String automationId;
+  final AutomationRunSummary? latest;
+
+  @override
+  State<_RecentRuns> createState() => _RecentRunsState();
+}
+
+const _recentRunsShown = 10;
+
+class _RecentRunsState extends State<_RecentRuns> {
+  List<AutomationRunSummary> _runs = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  @override
+  void didUpdateWidget(_RecentRuns old) {
+    super.didUpdateWidget(old);
+    if (old.latest != widget.latest) unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    try {
+      final runs = await AppScope.of(
+        context,
+      ).backend.automationRuns(widget.runtimeId, widget.automationId);
+      if (mounted) setState(() => _runs = runs);
+    } catch (_) {
+      // 只是补充列表；取不到就不显示，最近一次的入口还在上面。
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = L10n.of(context);
+    final material = MaterialLocalizations.of(context);
+    final now = DateTime.now();
+    final older = _runs
+        .where((run) => run.id != widget.latest?.id)
+        .take(_recentRunsShown)
+        .toList();
+    if (older.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ShelfHeader(title: l10n.autoRunHistory),
+        Shelf(
+          children: [
+            for (final run in older)
+              ShelfRow(
+                leading: StatusMark(
+                  mark: runMark(run.status),
+                  label: runStatusLabel(l10n, run.status),
+                ),
+                title: Text(runStatusLabel(l10n, run.status)),
+                subtitle: Text(
+                  [
+                    runSourceLabel(l10n, run.source),
+                    if (run.startedAt case final seconds?)
+                      if (fromUnixSeconds(seconds) case final at?)
+                        formatMoment(l10n, material, at, now),
+                  ].join(' · '),
+                ),
+                onTap: () =>
+                    openAutomationRun(context, widget.runtimeId, run.id),
+              ),
+          ],
+        ),
       ],
     );
   }

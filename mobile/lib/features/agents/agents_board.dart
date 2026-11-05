@@ -208,6 +208,29 @@ class AgentsBoard extends ChangeNotifier {
     }
   }
 
+  /// 保存一条自动化（[automationId] 为空是新建），列表换成保存后的目录。失败抛给调用方。
+  Future<void> saveAutomation(
+    String runtimeId, {
+    String? automationId,
+    required AutomationDraft draft,
+  }) async {
+    final catalog = await _model.backend.saveAutomation(
+      runtimeId,
+      automationId: automationId,
+      draft: draft,
+    );
+    _replace(runtimeId, catalog);
+  }
+
+  /// 删除一条自动化，列表换成删除后的目录。失败抛给调用方。
+  Future<void> deleteAutomation(String runtimeId, String automationId) async {
+    final catalog = await _model.backend.deleteAutomation(
+      runtimeId,
+      automationId,
+    );
+    _replace(runtimeId, catalog);
+  }
+
   /// 动作返回的目录比正在路上的取目录更新：作废那次取目录，直接用这份。
   void _replace(String runtimeId, AutomationCatalog catalog) {
     if (!_machines.containsKey(runtimeId)) return;

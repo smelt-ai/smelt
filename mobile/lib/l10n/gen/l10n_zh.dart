@@ -214,9 +214,6 @@ class L10nZh extends L10n {
   String get agentsEmptyAutomations => '这台机器上还没有自动化，可以在桌面端 Smelt 里创建。';
 
   @override
-  String get agentsReadOnly => '自动化在电脑上的 Smelt 里编辑。';
-
-  @override
   String agentsGone(String machine) {
     return '$machine 上已经没有这一项了。';
   }
@@ -488,6 +485,198 @@ class L10nZh extends L10n {
   String agentsRunNowFailed(String name, String message) {
     return '没能运行「$name」：$message';
   }
+
+  @override
+  String get autoRunTitle => '运行记录';
+
+  @override
+  String get autoRunOpen => '查看这次运行';
+
+  @override
+  String get autoRunHistory => '最近的运行';
+
+  @override
+  String get autoRunInstructions => '指令';
+
+  @override
+  String get autoRunOutput => '输出';
+
+  @override
+  String get autoRunTranscript => '对话';
+
+  @override
+  String get autoRunLoadFailed => '这次运行的记录没取到';
+
+  @override
+  String get autoRunNothing => '这次运行没有留下输出。';
+
+  @override
+  String get autoEditNewTitle => '新建自动化';
+
+  @override
+  String get autoEditTitle => '编辑自动化';
+
+  @override
+  String get autoEditEdit => '编辑';
+
+  @override
+  String get autoEditName => '名称';
+
+  @override
+  String get autoEditNameHint => '例如：每日晨报';
+
+  @override
+  String get autoEditAction => '做什么';
+
+  @override
+  String get autoEditActionAgent => '智能体';
+
+  @override
+  String get autoEditActionShell => '命令';
+
+  @override
+  String get autoEditAgent => '智能体';
+
+  @override
+  String get autoEditAgentNone => '这台机器上还没有智能体，先建一个。';
+
+  @override
+  String get autoEditAgentPick => '选一个智能体';
+
+  @override
+  String get autoEditPrompt => '指令';
+
+  @override
+  String get autoEditPromptHint => '例如：汇总昨天的进展，列出今天的待办';
+
+  @override
+  String get autoEditCommand => '命令';
+
+  @override
+  String get autoEditCommandHint => '例如：curl -fsS https://example.com/health';
+
+  @override
+  String get autoEditSchedules => '什么时候跑';
+
+  @override
+  String get autoEditAddSchedule => '添加时间';
+
+  @override
+  String get autoEditEvents => '事件触发（在电脑上编辑）';
+
+  @override
+  String get autoEditWebhook => 'Webhook';
+
+  @override
+  String get autoEditWebhookHint => '用 HTTP 请求触发。地址里带密钥，在电脑上的 Smelt 里复制。';
+
+  @override
+  String get autoEditNotify => '跑完通知';
+
+  @override
+  String autoEditMissing(String fields) {
+    return '还差：$fields';
+  }
+
+  @override
+  String get autoEditMissingName => '名称';
+
+  @override
+  String get autoEditMissingTrigger => '时间或 Webhook';
+
+  @override
+  String get autoEditMissingAgent => '智能体';
+
+  @override
+  String get autoEditMissingPrompt => '指令（定时运行不会带入别的内容）';
+
+  @override
+  String get autoEditMissingCommand => '命令';
+
+  @override
+  String get autoEditSaving => '保存中…';
+
+  @override
+  String autoEditSaveFailed(String message) {
+    return '没保存成功：$message';
+  }
+
+  @override
+  String get autoEditLoadFailed => '这条自动化没取到';
+
+  @override
+  String get autoEditDelete => '删除自动化';
+
+  @override
+  String autoEditDeleteTitle(String name) {
+    return '删除「$name」？';
+  }
+
+  @override
+  String autoEditDeleteBody(String machine) {
+    return '会从 $machine 上删掉它和它的运行记录，删了不能恢复。';
+  }
+
+  @override
+  String autoEditDeleteFailed(String message) {
+    return '没删掉：$message';
+  }
+
+  @override
+  String get autoEditDiscardTitle => '放弃修改？';
+
+  @override
+  String get autoEditDiscardBody => '对这条自动化的修改还没保存。';
+
+  @override
+  String get autoEditDiscard => '放弃';
+
+  @override
+  String get autoEditScheduleTitle => '时间';
+
+  @override
+  String get autoEditKindDaily => '每天';
+
+  @override
+  String get autoEditKindWeekly => '每周';
+
+  @override
+  String get autoEditKindEvery => '每隔';
+
+  @override
+  String get autoEditKindDuring => '时段内';
+
+  @override
+  String get autoEditTime => '时刻';
+
+  @override
+  String get autoEditStart => '从';
+
+  @override
+  String get autoEditEnd => '到';
+
+  @override
+  String get autoEditDays => '哪几天';
+
+  @override
+  String get autoEditInterval => '间隔';
+
+  @override
+  String get autoEditMinutes => '分钟';
+
+  @override
+  String get autoEditHours => '小时';
+
+  @override
+  String autoEditIntervalRange(int min, int max) {
+    return '$min–$max';
+  }
+
+  @override
+  String get autoEditDone => '完成';
+
+  @override
+  String get autoEditRemoveSchedule => '移除';
 
   @override
   String get appName => 'Smelt';

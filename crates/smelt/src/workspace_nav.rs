@@ -106,27 +106,21 @@ pub(crate) enum AutomationsView {
     #[default]
     List,
     Editor {
-        automation_id: String,
+        automation: crate::agents::AutomationRef,
     },
 }
 
 impl AutomationsView {
-    pub(crate) fn automation_id(&self) -> Option<&str> {
+    /// 编辑器开着的那条自动化。
+    pub(crate) fn editor(&self) -> Option<&crate::agents::AutomationRef> {
         match self {
-            Self::List => None,
-            Self::Editor { automation_id } => Some(automation_id.as_str()),
-        }
-    }
-
-    pub(crate) fn editor_id(&self) -> Option<&str> {
-        match self {
-            Self::Editor { automation_id } => Some(automation_id.as_str()),
+            Self::Editor { automation } => Some(automation),
             Self::List => None,
         }
     }
 
-    pub(crate) fn open_editor(&mut self, automation_id: String) {
-        *self = Self::Editor { automation_id };
+    pub(crate) fn open_editor(&mut self, automation: crate::agents::AutomationRef) {
+        *self = Self::Editor { automation };
     }
 
     pub(crate) fn pop_to_root(&mut self) {
@@ -259,23 +253,20 @@ mod tests {
 
     #[test]
     fn automations_editor_is_one_level_above_the_list() {
+        let auto = crate::agents::AutomationRef::new(crate::RuntimeKey::Local, "auto-1");
         let mut view = AutomationsView::List;
-        view.open_editor("auto-1".into());
-        assert_eq!(view.editor_id(), Some("auto-1"));
-        assert_eq!(view.automation_id(), Some("auto-1"));
+        view.open_editor(auto.clone());
+        assert_eq!(view.editor(), Some(&auto));
 
-        view.open_editor("auto-1".into());
+        view.open_editor(auto.clone());
         assert_eq!(
             view,
-            AutomationsView::Editor {
-                automation_id: "auto-1".into()
-            }
+            AutomationsView::Editor { automation: auto }
         );
 
         view.pop_to_root();
         assert_eq!(view, AutomationsView::List);
-        assert!(view.editor_id().is_none());
-        assert!(view.automation_id().is_none());
+        assert!(view.editor().is_none());
     }
 
     #[test]
@@ -285,11 +276,13 @@ mod tests {
             crate::RuntimeKey::Local,
             "agent-1".into(),
         ));
-        nav.automations_mut().open_editor("auto-1".into());
+        let auto =
+            crate::agents::AutomationRef::new(crate::RuntimeKey::Remote("box".into()), "auto-1");
+        nav.automations_mut().open_editor(auto.clone());
 
         nav.pop_active_to_root();
         assert_eq!(nav.agents(), &AgentsView::Catalog);
-        assert_eq!(nav.automations().editor_id(), Some("auto-1"));
+        assert_eq!(nav.automations().editor(), Some(&auto));
 
         nav.set_active(WorkspaceRoute::Automations);
         nav.pop_active_to_root();

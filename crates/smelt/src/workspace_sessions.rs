@@ -1800,6 +1800,16 @@ impl Workspace {
 
     pub(crate) fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.close_confirm.take() {
+            Some(CloseConfirm::Archive { ui_id, .. }) => {
+                self.archive_conversation_ui(ui_id, cx);
+            }
+            Some(CloseConfirm::DeleteArchived { runtime, id, .. }) => {
+                self.request_conversation_op(
+                    &runtime,
+                    crate::workspace_persist::ConversationOp::Delete { id },
+                    cx,
+                );
+            }
             Some(CloseConfirm::Project { project, .. }) => self.close_project(&project, cx),
             Some(CloseConfirm::Runtime { runtime_id, .. }) => {
                 // 能力库正配着这台机器的话，退回本机。

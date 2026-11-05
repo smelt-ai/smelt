@@ -93,6 +93,38 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         reject_unpaired(conn, operation, &v);
         return;
     }
+    if matches!(operation, DaemonOperation::Open | DaemonOperation::AcpOpen) {
+        let id = v["id"].as_str().unwrap_or_default();
+        let blocked = workspace_directory.read().map(|directory| {
+            directory.conversations.iter().any(|conversation| {
+                conversation.archived_at.is_some()
+                    && (conversation.acp.as_ref().is_some_and(|acp| acp.sid == id)
+                        || conversation
+                            .terminals
+                            .iter()
+                            .any(|t| t.id.as_deref() == Some(id)))
+            })
+        });
+        let message = match blocked {
+            Ok(false) => None,
+            Ok(true) => Some("对话已归档，请先恢复".to_string()),
+            Err(error) => Some(error),
+        };
+        if let Some(message) = message {
+            if operation == DaemonOperation::AcpOpen {
+                crate::acp_host::write_rejected_acp_snapshot(conn, &message);
+            } else {
+                let mut conn = conn;
+                write_terminal_error(
+                    &mut conn,
+                    &message,
+                    v["rows"].as_u64().unwrap_or(24) as u16,
+                    v["cols"].as_u64().unwrap_or(80) as u16,
+                );
+            }
+            return;
+        }
+    }
     match operation {
         DaemonOperation::Control => control::handle_control(
             conn,
@@ -120,18 +152,21 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         DaemonOperation::AcpOpen => {
             handle_acp_open(conn, reader, &v, sessions, acp_sessions, event_hub)
         }
-        DaemonOperation::AcpWatch => {
-            handle_acp_watch(conn, reader, &v, acp_sessions, &workspace_directory, &event_hub)
-        }
+        DaemonOperation::AcpWatch => handle_acp_watch(
+            conn,
+            reader,
+            &v,
+            acp_sessions,
+            &workspace_directory,
+            &event_hub,
+        ),
         DaemonOperation::AcpSnapshot => handle_acp_snapshot(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::AcpSkills => handle_acp_skills(conn, &v, &acp_sessions),
         DaemonOperation::AcpSubmitInput => {
             handle_acp_submit_input(conn, &v, &acp_sessions, &workspace_directory, &event_hub)
         }
         DaemonOperation::AcpAction => handle_acp_action(conn, &v, &acp_sessions, &event_hub),
-        DaemonOperation::AcpKill => {
-            handle_acp_kill(conn, &v, &acp_sessions, &event_hub)
-        }
+        DaemonOperation::AcpKill => handle_acp_kill(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::AcpRestart => handle_acp_restart(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::List => handle_list(conn, &sessions, &acp_sessions),
         DaemonOperation::HistoryRename => handle_history_rename(conn, &v, &sessions, &event_hub),

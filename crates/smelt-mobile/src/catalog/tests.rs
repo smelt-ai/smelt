@@ -7,11 +7,10 @@ use std::io::{BufRead, BufReader, Read};
 use serde_json::{Value, json};
 use smelt_event_protocol::{
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
-    CORE_TOPIC_AUTOMATIONS_CHANGED,
-    CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, CoreProjectionEvent,
-    CoreSessionPhase, CorrelationId, EventEnvelope, EventId, EventSource, SessionStateChanged,
-    SessionStatesSnapshot, SnapshotKind, SubscribeMessage, Topic,
+    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED,
+    CORE_TOPIC_WORKSPACE_CHANGED, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
+    EventEnvelope, EventId, EventSource, SessionStateChanged, SessionStatesSnapshot, SnapshotKind,
+    SubscribeMessage, Topic,
 };
 use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::automation::{Automation, AutomationFile, AutomationRun};
@@ -142,6 +141,29 @@ fn find<'a>(sessions: &'a [SessionSummary], id: &str) -> &'a SessionSummary {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn archives_are_hidden_and_pins_stay_within_their_project() {
+    let mut state = CatalogState::default();
+    let mut archived = conversation("archived", "terminal", Some(("/repo", 0)), 0);
+    archived["archived_at"] = json!(20);
+    let mut pinned = conversation("pinned", "acp", Some(("/repo", 0)), 2);
+    pinned["pinned_at"] = json!(10);
+    state.apply(
+        snapshot(
+            Vec::new(),
+            Some(parse_directory(one_project_directory(vec![
+                archived,
+                conversation("normal", "terminal", Some(("/repo", 0)), 1),
+                pinned,
+                conversation("outside", "acp", Some(("/other", 1)), 3),
+            ]))),
+            None,
+        ),
+        Instant::now(),
+    );
+    assert_eq!(ids_of(&state.summaries()), ["pinned", "normal", "outside"]);
+}
+
+#[test]
 fn projection_lists_the_directory_and_live_automation_runs() {
     let mut state = CatalogState::default();
     let mut directory = parse_directory(one_project_directory(vec![
@@ -150,7 +172,11 @@ fn projection_lists_the_directory_and_live_automation_runs() {
         conversation("outside", "acp", Some(("/work/other", 1)), 2),
     ]));
     directory.conversations[2].acp.as_mut().unwrap().agent = "codex".into();
-    directory.conversations[2].acp.as_mut().unwrap().session_title = None;
+    directory.conversations[2]
+        .acp
+        .as_mut()
+        .unwrap()
+        .session_title = None;
     let automations = automation_file(json!({
         "schema_version": 2,
         "revision": 1,
@@ -225,7 +251,10 @@ fn conversations_outside_every_project_still_list() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].title, "构建");
     assert_eq!(sessions[0].project_root.as_deref(), Some("/srv/app"));
-    assert!(state.projects().is_empty(), "运行时没开项目，就没有能新建会话的项目");
+    assert!(
+        state.projects().is_empty(),
+        "运行时没开项目，就没有能新建会话的项目"
+    );
 }
 
 #[test]
@@ -1747,6 +1776,120 @@ fn automation_commands_return_the_refreshed_catalog() {
     );
 }
 
+#[test]
+fn a_finished_run_reads_its_archived_record_and_transcript() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    let mut run = run_json("r-1", "a1", Some("s-gone"), 50);
+    run["status"] = json!("completed");
+    run["output"] = json!("今天要做三件事");
+    run["context"]["agent_instructions"] = json!("总结昨天");
+    runtime.result(
+        "automation.run_detail",
+        json!({
+            "archived_run": run,
+            "transcript": [
+                {"User": "总结昨天"},
+                {"Assistant": {"text": "今天要做三件事", "thought": false}},
+            ],
+        }),
+    );
+
+    let detail = catalog.automation_run_detail("r-1").unwrap();
+    assert_eq!(
+        runtime.controls("automation.run_detail"),
+        [json!({"run_id": "r-1", "include_archived_run": true})]
+    );
+    assert_eq!(detail.run.id, "r-1");
+    assert_eq!(detail.automation_id, "a1");
+    assert_eq!(detail.automation_name, "每日晨报");
+    assert_eq!(detail.instructions.as_deref(), Some("总结昨天"));
+    assert_eq!(detail.output.as_deref(), Some("今天要做三件事"));
+    assert_eq!(detail.transcript.len(), 2);
+}
+
+#[test]
+fn editing_an_automation_keeps_what_the_phone_does_not_edit() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    let automations = serde_json::to_value(sample_automations()).unwrap();
+    runtime.result("automation.list", json!({"automations": automations}));
+    runtime.result(
+        "agent.definition.list",
+        json!({"agents": serde_json::to_value(sample_definitions()).unwrap()}),
+    );
+    runtime.result(
+        "automation.get",
+        json!({"automation": automations[0].clone()}),
+    );
+    runtime.result(
+        "automation.upsert",
+        json!({"automation": automations[0].clone()}),
+    );
+
+    let editor = catalog.automation_editor(Some("a1")).unwrap();
+    assert_eq!(editor.draft.name, "晨报");
+    assert!(editor.draft.webhook);
+    assert_eq!(editor.event_topics, ["build.done"]);
+    assert_eq!(editor.agents[0].name, "研究员");
+
+    let mut draft = editor.draft.clone();
+    draft.name = "早报".into();
+    draft.prompt = "汇总昨天的进展".into();
+    draft.schedules.truncate(1);
+    catalog.save_automation(Some("a1"), &draft).unwrap();
+
+    let sent = runtime.controls("automation.upsert");
+    assert_eq!(sent.len(), 1);
+    let sent = &sent[0];
+    assert_eq!(sent["id"], "a1");
+    assert_eq!(sent["name"], "早报");
+    assert_eq!(sent["action"]["prompt"], "汇总昨天的进展");
+    assert_eq!(sent["trigger"]["schedules"].as_array().unwrap().len(), 1);
+    // 手机不编辑的：事件触发原样带回，已有 webhook 保持被隐去的令牌，运行时按位置换回。
+    assert_eq!(sent["trigger"]["events"], json!([{"topic": "build.done"}]));
+    assert_eq!(sent["trigger"]["webhooks"][0]["endpoint"], "<redacted>");
+    assert_eq!(sent["enabled"], true);
+}
+
+#[test]
+fn a_new_automation_is_checked_before_it_is_sent() {
+    let (_source, runtime, catalog, _events) = live(Vec::new(), repo_directory(&[]));
+    runtime.result("automation.list", json!({"automations": []}));
+    runtime.result(
+        "agent.definition.list",
+        json!({"agents": serde_json::to_value(sample_definitions()).unwrap()}),
+    );
+    runtime.result(
+        "automation.upsert",
+        json!({"automation": sample_automations()[0].clone()}),
+    );
+
+    let editor = catalog.automation_editor(None).unwrap();
+    assert_eq!(editor.draft.agent_definition_id, "d1");
+    let mut draft = editor.draft;
+    draft.name = "晨报".into();
+    // 定时的智能体动作要有指令：没填就不发。
+    let error = catalog.save_automation(None, &draft).unwrap_err();
+    assert!(!error.message.is_empty());
+    assert!(runtime.controls("automation.upsert").is_empty());
+
+    draft.prompt = "写晨报".into();
+    catalog.save_automation(None, &draft).unwrap();
+    let sent = &runtime.controls("automation.upsert")[0];
+    assert!(
+        !sent["id"].as_str().unwrap().is_empty(),
+        "新建的 id 由手机生成"
+    );
+    assert_eq!(
+        sent["trigger"]["schedules"][0],
+        json!({"type": "daily", "hour": 9, "minute": 0})
+    );
+    assert_eq!(sent["sinks"], json!([{"type": "local"}]));
+
+    runtime.result("automation.delete", json!({"id": "a1"}));
+    catalog.delete_automation("a1").unwrap();
+    assert_eq!(runtime.controls("automation.delete"), [json!({"id": "a1"})]);
+}
+
 fn browse_result() -> Value {
     json!({
         "path": "/",
@@ -1886,7 +2029,10 @@ fn projection_carries_the_custom_agent_of_a_conversation() {
     state.apply(snapshot(Vec::new(), Some(directory), None), Instant::now());
 
     let sessions = state.summaries();
-    assert_eq!(find(&sessions, "custom").profile_id.as_deref(), Some("p-til"));
+    assert_eq!(
+        find(&sessions, "custom").profile_id.as_deref(),
+        Some("p-til")
+    );
     assert_eq!(find(&sessions, "custom").agent, "custom");
     assert_eq!(find(&sessions, "raw").profile_id, None);
     assert_eq!(find(&sessions, "term").profile_id, None);
@@ -1905,7 +2051,11 @@ fn projection_carries_the_turn_start() {
         ..daemon("busy", DaemonPhase::ExecutingTool)
     };
     state.apply(
-        snapshot(vec![busy, daemon("idle", DaemonPhase::Idle)], Some(directory), None),
+        snapshot(
+            vec![busy, daemon("idle", DaemonPhase::Idle)],
+            Some(directory),
+            None,
+        ),
         Instant::now(),
     );
 

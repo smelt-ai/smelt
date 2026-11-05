@@ -10,7 +10,6 @@
   "@agentsLoadFailed": {"placeholders": {"message": {"type": "String"}}},
   "agentsEmptyAgents": "No agents on this machine yet.",
   "agentsEmptyAutomations": "No automations on this machine yet. Create them in Smelt on the desktop.",
-  "agentsReadOnly": "Automations are edited in Smelt on the desktop.",
   "agentsGone": "This item is no longer on {machine}.",
   "@agentsGone": {"placeholders": {"machine": {"type": "String"}}},
   "agentsMachineOffline": "{machine} is offline. Actions are available once it reconnects.",

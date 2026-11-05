@@ -34,6 +34,8 @@ TestBackend _backend() => TestBackend(
         's-auto',
         '汇总昨日 PR',
         automation: const AutomationSource(
+          automationId: 'auto-1',
+          runId: 'run-1',
           automationName: '每日站会摘要',
           runStatus: AutomationRunStatus.completed,
           runSource: AutomationRunSource.scheduled,

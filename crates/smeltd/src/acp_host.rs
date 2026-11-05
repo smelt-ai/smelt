@@ -3601,7 +3601,7 @@ pub(crate) fn handle_acp_open<C: ClientSocket>(
     }
 }
 
-fn write_rejected_acp_snapshot<C: ClientSocket>(mut conn: C, reason: &str) {
+pub(crate) fn write_rejected_acp_snapshot<C: ClientSocket>(mut conn: C, reason: &str) {
     let mut state = smelt_core::acp_session::AcpSessionState::default();
     state.phase = smelt_core::daemon_state::DaemonPhase::Dead;
     state.end_reason = reason.to_string();

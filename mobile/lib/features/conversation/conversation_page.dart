@@ -16,6 +16,7 @@ import '../../ui/page.dart';
 import '../../ui/station.dart';
 import '../../ui/time.dart';
 import '../agents/agent_memory_page.dart';
+import '../agents/automation_run_page.dart';
 import '../files/file_links.dart';
 import '../files/project_files_page.dart';
 import '../../utils/image_processing.dart';
@@ -927,16 +928,29 @@ class _ConversationPageState extends State<ConversationPage> {
     final view = _view;
     if (view == null) {
       if (_problemKind != null) {
+        // 自动化跑出来的会话跑完就没了，记录还在：给去看记录的路，不让人对着「重试」。
+        final run = _model.catalog
+            .session(widget.runtimeId, widget.sessionId)
+            ?.automation;
         return Center(
           child: SingleChildScrollView(
             child: EmptyNote(
               icon: LucideIcons.cloudOff,
               title: l10n.conversationUnavailableTitle,
               body: _problemText(l10n),
-              action: GalleyButton.solid(
-                label: l10n.commonRetry,
-                onPressed: _retry,
-              ),
+              action: run == null
+                  ? GalleyButton.solid(
+                      label: l10n.commonRetry,
+                      onPressed: _retry,
+                    )
+                  : GalleyButton.solid(
+                      label: l10n.autoRunOpen,
+                      onPressed: () => openAutomationRun(
+                        context,
+                        widget.runtimeId,
+                        run.runId,
+                      ),
+                    ),
             ),
           ),
         );

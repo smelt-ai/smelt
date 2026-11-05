@@ -191,6 +191,9 @@ impl CatalogState {
         let directory = self.workspace.as_ref().unwrap_or(&empty_directory);
         let mut listing = Listing::new(PathStyle::of_os(self.os.as_deref()), &directory.projects);
         for conversation in &directory.conversations {
+            if conversation.archived_at.is_some() {
+                continue;
+            }
             listing.push_conversation(conversation);
         }
         if let Some(automations) = self.automations.as_ref() {
@@ -269,6 +272,7 @@ impl CatalogState {
         rows.sort_by(|(a_row, a), (b_row, b)| {
             a.project_order
                 .cmp(&b.project_order)
+                .then(b_row.pinned.cmp(&a_row.pinned))
                 .then(a_row.order.cmp(&b_row.order))
                 .then(a_row.leaf.cmp(&b_row.leaf))
                 .then(a.title.cmp(&b.title))
@@ -303,6 +307,7 @@ struct Row {
     /// 在名册里的先后，和同一段对话里第几个终端。
     order: u32,
     leaf: u32,
+    pinned: bool,
 }
 
 /// 现拼的列表。项目分组先是目录里开着的项目，之后是会话 cwd 撑起来的分组。
@@ -388,6 +393,7 @@ impl Listing {
                 profile_id: acp.profile_id.clone(),
                 order,
                 leaf: 0,
+                pinned: conversation.pinned_at.is_some(),
             });
             return;
         }
@@ -422,6 +428,7 @@ impl Listing {
                 profile_id: None,
                 order,
                 leaf: u32::try_from(leaf).unwrap_or(u32::MAX),
+                pinned: conversation.pinned_at.is_some(),
             });
         }
     }
@@ -457,6 +464,7 @@ impl Listing {
                 profile_id: None,
                 order,
                 leaf: 0,
+                pinned: false,
             });
         }
 
@@ -530,6 +538,8 @@ pub(crate) fn dir_listing(
 
 fn automation_source(run: &AutomationRun) -> view::AutomationSource {
     view::AutomationSource {
+        automation_id: run.automation_id.clone(),
+        run_id: run.id.clone(),
         automation_name: run.context.automation_name.clone(),
         run_status: run_status(run.status),
         run_source: run_source(run.source),
@@ -761,7 +771,7 @@ fn run_source(source: model_automation::AutomationRunSource) -> view::Automation
     }
 }
 
-fn schedule(schedule: &model_automation::AutomationSchedule) -> view::AutomationSchedule {
+pub(super) fn schedule(schedule: &model_automation::AutomationSchedule) -> view::AutomationSchedule {
     use model_automation::AutomationSchedule as S;
     let blank = view::AutomationSchedule {
         kind: view::ScheduleKind::Daily,
@@ -816,8 +826,9 @@ fn schedule(schedule: &model_automation::AutomationSchedule) -> view::Automation
     }
 }
 
-fn run_summary(run: &AutomationRun) -> view::AutomationRunSummary {
+pub(super) fn run_summary(run: &AutomationRun) -> view::AutomationRunSummary {
     view::AutomationRunSummary {
+        id: run.id.clone(),
         status: run_status(run.status),
         source: run_source(run.source),
         started_at: run.started_at.or(Some(run.created_at)),

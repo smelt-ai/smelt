@@ -1076,6 +1076,15 @@ fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
     }
 }
 
+fn suspend_terminal_identity(event_hub: &EventHubHandle, state: &SessionState) -> Result<(), String> {
+    let _commit = STATE_DIRECTORY_COMMIT_GATE.lock().unwrap();
+    if !event_hub.remove_session(&state.id, state.instance).map_err(|error| error.to_string())? {
+        return Err("终端实例已替换，不能归档旧实例".to_string());
+    }
+    with_session_directory(|directory| directory.suspend_instance(state))
+        .unwrap_or_else(|| Err("终端身份目录尚未初始化".to_string()))
+}
+
 /// Remote ownership is a small catalog, so each change publishes a complete replacement. This
 /// gives lagging clients a convergent state without treating catalog events as a durable log.
 fn apply_history_rename(

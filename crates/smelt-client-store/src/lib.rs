@@ -148,6 +148,7 @@ pub struct WorkspaceUiRecord {
     pub sidebar_grouping: String,
     pub pinned_projects: Vec<ProjectKey>,
     pub sidebar_hide_empty_projects: bool,
+    pub archive_expanded: bool,
 }
 
 /// 在线更新的进度，强杀之后下次启动接着装。
@@ -620,8 +621,8 @@ pub(crate) fn write_workspace_ui(
         .execute(
             "INSERT OR REPLACE INTO workspace_ui (id, active_session, active_session_id, route,
                selected_agent_id, sidebar_w, sidebar_open, sidebar_grouping,
-               sidebar_hide_empty_projects)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+               sidebar_hide_empty_projects, archive_expanded)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 record.active_session as i64,
                 record.active_session_id,
@@ -630,7 +631,8 @@ pub(crate) fn write_workspace_ui(
                 record.sidebar_w,
                 record.sidebar_open,
                 record.sidebar_grouping,
-                record.sidebar_hide_empty_projects
+                record.sidebar_hide_empty_projects,
+                record.archive_expanded
             ],
         )
         .map_err(sql)?;
@@ -857,7 +859,7 @@ impl ClientStore {
             let Some(mut record) = connection
                 .query_row(
                     "SELECT active_session, active_session_id, route, selected_agent_id, sidebar_w,
-                       sidebar_open, sidebar_grouping, sidebar_hide_empty_projects
+                       sidebar_open, sidebar_grouping, sidebar_hide_empty_projects, archive_expanded
                      FROM workspace_ui WHERE id = 1",
                     [],
                     |row| {
@@ -873,6 +875,7 @@ impl ClientStore {
                             sidebar_grouping: row.get(6)?,
                             pinned_projects: Vec::new(),
                             sidebar_hide_empty_projects: row.get(7)?,
+                            archive_expanded: row.get(8)?,
                         })
                     },
                 )
