@@ -4711,14 +4711,14 @@ mod runtime_tests {
         ));
         let scope = root.join("@agentclientprotocol");
         let old = scope.join("claude-agent-acp@0.59.0@@@1");
-        let retired = scope.join("claude-agent-acp@0.70.0@@@1");
-        let current = scope.join("claude-agent-acp@0.78.0@@@1");
+        let retired = scope.join("claude-agent-acp@0.78.0@@@1");
+        let current = scope.join("claude-agent-acp@0.100.0@@@1");
         let unknown = scope.join("claude-agent-acp@0.58.0@@@1");
         let shared_sdk = scope.join("sdk@1.2.1@@@1");
         let aliases = scope.join("claude-agent-acp");
         let old_alias = aliases.join("0.59.0@@@1");
-        let retired_alias = aliases.join("0.70.0@@@1");
-        let current_alias = aliases.join("0.78.0@@@1");
+        let retired_alias = aliases.join("0.78.0@@@1");
+        let current_alias = aliases.join("0.100.0@@@1");
         let retired_pi = root.join("pi-acp@0.0.33@@@1");
         let pi_aliases = root.join("pi-acp");
         let retired_pi_alias = pi_aliases.join("0.0.33@@@1");
@@ -4737,7 +4737,7 @@ mod runtime_tests {
         assert!(removed >= 6, "旧实体目录和版本别名都应被清掉");
         assert!(!old.exists());
         assert!(std::fs::symlink_metadata(&old_alias).is_err());
-        assert!(!retired.exists(), "刚卸任的 0.70.0 缓存应清掉");
+        assert!(!retired.exists(), "刚卸任的 0.78.0 缓存应清掉");
         assert!(std::fs::symlink_metadata(&retired_alias).is_err());
         assert!(!retired_pi.exists(), "已退役的 pi-acp 缓存应清掉");
         assert!(std::fs::symlink_metadata(&retired_pi_alias).is_err());

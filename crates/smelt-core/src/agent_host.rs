@@ -495,7 +495,7 @@ mod tests {
         assert!(migrate_released_adapter_defaults(&mut config));
         assert_eq!(
             cmd(&config, ConversationAgentKind::Claude),
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.100.0"
         );
         assert_eq!(
             cmd(&config, ConversationAgentKind::Codex),

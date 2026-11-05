@@ -148,6 +148,10 @@ const CLAUDE_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
             package: "@agentclientprotocol/claude-agent-acp",
             version: "0.70.0",
         },
+        ManagedAcpAdapterRelease {
+            package: "@agentclientprotocol/claude-agent-acp",
+            version: "0.78.0",
+        },
     ],
     legacy_default_commands: &[],
 };
@@ -1216,7 +1220,7 @@ pub fn default_acp_cmd() -> String {
     // 切到系统 Node 去跑（哪怕我们准备了受管 bun），「受管运行时不依赖系统装了
     // 什么」这条设计承诺不加这个 flag 就不成立。见 bunx --help 的官方说明。
     //
-    // 0.78.0 已用受管 Bun 1.4.0 + 本机 Claude CLI 实测 initialize：协议版本 1、
+    // 0.100.0 已用受管 Bun 1.4.4 + 本机 Claude CLI 实测 initialize：协议版本 1、
     // 图片与 MCP 能力正常，`agentCapabilities.loadSession: true`。0.77 删掉的
     // agent-picker / `claudeCode.options.agent` Smelt 没用；不要广告
     // native subagent / session fork，适配器声明了却没实现。
@@ -1987,7 +1991,7 @@ mod tests {
     fn managed_adapter_defaults_pin_the_verified_latest_versions() {
         assert_eq!(
             default_acp_cmd(),
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.100.0"
         );
         assert_eq!(
             default_acp_codex_cmd(),
@@ -2002,13 +2006,19 @@ mod tests {
             ConversationAgentKind::Claude.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0"
             ),
-            Some("bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0".into())
+            Some("bunx --bun @agentclientprotocol/claude-agent-acp@0.100.0".into())
         );
         assert_eq!(
             ConversationAgentKind::Claude.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0"
             ),
-            Some("bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0".into())
+            Some("bunx --bun @agentclientprotocol/claude-agent-acp@0.100.0".into())
+        );
+        assert_eq!(
+            ConversationAgentKind::Claude.upgrade_released_default_command(
+                "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"
+            ),
+            Some("bunx --bun @agentclientprotocol/claude-agent-acp@0.100.0".into())
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command(

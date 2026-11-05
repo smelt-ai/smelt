@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { clampThinkingLevel, Type } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type SourceInfo } from "@earendil-works/pi-coding-agent";
 import { currentMemoryRoots, memoryRunIsUnattended } from "./agent-memory.ts";
 import { SMELT_BACKGROUND_TASK_EXTENSION_PATH } from "./background-task.ts";

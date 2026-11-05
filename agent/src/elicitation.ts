@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** Smelt 宿主保留的唯一选择题工具与具名内联 Extension 身份。 */
