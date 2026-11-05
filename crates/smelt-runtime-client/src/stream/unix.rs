@@ -199,9 +199,32 @@ impl UnixListener {
         net::UnixListener::bind(path).map(Self)
     }
 
+    /// 一个个接受进来的连接。accept 出错（多半是描述符用尽）照样交出去给调用方记日志，
+    /// 下一次 accept 之前先按 `accept_retry_delay` 等一会，调用方不用再等。Windows 的
+    /// 监听在接受线程里做同样的退避。
     pub fn incoming(&self) -> impl Iterator<Item = io::Result<UnixStream>> + '_ {
-        self.0.incoming().map(|stream| stream.map(UnixStream))
+        let mut failures = 0u32;
+        std::iter::from_fn(move || {
+            if let Some(failed) = failures.checked_sub(1) {
+                // 轮询例外：accept 失败之后没有「可以再试」的事件；周期 50 毫秒起翻倍，
+                // 上限 5 秒，成功一次就回到起点。
+                std::thread::sleep(accept_retry_delay(failed));
+            }
+            let accepted = self.0.accept().map(|(stream, _)| UnixStream(stream));
+            failures = match accepted {
+                Ok(_) => 0,
+                Err(_) => failures.saturating_add(1),
+            };
+            Some(accepted)
+        })
     }
+}
+
+/// 连续第 `failures` 次（从 0 起）accept 失败后隔多久再试：50 毫秒起翻倍，上限 5 秒。
+fn accept_retry_delay(failures: u32) -> Duration {
+    Duration::from_millis(50)
+        .saturating_mul(1u32.checked_shl(failures).unwrap_or(u32::MAX))
+        .min(Duration::from_secs(5))
 }
 
 impl fmt::Debug for UnixListener {
@@ -213,5 +236,19 @@ impl fmt::Debug for UnixListener {
 impl AsRawFd for UnixListener {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_accepts_back_off_up_to_five_seconds() {
+        assert_eq!(accept_retry_delay(0), Duration::from_millis(50));
+        assert_eq!(accept_retry_delay(3), Duration::from_millis(400));
+        assert_eq!(accept_retry_delay(6), Duration::from_millis(3_200));
+        assert_eq!(accept_retry_delay(7), Duration::from_secs(5));
+        assert_eq!(accept_retry_delay(u32::MAX), Duration::from_secs(5));
     }
 }

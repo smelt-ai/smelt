@@ -4,7 +4,7 @@
 use super::*;
 
 fn call_input(sessions: &Sessions, id: &str, data: &str) -> serde_json::Value {
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let subscribers = new_event_hub();
     let mut client = client;
     writeln!(

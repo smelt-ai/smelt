@@ -49,6 +49,18 @@ pub(crate) fn shutdown_started() -> bool {
     SHUTDOWN_STARTED.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// 停机已经由别的线程接手时，当前线程在这里等它把进程换掉或退出。
+///
+/// 不能返回：主线程一返回，进程就提前结束，回执和接班进程都来不及。也不能自己退出：
+/// 停机线程最后会 `process::exit`，两个线程同时退出不安全。没有人 unpark；park 可能
+/// 假醒，所以套在循环里。
+pub(crate) fn wait_for_shutdown_exit() -> ! {
+    debug_assert!(shutdown_started());
+    loop {
+        std::thread::park();
+    }
+}
+
 /// 五步停机。`exec_exe` 有值时，子进程和文件句柄都放开之后再 `exec` 到那份新映像。
 /// 没有则在回执写完后退出。回执一定在收割和 WAL checkpoint 之后，调用方才能去换
 /// `.app` / `.exe`。
@@ -59,11 +71,8 @@ pub(crate) fn graceful_shutdown(
     use std::sync::atomic::Ordering;
 
     if SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
-        // 先到的那次会 exec 或退出，这条线程不会再被用到。没有人 unpark 它；
-        // park 可能假醒，所以套在循环里。
-        loop {
-            std::thread::park();
-        }
+        // 先到的那次会 exec 或退出，这条线程不会再被用到。
+        wait_for_shutdown_exit();
     }
 
     // 1. 禁新会话、禁新子进程，并挡住身份目录的迟到提交。上面的标记先于写锁置上：
@@ -134,9 +143,9 @@ pub(crate) fn graceful_shutdown(
         Err(error) => dlog(&format!("shutdown: 打开状态库失败：{error}")),
     }
 
-    // 5. 先摘掉监听路径，再回执。调用方拿到 ok 就会立刻 bind 新守护；
-    // 旧进程这时还没退出，路径还在的话新进程会连上这个即将消失的监听。
-    let _ = std::fs::remove_file(crate::sock_path());
+    // 5. 先停止接新连接，再回执。调用方拿到 ok 就会立刻 bind 新守护；
+    // 旧进程这时还没退出，还在听的话新进程会连上这个即将消失的监听。
+    crate::stop_listening();
     if let Some(mut conn) = ack {
         let _ = smelt_runtime_client::protocol::write_json_line(
             &mut conn,

@@ -7,7 +7,7 @@
 //! - iroh：QUIC 握手证明对端持有它 endpoint id 的私钥；id 在 `paired_device` 表里才放行。
 //!   不在表里的设备只能调 `device.pair`，提交运行时发出的一次性配对码。
 
-use smelt_runtime_client::UnixStream;
+use smelt_runtime_client::RuntimeStream;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -388,7 +388,7 @@ impl smelt_iroh::runtime::StreamAcceptor for RemoteStreams {
         }
     }
 
-    fn accept(&self, remote: &str, stream: UnixStream) {
+    fn accept(&self, remote: &str, stream: RuntimeStream) {
         let remote = remote.to_string();
         // 查库、分发都是阻塞的，不能占着 tokio 线程。
         std::thread::spawn(move || {

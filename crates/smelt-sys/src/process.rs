@@ -246,6 +246,17 @@ pub fn process_started_at(pid: u32) -> Option<std::time::SystemTime> {
     }
 }
 
+/// 升级接班：等前任 `pid` 退出，最多等 `grace`；到时还没退就结束它，并等它真的退出。
+/// 返回是否动手结束了它。
+///
+/// 只认创建时间早于本进程的那个 pid：前任先拉起本进程再退出，pid 之后被系统复用给的
+/// 进程一定建得比本进程晚，不碰。查创建时间、等待、结束用的是同一个句柄，中途不会换成
+/// 别的进程。
+#[cfg(windows)]
+pub fn retire_predecessor(pid: u32, grace: std::time::Duration) -> io::Result<bool> {
+    windows::retire_predecessor(pid, grace)
+}
+
 /// 脱离当前控制台拉起一个进程，调用方不等它。守护进程用这个，避免被桌面的
 /// Job 带着一起退出。
 ///
@@ -287,11 +298,6 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
             "这个平台不能脱离启动进程",
         ))
     }
-}
-
-#[cfg(windows)]
-pub fn af_unix_peer_pid(socket: std::os::windows::io::RawSocket) -> io::Result<u32> {
-    windows::af_unix_peer_pid(socket)
 }
 
 #[cfg(windows)]
@@ -349,10 +355,9 @@ mod windows {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ACCESS_DENIED, FILETIME, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-        WAIT_TIMEOUT,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, GetLastError, HANDLE,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
-    use windows_sys::Win32::Networking::WinSock::WSAIoctl;
     use windows_sys::Win32::Security::{
         GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
@@ -371,8 +376,6 @@ mod windows {
         THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
     };
 
-    /// `_WSAIOR(IOC_VENDOR, 256)`，Winsock 文档里的 `SIO_AF_UNIX_GETPEERPID`。
-    const SIO_AF_UNIX_GETPEERPID: u32 = 0x5800_0100;
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -528,31 +531,6 @@ mod windows {
         }
     }
 
-    pub fn af_unix_peer_pid(socket: std::os::windows::io::RawSocket) -> io::Result<u32> {
-        let mut pid = 0u32;
-        let mut returned = 0u32;
-        let rc = unsafe {
-            WSAIoctl(
-                socket as usize,
-                SIO_AF_UNIX_GETPEERPID,
-                std::ptr::null(),
-                0,
-                (&mut pid as *mut u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-                &mut returned,
-                std::ptr::null_mut(),
-                None,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if pid == 0 {
-            return Err(io::Error::other("AF_UNIX 对端没有进程号"));
-        }
-        Ok(pid)
-    }
-
     pub fn process_executable(pid: u32) -> io::Result<PathBuf> {
         let process = open_query(pid)?;
         let _process = OwnedHandle(process);
@@ -703,22 +681,77 @@ mod windows {
         if process.is_null() {
             return None;
         }
-        let _process = OwnedHandle(process);
-        let mut created = FILETIME::default();
-        let mut exited = FILETIME::default();
-        let mut kernel = FILETIME::default();
-        let mut user = FILETIME::default();
-        if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0
-        {
-            return None;
-        }
-        let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+        let process = OwnedHandle(process);
+        let ticks = creation_ticks(process.raw()).ok()?;
         // FILETIME 是从 1601-01-01 起的 100 纳秒。到 Unix 纪元是 11_644_473_600 秒。
         const EPOCH_DIFF: u64 = 11_644_473_600 * 10_000_000;
         let unix_100ns = ticks.checked_sub(EPOCH_DIFF)?;
         let secs = unix_100ns / 10_000_000;
         let nanos = (unix_100ns % 10_000_000) * 100;
         UNIX_EPOCH.checked_add(Duration::new(secs, nanos as u32))
+    }
+
+    /// 进程的创建时间，FILETIME 的 100 纳秒刻度。
+    fn creation_ticks(process: HANDLE) -> io::Result<u64> {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+
+    pub fn retire_predecessor(pid: u32, grace: Duration) -> io::Result<bool> {
+        let ours = creation_ticks(unsafe { GetCurrentProcess() })?;
+        retire_if_born_before(pid, grace, ours)
+    }
+
+    /// [`retire_predecessor`] 的本体。`born_before` 单独拿出来，测试才能对自己拉起的
+    /// 子进程走「结束它」那条路。
+    pub(super) fn retire_if_born_before(
+        pid: u32,
+        grace: Duration,
+        born_before: u64,
+    ) -> io::Result<bool> {
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                0,
+                pid,
+            )
+        };
+        if process.is_null() {
+            let error = io::Error::last_os_error();
+            // 已经退出、pid 也没被复用。
+            if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        let process = OwnedHandle(process);
+        if creation_ticks(process.raw())? >= born_before {
+            return Ok(false);
+        }
+        let millis = u32::try_from(grace.as_millis()).unwrap_or(INFINITE - 1);
+        match unsafe { WaitForSingleObject(process.raw(), millis) } {
+            WAIT_OBJECT_0 => return Ok(false),
+            WAIT_TIMEOUT => {}
+            _ => return Err(io::Error::last_os_error()),
+        }
+        if unsafe { TerminateProcess(process.raw(), 1) } == 0 {
+            let error = io::Error::last_os_error();
+            // 恰好在这一刻自己退了。
+            if unsafe { WaitForSingleObject(process.raw(), 0) } == WAIT_OBJECT_0 {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        // TerminateProcess 只是发起。等它真的退出，它手里的管道实例和锁才都关掉。
+        unsafe { WaitForSingleObject(process.raw(), INFINITE) };
+        Ok(true)
     }
 
     fn open_for_job(pid: u32) -> io::Result<HANDLE> {
@@ -735,5 +768,59 @@ mod windows {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(pid, job);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use super::retire_predecessor;
+    use super::windows::retire_if_born_before;
+
+    /// 一个会自己跑上半分钟的子进程。
+    fn long_running() -> Child {
+        Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// pid 被复用给比本进程晚建的进程时不碰它：本进程拉起的子进程就是这种。
+    #[test]
+    fn a_process_started_after_us_is_never_terminated() {
+        let mut child = long_running();
+        let retired = retire_predecessor(child.id(), Duration::from_millis(50)).unwrap();
+        assert!(!retired);
+        assert!(child.try_wait().unwrap().is_none(), "子进程不该被结束");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// 到时还没退出的前任被结束，返回时已经真的退出。
+    #[test]
+    fn a_predecessor_still_running_after_the_grace_is_terminated() {
+        let mut child = long_running();
+        let retired =
+            retire_if_born_before(child.id(), Duration::from_millis(50), u64::MAX).unwrap();
+        assert!(retired);
+        let status = child.try_wait().unwrap().expect("返回时前任应该已经退出");
+        assert_eq!(status.code(), Some(1));
+    }
+
+    /// 前任已经退出时立刻返回，不等满宽限期。
+    #[test]
+    fn a_predecessor_that_already_exited_is_not_waited_for() {
+        let mut child = long_running();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let started = Instant::now();
+        let retired =
+            retire_if_born_before(child.id(), Duration::from_secs(30), u64::MAX).unwrap();
+        assert!(!retired);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

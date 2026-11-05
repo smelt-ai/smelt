@@ -20,4 +20,4 @@ pub mod stream;
 
 pub use client::{DEFAULT_REQUEST_TIMEOUT, RequestError, RuntimeClient};
 pub use connector::{Connector, LocalConnector};
-pub use stream::{RuntimeStream, UnixListener, UnixStream};
+pub use stream::{RuntimeListener, RuntimeStream};

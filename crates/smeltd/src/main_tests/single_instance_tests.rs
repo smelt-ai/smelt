@@ -33,6 +33,7 @@ fn concurrent_starters_leave_exactly_one_listener() {
     assert_eq!(listeners, 1, "并发启动只能有一个进程取得 listener");
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("lock"));
+    let _ = std::fs::remove_file(path.with_extension("instance.lock"));
 }
 
 #[test]
@@ -43,9 +44,10 @@ fn stale_socket_path_is_replaced_while_holding_startup_lock() {
     let listener = bind_single_instance(&path, true)
         .expect("僵尸 socket 应可恢复")
         .expect("没有活实例时应取得 listener");
-    assert!(UnixStream::connect(&path).is_ok());
+    assert!(RuntimeStream::connect(&path).is_ok());
 
     drop(listener);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("lock"));
+    let _ = std::fs::remove_file(path.with_extension("instance.lock"));
 }

@@ -282,7 +282,7 @@ fn bridge_tracked(
     Ok((theirs, tokio::spawn(pump(send, recv, ours))))
 }
 
-/// Windows 上 AF_UNIX 套接字进不了 tokio，改用线程搬运，见 [`threaded`]。
+/// Windows 上 `RuntimeStream::pair()` 是进程内的内存流，进不了 tokio，改用线程搬运，见 [`threaded`]。
 #[cfg(windows)]
 fn bridge_tracked(
     send: SendStream,

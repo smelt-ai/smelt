@@ -211,7 +211,7 @@ fn list_includes_recovered_sessions_as_disconnected() {
     with_directory_env(|| {
         set_session_directory_for_test(recovered_directory());
 
-        let (server, mut client) = UnixStream::pair().unwrap();
+        let (server, mut client) = RuntimeStream::pair().unwrap();
         writeln!(client, "{}", serde_json::json!({ "op": "list" })).unwrap();
         handle_conn(
             server,
@@ -269,7 +269,7 @@ fn kill_recovered_session_removes_identity() {
         let acp_sessions = new_test_acp_sessions();
         let subscribers = new_event_hub();
 
-        let (server, mut client) = UnixStream::pair().unwrap();
+        let (server, mut client) = RuntimeStream::pair().unwrap();
         writeln!(
             client,
             "{}",
@@ -315,7 +315,7 @@ fn failed_open_keeps_recovered_identity() {
         let sessions = new_sessions();
         let subscribers = new_event_hub();
 
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
         let reader = BufReader::new(server.try_clone().unwrap());
         let sessions_b = Arc::clone(&sessions);
         let subscribers_b = Arc::clone(&subscribers);
@@ -396,7 +396,7 @@ fn acp_kill_removes_disconnected_identity() {
 
         let acp_sessions = new_test_acp_sessions();
         let subscribers = new_event_hub();
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
         handle_acp_kill(
             server,
             &serde_json::json!({"id": "acp-1"}),

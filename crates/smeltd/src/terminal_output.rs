@@ -411,7 +411,7 @@ pub(crate) fn enqueue_session_streams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_runtime_client::UnixStream;
+    use smelt_runtime_client::RuntimeStream;
     use std::io::{Read, Write};
     use std::time::Duration;
 
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn attachment_writes_keyframe_before_later_live_output() {
-        let (server, mut client) = UnixStream::pair().unwrap();
+        let (server, mut client) = RuntimeStream::pair().unwrap();
         let attachment =
             OutputAttachment::new(server, b"header".to_vec(), "test", "attachment").unwrap();
         assert!(attachment.enqueue(b"live"));
@@ -448,7 +448,7 @@ mod tests {
     /// 再读到 EOF，否则只能把删除当成传输抖动去重连。
     #[test]
     fn close_after_flush_delivers_queued_bytes_then_eof() {
-        let (server, mut client) = UnixStream::pair().unwrap();
+        let (server, mut client) = RuntimeStream::pair().unwrap();
         let attachment =
             OutputAttachment::new(server, b"header".to_vec(), "test", "attachment").unwrap();
         assert!(attachment.enqueue(b"final"));
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn dispatch_never_writes_to_a_backpressured_attachment_socket() {
-        let (mut server, _client) = UnixStream::pair().unwrap();
+        let (mut server, _client) = RuntimeStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();
         let filler = [0u8; 8192];
         let mut full = false;
