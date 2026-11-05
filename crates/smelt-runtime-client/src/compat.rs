@@ -45,8 +45,9 @@ impl fmt::Display for Incompatibility {
 
 /// 桌面能不能用这个运行时：控制方法加事件（[`check_events`]）。
 ///
-/// 控制方法：运行时支持的协议版本区间要包含客户端的，还要有客户端的全部方法（方法只增不改，
-/// 缺了就是运行时旧，请它升级）。
+/// 控制方法：运行时支持的协议版本区间要包含客户端的，还要有全部必需方法（方法只增不改，
+/// 缺了就是运行时旧）。可选方法（[`ControlMethod::OPTIONAL`]）缺了不算：只有那一项功能
+/// 用不了，由用它的地方降级，不能为此把整台机器的终端和对话都拦在外面。
 pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
     with_runtime_version(
         described,
@@ -58,8 +59,8 @@ pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
 /// 宽容读取，推送加字段不升版本，所以这类改动下运行时比客户端新、旧都照常连（见
 /// `smelt_event_protocol` 的模块文档）。
 ///
-/// 手机只对这一项：[`ControlMethod`] 是按桌面的用法列的，手机只用其中一部分，缺的方法由
-/// 用到的地方报 MethodNotFound。
+/// 手机只对这一项：[`ControlMethod`] 的必需方法是按桌面的用法列的，手机只用其中一部分，
+/// 缺的方法由用到的地方报 MethodNotFound。
 pub fn check_events(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
     with_runtime_version(described, event_versions(described))
 }
@@ -91,6 +92,7 @@ fn check_control(described: &SystemDescribeResult) -> Result<(), (Outdated, Stri
     }
     let missing: Vec<&str> = ControlMethod::ALL
         .iter()
+        .filter(|method| method.required())
         .map(|method| method.as_str())
         .filter(|name| !control.methods.iter().any(|known| known == name))
         .collect();
@@ -213,6 +215,20 @@ mod tests {
         assert!(error.reason.contains("conversation.create_for_agent"));
     }
 
+    /// 最低协议版本之后才加的方法，旧运行时没有也照常连：只是那一项功能用不了。
+    #[test]
+    fn missing_optional_methods_are_still_compatible() {
+        let mut described = current();
+        described.control.methods.retain(|method| {
+            ControlMethod::from_wire_name(method).is_none_or(ControlMethod::required)
+        });
+        assert!(
+            !ControlMethod::OPTIONAL.is_empty(),
+            "这条测试要真的去掉了可选方法才有意义"
+        );
+        assert_eq!(check(&described), Ok(()));
+    }
+
     #[test]
     fn control_version_range_decides_the_direction() {
         let mut newer = current();
@@ -268,7 +284,23 @@ mod tests {
         );
     }
 
-    /// 手机只对事件：桌面的方法缺了不拦，事件协议对不上照样拦。
+    /// 手机只对事件：桌面的必需方法缺了不拦，事件协议对不上照样拦。
+    /// 没升级的运行时读得了就照常连：这里写死已发布的 2026.1031.0（控制 v3、事件 v6，没有
+    /// 可选方法），谁抬最低版本或把可选方法改成必需，这条就失败，得想清楚是不是真读不了。
+    #[test]
+    fn the_released_runtime_baseline_stays_compatible() {
+        let mut baseline = current();
+        baseline.control.methods.retain(|method| {
+            ControlMethod::from_wire_name(method).is_none_or(ControlMethod::required)
+        });
+        baseline.control.current_version = 3;
+        baseline.control.min_supported_version = 3;
+        baseline.control.max_supported_version = 3;
+        let events = baseline.events.as_mut().unwrap();
+        events.protocol_version = 6;
+        assert_eq!(check(&baseline), Ok(()));
+    }
+
     #[test]
     fn check_events_ignores_control_methods_but_not_event_versions() {
         let mut described = current();
