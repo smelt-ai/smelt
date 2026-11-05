@@ -16,6 +16,9 @@
 //! 读写超时、非阻塞、shutdown 状态；本地 `shutdown` 叫醒别的线程里等着的读写。管道没有
 //! 半关闭，`shutdown(Both)` 等手上的读写都退出就关句柄：对端读完已经写进去的数据，再读到
 //! EOF，和套接字的 FIN 一样。不用 `DisconnectNamedPipe`，它会把对端还没读的数据丢掉。
+//!
+//! 和 std 还有一处不同：写超时（非阻塞时写不进去也一样）之后连接作废。系统取消一次写时
+//! 报零字节，对端却可能已经收到了一截，字节流断在哪里没人知道，只能断开。
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -546,6 +549,7 @@ impl PipeStream {
         )? {
             Transfer::Done(read) => Ok(read),
             Transfer::Shut => Ok(0),
+            Transfer::Cancelled(error) => Err(error),
         }
     }
 
@@ -570,6 +574,13 @@ impl PipeStream {
         )? {
             Transfer::Done(written) => Ok(written),
             Transfer::Shut => Err(io::ErrorKind::BrokenPipe.into()),
+            Transfer::Cancelled(error) => {
+                // 系统取消一次写时报零字节，对端却可能已经收到了一截。字节流断在哪里没人
+                // 知道，再写下去对端会把半截数据和后面的拼在一起，所以这条连接作废：对端
+                // 读完收到的那截就是 EOF，和连接断了一样。
+                self.shutdown(Shutdown::Both)?;
+                Err(error)
+            }
         }
     }
 }
@@ -834,6 +845,9 @@ enum Transfer {
     Done(usize),
     /// 等着的时候本地 shutdown 了这个方向，这次读写取消掉了。
     Shut,
+    /// 超时、非阻塞时没能立刻完成，或等待本身出错，这次读写取消掉了，带着要报的错。
+    /// 取消的读什么也没读走；取消的写不一样，见 `PipeStream::write_bytes`。
+    Cancelled(io::Error),
 }
 
 fn overlapped_transfer(
@@ -884,34 +898,31 @@ fn overlapped_transfer(
     }
     let mut transferred = 0u32;
     let ok = unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, 1) };
-    let error = (ok == 0).then(|| unsafe { GetLastError() });
-    // 传了字节就报字节数，出的错留给下一次读写：取消之前已经读到的数据不能丢，写出去的
-    // 字节也不能当没写。和 std 的 `Read::read`、`Write::write` 一样，报错就是一个字节也
-    // 没传。
-    let Some(error) = error.filter(|_| transferred == 0) else {
+    if ok != 0 {
+        // 取消之前已经完成：数据不能丢。
         return Ok(Transfer::Done(transferred as usize));
-    };
+    }
+    let error = unsafe { GetLastError() };
     if finished || error != ERROR_OPERATION_ABORTED {
         return map_completed_error(error, write).map(Transfer::Done);
-    }
-    if let Some(error) = wait_error {
-        return Err(error);
     }
     if interrupted {
         return Ok(Transfer::Shut);
     }
-    Err(if matches!(wait, Wait::Poll) {
-        io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
-    } else {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            if write {
-                "命名管道写入超时"
-            } else {
-                "命名管道读取超时"
-            },
-        )
-    })
+    Ok(Transfer::Cancelled(wait_error.unwrap_or_else(|| {
+        if matches!(wait, Wait::Poll) {
+            io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
+        } else {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                if write {
+                    "命名管道写入超时"
+                } else {
+                    "命名管道读取超时"
+                },
+            )
+        }
+    })))
 }
 
 fn map_completed_error(error: u32, write: bool) -> io::Result<usize> {
@@ -1296,32 +1307,31 @@ mod tests {
         );
     }
 
-    /// 写超时截断的一次写，报回的字节数要和对端收到的一致：报错就是一个字节也没写进去，
-    /// 和 std 的 `Write::write` 约定一样。
+    /// 写超时截断的一次写，对端可能已经收到了一截，系统却报零字节。字节流断在哪里没人
+    /// 知道，连接要作废：之后的写报 `BrokenPipe`，对端读完收到的那截就是 EOF，哪怕本端
+    /// 还握着这条连接。
     #[test]
-    fn a_write_cut_short_by_its_timeout_reports_what_the_peer_got() {
+    fn a_write_cut_short_by_its_timeout_closes_the_connection() {
         let (_listener, server, client) = connected_pair("partial");
         // 比管道缓冲（64 KiB）大得多，对端不读就写不完。
         let payload = vec![7u8; 1024 * 1024];
         server
             .set_write_timeout(Some(Duration::from_millis(500)))
             .unwrap();
-        let writer = thread::spawn(move || {
-            let written = match (&server).write(&payload) {
-                Ok(written) => written,
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => 0,
-                Err(error) => panic!("写失败：{error}"),
-            };
-            drop(server);
-            written
-        });
+        let writing = server.try_clone().unwrap();
+        let writer =
+            thread::spawn(move || (&writing).write(&payload).map_err(|error| error.kind()));
         // 只读走一部分，剩下的让写超时。
         let mut taken = vec![0u8; 200 * 1024];
         (&client).read_exact(&mut taken).unwrap();
-        let written = writer.join().unwrap();
+        assert_eq!(writer.join().unwrap(), Err(io::ErrorKind::TimedOut));
+        assert_eq!(
+            (&server).write(b"more").unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
         let mut rest = Vec::new();
         (&client).read_to_end(&mut rest).unwrap();
-        assert_eq!(written, taken.len() + rest.len());
+        assert!(taken.len() + rest.len() < 1024 * 1024);
     }
 
     /// 我们作为客户端连上去，服务端只能识别身份、不能冒用：同一用户下别的进程抢先建了

@@ -5,9 +5,10 @@
 //! 命名管道是 Windows 本机进程间通信的正路，Bun / Pi 本来就连守护的这条管道。
 //! `pair()` 的两端都在本进程里，用不着内核对象，见 [`super::memory`]。
 //!
-//! 两种流对外的方法和 Unix 的 `UnixStream` 一致。差别只有一处：命名管道没有半关闭，
-//! `shutdown(Write)` 报 `Unsupported`。连守护的连接不半关闭；要半关闭的 iroh 桥接用的是
-//! `pair()`。
+//! 两种流对外的方法和 Unix 的 `UnixStream` 一致。命名管道有两处差别：没有半关闭，
+//! `shutdown(Write)` 报 `Unsupported`，连守护的连接不半关闭，要半关闭的 iroh 桥接用的是
+//! `pair()`；写超时之后连接作废（见 `smelt_sys::named_pipe`），用到写超时的调用方本来
+//! 就在写失败时断开。
 
 use std::fmt;
 use std::io::{self, Read, Write};
