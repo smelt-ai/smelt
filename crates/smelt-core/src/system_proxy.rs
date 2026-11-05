@@ -19,6 +19,8 @@
 //! - **入口只有一个**：`login_env::apply_login_environment` 铺完用户环境后调这里，所有走它
 //!   起的子进程（Pi、ACP agent、agent 代跑的命令、后台任务、git、安装 CLI）都跟随系统代理，
 //!   规则和浏览器一致：绕过列表里的地址直连。不要在调用点单独再调。
+//!   用户自己打开的内置终端用 portable_pty 起，不是 `Command`，由 smeltd 调
+//!   [`system_proxy_env`] 补，规则相同。
 //! - **绕过列表一起翻译**，并始终带上回环地址：OAuth 回调服务器、内网地址不能被塞进代理。
 //!
 //! 每次起进程现读：用户随时会开关代理工具，缓存会读到过期值。读系统代理是一次注册表 /
@@ -27,6 +29,7 @@
 // 其它平台读不到系统代理，翻译函数只有测试在用。
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
+use std::ffi::OsString;
 use std::process::Command;
 
 const HTTPS_PROXY_VARS: [&str; 2] = ["HTTPS_PROXY", "https_proxy"];
@@ -57,47 +60,56 @@ struct Configured {
 
 /// 子进程环境里缺哪个协议的代理，就按系统代理补哪个。要在命令的环境都设完之后调用。
 pub(crate) fn apply_system_proxy_fallback(command: &mut Command) {
-    let configured = configured(command, |name| std::env::var_os(name));
-    if configured.http && configured.https {
-        return;
-    }
-    let Some(proxy) = read_system_proxy() else {
-        return;
-    };
-    for (name, value) in proxy_env(&proxy, configured) {
+    let env =
+        system_proxy_env(|name| command_env(command, name, &|name: &str| std::env::var_os(name)));
+    for (name, value) in env {
         command.env(name, value);
     }
 }
 
-fn configured(
-    command: &Command,
-    process_env: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> Configured {
-    let all = has_value(command, &ALL_PROXY_VARS, &process_env);
+/// 按系统代理要补的变量。`lookup` 返回子进程最终会拿到的值，`None` 和空串都算没设。
+/// 给不是 `std::process::Command` 起的子进程用（内置终端的 PTY）；`Command` 直接走
+/// `login_env::apply_login_environment`。
+pub fn system_proxy_env(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str, String)> {
+    let configured = configured(&lookup);
+    if configured.http && configured.https {
+        return Vec::new();
+    }
+    let Some(proxy) = read_system_proxy() else {
+        return Vec::new();
+    };
+    proxy_env(&proxy, configured)
+}
+
+fn configured(lookup: &impl Fn(&str) -> Option<OsString>) -> Configured {
+    let has = |names: &[&str]| {
+        names
+            .iter()
+            .any(|name| lookup(name).is_some_and(|value| !value.is_empty()))
+    };
+    let all = has(&ALL_PROXY_VARS);
     Configured {
-        http: all || has_value(command, &HTTP_PROXY_VARS, &process_env),
-        https: all || has_value(command, &HTTPS_PROXY_VARS, &process_env),
-        no_proxy: has_value(command, &NO_PROXY_VARS, &process_env),
+        http: all || has(&HTTP_PROXY_VARS),
+        https: all || has(&HTTPS_PROXY_VARS),
+        no_proxy: has(&NO_PROXY_VARS),
     }
 }
 
-/// 子进程最终会不会拿到 `names` 里某个非空变量：命令上显式设的优先，显式删掉的算没有，
-/// 其余继承父进程。Windows 环境变量名不分大小写，其它平台按原样比较。
-fn has_value(
+/// `Command` 起的子进程最终拿到的值：命令上显式设的优先，显式删掉的算没有，其余继承父进程。
+/// Windows 环境变量名不分大小写，其它平台按原样比较。
+fn command_env(
     command: &Command,
-    names: &[&str],
-    process_env: &impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> bool {
-    names.iter().any(|name| {
-        let explicit = command
-            .get_envs()
-            .filter(|(key, _)| same_var(&key.to_string_lossy(), name))
-            .last();
-        match explicit {
-            Some((_, value)) => value.is_some_and(|value| !value.is_empty()),
-            None => process_env(name).is_some_and(|value| !value.is_empty()),
-        }
-    })
+    name: &str,
+    process_env: &impl Fn(&str) -> Option<OsString>,
+) -> Option<OsString> {
+    let explicit = command
+        .get_envs()
+        .filter(|(key, _)| same_var(&key.to_string_lossy(), name))
+        .last();
+    match explicit {
+        Some((_, value)) => value.map(ToOwned::to_owned),
+        None => process_env(name),
+    }
 }
 
 fn same_var(a: &str, b: &str) -> bool {
@@ -371,7 +383,13 @@ fn read_system_proxy() -> Option<SystemProxy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
+
+    fn configured_for(
+        command: &Command,
+        process_env: impl Fn(&str) -> Option<OsString>,
+    ) -> Configured {
+        configured(&|name: &str| command_env(command, name, &process_env))
+    }
 
     fn no_process_env(_: &str) -> Option<OsString> {
         None
@@ -473,7 +491,7 @@ mod tests {
     fn http_proxy_alone_still_gets_https_from_the_system() {
         let mut command = Command::new("x");
         command.env("HTTP_PROXY", "http://mine:1");
-        let configured = configured(&command, no_process_env);
+        let configured = configured_for(&command, no_process_env);
         assert_eq!(
             configured,
             Configured {
@@ -511,7 +529,7 @@ mod tests {
     #[test]
     fn all_proxy_covers_both_schemes() {
         let command = Command::new("x");
-        let configured = configured(&command, |name| {
+        let configured = configured_for(&command, |name| {
             (name == "ALL_PROXY").then(|| OsString::from("socks5://mine:1"))
         });
         assert!(configured.http && configured.https);
@@ -521,7 +539,7 @@ mod tests {
     fn explicit_https_proxy_on_command_counts_as_configured() {
         let mut command = Command::new("x");
         command.env("https_proxy", "http://mine:1");
-        let configured = configured(&command, no_process_env);
+        let configured = configured_for(&command, no_process_env);
         assert!(configured.https && !configured.http);
     }
 
@@ -529,7 +547,7 @@ mod tests {
     fn removed_or_empty_proxy_does_not_count() {
         let mut command = Command::new("x");
         command.env_remove("HTTPS_PROXY").env("HTTP_PROXY", "");
-        let configured = configured(&command, |name| {
+        let configured = configured_for(&command, |name| {
             (name == "HTTPS_PROXY").then(|| OsString::from("http://inherited:1"))
         });
         assert_eq!(configured, Configured::default());
