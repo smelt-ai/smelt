@@ -15,7 +15,7 @@ fn history_rename_writes_metadata_overlay() {
     ));
     let _ = std::fs::create_dir_all(&dir);
     unsafe { std::env::set_var("SMELT_SESSION_METADATA_DIR", &dir) };
-    let (server, mut client) = UnixStream::pair().unwrap();
+    let (server, mut client) = RuntimeStream::pair().unwrap();
     writeln!(
         client,
         "{}",

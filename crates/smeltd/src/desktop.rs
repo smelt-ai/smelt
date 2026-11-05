@@ -143,7 +143,7 @@ fn type_text_command(display: &str, text: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_runtime_client::UnixStream;
+    use smelt_runtime_client::RuntimeStream;
     use std::net::TcpListener;
 
     /// 假 VNC：把收到的字节原样回过去。
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn bytes_right_after_the_request_line_reach_the_vnc_server() {
         let endpoint = echo_vnc();
-        let (mut client, server) = UnixStream::pair().unwrap();
+        let (mut client, server) = RuntimeStream::pair().unwrap();
         client
             .write_all(b"{\"op\":\"desktop_attach\"}\nRFB 003.008\n")
             .unwrap();
@@ -204,7 +204,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = listener.local_addr().unwrap().to_string();
         drop(listener);
-        let (mut client, server) = UnixStream::pair().unwrap();
+        let (mut client, server) = RuntimeStream::pair().unwrap();
         std::thread::spawn(move || {
             let reader = BufReader::new(server.try_clone().unwrap());
             handle_desktop_attach(server, reader, &endpoint);

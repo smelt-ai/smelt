@@ -1161,17 +1161,20 @@ pub fn restart_daemon() {
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
     let stopped = smelt_client::daemon_stop::stop_local_daemon();
     // 老守护的 version 响应没有 pid，停不停得掉只能看 socket。Unix 用 lsof 按 sock 反查。
-    // Windows 没有这条路：只删残留 sock，等下次拉起。
     #[cfg(unix)]
-    if !stopped && local_runtime().connect().is_ok() {
-        force_kill_socket_owner(&path);
+    {
+        if !stopped && local_runtime().connect().is_ok() {
+            force_kill_socket_owner(&path);
+        }
+        // 残留 sock 文件会让下一次 connect 误判/卡住；尽量清掉。
+        if local_runtime().connect().is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
     }
+    // Windows 没有 sock 文件，监听的是命名管道，守护一退出就没了；也没有按监听反查进程
+    // 的办法，等下次拉起。
     #[cfg(not(unix))]
-    let _ = stopped;
-    // 残留 sock 文件会让下一次 connect 误判/卡住；尽量清掉。
-    if local_runtime().connect().is_err() {
-        let _ = std::fs::remove_file(&path);
-    }
+    let _ = (stopped, path);
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
 }
 

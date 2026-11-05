@@ -4287,7 +4287,7 @@ mod snapshot_link_tests {
             lifecycle: SessionLock::new(()),
             value: make_acp_session("acp-burst", None, None, None),
         });
-        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let (mut server, mut client) = RuntimeStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();
         let chunk = vec![b'x'; 8 * 1024];
         loop {

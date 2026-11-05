@@ -12,7 +12,7 @@ fn call_automation(
     event_hub: &EventHubHandle,
     request: serde_json::Value,
 ) -> serde_json::Value {
-    let (server, mut client) = UnixStream::pair().unwrap();
+    let (server, mut client) = RuntimeStream::pair().unwrap();
     writeln!(client, "{request}").unwrap();
     handle_conn(
         server,

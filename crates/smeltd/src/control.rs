@@ -1474,7 +1474,7 @@ pub(crate) fn handle_control<C: ClientSocket + crate::protocol::PeerSource>(
 
 #[cfg(test)]
 mod tests {
-    use smelt_runtime_client::UnixStream;
+    use smelt_runtime_client::RuntimeStream;
     use std::io::{BufRead, BufReader};
 
     use smelt_runtime_client::protocol::control::{
@@ -1499,7 +1499,7 @@ mod tests {
             .filter(|(key, _)| key.as_str() != "op")
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
 
         handle_control(
             server,
@@ -1636,7 +1636,7 @@ mod tests {
         let acp_sessions = super::super::new_test_acp_sessions();
         let event_hub = super::super::new_event_hub();
         let automations = smelt_core::automation_store::new_automation_store();
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
 
         handle_control(
             server,
@@ -1671,7 +1671,7 @@ mod tests {
         let acp_sessions = super::super::new_test_acp_sessions();
         let event_hub = super::super::new_event_hub();
         let automations = smelt_core::automation_store::new_automation_store();
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
 
         handle_control(
             server,

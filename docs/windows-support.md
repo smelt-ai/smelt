@@ -3,7 +3,7 @@
 对应 issue [#74](https://github.com/smelt-ai/smelt/issues/74)。两步都已落地：
 
 1. Windows 桌面端连远程运行时（Linux / macOS 上的 smeltd）。
-2. Windows 本机跑 smeltd：冷启动、Rust 客户端走 AF_UNIX、Bun 走命名管道、升级即重启。
+2. Windows 本机跑 smeltd：冷启动、本机连接一律走命名管道、升级即重启。
 
 数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名。发版起初是 zip 便携包，后来换成按用户安装的 Inno Setup 安装程序（`scripts/windows-installer.iss`）。
 
@@ -41,16 +41,18 @@
 
 1. smelt-runtime-client 新增 `stream` 模块，定义 `RuntimeStream` 和 `stream_pair()`：
    - Unix：`std::os::unix::net::UnixStream` 的类型别名，行为不变。
-   - Windows：`stream/windows.rs` 自己的 `UnixStream` / `UnixListener`（系统 AF_UNIX，Windows 10 1803 起支持），提供 `pair`、`connect`、`try_clone`、`set_read_timeout`、`set_write_timeout`、`set_nonblocking`、`shutdown`、`incoming`，和 std 的语义一致。
-   - 不在驱动上挂任何阻塞调用：afunix.sys 在阻塞 `recv` 刚挂上、对端恰好写入或关闭时偶尔丢掉唤醒，读一直挂到超时（10060）；本地 `shutdown` 也叫不醒另一条线程里阻塞的 `recv`。所以套接字建出来就是非阻塞的，读、写、accept、connect 遇到 WouldBlock 都用 AFD poll（WSAPoll 底下那层，可取消）等就绪，和本地 `shutdown` 的事件、读写超时一起等。最早用的 `uds_windows` 是阻塞实现，已去掉。
+   - Windows：`stream/windows.rs` 的 `RuntimeStream` / `RuntimeListener`，提供 `pair`、`connect`、`try_clone`、`set_read_timeout`、`set_write_timeout`、`set_nonblocking`、`shutdown`、`incoming`，和 std 的语义一致。`connect` / `bind` 走命名管道（`smelt_sys::named_pipe`），`pair()` 是进程内的内存流（`stream/memory.rs`）。
+   - 最早用的是系统 AF_UNIX（先是 `uds_windows`，后来自己包的非阻塞套接字加 AFD poll）。11 月撤掉：afunix.sys 在 Windows 10 22H2 上有内核里的释放后再用，桌面反复建连、断开时整机蓝屏（0x3B，崩在驱动里一次引用计数递减上，[#251](https://github.com/smelt-ai/smelt/issues/251)）。用户态绕不开驱动的缺陷，只能不走它。
+   - 命名管道没有半关闭，`shutdown(Write)` 报 `Unsupported`；`shutdown(Both)` 等手上的读写退出就关句柄，对端读完已写的数据再读到 EOF，和套接字的 FIN 一样（不用 `DisconnectNamedPipe`，它会丢掉对端没读的数据）。连守护的连接不半关闭；要半关闭的 iroh 桥接用 `pair()`。
 2. 所有签名里的 `UnixStream` 换成 `RuntimeStream`，是机械替换。
-3. iroh 搬运：Unix 保持现有 tokio 实现。Windows 上 AF_UNIX 套接字进不了 tokio，`bridge_tracked` 改为每个方向一条线程：一条阻塞读本地端、经 `Handle::block_on` 写 QUIC `SendStream`，另一条反过来。语义和现有 `pump` 一致：一方读到 EOF 只半关闭对应方向，另一方向继续；任一方向出错，两端一起关。
+3. iroh 搬运：Unix 保持现有 tokio 实现。Windows 上 `pair()` 的内存流进不了 tokio，`bridge_tracked` 改为每个方向一条线程：一条阻塞读本地端、经 `Handle::block_on` 写 QUIC `SendStream`，另一条反过来。语义和现有 `pump` 一致：一方读到 EOF 只半关闭对应方向，另一方向继续；任一方向出错，两端一起关。
    - 每条远程流两条线程。桌面同时开着的流是事件订阅加每个打开的终端、对话各一条，几十条量级，可以接受。
    - `runtime.rs` 里现有的桥接测试在 Windows CI 上跑同一套。
 
 没选的做法：
 
-- **回环 TCP 对**：拿不到对端进程，第 2 步本机通信不能用它（见第 2 步）。第 1 步用 AF_UNIX，第 2 步若也选 AF_UNIX，就不必再加一层桥。
+- **回环 TCP 对**：拿不到对端进程，第 2 步本机通信不能用它（见第 2 步）。
+- **AF_UNIX**：用过，因为 afunix.sys 的蓝屏撤掉，见上。
 - **trait object**：调用方要 `try_clone` 出读写两端，trait object 得自己补这套能力，只多一层间接。
 
 影响面：smelt-mobile 走 Unix 分支，行为不变，但它依赖的签名改了，要跑移动端测试。
@@ -146,9 +148,11 @@
 
 已实现。Unix 行为不变。Windows 是一套真的本机运行时，不是远程客户端的空壳。
 
-- **IPC**。Rust 客户端（桌面、`smelt-notify`、runtime client）继续连 AF_UNIX 文件 `~/.smelt/smeltd.sock`。Windows 上这个类型是 `smelt_runtime_client::stream` 自己包的 AF_UNIX。守护的 accept 循环是同步线程（`incoming` / `accept`），不把监听塞进 tokio，所以不要求 tokio 的 Windows AF_UNIX。Bun / Node 的 `net.connect(path)` 在 Windows 上连的是命名管道，不是这个文件。第二条监听只在 Windows 上建：`PipeListener::bind(user_pipe_path("daemon"))`，accept 之后进同一个连接处理函数。不把管道桥进 AF_UNIX，否则对端 pid 会变成 smeltd 自己，鉴权直接拒绝。交给 Bun / Pi / shell 的 `SMELT_SOCK` 在 Windows 上是 `\\.\pipe\smelt-<sid>-daemon` 这种管道名；Rust 代码连守护仍然用 sock 文件。
-- **鉴权**。macOS 的 codesign 路径不动。Windows 走同一用户 SID：pid 来自 AF_UNIX 的 `SIO_AF_UNIX_GETPEERPID` 或管道的 `GetNamedPipeClientProcessId`，exe 来自 `process_executable`，必须 `same_user_as_current`，并且不能是守护自己的 pid。basename 和 `"smelt"` 比的时候去掉一个结尾的 `.exe`、大小写不敏感，不另加一行表，免得 macOS 的 signing-id 列分叉。路径要和守护目录旁边的 `smelt.exe` 相同，或者和 `SMELT_BUNDLE_DIR`（桌面拉起守护时写成 GUI exe 所在目录）旁边的 `smelt.exe` 相同。托管映像是 `~/.smelt/bin/smeltd-<指纹>.exe`，GUI 在安装目录，只认守护目录的兄弟会把桌面拒掉。不做 Authenticode。
-- **升级**。不交接 fd（`handoff_v2` 已删）。升级先拨启动名，再优雅停机：收割子进程、回写未完成回合、WAL checkpoint，最后回执。Unix 回执后在本进程里 `exec` 新映像；Windows 不能 `exec`，拉起目标映像当接班进程（`SMELTD_PREDECESSOR_PID` 告诉它前任是谁），接班进程等前任退出、放掉监听再绑定。没有桌面的运行时（推送升级、空闲自升级）也能换上新版。终端会话和进行中的回合会中断，历史还在。
+- **IPC**。守护只有一条监听：`smeltd.sock` 这个路径对应的命名管道 `\\.\pipe\smelt-<sid>-daemon-<路径哈希>`（`daemon_pipe_path`），DACL 只给当前用户、拒绝远程客户端。Rust 客户端（桌面、`smelt-notify`、runtime client）照旧拿 sock 路径调 `RuntimeStream::connect`，Windows 上换成管道名去连，不建这个文件；交给 Bun / Pi / shell 的 `SMELT_SOCK` 直接是管道名，Node 的 `net.connect(path)` 只认它。守护的 accept 循环是同步线程，不把监听塞进 tokio。
+- **单实例**。不能像 Unix 那样「连得上就是有守护」：前任退出后，它的客户端还没关的那几端让管道名继续存在、实例都在忙。所以守护活着就一直握着 `smeltd.instance.lock`（进程没了系统替它放掉），拿到锁才接手管道名（`bind_taking_over`）。停机在回执前叫停监听、放掉这把锁，接班的守护才拿得到。
+- **排队**。管道没有套接字那样的 backlog，只有正在等客户端的那一个实例能连。`PipeListener` 在 `bind` 时起一条接受线程，不停地建实例、等客户端，连上的放进有界队列（64 条），`accept` 从队列里取。守护绑好管道就报就绪，接受循环等初始化做完才起来，中间连上来的客户端照样排上队。叫停时队列里还没取走的连接一起关掉，客户端去重连接班的守护。
+- **鉴权**。macOS 的 codesign 路径不动。Windows 走同一用户 SID：pid 来自管道的 `GetNamedPipeClientProcessId`，exe 来自 `process_executable`，必须 `same_user_as_current`，并且不能是守护自己的 pid。basename 和 `"smelt"` 比的时候去掉一个结尾的 `.exe`、大小写不敏感，不另加一行表，免得 macOS 的 signing-id 列分叉。路径要和守护目录旁边的 `smelt.exe` 相同，或者和 `SMELT_BUNDLE_DIR`（桌面拉起守护时写成 GUI exe 所在目录）旁边的 `smelt.exe` 相同。托管映像是 `~/.smelt/bin/smeltd-<指纹>.exe`，GUI 在安装目录，只认守护目录的兄弟会把桌面拒掉。不做 Authenticode。
+- **升级**。不交接 fd（`handoff_v2` 已删）。升级先拨启动名，再优雅停机：收割子进程、回写未完成回合、WAL checkpoint，最后回执。Unix 回执后在本进程里 `exec` 新映像；Windows 不能 `exec`，拉起目标映像当接班进程（`SMELTD_PREDECESSOR_PID` 告诉它前任是谁），接班进程等前任退出、放掉监听再绑定；30 秒还没退就是卡在退出路上，结束它再绑（只认创建时间早于自己的那个 pid，不会误杀复用了 pid 的进程）。不结束的话，旧版本的前任停机时不关 Bun 那条管道的监听，会和接班进程挂在同一个管道名下。没有桌面的运行时（推送升级、空闲自升级）也能换上新版。终端会话和进行中的回合会中断，历史还在。
 - **守护映像**。不建符号链接（那要额外权限）。发布是复制或硬链接到 `smeltd-<指纹>.exe`，启动名是旁边的 `smelt-image-v1` 指针文件。`launch_executable` 读出真正要执行的那份。
 - **Bun**。`scripts/fetch-bun.sh` 在 Windows 上取 `bun-windows-x64.zip`（Bun 1.4.4），装成 `bin/bun.exe`（硬链接或复制）。`agent/scripts/build-smelt-agent.sh` 编出 `smelt-agent.exe`。
 - **Shell 和进程**。交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`。没有参数的自动化 Shell 脚本同样走 `cmd.exe /d /c`，不调用 bash。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。ConPTY 不能 `CREATE_SUSPENDED`，shell 起来之后立刻 `attach_running`。PTY 尺寸走 master 的 `resize`，不用 `as_raw_fd`。
@@ -169,7 +173,7 @@
 
 原先写成「未定」的，按上面落地：
 
-- 本机通信是 Rust AF_UNIX（自己包的非阻塞套接字，等待走 AFD poll，sock 文件）加 Bun 命名管道。不是回环 TCP，也不要求 tokio AF_UNIX。
+- 本机通信一律是命名管道，Rust 和 Bun 连同一条。不是回环 TCP，也不用 AF_UNIX（见 D1）。
 - 鉴权是同用户 SID、peer exe 的 basename、守护目录或 `SMELT_BUNDLE_DIR` 的兄弟。没有 Authenticode。
 - 交接不做。升级重启，终端会话丢失。
 - 数据目录沿用 `%USERPROFILE%\.smelt`。

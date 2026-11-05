@@ -32,7 +32,7 @@ fn decode_frame(mirror: &mut smelt_core::acp_wire::FrameMirror, line: &str) -> s
     }
 }
 
-fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> AcpSnapshotLink {
+fn test_acp_attachment(sess: &Arc<AcpSession>, stream: RuntimeStream, id: &str) -> AcpSnapshotLink {
     let tool_debug_generation_sent = sess.reduced.lock().tool_debug_generation;
     let encode_sess = Arc::downgrade(sess);
     let detach_sess = Arc::downgrade(sess);
@@ -223,7 +223,7 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
             run_id: "run-current".into(),
         });
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     let sessions_for_open = Arc::clone(&acp_sessions);
     let worker = thread::spawn(move || {
@@ -267,7 +267,7 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
 }
 
 /// 读到含 `needle` 的一行为止；连接被关（EOF）或超时都算没读到。
-fn read_line_containing(reader: &mut BufReader<UnixStream>, needle: &str) -> bool {
+fn read_line_containing(reader: &mut BufReader<RuntimeStream>, needle: &str) -> bool {
     let mut line = String::new();
     loop {
         line.clear();
@@ -305,7 +305,7 @@ fn second_control_client_does_not_evict_the_first() {
     });
 
     let open = |acp_sessions: &AcpSessions| {
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -384,7 +384,7 @@ fn reopening_live_session_adopts_client_binding_when_unknown() {
     });
     *slot.value.conversation_binding.lock() = None;
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     let sessions_for_open = Arc::clone(&acp_sessions);
     let worker = thread::spawn(move || {
@@ -448,7 +448,7 @@ fn unknown_conversation_binding_is_not_mirrored_as_direct() {
     });
     *slot.value.conversation_binding.lock() = None;
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     let sessions_for_open = Arc::clone(&acp_sessions);
     let worker = thread::spawn(move || {
@@ -501,7 +501,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
         supports_rewind: false,
     });
 
-    let (control_server, _control_client) = UnixStream::pair().unwrap();
+    let (control_server, _control_client) = RuntimeStream::pair().unwrap();
     let control_fd = control_server.as_raw_fd();
     slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
@@ -517,7 +517,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
         .unwrap(),
     );
 
-    let (action_server, action_client) = UnixStream::pair().unwrap();
+    let (action_server, action_client) = RuntimeStream::pair().unwrap();
     handle_acp_action(
         action_server,
         &serde_json::json!({
@@ -580,7 +580,7 @@ fn submit_input_applies_pending_model_before_the_prompt() {
         supports_rewind: false,
     });
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_submit_input(
         server,
         &serde_json::json!({
@@ -640,7 +640,7 @@ fn switching_model_does_not_stop_the_current_turn() {
     });
     slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_submit_input(
         server,
         &serde_json::json!({
@@ -704,7 +704,7 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
         supports_rewind: false,
     });
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_action(
         server,
         &serde_json::json!({
@@ -721,7 +721,7 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
     assert_eq!(response["error"], "automation Run input is daemon-owned");
     assert!(cmd_rx.try_recv().is_err());
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_action(
         server,
         &serde_json::json!({
@@ -762,7 +762,7 @@ fn automation_run_rejects_direct_prompt_actions_but_keeps_approval_actions() {
             )),
             raw_request_line: None,
         });
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_action(
         server,
         &serde_json::json!({
@@ -857,7 +857,7 @@ fn automation_run_keeps_elicitation_actions() {
         raw_request_line: None,
     });
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_action(
         server,
         &serde_json::json!({
@@ -2346,7 +2346,7 @@ fn one_shot_action_rejects_invalid_prompt_shape() {
     acp_sessions.reserve_with("acp-action", || {
         make_acp_session_value("acp-action", AcpSessionState::default())
     });
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
 
     handle_acp_action(
         server,
@@ -2382,7 +2382,7 @@ fn one_shot_action_from_a_newer_client_reports_a_version_gap() {
     acp_sessions.reserve_with("acp-action", || {
         make_acp_session_value("acp-action", AcpSessionState::default())
     });
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
 
     handle_acp_action(
         server,
@@ -2406,7 +2406,7 @@ fn one_shot_action_from_a_newer_client_reports_a_version_gap() {
 #[test]
 fn skills_on_a_session_that_is_not_running_are_reported_as_unsupported() {
     let acp_sessions = new_test_acp_sessions();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
 
     handle_acp_skills(
         server,
@@ -2432,7 +2432,7 @@ fn skills_are_only_a_pi_concept() {
             Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"));
         session
     });
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
 
     handle_acp_skills(
         server,
@@ -2471,7 +2471,7 @@ fn pi_skills_come_from_the_launch_spec_plugin_args() {
         );
         session
     });
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
 
     handle_acp_skills(server, &serde_json::json!({"id": "acp-pi"}), &acp_sessions);
 
@@ -2487,7 +2487,7 @@ fn pi_skills_come_from_the_launch_spec_plugin_args() {
     std::fs::remove_dir_all(&temp).ok();
 }
 
-fn read_watch_unavailable(client: UnixStream) -> String {
+fn read_watch_unavailable(client: RuntimeStream) -> String {
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -2531,7 +2531,7 @@ fn subscribe_conversation_wake(subscribers: &EventHubHandle) -> smelt_event_bus:
 #[test]
 fn watch_on_unknown_session_reports_unavailable_instead_of_silently_closing() {
     let acp_sessions = new_test_acp_sessions();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     handle_acp_watch(
         server,
@@ -2548,7 +2548,7 @@ fn watch_on_unknown_session_reports_unavailable_instead_of_silently_closing() {
 #[test]
 fn watch_on_dormant_desktop_conversation_without_desktop_fails_fast() {
     let acp_sessions = new_test_acp_sessions();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     let started = Instant::now();
     handle_acp_watch(
@@ -2571,7 +2571,7 @@ fn watch_on_dormant_desktop_conversation_without_desktop_fails_fast() {
 #[test]
 fn submit_to_dormant_desktop_conversation_asks_the_desktop_and_fails_fast_without_it() {
     let acp_sessions = new_test_acp_sessions();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let started = Instant::now();
     handle_acp_submit_input(
         server,
@@ -2601,7 +2601,7 @@ fn watch_on_dormant_desktop_conversation_wakes_desktop_then_attaches() {
     let wake_requests = subscribe_conversation_wake(&subscribers);
     let directory = directory_with_acp("acp-dormant");
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -2663,7 +2663,7 @@ fn watch_delivers_initial_snapshot_matching_to_snapshot() {
     let acp_sessions = new_test_acp_sessions();
     acp_sessions.reserve_with("acp-1", || make_acp_session_value("acp-1", reduced));
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     let h = thread::spawn(move || {
         handle_acp_watch(
@@ -2706,7 +2706,7 @@ fn watch_registration_is_serialized_with_snapshot_push() {
     });
     let mut reduced_guard = slot.value.reduced.lock();
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -2773,7 +2773,7 @@ fn bounded_acp_snapshot_reads_only_the_requested_older_page() {
         make_acp_session_value("acp-history", reduced)
     });
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_snapshot(
         server,
         &serde_json::json!({
@@ -2796,7 +2796,7 @@ fn bounded_acp_snapshot_reads_only_the_requested_older_page() {
 #[test]
 fn missing_acp_snapshot_reports_that_the_session_is_gone() {
     let acp_sessions = new_test_acp_sessions();
-    let (server, mut client) = UnixStream::pair().unwrap();
+    let (server, mut client) = RuntimeStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -2848,7 +2848,7 @@ fn acp_snapshot_without_debug_omits_the_debug_sidecars() {
         make_acp_session_value("acp-no-debug", reduced_with_debug_sidecars())
     });
     let read = |request: serde_json::Value| {
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
         handle_acp_snapshot(server, &request, &acp_sessions, &new_event_hub());
         let mut line = String::new();
         BufReader::new(client).read_line(&mut line).unwrap();
@@ -2874,7 +2874,7 @@ fn watch_without_debug_never_streams_the_debug_sidecars() {
         make_acp_session_value("acp-watch-lean", reduced_with_debug_sidecars())
     });
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -2918,8 +2918,8 @@ fn watch_without_debug_never_streams_the_debug_sidecars() {
 fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
     let sess = make_acp_session("acp-2", AcpSessionState::default());
 
-    let (c_server, c_client) = UnixStream::pair().unwrap();
-    let (w_server, w_client) = UnixStream::pair().unwrap();
+    let (c_server, c_client) = RuntimeStream::pair().unwrap();
+    let (w_server, w_client) = RuntimeStream::pair().unwrap();
     // 对端 close 的传播是异步的：紧接着 write 可能在关闭生效前成功（socket
     // 缓冲为空时数据直接进缓冲），client 就不会被摘掉。clone 一个探针同步等
     // EOF——对端读端全关后，探针 read 必返回 0，之后 c_server 的 write 才
@@ -3037,7 +3037,7 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
         ..smelt_core::acp_session::RuntimeDebug::default()
     };
     let sess = make_acp_session("acp-runtime-debug-wire", reduced);
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     sess.out
         .lock()
         .clients
@@ -3080,7 +3080,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
         });
     }
     let sess = make_acp_session("acp-parallel", reduced);
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     sess.out
         .lock()
         .clients
@@ -3128,7 +3128,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
         reduced.phase = DaemonPhase::Thinking;
         reduced.turn_started_at_ms = Some(1);
     }
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
@@ -3193,7 +3193,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
         .lock()
         .merge_hosted_snapshot(host.to_snapshot(false))
         .unwrap();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
@@ -3262,7 +3262,7 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
         .lock()
         .merge_hosted_snapshot(host.to_snapshot(false))
         .unwrap();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
@@ -3350,7 +3350,7 @@ fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_i
 #[test]
 fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     let sess = make_acp_session("acp-tool-debug", AcpSessionState::default());
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     sess.out
         .lock()
         .clients
@@ -3405,7 +3405,7 @@ fn kill_removes_session_and_closes_connections() {
         make_acp_session_value("acp-3", AcpSessionState::default())
     });
 
-    let (c_server, c_client) = UnixStream::pair().unwrap();
+    let (c_server, c_client) = RuntimeStream::pair().unwrap();
     slot.value.out.lock().clients.push(
         acp_snapshot_link_for_slot(
             &slot,
@@ -3420,7 +3420,7 @@ fn kill_removes_session_and_closes_connections() {
         .unwrap(),
     );
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_kill(
         server,
         &serde_json::json!({"id": "acp-3"}),
@@ -3460,7 +3460,7 @@ fn kill_removes_session_and_closes_connections() {
 fn kill_unknown_session_is_a_harmless_no_op() {
     let acp_sessions = new_test_acp_sessions();
     let subscribers = new_event_hub();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_kill(
         server,
         &serde_json::json!({"id": "acp-ghost"}),
@@ -3483,7 +3483,7 @@ fn open_acp_session_once(
     acp_sessions: &AcpSessions,
     event_hub: &EventHubHandle,
 ) -> Arc<acp_registry::AcpSlot<AcpSession>> {
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     let acp_sessions2 = Arc::clone(acp_sessions);
     let subscribers2 = Arc::clone(event_hub);
@@ -3553,7 +3553,7 @@ fn kill_does_not_unpublish_until_lifecycle_is_free() {
     let lifecycle = old.lifecycle.lock();
     let registry_for_kill = Arc::clone(&acp_sessions);
     let subscribers = new_event_hub();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let killer = thread::spawn(move || {
         handle_acp_kill(
             server,
@@ -3590,7 +3590,7 @@ fn open_after_kill_creates_a_fresh_slot() {
         make_acp_session_value("acp-open-kill", AcpSessionState::default())
     });
 
-    let (kill_server, kill_client) = UnixStream::pair().unwrap();
+    let (kill_server, kill_client) = RuntimeStream::pair().unwrap();
     handle_acp_kill(
         kill_server,
         &serde_json::json!({"id": "acp-open-kill"}),
@@ -3675,7 +3675,7 @@ fn unreaped_retry_proves_without_killing_strangers() {
 
 #[test]
 fn upgrade_rejects_a_missing_binary_without_waiting_for_idle() {
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_upgrade(
         server,
         &serde_json::json!({"op": "upgrade", "exe": "/no/such/smeltd-upgrade-target"}),
@@ -3987,7 +3987,7 @@ fn acp_open_request_rejects_legacy_cmd() {
 
 #[test]
 fn acp_open_invalid_request_still_returns_ended_snapshot() {
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
     let acp_sessions: AcpSessions =
         Arc::new(acp_registry::AcpRegistry::new(Arc::new(RwLock::new(()))));
@@ -4481,7 +4481,7 @@ fn automation_binding_rejects_rewind() {
         supports_rewind: true,
     });
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_action(
         server,
         &serde_json::json!({
@@ -4498,7 +4498,7 @@ fn automation_binding_rejects_rewind() {
     assert_eq!(response["error"], "automation Run action is daemon-owned");
     assert!(cmd_rx.try_recv().is_err());
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_action(
         server,
         &serde_json::json!({
@@ -4564,7 +4564,7 @@ fn projected_entries(entries: &[AcpEntry], image_refs: bool) -> Vec<serde_json::
 /// 读一帧，按客户端的做法把它合进手里那份条目。返回这一帧的原始字节数、是不是增量帧、
 /// 还原出的帧。
 fn read_into_view(
-    lines: &mut BufReader<UnixStream>,
+    lines: &mut BufReader<RuntimeStream>,
     mirror: &mut smelt_core::acp_wire::FrameMirror,
     view: &mut Vec<serde_json::Value>,
 ) -> (usize, bool, serde_json::Value) {
@@ -4610,7 +4610,7 @@ fn watch_frames_follow_the_image_projection(image_refs: bool) {
     let acp_sessions = new_test_acp_sessions();
     let (slot, _) = acp_sessions.reserve_with(id, || make_acp_session_value(id, reduced));
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -4816,7 +4816,7 @@ fn conversation_image_finds_the_original_by_reference() {
     assert_eq!(error.code, ControlErrorCode::NotFound);
 
     // 一次性翻页同样只给引用，引用能直接拿来取图。
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     handle_acp_snapshot(
         server,
         &serde_json::json!({"id": "acp-image", "image_refs": true}),

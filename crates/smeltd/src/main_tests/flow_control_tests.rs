@@ -18,7 +18,7 @@ fn pump(sess: &Session, parser: &mut Processor, bytes: &[u8]) {
 }
 
 /// 读出 socket 里眼下所有的字节。
-fn read_available(stream: &mut UnixStream) -> Vec<u8> {
+fn read_available(stream: &mut RuntimeStream) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_millis(300)))
         .unwrap();
@@ -50,7 +50,7 @@ fn text_lines(term: &Term<VoidListener>) -> Vec<String> {
 
 /// 模拟桌面客户端：解析收到的字节，按累计字节数回确认。
 struct Client {
-    stream: UnixStream,
+    stream: RuntimeStream,
     term: Term<VoidListener>,
     parser: Processor,
     consumed: u64,
@@ -75,7 +75,7 @@ impl Client {
 #[test]
 fn a_client_that_falls_behind_is_coalesced_instead_of_detached() {
     let sess = make_dummy_session(ROWS, COLS);
-    let (server, stream) = UnixStream::pair().unwrap();
+    let (server, stream) = RuntimeStream::pair().unwrap();
     let keyframe = {
         let _output_gate = sess.output_gate.lock().unwrap();
         terminal_keyframe(&sess, KeyframeNeed::Full, false)
