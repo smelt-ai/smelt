@@ -149,8 +149,24 @@ mod tests {
         std::fs::remove_dir_all(home).ok();
     }
 
+    // 只用本机回环：不碰 DNS 和外网。fake-ip 代理（Clash / Surge 的 TUN 模式）会把
+    // 任何域名都解析成 198.18.x.x 并接下连接，拿 `.invalid` 测「连不上」在那种机器上必挂。
+
     #[test]
-    fn an_unresolvable_host_is_unreachable() {
-        assert!(!reachable("smelt-mirror-probe.invalid", 443));
+    fn a_closed_port_is_unreachable() {
+        // 占一个端口再放掉，此刻没有人在听，建连立即被拒。
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(!reachable("127.0.0.1", port));
+    }
+
+    #[test]
+    fn a_listening_port_is_reachable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(reachable("127.0.0.1", port));
     }
 }
