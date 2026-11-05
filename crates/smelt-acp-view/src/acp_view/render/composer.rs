@@ -28,7 +28,7 @@ fn queue_row_id<'a>(
 const CAPABILITIES_PANEL_WIDTH: f32 = 320.;
 
 /// 能力弹层：这场对话加载的技能和连的 MCP，按类型分组，底部去改勾选。勾选跟着智能体
-/// 定义、启动时就定了，对话里改不了，所以行都只读。
+/// 定义、启动时就定了，对话里改不了。点技能行把 `/skill:名字` 写进输入框；MCP 行只读。
 fn capabilities_panel(
     skills: &[smelt_model::pi_plugin_catalog::PiPlugin],
     mcp_servers: &[smelt_model::pi_mcp::PiMcpServer],
@@ -48,6 +48,9 @@ fn capabilities_panel(
         );
     } else {
         let skill_rows = skills.iter().map(|skill| {
+            let name = skill.name.clone();
+            let view = view.clone();
+            let popover = popover.clone();
             capability_row(
                 skill.name.clone(),
                 // 描述可能是多行的 frontmatter，压成一行再截断。
@@ -58,6 +61,17 @@ fn capabilities_panel(
                     .join(" "),
                 Some(skill.origin.clone()),
             )
+            .id(gpui::ElementId::from((
+                gpui::ElementId::from("acp-capability-skill"),
+                skill.id.clone(),
+            )))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|row| row.bg(ui_theme::overlay(0x14)))
+            .on_click(move |_, window, cx| {
+                let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
+                let _ = view.update(cx, |view, cx| view.use_skill(&name, window, cx));
+            })
         });
         let mcp_rows = mcp_servers
             .iter()
@@ -123,7 +137,7 @@ fn capability_group_header(title: &'static str, count: usize) -> impl IntoElemen
 }
 
 /// 一行：名字和来源在上，说明在下，都截成一行。
-fn capability_row(name: String, detail: String, tag: Option<String>) -> impl IntoElement {
+fn capability_row(name: String, detail: String, tag: Option<String>) -> gpui::Div {
     v_flex()
         .px_1()
         .py_1()

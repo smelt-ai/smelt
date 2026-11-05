@@ -21,7 +21,7 @@ use super::{
     is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
     latest_user_message_index, loaded_capabilities_summary, loaded_entries_end,
     loaded_skills_refresh, merge_rejected_prompt, merge_snapshot_entries,
-    model_label_with_provider, native_queue_item_kind_label, next_prompt_dispatch_pending,
+    model_label_with_provider, native_queue_item_kind_label, prefix_skill_command, next_prompt_dispatch_pending,
     memory_changes_summary, memory_changes_to_show, notice_to_show, overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
     pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
     process_group_label, progress_has_details, progress_summary, provider_menu_label,
@@ -5067,4 +5067,15 @@ fn memory_card_summary_counts_new_updated_and_pending() {
     assert!(memory_changes_to_show(Some(&changes), None).is_some());
     assert!(memory_changes_to_show(Some(&changes), Some(7)).is_none());
     assert!(memory_changes_to_show(Some(&changes), Some(6)).is_some());
+}
+
+#[test]
+fn skill_command_goes_to_the_front_and_replaces_an_existing_one() {
+    assert_eq!(prefix_skill_command("", "review"), "/skill:review ");
+    assert_eq!(prefix_skill_command("  看下这个文件", "review"), "/skill:review 看下这个文件");
+    assert_eq!(
+        prefix_skill_command("/skill:old 看下这个文件", "review"),
+        "/skill:review 看下这个文件"
+    );
+    assert_eq!(prefix_skill_command("/skill:old", "review"), "/skill:review ");
 }
