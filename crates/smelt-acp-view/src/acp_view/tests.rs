@@ -692,12 +692,6 @@ fn missing_global_degrades_to_the_plain_name(cx: &mut gpui::TestAppContext) {
 }
 use smelt_model::agent_host::AgentHostSettings;
 
-fn settings_with_cmd(agent: ConversationAgentKind, cmd: &str) -> AgentHostSettings {
-    let mut settings = AgentHostSettings::fresh();
-    settings.set_acp_cmd_for(agent, cmd.into());
-    settings
-}
-
 #[test]
 fn legacy_delivery_prompt_is_not_restored_by_the_gui() {
     assert_eq!(
@@ -2302,7 +2296,7 @@ fn task_complete_is_final_when_no_assistant_answer_exists() {
 fn restart_uses_updated_profile_launch_spec_when_profile_still_exists() {
     let current = ConversationLaunchSpec::from_command("claude --old")
         .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/old");
-    let mut config = settings_with_cmd(ConversationAgentKind::Claude, "claude --current");
+    let mut config = AgentHostSettings::fresh();
     config.profiles.push(AcpProfile {
         id: "quant".into(),
         kind_id: "claude".into(),
@@ -2321,8 +2315,9 @@ fn restart_uses_updated_profile_launch_spec_when_profile_still_exists() {
     );
 
     assert_eq!(
-        resolved.command, "claude --current",
-        "profile 会话重启时应沿用该 agent 当前配置的命令"
+        resolved.command,
+        ConversationAgentKind::Claude.default_cmd(),
+        "profile 会话重启时用这家 agent 的出厂命令"
     );
     assert_eq!(
         resolved.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
@@ -2375,15 +2370,12 @@ fn restart_keeps_persisted_launch_when_profile_agent_is_unknown() {
 #[test]
 fn restart_refreshes_ordinary_session_from_current_agent_command() {
     let current = ConversationLaunchSpec::from_command("claude --stale");
-    let config = settings_with_cmd(ConversationAgentKind::Claude, "claude --current");
+    let config = AgentHostSettings::fresh();
 
     let resolved =
         resolve_restart_launch(&current, None, &config, ConversationAgentKind::Claude, true);
 
-    assert_eq!(
-        resolved,
-        ConversationLaunchSpec::from_command("claude --current")
-    );
+    assert_eq!(resolved, ConversationAgentKind::Claude.default_launch());
 }
 
 #[test]
@@ -2392,7 +2384,7 @@ fn restart_refresh_preserves_product_agent_instructions() {
         smelt_model::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV,
         "Review every change carefully",
     );
-    let config = settings_with_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
+    let config = AgentHostSettings::fresh();
 
     let resolved = resolve_restart_launch(&current, None, &config, ConversationAgentKind::Pi, true);
 
@@ -2412,7 +2404,7 @@ fn restart_refresh_preserves_product_agent_plugin_and_mcp_selection() {
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent --stale")
         .with_env(SMELT_AGENT_PLUGIN_ARGS_ENV, "[\"--no-extensions\"]")
         .with_env(SMELT_AGENT_MCP_SERVERS_ENV, "[\"rea\"]");
-    let config = settings_with_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
+    let config = AgentHostSettings::fresh();
 
     let resolved = resolve_restart_launch(&current, None, &config, ConversationAgentKind::Pi, true);
 
@@ -2443,7 +2435,7 @@ fn restart_refresh_preserves_product_agent_memory_directories() {
             "/home/me/.smelt/agents/a/memory",
         )
         .with_env(SMELT_USER_MEMORY_DIR_ENV, "/home/me/.smelt/memory");
-    let config = settings_with_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
+    let config = AgentHostSettings::fresh();
 
     let resolved = resolve_restart_launch(&current, None, &config, ConversationAgentKind::Pi, true);
 
@@ -2467,7 +2459,7 @@ fn restart_refresh_preserves_product_agent_memory_directories() {
 fn restart_keeps_legacy_launch_when_refresh_is_disabled() {
     let current =
         ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude");
-    let config = settings_with_cmd(ConversationAgentKind::Claude, "claude --current");
+    let config = AgentHostSettings::fresh();
 
     let resolved = resolve_restart_launch(
         &current,

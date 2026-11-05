@@ -74,7 +74,7 @@ Claude、Codex 的官方 ACP 适配器和 Pi 一起编进 `smelt-agent`，**用�
 
 能力与权限语义（尤其 `request_permission`）**逐家实测**，不假设「接了 ACP = 会弹权限门」。
 
-- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家 agent，用户可增 custom，每项含名称/启动命令（静态注册表 `CONVERSATION_AGENTS` + `ConversationCommands`，按 agent id 存储）
+- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家 agent 用出厂命令（静态注册表 `CONVERSATION_AGENTS`）；要换命令、加参数、换数据目录用「自定义 Agent」
 - [x] Claude、Codex 适配器锁定版本并编进 `smelt-agent`；Codex 走标准 `codex-acp` 通道
 - [x] Pi 原生 RPC 驱动：编译好的 `smelt-agent`、锁定依赖、流式/工具/权限/取消/恢复、模型与推理配置
 - [x] 侧栏选用哪家 agent；会话记住选的是谁；UI 标注「适配器（smelt 代管）/ 原生（需本机 CLI）」

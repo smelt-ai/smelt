@@ -143,10 +143,6 @@ pub struct ConversationAgentDescriptor {
     pub label: &'static str,
     /// 短名：会话标题这种窄地方用（「Copilot 对话 · smelt」）。
     pub short_label: &'static str,
-    /// SQLite `json/agent_ui.json` 文档里存这家启动命令的键名。历史原因各不相同
-    /// （Claude 就叫 `acp_cmd`），改名等于把用户自定义命令悄悄重置回默认，
-    /// 所以键名是存档契约的一部分，跟着这张表走。
-    pub config_key: &'static str,
     /// 这家 agent 收不收图片。Grok 的 `promptCapabilities.image = false`（实测，
     /// 见 `default_acp_grok_cmd` 的注释），是唯一不收图的。会话交接时据此决定
     /// 图片占位文案怎么写——目标收不了图还只说「未复制」，新会话会一直等一张
@@ -185,7 +181,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "claude",
         label: "Claude Code",
         short_label: "Claude",
-        config_key: "acp_cmd",
         accepts_images: true,
         default_cmd: default_acp_cmd,
         previous_default_cmds: &[
@@ -209,7 +204,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "copilot",
         label: "GitHub Copilot",
         short_label: "Copilot",
-        config_key: "acp_copilot_cmd",
         accepts_images: true,
         default_cmd: default_acp_copilot_cmd,
         previous_default_cmds: &["copilot --acp"],
@@ -234,7 +228,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "codex",
         label: "Codex",
         short_label: "Codex",
-        config_key: "acp_codex_cmd",
         accepts_images: true,
         default_cmd: default_acp_codex_cmd,
         previous_default_cmds: &[
@@ -260,7 +253,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "grok",
         label: "Grok",
         short_label: "Grok",
-        config_key: "acp_grok_cmd",
         accepts_images: false,
         default_cmd: default_acp_grok_cmd,
         previous_default_cmds: &["grok agent stdio"],
@@ -285,7 +277,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "cursor",
         label: "Cursor Agent",
         short_label: "Cursor",
-        config_key: "acp_cursor_cmd",
         accepts_images: true,
         default_cmd: default_acp_cursor_cmd,
         previous_default_cmds: &["cursor-agent acp"],
@@ -312,7 +303,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "opencode",
         label: "OpenCode",
         short_label: "OpenCode",
-        config_key: "acp_opencode_cmd",
         accepts_images: true,
         default_cmd: default_acp_opencode_cmd,
         previous_default_cmds: &[],
@@ -339,7 +329,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "kiro",
         label: "Kiro",
         short_label: "Kiro",
-        config_key: "acp_kiro_cmd",
         accepts_images: true,
         default_cmd: default_acp_kiro_cmd,
         previous_default_cmds: &[
@@ -369,7 +358,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "pi",
         label: "Pi",
         short_label: "Pi",
-        config_key: "acp_pi_cmd",
         accepts_images: true,
         default_cmd: default_acp_pi_cmd,
         previous_default_cmds: &["bunx --bun pi-acp@0.0.33"],
@@ -397,8 +385,6 @@ pub static CUSTOM_AGENT: ConversationAgentDescriptor = ConversationAgentDescript
     id: "custom",
     label: "自定义 Agent",
     short_label: "自定义",
-    // 命令跟着每个 profile 走，不存在按种类保存的那一份。
-    config_key: "",
     // 认不出能力时按 ACP 的常见情况处理；真不收图的 agent 会在 prompt 时报错。
     accepts_images: true,
     default_cmd: String::new,
@@ -1282,7 +1268,7 @@ pub struct AcpProfile {
     pub kind_id: String,
     /// 新建菜单、会话标题、历史页 tab 上显示的名字，比如「Til」。
     pub label: String,
-    /// 启动命令。空 = 沿用底层 agent 当前生效的命令；通用 ACP 必填。旧运行时不报，读成空。
+    /// 启动命令。空 = 底层 agent 的出厂命令；通用 ACP 必填。旧运行时不报，读成空。
     #[serde(default)]
     pub command: String,
     /// 额外注入的环境变量，覆盖底层 agent 的同名变量。旧运行时不报，读成空。
@@ -1636,41 +1622,19 @@ mod tests {
     /// 存档契约：id 与 agent_ui.json 的键名都不能重名，也不能被顺手改掉
     /// （改了等于把用户自定义命令重置回默认）。
     #[test]
-    fn descriptor_ids_and_config_keys_are_stable_and_unique() {
+    fn descriptor_ids_are_stable() {
         let ids: Vec<_> = CONVERSATION_AGENTS.iter().map(|d| d.id).collect();
-        let keys: Vec<_> = CONVERSATION_AGENTS.iter().map(|d| d.config_key).collect();
         assert_eq!(
             ids,
             [
                 "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi"
             ]
         );
-        assert_eq!(
-            keys,
-            [
-                "acp_cmd",
-                "acp_copilot_cmd",
-                "acp_codex_cmd",
-                "acp_grok_cmd",
-                "acp_cursor_cmd",
-                "acp_opencode_cmd",
-                "acp_kiro_cmd",
-                "acp_pi_cmd"
-            ]
-        );
-
-        let mut unique = keys.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), keys.len(), "agent_ui.json 键名重复");
     }
 
     #[test]
     fn acp_descriptor_lookup_by_id() {
-        assert_eq!(
-            conversation_descriptor("grok").map(|d| d.config_key),
-            Some("acp_grok_cmd")
-        );
+        assert_eq!(conversation_descriptor("grok").map(|d| d.id), Some("grok"));
         assert!(conversation_descriptor("nope").is_none());
     }
 

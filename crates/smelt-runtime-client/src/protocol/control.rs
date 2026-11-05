@@ -28,8 +28,12 @@ use super::daemon::DaemonOperation;
 /// 少了 `native_dsh_profiles`。旧运行时缺这个字段就拒收修改，新桌面改不了旧运行时上的
 /// 智能体配置，得让兼容检查拦住、提示升级运行时。
 ///
-pub const CONTROL_API_VERSION: u16 = 3;
-pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
+///
+/// v4：按 agent 改启动命令的设置删掉，`agent.host.get` / `agent.host.apply_edit` 的配置去掉
+/// `commands`。旧运行时要这个字段，新桌面改不了它上面的智能体配置，所以升版：旧运行时判为
+/// 过旧、请它升级；旧手机的控制调用也会被拒，等手机升级。
+pub const CONTROL_API_VERSION: u16 = 4;
+pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 4;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
 
 macro_rules! define_control_methods {

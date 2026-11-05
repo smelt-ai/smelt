@@ -23,23 +23,6 @@ fn load_agent_ui_snapshot() -> Option<smelt_store::AgentUiSnapshot> {
         .flatten()
 }
 
-fn configured_command(
-    snapshot: Option<&smelt_store::AgentUiSnapshot>,
-    kind: ConversationAgentKind,
-) -> String {
-    let key = kind.descriptor().config_key;
-    snapshot
-        .and_then(|snapshot| {
-            snapshot
-                .commands
-                .iter()
-                .find(|command| command.command_key == key)
-                .map(|command| command.command.clone())
-        })
-        .filter(|command| !command.trim().is_empty())
-        .unwrap_or_else(|| kind.default_cmd())
-}
-
 fn configured_env(
     snapshot: Option<&smelt_store::AgentUiSnapshot>,
     kind: ConversationAgentKind,
@@ -61,7 +44,6 @@ fn configured_launch(
     kind: ConversationAgentKind,
 ) -> ConversationLaunchSpec {
     let mut launch = kind.default_launch();
-    launch.command = configured_command(snapshot, kind);
     launch.env.extend(configured_env(snapshot, kind));
     launch
 }
@@ -413,7 +395,6 @@ mod tests {
 
         let snapshot = smelt_store::AgentUiSnapshot {
             agent_hooks_enabled: true,
-            commands: Vec::new(),
             env: vec![smelt_store::AgentAcpEnvRecord {
                 engine_kind_id: "opencode".into(),
                 name: "OPENCODE_CONFIG_CONTENT".into(),

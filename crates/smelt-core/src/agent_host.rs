@@ -1,5 +1,5 @@
-//! 运行时那份智能体宿主配置：各家 CLI 的启动命令、环境变量、配置记忆、workspace
-//! profile、hook 与跨会话消息开关、智能体定义。`agent.host.*` 控制方法背后的实现。
+//! 运行时那份智能体宿主配置：各家 CLI 的环境变量、配置记忆、自定义 Agent
+//! （profile）、hook 与跨会话消息开关、智能体定义。`agent.host.*` 控制方法背后的实现。
 //!
 //! 这些都跟着运行时那台机器走（CLI 装在哪、profile 目录在哪），所以由运行时持有；
 //! 客户端只缓存一份，修改以「这次改了什么」提交，由这里合并到库里最新的那份上。
@@ -9,18 +9,9 @@ pub use smelt_model::agent_host::*;
 
 use std::collections::BTreeMap;
 
-use crate::agent_kind::{AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind};
+use crate::agent_kind::{AcpProfile, ConversationAgentKind};
 
 pub(crate) fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
-    let mut commands = BTreeMap::new();
-    for command in snapshot.commands {
-        if let Some(descriptor) = CONVERSATION_AGENTS
-            .iter()
-            .find(|descriptor| descriptor.config_key == command.command_key)
-        {
-            commands.insert(descriptor.id.to_string(), command.command);
-        }
-    }
     let mut env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for record in snapshot.env {
         env.entry(record.engine_kind_id)
@@ -42,7 +33,6 @@ pub(crate) fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHost
     }
     AgentHostSettings {
         hooks_enabled: snapshot.agent_hooks_enabled,
-        commands,
         env,
         config_memory,
         profiles: snapshot
@@ -59,17 +49,6 @@ pub(crate) fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHost
 fn prefs_snapshot(settings: &AgentHostSettings) -> smelt_store::AgentUiSnapshot {
     smelt_store::AgentUiSnapshot {
         agent_hooks_enabled: settings.hooks_enabled,
-        commands: CONVERSATION_AGENTS
-            .iter()
-            .filter_map(|descriptor| {
-                settings.commands.get(descriptor.id).map(|command| {
-                    smelt_store::AgentConversationCommandRecord {
-                        command_key: descriptor.config_key.to_string(),
-                        command: command.clone(),
-                    }
-                })
-            })
-            .collect(),
         env: settings
             .env
             .iter()
@@ -133,28 +112,11 @@ pub(crate) fn profile_from_record(profile: smelt_store::AgentProfileRecord) -> A
     }
 }
 
-/// 只迁移之前随应用发出的默认命令；用户自定义的命令不动。
-fn migrate_released_adapter_defaults(settings: &mut AgentHostSettings) -> bool {
-    let mut migrated = false;
-    for agent in ConversationAgentKind::ALL {
-        let current = settings
-            .commands
-            .get(agent.id())
-            .cloned()
-            .unwrap_or_else(|| agent.default_cmd());
-        if let Some(upgraded) = agent.upgrade_released_default_command(&current) {
-            settings.commands.insert(agent.id().to_string(), upgraded);
-            migrated = true;
-        }
-    }
-    migrated
-}
-
 fn store() -> Result<smelt_store::Store, String> {
     crate::sqlite_state::default_sqlite_store()
 }
 
-/// 读取整份配置。顺带把过时的出厂命令迁到当前版本并写回。
+/// 读取整份配置。
 pub fn load() -> Result<AgentHostSettings, String> {
     load_on(&store()?)
 }
@@ -164,11 +126,6 @@ fn load_on(store: &smelt_store::Store) -> Result<AgentHostSettings, String> {
     let mut settings = snapshot
         .map(from_snapshot)
         .unwrap_or_else(AgentHostSettings::fresh);
-    if migrate_released_adapter_defaults(&mut settings) {
-        store
-            .put_agent_ui_prefs(&prefs_snapshot(&settings))
-            .map_err(|e| e.to_string())?;
-    }
     settings.agents = crate::agent_definition_store::list_agent_definitions_on(store)
         .map_err(|e| e.to_string())?;
     settings.default_conversation_agent = crate::default_conversation::load_on(store);
@@ -241,7 +198,6 @@ fn apply_edit_on(
         before.hooks_enabled,
         after.hooks_enabled,
     );
-    merge_map(&mut current.commands, &before.commands, &after.commands);
     merge_map(&mut current.env, &before.env, &after.env);
     merge_map(
         &mut current.config_memory,
@@ -264,18 +220,6 @@ fn apply_edit_on(
 mod tests {
     use super::*;
 
-    fn cmd(settings: &AgentHostSettings, agent: ConversationAgentKind) -> String {
-        settings
-            .commands
-            .get(agent.id())
-            .cloned()
-            .unwrap_or_else(|| agent.default_cmd())
-    }
-
-    fn set_cmd(settings: &mut AgentHostSettings, agent: ConversationAgentKind, command: String) {
-        settings.commands.insert(agent.id().to_string(), command);
-    }
-
     fn temp_store() -> (smelt_store::Store, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "smelt-agent-host-{}",
@@ -287,7 +231,7 @@ mod tests {
         (store, dir)
     }
 
-    /// 端到端：客户端改一条命令，库里只变这一条，别的偏好原样留着。
+    /// 端到端：客户端改一家的环境变量，库里只变这一处，别的偏好原样留着。
     #[test]
     fn apply_edit_persists_only_the_changed_field() {
         let (store, dir) = temp_store();
@@ -298,11 +242,11 @@ mod tests {
         let before = load_on(&store).unwrap();
         let mut after = before.clone();
         after
-            .commands
-            .insert("claude".into(), "claude --edited".into());
+            .env
+            .insert("claude".into(), BTreeMap::from([("A".into(), "1".into())]));
         let merged = apply_edit_on(&store, &AgentHostEdit { before, after }).unwrap();
 
-        assert_eq!(merged.commands["claude"], "claude --edited");
+        assert_eq!(merged.env["claude"]["A"], "1");
         let stored = store.get_agent_ui_snapshot().unwrap().unwrap();
         assert!(!stored.agent_hooks_enabled, "没改的开关不能被这次提交改掉");
         assert_eq!(load_on(&store).unwrap(), merged);
@@ -354,12 +298,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn with_cmd(agent: ConversationAgentKind, command: String) -> AgentHostSettings {
-        let mut settings = AgentHostSettings::fresh();
-        set_cmd(&mut settings, agent, command);
-        settings
-    }
-
     fn profile(id: &str, label: &str) -> AcpProfile {
         AcpProfile {
             id: id.into(),
@@ -376,25 +314,27 @@ mod tests {
     fn edits_only_write_the_fields_this_client_changed() {
         let before = AgentHostSettings::fresh();
         let mut current = before.clone();
-        current
-            .commands
-            .insert("codex".into(), "codex --theirs".into());
+        current.env.insert(
+            "codex".into(),
+            BTreeMap::from([("T".into(), "theirs".into())]),
+        );
         current.hooks_enabled = false;
 
         let mut after = before.clone();
-        after
-            .commands
-            .insert("claude".into(), "claude --mine".into());
+        after.env.insert(
+            "claude".into(),
+            BTreeMap::from([("M".into(), "mine".into())]),
+        );
 
         merge_flag(
             &mut current.hooks_enabled,
             before.hooks_enabled,
             after.hooks_enabled,
         );
-        merge_map(&mut current.commands, &before.commands, &after.commands);
+        merge_map(&mut current.env, &before.env, &after.env);
 
-        assert_eq!(current.commands["codex"], "codex --theirs");
-        assert_eq!(current.commands["claude"], "claude --mine");
+        assert_eq!(current.env["codex"]["T"], "theirs");
+        assert_eq!(current.env["claude"]["M"], "mine");
         assert!(!current.hooks_enabled, "没改的开关保留别人的值");
     }
 
@@ -429,132 +369,6 @@ mod tests {
             labels,
             vec![("a", "A renamed"), ("c", "theirs"), ("d", "D")],
             "改名就地替换，删掉的移除，别人加的保留，新加的追加"
-        );
-    }
-
-    #[test]
-    fn released_default_commands_are_migrated_but_custom_ones_are_kept() {
-        let mut settings = AgentHostSettings::fresh();
-        settings
-            .commands
-            .insert("claude".into(), "my-claude --flag".into());
-        let custom_before = settings.commands["claude"].clone();
-
-        migrate_released_adapter_defaults(&mut settings);
-
-        assert_eq!(settings.commands["claude"], custom_before);
-    }
-
-    #[test]
-    fn legacy_codex_default_is_replaced_by_current_adapter() {
-        let mut config = AgentHostSettings::fresh();
-        set_cmd(
-            &mut config,
-            ConversationAgentKind::Codex,
-            "bunx --bun @zed-industries/codex-acp@0.16.0".into(),
-        );
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-
-        assert_eq!(
-            cmd(&config, ConversationAgentKind::Codex),
-            ConversationAgentKind::Codex.default_cmd()
-        );
-    }
-
-    #[test]
-    fn interim_app_server_default_is_replaced_by_current_adapter() {
-        let mut config = AgentHostSettings::fresh();
-        set_cmd(
-            &mut config,
-            ConversationAgentKind::Codex,
-            "codex app-server".into(),
-        );
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            cmd(&config, ConversationAgentKind::Codex),
-            ConversationAgentKind::Codex.default_cmd()
-        );
-    }
-
-    #[test]
-    fn previous_official_adapter_defaults_are_replaced_by_current_versions() {
-        let mut config = AgentHostSettings::fresh();
-        set_cmd(
-            &mut config,
-            ConversationAgentKind::Claude,
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0".into(),
-        );
-        set_cmd(
-            &mut config,
-            ConversationAgentKind::Codex,
-            "bunx --bun @agentclientprotocol/codex-acp@1.1.7".into(),
-        );
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            cmd(&config, ConversationAgentKind::Claude),
-            "smelt-agent acp-claude"
-        );
-        assert_eq!(
-            cmd(&config, ConversationAgentKind::Codex),
-            "smelt-agent acp-codex"
-        );
-    }
-
-    #[test]
-    fn unsupported_kiro_v3_trust_default_is_migrated_without_touching_custom_commands() {
-        let mut config = AgentHostSettings::fresh();
-        set_cmd(
-            &mut config,
-            ConversationAgentKind::Kiro,
-            "kiro-cli acp --agent-engine v3 --auth-method cli --trust-all-tools".into(),
-        );
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            cmd(&config, ConversationAgentKind::Kiro),
-            "kiro-cli acp --agent-engine v3 --auth-method cli"
-        );
-
-        let custom =
-            "kiro-cli acp --agent-engine v3 --auth-method cli --agent personal".to_string();
-        let mut config = with_cmd(ConversationAgentKind::Kiro, custom.clone());
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-        assert_eq!(cmd(&config, ConversationAgentKind::Kiro), custom);
-    }
-
-    #[test]
-    fn customized_previous_adapter_command_is_not_replaced() {
-        let custom = "NO_BROWSER=1 bunx --bun @agentclientprotocol/codex-acp@1.1.7".to_string();
-        let mut config = with_cmd(ConversationAgentKind::Codex, custom.clone());
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-        assert_eq!(cmd(&config, ConversationAgentKind::Codex), custom);
-    }
-
-    #[test]
-    fn current_adapter_defaults_do_not_repeat_migration() {
-        let mut config = AgentHostSettings::fresh();
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-    }
-
-    #[test]
-    fn custom_codex_adapter_is_not_migrated() {
-        let mut config = AgentHostSettings::fresh();
-        set_cmd(
-            &mut config,
-            ConversationAgentKind::Codex,
-            "codex-acp --custom".into(),
-        );
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            cmd(&config, ConversationAgentKind::Codex),
-            "codex-acp --custom"
         );
     }
 }

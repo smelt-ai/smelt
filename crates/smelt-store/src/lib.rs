@@ -40,16 +40,14 @@ mod snapshots;
 mod workspace;
 
 pub use snapshots::{
-    AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot,
-    HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
-    MemoryMetaSnapshot, MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust,
-    MemoryTrustedRecord, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
-    PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheSnapshot,
-    QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot,
-    TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord,
-    WorkspaceSnapshot, WorkspaceTerminalRecord,
+    AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentDefinitionRecord, AgentProfileEnvRecord,
+    AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord, HistoryTitleSnapshot,
+    LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot, MemoryProvenanceRecord,
+    MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord, MemoryUsageRecord, PairedDevice,
+    PublishedSessionRecord, PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota,
+    QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref,
+    RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogVersion,
+    WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -61,7 +59,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 34;
+pub const STORE_SCHEMA_VERSION: u32 = 35;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -2045,6 +2043,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 34 {
+            apply_v35_drop_agent_command(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 33 {
             apply_v34_conversation_archive(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2674,6 +2681,19 @@ mod imp {
             .any(|column| column == "archived_at")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V33_TO_V34)?;
+        }
+        apply_v35_drop_agent_command(transaction)
+    }
+
+    /// v35：按 agent 改启动命令的设置删掉了。已经没有这张表的库跳过。
+    fn apply_v35_drop_agent_command(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_names(transaction)?
+            .iter()
+            .any(|table| table == "agent_acp_command")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V34_TO_V35)?;
         }
         Ok(())
     }
@@ -5171,7 +5191,10 @@ mod tests {
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
-        connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
+        connection.execute_batch(V34_AGENT_COMMAND).unwrap();
+        connection
+            .execute_batch(V25_WORKSPACE_CATALOG_WRITER)
+            .unwrap();
         // 当前形状加回 v22 才有的跨 Agent 消息表、开关列和持久事件表，就是一个 v22 库。
         connection
             .execute_batch(
@@ -5305,6 +5328,45 @@ CREATE TABLE published_session (
 );
 ";
 
+    /// v34 的库还存着按 agent 改的启动命令；迁到 v35 时整张表删掉，别的配置原样留着。
+    #[test]
+    fn v34_database_drops_agent_commands() {
+        let dir = temp_dir("v34-migration");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection.execute_batch(V34_AGENT_COMMAND).unwrap();
+        connection
+            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
+            .unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO agent_acp_command(command_key, command) VALUES ('acp_cmd', 'claude --x');
+                 INSERT INTO agent_acp_env(engine_kind_id, name, value) VALUES ('claude', 'K', 'v');",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 34).unwrap();
+        drop(connection);
+
+        drop(Store::open_or_create(&path).unwrap());
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agent_acp_command'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+        let env: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_acp_env", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(env, 1);
+    }
+
     #[test]
     fn v23_database_drops_deepseek_harness_data() {
         let dir = temp_dir("v23-migration");
@@ -5313,6 +5375,7 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V34_AGENT_COMMAND).unwrap();
         connection.execute_batch(V30_AGENT_PROFILE).unwrap();
         connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
         connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
@@ -5382,10 +5445,6 @@ CREATE TABLE published_session (
         );
         assert_eq!(strings("SELECT id FROM session ORDER BY id"), ["s-pi"]);
         assert_eq!(strings("SELECT agent FROM history_title"), ["pi"]);
-        assert_eq!(
-            strings("SELECT command_key FROM agent_acp_command"),
-            ["acp_pi_cmd"]
-        );
         assert_eq!(strings("SELECT engine_kind_id FROM agent_acp_env"), ["pi"]);
         assert!(strings("SELECT id FROM agent_profile").is_empty());
         assert_eq!(strings("SELECT id FROM agent_definition"), ["a-pi"]);
@@ -5415,7 +5474,10 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
-        connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
+        connection.execute_batch(V34_AGENT_COMMAND).unwrap();
+        connection
+            .execute_batch(V25_WORKSPACE_CATALOG_WRITER)
+            .unwrap();
         connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
         connection
             .execute_batch(
@@ -5453,6 +5515,7 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V34_AGENT_COMMAND).unwrap();
         connection
             .execute_batch(&format!(
                 "{V28_WORKSPACE_EPOCH}
@@ -6624,10 +6687,6 @@ CREATE TABLE published_session (
         let store = Store::open_or_create(&path).unwrap();
         let agent_ui = AgentUiSnapshot {
             agent_hooks_enabled: true,
-            commands: vec![AgentConversationCommandRecord {
-                command_key: "acp_cmd".into(),
-                command: "claude --acp".into(),
-            }],
             env: vec![AgentAcpEnvRecord {
                 engine_kind_id: "claude".into(),
                 name: "ANTHROPIC_API_KEY".into(),
@@ -6756,7 +6815,6 @@ CREATE TABLE published_session (
         let connection = rusqlite::Connection::open(&path).unwrap();
         for (table, expected) in [
             ("agent_host_pref", 1i64),
-            ("agent_acp_command", 1),
             ("agent_acp_env", 1),
             ("agent_acp_config_memory", 1),
             ("agent_definition", 1),
@@ -7227,6 +7285,14 @@ ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
 
     /// v30 及更早的 workspace profile 表：没有启动命令列，也没有环境变量子表。
     /// 用当前结构的库退回旧版本做夹具时换回去。
+    /// v34 及更早还在、v35 删掉的按 agent 存启动命令的表。用当前结构的库退回旧版本做夹具时补上。
+    const V34_AGENT_COMMAND: &str = "
+CREATE TABLE agent_acp_command (
+  command_key TEXT PRIMARY KEY,
+  command TEXT NOT NULL
+) WITHOUT ROWID;
+";
+
     const V30_AGENT_PROFILE: &str = "
 DROP TABLE agent_profile_env;
 DROP TABLE agent_profile;
