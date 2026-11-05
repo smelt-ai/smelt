@@ -426,7 +426,7 @@ Pi 进程不链接 `smelt-store`、不直接打开数据库。对话的驱动线
 | `smeltd/src/agent_memory_control.rs` | 新增：认证会话并代 Pi 读写记忆元数据 |
 | `smeltd/src/automation_runtime.rs` | 自动化启动带 `SMELT_AGENT_UNATTENDED=1` |
 | `smelt-store`（schema v14） | `agent_definition.memory_enabled` |
-| `smelt/src/cli.rs` | `smelt agent create/update --memory on\|off` |
+| `smelt-cli/src/agent.rs` | `smelt agent create/update --memory on\|off` |
 | `agent/src/runtime-extensions.ts` | 注册 `smelt-memory`，位于 `smelt-permission` 之前 |
 | `agent/src/smelt-permission.ts` | 合法记忆写入免审批 |
 | `smelt/src/agents/` | 配置页"记忆"卡片；删除智能体的提示改为"删除智能体和它的记忆" |
