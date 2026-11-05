@@ -1231,14 +1231,24 @@ pub fn spawn_acp(
                 // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
                 // 失败的真实原因都在 stderr 里，别让用户猜）。
                 let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
-                // 装了本机 CLI 就跑 smelt-agent 里内置的适配器，否则把 bunx / bun 指到应用里的
-                // Bun，再进连接循环。改写只在这条连接线程里生效，存下来的启动规格不变。
-                let embedded = resolve_embedded_adapter_command(&launch.launch, &launch.ephemeral_env);
+                // 出厂默认的 Claude / Codex 命令跑 smelt-agent 里内置的适配器；别的命令把
+                // bunx / bun 指到应用里的 Bun，再进连接循环。改写只在这条连接线程里生效，
+                // 存下来的启动规格不变。
+                let embedded =
+                    match resolve_embedded_adapter_command(&launch.launch, &launch.ephemeral_env) {
+                        Ok(embedded) => embedded,
+                        Err(e) => {
+                            let _ = event_tx.try_send(ConversationEvent::Fatal(e));
+                            return;
+                        }
+                    };
                 let (cmd, managed_bun) = if let Some(cmd) = embedded {
                     crate::app_log::info(
                         "acp",
                         &format!("会话 {} 用 smelt-agent 内置适配器：{cmd}", launch.sid),
                     );
+                    // 以前经 bunx 下过的旧版适配器缓存，只有这里还会顺手清。
+                    cleanup_stale_managed_adapters(&|_| {});
                     (cmd, None)
                 } else {
                     let tx = event_tx.clone();
@@ -3138,30 +3148,37 @@ const EMBEDDED_ADAPTERS: &[EmbeddedAdapter] = &[
     },
 ];
 
-/// 能用内置适配器时返回改写后的命令；否则 `None`，照旧走 `bunx`。
+/// 出厂默认命令：`Ok(Some(..))` 是改写成内置适配器的命令；`Err` 是本机没有对应的 CLI。
+/// 其余 `Ok(None)`，照旧执行原命令（用户自定义的 `bunx` 走应用里的 Bun）。
 ///
 /// 只接管逐字的出厂默认命令（可带 `VAR=value` 前缀）：别的版本、额外参数都是用户自定义。
-/// 必须已有 CLI：适配器在编译产物里找不到自己依赖的原生二进制，没有 CLI 时让 `bunx`
-/// 连同原生包一起下载。
+/// 必须已有 CLI：编进 smelt-agent 的适配器没带自己依赖的原生二进制。新建会话只列出
+/// 探测到 CLI 的智能体，走到这里还没有，多半是装好前打开的旧对话或探测还没跑完，
+/// 不再用 `bunx` 现下一份，直接请用户去装。
 fn plan_embedded_adapter_command(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,
     search_path: &str,
     process_has_env: &dyn Fn(&str) -> bool,
     smelt_agent: impl FnOnce() -> Option<String>,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let tokens: Vec<&str> = launch.command.split_whitespace().collect();
-    let program_at = tokens
+    let Some(program_at) = tokens
         .iter()
-        .position(|token| crate::workspace_override::split_env_assignment(token).is_none())?;
+        .position(|token| crate::workspace_override::split_env_assignment(token).is_none())
+    else {
+        return Ok(None);
+    };
     let (prefix, command) = tokens.split_at(program_at);
     let command = command.join(" ");
-    let adapter = EMBEDDED_ADAPTERS.iter().find(|adapter| {
+    let Some(adapter) = EMBEDDED_ADAPTERS.iter().find(|adapter| {
         adapter
             .agent
             .managed_adapter()
             .is_some_and(|managed| managed.current_command() == command)
-    })?;
+    }) else {
+        return Ok(None);
+    };
     let has_explicit_cli = prefix.iter().any(|token| {
         crate::workspace_override::split_env_assignment(token)
             .is_some_and(|(name, value)| name == adapter.cli_env && !value.is_empty())
@@ -3174,24 +3191,33 @@ fn plan_embedded_adapter_command(
             .is_some_and(|value| !value.is_empty())
         || process_has_env(adapter.cli_env);
     if !has_explicit_cli && resolve_in_path(adapter.cli_program, search_path).is_none() {
-        return None;
+        return Err(format!(
+            "未找到命令 `{program}`。{agent} 对话要先安装 {agent} 的 CLI 并登录，装好后重新\
+             打开这个对话。如果确定装了，多半是它的目录没进登录 shell 的 PATH，可以在\
+             「设置 → Agent 集成」里设置 `{env}` 指向它。",
+            program = adapter.cli_program,
+            agent = adapter.agent.label(),
+            env = adapter.cli_env,
+        ));
     }
     // 跑的是这份 smelt-agent 编进来的那一版，不比启动命令里写的版本。
-    let executable = smelt_agent()?;
+    let Some(executable) = smelt_agent() else {
+        return Ok(None);
+    };
     // 启动命令按空白分词，带空格的路径传不过去。
     if executable.split_whitespace().count() != 1 {
-        return None;
+        return Ok(None);
     }
     let mut rewritten: Vec<&str> = prefix.to_vec();
     rewritten.push(&executable);
     rewritten.push(adapter.subcommand);
-    Some(rewritten.join(" "))
+    Ok(Some(rewritten.join(" ")))
 }
 
 fn resolve_embedded_adapter_command(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     plan_embedded_adapter_command(
         launch,
         ephemeral_env,
@@ -5148,6 +5174,7 @@ mod embedded_adapter_tests {
             &|_| false,
             || Some("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent".to_string()),
         )
+        .expect("这里的用例都有 CLI 或不是出厂默认命令")
     }
 
     #[test]
@@ -5164,11 +5191,32 @@ mod embedded_adapter_tests {
         );
     }
 
-    /// 编译产物里找不到适配器自带的原生二进制，没有 CLI 时必须留给 bunx 去下载。
+    /// 内置适配器没带原生二进制，没有 CLI 跑不起来；不再用 bunx 现下一份，直接请用户去装。
     #[test]
-    fn no_cli_stays_on_bunx() {
+    fn no_cli_is_an_error_instead_of_bunx() {
         let empty = CliDir::with("not-the-cli");
-        assert_eq!(plan(&spec(claude_default()), empty.path()), None);
+        for (agent, program) in [
+            (ConversationAgentKind::Claude, "`claude`"),
+            (ConversationAgentKind::Codex, "`codex`"),
+        ] {
+            let error = plan_embedded_adapter_command(
+                &spec(agent.default_cmd()),
+                &BTreeMap::new(),
+                empty.path(),
+                &|_| false,
+                || Some("/bin/smelt-agent".to_string()),
+            )
+            .expect_err("出厂默认命令没有 CLI 应报错");
+            assert!(error.contains(program), "{error}");
+        }
+        // 用户自定义的命令不归这里管，没有 CLI 也照原样执行。
+        assert_eq!(
+            plan(
+                &spec("bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0".to_string()),
+                empty.path()
+            ),
+            None
+        );
     }
 
     #[test]
@@ -5195,7 +5243,7 @@ mod embedded_adapter_tests {
                 &|_| false,
                 || Some("/bin/smelt-agent".to_string()),
             )
-            .is_some()
+            .is_ok_and(|planned| planned.is_some())
         );
         assert!(
             plan_embedded_adapter_command(
@@ -5205,7 +5253,7 @@ mod embedded_adapter_tests {
                 &|name| name == "CLAUDE_CODE_EXECUTABLE",
                 || Some("/bin/smelt-agent".to_string()),
             )
-            .is_some()
+            .is_ok_and(|planned| planned.is_some())
         );
     }
 
@@ -5244,7 +5292,7 @@ mod embedded_adapter_tests {
                 &|_| false,
                 || None,
             ),
-            None
+            Ok(None)
         );
     }
 
@@ -5260,7 +5308,7 @@ mod embedded_adapter_tests {
                 &|_| false,
                 || Some("/home/first last/.smelt/bin/smelt-agent".to_string()),
             ),
-            None
+            Ok(None)
         );
     }
 

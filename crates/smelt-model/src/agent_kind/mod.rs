@@ -1216,8 +1216,8 @@ pub fn default_acp_cmd() -> String {
     // bunx 由 ACP 解析器重写到按需下载的 Bun（`~/.smelt/runtime/bin/bun` 指向当前 generation）。
     // 会话持有这份 generation 的 lease，并把 lease FD 继承给 adapter。
     // 适配器锁版本——方言适配与回归测试都对着这个版本做，升级是主动行为。
-    // 启动层会优先将本机 `claude` 注入 CLAUDE_CODE_EXECUTABLE；没装才使用 SDK
-    // 携带的原生二进制，避免本机 CLI 与适配器运行时版本脱节。
+    // 启动层把本机 `claude` 注入 CLAUDE_CODE_EXECUTABLE，跑 smelt-agent 里内置的
+    // 适配器；本机没有 CLI 时直接请用户安装，不再用 bunx 现下 SDK 携带的原生二进制。
     //
     // --bun：强制 bunx 用 bun 自己的运行时执行，不 fallback 到系统 Node——实测
     // 发现这个适配器声明了 `engines.node >= 22`，bunx 默认会尊重这个声明主动
@@ -1248,8 +1248,8 @@ pub fn default_acp_codex_cmd() -> String {
     // 2.5.0 已用受管 Bun 1.4.4 + Codex CLI 0.165 实测 initialize：协议版本 1、
     // 图片/MCP 与 `loadSession` 能力正常。2.0 起工具调用按 AIR 协定上报、diff 是
     // 精确补丁，仍是标准 ACP 内容块。1.7+ 原生 subagent / fork / 后台任务
-    // 未协商则退回现有 tool call。build_agent_args 里的 CODEX_PATH
-    // 注入继续优先使用本机 CLI，找不到才 fallback 到适配器 bundle 的版本。
+    // 未协商则退回现有 tool call。启动层把本机 `codex` 注入 CODEX_PATH，跑
+    // smelt-agent 里内置的适配器；本机没有 CLI 时直接请用户安装，不走 bunx。
     CODEX_ACP_ADAPTER.current_command()
 }
 
