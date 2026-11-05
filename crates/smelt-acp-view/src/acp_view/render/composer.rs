@@ -66,7 +66,6 @@ fn capabilities_panel(
                 skill.id.clone(),
             )))
             .rounded(px(6.))
-            .cursor_pointer()
             .hover(|row| row.bg(ui_theme::overlay(0x14)))
             .on_click(move |_, window, cx| {
                 let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
