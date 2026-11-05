@@ -2488,7 +2488,7 @@ fn main() {
     #[cfg(windows)]
     let predecessor_pid = std::env::var(PREDECESSOR_PID_ENV)
         .ok()
-        .and_then(|pid| pid.parse::<i32>().ok());
+        .and_then(|pid| pid.parse::<u32>().ok());
     // Edition 2024：`remove_var` 标为 unsafe（多线程改 env 非同步）。此时只有不访问
     // 环境变量的 stderr tee 读线程，尚未启动任何会并发读环境的业务线程。
     // 桌面拉起时递来的就绪管道（见 `smelt_sys::ready_pipe`）：绑好 socket 后写一个字节，
@@ -2516,12 +2516,16 @@ fn main() {
             return;
         }
     };
-    // 升级的接班进程：前任回执后才退出，退出前监听还在它手里。等它退了再绑。
+    // 升级的接班进程：前任回执之前已经收割子进程、写完库，拉起本进程后只剩退出。等它退了
+    // 再绑。30 秒还没退就是卡在退出路上，结束它：旧版本的前任停机时不关 Bun 那条管道的
+    // 监听，不结束它就会和本进程一起挂在同一个管道名下，客户端随机连到其中一个。
     #[cfg(windows)]
-    if let Some(pid) = predecessor_pid
-        && !smelt_core::process_wait::wait_until_exit(pid, Duration::from_secs(30))
-    {
-        dlog(&format!("升级接班：前任 {pid} 30 秒内没退出，照常尝试绑定"));
+    if let Some(pid) = predecessor_pid {
+        match smelt_sys::process::retire_predecessor(pid, Duration::from_secs(30)) {
+            Ok(false) => {}
+            Ok(true) => dlog(&format!("升级接班：前任 {pid} 30 秒内没退出，已结束它")),
+            Err(error) => dlog(&format!("升级接班：等前任 {pid} 退出失败，照常绑定：{error}")),
+        }
     }
     let bound = match bind_fresh_daemon(&path) {
         Ok(Some(bound)) => bound,
@@ -2549,7 +2553,8 @@ fn main() {
         let _ = std::fs::remove_file(&path);
         std::process::exit(1);
     }
-    // 监听已经在内核里排队接连接，accept 循环稍后起来也不丢：这就算就绪。
+    // 监听已经在替我们排队接连接（Unix 是内核的 backlog，Windows 是 `PipeListener` 自己的
+    // 接受线程），accept 循环稍后起来也不丢：这就算就绪。
     if let Some(ready) = ready {
         ready.notify();
     }

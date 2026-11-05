@@ -16,13 +16,15 @@
 //! 半关闭，`shutdown(Both)` 等手上的读写都退出就关句柄：对端读完已经写进去的数据，再读到
 //! EOF，和套接字的 FIN 一样。不用 `DisconnectNamedPipe`，它会把对端还没读的数据丢掉。
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
@@ -51,8 +53,9 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::process::current_user_key;
 
-/// 实例都在忙时，客户端最多等多久才放弃。监听方在 `accept` 返回前会先建好下一个实例，
-/// 这段等待盖住中间那一下空档。服务没起来时 `CreateFile` 是「找不到」，不会耗这点时间。
+/// 实例都在忙时，客户端最多等多久才放弃。监听的接受线程每连上一个就先建好下一个实例，
+/// 这段等待盖住中间那一下空档，以及队列攒满时等调用方取走的时间。服务没起来时
+/// `CreateFile` 是「找不到」，不会耗这点时间。
 const CONNECT_BUDGET: Duration = Duration::from_secs(2);
 
 /// 当前用户专属的管道名，形如 `\\.\pipe\smelt-<sid>-<tag>`。
@@ -82,28 +85,143 @@ pub fn daemon_pipe_path(sock: &Path) -> io::Result<String> {
     user_pipe_path(&format!("daemon-{short}"))
 }
 
+/// 管道的监听。
+///
+/// 命名管道没有套接字那样的 backlog：只有正在等客户端的那一个实例能连，连上之后到建好
+/// 下一个实例之间，后来的客户端只能干等。所以 `bind` 时就起一条接受线程，不停地建实例、
+/// 等客户端，连上的放进有界队列，[`accept`](Self::accept) 从队列里取。调用方的接受循环
+/// 晚一点起来也不耽误客户端连上，和套接字 `listen` 之后内核替你排队一样。队列满了接受
+/// 线程停下来等，客户端在 `WaitNamedPipe` 上等空位，最多等 [`CONNECT_BUDGET`]。
 pub struct PipeListener {
     shared: Arc<ListenerShared>,
 }
 
+/// 接受线程最多替调用方攒多少条已经连上、还没被取走的连接。
+const BACKLOG: usize = 64;
+
 struct ListenerShared {
     name: String,
-    /// 已经建好、正在等客户端的那一个实例。`bind` 时就放上，避免调用方一返回
-    /// 客户端就 `ERROR_FILE_NOT_FOUND`。
+    /// 已经建好、等着下一个客户端的实例。`bind` 时就放上，避免调用方一返回客户端就
+    /// `ERROR_FILE_NOT_FOUND`。
     pending: Mutex<Option<OwnedHandle>>,
+    /// 已经连上、还没被 `accept` 取走的连接，和接受线程里出的错。
+    backlog: Mutex<VecDeque<io::Result<PipeStream>>>,
+    /// `backlog` 有了新连接、腾出了空位，或者叫停了。
+    backlog_changed: Condvar,
     stop: Signal,
+    thread: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// 叫停一个 [`PipeListener`]：关掉在等客户端的实例，之后不再建新的，新客户端连不上。
-/// 已经接受的连接不受影响。
+impl ListenerShared {
+    /// 叫停：之后不再建实例；在等客户端的实例、队列里还没被取走的连接都关掉，那些客户端
+    /// 读到 EOF，会去重连。等接受线程退出才返回，返回之后这个监听手里不再有实例，新客户端
+    /// 连不上。已经被 `accept` 取走的连接不受影响。
+    fn stop_listening(&self) {
+        // 先置标志再收走实例：`ensure_pending` 在锁里看标志，不会在这之后再建一个。
+        self.stop.set();
+        drop(lock(&self.pending).take());
+        let queued = std::mem::take(&mut *lock(&self.backlog));
+        self.backlog_changed.notify_all();
+        drop(queued);
+        let thread = lock(&self.thread).take();
+        if let Some(thread) = thread
+            && thread.thread().id() != std::thread::current().id()
+        {
+            let _ = thread.join();
+        }
+    }
+
+    fn ensure_pending(&self) {
+        let mut slot = lock(&self.pending);
+        if slot.is_none()
+            && !self.stop.is_set()
+            && let Ok(handle) = create_instance(&self.name, false)
+        {
+            *slot = Some(handle);
+        }
+    }
+
+    /// 放进队列，满了等空位。叫停了返回 `false`，连接随之关掉。
+    fn enqueue(&self, stream: PipeStream) -> bool {
+        let mut backlog = lock(&self.backlog);
+        loop {
+            if self.stop.is_set() {
+                return false;
+            }
+            if backlog.len() < BACKLOG {
+                backlog.push_back(Ok(stream));
+                self.backlog_changed.notify_all();
+                return true;
+            }
+            backlog = self
+                .backlog_changed
+                .wait(backlog)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// 错误交给调用方记日志。队列满了就丢掉，不为报错挤占连接的位置。
+    fn report(&self, error: io::Error) {
+        let mut backlog = lock(&self.backlog);
+        if !self.stop.is_set() && backlog.len() < BACKLOG {
+            backlog.push_back(Err(error));
+            self.backlog_changed.notify_all();
+        }
+    }
+
+    /// 接受线程：等客户端，连上就先建好下一个实例，再把这条放进队列。
+    fn serve(&self) {
+        let mut failures = 0u32;
+        while !self.stop.is_set() {
+            let instance = lock(&self.pending).take();
+            let connected = match instance {
+                Some(handle) => Ok(handle),
+                None => create_instance(&self.name, false),
+            }
+            .and_then(|handle| wait_for_client(handle, &self.stop));
+            // 这一实例用掉了（连上了，或者出了错）。下一个先建好，紧跟着来的客户端才有
+            // 实例可连，退避的这段时间也一样。
+            self.ensure_pending();
+            let accepted = connected.and_then(|handle| {
+                handle
+                    .map(|handle| PipeStream::from_handle(handle, End::Server))
+                    .transpose()
+            });
+            let error = match accepted {
+                Ok(None) => return,
+                Ok(Some(stream)) => {
+                    failures = 0;
+                    if !self.enqueue(stream) {
+                        return;
+                    }
+                    continue;
+                }
+                // 客户端连上就走了，不是监听的毛病，接着等下一个。
+                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA as i32) => continue,
+                Err(error) => error,
+            };
+            self.report(error);
+            // 轮询例外：建不出实例、等客户端出错之后没有「可以再试」的事件；周期 50 毫秒起
+            // 翻倍，上限 5 秒，成功一次就回到起点。叫停会立刻叫醒。
+            let delay = Duration::from_millis(50)
+                .saturating_mul(1u32.checked_shl(failures).unwrap_or(u32::MAX))
+                .min(Duration::from_secs(5));
+            if self.stop.wait(delay) {
+                return;
+            }
+            failures = failures.saturating_add(1);
+        }
+    }
+}
+
+/// 叫停一个 [`PipeListener`]，见 `ListenerShared::stop_listening`：返回之后新客户端连不上，
+/// 还没被取走的连接都关掉，已经接受的连接不受影响。
 #[derive(Clone)]
 pub struct PipeListenerStop(Arc<ListenerShared>);
 
 impl PipeListenerStop {
     pub fn stop(&self) {
-        // 先置标志再收走实例：`ensure_pending` 在锁里看标志，不会在这之后再建一个。
-        self.0.stop.set();
-        drop(lock(&self.0.pending).take());
+        self.0.stop_listening();
     }
 }
 
@@ -130,13 +248,20 @@ impl PipeListener {
             ));
         }
         let pending = create_instance(&name, first)?;
-        Ok(Self {
-            shared: Arc::new(ListenerShared {
-                name,
-                pending: Mutex::new(Some(pending)),
-                stop: Signal::new()?,
-            }),
-        })
+        let shared = Arc::new(ListenerShared {
+            name,
+            pending: Mutex::new(Some(pending)),
+            backlog: Mutex::new(VecDeque::new()),
+            backlog_changed: Condvar::new(),
+            stop: Signal::new()?,
+            thread: Mutex::new(None),
+        });
+        let serving = Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("smelt-pipe-accept".into())
+            .spawn(move || serving.serve())?;
+        *lock(&shared.thread) = Some(thread);
+        Ok(Self { shared })
     }
 
     pub fn name(&self) -> &str {
@@ -148,29 +273,23 @@ impl PipeListener {
         PipeListenerStop(Arc::clone(&self.shared))
     }
 
-    /// 阻塞到有客户端连上。返回已连接的流之前，先建好下一个实例。叫停之后报
-    /// `ConnectionAborted`。
+    /// 取一条已经连上的连接，没有就等。叫停之后报 `ConnectionAborted`。
     pub fn accept(&self) -> io::Result<PipeStream> {
         let shared = &self.shared;
-        if shared.stop.is_set() {
-            return Err(stopped());
-        }
-        let current = match lock(&shared.pending).take() {
-            Some(handle) => handle,
-            None => create_instance(&shared.name, false)?,
-        };
-        let connected = match wait_for_client(current, &shared.stop) {
-            Ok(Some(handle)) => handle,
-            Ok(None) => return Err(stopped()),
-            Err(error) => {
-                self.ensure_pending();
-                return Err(error);
+        let mut backlog = lock(&shared.backlog);
+        loop {
+            if shared.stop.is_set() {
+                return Err(stopped());
             }
-        };
-        // 客户端已经占用了这一实例。下一个必须在把流交出去之前就存在，
-        // 否则紧跟着来的连接会落到「没有实例」。
-        self.ensure_pending();
-        PipeStream::from_handle(connected, End::Server)
+            if let Some(next) = backlog.pop_front() {
+                shared.backlog_changed.notify_all();
+                return next;
+            }
+            backlog = shared
+                .backlog_changed
+                .wait(backlog)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
     }
 
     /// 一个个接受进来的连接，叫停之后结束。
@@ -180,15 +299,12 @@ impl PipeListener {
             result => Some(result),
         })
     }
+}
 
-    fn ensure_pending(&self) {
-        let mut slot = lock(&self.shared.pending);
-        if slot.is_none()
-            && !self.shared.stop.is_set()
-            && let Ok(handle) = create_instance(&self.shared.name, false)
-        {
-            *slot = Some(handle);
-        }
+impl Drop for PipeListener {
+    /// 监听没了就不再接客户端，接受线程随之退出。
+    fn drop(&mut self) {
+        self.shared.stop_listening();
     }
 }
 
@@ -528,6 +644,13 @@ impl Signal {
 
     fn is_set(&self) -> bool {
         self.set.load(Ordering::SeqCst)
+    }
+
+    /// 等到置位或超时，返回是否已置位。
+    fn wait(&self, timeout: Duration) -> bool {
+        self.is_set()
+            || unsafe { WaitForSingleObject(self.event.raw(), duration_millis(timeout)) }
+                == WAIT_OBJECT_0
     }
 }
 
@@ -1071,6 +1194,41 @@ mod tests {
         stop.stop();
         assert_eq!(accepting.join().unwrap(), 0);
         assert!(PipeStream::connect(&name).is_err());
+    }
+
+    /// 调用方还没开始 accept 时连上来的客户端都排上队，不会因为只有一个空闲实例而等到
+    /// 超时。守护绑好管道就报就绪，接受循环要等初始化做完才起来，靠的就是这个。
+    #[test]
+    fn clients_connecting_before_accept_are_queued() {
+        let listener = PipeListener::bind(test_pipe_name("backlog")).unwrap();
+        let clients: Vec<PipeStream> = (0..8u8)
+            .map(|index| {
+                let client = PipeStream::connect(listener.name()).unwrap();
+                (&client).write_all(&[index]).unwrap();
+                client
+            })
+            .collect();
+        let mut seen = Vec::new();
+        for _ in 0..clients.len() {
+            let server = listener.accept().unwrap();
+            server.set_read_timeout(Some(ARRIVES)).unwrap();
+            let mut byte = [0u8; 1];
+            (&server).read_exact(&mut byte).unwrap();
+            seen.push(byte[0]);
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (0..8).collect::<Vec<u8>>());
+    }
+
+    /// 叫停时还没被取走的连接一起关掉：客户端读到 EOF，好去重连接班的守护。
+    #[test]
+    fn stopping_closes_connections_nobody_accepted() {
+        let listener = PipeListener::bind(test_pipe_name("drain")).unwrap();
+        let client = PipeStream::connect(listener.name()).unwrap();
+        client.set_read_timeout(Some(ARRIVES)).unwrap();
+        listener.stopper().stop();
+        let mut buf = [0u8; 1];
+        assert_eq!((&client).read(&mut buf).unwrap(), 0);
     }
 
     /// 两端都能拿到对方的进程号。同一进程里就是自己。
