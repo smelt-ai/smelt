@@ -1,8 +1,9 @@
-//! 让 Pi（smelt-agent）跟随系统代理。
+//! 让 Pi（smelt-agent）和 ACP agent 跟随系统代理。
 //!
 //! smelt-agent 跑在 Bun 上，Bun 的 `fetch` 只认 `HTTP(S)_PROXY` / `NO_PROXY` 环境变量，
-//! 不读 Windows「设置 → 代理」、也不读 macOS「网络 → 代理」。只在系统里配了代理的用户
-//! （公司电脑、代理工具开了系统代理），浏览器能过、Pi 却直连：OAuth 令牌兑换被按地区拒绝
+//! 不读 Windows「设置 → 代理」、也不读 macOS「网络 → 代理」；Claude Code、Gemini CLI
+//! 这类 Node 写的 ACP agent 和 npm 也一样。只在系统里配了代理的用户
+//! （公司电脑、代理工具开了系统代理），浏览器能过、agent 却直连：OAuth 令牌兑换被按地区拒绝
 //! （`unsupported_country_region_territory`），模型请求同理。额度请求走 reqwest，它自己
 //! 会读系统代理，没有这个问题（见 `quota_http`）。
 //!
@@ -10,8 +11,12 @@
 //!
 //! - **只补，不覆盖**：子进程最终环境里已有任一代理变量（login shell、进程环境、启动配置
 //!   都算），说明用户自己配过，什么都不做。
-//! - **只认固定代理**：系统代理没开，或只配了 PAC 自动配置脚本 / 只有 SOCKS，都不注入。
-//!   Bun 跑不了 PAC；开了 TUN 的代理工具不需要环境变量也能通。
+//! - **只认固定代理**：系统代理没开、配了 PAC 自动配置脚本、只有 SOCKS，都不注入。
+//!   PAC 和手动代理同时开着时浏览器优先用 PAC，补手动那条会和浏览器走不同出口；
+//!   Bun 跑不了 PAC。开了 TUN 的代理工具不需要环境变量也能通。
+//! - **只接 agent 本体和要联网的辅助命令**（Pi、ACP agent、装 ACP CLI、kiro 取令牌）。
+//!   agent 代跑的终端命令（`acp_terminal`）、git（`subprocess`）不接：内网命令不该因为
+//!   系统绕过列表没写全就被塞进代理。
 //! - **绕过列表一起翻译**，并始终带上回环地址：OAuth 回调服务器、内网地址不能被塞进代理。
 //!
 //! 每次起进程现读：用户随时会开关代理工具，缓存会读到过期值。读系统代理是一次注册表 /
@@ -232,6 +237,13 @@ fn read_system_proxy() -> Option<SystemProxy> {
     if settings.get_u32("ProxyEnable").unwrap_or(0) == 0 {
         return None;
     }
+    // 配了 PAC：浏览器按脚本走，手动代理只是兜底，不跟。
+    if settings
+        .get_string("AutoConfigURL")
+        .is_ok_and(|url| !url.trim().is_empty())
+    {
+        return None;
+    }
     let (http, https) = parse_windows_proxy_server(&settings.get_string("ProxyServer").ok()?);
     let bypass = settings
         .get_string("ProxyOverride")
@@ -255,7 +267,7 @@ fn read_system_proxy() -> Option<SystemProxy> {
     use system_configuration::sys::schema_definitions::{
         kSCPropNetProxiesExceptionsList, kSCPropNetProxiesHTTPEnable, kSCPropNetProxiesHTTPPort,
         kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPSEnable, kSCPropNetProxiesHTTPSPort,
-        kSCPropNetProxiesHTTPSProxy,
+        kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesProxyAutoConfigEnable,
     };
 
     fn key(raw: CFStringRef) -> CFString {
@@ -295,6 +307,15 @@ fn read_system_proxy() -> Option<SystemProxy> {
 
     let store = SCDynamicStoreBuilder::new("smelt").build()?;
     let proxies = store.get_proxies()?;
+    // 配了 PAC：系统按脚本选代理，手动那条不跟。
+    let pac_enabled = proxies
+        .find(key(unsafe { kSCPropNetProxiesProxyAutoConfigEnable }))
+        .and_then(|flag| flag.downcast::<CFNumber>())
+        .and_then(|flag| flag.to_i32())
+        == Some(1);
+    if pac_enabled {
+        return None;
+    }
     // SAFETY: 同上，读取系统框架导出的常量。
     let (http, https) = unsafe {
         (
