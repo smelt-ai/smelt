@@ -87,7 +87,7 @@ pub struct GitDiff {
 ///
 /// 变更栏按仓库分组，每个仓库都是独立的提交单位——这是「子仓改动提交不出去」
 /// 那个 bug 的根治办法：文件天生属于某个仓库，不再靠路径反推。
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct RepoSet {
     pub repos: Vec<DiscoveredRepo>,
     /// 发现数量超上限被截断。UI 要明说，不能假装列全了。
@@ -310,6 +310,14 @@ fn git_status_retry_delay(failure_count: u8) -> Option<std::time::Duration> {
     Some(std::time::Duration::from_millis(
         150 * (1_u64 << (failure_count - 1)),
     ))
+}
+
+/// 一次 git status 失败后界面会不会变，不变就不重画。
+///
+/// 首次加载失败要出「读取失败」；第一次失败让提示出现；自动重试用完时从「正在重试」
+/// 换成「读取失败」。之后再失败界面不变，一直读不出的目录不该每次文件变化都重画。
+fn git_status_failure_changes_view(first_load: bool, failure_count: u8) -> bool {
+    first_load || failure_count == 1 || failure_count == GIT_STATUS_MAX_AUTO_RETRIES + 1
 }
 
 fn clear_confirmed_git_index_ops<K, Q>(

@@ -208,6 +208,9 @@ impl Workspace {
     /// 去重，重复通知不会叠并发。
     ///
     /// 文件树的目录列表也在这里标旧；打开着的文件没改过就重读，改过就提示。
+    ///
+    /// 这里自己不通知重画：标旧不改界面，重取回来的结果真变了才由各 ensure_* 通知。
+    /// 运行中的智能体每秒能报好几次变化，每次都重画会让所有面板跟着重建。
     pub(crate) fn on_project_changed(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
         if !self.watched_projects.contains(&root) {
             return;
@@ -217,7 +220,6 @@ impl Workspace {
         self.forget_repo_info_under(&root, cx);
         self.invalidate_project_git_status(&root, cx);
         self.ensure_git_repos(root, cx);
-        cx.notify();
     }
 
     /// 某台机器断开：它替我们建的监听随连接没了，重连后重新登记。断线期间分支可能变了，
@@ -291,8 +293,11 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.repo_info_inflight.remove(&cwd);
                 this.repo_info_stale.remove(&cwd);
+                let changed = this.repo_info.get(&cwd).map(|(_, old)| old) != Some(&info);
                 this.repo_info.insert(cwd, (Instant::now(), info));
-                cx.notify();
+                if changed {
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -363,19 +368,19 @@ impl Workspace {
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.git_repos_inflight.remove(&root_for_task);
-                    this.git_repos.insert(
-                        root_for_task.clone(),
-                        (
-                            Instant::now(),
-                            RepoSet {
-                                repos: found.repos,
-                                truncated: found.truncated,
-                            },
-                        ),
-                    );
-                    // 提交框按发现结果来建，而那一步不在 render 里。
-                    this.schedule_visible_refresh(cx);
-                    cx.notify();
+                    let set = RepoSet {
+                        repos: found.repos,
+                        truncated: found.truncated,
+                    };
+                    let changed =
+                        this.git_repos.get(&root_for_task).map(|(_, old)| old) != Some(&set);
+                    this.git_repos
+                        .insert(root_for_task.clone(), (Instant::now(), set));
+                    if changed {
+                        // 提交框按发现结果来建，而那一步不在 render 里。
+                        this.schedule_visible_refresh(cx);
+                        cx.notify();
+                    }
                 });
             })
             .detach();
@@ -483,31 +488,42 @@ impl Workspace {
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // 内容、失败计数（Git 页据此显示读取失败）、勾选框的乐观状态任一变了才重画。
+                let content_changed = this.git_status.get(&root).map(|(_, old)| old) != Some(&data);
                 let current_generation = this
                     .git_status_generation
                     .get(&root)
                     .copied()
                     .unwrap_or_default();
-                match git_status_response_action(current_generation, request_generation, data.ok) {
+                let changed = match git_status_response_action(
+                    current_generation,
+                    request_generation,
+                    data.ok,
+                ) {
                     GitStatusResponseAction::AcceptCurrent => {
                         this.git_status_inflight.remove(&root);
-                        this.git_status_failures.remove(&root);
+                        let recovered = this.git_status_failures.remove(&root).is_some();
                         this.git_status.insert(root.clone(), (Instant::now(), data));
                         // 当前代数的请求一定在所有已完成 index 操作之后启动；运行中的
                         // 操作仍是 false，不能提前移除。
+                        let pending_before = this.git_index_pending.len();
                         clear_confirmed_git_index_ops(&mut this.git_index_pending, &root);
+                        content_changed
+                            || recovered
+                            || this.git_index_pending.len() != pending_before
                     }
                     GitStatusResponseAction::AcceptStaleAndRefresh => {
                         // 这份成功快照不是最终权威状态，但仍比一直保留旧缓存可靠；先
                         // 展示它并保持过期，再串行补拉当前代。持续有文件事件时也不会
                         // 因为每个回包都被丢弃而永远卡在启动时的空状态。
                         this.git_status_inflight.remove(&root);
-                        this.git_status_failures.remove(&root);
+                        let recovered = this.git_status_failures.remove(&root).is_some();
                         this.git_status.insert(
                             root.clone(),
                             (Instant::now() - std::time::Duration::from_secs(3600), data),
                         );
                         this.ensure_git_status(root.clone(), cx);
+                        content_changed || recovered
                     }
                     GitStatusResponseAction::PreserveAndRetry => {
                         // 命令失败不等于工作区干净：保留上一次成功快照；首次加载就失败
@@ -518,11 +534,16 @@ impl Workspace {
                             *failures = failures.saturating_add(1);
                             *failures
                         };
-                        if let Some((fetched_at, _)) = this.git_status.get_mut(&root) {
-                            *fetched_at = Instant::now();
-                        } else {
-                            this.git_status.insert(root.clone(), (Instant::now(), data));
-                        }
+                        let first_load = match this.git_status.get_mut(&root) {
+                            Some((fetched_at, _)) => {
+                                *fetched_at = Instant::now();
+                                false
+                            }
+                            None => {
+                                this.git_status.insert(root.clone(), (Instant::now(), data));
+                                true
+                            }
+                        };
 
                         if let Some(delay) = git_status_retry_delay(failure_count) {
                             // inflight 在退避期间继续占位，文件事件和 render 不会再起一条
@@ -548,11 +569,14 @@ impl Workspace {
                             // 事件或界面交互超过 TTL 后仍会再尝试。
                             this.git_status_inflight.remove(&root);
                         }
+                        git_status_failure_changes_view(first_load, failure_count)
                     }
+                };
+                if changed {
+                    // 聚合开关和提交框的占位跟着这份快照走，不能只等 2 秒保底。
+                    this.schedule_visible_refresh(cx);
+                    cx.notify();
                 }
-                // 聚合开关和提交框的占位跟着这份快照走，不能只等 2 秒保底。
-                this.schedule_visible_refresh(cx);
-                cx.notify();
             });
         })
         .detach();
@@ -587,11 +611,14 @@ impl Workspace {
                 let current_generation = this.branches_generation.get(&root).copied().unwrap_or(0);
                 // 删除分支发生在列举期间时，这一包还含着已删的分支。不写回，再排一次刷新。
                 if current_generation == request_generation {
+                    let changed = this.branches.get(&root).map(|(_, old)| old) != Some(&list);
                     this.branches.insert(root, (Instant::now(), list));
+                    if changed {
+                        cx.notify();
+                    }
                 } else {
                     this.schedule_visible_refresh(cx);
                 }
-                cx.notify();
             });
         })
         .detach();

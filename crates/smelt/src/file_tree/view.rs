@@ -1011,6 +1011,10 @@ pub fn file_content_parts(
                     .when(!overlay_open, |el| el.child(html))
                     .into_any_element()
             } else if preview {
+                // TODO(上游 gpui-kit 0ebd729)：`base/src/text/inline.rs` 的 `retain_layout` 每次
+                // 有排版状态被释放就整表扫一遍 `RETAINED_LAYOUTS`，表随运行时间变大，长文档
+                // 预览每重画一次都更慢。我们这边只能少重画（工作台无谓的通知已经收掉），
+                // 根治要等上游改成增量清理。
                 div()
                     .id("md-preview")
                     .flex_1()

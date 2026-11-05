@@ -9,10 +9,11 @@ use super::{
     DiffScope, GitDiff, GitStatusData, GitStatusResponseAction, GitWrite, PendingGitIndexOp,
     aggregate_diff_ready_for_file, build_git_tree, clear_confirmed_git_index_ops,
     commit_button_label, diff_feedback_text, diff_parse_failure, diff_scroll_target,
-    full_file_path, git_empty_list_message, git_index_op_in_flight, git_status_response_action,
-    git_status_retry_delay, hunk_line_anchor, parse_diff, parse_diff_with_file_headers,
-    release_git_write, repo_needs_attention, reserve_git_write, resolve_git_write_target,
-    should_close_aggregate_diff, split_staged_and_changed,
+    full_file_path, git_empty_list_message, git_index_op_in_flight,
+    git_status_failure_changes_view, git_status_response_action, git_status_retry_delay,
+    hunk_line_anchor, parse_diff, parse_diff_with_file_headers, release_git_write,
+    repo_needs_attention, reserve_git_write, resolve_git_write_target, should_close_aggregate_diff,
+    split_staged_and_changed,
 };
 use smelt_runtime_client::protocol::git::{DiffKind, DiscoveredRepo, RepoKind};
 
@@ -128,6 +129,20 @@ fn git_status_failure_retries_are_bounded() {
         Some(std::time::Duration::from_millis(600))
     );
     assert_eq!(git_status_retry_delay(4), None);
+}
+
+#[test]
+fn repeated_git_status_failures_redraw_only_on_visible_transitions() {
+    // 首次加载就失败：占位要换成「读取失败」。
+    assert!(git_status_failure_changes_view(true, 5));
+    // 第一次失败出提示；重试用完那次从「正在重试」变「读取失败」。
+    assert!(git_status_failure_changes_view(false, 1));
+    assert!(git_status_failure_changes_view(false, 4));
+    // 重试中和重试用完以后再失败，界面都不变。
+    assert!(!git_status_failure_changes_view(false, 2));
+    assert!(!git_status_failure_changes_view(false, 3));
+    assert!(!git_status_failure_changes_view(false, 5));
+    assert!(!git_status_failure_changes_view(false, u8::MAX));
 }
 
 #[test]

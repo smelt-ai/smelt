@@ -914,36 +914,51 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.dir_inflight.remove(&dir);
                 let current_generation = this.dir_generation.get(&dir).copied().unwrap_or(0);
-                match entries {
+                // 列表内容变了才重画：项目里文件一直在写时，目录本身多半没变。
+                let changed = match entries {
                     // 删除发生在列目录期间时，这一包是旧快照。不写回，再排一次刷新去读新代次。
                     Ok(_) if current_generation != request_generation => {
                         this.schedule_visible_refresh(cx);
+                        false
                     }
                     Ok(entries) => {
-                        this.dir_cache.entry(dir.runtime).or_default().insert(
-                            dir.root,
-                            DirListing {
-                                entries: Rc::new(entries),
-                                stale: false,
-                            },
-                        );
+                        let cache = this.dir_cache.entry(dir.runtime).or_default();
+                        match cache.get_mut(&dir.root) {
+                            Some(old) if *old.entries == entries => {
+                                old.stale = false;
+                                false
+                            }
+                            _ => {
+                                cache.insert(
+                                    dir.root,
+                                    DirListing {
+                                        entries: Rc::new(entries),
+                                        stale: false,
+                                    },
+                                );
+                                true
+                            }
+                        }
                     }
                     // 连不上或目录没了：有旧列表就留着（仍标旧，下次刷新再试），
                     // 没有就记一份空的，免得一直转「加载中」。
                     Err(error) => {
                         eprintln!("[files] 列目录 {} 失败：{}", dir.root, error_text(error));
-                        this.dir_cache
-                            .entry(dir.runtime)
-                            .or_default()
-                            .entry(dir.root)
-                            .or_insert_with(|| DirListing {
-                                entries: Rc::new(Vec::new()),
-                                stale: false,
-                            });
+                        let cache = this.dir_cache.entry(dir.runtime).or_default();
+                        let first = !cache.contains_key(&dir.root);
+                        cache.entry(dir.root).or_insert_with(|| DirListing {
+                            entries: Rc::new(Vec::new()),
+                            stale: false,
+                        });
+                        first
                     }
-                }
+                };
+                // 等这一层出来才能定位的行，滚过去也要重画一次。
+                let revealing = this.file_tree_pending_reveal.is_some();
                 this.try_flush_file_tree_reveal(cx);
-                cx.notify();
+                if changed || revealing {
+                    cx.notify();
+                }
             });
         })
         .detach();

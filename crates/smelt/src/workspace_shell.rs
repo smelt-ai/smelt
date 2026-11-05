@@ -687,6 +687,7 @@ impl Panel for ShellPanel {
 impl Render for ShellPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let builtin = self.builtin;
+        let _timing = smelt_ui::frame_stats::RenderTiming::start(builtin.name());
         self.workspace
             .update(cx, |workspace, cx| builtin.render(workspace, window, cx))
             .unwrap_or_else(|_| div().size_full().into_any_element())

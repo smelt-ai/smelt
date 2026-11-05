@@ -2,6 +2,7 @@
 //!
 //! 用 `SMELT_FRAME_STATS=1` 打开，默认关闭且不计时。只量 render 函数体（建元素树），
 //! 不含其后的布局和绘制；拿来比较拆视图、换渲染后端前后的重绘次数和单次开销。
+//! [`count`] 记不计时的事件（比如谁通知了工作台），和 render 同一行汇总，用来找重画的源头。
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -31,6 +32,9 @@ impl ViewStats {
     }
 
     fn line(&self, view: &str) -> String {
+        if self.total.is_zero() {
+            return format!("{view} {} 次/秒", self.renders);
+        }
         let avg = self.total / self.renders.max(1);
         format!(
             "{view} {} 次/秒 · 平均 {:.2}ms · 最长 {:.2}ms",
@@ -71,29 +75,40 @@ impl Drop for RenderTiming {
         let Some(started) = self.started else {
             return;
         };
-        let now = Instant::now();
-        WINDOW.with(|window| {
-            let mut window = window.borrow_mut();
-            let current = window.get_or_insert_with(|| Window {
-                started: now,
-                views: BTreeMap::new(),
-            });
-            current
-                .views
-                .entry(self.view)
-                .or_default()
-                .record(now - started);
-            if now - current.started >= REPORT_INTERVAL {
-                let lines = current
-                    .views
-                    .iter()
-                    .map(|(view, stats)| stats.line(view))
-                    .collect::<Vec<_>>();
-                eprintln!("[smelt frame] {}", lines.join(" | "));
-                *window = None;
-            }
-        });
+        record(self.view, Some(started));
     }
+}
+
+/// 记一次事件，不计时。名字前加个前缀和视图区分开，比如 `通知:工作台`。
+pub fn count(event: &'static str) {
+    if enabled() {
+        record(event, None);
+    }
+}
+
+fn record(view: &'static str, started: Option<Instant>) {
+    let now = Instant::now();
+    WINDOW.with(|window| {
+        let mut window = window.borrow_mut();
+        let current = window.get_or_insert_with(|| Window {
+            started: now,
+            views: BTreeMap::new(),
+        });
+        let stats = current.views.entry(view).or_default();
+        match started {
+            Some(started) => stats.record(now - started),
+            None => stats.renders += 1,
+        }
+        if now - current.started >= REPORT_INTERVAL {
+            let lines = current
+                .views
+                .iter()
+                .map(|(view, stats)| stats.line(view))
+                .collect::<Vec<_>>();
+            eprintln!("[smelt frame] {}", lines.join(" | "));
+            *window = None;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -109,5 +124,14 @@ mod tests {
             stats.line("Workspace"),
             "Workspace 2 次/秒 · 平均 3.00ms · 最长 4.00ms"
         );
+    }
+
+    #[test]
+    fn untimed_events_report_only_count() {
+        let stats = ViewStats {
+            renders: 3,
+            ..ViewStats::default()
+        };
+        assert_eq!(stats.line("通知:工作台"), "通知:工作台 3 次/秒");
     }
 }

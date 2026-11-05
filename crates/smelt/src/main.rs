@@ -2539,6 +2539,9 @@ struct Workspace {
     _agent_hosts_sub: Option<Subscription>,
     /// provider 账户状态（额度）变化时重绘侧栏额度行。
     _provider_status_sub: Option<Subscription>,
+    /// `SMELT_FRAME_STATS` 下数工作台每秒被通知几次。每次通知都会让各面板跟着重画，
+    /// 这个数高了就是有地方在无谓地通知。
+    _notify_stats_sub: Option<Subscription>,
     /// 外观全局变化。不能放进 `settings_subs`：设置滑块重建时会清掉那个 vec。
     _appearance_sub: Option<Subscription>,
     /// 侧栏按哪一天算的「今天」。跨日检查拿它比，见 [`Self::start_date_change_watch`]。
@@ -2935,6 +2938,7 @@ impl Workspace {
             _agent_host_sub: None,
             _agent_hosts_sub: None,
             _provider_status_sub: None,
+            _notify_stats_sub: None,
             _appearance_sub: None,
             shown_date: Local::now().date_naive(),
             _date_change_timer: None,
@@ -3033,6 +3037,8 @@ impl Workspace {
                 |_, _, cx| cx.notify(),
             ),
         );
+        ws._notify_stats_sub =
+            Some(cx.observe_self(|_, _| smelt_ui::frame_stats::count("通知:工作台")));
         ws._appearance_sub = Some(
             cx.observe_global_in::<Appearance>(window, |this, _window, cx| {
                 this.schedule_visible_refresh(cx)
