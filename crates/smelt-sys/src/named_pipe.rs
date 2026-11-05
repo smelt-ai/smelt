@@ -3,8 +3,9 @@
 //! 套接字，都是这里的管道。不用系统的 AF_UNIX：afunix.sys 在 Windows 10 上有内核里的
 //! 释放后再用，桌面反复建连、断开时整机蓝屏（0x3B，#251）。
 //!
-//! 管道拒绝远程客户端，DACL 只给当前用户。对端 pid 用 `GetNamedPipeClientProcessId`
-//! （服务端）/ `GetNamedPipeServerProcessId`（客户端）拿。
+//! 管道拒绝远程客户端，DACL 只给当前用户。我们作为客户端打开管道时只许服务端识别身份、
+//! 不许冒用（[`CLIENT_SQOS`]）。对端 pid 用 `GetNamedPipeClientProcessId`（服务端）/
+//! `GetNamedPipeServerProcessId`（客户端）拿。
 //!
 //! 读写带 `FILE_FLAG_OVERLAPPED`。每次操作自己的手动重置事件，和本地 `shutdown` 的事件、
 //! 读写超时一起等。不切换 `PIPE_NOWAIT`：那个模式挂在管道实例上，同一实例上的读写共享
@@ -38,7 +39,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
-    PIPE_ACCESS_DUPLEX,
+    PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
@@ -57,6 +58,11 @@ use crate::process::current_user_key;
 /// 这段等待盖住中间那一下空档，以及队列攒满时等调用方取走的时间。服务没起来时
 /// `CreateFile` 是「找不到」，不会耗这点时间。
 const CONNECT_BUDGET: Duration = Duration::from_secs(2);
+
+/// 我们作为客户端打开管道时带的安全服务质量：服务端只能识别我们是谁，不能冒用我们的身份。
+/// 不带时默认可以冒用：同一用户下别的进程抢先建好同名管道，以管理员运行的 smelt 连上去，
+/// 就把管理员令牌交给了它。我们的服务端认人只看对端 pid，用不着冒用。
+const CLIENT_SQOS: u32 = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
 
 /// 当前用户专属的管道名，形如 `\\.\pipe\smelt-<sid>-<tag>`。
 pub fn user_pipe_path(tag: &str) -> io::Result<String> {
@@ -389,7 +395,7 @@ impl PipeStream {
                     0,
                     std::ptr::null(),
                     OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | CLIENT_SQOS,
                     std::ptr::null_mut(),
                 )
             };
@@ -684,7 +690,8 @@ pub enum Waitable<'a> {
 /// 阻塞到其中一个就绪，或者超时，返回每一个是否就绪。不取走管道里的数据。
 ///
 /// 管道上挂一个零字节的重叠读：有数据或对端关掉时它完成。返回前没完成的都取消并等它结束，
-/// 不会留下一个还挂在栈外缓冲上的读。本端已经 shutdown 的管道直接算就绪，读会报出 EOF。
+/// 不会留下一个还挂在栈外缓冲上的读。本端 shutdown 了读方向的管道算就绪（之前或等的时候
+/// 都算），读会报出 EOF。
 pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io::Result<Vec<bool>> {
     struct ZeroRead<'a> {
         index: usize,
@@ -739,6 +746,12 @@ pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io:
         }
     }
     let mut handles = pending;
+    // 等的时候本地 shutdown 了读方向也要醒：之后读就是 EOF，算就绪。
+    for read in &reads {
+        if !ready[read.index] {
+            handles.push(read.handle.shared.read_shut.event.raw());
+        }
+    }
     for source in sources {
         if let Waitable::Event(event) = source {
             handles.push(event.0.raw());
@@ -767,8 +780,8 @@ pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io:
         let ok = unsafe {
             GetOverlappedResult(read.handle.raw, &read.overlapped, &mut transferred, 1)
         };
-        ready[read.index] =
-            ok != 0 || unsafe { GetLastError() } != ERROR_OPERATION_ABORTED;
+        let completed = ok != 0 || unsafe { GetLastError() } != ERROR_OPERATION_ABORTED;
+        ready[read.index] = completed || read.handle.shared.read_shut.is_set();
     }
     if let Some(error) = wait_error {
         return Err(error);
@@ -800,7 +813,7 @@ pub fn output_pipe() -> io::Result<(PipeStream, OwnedHandle)> {
             0,
             std::ptr::null(),
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | CLIENT_SQOS,
             std::ptr::null_mut(),
         )
     };
@@ -860,56 +873,45 @@ fn overlapped_transfer(
     let handles = [event.raw(), shut.event.raw()];
     // 同时就绪时返回下标小的，即读写完成。
     let status = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, millis) };
-    if status == WAIT_OBJECT_0 {
-        return overlapped_result(handle, &overlapped, write, false).map(Transfer::Done);
-    }
+    let finished = status == WAIT_OBJECT_0;
     let interrupted = status == WAIT_OBJECT_0 + 1;
-    // 超时、被 shutdown 叫醒，或等待本身失败。缓冲和 OVERLAPPED 都在调用方的栈上，
-    // 返回前取消并等这次读写真的结束。
-    let wait_error = (!interrupted && status != WAIT_TIMEOUT).then(io::Error::last_os_error);
-    unsafe { CancelIoEx(handle, &overlapped) };
-    match overlapped_result(handle, &overlapped, write, true) {
-        // 取消之前已经完成：数据不能丢。
-        Ok(transferred) => Ok(Transfer::Done(transferred)),
-        Err(error) if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) => {
-            if let Some(error) = wait_error {
-                return Err(error);
-            }
-            if interrupted {
-                return Ok(Transfer::Shut);
-            }
-            Err(if matches!(wait, Wait::Poll) {
-                io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
-            } else {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    if write {
-                        "命名管道写入超时"
-                    } else {
-                        "命名管道读取超时"
-                    },
-                )
-            })
-        }
-        Err(error) => Err(error),
+    let wait_error =
+        (!finished && !interrupted && status != WAIT_TIMEOUT).then(io::Error::last_os_error);
+    if !finished {
+        // 超时、被 shutdown 叫醒，或等待本身失败。缓冲和 OVERLAPPED 都在调用方的栈上，
+        // 取消之后下面要等这次读写真的结束才返回。
+        unsafe { CancelIoEx(handle, &overlapped) };
     }
-}
-
-/// `wait` 为真时等到这次读写结束，取消之后用。
-fn overlapped_result(
-    handle: HANDLE,
-    overlapped: &OVERLAPPED,
-    write: bool,
-    wait: bool,
-) -> io::Result<usize> {
     let mut transferred = 0u32;
-    let ok = unsafe {
-        GetOverlappedResult(handle, overlapped, &mut transferred, i32::from(wait))
+    let ok = unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, 1) };
+    let error = (ok == 0).then(|| unsafe { GetLastError() });
+    // 传了字节就报字节数，出的错留给下一次读写：取消之前已经读到的数据不能丢，写出去的
+    // 字节也不能当没写。和 std 的 `Read::read`、`Write::write` 一样，报错就是一个字节也
+    // 没传。
+    let Some(error) = error.filter(|_| transferred == 0) else {
+        return Ok(Transfer::Done(transferred as usize));
     };
-    if ok != 0 {
-        return Ok(transferred as usize);
+    if finished || error != ERROR_OPERATION_ABORTED {
+        return map_completed_error(error, write).map(Transfer::Done);
     }
-    map_completed_error(unsafe { GetLastError() }, write)
+    if let Some(error) = wait_error {
+        return Err(error);
+    }
+    if interrupted {
+        return Ok(Transfer::Shut);
+    }
+    Err(if matches!(wait, Wait::Poll) {
+        io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
+    } else {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            if write {
+                "命名管道写入超时"
+            } else {
+                "命名管道读取超时"
+            },
+        )
+    })
 }
 
 fn map_completed_error(error: u32, write: bool) -> io::Result<usize> {
@@ -1292,6 +1294,102 @@ mod tests {
             (&clone).read(&mut buf).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
+    }
+
+    /// 写超时截断的一次写，报回的字节数要和对端收到的一致：报错就是一个字节也没写进去，
+    /// 和 std 的 `Write::write` 约定一样。
+    #[test]
+    fn a_write_cut_short_by_its_timeout_reports_what_the_peer_got() {
+        let (_listener, server, client) = connected_pair("partial");
+        // 比管道缓冲（64 KiB）大得多，对端不读就写不完。
+        let payload = vec![7u8; 1024 * 1024];
+        server
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let writer = thread::spawn(move || {
+            let written = match (&server).write(&payload) {
+                Ok(written) => written,
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => 0,
+                Err(error) => panic!("写失败：{error}"),
+            };
+            drop(server);
+            written
+        });
+        // 只读走一部分，剩下的让写超时。
+        let mut taken = vec![0u8; 200 * 1024];
+        (&client).read_exact(&mut taken).unwrap();
+        let written = writer.join().unwrap();
+        let mut rest = Vec::new();
+        (&client).read_to_end(&mut rest).unwrap();
+        assert_eq!(written, taken.len() + rest.len());
+    }
+
+    /// 我们作为客户端连上去，服务端只能识别身份、不能冒用：同一用户下别的进程抢先建了
+    /// 同名管道，以管理员运行的 smelt 连上去也交不出能用的令牌。
+    #[test]
+    fn servers_can_identify_clients_but_not_impersonate_them() {
+        use windows_sys::Win32::Security::{
+            RevertToSelf, SecurityIdentification, TokenImpersonationLevel,
+        };
+        use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+
+        fn impersonation_level() -> io::Result<i32> {
+            let mut token: HANDLE = std::ptr::null_mut();
+            if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let token = unsafe { OwnedHandle::from_raw_handle(token) };
+            let mut level = 0i32;
+            let mut needed = 0u32;
+            let ok = unsafe {
+                GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenImpersonationLevel,
+                    std::ptr::from_mut(&mut level).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                    &mut needed,
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(level)
+        }
+
+        let (_listener, server, client) = connected_pair("sqos");
+        // 服务端要先从管道里读到数据，才能冒用客户端。
+        (&client).write_all(b"x").unwrap();
+        let mut byte = [0u8; 1];
+        (&server).read_exact(&mut byte).unwrap();
+        // 在单独的线程里冒用，不弄脏跑测试的线程。
+        let level = thread::spawn(move || {
+            let handle = server.shared.use_handle().expect("连接还开着");
+            if unsafe { ImpersonateNamedPipeClient(handle.raw) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let level = impersonation_level();
+            unsafe { RevertToSelf() };
+            level
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(level, SecurityIdentification);
+    }
+
+    /// 等可读的时候本地 shutdown 了读方向，要叫醒它、算作就绪（接着读就是 EOF），和等着
+    /// 的读一样。
+    #[test]
+    fn local_shutdown_wakes_wait_readable() {
+        let (_listener, server, _client) = connected_pair("wait-shut");
+        let waiting = server.try_clone().unwrap();
+        let waiter = thread::spawn(move || {
+            wait_readable(&[Waitable::Pipe(&waiting)], Some(ARRIVES)).unwrap()
+        });
+        thread::sleep(Duration::from_millis(50));
+        server.shutdown(Shutdown::Read).unwrap();
+        assert_eq!(waiter.join().unwrap(), [true]);
     }
 
     #[test]

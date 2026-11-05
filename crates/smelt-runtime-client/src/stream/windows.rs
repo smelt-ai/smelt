@@ -200,7 +200,8 @@ impl RuntimeListener {
         PipeListener::bind_taking_over(pipe_name(path.as_ref())?).map(Self)
     }
 
-    /// 一个个接受进来的连接，被 [`stopper`](Self::stopper) 叫停后结束。
+    /// 一个个接受进来的连接，被 [`stopper`](Self::stopper) 叫停后结束。交出来的错误接受
+    /// 线程已经退避过，调用方记日志就行。
     pub fn incoming(&self) -> impl Iterator<Item = io::Result<RuntimeStream>> + '_ {
         self.0
             .incoming()

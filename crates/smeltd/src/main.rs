@@ -2822,13 +2822,6 @@ pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutco
     classify_self_upgrade_reply(&reply)
 }
 
-/// 连续第 `failures` 次（从 0 起）accept 失败后隔多久再试：50 毫秒起翻倍，上限 5 秒。
-fn accept_retry_delay(failures: u32) -> Duration {
-    Duration::from_millis(50)
-        .saturating_mul(1u32.checked_shl(failures).unwrap_or(u32::MAX))
-        .min(Duration::from_secs(5))
-}
-
 /// 服务主循环：远端自愈→accept（+macOS 菜单栏主线程编排）。
 #[allow(clippy::too_many_arguments)]
 fn run_serve_loop(
@@ -2882,21 +2875,14 @@ fn run_serve_loop(
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
     // 桌面、命令行和 Bun / Pi 都连这一条监听（Windows 上是命名管道）。
     let accept_loop = move || {
-        // 轮询例外：accept 失败（描述符用尽、建不出新的管道实例）之后没有「可以再试」的
-        // 事件；周期 50 毫秒起翻倍，上限 5 秒，成功一次就回到起点。
-        let mut failures = 0u32;
+        // accept 失败之后的退避由监听自己做（`RuntimeListener::incoming`），这里只记日志。
         for conn in listener.incoming() {
             match conn {
                 Ok(conn) => {
-                    failures = 0;
                     let context = server.context(Principal::Local);
                     thread::spawn(move || handle_conn(conn, context));
                 }
-                Err(error) => {
-                    dlog(&format!("accept 失败：{error}"));
-                    thread::sleep(accept_retry_delay(failures));
-                    failures = failures.saturating_add(1);
-                }
+                Err(error) => dlog(&format!("accept 失败：{error}")),
             }
         }
         // Windows 上只有停机叫停了监听才会走到这里。

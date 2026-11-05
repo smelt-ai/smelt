@@ -17,7 +17,10 @@ mod terminal;
 use lifecycle::*;
 use remote::*;
 
-pub(crate) use lifecycle::{graceful_shutdown, shutdown_started, wait_for_shutdown_exit};
+pub(crate) use lifecycle::{graceful_shutdown, shutdown_started};
+// 只有 Windows 的接受循环在监听被叫停后要等停机线程收尾，Unix 的接受循环不会结束。
+#[cfg(windows)]
+pub(crate) use lifecycle::wait_for_shutdown_exit;
 
 pub(crate) use auth::*;
 pub(crate) use subscribe::*;
