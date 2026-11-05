@@ -1,4 +1,4 @@
-# smelt 的命令行：`smelt agent …`、`smelt automation …`、`smelt settings …`。
+# smelt 的命令行：智能体、对话、自动化、MCP/插件/模型、设置（全部见 src/lib.rs 的 print_help）。
 # lib 给 GUI 的 smelt 在启动时先拦截子命令；bin 是控制台的同一套命令：Windows 发版时改名成
 # smelt.com 放在 smelt.exe 旁边，Linux 运行时包里以 smelt 为名分发（见 src/main.rs）。
 [package]

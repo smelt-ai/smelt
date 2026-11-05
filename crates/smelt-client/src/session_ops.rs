@@ -70,6 +70,22 @@ pub fn submit_automation_command(
     Ok((result, snapshot))
 }
 
+/// 运行时手上的整份自动化：定义、状态和最近的运行记录。webhook 令牌原样带着，给人或智能体看
+/// 之前先过 [`smelt_model::automation::redact_automation_credentials`]。
+pub fn automations_snapshot(
+    runtime: &RuntimeClient,
+) -> Result<smelt_model::automation::AutomationFile, String> {
+    let response = runtime.request_ok(
+        &json!({ "op": DaemonOperation::AutomationsSnapshot }),
+        REQUEST_TIMEOUT,
+    )?;
+    response
+        .get("automations")
+        .cloned()
+        .ok_or_else(|| "smeltd returned no automation snapshot".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))
+}
+
 /// 列出侧栏「对话」栏里的产品对话：工作区目录里绑了智能体、开在智能体 space 里的那些。
 pub fn list_agent_conversations(
     runtime: &RuntimeClient,
