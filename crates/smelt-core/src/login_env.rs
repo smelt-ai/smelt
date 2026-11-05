@@ -193,9 +193,24 @@ fn probe() -> LoginEnv {
         .cloned()
         .or_else(|| std::env::var("PATH").ok())
         .unwrap_or_default();
+    let bin = smelt_paths::smelt_home().map(|home| home.join("bin"));
+    let path = with_smelt_bin(&path, bin.as_deref());
     vars.insert("PATH".to_string(), path.clone());
 
     LoginEnv { path, vars }
+}
+
+/// 把 `~/.smelt/bin` 放到 PATH 最前面：智能体和它起的 shell 里直接敲 `smelt` 就能用内置的
+/// `smelt` 技能，不靠用户自己把它加进 PATH。用的是跟这个运行时配套的那份：macOS 上是桌面
+/// 放的、指向 App 的软链接，Linux 上是安装包装进来的 CLI。
+fn with_smelt_bin(path: &str, bin: Option<&std::path::Path>) -> String {
+    let Some(bin) = bin else {
+        return path.to_string();
+    };
+    let rest = std::env::split_paths(path).filter(|entry| entry != bin);
+    std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(rest))
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// 把 `env -0` 的输出解析成 KV。
@@ -351,7 +366,28 @@ pub fn xdg_config_home() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_marked, parse_env_block};
+    use super::{extract_marked, parse_env_block, with_smelt_bin};
+
+    #[test]
+    fn smelt_bin_goes_first_once() {
+        let bin = std::path::PathBuf::from("/home/me/.smelt/bin");
+        let join = |dirs: &[&str]| {
+            std::env::join_paths(dirs)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(
+            with_smelt_bin(&join(&["/usr/bin", "/bin"]), Some(&bin)),
+            join(&["/home/me/.smelt/bin", "/usr/bin", "/bin"])
+        );
+        // 用户自己加过的，挪到最前面，不留两份。
+        assert_eq!(
+            with_smelt_bin(&join(&["/usr/bin", "/home/me/.smelt/bin"]), Some(&bin)),
+            join(&["/home/me/.smelt/bin", "/usr/bin"])
+        );
+        assert_eq!(with_smelt_bin("/usr/bin", None), "/usr/bin");
+    }
 
     mod system_proxy_order {
         use super::super::apply_environment;
