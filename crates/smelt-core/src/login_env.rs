@@ -261,6 +261,10 @@ pub fn login_environment() -> &'static HashMap<String, String> {
 /// 沙盒标识）子进程照样需要。同名的以 login shell 为准——用户在 rc 里写的才是
 /// 他真正在用的那套工具链。npm 官方源连不上、用户又没配源时补上国内镜像，
 /// 见 `mirrors`。
+///
+/// 用户只在系统设置里配了代理时，按系统代理补上 `HTTP(S)_PROXY` / `NO_PROXY`，
+/// 见 `system_proxy`。放在这里而不是各调用点：起子进程的地方一多，逐个补总会漏。
+/// 调用方之后再设的变量（启动配置里的代理等）照常覆盖这里补的。
 pub fn apply_login_environment(command: &mut Command) -> &mut Command {
     for (key, value) in login_environment() {
         command.env(key, value);
@@ -268,7 +272,9 @@ pub fn apply_login_environment(command: &mut Command) -> &mut Command {
     if let Some(registry) = crate::mirrors::npm_registry_fallback() {
         command.env("NPM_CONFIG_REGISTRY", registry);
     }
-    command.env("PATH", login_path())
+    command.env("PATH", login_path());
+    crate::system_proxy::apply_system_proxy_fallback(command);
+    command
 }
 
 /// 四个 workspace 覆盖变量的读取顺序：**先查当前进程自己的环境**，查不到再

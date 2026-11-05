@@ -1,4 +1,4 @@
-//! 让 Pi（smelt-agent）和 ACP agent 跟随系统代理。
+//! 让 Smelt 起的子进程跟随系统代理。
 //!
 //! smelt-agent 跑在 Bun 上，Bun 的 `fetch` 只认 `HTTP(S)_PROXY` / `NO_PROXY` 环境变量，
 //! 不读 Windows「设置 → 代理」、也不读 macOS「网络 → 代理」；Claude Code、Gemini CLI
@@ -14,9 +14,10 @@
 //! - **只认固定代理**：系统代理没开、配了 PAC 自动配置脚本、只有 SOCKS，都不注入。
 //!   PAC 和手动代理同时开着时浏览器优先用 PAC，补手动那条会和浏览器走不同出口；
 //!   Bun 跑不了 PAC。开了 TUN 的代理工具不需要环境变量也能通。
-//! - **只接 agent 本体和要联网的辅助命令**（Pi、ACP agent、装 ACP CLI、kiro 取令牌）。
-//!   agent 代跑的终端命令（`acp_terminal`）、git（`subprocess`）不接：内网命令不该因为
-//!   系统绕过列表没写全就被塞进代理。
+//! - **入口只有一个**：`login_env::apply_login_environment` 铺完用户环境后调这里，所有走它
+//!   起的子进程（Pi、ACP agent、agent 代跑的命令、后台任务、git、安装 CLI）都跟随系统代理，
+//!   规则和浏览器一致：绕过列表里的地址直连。不要在调用点单独再调。
+//!   用户自己打开的内置终端（smeltd 的 PTY）不走这里，和系统终端 App 保持一致。
 //! - **绕过列表一起翻译**，并始终带上回环地址：OAuth 回调服务器、内网地址不能被塞进代理。
 //!
 //! 每次起进程现读：用户随时会开关代理工具，缓存会读到过期值。读系统代理是一次注册表 /

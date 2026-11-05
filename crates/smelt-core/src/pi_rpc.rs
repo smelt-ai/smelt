@@ -609,8 +609,6 @@ fn spawn_process(
     if let Some(path) = background_sock {
         command.env("SMELT_BACKGROUND_TASK_SOCK", path);
     }
-    // 环境都铺完再看：用户在 rc、启动配置里写过代理就不动，只配了系统代理才补。
-    crate::system_proxy::apply_system_proxy_fallback(&mut command);
     if let Some(cwd) = launch.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
         command.current_dir(cwd);
     }

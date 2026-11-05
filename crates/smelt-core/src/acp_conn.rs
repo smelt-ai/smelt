@@ -2691,8 +2691,6 @@ fn kiro_cli_get_kas_token(force_refresh: bool) -> Result<serde_json::Value, Stri
     let program = resolve_in_path("kiro-cli", &search_path).unwrap_or_else(|| "kiro-cli".into());
     let mut command = std::process::Command::new(program);
     crate::login_env::apply_login_environment(&mut command);
-    // 刷新令牌要联网，和 agent 本体一样跟随系统代理。
-    crate::system_proxy::apply_system_proxy_fallback(&mut command);
     command.args(["chat", "_", "get-kas-token"]);
     if force_refresh {
         command.arg("--force-refresh");
@@ -2971,8 +2969,6 @@ fn spawn_agent_process(
     if let Some(runtime) = managed_bun {
         runtime.inherit_into(&mut std_cmd);
     }
-    // 环境都铺完再看：用户在 rc、启动规格里配过代理就不动，只配了系统代理才补。
-    crate::system_proxy::apply_system_proxy_fallback(&mut std_cmd);
     let mut cmd = async_process::Command::from(std_cmd);
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
@@ -4284,7 +4280,6 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
     // 超时；brew 同理。PATH 放在最后，覆盖快照里那份。
     crate::login_env::apply_login_environment(&mut command);
     command.env("PATH", search_path);
-    crate::system_proxy::apply_system_proxy_fallback(&mut command);
     let child = command
         .spawn()
         .map_err(|error| format!("无法启动 {}：{error}", report.installer))?;
