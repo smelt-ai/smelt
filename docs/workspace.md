@@ -301,7 +301,7 @@ curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh
 
 `install.sh` 会下载对应架构的 tar.gz、对照 `SHA256SUMS` 校验，再调用包里的脚本。也可以自己解包后在包目录执行 `./install.sh`。参数：`--with-desktop`（TigerVNC / Xvnc、XFCE、Chrome 或 Chromium，用户级 systemd 服务 `smelt-display`、`smelt-desktop`、`smelt-chrome`，并执行 `smeltd mcp add playwright`）、`--relay=<地址>`（初始 iroh 中继，域名、IP 或 URL）、`--apt-mirror=<镜像>`（这次安装用的 apt 源；不给时官方源连不上就自动换阿里云 / 清华 / 中科大）、`--no-pair`。
 
-脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-agent`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-agent-<指纹>/`，`~/.smelt/bin/smelt-agent` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-agent）。已经在跑就停掉旧进程、换上新版本：进行中的终端会话和回合会中断，对话历史保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`，供 ACP 适配器和 MCP 使用。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
+脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify`、`smelt-up` 和命令行 `smelt`（`smelt-cli`，Linux 上不带子命令只打印用法）放进 `~/.smelt/bin`，`smeltd`、`smelt` 两个命令链到 `~/.local/bin`（以 root 执行时在 `/usr/local/bin` 生成切到运行用户再跑的同名脚本），再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-agent`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-agent-<指纹>/`，`~/.smelt/bin/smelt-agent` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-agent）。已经在跑就停掉旧进程、换上新版本：进行中的终端会话和回合会中断，对话历史保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`，供 ACP 适配器和 MCP 使用。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
 
 ```bash
 smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码
@@ -315,6 +315,14 @@ smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea�
 ```
 
 `pair` 会把远程访问打开（保留已填写的自建 relay）。配对串 10 分钟、用一次。配对等于把这台机器上当前用户的 shell 交给对方。macOS 和 Windows 上守护由桌面拉起，`smeltd install` 只在 Linux 注册 systemd 单元。细节在 `crates/smeltd/src/service.rs` 和 `scripts/install-smeltd.sh`。
+
+### 命令行 smelt
+
+`smelt agent …`、`smelt automation …`、`smelt settings …` 经本机 smeltd 的 Control API 读写，内置的 `smelt` 技能靠它。运行时给智能体子进程的 PATH 最前面是 `~/.smelt/bin`（`crates/smelt-core/src/login_env.rs`），三个平台的智能体都能直接敲 `smelt`：
+
+- macOS：GUI 的 `smelt` 自己就是命令行。桌面每次启动把 `~/.smelt/bin/smelt` 拨成指向当前 App 的软链接。终端里要用，在设置「维护 → 命令行」点「安装」，放 `/usr/local/bin/smelt` → `~/.smelt/bin/smelt`，目录写不进去时弹管理员授权框（`crates/smelt/src/settings/cli_command.rs`）。
+- Linux：运行时包里的 `smelt` 装进 `~/.smelt/bin`，远程升级时随其它小工具一起换；终端里的命令由 `install.sh` 链好。
+- Windows：安装程序的「把 smelt 命令加入 PATH」把安装目录加进用户 PATH，敲 `smelt` 找到 `smelt.com`。
 
 ### 远程桌面
 

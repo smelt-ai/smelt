@@ -1,4 +1,4 @@
-//! 对话改名 op（命令行、Pi 工具的 `smelt agent conversation-rename`）。
+//! 对话改名 op（命令行、Pi 工具的 `smelt conversation rename`）。
 
 use super::super::*;
 

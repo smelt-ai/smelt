@@ -1,4 +1,4 @@
-//! 设置页：维护（后台服务、旧版本残留）和关于（版本、应用更新、帮助与反馈）。
+//! 设置页：维护（后台服务、终端里的 smelt 命令、旧版本残留）和关于（版本、应用更新、帮助与反馈）。
 
 use super::*;
 #[cfg(any(target_os = "macos", windows))]
@@ -9,16 +9,54 @@ pub(super) fn maintenance_page(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    SettingPage::new("维护")
-        .resettable(false)
-        .group(
-            daemon_group(entity, snapshot)
-                .title("后台服务")
-                .description("smeltd 承载本机的终端和 Agent 会话。"),
+    let page = SettingPage::new("维护").resettable(false).group(
+        daemon_group(entity, snapshot)
+            .title("后台服务")
+            .description("smeltd 承载本机的终端和 Agent 会话。"),
+    );
+    #[cfg(target_os = "macos")]
+    let page = page.group(cli_command_group(cx).title("命令行"));
+    page.group(storage_group(cx).title("旧版本残留").description(
+        "升级后没人再读写的文件。废弃文件启动时自动删；旧版 worktree 目录要你在这里确认。",
+    ))
+}
+
+/// `/usr/local/bin/smelt`。状态在启动和装完时查好放在全局里，这里只读。
+#[cfg(target_os = "macos")]
+fn cli_command_group(cx: &App) -> SettingGroup {
+    let state = cx
+        .try_global::<CliCommandState>()
+        .cloned()
+        .unwrap_or_default();
+    let description = match state.system {
+        SystemCommand::Unknown => "还没检查",
+        SystemCommand::Installed => "已装好：/usr/local/bin/smelt 指向这个 App",
+        SystemCommand::Missing => {
+            "在 /usr/local/bin 放一个指向这个 App 的 smelt，终端里就能直接敲 smelt agent list。一般要输一次管理员密码"
+        }
+        SystemCommand::Stale => "/usr/local/bin/smelt 指向的不是这个 App，重新装一次就换过来",
+        SystemCommand::Taken => "/usr/local/bin/smelt 已经是别的程序，没有动它",
+    };
+    let label = match state.system {
+        SystemCommand::Installed => "重新安装",
+        _ => "安装",
+    };
+    let installing = state.installing;
+    let disabled = installing || state.system == SystemCommand::Taken;
+    SettingGroup::new().item(
+        SettingItem::new(
+            "终端里的 smelt 命令",
+            SettingField::render(move |_, _, _| {
+                Button::new("install-cli-command")
+                    .compact()
+                    .label(if installing { "安装中…" } else { label })
+                    .loading(installing)
+                    .disabled(disabled)
+                    .on_click(|_, _window, cx: &mut App| install_system_command(cx))
+            }),
         )
-        .group(storage_group(cx).title("旧版本残留").description(
-            "升级后没人再读写的文件。废弃文件启动时自动删；旧版 worktree 目录要你在这里确认。",
-        ))
+        .description(description),
+    )
 }
 
 pub(super) fn about_page(
