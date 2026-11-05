@@ -34,7 +34,7 @@ pub(crate) fn reachable(host: &str, port: u16) -> bool {
     false
 }
 
-/// 给拉 npm 包的子进程（Pi 的 `bun x`、Claude/Codex 的 `bunx`、agent 跑的 npm）补的源：
+/// 给拉 npm 包的子进程（MCP 预设的 `bun x`、agent 跑的 npm）补的源：
 /// 官方源连不上、用户又没自己配源或代理时是镜像地址，否则 `None`。进程存活期只探一次。
 /// Bun 和 npm 都认 `NPM_CONFIG_REGISTRY`。
 pub(crate) fn npm_registry_fallback() -> Option<&'static str> {

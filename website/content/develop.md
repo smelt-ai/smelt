@@ -35,8 +35,8 @@ cargo build --bin smeltd
   照样把 shell 养着；重开 GUI 按会话 id 自动 reattach。升级守护是先优雅停机再换
   新版本，不交接 fd，进行中的终端会话和回合会中断。手机和另一台桌面经 iroh 连的也是它。
 - **smelt-agent** —— Pi 运行时单二进制，跑官方 JSONL RPC。`make smelt-agent` 走
-  `agent/scripts/build-smelt-agent.sh`。装到用户机器上是 `~/.smelt/bin/smelt-agent`。受管 Bun
-  在 `~/.smelt/runtime`，只负责按需启动 ACP 适配器和 MCP 服务器。
+  `agent/scripts/build-smelt-agent.sh`。装到用户机器上是 `~/.smelt/bin/smelt-agent`。Claude、Codex
+  的官方 ACP 适配器编在里面；MCP 预设也用它自带的 Bun 运行，不另外下载 Bun。
 
 辅助二进制：`smelt-notify`（agent hook 状态上报，在
 `crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App，退出后替换安装）、`smelt-iroh-connect`

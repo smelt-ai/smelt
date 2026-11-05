@@ -409,9 +409,10 @@
       <code>./src/...worker.ts</code> 在 bunfs 里仍然是 <code>Cannot find module</code>，所以编译时还是把这两条说明符改成 <code>/$bunfs/root/...</code>。
     </li>
     <li>
-      Bun 不打进应用，也不用 <code>BUN_BE_BUN</code>。MCP 预设的 <code>bun x</code> 和 Claude/Codex 的 <code>bunx</code>
-      仍用按需下载的 Bun 1.4.4：<code>~/.smelt/runtime</code> 下的 generation（<code>store</code>、<code>current</code>、<code>leases</code>、<code>staging</code>）就是它的家，这些目录不能当成旧运行时清掉。
-      <code>~/.smelt/runtime/bin/bun</code> 指向当前 generation。
+      后来（2026-11）不再另外下载 Bun。Claude/Codex 的默认命令直接是 <code>smelt-agent acp-claude</code> / <code>acp-codex</code>；
+      MCP 预设写 <code>~/.smelt/bin/smelt-agent</code> 加 <code>BUN_BE_BUN=1</code>，smelt-agent 起 MCP 时换成它自己。
+      守护启动时删掉整个 <code>~/.smelt/runtime</code>，把 <code>mcp.json</code> 里指着 <code>~/.smelt/runtime/bin/bun</code> 的条目改过来。
+      下文关于 <code>~/.smelt/runtime</code> 的内容是当时的设计，留作记录。
     </li>
     <li>
       <code>smelt-pi</code>、<code>photon_rs_bg.wasm</code>、<code>native/</code> 和内置技能 <code>skills/</code> 按这一整套自己的指纹发布成

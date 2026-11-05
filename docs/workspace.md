@@ -286,7 +286,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
 
-数据目录是 `%USERPROFILE%\.smelt`。守护监听的是 `%USERPROFILE%\.smelt\smeltd.sock` 这个路径对应的命名管道 `\\.\pipe\smelt-<sid>-daemon-<路径哈希>`，不建这个文件。Rust 客户端（桌面、`smelt-notify`、runtime client）拿 sock 路径连，`RuntimeStream::connect` 换成管道名；交给 Bun / Pi 的 `SMELT_SOCK` 直接是管道名。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-agent-<指纹>/smelt-agent.exe`，启动名是 `smelt-agent.current` 指针文件。受管 Bun 取 `bun-windows-x64.zip`（Bun 1.4.4），装成 `%USERPROFILE%\.smelt\runtime` 下的 `bin/bun.exe`。
+数据目录是 `%USERPROFILE%\.smelt`。守护监听的是 `%USERPROFILE%\.smelt\smeltd.sock` 这个路径对应的命名管道 `\\.\pipe\smelt-<sid>-daemon-<路径哈希>`，不建这个文件。Rust 客户端（桌面、`smelt-notify`、runtime client）拿 sock 路径连，`RuntimeStream::connect` 换成管道名；交给 Bun / Pi 的 `SMELT_SOCK` 直接是管道名。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-agent-<指纹>/smelt-agent.exe`，启动名是 `smelt-agent.current` 指针文件。不另外下载 Bun：MCP 预设写的 `~/.smelt/bin/smelt-agent` 在 Windows 上执行不了，smelt-agent 起 MCP 时换成它自己。
 
 交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`，走 ConPTY。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。关掉桌面窗口本身不停守护，shell 还在。升级和其它平台一样先优雅停机再换新版本，进行中的终端会话和回合会中断；不同在于 Windows 不能 `exec`，旧进程拉起新映像当接班进程，接班进程等它退出再绑定监听。系统通知、状态栏图标、Dock 角标在 Windows 上没有。细节见 [`windows-support.md`](windows-support.md)。
 

@@ -3,13 +3,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// 运行时自带 Bun 启动器的 `~/` 写法。Unix 是 `~/.smelt/runtime/bin/bun`，Windows 是
-/// `~/.smelt/runtime/bin/bun.exe`。写进外部配置（如 Pi `mcp.json` 的 `command`）的路径
-/// 必须是这一条，Pi 会展开开头的 `~/`。
-#[cfg(unix)]
-pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun";
-#[cfg(windows)]
-pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun.exe";
+/// smelt-agent 启动名的 `~/` 写法。MCP 预设写进 Pi `mcp.json` 的 `command` 就是它，配上
+/// [`BUN_BE_BUN`] 把 smelt-agent 当 Bun 用（`smelt-agent x --bun 包@版本`）：Bun 编在
+/// smelt-agent 里，不用另装一份。Unix 上它是指向当前版本的链接，Pi CLI 自己也执行得了；
+/// Windows 上是指针文件，smelt-agent 起 MCP 时认出这条路径、换成它自己
+/// （`agent/src/pi-mcp-runtime.ts`）。Pi 会展开开头的 `~/`。
+pub const SMELT_AGENT_LAUNCHER_HOME_PATH: &str = "~/.smelt/bin/smelt-agent";
+
+/// Bun 编译出的程序带上这个环境变量就当 Bun 命令行用。
+pub const BUN_BE_BUN: (&str, &str) = ("BUN_BE_BUN", "1");
 
 /// 智能体自己的 space 根目录：`~/.smelt/agents/<id>`。
 ///

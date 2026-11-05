@@ -29,8 +29,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROGRAMS=(smeltd smelt-notify)
-# curl、unzip：按需下载到 ~/.smelt/runtime 的 Bun 要用（MCP 预设的 `bun x`、Claude/Codex 的 `bunx`）。
-BASE_PACKAGES=(ca-certificates curl unzip)
+# curl：运行时升级下载新版本要用。
+BASE_PACKAGES=(ca-certificates curl)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
 # 所以 Xvnc 要的 X 核心字体（fixed）、图标主题和终端的等宽字体要自己列上。图标用 Papirus
 # （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。

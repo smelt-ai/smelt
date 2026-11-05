@@ -4032,10 +4032,7 @@ fn daemon_relaunch_upgrades_released_adapter_defaults_only() {
         "bunx --bun @agentclientprotocol/codex-acp@1.1.7",
     );
     assert!(upgrade_released_adapter_launch(&mut old));
-    assert_eq!(
-        old.command,
-        "bunx --bun @agentclientprotocol/codex-acp@2.5.0"
-    );
+    assert_eq!(old.command, "smelt-agent acp-codex");
 
     let custom = "NO_BROWSER=1 bunx --bun @agentclientprotocol/codex-acp@1.1.7";
     let mut customized = smelt_core::agent_kind::ConversationLaunchSpec::from_command(custom);

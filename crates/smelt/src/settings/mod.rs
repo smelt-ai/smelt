@@ -864,7 +864,7 @@ pub fn initial_agent_conversation_config_for(
     agent_host_settings(runtime, cx).initial_agent_conversation_config(agent)
 }
 
-/// 设置页只在用户覆盖内置适配器时显示原始命令；默认 `bunx`、CLI 参数等属于
+/// 设置页只在用户覆盖内置适配器时显示原始命令；默认的 smelt-agent 子命令、CLI 参数等属于
 /// smelt 的实现细节，不应要求用户理解或维护。
 fn acp_cmd_setting_value(agent: ConversationAgentKind, command: String) -> SharedString {
     if command == agent.default_cmd() {

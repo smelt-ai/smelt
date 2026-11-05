@@ -495,11 +495,11 @@ mod tests {
         assert!(migrate_released_adapter_defaults(&mut config));
         assert_eq!(
             cmd(&config, ConversationAgentKind::Claude),
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.100.0"
+            "smelt-agent acp-claude"
         );
         assert_eq!(
             cmd(&config, ConversationAgentKind::Codex),
-            "bunx --bun @agentclientprotocol/codex-acp@2.5.0"
+            "smelt-agent acp-codex"
         );
     }
 

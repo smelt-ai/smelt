@@ -2836,7 +2836,7 @@ fn run_serve_loop(
     let exe_mtime = exe_mtime_secs();
     // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
     let _ = runtime_identity::runtime_id();
-    thread::spawn(smelt_core::managed_runtime::retire_pi_source_generations);
+    thread::spawn(smelt_core::managed_runtime::retire_managed_bun);
     thread::spawn(smelt_core::control_skill::remove_legacy_copy);
     thread::spawn(smelt_core::managed_runtime::reap_legacy_smelt_pi);
     #[cfg(target_os = "linux")]

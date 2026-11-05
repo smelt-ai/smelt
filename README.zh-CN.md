@@ -70,7 +70,7 @@ smeltd mcp add <id>          # playwright、figma、rea、browser-mcp
 
 - **工作台**：多项目 × 多标签内嵌真终端（跑 `claude`/`codex`/`copilot`/`pi`/`vim`/`htop` 等交互式程序与全屏 TUI），分屏、命令面板（`Cmd+K`）、可自定义的快捷启动
 - **看住 agent**：基于 agent hook（`smelt-notify`）与结构化协议（ACP 或 provider 原生协议）跟踪会话状态（等你批准 / 等你输入 / 跑着呢 / 有结果可看）。会话名来自 ACP `session_title` 或 hook `SessionTitleChanged`，没有时用首条用户请求；OSC 0/2 不是会话名。OSC 9/777 通知与响铃仅作信息提示；需要关注时角标提醒 + 系统通知；不依赖任何一家的私有格式
-- **原生 agent 对话**：通过 ACP 或 provider 原生协议接入 Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Crush、Pi，提供结构化消息流、工具卡片、内嵌 diff、权限审批、PLAN 进度和可续接会话。Pi 编译为单二进制 `smelt-agent`（`~/.smelt/bin/smelt-agent`），跑官方 JSONL RPC，不经 ACP 转换。受管 Bun（`~/.smelt/runtime`）按需启动 ACP 适配器和 MCP 服务器
+- **原生 agent 对话**：通过 ACP 或 provider 原生协议接入 Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Crush、Pi，提供结构化消息流、工具卡片、内嵌 diff、权限审批、PLAN 进度和可续接会话。Pi 编译为单二进制 `smelt-agent`（`~/.smelt/bin/smelt-agent`），跑官方 JSONL RPC，不经 ACP 转换。Claude Code、Codex 的官方 ACP 适配器也编在 `smelt-agent` 里，MCP 预设用它自带的 Bun 运行
 - **持久化智能体与自动化**：左侧「智能体」管理可复用定义，「自动化」独立管理时机、每次运行的输入与结果历史。智能体自动化在该智能体 space 下分配稳定目录（`~/.smelt/agents/<id>/automations/`）；Shell 自动化留在 `~/.smelt/workspaces/automations`。时机是定时或外部触发：定时仍是工作日/每天/按间隔；外部触发是本机 `127.0.0.1` 上的接收地址，同机程序 POST JSON 即可开 Run。目录只显示「外部触发」，不展示令牌。当前引擎只开放 Pi，定时、外部触发和手动 Run 均由 `smeltd` 托管。自动化固定全权限跑，不另存一套权限策略
 - **读写代码**：文件树 + 搜索、内置编辑器、Git diff 视图、Markdown/Mermaid 渲染
 - **用量与历史**：用量按 provider 查账户（Claude、Copilot、Codex、Cursor、Grok），不读 transcript。历史会话读各家本机存档，不只 Claude Code

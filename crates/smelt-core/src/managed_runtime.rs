@@ -1,123 +1,14 @@
-//! 受管 Bun 仍按 generation 下载到 `~/.smelt/runtime`。
-//! Pi 不再物化源码：跑的是 `~/.smelt/bin/smelt-agent` 指向的那份编译好的 smelt-agent（见 `agent_image`）。
-//!
-//! Bun 只留给 MCP 预设的 `bun x`，以及没装本机 CLI 或用了自定义命令时 Claude/Codex 的
-//! `bunx`（装了本机 CLI 时跑 smelt-agent 里内置的适配器，见 `acp_conn`）。固定入口指向当前
-//! generation，`mcp.json` 里写的还是 `MANAGED_BUN_LAUNCHER_HOME_PATH`。
+//! Pi 跑的是 `~/.smelt/bin/smelt-agent` 指向的那份编译好的 smelt-agent（见 `agent_image`）。
+//! 需要 Bun 的地方（MCP 预设的 `bun x`）也用它：smelt-agent 带上 `BUN_BE_BUN=1` 就是 Bun 命令行，
+//! 不再另外下载 Bun。
 
-use crate::runtime_generation::{
-    BunGenerationManifest, GENERATION_SCHEMA, GenerationKind, GenerationLease, GenerationStore,
-    RuntimeManagerLock, inherit_generation_fds,
-};
-use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-pub(crate) const BUN_VERSION: &str = "1.4.4";
-
-/// 当前受管 Bun 的固定入口，相对 runtime 根目录。generation 目录名带哈希、随版本变，
-/// 写进外部配置（如 `mcp.json` 的 `command`）的路径必须是这一条。
-#[cfg(unix)]
-const BUN_LAUNCHER: &str = "bin/bun";
-#[cfg(windows)]
-const BUN_LAUNCHER: &str = "bin/bun.exe";
-
-pub use smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH;
-
 include!(concat!(env!("OUT_DIR"), "/pi_agent_version.rs"));
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-darwin-aarch64.zip",
-    "c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510",
-);
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-darwin-x64.zip",
-    "50a3491f73abc2fe81673171a85762d3bc2cc1680ccecadd983de99adf77977e",
-);
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const BUN_ZIP_DIR: &str = "bun-darwin-aarch64";
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "0a2237cdcfa0d16ef501d9acca9f0026309ef348bea7393a64e8d1e3609565cc";
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const BUN_ZIP_DIR: &str = "bun-darwin-x64";
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "c35307c7d45d65c5a385a58c4a6cb0bb9499e4e626abdee207c177a77ba666ab";
-// Linux x64 用 baseline 版：不要求 AVX2，云主机的老 CPU 也能跑。
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip",
-    "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76",
-);
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const BUN_ZIP_DIR: &str = "bun-linux-x64-baseline";
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip",
-    "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e",
-);
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const BUN_ZIP_DIR: &str = "bun-linux-aarch64";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "354c2b049c716aca07b2e5cddb887928ac58950675d1258bb6312083917793b6";
-#[cfg(all(windows, target_arch = "x86_64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-windows-x64.zip",
-    "cd2c0fccc78f3ede1f50ca827a15f063eda13d4d150a3d0674f4f6e323d864a5",
-);
-#[cfg(all(windows, target_arch = "x86_64"))]
-const BUN_ZIP_DIR: &str = "bun-windows-x64";
-#[cfg(all(windows, target_arch = "x86_64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "cb1d8e6564e655e49d30cead359750a1cbbd12f42651caa4b62244d7bd93c244";
-
-/// npmmirror 按 GitHub Release 原样同步的 Bun 包，连不上 GitHub 时从这里下。
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-const BUN_MIRROR: &str = "https://registry.npmmirror.com/-/binary/bun";
-
-/// 和 `BUN_DOWNLOAD` 同一个包。校验和写死在上面，从哪下都一样可信，所以镜像地址不进
-/// generation 身份：换着来源下，装的仍是同一个 generation。
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-fn bun_mirror_url() -> String {
-    format!("{BUN_MIRROR}/bun-v{BUN_VERSION}/{BUN_ZIP_DIR}.zip")
-}
-
-#[derive(Clone, Debug)]
-pub struct ManagedBunRuntime {
-    pub path: PathBuf,
-    pub generation_id: String,
-    lease: GenerationLease,
-}
-
-impl ManagedBunRuntime {
-    pub fn inherit_into(&self, command: &mut Command) {
-        inherit_generation_fds(command, std::slice::from_ref(&self.lease));
-    }
-
-    #[cfg(unix)]
-    pub fn inherited_fd(&self) -> std::sync::Arc<std::os::fd::OwnedFd> {
-        self.lease.inherited_fd()
-    }
-}
 
 /// 起 smelt-agent 时用这个环境变量告诉它守护这边的约定版本（`PI_SMELT_PROTOCOL`）。
 /// smelt-agent 和守护分开发布，对不上它会拒绝启动，并在 stderr 说明。
@@ -152,377 +43,6 @@ impl ManagedPiRuntime {
         crate::system_proxy::apply_system_proxy_fallback(&mut command);
         command
     }
-}
-
-fn sha256_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
-    let mut digest = Sha256::new();
-    for part in parts {
-        digest.update((part.len() as u64).to_le_bytes());
-        digest.update(part);
-    }
-    hex::encode(digest.finalize())
-}
-
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-fn bun_manifest() -> BunGenerationManifest {
-    let (download_url, archive_sha256) = BUN_DOWNLOAD;
-    let identity = sha256_parts([
-        BUN_VERSION.as_bytes(),
-        std::env::consts::OS.as_bytes(),
-        std::env::consts::ARCH.as_bytes(),
-        BUN_EXECUTABLE_SHA256.as_bytes(),
-        download_url.as_bytes(),
-        archive_sha256.as_bytes(),
-    ]);
-    BunGenerationManifest {
-        schema: GENERATION_SCHEMA,
-        generation_id: format!("bun-{identity}"),
-        version: BUN_VERSION.to_string(),
-        platform: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        executable_sha256: BUN_EXECUTABLE_SHA256.to_string(),
-        download_url: download_url.to_string(),
-        archive_sha256: archive_sha256.to_string(),
-    }
-}
-
-fn bun_artifact_name() -> &'static str {
-    #[cfg(windows)]
-    {
-        "bun.exe"
-    }
-    #[cfg(not(windows))]
-    {
-        "bun"
-    }
-}
-
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-fn bun_tree_matches(root: &Path, expected: &BunGenerationManifest) -> bool {
-    let bun = root.join(bun_artifact_name());
-    let Ok(metadata) = fs::symlink_metadata(&bun) else {
-        return false;
-    };
-    #[cfg(unix)]
-    let executable = {
-        use std::os::unix::fs::PermissionsExt as _;
-        metadata.permissions().mode() & 0o111 != 0
-    };
-    #[cfg(not(unix))]
-    let executable = true;
-    metadata.is_file()
-        && !metadata.file_type().is_symlink()
-        && executable
-        && fs::read(root.join("manifest.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<BunGenerationManifest>(&bytes).ok())
-            .as_ref()
-            == Some(expected)
-}
-
-/// 旧版把 Pi 源码连整份 node_modules 物化在 `runtime/store/pi` 下，现在跑的是编译好的 smelt-agent。
-const RETIRED_PI_GENERATIONS: &str = "pi";
-
-/// 守护启动后在后台调一次，删掉旧的 Pi 源码 generation。别的进程正管着 runtime 目录就
-/// 这次不做；交接继承下来的旧 Pi 进程还占着的，留到它退出后的下一次启动。
-pub fn retire_pi_source_generations() {
-    let Ok(store) = GenerationStore::managed() else {
-        return;
-    };
-    let Ok(Some(_manager)) = store.try_lock_manager() else {
-        return;
-    };
-    store.retire_kind_locked(RETIRED_PI_GENERATIONS);
-}
-
-#[cfg(not(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-)))]
-pub fn sync_managed_bun(_status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
-    Err("受管 Bun 运行时只在 macOS、Linux 和 Windows x64 上提供".to_string())
-}
-
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-pub fn sync_managed_bun(status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
-    let store = GenerationStore::managed()?;
-    let manager = store.lock_manager()?;
-    let runtime = sync_managed_bun_locked(&store, status, &manager)?;
-    drop(manager);
-    Ok(runtime)
-}
-
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-fn sync_managed_bun_locked(
-    store: &GenerationStore,
-    status: &dyn Fn(&str),
-    manager: &RuntimeManagerLock,
-) -> Result<ManagedBunRuntime, String> {
-    let manifest = bun_manifest();
-    store.remove_stale_staging_locked();
-    let root = store.generation_root(GenerationKind::Bun, &manifest.generation_id);
-    if !bun_tree_matches(&root, &manifest) {
-        store.discard_invalid_locked(GenerationKind::Bun, &manifest.generation_id)?;
-        status("正在下载 Bun 运行时（约 25MB，仅首次）…");
-        store.publish_locked(
-            GenerationKind::Bun,
-            &manifest.generation_id,
-            &manifest,
-            |staging| install_bun_generation(staging, status, manager),
-        )?;
-    }
-    let lease = store.acquire_shared_locked(GenerationKind::Bun, &manifest.generation_id)?;
-    store.write_current_locked(GenerationKind::Bun, &manifest.generation_id)?;
-    // 先把固定入口切到新 generation，再回收旧的：顺序反过来，入口会短暂悬空。
-    publish_bun_launcher(store.runtime_root(), &root.join(bun_artifact_name()))?;
-    let mut keep = HashSet::new();
-    keep.insert(manifest.generation_id.clone());
-    store.gc_kind_locked(GenerationKind::Bun, &keep);
-    Ok(ManagedBunRuntime {
-        path: root.join(bun_artifact_name()),
-        generation_id: manifest.generation_id,
-        lease,
-    })
-}
-
-#[cfg(any(unix, windows))]
-/// Unix 把固定入口做成符号链接。Windows 没有符号链接权限时用硬链接，硬链接也不行就复制。
-/// 正在跑的 `bun.exe` 不能原地覆盖：先把旧入口改名挪开，再把新文件换上去。
-fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
-    let launcher = runtime_root.join(BUN_LAUNCHER);
-    let dir = launcher.parent().unwrap_or(runtime_root);
-    fs::create_dir_all(dir).map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        if fs::read_link(&launcher).is_ok_and(|target| target == bun) {
-            return Ok(());
-        }
-        let temporary = dir.join(format!(
-            ".bun-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let result = std::os::unix::fs::symlink(bun, &temporary)
-            .and_then(|()| fs::rename(&temporary, &launcher))
-            .map_err(|error| format!("更新 Bun 固定入口 {} 失败：{error}", launcher.display()));
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        return result;
-    }
-    #[cfg(windows)]
-    {
-        // 入口是硬链接或复制品，路径和 generation 里的 bun.exe 永远不同，比路径比不出来。
-        // 发布成功后在旁边记下来源，对得上就不碰正在用的入口。
-        let source_marker = dir.join("bun.exe.source");
-        let source = bun.to_string_lossy();
-        if launcher.is_file()
-            && fs::read_to_string(&source_marker).is_ok_and(|recorded| recorded == source)
-        {
-            return Ok(());
-        }
-        remove_retired_launchers(dir);
-        let temporary = dir.join(format!(
-            ".bun-{}-{}.exe",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        if fs::hard_link(bun, &temporary).is_err() {
-            fs::copy(bun, &temporary).map_err(|error| {
-                format!("复制 Bun 固定入口 {} 失败：{error}", launcher.display())
-            })?;
-        }
-        if launcher.exists() {
-            let aside = dir.join(format!(
-                ".bun-old-{}-{}.exe",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            ));
-            if let Err(error) = fs::rename(&launcher, &aside) {
-                let _ = fs::remove_file(&temporary);
-                return Err(format!(
-                    "挪开正在使用的 Bun 入口 {} 失败：{error}",
-                    launcher.display()
-                ));
-            }
-            let _ = fs::remove_file(&aside);
-        }
-        fs::rename(&temporary, &launcher).map_err(|error| {
-            format!("更新 Bun 固定入口 {} 失败：{error}", launcher.display())
-        })?;
-        // 记不下来只是下次再发布一遍。
-        let _ = fs::write(&source_marker, source.as_bytes());
-        Ok(())
-    }
-}
-
-/// 换入口时挪开的旧 `bun.exe` 当时还在跑，删不掉。之后再发布时把已经没人用的清掉。
-#[cfg(windows)]
-fn remove_retired_launchers(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(".bun-old-") {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// 下载 Bun 的 curl。连不上、或者连上了却半天不动（走代理、跨地区连 GitHub 常见）都要
-/// 放弃，不能一直等：没有超时的话，第一次用 Pi 的对话会一直停在「正在想」，还占着准备
-/// 运行时的锁，后面的对话也跟着等。两种超时 curl 都当可重试的错误，重试完仍失败就报出来。
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-fn bun_download_command(archive: &Path, url: &str) -> Command {
-    #[cfg(windows)]
-    let mut download = Command::new("curl.exe");
-    #[cfg(not(windows))]
-    let mut download = Command::new("curl");
-    download
-        .args(["-fsSL", "--retry", "2", "--connect-timeout", "20"])
-        // 连续 60 秒低于 1 KB/s 就当卡住了。
-        .args(["--speed-limit", "1024", "--speed-time", "60", "-o"])
-        .arg(archive)
-        .arg(url);
-    download
-}
-
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-fn install_bun_generation(
-    staging: &Path,
-    status: &dyn Fn(&str),
-    manager: &RuntimeManagerLock,
-) -> Result<(), String> {
-    let (url, expected_archive_sha) = BUN_DOWNLOAD;
-    let mirror = bun_mirror_url();
-    // 连不上 GitHub（中国大陆常见）就先走镜像，省得等 GitHub 那边一轮轮超时。
-    let sources = if crate::mirrors::reachable("github.com", 443) {
-        [url, mirror.as_str()]
-    } else {
-        [mirror.as_str(), url]
-    };
-    let archive = staging.join("download.zip");
-    let mut failures = Vec::new();
-    for source in sources {
-        let mut download = bun_download_command(&archive, source);
-        manager.inherit_into(&mut download);
-        let output = download
-            .output()
-            .map_err(|error| format!("无法执行 curl：{error}"))?;
-        if output.status.success() {
-            break;
-        }
-        failures.push(format!(
-            "{source}：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    if failures.len() == sources.len() {
-        return Err(format!("下载 Bun 失败：{}", failures.join("；")));
-    }
-    let actual_archive_sha = sha256_file(&archive)?;
-    if actual_archive_sha != expected_archive_sha {
-        return Err(format!(
-            "Bun 下载校验失败（期望 {expected_archive_sha}，实际 {actual_archive_sha}）"
-        ));
-    }
-    status("校验并解压 Bun 运行时…");
-    let unpack = staging.join("unpack");
-    fs::create_dir(&unpack).map_err(|error| format!("创建 Bun 解压目录失败：{error}"))?;
-    // Windows 10 起自带 tar，能解 zip。Unix 继续用 unzip。
-    #[cfg(windows)]
-    let mut extract = Command::new("tar");
-    #[cfg(windows)]
-    {
-        extract.args(["-xf"]).arg(&archive).arg("-C").arg(&unpack);
-    }
-    #[cfg(not(windows))]
-    let mut extract = Command::new("unzip");
-    #[cfg(not(windows))]
-    {
-        extract.args(["-q"]).arg(&archive).arg("-d").arg(&unpack);
-    }
-    manager.inherit_into(&mut extract);
-    let tool = if cfg!(windows) { "tar" } else { "unzip" };
-    let output = extract
-        .output()
-        .map_err(|error| format!("无法执行 {tool}：{error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "解压 Bun 失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let bun = staging.join(bun_artifact_name());
-    fs::rename(unpack.join(BUN_ZIP_DIR).join(bun_artifact_name()), &bun)
-        .map_err(|error| format!("安放 Bun 制品失败：{error}"))?;
-    fs::remove_file(&archive).map_err(|error| format!("清理 Bun 下载包失败：{error}"))?;
-    fs::remove_dir_all(&unpack).map_err(|error| format!("清理 Bun 解压目录失败：{error}"))?;
-    validate_bun(&bun)
-}
-
-fn sha256_file(path: &Path) -> Result<String, String> {
-    crate::daemon_image::content_fingerprint(path)
-        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))
-}
-
-#[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-fn validate_bun(bun: &Path) -> Result<(), String> {
-    let metadata =
-        fs::symlink_metadata(bun).map_err(|error| format!("读取受管 Bun 元数据失败：{error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("受管 Bun 不是普通文件".to_string());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err("受管 Bun 没有可执行权限".to_string());
-        }
-    }
-    let actual = sha256_file(bun)?;
-    if actual != BUN_EXECUTABLE_SHA256 {
-        return Err(format!(
-            "受管 Bun 制品校验失败（期望 {BUN_EXECUTABLE_SHA256}，实际 {actual}）"
-        ));
-    }
-    let output = Command::new(bun)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("受管 Bun 无法执行：{error}"))?;
-    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != BUN_VERSION {
-        return Err("受管 Bun 版本检查失败".to_string());
-    }
-    Ok(())
 }
 
 pub(crate) fn pi_runtime_version() -> &'static str {
@@ -587,6 +107,149 @@ fn require_photon_wasm(executable: &Path) -> Result<(), String> {
             wasm.display()
         ))
     }
+}
+
+/// 守护启动后在后台调一次，清掉单独下载 Bun 那一套留下的东西：`mcp.json` 里指着它的条目、
+/// 整个 `runtime` 目录、旧版 `bunx` 下载的适配器缓存。`runtime` 里只剩遗留物：Bun 和 Pi
+/// 源码的 generation，已删除的 DeepSeek Harness（`dsh-npx`）和旧插件体系（`shell-plugins`）
+/// 留下的目录。Windows 上还有交接前的 MCP 进程占着旧 `bun.exe` 时删不干净，留到下次启动。
+pub fn retire_managed_bun() {
+    crate::pi_mcp::retire_managed_bun_entries();
+    if let Some(home) = smelt_paths::smelt_home() {
+        let runtime = home.join("runtime");
+        match fs::remove_dir_all(&runtime) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => crate::app_log::error(
+                "smeltd",
+                &format!("清理旧运行时目录 {} 失败：{error}", runtime.display()),
+            ),
+        }
+    }
+    if let Some(cache_root) = bun_cache_dir() {
+        cleanup_retired_adapter_cache(&cache_root);
+    }
+}
+
+/// 旧版 Smelt 用 `bunx` 下载适配器时的 Bun 包缓存。登录 shell 里显式配置的绝对路径优先；
+/// 相对路径会随会话 cwd 漂移，无法安全判断删除目标，因此不做自动清理。
+fn bun_cache_dir() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let configured = crate::login_env::login_environment()
+        .get("BUN_INSTALL_CACHE_DIR")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| crate::workspace_override::expand_tilde(value));
+    let path = configured
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".bun/install/cache"));
+    // 即便用户把缓存变量误设成根目录或 home，也不能让自动回收触碰这种宽目标。
+    (path.is_absolute() && path.parent().is_some() && path != home).then_some(path)
+}
+
+fn safe_bun_cache_component(value: &str) -> bool {
+    !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\\'])
+}
+
+/// 返回 Bun 缓存中一个 npm 包的父目录与无 scope 包名。
+fn bun_cache_package_location(
+    cache_root: &std::path::Path,
+    package: &str,
+) -> Option<(std::path::PathBuf, String)> {
+    if let Some(scoped) = package.strip_prefix('@') {
+        let (scope, name) = scoped.split_once('/')?;
+        if !safe_bun_cache_component(scope) || !safe_bun_cache_component(name) {
+            return None;
+        }
+        return Some((cache_root.join(format!("@{scope}")), name.to_string()));
+    }
+    safe_bun_cache_component(package).then(|| (cache_root.to_path_buf(), package.to_string()))
+}
+
+fn bun_cache_entry_matches(name: &str, stem: &str) -> bool {
+    name == stem
+        || name
+            .strip_prefix(stem)
+            .is_some_and(|rest| rest.starts_with("@@@"))
+}
+
+fn remove_bun_cache_entry(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(path).is_ok()
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(path).is_ok()
+    } else {
+        false
+    }
+}
+
+fn cleanup_adapter_release(cache_root: &std::path::Path, package: &str, version: &str) -> usize {
+    if !safe_bun_cache_component(version) {
+        return 0;
+    }
+    let Some((package_parent, package_name)) = bun_cache_package_location(cache_root, package)
+    else {
+        return 0;
+    };
+
+    let mut removed = 0;
+    let actual_stem = format!("{package_name}@{version}");
+    if let Ok(entries) = std::fs::read_dir(&package_parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(|name| bun_cache_entry_matches(name, &actual_stem))
+                && remove_bun_cache_entry(&entry.path())
+            {
+                removed += 1;
+            }
+        }
+    }
+
+    // Bun 还会维护 `<scope>/<package>/<version>@@@N` 别名符号链接。只遍历真正
+    // 的目录，拒绝跟随异常符号链接，避免缓存损坏时越过 cache_root。
+    let aliases = package_parent.join(&package_name);
+    if std::fs::symlink_metadata(&aliases).is_ok_and(|metadata| metadata.is_dir()) {
+        if let Ok(entries) = std::fs::read_dir(&aliases) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name
+                    .to_str()
+                    .is_some_and(|name| bun_cache_entry_matches(name, version))
+                    && remove_bun_cache_entry(&entry.path())
+                {
+                    removed += 1;
+                }
+            }
+        }
+        let _ = std::fs::remove_dir(&aliases); // 仅空目录会成功；当前版本别名不会受影响。
+    }
+    removed
+}
+
+/// 清掉旧版出厂默认命令（`bunx --bun 包@版本`）下载过的适配器包，不碰别的版本和共享依赖。
+fn cleanup_retired_adapter_cache(cache_root: &std::path::Path) -> usize {
+    crate::agent_kind::ConversationAgentKind::ALL
+        .into_iter()
+        .flat_map(|agent| agent.descriptor().previous_default_cmds)
+        .filter_map(|command| bunx_package(command))
+        .map(|(package, version)| cleanup_adapter_release(cache_root, package, version))
+        .sum()
+}
+
+/// `bunx [--bun] 包@版本` 里的包名和版本。
+fn bunx_package(command: &str) -> Option<(&str, &str)> {
+    let mut words = command.split_whitespace();
+    if words.next()? != "bunx" {
+        return None;
+    }
+    let spec = words.find(|word| !word.starts_with("--"))?;
+    // 带 scope 的包名本身以 `@` 开头，版本在最后一个 `@` 之后。
+    let (package, version) = spec.rsplit_once('@')?;
+    (!package.is_empty()).then_some((package, version))
 }
 
 #[cfg(test)]
@@ -695,88 +358,6 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
-    /// 复现：远程 Linux 上下载 Bun 卡住，curl 没有超时，对话一直停在「正在想」。
-    #[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
-    #[test]
-    fn a_stalled_bun_download_gives_up_instead_of_waiting_forever() {
-        let command =
-            bun_download_command(Path::new("/tmp/bun.zip"), "https://example.com/bun.zip");
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        let value_of = |flag: &str| {
-            args.iter()
-                .position(|arg| arg == flag)
-                .and_then(|index| args.get(index + 1))
-                .map(String::as_str)
-        };
-        assert_eq!(value_of("--connect-timeout"), Some("20"));
-        assert_eq!(value_of("--speed-limit"), Some("1024"));
-        assert_eq!(value_of("--speed-time"), Some("60"));
-        assert_eq!(value_of("--retry"), Some("2"));
-        assert_eq!(value_of("-o"), Some("/tmp/bun.zip"));
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("https://example.com/bun.zip")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bun_launcher_follows_the_latest_generation() {
-        let runtime =
-            std::env::temp_dir().join(format!("smelt-bun-launcher-{}", uuid::Uuid::new_v4()));
-        let first = runtime.join("store/bun/bun-a/bun");
-        let second = runtime.join("store/bun/bun-b/bun");
-
-        publish_bun_launcher(&runtime, &first).unwrap();
-        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), first);
-        publish_bun_launcher(&runtime, &first).unwrap();
-        publish_bun_launcher(&runtime, &second).unwrap();
-        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), second);
-        assert!(
-            MANAGED_BUN_LAUNCHER_HOME_PATH.ends_with(BUN_LAUNCHER),
-            "写进外部配置的路径必须就是这个入口"
-        );
-        let leftovers = fs::read_dir(runtime.join("bin")).unwrap().count();
-        assert_eq!(leftovers, 1, "临时链接不能留下");
-        fs::remove_dir_all(runtime).ok();
-    }
-
-    /// Windows 的入口是硬链接或复制品。同一个 generation 再同步时不能重新发布：
-    /// 那会把正在跑的 bun.exe 挪开，挪开到换上之间入口不存在。
-    #[cfg(windows)]
-    #[test]
-    fn bun_launcher_is_not_republished_for_the_same_generation() {
-        let runtime =
-            std::env::temp_dir().join(format!("smelt-bun-launcher-{}", uuid::Uuid::new_v4()));
-        let first = runtime.join("store/bun/bun-a/bun.exe");
-        let second = runtime.join("store/bun/bun-b/bun.exe");
-        for (path, bytes) in [(&first, b"first"), (&second, b"secnd")] {
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, bytes).unwrap();
-        }
-        let launcher = runtime.join(BUN_LAUNCHER);
-
-        publish_bun_launcher(&runtime, &first).unwrap();
-        // 上一次换入口时没删掉的旧文件。同一个 generation 再同步不碰 bin 目录，它还在。
-        let retired = runtime.join("bin/.bun-old-1-x.exe");
-        fs::write(&retired, b"old").unwrap();
-        publish_bun_launcher(&runtime, &first).unwrap();
-        assert!(retired.exists(), "同一个 generation 不应重新发布");
-        assert_eq!(fs::read(&launcher).unwrap(), b"first");
-
-        publish_bun_launcher(&runtime, &second).unwrap();
-        assert_eq!(fs::read(&launcher).unwrap(), b"secnd");
-        assert!(!retired.exists(), "换 generation 时清掉没人用的旧入口");
-        fs::remove_dir_all(runtime).ok();
-    }
-
     #[test]
     fn photon_wasm_must_sit_beside_the_binary() {
         let dir = std::env::temp_dir().join(format!("smelt-agent-wasm-{}", uuid::Uuid::new_v4()));
@@ -798,43 +379,69 @@ mod tests {
         let auth = include_str!("../../../agent/src/auth-main.ts");
         assert!(main.contains("registerBunOAuthFlows()"));
         assert!(auth.contains("registerBunOAuthFlows()"));
-        let fetch = include_str!("../../../scripts/fetch-bun.sh");
-        assert!(fetch.contains(&format!("BUN_VERSION={BUN_VERSION}")));
     }
 
-    #[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
     #[test]
-    fn bun_manifest_pins_the_release_and_executable() {
-        let manifest = bun_manifest();
-        assert_eq!(manifest.version, BUN_VERSION);
-        assert_eq!(manifest.executable_sha256.len(), 64);
-        assert!(
-            manifest
-                .download_url
-                .contains(&format!("/bun-v{BUN_VERSION}/"))
+    fn retired_defaults_name_their_adapter_packages() {
+        assert_eq!(
+            bunx_package("bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"),
+            Some(("@agentclientprotocol/claude-agent-acp", "0.78.0"))
         );
-        assert_eq!(manifest.archive_sha256.len(), 64);
+        assert_eq!(
+            bunx_package("bunx --bun pi-acp@0.0.33"),
+            Some(("pi-acp", "0.0.33"))
+        );
+        assert_eq!(bunx_package("codex app-server"), None);
     }
 
-    /// 镜像下的必须是同一个包，不然写死的校验和对不上。
-    #[cfg(any(
-    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")),
-    all(windows, target_arch = "x86_64"),
-))]
+    #[cfg(unix)]
     #[test]
-    fn bun_mirror_serves_the_same_release_file() {
-        // 从右边取两段：文件名，再是版本目录。闭包做不到「返回值借用参数」
-        // （两个生命周期对不上），函数签名可以。
-        fn tail(url: &str) -> Vec<&str> {
-            url.rsplitn(3, '/').take(2).collect()
+    fn retired_adapter_cache_cleanup_is_targeted() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "smelt-adapter-cache-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let scope = root.join("@agentclientprotocol");
+        let old = scope.join("claude-agent-acp@0.59.0@@@1");
+        let retired = scope.join("claude-agent-acp@0.78.0@@@1");
+        let current = scope.join("claude-agent-acp@0.100.0@@@1");
+        let unknown = scope.join("claude-agent-acp@0.58.0@@@1");
+        let shared_sdk = scope.join("sdk@1.2.1@@@1");
+        let aliases = scope.join("claude-agent-acp");
+        let old_alias = aliases.join("0.59.0@@@1");
+        let retired_alias = aliases.join("0.78.0@@@1");
+        let current_alias = aliases.join("0.100.0@@@1");
+        let retired_pi = root.join("pi-acp@0.0.33@@@1");
+        let pi_aliases = root.join("pi-acp");
+        let retired_pi_alias = pi_aliases.join("0.0.33@@@1");
+        for dir in [&old, &retired, &current, &unknown, &shared_sdk, &aliases] {
+            std::fs::create_dir_all(dir).unwrap();
         }
-        let (url, _) = BUN_DOWNLOAD;
-        let mirror = bun_mirror_url();
-        assert_eq!(tail(&mirror), tail(url), "版本目录和文件名都要一致");
+        std::fs::create_dir_all(&retired_pi).unwrap();
+        std::fs::create_dir_all(&pi_aliases).unwrap();
+        symlink(&old, &old_alias).unwrap();
+        symlink(&retired, &retired_alias).unwrap();
+        symlink(&current, &current_alias).unwrap();
+        symlink(&retired_pi, &retired_pi_alias).unwrap();
+
+        let removed = cleanup_retired_adapter_cache(&root);
+
+        assert!(removed >= 6, "旧实体目录和版本别名都应被清掉");
+        assert!(!old.exists());
+        assert!(std::fs::symlink_metadata(&old_alias).is_err());
+        assert!(!retired.exists(), "刚卸任的 0.78.0 缓存应清掉");
+        assert!(std::fs::symlink_metadata(&retired_alias).is_err());
+        assert!(!retired_pi.exists(), "已退役的 pi-acp 缓存应清掉");
+        assert!(std::fs::symlink_metadata(&retired_pi_alias).is_err());
+        assert!(current.is_dir(), "没作为 bunx 默认值发布过的版本不删");
+        assert!(current_alias.is_symlink(), "它的版本别名也不删");
+        assert!(
+            unknown.is_dir(),
+            "没有作为 Smelt 默认值发布过的版本不应删除"
+        );
+        assert!(shared_sdk.is_dir(), "共享依赖缓存不属于适配器清理范围");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

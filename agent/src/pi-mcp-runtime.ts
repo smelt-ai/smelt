@@ -1,10 +1,13 @@
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import type { McpTransportFactory } from "@earendil-works/pi-coding-agent";
 import { createDefaultTransport as piCreateDefaultTransport } from "../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js";
 import { StdioTransport } from "@earendil-works/pi-mcp";
 import { withoutSessionControlEnv } from "./session-control-env.ts";
 
 /**
- * Pi's own transport factory, the one its MCP extension uses when none is given.
+ * Pi's own transport factory, the one its MCP extension uses when none is given, except that Smelt's
+ * MCP presets run on this smelt-agent (`onThisSmeltAgent`).
  *
  * It is not exported from the package entry, but it is what decides how a `mcp.json` entry becomes
  * a connection: `~` expansion, `${VAR}` and `!cmd` values in `env` and `headers`, OAuth for HTTP
@@ -14,7 +17,28 @@ import { withoutSessionControlEnv } from "./session-control-env.ts";
  * export: `import.meta.resolve` plus a dynamic import does not survive `bun build --compile`.
  * Pi is pinned to an exact version; the compile fails if an upgrade moves the module.
  */
-export const createPiDefaultTransport: McpTransportFactory = piCreateDefaultTransport;
+export const createPiDefaultTransport: McpTransportFactory = (entry, cwd, authProvider) =>
+	onThisSmeltAgent(piCreateDefaultTransport(entry, cwd, authProvider));
+
+/**
+ * Smelt 的 MCP 预设写的命令（`smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH`），配上
+ * `BUN_BE_BUN=1` 把 smelt-agent 当 Bun 用：`smelt-agent x --bun 包@版本`。Bun 编在 smelt-agent 里，
+ * 不用另装一份。
+ */
+export const SMELT_AGENT_LAUNCHER = join(homedir(), ".smelt", "bin", "smelt-agent");
+
+/**
+ * 命令是 smelt-agent 的启动名时，换成正在跑的这一份：版本和 Pi 一致；Windows 上那条路径只是
+ * 指向当前版本的指针文件，执行不了。Pi 展开 `~` 用的也是 `join(homedir(), …)`。
+ */
+function onThisSmeltAgent(transport: ReturnType<McpTransportFactory>): ReturnType<McpTransportFactory> {
+	if (!(transport instanceof StdioTransport)) return transport;
+	const command = resolve(transport.options.command);
+	const launcher = resolve(SMELT_AGENT_LAUNCHER);
+	const same =
+		process.platform === "win32" ? command.toLowerCase() === launcher.toLowerCase() : command === launcher;
+	return same ? new StdioTransport({ ...transport.options, command: process.execPath }) : transport;
+}
 
 /**
  * MCP server 进程该拿到的环境：去掉 Smelt 的会话控制变量。

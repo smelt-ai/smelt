@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 打 Linux 无头运行时（smeltd）的发布包：dist/smeltd-<版本>-linux-<架构>.tar.gz。
 # 由 release.yml 在两种架构的 runner 上各跑一次。
-# 包里还有 smelt-agent、photon wasm，pi-tui 的 native/，以及内置技能 skills/。Bun 不打进包，第一次用到 MCP 或 bunx 时再下载。
+# 包里还有 smelt-agent、photon wasm，pi-tui 的 native/，以及内置技能 skills/。Bun 编在 smelt-agent 里，不另外打包。
 #
 # 不交叉编译：在哪种架构的 Linux 机器上跑，就出哪种架构的包。只编运行时这一侧：
 # 桌面 GUI 那几个 crate 依赖 GPUI，只有 macOS 版。
