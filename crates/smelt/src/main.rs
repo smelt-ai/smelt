@@ -4208,6 +4208,9 @@ fn main() {
         if let Err(error) = settings::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
+        // 终端和智能体里的 `smelt` 命令指向这个 App（macOS 上 GUI 自己就是命令行）。
+        #[cfg(target_os = "macos")]
+        settings::sync_cli_command(cx);
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         cx.set_global(settings::AgentHosts::default());

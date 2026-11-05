@@ -1,6 +1,6 @@
 # smelt 的命令行：`smelt agent …`、`smelt automation …`、`smelt settings …`。
-# lib 给 GUI 的 smelt 在启动时先拦截子命令；bin 是控制台子系统的同一套命令，
-# Windows 发版时改名成 smelt.com 放在 smelt.exe 旁边（见 src/main.rs）。
+# lib 给 GUI 的 smelt 在启动时先拦截子命令；bin 是控制台的同一套命令：Windows 发版时改名成
+# smelt.com 放在 smelt.exe 旁边，Linux 运行时包里以 smelt 为名分发（见 src/main.rs）。
 [package]
 name = "smelt-cli"
 version.workspace = true

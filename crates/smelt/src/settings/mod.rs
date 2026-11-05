@@ -29,6 +29,8 @@ use crate::{Workspace, liquid_glass, terminal, terminal_view};
 
 mod agent_hooks;
 mod bundled_helpers;
+#[cfg(target_os = "macos")]
+mod cli_command;
 mod memory;
 mod nav;
 mod panel_plugins;
@@ -71,6 +73,10 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
+#[cfg(target_os = "macos")]
+pub(super) use cli_command::sync_cli_command;
+#[cfg(target_os = "macos")]
+use cli_command::{CliCommandState, SystemCommand, install_system_command};
 pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
 pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
 
@@ -1420,6 +1426,8 @@ impl SettingsContentView {
                 #[cfg(any(target_os = "macos", windows))]
                 Self::observe_settings_global::<UpdateSettings>(window, cx),
                 Self::observe_settings_global::<CleanupState>(window, cx),
+                #[cfg(target_os = "macos")]
+                Self::observe_settings_global::<CliCommandState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
                 Self::observe_settings_global::<RemoteSettingsState>(window, cx),

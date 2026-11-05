@@ -52,14 +52,19 @@ fn run(args: &[String]) -> i32 {
     }
 }
 
-fn print_help() {
+/// Linux 上只有运行时、没有图形界面，不列「启动图形界面」那一行。
+pub fn print_help() {
+    let gui = if cfg!(target_os = "linux") {
+        ""
+    } else {
+        "  smelt                         启动图形界面\n"
+    };
     eprint!(
         "\
 smelt {version}
 
 用法：
-  smelt                         启动图形界面
-  smelt agent list|get|create|update|delete|chat|conversations|conversation-rename|plugins
+{gui}  smelt agent list|get|create|update|delete|chat|conversations|conversation-rename|plugins
   smelt automation list|get|create|update|enable|disable|run|delete
   smelt settings get
   smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
@@ -83,7 +88,7 @@ smelt {version}
 
 stdout 为 JSON。
 ",
-        version = smelt_version::VERSION
+        version = smelt_version::VERSION,
     );
 }
 
