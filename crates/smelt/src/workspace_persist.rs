@@ -98,7 +98,7 @@ fn acp_saved_from_directory(acp: WorkspaceAcp) -> AcpSaved {
         agent_definition_id: acp.agent_definition_id,
         history_session_id: acp
             .history_session_id
-            .map(agent_client_protocol::schema::v1::SessionId::new),
+            .map(agent_client_protocol::v1::schema::SessionId::new),
         sid: Some(acp.sid).filter(|sid| !sid.is_empty()),
         refresh_launch_from_settings: acp.refresh_launch_from_settings,
         conversation_binding: acp.conversation_binding,

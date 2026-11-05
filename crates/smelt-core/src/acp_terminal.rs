@@ -12,7 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::fs::FileSystem;
 
-use agent_client_protocol::schema::v1::TerminalExitStatus;
+use agent_client_protocol::v1::schema::TerminalExitStatus;
 
 const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 1024 * 1024;
 

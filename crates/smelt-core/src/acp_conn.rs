@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentRequest, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
@@ -45,10 +45,10 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines, Responder,
-    SessionMessage,
+use agent_client_protocol::v1::{
+    ActiveSession, ConnectionTo, Responder, SessionMessage, SessionSetup,
 };
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, Lines};
 
 pub use crate::acp_chat::AcpImage as PromptImage;
 use crate::agent_kind::{
@@ -472,14 +472,14 @@ pub enum ReadyKind {
 /// 权限回执守卫：UI 点按钮时消费；**被 drop（视图关闭、卡片被弃置）自动回
 /// Cancelled**，保证 agent 侧永远等得到答案、不会挂起。
 enum PermissionResponderInner {
-    Acp(agent_client_protocol::Responder<RequestPermissionResponse>),
+    Acp(agent_client_protocol::v1::Responder<RequestPermissionResponse>),
     External(Box<dyn FnOnce(String) + Send>),
 }
 
 pub struct PermissionResponder(Option<PermissionResponderInner>);
 
 impl PermissionResponder {
-    fn acp(responder: agent_client_protocol::Responder<RequestPermissionResponse>) -> Self {
+    fn acp(responder: agent_client_protocol::v1::Responder<RequestPermissionResponse>) -> Self {
         Self(Some(PermissionResponderInner::Acp(responder)))
     }
 
@@ -493,7 +493,7 @@ impl PermissionResponder {
             Some(PermissionResponderInner::Acp(r)) => {
                 let _ = r.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                        agent_client_protocol::schema::v1::PermissionOptionId::new(option_id),
+                        agent_client_protocol::v1::schema::PermissionOptionId::new(option_id),
                     )),
                 ));
             }
@@ -523,7 +523,7 @@ type ExternalElicitResponder =
 
 /// 表单回执守卫：accept/decline 消费；**被 drop 自动回 Cancel**，agent 不会挂起。
 enum ElicitationResponderInner {
-    Acp(agent_client_protocol::Responder<CreateElicitationResponse>),
+    Acp(agent_client_protocol::v1::Responder<CreateElicitationResponse>),
     External(ExternalElicitResponder),
 }
 
@@ -1560,16 +1560,14 @@ fn classify_restore_failure(
     if is_missing_history_error(error) {
         return ConversationRestoreFailure::HistoryMissing;
     }
-    match error.code {
-        agent_client_protocol::ErrorCode::MethodNotFound => {
-            ConversationRestoreFailure::UnsupportedLoad
-        }
-        _ => ConversationRestoreFailure::Failed(with_auth_required_hint(
-            error,
-            command,
-            format!("恢复历史对话失败，可重试：{error}"),
-        )),
+    if error.code == agent_client_protocol::ErrorCode::METHOD_NOT_FOUND {
+        return ConversationRestoreFailure::UnsupportedLoad;
     }
+    ConversationRestoreFailure::Failed(with_auth_required_hint(
+        error,
+        command,
+        format!("恢复历史对话失败，可重试：{error}"),
+    ))
 }
 
 /// 不同 ACP adapter 对「历史 rollout 不存在」使用了不同的错误形态：有的返回
@@ -1577,10 +1575,7 @@ fn classify_restore_failure(
 /// 并把真实原因放进 `data.details`。这里只识别明确的 missing 文案，不能把所有
 /// `InternalError` 都降级成新会话。
 fn is_missing_history_error(error: &agent_client_protocol::Error) -> bool {
-    if matches!(
-        error.code,
-        agent_client_protocol::ErrorCode::ResourceNotFound
-    ) {
+    if error.code == agent_client_protocol::ErrorCode::RESOURCE_NOT_FOUND {
         return true;
     }
 
@@ -1728,7 +1723,7 @@ async fn run_connection(
     let session_cwd = Some(std::path::PathBuf::from(&cwd));
     let result =
         Client
-        .builder()
+        .v1()
         .name("smelt")
         // 权限请求：Responder 打包进事件甩给 UI，handler 立即返回不堵事件循环；
         // UI 弃置卡片时 PermissionResponder 的 Drop 兜底回 Cancelled。
@@ -1892,7 +1887,7 @@ async fn run_connection(
                             .name("smelt-acp-term-wait-rpc".into())
                             .spawn(move || {
                                 let status = terminals.wait(&id).unwrap_or_else(|_| {
-                                    agent_client_protocol::schema::v1::TerminalExitStatus::new()
+                                    agent_client_protocol::v1::schema::TerminalExitStatus::new()
                                 });
                                 let _ = responder
                                     .respond(WaitForTerminalExitResponse::new(status));
@@ -2005,8 +2000,11 @@ async fn run_connection(
                         .start_session()
                         .await
                     {
-                        Ok(restored) => {
-                            let (mut session, loaded) = restored.into_parts();
+                        Ok(SessionSetup {
+                            mut session,
+                            response: loaded,
+                            ..
+                        }) => {
                             publish_session_surface(
                                 loaded.config_options.as_deref(),
                                 loaded.modes.as_ref(),
@@ -2045,16 +2043,18 @@ async fn run_connection(
                 }
             }
 
-            // 2.1 的 ActiveSession 已保留 config_options，走官方 builder
-            // 就能同时拿到模型档位和 session 路由。
-            let session = connection
+            // 走官方 builder 就能同时拿到 session/new 的响应（模型档位、模式）
+            // 和 session 路由。
+            let SessionSetup {
+                session, response, ..
+            } = connection
                 .build_session_from(NewSessionRequest::new(std::path::Path::new(&cwd)))
                 .block_task()
                 .start_session()
                 .await?;
             publish_session_surface(
-                session.config_options(),
-                session.modes(),
+                response.config_options.as_deref(),
+                response.modes.as_ref(),
                 &channels.event_tx,
             );
             signal_acp_handshake_complete(&handshake_complete);
@@ -2158,7 +2158,7 @@ impl ReplayCursor {
 }
 
 fn observe_replay(message: &SessionMessage, replay: &mut ReplayCursor) {
-    let SessionMessage::SessionMessage(dispatch) = message else {
+    let SessionMessage::Message(dispatch) = message else {
         return;
     };
     let Ok(untyped) = dispatch.to_untyped_message() else {
@@ -2399,7 +2399,7 @@ async fn drive_session<S: SessionDrive>(
             }
             Next::Update(update) => {
                 let update = (*update)?;
-                let completes_prompt = matches!(&update, SessionMessage::StopReason(_));
+                let completes_prompt = matches!(&update, SessionMessage::PromptResponse(_));
                 translate_update(update, &channels.event_tx).await?;
                 if completes_prompt {
                     turn_active = false;
@@ -2474,7 +2474,7 @@ fn with_auth_required_hint(
     command: &str,
     original: String,
 ) -> String {
-    if error.code != agent_client_protocol::ErrorCode::AuthRequired {
+    if error.code != agent_client_protocol::ErrorCode::AUTH_REQUIRED {
         return original;
     }
     format!("{}\n\n原始错误：{original}", auth_required_hint(command))
@@ -2809,8 +2809,8 @@ async fn translate_update(
     event_tx: &smol::channel::Sender<ConversationEvent>,
 ) -> Result<(), agent_client_protocol::Error> {
     match message {
-        SessionMessage::SessionMessage(dispatch) => {
-            MatchDispatch::new(dispatch)
+        SessionMessage::Message(dispatch) => {
+            MatchDispatch::new(dispatch.into_raw())
                 .if_notification(async |notif: SessionNotification| {
                     let notif_parent = parent_tool_id_from_meta(notif.meta.as_ref());
                     let event = match notif.update {
@@ -2882,8 +2882,13 @@ async fn translate_update(
                 .await
                 .otherwise_ignore()?;
         }
-        SessionMessage::StopReason(reason) => {
-            let _ = event_tx.try_send(ConversationEvent::TurnEnded(reason));
+        // 只有 SDK 的 send_prompt 发的回合会把响应放进这条流；我们自己拼的
+        // session/prompt 走 PromptSettled。两条路收尾的方式保持一致。
+        SessionMessage::PromptResponse(Ok(response)) => {
+            let _ = event_tx.try_send(ConversationEvent::TurnEnded(response.stop_reason));
+        }
+        SessionMessage::PromptResponse(Err(error)) => {
+            let _ = event_tx.try_send(ConversationEvent::TurnFailed(describe_prompt_error(&error)));
         }
         _ => {} // SessionMessage #[non_exhaustive]
     }
@@ -3231,7 +3236,7 @@ pub(crate) fn model_from_config(options: &[SessionConfigOption]) -> Option<Model
     let cur = &sel.current_value;
     // 选项可能是平铺的，也可能按厂商/档位分组，两种都要翻。
     let (flat, provider_groups): (
-        Vec<&agent_client_protocol::schema::v1::SessionConfigSelectOption>,
+        Vec<&agent_client_protocol::v1::schema::SessionConfigSelectOption>,
         Vec<ModelProviderGroup>,
     ) = match &sel.options {
         SessionConfigSelectOptions::Ungrouped(v) => (v.iter().collect(), Vec::new()),
@@ -3286,7 +3291,7 @@ pub(crate) fn session_configs_from_config(
         .filter(|opt| !matches!(opt.category, Some(SessionConfigOptionCategory::Model)))
         .filter_map(|opt| match &opt.kind {
             SessionConfigKind::Select(sel) => {
-                let flat: Vec<&agent_client_protocol::schema::v1::SessionConfigSelectOption> =
+                let flat: Vec<&agent_client_protocol::v1::schema::SessionConfigSelectOption> =
                     match &sel.options {
                         SessionConfigSelectOptions::Ungrouped(v) => v.iter().collect(),
                         SessionConfigSelectOptions::Grouped(gs) => {
@@ -3580,12 +3585,12 @@ fn permission_from_request(
 pub(crate) fn permission_view(
     title: Option<&str>,
     tool_call_id: &str,
-    kind: Option<agent_client_protocol::schema::v1::ToolKind>,
+    kind: Option<agent_client_protocol::v1::schema::ToolKind>,
     raw_input: Option<&serde_json::Value>,
     paths: &[String],
 ) -> (String, crate::acp_session::ApprovalDetailsView) {
     use crate::acp_session::ApprovalDetailsView;
-    use agent_client_protocol::schema::v1::ToolKind as Acp;
+    use agent_client_protocol::v1::schema::ToolKind as Acp;
 
     /// 网址、命令过长时只留开头，卡片和系统通知都放得下。
     const TARGET_MAX_CHARS: usize = 300;
@@ -3665,10 +3670,10 @@ pub fn content_text(content: &ContentBlock) -> String {
 /// acp_view.rs（GUI 层），跟着 `apply_event` 归约逻辑一起搬进 acp_session——
 /// 谁跑归约谁就要做这层翻译，现在是 smeltd 不是 GUI。
 pub fn tool_kind_from_acp(
-    k: agent_client_protocol::schema::v1::ToolKind,
+    k: agent_client_protocol::v1::schema::ToolKind,
 ) -> crate::acp_chat::ToolKind {
     use crate::acp_chat::ToolKind;
-    use agent_client_protocol::schema::v1::ToolKind as Acp;
+    use agent_client_protocol::v1::schema::ToolKind as Acp;
     match k {
         Acp::Read => ToolKind::Read,
         Acp::Edit => ToolKind::Edit,
@@ -3701,7 +3706,7 @@ const ACP_TOOL_KIND_RECOGNIZERS: &[AcpToolKindRecognizer] = &[
 /// 一条完整 ACP tool_call 的最终语义类别。标准类别优先；只有协议退化成 Other
 /// 时才运行扩展识别器，避免厂商元数据覆盖 Read/Edit 等明确语义。
 pub fn tool_kind_from_acp_call(
-    call: &agent_client_protocol::schema::v1::ToolCall,
+    call: &agent_client_protocol::v1::schema::ToolCall,
 ) -> crate::acp_chat::ToolKind {
     tool_kind_from_acp_fields(
         Some(call.kind),
@@ -3714,7 +3719,7 @@ pub fn tool_kind_from_acp_call(
 
 /// tool_call_update 的字段是稀疏的，因此没有足够信息时返回 None，调用方保留原类别。
 pub fn tool_kind_from_acp_fields(
-    explicit: Option<agent_client_protocol::schema::v1::ToolKind>,
+    explicit: Option<agent_client_protocol::v1::schema::ToolKind>,
     title: Option<&str>,
     raw_input: Option<&serde_json::Value>,
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -3824,10 +3829,10 @@ fn recognize_collaboration_title(
 }
 
 pub fn tool_status_from_acp(
-    s: agent_client_protocol::schema::v1::ToolCallStatus,
+    s: agent_client_protocol::v1::schema::ToolCallStatus,
 ) -> crate::acp_chat::ToolCallStatus {
     use crate::acp_chat::ToolCallStatus;
-    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
+    use agent_client_protocol::v1::schema::ToolCallStatus as Acp;
     match s {
         Acp::Pending => ToolCallStatus::Pending,
         Acp::InProgress => ToolCallStatus::InProgress,
@@ -3838,15 +3843,15 @@ pub fn tool_status_from_acp(
 }
 
 pub fn tool_content_parts(
-    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+    content: &[agent_client_protocol::v1::schema::ToolCallContent],
 ) -> Vec<crate::acp_chat::ToolOutputPart> {
     use crate::acp_chat::ToolOutputPart;
-    use agent_client_protocol::schema::v1::ToolCallContent;
+    use agent_client_protocol::v1::schema::ToolCallContent;
     content
         .iter()
         .filter_map(|c| match c {
             ToolCallContent::Content(inner) => {
-                if let agent_client_protocol::schema::v1::ContentBlock::Image(image) =
+                if let agent_client_protocol::v1::schema::ContentBlock::Image(image) =
                     &inner.content
                 {
                     return Some(ToolOutputPart::Image(crate::acp_chat::AcpImage::new(
@@ -4467,7 +4472,7 @@ fn command_file_names(program: &str) -> Vec<String> {
 #[cfg(test)]
 mod elicit_parse_tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ElicitationScope, ElicitationSessionScope, ElicitationUrlMode,
     };
 
@@ -4930,7 +4935,10 @@ mod restore_failure_tests {
     #[test]
     fn missing_history_is_an_explicit_restore_failure() {
         assert_eq!(
-            classify_restore_failure(&Error::resource_not_found(None), ""),
+            classify_restore_failure(
+                &agent_client_protocol::v1::schema::Error::resource_not_found(None).into(),
+                "",
+            ),
             ConversationRestoreFailure::HistoryMissing
         );
     }
@@ -5614,13 +5622,13 @@ mod config_queue_tests {
 
 #[cfg(test)]
 mod model_tests {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         NewSessionResponse, SessionConfigId, SessionConfigKind, SessionConfigOption,
         SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOption,
         SessionConfigSelectOptions,
     };
 
-    use agent_client_protocol::schema::v1::SessionConfigValueId;
+    use agent_client_protocol::v1::schema::SessionConfigValueId;
 
     fn opt(value: &str, name: &str) -> SessionConfigSelectOption {
         SessionConfigSelectOption::new(
@@ -5668,7 +5676,7 @@ mod model_tests {
     /// 选项按厂商/档位分组时同样要能翻出来。
     #[test]
     fn looks_inside_grouped_options() {
-        use agent_client_protocol::schema::v1::{SessionConfigGroupId, SessionConfigSelectGroup};
+        use agent_client_protocol::v1::schema::{SessionConfigGroupId, SessionConfigSelectGroup};
         let group = SessionConfigSelectGroup::new(
             SessionConfigGroupId::new("anthropic".to_string()),
             "Anthropic".to_string(),
@@ -6482,7 +6490,7 @@ mod runtime_diagnostics_wire_tests {
 mod permission_view_tests {
     use super::permission_view;
     use crate::acp_session::ApprovalDetailsView;
-    use agent_client_protocol::schema::v1::ToolKind;
+    use agent_client_protocol::v1::schema::ToolKind;
     use serde_json::json;
 
     #[test]

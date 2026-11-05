@@ -1675,7 +1675,7 @@ struct AcpSaved {
     agent: Option<String>,
     /// 产品级智能体定义引用；只描述“这段对话由谁创建”，不改变底层 provider。
     agent_definition_id: Option<String>,
-    history_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    history_session_id: Option<agent_client_protocol::v1::schema::SessionId>,
     /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
     /// → None，恢复时退化成生成一个新 id——意味着即便 smeltd 里那个会话还
     /// 活着，GUI 重开后也接不上、只能按 history_session_id 重新 spawn 一次

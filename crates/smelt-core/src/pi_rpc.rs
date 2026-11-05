@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ElicitationContentValue, SessionId, StopReason, ToolCallId,
 };
 use futures::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt};

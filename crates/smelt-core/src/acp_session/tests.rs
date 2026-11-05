@@ -2,7 +2,7 @@ use super::apply::recovered_elicitation;
 use super::*;
 use crate::acp_chat::{ToolCallStatus, ToolKind, ToolOutputPart};
 use crate::acp_conn::{ConversationEvent, ElicitFieldKind, ReadyKind};
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     StopReason, ToolCall, ToolCallStatus as AcpToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind as AcpToolKind,
 };
@@ -271,7 +271,7 @@ fn ready_does_not_erase_replay_started_before_buffered_updates() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("runtime-session"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("runtime-session"),
             kind: ReadyKind::ResumedWithReplay,
             supports_image: true,
         },
@@ -295,7 +295,7 @@ fn replayed_agent_updates_do_not_leave_session_running() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("sid-1"),
             kind: ReadyKind::ResumedWithReplay,
             supports_image: true,
         },
@@ -338,7 +338,7 @@ fn load_replay_rebuilds_legacy_projection_without_duplicates() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("sid-1"),
             kind: ReadyKind::ResumedWithReplay,
             supports_image: true,
         },
@@ -638,7 +638,7 @@ fn replay_finished_clears_replaying_without_a_new_prompt() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("sid-1"),
             kind: ReadyKind::ResumedWithReplay,
             supports_image: true,
         },
@@ -653,7 +653,7 @@ fn ready_resumed_keep_history_preserves_local_entries() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("sid-1"),
             kind: ReadyKind::ResumedKeepHistory,
             supports_image: true,
         },
@@ -676,7 +676,7 @@ fn ready_fresh_replaces_id_and_preserves_legacy_history_with_divider() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("new-sid"),
             kind: ReadyKind::Fresh,
             supports_image: true,
         },
@@ -698,7 +698,7 @@ fn ready_fresh_blank_session_does_not_create_history_id() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("new-sid"),
             kind: ReadyKind::Fresh,
             supports_image: true,
         },
@@ -715,7 +715,7 @@ fn first_prompt_after_ready_makes_blank_session_resumable() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("new-sid"),
             kind: ReadyKind::Fresh,
             supports_image: true,
         },
@@ -737,7 +737,7 @@ fn ready_keeps_a_pre_ready_prompt_running_without_a_divider() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("new-sid"),
             kind: ReadyKind::Fresh,
             supports_image: true,
         },
@@ -761,7 +761,7 @@ fn ready_fresh_does_not_replace_preseeded_history_id() {
     apply_event(
         &mut s,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("new-runtime"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("new-runtime"),
             kind: ReadyKind::Fresh,
             supports_image: true,
         },
@@ -1599,7 +1599,7 @@ fn requested_cancel_finishes_tools_even_when_adapter_reports_end_turn() {
 fn late_permission_event(tool_call_id: &str) -> ConversationEvent {
     ConversationEvent::Permission {
         question: "允许执行？".into(),
-        tool_call_id: agent_client_protocol::schema::v1::ToolCallId::new(tool_call_id),
+        tool_call_id: agent_client_protocol::v1::schema::ToolCallId::new(tool_call_id),
         pub_options: vec![PermissionOptionView {
             option_id: "allow".into(),
             name: "Allow".into(),
@@ -2046,9 +2046,9 @@ fn late_task_complete_after_turn_ended_does_not_reopen_turn() {
     apply_event(
         &mut s,
         ConversationEvent::ToolCall(
-            agent_client_protocol::schema::v1::ToolCall::new("done", "task_complete")
-                .kind(agent_client_protocol::schema::v1::ToolKind::Other)
-                .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed),
+            agent_client_protocol::v1::schema::ToolCall::new("done", "task_complete")
+                .kind(agent_client_protocol::v1::schema::ToolKind::Other)
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed),
         ),
     );
 
@@ -2583,7 +2583,7 @@ fn legacy_elicitation_field_without_required_stays_required() {
 
 #[test]
 fn choose_elicitation_single_select_signals_auto_submit() {
-    use agent_client_protocol::schema::v1::ElicitationContentValue as V;
+    use agent_client_protocol::v1::schema::ElicitationContentValue as V;
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
         id: "q1".into(),
@@ -2620,7 +2620,7 @@ fn choose_elicitation_single_select_signals_auto_submit() {
 
 #[test]
 fn choose_elicitation_multi_select_toggles() {
-    use agent_client_protocol::schema::v1::ElicitationContentValue as V;
+    use agent_client_protocol::v1::schema::ElicitationContentValue as V;
     let mut s = fresh_state();
     s.elicitation = Some(LiveElicitation {
         id: "q1".into(),
@@ -2663,7 +2663,7 @@ fn choose_elicitation_multi_select_toggles() {
 /// 题目卡的「自己写答案」：提交时自定义文本优先于已选选项；多选则追加在末尾。
 #[test]
 fn submit_elicitation_custom_answer_wins_over_chosen_option() {
-    use agent_client_protocol::schema::v1::ElicitationContentValue as V;
+    use agent_client_protocol::v1::schema::ElicitationContentValue as V;
     use std::sync::mpsc;
 
     let (select_tx, select_rx) = mpsc::channel();
@@ -2738,7 +2738,7 @@ fn set_elicitation_text_rejects_fields_without_custom_input() {
             required: true,
             allow_custom_input: false,
             kind: ElicitFieldKind::Select(vec![crate::acp_conn::ElicitOption {
-                value: agent_client_protocol::schema::v1::ElicitationContentValue::String(
+                value: agent_client_protocol::v1::schema::ElicitationContentValue::String(
                     "a".into(),
                 ),
                 label: "A".into(),
@@ -2774,7 +2774,7 @@ fn recovered_elicitation_answer_appends_custom_text() {
             required: true,
             allow_custom_input: true,
             kind: ElicitFieldKind::Select(vec![crate::acp_conn::ElicitOption {
-                value: agent_client_protocol::schema::v1::ElicitationContentValue::String(
+                value: agent_client_protocol::v1::schema::ElicitationContentValue::String(
                     "a".into(),
                 ),
                 label: "A".into(),
@@ -2881,8 +2881,8 @@ fn completed_replayed_question_does_not_rebuild_an_elicitation() {
     apply_event(
         &mut state,
         ConversationEvent::ToolCall(
-            agent_client_protocol::schema::v1::ToolCall::new("ask-1", "Already answered?")
-                .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+            agent_client_protocol::v1::schema::ToolCall::new("ask-1", "Already answered?")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed)
                 .raw_input(raw_input),
         ),
     );
@@ -2904,8 +2904,8 @@ fn terminal_tool_update_clears_recovered_elicitation() {
     apply_event(
         &mut state,
         ConversationEvent::ToolCall(
-            agent_client_protocol::schema::v1::ToolCall::new("ask-1", "Already answered?")
-                .status(agent_client_protocol::schema::v1::ToolCallStatus::Pending)
+            agent_client_protocol::v1::schema::ToolCall::new("ask-1", "Already answered?")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::Pending)
                 .raw_input(raw_input),
         ),
     );
@@ -2913,10 +2913,10 @@ fn terminal_tool_update_clears_recovered_elicitation() {
 
     apply_event(
         &mut state,
-        ConversationEvent::ToolCallUpdate(agent_client_protocol::schema::v1::ToolCallUpdate::new(
+        ConversationEvent::ToolCallUpdate(agent_client_protocol::v1::schema::ToolCallUpdate::new(
             "ask-1",
-            agent_client_protocol::schema::v1::ToolCallUpdateFields::new()
-                .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed),
+            agent_client_protocol::v1::schema::ToolCallUpdateFields::new()
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed),
         )),
     );
 
@@ -2944,8 +2944,8 @@ fn replayed_user_answer_clears_question_without_a_terminal_tool_update() {
     apply_event(
         &mut state,
         ConversationEvent::ToolCall(
-            agent_client_protocol::schema::v1::ToolCall::new("ask-1", "Fix it now?")
-                .status(agent_client_protocol::schema::v1::ToolCallStatus::Pending)
+            agent_client_protocol::v1::schema::ToolCall::new("ask-1", "Fix it now?")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::Pending)
                 .raw_input(raw_input),
         ),
     );
@@ -2975,7 +2975,7 @@ fn ready_does_not_overwrite_a_recovered_choice_phase() {
     apply_event(
         &mut state,
         ConversationEvent::Ready {
-            session_id: agent_client_protocol::schema::v1::SessionId::new("session"),
+            session_id: agent_client_protocol::v1::schema::SessionId::new("session"),
             kind: ReadyKind::ResumedKeepHistory,
             supports_image: true,
         },
@@ -3943,7 +3943,7 @@ fn rewind_truncates_projection_and_adopts_the_new_provider_identity() {
     apply_event(
         &mut state,
         ConversationEvent::ProviderSessionIdChanged(
-            agent_client_protocol::schema::v1::SessionId::from("new-branch"),
+            agent_client_protocol::v1::schema::SessionId::from("new-branch"),
         ),
     );
     assert_eq!(state.acp_session_id.as_deref(), Some("new-branch"));
@@ -4102,7 +4102,7 @@ fn undo_prompt_sent_refuses_a_finished_turn() {
     crate::acp_session::apply_event(
         &mut state,
         crate::acp_conn::ConversationEvent::TurnEnded(
-            agent_client_protocol::schema::v1::StopReason::EndTurn,
+            agent_client_protocol::v1::schema::StopReason::EndTurn,
         ),
     );
 

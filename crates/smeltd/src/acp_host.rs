@@ -1660,7 +1660,7 @@ pub(crate) fn start_acp_event_drain(
                         if matches!(
                             &ev,
                             smelt_core::acp_conn::ConversationEvent::TurnEnded(
-                                agent_client_protocol::schema::v1::StopReason::Cancelled
+                                agent_client_protocol::v1::schema::StopReason::Cancelled
                             )
                         ) {
                             park_unaccepted_after_cancel(sess);
@@ -1992,9 +1992,9 @@ pub(crate) fn acp_relaunch(
         resume_session_id: if fork_id.is_some() {
             None
         } else {
-            resume_id.map(agent_client_protocol::schema::v1::SessionId::new)
+            resume_id.map(agent_client_protocol::v1::schema::SessionId::new)
         },
-        fork_session_id: fork_id.map(agent_client_protocol::schema::v1::SessionId::new),
+        fork_session_id: fork_id.map(agent_client_protocol::v1::schema::SessionId::new),
         fork_cut,
         peer_handler,
     };

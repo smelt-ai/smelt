@@ -37,7 +37,7 @@ similar = "3"
 # （自己 spawn，不用 SDK 的 `Stdio` 适配器，所以不开 `stdio`）。
 # `unstable_plan_operations` 仍是未定稿的计划增量更新。线协议保持 V1，
 # 不开 `unstable_protocol_v2`。
-agent-client-protocol = { version = "=3.4.0", features = ["process", "unstable_plan_operations"] }
+agent-client-protocol = { version = "=5.0.0", features = ["process", "unstable_plan_operations"] }
 smol = "2"
 chrono = { version = "0.4", features = ["serde"] }
 iana-time-zone = "0.1"

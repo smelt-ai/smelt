@@ -1457,7 +1457,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     smelt_core::acp_session::apply_event(
         &mut slot.value.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::TurnEnded(
-            agent_client_protocol::schema::v1::StopReason::EndTurn,
+            agent_client_protocol::v1::schema::StopReason::EndTurn,
         ),
     );
     settle_acp_turn_locked(&slot.value, true, false, true, &subscribers);
@@ -2302,7 +2302,7 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
     smelt_core::acp_session::apply_event(
         &mut reduced,
         smelt_core::acp_conn::ConversationEvent::TurnEnded(
-            agent_client_protocol::schema::v1::StopReason::Cancelled,
+            agent_client_protocol::v1::schema::StopReason::Cancelled,
         ),
     );
     let session = make_acp_session("acp-cancel-release", reduced);

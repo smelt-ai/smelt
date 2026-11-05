@@ -1110,7 +1110,7 @@ fn empty_conversation_welcome_stays_while_composer_has_unsent_draft() {
 
 #[test]
 fn blank_runtime_id_is_not_reused_as_history() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let same = SessionId::new("blank-session");
     let other = SessionId::new("other-session");
