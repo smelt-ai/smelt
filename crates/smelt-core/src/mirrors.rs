@@ -36,6 +36,8 @@ pub(crate) fn reachable(host: &str, port: u16) -> bool {
 
 /// 给拉 npm 包的子进程（MCP 预设的 `bun x`、agent 跑的 npm）补的源：
 /// 官方源连不上、用户又没自己配源或代理时是镜像地址，否则 `None`。进程存活期只探一次。
+/// 只在系统设置里配了代理也算配过：子进程会被补上 `HTTPS_PROXY`（见 `system_proxy`），
+/// 走代理连官方源，不该再被改到镜像。
 /// Bun 和 npm 都认 `NPM_CONFIG_REGISTRY`。
 pub(crate) fn npm_registry_fallback() -> Option<&'static str> {
     static FALLBACK: OnceLock<Option<&'static str>> = OnceLock::new();
@@ -48,7 +50,9 @@ pub(crate) fn npm_registry_fallback() -> Option<&'static str> {
                 .filter(|value| !value.is_empty())
         };
         let home = dirs::home_dir();
-        if user_configured_network(lookup, home.as_deref()) {
+        if user_configured_network(lookup, home.as_deref())
+            || crate::system_proxy::has_system_https_proxy()
+        {
             return None;
         }
         (!reachable(NPM_REGISTRY_HOST, 443)).then_some(NPM_MIRROR)
