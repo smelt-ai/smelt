@@ -2210,6 +2210,11 @@ struct Workspace {
     delete_branch_target: Option<(ProjectRef, String, bool)>,
     /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
     git_log_resize: Entity<ResizableState>,
+    /// 各分段正文的高度，拖分隔条或展开时按它分配像素高度。
+    pub(crate) sidebar_section_heights:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
+    /// 正在拖的分隔条：(起点 y, 上方分段起始高度, 下方分段起始高度, 预留)。
+    pub(crate) sidebar_split_drag: Option<(f32, f32, f32, f32)>,
     /// 左侧会话栏是否展开。
     sidebar_open: bool,
     sidebar_w: f32,
@@ -2277,6 +2282,7 @@ struct Workspace {
     sidebar_drop_origin: Option<(SidebarDrag, Pixels)>,
     /// 侧栏会话列表的滚动位置；拖到顶底边缘时靠它自动滚。
     sidebar_scroll: ScrollHandle,
+    pub(crate) sidebar_conversations_scroll: ScrollHandle,
     /// 侧栏要滚到哪一行、视口外有没有「需要你」，见 `session_list::reveal`。
     sidebar_reveal: std::rc::Rc<session_list::SidebarReveal>,
     /// 刚新建、要闪一下的那一行（会话 `ui_id`）。新建下一个时换掉。
@@ -2807,6 +2813,8 @@ impl Workspace {
             git_log: git_log::GitLogState::default(),
             delete_branch_target: None,
             git_log_resize,
+            sidebar_section_heights: Default::default(),
+            sidebar_split_drag: None,
             sidebar_open,
             sidebar_w,
             shell_dock: shell.area,
@@ -2849,6 +2857,7 @@ impl Workspace {
             shown_session_facts: Vec::new(),
             sidebar_drop_origin: None,
             sidebar_scroll: ScrollHandle::new(),
+            sidebar_conversations_scroll: ScrollHandle::new(),
             sidebar_reveal: Default::default(),
             sidebar_flash: None,
             recent_sessions: Vec::new(),
@@ -3907,6 +3916,7 @@ gpui_kit_assets::icon_assets!(
         Clock,
         Coffee,
         Keyboard,
+        Laptop,
         MessageSquare,
         Pin,
         Puzzle,

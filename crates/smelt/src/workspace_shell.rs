@@ -482,7 +482,7 @@ impl Workspace {
             .map(|session| session.status(cx))
             .collect();
         let focused_key = self.sidebar_focused_key(window);
-        let list = self.render_session_list(cx.entity(), cx, &statuses, animate, focused_key);
+        let list = self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
         // 间距留在卡片外面，透出壳的底色。加在卡片上会被卡片自己的底色填满。
         div()
             .size_full()

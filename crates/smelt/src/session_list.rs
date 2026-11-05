@@ -27,6 +27,7 @@ use smelt_ui::ListRow;
 use smelt_ui::truncated_line::truncated_line;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
+use gpui_base::{Easing, Presence, Transition};
 
 // drag.rs / row.rs 作为本模块子模块沿用 `super::*` 读取 ACP 类型。
 use crate::settings::ConversationAgentKind;
@@ -89,8 +90,7 @@ fn runtime_name_with_indicator(
         .min_w_0()
         .overflow_hidden()
         .text_sm()
-        .font_medium()
-        .text_color(rgb(ui_theme::text_muted()))
+        .text_color(rgb(ui_theme::text_mid()))
         .child(truncated_line(name));
     let Some(indicator) = indicator else {
         return name.into_any_element();
@@ -146,7 +146,8 @@ fn runtime_name_with_indicator(
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
-    folded: bool,
+    _folded: bool,
+    chevron_degrees: f32,
     grouping: Option<Div>,
     // 键盘焦点环、滚到这一行用的锚，见 `keyboard`。
     extras: Vec<AnyElement>,
@@ -171,30 +172,49 @@ fn runtime_section_header(
         .mt_3()
         .pl(px(PROJECT_HEADER_PAD_X))
         .pr_1()
-        .h(ui_theme::height::sm())
+        .h(ui_theme::height::md())
         .flex()
         .items_center()
-        .gap_1()
+        .gap_2()
         .rounded(ui_theme::row_radius())
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
-        .child(runtime_name_with_indicator(&key, name, indicator))
+        // 跟「对话」分组行同一套：最左折叠箭头（常显、随开合转），再是机器图标，再是名字。
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap_1()
                 .flex_none()
-                .opacity(if folded { 1.0 } else { 0.0 })
-                .group_hover(group.clone(), |style| style.opacity(1.0))
                 .child(
-                    Icon::new(if folded {
-                        IconName::ChevronRight
+                    div()
+                        .w(px(row::GROUP_ICON_BOX))
+                        .h(px(16.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::ChevronRight)
+                                .size(px(12.))
+                                .text_color(rgb(ui_theme::text_muted()))
+                                .transform(Transformation::rotate(radians(
+                                    chevron_degrees.to_radians(),
+                                ))),
+                        ),
+                )
+                .child(
+                    Icon::new(if key == RuntimeKey::Local {
+                        gpui_kit_assets::IconName::Laptop
                     } else {
-                        IconName::ChevronDown
+                        gpui_kit_assets::IconName::Server
                     })
-                    .size(px(12.))
+                    .size(px(15.))
                     .text_color(rgb(ui_theme::text_muted())),
                 ),
         )
+        .child(runtime_name_with_indicator(&key, name, indicator))
         .child(div().flex_1())
         .children(grouping.map(|grouping| {
             grouping
@@ -438,6 +458,38 @@ use drag::{
 
 pub(crate) mod row;
 
+/// 侧栏分段的类型（对话或各机器空间）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum SectionKind {
+    Conversations,
+    Runtime(crate::runtimes::RuntimeKey),
+}
+
+/// 拖侧栏分段之间的分隔条：可调节展开段的高度，或把未展开段向上/下拉开。
+#[derive(Clone)]
+struct SectionSplitDrag {
+    split_index: usize,
+    above_id: String,
+    above_kind: SectionKind,
+    above_folded: bool,
+    below_id: String,
+    below_kind: SectionKind,
+    below_folded: bool,
+    active_above_id: Option<String>,
+    active_below_id: Option<String>,
+    active_above_h: f32,
+    active_below_h: f32,
+}
+
+impl Render for SectionSplitDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// 拖分隔条时每段正文至少留这么高（像素）。
+const SECTION_MIN_BODY: f32 = 60.;
+
 use machines::machine_menu;
 use new_session::new_session_picker;
 use row::{
@@ -598,6 +650,30 @@ impl Workspace {
             })
     }
 
+    pub(crate) fn set_section_kind_folded(
+        &mut self,
+        kind: &SectionKind,
+        folded: bool,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        match kind {
+            SectionKind::Conversations => {
+                if self.sidebar_conversations_collapsed != folded {
+                    self.sidebar_conversations_collapsed = folded;
+                    cx.notify();
+                }
+            }
+            SectionKind::Runtime(key) => {
+                if let Some(space) = self.space_mut(key) {
+                    if space.folded != Some(folded) {
+                        space.folded = Some(folded);
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
     /// 会话行的 agent 图标颜色：空闲/要你走默认三态色；运行中进入时短暂提亮。
     ///
     /// 过渡只在 Running 时生效（见 `render_session_list` 图标处注释）：短暂提高基准蓝
@@ -614,7 +690,8 @@ impl Workspace {
     pub(crate) fn render_session_list(
         &self,
         this: Entity<Workspace>,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut App,
         statuses: &[AgentStatus],
         animate_running: bool,
         // 键盘焦点在侧栏里时，焦点环落在哪一行（`SidebarItem::key`）。
@@ -822,80 +899,6 @@ impl Workspace {
             .flex_col()
             .track_scroll(&self.sidebar_scroll)
             .lock_scroll_axis()
-            .on_drag_move(move |ev: &DragMoveEvent<SessionDrag>, _window, cx| {
-                e_scroll_sess.update(cx, |ws, cx| {
-                    ws.update_sidebar_drag_scroll(ev.event.position, cx);
-                });
-            })
-            .on_drag_move(move |ev: &DragMoveEvent<ProjectDrag>, _window, cx| {
-                e_scroll_proj.update(cx, |ws, cx| {
-                    ws.update_sidebar_drag_scroll(ev.event.position, cx);
-                });
-            })
-            // 键盘操作，见 `keyboard`。焦点句柄挂在零大小的子元素上，点行不会把焦点从终端抢过来。
-            .key_context("Sidebar")
-            .on_action({
-                let this = this.clone();
-                move |_: &crate::SidebarUp, _window, cx| {
-                    this.update(cx, |ws, cx| ws.sidebar_move(-1, cx));
-                }
-            })
-            .on_action({
-                let this = this.clone();
-                move |_: &crate::SidebarDown, _window, cx| {
-                    this.update(cx, |ws, cx| ws.sidebar_move(1, cx));
-                }
-            })
-            .on_action({
-                let this = this.clone();
-                move |_: &crate::SidebarCollapse, _window, cx| {
-                    this.update(cx, |ws, cx| ws.sidebar_collapse(cx));
-                }
-            })
-            .on_action({
-                let this = this.clone();
-                move |_: &crate::SidebarExpand, _window, cx| {
-                    this.update(cx, |ws, cx| ws.sidebar_expand(cx));
-                }
-            })
-            .on_action({
-                let this = this.clone();
-                move |_: &crate::SidebarOpen, window, cx| {
-                    this.update(cx, |ws, cx| ws.sidebar_open_cursor(window, cx));
-                }
-            })
-            .on_action({
-                let this = this.clone();
-                move |_: &crate::SidebarExit, window, cx| {
-                    this.update(cx, |ws, cx| ws.sidebar_exit(window, cx));
-                }
-            })
-            // 打字跳转。只在焦点就在侧栏上时：行内改名的输入框也在这里面，打的字不能被截走。
-            .on_key_down({
-                let this = this.clone();
-                let focus = self.sidebar_focus.clone();
-                move |event: &KeyDownEvent, window, cx| {
-                    let modifiers = &event.keystroke.modifiers;
-                    if !focus.is_focused(window)
-                        || modifiers.control
-                        || modifiers.platform
-                        || modifiers.alt
-                        || modifiers.function
-                    {
-                        return;
-                    }
-                    let Some(text) = event
-                        .keystroke
-                        .key_char
-                        .clone()
-                        .filter(|text| !text.trim().is_empty())
-                    else {
-                        return;
-                    };
-                    cx.stop_propagation();
-                    this.update(cx, |ws, cx| ws.sidebar_typeahead(&text, cx));
-                }
-            })
             .child(div().track_focus(&self.sidebar_focus).size_0())
             .child(self.render_product_conversation_nav(this.clone(), statuses, focused_key, cx))
             .children(project_section_header);
@@ -914,7 +917,7 @@ impl Workspace {
         // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
         // 「打开项目」就在上面。
         let first_header = std::cell::Cell::new(true);
-        let header_for = |runtime: crate::runtimes::Runtime, grouping: Option<Div>, cx: &App| {
+        let header_for = |runtime: crate::runtimes::Runtime, chevron_degrees: f32, grouping: Option<Div>, cx: &App| {
             let separated = !first_header.replace(false);
             let key = runtime.key().clone();
             let item_key = SidebarItem::Runtime(key.clone()).key();
@@ -923,18 +926,22 @@ impl Workspace {
                 extras.push(focus_ring().into_any_element());
             }
             if reveal_target == Some(item_key) {
+                let scroll = self
+                    .space(&key)
+                    .map(|s| s.scroll.clone())
+                    .unwrap_or_else(|| self.sidebar_scroll.clone());
                 extras.push(
                     reveal_anchor(
                         self.sidebar_reveal.clone(),
                         item_key,
-                        self.sidebar_scroll.clone(),
+                        scroll,
                         this.clone(),
                     )
                     .into_any_element(),
                 );
             }
             div()
-                .when(separated, |d| {
+                .when(!runtime_sections && separated, |d| {
                     d.child(
                         div()
                             .mx_2()
@@ -947,11 +954,14 @@ impl Workspace {
                     runtime,
                     this.clone(),
                     self.runtime_folded(&key),
+                    chevron_degrees,
                     grouping,
                     extras,
                     cx,
                 ))
         };
+        let mut groups_by_runtime: std::collections::HashMap<RuntimeKey, Vec<AnyElement>> =
+            std::collections::HashMap::new();
         let mut headers_left: std::collections::VecDeque<crate::runtimes::Runtime> =
             if !runtime_sections {
                 Default::default()
@@ -965,20 +975,24 @@ impl Workspace {
             let Some(space) = self.space(&group.runtime) else {
                 continue;
             };
-            if headers_left
-                .iter()
-                .any(|runtime| runtime.key() == &group.runtime)
+            let runtime_scroll = space.scroll.clone();
+            if !runtime_sections
+                && headers_left
+                    .iter()
+                    .any(|runtime| runtime.key() == &group.runtime)
             {
                 while let Some(runtime) = headers_left.pop_front() {
                     let reached = runtime.key() == &group.runtime;
-                    rows = rows.child(header_for(runtime, grouping_slot.take(), cx));
+                    let folded = self.runtime_folded(runtime.key());
+                    let deg = if folded { 0.0 } else { 90.0 };
+                    rows = rows.child(header_for(runtime, deg, grouping_slot.take(), cx));
                     if reached {
                         break;
                     }
                 }
             }
-            // 机器分段折起来了，它下面的项目和会话都不画。
-            if runtime_sections && self.runtime_folded(&group.runtime) {
+            // 机器分段折起来了且不在分段视图里时，它下面的项目和会话都不画。
+            if !runtime_sections && self.runtime_folded(&group.runtime) {
                 continue;
             }
             let is_project_group = grouping == SidebarGrouping::Project;
@@ -1087,7 +1101,7 @@ impl Workspace {
                             row.child(reveal_anchor(
                                 self.sidebar_reveal.clone(),
                                 group_key,
-                                self.sidebar_scroll.clone(),
+                                runtime_scroll.clone(),
                                 this.clone(),
                             ))
                         })
@@ -1407,20 +1421,34 @@ impl Workspace {
 
             if collapsed {
                 if grouping != SidebarGrouping::None {
-                    rows = rows.child(
-                        flip_slot(project_flip_id(&project), reorder_generation, group_rows)
-                            .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
-                    );
+                    let entry = flip_slot(project_flip_id(&project), reorder_generation, group_rows)
+                        .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
+                        .into_any_element();
+                    if runtime_sections {
+                        groups_by_runtime
+                            .entry(group.runtime.clone())
+                            .or_default()
+                            .push(entry);
+                    } else {
+                        rows = rows.child(entry);
+                    }
                 }
                 continue;
             }
 
             if ixs.is_empty() {
                 // 空项目不占一行说明。Grok 的空分组就是没有条目，新建走标题上的 +。
-                rows = rows.child(
-                    flip_slot(project_flip_id(&project), reorder_generation, group_rows)
-                        .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
-                );
+                let entry = flip_slot(project_flip_id(&project), reorder_generation, group_rows)
+                    .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
+                    .into_any_element();
+                if runtime_sections {
+                    groups_by_runtime
+                        .entry(group.runtime.clone())
+                        .or_default()
+                        .push(entry);
+                } else {
+                    rows = rows.child(entry);
+                }
                 continue;
             }
 
@@ -1692,7 +1720,7 @@ impl Workspace {
                         row.child(reveal_anchor(
                             self.sidebar_reveal.clone(),
                             ui_id,
-                            self.sidebar_scroll.clone(),
+                            runtime_scroll.clone(),
                             this.clone(),
                         ))
                     })
@@ -1922,7 +1950,7 @@ impl Workspace {
                                     row.child(reveal_anchor(
                                         self.sidebar_reveal.clone(),
                                         pane_key,
-                                        self.sidebar_scroll.clone(),
+                                        runtime_scroll.clone(),
                                         this.clone(),
                                     ))
                                 })
@@ -2069,7 +2097,7 @@ impl Workspace {
                             group.child(reveal_anchor(
                                 self.sidebar_reveal.clone(),
                                 ui_id,
-                                self.sidebar_scroll.clone(),
+                                runtime_scroll.clone(),
                                 this.clone(),
                             ))
                         })
@@ -2102,42 +2130,312 @@ impl Workspace {
                     );
                 }
             }
-            rows = rows.child(
-                flip_slot(
-                    project_flip_id(&project),
-                    reorder_generation,
-                    group_rows.child(group_body),
-                )
-                .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
-            );
+            let group_entry = flip_slot(
+                project_flip_id(&project),
+                reorder_generation,
+                group_rows.child(group_body),
+            )
+            .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
+            .into_any_element();
+            if runtime_sections {
+                groups_by_runtime
+                    .entry(group.runtime.clone())
+                    .or_default()
+                    .push(group_entry);
+            } else {
+                rows = rows.child(group_entry);
+            }
         }
 
-        for runtime in headers_left {
-            rows = rows.child(header_for(runtime, grouping_slot.take(), cx));
+        if !runtime_sections {
+            for runtime in headers_left {
+                let folded = self.runtime_folded(runtime.key());
+                let deg = if folded { 0.0 } else { 90.0 };
+                rows = rows.child(header_for(runtime, deg, grouping_slot.take(), cx));
+            }
         }
 
-        if hidden_empty > 0 {
+        let make_hidden_empty_row = || {
             let e_show = this.clone();
-            rows = rows.child(
-                ListRow::new("hidden-empty-projects")
-                    .mx_2()
-                    .mt_2()
-                    .px(px(PROJECT_HEADER_PAD_X))
-                    .py(px(4.))
-                    .rounded(ui_theme::row_radius())
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_ev, _window, cx| {
-                        e_show.update(cx, |ws, cx| {
-                            ws.sidebar_hide_empty_projects = false;
-                            ws.save_state(cx);
-                            cx.notify();
-                        });
-                    })
-                    .text_xs()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child(format!("已隐藏 {hidden_empty} 个无会话项目")),
-            );
+            ListRow::new("hidden-empty-projects")
+                .mx_2()
+                .mt_2()
+                .px(px(PROJECT_HEADER_PAD_X))
+                .py(px(4.))
+                .rounded(ui_theme::row_radius())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_ev, _window, cx| {
+                    e_show.update(cx, |ws, cx| {
+                        ws.sidebar_hide_empty_projects = false;
+                        ws.save_state(cx);
+                        cx.notify();
+                    });
+                })
+                .text_xs()
+                .text_color(rgb(ui_theme::text_faint()))
+                .child(format!("已隐藏 {hidden_empty} 个无会话项目"))
+                .into_any_element()
+        };
+
+        if !runtime_sections && hidden_empty > 0 {
+            rows = rows.child(make_hidden_empty_row());
         }
+
+        let machine_sections_view = if runtime_sections {
+            struct UnifiedSection {
+                id: String,
+                kind: SectionKind,
+                is_folded: bool,
+                presence: gpui_base::PresenceSample,
+                header: AnyElement,
+                body: AnyElement,
+                scroll: ScrollHandle,
+                item_count: usize,
+            }
+
+            let mut sections: Vec<UnifiedSection> = Vec::new();
+
+            // 1. 对话栏目（如果有会话）
+            let conv_folded = self.sidebar_conversations_collapsed;
+            let conv_presence = Presence::new(
+                ElementId::from("sidebar-section-presence-conversations"),
+                !conv_folded,
+            )
+            .transition(Transition::new(Duration::from_millis(180)).easing(Easing::EaseInOut))
+            .sample(window, cx);
+
+            if let Some((header, body)) = self.render_product_conversation_parts(
+                this.clone(),
+                statuses,
+                focused_key,
+                Some(conv_presence.progress * 90.0),
+                cx,
+            ) {
+                if let Some(body) = body {
+                    let conv_count = self.sidebar_conversation_order(cx).len();
+                    sections.push(UnifiedSection {
+                        id: "conversations".to_string(),
+                        kind: SectionKind::Conversations,
+                        is_folded: conv_folded,
+                        presence: conv_presence,
+                        header,
+                        body,
+                        scroll: self.sidebar_conversations_scroll.clone(),
+                        item_count: conv_count,
+                    });
+                }
+            }
+
+            // 2. 各机器栏目
+            for key in self.space_keys() {
+                let Some(space) = self.space(&key) else { continue };
+                let runtime = space.runtime.clone();
+                let is_folded = self.runtime_folded(&key);
+                let presence = Presence::new(
+                    ElementId::from(SharedString::from(format!("sidebar-section-presence-runtime-{key:?}"))),
+                    !is_folded,
+                )
+                .transition(Transition::new(Duration::from_millis(180)).easing(Easing::EaseInOut))
+                .sample(window, cx);
+
+                let machine_header = header_for(runtime, presence.progress * 90.0, grouping_slot.take(), cx);
+                let mut machine_items = groups_by_runtime.remove(&key).unwrap_or_default();
+                let machine_count = machine_items.len().max(2);
+                if key == RuntimeKey::Local && hidden_empty > 0 {
+                    machine_items.push(make_hidden_empty_row());
+                }
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .children(machine_items)
+                    .into_any_element();
+
+                sections.push(UnifiedSection {
+                    id: format!("runtime-{key:?}"),
+                    kind: SectionKind::Runtime(key.clone()),
+                    is_folded,
+                    presence,
+                    header: machine_header.into_any_element(),
+                    body,
+                    scroll: space.scroll.clone(),
+                    item_count: machine_count,
+                });
+            }
+
+            // 固定的一棵树：每段永远是「标题 + 正文 + 分隔条」。
+            // 展开 / 收起高度往下索取，不改变上方已有分段的高度，标题栏位置严格保持不动，
+            // 方便鼠标悬停在标题处连续点击来回伸缩。
+            let n = sections.len();
+            struct SectionMeta {
+                id: String,
+                kind: SectionKind,
+                is_folded: bool,
+                item_count: usize,
+            }
+            let metas: Vec<SectionMeta> = sections
+                .iter()
+                .map(|s| SectionMeta {
+                    id: s.id.clone(),
+                    kind: s.kind.clone(),
+                    is_folded: s.is_folded,
+                    item_count: s.item_count,
+                })
+                .collect();
+            let expanded: Vec<bool> = sections.iter().map(|s| !s.is_folded).collect();
+
+            let get_base_h = |id: &str, count: usize| -> f32 {
+                let heights = self.sidebar_section_heights.borrow();
+                if let Some(&h) = heights.get(id) {
+                    h.max(SECTION_MIN_BODY)
+                } else {
+                    let content_h = (count as f32 * 34.0 + 8.0).clamp(SECTION_MIN_BODY, 320.0);
+                    content_h
+                }
+            };
+
+            let mut container = div().size_full().flex().flex_col().min_h_0().on_drag_move({
+                let this = this.clone();
+                move |ev: &DragMoveEvent<SectionSplitDrag>, _window, cx| {
+                    let drag = ev.drag(cx).clone();
+                    let y = f32::from(ev.event.position.y);
+                    this.update(cx, |ws, cx| {
+                        let (y0, a0, b0, _) = *ws
+                            .sidebar_split_drag
+                            .get_or_insert_with(|| (y, drag.active_above_h, drag.active_below_h, 0.0));
+
+                        let delta = y - y0;
+
+                        match (&drag.active_above_id, &drag.active_below_id) {
+                            (Some(a_id), Some(b_id)) => {
+                                let sum = a0 + b0;
+                                if sum <= SECTION_MIN_BODY * 1.5 {
+                                    return;
+                                }
+                                let new_a = (a0 + delta).clamp(SECTION_MIN_BODY, sum - SECTION_MIN_BODY);
+                                let new_b = (sum - new_a).max(SECTION_MIN_BODY);
+                                ws.sidebar_section_heights.borrow_mut().insert(a_id.clone(), new_a);
+                                ws.sidebar_section_heights.borrow_mut().insert(b_id.clone(), new_b);
+                                cx.notify();
+                            }
+                            (Some(a_id), None) => {
+                                // 上方有展开项，下方无展开项（如对话展开、机器全部收起）：
+                                // 向下拖拉大上方并推移下方，向上拖推小上方
+                                let new_a = (a0 + delta).clamp(SECTION_MIN_BODY, 800.0);
+                                ws.sidebar_section_heights.borrow_mut().insert(a_id.clone(), new_a);
+                                cx.notify();
+                            }
+                            (None, Some(b_id)) => {
+                                // 上方无展开项，下方有展开项：向上拖拉大下方，向下拖推小下方
+                                let new_b = (b0 - delta).clamp(SECTION_MIN_BODY, 800.0);
+                                ws.sidebar_section_heights.borrow_mut().insert(b_id.clone(), new_b);
+                                cx.notify();
+                            }
+                            (None, None) => {}
+                        }
+                    });
+                }
+            });
+
+            for (ix, section) in sections.into_iter().enumerate() {
+                let base_h = get_base_h(&section.id, section.item_count);
+                let is_in_drag = self.sidebar_split_drag.is_some() && cx.has_active_drag();
+                let progress = if is_in_drag && !section.is_folded {
+                    1.0
+                } else {
+                    section.presence.progress.clamp(0.0, 1.0)
+                };
+                container = container.child(div().flex_none().child(section.header));
+
+                let cur_h = base_h * progress;
+                let mut body = div()
+                    .id(ElementId::from(SharedString::from(format!(
+                        "section-body-{}",
+                        section.id
+                    ))))
+                    .relative()
+                    .flex_none()
+                    .h(px(cur_h))
+                    .overflow_hidden();
+                if (section.presence.should_render() || is_in_drag) && progress > 0.001 {
+                    body = body
+                        .child(
+                            div()
+                                .id(ElementId::from(SharedString::from(format!(
+                                    "section-scroll-{}",
+                                    section.id
+                                ))))
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&section.scroll)
+                                .lock_scroll_axis()
+                                .opacity(progress)
+                                .child(section.body),
+                        );
+                }
+                container = container.child(body);
+
+                // 分隔条显示与可拖拽判断：
+                // 紧邻分隔条的上下两段至少有一项展开时显示拖拽条；两闭合段之间不留缝隙。
+                if ix + 1 < n {
+                    let active_above = (0..=ix).rev().find(|&k| expanded[k]);
+                    let active_below = (ix + 1..n).find(|&k| expanded[k]);
+                    let should_show_handle = (expanded[ix] || expanded[ix + 1])
+                        && (active_above.is_some() || active_below.is_some());
+
+                    let mut handle = div().id(("sidebar-section-split", ix)).relative().flex_none().h(px(0.));
+                    if should_show_handle {
+                        let active_above_h = active_above.map(|k| get_base_h(&metas[k].id, metas[k].item_count)).unwrap_or(220.0);
+                        let active_below_h = active_below.map(|k| get_base_h(&metas[k].id, metas[k].item_count)).unwrap_or(240.0);
+                        let payload = SectionSplitDrag {
+                            split_index: ix,
+                            above_id: metas[ix].id.clone(),
+                            above_kind: metas[ix].kind.clone(),
+                            above_folded: metas[ix].is_folded,
+                            below_id: metas[ix + 1].id.clone(),
+                            below_kind: metas[ix + 1].kind.clone(),
+                            below_folded: metas[ix + 1].is_folded,
+                            active_above_id: active_above.map(|k| metas[k].id.clone()),
+                            active_below_id: active_below.map(|k| metas[k].id.clone()),
+                            active_above_h,
+                            active_below_h,
+                        };
+                        let start_this = this.clone();
+                        handle = handle.child(deferred(
+                            div()
+                                .id(("sidebar-section-split-hit", ix))
+                                .absolute()
+                                .left_0()
+                                .top(px(-4.))
+                                .w_full()
+                                .h(px(8.))
+                                .cursor_row_resize()
+                                .group("sidebar-section-split-hit")
+                                .on_drag(payload, move |drag, _, _, cx| {
+                                    start_this.update(cx, |ws, _| ws.sidebar_split_drag = None);
+                                    cx.new(|_| drag.clone())
+                                })
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .top(px(3.5))
+                                        .w_full()
+                                        .h(px(1.))
+                                        .bg(rgb(ui_theme::border_dim()))
+                                        .group_hover("sidebar-section-split-hit", |s| {
+                                            s.bg(rgb(ui_theme::text_faint()))
+                                        }),
+                                ),
+                        ).with_priority(1));
+                    }
+                    container = container.child(handle);
+                }
+            }
+
+            Some(container.into_any_element())
+        } else {
+            None
+        };
 
         // ---- 底部操作条：设置 ----
         // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。「设置」点一下直接
@@ -2314,20 +2612,107 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(rows)
-                    .vertical_scrollbar(&self.sidebar_scroll)
-                    // 放在所有行后面：行都量完了才算视口外的「需要你」。
-                    .child(attention_checker(
-                        self.sidebar_reveal.clone(),
-                        self.sidebar_scroll.clone(),
-                        this.clone(),
-                    ))
-                    .children(offscreen.above.map(|target| {
-                        attention_pill(true, target, self.sidebar_reveal.clone(), this.clone())
-                    }))
-                    .children(offscreen.below.map(|target| {
-                        attention_pill(false, target, self.sidebar_reveal.clone(), this.clone())
-                    })),
+                    .on_drag_move(move |ev: &DragMoveEvent<SessionDrag>, _window, cx| {
+                        e_scroll_sess.update(cx, |ws, cx| {
+                            ws.update_sidebar_drag_scroll(ev.event.position, cx);
+                        });
+                    })
+                    .on_drag_move(move |ev: &DragMoveEvent<ProjectDrag>, _window, cx| {
+                        e_scroll_proj.update(cx, |ws, cx| {
+                            ws.update_sidebar_drag_scroll(ev.event.position, cx);
+                        });
+                    })
+                    // 键盘操作，见 `keyboard`。焦点句柄挂在零大小的子元素上，点行不会把焦点从终端抢过来。
+                    .key_context("Sidebar")
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &crate::SidebarUp, _window, cx| {
+                            this.update(cx, |ws, cx| ws.sidebar_move(-1, cx));
+                        }
+                    })
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &crate::SidebarDown, _window, cx| {
+                            this.update(cx, |ws, cx| ws.sidebar_move(1, cx));
+                        }
+                    })
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &crate::SidebarCollapse, _window, cx| {
+                            this.update(cx, |ws, cx| ws.sidebar_collapse(cx));
+                        }
+                    })
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &crate::SidebarExpand, _window, cx| {
+                            this.update(cx, |ws, cx| ws.sidebar_expand(cx));
+                        }
+                    })
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &crate::SidebarOpen, window, cx| {
+                            this.update(cx, |ws, cx| ws.sidebar_open_cursor(window, cx));
+                        }
+                    })
+                    .on_action({
+                        let this = this.clone();
+                        move |_: &crate::SidebarExit, window, cx| {
+                            this.update(cx, |ws, cx| ws.sidebar_exit(window, cx));
+                        }
+                    })
+                    // 打字跳转。只在焦点就在侧栏上时：行内改名的输入框也在这里面，打的字不能被截走。
+                    .on_key_down({
+                        let this = this.clone();
+                        let focus = self.sidebar_focus.clone();
+                        move |event: &KeyDownEvent, window, cx| {
+                            let modifiers = &event.keystroke.modifiers;
+                            if !focus.is_focused(window)
+                                || modifiers.control
+                                || modifiers.platform
+                                || modifiers.alt
+                                || modifiers.function
+                            {
+                                return;
+                            }
+                            let Some(text) = event
+                                .keystroke
+                                .key_char
+                                .clone()
+                                .filter(|text| !text.trim().is_empty())
+                            else {
+                                return;
+                            };
+                            cx.stop_propagation();
+                            this.update(cx, |ws, cx| ws.sidebar_typeahead(&text, cx));
+                        }
+                    })
+                    .map(|pane| {
+                        if let Some(sections_view) = machine_sections_view {
+                            pane.child(
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().track_focus(&self.sidebar_focus).size_0())
+                                    .child(div().flex_1().min_h_0().flex().flex_col().child(sections_view))
+                            )
+                        } else {
+                            pane.child(rows)
+                                .vertical_scrollbar(&self.sidebar_scroll)
+                                // 放在所有行后面：行都量完了才算视口外的「需要你」。
+                                .child(attention_checker(
+                                    self.sidebar_reveal.clone(),
+                                    self.sidebar_scroll.clone(),
+                                    this.clone(),
+                                ))
+                                .children(offscreen.above.map(|target| {
+                                    attention_pill(true, target, self.sidebar_reveal.clone(), this.clone())
+                                }))
+                                .children(offscreen.below.map(|target| {
+                                    attention_pill(false, target, self.sidebar_reveal.clone(), this.clone())
+                                }))
+                        }
+                    }),
             )
             .child(footer)
     }
