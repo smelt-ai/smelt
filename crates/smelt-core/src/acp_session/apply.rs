@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agent_client_protocol::schema::v1::{Plan, SessionId, StopReason, ToolCall, ToolCallUpdate};
+use agent_client_protocol::v1::schema::{Plan, SessionId, StopReason, ToolCall, ToolCallUpdate};
 
 use super::{
     AcpEndKind, AcpNoticeKind, AcpSessionState, AcpTurnOutcome, LiveElicitation, LivePermission,
@@ -1582,7 +1582,7 @@ pub(super) fn recovered_elicitation(
             .iter()
             .filter_map(|option| option.get("label")?.as_str())
             .map(|label| crate::acp_conn::ElicitOption {
-                value: agent_client_protocol::schema::v1::ElicitationContentValue::String(
+                value: agent_client_protocol::v1::schema::ElicitationContentValue::String(
                     label.to_string(),
                 ),
                 label: label.to_string(),

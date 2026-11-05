@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agent_client_protocol::schema::v1::{PermissionOptionKind, PlanEntryStatus, StopReason};
+use agent_client_protocol::v1::schema::{PermissionOptionKind, PlanEntryStatus, StopReason};
 
 use crate::acp_chat::{AcpEntry, AcpImage as PromptImage};
 use crate::acp_conn::{ModelState, SessionConfigState};

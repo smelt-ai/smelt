@@ -44,15 +44,15 @@ flowchart TB
 
 | Provider | 协议形态 | smelt 怎么交付 | 启动（出厂默认） |
 |----------|----------|----------------|------------------|
-| **Claude** | **适配器**（`claude-agent-acp`） | **受管 bun 自动拉包** | `bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0` |
-| **Codex** | **标准 ACP 通道** | 经 `bunx` 拉官方 `codex-acp`（出厂默认） | `bunx --bun @agentclientprotocol/codex-acp@1.12.0` |
+| **Claude** | **适配器**（`claude-agent-acp`） | 编在 `smelt-agent` 里，跑本机 Claude CLI | 逻辑名，运行时换成 `smelt-agent acp-claude` |
+| **Codex** | **标准 ACP 通道**（`codex-acp`） | 编在 `smelt-agent` 里，跑本机 Codex CLI | 逻辑名，运行时换成 `smelt-agent acp-codex` |
 | **Copilot** | **原生**（CLI 内置 ACP server） | 用户本机已装 `copilot`；smelt 不代装 CLI | `copilot --acp --stdio` |
 | **Grok** | **原生**（Grok Build 官方 ACP） | 用户本机已装 / 官方入口；smelt 不代装 CLI | 以官方 `agent stdio` 为准 |
 | **Pi** | **官方 JSONL RPC** | Smelt 原生驱动；Pi 编成 `smelt-agent`，复用 Pi 配置/凭据 | `smelt-pi-agent` |
 
-受管适配器升级时，Smelt 只把自己曾发布过的逐字默认命令迁到当前 pin；带环境
-前缀、额外参数或替换过运行器的用户命令保持不动。新会话和断线/手动重启后的
-会话使用新版本，正在执行的进程不热切换。
+适配器版本钉在 `agent/package.json`，跟着 smelt-agent 一起升级。出厂默认命令换过写法时，
+Smelt 只把自己曾发布过的逐字默认命令迁到当前默认；带环境前缀、额外参数或替换过运行器的
+用户命令保持不动。新会话和断线/手动重启后的会话使用新版本，正在执行的进程不热切换。
 
 ```text
 原生   = agent 进程自己实现 ACP
@@ -61,14 +61,10 @@ flowchart TB
 app-server = smelt 直接消费 Codex 的原生 JSONL 协议
 ```
 
-### 适配器：统一走应用里自带的 bun
+### 适配器：编在 smelt-agent 里
 
-Bun 1.4.3 仍按 generation 下载到 `~/.smelt/runtime`，`~/.smelt/runtime/bin/bun` 指向当前这一份。Pi 会话用编译好的 `smelt-agent`，不靠这份 Bun。
-
-1. `bunx <adapter>@<锁版本>` 由这份 Bun 解析/缓存，**用户不必自己装 node/npx/适配器**
-2. 出厂命令**一律 `bunx …@版本`**，不用 `npx`（避免依赖用户系统 Node）
-3. 版本锁定在出厂默认里；设置可「升级到 latest」并写回
-4. 拉包失败可读、可重试
+Claude、Codex 的官方 ACP 适配器和 Pi 一起编进 `smelt-agent`，**用户不必自己装 node/npx/适配器**，
+也不另外下载 Bun。MCP 预设需要的 `bun x` 同样用 smelt-agent（`BUN_BE_BUN=1`）。
 
 **仍须用户自备的（smelt 不代装）：**  
 - Claude 适配器背后的 **Claude Code / 登录**  
@@ -78,8 +74,8 @@ Bun 1.4.3 仍按 generation 下载到 `~/.smelt/runtime`，`~/.smelt/runtime/bin
 
 能力与权限语义（尤其 `request_permission`）**逐家实测**，不假设「接了 ACP = 会弹权限门」。
 
-- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家 agent，用户可增 custom，每项含名称/启动命令（静态注册表 `CONVERSATION_AGENTS` + `ConversationCommands`，按 agent id 存储）
-- [x] Claude 适配器锁定版本并由 `ensure_bun` 拉取；Codex 走标准 `codex-acp` 通道
+- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家 agent 用出厂命令（静态注册表 `CONVERSATION_AGENTS`）；要换命令、加参数、换数据目录用「自定义 Agent」
+- [x] Claude、Codex 适配器锁定版本并编进 `smelt-agent`；Codex 走标准 `codex-acp` 通道
 - [x] Pi 原生 RPC 驱动：编译好的 `smelt-agent`、锁定依赖、流式/工具/权限/取消/恢复、模型与推理配置
 - [x] 侧栏选用哪家 agent；会话记住选的是谁；UI 标注「适配器（smelt 代管）/ 原生（需本机 CLI）」
 - [ ] 逐家实测矩阵：`session/load` · `request_permission` · elicitation
@@ -88,13 +84,11 @@ Bun 1.4.3 仍按 generation 下载到 `~/.smelt/runtime`，`~/.smelt/runtime/bin
 
 ```mermaid
 flowchart LR
-  subgraph managed["适配器 · smelt 受管"]
-    Bun["ensure_bun"]
-    CL["bunx claude-agent-acp"]
-    Bun --> CL
+  subgraph managed["适配器 · 编在 smelt-agent 里"]
+    CL["smelt-agent acp-claude"]
+    CD["smelt-agent acp-codex"]
   end
   subgraph native["原生 · 用户本机 CLI"]
-    CD["bunx codex-acp"]
     CP["copilot --acp"]
     GK["grok agent stdio"]
   end

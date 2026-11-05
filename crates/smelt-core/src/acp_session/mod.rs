@@ -19,7 +19,7 @@ pub use smelt_model::acp_session::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agent_client_protocol::schema::v1::{ElicitationContentValue, Plan};
+use agent_client_protocol::v1::schema::{ElicitationContentValue, Plan};
 
 use crate::acp_chat::AcpEntry;
 use crate::acp_conn::{

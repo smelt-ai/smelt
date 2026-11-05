@@ -27,7 +27,7 @@ use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h
 pub(crate) use smelt_ui::Button;
 use smelt_ui::ListRow;
 
-use agent_client_protocol::schema::v1::SessionId;
+use agent_client_protocol::v1::schema::SessionId;
 
 use smelt_client::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientHandle, ConversationClientLaunch, load_acp_history,

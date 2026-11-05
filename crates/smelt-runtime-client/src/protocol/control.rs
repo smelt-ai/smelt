@@ -16,8 +16,7 @@ use super::daemon::DaemonOperation;
 /// 自己要的方法，缺了必需的就判运行时太旧。新方法缺了只是某项功能用不了的，记进
 /// [`ControlMethod::OPTIONAL`]；客户端离了它就用不了的，直接是必需方法。改已有方法的参数或
 /// 结果才升，同时抬 [`CONTROL_API_MIN_SUPPORTED_VERSION`]：同名方法换了形状，方法清单看不
-/// 出来，只能靠版本拦住。但用户的 Linux 机器打成了镜像，运行时升不了，升它就连不上这些机器：
-/// 优先让改动可缺省、新旧两边都读得了，不升版本。
+/// 出来，只能靠版本拦住。升了版，没升级的运行时整台连不上：优先让改动新旧两边都读得了，不升。
 ///
 /// 删方法不升：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下；不调它的客户端
 /// （手机、Pi）照常连。2026-10 删整份读写的 `workspace.load` / `workspace.save` 就是这样。
@@ -32,6 +31,9 @@ use super::daemon::DaemonOperation;
 ///
 /// 自定义 Agent 的 profile 多了启动命令和环境变量，没有升版：两个字段可缺省，旧运行时也
 /// 不拒绝多出来的字段。
+///
+/// 删掉按 agent 改启动命令的设置后没有升版：配置在线上仍带一个恒为空的 `commands`
+/// （见 `AgentHostSettings::commands`），v3 运行时照常解析、合并时什么都不改。
 pub const CONTROL_API_VERSION: u16 = 3;
 pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 3;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
@@ -206,7 +208,7 @@ define_control_methods! {
 impl ControlMethod {
     /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加、缺了只是某项功能
     /// 用不了的方法。运行时可以没有：客户端不因缺它们判不兼容，用到它们的功能调到
-    /// MethodNotFound 时自己降级。客户端离了就用不了的新方法不放这里（工作区目录的
+    /// MethodNotFound 就照常报错，不为旧运行时另写降级。客户端离了就用不了的新方法不放这里（工作区目录的
     /// `workspace.conversation.create/update/delete` / `workspace.project.*`：桌面没有它们读不到目录）。
     /// 抬最低版本时清空，它们成了新基线里的必需方法。
     pub const OPTIONAL: &'static [Self] = &[

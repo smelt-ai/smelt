@@ -1366,7 +1366,7 @@ impl Workspace {
         &self,
         agent: settings::ConversationAgentKind,
         cwd: &str,
-        target_id: &agent_client_protocol::schema::v1::SessionId,
+        target_id: &agent_client_protocol::v1::schema::SessionId,
         cx: &App,
     ) -> Option<usize> {
         self.sessions.iter().position(|s| match &s.kind {
@@ -1404,7 +1404,7 @@ impl Workspace {
         // 已经开着的必须是**这一条**历史会话（比对 agent + cwd + 具体 session id），
         // 不能只认 agent+cwd——同项目同 agent 可能同时开着好几条不同的历史会话，
         // 之前只按 agent+cwd 找，点哪条「继续」都会跳到"第一个凑巧匹配的"那条。
-        let target_id = agent_client_protocol::schema::v1::SessionId::new(resume_id.clone());
+        let target_id = agent_client_protocol::v1::schema::SessionId::new(resume_id.clone());
         if let Some(ix) = self.find_open_acp_session(agent, &cwd, &target_id, cx) {
             let view = match &self.sessions[ix].kind {
                 SessionKind::Conversation(view) => view.clone(),

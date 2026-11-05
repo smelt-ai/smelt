@@ -29,8 +29,6 @@ struct AgentUiProjection {
     #[serde(default, alias = "agent_presets")]
     agents: Vec<AgentDefinition>,
     #[serde(default)]
-    acp_pi_cmd: Option<String>,
-    #[serde(default)]
     acp_env: BTreeMap<String, BTreeMap<String, String>>,
 }
 
@@ -46,11 +44,6 @@ fn load_agent_ui_projection() -> Result<Option<AgentUiProjection>, String> {
 }
 
 fn projection_from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentUiProjection {
-    let acp_pi_cmd = snapshot
-        .commands
-        .iter()
-        .find(|command| command.command_key == ConversationAgentKind::Pi.descriptor().config_key)
-        .map(|command| command.command.clone());
     let mut acp_env = BTreeMap::new();
     for record in snapshot.env {
         acp_env
@@ -60,7 +53,6 @@ fn projection_from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentUiPr
     }
     AgentUiProjection {
         agents: snapshot.agents.into_iter().map(agent_from_record).collect(),
-        acp_pi_cmd,
         acp_env,
     }
 }
@@ -173,9 +165,6 @@ fn resolve_agent_execution_definition(
         ));
     }
     let mut launch = kind.default_launch();
-    if let Some(command) = config.acp_pi_cmd {
-        launch.command = command;
-    }
     for (name, value) in config.acp_env.get(kind.id()).into_iter().flatten() {
         launch.env.insert(name.clone(), value.clone());
     }
@@ -1187,16 +1176,9 @@ mod tests {
     }
 
     #[test]
-    fn typed_snapshot_supplies_agents_command_and_env() {
+    fn typed_snapshot_supplies_agents_and_env() {
         let snapshot = smelt_store::AgentUiSnapshot {
             agent_hooks_enabled: true,
-            commands: vec![smelt_store::AgentConversationCommandRecord {
-                command_key: ConversationAgentKind::Pi
-                    .descriptor()
-                    .config_key
-                    .to_string(),
-                command: "smelt-pi-agent --x".into(),
-            }],
             env: vec![smelt_store::AgentAcpEnvRecord {
                 engine_kind_id: "pi".into(),
                 name: "FOO".into(),
@@ -1224,7 +1206,10 @@ mod tests {
             resolve_agent_execution_definition(projection_from_snapshot(snapshot), "writer")
                 .unwrap();
 
-        assert_eq!(execution.launch.command, "smelt-pi-agent --x");
+        assert_eq!(
+            execution.launch.command,
+            ConversationAgentKind::Pi.default_cmd()
+        );
         assert_eq!(execution.launch.env.get("FOO"), Some(&"bar".to_string()));
     }
 

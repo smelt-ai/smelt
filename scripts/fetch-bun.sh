@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 把钉死的 Bun 1.4.3 放进 target/bundled-bun/<id>/bun。已有且可执行文件哈希相符就复用。
+# 把钉死的 Bun 1.4.4 放进 target/bundled-bun/<id>/bun。已有且可执行文件哈希相符就复用。
 # 用法：scripts/fetch-bun.sh [darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64]
 # `--managed-only` 只是不走 PATH，和默认行为一样。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUN_VERSION=1.4.3
+BUN_VERSION=1.4.4
 
 host_id() {
   local os arch
@@ -41,29 +41,29 @@ ID="${ID:-$(host_id)}"
 case "$ID" in
   darwin-arm64)
     ZIP=bun-darwin-aarch64.zip
-    ARCHIVE_SHA=80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
-    EXE_SHA=28c7dd0a06916aba284d570ef44a2d70e9c538eaf2ba58dfe0910525563b3f79
+    ARCHIVE_SHA=c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510
+    EXE_SHA=0a2237cdcfa0d16ef501d9acca9f0026309ef348bea7393a64e8d1e3609565cc
     ;;
   darwin-x64)
     ZIP=bun-darwin-x64.zip
-    ARCHIVE_SHA=62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d
-    EXE_SHA=c2a945a9d33f9088b32ac3550d1d1fd485a7fc10d71c66f91ef0d33b41cefa7c
+    ARCHIVE_SHA=50a3491f73abc2fe81673171a85762d3bc2cc1680ccecadd983de99adf77977e
+    EXE_SHA=c35307c7d45d65c5a385a58c4a6cb0bb9499e4e626abdee207c177a77ba666ab
     ;;
   linux-x64)
     ZIP=bun-linux-x64-baseline.zip
-    ARCHIVE_SHA=1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b
-    EXE_SHA=7ce7d6b654eddeec20afddf2396317fba6dc19ab52788a27e894e1806bf8f24b
+    ARCHIVE_SHA=e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76
+    EXE_SHA=10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235
     ;;
   linux-arm64)
     ZIP=bun-linux-aarch64.zip
-    ARCHIVE_SHA=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21
-    EXE_SHA=029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe
+    ARCHIVE_SHA=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e
+    EXE_SHA=354c2b049c716aca07b2e5cddb887928ac58950675d1258bb6312083917793b6
     ;;
   windows-x64)
     ZIP=bun-windows-x64.zip
-    ARCHIVE_SHA=0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d
+    ARCHIVE_SHA=cd2c0fccc78f3ede1f50ca827a15f063eda13d4d150a3d0674f4f6e323d864a5
     # 压缩包里是 bun-windows-x64/bun.exe。
-    EXE_SHA=095db4abae203d42f29fdec26da4a882fcde6333cdd84e40c0c7828c0cf543f6
+    EXE_SHA=cb1d8e6564e655e49d30cead359750a1cbbd12f42651caa4b62244d7bd93c244
     BIN_NAME=bun.exe
     ;;
 esac

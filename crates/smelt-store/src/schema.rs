@@ -14,11 +14,10 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 41] = [
+pub const TABLES: [&str; 40] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
-    "agent_acp_command",
     "agent_acp_config_memory",
     "agent_acp_env",
     "agent_definition",
@@ -346,10 +345,6 @@ CREATE TABLE agent_host_pref (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   hooks_enabled INTEGER NOT NULL CHECK (hooks_enabled IN (0, 1))
 );
-CREATE TABLE agent_acp_command (
-  command_key TEXT PRIMARY KEY,
-  command TEXT NOT NULL
-) WITHOUT ROWID;
 CREATE TABLE agent_acp_env (
   engine_kind_id TEXT NOT NULL,
   name TEXT NOT NULL,
@@ -1776,6 +1771,11 @@ UPDATE workspace_catalog SET epoch = lower(hex(randomblob(16))) WHERE epoch = ''
 pub const MIGRATE_V33_TO_V34: &str = "
 ALTER TABLE session_group ADD COLUMN archived_at INTEGER;
 ALTER TABLE session_group ADD COLUMN pinned_at INTEGER;
+";
+
+/// v35：按 agent 改启动命令的设置删掉了，换命令用自定义 Agent。存它的表一起删。
+pub const MIGRATE_V34_TO_V35: &str = "
+DROP TABLE agent_acp_command;
 ";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。

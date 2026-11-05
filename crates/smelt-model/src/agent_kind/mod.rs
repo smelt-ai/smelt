@@ -79,114 +79,53 @@ pub enum TaskCliPatch {
     },
 }
 
-/// Smelt 曾经作为出厂默认值发布过的一版受管 ACP 适配器。
+/// 运行 smelt-agent 的逻辑命令名。启动命令里写它，连接层换成当前发布的那份 smelt-agent
+/// 的真实路径（见 `acp_conn`），不要求用户 PATH 里有同名程序。
+pub const SMELT_AGENT_COMMAND: &str = "smelt-agent";
+
+/// 内置 Claude / Codex 适配器的启动名。和 [`SMELT_PI_AGENT_COMMAND`] 一样是逻辑名：运行时
+/// 把它换成自己编进 smelt-agent 的那份适配器（见 `acp_conn`），不按字面执行。怎么启动由
+/// 运行时决定，换适配器只改运行时，桌面、存档都不用动。
 ///
-/// 包名和版本拆开存，而不是只留一条命令字符串：配置迁移需要还原旧默认命令，
-/// Bun 缓存清理则需要精确定位旧包目录，两条路径必须共用同一份版本事实。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ManagedAcpAdapterRelease {
-    pub package: &'static str,
-    pub version: &'static str,
+/// 每个适配器有两个名字，都不能改：
+///
+/// - `legacy`：2026.1104 及更早的运行时出厂写的那条命令。那些运行时只认它：装了 CLI 走
+///   自己内嵌的适配器，没装用 bunx 跑。出厂命令现在写它，旧运行时不用升级也能开对话。
+/// - `name`：以后的出厂名。等兼容基线越过第一个认识它的运行时，出厂命令换成它；`legacy`
+///   照样认，旧存档还能开。
+pub struct BuiltinAdapterCommand {
+    pub agent: ConversationAgentKind,
+    pub name: &'static str,
+    pub legacy: &'static str,
 }
 
-impl ManagedAcpAdapterRelease {
-    fn command(self) -> String {
-        format!("bunx --bun {}@{}", self.package, self.version)
-    }
-}
-
-/// 由 Smelt 通过受管 Bun 启动的 ACP 适配器版本策略。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ManagedAcpAdapter {
-    current: ManagedAcpAdapterRelease,
-    /// 发布过的旧默认版本。升级 `agent/package.json` 里的适配器时把旧版本加进来：存着旧
-    /// 默认命令的设置靠它迁移到新版本，否则会一直走 `bunx` 旧版，也用不上内置的那份。
-    previous_releases: &'static [ManagedAcpAdapterRelease],
-    /// 曾作为默认值发布、但不是 `bunx package@version` 形态的命令。
-    legacy_default_commands: &'static [&'static str],
-}
-
-impl ManagedAcpAdapter {
-    pub fn previous_releases(self) -> &'static [ManagedAcpAdapterRelease] {
-        self.previous_releases
-    }
-
-    pub fn current_command(self) -> String {
-        self.current.command()
-    }
-
-    /// 只认 Smelt 确实发布过的逐字默认值。带环境前缀、额外参数或换过运行器的
-    /// 命令都属于用户自定义，不能借版本升级之名覆盖。
-    fn should_upgrade_command(self, command: &str) -> bool {
-        self.current.command() == command
-            || self
-                .previous_releases
-                .iter()
-                .any(|release| release.command() == command)
-            || self.legacy_default_commands.contains(&command.trim())
-    }
-
-    pub fn current_release(self) -> ManagedAcpAdapterRelease {
-        self.current
+impl BuiltinAdapterCommand {
+    /// 命令（已去掉 `VAR=值` 前缀、按空白分好词）以它的名字开头时，给出名字后面的参数。
+    pub fn args_after<'w, 'a>(&self, words: &'w [&'a str]) -> Option<&'w [&'a str]> {
+        [self.name, self.legacy].into_iter().find_map(|name| {
+            let name: Vec<&str> = name.split_whitespace().collect();
+            words.starts_with(&name).then(|| &words[name.len()..])
+        })
     }
 }
 
-// 当前版本取自 `agent/package.json`（见 build.rs），那里是唯一的出处。
-include!(concat!(env!("OUT_DIR"), "/acp_adapter_versions.rs"));
-
-const CLAUDE_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
-    current: ManagedAcpAdapterRelease {
-        package: "@agentclientprotocol/claude-agent-acp",
-        version: CLAUDE_AGENT_ACP_VERSION,
-    },
-    previous_releases: &[
-        ManagedAcpAdapterRelease {
-            package: "@agentclientprotocol/claude-agent-acp",
-            version: "0.59.0",
-        },
-        ManagedAcpAdapterRelease {
-            package: "@agentclientprotocol/claude-agent-acp",
-            version: "0.70.0",
-        },
-    ],
-    legacy_default_commands: &[],
+pub const CLAUDE_ADAPTER_COMMAND: BuiltinAdapterCommand = BuiltinAdapterCommand {
+    agent: ConversationAgentKind::Claude,
+    name: "smelt-claude-agent",
+    legacy: "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
 };
 
-const CODEX_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
-    current: ManagedAcpAdapterRelease {
-        package: "@agentclientprotocol/codex-acp",
-        version: CODEX_ACP_VERSION,
-    },
-    previous_releases: &[
-        ManagedAcpAdapterRelease {
-            package: "@zed-industries/codex-acp",
-            version: "0.16.0",
-        },
-        ManagedAcpAdapterRelease {
-            package: "@agentclientprotocol/codex-acp",
-            version: "1.1.7",
-        },
-        ManagedAcpAdapterRelease {
-            package: "@agentclientprotocol/codex-acp",
-            version: "1.6.2",
-        },
-    ],
-    legacy_default_commands: &["codex app-server"],
+pub const CODEX_ADAPTER_COMMAND: BuiltinAdapterCommand = BuiltinAdapterCommand {
+    agent: ConversationAgentKind::Codex,
+    name: "smelt-codex-agent",
+    legacy: "bunx --bun @agentclientprotocol/codex-acp@1.12.0",
 };
 
-// `pi-acp` 是 Smelt 旧版发布过的默认桥；保留这份元数据只为精确迁移旧设置、
-// 清理旧缓存。当前 Pi 对话已经改走官方原生 RPC。
-const PI_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
-    current: ManagedAcpAdapterRelease {
-        package: "pi-acp",
-        version: "0.0.33",
-    },
-    previous_releases: &[],
-    legacy_default_commands: &[],
-};
+pub const BUILTIN_ADAPTER_COMMANDS: &[BuiltinAdapterCommand] =
+    &[CLAUDE_ADAPTER_COMMAND, CODEX_ADAPTER_COMMAND];
 
 /// Smelt 自带的 Pi 原生 RPC 逻辑入口。不要求用户 PATH 中真的存在同名
-/// 程序；连接层会把它解析成受管 Bun + Pi 官方 RPC entry。
+/// 程序；连接层会把它解析成 smelt-agent 的 RPC 入口。
 pub const SMELT_PI_AGENT_COMMAND: &str = "smelt-pi-agent";
 
 /// Smelt 把产品 Agent 的长期指令交给内置 Pi 启动器时使用的私有环境变量。
@@ -245,10 +184,6 @@ pub struct ConversationAgentDescriptor {
     pub label: &'static str,
     /// 短名：会话标题这种窄地方用（「Copilot 对话 · smelt」）。
     pub short_label: &'static str,
-    /// SQLite `json/agent_ui.json` 文档里存这家启动命令的键名。历史原因各不相同
-    /// （Claude 就叫 `acp_cmd`），改名等于把用户自定义命令悄悄重置回默认，
-    /// 所以键名是存档契约的一部分，跟着这张表走。
-    pub config_key: &'static str,
     /// 这家 agent 收不收图片。Grok 的 `promptCapabilities.image = false`（实测，
     /// 见 `default_acp_grok_cmd` 的注释），是唯一不收图的。会话交接时据此决定
     /// 图片占位文案怎么写——目标收不了图还只说「未复制」，新会话会一直等一张
@@ -258,11 +193,8 @@ pub struct ConversationAgentDescriptor {
     /// 版本锁和长注释，留在各自的函数里比塞进表里可读。
     pub default_cmd: fn() -> String,
     /// 曾经作为出厂默认值发布过的命令。设置迁移和 daemon relaunch 只升级这些
-    /// 逐字默认值，用户自定义命令不动。受管 Bun 适配器的旧版本另走
-    /// `managed_adapter`，不要把 bunx 包版本写进这里。
+    /// 逐字默认值，用户自定义命令不动。
     pub previous_default_cmds: &'static [&'static str],
-    /// 需要 Smelt 负责版本迁移与缓存回收的 Bun 适配器；原生 ACP CLI 为 None。
-    pub managed_adapter: Option<ManagedAcpAdapter>,
     /// 只注入当前 agent 子进程的出厂环境覆盖。需要用配置而不是 CLI flag 表达的
     /// 能力放这里，不能写用户的全局配置文件；用户在设置里显式配置同名变量时覆盖它。
     pub default_env: &'static [(&'static str, &'static str)],
@@ -290,11 +222,12 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "claude",
         label: "Claude Code",
         short_label: "Claude",
-        config_key: "acp_cmd",
         accepts_images: true,
         default_cmd: default_acp_cmd,
-        previous_default_cmds: &[],
-        managed_adapter: Some(CLAUDE_ACP_ADAPTER),
+        previous_default_cmds: &[
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0",
+        ],
         default_env: &[],
         homebrew_cask: Some("claude-code"),
         npm_package: Some("@anthropic-ai/claude-code"),
@@ -311,11 +244,9 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "copilot",
         label: "GitHub Copilot",
         short_label: "Copilot",
-        config_key: "acp_copilot_cmd",
         accepts_images: true,
         default_cmd: default_acp_copilot_cmd,
         previous_default_cmds: &["copilot --acp"],
-        managed_adapter: None,
         default_env: &[],
         homebrew_cask: Some("copilot-cli"),
         npm_package: Some("@github/copilot"),
@@ -337,11 +268,14 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "codex",
         label: "Codex",
         short_label: "Codex",
-        config_key: "acp_codex_cmd",
         accepts_images: true,
         default_cmd: default_acp_codex_cmd,
-        previous_default_cmds: &[],
-        managed_adapter: Some(CODEX_ACP_ADAPTER),
+        previous_default_cmds: &[
+            "bunx --bun @zed-industries/codex-acp@0.16.0",
+            "bunx --bun @agentclientprotocol/codex-acp@1.1.7",
+            "bunx --bun @agentclientprotocol/codex-acp@1.6.2",
+            "codex app-server",
+        ],
         default_env: &[],
         homebrew_cask: Some("codex"),
         npm_package: Some("@openai/codex"),
@@ -358,11 +292,9 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "grok",
         label: "Grok",
         short_label: "Grok",
-        config_key: "acp_grok_cmd",
         accepts_images: false,
         default_cmd: default_acp_grok_cmd,
         previous_default_cmds: &["grok agent stdio"],
-        managed_adapter: None,
         default_env: &[],
         homebrew_cask: None,
         npm_package: Some("@xai-official/grok"),
@@ -384,11 +316,9 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "cursor",
         label: "Cursor Agent",
         short_label: "Cursor",
-        config_key: "acp_cursor_cmd",
         accepts_images: true,
         default_cmd: default_acp_cursor_cmd,
         previous_default_cmds: &["cursor-agent acp"],
-        managed_adapter: None,
         default_env: &[],
         homebrew_cask: None,
         npm_package: None,
@@ -412,11 +342,9 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "opencode",
         label: "OpenCode",
         short_label: "OpenCode",
-        config_key: "acp_opencode_cmd",
         accepts_images: true,
         default_cmd: default_acp_opencode_cmd,
         previous_default_cmds: &[],
-        managed_adapter: None,
         // `--auto` 只属于 TUI，ACP 子命令会拒绝它。OpenCode 的配置层接受
         // `permission: "allow"` 并归一为 `{"*":"allow"}`，用进程环境覆盖即可
         // 获得相同的免审批语义，同时不改用户级/项目级 opencode.json。
@@ -440,7 +368,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "kiro",
         label: "Kiro",
         short_label: "Kiro",
-        config_key: "acp_kiro_cmd",
         accepts_images: true,
         default_cmd: default_acp_kiro_cmd,
         previous_default_cmds: &[
@@ -448,7 +375,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             "kiro-cli acp --trust-all-tools",
             "kiro-cli acp --agent-engine v3 --auth-method cli --trust-all-tools",
         ],
-        managed_adapter: None,
         default_env: &[],
         homebrew_cask: Some("kiro-cli"),
         npm_package: None,
@@ -471,11 +397,9 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         id: "pi",
         label: "Pi",
         short_label: "Pi",
-        config_key: "acp_pi_cmd",
         accepts_images: true,
         default_cmd: default_acp_pi_cmd,
-        previous_default_cmds: &[],
-        managed_adapter: Some(PI_ACP_ADAPTER),
+        previous_default_cmds: &["bunx --bun pi-acp@0.0.33"],
         default_env: &[],
         homebrew_cask: None,
         npm_package: Some("@earendil-works/pi-coding-agent"),
@@ -500,13 +424,10 @@ pub static CUSTOM_AGENT: ConversationAgentDescriptor = ConversationAgentDescript
     id: "custom",
     label: "自定义 Agent",
     short_label: "自定义",
-    // 命令跟着每个 profile 走，不存在按种类保存的那一份。
-    config_key: "",
     // 认不出能力时按 ACP 的常见情况处理；真不收图的 agent 会在 prompt 时报错。
     accepts_images: true,
     default_cmd: String::new,
     previous_default_cmds: &[],
-    managed_adapter: None,
     default_env: &[],
     homebrew_cask: None,
     npm_package: None,
@@ -599,11 +520,6 @@ impl ConversationAgentKind {
         (self.descriptor().default_cmd)()
     }
 
-    /// Smelt 负责锁版本、迁移旧默认值和回收缓存的 ACP 适配器元数据。
-    pub fn managed_adapter(self) -> Option<ManagedAcpAdapter> {
-        self.descriptor().managed_adapter
-    }
-
     /// 旧设置、历史会话和 daemon relaunch 共用的版本迁移入口。返回 None 表示
     /// 当前命令不是 Smelt 发布过的旧默认值（包括已经是最新版和用户自定义）。
     pub fn upgrade_released_default_command(self, command: &str) -> Option<String> {
@@ -612,11 +528,10 @@ impl ConversationAgentKind {
         if trimmed == current {
             return None;
         }
-        let from_adapter = self
-            .managed_adapter()
-            .is_some_and(|adapter| adapter.should_upgrade_command(command));
-        let from_factory = self.descriptor().previous_default_cmds.contains(&trimmed);
-        (from_adapter || from_factory).then_some(current)
+        self.descriptor()
+            .previous_default_cmds
+            .contains(&trimmed)
+            .then_some(current)
     }
 
     /// 出厂启动规格。命令和只对当前 agent 生效的环境覆盖必须从同一注册项派生，
@@ -1205,22 +1120,16 @@ mod history_source_tests {
 }
 
 pub fn default_acp_cmd() -> String {
-    // bunx 由 ACP 解析器重写到按需下载的 Bun（`~/.smelt/runtime/bin/bun` 指向当前 generation）。
-    // 会话持有这份 generation 的 lease，并把 lease FD 继承给 adapter。
-    // 适配器锁版本——方言适配与回归测试都对着这个版本做，升级是主动行为。
-    // 启动层会优先将本机 `claude` 注入 CLAUDE_CODE_EXECUTABLE；没装才使用 SDK
-    // 携带的原生二进制，避免本机 CLI 与适配器运行时版本脱节。
+    // 逻辑名，见 `BuiltinAdapterCommand`。运行时跑 smelt-agent 里编进去的官方适配器
+    // `@agentclientprotocol/claude-agent-acp`，版本由 `agent/package.json` 锁定，方言适配与
+    // 回归测试都对着这个版本做，升级是主动行为。启动层把本机 `claude` 注入
+    // CLAUDE_CODE_EXECUTABLE；本机没有 CLI 时直接请用户安装。
     //
-    // --bun：强制 bunx 用 bun 自己的运行时执行，不 fallback 到系统 Node——实测
-    // 发现这个适配器声明了 `engines.node >= 22`，bunx 默认会尊重这个声明主动
-    // 切到系统 Node 去跑（哪怕我们准备了受管 bun），「受管运行时不依赖系统装了
-    // 什么」这条设计承诺不加这个 flag 就不成立。见 bunx --help 的官方说明。
-    //
-    // 0.78.0 已用受管 Bun 1.4.0 + 本机 Claude CLI 实测 initialize：协议版本 1、
+    // 0.100.0 已用 Bun 1.4.4 + 本机 Claude CLI 实测 initialize：协议版本 1、
     // 图片与 MCP 能力正常，`agentCapabilities.loadSession: true`。0.77 删掉的
     // agent-picker / `claudeCode.options.agent` Smelt 没用；不要广告
     // native subagent / session fork，适配器声明了却没实现。
-    CLAUDE_ACP_ADAPTER.current_command()
+    CLAUDE_ADAPTER_COMMAND.legacy.to_string()
 }
 
 pub fn default_acp_copilot_cmd() -> String {
@@ -1233,15 +1142,15 @@ pub fn default_acp_copilot_cmd() -> String {
 }
 
 pub fn default_acp_codex_cmd() -> String {
-    // 改回标准 ACP 通道：官方 `@agentclientprotocol/codex-acp` 适配器把 Codex
-    // app-server 包了一层 ACP，跟 Claude/Copilot/Grok 走同一套 AcpAgent 驱动，
-    // 不再需要 smeltd 里那条按命令字符串识别的 codex_app_server 专用 driver
-    // （dispatch 逻辑保留，兼容手填 `codex app-server` 的旧存档/自定义命令）。
-    // 1.12.0 已用受管 Bun 1.4.0 + 本机 Codex CLI 实测 initialize：协议版本 1、
-    // 图片/MCP 与 `loadSession` 能力正常。1.7+ 原生 subagent / fork / 后台任务
-    // 未协商则退回现有 tool call。build_agent_args 里的 CODEX_PATH
-    // 注入继续优先使用本机 CLI，找不到才 fallback 到适配器 bundle 的版本。
-    CODEX_ACP_ADAPTER.current_command()
+    // 逻辑名，见 `BuiltinAdapterCommand`。标准 ACP 通道：运行时跑 smelt-agent 里编进去的
+    // 官方 `@agentclientprotocol/codex-acp`，它把 Codex app-server 包了一层 ACP，跟
+    // Claude/Copilot/Grok 走同一套 AcpAgent 驱动。
+    // 2.5.0 已用 Bun 1.4.4 + Codex CLI 0.165 实测 initialize：协议版本 1、
+    // 图片/MCP 与 `loadSession` 能力正常。2.0 起工具调用按 AIR 协定上报、diff 是
+    // 精确补丁，仍是标准 ACP 内容块。1.7+ 原生 subagent / fork / 后台任务
+    // 未协商则退回现有 tool call。启动层把本机 `codex` 注入 CODEX_PATH；本机没有
+    // CLI 时直接请用户安装。
+    CODEX_ADAPTER_COMMAND.legacy.to_string()
 }
 
 pub fn default_acp_grok_cmd() -> String {
@@ -1283,8 +1192,8 @@ pub fn default_acp_kiro_cmd() -> String {
 }
 
 pub fn default_acp_pi_cmd() -> String {
-    // 这是 Smelt 自带运行时的逻辑名。实际启动时由连接层解析成锁定版本的受管
-    // Bun + Pi 官方 RPC entry；配置里不持久化机器相关的绝对路径。
+    // 这是 Smelt 自带运行时的逻辑名。实际启动时由连接层解析成当前发布的 smelt-agent；
+    // 配置里不持久化机器相关的绝对路径。
     SMELT_PI_AGENT_COMMAND.to_string()
 }
 
@@ -1400,7 +1309,7 @@ pub struct AcpProfile {
     pub kind_id: String,
     /// 新建菜单、会话标题、历史页 tab 上显示的名字，比如「Til」。
     pub label: String,
-    /// 启动命令。空 = 沿用底层 agent 当前生效的命令；通用 ACP 必填。旧运行时不报，读成空。
+    /// 启动命令。空 = 底层 agent 的出厂命令；通用 ACP 必填。旧运行时不报，读成空。
     #[serde(default)]
     pub command: String,
     /// 额外注入的环境变量，覆盖底层 agent 的同名变量。旧运行时不报，读成空。
@@ -1754,41 +1663,19 @@ mod tests {
     /// 存档契约：id 与 agent_ui.json 的键名都不能重名，也不能被顺手改掉
     /// （改了等于把用户自定义命令重置回默认）。
     #[test]
-    fn descriptor_ids_and_config_keys_are_stable_and_unique() {
+    fn descriptor_ids_are_stable() {
         let ids: Vec<_> = CONVERSATION_AGENTS.iter().map(|d| d.id).collect();
-        let keys: Vec<_> = CONVERSATION_AGENTS.iter().map(|d| d.config_key).collect();
         assert_eq!(
             ids,
             [
                 "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi"
             ]
         );
-        assert_eq!(
-            keys,
-            [
-                "acp_cmd",
-                "acp_copilot_cmd",
-                "acp_codex_cmd",
-                "acp_grok_cmd",
-                "acp_cursor_cmd",
-                "acp_opencode_cmd",
-                "acp_kiro_cmd",
-                "acp_pi_cmd"
-            ]
-        );
-
-        let mut unique = keys.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), keys.len(), "agent_ui.json 键名重复");
     }
 
     #[test]
     fn acp_descriptor_lookup_by_id() {
-        assert_eq!(
-            conversation_descriptor("grok").map(|d| d.config_key),
-            Some("acp_grok_cmd")
-        );
+        assert_eq!(conversation_descriptor("grok").map(|d| d.id), Some("grok"));
         assert!(conversation_descriptor("nope").is_none());
     }
 
@@ -1981,10 +1868,9 @@ mod tests {
         );
     }
 
-    /// 版本取自 `agent/package.json`。这里故意写死：那边一改（包括 Dependabot），这条就失败，
-    /// 提醒把旧版本加进 `previous_releases` 再更新这里。
     #[test]
-    fn managed_adapter_defaults_pin_the_verified_latest_versions() {
+    fn builtin_adapters_are_named_by_what_released_runtimes_understand() {
+        // 2026.1104 及更早的运行时只认这两条。改了，没升级的运行时就开不了 Claude / Codex。
         assert_eq!(
             default_acp_cmd(),
             "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"
@@ -1994,33 +1880,54 @@ mod tests {
             "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
         );
         assert_eq!(default_acp_pi_cmd(), "smelt-pi-agent");
+        for adapter in BUILTIN_ADAPTER_COMMANDS {
+            for name in [adapter.name, adapter.legacy] {
+                assert_eq!(
+                    ConversationAgentKind::from_command_loose(name),
+                    Some(adapter.agent)
+                );
+                let mut words: Vec<&str> = name.split_whitespace().collect();
+                assert_eq!(adapter.args_after(&words), Some(&[][..]));
+                words.push("--verbose");
+                assert_eq!(adapter.args_after(&words), Some(&["--verbose"][..]));
+            }
+            assert!(
+                adapter
+                    .agent
+                    .upgrade_released_default_command(adapter.legacy)
+                    .is_none()
+            );
+        }
+        let codex: Vec<&str> = CODEX_ADAPTER_COMMAND.legacy.split_whitespace().collect();
+        assert_eq!(CLAUDE_ADAPTER_COMMAND.args_after(&codex), None);
+        assert_eq!(CLAUDE_ADAPTER_COMMAND.args_after(&["smelt-claude"]), None);
     }
 
     #[test]
-    fn managed_adapter_versions_only_upgrade_released_defaults() {
+    fn only_released_defaults_are_upgraded() {
         assert_eq!(
             ConversationAgentKind::Claude.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0"
             ),
-            Some("bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0".into())
+            Some(CLAUDE_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Claude.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0"
             ),
-            Some("bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0".into())
+            Some(CLAUDE_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/codex-acp@1.1.7"
             ),
-            Some("bunx --bun @agentclientprotocol/codex-acp@1.12.0".into())
+            Some(CODEX_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/codex-acp@1.6.2"
             ),
-            Some("bunx --bun @agentclientprotocol/codex-acp@1.12.0".into())
+            Some(CODEX_ADAPTER_COMMAND.legacy.into())
         );
         assert!(
             ConversationAgentKind::Codex
@@ -2031,7 +1938,7 @@ mod tests {
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command("  codex app-server  "),
-            Some("bunx --bun @agentclientprotocol/codex-acp@1.12.0".into())
+            Some(CODEX_ADAPTER_COMMAND.legacy.into())
         );
         assert_eq!(
             ConversationAgentKind::Copilot.upgrade_released_default_command("copilot --acp"),

@@ -1457,7 +1457,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     smelt_core::acp_session::apply_event(
         &mut slot.value.reduced.lock(),
         smelt_core::acp_conn::ConversationEvent::TurnEnded(
-            agent_client_protocol::schema::v1::StopReason::EndTurn,
+            agent_client_protocol::v1::schema::StopReason::EndTurn,
         ),
     );
     settle_acp_turn_locked(&slot.value, true, false, true, &subscribers);
@@ -2302,7 +2302,7 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
     smelt_core::acp_session::apply_event(
         &mut reduced,
         smelt_core::acp_conn::ConversationEvent::TurnEnded(
-            agent_client_protocol::schema::v1::StopReason::Cancelled,
+            agent_client_protocol::v1::schema::StopReason::Cancelled,
         ),
     );
     let session = make_acp_session("acp-cancel-release", reduced);
@@ -4034,13 +4034,33 @@ fn daemon_relaunch_upgrades_released_adapter_defaults_only() {
     assert!(upgrade_released_adapter_launch(&mut old));
     assert_eq!(
         old.command,
-        "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
+        smelt_core::agent_kind::CODEX_ADAPTER_COMMAND.legacy
     );
 
-    let custom = "NO_BROWSER=1 bunx --bun @agentclientprotocol/codex-acp@1.1.7";
-    let mut customized = smelt_core::agent_kind::ConversationLaunchSpec::from_command(custom);
-    assert!(!upgrade_released_adapter_launch(&mut customized));
-    assert_eq!(customized.command, custom);
+    // 前缀挪进 env；env 里写过的同名变量不被前缀盖掉。
+    let mut prefixed = smelt_core::agent_kind::ConversationLaunchSpec::from_command(
+        "CLAUDE_CONFIG_DIR=~/.claude-work  DEBUG=1 bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0",
+    )
+    .with_env("DEBUG", "0");
+    assert!(upgrade_released_adapter_launch(&mut prefixed));
+    assert_eq!(
+        prefixed.command,
+        smelt_core::agent_kind::CLAUDE_ADAPTER_COMMAND.legacy
+    );
+    assert_eq!(prefixed.env["CLAUDE_CONFIG_DIR"], "~/.claude-work");
+    assert_eq!(prefixed.env["DEBUG"], "0");
+
+    // 已经是现在的出厂命令、或用户自己的命令，都不动。
+    for command in [
+        "CLAUDE_CONFIG_DIR=/work bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
+        "NO_BROWSER=1 bunx --bun @agentclientprotocol/codex-acp@1.1.8",
+        "codex app-server --listen",
+    ] {
+        let mut custom = smelt_core::agent_kind::ConversationLaunchSpec::from_command(command);
+        assert!(!upgrade_released_adapter_launch(&mut custom), "{command}");
+        assert_eq!(custom.command, command);
+        assert!(custom.env.is_empty());
+    }
 }
 
 #[test]

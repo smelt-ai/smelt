@@ -46,7 +46,6 @@ pub mod managed_runtime;
 pub mod memory_settings;
 mod mirrors;
 pub mod new_session;
-pub mod runtime_generation;
 pub use smelt_model::osc;
 pub mod pi_auth;
 pub mod pi_auth_service;

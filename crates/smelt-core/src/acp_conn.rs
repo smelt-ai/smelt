@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentRequest, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
@@ -45,14 +45,15 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, ActiveSession, Agent, Client, ConnectionTo, Lines, Responder,
-    SessionMessage,
+use agent_client_protocol::v1::{
+    ActiveSession, ConnectionTo, Responder, SessionMessage, SessionSetup,
 };
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, Lines};
 
 pub use crate::acp_chat::AcpImage as PromptImage;
 use crate::agent_kind::{
-    ConversationAgentKind, ConversationLaunchSpec, SMELT_PI_AGENT_COMMAND, TerminalAgentKind,
+    BUILTIN_ADAPTER_COMMANDS, ConversationAgentKind, ConversationLaunchSpec, SMELT_AGENT_COMMAND,
+    SMELT_PI_AGENT_COMMAND, TerminalAgentKind,
 };
 
 /// 一次 ACP 会话的启动参数。
@@ -472,14 +473,14 @@ pub enum ReadyKind {
 /// 权限回执守卫：UI 点按钮时消费；**被 drop（视图关闭、卡片被弃置）自动回
 /// Cancelled**，保证 agent 侧永远等得到答案、不会挂起。
 enum PermissionResponderInner {
-    Acp(agent_client_protocol::Responder<RequestPermissionResponse>),
+    Acp(agent_client_protocol::v1::Responder<RequestPermissionResponse>),
     External(Box<dyn FnOnce(String) + Send>),
 }
 
 pub struct PermissionResponder(Option<PermissionResponderInner>);
 
 impl PermissionResponder {
-    fn acp(responder: agent_client_protocol::Responder<RequestPermissionResponse>) -> Self {
+    fn acp(responder: agent_client_protocol::v1::Responder<RequestPermissionResponse>) -> Self {
         Self(Some(PermissionResponderInner::Acp(responder)))
     }
 
@@ -493,7 +494,7 @@ impl PermissionResponder {
             Some(PermissionResponderInner::Acp(r)) => {
                 let _ = r.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                        agent_client_protocol::schema::v1::PermissionOptionId::new(option_id),
+                        agent_client_protocol::v1::schema::PermissionOptionId::new(option_id),
                     )),
                 ));
             }
@@ -523,7 +524,7 @@ type ExternalElicitResponder =
 
 /// 表单回执守卫：accept/decline 消费；**被 drop 自动回 Cancel**，agent 不会挂起。
 enum ElicitationResponderInner {
-    Acp(agent_client_protocol::Responder<CreateElicitationResponse>),
+    Acp(agent_client_protocol::v1::Responder<CreateElicitationResponse>),
     External(ExternalElicitResponder),
 }
 
@@ -1206,7 +1207,7 @@ pub fn spawn_agent_runtime(
 }
 
 /// 起一条专用线程跑 ACP 连接，立即返回句柄。`spawn_gate` 只包住实际创建
-/// 子进程到发布 `ConversationHandle.stdio` 的区间；运行时解析/下载在拿读锁之前完成。
+/// 子进程到发布 `ConversationHandle.stdio` 的区间。
 /// 不需要与外部升级流程协调的调用方可传 `None`。
 pub fn spawn_acp(
     launch: ConversationLaunch,
@@ -1231,55 +1232,8 @@ pub fn spawn_acp(
                 // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
                 // 失败的真实原因都在 stderr 里，别让用户猜）。
                 let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
-                // 装了本机 CLI 就跑 smelt-agent 里内置的适配器，否则把 bunx / bun 指到应用里的
-                // Bun，再进连接循环。改写只在这条连接线程里生效，存下来的启动规格不变。
-                let embedded = resolve_embedded_adapter_command(&launch.launch, &launch.ephemeral_env);
-                let (cmd, managed_bun) = if let Some(cmd) = embedded {
-                    crate::app_log::info(
-                        "acp",
-                        &format!("会话 {} 用 smelt-agent 内置适配器：{cmd}", launch.sid),
-                    );
-                    (cmd, None)
-                } else {
-                    let tx = event_tx.clone();
-                    match resolve_runtime_command_with_bun(&launch.launch.command, &|msg| {
-                        let _ = tx.try_send(ConversationEvent::StartupProgress(msg.to_string()));
-                    }) {
-                        Ok(cmd) => cmd,
-                        Err(e) => {
-                            let _ = event_tx.try_send(ConversationEvent::Fatal(e));
-                            return;
-                        }
-                    }
-                };
-                let ConversationLaunch {
-                    launch: launch_spec,
-                    ephemeral_env,
-                    cwd,
-                    sid,
-                    agent_token,
-                    resume_session_id,
-                    fork_session_id,
-                    fork_cut,
-                    peer_handler: _,
-                } = launch;
-                let launch = ConversationLaunch {
-                    launch: ConversationLaunchSpec {
-                        command: cmd,
-                        env: launch_spec.env,
-                    },
-                    ephemeral_env,
-                    cwd,
-                    sid,
-                    agent_token,
-                    resume_session_id,
-                    fork_session_id,
-                    fork_cut,
-                    peer_handler: None,
-                };
                 let result = smol::block_on(run_connection(
                     &launch,
-                    managed_bun,
                     AcpChannels {
                         cmd_rx,
                         cmd_tx: cmd_tx_for_thread,
@@ -1560,16 +1514,14 @@ fn classify_restore_failure(
     if is_missing_history_error(error) {
         return ConversationRestoreFailure::HistoryMissing;
     }
-    match error.code {
-        agent_client_protocol::ErrorCode::MethodNotFound => {
-            ConversationRestoreFailure::UnsupportedLoad
-        }
-        _ => ConversationRestoreFailure::Failed(with_auth_required_hint(
-            error,
-            command,
-            format!("恢复历史对话失败，可重试：{error}"),
-        )),
+    if error.code == agent_client_protocol::ErrorCode::METHOD_NOT_FOUND {
+        return ConversationRestoreFailure::UnsupportedLoad;
     }
+    ConversationRestoreFailure::Failed(with_auth_required_hint(
+        error,
+        command,
+        format!("恢复历史对话失败，可重试：{error}"),
+    ))
 }
 
 /// 不同 ACP adapter 对「历史 rollout 不存在」使用了不同的错误形态：有的返回
@@ -1577,10 +1529,7 @@ fn classify_restore_failure(
 /// 并把真实原因放进 `data.details`。这里只识别明确的 missing 文案，不能把所有
 /// `InternalError` 都降级成新会话。
 fn is_missing_history_error(error: &agent_client_protocol::Error) -> bool {
-    if matches!(
-        error.code,
-        agent_client_protocol::ErrorCode::ResourceNotFound
-    ) {
+    if error.code == agent_client_protocol::ErrorCode::RESOURCE_NOT_FOUND {
         return true;
     }
 
@@ -1661,7 +1610,6 @@ struct ConnectionSync {
 /// （UI 指令 / agent 更新流）。返回 Ok 表示用户主动 Shutdown。
 async fn run_connection(
     launch: &ConversationLaunch,
-    managed_bun: Option<crate::managed_runtime::ManagedBunRuntime>,
     channels: AcpChannels,
     sync: ConnectionSync,
 ) -> Result<(), agent_client_protocol::Error> {
@@ -1681,7 +1629,7 @@ async fn run_connection(
             return Ok(None);
         }
         let (child_stdin, child_stdout, child_stderr, child) =
-            spawn_agent_process(&agent, launch.cwd.as_deref(), managed_bun.as_ref())?;
+            spawn_agent_process(&agent, launch.cwd.as_deref())?;
         *stdio = Some(AcpStdio {
             pid: child.id() as i32,
         });
@@ -1728,7 +1676,7 @@ async fn run_connection(
     let session_cwd = Some(std::path::PathBuf::from(&cwd));
     let result =
         Client
-        .builder()
+        .v1()
         .name("smelt")
         // 权限请求：Responder 打包进事件甩给 UI，handler 立即返回不堵事件循环；
         // UI 弃置卡片时 PermissionResponder 的 Drop 兜底回 Cancelled。
@@ -1892,7 +1840,7 @@ async fn run_connection(
                             .name("smelt-acp-term-wait-rpc".into())
                             .spawn(move || {
                                 let status = terminals.wait(&id).unwrap_or_else(|_| {
-                                    agent_client_protocol::schema::v1::TerminalExitStatus::new()
+                                    agent_client_protocol::v1::schema::TerminalExitStatus::new()
                                 });
                                 let _ = responder
                                     .respond(WaitForTerminalExitResponse::new(status));
@@ -2005,8 +1953,11 @@ async fn run_connection(
                         .start_session()
                         .await
                     {
-                        Ok(restored) => {
-                            let (mut session, loaded) = restored.into_parts();
+                        Ok(SessionSetup {
+                            mut session,
+                            response: loaded,
+                            ..
+                        }) => {
                             publish_session_surface(
                                 loaded.config_options.as_deref(),
                                 loaded.modes.as_ref(),
@@ -2045,16 +1996,18 @@ async fn run_connection(
                 }
             }
 
-            // 2.1 的 ActiveSession 已保留 config_options，走官方 builder
-            // 就能同时拿到模型档位和 session 路由。
-            let session = connection
+            // 走官方 builder 就能同时拿到 session/new 的响应（模型档位、模式）
+            // 和 session 路由。
+            let SessionSetup {
+                session, response, ..
+            } = connection
                 .build_session_from(NewSessionRequest::new(std::path::Path::new(&cwd)))
                 .block_task()
                 .start_session()
                 .await?;
             publish_session_surface(
-                session.config_options(),
-                session.modes(),
+                response.config_options.as_deref(),
+                response.modes.as_ref(),
                 &channels.event_tx,
             );
             signal_acp_handshake_complete(&handshake_complete);
@@ -2069,7 +2022,6 @@ async fn run_connection(
         })
         .await;
     child_guard.kill_and_reap();
-    drop(managed_bun);
     if handshake_watchdog.timed_out() {
         return Err(agent_client_protocol::Error::internal_error().data(format!(
             "ACP 启动握手超时（{} 秒），agent 进程已终止",
@@ -2158,7 +2110,7 @@ impl ReplayCursor {
 }
 
 fn observe_replay(message: &SessionMessage, replay: &mut ReplayCursor) {
-    let SessionMessage::SessionMessage(dispatch) = message else {
+    let SessionMessage::Message(dispatch) = message else {
         return;
     };
     let Ok(untyped) = dispatch.to_untyped_message() else {
@@ -2399,7 +2351,7 @@ async fn drive_session<S: SessionDrive>(
             }
             Next::Update(update) => {
                 let update = (*update)?;
-                let completes_prompt = matches!(&update, SessionMessage::StopReason(_));
+                let completes_prompt = matches!(&update, SessionMessage::PromptResponse(_));
                 translate_update(update, &channels.event_tx).await?;
                 if completes_prompt {
                     turn_active = false;
@@ -2448,15 +2400,15 @@ async fn drain_ready_updates<S: SessionDrive>(
 const PROMPT_ERROR_HINTS: &[(&[&str], &str)] = &[
     (
         &["no api key"],
-        "还没配 API key：打开 设置 → Agent 对话 → 对应 agent 的「环境变量」，按 `KEY=值` 每行一条填好后新建会话即可（比如 DEEPSEEK_API_KEY=sk-...）。",
+        "还没配 API key：在「设置 → Agent → 自定义 Agent」新建一个基于这个 agent 的 Agent，在「环境变量」里按 `KEY=值` 每行一条填好（比如 OPENAI_API_KEY=sk-...），再用它新建对话。",
     ),
     (
         &["api key", "invalid"],
-        "API key 被服务端拒绝了：到 设置 → Agent 对话 → 「环境变量」里核对一遍，注意别把前后空格或引号一起粘进去。",
+        "API key 被服务端拒绝了：到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」核对一遍，注意别把前后空格或引号一起粘进去。",
     ),
     (
         &["econnrefused"],
-        "连不上模型服务：如果配了自定义 base URL（如 DEEPSEEK_BASE_URL），到 设置 → Agent 对话 → 「环境变量」确认地址和端口，以及本机能否访问。",
+        "连不上模型服务：如果配了自定义 base URL（如 OPENAI_BASE_URL），到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」确认地址和端口，以及本机能否访问。",
     ),
     (
         &["rate limit"],
@@ -2474,7 +2426,7 @@ fn with_auth_required_hint(
     command: &str,
     original: String,
 ) -> String {
-    if error.code != agent_client_protocol::ErrorCode::AuthRequired {
+    if error.code != agent_client_protocol::ErrorCode::AUTH_REQUIRED {
         return original;
     }
     format!("{}\n\n原始错误：{original}", auth_required_hint(command))
@@ -2809,8 +2761,8 @@ async fn translate_update(
     event_tx: &smol::channel::Sender<ConversationEvent>,
 ) -> Result<(), agent_client_protocol::Error> {
     match message {
-        SessionMessage::SessionMessage(dispatch) => {
-            MatchDispatch::new(dispatch)
+        SessionMessage::Message(dispatch) => {
+            MatchDispatch::new(dispatch.into_raw())
                 .if_notification(async |notif: SessionNotification| {
                     let notif_parent = parent_tool_id_from_meta(notif.meta.as_ref());
                     let event = match notif.update {
@@ -2882,8 +2834,13 @@ async fn translate_update(
                 .await
                 .otherwise_ignore()?;
         }
-        SessionMessage::StopReason(reason) => {
-            let _ = event_tx.try_send(ConversationEvent::TurnEnded(reason));
+        // 只有 SDK 的 send_prompt 发的回合会把响应放进这条流；我们自己拼的
+        // session/prompt 走 PromptSettled。两条路收尾的方式保持一致。
+        SessionMessage::PromptResponse(Ok(response)) => {
+            let _ = event_tx.try_send(ConversationEvent::TurnEnded(response.stop_reason));
+        }
+        SessionMessage::PromptResponse(Err(error)) => {
+            let _ = event_tx.try_send(ConversationEvent::TurnFailed(describe_prompt_error(&error)));
         }
         _ => {} // SessionMessage #[non_exhaustive]
     }
@@ -2914,7 +2871,12 @@ fn build_agent(
     // 这里的 PATH 注入用的正是同一条路。真正要做的是"先把这些前缀跳过去找到
     // 真正的程序名"，不然会把 `CLAUDE_CONFIG_DIR=...` 整个当成程序名去查 PATH，
     // 报"未找到命令"（这是之前真实的行为，不是假设）。
-    let args = build_agent_args_with_ephemeral_env(launch, ephemeral_env, &search_path)?;
+    let args = build_agent_args_with_ephemeral_env(
+        launch,
+        ephemeral_env,
+        &search_path,
+        &crate::managed_runtime::locate_smelt_agent,
+    )?;
     Ok(AcpAgent::from_args(args.iter().map(String::as_str))?.into_config())
 }
 
@@ -2926,7 +2888,6 @@ fn build_agent(
 fn spawn_agent_process(
     config: &AcpAgentConfig,
     cwd: Option<&str>,
-    managed_bun: Option<&crate::managed_runtime::ManagedBunRuntime>,
 ) -> Result<
     (
         async_process::ChildStdin,
@@ -2968,9 +2929,6 @@ fn spawn_agent_process(
             smelt_sys::process::CREATE_SUSPENDED | smelt_sys::process::CREATE_NO_WINDOW,
         );
     }
-    if let Some(runtime) = managed_bun {
-        runtime.inherit_into(&mut std_cmd);
-    }
     let mut cmd = async_process::Command::from(std_cmd);
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
@@ -3002,13 +2960,18 @@ fn build_agent_args(
     launch: &ConversationLaunchSpec,
     search_path: &str,
 ) -> Result<Vec<String>, agent_client_protocol::Error> {
-    build_agent_args_with_ephemeral_env(launch, &BTreeMap::new(), search_path)
+    build_agent_args_with_ephemeral_env(launch, &BTreeMap::new(), search_path, &|| {
+        Err("测试里没有 smelt-agent".to_string())
+    })
 }
 
+/// `smelt_agent` 给出当前发布的 smelt-agent：命令的程序名是 [`SMELT_AGENT_COMMAND`] 时换成它；
+/// 命令是内置适配器的逻辑名（[`BUILTIN_ADAPTER_COMMANDS`]）时换成它里面的适配器。
 fn build_agent_args_with_ephemeral_env(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,
     search_path: &str,
+    smelt_agent: &dyn Fn() -> Result<std::path::PathBuf, String>,
 ) -> Result<Vec<String>, agent_client_protocol::Error> {
     let mut tokens = launch.command.split_whitespace();
     let mut user_env = BTreeMap::<String, String>::new();
@@ -3036,24 +2999,26 @@ fn build_agent_args_with_ephemeral_env(
     for (name, value) in ephemeral_env {
         user_env.insert(name.clone(), value.clone());
     }
-    inject_local_adapter_cli_path(
-        &launch.command,
-        "@agentclientprotocol/codex-acp",
-        "CODEX_PATH",
-        "codex",
-        &mut user_env,
-        search_path,
-    );
-    inject_local_adapter_cli_path(
-        &launch.command,
-        "@agentclientprotocol/claude-agent-acp",
-        "CLAUDE_CODE_EXECUTABLE",
-        "claude",
-        &mut user_env,
-        search_path,
-    );
-    let resolved: Vec<String> = match prog_token {
-        Some(prog) => {
+    let rest: Vec<&str> = tokens.collect();
+    let words: Vec<&str> = prog_token.into_iter().chain(rest.iter().copied()).collect();
+    let builtin = BUILTIN_ADAPTER_COMMANDS.iter().find_map(|builtin| {
+        let args = builtin.args_after(&words)?;
+        let adapter = EMBEDDED_ADAPTERS
+            .iter()
+            .find(|adapter| adapter.agent == builtin.agent)?;
+        Some((adapter, args))
+    });
+    let resolved: Vec<String> = match (builtin, prog_token) {
+        (Some((adapter, args)), _) => {
+            let args: Vec<&str> = std::iter::once(adapter.subcommand)
+                .chain(args.iter().copied())
+                .collect();
+            smelt_agent_invocation(&args, &mut user_env, search_path, smelt_agent)?
+        }
+        (None, Some(SMELT_AGENT_COMMAND)) => {
+            smelt_agent_invocation(&rest, &mut user_env, search_path, smelt_agent)?
+        }
+        (None, Some(prog)) => {
             let prog = if prog.contains('/') {
                 prog.to_string()
             } else {
@@ -3061,16 +3026,16 @@ fn build_agent_args_with_ephemeral_env(
                     agent_client_protocol::Error::internal_error().data(format!(
                         "未找到命令 `{prog}`。这类对话 agent 是各自独立的 CLI，需要先自行\
                          安装并登录。如果确定装了，多半是它的目录没进登录 shell 的 PATH——\
-                         可在「设置 → Agent 集成」把启动命令换成绝对路径（如 \
-                         `~/.grok/bin/{prog} …`）。"
+                         可以在「设置 → Agent → 自定义 Agent」新建一个基于它的 Agent，启动命令\
+                         写绝对路径（如 `~/.grok/bin/{prog} …`）。"
                     ))
                 })?
             };
             std::iter::once(prog)
-                .chain(tokens.map(String::from))
+                .chain(rest.iter().map(|arg| arg.to_string()))
                 .collect()
         }
-        None => Vec::new(),
+        (None, None) => Vec::new(),
     };
     let mut args = vec![format!("PATH={search_path}")];
     args.extend(
@@ -3082,37 +3047,26 @@ fn build_agent_args_with_ephemeral_env(
     Ok(args)
 }
 
-/// 官方 ACP 适配器有时会携带自己的 agent 运行时；优先使用扩展 PATH 中找到的
-/// 本机 CLI，避免模型、能力或登录态落在另一份过期运行时上。用户通过启动规格或
-/// 环境显式指定时保持原样，找不到本机 CLI 则让适配器自行回退。
-fn inject_local_adapter_cli_path(
-    command: &str,
-    adapter_package: &str,
-    env_var: &str,
-    program: &str,
+/// smelt-agent 不在用户 PATH 上，换成当前发布的那份。路径作为单独一个参数交给 SDK，带空格
+/// 也不怕。跑内置适配器时把本机 CLI 的位置交给它。
+fn smelt_agent_invocation(
+    args: &[&str],
     user_env: &mut BTreeMap<String, String>,
     search_path: &str,
-) {
-    let runs_embedded = EMBEDDED_ADAPTERS.iter().any(|adapter| {
-        adapter.cli_env == env_var && command.split_whitespace().last() == Some(adapter.subcommand)
-    });
-    if !(command.contains(adapter_package) || runs_embedded)
-        || user_env.contains_key(env_var)
-        || std::env::var_os(env_var).is_some()
-    {
-        return;
+    smelt_agent: &dyn Fn() -> Result<std::path::PathBuf, String>,
+) -> Result<Vec<String>, agent_client_protocol::Error> {
+    if let Some(adapter) = args.first().and_then(|sub| embedded_adapter(sub)) {
+        use_local_adapter_cli(adapter, user_env, search_path)?;
     }
-    if let Some(path) = resolve_in_path(program, search_path) {
-        user_env.insert(env_var.to_string(), path);
-    }
+    let executable =
+        smelt_agent().map_err(|error| agent_client_protocol::Error::internal_error().data(error))?;
+    Ok(std::iter::once(executable.to_string_lossy().into_owned())
+        .chain(args.iter().map(|arg| arg.to_string()))
+        .collect())
 }
 
-/// 编进 smelt-agent 的官方 ACP 适配器。每一份 smelt-agent 都带着它们：这个名字从改名
-/// （#220）才有，适配器在那之前（#208）就编进去了；守护也只认 `smelt-agent`，不会落到
-/// 改名前的 smelt-pi 上。所以不用先运行它问带了什么，省掉一次上百 MB 程序的冷启动。
-///
-/// 启动命令仍是 `bunx --bun 包@版本`：设置和会话里存的都是它，新客户端也会把它发给已经
-/// 冻结、不认识子命令的旧运行时，所以不换命令，由运行时在启动这一刻决定怎么跑。
+/// 编进 smelt-agent 的官方 ACP 适配器（`smelt-agent <子命令>`）。适配器没带自己依赖的
+/// 原生二进制，跑的是本机装的 CLI。
 struct EmbeddedAdapter {
     agent: ConversationAgentKind,
     subcommand: &'static str,
@@ -3135,70 +3089,39 @@ const EMBEDDED_ADAPTERS: &[EmbeddedAdapter] = &[
     },
 ];
 
-/// 能用内置适配器时返回改写后的命令；否则 `None`，照旧走 `bunx`。
-///
-/// 只接管逐字的出厂默认命令（可带 `VAR=value` 前缀）：别的版本、额外参数都是用户自定义。
-/// 必须已有 CLI：适配器在编译产物里找不到自己依赖的原生二进制，没有 CLI 时让 `bunx`
-/// 连同原生包一起下载。
-fn plan_embedded_adapter_command(
-    launch: &ConversationLaunchSpec,
-    ephemeral_env: &BTreeMap<String, String>,
-    search_path: &str,
-    process_has_env: &dyn Fn(&str) -> bool,
-    smelt_agent: impl FnOnce() -> Option<String>,
-) -> Option<String> {
-    let tokens: Vec<&str> = launch.command.split_whitespace().collect();
-    let program_at = tokens
+fn embedded_adapter(subcommand: &str) -> Option<&'static EmbeddedAdapter> {
+    EMBEDDED_ADAPTERS
         .iter()
-        .position(|token| crate::workspace_override::split_env_assignment(token).is_none())?;
-    let (prefix, command) = tokens.split_at(program_at);
-    let command = command.join(" ");
-    let adapter = EMBEDDED_ADAPTERS.iter().find(|adapter| {
-        adapter
-            .agent
-            .managed_adapter()
-            .is_some_and(|managed| managed.current_command() == command)
-    })?;
-    let has_explicit_cli = prefix.iter().any(|token| {
-        crate::workspace_override::split_env_assignment(token)
-            .is_some_and(|(name, value)| name == adapter.cli_env && !value.is_empty())
-    }) || launch
-        .env
-        .iter()
-        .any(|(name, value)| name == adapter.cli_env && !value.is_empty())
-        || ephemeral_env
-            .get(adapter.cli_env)
-            .is_some_and(|value| !value.is_empty())
-        || process_has_env(adapter.cli_env);
-    if !has_explicit_cli && resolve_in_path(adapter.cli_program, search_path).is_none() {
-        return None;
-    }
-    // 跑的是这份 smelt-agent 编进来的那一版，不比启动命令里写的版本。
-    let executable = smelt_agent()?;
-    // 启动命令按空白分词，带空格的路径传不过去。
-    if executable.split_whitespace().count() != 1 {
-        return None;
-    }
-    let mut rewritten: Vec<&str> = prefix.to_vec();
-    rewritten.push(&executable);
-    rewritten.push(adapter.subcommand);
-    Some(rewritten.join(" "))
+        .find(|adapter| adapter.subcommand == subcommand)
 }
 
-fn resolve_embedded_adapter_command(
-    launch: &ConversationLaunchSpec,
-    ephemeral_env: &BTreeMap<String, String>,
-) -> Option<String> {
-    plan_embedded_adapter_command(
-        launch,
-        ephemeral_env,
-        &extended_search_path(),
-        &|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()),
-        || {
-            let executable = crate::managed_runtime::locate_smelt_agent().ok()?;
-            executable.to_str().map(str::to_string)
-        },
-    )
+/// 把本机 CLI 的路径交给内置适配器。启动规格、环境里显式指定了就照用；都没有又找不到 CLI，
+/// 直接请用户安装：新建会话只列出探测到 CLI 的智能体，走到这里多半是装好前打开的旧对话。
+fn use_local_adapter_cli(
+    adapter: &EmbeddedAdapter,
+    user_env: &mut BTreeMap<String, String>,
+    search_path: &str,
+) -> Result<(), agent_client_protocol::Error> {
+    let explicit = user_env
+        .get(adapter.cli_env)
+        .is_some_and(|value| !value.is_empty())
+        || std::env::var_os(adapter.cli_env).is_some_and(|value| !value.is_empty());
+    if explicit {
+        return Ok(());
+    }
+    let Some(path) = resolve_in_path(adapter.cli_program, search_path) else {
+        return Err(agent_client_protocol::Error::internal_error().data(format!(
+            "未找到命令 `{program}`。{agent} 对话要先安装 {agent} 的 CLI 并登录，装好后重新\
+             打开这个对话。如果确定装了，多半是它的目录没进登录 shell 的 PATH，可以在\
+             「设置 → Agent → 自定义 Agent」新建一个基于 {agent} 的 Agent，环境变量里写\
+             `{env}=<{program} 的绝对路径>`。",
+            program = adapter.cli_program,
+            agent = adapter.agent.label(),
+            env = adapter.cli_env,
+        )));
+    };
+    user_env.insert(adapter.cli_env.to_string(), path);
+    Ok(())
 }
 
 /// Ask Claude's adapter to include raw SDK messages so usage/cache-token
@@ -3233,7 +3156,7 @@ pub(crate) fn model_from_config(options: &[SessionConfigOption]) -> Option<Model
     let cur = &sel.current_value;
     // 选项可能是平铺的，也可能按厂商/档位分组，两种都要翻。
     let (flat, provider_groups): (
-        Vec<&agent_client_protocol::schema::v1::SessionConfigSelectOption>,
+        Vec<&agent_client_protocol::v1::schema::SessionConfigSelectOption>,
         Vec<ModelProviderGroup>,
     ) = match &sel.options {
         SessionConfigSelectOptions::Ungrouped(v) => (v.iter().collect(), Vec::new()),
@@ -3288,7 +3211,7 @@ pub(crate) fn session_configs_from_config(
         .filter(|opt| !matches!(opt.category, Some(SessionConfigOptionCategory::Model)))
         .filter_map(|opt| match &opt.kind {
             SessionConfigKind::Select(sel) => {
-                let flat: Vec<&agent_client_protocol::schema::v1::SessionConfigSelectOption> =
+                let flat: Vec<&agent_client_protocol::v1::schema::SessionConfigSelectOption> =
                     match &sel.options {
                         SessionConfigSelectOptions::Ungrouped(v) => v.iter().collect(),
                         SessionConfigSelectOptions::Grouped(gs) => {
@@ -3582,12 +3505,12 @@ fn permission_from_request(
 pub(crate) fn permission_view(
     title: Option<&str>,
     tool_call_id: &str,
-    kind: Option<agent_client_protocol::schema::v1::ToolKind>,
+    kind: Option<agent_client_protocol::v1::schema::ToolKind>,
     raw_input: Option<&serde_json::Value>,
     paths: &[String],
 ) -> (String, crate::acp_session::ApprovalDetailsView) {
     use crate::acp_session::ApprovalDetailsView;
-    use agent_client_protocol::schema::v1::ToolKind as Acp;
+    use agent_client_protocol::v1::schema::ToolKind as Acp;
 
     /// 网址、命令过长时只留开头，卡片和系统通知都放得下。
     const TARGET_MAX_CHARS: usize = 300;
@@ -3667,10 +3590,10 @@ pub fn content_text(content: &ContentBlock) -> String {
 /// acp_view.rs（GUI 层），跟着 `apply_event` 归约逻辑一起搬进 acp_session——
 /// 谁跑归约谁就要做这层翻译，现在是 smeltd 不是 GUI。
 pub fn tool_kind_from_acp(
-    k: agent_client_protocol::schema::v1::ToolKind,
+    k: agent_client_protocol::v1::schema::ToolKind,
 ) -> crate::acp_chat::ToolKind {
     use crate::acp_chat::ToolKind;
-    use agent_client_protocol::schema::v1::ToolKind as Acp;
+    use agent_client_protocol::v1::schema::ToolKind as Acp;
     match k {
         Acp::Read => ToolKind::Read,
         Acp::Edit => ToolKind::Edit,
@@ -3703,7 +3626,7 @@ const ACP_TOOL_KIND_RECOGNIZERS: &[AcpToolKindRecognizer] = &[
 /// 一条完整 ACP tool_call 的最终语义类别。标准类别优先；只有协议退化成 Other
 /// 时才运行扩展识别器，避免厂商元数据覆盖 Read/Edit 等明确语义。
 pub fn tool_kind_from_acp_call(
-    call: &agent_client_protocol::schema::v1::ToolCall,
+    call: &agent_client_protocol::v1::schema::ToolCall,
 ) -> crate::acp_chat::ToolKind {
     tool_kind_from_acp_fields(
         Some(call.kind),
@@ -3716,7 +3639,7 @@ pub fn tool_kind_from_acp_call(
 
 /// tool_call_update 的字段是稀疏的，因此没有足够信息时返回 None，调用方保留原类别。
 pub fn tool_kind_from_acp_fields(
-    explicit: Option<agent_client_protocol::schema::v1::ToolKind>,
+    explicit: Option<agent_client_protocol::v1::schema::ToolKind>,
     title: Option<&str>,
     raw_input: Option<&serde_json::Value>,
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -3826,10 +3749,10 @@ fn recognize_collaboration_title(
 }
 
 pub fn tool_status_from_acp(
-    s: agent_client_protocol::schema::v1::ToolCallStatus,
+    s: agent_client_protocol::v1::schema::ToolCallStatus,
 ) -> crate::acp_chat::ToolCallStatus {
     use crate::acp_chat::ToolCallStatus;
-    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
+    use agent_client_protocol::v1::schema::ToolCallStatus as Acp;
     match s {
         Acp::Pending => ToolCallStatus::Pending,
         Acp::InProgress => ToolCallStatus::InProgress,
@@ -3840,15 +3763,15 @@ pub fn tool_status_from_acp(
 }
 
 pub fn tool_content_parts(
-    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+    content: &[agent_client_protocol::v1::schema::ToolCallContent],
 ) -> Vec<crate::acp_chat::ToolOutputPart> {
     use crate::acp_chat::ToolOutputPart;
-    use agent_client_protocol::schema::v1::ToolCallContent;
+    use agent_client_protocol::v1::schema::ToolCallContent;
     content
         .iter()
         .filter_map(|c| match c {
             ToolCallContent::Content(inner) => {
-                if let agent_client_protocol::schema::v1::ContentBlock::Image(image) =
+                if let agent_client_protocol::v1::schema::ContentBlock::Image(image) =
                     &inner.content
                 {
                     return Some(ToolOutputPart::Image(crate::acp_chat::AcpImage::new(
@@ -3874,141 +3797,6 @@ pub fn tool_content_parts(
             _ => None,
         })
         .collect()
-}
-
-/// Managed Bun/Pi provisioning, immutable generations and leases live in `managed_runtime`.
-/// This module only owns ACP command rewriting, adapter-cache cleanup and diagnostics./// Smelt 启动的 Bun 实际使用的包缓存。登录 shell 里显式配置的绝对路径优先；
-/// 相对路径会随会话 cwd 漂移，无法安全判断删除目标，因此不做自动清理。
-fn managed_bun_cache_dir() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
-    let configured = crate::login_env::login_environment()
-        .get("BUN_INSTALL_CACHE_DIR")
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| crate::workspace_override::expand_tilde(value));
-    let path = configured
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.join(".bun/install/cache"));
-    // 即便用户把缓存变量误设成根目录或 home，也不能让自动回收触碰这种宽目标。
-    (path.is_absolute() && path.parent().is_some() && path != home).then_some(path)
-}
-
-fn safe_bun_cache_component(value: &str) -> bool {
-    !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\\'])
-}
-
-/// 返回 Bun 缓存中一个 npm 包的父目录与无 scope 包名。
-fn bun_cache_package_location(
-    cache_root: &std::path::Path,
-    package: &str,
-) -> Option<(std::path::PathBuf, String)> {
-    if let Some(scoped) = package.strip_prefix('@') {
-        let (scope, name) = scoped.split_once('/')?;
-        if !safe_bun_cache_component(scope) || !safe_bun_cache_component(name) {
-            return None;
-        }
-        return Some((cache_root.join(format!("@{scope}")), name.to_string()));
-    }
-    safe_bun_cache_component(package).then(|| (cache_root.to_path_buf(), package.to_string()))
-}
-
-fn bun_cache_entry_matches(name: &str, stem: &str) -> bool {
-    name == stem
-        || name
-            .strip_prefix(stem)
-            .is_some_and(|rest| rest.starts_with("@@@"))
-}
-
-fn remove_bun_cache_entry(path: &std::path::Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(path).is_ok()
-    } else if metadata.is_dir() {
-        std::fs::remove_dir_all(path).is_ok()
-    } else {
-        false
-    }
-}
-
-fn cleanup_managed_adapter_release(
-    cache_root: &std::path::Path,
-    release: crate::agent_kind::ManagedAcpAdapterRelease,
-) -> usize {
-    if !safe_bun_cache_component(release.version) {
-        return 0;
-    }
-    let Some((package_parent, package_name)) =
-        bun_cache_package_location(cache_root, release.package)
-    else {
-        return 0;
-    };
-
-    let mut removed = 0;
-    let actual_stem = format!("{package_name}@{}", release.version);
-    if let Ok(entries) = std::fs::read_dir(&package_parent) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name
-                .to_str()
-                .is_some_and(|name| bun_cache_entry_matches(name, &actual_stem))
-                && remove_bun_cache_entry(&entry.path())
-            {
-                removed += 1;
-            }
-        }
-    }
-
-    // Bun 还会维护 `<scope>/<package>/<version>@@@N` 别名符号链接。只遍历真正
-    // 的目录，拒绝跟随异常符号链接，避免缓存损坏时越过 cache_root。
-    let aliases = package_parent.join(&package_name);
-    if std::fs::symlink_metadata(&aliases).is_ok_and(|metadata| metadata.is_dir()) {
-        if let Ok(entries) = std::fs::read_dir(&aliases) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if name
-                    .to_str()
-                    .is_some_and(|name| bun_cache_entry_matches(name, release.version))
-                    && remove_bun_cache_entry(&entry.path())
-                {
-                    removed += 1;
-                }
-            }
-        }
-        let _ = std::fs::remove_dir(&aliases); // 仅空目录会成功；当前版本别名不会受影响。
-    }
-    removed
-}
-
-/// 清掉 Smelt 历史默认值对应的适配器包，不碰当前版、未发布版本或共享依赖。
-/// 用户若显式继续运行某个已知旧版，Bun 会按普通缓存缺失语义重新下载；命令配置
-/// 本身由上层精确匹配迁移保护，不会在这里改写。
-fn cleanup_stale_managed_adapter_cache(cache_root: &std::path::Path) -> usize {
-    let mut removed = 0;
-    for agent in ConversationAgentKind::ALL {
-        let Some(adapter) = agent.managed_adapter() else {
-            continue;
-        };
-        for release in adapter.previous_releases() {
-            removed += cleanup_managed_adapter_release(cache_root, *release);
-        }
-        // 当默认命令已经迁离一个受管适配器（目前是 Pi）时，它最后发布的版本也
-        // 变成可回收项；Claude/Codex 当前默认仍等于 current command，必须保留。
-        if adapter.current_command() != agent.default_cmd() {
-            removed += cleanup_managed_adapter_release(cache_root, adapter.current_release());
-        }
-    }
-    removed
-}
-
-fn cleanup_stale_managed_adapters(status: &dyn Fn(&str)) {
-    let Some(cache_root) = managed_bun_cache_dir() else {
-        return;
-    };
-    let removed = cleanup_stale_managed_adapter_cache(&cache_root);
-    if removed > 0 {
-        status(&format!("已清理 {removed} 个旧 ACP 适配器缓存项"));
-    }
 }
 
 /// 探测 Smelt 实际会用到的 Agent CLI。
@@ -4308,73 +4096,6 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
     ))
 }
 
-/// 命令首词是 `bunx`/`bun` 时解析到应用里的 Bun。Pi 的逻辑入口由
-/// `pi_rpc` 驱动在进入 ACP 解析前接管；这里不把它伪装成 ACP 命令。应用里没有
-/// Bun、但系统 PATH 里有同名可执行则原样放行；其他命令一律不动。
-fn resolve_runtime_command_with_bun(
-    cmd: &str,
-    status: &dyn Fn(&str),
-) -> Result<(String, Option<crate::managed_runtime::ManagedBunRuntime>), String> {
-    let head = command_head_after_env_prefixes(cmd).unwrap_or_default();
-    if head != "bunx" && head != "bun" {
-        return Ok((cmd.to_string(), None));
-    }
-    let runtime_result = crate::managed_runtime::sync_managed_bun(status);
-    cleanup_stale_managed_adapters(status);
-    match runtime_result {
-        Ok(runtime) => {
-            let bun = runtime.path.to_string_lossy().into_owned();
-            let command =
-                rewrite_runtime_command_with_bun(cmd, &bun).unwrap_or_else(|| cmd.to_string());
-            Ok((command, Some(runtime)))
-        }
-        Err(error) => {
-            // Explicit third-party ACP commands retain their existing PATH fallback policy.
-            let system_has = std::env::split_paths(crate::login_env::login_path())
-                .any(|path| path.join(head).is_file());
-            if system_has {
-                Ok((cmd.to_string(), None))
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, String> {
-    resolve_runtime_command_with_bun(cmd, status).map(|(command, _runtime)| command)
-}
-
-fn command_head_after_env_prefixes(cmd: &str) -> Option<&str> {
-    cmd.split_whitespace()
-        .find(|tok| crate::workspace_override::split_env_assignment(tok).is_none())
-}
-
-fn rewrite_runtime_command_with_bun(cmd: &str, bun: &str) -> Option<String> {
-    let mut words = cmd.split_whitespace();
-    let mut prefix = Vec::new();
-    let head = loop {
-        match words.next() {
-            Some(tok) if crate::workspace_override::split_env_assignment(tok).is_some() => {
-                prefix.push(tok);
-            }
-            Some(tok) => break tok,
-            None => return None,
-        }
-    };
-    if head != "bunx" && head != "bun" {
-        return None;
-    }
-    let mut parts: Vec<String> = prefix.into_iter().map(str::to_string).collect();
-    parts.push(bun.to_string());
-    if head == "bunx" {
-        parts.push("x".to_string());
-    }
-    parts.extend(words.map(str::to_string));
-    Some(parts.join(" "))
-}
-
 /// login shell 的 PATH（跑一次缓存）。GUI 进程从 Finder 启动时 PATH 只有系统
 /// 目录，nvm/homebrew 里的 npx 找不到；跟终端会话不同（那边 shell 由 smeltd 起，
 /// 自带 login 环境），ACP 子进程是 GUI 直接 spawn 的，得自己补。
@@ -4415,7 +4136,7 @@ fn extend_search_path(login: &str, home: Option<&std::path::Path>) -> String {
 }
 
 /// 在 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
-/// 已经带 `/` 或 `\` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
+/// 已经带 `/` 或 `\` 的（绝对路径、smelt-agent 的全路径）原样返回，不查。找不到返回
 /// None——调用方保留原名，让 spawn 照常失败并把真实错误报出来。
 ///
 /// Windows 上没有扩展名的名字按 `.exe`、`.cmd`、`.bat`、原名这个顺序找。
@@ -4468,7 +4189,7 @@ fn command_file_names(program: &str) -> Vec<String> {
 #[cfg(test)]
 mod elicit_parse_tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ElicitationScope, ElicitationSessionScope, ElicitationUrlMode,
     };
 
@@ -4700,103 +4421,6 @@ mod runtime_tests {
 
         assert!(error.contains("Homebrew 或 npm"));
     }
-
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_stale_managed_adapter_cache_is_targeted() {
-        use std::os::unix::fs::symlink;
-
-        let root = std::env::temp_dir().join(format!(
-            "smelt-adapter-cache-cleanup-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let scope = root.join("@agentclientprotocol");
-        let old = scope.join("claude-agent-acp@0.59.0@@@1");
-        let retired = scope.join("claude-agent-acp@0.70.0@@@1");
-        let current = scope.join("claude-agent-acp@0.78.0@@@1");
-        let unknown = scope.join("claude-agent-acp@0.58.0@@@1");
-        let shared_sdk = scope.join("sdk@1.2.1@@@1");
-        let aliases = scope.join("claude-agent-acp");
-        let old_alias = aliases.join("0.59.0@@@1");
-        let retired_alias = aliases.join("0.70.0@@@1");
-        let current_alias = aliases.join("0.78.0@@@1");
-        let retired_pi = root.join("pi-acp@0.0.33@@@1");
-        let pi_aliases = root.join("pi-acp");
-        let retired_pi_alias = pi_aliases.join("0.0.33@@@1");
-        for dir in [&old, &retired, &current, &unknown, &shared_sdk, &aliases] {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        std::fs::create_dir_all(&retired_pi).unwrap();
-        std::fs::create_dir_all(&pi_aliases).unwrap();
-        symlink(&old, &old_alias).unwrap();
-        symlink(&retired, &retired_alias).unwrap();
-        symlink(&current, &current_alias).unwrap();
-        symlink(&retired_pi, &retired_pi_alias).unwrap();
-
-        let removed = cleanup_stale_managed_adapter_cache(&root);
-
-        assert!(removed >= 6, "旧实体目录和版本别名都应被清掉");
-        assert!(!old.exists());
-        assert!(std::fs::symlink_metadata(&old_alias).is_err());
-        assert!(!retired.exists(), "刚卸任的 0.70.0 缓存应清掉");
-        assert!(std::fs::symlink_metadata(&retired_alias).is_err());
-        assert!(!retired_pi.exists(), "已退役的 pi-acp 缓存应清掉");
-        assert!(std::fs::symlink_metadata(&retired_pi_alias).is_err());
-        assert!(current.is_dir(), "当前适配器版本必须保留");
-        assert!(current_alias.is_symlink(), "当前版本别名必须保留");
-        assert!(
-            unknown.is_dir(),
-            "没有作为 Smelt 默认值发布过的版本不应删除"
-        );
-        assert!(shared_sdk.is_dir(), "共享依赖缓存不属于适配器清理范围");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// 非 bun 前缀的命令一律原样放行（npx / 绝对路径等逃生口不被劫持）。
-    #[test]
-    fn non_bun_commands_pass_through() {
-        let noop = |_: &str| {};
-        for cmd in [
-            "npx -y foo@1",
-            "/usr/local/bin/some-acp --flag",
-            "node adapter.js",
-        ] {
-            assert_eq!(resolve_runtime_command(cmd, &noop).unwrap(), cmd);
-        }
-    }
-
-    #[test]
-    fn bun_and_bunx_rewrites_are_deterministic_and_preserve_argument_order() {
-        assert_eq!(
-            rewrite_runtime_command_with_bun("bunx pkg@1 --flag", "/managed/bun").as_deref(),
-            Some("/managed/bun x pkg@1 --flag")
-        );
-        assert_eq!(
-            rewrite_runtime_command_with_bun("bunx --bun pkg@1 --flag", "/managed/bun").as_deref(),
-            Some("/managed/bun x --bun pkg@1 --flag")
-        );
-        assert_eq!(
-            rewrite_runtime_command_with_bun("bun --version", "/managed/bun").as_deref(),
-            Some("/managed/bun --version")
-        );
-        assert_eq!(
-            rewrite_runtime_command_with_bun("node app.js", "/managed/bun"),
-            None
-        );
-    }
-
-    #[test]
-    fn runtime_rewrite_preserves_legacy_env_prefixes_before_bunx() {
-        let out = rewrite_runtime_command_with_bun(
-            "CLAUDE_CONFIG_DIR=~/.claude bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
-            "/managed/bun",
-        )
-        .expect("bunx should rewrite");
-        assert_eq!(
-            out,
-            "CLAUDE_CONFIG_DIR=~/.claude /managed/bun x --bun @agentclientprotocol/claude-agent-acp@0.78.0"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -4931,7 +4555,10 @@ mod restore_failure_tests {
     #[test]
     fn missing_history_is_an_explicit_restore_failure() {
         assert_eq!(
-            classify_restore_failure(&Error::resource_not_found(None), ""),
+            classify_restore_failure(
+                &agent_client_protocol::v1::schema::Error::resource_not_found(None).into(),
+                "",
+            ),
             ConversationRestoreFailure::HistoryMissing
         );
     }
@@ -5078,12 +4705,13 @@ mod spawn_gate_tests {
 
 #[cfg(test)]
 mod embedded_adapter_tests {
-    use super::{
-        ConversationAgentKind, auth_required_hint, inject_local_adapter_cli_path,
-        plan_embedded_adapter_command,
+    use super::{ConversationAgentKind, auth_required_hint, build_agent_args_with_ephemeral_env};
+    use crate::agent_kind::{
+        CLAUDE_ADAPTER_COMMAND, CODEX_ADAPTER_COMMAND, ConversationLaunchSpec,
     };
-    use crate::agent_kind::ConversationLaunchSpec;
     use std::collections::BTreeMap;
+
+    const SMELT_AGENT: &str = "/home/me/.smelt/bin/smelt-agent-abc/smelt-agent";
 
     fn spec(command: String) -> ConversationLaunchSpec {
         ConversationLaunchSpec {
@@ -5125,6 +4753,15 @@ mod embedded_adapter_tests {
         fn path(&self) -> &str {
             self.0.to_str().unwrap()
         }
+
+        fn program(&self, program: &str) -> String {
+            let name = if cfg!(windows) {
+                format!("{program}.exe")
+            } else {
+                program.to_string()
+            };
+            self.0.join(name).to_string_lossy().into_owned()
+        }
     }
 
     impl Drop for CliDir {
@@ -5133,152 +4770,180 @@ mod embedded_adapter_tests {
         }
     }
 
-    fn plan(launch: &ConversationLaunchSpec, search_path: &str) -> Option<String> {
-        plan_embedded_adapter_command(
-            launch,
-            &BTreeMap::new(),
-            search_path,
-            &|_| false,
-            || Some("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent".to_string()),
-        )
+    fn args_with(
+        launch: &ConversationLaunchSpec,
+        ephemeral: &BTreeMap<String, String>,
+        search_path: &str,
+        smelt_agent: &str,
+    ) -> Result<Vec<String>, String> {
+        build_agent_args_with_ephemeral_env(launch, ephemeral, search_path, &|| {
+            Ok(smelt_agent.into())
+        })
+        .map_err(|error| format!("{error:?}"))
+    }
+
+    fn args(launch: &ConversationLaunchSpec, search_path: &str) -> Result<Vec<String>, String> {
+        args_with(launch, &BTreeMap::new(), search_path, SMELT_AGENT)
+    }
+
+    /// 程序名之后的部分：smelt-agent 的真实路径和子命令。
+    fn program_and_args(args: &[String]) -> &[String] {
+        let at = args
+            .iter()
+            .position(|arg| crate::workspace_override::split_env_assignment(arg).is_none())
+            .unwrap();
+        &args[at..]
     }
 
     #[test]
-    fn default_commands_run_the_embedded_adapter_when_the_cli_exists() {
+    fn default_commands_run_smelt_agent_with_the_local_cli() {
         let claude = CliDir::with("claude");
-        assert_eq!(
-            plan(&spec(claude_default()), claude.path()).as_deref(),
-            Some("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude")
+        let built = args(&spec(claude_default()), claude.path()).unwrap();
+        assert_eq!(program_and_args(&built), [SMELT_AGENT, "acp-claude"]);
+        assert!(
+            built.contains(&format!(
+                "CLAUDE_CODE_EXECUTABLE={}",
+                claude.program("claude")
+            )),
+            "{built:?}"
         );
+
         let codex = CliDir::with("codex");
-        assert_eq!(
-            plan(&spec(ConversationAgentKind::Codex.default_cmd()), codex.path()).as_deref(),
-            Some("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-codex")
-        );
+        let built = args(
+            &spec(ConversationAgentKind::Codex.default_cmd()),
+            codex.path(),
+        )
+        .unwrap();
+        assert_eq!(program_and_args(&built), [SMELT_AGENT, "acp-codex"]);
+        assert!(built.contains(&format!("CODEX_PATH={}", codex.program("codex"))));
     }
 
-    /// 编译产物里找不到适配器自带的原生二进制，没有 CLI 时必须留给 bunx 去下载。
+    /// 旧名字（旧运行时写下的存档、旧桌面发来的请求）和以后的新名字都换成内置适配器。
     #[test]
-    fn no_cli_stays_on_bunx() {
+    fn both_names_of_a_builtin_adapter_run_it() {
+        let claude = CliDir::with("claude");
+        let codex = CliDir::with("codex");
+        for (adapter, cli, subcommand) in [
+            (&CLAUDE_ADAPTER_COMMAND, &claude, "acp-claude"),
+            (&CODEX_ADAPTER_COMMAND, &codex, "acp-codex"),
+        ] {
+            for name in [adapter.name, adapter.legacy] {
+                let spaced = format!("  {}  ", name.replace(' ', "   "));
+                let built = args(&spec(spaced), cli.path()).unwrap();
+                assert_eq!(program_and_args(&built), [SMELT_AGENT, subcommand]);
+            }
+        }
+    }
+
+    /// 路径作为单独一个参数交出去，Windows 用户名带空格也不会被拆开。
+    #[test]
+    fn a_smelt_agent_path_with_spaces_stays_one_argument() {
+        let claude = CliDir::with("claude");
+        let path = "C:/Users/first last/.smelt/bin/smelt-agent-abc/smelt-agent.exe";
+        let built = args_with(
+            &spec(claude_default()),
+            &BTreeMap::new(),
+            claude.path(),
+            path,
+        )
+        .unwrap();
+        assert_eq!(program_and_args(&built), [path, "acp-claude"]);
+    }
+
+    #[test]
+    fn no_smelt_agent_is_an_error() {
+        let claude = CliDir::with("claude");
+        let error = build_agent_args_with_ephemeral_env(
+            &spec(claude_default()),
+            &BTreeMap::new(),
+            claude.path(),
+            &|| Err("找不到 smelt-agent".to_string()),
+        )
+        .expect_err("没有 smelt-agent 应报错");
+        assert!(format!("{error:?}").contains("找不到 smelt-agent"));
+    }
+
+    /// 内置适配器没带原生二进制，没有 CLI 跑不起来，直接请用户去装。
+    #[test]
+    fn no_cli_is_an_error() {
         let empty = CliDir::with("not-the-cli");
-        assert_eq!(plan(&spec(claude_default()), empty.path()), None);
+        for (agent, program) in [
+            (ConversationAgentKind::Claude, "`claude`"),
+            (ConversationAgentKind::Codex, "`codex`"),
+        ] {
+            let error = args(&spec(agent.default_cmd()), empty.path())
+                .expect_err("内置适配器没有 CLI 应报错");
+            assert!(error.contains(program), "{error}");
+        }
     }
 
     #[test]
     fn explicit_cli_path_counts_as_having_the_cli() {
         let empty = CliDir::with("not-the-cli");
         let prefixed = format!("CLAUDE_CODE_EXECUTABLE=/opt/claude {}", claude_default());
-        assert_eq!(
-            plan(&spec(prefixed), empty.path()).as_deref(),
-            Some("CLAUDE_CODE_EXECUTABLE=/opt/claude /home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude")
-        );
+        let built = args(&spec(prefixed), empty.path()).unwrap();
+        assert!(built.contains(&"CLAUDE_CODE_EXECUTABLE=/opt/claude".to_string()));
 
         let mut launch = spec(claude_default());
-        launch
-            .env
-            .insert("CLAUDE_CODE_EXECUTABLE".to_string(), "/opt/claude".to_string());
-        assert!(plan(&launch, empty.path()).is_some());
+        launch.env.insert(
+            "CLAUDE_CODE_EXECUTABLE".to_string(),
+            "/opt/claude".to_string(),
+        );
+        assert!(args(&launch, empty.path()).is_ok());
 
         let ephemeral = BTreeMap::from([("CODEX_PATH".to_string(), "/opt/codex".to_string())]);
         assert!(
-            plan_embedded_adapter_command(
+            args_with(
                 &spec(ConversationAgentKind::Codex.default_cmd()),
                 &ephemeral,
                 empty.path(),
-                &|_| false,
-                || Some("/bin/smelt-agent".to_string()),
+                SMELT_AGENT,
             )
-            .is_some()
-        );
-        assert!(
-            plan_embedded_adapter_command(
-                &spec(claude_default()),
-                &BTreeMap::new(),
-                empty.path(),
-                &|name| name == "CLAUDE_CODE_EXECUTABLE",
-                || Some("/bin/smelt-agent".to_string()),
-            )
-            .is_some()
+            .is_ok()
         );
     }
 
     #[test]
-    fn env_prefix_is_kept() {
+    fn env_prefix_and_extra_arguments_are_kept() {
         let claude = CliDir::with("claude");
-        let command = format!("CLAUDE_CONFIG_DIR=~/.claude-work {}", claude_default());
+        let command = format!("CLAUDE_CONFIG_DIR=/work {} --verbose", claude_default());
+        let built = args(&spec(command), claude.path()).unwrap();
+        assert!(built.contains(&"CLAUDE_CONFIG_DIR=/work".to_string()));
         assert_eq!(
-            plan(&spec(command), claude.path()).as_deref(),
-            Some("CLAUDE_CONFIG_DIR=~/.claude-work /home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude")
+            program_and_args(&built),
+            [SMELT_AGENT, "acp-claude", "--verbose"]
         );
     }
 
+    /// 用户自己写的命令原样执行，不换到 smelt-agent，也不替它找 CLI。
     #[test]
     fn custom_commands_are_left_alone() {
-        let claude = CliDir::with("claude");
-        for command in [
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0".to_string(),
-            format!("{} --verbose", claude_default()),
-            "bunx @agentclientprotocol/claude-agent-acp@0.78.0".to_string(),
-            "claude-agent-acp".to_string(),
-            "copilot --acp --allow-all".to_string(),
-        ] {
-            assert_eq!(plan(&spec(command.clone()), claude.path()), None, "{command}");
-        }
-    }
-
-    #[test]
-    fn no_smelt_agent_stays_on_bunx() {
-        let claude = CliDir::with("claude");
+        let tools = CliDir::with("bunx");
+        let built = args(
+            &spec("bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0".to_string()),
+            tools.path(),
+        )
+        .unwrap();
         assert_eq!(
-            plan_embedded_adapter_command(
-                &spec(claude_default()),
-                &BTreeMap::new(),
-                claude.path(),
-                &|_| false,
-                || None,
-            ),
-            None
+            program_and_args(&built),
+            [
+                tools.program("bunx").as_str(),
+                "--bun",
+                "@agentclientprotocol/claude-agent-acp@0.70.0"
+            ]
+        );
+        assert!(
+            !built
+                .iter()
+                .any(|arg| arg.starts_with("CLAUDE_CODE_EXECUTABLE="))
         );
     }
 
-    /// 启动命令按空白分词，带空格的路径会被拆坏。
     #[test]
-    fn smelt_pi_path_with_spaces_stays_on_bunx() {
-        let claude = CliDir::with("claude");
-        assert_eq!(
-            plan_embedded_adapter_command(
-                &spec(claude_default()),
-                &BTreeMap::new(),
-                claude.path(),
-                &|_| false,
-                || Some("/home/first last/.smelt/bin/smelt-agent".to_string()),
-            ),
-            None
-        );
-    }
-
-    /// 改写后命令里没有包名了，CLI 路径还得注入，否则适配器在 bunfs 里找不到原生二进制。
-    #[test]
-    fn rewritten_command_still_gets_the_cli_path() {
-        let dir = CliDir::with("claude");
-        let mut env = BTreeMap::new();
-        inject_local_adapter_cli_path(
-            "/bin/smelt-agent acp-claude",
-            "@agentclientprotocol/claude-agent-acp",
-            "CLAUDE_CODE_EXECUTABLE",
-            "claude",
-            &mut env,
-            dir.path(),
-        );
-        assert!(env.contains_key("CLAUDE_CODE_EXECUTABLE"));
-    }
-
-    /// 连接失败时拿到的是改写后的命令，登录提示仍要认出是哪家。
-    #[test]
-    fn rewritten_command_keeps_the_right_login_hint() {
-        let claude = auth_required_hint("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-claude");
+    fn default_commands_keep_the_right_login_hint() {
+        let claude = auth_required_hint(&claude_default());
         assert!(claude.contains("Claude Code"), "{claude}");
-        let codex = auth_required_hint("/home/me/.smelt/bin/smelt-agent-abc/smelt-agent acp-codex");
+        let codex = auth_required_hint(&ConversationAgentKind::Codex.default_cmd());
         assert!(codex.contains("codex login"), "{codex}");
     }
 }
@@ -5286,15 +4951,14 @@ mod embedded_adapter_tests {
 #[cfg(test)]
 mod path_resolve_tests {
     use super::{
-        build_agent_args, build_agent_args_with_ephemeral_env, extend_search_path,
-        inject_local_adapter_cli_path, resolve_in_path,
+        build_agent_args, build_agent_args_with_ephemeral_env, extend_search_path, resolve_in_path,
     };
     use crate::agent_kind::ConversationLaunchSpec;
     use std::collections::BTreeMap;
 
     #[test]
     fn absolute_or_slashed_returned_asis() {
-        // 带斜杠的（绝对路径 / 受管 bun 全路径）不查 PATH，原样返回。
+        // 带斜杠的（绝对路径 / smelt-agent 全路径）不查 PATH，原样返回。
         assert_eq!(
             resolve_in_path("/usr/bin/env", "/nonexistent").as_deref(),
             Some("/usr/bin/env")
@@ -5465,91 +5129,15 @@ mod path_resolve_tests {
         let ephemeral =
             BTreeMap::from([("PLUGIN_TOKEN".to_string(), "remote-task-value".to_string())]);
 
-        let args = build_agent_args_with_ephemeral_env(&launch, &ephemeral, "/bin:/usr/bin")
+        let args =
+            build_agent_args_with_ephemeral_env(&launch, &ephemeral, "/bin:/usr/bin", &|| {
+                Err("用不到 smelt-agent".to_string())
+            })
             .expect("launch args");
 
         assert!(args.contains(&"PLUGIN_TOKEN=remote-task-value".to_string()));
         assert!(args.contains(&"UNCHANGED=yes".to_string()));
         assert_eq!(launch.env["PLUGIN_TOKEN"], "stored-value");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn official_codex_adapter_prefers_local_codex_cli() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("smelt-codex-path-{}-{nonce}", std::process::id()));
-        std::fs::create_dir(&dir).unwrap();
-        let codex = dir.join("codex");
-        std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-        let mut permissions = std::fs::metadata(&codex).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&codex, permissions).unwrap();
-
-        let mut env = BTreeMap::new();
-        inject_local_adapter_cli_path(
-            "bunx --bun @agentclientprotocol/codex-acp@1.12.0",
-            "@agentclientprotocol/codex-acp",
-            "SMELT_TEST_CODEX_PATH",
-            "codex",
-            &mut env,
-            dir.to_str().unwrap(),
-        );
-
-        assert_eq!(
-            env.get("SMELT_TEST_CODEX_PATH"),
-            Some(&codex.to_string_lossy().into_owned())
-        );
-        std::fs::remove_file(codex).unwrap();
-        std::fs::remove_dir(dir).unwrap();
-    }
-
-    #[test]
-    fn explicit_codex_path_is_not_overridden() {
-        let mut env = BTreeMap::from([("CODEX_PATH".to_string(), "/custom/codex".to_string())]);
-
-        inject_local_adapter_cli_path(
-            "bunx --bun @agentclientprotocol/codex-acp@1.12.0",
-            "@agentclientprotocol/codex-acp",
-            "CODEX_PATH",
-            "codex",
-            &mut env,
-            "/opt/homebrew/bin",
-        );
-
-        assert_eq!(
-            env.get("CODEX_PATH").map(String::as_str),
-            Some("/custom/codex")
-        );
-    }
-
-    #[test]
-    fn official_claude_adapter_prefers_local_claude_cli() {
-        let root = temp_root("claude");
-        let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let exe = write_executable(&bin, "sh");
-        let mut env = BTreeMap::new();
-
-        inject_local_adapter_cli_path(
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
-            "@agentclientprotocol/claude-agent-acp",
-            "CLAUDE_CODE_EXECUTABLE",
-            "sh",
-            &mut env,
-            bin.to_str().unwrap(),
-        );
-
-        assert_eq!(
-            env.get("CLAUDE_CODE_EXECUTABLE").map(String::as_str),
-            exe.to_str()
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -5615,13 +5203,13 @@ mod config_queue_tests {
 
 #[cfg(test)]
 mod model_tests {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         NewSessionResponse, SessionConfigId, SessionConfigKind, SessionConfigOption,
         SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOption,
         SessionConfigSelectOptions,
     };
 
-    use agent_client_protocol::schema::v1::SessionConfigValueId;
+    use agent_client_protocol::v1::schema::SessionConfigValueId;
 
     fn opt(value: &str, name: &str) -> SessionConfigSelectOption {
         SessionConfigSelectOption::new(
@@ -5669,7 +5257,7 @@ mod model_tests {
     /// 选项按厂商/档位分组时同样要能翻出来。
     #[test]
     fn looks_inside_grouped_options() {
-        use agent_client_protocol::schema::v1::{SessionConfigGroupId, SessionConfigSelectGroup};
+        use agent_client_protocol::v1::schema::{SessionConfigGroupId, SessionConfigSelectGroup};
         let group = SessionConfigSelectGroup::new(
             SessionConfigGroupId::new("anthropic".to_string()),
             "Anthropic".to_string(),
@@ -6412,6 +6000,8 @@ mod prompt_failure_tests {
         let text = describe_prompt_error(&e);
         assert!(text.contains("设置"), "要指到设置页：{text}");
         assert!(text.contains("环境变量"), "要指到具体那个输入框：{text}");
+        // 只有自定义 Agent 能填环境变量，内置的没有这个输入框。
+        assert!(text.contains("自定义 Agent"), "{text}");
         // 原文仍然保留：诊断信息不能因为「友好」就被吞掉。
         assert!(text.contains("no API key"), "{text}");
     }
@@ -6483,7 +6073,7 @@ mod runtime_diagnostics_wire_tests {
 mod permission_view_tests {
     use super::permission_view;
     use crate::acp_session::ApprovalDetailsView;
-    use agent_client_protocol::schema::v1::ToolKind;
+    use agent_client_protocol::v1::schema::ToolKind;
     use serde_json::json;
 
     #[test]

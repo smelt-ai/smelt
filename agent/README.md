@@ -31,10 +31,9 @@ Extension / Tool / Skill 交付。
 发布时 `agent/` 编成单个 `smelt-agent`，和对应的 `smeltd-<指纹>` 放在一起。
 不再把源码嵌进 `smelt-core`，也不再在用户机器上 `bun install`。
 Claude、Codex 的官方 ACP 适配器也编在里面（`smelt-agent acp-claude` / `acp-codex`，
-版本钉在 `package.json`）。设置里存的仍是 `bunx --bun 包@版本`，守护在本机装了对应 CLI
-时改跑内置的这份；没装 CLI 或用了自定义命令时照旧 `bunx`，由它连同原生二进制一起下载。
-Bun 不打进应用：MCP 预设的 `bun x` 和上面那条 `bunx` 仍用按需下载的那份，
-`~/.smelt/runtime/bin/bun` 指向当前 generation。Pi 登录仍写 `~/.pi/agent/auth.json`。
+版本钉在 `package.json`），设置里存的默认命令就是这两个子命令。适配器跑的是本机装的
+CLI，没装时直接请用户安装。MCP 预设也用 smelt-agent：带上 `BUN_BE_BUN=1` 就是 Bun 命令行
+（`smelt-agent x --bun 包@版本`），不另外下载 Bun。Pi 登录仍写 `~/.pi/agent/auth.json`。
 
 读取与搜索工具只有在 Pi registry 证明其确为 built-in 时才默认直接执行；写文件、
 执行命令和 Extension 注册的 Tool 由权限 Extension 通过 Pi RPC 的 Extension UI

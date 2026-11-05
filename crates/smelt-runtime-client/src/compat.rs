@@ -285,10 +285,14 @@ mod tests {
     }
 
     /// 手机只对事件：桌面的必需方法缺了不拦，事件协议对不上照样拦。
-    /// 用户的 Linux 打成了镜像，运行时升不了：这里写死已发布的版本，谁抬最低版本这条就失败。
+    /// 没升级的运行时读得了就照常连：这里写死已发布的 2026.1031.0（控制 v3、事件 v6，没有
+    /// 可选方法），谁抬最低版本或把可选方法改成必需，这条就失败，得想清楚是不是真读不了。
     #[test]
     fn the_released_runtime_baseline_stays_compatible() {
         let mut baseline = current();
+        baseline.control.methods.retain(|method| {
+            ControlMethod::from_wire_name(method).is_none_or(ControlMethod::required)
+        });
         baseline.control.current_version = 3;
         baseline.control.min_supported_version = 3;
         baseline.control.max_supported_version = 3;

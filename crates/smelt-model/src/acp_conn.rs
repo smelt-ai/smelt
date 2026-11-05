@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use agent_client_protocol::schema::v1::ElicitationContentValue;
+use agent_client_protocol::v1::schema::ElicitationContentValue;
 
 use crate::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 

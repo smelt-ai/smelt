@@ -103,17 +103,10 @@ pub struct WorkspaceAcpRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentUiSnapshot {
     pub agent_hooks_enabled: bool,
-    pub commands: Vec<AgentConversationCommandRecord>,
     pub env: Vec<AgentAcpEnvRecord>,
     pub config_memory: Vec<AgentAcpConfigMemoryRecord>,
     pub agents: Vec<AgentDefinitionRecord>,
     pub profiles: Vec<AgentProfileRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentConversationCommandRecord {
-    pub command_key: String,
-    pub command: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

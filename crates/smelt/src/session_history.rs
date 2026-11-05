@@ -1399,9 +1399,7 @@ fn migration_menu(
         }
         let target = acp_view::AcpHandoffTarget {
             agent: target_agent,
-            launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command(
-                config.acp_cmd_for(target_agent),
-            ),
+            launch: config.acp_launch_for(target_agent),
             profile_id: None,
             profile_label: None,
         };
@@ -1593,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn history_resume_profile_launch_uses_current_agent_command() {
+    fn history_resume_profile_launch_uses_the_agent_command() {
         let profile = AcpProfile {
             id: "quant".into(),
             kind_id: "claude".into(),
@@ -1602,12 +1600,11 @@ mod tests {
             env: Default::default(),
             workspace_dir: "~/Claude Workspaces/quant".into(),
         };
-        let mut config = AgentHostSettings::fresh();
-        config.set_acp_cmd_for(ConversationAgentKind::Claude, "claude --current".into());
+        let config = AgentHostSettings::fresh();
 
         let launch = current_profile_launch(&config, &profile).expect("有效 profile");
 
-        assert_eq!(launch.command, "claude --current");
+        assert_eq!(launch.command, ConversationAgentKind::Claude.default_cmd());
         assert_eq!(
             launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("~/Claude Workspaces/quant")

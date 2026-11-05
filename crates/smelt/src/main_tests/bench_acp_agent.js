@@ -3,8 +3,8 @@
 // prompt 里写 `stream <片段数> <每片字节> <间隔毫秒> <标签>`，就按这个节奏流式吐出助手
 // 回复，最后一片是 `__END_<标签>__`，然后结束回合。标签用来区分各个回合。其余请求一律回空结果。
 //
-// 由运行时的受管 Bun 执行（见 remote_terminal_bench.rs 的 `bench_agent_launch`），整段
-// 包在 async 函数里：`bun -e` 拿到的是 eval 的代码，顶层不能 `for await`。
+// 由运行时的 smelt-agent 当 Bun 执行（见 remote_terminal_bench.rs 的 `bench_agent_launch`），
+// 整段包在 async 函数里：`-e` 拿到的是 eval 的代码，顶层不能 `for await`。
 (async () => {
   const readline = require("node:readline");
 

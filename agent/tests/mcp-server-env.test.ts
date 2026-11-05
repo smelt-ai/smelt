@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { DefaultResourceLoader, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import { builtInExtensions } from "../node_modules/@earendil-works/pi-coding-agent/dist/extensions/index.js";
-import { createSmeltMcpTransport } from "../src/pi-mcp-runtime.ts";
+import { StdioTransport } from "@earendil-works/pi-mcp";
+import { createPiDefaultTransport, createSmeltMcpTransport } from "../src/pi-mcp-runtime.ts";
 import { SMELT_BUILTIN_MCP_EXTENSION, smeltExtensionFactories } from "../src/runtime-extensions.ts";
 
 /** daemon 写进 Pi 进程环境的会话控制变量（见 `pi_rpc.rs` 的 `spawn_process`）。 */
@@ -68,6 +69,36 @@ describe("MCP server environment", () => {
 		expect(seen.SMELT_HOME).toBe("/home/me/.smelt");
 		expect(seen.PROBE).toBe("1");
 		expect(seen.SMELT_EXPLICIT).toBe("kept");
+	});
+
+	// MCP 预设写的是 smelt-agent 的启动名；Windows 上它只是指针文件，得换成正在跑的这一份。
+	test("presets on the smelt-agent launcher run on this smelt-agent", () => {
+		for (const create of [createPiDefaultTransport, createSmeltMcpTransport]) {
+			const transport = create(
+				{
+					name: "playwright",
+					config: {
+						command: "~/.smelt/bin/smelt-agent",
+						args: ["x", "--bun", "@playwright/mcp@0.0.83"],
+						env: { BUN_BE_BUN: "1" },
+					},
+					source: "test",
+				},
+				process.cwd(),
+				undefined,
+			);
+			expect(transport).toBeInstanceOf(StdioTransport);
+			const options = (transport as StdioTransport).options;
+			expect(options.command).toBe(process.execPath);
+			expect(options.args).toEqual(["x", "--bun", "@playwright/mcp@0.0.83"]);
+			expect(options.env?.BUN_BE_BUN).toBe("1");
+		}
+		const other = createPiDefaultTransport(
+			{ name: "other", config: { command: "npx", args: ["-y", "x"] }, source: "test" },
+			process.cwd(),
+			undefined,
+		);
+		expect((other as StdioTransport).options.command).toBe("npx");
 	});
 
 	test("HTTP servers are left to Pi's own transport", () => {
