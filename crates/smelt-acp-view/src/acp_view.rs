@@ -1404,6 +1404,19 @@ fn append_prompt_text(current: &str, text: &str) -> (String, usize) {
     (merged, cursor_offset)
 }
 
+/// 把 `/skill:名字` 放到草稿开头：Pi 只认开头的技能命令。草稿已经以某个技能命令开头时
+/// 换成新的，不叠两个。
+fn prefix_skill_command(current: &str, skill: &str) -> String {
+    let current = current.trim_start();
+    let rest = match current.strip_prefix("/skill:") {
+        Some(after) => after
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, rest)| rest.trim_start()),
+        None => current,
+    };
+    format!("/skill:{skill} {rest}")
+}
+
 fn merge_rejected_prompt(current: &str, rejected: &str) -> String {
     if current.trim().is_empty() {
         rejected.to_string()
@@ -3532,6 +3545,23 @@ impl AcpView {
         input.update(cx, |s, cx| {
             let cur = s.value().to_string();
             let (merged, cursor_offset) = append_prompt_text(&cur, text);
+            s.set_value(merged, window, cx);
+            let position = s.text().offset_to_position(cursor_offset);
+            s.set_cursor_position(position, window, cx);
+            s.focus(window, cx);
+        });
+        self.input_has_draft = true;
+        cx.notify();
+    }
+
+    /// 能力弹层里点一条技能：在草稿开头写上 `/skill:名字`，光标放末尾等人补一句再发。
+    pub fn use_skill(&mut self, skill: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.input.clone() else {
+            return;
+        };
+        input.update(cx, |s, cx| {
+            let merged = prefix_skill_command(&s.value(), skill);
+            let cursor_offset = merged.len();
             s.set_value(merged, window, cx);
             let position = s.text().offset_to_position(cursor_offset);
             s.set_cursor_position(position, window, cx);
