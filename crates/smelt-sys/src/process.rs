@@ -290,11 +290,6 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
 }
 
 #[cfg(windows)]
-pub fn af_unix_peer_pid(socket: std::os::windows::io::RawSocket) -> io::Result<u32> {
-    windows::af_unix_peer_pid(socket)
-}
-
-#[cfg(windows)]
 pub fn process_executable(pid: u32) -> io::Result<PathBuf> {
     windows::process_executable(pid)
 }
@@ -352,7 +347,6 @@ mod windows {
         CloseHandle, ERROR_ACCESS_DENIED, FILETIME, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
         WAIT_TIMEOUT,
     };
-    use windows_sys::Win32::Networking::WinSock::WSAIoctl;
     use windows_sys::Win32::Security::{
         GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
@@ -371,8 +365,6 @@ mod windows {
         THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
     };
 
-    /// `_WSAIOR(IOC_VENDOR, 256)`，Winsock 文档里的 `SIO_AF_UNIX_GETPEERPID`。
-    const SIO_AF_UNIX_GETPEERPID: u32 = 0x5800_0100;
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -526,31 +518,6 @@ mod windows {
         } else {
             Err(io::Error::other("挂起的进程没有可恢复的线程"))
         }
-    }
-
-    pub fn af_unix_peer_pid(socket: std::os::windows::io::RawSocket) -> io::Result<u32> {
-        let mut pid = 0u32;
-        let mut returned = 0u32;
-        let rc = unsafe {
-            WSAIoctl(
-                socket as usize,
-                SIO_AF_UNIX_GETPEERPID,
-                std::ptr::null(),
-                0,
-                (&mut pid as *mut u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-                &mut returned,
-                std::ptr::null_mut(),
-                None,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if pid == 0 {
-            return Err(io::Error::other("AF_UNIX 对端没有进程号"));
-        }
-        Ok(pid)
     }
 
     pub fn process_executable(pid: u32) -> io::Result<PathBuf> {

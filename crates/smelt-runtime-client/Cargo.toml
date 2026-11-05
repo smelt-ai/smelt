@@ -30,17 +30,6 @@ rust-embed = { version = "8", features = ["debug-embed"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Windows 上 std 没有 UnixStream，系统 AF_UNIX 由 stream/windows.rs 自己包：建连、
-# 读写、accept 的等待都走 AFD poll，要 windows-sys 的这些 API。
+# Windows 上连守护走命名管道（smelt-sys 的 named_pipe），不用系统的 AF_UNIX，见 stream/windows.rs。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Wdk_Foundation",
-    "Wdk_Storage_FileSystem",
-    "Wdk_System_IO",
-    "Win32_Foundation",
-    "Win32_Networking_WinSock",
-    "Win32_Security",
-    "Win32_Storage_FileSystem",
-    "Win32_System_IO",
-    "Win32_System_Threading",
-] }
+smelt-sys = { path = "../smelt-sys" }

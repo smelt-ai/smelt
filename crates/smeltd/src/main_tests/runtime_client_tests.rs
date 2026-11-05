@@ -31,7 +31,7 @@ fn in_process_runtime_as(principal: Principal) -> RuntimeClient {
         event_hub: new_event_hub(),
     };
     RuntimeClient::new(move || {
-        let (client, server_end) = UnixStream::pair()?;
+        let (client, server_end) = RuntimeStream::pair()?;
         let context = server.context(principal.clone());
         thread::spawn(move || handle_conn(server_end, context));
         Ok(client)

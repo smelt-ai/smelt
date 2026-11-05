@@ -114,8 +114,8 @@ fn attach_mobile_watcher(
     sessions: &Sessions,
     cols: u16,
     rows: u16,
-) -> (thread::JoinHandle<()>, UnixStream, BufReader<UnixStream>) {
-    let (server, client) = UnixStream::pair().unwrap();
+) -> (thread::JoinHandle<()>, RuntimeStream, BufReader<RuntimeStream>) {
+    let (server, client) = RuntimeStream::pair().unwrap();
     let sessions_for_watch = Arc::clone(sessions);
     let watch = thread::spawn(move || {
         let reader = BufReader::new(server.try_clone().unwrap());
@@ -139,7 +139,7 @@ fn attach_mobile_watcher(
 }
 
 /// 数一段时间内 watcher 收到的 `W`（= 子进程收到的 SIGWINCH 次数）。
-fn count_winch(reader: &mut BufReader<UnixStream>, client: &UnixStream, window: Duration) -> usize {
+fn count_winch(reader: &mut BufReader<RuntimeStream>, client: &RuntimeStream, window: Duration) -> usize {
     client
         .set_read_timeout(Some(Duration::from_millis(50)))
         .unwrap();

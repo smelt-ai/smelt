@@ -326,7 +326,7 @@ pub(super) fn static_cert_hash(path: &Path) -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
+pub(crate) fn system_peer_identity(conn: &RuntimeStream) -> Result<PeerIdentity, String> {
     const LOCAL_PEERPID: libc::c_int = 0x002;
     const LOCAL_PEERTOKEN: libc::c_int = 0x006;
 
@@ -413,7 +413,7 @@ pub(super) fn process_executable(pid: u32) -> Result<PathBuf, String> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-pub(crate) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
+pub(crate) fn system_peer_identity(conn: &RuntimeStream) -> Result<PeerIdentity, String> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -448,10 +448,11 @@ pub(super) fn process_executable(pid: u32) -> Result<PathBuf, String> {
         .map_err(|error| format!("cannot determine executable for Unix peer pid {pid}: {error}"))
 }
 
+/// Windows：守护接受的是命名管道，pid 来自 `GetNamedPipeClientProcessId`。
 #[cfg(windows)]
-pub(super) fn system_peer_identity(conn: &UnixStream) -> Result<PeerIdentity, String> {
-    use std::os::windows::io::AsRawSocket;
-    let pid = smelt_sys::process::af_unix_peer_pid(conn.as_raw_socket())
+pub(super) fn system_peer_identity(conn: &RuntimeStream) -> Result<PeerIdentity, String> {
+    let pid = conn
+        .peer_pid()
         .map_err(|error| format!("cannot determine Windows peer pid: {error}"))?;
     windows_peer_identity(pid)
 }
@@ -487,39 +488,19 @@ pub(super) fn process_executable(_pid: u32) -> Result<PathBuf, String> {
     target_os = "android",
     windows
 )))]
-pub(super) fn system_peer_identity(_conn: &UnixStream) -> Result<PeerIdentity, String> {
+pub(super) fn system_peer_identity(_conn: &RuntimeStream) -> Result<PeerIdentity, String> {
     Err("first-party Unix peer authentication is unsupported on this platform".to_string())
 }
 
-/// 从一条客户端连接取出对端身份。Unix 仍走原来的 getsockopt；Windows 管道走
-/// `GetNamedPipeClientProcessId`。
-/// 连接处理函数用它取对端，不关心底下是 AF_UNIX 还是命名管道。
+/// 从一条客户端连接取出对端身份：Unix 走 getsockopt，Windows 走命名管道的对端 pid。
+/// 测试里可以换成固定的身份。
 pub(crate) trait PeerSource {
     fn peer_identity(&self) -> Result<PeerIdentity, String>;
 }
 
-impl PeerSource for UnixStream {
+impl PeerSource for RuntimeStream {
     fn peer_identity(&self) -> Result<PeerIdentity, String> {
         system_peer_identity(self)
-    }
-}
-
-impl PeerSource for crate::ClientConn {
-    fn peer_identity(&self) -> Result<PeerIdentity, String> {
-        peer_identity_of(self)
-    }
-}
-
-pub(crate) fn peer_identity_of(conn: &crate::ClientConn) -> Result<PeerIdentity, String> {
-    match conn {
-        crate::ClientConn::Unix(stream) => system_peer_identity(stream),
-        #[cfg(windows)]
-        crate::ClientConn::Pipe { stream, .. } => {
-            let pid = stream
-                .client_pid()
-                .map_err(|error| format!("cannot determine named pipe peer pid: {error}"))?;
-            windows_peer_identity(pid)
-        }
     }
 }
 
@@ -609,7 +590,7 @@ pub(super) fn authenticate_event_client_without_codesign(
 
 /// 本机控制连接的对端必须是经过签名校验的桌面进程（`smelt`）。
 /// 事件订阅那条路要客户端自报 kind；采纳/删除没有这帧，只认内核看到的对端身份。
-/// AF_UNIX 和 Windows 命名管道都走 [`PeerSource`]，管道不会被当成守护自己。
+/// 对端身份走 [`PeerSource`]；对端是守护自己时在第一方校验里拒绝。
 pub(crate) fn authenticate_first_party_peer(
     conn: &impl PeerSource,
 ) -> Result<FirstPartyClientKind, String> {

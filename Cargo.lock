@@ -10951,9 +10951,9 @@ dependencies = [
  "similar 3.2.0",
  "smelt-event-protocol",
  "smelt-paths",
+ "smelt-sys",
  "tungstenite",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -80,10 +80,10 @@ fn failed_headless_upgrades_back_off_up_to_thirty_minutes() {
 }
 
 #[test]
-fn failed_pipe_accepts_back_off_up_to_five_seconds() {
-    assert_eq!(pipe_accept_retry_delay(0), Duration::from_millis(50));
-    assert_eq!(pipe_accept_retry_delay(3), Duration::from_millis(400));
-    assert_eq!(pipe_accept_retry_delay(6), Duration::from_millis(3_200));
-    assert_eq!(pipe_accept_retry_delay(7), Duration::from_secs(5));
-    assert_eq!(pipe_accept_retry_delay(u32::MAX), Duration::from_secs(5));
+fn failed_accepts_back_off_up_to_five_seconds() {
+    assert_eq!(accept_retry_delay(0), Duration::from_millis(50));
+    assert_eq!(accept_retry_delay(3), Duration::from_millis(400));
+    assert_eq!(accept_retry_delay(6), Duration::from_millis(3_200));
+    assert_eq!(accept_retry_delay(7), Duration::from_secs(5));
+    assert_eq!(accept_retry_delay(u32::MAX), Duration::from_secs(5));
 }

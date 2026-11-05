@@ -1,27 +1,34 @@
-//! Windows 命名管道。Bun / Node 的 `net.connect(path)` 在 Windows 上连的是
-//! `\\.\pipe\...`，不是文件系统上的 AF_UNIX。交给 Bun 的 `SMELT_SOCK` 和后台
-//! 任务套接字都用这里，不把管道桥接进 AF_UNIX——桥的对端会变成 smeltd 自己，
-//! 事件鉴权会拒绝。
+//! Windows 命名管道：本机进程之间的连接都走它。桌面、命令行、`smelt-notify` 连守护，
+//! Bun / Node 的 `net.connect(path)`（在 Windows 上连的就是 `\\.\pipe\...`），后台任务
+//! 套接字，都是这里的管道。不用系统的 AF_UNIX：afunix.sys 在 Windows 10 上有内核里的
+//! 释放后再用，桌面反复建连、断开时整机蓝屏（0x3B，#251）。
 //!
-//! 管道拒绝远程客户端，DACL 只给当前用户。接受之后用
-//! `GetNamedPipeClientProcessId` 拿对端 pid。
+//! 管道拒绝远程客户端，DACL 只给当前用户。对端 pid 用 `GetNamedPipeClientProcessId`
+//! （服务端）/ `GetNamedPipeServerProcessId`（客户端）拿。
 //!
-//! 读写带 `FILE_FLAG_OVERLAPPED`。每次操作自己的手动重置事件，超时靠
-//! `WaitForSingleObject`。不切换 `PIPE_NOWAIT`：那个模式挂在管道实例上，
-//! `DuplicateHandle` 出来的句柄共享同一份，一边为了写超时改成不等待，
-//! 另一边正在进行的 `ReadFile` 会立刻以 `ERROR_NO_DATA` 失败。
+//! 读写带 `FILE_FLAG_OVERLAPPED`。每次操作自己的手动重置事件，和本地 `shutdown` 的事件、
+//! 读写超时一起等。不切换 `PIPE_NOWAIT`：那个模式挂在管道实例上，同一实例上的读写共享
+//! 同一份，一边为了写超时改成不等待，另一边正在进行的 `ReadFile` 会立刻以
+//! `ERROR_NO_DATA` 失败。
+//!
+//! [`PipeStream`] 的语义照 std 的 `UnixStream`：`try_clone` 出来的各份共用一个句柄和
+//! 读写超时、非阻塞、shutdown 状态；本地 `shutdown` 叫醒别的线程里等着的读写。管道没有
+//! 半关闭，`shutdown(Both)` 等手上的读写都退出就关句柄：对端读完已经写进去的数据，再读到
+//! EOF，和套接字的 FIN 一样。不用 `DisconnectNamedPipe`，它会把对端还没读的数据丢掉。
 
+use std::fmt;
 use std::io::{self, Read, Write};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::net::Shutdown;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA,
-    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED,
+    ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     ACL_REVISION, AddAccessAllowedAce, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
@@ -33,7 +40,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
@@ -64,8 +71,9 @@ pub fn user_pipe_path(tag: &str) -> io::Result<String> {
     Ok(format!(r"\\.\pipe\smelt-{key}-{tag}"))
 }
 
-/// 守护给 Bun / Pi 的命名管道名。和 AF_UNIX 的 `smeltd.sock` 一一对应：
-/// 管道名只看用户 SID 的话，同一用户下不同 `SMELT_HOME` 的守护会抢同一个名字。
+/// 守护监听的命名管道名，Rust 客户端和 Bun / Pi 连的都是它。和 `smeltd.sock` 这个路径
+/// 一一对应（Windows 上没有这个文件，路径只用来起名）：管道名只看用户 SID 的话，同一用户
+/// 下不同 `SMELT_HOME` 的守护会抢同一个名字。
 pub fn daemon_pipe_path(sock: &Path) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     // Windows 路径不区分大小写，同一个目录换个写法也得到同一个名字。
@@ -75,43 +83,85 @@ pub fn daemon_pipe_path(sock: &Path) -> io::Result<String> {
 }
 
 pub struct PipeListener {
+    shared: Arc<ListenerShared>,
+}
+
+struct ListenerShared {
     name: String,
     /// 已经建好、正在等客户端的那一个实例。`bind` 时就放上，避免调用方一返回
     /// 客户端就 `ERROR_FILE_NOT_FOUND`。
     pending: Mutex<Option<OwnedHandle>>,
+    stop: Signal,
+}
+
+/// 叫停一个 [`PipeListener`]：关掉在等客户端的实例，之后不再建新的，新客户端连不上。
+/// 已经接受的连接不受影响。
+#[derive(Clone)]
+pub struct PipeListenerStop(Arc<ListenerShared>);
+
+impl PipeListenerStop {
+    pub fn stop(&self) {
+        // 先置标志再收走实例：`ensure_pending` 在锁里看标志，不会在这之后再建一个。
+        self.0.stop.set();
+        drop(lock(&self.0.pending).take());
+    }
 }
 
 impl PipeListener {
+    /// 这个名字已经有人在听（或者还有没关掉的实例）就失败，不悄悄挂成同一管道的另一个
+    /// 实例，否则客户端会随机连到另一个进程。
     pub fn bind(name: impl Into<String>) -> io::Result<Self> {
-        let name = name.into();
+        Self::bind_with(name.into(), true)
+    }
+
+    /// 接手这个名字：已有实例时照样建，成为同一管道的又一个实例。
+    ///
+    /// 只给另有单实例保证的调用方用（守护握着实例锁）。前任退出之后，它的客户端还没关掉
+    /// 的那几端会让名字继续存在，[`bind`](Self::bind) 会一直被拒，直到那些客户端都关掉。
+    pub fn bind_taking_over(name: impl Into<String>) -> io::Result<Self> {
+        Self::bind_with(name.into(), false)
+    }
+
+    fn bind_with(name: String, first: bool) -> io::Result<Self> {
         if !is_pipe_path(&name) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("命名管道路径必须以 \\\\.\\pipe\\ 开头：{name}"),
             ));
         }
-        let pending = create_instance(&name, true)?;
+        let pending = create_instance(&name, first)?;
         Ok(Self {
-            name,
-            pending: Mutex::new(Some(pending)),
+            shared: Arc::new(ListenerShared {
+                name,
+                pending: Mutex::new(Some(pending)),
+                stop: Signal::new()?,
+            }),
         })
     }
 
     pub fn name(&self) -> &str {
-        &self.name
+        &self.shared.name
     }
 
-    /// 阻塞到有客户端连上。返回已连接的流之前，先建好下一个实例。
+    /// 别的线程用它叫停监听，见 [`PipeListenerStop`]。
+    pub fn stopper(&self) -> PipeListenerStop {
+        PipeListenerStop(Arc::clone(&self.shared))
+    }
+
+    /// 阻塞到有客户端连上。返回已连接的流之前，先建好下一个实例。叫停之后报
+    /// `ConnectionAborted`。
     pub fn accept(&self) -> io::Result<PipeStream> {
-        let current = {
-            let mut slot = self.pending.lock().unwrap_or_else(|error| error.into_inner());
-            match slot.take() {
-                Some(handle) => handle,
-                None => create_instance(&self.name, false)?,
-            }
+        let shared = &self.shared;
+        if shared.stop.is_set() {
+            return Err(stopped());
+        }
+        let current = match lock(&shared.pending).take() {
+            Some(handle) => handle,
+            None => create_instance(&shared.name, false)?,
         };
-        let connected = match wait_for_client(current) {
-            Ok(handle) => handle,
+        let connected = match wait_for_client(current, &shared.stop) {
+            Ok(Some(handle)) => handle,
+            Ok(None) => return Err(stopped()),
             Err(error) => {
                 self.ensure_pending();
                 return Err(error);
@@ -120,30 +170,94 @@ impl PipeListener {
         // 客户端已经占用了这一实例。下一个必须在把流交出去之前就存在，
         // 否则紧跟着来的连接会落到「没有实例」。
         self.ensure_pending();
-        Ok(PipeStream::from_handle(connected))
+        PipeStream::from_handle(connected, End::Server)
+    }
+
+    /// 一个个接受进来的连接，叫停之后结束。
+    pub fn incoming(&self) -> impl Iterator<Item = io::Result<PipeStream>> + '_ {
+        std::iter::from_fn(move || match self.accept() {
+            Err(_) if self.shared.stop.is_set() => None,
+            result => Some(result),
+        })
     }
 
     fn ensure_pending(&self) {
-        let mut slot = self.pending.lock().unwrap_or_else(|error| error.into_inner());
+        let mut slot = lock(&self.shared.pending);
         if slot.is_none()
-            && let Ok(handle) = create_instance(&self.name, false)
+            && !self.shared.stop.is_set()
+            && let Ok(handle) = create_instance(&self.shared.name, false)
         {
             *slot = Some(handle);
         }
     }
 }
 
-fn timeout_of(slot: &Mutex<Option<Duration>>) -> Option<Duration> {
-    *slot.lock().unwrap_or_else(|error| error.into_inner())
+impl fmt::Debug for PipeListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PipeListener")
+            .field("name", &self.shared.name)
+            .finish()
+    }
 }
 
+fn stopped() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, "命名管道监听已停止")
+}
+
+/// 一条管道连接。`try_clone` 出来的各份共用同一个句柄和设置，见模块说明。
 pub struct PipeStream {
-    handle: OwnedHandle,
-    /// 和 `UnixStream` 一样经 `&self` 设：两边的调用方写法一致。只影响这一份句柄。
+    shared: Arc<StreamShared>,
+}
+
+struct StreamShared {
+    handle: Mutex<HandleSlot>,
+    end: End,
     read_timeout: Mutex<Option<Duration>>,
     write_timeout: Mutex<Option<Duration>>,
-    /// 只影响这一份句柄之后的操作。不改内核里的管道模式。
     nonblocking: AtomicBool,
+    read_shut: Signal,
+    write_shut: Signal,
+}
+
+struct HandleSlot {
+    /// `shutdown(Both)` 之后、手上的读写都退出时关掉，变成 `None`。
+    handle: Option<OwnedHandle>,
+    /// 正在用句柄的读写数。不为零时不关句柄，免得别的线程拿着的句柄值被系统复用。
+    users: usize,
+    closing: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum End {
+    /// 监听方接受的那一端。
+    Server,
+    /// `CreateFile` 连上去的那一端。
+    Client,
+}
+
+/// 借着句柄做一次读写。活着时句柄不会被关掉。
+struct HandleUse<'a> {
+    shared: &'a StreamShared,
+    raw: HANDLE,
+}
+
+impl Drop for HandleUse<'_> {
+    fn drop(&mut self) {
+        let mut slot = lock(&self.shared.handle);
+        slot.users -= 1;
+        if slot.closing && slot.users == 0 {
+            drop(slot.handle.take());
+        }
+    }
+}
+
+impl StreamShared {
+    fn use_handle(&self) -> Option<HandleUse<'_>> {
+        let mut slot = lock(&self.handle);
+        let raw = slot.handle.as_ref()?.as_raw_handle();
+        slot.users += 1;
+        Some(HandleUse { shared: self, raw })
+    }
 }
 
 impl PipeStream {
@@ -164,7 +278,10 @@ impl PipeStream {
                 )
             };
             if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
-                return Ok(Self::from_handle(unsafe { OwnedHandle::from_raw_handle(handle) }));
+                return Self::from_handle(
+                    unsafe { OwnedHandle::from_raw_handle(handle) },
+                    End::Client,
+                );
             }
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
@@ -172,87 +289,105 @@ impl PipeStream {
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "命名管道正忙",
-                ));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "命名管道正忙"));
             }
             let millis = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX - 1).max(1);
             let waited = unsafe { WaitNamedPipeW(wide.as_ptr(), millis) };
             if waited == 0 && std::time::Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "命名管道正忙",
-                ));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "命名管道正忙"));
             }
         }
     }
 
-    fn from_handle(handle: OwnedHandle) -> Self {
-        Self {
-            handle,
-            read_timeout: Mutex::new(None),
-            write_timeout: Mutex::new(None),
-            nonblocking: AtomicBool::new(false),
-        }
-    }
-
-    pub fn try_clone(&self) -> io::Result<Self> {
-        let mut duplicated: HANDLE = std::ptr::null_mut();
-        let ok = unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                self.handle.as_raw_handle(),
-                GetCurrentProcess(),
-                &mut duplicated,
-                0,
-                0,
-                0x0000_0002,
-            )
-        };
-        if ok == 0 || duplicated.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let cloned = Self::from_handle(unsafe { OwnedHandle::from_raw_handle(duplicated) });
-        cloned
-            .nonblocking
-            .store(self.nonblocking.load(Ordering::Relaxed), Ordering::Relaxed);
+    fn from_handle(handle: OwnedHandle, end: End) -> io::Result<Self> {
         Ok(Self {
-            read_timeout: Mutex::new(timeout_of(&self.read_timeout)),
-            write_timeout: Mutex::new(timeout_of(&self.write_timeout)),
-            ..cloned
+            shared: Arc::new(StreamShared {
+                handle: Mutex::new(HandleSlot {
+                    handle: Some(handle),
+                    users: 0,
+                    closing: false,
+                }),
+                end,
+                read_timeout: Mutex::new(None),
+                write_timeout: Mutex::new(None),
+                nonblocking: AtomicBool::new(false),
+                read_shut: Signal::new()?,
+                write_shut: Signal::new()?,
+            }),
         })
     }
 
-    /// 之后没有单独设超时的读写立刻返回 `WouldBlock`。不改管道实例的等待模式，
-    /// 所以不会碰到同一实例上另一份句柄正在进行的读写。
+    /// 和这一份共用句柄与设置的另一份，见模块说明。
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    /// `Read`：之后的读都是 EOF，等着的读立刻返回。只影响本端。
+    /// `Both`：读写都停下，等手上的读写退出就关句柄，对端读完数据后看到 EOF。
+    /// `Write`：管道没有半关闭，报 `Unsupported`。
+    pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        match how {
+            Shutdown::Read => {
+                self.shared.read_shut.set();
+                Ok(())
+            }
+            Shutdown::Write => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "命名管道不能只关写方向",
+            )),
+            Shutdown::Both => {
+                self.shared.read_shut.set();
+                self.shared.write_shut.set();
+                let mut slot = lock(&self.shared.handle);
+                slot.closing = true;
+                if slot.users == 0 {
+                    drop(slot.handle.take());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// 为真时没有可读的数据、写不进去就直接报 `WouldBlock`。只改本进程里的语义，
+    /// 不改管道实例的等待模式，所以不会碰到正在进行的读写。
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        self.nonblocking.store(nonblocking, Ordering::Relaxed);
+        self.shared.nonblocking.store(nonblocking, Ordering::SeqCst);
         Ok(())
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        *self.read_timeout.lock().unwrap_or_else(|error| error.into_inner()) = timeout;
+        *lock(&self.shared.read_timeout) = checked_timeout(timeout)?;
         Ok(())
     }
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        *self.write_timeout.lock().unwrap_or_else(|error| error.into_inner()) = timeout;
+        *lock(&self.shared.write_timeout) = checked_timeout(timeout)?;
         Ok(())
     }
 
-    /// 断开服务端这一实例。堵在另一份句柄上的重叠读写会结束，读端看到管道断开。
-    pub fn disconnect(&self) -> io::Result<()> {
-        if unsafe { DisconnectNamedPipe(self.handle.as_raw_handle()) } == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+    pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(*lock(&self.shared.read_timeout))
     }
 
-    pub fn client_pid(&self) -> io::Result<u32> {
+    pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(*lock(&self.shared.write_timeout))
+    }
+
+    /// 对端进程号。
+    pub fn peer_pid(&self) -> io::Result<u32> {
+        let Some(handle) = self.shared.use_handle() else {
+            return Err(io::ErrorKind::NotConnected.into());
+        };
         let mut pid = 0u32;
-        if unsafe { GetNamedPipeClientProcessId(self.handle.as_raw_handle(), &mut pid) } == 0 {
+        let ok = unsafe {
+            match self.shared.end {
+                End::Server => GetNamedPipeClientProcessId(handle.raw, &mut pid),
+                End::Client => GetNamedPipeServerProcessId(handle.raw, &mut pid),
+            }
+        };
+        if ok == 0 {
             return Err(io::Error::last_os_error());
         }
         if pid == 0 {
@@ -261,56 +396,138 @@ impl PipeStream {
         Ok(pid)
     }
 
-    fn wait_for(&self, timeout: Option<Duration>) -> Wait {
-        if let Some(timeout) = timeout {
-            Wait::Budget(timeout)
-        } else if self.nonblocking.load(Ordering::Relaxed) {
+    fn wait_for(&self, timeout: &Mutex<Option<Duration>>) -> Wait {
+        if self.shared.nonblocking.load(Ordering::SeqCst) {
             Wait::Poll
+        } else if let Some(timeout) = *lock(timeout) {
+            Wait::Budget(timeout)
         } else {
             Wait::Forever
         }
     }
+
+    fn read_bytes(&self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || self.shared.read_shut.is_set() {
+            return Ok(0);
+        }
+        let Some(handle) = self.shared.use_handle() else {
+            return Ok(0);
+        };
+        let wait = self.wait_for(&self.shared.read_timeout);
+        match overlapped_transfer(
+            handle.raw,
+            buf.as_mut_ptr(),
+            buf.len(),
+            false,
+            wait,
+            &self.shared.read_shut,
+        )? {
+            Transfer::Done(read) => Ok(read),
+            Transfer::Shut => Ok(0),
+        }
+    }
+
+    fn write_bytes(&self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.shared.write_shut.is_set() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let Some(handle) = self.shared.use_handle() else {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        };
+        let wait = self.wait_for(&self.shared.write_timeout);
+        match overlapped_transfer(
+            handle.raw,
+            buf.as_ptr() as *mut u8,
+            buf.len(),
+            true,
+            wait,
+            &self.shared.write_shut,
+        )? {
+            Transfer::Done(written) => Ok(written),
+            Transfer::Shut => Err(io::ErrorKind::BrokenPipe.into()),
+        }
+    }
 }
 
-impl AsRawHandle for PipeStream {
-    fn as_raw_handle(&self) -> RawHandle {
-        self.handle.as_raw_handle()
+impl fmt::Debug for PipeStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PipeStream")
+            .field("end", &self.shared.end)
+            .finish()
     }
 }
 
 impl Read for PipeStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let wait = self.wait_for(timeout_of(&self.read_timeout));
-        overlapped_transfer(
-            self.handle.as_raw_handle(),
-            buf.as_mut_ptr(),
-            buf.len(),
-            false,
-            wait,
-        )
+        self.read_bytes(buf)
+    }
+}
+
+impl Read for &PipeStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_bytes(buf)
     }
 }
 
 impl Write for PipeStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let wait = self.wait_for(timeout_of(&self.write_timeout));
-        overlapped_transfer(
-            self.handle.as_raw_handle(),
-            buf.as_ptr() as *mut u8,
-            buf.len(),
-            true,
-            wait,
-        )
+        self.write_bytes(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+impl Write for &PipeStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.write_bytes(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn checked_timeout(timeout: Option<Duration>) -> io::Result<Option<Duration>> {
+    if timeout == Some(Duration::ZERO) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot set a 0 duration timeout",
+        ));
+    }
+    Ok(timeout)
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// 置位后不再复位的信号：标志给循环开头看，事件和读写一起等。
+struct Signal {
+    set: AtomicBool,
+    event: ManualEvent,
+}
+
+impl Signal {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            set: AtomicBool::new(false),
+            event: ManualEvent::new()?,
+        })
+    }
+
+    fn set(&self) {
+        // 先置标志再置事件：看漏了标志的等待也会被事件叫醒。
+        self.set.store(true, Ordering::SeqCst);
+        unsafe { SetEvent(self.event.raw()) };
+    }
+
+    fn is_set(&self) -> bool {
+        self.set.load(Ordering::SeqCst)
     }
 }
 
@@ -344,11 +561,11 @@ pub enum Waitable<'a> {
 /// 阻塞到其中一个就绪，或者超时，返回每一个是否就绪。不取走管道里的数据。
 ///
 /// 管道上挂一个零字节的重叠读：有数据或对端关掉时它完成。返回前没完成的都取消并等它结束，
-/// 不会留下一个还挂在栈外缓冲上的读。
+/// 不会留下一个还挂在栈外缓冲上的读。本端已经 shutdown 的管道直接算就绪，读会报出 EOF。
 pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io::Result<Vec<bool>> {
-    struct ZeroRead {
+    struct ZeroRead<'a> {
         index: usize,
-        handle: HANDLE,
+        handle: HandleUse<'a>,
         event: ManualEvent,
         overlapped: OVERLAPPED,
         byte: u8,
@@ -358,10 +575,19 @@ pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io:
     let mut reads = Vec::new();
     for (index, source) in sources.iter().enumerate() {
         if let Waitable::Pipe(pipe) = source {
+            let handle = if pipe.shared.read_shut.is_set() {
+                None
+            } else {
+                pipe.shared.use_handle()
+            };
+            let Some(handle) = handle else {
+                ready[index] = true;
+                continue;
+            };
             let event = ManualEvent::new()?;
             reads.push(Box::new(ZeroRead {
                 index,
-                handle: pipe.handle.as_raw_handle(),
+                handle,
                 overlapped: OVERLAPPED {
                     hEvent: event.raw(),
                     ..OVERLAPPED::default()
@@ -375,7 +601,7 @@ pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io:
     for read in &mut reads {
         let ok = unsafe {
             ReadFile(
-                read.handle,
+                read.handle.raw,
                 &mut read.byte,
                 0,
                 std::ptr::null_mut(),
@@ -413,9 +639,11 @@ pub fn wait_readable(sources: &[Waitable<'_>], timeout: Option<Duration>) -> io:
         if ready[read.index] {
             continue;
         }
-        unsafe { CancelIoEx(read.handle, &read.overlapped) };
+        unsafe { CancelIoEx(read.handle.raw, &read.overlapped) };
         let mut transferred = 0u32;
-        let ok = unsafe { GetOverlappedResult(read.handle, &read.overlapped, &mut transferred, 1) };
+        let ok = unsafe {
+            GetOverlappedResult(read.handle.raw, &read.overlapped, &mut transferred, 1)
+        };
         ready[read.index] =
             ok != 0 || unsafe { GetLastError() } != ERROR_OPERATION_ABORTED;
     }
@@ -456,9 +684,8 @@ pub fn output_pipe() -> io::Result<(PipeStream, OwnedHandle)> {
     if theirs.is_null() || theirs == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
-    Ok((PipeStream::from_handle(ours), unsafe {
-        OwnedHandle::from_raw_handle(theirs)
-    }))
+    let theirs = unsafe { OwnedHandle::from_raw_handle(theirs) };
+    Ok((PipeStream::from_handle(ours, End::Server)?, theirs))
 }
 
 enum Wait {
@@ -467,13 +694,20 @@ enum Wait {
     Poll,
 }
 
+enum Transfer {
+    Done(usize),
+    /// 等着的时候本地 shutdown 了这个方向，这次读写取消掉了。
+    Shut,
+}
+
 fn overlapped_transfer(
     handle: HANDLE,
     buf: *mut u8,
     len: usize,
     write: bool,
     wait: Wait,
-) -> io::Result<usize> {
+    shut: &Signal,
+) -> io::Result<Transfer> {
     let len = u32::try_from(len).unwrap_or(u32::MAX);
     let event = ManualEvent::new()?;
     let mut overlapped = OVERLAPPED {
@@ -489,41 +723,50 @@ fn overlapped_transfer(
         }
     };
     if ok != 0 {
-        return Ok(transferred as usize);
+        return Ok(Transfer::Done(transferred as usize));
     }
     let error = unsafe { GetLastError() };
     if error != ERROR_IO_PENDING {
-        return map_completed_error(error, write);
+        return map_completed_error(error, write).map(Transfer::Done);
     }
     let millis = match wait {
         Wait::Forever => INFINITE,
         Wait::Budget(duration) => duration_millis(duration),
         Wait::Poll => 0,
     };
-    let status = unsafe { WaitForSingleObject(event.raw(), millis) };
+    let handles = [event.raw(), shut.event.raw()];
+    // 同时就绪时返回下标小的，即读写完成。
+    let status = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, millis) };
     if status == WAIT_OBJECT_0 {
-        return overlapped_result(handle, &overlapped, write, false);
+        return overlapped_result(handle, &overlapped, write, false).map(Transfer::Done);
     }
-    // 超时或等待本身失败。缓冲和 OVERLAPPED 都在调用方的栈上，返回前取消并等这次读写真的结束。
-    let wait_error = (status != WAIT_TIMEOUT).then(io::Error::last_os_error);
+    let interrupted = status == WAIT_OBJECT_0 + 1;
+    // 超时、被 shutdown 叫醒，或等待本身失败。缓冲和 OVERLAPPED 都在调用方的栈上，
+    // 返回前取消并等这次读写真的结束。
+    let wait_error = (!interrupted && status != WAIT_TIMEOUT).then(io::Error::last_os_error);
     unsafe { CancelIoEx(handle, &overlapped) };
     match overlapped_result(handle, &overlapped, write, true) {
-        Ok(transferred) => Ok(transferred),
+        // 取消之前已经完成：数据不能丢。
+        Ok(transferred) => Ok(Transfer::Done(transferred)),
         Err(error) if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) => {
-            Err(wait_error.unwrap_or_else(|| {
-                if matches!(wait, Wait::Poll) {
-                    io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
-                } else {
-                    io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        if write {
-                            "命名管道写入超时"
-                        } else {
-                            "命名管道读取超时"
-                        },
-                    )
-                }
-            }))
+            if let Some(error) = wait_error {
+                return Err(error);
+            }
+            if interrupted {
+                return Ok(Transfer::Shut);
+            }
+            Err(if matches!(wait, Wait::Poll) {
+                io::Error::new(io::ErrorKind::WouldBlock, "命名管道没有数据")
+            } else {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    if write {
+                        "命名管道写入超时"
+                    } else {
+                        "命名管道读取超时"
+                    },
+                )
+            })
         }
         Err(error) => Err(error),
     }
@@ -587,7 +830,8 @@ impl Drop for ManualEvent {
     }
 }
 
-fn wait_for_client(handle: OwnedHandle) -> io::Result<OwnedHandle> {
+/// 等客户端连上这一实例。叫停了返回 `None`，实例随之关掉。
+fn wait_for_client(handle: OwnedHandle, stop: &Signal) -> io::Result<Option<OwnedHandle>> {
     let event = ManualEvent::new()?;
     let mut overlapped = OVERLAPPED {
         hEvent: event.raw(),
@@ -595,20 +839,26 @@ fn wait_for_client(handle: OwnedHandle) -> io::Result<OwnedHandle> {
     };
     let connected = unsafe { ConnectNamedPipe(handle.as_raw_handle(), &mut overlapped) };
     if connected != 0 {
-        return Ok(handle);
+        return Ok(Some(handle));
     }
     let error = unsafe { GetLastError() };
     if error == ERROR_PIPE_CONNECTED {
-        return Ok(handle);
+        return Ok(Some(handle));
     }
     if error != ERROR_IO_PENDING {
         return Err(io::Error::from_raw_os_error(error as i32));
     }
-    let status = unsafe { WaitForSingleObject(event.raw(), INFINITE) };
+    let handles = [event.raw(), stop.event.raw()];
+    let status = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
     if status != WAIT_OBJECT_0 {
+        let wait_error = (status != WAIT_OBJECT_0 + 1).then(io::Error::last_os_error);
         unsafe { CancelIoEx(handle.as_raw_handle(), &overlapped) };
         unsafe { WaitForSingleObject(event.raw(), INFINITE) };
-        return Err(io::Error::last_os_error());
+        // 叫停时恰好连上的客户端也一起断开：监听已经停了，不再接新连接。
+        return match wait_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        };
     }
     let mut transferred = 0u32;
     let ok = unsafe {
@@ -620,7 +870,7 @@ fn wait_for_client(handle: OwnedHandle) -> io::Result<OwnedHandle> {
             return Err(io::Error::from_raw_os_error(error as i32));
         }
     }
-    Ok(handle)
+    Ok(Some(handle))
 }
 
 /// `FILE_FLAG_FIRST_PIPE_INSTANCE`：这个名字已经有人在听时建不出来（拒绝访问）。
@@ -734,7 +984,8 @@ impl UserOnlySecurity {
     }
 }
 
-fn is_pipe_path(name: &str) -> bool {
+/// `\\.\pipe\...` 或 `\\?\pipe\...` 形式的名字。
+pub fn is_pipe_path(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() >= 9
         && bytes[0] == b'\\'
@@ -753,6 +1004,23 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+
+    const ARRIVES: Duration = Duration::from_secs(5);
+
+    fn test_pipe_name(tag: &str) -> String {
+        user_pipe_path(&format!("test-{tag}-{}", uuid::Uuid::new_v4().simple())).unwrap()
+    }
+
+    /// 监听方和客户端各一端，已经连好。
+    fn connected_pair(tag: &str) -> (PipeListener, PipeStream, PipeStream) {
+        let listener = PipeListener::bind(test_pipe_name(tag)).unwrap();
+        let client = PipeStream::connect(listener.name()).unwrap();
+        let server = listener.accept().unwrap();
+        server.set_read_timeout(Some(ARRIVES)).unwrap();
+        client.set_read_timeout(Some(ARRIVES)).unwrap();
+        (listener, server, client)
+    }
 
     #[test]
     fn daemon_pipe_follows_the_socket_path() {
@@ -766,9 +1034,115 @@ mod tests {
     /// 同一个名字只能有一个监听方。第二个 `bind` 要失败，不能悄悄变成同一管道的另一个实例。
     #[test]
     fn second_listener_on_the_same_name_is_refused() {
-        let name = user_pipe_path(&format!("test-first-{}", uuid::Uuid::new_v4().simple())).unwrap();
+        let name = test_pipe_name("first");
         let _first = PipeListener::bind(&name).unwrap();
         assert!(PipeListener::bind(&name).is_err());
+    }
+
+    /// 前任的客户端还握着自己那端时，名字还在，接手的监听照样建得出来、接得到新客户端。
+    #[test]
+    fn taking_over_works_while_a_client_of_the_old_listener_is_still_open() {
+        let name = test_pipe_name("takeover");
+        let old = PipeListener::bind(&name).unwrap();
+        let lingering = PipeStream::connect(&name).unwrap();
+        let accepted = old.accept().unwrap();
+        drop(accepted);
+        drop(old);
+
+        let new = PipeListener::bind_taking_over(&name).unwrap();
+        let client = PipeStream::connect(&name).unwrap();
+        let server = new.accept().unwrap();
+        (&client).write_all(b"z").unwrap();
+        let mut byte = [0u8; 1];
+        server.set_read_timeout(Some(ARRIVES)).unwrap();
+        (&server).read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"z");
+        drop(lingering);
+    }
+
+    /// 叫停之后等着的 accept 返回，`incoming` 结束，新客户端连不上。
+    #[test]
+    fn stopping_a_listener_ends_incoming_and_refuses_new_clients() {
+        let listener = PipeListener::bind(test_pipe_name("stop")).unwrap();
+        let name = listener.name().to_string();
+        let stop = listener.stopper();
+        let accepting = thread::spawn(move || listener.incoming().count());
+        thread::sleep(Duration::from_millis(50));
+        stop.stop();
+        assert_eq!(accepting.join().unwrap(), 0);
+        assert!(PipeStream::connect(&name).is_err());
+    }
+
+    /// 两端都能拿到对方的进程号。同一进程里就是自己。
+    #[test]
+    fn both_ends_see_the_peer_pid() {
+        let (_listener, server, client) = connected_pair("pid");
+        assert_eq!(server.peer_pid().unwrap(), std::process::id());
+        assert_eq!(client.peer_pid().unwrap(), std::process::id());
+    }
+
+    /// 本地 `shutdown` 要叫醒另一份克隆上等着的读。
+    #[test]
+    fn local_shutdown_wakes_a_read_waiting_on_a_clone() {
+        let (_listener, server, _client) = connected_pair("wake");
+        let reading = server.try_clone().unwrap();
+        let reader = thread::spawn(move || {
+            let mut buf = [0u8; 8];
+            (&reading).read(&mut buf).map_err(|error| error.kind())
+        });
+        thread::sleep(Duration::from_millis(50));
+        server.shutdown(Shutdown::Both).unwrap();
+        assert_eq!(reader.join().unwrap(), Ok(0));
+    }
+
+    /// 和套接字的 FIN 一样：`shutdown(Both)` 之前写进去的字节对端都读得到，然后是 EOF，
+    /// 哪怕本端还有别的克隆没丢。守护靠这个先把终态快照写完再断开。
+    #[test]
+    fn shutdown_delivers_written_bytes_then_eof_while_a_clone_is_alive() {
+        let (_listener, server, client) = connected_pair("fin");
+        let _still_held = server.try_clone().unwrap();
+        (&server).write_all(b"final").unwrap();
+        server.shutdown(Shutdown::Both).unwrap();
+        let mut received = Vec::new();
+        (&client).read_to_end(&mut received).unwrap();
+        assert_eq!(received, b"final");
+        assert_eq!(
+            (&server).write(b"more").unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    /// 克隆共用读超时和非阻塞设置，和 dup 出来的套接字一样。
+    #[test]
+    fn clones_share_timeouts_and_nonblocking() {
+        let (_listener, server, _client) = connected_pair("shared");
+        let clone = server.try_clone().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        assert_eq!(
+            clone.read_timeout().unwrap(),
+            Some(Duration::from_millis(50))
+        );
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            (&clone).read(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        server.set_nonblocking(true).unwrap();
+        assert_eq!(
+            (&clone).read(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn shutdown_write_alone_is_unsupported() {
+        let (_listener, server, _client) = connected_pair("half");
+        assert_eq!(
+            server.shutdown(Shutdown::Write).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
     }
 
     #[test]

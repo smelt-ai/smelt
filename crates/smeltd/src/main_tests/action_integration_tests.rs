@@ -3,7 +3,7 @@ use super::*;
 /// 直接走 handle_conn 的真实分发（不是绕过去调内部函数）：action 是一次性
 /// 请求-响应，不像 watch/open 那样要开线程陪它跑一辈子。
 fn call_action(sessions: &Sessions, id: &str, kind: &str) -> serde_json::Value {
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let subscribers = new_event_hub();
     let mut client = client;
     writeln!(

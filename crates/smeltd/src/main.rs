@@ -181,7 +181,7 @@ use terminal_snapshot::{
 };
 
 use client_conn::{ClientConn, ClientSocket, ConnId};
-use smelt_runtime_client::{UnixListener, UnixStream};
+use smelt_runtime_client::{RuntimeListener, RuntimeStream};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
@@ -389,19 +389,27 @@ fn pinned_daemon_fingerprint(env: Option<String>) -> Option<String> {
         .and_then(|exe| smelt_core::daemon_image::content_fingerprint(&exe).ok())
 }
 
+/// 绑好的守护监听。
+pub(crate) struct DaemonListener {
+    listener: RuntimeListener,
+    /// Windows 的单实例锁，见 [`bind_single_instance`]。
+    #[cfg(windows)]
+    instance: smelt_sys::file_lock::ExclusiveFile,
+}
+
 /// 串行化“检查现有实例 → 清理僵尸 socket → bind”整段启动流程。
 ///
 /// 只做 connect 后 remove_file 存在 TOCTOU：两个并发启动者都可能先观察到
 /// socket 不存在，后启动者再把先启动者刚 bind 的有效路径删掉，令先启动者变成
 /// 仍托管会话但无法接受新连接的孤立 daemon。flock 随进程退出自动释放，也能覆盖
 /// 多个 GUI 进程同时拉起守护的情况。
+#[cfg(unix)]
 fn bind_single_instance(
     path: &std::path::Path,
     check_existing: bool,
-) -> std::io::Result<Option<UnixListener>> {
+) -> std::io::Result<Option<DaemonListener>> {
     let lock_path = path.with_extension("lock");
     // 锁只覆盖「检查 → 删僵尸 sock → bind」。函数结束就放锁；长期单实例靠套接字文件本身。
-    #[cfg(unix)]
     let _lock = {
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -415,18 +423,75 @@ fn bind_single_instance(
         }
         lock
     };
-    #[cfg(windows)]
-    let _lock = smelt_sys::file_lock::ExclusiveFile::lock(&lock_path)?;
 
-    if check_existing && UnixStream::connect(path).is_ok() {
+    if check_existing && RuntimeStream::connect(path).is_ok() {
         return Ok(None);
     }
     let _ = std::fs::remove_file(path);
-    UnixListener::bind(path).map(Some)
+    let listener = RuntimeListener::bind(path)?;
+    Ok(Some(DaemonListener { listener }))
 }
 
-fn bind_fresh_daemon(path: &std::path::Path) -> std::io::Result<Option<UnixListener>> {
+/// Windows 监听的是 `path` 对应的命名管道。单实例靠一把守护活着就一直握着的文件锁，
+/// 进程没了系统替它放掉，停机摘监听时也放掉（见 [`stop_listening`]）。
+///
+/// 不能像 Unix 那样「连得上就是有守护」：前任退出后，它的客户端还没关的那几端会让管道
+/// 名继续存在、实例都在忙，连不上也说明不了什么，等它们关掉又没有事件可等。所以接手名字
+/// （`bind_taking_over`），谁在服务由锁说了算。`check_existing` 为假时排队等锁。
+#[cfg(windows)]
+fn bind_single_instance(
+    path: &std::path::Path,
+    check_existing: bool,
+) -> std::io::Result<Option<DaemonListener>> {
+    use smelt_sys::file_lock::ExclusiveFile;
+    let lock_path = path.with_extension("instance.lock");
+    let instance = if check_existing {
+        match ExclusiveFile::try_lock(&lock_path)? {
+            Some(instance) => instance,
+            None => return Ok(None),
+        }
+    } else {
+        ExclusiveFile::lock(&lock_path)?
+    };
+    // 旧版本在这里留下的 AF_UNIX 套接字文件，现在用不上了。
+    let _ = std::fs::remove_file(path);
+    let listener = RuntimeListener::bind_taking_over(path)?;
+    Ok(Some(DaemonListener { listener, instance }))
+}
+
+fn bind_fresh_daemon(path: &std::path::Path) -> std::io::Result<Option<DaemonListener>> {
     bind_single_instance(path, true)
+}
+
+/// Windows：叫停监听的句柄和单实例锁，停机时由 [`stop_listening`] 用掉。
+#[cfg(windows)]
+struct Listening {
+    stop: smelt_sys::named_pipe::PipeListenerStop,
+    instance: Mutex<Option<smelt_sys::file_lock::ExclusiveFile>>,
+}
+
+#[cfg(windows)]
+static LISTENING: OnceLock<Listening> = OnceLock::new();
+
+/// 停止接新连接。停机在回执之前调用：调用方拿到回执就会拉起新守护，新守护不能连到
+/// 这个即将退出的进程上。Unix 摘掉 socket 路径；Windows 关掉在等客户端的管道实例，
+/// 放掉单实例锁。已经接受的连接不受影响。
+pub(crate) fn stop_listening() {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(sock_path());
+    }
+    #[cfg(windows)]
+    if let Some(listening) = LISTENING.get() {
+        listening.stop.stop();
+        drop(
+            listening
+                .instance
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+        );
+    }
 }
 
 fn secure_daemon_socket(path: &std::path::Path) -> std::io::Result<()> {
@@ -436,8 +501,8 @@ fn secure_daemon_socket(path: &std::path::Path) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        // sock 文件在用户配置目录 `~/.smelt` 下。目录 ACL 加上同用户对端校验就是边界。
-        // 不在 AF_UNIX 文件上再套一层 DACL，也不调用 PermissionsExt。
+        // 没有 sock 文件。命名管道建出来时 DACL 就只给当前用户，并拒绝远程客户端
+        // （`smelt_sys::named_pipe`），再加上同用户对端校验就是边界。
         let _ = path;
         Ok(())
     }
@@ -2458,8 +2523,8 @@ fn main() {
     {
         dlog(&format!("升级接班：前任 {pid} 30 秒内没退出，照常尝试绑定"));
     }
-    let listener = match bind_fresh_daemon(&path) {
-        Ok(Some(l)) => l,
+    let bound = match bind_fresh_daemon(&path) {
+        Ok(Some(bound)) => bound,
         Ok(None) => return,
         Err(e) => {
             // 曾经是静默 return：守护无声消失、sock 残留，外面完全查不到
@@ -2468,6 +2533,12 @@ fn main() {
             return;
         }
     };
+    let listener = bound.listener;
+    #[cfg(windows)]
+    let _ = LISTENING.set(Listening {
+        stop: listener.stopper(),
+        instance: Mutex::new(Some(bound.instance)),
+    });
     // socket 仅本用户可读写。权限收紧失败时不能留下一个仍接受连接的 daemon。
     if let Err(error) = secure_daemon_socket(&path) {
         dlog(&format!(
@@ -2726,7 +2797,7 @@ fn classify_self_upgrade_reply(reply: &str) -> SelfUpgradeOutcome {
 }
 
 pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
-    let sock = match UnixStream::connect(sock_path()) {
+    let sock = match RuntimeStream::connect(sock_path()) {
         Ok(sock) => sock,
         Err(error) => return SelfUpgradeOutcome::Failed(format!("连自己失败：{error}")),
     };
@@ -2746,10 +2817,8 @@ pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutco
     classify_self_upgrade_reply(&reply)
 }
 
-/// 命名管道连续第 `failures` 次（从 0 起）accept 失败后隔多久再试：50 毫秒起翻倍，
-/// 上限 5 秒。
-#[cfg(any(windows, test))]
-fn pipe_accept_retry_delay(failures: u32) -> Duration {
+/// 连续第 `failures` 次（从 0 起）accept 失败后隔多久再试：50 毫秒起翻倍，上限 5 秒。
+fn accept_retry_delay(failures: u32) -> Duration {
     Duration::from_millis(50)
         .saturating_mul(1u32.checked_shl(failures).unwrap_or(u32::MAX))
         .min(Duration::from_secs(5))
@@ -2758,7 +2827,7 @@ fn pipe_accept_retry_delay(failures: u32) -> Duration {
 /// 服务主循环：远端自愈→accept（+macOS 菜单栏主线程编排）。
 #[allow(clippy::too_many_arguments)]
 fn run_serve_loop(
-    listener: UnixListener,
+    listener: RuntimeListener,
     sessions: Sessions,
     acp_sessions: AcpSessions,
     workspace_directory: WorkspaceDirectoryReader,
@@ -2806,49 +2875,28 @@ fn run_serve_loop(
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
-    #[cfg(windows)]
-    if let Ok(pipe_name) = smelt_sys::named_pipe::daemon_pipe_path(&sock_path()) {
-        client_conn::remember_daemon_pipe(pipe_name.clone());
-        let pipe_server = server.clone();
-        thread::Builder::new()
-            .name("smelt-agentpe-accept".into())
-            .spawn(move || {
-                let listener = match smelt_sys::named_pipe::PipeListener::bind(pipe_name) {
-                    Ok(listener) => listener,
-                    Err(error) => {
-                        dlog(&format!("命名管道监听失败，Bun 连不上守护：{error}"));
-                        return;
-                    }
-                };
-                // 轮询例外：accept 失败（建不出新的管道实例、客户端连上就断）之后没有「可以再试」
-                // 的事件；周期 50 毫秒起翻倍，上限 5 秒，成功一次就回到起点。不放弃：Bun 只能走
-                // 这条管道连守护。
-                let mut failures = 0u32;
-                loop {
-                    match listener.accept() {
-                        Ok(stream) => {
-                            failures = 0;
-                            let context = pipe_server.context(Principal::Local);
-                            let conn = ClientConn::from_pipe(stream);
-                            thread::spawn(move || handle_conn(conn, context));
-                        }
-                        Err(error) => {
-                            dlog(&format!("命名管道 accept 失败：{error}"));
-                            thread::sleep(pipe_accept_retry_delay(failures));
-                            failures = failures.saturating_add(1);
-                        }
-                    }
-                }
-            })
-            .ok();
-    }
-
+    // 桌面、命令行和 Bun / Pi 都连这一条监听（Windows 上是命名管道）。
     let accept_loop = move || {
+        // 轮询例外：accept 失败（描述符用尽、建不出新的管道实例）之后没有「可以再试」的
+        // 事件；周期 50 毫秒起翻倍，上限 5 秒，成功一次就回到起点。
+        let mut failures = 0u32;
         for conn in listener.incoming() {
-            let Ok(conn) = conn else { continue };
-            let context = server.context(Principal::Local);
-            thread::spawn(move || handle_conn(ClientConn::from_unix(conn), context));
+            match conn {
+                Ok(conn) => {
+                    failures = 0;
+                    let context = server.context(Principal::Local);
+                    thread::spawn(move || handle_conn(conn, context));
+                }
+                Err(error) => {
+                    dlog(&format!("accept 失败：{error}"));
+                    thread::sleep(accept_retry_delay(failures));
+                    failures = failures.saturating_add(1);
+                }
+            }
         }
+        // Windows 上只有停机叫停了监听才会走到这里。
+        #[cfg(windows)]
+        protocol::wait_for_shutdown_exit();
     };
 
     // 只有被 GUI 拉起时（SMELT_MENUBAR=1，说明继承了登录会话、连得上 WindowServer）

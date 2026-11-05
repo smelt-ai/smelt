@@ -54,11 +54,11 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
 }
 
 /// 读一行 JSON 尺寸头 + `replay_len` 字节快照——跟真实客户端的 attach 协议一致。
-pub(crate) fn read_header_and_snapshot_pub(br: &mut BufReader<UnixStream>) -> serde_json::Value {
+pub(crate) fn read_header_and_snapshot_pub(br: &mut BufReader<RuntimeStream>) -> serde_json::Value {
     read_header_and_snapshot(br)
 }
 
-fn read_header_and_snapshot(br: &mut BufReader<UnixStream>) -> serde_json::Value {
+fn read_header_and_snapshot(br: &mut BufReader<RuntimeStream>) -> serde_json::Value {
     let mut line = String::new();
     br.read_line(&mut line).unwrap();
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -73,7 +73,7 @@ fn remote_watch_owns_geometry_until_its_connection_closes() {
     let sess = make_dummy_session(59, 181);
     let sessions = new_sessions();
     sessions.insert_for_test("t", Arc::clone(&sess));
-    let (server, mut client) = UnixStream::pair().unwrap();
+    let (server, mut client) = RuntimeStream::pair().unwrap();
     let sessions_for_watch = Arc::clone(&sessions);
     let watch = thread::spawn(move || {
         let reader = BufReader::new(server.try_clone().unwrap());
@@ -139,7 +139,7 @@ fn an_unannounced_drop_keeps_the_remote_geometry_for_a_grace_period() {
     let sess = make_dummy_session(59, 181);
     let sessions = new_sessions();
     sessions.insert_for_test("t", Arc::clone(&sess));
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let sessions_for_watch = Arc::clone(&sessions);
     let watch = thread::spawn(move || {
         let reader = BufReader::new(server.try_clone().unwrap());
@@ -176,7 +176,7 @@ fn an_unannounced_drop_keeps_the_remote_geometry_for_a_grace_period() {
     }
 
     // 手机切回来：同尺寸续租，不挂 jolt（= 不惊动子进程）。
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let sessions_for_watch = Arc::clone(&sessions);
     let watch = thread::spawn(move || {
         let reader = BufReader::new(server.try_clone().unwrap());
@@ -220,7 +220,7 @@ fn a_desktop_focus_claim_ends_the_grace_but_never_preempts_a_live_viewer() {
     let sess = make_dummy_session(59, 181);
     let sessions = new_sessions();
     sessions.insert_for_test("t", Arc::clone(&sess));
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let sessions_for_watch = Arc::clone(&sessions);
     let watch = thread::spawn(move || {
         let reader = BufReader::new(server.try_clone().unwrap());
@@ -272,12 +272,12 @@ fn mobile_watch_does_not_jolt_when_the_geometry_is_unchanged() {
     let sessions = new_sessions();
     sessions.insert_for_test("t", Arc::clone(&sess));
 
-    let (desktop_server, desktop_client) = UnixStream::pair().unwrap();
+    let (desktop_server, desktop_client) = RuntimeStream::pair().unwrap();
     let desktop_attachment =
         OutputAttachment::new(desktop_server, Vec::new(), "t", "attachment").unwrap();
     sess.out.lock().unwrap().clients.push(desktop_attachment);
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let sessions_for_watch = Arc::clone(&sessions);
     let watch = thread::spawn(move || {
         let reader = BufReader::new(server.try_clone().unwrap());
@@ -342,12 +342,12 @@ fn mobile_watch_jolts_once_when_geometry_changes() {
     sessions.insert_for_test("t", Arc::clone(&sess));
 
     // 每次 resize_session_* 都会给桌面客户端写一条 geometry OSC 标记——用它数抖动次数。
-    let (desktop_server, desktop_client) = UnixStream::pair().unwrap();
+    let (desktop_server, desktop_client) = RuntimeStream::pair().unwrap();
     let desktop_attachment =
         OutputAttachment::new(desktop_server, Vec::new(), "t", "attachment").unwrap();
     sess.out.lock().unwrap().clients.push(desktop_attachment);
 
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let sessions_for_watch = Arc::clone(&sessions);
     let watch = thread::spawn(move || {
         let reader = BufReader::new(server.try_clone().unwrap());
@@ -424,7 +424,7 @@ impl TerminalGeometryParamsForTest {
 fn attach_only_open_does_not_create_a_missing_session() {
     let sessions = new_sessions();
     let subscribers = new_event_hub();
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
 
     handle_open(
@@ -471,7 +471,7 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
     let slot = sessions.get("t").unwrap();
 
     // 模拟 PTY：pump 从一端读，测试从另一端写，模拟"shell 产生了输出"。
-    let (pty_reader_end, mut pty_writer_end) = UnixStream::pair().unwrap();
+    let (pty_reader_end, mut pty_writer_end) = RuntimeStream::pair().unwrap();
     start_pty_pump(
         Arc::clone(&sess),
         Box::new(pty_reader_end),
@@ -483,7 +483,7 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
     );
 
     // 第一路：桌面 attachment。
-    let (open_server, open_client) = UnixStream::pair().unwrap();
+    let (open_server, open_client) = RuntimeStream::pair().unwrap();
     let sessions_a = Arc::clone(&sessions);
     let subscribers_a = new_event_hub();
     thread::spawn(move || {
@@ -502,7 +502,7 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
     assert_eq!(open_header["geometry_token"], sess.geometry_token.as_str());
 
     // 第二路：另一个交互 attachment。同 id 并行 open 不该顶掉第一路。
-    let (open2_server, open2_client) = UnixStream::pair().unwrap();
+    let (open2_server, open2_client) = RuntimeStream::pair().unwrap();
     let sessions_b = Arc::clone(&sessions);
     let subscribers_b = new_event_hub();
     thread::spawn(move || {
@@ -525,7 +525,7 @@ fn multiple_opens_and_watch_receive_the_same_output_independently() {
     read_header_and_snapshot(&mut open2_br);
 
     // 第三路：watch（只读旁观）。同样不影响两个 open attachment。
-    let (watch_server, watch_client) = UnixStream::pair().unwrap();
+    let (watch_server, watch_client) = RuntimeStream::pair().unwrap();
     let sessions_c = Arc::clone(&sessions);
     thread::spawn(move || {
         let reader = BufReader::new(watch_server.try_clone().unwrap());
