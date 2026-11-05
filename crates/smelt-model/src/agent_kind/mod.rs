@@ -174,6 +174,10 @@ const CODEX_ACP_ADAPTER: ManagedAcpAdapter = ManagedAcpAdapter {
             package: "@agentclientprotocol/codex-acp",
             version: "1.6.2",
         },
+        ManagedAcpAdapterRelease {
+            package: "@agentclientprotocol/codex-acp",
+            version: "1.12.0",
+        },
     ],
     legacy_default_commands: &["codex app-server"],
 };
@@ -1241,8 +1245,9 @@ pub fn default_acp_codex_cmd() -> String {
     // app-server 包了一层 ACP，跟 Claude/Copilot/Grok 走同一套 AcpAgent 驱动，
     // 不再需要 smeltd 里那条按命令字符串识别的 codex_app_server 专用 driver
     // （dispatch 逻辑保留，兼容手填 `codex app-server` 的旧存档/自定义命令）。
-    // 1.12.0 已用受管 Bun 1.4.0 + 本机 Codex CLI 实测 initialize：协议版本 1、
-    // 图片/MCP 与 `loadSession` 能力正常。1.7+ 原生 subagent / fork / 后台任务
+    // 2.5.0 已用受管 Bun 1.4.4 + Codex CLI 0.165 实测 initialize：协议版本 1、
+    // 图片/MCP 与 `loadSession` 能力正常。2.0 起工具调用按 AIR 协定上报、diff 是
+    // 精确补丁，仍是标准 ACP 内容块。1.7+ 原生 subagent / fork / 后台任务
     // 未协商则退回现有 tool call。build_agent_args 里的 CODEX_PATH
     // 注入继续优先使用本机 CLI，找不到才 fallback 到适配器 bundle 的版本。
     CODEX_ACP_ADAPTER.current_command()
@@ -1995,7 +2000,7 @@ mod tests {
         );
         assert_eq!(
             default_acp_codex_cmd(),
-            "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
+            "bunx --bun @agentclientprotocol/codex-acp@2.5.0"
         );
         assert_eq!(default_acp_pi_cmd(), "smelt-pi-agent");
     }
@@ -2024,13 +2029,19 @@ mod tests {
             ConversationAgentKind::Codex.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/codex-acp@1.1.7"
             ),
-            Some("bunx --bun @agentclientprotocol/codex-acp@1.12.0".into())
+            Some("bunx --bun @agentclientprotocol/codex-acp@2.5.0".into())
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command(
                 "bunx --bun @agentclientprotocol/codex-acp@1.6.2"
             ),
-            Some("bunx --bun @agentclientprotocol/codex-acp@1.12.0".into())
+            Some("bunx --bun @agentclientprotocol/codex-acp@2.5.0".into())
+        );
+        assert_eq!(
+            ConversationAgentKind::Codex.upgrade_released_default_command(
+                "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
+            ),
+            Some("bunx --bun @agentclientprotocol/codex-acp@2.5.0".into())
         );
         assert!(
             ConversationAgentKind::Codex
@@ -2041,7 +2052,7 @@ mod tests {
         );
         assert_eq!(
             ConversationAgentKind::Codex.upgrade_released_default_command("  codex app-server  "),
-            Some("bunx --bun @agentclientprotocol/codex-acp@1.12.0".into())
+            Some("bunx --bun @agentclientprotocol/codex-acp@2.5.0".into())
         );
         assert_eq!(
             ConversationAgentKind::Copilot.upgrade_released_default_command("copilot --acp"),

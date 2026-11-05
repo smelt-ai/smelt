@@ -4034,7 +4034,7 @@ fn daemon_relaunch_upgrades_released_adapter_defaults_only() {
     assert!(upgrade_released_adapter_launch(&mut old));
     assert_eq!(
         old.command,
-        "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
+        "bunx --bun @agentclientprotocol/codex-acp@2.5.0"
     );
 
     let custom = "NO_BROWSER=1 bunx --bun @agentclientprotocol/codex-acp@1.1.7";

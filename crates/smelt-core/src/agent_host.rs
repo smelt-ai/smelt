@@ -499,7 +499,7 @@ mod tests {
         );
         assert_eq!(
             cmd(&config, ConversationAgentKind::Codex),
-            "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
+            "bunx --bun @agentclientprotocol/codex-acp@2.5.0"
         );
     }
 
