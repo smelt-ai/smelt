@@ -33,6 +33,7 @@ pub(crate) fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHost
     }
     AgentHostSettings {
         hooks_enabled: snapshot.agent_hooks_enabled,
+        commands: Default::default(),
         env,
         config_memory,
         profiles: snapshot

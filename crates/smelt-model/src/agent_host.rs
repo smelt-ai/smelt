@@ -2,13 +2,18 @@
 
 use crate::agent_definition::AgentDefinition;
 use crate::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHostSettings {
     /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。
     pub hooks_enabled: bool,
+    /// 已删掉的「按 agent 改启动命令」。控制协议 v3 的运行时要求配置里有这个字段，所以线上
+    /// 恒写空表（它按改前改后三方合并，两边都空就什么都不改），读到的丢弃。
+    #[serde(default, skip_deserializing)]
+    pub commands: RetiredCommands,
     /// agent id → 额外注入的环境变量。
     pub env: BTreeMap<String, BTreeMap<String, String>>,
     /// agent id → 用户最近显式选择的配置 `(config_id, value_id)`。
@@ -25,12 +30,23 @@ impl AgentHostSettings {
     pub fn fresh() -> Self {
         Self {
             hooks_enabled: true,
+            commands: RetiredCommands,
             env: BTreeMap::new(),
             config_memory: BTreeMap::new(),
             profiles: Vec::new(),
             agents: Vec::new(),
             default_conversation_agent: None,
         }
+    }
+}
+
+/// [`AgentHostSettings::commands`] 的线上形状：恒为空表。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetiredCommands;
+
+impl Serialize for RetiredCommands {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_map(Some(0))?.end()
     }
 }
 
@@ -172,6 +188,18 @@ pub struct AgentHostEdit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // v3 运行时要求配置里有 `commands`；新运行时收到旧客户端带内容的 `commands` 照样丢弃。
+    #[test]
+    fn commands_stay_an_empty_map_on_the_wire() {
+        let wire = serde_json::to_value(settings()).unwrap();
+        assert_eq!(wire["commands"], serde_json::json!({}));
+
+        let mut from_old = wire;
+        from_old["commands"] = serde_json::json!({ "claude": "claude --edited" });
+        let read: AgentHostSettings = serde_json::from_value(from_old).unwrap();
+        assert_eq!(read, settings());
+    }
 
     fn settings() -> AgentHostSettings {
         AgentHostSettings::fresh()
