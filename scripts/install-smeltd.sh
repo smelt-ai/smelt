@@ -305,7 +305,7 @@ root_command_script() {
   fi
   cat <<WRAPPER
 #!/bin/bash
-# $ROOT_COMMAND_MARKER，重新安装时会覆盖。
+# ${ROOT_COMMAND_MARKER}，重新安装时会覆盖。
 bin=$(printf %q "$home/.smelt/bin/$command")
 user=$(printf %q "$user")
 case "\$(id -u)" in
@@ -316,7 +316,7 @@ case "\$(id -u)" in
     ;;
 esac
 if [[ ! -x "\$bin" ]]; then
-  echo "找不到 \$bin，运行时可能已经卸载；不用了可以删掉 \$0" >&2
+  echo "找不到 \${bin}，运行时可能已经卸载；不用了可以删掉 \$0" >&2
   exit 1
 fi
 if [[ "\$(id -u)" == $uid ]]; then
