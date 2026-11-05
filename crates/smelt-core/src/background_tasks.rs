@@ -1837,21 +1837,25 @@ fn bind_control_listener(socket_path: &Path) -> Result<TaskListener, String> {
     }
 }
 
+/// 和 agent 自己起的子进程一样铺用户环境（含系统代理），否则 Pi 的 bash 走宿主和
+/// 在 Pi 进程里直接跑（短超时、子智能体）时环境不一致。
 fn shell_command(command: &str) -> Command {
     #[cfg(unix)]
-    {
+    let mut command_process = {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let mut command_process = Command::new(shell);
         command_process.arg("-lc").arg(command);
         command_process
-    }
+    };
     #[cfg(windows)]
-    {
+    let mut command_process = {
         let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
         let mut command_process = Command::new(shell);
         command_process.arg("/d").arg("/c").arg(command);
         command_process
-    }
+    };
+    crate::login_env::apply_login_environment(&mut command_process, []);
+    command_process
 }
 
 #[cfg(test)]

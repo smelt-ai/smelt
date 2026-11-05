@@ -231,12 +231,16 @@ mod linux {
 
     /// 连不上、或者连上了却半天不动都要放弃，不能一直等：桌面那边一直显示「升级中」。
     fn download(url: &str, to: &Path) -> Result<(), String> {
-        let output = Command::new("curl")
+        let mut command = Command::new("curl");
+        command
             .args(["-fsSL", "--retry", "2", "--connect-timeout", "20"])
             // 连续 60 秒低于 1 KB/s 就当卡住了。
             .args(["--speed-limit", "1024", "--speed-time", "60", "-o"])
             .arg(to)
-            .arg(url)
+            .arg(url);
+        // curl 只认代理环境变量；用户的代理配在 rc 或系统设置里都要跟上。
+        smelt_core::login_env::apply_login_environment(&mut command, []);
+        let output = command
             .output()
             .map_err(|error| format!("无法执行 curl：{error}"))?;
         if output.status.success() {

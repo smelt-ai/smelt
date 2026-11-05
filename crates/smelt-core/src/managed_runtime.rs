@@ -141,15 +141,16 @@ impl ManagedPiRuntime {
 
     /// 起 smelt-agent 的子命令（登录、MCP 登录）。和 Pi 会话一样铺 login shell 环境：
     /// 守护拿不到用户 rc 里的代理变量，子命令要联网，缺了它在只放行代理的网络里会挂住。
-    /// 用户只配了系统代理时也要跟上，见 `system_proxy`。
     pub(crate) fn command(&self, subcommand: Option<&str>) -> Command {
         let mut command = Command::new(&self.executable);
         if let Some(subcommand) = subcommand {
             command.arg(subcommand);
         }
-        crate::login_env::apply_login_environment(&mut command);
-        command.env(PI_PROTOCOL_ENV, pi_protocol());
-        crate::system_proxy::apply_system_proxy_fallback(&mut command);
+        let protocol = pi_protocol();
+        crate::login_env::apply_login_environment(
+            &mut command,
+            [(PI_PROTOCOL_ENV, protocol.as_str())],
+        );
         command
     }
 }
@@ -405,6 +406,8 @@ fn bun_download_command(archive: &Path, url: &str) -> Command {
         .args(["--speed-limit", "1024", "--speed-time", "60", "-o"])
         .arg(archive)
         .arg(url);
+    // curl 只认代理环境变量；用户的代理配在 rc 或系统设置里都要跟上。
+    crate::login_env::apply_login_environment(&mut download, []);
     download
 }
 
