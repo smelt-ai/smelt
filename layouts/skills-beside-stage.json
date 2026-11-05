@@ -1,7 +1,7 @@
 {
   "format": 1,
   "name": "技能在舞台旁",
-  "description": "示例：技能插件不再挂在工具面板里，和舞台左右并排",
+  "description": "示例：技能插件不收进右栏，和舞台左右并排",
   "left": { "tabs": ["smelt.sessions"] },
   "center": {
     "split": "row",
@@ -10,5 +10,5 @@
       { "tabs": ["smelt.stage"] }
     ]
   },
-  "right": { "tabs": ["smelt.tools"] }
+  "right": { "tabs": ["smelt.files", "smelt.git", "smelt.history", "plugin:*"] }
 }

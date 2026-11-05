@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 8;
+pub(crate) const SCHEMA_VERSION: u32 = 9;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -47,12 +47,16 @@ CREATE TABLE workspace_ui (
   active_session_id TEXT,
   route TEXT NOT NULL,
   selected_agent_id TEXT,
-  sidebar_w REAL,
-  sidebar_open INTEGER CHECK (sidebar_open IN (0, 1)),
   sidebar_grouping TEXT NOT NULL,
   sidebar_hide_empty_projects INTEGER NOT NULL CHECK (sidebar_hide_empty_projects IN (0, 1)),
-  archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1))
+  archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1)),
+  layout_id TEXT
 );
+CREATE TABLE workspace_layout_state (
+  layout_id TEXT PRIMARY KEY,
+  file_digest TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (json_valid(state))
+) WITHOUT ROWID;
 CREATE TABLE collapsed_project (
   runtime_id TEXT NOT NULL,
   root TEXT NOT NULL,
@@ -74,10 +78,6 @@ CREATE TABLE conversation_route (
   conversation_id TEXT NOT NULL,
   active_terminal_id TEXT,
   dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
-  stage_cover TEXT,
-  tool_panel_tab TEXT NOT NULL,
-  tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
-  tool_panel_w REAL NOT NULL,
   file_tree_selected TEXT,
   open_file_path TEXT,
   file_tree_w REAL NOT NULL,
@@ -276,6 +276,24 @@ ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
   CHECK (archive_expanded IN (0, 1));
 ";
 
+/// v9：工作台的开合、宽度、选中的标签都交给外层 Dock，按布局各存一份「点出来的状态」，
+/// 记下用的是哪套布局。左栏、工具面板旧的开合宽度和舞台覆盖页不再有，旧值直接丢掉，
+/// 不往新表里搬：新表按布局存，旧值对不上任何一棵树。
+const MIGRATE_V8_TO_V9: &str = "
+ALTER TABLE workspace_ui DROP COLUMN sidebar_w;
+ALTER TABLE workspace_ui DROP COLUMN sidebar_open;
+ALTER TABLE workspace_ui ADD COLUMN layout_id TEXT;
+ALTER TABLE conversation_route DROP COLUMN stage_cover;
+ALTER TABLE conversation_route DROP COLUMN tool_panel_tab;
+ALTER TABLE conversation_route DROP COLUMN tool_panel_open;
+ALTER TABLE conversation_route DROP COLUMN tool_panel_w;
+CREATE TABLE workspace_layout_state (
+  layout_id TEXT PRIMARY KEY,
+  file_digest TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (json_valid(state))
+) WITHOUT ROWID;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -329,12 +347,17 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7 => {}
+        7 | 8 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V7_TO_V8)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=8).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V8_TO_V9)
             .map_err(|error| error.to_string())?;
     }
     transaction
@@ -464,10 +487,6 @@ mod legacy {
         #[serde(default)]
         selected_agent_id: Option<String>,
         #[serde(default)]
-        sidebar_w: Option<f32>,
-        #[serde(default)]
-        sidebar_open: Option<bool>,
-        #[serde(default)]
         collapsed_projects: Vec<String>,
         #[serde(default)]
         collapsed_agents: Vec<String>,
@@ -596,8 +615,6 @@ mod legacy {
                     active_session_id: old.active_session_id,
                     route: old.route,
                     selected_agent_id: old.selected_agent_id,
-                    sidebar_w: old.sidebar_w,
-                    sidebar_open: old.sidebar_open,
                     collapsed_projects: old
                         .collapsed_projects
                         .into_iter()
@@ -612,6 +629,7 @@ mod legacy {
                         .collect(),
                     sidebar_hide_empty_projects: old.sidebar_hide_empty_projects,
                     archive_expanded: false,
+                    layout_id: None,
                 },
             )?;
         }

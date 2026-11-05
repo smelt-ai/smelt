@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::*;
 
 use crate::settings::Appearance;
-use crate::{
-    SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp, tool_panel,
-};
+use crate::{SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp};
 
 /// Git 页可见时，同一仓库 60 秒内只自动 fetch 一次。页不可见时不发。
 pub(crate) fn git_autofetch_due(last: Option<Instant>, now: Instant, git_visible: bool) -> bool {
@@ -284,11 +282,13 @@ impl Workspace {
     }
 
     fn git_page_visible(&self) -> bool {
-        self.tool_tab_visible(tool_panel::ToolPanelTab::Git)
+        self.shell_displayed
+            .contains(&smelt_client::layout::Component::Git)
     }
 
     fn history_page_visible(&self) -> bool {
-        self.tool_tab_visible(tool_panel::ToolPanelTab::History)
+        self.shell_displayed
+            .contains(&smelt_client::layout::Component::History)
     }
 
     /// 每 2 秒把仍开着的页的 TTL 缓存再对一次。打开页面和切换项目走事件，

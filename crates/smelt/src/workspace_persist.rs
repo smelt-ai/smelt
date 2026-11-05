@@ -158,8 +158,6 @@ pub(crate) struct WorkspaceUiState {
     pub(crate) active_session_id: Option<String>,
     pub(crate) route: WorkspaceRoute,
     pub(crate) selected_agent_id: Option<String>,
-    pub(crate) sidebar_w: Option<f32>,
-    pub(crate) sidebar_open: Option<bool>,
     /// 各运行时上折叠、置顶的项目。
     pub(crate) collapsed_projects: Vec<ProjectKey>,
     pub(crate) collapsed_agents: Vec<String>,
@@ -167,6 +165,8 @@ pub(crate) struct WorkspaceUiState {
     pub(crate) pinned_projects: Vec<ProjectKey>,
     pub(crate) sidebar_hide_empty_projects: bool,
     pub(crate) archive_expanded: bool,
+    /// 用的布局：布局文件名去掉 `.json`，`None` 是代码里的默认布局。
+    pub(crate) layout_id: Option<String>,
 }
 
 /// 项目在客户端库里的身份。
@@ -246,10 +246,6 @@ fn conversation_record(
         conversation_id: key.1.clone(),
         active_terminal_id: saved.active_terminal_id.clone(),
         dock_layout: saved.dock_layout.clone(),
-        stage_cover: route.stage_cover.as_ref().map(enum_name),
-        tool_panel_tab: enum_name(&route.tool_panel_tab),
-        tool_panel_open: route.tool_panel_open,
-        tool_panel_w: route.tool_panel_w,
         expanded: sorted_paths(&route.expanded),
         file_tree_selected: route.file_tree_selected.clone(),
         open_file_path: route.open_file_path.clone(),
@@ -275,10 +271,6 @@ fn conversation_from_record(
         .map(RuntimeKey::Remote)
         .unwrap_or(RuntimeKey::Local);
     let route = SessionRouteArchive {
-        stage_cover: record.stage_cover.as_deref().and_then(enum_from_name),
-        tool_panel_tab: enum_from_name(&record.tool_panel_tab).unwrap_or(defaults.tool_panel_tab),
-        tool_panel_open: record.tool_panel_open,
-        tool_panel_w: record.tool_panel_w,
         expanded: record.expanded.into_iter().collect(),
         file_tree_selected: record.file_tree_selected,
         open_file_path: record.open_file_path,
@@ -329,8 +321,6 @@ pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
         active_session_id: record.active_session_id,
         route: crate::settings::enum_from_name(&record.route).unwrap_or_default(),
         selected_agent_id: record.selected_agent_id,
-        sidebar_w: record.sidebar_w,
-        sidebar_open: record.sidebar_open,
         collapsed_projects: record.collapsed_projects,
         collapsed_agents: record.collapsed_agents,
         sidebar_grouping: crate::settings::enum_from_name(&record.sidebar_grouping)
@@ -338,6 +328,7 @@ pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
         pinned_projects: record.pinned_projects,
         sidebar_hide_empty_projects: record.sidebar_hide_empty_projects,
         archive_expanded: record.archive_expanded,
+        layout_id: record.layout_id,
     }
 }
 
@@ -347,14 +338,13 @@ fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
         active_session_id: ui.active_session_id.clone(),
         route: crate::settings::enum_name(&ui.route),
         selected_agent_id: ui.selected_agent_id.clone(),
-        sidebar_w: ui.sidebar_w,
-        sidebar_open: ui.sidebar_open,
         collapsed_projects: ui.collapsed_projects.clone(),
         collapsed_agents: ui.collapsed_agents.clone(),
         sidebar_grouping: crate::settings::enum_name(&ui.sidebar_grouping),
         pinned_projects: ui.pinned_projects.clone(),
         sidebar_hide_empty_projects: ui.sidebar_hide_empty_projects,
         archive_expanded: ui.archive_expanded,
+        layout_id: ui.layout_id.clone(),
     };
     smelt_client_store::client_store()
         .and_then(|store| store.put_workspace_ui(&record))
@@ -1139,14 +1129,13 @@ impl Workspace {
                 .filter(|id| !id.is_empty()),
             route: self.nav.persist(),
             selected_agent_id: self.agent_surface.selected_id.clone(),
-            sidebar_w: Some(self.sidebar_w),
-            sidebar_open: Some(self.sidebar_open),
             collapsed_projects: Vec::new(),
             collapsed_agents: self.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,
             pinned_projects: Vec::new(),
             sidebar_hide_empty_projects: self.sidebar_hide_empty_projects,
             archive_expanded: self.archive_expanded,
+            layout_id: self.layout_choice.clone(),
         };
         for space_key in self.space_keys() {
             let Some(space) = self.space(&space_key) else {
@@ -1471,10 +1460,6 @@ mod agent_conversation_persist_tests {
     #[test]
     fn conversation_ui_lives_in_the_client_store() {
         let mut route = crate::SessionRouteArchive {
-            stage_cover: Some(crate::StageCover::ToolPanel),
-            tool_panel_tab: crate::tool_panel::ToolPanelTab::Git,
-            tool_panel_open: true,
-            tool_panel_w: 420.0,
             file_tree_selected: Some("/srv/app/main.rs".into()),
             file_tree_open: false,
             pinned_roots: vec!["/srv/app".into(), "/srv/lib".into()],

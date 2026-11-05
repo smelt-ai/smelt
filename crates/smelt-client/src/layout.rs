@@ -6,8 +6,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// 现在认识的格式版本。
 pub const FORMAT: u32 = 1;
@@ -18,10 +19,10 @@ pub const LAYOUT_DIR: &str = "layouts";
 
 pub const SESSIONS: &str = "smelt.sessions";
 pub const STAGE: &str = "smelt.stage";
-pub const TOOLS: &str = "smelt.tools";
 pub const FILES: &str = "smelt.files";
 pub const GIT: &str = "smelt.git";
 pub const HISTORY: &str = "smelt.history";
+pub const OTHER_PLUGINS: &str = "plugin:*";
 const PLUGIN_PREFIX: &str = "plugin:";
 const BUILTIN_PREFIX: &str = "smelt.";
 
@@ -30,13 +31,13 @@ const BUILTIN_PREFIX: &str = "smelt.";
 pub enum Component {
     Sessions,
     Stage,
-    /// 工具面板：没被单独摆出来的文件、变更、历史和插件面板，叠成一排页签。
-    Tools,
-    /// 下面三个是工具面板里的页签，可以单独摆。摆出来的不再出现在工具面板里。
     Files,
     Git,
     History,
     Plugin(PluginPanelRef),
+    /// `plugin:*`：不是组件，是个记号。布局里别处没写到的插件面板（不带 `props`），
+    /// 按插件的先后插在这个位置。一套布局最多写一次，没写的话这些面板不出现。
+    OtherPlugins,
 }
 
 /// `plugin:<插件 id>/<面板>`，可带 `props`。同一个面板换不同的 `props` 能摆多份。
@@ -101,7 +102,7 @@ impl Component {
         match name {
             SESSIONS => Ok(Self::Sessions),
             STAGE => Ok(Self::Stage),
-            TOOLS => Ok(Self::Tools),
+            OTHER_PLUGINS => Ok(Self::OtherPlugins),
             FILES => Ok(Self::Files),
             GIT => Ok(Self::Git),
             HISTORY => Ok(Self::History),
@@ -136,11 +137,22 @@ impl Component {
         match self {
             Self::Sessions => SESSIONS.into(),
             Self::Stage => STAGE.into(),
-            Self::Tools => TOOLS.into(),
             Self::Files => FILES.into(),
             Self::Git => GIT.into(),
             Self::History => HISTORY.into(),
             Self::Plugin(panel) => format!("{PLUGIN_PREFIX}{}/{}", panel.plugin, panel.panel),
+            Self::OtherPlugins => OTHER_PLUGINS.into(),
+        }
+    }
+
+    /// 在一套布局里认出这个组件的键：名字，插件面板带 `props` 时接上 `?` 和 `props`。
+    /// 存「点出来的状态」时拿它记选中的标签和拆分。
+    pub fn key(&self) -> String {
+        match self {
+            Self::Plugin(PluginPanelRef {
+                props: Some(props), ..
+            }) => format!("{}?{}", self.name(), props.as_str()),
+            _ => self.name(),
         }
     }
 }
@@ -236,34 +248,48 @@ pub struct Layout {
     pub left: Option<DockSpec>,
     pub right: Option<DockSpec>,
     pub bottom: Option<DockSpec>,
+    /// 布局内容的指纹。文件改了指纹就变，存下的「点出来的状态」随之作废。
+    pub digest: String,
 }
 
 impl Layout {
-    /// 代码里的默认布局：左边会话列表，中间舞台，右边工具面板。
+    /// 代码里的默认布局：左边会话列表，中间舞台，右边文件、变更、历史和插件面板一组标签。
     pub fn default_layout() -> Self {
-        let tabs = |component| Node::Tabs {
-            tabs: vec![Tab::new(component)],
+        let tabs = |components: Vec<Component>| Node::Tabs {
+            tabs: components.into_iter().map(Tab::new).collect(),
             active: 0,
         };
-        let dock = |component| DockSpec {
-            size: None,
+        let dock = |size, components| DockSpec {
+            size: Some(size),
             open: true,
-            node: tabs(component),
+            node: tabs(components),
         };
-        Self {
+        let mut layout = Self {
             name: "默认".into(),
-            description: Some("左边会话列表，中间舞台，右边工具面板".into()),
+            description: Some("左边会话列表，中间舞台，右边文件、变更、历史和插件面板".into()),
             copied_from: None,
-            center: tabs(Component::Stage),
-            left: Some(dock(Component::Sessions)),
-            right: Some(dock(Component::Tools)),
+            center: tabs(vec![Component::Stage]),
+            left: Some(dock(240., vec![Component::Sessions])),
+            right: Some(dock(
+                320.,
+                vec![
+                    Component::Files,
+                    Component::Git,
+                    Component::History,
+                    Component::OtherPlugins,
+                ],
+            )),
             bottom: None,
-        }
+            digest: String::new(),
+        };
+        // 没有文件，拿结构本身算指纹：改了默认布局，旧的状态自然作废。
+        layout.digest = digest(&format!("{layout:?}"));
+        layout
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
         let wire: WireLayout = serde_json::from_str(text).map_err(|error| error.to_string())?;
-        wire.into_layout()
+        wire.into_layout(digest(text))
     }
 
     /// 所有组件，按区域（左、中、右、下）再按树的先后。
@@ -275,7 +301,7 @@ impl Layout {
         out
     }
 
-    /// 布局里摆出来的插件面板，按出现的先后。
+    /// 布局里点名摆出来的插件面板，按出现的先后。不含 `plugin:*` 收的那些。
     pub fn plugin_panels(&self) -> Vec<&PluginPanelRef> {
         self.components()
             .into_iter()
@@ -399,7 +425,7 @@ enum Place {
 }
 
 impl WireLayout {
-    fn into_layout(self) -> Result<Layout, String> {
+    fn into_layout(self, digest: String) -> Result<Layout, String> {
         if self.format > FORMAT {
             return Err(format!(
                 "这个布局比当前 smelt 新（format {}，这个版本只认 {FORMAT}）",
@@ -429,6 +455,7 @@ impl WireLayout {
             center,
             right: dock(self.right, "right")?,
             bottom: dock(self.bottom, "bottom")?,
+            digest,
         };
 
         let mut seen = HashSet::new();
@@ -439,6 +466,9 @@ impl WireLayout {
                         "插件面板 `{}` 以同样的 `props` 出现了不止一次；要摆多份，给每份不同的 `props`",
                         component.name()
                     ),
+                    Component::OtherPlugins => {
+                        format!("`{OTHER_PLUGINS}` 出现了不止一次；其余插件面板只能收在一处")
+                    }
                     _ => format!(
                         "组件 `{}` 出现了不止一次；内置组件在一套布局里只能放一处",
                         component.name()
@@ -546,6 +576,11 @@ fn into_tab(value: Value) -> Result<Tab, String> {
     };
     match &mut component {
         Component::Plugin(panel) => panel.props = props.as_ref().map(Props::new),
+        Component::OtherPlugins if props.is_some() || title.is_some() => {
+            return Err(format!(
+                "`{OTHER_PLUGINS}` 只是个位置记号，不能写 `props` 和 `title`"
+            ));
+        }
         builtin if props.is_some() || title.is_some() => {
             return Err(format!(
                 "`{}` 是内置组件，不能写 `props` 和 `title`：只有插件面板能写",
@@ -555,6 +590,101 @@ fn into_tab(value: Value) -> Result<Tab, String> {
         _ => {}
     }
     Ok(Tab { component, title })
+}
+
+/// 布局内容的指纹：SHA-256 的十六进制。
+fn digest(text: &str) -> String {
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+// ---- 点出来的状态 ----
+//
+// 布局文件只写初值。用户拖的宽度、开合、选中的标签按布局各存一份，格式是我们自己的，
+// 带版本号；读到不认识的版本或内容不对，就当没存过，回到布局里写的初值。
+//
+// 拆分不按路径认：Dock 会把只剩一个子节点的拆分拆掉、把同方向的拆分拼起来，`plugin:*`
+// 收进来的面板也随装了哪些插件变，路径靠不住。这里按「每个子节点最左上那个面板的键」
+// 认一个拆分，对不上的就不套。放大不存：上游 Dock 放大不发布局变化，重启回到不放大。
+
+/// 现在写的状态版本。
+pub const STATE_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutState {
+    pub v: u32,
+    pub docks: DockStates,
+    /// 拖过的拆分。
+    pub splits: Vec<SplitState>,
+    /// 各标签组里选中的组件，存 [`Component::key`]。
+    pub active: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockStates {
+    pub left: Option<DockState>,
+    pub right: Option<DockState>,
+    pub bottom: Option<DockState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockState {
+    pub open: bool,
+    pub size: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitState {
+    /// 每个子节点最左上那个面板的 [`Component::key`]，拿来认出是哪个拆分。
+    pub children: Vec<String>,
+    /// 每个子节点沿拆分方向的像素大小，`None` 均分剩下的。和 `children` 一样长。
+    pub sizes: Vec<Option<f32>>,
+}
+
+impl LayoutState {
+    pub fn new(docks: DockStates, splits: Vec<SplitState>, active: Vec<String>) -> Self {
+        Self {
+            v: STATE_VERSION,
+            docks,
+            splits,
+            active,
+        }
+    }
+
+    /// 读存下的状态。版本不认识、内容不合法都返回 `None`，调用方回到布局的初值。
+    pub fn parse(text: &str) -> Option<Self> {
+        let state: Self = serde_json::from_str(text).ok()?;
+        (state.v == STATE_VERSION && state.is_valid()).then_some(state)
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("LayoutState 只含能序列化的字段")
+    }
+
+    pub fn dock(&self, region: Region) -> Option<DockState> {
+        match region {
+            Region::Left => self.docks.left,
+            Region::Right => self.docks.right,
+            Region::Bottom => self.docks.bottom,
+            Region::Center => None,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        let size_ok = |size: f32| size.is_finite() && size > 0.;
+        [self.docks.left, self.docks.right, self.docks.bottom]
+            .into_iter()
+            .flatten()
+            .all(|dock| size_ok(dock.size))
+            && self.splits.iter().all(|split| {
+                split.children.len() >= 2
+                    && split.children.len() == split.sizes.len()
+                    && split.sizes.iter().flatten().all(|size| size_ok(*size))
+            })
+    }
 }
 
 // ---- 布局目录 ----
@@ -634,7 +764,7 @@ mod tests {
           { "tabs": ["smelt.stage"] }
         ]
       },
-      "right":  { "size": 360, "open": false, "tabs": ["smelt.tools"] }
+      "right":  { "size": 360, "open": false, "tabs": ["smelt.files", "smelt.git", "smelt.history", "plugin:*"] }
     }"#;
 
     #[test]
@@ -658,7 +788,11 @@ mod tests {
         assert!(layout.mentions_plugin_panel("com.smelt.kanban", "board"));
         assert!(!layout.mentions_plugin_panel("com.smelt.kanban", "other"));
         assert_eq!(layout.region_of(&Component::Stage), Some(Region::Center));
-        assert_eq!(layout.region_of(&Component::Tools), Some(Region::Right));
+        assert_eq!(layout.region_of(&Component::Git), Some(Region::Right));
+        assert_eq!(
+            layout.region_of(&Component::OtherPlugins),
+            Some(Region::Right)
+        );
         assert_eq!(layout.center_top_left(), Some(&Component::Plugin(board)));
     }
 
@@ -667,16 +801,26 @@ mod tests {
         let layout = Layout::default_layout();
         assert_eq!(layout.center_top_left(), Some(&Component::Stage));
         assert_eq!(layout.region_of(&Component::Sessions), Some(Region::Left));
-        assert_eq!(layout.region_of(&Component::Tools), Some(Region::Right));
+        for component in [
+            Component::Files,
+            Component::Git,
+            Component::History,
+            Component::OtherPlugins,
+        ] {
+            assert_eq!(layout.region_of(&component), Some(Region::Right));
+        }
         assert!(layout.plugin_panels().is_empty());
+        assert_eq!(layout.digest, Layout::default_layout().digest);
+        assert_eq!(layout.digest.len(), 64);
     }
 
     #[test]
-    fn sessions_and_tools_are_optional() {
+    fn everything_but_the_stage_is_optional() {
         let layout =
             parse(r#"{"format":1,"name":"专注","center":{"tabs":["smelt.stage"]}}"#).unwrap();
         assert_eq!(layout.region_of(&Component::Sessions), None);
-        assert_eq!(layout.region_of(&Component::Tools), None);
+        assert_eq!(layout.region_of(&Component::Files), None);
+        assert_eq!(layout.region_of(&Component::OtherPlugins), None);
     }
 
     fn rejects(text: &str, needle: &str) {
@@ -691,7 +835,7 @@ mod tests {
                 "center":{"split":"column","children":[
                   {"tabs":["smelt.stage"]},{"size":240,"tabs":["smelt.git","smelt.history"]}]},
                 "left":{"tabs":["smelt.sessions","smelt.files"]},
-                "right":{"tabs":["smelt.tools"]}}"#,
+                "right":{"tabs":["plugin:*"]}}"#,
         )
         .unwrap();
         assert_eq!(layout.region_of(&Component::Files), Some(Region::Left));
@@ -699,6 +843,106 @@ mod tests {
         assert_eq!(layout.region_of(&Component::History), Some(Region::Center));
         for component in [Component::Files, Component::Git, Component::History] {
             assert_eq!(Component::parse(&component.name()), Ok(component));
+        }
+    }
+
+    #[test]
+    fn other_plugins_is_a_marker_written_once() {
+        let layout = parse(
+            r#"{"format":1,"name":"x","center":{"tabs":["smelt.stage","plugin:k/board","plugin:*"]}}"#,
+        )
+        .unwrap();
+        // 记号不算点名摆出来的插件面板。
+        assert_eq!(layout.plugin_panels(), [&PluginPanelRef::new("k", "board")]);
+        assert_eq!(Component::parse(OTHER_PLUGINS), Ok(Component::OtherPlugins));
+        rejects(
+            r#"{"format":1,"name":"x","center":{"tabs":["smelt.stage","plugin:*"]},"right":{"tabs":["plugin:*"]}}"#,
+            "`plugin:*` 出现了不止一次",
+        );
+        rejects(
+            r#"{"format":1,"name":"x","center":{"tabs":["smelt.stage",{"component":"plugin:*","title":"插件"}]}}"#,
+            "只是个位置记号",
+        );
+        rejects(
+            r#"{"format":1,"name":"x","center":{"tabs":["smelt.stage",{"component":"plugin:*","props":{}}]}}"#,
+            "只是个位置记号",
+        );
+    }
+
+    #[test]
+    fn keys_tell_props_apart() {
+        let mut board = PluginPanelRef::new("k", "board");
+        assert_eq!(Component::Plugin(board.clone()).key(), "plugin:k/board");
+        board.props = Some(Props::new(&serde_json::json!({"b":1,"a":2})));
+        assert_eq!(
+            Component::Plugin(board).key(),
+            r#"plugin:k/board?{"a":2,"b":1}"#
+        );
+        assert_eq!(Component::Git.key(), GIT);
+    }
+
+    #[test]
+    fn the_digest_follows_the_file_text() {
+        let a = r#"{"format":1,"name":"x","center":{"tabs":["smelt.stage"]}}"#;
+        let b = r#"{"format":1,"name":"y","center":{"tabs":["smelt.stage"]}}"#;
+        assert_eq!(parse(a).unwrap().digest, parse(a).unwrap().digest);
+        assert_ne!(parse(a).unwrap().digest, parse(b).unwrap().digest);
+        assert_ne!(parse(a).unwrap().digest, Layout::default_layout().digest);
+    }
+
+    #[test]
+    fn layout_state_round_trips() {
+        let state = LayoutState::new(
+            DockStates {
+                left: Some(DockState {
+                    open: false,
+                    size: 260.,
+                }),
+                right: Some(DockState {
+                    open: true,
+                    size: 400.5,
+                }),
+                bottom: None,
+            },
+            vec![SplitState {
+                children: vec![STAGE.into(), "plugin:k/board".into()],
+                sizes: vec![Some(420.), None],
+            }],
+            vec![GIT.into()],
+        );
+        let text = state.to_json();
+        assert_eq!(LayoutState::parse(&text), Some(state.clone()));
+        assert_eq!(state.dock(Region::Left).map(|dock| dock.open), Some(false));
+        assert_eq!(state.dock(Region::Bottom), None);
+    }
+
+    #[test]
+    fn unreadable_layout_state_falls_back() {
+        let ok = r#"{"v":1,"docks":{"left":null,"right":{"open":true,"size":320},"bottom":null},"splits":[],"active":[]}"#;
+        assert!(LayoutState::parse(ok).is_some());
+        let bad = [
+            String::new(),
+            "{".into(),
+            "[]".into(),
+            // 不认识的版本。
+            ok.replace(r#""v":1"#, r#""v":2"#),
+            // 不认识的字段。
+            ok.replace(r#""active":[]"#, r#""active":[],"zoom":"x""#),
+            // 宽度不合法。
+            ok.replace(r#""size":320"#, r#""size":-1"#),
+            ok.replace(r#""size":320"#, r#""size":0"#),
+            // 拆分的子节点和大小对不上，或者不成拆分。
+            ok.replace(
+                r#""splits":[]"#,
+                r#""splits":[{"children":["a","b"],"sizes":[1]}]"#,
+            ),
+            ok.replace(
+                r#""splits":[]"#,
+                r#""splits":[{"children":["a"],"sizes":[1]}]"#,
+            ),
+        ];
+        for bad in bad {
+            assert_eq!(LayoutState::parse(&bad), None, "{bad}");
         }
     }
 
@@ -839,7 +1083,7 @@ mod tests {
         );
         rejects(
             r#"{"format":1,"name":"x","center":{"split":"column","children":[
-                {"tabs":["smelt.stage"]},{"tabs":["smelt.tools"],"active":1}]}}"#,
+                {"tabs":["smelt.stage"]},{"tabs":["smelt.git"],"active":1}]}}"#,
             "center/1: `active` 是 1",
         );
     }

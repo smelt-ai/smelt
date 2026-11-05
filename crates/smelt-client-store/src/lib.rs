@@ -93,8 +93,7 @@ impl ProjectKey {
     }
 }
 
-/// 一段对话在这台设备上的界面状态：终端怎么分屏、当前看哪个，舞台覆盖页、工具面板、
-/// 文件树、Git 页的开合与选中。枚举类字段存 serde 名，由界面转换。路径列表按原顺序存取。
+/// 一段对话在这台设备上的界面状态：终端怎么分屏、当前看哪个，文件树、Git 页的开合与选中。枚举类字段存 serde 名，由界面转换。路径列表按原顺序存取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConversationRouteRecord {
     /// `None` 是本机运行时。
@@ -105,10 +104,6 @@ pub struct ConversationRouteRecord {
     pub active_terminal_id: Option<String>,
     /// 终端的分屏布局。格式归界面定义并带版本号，这里只当一段 JSON 存取。
     pub dock_layout: Option<String>,
-    pub stage_cover: Option<String>,
-    pub tool_panel_tab: String,
-    pub tool_panel_open: bool,
-    pub tool_panel_w: f32,
     pub expanded: Vec<String>,
     pub file_tree_selected: Option<String>,
     pub open_file_path: Option<String>,
@@ -141,14 +136,24 @@ pub struct WorkspaceUiRecord {
     pub active_session_id: Option<String>,
     pub route: String,
     pub selected_agent_id: Option<String>,
-    pub sidebar_w: Option<f32>,
-    pub sidebar_open: Option<bool>,
     pub collapsed_projects: Vec<ProjectKey>,
     pub collapsed_agents: Vec<String>,
     pub sidebar_grouping: String,
     pub pinned_projects: Vec<ProjectKey>,
     pub sidebar_hide_empty_projects: bool,
     pub archive_expanded: bool,
+    /// 工作台用的布局：布局文件名去掉 `.json`，`None` 是代码里的默认布局。
+    pub layout_id: Option<String>,
+}
+
+/// 一套布局「点出来的状态」：停靠区开合、宽度，拆分大小，选中的标签。
+/// 格式归界面定义并带版本号，这里只当一段 JSON 存取。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayoutStateRecord {
+    pub layout_id: String,
+    /// 存的时候布局内容的指纹。和现在的布局对不上，这份状态就作废。
+    pub file_digest: String,
+    pub state: String,
 }
 
 /// 在线更新的进度，强杀之后下次启动接着装。
@@ -408,10 +413,9 @@ fn write_conversation_routes(
     let mut route = connection
         .prepare(
             "INSERT OR REPLACE INTO conversation_route (runtime_id, conversation_id,
-               active_terminal_id, dock_layout, stage_cover, tool_panel_tab, tool_panel_open,
-               tool_panel_w, file_tree_selected, open_file_path, file_tree_w, file_tree_open,
-               git_tab, diff_split, diff_scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+               active_terminal_id, dock_layout, file_tree_selected, open_file_path, file_tree_w,
+               file_tree_open, git_tab, diff_split, diff_scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .map_err(sql)?;
     let mut path = connection
@@ -429,10 +433,6 @@ fn write_conversation_routes(
                 record.conversation_id,
                 record.active_terminal_id,
                 record.dock_layout,
-                record.stage_cover,
-                record.tool_panel_tab,
-                record.tool_panel_open,
-                record.tool_panel_w,
                 record.file_tree_selected,
                 record.open_file_path,
                 record.file_tree_w,
@@ -463,9 +463,9 @@ fn read_conversation_routes(
 ) -> Result<Vec<ConversationRouteRecord>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT runtime_id, conversation_id, active_terminal_id, dock_layout, stage_cover,
-               tool_panel_tab, tool_panel_open, tool_panel_w, file_tree_selected, open_file_path,
-               file_tree_w, file_tree_open, git_tab, diff_split, diff_scope
+            "SELECT runtime_id, conversation_id, active_terminal_id, dock_layout,
+               file_tree_selected, open_file_path, file_tree_w, file_tree_open, git_tab,
+               diff_split, diff_scope
              FROM conversation_route ORDER BY runtime_id, conversation_id",
         )
         .map_err(sql)?;
@@ -477,21 +477,17 @@ fn read_conversation_routes(
                 conversation_id: row.get(1)?,
                 active_terminal_id: row.get(2)?,
                 dock_layout: row.get(3)?,
-                stage_cover: row.get(4)?,
-                tool_panel_tab: row.get(5)?,
-                tool_panel_open: row.get(6)?,
-                tool_panel_w: row.get(7)?,
                 expanded: Vec::new(),
-                file_tree_selected: row.get(8)?,
-                open_file_path: row.get(9)?,
-                file_tree_w: row.get(10)?,
-                file_tree_open: row.get(11)?,
+                file_tree_selected: row.get(4)?,
+                open_file_path: row.get(5)?,
+                file_tree_w: row.get(6)?,
+                file_tree_open: row.get(7)?,
                 pinned_roots: Vec::new(),
                 collapsed_roots: Vec::new(),
-                git_tab: row.get(12)?,
-                diff_split: row.get(13)?,
+                git_tab: row.get(8)?,
+                diff_split: row.get(9)?,
                 git_tree_collapsed: Vec::new(),
-                diff_scope: row.get(14)?,
+                diff_scope: row.get(10)?,
             })
         })
         .map_err(sql)?
@@ -620,19 +616,18 @@ pub(crate) fn write_workspace_ui(
     connection
         .execute(
             "INSERT OR REPLACE INTO workspace_ui (id, active_session, active_session_id, route,
-               selected_agent_id, sidebar_w, sidebar_open, sidebar_grouping,
-               sidebar_hide_empty_projects, archive_expanded)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               selected_agent_id, sidebar_grouping, sidebar_hide_empty_projects,
+               archive_expanded, layout_id)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 record.active_session as i64,
                 record.active_session_id,
                 record.route,
                 record.selected_agent_id,
-                record.sidebar_w,
-                record.sidebar_open,
                 record.sidebar_grouping,
                 record.sidebar_hide_empty_projects,
-                record.archive_expanded
+                record.archive_expanded,
+                record.layout_id
             ],
         )
         .map_err(sql)?;
@@ -858,8 +853,8 @@ impl ClientStore {
         self.with(|connection| {
             let Some(mut record) = connection
                 .query_row(
-                    "SELECT active_session, active_session_id, route, selected_agent_id, sidebar_w,
-                       sidebar_open, sidebar_grouping, sidebar_hide_empty_projects, archive_expanded
+                    "SELECT active_session, active_session_id, route, selected_agent_id,
+                       sidebar_grouping, sidebar_hide_empty_projects, archive_expanded, layout_id
                      FROM workspace_ui WHERE id = 1",
                     [],
                     |row| {
@@ -868,14 +863,13 @@ impl ClientStore {
                             active_session_id: row.get(1)?,
                             route: row.get(2)?,
                             selected_agent_id: row.get(3)?,
-                            sidebar_w: row.get(4)?,
-                            sidebar_open: row.get(5)?,
                             collapsed_projects: Vec::new(),
                             collapsed_agents: Vec::new(),
-                            sidebar_grouping: row.get(6)?,
+                            sidebar_grouping: row.get(4)?,
                             pinned_projects: Vec::new(),
-                            sidebar_hide_empty_projects: row.get(7)?,
-                            archive_expanded: row.get(8)?,
+                            sidebar_hide_empty_projects: row.get(5)?,
+                            archive_expanded: row.get(6)?,
+                            layout_id: row.get(7)?,
                         })
                     },
                 )
@@ -894,6 +888,46 @@ impl ClientStore {
     #[track_caller]
     pub fn put_workspace_ui(&self, record: &WorkspaceUiRecord) -> Result<(), ClientStoreError> {
         self.write(|connection| write_workspace_ui(connection, record))
+    }
+
+    /// 某套布局存下的状态。
+    #[track_caller]
+    pub fn layout_state(
+        &self,
+        layout_id: &str,
+    ) -> Result<Option<LayoutStateRecord>, ClientStoreError> {
+        self.with(|connection| {
+            connection
+                .query_row(
+                    "SELECT layout_id, file_digest, state FROM workspace_layout_state
+                     WHERE layout_id = ?1",
+                    [layout_id],
+                    |row| {
+                        Ok(LayoutStateRecord {
+                            layout_id: row.get(0)?,
+                            file_digest: row.get(1)?,
+                            state: row.get(2)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(sql)
+        })
+    }
+
+    /// 换掉这套布局存下的状态。
+    #[track_caller]
+    pub fn put_layout_state(&self, record: &LayoutStateRecord) -> Result<(), ClientStoreError> {
+        self.write(|connection| {
+            connection
+                .execute(
+                    "INSERT OR REPLACE INTO workspace_layout_state (layout_id, file_digest, state)
+                     VALUES (?1, ?2, ?3)",
+                    params![record.layout_id, record.file_digest, record.state],
+                )
+                .map(drop)
+                .map_err(sql)
+        })
     }
 
     #[track_caller]

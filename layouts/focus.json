@@ -1,7 +1,7 @@
 {
   "format": 1,
   "name": "专注",
-  "description": "示例：不要会话列表，只留舞台和工具面板",
+  "description": "示例：不要会话列表，只留舞台和右边的文件、变更、历史",
   "center": { "tabs": ["smelt.stage"] },
-  "right": { "tabs": ["smelt.tools"] }
+  "right": { "tabs": ["smelt.files", "smelt.git", "smelt.history", "plugin:*"] }
 }

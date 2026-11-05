@@ -6,7 +6,7 @@
 //! 入口默认导出的视图是插件的根：宿主挂载并持有它（持有着就是插件活着），但不显示。
 //! 插件要显示的东西是面板：在 `smelt.json` 里声明，在根视图的 `init()` 里用
 //! `DockArea.register_panel` 注册，布局按 `plugin:<id>/<面板>` 摆（见
-//! `workspace_layout`）。没摆进布局的面板眼下落在工具面板里。
+//! `workspace_layout`）。没被点名摆出来的面板由布局里的 `plugin:*` 收进它所在的标签组。
 //!
 //! gpui-shell 不提供「列出某个插件注册了哪些面板」，`gpui-shell.json` 又不收别的字段，
 //! 所以面板清单写在 smelt 自己的 `smelt.json` 里（和 VS Code 的 `contributes.views`
@@ -54,6 +54,7 @@ pub(crate) use host_workspace::{
     CurrentProject, MachineEntry, MachineInfo, ProjectInfo, SessionInfo,
 };
 use host_workspace::{HostContext, Topic};
+use smelt_client::layout::PluginPanelRef;
 
 pub(crate) use log::install as install_log;
 pub(crate) use manage::{import, uninstall, user_plugin_dir};
@@ -74,9 +75,6 @@ struct Registry {
     runtime: Option<Rc<ShellRuntime>>,
     /// 已挂载的插件，持有它们的根视图。清掉就卸载：视图拥有的任务随视图一起取消。
     plugins: Vec<MountedPlugin>,
-    /// 这个进程里见过的插件面板（`<插件 id>/<面板>`），下标就是 `PluginTabSlot`。只增不删：
-    /// 重新加载、增删插件之后，同一个面板还是同一个槽位。
-    keys: Vec<String>,
     /// 每次 `mount_all` 加一。插件面板记着自己按哪一次建的，对不上就重建。
     generation: u64,
     /// 所有插件共享的宿主上下文，`smelt-workspace.context()` 读它。
@@ -86,31 +84,8 @@ struct Registry {
 }
 
 impl Registry {
-    fn slot_of(&mut self, key: String) -> Option<PluginTabSlot> {
-        let index = match self.keys.iter().position(|seen| *seen == key) {
-            Some(index) => index,
-            None => {
-                self.keys.push(key);
-                self.keys.len() - 1
-            }
-        };
-        u16::try_from(index).ok().map(PluginTabSlot)
-    }
-
     fn plugin(&self, id: &str) -> Option<&MountedPlugin> {
         self.plugins.iter().find(|plugin| plugin.id == id)
-    }
-
-    fn declared(&self, slot: PluginTabSlot) -> Option<(&MountedPlugin, &DeclaredPanel)> {
-        self.plugins.iter().find_map(|plugin| {
-            let panel = plugin
-                .panels
-                .as_ref()
-                .ok()?
-                .iter()
-                .find(|panel| panel.slot == slot)?;
-            Some((plugin, panel))
-        })
     }
 }
 
@@ -129,7 +104,6 @@ struct MountedPlugin {
 struct DeclaredPanel {
     name: String,
     title: String,
-    slot: PluginTabSlot,
 }
 
 /// `smelt.json`：smelt 要知道、gpui-shell 清单里放不下的东西。现在只有面板清单。
@@ -214,15 +188,10 @@ pub(crate) struct InstalledPlugin {
     pub(crate) error: Option<String>,
 }
 
-/// 一个插件面板的槽位：工具面板里插件页签用它。`ToolPanelTab` 必须是 `Copy`，所以运行时
-/// 用下标，存档时换回 `<插件 id>/<面板>`（见 `key_for` / `slot_for_key`）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PluginTabSlot(pub(crate) u16);
-
 /// 发现并挂载全部插件。读盘、执行脚本，只在事件里调用，不在 render 里。
 ///
-/// 工作台创建时调一次，必须先于工作台存档读取和布局搭建：存档里的 tab 以面板名记录，
-/// 注册表为空时会降级成 Files；布局里的插件面板要等插件注册过才建得出来。之后设置页
+/// 工作台创建时调一次，必须先于布局搭建：布局里的插件面板要等插件注册过才建得出来，
+/// `plugin:*` 也要知道有哪些面板。之后设置页
 /// 导入、删除、重新加载插件时再调：旧的插件全部卸载、重新加载，调用方随后让布局重建
 /// 插件面板（`Workspace::rebuild_plugin_panels`）。工作台窗口同一时刻只有一个，`window` 就是它。
 pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
@@ -253,18 +222,11 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                  source,
              }| {
                 let id = manifest.id().to_string();
-                let panels = declared_panels(&root).and_then(|panels| {
+                let panels = declared_panels(&root).map(|panels| {
                     panels
                         .into_iter()
-                        .map(|(name, title)| {
-                            let slot = REGISTRY
-                                .with(|registry| {
-                                    registry.borrow_mut().slot_of(format!("{id}/{name}"))
-                                })
-                                .ok_or_else(|| "插件面板太多，没有加载".to_string())?;
-                            Ok(DeclaredPanel { name, title, slot })
-                        })
-                        .collect::<Result<Vec<_>, String>>()
+                        .map(|(name, title)| DeclaredPanel { name, title })
+                        .collect::<Vec<_>>()
                 });
                 if let Err(error) = &panels {
                     eprintln!("[plugins] {id}：{error}");
@@ -491,56 +453,23 @@ pub(crate) fn generation() -> u64 {
     with_registry(|registry| registry.generation)
 }
 
-/// 已挂载插件声明的面板的槽位，按插件加载顺序、再按 `smelt.json` 里的先后。
-pub(crate) fn slots() -> Vec<PluginTabSlot> {
+/// 已挂载插件声明的面板，按插件加载顺序、再按 `smelt.json` 里的先后。
+/// 布局里 `plugin:*` 收的就是其中没被点名摆出来的那些。
+pub(crate) fn declared() -> Vec<PluginPanelRef> {
     with_registry(|registry| {
         registry
             .plugins
             .iter()
-            .filter_map(|plugin| plugin.panels.as_ref().ok())
+            .filter_map(|plugin| {
+                let panels = plugin.panels.as_ref().ok()?;
+                Some(
+                    panels
+                        .iter()
+                        .map(|panel| PluginPanelRef::new(plugin.id.clone(), panel.name.clone())),
+                )
+            })
             .flatten()
-            .map(|panel| panel.slot)
             .collect()
-    })
-}
-
-/// 槽位上的面板眼下还在：插件挂着，也还声明着它。
-pub(crate) fn is_mounted(slot: PluginTabSlot) -> bool {
-    with_registry(|registry| registry.declared(slot).is_some())
-}
-
-/// 槽位对应的插件 id 和面板名。插件已经删掉也照样给出。
-pub(crate) fn panel_of(slot: PluginTabSlot) -> Option<(String, String)> {
-    let key = key_for(slot)?;
-    let (plugin, panel) = key.split_once('/')?;
-    Some((plugin.to_string(), panel.to_string()))
-}
-
-pub(crate) fn title(slot: PluginTabSlot) -> String {
-    with_registry(|registry| {
-        registry
-            .declared(slot)
-            .map(|(_, panel)| panel.title.clone())
-            .unwrap_or_default()
-    })
-}
-
-/// 存档里的稳定身份：`<插件 id>/<面板>`。插件已经删掉也照样给出：下次启动解析不到，
-/// 自然降级成 Files；要是又装回来，还能回到它。
-pub(crate) fn key_for(slot: PluginTabSlot) -> Option<String> {
-    with_registry(|registry| registry.keys.get(usize::from(slot.0)).cloned())
-}
-
-/// 只认眼下挂着的插件声明的面板。
-pub(crate) fn slot_for_key(key: &str) -> Option<PluginTabSlot> {
-    with_registry(|registry| {
-        let slot = registry
-            .keys
-            .iter()
-            .position(|seen| seen == key)
-            .and_then(|index| u16::try_from(index).ok())
-            .map(PluginTabSlot)?;
-        registry.declared(slot).map(|_| slot)
     })
 }
 

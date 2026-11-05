@@ -193,12 +193,9 @@ impl Workspace {
         self.sidebar_cursor.as_ref().map(SidebarItem::key)
     }
 
-    /// ⌘⇧E：把焦点放进侧栏，停在正在看的那一行上；侧栏收着就先打开。
+    /// ⌘⇧E：把焦点放进侧栏，停在正在看的那一行上；会话列表没露出来就先亮出来。
     pub(crate) fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sidebar_open {
-            self.sidebar_open = true;
-            self.save_state(cx);
-        }
+        self.reveal_layout_component(&smelt_client::layout::Component::Sessions, window, cx);
         let items: Vec<SidebarItem> = self
             .sidebar_items(cx)
             .into_iter()

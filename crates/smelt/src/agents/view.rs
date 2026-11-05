@@ -1254,7 +1254,7 @@ impl Workspace {
             self.agent_surface.editor = None;
         }
 
-        let left_guard = self.chrome_left_guard(window);
+        let left_guard = self.chrome_left_guard(window, cx);
         let (header, body) = if let Some(open) = open {
             let selected = groups
                 .iter()
@@ -1407,7 +1407,7 @@ impl Workspace {
                 }
             },
         );
-        let header = product_page_chrome(self.chrome_left_guard(window))
+        let header = product_page_chrome(self.chrome_left_guard(window, cx))
             .gap_3()
             .child(
                 div()

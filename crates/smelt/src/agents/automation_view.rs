@@ -665,7 +665,7 @@ impl Workspace {
         }
 
         let entity = cx.entity();
-        let left_guard = self.chrome_left_guard(window);
+        let left_guard = self.chrome_left_guard(window, cx);
         let Some(automation) = self.nav.automations().editor().cloned() else {
             return div()
                 .flex_1()

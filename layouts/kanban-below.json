@@ -10,5 +10,5 @@
       { "size": 240, "tabs": ["plugin:com.smelt.kanban/board"] }
     ]
   },
-  "right": { "tabs": ["smelt.tools"] }
+  "right": { "tabs": ["smelt.files", "smelt.git", "smelt.history", "plugin:*"] }
 }

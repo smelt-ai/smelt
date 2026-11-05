@@ -1,7 +1,7 @@
 {
   "format": 1,
   "name": "变更在旁",
-  "description": "示例：变更单独摆在舞台右边，工具面板里只剩文件和历史",
+  "description": "示例：变更单独摆在舞台右边，右栏只剩文件、历史和其余插件",
   "left": { "tabs": ["smelt.sessions"] },
   "center": {
     "split": "row",
@@ -10,5 +10,5 @@
       { "size": 380, "tabs": ["smelt.git"] }
     ]
   },
-  "right": { "open": false, "tabs": ["smelt.tools"] }
+  "right": { "open": false, "tabs": ["smelt.files", "smelt.history", "plugin:*"] }
 }

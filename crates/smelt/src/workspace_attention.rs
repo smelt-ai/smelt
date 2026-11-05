@@ -51,9 +51,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 通知目标必须真的露出来；Tool Panel 全屏覆盖层若仍保留，activate 会把底下
-        // 会话标已读但用户实际看不到它。
-        self.stage_cover = None;
+        // 通知目标必须真的露出来：舞台被放大的另一组或同组别的标签挡着时先亮出舞台，
+        // 不然 activate 把会话标已读，用户实际看不到它。
+        self.reveal_layout_component(&smelt_client::layout::Component::Stage, window, cx);
         if let Some(pane) = pane
             && let Some(session) = self.sessions.get_mut(session_ix)
         {

@@ -1706,14 +1706,13 @@ impl Workspace {
         self.add_session(runtime, cwd, cx);
     }
 
-    /// 切换左侧栏（会话列表与工作区）开合状态。宽度由 Dock 的左栏记住。
+    /// 切换左停靠区开合。开合和宽度都在 Dock 上，变了由 Dock 的布局变化存下来。
     pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        if !self.sidebar_open {
+        let placement = gpui_component::dock::DockPlacement::Left;
+        self.toggle_shell_dock(placement, window, cx);
+        if !self.shell_dock_open(placement, cx) {
             self.focus_active_stage(window, cx);
         }
-        self.save_state(cx);
-        cx.notify();
     }
 
     /// 在这个运行时上打开一个目录作为项目并设为活动项目。已经开着就只切活动。项目随
@@ -1740,8 +1739,6 @@ impl Workspace {
             return;
         }
         self.active_project = Some(ProjectRef { runtime, root });
-        // 打开项目 = 想看这个项目，收掉盖在舞台上的覆盖页。
-        self.stage_cover = None;
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -2043,9 +2040,6 @@ impl Workspace {
             paths.len(),
             paths
         );
-        self.stage_cover = None;
-        cx.notify();
-
         let paths: Vec<std::path::PathBuf> = paths.to_vec();
         let (tx, rx) = smol::channel::bounded(1);
         std::thread::Builder::new()
@@ -2338,33 +2332,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 聚焦当前会话的活动终端（ACP 会话的聚焦走视图自身，这里跳过）。
-    /// 设置/收回舞台覆盖页并处理焦点：全屏页自己没有可聚焦元素，焦点认领到根
-    /// 让全局快捷键仍收得到；收回时把焦点还给活动会话（终端 pane / ACP 输入框）。
-    pub(crate) fn set_stage_cover(
-        &mut self,
-        v: Option<StageCover>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = self.stage_cover != v;
-        if v.is_some() {
-            self.desktop = None;
-            self.nav.set_active(WorkspaceRoute::Session);
-        }
-        self.stage_cover = v;
-        match v {
-            Some(_) => window.focus(&self.focus_handle, cx),
-            None => self.focus_active_stage(window, cx),
-        }
-        if changed {
-            // Esc / 返回条也走这里。只改内存不落盘的话，冷启动会按存档再进全屏。
-            self.save_state(cx);
-            self.schedule_visible_refresh(cx);
-        }
-        cx.notify();
-    }
-
     /// 焦点还给活动会话：Term → 活动 pane；ACP → 消息流输入框。
     pub(crate) fn focus_active_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Session {
@@ -2423,7 +2390,7 @@ impl Workspace {
     }
 
     pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
-        if self.stage_cover.is_some() {
+        if !self.stage_visible(cx) {
             return None;
         }
         if !route_views_session(self.active_tab(), self.nav.agents().conversation_sid()) {
@@ -2498,7 +2465,8 @@ impl Workspace {
             self.sync_session_ui(window, cx);
             self.desktop = None;
             self.nav.set_active(WorkspaceRoute::Session);
-            let route_has_overlay = self.stage_cover.is_some();
+            // 舞台被同组别的标签或放大的另一组挡住时，切过去也不算看过。
+            let route_has_overlay = !self.stage_visible(cx);
             // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
             // 视图更新期间再读它会 panic。
             let restore_settled = self.session_restore_settled(ix, cx);

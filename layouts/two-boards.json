@@ -25,5 +25,5 @@
       }
     ]
   },
-  "right": { "tabs": ["smelt.tools"] }
+  "right": { "tabs": ["smelt.files", "smelt.git", "smelt.history", "plugin:*"] }
 }
