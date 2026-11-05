@@ -2685,7 +2685,8 @@ mod imp {
         apply_v35_drop_agent_command(transaction)
     }
 
-    /// v35：按 agent 改启动命令的设置删掉了。已经没有这张表的库跳过。
+    /// v35：按 agent 改启动命令的设置删掉了，换命令用自定义 Agent。用户改过的命令先各转成一个
+    /// 基于同一 agent 的自定义 Agent，再删表。已经没有这张表的库跳过。
     fn apply_v35_drop_agent_command(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
@@ -2693,7 +2694,219 @@ mod imp {
             .iter()
             .any(|table| table == "agent_acp_command")
         {
+            convert_v34_agent_commands(transaction)?;
             transaction.execute_batch(crate::schema::MIGRATE_V34_TO_V35)?;
+        }
+        Ok(())
+    }
+
+    /// v34 时一家 agent 在迁移里要用到的东西。这是冻结的历史，以后改出厂命令、改数据目录变量
+    /// 都不动这里。
+    struct V34Agent {
+        command_key: &'static str,
+        kind_id: &'static str,
+        label: &'static str,
+        /// 换数据目录的变量。自定义 Agent 把它单列成「数据目录」，不许写进环境变量。
+        workspace_env: Option<&'static str>,
+        /// 发布过的出厂命令。原样留着这些的不算改过。
+        factory: &'static [&'static str],
+    }
+
+    const V34_AGENTS: &[V34Agent] = &[
+        V34Agent {
+            command_key: "acp_cmd",
+            kind_id: "claude",
+            label: "Claude Code",
+            workspace_env: Some("CLAUDE_CONFIG_DIR"),
+            factory: &[
+                "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
+                "bunx --bun @agentclientprotocol/claude-agent-acp@0.70.0",
+                "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
+            ],
+        },
+        V34Agent {
+            command_key: "acp_copilot_cmd",
+            kind_id: "copilot",
+            label: "GitHub Copilot",
+            workspace_env: Some("COPILOT_HOME"),
+            factory: &["copilot --acp", "copilot --acp --allow-all"],
+        },
+        V34Agent {
+            command_key: "acp_codex_cmd",
+            kind_id: "codex",
+            label: "Codex",
+            workspace_env: Some("CODEX_HOME"),
+            factory: &[
+                "bunx --bun @zed-industries/codex-acp@0.16.0",
+                "bunx --bun @agentclientprotocol/codex-acp@1.1.7",
+                "bunx --bun @agentclientprotocol/codex-acp@1.6.2",
+                "bunx --bun @agentclientprotocol/codex-acp@1.12.0",
+                "codex app-server",
+            ],
+        },
+        V34Agent {
+            command_key: "acp_grok_cmd",
+            kind_id: "grok",
+            label: "Grok",
+            workspace_env: Some("GROK_HOME"),
+            factory: &["grok agent stdio", "grok agent --always-approve stdio"],
+        },
+        V34Agent {
+            command_key: "acp_cursor_cmd",
+            kind_id: "cursor",
+            label: "Cursor Agent",
+            workspace_env: None,
+            factory: &["cursor-agent acp", "cursor-agent --force acp"],
+        },
+        V34Agent {
+            command_key: "acp_opencode_cmd",
+            kind_id: "opencode",
+            label: "OpenCode",
+            workspace_env: Some("OPENCODE_CONFIG_DIR"),
+            factory: &["opencode acp"],
+        },
+        V34Agent {
+            command_key: "acp_kiro_cmd",
+            kind_id: "kiro",
+            label: "Kiro",
+            workspace_env: None,
+            factory: &[
+                "kiro-cli acp",
+                "kiro-cli acp --trust-all-tools",
+                "kiro-cli acp --agent-engine v3 --auth-method cli --trust-all-tools",
+                "kiro-cli acp --agent-engine v3 --auth-method cli",
+            ],
+        },
+        V34Agent {
+            command_key: "acp_pi_cmd",
+            kind_id: "pi",
+            label: "Pi",
+            workspace_env: Some("PI_CODING_AGENT_DIR"),
+            factory: &["bunx --bun pi-acp@0.0.33", "smelt-pi-agent"],
+        },
+    ];
+
+    /// 自定义 Agent 的环境变量里不许设的名字（同 `AcpProfile::validate`）。命令前缀里写了的
+    /// 留在启动命令里，启动时照旧生效。
+    const V34_LAUNCH_ONLY_ENV: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "SHELL",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "BASH_ENV",
+    ];
+
+    /// 一条旧命令转成的自定义 Agent。
+    #[derive(Debug, PartialEq, Eq)]
+    struct V34CommandProfile {
+        /// 空表示沿用这家 agent 的出厂命令。
+        command: String,
+        workspace_dir: String,
+        env: std::collections::BTreeMap<String, String>,
+    }
+
+    impl V34Agent {
+        /// 命令和出厂的一样（多打的空格不算）就不用转，返回 None。开头的 `VAR=值` 拆出来：数据目录
+        /// 变量进「数据目录」，启动专用的留在命令前缀里，其余进环境变量。
+        fn profile_for(&self, command: &str) -> Option<V34CommandProfile> {
+            let mut words = command.split_whitespace().peekable();
+            let mut prefix = Vec::new();
+            let mut workspace_dir = String::new();
+            let mut env = std::collections::BTreeMap::new();
+            while let Some(&word) = words.peek() {
+                let Some((name, value)) = v34_env_assignment(word) else {
+                    break;
+                };
+                if self.workspace_env == Some(name) {
+                    workspace_dir = value.to_string();
+                } else if V34_LAUNCH_ONLY_ENV.contains(&name) {
+                    prefix.push(word);
+                } else {
+                    env.insert(name.to_string(), value.to_string());
+                }
+                words.next();
+            }
+            let program = words.collect::<Vec<_>>().join(" ");
+            let factory = program.is_empty() || self.factory.contains(&program.as_str());
+            if factory && prefix.is_empty() && env.is_empty() && workspace_dir.is_empty() {
+                return None;
+            }
+            let command = if factory && prefix.is_empty() {
+                String::new()
+            } else {
+                prefix
+                    .into_iter()
+                    .chain((!program.is_empty()).then_some(program.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            Some(V34CommandProfile {
+                command,
+                workspace_dir,
+                env,
+            })
+        }
+    }
+
+    /// shell 风格的 `VAR=值`，规则同 `workspace_override::split_env_assignment`。
+    fn v34_env_assignment(word: &str) -> Option<(&str, &str)> {
+        let (name, value) = word.split_once('=')?;
+        let mut chars = name.chars();
+        let first = chars.next()?;
+        ((first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then_some((name, value))
+    }
+
+    fn convert_v34_agent_commands(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        let rows = transaction
+            .prepare("SELECT command_key, command FROM agent_acp_command ORDER BY command_key")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM agent_profile",
+            [],
+            |row| row.get(0),
+        )?;
+        for (command_key, command) in rows {
+            let Some(agent) = V34_AGENTS
+                .iter()
+                .find(|agent| agent.command_key == command_key)
+            else {
+                continue;
+            };
+            let Some(profile) = agent.profile_for(&command) else {
+                continue;
+            };
+            let id = format!("adapter-command-{}", agent.kind_id);
+            transaction.execute(
+                "INSERT INTO agent_profile(id, kind_id, label, command, workspace_dir, position)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    id,
+                    agent.kind_id,
+                    format!("{}（原适配器命令）", agent.label),
+                    profile.command,
+                    profile.workspace_dir,
+                    position,
+                ],
+            )?;
+            for (name, value) in &profile.env {
+                transaction.execute(
+                    "INSERT INTO agent_profile_env(profile_id, name, value) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id, name, value],
+                )?;
+            }
+            position += 1;
         }
         Ok(())
     }
@@ -5328,9 +5541,10 @@ CREATE TABLE published_session (
 );
 ";
 
-    /// v34 的库还存着按 agent 改的启动命令；迁到 v35 时整张表删掉，别的配置原样留着。
+    /// v34 的库还存着按 agent 改的启动命令；迁到 v35 时改过的转成自定义 Agent，出厂的不转，
+    /// 然后整张表删掉，别的配置原样留着。
     #[test]
-    fn v34_database_drops_agent_commands() {
+    fn v34_database_turns_agent_commands_into_custom_agents() {
         let dir = temp_dir("v34-migration");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -5343,8 +5557,14 @@ CREATE TABLE published_session (
             .unwrap();
         connection
             .execute_batch(
-                "INSERT INTO agent_acp_command(command_key, command) VALUES ('acp_cmd', 'claude --x');
-                 INSERT INTO agent_acp_env(engine_kind_id, name, value) VALUES ('claude', 'K', 'v');",
+                "INSERT INTO agent_acp_command(command_key, command) VALUES
+                   ('acp_cmd', 'CLAUDE_CONFIG_DIR=~/.claude-work DEBUG=1 bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0'),
+                   ('acp_codex_cmd', 'PATH=/opt/bin:/usr/bin   my-codex-acp --fast'),
+                   ('acp_grok_cmd', ' grok  agent stdio '),
+                   ('acp_dsh_cmd', 'dsh-acp-rich');
+                 INSERT INTO agent_acp_env(engine_kind_id, name, value) VALUES ('claude', 'K', 'v');
+                 INSERT INTO agent_profile(id, kind_id, label, command, workspace_dir, position)
+                   VALUES ('quant', 'claude', '量化', '', '~/.quant', 0);",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 34).unwrap();
@@ -5365,6 +5585,73 @@ CREATE TABLE published_session (
             .query_row("SELECT COUNT(*) FROM agent_acp_env", [], |row| row.get(0))
             .unwrap();
         assert_eq!(env, 1);
+        let profiles: Vec<(String, String, String, String, String, i64)> = connection
+            .prepare(
+                "SELECT id, kind_id, label, command, workspace_dir, position
+                     FROM agent_profile ORDER BY position",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let profile = |id: &str, kind: &str, label: &str, command: &str, dir: &str, position| {
+            (
+                id.to_string(),
+                kind.to_string(),
+                label.to_string(),
+                command.to_string(),
+                dir.to_string(),
+                position,
+            )
+        };
+        assert_eq!(
+            profiles,
+            [
+                profile("quant", "claude", "量化", "", "~/.quant", 0),
+                profile(
+                    "adapter-command-claude",
+                    "claude",
+                    "Claude Code（原适配器命令）",
+                    "",
+                    "~/.claude-work",
+                    1
+                ),
+                profile(
+                    "adapter-command-codex",
+                    "codex",
+                    "Codex（原适配器命令）",
+                    "PATH=/opt/bin:/usr/bin my-codex-acp --fast",
+                    "",
+                    2
+                ),
+            ],
+            "出厂命令（多打空格也算）和认不出的旧 agent 不转"
+        );
+        let env: Vec<(String, String, String)> = connection
+            .prepare("SELECT profile_id, name, value FROM agent_profile_env ORDER BY profile_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            env,
+            [(
+                "adapter-command-claude".to_string(),
+                "DEBUG".to_string(),
+                "1".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -5404,7 +5691,7 @@ CREATE TABLE published_session (
                  INSERT INTO history_title(agent, resume_id, custom_title, updated_at_ms) VALUES
                    ('dsh', 'r1', 'DSH', 1), ('pi', 'r2', 'Pi', 1);
                  INSERT INTO agent_acp_command(command_key, command) VALUES
-                   ('acp_dsh_cmd', 'dsh-acp-rich'), ('acp_pi_cmd', 'smelt-pi');
+                   ('acp_dsh_cmd', 'dsh-acp-rich'), ('acp_pi_cmd', 'smelt-pi-agent');
                  INSERT INTO agent_acp_env(engine_kind_id, name, value) VALUES
                    ('dsh', 'K', 'v'), ('pi', 'K', 'v');
                  INSERT INTO agent_profile(id, kind_id, label, workspace_dir, position) VALUES
@@ -7283,8 +7570,6 @@ ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
 ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
 ";
 
-    /// v30 及更早的 workspace profile 表：没有启动命令列，也没有环境变量子表。
-    /// 用当前结构的库退回旧版本做夹具时换回去。
     /// v34 及更早还在、v35 删掉的按 agent 存启动命令的表。用当前结构的库退回旧版本做夹具时补上。
     const V34_AGENT_COMMAND: &str = "
 CREATE TABLE agent_acp_command (
@@ -7293,6 +7578,8 @@ CREATE TABLE agent_acp_command (
 ) WITHOUT ROWID;
 ";
 
+    /// v30 及更早的 workspace profile 表：没有启动命令列，也没有环境变量子表。
+    /// 用当前结构的库退回旧版本做夹具时换回去。
     const V30_AGENT_PROFILE: &str = "
 DROP TABLE agent_profile_env;
 DROP TABLE agent_profile;
