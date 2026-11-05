@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn session_attention_ids(session: &Session, cx: &App) -> Vec<String> {
+pub(crate) fn session_attention_ids(session: &Session, cx: &App) -> Vec<String> {
     match &session.kind {
         SessionKind::Term { .. } => session
             .term_leaves()
@@ -13,9 +13,24 @@ fn session_attention_ids(session: &Session, cx: &App) -> Vec<String> {
     }
 }
 
+/// 带角标的守护会话 id → 是否要处理（false 是只未读）。
+pub(crate) fn attention_badge(cx: &App) -> std::collections::HashMap<String, bool> {
+    cx.try_global::<AttentionGlobal>()
+        .map(|store| {
+            store
+                .0
+                .lock()
+                .unwrap()
+                .badge_sessions()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 菜单项点下去要露出来的那个守护会话 id。终端会话可能分屏：优先挂着提醒的
 /// pane，其次当前活动 pane，再其次第一个；对话只有一个 id。
-fn menu_jump_target(
+pub(crate) fn menu_jump_target(
     ids: &[String],
     badge: &std::collections::HashMap<String, bool>,
     active_id: Option<&str>,
@@ -51,14 +66,13 @@ impl Workspace {
 
     /// 系统通知只保存稳定的守护会话 id；点击时再查当前侧栏位置，避免通知
     /// 出现后用户重排、关闭会话导致旧索引跳错目标。
-    pub(crate) fn goto_notification_session(
-        &mut self,
+    /// 守护里的稳定会话 id 落在哪个会话上：会话下标，终端会话再带上是哪个分屏。
+    pub(crate) fn find_daemon_session(
+        &self,
         session_id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let target = self
-            .sessions
+        cx: &App,
+    ) -> Option<(usize, Option<Entity<TerminalView>>)> {
+        self.sessions
             .iter()
             .enumerate()
             .find_map(|(session_ix, session)| match &session.kind {
@@ -71,8 +85,16 @@ impl Workspace {
                     Some((session_ix, None))
                 }
                 SessionKind::Conversation(_) => None,
-            });
-        if let Some((session_ix, pane)) = target {
+            })
+    }
+
+    pub(crate) fn goto_notification_session(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some((session_ix, pane)) = self.find_daemon_session(session_id, cx) {
             self.goto_notification(session_ix, pane.as_ref(), window, cx);
             true
         } else {
@@ -167,18 +189,7 @@ impl Workspace {
             status_item::set_counts(attention_count, running_count);
         }
 
-        let badge: std::collections::HashMap<String, bool> = cx
-            .try_global::<AttentionGlobal>()
-            .map(|store| {
-                store
-                    .0
-                    .lock()
-                    .unwrap()
-                    .badge_sessions()
-                    .into_iter()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let badge = attention_badge(cx);
         let mut menu_order: Vec<usize> = (0..self.sessions.len()).collect();
         menu_order.sort_by_key(|&ix| statuses[ix].rank());
         let menu_snapshot: Vec<status_item::SessionEntry> = menu_order
@@ -227,34 +238,7 @@ impl Workspace {
             self.status_menu_snapshot = Some(menu_snapshot);
         }
 
-        // 插件经 `smelt-workspace.sessions()` 读：全部会话按侧栏顺序，挂着要处理的提醒也算「要你」。
-        let viewed = self.viewed_session_id(cx);
-        let plugin_sessions = self
-            .sessions
-            .iter()
-            .zip(&statuses)
-            .filter_map(|(session, &status)| {
-                let ids = session_attention_ids(session, cx);
-                let active_id = session
-                    .active_term()
-                    .map(|pane| pane.read(cx).session_id().to_string());
-                let id = menu_jump_target(&ids, &badge, active_id.as_deref())?;
-                let requires_action = ids.iter().any(|id| badge.get(id) == Some(&true));
-                Some(crate::plugins::SessionInfo {
-                    viewing: ids.iter().any(|id| Some(id.as_str()) == viewed.as_deref()),
-                    id,
-                    title: Self::title_with_runtime(session, cx),
-                    agent: session.agent_icon_id(cx),
-                    status: if requires_action {
-                        AgentStatus::NeedsYou
-                    } else {
-                        status
-                    },
-                    cwd: session.cwd(cx),
-                })
-            })
-            .collect();
-        crate::plugins::set_sessions(plugin_sessions);
+        self.publish_to_plugins(cx);
     }
 }
 

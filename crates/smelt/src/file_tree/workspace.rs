@@ -505,6 +505,7 @@ impl Workspace {
         // 拖宽/拖窄的手动结果不再覆盖。
         if self.tool_panel_open
             && matches!(self.tool_panel_tab, crate::tool_panel::ToolPanelTab::Files)
+            && !self.layout_places_tool(crate::tool_panel::ToolPanelTab::Files)
             && !self.tool_panel_promoted()
             && self.tool_panel_w < 640.
         {

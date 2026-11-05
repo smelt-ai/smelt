@@ -1,0 +1,6 @@
+{
+  "id": "com.smelt.kanban",
+  "name": "看板",
+  "version": "0.1.0",
+  "entry": "main.js"
+}

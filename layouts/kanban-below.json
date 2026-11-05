@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "name": "看板在下",
+  "description": "示例：舞台下面放会话看板",
+  "left": { "tabs": ["smelt.sessions"] },
+  "center": {
+    "split": "column",
+    "children": [
+      { "tabs": ["smelt.stage"] },
+      { "size": 240, "tabs": ["plugin:com.smelt.kanban/board"] }
+    ]
+  },
+  "right": { "tabs": ["smelt.tools"] }
+}

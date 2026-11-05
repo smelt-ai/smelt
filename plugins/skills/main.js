@@ -1,4 +1,4 @@
-// 「技能」面板：用 gpui-shell 原生绘制的技能管理，设计见同目录 DESIGN.md。
+// 「技能」插件（面板 `skills`）：用 gpui-shell 原生绘制的技能管理，设计见同目录 DESIGN.md。
 //
 // 磁盘操作在脚本里完成（官方 `fs/promises` 加 smelt 的通用模块 `smelt-fs`）；
 // 界面是 GPUI 元素。磁盘操作都是异步的，在事件里 `cx.spawn` 等它们，结果缓存在
@@ -8,11 +8,11 @@
 // 展开一层；「导入」展开在列表顶部。问题就标在出问题的那一行上，不另设汇总横幅。表单见 `editors.js`，小部件见
 // `ui.js`。只有删除、清理这类确认用居中的 `AlertDialog`。
 //
-// 当前项目由宿主写进 `smelt-workspace.context()`。脚本没法被宿主直接通知，
-// 所以每秒看一眼 `generation`，变了才重扫——轮询读的是内存，不碰磁盘。
+// 当前项目由宿主写进 `smelt-workspace.context()`；`changed("context", 版本)` 在项目
+// 换了时兑现，循环里等它再重扫，空闲时不醒。
 
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, DockArea } from "gpui-base";
 import {
   Collapsible,
   DropdownMenu,
@@ -26,7 +26,7 @@ import {
   InputState,
   Radio,
 } from "gpui-component";
-import { context } from "smelt-workspace";
+import { changed, context } from "smelt-workspace";
 import {
   scan,
   repairBridges,
@@ -41,11 +41,14 @@ import {
 import { ScopeSession, ImportSession, scopeForm, planView, importSource, importWarnings } from "./editors.js";
 import { SPACE, MONO, TRASH, button, tag, hint, box, section, confirm, edited, pretty } from "./ui.js";
 
-export default class Skills extends View {
+/// 面板 `skills`：技能管理。宿主按布局建它。
+class Skills extends View {
   init(_props, cx) {
     this.state = { skills: [], broken: [], installed: [] };
     this.home = "";
     this.projectRoot = null;
+    // 当前项目在别的机器上时是那台机器的名字：这里只读得到本机磁盘，项目级技能看不到。
+    this.remoteMachine = null;
     this.notice = null;
     // 展开的是哪一行（skill 目录）。一次只展开一行。
     this.expanded = null;
@@ -71,25 +74,24 @@ export default class Skills extends View {
     cx.spawn(async (cx) => {
       await this.load();
       cx.notify();
-    });
-    this.watch = cx.timer.every(1000, (cx) => {
-      if (context().generation === this.generation) return;
-      cx.spawn(async (cx) => {
+      for (;;) {
+        await changed("context", this.generation);
         await this.reload(cx);
         cx.notify();
-      });
+      }
     });
   }
 
   // ---------------------------------------------------------------- 数据
 
-  /// 重扫磁盘。只在 init、定时器、事件里调用，不在 render 里。
-  /// `generation` 在第一个 await 之前就记下，扫描期间定时器不会再触发一次。
+  /// 重扫磁盘。只在 init、项目变化、事件里调用，不在 render 里。
+  /// `generation` 在第一个 await 之前就记下：扫描期间项目又换了，下一次 `changed` 立刻兑现。
   async load() {
     const ctx = context();
     this.generation = ctx.generation;
     this.home = ctx.home;
     this.projectRoot = ctx.project_root;
+    this.remoteMachine = ctx.project !== null && !ctx.project.machine.local ? ctx.project.machine.name : null;
     try {
       this.state = await scan(ctx.home, ctx.project_root);
     } catch (error) {
@@ -293,6 +295,14 @@ export default class Skills extends View {
       .text_color(colors.foreground)
       .child(this.header(cx))
       .when(this.notice !== null, (el) => el.child(this.noticeBar()))
+      .when(this.remoteMachine !== null, (el) =>
+        el.child(
+          div()
+            .px(SPACE.md)
+            .pb(SPACE.sm)
+            .child(hint(`当前项目在「${this.remoteMachine}」上，这里只列本机的技能，看不到那个项目里的。`, cx)),
+        ),
+      )
       .child(
         v_flex()
           .flex_1()
@@ -773,5 +783,16 @@ export default class Skills extends View {
     if (skill.placement === "agent") return tag(skill.agent ?? "agent", "info");
     if (skill.placement === "legacy") return tag("旧位置", "warning");
     return tag("通用", "secondary");
+  }
+}
+
+/// 插件的根：只注册面板 `skills`（见 smelt.json），自己不显示。
+export default class SkillsPlugin extends View {
+  init() {
+    DockArea.register_panel("skills", Skills);
+  }
+
+  render() {
+    return div();
   }
 }

@@ -134,14 +134,14 @@ impl Workspace {
             let _ = cx.update_window(handle, |_root, window, cx| {
                 crate::plugins::mount_all(window, cx);
                 let _ = view.update(cx, |workspace, cx| {
+                    workspace.rebuild_plugin_panels(window, cx);
                     workspace.leave_unmounted_plugin_tab(cx);
-                    cx.notify();
                 });
             });
         });
     }
 
-    /// 正停在一个已经删掉的插件 tab 上就回到 Files。别的会话、项目里记着的不管：
+    /// 正停在一个已经删掉（或不再声明）的插件面板页签上就回到 Files。别的会话、项目里记着的不管：
     /// 切过去时那个 tab 说明插件已删除，下次启动存档自然降级。
     fn leave_unmounted_plugin_tab(&mut self, cx: &mut Context<Self>) {
         if let ToolPanelTab::Plugin(slot) = self.tool_panel_tab

@@ -10,6 +10,8 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
 use gpui_component::*;
 
+use smelt_client::layout::{Component, PluginPanelRef};
+
 use crate::{StageCover, Workspace, ui_theme};
 
 pub(crate) const MIN_FILE_TREE_WIDTH: f32 = 190.0;
@@ -20,8 +22,8 @@ pub(crate) const MAX_FILE_TREE_WIDTH: f32 = 320.0;
 /// 任何无法解析的 tab 都降级到它。
 const DEFAULT_PANEL_KEY: &str = "files";
 
-/// Tool Panel 的 tab。前三个是内置的；`Plugin` 是插件（见 `plugins`），
-/// 数量和标题都来自已安装插件的 manifest，宿主不认识它们的具体身份。
+/// Tool Panel 的 tab。前三个是内置的；`Plugin` 是插件声明、布局里没摆的面板（见 `plugins`），
+/// 数量和标题都来自已安装插件的 `smelt.json`，宿主不认识它们的具体身份。
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub(crate) enum ToolPanelTab {
     #[default]
@@ -37,7 +39,7 @@ impl serde::Serialize for ToolPanelTab {
         S: serde::Serializer,
     {
         match self {
-            // 存插件自己的稳定身份，不存槽位下标：下标会随插件增删平移。
+            // 存面板的稳定身份 `<插件 id>/<面板>`，不存槽位下标：下标会随插件增删平移。
             // 查不到 key（注册表还没建好）时降级成 files，不写坏存档。
             Self::Plugin(slot) => match crate::plugins::key_for(*slot) {
                 Some(key) => {
@@ -92,9 +94,32 @@ impl ToolPanelTab {
         crate::plugins::slot_for_key(key).map_or(Self::Files, Self::Plugin)
     }
 
-    fn label(self) -> String {
+    /// 单独摆进布局时对应的组件。插件槽位查不到 id（注册表还没建好）时是 `None`。
+    pub(crate) fn component(self) -> Option<Component> {
         match self {
-            // 插件面板的标题来自 manifest，只有运行时才知道。
+            Self::Files => Some(Component::Files),
+            Self::Git => Some(Component::Git),
+            Self::History => Some(Component::History),
+            Self::Plugin(slot) => crate::plugins::panel_of(slot)
+                .map(|(plugin, panel)| Component::Plugin(PluginPanelRef::new(plugin, panel))),
+        }
+    }
+
+    /// 布局里的内置组件是不是工具面板的一个页签。插件不在这里认：它们由插件面板自己画。
+    pub(crate) fn from_builtin_component(component: &Component) -> Option<Self> {
+        match component {
+            Component::Files => Some(Self::Files),
+            Component::Git => Some(Self::Git),
+            Component::History => Some(Self::History),
+            Component::Sessions | Component::Stage | Component::Tools | Component::Plugin(_) => {
+                None
+            }
+        }
+    }
+
+    pub(crate) fn label(self) -> String {
+        match self {
+            // 插件面板的标题来自 `smelt.json`，只有运行时才知道。
             Self::Plugin(slot) => crate::plugins::title(slot),
             builtin => builtin_panel(builtin).map_or_else(String::new, |p| p.title.to_string()),
         }
@@ -141,6 +166,16 @@ const BUILTIN_PANELS: &[BuiltinPanel] = &[
 
 fn builtin_panel(tab: ToolPanelTab) -> Option<&'static BuiltinPanel> {
     BUILTIN_PANELS.iter().find(|panel| panel.tab == tab)
+}
+
+/// 工具面板实际显示哪个页签：存档里的那个还在面板里就是它，否则（被布局单独摆出去了、
+/// 插件卸了）先显示剩下的第一个，不改存档。面板里一个都不剩是 `None`。
+fn shown_tab(saved: ToolPanelTab, docked: &[ToolPanelTab]) -> Option<ToolPanelTab> {
+    if docked.contains(&saved) {
+        Some(saved)
+    } else {
+        docked.first().copied()
+    }
 }
 
 /// 变更角标：当前项目里**所有**仓库的改动文件总数。
@@ -347,24 +382,86 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 这个页签被布局单独摆出来了：它不在工具面板里，自己占一块面板。
+    /// 插件面板只要摆了一份（不论 `props`）就算：摆出去的那几份就是它的全部。
+    pub(crate) fn layout_places_tool(&self, tab: ToolPanelTab) -> bool {
+        match tab {
+            ToolPanelTab::Plugin(slot) => {
+                crate::plugins::panel_of(slot).is_some_and(|(plugin, panel)| {
+                    self.shell_layout
+                        .layout
+                        .mentions_plugin_panel(&plugin, &panel)
+                })
+            }
+            builtin => builtin
+                .component()
+                .is_some_and(|component| self.shell_layout.places(&component)),
+        }
+    }
+
+    /// 工具面板里还剩的页签：内置的在前，插件在后，布局单独摆出去的不算。
+    /// 同一块内容只能画在一处（文件树的滚动、插件视图都只有一份）。
+    fn docked_tool_tabs(&self) -> Vec<ToolPanelTab> {
+        BUILTIN_PANELS
+            .iter()
+            .map(|panel| panel.tab)
+            .chain(
+                crate::plugins::slots()
+                    .into_iter()
+                    .map(ToolPanelTab::Plugin),
+            )
+            .filter(|tab| !self.layout_places_tool(*tab))
+            .collect()
+    }
+
+    /// 工具面板实际显示哪个页签，见 [`shown_tab`]。切回不摆它的布局，存档里的 tab 就回来了。
+    fn shown_tool_panel_tab(&self, tab: ToolPanelTab) -> Option<ToolPanelTab> {
+        shown_tab(tab, &self.docked_tool_tabs())
+    }
+
+    /// 这个页签的内容现在在不在屏幕上。单独摆出来的看它那块面板是不是正显示着
+    /// （Dock 经 `set_active` 告诉我们，见 `workspace_layout::set_displayed`）；
+    /// 否则看工具面板是不是停着或铺满舞台、正停在它上面。
+    pub(crate) fn tool_tab_visible(&self, tab: ToolPanelTab) -> bool {
+        if let Some(component) = tab.component()
+            && self.shell_layout.places(&component)
+        {
+            return self.shell_displayed.contains(&component);
+        }
+        self.tool_panel_stage_active(tab) || (self.tool_panel_open && self.tool_panel_tab == tab)
+    }
+
+    /// 让这个页签显示出来。单独摆出来的就去它那块面板：展开停靠区、在标签组里选中它；
+    /// 否则照旧在工具面板里切过去并打开工具面板。
+    pub(crate) fn reveal_tool_tab(
+        &mut self,
+        tab: ToolPanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(component) = tab.component()
+            && self.shell_layout.places(&component)
+        {
+            self.reveal_layout_component(&component, window, cx);
+            return;
+        }
+        self.tool_panel_tab = tab;
+        self.set_tool_panel_open(true, cx);
+    }
+
     /// 文件 / 变更 / 技能 / 历史。这一条就是交通灯带，不再在它下面另垫标题。
     pub(crate) fn render_tool_panel_tabs(
         &mut self,
-        active_tab: ToolPanelTab,
+        active_tab: Option<ToolPanelTab>,
         stage_rail: bool,
         left_guard: Pixels,
         cx: &mut Context<Self>,
     ) -> TabBar {
         // 内置面板来自注册表，插件面板追在后面；两者在这一层同等。
-        let mut tabs: Vec<ToolPanelTab> = BUILTIN_PANELS.iter().map(|panel| panel.tab).collect();
-        tabs.extend(
-            crate::plugins::slots()
-                .into_iter()
-                .map(ToolPanelTab::Plugin),
-        );
+        let tabs = self.docked_tool_tabs();
         // 停靠 rail 收起期间不保留高亮；全屏 rail 始终高亮当前 Tool Panel tab。
         let selected_index = (stage_rail || self.tool_panel_open)
-            .then(|| tabs.iter().position(|t| *t == active_tab))
+            .then(|| tabs.iter().position(|t| Some(*t) == active_tab))
             .flatten();
 
         let bar_h = crate::workspace_frame::TOP_BAR_HEIGHT;
@@ -423,8 +520,9 @@ impl Workspace {
 
     /// 停靠右栏：tab 在抽屉顶，内容在下面。窗口顶栏不放这些 tab。
     pub(crate) fn render_tool_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let tabs = self.render_tool_panel_tabs(self.tool_panel_tab, false, px(0.), cx);
-        let body = self.render_tool_panel_content(self.tool_panel_tab, window, cx);
+        let tab = self.shown_tool_panel_tab(self.tool_panel_tab);
+        let tabs = self.render_tool_panel_tabs(tab, false, px(0.), cx);
+        let body = self.render_shown_tool_panel_content(tab, window, cx);
         div()
             .w_full()
             .flex_shrink_0()
@@ -447,12 +545,40 @@ impl Workspace {
         let tab = self
             .active_stage_tool_panel_tab()
             .unwrap_or(self.tool_panel_tab);
+        let tab = self.shown_tool_panel_tab(tab);
         v_flex()
             .flex_1()
             .min_h_0()
             .child(self.render_tool_panel_tabs(tab, true, left_guard, cx))
-            .child(self.render_tool_panel_content(tab, window, cx))
+            .child(self.render_shown_tool_panel_content(tab, window, cx))
             .into_any_element()
+    }
+
+    fn render_shown_tool_panel_content(
+        &mut self,
+        tab: Option<ToolPanelTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match tab {
+            Some(tab) => self.render_tool_panel_content(tab, window, cx),
+            None => crate::placeholder_view(
+                "工具面板里的页签都被这套布局单独摆出去了",
+                cx.theme().muted_foreground,
+            )
+            .into_any_element(),
+        }
+    }
+
+    /// 布局里单独摆出来的文件、变更、历史：标题条加内容，和放进布局的插件同一个样子。
+    pub(crate) fn render_placed_tool(
+        &mut self,
+        tab: ToolPanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = self.render_tool_panel_content(tab, window, cx);
+        crate::workspace_layout::titled_panel(tab.label(), body, cx).into_any_element()
     }
 
     /// Tool Panel 的内容渲染与停靠/全屏展示方式无关。
@@ -463,16 +589,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match tab {
-            ToolPanelTab::Plugin(slot) => {
-                // 插件读写的是本机磁盘（D8），远程项目上不可用，说明原因。
-                if let Some(notice) = self.remote_project_notice(cx) {
-                    return crate::placeholder_view(&notice, cx.theme().muted_foreground)
-                        .into_any_element();
-                }
-                // 插件经 smelt-workspace.context() 读当前项目；这里只写内存。
-                crate::plugins::set_project_root(self.active_local_project_root(cx));
-                crate::plugins::render(slot, cx)
-            }
+            // 当前项目在不在本机、能不能用，插件经 `context()` 自己看（见 workspace_plugins）。
+            ToolPanelTab::Plugin(slot) => match crate::plugins::panel_of(slot) {
+                Some((plugin, panel)) => self
+                    .shell_layout
+                    .plugin_content(&PluginPanelRef::new(plugin, panel), cx),
+                None => div().flex_1().min_h_0().into_any_element(),
+            },
             builtin => match builtin_panel(builtin) {
                 Some(panel) => (panel.render)(self, window, cx),
                 // 注册表里没有就不渲染：这是声明与实现脱节，不应该 panic 拖垮整个窗口。
@@ -636,7 +759,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUILTIN_PANELS, ToolPanelTab, should_reset_git_diff_on_dock_selection};
+    use super::{BUILTIN_PANELS, ToolPanelTab, should_reset_git_diff_on_dock_selection, shown_tab};
     use crate::StageCover;
 
     /// 每个内置面板都要能存进存档再原样读回来。
@@ -673,6 +796,30 @@ mod tests {
         // 插件不在（这里注册表为空）时降级成 Files。
         let tab: ToolPanelTab = serde_json::from_str(r#"{"plugin":"com.smelt.skills"}"#).unwrap();
         assert_eq!(tab, ToolPanelTab::Files);
+    }
+
+    /// 每个内置页签都能单独摆进布局，组件和页签一一对得上。
+    #[test]
+    fn every_builtin_panel_is_a_layout_component() {
+        for panel in BUILTIN_PANELS {
+            let component = panel.tab.component().expect("内置页签都有组件");
+            assert_eq!(
+                ToolPanelTab::from_builtin_component(&component),
+                Some(panel.tab),
+                "面板 {} 的组件对不回来",
+                panel.key
+            );
+        }
+    }
+
+    /// 存档里停的页签被布局摆出去了：先显示剩下的第一个；一个不剩就什么都不显示。
+    #[test]
+    fn a_saved_tab_placed_elsewhere_falls_back_to_the_first_docked_one() {
+        use ToolPanelTab::{Files, Git, History};
+        assert_eq!(shown_tab(Git, &[Files, Git, History]), Some(Git));
+        assert_eq!(shown_tab(Git, &[Files, History]), Some(Files));
+        assert_eq!(shown_tab(Files, &[Git, History]), Some(Git));
+        assert_eq!(shown_tab(Files, &[]), None);
     }
 
     #[test]

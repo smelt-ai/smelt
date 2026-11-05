@@ -1,81 +1,81 @@
 //! 工作台外壳用 `gpui-component` 的 Dock。
 //!
-//! 左栏、舞台、工具面板各是一块停靠面板。开合和宽度仍以原来的字段为准
-//! （`sidebar_open` / `sidebar_w`，以及当前会话的 `tool_panel_open` /
-//! `tool_panel_w`），渲染前写进 Dock，用户拖动分隔条后再写回这些字段。
-//! 三块面板的位置固定，Dock 锁住不让拖动和放下，布局树不存，每次启动照原样装。
+//! 外层 Dock 里摆什么由布局决定（`workspace_layout`）：默认是左栏、舞台、工具面板三块。
+//! 会话列表、工具面板所在停靠区的开合和宽度仍以原来的字段为准（`sidebar_open` /
+//! `sidebar_w`，以及当前会话的 `tool_panel_open` / `tool_panel_w`），渲染前写进 Dock，
+//! 用户拖动分隔条后再写回这些字段。Dock 锁住不让拖动和放下，排布只改布局文件。
 //! 终端分屏是舞台里另一个 Dock（`term_dock`），锁住外层它的标签才不会被放进侧栏。
 
 use gpui::{
     AnyElement, App, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, Pixels,
     Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
 };
-use gpui_component::dock::{
-    BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle,
-    register_panel,
-};
+use gpui_component::dock::{BasePanel, DockArea, DockPlacement, DockSkin, Panel, PanelEvent};
 
 use gpui_component::{ActiveTheme, Icon};
 use gpui_component::empty::{
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
 pub(crate) use smelt_ui::Button;
+use smelt_client::layout;
 
 use crate::settings::Appearance;
+use crate::workspace_layout::ShellLayout;
 use crate::{
     AgentStatus, MIN_SIDEBAR_WIDTH, MIN_TOOL_PANEL_WIDTH, MIN_WORKSPACE_CONTENT_WIDTH, SessionKind,
     Workspace, WorkspaceRoute, terminal, ui_theme, workspace_frame,
 };
 
 const SHELL_VERSION: usize = 1;
-const SIDEBAR_PANEL: &str = "smelt.sidebar";
-const STAGE_PANEL: &str = "smelt.stage";
-const TOOL_PANEL: &str = "smelt.tools";
+
+/// 工作台三大块：布局文件里的名字 → 标题和画法。工具面板里的页签单独摆出来时不在这里，
+/// 走 [`ShellContent::Tool`]，标题和画法沿用工具面板自己的登记表。
+pub(crate) struct Builtin {
+    name: &'static str,
+    title: &'static str,
+    render: fn(&mut Workspace, &mut Window, &mut Context<Workspace>) -> AnyElement,
+}
+
+static BUILTINS: [Builtin; 3] = [
+    Builtin {
+        name: layout::SESSIONS,
+        title: "会话",
+        render: Workspace::render_sidebar_dock,
+    },
+    Builtin {
+        name: layout::STAGE,
+        title: "舞台",
+        render: Workspace::render_stage_dock,
+    },
+    Builtin {
+        name: layout::TOOLS,
+        title: "工具",
+        render: Workspace::render_tool_dock,
+    },
+];
+
+pub(crate) fn builtin(name: &str) -> Option<&'static Builtin> {
+    BUILTINS.iter().find(|builtin| builtin.name == name)
+}
 
 pub(crate) struct InstalledShell {
     pub(crate) area: Entity<DockArea>,
+    pub(crate) layout: ShellLayout,
     pub(crate) applied_sidebar: f32,
     pub(crate) applied_tool: f32,
 }
 
-/// 建好 Dock，摆成左栏 / 舞台 / 右栏并锁住。每个停靠区只有一个面板、拖不走，布局固定，
-/// 不用存；开合和宽度每次渲染前由 `align_shell_dock` 从工作区状态写进来。
+/// 建好 Dock，装上默认布局并锁住。开合和宽度每次渲染前由 `align_shell_dock`
+/// 从工作区状态写进来。
 pub(crate) fn install(
     workspace: WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
 ) -> InstalledShell {
-    register_shell_panels(workspace.clone(), cx);
     let (area, skin) = DockSkin::dock_area("smelt-shell", Some(SHELL_VERSION), window, cx);
     skin.set_toggle_button_visible(false, cx);
     skin.set_close_button_visible(false, cx);
-
-    {
-        let sidebar = cx.new(|cx| ShellPanel::new(workspace.clone(), SIDEBAR_PANEL, "会话", cx));
-        let stage = cx.new(|cx| ShellPanel::new(workspace.clone(), STAGE_PANEL, "舞台", cx));
-        let tools = cx.new(|cx| ShellPanel::new(workspace.clone(), TOOL_PANEL, "工具", cx));
-        area.update(cx, |area, cx| {
-            area.set_dock(
-                DockPlacement::Left,
-                DockLayout::tabs().panel_view(panel_handle(sidebar), cx),
-                window,
-                cx,
-            );
-            area.set_center(
-                DockLayout::tabs().panel_view(panel_handle(stage), cx),
-                window,
-                cx,
-            );
-            area.set_dock(
-                DockPlacement::Right,
-                DockLayout::tabs().panel_view(panel_handle(tools), cx),
-                window,
-                cx,
-            );
-            // 锁住只禁拖动和放下，开合与拖宽照常。
-            area.set_locked(true, window, cx);
-        });
-    }
+    let layout = crate::workspace_layout::install_default(workspace, &area, window, cx);
 
     let applied_sidebar = area
         .read(cx)
@@ -89,32 +89,25 @@ pub(crate) fn install(
         .unwrap_or(crate::DEFAULT_TOOL_PANEL_WIDTH);
     InstalledShell {
         area,
+        layout,
         applied_sidebar,
         applied_tool,
     }
 }
 
-fn register_shell_panels(workspace: WeakEntity<Workspace>, cx: &mut App) {
-    register_one(cx, SIDEBAR_PANEL, "会话", workspace.clone());
-    register_one(cx, STAGE_PANEL, "舞台", workspace.clone());
-    register_one(cx, TOOL_PANEL, "工具", workspace);
+/// 内置面板里画什么。
+pub(crate) enum ShellContent {
+    /// 会话列表、舞台、工具面板。
+    Region(&'static Builtin),
+    /// 工具面板的一个页签，被布局单独摆了出来。
+    Tool(crate::tool_panel::ToolPanelTab),
 }
 
-fn register_one(
-    cx: &mut App,
-    name: &'static str,
-    title: &'static str,
+/// 一块内置组件的面板。内容由工作台画，这里只是 Dock 里的壳。
+pub(crate) struct ShellPanel {
     workspace: WeakEntity<Workspace>,
-) {
-    register_panel(cx, name, move |_state, _window, cx| {
-        panel_handle(cx.new(|cx| ShellPanel::new(workspace.clone(), name, title, cx)))
-    });
-}
-
-struct ShellPanel {
-    workspace: WeakEntity<Workspace>,
-    name: &'static str,
-    title: &'static str,
+    component: layout::Component,
+    content: ShellContent,
     focus_handle: FocusHandle,
     /// Dock 皮肤把面板内容缓存起来，只在这块面板自己被通知时重画。
     /// 会话列表和舞台的数据在 Workspace 上，所以跟着它的通知一起失效。
@@ -122,20 +115,18 @@ struct ShellPanel {
 }
 
 impl ShellPanel {
-    fn new(
+    pub(crate) fn new(
         workspace: WeakEntity<Workspace>,
-        name: &'static str,
-        title: &'static str,
+        component: layout::Component,
+        content: ShellContent,
         cx: &mut Context<Self>,
     ) -> Self {
-        let host = workspace
-            .upgrade()
-            .expect("工作台外壳面板在工作台构造期间创建");
+        let host = workspace.upgrade().expect("工作台外壳面板由工作台创建");
         let _workspace_refresh = cx.observe(&host, |_, _, cx| cx.notify());
         Self {
             workspace,
-            name,
-            title,
+            component,
+            content,
             focus_handle: cx.focus_handle(),
             _workspace_refresh,
         }
@@ -152,7 +143,10 @@ impl Focusable for ShellPanel {
 
 impl BasePanel for ShellPanel {
     fn panel_name(&self) -> &'static str {
-        self.name
+        match &self.content {
+            ShellContent::Region(builtin) => builtin.name,
+            ShellContent::Tool(_) => "smelt.tool",
+        }
     }
 
     fn closable(&self, _: &App) -> bool {
@@ -164,7 +158,7 @@ impl BasePanel for ShellPanel {
     }
 
     fn visible(&self, cx: &App) -> bool {
-        if self.name != TOOL_PANEL {
+        if self.component != layout::Component::Tools {
             return true;
         }
         self.workspace.upgrade().is_none_or(|workspace| {
@@ -172,14 +166,25 @@ impl BasePanel for ShellPanel {
             workspace.tool_panel_open && !workspace.tool_panel_promoted()
         })
     }
+
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        crate::workspace_layout::set_displayed(&self.workspace, self.component.clone(), active, cx);
+    }
+
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        crate::workspace_layout::set_displayed(&self.workspace, self.component.clone(), false, cx);
+    }
 }
 
 impl Panel for ShellPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.title
+        match &self.content {
+            ShellContent::Region(builtin) => builtin.title.to_string(),
+            ShellContent::Tool(tab) => tab.label(),
+        }
     }
 
-    /// 这三块自己有顶栏和页签。Dock 的标题条只在同一组里有第二块面板时出现，
+    /// 这几块自己有顶栏和页签。Dock 的标题条只在同一组里有第二块面板时出现，
     /// 那时候用它拖动。
     fn title_bar(&self, _: &App) -> bool {
         false
@@ -192,11 +197,14 @@ impl Panel for ShellPanel {
 
 impl Render for ShellPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match &self.content {
+            ShellContent::Region(builtin) => Ok(builtin.render),
+            ShellContent::Tool(tab) => Err(*tab),
+        };
         self.workspace
-            .update(cx, |workspace, cx| match self.name {
-                SIDEBAR_PANEL => workspace.render_sidebar_dock(window, cx),
-                STAGE_PANEL => workspace.render_stage_dock(window, cx),
-                _ => workspace.render_tool_dock(window, cx),
+            .update(cx, |workspace, cx| match content {
+                Ok(render) => render(workspace, window, cx),
+                Err(tab) => workspace.render_placed_tool(tab, window, cx),
             })
             .unwrap_or_else(|_| div().size_full().into_any_element())
     }
@@ -316,44 +324,47 @@ impl Workspace {
         let mut dragged = false;
 
         let sidebar_display = crate::sidebar_width_for_viewport(sidebar_w, viewport);
-        self.shell_dock.update(cx, |dock, cx| {
-            sync_edge(
-                dock,
-                DockPlacement::Left,
-                sidebar_open,
-                &mut sidebar_w,
-                &mut applied_sidebar,
-                sidebar_display,
-                MIN_SIDEBAR_WIDTH,
-                sidebar_cap(viewport),
-                pointer_down,
-                &mut dragged,
-                window,
-                cx,
-            );
-            let sidebar_on_screen = if dock.is_dock_open(DockPlacement::Left) {
-                dock.dock_size(DockPlacement::Left)
-                    .map(|size| f32::from(size))
-                    .unwrap_or(0.)
-            } else {
-                0.
-            };
-            let tool_shown = tool_display(tool_w, viewport, sidebar_on_screen);
-            sync_edge(
-                dock,
-                DockPlacement::Right,
-                tool_open,
-                &mut tool_w,
-                &mut applied_tool,
-                tool_shown,
-                MIN_TOOL_PANEL_WIDTH,
-                tool_cap(viewport, sidebar_on_screen),
-                pointer_down,
-                &mut dragged,
-                window,
-                cx,
-            );
+        let sessions_dock = self.shell_layout.sessions_dock;
+        let tools_dock = self.shell_layout.tools_dock;
+        let left_open = self.shell_dock.update(cx, |dock, cx| {
+            if let Some(placement) = sessions_dock {
+                sync_edge(
+                    dock,
+                    placement,
+                    sidebar_open,
+                    &mut sidebar_w,
+                    &mut applied_sidebar,
+                    sidebar_display,
+                    MIN_SIDEBAR_WIDTH,
+                    sidebar_cap(viewport),
+                    pointer_down,
+                    &mut dragged,
+                    window,
+                    cx,
+                );
+            }
+            if let Some(placement) = tools_dock {
+                let across = opposite_on_screen(dock, placement);
+                let tool_shown = tool_display(tool_w, viewport, across);
+                sync_edge(
+                    dock,
+                    placement,
+                    tool_open,
+                    &mut tool_w,
+                    &mut applied_tool,
+                    tool_shown,
+                    MIN_TOOL_PANEL_WIDTH,
+                    tool_cap(viewport, across),
+                    pointer_down,
+                    &mut dragged,
+                    window,
+                    cx,
+                );
+            }
+            dock.is_dock_open(DockPlacement::Left)
         });
+        // 左停靠区收起或没有时，中间区域贴着窗口左上角。
+        self.shell_stage_top_left = !left_open && self.shell_layout.stage_top_left_of_center;
 
         if (self.sidebar_w - sidebar_w).abs() > 0.5 {
             self.sidebar_w = sidebar_w;
@@ -400,7 +411,8 @@ impl Workspace {
         if !self.sidebar_open {
             return None;
         }
-        let dock_width = open_dock_width(&self.shell_dock, DockPlacement::Left, cx)?;
+        let placement = self.shell_layout.sessions_dock?;
+        let dock_width = open_dock_width(&self.shell_dock, placement, cx)?;
         sidebar_width_after_collapse(gesture_width.unwrap_or(self.sidebar_w), dock_width)
     }
 
@@ -409,7 +421,8 @@ impl Workspace {
         if !self.tool_panel_open || self.tool_panel_promoted() {
             return None;
         }
-        let dock_width = open_dock_width(&self.shell_dock, DockPlacement::Right, cx)?;
+        let placement = self.shell_layout.tools_dock?;
+        let dock_width = open_dock_width(&self.shell_dock, placement, cx)?;
         tool_panel_width_after_collapse(gesture_width.unwrap_or(self.tool_panel_w), dock_width)
     }
 
@@ -417,7 +430,9 @@ impl Workspace {
         self.sidebar_w = width;
         self.sidebar_open = false;
         self.shell_applied_sidebar = width;
-        self.close_dock_keeping_width(DockPlacement::Left, width, window, cx);
+        if let Some(placement) = self.shell_layout.sessions_dock {
+            self.close_dock_keeping_width(placement, width, window, cx);
+        }
         self.focus_active_stage(window, cx);
         self.shell_needs_save = true;
     }
@@ -426,7 +441,9 @@ impl Workspace {
         self.tool_panel_w = width;
         self.set_tool_panel_open(false, cx);
         self.shell_applied_tool = width;
-        self.close_dock_keeping_width(DockPlacement::Right, width, window, cx);
+        if let Some(placement) = self.shell_layout.tools_dock {
+            self.close_dock_keeping_width(placement, width, window, cx);
+        }
         self.focus_active_stage(window, cx);
         self.shell_needs_save = true;
     }
@@ -453,20 +470,19 @@ impl Workspace {
         let tool_open = self.tool_panel_open && !self.tool_panel_promoted();
         let tool_w = self.tool_panel_w;
         let dock = self.shell_dock.read(cx);
-        let sidebar_on_screen = if dock.is_dock_open(DockPlacement::Left) {
-            dock.dock_size(DockPlacement::Left)
-                .map(|size| f32::from(size))
-                .unwrap_or(0.)
-        } else {
-            0.
-        };
-        edge_needs_snap(dock, DockPlacement::Left, sidebar_open, sidebar_display)
-            || edge_needs_snap(
+        let sessions_snap = self.shell_layout.sessions_dock.is_some_and(|placement| {
+            edge_needs_snap(dock, placement, sidebar_open, sidebar_display)
+        });
+        let tools_snap = self.shell_layout.tools_dock.is_some_and(|placement| {
+            let across = opposite_on_screen(dock, placement);
+            edge_needs_snap(
                 dock,
-                DockPlacement::Right,
+                placement,
                 tool_open,
-                tool_display(tool_w, viewport, sidebar_on_screen),
+                tool_display(tool_w, viewport, across),
             )
+        });
+        sessions_snap || tools_snap
     }
 
     pub(crate) fn render_sidebar_dock(
@@ -678,6 +694,19 @@ fn open_dock_width(dock: &Entity<DockArea>, placement: DockPlacement, cx: &App) 
     dock.dock_size(placement).map(|size| f32::from(size))
 }
 
+/// 对面那个停靠区在屏幕上占多宽。工具面板的上限要让开它。
+fn opposite_on_screen(dock: &DockArea, placement: DockPlacement) -> f32 {
+    let across = match placement {
+        DockPlacement::Left => DockPlacement::Right,
+        _ => DockPlacement::Left,
+    };
+    if dock.is_dock_open(across) {
+        dock.dock_size(across).map_or(0., f32::from)
+    } else {
+        0.
+    }
+}
+
 fn edge_needs_snap(
     dock: &DockArea,
     placement: DockPlacement,
@@ -765,6 +794,42 @@ mod tests {
             display: 320.,
             min: 240.,
             max,
+        }
+    }
+
+    /// 布局格式认的每个内置组件，外壳都要有面板画它。
+    #[test]
+    fn every_builtin_component_has_a_panel() {
+        use crate::tool_panel::ToolPanelTab;
+        use smelt_client::layout::Component;
+        for component in [
+            Component::Sessions,
+            Component::Stage,
+            Component::Tools,
+            Component::Files,
+            Component::Git,
+            Component::History,
+        ] {
+            let name = component.name();
+            let tool = ToolPanelTab::from_builtin_component(&component).is_some();
+            let region = super::builtin(&name).is_some();
+            assert!(
+                tool != region,
+                "{name} 要么是工具页签、要么是外壳大块，恰好一种"
+            );
+        }
+    }
+
+    /// 仓库里自带的示例布局都要合法。
+    #[test]
+    fn repo_layouts_are_valid() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../layouts");
+        let entries = smelt_client::layout::discover(&[dir]);
+        assert!(!entries.is_empty());
+        for entry in entries {
+            if let Err(error) = entry.layout {
+                panic!("{}：{error}", entry.path.display());
+            }
         }
     }
 

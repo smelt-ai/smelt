@@ -59,9 +59,11 @@ mod terminal_view;
 mod workspace_attention;
 mod workspace_directory;
 mod workspace_frame;
+mod workspace_layout;
 mod workspace_nav;
 mod workspace_palette;
 mod workspace_persist;
+mod workspace_plugins;
 mod workspace_prepare;
 mod workspace_sessions;
 mod workspace_shell;
@@ -278,6 +280,9 @@ enum Cmd {
     NextTab,
     PrevTab,
     SwitchTab(usize),
+    /// 切到布局目录里的这套布局（布局 id）。
+    SwitchLayout(String),
+    RestoreDefaultLayout,
 }
 
 /// 按本地日历把 unix 秒归入「今天 / 昨天 / 本周 / 更早」。
@@ -2250,6 +2255,15 @@ struct Workspace {
     sidebar_w: f32,
     /// 工作台三栏。开合和宽度仍由上面的字段决定，渲染前对齐进这棵 Dock。
     shell_dock: Entity<gpui_component::dock::DockArea>,
+    /// 外层 Dock 里装的是哪套布局。
+    shell_layout: workspace_layout::ShellLayout,
+    /// 布局里此刻正显示着的组件（停靠区展开、在标签组里选中）。Dock 经面板的 `set_active`
+    /// 维护，单独摆出来的工具页签据此判断要不要刷新自己的缓存。
+    shell_displayed: HashSet<smelt_client::layout::Component>,
+    /// 布局目录里读到的布局，命令面板从这里列。打开命令面板、切换布局时重读。
+    layout_catalog: Vec<smelt_client::layout::LayoutEntry>,
+    /// 舞台贴着窗口左上角，要给红黄绿按钮让位置。每帧对齐 Dock 时算。
+    shell_stage_top_left: bool,
     /// 上次写进 Dock 的宽度。和 Dock 上的实际宽度不一致时，是用户拖了分隔条。
     shell_applied_sidebar: f32,
     shell_applied_tool: f32,
@@ -2740,15 +2754,12 @@ impl std::ops::DerefMut for Workspace {
 impl Workspace {
     /// Files 既可能展开到舞台，也可能停靠在 Tool Panel；两种状态都视为文件视图可见。
     fn files_view_visible(&self) -> bool {
-        self.tool_panel_stage_active(tool_panel::ToolPanelTab::Files)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Files)
+        self.tool_tab_visible(tool_panel::ToolPanelTab::Files)
     }
 
     /// Git「改动」页正在显示（舞台展开或停靠）。F7 的键位 context 只在这时挂上。
     fn git_changes_shown(&self) -> bool {
-        (self.tool_panel_stage_active(tool_panel::ToolPanelTab::Git)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Git))
-            && self.git_tab == GitTab::Changes
+        self.tool_tab_visible(tool_panel::ToolPanelTab::Git) && self.git_tab == GitTab::Changes
     }
 
     /// 某个终端网格自己的焦点句柄正被聚焦（搜索框等子元素不算）。
@@ -2764,19 +2775,19 @@ impl Workspace {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // 插件 tab 必须先于存档读取挂好：存档里的 tab 以插件 id 记录，
-        // 注册表为空时会降级成 Files，用户上次停在插件面板就再也回不去。
+        // 插件必须先于存档读取和布局搭建挂好：存档里的 tab 以插件面板名记录，注册表为空时
+        // 会降级成 Files；布局里的插件面板按插件在 `init()` 里注册的类建。
         plugins::mount_all(window, cx);
-        // 插件的 `open_session`：和点系统通知一样跳到会话。推到这一轮更新结束后再进
-        // 工作台窗口：插件是在自己的事件里调它的，这时可能正嵌在别的更新里。
+        // 插件经 `smelt-workspace` 发来的操作（跳到会话、关会话、切项目）。推到这一轮
+        // 更新结束后再进工作台窗口：插件是在自己的事件里调它的，这时可能正嵌在别的更新里。
         let window_handle = window.window_handle();
         let workspace = cx.weak_entity();
-        plugins::set_session_opener(move |session_id, cx| {
+        plugins::set_workspace_handler(move |request, cx| {
             let workspace = workspace.clone();
             cx.defer(move |cx| {
                 let _ = cx.update_window(window_handle, |_root, window, cx| {
                     let _ = workspace.update(cx, |workspace, cx| {
-                        workspace.request_notification_session_jump(session_id, window, cx);
+                        workspace.handle_plugin_request(request, window, cx);
                     });
                     window.activate_window();
                 });
@@ -2844,6 +2855,10 @@ impl Workspace {
             sidebar_open,
             sidebar_w,
             shell_dock: shell.area,
+            shell_layout: shell.layout,
+            shell_displayed: HashSet::new(),
+            layout_catalog: Vec::new(),
+            shell_stage_top_left: !sidebar_open,
             shell_applied_sidebar: shell.applied_sidebar,
             shell_applied_tool: shell.applied_tool,
             shell_needs_save: false,
@@ -3077,11 +3092,14 @@ impl Workspace {
             }),
         );
         ws.ensure_pi_library_runtime(cx);
-        ws._runtime_hub_sub = Some(
-            cx.observe_global_in::<crate::runtimes::RuntimeHub>(window, |this, _window, cx| {
-                this.sync_remote_spaces(cx)
-            }),
-        );
+        ws._runtime_hub_sub = Some(cx.observe_global_in::<crate::runtimes::RuntimeHub>(
+            window,
+            |this, _window, cx| {
+                this.sync_remote_spaces(cx);
+                // 机器上下线、增删：插件看到的机器列表跟着变。
+                this.publish_to_plugins(cx);
+            },
+        ));
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -3357,7 +3375,10 @@ impl Render for Workspace {
             } else {
                 px(0.)
             };
-            let tool_span = if !tool_promoted
+            // 工具面板铺进舞台时它那一栏让出来；右边放的是别的组件就照常算。
+            let tools_on_right =
+                self.shell_layout.tools_dock == Some(gpui_component::dock::DockPlacement::Right);
+            let tool_span = if !(tool_promoted && tools_on_right)
                 && dock.is_dock_open(gpui_component::dock::DockPlacement::Right)
             {
                 dock.dock_size(gpui_component::dock::DockPlacement::Right)
@@ -3628,7 +3649,8 @@ impl Render for Workspace {
                     .h(workspace_frame::TOP_BAR_HEIGHT)
                     .flex()
                     .items_center()
-                    .child(
+                    // 布局里没有会话列表时没东西可开合，不放这个开关。
+                    .children(self.shell_layout.sessions_dock.is_some().then(|| {
                         // 这一条浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
                         div()
                             // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
@@ -3660,8 +3682,8 @@ impl Render for Workspace {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_sidebar(window, cx);
                                     })),
-                            ),
-                    )
+                            )
+                    }))
                     // 中间点穿。窗口开关在右侧共用顶栏里，不在这条浮层。
                     .child(div().flex_1().min_w_0()),
             )

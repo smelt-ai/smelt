@@ -5064,6 +5064,11 @@ impl AcpView {
         })
     }
 
+    /// 上下文用量：(已用 token, 窗口大小)。None = agent 没上报过。
+    pub fn context_usage(&self) -> Option<(u64, u64)> {
+        self.usage
+    }
+
     /// 最近一条整条滚出视口顶的用户提问，压成一行（舞台标题胶囊吸顶用）。
     pub fn pinned_prompt(&self) -> Option<String> {
         self.pinned_prompt_ix()

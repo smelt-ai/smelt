@@ -441,6 +441,7 @@ pub(crate) mod row;
 
 use machines::machine_menu;
 use new_session::new_session_picker;
+pub(crate) use new_session::{find_new_session_target, launch_new_session, new_session_sections};
 use row::{
     FooterQuota, acp_provider_icon, effective_pane_updated_at, focus_ring, group_disclosure,
     inline_rename_input, new_row_flash, pinned_marker, project_header_is_selected, provider_icon,
@@ -585,14 +586,6 @@ impl Workspace {
             groups.first().map(|g| g.root.as_str()),
         )
         .map(|root| ProjectRef { runtime, root })
-    }
-
-    /// 活动项目在本机上时的项目根。只读本机的插件面板用；文件、变更、历史面板按
-    /// [`Self::active_project_ref`] 发给项目所在的机器。
-    pub(crate) fn active_local_project_root(&self, cx: &App) -> Option<String> {
-        self.active_project_ref(cx)
-            .filter(|project| project.runtime == RuntimeKey::Local)
-            .map(|project| project.root)
     }
 
     /// `root` 是否是某段仍然开着的智能体对话的工作目录。

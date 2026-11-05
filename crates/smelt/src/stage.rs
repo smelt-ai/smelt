@@ -404,7 +404,7 @@ impl Workspace {
     /// 侧栏收起时，舞台左缘要让开交通灯和侧栏开关。侧栏开着时让位是 0。
     /// 客户区没有交通灯（macOS 全屏、Windows 系统标题栏）时只让侧栏开关。
     pub(crate) fn chrome_left_guard(&self, window: &Window) -> Pixels {
-        if self.sidebar_open {
+        if !self.shell_stage_top_left {
             px(0.)
         } else if !workspace_frame::traffic_lights_visible(window) {
             px(48.)
@@ -481,7 +481,7 @@ impl Workspace {
         };
         let toggles = self.render_window_trailing_toggles(cx);
         let drag_band = stage_content_drag_band(
-            self.sidebar_open,
+            !self.shell_stage_top_left,
             no_traffic_lights,
             panel_reserve,
             stage_has_page_header(

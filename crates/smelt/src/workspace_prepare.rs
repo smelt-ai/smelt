@@ -284,13 +284,11 @@ impl Workspace {
     }
 
     fn git_page_visible(&self) -> bool {
-        self.tool_panel_stage_active(tool_panel::ToolPanelTab::Git)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Git)
+        self.tool_tab_visible(tool_panel::ToolPanelTab::Git)
     }
 
     fn history_page_visible(&self) -> bool {
-        self.tool_panel_stage_active(tool_panel::ToolPanelTab::History)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::History)
+        self.tool_tab_visible(tool_panel::ToolPanelTab::History)
     }
 
     /// 每 2 秒把仍开着的页的 TTL 缓存再对一次。打开页面和切换项目走事件，

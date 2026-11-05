@@ -1,0 +1,8 @@
+{
+  "format": 1,
+  "name": "队伍在左",
+  "description": "示例：左栏换成「队伍」插件，原来的会话列表留作第二个标签",
+  "left": { "tabs": ["plugin:com.smelt.party/roster", "smelt.sessions"] },
+  "center": { "tabs": ["smelt.stage"] },
+  "right": { "tabs": ["smelt.tools"] }
+}

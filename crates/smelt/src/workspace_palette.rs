@@ -4,6 +4,8 @@ use super::*;
 
 impl Workspace {
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 布局文件可能刚被人或智能体改过；列表在这里重读，命令面板渲染时只读缓存。
+        self.reload_layout_catalog();
         let state = cx.new(|cx| gpui_component::command::CommandState::new(window, cx));
         state.update(cx, |state, cx| state.focus(window, cx));
         self.palette = Some(state);
@@ -22,13 +24,14 @@ impl Workspace {
     /// 这里不挂 `PrevSession` / `NextSession`。确认会先派发 Action 再跑回调，
     /// 而那两个 Action 按侧栏视觉顺序切，面板这里按会话数组顺序切。
     pub(crate) fn palette_groups(&self, cx: &App) -> [Vec<(String, Cmd)>; 2] {
-        let commands = vec![
+        let mut commands = vec![
             ("新建会话".to_string(), Cmd::NewTab),
             ("打开项目…".to_string(), Cmd::OpenProject),
             ("关闭当前会话/窗格".to_string(), Cmd::CloseTab),
             ("下一个会话".to_string(), Cmd::NextTab),
             ("上一个会话".to_string(), Cmd::PrevTab),
         ];
+        commands.extend(self.layout_palette_entries());
         let sessions = self
             .sessions
             .iter()
@@ -52,6 +55,8 @@ impl Workspace {
             Cmd::NextTab => self.next_active(window, cx),
             Cmd::PrevTab => self.prev_active(window, cx),
             Cmd::SwitchTab(i) => self.activate(i, window, cx),
+            Cmd::SwitchLayout(id) => self.switch_layout(&id, window, cx),
+            Cmd::RestoreDefaultLayout => self.restore_default_layout(window, cx),
         }
     }
 }

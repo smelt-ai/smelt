@@ -295,8 +295,7 @@ impl GitDiffBody {
                     };
                     let path = full_path.clone();
                     host.update(cx, |this, cx| {
-                        this.tool_panel_tab = crate::tool_panel::ToolPanelTab::Files;
-                        this.set_tool_panel_open(true, cx);
+                        this.reveal_tool_tab(crate::tool_panel::ToolPanelTab::Files, window, cx);
                         this.schedule_visible_refresh(cx);
                         this.view_file(path, window, cx);
                         this.save_state(cx);
@@ -541,8 +540,7 @@ fn diff_header_suffix(
                         path: full.clone(),
                     };
                     host.update(cx, |this, cx| {
-                        this.tool_panel_tab = crate::tool_panel::ToolPanelTab::Files;
-                        this.set_tool_panel_open(true, cx);
+                        this.reveal_tool_tab(crate::tool_panel::ToolPanelTab::Files, window, cx);
                         this.schedule_visible_refresh(cx);
                         this.view_file_on(file, None, window, cx);
                         this.save_state(cx);

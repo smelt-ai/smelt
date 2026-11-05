@@ -28,8 +28,8 @@ use crate::{RuntimeKey, Workspace, ui_theme};
 use smelt_model::acp_conn::AcpRuntimeDiagnostics;
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind};
 use smelt_model::new_session::{
-    NewSessionAction, NewSessionPreferences, NewSessionTarget, PinParams, SECTION_LABELS,
-    build_sections, new_session_actions,
+    NewSessionAction, NewSessionPreferences, NewSessionSections, NewSessionTarget, PinParams,
+    SECTION_LABELS, build_sections, find_action, new_session_actions,
 };
 use smelt_model::session_control::AcpAgentOption;
 
@@ -133,8 +133,16 @@ fn remote_catalog_notice(runtime_name: &str, entry: Option<&RemoteCatalogEntry>)
     }
 }
 
-fn refresh_remote_launch_catalog(runtime: crate::runtimes::Runtime, cx: &mut App) {
+/// 读完（成功或失败）后调 `on_done`，插件那边靠它等目录回来再列选项。
+fn refresh_remote_launch_catalog(
+    runtime: crate::runtimes::Runtime,
+    on_done: Option<Box<dyn FnOnce(&mut App)>>,
+    cx: &mut App,
+) {
     if runtime.is_local() {
+        if let Some(on_done) = on_done {
+            on_done(cx);
+        }
         return;
     }
     let key = runtime.key().clone();
@@ -180,6 +188,9 @@ fn refresh_remote_launch_catalog(runtime: crate::runtimes::Runtime, cx: &mut App
                 Err(_) => entry.reading = CatalogReading::Failed,
             }
             cx.refresh_windows();
+            if let Some(on_done) = on_done {
+                on_done(cx);
+            }
         });
     })
     .detach();
@@ -348,6 +359,84 @@ fn available_new_session_actions(runtime: &RuntimeKey, cx: &App) -> Vec<NewSessi
     remote_new_session_actions(&conversations, catalog)
 }
 
+/// 这台机器上的新建选项，分组和侧栏「+」一致。远程机器先重新读一次它装了什么，
+/// 读完（失败就用上次读到的）再交给 `done`；本机立刻交。
+pub(crate) fn new_session_sections(
+    runtime: crate::runtimes::Runtime,
+    done: impl FnOnce(NewSessionSections, &mut App) + 'static,
+    cx: &mut App,
+) {
+    let key = runtime.key().clone();
+    refresh_remote_launch_catalog(
+        runtime,
+        Some(Box::new(move |cx: &mut App| {
+            let actions = available_new_session_actions(&key, cx);
+            let preferences = current_new_session_preferences(cx);
+            done(build_sections(&actions, &preferences), cx);
+        })),
+        cx,
+    );
+}
+
+/// 按 key 找回这台机器上的新建动作。远程用上次读到的目录，没读过就只有空白终端。
+pub(crate) fn find_new_session_target(
+    runtime: &RuntimeKey,
+    key: &str,
+    cx: &App,
+) -> Option<NewSessionTarget> {
+    let actions = available_new_session_actions(runtime, cx);
+    find_action(&actions, key).map(|action| action.target.clone())
+}
+
+/// 建一个新会话：侧栏「+」和插件共用。对话的启动规格现查，配置里已经没有这一项
+/// （比如弹层开着时在设置里删了）就什么也不建：比建出一场引擎不明的对话安全。
+pub(crate) fn launch_new_session(
+    workspace: &mut Workspace,
+    runtime: crate::runtimes::Runtime,
+    cwd: Option<String>,
+    target: NewSessionTarget,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    match target {
+        NewSessionTarget::Conversation {
+            agent_option_id, ..
+        } => {
+            let Some((agent, launch_override, profile_id, agent_definition)) =
+                conversation_launch(runtime.key(), &agent_option_id, cx)
+            else {
+                return;
+            };
+            workspace.add_acp_session(
+                NewAcpSessionRequest {
+                    runtime,
+                    agent,
+                    launch_override,
+                    profile_id,
+                    agent_definition,
+                    fallback_cwd: cwd,
+                    pending_prompt: None,
+                    automation_id: None,
+                    activate: true,
+                },
+                window,
+                cx,
+            );
+        }
+        NewSessionTarget::Terminal { command, provider } => workspace.add_session_with_launch(
+            runtime,
+            cwd,
+            Some(LaunchEntry {
+                label: String::new(),
+                command,
+                provider,
+            }),
+            cx,
+        ),
+        NewSessionTarget::BlankTerminal => workspace.add_session(runtime, cwd, cx),
+    }
+}
+
 /// 远程还没取回过时按「什么都没装」处理，只剩空白终端。放行的话会把本机的清单
 /// 当成那台机器的，点了起不来。
 fn remote_new_session_actions(
@@ -488,53 +577,8 @@ impl NewSessionPickerState {
         };
         let cwd = self.cwd.clone();
         let runtime = self.runtime.clone();
-        let conversation = match &target {
-            NewSessionTarget::Conversation {
-                agent_option_id, ..
-            } => {
-                let Some(resolved) = conversation_launch(runtime.key(), agent_option_id, cx) else {
-                    // 配置在弹层开着的时候被改没了：静默关掉比建出一场引擎不明的
-                    // 对话安全。
-                    self.dismiss(window, cx);
-                    return;
-                };
-                Some(resolved)
-            }
-            _ => None,
-        };
-        self.workspace.update(cx, |workspace, cx| match target {
-            NewSessionTarget::Conversation { .. } => {
-                let Some((agent, launch_override, profile_id, agent_definition)) = conversation
-                else {
-                    return;
-                };
-                workspace.add_acp_session(
-                    NewAcpSessionRequest {
-                        runtime,
-                        agent,
-                        launch_override,
-                        profile_id,
-                        agent_definition,
-                        fallback_cwd: cwd,
-                        pending_prompt: None,
-                        automation_id: None,
-                        activate: true,
-                    },
-                    window,
-                    cx,
-                )
-            }
-            NewSessionTarget::Terminal { command, provider } => workspace.add_session_with_launch(
-                runtime,
-                cwd,
-                Some(LaunchEntry {
-                    label: String::new(),
-                    command,
-                    provider,
-                }),
-                cx,
-            ),
-            NewSessionTarget::BlankTerminal => workspace.add_session(runtime, cwd, cx),
+        self.workspace.update(cx, |workspace, cx| {
+            launch_new_session(workspace, runtime, cwd, target, window, cx)
         });
         self.dismiss(window, cx);
     }
@@ -781,7 +825,7 @@ impl RenderOnce for NewSessionPicker {
             .track_focus(&focus_handle)
             .on_open_change(move |open, _, cx| {
                 if *open {
-                    refresh_remote_launch_catalog(refresh_runtime.clone(), cx);
+                    refresh_remote_launch_catalog(refresh_runtime.clone(), None, cx);
                 }
             })
             .content(move |_, _window, cx| {

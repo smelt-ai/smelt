@@ -681,6 +681,8 @@ impl Workspace {
         if self.ws_snapshot_finalizing {
             return;
         }
+        // 项目列表、置顶、排序、当前项目变了都会走到这里，插件看到的那份跟着更新。
+        self.publish_to_plugins(cx);
         let jobs = self
             .space_keys()
             .into_iter()

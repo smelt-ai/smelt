@@ -567,19 +567,6 @@ impl Workspace {
         )
     }
 
-    /// 活动项目在远程运行时上时，只支持本机的插件面板该说的话。不能说成
-    /// 「没有项目」：项目明明打开着，只是在另一台机器上。
-    pub(crate) fn remote_project_notice(&self, cx: &App) -> Option<String> {
-        let project = self.active_project_ref(cx)?;
-        if project.runtime == crate::RuntimeKey::Local {
-            return None;
-        }
-        let name = crate::runtimes::runtime_name(&project.runtime, cx);
-        Some(format!(
-            "这是「{name}」上的项目，这个面板暂时只支持本机项目"
-        ))
-    }
-
     /// 把工具面板（变更、文件树）里的文字交给当前会话：终端写进 PTY，对话放进输入框。
     /// 都不带回车，发不发由人定。面板跟着选中的项目走，舞台上的会话不一定是这个项目的；
     /// 不是时不发，不能把 B 项目的评论写进 A 的会话。没送到时告诉用户原因，返回 false。
@@ -1760,7 +1747,11 @@ impl Workspace {
         cx.notify();
     }
 
-    fn find_project_group(&self, project: &ProjectRef, cx: &App) -> Option<ProjectGroup> {
+    pub(crate) fn find_project_group(
+        &self,
+        project: &ProjectRef,
+        cx: &App,
+    ) -> Option<ProjectGroup> {
         self.project_groups(&project.runtime, cx)
             .into_iter()
             .find(|g| g.root.trim_end_matches('/') == project.root.trim_end_matches('/'))
