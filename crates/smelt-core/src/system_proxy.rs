@@ -81,6 +81,12 @@ pub fn system_proxy_env(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<(&'sta
     proxy_env(&proxy, configured)
 }
 
+/// 系统设置里配了能用的 HTTPS 固定代理（PAC、仅 SOCKS 不算）。给「用户配没配过网络」
+/// 这类判断用，比如要不要把 npm 源换成国内镜像（`mirrors`）。
+pub(crate) fn has_system_https_proxy() -> bool {
+    read_system_proxy().is_some_and(|proxy| proxy.https.is_some())
+}
+
 fn configured(lookup: &impl Fn(&str) -> Option<OsString>) -> Configured {
     let has = |names: &[&str]| {
         names
