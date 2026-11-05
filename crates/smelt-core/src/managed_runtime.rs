@@ -403,6 +403,8 @@ fn bun_download_command(archive: &Path, url: &str) -> Command {
         .args(["--speed-limit", "1024", "--speed-time", "60", "-o"])
         .arg(archive)
         .arg(url);
+    // curl 只认代理环境变量；用户的代理配在 rc 或系统设置里都要跟上。
+    crate::login_env::apply_login_environment(&mut download);
     download
 }
 
