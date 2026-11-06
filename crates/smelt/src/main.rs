@@ -2245,19 +2245,21 @@ struct Workspace {
     delete_branch_target: Option<(ProjectRef, String, bool)>,
     /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
     git_log_resize: Entity<ResizableState>,
-    /// 各分段正文的高度，拖分隔条或展开时按它分配像素高度。
+    /// 各分段正文的高度分配缓存。
     pub(crate) sidebar_section_heights:
         std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
-    /// 正在拖的分隔条：(起点 y, 上方分段起始高度, 下方分段起始高度, 预留)。
+    /// 各分段正文的相对权重，>=2 个分段展开时按权重通过 flex_grow 分配高度。
+    pub(crate) sidebar_section_weights:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
+    /// 正在拖的分隔条：(起点 y, 上方分段起始像素高度, 下方分段起始像素高度, 两者权重之和)。
     pub(crate) sidebar_split_drag: Option<(f32, f32, f32, f32)>,
     /// 左侧会话栏是否展开。
     sidebar_open: bool,
     sidebar_w: f32,
-    /// 工作台三栏。开合和宽度仍由上面的字段决定，渲染前对齐进这棵 Dock。
-    shell_dock: Entity<gpui_component::dock::DockArea>,
-    /// 上次写进 Dock 的宽度。和 Dock 上的实际宽度不一致时，是用户拖了分隔条。
-    shell_applied_sidebar: f32,
-    shell_applied_tool: f32,
+    /// 侧栏拖动调节起点：(按下时的鼠标 x, 按下时的侧栏宽)。
+    pub(crate) shell_drag_sidebar_start: Option<(f32, f32)>,
+    /// 工具面板拖动调节起点：(按下时的鼠标 x, 按下时的工具栏宽)。
+    pub(crate) shell_drag_tool_start: Option<(f32, f32)>,
     /// 分隔条拖动改过宽度，松手时落盘。
     shell_needs_save: bool,
     /// 左键还按着。这段时间不把 Dock 宽度推回去，免得和拖动对着干。
@@ -2319,6 +2321,7 @@ struct Workspace {
     /// 侧栏会话列表的滚动位置；拖到顶底边缘时靠它自动滚。
     sidebar_scroll: ScrollHandle,
     pub(crate) sidebar_conversations_scroll: ScrollHandle,
+    pub(crate) sidebar_archive_scroll: ScrollHandle,
     /// 侧栏要滚到哪一行、视口外有没有「需要你」，见 `session_list::reveal`。
     sidebar_reveal: std::rc::Rc<session_list::SidebarReveal>,
     /// 刚新建、要闪一下的那一行（会话 `ui_id`）。新建下一个时换掉。
@@ -2824,7 +2827,6 @@ impl Workspace {
         let git_log_resize = cx.new(|_| ResizableState::default());
         // 没有会话时右侧不继承全局偏好；新会话使用 SessionUiState 的默认收起状态。
         let initial_session_ui = SessionUiState::default();
-        let shell = workspace_shell::install(cx.weak_entity(), window, cx);
 
         let mut ws = Self {
             sessions,
@@ -2850,12 +2852,12 @@ impl Workspace {
             delete_branch_target: None,
             git_log_resize,
             sidebar_section_heights: Default::default(),
+            sidebar_section_weights: Default::default(),
             sidebar_split_drag: None,
             sidebar_open,
             sidebar_w,
-            shell_dock: shell.area,
-            shell_applied_sidebar: shell.applied_sidebar,
-            shell_applied_tool: shell.applied_tool,
+            shell_drag_sidebar_start: None,
+            shell_drag_tool_start: None,
             shell_needs_save: false,
             shell_pointer_down: false,
             shell_gesture_sidebar_w: None,
@@ -2895,6 +2897,7 @@ impl Workspace {
             sidebar_drop_origin: None,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_conversations_scroll: ScrollHandle::new(),
+            sidebar_archive_scroll: ScrollHandle::new(),
             sidebar_reveal: Default::default(),
             sidebar_flash: None,
             recent_sessions: Vec::new(),
@@ -3358,34 +3361,23 @@ impl Render for Workspace {
         let shell_surface: Hsla = rgb(ui_theme::bg_rail()).into();
         let shell_padding = ui_theme::shell_padding();
 
-        self.align_shell_dock(window, cx);
-        // 顶带横跨舞台和右栏。停靠缝从这条下面才把两列切开；开关贴在窗口最右，压在页签上。
-        let tool_promoted = self.tool_panel_promoted();
-        let (sidebar_span, tool_span) = {
-            let dock = self.shell_dock.read(cx);
-            let sidebar_span = if dock.is_dock_open(gpui_component::dock::DockPlacement::Left) {
-                dock.dock_size(gpui_component::dock::DockPlacement::Left)
-                    .unwrap_or(px(0.))
-            } else {
-                px(0.)
-            };
-            let tool_span = if !tool_promoted
-                && dock.is_dock_open(gpui_component::dock::DockPlacement::Right)
-            {
-                dock.dock_size(gpui_component::dock::DockPlacement::Right)
-                    .unwrap_or(px(0.))
-            } else {
-                px(0.)
-            };
-            (sidebar_span, tool_span)
+        let (animated_sidebar_w, animated_tool_w, sidebar_progress, tool_progress) =
+            self.shell_animated_spans(window, cx);
+        let sidebar_span = px(animated_sidebar_w);
+        let tool_span = px(animated_tool_w);
+        let max_guard = if !workspace_frame::traffic_lights_visible(window) {
+            48.0
+        } else {
+            128.0
         };
+        let left_guard = px((max_guard - f32::from(sidebar_span)).max(0.0));
         let shell_chrome = self.render_shared_right_chrome(
-            self.chrome_left_guard(window),
+            left_guard,
             tool_span,
             !workspace_frame::traffic_lights_visible(window),
             cx,
         );
-        // 外壳分栏拖动要在窗口级听按下和松开：弹出菜单等元素会拿走焦点、停止事件
+        // 外壳分栏拖动要在窗口级听按下、移动和松开：弹出菜单等元素会拿走焦点、停止事件
         // 传播，只靠 Workspace 根节点收不全。在 paint 阶段注册窗口级监听。
         let shell_pointer_bridge = {
             let workspace = cx.entity().downgrade();
@@ -3403,6 +3395,39 @@ impl Render for Workspace {
                                 workspace.shell_pointer_down = true;
                             });
                         }
+                    });
+                    let workspace_for_move = workspace.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if !phase.bubble() || event.pressed_button != Some(MouseButton::Left) {
+                            return;
+                        }
+                        let viewport = window.viewport_size().width;
+                        let _ = workspace_for_move.update(cx, |workspace, cx| {
+                            let mouse_x = f32::from(event.position.x);
+                            let mut changed = false;
+                            if let Some((start_x, start_w)) = workspace.shell_drag_sidebar_start {
+                                let delta = mouse_x - start_x;
+                                let cap = workspace_shell::sidebar_cap(viewport);
+                                let new_w = (start_w + delta).clamp(0.0, cap);
+                                if (new_w - workspace.sidebar_w).abs() > 0.5 {
+                                    workspace.sidebar_w = new_w;
+                                    changed = true;
+                                }
+                            }
+                            if let Some((start_x, start_w)) = workspace.shell_drag_tool_start {
+                                let delta = start_x - mouse_x;
+                                let sidebar_display = if workspace.sidebar_open { workspace.sidebar_w } else { 0.0 };
+                                let cap = workspace_shell::tool_cap(viewport, sidebar_display);
+                                let new_w = (start_w + delta).clamp(0.0, cap);
+                                if (new_w - workspace.tool_panel_w).abs() > 0.5 {
+                                    workspace.tool_panel_w = new_w;
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                cx.notify();
+                            }
+                        });
                     });
                     let workspace_for_up = workspace;
                     window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
@@ -3604,7 +3629,14 @@ impl Render for Workspace {
                             .min_h_0()
                             .flex()
                             .relative()
-                            .child(self.shell_dock.clone())
+                            .child(self.render_shell_columns(
+                                animated_sidebar_w,
+                                animated_tool_w,
+                                sidebar_progress,
+                                tool_progress,
+                                window,
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .absolute()
@@ -3955,6 +3987,7 @@ gpui_kit_assets::icon_assets!(
         Coffee,
         Keyboard,
         Laptop,
+        LaptopMinimal,
         MessageSquare,
         Pin,
         Puzzle,

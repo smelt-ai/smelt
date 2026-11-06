@@ -375,6 +375,7 @@ impl Workspace {
                         Icon::new(gpui_kit_assets::IconName::MessageSquare).size(px(15.)),
                         collapsed,
                         true,
+                        None,
                     )
                     .into_any_element()
                 }
