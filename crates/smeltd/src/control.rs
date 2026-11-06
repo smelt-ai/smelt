@@ -355,6 +355,21 @@ fn dispatch_control(
                 .unwrap_or_default();
             success_value(control_version, &request_id, status)
         }
+        ControlMethod::NotifySend => {
+            let params: smelt_core::control_api::NotifySendParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::agent_notify::from_control(event_hub, params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::InvalidParams, error),
+                ),
+            }
+        }
         device @ (ControlMethod::DevicePairBegin
         | ControlMethod::DevicePair
         | ControlMethod::DeviceList

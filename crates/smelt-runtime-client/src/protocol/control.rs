@@ -185,6 +185,7 @@ define_control_methods! {
     DeviceRevoke => (DEVICE_REVOKE_METHOD, "device.revoke"),
     PushRegister => (PUSH_REGISTER_METHOD, "push.register"),
     PushUnregister => (PUSH_UNREGISTER_METHOD, "push.unregister"),
+    NotifySend => (NOTIFY_SEND_METHOD, "notify.send"),
     NewSessionPinsGet => (NEW_SESSION_PINS_GET_METHOD, "new_session.pins.get"),
     NewSessionPinsToggle => (NEW_SESSION_PINS_TOGGLE_METHOD, "new_session.pins.toggle"),
     TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
@@ -220,6 +221,8 @@ impl ControlMethod {
         // 手机推送：旧运行时没有，手机提示「升级后才能推送」。
         Self::PushRegister,
         Self::PushUnregister,
+        // 智能体通知：旧运行时没有，`smelt notify` 报错。
+        Self::NotifySend,
         // 额度开关：旧运行时没有，设置页显示读取失败，侧栏额度照常。
         Self::QuotaSettingsGet,
         Self::QuotaSetEnabled,

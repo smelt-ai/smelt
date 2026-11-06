@@ -119,14 +119,17 @@ void main() {
         registration.input,
         registration.failure,
         registration.success,
+        registration.message,
       ],
-      [true, true, true, true],
+      [true, true, true, true, true],
     );
 
     await push.setKinds(input: false);
     expect(backend.registrations.last!.input, isFalse);
     await push.setKinds(success: false);
     expect(backend.registrations.last!.success, isFalse);
+    await push.setKinds(message: false);
+    expect(backend.registrations.last!.message, isFalse);
     expect(platform.prompts, 1, reason: '已经允许过，不再弹');
 
     await push.setEnabled(false);

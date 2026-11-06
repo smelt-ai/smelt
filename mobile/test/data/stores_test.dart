@@ -113,10 +113,12 @@ void main() {
       expect(legacy.pushInput, isTrue);
       expect(legacy.pushFailure, isTrue);
       expect(legacy.pushSuccess, isTrue);
+      expect(legacy.pushMessage, isTrue);
       final custom = const Preferences().copyWith(
         pushEnabled: true,
         pushInput: false,
         pushSuccess: false,
+        pushMessage: false,
       );
       expect(Preferences.fromJson(custom.toJson()), custom);
     });

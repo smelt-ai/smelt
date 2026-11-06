@@ -1900,8 +1900,11 @@ class L10nZh extends L10n {
   String get pushKindSuccess => '跑完一轮';
 
   @override
+  String get pushKindMessage => '智能体消息';
+
+  @override
   String get pushFooter =>
-      '你在 Mac 前用着 Smelt 时，提醒弹在 Mac 上，手机不响；锁屏或 5 分钟没碰键鼠后，还没处理的审批和提问会马上推到手机。通知会显示会话名、项目名和一行摘要（等批准的命令、智能体最后一条回复的开头等），这几行字会经过推送服务和 Apple。完整的会话内容只留在你的机器上。';
+      '你在 Mac 前用着 Smelt 时，提醒弹在 Mac 上，手机不响；锁屏或 5 分钟没碰键鼠后，还没处理的审批和提问会马上推到手机。通知会显示会话名、项目名和一行摘要（等批准的命令、智能体最后一条回复的开头等），这几行字会经过推送服务和 Apple。完整的会话内容只留在你的机器上。「智能体消息」是智能体判断值得告诉你时主动发的，你在 Mac 前也会推到手机。';
 
   @override
   String get pushSessionGone => '这段会话已经不在了。';

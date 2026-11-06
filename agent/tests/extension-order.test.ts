@@ -22,6 +22,7 @@ import {
 	smeltElicitationExtension,
 } from "../src/elicitation.ts";
 import smeltMemoryExtension, { SMELT_MEMORY_EXTENSION_NAME } from "../src/memory-extension.ts";
+import { SMELT_NOTIFY_EXTENSION_NAME, smeltNotifyExtension } from "../src/notify-user.ts";
 import { SMELT_SESSION_PEERS_EXTENSION_NAME, smeltSessionPeersExtension } from "../src/session-peers.ts";
 import smeltPermissionExtension from "../src/smelt-permission.ts";
 import smeltSubagentExtension, { SMELT_SUBAGENT_EXTENSION_NAME } from "../src/subagent/index.ts";
@@ -71,6 +72,7 @@ describe("Smelt Pi extension ordering", () => {
 			{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 			{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
 			{ name: SMELT_SESSION_PEERS_EXTENSION_NAME, factory: smeltSessionPeersExtension, hidden: true },
+			{ name: SMELT_NOTIFY_EXTENSION_NAME, factory: smeltNotifyExtension, hidden: true },
 			{ name: "smelt-codemode", factory: smeltCodemodeExtension, hidden: true },
 			{ name: "smelt-model-refresh", factory: smeltModelRefreshExtension, hidden: true },
 			{ name: SMELT_MEMORY_EXTENSION_NAME, factory: smeltMemoryExtension, hidden: true },

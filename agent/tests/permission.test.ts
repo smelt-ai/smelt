@@ -49,6 +49,11 @@ describe("Smelt Pi permission extension", () => {
 		expect(toolNeedsSmeltApproval(extension("session_read", "/tmp/spoof.ts"))).toBe(true);
 	});
 
+	test("notifying the user skips approval only for the Smelt-owned tool", () => {
+		expect(toolNeedsSmeltApproval(extension("notify_user", "<inline:smelt-notify>"))).toBe(false);
+		expect(toolNeedsSmeltApproval(extension("notify_user", "/tmp/spoof.ts"))).toBe(true);
+	});
+
 	test("only the Smelt-owned canonical elicitation tool bypasses approval", () => {
 		const choice = {
 			question: "用哪种节奏？",

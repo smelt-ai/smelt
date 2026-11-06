@@ -292,9 +292,13 @@ pub enum DaemonStateEvent {
     ProjectChanged { root: String },
     /// 关注过的智能体的记忆目录里有文件变了（`None` 是用户全局记忆）。
     AgentMemoryChanged { agent_id: Option<String> },
-    /// 会话里的终端程序发了一条 OSC 9/99/777 通知。一次性事件，不是投影；会话已有
-    /// 结构化 hook 事件时运行时不会发。
-    TerminalNotification { session_id: String, message: String },
+    /// 会话里的终端程序发了一条 OSC 9/99/777 通知（会话已有结构化 hook 事件时运行时不会
+    /// 发），或智能体主动发了一条通知（带 `title`）。一次性事件，不是投影。
+    TerminalNotification {
+        session_id: String,
+        title: Option<String>,
+        message: String,
+    },
     /// 会话里的终端程序用 OSC 9;4 报的进度变了（`None` = 清掉）。不是投影：运行时在
     /// 进度条还在时定期重发，后连上的客户端靠它补齐。
     TerminalProgress {

@@ -66,10 +66,10 @@ class DeliveredPush {
   final String id;
   final PushTarget target;
 
-  /// `approval` / `input` / `failure` / `success`（`smelt-push` 的 `PushKind`）。
+  /// `approval` / `input` / `failure` / `success` / `message`（`smelt-push` 的 `PushKind`）。
   final String? kind;
 
-  /// 等你批准、等你回复：处理掉就过时了。完成、失败是结果，留作记录。
+  /// 等你批准、等你回复：处理掉就过时了。完成、失败、智能体的消息留作记录。
   bool get isRequest => kind == 'approval' || kind == 'input';
 }
 
@@ -177,6 +177,7 @@ class PushService extends ValueNotifier<PushStatus> {
     bool? input,
     bool? failure,
     bool? success,
+    bool? message,
   }) async {
     prefs.update(
       prefs.value.copyWith(
@@ -184,6 +185,7 @@ class PushService extends ValueNotifier<PushStatus> {
         pushInput: input,
         pushFailure: failure,
         pushSuccess: success,
+        pushMessage: message,
       ),
     );
     await _sync(prompt: false);
@@ -269,6 +271,7 @@ class PushService extends ValueNotifier<PushStatus> {
           input: p.pushInput,
           failure: p.pushFailure,
           success: p.pushSuccess,
+          message: p.pushMessage,
         ),
       );
       value = PushStatus.on;

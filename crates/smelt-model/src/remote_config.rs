@@ -104,10 +104,17 @@ pub struct PushRegisterParams {
     /// 见 [`PUSH_PAYLOAD_VERSION`]。旧版手机不带，就是 1。
     #[serde(default = "legacy_push_payload_version")]
     pub payload_version: u32,
+    /// 智能体主动发的消息。正文原样显示，哪一版 App 都认，旧版手机不带就是推。
+    #[serde(default = "default_push_message")]
+    pub message: bool,
 }
 
 fn legacy_push_payload_version() -> u32 {
     1
+}
+
+fn default_push_message() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -127,5 +134,6 @@ mod tests {
         .unwrap();
         assert!(!params.success);
         assert_eq!(params.payload_version, 1);
+        assert!(params.message, "智能体消息旧版 App 也显示得了，默认推");
     }
 }

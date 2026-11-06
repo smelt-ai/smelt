@@ -14,6 +14,31 @@ use crate::appearance_settings::{SettingsPatch, SettingsResult};
 use crate::automation::{Automation, AutomationCommandResult};
 use crate::launch_settings::{LaunchEntry, LaunchSettings};
 
+/// 发一条不属于任何会话的通知（`smelt notify`）：桌面弹出，推给登记了「智能体消息」的手机。
+pub enum NotifySend {}
+
+impl ControlCall for NotifySend {
+    type Params = NotifySendParams;
+    type Result = NotifySendResult;
+
+    const METHOD: ControlMethod = ControlMethod::NotifySend;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotifySendParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotifySendResult {
+    /// 有桌面客户端连着、收到了。
+    pub desktop: bool,
+    /// 推给了几台手机。
+    pub phones: usize,
+}
+
 /// 运行时的智能体宿主配置（各家 CLI 命令、环境变量、profile、开关、智能体定义）。
 pub enum AgentHostGet {}
 

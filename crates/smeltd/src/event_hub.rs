@@ -408,19 +408,22 @@ impl DaemonEventHub {
         Ok(())
     }
 
-    /// 终端里的程序发了一条 OSC 通知。没人订阅就不发：通知是一次性的，不补发。
+    /// 终端里的程序发了一条 OSC 通知，或智能体主动发了一条（带标题）。没人订阅就不发：
+    /// 通知是一次性的，不补发。有人订阅、发出去了返回 true。
     pub(crate) fn publish_terminal_notification(
         &self,
         session_id: &str,
+        title: Option<&str>,
         message: &str,
-    ) -> Result<(), EventBusError> {
+    ) -> Result<bool, EventBusError> {
         let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_TERMINAL_NOTIFICATION)
             .expect("registered core topic is valid");
         if !self.hub.has_subscriber(&topic)? {
-            return Ok(());
+            return Ok(false);
         }
         let payload = smelt_event_protocol::TerminalNotification {
             session_id: session_id.to_string(),
+            title: title.map(str::to_string),
             message: message.to_string(),
         };
         self.publish_core(
@@ -430,7 +433,7 @@ impl DaemonEventHub {
             })?,
             None,
         )?;
-        Ok(())
+        Ok(true)
     }
 
     /// 记下并广播一个终端的进度变化（`None` = 清掉）。记账和广播在同一把锁里：订阅时的补发不会

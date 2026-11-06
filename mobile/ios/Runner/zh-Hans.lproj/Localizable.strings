@@ -5,6 +5,7 @@
 "SMELT_PUSH_INPUT" = "有智能体在等你回复";
 "SMELT_PUSH_FAILURE" = "有智能体运行失败了";
 "SMELT_PUSH_SUCCESS" = "有智能体跑完了";
+"SMELT_PUSH_MESSAGE" = "智能体给你发了一条消息";
 "SMELT_PUSH_APPROVAL_DETAIL" = "等你批准：%@";
 "SMELT_PUSH_INPUT_DETAIL" = "等你回复：%@";
 "SMELT_PUSH_FAILURE_DETAIL" = "失败：%@";

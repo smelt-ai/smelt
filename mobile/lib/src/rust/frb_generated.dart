@@ -4984,8 +4984,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PushRegistration dco_decode_push_registration(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return PushRegistration(
       handle: dco_decode_String(arr[0]),
       relayUrl: dco_decode_String(arr[1]),
@@ -4993,6 +4993,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       input: dco_decode_bool(arr[3]),
       failure: dco_decode_bool(arr[4]),
       success: dco_decode_bool(arr[5]),
+      message: dco_decode_bool(arr[6]),
     );
   }
 
@@ -7975,6 +7976,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_input = sse_decode_bool(deserializer);
     var var_failure = sse_decode_bool(deserializer);
     var var_success = sse_decode_bool(deserializer);
+    var var_message = sse_decode_bool(deserializer);
     return PushRegistration(
       handle: var_handle,
       relayUrl: var_relayUrl,
@@ -7982,6 +7984,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       input: var_input,
       failure: var_failure,
       success: var_success,
+      message: var_message,
     );
   }
 
@@ -10704,6 +10707,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.input, serializer);
     sse_encode_bool(self.failure, serializer);
     sse_encode_bool(self.success, serializer);
+    sse_encode_bool(self.message, serializer);
   }
 
   @protected

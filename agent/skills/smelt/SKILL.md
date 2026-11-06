@@ -74,10 +74,18 @@ smelt automation delete <id>
 - 触发条件可以组合，至少一种：`--every-minutes N`、`--every-hours N`、`--daily HH:MM`、`--weekly <星期>@HH:MM`、`--during <分钟>@HH:MM-HH:MM[@<星期>]`（时段内每隔几分钟一次，不写星期是每天）、`--webhook`、`--event <主题>`。星期写 `mon`…`sun`、`weekdays`、`weekend`、`everyday`，逗号分隔。
 - update 时按类别替换：给了任何定时就整组换掉定时，`--event` 同理；webhook 已有就保留原地址（换地址会让调用方全部失效）。`--no-schedule` / `--no-webhook` / `--no-event` 去掉那一类，但不能删光。
 - 定时触发必须带 `--prompt`。`--webhook` / `--event` 可以不带，收到的内容就是这次的指令，但不带 `--prompt` 时不能手动 `run`。带了 `--prompt` 时，收到的内容附在它后面；写 `{{payload}}` 或 `{{字段名}}` 可以放到指定位置。
-- `--notify on|off` 控制跑完是否发应用通知，不写就保持原样。
+- `--notify on|off` 控制跑完是否发应用通知，不写就保持原样。它只管例行的「跑完提醒」。想「有事才提醒」：`--notify off`，再在 `--prompt` 里写清楚什么情况下通知用户（Pi 用 `notify_user` 工具，Shell 自动化在脚本里调 `smelt notify`）。
 - webhook 令牌不会出现在输出里，要地址让用户去桌面的自动化页面复制。
 - 智能体自动化在它的 space（`~/.smelt/agents/<id>/automations/` 下的子目录）里运行，能读到它在对话里攒下的文件和绑定的目录，但不会带上你的项目；要处理的仓库写进 `--prompt`。
 - 看自动化跑得怎样：`runs` 列最近的运行（新的在前，默认 20 条），`run-log` 看一次运行的输出、报错和对话记录。
+
+## 通知用户
+
+```sh
+smelt notify [--title <标题>] <内容>
+```
+
+桌面弹系统通知，并推给在 Smelt 手机端打开了「智能体消息」的手机；人在不在电脑前都推。Pi 对话里用 `notify_user` 工具（会带上会话名，点开推送直接进那段会话），CLI 给脚本和别的智能体用。只在真有事要用户知道时发，别拿来报进度。
 
 ## 能力：MCP、插件、模型、用量
 
