@@ -1,17 +1,28 @@
-//! 让 Pi（smelt-agent）跟随系统代理。
+//! 让 Smelt 起的子进程跟随系统代理。
 //!
 //! smelt-agent 跑在 Bun 上，Bun 的 `fetch` 只认 `HTTP(S)_PROXY` / `NO_PROXY` 环境变量，
-//! 不读 Windows「设置 → 代理」、也不读 macOS「网络 → 代理」。只在系统里配了代理的用户
-//! （公司电脑、代理工具开了系统代理），浏览器能过、Pi 却直连：OAuth 令牌兑换被按地区拒绝
+//! 不读 Windows「设置 → 代理」、也不读 macOS「网络 → 代理」；Claude Code、Gemini CLI
+//! 这类 Node 写的 ACP agent 和 npm 也一样。只在系统里配了代理的用户
+//! （公司电脑、代理工具开了系统代理），浏览器能过、agent 却直连：OAuth 令牌兑换被按地区拒绝
 //! （`unsupported_country_region_territory`），模型请求同理。额度请求走 reqwest，它自己
 //! 会读系统代理，没有这个问题（见 `quota_http`）。
 //!
-//! 所以起 Pi 之前，把系统代理翻译成环境变量补给它。规则：
+//! 所以起子进程之前，把系统代理翻译成环境变量补给它。规则：
 //!
-//! - **只补，不覆盖**：子进程最终环境里已有任一代理变量（login shell、进程环境、启动配置
-//!   都算），说明用户自己配过，什么都不做。
-//! - **只认固定代理**：系统代理没开，或只配了 PAC 自动配置脚本 / 只有 SOCKS，都不注入。
-//!   Bun 跑不了 PAC；开了 TUN 的代理工具不需要环境变量也能通。
+//! - **按协议只补，不覆盖**：子进程最终环境里（login shell、进程环境、启动配置都算）已有
+//!   `HTTPS_PROXY` 或 `ALL_PROXY`，HTTPS 就不补；`HTTP_PROXY` 同理。不能看到任一代理变量
+//!   就整体放弃：Bun 发 HTTPS 请求不看 `HTTP_PROXY`，只配了 `HTTP_PROXY` 的用户（不少公司
+//!   就这么下发）HTTPS 会直连。`quota_http` 踩过同一个坑。
+//! - **只认固定代理**：系统代理没开、配了 PAC 自动配置脚本、只有 SOCKS，都不注入。
+//!   PAC 和手动代理同时开着时浏览器优先用 PAC，补手动那条会和浏览器走不同出口；
+//!   Bun 跑不了 PAC。开了 TUN 的代理工具不需要环境变量也能通。
+//! - **入口只有一个**：`login_env::apply_login_environment` 按「login 环境 → 调用方覆盖 →
+//!   补系统代理」铺环境，所有走它起的子进程（Pi、ACP agent、agent 代跑的命令、后台任务、
+//!   git、安装 CLI、下载用的 curl）都跟随系统代理，规则和浏览器一致：绕过列表里的地址直连。
+//!   调用方自己的 env 必须交给它，不能在它返回后再铺：异名变量（启动配置里的 `ALL_PROXY`）
+//!   判断时看不到，补上的 `HTTPS_PROXY` 会把它盖掉。
+//!   用户自己打开的内置终端用 portable_pty 起，不是 `Command`，由 smeltd 调
+//!   [`system_proxy_env`] 补，规则相同。
 //! - **绕过列表一起翻译**，并始终带上回环地址：OAuth 回调服务器、内网地址不能被塞进代理。
 //!
 //! 每次起进程现读：用户随时会开关代理工具，缓存会读到过期值。读系统代理是一次注册表 /
@@ -20,17 +31,12 @@
 // 其它平台读不到系统代理，翻译函数只有测试在用。
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
+use std::ffi::OsString;
 use std::process::Command;
 
-/// 任一个已经有值，就当用户自己配了代理。
-const PROXY_VARS: [&str; 6] = [
-    "HTTPS_PROXY",
-    "https_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-];
+const HTTPS_PROXY_VARS: [&str; 2] = ["HTTPS_PROXY", "https_proxy"];
+const HTTP_PROXY_VARS: [&str; 2] = ["HTTP_PROXY", "http_proxy"];
+const ALL_PROXY_VARS: [&str; 2] = ["ALL_PROXY", "all_proxy"];
 
 const NO_PROXY_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
@@ -39,51 +45,92 @@ const LOOPBACK: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
 /// 系统里配的固定代理，已规整成带 scheme 的 URL。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SystemProxy {
-    http: Option<String>,
-    https: Option<String>,
+pub(crate) struct SystemProxy {
+    pub(crate) http: Option<String>,
+    pub(crate) https: Option<String>,
     /// `NO_PROXY` 格式的条目，不含回环地址。
-    bypass: Vec<String>,
+    pub(crate) bypass: Vec<String>,
 }
 
-/// 子进程环境里没有代理变量时，按系统代理补上。要在命令的环境都设完之后调用。
-pub(crate) fn apply_system_proxy_fallback(command: &mut Command) {
-    if configures_proxy(command, |name| std::env::var_os(name)) {
-        return;
-    }
-    let Some(proxy) = read_system_proxy() else {
-        return;
-    };
-    let keep_no_proxy = has_value(command, &NO_PROXY_VARS, |name| std::env::var_os(name));
-    for (name, value) in proxy_env(&proxy, keep_no_proxy) {
+/// 子进程最终环境里用户已经配了哪些。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Configured {
+    http: bool,
+    https: bool,
+    no_proxy: bool,
+}
+
+/// 子进程环境里缺哪个协议的代理，就按系统代理补哪个。要在命令的环境都设完之后调用，
+/// 只由 `login_env::apply_login_environment` 调。`read` 是读系统代理，测试里换成假的。
+pub(crate) fn apply_system_proxy_fallback(
+    command: &mut Command,
+    read: impl FnOnce() -> Option<SystemProxy>,
+) {
+    let env = fallback_env(
+        |name| command_env(command, name, &|name: &str| std::env::var_os(name)),
+        read,
+    );
+    for (name, value) in env {
         command.env(name, value);
     }
 }
 
-fn configures_proxy(
-    command: &Command,
-    process_env: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> bool {
-    has_value(command, &PROXY_VARS, process_env)
+/// 按系统代理要补的变量。`lookup` 返回子进程最终会拿到的值，`None` 和空串都算没设。
+/// 给不是 `std::process::Command` 起的子进程用（内置终端的 PTY）；`Command` 直接走
+/// `login_env::apply_login_environment`。
+pub fn system_proxy_env(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str, String)> {
+    fallback_env(lookup, read_system_proxy)
 }
 
-/// 子进程最终会不会拿到 `names` 里某个非空变量：命令上显式设的优先，显式删掉的算没有，
-/// 其余继承父进程。Windows 环境变量名不分大小写，其它平台按原样比较。
-fn has_value(
+fn fallback_env(
+    lookup: impl Fn(&str) -> Option<OsString>,
+    read: impl FnOnce() -> Option<SystemProxy>,
+) -> Vec<(&'static str, String)> {
+    let configured = configured(&lookup);
+    if configured.http && configured.https {
+        return Vec::new();
+    }
+    let Some(proxy) = read() else {
+        return Vec::new();
+    };
+    proxy_env(&proxy, configured)
+}
+
+/// 系统设置里配了能用的 HTTPS 固定代理（PAC、仅 SOCKS 不算）。给「用户配没配过网络」
+/// 这类判断用，比如要不要把 npm 源换成国内镜像（`mirrors`）。
+pub(crate) fn has_system_https_proxy() -> bool {
+    read_system_proxy().is_some_and(|proxy| proxy.https.is_some())
+}
+
+fn configured(lookup: &impl Fn(&str) -> Option<OsString>) -> Configured {
+    let has = |names: &[&str]| {
+        names
+            .iter()
+            .any(|name| lookup(name).is_some_and(|value| !value.is_empty()))
+    };
+    let all = has(&ALL_PROXY_VARS);
+    Configured {
+        http: all || has(&HTTP_PROXY_VARS),
+        https: all || has(&HTTPS_PROXY_VARS),
+        no_proxy: has(&NO_PROXY_VARS),
+    }
+}
+
+/// `Command` 起的子进程最终拿到的值：命令上显式设的优先，显式删掉的算没有，其余继承父进程。
+/// Windows 环境变量名不分大小写，其它平台按原样比较。
+fn command_env(
     command: &Command,
-    names: &[&str],
-    process_env: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> bool {
-    names.iter().any(|name| {
-        let explicit = command
-            .get_envs()
-            .filter(|(key, _)| same_var(&key.to_string_lossy(), name))
-            .last();
-        match explicit {
-            Some((_, value)) => value.is_some_and(|value| !value.is_empty()),
-            None => process_env(name).is_some_and(|value| !value.is_empty()),
-        }
-    })
+    name: &str,
+    process_env: &impl Fn(&str) -> Option<OsString>,
+) -> Option<OsString> {
+    let explicit = command
+        .get_envs()
+        .filter(|(key, _)| same_var(&key.to_string_lossy(), name))
+        .last();
+    match explicit {
+        Some((_, value)) => value.map(ToOwned::to_owned),
+        None => process_env(name),
+    }
 }
 
 fn same_var(a: &str, b: &str) -> bool {
@@ -94,19 +141,20 @@ fn same_var(a: &str, b: &str) -> bool {
     }
 }
 
-/// 要设的变量。大小写两份都设：curl 只认小写的 `http_proxy`，有的工具只认大写；
-/// Windows 上同名不分大小写，后一份覆盖前一份，值相同。
-fn proxy_env(proxy: &SystemProxy, keep_no_proxy: bool) -> Vec<(&'static str, String)> {
+/// 要设的变量：用户没配的协议才补。大小写两份都设：curl 只认小写的 `http_proxy`，
+/// 有的工具只认大写；Windows 上同名不分大小写，后一份覆盖前一份，值相同。
+/// 用户自己的 `NO_PROXY` 不动；什么代理都没补时也不碰 `NO_PROXY`。
+fn proxy_env(proxy: &SystemProxy, configured: Configured) -> Vec<(&'static str, String)> {
     let mut env = Vec::new();
-    if let Some(http) = &proxy.http {
+    if let Some(http) = proxy.http.as_ref().filter(|_| !configured.http) {
         env.push(("HTTP_PROXY", http.clone()));
         env.push(("http_proxy", http.clone()));
     }
-    if let Some(https) = &proxy.https {
+    if let Some(https) = proxy.https.as_ref().filter(|_| !configured.https) {
         env.push(("HTTPS_PROXY", https.clone()));
         env.push(("https_proxy", https.clone()));
     }
-    if !keep_no_proxy {
+    if !env.is_empty() && !configured.no_proxy {
         let mut entries: Vec<String> = LOOPBACK.iter().map(|entry| entry.to_string()).collect();
         for entry in &proxy.bypass {
             if !entries
@@ -225,11 +273,18 @@ fn finish(proxy: SystemProxy) -> Option<SystemProxy> {
 }
 
 #[cfg(windows)]
-fn read_system_proxy() -> Option<SystemProxy> {
+pub(crate) fn read_system_proxy() -> Option<SystemProxy> {
     let settings = windows_registry::CURRENT_USER
         .open("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
         .ok()?;
     if settings.get_u32("ProxyEnable").unwrap_or(0) == 0 {
+        return None;
+    }
+    // 配了 PAC：浏览器按脚本走，手动代理只是兜底，不跟。
+    if settings
+        .get_string("AutoConfigURL")
+        .is_ok_and(|url| !url.trim().is_empty())
+    {
         return None;
     }
     let (http, https) = parse_windows_proxy_server(&settings.get_string("ProxyServer").ok()?);
@@ -245,7 +300,7 @@ fn read_system_proxy() -> Option<SystemProxy> {
 }
 
 #[cfg(target_os = "macos")]
-fn read_system_proxy() -> Option<SystemProxy> {
+pub(crate) fn read_system_proxy() -> Option<SystemProxy> {
     use system_configuration::core_foundation::array::CFArray;
     use system_configuration::core_foundation::base::{CFType, CFTypeRef, TCFType as _};
     use system_configuration::core_foundation::dictionary::CFDictionary;
@@ -255,7 +310,7 @@ fn read_system_proxy() -> Option<SystemProxy> {
     use system_configuration::sys::schema_definitions::{
         kSCPropNetProxiesExceptionsList, kSCPropNetProxiesHTTPEnable, kSCPropNetProxiesHTTPPort,
         kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPSEnable, kSCPropNetProxiesHTTPSPort,
-        kSCPropNetProxiesHTTPSProxy,
+        kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesProxyAutoConfigEnable,
     };
 
     fn key(raw: CFStringRef) -> CFString {
@@ -295,6 +350,15 @@ fn read_system_proxy() -> Option<SystemProxy> {
 
     let store = SCDynamicStoreBuilder::new("smelt").build()?;
     let proxies = store.get_proxies()?;
+    // 配了 PAC：系统按脚本选代理，手动那条不跟。
+    let pac_enabled = proxies
+        .find(key(unsafe { kSCPropNetProxiesProxyAutoConfigEnable }))
+        .and_then(|flag| flag.downcast::<CFNumber>())
+        .and_then(|flag| flag.to_i32())
+        == Some(1);
+    if pac_enabled {
+        return None;
+    }
     // SAFETY: 同上，读取系统框架导出的常量。
     let (http, https) = unsafe {
         (
@@ -333,14 +397,20 @@ fn read_system_proxy() -> Option<SystemProxy> {
 
 /// 其它平台没有统一的系统代理设置（Linux 桌面各家不同），只认环境变量。
 #[cfg(not(any(windows, target_os = "macos")))]
-fn read_system_proxy() -> Option<SystemProxy> {
+pub(crate) fn read_system_proxy() -> Option<SystemProxy> {
     None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
+
+    fn configured_for(
+        command: &Command,
+        process_env: impl Fn(&str) -> Option<OsString>,
+    ) -> Configured {
+        configured(&|name: &str| command_env(command, name, &process_env))
+    }
 
     fn no_process_env(_: &str) -> Option<OsString> {
         None
@@ -408,7 +478,7 @@ mod tests {
             https: Some("http://p:1".to_string()),
             bypass: vec!["localhost".to_string(), ".corp".to_string()],
         };
-        let env = proxy_env(&proxy, false);
+        let env = proxy_env(&proxy, Configured::default());
         let no_proxy = env
             .iter()
             .find(|(name, _)| *name == "NO_PROXY")
@@ -423,38 +493,84 @@ mod tests {
             https: Some("http://p:1".to_string()),
             ..SystemProxy::default()
         };
-        let env = proxy_env(&proxy, true);
-        assert!(
-            env.iter()
-                .all(|(name, _)| !name.eq_ignore_ascii_case("NO_PROXY"))
+        let configured = Configured {
+            no_proxy: true,
+            ..Configured::default()
+        };
+        let env = proxy_env(&proxy, configured);
+        assert_eq!(
+            env,
+            [
+                ("HTTPS_PROXY", "http://p:1".to_string()),
+                ("https_proxy", "http://p:1".to_string())
+            ]
         );
+    }
+
+    /// 公司只下发了 `HTTP_PROXY`：保留它，HTTPS 从系统代理补上，否则 Bun 的 HTTPS 会直连。
+    #[test]
+    fn http_proxy_alone_still_gets_https_from_the_system() {
+        let mut command = Command::new("x");
+        command.env("HTTP_PROXY", "http://mine:1");
+        let configured = configured_for(&command, no_process_env);
+        assert_eq!(
+            configured,
+            Configured {
+                http: true,
+                ..Configured::default()
+            }
+        );
+        let proxy = SystemProxy {
+            http: Some("http://sys:8080".to_string()),
+            https: Some("http://sys:8080".to_string()),
+            bypass: Vec::new(),
+        };
+        let env = proxy_env(&proxy, configured);
         assert!(
             env.iter()
                 .all(|(name, _)| !name.eq_ignore_ascii_case("HTTP_PROXY"))
         );
+        assert!(env.contains(&("HTTPS_PROXY", "http://sys:8080".to_string())));
+        assert!(env.contains(&("NO_PROXY", "localhost,127.0.0.1,::1".to_string())));
     }
 
     #[test]
-    fn explicit_proxy_on_command_counts_as_configured() {
+    fn nothing_to_add_leaves_no_proxy_alone() {
+        let proxy = SystemProxy {
+            http: Some("http://sys:1".to_string()),
+            ..SystemProxy::default()
+        };
+        let configured = Configured {
+            http: true,
+            ..Configured::default()
+        };
+        assert!(proxy_env(&proxy, configured).is_empty());
+    }
+
+    #[test]
+    fn all_proxy_covers_both_schemes() {
+        let command = Command::new("x");
+        let configured = configured_for(&command, |name| {
+            (name == "ALL_PROXY").then(|| OsString::from("socks5://mine:1"))
+        });
+        assert!(configured.http && configured.https);
+    }
+
+    #[test]
+    fn explicit_https_proxy_on_command_counts_as_configured() {
         let mut command = Command::new("x");
         command.env("https_proxy", "http://mine:1");
-        assert!(configures_proxy(&command, no_process_env));
-    }
-
-    #[test]
-    fn inherited_proxy_counts_as_configured() {
-        let command = Command::new("x");
-        assert!(configures_proxy(&command, |name| {
-            (name == "ALL_PROXY").then(|| OsString::from("socks5://mine:1"))
-        }));
+        let configured = configured_for(&command, no_process_env);
+        assert!(configured.https && !configured.http);
     }
 
     #[test]
     fn removed_or_empty_proxy_does_not_count() {
         let mut command = Command::new("x");
         command.env_remove("HTTPS_PROXY").env("HTTP_PROXY", "");
-        assert!(!configures_proxy(&command, |name| {
+        let configured = configured_for(&command, |name| {
             (name == "HTTPS_PROXY").then(|| OsString::from("http://inherited:1"))
-        }));
+        });
+        assert_eq!(configured, Configured::default());
     }
 }

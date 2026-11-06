@@ -21,7 +21,7 @@ pub enum SettingsSection {
     Remote,
     /// 停在这一页时才采样。
     Resources,
-    /// 后台服务、旧版本残留。
+    /// 后台服务、终端里的 smelt 命令（macOS）、旧版本残留。
     Maintenance,
     /// 版本、应用更新（macOS、Windows）、帮助与反馈。
     About,
@@ -312,6 +312,10 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "旧数据",
                         "~/.smelt",
                         "高级",
+                        "命令行",
+                        "CLI",
+                        "终端命令",
+                        "PATH",
                     ],
                 ),
                 leaf(

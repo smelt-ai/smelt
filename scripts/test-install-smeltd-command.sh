@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# 验证 install-smeltd.sh 生成的 /usr/local/bin/smeltd：root 先切用户再执行、参数原样传、
+# 验证 install-smeltd.sh 生成的 /usr/local/bin/smeltd、/usr/local/bin/smelt：root 先切用户再执行、参数原样传、
 # 其他用户拿到明确提示。用假的 id、runuser，不需要 root。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$(mktemp -d)"
+# 取真实路径：macOS 的 /var 是指向 /private/var 的链接，cd 之后 $PWD 对不上。
+WORK="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 
 # 只取生成函数，不执行安装脚本的主体。
@@ -32,13 +33,13 @@ SCRIPT
 chmod +x "$HOME_DIR/.smelt/bin/smeltd" "$WORK/fake/id" "$WORK/fake/runuser"
 
 COMMAND="$WORK/smeltd"
-root_command_script smelt 1001 "$HOME_DIR" /run/user/1001 >"$COMMAND"
+root_command_script smeltd smelt 1001 "$HOME_DIR" /run/user/1001 >"$COMMAND"
 chmod +x "$COMMAND"
 export PATH="$WORK/fake:$PATH"
 
 expect() {
   local output="$1" wanted="$2" what="$3"
-  [[ "$output" == *"$wanted"* ]] || { echo "FAIL: $what：没有「$wanted」，实际：$output" >&2; exit 1; }
+  [[ "$output" == *"$wanted"* ]] || { echo "FAIL: ${what}：没有「${wanted}」，实际：$output" >&2; exit 1; }
 }
 
 output="$(cd "$WORK" && FAKE_UID=0 "$COMMAND" relay 'a b')"
@@ -65,4 +66,21 @@ fi
 expect "$output" "可能已经卸载" "卸载后的提示"
 
 expect "$(cat "$COMMAND")" "$ROOT_COMMAND_MARKER" "带生成标记，重装才认得出"
+
+# 命令行 smelt 用同一个生成函数，执行的是 ~/.smelt/bin/smelt。
+cat >"$HOME_DIR/.smelt/bin/smelt" <<'SCRIPT'
+#!/bin/bash
+echo "real-smelt user=${USER:-} args=$*"
+SCRIPT
+chmod +x "$HOME_DIR/.smelt/bin/smelt"
+CLI="$WORK/smelt"
+root_command_script smelt smelt 1001 "$HOME_DIR" "" >"$CLI"
+chmod +x "$CLI"
+output="$(FAKE_UID=0 "$CLI" agent list)"
+expect "$output" "real-smelt user=smelt args=agent list" "root 跑 smelt 切到运行用户"
+if output="$(FAKE_UID=1002 "$CLI" agent list 2>&1)"; then
+  echo "FAIL: 其他用户跑 smelt 应该失败" >&2
+  exit 1
+fi
+expect "$output" "请用 sudo smelt agent list" "smelt 给其他用户的提示"
 echo "ok"

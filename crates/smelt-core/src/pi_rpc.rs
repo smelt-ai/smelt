@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ElicitationContentValue, SessionId, StopReason, ToolCallId,
 };
 use futures::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt};
@@ -270,25 +270,6 @@ pub fn spawn_pi_rpc(
                         return;
                     }
                 };
-                // 要连的 MCP 里有用受管 Bun 启动的（预设都是），先把 Bun 备好，会话期间持有它的
-                // 租约。Pi 自己已经不跑在 Bun 上，没人会为它下载；新装的机器上那条路径不在，
-                // MCP 起不来（spawn … ENOENT）。备不好也照常起 Pi，MCP 那边会如实报错。
-                let _mcp_bun = crate::pi_mcp::uses_managed_bun(
-                    &crate::pi_mcp::loaded_mcp_servers_for_launch(&launch.launch),
-                )
-                .then(|| {
-                    crate::managed_runtime::sync_managed_bun(&|message| {
-                        let _ = event_tx
-                            .try_send(ConversationEvent::StartupProgress(message.to_string()));
-                    })
-                    .inspect_err(|error| {
-                        crate::app_log::error(
-                            "pi-rpc",
-                            &format!("准备 MCP 用的 Bun 失败：{error}"),
-                        );
-                    })
-                    .ok()
-                });
                 let had_resume =
                     launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
                 let result = smol::block_on(async {
@@ -583,8 +564,6 @@ fn spawn_process(
     let program = process_args.remove(0);
     let mut command = std::process::Command::new(program);
     command.args(process_args);
-    crate::login_env::apply_login_environment(&mut command);
-
     let mut environment = inline_env;
     for (name, value) in &launch.launch.env {
         environment.insert(name.clone(), runtime_env_value(name, value));
@@ -592,11 +571,16 @@ fn spawn_process(
     for (name, value) in &launch.ephemeral_env {
         environment.insert(name.clone(), value.clone());
     }
-    let path = environment
-        .remove("PATH")
-        .unwrap_or_else(crate::acp_conn::extended_search_path);
-    command.env("PATH", path);
-    command.envs(environment);
+    if !environment.contains_key("PATH") {
+        environment.insert("PATH".to_string(), crate::acp_conn::extended_search_path());
+    }
+    // 启动配置的 env 作为覆盖交给统一入口，补系统代理时才看得到它们。
+    crate::login_env::apply_login_environment(
+        &mut command,
+        environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
     // 会话身份与 capability token 必须由 daemon 决定；用户在旧式命令
     // 前缀或配置 env 中写了同名变量也不能覆盖。
     command.env("SMELT_SESSION_ID", &launch.sid);
@@ -609,8 +593,6 @@ fn spawn_process(
     if let Some(path) = background_sock {
         command.env("SMELT_BACKGROUND_TASK_SOCK", path);
     }
-    // 环境都铺完再看：用户在 rc、启动配置里写过代理就不动，只配了系统代理才补。
-    crate::system_proxy::apply_system_proxy_fallback(&mut command);
     if let Some(cwd) = launch.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
         command.current_dir(cwd);
     }
@@ -8610,7 +8592,7 @@ mod tests {
         ));
     }
 
-    /// 从 Smelt 的统一运行时入口走完受管 Bun -> Pi RPC -> Ready，
+    /// 从 Smelt 的统一运行时入口走完 smelt-agent -> Pi RPC -> Ready，
     /// 避免逻辑命令意外落回 ACP parser 却只有单元测试通过。
     #[test]
     #[ignore = "需要先编出 smelt-agent（agent/scripts/build-smelt-agent.sh）"]

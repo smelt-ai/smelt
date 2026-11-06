@@ -116,7 +116,7 @@ fn request(id: &str, topic: &str) -> serde_json::Value {
     .unwrap()
 }
 
-fn read_message(reader: &mut BufReader<UnixStream>) -> SubscribeMessage<serde_json::Value> {
+fn read_message(reader: &mut BufReader<RuntimeStream>) -> SubscribeMessage<serde_json::Value> {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     assert!(!line.is_empty(), "event subscription closed unexpectedly");
@@ -127,7 +127,7 @@ fn read_message(reader: &mut BufReader<UnixStream>) -> SubscribeMessage<serde_js
 fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
     let event_hub = super::super::new_event_hub();
     let request = request("sessions", CORE_TOPIC_SESSION_STATE_CHANGED);
-    let (server, client) = UnixStream::pair().unwrap();
+    let (server, client) = RuntimeStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -195,7 +195,7 @@ fn version_and_capability_rejections_are_explicit() {
             "missing subscribe capability",
         ),
     ] {
-        let (server, client) = UnixStream::pair().unwrap();
+        let (server, client) = RuntimeStream::pair().unwrap();
         handle_event_subscribe(server, Some(&request), Ok(identity), &event_hub);
         let mut line = String::new();
         BufReader::new(client).read_line(&mut line).unwrap();
@@ -533,7 +533,7 @@ fn macos_auth_uses_running_pid_identity_and_rejects_team_mismatch() {
 fn macos_peer_identity_reads_a_real_audit_token_from_the_socket() {
     // LOCAL_PEERTOKEN 取不到时代码会静默退化为 audit_token: None，而那会让所有鉴权全部
     // 失败。这里用真实 socket 验证内核确实返回 token，且其 pid 字段与对端一致。
-    let (server, _client) = UnixStream::pair().unwrap();
+    let (server, _client) = RuntimeStream::pair().unwrap();
     let identity = super::auth::system_peer_identity(&server).unwrap();
     assert_eq!(identity.pid, std::process::id());
     let token = identity
@@ -1012,7 +1012,7 @@ fn wire_auth_rejects_capability_escalation_and_removed_plugin_auth() {
 fn client_message_after_subscribe_closes_socket_and_reclaims_reader_worker() {
     let event_hub = super::super::new_event_hub();
     let request = request("sessions", CORE_TOPIC_SESSION_STATE_CHANGED);
-    let (server, mut client) = UnixStream::pair().unwrap();
+    let (server, mut client) = RuntimeStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();

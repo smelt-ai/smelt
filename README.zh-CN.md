@@ -70,7 +70,7 @@ smeltd mcp add <id>          # playwright、figma、rea、browser-mcp
 
 - **工作台**：多项目 × 多标签内嵌真终端（跑 `claude`/`codex`/`copilot`/`pi`/`vim`/`htop` 等交互式程序与全屏 TUI），分屏、命令面板（`Cmd+K`）、可自定义的快捷启动
 - **看住 agent**：基于 agent hook（`smelt-notify`）与结构化协议（ACP 或 provider 原生协议）跟踪会话状态（等你批准 / 等你输入 / 跑着呢 / 有结果可看）。会话名来自 ACP `session_title` 或 hook `SessionTitleChanged`，没有时用首条用户请求；OSC 0/2 不是会话名。OSC 9/777 通知与响铃仅作信息提示；需要关注时角标提醒 + 系统通知；不依赖任何一家的私有格式
-- **原生 agent 对话**：通过 ACP 或 provider 原生协议接入 Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Crush、Pi，提供结构化消息流、工具卡片、内嵌 diff、权限审批、PLAN 进度和可续接会话。Pi 编译为单二进制 `smelt-agent`（`~/.smelt/bin/smelt-agent`），跑官方 JSONL RPC，不经 ACP 转换。受管 Bun（`~/.smelt/runtime`）按需启动 ACP 适配器和 MCP 服务器
+- **原生 agent 对话**：通过 ACP 或 provider 原生协议接入 Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Crush、Pi，提供结构化消息流、工具卡片、内嵌 diff、权限审批、PLAN 进度和可续接会话。Pi 编译为单二进制 `smelt-agent`（`~/.smelt/bin/smelt-agent`），跑官方 JSONL RPC，不经 ACP 转换。Claude Code、Codex 的官方 ACP 适配器也编在 `smelt-agent` 里，MCP 预设用它自带的 Bun 运行
 - **持久化智能体与自动化**：左侧「智能体」管理可复用定义，「自动化」独立管理时机、每次运行的输入与结果历史。智能体自动化在该智能体 space 下分配稳定目录（`~/.smelt/agents/<id>/automations/`）；Shell 自动化留在 `~/.smelt/workspaces/automations`。时机是定时或外部触发：定时仍是工作日/每天/按间隔；外部触发是本机 `127.0.0.1` 上的接收地址，同机程序 POST JSON 即可开 Run。目录只显示「外部触发」，不展示令牌。当前引擎只开放 Pi，定时、外部触发和手动 Run 均由 `smeltd` 托管。自动化固定全权限跑，不另存一套权限策略
 - **读写代码**：文件树 + 搜索、内置编辑器、Git diff 视图、Markdown/Mermaid 渲染
 - **用量与历史**：用量按 provider 查账户（Claude、Copilot、Codex、Cursor、Grok），不读 transcript。历史会话读各家本机存档，不只 Claude Code
@@ -104,7 +104,7 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 ## 架构
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.10）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、iroh（远程连接）。axum 用于自动化 webhook 服务（只听本机回环）。结构化状态在 `~/.smelt/` 的 SQLite（Windows 上是 `%USERPROFILE%\.smelt`）：运行时库 `smelt.sqlite3`，这台桌面的客户端库 `client.sqlite3`。见 [`docs/local-storage.md`](docs/local-storage.md)。
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.11）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、iroh（远程连接）。axum 用于自动化 webhook 服务（只听本机回环）。结构化状态在 `~/.smelt/` 的 SQLite（Windows 上是 `%USERPROFILE%\.smelt`）：运行时库 `smelt.sqlite3`，这台桌面的客户端库 `client.sqlite3`。见 [`docs/local-storage.md`](docs/local-storage.md)。
 
 工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、同进程的 ACP 驱动、自动化；macOS 与 Windows 桌面按需拉起，在 Linux 上可以装成 systemd 用户服务）、`smelt-agent`（Pi 运行时单二进制）、`smelt-notify`（agent hook 的状态上报）、`smelt-installer`（退出后替换 macOS App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
 Windows 上，Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（AF_UNIX，`smelt-runtime-client/src/stream/windows.rs` 自己包的非阻塞套接字）。Bun 和 Pi 走当前用户的命名管道。子进程放进 Job Object（`KILL_ON_JOB_CLOSE`）。受管 Bun 下载 `bun-windows-x64.zip`，装到 `%USERPROFILE%\.smelt\runtime`。

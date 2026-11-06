@@ -129,25 +129,9 @@ mod pairing_qr_tests {
 mod daemon_info_tests {
     #[cfg(unix)]
     use super::daemon_info_line;
-    use super::{acp_cmd_setting_value, fmt_uptime};
+    use super::fmt_uptime;
     #[cfg(unix)]
     use crate::local_daemon::DaemonInfo;
-    use smelt_model::agent_kind::ConversationAgentKind;
-
-    #[test]
-    fn builtin_agent_command_is_hidden_in_settings() {
-        let agent = ConversationAgentKind::Codex;
-        assert!(acp_cmd_setting_value(agent, agent.default_cmd()).is_empty());
-    }
-
-    #[test]
-    fn custom_agent_command_remains_visible_in_settings() {
-        assert_eq!(
-            acp_cmd_setting_value(ConversationAgentKind::Codex, "codex-acp --custom".into())
-                .as_ref(),
-            "codex-acp --custom"
-        );
-    }
 
     #[test]
     fn fmt_uptime_picks_two_units() {

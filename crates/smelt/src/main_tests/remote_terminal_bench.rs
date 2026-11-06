@@ -324,16 +324,19 @@ fn remote_terminal_under_heavy_output() {
     unpair_after_bench(&runtime, home);
 }
 
-/// 假 agent 的启动命令。脚本由运行时自己的受管 Bun 执行，那台机器不用另装解释器，
-/// 也不用先把文件传过去。运行时按空白切命令、不经过 shell，所以脚本按字节编进
-/// `bun -e`。
+/// 假 agent 的启动命令。脚本由运行时自己的 smelt-agent 当 Bun 执行（`BUN_BE_BUN=1`），
+/// 那台机器不用另装解释器，也不用先把文件传过去。运行时按空白切命令、不经过 shell，
+/// 所以脚本按字节编进 `-e`。
 fn bench_agent_launch() -> smelt_model::agent_kind::ConversationLaunchSpec {
     let bytes: Vec<String> = include_str!("bench_acp_agent.js")
         .bytes()
         .map(|byte| byte.to_string())
         .collect();
     smelt_model::agent_kind::ConversationLaunchSpec {
-        command: format!("bun -e eval(Buffer.from([{}]).toString())", bytes.join(",")),
+        command: format!(
+            "BUN_BE_BUN=1 smelt-agent -e eval(Buffer.from([{}]).toString())",
+            bytes.join(",")
+        ),
         env: Default::default(),
     }
 }

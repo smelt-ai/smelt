@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 打 Linux 无头运行时（smeltd）的发布包：dist/smeltd-<版本>-linux-<架构>.tar.gz。
 # 由 release.yml 在两种架构的 runner 上各跑一次。
-# 包里还有 smelt-agent、photon wasm，pi-tui 的 native/，以及内置技能 skills/。Bun 不打进包，第一次用到 MCP 或 bunx 时再下载。
+# 包里还有 smelt-agent、photon wasm，pi-tui 的 native/，以及内置技能 skills/。Bun 编在 smelt-agent 里，不另外打包。
 #
 # 不交叉编译：在哪种架构的 Linux 机器上跑，就出哪种架构的包。只编运行时这一侧：
 # 桌面 GUI 那几个 crate 依赖 GPUI，只有 macOS 版。
@@ -17,7 +17,7 @@ case "$(uname -m)" in
   *) echo "✗ 不支持的架构：$(uname -m)" >&2; exit 1 ;;
 esac
 
-# 随运行时一起分发的程序。
+# 随运行时一起分发的程序。命令行 smelt 另外编（smelt-cli，不依赖 GPUI），以 smelt 为名打进包。
 PROGRAMS=(smeltd smelt-notify)
 
 # 版本号按 git tag 算（发版流水线直接传 SMELT_BUILD_VERSION），编进 smeltd。
@@ -25,7 +25,7 @@ version="$(scripts/version.sh)"
 export SMELT_BUILD_VERSION="$version"
 name="smeltd-${version}-linux-$(uname -m)"
 echo "▶ 打包 ${name}"
-cargo build --release -p smeltd --bins --locked
+cargo build --release -p smeltd --bins -p smelt-cli --locked
 make smelt-agent
 bin="target/smelt-agent/smelt-agent"
 wasm="target/smelt-agent/photon_rs_bg.wasm"
@@ -47,6 +47,7 @@ mkdir -p "$staging"
 for program in "${PROGRAMS[@]}"; do
   install -m 0755 "target/release/$program" "$staging/$program"
 done
+install -m 0755 target/release/smelt-cli "$staging/smelt"
 install -m 0755 scripts/install-smeltd.sh "$staging/install.sh"
 install -m 0755 scripts/smelt-up.sh "$staging/smelt-up"
 install -m 0755 "$bin" "$staging/smelt-agent"

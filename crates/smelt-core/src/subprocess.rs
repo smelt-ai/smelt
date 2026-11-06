@@ -103,10 +103,7 @@ impl Subprocess for LocalSubprocess {
         // git 本身能跑，但 hook（husky 调 npm/node、pre-commit 调 python）
         // 一律 command not found。先铺 login shell 环境，再让调用方显式
         // 传入的 env 覆盖它。
-        crate::login_env::apply_login_environment(&mut command);
-        for (k, v) in env {
-            command.env(k, v);
-        }
+        crate::login_env::apply_login_environment(&mut command, env.iter().copied());
         let out = command.output()?;
         Ok(Output {
             code: out.status.code(),
@@ -131,10 +128,7 @@ impl Subprocess for LocalSubprocess {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        crate::login_env::apply_login_environment(&mut command);
-        for (k, v) in env {
-            command.env(k, v);
-        }
+        crate::login_env::apply_login_environment(&mut command, env.iter().copied());
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

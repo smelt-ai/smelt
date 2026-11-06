@@ -30,10 +30,8 @@ pub enum PiMcpPresetTransport {
         /// OAuth 动态注册时报的客户端名。部分服务只接受它认识的客户端。
         oauth_client_name: Option<&'static str>,
     },
-    Stdio {
-        command: &'static str,
-        args: &'static [&'static str],
-    },
+    /// 用 smelt-agent 自带的 Bun 跑：`smelt-agent <args>`，带上 `BUN_BE_BUN=1`。
+    Bun { args: &'static [&'static str] },
 }
 
 impl PiMcpPresetTransport {
@@ -67,10 +65,9 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     PiMcpPreset {
         id: "rea",
         name: "REA 逆向分析",
-        summary: "在本机拆解应用、二进制、网页和抓包，带证据讲清某个功能是怎么实现的。用 Smelt 自带的 Bun 运行，不用装 Node；首次连接会下载约 25MB。",
+        summary: "在本机拆解应用、二进制、网页和抓包，带证据讲清某个功能是怎么实现的。用 Smelt 自带的 Bun 运行，不用装 Node。",
         description: "REA (Reverse Engineer Anything): local, evidence-backed reverse engineering of desktop apps, binaries, Electron/JavaScript bundles, websites and traffic captures",
-        transport: PiMcpPresetTransport::Stdio {
-            command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
+        transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "rea-agents@6.5.0", "mcp"],
         },
         exposure: None,
@@ -89,8 +86,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         name: "Agent360 浏览器",
         summary: "操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。用 Smelt 自带的 Bun 运行。",
         description: "Browser automation in the user's own signed-in Chrome: navigate, click, fill forms, read pages and take screenshots, and ask the user for 2FA codes or CAPTCHAs",
-        transport: PiMcpPresetTransport::Stdio {
-            command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
+        transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "@agent360/browser-mcp@1.30.2"],
         },
         exposure: Some("deferred"),
@@ -112,8 +108,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         name: "Playwright 浏览器",
         summary: "通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。用 Smelt 自带的 Bun 运行。",
         description: "Browser automation with Playwright in the user's own signed-in Chrome via the Playwright extension: navigate, click, type, fill forms, read accessibility snapshots, take screenshots and inspect console and network",
-        transport: PiMcpPresetTransport::Stdio {
-            command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
+        transport: PiMcpPresetTransport::Bun {
             args: &["x", "--bun", "@playwright/mcp@0.0.83", "--extension"],
         },
         exposure: Some("deferred"),
@@ -133,8 +128,7 @@ const PLAYWRIGHT_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
     name: "Playwright 浏览器",
     summary: "操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态：打开网页、点击填表、读页面结构、截图；遇到验证码、付款，人在远程桌面里接管。用 Smelt 自带的 Bun 运行。",
     description: "Browser automation with Playwright in the always-on Chrome on this machine's remote desktop, keeping its signed-in sessions: navigate, click, type, fill forms, read accessibility snapshots and take screenshots. A person can watch and take over the same browser from the remote desktop",
-    transport: PiMcpPresetTransport::Stdio {
-        command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
+    transport: PiMcpPresetTransport::Bun {
         args: &[
             "x",
             "--bun",
@@ -173,8 +167,11 @@ impl PiMcpPreset {
                     entry.insert("oauth".into(), Value::Object(oauth));
                 }
             }
-            PiMcpPresetTransport::Stdio { command, args } => {
-                entry.insert("command".into(), Value::String(command.into()));
+            PiMcpPresetTransport::Bun { args } => {
+                entry.insert(
+                    "command".into(),
+                    Value::String(crate::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH.into()),
+                );
                 entry.insert(
                     "args".into(),
                     Value::Array(
@@ -183,6 +180,10 @@ impl PiMcpPreset {
                             .collect(),
                     ),
                 );
+                let (name, value) = crate::agent_paths::BUN_BE_BUN;
+                let mut env = Map::new();
+                env.insert(name.into(), Value::String(value.into()));
+                entry.insert("env".into(), Value::Object(env));
             }
         }
         entry.insert("description".into(), Value::String(self.description.into()));

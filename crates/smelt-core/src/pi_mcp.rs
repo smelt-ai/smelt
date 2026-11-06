@@ -142,15 +142,59 @@ fn loaded_mcp_servers_for_launch_at(
         .collect()
 }
 
-/// 这些 MCP 服务器里有没有用受管 Bun 启动的。MCP 预设写的命令是
-/// [`smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH`]，`~` 由 Pi 展开。
-pub fn uses_managed_bun(servers: &[PiMcpServer]) -> bool {
-    servers.iter().any(|server| {
-        matches!(
-            &server.transport,
-            PiMcpTransport::Stdio { command, .. }
-                if command == smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH
-        )
+/// 旧版预设用单独下载的 Bun 跑（`~/.smelt/runtime/bin/bun`），那份 Bun 已经不再下载。
+const RETIRED_BUN_LAUNCHERS: [&str; 2] =
+    ["~/.smelt/runtime/bin/bun", "~/.smelt/runtime/bin/bun.exe"];
+
+/// 把 `mcp.json` 里还指着旧 Bun 的条目改成 smelt-agent 自带的 Bun，参数原样保留：
+/// `smelt-agent` 带上 `BUN_BE_BUN=1` 就是 Bun 命令行。没有要改的就不碰文件。守护启动时调。
+pub fn retire_managed_bun_entries() {
+    if let Err(error) = retire_managed_bun_entries_at(&pi_agent_dir()) {
+        crate::app_log::error(
+            "pi-mcp",
+            &format!("迁移 mcp.json 里的旧 Bun 命令失败：{error}"),
+        );
+    }
+}
+
+fn retire_managed_bun_entries_at(agent_dir: &Path) -> Result<(), String> {
+    let path = agent_dir.join("mcp.json");
+    let retired = |entry: &Value| {
+        entry
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| RETIRED_BUN_LAUNCHERS.contains(&command.trim()))
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let doc: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("{} 不是合法 JSON：{error}", path.display()))?;
+    let needs = doc
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| servers.values().any(retired));
+    if !needs {
+        return Ok(());
+    }
+    edit_servers(agent_dir, |servers| {
+        for entry in servers.values_mut().filter(|entry| retired(entry)) {
+            let Some(entry) = entry.as_object_mut() else {
+                continue;
+            };
+            entry.insert(
+                "command".into(),
+                Value::String(smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH.into()),
+            );
+            let (name, value) = smelt_model::agent_paths::BUN_BE_BUN;
+            let env = entry
+                .entry("env")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(env) = env.as_object_mut() {
+                env.insert(name.into(), Value::String(value.into()));
+            }
+        }
+        Ok(())
     })
 }
 
@@ -295,32 +339,73 @@ fn last_output_line(output: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// 预设都用受管 Bun 启动：Pi 要连它们之前得先把 Bun 备好。
+    /// 旧版预设指着单独下载的 Bun；改成 smelt-agent 自带的，参数和别的条目都不动。
     #[test]
-    fn presets_run_on_the_managed_bun() {
-        let dir = tempfile::tempdir().unwrap();
-        add_pi_mcp_preset_at(dir.path(), "playwright", true).unwrap();
-        let servers = load_pi_mcp_servers_at(dir.path()).unwrap();
-        assert!(uses_managed_bun(&servers));
+    fn entries_on_the_retired_bun_move_to_smelt_agent() {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.join("mcp.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "playwright": {
+                        "command": "~/.smelt/runtime/bin/bun",
+                        "args": ["x", "--bun", "@playwright/mcp@0.0.83", "--extension"],
+                        "exposure": "deferred",
+                    },
+                    "rea": {
+                        "command": "~/.smelt/runtime/bin/bun.exe",
+                        "args": ["x", "--bun", "rea-agents@6.5.0", "mcp"],
+                        "env": {"REA_HOME": "/data"},
+                    },
+                    "mine": {"command": "npx", "args": ["-y", "mine"]},
+                    "figma": {"url": "https://mcp.figma.com/mcp"},
+                },
+                "settings": {"keep": true},
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        let http = PiMcpServer {
-            name: "remote".into(),
-            transport: PiMcpTransport::Http {
-                url: "https://example.com/mcp".into(),
-            },
-            enabled: true,
-            description: None,
-            signed_in: false,
-        };
-        let system_node = PiMcpServer {
-            name: "local".into(),
-            transport: PiMcpTransport::Stdio {
-                command: "npx".into(),
-                args: vec![],
-            },
-            ..http.clone()
-        };
-        assert!(!uses_managed_bun(&[http, system_node]));
+        retire_managed_bun_entries_at(&dir).unwrap();
+
+        let doc = read(&dir);
+        let playwright = &doc["mcpServers"]["playwright"];
+        assert_eq!(
+            playwright["command"],
+            smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH
+        );
+        assert_eq!(
+            playwright["args"],
+            serde_json::json!(["x", "--bun", "@playwright/mcp@0.0.83", "--extension"])
+        );
+        assert_eq!(playwright["env"], serde_json::json!({"BUN_BE_BUN": "1"}));
+        assert_eq!(playwright["exposure"], "deferred");
+        let rea = &doc["mcpServers"]["rea"];
+        assert_eq!(
+            rea["command"],
+            smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH
+        );
+        assert_eq!(
+            rea["env"],
+            serde_json::json!({"REA_HOME": "/data", "BUN_BE_BUN": "1"})
+        );
+        assert_eq!(doc["mcpServers"]["mine"]["command"], "npx");
+        assert!(doc["mcpServers"]["mine"].get("env").is_none());
+        assert_eq!(doc["settings"]["keep"], true);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn nothing_to_retire_leaves_mcp_json_alone() {
+        let dir = temp_dir();
+        retire_managed_bun_entries_at(&dir).unwrap();
+        assert!(!dir.join("mcp.json").exists(), "没有文件就不建");
+
+        let text = "{\"mcpServers\":{\"mine\":{\"command\":\"npx\"}}}";
+        std::fs::write(dir.join("mcp.json"), text).unwrap();
+        retire_managed_bun_entries_at(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("mcp.json")).unwrap(), text);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn temp_dir() -> PathBuf {
@@ -414,11 +499,19 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "rea", false).unwrap();
 
         let rea = &read(&dir)["mcpServers"]["rea"];
-        assert_eq!(rea["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
+        assert_eq!(
+            rea["command"],
+            smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH
+        );
         assert_eq!(
             rea["args"],
             serde_json::json!(["x", "--bun", "rea-agents@6.5.0", "mcp"]),
             "持久注册必须钉死版本，不能用 @latest；--bun 防止转交给系统 node"
+        );
+        assert_eq!(
+            rea["env"],
+            serde_json::json!({"BUN_BE_BUN": "1"}),
+            "smelt-agent 带上它才是 Bun 命令行"
         );
         assert_eq!(rea["timeout"], 120);
         assert!(
@@ -430,7 +523,7 @@ mod tests {
         assert_eq!(
             servers[0].transport,
             PiMcpTransport::Stdio {
-                command: smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH.into(),
+                command: smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH.into(),
                 args: vec![
                     "x".into(),
                     "--bun".into(),
@@ -448,7 +541,10 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "browser-mcp", false).unwrap();
 
         let browser = &read(&dir)["mcpServers"]["browser-mcp"];
-        assert_eq!(browser["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
+        assert_eq!(
+            browser["command"],
+            smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH
+        );
         assert_eq!(
             browser["args"],
             serde_json::json!(["x", "--bun", "@agent360/browser-mcp@1.30.2"]),
@@ -471,7 +567,10 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "playwright", false).unwrap();
 
         let playwright = &read(&dir)["mcpServers"]["playwright"];
-        assert_eq!(playwright["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
+        assert_eq!(
+            playwright["command"],
+            smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH
+        );
         assert_eq!(
             playwright["args"],
             serde_json::json!(["x", "--bun", "@playwright/mcp@0.0.83", "--extension"]),
@@ -496,7 +595,10 @@ mod tests {
         add_pi_mcp_preset_at(&dir, "playwright", true).unwrap();
 
         let chrome = &read(&dir)["mcpServers"]["playwright"];
-        assert_eq!(chrome["command"], smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH);
+        assert_eq!(
+            chrome["command"],
+            smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH
+        );
         assert_eq!(
             chrome["args"],
             serde_json::json!([

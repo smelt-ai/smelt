@@ -1675,7 +1675,7 @@ struct AcpSaved {
     agent: Option<String>,
     /// 产品级智能体定义引用；只描述“这段对话由谁创建”，不改变底层 provider。
     agent_definition_id: Option<String>,
-    history_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    history_session_id: Option<agent_client_protocol::v1::schema::SessionId>,
     /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
     /// → None，恢复时退化成生成一个新 id——意味着即便 smeltd 里那个会话还
     /// 活着，GUI 重开后也接不上、只能按 history_session_id 重新 spawn 一次
@@ -2537,8 +2537,6 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 设置「Agent → 高级 → 对话适配器命令」是否展开。只在本次运行内记住。
-    settings_acp_commands_open: bool,
     /// 能力库正文。只在能力库路由可见时存在，见 `sync_capabilities_view`。
     capabilities_view: Option<Entity<settings::SettingsContentView>>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
@@ -2995,7 +2993,6 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            settings_acp_commands_open: false,
             capabilities_view: None,
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
@@ -4251,6 +4248,9 @@ fn main() {
         if let Err(error) = settings::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
+        // 终端和智能体里的 `smelt` 命令指向这个 App（macOS 上 GUI 自己就是命令行）。
+        #[cfg(target_os = "macos")]
+        settings::sync_cli_command(cx);
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         cx.set_global(settings::AgentHosts::default());

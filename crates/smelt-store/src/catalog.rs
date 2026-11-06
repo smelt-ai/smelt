@@ -1,9 +1,9 @@
 //! 智能体配置、远程会话、守护会话目录的关系表读写。
 
 use crate::{
-    AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot,
-    PublishedSessionRecord, PublishedSessionSnapshot, StoreError,
+    AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentDefinitionRecord, AgentProfileEnvRecord,
+    AgentProfileRecord, AgentUiSnapshot, PublishedSessionRecord, PublishedSessionSnapshot,
+    StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -22,7 +22,6 @@ pub(crate) fn read_agent_ui_snapshot(
     }
     Ok(Some(AgentUiSnapshot {
         agent_hooks_enabled: hooks_enabled.unwrap_or(true),
-        commands: query_commands(connection)?,
         env: query_env(connection)?,
         config_memory: query_config_memory(connection)?,
         agents: query_agents(connection)?,
@@ -39,14 +38,13 @@ pub(crate) fn write_agent_ui_snapshot(
     Ok(())
 }
 
-/// 写智能体宿主偏好、启动命令和 profile，不动 `agent_definition`。
+/// 写智能体宿主偏好、环境变量和 profile，不动 `agent_definition`。
 ///
 /// 改偏好时不能整表重写定义：否则并发的单行 create 会被内存里的旧清单盖掉。
 pub(crate) fn write_agent_ui_prefs(
     transaction: &Transaction<'_>,
     snapshot: &AgentUiSnapshot,
 ) -> Result<(), StoreError> {
-    transaction.execute("DELETE FROM agent_acp_command", [])?;
     transaction.execute("DELETE FROM agent_acp_env", [])?;
     transaction.execute("DELETE FROM agent_acp_config_memory", [])?;
     transaction.execute("DELETE FROM agent_profile_env", [])?;
@@ -56,12 +54,6 @@ pub(crate) fn write_agent_ui_prefs(
          ON CONFLICT(id) DO UPDATE SET hooks_enabled = excluded.hooks_enabled",
         params![snapshot.agent_hooks_enabled],
     )?;
-    for command in &snapshot.commands {
-        transaction.execute(
-            "INSERT INTO agent_acp_command(command_key, command) VALUES (?1, ?2)",
-            params![command.command_key, command.command],
-        )?;
-    }
     for env in &snapshot.env {
         transaction.execute(
             "INSERT INTO agent_acp_env(engine_kind_id, name, value) VALUES (?1, ?2, ?3)",
@@ -279,21 +271,6 @@ fn agent_definitions_exist(connection: &Connection) -> Result<bool, StoreError> 
         .query_row("SELECT EXISTS(SELECT 1 FROM agent_definition)", [], |row| {
             row.get(0)
         })
-        .map_err(StoreError::from)
-}
-
-fn query_commands(
-    connection: &Connection,
-) -> Result<Vec<AgentConversationCommandRecord>, StoreError> {
-    let mut statement = connection
-        .prepare("SELECT command_key, command FROM agent_acp_command ORDER BY command_key")?;
-    let rows = statement.query_map([], |row| {
-        Ok(AgentConversationCommandRecord {
-            command_key: row.get(0)?,
-            command: row.get(1)?,
-        })
-    })?;
-    rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
 }
 

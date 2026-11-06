@@ -27,7 +27,7 @@ cargo run --bin smelt
 
 | 层 | 选型 | 说明 |
 |----|------|------|
-| GUI 框架 | **GPUI**（`gpui-pre` 0.3.10）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
+| GUI 框架 | **GPUI**（`gpui-pre` 0.3.11）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
 | 组件库 | **gpui-component**（`longbridge/gpui-kit`，不再用 zzfn fork） | Dock/补全/主题等，与 GPUI 同一套修订 |
 | 终端后端 | **portable-pty** `0.9`（在 `smeltd`） | Unix 起 `$SHELL`；Windows 起 `COMSPEC` 或 `cmd.exe`（ConPTY）并拿到 PTY |
 | 终端状态机 | **alacritty_terminal** `0.26` | ANSI 解析 + 网格模型 + 滚动缓冲 |
@@ -54,7 +54,7 @@ cargo run --bin smelt
   的定义在 `smelt-model`，这里只再导出。
 - **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
   `~/.smelt/client.sqlite3`（外观、侧栏顺序、每段对话的界面状态和分屏布局、连过哪些运行时）。`SCHEMA_VERSION = 8`。
-- **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（本机 socket 与 iroh）。Windows 上 Rust 客户端的本机 socket 是 AF_UNIX 文件 `smeltd.sock`（`stream/windows.rs` 自己包的非阻塞套接字）；Bun / Pi 另走当前用户的命名管道。
+- **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（本机 socket 与 iroh）。Windows 上本机连接走当前用户的命名管道，Rust 客户端和 Bun / Pi 连同一条；`pair()` 是进程内的内存流（`stream/windows.rs`、`stream/memory.rs`）。不用 AF_UNIX。
 - **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify`）：
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
 - **`crates/smelt-paths`** —— 统一环境路径推导（`~/.smelt`）与单用例测试隔离沙箱。
@@ -286,7 +286,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-agent.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
 
-数据目录是 `%USERPROFILE%\.smelt`。Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（AF_UNIX，见 `smelt-runtime-client/src/stream/windows.rs`）。Bun / Pi 不连这个文件：交给它们的 `SMELT_SOCK` 是当前用户的命名管道 `\\.\pipe\smelt-<sid>-daemon`。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-agent-<指纹>/smelt-agent.exe`，启动名是 `smelt-agent.current` 指针文件。受管 Bun 取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `%USERPROFILE%\.smelt\runtime` 下的 `bin/bun.exe`。
+数据目录是 `%USERPROFILE%\.smelt`。守护监听的是 `%USERPROFILE%\.smelt\smeltd.sock` 这个路径对应的命名管道 `\\.\pipe\smelt-<sid>-daemon-<路径哈希>`，不建这个文件。Rust 客户端（桌面、`smelt-notify`、runtime client）拿 sock 路径连，`RuntimeStream::connect` 换成管道名；交给 Bun / Pi 的 `SMELT_SOCK` 直接是管道名。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-agent-<指纹>/smelt-agent.exe`，启动名是 `smelt-agent.current` 指针文件。不另外下载 Bun：MCP 预设写的 `~/.smelt/bin/smelt-agent` 在 Windows 上执行不了，smelt-agent 起 MCP 时换成它自己。
 
 交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`，走 ConPTY。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。关掉桌面窗口本身不停守护，shell 还在。升级和其它平台一样先优雅停机再换新版本，进行中的终端会话和回合会中断；不同在于 Windows 不能 `exec`，旧进程拉起新映像当接班进程，接班进程等它退出再绑定监听。系统通知、状态栏图标、Dock 角标在 Windows 上没有。细节见 [`windows-support.md`](windows-support.md)。
 
@@ -301,7 +301,7 @@ curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh
 
 `install.sh` 会下载对应架构的 tar.gz、对照 `SHA256SUMS` 校验，再调用包里的脚本。也可以自己解包后在包目录执行 `./install.sh`。参数：`--with-desktop`（TigerVNC / Xvnc、XFCE、Chrome 或 Chromium，用户级 systemd 服务 `smelt-display`、`smelt-desktop`、`smelt-chrome`，并执行 `smeltd mcp add playwright`）、`--relay=<地址>`（初始 iroh 中继，域名、IP 或 URL）、`--apt-mirror=<镜像>`（这次安装用的 apt 源；不给时官方源连不上就自动换阿里云 / 清华 / 中科大）、`--no-pair`。
 
-脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-agent`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-agent-<指纹>/`，`~/.smelt/bin/smelt-agent` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-agent）。已经在跑就停掉旧进程、换上新版本：进行中的终端会话和回合会中断，对话历史保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`，供 ACP 适配器和 MCP 使用。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），Bun 从 npmmirror 下，npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
+脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify`、`smelt-up` 和命令行 `smelt`（`smelt-cli`，Linux 上不带子命令只打印用法）放进 `~/.smelt/bin`，`smeltd`、`smelt` 两个命令链到 `~/.local/bin`（以 root 执行时在 `/usr/local/bin` 生成切到运行用户再跑的同名脚本），再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-agent`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-agent-<指纹>/`，`~/.smelt/bin/smelt-agent` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-agent）。已经在跑就停掉旧进程、换上新版本：进行中的终端会话和回合会中断，对话历史保留。Bun 编在 smelt-agent 里，不另外下载：Claude/Codex 适配器和 MCP 预设都跑在 smelt-agent 上。国内网络连不上官方地址时自动换镜像：系统包换阿里云 / 清华 / 中科大（`--apt-mirror` 可指定），npm 包走 `registry.npmmirror.com`（用户自己配了源或代理就不动，见 `crates/smelt-core/src/mirrors.rs`）。之后：
 
 ```bash
 smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码
@@ -315,6 +315,14 @@ smeltd mcp add <id>              # 内置 MCP 预设：playwright、figma、rea�
 ```
 
 `pair` 会把远程访问打开（保留已填写的自建 relay）。配对串 10 分钟、用一次。配对等于把这台机器上当前用户的 shell 交给对方。macOS 和 Windows 上守护由桌面拉起，`smeltd install` 只在 Linux 注册 systemd 单元。细节在 `crates/smeltd/src/service.rs` 和 `scripts/install-smeltd.sh`。
+
+### 命令行 smelt
+
+`smelt agent …`、`smelt automation …`、`smelt settings …` 经本机 smeltd 的 Control API 读写，内置的 `smelt` 技能靠它。运行时给智能体子进程的 PATH 最前面是 `~/.smelt/bin`（`crates/smelt-core/src/login_env.rs`），三个平台的智能体都能直接敲 `smelt`：
+
+- macOS：GUI 的 `smelt` 自己就是命令行。桌面每次启动把 `~/.smelt/bin/smelt` 拨成指向当前 App 的软链接。终端里要用，在设置「维护 → 命令行」点「安装」，放 `/usr/local/bin/smelt` → `~/.smelt/bin/smelt`，目录写不进去时弹管理员授权框（`crates/smelt/src/settings/cli_command.rs`）。
+- Linux：运行时包里的 `smelt` 装进 `~/.smelt/bin`，远程升级时随其它小工具一起换；终端里的命令由 `install.sh` 链好。
+- Windows：安装程序的「把 smelt 命令加入 PATH」把安装目录加进用户 PATH，敲 `smelt` 找到 `smelt.com`。
 
 ### 远程桌面
 

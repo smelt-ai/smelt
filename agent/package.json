@@ -16,12 +16,13 @@
     "production-smoke": "bun scripts/production-smoke.ts"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.78.0",
-    "@agentclientprotocol/codex-acp": "1.12.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-mcp": "1.4.0",
-    "proper-lockfile": "4.1.2"
+    "@agentclientprotocol/claude-agent-acp": "0.100.0",
+    "@agentclientprotocol/codex-acp": "2.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-mcp": "1.5.0",
+    "proper-lockfile": "4.1.2",
+    "typebox": "1.3.27"
   },
   "devDependencies": {
     "@types/bun": "1.4.4",

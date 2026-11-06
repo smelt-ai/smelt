@@ -34,8 +34,10 @@ pub(crate) fn reachable(host: &str, port: u16) -> bool {
     false
 }
 
-/// 给拉 npm 包的子进程（Pi 的 `bun x`、Claude/Codex 的 `bunx`、agent 跑的 npm）补的源：
+/// 给拉 npm 包的子进程（MCP 预设的 `bun x`、agent 跑的 npm）补的源：
 /// 官方源连不上、用户又没自己配源或代理时是镜像地址，否则 `None`。进程存活期只探一次。
+/// 只在系统设置里配了代理也算配过：子进程会被补上 `HTTPS_PROXY`（见 `system_proxy`），
+/// 走代理连官方源，不该再被改到镜像。
 /// Bun 和 npm 都认 `NPM_CONFIG_REGISTRY`。
 pub(crate) fn npm_registry_fallback() -> Option<&'static str> {
     static FALLBACK: OnceLock<Option<&'static str>> = OnceLock::new();
@@ -48,7 +50,9 @@ pub(crate) fn npm_registry_fallback() -> Option<&'static str> {
                 .filter(|value| !value.is_empty())
         };
         let home = dirs::home_dir();
-        if user_configured_network(lookup, home.as_deref()) {
+        if user_configured_network(lookup, home.as_deref())
+            || crate::system_proxy::has_system_https_proxy()
+        {
             return None;
         }
         (!reachable(NPM_REGISTRY_HOST, 443)).then_some(NPM_MIRROR)
@@ -149,8 +153,24 @@ mod tests {
         std::fs::remove_dir_all(home).ok();
     }
 
+    // 只用本机回环：不碰 DNS 和外网。fake-ip 代理（Clash / Surge 的 TUN 模式）会把
+    // 任何域名都解析成 198.18.x.x 并接下连接，拿 `.invalid` 测「连不上」在那种机器上必挂。
+
     #[test]
-    fn an_unresolvable_host_is_unreachable() {
-        assert!(!reachable("smelt-mirror-probe.invalid", 443));
+    fn a_closed_port_is_unreachable() {
+        // 占一个端口再放掉，此刻没有人在听，建连立即被拒。
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(!reachable("127.0.0.1", port));
+    }
+
+    #[test]
+    fn a_listening_port_is_reachable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(reachable("127.0.0.1", port));
     }
 }

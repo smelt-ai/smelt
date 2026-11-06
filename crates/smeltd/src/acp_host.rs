@@ -1660,7 +1660,7 @@ pub(crate) fn start_acp_event_drain(
                         if matches!(
                             &ev,
                             smelt_core::acp_conn::ConversationEvent::TurnEnded(
-                                agent_client_protocol::schema::v1::StopReason::Cancelled
+                                agent_client_protocol::v1::schema::StopReason::Cancelled
                             )
                         ) {
                             park_unaccepted_after_cancel(sess);
@@ -1992,9 +1992,9 @@ pub(crate) fn acp_relaunch(
         resume_session_id: if fork_id.is_some() {
             None
         } else {
-            resume_id.map(agent_client_protocol::schema::v1::SessionId::new)
+            resume_id.map(agent_client_protocol::v1::schema::SessionId::new)
         },
-        fork_session_id: fork_id.map(agent_client_protocol::schema::v1::SessionId::new),
+        fork_session_id: fork_id.map(agent_client_protocol::v1::schema::SessionId::new),
         fork_cut,
         peer_handler,
     };
@@ -2015,17 +2015,36 @@ pub(crate) fn acp_relaunch(
     );
 }
 
+/// 命令是 Smelt 发布过的旧出厂命令时换成现在的。旧的「对话适配器命令」设置里常在前面写
+/// `VAR=值`（比如分开账号的 `CLAUDE_CONFIG_DIR`），这些挪进 `env`；`env` 里已有同名的以它为准，
+/// 和启动时的覆盖顺序一致。
 pub(crate) fn upgrade_released_adapter_launch(
     launch: &mut smelt_core::agent_kind::ConversationLaunchSpec,
 ) -> bool {
-    let Some(agent) =
-        smelt_core::agent_kind::ConversationAgentKind::from_command_loose(&launch.command)
+    let mut words = launch.command.split_whitespace().peekable();
+    let mut prefix = Vec::new();
+    while let Some(assignment) = words
+        .peek()
+        .copied()
+        .and_then(smelt_core::workspace_override::split_env_assignment)
+    {
+        prefix.push(assignment);
+        words.next();
+    }
+    let command = words.collect::<Vec<_>>().join(" ");
+    let Some(agent) = smelt_core::agent_kind::ConversationAgentKind::from_command_loose(&command)
     else {
         return false;
     };
-    let Some(upgraded) = agent.upgrade_released_default_command(&launch.command) else {
+    let Some(upgraded) = agent.upgrade_released_default_command(&command) else {
         return false;
     };
+    for (name, value) in prefix {
+        launch
+            .env
+            .entry(name.to_string())
+            .or_insert_with(|| value.to_string());
+    }
     launch.command = upgraded;
     true
 }
@@ -4287,7 +4306,7 @@ mod snapshot_link_tests {
             lifecycle: SessionLock::new(()),
             value: make_acp_session("acp-burst", None, None, None),
         });
-        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let (mut server, mut client) = RuntimeStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();
         let chunk = vec![b'x'; 8 * 1024];
         loop {

@@ -12,7 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::fs::FileSystem;
 
-use agent_client_protocol::schema::v1::TerminalExitStatus;
+use agent_client_protocol::v1::schema::TerminalExitStatus;
 
 const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 1024 * 1024;
 
@@ -112,10 +112,11 @@ impl AcpTerminals {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        crate::login_env::apply_login_environment(&mut cmd);
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
+        crate::login_env::apply_login_environment(
+            &mut cmd,
+            env.iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        );
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }

@@ -1,5 +1,5 @@
 import { connect, type Socket } from "node:net";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { createBashTool, defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { keepsForegroundTimeout, watchHostCommand } from "./bash-run.ts";
 import { stripSessionControlFromSpawnEnv } from "./session-control-env.ts";

@@ -29,6 +29,8 @@ use crate::{Workspace, liquid_glass, terminal, terminal_view};
 
 mod agent_hooks;
 mod bundled_helpers;
+#[cfg(target_os = "macos")]
+mod cli_command;
 mod memory;
 mod nav;
 mod panel_plugins;
@@ -71,6 +73,10 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
+#[cfg(target_os = "macos")]
+pub(super) use cli_command::sync_cli_command;
+#[cfg(target_os = "macos")]
+use cli_command::{CliCommandState, SystemCommand, install_system_command};
 pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
 pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
 
@@ -826,14 +832,9 @@ pub fn agent_definition(
     agent_hosts(cx)?.agent(runtime, id).cloned()
 }
 
-/// 那台机器上某个 agent 的启动命令。
-pub fn acp_cmd_for(runtime: &crate::RuntimeKey, agent: ConversationAgentKind, cx: &App) -> String {
-    agent_host_settings(runtime, cx).acp_cmd_for(agent)
-}
-
 /// 那台机器上某个 agent 的完整启动规格（命令 + 用户配的环境变量）。
 ///
-/// 新建会话一律走这里。只取 `acp_cmd_for` 再自己 `from_command` 会把环境变量
+/// 新建会话一律走这里。只取出厂命令再自己 `from_command` 会把环境变量
 /// 丢掉，表现是"设置里填了 API key 却还是说没配"——而且只在真发一轮时才暴露。
 pub fn acp_launch_for(
     runtime: &crate::RuntimeKey,
@@ -862,40 +863,6 @@ pub fn initial_agent_conversation_config_for(
     cx: &App,
 ) -> Vec<(String, String)> {
     agent_host_settings(runtime, cx).initial_agent_conversation_config(agent)
-}
-
-/// 设置页只在用户覆盖内置适配器时显示原始命令；默认 `bunx`、CLI 参数等属于
-/// smelt 的实现细节，不应要求用户理解或维护。
-fn acp_cmd_setting_value(agent: ConversationAgentKind, command: String) -> SharedString {
-    if command == agent.default_cmd() {
-        SharedString::default()
-    } else {
-        command.into()
-    }
-}
-
-/// 设置「Agent → 高级 → 对话适配器命令」里每家 Agent 一个输入框（从枚举派生，加
-/// 一家 agent 不用回来抄第四遍）。各家的说明一样，写在那一节的标题行。
-fn acp_cmd_setting_item(agent: ConversationAgentKind) -> SettingItem {
-    SettingItem::new(
-        agent.label(),
-        SettingField::input(
-            move |cx: &App| {
-                acp_cmd_setting_value(agent, acp_cmd_for(&crate::RuntimeKey::Local, agent, cx))
-            },
-            move |v: SharedString, cx: &mut App| {
-                let v = v.trim().to_string();
-                // 留空 = 使用内置适配器（不是清成空串跑不起来）。
-                let cmd = if v.is_empty() { agent.default_cmd() } else { v };
-                apply_agent_host(
-                    &crate::RuntimeKey::Local,
-                    move |c| c.set_acp_cmd_for(agent, cmd),
-                    cx,
-                );
-            },
-        ),
-    )
-    .keywords(["acp", "对话", "agent", "自定义启动命令", agent.id()])
 }
 
 /// 按钮的短暂成功文案（设置页复制、自动化保存等读它改按钮字）。
@@ -1356,7 +1323,6 @@ struct SettingsRenderSnapshot {
     daemon_info: Option<crate::local_daemon::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
-    acp_commands_open: bool,
     /// 能力库当前页签。和 `settings_section` 分开记：设置窗口和能力库可以同时开着，
     /// 各看各的页。
     capabilities_tab: crate::CapabilitiesTab,
@@ -1420,6 +1386,8 @@ impl SettingsContentView {
                 #[cfg(any(target_os = "macos", windows))]
                 Self::observe_settings_global::<UpdateSettings>(window, cx),
                 Self::observe_settings_global::<CleanupState>(window, cx),
+                #[cfg(target_os = "macos")]
+                Self::observe_settings_global::<CliCommandState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
                 Self::observe_settings_global::<RemoteSettingsState>(window, cx),

@@ -11,7 +11,7 @@ fn denied(message: &str) -> ControlError {
     ControlError::new(ControlErrorCode::PermissionDenied, message)
 }
 
-/// 当前控制连接对端的 pid。AF_UNIX 与 Windows 命名管道都走 [`crate::protocol::PeerSource`]。
+/// 当前控制连接对端的 pid，经 [`crate::protocol::PeerSource`] 取。
 /// 取不到就拒绝（生产路径必须能取证）。
 pub(crate) fn peer_pid(conn: &impl crate::protocol::PeerSource) -> Result<u32, ControlError> {
     conn.peer_identity()

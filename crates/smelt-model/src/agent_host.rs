@@ -1,18 +1,19 @@
 //! 智能体配置（命令、环境变量、profile、定义、开关）的数据。存取和合并在运行时。
 
 use crate::agent_definition::AgentDefinition;
-use crate::agent_kind::{
-    AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind, ConversationLaunchSpec,
-};
-use serde::{Deserialize, Serialize};
+use crate::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHostSettings {
     /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。
     pub hooks_enabled: bool,
-    /// agent id → 启动命令。没有的按该 agent 的出厂命令。
-    pub commands: BTreeMap<String, String>,
+    /// 已删掉的「按 agent 改启动命令」。控制协议 v3 的运行时要求配置里有这个字段，所以线上
+    /// 恒写空表（它按改前改后三方合并，两边都空就什么都不改），读到的丢弃。
+    #[serde(default, skip_deserializing)]
+    pub commands: RetiredCommands,
     /// agent id → 额外注入的环境变量。
     pub env: BTreeMap<String, BTreeMap<String, String>>,
     /// agent id → 用户最近显式选择的配置 `(config_id, value_id)`。
@@ -25,14 +26,11 @@ pub struct AgentHostSettings {
 }
 
 impl AgentHostSettings {
-    /// 新装：每家都按出厂命令填一份，hook 默认开启。
+    /// 新装：hook 默认开启。
     pub fn fresh() -> Self {
         Self {
             hooks_enabled: true,
-            commands: CONVERSATION_AGENTS
-                .iter()
-                .map(|d| (d.id.to_string(), (d.default_cmd)()))
-                .collect(),
+            commands: RetiredCommands,
             env: BTreeMap::new(),
             config_memory: BTreeMap::new(),
             profiles: Vec::new(),
@@ -42,20 +40,17 @@ impl AgentHostSettings {
     }
 }
 
+/// [`AgentHostSettings::commands`] 的线上形状：恒为空表。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetiredCommands;
+
+impl Serialize for RetiredCommands {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_map(Some(0))?.end()
+    }
+}
+
 impl AgentHostSettings {
-    /// 某个 agent 种类当前生效的启动命令。没配的按出厂命令。
-    pub fn acp_cmd_for(&self, agent: ConversationAgentKind) -> String {
-        self.commands
-            .get(agent.id())
-            .cloned()
-            .unwrap_or_else(|| agent.default_cmd())
-    }
-
-    /// 改某个 agent 的启动命令（设置页各条输入框共用）。
-    pub fn set_acp_cmd_for(&mut self, agent: ConversationAgentKind, cmd: String) {
-        self.commands.insert(agent.id().to_string(), cmd);
-    }
-
     pub fn find_profile(&self, id: &str) -> Option<&AcpProfile> {
         self.profiles.iter().find(|p| p.id == id)
     }
@@ -136,13 +131,13 @@ impl AgentHostSettings {
         values
     }
 
-    /// 某个 agent 当前生效的完整启动规格：命令 + 用户配的环境变量。
+    /// 某个 agent 当前生效的完整启动规格：出厂命令 + 用户配的环境变量。要换命令、
+    /// 加参数用自定义 Agent（[`AcpProfile`]）。
     ///
-    /// 唯一接缝。会话侧一律走这里，不要再自己 `from_command(acp_cmd_for(..))`
+    /// 唯一接缝。会话侧一律走这里，不要再自己 `from_command(default_cmd())`
     /// ——那样拼出来的规格永远少了环境变量，且漏一处就是"设置里填了不生效"。
     pub fn acp_launch_for(&self, agent: ConversationAgentKind) -> ConversationLaunchSpec {
         let mut launch = agent.default_launch();
-        launch.command = self.acp_cmd_for(agent);
         // 用户显式配置优先于出厂覆盖；这样既默认全权限，也保留降权和自定义
         // OPENCODE_CONFIG_CONTENT 的出口。
         for (name, value) in self.acp_env_for(agent) {
@@ -194,6 +189,18 @@ pub struct AgentHostEdit {
 mod tests {
     use super::*;
 
+    // v3 运行时要求配置里有 `commands`；新运行时收到旧客户端带内容的 `commands` 照样丢弃。
+    #[test]
+    fn commands_stay_an_empty_map_on_the_wire() {
+        let wire = serde_json::to_value(settings()).unwrap();
+        assert_eq!(wire["commands"], serde_json::json!({}));
+
+        let mut from_old = wire;
+        from_old["commands"] = serde_json::json!({ "claude": "claude --edited" });
+        let read: AgentHostSettings = serde_json::from_value(from_old).unwrap();
+        assert_eq!(read, settings());
+    }
+
     fn settings() -> AgentHostSettings {
         AgentHostSettings::fresh()
     }
@@ -216,7 +223,7 @@ mod tests {
     }
 
     /// 设置页填的环境变量必须真的跟着会话走。之前会话侧是自己
-    /// `from_command(acp_cmd_for(..))` 拼的规格，环境变量在那条路上会被整段丢掉，
+    /// `from_command(..)` 拼的规格，环境变量在那条路上会被整段丢掉，
     /// 而症状要等到真发一轮才暴露成"key 没配"。
     #[test]
     fn launch_spec_carries_the_env_from_settings() {
@@ -227,10 +234,7 @@ mod tests {
         );
 
         let launch = config.acp_launch_for(ConversationAgentKind::Codex);
-        assert_eq!(
-            launch.command,
-            config.acp_cmd_for(ConversationAgentKind::Codex)
-        );
+        assert_eq!(launch.command, ConversationAgentKind::Codex.default_cmd());
         assert_eq!(
             launch.env.get("OPENAI_API_KEY").map(String::as_str),
             Some("sk-abc")
@@ -441,20 +445,9 @@ mod tests {
         );
     }
 
-    /// 运行时给的配置缺某家的命令时用出厂命令。
     #[test]
-    fn missing_command_falls_back_to_descriptor_default() {
-        let mut config = settings();
-        config.commands.clear();
-        for kind in ConversationAgentKind::ALL {
-            assert_eq!(config.acp_cmd_for(kind), kind.default_cmd());
-        }
-    }
-
-    #[test]
-    fn profile_launch_uses_configured_agent_command_and_workspace_env() {
-        let mut config = settings();
-        config.set_acp_cmd_for(ConversationAgentKind::Claude, "claude-custom --acp".into());
+    fn profile_launch_uses_the_agent_command_and_workspace_env() {
+        let config = settings();
         let profile = AcpProfile {
             id: "quant".into(),
             kind_id: "claude".into(),
@@ -466,7 +459,7 @@ mod tests {
 
         let launch = config.profile_launch_spec(&profile).expect("有效 profile");
 
-        assert_eq!(launch.command, "claude-custom --acp");
+        assert_eq!(launch.command, ConversationAgentKind::Claude.default_cmd());
         assert_eq!(
             launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("~/Claude Workspaces/quant")
@@ -506,12 +499,6 @@ mod tests {
         assert_eq!(
             launch.env,
             BTreeMap::from([("TOKEN".to_string(), "x".to_string())])
-        );
-        assert!(
-            !AgentHostSettings::fresh()
-                .commands
-                .contains_key(ConversationAgentKind::Custom.id()),
-            "通用 ACP 没有按种类保存的命令"
         );
     }
 }

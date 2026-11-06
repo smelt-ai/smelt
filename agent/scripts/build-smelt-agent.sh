@@ -69,7 +69,7 @@ fi
   cd "$ROOT/agent"
   "$BUN" install --frozen-lockfile
 )
-# --splitting 在 compile-smelt-agent.ts 里打开。Bun 1.4.3 上图片 worker 和
+# --splitting 在 compile-smelt-agent.ts 里打开。Bun 1.4.4 上图片 worker 和
 # codemode worker 都过了冒烟。说明符改写也在那个脚本里：相对的 ./src 路径仍然找不到。
 "$BUN" "$ROOT/agent/scripts/compile-smelt-agent.ts" "$OUT_BIN" "$TARGET"
 

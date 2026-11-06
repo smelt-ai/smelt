@@ -193,9 +193,24 @@ fn probe() -> LoginEnv {
         .cloned()
         .or_else(|| std::env::var("PATH").ok())
         .unwrap_or_default();
+    let bin = smelt_paths::smelt_home().map(|home| home.join("bin"));
+    let path = with_smelt_bin(&path, bin.as_deref());
     vars.insert("PATH".to_string(), path.clone());
 
     LoginEnv { path, vars }
+}
+
+/// 把 `~/.smelt/bin` 放到 PATH 最前面：智能体和它起的 shell 里直接敲 `smelt` 就能用内置的
+/// `smelt` 技能，不靠用户自己把它加进 PATH。用的是跟这个运行时配套的那份：macOS 上是桌面
+/// 放的、指向 App 的软链接，Linux 上是安装包装进来的 CLI。
+fn with_smelt_bin(path: &str, bin: Option<&std::path::Path>) -> String {
+    let Some(bin) = bin else {
+        return path.to_string();
+    };
+    let rest = std::env::split_paths(path).filter(|entry| entry != bin);
+    std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(rest))
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// 把 `env -0` 的输出解析成 KV。
@@ -261,14 +276,35 @@ pub fn login_environment() -> &'static HashMap<String, String> {
 /// 沙盒标识）子进程照样需要。同名的以 login shell 为准——用户在 rc 里写的才是
 /// 他真正在用的那套工具链。npm 官方源连不上、用户又没配源时补上国内镜像，
 /// 见 `mirrors`。
-pub fn apply_login_environment(command: &mut Command) -> &mut Command {
+///
+/// 顺序是「login 环境 → 调用方覆盖 `overrides`（启动配置、ACP 规格里的 env，含 PATH）→
+/// 用户只在系统设置里配了代理时补 `HTTP(S)_PROXY` / `NO_PROXY`」，见 `system_proxy`。
+/// 调用方自己的 env 一律经 `overrides` 传进来，不要在返回后再铺：补系统代理时要看到
+/// 子进程最终的环境，启动配置里写了 `ALL_PROXY` 就不能再补 `HTTPS_PROXY` 把它盖掉。
+pub fn apply_login_environment<'a>(
+    command: &mut Command,
+    overrides: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> &mut Command {
+    apply_environment(command, overrides, crate::system_proxy::read_system_proxy)
+}
+
+fn apply_environment<'a>(
+    command: &mut Command,
+    overrides: impl IntoIterator<Item = (&'a str, &'a str)>,
+    read_system_proxy: impl FnOnce() -> Option<crate::system_proxy::SystemProxy>,
+) -> &mut Command {
     for (key, value) in login_environment() {
         command.env(key, value);
     }
     if let Some(registry) = crate::mirrors::npm_registry_fallback() {
         command.env("NPM_CONFIG_REGISTRY", registry);
     }
-    command.env("PATH", login_path())
+    command.env("PATH", login_path());
+    for (key, value) in overrides {
+        command.env(key, value);
+    }
+    crate::system_proxy::apply_system_proxy_fallback(command, read_system_proxy);
+    command
 }
 
 /// 四个 workspace 覆盖变量的读取顺序：**先查当前进程自己的环境**，查不到再
@@ -330,7 +366,108 @@ pub fn xdg_config_home() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_marked, parse_env_block};
+    use super::{extract_marked, parse_env_block, with_smelt_bin};
+
+    #[test]
+    fn smelt_bin_goes_first_once() {
+        let bin = std::path::PathBuf::from("/home/me/.smelt/bin");
+        let join = |dirs: &[&str]| {
+            std::env::join_paths(dirs)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(
+            with_smelt_bin(&join(&["/usr/bin", "/bin"]), Some(&bin)),
+            join(&["/home/me/.smelt/bin", "/usr/bin", "/bin"])
+        );
+        // 用户自己加过的，挪到最前面，不留两份。
+        assert_eq!(
+            with_smelt_bin(&join(&["/usr/bin", "/home/me/.smelt/bin"]), Some(&bin)),
+            join(&["/home/me/.smelt/bin", "/usr/bin"])
+        );
+        assert_eq!(with_smelt_bin("/usr/bin", None), "/usr/bin");
+    }
+
+    mod system_proxy_order {
+        use super::super::apply_environment;
+        use crate::system_proxy::SystemProxy;
+        use std::process::Command;
+
+        fn system_proxy() -> Option<SystemProxy> {
+            Some(SystemProxy {
+                http: Some("http://sys:8080".to_string()),
+                https: Some("http://sys:8080".to_string()),
+                bypass: Vec::new(),
+            })
+        }
+
+        /// Windows 环境变量名不分大小写：先设了 `HTTP_PROXY` 再设 `http_proxy`，`Command` 里只留一项、
+        /// 键名是先设的那个。
+        fn env_of(command: &Command, name: &str) -> Option<String> {
+            command
+                .get_envs()
+                .filter(|(key, _)| {
+                    if cfg!(windows) {
+                        key.eq_ignore_ascii_case(name)
+                    } else {
+                        *key == name
+                    }
+                })
+                .last()
+                .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+        }
+
+        /// 启动配置里写了 `ALL_PROXY`：判断时要看得到它，不能再补 `HTTPS_PROXY` 把它盖掉。
+        #[test]
+        fn caller_all_proxy_suppresses_system_https_proxy() {
+            let mut command = Command::new("x");
+            apply_environment(
+                &mut command,
+                [("ALL_PROXY", "socks5://mine:1080")],
+                system_proxy,
+            );
+            assert_eq!(
+                env_of(&command, "ALL_PROXY").as_deref(),
+                Some("socks5://mine:1080")
+            );
+            assert_ne!(
+                env_of(&command, "HTTPS_PROXY").as_deref(),
+                Some("http://sys:8080")
+            );
+            assert_ne!(
+                env_of(&command, "HTTP_PROXY").as_deref(),
+                Some("http://sys:8080")
+            );
+        }
+
+        /// 调用方没配（空串算没配）时照常补上系统代理。显式置空是为了不受跑测试那台机器
+        /// login 环境里的代理变量影响。
+        #[test]
+        fn system_proxy_fills_in_after_caller_overrides() {
+            let mut command = Command::new("x");
+            apply_environment(
+                &mut command,
+                [
+                    ("HTTPS_PROXY", ""),
+                    ("https_proxy", ""),
+                    ("HTTP_PROXY", ""),
+                    ("http_proxy", ""),
+                    ("ALL_PROXY", ""),
+                    ("all_proxy", ""),
+                ],
+                system_proxy,
+            );
+            assert_eq!(
+                env_of(&command, "HTTPS_PROXY").as_deref(),
+                Some("http://sys:8080")
+            );
+            assert_eq!(
+                env_of(&command, "http_proxy").as_deref(),
+                Some("http://sys:8080")
+            );
+        }
+    }
 
     /// 交互式 zsh 会在输出前粘一段 shell-integration 的 OSC 噪音（实测形如
     /// `\e]1337;…;shell=zsh`）。抠取逻辑必须只取标记之间的内容——那段噪音里

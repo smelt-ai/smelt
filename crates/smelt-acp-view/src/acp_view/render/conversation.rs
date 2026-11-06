@@ -2454,7 +2454,12 @@ impl AcpView {
             .appearance(false)
             .p_0()
             .trigger(trigger)
-            .content(move |_, _, _| {
+            .content(move |_, _, cx| {
+                // 折叠卡片只有 hover 预览这一条显示路径，解码必须在这里触发，
+                // 否则缩略图永远停在占位。已在途/已完成时是空操作。
+                for image in images.iter().flatten().flatten() {
+                    smelt_ui::image::ensure_preview(image, cx);
+                }
                 render_tool_output_popover_body(ToolOutputPopoverBody {
                     tool_id: tool_id.clone(),
                     kind,
@@ -2870,7 +2875,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                     .and_then(Option::as_ref)
                 {
                     // hover 预览没有 `Context<AcpView>`，只出缩略图，不接点击大图；
-                    // 解码交给展开卡片路径触发（缓存按图片 id 全局共享）。
+                    // 解码由 popover 的 content 闭包触发（缓存按图片 id 全局共享）。
                     Some(image) => col.child(image_thumb_element(image)),
                     None => col,
                 }

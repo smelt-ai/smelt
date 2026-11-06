@@ -251,7 +251,7 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。发版�
 - **Agent 与远程**：Agent、远程
 - **系统**：资源占用、维护、关于
 
-外观把主题、字号与字体、窗口与背景放在同一页，页内是「界面」「终端与代码」「窗口」。Agent 页是「本机 Agent」（CLI 和 Hooks）、「新建菜单」、「高级」（对话适配器命令）。远程页是「连到其他机器」和「让其他设备连进来」。维护页是「后台服务」和「旧版本残留」。关于页是版本、「更新」和「帮助与反馈」。
+外观把主题、字号与字体、窗口与背景放在同一页，页内是「界面」「终端与代码」「窗口」。Agent 页是「本机 Agent」（CLI 和 Hooks）、「自定义 Agent」、「新建菜单」、「账户额度」。远程页是「连到其他机器」和「让其他设备连进来」。维护页是「后台服务」和「旧版本残留」。关于页是版本、「更新」和「帮助与反馈」。
 
 连着远程运行时，「Agent」页标题旁会标「只作用于本机运行时」。没连远程就不标。
 
@@ -297,7 +297,6 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。发版�
 | `~/.smelt/smelt.sqlite3` | 这台机器的会话、项目、智能体、自动化、配对设备和远程开关。分屏布局不在这里 |
 | `~/.smelt/client.sqlite3` | 这台桌面的主题、字体、窗口背景、侧栏，以及连过哪些运行时。分屏布局在 `conversation_route.dock_layout` |
 | `~/.smelt/bin/smelt-agent` | 内置 Pi 运行时，单个二进制，跑官方 JSONL RPC |
-| `~/.smelt/runtime/` | 受管 Bun。ACP 适配器和 MCP 服务器按需从这里启动 |
 | `~/.smelt/smeltd.sock` | `smeltd` 的本机 socket |
 | `~/.smelt/iroh-secret` | 这台运行时的 iroh 身份 |
 

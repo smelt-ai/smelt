@@ -1,7 +1,6 @@
 use super::*;
 use crate::workspace_persist::ConversationOp;
 use smelt_model::workspace_directory::WorkspaceConversation;
-use smelt_runtime_client::protocol::control::ControlMethod;
 
 const ARCHIVE_HEADER_GROUP: &str = "archive-header-hover";
 const ARCHIVE_ROW_GROUP: &str = "archive-row-hover";
@@ -22,25 +21,18 @@ pub(super) fn organization_menu(
         return menu;
     };
     let pinned = space.directory.is_pinned(&session.conversation_id);
-    let pin_supported = !space
-        .unsupported_conversation_methods
-        .contains(&ControlMethod::WorkspaceConversationPin);
-    let archive_supported = !space
-        .unsupported_conversation_methods
-        .contains(&ControlMethod::WorkspaceConversationArchive)
-        && session.automation_id.is_none();
+    let archivable = session.automation_id.is_none();
     let e_pin = workspace.clone();
     menu.item(
         PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
             .icon(Icon::new(gpui_kit_assets::IconName::Pin))
-            .disabled(!pin_supported)
             .on_click(move |_, _, cx| {
                 e_pin.update(cx, |ws, cx| ws.toggle_conversation_pin(ui_id, cx));
             }),
     )
     .item(
         PopupMenuItem::new("归档")
-            .disabled(!archive_supported)
+            .disabled(!archivable)
             .on_click(move |_, _, cx| {
                 workspace.update(cx, |ws, cx| ws.request_archive_conversation_ui(ui_id, cx));
             }),
@@ -251,11 +243,6 @@ impl Workspace {
             let e_restore = this.clone();
             let e_delete = this.clone();
             let e_menu = this.clone();
-            let supported = self.space(key).is_some_and(|space| {
-                !space
-                    .unsupported_conversation_methods
-                    .contains(&ControlMethod::WorkspaceConversationArchive)
-            });
             let is_acp = conversation.acp.is_some();
             let row = ListRow::new(element_id.clone())
                 .group(ARCHIVE_ROW_GROUP)
@@ -314,7 +301,6 @@ impl Workspace {
                                 .icon_size()
                                 .icon(Icon::new(gpui_kit_assets::IconName::RotateCw))
                                 .icon_action("恢复")
-                                .disabled(!supported)
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
                                     e_restore.update(cx, |ws, cx| {
@@ -355,20 +341,18 @@ impl Workspace {
                     let delete_key = menu_key.clone();
                     let delete_id = menu_id.clone();
                     let delete_title = menu_title.clone();
-                    menu.item(PopupMenuItem::new("恢复").disabled(!supported).on_click(
-                        move |_, _, cx| {
-                            e_restore.update(cx, |ws, cx| {
-                                ws.request_conversation_op(
-                                    &restore_key,
-                                    ConversationOp::Archive {
-                                        id: restore_id.clone(),
-                                        archived: false,
-                                    },
-                                    cx,
-                                )
-                            });
-                        },
-                    ))
+                    menu.item(PopupMenuItem::new("恢复").on_click(move |_, _, cx| {
+                        e_restore.update(cx, |ws, cx| {
+                            ws.request_conversation_op(
+                                &restore_key,
+                                ConversationOp::Archive {
+                                    id: restore_id.clone(),
+                                    archived: false,
+                                },
+                                cx,
+                            )
+                        });
+                    }))
                     .item(
                         PopupMenuItem::new("永久删除")
                             .icon(crate::trash_icon())

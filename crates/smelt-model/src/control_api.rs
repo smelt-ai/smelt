@@ -921,7 +921,7 @@ pi_calls! {
     /// OSC 11 查到的底色得和桌面实际底色一致。
     TerminalThemePublish => TerminalThemePublish(crate::terminal_theme::TerminalThemeSnapshot)
         -> EmptyParams;
-    /// 用产品智能体定义开一场对话（`smelt agent start`）。
+    /// 用产品智能体定义开一场对话（`smelt agent chat`）。
     ConversationCreateForAgent => ConversationCreateForAgent(AgentDefinitionIdParams)
         -> crate::session_control::CreatedAgentConversation;
     /// 新建会话的选择目录：可开对话的 agent 选项，和按「常用 / 终端 / 对话」分好组的

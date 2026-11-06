@@ -1,5 +1,5 @@
 //! 设置页：Agent。本机 Agent（CLI 和 Hooks）、自定义 Agent、新建菜单（「+」菜单项）、
-//! 账户额度（每家的查询开关）、高级（对话适配器命令，默认折叠）。
+//! 账户额度（每家的查询开关）。
 
 use super::*;
 use smelt_ui::IconAction as _;
@@ -24,8 +24,7 @@ pub(super) fn agents_page(
                 .item(items.profiles),
         )
         .group(SettingGroup::new().title("新建菜单").item(items.launch))
-        .group(quota_group(entity.clone(), cx))
-        .group(advanced_group(entity, snapshot.acp_commands_open, cx))
+        .group(quota_group(entity, cx))
 }
 
 /// 每家账户一行：查询开关，钥匙串被拒绝时再带一个重试。状态在设置窗口打开时和每轮刷新后取好，
@@ -101,63 +100,6 @@ fn quota_setting_item(
         item.description("钥匙串访问被拒绝或不可用，已停止自动读取。点重试会再请求一次授权。")
     } else {
         item
-    }
-}
-
-/// 对话适配器命令：几乎没人改，默认折起来只露一行摘要。每家一项的说明都一样，写在标题行
-/// 一次就够。
-fn advanced_group(entity: Entity<Workspace>, open: bool, cx: &App) -> SettingGroup {
-    let changed = ConversationAgentKind::ALL
-        .into_iter()
-        .filter(|agent| acp_cmd_for(&crate::RuntimeKey::Local, *agent, cx) != agent.default_cmd())
-        .count();
-    let summary = match changed {
-        0 => format!("{} 家都用内置", ConversationAgentKind::ALL.len()),
-        n => format!("{n} 家改过"),
-    };
-    let header = SettingItem::new(
-        "对话适配器命令",
-        SettingField::render(move |_, _, cx: &mut App| {
-            let entity = entity.clone();
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(summary.clone()),
-                )
-                .child(
-                    Button::new("toggle-acp-commands")
-                        .quiet()
-                        .compact()
-                        .icon(if open {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .label(if open { "收起" } else { "展开" })
-                        .on_click(move |_, _, cx| {
-                            entity.update(cx, |ws, cx| {
-                                ws.settings_acp_commands_open = !ws.settings_acp_commands_open;
-                                cx.notify();
-                            });
-                        }),
-                )
-        }),
-    )
-    .description("替换适配器或追加参数时才需要改，留空用内置；只影响之后新建的对话。")
-    .keywords(["acp", "适配器", "自定义启动命令", "对话命令"]);
-    let group = SettingGroup::new().title("高级").item(header);
-    if open {
-        group.items(
-            ConversationAgentKind::ALL
-                .into_iter()
-                .map(acp_cmd_setting_item),
-        )
-    } else {
-        group
     }
 }
 
