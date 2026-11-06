@@ -78,7 +78,7 @@ fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
     (ElementId::from(name), key).into()
 }
 
-/// 机器名字，远程的带连接灯和要人处理时的几个字；悬停看完整的连接说明。
+/// 机器名字，远程的由机器图标颜色体现连接状态，要人处理时后面带说明；悬停看完整的连接说明。
 fn runtime_name_with_indicator(
     key: &RuntimeKey,
     name: impl Into<SharedString>,
@@ -108,7 +108,6 @@ fn runtime_name_with_indicator(
         .min_w_0()
         .gap_1p5()
         .items_center()
-        .child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(light)))
         .child(name)
         .when_some(indicator.label, |d, label| {
             d.child(
@@ -134,7 +133,7 @@ fn runtime_name_with_indicator(
         .into_any_element()
 }
 
-/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器名字前一盏连接灯（绿：在线；
+/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器图标颜色体现连接状态（绿：在线；
 /// 黄：慢、连接中、升级中；红：离线、版本不兼容），悬停名字看走哪条路、多慢、什么版本，
 /// 要人处理的状态名字后再写几个字。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
 /// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。`grouping` 是侧栏的「筛选与
@@ -157,6 +156,12 @@ fn runtime_section_header(
     let name = crate::runtimes::runtime_name(&key, cx);
     let indicator = crate::runtimes::runtime_indicator(&key, cx);
     let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
+    let icon_color = match indicator.as_ref().map(|i| i.light) {
+        Some(crate::runtimes::LinkLight::Good) => ui_theme::green(),
+        Some(crate::runtimes::LinkLight::Degraded) => ui_theme::yellow(),
+        Some(crate::runtimes::LinkLight::Down) => ui_theme::red(),
+        None => ui_theme::text_muted(),
+    };
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     let toggle_workspace = workspace.clone();
     let toggle_key = key.clone();
@@ -214,12 +219,12 @@ fn runtime_section_header(
                         .justify_center()
                         .child(
                             Icon::new(if key == RuntimeKey::Local {
-                                gpui_kit_assets::IconName::LaptopMinimal
+                                gpui_kit_assets::IconName::Monitor
                             } else {
                                 gpui_kit_assets::IconName::Server
                             })
-                            .size(px(if key == RuntimeKey::Local { 14. } else { 15. }))
-                            .text_color(rgb(ui_theme::text_muted())),
+                            .size(px(15.))
+                            .text_color(rgb(icon_color)),
                         ),
                 ),
         )
@@ -2273,6 +2278,7 @@ impl Workspace {
                 body: AnyElement,
                 scroll: ScrollHandle,
                 last_body_h: f32,
+                natural_h: f32,
             }
 
             let mut sections: Vec<UnifiedSection> = Vec::new();
@@ -2286,12 +2292,17 @@ impl Workspace {
                 ((rows as f32 * 33.0 + 10.0).min(260.0)).max(SECTION_MIN_BODY)
             };
 
+            let calc_natural_h = |rows: usize| -> f32 {
+                (rows as f32 * 33.0 + 8.0).max(SECTION_MIN_BODY)
+            };
+
             let trans_duration = Duration::from_millis(180);
 
             // 1. 对话栏目（如果有会话）
             let conv_folded = self.sidebar_conversations_collapsed;
             let conv_count = self.sidebar_conversation_order(cx).len();
             let conv_body_h = calc_body_h(conv_count, &self.sidebar_conversations_scroll);
+            let conv_natural_h = calc_natural_h(conv_count);
             let conv_policy = Transition::new(trans_duration).easing(Easing::EaseOut);
             let conv_progress: f32 = gpui_base::transition(
                 ElementId::from("sidebar-section-trans-conversations"),
@@ -2319,6 +2330,7 @@ impl Workspace {
                         body,
                         scroll: self.sidebar_conversations_scroll.clone(),
                         last_body_h: conv_body_h,
+                        natural_h: conv_natural_h,
                     });
                 }
             }
@@ -2330,6 +2342,7 @@ impl Workspace {
                 let is_folded = self.runtime_folded(&key);
                 let total_rows = row_counts_by_runtime.get(&key).copied().unwrap_or(1);
                 let runtime_body_h = calc_body_h(total_rows, &space.scroll);
+                let runtime_natural_h = calc_natural_h(total_rows);
                 let trans_policy = Transition::new(trans_duration).easing(Easing::EaseOut);
                 let progress: f32 = gpui_base::transition(
                     ElementId::from(SharedString::from(format!("sidebar-section-trans-runtime-{key:?}"))),
@@ -2389,6 +2402,7 @@ impl Workspace {
                     body,
                     scroll: space.scroll.clone(),
                     last_body_h: runtime_body_h,
+                    natural_h: runtime_natural_h,
                 });
             }
 
@@ -2410,6 +2424,7 @@ impl Workspace {
             ) {
                 if let Some(body) = body {
                     let archive_body_h = calc_body_h(count, &self.sidebar_archive_scroll);
+                    let archive_natural_h = calc_natural_h(count);
                     sections.push(UnifiedSection {
                         id: "archive".to_string(),
                         kind: SectionKind::Archive,
@@ -2420,6 +2435,7 @@ impl Workspace {
                         body,
                         scroll: self.sidebar_archive_scroll.clone(),
                         last_body_h: archive_body_h,
+                        natural_h: archive_natural_h,
                     });
                 }
             }
@@ -2552,52 +2568,55 @@ impl Workspace {
             };
 
             // 连续权重 Flexbox 手风琴模型：
-            // 1. 各板块顺序绝对固定；
-            // 2. 当对话展开而机器全折叠时：对话占满全部空间，机器板块吸底（零跳动且留出最大视口）；
-            // 3. 当对话收起而机器全折叠时：机器板块贴顶跟随对话，空白自然留在最下方；
-            // 4. 当有机器展开时：展开项按权重瓜分剩余空间，未展开的后续机器吸底；
-            // 5. 动画期间全程使用连续权重线性过渡，绝对无两段突变，无固定高度截断。
-            let has_conv_section = sections
-                .first()
-                .map(|s| matches!(s.kind, SectionKind::Conversations))
-                .unwrap_or(false);
-            let conv_progress = if has_conv_section {
-                sections[0].progress.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let conv_active = has_conv_section && conv_progress > 0.001;
-
-            // 机器板块中是否有正在展开或已完全展开的板块（非空）
-            let any_machine_active = sections
+            // 1. 各板块（对话、机器、归档）统一参与手风琴空间分配与 Resizer 拖拽调节；
+            // 2. 当有板块完全展开时：所有展开项与动画中项按瞬时权重平滑瓜分 100% 侧栏空间，向下占满视口；
+            // 3. 当所有板块全部收起时：所有标题贴顶吸附，底部由占位 spacer 垫底留白；
+            // 4. 动画期间全程严格数学连续过渡，绝对无两段突变，无空白闪烁与尺寸跳变；
+            // 5. 分割条（Resizer）：在任意两个完全展开的板块之间动态连接，即使中间夹杂折叠板块也能上下拖拽调节高度。
+            let total_instant_w: f32 = sections
                 .iter()
-                .skip(if has_conv_section { 1 } else { 0 })
-                .any(|s| !s.is_compact_empty && s.progress > 0.001);
-
-            let machine_active_weight: f32 = sections
-                .iter()
-                .skip(if has_conv_section { 1 } else { 0 })
                 .filter(|s| !s.is_compact_empty && s.progress > 0.001)
                 .map(|s| get_base_weight(&s.id, &s.kind) * s.progress)
                 .sum();
 
-            let machine_max_weight: f32 = sections
+            let has_fully_expanded = sections
                 .iter()
-                .skip(if has_conv_section { 1 } else { 0 })
+                .any(|s| !s.is_compact_empty && s.progress > 0.99);
+
+            let total_max_w: f32 = sections
+                .iter()
                 .filter(|s| !s.is_compact_empty && s.progress > 0.001)
                 .map(|s| get_base_weight(&s.id, &s.kind))
                 .sum();
 
-            let total_shared_weight = if conv_active && any_machine_active {
-                (get_base_weight("conversations", &SectionKind::Conversations) * conv_progress)
-                    + machine_active_weight
+            // 底部弹性占位：
+            // - 全收起时：bottom_spacer = 1.0，所有板块自然贴顶，空白留在最下方；
+            // - 存在完全展开板块时：bottom_spacer = 0.0，展开项占满剩余空间向下延伸；
+            // - 仅有部分板块在展开动画途中时：随着展开进度从 1.0 连续缩至 0.0，单段平滑展开。
+            let bottom_spacer_w = if total_instant_w <= 0.001 {
+                1.0
+            } else if has_fully_expanded {
+                0.0
+            } else if total_max_w > 0.001 {
+                (1.0 - (total_instant_w / total_max_w)).clamp(0.0, 1.0)
             } else {
                 0.0
             };
 
+            let mut prev_expanded_idx: Option<usize> = None;
+
             for (ix, section) in sections.into_iter().enumerate() {
                 let UnifiedSection { id, kind, header, body, scroll, progress, is_compact_empty, .. } = section;
                 let progress = progress.clamp(0.0, 1.0);
+
+                let is_expanded = metas[ix].progress > 0.99 && !metas[ix].is_compact_empty;
+                if is_expanded && !is_animating {
+                    if let Some(above_idx) = prev_expanded_idx {
+                        // 在下方展开板块上方插入分割条，连接上一个展开板块与当前展开板块
+                        container = container.child(make_sash(ix, above_idx, ix));
+                    }
+                    prev_expanded_idx = Some(ix);
+                }
 
                 // 1. 板块 Header
                 container = container.child(div().flex_none().child(header));
@@ -2620,24 +2639,16 @@ impl Workspace {
                     let base_w = get_base_weight(&id, &kind);
                     let instant_w = (base_w * progress).max(0.001);
 
-                    let flex_w = if conv_active && any_machine_active {
-                        // 对话和机器同时处于展开/动画中：按瞬时权重平滑瓜分容器
-                        if total_shared_weight > 0.001 {
-                            instant_w / total_shared_weight
+                    let flex_w = if has_fully_expanded {
+                        if total_instant_w > 0.001 {
+                            instant_w / total_instant_w
                         } else {
                             1.0
                         }
-                    } else if any_machine_active {
-                        // 仅机器展开（对话关闭）：单板块或多机器自身权重归一化，
-                        // 随着 progress 从 0->1 线性撑满，无两段式突变
-                        if machine_max_weight > 0.001 {
-                            instant_w / machine_max_weight
-                        } else {
-                            progress
-                        }
+                    } else if total_max_w > 0.001 {
+                        instant_w / total_max_w
                     } else {
-                        // 仅对话展开（机器全关闭）：对话占满剩余空间
-                        conv_progress
+                        progress
                     };
 
                     let body_elem = div()
@@ -2660,39 +2671,7 @@ impl Workspace {
                         );
                     container = container.child(body_elem);
                 }
-
-                // 3. 分割条（Resizer）：仅在相邻两个同时完全展开且均有可分配内容的板块之间显示
-                if ix < n - 1
-                    && metas[ix].progress > 0.99
-                    && !metas[ix].is_compact_empty
-                    && metas[ix + 1].progress > 0.99
-                    && !metas[ix + 1].is_compact_empty
-                    && !is_animating
-                {
-                    container = container.child(make_sash(ix, ix, ix + 1));
-                }
             }
-
-            // 底部弹性占位：
-            // 1. 当机器全收起时：
-            //    - 若对话展开 (conv_progress = 1.0)，占位权重为 0，对话占满全部空间把机器推至底部吸底；
-            //    - 若对话收起 (conv_progress = 0.0)，占位权重为 1.0，所有板块自然贴顶，空白留在最下方；
-            //    - 对话收放动画期间平滑插值，机器板块无跳动平滑移动。
-            // 2. 当对话收起而机器正在展开/折叠时：
-            //    - 随着机器 progress 增加，底部占位权重从 1.0 线性递减至 0.0，
-            //    - 保证机器板块在 0% 到 100% 之间全程单段平滑展开，不分两段！
-            let bottom_spacer_w = if !any_machine_active {
-                (1.0 - conv_progress).clamp(0.0, 1.0)
-            } else if !conv_active {
-                let ratio = if machine_max_weight > 0.001 {
-                    machine_active_weight / machine_max_weight
-                } else {
-                    1.0
-                };
-                (1.0 - ratio).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
 
             if bottom_spacer_w > 0.001 {
                 container = container.child(

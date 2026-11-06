@@ -3986,6 +3986,7 @@ gpui_kit_assets::icon_assets!(
         Laptop,
         LaptopMinimal,
         MessageSquare,
+        Monitor,
         Pin,
         Puzzle,
         RefreshCw,
