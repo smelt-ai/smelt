@@ -970,6 +970,7 @@ fn push_on() -> Desired {
         failure: true,
         success: true,
         payload_version: smelt_model::remote_config::PUSH_PAYLOAD_VERSION,
+        message: true,
     })
 }
 

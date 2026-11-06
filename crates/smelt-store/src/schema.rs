@@ -436,7 +436,8 @@ CREATE TABLE push_registration (
   notify_failure INTEGER NOT NULL CHECK (notify_failure IN (0, 1)),
   updated_at_ms INTEGER NOT NULL,
   notify_success INTEGER NOT NULL DEFAULT 0 CHECK (notify_success IN (0, 1)),
-  payload_version INTEGER NOT NULL DEFAULT 1 CHECK (payload_version >= 1)
+  payload_version INTEGER NOT NULL DEFAULT 1 CHECK (payload_version >= 1),
+  notify_message INTEGER NOT NULL DEFAULT 1 CHECK (notify_message IN (0, 1))
 ) WITHOUT ROWID;
 CREATE TABLE runtime_identity (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1776,6 +1777,11 @@ ALTER TABLE session_group ADD COLUMN pinned_at INTEGER;
 /// v35：按 agent 改启动命令的设置删掉了，换命令用自定义 Agent。存它的表一起删。
 pub const MIGRATE_V34_TO_V35: &str = "
 DROP TABLE agent_acp_command;
+";
+
+/// v36：推送登记加「智能体消息」开关。消息正文原样显示，旧版 App 也认，已有的登记默认推。
+pub const MIGRATE_V35_TO_V36: &str = "
+ALTER TABLE push_registration ADD COLUMN notify_message INTEGER NOT NULL DEFAULT 1 CHECK (notify_message IN (0, 1));
 ";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。

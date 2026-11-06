@@ -128,10 +128,12 @@ final class PushChannel {
     (notification.request.content.userInfo["smelt"] as? [String: Any])?["kind"] as? String
   }
 
+  /// 智能体从命令行、自动化发的消息不带会话（`session_id` 为空），点开只打开 App。
   private static func target(of notification: UNNotification) -> [String: String]? {
     guard let smelt = notification.request.content.userInfo["smelt"] as? [String: Any],
       let runtimeId = smelt["runtime_id"] as? String,
-      let sessionId = smelt["session_id"] as? String
+      let sessionId = smelt["session_id"] as? String,
+      !sessionId.isEmpty
     else { return nil }
     return ["runtimeId": runtimeId, "sessionId": sessionId]
   }

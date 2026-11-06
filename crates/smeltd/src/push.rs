@@ -10,6 +10,9 @@
 //! - 在：Mac 上已经弹了系统通知，手机不响。等批准、等回复先扣着，人一离开（锁屏、本机桌面
 //!   App 断开、键鼠闲置满 `presence::AWAY_AFTER`）还没处理就补推；完成、失败不推。
 //!
+//! 智能体主动发的消息（[`send_message`]，见 `crate::agent_notify`）不来自会话状态：不看人在
+//! 不在、立刻发；每条各占一个位置，不被同一会话后来的提醒替换，会话结束、被删也不撤。
+//!
 //! 发送失败按退避重试，超过 [`TTL`] 丢弃；重试期间事情已经处理掉（行动项解决、会话删除）就
 //! 不再重试。outbox 不落盘：smeltd 重启后首份快照只建基线，不补发重启前的提醒。
 //!
@@ -19,7 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::presence::Presence;
@@ -34,8 +37,8 @@ use smelt_event_protocol::{
     Capability, PluginId, SubscribeMessage, SubscriptionId, Topic,
 };
 use smelt_push::{
-    DETAIL_MAX_CHARS, PushKind, RELAY_SEND_PATH, SUBTITLE_MAX_CHARS, SendRequest, TITLE_MAX_CHARS,
-    excerpt,
+    DETAIL_MAX_CHARS, MESSAGE_MAX_CHARS, PushKind, RELAY_SEND_PATH, SUBTITLE_MAX_CHARS,
+    SendRequest, TITLE_MAX_CHARS, excerpt,
 };
 
 use crate::event_hub::{self, EventHubHandle};
@@ -47,6 +50,9 @@ const BACKOFF_BASE: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(2 * 60);
 /// 一次发给中继的请求的时限。
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 发送线程起来之后才有：测试进程、没有运行时库时为空，智能体消息只弹桌面。
+static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
 
 const PLUGIN_ID: &str = "core.push";
 const SUBSCRIPTION_ID: &str = "push";
@@ -69,6 +75,7 @@ pub(crate) fn spawn(event_hub: &EventHubHandle) {
         return;
     }
     let shared = Arc::new(Shared::default());
+    let _ = SHARED.set(Arc::clone(&shared));
     let away_shared = Arc::clone(&shared);
     crate::presence::on_away(move || away_shared.release_held());
     let watcher_hub = Arc::clone(event_hub);
@@ -88,6 +95,41 @@ pub(crate) fn spawn(event_hub: &EventHubHandle) {
     }
 }
 
+/// 智能体主动发的一条消息：立刻推给登记了「智能体消息」的手机，返回有几台。推送没在跑、
+/// 没有手机要它时返回 0，不排队。
+///
+/// `session_id` 用于手机上按会话分组和点开跳转；没有会话（命令行发的）时为空串。
+pub(crate) fn send_message(
+    session_id: &str,
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    body: &str,
+) -> usize {
+    let Some(shared) = SHARED.get() else {
+        return 0;
+    };
+    let phones = match registered_targets(PushKind::Message) {
+        Ok(targets) => targets.len(),
+        Err(error) => {
+            crate::dlog(&format!("推送：读登记失败：{error}"));
+            return 0;
+        }
+    };
+    if phones == 0 {
+        return 0;
+    }
+    let content = Content {
+        title: title.and_then(|title| excerpt(title, TITLE_MAX_CHARS)),
+        subtitle: subtitle.and_then(|subtitle| excerpt(subtitle, SUBTITLE_MAX_CHARS)),
+        detail: excerpt(body, MESSAGE_MAX_CHARS),
+    };
+    shared.apply(vec![Command::Message {
+        session_id: session_id.to_string(),
+        content,
+    }]);
+    phones
+}
+
 // ---------------------------------------------------------------------------
 // 判定：会话状态 → 要推 / 不用推了
 // ---------------------------------------------------------------------------
@@ -102,6 +144,11 @@ enum Command {
     },
     /// 这段会话的事已经处理掉（或会话没了），还没推出去的不推了。
     Cancel { session_id: String },
+    /// 智能体主动发的消息，见 [`send_message`]。
+    Message {
+        session_id: String,
+        content: Content,
+    },
 }
 
 /// 推送里显示的文字，取自提醒产生那一刻的会话状态，已按 `smelt_push` 的上限截好。
@@ -323,6 +370,9 @@ struct Target {
 struct Job {
     /// 区分同一会话先后的提醒：被取消或被新提醒替换后，发送中的旧 Job 回来不能再排队。
     serial: u64,
+    /// 在 outbox 里占的位置。会话提醒是会话 id：同一会话只留最新一条，处理掉就撤；智能体
+    /// 消息每条各占一个，不被替换、不被撤。
+    key: String,
     session_id: String,
     kind: PushKind,
     content: Content,
@@ -344,7 +394,7 @@ struct Job {
 #[derive(Default)]
 struct Outbox {
     jobs: Vec<Job>,
-    /// 每段会话当前有效的那条提醒。
+    /// 每个位置（[`Job::key`]）当前有效的那条。
     live: HashMap<String, u64>,
     next_serial: u64,
 }
@@ -352,16 +402,37 @@ struct Outbox {
 impl Outbox {
     /// 新提醒立刻到点。同一会话还在重试的旧提醒作废：积压恢复后只推最新的那条。
     fn notify(&mut self, session_id: String, kind: PushKind, content: Content, now: Instant) {
-        self.jobs.retain(|job| job.session_id != session_id);
+        self.jobs.retain(|job| job.key != session_id);
+        let apns_id = uuid::Uuid::new_v4().to_string();
+        self.enqueue(session_id.clone(), session_id, kind, content, apns_id, now);
+    }
+
+    /// 智能体的消息立刻到点，自己占一个位置。
+    fn message(&mut self, session_id: String, content: Content, now: Instant) {
+        let apns_id = uuid::Uuid::new_v4().to_string();
+        let key = format!("message:{apns_id}");
+        self.enqueue(key, session_id, PushKind::Message, content, apns_id, now);
+    }
+
+    fn enqueue(
+        &mut self,
+        key: String,
+        session_id: String,
+        kind: PushKind,
+        content: Content,
+        apns_id: String,
+        now: Instant,
+    ) {
         let serial = self.next_serial;
         self.next_serial += 1;
-        self.live.insert(session_id.clone(), serial);
+        self.live.insert(key.clone(), serial);
         self.jobs.push(Job {
             serial,
+            key,
             session_id,
             kind,
             content,
-            apns_id: uuid::Uuid::new_v4().to_string(),
+            apns_id,
             created: now,
             due: now,
             attempt: 0,
@@ -373,7 +444,7 @@ impl Outbox {
 
     /// 扣着到 `until` 再看。期间被取消、被替换的不再回来。
     fn hold(&mut self, mut job: Job, until: Instant) {
-        if self.live.get(&job.session_id) != Some(&job.serial) {
+        if self.live.get(&job.key) != Some(&job.serial) {
             return;
         }
         job.held = true;
@@ -383,8 +454,8 @@ impl Outbox {
 
     /// 不发了（人在 Mac 前，完成 / 失败已经在 Mac 上看到）。
     fn discard(&mut self, job: Job) {
-        if self.live.get(&job.session_id) == Some(&job.serial) {
-            self.live.remove(&job.session_id);
+        if self.live.get(&job.key) == Some(&job.serial) {
+            self.live.remove(&job.key);
         }
     }
 
@@ -399,8 +470,9 @@ impl Outbox {
         released
     }
 
+    /// 撤掉这段会话的提醒。智能体消息不在会话的位置上，不受影响。
     fn cancel(&mut self, session_id: &str) {
-        self.jobs.retain(|job| job.session_id != session_id);
+        self.jobs.retain(|job| job.key != session_id);
         self.live.remove(session_id);
     }
 
@@ -420,7 +492,7 @@ impl Outbox {
     /// 发完一轮：还有手机没送到就按退避排下一次，送完、过期或期间被取消 / 替换就收掉。
     /// 过期时还有手机没送到，返回 true。
     fn finish(&mut self, mut job: Job, now: Instant) -> bool {
-        if self.live.get(&job.session_id) != Some(&job.serial) {
+        if self.live.get(&job.key) != Some(&job.serial) {
             return false;
         }
         let remaining = job
@@ -435,7 +507,7 @@ impl Outbox {
                 return false;
             }
         }
-        self.live.remove(&job.session_id);
+        self.live.remove(&job.key);
         remaining
     }
 }
@@ -471,6 +543,10 @@ impl Shared {
                     content,
                 } => outbox.notify(session_id, kind, content, now),
                 Command::Cancel { session_id } => outbox.cancel(&session_id),
+                Command::Message {
+                    session_id,
+                    content,
+                } => outbox.message(session_id, content, now),
             }
         }
         drop(outbox);
@@ -612,15 +688,18 @@ enum Gate {
 }
 
 /// 第一次发之前：人不在就发；人在时，要你处理的扣到可能离开的那一刻，结果类的不推。
+/// 智能体的消息是它判断过值得打扰才发的，人在不在都发。
 fn gate(kind: PushKind, presence: Presence) -> Gate {
     match presence {
+        _ if kind == PushKind::Message => Gate::Send,
         Presence::Away => Gate::Send,
         Presence::Here { away_in } if kind.is_request() => Gate::Hold(away_in),
         Presence::Here { .. } => Gate::Skip,
     }
 }
 
-/// 发给一台手机的请求。旧 App 不带摘要：它的文案文件里没有带摘要的 loc-key。
+/// 发给一台手机的请求。旧 App 不带摘要：它的文案文件里没有带摘要的 loc-key。智能体消息的
+/// 正文走 `body`，不经文案文件，都带。
 fn send_request(job: &Job, target: &Target, runtime_id: &str) -> SendRequest {
     SendRequest {
         collapse_id: smelt_push::collapse_id(&target.handle, &job.apns_id),
@@ -631,7 +710,11 @@ fn send_request(job: &Job, target: &Target, runtime_id: &str) -> SendRequest {
         apns_id: job.apns_id.clone(),
         title: job.content.title.clone(),
         subtitle: job.content.subtitle.clone(),
-        detail: job.content.detail.clone().filter(|_| target.rich),
+        detail: job
+            .content
+            .detail
+            .clone()
+            .filter(|_| target.rich || job.kind == PushKind::Message),
     }
 }
 
@@ -724,6 +807,7 @@ fn registered_targets(kind: PushKind) -> Result<Vec<Target>, String> {
             PushKind::Success => {
                 registration.notify_success && registration.payload_version >= PUSH_PAYLOAD_VERSION
             }
+            PushKind::Message => registration.notify_message,
         })
         .map(|registration| Target {
             device_endpoint_id: registration.device_endpoint_id,
@@ -947,6 +1031,56 @@ mod tests {
         );
         assert_eq!(gate(PushKind::Failure, here), Gate::Skip);
         assert_eq!(gate(PushKind::Success, here), Gate::Skip);
+        assert_eq!(
+            gate(PushKind::Message, here),
+            Gate::Send,
+            "智能体判断过值得打扰才发，人在 Mac 前也推"
+        );
+        assert_eq!(gate(PushKind::Message, Presence::Away), Gate::Send);
+    }
+
+    /// 智能体消息各占一个位置：不替换同一会话的提醒，也不被它替换；会话的提醒处理掉、会话
+    /// 被删时不撤。
+    #[test]
+    fn messages_are_independent_of_session_alerts() {
+        let mut outbox = Outbox::default();
+        let start = Instant::now();
+        outbox.notify("a".into(), PushKind::Approval, Content::default(), start);
+        outbox.message("a".into(), Content::default(), start);
+        outbox.message("a".into(), Content::default(), start);
+        outbox.notify("a".into(), PushKind::Success, Content::default(), start);
+        outbox.cancel("a");
+        let due = outbox.take_due(start);
+        assert_eq!(due.len(), 2, "两条消息都在，会话提醒撤了");
+        assert!(due.iter().all(|job| job.kind == PushKind::Message));
+        assert_ne!(due[0].apns_id, due[1].apns_id);
+        assert!(due.iter().all(|job| job.session_id == "a"));
+        for job in due {
+            assert!(!outbox.finish(Job {
+                targets: Some(Vec::new()),
+                ..job
+            }, start));
+        }
+        assert!(outbox.live.is_empty());
+    }
+
+    /// 消息正文走 `body`，旧 App 也显示得了：都带上。
+    #[test]
+    fn message_body_goes_to_legacy_targets_too() {
+        let mut outbox = Outbox::default();
+        let start = Instant::now();
+        let content = Content {
+            title: Some("巡检".into()),
+            subtitle: None,
+            detail: Some("3 台机器磁盘告警".into()),
+        };
+        outbox.message("a".into(), content, start);
+        let job = outbox.take_due(start).pop().unwrap();
+        let mut legacy = target("old");
+        legacy.rich = false;
+        let request = send_request(&job, &legacy, "runtime");
+        assert_eq!(request.kind, PushKind::Message);
+        assert_eq!(request.detail.as_deref(), Some("3 台机器磁盘告警"));
     }
 
     /// 扣着的提醒到点复查；人离开时提前放出来，并且直接发。

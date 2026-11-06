@@ -7,6 +7,7 @@
 //!
 //! 推送带一小段明文：会话名、项目名和一行摘要（等批准的命令、智能体最后一条回复的开头等），
 //! 经过中继和 APNs。提醒类型的那几个字由手机按 `loc-key` 本地化，运行时和中继不出文案。
+//! 智能体主动发的消息（[`PushKind::Message`]）例外：正文就是智能体写的那段话，原样显示。
 //! 完整的会话内容仍然只走 iroh。
 //!
 //! 运行时（smeltd）、中继、手机是三个程序，格式在这里只定义一份。Dart / Swift 一侧照这里的
@@ -27,6 +28,8 @@ pub const TITLE_MAX_CHARS: usize = 80;
 pub const SUBTITLE_MAX_CHARS: usize = 60;
 /// 推送正文里的摘要最多这么多字。三段加起来离 APNs 4KB 的载荷上限很远。
 pub const DETAIL_MAX_CHARS: usize = 200;
+/// 智能体主动发的消息正文最多这么多字。全是汉字也只有 1.5KB，加上标题仍在 4KB 内。
+pub const MESSAGE_MAX_CHARS: usize = 500;
 
 /// 设备令牌属于哪套 APNs：开发签名的包走 sandbox，TestFlight / App Store 走 production。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,8 +55,8 @@ pub struct RegisterResponse {
     pub handle: String,
 }
 
-/// 会推到手机的提醒类型，和 `smelt_model::attention::AttentionKind` 里除响铃、普通提示外的
-/// 四种一一对应。
+/// 会推到手机的提醒类型。前四种和 `smelt_model::attention::AttentionKind` 里除响铃、普通提示外
+/// 的四种一一对应；[`Self::Message`] 是智能体自己决定发的消息，不来自会话状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushKind {
@@ -61,6 +64,7 @@ pub enum PushKind {
     Input,
     Failure,
     Success,
+    Message,
 }
 
 impl PushKind {
@@ -71,6 +75,7 @@ impl PushKind {
             Self::Input => "SMELT_PUSH_INPUT",
             Self::Failure => "SMELT_PUSH_FAILURE",
             Self::Success => "SMELT_PUSH_SUCCESS",
+            Self::Message => "SMELT_PUSH_MESSAGE",
         }
     }
 
@@ -81,6 +86,16 @@ impl PushKind {
             Self::Input => "SMELT_PUSH_INPUT_DETAIL",
             Self::Failure => "SMELT_PUSH_FAILURE_DETAIL",
             Self::Success => "SMELT_PUSH_SUCCESS_DETAIL",
+            // 消息正文走 `body` 原样显示，不经本地化模板。
+            Self::Message => "SMELT_PUSH_MESSAGE",
+        }
+    }
+
+    /// `detail` 最多这么多字。
+    pub fn detail_max_chars(self) -> usize {
+        match self {
+            Self::Message => MESSAGE_MAX_CHARS,
+            _ => DETAIL_MAX_CHARS,
         }
     }
 
@@ -90,7 +105,7 @@ impl PushKind {
     pub fn interruption_level(self) -> &'static str {
         match self {
             Self::Approval | Self::Input => "time-sensitive",
-            Self::Failure | Self::Success => "active",
+            Self::Failure | Self::Success | Self::Message => "active",
         }
     }
 
@@ -98,7 +113,7 @@ impl PushKind {
     pub fn relevance_score(self) -> f64 {
         match self {
             Self::Approval | Self::Input => 1.0,
-            Self::Failure => 0.8,
+            Self::Failure | Self::Message => 0.8,
             Self::Success => 0.5,
         }
     }
@@ -134,6 +149,7 @@ pub struct SendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
     /// 一行摘要：等批准的命令、等回复的问题、失败原因、最后一条回复的开头。
+    /// [`PushKind::Message`] 时是智能体写的消息正文。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -145,7 +161,7 @@ impl SendRequest {
             |text: Option<&str>, max: usize| text.is_none_or(|text| text.chars().count() <= max);
         fits(self.title.as_deref(), TITLE_MAX_CHARS)
             && fits(self.subtitle.as_deref(), SUBTITLE_MAX_CHARS)
-            && fits(self.detail.as_deref(), DETAIL_MAX_CHARS)
+            && fits(self.detail.as_deref(), self.kind.detail_max_chars())
     }
 }
 
@@ -184,7 +200,7 @@ pub fn excerpt(text: &str, max_chars: usize) -> Option<String> {
 /// 中继交给 APNs 的载荷。
 ///
 /// 标题是会话名、副标题是项目名，原样显示；正文用 `loc-key` / `loc-args`，由手机按自己的
-/// 语言拼成「等你批准：<摘要>」。`thread-id` 是会话：通知中心里一段会话叠成一组。
+/// 语言拼成「等你批准：<摘要>」。智能体的消息正文用 `body` 原样显示，哪一版 App 都认。`thread-id` 是会话：通知中心里一段会话叠成一组。
 /// `mutable-content` 不设：没有 Notification Service Extension。`smelt` 里是点开后跳转、
 /// 处理掉后撤回用的 id 和类型。
 pub fn apns_payload(request: &SendRequest) -> serde_json::Value {
@@ -196,6 +212,9 @@ pub fn apns_payload(request: &SendRequest) -> serde_json::Value {
         alert.insert("subtitle".into(), subtitle.as_str().into());
     }
     match &request.detail {
+        Some(detail) if request.kind == PushKind::Message => {
+            alert.insert("body".into(), detail.as_str().into());
+        }
         Some(detail) => {
             alert.insert("loc-key".into(), request.kind.detail_loc_key().into());
             alert.insert("loc-args".into(), serde_json::json!([detail]));
@@ -302,6 +321,37 @@ mod tests {
         );
         assert_eq!(payload["aps"]["interruption-level"], "active");
         assert_eq!(payload["smelt"]["kind"], "success");
+    }
+
+    /// 智能体的消息正文原样放进 `body`，不走本地化模板。
+    #[test]
+    fn apns_payload_shows_message_body_verbatim() {
+        let mut request = send_request();
+        request.kind = PushKind::Message;
+        request.detail = Some("巡检发现 3 台机器磁盘告警".into());
+        let payload = apns_payload(&request);
+        assert_eq!(
+            payload["aps"]["alert"],
+            serde_json::json!({
+                "title": "修推送",
+                "subtitle": "smelt",
+                "body": "巡检发现 3 台机器磁盘告警",
+            })
+        );
+        assert_eq!(payload["aps"]["interruption-level"], "active");
+        assert_eq!(payload["smelt"]["kind"], "message");
+        assert!(!PushKind::Message.is_request());
+    }
+
+    /// 消息正文比摘要长：按消息的上限查。
+    #[test]
+    fn message_body_has_its_own_limit() {
+        let mut request = send_request();
+        request.kind = PushKind::Message;
+        request.detail = Some("x".repeat(MESSAGE_MAX_CHARS));
+        assert!(request.text_within_limits());
+        request.detail = Some("x".repeat(MESSAGE_MAX_CHARS + 1));
+        assert!(!request.text_within_limits());
     }
 
     #[test]

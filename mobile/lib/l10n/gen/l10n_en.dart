@@ -1983,8 +1983,11 @@ class L10nEn extends L10n {
   String get pushKindSuccess => 'Finished a turn';
 
   @override
+  String get pushKindMessage => 'Messages from agents';
+
+  @override
   String get pushFooter =>
-      'While you\'re using Smelt on your Mac, alerts show up there and your phone stays quiet. Once the Mac is locked or idle for 5 minutes, approvals and questions you haven\'t handled come to your phone right away. Notifications show the session name, the project and a one-line summary (the command waiting for approval, the start of the agent\'s last reply, and so on). That text passes through the push service and Apple. Full session contents stay on your machines.';
+      'While you\'re using Smelt on your Mac, alerts show up there and your phone stays quiet. Once the Mac is locked or idle for 5 minutes, approvals and questions you haven\'t handled come to your phone right away. Notifications show the session name, the project and a one-line summary (the command waiting for approval, the start of the agent\'s last reply, and so on). That text passes through the push service and Apple. Full session contents stay on your machines. Messages from agents are sent when an agent decides something is worth telling you, and reach your phone even while you\'re at your Mac.';
 
   @override
   String get pushSessionGone => 'That session no longer exists.';

@@ -329,6 +329,7 @@ fn push_register(principal: &Principal, params: PushRegisterParams) -> Result<()
             notify_failure: params.failure,
             notify_success: params.success,
             payload_version: params.payload_version,
+            notify_message: params.message,
             updated_at_ms: now_ms(),
         })
         .map_err(store_error)?;
@@ -441,6 +442,7 @@ mod tests {
             failure: true,
             success: true,
             payload_version: smelt_core::remote_config::PUSH_PAYLOAD_VERSION,
+            message: true,
         }
     }
 

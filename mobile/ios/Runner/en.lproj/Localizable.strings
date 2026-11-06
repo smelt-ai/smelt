@@ -6,6 +6,7 @@
 "SMELT_PUSH_INPUT" = "An agent is waiting for your reply";
 "SMELT_PUSH_FAILURE" = "An agent run failed";
 "SMELT_PUSH_SUCCESS" = "An agent finished";
+"SMELT_PUSH_MESSAGE" = "An agent sent you a message";
 "SMELT_PUSH_APPROVAL_DETAIL" = "Needs approval: %@";
 "SMELT_PUSH_INPUT_DETAIL" = "Waiting for you: %@";
 "SMELT_PUSH_FAILURE_DETAIL" = "Failed: %@";

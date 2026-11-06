@@ -27,6 +27,9 @@ class PushRegistration {
   final bool failure;
   final bool success;
 
+  /// 智能体主动发的消息。
+  final bool message;
+
   const PushRegistration({
     required this.handle,
     required this.relayUrl,
@@ -34,6 +37,7 @@ class PushRegistration {
     required this.input,
     required this.failure,
     required this.success,
+    required this.message,
   });
 
   @override
@@ -43,7 +47,8 @@ class PushRegistration {
       approval.hashCode ^
       input.hashCode ^
       failure.hashCode ^
-      success.hashCode;
+      success.hashCode ^
+      message.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -55,5 +60,6 @@ class PushRegistration {
           approval == other.approval &&
           input == other.input &&
           failure == other.failure &&
-          success == other.success;
+          success == other.success &&
+          message == other.message;
 }

@@ -932,6 +932,37 @@ fn daemon_attention_suppressed(
         })
 }
 
+/// 终端程序的 OSC 通知（运行时已滤掉有结构化 hook 的会话）和智能体主动发的通知（带标题）。
+/// 进同一个关注 store，正在看的会话由 store 标已读、不弹。自动化运行的会话不在侧栏里、命令行
+/// 发的没有会话，都没处标已读：直接弹一条应用通知，不记未读，免得角标一直挂着。
+fn publish_session_notification(
+    runtime: &RuntimeKey,
+    session_id: &str,
+    title: Option<&str>,
+    message: &str,
+    cx: &mut App,
+) {
+    let title = title.unwrap_or("终端通知");
+    let outside_sidebar = session_id.is_empty()
+        || cx
+            .try_global::<settings::AgentHostState>()
+            .and_then(|config| config.automations_on(runtime))
+            .is_some_and(|machine| {
+                automation_notifications::owns_session(&machine.runs, session_id)
+            });
+    if outside_sidebar {
+        status_item::deliver_app_notification(title, message);
+        return;
+    }
+    let item = AttentionItem {
+        session_id: session_id.to_string(),
+        title: title.to_string(),
+        message: message.to_string(),
+        kind: AttentionKind::Notice,
+    };
+    AttentionGlobal::publish_terminal_notification(item, Instant::now(), cx);
+}
+
 fn apply_daemon_attention(
     runtime: &RuntimeKey,
     previous: Option<&terminal::DaemonSessionState>,
@@ -4295,19 +4326,20 @@ fn main() {
                         _ => {}
                     }
                 }
-                // 终端程序的 OSC 通知：运行时已滤掉有结构化 hook 的会话，这里进同一个
-                // 关注 store，正在看的会话由 store 标已读、不弹。
-                if let terminal::DaemonStateEvent::TerminalNotification { session_id, message } =
-                    &event
+                if let terminal::DaemonStateEvent::TerminalNotification {
+                    session_id,
+                    title,
+                    message,
+                } = &event
                 {
-                    let item = AttentionItem {
-                        session_id: session_id.clone(),
-                        title: "终端通知".to_string(),
-                        message: message.clone(),
-                        kind: AttentionKind::Notice,
-                    };
                     cx.update(|cx| {
-                        AttentionGlobal::publish_terminal_notification(item, Instant::now(), cx);
+                        publish_session_notification(
+                            &runtime,
+                            session_id,
+                            title.as_deref(),
+                            message,
+                            cx,
+                        );
                     });
                     continue;
                 }

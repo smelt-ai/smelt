@@ -491,7 +491,10 @@ pub struct AgentMemoryChanged {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalNotification {
     pub session_id: String,
-    /// 通知正文，已从 OSC 载荷里取出（777 取最后一段，99 已解 base64）。
+    /// 智能体主动发的通知（`notify_user` 工具）带的标题。终端程序的 OSC 通知没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 通知正文，已从 OSC 载荷里取出（777 取最后一段，99 已解 base64），或智能体写的消息。
     pub message: String,
 }
 
