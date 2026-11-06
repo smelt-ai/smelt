@@ -481,7 +481,7 @@ impl Workspace {
         };
         let toggles = self.render_window_trailing_toggles(cx);
         let drag_band = stage_content_drag_band(
-            self.sidebar_open,
+            left_guard <= px(0.),
             no_traffic_lights,
             panel_reserve,
             stage_has_page_header(

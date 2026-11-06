@@ -279,18 +279,19 @@ impl Workspace {
     /// 侧栏「对话」分组。跟项目分组同一套：分组行点一下收起或展开，展开列出全部对话，
     /// 按最近活动排；收起时分组行写数量和最要紧的状态。一个对话都没有就整组不出现。
     /// 跟项目在同一个滚动区里，对话多了只是把项目往下推。
-    pub(crate) fn render_product_conversation_nav(
+    pub(crate) fn render_product_conversation_parts(
         &self,
         entity: Entity<Workspace>,
         statuses: &[AgentStatus],
         // 键盘焦点在侧栏里时，焦点环落在哪一行（`SidebarItem::key`）。
         focused_key: Option<u64>,
+        chevron_degrees: Option<f32>,
         cx: &App,
-    ) -> AnyElement {
+    ) -> Option<(AnyElement, Option<AnyElement>)> {
         // 跟键盘导航同一份顺序。
         let product = self.sidebar_conversation_order(cx);
         if product.is_empty() {
-            return div().into_any_element();
+            return None;
         }
         let ordered: Vec<(usize, u64)> = product
             .iter()
@@ -340,13 +341,45 @@ impl Workspace {
             .items_center()
             .gap_2()
             .rounded(crate::ui_theme::row_radius())
-            .child(crate::session_list::row::group_disclosure(
-                "conversation-group-disclosure",
-                CONVERSATION_GROUP_HOVER,
-                Icon::new(gpui_kit_assets::IconName::MessageSquare).size(px(15.)),
-                collapsed,
-                true,
-            ))
+            .child({
+                if let Some(deg) = chevron_degrees {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .w(px(crate::session_list::row::GROUP_ICON_BOX))
+                                .h(px(16.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::ChevronRight)
+                                        .size(px(12.))
+                                        .text_color(rgb(crate::ui_theme::text_muted()))
+                                        .transform(Transformation::rotate(radians(deg.to_radians()))),
+                                ),
+                        )
+                        .child(
+                            Icon::new(gpui_kit_assets::IconName::MessageSquare)
+                                .size(px(15.))
+                                .text_color(rgb(crate::ui_theme::text_muted())),
+                        )
+                        .into_any_element()
+                } else {
+                    crate::session_list::row::group_disclosure(
+                        "conversation-group-disclosure",
+                        CONVERSATION_GROUP_HOVER,
+                        Icon::new(gpui_kit_assets::IconName::MessageSquare).size(px(15.)),
+                        collapsed,
+                        true,
+                        None,
+                    )
+                    .into_any_element()
+                }
+            })
             .child(
                 div()
                     .flex_1()
@@ -380,10 +413,7 @@ impl Workspace {
                     cx.notify();
                 });
             });
-        let section = div().mx_2().mt_3().flex().flex_col().child(header);
-        if collapsed {
-            return section.into_any_element();
-        }
+        let header_elem = div().mx_2().mt_3().child(header).into_any_element();
 
         let now = chrono::Local::now();
         // 正在就地改名的那一行：标题那一格换成输入框。
@@ -561,27 +591,55 @@ impl Workspace {
             );
         }
         // 对话缩进一档挂在分组下面，左边一根细线，跟项目下的会话同一套尺寸。
-        section
+        let body = div()
+            .mx_2()
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .pb_1()
+            .pl(px(crate::session_list::PROJECT_SESSION_INDENT))
             .child(
                 div()
-                    .relative()
+                    .absolute()
+                    .left(px(crate::session_list::PROJECT_GUIDE_LEFT))
+                    .top_0()
+                    .bottom(px(4.))
+                    .w(px(1.))
+                    .bg(crate::ui_theme::hairline()),
+            )
+            .children(rows)
+            .into_any_element();
+
+        Some((header_elem, Some(body)))
+    }
+
+    pub(crate) fn render_product_conversation_nav(
+        &self,
+        entity: Entity<Workspace>,
+        statuses: &[AgentStatus],
+        focused_key: Option<u64>,
+        cx: &App,
+    ) -> AnyElement {
+        let Some((header, body)) =
+            self.render_product_conversation_parts(entity, statuses, focused_key, None, cx)
+        else {
+            return div().into_any_element();
+        };
+        if let Some(body) = body {
+            if !self.sidebar_conversations_collapsed {
+                div()
                     .flex()
                     .flex_col()
-                    .gap(px(1.))
-                    .pb_1()
-                    .pl(px(crate::session_list::PROJECT_SESSION_INDENT))
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(crate::session_list::PROJECT_GUIDE_LEFT))
-                            .top_0()
-                            .bottom(px(4.))
-                            .w(px(1.))
-                            .bg(crate::ui_theme::hairline()),
-                    )
-                    .children(rows),
-            )
-            .into_any_element()
+                    .child(header)
+                    .child(body)
+                    .into_any_element()
+            } else {
+                header
+            }
+        } else {
+            header
+        }
     }
 
     pub(super) fn render_agents_header(

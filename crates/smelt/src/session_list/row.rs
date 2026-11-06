@@ -183,6 +183,7 @@ pub(crate) fn group_disclosure(
     icon: Icon,
     collapsed: bool,
     collapsible: bool,
+    chevron_degrees: Option<f32>,
 ) -> Stateful<Div> {
     let id = id.into();
     let turn_id = ElementId::from((id.clone(), if collapsed { "collapsed" } else { "expanded" }));
@@ -218,19 +219,32 @@ pub(crate) fn group_disclosure(
                     .justify_center()
                     .opacity(0.0)
                     .group_hover(group, |style| style.opacity(1.0))
-                    .child(ambient_animation(
-                        turn_id,
-                        Duration::from_millis(DISCLOSURE_TURN_MS),
-                        true,
-                        move |phase| {
-                            let (from, to) = if collapsed { (90.0, 0.0) } else { (0.0, 90.0) };
-                            let degrees: f32 =
-                                from + (to - from) * smelt_ui::motion::ease_snap(phase);
-                            Icon::new(IconName::ChevronRight)
-                                .size(px(14.))
-                                .transform(Transformation::rotate(radians(degrees.to_radians())))
-                        },
-                    )),
+                    .map(|d| {
+                        if let Some(deg) = chevron_degrees {
+                            d.child(
+                                Icon::new(IconName::ChevronRight)
+                                    .size(px(14.))
+                                    .transform(Transformation::rotate(radians(deg.to_radians()))),
+                            )
+                        } else {
+                            d.child(ambient_animation(
+                                turn_id,
+                                Duration::from_millis(DISCLOSURE_TURN_MS),
+                                true,
+                                move |phase| {
+                                    let (from, to) =
+                                        if collapsed { (90.0, 0.0) } else { (0.0, 90.0) };
+                                    let degrees: f32 =
+                                        from + (to - from) * smelt_ui::motion::ease_snap(phase);
+                                    Icon::new(IconName::ChevronRight)
+                                        .size(px(14.))
+                                        .transform(Transformation::rotate(radians(
+                                            degrees.to_radians(),
+                                        )))
+                                },
+                            ))
+                        }
+                    }),
             )
         })
 }

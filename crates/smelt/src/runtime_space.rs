@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 
+use gpui::ScrollHandle;
+
 use crate::SessionState;
 use crate::runtimes::{Runtime, RuntimeKey};
 use crate::workspace_directory::DirectorySync;
@@ -25,6 +27,8 @@ pub(crate) struct RuntimeSpace {
     /// 侧栏里这台机器的分段，用户这次运行里亲手折起（`Some(true)`）或展开过。不落盘：
     /// 下次启动回到默认，见 [`crate::Workspace::runtime_folded`]。
     pub(crate) folded: Option<bool>,
+    /// 该机器分栏独立的滚动句柄。
+    pub(crate) scroll: ScrollHandle,
     /// 和这个运行时那份工作区目录（项目、对话）的同步账本。目录收到之前不发命令：内存里
     /// 的空列表不代表运行时上没有对话。
     pub(crate) directory: DirectorySync,
@@ -47,6 +51,7 @@ impl RuntimeSpace {
             collapsed_projects: HashSet::new(),
             pinned_projects: HashSet::new(),
             folded: None,
+            scroll: ScrollHandle::new(),
             directory: DirectorySync::default(),
             write_queue: WorkspaceSnapshotWriteQueue::default(),
             restore_pending: Vec::new(),
