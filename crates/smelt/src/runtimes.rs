@@ -61,10 +61,21 @@ pub(crate) fn connect_terminal(
     runtime.client().connect()
 }
 
-/// 给人看的运行时名字：本机就叫本机，远程用配对时记下的主机名。
+static LOCAL_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 本机运行时名称：优先读取电脑硬件序列号，读不到时使用主机名，最后兜底为「本机」。
+pub(crate) fn local_runtime_name() -> &'static str {
+    LOCAL_NAME.get_or_init(|| {
+        smelt_sys::hardware_serial()
+            .or_else(smelt_sys::hostname)
+            .unwrap_or_else(|| "本机".to_string())
+    })
+}
+
+/// 给人看的运行时名字：本机优先展示电脑序列号，远程用配对时记下的主机名。
 pub(crate) fn runtime_name(key: &RuntimeKey, cx: &gpui::App) -> String {
     match key {
-        RuntimeKey::Local => "本机".to_string(),
+        RuntimeKey::Local => local_runtime_name().to_string(),
         RuntimeKey::Remote(id) => cx
             .try_global::<RuntimeHub>()
             .and_then(|hub| {
@@ -297,11 +308,11 @@ pub(crate) enum LinkLight {
     Down,
 }
 
-/// 侧栏标题上一台远程机器的连接状态：一盏灯，悬停看完整说明。要人处理的（离线、版本
-/// 不兼容、升级中）灯旁再写几个字，不只靠颜色。
+/// 侧栏标题上一台远程机器的连接状态：一盏灯，悬停看完整说明。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeIndicator {
     pub(crate) light: LinkLight,
+    #[allow(dead_code)]
     pub(crate) label: Option<String>,
     pub(crate) detail: String,
 }

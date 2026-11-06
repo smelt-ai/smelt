@@ -78,7 +78,7 @@ fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
     (ElementId::from(name), key).into()
 }
 
-/// 机器名字，远程的由机器图标颜色体现连接状态，要人处理时后面带说明；悬停看完整的连接说明。
+/// 机器名字，远程的由机器图标颜色体现连接状态；悬停看完整的连接说明。
 fn runtime_name_with_indicator(
     key: &RuntimeKey,
     name: impl Into<SharedString>,
@@ -95,11 +95,6 @@ fn runtime_name_with_indicator(
     let Some(indicator) = indicator else {
         return name.into_any_element();
     };
-    let light = match indicator.light {
-        crate::runtimes::LinkLight::Good => ui_theme::green(),
-        crate::runtimes::LinkLight::Degraded => ui_theme::yellow(),
-        crate::runtimes::LinkLight::Down => ui_theme::red(),
-    };
     let detail = SharedString::from(indicator.detail);
     h_flex()
         .id(ElementId::from(SharedString::from(format!(
@@ -109,15 +104,6 @@ fn runtime_name_with_indicator(
         .gap_1p5()
         .items_center()
         .child(name)
-        .when_some(indicator.label, |d, label| {
-            d.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(rgb(light))
-                    .child(label),
-            )
-        })
         .tooltip(move |window, cx| {
             gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
         })

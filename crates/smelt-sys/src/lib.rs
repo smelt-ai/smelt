@@ -70,6 +70,113 @@ pub fn hostname() -> Option<String> {
     None
 }
 
+/// 读取本机硬件序列号（macOS 读取 IOPlatformSerialNumber，Windows 读取 BIOS 序列号，Linux 读取 DMI/machine-id）。
+#[cfg(target_os = "macos")]
+pub fn hardware_serial() -> Option<String> {
+    let output = std::process::Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if let Some(idx) = line.find("\"IOPlatformSerialNumber\"") {
+            let rest = &line[idx + "\"IOPlatformSerialNumber\"".len()..];
+            if let Some(eq_idx) = rest.find('=') {
+                let val = rest[eq_idx + 1..].trim().trim_matches('"').trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+pub fn hardware_serial() -> Option<String> {
+    fn is_valid_serial(s: &str) -> bool {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.len() < 3 {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        !matches!(
+            lower.as_str(),
+            "to be filled by o.e.m."
+                | "default string"
+                | "system serial number"
+                | "none"
+                | "0"
+                | "chassis serial number"
+        )
+    }
+
+    // 优先尝试 wmic
+    if let Ok(output) = std::process::Command::new("wmic")
+        .args(["bios", "get", "serialnumber"])
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty()
+                    && !trimmed.eq_ignore_ascii_case("serialnumber")
+                    && is_valid_serial(trimmed)
+                {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // 降级尝试 powershell
+    if let Ok(output) = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-CimInstance Win32_BIOS).SerialNumber",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let trimmed = text.trim();
+            if is_valid_serial(trimmed) {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn hardware_serial() -> Option<String> {
+    if let Ok(content) = std::fs::read_to_string("/sys/class/dmi/id/product_serial") {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() && trimmed != "None" {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(content) = std::fs::read_to_string("/etc/machine-id") {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn hardware_serial() -> Option<String> {
+    None
+}
+
 /// 桌面在跑的标记：Windows 上的命名互斥量 `SmeltDesktop`。安装程序
 /// （`scripts/windows-installer.iss` 的 `AppMutex`）在安装和卸载开头查它，Smelt 还开着就
 /// 提示先关掉。只要它存在，不做单实例：另一个实例已经建过也照样拿到句柄。句柄不关，
