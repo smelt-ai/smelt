@@ -91,9 +91,9 @@ pub(super) fn shortcuts_page(
                             .text_color(colors.muted)
                             .child("点键帽录新的快捷键：Esc 取消，⌫ 清掉不用。要带 ⌘，或者用 F 键。"),
                     )
-                    .child(section("全局", global, colors))
-                    .child(section("会话与面板", session, colors))
-                    .child(section("编辑与导航", edit, colors))
+                    .child(section(ShortcutGroup::Global.label(), global, colors))
+                    .child(section(ShortcutGroup::Session.label(), session, colors))
+                    .child(section(ShortcutGroup::Edit.label(), edit, colors))
                     .into_any_element()
             })
             .keywords(["快捷键", "键盘", "改键", "shortcut", "keyboard", "hotkey", "keybinding"]),

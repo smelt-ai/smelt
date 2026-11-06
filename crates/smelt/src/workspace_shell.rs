@@ -145,9 +145,37 @@ struct SmeltTabGroup {
 
 impl TabGroupRenderer for SmeltTabGroup {
     /// 组的底色是栏的底色，不用主题的背景色：主题色可能带透明度，会透出窗口后面。
+    ///
+    /// 所在区域布局里写了背景，就在底色上铺这张图，压在标签条和面板底下；区域里的面板
+    /// 这时不铺自己的实底（`ShellLayout::backdrop_of`）。每组各铺一份：放大的组盖住
+    /// 整个工作台时也带着它的背景。
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        let surface: Hsla = rgb(ui_theme::bg_column()).into();
-        self.inner.frame(group, window, cx).bg(surface)
+        let backdrop = self.workspace.upgrade().and_then(|workspace| {
+            let workspace = workspace.read(cx);
+            group_backdrop(
+                &workspace.shell_dock.read(cx),
+                &workspace.shell_layout,
+                group.node(),
+            )
+        });
+        let frame = self.inner.frame(group, window, cx);
+        match backdrop {
+            None => frame.bg(Hsla::from(rgb(ui_theme::bg_column()))),
+            Some((region, background)) => {
+                // 舞台那块的底本来是舞台色，停靠区是栏的颜色。
+                let surface = match region {
+                    layout::Region::Center => ui_theme::bg_stage(),
+                    _ => ui_theme::bg_column(),
+                };
+                frame.relative().bg(Hsla::from(rgb(surface))).child(
+                    workspace_frame::background_image_layer(
+                        &background.image,
+                        background.opacity,
+                        cx,
+                    ),
+                )
+            }
+        }
     }
 
     fn content_frame(
@@ -218,6 +246,30 @@ impl TabGroupRenderer for SmeltTabGroup {
     ) -> Option<AnyElement> {
         self.inner.render_empty(group, window, cx)
     }
+}
+
+/// 这一组在哪块区域、那块区域布局里写的背景。
+fn group_backdrop(
+    area: &DockArea,
+    shell: &crate::workspace_layout::ShellLayout,
+    node: NodeId,
+) -> Option<(layout::Region, layout::Background)> {
+    let region = [
+        (DockPlacement::Center, layout::Region::Center),
+        (DockPlacement::Left, layout::Region::Left),
+        (DockPlacement::Right, layout::Region::Right),
+        (DockPlacement::Bottom, layout::Region::Bottom),
+    ]
+    .into_iter()
+    .find(|(placement, _)| {
+        area.layout(*placement)
+            .is_some_and(|tree| tree.find_node(node).is_some())
+    })
+    .map(|(_, region)| region)?;
+    shell
+        .layout
+        .background(region)
+        .map(|background| (region, background.clone()))
 }
 
 /// 标签条两头要让出的宽度：左头让红黄绿按钮和左栏开关，右头让右栏开关。
@@ -700,7 +752,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let surface: Hsla = rgb(ui_theme::bg_column()).into();
+        // 区域有布局背景时不铺底，让标签组铺的图透出来。
+        let surface: Hsla = match self.shell_layout.backdrop_of(&Component::Sessions) {
+            Some(_) => gpui::transparent_black(),
+            None => rgb(ui_theme::bg_column()).into(),
+        };
         let animate =
             self.workspace_window_active && self.shell_displayed.contains(&Component::Sessions);
         let statuses: Vec<AgentStatus> = self
@@ -736,84 +792,94 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let stage_surface: Hsla = rgb(ui_theme::bg_stage()).into();
+        // 舞台所在区域有布局背景时，舞台、对话、终端都不铺底，也不画设置里那张背景图：
+        // 布局的背景由标签组铺，比设置里的优先。
+        let backdrop = self.shell_layout.backdrop_of(&Component::Stage).is_some();
+        let stage_surface: Hsla = if backdrop {
+            gpui::transparent_black()
+        } else {
+            rgb(ui_theme::bg_stage()).into()
+        };
         let stage_content: AnyElement = match self.active_tab() {
             WorkspaceRoute::Agents => self.render_agents_page(window, cx),
             WorkspaceRoute::Automations => self.render_automations_page(window, cx),
             WorkspaceRoute::Capabilities => self.render_capabilities_page(window, cx),
             WorkspaceRoute::Desktop => self.render_desktop_page(window, cx),
             WorkspaceRoute::Session => {
-                let background_image = cx.global::<Appearance>().bg_image.clone();
-                let content =
-                    if self
-                        .sessions
-                        .get(self.active_session)
-                        .is_some_and(|session| !session.is_product_conversation(cx))
-                    {
-                        div().flex_1().min_w_0().min_h_0().flex().flex_col().child(
-                            div().flex_1().min_w_0().min_h_0().flex().child(
-                                match &self.sessions[self.active_session].kind {
-                                    SessionKind::Term { dock, .. } => div()
+                let background_image = (!backdrop)
+                    .then(|| cx.global::<Appearance>().bg_image.clone())
+                    .flatten();
+                let content = if self
+                    .sessions
+                    .get(self.active_session)
+                    .is_some_and(|session| !session.is_product_conversation(cx))
+                {
+                    div().flex_1().min_w_0().min_h_0().flex().flex_col().child(
+                        div().flex_1().min_w_0().min_h_0().flex().child(
+                            match &self.sessions[self.active_session].kind {
+                                SessionKind::Term { dock, .. } => div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .flex()
+                                    .when(!backdrop, |this| this.bg(rgb(terminal::default_bg())))
+                                    .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
+                                    .child(dock.area().clone())
+                                    .into_any_element(),
+                                SessionKind::Conversation(view) => {
+                                    let bg_image_opacity =
+                                        cx.global::<Appearance>().bg_image_opacity;
+                                    div()
+                                        .relative()
                                         .flex_1()
                                         .min_w_0()
                                         .min_h_0()
                                         .flex()
-                                        .bg(rgb(terminal::default_bg()))
-                                        .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
-                                        .child(dock.area().clone())
-                                        .into_any_element(),
-                                    SessionKind::Conversation(view) => {
-                                        let bg_image_opacity =
-                                            cx.global::<Appearance>().bg_image_opacity;
-                                        div()
-                                            .relative()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .min_h_0()
-                                            .flex()
-                                            .bg(rgb(ui_theme::bg_stage()))
-                                            .children(background_image.as_deref().map(|path| {
-                                                workspace_frame::background_image_layer(
-                                                    path,
-                                                    bg_image_opacity,
-                                                    cx,
-                                                )
-                                            }))
-                                            .child(view.clone().cached(
+                                        .when(!backdrop, |this| this.bg(rgb(ui_theme::bg_stage())))
+                                        .children(background_image.as_deref().map(|path| {
+                                            workspace_frame::background_image_layer(
+                                                path,
+                                                bg_image_opacity,
+                                                cx,
+                                            )
+                                        }))
+                                        .child(
+                                            view.clone().cached(
                                                 gpui::StyleRefinement::default().size_full(),
-                                            ))
-                                            .into_any_element()
-                                    }
-                                },
-                            ),
-                        )
-                    } else if self.spaces.is_empty() {
-                        stage_empty_state(
-                            gpui_kit_assets::IconName::Server,
-                            "添加远程机器",
-                            "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
-                            Some(
-                                Button::new("empty-add-runtime")
-                                    .commit()
-                                    .label("添加远程机器")
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.open_settings_section(
-                                            crate::settings::SettingsSection::Remote,
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                        )
-                    } else {
-                        // 舞台上没有会话时的通用空态，不分为什么空、也不催下一步：
-                        // 开对话、开项目的入口都在侧栏。
-                        stage_empty_state(
-                            gpui_kit_assets::IconName::Coffee,
-                            "休息一下",
-                            "没有打开的会话",
-                            None,
-                        )
-                    };
+                                            ),
+                                        )
+                                        .into_any_element()
+                                }
+                            },
+                        ),
+                    )
+                } else if self.spaces.is_empty() {
+                    stage_empty_state(
+                        gpui_kit_assets::IconName::Server,
+                        "添加远程机器",
+                        "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
+                        Some(
+                            Button::new("empty-add-runtime")
+                                .commit()
+                                .label("添加远程机器")
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.open_settings_section(
+                                        crate::settings::SettingsSection::Remote,
+                                        cx,
+                                    );
+                                })),
+                        ),
+                    )
+                } else {
+                    // 舞台上没有会话时的通用空态，不分为什么空、也不催下一步：
+                    // 开对话、开项目的入口都在侧栏。
+                    stage_empty_state(
+                        gpui_kit_assets::IconName::Coffee,
+                        "休息一下",
+                        "没有打开的会话",
+                        None,
+                    )
+                };
                 content.into_any_element()
             }
         };
@@ -864,7 +930,7 @@ fn stage_empty_state(
 #[cfg(test)]
 mod tests {
     use super::Builtin;
-    use smelt_client::layout::{self, Component};
+    use smelt_client::layout::Component;
 
     /// 布局格式认的每个内置组件，外壳都有面板画它，名字和布局文件里的一致。
     #[test]
@@ -895,19 +961,6 @@ mod tests {
         ] {
             assert_eq!(builtin.zoomable(), zoomable, "{}", builtin.name());
             assert_eq!(builtin.draws_own_top_bar(), !zoomable, "{}", builtin.name());
-        }
-    }
-
-    /// 仓库里自带的示例布局都要合法。
-    #[test]
-    fn repo_layouts_are_valid() {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../layouts");
-        let entries = layout::discover(&[dir]);
-        assert!(!entries.is_empty());
-        for entry in entries {
-            if let Err(error) = entry.layout {
-                panic!("{}：{error}", entry.path.display());
-            }
         }
     }
 }

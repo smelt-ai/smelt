@@ -740,6 +740,31 @@ fn config_selection_is_pending(pending: &[(String, String)], config_id: &str) ->
     pending.iter().any(|(id, _)| id == config_id)
 }
 
+/// 配置项 `config_id` 现在显示的那一档：(值 id, 显示名)。用户刚选、agent 还没确认的
+/// 按刚选的算，和输入栏的 `overlay_session_configs` 一致。没有这一项，或当前值不在选项里
+/// 时为 None。
+fn displayed_config_choice(
+    configs: &[SessionConfigState],
+    pending: &[(String, String)],
+    config_id: &str,
+) -> Option<(String, String)> {
+    let config = configs
+        .iter()
+        .find(|config| config.config_id == config_id)?;
+    let chosen = pending
+        .iter()
+        .find(|(id, _)| id == config_id)
+        .and_then(|(_, value)| config.options.iter().find(|(option, _)| option == value));
+    chosen
+        .or_else(|| {
+            config
+                .options
+                .iter()
+                .find(|(_, name)| name == &config.current_name)
+        })
+        .cloned()
+}
+
 fn overlay_session_configs(
     configs: &[SessionConfigState],
     pending: &[(String, String)],
@@ -1220,8 +1245,19 @@ fn restorable_gui_prompt(
     prompt.filter(|text| !text.trim().is_empty())
 }
 
+/// 见 `AcpView::summary`：(当前模型的值和名字, 用户刚选还没确认的配置, 上下文用量, 推理强度)。
+type SummaryInputs = (
+    Option<(String, String)>,
+    Vec<(String, String)>,
+    Option<(u64, u64)>,
+    Option<(String, String)>,
+);
+
 pub enum AcpViewEvent {
     Changed,
+    /// 模型、推理强度、上下文用量至少一项变了，但这次快照不用落盘（一轮中途常见）。
+    /// 侧栏和插件看的是这几项，上层据此重发会话摘要。
+    SummaryChanged,
     /// 用户在输入栏配置菜单中显式选择了一项。上层据此按 agent 维度持久化；
     /// 自动恢复、controller 注入等内部配置不会发这个事件，避免污染交互默认值。
     ConfigSelected {
@@ -4359,6 +4395,7 @@ impl AcpView {
             self.last_snapshot_revision = snap.snapshot_revision;
         }
 
+        let summary_before = self.summary();
         let mut should_persist = snap.should_persist;
         if let Some(tool_debug) = snap.tool_debug.take() {
             self.tool_debug = tool_debug;
@@ -4689,7 +4726,10 @@ impl AcpView {
         }
 
         if should_persist || self.history_session_id != previous_history_session_id {
+            // 上层处理 Changed 时也会重发会话摘要，不用再发 SummaryChanged。
             cx.emit(AcpViewEvent::Changed);
+        } else if self.summary() != summary_before {
+            cx.emit(AcpViewEvent::SummaryChanged);
         }
         if self.has_active_turn() {
             self.ensure_running_tick(cx);
@@ -5067,6 +5107,28 @@ impl AcpView {
     /// 上下文用量：(已用 token, 窗口大小)。None = agent 没上报过。
     pub fn context_usage(&self) -> Option<(u64, u64)> {
         self.usage
+    }
+
+    /// 推理强度：(档位 id, 显示名)，比如 `("high", "高")`。哪个配置项算推理强度按 agent
+    /// 定（Claude 的 `effort`、Codex 的 `reasoning_effort`、Pi 的 `thought_level`）；用户刚选、
+    /// agent 还没确认的按刚选的算，和输入栏显示的一致。None = 这家 agent 没有这一项，
+    /// 或还没上报。
+    pub fn effort(&self) -> Option<(String, String)> {
+        let key = self.agent.task_params().thinking_key?;
+        displayed_config_choice(&self.config_options, &self.pending_config_values, key)
+    }
+
+    /// 侧栏和插件看的那几项（模型、推理强度、上下文用量）的输入，`apply_snapshot` 前后各取
+    /// 一次比较。每个流式增量都要比，所以只取当前值和用户刚选的那几项，不克隆整张模型列表。
+    fn summary(&self) -> SummaryInputs {
+        (
+            self.model
+                .as_ref()
+                .map(|model| (model.current_value.clone(), model.current_name.clone())),
+            self.pending_config_values.clone(),
+            self.usage,
+            self.effort(),
+        )
     }
 
     /// 最近一条整条滚出视口顶的用户提问，压成一行（舞台标题胶囊吸顶用）。

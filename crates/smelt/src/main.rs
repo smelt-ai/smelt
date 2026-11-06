@@ -259,6 +259,14 @@ pub struct ActivateSession {
     pub index: usize,
 }
 
+/// 插件在 `smelt.json` 里声明的命令，插件给它声明的快捷键绑的就是这个动作。交给那个插件。
+#[derive(Clone, PartialEq, Debug, gpui::Action)]
+#[action(namespace = smelt, no_json)]
+pub struct RunPluginCommand {
+    pub plugin: String,
+    pub command: String,
+}
+
 /// 命令面板里的一个可执行动作。
 #[derive(Clone)]
 enum Cmd {
@@ -271,6 +279,11 @@ enum Cmd {
     /// 切到布局目录里的这套布局（布局 id）。
     SwitchLayout(String),
     RestoreDefaultLayout,
+    /// 插件声明的命令：交给那个插件。
+    Plugin {
+        plugin: String,
+        command: String,
+    },
 }
 
 /// 按本地日历把 unix 秒归入「今天 / 昨天 / 本周 / 更早」。
@@ -3396,6 +3409,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CyclePaneNext, window, cx| {
                 this.cycle_pane(1, window, cx);
             }))
+            // 插件命令的快捷键。插件重新加载过、命令已经不在了就什么也不做。
+            .on_action(|action: &RunPluginCommand, _, _| {
+                plugins::invoke(&action.plugin, &action.command);
+            })
             // Cmd+1~9：按侧栏视觉顺序（各项目分组依次铺平）跳到第 N 个会话。
             .on_action(cx.listener(|this, action: &ActivateSession, window, cx| {
                 let visible = this.sidebar_session_order(cx);

@@ -100,6 +100,7 @@ impl Workspace {
                     machine: machine_info(runtime.key(), cx),
                     model: acp.and_then(|view| view.model_name()),
                     context: acp.and_then(|view| view.context_usage()),
+                    effort: acp.and_then(|view| view.effort()),
                     updated_at: session.effective_updated_at(cx),
                     turn_started_at: session.turn_started_at(cx),
                 })
@@ -147,6 +148,16 @@ impl Workspace {
                 };
                 let cwd = (!root.is_empty()).then_some(root);
                 crate::session_list::launch_new_session(self, runtime, cwd, target, window, cx);
+            }
+            WorkspaceRequest::OpenSettings(Some(section)) => {
+                self.open_settings_section(section, cx);
+            }
+            WorkspaceRequest::OpenSettings(None) => self.open_settings(cx),
+            // 按当前焦点派发，和按键一样：焦点不在文件里时 save_file 就什么也不做。
+            WorkspaceRequest::Run(id) => {
+                if let Some(shortcut) = crate::keymap::shortcut(id) {
+                    window.dispatch_action(shortcut.action(), cx);
+                }
             }
         }
     }

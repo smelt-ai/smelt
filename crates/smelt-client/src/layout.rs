@@ -229,6 +229,16 @@ pub struct DockSpec {
     pub size: Option<f32>,
     pub open: bool,
     pub node: Node,
+    pub background: Option<Background>,
+}
+
+/// 一块区域的背景图：铺满区域、多出来的裁掉，压在区域里的面板底下。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Background {
+    /// 读布局文件时已经换成绝对路径（相对的是包的根目录，见 [`read_layout`]）。
+    pub image: PathBuf,
+    /// 图的不透明度，0 到 1；底下是区域原来的底色。
+    pub opacity: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +255,7 @@ pub struct Layout {
     pub description: Option<String>,
     pub copied_from: Option<String>,
     pub center: Node,
+    pub center_background: Option<Background>,
     pub left: Option<DockSpec>,
     pub right: Option<DockSpec>,
     pub bottom: Option<DockSpec>,
@@ -263,12 +274,14 @@ impl Layout {
             size: Some(size),
             open: true,
             node: tabs(components),
+            background: None,
         };
         let mut layout = Self {
             name: "默认".into(),
             description: Some("左边会话列表，中间舞台，右边文件、变更、历史和插件面板".into()),
             copied_from: None,
             center: tabs(vec![Component::Stage]),
+            center_background: None,
             left: Some(dock(240., vec![Component::Sessions])),
             right: Some(dock(
                 320.,
@@ -340,6 +353,29 @@ impl Layout {
         }
     }
 
+    /// 这块区域布局里写的背景。
+    pub fn background(&self, region: Region) -> Option<&Background> {
+        match region {
+            Region::Center => self.center_background.as_ref(),
+            _ => self.dock(region)?.background.as_ref(),
+        }
+    }
+
+    fn backgrounds_mut(&mut self) -> impl Iterator<Item = &mut Background> {
+        [
+            self.center_background.as_mut(),
+            self.left.as_mut().and_then(|dock| dock.background.as_mut()),
+            self.right
+                .as_mut()
+                .and_then(|dock| dock.background.as_mut()),
+            self.bottom
+                .as_mut()
+                .and_then(|dock| dock.background.as_mut()),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
     fn regions(&self) -> impl Iterator<Item = (Region, &Node)> {
         [
             self.left.as_ref().map(|dock| (Region::Left, &dock.node)),
@@ -396,6 +432,16 @@ struct WireNode {
     size: Option<f32>,
     #[serde(default)]
     open: Option<bool>,
+    #[serde(default)]
+    background: Option<WireBackground>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireBackground {
+    image: String,
+    #[serde(default)]
+    opacity: Option<f32>,
 }
 
 /// 标签的对象写法。
@@ -438,14 +484,19 @@ impl WireLayout {
         if self.name.trim().is_empty() {
             return Err("name 不能为空".into());
         }
-        let center = self.center.into_node("center", Place::CenterRoot)?.0;
+        let (center, _, center_background) = self.center.into_node("center", Place::CenterRoot)?;
         let dock = |node: Option<WireNode>, path: &str| -> Result<Option<DockSpec>, String> {
             let Some(node) = node else {
                 return Ok(None);
             };
             let open = node.open.unwrap_or(true);
-            let (node, size) = node.into_node(path, Place::DockRoot)?;
-            Ok(Some(DockSpec { size, open, node }))
+            let (node, size, background) = node.into_node(path, Place::DockRoot)?;
+            Ok(Some(DockSpec {
+                size,
+                open,
+                node,
+                background,
+            }))
         };
         let layout = Layout {
             name: self.name,
@@ -453,6 +504,7 @@ impl WireLayout {
             copied_from: self.copied_from,
             left: dock(self.left, "left")?,
             center,
+            center_background,
             right: dock(self.right, "right")?,
             bottom: dock(self.bottom, "bottom")?,
             digest,
@@ -486,11 +538,25 @@ impl WireLayout {
 }
 
 impl WireNode {
-    fn into_node(self, path: &str, place: Place) -> Result<(Node, Option<f32>), String> {
+    /// 返回节点、沿拆分方向的大小、区域背景（只有区域的根节点能写）。
+    fn into_node(
+        self,
+        path: &str,
+        place: Place,
+    ) -> Result<(Node, Option<f32>, Option<Background>), String> {
         let at = |message: String| format!("{path}: {message}");
         if self.open.is_some() && place != Place::DockRoot {
             return Err(at("`open` 只能写在停靠区（left / right / bottom）上".into()));
         }
+        let background = match self.background {
+            Some(_) if place == Place::SplitChild => {
+                return Err(at(
+                    "`background` 只能写在区域上（center / left / right / bottom），拆分里的一块不能单独写".into(),
+                ));
+            }
+            Some(wire) => Some(wire.into_background().map_err(at)?),
+            None => None,
+        };
         let size = match self.size {
             Some(_) if place == Place::CenterRoot => {
                 return Err(at("center 占满剩下的地方，不能写 `size`".into()));
@@ -511,7 +577,11 @@ impl WireNode {
                 let children = children
                     .into_iter()
                     .enumerate()
-                    .map(|(ix, child)| child.into_node(&format!("{path}/{ix}"), Place::SplitChild))
+                    .map(|(ix, child)| {
+                        child
+                            .into_node(&format!("{path}/{ix}"), Place::SplitChild)
+                            .map(|(node, size, _)| (node, size))
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 Node::Split {
                     axis: match axis {
@@ -552,7 +622,25 @@ impl WireNode {
                 ));
             }
         };
-        Ok((node, size))
+        Ok((node, size, background))
+    }
+}
+
+impl WireBackground {
+    fn into_background(self) -> Result<Background, String> {
+        if self.image.trim().is_empty() {
+            return Err("`background.image` 不能为空".into());
+        }
+        let opacity = self.opacity.unwrap_or(1.);
+        if !(0. ..=1.).contains(&opacity) {
+            return Err(format!(
+                "`background.opacity` 要在 0 到 1 之间，现在是 {opacity}"
+            ));
+        }
+        Ok(Background {
+            image: PathBuf::from(self.image),
+            opacity,
+        })
     }
 }
 
@@ -703,46 +791,66 @@ pub struct LayoutEntry {
     pub layout: Result<Layout, String>,
 }
 
-/// 按顺序读这些目录里的 `*.json`。同一个 id 前面的目录赢，和插件一致。
-/// 结果按 id 排序。目录不存在就跳过。
-pub fn discover(dirs: &[PathBuf]) -> Vec<LayoutEntry> {
-    let mut entries: Vec<LayoutEntry> = Vec::new();
-    for dir in dirs {
-        let Ok(read) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        let mut paths: Vec<PathBuf> = read
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "json") && path.is_file())
-            .collect();
-        paths.sort();
-        for path in paths {
-            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if entries.iter().any(|entry| entry.id == id) {
-                continue;
-            }
+/// 读这个目录里的 `*.json`，结果按 id 排序。目录不存在就是没有布局。
+/// 背景图的相对路径相对这个目录。
+pub fn discover(dir: &Path) -> Vec<LayoutEntry> {
+    discover_in(dir, dir)
+}
+
+/// `assets` 是背景图相对路径的起点。
+fn discover_in(dir: &Path, assets: &Path) -> Vec<LayoutEntry> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<LayoutEntry> = read
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json") && path.is_file())
+        .filter_map(|path| {
+            let id = path.file_stem()?.to_str()?.to_string();
             let layout = if id == DEFAULT_ID {
                 Err(format!("`{DEFAULT_ID}` 留给内置的默认布局，换个文件名"))
             } else {
-                read_layout(&path)
+                read_layout(&path, assets)
             };
-            entries.push(LayoutEntry {
-                id: id.to_string(),
-                path,
-                layout,
-            });
-        }
-    }
+            Some(LayoutEntry { id, path, layout })
+        })
+        .collect();
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     entries
 }
 
-pub fn read_layout(path: &Path) -> Result<Layout, String> {
+/// 插件带的布局：插件目录下 `layouts/` 里的 `*.json`。id 是 `<插件 id>/<文件名>`，
+/// 和用户布局（id 就是文件名，不会带 `/`）、别的插件的布局都撞不上。
+/// 背景图的相对路径相对插件目录，和插件脚本里 `image()` 的路径一样。
+pub fn discover_plugin(plugin: &str, plugin_root: &Path) -> Vec<LayoutEntry> {
+    discover_in(&plugin_root.join(LAYOUT_DIR), plugin_root)
+        .into_iter()
+        .map(|entry| LayoutEntry {
+            id: format!("{plugin}/{}", entry.id),
+            ..entry
+        })
+        .collect()
+}
+
+/// 插件带的布局属于哪个插件；用户布局是 None。
+pub fn layout_plugin(id: &str) -> Option<&str> {
+    id.split_once('/').map(|(plugin, _)| plugin)
+}
+
+/// 读一个布局文件，把背景图的相对路径换成 `assets` 下的绝对路径。图不在就是布局有错：
+/// 写错路径当场报出来，不等换上以后才发现底是空的。
+pub fn read_layout(path: &Path, assets: &Path) -> Result<Layout, String> {
     let text = std::fs::read_to_string(path).map_err(|error| format!("读不了：{error}"))?;
-    Layout::parse(&text)
+    let mut layout = Layout::parse(&text)?;
+    for background in layout.backgrounds_mut() {
+        let image = assets.join(&background.image);
+        if !image.is_file() {
+            return Err(format!("背景图 `{}` 不存在", image.display()));
+        }
+        background.image = image;
+    }
+    Ok(layout)
 }
 
 #[cfg(test)]
@@ -780,6 +888,7 @@ mod tests {
                     tabs: vec![Tab::new(Component::Sessions)],
                     active: 0,
                 },
+                background: None,
             })
         );
         assert!(!layout.right.as_ref().unwrap().open);
@@ -1113,26 +1222,113 @@ mod tests {
     }
 
     #[test]
-    fn discover_prefers_earlier_dirs_and_refuses_default() {
+    fn discover_lists_json_sorted_and_refuses_default() {
         let root = std::env::temp_dir().join(format!("smelt-layouts-{}", std::process::id()));
-        let first = root.join("first");
-        let second = root.join("second");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         let ok = r#"{"format":1,"name":"A","center":{"tabs":["smelt.stage"]}}"#;
-        let other = r#"{"format":1,"name":"B","center":{"tabs":["smelt.stage"]}}"#;
-        std::fs::write(first.join("a.json"), ok).unwrap();
-        std::fs::write(second.join("a.json"), other).unwrap();
-        std::fs::write(second.join("default.json"), ok).unwrap();
-        std::fs::write(second.join("broken.json"), "{").unwrap();
-        std::fs::write(second.join("notes.txt"), "x").unwrap();
+        std::fs::write(root.join("a.json"), ok).unwrap();
+        // 按文件名排 `a-b.json` 在 `a.json` 前面；按 id 排 `a` 在前。
+        std::fs::write(root.join("a-b.json"), ok).unwrap();
+        std::fs::write(root.join("default.json"), ok).unwrap();
+        std::fs::write(root.join("broken.json"), "{").unwrap();
+        std::fs::write(root.join("notes.txt"), "x").unwrap();
 
-        let entries = discover(&[first, second, root.join("missing")]);
+        let entries = discover(&root);
         let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, ["a", "broken", "default"]);
+        assert_eq!(ids, ["a", "a-b", "broken", "default"]);
         assert_eq!(entries[0].layout.as_ref().unwrap().name, "A");
-        assert!(entries[1].layout.is_err());
-        assert!(entries[2].layout.as_ref().unwrap_err().contains("留给内置"));
+        assert!(entries[2].layout.is_err());
+        assert!(entries[3].layout.as_ref().unwrap_err().contains("留给内置"));
+        assert!(discover(&root.join("missing")).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugin_layouts_are_named_after_their_plugin() {
+        let root =
+            std::env::temp_dir().join(format!("smelt-plugin-layouts-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(LAYOUT_DIR)).unwrap();
+        let ok = r#"{"format":1,"name":"旅人","center":{"tabs":["smelt.stage"]}}"#;
+        std::fs::write(root.join(LAYOUT_DIR).join("traveler.json"), ok).unwrap();
+
+        let entries = discover_plugin("com.wawa.traveler", &root);
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, ["com.wawa.traveler/traveler"]);
+        assert_eq!(layout_plugin(&entries[0].id), Some("com.wawa.traveler"));
+        assert_eq!(layout_plugin("my-layout"), None);
+        // 插件没带布局就是没有。
+        assert!(discover_plugin("x", &root.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backgrounds_sit_on_regions() {
+        let layout = parse(
+            r#"{
+              "format": 1, "name": "地图",
+              "left":   { "tabs": ["smelt.sessions"], "background": { "image": "assets/night.svg", "opacity": 0.3 } },
+              "center": { "tabs": ["smelt.stage"], "background": { "image": "assets/map.png" } }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            layout.background(Region::Left),
+            Some(&Background {
+                image: PathBuf::from("assets/night.svg"),
+                opacity: 0.3,
+            })
+        );
+        // 没写不透明度就是原样画。
+        assert_eq!(layout.background(Region::Center).unwrap().opacity, 1.);
+        assert_eq!(layout.background(Region::Right), None);
+        assert_eq!(Layout::default_layout().background(Region::Center), None);
+    }
+
+    #[test]
+    fn backgrounds_are_checked() {
+        let with = |center: &str| {
+            parse(&format!(r#"{{"format":1,"name":"x","center":{center}}}"#)).unwrap_err()
+        };
+        let in_split = with(
+            r#"{"split":"row","children":[{"tabs":["smelt.stage"],"background":{"image":"a.png"}}]}"#,
+        );
+        assert!(in_split.contains("center/0") && in_split.contains("只能写在区域上"));
+        let opacity =
+            with(r#"{"tabs":["smelt.stage"],"background":{"image":"a.png","opacity":1.5}}"#);
+        assert!(opacity.contains("0 到 1"));
+        let empty = with(r#"{"tabs":["smelt.stage"],"background":{"image":" "}}"#);
+        assert!(empty.contains("不能为空"));
+        let unknown =
+            with(r#"{"tabs":["smelt.stage"],"background":{"image":"a.png","fit":"contain"}}"#);
+        assert!(unknown.contains("fit"));
+    }
+
+    /// 插件布局的背景图相对插件目录；图不在，布局就是有错的。
+    #[test]
+    fn plugin_backgrounds_resolve_against_the_plugin_root() {
+        let root = tempfile::tempdir().unwrap();
+        let layouts = root.path().join(LAYOUT_DIR);
+        std::fs::create_dir_all(&layouts).unwrap();
+        std::fs::create_dir_all(root.path().join("assets")).unwrap();
+        std::fs::write(root.path().join("assets/map.svg"), "<svg/>").unwrap();
+        let with = |image: &str| {
+            format!(
+                r#"{{"format":1,"name":"x","center":{{"tabs":["smelt.stage"],"background":{{"image":"{image}"}}}}}}"#
+            )
+        };
+        std::fs::write(layouts.join("found.json"), with("assets/map.svg")).unwrap();
+        std::fs::write(layouts.join("lost.json"), with("assets/gone.png")).unwrap();
+
+        let entries = discover_plugin("p", root.path());
+        let found = entries[0].layout.as_ref().unwrap();
+        assert_eq!(
+            found.background(Region::Center).unwrap().image,
+            root.path().join("assets/map.svg")
+        );
+        let lost = entries[1].layout.as_ref().unwrap_err();
+        assert!(
+            lost.contains("gone.png") && lost.contains("不存在"),
+            "{lost}"
+        );
     }
 }

@@ -6,8 +6,13 @@
 //! 动态的按键串都用 `Keystroke::parse_with_os` 解析：gpui 的 `Keystroke::parse` 只收静态串。
 //!
 //! 改键不能把整张键表清空重来：gpui-shell 插件第一次用到时才往键表里加自己的键，清掉就
-//! 回不来了。smelt 自己的键都打上 [`APP_KEYMAP`] 标记，改键时只把这一段原地换掉，前后别人
-//! 的键和先后顺序都不动。
+//! 回不来了。smelt 自己的键都打上 [`APP_KEYMAP`] 标记，插件在 `smelt.json` 里给命令声明的
+//! 键打上 [`PLUGIN_KEYMAP`]，改键、重新加载插件时只把这一段原地换掉，前后别人的键和先后
+//! 顺序都不动。
+//!
+//! 插件命令的键和用户录的键守同样的规矩（见 [`check_plugin_key`]），撞上已有的键就不装，
+//! 原因记到插件注册表上，设置的插件页列出来。先到先得：smelt 自己的键、组件的键在前，
+//! 插件之间按加载顺序。
 //!
 //! 新的工作区组合键绑在 `Workspace` 或更具体、但仍浅于 Terminal / Input 的 context 上。
 //! `None` 与最内层同深度，后注册会抢走输入框的键，这里不再新增。
@@ -28,6 +33,8 @@ use super::*;
 /// smelt 自己注册的键都带这个标记，改键时据此认出要换掉的那一段。
 /// 值只在 `NoAction` 判优先级时有用，和不带标记的键一样按用户键位算。
 const APP_KEYMAP: KeyBindingMetaIndex = KeyBindingMetaIndex(0);
+/// 插件命令的键带这个标记，和 smelt 自己的键一起重装。
+const PLUGIN_KEYMAP: KeyBindingMetaIndex = KeyBindingMetaIndex(1);
 
 /// 动作名 → 用户改的按键。`None` 是用户清掉了，不绑任何键。
 pub(crate) type Overrides = BTreeMap<String, Option<String>>;
@@ -37,6 +44,17 @@ pub(crate) enum ShortcutGroup {
     Global,
     Session,
     Edit,
+}
+
+impl ShortcutGroup {
+    /// 快捷键设置页上这一组的标题，插件的 `commands()` 也用它分组。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Global => "全局",
+            Self::Session => "会话与面板",
+            Self::Edit => "编辑与导航",
+        }
+    }
 }
 
 /// 一条能改的快捷键。
@@ -409,34 +427,174 @@ pub(crate) fn shortcut(id: &str) -> Option<&'static Shortcut> {
     SHORTCUTS.iter().find(|shortcut| shortcut.id == id)
 }
 
-/// 把键表里 smelt 那一段换成按当前覆盖算出来的，再重设菜单。
-fn install(cx: &mut App) {
-    let app = app_key_bindings(&cx.global::<KeymapState>().overrides, cx);
-    let rebuilt = {
-        let keymap = cx.key_bindings();
-        let keymap = keymap.borrow();
-        splice_app_bindings(keymap.bindings().cloned().collect(), app)
-    };
+/// 把键表里 smelt 那一段换成按当前覆盖和已挂载插件算出来的，再重设菜单。改键、插件重新
+/// 加载以后调。插件命令的键装成什么样告诉插件注册表。
+pub(crate) fn install(cx: &mut App) {
+    let os = cx.platform_info().os;
+    let overrides = cx.global::<KeymapState>().overrides.clone();
+    let app = app_key_bindings(&overrides, cx);
+    let existing: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
+
+    let commands = crate::plugins::commands();
+    let fixed: Vec<&KeyBinding> = existing
+        .iter()
+        .filter(|binding| !is_ours(binding))
+        .chain(&app)
+        .collect();
+    let (planned, mut problems) = plan_plugin_keys(&commands, &overrides, &fixed, os);
+    let workspace: std::rc::Rc<KeyBindingContextPredicate> =
+        KeyBindingContextPredicate::parse("Workspace")
+            .expect("Workspace 是合法的 context")
+            .into();
+    let mut plugin = Vec::new();
+    let mut bound = Vec::new();
+    for (index, keystroke) in planned {
+        let entry = &commands[index];
+        let spec = keystroke.unparse(os);
+        let action = Box::new(RunPluginCommand {
+            plugin: entry.plugin.clone(),
+            command: entry.command.name.clone(),
+        });
+        match KeyBinding::load(&spec, action, Some(workspace.clone()), false, None, cx) {
+            Ok(binding) => {
+                plugin.push(binding.with_meta(PLUGIN_KEYMAP));
+                bound.push((entry.plugin.clone(), entry.command.name.clone(), spec));
+            }
+            Err(error) => problems.push((
+                entry.plugin.clone(),
+                format!(
+                    "命令「{}」的快捷键 {spec} 没装上：{error}",
+                    entry.command.title
+                ),
+            )),
+        }
+    }
+    crate::plugins::set_keys(crate::plugins::PluginKeys { bound, problems });
+
+    // 插件的在前：同深度后加的先匹配，真撞上了（检查漏掉的）也是 smelt 的赢。
+    plugin.extend(app);
+    let rebuilt = splice_app_bindings(existing, plugin);
     cx.clear_key_bindings();
     cx.bind_keys(rebuilt);
     cx.set_menus(app_menus());
 }
 
-/// smelt 那一段换成 `app`，放在原来第一条 smelt 键的位置；原来没有就接在最后。
-fn splice_app_bindings(existing: Vec<KeyBinding>, app: Vec<KeyBinding>) -> Vec<KeyBinding> {
-    let at = existing
-        .iter()
-        .position(is_app_binding)
-        .unwrap_or(existing.len());
-    let mut others = existing.into_iter().filter(|binding| !is_app_binding(binding));
+/// smelt 那一段（自己的键和插件命令的键）换成 `ours`，放在原来这一段第一条的位置；
+/// 原来没有就接在最后。
+fn splice_app_bindings(existing: Vec<KeyBinding>, ours: Vec<KeyBinding>) -> Vec<KeyBinding> {
+    let at = existing.iter().position(is_ours).unwrap_or(existing.len());
+    let mut others = existing.into_iter().filter(|binding| !is_ours(binding));
     let mut rebuilt: Vec<KeyBinding> = others.by_ref().take(at).collect();
-    rebuilt.extend(app);
+    rebuilt.extend(ours);
     rebuilt.extend(others);
     rebuilt
 }
 
 fn is_app_binding(binding: &KeyBinding) -> bool {
     binding.meta() == Some(APP_KEYMAP)
+}
+
+fn is_ours(binding: &KeyBinding) -> bool {
+    matches!(binding.meta(), Some(APP_KEYMAP | PLUGIN_KEYMAP))
+}
+
+/// 插件命令里哪些键装得上：(命令在 `commands` 里的下标, 按键)，以及装不上的
+/// (插件 id, 原因)。`fixed` 是插件以外已经在的键（组件的、smelt 自己的）。
+fn plan_plugin_keys(
+    commands: &[crate::plugins::PluginCommand],
+    overrides: &Overrides,
+    fixed: &[&KeyBinding],
+    os: OperatingSystem,
+) -> (Vec<(usize, Keystroke)>, Vec<(String, String)>) {
+    let mut planned: Vec<(usize, Keystroke)> = Vec::new();
+    let mut problems = Vec::new();
+    for (index, entry) in commands.iter().enumerate() {
+        let Some(spec) = entry.command.key.as_deref() else {
+            continue;
+        };
+        let earlier = planned.iter().find_map(|(earlier, keystroke)| {
+            same_key(spec, keystroke, os).then(|| &commands[*earlier])
+        });
+        let checked = match earlier {
+            Some(earlier) => Err(format!(
+                "插件「{}」的「{}」先用了",
+                earlier.plugin_name, earlier.command.title
+            )),
+            None => check_plugin_key(spec, overrides, fixed, os),
+        };
+        match checked {
+            Ok(keystroke) => planned.push((index, keystroke)),
+            Err(reason) => problems.push((
+                entry.plugin.clone(),
+                format!(
+                    "命令「{}」的快捷键 {spec} 没装上：{reason}",
+                    entry.command.title
+                ),
+            )),
+        }
+    }
+    (planned, problems)
+}
+
+/// 插件声明的一个键能不能装：只收一个按键；和用户录键一样要带 ⌘（或者是 F 键）、不能是
+/// 保留键；不能撞上 smelt 的快捷键（按用户当前的键位算）和别的改不了的键。
+fn check_plugin_key(
+    spec: &str,
+    overrides: &Overrides,
+    fixed: &[&KeyBinding],
+    os: OperatingSystem,
+) -> Result<Keystroke, String> {
+    if spec.split_whitespace().nth(1).is_some() {
+        return Err("只支持一个按键，不支持连按".to_string());
+    }
+    let keystroke = Keystroke::parse_with_os(spec.trim(), os)
+        .map_err(|_| "写法不对，要写成 cmd-shift-j 这样".to_string())?;
+    let keystroke = Keystroke {
+        modifiers: keystroke.modifiers,
+        key: keystroke.key,
+        key_char: None,
+    };
+    if !keystroke.modifiers.platform && !is_function_key(&keystroke.key) {
+        return Err("要带 ⌘：⌃ 和 ⌥ 组合留给终端和输入框".to_string());
+    }
+    if let Some((_, what)) = RESERVED_KEYS
+        .iter()
+        .find(|(reserved, _)| same_key(reserved, &keystroke, os))
+    {
+        return Err(format!("留给{what}"));
+    }
+    if let Some(shortcut) = SHORTCUTS.iter().find(|shortcut| {
+        shortcut
+            .keystroke(overrides)
+            .is_some_and(|key| same_key(key, &keystroke, os))
+    }) {
+        return Err(format!("smelt 的「{}」正用着", shortcut.label));
+    }
+    if let Some(binding) = fixed
+        .iter()
+        .find(|binding| !is_rebindable(binding) && binds(binding, &keystroke))
+    {
+        return Err(format!(
+            "已被别的功能占用（{}）",
+            describe_action(binding.action())
+        ));
+    }
+    Ok(keystroke)
+}
+
+/// 这条键绑的就是这一个按键，而且绑了实际动作（`NoAction` 是解绑，不算占用）。
+fn binds(binding: &KeyBinding, keystroke: &Keystroke) -> bool {
+    !binding.action().as_any().is::<NoAction>()
+        && matches!(binding.keystrokes(), [only] if only.inner().modifiers == keystroke.modifiers
+            && only.inner().key == keystroke.key)
+}
+
+/// 告诉用户一个键被谁占着。插件命令说是哪个插件的哪条，别的只有动作名。
+fn describe_action(action: &dyn Action) -> String {
+    match action.as_any().downcast_ref::<RunPluginCommand>() {
+        Some(command) => format!("插件命令 {}/{}", command.plugin, command.command),
+        None => action.name().to_string(),
+    }
 }
 
 /// 改几条快捷键：`Some(按键)` 换成这个键，`None` 清掉不绑。先一起写库，写成了才换上；
@@ -637,17 +795,14 @@ fn recorded<'a>(
             keystroke: keystroke.unparse(os),
         };
     }
-    let taken = keymap.into_iter().find(|binding| {
-        !is_rebindable(binding)
-            && !binding.action().as_any().is::<NoAction>()
-            && matches!(binding.keystrokes(), [only] if only.inner().modifiers == keystroke.modifiers
-                && only.inner().key == keystroke.key)
-    });
+    let taken = keymap
+        .into_iter()
+        .find(|binding| !is_rebindable(binding) && binds(binding, &keystroke));
     if let Some(binding) = taken {
         return Recorded::Rejected(format!(
             "{} 已被别的功能占用（{}）",
             display(&keystroke),
-            binding.action().name()
+            describe_action(binding.action())
         ));
     }
     if shortcut(id).is_some_and(|shortcut| same_key(shortcut.default, &keystroke, os)) {

@@ -194,6 +194,7 @@ fn plugin_item(
     if let Some(error) = &plugin.error {
         detail.push(format!("加载失败：{error}"));
     }
+    detail.extend(plugin.notes.iter().cloned());
 
     SettingItem::new(
         plugin.name.clone(),

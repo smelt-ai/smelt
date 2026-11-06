@@ -24,10 +24,11 @@ fn trash_dir() -> Option<PathBuf> {
     smelt_paths::smelt_home().map(|home| home.join("trash").join(PLUGIN_DIR))
 }
 
-/// 把 `source` 目录里的插件复制进用户插件目录。返回插件名。
-pub(crate) fn import(source: &Path) -> Result<String, String> {
+/// 把 `source` 目录里的插件复制进用户插件目录。返回 (插件 id, 插件名)。
+pub(crate) fn import(source: &Path) -> Result<(String, String), String> {
     let plugins = user_plugin_dir().ok_or("找不到 smelt 数据目录")?;
-    import_into(source, &plugins).map(|manifest| manifest.name().to_string())
+    import_into(source, &plugins)
+        .map(|manifest| (manifest.id().to_string(), manifest.name().to_string()))
 }
 
 /// 把用户插件目录里的 `root` 挪进回收目录。

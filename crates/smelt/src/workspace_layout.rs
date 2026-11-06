@@ -12,7 +12,6 @@
 //! 布局里的 `plugin:*` 展开成没被单独摆出来的那些插件面板。
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
@@ -27,8 +26,8 @@ use gpui_component::dock::{
 };
 use gpui_shell::dock::ScriptPanel;
 use smelt_client::layout::{
-    self, Axis, Component, DockState, DockStates, Layout, LayoutEntry, LayoutState, Node,
-    PluginPanelRef, Region, SplitState, Tab,
+    self, Axis, Background, Component, DockState, DockStates, Layout, LayoutEntry, LayoutState,
+    Node, PluginPanelRef, Region, SplitState, Tab,
 };
 use smelt_client_store::LayoutStateRecord;
 
@@ -43,6 +42,12 @@ const SIDE_DOCKS: [(DockPlacement, Region); 3] = [
     (DockPlacement::Right, Region::Right),
     (DockPlacement::Bottom, Region::Bottom),
 ];
+
+/// 舞台所在区域有没有布局背景。终端是舞台里另一个 Dock 的面板，看不到外层布局，
+/// 装布局时把这一位放进全局，终端据此不铺自己的实底。
+pub(crate) struct StageBackdrop(pub(crate) bool);
+
+impl gpui::Global for StageBackdrop {}
 
 /// 当前装着的布局，和它摆出来的面板。
 pub(crate) struct ShellLayout {
@@ -62,6 +67,19 @@ impl ShellLayout {
 
     pub(crate) fn panel_id(&self, component: &Component, cx: &App) -> Option<PanelId> {
         self.panels.get(component).map(|panel| panel.panel_id(cx))
+    }
+
+    /// 这个组件所在区域布局里写的背景。没单独摆的插件面板在 `plugin:*` 那块区域。
+    /// 有背景时，面板不铺自己的实底，让区域底下的图透出来（图由标签组铺，见 `workspace_shell`）。
+    pub(crate) fn backdrop_of(&self, component: &Component) -> Option<&Background> {
+        let region = self
+            .layout
+            .region_of(component)
+            .or_else(|| match component {
+                Component::Plugin(_) => self.layout.region_of(&Component::OtherPlugins),
+                _ => None,
+            })?;
+        self.layout.background(region)
     }
 
     /// 从 Dock 现在的样子取出要存的状态。
@@ -163,7 +181,7 @@ pub(crate) fn install_initial(
     cx: &mut App,
 ) -> InitialShell {
     let area = crate::workspace_shell::new_area(workspace.clone(), window, cx);
-    let catalog = layout::discover(&layout_dirs());
+    let catalog = discover_layouts();
     let (id, layout) = match chosen {
         None => (layout::DEFAULT_ID.to_string(), Layout::default_layout()),
         Some(id) => match catalog.iter().find(|entry| entry.id == id) {
@@ -267,12 +285,16 @@ fn install(
         // 锁住只禁拖动和放下，开合与拖宽照常。
         area.set_locked(true, window, cx);
     });
-    ShellLayout {
+    let shell = ShellLayout {
         id,
         layout,
         panels,
         plugins,
-    }
+    };
+    cx.set_global(StageBackdrop(
+        shell.backdrop_of(&Component::Stage).is_some(),
+    ));
+    shell
 }
 
 /// 搭一套布局时手里的东西：上一套留下、可以复用的面板，存过的状态，和建新面板要用的窗口、Dock。
@@ -464,39 +486,20 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// 布局目录，和插件一样的来源和先后：用户的、App 自带的、debug 构建读仓库里的。
-fn layout_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(user) = layout::user_layout_dir() {
-        dirs.push(user);
-    }
-    if let Some(bundled) = bundled_layout_dir() {
-        dirs.push(bundled);
-    }
-    #[cfg(debug_assertions)]
-    dirs.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(layout::LAYOUT_DIR),
-    );
-    dirs
-}
-
-fn bundled_layout_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    if macos.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
-        return None;
-    }
-    let dir = contents.join("Resources").join(layout::LAYOUT_DIR);
-    dir.is_dir().then_some(dir)
+/// 全部布局：用户布局目录里的，再加上已挂载插件带的。读文件，只在启动、打开命令面板这类
+/// 事件里调，不在 render 里。App 不带布局：默认布局写在代码里。
+fn discover_layouts() -> Vec<LayoutEntry> {
+    let mut entries = layout::user_layout_dir()
+        .map(|dir| layout::discover(&dir))
+        .unwrap_or_default();
+    entries.extend(crate::plugins::layouts());
+    entries
 }
 
 impl Workspace {
     /// 重读布局目录。读文件，只在打开命令面板、切换这类事件里调，不在 render 里。
     pub(crate) fn reload_layout_catalog(&mut self) {
-        self.layout_catalog = layout::discover(&layout_dirs());
+        self.layout_catalog = discover_layouts();
     }
 
     /// 命令面板里和布局有关的条目。只读缓存的目录。
@@ -567,6 +570,9 @@ impl Workspace {
         self.layout_choice =
             (self.shell_layout.id != layout::DEFAULT_ID).then(|| self.shell_layout.id.clone());
         self.save_state(cx);
+        // 背景跟着布局换：复用的面板（插件面板、舞台里的终端）各自缓存着内容，
+        // 只通知工作台不会重画它们，整窗刷新一次。
+        window.refresh();
         cx.notify();
     }
 
@@ -624,9 +630,69 @@ impl Workspace {
         });
     }
 
-    /// 插件重新加载（`plugins::mount_all`）之后调：插件面板换成新脚本建的。
+    /// 插件重新加载（`plugins::mount_all`）之后调。`imported` 是刚导入的插件：它带了布局就
+    /// 直接换上（多套时用按 id 排第一的），装上就生效，不用再去命令面板里找。
+    ///
+    /// 没有要换的时候：当前布局是插件带的而插件已经删了，回到默认布局；当前布局文件改过，
+    /// 按新文件重装（插件作者改完点「重新加载」就能看到）；否则只把插件面板换成新脚本建的。
+    pub(crate) fn plugins_reloaded(
+        &mut self,
+        imported: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_layout_catalog();
+        let brought = imported.and_then(|plugin| {
+            self.layout_catalog
+                .iter()
+                .find(|entry| layout::layout_plugin(&entry.id) == Some(plugin))
+                .cloned()
+        });
+        if let Some(LayoutEntry { id, path, layout }) = brought {
+            match layout {
+                Ok(layout) => {
+                    let name = layout.name.clone();
+                    self.apply_layout(id, layout, window, cx);
+                    crate::status_item::notify_success(format!(
+                        "已换上布局「{name}」。要换回去，在命令面板里选「恢复默认布局」或别的布局"
+                    ));
+                }
+                Err(error) => crate::status_item::notify_error(format!(
+                    "插件带的布局没有加载（{}）：{error}",
+                    path.display()
+                )),
+            }
+            return;
+        }
+
+        let current = self.shell_layout.id.clone();
+        let entry = self
+            .layout_catalog
+            .iter()
+            .find(|entry| entry.id == current)
+            .cloned();
+        match entry {
+            None if layout::layout_plugin(&current).is_some() => {
+                let name = self.shell_layout.layout.name.clone();
+                self.restore_default_layout(window, cx);
+                crate::status_item::notify_success(format!(
+                    "布局「{name}」所属的插件不在了，换回了默认布局"
+                ));
+            }
+            Some(LayoutEntry {
+                id,
+                layout: Ok(layout),
+                ..
+            }) if layout.digest != self.shell_layout.layout.digest => {
+                self.apply_layout(id, layout, window, cx);
+            }
+            _ => self.rebuild_plugin_panels(window, cx),
+        }
+    }
+
+    /// 插件重新加载之后、布局不用换时调：插件面板换成新脚本建的。
     /// 插件增删会改变 `plugin:*` 展开出来的面板，那就整套重装；否则 Dock 不用重搭。
-    pub(crate) fn rebuild_plugin_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn rebuild_plugin_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let area = self.shell_dock.clone();
         let panels = std::mem::take(&mut self.shell_layout.panels);
         let plugins = std::mem::take(&mut self.shell_layout.plugins);
@@ -827,6 +893,15 @@ impl PluginPanel {
     }
 
     fn content(&self, cx: &App) -> AnyElement {
+        // 所在区域布局里写了背景就不铺底，让图透出来。
+        let backdrop = self.workspace.upgrade().is_some_and(|workspace| {
+            let component = Component::Plugin(self.target.clone());
+            workspace
+                .read(cx)
+                .shell_layout
+                .backdrop_of(&component)
+                .is_some()
+        });
         match &self.inner {
             // 底色由宿主铺，和文件树等内置面板一样是实底的舞台色：主题原色可能带透明度，
             // 插件自己铺会透出窗口后面的东西。插件只画内容，不画页面底。
@@ -834,7 +909,7 @@ impl PluginPanel {
                 .flex_1()
                 .min_h_0()
                 .size_full()
-                .bg(rgb(ui_theme::bg_stage()))
+                .when(!backdrop, |this| this.bg(rgb(ui_theme::bg_stage())))
                 .child(inner.view())
                 .into_any_element(),
             Err(reason) => {

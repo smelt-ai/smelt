@@ -61,7 +61,8 @@ impl Workspace {
                 .spawn(async move { crate::plugins::import(&source) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_panel_plugin_change(result.map(|name| format!("已导入「{name}」")), cx)
+                let result = result.map(|(id, name)| (format!("已导入「{name}」"), Some(id)));
+                this.finish_panel_plugin_change(result, cx)
             });
         })
         .detach();
@@ -101,7 +102,12 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_panel_plugin_change(
-                    result.map(|()| format!("已删除「{}」，原文件在回收目录里", plugin.name)),
+                    result.map(|()| {
+                        (
+                            format!("已删除「{}」，原文件在回收目录里", plugin.name),
+                            None,
+                        )
+                    }),
                     cx,
                 )
             });
@@ -123,17 +129,23 @@ impl Workspace {
     }
 
     /// 重新读盘、重新挂载全部插件。插件作者改完脚本点它，不用重启。
+    pub(crate) fn reload_panel_plugins(&mut self, cx: &mut Context<Self>) {
+        self.remount_panel_plugins(None, cx);
+    }
+
+    /// 重新挂载全部插件，再让布局跟上（见 `Workspace::plugins_reloaded`）。`imported` 是刚导入
+    /// 的插件，它带了布局就换上。
     ///
     /// 挂载要用工作台窗口，而这里多半是从设置窗口的按钮进来的，正占着 `Workspace`：
     /// 推到这一轮更新结束后再进工作台窗口，免得重入。
-    pub(crate) fn reload_panel_plugins(&mut self, cx: &mut Context<Self>) {
+    fn remount_panel_plugins(&mut self, imported: Option<String>, cx: &mut Context<Self>) {
         let handle = self.window_handle;
         let view = cx.weak_entity();
         cx.defer(move |cx| {
             let _ = cx.update_window(handle, |_root, window, cx| {
                 crate::plugins::mount_all(window, cx);
                 let _ = view.update(cx, |workspace, cx| {
-                    workspace.rebuild_plugin_panels(window, cx);
+                    workspace.plugins_reloaded(imported.as_deref(), window, cx);
                 });
             });
         });
@@ -150,16 +162,17 @@ impl Workspace {
         true
     }
 
+    /// `result` 成功时是 (提示, 刚导入的插件 id)。
     fn finish_panel_plugin_change(
         &mut self,
-        result: Result<String, String>,
+        result: Result<(String, Option<String>), String>,
         cx: &mut Context<Self>,
     ) {
         self.panel_plugins.busy = false;
         match result {
-            Ok(message) => {
+            Ok((message, imported)) => {
                 crate::status_item::notify_success(message);
-                self.reload_panel_plugins(cx);
+                self.remount_panel_plugins(imported, cx);
             }
             Err(error) => self.panel_plugins.error = Some(error),
         }

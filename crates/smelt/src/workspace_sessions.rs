@@ -934,6 +934,8 @@ impl Workspace {
                     // 这里立刻通知。
                     this.notify_if_session_facts_changed(cx);
                 }
+                // 一轮中途只换了模型、推理强度或上下文用量：不落盘，只让插件看到新值。
+                acp_view::AcpViewEvent::SummaryChanged => this.publish_to_plugins(cx),
                 acp_view::AcpViewEvent::ConfigSelected {
                     config_id,
                     value_id,

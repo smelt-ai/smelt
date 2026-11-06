@@ -15,6 +15,7 @@ use super::{
     composer_should_nest_models, composer_usage_breakdown, config_rejection_is_new,
     config_selection_is_pending, consecutive_compact_tool_run, consume_composer_restore,
     conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
+    displayed_config_choice,
     diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
     entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
     format_attached_paths, is_active_permission_selection, is_fresh_conversation_start,
@@ -310,6 +311,40 @@ fn pending_config_selection_shows_immediately_and_keeps_latest() {
     assert_eq!(model.current_value, "fast");
     assert_eq!(model.current_name, "Fast");
     assert_eq!(composer_model_label(Some(&model), "Grok"), "Fast");
+}
+
+/// 插件看的推理强度：按 agent 的键找到那一项，给出档位 id 和显示名；刚选的先算上。
+#[test]
+fn displayed_config_choice_follows_pending_selection() {
+    let effort = SessionConfigState {
+        config_id: "effort".into(),
+        name: "推理".into(),
+        description: None,
+        current_name: "中".into(),
+        options: vec![
+            ("low".into(), "低".into()),
+            ("medium".into(), "中".into()),
+            ("high".into(), "高".into()),
+        ],
+        boolean: None,
+    };
+    let configs = [mode_config("agent"), effort];
+    assert_eq!(
+        displayed_config_choice(&configs, &[], "effort"),
+        Some(("medium".into(), "中".into()))
+    );
+
+    let mut pending = Vec::new();
+    apply_pending_config_selection(&mut pending, "effort".into(), "high".into(), Some("medium"));
+    assert_eq!(
+        displayed_config_choice(&configs, &pending, "effort"),
+        Some(("high".into(), "高".into()))
+    );
+
+    assert_eq!(
+        displayed_config_choice(&configs, &pending, "reasoning_effort"),
+        None
+    );
 }
 
 #[test]

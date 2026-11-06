@@ -1,11 +1,15 @@
 //! `smelt-workspace`：smelt 注册给全部插件的工作台 HostModule。
 //!
 //! 插件读得到主目录、工作台当前项目、机器和项目、侧栏里的智能体会话，能等它们变化，
-//! 能请宿主弹系统的目录选择框、跳到或关掉某个会话、切项目。
+//! 能请宿主弹系统的目录选择框、跳到或关掉某个会话、切项目、打开设置，能执行 smelt 的
+//! 命令和别的插件的命令，能收到发给自己的命令。
 //!
 //! 宿主不能回调脚本（gpui-shell 的宿主函数不许重入引擎），所以「订阅」做成一个异步
 //! 函数：`changed(topic, since)` 在这个主题的 generation 不等于 `since` 时兑现。插件在
-//! 循环里 await 它，有变化才醒，空闲时没有任何定时器。
+//! 循环里 await 它，有变化才醒，空闲时没有任何定时器。命令也一样：`next_command()`
+//! 在有命令发给这个插件时兑现。
+//!
+//! 模块每个插件各建一份（见 `plugins::plugin_policy`），命令队列是这个插件自己的。
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -21,6 +25,7 @@ use tokio::sync::oneshot;
 
 use super::WorkspaceRequest;
 use super::host_fs::path_value;
+use crate::settings::SettingsSection;
 
 /// 宿主上下文：插件读得到的工作台状态。由工作台写入（纯内存），插件经
 /// `smelt-workspace.context()` / `sessions()` 读取，经 `changed()` 等变化。
@@ -36,6 +41,8 @@ pub(super) struct HostContext {
     pub(super) machines: Vec<MachineEntry>,
     /// 每次 `machines`（含其中的项目）有任何一项变化加一。
     pub(super) machines_generation: u64,
+    /// 每次重装快捷键（改键、插件重新加载）加一：`commands()` 给的列表或键可能变了。
+    pub(super) commands_generation: u64,
     /// 正在 `changed()` 里等着的插件。
     waiters: Vec<Waiter>,
 }
@@ -56,6 +63,8 @@ pub(super) enum Topic {
     Sessions,
     /// 机器和各机器上的项目，对应 `machines()`。
     Machines,
+    /// 能执行的命令和它们绑的键，对应 `commands()`。
+    Commands,
 }
 
 impl Topic {
@@ -64,6 +73,7 @@ impl Topic {
             "context" => Some(Self::Context),
             "sessions" => Some(Self::Sessions),
             "machines" => Some(Self::Machines),
+            "commands" => Some(Self::Commands),
             _ => None,
         }
     }
@@ -80,6 +90,7 @@ impl HostContext {
             Topic::Context => self.generation,
             Topic::Sessions => self.sessions_generation,
             Topic::Machines => self.machines_generation,
+            Topic::Commands => self.commands_generation,
         }
     }
 
@@ -107,6 +118,58 @@ impl HostContext {
             self.waiters.push(Waiter { topic, reply });
         }
         receiver
+    }
+}
+
+/// 发给一个插件、还没被它取走的命令。
+///
+/// 插件没在等的时候命令先排着，等它下一次 `next_command()` 再给；排太多（插件不取）
+/// 就丢最早的，命令是用户按出来的，过时的不值得留。
+#[derive(Default)]
+pub(crate) struct CommandQueue {
+    pending: std::collections::VecDeque<String>,
+    waiter: Option<oneshot::Sender<String>>,
+}
+
+/// 插件不取时最多替它排几条。
+const COMMAND_QUEUE_LIMIT: usize = 16;
+
+impl CommandQueue {
+    /// 发一条命令：插件正等着就直接给它，否则排队。
+    pub(super) fn push(&mut self, command: String) {
+        let command = match self.waiter.take() {
+            Some(waiter) => match waiter.send(command) {
+                Ok(()) => return,
+                // 等的那个视图已经卸载了。
+                Err(command) => command,
+            },
+            None => command,
+        };
+        if self.pending.len() == COMMAND_QUEUE_LIMIT {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(command);
+    }
+
+    /// 取下一条命令。排着的立刻给；没有就等。同一个插件只能有一处在等：两处都等，
+    /// 命令该给谁说不清。
+    fn next(&mut self) -> Result<oneshot::Receiver<String>, HostError> {
+        let (reply, receiver) = oneshot::channel();
+        if let Some(command) = self.pending.pop_front() {
+            let _ = reply.send(command);
+            return Ok(receiver);
+        }
+        if self
+            .waiter
+            .as_ref()
+            .is_some_and(|waiter| !waiter.is_closed())
+        {
+            return Err(HostError::new(
+                "已经有一处在等 next_command()：一个插件只在一个地方取命令",
+            ));
+        }
+        self.waiter = Some(reply);
+        Ok(receiver)
     }
 }
 
@@ -163,6 +226,8 @@ pub(crate) struct SessionInfo {
     pub(crate) model: Option<String>,
     /// 上下文用量：(已用 token, 窗口大小)。只有对话有，而且要 agent 上报过。
     pub(crate) context: Option<(u64, u64)>,
+    /// 推理强度：(档位 id, 显示名)。只有对话有，而且要这家 agent 有这一项、上报过。
+    pub(crate) effort: Option<(String, String)>,
     /// 最近一次活动（unix 秒）。
     pub(crate) updated_at: u64,
     /// 这一轮从什么时候开始（unix 秒）；没在一轮里是 0。
@@ -195,6 +260,8 @@ export interface Machine {
   online: boolean;
 }
 export interface ContextUsage { used: number; size: number }
+/** value 是这家 agent 自己的档位 id（比如 "high"），各家的档位不一样；name 是显示名。 */
+export interface Effort { value: string; name: string }
 export interface AgentSession {
   /** 稳定的会话 id，交给 open_session。 */
   id: string;
@@ -214,6 +281,8 @@ export interface AgentSession {
   model: string | null;
   /** 上下文用量（token）。只有对话有，而且要 agent 上报过。 */
   context: ContextUsage | null;
+  /** 推理强度。只有对话有，而且要这家 agent 有这一项（Claude、Codex、Pi）并上报过；终端会话总是 null。 */
+  effort: Effort | null;
   /** 最近一次活动，unix 秒。 */
   updated_at: number;
   /** 这一轮从什么时候开始，unix 秒；没在一轮里是 0。 */
@@ -240,7 +309,7 @@ export interface Sessions { sessions: AgentSession[]; generation: number }
 /** 工作台侧栏里的全部会话，按侧栏顺序。只读内存。generation 在任何一项变化时加一。 */
 export function sessions(): Sessions;
 /** context：当前项目；sessions：会话列表和各会话的状态；machines：机器和项目。 */
-export type Topic = "context" | "sessions" | "machines";
+export type Topic = "context" | "sessions" | "machines" | "commands";
 /**
  * 等这个主题变化：它的 generation 不等于 since 时兑现，给出新的 generation。
  * since 传 -1 立刻拿到当前值。在循环里 await 它代替定时检查，空闲时不会醒：
@@ -280,10 +349,55 @@ export function new_session_options(machine: string): Promise<NewSessionOptions>
  * 选项已经不在了（设置里删了）时什么也不做。
  */
 export function new_session(machine: string, root: string, key: string): null;
+/** 设置窗口的页。加机器在 remote。 */
+export type SettingsPage =
+  | "appearance" | "notifications" | "shortcuts" | "panel-plugins"
+  | "agents" | "remote" | "resources" | "maintenance" | "about";
+/**
+ * 打开设置窗口。不给 page 和按 ⌘, 一样：已经开着就只提到前面，新开时停在有事要处理的那一页。
+ * 给了 page 就切到那一页。
+ */
+export function open_settings(page?: SettingsPage): null;
+export interface Command {
+  /**
+   * 交给 run 的 id。smelt 自己的命令是快捷键设置里那些（比如 "toggle_sidebar"、
+   * "split_beside"）；插件的是 "<插件 id>/<命令名>"。
+   */
+  id: string;
+  title: string;
+  /**
+   * 分组名，现成能显示的：smelt 自己的命令按快捷键设置页分（「全局」「会话与面板」
+   * 「编辑与导航」），插件的命令是插件名。
+   */
+  group: string;
+  /** 眼下绑的键，gpui 写法（比如 "cmd-shift-j"）；没绑是 null。 */
+  key: string | null;
+}
+/**
+ * 能执行的命令：先 smelt 自己的，再各插件声明的。只读内存。改键、插件重新加载后会变，
+ * 用 changed("commands", since) 等。
+ */
+export function commands(): Command[];
+/**
+ * 执行一条命令。smelt 自己的命令和按它的快捷键一样，按当前焦点派发：比如 save_file
+ * 只在焦点在文件里时有用。插件的命令交给那个插件。没有这条命令时报错。
+ */
+export function run(id: string): null;
+/**
+ * 等下一条发给这个插件的命令（smelt.json 里声明的，用户从命令面板或快捷键发出），
+ * 兑现成命令名。插件没在等时命令先排着。一个插件只在一处等，通常是根视图的 init：
+ *
+ *   for (;;) { const name = await next_command(); if (name === "jump") this.jump(); }
+ */
+export function next_command(): Promise<string>;
 "#;
 
 /// 在访达里打开用官方的 `cx.open_path`，不在这里重复提供。
-pub(super) fn workspace_module(home: PathBuf, context: Rc<RefCell<HostContext>>) -> HostModule {
+pub(super) fn workspace_module(
+    home: PathBuf,
+    context: Rc<RefCell<HostContext>>,
+    commands: Rc<RefCell<CommandQueue>>,
+) -> HostModule {
     let sessions = context.clone();
     let machines = context.clone();
     let waits = context.clone();
@@ -346,6 +460,19 @@ pub(super) fn workspace_module(home: PathBuf, context: Rc<RefCell<HostContext>>)
                 WorkspaceRequest::NewSession { machine, root, key },
             )
         })
+        .function("open_settings", |arguments| {
+            let section = match arguments.get(0).filter(|value| !value.is_null()) {
+                Some(_) => {
+                    let page = arguments.string(0)?;
+                    Some(
+                        SettingsSection::from_key(page)
+                            .ok_or_else(|| HostError::new(format!("没有这一页设置：{page}")))?,
+                    )
+                }
+                None => None,
+            };
+            send("open_settings", WorkspaceRequest::OpenSettings(section))
+        })
         .async_function("pick_directory", |arguments| {
             let prompt = match arguments.get(0).filter(|value| !value.is_null()) {
                 Some(_) => Some(arguments.string(0)?.to_owned()),
@@ -353,6 +480,57 @@ pub(super) fn workspace_module(home: PathBuf, context: Rc<RefCell<HostContext>>)
             };
             pick_directory(prompt)
         })
+        .function("commands", |_| {
+            gpui_shell::with_current_app(|cx| commands_value(cx))
+                .ok_or_else(|| HostError::new("commands 只能在事件或任务里调用"))
+        })
+        .function("run", |arguments| {
+            let id = arguments.string(0)?;
+            if let Some(shortcut) = crate::keymap::shortcut(id) {
+                return send("run", WorkspaceRequest::Run(shortcut.id));
+            }
+            // 命令名不带 `/`，最后一个 `/` 前面就是插件 id。
+            let invoked = id
+                .rsplit_once('/')
+                .is_some_and(|(plugin, command)| super::invoke(plugin, command));
+            if invoked {
+                Ok(HostValue::Null)
+            } else {
+                Err(HostError::new(format!("没有这个命令：{id}")))
+            }
+        })
+        .async_function("next_command", move |_| {
+            let receiver = commands.borrow_mut().next()?;
+            Ok(async move {
+                receiver
+                    .await
+                    .map(HostValue::from)
+                    .map_err(|_| HostError::new("宿主已经关闭"))
+            })
+        })
+}
+
+/// smelt 自己能改键的那些在前，插件声明的在后。键是眼下真绑着的。
+fn commands_value(cx: &gpui::App) -> HostValue {
+    let overrides = cx.global::<crate::keymap::KeymapState>().overrides();
+    let builtin = crate::keymap::SHORTCUTS.iter().map(|shortcut| {
+        HostObject::new()
+            .field("id", shortcut.id)
+            .field("title", shortcut.label)
+            .field("group", shortcut.group.label())
+            .field("key", shortcut.keystroke(overrides).map(str::to_owned))
+            .into()
+    });
+    let plugins = super::commands().into_iter().map(|entry| {
+        let key = super::bound_key(&entry.plugin, &entry.command.name);
+        HostObject::new()
+            .field("id", format!("{}/{}", entry.plugin, entry.command.name))
+            .field("title", entry.command.title)
+            .field("group", entry.plugin_name)
+            .field("key", key)
+            .into()
+    });
+    HostValue::from(builtin.chain(plugins).collect::<Vec<HostValue>>())
 }
 
 /// 把操作交给工作台。工作台在这一轮更新结束后才做，所以插件这里拿不到结果。
@@ -405,6 +583,14 @@ fn sessions_value(context: &HostContext) -> HostValue {
                     "context",
                     session.context.map(|(used, size)| {
                         HostObject::new().field("used", used).field("size", size)
+                    }),
+                )
+                .field(
+                    "effort",
+                    session.effort.as_ref().map(|(value, name)| {
+                        HostObject::new()
+                            .field("value", value.clone())
+                            .field("name", name.clone())
                     }),
                 )
                 .field("updated_at", session.updated_at)
@@ -528,7 +714,53 @@ fn pick_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{HostContext, Topic};
+    use super::{COMMAND_QUEUE_LIMIT, CommandQueue, HostContext, Topic};
+
+    #[test]
+    fn commands_reach_a_waiting_plugin_at_once() {
+        let mut queue = CommandQueue::default();
+        let mut receiver = queue.next().unwrap();
+        assert!(receiver.try_recv().is_err());
+        queue.push("jump".to_string());
+        assert_eq!(receiver.try_recv().as_deref(), Ok("jump"));
+        assert!(queue.pending.is_empty());
+    }
+
+    #[test]
+    fn commands_wait_in_order_until_taken() {
+        let mut queue = CommandQueue::default();
+        queue.push("a".to_string());
+        queue.push("b".to_string());
+        assert_eq!(queue.next().unwrap().try_recv().as_deref(), Ok("a"));
+        assert_eq!(queue.next().unwrap().try_recv().as_deref(), Ok("b"));
+    }
+
+    #[test]
+    fn a_plugin_that_never_takes_keeps_only_the_latest_commands() {
+        let mut queue = CommandQueue::default();
+        for index in 0..COMMAND_QUEUE_LIMIT + 3 {
+            queue.push(index.to_string());
+        }
+        assert_eq!(queue.pending.len(), COMMAND_QUEUE_LIMIT);
+        assert_eq!(queue.next().unwrap().try_recv().as_deref(), Ok("3"));
+    }
+
+    #[test]
+    fn only_one_place_may_wait_for_commands() {
+        let mut queue = CommandQueue::default();
+        let _first = queue.next().unwrap();
+        assert!(queue.next().is_err());
+    }
+
+    #[test]
+    fn a_waiter_whose_view_is_gone_neither_blocks_nor_eats_commands() {
+        let mut queue = CommandQueue::default();
+        drop(queue.next().unwrap());
+        queue.push("kept".to_string());
+        assert_eq!(queue.next().unwrap().try_recv().as_deref(), Ok("kept"));
+        drop(queue.next().unwrap());
+        assert!(queue.next().is_ok(), "等的视图没了，换一处等不算两处");
+    }
 
     #[test]
     fn changed_resolves_at_once_when_generation_already_differs() {
@@ -557,6 +789,17 @@ mod tests {
         context.wake(Topic::Context);
         assert_eq!(on_context.try_recv(), Ok(1));
         assert!(context.waiters.is_empty());
+    }
+
+    #[test]
+    fn reinstalling_keys_wakes_whoever_waits_for_commands() {
+        let context = super::super::REGISTRY.with(|registry| registry.borrow().context.clone());
+        let mut on_commands = context.borrow_mut().wait(Topic::Commands, 0.0);
+        let mut on_sessions = context.borrow_mut().wait(Topic::Sessions, 0.0);
+
+        super::super::set_keys(super::super::PluginKeys::default());
+        assert_eq!(on_commands.try_recv(), Ok(1));
+        assert!(on_sessions.try_recv().is_err(), "别的主题不跟着醒");
     }
 
     #[test]

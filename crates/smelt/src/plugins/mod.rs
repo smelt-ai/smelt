@@ -12,17 +12,19 @@
 //! 所以面板清单写在 smelt 自己的 `smelt.json` 里（和 VS Code 的 `contributes.views`
 //! 加代码注册是一个路数）：宿主不跑脚本就知道有哪些面板，声明了没注册的显示原因。
 //!
-//! 每个插件加载前把默认 Policy 的应用名换成插件 id，面板名因此是
-//! `shell:<插件 id>/<面板>`，两个插件都叫 `board` 也不会撞。
-//! 插件当作可信代码，全部共用一份宿主定的权限，和 smelt 自己一样不设限（见
-//! `unrestricted`），smelt 的通用 HostModule（`smelt-fs` 见 `host_fs`，
-//! `smelt-workspace` 见 `host_workspace`）用 `export_module` 注册一次，所有插件都能导入。这就是官方给嵌入宿主的
-//! 写法：宿主先装好默认 Policy 和模块，再 `load_application` / `mount_application`，
-//! 视图带着默认 Policy 出生。插件 manifest 的 `capabilities` 里只认 `network.hosts`：
-//! gpui-shell 的网络授权只能逐个列主机名，各插件声明的主机合起来授给全部插件。
+//! 每个插件挂载前把默认 Policy 换成它自己的一份（见 `plugin_policy`），视图带着它出生：
+//! - 应用名是插件 id，面板名因此是 `shell:<插件 id>/<面板>`，两个插件都叫 `board` 也不会撞；
+//! - smelt 的 HostModule（`smelt-fs` 见 `host_fs`，`smelt-workspace` 见 `host_workspace`）
+//!   按插件各建一份，宿主因此知道是哪个插件在调，命令只发给声明它的插件；
+//! - 权限大家一样：插件当作可信代码，和 smelt 自己一样不设限（见 `unrestricted`）。插件
+//!   manifest 的 `capabilities` 里只认 `network.hosts`：gpui-shell 的网络授权只能逐个列
+//!   主机名，各插件声明的主机合起来授给全部插件。
 //!
-//! 没用上游的 `PluginManager`：它按 manifest 给每个插件新建一份空 Policy，拿不到
-//! 宿主注册的模块。这里只用公开的 `PluginManifest::read` 发现插件。
+//! 插件还可以在 `smelt.json` 里声明命令：命令面板里列出来，可以带默认快捷键（`keymap`
+//! 装键），插件在根视图里循环 `await next_command()` 取。
+//!
+//! 没用上游的 `PluginManager`：它按 manifest 给每个插件新建一份空 Policy，装不上
+//! smelt 的模块。这里只用公开的 `PluginManifest::read` 发现插件。
 //!
 //! 插件从哪来（前面的赢得同名 id，用户装的副本可以盖过自带的）：
 //! 1. `~/.smelt/plugins/`：用户自己装的。设置里的「面板插件」页往这里导入、从这里删除
@@ -50,11 +52,11 @@ use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
 use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
 
+use host_workspace::{CommandQueue, HostContext, Topic};
 pub(crate) use host_workspace::{
     CurrentProject, MachineEntry, MachineInfo, ProjectInfo, SessionInfo,
 };
-use host_workspace::{HostContext, Topic};
-use smelt_client::layout::PluginPanelRef;
+use smelt_client::layout::{LayoutEntry, PluginPanelRef};
 
 pub(crate) use log::install as install_log;
 pub(crate) use manage::{import, uninstall, user_plugin_dir};
@@ -79,6 +81,10 @@ struct Registry {
     generation: u64,
     /// 所有插件共享的宿主上下文，`smelt-workspace.context()` 读它。
     context: Rc<RefCell<HostContext>>,
+    /// 宿主模块要用的主目录和文件接口，运行时第一次建好时定下，每个插件的模块都用这一份。
+    host: Option<HostParts>,
+    /// 插件命令的快捷键装上了哪些、哪些没装上，`keymap` 每次装键后写进来。
+    keys: PluginKeys,
     /// `smelt-workspace` 里的操作（跳到会话、关会话、切项目）交给谁做。工作台创建时装上。
     workspace_handler: Option<WorkspaceHandler>,
 }
@@ -89,6 +95,20 @@ impl Registry {
     }
 }
 
+struct HostParts {
+    home: PathBuf,
+    fs: Rc<host_fs::HostFs>,
+}
+
+/// 插件命令的快捷键这一次装成什么样。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PluginKeys {
+    /// 装上了的：(插件 id, 命令名, 按键)。
+    pub(crate) bound: Vec<(String, String, String)>,
+    /// 没装上的：(插件 id, 给人看的原因)。
+    pub(crate) problems: Vec<(String, String)>,
+}
+
 struct MountedPlugin {
     id: String,
     name: String,
@@ -97,16 +117,37 @@ struct MountedPlugin {
     source: PluginSource,
     /// 根视图。不显示；失败时它的面板都画这个错误：静默消失的插件最难排查。
     view: Result<Entity<ScriptView>, String>,
-    /// `smelt.json` 声明的面板。清单坏了插件照样挂载，只是没有面板。
-    panels: Result<Vec<DeclaredPanel>, String>,
+    /// `smelt.json` 声明的面板和命令。清单坏了插件照样挂载，只是什么也没声明。
+    declared: Result<Declared, String>,
+    /// 发给这个插件的命令，等它经 `next_command()` 取走。
+    commands: Rc<RefCell<CommandQueue>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct DeclaredPanel {
     name: String,
     title: String,
 }
 
-/// `smelt.json`：smelt 要知道、gpui-shell 清单里放不下的东西。现在只有面板清单。
+/// 插件在 `smelt.json` 里声明的一条命令。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeclaredCommand {
+    /// 插件收到的名字：`next_command()` 兑现的就是它。
+    pub(crate) name: String,
+    /// 命令面板里的名字。
+    pub(crate) title: String,
+    /// 默认快捷键，原样留着；能不能绑上由 `keymap` 装键时判断。
+    pub(crate) key: Option<String>,
+}
+
+/// `smelt.json` 里声明的东西。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Declared {
+    panels: Vec<DeclaredPanel>,
+    commands: Vec<DeclaredCommand>,
+}
+
+/// `smelt.json`：smelt 要知道、gpui-shell 清单里放不下的东西：面板和命令。
 const SMELT_MANIFEST_FILE: &str = "smelt.json";
 
 #[derive(serde::Deserialize)]
@@ -114,6 +155,17 @@ const SMELT_MANIFEST_FILE: &str = "smelt.json";
 struct SmeltManifest {
     #[serde(default)]
     panels: Vec<SmeltPanel>,
+    #[serde(default)]
+    commands: Vec<SmeltCommand>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SmeltCommand {
+    name: String,
+    title: String,
+    #[serde(default)]
+    key: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -125,34 +177,49 @@ struct SmeltPanel {
     title: String,
 }
 
-/// 读插件声明的面板：`(name, title)`，按清单里的先后。没有 `smelt.json` 就是没有面板。
-fn declared_panels(root: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+/// 读插件的 `smelt.json`。没有这个文件就是什么也没声明。
+fn read_declared(root: &std::path::Path) -> Result<Declared, String> {
     let path = root.join(SMELT_MANIFEST_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Declared::default());
+        }
         Err(error) => return Err(format!("读不了 {SMELT_MANIFEST_FILE}：{error}")),
     };
     let manifest: SmeltManifest = serde_json::from_str(&text)
         .map_err(|error| format!("{SMELT_MANIFEST_FILE} 不对：{error}"))?;
-    let mut panels: Vec<(String, String)> = Vec::new();
+    let mut declared = Declared::default();
     for SmeltPanel { name, title } in manifest.panels {
-        if name.is_empty() || name.contains('/') {
-            return Err(format!(
-                "{SMELT_MANIFEST_FILE}：面板名 `{name}` 不能为空、不能带 `/`"
-            ));
-        }
-        if title.trim().is_empty() {
-            return Err(format!(
-                "{SMELT_MANIFEST_FILE}：面板 `{name}` 的 `title` 不能为空"
-            ));
-        }
-        if panels.iter().any(|(seen, _)| *seen == name) {
+        check_name("面板", &name, &title)?;
+        if declared.panels.iter().any(|seen| seen.name == name) {
             return Err(format!("{SMELT_MANIFEST_FILE}：面板 `{name}` 写了两次"));
         }
-        panels.push((name, title));
+        declared.panels.push(DeclaredPanel { name, title });
     }
-    Ok(panels)
+    for SmeltCommand { name, title, key } in manifest.commands {
+        check_name("命令", &name, &title)?;
+        if declared.commands.iter().any(|seen| seen.name == name) {
+            return Err(format!("{SMELT_MANIFEST_FILE}：命令 `{name}` 写了两次"));
+        }
+        declared.commands.push(DeclaredCommand { name, title, key });
+    }
+    Ok(declared)
+}
+
+/// 面板名、命令名不能为空、不能带 `/`（`/` 前面是插件 id），标题不能为空。
+fn check_name(what: &str, name: &str, title: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') {
+        return Err(format!(
+            "{SMELT_MANIFEST_FILE}：{what}名 `{name}` 不能为空、不能带 `/`"
+        ));
+    }
+    if title.trim().is_empty() {
+        return Err(format!(
+            "{SMELT_MANIFEST_FILE}：{what} `{name}` 的 `title` 不能为空"
+        ));
+    }
+    Ok(())
 }
 
 /// 插件从哪个目录加载的。
@@ -186,6 +253,8 @@ pub(crate) struct InstalledPlugin {
     pub(crate) source: PluginSource,
     /// 加载失败的原因。
     pub(crate) error: Option<String>,
+    /// 加载成功但有要说一声的：比如命令的快捷键没装上。
+    pub(crate) notes: Vec<String>,
 }
 
 /// 发现并挂载全部插件。读盘、执行脚本，只在事件里调用，不在 render 里。
@@ -206,12 +275,12 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     unmount_all();
 
     let found = discover();
-    // 视图出生时定下权限，所以每次挂载前按这一批插件的声明重新装一遍。
+    // 网络只能逐个列主机，各插件声明的合起来授给全部插件。
     let hosts = found
         .iter()
         .flat_map(|plugin| declared_hosts(&plugin.root))
         .collect::<Vec<_>>();
-    gpui_shell::set_capabilities(unrestricted().network_hosts(hosts));
+    let capabilities = unrestricted().network_hosts(hosts);
 
     let plugins: Vec<MountedPlugin> = found
         .into_iter()
@@ -222,23 +291,21 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                  source,
              }| {
                 let id = manifest.id().to_string();
-                let panels = declared_panels(&root).map(|panels| {
-                    panels
-                        .into_iter()
-                        .map(|(name, title)| DeclaredPanel { name, title })
-                        .collect::<Vec<_>>()
-                });
-                if let Err(error) = &panels {
+                let declared = read_declared(&root);
+                if let Err(error) = &declared {
                     eprintln!("[plugins] {id}：{error}");
                 }
+                let commands = Rc::new(RefCell::new(CommandQueue::default()));
                 // 开关挂在运行时上、加载时读，所以每个插件加载前按它的来源设一次。
                 runtime.set_editor_files(source.editor_files());
-                // 视图带着默认 Policy 出生，面板按 Policy 上的应用名起名：每个插件用自己的 id。
-                policy::update_default(|policy| policy.with_application(&id));
-                let view = runtime
-                    .load_application(&root, manifest.entry())
-                    .and_then(|application| runtime.mount_application(&application, window, cx))
-                    .map_err(|error| format!("{error:#}"));
+                // 视图带着默认 Policy 出生：每个插件挂载前换成它自己的一份。
+                let view = plugin_policy(&id, &capabilities, &commands).and_then(|policy| {
+                    policy::set_default(policy);
+                    runtime
+                        .load_application(&root, manifest.entry())
+                        .and_then(|application| runtime.mount_application(&application, window, cx))
+                        .map_err(|error| format!("{error:#}"))
+                });
                 if let Err(error) = &view {
                     eprintln!("[plugins] {id} 加载失败：{error}");
                 }
@@ -249,19 +316,54 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     root,
                     source,
                     view,
-                    panels,
+                    declared,
+                    commands,
                 }
             },
         )
         .collect();
-    // 插件以外再建的视图不冒用最后一个插件的名字。空名回到 gpui-shell 的默认应用名。
-    policy::update_default(|policy| policy.with_application(""));
+    // 插件以外再建的视图不冒用最后一个插件的身份和模块。
+    policy::set_default(Policy::new());
 
     REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
         registry.plugins = plugins;
         registry.generation += 1;
     });
+    // 插件声明的命令快捷键跟着这一批插件重装。
+    crate::keymap::install(cx);
+}
+
+/// 一个插件自己的 Policy：权限大家一样，应用名和宿主模块各是各的。
+///
+/// 模块按插件各建一份，`smelt-workspace` 才知道是谁在调：`next_command()` 只取发给
+/// 这个插件的命令。gpui-shell 的 Policy 本来就是一个应用一份；面板类注册时记下注册它的
+/// Policy，之后再建的面板照样是这个插件的。
+fn plugin_policy(
+    id: &str,
+    capabilities: &Capabilities,
+    commands: &Rc<RefCell<CommandQueue>>,
+) -> Result<Policy, String> {
+    let (home, fs, context) = REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        let host = registry
+            .host
+            .as_ref()
+            .expect("运行时建好时就备好了宿主模块的材料");
+        (host.home.clone(), host.fs.clone(), registry.context.clone())
+    });
+    Policy::new()
+        .with_application(id)
+        .with_capabilities(capabilities.clone())
+        .with_host_module(host_fs::fs_module(fs))
+        .and_then(|policy| {
+            policy.with_host_module(host_workspace::workspace_module(
+                home,
+                context,
+                commands.clone(),
+            ))
+        })
+        .map_err(|error| error.message().to_string())
 }
 
 /// 卸载全部插件。视图拥有的任务随视图一起取消。
@@ -277,7 +379,6 @@ fn unmount_all() {
 /// 取消任务会 panic，析构里的 panic 直接中止进程。
 pub(crate) fn shutdown() {
     unmount_all();
-    gpui_shell::clear_exported_modules();
     let (runtime, handler) = REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
         (registry.runtime.take(), registry.workspace_handler.take())
@@ -325,9 +426,8 @@ fn discover() -> Vec<Found> {
     found
 }
 
-/// 一个进程一个运行时；重开窗口时复用它。第一次创建时装好全部插件共用的
-/// 默认 Policy 和宿主模块，顺序是先 Policy 后模块：`export_module` 往默认 Policy
-/// 上加，先装的会被后面的 `set_default` 整个换掉。
+/// 一个进程一个运行时；重开窗口时复用它。第一次创建时备好宿主模块要用的主目录和文件接口，
+/// 模块本身在挂载每个插件时按插件建（见 `plugin_policy`）。
 fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
     if let Some(runtime) = REGISTRY.with(|registry| registry.borrow().runtime.clone()) {
         return Ok(runtime);
@@ -343,17 +443,14 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
 
     let home = dirs::home_dir().context("无法定位用户主目录")?;
     let home = std::fs::canonicalize(&home).unwrap_or(home);
-    // 权限在 `mount_all` 里按插件声明装，这里只立一份空的默认 Policy。必须先于
-    // `export_module`：模块挂在默认 Policy 上，后装的 `set_default` 会把它整个换掉。
-    policy::set_default(Policy::new());
-    let context = REGISTRY.with(|registry| registry.borrow().context.clone());
-    let host_error = |error: gpui_shell::HostError| anyhow::anyhow!(error.message().to_string());
-    let fs = Rc::new(host_fs::HostFs);
-    gpui_shell::export_module(host_fs::fs_module(fs)).map_err(host_error)?;
-    gpui_shell::export_module(host_workspace::workspace_module(home, context))
-        .map_err(host_error)?;
-
-    REGISTRY.with(|registry| registry.borrow_mut().runtime = Some(runtime.clone()));
+    REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.host = Some(HostParts {
+            home,
+            fs: Rc::new(host_fs::HostFs),
+        });
+        registry.runtime = Some(runtime.clone());
+    });
     Ok(runtime)
 }
 
@@ -361,8 +458,8 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
 ///
 /// 网络另算：gpui-shell 只认逐个列出的主机名，没有「任意主机」，由调用方补上各插件
 /// 声明的主机（见 `declared_hosts`）。`exit` 不给：
-/// 那是请宿主退出，插件不该能关掉 smelt。`localStorage` 不给：所有插件共用这一份
-/// Policy，存储也就是同一个文件，键会互相覆盖；插件要存东西就自己写文件。
+/// 那是请宿主退出，插件不该能关掉 smelt。`localStorage` 不给：要给得按插件定存储文件
+/// 放在哪，还没做；插件要存东西就自己写文件。
 fn unrestricted() -> Capabilities {
     let roots = filesystem_roots();
     Capabilities::new()
@@ -461,9 +558,10 @@ pub(crate) fn declared() -> Vec<PluginPanelRef> {
             .plugins
             .iter()
             .filter_map(|plugin| {
-                let panels = plugin.panels.as_ref().ok()?;
+                let declared = plugin.declared.as_ref().ok()?;
                 Some(
-                    panels
+                    declared
+                        .panels
                         .iter()
                         .map(|panel| PluginPanelRef::new(plugin.id.clone(), panel.name.clone())),
                 )
@@ -471,6 +569,21 @@ pub(crate) fn declared() -> Vec<PluginPanelRef> {
             .flatten()
             .collect()
     })
+}
+
+/// 已挂载插件带的布局（插件目录下的 `layouts/`），按插件加载顺序。读盘，只在事件里调。
+pub(crate) fn layouts() -> Vec<LayoutEntry> {
+    let roots: Vec<(String, PathBuf)> = with_registry(|registry| {
+        registry
+            .plugins
+            .iter()
+            .map(|plugin| (plugin.id.clone(), plugin.root.clone()))
+            .collect()
+    });
+    roots
+        .iter()
+        .flat_map(|(id, root)| smelt_client::layout::discover_plugin(id, root))
+        .collect()
 }
 
 /// 一个插件面板眼下能不能建，能建的话注册名和标题是什么。看的是挂着哪些插件、它们声明了
@@ -491,8 +604,11 @@ pub(crate) fn panel_target(plugin: &str, panel: &str) -> Result<PanelTarget, Str
         if let Err(error) = &mounted.view {
             return Err(format!("插件「{}」加载失败：{error}", mounted.name));
         }
-        let declared = match &mounted.panels {
-            Ok(panels) => panels.iter().find(|declared| declared.name == panel),
+        let declared = match &mounted.declared {
+            Ok(declared) => declared
+                .panels
+                .iter()
+                .find(|declared| declared.name == panel),
             Err(error) => return Err(format!("插件「{}」的 {error}", mounted.name)),
         };
         let Some(declared) = declared else {
@@ -524,10 +640,91 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
                     .view
                     .as_ref()
                     .err()
-                    .or(plugin.panels.as_ref().err())
+                    .or(plugin.declared.as_ref().err())
                     .cloned(),
+                notes: registry
+                    .keys
+                    .problems
+                    .iter()
+                    .filter(|(id, _)| *id == plugin.id)
+                    .map(|(_, problem)| problem.clone())
+                    .collect(),
             })
             .collect()
+    })
+}
+
+/// 一条插件命令，连同它属于谁。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PluginCommand {
+    pub(crate) plugin: String,
+    pub(crate) plugin_name: String,
+    pub(crate) command: DeclaredCommand,
+}
+
+/// 加载成功的插件声明的命令，按插件加载顺序、再按 `smelt.json` 里的先后。只读内存。
+/// 加载失败的插件不列：没人会来取它的命令。
+pub(crate) fn commands() -> Vec<PluginCommand> {
+    with_registry(|registry| {
+        registry
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.view.is_ok())
+            .filter_map(|plugin| Some((plugin, plugin.declared.as_ref().ok()?)))
+            .flat_map(|(plugin, declared)| {
+                declared.commands.iter().map(|command| PluginCommand {
+                    plugin: plugin.id.clone(),
+                    plugin_name: plugin.name.clone(),
+                    command: command.clone(),
+                })
+            })
+            .collect()
+    })
+}
+
+/// 把命令交给插件：排进它的队列，正在 `next_command()` 里等的立刻醒。插件已经不在了、
+/// 没声明这条命令，返回 false。
+pub(crate) fn invoke(plugin: &str, command: &str) -> bool {
+    let queue = with_registry(|registry| {
+        let mounted = registry.plugin(plugin)?;
+        mounted.view.as_ref().ok()?;
+        let declared = mounted.declared.as_ref().ok()?;
+        declared
+            .commands
+            .iter()
+            .any(|declared| declared.name == command)
+            .then(|| mounted.commands.clone())
+    });
+    match queue {
+        Some(queue) => {
+            queue.borrow_mut().push(command.to_owned());
+            true
+        }
+        None => false,
+    }
+}
+
+/// `keymap` 每次重装键（改键、插件重新加载）以后告诉这里结果：设置页列出没装上的，
+/// `commands()` 给出装上的键。smelt 自己的键也可能刚改过，所以每次都叫醒等 `commands` 的插件。
+pub(crate) fn set_keys(keys: PluginKeys) {
+    REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.keys = keys;
+        let mut context = registry.context.borrow_mut();
+        context.commands_generation += 1;
+        context.wake(Topic::Commands);
+    });
+}
+
+/// 插件命令眼下绑的键。
+pub(crate) fn bound_key(plugin: &str, command: &str) -> Option<String> {
+    with_registry(|registry| {
+        registry
+            .keys
+            .bound
+            .iter()
+            .find(|(id, name, _)| id == plugin && name == command)
+            .map(|(_, _, key)| key.clone())
     })
 }
 
@@ -586,6 +783,10 @@ pub(crate) enum WorkspaceRequest {
         root: String,
         key: String,
     },
+    /// 打开设置窗口。None 和 ⌘, 一样：开着就只提到前面，新开时停在要处理的那一页。
+    OpenSettings(Option<crate::settings::SettingsSection>),
+    /// 执行 smelt 自己的一条命令（`keymap::SHORTCUTS` 的 id），和按它的快捷键一样。
+    Run(&'static str),
 }
 
 /// 插件的操作怎么落到工作台。要用工作台窗口和 `Workspace`，插件模块够不着，由工作台
@@ -604,7 +805,10 @@ fn request(request: WorkspaceRequest, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MANIFEST_FILE, PluginManifest, declared_hosts, declared_panels, repo_plugin_dir};
+    use super::{
+        DeclaredCommand, DeclaredPanel, MANIFEST_FILE, PluginManifest, declared_hosts,
+        read_declared, repo_plugin_dir,
+    };
 
     #[test]
     fn declared_hosts_come_from_the_manifest() {
@@ -646,7 +850,7 @@ mod tests {
                 root.display(),
                 manifest.entry()
             );
-            declared_panels(&root).unwrap_or_else(|error| panic!("{}：{error}", root.display()));
+            read_declared(&root).unwrap_or_else(|error| panic!("{}：{error}", root.display()));
             assert!(
                 ids.insert(manifest.id().to_string()),
                 "插件 id 重复：{}",
@@ -656,60 +860,51 @@ mod tests {
         assert!(!ids.is_empty(), "{} 下没有插件", dir.display());
     }
 
-    /// 仓库里的示例布局摆的插件面板，都要是仓库里某个插件在 `smelt.json` 里声明过的：
-    /// 改了面板名忘了改布局，示例打开就只剩一块说明。
     #[test]
-    fn repo_layouts_name_declared_plugin_panels() {
-        let mut declared = std::collections::BTreeSet::new();
-        for entry in std::fs::read_dir(repo_plugin_dir()).unwrap().flatten() {
-            let root = entry.path();
-            let Ok(manifest) = PluginManifest::read(&root) else {
-                continue;
-            };
-            for (panel, _) in declared_panels(&root).unwrap() {
-                declared.insert((manifest.id().to_string(), panel));
-            }
-        }
-        let layouts = repo_plugin_dir()
-            .join("..")
-            .join(smelt_client::layout::LAYOUT_DIR);
-        for entry in smelt_client::layout::discover(&[layouts]) {
-            let Ok(layout) = entry.layout else {
-                continue;
-            };
-            for target in layout.plugin_panels() {
-                assert!(
-                    declared.contains(&(target.plugin.clone(), target.panel.clone())),
-                    "{} 摆了 plugin:{}/{}，仓库里没有插件声明它",
-                    entry.path.display(),
-                    target.plugin,
-                    target.panel
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn declared_panels_come_from_smelt_json() {
+    fn panels_and_commands_come_from_smelt_json() {
         let dir = std::env::temp_dir().join(format!("smelt-plugin-panels-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(super::SMELT_MANIFEST_FILE);
         assert_eq!(
-            declared_panels(&dir),
-            Ok(Vec::new()),
-            "没有 smelt.json 就是没有面板"
+            read_declared(&dir),
+            Ok(Default::default()),
+            "没有 smelt.json 就是什么也没声明"
         );
 
         std::fs::write(
             &file,
-            r#"{"panels":[{"name":"board","title":"看板"},{"name":"list","title":"列表"}]}"#,
+            r#"{"panels":[{"name":"board","title":"看板"},{"name":"list","title":"列表"}],
+                "commands":[{"name":"jump","title":"跳过去","key":"cmd-shift-j"},
+                            {"name":"refresh","title":"刷新"}]}"#,
         )
         .unwrap();
+        let declared = read_declared(&dir).unwrap();
         assert_eq!(
-            declared_panels(&dir).unwrap(),
+            declared.panels,
             [
-                ("board".to_string(), "看板".to_string()),
-                ("list".to_string(), "列表".to_string())
+                DeclaredPanel {
+                    name: "board".to_string(),
+                    title: "看板".to_string()
+                },
+                DeclaredPanel {
+                    name: "list".to_string(),
+                    title: "列表".to_string()
+                }
+            ]
+        );
+        assert_eq!(
+            declared.commands,
+            [
+                DeclaredCommand {
+                    name: "jump".to_string(),
+                    title: "跳过去".to_string(),
+                    key: Some("cmd-shift-j".to_string())
+                },
+                DeclaredCommand {
+                    name: "refresh".to_string(),
+                    title: "刷新".to_string(),
+                    key: None
+                }
             ]
         );
 
@@ -725,9 +920,21 @@ mod tests {
             ),
             (r#"{"panels":[{"name":"a","title":"x","size":3}]}"#, "size"),
             (r#"{"views":[]}"#, "views"),
+            (
+                r#"{"commands":[{"name":"","title":"x"}]}"#,
+                "命令名 `` 不能为空",
+            ),
+            (
+                r#"{"commands":[{"name":"a","title":"x"},{"name":"a","title":"y"}]}"#,
+                "命令 `a` 写了两次",
+            ),
+            (
+                r#"{"commands":[{"name":"a","title":"x","when":"y"}]}"#,
+                "when",
+            ),
         ] {
             std::fs::write(&file, text).unwrap();
-            let error = declared_panels(&dir).unwrap_err();
+            let error = read_declared(&dir).unwrap_err();
             assert!(error.contains(needle), "「{error}」里没有「{needle}」");
         }
         let _ = std::fs::remove_dir_all(&dir);

@@ -218,15 +218,6 @@ for dir in "$ROOT"/plugins/*/; do
   done
   echo "  … 打包插件：$(basename "$dir")"
 done
-# 布局（见 crates/smelt/src/workspace_layout.rs）：示例布局随 App 分发，GUI 从
-# Contents/Resources/layouts/ 只读加载；用户自己的在 ~/.smelt/layouts/，同名时用户的优先。
-LAYOUTS="$RES/layouts"
-mkdir -p "$LAYOUTS"
-for file in "$ROOT"/layouts/*.json; do
-  [[ -f "$file" ]] || continue
-  cp "$file" "$LAYOUTS/"
-  echo "  … 打包布局：$(basename "$file")"
-done
 
 # 可选：把当前包在 GitHub Release 上的更新包地址写进 App（release.yml 按 tag 拼好传进来），
 # 刚装好的包才不会把自己当成新版本再下一遍。updater 认这个地址优先于用户状态里记的。

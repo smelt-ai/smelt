@@ -32,6 +32,16 @@ impl Workspace {
             ("上一个会话".to_string(), Cmd::PrevTab),
         ];
         commands.extend(self.layout_palette_entries());
+        // 插件声明的命令，名字前带插件名，用户分得清是谁的。
+        commands.extend(crate::plugins::commands().into_iter().map(|entry| {
+            (
+                format!("{}：{}", entry.plugin_name, entry.command.title),
+                Cmd::Plugin {
+                    plugin: entry.plugin,
+                    command: entry.command.name,
+                },
+            )
+        }));
         let sessions = self
             .sessions
             .iter()
@@ -57,6 +67,9 @@ impl Workspace {
             Cmd::SwitchTab(i) => self.activate(i, window, cx),
             Cmd::SwitchLayout(id) => self.switch_layout(&id, window, cx),
             Cmd::RestoreDefaultLayout => self.restore_default_layout(window, cx),
+            Cmd::Plugin { plugin, command } => {
+                crate::plugins::invoke(&plugin, &command);
+            }
         }
     }
 }

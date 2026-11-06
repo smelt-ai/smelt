@@ -3,6 +3,7 @@
 //!
 //! 从 main.rs 拆出的 `impl Workspace` 方法，字段仍在 main.rs。
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::*;
 
@@ -220,6 +221,11 @@ impl Workspace {
         let content_header = content_parts.header;
         let content = content_parts.body;
         let resize_listener = tree_open.then(|| self.file_tree_resize_listener(cx));
+        // 所在区域有布局背景时文件树不铺舞台色，让图透出来。
+        let backdrop = self
+            .shell_layout
+            .backdrop_of(&smelt_client::layout::Component::Files)
+            .is_some();
         let tree_side = tree_open.then(|| {
             div()
                 .h_full()
@@ -234,7 +240,7 @@ impl Workspace {
                         .min_h_0()
                         .overflow_hidden()
                         .flex()
-                        .bg(rgb(ui_theme::bg_stage()))
+                        .when(!backdrop, |this| this.bg(rgb(ui_theme::bg_stage())))
                         .child(div().size_full().min_h_0().flex().flex_col().child(tree)),
                 )
                 .into_any_element()

@@ -51,6 +51,22 @@ impl SettingsSection {
             Self::About => "about".into(),
         }
     }
+
+    /// `element_key` 的反向：插件按这个名字打开某一页。不认识的名字是 None。
+    pub fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "appearance" => Self::Appearance,
+            "notifications" => Self::Notifications,
+            "shortcuts" => Self::Shortcuts,
+            "panel-plugins" => Self::PanelPlugins,
+            "agents" => Self::Agents,
+            "remote" => Self::Remote,
+            "resources" => Self::Resources,
+            "maintenance" => Self::Maintenance,
+            "about" => Self::About,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -511,6 +527,23 @@ mod tests {
                 SettingsSection::About,
             ]
         );
+    }
+
+    /// 插件按 `element_key` 打开设置页：每一页都要能按名字找回来。
+    #[test]
+    fn every_page_round_trips_through_its_key() {
+        for child in settings_nav()
+            .iter()
+            .flat_map(|category| category.children.iter())
+        {
+            let key = child.section.element_key();
+            assert_eq!(
+                SettingsSection::from_key(&key),
+                Some(child.section.clone()),
+                "{key}"
+            );
+        }
+        assert_eq!(SettingsSection::from_key("Remote"), None);
     }
 
     #[test]
