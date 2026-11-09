@@ -1,14 +1,18 @@
 //! smelt 的插件：gpui-shell 脚本应用。
 //!
 //! 插件目录里放 gpui-shell 的 manifest `gpui-shell.json` 和入口脚本，界面由 GPUI 原生
-//! 绘制，脚本跑在 UI 线程的 QuickJS 里。每个插件挂成 Tool Panel 的一个 tab。
+//! 绘制，脚本跑在 UI 线程的 QuickJS 里。插件在 init 里调 `smelt-plugin-api` 的
+//! `register_page` 就是工作台的一页（见 `smelt_plugin_api::js`），否则挂成 Tool Panel
+//! 的一个 tab。
 //!
-//! 插件当作可信代码，全部共用一份宿主定的权限，和 smelt 自己一样不设限（见
-//! `unrestricted`），smelt 的通用 HostModule（`smelt-fs` 见 `host_fs`，
-//! `smelt-workspace` 见 `host_workspace`）用 `export_module` 注册一次，所有插件都能导入。这就是官方给嵌入宿主的
-//! 写法：宿主先装好默认 Policy 和模块，再 `load_application` / `mount_application`，
-//! 视图带着默认 Policy 出生。插件 manifest 的 `capabilities` 里只认 `network.hosts`：
-//! gpui-shell 的网络授权只能逐个列主机名，各插件声明的主机合起来授给全部插件。
+//! 插件当作可信代码，权限全部一样，和 smelt 自己一样不设限（见 `unrestricted`）。
+//! 每个插件一份自己的 Policy（应用名就是插件 id），里面装 smelt 的宿主模块：
+//! `smelt-plugin-api`（见 `smelt_plugin_api::js`，每个插件一份，模块由此知道是谁在调）、
+//! `smelt-fs`（见 `host_fs`）、`smelt-workspace`（见 `host_workspace`）。gpui-shell 按
+//! 调用所在视图的 Policy 分派宿主函数，所以各插件拿到的是自己那份。挂载时把它设成默认
+//! Policy，视图带着它出生（见 `mount_all`）。插件 manifest 的 `capabilities` 里只认
+//! `network.hosts`：gpui-shell 的网络授权只能逐个列主机名，各插件声明的主机合起来授给
+//! 全部插件。
 //!
 //! 没用上游的 `PluginManager`：它按 manifest 给每个插件新建一份空 Policy，拿不到
 //! 宿主注册的模块。这里只用公开的 `PluginManifest::read` 发现插件。
@@ -40,6 +44,7 @@ use gpui_component::ActiveTheme as _;
 use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
 use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
+use smelt_plugin_api::js::JsPlugin;
 
 use host_workspace::HostContext;
 pub(crate) use host_workspace::SessionInfo;
@@ -63,7 +68,7 @@ struct Registry {
     /// 这个进程里见过的插件 id，下标就是 `PluginTabSlot`。只增不删：重新加载、增删
     /// 插件之后，同一个 id 还是同一个槽位，各会话、各项目记着的 tab 不用跟着改。
     ids: Vec<String>,
-    /// 所有插件共享的宿主上下文，`smelt-workspace.context()` 读它。
+    /// 所有插件共享的宿主上下文，`smelt-workspace.sessions()` 读它。
     context: Rc<RefCell<HostContext>>,
     /// `smelt-workspace.open_session` 怎么跳到会话。工作台创建时装上。
     session_opener: Option<Rc<dyn Fn(String, &mut App)>>,
@@ -81,8 +86,17 @@ impl Registry {
         u16::try_from(index).ok().map(PluginTabSlot)
     }
 
+    /// 占着 tab 的插件；登记成页面的不在这里。
     fn panel(&self, slot: PluginTabSlot) -> Option<&PluginPanel> {
-        self.panels.iter().find(|panel| panel.slot == slot)
+        self.panels
+            .iter()
+            .find(|panel| panel.slot == slot && !panel.page)
+    }
+
+    fn panel_by_id(&self, id: &str) -> Option<&PluginPanel> {
+        self.panels
+            .iter()
+            .find(|panel| panel.id == id && !panel.page)
     }
 }
 
@@ -95,6 +109,8 @@ struct PluginPanel {
     source: PluginSource,
     /// 加载失败也占一个 tab，把错误画出来：静默消失的插件最难排查。
     content: Result<Entity<ScriptView>, String>,
+    /// 登记成了工作台的一页，在舞台上画，不占 Tool Panel 的 tab。
+    page: bool,
 }
 
 /// 插件从哪个目录加载的。
@@ -157,7 +173,8 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
         .iter()
         .flat_map(|plugin| declared_hosts(&plugin.root))
         .collect::<Vec<_>>();
-    gpui_shell::set_capabilities(unrestricted().network_hosts(hosts));
+    let capabilities = unrestricted().network_hosts(hosts);
+    let context = REGISTRY.with(|registry| registry.borrow().context.clone());
 
     let panels: Vec<PluginPanel> = found
         .into_iter()
@@ -175,13 +192,20 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                 };
                 // 开关挂在运行时上、加载时读，所以每个插件加载前按它的来源设一次。
                 runtime.set_editor_files(source.editor_files());
-                let content = runtime
-                    .load_application(&root, manifest.entry())
-                    .and_then(|application| runtime.mount_application(&application, window, cx))
+                let plugin = JsPlugin::new();
+                let content = plugin_policy(&id, &capabilities, &plugin, &context)
+                    .and_then(|policy| {
+                        // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
+                        policy::set_default(policy);
+                        let application = runtime.load_application(&root, manifest.entry())?;
+                        runtime.mount_application(&application, window, cx)
+                    })
                     .map_err(|error| format!("{error:#}"));
-                if let Err(error) = &content {
-                    eprintln!("[plugins] {id} 加载失败：{error}");
+                match &content {
+                    Ok(view) => plugin.attach(view, cx),
+                    Err(error) => eprintln!("[plugins] {id} 加载失败：{error}"),
                 }
+                let page = content.is_ok() && plugin.is_page();
                 Some(PluginPanel {
                     slot,
                     title: manifest.name().to_string(),
@@ -190,12 +214,34 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     root,
                     source,
                     content,
+                    page,
                 })
             },
         )
         .collect();
+    // 默认 Policy 不留最后那个插件的：之后再有脚本在视图外跑，什么都不给。
+    policy::set_default(Policy::new());
 
     REGISTRY.with(|registry| registry.borrow_mut().panels = panels);
+}
+
+/// 一个插件自己的 Policy：权限大家一样，宿主模块里的 `smelt-plugin-api` 是它自己的。
+fn plugin_policy(
+    id: &str,
+    capabilities: &Capabilities,
+    plugin: &JsPlugin,
+    context: &Rc<RefCell<HostContext>>,
+) -> anyhow::Result<Policy> {
+    let host_error = |error: gpui_shell::HostError| anyhow::anyhow!(error.message().to_string());
+    Policy::new()
+        .with_application(id)
+        .with_capabilities(capabilities.clone())
+        .with_host_module(plugin.module())
+        .and_then(|policy| policy.with_host_module(host_fs::fs_module(Rc::new(host_fs::HostFs))))
+        .and_then(|policy| {
+            policy.with_host_module(host_workspace::workspace_module(context.clone()))
+        })
+        .map_err(host_error)
 }
 
 /// 卸载全部插件。视图拥有的任务随视图一起取消。
@@ -204,14 +250,13 @@ fn unmount_all() {
     drop(panels);
 }
 
-/// 应用退出时释放插件视图、宿主模块和运行时。
+/// 应用退出时释放插件视图和运行时。
 ///
 /// 它们都挂在线程局部的注册表上。留到线程局部变量析构时再释放，gpui-shell 的
 /// 任务表（也是线程局部，且建得比注册表晚、析构得比它早）已经没了，释放时
 /// 取消任务会 panic，析构里的 panic 直接中止进程。
 pub(crate) fn shutdown() {
     unmount_all();
-    gpui_shell::clear_exported_modules();
     let (runtime, opener) = REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
         (registry.runtime.take(), registry.session_opener.take())
@@ -259,9 +304,8 @@ fn discover() -> Vec<Found> {
     found
 }
 
-/// 一个进程一个运行时；重开窗口时复用它。第一次创建时装好全部插件共用的
-/// 默认 Policy 和宿主模块，顺序是先 Policy 后模块：`export_module` 往默认 Policy
-/// 上加，先装的会被后面的 `set_default` 整个换掉。
+/// 一个进程一个运行时；重开窗口时复用它。Policy 和宿主模块每个插件一份，挂载时装
+/// （见 `mount_all`），不挂在运行时上。
 fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
     if let Some(runtime) = REGISTRY.with(|registry| registry.borrow().runtime.clone()) {
         return Ok(runtime);
@@ -274,19 +318,6 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
     let components =
         gpui_shell::components::components().context("构建 gpui-component 脚本组件目录")?;
     let runtime = ShellRuntime::new_with_components(cx, components)?;
-
-    let home = dirs::home_dir().context("无法定位用户主目录")?;
-    let home = std::fs::canonicalize(&home).unwrap_or(home);
-    // 权限在 `mount_all` 里按插件声明装，这里只立一份空的默认 Policy。必须先于
-    // `export_module`：模块挂在默认 Policy 上，后装的 `set_default` 会把它整个换掉。
-    policy::set_default(Policy::new());
-    let context = REGISTRY.with(|registry| registry.borrow().context.clone());
-    let host_error = |error: gpui_shell::HostError| anyhow::anyhow!(error.message().to_string());
-    let fs = Rc::new(host_fs::HostFs);
-    gpui_shell::export_module(host_fs::fs_module(fs)).map_err(host_error)?;
-    gpui_shell::export_module(host_workspace::workspace_module(home, context))
-        .map_err(host_error)?;
-
     REGISTRY.with(|registry| registry.borrow_mut().runtime = Some(runtime.clone()));
     Ok(runtime)
 }
@@ -295,8 +326,8 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
 ///
 /// 网络另算：gpui-shell 只认逐个列出的主机名，没有「任意主机」，由调用方补上各插件
 /// 声明的主机（见 `declared_hosts`）。`exit` 不给：
-/// 那是请宿主退出，插件不该能关掉 smelt。`localStorage` 不给：所有插件共用这一份
-/// Policy，存储也就是同一个文件，键会互相覆盖；插件要存东西就自己写文件。
+/// 那是请宿主退出，插件不该能关掉 smelt。`localStorage` 不给：那是 JSON 文件，业务数据
+/// 要进 SQLite；插件要存东西就自己写文件。
 fn unrestricted() -> Capabilities {
     let roots = filesystem_roots();
     Capabilities::new()
@@ -382,12 +413,20 @@ fn with_registry<R>(read: impl FnOnce(&Registry) -> R) -> R {
     REGISTRY.with(|registry| read(&registry.borrow()))
 }
 
-/// 已挂载插件的槽位，按加载顺序。
+/// 占 Tool Panel tab 的插件（登记成页面的不算），按加载顺序。
 pub(crate) fn slots() -> Vec<PluginTabSlot> {
-    with_registry(|registry| registry.panels.iter().map(|panel| panel.slot).collect())
+    with_registry(|registry| {
+        registry
+            .panels
+            .iter()
+            .filter(|panel| !panel.page)
+            .map(|panel| panel.slot)
+            .collect()
+    })
 }
 
-/// 槽位上的插件眼下挂着。插件被删掉以后，记着它的 tab 还在，只是这里为 false。
+/// 槽位上的插件眼下挂着、占着 tab。插件被删掉（或改成了页面）以后，记着它的 tab
+/// 还在，只是这里为 false。
 pub(crate) fn is_mounted(slot: PluginTabSlot) -> bool {
     with_registry(|registry| registry.panel(slot).is_some())
 }
@@ -407,15 +446,9 @@ pub(crate) fn key_for(slot: PluginTabSlot) -> Option<String> {
     with_registry(|registry| registry.ids.get(usize::from(slot.0)).cloned())
 }
 
-/// 只认眼下挂着的插件。
+/// 只认眼下挂着、占着 tab 的插件。
 pub(crate) fn slot_for_key(key: &str) -> Option<PluginTabSlot> {
-    with_registry(|registry| {
-        registry
-            .panels
-            .iter()
-            .find(|panel| panel.id == key)
-            .map(|panel| panel.slot)
-    })
+    with_registry(|registry| registry.panel_by_id(key).map(|panel| panel.slot))
 }
 
 /// 已挂载的插件，按加载顺序。只读内存。
@@ -434,19 +467,6 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
             })
             .collect()
     })
-}
-
-/// 把工作台的当前项目同步给插件。只比较、写内存，可以在 render 里调。
-pub(crate) fn set_project_root(project_root: Option<String>) {
-    let project_root = project_root.map(PathBuf::from);
-    REGISTRY.with(|registry| {
-        let registry = registry.borrow();
-        let mut context = registry.context.borrow_mut();
-        if context.project_root != project_root {
-            context.project_root = project_root;
-            context.generation += 1;
-        }
-    });
 }
 
 /// 把工作台侧栏的会话同步给插件。只比较、写内存；内容没变时 generation 不动。

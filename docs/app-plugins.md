@@ -43,6 +43,7 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 
 - **宿主服务是一个 gpui 全局。** `smelt-plugin-api` 定义接口，宿主启动时实现并装上，插件用 `smelt_plugin_api::host(cx)` 取：机器列表和客户端、通知、用系统编辑器打开文件、在某台机器上选路径、画页头。运行时话题（`pi_config.changed`、重新订阅上）和机器列表变化由宿主转成插件可订阅的事件（`HostEvent`）。
 - **页面按字符串 id 登记。** 注册表记 id、标题、图标、侧栏位置、是否进机器菜单、建视图的函数；工作台路由是 `Page(id)`。宿主里别处跳过去用 `open_page("capabilities", {"tab": "plugins"})`，不出现插件的类型；侧栏入口和机器菜单都按登记生成。路由落盘只记 id，启动时那一页没登记了（插件下线）就回会话；`agents`、`automations`、`desktop`、`session` 是宿主自己的路由，页面不能用这几个 id。
+- **JS 插件的宿主模块也叫 `smelt-plugin-api`**，是 Rust 那份接口的薄映射（`smelt_plugin_api::js`）：`register_page`、`active_project`、`pick_paths`、`next_event`。每个插件一份自己的 gpui-shell Policy（应用名是插件 id），模块装在里面，所以宿主函数知道是哪个插件在调。宿主不能回调脚本，事件做成 `await next_event()`：每个插件一条队列，同样的事件只留一份。插件在 init 里调 `register_page` 就是工作台的一页（宿主画页头和底色，脚本视图画在下面），否则挂成 Tool Panel 的 tab；插件视图释放时它登记的页面一起撤下。页面视图由注册表缓存，登记变了宿主收到 `PagesChanged` 重新对路由。
 - **插件 crate 只依赖 `smelt-plugin-api` 和 gpui 组件库。** 插件要用的协议类型（`smelt-model`）和共用组件（`smelt-ui`）由 `smelt-plugin-api` 再导出，和 JS 插件拿到的一致。
 
 ## 插件的样子
@@ -75,7 +76,8 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 ## 已知缺口
 
 - gpui-shell 没有拖放绑定（会话列表拖动排序要用）、终端组件；Tree 只有 label，编辑器内容不可读写。缺的组件由宿主提供原生组件，或给上游提 PR，不 fork。
-- gpui-shell 的 `gpui-shell.json` 拒绝未知字段，插件要声明的面板、命令放在哪里待定（旧分支用另一个 `smelt.json`）。
+- gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以插件不在 manifest 里声明，而是在 init 里调宿主函数登记（页面已经这样做：`register_page`）。命令、快捷键照此补。
+- JS 页面还拿不到打开参数，不进机器菜单；要用时再把 `Page::open` 映射成事件。
 - 别的插件或客户端改了 smeltd 的数据，靠 smeltd 推事件通知，不靠插件自觉广播。Pi 配置已经这样做了（`pi_config.changed`，放在单独的一条订阅里，v7 的运行时不推）。绕过 smeltd 的修改（手改 Pi 配置文件、直接用 `pi` 命令行）目前收不到，要 smeltd 监视文件才能补上；在那之前，能力库的「刷新」只重读能力库自己，不再顺带让对话重拉模型目录。
 - 手机端是 Flutter，跑不了 gpui-shell；插件只影响桌面，手机直接用 smeltd 协议。
 

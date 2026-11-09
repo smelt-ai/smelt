@@ -23,7 +23,7 @@ smelt-client-store = { path = "../smelt-client-store" }
 # ACP 会话消息流渲染层，均已独立成 crate（见各自 Cargo.toml 文件头注释）。
 smelt-ui = { path = "../smelt-ui" }
 smelt-app-state = { path = "../smelt-app-state" }
-smelt-plugin-api = { path = "../smelt-plugin-api" }
+smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
 smelt-capabilities = { path = "../plugins/capabilities" }
 smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }

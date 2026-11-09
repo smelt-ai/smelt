@@ -2,7 +2,7 @@
 //! 工作台的路由。设计见 `docs/app-plugins.md`。
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::*;
@@ -77,6 +77,13 @@ impl api::Host for SmeltHost {
         });
     }
 
+    fn active_project(&self, cx: &App) -> Option<PathBuf> {
+        self.workspace()?
+            .read(cx)
+            .active_local_project_root(cx)
+            .map(PathBuf::from)
+    }
+
     fn page_header(&self, window: &Window, cx: &App) -> Div {
         let left_guard = self
             .workspace()
@@ -104,7 +111,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(page) = self.page_handle(id, window, cx) else {
+        let Some((page, _)) = api::ensure_page_view(id, window, cx) else {
             return false;
         };
         self.activate_workspace_tab(WorkspaceRoute::Page(id.to_string()), window, cx);
@@ -112,41 +119,56 @@ impl Workspace {
         true
     }
 
-    /// 启动时恢复到上次停的插件页面。那一页已经没有了（插件下线）就回会话。
-    pub(crate) fn restore_page_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 让停着的插件页面对上注册表：启动时恢复上次停的页面，页面登记变了（插件加载、
+    /// 卸载、替换）时重新取。那一页已经没有了就回会话；新建的视图打开一次，让它读数据。
+    pub(crate) fn sync_page_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let WorkspaceRoute::Page(id) = self.active_tab().clone() else {
             return;
         };
-        match self.page_handle(&id, window, cx) {
-            Some(page) => page.open(&serde_json::Value::Null, window, cx),
+        match api::ensure_page_view(&id, window, cx) {
+            Some((page, true)) => page.open(&serde_json::Value::Null, window, cx),
+            Some((_, false)) => {}
             None => self.nav.set_active(WorkspaceRoute::Session),
         }
     }
 
-    /// 页面第一次打开时建，之后一直用这一份。
-    fn page_handle(
+    /// 宿主事件里工作台自己要管的：页面登记变了要对路由，侧栏入口要重画。
+    pub(crate) fn subscribe_host_events(
         &mut self,
-        id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Rc<dyn api::PageHandle>> {
-        if let Some(page) = self.pages.get(id) {
-            return Some(page.clone());
-        }
-        let spec = api::page(id, cx)?;
-        let page = (spec.build)(window, cx);
-        self.pages.insert(spec.id, page.clone());
-        Some(page)
+    ) -> Subscription {
+        cx.subscribe_in(
+            &api::events(cx),
+            window,
+            |this, _, event: &HostEvent, window, cx| {
+                if *event == HostEvent::PagesChanged {
+                    this.sync_page_route(window, cx);
+                    cx.notify();
+                }
+            },
+        )
     }
 
-    pub(crate) fn render_page(&self, id: &str) -> AnyElement {
+    /// 只取已经建好的视图，不建。
+    pub(crate) fn render_page(&self, id: &str, cx: &App) -> AnyElement {
         div()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
-            .children(self.pages.get(id).map(|page| page.view()))
+            .children(api::page_view(id, cx).map(|page| page.view()))
             .into_any_element()
+    }
+
+    /// 当前项目变了就告诉插件。在可见刷新里调：当前项目跟着会话、侧栏选中、项目分组
+    /// 变，这些变更都会排一次可见刷新。
+    pub(crate) fn note_active_project(&mut self, cx: &mut Context<Self>) {
+        let root = self.active_local_project_root(cx);
+        if self.plugin_project_root != root {
+            self.plugin_project_root = root;
+            api::emit(HostEvent::ActiveProjectChanged, cx);
+        }
     }
 }

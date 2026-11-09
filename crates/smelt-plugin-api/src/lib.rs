@@ -7,7 +7,7 @@
 //! 宿主到插件的通知是 gpui 事件（[`HostEvent`]），插件用 `cx.subscribe(&events(cx), …)`
 //! 订阅，不轮询。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -23,7 +23,13 @@ pub use smelt_ui as ui;
 
 mod page;
 
-pub use page::{Page, PageBuilder, PageHandle, PageSpec, page, pages, register_page};
+#[cfg(feature = "js")]
+pub mod js;
+
+pub use page::{
+    Page, PageBuilder, PageHandle, PageSpec, RESERVED_PAGE_IDS, ensure_page_view, page, page_view,
+    pages, register_page, unregister_page,
+};
 
 /// 桌面挂着的一台机器。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +66,10 @@ pub enum HostEvent {
     Reconnected(RuntimeKey),
     /// 挂着的机器变了：加了、移除了、改了名或连接状态。
     MachinesChanged,
+    /// 工作台的当前项目变了（读 [`Host::active_project`]）。
+    ActiveProjectChanged,
+    /// 页面登记变了：加了、替换了或撤下了（见 [`register_page`]）。
+    PagesChanged,
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。
@@ -85,6 +95,8 @@ pub trait Host: 'static {
         done: PathsPicked,
         cx: &mut App,
     );
+    /// 工作台的当前项目，只算这台电脑上的；当前是远程项目或没有项目时是 `None`。
+    fn active_project(&self, cx: &App) -> Option<PathBuf>;
     /// 页面的页头底板：留好拖窗口条、交通灯和右上角开关的位置，页面往里放标题和按钮。
     fn page_header(&self, window: &Window, cx: &App) -> Div;
 }
@@ -115,9 +127,14 @@ pub fn events(cx: &App) -> Entity<HostEvents> {
     cx.global::<HostGlobal>().events.clone()
 }
 
-/// 宿主发一条事件给所有订阅的插件。
+/// 宿主发一条事件给所有订阅的插件。宿主还没装（测试里）就没人订阅，什么都不做。
 pub fn emit(event: HostEvent, cx: &mut App) {
-    events(cx).update(cx, |_, cx| cx.emit(event));
+    if let Some(events) = cx
+        .try_global::<HostGlobal>()
+        .map(|host| host.events.clone())
+    {
+        events.update(cx, |_, cx| cx.emit(event));
+    }
 }
 
 /// 一次运行时调用的默认上限。大仓库的 status、搜索也该在这个时间里回来。

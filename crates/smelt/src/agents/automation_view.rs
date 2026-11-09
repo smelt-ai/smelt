@@ -99,7 +99,7 @@ impl Workspace {
                         self.render_agent_product_navigation_row(
                             SharedString::from(format!("{}-route", page.id)),
                             page.title,
-                            page.icon,
+                            gpui_component::Icon::empty().path(page.icon),
                             false,
                             WorkspaceRoute::Page(page.id.to_string()),
                             entity.clone(),

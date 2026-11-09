@@ -469,7 +469,7 @@ impl Workspace {
         let stage_content: AnyElement = match self.active_tab() {
             WorkspaceRoute::Agents => self.render_agents_page(window, cx),
             WorkspaceRoute::Automations => self.render_automations_page(window, cx),
-            WorkspaceRoute::Page(id) => self.render_page(id),
+            WorkspaceRoute::Page(id) => self.render_page(id, cx),
             WorkspaceRoute::Desktop => self.render_desktop_page(window, cx),
             WorkspaceRoute::Session => {
                 if self.tool_panel_promoted() {

@@ -99,6 +99,7 @@ impl Workspace {
         if let Some(project) = self.active_project_ref(cx) {
             self.ensure_git_watch(project, cx);
         }
+        self.note_active_project(cx);
 
         // 仓库信息发给会话所在的那台机器。
         let repo_cwds: HashSet<crate::ProjectRef> = self

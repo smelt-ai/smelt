@@ -2538,8 +2538,8 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 打开过的插件页面，按页面 id。第一次打开时建，之后一直留着：离开再回来表单还在。
-    pages: HashMap<SharedString, Rc<dyn smelt_plugin_api::PageHandle>>,
+    /// 上次告诉插件的当前项目（见 `note_active_project`），只用来判断变没变。
+    plugin_project_root: Option<String>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
     ///
     /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
@@ -2626,6 +2626,8 @@ struct Workspace {
     _workspace_directories_sub: Option<Subscription>,
     /// 远程运行时增删时同步侧栏的空间。
     _runtime_hub_sub: Option<Subscription>,
+    /// 宿主转给插件的事件里，工作台自己要管的（见 `subscribe_host_events`）。
+    _host_events_sub: Option<Subscription>,
     /// 自动化目录读 AgentHostState；不观察的话，投影写进 global 后当前页不会重绘。
     _agent_host_sub: Option<Subscription>,
     /// 智能体页、侧栏读各台机器的智能体配置（`AgentHosts`），理由同上。
@@ -2979,7 +2981,7 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            pages: HashMap::new(),
+            plugin_project_root: None,
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_running_count: None,
@@ -3016,6 +3018,7 @@ impl Workspace {
             saved_sidebar_orders: workspace_persist::load_sidebar_orders(),
             _workspace_directories_sub: None,
             _runtime_hub_sub: None,
+            _host_events_sub: None,
             _agent_host_sub: None,
             _agent_hosts_sub: None,
             _provider_status_sub: None,
@@ -3079,7 +3082,8 @@ impl Workspace {
                 this.sync_remote_spaces(cx)
             }),
         );
-        ws.restore_page_route(window, cx);
+        ws._host_events_sub = Some(ws.subscribe_host_events(window, cx));
+        ws.sync_page_route(window, cx);
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         let activation = cx.observe_window_activation(window, |this, window, cx| {

@@ -39,7 +39,7 @@ pub fn register(cx: &mut App) {
         PageSpec {
             id: PAGE_ID.into(),
             title: "能力库".into(),
-            icon: IconName::LayoutDashboard,
+            icon: IconName::LayoutDashboard.path(),
             sidebar: true,
             machine_menu: true,
             build: Rc::new(|_window, cx| {
@@ -47,7 +47,8 @@ pub fn register(cx: &mut App) {
             }),
         },
         cx,
-    );
+    )
+    .expect("能力库的页面 id 不是宿主保留的");
 }
 
 /// 页面里平级的几个页签。
@@ -175,6 +176,7 @@ impl CapabilitiesPage {
                 }
                 cx.notify();
             }
+            HostEvent::ActiveProjectChanged | HostEvent::PagesChanged => {}
         }
     }
 

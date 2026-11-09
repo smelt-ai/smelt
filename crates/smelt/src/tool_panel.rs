@@ -469,8 +469,6 @@ impl Workspace {
                     return crate::placeholder_view(&notice, cx.theme().muted_foreground)
                         .into_any_element();
                 }
-                // 插件经 smelt-workspace.context() 读当前项目；这里只写内存。
-                crate::plugins::set_project_root(self.active_local_project_root(cx));
                 crate::plugins::render(slot, cx)
             }
             builtin => match builtin_panel(builtin) {

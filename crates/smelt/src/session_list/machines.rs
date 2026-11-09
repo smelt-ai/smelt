@@ -49,7 +49,7 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
                 let workspace = workspace.clone();
                 MachineAction {
                     label: page.title,
-                    icon: page.icon.into(),
+                    icon: Icon::empty().path(page.icon),
                     separated: false,
                     run: Rc::new(move |window, cx| {
                         let args = args.clone();

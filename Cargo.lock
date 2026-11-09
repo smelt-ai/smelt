@@ -11173,13 +11173,16 @@ dependencies = [
 name = "smelt-plugin-api"
 version = "0.0.0"
 dependencies = [
+ "futures-channel",
  "gpui-component",
  "gpui-pre",
+ "gpui-shell",
  "serde_json",
  "smelt-client",
  "smelt-model",
  "smelt-runtime-client",
  "smelt-ui",
+ "smol",
 ]
 
 [[package]]
