@@ -5,7 +5,7 @@
 
 use super::{
     WorkspaceRoute, agent_conversation_occupies_project_stage,
-    should_correct_agent_conversation_on_project_stage, should_open_restored_agent_conversation,
+    should_open_restored_agent_conversation,
 };
 
 #[test]
@@ -70,21 +70,6 @@ fn an_agent_conversation_never_occupies_the_project_stage() {
     assert!(!agent_conversation_occupies_project_stage(
         &WorkspaceRoute::Session,
         false,
-    ));
-}
-
-#[test]
-fn project_stage_is_not_corrected_until_sessions_finish_restoring() {
-    // 恢复窗口期存档下标会对到先插入的智能体对话；这时不能把舞台拽去「对话」。
-    assert!(!should_correct_agent_conversation_on_project_stage(
-        false,
-        &WorkspaceRoute::Session,
-        true,
-    ));
-    assert!(should_correct_agent_conversation_on_project_stage(
-        true,
-        &WorkspaceRoute::Session,
-        true,
     ));
 }
 

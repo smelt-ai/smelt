@@ -347,16 +347,63 @@ fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_px(appearance.font_px);
     terminal_view::set_font_family(&appearance.font_family);
     cx.set_global(appearance.clone());
-    apply_named_theme(&appearance.theme_name, cx);
+    apply_current_theme(cx);
     apply_bg_color(&appearance);
     cx.refresh_windows();
+}
+
+/// 套上设置里存的主题。插件重新加载后也要调：存的可能是插件带的主题，配色改了或者
+/// 插件删了。只改全局态不重绘，调用方自己 `cx.refresh_windows()`。
+pub fn apply_current_theme(cx: &mut App) {
+    let name = cx.global::<Appearance>().theme_name.clone();
+    apply_named_theme(&name, cx);
+}
+
+/// 换主题并存进设置。设置页下拉、换到带主题的布局都走这里：只有设置里这一个主题，
+/// 最后一次操作说了算。内置的和插件带的都没有这个名字就什么都不动，返回 false。
+pub(crate) fn choose_theme(name: &str, cx: &mut App) -> bool {
+    let dark = match smelt_model::theme_index::find(name) {
+        Some(entry) => entry.mode != "light",
+        None => match smelt_ui::theme_catalog::plugin_themes(cx)
+            .iter()
+            .find(|theme| *theme.config.name == *name)
+        {
+            Some(theme) => theme.config.mode.is_dark(),
+            None => return false,
+        },
+    };
+    let mode = if dark {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    };
+    let name = name.to_string();
+    apply_appearance(
+        move |appearance| {
+            appearance.theme_name = name;
+            appearance.theme_mode = mode;
+        },
+        cx,
+    );
+    apply_current_theme(cx);
+    cx.refresh_windows();
+    true
 }
 
 /// 按主题名装上配色。组件库走 `apply_config`，自绘色板从这份主题投影，终端跟着明暗切。
 /// 字号和字体在装完之后写回 Appearance，主题文件里的字号不覆盖用户设置。
 /// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`。
 pub fn apply_named_theme(name: &str, cx: &mut App) {
-    let applied = smelt_ui::theme_catalog::apply(name, cx);
+    // 找不到这款（比如带它的插件删了、插件还没挂上）就套同明暗的默认主题，不留着上一款的
+    // 配色。设置里存的名字不动，插件装回来就又是它。
+    let applied = smelt_ui::theme_catalog::apply(name, cx) || {
+        let light = cx
+            .try_global::<Appearance>()
+            .is_some_and(|appearance| !appearance.theme_mode.is_dark());
+        let fallback =
+            smelt_model::theme_index::default_for_mode(if light { "light" } else { "dark" });
+        smelt_ui::theme_catalog::apply(fallback, cx)
+    };
     let dark = if applied && cx.has_global::<Theme>() {
         cx.global::<Theme>().is_dark()
     } else {

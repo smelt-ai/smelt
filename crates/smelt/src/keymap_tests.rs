@@ -8,7 +8,7 @@ use super::{
     overrides_from_records, plan_plugin_keys, recorded, splice_app_bindings,
 };
 use crate::plugins::{DeclaredCommand, PluginCommand};
-use crate::{OpenDocs, ReportIssue, RunPluginCommand, ToggleCommandPalette, ToggleSidebar};
+use crate::{OpenDocs, ReportIssue, RunPluginCommand, SplitBeside, ToggleCommandPalette};
 
 /// 测试 App 的本机系统，录键判定和解析都按它来，跟 `app_key_bindings` 一致。
 fn os() -> OperatingSystem {
@@ -108,7 +108,7 @@ fn unknown_actions_and_broken_keystrokes_fall_back_to_defaults() {
                 keystroke: Some("cmd-j".to_string()),
             },
             KeyBindingRecord {
-                action_id: "toggle_sidebar".to_string(),
+                action_id: "new_conversation".to_string(),
                 keystroke: None,
             },
             KeyBindingRecord {
@@ -125,7 +125,10 @@ fn unknown_actions_and_broken_keystrokes_fall_back_to_defaults() {
     );
     assert_eq!(
         loaded,
-        overrides(&[("command_palette", Some("cmd-j")), ("toggle_sidebar", None)])
+        overrides(&[
+            ("command_palette", Some("cmd-j")),
+            ("new_conversation", None)
+        ])
     );
 }
 
@@ -138,7 +141,7 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
     existing.extend(app_bindings(&Overrides::new()));
     existing.push(after);
 
-    let app = app_bindings(&overrides(&[("toggle_sidebar", Some("cmd-shift-b"))]));
+    let app = app_bindings(&overrides(&[("split_beside", Some("cmd-shift-b"))]));
     let app_len = app.len();
     let rebuilt = splice_app_bindings(existing, app);
 
@@ -146,12 +149,12 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
     assert!(rebuilt[0].action().as_any().is::<OpenDocs>());
     assert!(rebuilt[1..=app_len].iter().all(|b| b.meta() == Some(APP_KEYMAP)));
     assert!(rebuilt[app_len + 1].action().as_any().is::<ReportIssue>());
-    let sidebar: Vec<_> = rebuilt
+    let split: Vec<_> = rebuilt
         .iter()
-        .filter(|binding| binding.action().as_any().is::<ToggleSidebar>())
+        .filter(|binding| binding.action().as_any().is::<SplitBeside>())
         .collect();
-    assert_eq!(sidebar.len(), 1, "旧的那段不能留下来");
-    assert_eq!(sidebar[0].keystrokes()[0].inner(), &stroke("cmd-shift-b"));
+    assert_eq!(split.len(), 1, "旧的那段不能留下来");
+    assert_eq!(split[0].keystrokes()[0].inner(), &stroke("cmd-shift-b"));
 }
 
 #[test]
@@ -184,16 +187,16 @@ fn keys_without_command_are_left_to_the_terminal_and_inputs() {
 #[test]
 fn a_key_used_by_another_shortcut_asks_to_reassign() {
     let none = Overrides::new();
-    match judge("command_palette", "cmd-b", &none) {
+    match judge("command_palette", "cmd-d", &none) {
         Recorded::Taken { other, keystroke } => {
-            assert_eq!(other, "toggle_sidebar");
-            assert_eq!(stroke(&keystroke), stroke("cmd-b"));
+            assert_eq!(other, "split_beside");
+            assert_eq!(stroke(&keystroke), stroke("cmd-d"));
         }
         other => panic!("应该问要不要改绑，实际是 {other:?}"),
     }
     // 改走以后，原来的键就空出来了。
-    let moved = overrides(&[("toggle_sidebar", Some("cmd-shift-b"))]);
-    assert_set(judge("command_palette", "cmd-b", &moved), "cmd-b");
+    let moved = overrides(&[("split_beside", Some("cmd-shift-b"))]);
+    assert_set(judge("command_palette", "cmd-d", &moved), "cmd-d");
     // 自己现在的键不算冲突。
     assert_eq!(judge("command_palette", "cmd-k", &none), Recorded::Reset);
 }
@@ -261,7 +264,7 @@ fn plugin_keys_that_break_the_rules_are_reported() {
         ("cmd-c", "复制"),
         ("cmd-k cmd-s", "连按"),
         ("cmd-hyper-j", "写法不对"),
-        ("cmd-b", "切换左侧栏"),
+        ("cmd-d", "左右分屏"),
         ("cmd-q", "已被别的功能占用"),
     ] {
         let commands = [plugin_command("party", "jump", Some(key))];
@@ -281,16 +284,16 @@ fn plugin_keys_that_break_the_rules_are_reported() {
 /// smelt 的快捷键按用户当前的键位算：改走了，原来的键插件就能用。
 #[test]
 fn plugin_keys_follow_the_users_current_shortcuts() {
-    let commands = [plugin_command("party", "jump", Some("cmd-b"))];
-    let moved = overrides(&[("toggle_sidebar", Some("cmd-shift-b"))]);
+    let commands = [plugin_command("party", "jump", Some("cmd-d"))];
+    let moved = overrides(&[("split_beside", Some("cmd-shift-b"))]);
     let (planned, problems) = plan(&commands, &moved, &[]);
     assert!(problems.is_empty(), "{problems:?}");
-    assert_eq!(planned, [(0, stroke("cmd-b"))]);
+    assert_eq!(planned, [(0, stroke("cmd-d"))]);
 
     let commands = [plugin_command("party", "jump", Some("cmd-shift-b"))];
     let (planned, problems) = plan(&commands, &moved, &[]);
     assert!(planned.is_empty());
-    assert!(problems[0].1.contains("切换左侧栏"), "{problems:?}");
+    assert!(problems[0].1.contains("左右分屏"), "{problems:?}");
 }
 
 /// 插件之间先到先得；脚本自己绑的、组件的键也不抢。

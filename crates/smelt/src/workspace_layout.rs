@@ -1,593 +1,296 @@
-//! 工作台布局：把布局文件搭成外层 Dock，切换、恢复默认，按布局存取点出来的状态，以及插件面板。
+//! 工作台布局：装哪套布局、存它点出来的样子、切换 / 重置 / 复制、插件的布局命令。
 //!
-//! 格式和校验在 `smelt_client::layout`。这里只管窗口里的事：组件名对到面板实体，
-//! 声明树翻成 `DockLayout` 装进 `workspace_shell` 建好的那个 `DockArea`。
-//! 面板实体按组件名缓存，切换布局时复用，会话列表、舞台里的终端和插件脚本都不重建。
+//! 布局文件和存档都是官方的 `DockAreaState`（见 `layout_files`、`docs/workspace-layouts.md`），
+//! 整个工作台是一块 `DockArea`（`Workspace::shell_dock`），怎么画见 `workspace_shell`。
+//! Dock 是唯一的一份：哪组选中哪个、放大、dock 开合、拆分大小都只在它那里，这里只读它、
+//! 让它改，再把 `dump()` 原样存进库。
 //!
-//! 停靠区的开合和宽度、拆分比例、各组选中的标签只在 Dock 上。Dock 发 `LayoutChanged`
-//! 时按布局存进客户端库（`workspace_layout_state`），装布局时在搭树的同时套回去。
-//!
-//! 插件面板（`plugin:<id>/<面板>`）由插件自己注册的类建出来，外面包一层 smelt 的
-//! `PluginPanel`：底色和「没装 / 没声明 / 没注册 / 加载失败」的说明归宿主，内容归插件。
-//! 布局里的 `plugin:*` 展开成没被单独摆出来的那些插件面板。
+//! 两个事件：
+//! - `DockEvent::LayoutChanged`（树改了：装布局、拖动、选中、开合、拖分隔条）：重算舞台、
+//!   存档、同步显示；
+//! - Dock 的通知（放大、还原不发 `LayoutChanged`）：同步显示。
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashSet;
 
-use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, WeakEntity, Window,
-    div, prelude::*, px, rgb,
-};
-use gpui_component::ActiveTheme;
+use gpui::{App, Context, Entity, Subscription, Window};
 use gpui_component::dock::{
-    BasePanel, BasePanelView, DockArea, DockLayout, DockPlacement, PaneNode, PaneRef, Panel,
-    PanelBuildContext, PanelControl, PanelEvent, PanelId, PanelInfo, PanelRegistry, PanelState,
-    panel_handle,
+    BasePanelView, DockArea, DockAreaState, DockEvent, DockPlacement, InsertTarget, NodeId,
+    PaneNode, PaneRef, PanelBuildContext, PanelId, PanelInfo, PanelRegistry, PanelState,
 };
-use gpui_shell::dock::ScriptPanel;
-use smelt_client::layout::{
-    self, Axis, Background, Component, DockState, DockStates, Layout, LayoutEntry, LayoutState,
-    Node, PluginPanelRef, Region, SplitState, Tab,
-};
+use serde_json::Value;
 use smelt_client_store::LayoutStateRecord;
 
-use crate::workspace_shell::{Builtin, ShellPanel};
-use crate::{Workspace, ui_theme};
+use crate::Workspace;
+use crate::layout_files::{self, LayoutEntry, LayoutFile};
+use crate::plugins::{
+    LayoutCommand, LayoutDock, LayoutDockSide, LayoutNodeInfo, LayoutPanelInfo, LayoutSnapshot,
+};
+use crate::workspace_shell::{self, Builtin, ChromeSlots};
+use crate::workspace_stages::{Accepts, StageSpec};
 
-/// 布局里没写 `size`、也没存过的停靠区多宽。
-const DEFAULT_DOCK_SIZE: f32 = 320.;
-
-const SIDE_DOCKS: [(DockPlacement, Region); 3] = [
-    (DockPlacement::Left, Region::Left),
-    (DockPlacement::Right, Region::Right),
-    (DockPlacement::Bottom, Region::Bottom),
-];
-
-/// 舞台所在区域有没有布局背景。终端是舞台里另一个 Dock 的面板，看不到外层布局，
-/// 装布局时把这一位放进全局，终端据此不铺自己的实底。
-pub(crate) struct StageBackdrop(pub(crate) bool);
-
-impl gpui::Global for StageBackdrop {}
-
-/// 当前装着的布局，和它摆出来的面板。
+/// 装着的是哪套布局、它的文件。点出来的样子不在这里，在 Dock 上。
 pub(crate) struct ShellLayout {
+    /// 布局 id：默认布局是 `default`，用户布局是文件名，插件带的是 `<插件 id>/<文件名>`。
     pub(crate) id: String,
-    pub(crate) layout: Layout,
-    /// 组件 → 面板，正好是 Dock 里的全部面板（含 `plugin:*` 展开出来的）。切换布局时复用。
-    panels: HashMap<Component, Arc<dyn BasePanelView>>,
-    /// 插件面板的宿主壳，键和 `panels` 里的插件面板一样。
-    plugins: HashMap<Component, Entity<PluginPanel>>,
+    /// 装它时读的文件。存档记着它的指纹。
+    pub(crate) file: LayoutFile,
 }
 
-impl ShellLayout {
-    /// 布局里有没有这个组件（`plugin:*` 收进来的也算）。
-    pub(crate) fn places(&self, component: &Component) -> bool {
-        self.panels.contains_key(component)
-    }
-
-    pub(crate) fn panel_id(&self, component: &Component, cx: &App) -> Option<PanelId> {
-        self.panels.get(component).map(|panel| panel.panel_id(cx))
-    }
-
-    /// 这个组件所在区域布局里写的背景。没单独摆的插件面板在 `plugin:*` 那块区域。
-    /// 有背景时，面板不铺自己的实底，让区域底下的图透出来（图由标签组铺，见 `workspace_shell`）。
-    pub(crate) fn backdrop_of(&self, component: &Component) -> Option<&Background> {
-        let region = self
-            .layout
-            .region_of(component)
-            .or_else(|| match component {
-                Component::Plugin(_) => self.layout.region_of(&Component::OtherPlugins),
-                _ => None,
-            })?;
-        self.layout.background(region)
-    }
-
-    /// 从 Dock 现在的样子取出要存的状态。
-    fn capture_state(&self, area: &DockArea, cx: &App) -> LayoutState {
-        let keys: HashMap<PanelId, String> = self
-            .panels
-            .iter()
-            .map(|(component, panel)| (panel.panel_id(cx), component.key()))
-            .collect();
-        let docks = DockStates {
-            left: dock_state(area, DockPlacement::Left),
-            right: dock_state(area, DockPlacement::Right),
-            bottom: dock_state(area, DockPlacement::Bottom),
-        };
-        let mut splits = Vec::new();
-        let mut active = Vec::new();
-        for placement in [
-            DockPlacement::Center,
-            DockPlacement::Left,
-            DockPlacement::Right,
-            DockPlacement::Bottom,
-        ] {
-            if let Some(tree) = area.layout(placement) {
-                capture_node(tree.root(), &keys, &mut splits, &mut active);
-            }
-        }
-        LayoutState::new(docks, splits, active)
-    }
-}
-
-fn dock_state(area: &DockArea, placement: DockPlacement) -> Option<DockState> {
-    area.has_dock(placement).then(|| DockState {
-        open: area.is_dock_open(placement),
-        size: area
-            .dock_size(placement)
-            .map_or(DEFAULT_DOCK_SIZE, f32::from),
-    })
-}
-
-/// 记下拖过的拆分（按每个子节点最左上那块面板认）和多标签组里选中的那块。
-fn capture_node(
-    node: &PaneNode,
-    keys: &HashMap<PanelId, String>,
-    splits: &mut Vec<SplitState>,
-    active: &mut Vec<String>,
-) {
-    match node.kind() {
-        PaneRef::Tabs { panels, active_ix } => {
-            if panels.len() > 1
-                && let Some(key) = panels.get(active_ix).and_then(|panel| keys.get(panel))
-            {
-                active.push(key.clone());
-            }
-        }
-        PaneRef::Split {
-            children, sizes, ..
-        } => {
-            let children_keys: Option<Vec<String>> = children
-                .iter()
-                .map(|child| first_panel(child).and_then(|panel| keys.get(&panel).cloned()))
-                .collect();
-            if let Some(children_keys) = children_keys
-                && sizes.iter().any(Option::is_some)
-            {
-                splits.push(SplitState {
-                    children: children_keys,
-                    sizes: sizes.iter().map(|size| size.map(f32::from)).collect(),
-                });
-            }
-            for child in children {
-                capture_node(child, keys, splits, active);
-            }
-        }
-    }
-}
-
-fn first_panel(node: &PaneNode) -> Option<PanelId> {
-    match node.kind() {
-        PaneRef::Tabs { panels, .. } => panels.first().copied(),
-        PaneRef::Split { children, .. } => children.first().and_then(first_panel),
-    }
-}
-
-/// 启动时装的布局，和装它时顺带读出来的东西。
-pub(crate) struct InitialShell {
-    pub(crate) area: Entity<DockArea>,
-    pub(crate) layout: ShellLayout,
-    pub(crate) catalog: Vec<LayoutEntry>,
-    /// 刚装好时 Dock 的状态，等于库里存着的（或即将等于），用来跳过一样的写入。
-    pub(crate) written: String,
-}
-
-/// 启动时装上次用的布局。没有、读不出来或不合法就装默认布局并提示，库里记着的选择不改：
-/// 布局文件修好了，下次启动还是它。插件必须已经挂载（`plugins::mount_all`）。
-pub(crate) fn install_initial(
-    workspace: WeakEntity<Workspace>,
-    chosen: Option<&str>,
-    window: &mut Window,
-    cx: &mut App,
-) -> InitialShell {
-    let area = crate::workspace_shell::new_area(workspace.clone(), window, cx);
-    let catalog = discover_layouts();
-    let (id, layout) = match chosen {
-        None => (layout::DEFAULT_ID.to_string(), Layout::default_layout()),
-        Some(id) => match catalog.iter().find(|entry| entry.id == id) {
-            Some(LayoutEntry {
-                layout: Ok(layout), ..
-            }) => (id.to_string(), layout.clone()),
-            found => {
-                let reason = match found {
-                    Some(LayoutEntry {
-                        path,
-                        layout: Err(error),
-                        ..
-                    }) => format!("{}：{error}", path.display()),
-                    _ => "布局文件不在了".to_string(),
-                };
-                crate::status_item::notify_error(format!(
-                    "上次用的布局 `{id}` 没有加载，先用默认布局（{reason}）"
-                ));
-                (layout::DEFAULT_ID.to_string(), Layout::default_layout())
-            }
-        },
-    };
-    let builder = Builder::new(workspace, &area, HashMap::new(), HashMap::new(), window);
-    let layout = install(builder, &area, id, layout, cx);
-    let written = layout.capture_state(area.read(cx), cx).to_json();
-    InitialShell {
-        area,
-        layout,
-        catalog,
-        written,
-    }
-}
-
-/// 读这套布局存过的状态。布局文件改过（指纹对不上）、格式不认识都当没存过。
-fn saved_state(id: &str, layout: &Layout) -> Option<LayoutState> {
-    let record = match smelt_client_store::client_store().and_then(|store| store.layout_state(id)) {
-        Ok(record) => record?,
-        Err(error) => {
-            eprintln!("[layout] 读布局 `{id}` 的状态失败：{error}");
-            return None;
-        }
-    };
-    (record.file_digest == layout.digest)
-        .then(|| LayoutState::parse(&record.state))
-        .flatten()
-}
-
-fn install(
-    mut builder: Builder<'_>,
-    area: &Entity<DockArea>,
-    id: String,
-    layout: Layout,
-    cx: &mut App,
-) -> ShellLayout {
-    builder.state = saved_state(&id, &layout);
-    builder.sync_plugins(&layout, cx);
-    // 这套布局用不到的面板不留：留着的实体还订阅着工作台，每次通知都会跟着重画。
-    let mut wanted: HashSet<Component> = layout.components().into_iter().cloned().collect();
-    wanted.extend(builder.plugins.keys().cloned());
-    builder
-        .panels
-        .retain(|component, _| wanted.contains(component));
-
-    let center = builder
-        .build_node(&layout.center, cx)
-        .map_or_else(DockLayout::tabs, |(node, _)| node);
-    let docks: Vec<_> = SIDE_DOCKS
-        .into_iter()
-        .map(|(placement, region)| {
-            let dock = layout.dock(region).and_then(|spec| {
-                let (node, _) = builder.build_node(&spec.node, cx)?;
-                let saved = builder.state.as_ref().and_then(|state| state.dock(region));
-                let size = saved.map_or(spec.size.unwrap_or(DEFAULT_DOCK_SIZE), |dock| dock.size);
-                let open = saved.map_or(spec.open, |dock| dock.open);
-                Some((node, size, open))
-            });
-            (placement, dock)
-        })
-        .collect();
-    let Builder {
-        panels,
-        plugins,
-        window,
-        ..
-    } = builder;
-
-    area.update(cx, |area, cx| {
-        area.set_zoomed_out(window, cx);
-        area.set_center(center, window, cx);
-        for (placement, dock) in docks {
-            let Some((node, size, open)) = dock else {
-                area.remove_dock(placement, window, cx);
-                continue;
-            };
-            area.set_dock(placement, node, window, cx);
-            area.set_dock_size(placement, px(size), window, cx);
-            if area.is_dock_open(placement) != open {
-                area.toggle_dock(placement, window, cx);
-            }
-        }
-        // 锁住只禁拖动和放下，开合与拖宽照常。
-        area.set_locked(true, window, cx);
-    });
-    let shell = ShellLayout {
-        id,
-        layout,
-        panels,
-        plugins,
-    };
-    cx.set_global(StageBackdrop(
-        shell.backdrop_of(&Component::Stage).is_some(),
-    ));
-    shell
-}
-
-/// 搭一套布局时手里的东西：上一套留下、可以复用的面板，存过的状态，和建新面板要用的窗口、Dock。
-struct Builder<'a> {
-    workspace: WeakEntity<Workspace>,
-    area: WeakEntity<DockArea>,
-    panels: HashMap<Component, Arc<dyn BasePanelView>>,
-    plugins: HashMap<Component, Entity<PluginPanel>>,
-    /// 没摆进布局的插件面板，`plugin:*` 展开成它们。
-    unplaced: Vec<PluginPanelRef>,
-    state: Option<LayoutState>,
-    window: &'a mut Window,
-}
-
-impl<'a> Builder<'a> {
-    fn new(
-        workspace: WeakEntity<Workspace>,
-        area: &Entity<DockArea>,
-        panels: HashMap<Component, Arc<dyn BasePanelView>>,
-        plugins: HashMap<Component, Entity<PluginPanel>>,
-        window: &'a mut Window,
-    ) -> Self {
+impl Default for ShellLayout {
+    fn default() -> Self {
         Self {
-            workspace,
-            area: area.downgrade(),
-            panels,
-            plugins,
-            unplaced: Vec::new(),
-            state: None,
-            window,
-        }
-    }
-
-    /// 插件面板对齐到这套布局和眼下挂着的插件：用不到的释放，插件重新加载过的重建。
-    /// 面板本身在 `build_node` 摆到哪儿就在哪儿建。
-    fn sync_plugins(&mut self, layout: &Layout, cx: &mut App) {
-        self.unplaced = if layout.components().contains(&&Component::OtherPlugins) {
-            crate::plugins::declared()
-                .into_iter()
-                .filter(|target| !layout.mentions_plugin_panel(&target.plugin, &target.panel))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let wanted: HashSet<Component> = layout
-            .plugin_panels()
-            .into_iter()
-            .cloned()
-            .chain(self.unplaced.iter().cloned())
-            .map(Component::Plugin)
-            .collect();
-
-        let stale: Vec<Component> = self
-            .plugins
-            .keys()
-            .filter(|component| !wanted.contains(component))
-            .cloned()
-            .collect();
-        for component in stale {
-            if let Some(panel) = self.plugins.remove(&component) {
-                self.panels.remove(&component);
-                panel.update(cx, |panel, cx| panel.release(self.window, cx));
-            }
-        }
-        for panel in self.plugins.values() {
-            panel.update(cx, |panel, cx| panel.refresh(&self.area, self.window, cx));
-        }
-    }
-
-    /// 取一个插件面板，没有就建。`title` 是布局给的标题，复用的面板也换上它。
-    fn plugin(
-        &mut self,
-        target: &PluginPanelRef,
-        title: Option<String>,
-        cx: &mut App,
-    ) -> Arc<dyn BasePanelView> {
-        let component = Component::Plugin(target.clone());
-        let plugin = match self.plugins.get(&component) {
-            Some(panel) => {
-                panel.update(cx, |panel, cx| panel.set_title(title, cx));
-                panel.clone()
-            }
-            None => {
-                let panel = PluginPanel::new(
-                    self.workspace.clone(),
-                    target.clone(),
-                    title,
-                    &self.area,
-                    self.window,
-                    cx,
-                );
-                self.plugins.insert(component.clone(), panel.clone());
-                panel
-            }
-        };
-        self.panels
-            .entry(component)
-            .or_insert_with(|| panel_handle(plugin))
-            .clone()
-    }
-
-    fn builtin(&mut self, builtin: Builtin, cx: &mut App) -> Arc<dyn BasePanelView> {
-        let workspace = self.workspace.clone();
-        self.panels
-            .entry(builtin.component())
-            .or_insert_with(|| panel_handle(cx.new(|cx| ShellPanel::new(workspace, builtin, cx))))
-            .clone()
-    }
-
-    /// 搭一个节点，顺带给出它最左上那块面板的键（认拆分用）。空的标签组（`plugin:*`
-    /// 一个插件都没有）和因此空掉的拆分不搭；只剩一个子节点的拆分直接换成那个子节点。
-    fn build_node(&mut self, node: &Node, cx: &mut App) -> Option<(DockLayout, String)> {
-        match node {
-            Node::Split { axis, children } => {
-                let mut built = Vec::new();
-                for (child, size) in children {
-                    if let Some((node, key)) = self.build_node(child, cx) {
-                        built.push((node, key, *size));
-                    }
-                }
-                if built.len() <= 1 {
-                    return built.pop().map(|(node, key, _)| (node, key));
-                }
-                let keys: Vec<String> = built.iter().map(|(_, key, _)| key.clone()).collect();
-                let saved = self.state.as_ref().and_then(|state| {
-                    state
-                        .splits
-                        .iter()
-                        .find(|split| split.children == keys)
-                        .map(|split| split.sizes.clone())
-                });
-                let split = match axis {
-                    Axis::Row => DockLayout::h_split(),
-                    Axis::Column => DockLayout::v_split(),
-                };
-                let split =
-                    built
-                        .into_iter()
-                        .enumerate()
-                        .fold(split, |split, (ix, (node, _, size))| {
-                            let size = saved.as_ref().map_or(size, |sizes| sizes[ix]);
-                            split.child(node, size.map(px))
-                        });
-                Some((split, keys[0].clone()))
-            }
-            Node::Tabs { tabs, active } => {
-                let mut entries: Vec<(Arc<dyn BasePanelView>, String)> = Vec::new();
-                let mut declared_active = None;
-                for (ix, Tab { component, title }) in tabs.iter().enumerate() {
-                    if ix == *active {
-                        declared_active = Some(entries.len());
-                    }
-                    match component {
-                        Component::OtherPlugins => {
-                            for target in self.unplaced.clone() {
-                                let key = Component::Plugin(target.clone()).key();
-                                entries.push((self.plugin(&target, None, cx), key));
-                            }
-                        }
-                        Component::Plugin(target) => {
-                            entries.push((self.plugin(target, title.clone(), cx), component.key()));
-                        }
-                        builtin => {
-                            let builtin = Builtin::of(builtin).unwrap_or_else(|| {
-                                panic!("内置组件 `{}` 没有面板", builtin.name())
-                            });
-                            entries.push((self.builtin(builtin, cx), component.key()));
-                        }
-                    }
-                }
-                let first_key = entries.first()?.1.clone();
-                let saved_active = self.state.as_ref().and_then(|state| {
-                    entries
-                        .iter()
-                        .position(|(_, key)| state.active.contains(key))
-                });
-                let active = saved_active
-                    .or(declared_active)
-                    .filter(|ix| *ix < entries.len())
-                    .unwrap_or(0);
-                let group = entries
-                    .into_iter()
-                    .fold(DockLayout::tabs(), |group, (panel, _)| {
-                        group.panel_view(panel, cx)
-                    });
-                Some((group.active_index(active), first_key))
-            }
+            id: layout_files::DEFAULT_ID.to_string(),
+            file: LayoutFile::default_layout(),
         }
     }
 }
 
 /// 全部布局：用户布局目录里的，再加上已挂载插件带的。读文件，只在启动、打开命令面板这类
-/// 事件里调，不在 render 里。App 不带布局：默认布局写在代码里。
-fn discover_layouts() -> Vec<LayoutEntry> {
-    let mut entries = layout::user_layout_dir()
-        .map(|dir| layout::discover(&dir))
+/// 事件里调，不在 render 里。默认布局写在代码里，不在这里面。
+pub(crate) fn discover_layouts() -> Vec<LayoutEntry> {
+    let mut entries = layout_files::user_layout_dir()
+        .map(|dir| layout_files::discover(&dir))
         .unwrap_or_default();
     entries.extend(crate::plugins::layouts());
     entries
 }
 
+/// 这套布局存过的状态，和库里那段原文。文件改过（指纹对不上）、格式不认识都当没存过。
+fn saved_state(id: &str, file: &LayoutFile) -> Option<(DockAreaState, String)> {
+    let record = match smelt_client_store::client_store().and_then(|store| store.layout_state(id)) {
+        Ok(record) => record?,
+        Err(error) => {
+            eprintln!("[layout] 读布局 `{id}` 的存档失败：{error}");
+            return None;
+        }
+    };
+    let state = layout_files::saved_state(&record, file)?;
+    Some((state, record.state))
+}
+
+/// 订阅整个工作台的 Dock：树改了重算舞台、存档；放大、还原只发通知，同步显示。
+pub(crate) fn watch_shell_dock(
+    area: &Entity<DockArea>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Vec<Subscription> {
+    vec![
+        cx.subscribe_in(area, window, |this, _, event: &DockEvent, window, cx| {
+            if matches!(event, DockEvent::LayoutChanged) {
+                this.shell_layout_changed(window, cx);
+            }
+        }),
+        cx.observe_in(area, window, |this, _, window, cx| {
+            this.sync_layout_visibility(window, cx);
+        }),
+    ]
+}
+
 impl Workspace {
+    /// 启动时装上次用的布局。没有、读不出来或不合法就装默认布局并提示，库里记着的选择不改：
+    /// 布局文件修好了，下次启动还是它。插件必须已经挂载（`plugins::mount_all`），工作台必须
+    /// 已经建好（内置面板要订阅它），所以由 `Workspace::new` 推迟到建完再调。
+    pub(crate) fn install_initial_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (id, file) = match self.layout_choice.clone() {
+            None => (
+                layout_files::DEFAULT_ID.to_string(),
+                LayoutFile::default_layout(),
+            ),
+            Some(id) => match self.layout_catalog.iter().find(|entry| entry.id == id) {
+                Some(LayoutEntry {
+                    layout: Ok(file), ..
+                }) => (id, file.clone()),
+                found => {
+                    let reason = match found {
+                        Some(LayoutEntry {
+                            path,
+                            layout: Err(error),
+                            ..
+                        }) => format!("{}：{error}", path.display()),
+                        _ => "布局文件不在了".to_string(),
+                    };
+                    crate::status_item::notify_error(format!(
+                        "上次用的布局 `{id}` 没有加载，先用默认布局（{reason}）"
+                    ));
+                    (
+                        layout_files::DEFAULT_ID.to_string(),
+                        LayoutFile::default_layout(),
+                    )
+                }
+            },
+        };
+        self.load_layout(id, file, true, window, cx);
+    }
+
     /// 重读布局目录。读文件，只在打开命令面板、切换这类事件里调，不在 render 里。
     pub(crate) fn reload_layout_catalog(&mut self) {
         self.layout_catalog = discover_layouts();
     }
 
-    /// 命令面板里和布局有关的条目。只读缓存的目录。
-    pub(crate) fn layout_palette_entries(&self) -> Vec<(String, crate::Cmd)> {
+    /// 命令面板里和布局有关的条目。只读缓存的目录和 Dock。
+    pub(crate) fn layout_palette_entries(&self, cx: &App) -> Vec<(String, crate::Cmd)> {
+        let current = &self.shell_layout.id;
         let mut entries = Vec::new();
         for entry in &self.layout_catalog {
-            if entry.id == self.shell_layout.id {
+            if &entry.id == current {
                 continue;
             }
             let label = match &entry.layout {
-                Ok(layout) => format!("切换布局：{}", layout.name),
+                Ok(_) => format!("切换布局：{}", entry.id),
                 Err(_) => format!("切换布局：{}（有错误）", entry.id),
             };
-            entries.push((label, crate::Cmd::SwitchLayout(entry.id.clone())));
+            entries.push((
+                label,
+                layout_cmd(LayoutCommand::Switch {
+                    layout: entry.id.clone(),
+                }),
+            ));
         }
-        if self.shell_layout.id != layout::DEFAULT_ID {
-            entries.push(("恢复默认布局".to_string(), crate::Cmd::RestoreDefaultLayout));
+        if current != layout_files::DEFAULT_ID {
+            entries.push((
+                "切换到默认布局".to_string(),
+                layout_cmd(LayoutCommand::Switch {
+                    layout: layout_files::DEFAULT_ID.to_string(),
+                }),
+            ));
+        }
+        entries.push(("重置当前布局".to_string(), layout_cmd(LayoutCommand::Reset)));
+        entries.push((
+            "复制当前布局".to_string(),
+            layout_cmd(LayoutCommand::Copy { layout: None }),
+        ));
+        // 布局里没有的面板：内置的（舞台只能布局文件里摆）和插件声明的。
+        let area = self.shell_dock.read(cx);
+        let absent = |name: &str| workspace_shell::find_panel(area, name, cx).is_none();
+        let builtins = Builtin::ALL
+            .into_iter()
+            .filter(|&builtin| builtin != Builtin::Stage)
+            .map(|builtin| (builtin.name().to_string(), builtin.title().to_string()));
+        let plugins = crate::plugins::declared()
+            .into_iter()
+            .map(|target| (target.registered_name.to_string(), target.title));
+        for (name, title) in builtins.chain(plugins) {
+            if absent(&name) {
+                entries.push((
+                    format!("添加面板：{title}"),
+                    layout_cmd(LayoutCommand::Add {
+                        panel: name,
+                        to: None,
+                    }),
+                ));
+            }
         }
         entries
     }
 
-    /// 切到目录里的一套布局。每次都重读文件，改过的布局再切一次就生效。
-    /// 不合法就不动当前布局，提示原因。
+    /// 切到一套布局。用户和插件的每次都重读文件，改过的布局再切一次就生效；不合法就不动
+    /// 当前布局，提示原因。
     pub(crate) fn switch_layout(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.reload_layout_catalog();
-        let Some(entry) = self.layout_catalog.iter().find(|entry| entry.id == id) else {
-            crate::status_item::notify_error(format!("找不到布局 `{id}`"));
-            return;
-        };
-        let LayoutEntry { id, path, layout } = entry.clone();
-        match layout {
-            Ok(layout) => self.apply_layout(id, layout, window, cx),
-            Err(error) => crate::status_item::notify_error(format!(
-                "布局 `{id}` 没有加载（{}）：{error}",
-                path.display()
-            )),
+        match self.find_layout_file(id) {
+            Ok(file) => self.apply_layout(id.to_string(), file, true, window, cx),
+            Err(error) => crate::status_item::notify_error(error),
         }
     }
 
-    pub(crate) fn restore_default_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.apply_layout(
-            layout::DEFAULT_ID.to_string(),
-            Layout::default_layout(),
-            window,
-            cx,
-        );
+    /// 重读目录，按 id 找布局文件。默认布局写在代码里。
+    fn find_layout_file(&mut self, id: &str) -> Result<LayoutFile, String> {
+        if id == layout_files::DEFAULT_ID {
+            return Ok(LayoutFile::default_layout());
+        }
+        self.reload_layout_catalog();
+        let entry = self
+            .layout_catalog
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| format!("找不到布局 `{id}`"))?;
+        entry
+            .layout
+            .clone()
+            .map_err(|error| format!("布局 `{id}` 没有加载（{}）：{error}", entry.path.display()))
     }
 
-    /// 装一套布局，记下选的是哪套（默认布局记成没选）。
+    /// 装一套布局，记下选的是哪套（默认布局记成没选）。`use_saved` 为 false 时不看存档，
+    /// 按文件装：装完的第一次存档就盖掉旧的，这就是重置。
     fn apply_layout(
         &mut self,
         id: String,
-        layout: Layout,
+        file: LayoutFile,
+        use_saved: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let panels = std::mem::take(&mut self.shell_layout.panels);
-        let plugins = std::mem::take(&mut self.shell_layout.plugins);
-        let area = self.shell_dock.clone();
-        let builder = Builder::new(cx.weak_entity(), &area, panels, plugins, window);
-        self.shell_layout = install(builder, &area, id, layout, cx);
-        // 装的时候已经按存档搭好，Dock 现在的样子就是库里的，不用再写一遍。
-        self.layout_state_written = Some(
-            self.shell_layout
-                .capture_state(self.shell_dock.read(cx), cx)
-                .to_json(),
-        );
-        self.layout_choice =
-            (self.shell_layout.id != layout::DEFAULT_ID).then(|| self.shell_layout.id.clone());
+        self.layout_choice = (id != layout_files::DEFAULT_ID).then(|| id.clone());
+        self.load_layout(id, file, use_saved, window, cx);
         self.save_state(cx);
-        // 背景跟着布局换：复用的面板（插件面板、舞台里的终端）各自缓存着内容，
-        // 只通知工作台不会重画它们，整窗刷新一次。
-        window.refresh();
         cx.notify();
     }
 
-    /// Dock 布局变了（开合、拖宽、拖拆分、换标签）：存进这套布局的状态。和上次写的一样就不写。
-    pub(crate) fn save_layout_state(&mut self, cx: &mut Context<Self>) {
-        let state = self
-            .shell_layout
-            .capture_state(self.shell_dock.read(cx), cx)
-            .to_json();
+    /// 把布局装进 Dock。舞台、存档、显示由装完发出的 `LayoutChanged` 跟上。
+    fn load_layout(
+        &mut self,
+        id: String,
+        file: LayoutFile,
+        use_saved: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = use_saved.then(|| saved_state(&id, &file)).flatten();
+        let (state, written) = match saved {
+            Some((state, text)) => (state, Some(text)),
+            None => (file.state.clone(), None),
+        };
+        self.shell_layout = ShellLayout { id, file };
+        // 按存档装的，装完 dump 出来和库里一样就不用再写。
+        self.layout_state_written = written;
+        self.load_shell_state(state, window, cx);
+    }
+
+    fn load_shell_state(
+        &mut self,
+        state: DockAreaState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let area = self.shell_dock.clone();
+        if let Err(error) = workspace_shell::load(&area, cx.weak_entity(), state, window, cx) {
+            crate::status_item::notify_error(format!(
+                "布局 `{}` 没装上：{error:#}",
+                self.shell_layout.id
+            ));
+        }
+    }
+
+    /// Dock 的树改了：舞台按新树重算，存档，同步显示，告诉插件。
+    fn shell_layout_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let specs: Vec<StageSpec> = workspace_shell::shell_panels(self.shell_dock.read(cx))
+            .into_iter()
+            .filter_map(|(panel, entity)| {
+                let shell = entity.read(cx);
+                (shell.builtin() == Builtin::Stage).then(|| StageSpec {
+                    id: workspace_shell::stage_id(&entity),
+                    accepts: Accepts::from_info(shell.info()),
+                    panel,
+                })
+            })
+            .collect();
+        self.stages.set_specs(specs);
+        // 舞台换了：焦点、各块显示什么按新树的 `accepts` 重新理。
+        self.settle_stages(cx);
+        self.save_layout_state(cx);
+        self.sync_layout_visibility(window, cx);
+        self.publish_to_plugins(cx);
+        cx.notify();
+    }
+
+    /// 把 Dock 现在的样子（`dump()` 原样）存进库。和上次写的一样就不写。
+    pub(crate) fn save_layout_state(&mut self, cx: &App) {
+        let state = layout_files::to_text(&self.shell_dock.read(cx).dump(cx));
         if self.layout_state_written.as_deref() == Some(state.as_str()) {
             return;
         }
         let record = LayoutStateRecord {
             layout_id: self.shell_layout.id.clone(),
-            file_digest: self.shell_layout.layout.digest.clone(),
+            file_digest: self.shell_layout.file.digest.clone(),
             state: state.clone(),
         };
         match smelt_client_store::client_store().and_then(|store| store.put_layout_state(&record)) {
@@ -599,42 +302,272 @@ impl Workspace {
         }
     }
 
-    /// 窗口变窄时把展开的侧停靠区收窄，给中间留够 `MIN_WORKSPACE_CONTENT_WIDTH`：
-    /// Dock 不会自己按窗口收。先收右边，再收左边，最窄收到 `MIN_SIDE_DOCK_WIDTH`。
-    /// 收窄会发布局变化，跟着存下来：Dock 上的宽度就是唯一的宽度。
-    pub(crate) fn fit_docks_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let viewport = f32::from(window.viewport_size().width);
-        self.shell_dock.update(cx, |area, cx| {
-            let open_width = |area: &DockArea, placement| {
-                if area.is_dock_open(placement) {
-                    area.dock_size(placement).map_or(0., f32::from)
+    /// 哪些面板看得见变了：刚露出来的内置页刷一次缓存，有焦点的舞台露出来时把正在看的
+    /// 会话标成看过；再把 `layout()` 发给插件。插件面板显示与否由 Dock 自己告诉它。
+    pub(crate) fn sync_layout_visibility(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let area = self.shell_dock.read(cx);
+        let shown = workspace_shell::shown_panels(area);
+        let displayed: HashSet<Builtin> = workspace_shell::shell_panels(area)
+            .into_iter()
+            .filter(|(panel, _)| shown.contains(panel))
+            .map(|(_, entity)| entity.read(cx).builtin())
+            .collect();
+        let changed = shown != self.shell_shown;
+        let revealed = displayed.difference(&self.shell_displayed).next().is_some();
+        self.shell_shown = shown;
+        self.shell_displayed = displayed;
+        if revealed {
+            self.schedule_visible_refresh(cx);
+        }
+        // 舞台被挡着时正在看的会话不算看过；露出来这一刻补标。
+        if changed && self.focused_stage_shown() {
+            self.mark_visible_session_read(cx);
+        }
+        self.publish_layout(window, cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// 把 `layout()` 发给插件。内容没变不叫醒插件；红黄绿按钮全屏时会藏起来，窗口变化时也调。
+    pub(crate) fn publish_layout(&self, window: &Window, cx: &App) {
+        crate::plugins::set_layout(self.layout_snapshot(window, cx));
+    }
+
+    /// 给插件的 `layout()`：Dock 的树，贴角的是哪组。
+    fn layout_snapshot(&self, window: &Window, cx: &App) -> LayoutSnapshot {
+        let area = self.shell_dock.read(cx);
+        let shown = &self.shell_shown;
+        let names = |node: NodeId| {
+            workspace_shell::group_panels(area, node).map(|panels| {
+                panels
+                    .iter()
+                    .filter_map(|&panel| area.panel(panel))
+                    .map(|panel| workspace_shell::layout_name(panel, cx))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let dock = |placement: DockPlacement| {
+            area.layout(placement).map(|tree| LayoutDock {
+                open: area.is_dock_open(placement),
+                root: node_info(area, tree.root(), shown, cx),
+            })
+        };
+        let slots = ChromeSlots::of(area);
+        LayoutSnapshot {
+            id: self.shell_layout.id.clone(),
+            center: area
+                .layout(DockPlacement::Center)
+                .map(|tree| node_info(area, tree.root(), shown, cx)),
+            left: dock(DockPlacement::Left),
+            right: dock(DockPlacement::Right),
+            bottom: dock(DockPlacement::Bottom),
+            zoomed: area.zoomed_group().and_then(names),
+            top_left: slots.top_left.and_then(names),
+            top_right: slots.top_right.and_then(names),
+            lights: f32::from(workspace_shell::lights_width(window)),
+        }
+    }
+
+    /// Esc：还原放大的组。没放大着返回 false。
+    pub(crate) fn unzoom_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.shell_dock.read(cx).is_zoomed() {
+            return false;
+        }
+        self.shell_dock
+            .update(cx, |area, cx| area.set_zoomed_out(window, cx));
+        true
+    }
+
+    /// 布局命令：插件经 `run("layout.…", args)` 发来的，和命令面板里的。
+    pub(crate) fn run_layout_command(
+        &mut self,
+        command: LayoutCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = match command {
+            LayoutCommand::Select { panel } => self.panel_named(&panel, cx).map(|id| {
+                self.reveal_panel(id, window, cx);
+            }),
+            LayoutCommand::Zoom { panel } => self.panel_named(&panel, cx).map(|id| {
+                self.toggle_zoom(id, window, cx);
+            }),
+            LayoutCommand::Add { panel, to } => self.add_panel(&panel, to.as_deref(), window, cx),
+            LayoutCommand::Focus { id } => {
+                if self.stages.panel_of(&id).is_some() {
+                    self.focus_stage(&id, window, cx);
+                    Ok(())
                 } else {
-                    0.
-                }
-            };
-            let mut excess = open_width(area, DockPlacement::Left)
-                + open_width(area, DockPlacement::Right)
-                + crate::MIN_WORKSPACE_CONTENT_WIDTH
-                - viewport;
-            for placement in [DockPlacement::Right, DockPlacement::Left] {
-                if excess <= 0. {
-                    break;
-                }
-                let width = open_width(area, placement);
-                let target = (width - excess).max(MIN_SIDE_DOCK_WIDTH);
-                if target < width {
-                    area.set_dock_size(placement, px(target), window, cx);
-                    excess -= width - target;
+                    Err(format!("布局里没有舞台 `{id}`"))
                 }
             }
+            LayoutCommand::ToggleDock { dock } => self.toggle_dock(dock, window, cx),
+            LayoutCommand::Switch { layout } => {
+                self.switch_layout(&layout, window, cx);
+                Ok(())
+            }
+            LayoutCommand::Reset => {
+                let id = self.shell_layout.id.clone();
+                self.find_layout_file(&id)
+                    .map(|file| self.apply_layout(id, file, false, window, cx))
+            }
+            LayoutCommand::Copy { layout } => {
+                let from = layout.unwrap_or_else(|| self.shell_layout.id.clone());
+                self.copy_layout(&from, window, cx)
+            }
+        };
+        if let Err(error) = result {
+            crate::status_item::notify_error(error);
+        }
+    }
+
+    fn panel_named(&self, name: &str, cx: &App) -> Result<PanelId, String> {
+        workspace_shell::find_panel(self.shell_dock.read(cx), name, cx)
+            .ok_or_else(|| format!("布局里没有面板 `{name}`"))
+    }
+
+    /// 放大这块面板所在的组；已经放大的是这组就还原。放大前先让它露出来。
+    fn toggle_zoom(&mut self, panel: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+        let area = self.shell_dock.read(cx);
+        let Some(group) = workspace_shell::group_of(area, panel) else {
+            return;
+        };
+        if area.zoomed_group() == Some(group) {
+            self.shell_dock
+                .update(cx, |area, cx| area.set_zoomed_out(window, cx));
+            return;
+        }
+        self.reveal_panel(panel, window, cx);
+        self.shell_dock
+            .update(cx, |area, cx| area.set_zoomed_in(group, window, cx));
+    }
+
+    /// 开合官方的一块 dock。布局没有这块 dock 时提示。
+    fn toggle_dock(
+        &mut self,
+        dock: LayoutDockSide,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let placement = dock.placement();
+        if !self.shell_dock.read(cx).has_dock(placement) {
+            return Err(format!("这套布局没有 {} 这块 dock", dock.name()));
+        }
+        self.shell_dock
+            .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
+        Ok(())
+    }
+
+    /// 把布局里没有的面板加进来：给了 `to` 进它那一组，不然在中间的树最右边另起一组。
+    /// 已经有了就切过去。
+    fn add_panel(
+        &mut self,
+        name: &str,
+        to: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Ok(existing) = self.panel_named(name, cx) {
+            self.reveal_panel(existing, window, cx);
+            return Ok(());
+        }
+        let target = match to {
+            Some(to) => {
+                let beside = self.panel_named(to, cx)?;
+                let node = workspace_shell::group_of(self.shell_dock.read(cx), beside)
+                    .ok_or_else(|| format!("布局里没有面板 `{to}`"))?;
+                InsertTarget::Tabs {
+                    node,
+                    ix: None,
+                    activate: true,
+                }
+            }
+            None => InsertTarget::Split {
+                node: self
+                    .shell_dock
+                    .read(cx)
+                    .layout(DockPlacement::Center)
+                    .map(|tree| tree.root().id())
+                    .ok_or("布局还没装好")?,
+                placement: gpui_component::Placement::Right,
+                size: None,
+            },
+        };
+        let panel = self.build_panel(name, window, cx)?;
+        let id = panel.panel_id(cx);
+        self.shell_dock.update(cx, |area, cx| {
+            // Dock 只能先把面板放进某一组，再挪到要去的地方。
+            area.add_panel_view(panel, DockPlacement::Center, None, window, cx);
+            area.move_panel(id, target, window, cx);
         });
+        self.reveal_panel(id, window, cx);
+        Ok(())
+    }
+
+    /// 按面板名新建一块面板：内置的直接建，插件的经 Dock 的注册表建（和装布局时一样）。
+    fn build_panel(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<std::sync::Arc<dyn BasePanelView>, String> {
+        if let Some(builtin) = Builtin::from_name(name) {
+            return Ok(workspace_shell::new_builtin(cx.weak_entity(), builtin, cx));
+        }
+        let Some((plugin, panel)) = workspace_shell::plugin_panel(name) else {
+            return Err(format!("不认识的面板 `{name}`"));
+        };
+        let target = crate::plugins::panel_target(plugin, panel)?;
+        let state = PanelState {
+            panel_name: target.registered_name.to_string(),
+            children: Vec::new(),
+            info: PanelInfo::panel(Value::Null),
+        };
+        let context = PanelBuildContext::new(self.shell_dock.downgrade(), &state, &state.info);
+        PanelRegistry::build_panel(target.registered_name, context, window, cx)
+            .ok_or_else(|| workspace_shell::unbuilt_reason(name))
+    }
+
+    /// 把一套布局复制到用户布局目录，复制完切过去。当前这套复制的是 Dock 现在的样子，
+    /// 别的复制文件。默认布局也能复制，拿它当起点改。
+    fn copy_layout(
+        &mut self,
+        from: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let dir = layout_files::user_layout_dir().ok_or("找不到 smelt 的主目录，没法复制布局")?;
+        let text = if from == self.shell_layout.id {
+            layout_files::to_text(&self.shell_dock.read(cx).dump(cx))
+        } else if from == layout_files::DEFAULT_ID {
+            layout_files::DEFAULT_LAYOUT.to_string()
+        } else {
+            self.reload_layout_catalog();
+            let entry = self
+                .layout_catalog
+                .iter()
+                .find(|entry| entry.id == from)
+                .ok_or_else(|| format!("找不到布局 `{from}`"))?;
+            std::fs::read_to_string(&entry.path)
+                .map_err(|error| format!("读不了 {}：{error}", entry.path.display()))?
+        };
+        let id = layout_files::copy_id(from, |id| dir.join(format!("{id}.json")).exists());
+        let path = dir.join(format!("{id}.json"));
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, text))
+            .map_err(|error| format!("写不了 {}：{error}", path.display()))?;
+        self.switch_layout(&id, window, cx);
+        crate::status_item::notify_success(format!("已复制到 {}", path.display()));
+        Ok(())
     }
 
     /// 插件重新加载（`plugins::mount_all`）之后调。`imported` 是刚导入的插件：它带了布局就
     /// 直接换上（多套时用按 id 排第一的），装上就生效，不用再去命令面板里找。
     ///
-    /// 没有要换的时候：当前布局是插件带的而插件已经删了，回到默认布局；当前布局文件改过，
-    /// 按新文件重装（插件作者改完点「重新加载」就能看到）；否则只把插件面板换成新脚本建的。
+    /// 没有要换的时候：当前布局是插件带的而插件已经删了，回到默认布局；布局文件改过就按新
+    /// 文件装；否则把 Dock 现在的样子 dump 出来再装回去，插件面板换成新脚本建的，内置面板
+    /// 和点出来的样子照旧。
     pub(crate) fn plugins_reloaded(
         &mut self,
         imported: Option<&str>,
@@ -645,16 +578,15 @@ impl Workspace {
         let brought = imported.and_then(|plugin| {
             self.layout_catalog
                 .iter()
-                .find(|entry| layout::layout_plugin(&entry.id) == Some(plugin))
+                .find(|entry| layout_files::layout_plugin(&entry.id) == Some(plugin))
                 .cloned()
         });
         if let Some(LayoutEntry { id, path, layout }) = brought {
             match layout {
-                Ok(layout) => {
-                    let name = layout.name.clone();
-                    self.apply_layout(id, layout, window, cx);
+                Ok(file) => {
+                    self.apply_layout(id.clone(), file, true, window, cx);
                     crate::status_item::notify_success(format!(
-                        "已换上布局「{name}」。要换回去，在命令面板里选「恢复默认布局」或别的布局"
+                        "已换上布局「{id}」。要换回去，在命令面板里选「切换到默认布局」或别的布局"
                     ));
                 }
                 Err(error) => crate::status_item::notify_error(format!(
@@ -672,362 +604,111 @@ impl Workspace {
             .find(|entry| entry.id == current)
             .cloned();
         match entry {
-            None if layout::layout_plugin(&current).is_some() => {
-                let name = self.shell_layout.layout.name.clone();
-                self.restore_default_layout(window, cx);
+            None if layout_files::layout_plugin(&current).is_some() => {
+                self.apply_layout(
+                    layout_files::DEFAULT_ID.to_string(),
+                    LayoutFile::default_layout(),
+                    true,
+                    window,
+                    cx,
+                );
                 crate::status_item::notify_success(format!(
-                    "布局「{name}」所属的插件不在了，换回了默认布局"
+                    "布局「{current}」所属的插件不在了，换回了默认布局"
                 ));
             }
             Some(LayoutEntry {
-                id,
-                layout: Ok(layout),
-                ..
-            }) if layout.digest != self.shell_layout.layout.digest => {
-                self.apply_layout(id, layout, window, cx);
+                layout: Ok(file), ..
+            }) if file.digest != self.shell_layout.file.digest => {
+                self.apply_layout(current, file, true, window, cx);
             }
-            _ => self.rebuild_plugin_panels(window, cx),
+            // 默认布局、文件没变，或者文件现在不合法：照现在的样子重装。
+            _ => {
+                let state = self.shell_dock.read(cx).dump(cx);
+                self.load_shell_state(state, window, cx);
+            }
         }
     }
 
-    /// 插件重新加载之后、布局不用换时调：插件面板换成新脚本建的。
-    /// 插件增删会改变 `plugin:*` 展开出来的面板，那就整套重装；否则 Dock 不用重搭。
-    fn rebuild_plugin_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let area = self.shell_dock.clone();
-        let panels = std::mem::take(&mut self.shell_layout.panels);
-        let plugins = std::mem::take(&mut self.shell_layout.plugins);
-        let before: HashSet<Component> = plugins.keys().cloned().collect();
-        let mut builder = Builder::new(cx.weak_entity(), &area, panels, plugins, window);
-        builder.sync_plugins(&self.shell_layout.layout, cx);
-        let unplaced_changed = builder
-            .unplaced
-            .iter()
-            .any(|target| !before.contains(&Component::Plugin(target.clone())))
-            || before.len() != builder.plugins.len();
-        let Builder {
-            panels, plugins, ..
-        } = builder;
-        self.shell_layout.panels = panels;
-        self.shell_layout.plugins = plugins;
-        if unplaced_changed {
-            let id = self.shell_layout.id.clone();
-            let layout = self.shell_layout.layout.clone();
-            self.apply_layout(id, layout, window, cx);
-        }
-        cx.notify();
-    }
-
-    /// 让布局里的一个组件显示出来：放大着就先还原，所在停靠区收着就展开，再选中它。
-    /// 布局里没有这个组件就什么都不做，调用方据 `ShellLayout::places` 决定给不给入口。
-    pub(crate) fn reveal_layout_component(
+    /// 让一块面板露出来：别的组放大着先还原，在收起的 dock 里就打开，再选中它的标签。
+    pub(crate) fn reveal_panel(
         &mut self,
-        component: &Component,
+        panel: PanelId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.shell_layout.panel_id(component, cx) else {
-            return;
-        };
         self.shell_dock.update(cx, |area, cx| {
-            if area.is_zoomed() {
+            let Some(group) = workspace_shell::group_of(area, panel) else {
+                return;
+            };
+            if area.zoomed_group().is_some_and(|zoomed| zoomed != group) {
                 area.set_zoomed_out(window, cx);
             }
-            let placement =
-                SIDE_DOCKS
-                    .into_iter()
-                    .map(|(placement, _)| placement)
-                    .find(|placement| {
-                        area.layout(*placement)
-                            .is_some_and(|tree| tree.find_panel_node(id).is_some())
-                    });
-            if let Some(placement) = placement
+            if let Some(placement) = workspace_shell::placement_of(area, panel)
+                && placement != DockPlacement::Center
                 && !area.is_dock_open(placement)
             {
                 area.toggle_dock(placement, window, cx);
             }
-            area.select_panel(id, window, cx);
+            area.select_panel(panel, window, cx);
         });
-        cx.notify();
     }
 
-    /// 切开或收起一侧停靠区。放大着先还原：放大时停靠区看不见，开关它没有意义。
-    pub(crate) fn toggle_shell_dock(
+    /// 让布局里的一块内置面板露出来（按树的先后取第一块）。布局里没有就什么都不做。
+    pub(crate) fn reveal_builtin(
         &mut self,
-        placement: DockPlacement,
+        builtin: Builtin,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.shell_dock.update(cx, |area, cx| {
-            if area.is_zoomed() {
-                area.set_zoomed_out(window, cx);
-                if area.is_dock_open(placement) {
-                    return;
-                }
-            }
-            if area.has_dock(placement) {
-                area.toggle_dock(placement, window, cx);
-            }
-        });
-        cx.notify();
-    }
-
-    /// 这一侧的停靠区展开着（放大时不算）。
-    pub(crate) fn shell_dock_open(&self, placement: DockPlacement, cx: &App) -> bool {
-        let area = self.shell_dock.read(cx);
-        !area.is_zoomed() && area.is_dock_open(placement)
-    }
-}
-
-/// 窗口变窄时侧停靠区最窄收到多少。
-const MIN_SIDE_DOCK_WIDTH: f32 = 200.;
-
-/// Dock 告诉面板它开始或不再显示（停靠区收起、同组里换了标签、切布局移走）。记在工作台上，
-/// 单独摆出来的工具页签据此决定刷不刷自己的缓存；刚露出来时补一次，和在工具面板里切过去一样。
-///
-/// 推迟到这轮更新结束再写：切布局时 `on_removed` 是在工作台自己的 update 里同步调来的，
-/// 当场再 update 工作台会重入。
-pub(crate) fn set_displayed(
-    workspace: &WeakEntity<Workspace>,
-    component: Component,
-    displayed: bool,
-    cx: &mut App,
-) {
-    let workspace = workspace.clone();
-    cx.defer(move |cx| {
-        let _ = workspace.update(cx, |workspace, cx| {
-            let is_stage = component == Component::Stage;
-            let changed = if displayed {
-                workspace.shell_displayed.insert(component)
-            } else {
-                workspace.shell_displayed.remove(&component)
-            };
-            if changed && displayed {
-                workspace.schedule_visible_refresh(cx);
-                // 舞台被同组别的标签挡着时正在看的会话不算看过；露出来这一刻补标。
-                if is_stage {
-                    workspace.mark_visible_session_read(cx);
-                }
-            }
-        });
-    });
-}
-
-/// 一个插件面板：插件注册的类建出来的面板，外面包一层宿主的底色。标题条和标签由 Dock 画。
-///
-/// 建不出来（没装、没声明、没注册、脚本出错）也照样占着位置，把原因画出来：
-/// 静默消失的面板最难排查。插件重新加载后由 `refresh` 换成新脚本建的，实体不换。
-pub(crate) struct PluginPanel {
-    workspace: WeakEntity<Workspace>,
-    target: PluginPanelRef,
-    /// 布局里写的标题；没写用插件声明的。
-    title: Option<String>,
-    /// 插件在 `smelt.json` 里声明的标题，建的时候取。
-    declared_title: Option<String>,
-    /// 按第几次 `plugins::mount_all` 建的。
-    generation: u64,
-    inner: Result<Arc<dyn BasePanelView>, String>,
-    focus_handle: FocusHandle,
-}
-
-impl PluginPanel {
-    fn new(
-        workspace: WeakEntity<Workspace>,
-        target: PluginPanelRef,
-        title: Option<String>,
-        area: &WeakEntity<DockArea>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Entity<Self> {
-        let (inner, declared_title) = build_plugin_panel(&target, area, window, cx);
-        cx.new(|cx| Self {
-            workspace,
-            target,
-            title,
-            declared_title,
-            generation: crate::plugins::generation(),
-            inner,
-            focus_handle: cx.focus_handle(),
-        })
-    }
-
-    fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
-        if self.title != title {
-            self.title = title;
-            cx.notify();
-        }
-    }
-
-    /// 插件重新加载过就换成新脚本建的面板。
-    fn refresh(
-        &mut self,
-        area: &WeakEntity<DockArea>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let generation = crate::plugins::generation();
-        if self.generation == generation {
-            return;
-        }
-        self.release(window, cx);
-        let (inner, declared_title) = build_plugin_panel(&self.target, area, window, cx);
-        self.inner = inner;
-        self.declared_title = declared_title;
-        self.generation = generation;
-        cx.notify();
-    }
-
-    /// 不再用这个面板：让插件释放它为这份面板留着的东西（脚本侧的 `release`）。
-    /// Dock 把面板移走时不调这个：换布局时同一个面板会被移走再放进新的一套。
-    fn release(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inner = std::mem::replace(&mut self.inner, Err("面板已经释放。".to_string()));
-        if let Ok(inner) = inner {
-            inner.on_removed(window, cx);
-        }
-    }
-
-    fn title_text(&self) -> String {
-        self.title
-            .clone()
-            .or_else(|| self.declared_title.clone())
-            .unwrap_or_else(|| self.target.panel.clone())
-    }
-
-    fn content(&self, cx: &App) -> AnyElement {
-        // 所在区域布局里写了背景就不铺底，让图透出来。
-        let backdrop = self.workspace.upgrade().is_some_and(|workspace| {
-            let component = Component::Plugin(self.target.clone());
-            workspace
-                .read(cx)
-                .shell_layout
-                .backdrop_of(&component)
-                .is_some()
-        });
-        match &self.inner {
-            // 底色由宿主铺，和文件树等内置面板一样是实底的舞台色：主题原色可能带透明度，
-            // 插件自己铺会透出窗口后面的东西。插件只画内容，不画页面底。
-            Ok(inner) => div()
-                .flex_1()
-                .min_h_0()
-                .size_full()
-                .when(!backdrop, |this| this.bg(rgb(ui_theme::bg_stage())))
-                .child(inner.view())
-                .into_any_element(),
-            Err(reason) => {
-                crate::placeholder_view(reason, cx.theme().muted_foreground).into_any_element()
-            }
+        let panel = workspace_shell::shell_panels(self.shell_dock.read(cx))
+            .into_iter()
+            .find(|(_, entity)| entity.read(cx).builtin() == builtin)
+            .map(|(panel, _)| panel);
+        if let Some(panel) = panel {
+            self.reveal_panel(panel, window, cx);
         }
     }
 }
 
-/// 按插件注册的类建一份面板，`props` 交给脚本的 `deserialize`。能不能建看挂着哪些插件、
-/// 它们声明了什么（`plugins::panel_target`），不看 Dock 的注册表：删掉的插件注册过的类还在。
-fn build_plugin_panel(
-    target: &PluginPanelRef,
-    area: &WeakEntity<DockArea>,
-    window: &mut Window,
-    cx: &mut App,
-) -> (Result<Arc<dyn BasePanelView>, String>, Option<String>) {
-    let found = match crate::plugins::panel_target(&target.plugin, &target.panel) {
-        Ok(found) => found,
-        Err(reason) => return (Err(reason), None),
-    };
-    let props = target
-        .props
-        .as_ref()
-        .map_or(serde_json::Value::Null, |props| props.value());
-    let state = PanelState::new(found.registered_name);
-    let info = PanelInfo::panel(props);
-    let context = PanelBuildContext::new(area.clone(), &state, &info);
-    let inner = match PanelRegistry::build_panel(found.registered_name, context, window, cx) {
-        // 注册过、脚本也建出来了。脚本 `build` 抛错时 gpui-shell 给的是一个什么都不画的
-        // 占位面板，认不出 `ScriptPanel` 就是这种。
-        Some(panel)
-            if panel
-                .as_any()
-                .downcast_ref::<Entity<ScriptPanel>>()
-                .is_some() =>
-        {
-            Ok(panel)
-        }
-        Some(_) => Err(format!(
-            "面板 `{}` 的脚本出错了，没有建出来，原因见日志。",
-            target.panel
-        )),
-        None => Err(format!(
-            "插件 `{}` 声明了面板 `{}`，但代码里没有注册：在根视图的 `init()` 里调 \
-             `DockArea.register_panel(\"{}\", 类)`。",
-            target.plugin, target.panel, target.panel
-        )),
-    };
-    if let Err(reason) = &inner {
-        eprintln!("[plugins] {}/{}：{reason}", target.plugin, target.panel);
-    }
-    (inner, Some(found.title))
+fn layout_cmd(command: LayoutCommand) -> crate::Cmd {
+    crate::Cmd::Layout(command)
 }
 
-impl EventEmitter<PanelEvent> for PluginPanel {}
-
-impl Focusable for PluginPanel {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match &self.inner {
-            Ok(inner) => inner.focus_handle(cx),
-            Err(_) => self.focus_handle.clone(),
-        }
-    }
-}
-
-impl BasePanel for PluginPanel {
-    fn panel_name(&self) -> &'static str {
-        "smelt.plugin"
-    }
-
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn zoomable(&self, _: &App) -> bool {
-        true
-    }
-
-    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Ok(inner) = &self.inner {
-            inner.set_active(active, window, cx);
-        }
-        set_displayed(
-            &self.workspace,
-            Component::Plugin(self.target.clone()),
-            active,
-            cx,
-        );
-    }
-
-    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        set_displayed(
-            &self.workspace,
-            Component::Plugin(self.target.clone()),
-            false,
-            cx,
-        );
-    }
-}
-
-impl Panel for PluginPanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.title_text()
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        Some(PanelControl::Toolbar)
-    }
-
-    fn inner_padding(&self, _: &App) -> bool {
-        false
-    }
-}
-
-impl Render for PluginPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 当前项目在不在本机、能不能用，插件经 `context()` 自己看（见 workspace_plugins）。
-        self.content(cx)
+/// Dock 树里的一个节点给插件看的样子。
+fn node_info(
+    area: &DockArea,
+    node: &PaneNode,
+    shown: &HashSet<PanelId>,
+    cx: &App,
+) -> LayoutNodeInfo {
+    match node.kind() {
+        PaneRef::Split { axis, children, .. } => LayoutNodeInfo {
+            kind: match axis {
+                gpui::Axis::Horizontal => "row",
+                gpui::Axis::Vertical => "column",
+            },
+            panels: Vec::new(),
+            active: None,
+            children: children
+                .iter()
+                .map(|child| node_info(area, child, shown, cx))
+                .collect(),
+        },
+        PaneRef::Tabs { panels, active_ix } => LayoutNodeInfo {
+            kind: "tabs",
+            panels: panels
+                .iter()
+                .filter_map(|&id| {
+                    let panel = area.panel(id)?;
+                    Some(LayoutPanelInfo {
+                        name: workspace_shell::layout_name(panel, cx),
+                        title: workspace_shell::panel_text(panel, cx).to_string(),
+                        shown: shown.contains(&id),
+                    })
+                })
+                .collect(),
+            active: Some(active_ix),
+            children: Vec::new(),
+        },
     }
 }

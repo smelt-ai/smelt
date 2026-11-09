@@ -574,7 +574,7 @@ impl Workspace {
                     }),
             )
             .child(match live_view {
-                Some(view) => self.render_product_conversation_view(view, cx),
+                Some(view) => self.render_conversation_surface(view, cx),
                 None => div()
                     .id("automation-run-detail-scroll")
                     .flex_1()
@@ -665,7 +665,7 @@ impl Workspace {
         }
 
         let entity = cx.entity();
-        let left_guard = self.chrome_left_guard(window, cx);
+        let left_guard = self.chrome_left_guard(&WorkspaceRoute::Automations, window, cx);
         let Some(automation) = self.nav.automations().editor().cloned() else {
             return div()
                 .flex_1()
@@ -673,7 +673,6 @@ impl Workspace {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .bg(rgb(crate::ui_theme::bg_stage()))
                 .child(self.render_automations_catalog_header(entity.clone(), left_guard, cx))
                 .child(self.render_automations_catalog(error, entity, cx))
                 .into_any_element();
@@ -832,10 +831,8 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(crate::ui_theme::bg_stage()))
             .child(
                 div()
-                    .bg(rgb(crate::ui_theme::bg_stage()))
                     .border_b_1()
                     .border_color(rgb(crate::ui_theme::border()))
                     .child(header),

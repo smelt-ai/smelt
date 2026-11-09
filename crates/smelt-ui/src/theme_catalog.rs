@@ -3,9 +3,15 @@
 //! 库启动时只带 Default Light / Default Dark。Ayu、Catppuccin 等在这里的
 //! `themes/` 里，随二进制嵌入，不依赖进程的当前目录。Default 不在这些文件里，
 //! `gpui_component::init` 已经装好。
+//!
+//! 插件带的主题不进注册表：注册表同名先到先得、装进去就删不掉，插件改了配色重新加载、
+//! 或者删掉插件，注册表里还是旧的。它们放在 [`PluginThemes`] 里，每次挂载插件整份换掉；
+//! 按名字找时先找内置的，插件的主题不能顶替内置的。
 
-use gpui::{App, Hsla, SharedString};
-use gpui_component::{Theme, ThemeRegistry};
+use std::rc::Rc;
+
+use gpui::{App, Global, Hsla, SharedString};
+use gpui_component::{Theme, ThemeConfig, ThemeRegistry};
 
 use crate::theme_files::THEME_FILES;
 use crate::ui_theme;
@@ -18,15 +24,52 @@ pub struct ThemeSwatch {
     pub accent: Hsla,
 }
 
+/// 插件带的一款主题。
+#[derive(Clone, Debug)]
+pub struct PluginTheme {
+    pub config: Rc<ThemeConfig>,
+    /// 设置页下拉里的系列名：带它的插件的名字。
+    pub family: SharedString,
+}
+
+/// 眼下挂着的插件带的主题，按插件加载顺序。
+#[derive(Default)]
+struct PluginThemes(Vec<PluginTheme>);
+
+impl Global for PluginThemes {}
+
+/// 换上这一批插件的主题。只写内存；正用着的主题要不要重新套，调用方定。
+pub fn set_plugin_themes(themes: Vec<PluginTheme>, cx: &mut App) {
+    cx.set_global(PluginThemes(themes));
+}
+
+/// 插件带的主题，按插件加载顺序。
+pub fn plugin_themes(cx: &App) -> &[PluginTheme] {
+    cx.try_global::<PluginThemes>()
+        .map_or(&[], |themes| themes.0.as_slice())
+}
+
+/// 按名字找主题配置：先内置的，再插件的。
+fn config(name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
+    let key = SharedString::from(name);
+    ThemeRegistry::global(cx)
+        .themes()
+        .get(&key)
+        .cloned()
+        .or_else(|| {
+            plugin_themes(cx)
+                .iter()
+                .find(|theme| theme.config.name == key)
+                .map(|theme| theme.config.clone())
+        })
+}
+
 /// 按名字取一款主题的代表色。颜色由 gpui-kit 自己解析主题配置得出，换上这款主题后
-/// 界面就是这几个色；不另写一套解析。名字不在注册表里时是 `None`。
+/// 界面就是这几个色；不另写一套解析。名字内置的和插件的都找不到时是 `None`。
 ///
 /// 注册表在启动装主题时已经装满（见 [`apply`]），这里只读不装。
 pub fn swatch(name: &str, cx: &App) -> Option<ThemeSwatch> {
-    let config = ThemeRegistry::global(cx)
-        .themes()
-        .get(&SharedString::from(name))?
-        .clone();
+    let config = config(name, cx)?;
     let mut theme = Theme::global(cx).clone();
     theme.apply_config(&config);
     Some(ThemeSwatch {
@@ -36,14 +79,13 @@ pub fn swatch(name: &str, cx: &App) -> Option<ThemeSwatch> {
     })
 }
 
-/// 按名字装上主题，产品色跟着换成这份主题。名字不在目录里时返回 false。
+/// 按名字装上主题，产品色跟着换成这份主题。内置的和插件的都找不到时返回 false。
 pub fn apply(name: &str, cx: &mut gpui::App) -> bool {
     if !cx.has_global::<ThemeRegistry>() || !cx.has_global::<Theme>() {
         return false;
     }
     ensure_loaded(cx);
-    let key = SharedString::from(name);
-    let Some(config) = ThemeRegistry::global(cx).themes().get(&key).cloned() else {
+    let Some(config) = config(name, cx) else {
         return false;
     };
     Theme::update(cx, |theme| {
@@ -108,6 +150,51 @@ mod tests {
                 );
             }
             assert_eq!(swatch("没有这款主题", cx), None);
+        });
+    }
+
+    fn plugin_theme(json: &str, family: &str) -> PluginTheme {
+        PluginTheme {
+            config: Rc::new(serde_json::from_str(json).unwrap()),
+            family: family.into(),
+        }
+    }
+
+    #[gpui::test]
+    fn plugin_themes_apply_by_name_and_go_away_with_the_plugin(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            let traveler = plugin_theme(
+                r##"{"name": "Traveler", "mode": "light", "radius": 2, "colors": {"background": "#f4e4c1"}}"##,
+                "旅人",
+            );
+            set_plugin_themes(vec![traveler], cx);
+            assert!(apply("Traveler", cx));
+            assert!(!cx.global::<Theme>().is_dark());
+            assert_eq!(cx.global::<Theme>().radius, gpui::px(2.));
+            assert!(swatch("Traveler", cx).is_some());
+
+            // 换回内置主题，圆角回到库的默认。
+            assert!(apply("Default Dark", cx));
+            assert_eq!(cx.global::<Theme>().radius, gpui::px(6.));
+
+            set_plugin_themes(Vec::new(), cx);
+            assert!(!apply("Traveler", cx), "插件删掉以后它的主题就没了");
+        });
+    }
+
+    #[gpui::test]
+    fn plugin_themes_cannot_replace_built_in_ones(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            assert!(apply("Default Dark", cx));
+            let built_in = swatch("Ayu Dark", cx).unwrap();
+            let impostor = plugin_theme(
+                r##"{"name": "Ayu Dark", "mode": "dark", "colors": {"background": "#ff0000"}}"##,
+                "冒名",
+            );
+            set_plugin_themes(vec![impostor], cx);
+            assert_eq!(swatch("Ayu Dark", cx), Some(built_in));
         });
     }
 }

@@ -1363,17 +1363,10 @@ impl Render for TerminalView {
         // 配色快照也都取它，四处同源。
         let ap = cx.global::<crate::Appearance>().clone();
         let bg_color = terminal::default_bg();
-        // 舞台所在区域有布局背景时，终端不铺底也不画设置里的背景图，让外层铺的图透出来。
-        let backdrop = cx
-            .try_global::<crate::workspace_layout::StageBackdrop>()
-            .is_some_and(|backdrop| backdrop.0);
         // 终端是最高频的绘制区域。整窗透明度已由 NSWindow 统一处理，这里保持实底，
         // 避免每次终端输出都触发整块窗口的额外 alpha 混合。
-        let mut bg_layer = div()
-            .absolute()
-            .inset_0()
-            .when(!backdrop, |this| this.bg(rgb(bg_color)));
-        if let Some(path) = ap.bg_image.as_ref().filter(|_| !backdrop) {
+        let mut bg_layer = div().absolute().inset_0().bg(rgb(bg_color));
+        if let Some(path) = &ap.bg_image {
             bg_layer = bg_layer.child(crate::workspace_frame::background_image_layer(
                 path,
                 ap.bg_image_opacity,

@@ -53,7 +53,8 @@ impl Workspace {
     ) {
         // 通知目标必须真的露出来：舞台被放大的另一组或同组别的标签挡着时先亮出舞台，
         // 不然 activate 把会话标已读，用户实际看不到它。
-        self.reveal_layout_component(&smelt_client::layout::Component::Stage, window, cx);
+        self.route_session_to_stage(session_ix, cx);
+        self.reveal_focused_stage(window, cx);
         if let Some(pane) = pane
             && let Some(session) = self.sessions.get_mut(session_ix)
         {
@@ -123,18 +124,13 @@ impl Workspace {
             return;
         };
         let target_found = self.goto_notification_session(&session_id, window, cx);
-        if target_found {
-            // 即使目标恰好已经占着 index 0，通知点击也是一次显式选择；否则恢复收口
-            // 可能仍按旧存档活动项把刚跳到的会话覆盖掉。
-            self.active_session_revision = self.active_session_revision.wrapping_add(1);
-        }
         if should_defer_notification_session_jump(self.sessions_restore_settled(), target_found) {
             self.pending_notification_session_id = Some(session_id);
         }
     }
 
     /// 返回该通知对应的会话标题，以及它是否正显示在主舞台上。非会话路由和
-    /// Tool Panel 全屏覆盖层都会遮住活动会话，不能只看 active_session 就判定已在看。
+    /// Tool Panel 全屏覆盖层都会遮住活动会话，不能只看当前会话是谁就判定已在看。
     pub(crate) fn attention_context(
         &self,
         notification: &AttentionItem,

@@ -195,7 +195,7 @@ impl Workspace {
 
     /// ⌘⇧E：把焦点放进侧栏，停在正在看的那一行上；会话列表没露出来就先亮出来。
     pub(crate) fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.reveal_layout_component(&smelt_client::layout::Component::Sessions, window, cx);
+        self.reveal_builtin(crate::workspace_shell::Builtin::Sessions, window, cx);
         let items: Vec<SidebarItem> = self
             .sidebar_items(cx)
             .into_iter()

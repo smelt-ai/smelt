@@ -178,7 +178,7 @@ fn removed_hotspot_tab_migrates_to_changes() {
 
 #[test]
 fn retired_panel_fields_are_ignored_on_restore() {
-    // 停靠区开合、宽度、选中的标签都归 Dock 管，存在布局状态里；旧存档里的这些键直接丢。
+    // 开合、宽度、选中的标签都归布局管，存在布局状态里；旧存档里的这些键直接丢。
     let archive: SessionRouteArchive = serde_json::from_value(serde_json::json!({
         "version": 1,
         "stage_override": "inspector",

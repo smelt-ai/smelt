@@ -14,6 +14,7 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
 
+use crate::workspace_stages::StageShows;
 use crate::{Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
 use smelt_ui::IconAction as _;
 use smelt_ui::truncated_line::truncated_line;
@@ -80,7 +81,7 @@ pub(crate) fn stage_content_drag_band(
     })
 }
 
-/// 铬标题跟可见面走，不读裸的 `active_session`。
+/// 铬标题跟可见面走，不只看当前会话是谁。
 ///
 /// `project_session` 是项目舞台上那条会话；切到智能体目录后它往往还在，
 /// 但不能再显示——那就是「顶栏还停在上一场 Grok」这条 bug。
@@ -97,9 +98,6 @@ pub(crate) fn chrome_title_for_stage(
         }
     }
 }
-
-/// 右上角的右栏开关加上右边距。胶囊居中时让开它，页头按钮和标签也别钻到它下面。
-pub(crate) const CHROME_TOGGLE_RESERVE: f32 = 48.;
 
 /// 静止宽度。胶囊浮在内容第一行正中，左右常是终端自己的路径和用量，只能留一个短名字。
 const CHROME_ISLAND_MAX_WIDTH: f32 = 200.;
@@ -382,62 +380,60 @@ impl Workspace {
         }
     }
 
-    /// 舞台在窗口左上角时，它的页头和胶囊要让开红黄绿按钮和左栏开关；不在就是 0。
-    pub(crate) fn chrome_left_guard(&self, window: &Window, cx: &App) -> Pixels {
-        if !self.chrome_slots(cx).stage_top_left {
-            return px(0.);
-        }
-        let has_left_dock = self
-            .shell_dock
-            .read(cx)
-            .has_dock(gpui_component::dock::DockPlacement::Left);
-        crate::workspace_shell::top_left_guard(window, has_left_dock)
-    }
-
-    /// 舞台在窗口右上角、右栏开关压在它上面时要让开的宽度。
-    fn chrome_right_guard(&self, cx: &App) -> Pixels {
-        let has_right_dock = self
-            .shell_dock
-            .read(cx)
-            .has_dock(gpui_component::dock::DockPlacement::Right);
-        if has_right_dock && self.chrome_slots(cx).stage_top_right {
-            px(CHROME_TOGGLE_RESERVE)
+    /// 放这个页面的舞台单独贴着窗口左上角时，页头要让开红黄绿按钮；不贴就是 0。
+    pub(crate) fn chrome_left_guard(
+        &self,
+        route: &WorkspaceRoute,
+        window: &Window,
+        cx: &App,
+    ) -> Pixels {
+        if self.stage_at_top_left(self.page_stage(route), cx) {
+            crate::workspace_shell::lights_width(window)
         } else {
             px(0.)
         }
     }
 
-    fn chrome_title(&self, cx: &App) -> ChromeTitle {
-        let agent_conversation =
-            self.selected_agent_conversation_view(cx)
-                .map(|(ix, view)| ChromeSessionTitle {
-                    title: Self::title_with_runtime(&self.sessions[ix], cx),
-                    model: view.read(cx).model_name(),
-                    conversation: Some(view),
+    /// 这块舞台上的标题：会话是它的名字和模型，智能体页是打开着的那段对话，别的页面没有。
+    fn chrome_title(&self, shows: &StageShows, cx: &App) -> ChromeTitle {
+        match shows {
+            StageShows::Session(ix) => {
+                let project_session = self.sessions.get(*ix).map(|session| {
+                    let conversation = session.active_acp().cloned();
+                    ChromeSessionTitle {
+                        title: Self::title_with_runtime(session, cx),
+                        model: conversation
+                            .as_ref()
+                            .and_then(|view| view.read(cx).model_name()),
+                        conversation,
+                    }
                 });
-        let project_session = self.sessions.get(self.active_session).and_then(|session| {
-            if session.is_product_conversation(cx) {
-                return None;
+                chrome_title_for_stage(&WorkspaceRoute::Session, None, project_session)
             }
-            let conversation = session.active_acp().cloned();
-            Some(ChromeSessionTitle {
-                title: Self::title_with_runtime(session, cx),
-                model: conversation
-                    .as_ref()
-                    .and_then(|view| view.read(cx).model_name()),
-                conversation,
-            })
-        });
-        chrome_title_for_stage(self.active_tab(), agent_conversation, project_session)
+            StageShows::Page(route) => {
+                let agent_conversation =
+                    self.selected_agent_conversation_view(cx).map(|(ix, view)| {
+                        ChromeSessionTitle {
+                            title: Self::title_with_runtime(&self.sessions[ix], cx),
+                            model: view.read(cx).model_name(),
+                            conversation: Some(view),
+                        }
+                    });
+                chrome_title_for_stage(route, agent_conversation, None)
+            }
+            StageShows::Empty => ChromeTitle::Hidden,
+        }
     }
 
     /// 浮在舞台内容上沿的标题胶囊，和没有页头时的拖窗口条。不占布局高度。
     pub(crate) fn render_stage_chrome(
         &mut self,
+        stage: &str,
+        shows: &StageShows,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let island = match self.chrome_title(cx) {
+        let island = match self.chrome_title(shows, cx) {
             ChromeTitle::Hidden => None,
             ChromeTitle::Visible {
                 title,
@@ -458,15 +454,22 @@ impl Workspace {
                 })
             }
         };
-        let left_guard = self.chrome_left_guard(window, cx);
-        let right_guard = self.chrome_right_guard(cx);
+        let at_top_left = self.stage_at_top_left(stage, cx);
+        let left_guard = if at_top_left {
+            crate::workspace_shell::lights_width(window)
+        } else {
+            px(0.)
+        };
+        let page_header = match shows {
+            StageShows::Page(route) => {
+                stage_has_page_header(route, self.selected_agent_conversation_view(cx).is_some())
+            }
+            StageShows::Session(_) | StageShows::Empty => false,
+        };
         let drag_band = stage_content_drag_band(
-            self.chrome_slots(cx).stage_top_left,
+            at_top_left,
             !workspace_frame::traffic_lights_visible(window),
-            stage_has_page_header(
-                self.active_tab(),
-                self.selected_agent_conversation_view(cx).is_some(),
-            ),
+            page_header,
         );
         div()
             .absolute()
@@ -490,46 +493,13 @@ impl Workspace {
                     .absolute()
                     .top(px(ui_theme::CHROME_ISLAND_TOP_PX))
                     .left(left_guard)
-                    .right(right_guard)
+                    .right_0()
                     .h(px(ui_theme::CHROME_ISLAND_HEIGHT_PX))
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(island)
             }))
-    }
-
-    /// 窗口右上角的右栏开关。布局没有右停靠区就不画。
-    pub(crate) fn render_window_trailing_toggles(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let placement = gpui_component::dock::DockPlacement::Right;
-        if !self.shell_dock.read(cx).has_dock(placement) {
-            return None;
-        }
-        let open = self.shell_dock_open(placement, cx);
-        Some(
-            h_flex()
-                .flex_none()
-                .items_center()
-                // 挂在拖窗口的标签条上：按下先拦住，不让它变成拖窗口。
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    Button::new("right-dock-toggle")
-                        .quiet()
-                        .compact()
-                        .selected(open)
-                        .toggled(open)
-                        .icon(if open {
-                            Icon::empty().path("smelt-icons/panel-right-filled.svg")
-                        } else {
-                            Icon::new(IconName::PanelRight)
-                        })
-                        .accessibility_label("切换右栏")
-                        .tooltip_with_action("切换右栏", &crate::ToggleToolPanel, None)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.toggle_shell_dock(placement, window, cx);
-                        })),
-                ),
-        )
     }
 }
 

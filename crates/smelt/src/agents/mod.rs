@@ -2270,7 +2270,7 @@ pub(crate) fn product_page_chrome(left_guard: Pixels) -> Div {
             .pt(crate::workspace_frame::TOP_BAR_HEIGHT)
             .pb(px(8.))
             .pl(left_guard + px(20.))
-            .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
+            .pr(px(20.))
             .border_b_1()
             .border_color(crate::ui_theme::hairline())
             .flex()

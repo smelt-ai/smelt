@@ -131,7 +131,6 @@ pub struct SidebarOrderRecord {
 /// 侧栏、路由这些界面状态。列表按原顺序存取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceUiRecord {
-    pub active_session: usize,
     /// 当前看的那段对话的稳定 id。
     pub active_session_id: Option<String>,
     pub route: String,
@@ -615,12 +614,11 @@ pub(crate) fn write_workspace_ui(
 ) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO workspace_ui (id, active_session, active_session_id, route,
+            "INSERT OR REPLACE INTO workspace_ui (id, active_session_id, route,
                selected_agent_id, sidebar_grouping, sidebar_hide_empty_projects,
                archive_expanded, layout_id)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
-                record.active_session as i64,
                 record.active_session_id,
                 record.route,
                 record.selected_agent_id,
@@ -853,23 +851,22 @@ impl ClientStore {
         self.with(|connection| {
             let Some(mut record) = connection
                 .query_row(
-                    "SELECT active_session, active_session_id, route, selected_agent_id,
-                       sidebar_grouping, sidebar_hide_empty_projects, archive_expanded, layout_id
+                    "SELECT active_session_id, route, selected_agent_id, sidebar_grouping,
+                       sidebar_hide_empty_projects, archive_expanded, layout_id
                      FROM workspace_ui WHERE id = 1",
                     [],
                     |row| {
                         Ok(WorkspaceUiRecord {
-                            active_session: row.get::<_, i64>(0)? as usize,
-                            active_session_id: row.get(1)?,
-                            route: row.get(2)?,
-                            selected_agent_id: row.get(3)?,
+                            active_session_id: row.get(0)?,
+                            route: row.get(1)?,
+                            selected_agent_id: row.get(2)?,
                             collapsed_projects: Vec::new(),
                             collapsed_agents: Vec::new(),
-                            sidebar_grouping: row.get(4)?,
+                            sidebar_grouping: row.get(3)?,
                             pinned_projects: Vec::new(),
-                            sidebar_hide_empty_projects: row.get(5)?,
-                            archive_expanded: row.get(6)?,
-                            layout_id: row.get(7)?,
+                            sidebar_hide_empty_projects: row.get(4)?,
+                            archive_expanded: row.get(5)?,
+                            layout_id: row.get(6)?,
                         })
                     },
                 )

@@ -43,7 +43,6 @@ CREATE TABLE notify_prefs (
 );
 CREATE TABLE workspace_ui (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  active_session INTEGER NOT NULL CHECK (active_session >= 0),
   active_session_id TEXT,
   route TEXT NOT NULL,
   selected_agent_id TEXT,
@@ -278,8 +277,10 @@ ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
 
 /// v9：工作台的开合、宽度、选中的标签都交给外层 Dock，按布局各存一份「点出来的状态」，
 /// 记下用的是哪套布局。左栏、工具面板旧的开合宽度和舞台覆盖页不再有，旧值直接丢掉，
-/// 不往新表里搬：新表按布局存，旧值对不上任何一棵树。
+/// 不往新表里搬：新表按布局存，旧值对不上任何一棵树。当前会话只按对话 id 认，旧的列表下标
+/// 一起丢掉。
 const MIGRATE_V8_TO_V9: &str = "
+ALTER TABLE workspace_ui DROP COLUMN active_session;
 ALTER TABLE workspace_ui DROP COLUMN sidebar_w;
 ALTER TABLE workspace_ui DROP COLUMN sidebar_open;
 ALTER TABLE workspace_ui ADD COLUMN layout_id TEXT;
@@ -479,8 +480,6 @@ mod legacy {
     #[derive(Deserialize)]
     struct WorkspaceUi {
         #[serde(default)]
-        active_session: usize,
-        #[serde(default)]
         active_session_id: Option<String>,
         #[serde(default = "default_route")]
         route: String,
@@ -611,7 +610,6 @@ mod legacy {
             crate::write_workspace_ui(
                 transaction,
                 &WorkspaceUiRecord {
-                    active_session: old.active_session,
                     active_session_id: old.active_session_id,
                     route: old.route,
                     selected_agent_id: old.selected_agent_id,

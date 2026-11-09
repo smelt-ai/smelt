@@ -5,8 +5,9 @@
 //!
 //! 入口默认导出的视图是插件的根：宿主挂载并持有它（持有着就是插件活着），但不显示。
 //! 插件要显示的东西是面板：在 `smelt.json` 里声明，在根视图的 `init()` 里用
-//! `DockArea.register_panel` 注册，布局按 `plugin:<id>/<面板>` 摆（见
-//! `workspace_layout`）。没被点名摆出来的面板由布局里的 `plugin:*` 收进它所在的标签组。
+//! `DockArea.register_panel` 注册，布局按注册名 `shell:<id>/<面板>` 摆（见
+//! `docs/workspace-layouts.md`）。插件删掉、重新加载后不再注册的面板，换成占位的构建器
+//! （见 `retire_panels`）。
 //!
 //! gpui-shell 不提供「列出某个插件注册了哪些面板」，`gpui-shell.json` 又不收别的字段，
 //! 所以面板清单写在 smelt 自己的 `smelt.json` 里（和 VS Code 的 `contributes.views`
@@ -41,6 +42,7 @@ mod host_fs;
 mod host_workspace;
 mod log;
 mod manage;
+mod themes;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -54,12 +56,14 @@ use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
 
 use host_workspace::{CommandQueue, HostContext, Topic};
 pub(crate) use host_workspace::{
-    CurrentProject, MachineEntry, MachineInfo, ProjectInfo, SessionInfo,
+    CurrentProject, GitSummary, LayoutDock, LayoutNodeInfo, LayoutPanelInfo, LayoutSnapshot,
+    LayoutStage, MachineEntry, MachineInfo, ProjectInfo, SessionInfo,
 };
-use smelt_client::layout::{LayoutEntry, PluginPanelRef};
+
+use crate::layout_files::LayoutEntry;
 
 pub(crate) use log::install as install_log;
-pub(crate) use manage::{import, uninstall, user_plugin_dir};
+pub(crate) use manage::{Conflict, Import, import, uninstall, user_plugin_dir};
 
 /// 用户安装插件的目录（`~/.smelt` 下），也是 App 包里、仓库里放插件的目录名。
 const PLUGIN_DIR: &str = "plugins";
@@ -121,6 +125,8 @@ struct MountedPlugin {
     declared: Result<Declared, String>,
     /// 发给这个插件的命令，等它经 `next_command()` 取走。
     commands: Rc<RefCell<CommandQueue>>,
+    /// 这个插件带的主题里没装上的，和原因。
+    theme_problems: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -171,9 +177,9 @@ struct SmeltCommand {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SmeltPanel {
-    /// 和 `DockArea.register_panel(name, …)` 的 `name` 一致，布局里写 `plugin:<id>/<name>`。
+    /// 和 `DockArea.register_panel(name, …)` 的 `name` 一致，布局里写 `shell:<id>/<name>`。
     name: String,
-    /// 标签上的名字。布局里的 `title` 可以覆盖它。
+    /// 标签上的名字。
     title: String,
 }
 
@@ -259,10 +265,10 @@ pub(crate) struct InstalledPlugin {
 
 /// 发现并挂载全部插件。读盘、执行脚本，只在事件里调用，不在 render 里。
 ///
-/// 工作台创建时调一次，必须先于布局搭建：布局里的插件面板要等插件注册过才建得出来，
-/// `plugin:*` 也要知道有哪些面板。之后设置页
-/// 导入、删除、重新加载插件时再调：旧的插件全部卸载、重新加载，调用方随后让布局重建
-/// 插件面板（`Workspace::rebuild_plugin_panels`）。工作台窗口同一时刻只有一个，`window` 就是它。
+/// 工作台创建时调一次，必须先于布局搭建：布局里的插件面板要等插件注册过才建得出来。
+/// 之后设置页导入、删除、重新加载插件时再调：旧的插件全部卸载、重新加载，调用方随后让
+/// 布局重建插件面板（`Workspace::plugins_reloaded`）。工作台窗口同一时刻只有一个，
+/// `window` 就是它。
 pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     let runtime = match runtime(cx) {
         Ok(runtime) => runtime,
@@ -272,6 +278,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
         }
     };
     // 先卸载已经挂着的插件：上一个窗口留下的，或者这次要重新加载的。
+    retire_panels(cx);
     unmount_all();
 
     let found = discover();
@@ -282,7 +289,8 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
         .collect::<Vec<_>>();
     let capabilities = unrestricted().network_hosts(hosts);
 
-    let plugins: Vec<MountedPlugin> = found
+    let mut offered = Vec::new();
+    let mut plugins: Vec<MountedPlugin> = found
         .into_iter()
         .map(
             |Found {
@@ -296,6 +304,12 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     eprintln!("[plugins] {id}：{error}");
                 }
                 let commands = Rc::new(RefCell::new(CommandQueue::default()));
+                let (themes, theme_problems) = themes::read(&root);
+                offered.push(themes::Offered {
+                    plugin: id.clone(),
+                    plugin_name: manifest.name().to_string(),
+                    themes,
+                });
                 // 开关挂在运行时上、加载时读，所以每个插件加载前按它的来源设一次。
                 runtime.set_editor_files(source.editor_files());
                 // 视图带着默认 Policy 出生：每个插件挂载前换成它自己的一份。
@@ -318,12 +332,22 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     view,
                     declared,
                     commands,
+                    theme_problems,
                 }
             },
         )
         .collect();
     // 插件以外再建的视图不冒用最后一个插件的身份和模块。
     policy::set_default(Policy::new());
+
+    let (themes, refused) = themes::resolve(offered, |name| {
+        smelt_model::theme_index::find(name).is_some()
+    });
+    for (id, problem) in refused {
+        if let Some(plugin) = plugins.iter_mut().find(|plugin| plugin.id == id) {
+            plugin.theme_problems.push(problem);
+        }
+    }
 
     REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
@@ -332,6 +356,10 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     });
     // 插件声明的命令快捷键跟着这一批插件重装。
     crate::keymap::install(cx);
+    // 正用着的可能就是插件的主题：改了配色、插件删了，都要重新套一次。
+    smelt_ui::theme_catalog::set_plugin_themes(themes, cx);
+    crate::settings::apply_current_theme(cx);
+    cx.refresh_windows();
 }
 
 /// 一个插件自己的 Policy：权限大家一样，应用名和宿主模块各是各的。
@@ -367,6 +395,36 @@ fn plugin_policy(
 }
 
 /// 卸载全部插件。视图拥有的任务随视图一起取消。
+/// 挂着的插件声明过的面板，构建器先换成占位的。
+///
+/// Dock 的注册表是全局的、删不掉条目，插件卸了它注册过的构建器还在，照样建得出一块连着
+/// 旧脚本的面板。换掉以后，重新挂上、照样注册的插件在 `init()` 里覆盖回去；删了、加载失败、
+/// 不再注册的，建出来是占位，原因按建的时候插件的样子算。
+fn retire_panels(cx: &mut App) {
+    let names: Vec<&'static str> = with_registry(|registry| {
+        registry
+            .plugins
+            .iter()
+            .filter_map(|plugin| Some((plugin, plugin.declared.as_ref().ok()?)))
+            .flat_map(|(plugin, declared)| {
+                declared
+                    .panels
+                    .iter()
+                    .map(|panel| gpui_shell::dock::panel_name(&plugin.id, &panel.name))
+            })
+            .collect()
+    });
+    for name in names {
+        gpui_component::dock::register_panel(cx, name, move |context, _window, cx| {
+            crate::workspace_shell::placeholder(
+                context.state().clone(),
+                crate::workspace_shell::unbuilt_reason(name),
+                cx,
+            )
+        });
+    }
+}
+
 fn unmount_all() {
     let plugins = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().plugins));
     drop(plugins);
@@ -550,23 +608,21 @@ pub(crate) fn generation() -> u64 {
     with_registry(|registry| registry.generation)
 }
 
-/// 已挂载插件声明的面板，按插件加载顺序、再按 `smelt.json` 里的先后。
-/// 布局里 `plugin:*` 收的就是其中没被点名摆出来的那些。
-pub(crate) fn declared() -> Vec<PluginPanelRef> {
+/// 加载成功的插件声明的面板，按插件加载顺序、再按 `smelt.json` 里的先后。命令面板的
+/// 「添加面板」列的就是这些。只读内存。
+pub(crate) fn declared() -> Vec<PanelTarget> {
     with_registry(|registry| {
         registry
             .plugins
             .iter()
-            .filter_map(|plugin| {
-                let declared = plugin.declared.as_ref().ok()?;
-                Some(
-                    declared
-                        .panels
-                        .iter()
-                        .map(|panel| PluginPanelRef::new(plugin.id.clone(), panel.name.clone())),
-                )
+            .filter(|plugin| plugin.view.is_ok())
+            .filter_map(|plugin| Some((plugin, plugin.declared.as_ref().ok()?)))
+            .flat_map(|(plugin, declared)| {
+                declared.panels.iter().map(|panel| PanelTarget {
+                    registered_name: gpui_shell::dock::panel_name(&plugin.id, &panel.name),
+                    title: panel.title.clone(),
+                })
             })
-            .flatten()
             .collect()
     })
 }
@@ -582,7 +638,7 @@ pub(crate) fn layouts() -> Vec<LayoutEntry> {
     });
     roots
         .iter()
-        .flat_map(|(id, root)| smelt_client::layout::discover_plugin(id, root))
+        .flat_map(|(id, root)| crate::layout_files::discover_plugin(id, root))
         .collect()
 }
 
@@ -642,12 +698,18 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
                     .err()
                     .or(plugin.declared.as_ref().err())
                     .cloned(),
-                notes: registry
-                    .keys
-                    .problems
+                notes: plugin
+                    .theme_problems
                     .iter()
-                    .filter(|(id, _)| *id == plugin.id)
-                    .map(|(_, problem)| problem.clone())
+                    .cloned()
+                    .chain(
+                        registry
+                            .keys
+                            .problems
+                            .iter()
+                            .filter(|(id, _)| *id == plugin.id)
+                            .map(|(_, problem)| problem.clone()),
+                    )
                     .collect(),
             })
             .collect()
@@ -767,6 +829,104 @@ pub(crate) fn set_sessions(sessions: Vec<SessionInfo>) {
     });
 }
 
+/// 把当前布局点出来的样子同步给插件。只比较、写内存；内容没变时 generation 不动。
+pub(crate) fn set_layout(layout: LayoutSnapshot) {
+    REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        let mut context = registry.context.borrow_mut();
+        if context.layout != layout {
+            context.layout = layout;
+            context.layout_generation += 1;
+            context.wake(Topic::Layout);
+        }
+    });
+}
+
+/// 把布局里几块舞台的样子同步给插件，算在 `layout()` 里。只比较、写内存；没变时
+/// generation 不动。
+pub(crate) fn set_stages(stages: Vec<LayoutStage>) {
+    REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        let mut context = registry.context.borrow_mut();
+        if context.stages != stages {
+            context.stages = stages;
+            context.layout_generation += 1;
+            context.wake(Topic::Layout);
+        }
+    });
+}
+
+/// 把当前项目的 git 摘要同步给插件。只比较、写内存；内容没变时 generation 不动。
+pub(crate) fn set_git(git: Option<GitSummary>) {
+    REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        let mut context = registry.context.borrow_mut();
+        if context.git != git {
+            context.git = git;
+            context.git_generation += 1;
+            context.wake(Topic::Git);
+        }
+    });
+}
+
+/// 插件经 `run("layout.…", args)` 发来的布局命令，命令面板里的布局条目也是它。面板按
+/// 面板名（`panel_name`）找。
+#[derive(Clone, Debug)]
+pub(crate) enum LayoutCommand {
+    /// 切到这个面板：选中它的标签，被放大挡住先还原，在收起的 dock 里就打开。
+    Select { panel: String },
+    /// 放大这个面板所在的组；已经放大的是这组就还原。
+    Zoom { panel: String },
+    /// 把布局里没有的面板加进来：给了 `to` 进它那一组，不然在最右边另起一组。
+    Add { panel: String, to: Option<String> },
+    /// 焦点换到这块舞台。
+    Focus { id: String },
+    /// 开合官方的一块 dock。
+    ToggleDock { dock: LayoutDockSide },
+    /// 切到这套布局。
+    Switch { layout: String },
+    /// 丢掉当前布局的存档，重新读文件。
+    Reset,
+    /// 复制这套布局（None 是当前这套）到用户布局目录，再切过去。
+    Copy { layout: Option<String> },
+}
+
+/// 官方的三块 dock。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayoutDockSide {
+    Left,
+    Right,
+    Bottom,
+}
+
+impl LayoutDockSide {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    pub(crate) fn placement(self) -> gpui_component::dock::DockPlacement {
+        use gpui_component::dock::DockPlacement;
+        match self {
+            Self::Left => DockPlacement::Left,
+            Self::Right => DockPlacement::Right,
+            Self::Bottom => DockPlacement::Bottom,
+        }
+    }
+}
+
 /// 插件经 `smelt-workspace` 请工作台做的事。id、项目都是插件从快照里拿到的，可能已经
 /// 不在了，由工作台判断。
 #[derive(Debug)]
@@ -787,6 +947,7 @@ pub(crate) enum WorkspaceRequest {
     OpenSettings(Option<crate::settings::SettingsSection>),
     /// 执行 smelt 自己的一条命令（`keymap::SHORTCUTS` 的 id），和按它的快捷键一样。
     Run(&'static str),
+    Layout(LayoutCommand),
 }
 
 /// 插件的操作怎么落到工作台。要用工作台窗口和 `Workspace`，插件模块够不着，由工作台

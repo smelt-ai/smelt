@@ -344,13 +344,7 @@ impl Render for DesktopView {
             .flex()
             .flex_col()
             .child(self.render_toolbar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .bg(rgb(ui_theme::bg_stage()))
-                    .children(self.webview.clone()),
-            )
+            .child(div().flex_1().min_h_0().children(self.webview.clone()))
     }
 }
 
@@ -381,7 +375,7 @@ impl crate::Workspace {
             return div().into_any_element();
         };
         let name = crate::runtimes::runtime_name(view.read(cx).runtime().key(), cx);
-        let header = crate::agents::product_page_chrome(self.chrome_left_guard(window, cx))
+        let header = crate::agents::product_page_chrome(self.chrome_left_guard(&crate::WorkspaceRoute::Desktop, window, cx))
             .gap_3()
             .child(
                 div()
@@ -407,7 +401,6 @@ impl crate::Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg_stage()))
             .child(header)
             .child(div().flex_1().min_h_0().child(view))
             .into_any_element()

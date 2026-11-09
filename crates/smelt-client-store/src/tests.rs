@@ -78,7 +78,6 @@ fn appearance() -> AppearanceRecord {
 
 fn workspace_ui() -> WorkspaceUiRecord {
     WorkspaceUiRecord {
-        active_session: 2,
         active_session_id: Some("s-1".to_string()),
         route: "session".to_string(),
         selected_agent_id: None,
@@ -144,8 +143,8 @@ fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
     cleanup(&path);
 }
 
-/// v8 → v9：左栏、工具面板的开合宽度和舞台覆盖页直接丢掉，对话的其余界面状态留着；
-/// 布局状态从空表开始，用默认布局。
+/// v8 → v9：左栏、工具面板的开合宽度、舞台覆盖页和当前会话的列表下标直接丢掉，对话的其余
+/// 界面状态留着；布局状态从空表开始，用默认布局。
 #[test]
 fn v8_drops_the_old_shell_columns_and_keeps_the_rest() {
     let path = temp_path();
@@ -194,7 +193,7 @@ fn v8_drops_the_old_shell_columns_and_keeps_the_rest() {
     let old_columns: u32 = connection
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('workspace_ui')
-               WHERE name IN ('sidebar_w', 'sidebar_open')",
+               WHERE name IN ('active_session', 'sidebar_w', 'sidebar_open')",
             [],
             |row| row.get(0),
         )

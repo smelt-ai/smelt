@@ -33,9 +33,9 @@ pub(super) fn session_row_is_selected(
     session_route_active: bool,
     project_context_matches: bool,
     ix: usize,
-    active: usize,
+    active: Option<usize>,
 ) -> bool {
-    session_route_active && project_context_matches && ix == active
+    session_route_active && project_context_matches && active == Some(ix)
 }
 
 /// 项目只是会话的分组上下文；当前会话已经在这个项目里时，项目标题不应再画一层

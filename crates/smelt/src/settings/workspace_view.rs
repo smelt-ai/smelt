@@ -180,7 +180,9 @@ impl Workspace {
     /// 能力库正文只在这条路由可见时存在。离开就丢掉：它观察 Workspace，每次通知都可能
     /// 重读 Pi 的配置文件，看不见时没必要付这份代价。回来时重建，快照自然是最新的。
     pub(crate) fn sync_capabilities_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab() != &crate::WorkspaceRoute::Capabilities {
+        if self.active_tab() != &crate::WorkspaceRoute::Capabilities
+            && !self.page_parked(&crate::WorkspaceRoute::Capabilities)
+        {
             self.capabilities_view = None;
             return;
         }

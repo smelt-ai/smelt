@@ -10,6 +10,8 @@ use crate::plugins::{InstalledPlugin, PluginSource};
 pub(crate) struct PanelPluginsState {
     /// 正在等二次确认删除的插件 id。
     pending_delete: Option<String>,
+    /// 选的目录里的插件已经装了同 id 的，等用户确认覆盖。
+    pending_overwrite: Option<PendingOverwrite>,
     /// 导入、删除的最近一次错误。
     error: Option<String>,
     /// 正在复制或删除，按钮先禁用。
@@ -17,10 +19,17 @@ pub(crate) struct PanelPluginsState {
 }
 
 #[derive(Clone)]
+pub(crate) struct PendingOverwrite {
+    source: std::path::PathBuf,
+    pub(crate) conflict: crate::plugins::Conflict,
+}
+
+#[derive(Clone)]
 pub(crate) struct PanelPluginsSnapshot {
     pub(crate) plugins: Vec<InstalledPlugin>,
     pub(crate) user_dir: Option<std::path::PathBuf>,
     pub(crate) pending_delete: Option<String>,
+    pub(crate) pending_overwrite: Option<PendingOverwrite>,
     pub(crate) error: Option<String>,
     pub(crate) busy: bool,
 }
@@ -32,13 +41,15 @@ impl Workspace {
             plugins: crate::plugins::installed(),
             user_dir: crate::plugins::user_plugin_dir(),
             pending_delete: self.panel_plugins.pending_delete.clone(),
+            pending_overwrite: self.panel_plugins.pending_overwrite.clone(),
             error: self.panel_plugins.error.clone(),
             busy: self.panel_plugins.busy,
         }
     }
 
-    /// 选一个插件目录，复制进用户插件目录，然后重新加载。
+    /// 选一个插件目录，复制进用户插件目录，然后重新加载。已经装了同 id 的先停下来问。
     pub(super) fn import_panel_plugin(&mut self, cx: &mut Context<Self>) {
+        self.panel_plugins.pending_overwrite = None;
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -52,17 +63,52 @@ impl Workspace {
             let Some(source) = paths.into_iter().next() else {
                 return;
             };
-            let started = this.update(cx, |this, cx| this.begin_panel_plugin_change(cx));
-            if !matches!(started, Ok(true)) {
-                return;
-            }
+            let _ = this.update(cx, |this, cx| {
+                this.run_panel_plugin_import(source, false, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// 覆盖装着的同 id 插件：旧的挪进回收目录。
+    pub(super) fn confirm_panel_plugin_overwrite(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.panel_plugins.pending_overwrite.take() {
+            self.run_panel_plugin_import(pending.source, true, cx);
+        }
+    }
+
+    pub(super) fn cancel_panel_plugin_overwrite(&mut self, cx: &mut Context<Self>) {
+        self.panel_plugins.pending_overwrite = None;
+        cx.notify();
+    }
+
+    fn run_panel_plugin_import(
+        &mut self,
+        source: std::path::PathBuf,
+        overwrite: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.begin_panel_plugin_change(cx) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let task_source = source.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { crate::plugins::import(&source) })
+                .spawn(async move { crate::plugins::import(&task_source, overwrite) })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                let result = result.map(|(id, name)| (format!("已导入「{name}」"), Some(id)));
-                this.finish_panel_plugin_change(result, cx)
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(crate::plugins::Import::Conflict(conflict)) => {
+                    this.panel_plugins.busy = false;
+                    this.panel_plugins.pending_overwrite =
+                        Some(PendingOverwrite { source, conflict });
+                    cx.notify();
+                }
+                Ok(crate::plugins::Import::Imported { id, name }) => {
+                    let verb = if overwrite { "已更新" } else { "已导入" };
+                    this.finish_panel_plugin_change(Ok((format!("{verb}「{name}」"), Some(id))), cx)
+                }
+                Err(error) => this.finish_panel_plugin_change(Err(error), cx),
             });
         })
         .detach();

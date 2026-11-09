@@ -985,7 +985,6 @@ impl Workspace {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .bg(rgb(crate::ui_theme::bg_stage()))
                 .overflow_y_scroll()
                 .child(
                     agent_definition_column()
@@ -1070,7 +1069,6 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(rgb(crate::ui_theme::bg_stage()))
             .overflow_y_scroll()
             .child(
                 agent_definition_column()
@@ -1188,38 +1186,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn render_product_conversation_view(
-        &self,
-        view: Entity<acp_view::AcpView>,
-        cx: &App,
-    ) -> AnyElement {
-        let appearance = cx.try_global::<settings::Appearance>();
-        let background_image = appearance.and_then(|appearance| appearance.bg_image.clone());
-        let bg_image_opacity = appearance
-            .map(|appearance| appearance.bg_image_opacity)
-            .unwrap_or(0.25);
-        div()
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .bg(rgb(crate::ui_theme::bg_stage()))
-            .children(background_image.as_deref().map(|path| {
-                crate::workspace_frame::background_image_layer(path, bg_image_opacity, cx)
-            }))
-            .child(view.cached(gpui::StyleRefinement::default().size_full()))
-            .into_any_element()
-    }
-
-    pub(super) fn render_agent_conversation_pane(
-        &self,
-        view: Entity<acp_view::AcpView>,
-        cx: &App,
-    ) -> AnyElement {
-        self.render_product_conversation_view(view, cx)
-    }
-
     pub(crate) fn render_agents_page(
         &mut self,
         window: &mut Window,
@@ -1244,7 +1210,7 @@ impl Workspace {
         let conversation = self.selected_agent_conversation_view(cx);
         let entity = cx.entity();
         if let Some((_, view)) = conversation {
-            return self.render_agent_conversation_pane(view, cx);
+            return self.render_conversation_surface(view, cx);
         }
 
         let open = self.nav.agents().editor_agent().cloned();
@@ -1254,7 +1220,7 @@ impl Workspace {
             self.agent_surface.editor = None;
         }
 
-        let left_guard = self.chrome_left_guard(window, cx);
+        let left_guard = self.chrome_left_guard(&WorkspaceRoute::Agents, window, cx);
         let (header, body) = if let Some(open) = open {
             let selected = groups
                 .iter()
@@ -1287,7 +1253,6 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(crate::ui_theme::bg_stage()))
             .child(header)
             .child(body)
             .into_any_element()
@@ -1350,7 +1315,6 @@ impl Workspace {
             .justify_center()
             .gap_4()
             .px_8()
-            .bg(rgb(crate::ui_theme::bg_stage()))
             .child(
                 div()
                     .text_size(px(28.))
@@ -1407,7 +1371,7 @@ impl Workspace {
                 }
             },
         );
-        let header = product_page_chrome(self.chrome_left_guard(window, cx))
+        let header = product_page_chrome(self.chrome_left_guard(&WorkspaceRoute::Capabilities, window, cx))
             .gap_3()
             .child(
                 div()
@@ -1430,7 +1394,6 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(crate::ui_theme::bg_stage()))
             .child(header)
             .child(
                 div()

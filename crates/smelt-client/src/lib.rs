@@ -4,8 +4,6 @@
 pub mod acp_client;
 pub mod daemon_state;
 pub mod daemon_stop;
-// 工作台布局文件的格式和校验，桌面和命令行共用。
-pub mod layout;
 pub mod runtime;
 pub mod session_kill;
 pub mod session_ops;

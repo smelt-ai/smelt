@@ -16,9 +16,8 @@ impl Workspace {
             // 侧栏「智能体」回根页。草稿还没提交，离开编辑器就等于取消。
             self.cancel_conversation_draft(cx);
         }
-        if tab != WorkspaceRoute::Desktop {
-            self.desktop = None;
-        }
+        self.route_to_stage(&tab, cx);
+        self.drop_desktop_unless(&tab);
         self.nav.set_active(tab);
         self.pop_active_tab_to_root();
         window.focus(&self.focus_handle, cx);
@@ -27,12 +26,18 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute, cx: &mut Context<Self>) {
-        if tab != WorkspaceRoute::Desktop {
-            self.desktop = None;
-        }
+    pub(crate) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute, cx: &mut Context<Self>) {
+        self.route_to_stage(&tab, cx);
+        self.drop_desktop_unless(&tab);
         self.nav.set_active(tab);
         self.schedule_visible_refresh(cx);
+    }
+
+    /// 远程桌面离开舞台就放掉它的连接；停在别的舞台上还看得见，不放。
+    fn drop_desktop_unless(&mut self, tab: &WorkspaceRoute) {
+        if *tab != WorkspaceRoute::Desktop && !self.page_parked(&WorkspaceRoute::Desktop) {
+            self.desktop = None;
+        }
     }
 
     pub(super) fn pop_active_tab_to_root(&mut self) {
@@ -1132,9 +1137,8 @@ impl Workspace {
         else {
             return;
         };
-        if self.active_session != session_ix {
-            self.active_session_revision = self.active_session_revision.wrapping_add(1);
-            self.active_session = session_ix;
+        if !self.is_current(session_ix) {
+            self.point_current_at(session_ix);
             // 换到的对话在侧栏「对话」组里得看得见：组折着就展开，再滚到它。
             self.sidebar_conversations_collapsed = false;
             self.sidebar_reveal.request(self.sessions[session_ix].ui_id);

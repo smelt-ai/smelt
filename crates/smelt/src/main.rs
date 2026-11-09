@@ -31,6 +31,7 @@ mod git_log_view;
 mod git_panel;
 mod ide;
 mod keymap;
+mod layout_files;
 mod liquid_glass;
 mod local_daemon;
 mod overlay;
@@ -67,14 +68,13 @@ mod workspace_plugins;
 mod workspace_prepare;
 mod workspace_sessions;
 mod workspace_shell;
+mod workspace_stages;
 mod workspace_update;
 mod workspace_view;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::load_workspace_ui;
-#[cfg(test)]
-pub(crate) use workspace_persist::persisted_active_position;
 
 mod updater;
 
@@ -99,9 +99,6 @@ use terminal_view::TerminalView;
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
 use git_panel::{BranchList, GitDiff, GitStatusData, RepoInfo};
 use settings::{Appearance, active_launch_entries, default_launch_entries, load_appearance};
-
-/// 窗口变窄时停靠区让出地方，中间至少留这么宽。
-const MIN_WORKSPACE_CONTENT_WIDTH: f32 = 400.0;
 
 /// 文件事件里有没有名叫 `name` 的文件。
 fn event_touches_file(event: &notify::Event, name: &std::ffi::OsStr) -> bool {
@@ -222,8 +219,6 @@ gpui::actions!(
         SendSelectionToTerminal,
         PrevSession,
         NextSession,
-        ToggleSidebar,
-        ToggleToolPanel,
         NewConversation,
         ToggleCommandPalette,
         CyclePanePrev,
@@ -276,9 +271,8 @@ enum Cmd {
     NextTab,
     PrevTab,
     SwitchTab(usize),
-    /// 切到布局目录里的这套布局（布局 id）。
-    SwitchLayout(String),
-    RestoreDefaultLayout,
+    /// 布局命令：切换、重置、复制、添加面板，和插件的 `run("layout.…")` 一样。
+    Layout(crate::plugins::LayoutCommand),
     /// 插件声明的命令：交给那个插件。
     Plugin {
         plugin: String,
@@ -1850,15 +1844,6 @@ fn record_restored_index(
     }
 }
 
-fn restored_active_position(restored_indices: &[usize], saved_active: usize) -> usize {
-    if restored_indices.is_empty() {
-        return 0;
-    }
-    restored_indices
-        .binary_search(&saved_active)
-        .unwrap_or_else(|position| position.min(restored_indices.len() - 1))
-}
-
 /// 新对话的稳定 id。
 pub(crate) fn new_conversation_id() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -1872,38 +1857,6 @@ pub(crate) fn live_daemon_session_id(session: &Session, cx: &App) -> Option<Stri
         SessionKind::Term { active, .. } => active.read(cx).session_id().to_string(),
     };
     (!id.is_empty()).then_some(id)
-}
-
-/// 恢复完成后的活动会话：先按稳定 id 认人，认不到再退回存档下标映射。
-/// 恢复期间用户已经点过会话时，不要用存档盖掉。
-pub(crate) fn resolve_restored_active_session(
-    live_ids: &[Option<String>],
-    saved_id: Option<&str>,
-    saved_index: usize,
-    restored_original_indices: &[usize],
-    restore_order_intact: bool,
-    user_changed_selection: bool,
-    current_index: usize,
-) -> usize {
-    if live_ids.is_empty() {
-        return 0;
-    }
-    let clamp = |index: usize| index.min(live_ids.len() - 1);
-    if user_changed_selection {
-        return clamp(current_index);
-    }
-    if let Some(id) = saved_id.filter(|id| !id.is_empty())
-        && let Some(ix) = live_ids.iter().position(|live| live.as_deref() == Some(id))
-    {
-        return ix;
-    }
-    if restore_order_intact {
-        return clamp(restored_active_position(
-            restored_original_indices,
-            saved_index,
-        ));
-    }
-    clamp(current_index)
 }
 
 fn should_auto_resume_active_acp(sessions_restored: bool) -> bool {
@@ -1931,7 +1884,7 @@ fn should_open_restored_agent_conversation(
 
 /// 智能体对话占着项目舞台是不一致状态，必须纠正。
 ///
-/// 项目舞台画的是 `sessions[active_session]`，而智能体对话不属于项目会话列表；
+/// 项目舞台画的是当前会话，而智能体对话不属于项目会话列表；
 /// 让它落在这条路由上会把工作台对话渲染进项目舞台。这条是不变量，和上面的一次性
 /// 补位不同，得一直守着。
 fn agent_conversation_occupies_project_stage(
@@ -1948,17 +1901,6 @@ fn route_views_session(route: &WorkspaceRoute, agent_conversation_sid: Option<&s
 
 fn should_defer_notification_session_jump(sessions_restored: bool, target_found: bool) -> bool {
     !sessions_restored && !target_found
-}
-
-/// 恢复完成前 `active_session` 仍是存档下标，ACP 先插入时会对到别人。
-/// 不能在窗口期按这个下标把舞台拽去「对话」。
-fn should_correct_agent_conversation_on_project_stage(
-    sessions_restored: bool,
-    route: &WorkspaceRoute,
-    active_is_agent_conversation: bool,
-) -> bool {
-    sessions_restored
-        && agent_conversation_occupies_project_stage(route, active_is_agent_conversation)
 }
 
 /// 新会话 id（uuid v4）：GUI 与 smeltd 之间的持久身份。
@@ -2105,11 +2047,10 @@ fn rebuild_pane_ready(
 struct Workspace {
     /// 所有会话；每个会话 = 一棵独立分屏树 + 会话内活动 pane。
     sessions: Vec<Session>,
-    /// 当前活动会话的**运行时下标**（主区显示它、侧栏高亮它）。
-    /// 跨进程身份在 `saved_active_session_id` / 各会话的对话 id，不能靠这个下标落盘认人。
-    active_session: usize,
-    /// 冷启动要恢复的活动会话（对话 id）。恢复完成前 `active_session` 还不是活列表下标。
-    saved_active_session_id: Option<String>,
+    /// 当前会话的对话 id（[`Session::conversation_id`]）：有焦点的舞台显示它、侧栏高亮它，
+    /// 落盘也只记它。按 id 不按下标：列表增删、重排、恢复时陆续插入都不用跟着改。冷启动时
+    /// 是上次的那个，它还没恢复出来时 [`Workspace::cur`] 是 None。
+    current_conversation: Option<String>,
     /// 客户端库里记着、还没认领的对话界面状态（分屏、当前终端、右侧 route）。运行时的目录
     /// 到了，按对话 id 填回待恢复的会话；目录还没到的运行时，保存时原样写回。
     saved_conversation_ui:
@@ -2173,22 +2114,27 @@ struct Workspace {
     delete_branch_target: Option<(ProjectRef, String, bool)>,
     /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
     git_log_resize: Entity<ResizableState>,
-    /// 工作台外层 Dock。停靠区开合和宽度、拆分、选中的标签、放大都只在它上面。
+    /// 整个工作台的 Dock。哪组选中哪个、放大、dock 开合、拆分大小只在它那里，
+    /// 见 `workspace_shell`（怎么画）、`workspace_layout`（装、存、命令）。
     shell_dock: Entity<gpui_component::dock::DockArea>,
-    /// 外层 Dock 里装的是哪套布局。
+    /// 装着的是哪套布局、它的文件。
     shell_layout: workspace_layout::ShellLayout,
-    /// 布局里此刻正显示着的组件（停靠区展开、在标签组里选中）。Dock 经面板的 `set_active`
-    /// 维护，单独摆出来的工具页签据此判断要不要刷新自己的缓存。
-    shell_displayed: HashSet<smelt_client::layout::Component>,
+    /// Dock 里此刻看得见的面板。Dock 每次变都由 `sync_layout_visibility` 重算。
+    shell_shown: HashSet<gpui_component::dock::PanelId>,
+    /// 其中的内置面板。工具页据此判断要不要刷新自己的缓存。
+    shell_displayed: HashSet<workspace_shell::Builtin>,
+    /// 布局摆了几块舞台时，哪块有焦点、别的各显示什么。见 `workspace_stages`。
+    stages: workspace_stages::Stages,
     /// 布局目录里读到的布局，命令面板从这里列。打开命令面板、切换布局时重读。
-    layout_catalog: Vec<smelt_client::layout::LayoutEntry>,
+    layout_catalog: Vec<layout_files::LayoutEntry>,
     /// 用户选的布局，存进 `workspace_ui`。`None` 是默认布局。上次选的布局这次没装上时
     /// 保持原样，布局文件修好后下次启动还是它。
     layout_choice: Option<String>,
     /// 最近写进库里的布局状态，和它一样就不再写。
     layout_state_written: Option<String>,
-    /// 外层 Dock 布局变了就存状态；窗口尺寸变了就收窄停靠区。
-    _shell_dock_sub: Option<Subscription>,
+    /// 订阅 Dock：树改了重算舞台、存档；放大、还原同步显示。
+    _shell_dock_subs: Vec<Subscription>,
+    /// 窗口尺寸变了（全屏时红黄绿按钮藏起来）重发 `layout()`。
     _window_bounds_sub: Option<Subscription>,
     /// 交互式 diff：选中待评论的行号集合（对应 GitDiff.lines 下标），换文件/重开 diff 时清空。
     /// 交互式 diff 的评论输入框（懒创建，随 Git 视图渲染出待发送的 diff 时创建）。
@@ -2577,8 +2523,6 @@ struct Workspace {
     daemon_restart_waiting_idle: bool,
     /// 会话列表被用户增删/重排的版本号。后台恢复只在版本未变化时按旧存档索引插入。
     session_list_revision: u64,
-    /// 活动会话被用户切换的版本号。后台恢复只在版本未变化时恢复存档中的活动项。
-    active_session_revision: u64,
     /// 根节点自己的焦点句柄：总览/文件树/Git/历史会话这些页面自身没有可
     /// 聚焦的元素，切过去后如果谁都不 focus，窗口的 focus 仍停在切走前那个（可能
     /// 已经不在当前渲染树里的）终端上——GPUI 找不到就把 focus 兜底纠正到 window 的
@@ -2613,8 +2557,6 @@ struct Workspace {
     /// 一次性闸门。智能体面的子页不落盘，补位只该在恢复完成后做一次；持续做会把
     /// 用户返回智能体目录的操作顶回对话页。
     restored_agent_conversation_route: bool,
-    /// 客户端记下的上次活动会话位置。目录到了以后，按 id 找不到时用它兜底。
-    startup_active_session: usize,
     /// deferred 保存携带的代际。退出 flush 切换代际，已排队但尚未进入写队列的旧快照
     /// 会被淘汰，不能在最终快照之后反向覆盖。
     ws_snapshot_epoch: u64,
@@ -2671,16 +2613,16 @@ impl std::ops::DerefMut for Workspace {
 }
 
 impl Workspace {
-    /// 文件面板此刻显示着（所在停靠区展开、在标签组里选中）。
+    /// 文件面板此刻看得见（是所在组选中的那个、没被别的组的放大盖住、不在收起的 dock 里）。
     fn files_view_visible(&self) -> bool {
         self.shell_displayed
-            .contains(&smelt_client::layout::Component::Files)
+            .contains(&workspace_shell::Builtin::Files)
     }
 
     /// Git「改动」页正在显示。F7 的键位 context 只在这时挂上。
     fn git_changes_shown(&self) -> bool {
         self.shell_displayed
-            .contains(&smelt_client::layout::Component::Git)
+            .contains(&workspace_shell::Builtin::Git)
             && self.git_tab == GitTab::Changes
     }
 
@@ -2702,6 +2644,8 @@ impl Workspace {
         plugins::mount_all(window, cx);
         // 插件经 `smelt-workspace` 发来的操作（跳到会话、关会话、切项目）。推到这一轮
         // 更新结束后再进工作台窗口：插件是在自己的事件里调它的，这时可能正嵌在别的更新里。
+        // 不在这里激活主窗口：插件面板就画在主窗口里，用户点它时主窗口本来就在前面；
+        // 要换窗口的操作（打开设置）自己激活目标窗口，这里再激活主窗口会把它盖到后面。
         let window_handle = window.window_handle();
         let workspace = cx.weak_entity();
         plugins::set_workspace_handler(move |request, cx| {
@@ -2711,14 +2655,12 @@ impl Workspace {
                     let _ = workspace.update(cx, |workspace, cx| {
                         workspace.handle_plugin_request(request, window, cx);
                     });
-                    window.activate_window();
                 });
             });
         });
         // 客户端界面状态（侧栏开合和顺序、当前页、Dock 布局）存在本机，同步读，窗口一次成型。
         // 项目和会话属于运行时，随订阅首帧到，到了再恢复会话（见 apply_workspace_directory）。
         let ui = load_workspace_ui();
-        let startup_active_session = ui.active_session;
         let collapsed_projects = ui.collapsed_projects.clone();
         let pinned_projects = ui.pinned_projects.clone();
         // 折叠、置顶按运行时分到各自的空间。
@@ -2736,22 +2678,17 @@ impl Workspace {
                 .collect();
             space
         };
-        let saved_active_session_id = ui.active_session_id.clone().filter(|id| !id.is_empty());
         let sessions: Vec<Session> = Vec::new();
         // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
         let git_log_resize = cx.new(|_| ResizableState::default());
         // 没有会话时右侧不继承全局偏好；新会话使用 SessionUiState 的默认收起状态。
         let initial_session_ui = SessionUiState::default();
-        let shell = workspace_layout::install_initial(
-            cx.weak_entity(),
-            ui.layout_id.as_deref(),
-            window,
-            cx,
-        );
+        // Dock 先建空的：内置面板要订阅工作台，布局等工作台建好再装（见下面的 `defer_in`）。
+        let shell_dock = workspace_shell::new_area(cx.weak_entity(), window, cx);
 
         let mut ws = Self {
             sessions,
-            active_session: 0,
+            current_conversation: ui.active_session_id.clone().filter(|id| !id.is_empty()),
             nav: WorkspaceNav::from_persisted(ui.route.clone()),
             agent_surface: agents::AgentsSurface::from_persisted(ui.selected_agent_id.clone()),
             automation_surface: agents::AutomationsSurface::default(),
@@ -2772,13 +2709,15 @@ impl Workspace {
             git_log: git_log::GitLogState::default(),
             delete_branch_target: None,
             git_log_resize,
-            shell_dock: shell.area,
-            shell_layout: shell.layout,
+            shell_dock,
+            shell_layout: workspace_layout::ShellLayout::default(),
+            shell_shown: HashSet::new(),
             shell_displayed: HashSet::new(),
-            layout_catalog: shell.catalog,
+            stages: workspace_stages::Stages::default(),
+            layout_catalog: workspace_layout::discover_layouts(),
             layout_choice: ui.layout_id.clone(),
-            layout_state_written: Some(shell.written),
-            _shell_dock_sub: None,
+            layout_state_written: None,
+            _shell_dock_subs: Vec::new(),
             _window_bounds_sub: None,
             diff_comment_input: None,
             diff_body: None,
@@ -2787,7 +2726,6 @@ impl Workspace {
             pending_notification_session_id: None,
             pending_conversation_wakes: Vec::new(),
             restored_agent_conversation_route: false,
-            startup_active_session,
             ws_snapshot_epoch: 0,
             ws_snapshot_finalizing: false,
             close_confirm: None,
@@ -2943,7 +2881,6 @@ impl Workspace {
             session_manager_list: None,
             session_manager_tombstones: HashSet::new(),
             workspace_window_active: false,
-            saved_active_session_id,
             saved_conversation_ui: workspace_persist::load_conversation_ui(),
             saved_sidebar_orders: workspace_persist::load_sidebar_orders(),
             _workspace_directories_sub: None,
@@ -2963,7 +2900,6 @@ impl Workspace {
             _daemon_binary_watcher: None,
             daemon_restart_waiting_idle: false,
             session_list_revision: 0,
-            active_session_revision: 0,
             focus_handle: cx.focus_handle(),
             file_tree_focus_handle: cx.focus_handle(),
             modal_focus: cx.focus_handle(),
@@ -3007,19 +2943,14 @@ impl Workspace {
                 this.apply_received_workspace_directories(window, cx)
             }),
         );
-        ws._shell_dock_sub = Some(cx.subscribe_in(
-            &ws.shell_dock.clone(),
-            window,
-            |this, _, event: &gpui_component::dock::DockEvent, _window, cx| {
-                if matches!(event, gpui_component::dock::DockEvent::LayoutChanged) {
-                    this.save_layout_state(cx);
-                }
-            },
-        ));
+        ws._shell_dock_subs = workspace_layout::watch_shell_dock(&ws.shell_dock, window, cx);
         ws._window_bounds_sub = Some(cx.observe_window_bounds(window, |this, window, cx| {
-            this.fit_docks_to_window(window, cx);
+            this.publish_layout(window, cx);
         }));
-        ws.fit_docks_to_window(window, cx);
+        // 装上次用的布局。装完 Dock 发 `LayoutChanged`，舞台、显示、`layout()` 跟着对齐。
+        cx.defer_in(window, |this, window, cx| {
+            this.install_initial_layout(window, cx)
+        });
         ws.ensure_pi_library_runtime(cx);
         ws._runtime_hub_sub = Some(cx.observe_global_in::<crate::runtimes::RuntimeHub>(
             window,
@@ -3295,13 +3226,6 @@ impl Render for Workspace {
         let shell_surface: Hsla = rgb(ui_theme::bg_rail()).into();
         let shell_padding = ui_theme::shell_padding();
 
-        let has_left_dock = self
-            .shell_dock
-            .read(cx)
-            .has_dock(gpui_component::dock::DockPlacement::Left);
-        let left_dock_open = self.shell_dock_open(gpui_component::dock::DockPlacement::Left, cx);
-        let trailing_toggles = self.render_window_trailing_toggles(cx);
-
         // 壳层走界面字体（默认系统 UI）；终端/diff/代码块各自绑代码字体。
         let frame = div()
             .relative()
@@ -3380,13 +3304,6 @@ impl Render for Workspace {
                     this.send_open_file_selection(window, cx);
                 }),
             )
-            // 左右侧边栏切换（全局 Action，焦点在子组件或输入框内也能响应）
-            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
-                this.toggle_sidebar(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleToolPanel, window, cx| {
-                this.toggle_shell_dock(gpui_component::dock::DockPlacement::Right, window, cx);
-            }))
             .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
                 this.focus_sidebar(window, cx);
             }))
@@ -3457,92 +3374,27 @@ impl Render for Workspace {
                 }
                 this.jump_hunk(false, cx);
             }))
-            // Esc：先关工作区弹层；没有弹层时还原放大的那一组。
+            // Esc：先关工作区弹层；没有弹层时还原放大的组。
             // 终端网格聚焦时 Esc 属于 PTY（vim 等），不还原。
             .on_action(cx.listener(|this, _: &DismissWorkspace, window, cx| {
                 if this.dismiss_workspace_overlay(window, cx) {
                     return;
                 }
-                if !this.terminal_grid_focused(window, cx) && this.shell_dock.read(cx).is_zoomed()
-                {
-                    this.shell_dock
-                        .update(cx, |area, cx| area.set_zoomed_out(window, cx));
+                if !this.terminal_grid_focused(window, cx) && this.unzoom_layout(window, cx) {
                     return;
                 }
                 cx.propagate();
             }))
-            // 主体先绘制；透明标题栏随后覆盖在顶部 safe area 上，避免面板背景
-            // 把铃铛和 Tool Panel 开关压成若隐若现的轮廓。
+            // Dock 铺满窗口；贴着上沿两个角的组给红黄绿按钮让位（`workspace_shell`）。
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
+                    .flex_col()
                     .p(shell_padding)
                     .bg(shell_surface)
-                    .child(
-                        div()
-                            .w_0()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex()
-                            .relative()
-                            .child(self.shell_dock.clone()),
-                    ),
-            )
-            // 窗口上沿的两个停靠区开关，浮在标签条和舞台顶带上；标签条两头给它们让了位置
-            // （`workspace_shell::TabBarEdges`）。
-            .child(
-                div()
-                    .absolute()
-                    // 跟主体内的共用顶栏使用同一个纵向原点；外壳内边距若以后
-                    // 恢复，左侧开关与原生交通灯都会一起移动。
-                    .top(shell_padding)
-                    .left_0()
-                    .right_0()
-                    .h(workspace_frame::TOP_BAR_HEIGHT)
-                    .pr(shell_padding + px(12.))
-                    .flex()
-                    .items_center()
-                    // 布局没有左停靠区时没东西可开合，不放这个开关。
-                    .children(has_left_dock.then(|| {
-                        // 这一条浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
-                        div()
-                            // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
-                            // 隐藏红绿灯、Windows 用系统标题栏不在客户区画红绿灯，
-                            // 这 92px 就全空了，按钮回到窗口左侧
-                            // 18px 的统一视觉基准。纵向不再手算 top：由共用顶栏的
-                            // flex 居中，UI 字号改变、按钮尺寸随 rem 缩放时也不会偏。
-                            .ml(px(if workspace_frame::traffic_lights_visible(window) {
-                                92.
-                            } else {
-                                18.
-                            }))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(
-                                smelt_ui::Button::new("sidebar-toggle")
-                                    .quiet()
-                                    .compact()
-                                    // 跟右侧两个开关同一套「细线 ↔ 实心色块」区分开合：
-                                    // 收起态用 bundled 的细线 PanelLeft，展开态换成
-                                    // panel-left-filled 实心色块，不再用带箭头的
-                                    // -open/-close 变体（对齐 Codex 工具栏风格）。
-                                    .icon(if left_dock_open {
-                                        Icon::empty().path("smelt-icons/panel-left-filled.svg")
-                                    } else {
-                                        Icon::new(IconName::PanelLeft)
-                                    })
-                                    .accessibility_label("切换左侧栏")
-                                    .tooltip_with_action("切换左侧栏", &ToggleSidebar, None)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_sidebar(window, cx);
-                                    })),
-                            )
-                    }))
-                    // 中间点穿。
-                    .child(div().flex_1().min_w_0())
-                    .children(trailing_toggles),
+                    .child(self.shell_dock.clone()),
             )
             // 确认框、命令面板和图片预览都留在当前 Workspace 的 GPUI 树内。
             .child(self.render_overlay_layers(window, cx))
@@ -4007,7 +3859,7 @@ fn main() {
         // 代码字体必须在装主题之前落地：Theme.mono_font_family 从这里读。
         terminal_view::set_font_px(appearance.font_px);
         terminal_view::set_font_family(&appearance.font_family);
-        settings::apply_named_theme(&appearance.theme_name, cx);
+        settings::apply_current_theme(cx);
         // 用户自选终端底色要在首帧前生效，并连同主题一起发布给守护（移动端配色）。
         settings::apply_bg_color(&appearance);
         cx.set_global(settings::LaunchConfig::default());

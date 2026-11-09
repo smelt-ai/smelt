@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "center": {
+    "panel_name": "StackPanel",
+    "info": { "stack": { "sizes": [260, 820, 340], "axis": 0 } },
+    "children": [
+      {
+        "panel_name": "TabPanel",
+        "info": { "tabs": { "active_index": 0 } },
+        "children": [
+          { "panel_name": "smelt.sessions", "children": [], "info": { "panel": null } }
+        ]
+      },
+      {
+        "panel_name": "TabPanel",
+        "info": { "tabs": { "active_index": 0 } },
+        "children": [
+          { "panel_name": "smelt.stage", "children": [], "info": { "panel": null } }
+        ]
+      },
+      {
+        "panel_name": "TabPanel",
+        "info": { "tabs": { "active_index": 0 } },
+        "children": [
+          { "panel_name": "smelt.files", "children": [], "info": { "panel": null } },
+          { "panel_name": "smelt.git", "children": [], "info": { "panel": null } },
+          { "panel_name": "smelt.history", "children": [], "info": { "panel": null } }
+        ]
+      }
+    ]
+  }
+}

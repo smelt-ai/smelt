@@ -44,6 +44,8 @@ struct RuntimeSubscriptions {
     _local: SubscriptionHandle,
     remotes: HashMap<RuntimeKey, SubscriptionHandle>,
     _hub_watch: Option<Subscription>,
+    /// 系统睡醒：换掉远程机器共用的 iroh endpoint，见 [`crate::runtimes::reset_iroh_after_wake`]。
+    _system_wake: Subscription,
 }
 
 /// 叫醒退避中的订阅线程。
@@ -236,12 +238,14 @@ pub(crate) fn start(cx: &mut App) -> smol::channel::Receiver<RuntimeEvent> {
     })
     .detach();
     let local = spawn_subscription(Runtime::local(), sender.clone(), status.clone());
+    let system_wake = cx.on_system_wake(crate::runtimes::reset_iroh_after_wake);
     cx.set_global(RuntimeSubscriptions {
         sender,
         status,
         _local: local,
         remotes: HashMap::new(),
         _hub_watch: None,
+        _system_wake: system_wake,
     });
     sync_remote_subscriptions(cx);
     let watch = cx.observe_global::<RuntimeHub>(sync_remote_subscriptions);

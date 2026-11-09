@@ -9,12 +9,13 @@
 
 use super::*;
 use crate::plugins::{
-    CurrentProject, MachineEntry, MachineInfo, ProjectInfo, SessionInfo, WorkspaceRequest,
+    CurrentProject, GitSummary, MachineEntry, MachineInfo, ProjectInfo, SessionInfo,
+    WorkspaceRequest,
 };
 use crate::workspace_attention::{attention_badge, menu_jump_target, session_attention_ids};
 
 impl Workspace {
-    /// 把当前项目、会话和机器（带项目）的快照发给插件。只读内存。
+    /// 把当前项目、它的 git 摘要、会话和机器（带项目）的快照发给插件。只读内存。
     pub(crate) fn publish_to_plugins(&self, cx: &App) {
         let badge = attention_badge(cx);
         let active = self.active_project_ref(cx);
@@ -22,6 +23,7 @@ impl Workspace {
             machine: machine_info(&project.runtime, cx),
             root: project.root.clone(),
         }));
+        self.publish_git_to_plugins(active.as_ref());
         let mut project_of: HashMap<usize, String> = HashMap::new();
         let machines = self
             .spaces
@@ -63,8 +65,12 @@ impl Workspace {
             .collect();
         crate::plugins::set_machines(machines);
 
-        // 全部会话按侧栏顺序，挂着要处理的提醒也算「要你」。
+        crate::plugins::set_stages(self.stage_infos(cx));
+        // 全部会话按侧栏顺序，挂着要处理的提醒也算「要你」。有焦点的舞台上的看
+        // `viewed_session_id`（它管被挡着、页面盖着），别的舞台上的看那块露没露出来。
         let viewed = self.viewed_session_id(cx);
+        let focused = self.focused_stage();
+        let parked = self.parked_sessions();
         let sessions = self
             .sessions
             .iter()
@@ -79,8 +85,16 @@ impl Workspace {
                 let unread = ids.iter().any(|id| badge.get(id) == Some(&false));
                 let acp = session.active_acp().map(|view| view.read(cx));
                 let runtime = session.runtime(cx);
+                let stage = if ids.iter().any(|id| Some(id.as_str()) == viewed.as_deref()) {
+                    Some(focused.clone())
+                } else {
+                    parked
+                        .iter()
+                        .find(|(parked, _)| *parked == ix)
+                        .map(|(_, stage)| stage.clone())
+                };
                 Some(SessionInfo {
-                    viewing: ids.iter().any(|id| Some(id.as_str()) == viewed.as_deref()),
+                    stage,
                     id,
                     title: Self::title_with_runtime(session, cx),
                     kind: if acp.is_some() {
@@ -107,6 +121,24 @@ impl Workspace {
             })
             .collect();
         crate::plugins::set_sessions(sessions);
+    }
+
+    /// 把当前项目根目录的 git 摘要发给插件。项目一换（[`Self::publish_to_plugins`]）、
+    /// 这个目录的 git 状态读回来（`ensure_git_status`）各发一次；内容没变不叫醒插件。
+    pub(crate) fn publish_git_to_plugins(&self, active: Option<&ProjectRef>) {
+        let git = active.and_then(|project| {
+            let (_, data) = self.git_status.get(project)?;
+            data.ok.then(|| GitSummary {
+                root: project.root.clone(),
+                branch: data.branch.clone(),
+                upstream: data.upstream.clone(),
+                ahead: data.ahead,
+                behind: data.behind,
+                changed: data.files.len() as u32,
+                stashes: data.stash_count,
+            })
+        });
+        crate::plugins::set_git(git);
     }
 
     /// 插件经 `smelt-workspace` 发来的操作。会话、项目已经不在了就什么也不做：插件手里的
@@ -159,6 +191,7 @@ impl Workspace {
                     window.dispatch_action(shortcut.action(), cx);
                 }
             }
+            WorkspaceRequest::Layout(command) => self.run_layout_command(command, window, cx),
         }
     }
 }

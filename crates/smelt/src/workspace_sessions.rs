@@ -32,11 +32,8 @@ pub(crate) struct NewAcpSessionRequest {
 
 /// 这一批会话为什么要恢复。
 enum RestoreKind {
-    /// 运行时的第一份目录：恢复上次的会话，恢复完定下活动会话、按需重试。
-    ColdStart {
-        active_session: usize,
-        active_session_id: Option<String>,
-    },
+    /// 运行时的第一份目录：恢复上次的会话，恢复完理一遍当前会话和舞台、按需重试。
+    ColdStart,
     /// 别处新开的对话随推送到了：只接上，不动活动会话。
     Incoming,
 }
@@ -89,18 +86,13 @@ impl Workspace {
         &mut self,
         runtime: crate::runtimes::Runtime,
         pending: Vec<SessionState>,
-        active_session: usize,
-        active_session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.schedule_indexed_session_restore(
             runtime,
             pending.into_iter().enumerate().collect(),
-            RestoreKind::ColdStart {
-                active_session,
-                active_session_id,
-            },
+            RestoreKind::ColdStart,
             window,
             cx,
         );
@@ -144,7 +136,6 @@ impl Workspace {
         let is_local = runtime.is_local();
         let runtime_bg = runtime.clone();
         let restore_revision = self.session_list_revision;
-        let restore_active_revision = self.active_session_revision;
         let (acp_saved, pending) = split_indexed_restore_queue(pending);
         // 逐个交货，别攒成一整包：会话之间互不依赖，攒一包等于让窗口空等最慢的那次
         // attach——表现为「冷启动后一个会话都不显示，过一会才全部冒出来」。改成恢复好
@@ -322,6 +313,10 @@ impl Workspace {
                         this.forget_pending_restore(&key, original_index);
                         restored += 1;
                     }
+                    // 当前会话一恢复出来就换上它自己的界面状态，不等全部恢复完。
+                    if this.cur().is_some() {
+                        this.sync_session_ui(window, cx);
+                    }
                     this.consume_pending_notification_session_jump(window, cx);
                     this.consume_pending_conversation_wakes(window, cx);
                     cx.notify();
@@ -401,6 +396,9 @@ impl Workspace {
                         restore_order_intact,
                     );
                     this.forget_pending_restore(&key, original_index);
+                    if this.cur().is_some() {
+                        this.sync_session_ui(window, cx);
+                    }
                     this.consume_pending_notification_session_jump(window, cx);
                     // 让这一个立刻上屏，不等其余的
                     cx.notify();
@@ -414,44 +412,31 @@ impl Workspace {
             }
 
             let _ = this.update_in(cx, |this, window, cx| {
-                let RestoreKind::ColdStart {
-                    active_session,
-                    active_session_id,
-                } = kind
-                else {
+                if matches!(kind, RestoreKind::Incoming) {
                     eprintln!("[workspace] {key:?} 接上别处新开的会话：成功 {restored}");
+                    this.settle_stages(cx);
                     this.save_state(cx);
                     this.schedule_visible_refresh(cx);
                     cx.notify();
                     return;
-                };
+                }
                 let Some(space) = this.space_mut(&key) else {
                     // 运行时在恢复期间被移除了，它的会话已经一起摘掉。
                     return;
                 };
                 space.sessions_restored = true;
+                // 上次的当前会话恢复到了早就显示着；没恢复出来（别处关了、恢复失败）才换一个。
+                this.settle_current(window, cx);
+                // 空着的舞台放进各自收的、最近看过的会话；别的舞台上记着的这台机器上的会话，
+                // 这时才找得到。
+                this.settle_stages(cx);
                 if is_local {
-                    let live_ids = this
-                        .sessions
-                        .iter()
-                        .map(|session| Some(session.conversation_id.clone()))
-                        .collect::<Vec<_>>();
-                    this.active_session = crate::resolve_restored_active_session(
-                        &live_ids,
-                        active_session_id.as_deref(),
-                        active_session,
-                        &restored_order,
-                        restore_order_intact,
-                        this.active_session_revision != restore_active_revision,
-                        this.active_session,
-                    );
-                    this.sync_session_ui(window, cx);
                     this.consume_pending_notification_session_jump(window, cx);
                     this.consume_pending_conversation_wakes(window, cx);
                     if let Some(Session {
                         kind: SessionKind::Conversation(view),
                         ..
-                    }) = this.sessions.get(this.active_session)
+                    }) = this.cur()
                     {
                         view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
                     }
@@ -473,8 +458,6 @@ impl Workspace {
                             delay.as_secs()
                         ));
                     }
-                    let active_session = this.active_session;
-                    let active_session_id = this.saved_active_session_id.clone();
                     eprintln!(
                         "[workspace] {failed} 个会话未能恢复，将在 {} 秒后重试（第 {attempt}/{} 次）",
                         delay.as_secs(),
@@ -498,10 +481,7 @@ impl Workspace {
                             this.schedule_indexed_session_restore(
                                 runtime,
                                 leftover,
-                                RestoreKind::ColdStart {
-                                    active_session,
-                                    active_session_id,
-                                },
+                                RestoreKind::ColdStart,
                                 window,
                                 cx,
                             );
@@ -538,9 +518,55 @@ impl Workspace {
         .detach();
     }
 
-    /// 当前活动会话（不可变引用）。
+    /// 当前会话在列表里的下标。还没恢复出来、已经关掉时是 None。
+    pub(crate) fn current_ix(&self) -> Option<usize> {
+        let id = self.current_conversation.as_deref()?;
+        self.sessions
+            .iter()
+            .position(|session| session.conversation_id == id)
+    }
+
+    /// 当前会话。
     pub(crate) fn cur(&self) -> Option<&Session> {
-        self.sessions.get(self.active_session)
+        self.current_ix().map(|ix| &self.sessions[ix])
+    }
+
+    /// 第 `ix` 个会话是不是当前会话。
+    pub(crate) fn is_current(&self, ix: usize) -> bool {
+        self.sessions.get(ix).is_some_and(|session| {
+            Some(session.conversation_id.as_str()) == self.current_conversation.as_deref()
+        })
+    }
+
+    /// 把当前会话记成第 `ix` 个。只改记号；分舞台、切页、标已读走
+    /// [`Self::set_current_session`]。
+    pub(crate) fn point_current_at(&mut self, ix: usize) {
+        if let Some(session) = self.sessions.get(ix) {
+            self.current_conversation = Some(session.conversation_id.clone());
+        }
+    }
+
+    /// 恢复结束时理一遍当前会话：找得到就不动；还在哪台机器的待恢复里就接着等；都不是
+    /// （别处关了、恢复失败、从没记过）就换成列表里第一个，列表空着就没有。
+    pub(crate) fn settle_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cur().is_none() {
+            let waiting = self.current_conversation.as_deref().is_some_and(|id| {
+                self.spaces.iter().any(|space| {
+                    !space.sessions_restored
+                        && space
+                            .restore_pending
+                            .iter()
+                            .any(|(_, state)| state.id == id)
+                })
+            });
+            if !waiting {
+                self.current_conversation = self
+                    .sessions
+                    .first()
+                    .map(|session| session.conversation_id.clone());
+            }
+        }
+        self.sync_session_ui(window, cx);
     }
 
     /// 当前会话的工作目录，连同它在哪台机器上。git、文件这些查询要发给那台机器：
@@ -580,7 +606,7 @@ impl Workspace {
             .active_project_ref(cx)
             .and_then(|project| self.find_project_group(&project, cx));
         let target = panel_send_target(
-            self.cur().map(|_| self.active_session),
+            self.current_ix(),
             group
                 .as_ref()
                 .map(|group| (group.label.as_str(), group.sessions.as_slice())),
@@ -835,15 +861,9 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let active_id = self.cur().map(|session| session.ui_id);
         if !reorder_vec(&mut self.sessions, from_ix, target_ix, before) {
             self.sess_drop_hint = None;
             return;
-        }
-        if let Some(id) = active_id
-            && let Some(ix) = self.sessions.iter().position(|session| session.ui_id == id)
-        {
-            self.active_session = ix;
         }
         self.sess_drop_hint = None;
         self.sidebar_drag = None;
@@ -1236,7 +1256,7 @@ impl Workspace {
             ui_state: SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
-        self.active_session = self.sessions.len() - 1;
+        self.set_current_session(self.sessions.len() - 1, cx);
         self.sync_session_ui(window, cx);
         view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
@@ -1617,8 +1637,7 @@ impl Workspace {
                     // 新的一行闪一下，并且得看得见：所在项目折着就展开，再滚到它。
                     this.sidebar_flash = Some(this.sessions[ix].ui_id);
                     this.reveal_session_in_sidebar(ix, cx);
-                    this.active_session = ix;
-                    this.note_session_viewed(ix);
+                    this.set_current_session(ix, cx);
                     this.save_state(cx);
                     this.schedule_visible_refresh(cx);
                     eprintln!(
@@ -1646,7 +1665,7 @@ impl Workspace {
             .cwd()
             .or_else(|| runtime.is_local().then(current_dir).flatten());
         let beside = active.clone();
-        let session_ix = self.active_session;
+        let conversation = sess.conversation_id.clone();
         let sid = new_sid();
         let cwd_bg = cwd.clone();
         let sid_bg = sid.clone();
@@ -1669,10 +1688,14 @@ impl Workspace {
             let _ = cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |this, cx| {
                     // 分屏目标会话可能在握手期间被关掉——对不上就丢弃这个终端。
-                    if session_ix >= this.sessions.len() {
+                    let Some(session_ix) = this
+                        .sessions
+                        .iter()
+                        .position(|session| session.conversation_id == conversation)
+                    else {
                         eprintln!("[workspace] 分屏目标会话已不存在，丢弃");
                         return;
-                    }
+                    };
                     let view = cx.new(|cx| {
                         TerminalView::from_terminal(cx, runtime, terminal, cwd, sid, None, None)
                     });
@@ -1706,15 +1729,6 @@ impl Workspace {
             runtime.is_local().then(current_dir).flatten()
         });
         self.add_session(runtime, cwd, cx);
-    }
-
-    /// 切换左停靠区开合。开合和宽度都在 Dock 上，变了由 Dock 的布局变化存下来。
-    pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let placement = gpui_component::dock::DockPlacement::Left;
-        self.toggle_shell_dock(placement, window, cx);
-        if !self.shell_dock_open(placement, cx) {
-            self.focus_active_stage(window, cx);
-        }
     }
 
     /// 在这个运行时上打开一个目录作为项目并设为活动项目。已经开着就只切活动。项目随
@@ -2152,17 +2166,21 @@ impl Workspace {
         let closed_ui_id = self.sessions[ix].ui_id;
         // 关的是当前项目会话：回到上一个看过的项目会话；还没看过别的就落到同一个项目里
         // 挨着的那个。不按 sessions 下标顺延，也不跳去智能体对话（那要换页）。
-        let closing_current_project_session =
-            ix == self.active_session && !self.sessions[ix].is_product_conversation(cx);
+        let closing_current = self.is_current(ix);
+        let closing_current_project_session = closing_current
+            && crate::workspace_stages::session_stage_content(&self.sessions[ix], cx).is_some();
+        // 只挑这块舞台收、别的舞台上没显示着的。
         let project_next = if closing_current_project_session {
             self.previous_viewed_session(closed_ui_id, |session| {
-                !session.is_product_conversation(cx)
+                self.fits_focused_stage(session, cx)
             })
             .or_else(|| {
                 group
                     .as_ref()
                     .and_then(|g| crate::sidebar_order::neighbor_in_group(&g.sessions, ix))
+                    .filter(|&next| self.fits_focused_stage(&self.sessions[next], cx))
             })
+            .map(|next| self.sessions[next].conversation_id.clone())
         } else {
             None
         };
@@ -2215,7 +2233,7 @@ impl Workspace {
         let closed_current_conversation =
             closed_conversation_sid.as_deref() == self.nav.agents().conversation_sid();
         // 关的是正在看的对话：回到上一个看过的对话，没有就落到最后一段。
-        let next_conversation_ix = if closed_current_conversation {
+        let next_conversation = if closed_current_conversation {
             self.previous_viewed_session(closed_ui_id, |session| session.is_agent_conversation(cx))
                 .or_else(|| {
                     self.sessions
@@ -2228,39 +2246,40 @@ impl Workspace {
                 })
         } else {
             None
-        };
+        }
+        .map(|next| {
+            let session = &self.sessions[next];
+            let sid = session
+                .active_acp()
+                .map(|view| view.read(cx).session_id().to_string());
+            (session.conversation_id.clone(), sid)
+        });
         self.sessions.remove(ix);
         self.recent_sessions.retain(|ui_id| *ui_id != closed_ui_id);
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
-        if let Some(next) = next_conversation_ix {
-            let next = if next > ix { next - 1 } else { next };
-            self.active_session_revision = self.active_session_revision.wrapping_add(1);
-            self.active_session = next;
-            if let Some(sid) = self.sessions.get(next).and_then(|session| {
-                session
-                    .active_acp()
-                    .map(|view| view.read(cx).session_id().to_string())
-            }) {
-                self.nav.agents_mut().open_conversation(sid);
-            } else {
-                self.nav.agents_mut().pop_to_root();
+        if let Some((next, sid)) = next_conversation {
+            self.current_conversation = Some(next);
+            match sid {
+                Some(sid) => self.nav.agents_mut().open_conversation(sid),
+                None => self.nav.agents_mut().pop_to_root(),
             }
         } else {
             if closed_current_conversation {
                 self.nav.agents_mut().pop_to_root();
             }
-            // 空列表时 active_session 归 0（各处都是 sessions.get(ix) 取，取不到就是无会话态）。
             if let Some(next) = project_next {
-                self.active_session_revision = self.active_session_revision.wrapping_add(1);
-                self.active_session = if next > ix { next - 1 } else { next };
-            } else if self.sessions.is_empty() {
-                self.active_session = 0;
-            } else if self.active_session >= self.sessions.len() {
-                self.active_session = self.sessions.len() - 1;
-            } else if self.active_session > ix {
-                self.active_session -= 1;
+                self.current_conversation = Some(next);
+            } else if closing_current_project_session && self.take_over_parked_stage(cx) {
+                // 这块舞台没有能接着放的了：焦点交给别的舞台，它就空着。
+            } else if closing_current {
+                // 列表里挨着的那个接上，关的是最后一个就往前一个；列表空了就没有当前会话。
+                self.current_conversation = self
+                    .sessions
+                    .get(ix.min(self.sessions.len().saturating_sub(1)))
+                    .map(|session| session.conversation_id.clone());
             }
         }
+        self.settle_stages(cx);
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -2310,10 +2329,13 @@ impl Workspace {
 
     /// Cmd+W：会话内多 pane 时关掉活动 pane（切到相邻），否则关整个会话。正在跑的先确认。
     pub(crate) fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.cur().and_then(|s| s.active_term().cloned()) {
-            Some(view) => self.request_close_session_pane(self.active_session, view, window, cx),
+        let Some(ix) = self.current_ix() else {
+            return;
+        };
+        match self.sessions[ix].active_term().cloned() {
+            Some(view) => self.request_close_session_pane(ix, view, window, cx),
             // ACP 会话没有分屏树，只能整个关。
-            None => self.request_close_session(self.active_session, window, cx),
+            None => self.request_close_session(ix, window, cx),
         }
     }
 
@@ -2324,8 +2346,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(sess) = self.sessions.get_mut(self.active_session) {
-            sess.set_active_term(e.clone());
+        if let Some(ix) = self.current_ix() {
+            self.sessions[ix].set_active_term(e.clone());
         }
         e.update(cx, |terminal, cx| terminal.mark_read(cx));
         let h = e.read(cx).focus_handle();
@@ -2339,7 +2361,7 @@ impl Workspace {
         if let Some(Session {
             kind: SessionKind::Conversation(view),
             ..
-        }) = self.sessions.get(self.active_session)
+        }) = self.cur()
         {
             let view = view.clone();
             view.update(cx, |v, cx| v.focus_input(window, cx));
@@ -2384,7 +2406,7 @@ impl Workspace {
         }
         let cur = order
             .iter()
-            .position(|&ix| ix == self.active_session)
+            .position(|&ix| self.is_current(ix))
             .unwrap_or(0);
         let n = order.len() as isize;
         let next = (cur as isize + delta).rem_euclid(n) as usize;
@@ -2392,13 +2414,13 @@ impl Workspace {
     }
 
     pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
-        if !self.stage_visible(cx) {
+        if !self.focused_stage_shown() {
             return None;
         }
         if !route_views_session(self.active_tab(), self.nav.agents().conversation_sid()) {
             return None;
         }
-        match &self.sessions.get(self.active_session)?.kind {
+        match &self.cur()?.kind {
             SessionKind::Term { active, .. } => Some(active.read(cx).session_id().to_string()),
             SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
         }
@@ -2447,12 +2469,11 @@ impl Workspace {
         }
         if ix < self.sessions.len() {
             // 换到别的会话时（⌘↑↓、点通知、新建），它在侧栏里得看得见。
-            if ix != self.active_session {
+            if !self.is_current(ix) {
                 self.reveal_session_in_sidebar(ix, cx);
             }
-            self.active_session_revision = self.active_session_revision.wrapping_add(1);
-            self.active_session = ix;
-            self.note_session_viewed(ix);
+            // 先分到该放它的舞台，再设成当前、换到会话页。
+            self.set_current_session(ix, cx);
             // 活动项目跟着活动会话走：切到别的项目的会话时侧栏高亮同步换过去。
             if let Some(g) = self
                 .all_project_groups(cx)
@@ -2465,10 +2486,8 @@ impl Workspace {
                 });
             }
             self.sync_session_ui(window, cx);
-            self.desktop = None;
-            self.nav.set_active(WorkspaceRoute::Session);
-            // 舞台被同组别的标签或放大的另一组挡住时，切过去也不算看过。
-            let route_has_overlay = !self.stage_visible(cx);
+            // 舞台被同一个 stack 里别的或放大的别的节点挡住时，切过去也不算看过。
+            let route_has_overlay = !self.focused_stage_shown();
             // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
             // 视图更新期间再读它会 panic。
             let restore_settled = self.session_restore_settled(ix, cx);
@@ -2516,7 +2535,7 @@ impl Workspace {
     }
 
     pub(crate) fn next_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.next_project_session(self.active_session, 1, cx) {
+        if let Some(ix) = self.next_project_session(self.current_ix().unwrap_or(0), 1, cx) {
             self.activate(ix, window, cx);
         }
     }
@@ -2532,7 +2551,7 @@ impl Workspace {
     }
 
     pub(crate) fn prev_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.next_project_session(self.active_session, -1, cx) {
+        if let Some(ix) = self.next_project_session(self.current_ix().unwrap_or(0), -1, cx) {
             self.activate(ix, window, cx);
         }
     }

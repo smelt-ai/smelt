@@ -39,7 +39,7 @@ Each design states its status at the top.
 - [`windows-support.md`](windows-support.md) — Windows desktop and a native smeltd. Implemented (#74, #83): x86_64 per-user installer, unsigned, no auto-update.
 - [`collaboration.md`](collaboration.md) — Multiplayer around a live session. Not started.
 - [`plugin-platform.md`](plugin-platform.md) — Plugin platform: host API parity, component registry, themes, packages, trust (#257). Draft, not started.
-- [`workspace-layouts.md`](workspace-layouts.md) — Customizable, switchable workspace layouts (#260). Draft; a rough version is on `feat/workspace-layouts`.
+- [`workspace-layouts.md`](workspace-layouts.md) — Customizable, switchable workspace layouts (#260). Draft v3: layout files and saved state use gpui-base's official `DockAreaState`; the whole workspace is one `DockArea`.
 - [`remote-mobile-files.md`](remote-mobile-files.md) — Project files on remote machines (desktop tool panel) and on mobile (browse and preview, syntax highlighting) (#77). Done.
 - [`remote-automations.md`](remote-automations.md) — Automations on remote machines (desktop) and creating / editing them on mobile (#79). Done.
 

@@ -137,9 +137,8 @@ mod restore_order_tests {
     use std::time::Duration;
 
     use crate::{
-        AcpSaved, PaneState, RESTORE_RETRY_LIMIT, SessionState, persisted_active_position,
-        planned_restore_insert_position, record_restored_index, resolve_restored_active_session,
-        restore_error_blocks_remaining, restore_retry_delay, restored_active_position,
+        AcpSaved, PaneState, RESTORE_RETRY_LIMIT, SessionState, planned_restore_insert_position,
+        record_restored_index, restore_error_blocks_remaining, restore_retry_delay,
         restored_insert_position, should_auto_resume_active_acp, should_retry_failed_restore,
         split_indexed_restore_queue, workspace_persist::merge_restore_pending,
     };
@@ -230,12 +229,6 @@ mod restore_order_tests {
         restored.insert(pos, 2);
 
         assert_eq!(restored, vec![0, 1, 2, 3]);
-        assert_eq!(restored_active_position(&restored, 2), 2);
-    }
-
-    #[test]
-    fn missing_active_session_falls_back_to_last_restored_session() {
-        assert_eq!(restored_active_position(&[0, 1, 3], 2), 2);
     }
 
     #[test]
@@ -250,7 +243,6 @@ mod restore_order_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["term-0", "acp-1", "term-2", "acp-3"]);
-        assert_eq!(persisted_active_position(1, &pending, true), 3);
     }
 
     #[test]
@@ -268,56 +260,5 @@ mod restore_order_tests {
         let mut restored = vec![1, 3];
         record_restored_index(&mut restored, 4, 2, false);
         assert_eq!(restored, vec![1, 3]);
-    }
-
-    #[test]
-    fn restored_active_session_follows_stable_id_when_acp_is_inserted_first() {
-        // 活列表是 ACP 先到的顺序：[对话, 项目终端]，存档下标 0 已经不是用户点的那条。
-        let live_ids = [Some("conversation".into()), Some("project-term".into())];
-        assert_eq!(
-            resolve_restored_active_session(
-                &live_ids,
-                Some("project-term"),
-                0,
-                &[0, 1],
-                true,
-                false,
-                0,
-            ),
-            1
-        );
-    }
-
-    #[test]
-    fn restored_active_session_keeps_user_click_during_restore() {
-        let live_ids = [Some("conversation".into()), Some("project-term".into())];
-        assert_eq!(
-            resolve_restored_active_session(
-                &live_ids,
-                Some("project-term"),
-                1,
-                &[0, 1],
-                true,
-                true,
-                0,
-            ),
-            0
-        );
-    }
-
-    #[test]
-    fn restored_active_session_falls_back_to_saved_index_without_id() {
-        assert_eq!(
-            resolve_restored_active_session(
-                &[Some("a".into()), Some("b".into()), Some("c".into()),],
-                None,
-                2,
-                &[0, 1, 2],
-                true,
-                false,
-                0
-            ),
-            2
-        );
     }
 }

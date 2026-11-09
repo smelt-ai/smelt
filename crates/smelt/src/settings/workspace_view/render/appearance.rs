@@ -104,7 +104,12 @@ fn theme_item() -> SettingItem {
     SettingItem::new(
         "主题",
         SettingField::render(|_, window, cx: &mut App| {
-            let picker = window.use_keyed_state("settings-theme-picker", cx, ThemePicker::new);
+            // 插件重新加载以后它们带的主题可能变了，下拉跟着重建。
+            let key = ElementId::NamedInteger(
+                "settings-theme-picker".into(),
+                crate::plugins::generation(),
+            );
+            let picker = window.use_keyed_state(key, cx, ThemePicker::new);
             let select = picker.read(cx).select.clone();
             let border = cx.theme().border;
             // 别处换了主题（命令面板等）时，下拉跟着对上，不停在旧的那项。只对目录里
@@ -142,14 +147,22 @@ struct ThemePicker {
 impl ThemePicker {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let current = cx.global::<Appearance>().theme_name.clone();
-        let options = smelt_model::theme_index::entries()
+        // 内置的在前，插件带的接在后面，系列名是插件名。
+        let built_in = smelt_model::theme_index::entries()
             .iter()
             .map(|entry| ThemeOption {
                 name: entry.name.clone().into(),
                 family: entry.family.clone().into(),
                 swatch: smelt_ui::theme_catalog::swatch(&entry.name, cx),
-            })
-            .collect::<Vec<_>>();
+            });
+        let from_plugins = smelt_ui::theme_catalog::plugin_themes(cx)
+            .iter()
+            .map(|theme| ThemeOption {
+                name: theme.config.name.clone(),
+                family: theme.family.clone(),
+                swatch: smelt_ui::theme_catalog::swatch(&theme.config.name, cx),
+            });
+        let options = built_in.chain(from_plugins).collect::<Vec<_>>();
         let selected = options
             .iter()
             .position(|option| *option.name == *current)
@@ -165,7 +178,7 @@ impl ThemePicker {
             &select,
             |_, _, event: &SelectEvent<SearchableVec<ThemeOption>>, cx| {
                 if let SelectEvent::Confirm(Some(name)) = event {
-                    select_theme(name.to_string(), cx);
+                    choose_theme(name, cx);
                 }
             },
         );
@@ -219,27 +232,6 @@ impl SelectItem for ThemeOption {
         let query = query.to_lowercase();
         self.name.to_lowercase().contains(&query) || self.family.to_lowercase().contains(&query)
     }
-}
-
-fn select_theme(name: String, cx: &mut App) {
-    let Some(entry) = smelt_model::theme_index::find(&name) else {
-        return;
-    };
-    let mode = if entry.mode == "light" {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
-    };
-    apply_appearance(
-        move |appearance| {
-            appearance.theme_name = name;
-            appearance.theme_mode = mode;
-        },
-        cx,
-    );
-    let selected = cx.global::<Appearance>().theme_name.clone();
-    apply_named_theme(&selected, cx);
-    cx.refresh_windows();
 }
 
 /// 背景、前景、强调三个色点。描边用当前主题的边框色，深色主题的底色点在深色界面上也看得见。

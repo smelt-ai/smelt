@@ -113,6 +113,14 @@ impl crate::Workspace {
         self.space(session.runtime(cx).key())
             .is_none_or(|space| space.sessions_restored)
     }
+
+    /// 当前会话所在运行时的恢复是否结束。当前会话还没恢复出来时，看全部空间。
+    pub(crate) fn current_restore_settled(&self, cx: &gpui::App) -> bool {
+        match self.current_ix() {
+            Some(ix) => self.session_restore_settled(ix, cx),
+            None => self.sessions_restore_settled(),
+        }
+    }
 }
 
 /// 某台机器上的一个目录：项目根，或项目里的仓库根、文件夹。工具面板的缓存都按它存，

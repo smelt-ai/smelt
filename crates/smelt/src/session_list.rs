@@ -581,7 +581,7 @@ impl Workspace {
             selected_is_open_conversation,
             groups
                 .iter()
-                .find(|g| g.sessions.contains(&self.active_session))
+                .find(|g| self.current_ix().is_some_and(|ix| g.sessions.contains(&ix)))
                 .map(|g| g.root.as_str()),
             groups.first().map(|g| g.root.as_str()),
         )
@@ -625,7 +625,7 @@ impl Workspace {
         // 上一帧量出的视口外「需要你」，这一帧画提示用。
         let offscreen = self.sidebar_reveal.offscreen();
         let reveal_target = self.sidebar_reveal.target();
-        let active = self.active_session;
+        let active = self.current_ix();
         // 注：项目实体化后允许关到一个会话都不剩（侧栏还有项目行撑着，舞台落到引导页），
         // 所以关闭键不再有「最后一个不许关」那道门槛，全都常显。
         let active_project = self.active_project_ref(cx);
@@ -1018,7 +1018,7 @@ impl Workspace {
                 continue;
             }
             let active_session_is_visible =
-                session_route_active && !collapsed && ixs.contains(&active);
+                session_route_active && !collapsed && active.is_some_and(|ix| ixs.contains(&ix));
             let project_header_selected = project_header_is_selected(
                 session_route_active,
                 is_active_group,
@@ -2380,16 +2380,18 @@ mod tests {
 
     #[test]
     fn task_panel_does_not_select_the_last_active_session() {
-        assert!(session_row_is_selected(true, true, 2, 2));
-        assert!(!session_row_is_selected(false, true, 2, 2));
-        assert!(!session_row_is_selected(true, true, 1, 2));
-        assert!(!session_row_is_selected(true, false, 2, 2));
+        assert!(session_row_is_selected(true, true, 2, Some(2)));
+        assert!(!session_row_is_selected(false, true, 2, Some(2)));
+        assert!(!session_row_is_selected(true, true, 1, Some(2)));
+        assert!(!session_row_is_selected(true, false, 2, Some(2)));
+        // 当前会话还没恢复出来：哪行都不高亮。
+        assert!(!session_row_is_selected(true, true, 0, None));
     }
 
     #[test]
     fn active_session_is_the_only_selected_row_inside_its_project() {
         assert!(!project_header_is_selected(true, true, true));
-        assert!(session_row_is_selected(true, true, 2, 2));
+        assert!(session_row_is_selected(true, true, 2, Some(2)));
         // 会话被折叠隐藏或项目为空时，项目行接管唯一的主选中态。
         assert!(project_header_is_selected(true, true, false));
     }

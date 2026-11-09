@@ -240,9 +240,8 @@ impl Workspace {
             self.applied_ui_font_px = Some(ui_font_px);
         }
 
-        if should_auto_resume_active_acp(self.session_restore_settled(self.active_session, cx))
-            && let Some(SessionKind::Conversation(view)) =
-                self.sessions.get(self.active_session).map(|s| &s.kind)
+        if should_auto_resume_active_acp(self.current_restore_settled(cx))
+            && let Some(SessionKind::Conversation(view)) = self.cur().map(|s| &s.kind)
         {
             let view = view.clone();
             view.update(cx, |v, cx| v.maybe_auto_resume(window, cx));
@@ -256,39 +255,43 @@ impl Workspace {
     /// 补位只做一次：每帧都做会把用户点侧栏「智能体」返回目录的动作顶回来。
     /// 项目舞台上的对话则是不变量，恢复完成后一直守着。
     fn align_visible_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let active_is_agent_conversation = self
-            .sessions
-            .get(self.active_session)
-            .is_some_and(|session| session.is_agent_conversation(cx));
+        let Some(current) = self.current_ix() else {
+            if self.sessions_restore_settled() {
+                self.restored_agent_conversation_route = true;
+            }
+            return;
+        };
+        let restore_settled = self.session_restore_settled(current, cx);
+        let active_is_agent_conversation = self.sessions[current].is_agent_conversation(cx);
         if crate::should_open_restored_agent_conversation(
-            self.session_restore_settled(self.active_session, cx),
+            restore_settled,
             self.restored_agent_conversation_route,
             active_is_agent_conversation,
             self.active_tab(),
         ) {
             self.restored_agent_conversation_route = true;
-            self.activate(self.active_session, window, cx);
-        } else if self.session_restore_settled(self.active_session, cx) {
+            self.activate(current, window, cx);
+        } else if restore_settled {
             self.restored_agent_conversation_route = true;
         }
 
-        if crate::should_correct_agent_conversation_on_project_stage(
-            self.session_restore_settled(self.active_session, cx),
+        // 当前会话按 id 认，恢复中途也不会指错，这条不用等恢复完。
+        if crate::agent_conversation_occupies_project_stage(
             self.active_tab(),
             active_is_agent_conversation,
         ) {
-            self.activate(self.active_session, window, cx);
+            self.activate(current, window, cx);
         }
     }
 
     fn git_page_visible(&self) -> bool {
         self.shell_displayed
-            .contains(&smelt_client::layout::Component::Git)
+            .contains(&crate::workspace_shell::Builtin::Git)
     }
 
     fn history_page_visible(&self) -> bool {
         self.shell_displayed
-            .contains(&smelt_client::layout::Component::History)
+            .contains(&crate::workspace_shell::Builtin::History)
     }
 
     /// 每 2 秒把仍开着的页的 TTL 缓存再对一次。打开页面和切换项目走事件，

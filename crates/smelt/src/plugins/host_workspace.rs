@@ -1,8 +1,9 @@
 //! `smelt-workspace`：smelt 注册给全部插件的工作台 HostModule。
 //!
-//! 插件读得到主目录、工作台当前项目、机器和项目、侧栏里的智能体会话，能等它们变化，
-//! 能请宿主弹系统的目录选择框、跳到或关掉某个会话、切项目、打开设置，能执行 smelt 的
-//! 命令和别的插件的命令，能收到发给自己的命令。
+//! 插件读得到主目录、工作台当前项目和它的 git 摘要、机器和项目、侧栏里的智能体会话、
+//! 当前布局（整棵树点出来的样子、贴角的情况），
+//! 能等它们变化，能请宿主弹系统的目录选择框、跳到或关掉某个会话、切项目、打开设置，
+//! 能执行 smelt 的命令（含带参数的 `layout.*`）和别的插件的命令，能收到发给自己的命令。
 //!
 //! 宿主不能回调脚本（gpui-shell 的宿主函数不许重入引擎），所以「订阅」做成一个异步
 //! 函数：`changed(topic, since)` 在这个主题的 generation 不等于 `since` 时兑现。插件在
@@ -23,8 +24,8 @@ use smelt_model::new_session::{
 };
 use tokio::sync::oneshot;
 
-use super::WorkspaceRequest;
 use super::host_fs::path_value;
+use super::{LayoutCommand, LayoutDockSide, WorkspaceRequest};
 use crate::settings::SettingsSection;
 
 /// 宿主上下文：插件读得到的工作台状态。由工作台写入（纯内存），插件经
@@ -43,6 +44,17 @@ pub(super) struct HostContext {
     pub(super) machines_generation: u64,
     /// 每次重装快捷键（改键、插件重新加载）加一：`commands()` 给的列表或键可能变了。
     pub(super) commands_generation: u64,
+    /// 当前布局点出来的样子，对应 `layout()`。
+    pub(super) layout: LayoutSnapshot,
+    /// 布局里的几块舞台和各自显示什么，对应 `layout()` 的 `stages`。换焦点、换显示的东西
+    /// 不经过窗口，所以和 `layout` 分开写。
+    pub(super) stages: Vec<LayoutStage>,
+    /// 每次 `layout` 或 `stages` 变化加一。
+    pub(super) layout_generation: u64,
+    /// 当前项目的 git 摘要，对应 `git()`。
+    pub(super) git: Option<GitSummary>,
+    /// 每次 `git` 变化加一。
+    pub(super) git_generation: u64,
     /// 正在 `changed()` 里等着的插件。
     waiters: Vec<Waiter>,
 }
@@ -52,6 +64,81 @@ pub(super) struct HostContext {
 pub(crate) struct CurrentProject {
     pub(crate) machine: MachineInfo,
     pub(crate) root: String,
+}
+
+/// 当前布局：Dock 现在的树（哪组选中哪个、放大哪组、dock 开没开），贴着窗口上沿两个角的
+/// 组。贴角的是插件面板时，红黄绿按钮的让位由插件自己画。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LayoutSnapshot {
+    /// 布局 id，交给 `layout.switch`。
+    pub(crate) id: String,
+    /// 中间的树。装好布局之前是 None。
+    pub(crate) center: Option<LayoutNodeInfo>,
+    pub(crate) left: Option<LayoutDock>,
+    pub(crate) right: Option<LayoutDock>,
+    pub(crate) bottom: Option<LayoutDock>,
+    /// 放大着的那组里的面板名。
+    pub(crate) zoomed: Option<Vec<String>>,
+    /// 贴着窗口左上角、右上角的那组里的面板名。
+    pub(crate) top_left: Option<Vec<String>>,
+    pub(crate) top_right: Option<Vec<String>>,
+    /// 红黄绿按钮占的宽度；全屏、没有红黄绿按钮时是 0。
+    pub(crate) lights: f32,
+}
+
+/// 布局里的一块舞台（`smelt.stage`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LayoutStage {
+    pub(crate) id: String,
+    /// 收哪几类：`terminal` / `conversation` / `page`。
+    pub(crate) accepts: Vec<&'static str>,
+    /// 有焦点：工作台的「当前」显示在它上面。
+    pub(crate) focused: bool,
+    /// 显示着的页面（`agents`、`automations`、`capabilities`、`desktop`）；显示会话或空着时是 None。
+    pub(crate) page: Option<String>,
+}
+
+/// Dock 树里的一个节点：`row` / `column` 是拆分，`tabs` 是一组面板。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LayoutNodeInfo {
+    /// `row` / `column` / `tabs`。
+    pub(crate) kind: &'static str,
+    /// `tabs` 里的面板，按标签的先后；拆分是空的。
+    pub(crate) panels: Vec<LayoutPanelInfo>,
+    /// `tabs` 选中的是第几个；拆分是 None。
+    pub(crate) active: Option<usize>,
+    pub(crate) children: Vec<LayoutNodeInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LayoutPanelInfo {
+    /// 面板名，和布局文件里的 `panel_name` 一样。
+    pub(crate) name: String,
+    /// 标签上的名字。
+    pub(crate) title: String,
+    /// 此刻看得见。
+    pub(crate) shown: bool,
+}
+
+/// 官方的一块 dock（左、右、下）。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LayoutDock {
+    pub(crate) open: bool,
+    pub(crate) root: LayoutNodeInfo,
+}
+
+/// 当前项目根目录的 git 摘要。目录不是仓库、还没读回来时没有。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GitSummary {
+    /// 是哪个项目的（`context()` 的 `project.root`）。
+    pub(crate) root: String,
+    pub(crate) branch: String,
+    pub(crate) upstream: Option<String>,
+    pub(crate) ahead: u32,
+    pub(crate) behind: u32,
+    /// 有改动的文件数，含未跟踪的。
+    pub(crate) changed: u32,
+    pub(crate) stashes: u32,
 }
 
 /// 插件能订阅的主题。
@@ -65,6 +152,10 @@ pub(super) enum Topic {
     Machines,
     /// 能执行的命令和它们绑的键，对应 `commands()`。
     Commands,
+    /// 当前布局，对应 `layout()`。
+    Layout,
+    /// 当前项目的 git 摘要，对应 `git()`。
+    Git,
 }
 
 impl Topic {
@@ -74,6 +165,8 @@ impl Topic {
             "sessions" => Some(Self::Sessions),
             "machines" => Some(Self::Machines),
             "commands" => Some(Self::Commands),
+            "layout" => Some(Self::Layout),
+            "git" => Some(Self::Git),
             _ => None,
         }
     }
@@ -91,6 +184,8 @@ impl HostContext {
             Topic::Sessions => self.sessions_generation,
             Topic::Machines => self.machines_generation,
             Topic::Commands => self.commands_generation,
+            Topic::Layout => self.layout_generation,
+            Topic::Git => self.git_generation,
         }
     }
 
@@ -232,8 +327,8 @@ pub(crate) struct SessionInfo {
     pub(crate) updated_at: u64,
     /// 这一轮从什么时候开始（unix 秒）；没在一轮里是 0。
     pub(crate) turn_started_at: u64,
-    /// 主舞台上正显示着它。
-    pub(crate) viewing: bool,
+    /// 显示着它、此刻看得见的舞台 id。没显示、被挡着是 None。
+    pub(crate) stage: Option<String>,
 }
 
 const WORKSPACE_DECLARATIONS: &str = r#"
@@ -287,8 +382,8 @@ export interface AgentSession {
   updated_at: number;
   /** 这一轮从什么时候开始，unix 秒；没在一轮里是 0。 */
   turn_started_at: number;
-  /** 主舞台上正显示着它。 */
-  viewing: boolean;
+  /** 显示着它、此刻看得见的舞台 id（见 layout().stages）。没显示或被挡着时为 null。 */
+  stage: string | null;
 }
 export interface Project {
   /** 项目根目录，在这台机器上唯一。 */
@@ -308,8 +403,89 @@ export function machines(): Machines;
 export interface Sessions { sessions: AgentSession[]; generation: number }
 /** 工作台侧栏里的全部会话，按侧栏顺序。只读内存。generation 在任何一项变化时加一。 */
 export function sessions(): Sessions;
-/** context：当前项目；sessions：会话列表和各会话的状态；machines：机器和项目。 */
-export type Topic = "context" | "sessions" | "machines" | "commands";
+export interface LayoutPanel {
+  /** 面板名，和布局文件里的 panel_name 一样：内置的是 "smelt.stage" 这样，插件的是 "shell:<插件 id>/<面板>"。交给 run("layout.select", { panel })。 */
+  name: string;
+  /** 标签上的名字：内置面板的名字（「文件」「变更」…），插件面板的标题。 */
+  title: string;
+  /** 此刻看得见：是所在组选中的那个，没被别的组的放大挡住，也不在收起的 dock 里。 */
+  shown: boolean;
+}
+export interface LayoutNode {
+  /** row / column 是拆分，tabs 是一组面板。 */
+  type: "row" | "column" | "tabs";
+  /** tabs 里的面板，按标签先后；row / column 是 []。 */
+  panels: LayoutPanel[];
+  /** tabs 选中的是第几个；row / column 是 null。 */
+  active: number | null;
+  children: LayoutNode[];
+}
+export interface LayoutDock {
+  /** 开着。用 run("layout.toggle_dock", { dock }) 开合。 */
+  open: boolean;
+  root: LayoutNode;
+}
+export interface LayoutStage {
+  /** 舞台的 id，交给 run("layout.focus", { id })。运行时给的，换布局、重启会变。 */
+  id: string;
+  /** 收哪几类。 */
+  accepts: ("terminal" | "conversation" | "page")[];
+  /** 有焦点：标题、文件、变更、上一个 / 下一个会话都跟着它显示的东西。有舞台时正好一块是 true。 */
+  focused: boolean;
+  /** 显示着的页面；显示会话（看 sessions() 的 stage）或空着时是 null。 */
+  page: "agents" | "automations" | "capabilities" | "desktop" | null;
+}
+export interface Layout {
+  /** 布局 id，交给 run("layout.switch", { layout })。 */
+  id: string;
+  /** 中间的树。还没装好布局时是 null。 */
+  center: LayoutNode | null;
+  /** 官方的 dock 区域。布局没写的是 null。 */
+  docks: { left: LayoutDock | null; right: LayoutDock | null; bottom: LayoutDock | null };
+  /** 放大着的那组里的面板名。没放大是 null。 */
+  zoomed: string[] | null;
+  /** 贴着窗口左上角的那组里的面板名。它开头要给红黄绿按钮让出 lights 那么宽。 */
+  top_left: string[] | null;
+  /** 贴着窗口右上角的那组里的面板名。 */
+  top_right: string[] | null;
+  /** 红黄绿按钮占的宽度（像素）；全屏、没有红黄绿按钮时是 0。 */
+  lights: number;
+  /** 几块舞台，按树里的先后。什么东西放哪块由各块的 accepts 和用户的操作定，插件不指定。 */
+  stages: LayoutStage[];
+  generation: number;
+}
+/**
+ * 当前布局：Dock 的树（哪组选中哪个、放大、dock 开合），贴角的是哪组。只读内存。
+ * generation 在任何一项变化时加一。
+ */
+export function layout(): Layout;
+export interface GitRepo {
+  /** 是哪个项目的，同 context().project.root。 */
+  root: string;
+  /** 当前分支；分离头指针时是运行时给的写法。 */
+  branch: string;
+  /** 跟踪的远端分支，比如 "origin/main"；没设时是 null。 */
+  upstream: string | null;
+  /** 比 upstream 多几个提交（未推送）。 */
+  ahead: number;
+  /** 比 upstream 少几个提交。 */
+  behind: number;
+  /** 有改动的文件数，含未跟踪的（未提交）。 */
+  changed: number;
+  /** stash 里存着几份。 */
+  stashes: number;
+}
+export interface Git { repo: GitRepo | null; generation: number }
+/**
+ * 当前项目根目录的 git 摘要。目录不是 git 仓库、还没读回来时 repo 是 null。
+ * 文件一变 smelt 就会重读，用 changed("git", since) 等，不用自己跑 git。只读内存。
+ */
+export function git(): Git;
+/**
+ * context：当前项目；sessions：会话列表和各会话的状态；machines：机器和项目；
+ * commands：命令和键；layout：当前布局；git：当前项目的 git 摘要。
+ */
+export type Topic = "context" | "sessions" | "machines" | "commands" | "layout" | "git";
 /**
  * 等这个主题变化：它的 generation 不等于 since 时兑现，给出新的 generation。
  * since 传 -1 立刻拿到当前值。在循环里 await 它代替定时检查，空闲时不会醒：
@@ -360,8 +536,7 @@ export type SettingsPage =
 export function open_settings(page?: SettingsPage): null;
 export interface Command {
   /**
-   * 交给 run 的 id。smelt 自己的命令是快捷键设置里那些（比如 "toggle_sidebar"、
-   * "split_beside"）；插件的是 "<插件 id>/<命令名>"。
+   * 交给 run 的 id。smelt 自己的命令是快捷键设置里那些（比如 "split_beside"）；插件的是 "<插件 id>/<命令名>"。
    */
   id: string;
   title: string;
@@ -380,8 +555,26 @@ export interface Command {
 export function commands(): Command[];
 /**
  * 执行一条命令。smelt 自己的命令和按它的快捷键一样，按当前焦点派发：比如 save_file
- * 只在焦点在文件里时有用。插件的命令交给那个插件。没有这条命令时报错。
+ * 只在焦点在文件里时有用。插件的命令交给那个插件。没有这条命令、参数不对时报错。
+ *
+ * 布局命令带参数，面板按面板名找（见 layout() 里各面板的 name）：
+ * - layout.select { panel }：切到这个面板：选中它的标签，被放大挡住先还原，在收起的 dock 里就打开；
+ * - layout.zoom { panel }：放大它所在的组，已经放大的是这组就还原；
+ * - layout.add { panel, to? }：把布局里没有的面板加进来，给了 to（布局里的面板名）就进它那一组，
+ *   不然在最右边另起一组；已经有了就和 layout.select 一样；
+ * - layout.focus { id }：焦点换到这块舞台，它显示的变成当前（和在里面点一下一样）。空着的不换；
+ * - layout.toggle_dock { dock }：开合官方的 dock 区域（"left" / "right" / "bottom"）；
+ * - layout.switch { layout }：切到这套布局（布局 id 是文件名去掉 .json）；
+ * - layout.reset：丢掉这套布局的存档，重新读文件；
+ * - layout.copy { layout? }：把这套布局（不给是当前这套）复制到用户布局目录再切过去。
+ * 面板、布局不在了在工作台里提示，这里不报错。
  */
+export function run(id: "layout.select" | "layout.zoom", args: { panel: string }): null;
+export function run(id: "layout.add", args: { panel: string; to?: string }): null;
+export function run(id: "layout.focus", args: { id: string }): null;
+export function run(id: "layout.toggle_dock", args: { dock: "left" | "right" | "bottom" }): null;
+export function run(id: "layout.switch", args: { layout: string }): null;
+export function run(id: "layout.copy", args?: { layout?: string }): null;
 export function run(id: string): null;
 /**
  * 等下一条发给这个插件的命令（smelt.json 里声明的，用户从命令面板或快捷键发出），
@@ -400,6 +593,8 @@ pub(super) fn workspace_module(
 ) -> HostModule {
     let sessions = context.clone();
     let machines = context.clone();
+    let layout = context.clone();
+    let git = context.clone();
     let waits = context.clone();
     HostModule::new("smelt-workspace")
         .declarations(WORKSPACE_DECLARATIONS)
@@ -408,6 +603,8 @@ pub(super) fn workspace_module(
         })
         .function("sessions", move |_| Ok(sessions_value(&sessions.borrow())))
         .function("machines", move |_| Ok(machines_value(&machines.borrow())))
+        .function("layout", move |_| Ok(layout_value(&layout.borrow())))
+        .function("git", move |_| Ok(git_value(&git.borrow())))
         .async_function("changed", move |arguments| {
             let name = arguments.string(0)?;
             let topic = Topic::parse(name)
@@ -489,6 +686,14 @@ pub(super) fn workspace_module(
             if let Some(shortcut) = crate::keymap::shortcut(id) {
                 return send("run", WorkspaceRequest::Run(shortcut.id));
             }
+            if let Some(name) = id
+                .strip_prefix("layout.")
+                .filter(|name| !name.contains('/'))
+            {
+                let args = arguments.get(1).filter(|value| !value.is_null());
+                let command = layout_command(name, args)?;
+                return send("run", WorkspaceRequest::Layout(command));
+            }
             // 命令名不带 `/`，最后一个 `/` 前面就是插件 id。
             let invoked = id
                 .rsplit_once('/')
@@ -510,7 +715,73 @@ pub(super) fn workspace_module(
         })
 }
 
-/// smelt 自己能改键的那些在前，插件声明的在后。键是眼下真绑着的。
+/// `run("layout.<name>", args)` 的参数。只看形状，面板、布局在不在由工作台判断。
+fn layout_command(name: &str, args: Option<&HostValue>) -> Result<LayoutCommand, HostError> {
+    let field = |key: &str| -> Result<String, HostError> {
+        args.and_then(|args| args.get(key))
+            .and_then(HostValue::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| HostError::new(format!("layout.{name} 要参数 {{ {key}: string }}")))
+    };
+    // 可省的参数：没给、给 null 是 None，给了就要是字符串。
+    let optional = |key: &str| -> Result<Option<String>, HostError> {
+        match args
+            .and_then(|args| args.get(key))
+            .filter(|value| !value.is_null())
+        {
+            None => Ok(None),
+            Some(_) => field(key).map(Some),
+        }
+    };
+    if let Some(args) = args
+        && args.as_object().is_none()
+    {
+        return Err(HostError::new(format!(
+            "layout.{name} 的参数要是对象，给的是 {}",
+            args.describe()
+        )));
+    }
+    Ok(match name {
+        "select" => LayoutCommand::Select {
+            panel: field("panel")?,
+        },
+        "zoom" => LayoutCommand::Zoom {
+            panel: field("panel")?,
+        },
+        "add" => LayoutCommand::Add {
+            panel: field("panel")?,
+            to: optional("to")?,
+        },
+        "focus" => LayoutCommand::Focus { id: field("id")? },
+        "toggle_dock" => {
+            let dock = field("dock")?;
+            LayoutCommand::ToggleDock {
+                dock: LayoutDockSide::parse(&dock).ok_or_else(|| {
+                    HostError::new(format!(
+                        "layout.toggle_dock 的 dock 只能是 \"left\"、\"right\"、\"bottom\"，给的是 \"{dock}\""
+                    ))
+                })?,
+            }
+        }
+        "switch" => LayoutCommand::Switch {
+            layout: field("layout")?,
+        },
+        "reset" => LayoutCommand::Reset,
+        "copy" => LayoutCommand::Copy {
+            layout: optional("layout")?,
+        },
+        _ => return Err(HostError::new(format!("没有这个命令：layout.{name}"))),
+    })
+}
+
+/// 不带参数就能执行的布局命令，列进 `commands()`。带参数的（select、zoom…）要面板名，
+/// 放进命令列表点了也只会报错，只写在 `run` 的说明里。
+const LAYOUT_COMMANDS: [(&str, &str); 2] = [
+    ("layout.reset", "重置当前布局"),
+    ("layout.copy", "复制当前布局"),
+];
+
+/// smelt 自己能改键的那些在前，然后是布局命令，插件声明的在后。键是眼下真绑着的。
 fn commands_value(cx: &gpui::App) -> HostValue {
     let overrides = cx.global::<crate::keymap::KeymapState>().overrides();
     let builtin = crate::keymap::SHORTCUTS.iter().map(|shortcut| {
@@ -519,6 +790,14 @@ fn commands_value(cx: &gpui::App) -> HostValue {
             .field("title", shortcut.label)
             .field("group", shortcut.group.label())
             .field("key", shortcut.keystroke(overrides).map(str::to_owned))
+            .into()
+    });
+    let layout = LAYOUT_COMMANDS.iter().map(|(id, title)| {
+        HostObject::new()
+            .field("id", *id)
+            .field("title", *title)
+            .field("group", "布局")
+            .field("key", None::<String>)
             .into()
     });
     let plugins = super::commands().into_iter().map(|entry| {
@@ -530,7 +809,12 @@ fn commands_value(cx: &gpui::App) -> HostValue {
             .field("key", key)
             .into()
     });
-    HostValue::from(builtin.chain(plugins).collect::<Vec<HostValue>>())
+    HostValue::from(
+        builtin
+            .chain(layout)
+            .chain(plugins)
+            .collect::<Vec<HostValue>>(),
+    )
 }
 
 /// 把操作交给工作台。工作台在这一轮更新结束后才做，所以插件这里拿不到结果。
@@ -560,6 +844,85 @@ fn context_value(home: &Path, context: &HostContext) -> HostValue {
             }),
         )
         .field("generation", context.generation)
+        .into()
+}
+
+fn layout_value(context: &HostContext) -> HostValue {
+    let layout = &context.layout;
+    let stages: Vec<HostValue> = context
+        .stages
+        .iter()
+        .map(|stage| {
+            let accepts: Vec<HostValue> = stage.accepts.iter().map(|&kind| kind.into()).collect();
+            HostObject::new()
+                .field("id", stage.id.clone())
+                .field("accepts", accepts)
+                .field("focused", stage.focused)
+                .field("page", stage.page.clone())
+                .into()
+        })
+        .collect();
+    let dock = |dock: &Option<LayoutDock>| {
+        dock.as_ref().map(|dock| {
+            HostObject::new()
+                .field("open", dock.open)
+                .field("root", layout_node_value(&dock.root))
+        })
+    };
+    HostObject::new()
+        .field("id", layout.id.clone())
+        .field("center", layout.center.as_ref().map(layout_node_value))
+        .field(
+            "docks",
+            HostObject::new()
+                .field("left", dock(&layout.left))
+                .field("right", dock(&layout.right))
+                .field("bottom", dock(&layout.bottom)),
+        )
+        .field("zoomed", layout.zoomed.clone())
+        .field("top_left", layout.top_left.clone())
+        .field("top_right", layout.top_right.clone())
+        .field("lights", layout.lights)
+        .field("stages", stages)
+        .field("generation", context.layout_generation)
+        .into()
+}
+
+fn layout_node_value(node: &LayoutNodeInfo) -> HostValue {
+    let panels: Vec<HostValue> = node
+        .panels
+        .iter()
+        .map(|panel| {
+            HostObject::new()
+                .field("name", panel.name.clone())
+                .field("title", panel.title.clone())
+                .field("shown", panel.shown)
+                .into()
+        })
+        .collect();
+    let children: Vec<HostValue> = node.children.iter().map(layout_node_value).collect();
+    HostObject::new()
+        .field("type", node.kind)
+        .field("panels", panels)
+        .field("active", node.active)
+        .field("children", children)
+        .into()
+}
+
+fn git_value(context: &HostContext) -> HostValue {
+    let repo = context.git.as_ref().map(|git| {
+        HostObject::new()
+            .field("root", git.root.clone())
+            .field("branch", git.branch.clone())
+            .field("upstream", git.upstream.clone())
+            .field("ahead", git.ahead)
+            .field("behind", git.behind)
+            .field("changed", git.changed)
+            .field("stashes", git.stashes)
+    });
+    HostObject::new()
+        .field("repo", repo)
+        .field("generation", context.git_generation)
         .into()
 }
 
@@ -595,7 +958,7 @@ fn sessions_value(context: &HostContext) -> HostValue {
                 )
                 .field("updated_at", session.updated_at)
                 .field("turn_started_at", session.turn_started_at)
-                .field("viewing", session.viewing)
+                .field("stage", session.stage.clone())
                 .into()
         })
         .collect();
@@ -714,7 +1077,55 @@ fn pick_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMAND_QUEUE_LIMIT, CommandQueue, HostContext, Topic};
+    use super::{
+        COMMAND_QUEUE_LIMIT, CommandQueue, HostContext, HostObject, HostValue, LayoutCommand,
+        Topic, layout_command,
+    };
+
+    #[test]
+    fn layout_commands_find_panels_by_name() {
+        let args: HostValue = HostObject::new().field("panel", "smelt.git").into();
+        assert!(matches!(
+            layout_command("select", Some(&args)),
+            Ok(LayoutCommand::Select { panel }) if panel == "smelt.git"
+        ));
+        assert!(matches!(
+            layout_command("add", Some(&args)),
+            Ok(LayoutCommand::Add { panel, to: None }) if panel == "smelt.git"
+        ));
+        let into: HostValue = HostObject::new()
+            .field("panel", "shell:demo/topbar")
+            .field("to", "smelt.files")
+            .into();
+        assert!(matches!(
+            layout_command("add", Some(&into)),
+            Ok(LayoutCommand::Add { to: Some(to), .. }) if to == "smelt.files"
+        ));
+        assert!(layout_command("zoom", None).is_err());
+        let dock: HostValue = HostObject::new().field("dock", "bottom").into();
+        assert!(matches!(
+            layout_command("toggle_dock", Some(&dock)),
+            Ok(LayoutCommand::ToggleDock {
+                dock: LayoutDockSide::Bottom
+            })
+        ));
+        let sideways: HostValue = HostObject::new().field("dock", "center").into();
+        assert!(layout_command("toggle_dock", Some(&sideways)).is_err());
+        assert!(
+            layout_command("toggle", Some(&args)).is_err(),
+            "开合节点没有了"
+        );
+    }
+
+    #[test]
+    fn layout_focus_takes_a_stage_id() {
+        let args: HostValue = HostObject::new().field("id", "chat").into();
+        assert!(matches!(
+            layout_command("focus", Some(&args)),
+            Ok(LayoutCommand::Focus { id }) if id == "chat"
+        ));
+        assert!(layout_command("focus", None).is_err());
+    }
 
     #[test]
     fn commands_reach_a_waiting_plugin_at_once() {

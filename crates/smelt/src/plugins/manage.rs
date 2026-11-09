@@ -1,7 +1,9 @@
 //! 用户插件的导入和删除：只动 `~/.smelt/plugins/`，App 自带的插件不归这里管。
 //!
-//! 导入是把一个插件目录复制进来，之后和原目录无关。删除是挪进回收目录，不直接抹掉。
-//! 两者都只改磁盘；改完由调用方 `mount_all` 重新加载。都是阻塞 IO，放后台线程调。
+//! 导入是把一个插件目录复制进来，之后和原目录无关。已经装了同 id 的插件时先交回
+//! [`Import::Conflict`] 不动磁盘，用户确认覆盖后再导一次：旧的挪进回收目录，新的换上。
+//! 删除也是挪进回收目录，不直接抹掉。都只改磁盘；改完由调用方 `mount_all` 重新加载。
+//! 都是阻塞 IO，放后台线程调。
 
 use std::fs;
 use std::io;
@@ -24,11 +26,33 @@ fn trash_dir() -> Option<PathBuf> {
     smelt_paths::smelt_home().map(|home| home.join("trash").join(PLUGIN_DIR))
 }
 
-/// 把 `source` 目录里的插件复制进用户插件目录。返回 (插件 id, 插件名)。
-pub(crate) fn import(source: &Path) -> Result<(String, String), String> {
+/// 一次导入的结果。
+#[derive(Debug)]
+pub(crate) enum Import {
+    Imported {
+        id: String,
+        name: String,
+    },
+    /// 已经装了同 id 的插件，磁盘没动。用户确认后带上 `overwrite` 再导一次。
+    Conflict(Conflict),
+}
+
+/// 要导入的插件和已经装着的那个同 id。
+#[derive(Clone, Debug)]
+pub(crate) struct Conflict {
+    pub(crate) name: String,
+    /// 要导入的版本；清单里没写是空。
+    pub(crate) version: String,
+    /// 装着的那个的版本；清单里没写是空。
+    pub(crate) installed_version: String,
+}
+
+/// 把 `source` 目录里的插件复制进用户插件目录。`overwrite` 为 false 时碰到同 id 的就交回
+/// [`Import::Conflict`]；为 true 时把装着的挪进回收目录，换成这个。
+pub(crate) fn import(source: &Path, overwrite: bool) -> Result<Import, String> {
     let plugins = user_plugin_dir().ok_or("找不到 smelt 数据目录")?;
-    import_into(source, &plugins)
-        .map(|manifest| (manifest.id().to_string(), manifest.name().to_string()))
+    let trash = trash_dir().ok_or("找不到 smelt 数据目录")?;
+    import_into(source, &plugins, &trash, overwrite)
 }
 
 /// 把用户插件目录里的 `root` 挪进回收目录。
@@ -38,7 +62,12 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
     uninstall_into(root, &plugins, &trash).map(|_| ())
 }
 
-fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> {
+fn import_into(
+    source: &Path,
+    plugins: &Path,
+    trash: &Path,
+    overwrite: bool,
+) -> Result<Import, String> {
     let manifest = PluginManifest::read(source).map_err(|error| {
         if source.join(MANIFEST_FILE).is_file() {
             format!("插件清单有问题：{error}")
@@ -56,16 +85,24 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
     if canonical_source.starts_with(&canonical_plugins) {
         return Err("这个插件已经在插件目录里了".to_string());
     }
-    if let Some(existing) = installed_root(plugins, manifest.id()) {
-        return Err(format!(
-            "已经装了 id 相同的插件（{}），先删掉它再导入",
-            existing.display()
-        ));
+    let existing = installed_root(plugins, manifest.id());
+    if let Some(existing) = &existing
+        && !overwrite
+    {
+        let installed_version = PluginManifest::read(existing)
+            .map(|installed| installed.version().to_string())
+            .unwrap_or_default();
+        return Ok(Import::Conflict(Conflict {
+            name: manifest.name().to_string(),
+            version: manifest.version().to_string(),
+            installed_version,
+        }));
     }
 
-    // id 只含小写字母、数字和 `.-_`，不以点开头，直接当目录名。
+    // id 只含小写字母、数字和 `.-_`，不以点开头，直接当目录名。装着的那个可能是手动放进来、
+    // 目录名不是 id 的；它会被挪走，所以只有占着这个名字的不是它时才算冲突。
     let target = plugins.join(manifest.id());
-    if fs::symlink_metadata(&target).is_ok() {
+    if fs::symlink_metadata(&target).is_ok() && existing.as_deref() != Some(target.as_path()) {
         return Err(format!("{} 已经存在", target.display()));
     }
     // 先复制到点开头的暂存目录（发现插件时跳过它），完整了再一次改名到位：
@@ -75,12 +112,28 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
         fs::remove_dir_all(&staging)
             .map_err(|error| format!("清理上次没导完的目录失败：{error}"))?;
     }
-    let copied = copy_tree(source, &staging, true).and_then(|()| fs::rename(&staging, &target));
-    if let Err(error) = copied {
+    if let Err(error) = copy_tree(source, &staging, true) {
         let _ = fs::remove_dir_all(&staging);
         return Err(format!("复制插件失败：{error}"));
     }
-    Ok(manifest)
+    // 新的完整复制好了才挪走旧的，复制失败时装着的那个原样不动。
+    if let Some(existing) = &existing
+        && let Err(error) = uninstall_into(existing, plugins, trash)
+    {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("挪走旧版本失败：{error}"));
+    }
+    if let Err(error) = fs::rename(&staging, &target) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(match existing {
+            Some(_) => format!("换上新版本失败：{error}；旧版本在 {} 里", trash.display()),
+            None => format!("复制插件失败：{error}"),
+        });
+    }
+    Ok(Import::Imported {
+        id: manifest.id().to_string(),
+        name: manifest.name().to_string(),
+    })
 }
 
 /// 用户插件目录里 id 为 `id` 的插件。
@@ -193,9 +246,12 @@ mod tests {
         scratch.write("src/demo/lib/util.js", "export const x = 1;");
         let plugins = scratch.path("plugins");
 
-        let manifest = import_into(&source, &plugins).unwrap();
+        let imported = import_into(&source, &plugins, &scratch.path("trash"), false).unwrap();
 
-        assert_eq!(manifest.id(), "com.example.demo");
+        assert!(
+            matches!(&imported, Import::Imported { id, .. } if id == "com.example.demo"),
+            "{imported:?}"
+        );
         let target = plugins.join("com.example.demo");
         assert!(target.join(MANIFEST_FILE).is_file());
         assert!(target.join("lib/util.js").is_file());
@@ -215,7 +271,7 @@ mod tests {
         std::os::unix::fs::symlink(scratch.path("outside"), source.join("linked")).unwrap();
         let plugins = scratch.path("plugins");
 
-        import_into(&source, &plugins).unwrap();
+        import_into(&source, &plugins, &scratch.path("trash"), false).unwrap();
 
         let target = plugins.join("com.example.demo");
         assert!(!target.join(".git").exists());
@@ -234,24 +290,94 @@ mod tests {
             r#"{"id":"com.example.x","name":"X","version":"0.1.0","entry":"main.js"}"#,
         );
         let plugins = scratch.path("plugins");
+        let trash = scratch.path("trash");
 
-        let missing = import_into(&scratch.path("src/empty"), &plugins).unwrap_err();
+        let missing = import_into(&scratch.path("src/empty"), &plugins, &trash, false).unwrap_err();
         assert!(missing.contains("不是 smelt 插件"), "{missing}");
-        let broken = import_into(&scratch.path("src/broken"), &plugins).unwrap_err();
+        let broken = import_into(&scratch.path("src/broken"), &plugins, &trash, false).unwrap_err();
         assert!(broken.contains("清单有问题"), "{broken}");
-        let no_entry = import_into(&scratch.path("src/no-entry"), &plugins).unwrap_err();
+        let no_entry =
+            import_into(&scratch.path("src/no-entry"), &plugins, &trash, false).unwrap_err();
         assert!(no_entry.contains("main.js"), "{no_entry}");
     }
 
     #[test]
-    fn import_refuses_an_id_that_is_already_installed() {
+    fn import_of_an_installed_id_asks_first_and_leaves_the_disk_alone() {
+        let scratch = Scratch::new();
+        let installed = scratch.plugin("plugins/com.example.demo", "com.example.demo");
+        let source = scratch.plugin("src/demo", "com.example.demo");
+        scratch.write("src/demo/new.js", "");
+
+        let outcome = import_into(
+            &source,
+            &scratch.path("plugins"),
+            &scratch.path("trash"),
+            false,
+        )
+        .unwrap();
+
+        let Import::Conflict(conflict) = outcome else {
+            panic!("应该先问：{outcome:?}");
+        };
+        assert_eq!(conflict.name, "Demo");
+        assert_eq!(conflict.installed_version, "0.1.0");
+        assert!(!installed.join("new.js").exists(), "确认前不动装着的");
+        assert!(!scratch.path("trash").exists());
+    }
+
+    #[test]
+    fn overwrite_moves_the_installed_copy_to_the_trash_and_puts_the_new_one_under_its_id() {
         let scratch = Scratch::new();
         // 手动 clone 进来的，目录名和 id 不一样。
-        scratch.plugin("plugins/project-stats", "com.example.demo");
+        let installed = scratch.plugin("plugins/project-stats", "com.example.demo");
+        scratch.write("plugins/project-stats/old.js", "");
         let source = scratch.plugin("src/demo", "com.example.demo");
+        scratch.write("src/demo/new.js", "");
+        let plugins = scratch.path("plugins");
+        let trash = scratch.path("trash");
 
-        let error = import_into(&source, &scratch.path("plugins")).unwrap_err();
-        assert!(error.contains("project-stats"), "{error}");
+        let outcome = import_into(&source, &plugins, &trash, true).unwrap();
+
+        assert!(matches!(outcome, Import::Imported { .. }), "{outcome:?}");
+        assert!(!installed.exists());
+        let target = plugins.join("com.example.demo");
+        assert!(target.join("new.js").is_file());
+        assert!(!target.join("old.js").exists(), "不是合并，整个换掉");
+        let trashed: Vec<_> = fs::read_dir(&trash).unwrap().flatten().collect();
+        assert_eq!(trashed.len(), 1);
+        assert!(
+            trashed[0].path().join("old.js").is_file(),
+            "旧的在回收目录里"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_keeps_the_installed_copy_when_the_new_one_cannot_be_copied() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new();
+        let installed = scratch.plugin("plugins/com.example.demo", "com.example.demo");
+        let source = scratch.plugin("src/demo", "com.example.demo");
+        // 读不了的文件：复制到一半失败。
+        scratch.write("src/demo/locked.js", "");
+        let locked = source.join("locked.js");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let outcome = import_into(
+            &source,
+            &scratch.path("plugins"),
+            &scratch.path("trash"),
+            true,
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(
+            installed.join("main.js").is_file(),
+            "复制失败时装着的原样不动"
+        );
+        assert!(!scratch.path("trash").exists());
+        assert!(!scratch.path("plugins/.importing-com.example.demo").exists());
     }
 
     #[test]
@@ -259,7 +385,13 @@ mod tests {
         let scratch = Scratch::new();
         let installed = scratch.plugin("plugins/demo", "com.example.demo");
 
-        let error = import_into(&installed, &scratch.path("plugins")).unwrap_err();
+        let error = import_into(
+            &installed,
+            &scratch.path("plugins"),
+            &scratch.path("trash"),
+            true,
+        )
+        .unwrap_err();
         assert!(error.contains("已经在插件目录里"), "{error}");
     }
 

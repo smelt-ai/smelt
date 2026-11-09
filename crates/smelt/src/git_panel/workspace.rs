@@ -573,6 +573,11 @@ impl Workspace {
                     }
                 };
                 if changed {
+                    // 插件的 `git()` 只跟当前项目根目录。
+                    let active = this.active_project_ref(cx);
+                    if active.as_ref() == Some(&root) {
+                        this.publish_git_to_plugins(active.as_ref());
+                    }
                     // 聚合开关和提交框的占位跟着这份快照走，不能只等 2 秒保底。
                     this.schedule_visible_refresh(cx);
                     cx.notify();

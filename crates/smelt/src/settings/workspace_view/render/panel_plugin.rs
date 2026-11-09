@@ -42,7 +42,15 @@ fn list_group(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Settin
     };
     let mut group = SettingGroup::new()
         .title(title)
-        .item(toolbar_item(entity.clone(), state))
+        .item(toolbar_item(entity.clone(), state));
+    if let Some(pending) = &state.pending_overwrite {
+        group = group.item(overwrite_item(
+            entity.clone(),
+            &pending.conflict,
+            state.busy,
+        ));
+    }
+    group = group
         // 页脚本身是小号字，这里只把颜色换成警告色：导入别人的插件等于给它整台机器的权限。
         .footer(|_, cx| {
             div().text_color(cx.theme().warning).child(
@@ -128,6 +136,59 @@ fn toolbar_item(entity: Entity<Workspace>, state: &PanelPluginsSnapshot) -> Sett
     .description(format!(
         "选一个含 gpui-shell.json 的目录，复制进 {user_dir}；改了脚本点「重新加载」，不用重启。"
     ))
+}
+
+/// 选的插件已经装了：问要不要覆盖。紧跟在导入那一行下面，是这次导入的后半步。
+fn overwrite_item(
+    entity: Entity<Workspace>,
+    conflict: &crate::plugins::Conflict,
+    busy: bool,
+) -> SettingItem {
+    let version = |version: &str| {
+        if version.is_empty() {
+            "没写版本".to_string()
+        } else {
+            format!("版本 {version}")
+        }
+    };
+    let description = format!(
+        "装着的是{}，要导入的是{}。覆盖后旧的整个挪进 ~/.smelt/trash/plugins，需要时能找回。",
+        version(&conflict.installed_version),
+        version(&conflict.version),
+    );
+    SettingItem::new(
+        format!("已经装了「{}」，覆盖吗？", conflict.name),
+        SettingField::render(move |_, _, _| {
+            let confirm_entity = entity.clone();
+            let cancel_entity = entity.clone();
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("confirm-overwrite-panel-plugin")
+                        .compact()
+                        .label("覆盖")
+                        .disabled(busy)
+                        .on_click(move |_, _, cx| {
+                            confirm_entity.update(cx, |workspace, cx| {
+                                workspace.confirm_panel_plugin_overwrite(cx);
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("cancel-overwrite-panel-plugin")
+                        .quiet()
+                        .compact()
+                        .label("取消")
+                        .on_click(move |_, _, cx| {
+                            cancel_entity.update(cx, |workspace, cx| {
+                                workspace.cancel_panel_plugin_overwrite(cx);
+                            });
+                        }),
+                )
+                .into_any_element()
+        }),
+    )
+    .description(description)
 }
 
 /// 给插件作者看的：示例和日志。放在最后，不跟装插件的人抢位置。

@@ -33,25 +33,6 @@ pub(crate) fn merge_restore_pending<T: Clone>(
     sessions
 }
 
-pub(crate) fn persisted_active_position(
-    active_session: usize,
-    pending: &[(usize, SessionState)],
-    sessions_restored: bool,
-) -> usize {
-    if !sessions_restored {
-        return active_session;
-    }
-    let mut position = active_session;
-    let mut pending_indices = pending.iter().map(|(index, _)| *index).collect::<Vec<_>>();
-    pending_indices.sort_unstable();
-    for index in pending_indices {
-        if index <= position {
-            position += 1;
-        }
-    }
-    position
-}
-
 /// 运行时目录里的一段对话 → 待恢复的会话。终端先按默认摆法，客户端存的分屏随后填回。
 pub(crate) fn session_state_from_conversation(conversation: WorkspaceConversation) -> SessionState {
     let acp = conversation.acp.map(acp_saved_from_directory);
@@ -154,7 +135,7 @@ fn directory_terminal(leaf: PaneState) -> Option<WorkspaceTerminal> {
 /// 客户端自己的界面状态。每台设备可以不同（设计文档 D1），不交给运行时。
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceUiState {
-    pub(crate) active_session: usize,
+    /// 当前会话的对话 id。
     pub(crate) active_session_id: Option<String>,
     pub(crate) route: WorkspaceRoute,
     pub(crate) selected_agent_id: Option<String>,
@@ -317,7 +298,6 @@ pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
         return WorkspaceUiState::default();
     };
     WorkspaceUiState {
-        active_session: record.active_session,
         active_session_id: record.active_session_id,
         route: crate::settings::enum_from_name(&record.route).unwrap_or_default(),
         selected_agent_id: record.selected_agent_id,
@@ -334,7 +314,6 @@ pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
 
 fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
     let record = smelt_client_store::WorkspaceUiRecord {
-        active_session: ui.active_session,
         active_session_id: ui.active_session_id.clone(),
         route: crate::settings::enum_name(&ui.route),
         selected_agent_id: ui.selected_agent_id.clone(),
@@ -831,8 +810,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 一个运行时的第一份目录：恢复上次的会话。活动会话只按本机那份认（客户端记的是上次的
-    /// 活动会话）。
+    /// 一个运行时的第一份目录：恢复上次的会话。当前会话按对话 id 记着，恢复到它自然就显示。
     fn start_directory_restore(
         &mut self,
         runtime: Runtime,
@@ -842,25 +820,13 @@ impl Workspace {
     ) {
         let key = runtime.key().clone();
         let is_local = key == RuntimeKey::Local;
-        let (active, saved_active_session_id) = if is_local {
-            let saved_id = self
-                .saved_active_session_id
-                .clone()
-                .filter(|id| !id.is_empty());
-            let active = saved_id
-                .as_deref()
-                .and_then(|id| pending.iter().position(|state| state.id == id))
-                .unwrap_or(self.startup_active_session);
-            (active, saved_id)
-        } else {
-            (0, None)
-        };
         let Some(space) = self.space_mut(&key) else {
             return;
         };
         space.restore_pending = pending.iter().cloned().enumerate().collect();
         if pending.is_empty() {
             space.sessions_restored = true;
+            self.settle_current(window, cx);
             if is_local {
                 self.check_daemon_outdated(cx);
             }
@@ -871,14 +837,7 @@ impl Workspace {
             key,
             pending.len()
         );
-        self.schedule_session_restore(
-            runtime,
-            pending,
-            active,
-            saved_active_session_id,
-            window,
-            cx,
-        );
+        self.schedule_session_restore(runtime, pending, window, cx);
     }
 
     /// 一个运行时那份的写入（常规保存与退出 flush）都进入它自己的单消费者队列。
@@ -1111,22 +1070,7 @@ impl Workspace {
     /// 客户端界面状态：折叠、置顶按运行时收齐。
     fn workspace_ui_state(&self) -> WorkspaceUiState {
         let mut ui = WorkspaceUiState {
-            active_session: self
-                .space(&RuntimeKey::Local)
-                .map(|space| {
-                    persisted_active_position(
-                        self.active_session,
-                        &space.restore_pending,
-                        space.sessions_restored,
-                    )
-                })
-                .unwrap_or(self.active_session),
-            active_session_id: self
-                .sessions
-                .get(self.active_session)
-                .map(|session| session.conversation_id.clone())
-                .or_else(|| self.saved_active_session_id.clone())
-                .filter(|id| !id.is_empty()),
+            active_session_id: self.current_conversation.clone(),
             route: self.nav.persist(),
             selected_agent_id: self.agent_surface.selected_id.clone(),
             collapsed_projects: Vec::new(),
