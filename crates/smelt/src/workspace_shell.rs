@@ -1,20 +1,16 @@
-//! 工作台外壳用 `gpui-component` 的 Dock。
+//! 工作台外壳分栏与伸缩动画。
 //!
-//! 左栏、舞台、工具面板各是一块停靠面板。开合和宽度仍以原来的字段为准
-//! （`sidebar_open` / `sidebar_w`，以及当前会话的 `tool_panel_open` /
-//! `tool_panel_w`），渲染前写进 Dock，用户拖动分隔条后再写回这些字段。
-//! 三块面板的位置固定，Dock 锁住不让拖动和放下，布局树不存，每次启动照原样装。
-//! 终端分屏是舞台里另一个 Dock（`term_dock`），锁住外层它的标签才不会被放进侧栏。
+//! 左栏（会话列表与机器管理）、中间舞台与右栏（工具面板）采用直接分栏排布：
+//! - 侧栏与工具栏的开合由平滑动画驱动，在 0px 与目标宽度之间丝滑过渡，没有底层硬截断；
+//! - 展开状态下在栏间提供拖拽分隔条调节宽度，松手时落盘；拖过收起线时平滑闭合；
+//! - 终端分屏是舞台里的专用 Dock（`term_dock`），不与顶层外壳耦合。
 
+use std::time::Duration;
+use gpui_base::{Easing, Transition};
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, Pixels,
-    Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
+    AnyElement, Context, ExternalPaths, Hsla, MouseButton, MouseDownEvent, Pixels, Window,
+    div, prelude::*, px, rgb,
 };
-use gpui_component::dock::{
-    BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle,
-    register_panel,
-};
-
 use gpui_component::{ActiveTheme, Icon};
 use gpui_component::empty::{
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
@@ -27,182 +23,42 @@ use crate::{
     Workspace, WorkspaceRoute, terminal, ui_theme, workspace_frame,
 };
 
-const SHELL_VERSION: usize = 1;
-const SIDEBAR_PANEL: &str = "smelt.sidebar";
-const STAGE_PANEL: &str = "smelt.stage";
-const TOOL_PANEL: &str = "smelt.tools";
-
-pub(crate) struct InstalledShell {
-    pub(crate) area: Entity<DockArea>,
-    pub(crate) applied_sidebar: f32,
-    pub(crate) applied_tool: f32,
+/// 允许拖到的侧栏上限。
+pub(crate) fn sidebar_cap(viewport: Pixels) -> f32 {
+    let shell = f32::from(ui_theme::shell_padding()) * 2.0;
+    (f32::from(viewport) - shell - MIN_WORKSPACE_CONTENT_WIDTH).max(MIN_SIDEBAR_WIDTH)
 }
 
-/// 建好 Dock，摆成左栏 / 舞台 / 右栏并锁住。每个停靠区只有一个面板、拖不走，布局固定，
-/// 不用存；开合和宽度每次渲染前由 `align_shell_dock` 从工作区状态写进来。
-pub(crate) fn install(
-    workspace: WeakEntity<Workspace>,
-    window: &mut Window,
-    cx: &mut App,
-) -> InstalledShell {
-    register_shell_panels(workspace.clone(), cx);
-    let (area, skin) = DockSkin::dock_area("smelt-shell", Some(SHELL_VERSION), window, cx);
-    skin.set_toggle_button_visible(false, cx);
-    skin.set_close_button_visible(false, cx);
+/// 允许拖到的工具栏上限。
+pub(crate) fn tool_cap(viewport: Pixels, sidebar_on_screen: f32) -> f32 {
+    let shell = f32::from(ui_theme::shell_padding()) * 2.0;
+    (f32::from(viewport) - shell - sidebar_on_screen - MIN_WORKSPACE_CONTENT_WIDTH)
+        .max(MIN_TOOL_PANEL_WIDTH)
+}
 
-    {
-        let sidebar = cx.new(|cx| ShellPanel::new(workspace.clone(), SIDEBAR_PANEL, "会话", cx));
-        let stage = cx.new(|cx| ShellPanel::new(workspace.clone(), STAGE_PANEL, "舞台", cx));
-        let tools = cx.new(|cx| ShellPanel::new(workspace.clone(), TOOL_PANEL, "工具", cx));
-        area.update(cx, |area, cx| {
-            area.set_dock(
-                DockPlacement::Left,
-                DockLayout::tabs().panel_view(panel_handle(sidebar), cx),
-                window,
-                cx,
-            );
-            area.set_center(
-                DockLayout::tabs().panel_view(panel_handle(stage), cx),
-                window,
-                cx,
-            );
-            area.set_dock(
-                DockPlacement::Right,
-                DockLayout::tabs().panel_view(panel_handle(tools), cx),
-                window,
-                cx,
-            );
-            // 锁住只禁拖动和放下，开合与拖宽照常。
-            area.set_locked(true, window, cx);
-        });
-    }
+pub(crate) fn tool_display(preference: f32, viewport: Pixels, sidebar_on_screen: f32) -> f32 {
+    preference.clamp(MIN_TOOL_PANEL_WIDTH, tool_cap(viewport, sidebar_on_screen))
+}
 
-    let applied_sidebar = area
-        .read(cx)
-        .dock_size(DockPlacement::Left)
-        .map(|size| f32::from(size))
-        .unwrap_or(crate::DEFAULT_SIDEBAR_WIDTH);
-    let applied_tool = area
-        .read(cx)
-        .dock_size(DockPlacement::Right)
-        .map(|size| f32::from(size))
-        .unwrap_or(crate::DEFAULT_TOOL_PANEL_WIDTH);
-    InstalledShell {
-        area,
-        applied_sidebar,
-        applied_tool,
+/// 松手时窄于收起线，就用按下前的宽度，并把它抬到这一栏的最小宽度以上。
+/// 否则这次松手不收起。
+pub(crate) fn width_after_collapse(gesture_width: f32, current_width: f32, min_width: f32) -> Option<f32> {
+    if current_width < crate::DOCK_COLLAPSE_WIDTH {
+        Some(gesture_width.max(min_width))
+    } else {
+        None
     }
 }
 
-fn register_shell_panels(workspace: WeakEntity<Workspace>, cx: &mut App) {
-    register_one(cx, SIDEBAR_PANEL, "会话", workspace.clone());
-    register_one(cx, STAGE_PANEL, "舞台", workspace.clone());
-    register_one(cx, TOOL_PANEL, "工具", workspace);
+pub(crate) fn sidebar_width_after_collapse(gesture_width: f32, current_width: f32) -> Option<f32> {
+    width_after_collapse(gesture_width, current_width, crate::MIN_SIDEBAR_WIDTH)
 }
 
-fn register_one(
-    cx: &mut App,
-    name: &'static str,
-    title: &'static str,
-    workspace: WeakEntity<Workspace>,
-) {
-    register_panel(cx, name, move |_state, _window, cx| {
-        panel_handle(cx.new(|cx| ShellPanel::new(workspace.clone(), name, title, cx)))
-    });
+pub(crate) fn tool_panel_width_after_collapse(gesture_width: f32, current_width: f32) -> Option<f32> {
+    width_after_collapse(gesture_width, current_width, crate::MIN_TOOL_PANEL_WIDTH)
 }
 
-struct ShellPanel {
-    workspace: WeakEntity<Workspace>,
-    name: &'static str,
-    title: &'static str,
-    focus_handle: FocusHandle,
-    /// Dock 皮肤把面板内容缓存起来，只在这块面板自己被通知时重画。
-    /// 会话列表和舞台的数据在 Workspace 上，所以跟着它的通知一起失效。
-    _workspace_refresh: Subscription,
-}
-
-impl ShellPanel {
-    fn new(
-        workspace: WeakEntity<Workspace>,
-        name: &'static str,
-        title: &'static str,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let host = workspace
-            .upgrade()
-            .expect("工作台外壳面板在工作台构造期间创建");
-        let _workspace_refresh = cx.observe(&host, |_, _, cx| cx.notify());
-        Self {
-            workspace,
-            name,
-            title,
-            focus_handle: cx.focus_handle(),
-            _workspace_refresh,
-        }
-    }
-}
-
-impl EventEmitter<PanelEvent> for ShellPanel {}
-
-impl Focusable for ShellPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl BasePanel for ShellPanel {
-    fn panel_name(&self) -> &'static str {
-        self.name
-    }
-
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn zoomable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn visible(&self, cx: &App) -> bool {
-        if self.name != TOOL_PANEL {
-            return true;
-        }
-        self.workspace.upgrade().is_none_or(|workspace| {
-            let workspace = workspace.read(cx);
-            workspace.tool_panel_open && !workspace.tool_panel_promoted()
-        })
-    }
-}
-
-impl Panel for ShellPanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.title
-    }
-
-    /// 这三块自己有顶栏和页签。Dock 的标题条只在同一组里有第二块面板时出现，
-    /// 那时候用它拖动。
-    fn title_bar(&self, _: &App) -> bool {
-        false
-    }
-
-    fn inner_padding(&self, _: &App) -> bool {
-        false
-    }
-}
-
-impl Render for ShellPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.workspace
-            .update(cx, |workspace, cx| match self.name {
-                SIDEBAR_PANEL => workspace.render_sidebar_dock(window, cx),
-                STAGE_PANEL => workspace.render_stage_dock(window, cx),
-                _ => workspace.render_tool_dock(window, cx),
-            })
-            .unwrap_or_else(|_| div().size_full().into_any_element())
-    }
-}
-
-/// 分隔条拖动和窗口变宽时，Dock 上的像素与存档宽度怎么对齐。
+/// 分隔条拖动和窗口变宽时，像素与存档宽度怎么对齐。保留纯计算逻辑供单元测试。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ShellSizeStep {
     pub(crate) preference: f32,
@@ -210,19 +66,16 @@ pub(crate) struct ShellSizeStep {
     pub(crate) dock: f32,
     pub(crate) display: f32,
     pub(crate) min: f32,
-    /// 当前窗口下这条边最多能到多宽。比 `min` 还小的时候按 `min` 算。
     pub(crate) max: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ShellSizeAction {
     Keep,
-    /// 用户拖过。`push` 有值时 Dock 比下限还窄，要把它顶回去。
     Adopt {
         preference: f32,
         push: Option<f32>,
     },
-    /// 窗口变了，把 Dock 推到当前该显示的宽度，不改存档。
     Push(f32),
 }
 
@@ -239,8 +92,6 @@ pub(crate) fn shell_size_action(step: ShellSizeStep) -> ShellSizeAction {
     }
 }
 
-/// 鼠标还按着时不要把 Dock 推回去，否则会和正在拖的指针对着干。
-/// 松手后的下一帧再按同一套规则归位。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ShellSizeDecision {
     pub(crate) preference: f32,
@@ -287,186 +138,253 @@ pub(crate) fn decide_shell_size(step: ShellSizeStep, pointer_down: bool) -> Shel
     }
 }
 
-fn sidebar_cap(viewport: Pixels) -> f32 {
-    let shell = f32::from(ui_theme::shell_padding()) * 2.0;
-    (f32::from(viewport) - shell - MIN_WORKSPACE_CONTENT_WIDTH).max(MIN_SIDEBAR_WIDTH)
-}
-
-fn tool_cap(viewport: Pixels, sidebar_on_screen: f32) -> f32 {
-    let shell = f32::from(ui_theme::shell_padding()) * 2.0;
-    (f32::from(viewport) - shell - sidebar_on_screen - MIN_WORKSPACE_CONTENT_WIDTH)
-        .max(MIN_TOOL_PANEL_WIDTH)
-}
-
-fn tool_display(preference: f32, viewport: Pixels, sidebar_on_screen: f32) -> f32 {
-    preference.clamp(MIN_TOOL_PANEL_WIDTH, tool_cap(viewport, sidebar_on_screen))
-}
-
 impl Workspace {
-    /// 渲染前把存档里的开合、宽度写进 Dock；用户拖动分隔条后把新宽度写回存档。
-    pub(crate) fn align_shell_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 计算侧栏与工具栏在当前动画帧中的像素跨度与动画进度。
+    pub(crate) fn shell_animated_spans(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (f32, f32, f32, f32) {
         let viewport = window.viewport_size().width;
-        let pointer_down = self.shell_pointer_down;
         let sidebar_open = self.sidebar_open;
-        let mut sidebar_w = self.sidebar_w;
-        let mut applied_sidebar = self.shell_applied_sidebar;
         let tool_open = self.tool_panel_open && !self.tool_panel_promoted();
-        let mut tool_w = self.tool_panel_w;
-        let mut applied_tool = self.shell_applied_tool;
-        let mut dragged = false;
 
-        let sidebar_display = crate::sidebar_width_for_viewport(sidebar_w, viewport);
-        self.shell_dock.update(cx, |dock, cx| {
-            sync_edge(
-                dock,
-                DockPlacement::Left,
-                sidebar_open,
-                &mut sidebar_w,
-                &mut applied_sidebar,
-                sidebar_display,
-                MIN_SIDEBAR_WIDTH,
-                sidebar_cap(viewport),
-                pointer_down,
-                &mut dragged,
-                window,
-                cx,
-            );
-            let sidebar_on_screen = if dock.is_dock_open(DockPlacement::Left) {
-                dock.dock_size(DockPlacement::Left)
-                    .map(|size| f32::from(size))
-                    .unwrap_or(0.)
-            } else {
-                0.
-            };
-            let tool_shown = tool_display(tool_w, viewport, sidebar_on_screen);
-            sync_edge(
-                dock,
-                DockPlacement::Right,
-                tool_open,
-                &mut tool_w,
-                &mut applied_tool,
-                tool_shown,
-                MIN_TOOL_PANEL_WIDTH,
-                tool_cap(viewport, sidebar_on_screen),
-                pointer_down,
-                &mut dragged,
-                window,
-                cx,
-            );
-        });
+        let sidebar_display = crate::sidebar_width_for_viewport(self.sidebar_w, viewport);
+        let sidebar_policy = Transition::new(Duration::from_millis(200)).easing(Easing::EaseOut);
+        let sidebar_progress: f32 = gpui_base::transition(
+            gpui::ElementId::from("workspace-shell-sidebar-collapse"),
+            if sidebar_open { 1.0f32 } else { 0.0f32 },
+            sidebar_policy,
+            window,
+            cx,
+        );
 
-        if (self.sidebar_w - sidebar_w).abs() > 0.5 {
-            self.sidebar_w = sidebar_w;
-        }
-        if (self.tool_panel_w - tool_w).abs() > 0.5 {
-            self.tool_panel_w = tool_w;
-        }
-        self.shell_applied_sidebar = applied_sidebar;
-        self.shell_applied_tool = applied_tool;
-        if dragged {
-            self.shell_needs_save = true;
-        }
+        let tool_policy = Transition::new(Duration::from_millis(200)).easing(Easing::EaseOut);
+        let tool_progress: f32 = gpui_base::transition(
+            gpui::ElementId::from("workspace-shell-tool-collapse"),
+            if tool_open { 1.0f32 } else { 0.0f32 },
+            tool_policy,
+            window,
+            cx,
+        );
+
+        let animated_sidebar_w = (sidebar_display * sidebar_progress).max(0.0);
+        let tool_shown = tool_display(self.tool_panel_w, viewport, animated_sidebar_w);
+        let animated_tool_w = (tool_shown * tool_progress).max(0.0);
+
+        (
+            animated_sidebar_w,
+            animated_tool_w,
+            sidebar_progress,
+            tool_progress,
+        )
     }
 
+    /// 渲染外壳主体三栏及栏间分隔条。
+    pub(crate) fn render_shell_columns(
+        &mut self,
+        animated_sidebar_w: f32,
+        animated_tool_w: f32,
+        sidebar_progress: f32,
+        tool_progress: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sidebar_open = self.sidebar_open;
+        let tool_open = self.tool_panel_open && !self.tool_panel_promoted();
+
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .when(animated_sidebar_w > 0.001, |row| {
+                row.child(
+                    div()
+                        .w(px(animated_sidebar_w))
+                        .h_full()
+                        .overflow_hidden()
+                        .flex_none()
+                        .relative()
+                        .child(self.render_sidebar_dock(window, cx))
+                        .when(sidebar_open && sidebar_progress >= 0.999, |col| {
+                            col.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .right_0()
+                                    .w(ui_theme::chrome_gap())
+                                    .child(self.render_sidebar_resize_handle(cx)),
+                            )
+                        }),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.render_stage_dock(window, cx)),
+            )
+            .when(animated_tool_w > 0.001, |row| {
+                row.child(
+                    div()
+                        .w(px(animated_tool_w))
+                        .h_full()
+                        .overflow_hidden()
+                        .flex_none()
+                        .relative()
+                        .child(self.render_tool_dock(window, cx))
+                        .when(tool_open && tool_progress >= 0.999, |col| {
+                            col.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left_0()
+                                    .w(ui_theme::chrome_gap())
+                                    .child(self.render_tool_resize_handle(cx)),
+                            )
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// 侧栏与舞台之间的拖拽调节发丝。
+    pub(crate) fn render_sidebar_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let is_dragging = self.shell_drag_sidebar_start.is_some();
+        div()
+            .id("sidebar-shell-resize-handle")
+            .size_full()
+            .cursor_col_resize()
+            .group("sidebar-handle")
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(2.))
+                    .w(px(1.))
+                    .bg(rgb(if is_dragging {
+                        ui_theme::text_faint()
+                    } else {
+                        ui_theme::border_dim()
+                    }))
+                    .group_hover("sidebar-handle", |line| line.bg(rgb(ui_theme::text_faint()))),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.shell_drag_sidebar_start = Some((
+                        f32::from(event.position.x),
+                        this.sidebar_w,
+                    ));
+                    this.shell_gesture_sidebar_w = Some(this.sidebar_w);
+                    this.shell_pointer_down = true;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// 舞台与工具栏之间的拖拽调节发丝。
+    pub(crate) fn render_tool_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let is_dragging = self.shell_drag_tool_start.is_some();
+        div()
+            .id("tool-shell-resize-handle")
+            .size_full()
+            .cursor_col_resize()
+            .group("tool-handle")
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(3.))
+                    .w(px(1.))
+                    .bg(rgb(if is_dragging {
+                        ui_theme::text_faint()
+                    } else {
+                        ui_theme::border_dim()
+                    }))
+                    .group_hover("tool-handle", |line| line.bg(rgb(ui_theme::text_faint()))),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.shell_drag_tool_start = Some((
+                        f32::from(event.position.x),
+                        this.tool_panel_w,
+                    ));
+                    this.shell_gesture_tool_w = Some(this.tool_panel_w);
+                    this.shell_pointer_down = true;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// 松开鼠标指针时提交拖拽结果并判定是否收起。
     pub(crate) fn commit_shell_pointer(
         &mut self,
         window: &mut Window,
-        viewport: Pixels,
+        _viewport: Pixels,
         cx: &mut Context<Self>,
     ) {
-        let gesture_sidebar = self.shell_gesture_sidebar_w.take();
-        let gesture_tool = self.shell_gesture_tool_w.take();
         self.shell_pointer_down = false;
-        if let Some(width) = self.sidebar_collapse_width(gesture_sidebar, cx) {
-            self.collapse_sidebar(width, window, cx);
+        let mut changed = false;
+        if let Some((_, _)) = self.shell_drag_sidebar_start.take() {
+            let gesture_w = self
+                .shell_gesture_sidebar_w
+                .take()
+                .unwrap_or(self.sidebar_w);
+            if self.sidebar_w < crate::DOCK_COLLAPSE_WIDTH {
+                self.sidebar_w = gesture_w.max(crate::MIN_SIDEBAR_WIDTH);
+                self.sidebar_open = false;
+                self.focus_active_stage(window, cx);
+            } else {
+                self.sidebar_w = self.sidebar_w.max(crate::MIN_SIDEBAR_WIDTH);
+            }
+            changed = true;
         }
-        if let Some(width) = self.tool_panel_collapse_width(gesture_tool, cx) {
-            self.collapse_tool_panel(width, window, cx);
+        if let Some((_, _)) = self.shell_drag_tool_start.take() {
+            let gesture_w = self
+                .shell_gesture_tool_w
+                .take()
+                .unwrap_or(self.tool_panel_w);
+            if self.tool_panel_w < crate::DOCK_COLLAPSE_WIDTH {
+                self.tool_panel_w = gesture_w.max(crate::MIN_TOOL_PANEL_WIDTH);
+                self.set_tool_panel_open(false, cx);
+                self.focus_active_stage(window, cx);
+            } else {
+                self.tool_panel_w = self.tool_panel_w.max(crate::MIN_TOOL_PANEL_WIDTH);
+            }
+            changed = true;
         }
-        let snap = self.shell_edges_need_snap(viewport, cx);
-        if self.shell_needs_save {
+        if changed || self.shell_needs_save {
             self.shell_needs_save = false;
             self.save_state(cx);
-        }
-        // 拖动过程中故意没把越界宽度推回去。松手后重画一帧，align 再归位。
-        if snap {
             cx.notify();
         }
     }
 
-    /// 左栏还开着，并且松手时窄于收起线，就回到按下时的宽度并收起。
-    /// 宽于收起线时返回 `None`，宽度仍按拖动规则夹回最小宽度。
-    fn sidebar_collapse_width(&self, gesture_width: Option<f32>, cx: &App) -> Option<f32> {
-        if !self.sidebar_open {
-            return None;
-        }
-        let dock_width = open_dock_width(&self.shell_dock, DockPlacement::Left, cx)?;
-        sidebar_width_after_collapse(gesture_width.unwrap_or(self.sidebar_w), dock_width)
-    }
-
-    /// 右栏还停在边上（没有铺进舞台），并且松手时窄于同一条收起线。
-    fn tool_panel_collapse_width(&self, gesture_width: Option<f32>, cx: &App) -> Option<f32> {
-        if !self.tool_panel_open || self.tool_panel_promoted() {
-            return None;
-        }
-        let dock_width = open_dock_width(&self.shell_dock, DockPlacement::Right, cx)?;
-        tool_panel_width_after_collapse(gesture_width.unwrap_or(self.tool_panel_w), dock_width)
-    }
-
-    fn collapse_sidebar(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_w = width;
+    pub(crate) fn collapse_sidebar(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_w = width.max(crate::MIN_SIDEBAR_WIDTH);
         self.sidebar_open = false;
-        self.shell_applied_sidebar = width;
-        self.close_dock_keeping_width(DockPlacement::Left, width, window, cx);
         self.focus_active_stage(window, cx);
-        self.shell_needs_save = true;
+        self.save_state(cx);
+        cx.notify();
     }
 
-    fn collapse_tool_panel(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.tool_panel_w = width;
+    pub(crate) fn collapse_tool_panel(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.tool_panel_w = width.max(crate::MIN_TOOL_PANEL_WIDTH);
         self.set_tool_panel_open(false, cx);
-        self.shell_applied_tool = width;
-        self.close_dock_keeping_width(DockPlacement::Right, width, window, cx);
         self.focus_active_stage(window, cx);
-        self.shell_needs_save = true;
-    }
-
-    /// 先收起再写回宽度。开着的时候改宽度会先闪回拖动前的尺寸。
-    fn close_dock_keeping_width(
-        &mut self,
-        placement: DockPlacement,
-        width: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.shell_dock.update(cx, |dock, cx| {
-            if dock.is_dock_open(placement) {
-                dock.toggle_dock(placement, window, cx);
-            }
-            dock.set_dock_size(placement, px(width), window, cx);
-        });
-    }
-
-    fn shell_edges_need_snap(&self, viewport: Pixels, cx: &App) -> bool {
-        let sidebar_open = self.sidebar_open;
-        let sidebar_display = crate::sidebar_width_for_viewport(self.sidebar_w, viewport);
-        let tool_open = self.tool_panel_open && !self.tool_panel_promoted();
-        let tool_w = self.tool_panel_w;
-        let dock = self.shell_dock.read(cx);
-        let sidebar_on_screen = if dock.is_dock_open(DockPlacement::Left) {
-            dock.dock_size(DockPlacement::Left)
-                .map(|size| f32::from(size))
-                .unwrap_or(0.)
-        } else {
-            0.
-        };
-        edge_needs_snap(dock, DockPlacement::Left, sidebar_open, sidebar_display)
-            || edge_needs_snap(
-                dock,
-                DockPlacement::Right,
-                tool_open,
-                tool_display(tool_w, viewport, sidebar_on_screen),
-            )
+        self.save_state(cx);
+        cx.notify();
     }
 
     pub(crate) fn render_sidebar_dock(
@@ -482,8 +400,9 @@ impl Workspace {
             .map(|session| session.status(cx))
             .collect();
         let focused_key = self.sidebar_focused_key(window);
-        let list = self.render_session_list(cx.entity(), cx, &statuses, animate, focused_key);
-        // 间距留在卡片外面，透出壳的底色。加在卡片上会被卡片自己的底色填满。
+        let list = self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
+        let viewport = window.viewport_size().width;
+        let sidebar_display = crate::sidebar_width_for_viewport(self.sidebar_w, viewport);
         div()
             .size_full()
             .pr(ui_theme::chrome_gap())
@@ -497,7 +416,13 @@ impl Workspace {
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                         this.open_paths(paths.paths(), cx);
                     }))
-                    .child(list)
+                    .child(
+                        div()
+                            .w(px(sidebar_display))
+                            .h_full()
+                            .flex_none()
+                            .child(list),
+                    )
                     .child(workspace_frame::with_window_drag(
                         div()
                             .absolute()
@@ -516,10 +441,21 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let surface: Hsla = rgb(ui_theme::bg_column()).into();
+        let tool_w = self.tool_panel_w;
         div()
             .size_full()
             .pl(ui_theme::chrome_gap())
-            .child(workspace_frame::card(surface).child(self.render_tool_panel(window, cx)))
+            .child(
+                workspace_frame::card(surface)
+                    .justify_end()
+                    .child(
+                        div()
+                            .w(px(tool_w))
+                            .h_full()
+                            .flex_none()
+                            .child(self.render_tool_panel(window, cx)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -600,8 +536,6 @@ impl Workspace {
                             ),
                         )
                     } else {
-                        // 舞台上没有会话时的通用空态，不分为什么空、也不催下一步：
-                        // 开对话、开项目的入口都在侧栏。
                         stage_empty_state(
                             gpui_kit_assets::IconName::Coffee,
                             "休息一下",
@@ -620,7 +554,6 @@ impl Workspace {
             .flex()
             .flex_col()
             .child(stage_content);
-        // 顶带不画在舞台面板里。舞台和右栏共用的那一条由工作台盖在两列上沿。
         div()
             .size_full()
             .child(workspace_frame::card(stage_surface).child(stage))
@@ -628,7 +561,7 @@ impl Workspace {
     }
 }
 
-/// 舞台空态。用组件库的 `Empty`，各种空态长一个样；只有非做不可的下一步才给按钮。
+/// 舞台空态。
 fn stage_empty_state(
     icon: impl Into<Icon>,
     title: &'static str,
@@ -650,93 +583,6 @@ fn stage_empty_state(
             empty.content(EmptyContent::new().child(action))
         });
     div().flex_1().flex().child(empty)
-}
-
-/// 松手时窄于收起线，就用按下前的宽度，并把它抬到这一栏的最小宽度以上。
-/// 否则这次松手不收起。
-fn width_after_collapse(gesture_width: f32, dock_width: f32, min_width: f32) -> Option<f32> {
-    if dock_width < crate::DOCK_COLLAPSE_WIDTH {
-        Some(gesture_width.max(min_width))
-    } else {
-        None
-    }
-}
-
-fn sidebar_width_after_collapse(gesture_width: f32, dock_width: f32) -> Option<f32> {
-    width_after_collapse(gesture_width, dock_width, crate::MIN_SIDEBAR_WIDTH)
-}
-
-fn tool_panel_width_after_collapse(gesture_width: f32, dock_width: f32) -> Option<f32> {
-    width_after_collapse(gesture_width, dock_width, crate::MIN_TOOL_PANEL_WIDTH)
-}
-
-fn open_dock_width(dock: &Entity<DockArea>, placement: DockPlacement, cx: &App) -> Option<f32> {
-    let dock = dock.read(cx);
-    if !dock.is_dock_open(placement) {
-        return None;
-    }
-    dock.dock_size(placement).map(|size| f32::from(size))
-}
-
-fn edge_needs_snap(
-    dock: &DockArea,
-    placement: DockPlacement,
-    want_open: bool,
-    display: f32,
-) -> bool {
-    if !want_open || !dock.is_dock_open(placement) {
-        return false;
-    }
-    dock.dock_size(placement)
-        .is_some_and(|size| (f32::from(size) - display).abs() > 0.5)
-}
-
-fn sync_edge(
-    dock: &mut DockArea,
-    placement: DockPlacement,
-    want_open: bool,
-    preference: &mut f32,
-    applied: &mut f32,
-    display: f32,
-    min: f32,
-    max: f32,
-    pointer_down: bool,
-    dragged: &mut bool,
-    window: &mut Window,
-    cx: &mut Context<DockArea>,
-) {
-    if !dock.has_dock(placement) {
-        return;
-    }
-    if dock.is_dock_open(placement) != want_open {
-        dock.toggle_dock(placement, window, cx);
-    }
-    if !want_open {
-        return;
-    }
-    let Some(size) = dock.dock_size(placement) else {
-        return;
-    };
-    let dock_w = f32::from(size);
-    let decision = decide_shell_size(
-        ShellSizeStep {
-            preference: *preference,
-            applied: *applied,
-            dock: dock_w,
-            display,
-            min,
-            max,
-        },
-        pointer_down,
-    );
-    *preference = decision.preference;
-    *applied = decision.applied;
-    if decision.dragged {
-        *dragged = true;
-    }
-    if let Some(push) = decision.push {
-        dock.set_dock_size(placement, px(push), window, cx);
-    }
 }
 
 #[cfg(test)]

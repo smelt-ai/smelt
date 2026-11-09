@@ -3,6 +3,7 @@ use crate::workspace_persist::ConversationOp;
 use smelt_model::workspace_directory::WorkspaceConversation;
 
 const ARCHIVE_HEADER_GROUP: &str = "archive-header-hover";
+const ARCHIVE_ROW_GROUP: &str = "archive-row-hover";
 
 pub(super) fn organization_menu(
     menu: PopupMenu,
@@ -116,7 +117,12 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn render_archive_section(&self, this: Entity<Self>, cx: &App) -> Option<Div> {
+    pub(super) fn render_archive_parts(
+        &self,
+        this: Entity<Self>,
+        chevron_degrees: f32,
+        cx: &App,
+    ) -> Option<(AnyElement, Option<AnyElement>, usize)> {
         let mut archived = self
             .spaces
             .iter()
@@ -132,39 +138,75 @@ impl Workspace {
             return None;
         }
         archived.sort_by(|(_, a), (_, b)| b.archived_at.cmp(&a.archived_at));
+
+        let count = archived.len();
         let e_toggle = this.clone();
         let header = ListRow::new("archive-section-header")
             .group(ARCHIVE_HEADER_GROUP)
+            .relative()
             .mx_2()
             .mt_3()
-            .px(px(PROJECT_HEADER_PAD_X))
-            .h(ui_theme::height::sm())
+            .pl(px(PROJECT_HEADER_PAD_X))
+            .pr_2()
+            .h(ui_theme::height::md())
             .flex()
             .items_center()
-            .gap_1()
-            .text_xs()
-            .font_medium()
-            .text_color(rgb(ui_theme::text_muted()))
-            .child(group_disclosure(
-                "archive-disclosure",
-                ARCHIVE_HEADER_GROUP,
-                Icon::new(gpui_kit_assets::IconName::Archive)
-                    .size(px(PROJECT_DISCLOSURE_ICON_SIZE)),
-                !self.archive_expanded,
-                true,
-            ))
-            .child(format!("归档 ({})", archived.len()))
+            .gap_2()
+            .rounded(ui_theme::row_radius())
             .on_click(move |_, _, cx| {
                 e_toggle.update(cx, |ws, cx| {
                     ws.archive_expanded = !ws.archive_expanded;
                     ws.save_state(cx);
                     cx.notify();
                 });
-            });
-        let mut section = div().flex().flex_col().child(header);
-        if !self.archive_expanded {
-            return Some(section);
-        }
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_none()
+                    .child(
+                        div()
+                            .w(px(row::GROUP_ICON_BOX))
+                            .h(px(16.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::ChevronRight)
+                                    .size(px(12.))
+                                    .text_color(rgb(ui_theme::text_muted()))
+                                    .transform(Transformation::rotate(radians(
+                                        chevron_degrees.to_radians(),
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        Icon::new(gpui_kit_assets::IconName::Archive)
+                            .size(px(15.))
+                            .text_color(rgb(ui_theme::text_muted())),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_sm()
+                    .text_color(rgb(ui_theme::text_mid()))
+                    .child("归档"),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(rgb(ui_theme::text_muted()))
+                    .child(count.to_string()),
+            );
+
+        let mut rows = Vec::new();
         for (key, conversation) in archived {
             let title = archive_title(conversation);
             let cwd = conversation
@@ -201,59 +243,95 @@ impl Workspace {
             let e_restore = this.clone();
             let e_delete = this.clone();
             let e_menu = this.clone();
+            let is_acp = conversation.acp.is_some();
             let row = ListRow::new(element_id.clone())
-                .mx_2()
+                .group(ARCHIVE_ROW_GROUP)
+                .relative()
                 .px_2()
                 .py_1()
                 .rounded(ui_theme::row_radius())
                 .flex()
                 .items_center()
-                .gap_1()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .child(
+                            (if is_acp {
+                                Icon::new(gpui_kit_assets::IconName::MessageSquare)
+                            } else {
+                                Icon::new(IconName::SquareTerminal)
+                            })
+                            .size(px(15.))
+                            .text_color(rgb(ui_theme::text_muted())),
+                        ),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_color(rgb(ui_theme::text_muted()))
-                        .child(div().text_sm().child(truncated_line(title)))
-                        .child(div().text_xs().child(truncated_line(label))),
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(ui_theme::text_mid()))
+                                .group_hover(ARCHIVE_ROW_GROUP, |style| {
+                                    style.text_color(rgb(ui_theme::text()))
+                                })
+                                .child(truncated_line(title)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(ui_theme::text_muted()))
+                                .child(truncated_line(label)),
+                        ),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("{element_id}-restore")))
-                        .quiet()
-                        .icon_size()
-                        .icon(Icon::new(gpui_kit_assets::IconName::RotateCw))
-                        .icon_action("恢复")
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            e_restore.update(cx, |ws, cx| {
-                                ws.request_conversation_op(
-                                    &restore_key,
-                                    ConversationOp::Archive {
-                                        id: restore_id.clone(),
-                                        archived: false,
-                                    },
-                                    cx,
-                                )
-                            });
-                        }),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("{element_id}-delete")))
-                        .dismiss()
-                        .icon(crate::trash_icon())
-                        .icon_action("永久删除")
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            e_delete.update(cx, |ws, cx| {
-                                ws.request_delete_archived(
-                                    delete_key.clone(),
-                                    delete_id.clone(),
-                                    delete_title.clone(),
-                                    cx,
-                                );
-                            });
-                        }),
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .opacity(0.0)
+                        .group_hover(ARCHIVE_ROW_GROUP, |style| style.opacity(1.0))
+                        .child(
+                            Button::new(SharedString::from(format!("{element_id}-restore")))
+                                .quiet()
+                                .icon_size()
+                                .icon(Icon::new(gpui_kit_assets::IconName::RotateCw))
+                                .icon_action("恢复")
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    e_restore.update(cx, |ws, cx| {
+                                        ws.request_conversation_op(
+                                            &restore_key,
+                                            ConversationOp::Archive {
+                                                id: restore_id.clone(),
+                                                archived: false,
+                                            },
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("{element_id}-delete")))
+                                .dismiss()
+                                .icon(crate::trash_icon())
+                                .icon_action("永久删除")
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    e_delete.update(cx, |ws, cx| {
+                                        ws.request_delete_archived(
+                                            delete_key.clone(),
+                                            delete_id.clone(),
+                                            delete_title.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }),
+                        ),
                 )
                 .context_menu(move |menu, _, _| {
                     let e_restore = e_menu.clone();
@@ -290,7 +368,42 @@ impl Workspace {
                             }),
                     )
                 });
-            section = section.child(row);
+            rows.push(row);
+        }
+        let body = div()
+            .mx_2()
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .pb_1()
+            .pl(px(PROJECT_SESSION_INDENT))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(PROJECT_GUIDE_LEFT))
+                    .top_0()
+                    .bottom(px(4.))
+                    .w(px(1.))
+                    .bg(ui_theme::hairline()),
+            )
+            .children(rows);
+
+        Some((header.into_any_element(), Some(body.into_any_element()), count))
+    }
+
+    pub(super) fn render_archive_section(&self, this: Entity<Self>, cx: &App) -> Option<Div> {
+        let (header, body, _) = self.render_archive_parts(
+            this,
+            if self.archive_expanded { 90.0 } else { 0.0 },
+            cx,
+        )?;
+        let mut section = div().flex().flex_col().child(header);
+        if !self.archive_expanded {
+            return Some(section);
+        }
+        if let Some(body) = body {
+            section = section.child(body);
         }
         Some(section)
     }

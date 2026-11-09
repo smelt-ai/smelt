@@ -61,10 +61,36 @@ pub(crate) fn connect_terminal(
     runtime.client().connect()
 }
 
-/// 给人看的运行时名字：本机就叫本机，远程用配对时记下的主机名。
+static LOCAL_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 初始化本机名字：启动时在后台读取硬件序列号，render 只读内存缓存。
+pub(crate) fn init_local_runtime_name(cx: &gpui::App) {
+    cx.spawn(async move |cx| {
+        let name = cx
+            .background_executor()
+            .spawn(async {
+                smelt_sys::hardware_serial()
+                    .or_else(smelt_sys::hostname)
+                    .unwrap_or_else(|| "本机".to_string())
+            })
+            .await;
+        let _ = LOCAL_NAME.set(name);
+        cx.update(|cx| {
+            update_hub(cx, |_| {});
+        });
+    })
+    .detach();
+}
+
+/// 本机运行时名称：纯读内存缓存，启动未取到时兜底为「本机」。
+pub(crate) fn local_runtime_name() -> &'static str {
+    LOCAL_NAME.get().map(|s| s.as_str()).unwrap_or("本机")
+}
+
+/// 给人看的运行时名字：本机优先展示电脑序列号，远程用配对时记下的主机名。
 pub(crate) fn runtime_name(key: &RuntimeKey, cx: &gpui::App) -> String {
     match key {
-        RuntimeKey::Local => "本机".to_string(),
+        RuntimeKey::Local => local_runtime_name().to_string(),
         RuntimeKey::Remote(id) => cx
             .try_global::<RuntimeHub>()
             .and_then(|hub| {
@@ -297,27 +323,23 @@ pub(crate) enum LinkLight {
     Down,
 }
 
-/// 侧栏标题上一台远程机器的连接状态：一盏灯，悬停看完整说明。要人处理的（离线、版本
-/// 不兼容、升级中）灯旁再写几个字，不只靠颜色。
+/// 侧栏标题上一台远程机器的连接状态：一盏灯，悬停看完整说明。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeIndicator {
     pub(crate) light: LinkLight,
-    pub(crate) label: Option<String>,
     pub(crate) detail: String,
 }
 
 fn indicator(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> RuntimeIndicator {
-    let (light, label) = match status {
+    let light = match status {
         RuntimeStatus::Online { .. } => match link {
-            Some(link) if link.rtt_ms >= SLOW_RTT_MS => (LinkLight::Degraded, None),
-            _ => (LinkLight::Good, None),
+            Some(link) if link.rtt_ms >= SLOW_RTT_MS => LinkLight::Degraded,
+            _ => LinkLight::Good,
         },
-        RuntimeStatus::Connecting => (LinkLight::Degraded, None),
-        RuntimeStatus::Upgrading(_) => (LinkLight::Degraded, Some("升级中".to_string())),
-        RuntimeStatus::Offline(_) => (LinkLight::Down, Some("离线".to_string())),
-        RuntimeStatus::Incompatible { version, .. } => {
-            (LinkLight::Down, Some(format!("版本不兼容 · {version}")))
-        }
+        RuntimeStatus::Connecting => LinkLight::Degraded,
+        RuntimeStatus::Upgrading(_) => LinkLight::Degraded,
+        RuntimeStatus::Offline(_) => LinkLight::Down,
+        RuntimeStatus::Incompatible { .. } => LinkLight::Down,
     };
     let detail = match status {
         RuntimeStatus::Offline(error) => format!("离线：{error}"),
@@ -327,11 +349,7 @@ fn indicator(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> RuntimeIndic
         }
         _ => link_text(status, link).0,
     };
-    RuntimeIndicator {
-        light,
-        label,
-        detail,
-    }
+    RuntimeIndicator { light, detail }
 }
 
 fn remote_of<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RemoteRuntime> {
@@ -905,6 +923,7 @@ fn update_hub(cx: &mut gpui::App, change: impl FnOnce(&mut RuntimeHub)) {
 /// 启动时读出登记过的远程运行时（客户端库在本机，同步读，主窗口一起来侧栏就有它们
 /// 的分段），再起连接变化的处理循环。连通性由订阅线程报（见 `runtime_events`）。
 pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
+    init_local_runtime_name(cx);
     let mut hub = RuntimeHub::default();
     match smelt_client_store::client_store().and_then(|store| store.runtime_connections()) {
         Ok(connections) => {
@@ -1586,7 +1605,7 @@ mod tests {
         );
     }
 
-    /// 侧栏标题一盏灯：在线绿、慢或过程中黄、用不了红；要人处理的灯旁写字，悬停看全。
+    /// 侧栏标题一盏灯：在线绿、慢或过程中黄、用不了红，悬停看全。
     #[test]
     fn the_sidebar_light_follows_the_link() {
         let fast = indicator(
@@ -1594,7 +1613,6 @@ mod tests {
             Some(&link(LinkKind::Relay("n0 usw1-1".into()), 60)),
         );
         assert_eq!(fast.light, LinkLight::Good);
-        assert_eq!(fast.label, None);
         assert_eq!(fast.detail, "中继 n0 usw1-1 · 60ms");
 
         let slow = indicator(
@@ -1602,11 +1620,9 @@ mod tests {
             Some(&link(LinkKind::Relay("n0 usw1-1".into()), 628)),
         );
         assert_eq!(slow.light, LinkLight::Degraded);
-        assert_eq!(slow.label, None);
 
         let offline = indicator(&RuntimeStatus::Offline("connection refused".into()), None);
         assert_eq!(offline.light, LinkLight::Down);
-        assert_eq!(offline.label.as_deref(), Some("离线"));
         assert_eq!(offline.detail, "离线：connection refused");
 
         let incompatible = indicator(
@@ -1618,11 +1634,9 @@ mod tests {
             None,
         );
         assert_eq!(incompatible.light, LinkLight::Down);
-        assert_eq!(incompatible.label.as_deref(), Some("版本不兼容 · 0.9.0"));
 
         let upgrading = indicator(&RuntimeStatus::Upgrading("正在升级".into()), None);
         assert_eq!(upgrading.light, LinkLight::Degraded);
-        assert_eq!(upgrading.label.as_deref(), Some("升级中"));
     }
 
     /// 每次连接都用 `respond` 回一条 `system.describe`，模拟另一个版本的运行时。

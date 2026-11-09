@@ -39,6 +39,7 @@ impl Workspace {
             self.sidebar_drag = None;
             self.sess_drop_hint = None;
             self.proj_drop_hint = None;
+            self.sidebar_split_drag = None;
             self.stop_sidebar_drag_scroll();
         } else if self.sidebar_drag.is_some() {
             cx.set_active_drag_cursor_style(CursorStyle::ClosedHand, window);

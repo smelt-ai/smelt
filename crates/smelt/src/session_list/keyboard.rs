@@ -110,7 +110,7 @@ impl Workspace {
             .map(|s| s.effective_updated_at(cx))
             .collect();
         let groups = self.sidebar_display_groups(&statuses, &last_updated_at, cx, |_, _| {});
-        let runtime_sections = self.spaces.iter().any(|space| !space.runtime.is_local());
+        let runtime_sections = self.runtime_sections();
         let active_project = self.active_project_ref(cx);
         for key in self.space_keys() {
             let Some(space) = self.space(&key) else {
