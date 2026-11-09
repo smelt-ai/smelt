@@ -1,12 +1,17 @@
-//! 插件的日志：把 gpui-shell 的 tracing 事件落进 `~/.smelt/app.log`，来源记作 `plugin`。
+//! 进程的 tracing 接收端：把插件和 iroh 的 tracing 事件落进 `~/.smelt/app.log`。
 //!
+//! 插件（gpui-shell）的来源记作 `plugin`。
 //! 插件的 `console.log` / `console.error` 不写 stderr，而是发 tracing 事件（target
 //! `gpui_shell::script`）；脚本里没接住的异常、Promise 失败也是 gpui-shell 发的 tracing
 //! 事件。不接住它们，插件作者调试时什么都看不见。
 //!
-//! 只收 gpui-shell 的：脚本输出全收，gpui-shell 自己的只收警告和错误。别的库发的
-//! tracing 事件一律不碰。gpui-shell 不在事件里带插件身份，所有插件共用一个脚本运行时，
-//! 分不出是哪个插件说的；插件自己在消息里写前缀。
+//! 脚本输出全收，gpui-shell 自己的只收警告和错误。gpui-shell 不在事件里带插件身份，所有
+//! 插件共用一个脚本运行时，分不出是哪个插件说的；插件自己在消息里写前缀。
+//!
+//! iroh（连远程机器的那套，含 `iroh_relay` 等子库）只收警告和错误，来源记作 `iroh`：
+//! 不接的话 endpoint 连不上 relay 时 app.log 里只有拨号超时，看不出卡在哪。
+//!
+//! 别的库发的 tracing 事件一律不碰。
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Metadata, Subscriber};
@@ -18,30 +23,44 @@ const SHELL_TARGET: &str = "gpui_shell";
 
 /// 装上全局的 tracing 接收端。进程启动时调一次。别处已经装过就不装，不抢。
 pub(crate) fn install() {
-    let subscriber = tracing_subscriber::registry().with(PluginLog::new(|level, message| {
-        smelt_sys::app_log::log(level, "plugin", message);
+    let subscriber = tracing_subscriber::registry().with(AppLog::new(|scope, level, message| {
+        smelt_sys::app_log::log(level, scope, message);
     }));
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
-struct PluginLog<W> {
+/// 把要的 tracing 事件交给 `write(来源, 级别, 正文)`。
+struct AppLog<W> {
     write: W,
 }
 
-impl<W: Fn(&str, &str)> PluginLog<W> {
+impl<W: Fn(&str, &str, &str)> AppLog<W> {
     fn new(write: W) -> Self {
         Self { write }
     }
 }
 
-/// 收不收这条：脚本输出全收，gpui-shell 自己的只收警告和错误。
-fn wanted(metadata: &Metadata<'_>) -> bool {
+/// 收不收这条，收的话记成哪个来源：脚本输出全收；gpui-shell 自己的、iroh 的只收警告和
+/// 错误。
+fn source(metadata: &Metadata<'_>) -> Option<&'static str> {
     let target = metadata.target();
     if target == SCRIPT_TARGET {
-        return true;
+        return Some("plugin");
     }
-    let from_shell = target == SHELL_TARGET || target.starts_with("gpui_shell::");
-    from_shell && *metadata.level() <= Level::WARN
+    let source = if target == SHELL_TARGET || target.starts_with("gpui_shell::") {
+        "plugin"
+    } else if is_iroh(target) {
+        "iroh"
+    } else {
+        return None;
+    };
+    (*metadata.level() <= Level::WARN).then_some(source)
+}
+
+/// iroh 和它的子库（`iroh_relay`、`iroh_dns` 等）。
+fn is_iroh(target: &str) -> bool {
+    let krate = target.split("::").next().unwrap_or(target);
+    krate == "iroh" || krate.starts_with("iroh_")
 }
 
 fn level_name(level: &Level) -> &'static str {
@@ -54,29 +73,29 @@ fn level_name(level: &Level) -> &'static str {
     }
 }
 
-impl<S, W> Layer<S> for PluginLog<W>
+impl<S, W> Layer<S> for AppLog<W>
 where
     S: Subscriber,
-    W: Fn(&str, &str) + Send + Sync + 'static,
+    W: Fn(&str, &str, &str) + Send + Sync + 'static,
 {
     fn enabled(&self, metadata: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
-        wanted(metadata)
+        source(metadata).is_some()
     }
 
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let metadata = event.metadata();
-        if !wanted(metadata) {
+        let Some(source) = source(metadata) else {
             return;
-        }
+        };
         let mut message = MessageText::default();
         event.record(&mut message);
-        // gpui-shell 自己的事件标上 target，和插件的 console 输出分得开。
+        // 库自己的事件标上 target，和插件的 console 输出分得开。
         let text = if metadata.target() == SCRIPT_TARGET {
             message.0
         } else {
             format!("{}: {}", metadata.target(), message.0)
         };
-        (self.write)(level_name(metadata.level()), &text);
+        (self.write)(source, level_name(metadata.level()), &text);
     }
 }
 
@@ -100,18 +119,28 @@ mod tests {
 
     use super::*;
 
-    fn capture(body: impl FnOnce()) -> Vec<(String, String)> {
+    fn capture(body: impl FnOnce()) -> Vec<(String, String, String)> {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = lines.clone();
         let subscriber =
-            tracing_subscriber::registry().with(PluginLog::new(move |level, message| {
-                sink.lock()
-                    .unwrap()
-                    .push((level.to_string(), message.to_string()));
+            tracing_subscriber::registry().with(AppLog::new(move |scope, level, message| {
+                sink.lock().unwrap().push((
+                    scope.to_string(),
+                    level.to_string(),
+                    message.to_string(),
+                ));
             }));
         tracing::subscriber::with_default(subscriber, body);
         let lines = lines.lock().unwrap().clone();
         lines
+    }
+
+    fn line(scope: &str, level: &str, message: &str) -> (String, String, String) {
+        (scope.to_string(), level.to_string(), message.to_string())
+    }
+
+    fn plugin(level: &str, message: &str) -> (String, String, String) {
+        line("plugin", level, message)
     }
 
     #[test]
@@ -124,9 +153,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                ("debug".to_string(), "starting".to_string()),
-                ("info".to_string(), "[forge] 2 sessions".to_string()),
-                ("error".to_string(), "boom".to_string()),
+                plugin("debug", "starting"),
+                plugin("info", "[forge] 2 sessions"),
+                plugin("error", "boom"),
             ]
         );
     }
@@ -141,11 +170,29 @@ mod tests {
         assert_eq!(
             lines,
             [
-                (
-                    "error".to_string(),
-                    "gpui_shell::engine::quickjs::scheduler: unhandled rejection".to_string()
+                plugin(
+                    "error",
+                    "gpui_shell::engine::quickjs::scheduler: unhandled rejection"
                 ),
-                ("warn".to_string(), "gpui_shell: careful".to_string()),
+                plugin("warn", "gpui_shell: careful"),
+            ]
+        );
+    }
+
+    #[test]
+    fn iroh_keeps_only_warnings_and_errors_under_its_own_source() {
+        let lines = capture(|| {
+            tracing::info!(target: "iroh::socket", "link change detected");
+            tracing::warn!(target: "iroh::socket", "failed to rebind transports");
+            tracing::error!(target: "iroh_relay::client", "relay connect failed");
+            tracing::warn!(target: "iroh", "endpoint closed");
+        });
+        assert_eq!(
+            lines,
+            [
+                line("iroh", "warn", "iroh::socket: failed to rebind transports"),
+                line("iroh", "error", "iroh_relay::client: relay connect failed"),
+                line("iroh", "warn", "iroh: endpoint closed"),
             ]
         );
     }
@@ -155,6 +202,7 @@ mod tests {
         let lines = capture(|| {
             tracing::error!(target: "reqwest::connect", "nope");
             tracing::error!(target: "gpui_shellfish", "not ours either");
+            tracing::error!(target: "irohish::thing", "nor this");
         });
         assert!(lines.is_empty());
     }

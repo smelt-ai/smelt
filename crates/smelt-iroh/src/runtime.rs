@@ -534,6 +534,12 @@ impl RuntimeConnector {
 }
 
 impl RuntimeConnector {
+    /// 是不是经 `client` 拨号。调用方换了客户端（丢掉旧 endpoint 重建）之后，手里旧的
+    /// 连接器还拴在旧 endpoint 上，要按新的重建。
+    pub fn uses(&self, client: &Arc<IrohClient>) -> bool {
+        Arc::ptr_eq(&self.client, client)
+    }
+
     /// 当前连接选中的传输路径和 RTT。还没连上、连接已断或还没选出路径时为 None。
     /// 不会为此拨号。和 [`smelt_runtime_client::Connector::connect`] 一样不能在 tokio
     /// 运行时里调用。
