@@ -2556,11 +2556,10 @@ impl Workspace {
                     scroll,
                     progress,
                     is_compact_empty,
-                    ..
                 } = section;
                 let progress = progress.clamp(0.0, 1.0);
 
-                let is_expanded = metas[ix].progress > 0.99 && !metas[ix].is_compact_empty;
+                let is_expanded = progress > 0.99 && !is_compact_empty;
                 if is_expanded && !is_animating {
                     if let Some(above_idx) = prev_expanded_idx {
                         // 在下方展开板块上方插入分割条，连接上一个展开板块与当前展开板块

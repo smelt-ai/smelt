@@ -470,16 +470,17 @@ impl Workspace {
             return;
         }
         let delta = sidebar_drag_scroll_delta(position, viewport);
-        let scroll = scroll.clone();
-        self.sidebar_auto_scroll
-            .set(delta, cx, move |delta, _ws, cx| {
-                let offset = scroll.offset();
-                let next_y = apply_sidebar_scroll_delta(offset.y, delta, scroll.max_offset().y);
-                if next_y != offset.y {
-                    scroll.set_offset(point(offset.x, next_y));
-                    cx.notify();
-                }
-            });
+        self.sidebar_auto_scroll.set(delta, cx, |delta, ws, cx| {
+            let Some(scroll) = ws.drag_scroll_handle(cx) else {
+                return;
+            };
+            let offset = scroll.offset();
+            let next_y = apply_sidebar_scroll_delta(offset.y, delta, scroll.max_offset().y);
+            if next_y != offset.y {
+                scroll.set_offset(point(offset.x, next_y));
+                cx.notify();
+            }
+        });
     }
 
     pub(crate) fn stop_sidebar_drag_scroll(&mut self) {
