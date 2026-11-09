@@ -718,20 +718,38 @@ pub fn sync_agent_definitions_on(
 }
 
 /// 插件删掉了：每个勾着它的智能体都去掉这一项。不清的话，以后再导入同 id 的插件，
-/// 这些智能体会自己又勾上。期间被别人删掉的智能体跳过。
+/// 这些智能体会自己又勾上。
 pub fn forget_plugin_on(
     store: &smelt_store::Store,
     plugin_id: &str,
 ) -> Result<(), AgentDefinitionError> {
-    for agent in list_agent_definitions_on(store)? {
-        if !agent.plugins.iter().any(|id| id == plugin_id) {
+    uncheck_everywhere(store, plugin_id, |definition| &mut definition.plugins)
+}
+
+/// MCP 服务器删掉了：每个勾着它的智能体都去掉这一项。道理同 [`forget_plugin_on`]：
+/// 以后再加同名的服务器，不该自己又被勾上。
+pub fn forget_mcp_server_on(
+    store: &smelt_store::Store,
+    name: &str,
+) -> Result<(), AgentDefinitionError> {
+    uncheck_everywhere(store, name, |definition| &mut definition.mcp_servers)
+}
+
+/// 从每个智能体的那张勾选表里去掉 `id`。期间被别人删掉的智能体跳过。
+fn uncheck_everywhere(
+    store: &smelt_store::Store,
+    id: &str,
+    checked: fn(&mut AgentDefinition) -> &mut Vec<String>,
+) -> Result<(), AgentDefinitionError> {
+    for mut agent in list_agent_definitions_on(store)? {
+        if !checked(&mut agent).iter().any(|checked| checked == id) {
             continue;
         }
-        let forgotten = modify_agent_definition_on(store, &agent.id, |definition| {
-            definition.plugins.retain(|id| id != plugin_id);
+        let unchecked = modify_agent_definition_on(store, &agent.id, |definition| {
+            checked(definition).retain(|checked| checked != id);
             Ok(())
         });
-        match forgotten {
+        match unchecked {
             Ok(_) | Err(AgentDefinitionError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
@@ -762,6 +780,10 @@ pub fn delete_agent_definition(id: &str) -> Result<(), AgentDefinitionError> {
 
 pub fn forget_plugin(plugin_id: &str) -> Result<(), AgentDefinitionError> {
     forget_plugin_on(&default_store()?, plugin_id)
+}
+
+pub fn forget_mcp_server(name: &str) -> Result<(), AgentDefinitionError> {
+    forget_mcp_server_on(&default_store()?, name)
 }
 
 pub fn sync_agent_definitions(
@@ -1502,6 +1524,35 @@ mod tests {
         // 没人勾的插件：什么都不改。
         forget_plugin_on(&store, "skill:nobody").unwrap();
         assert_eq!(plugins("writer"), ["skill:kept"]);
+    }
+
+    #[test]
+    fn forget_mcp_server_unchecks_it_everywhere_and_keeps_the_rest() {
+        let (_dir, store) = open_store();
+        create_sample(&store, "writer");
+        create_sample(&store, "idle");
+        let check = |id: &str, servers: &[&str]| {
+            update_agent_definition_on(
+                &store,
+                id,
+                AgentDefinitionPatch {
+                    mcp_servers: Some(servers.iter().map(|name| name.to_string()).collect()),
+                    plugins: Some(vec!["gone".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        check("writer", &["gone", "kept"]);
+        check("idle", &["kept"]);
+
+        forget_mcp_server_on(&store, "gone").unwrap();
+
+        let agent = |id: &str| get_agent_definition_on(&store, id).unwrap();
+        assert_eq!(agent("writer").mcp_servers, ["kept"]);
+        assert_eq!(agent("idle").mcp_servers, ["kept"]);
+        // 同名的插件勾选是另一张表，不动。
+        assert_eq!(agent("writer").plugins, ["gone"]);
     }
 
     #[test]

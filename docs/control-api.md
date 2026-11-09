@@ -146,7 +146,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | 工作区与文件 | `workspace.conversation.create` / `update` / `delete`、`workspace.project.open` / `close`、`workspace.rename`（改名的唯一入口，名字写在哪由运行时定，在跑的对话同步给 agent）、`workspace.directory`（只读整份目录；目录只经前面几条单条改动写，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
 | 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
-| Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`（`pi.plugins.remove` 同时清掉这台机器上各智能体对该插件的勾选；改了配置的调用成功后运行时推 `pi_config.changed`，这个话题只在单独的一条订阅里，见 `smelt-event-protocol` 模块文档）；`quota.get` / `quota.refresh` / `quota.settings.get` / `quota.set_enabled` |
+| Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`（`pi.plugins.remove`、`pi.mcp.remove` 同时清掉这台机器上各智能体对它的勾选；改了配置的调用成功后运行时推 `pi_config.changed`，这个话题只在单独的一条订阅里，见 `smelt-event-protocol` 模块文档）；`quota.get` / `quota.refresh` / `quota.settings.get` / `quota.set_enabled` |
 | 其它 | `resource.usage`（守护进程和各会话进程树的 CPU、内存）、`agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`history.*`、`desktop.type_text`、`automation.run_detail` |
 
 ### `agent.memory.*`

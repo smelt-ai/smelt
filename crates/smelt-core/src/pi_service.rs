@@ -200,8 +200,11 @@ pub fn set_mcp_enabled(params: McpEnabledParams) -> Result<(), String> {
     crate::pi_mcp::set_pi_mcp_server_enabled(&params.name, params.enabled)
 }
 
+/// 从 `mcp.json` 删掉服务器，再把这台机器上各智能体对它的勾选一并清掉。
 pub fn remove_mcp_server(params: McpServerParams) -> Result<(), String> {
-    crate::pi_mcp::remove_pi_mcp_server(&params.name)
+    crate::pi_mcp::remove_pi_mcp_server(&params.name)?;
+    crate::agent_definition_store::forget_mcp_server(&params.name)
+        .map_err(|error| format!("MCP 服务器已删除，但清理智能体里的勾选失败：{error}"))
 }
 
 /// 跑 `pi mcp login <name>`：需要授权时 Pi 打开浏览器，等回调写好令牌。
