@@ -63,6 +63,7 @@ dependencies:
   flutter_svg: ^2.3.0
   flutter_slidable: ^4.0.3
   device_info_plus: ^13.3.0
+  connectivity_plus: ^7.3.2
   
 dev_dependencies:
   fake_async: any

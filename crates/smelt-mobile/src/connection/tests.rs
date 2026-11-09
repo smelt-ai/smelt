@@ -17,6 +17,7 @@ use super::*;
 use crate::api::fleet::LinkPath;
 
 const FAST: Timing = Timing {
+    verify_timeout: Duration::from_millis(100),
     probe_timeout: Duration::from_millis(500),
     connect_timeout: Duration::from_millis(500),
     pair_timeout: Duration::from_millis(500),
@@ -37,6 +38,10 @@ struct FakeRuntime {
     paired_names: Mutex<Vec<String>>,
     describes: AtomicUsize,
     links: AtomicUsize,
+    /// 编号小于它的链路僵死了：开流成功，但永远不回包（同后台冻结后的 QUIC 连接）。
+    zombie_below: AtomicUsize,
+    /// 僵死链路开出的流的服务端，握着不放，客户端只能等到超时。
+    zombie_streams: Mutex<Vec<RuntimeStream>>,
     /// 各链路登记的连接变化回调。
     watchers: Mutex<Vec<OnLinkChange>>,
     rtt_ms: Mutex<Option<u32>>,
@@ -54,6 +59,8 @@ impl FakeRuntime {
             paired_names: Mutex::new(Vec::new()),
             describes: AtomicUsize::new(0),
             links: AtomicUsize::new(0),
+            zombie_below: AtomicUsize::new(0),
+            zombie_streams: Mutex::new(Vec::new()),
             watchers: Mutex::new(Vec::new()),
             rtt_ms: Mutex::new(None),
             event_protocol: Mutex::new(EVENT_BUS_PROTOCOL_VERSION),
@@ -164,7 +171,7 @@ struct FakeRoute(Arc<FakeRuntime>);
 
 impl Route for FakeRoute {
     fn link(&self) -> Link {
-        self.0.links.fetch_add(1, Ordering::SeqCst);
+        let index = self.0.links.fetch_add(1, Ordering::SeqCst);
         let runtime = Arc::clone(&self.0);
         let for_metrics = Arc::clone(&self.0);
         let for_watch = Arc::clone(&self.0);
@@ -177,6 +184,10 @@ impl Route for FakeRoute {
                     ));
                 }
                 let (client, server) = RuntimeStream::pair()?;
+                if index < runtime.zombie_below.load(Ordering::SeqCst) {
+                    runtime.zombie_streams.lock().unwrap().push(server);
+                    return Ok(client);
+                }
                 let runtime = Arc::clone(&runtime);
                 std::thread::spawn(move || {
                     let mut line = String::new();
@@ -598,6 +609,50 @@ fn verify_probes_immediately() {
     hub.verify();
 
     wait_until("立刻探活", || runtime.describes() > describes);
+    hub.disconnect();
+}
+
+#[test]
+fn verify_on_a_zombie_link_redials_at_once_without_backoff() {
+    let runtime = FakeRuntime::paired("runtime-a");
+    let dialer = FakeDialer(vec![("ep-a".into(), Arc::clone(&runtime))]);
+    // 退避设得很长：走了退避就连不回来。
+    let hub = ConnectionHub::new(Timing {
+        backoff_base: Duration::from_secs(3600),
+        backoff_max: Duration::from_secs(3600),
+        ..FAST
+    });
+    let events = record(&hub);
+    hub.connect(&dialer, target("ep-a")).unwrap();
+    wait_until("盯上链路", || runtime.watchers() == 1);
+    let links = runtime.links.load(Ordering::SeqCst);
+    // 后台期间现有链路僵死了，传输层还没报断开。
+    runtime.zombie_below.store(links, Ordering::SeqCst);
+    let started = Instant::now();
+
+    hub.verify();
+
+    wait_until("换新链路重新连上", || {
+        runtime.links.load(Ordering::SeqCst) > links
+            && last(&events).state == ConnectionState::Connected
+    });
+    // 等到确认的短时限就放弃旧链路、立刻重拨，不等重连的长时限，也不走退避。
+    assert!(
+        started.elapsed() < FAST.probe_timeout,
+        "{:?}",
+        started.elapsed()
+    );
+    let events = events.lock().unwrap().clone();
+    let reconnecting = events
+        .iter()
+        .find(|event| event.state == ConnectionState::Reconnecting)
+        .expect("确认失败后先告诉界面在重连");
+    assert_eq!(
+        reconnecting.error.as_ref().unwrap().kind,
+        SmeltErrorKind::Offline
+    );
+    assert!(events.last().unwrap().error.is_none());
+    wait_until("盯上新链路", || runtime.watchers() == 2);
     hub.disconnect();
 }
 

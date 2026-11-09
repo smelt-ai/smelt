@@ -13,7 +13,9 @@
 //! 已连上时不定时探活：链路断开由传输层报（[`LinkChange::Closed`]：iroh 的 QUIC 每 5 秒保活，
 //! 对端消失约 30 秒后空闲超时；运行时撤销设备、重启时直接关连接），这条链路上的长连接也同时
 //! 读到 EOF。换传输路径时刷新路径和 RTT（[`LinkChange::Path`]）。回前台、下拉刷新时
-//! [`ConnectionHub::verify`] 在现有链路上确认一次：系统在后台冻结过保活，网络可能已经换过。
+//! [`ConnectionHub::verify`] 在现有链路上确认一次：系统在后台冻结过保活，网络可能已经换过，
+//! 旧 QUIC 连接常常已经僵死却还没察觉（开流照样成功，回包永远不来）。所以这次确认用短时限，
+//! 确认不了就当链路断了，立刻建新链路重连，不走退避。
 //!
 //! 每次 connect / pair / disconnect 换一代（generation）：旧会话的线程被叫停，它晚到的
 //! 结果、以及被取代的 connect / pair 的结果，都按代号丢弃。一个状态机只连一台机器，换代
@@ -122,7 +124,10 @@ pub(crate) trait Dialer: Send + Sync {
 /// 各种时限。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Timing {
-    /// 确认链路（回前台、重连）时 `system.describe` 的读写时限。
+    /// 在现有链路上确认（回前台、下拉刷新）的时限。僵死的链路只能靠它发现，界面在这段时间里
+    /// 仍显示已连上，所以要短。
+    pub verify_timeout: Duration,
+    /// 新链路重连时 `system.describe` 的读写时限（含拨号）。
     pub probe_timeout: Duration,
     /// connect 的 `system.describe` 时限。拨号自身另有 iroh 的 20 秒上限。
     pub connect_timeout: Duration,
@@ -134,6 +139,7 @@ pub(crate) struct Timing {
 
 impl Timing {
     pub(crate) const PRODUCTION: Self = Self {
+        verify_timeout: Duration::from_secs(2),
         probe_timeout: Duration::from_secs(5),
         connect_timeout: Duration::from_secs(10),
         pair_timeout: Duration::from_secs(30),
@@ -547,9 +553,13 @@ impl ConnectionHub {
 fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut failures: u32) {
     // 盯链路的守卫只在这条普通线程上建和放。
     let mut watch = (failures == 0).then(|| session.watch());
+    // 现有链路确认失败：下一轮立刻建新链路，不等退避。
+    let mut redial = false;
     loop {
         // 这一轮用不用新链路：重连不复用可能已经僵死的旧连接。
-        let fresh = if failures == 0 {
+        let fresh = if std::mem::take(&mut redial) {
+            true
+        } else if failures == 0 {
             match session.signals.wait_connected() {
                 Wake::Stop => return,
                 // 回前台、下拉刷新：在现有链路上确认一下。
@@ -597,7 +607,12 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
         } else {
             session.link()
         };
-        let outcome = describe(&link, &session.target, timing.probe_timeout).map(|info| {
+        let timeout = if fresh {
+            timing.probe_timeout
+        } else {
+            timing.verify_timeout
+        };
+        let outcome = describe(&link, &session.target, timeout).map(|info| {
             *session.os.lock().unwrap_or_else(|e| e.into_inner()) = info.os;
             (link.metrics)()
         });
@@ -630,6 +645,20 @@ fn supervise(shared: Arc<Shared>, session: Arc<Session>, timing: Timing, mut fai
                     Some(error),
                 ));
                 return;
+            }
+            Err(error) if !fresh => {
+                // 现有链路确认不了：多半在后台时僵死了。这只说明旧连接不行，不说明对端不在，
+                // 先告诉界面在重连，马上换新链路试，失败了才开始退避。
+                log::info!("现有链路确认失败，换新链路：{}", error.message);
+                inner.publish(event(
+                    ConnectionState::Reconnecting,
+                    target,
+                    None,
+                    Some(error),
+                ));
+                drop(inner);
+                watch = None;
+                redial = true;
             }
             Err(error) => {
                 log::info!("连不上运行时（第 {} 次）：{}", failures + 1, error.message);

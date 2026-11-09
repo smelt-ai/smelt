@@ -118,6 +118,19 @@ impl Transport for IrohDialer {
         state.client = None;
         Ok(true)
     }
+
+    fn network_change(&self) {
+        // 还没建 endpoint 就没有要迁移的路径，下次拨号时自然按新网络来。
+        let client = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .client
+            .clone();
+        if let Some(client) = client {
+            client.network_change();
+        }
+    }
 }
 
 struct IrohRoute {

@@ -26,6 +26,7 @@ fn fast_backoff(_attempt: u32) -> Duration {
 
 const FAST: Timings = Timings {
     connection: crate::connection::Timing {
+        verify_timeout: Duration::from_millis(500),
         probe_timeout: Duration::from_millis(500),
         connect_timeout: Duration::from_millis(500),
         pair_timeout: Duration::from_millis(500),
@@ -285,6 +286,7 @@ struct FakeTransport {
     runtimes: Mutex<Vec<Arc<FakeRuntime>>>,
     shape: Mutex<Shape>,
     changes: AtomicUsize,
+    network_changes: AtomicUsize,
 }
 
 impl FakeTransport {
@@ -293,6 +295,7 @@ impl FakeTransport {
             runtimes: Mutex::new(runtimes.iter().map(|r| Arc::clone(r)).collect()),
             shape: Mutex::new(Shape::Preset),
             changes: AtomicUsize::new(0),
+            network_changes: AtomicUsize::new(0),
         })
     }
 
@@ -327,6 +330,10 @@ impl Transport for FakeTransport {
         *current = shape;
         self.changes.fetch_add(1, Ordering::SeqCst);
         Ok(true)
+    }
+
+    fn network_change(&self) {
+        self.network_changes.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -931,6 +938,21 @@ fn reconnect_and_verify_reach_the_runtime() {
     let describes = a.describes.load(Ordering::SeqCst);
     h.fleet.verify();
     wait_until("立刻探活", || {
+        a.describes.load(Ordering::SeqCst) > describes
+    });
+}
+
+#[test]
+fn network_change_tells_the_transport_and_checks_every_link() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let h = harness(&[(&a, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    let describes = a.describes.load(Ordering::SeqCst);
+
+    h.fleet.network_changed();
+
+    assert_eq!(h.transport.network_changes.load(Ordering::SeqCst), 1);
+    wait_until("网络变了立刻探活", || {
         a.describes.load(Ordering::SeqCst) > describes
     });
 }
