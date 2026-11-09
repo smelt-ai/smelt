@@ -165,6 +165,7 @@ struct FakeSource {
 struct FakeState {
     generation: u64,
     client: Option<RuntimeClient>,
+    connection: ConnectionState,
     listeners: Vec<Listener>,
 }
 
@@ -174,6 +175,7 @@ impl FakeSource {
             state: Mutex::new(FakeState {
                 generation: 1,
                 client: Some(client),
+                connection: ConnectionState::Connected,
                 listeners: Vec::new(),
             }),
         })
@@ -216,6 +218,7 @@ impl FakeSource {
 }
 
 fn publish(state: &mut FakeState, connection: ConnectionState) {
+    state.connection = connection;
     let generation = state.generation;
     let event = ConnectionEvent {
         state: connection,
@@ -241,7 +244,7 @@ impl RuntimeSource for FakeSource {
     fn subscribe(&self, listener: Listener) {
         let mut state = self.state.lock().unwrap();
         let event = ConnectionEvent {
-            state: ConnectionState::Connected,
+            state: state.connection,
             endpoint_id: None,
             link: None,
             error: None,
@@ -827,6 +830,45 @@ fn attach_without_a_runtime_is_fatal() {
 
     hub.attach("t1".into(), GEOMETRY, None, recorder.emit())
         .unwrap();
+    recorder.wait_ended();
+
+    assert_eq!(
+        recorder.events(),
+        vec![TerminalUpdate::Error {
+            message: NO_RUNTIME.to_string(),
+            fatal: true,
+        }]
+    );
+}
+
+/// 冷启动点开推送：终端页赶在首次连接完成前附着，要等连上，不能直接判死。
+#[test]
+fn attach_while_connecting_waits_for_the_connection() {
+    let runtime = FakeRuntime::new(idle_watch);
+    let (hub, source) = setup(&runtime);
+    source.begin();
+    let recorder = Recorder::new();
+
+    hub.attach("t1".into(), GEOMETRY, None, recorder.emit())
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(recorder.events().is_empty());
+
+    source.connected(runtime.client());
+    recorder.wait_readies(1);
+}
+
+#[test]
+fn attach_while_connecting_fails_when_the_connection_stops() {
+    let runtime = FakeRuntime::new(idle_watch);
+    let (hub, source) = setup(&runtime);
+    source.begin();
+    let recorder = Recorder::new();
+
+    hub.attach("t1".into(), GEOMETRY, None, recorder.emit())
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    source.publish(ConnectionState::Disconnected);
     recorder.wait_ended();
 
     assert_eq!(
