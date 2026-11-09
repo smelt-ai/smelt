@@ -214,7 +214,7 @@ impl Workspace {
             .0
             .insert(runtime.clone(), config.model_choice_groups.clone());
         if models_changed && runtime == crate::RuntimeKey::Local {
-            smelt_ui::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
+            smelt_app_state::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
         }
         // 修改回带的快照比之前发出、还没回来的读取都新。
         let slot = self.pi_configs.entry(runtime).or_default();

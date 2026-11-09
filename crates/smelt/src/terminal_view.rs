@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
+use smelt_app_state::daemon_states_global::{AttentionGlobal, AttentionItem, AttentionKind};
 use smelt_client::daemon_state::RuntimePresence;
-use smelt_ui::daemon_states_global::{AttentionGlobal, AttentionItem, AttentionKind};
 use smol::Timer;
 
 use crate::terminal::{self, Terminal};
@@ -271,11 +271,11 @@ fn daemon_agent_state(
     session_id: &str,
     cx: &App,
 ) -> Option<smelt_client::daemon_state::DaemonSessionState> {
-    smelt_ui::daemon_states_global::DaemonStates::get(runtime.key(), session_id, cx)
+    smelt_app_state::daemon_states_global::DaemonStates::get(runtime.key(), session_id, cx)
 }
 
 fn terminal_bell_notifications_enabled(cx: &App) -> bool {
-    cx.try_global::<smelt_ui::agent_host_state::AgentHostState>()
+    cx.try_global::<smelt_app_state::agent_host_state::AgentHostState>()
         .map(|config| config.notify_terminal_bell)
         .unwrap_or(true)
 }
@@ -597,7 +597,7 @@ impl TerminalView {
                 let sid2 = sid.clone();
                 let presence = this
                     .update(cx, |this, cx| {
-                        smelt_ui::daemon_states_global::DaemonStates::runtime_presence(
+                        smelt_app_state::daemon_states_global::DaemonStates::runtime_presence(
                             this.runtime.key(),
                             &sid2,
                             cx,

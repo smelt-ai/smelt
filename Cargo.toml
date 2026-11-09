@@ -30,6 +30,7 @@ members = [
     "crates/smelt-git",
     "crates/smeltd",
     "crates/smelt-ui",
+    "crates/smelt-app-state",
     "crates/smelt-acp-view",
     "crates/smelt",
     "crates/smelt-iroh",

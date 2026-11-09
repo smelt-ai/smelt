@@ -63,7 +63,8 @@ cargo run --bin smelt
 - **`crates/smelt-event-bus`** —— 系统内部进程间事件总线（EventHub）。
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
-- **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
+- **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的界面组件（`ui_theme`/`markdown_mermaid`/按钮、列表行等），不碰客户端库和运行时。
+- **`crates/smelt-app-state`** —— 桌面进程里跨功能共享的状态（GPUI Global）：守护上报的会话状态、关注事件、provider 账户状态、各机器智能体宿主配置。
 - **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 34，按字段建表，没有通用 kv）。工作区目录（项目、对话）只由运行时写：客户端发 `workspace.conversation.*` / `workspace.project.*` 单条命令，经 `workspace.changed` 收整份目录。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。

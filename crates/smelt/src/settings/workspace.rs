@@ -577,7 +577,7 @@ impl Workspace {
     /// 凭据或模型目录在别处变了（登录、登出）：重新取快照；是本机的，还要告知活着的会话。
     pub(super) fn reload_pi_model_settings(&mut self, cx: &mut Context<Self>) {
         if *self.pi_library_runtime() == crate::RuntimeKey::Local {
-            smelt_ui::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
+            smelt_app_state::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
         }
         self.refresh_pi_library(cx);
     }

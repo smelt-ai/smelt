@@ -10916,6 +10916,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-acp-view",
+ "smelt-app-state",
  "smelt-cli",
  "smelt-client",
  "smelt-client-store",
@@ -10950,6 +10951,7 @@ dependencies = [
  "gpui-pre",
  "serde",
  "serde_json",
+ "smelt-app-state",
  "smelt-client",
  "smelt-core",
  "smelt-model",
@@ -10958,6 +10960,19 @@ dependencies = [
  "smelt-ui",
  "smol",
  "uuid",
+]
+
+[[package]]
+name = "smelt-app-state"
+version = "0.0.0"
+dependencies = [
+ "gpui-pre",
+ "serde_json",
+ "smelt-client",
+ "smelt-client-store",
+ "smelt-model",
+ "smelt-runtime-client",
+ "smol",
 ]
 
 [[package]]
@@ -11225,16 +11240,9 @@ dependencies = [
  "image",
  "merman",
  "rustybuzz",
- "serde",
  "serde_json",
  "sha2 0.11.1",
- "smelt-client",
- "smelt-client-store",
- "smelt-core",
  "smelt-model",
- "smelt-runtime-client",
- "smelt-store",
- "smelt-sys",
  "smol",
  "url",
  "usvg 0.46.0",

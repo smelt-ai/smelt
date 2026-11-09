@@ -7,11 +7,10 @@
 use gpui::{App, AsyncApp, Global};
 use std::collections::{BTreeMap, HashSet};
 
-use crate::automation::{Automation, AutomationRun, AutomationState};
 pub use smelt_client::runtime::RuntimeKey;
 pub use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::agent_host::{AgentHostEdit, AgentHostSettings};
-use smelt_model::automation::AutomationFile;
+use smelt_model::automation::{Automation, AutomationFile, AutomationRun, AutomationState};
 use smelt_model::control_api::{AgentHostApplyEdit, AgentHostGet};
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::EmptyParams;

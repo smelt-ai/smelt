@@ -3,10 +3,8 @@
 //! 页面、被多处复用」的东西，别把整个应用的 UI 都塞进来。
 
 pub mod acp_completion;
-pub mod agent_host_state;
 pub mod automation;
 pub mod button;
-pub mod daemon_states_global;
 pub mod frame_stats;
 pub mod global_wait;
 pub mod icon_action;
@@ -16,7 +14,6 @@ pub mod markdown_links;
 mod markdown_literal_html;
 pub mod markdown_mermaid;
 pub mod motion;
-pub mod provider_status_global;
 pub mod theme_catalog;
 pub mod theme_files;
 pub mod truncated_line;

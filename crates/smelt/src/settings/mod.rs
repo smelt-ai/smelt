@@ -754,16 +754,16 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 //
 // 智能体配置（启动命令、env、profile、定义）归运行时，每台机器一份：读、改都要说明是
 // 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
+pub use smelt_app_state::agent_host_state::{
+    AgentDefinition, AgentHostState, AgentHosts, MachineAutomations, agent_host_loaded,
+    agent_host_settled, agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host,
+    initial_agent_host_state, reload_agent_hosts, try_apply_agent_host,
+};
 pub use smelt_model::agent_host::AgentHostSettings;
 pub use smelt_model::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
 use smelt_model::agent_kind::{ConversationLaunchSpec, format_env_lines, parse_env_lines};
-pub use smelt_ui::agent_host_state::{
-    AgentDefinition, AgentHostState, AgentHosts, MachineAutomations, agent_host_loaded,
-    agent_host_settled, agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host,
-    initial_agent_host_state, reload_agent_hosts, try_apply_agent_host,
-};
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,
     AutomationSchedule, AutomationSink, AutomationTrigger, AutomationTriggerKindId,
@@ -780,7 +780,7 @@ pub fn attach_agent_host(
     cx: &mut App,
     on_first_load: impl FnOnce(&mut App) + 'static,
 ) {
-    use smelt_ui::agent_host_state::{AgentHostLoad, load_agent_host, register_agent_host};
+    use smelt_app_state::agent_host_state::{AgentHostLoad, load_agent_host, register_agent_host};
 
     if !register_agent_host(&key, client, cx) {
         return;

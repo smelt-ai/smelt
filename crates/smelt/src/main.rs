@@ -880,9 +880,9 @@ pub(crate) use smelt_model::agent_status::AgentStatus;
 
 // DaemonStates（守护上报的会话状态镜像）/ AttentionGlobal（统一关注事件 store）：
 // ACP 视图独立成 smelt-acp-view 后要跨
-// crate 读写，搬进 smelt-ui（daemon_states_global.rs）共享，这里重导出成原来
+// crate 读写，放在 smelt-app-state（daemon_states_global.rs）共享，这里重导出成原来
 // 的裸名字。
-pub(crate) use smelt_ui::daemon_states_global::{
+pub(crate) use smelt_app_state::daemon_states_global::{
     AttentionGlobal, AttentionItem, AttentionKind, DaemonStates,
 };
 
@@ -3141,7 +3141,7 @@ impl Workspace {
         ws._agent_hosts_sub =
             Some(cx.observe_global_in::<settings::AgentHosts>(window, |_, _, cx| cx.notify()));
         ws._provider_status_sub = Some(
-            cx.observe_global_in::<smelt_ui::provider_status_global::ProviderStatus>(
+            cx.observe_global_in::<smelt_app_state::provider_status_global::ProviderStatus>(
                 window,
                 |_, _, cx| cx.notify(),
             ),
@@ -4239,7 +4239,7 @@ fn main() {
         cx.set_global(WorkspaceDirectoriesGlobal::default());
         // provider 账户状态（额度 + Pi 模型目录版本）：刷新循环写，侧栏和对话
         // 模型菜单读。必须在建 Workspace 之前装好，否则启动首查无处可写。
-        cx.set_global(smelt_ui::provider_status_global::ProviderStatus::default());
+        cx.set_global(smelt_app_state::provider_status_global::ProviderStatus::default());
         let attention = AttentionGlobal::default();
         cx.set_global(attention);
         let current_ws_for_attention = current_ws.clone();
