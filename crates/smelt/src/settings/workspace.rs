@@ -1165,26 +1165,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 真删 `~/.pi` 下的实体，并把所有引用它的智能体的勾选一并清掉。
+    /// 真删 `~/.pi` 下的实体。智能体对它的勾选由运行时一并清掉，桌面端收到 Pi 配置变化
+    /// 后重读那台机器的智能体配置。
     pub(super) fn confirm_pi_plugin_delete(&mut self, id: String, cx: &mut Context<Self>) {
         self.pi_plugin_pending_delete = None;
         self.run_pi_call::<smelt_model::control_api::PiPluginsRemove>(
-            smelt_model::pi_service::PluginIdParams { id: id.clone() },
+            smelt_model::pi_service::PluginIdParams { id },
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
             move |this, result, cx| match result {
                 Ok(config) => {
                     this.pi_plugin_error = None;
-                    // 插件删在能力库那台机器上，只清那台机器上的智能体的勾选。
-                    super::apply_agent_host(
-                        &this.pi_library_runtime().clone(),
-                        move |host| {
-                            for agent in &mut host.agents {
-                                agent.plugins.retain(|plugin_id| *plugin_id != id);
-                            }
-                        },
-                        cx,
-                    );
                     this.adopt_pi_config(config, cx);
                 }
                 Err(error) => {

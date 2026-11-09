@@ -210,13 +210,15 @@ pub fn login_mcp_server(params: McpServerParams) -> Result<(), String> {
     crate::pi_mcp::login_pi_mcp_server(&params.name, &|_| {}).map(|_| ())
 }
 
-/// 删 `~/.pi` 下的插件实体。引用它的智能体勾选由调用方经智能体配置清掉。
+/// 删 `~/.pi` 下的插件实体，再把这台机器上各智能体对它的勾选一并清掉。
 pub fn remove_plugin(params: PluginIdParams) -> Result<(), String> {
     let plugin = crate::pi_plugin_catalog::discover_plugins()
         .into_iter()
         .find(|plugin| plugin.id == params.id)
         .ok_or_else(|| format!("插件不存在：{}", params.id))?;
-    crate::pi_plugin_catalog::remove_plugin(&plugin)
+    crate::pi_plugin_catalog::remove_plugin(&plugin)?;
+    crate::agent_definition_store::forget_plugin(&plugin.id)
+        .map_err(|error| format!("插件已删除，但清理智能体里的勾选失败：{error}"))
 }
 
 pub fn import_plugin(params: ImportPluginParams) -> Result<(), String> {

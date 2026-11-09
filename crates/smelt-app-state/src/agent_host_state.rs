@@ -547,30 +547,38 @@ pub fn apply_agent_host(key: &RuntimeKey, f: impl FnOnce(&mut AgentHostSettings)
 
 /// 从各台已经读到过的机器重新取一份。CLI / Control API 改过定义后，打开智能体面时对齐。
 pub fn reload_agent_hosts(cx: &mut App) {
-    let Some(hosts) = agent_hosts(cx) else {
+    let keys: Vec<RuntimeKey> = agent_hosts(cx)
+        .map(|hosts| hosts.machines.keys().cloned().collect())
+        .unwrap_or_default();
+    for key in keys {
+        reload_agent_host(&key, cx);
+    }
+}
+
+/// 那台机器上的配置可能被别处改过（比如删插件时运行时清掉了智能体的勾选）：读到过就
+/// 重新取一份，还没读到的由挂上时那次读取负责。
+pub fn reload_agent_host(key: &RuntimeKey, cx: &mut App) {
+    let Some(client) = agent_hosts(cx)
+        .and_then(|hosts| hosts.machine(key))
+        .filter(|machine| machine.settings.is_some())
+        .map(|machine| machine.client.clone())
+    else {
         return;
     };
-    let targets: Vec<(RuntimeKey, RuntimeClient)> = hosts
-        .machines
-        .iter()
-        .filter(|(_, machine)| machine.settings.is_some())
-        .map(|(key, machine)| (key.clone(), machine.client.clone()))
-        .collect();
-    for (key, client) in targets {
-        cx.spawn(async move |cx| {
-            let fetched = cx
-                .background_executor()
-                .spawn(async move { fetch_agent_host(&client) })
-                .await;
-            cx.update(|cx| {
-                update_hosts(cx, |hosts| match fetched {
-                    Ok(settings) => hosts.adopt(&key, settings),
-                    Err(error) => hosts.set_error(&key, format!("读取智能体配置失败：{error}")),
-                })
-            });
-        })
-        .detach();
-    }
+    let key = key.clone();
+    cx.spawn(async move |cx| {
+        let fetched = cx
+            .background_executor()
+            .spawn(async move { fetch_agent_host(&client) })
+            .await;
+        cx.update(|cx| {
+            update_hosts(cx, |hosts| match fetched {
+                Ok(settings) => hosts.adopt(&key, settings),
+                Err(error) => hosts.set_error(&key, format!("读取智能体配置失败：{error}")),
+            })
+        });
+    })
+    .detach();
 }
 
 #[cfg(test)]

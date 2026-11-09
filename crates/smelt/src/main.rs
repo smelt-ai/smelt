@@ -4331,6 +4331,8 @@ fn main() {
                 if runtime == RuntimeKey::Local {
                     cx.update(ProviderStatus::bump_pi_catalog);
                 }
+                // 删插件时运行时顺带清掉了智能体的勾选。
+                cx.update(|cx| settings::reload_agent_host(&runtime, cx));
                 if let Some(ws) = current_workspace(&current_ws_for_topics) {
                     let _ = ws.update(cx, |ws, cx| ws.on_pi_config_changed(&runtime, cx));
                 }
@@ -4393,6 +4395,7 @@ fn main() {
                                 ws.on_runtime_resubscribed(&runtime, cx);
                                 // 断开期间 Pi 配置可能变过，单独订阅的事件补不回来。
                                 ws.on_pi_config_changed(&runtime, cx);
+                                settings::reload_agent_host(&runtime, cx);
                             });
                         }
                         _ => {}

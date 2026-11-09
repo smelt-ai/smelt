@@ -717,6 +717,28 @@ pub fn sync_agent_definitions_on(
     Ok(())
 }
 
+/// 插件删掉了：每个勾着它的智能体都去掉这一项。不清的话，以后再导入同 id 的插件，
+/// 这些智能体会自己又勾上。期间被别人删掉的智能体跳过。
+pub fn forget_plugin_on(
+    store: &smelt_store::Store,
+    plugin_id: &str,
+) -> Result<(), AgentDefinitionError> {
+    for agent in list_agent_definitions_on(store)? {
+        if !agent.plugins.iter().any(|id| id == plugin_id) {
+            continue;
+        }
+        let forgotten = modify_agent_definition_on(store, &agent.id, |definition| {
+            definition.plugins.retain(|id| id != plugin_id);
+            Ok(())
+        });
+        match forgotten {
+            Ok(_) | Err(AgentDefinitionError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 pub fn list_agent_definitions() -> Result<Vec<AgentDefinition>, AgentDefinitionError> {
     list_agent_definitions_on(&default_store()?)
 }
@@ -736,6 +758,10 @@ pub fn update_agent_definition(
 
 pub fn delete_agent_definition(id: &str) -> Result<(), AgentDefinitionError> {
     delete_agent_definition_on(&default_store()?, id)
+}
+
+pub fn forget_plugin(plugin_id: &str) -> Result<(), AgentDefinitionError> {
+    forget_plugin_on(&default_store()?, plugin_id)
 }
 
 pub fn sync_agent_definitions(
@@ -1444,6 +1470,38 @@ mod tests {
 
         delete_agent_definition_on(&store, "writer").unwrap();
         assert!(list_agent_definitions_on(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn forget_plugin_unchecks_it_everywhere_and_keeps_the_rest() {
+        let (_dir, store) = open_store();
+        create_sample(&store, "writer");
+        create_sample(&store, "reviewer");
+        create_sample(&store, "idle");
+        let check = |id: &str, plugins: &[&str]| {
+            update_agent_definition_on(
+                &store,
+                id,
+                AgentDefinitionPatch {
+                    plugins: Some(plugins.iter().map(|plugin| plugin.to_string()).collect()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        check("writer", &["skill:gone", "skill:kept"]);
+        check("reviewer", &["skill:gone"]);
+        check("idle", &["skill:kept"]);
+
+        forget_plugin_on(&store, "skill:gone").unwrap();
+
+        let plugins = |id: &str| get_agent_definition_on(&store, id).unwrap().plugins;
+        assert_eq!(plugins("writer"), ["skill:kept"]);
+        assert!(plugins("reviewer").is_empty());
+        assert_eq!(plugins("idle"), ["skill:kept"]);
+        // 没人勾的插件：什么都不改。
+        forget_plugin_on(&store, "skill:nobody").unwrap();
+        assert_eq!(plugins("writer"), ["skill:kept"]);
     }
 
     #[test]
