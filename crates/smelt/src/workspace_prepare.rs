@@ -93,7 +93,6 @@ impl Workspace {
         // 因为这次刷新还会继续往下走。
         self.sync_session_ui(window, cx);
         self.align_visible_route(window, cx);
-        self.sync_capabilities_view(window, cx);
         self.sync_notification_surfaces(cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
 

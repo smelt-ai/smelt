@@ -1,17 +1,15 @@
 //! 工作台当前显示哪一个一级入口。
 //!
-//! 左侧「智能体 / 自动化 / 能力库」是分组标题，不是 iOS/长桥那种保活 Tab：点标题总是进
-//! 该面的根页。能力库的模型、插件、MCP、记忆是面内平级页签，不是钻取。对话和运行现场
-//! 是侧栏里的子行，只切当前面、不清根页。
+//! 左侧「智能体 / 自动化」和插件登记的页面是分组标题，不是 iOS/长桥那种保活 Tab：点标题
+//! 总是进该面的根页。对话和运行现场是侧栏里的子行，只切当前面、不清根页。
 
-/// 左侧一级导航。智能体、自动化、能力库与会话并列。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// 左侧一级导航。智能体、自动化、插件页面与会话并列。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WorkspaceRoute {
     Agents,
     Automations,
-    /// 能力库：智能体共用的模型、插件和记忆。
-    Capabilities,
+    /// 插件登记的页面（[`smelt_plugin_api::PageSpec`]），按 id 记。
+    Page(String),
     /// 运行时那台机器的远程桌面。看哪台运行时记在 Workspace 上，不落盘。
     Desktop,
     #[default]
@@ -21,6 +19,39 @@ pub(crate) enum WorkspaceRoute {
 impl WorkspaceRoute {
     pub(crate) fn is_session(&self) -> bool {
         matches!(self, Self::Session)
+    }
+
+    /// 落盘的名字。插件页面就是它的 id；宿主自己的几个名字插件不能占用。
+    fn wire_name(&self) -> &str {
+        match self {
+            Self::Agents => "agents",
+            Self::Automations => "automations",
+            Self::Page(id) => id,
+            Self::Desktop => "desktop",
+            Self::Session => "session",
+        }
+    }
+
+    fn from_wire_name(name: String) -> Self {
+        match name.as_str() {
+            "agents" => Self::Agents,
+            "automations" => Self::Automations,
+            "desktop" => Self::Desktop,
+            "session" => Self::Session,
+            _ => Self::Page(name),
+        }
+    }
+}
+
+impl serde::Serialize for WorkspaceRoute {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.wire_name())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WorkspaceRoute {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from_wire_name)
     }
 }
 
@@ -65,38 +96,6 @@ impl AgentsView {
     }
 }
 
-/// 能力库面内页签。各页平级，切换不算钻取：侧栏回根页时保持当前页签，不落盘。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum CapabilitiesTab {
-    #[default]
-    Models,
-    Plugins,
-    Mcp,
-    Memory,
-}
-
-impl CapabilitiesTab {
-    pub(crate) const ALL: [Self; 4] = [Self::Models, Self::Plugins, Self::Mcp, Self::Memory];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Models => "模型",
-            Self::Plugins => "插件",
-            Self::Mcp => "MCP",
-            Self::Memory => "记忆",
-        }
-    }
-
-    pub(crate) fn element_id(self) -> &'static str {
-        match self {
-            Self::Models => "capabilities-tab-models",
-            Self::Plugins => "capabilities-tab-plugins",
-            Self::Mcp => "capabilities-tab-mcp",
-            Self::Memory => "capabilities-tab-memory",
-        }
-    }
-}
-
 /// 自动化面内页。列表是根，编辑器是唯一一层钻取，不落盘。
 ///
 /// 运行记录不另开一页：它留在编辑器里。选中哪一次运行是编辑器上的选中态，
@@ -133,7 +132,6 @@ pub(crate) struct WorkspaceNav {
     active: WorkspaceRoute,
     agents: AgentsView,
     automations: AutomationsView,
-    capabilities: CapabilitiesTab,
 }
 
 impl Default for WorkspaceNav {
@@ -142,7 +140,6 @@ impl Default for WorkspaceNav {
             active: WorkspaceRoute::Session,
             agents: AgentsView::Catalog,
             automations: AutomationsView::List,
-            capabilities: CapabilitiesTab::Models,
         }
     }
 }
@@ -153,7 +150,6 @@ impl WorkspaceNav {
             active: route,
             agents: AgentsView::Catalog,
             automations: AutomationsView::List,
-            capabilities: CapabilitiesTab::Models,
         }
     }
 
@@ -177,14 +173,6 @@ impl WorkspaceNav {
         &mut self.automations
     }
 
-    pub(crate) fn capabilities_tab(&self) -> CapabilitiesTab {
-        self.capabilities
-    }
-
-    pub(crate) fn set_capabilities_tab(&mut self, tab: CapabilitiesTab) {
-        self.capabilities = tab;
-    }
-
     pub(crate) fn set_active(&mut self, tab: WorkspaceRoute) {
         self.active = tab;
     }
@@ -193,7 +181,7 @@ impl WorkspaceNav {
         match self.active {
             WorkspaceRoute::Agents => self.agents.pop_to_root(),
             WorkspaceRoute::Automations => self.automations.pop_to_root(),
-            WorkspaceRoute::Capabilities | WorkspaceRoute::Desktop | WorkspaceRoute::Session => {}
+            WorkspaceRoute::Page(_) | WorkspaceRoute::Desktop | WorkspaceRoute::Session => {}
         }
     }
 
@@ -299,18 +287,11 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_tab_survives_returning_to_the_root() {
+    fn page_route_is_restored_as_is() {
         let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Session);
-        assert_eq!(nav.capabilities_tab(), CapabilitiesTab::Models);
-        nav.set_capabilities_tab(CapabilitiesTab::Plugins);
-        nav.set_active(WorkspaceRoute::Capabilities);
+        nav.set_active(WorkspaceRoute::Page("capabilities".into()));
         nav.pop_active_to_root();
-        assert_eq!(
-            nav.capabilities_tab(),
-            CapabilitiesTab::Plugins,
-            "页签是平级切换，不是钻取，点侧栏标题不应把它重置"
-        );
-        assert_eq!(nav.persist(), WorkspaceRoute::Capabilities);
+        assert_eq!(nav.persist(), WorkspaceRoute::Page("capabilities".into()));
     }
 
     #[test]
@@ -324,7 +305,7 @@ mod tests {
             "\"automations\""
         );
         assert_eq!(
-            serde_json::to_string(&WorkspaceRoute::Capabilities).unwrap(),
+            serde_json::to_string(&WorkspaceRoute::Page("capabilities".into())).unwrap(),
             "\"capabilities\""
         );
         assert_eq!(
@@ -335,6 +316,10 @@ mod tests {
             serde_json::from_str::<WorkspaceRoute>("\"session\"").unwrap(),
             WorkspaceRoute::Session
         );
-        assert!(serde_json::from_str::<WorkspaceRoute>("\"retired-plugin\"").is_err());
+        // 不认识的名字是插件页面的 id；插件已经不在时由恢复的地方退回会话。
+        assert_eq!(
+            serde_json::from_str::<WorkspaceRoute>("\"retired-plugin\"").unwrap(),
+            WorkspaceRoute::Page("retired-plugin".into())
+        );
     }
 }

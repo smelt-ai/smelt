@@ -103,8 +103,8 @@ impl Workspace {
 
     pub(super) fn render_agent_product_navigation_row(
         &self,
-        id: &'static str,
-        label: &'static str,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
         icon: impl Into<Icon>,
         attention: bool,
         route: WorkspaceRoute,
@@ -135,7 +135,7 @@ impl Workspace {
                     } else {
                         crate::ui_theme::text_mid()
                     }))
-                    .child(label),
+                    .child(label.into()),
             )
             .when(attention, |row| {
                 row.child(
@@ -917,7 +917,7 @@ impl Workspace {
                 .separator()
                 .item(
                     PopupMenuItem::new("删除智能体")
-                        .icon(crate::trash_icon())
+                        .icon(smelt_ui::trash_icon())
                         .disabled(automation_count != 0)
                         .on_click(move |_, _, cx| {
                             let agent = delete_agent.clone();
@@ -1115,7 +1115,7 @@ impl Workspace {
                 let disabled = automation_count != 0;
                 menu.item(
                     PopupMenuItem::new("删除智能体")
-                        .icon(crate::trash_icon())
+                        .icon(smelt_ui::trash_icon())
                         .disabled(disabled)
                         .on_click(move |_, _, cx| {
                             let agent = agent.clone();
@@ -1351,156 +1351,6 @@ impl Workspace {
             .bg(rgb(crate::ui_theme::bg_stage()))
             .child(header)
             .child(body)
-            .into_any_element()
-    }
-
-    /// 能力库在配哪台机器：一个按钮，点开选本机或别的机器。离线的照样能选，选了会说
-    /// 读不到。
-    fn render_pi_library_picker(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let current = self.pi_library_runtime().clone();
-        let entity = cx.entity();
-        Button::new("capabilities-runtime")
-            .quiet()
-            .compact()
-            .label(format!(
-                "机器：{}",
-                crate::runtimes::runtime_name(&current, cx)
-            ))
-            .icon(IconName::ChevronDown)
-            .dropdown_menu(move |menu, _window, cx| {
-                let mut runtimes = vec![crate::RuntimeKey::Local];
-                if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
-                    runtimes.extend(
-                        hub.remotes
-                            .iter()
-                            .map(|remote| remote.runtime.key().clone()),
-                    );
-                }
-                runtimes.into_iter().fold(menu, |menu, key| {
-                    let mut label = crate::runtimes::runtime_name(&key, cx);
-                    if let Some(unavailable) = crate::runtimes::runtime_unavailable_label(&key, cx)
-                    {
-                        label = format!("{label}（{unavailable}）");
-                    }
-                    let entity = entity.clone();
-                    let checked = key == current;
-                    menu.item(PopupMenuItem::new(label).checked(checked).on_click(
-                        move |_, _window, cx| {
-                            let key = key.clone();
-                            entity.update(cx, |workspace, cx| {
-                                workspace.select_pi_library_runtime(key, cx)
-                            });
-                        },
-                    ))
-                })
-            })
-    }
-
-    fn render_capabilities_needs_runtime(&self, entity: Entity<Workspace>, cx: &App) -> AnyElement {
-        let (fg, muted) = {
-            let theme = cx.theme();
-            (theme.foreground, theme.muted_foreground)
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .px_8()
-            .bg(rgb(crate::ui_theme::bg_stage()))
-            .child(
-                div()
-                    .text_size(px(28.))
-                    .font_semibold()
-                    .text_color(fg)
-                    .child("添加远程机器"),
-            )
-            .child(
-                div()
-                    .max_w(px(420.))
-                    .text_sm()
-                    .text_center()
-                    .text_color(muted)
-                    .child("模型、技能和插件跟运行时所在的机器走。配对一台远程机器后就能配置。"),
-            )
-            .child(
-                Button::new("capabilities-add-runtime")
-                    .commit()
-                    .capsule()
-                    .label("添加远程机器")
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |workspace, cx| {
-                            workspace.open_settings_section(
-                                crate::settings::SettingsSection::Remote,
-                                cx,
-                            );
-                        });
-                    }),
-            )
-            .into_any_element()
-    }
-
-    /// 能力库：页头和智能体、自动化同一条，左边页名接三个页签。正文是独立的设置内容视图，
-    /// 自己节流刷新快照，终端输出这类高频通知不会让它每帧重读 Pi 配置。
-    pub(crate) fn render_capabilities_page(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let entity = cx.entity();
-        if crate::runtimes::client(self.pi_library_runtime(), cx).is_none() {
-            return self.render_capabilities_needs_runtime(entity, cx);
-        }
-        let current = self.nav.capabilities_tab();
-        let tabs = choice_tabs(
-            "capabilities-tabs",
-            CapabilitiesTab::ALL.iter().position(|tab| *tab == current),
-            CapabilitiesTab::ALL.map(|tab| Tab::new().label(tab.label())),
-            move |ix, cx| {
-                if let Some(tab) = CapabilitiesTab::ALL.get(ix).copied() {
-                    entity.update(cx, |workspace, cx| {
-                        workspace.select_capabilities_tab(tab, cx)
-                    });
-                }
-            },
-        );
-        let header = product_page_chrome(self.chrome_left_guard(window))
-            .gap_3()
-            .child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(crate::ui_theme::text_bright()))
-                    .child("能力库"),
-            )
-            .child(tabs)
-            // 挂了别的机器，才需要选在配哪台。
-            .when(crate::runtimes::has_remote_runtimes(cx), |header| {
-                header
-                    .child(div().flex_1())
-                    .child(self.render_pi_library_picker(cx))
-            });
-
-        div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .bg(rgb(crate::ui_theme::bg_stage()))
-            .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .children(self.capabilities_view.clone()),
-            )
             .into_any_element()
     }
 }

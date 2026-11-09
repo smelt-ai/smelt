@@ -90,14 +90,22 @@ impl Workspace {
                 WorkspaceRoute::Automations,
                 entity.clone(),
             ))
-            .child(self.render_agent_product_navigation_row(
-                "capabilities-route",
-                "能力库",
-                IconName::LayoutDashboard,
-                false,
-                WorkspaceRoute::Capabilities,
-                entity,
-            ))
+            // 插件登记的页面排在宿主自己的入口后面。
+            .children(
+                smelt_plugin_api::pages(cx)
+                    .into_iter()
+                    .filter(|page| page.sidebar)
+                    .map(|page| {
+                        self.render_agent_product_navigation_row(
+                            SharedString::from(format!("{}-route", page.id)),
+                            page.title,
+                            page.icon,
+                            false,
+                            WorkspaceRoute::Page(page.id.to_string()),
+                            entity.clone(),
+                        )
+                    }),
+            )
     }
 
     pub(super) fn render_automation_drill_header(
@@ -225,7 +233,7 @@ impl Workspace {
                         let delete_id = delete_id.clone();
                         menu.item(
                             PopupMenuItem::new("删除自动化")
-                                .icon(crate::trash_icon())
+                                .icon(smelt_ui::trash_icon())
                                 .on_click(move |_, _, cx| {
                                     let id = delete_id.clone();
                                     delete_entity.update(cx, |workspace, cx| {

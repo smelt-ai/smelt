@@ -170,6 +170,14 @@ pub fn group_pi_model_choices(choices: Vec<PiModelChoice>) -> Vec<PiModelChoiceG
     groups
 }
 
+/// Provider 的 API 地址：必须是完整的 HTTP(S) URL。
+pub fn validate_api_base_url(base_url: &str) -> Result<(), String> {
+    match url::Url::parse(base_url) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
+        _ => Err("API 地址必须是完整的 HTTP(S) URL".to_string()),
+    }
+}
+
 /// 自定义 Provider 在 `models.json` 里的键名。
 ///
 /// Pi 把这个字符串当对象键用，大小写敏感、本身几乎不限制字符。我们只拦空键、空白、

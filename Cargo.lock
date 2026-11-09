@@ -10917,6 +10917,7 @@ dependencies = [
  "serde_json",
  "smelt-acp-view",
  "smelt-app-state",
+ "smelt-capabilities",
  "smelt-cli",
  "smelt-client",
  "smelt-client-store",
@@ -10926,6 +10927,7 @@ dependencies = [
  "smelt-model",
  "smelt-pairing",
  "smelt-paths",
+ "smelt-plugin-api",
  "smelt-runtime-client",
  "smelt-store",
  "smelt-sys",
@@ -10973,6 +10975,15 @@ dependencies = [
  "smelt-model",
  "smelt-runtime-client",
  "smol",
+]
+
+[[package]]
+name = "smelt-capabilities"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
 ]
 
 [[package]]
@@ -11138,6 +11149,7 @@ dependencies = [
  "smelt-paths",
  "smelt-runtime-client",
  "tempfile",
+ "url",
  "uuid",
 ]
 
@@ -11155,6 +11167,19 @@ dependencies = [
  "dirs 5.0.1",
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "smelt-plugin-api"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "serde_json",
+ "smelt-client",
+ "smelt-model",
+ "smelt-runtime-client",
+ "smelt-ui",
 ]
 
 [[package]]

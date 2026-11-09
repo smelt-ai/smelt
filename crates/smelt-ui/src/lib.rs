@@ -22,3 +22,9 @@ pub mod ui_theme;
 pub use button::Button;
 pub use icon_action::IconAction;
 pub use list_row::ListRow;
+
+/// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
+/// 删除/移除统一用这枚 Lucide trash-2。
+pub fn trash_icon() -> gpui_component::Icon {
+    gpui_component::Icon::empty().path("smelt-icons/trash.svg")
+}

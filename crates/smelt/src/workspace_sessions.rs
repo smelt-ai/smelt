@@ -1133,7 +1133,7 @@ impl Workspace {
                     }
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: false } => {
-                    this.open_capabilities(crate::CapabilitiesTab::Plugins, window, cx);
+                    this.open_capabilities("plugins", window, cx);
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: true } => {
                     // 智能体定义已经删了就停在智能体列表。
@@ -1812,10 +1812,6 @@ impl Workspace {
             }
             Some(CloseConfirm::Project { project, .. }) => self.close_project(&project, cx),
             Some(CloseConfirm::Runtime { runtime_id, .. }) => {
-                // 能力库正配着这台机器的话，退回本机。
-                if *self.pi_library_runtime() == crate::RuntimeKey::Remote(runtime_id.clone()) {
-                    self.select_pi_library_runtime(crate::RuntimeKey::Local, cx);
-                }
                 crate::runtimes::remove_runtime(runtime_id, cx);
                 cx.notify();
             }

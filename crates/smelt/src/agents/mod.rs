@@ -24,7 +24,7 @@ pub(crate) use smelt_ui::Button;
 use smelt_ui::ListRow;
 
 use crate::workspace_sessions::NewAcpSessionRequest;
-use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
+use crate::{AgentStatus, Workspace, WorkspaceRoute, acp_view, settings};
 use smelt_model::pi_plugin_catalog::PiPlugin;
 use smelt_ui::IconAction as _;
 use smelt_ui::truncated_line::truncated_line;
@@ -1351,7 +1351,7 @@ fn render_trigger_entry(
                 )
                 .child(
                     compact_chip("automation-remove-trigger")
-                        .icon(crate::trash_icon())
+                        .icon(smelt_ui::trash_icon())
                         .icon_action("删除触发器")
                         .on_click(move |_, _, cx| {
                             remove_entity.update(cx, |workspace, cx| {
@@ -1839,7 +1839,7 @@ fn render_schedule_rule(
     let remove = can_remove.then(|| {
         let remove_entity = entity.clone();
         compact_chip("automation-remove-schedule")
-            .icon(crate::trash_icon())
+            .icon(smelt_ui::trash_icon())
             .icon_action("删除时间设置")
             .on_click(move |_, _, cx| {
                 remove_entity.update(cx, |workspace, cx| {
@@ -2383,7 +2383,7 @@ fn render_agent_plugin_card(
         .tooltip("去能力库导入或删除插件")
         .on_click(move |_, window, cx| {
             manage_entity.update(cx, |workspace, cx| {
-                workspace.open_capabilities(CapabilitiesTab::Plugins, window, cx);
+                workspace.open_capabilities("plugins", window, cx);
             });
         });
 
@@ -3276,7 +3276,7 @@ fn agent_context_row(
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
                 .icon_size()
-                .icon(crate::trash_icon())
+                .icon(smelt_ui::trash_icon())
                 .icon_action(if is_folder {
                     "解除这个目录的绑定"
                 } else {
@@ -3322,7 +3322,7 @@ fn render_agent_mcp_card(
         .tooltip("去能力库添加、登录或停用 MCP 服务器")
         .on_click(move |_, window, cx| {
             manage_entity.update(cx, |workspace, cx| {
-                workspace.open_capabilities(CapabilitiesTab::Mcp, window, cx);
+                workspace.open_capabilities("mcp", window, cx);
             });
         });
 

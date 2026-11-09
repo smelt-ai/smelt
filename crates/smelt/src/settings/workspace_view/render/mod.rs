@@ -10,7 +10,6 @@ use super::*;
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputState, Textarea};
 use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
-use gpui_component::tag::Tag;
 
 mod agent;
 mod appearance;
@@ -18,11 +17,6 @@ mod collaboration;
 mod maintenance;
 mod notify;
 mod panel_plugin;
-mod pi_auth;
-mod pi_mcp;
-mod pi_memory;
-mod pi_model;
-mod pi_plugin;
 mod shortcuts;
 
 /// 渲染独立设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。
@@ -35,40 +29,6 @@ pub(super) fn render_settings_content(
         entity,
         snapshot: snapshot.clone(),
     })
-}
-
-/// 能力库正文：只画当前页签那一页。页头和页签在 Workspace 那边，跟智能体、自动化同一条页头。
-pub(super) fn render_capabilities_content(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
-    cx: &App,
-) -> Div {
-    let tab = snapshot.capabilities_tab;
-    let page = match tab {
-        // 模型、MCP 页自己排版：居中限宽、表单就地展开，不走 Settings 的「标签左、值右」两栏。
-        crate::CapabilitiesTab::Models => {
-            return div()
-                .size_full()
-                .child(pi_model::pi_model_page(entity, snapshot, cx));
-        }
-        crate::CapabilitiesTab::Mcp => {
-            return div()
-                .size_full()
-                .child(pi_mcp::pi_mcp_page(entity, snapshot, cx));
-        }
-        crate::CapabilitiesTab::Plugins => pi_plugin::pi_plugin_page(entity, snapshot, cx),
-        crate::CapabilitiesTab::Memory => pi_memory::pi_memory_page(snapshot, cx),
-    };
-    div().size_full().child(
-        // 借 Settings 的内容排版，关掉它自带的分组侧栏。
-        Settings::new(SharedString::from(format!(
-            "capabilities-pane:{}",
-            tab.element_id()
-        )))
-        .sidebar_width(px(0.))
-        .sidebar_size_range(px(0.)..px(0.))
-        .pages(vec![page]),
-    )
 }
 
 #[derive(IntoElement)]

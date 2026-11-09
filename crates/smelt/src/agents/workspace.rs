@@ -60,37 +60,34 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        debug_assert!(matches!(
-            route,
-            WorkspaceRoute::Agents | WorkspaceRoute::Automations | WorkspaceRoute::Capabilities
-        ));
-        if route == WorkspaceRoute::Agents {
-            settings::reload_agent_hosts(cx);
+        match route {
+            WorkspaceRoute::Agents => {
+                settings::reload_agent_hosts(cx);
+                self.activate_workspace_tab(route, window, cx);
+            }
+            WorkspaceRoute::Automations => self.activate_workspace_tab(route, window, cx),
+            WorkspaceRoute::Page(id) => {
+                self.open_page(&id, serde_json::Value::Null, window, cx);
+            }
+            WorkspaceRoute::Desktop | WorkspaceRoute::Session => {
+                debug_assert!(false, "侧栏产品入口不会开 {route:?}");
+                self.activate_workspace_tab(route, window, cx);
+            }
         }
-        self.activate_workspace_tab(route, window, cx);
     }
 
     pub(crate) fn open_agents_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_agent_product_route(WorkspaceRoute::Agents, window, cx);
     }
 
-    /// 直接打开能力库的某个页签，比如智能体编辑器里「插件 · 管理」。
-    pub(crate) fn open_capabilities(
-        &mut self,
-        tab: CapabilitiesTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.nav.set_capabilities_tab(tab);
-        self.open_agent_product_route(WorkspaceRoute::Capabilities, window, cx);
-    }
-
-    pub(super) fn select_capabilities_tab(&mut self, tab: CapabilitiesTab, cx: &mut Context<Self>) {
-        if self.nav.capabilities_tab() != tab {
-            self.nav.set_capabilities_tab(tab);
-            self.schedule_visible_refresh(cx);
-            cx.notify();
-        }
+    /// 直接打开能力库的某个页签（`plugins`、`mcp`），比如智能体编辑器里「插件 · 管理」。
+    pub(crate) fn open_capabilities(&mut self, tab: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(
+            smelt_capabilities::PAGE_ID,
+            serde_json::json!({ "tab": tab }),
+            window,
+            cx,
+        );
     }
 
     /// 编辑器正开着的那个智能体在哪台机器上。编辑器里的修改只认它：只给 id 不知道
@@ -442,17 +439,18 @@ impl Workspace {
         editor.pi.generation += 1;
         let generation = editor.pi.generation;
         let agent = editor.agent.clone();
-        self.run_call_on::<smelt_model::control_api::PiConfigGet>(
-            &agent.runtime.clone(),
+        let task = smelt_plugin_api::call::<smelt_model::control_api::PiConfigGet>(
+            &agent.runtime,
             smelt_runtime_client::protocol::control::EmptyParams::default(),
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
-            move |this, result, cx| {
-                let Some(editor) =
-                    this.agent_surface.editor.as_mut().filter(|editor| {
-                        editor.agent == agent && editor.pi.generation == generation
-                    })
-                else {
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(editor) = this.agent_surface.editor.as_mut().filter(|editor| {
+                    editor.agent == agent && editor.pi.generation == generation
+                }) else {
                     return;
                 };
                 match result {
@@ -466,8 +464,9 @@ impl Workspace {
                     }
                 }
                 cx.notify();
-            },
-        );
+            });
+        })
+        .detach();
     }
 
     /// 向运行时重新取当前编辑器那个智能体的记忆。回来时编辑器已换人就丢掉。

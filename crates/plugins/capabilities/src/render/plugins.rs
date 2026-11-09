@@ -5,21 +5,21 @@
 //! 项目级插件永远扫不到。内置技能跟着运行时更新，不能删。
 
 use super::*;
-use smelt_model::pi_plugin_catalog::{
+use api::model::pi_plugin_catalog::{
     PiPlugin, PiPluginKind, global_extension_root, global_skill_roots,
 };
 
 pub(super) fn pi_plugin_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     _cx: &App,
 ) -> SettingPage {
-    let plugins = snapshot.pi_plugins.clone();
+    let plugins = page.pi_plugins();
     let usable = plugins.iter().filter(|plugin| plugin.is_usable()).count();
     let broken = plugins.len() - usable;
 
     let mut groups = vec![overview_group(entity.clone(), &plugins)];
-    if let Some(error) = snapshot.pi_plugin_error.clone() {
+    if let Some(error) = page.pi_plugin_error.clone() {
         groups.push(
             SettingGroup::new()
                 .title("上一次操作失败")
@@ -35,8 +35,8 @@ pub(super) fn pi_plugin_page(
     groups.push(list_group(
         entity,
         &plugins,
-        snapshot.pi_plugin_pending_delete.clone(),
-        snapshot,
+        page.pi_plugin_pending_delete.clone(),
+        page,
     ));
 
     SettingPage::new("智能体插件")
@@ -50,7 +50,7 @@ pub(super) fn pi_plugin_page(
         .groups(groups)
 }
 
-fn overview_group(entity: Entity<Workspace>, plugins: &[PiPlugin]) -> SettingGroup {
+fn overview_group(entity: Entity<CapabilitiesPage>, plugins: &[PiPlugin]) -> SettingGroup {
     let skill_count = plugins
         .iter()
         .filter(|plugin| plugin.kind == PiPluginKind::Skill)
@@ -138,10 +138,10 @@ fn overview_group(entity: Entity<Workspace>, plugins: &[PiPlugin]) -> SettingGro
 }
 
 fn list_group(
-    entity: Entity<Workspace>,
+    entity: Entity<CapabilitiesPage>,
     plugins: &[PiPlugin],
     pending_delete: Option<String>,
-    snapshot: &SettingsRenderSnapshot,
+    page: &CapabilitiesPage,
 ) -> SettingGroup {
     if plugins.is_empty() {
         return SettingGroup::new()
@@ -162,7 +162,7 @@ fn list_group(
                 entity.clone(),
                 plugin,
                 pending_delete.as_deref() == Some(plugin.id.as_str()),
-                snapshot,
+                page,
             )
         })
         .collect::<Vec<_>>();
@@ -174,12 +174,12 @@ fn list_group(
 }
 
 fn plugin_item(
-    entity: Entity<Workspace>,
+    entity: Entity<CapabilitiesPage>,
     plugin: &PiPlugin,
     pending: bool,
-    snapshot: &SettingsRenderSnapshot,
+    page: &CapabilitiesPage,
 ) -> SettingItem {
-    let users = snapshot
+    let users = page
         .agent_names_using_plugin
         .get(&plugin.id)
         .cloned()

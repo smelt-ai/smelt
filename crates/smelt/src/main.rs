@@ -34,6 +34,7 @@ mod keymap;
 mod liquid_glass;
 mod local_daemon;
 mod overlay;
+mod plugin_host;
 mod plugins;
 mod provider_quota;
 mod resizable_split;
@@ -69,7 +70,7 @@ mod workspace_update;
 mod workspace_view;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
-pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
+pub(crate) use workspace_nav::{WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::load_workspace_ui;
 #[cfg(test)]
 pub(crate) use workspace_persist::persisted_active_position;
@@ -2403,37 +2404,6 @@ struct Workspace {
     launch_inputs: Option<settings::LaunchInputs>,
     /// 手动添加 workspace 列表编辑器（设置页「Agent 集成」分组懒创建）。
     profile_inputs: Option<settings::ProfileInputs>,
-    /// 原生 Pi 模型设置表单。
-    pi_model_editor: Option<settings::PiModelEditor>,
-    /// 原生 Pi 自定义 Provider 表单。
-    pi_custom_provider_editor: Option<settings::PiCustomProviderEditor>,
-    /// Pi 内置 provider 的凭据现状缓存；打开凭据面板时才异步填。
-    pi_auth_providers: Option<settings::PiAuthProvidersState>,
-    /// 正在进行的订阅/API key 登录；持有登录子进程。
-    pi_login: Option<settings::PiLoginView>,
-    /// 正在为哪个 provider 挑默认模型。
-    pi_auth_model_picker: Option<settings::PiAuthModelPicker>,
-    /// Pi 凭据操作（列表、注销）的最近一次错误。
-    pi_auth_error: Option<String>,
-    /// 凭据面板是否展开到全部内置 provider（默认只列可订阅登录的和已配好的）。
-    pi_auth_show_all: bool,
-    /// 正在登录的 MCP 服务器名。登录跑在后台子进程里，期间禁用同一行的按钮。
-    pi_mcp_login: Option<String>,
-    /// 等用户确认移除的 MCP 服务器名。移除会删掉用户手写的配置，所以要两步。
-    pi_mcp_pending_remove: Option<String>,
-    /// MCP 配置操作（添加、启停、移除、登录）的最近一次错误。
-    pi_mcp_error: Option<String>,
-    /// 各台机器的 Pi 配置快照（模型、MCP、插件……）。渲染只读它；打开设置窗口、进
-    /// 能力库、开智能体编辑器时刷新，修改由运行时回带新快照。
-    pi_configs: HashMap<RuntimeKey, settings::PiConfigSlot>,
-    /// 能力库在配哪台机器。
-    pi_library: settings::PiLibrary,
-    /// 交互式原生 Pi 模型表单错误。
-    pi_model_editor_error: Option<String>,
-    /// 正在等二次确认删除的插件 id。
-    pi_plugin_pending_delete: Option<String>,
-    /// 插件导入 / 删除的最近一次错误。
-    pi_plugin_error: Option<String>,
     /// 面板插件（Tool Panel 里的 gpui-shell 插件）设置页的状态，见 `settings::panel_plugins`。
     panel_plugins: settings::PanelPluginsState,
     /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 界面字号滑块 + 终端字号滑块 + 背景色取色器
@@ -2568,8 +2538,8 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 能力库正文。只在能力库路由可见时存在，见 `sync_capabilities_view`。
-    capabilities_view: Option<Entity<settings::SettingsContentView>>,
+    /// 打开过的插件页面，按页面 id。第一次打开时建，之后一直留着：离开再回来表单还在。
+    pages: HashMap<SharedString, Rc<dyn smelt_plugin_api::PageHandle>>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
     ///
     /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
@@ -2978,21 +2948,6 @@ impl Workspace {
             history_project_root: None,
             launch_inputs: None,
             profile_inputs: None,
-            pi_model_editor: None,
-            pi_custom_provider_editor: None,
-            pi_auth_providers: None,
-            pi_login: None,
-            pi_auth_model_picker: None,
-            pi_auth_error: None,
-            pi_auth_show_all: false,
-            pi_mcp_login: None,
-            pi_mcp_pending_remove: None,
-            pi_mcp_error: None,
-            pi_configs: HashMap::new(),
-            pi_library: Default::default(),
-            pi_model_editor_error: None,
-            pi_plugin_pending_delete: None,
-            pi_plugin_error: None,
             panel_plugins: Default::default(),
             opacity_slider: None,
             ui_font_size_slider: None,
@@ -3024,7 +2979,7 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            capabilities_view: None,
+            pages: HashMap::new(),
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_running_count: None,
@@ -3119,12 +3074,12 @@ impl Workspace {
                 this.apply_received_workspace_directories(window, cx)
             }),
         );
-        ws.ensure_pi_library_runtime(cx);
         ws._runtime_hub_sub = Some(
             cx.observe_global_in::<crate::runtimes::RuntimeHub>(window, |this, _window, cx| {
                 this.sync_remote_spaces(cx)
             }),
         );
+        ws.restore_page_route(window, cx);
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -3987,12 +3942,6 @@ const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
     ("custom", include_bytes!("../assets/icons/agent-custom.svg")),
 ];
 
-/// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
-/// 删除/移除统一用这枚 Lucide trash-2。
-pub(crate) fn trash_icon() -> Icon {
-    Icon::empty().path("smelt-icons/trash.svg")
-}
-
 /// `smelt-icons/agent-<id>.svg` → 图标字节；不是 agent 图标路径返回 None。
 fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
     let id = path
@@ -4308,6 +4257,8 @@ fn main() {
         });
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
+        // 插件要读机器列表，在 RuntimeHub 之后、开主窗口之前装。
+        plugin_host::install(current_ws.clone(), cx);
         // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求这些投影
         // 目前只认本机；会话状态、项目文件变化、智能体记忆变化各运行时都有。
         let runtime_events::RuntimeEventReceivers {
@@ -4332,12 +4283,15 @@ fn main() {
                     cx.update(ProviderStatus::bump_pi_catalog);
                 }
                 // 删插件时运行时顺带清掉了智能体的勾选。
-                cx.update(|cx| settings::reload_agent_host(&runtime, cx));
+                cx.update(|cx| {
+                    settings::reload_agent_host(&runtime, cx);
+                    smelt_plugin_api::emit(
+                        smelt_plugin_api::HostEvent::PiConfigChanged(runtime.clone()),
+                        cx,
+                    );
+                });
                 if let Some(ws) = current_workspace(&current_ws_for_topics) {
-                    let _ = ws.update(cx, |ws, cx| {
-                        ws.on_pi_config_changed(&runtime, cx);
-                        ws.on_agent_pi_config_changed(&runtime, cx);
-                    });
+                    let _ = ws.update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
                 }
             }
         })
@@ -4397,9 +4351,14 @@ fn main() {
                             let _ = ws.update(cx, |ws, cx| {
                                 ws.on_runtime_resubscribed(&runtime, cx);
                                 // 断开期间 Pi 配置可能变过，单独订阅的事件补不回来。
-                                ws.on_pi_config_changed(&runtime, cx);
                                 ws.on_agent_pi_config_changed(&runtime, cx);
                                 settings::reload_agent_host(&runtime, cx);
+                            });
+                            cx.update(|cx| {
+                                smelt_plugin_api::emit(
+                                    smelt_plugin_api::HostEvent::Reconnected(runtime.clone()),
+                                    cx,
+                                )
                             });
                         }
                         _ => {}

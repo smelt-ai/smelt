@@ -336,9 +336,15 @@ fn product_and_session_routes_are_independent_top_level_routes() {
         serde_json::from_str::<WorkspaceRoute>("\"session\"").unwrap(),
         WorkspaceRoute::Session
     );
-    assert!(
-        serde_json::from_str::<WorkspaceRoute>("\"retired-plugin\"").is_err(),
-        "未知插件 route 不能作为旧存档兼容值"
+    // 宿主不认识的名字都是插件页面 id；那一页还在不在由启动恢复时查登记（见
+    // `Workspace::restore_page_route`），没有了就回会话。
+    assert_eq!(
+        serde_json::from_str::<WorkspaceRoute>("\"capabilities\"").unwrap(),
+        WorkspaceRoute::Page("capabilities".into())
+    );
+    assert_eq!(
+        serde_json::to_string(&WorkspaceRoute::Page("capabilities".into())).unwrap(),
+        "\"capabilities\""
     );
 }
 

@@ -39,6 +39,12 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 - Diff（带行评论、hunk 操作）、代码编辑器
 - 远程桌面画面
 
+## 宿主接口（2026-11-09 定）
+
+- **宿主服务是一个 gpui 全局。** `smelt-plugin-api` 定义接口，宿主启动时实现并装上，插件用 `smelt_plugin_api::host(cx)` 取：机器列表和客户端、通知、用系统编辑器打开文件、在某台机器上选路径、画页头。运行时话题（`pi_config.changed`、重新订阅上）和机器列表变化由宿主转成插件可订阅的事件（`HostEvent`）。
+- **页面按字符串 id 登记。** 注册表记 id、标题、图标、侧栏位置、是否进机器菜单、建视图的函数；工作台路由是 `Page(id)`。宿主里别处跳过去用 `open_page("capabilities", {"tab": "plugins"})`，不出现插件的类型；侧栏入口和机器菜单都按登记生成。路由落盘只记 id，启动时那一页没登记了（插件下线）就回会话；`agents`、`automations`、`desktop`、`session` 是宿主自己的路由，页面不能用这几个 id。
+- **插件 crate 只依赖 `smelt-plugin-api` 和 gpui 组件库。** 插件要用的协议类型（`smelt-model`）和共用组件（`smelt-ui`）由 `smelt-plugin-api` 再导出，和 JS 插件拿到的一致。
+
 ## 插件的样子
 
 **用户插件**是一个 gpui-shell 文件夹（`gpui-shell.json` + JS），导入文件夹就算装上。
@@ -48,7 +54,7 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 1. **宿主接口只有一份**，在 `smelt-plugin-api` crate 里（注册表、smeltd 通道、事件、存储、活动上下文）。Rust 插件直接调它；给 JS 的宿主模块是同一套接口的薄映射，不另造。
 2. **边界靠编译器**：插件 crate 只依赖 `smelt-plugin-api` 和 gpui 组件库，不能依赖宿主 crate `smelt`。
 3. **注册表按 id，不分语言**：用户导入同 id 的 JS 插件就替换掉内置的 Rust 插件；内置插件也能关掉。
-4. **插件之间不互相依赖**：插件 crate 不能依赖别的插件 crate，插件之间只经宿主的事件、命令和 `navigate` 打交道（JS 插件也只能这样）。
+4. **插件之间不互相依赖**：插件 crate 不能依赖别的插件 crate，插件之间只经宿主的事件和命令打交道（JS 插件也只能这样）。
 5. **只在画界面上有差别**：Rust 插件直接用 GPUI，JS 插件用 gpui-shell；数据、服务、注册两边拿到的一样。
 
 - **纯脚本插件**：设置页、能力库、额度、历史、自动化等。
