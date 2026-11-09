@@ -12,6 +12,7 @@ import {
 import { SMELT_MCP_EXTENSION_NAME, smeltMcpExtension } from "./mcp-selection.ts";
 import smeltMemoryExtension, { SMELT_MEMORY_EXTENSION_NAME } from "./memory-extension.ts";
 import smeltModelRefreshExtension from "./model-refresh.ts";
+import { SMELT_NOTIFY_EXTENSION_NAME, smeltNotifyExtension } from "./notify-user.ts";
 import { createSmeltMcpTransport } from "./pi-mcp-runtime.ts";
 import { SMELT_SESSION_PEERS_EXTENSION_NAME, smeltSessionPeersExtension } from "./session-peers.ts";
 import smeltPermissionExtension from "./smelt-permission.ts";
@@ -26,6 +27,7 @@ export const SMELT_EXTENSION_FACTORIES = [
 	{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 	{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
 	{ name: SMELT_SESSION_PEERS_EXTENSION_NAME, factory: smeltSessionPeersExtension, hidden: true },
+	{ name: SMELT_NOTIFY_EXTENSION_NAME, factory: smeltNotifyExtension, hidden: true },
 	{ name: "smelt-codemode", factory: smeltCodemodeExtension, hidden: true },
 	{ name: "smelt-model-refresh", factory: smeltModelRefreshExtension, hidden: true },
 	{ name: SMELT_MEMORY_EXTENSION_NAME, factory: smeltMemoryExtension, hidden: true },

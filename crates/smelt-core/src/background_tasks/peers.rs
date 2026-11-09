@@ -3,7 +3,8 @@
 //! - 守护把消息交给这里（`deliver`），排队后和后台任务、子智能体的结果走同一条
 //!   监听交回会话：扩展写成 `smelt.peer_message` 自定义消息，`message_start` 时回 ack 才算送到；
 //!   `clear_queue` 清掉的、换了监听的，再写一次。
-//! - 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn` 不在这里回答。
+//! - 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn` 和通知用户的
+//!   `notify` 不在这里回答。
 //!   起会话时守护把应答函数装进这个会话；来源是那时候绑上的会话 id，请求体里的字段不算。
 //!
 //! 只认会话本身（空归属）：子智能体不收也不发。
@@ -62,7 +63,12 @@ pub(super) fn forward(
     request: &serde_json::Value,
 ) {
     let reply = if !request_owner(request).is_empty() {
-        serde_json::json!({"ok": false, "error": "子智能体不能和别的对话通信"})
+        let error = if op == "notify" {
+            "子智能体不能直接通知用户，把结果交回父会话"
+        } else {
+            "子智能体不能和别的对话通信"
+        };
+        serde_json::json!({"ok": false, "error": error})
     } else {
         match inner.peer_handler.as_ref() {
             Some(handler) => {

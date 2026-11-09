@@ -106,6 +106,7 @@ mod acp_host;
 mod acp_idle;
 mod acp_registry;
 mod agent_memory_control;
+mod agent_notify;
 mod automation_runtime;
 mod client_conn;
 mod control;
@@ -3354,7 +3355,7 @@ fn publish_terminal_notifications(
         return;
     }
     for message in messages {
-        if let Err(error) = event_hub.publish_terminal_notification(id, &message) {
+        if let Err(error) = event_hub.publish_terminal_notification(id, None, &message) {
             eprintln!("[event-hub] terminal notification publish failed: {error}");
         }
     }

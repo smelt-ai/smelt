@@ -182,6 +182,24 @@ Smelt 进程后，smeltd 虽会继续执行自动化，但应用的 UserNotifica
 当前不会在下次冷启动时补发这段历史。若产品要求显式退出 App 后也立即通知，需要独立的
 签名通知 helper 或 daemon outbox，不能让无 app bundle 身份的 managed smeltd 直接冒充 GUI。
 
+### 智能体主动通知
+
+会话状态产生的提醒由运行时判定；智能体自己判断「这件事值得告诉用户」时，用 Pi 的
+`notify_user` 工具（经会话宿主的 `notify` op 交给 smeltd，来源按绑定的会话认）或
+`smelt notify` 命令（Control API `notify.send`，不属于任何会话）发一条，内容由它写
+（`crates/smeltd/src/agent_notify.rs`）。
+
+- **桌面**：经 `terminal.notification` 带 `title` 发给连着的客户端，和终端 OSC 通知进同一个
+  关注队列（`Notice`，总是开着）。自动化运行的会话不在侧栏、命令行发的没有会话，没处标已读：
+  GUI 直接弹应用通知，不记未读。
+- **手机**：`PushKind::Message`，正文放 `aps.alert.body` 原样显示，不走 loc-key，所以旧版
+  App 也显示得了，不升载荷版本。不看人在不在 Mac 前、立刻发；每条在 outbox 里各占一个位置，
+  不被同一会话的提醒替换，会话结束、被删也不撤。登记里的 `message` 开关（库里
+  `notify_message`）缺省为开。自动化运行、命令行发的不带会话（`session_id` 为空），点开只打开 App。
+- **和自动化通知的关系**：自动化的通知开关只管每次跑完的例行提醒，管不到这里。想「有事才
+  提醒」就关掉例行提醒，在提示词里写什么情况下调用 `notify_user`。
+- 子智能体不能直接通知用户，结果交回父会话由它决定。
+
 ### 手机推送
 
 iOS 把 App 挂起后 iroh 连接就断了，等批准、等输入、运行失败、跑完一轮经 APNs 推到手机。推送由各台
@@ -191,7 +209,8 @@ smeltd 自己产生，不依赖手机连着，也不依赖桌面 GUI 在线；AP
 - **同源判定**：smeltd 在进程内订阅自己的 `session.state_changed` / `session.removed`，用
   客户端同一个 `DaemonStateEventClient` 解码，再用同一套 `apply_daemon_baseline` /
   `apply_daemon_transition` 算边沿（`crates/smeltd/src/push.rs`）。首份快照只建基线；落后时
-  按快照重新对齐，之后照常比较边沿。推审批、输入、失败、成功四种，响铃和普通提示不推。
+  按快照重新对齐，之后照常比较边沿。推审批、输入、失败、成功四种，响铃和普通提示不推；
+  另有智能体主动发的消息，见上一节。
 - **登记**：手机先找中继用 APNs 令牌换**句柄**（中继用自己的密钥加密过的令牌，中继不存
   设备表），再经 iroh 调 `push.register` 把句柄、中继地址和要推的类型登记到每台机器。
   smeltd 按连接的设备身份写 `push_registration` 表（外键挂在 `paired_device` 上，撤销设备

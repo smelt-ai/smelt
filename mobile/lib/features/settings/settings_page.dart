@@ -369,6 +369,11 @@ class _PushSection extends StatelessWidget {
                 prefs.pushSuccess,
                 (value) => push.setKinds(success: value),
               ),
+              kind(
+                l10n.pushKindMessage,
+                prefs.pushMessage,
+                (value) => push.setKinds(message: value),
+              ),
             ],
           ],
         ),

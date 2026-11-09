@@ -422,7 +422,9 @@ fn handle_client(inner: Arc<Inner>, stream: TaskStream, session_cwd: &str) {
     match request.get("op").and_then(serde_json::Value::as_str) {
         Some("listen") => serve_listen(inner, stream, request_owner(&request)),
         Some("subagent_dispatch") => subagents::serve_dispatch(inner, stream, &request, pending),
-        Some(op @ ("session_list" | "session_read" | "session_send" | "session_spawn")) => {
+        Some(
+            op @ ("session_list" | "session_read" | "session_send" | "session_spawn" | "notify"),
+        ) => {
             peers::forward(&inner, stream, op, &request);
         }
         Some("wait") if wait_timeout(&request).is_some() => {

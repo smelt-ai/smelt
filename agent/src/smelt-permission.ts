@@ -8,6 +8,7 @@ import {
 	SMELT_MEMORY_EXTENSION_PATH,
 	SMELT_MEMORY_SEARCH_TOOL_NAME,
 } from "./memory-extension.ts";
+import { SMELT_NOTIFY_EXTENSION_PATH, SMELT_NOTIFY_TOOL_NAME } from "./notify-user.ts";
 import {
 	SMELT_SESSION_LIST_TOOL_NAME,
 	SMELT_SESSION_PEERS_EXTENSION_PATH,
@@ -52,6 +53,15 @@ function isSmeltSessionPeerReadTool(tool: ToolIdentity): boolean {
 	);
 }
 
+/** 通知用户只是给用户本人发一条消息，不碰文件、不跑命令，免审批。按身份认。 */
+function isSmeltNotifyTool(tool: ToolIdentity): boolean {
+	return (
+		tool.name === SMELT_NOTIFY_TOOL_NAME &&
+		tool.sourceInfo.source === "inline" &&
+		tool.sourceInfo.path === SMELT_NOTIFY_EXTENSION_PATH
+	);
+}
+
 function isSmeltElicitationTool(tool: ToolIdentity): boolean {
 	return (
 		tool.name === SMELT_ELICITATION_TOOL_NAME &&
@@ -75,7 +85,7 @@ export function toolNeedsSmeltApproval(tool: ToolIdentity | undefined, _input?: 
 	if (READ_ONLY_BUILTIN_TOOLS.has(tool.name) && isActualBuiltin(tool)) {
 		return false;
 	}
-	if (isSmeltMemorySearchTool(tool) || isSmeltSessionPeerReadTool(tool)) {
+	if (isSmeltMemorySearchTool(tool) || isSmeltSessionPeerReadTool(tool) || isSmeltNotifyTool(tool)) {
 		return false;
 	}
 	return !isSmeltElicitationTool(tool);

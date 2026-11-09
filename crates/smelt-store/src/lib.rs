@@ -59,7 +59,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 35;
+pub const STORE_SCHEMA_VERSION: u32 = 36;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -2043,6 +2043,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 35 {
+            apply_v36_push_message(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 34 {
             apply_v35_drop_agent_command(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2696,6 +2705,17 @@ mod imp {
         {
             convert_v34_agent_commands(transaction)?;
             transaction.execute_batch(crate::schema::MIGRATE_V34_TO_V35)?;
+        }
+        apply_v36_push_message(transaction)
+    }
+
+    /// v36：推送登记加「智能体消息」开关。已经有这一列的库跳过。
+    fn apply_v36_push_message(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_columns(transaction, "push_registration")?
+            .iter()
+            .any(|column| column == "notify_message")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V35_TO_V36)?;
         }
         Ok(())
     }
@@ -7939,9 +7959,42 @@ CREATE TABLE worktree_inherit_skip_pattern (
                 notify_failure: true,
                 notify_success: false,
                 payload_version: 1,
+                notify_message: true,
                 updated_at_ms: 5,
             }]
         );
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
+    /// v35 的登记迁移后默认推智能体消息：消息正文原样显示，旧版 App 也认。
+    #[test]
+    fn migrates_v35_adding_push_message() {
+        let dir = temp_dir("migrate-v35-push-message");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE push_registration DROP COLUMN notify_message;
+                 INSERT INTO paired_device(endpoint_id, name, paired_at_ms) VALUES ('aa', 'iPhone', 1);
+                 INSERT INTO push_registration(device_endpoint_id, handle, relay_url,
+                   notify_approval, notify_input, notify_failure, updated_at_ms,
+                   notify_success, payload_version)
+                 VALUES ('aa', 'h', 'https://push.example.test', 1, 1, 1, 5, 1, 2);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 35).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let registrations = store.list_push_registrations().unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert!(registrations[0].notify_message);
+        assert!(registrations[0].notify_success);
         drop(store);
         assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
     }
@@ -7959,6 +8012,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             notify_failure: true,
             notify_success: false,
             payload_version: 1,
+            notify_message: true,
             updated_at_ms: 10,
         };
         assert!(
@@ -7981,6 +8035,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             notify_input: true,
             notify_success: true,
             payload_version: 2,
+            notify_message: false,
             updated_at_ms: 20,
             ..registration.clone()
         };

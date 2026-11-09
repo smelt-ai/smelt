@@ -1,7 +1,8 @@
 //! Pi 对话互发消息：主 daemon 这一头（门卫 + 发件队列）。设计见 `docs/pi-session-messaging-design.html`。
 //!
-//! 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn` 由起会话时
-//! 绑上的应答函数直接回答。来源是绑定时记下的会话 id，请求体里的字段不算。
+//! 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn`（以及通知用户的
+//! `notify`，见 `crate::agent_notify`）由起会话时绑上的应答函数直接回答。来源是绑定时记下的
+//! 会话 id，请求体里的字段不算。
 //!
 //! 先收下，再处理：门卫只做同步检查，通过就把消息记进内存里的发件队列、回 `accepted`。
 //! 拉起对方、投递在后台：每个目标一条投递线程，按收下的先后经
@@ -417,6 +418,12 @@ pub(crate) fn bind_peer_handler(
             "session_spawn" => {
                 spawn(&slot, &session_id, &courier, body).unwrap_or_else(|error| error)
             }
+            "notify" => crate::agent_notify::from_session(
+                &session_id,
+                &slot.value,
+                &courier.subscribers,
+                body,
+            ),
             _ => rejected("invalid", format!("不认识的操作 {op}")),
         }
     })
@@ -548,7 +555,7 @@ fn not_found(id: &str) -> serde_json::Value {
 }
 
 /// 侧栏上的名字：工作区目录里的（含用户改过的），其次远程目录里的，再次会话自己的标题。
-fn title_of(id: &str, sess: &AcpSession) -> String {
+pub(crate) fn title_of(id: &str, sess: &AcpSession) -> String {
     if let Some(server) = SERVER.get() {
         let directory = server
             .workspace_directory

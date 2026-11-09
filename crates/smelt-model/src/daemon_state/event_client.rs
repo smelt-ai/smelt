@@ -544,6 +544,7 @@ impl DaemonStateEventClient {
                     decode_payload(payload, topic)?;
                 Ok(Some(DaemonStateEvent::TerminalNotification {
                     session_id: notification.session_id,
+                    title: notification.title,
                     message: notification.message,
                 }))
             }
@@ -1161,8 +1162,18 @@ mod tests {
                     serde_json::json!({ "session_id": "s1", "message": "构建完成" }),
                 ))
                 .unwrap(),
-            Some(DaemonStateEvent::TerminalNotification { session_id, message })
+            Some(DaemonStateEvent::TerminalNotification { session_id, title: None, message })
                 if session_id == "s1" && message == "构建完成"
+        ));
+        assert!(matches!(
+            desktop
+                .decode_message(event_message(
+                    CORE_TOPIC_TERMINAL_NOTIFICATION,
+                    serde_json::json!({ "session_id": "s1", "title": "巡检", "message": "磁盘告警" }),
+                ))
+                .unwrap(),
+            Some(DaemonStateEvent::TerminalNotification { title: Some(title), message, .. })
+                if title == "巡检" && message == "磁盘告警"
         ));
     }
 

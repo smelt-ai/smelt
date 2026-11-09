@@ -20,6 +20,7 @@ class Preferences {
     this.pushInput = true,
     this.pushFailure = true,
     this.pushSuccess = true,
+    this.pushMessage = true,
   });
 
   static const version = 1;
@@ -42,6 +43,9 @@ class Preferences {
   final bool pushFailure;
   final bool pushSuccess;
 
+  /// 智能体主动发的消息（`notify_user`）。
+  final bool pushMessage;
+
   Preferences copyWith({
     ThemeMode? themeMode,
     double? terminalFontSize,
@@ -51,6 +55,7 @@ class Preferences {
     bool? pushInput,
     bool? pushFailure,
     bool? pushSuccess,
+    bool? pushMessage,
   }) => Preferences(
     themeMode: themeMode ?? this.themeMode,
     terminalFontSize: terminalFontSize ?? this.terminalFontSize,
@@ -60,6 +65,7 @@ class Preferences {
     pushInput: pushInput ?? this.pushInput,
     pushFailure: pushFailure ?? this.pushFailure,
     pushSuccess: pushSuccess ?? this.pushSuccess,
+    pushMessage: pushMessage ?? this.pushMessage,
   );
 
   factory Preferences.fromJson(Map<String, dynamic> json) {
@@ -79,6 +85,7 @@ class Preferences {
       pushInput: json['pushInput'] != false,
       pushFailure: json['pushFailure'] != false,
       pushSuccess: json['pushSuccess'] != false,
+      pushMessage: json['pushMessage'] != false,
     );
   }
 
@@ -92,6 +99,7 @@ class Preferences {
     'pushInput': pushInput,
     'pushFailure': pushFailure,
     'pushSuccess': pushSuccess,
+    'pushMessage': pushMessage,
   };
 
   @override
@@ -104,7 +112,8 @@ class Preferences {
       other.pushApproval == pushApproval &&
       other.pushInput == pushInput &&
       other.pushFailure == pushFailure &&
-      other.pushSuccess == pushSuccess;
+      other.pushSuccess == pushSuccess &&
+      other.pushMessage == pushMessage;
 
   @override
   int get hashCode => Object.hash(
@@ -116,6 +125,7 @@ class Preferences {
     pushInput,
     pushFailure,
     pushSuccess,
+    pushMessage,
   );
 }
 

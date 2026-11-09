@@ -13,7 +13,9 @@ mod conversation;
 mod pi;
 
 use smelt_model::appearance_settings::SettingsPatch;
-use smelt_model::control_api::{QuotaGet, SettingsGet, SettingsUpdate};
+use smelt_model::control_api::{
+    NotifySend, NotifySendParams, QuotaGet, SettingsGet, SettingsUpdate,
+};
 use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, EmptyParams};
 use std::collections::BTreeMap;
 
@@ -29,7 +31,7 @@ where
     match args.get(1).map(String::as_str) {
         Some(
             "agent" | "conversation" | "automation" | "mcp" | "plugin" | "model" | "quota"
-            | "settings" | "help" | "-h" | "--help" | "--version" | "-V",
+            | "settings" | "notify" | "help" | "-h" | "--help" | "--version" | "-V",
         ) => Some(run(&args)),
         _ => None,
     }
@@ -54,6 +56,10 @@ fn run(args: &[String]) -> i32 {
         Some("model") => pi::run_model(rest),
         Some("quota") => respond(control::<QuotaGet>(EmptyParams::default())),
         Some("settings") => run_settings(rest),
+        Some("notify") => match parse_notify(rest) {
+            Ok(params) => respond(control::<NotifySend>(params)),
+            Err(message) => usage(&message),
+        },
         _ => 2,
     }
 }
@@ -106,6 +112,9 @@ smelt {version}
   smelt model list | default <provider>/<模型id> | thinking off|minimal|low|medium|high|xhigh
   smelt quota
 
+通知（桌面弹出，并推给在手机端打开了「智能体消息」的手机）：
+  smelt notify [--title <标题>] <内容>
+
 设置：
   smelt settings get
   smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
@@ -114,6 +123,32 @@ smelt {version}
 ",
         version = smelt_version::VERSION,
     );
+}
+
+/// `smelt notify [--title <标题>] <内容>`：内容是其余参数用空格连起来。
+fn parse_notify(args: &[String]) -> Result<NotifySendParams, String> {
+    let mut title = None;
+    let mut words = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--title" => {
+                index += 1;
+                title = Some(
+                    args.get(index)
+                        .ok_or("--title 后面要跟标题")?
+                        .to_string(),
+                );
+            }
+            word => words.push(word),
+        }
+        index += 1;
+    }
+    let message = words.join(" ");
+    if message.trim().is_empty() {
+        return Err("smelt notify [--title <标题>] <内容>".to_string());
+    }
+    Ok(NotifySendParams { title, message })
 }
 
 /// 一次 Control API 调用。smeltd 没在跑时给出能看懂的原因。
@@ -244,6 +279,22 @@ mod tests {
         ] {
             assert_eq!(maybe_run(["smelt", group, "nope"]), Some(2), "{group}");
         }
+    }
+
+    #[test]
+    fn notify_joins_words_and_takes_a_title() {
+        assert_eq!(
+            parse_notify(&args(&["--title", "巡检", "磁盘", "告警"])).unwrap(),
+            NotifySendParams {
+                title: Some("巡检".into()),
+                message: "磁盘 告警".into(),
+            }
+        );
+        assert_eq!(parse_notify(&args(&["好了"])).unwrap().title, None);
+        assert!(parse_notify(&args(&[])).is_err());
+        assert!(parse_notify(&args(&["--title", "只有标题"])).is_err());
+        assert!(parse_notify(&args(&["内容", "--title"])).is_err());
+        assert_eq!(maybe_run(["smelt", "notify"]), Some(2), "没内容不碰 smeltd");
     }
 
     #[test]
