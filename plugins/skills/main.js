@@ -1,5 +1,4 @@
-// 「技能」页：用 gpui-shell 原生绘制的技能管理，设计见同目录 DESIGN.md。init 里把自己
-// 登记成工作台的一页（`register_page`），入口在侧栏「智能体」那一组。
+// 「技能」面板：用 gpui-shell 原生绘制的技能管理，设计见同目录 DESIGN.md。
 //
 // 磁盘操作在脚本里完成（官方 `fs/promises` 加 smelt 的通用模块 `smelt-fs`）；
 // 界面是 GPUI 元素。磁盘操作都是异步的，在事件里 `cx.spawn` 等它们，结果缓存在
@@ -29,7 +28,7 @@ import {
 } from "gpui-component";
 import { homedir } from "os";
 import { realpath } from "smelt-fs";
-import { active_project, next_event, register_page } from "smelt-plugin-api";
+import { active_project, next_event } from "smelt-plugin-api";
 import {
   scan,
   repairBridges,
@@ -46,7 +45,6 @@ import { SPACE, MONO, TRASH, button, tag, hint, box, section, confirm, edited, p
 
 export default class Skills extends View {
   init(_props, cx) {
-    register_page({ id: "skills", title: "技能", icon: "sparkles", sidebar: true });
     this.state = { skills: [], broken: [], installed: [] };
     // 取真实路径：扫描结果里的目录都是解开软链后的，比较时两边要一致。
     this.home = realpath(homedir()) ?? homedir();

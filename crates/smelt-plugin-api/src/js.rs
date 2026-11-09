@@ -5,23 +5,20 @@
 //! [`JsPlugin::attach`] 交回插件视图。
 //!
 //! gpui-shell 的宿主不能回调脚本，宿主事件做成脚本 await 的 `next_event()`：每个插件
-//! 一条队列，从挂载完起开始记。插件视图释放时队列和它登记的页面一起撤掉，所以插件卸载、
-//! 重新加载不用宿主另外收拾。
+//! 一条队列，从挂载完起开始记。插件视图释放时队列一起撤掉，所以插件卸载、重新加载不用
+//! 宿主另外收拾。
+//!
+//! 插件摆在哪不由插件定，这里没有登记页面、面板位置的函数（见 `docs/app-plugins.md`）。
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
-use gpui::{
-    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, rgb,
-};
-use gpui_component::v_flex;
+use gpui::{App, Entity, Subscription};
 use gpui_shell::{HostArguments, HostError, HostModule, HostObject, HostValue, ScriptView};
-use smelt_ui::ui_theme;
 
-use crate::{HostEvent, Page, PageBuilder, PageHandle, PageSpec, PathRequest, RuntimeKey};
+use crate::{HostEvent, PathRequest, RuntimeKey};
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
@@ -29,20 +26,6 @@ pub const MODULE: &str = "smelt-plugin-api";
 const DECLARATIONS: &str = r#"
 /** 一台机器：本机是 null，远程机器是它的 runtime id。 */
 export type Machine = string | null;
-export interface PageOptions {
-  /** 路由里记的 id。"agents"、"automations"、"desktop"、"session" 是宿主的，不能用。 */
-  id: string;
-  title: string;
-  /** Lucide 图标名，如 "sparkles"；不给是 "puzzle"。名字不存在时 register_page 报错。 */
-  icon?: string;
-  /** 进侧栏「智能体」那一组。 */
-  sidebar?: boolean;
-}
-/**
- * 把这个插件登记成工作台的一页，通常在 View 的 init 里调。同 id 的页面被替换。
- * 登记了页面的插件画在舞台上，宿主给它页头（标题）和底色，不再占工具面板的 tab。
- */
-export function register_page(options: PageOptions): null;
 /** 工作台的当前项目，只算这台电脑上的；远程项目或没有项目时为 null。 */
 export function active_project(): string | null;
 export interface PathRequest {
@@ -72,24 +55,10 @@ pub struct JsPlugin(Rc<RefCell<PluginState>>);
 
 #[derive(Default)]
 struct PluginState {
-    /// 挂载成功后才有。
-    view: Option<WeakEntity<ScriptView>>,
-    /// 挂载完之前（init 里）登记的页面，挂载完再交给注册表。
-    pending: Vec<PageOptions>,
-    /// 登记了的页面和当时的建视图函数：撤之前比一下，已经被别人替换的不撤。
-    pages: Vec<(SharedString, PageBuilder)>,
     queue: VecDeque<HostEvent>,
     waiter: Option<oneshot::Sender<HostEvent>>,
     _events: Option<Subscription>,
     _release: Option<Subscription>,
-}
-
-#[derive(Clone)]
-struct PageOptions {
-    id: SharedString,
-    title: SharedString,
-    icon: SharedString,
-    sidebar: bool,
 }
 
 impl JsPlugin {
@@ -99,13 +68,9 @@ impl JsPlugin {
 
     /// 这个插件的 `smelt-plugin-api` 模块，装进它自己的 Policy。
     pub fn module(&self) -> HostModule {
-        let pages = self.clone();
         let events = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
-            .function("register_page", move |arguments| {
-                pages.register_page(page_options(arguments)?)
-            })
             .function("active_project", |_| {
                 let project = in_app("active_project", |cx| crate::host(cx).active_project(cx))?;
                 Ok(project
@@ -116,12 +81,12 @@ impl JsPlugin {
             .async_function("next_event", move |_| Ok(events.next_event()))
     }
 
-    /// 挂载成功后调：init 里登记的页面现在登记，开始记宿主事件，视图释放时撤掉这些。
+    /// 挂载成功后调：开始记宿主事件，视图释放时撤掉。
     pub fn attach(&self, view: &Entity<ScriptView>, cx: &mut App) {
         let state = Rc::downgrade(&self.0);
-        let release = cx.observe_release(view, move |_, cx| {
+        let release = cx.observe_release(view, move |_, _| {
             if let Some(state) = state.upgrade() {
-                JsPlugin(state).detach(cx);
+                JsPlugin(state).detach();
             }
         });
         let state = Rc::downgrade(&self.0);
@@ -131,72 +96,9 @@ impl JsPlugin {
                 JsPlugin(state).deliver(event);
             }
         });
-        let pending = {
-            let mut state = self.0.borrow_mut();
-            state.view = Some(view.downgrade());
-            state._release = Some(release);
-            state._events = Some(events);
-            std::mem::take(&mut state.pending)
-        };
-        for options in pending {
-            if let Err(error) = self.register(options, cx) {
-                eprintln!("[plugins] {error}");
-            }
-        }
-    }
-
-    /// 登记过页面：它画在舞台上，宿主不再把它放进别处。
-    pub fn is_page(&self) -> bool {
-        let state = self.0.borrow();
-        !state.pages.is_empty() || !state.pending.is_empty()
-    }
-
-    fn register_page(&self, options: PageOptions) -> Result<HostValue, HostError> {
-        // 名字写错图标就空着，在这里报出来，插件作者当场看得到。
-        let icon_found = in_app("register_page", |cx| {
-            matches!(cx.asset_source().load(&options.icon), Ok(Some(_)))
-        })?;
-        if !icon_found {
-            return Err(HostError::new(format!(
-                "register_page：没有这个图标「{}」，要用 Lucide 图标名，如 \"sparkles\"",
-                icon_name(&options.icon)
-            )));
-        }
-        if self.0.borrow().view.is_none() {
-            self.0.borrow_mut().pending.push(options);
-            return Ok(HostValue::Null);
-        }
-        in_app("register_page", |cx| self.register(options, cx))?.map_err(HostError::new)?;
-        Ok(HostValue::Null)
-    }
-
-    fn register(&self, options: PageOptions, cx: &mut App) -> Result<(), String> {
-        let Some(view) = self.0.borrow().view.clone() else {
-            return Err("插件还没挂载好".to_string());
-        };
-        let title = options.title.clone();
-        let build: PageBuilder = Rc::new(move |_window, cx| {
-            let page = ScriptPage {
-                title: title.clone(),
-                view: view.clone(),
-            };
-            Rc::new(cx.new(|_| page)) as Rc<dyn PageHandle>
-        });
-        crate::register_page(
-            PageSpec {
-                id: options.id.clone(),
-                title: options.title,
-                icon: options.icon,
-                sidebar: options.sidebar,
-                machine_menu: false,
-                build: build.clone(),
-            },
-            cx,
-        )?;
         let mut state = self.0.borrow_mut();
-        state.pages.retain(|(id, _)| *id != options.id);
-        state.pages.push((options.id, build));
-        Ok(())
+        state._release = Some(release);
+        state._events = Some(events);
     }
 
     fn next_event(&self) -> impl Future<Output = Result<HostValue, HostError>> + Send + use<> {
@@ -232,91 +134,18 @@ impl JsPlugin {
         }
     }
 
-    /// 视图释放了：扔掉队列和订阅，撤下还没被别人替换的页面。
-    fn detach(&self, cx: &mut App) {
-        let pages = {
-            let mut state = self.0.borrow_mut();
-            state.queue.clear();
-            state.waiter = None;
-            state._events = None;
-            std::mem::take(&mut state.pages)
-        };
-        for (id, build) in pages {
-            if crate::page(&id, cx).is_some_and(|spec| Rc::ptr_eq(&spec.build, &build)) {
-                crate::unregister_page(&id, cx);
-            }
-        }
+    /// 视图释放了：扔掉队列和订阅。
+    fn detach(&self) {
+        let mut state = self.0.borrow_mut();
+        state.queue.clear();
+        state.waiter = None;
+        state._events = None;
     }
 }
 
 fn in_app<R>(name: &str, f: impl FnOnce(&mut App) -> R) -> Result<R, HostError> {
     gpui_shell::with_current_app(f)
         .ok_or_else(|| HostError::new(format!("{name} 只能在视图的事件、任务或 init 里调用")))
-}
-
-// ---------------------------------------------------------------- 页面
-
-/// JS 页面：宿主画页头（和 Rust 页面同一个底板）和舞台底色，脚本视图画在下面。
-/// 脚本视图归加载它的宿主，这里只拿弱引用；它释放时这一页也随之撤下。
-struct ScriptPage {
-    title: SharedString,
-    view: WeakEntity<ScriptView>,
-}
-
-impl Render for ScriptPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = crate::host(cx).page_header(window, cx).child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(rgb(ui_theme::text_bright()))
-                .child(self.title.clone()),
-        );
-        v_flex()
-            .size_full()
-            .bg(rgb(ui_theme::bg_stage()))
-            .child(header)
-            .child(div().flex_1().min_h_0().children(self.view.upgrade()))
-    }
-}
-
-impl Page for ScriptPage {
-    // 打开参数还没映射给脚本：JS 页面眼下不进机器菜单，没人带参数打开它。
-    fn open(&mut self, _args: &serde_json::Value, _window: &mut Window, _cx: &mut Context<Self>) {}
-}
-
-/// Lucide 图标名在资源里的路径：`icons/<名字>.svg`。
-const ICON_PREFIX: &str = "icons/";
-const ICON_SUFFIX: &str = ".svg";
-
-fn icon_name(path: &str) -> &str {
-    path.strip_prefix(ICON_PREFIX)
-        .and_then(|name| name.strip_suffix(ICON_SUFFIX))
-        .unwrap_or(path)
-}
-
-fn page_options(arguments: &HostArguments) -> Result<PageOptions, HostError> {
-    let options = arguments.value(0)?;
-    let text = |name: &str| -> Result<SharedString, HostError> {
-        options
-            .get(name)
-            .and_then(HostValue::as_str)
-            .map(|text| SharedString::from(text.to_owned()))
-            .ok_or_else(|| HostError::new(format!("register_page：{name} 要是字符串")))
-    };
-    let icon = match options.get("icon").filter(|icon| !icon.is_null()) {
-        Some(_) => format!("{ICON_PREFIX}{}{ICON_SUFFIX}", text("icon")?),
-        None => format!("{ICON_PREFIX}puzzle{ICON_SUFFIX}"),
-    };
-    Ok(PageOptions {
-        id: text("id")?,
-        title: text("title")?,
-        icon: icon.into(),
-        sidebar: options
-            .get("sidebar")
-            .and_then(HostValue::as_bool)
-            .unwrap_or(false),
-    })
 }
 
 // ---------------------------------------------------------------- 选路径

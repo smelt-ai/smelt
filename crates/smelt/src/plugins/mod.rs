@@ -1,9 +1,7 @@
 //! smelt 的插件：gpui-shell 脚本应用。
 //!
 //! 插件目录里放 gpui-shell 的 manifest `gpui-shell.json` 和入口脚本，界面由 GPUI 原生
-//! 绘制，脚本跑在 UI 线程的 QuickJS 里。插件在 init 里调 `smelt-plugin-api` 的
-//! `register_page` 就是工作台的一页（见 `smelt_plugin_api::js`），否则挂成 Tool Panel
-//! 的一个 tab。
+//! 绘制，脚本跑在 UI 线程的 QuickJS 里。每个插件挂成 Tool Panel 的一个 tab。
 //!
 //! 插件当作可信代码，权限全部一样，和 smelt 自己一样不设限（见 `unrestricted`）。
 //! 每个插件一份自己的 Policy（应用名就是插件 id），里面装 smelt 的宿主模块：
@@ -86,17 +84,8 @@ impl Registry {
         u16::try_from(index).ok().map(PluginTabSlot)
     }
 
-    /// 占着 tab 的插件；登记成页面的不在这里。
     fn panel(&self, slot: PluginTabSlot) -> Option<&PluginPanel> {
-        self.panels
-            .iter()
-            .find(|panel| panel.slot == slot && !panel.page)
-    }
-
-    fn panel_by_id(&self, id: &str) -> Option<&PluginPanel> {
-        self.panels
-            .iter()
-            .find(|panel| panel.id == id && !panel.page)
+        self.panels.iter().find(|panel| panel.slot == slot)
     }
 }
 
@@ -109,8 +98,6 @@ struct PluginPanel {
     source: PluginSource,
     /// 加载失败也占一个 tab，把错误画出来：静默消失的插件最难排查。
     content: Result<Entity<ScriptView>, String>,
-    /// 登记成了工作台的一页，在舞台上画，不占 Tool Panel 的 tab。
-    page: bool,
 }
 
 /// 插件从哪个目录加载的。
@@ -205,7 +192,6 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     Ok(view) => plugin.attach(view, cx),
                     Err(error) => eprintln!("[plugins] {id} 加载失败：{error}"),
                 }
-                let page = content.is_ok() && plugin.is_page();
                 Some(PluginPanel {
                     slot,
                     title: manifest.name().to_string(),
@@ -214,7 +200,6 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     root,
                     source,
                     content,
-                    page,
                 })
             },
         )
@@ -413,20 +398,11 @@ fn with_registry<R>(read: impl FnOnce(&Registry) -> R) -> R {
     REGISTRY.with(|registry| read(&registry.borrow()))
 }
 
-/// 占 Tool Panel tab 的插件（登记成页面的不算），按加载顺序。
 pub(crate) fn slots() -> Vec<PluginTabSlot> {
-    with_registry(|registry| {
-        registry
-            .panels
-            .iter()
-            .filter(|panel| !panel.page)
-            .map(|panel| panel.slot)
-            .collect()
-    })
+    with_registry(|registry| registry.panels.iter().map(|panel| panel.slot).collect())
 }
 
-/// 槽位上的插件眼下挂着、占着 tab。插件被删掉（或改成了页面）以后，记着它的 tab
-/// 还在，只是这里为 false。
+/// 槽位上的插件眼下挂着。插件被删掉以后，记着它的 tab 还在，只是这里为 false。
 pub(crate) fn is_mounted(slot: PluginTabSlot) -> bool {
     with_registry(|registry| registry.panel(slot).is_some())
 }
@@ -446,9 +422,14 @@ pub(crate) fn key_for(slot: PluginTabSlot) -> Option<String> {
     with_registry(|registry| registry.ids.get(usize::from(slot.0)).cloned())
 }
 
-/// 只认眼下挂着、占着 tab 的插件。
 pub(crate) fn slot_for_key(key: &str) -> Option<PluginTabSlot> {
-    with_registry(|registry| registry.panel_by_id(key).map(|panel| panel.slot))
+    with_registry(|registry| {
+        registry
+            .panels
+            .iter()
+            .find(|panel| panel.id == key)
+            .map(|panel| panel.slot)
+    })
 }
 
 /// 已挂载的插件，按加载顺序。只读内存。
