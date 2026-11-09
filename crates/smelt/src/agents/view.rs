@@ -318,6 +318,7 @@ impl Workspace {
         let toggle_entity = entity.clone();
         let group_key = crate::session_list::SidebarItem::ConversationGroup.key();
         let reveal_target = self.sidebar_reveal.target();
+        let conv_scroll = self.conversation_scroll();
         // 分组行跟项目行同一个样子：图标、名字，收起时右边写数量和状态点。选中的对话被
         // 收在里面时，分组行代它亮起来。
         let header = ListRow::new("conversation-group")
@@ -330,7 +331,7 @@ impl Workspace {
                 row.child(crate::session_list::reveal_anchor(
                     self.sidebar_reveal.clone(),
                     group_key,
-                    self.sidebar_scroll.clone(),
+                    conv_scroll.clone(),
                     entity.clone(),
                 ))
             })
@@ -359,7 +360,9 @@ impl Workspace {
                                     Icon::new(IconName::ChevronRight)
                                         .size(px(12.))
                                         .text_color(rgb(crate::ui_theme::text_muted()))
-                                        .transform(Transformation::rotate(radians(deg.to_radians()))),
+                                        .transform(Transformation::rotate(radians(
+                                            deg.to_radians(),
+                                        ))),
                                 ),
                         )
                         .child(
@@ -492,7 +495,7 @@ impl Workspace {
                         row.child(crate::session_list::reveal_anchor(
                             self.sidebar_reveal.clone(),
                             ui_id,
-                            self.sidebar_scroll.clone(),
+                            conv_scroll.clone(),
                             entity.clone(),
                         ))
                     })

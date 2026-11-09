@@ -427,31 +427,59 @@ pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
 }
 
 impl Workspace {
+    /// 正在拖拽的行所在分段对应的滚动句柄：分段模式下分别定位到对话段或对应的机器段。
+    pub(crate) fn drag_scroll_handle(&self, cx: &App) -> Option<ScrollHandle> {
+        if !self.runtime_sections() {
+            return Some(self.sidebar_scroll.clone());
+        }
+        match &self.sidebar_drag {
+            Some(crate::SidebarDrag::Session(ui_id)) => {
+                let conv_order = self.sidebar_conversation_order(cx);
+                let is_conversation = self.sessions.iter().enumerate().any(|(ix, s)| {
+                    s.ui_id == *ui_id && s.active_acp().is_some() && conv_order.contains(&ix)
+                });
+                if is_conversation {
+                    Some(self.sidebar_conversations_scroll.clone())
+                } else if let Some(session) = self.sessions.iter().find(|s| s.ui_id == *ui_id) {
+                    let key = session.runtime(cx).key().clone();
+                    self.space(&key).map(|s| s.scroll.clone())
+                } else {
+                    Some(self.sidebar_scroll.clone())
+                }
+            }
+            Some(crate::SidebarDrag::Project(project_ref)) => {
+                self.space(&project_ref.runtime).map(|s| s.scroll.clone())
+            }
+            None => None,
+        }
+    }
+
     /// 拖着会话/项目在侧栏顶底边缘时，按指针位置自动滚列表。
     pub(crate) fn update_sidebar_drag_scroll(
         &mut self,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar_drag.is_none() {
+        let Some(scroll) = self.drag_scroll_handle(cx) else {
             self.sidebar_auto_scroll.stop();
             return;
-        }
-        let viewport = self.sidebar_scroll.bounds();
+        };
+        let viewport = scroll.bounds();
         if viewport.size.height <= px(0.) {
             self.sidebar_auto_scroll.stop();
             return;
         }
         let delta = sidebar_drag_scroll_delta(position, viewport);
-        self.sidebar_auto_scroll.set(delta, cx, |delta, ws, cx| {
-            let offset = ws.sidebar_scroll.offset();
-            let next_y =
-                apply_sidebar_scroll_delta(offset.y, delta, ws.sidebar_scroll.max_offset().y);
-            if next_y != offset.y {
-                ws.sidebar_scroll.set_offset(point(offset.x, next_y));
-                cx.notify();
-            }
-        });
+        let scroll = scroll.clone();
+        self.sidebar_auto_scroll
+            .set(delta, cx, move |delta, _ws, cx| {
+                let offset = scroll.offset();
+                let next_y = apply_sidebar_scroll_delta(offset.y, delta, scroll.max_offset().y);
+                if next_y != offset.y {
+                    scroll.set_offset(point(offset.x, next_y));
+                    cx.notify();
+                }
+            });
     }
 
     pub(crate) fn stop_sidebar_drag_scroll(&mut self) {

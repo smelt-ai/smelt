@@ -1,5 +1,6 @@
 //! 桌面客户端和运行时共用的底层工具。见 Cargo.toml 的说明。
 
+pub mod agent_image;
 pub mod app_log;
 pub mod block_on;
 pub mod daemon_image;
@@ -7,7 +8,6 @@ pub mod fd_limit;
 pub mod file_lock;
 #[cfg(windows)]
 pub mod named_pipe;
-pub mod agent_image;
 pub mod process;
 pub mod process_usage;
 pub mod process_wait;
@@ -48,13 +48,8 @@ pub fn hostname() -> Option<String> {
         return None;
     }
     let mut buf = vec![0u16; len as usize];
-    let ok = unsafe {
-        GetComputerNameExW(
-            ComputerNamePhysicalDnsHostname,
-            buf.as_mut_ptr(),
-            &mut len,
-        )
-    };
+    let ok =
+        unsafe { GetComputerNameExW(ComputerNamePhysicalDnsHostname, buf.as_mut_ptr(), &mut len) };
     if ok == 0 {
         return None;
     }
@@ -97,6 +92,8 @@ pub fn hardware_serial() -> Option<String> {
 
 #[cfg(windows)]
 pub fn hardware_serial() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
     fn is_valid_serial(s: &str) -> bool {
         let trimmed = s.trim();
         if trimmed.is_empty() || trimmed.len() < 3 {
@@ -114,35 +111,17 @@ pub fn hardware_serial() -> Option<String> {
         )
     }
 
-    // 优先尝试 wmic
-    if let Ok(output) = std::process::Command::new("wmic")
-        .args(["bios", "get", "serialnumber"])
-        .output()
-    {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty()
-                    && !trimmed.eq_ignore_ascii_case("serialnumber")
-                    && is_valid_serial(trimmed)
-                {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-    }
+    // Windows 11 24H2 已移除 wmic，直接通过 powershell 查询 Win32_BIOS；加 CREATE_NO_WINDOW 避免弹出控制台。
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-CimInstance Win32_BIOS).SerialNumber",
+    ]);
+    cmd.creation_flags(crate::process::CREATE_NO_WINDOW);
 
-    // 降级尝试 powershell
-    if let Ok(output) = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-CimInstance Win32_BIOS).SerialNumber",
-        ])
-        .output()
-    {
+    if let Ok(output) = cmd.output() {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             let trimmed = text.trim();
@@ -216,12 +195,15 @@ pub fn set_modified(path: &std::path::Path, when: std::time::SystemTime) -> std:
 }
 
 #[cfg(windows)]
-fn set_modified_windows(path: &std::path::Path, when: std::time::SystemTime) -> std::io::Result<()> {
+fn set_modified_windows(
+    path: &std::path::Path,
+    when: std::time::SystemTime,
+) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, SetFileTime, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, SetFileTime,
     };
 
     let ticks = when
@@ -235,7 +217,11 @@ fn set_modified_windows(path: &std::path::Path, when: std::time::SystemTime) -> 
         dwLowDateTime: ticks as u32,
         dwHighDateTime: (ticks >> 32) as u32,
     };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),

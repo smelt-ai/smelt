@@ -18,16 +18,16 @@ use crate::{ProjectRef, RuntimeKey};
 use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_base::{Easing, Transition};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
 use smelt_ui::IconAction as _;
 use smelt_ui::ListRow;
-use smelt_ui::truncated_line::truncated_line;
 use smelt_ui::motion::{ambient_animation, flip_slot};
+use smelt_ui::truncated_line::truncated_line;
 use std::time::Duration;
-use gpui_base::{Easing, Transition};
 
 // drag.rs / row.rs 作为本模块子模块沿用 `super::*` 读取 ACP 类型。
 use crate::settings::ConversationAgentKind;
@@ -469,9 +469,7 @@ pub(crate) enum SectionKind {
 
 /// 拖侧栏分段之间的分隔条：在两个展开段之间调节相对权重分配。
 #[derive(Clone)]
-#[allow(dead_code)]
 struct SectionSplitDrag {
-    split_index: usize,
     above_id: String,
     below_id: String,
     start_h_above: f32,
@@ -655,35 +653,17 @@ impl Workspace {
             })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn set_section_kind_folded(
-        &mut self,
-        kind: &SectionKind,
-        folded: bool,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        match kind {
-            SectionKind::Conversations => {
-                if self.sidebar_conversations_collapsed != folded {
-                    self.sidebar_conversations_collapsed = folded;
-                    cx.notify();
-                }
-            }
-            SectionKind::Runtime(key) => {
-                if let Some(space) = self.space_mut(key) {
-                    if space.folded != Some(folded) {
-                        space.folded = Some(folded);
-                        cx.notify();
-                    }
-                }
-            }
-            SectionKind::Archive => {
-                if self.archive_expanded == folded {
-                    self.archive_expanded = !folded;
-                    self.save_state(cx);
-                    cx.notify();
-                }
-            }
+    /// 是否存在远程机器分段（当有远程机器时，侧栏拆分为多段手风琴独立滚动）。
+    pub(crate) fn runtime_sections(&self) -> bool {
+        self.spaces.iter().any(|space| !space.runtime.is_local())
+    }
+
+    /// 对话所在分段的滚动句柄：分段模式下为独立对话滚动区，单段模式下回退为全局侧栏滚动。
+    pub(crate) fn conversation_scroll(&self) -> ScrollHandle {
+        if self.runtime_sections() {
+            self.sidebar_conversations_scroll.clone()
+        } else {
+            self.sidebar_scroll.clone()
         }
     }
 
@@ -839,7 +819,7 @@ impl Workspace {
             );
 
         // 挂了远程机器就按机器分段，机器名就是分段标题，不再叠一层「项目」。
-        let runtime_sections = self.spaces.iter().any(|space| !space.runtime.is_local());
+        let runtime_sections = self.runtime_sections();
         // 「筛选与分组」只有一个：没分段时在「项目」标题上，分段时挂在第一段机器标题上。
         let mut grouping_slot = Some(grouping_btn);
 
@@ -930,7 +910,10 @@ impl Workspace {
         // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
         // 「打开项目」就在上面。
         let first_header = std::cell::Cell::new(true);
-        let header_for = |runtime: crate::runtimes::Runtime, chevron_degrees: f32, grouping: Option<Div>, cx: &App| {
+        let header_for = |runtime: crate::runtimes::Runtime,
+                          chevron_degrees: f32,
+                          grouping: Option<Div>,
+                          cx: &App| {
             let separated = !first_header.replace(false);
             let key = runtime.key().clone();
             let item_key = SidebarItem::Runtime(key.clone()).key();
@@ -939,18 +922,16 @@ impl Workspace {
                 extras.push(focus_ring().into_any_element());
             }
             if reveal_target == Some(item_key) {
-                let scroll = self
-                    .space(&key)
-                    .map(|s| s.scroll.clone())
-                    .unwrap_or_else(|| self.sidebar_scroll.clone());
+                let scroll = if runtime_sections {
+                    self.space(&key)
+                        .map(|s| s.scroll.clone())
+                        .unwrap_or_else(|| self.sidebar_scroll.clone())
+                } else {
+                    self.sidebar_scroll.clone()
+                };
                 extras.push(
-                    reveal_anchor(
-                        self.sidebar_reveal.clone(),
-                        item_key,
-                        scroll,
-                        this.clone(),
-                    )
-                    .into_any_element(),
+                    reveal_anchor(self.sidebar_reveal.clone(), item_key, scroll, this.clone())
+                        .into_any_element(),
                 );
             }
             div()
@@ -990,7 +971,11 @@ impl Workspace {
             let Some(space) = self.space(&group.runtime) else {
                 continue;
             };
-            let runtime_scroll = space.scroll.clone();
+            let runtime_scroll = if runtime_sections {
+                space.scroll.clone()
+            } else {
+                self.sidebar_scroll.clone()
+            };
             if !runtime_sections
                 && headers_left
                     .iter()
@@ -1448,11 +1433,14 @@ impl Workspace {
             let is_fully_collapsed = collapsed && proj_progress <= 0.001;
             if is_fully_collapsed {
                 if grouping != SidebarGrouping::None {
-                    let entry = flip_slot(project_flip_id(&project), reorder_generation, group_rows)
-                        .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
-                        .into_any_element();
+                    let entry =
+                        flip_slot(project_flip_id(&project), reorder_generation, group_rows)
+                            .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
+                            .into_any_element();
                     if runtime_sections {
-                        *row_counts_by_runtime.entry(group.runtime.clone()).or_default() += 1;
+                        *row_counts_by_runtime
+                            .entry(group.runtime.clone())
+                            .or_default() += 1;
                         groups_by_runtime
                             .entry(group.runtime.clone())
                             .or_default()
@@ -1470,7 +1458,9 @@ impl Workspace {
                     .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
                     .into_any_element();
                 if runtime_sections {
-                    *row_counts_by_runtime.entry(group.runtime.clone()).or_default() += 1;
+                    *row_counts_by_runtime
+                        .entry(group.runtime.clone())
+                        .or_default() += 1;
                     groups_by_runtime
                         .entry(group.runtime.clone())
                         .or_default()
@@ -2206,8 +2196,9 @@ impl Workspace {
             .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
             .into_any_element();
             if runtime_sections {
-                *row_counts_by_runtime.entry(group.runtime.clone()).or_default() +=
-                    1 + (ixs.len() as f32 * proj_progress).ceil() as usize;
+                *row_counts_by_runtime
+                    .entry(group.runtime.clone())
+                    .or_default() += 1 + (ixs.len() as f32 * proj_progress).ceil() as usize;
                 groups_by_runtime
                     .entry(group.runtime.clone())
                     .or_default()
@@ -2253,42 +2244,21 @@ impl Workspace {
         }
 
         let machine_sections_view = if runtime_sections {
-            #[allow(dead_code)]
             struct UnifiedSection {
                 id: String,
                 kind: SectionKind,
-                is_folded: bool,
                 progress: f32,
                 is_compact_empty: bool,
                 header: AnyElement,
                 body: AnyElement,
                 scroll: ScrollHandle,
-                last_body_h: f32,
-                natural_h: f32,
             }
 
             let mut sections: Vec<UnifiedSection> = Vec::new();
-
-            // 预估正文行高/高度，用于折叠动画时平滑收缩
-            let calc_body_h = |rows: usize, scroll: &ScrollHandle| -> f32 {
-                let bounds_h = f32::from(scroll.bounds().size.height);
-                if bounds_h > 0.0 {
-                    return bounds_h.max(SECTION_MIN_BODY);
-                }
-                ((rows as f32 * 33.0 + 10.0).min(260.0)).max(SECTION_MIN_BODY)
-            };
-
-            let calc_natural_h = |rows: usize| -> f32 {
-                (rows as f32 * 33.0 + 8.0).max(SECTION_MIN_BODY)
-            };
-
             let trans_duration = Duration::from_millis(180);
 
             // 1. 对话栏目（如果有会话）
             let conv_folded = self.sidebar_conversations_collapsed;
-            let conv_count = self.sidebar_conversation_order(cx).len();
-            let conv_body_h = calc_body_h(conv_count, &self.sidebar_conversations_scroll);
-            let conv_natural_h = calc_natural_h(conv_count);
             let conv_policy = Transition::new(trans_duration).easing(Easing::EaseOut);
             let conv_progress: f32 = gpui_base::transition(
                 ElementId::from("sidebar-section-trans-conversations"),
@@ -2309,29 +2279,27 @@ impl Workspace {
                     sections.push(UnifiedSection {
                         id: "conversations".to_string(),
                         kind: SectionKind::Conversations,
-                        is_folded: conv_folded,
                         progress: conv_progress,
                         is_compact_empty: false,
                         header,
                         body,
                         scroll: self.sidebar_conversations_scroll.clone(),
-                        last_body_h: conv_body_h,
-                        natural_h: conv_natural_h,
                     });
                 }
             }
 
             // 2. 各机器栏目
             for key in self.space_keys() {
-                let Some(space) = self.space(&key) else { continue };
+                let Some(space) = self.space(&key) else {
+                    continue;
+                };
                 let runtime = space.runtime.clone();
                 let is_folded = self.runtime_folded(&key);
-                let total_rows = row_counts_by_runtime.get(&key).copied().unwrap_or(1);
-                let runtime_body_h = calc_body_h(total_rows, &space.scroll);
-                let runtime_natural_h = calc_natural_h(total_rows);
                 let trans_policy = Transition::new(trans_duration).easing(Easing::EaseOut);
                 let progress: f32 = gpui_base::transition(
-                    ElementId::from(SharedString::from(format!("sidebar-section-trans-runtime-{key:?}"))),
+                    ElementId::from(SharedString::from(format!(
+                        "sidebar-section-trans-runtime-{key:?}"
+                    ))),
                     if is_folded { 0.0f32 } else { 1.0f32 },
                     trans_policy,
                     window,
@@ -2381,14 +2349,11 @@ impl Workspace {
                 sections.push(UnifiedSection {
                     id: format!("runtime-{key:?}"),
                     kind: SectionKind::Runtime(key.clone()),
-                    is_folded,
                     progress,
                     is_compact_empty,
                     header: machine_header.into_any_element(),
                     body,
                     scroll: space.scroll.clone(),
-                    last_body_h: runtime_body_h,
-                    natural_h: runtime_natural_h,
                 });
             }
 
@@ -2403,56 +2368,40 @@ impl Workspace {
                 cx,
             );
 
-            if let Some((header, body, count)) = self.render_archive_parts(
-                this.clone(),
-                archive_progress * 90.0,
-                cx,
-            ) {
+            if let Some((header, body, _count)) =
+                self.render_archive_parts(this.clone(), archive_progress * 90.0, cx)
+            {
                 if let Some(body) = body {
-                    let archive_body_h = calc_body_h(count, &self.sidebar_archive_scroll);
-                    let archive_natural_h = calc_natural_h(count);
                     sections.push(UnifiedSection {
                         id: "archive".to_string(),
                         kind: SectionKind::Archive,
-                        is_folded: archive_folded,
                         progress: archive_progress,
                         is_compact_empty: false,
                         header,
                         body,
                         scroll: self.sidebar_archive_scroll.clone(),
-                        last_body_h: archive_body_h,
-                        natural_h: archive_natural_h,
                     });
                 }
             }
 
-            #[allow(dead_code)]
             struct SectionMeta {
                 id: String,
                 kind: SectionKind,
-                is_folded: bool,
-                is_compact_empty: bool,
-                progress: f32,
                 scroll: ScrollHandle,
-                last_body_h: f32,
             }
             let metas: Vec<SectionMeta> = sections
                 .iter()
                 .map(|s| SectionMeta {
                     id: s.id.clone(),
                     kind: s.kind.clone(),
-                    is_folded: s.is_folded,
-                    is_compact_empty: s.is_compact_empty,
-                    progress: s.progress,
                     scroll: s.scroll.clone(),
-                    last_body_h: s.last_body_h,
                 })
                 .collect();
 
             let n = sections.len();
-            let is_animating = sections.iter().any(|s| {
-                s.progress > 0.001 && s.progress < 0.999
-            });
+            let is_animating = sections
+                .iter()
+                .any(|s| s.progress > 0.001 && s.progress < 0.999);
 
             // 基础权重字典（用户可拖动分割条调整相对比例，默认本机 1.0，其余 0.5）
             let get_base_weight = |id: &str, kind: &SectionKind| -> f32 {
@@ -2479,35 +2428,42 @@ impl Workspace {
                         let drag = ev.drag(cx).clone();
                         let y = f32::from(ev.event.position.y);
                         this.update(cx, |ws, cx| {
-                            let (y0, a0, b0, w_total) = *ws
-                                .sidebar_split_drag
-                                .get_or_insert_with(|| (y, drag.start_h_above, drag.start_h_below, drag.w_total));
+                            let (y0, a0, b0, w_total) =
+                                *ws.sidebar_split_drag.get_or_insert_with(|| {
+                                    (y, drag.start_h_above, drag.start_h_below, drag.w_total)
+                                });
 
                             let delta = y - y0;
                             let sum_h = a0 + b0;
                             if sum_h <= SECTION_MIN_BODY * 1.5 {
                                 return;
                             }
-                            let new_a = (a0 + delta).clamp(SECTION_MIN_BODY, sum_h - SECTION_MIN_BODY);
+                            let new_a =
+                                (a0 + delta).clamp(SECTION_MIN_BODY, sum_h - SECTION_MIN_BODY);
                             let new_b = (sum_h - new_a).max(SECTION_MIN_BODY);
                             let ratio_a = new_a / (new_a + new_b);
                             let new_w_a = (w_total * ratio_a).max(0.1);
                             let new_w_b = (w_total * (1.0 - ratio_a)).max(0.1);
-                            ws.sidebar_section_weights.borrow_mut().insert(drag.above_id.clone(), new_w_a);
-                            ws.sidebar_section_weights.borrow_mut().insert(drag.below_id.clone(), new_w_b);
+                            ws.sidebar_section_weights
+                                .borrow_mut()
+                                .insert(drag.above_id.clone(), new_w_a);
+                            ws.sidebar_section_weights
+                                .borrow_mut()
+                                .insert(drag.below_id.clone(), new_w_b);
                             cx.notify();
                         });
                     }
                 });
 
             let make_sash = |ix: usize, above_idx: usize, below_idx: usize| -> AnyElement {
-                let h_a = f32::from(metas[above_idx].scroll.bounds().size.height).max(SECTION_MIN_BODY);
-                let h_b = f32::from(metas[below_idx].scroll.bounds().size.height).max(SECTION_MIN_BODY);
+                let h_a =
+                    f32::from(metas[above_idx].scroll.bounds().size.height).max(SECTION_MIN_BODY);
+                let h_b =
+                    f32::from(metas[below_idx].scroll.bounds().size.height).max(SECTION_MIN_BODY);
                 let w_a = get_base_weight(&metas[above_idx].id, &metas[above_idx].kind);
                 let w_b = get_base_weight(&metas[below_idx].id, &metas[below_idx].kind);
 
                 let payload = SectionSplitDrag {
-                    split_index: ix,
                     above_id: metas[above_idx].id.clone(),
                     below_id: metas[below_idx].id.clone(),
                     start_h_above: h_a,
@@ -2592,7 +2548,16 @@ impl Workspace {
             let mut prev_expanded_idx: Option<usize> = None;
 
             for (ix, section) in sections.into_iter().enumerate() {
-                let UnifiedSection { id, kind, header, body, scroll, progress, is_compact_empty, .. } = section;
+                let UnifiedSection {
+                    id,
+                    kind,
+                    header,
+                    body,
+                    scroll,
+                    progress,
+                    is_compact_empty,
+                    ..
+                } = section;
                 let progress = progress.clamp(0.0, 1.0);
 
                 let is_expanded = metas[ix].progress > 0.99 && !metas[ix].is_compact_empty;
@@ -2612,7 +2577,10 @@ impl Workspace {
                     // 无项目紧凑占位行（如离线机器显示「暂无项目」）：固定 28px 高度平滑展开/折叠
                     let cur_h = (28.0 * progress).max(0.0);
                     let mut body_elem = div()
-                        .id(ElementId::from(SharedString::from(format!("section-body-{}", id))))
+                        .id(ElementId::from(SharedString::from(format!(
+                            "section-body-{}",
+                            id
+                        ))))
                         .relative()
                         .flex_none()
                         .h(px(cur_h))
@@ -2638,7 +2606,10 @@ impl Workspace {
                     };
 
                     let body_elem = div()
-                        .id(ElementId::from(SharedString::from(format!("section-body-{}", id))))
+                        .id(ElementId::from(SharedString::from(format!(
+                            "section-body-{}",
+                            id
+                        ))))
                         .relative()
                         .flex_grow(flex_w)
                         .flex_shrink_1()
@@ -2648,13 +2619,17 @@ impl Workspace {
                         .opacity(progress)
                         .child(
                             div()
-                                .id(ElementId::from(SharedString::from(format!("section-scroll-{}", id))))
+                                .id(ElementId::from(SharedString::from(format!(
+                                    "section-scroll-{}",
+                                    id
+                                ))))
                                 .size_full()
                                 .overflow_y_scroll()
                                 .track_scroll(&scroll)
                                 .lock_scroll_axis()
                                 .child(body),
-                        );
+                        )
+                        .vertical_scrollbar(&scroll);
                     container = container.child(body_elem);
                 }
             }
