@@ -319,28 +319,7 @@ impl DaemonStateEventClient {
     /// 身份总是桌面第一方：本机连接按进程身份核验；已配对的远程设备（含手机）运行时
     /// 不看这个字段，一律按桌面第一方处理。手机和桌面的差别只在订阅形状。
     pub fn new(shape: SubscriptionShape) -> Self {
-        let subscription_id =
-            SubscriptionId::new(format!("desktop-{}", uuid::Uuid::new_v4().simple()))
-                .expect("generated subscription id is valid");
-        let handshake = EventSubscribeRequest {
-            auth: EventClientAuth::FirstParty {
-                kind: FirstPartyClientKind::Desktop,
-            },
-            request: SubscribeRequest {
-                protocol: ProtocolRange {
-                    min: MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION,
-                    max: EVENT_BUS_PROTOCOL_VERSION,
-                },
-                subscription: SubscriptionDeclaration {
-                    id: subscription_id,
-                    topics: shape
-                        .topics()
-                        .into_iter()
-                        .map(|topic| Topic::new(topic).expect("core topic is valid"))
-                        .collect(),
-                },
-            },
-        };
+        let handshake = desktop_handshake(shape.topics());
         let mut pending = PendingSnapshots::default();
         pending.begin();
         Self {
@@ -358,17 +337,7 @@ impl DaemonStateEventClient {
     }
 
     pub fn request_line(&self) -> Result<String, DaemonEventClientError> {
-        let value = serde_json::json!({
-            "op": DaemonOperation::EventSubscribe,
-            "auth": &self.handshake.auth,
-            "request": &self.handshake.request,
-        });
-        serde_json::to_string(&value)
-            .map(|mut line| {
-                line.push('\n');
-                line
-            })
-            .map_err(|error| DaemonEventClientError::Protocol(error.to_string()))
+        request_line(&self.handshake)
     }
 
     pub fn decode_line(
@@ -607,6 +576,47 @@ impl DaemonStateEventClient {
             _ => Ok(None),
         }
     }
+}
+
+/// 桌面第一方身份订这些话题的握手，每次一个新的订阅 id。
+pub(super) fn desktop_handshake(topics: Vec<&str>) -> EventSubscribeRequest {
+    let subscription_id = SubscriptionId::new(format!("desktop-{}", uuid::Uuid::new_v4().simple()))
+        .expect("generated subscription id is valid");
+    EventSubscribeRequest {
+        auth: EventClientAuth::FirstParty {
+            kind: FirstPartyClientKind::Desktop,
+        },
+        request: SubscribeRequest {
+            protocol: ProtocolRange {
+                min: MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION,
+                max: EVENT_BUS_PROTOCOL_VERSION,
+            },
+            subscription: SubscriptionDeclaration {
+                id: subscription_id,
+                topics: topics
+                    .into_iter()
+                    .map(|topic| Topic::new(topic).expect("core topic is valid"))
+                    .collect(),
+            },
+        },
+    }
+}
+
+/// 写进连接的那一行请求。
+pub(super) fn request_line(
+    handshake: &EventSubscribeRequest,
+) -> Result<String, DaemonEventClientError> {
+    let value = serde_json::json!({
+        "op": DaemonOperation::EventSubscribe,
+        "auth": &handshake.auth,
+        "request": &handshake.request,
+    });
+    serde_json::to_string(&value)
+        .map(|mut line| {
+            line.push('\n');
+            line
+        })
+        .map_err(|error| DaemonEventClientError::Protocol(error.to_string()))
 }
 
 fn replacement_projection_topic(topic: &str) -> bool {

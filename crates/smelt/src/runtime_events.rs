@@ -23,6 +23,10 @@
 //!
 //! 别处要读运行时的（工作区目录、配置、额度、终端重连），用 [`wait_online`] 等这里探到
 //! 在线再读，不各自拨号重试。
+//!
+//! 不进核心订阅的话题（[`SEPARATE_TOPICS`]，见 `smelt_event_protocol` 模块文档）每一轮
+//! 在核心订阅之前单独订一条，核心订阅断了就关掉它，下一轮重开。运行时不认识这些话题就拒掉
+//! 那一条：记一笔日志，这一轮不再订，核心订阅照常。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,11 +37,30 @@ use gpui::{App, AsyncApp, Global, Subscription};
 
 use crate::runtimes::{IncompatibleFix, Runtime, RuntimeHub, RuntimeKey, RuntimeStatus};
 use crate::terminal::DaemonStateEvent;
+use smelt_client::daemon_state::{TopicMessage, TopicSubscription, TopicSubscriptionCloser};
 
 pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
+/// 单独订阅收到的：哪台运行时的。
+pub(crate) type RuntimeTopicEvent = (RuntimeKey, TopicMessage);
+
+/// 单独订的话题。
+const SEPARATE_TOPICS: &[&str] = &[smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED];
+
+/// 事件的接收端：核心订阅的，和单独订阅的。
+pub(crate) struct RuntimeEventReceivers {
+    pub(crate) states: smol::channel::Receiver<RuntimeEvent>,
+    pub(crate) topics: smol::channel::Receiver<RuntimeTopicEvent>,
+}
+
+/// 两条订阅的发送端，每条订阅线程一份。
+#[derive(Clone)]
+pub(crate) struct RuntimeEventSenders {
+    pub(crate) states: smol::channel::Sender<RuntimeEvent>,
+    pub(crate) topics: smol::channel::Sender<RuntimeTopicEvent>,
+}
 
 struct RuntimeSubscriptions {
-    sender: smol::channel::Sender<RuntimeEvent>,
+    sender: RuntimeEventSenders,
     /// 订阅线程把远程运行时的连通性报给主线程：哪个运行时、现在怎样。
     status: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     /// 本机那条。
@@ -220,8 +243,10 @@ fn online_or_removed(key: &RuntimeKey, cx: &App) -> Option<bool> {
 impl Global for RuntimeSubscriptions {}
 
 /// 起本机和已登记远程运行时的订阅，返回事件的接收端。要在 [`RuntimeHub`] 装好之后调。
-pub(crate) fn start(cx: &mut App) -> smol::channel::Receiver<RuntimeEvent> {
-    let (sender, receiver) = smol::channel::unbounded();
+pub(crate) fn start(cx: &mut App) -> RuntimeEventReceivers {
+    let (states, states_rx) = smol::channel::unbounded();
+    let (topics, topics_rx) = smol::channel::unbounded();
+    let sender = RuntimeEventSenders { states, topics };
     let (status, status_rx) = smol::channel::unbounded::<(RuntimeKey, RuntimeStatus)>();
     cx.spawn(async move |cx| {
         while let Ok((key, status)) = status_rx.recv().await {
@@ -250,12 +275,61 @@ pub(crate) fn start(cx: &mut App) -> smol::channel::Receiver<RuntimeEvent> {
     sync_remote_subscriptions(cx);
     let watch = cx.observe_global::<RuntimeHub>(sync_remote_subscriptions);
     cx.global_mut::<RuntimeSubscriptions>()._hub_watch = Some(watch);
-    receiver
+    RuntimeEventReceivers {
+        states: states_rx,
+        topics: topics_rx,
+    }
+}
+
+/// 跟着一轮核心订阅的单独订阅：读在自己的线程里，[`Self::close`] 关掉连接并等它退出。
+struct SeparateSubscription {
+    closer: TopicSubscriptionCloser,
+    reader: std::thread::JoinHandle<()>,
+}
+
+impl SeparateSubscription {
+    /// 连不上、起不了线程就不订，记日志；下一轮核心订阅再试。
+    fn open(runtime: &Runtime, sender: smol::channel::Sender<RuntimeTopicEvent>) -> Option<Self> {
+        let key = runtime.key().clone();
+        let opened = TopicSubscription::open(runtime.client(), SEPARATE_TOPICS.to_vec())
+            .and_then(|subscription| Ok((subscription.closer()?, subscription)));
+        let (closer, subscription) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("[runtime-events] {key:?} 单独订阅连不上：{error}");
+                return None;
+            }
+        };
+        let thread_key = key.clone();
+        let reader = std::thread::Builder::new()
+            .name(format!("smelt-topics-{key:?}"))
+            .spawn(move || {
+                let result = subscription
+                    .run(|message| sender.try_send((thread_key.clone(), message)).is_ok());
+                // 被拒多半是运行时比这些话题旧：这一轮不再订，等下一轮核心订阅。
+                if let Err(error) = result {
+                    eprintln!("[runtime-events] {thread_key:?} 单独订阅停了：{error}");
+                }
+            });
+        match reader {
+            Ok(reader) => Some(Self { closer, reader }),
+            Err(error) => {
+                closer.close();
+                eprintln!("[runtime-events] {key:?} 起单独订阅线程失败：{error}");
+                None
+            }
+        }
+    }
+
+    fn close(self) {
+        self.closer.close();
+        let _ = self.reader.join();
+    }
 }
 
 pub(crate) fn spawn_subscription(
     runtime: Runtime,
-    sender: smol::channel::Sender<RuntimeEvent>,
+    sender: RuntimeEventSenders,
     status_tx: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
 ) -> SubscriptionHandle {
     let key = runtime.key().clone();
@@ -330,13 +404,19 @@ pub(crate) fn spawn_subscription(
                     }
                     _ => {
                         incompatible_attempt = 0;
+                        // 先订上单独的这条：核心订阅的快照到时，它已经在收了，读的一方在快照时
+                        // 重读一遍就不会漏掉中间的变化。
+                        let separate = SeparateSubscription::open(&runtime, sender.topics.clone());
                         crate::terminal::subscribe_daemon_states_blocking(
                             runtime.client(),
                             |event| {
                                 !stop.load(Ordering::Acquire)
-                                    && sender.try_send((key.clone(), event)).is_ok()
+                                    && sender.states.try_send((key.clone(), event)).is_ok()
                             },
                         );
+                        if let Some(separate) = separate {
+                            separate.close();
+                        }
                         if stop.load(Ordering::Acquire) {
                             return;
                         }
@@ -346,7 +426,9 @@ pub(crate) fn spawn_subscription(
                             key.clone(),
                             RuntimeStatus::Offline("连接断开".to_string()),
                         ));
-                        let _ = sender.try_send((key.clone(), DaemonStateEvent::Disconnected));
+                        let _ = sender
+                            .states
+                            .try_send((key.clone(), DaemonStateEvent::Disconnected));
                         // 短暂可用后断开（daemon 升级）从首档开始；连续失败则指数退避并封顶，
                         // 避免运行时没起来时固定节拍反复去连。
                         if connected_at.elapsed() >= Duration::from_secs(5) {

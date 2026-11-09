@@ -408,6 +408,24 @@ impl DaemonEventHub {
         Ok(())
     }
 
+    /// 经运行时改了 Pi 的配置。没人订阅就不发。
+    pub(crate) fn publish_pi_config_changed(&self) -> Result<(), EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_PI_CONFIG_CHANGED)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        let payload = smelt_event_protocol::PiConfigChanged {};
+        self.publish_core(
+            smelt_event_protocol::CORE_TOPIC_PI_CONFIG_CHANGED,
+            serde_json::to_value(payload).map_err(|error| {
+                EventBusError::new(format!("serialize pi config change: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(())
+    }
+
     /// 终端里的程序发了一条 OSC 通知，或智能体主动发了一条（带标题）。没人订阅就不发：
     /// 通知是一次性的，不补发。有人订阅、发出去了返回 true。
     pub(crate) fn publish_terminal_notification(

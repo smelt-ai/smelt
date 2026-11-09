@@ -13,7 +13,9 @@
 //! - **读得了就不抬最低版本**：[`MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION`] 不跟着当前版本
 //!   走，新客户端读得了的旧运行时照常连，个别功能不对等它升级。读不了（形状变了、没法宽容
 //!   读取）才抬，旧运行时判为过旧、请它升级。不为旧运行时写专门的兼容分支。
-//! - **加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会反复重连。
+//! - **核心订阅加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会
+//!   反复重连。不升版本的新话题只能放进单独的一条订阅（见 [`PiConfigChanged`]）：旧运行时拒掉
+//!   的只是那一条，客户端不重试，那项功能在这台机器上不可用。
 //! - **其余枚举加值也要升**：它们解不出会让整条消息失败，比如相位、自动化状态。相位还决定客户端
 //!   怎么判断会话在不在忙，没有安全的兜底含义。
 //! - **请求不宽容**：订阅请求和 `ConversationInput` 保持严格。旧运行时要是忽略新字段，用户的
@@ -74,6 +76,9 @@ pub const CORE_TOPIC_PROJECT_CHANGED: &str = "project.changed";
 /// 智能体的记忆目录里有文件变了。只在客户端用 `agent.memory.watch` 关注过的智能体上发；
 /// 客户端据此重取记忆列表。
 pub const CORE_TOPIC_AGENT_MEMORY_CHANGED: &str = "agent_memory.changed";
+/// 某台机器上 Pi 的配置变了（模型、凭据、MCP、插件），载荷 [`PiConfigChanged`]。不进
+/// 核心订阅，见模块文档。
+pub const CORE_TOPIC_PI_CONFIG_CHANGED: &str = "pi_config.changed";
 /// CLI / Control API 要改外观。外观归客户端，运行时只校验后转给在线的桌面端。
 pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
 /// 终端里的程序用 OSC 9 / 99 / 777 发了一条通知。运行时在 PTY 字节流上扫一次，
@@ -488,6 +493,15 @@ pub struct AgentMemoryChanged {
     pub agent_id: Option<String>,
 }
 
+/// 经运行时改了 Pi 的配置：谁改的都发（桌面、手机、命令行），读的一方据此重取
+/// `pi.config.get`，不靠改的那一方去通知别人。绕过运行时的修改（手改配置文件、直接用 `pi`
+/// 命令行）不在内。没有字段：读的一方重取自己关心的那部分。
+///
+/// 这个话题加在事件协议 v7 之后、没有升版本，所以只放在单独的一条订阅里，v7 的运行时会拒掉
+/// 那一条。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PiConfigChanged {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalNotification {
     pub session_id: String,
@@ -597,6 +611,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_CAPABILITY_WORKSPACE_READ,
             None,
             4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_PI_CONFIG_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            1024,
         )?,
         // 正文最多 4096 字节（扫描器上限），JSON 转义后可能翻倍。
         descriptor(
@@ -897,6 +917,7 @@ mod tests {
             (CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, None, 1),
             (CORE_TOPIC_PROJECT_CHANGED, None, 1),
             (CORE_TOPIC_AGENT_MEMORY_CHANGED, None, 1),
+            (CORE_TOPIC_PI_CONFIG_CHANGED, None, 1),
             (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
             (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
         ];

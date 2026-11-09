@@ -263,7 +263,7 @@ impl Workspace {
                 view.device_code = None;
                 view.outcome = Some(Ok(()));
                 let provider_id = view.provider_id.clone();
-                self.reload_pi_model_settings(cx);
+                self.refresh_pi_library(cx);
                 self.refresh_pi_auth_providers(cx);
                 self.load_pi_models_for(provider_id, cx);
             }
@@ -442,7 +442,7 @@ impl Workspace {
             move |this, result, cx| match result {
                 Ok(config) => {
                     this.pi_auth_model_picker = None;
-                    this.adopt_pi_config(config, true, cx);
+                    this.adopt_pi_config(config, cx);
                     crate::status_item::notify_success(format!("已设为默认模型：{label}"));
                 }
                 Err(error) => {
@@ -468,7 +468,7 @@ impl Workspace {
                 if let Err(error) = outcome {
                     this.pi_auth_error = Some(error);
                 } else {
-                    this.reload_pi_model_settings(cx);
+                    this.refresh_pi_library(cx);
                     // 凭据没了，它报过的模型也就不能选了。
                     if this
                         .pi_auth_model_picker

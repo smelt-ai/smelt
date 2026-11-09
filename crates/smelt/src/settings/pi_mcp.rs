@@ -14,7 +14,6 @@ impl Workspace {
         self.pi_mcp_error = None;
         self.run_pi_mutation::<PiMcpAddPreset>(
             McpPresetParams { id: id.to_string() },
-            false,
             cx,
             |this, error, _| this.pi_mcp_error = Some(error),
         );
@@ -29,7 +28,6 @@ impl Workspace {
         self.pi_mcp_error = None;
         self.run_pi_mutation::<PiMcpSetEnabled>(
             McpEnabledParams { name, enabled },
-            false,
             cx,
             |this, error, _| this.pi_mcp_error = Some(error),
         );
@@ -48,12 +46,9 @@ impl Workspace {
     pub fn confirm_pi_mcp_remove(&mut self, name: String, cx: &mut Context<Self>) {
         self.pi_mcp_pending_remove = None;
         self.pi_mcp_error = None;
-        self.run_pi_mutation::<PiMcpRemove>(
-            McpServerParams { name },
-            false,
-            cx,
-            |this, error, _| this.pi_mcp_error = Some(error),
-        );
+        self.run_pi_mutation::<PiMcpRemove>(McpServerParams { name }, cx, |this, error, _| {
+            this.pi_mcp_error = Some(error)
+        });
         cx.notify();
     }
 
@@ -74,7 +69,7 @@ impl Workspace {
                 this.pi_mcp_login = None;
                 match outcome {
                     Ok(config) => {
-                        this.adopt_pi_config(config, false, cx);
+                        this.adopt_pi_config(config, cx);
                         crate::status_item::notify_success(format!("MCP 服务器 {name} 已登录"));
                     }
                     Err(error) => this.pi_mcp_error = Some(error),

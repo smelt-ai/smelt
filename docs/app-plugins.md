@@ -70,7 +70,7 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 
 - gpui-shell 没有拖放绑定（会话列表拖动排序要用）、终端组件；Tree 只有 label，编辑器内容不可读写。缺的组件由宿主提供原生组件，或给上游提 PR，不 fork。
 - gpui-shell 的 `gpui-shell.json` 拒绝未知字段，插件要声明的面板、命令放在哪里待定（旧分支用另一个 `smelt.json`）。
-- 别的插件或客户端改了 smeltd 的数据，靠 smeltd 推事件通知（如 `PiConfigChanged`），不靠插件自觉广播。绕过 smeltd 的修改（手改 Pi 配置文件、直接用 `pi` 命令行）目前收不到，要 smeltd 监视文件才能补上。
+- 别的插件或客户端改了 smeltd 的数据，靠 smeltd 推事件通知，不靠插件自觉广播。Pi 配置已经这样做了（`pi_config.changed`，放在单独的一条订阅里，v7 的运行时不推）。绕过 smeltd 的修改（手改 Pi 配置文件、直接用 `pi` 命令行）目前收不到，要 smeltd 监视文件才能补上；在那之前，能力库的「刷新」只重读能力库自己，不再顺带让对话重拉模型目录。
 - 手机端是 Flutter，跑不了 gpui-shell；插件只影响桌面，手机直接用 smeltd 协议。
 
 ## 参考

@@ -226,20 +226,25 @@ pub fn import_plugin(params: ImportPluginParams) -> Result<(), String> {
 
 /// 照端点刷新所有「自动」provider 的模型目录。桌面启动时请运行时做一次；每个
 /// provider 一次网络往返，单个失败不影响其余，也不改动它的目录。
-pub fn refresh_auto_models() {
+/// 返回有没有写过配置（刷新了目录或清掉了标记）；全都没问到就是没写。
+pub fn refresh_auto_models() -> bool {
+    let mut wrote = false;
     for outcome in crate::pi_auto_models::refresh_auto_model_catalogs() {
         match outcome {
             crate::pi_auto_models::AutoRefreshOutcome::Refreshed { provider, models } => {
+                wrote = true;
                 eprintln!("[pi] {provider} 的模型目录已刷新：{models} 个模型");
             }
             crate::pi_auto_models::AutoRefreshOutcome::Kept { provider, reason } => {
                 eprintln!("[pi] {provider} 的模型目录保持不变：{reason}");
             }
             crate::pi_auto_models::AutoRefreshOutcome::Forgotten { provider } => {
+                wrote = true;
                 eprintln!("[pi] {provider} 已不在配置中，不再自动刷新其模型目录");
             }
         }
     }
+    wrote
 }
 
 #[cfg(test)]

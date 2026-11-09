@@ -39,3 +39,58 @@ pub fn subscribe_daemon_states_blocking(
         }
     }
 }
+
+/// 一条连好、请求已经写出去的单独订阅（见 [`TopicEventClient`]）。读放在调用方的线程里
+/// （[`Self::run`]）；[`Self::closer`] 从别的线程关掉连接，读的那边随即返回。
+pub struct TopicSubscription {
+    stream: smelt_runtime_client::RuntimeStream,
+    client: TopicEventClient,
+}
+
+/// 关掉一条单独订阅的连接。
+pub struct TopicSubscriptionCloser(smelt_runtime_client::RuntimeStream);
+
+impl TopicSubscriptionCloser {
+    pub fn close(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+impl TopicSubscription {
+    /// 连上并写出订阅请求。连不上、写不出去是 `Err`，原因给人看。
+    pub fn open(
+        runtime: &smelt_runtime_client::RuntimeClient,
+        topics: Vec<&str>,
+    ) -> Result<Self, String> {
+        let client = TopicEventClient::new(topics);
+        let request = client.request_line().map_err(|error| error.to_string())?;
+        let mut stream = runtime.connect().map_err(|error| error.to_string())?;
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string())?;
+        Ok(Self { stream, client })
+    }
+
+    pub fn closer(&self) -> Result<TopicSubscriptionCloser, String> {
+        self.stream
+            .try_clone()
+            .map(TopicSubscriptionCloser)
+            .map_err(|error| error.to_string())
+    }
+
+    /// 阻塞读到连接断开、被关掉或 `emit` 返回 false。运行时拒掉订阅、协议出错是 `Err`。
+    pub fn run(
+        self,
+        mut emit: impl FnMut(TopicMessage) -> bool,
+    ) -> Result<(), DaemonEventClientError> {
+        let reader = BufReader::new(self.stream);
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(message) = self.client.decode_line(&line)?
+                && !emit(message)
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}

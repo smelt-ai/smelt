@@ -30,7 +30,8 @@ struct ProviderStatusData {
     /// 由用户点击触发、应在侧栏给出绿色反馈的那一家。后台定时和启动首查不写
     /// 这里，避免静默刷新打断额度行原有的风险颜色。
     manual_refreshing: HashSet<QuotaTarget>,
-    /// Pi 的凭据/模型配置版本号：登录、登出、改 `models.json` 各 +1。
+    /// 本机 Pi 配置的版本号：运行时每推一次 `pi_config.changed`（登录、登出、改 provider
+    /// 等）+1。
     ///
     /// Pi 的模型目录只能问 Pi 进程自己（`get_available_models`），而那是会话级
     /// 的、启动时拉一次。会话订阅这个版本号，变了就重拉自己的目录——这样新登录
@@ -166,8 +167,8 @@ impl ProviderStatus {
 
     // ---- Pi 模型目录 ----
 
-    /// Pi 的凭据或模型配置变了（登录、登出、改 `models.json`）。活着的 Pi 会话
-    /// 会据此重拉自己的模型目录。
+    /// 本机的 Pi 配置变了（运行时推了 `pi_config.changed`）。活着的 Pi 会话会据此重拉
+    /// 自己的模型目录。
     pub fn bump_pi_catalog(cx: &mut App) {
         Self::update_data(cx, |data| {
             data.pi_catalog_revision = data.pi_catalog_revision.wrapping_add(1);

@@ -1890,7 +1890,9 @@ mod tests {
     /// 不能只在启动时探一次。
     #[test]
     fn subscription_reports_reachability_changes() {
-        let (events, _events_rx) = smol::channel::unbounded();
+        let (states, _states_rx) = smol::channel::unbounded();
+        let (topics, _topics_rx) = smol::channel::unbounded();
+        let events = crate::runtime_events::RuntimeEventSenders { states, topics };
         let (status, status_rx) = smol::channel::unbounded();
         let handle = crate::runtime_events::spawn_subscription(
             remote_runtime("rt-test", describe_without("no.such.method")),
@@ -1917,7 +1919,9 @@ mod tests {
             described.events.as_mut().unwrap().protocol_version += 1;
             serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
         });
-        let (events, _events_rx) = smol::channel::unbounded();
+        let (states, _states_rx) = smol::channel::unbounded();
+        let (topics, _topics_rx) = smol::channel::unbounded();
+        let events = crate::runtime_events::RuntimeEventSenders { states, topics };
         let (status, status_rx) = smol::channel::unbounded();
         let handle = crate::runtime_events::spawn_subscription(
             remote_runtime("rt-new", newer),

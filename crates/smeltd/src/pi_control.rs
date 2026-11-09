@@ -1,5 +1,8 @@
 //! `pi.*` 控制方法：Pi 的配置文件在运行时那台机器上，读写、问端点、跑登录都在这里
 //! 执行。业务规则在 `smelt_core::pi_service`。修改类方法都回带新的完整快照。
+//!
+//! 改了配置的方法成功后发 `pi_config.changed`（见 [`changes_config`]），谁改的都发：
+//! 别处开着的编辑器、模型下拉、对话据此重读，不靠改的一方去通知。
 
 use smelt_core::control_api::*;
 use smelt_core::pi_auth_service;
@@ -8,10 +11,51 @@ use smelt_runtime_client::protocol::control::{
     ControlCall, ControlError, ControlErrorCode, ControlMethod, EmptyParams, decode_params,
 };
 
+use crate::event_hub::EventHubHandle;
+
 /// `method` 必须是 `pi.*` 之一。
 pub(crate) fn dispatch(
     method: ControlMethod,
     params: serde_json::Value,
+    event_hub: &EventHubHandle,
+) -> Result<serde_json::Value, ControlError> {
+    let result = run(method, params, event_hub)?;
+    if changes_config(method) {
+        notify_changed(event_hub);
+    }
+    Ok(result)
+}
+
+/// 这次成功的调用一定改了配置。改没改要看结果的（自动模型目录、登录）不在这里，在 `run`
+/// 里各自判断。
+fn changes_config(method: ControlMethod) -> bool {
+    matches!(
+        method,
+        ControlMethod::PiConfigEnsureFile
+            | ControlMethod::PiModelsSetThinkingLevel
+            | ControlMethod::PiModelsSaveDefault
+            | ControlMethod::PiProvidersSaveCustom
+            | ControlMethod::PiProvidersRemoveCustom
+            | ControlMethod::PiMcpAddPreset
+            | ControlMethod::PiMcpSetEnabled
+            | ControlMethod::PiMcpRemove
+            | ControlMethod::PiMcpLogin
+            | ControlMethod::PiPluginsRemove
+            | ControlMethod::PiPluginsImport
+            | ControlMethod::PiAuthLogout
+    )
+}
+
+fn notify_changed(event_hub: &EventHubHandle) {
+    if let Err(error) = event_hub.publish_pi_config_changed() {
+        eprintln!("[pi] 通知 Pi 配置变化失败：{error}");
+    }
+}
+
+fn run(
+    method: ControlMethod,
+    params: serde_json::Value,
+    event_hub: &EventHubHandle,
 ) -> Result<serde_json::Value, ControlError> {
     match method {
         ControlMethod::PiConfigGet => call::<PiConfigGet>(params, |_| Ok(pi_service::config())),
@@ -37,8 +81,11 @@ pub(crate) fn dispatch(
         ControlMethod::PiProvidersRemoveCustom => {
             mutate::<PiProvidersRemoveCustom>(params, pi_service::remove_custom_provider)
         }
+        // 桌面每次启动都请一次，多半什么也没问到：没写就不发，免得别处白白重读。
         ControlMethod::PiProvidersRefreshAuto => call::<PiProvidersRefreshAuto>(params, |_| {
-            pi_service::refresh_auto_models();
+            if pi_service::refresh_auto_models() {
+                notify_changed(event_hub);
+            }
             Ok(EmptyParams::default())
         }),
         ControlMethod::PiMcpAddPreset => {
@@ -70,9 +117,15 @@ pub(crate) fn dispatch(
                 login_id: pi_auth_service::start(p)?,
             })
         }),
-        ControlMethod::PiAuthLoginEvents => {
-            call::<PiAuthLoginEvents>(params, pi_auth_service::events)
-        }
+        // 成功失败都发：失败时别处重读一次也无妨。没人来取事件的登录会被当成没人要清掉，
+        // 不会改配置。
+        ControlMethod::PiAuthLoginEvents => call::<PiAuthLoginEvents>(params, |p| {
+            let result = pi_auth_service::events(p)?;
+            if result.finished {
+                notify_changed(event_hub);
+            }
+            Ok(result)
+        }),
         ControlMethod::PiAuthLoginAnswer => call::<PiAuthLoginAnswer>(params, |p| {
             pi_auth_service::answer(p)?;
             Ok(EmptyParams::default())
@@ -108,4 +161,36 @@ fn call<C: ControlCall>(
         run(params).map_err(|error| ControlError::new(ControlErrorCode::OperationFailed, error))?;
     serde_json::to_value(result)
         .map_err(|error| ControlError::new(ControlErrorCode::Internal, error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 只读的方法不发：别处收到就会来读，读一次发一次会来回打转。
+    #[test]
+    fn reads_never_announce_a_change() {
+        for method in [
+            ControlMethod::PiConfigGet,
+            ControlMethod::PiProvidersDiscoverModels,
+            ControlMethod::PiAuthProviders,
+            ControlMethod::PiAuthModels,
+            ControlMethod::PiAuthLoginStart,
+            ControlMethod::PiAuthLoginEvents,
+            ControlMethod::PiAuthLoginAnswer,
+            ControlMethod::PiAuthLoginCancel,
+            ControlMethod::PiProvidersRefreshAuto,
+        ] {
+            assert!(!changes_config(method), "{method}");
+        }
+        for method in [
+            ControlMethod::PiModelsSaveDefault,
+            ControlMethod::PiProvidersSaveCustom,
+            ControlMethod::PiMcpSetEnabled,
+            ControlMethod::PiPluginsRemove,
+            ControlMethod::PiAuthLogout,
+        ] {
+            assert!(changes_config(method), "{method}");
+        }
+    }
 }

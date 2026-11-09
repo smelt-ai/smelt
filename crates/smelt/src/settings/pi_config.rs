@@ -2,7 +2,8 @@
 //!
 //! 配置文件在运行时那台机器上，读写都走 `pi.*`（[`smelt_model::pi_service`]）。这里
 //! 按机器缓存最近一次快照给渲染读；打开设置窗口、进能力库、开智能体编辑器时刷新，每次
-//! 修改由运行时回带新快照。
+//! 修改由运行时回带新快照。别处（另一扇窗口、手机、命令行）经运行时改了配置，运行时推
+//! `pi_config.changed`，缓存过的那台机器重读（[`Workspace::on_pi_config_changed`]）。
 //!
 //! 能力库可以切到别的机器去配（[`PiLibrary`]），智能体编辑器读智能体所在那台机器的：
 //! 都从同一份按机器的缓存取。
@@ -90,7 +91,7 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok(config) => this.adopt_pi_config_on(target, config, false, cx),
+                    Ok(config) => this.adopt_pi_config_on(target, config, cx),
                     Err(error) => {
                         eprintln!("[settings] 读取 Pi 配置失败：{error}");
                         if let Some(slot) = this.pi_configs.get_mut(&target) {
@@ -101,6 +102,18 @@ impl Workspace {
                 }
             },
         );
+    }
+
+    /// 那台机器上的 Pi 配置变了，或者重新连上了它（断开期间可能变过）：缓存过就重读，
+    /// 没缓存过的等用到时再读。
+    pub(crate) fn on_pi_config_changed(
+        &mut self,
+        runtime: &crate::RuntimeKey,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pi_configs.contains_key(runtime) {
+            self.refresh_pi_config(runtime.clone(), cx);
+        }
     }
 
     /// 能力库正在配的那台机器的快照。
@@ -181,23 +194,17 @@ impl Workspace {
     }
 
     /// 换上能力库那台机器的新快照。
-    pub(crate) fn adopt_pi_config(
-        &mut self,
-        config: PiConfig,
-        models_changed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.adopt_pi_config_on(self.pi_library.runtime.clone(), config, models_changed, cx);
+    pub(crate) fn adopt_pi_config(&mut self, config: PiConfig, cx: &mut Context<Self>) {
+        self.adopt_pi_config_on(self.pi_library.runtime.clone(), config, cx);
     }
 
-    /// 换上那台机器给的新快照，顺带更新开着的、属于那台机器的智能体编辑器和模型下拉。
-    /// `models_changed`：凭据或模型目录变了，告诉活着的会话重新读——登录、登出、改
-    /// provider 都汇到这里，散在各个调用点早晚漏一个。会话眼下只跟本机的 Pi 目录走。
+    /// 换上那台机器给的新快照，顺带更新开着的、属于那台机器的智能体编辑器和模型下拉：
+    /// 它们读的都是这份缓存。活着的会话不归这里管，它们跟着运行时推的
+    /// `pi_config.changed` 重拉模型目录。
     fn adopt_pi_config_on(
         &mut self,
         runtime: crate::RuntimeKey,
         config: PiConfig,
-        models_changed: bool,
         cx: &mut Context<Self>,
     ) {
         if let Some(editor) = self.agent_surface.editor.as_mut() {
@@ -213,9 +220,6 @@ impl Workspace {
         cx.global_mut::<PiModelChoices>()
             .0
             .insert(runtime.clone(), config.model_choice_groups.clone());
-        if models_changed && runtime == crate::RuntimeKey::Local {
-            smelt_app_state::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
-        }
         // 修改回带的快照比之前发出、还没回来的读取都新。
         let slot = self.pi_configs.entry(runtime).or_default();
         slot.generation += 1;
@@ -277,7 +281,6 @@ impl Workspace {
     pub(crate) fn run_pi_mutation<C>(
         &mut self,
         params: C::Params,
-        models_changed: bool,
         cx: &mut Context<Self>,
         on_error: impl FnOnce(&mut Self, String, &mut Context<Self>) + 'static,
     ) where
@@ -289,7 +292,7 @@ impl Workspace {
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
             move |this, result, cx| match result {
-                Ok(config) => this.adopt_pi_config(config, models_changed, cx),
+                Ok(config) => this.adopt_pi_config(config, cx),
                 Err(error) => {
                     on_error(this, error, cx);
                     cx.notify();

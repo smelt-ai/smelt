@@ -574,14 +574,6 @@ impl Workspace {
         }
     }
 
-    /// 凭据或模型目录在别处变了（登录、登出）：重新取快照；是本机的，还要告知活着的会话。
-    pub(super) fn reload_pi_model_settings(&mut self, cx: &mut Context<Self>) {
-        if *self.pi_library_runtime() == crate::RuntimeKey::Local {
-            smelt_app_state::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
-        }
-        self.refresh_pi_library(cx);
-    }
-
     pub fn edit_pi_model_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::InputState;
 
@@ -647,7 +639,6 @@ impl Workspace {
         }
         self.run_pi_mutation::<smelt_model::control_api::PiModelsSetThinkingLevel>(
             smelt_model::pi_service::ThinkingLevelParams { level },
-            true,
             cx,
             |_, error, _| crate::status_item::notify_error(&error),
         );
@@ -702,7 +693,7 @@ impl Workspace {
                 Ok(config) => {
                     this.pi_model_editor = None;
                     this.pi_model_editor_error = None;
-                    this.adopt_pi_config(config, true, cx);
+                    this.adopt_pi_config(config, cx);
                     crate::status_item::notify_success("Pi 模型配置已保存");
                 }
                 Err(error) => this.reject_pi_model_edit(error, cx),
@@ -1069,7 +1060,7 @@ impl Workspace {
                 Ok(saved) => {
                     this.pi_custom_provider_editor = None;
                     this.pi_model_editor_error = None;
-                    this.adopt_pi_config(saved.config, true, cx);
+                    this.adopt_pi_config(saved.config, cx);
                     crate::status_item::notify_success(if saved.auto {
                         format!("自定义 Provider {id} 已保存，模型目录将在每次启动时刷新")
                     } else {
@@ -1096,7 +1087,7 @@ impl Workspace {
             cx,
             move |this, result, cx| match result {
                 Ok(config) => {
-                    this.adopt_pi_config(config, true, cx);
+                    this.adopt_pi_config(config, cx);
                     crate::status_item::notify_success(format!(
                         "已移除自定义 Provider {provider_id}"
                     ));
@@ -1152,7 +1143,7 @@ impl Workspace {
     }
 
     pub(super) fn refresh_pi_settings(&mut self, cx: &mut Context<Self>) {
-        self.reload_pi_model_settings(cx);
+        self.refresh_pi_library(cx);
         cx.notify();
     }
 
@@ -1194,7 +1185,7 @@ impl Workspace {
                         },
                         cx,
                     );
-                    this.adopt_pi_config(config, false, cx);
+                    this.adopt_pi_config(config, cx);
                 }
                 Err(error) => {
                     this.pi_plugin_error = Some(error);
@@ -1232,7 +1223,6 @@ impl Workspace {
     ) {
         self.run_pi_mutation::<smelt_model::control_api::PiPluginsImport>(
             smelt_model::pi_service::ImportPluginParams { kind, source },
-            false,
             cx,
             |this, error, _| this.pi_plugin_error = Some(error),
         );

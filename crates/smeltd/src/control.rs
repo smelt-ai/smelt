@@ -226,10 +226,12 @@ fn dispatch_control(
         | ControlMethod::PiAuthLoginStart
         | ControlMethod::PiAuthLoginEvents
         | ControlMethod::PiAuthLoginAnswer
-        | ControlMethod::PiAuthLoginCancel) => match super::pi_control::dispatch(pi, params) {
-            Ok(result) => success_value(control_version, &request_id, result),
-            Err(error) => error_value(control_version, request_id, error),
-        },
+        | ControlMethod::PiAuthLoginCancel) => {
+            match super::pi_control::dispatch(pi, params, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::SessionLaunchPrepare => {
             let params: smelt_core::agent_definition_store::LaunchPrepareParams =
                 match params_or_error(control_version, &request_id, params) {

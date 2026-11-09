@@ -4310,7 +4310,33 @@ fn main() {
         runtimes::start_runtime_hub(cx);
         // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求这些投影
         // 目前只认本机；会话状态、项目文件变化、智能体记忆变化各运行时都有。
-        let daemon_state_rx = runtime_events::start(cx);
+        let runtime_events::RuntimeEventReceivers {
+            states: daemon_state_rx,
+            topics: topic_rx,
+        } = runtime_events::start(cx);
+        // 单独订阅的话题。积压丢了事件（`Lagged`）就当作都变过。
+        let current_ws_for_topics = current_ws.clone();
+        cx.spawn(async move |cx| {
+            use smelt_app_state::provider_status_global::ProviderStatus;
+            use smelt_client::daemon_state::{CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage};
+            while let Ok((runtime, message)) = topic_rx.recv().await {
+                let pi_config_changed = match &message {
+                    TopicMessage::Event { topic, .. } => topic == CORE_TOPIC_PI_CONFIG_CHANGED,
+                    TopicMessage::Lagged => true,
+                };
+                if !pi_config_changed {
+                    continue;
+                }
+                // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的 Pi 目录走。
+                if runtime == RuntimeKey::Local {
+                    cx.update(ProviderStatus::bump_pi_catalog);
+                }
+                if let Some(ws) = current_workspace(&current_ws_for_topics) {
+                    let _ = ws.update(cx, |ws, cx| ws.on_pi_config_changed(&runtime, cx));
+                }
+            }
+        })
+        .detach();
         let current_ws_for_events = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok((runtime, event)) = daemon_state_rx.recv().await {
@@ -4364,7 +4390,9 @@ fn main() {
                         }
                         terminal::DaemonStateEvent::Snapshot { .. } => {
                             let _ = ws.update(cx, |ws, cx| {
-                                ws.on_runtime_resubscribed(&runtime, cx)
+                                ws.on_runtime_resubscribed(&runtime, cx);
+                                // 断开期间 Pi 配置可能变过，单独订阅的事件补不回来。
+                                ws.on_pi_config_changed(&runtime, cx);
                             });
                         }
                         _ => {}
