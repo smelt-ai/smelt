@@ -8,7 +8,7 @@
 //! 一条队列，从挂载完起开始记。插件视图释放时队列一起撤掉，所以插件卸载、重新加载不用
 //! 宿主另外收拾。
 //!
-//! 插件摆在哪不由插件定，这里没有登记页面、面板位置的函数（见 `docs/app-plugins.md`）。
+//! 插件摆在哪不由插件定，这里没有登记位置的函数（见 `docs/app-plugins.md`）。
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -44,7 +44,7 @@ export type HostEvent =
   | { type: "reconnected"; machine: Machine }
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
-  | { type: "pages_changed" };
+  | { type: "views_changed" };
 /** 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份。同时只能有一个在等。 */
 export function next_event(): Promise<HostEvent>;
 "#;
@@ -221,7 +221,7 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::ActiveProjectChanged => {
             HostObject::new().field("type", "active_project_changed")
         }
-        HostEvent::PagesChanged => HostObject::new().field("type", "pages_changed"),
+        HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
     };
     object.into()
 }
@@ -254,12 +254,12 @@ mod tests {
     fn a_waiting_next_event_takes_the_event_directly() {
         let plugin = JsPlugin::new();
         let waiting = plugin.next_event();
-        plugin.deliver(&HostEvent::PagesChanged);
+        plugin.deliver(&HostEvent::ViewsChanged);
         assert!(plugin.0.borrow().queue.is_empty());
         let value = smol::block_on(waiting).unwrap();
         assert_eq!(
             value.get("type").and_then(HostValue::as_str),
-            Some("pages_changed")
+            Some("views_changed")
         );
     }
 

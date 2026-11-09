@@ -21,14 +21,14 @@ pub use smelt_model as model;
 pub use smelt_runtime_client as client;
 pub use smelt_ui as ui;
 
-mod page;
+mod view;
 
 #[cfg(feature = "js")]
 pub mod js;
 
-pub use page::{
-    Page, PageBuilder, PageHandle, PageSpec, RESERVED_PAGE_IDS, ensure_page_view, page, page_view,
-    pages, register_page, unregister_page,
+pub use view::{
+    PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec, built_view, ensure_view,
+    register_view, unregister_view, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -68,8 +68,8 @@ pub enum HostEvent {
     MachinesChanged,
     /// 工作台的当前项目变了（读 [`Host::active_project`]）。
     ActiveProjectChanged,
-    /// 页面登记变了：加了、替换了或撤下了（见 [`register_page`]）。
-    PagesChanged,
+    /// 视图登记变了：加了、替换了或撤下了（见 [`register_view`]）。
+    ViewsChanged,
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。

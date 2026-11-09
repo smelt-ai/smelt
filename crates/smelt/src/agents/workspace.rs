@@ -83,7 +83,7 @@ impl Workspace {
     /// 直接打开能力库的某个页签（`plugins`、`mcp`），比如智能体编辑器里「插件 · 管理」。
     pub(crate) fn open_capabilities(&mut self, tab: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_page(
-            smelt_capabilities::PAGE_ID,
+            smelt_capabilities::VIEW_ID,
             serde_json::json!({ "tab": tab }),
             window,
             cx,

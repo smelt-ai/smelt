@@ -1,7 +1,7 @@
 //! 能力库：给某台机器上的 Pi 配模型与凭据、MCP 服务器、技能与扩展、记忆召回。
 //!
-//! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。页面 id 是
-//! [`PAGE_ID`]，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
+//! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道，宿主里没有它的类型。视图 id 是
+//! [`VIEW_ID`]，打开时的参数：`{"tab": "models" | "plugins" | "mcp" | "memory",
 //! "machine": …}`（机器的写法见 [`api::machine_to_json`]），都可以不给。
 //!
 //! 状态全在 [`CapabilitiesPage`] 上：在配哪台机器、那台机器的 Pi 配置快照、各表单。
@@ -18,7 +18,7 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
-use smelt_plugin_api::{self as api, HostEvent, Page, PageHandle, PageSpec, RuntimeKey};
+use smelt_plugin_api::{self as api, HostEvent, PluginView, RuntimeKey, ViewHandle, ViewSpec};
 
 mod auth;
 mod config;
@@ -31,24 +31,23 @@ mod state;
 use config::PiConfigSlot;
 use state::*;
 
-pub const PAGE_ID: &str = "capabilities";
+pub const VIEW_ID: &str = "capabilities";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
-    api::register_page(
-        PageSpec {
-            id: PAGE_ID.into(),
+    api::register_view(
+        ViewSpec {
+            id: VIEW_ID.into(),
             title: "能力库".into(),
             icon: IconName::LayoutDashboard.path(),
-            sidebar: true,
-            machine_menu: true,
+            per_machine: true,
             build: Rc::new(|_window, cx| {
-                Rc::new(cx.new(CapabilitiesPage::new)) as Rc<dyn PageHandle>
+                Rc::new(cx.new(CapabilitiesPage::new)) as Rc<dyn ViewHandle>
             }),
         },
         cx,
     )
-    .expect("能力库的页面 id 不是宿主保留的");
+    .expect("能力库的视图 id 不是宿主保留的");
 }
 
 /// 页面里平级的几个页签。
@@ -176,7 +175,7 @@ impl CapabilitiesPage {
                 }
                 cx.notify();
             }
-            HostEvent::ActiveProjectChanged | HostEvent::PagesChanged => {}
+            HostEvent::ActiveProjectChanged | HostEvent::ViewsChanged => {}
         }
     }
 
@@ -268,7 +267,7 @@ impl CapabilitiesPage {
     }
 }
 
-impl Page for CapabilitiesPage {
+impl PluginView for CapabilitiesPage {
     fn open(&mut self, args: &serde_json::Value, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = args
             .get("tab")

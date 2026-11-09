@@ -38,23 +38,23 @@ fn machine_actions(runtime: Runtime, workspace: Entity<Workspace>, cx: &App) -> 
             }
         }),
     }];
-    // 插件登记的、按机器配的页面：打开时带上这台机器。
+    // 能针对机器打开的插件视图：打开时带上这台机器。
     actions.extend(
-        smelt_plugin_api::pages(cx)
+        smelt_plugin_api::views(cx)
             .into_iter()
-            .filter(|page| page.machine_menu)
-            .map(|page| {
+            .filter(|view| view.per_machine)
+            .map(|view| {
                 let args =
                     serde_json::json!({ "machine": smelt_plugin_api::machine_to_json(&key) });
                 let workspace = workspace.clone();
                 MachineAction {
-                    label: page.title,
-                    icon: Icon::empty().path(page.icon),
+                    label: view.title,
+                    icon: Icon::empty().path(view.icon),
                     separated: false,
                     run: Rc::new(move |window, cx| {
                         let args = args.clone();
                         workspace.update(cx, |ws, cx| {
-                            ws.open_page(&page.id, args, window, cx);
+                            ws.open_page(&view.id, args, window, cx);
                         });
                     }),
                 }

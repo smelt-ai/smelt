@@ -1,14 +1,14 @@
 //! 工作台当前显示哪一个一级入口。
 //!
-//! 左侧「智能体 / 自动化」和插件登记的页面是分组标题，不是 iOS/长桥那种保活 Tab：点标题
+//! 左侧「智能体 / 自动化」和插件视图的入口是分组标题，不是 iOS/长桥那种保活 Tab：点标题
 //! 总是进该面的根页。对话和运行现场是侧栏里的子行，只切当前面、不清根页。
 
-/// 左侧一级导航。智能体、自动化、插件页面与会话并列。
+/// 左侧一级导航。智能体、自动化、插件视图与会话并列。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WorkspaceRoute {
     Agents,
     Automations,
-    /// 插件登记的页面（[`smelt_plugin_api::PageSpec`]），按 id 记。
+    /// 插件视图（[`smelt_plugin_api::ViewSpec`]）当舞台上的一页，按 id 记。
     Page(String),
     /// 运行时那台机器的远程桌面。看哪台运行时记在 Workspace 上，不落盘。
     Desktop,

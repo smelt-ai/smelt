@@ -90,22 +90,17 @@ impl Workspace {
                 WorkspaceRoute::Automations,
                 entity.clone(),
             ))
-            // 插件登记的页面排在宿主自己的入口后面。
-            .children(
-                smelt_plugin_api::pages(cx)
-                    .into_iter()
-                    .filter(|page| page.sidebar)
-                    .map(|page| {
-                        self.render_agent_product_navigation_row(
-                            SharedString::from(format!("{}-route", page.id)),
-                            page.title,
-                            gpui_component::Icon::empty().path(page.icon),
-                            false,
-                            WorkspaceRoute::Page(page.id.to_string()),
-                            entity.clone(),
-                        )
-                    }),
-            )
+            // 插件视图摆在哪由宿主定：眼下每个都是舞台上的一页，入口排在宿主自己的后面。
+            .children(smelt_plugin_api::views(cx).into_iter().map(|view| {
+                self.render_agent_product_navigation_row(
+                    SharedString::from(format!("{}-route", view.id)),
+                    view.title,
+                    gpui_component::Icon::empty().path(view.icon),
+                    false,
+                    WorkspaceRoute::Page(view.id.to_string()),
+                    entity.clone(),
+                )
+            }))
     }
 
     pub(super) fn render_automation_drill_header(
