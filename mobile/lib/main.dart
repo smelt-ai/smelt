@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -105,7 +106,8 @@ Future<String?> _demoScreen() async {
   }
 }
 
-/// 回到前台立刻确认每台机器还连着：系统在后台冻结了链路保活，这段时间网络往往已经换过。
+/// 回到前台、网络变了（切 Wi-Fi / 蜂窝、断网又恢复）都立刻确认每台机器还连着：系统在后台
+/// 冻结了链路保活，网络换了旧路径也跟着没了，等传输层自己发现要到 QUIC 空闲超时。
 class _Lifecycle extends StatefulWidget {
   const _Lifecycle({required this.model, required this.child});
 
@@ -117,16 +119,29 @@ class _Lifecycle extends StatefulWidget {
 }
 
 class _LifecycleState extends State<_Lifecycle> with WidgetsBindingObserver {
+  StreamSubscription<List<ConnectivityResult>>? _network;
+  List<ConnectivityResult>? _lastNetwork;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _network = Connectivity().onConnectivityChanged.listen(_onNetwork);
   }
 
   @override
   void dispose() {
+    unawaited(_network?.cancel());
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onNetwork(List<ConnectivityResult> network) {
+    final last = _lastNetwork;
+    _lastNetwork = network;
+    // 第一次是订阅时的现状，不是变化；同样的结果重复推来也不算。
+    if (last == null || listEquals(last, network)) return;
+    widget.model.backend.networkChanged();
   }
 
   @override

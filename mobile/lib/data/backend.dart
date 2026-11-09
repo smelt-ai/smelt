@@ -35,6 +35,9 @@ abstract interface class Backend {
   Future<void> reconnectRuntime(String runtimeId);
   Future<void> verifyConnections();
 
+  /// 网络变了：让传输层重新找路径，并确认每台机器的链路。
+  Future<void> networkChanged();
+
   /// 一次性迁移旧版钥匙串里的机器列表。
   Future<List<RuntimeRecord>> importRuntimes(List<RuntimeImport> runtimes);
 
@@ -299,6 +302,9 @@ class FrbBackend implements Backend {
 
   @override
   Future<void> verifyConnections() => fleet.verifyConnections();
+
+  @override
+  Future<void> networkChanged() => fleet.networkChanged();
 
   @override
   Future<List<RuntimeRecord>> importRuntimes(List<RuntimeImport> runtimes) =>

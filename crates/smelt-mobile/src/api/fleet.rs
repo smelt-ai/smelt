@@ -137,6 +137,12 @@ pub fn verify_connections() {
     crate::fleet::fleet().verify();
 }
 
+/// 网络变了（切 Wi-Fi / 蜂窝、断网又恢复，App 侧监听到时调用）：让 iroh 重新找路径，并像
+/// [`verify_connections`] 一样确认每台机器的链路，旧路径跟着旧网络没了的立刻换新链路重连。
+pub fn network_changed() {
+    crate::fleet::fleet().network_changed();
+}
+
 /// 一次性导入旧版存的机器，返回这次新登记的。已登记的（同一 `runtime_id` 或 endpoint）
 /// 和不合法的跳过。导入的机器立刻开始连。
 pub fn import_runtimes(runtimes: Vec<RuntimeImport>) -> Result<Vec<RuntimeRecord>, SmeltError> {

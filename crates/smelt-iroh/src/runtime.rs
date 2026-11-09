@@ -469,6 +469,15 @@ impl IrohClient {
         self.endpoint.id()
     }
 
+    /// 告诉 iroh 网络可能变了（切 Wi-Fi / 蜂窝、断网又恢复）：重新探测本机地址、重连 relay、
+    /// 给现有连接找新路径。Android 原生层收不到网络变化，iOS 上也不保证及时，所以由 App 转告。
+    /// 不阻塞。
+    pub fn network_change(&self) {
+        let endpoint = self.endpoint.clone();
+        self.runtime
+            .spawn(async move { endpoint.network_change().await });
+    }
+
     /// 连某个运行时的连接器。
     pub fn connector(
         self: &Arc<Self>,

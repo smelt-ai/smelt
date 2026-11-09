@@ -52,6 +52,9 @@ pub(crate) trait Transport: Dialer {
     /// 按全部登记机器的 relay 调整形态，返回形态是否变了。变了时旧 endpoint 已丢弃，调用方
     /// 要让所有节点重新 connect。relay 不合法时报错、形态不变。
     fn configure(&self, relays: &[Option<String>]) -> Result<bool, SmeltError>;
+
+    /// 网络可能变了，让传输层重新探测地址和路径。
+    fn network_change(&self);
 }
 
 /// 各模块的时限。生产值见 [`Timings::PRODUCTION`]，测试用毫秒级。
@@ -588,6 +591,16 @@ impl Fleet {
         for node in self.shared.nodes() {
             node.hub.verify();
         }
+    }
+
+    /// 网络变了（切 Wi-Fi / 蜂窝、断网又恢复）：先让传输层重新找路径，再确认每台机器的链路。
+    /// 旧链路的路径多半跟着旧网络一起没了，却要等 QUIC 空闲超时才会报断开；确认不了的
+    /// 立刻换新链路重连（见 [`crate::connection`]）。
+    pub(crate) fn network_changed(&self) {
+        if let Ok(env) = self.shared.env() {
+            env.transport.network_change();
+        }
+        self.verify();
     }
 
     pub(crate) fn detach_all_terminals(&self) {

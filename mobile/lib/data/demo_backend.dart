@@ -508,6 +508,9 @@ class DemoBackend implements Backend {
   }
 
   @override
+  Future<void> networkChanged() async {}
+
+  @override
   Future<List<RuntimeRecord>> importRuntimes(
     List<RuntimeImport> runtimes,
   ) async => const [];
