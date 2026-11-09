@@ -134,11 +134,18 @@ struct HubInner {
     /// 会话 id → 当前附着。锁顺序：本锁在前、附着的状态锁在后；拿着它不调 `source`
     /// （连接状态机在它的锁里回调我们的监听）。
     attachments: Mutex<HashMap<String, Arc<Attachment>>>,
+    /// 监听到的最新连接状态。从没附着上的附着据此判断：正在连就等，停下了才 fatal。
+    /// 监听在连接状态机的锁里写它；读它时不能拿着 `source` 的锁。
+    connection: Mutex<ConnectionState>,
 }
 
 impl HubInner {
     fn attachments(&self) -> MutexGuard<'_, HashMap<String, Arc<Attachment>>> {
         self.attachments.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn connection(&self) -> ConnectionState {
+        *self.connection.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn get(&self, session_id: &str) -> Result<Arc<Attachment>, SmeltError> {
@@ -163,13 +170,19 @@ impl HubInner {
 
     /// 连接状态变化。在连接状态机的锁里调用：只改内存、推事件，不阻塞。
     fn on_connection(&self, generation: u64, event: &ConnectionEvent) {
+        *self.connection.lock().unwrap_or_else(|e| e.into_inner()) = event.state;
         let attachments: Vec<_> = self.attachments().values().cloned().collect();
         for attachment in attachments {
             match attachment.generation() {
-                // 连接停下（未配对、被忘记、主动断开）：终端跟着停。
+                // 连接停下（未配对、被忘记、主动断开、连不上）：终端跟着停。
                 Some(_) if event.state == ConnectionState::Disconnected => {
                     attachment.fail(RUNTIME_GONE);
                 }
+                // 还在等首次连上的附着：连不上就收尾，连上了就去附着。
+                None if event.state == ConnectionState::Disconnected => {
+                    attachment.fail(NO_RUNTIME);
+                }
+                None if event.state == ConnectionState::Connected => attachment.retry_now(),
                 // 同一台机器重新连过：旧一代链路上的附着连接掐掉，新一代连上后在新连接上重新附着。
                 Some(bound) if bound != generation => attachment.follow(generation),
                 // 重新连上：别等退避，立刻重新附着。
@@ -179,8 +192,9 @@ impl HubInner {
         }
     }
 
-    /// 这台机器当前连接的客户端。从没连上过就让附着以 fatal 收尾；附着过、新一代正在连
-    /// （换代时状态机先撤掉旧连接再连）就等它连上。被叫停返回 None。
+    /// 这台机器当前连接的客户端。没有连接时等它连上（冷启动点开推送时，终端页会赶在
+    /// 首次连接完成之前附着）；从没附着上、连接又已停下，才让附着以 fatal 收尾。附着过的
+    /// 遇到换代（状态机先撤掉旧连接再连）同样等新一代连上。被叫停返回 None。
     fn runtime_for(&self, attachment: &Attachment) -> Option<RuntimeClient> {
         loop {
             match self.source.current() {
@@ -191,10 +205,21 @@ impl HubInner {
                         return Some(client);
                     }
                 }
-                None if attachment.generation().is_none() => {
-                    attachment.fail(NO_RUNTIME);
-                    return None;
-                }
+                None if attachment.generation().is_none() => match self.connection() {
+                    ConnectionState::Disconnected => {
+                        attachment.fail(NO_RUNTIME);
+                        return None;
+                    }
+                    // 刚取完连接就连上了：再取一次。
+                    ConnectionState::Connected => {}
+                    // 正在连：连上或停下由监听叫醒 / 收尾。读状态和开始等之间连上了也不会
+                    // 漏掉：`retry_now` 记在附着上，等的时候直接返回。
+                    ConnectionState::Connecting | ConnectionState::Reconnecting => {
+                        if let Wake::Stop = attachment.wait_signal() {
+                            return None;
+                        }
+                    }
+                },
                 // 连上时监听叫醒（`retry_now`）；连接停下由监听收尾（叫停）。
                 None => {
                     if let Wake::Stop = attachment.wait_signal() {
@@ -383,6 +408,7 @@ impl TerminalHub {
             source: Arc::clone(&source),
             timing,
             attachments: Mutex::new(HashMap::new()),
+            connection: Mutex::new(ConnectionState::Disconnected),
         });
         // 弱引用：监听存在连接状态机里，不该反过来吊住终端表。
         let weak: Weak<HubInner> = Arc::downgrade(&inner);
