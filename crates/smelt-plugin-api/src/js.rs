@@ -33,7 +33,7 @@ export interface PageOptions {
   /** 路由里记的 id。"agents"、"automations"、"desktop"、"session" 是宿主的，不能用。 */
   id: string;
   title: string;
-  /** lucide 图标名，如 "sparkles"。 */
+  /** Lucide 图标名，如 "sparkles"；不给是 "puzzle"。名字不存在时 register_page 报错。 */
   icon?: string;
   /** 进侧栏「智能体」那一组。 */
   sidebar?: boolean;
@@ -152,6 +152,16 @@ impl JsPlugin {
     }
 
     fn register_page(&self, options: PageOptions) -> Result<HostValue, HostError> {
+        // 名字写错图标就空着，在这里报出来，插件作者当场看得到。
+        let icon_found = in_app("register_page", |cx| {
+            matches!(cx.asset_source().load(&options.icon), Ok(Some(_)))
+        })?;
+        if !icon_found {
+            return Err(HostError::new(format!(
+                "register_page：没有这个图标「{}」，要用 Lucide 图标名，如 \"sparkles\"",
+                icon_name(&options.icon)
+            )));
+        }
         if self.0.borrow().view.is_none() {
             self.0.borrow_mut().pending.push(options);
             return Ok(HostValue::Null);
@@ -275,6 +285,16 @@ impl Page for ScriptPage {
     fn open(&mut self, _args: &serde_json::Value, _window: &mut Window, _cx: &mut Context<Self>) {}
 }
 
+/// Lucide 图标名在资源里的路径：`icons/<名字>.svg`。
+const ICON_PREFIX: &str = "icons/";
+const ICON_SUFFIX: &str = ".svg";
+
+fn icon_name(path: &str) -> &str {
+    path.strip_prefix(ICON_PREFIX)
+        .and_then(|name| name.strip_suffix(ICON_SUFFIX))
+        .unwrap_or(path)
+}
+
 fn page_options(arguments: &HostArguments) -> Result<PageOptions, HostError> {
     let options = arguments.value(0)?;
     let text = |name: &str| -> Result<SharedString, HostError> {
@@ -285,8 +305,8 @@ fn page_options(arguments: &HostArguments) -> Result<PageOptions, HostError> {
             .ok_or_else(|| HostError::new(format!("register_page：{name} 要是字符串")))
     };
     let icon = match options.get("icon").filter(|icon| !icon.is_null()) {
-        Some(_) => format!("icons/{}.svg", text("icon")?),
-        None => "icons/puzzle.svg".to_string(),
+        Some(_) => format!("{ICON_PREFIX}{}{ICON_SUFFIX}", text("icon")?),
+        None => format!("{ICON_PREFIX}puzzle{ICON_SUFFIX}"),
     };
     Ok(PageOptions {
         id: text("id")?,

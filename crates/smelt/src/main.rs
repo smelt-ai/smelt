@@ -3957,41 +3957,15 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
-// 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
-// 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
-gpui_kit_assets::icon_assets!(
-    LucideExtras,
-    [
-        Archive,
-        BellOff,
-        Clock,
-        Coffee,
-        Keyboard,
-        Laptop,
-        LaptopMinimal,
-        MessageSquare,
-        Monitor,
-        Pin,
-        Puzzle,
-        RefreshCw,
-        RotateCw,
-        Server,
-        SlidersHorizontal,
-        Webhook,
-        Workflow,
-        Wrench,
-    ]
-);
-
+// 图标用组件库的全套目录（`AllAssets`，Lucide 全部 + 组件库自己的），不只打包组件用到的
+// 那一百来个：插件（包括用户写的 JS 插件）按 Lucide 名字取图标，只编一部分进来，没编进来
+// 的图标位置就空着。全套 SVG 约 0.7 MB。
 struct SmeltAssets;
 
 impl gpui::AssetSource for SmeltAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         if let Some(bytes) = agent_icon_svg(path) {
             return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
-        }
-        if let Some(bytes) = LucideExtras.load(path)? {
-            return Ok(Some(bytes));
         }
         if path == "smelt-icons/git-branch.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(
@@ -4039,11 +4013,11 @@ impl gpui::AssetSource for SmeltAssets {
                 include_bytes!("../assets/icons/panel-left-filled.svg").as_slice(),
             )));
         }
-        gpui_kit_assets::Assets.load(path)
+        gpui_kit_assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-        gpui_kit_assets::Assets.list(path)
+        gpui_kit_assets::AllAssets.list(path)
     }
 }
 
