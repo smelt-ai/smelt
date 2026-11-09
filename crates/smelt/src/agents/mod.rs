@@ -173,10 +173,9 @@ pub(crate) struct AgentEditor {
     instructions: Entity<TextareaState>,
     /// 绑定参考链接用的输入框。目录走原生选择框，链接只能手输。
     context_link: Entity<InputState>,
-    /// 智能体那台机器扫出的插件目录，取自 Workspace 的 Pi 配置快照；快照更新时跟着换。
-    plugins: Vec<PiPlugin>,
-    /// 运行时那台机器上 `~/.pi/agent/mcp.json` 里的服务器，同上。
-    mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
+    /// 智能体那台机器的 Pi 配置：插件、MCP 服务器、可选模型都从这里取。编辑器自己读、
+    /// 自己留一份，不和能力库共用。
+    pi: AgentPiSnapshot,
     /// 同理，记忆不在渲染里扫：打开编辑器、运行时报记忆目录有变化、有对话停下来、
     /// 点刷新或删除后才重扫。
     memories: AgentMemories,
@@ -191,20 +190,58 @@ pub(crate) struct AgentEditor {
 }
 
 impl AgentEditor {
-    /// 换上 `runtime` 那台机器新给的插件和 MCP 目录。别的机器的目录不是这个智能体能用的，
-    /// 不换。
-    pub(crate) fn set_pi_catalog(
-        &mut self,
-        runtime: &crate::RuntimeKey,
-        plugins: Vec<PiPlugin>,
-        mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
-    ) {
-        if self.agent.runtime != *runtime {
-            return;
-        }
-        self.plugins = plugins;
-        self.mcp_servers = mcp_servers;
+    /// 智能体那台机器上扫出的插件；还没读到是空的。
+    pub(crate) fn pi_plugins(&self) -> &[PiPlugin] {
+        self.pi
+            .config
+            .as_ref()
+            .map(|config| config.plugins.as_slice())
+            .unwrap_or_default()
     }
+
+    /// 那台机器 `~/.pi/agent/mcp.json` 里的服务器；还没读到或读不出来是空的。
+    pub(crate) fn pi_mcp_servers(&self) -> &[smelt_model::pi_mcp::PiMcpServer] {
+        self.pi
+            .config
+            .as_ref()
+            .and_then(|config| config.mcp_servers.as_ref().ok())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// 那台机器上可选的模型；还没读到是空的。
+    pub(crate) fn pi_model_choice_groups(
+        &self,
+    ) -> &[smelt_model::pi_model_settings::PiModelChoiceGroup] {
+        self.pi
+            .config
+            .as_ref()
+            .map(|config| config.model_choice_groups.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// 还没读到配置时显示的话；读到了是 `None`。
+    pub(crate) fn pi_pending_text(&self) -> Option<String> {
+        if self.pi.config.is_some() {
+            return None;
+        }
+        Some(
+            self.pi
+                .error
+                .clone()
+                .unwrap_or_else(|| "正在读取这台机器的 Pi 配置…".to_string()),
+        )
+    }
+}
+
+/// 编辑器读到的那台机器的 Pi 配置。
+#[derive(Default)]
+pub(crate) struct AgentPiSnapshot {
+    config: Option<smelt_model::pi_service::PiConfig>,
+    /// 最近一次读取失败的原因。
+    error: Option<String>,
+    /// 读取的代数：晚回来的旧读取不能盖掉更新的那份。
+    generation: u64,
 }
 
 /// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。由运行时列出。
@@ -2189,8 +2226,15 @@ fn render_agent_model_control(
                         });
                     }),
             );
-            // 模型在智能体那台机器上跑，可选的也是那台机器的。
-            let groups = crate::settings::pi_model_choice_groups(&agent.runtime, cx);
+            // 模型在智能体那台机器上跑，可选的也是那台机器的：取编辑器读到的那份。
+            let groups = entity
+                .read(cx)
+                .agent_surface
+                .editor
+                .as_ref()
+                .filter(|editor| editor.agent == agent)
+                .map(|editor| editor.pi_model_choice_groups().to_vec())
+                .unwrap_or_default();
             if !groups.is_empty() {
                 menu = menu.separator();
             }
@@ -2345,7 +2389,7 @@ fn render_agent_plugin_card(
 
     // 已勾选但磁盘上已经没有的条目也要露出来，否则用户没法取消它。
     let mut rows: Vec<AnyElement> = editor
-        .plugins
+        .pi_plugins()
         .iter()
         .map(|plugin| {
             agent_plugin_row(
@@ -2363,8 +2407,10 @@ fn render_agent_plugin_card(
             )
         })
         .collect();
-    for id in &selected {
-        if editor.plugins.iter().any(|plugin| plugin.id == *id) {
+    // 目录还没读到时不知道哪些已经没了，先不标。
+    let pending = editor.pi_pending_text();
+    for id in selected.iter().filter(|_| pending.is_none()) {
+        if editor.pi_plugins().iter().any(|plugin| plugin.id == *id) {
             continue;
         }
         let (kind_label, name) = match smelt_model::pi_plugin_catalog::split_plugin_id(id) {
@@ -2392,7 +2438,9 @@ fn render_agent_plugin_card(
             .py_4()
             .text_xs()
             .text_color(rgb(crate::ui_theme::text_faint()))
-            .child("还没有装任何插件。去「设置 → 智能体插件」导入技能或扩展。")
+            .child(pending.unwrap_or_else(|| {
+                "还没有装任何插件。点「管理」去能力库导入技能或扩展。".to_string()
+            }))
             .into_any_element()
     } else {
         div()
@@ -3279,7 +3327,7 @@ fn render_agent_mcp_card(
         });
 
     let mut rows: Vec<AnyElement> = editor
-        .mcp_servers
+        .pi_mcp_servers()
         .iter()
         .map(|server| {
             let (kind_label, detail) = match &server.transport {
@@ -3307,8 +3355,13 @@ fn render_agent_mcp_card(
         })
         .collect();
     // 已勾选但 mcp.json 里已经删掉的也要露出来，否则用户没法取消它。
-    for name in &selected {
-        if editor.mcp_servers.iter().any(|server| server.name == *name) {
+    let pending = editor.pi_pending_text();
+    for name in selected.iter().filter(|_| pending.is_none()) {
+        if editor
+            .pi_mcp_servers()
+            .iter()
+            .any(|server| server.name == *name)
+        {
             continue;
         }
         rows.push(agent_plugin_row(
@@ -3326,23 +3379,26 @@ fn render_agent_mcp_card(
         ));
     }
 
-    let body = if rows.is_empty() {
-        div()
-            .px_5()
-            .py_4()
-            .text_xs()
-            .text_color(rgb(crate::ui_theme::text_faint()))
-            .child("还没有配置 MCP 服务器。点「管理」去能力库添加。")
-            .into_any_element()
-    } else {
-        div()
-            .px_2()
-            .pb_2()
-            .flex()
-            .flex_col()
-            .children(rows)
-            .into_any_element()
-    };
+    let body =
+        if rows.is_empty() {
+            div()
+                .px_5()
+                .py_4()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child(pending.unwrap_or_else(|| {
+                    "还没有配置 MCP 服务器。点「管理」去能力库添加。".to_string()
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .px_2()
+                .pb_2()
+                .flex()
+                .flex_col()
+                .children(rows)
+                .into_any_element()
+        };
 
     agent_surface_card()
         .flex()

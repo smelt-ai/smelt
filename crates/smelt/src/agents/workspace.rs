@@ -412,17 +412,62 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 请运行时重新扫描插件和 MCP。用户在设置里装完插件后不用重开编辑器；新快照到了
-    /// 会顺带更新打开着的编辑器。
+    /// 请运行时重新扫描插件和 MCP。用户在能力库里装完插件后不用重开编辑器。
     pub(super) fn refresh_agent_plugins(&mut self, cx: &mut Context<Self>) {
-        if let Some(runtime) = self
+        self.refresh_agent_pi_config(cx);
+    }
+
+    /// 那台机器上的 Pi 配置变了，或者重新连上了它：开着的编辑器属于那台机器就重读。
+    pub(crate) fn on_agent_pi_config_changed(
+        &mut self,
+        runtime: &crate::RuntimeKey,
+        cx: &mut Context<Self>,
+    ) {
+        if self
             .agent_surface
             .editor
             .as_ref()
-            .map(|e| e.agent.runtime.clone())
+            .is_some_and(|editor| editor.agent.runtime == *runtime)
         {
-            self.refresh_pi_config(runtime, cx);
+            self.refresh_agent_pi_config(cx);
         }
+    }
+
+    /// 向智能体那台机器读一次 Pi 配置给编辑器。回来时编辑器已经换了智能体，或者又发了
+    /// 一次读取，这份就丢掉。
+    fn refresh_agent_pi_config(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_surface.editor.as_mut() else {
+            return;
+        };
+        editor.pi.generation += 1;
+        let generation = editor.pi.generation;
+        let agent = editor.agent.clone();
+        self.run_call_on::<smelt_model::control_api::PiConfigGet>(
+            &agent.runtime.clone(),
+            smelt_runtime_client::protocol::control::EmptyParams::default(),
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| {
+                let Some(editor) =
+                    this.agent_surface.editor.as_mut().filter(|editor| {
+                        editor.agent == agent && editor.pi.generation == generation
+                    })
+                else {
+                    return;
+                };
+                match result {
+                    Ok(config) => {
+                        editor.pi.config = Some(config);
+                        editor.pi.error = None;
+                    }
+                    Err(error) => {
+                        eprintln!("[agents] 读取 Pi 配置失败：{error}");
+                        editor.pi.error = Some(format!("读取这台机器的 Pi 配置失败：{error}"));
+                    }
+                }
+                cx.notify();
+            },
+        );
     }
 
     /// 向运行时重新取当前编辑器那个智能体的记忆。回来时编辑器已换人就丢掉。
@@ -866,22 +911,13 @@ impl Workspace {
         }));
 
         let memories = AgentMemories::default();
-        let pi_config = self.pi_config_on(&agent_ref.runtime);
-        let plugins = pi_config
-            .map(|config| config.plugins.clone())
-            .unwrap_or_default();
-        let mcp_servers = pi_config
-            .and_then(|config| config.mcp_servers.clone().ok())
-            .unwrap_or_default();
-        let runtime = agent_ref.runtime.clone();
         self.agent_surface.editor = Some(AgentEditor {
             agent: agent_ref,
             name,
             name_editing: false,
             instructions,
             context_link,
-            plugins,
-            mcp_servers,
+            pi: Default::default(),
             memories,
             tab: self
                 .agent_surface
@@ -894,7 +930,7 @@ impl Workspace {
             _subscriptions: subscriptions,
         });
         self.refresh_agent_memories(cx);
-        self.refresh_pi_config(runtime, cx);
+        self.refresh_agent_pi_config(cx);
         window.focus(&self.focus_handle, cx);
     }
 

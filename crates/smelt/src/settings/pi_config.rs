@@ -5,8 +5,8 @@
 //! 修改由运行时回带新快照。别处（另一扇窗口、手机、命令行）经运行时改了配置，运行时推
 //! `pi_config.changed`，缓存过的那台机器重读（[`Workspace::on_pi_config_changed`]）。
 //!
-//! 能力库可以切到别的机器去配（[`PiLibrary`]），智能体编辑器读智能体所在那台机器的：
-//! 都从同一份按机器的缓存取。
+//! 能力库可以切到别的机器去配（[`PiLibrary`]）。这份缓存只给能力库（含设置窗口里的模型
+//! 页）用；智能体编辑器自己读、自己留一份，见 `agents::AgentPiSnapshot`。
 
 use super::*;
 use smelt_model::control_api::PiConfigGet;
@@ -40,7 +40,7 @@ pub(crate) struct PiConfigSlot {
     generation: u64,
 }
 
-/// 各台机器的可选模型：记忆设置页、智能体定义页的下拉菜单拿不到 `Workspace`。
+/// 各台机器的可选模型：能力库里记忆页的重排模型下拉拿不到 `Workspace`。
 #[derive(Default)]
 pub struct PiModelChoices(std::collections::HashMap<crate::RuntimeKey, Vec<PiModelChoiceGroup>>);
 
@@ -198,22 +198,14 @@ impl Workspace {
         self.adopt_pi_config_on(self.pi_library.runtime.clone(), config, cx);
     }
 
-    /// 换上那台机器给的新快照，顺带更新开着的、属于那台机器的智能体编辑器和模型下拉：
-    /// 它们读的都是这份缓存。活着的会话不归这里管，它们跟着运行时推的
-    /// `pi_config.changed` 重拉模型目录。
+    /// 换上那台机器给的新快照。别的功能（智能体编辑器、活着的会话）各自跟着运行时推的
+    /// `pi_config.changed` 重读，不归这里管。
     fn adopt_pi_config_on(
         &mut self,
         runtime: crate::RuntimeKey,
         config: PiConfig,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.agent_surface.editor.as_mut() {
-            editor.set_pi_catalog(
-                &runtime,
-                config.plugins.clone(),
-                config.mcp_servers.clone().unwrap_or_default(),
-            );
-        }
         if !cx.has_global::<PiModelChoices>() {
             cx.set_global(PiModelChoices::default());
         }
