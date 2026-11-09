@@ -502,11 +502,14 @@ pub(crate) struct RuntimeHub {
 
 impl gpui::Global for RuntimeHub {}
 
+/// 这台桌面的 iroh endpoint，所有远程运行时共用（同一把密钥绑几个会让 relay 上出现重复
+/// 节点）。第一次拨号时才绑；[`reset_iroh_client`] 丢掉之后下一次拨号重绑。
+static IROH_CLIENT: std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::IrohClient>>> =
+    std::sync::Mutex::new(None);
+
 /// 这台桌面的 iroh 身份，所有远程运行时共用。绑定要起 tokio 运行时，只能在后台调。
 pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohClient>, String> {
-    static CLIENT: std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::IrohClient>>> =
-        std::sync::Mutex::new(None);
-    let mut slot = CLIENT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut slot = IROH_CLIENT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(client) = slot.as_ref() {
         return Ok(std::sync::Arc::clone(client));
     }
@@ -519,11 +522,80 @@ pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohCl
     Ok(client)
 }
 
+/// 系统睡醒后丢掉 iroh endpoint，下一次拨号重绑一个新的，再请离线的机器立刻重探。
+///
+/// 长睡醒来（中间还换过网络、开关过代理）后，旧 endpoint 可能再也连不上 relay：之后每次
+/// 拨号都等满时限报超时，所有远程机器一直显示离线，重开应用才好（2026-11-09，睡了一个多
+/// 小时，relay 和远程机器都好着，app 里一条到 relay 的连接都没有）。iroh 没能自己恢复，
+/// 卡在哪还没查清（它的警告现在进 app.log，来源 `iroh`），所以不指望它，醒来就换新的。
+///
+/// 旧 endpoint 上还活着的连接随之关掉：在线的机器订阅断开，按原有的断线重连接到新
+/// endpoint 上；终端、对话照常重连。睡过一觉这些连接多半已经超时，代价很小。还没拨过号
+/// 就什么都不做，不为此去绑。
+pub(crate) fn reset_iroh_after_wake(cx: &mut gpui::App) {
+    let routes: Vec<RemoteRoute> = cx
+        .try_global::<RuntimeHub>()
+        .map(|hub| {
+            hub.remotes
+                .iter()
+                .map(|remote| remote.route.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    cx.spawn(async move |cx| {
+        let reset = cx
+            .background_executor()
+            .spawn(async move { reset_iroh_client(&routes) })
+            .await;
+        if reset {
+            smelt_sys::app_log::log("info", "iroh", "系统睡醒，换掉旧的 iroh endpoint");
+            cx.update(|cx| crate::runtime_events::probe_remotes(cx));
+        }
+    })
+    .detach();
+}
+
+/// 丢掉共用的 iroh endpoint 和各台机器按它拨好的连接器。旧的在最后一份引用放掉时关闭，
+/// 通常就在这里：关连接要等 iroh 收尾，阻塞，只在后台调。之前没绑过返回 `false`。
+fn reset_iroh_client(routes: &[RemoteRoute]) -> bool {
+    // 先清全局这份再清各条路线：反过来的话，夹在中间的拨号会按旧 endpoint 再建一个连接器
+    // 留在路线上。就算有拨号赶在这之前拿走了旧的，下一次连接也会认出连接器不是新
+    // endpoint 的、重建（见 [`RouteState::connector`]）。
+    let old = IROH_CLIENT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if old.is_none() {
+        return false;
+    }
+    for route in routes {
+        route.redial();
+    }
+    drop(old);
+    true
+}
+
 /// 经哪个中继连一台远程运行时，以及按它拨好的连接器（还没拨过号就是 `None`）。
 #[derive(Default)]
 struct RouteState {
     relay: Option<smelt_iroh::RelaySettings>,
     connector: Option<std::sync::Arc<smelt_iroh::runtime::RuntimeConnector>>,
+}
+
+impl RouteState {
+    /// 经 `client` 连 `endpoint` 的连接器：已有的是经它拨的就接着用（同一条 QUIC 连接上
+    /// 开流），没有或是经换掉的旧 endpoint 拨的就按眼下的中继新建。
+    fn connector(
+        &mut self,
+        client: &std::sync::Arc<smelt_iroh::runtime::IrohClient>,
+        endpoint: smelt_iroh::EndpointId,
+    ) -> std::sync::Arc<smelt_iroh::runtime::RuntimeConnector> {
+        if let Some(connector) = self.connector.as_ref()
+            && connector.uses(client)
+        {
+            return std::sync::Arc::clone(connector);
+        }
+        let connector = std::sync::Arc::new(client.connector(endpoint, self.relay.as_ref()));
+        self.connector = Some(std::sync::Arc::clone(&connector));
+        connector
+    }
 }
 
 /// 盯着连接路径的守卫，带着编号：认出守卫换过之后才到的旧事件。
@@ -534,7 +606,7 @@ type RouteWatch = Option<(u64, smelt_iroh::runtime::LinkWatch)>;
 #[derive(Clone, Default)]
 struct RemoteRoute {
     state: std::sync::Arc<std::sync::Mutex<RouteState>>,
-    /// 单独一把锁：第一次拨号时 `state` 会被握着绑 iroh，主线程摘守卫不能跟着等。
+    /// 单独一把锁：主线程摘守卫不跟后台读连接路径、拨号抢 `state`。
     watch: std::sync::Arc<std::sync::Mutex<RouteWatch>>,
 }
 
@@ -615,10 +687,13 @@ impl RemoteRoute {
 
     /// 改走另一个中继：丢掉按旧中继拨的连接器，下一次开流按新的重拨。
     fn retarget(&self, relay: Option<smelt_iroh::RelaySettings>) {
-        let mut route = self.lock();
-        route.relay = relay;
-        route.connector = None;
-        drop(route);
+        self.lock().relay = relay;
+        self.redial();
+    }
+
+    /// 丢掉连接器和盯着它的守卫，下一次开流重拨。
+    fn redial(&self) {
+        self.lock().connector = None;
         self.unwatch();
     }
 }
@@ -645,7 +720,8 @@ fn connected(status: &RuntimeStatus) -> bool {
 }
 
 /// 远程运行时的连接器。iroh 要起 tokio，不能在主线程绑，所以第一次连接（总在后台）时
-/// 才绑；之后复用同一个，同一条 QUIC 连接上开流。
+/// 才绑；之后复用同一个，同一条 QUIC 连接上开流。endpoint 换过（见
+/// [`reset_iroh_after_wake`]）就按新的重建。
 struct LazyRemoteConnector {
     endpoint: smelt_iroh::EndpointId,
     route: RemoteRoute,
@@ -653,19 +729,8 @@ struct LazyRemoteConnector {
 
 impl smelt_runtime_client::Connector for LazyRemoteConnector {
     fn connect(&self) -> std::io::Result<smelt_runtime_client::RuntimeStream> {
-        let connector = {
-            let mut route = self.route.lock();
-            match route.connector.as_ref() {
-                Some(connector) => std::sync::Arc::clone(connector),
-                None => {
-                    let client = iroh_client().map_err(std::io::Error::other)?;
-                    let connector =
-                        std::sync::Arc::new(client.connector(self.endpoint, route.relay.as_ref()));
-                    route.connector = Some(std::sync::Arc::clone(&connector));
-                    connector
-                }
-            }
-        };
+        let client = iroh_client().map_err(std::io::Error::other)?;
+        let connector = self.route.lock().connector(&client, self.endpoint);
         smelt_runtime_client::Connector::connect(connector.as_ref())
     }
 }
@@ -2087,5 +2152,39 @@ mod tests {
             remote.connection.name, remote.connection.runtime_id
         );
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// 睡醒换掉 iroh endpoint 后，路线上按旧 endpoint 拨的连接器不能再用：它拴着的那个
+    /// endpoint 可能已经连不上 relay，接着用就一直拨号超时。
+    #[test]
+    fn route_rebuilds_connector_once_endpoint_is_replaced() {
+        // 不碰网络：relay 指向本机不存在的端口，绑定不等它。
+        let relay = smelt_iroh::RelaySettings::parse("127.0.0.1:9").unwrap();
+        let bind = |name: &str| {
+            let path = std::env::temp_dir()
+                .join(format!("smelt-route-test-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let secret = smelt_iroh::load_or_create_secret(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+            smelt_iroh::runtime::IrohClient::new(secret, Some(&relay)).unwrap()
+        };
+        let old = bind("old");
+        let new = bind("new");
+        let target = new.id();
+        let mut route = RouteState::default();
+
+        let first = route.connector(&old, target);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &route.connector(&old, target)),
+            "endpoint 没换就接着用同一个连接器"
+        );
+
+        let rebuilt = route.connector(&new, target);
+        assert!(rebuilt.uses(&new), "换了 endpoint 要按新的重建");
+        assert!(!rebuilt.uses(&old));
+        assert!(std::sync::Arc::ptr_eq(
+            &rebuilt,
+            &route.connector(&new, target)
+        ));
     }
 }
