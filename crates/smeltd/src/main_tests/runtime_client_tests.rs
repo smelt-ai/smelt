@@ -230,6 +230,36 @@ fn appearance_update_without_a_desktop_is_refused() {
 }
 
 #[test]
+fn mixed_appearance_and_memory_patch_is_rejected_before_desktop_check() {
+    use smelt_core::appearance_settings::SettingsPatch;
+    use smelt_core::control_api::SettingsUpdate;
+
+    let error = in_process_runtime()
+        .call::<SettingsUpdate>(
+            &SettingsPatch {
+                settings: std::collections::BTreeMap::from([
+                    (
+                        "appearance.theme_mode".to_string(),
+                        serde_json::json!("light"),
+                    ),
+                    (
+                        "memory.embedding_model".to_string(),
+                        serde_json::json!("bge-m3"),
+                    ),
+                ]),
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap_err();
+
+    let ControlClientError::Protocol(error) = error else {
+        panic!("expected a protocol error, got {error}");
+    };
+    assert_eq!(error.code, ControlErrorCode::InvalidParams);
+    assert!(error.message.contains("分两次"), "{}", error.message);
+}
+
+#[test]
 fn git_failure_reaches_the_client_as_an_operation_error() {
     use smelt_runtime_client::protocol::git::{GitBranchParams, GitCheckoutCall};
     let root = git_repo_with_change("checkout");

@@ -2095,7 +2095,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let subscriber = runtime.client().clone();
         std::thread::spawn(move || {
-            crate::terminal::subscribe_daemon_states_blocking(&subscriber, |event| {
+            crate::terminal::subscribe_daemon_states_blocking(&subscriber, false, |event| {
                 tx.send(event).is_ok()
             });
         });

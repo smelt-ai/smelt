@@ -114,6 +114,7 @@ mod memory_peer_auth;
 mod conversation_image;
 mod desktop;
 mod devices;
+mod appearance_requests;
 mod event_hub;
 mod files_control;
 mod git_control;

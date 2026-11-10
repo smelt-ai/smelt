@@ -1179,31 +1179,43 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            // 外观归桌面端：没有在线的桌面端就整单拒绝，别让记忆配置写了一半。
-            let wants_appearance = params
-                .settings
-                .keys()
-                .any(|key| !smelt_core::memory_settings::is_memory_key(key));
-            if wants_appearance && !event_hub.has_appearance_listener().unwrap_or(false) {
-                return error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(
-                        ControlErrorCode::FailedPrecondition,
-                        "外观属于桌面客户端，现在没有打开的桌面客户端来接收这次修改",
-                    ),
-                );
-            }
+            // 混合补丁由 update_settings 在打开库之前拒绝；桌面是否可用只由 dispatch 判定。
             match appearance_settings::update_settings(params).map_err(control_error_for_settings) {
                 Ok(update) => {
-                    if !update.appearance.is_empty()
-                        && let Err(error) = event_hub.request_appearance_change(update.appearance)
-                    {
-                        return error_value(
-                            control_version,
-                            request_id,
-                            ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
-                        );
+                    if !update.appearance.is_empty() {
+                        use crate::appearance_requests::RequestError;
+                        // 普通控制调用默认等 5 秒；留 1 秒传回结果，超时只说明结果未知。
+                        let result = event_hub
+                            .appearance_requests
+                            .dispatch(update.appearance)
+                            .and_then(|pending| pending.wait(std::time::Duration::from_secs(4)));
+                        if let Err(error) = result {
+                            let error = match error {
+                                RequestError::NoDesktop => ControlError::new(
+                                    ControlErrorCode::FailedPrecondition,
+                                    "外观属于本机桌面客户端，现在没有可接收修改的本机桌面",
+                                ),
+                                RequestError::MultipleDesktops => ControlError::new(
+                                    ControlErrorCode::FailedPrecondition,
+                                    "有多个本机桌面，无法确定由哪一个修改外观",
+                                ),
+                                RequestError::DeliveryFailed => ControlError::new(
+                                    ControlErrorCode::OperationFailed,
+                                    "外观请求无法投递到桌面",
+                                ),
+                                RequestError::OutcomeUnknown => ControlError::new(
+                                    ControlErrorCode::OperationFailed,
+                                    "没有收到桌面回执，修改结果未知（可能已生效或稍后生效）",
+                                ),
+                                RequestError::Invalid(message) => {
+                                    ControlError::new(ControlErrorCode::InvalidParams, message)
+                                }
+                                RequestError::Desktop(message) => {
+                                    ControlError::new(ControlErrorCode::OperationFailed, message)
+                                }
+                            };
+                            return error_value(control_version, request_id, error);
+                        }
                     }
                     success_value(control_version, &request_id, update.result)
                 }

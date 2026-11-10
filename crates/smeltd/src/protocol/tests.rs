@@ -8,9 +8,8 @@ use super::*;
 use smelt_event_protocol::FirstPartyClientKind;
 use smelt_event_protocol::{
     CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
-    CORE_CAPABILITY_SESSION_READ,
-    CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
-    EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, PluginId, ProtocolRange,
+    CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_SESSION_STATE_CHANGED,
+    Capability, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, PluginId, ProtocolRange,
     SubscribeErrorCode, SubscribeMessage, SubscribeRequest, SubscriptionDeclaration,
     SubscriptionId,
 };
@@ -173,6 +172,99 @@ fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
         )
         .expect("disconnect must remove the prior subscription");
     drop(replacement);
+}
+
+#[test]
+fn appearance_request_is_unicast_to_the_authenticated_local_subscription() {
+    use smelt_event_protocol::{
+        AppearanceApplyOutcome, AppearanceApplyRequested, CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
+        FirstPartyClientKind,
+    };
+    let event_hub = super::super::new_event_hub();
+    let mut request = request("appearance-desktop", CORE_TOPIC_SESSION_STATE_CHANGED);
+    request["subscription"]["topics"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(CORE_TOPIC_APPEARANCE_APPLY_REQUESTED));
+    let desktop = peer(123, None);
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker_hub = Arc::clone(&event_hub);
+    let worker_peer = desktop.clone();
+    let worker = thread::spawn(move || {
+        subscribe::handle_event_subscribe_with_peer(
+            server,
+            Some(&request),
+            Ok(auth::first_party_event_client(
+                FirstPartyClientKind::Desktop,
+            )),
+            Some(worker_peer),
+            &worker_hub,
+        )
+    });
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    assert!(matches!(
+        read_message(&mut reader),
+        SubscribeMessage::Snapshot { .. }
+    ));
+    let pending = event_hub
+        .appearance_requests
+        .dispatch(std::collections::BTreeMap::from([(
+            "appearance.theme".into(),
+            serde_json::json!("unknown theme"),
+        )]))
+        .unwrap();
+    let SubscribeMessage::Event { envelope, .. } = read_message(&mut reader) else {
+        panic!("expected appearance request");
+    };
+    assert_eq!(
+        envelope.topic.as_str(),
+        CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+    );
+    let request: AppearanceApplyRequested = serde_json::from_value(envelope.payload).unwrap();
+    event_hub
+        .appearance_requests
+        .respond(
+            &desktop,
+            &request.request_id,
+            AppearanceApplyOutcome::Invalid {
+                message: "未知主题".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(pending.wait(Duration::from_secs(1)),
+        Err(crate::appearance_requests::RequestError::Invalid(message)) if message == "未知主题"));
+    client.shutdown(Shutdown::Both).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn appearance_subscription_is_rejected_without_local_peer() {
+    use smelt_event_protocol::{CORE_TOPIC_APPEARANCE_APPLY_REQUESTED, FirstPartyClientKind};
+    let event_hub = super::super::new_event_hub();
+    let request = request("remote-appearance", CORE_TOPIC_APPEARANCE_APPLY_REQUESTED);
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker = thread::spawn(move || {
+        handle_event_subscribe(
+            server,
+            Some(&request),
+            Ok(auth::first_party_event_client(
+                FirstPartyClientKind::Desktop,
+            )),
+            &event_hub,
+        )
+    });
+    let mut reader = BufReader::new(client);
+    assert!(matches!(
+        read_message(&mut reader),
+        SubscribeMessage::Error { .. }
+    ));
+    worker.join().unwrap();
 }
 
 #[test]

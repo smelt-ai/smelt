@@ -409,6 +409,7 @@ pub(crate) fn spawn_subscription(
                         let separate = SeparateSubscription::open(&runtime, sender.topics.clone());
                         crate::terminal::subscribe_daemon_states_blocking(
                             runtime.client(),
+                            runtime.is_local(),
                             |event| {
                                 !stop.load(Ordering::Acquire)
                                     && sender.states.try_send((key.clone(), event)).is_ok()

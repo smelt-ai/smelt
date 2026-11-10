@@ -4071,14 +4071,33 @@ fn main() {
                     cx.update(|cx| DaemonStates::set_progress(&runtime, session_id, *progress, cx));
                     continue;
                 }
-                if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
+                if let terminal::DaemonStateEvent::AppearanceApplyRequested { request_id, settings } = &event {
                     if is_local {
-                        let settings = settings.clone();
-                        cx.update(|cx| {
-                            if let Err(error) = settings::apply_requested_appearance(&settings, cx) {
-                                crate::status_item::notify_error(format!("外观修改失败：{error}"));
+                        let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
+                        let outcome = match result {
+                            Ok(()) => smelt_event_protocol::AppearanceApplyOutcome::Applied,
+                            Err(smelt_model::appearance_settings::SettingsError::Invalid(message)) => {
+                                smelt_event_protocol::AppearanceApplyOutcome::Invalid { message }
                             }
-                        });
+                            Err(smelt_model::appearance_settings::SettingsError::Store(message)) => {
+                                smelt_event_protocol::AppearanceApplyOutcome::Failed { message }
+                            }
+                        };
+                        let receipt = smelt_event_protocol::AppearanceApplyReceipt {
+                            request_id: request_id.clone(),
+                            outcome,
+                        };
+                        cx.background_executor().spawn(async move {
+                            let request = serde_json::json!({
+                                "op": smelt_runtime_client::protocol::daemon::DaemonOperation::AppearanceReceipt,
+                                "receipt": receipt,
+                            });
+                            if let Err(error) = smelt_client::daemon_state::local_runtime().request_ok(
+                                &request, std::time::Duration::from_secs(4),
+                            ) {
+                                eprintln!("[appearance] 发送外观修改回执失败：{error}");
+                            }
+                        }).detach();
                     }
                     continue;
                 }
@@ -4129,7 +4148,7 @@ fn main() {
                         terminal::DaemonStateEvent::Removed { .. } => {}
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
-                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
                         terminal::DaemonStateEvent::TerminalNotification { .. } => {}
@@ -4183,7 +4202,7 @@ fn main() {
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::Automations(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
-                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
                         terminal::DaemonStateEvent::TerminalNotification { .. } => {}

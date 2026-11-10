@@ -310,8 +310,10 @@ pub enum DaemonStateEvent {
         session_id: String,
         progress: Option<TerminalProgress>,
     },
-    /// CLI / Control API 要改外观，已由运行时校验过。一次性请求，不是投影。
-    AppearanceChangeRequested {
+    /// CLI / Control API 要改外观，已由运行时校验过，单播给本机桌面。一次性请求，不是投影；
+    /// 处理完用 `request_id` 回执。
+    AppearanceApplyRequested {
+        request_id: String,
         settings: std::collections::BTreeMap<String, serde_json::Value>,
     },
     /// 当前这条 subscribe 连接已断开（守护 exec / 崩溃 / socket 没了）。

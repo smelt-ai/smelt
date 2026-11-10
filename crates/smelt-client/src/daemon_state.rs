@@ -9,15 +9,20 @@ use std::io::{BufRead, BufReader, Write};
 
 /// 阻塞：连接正式 `event_subscribe`，逐行解析稳定 DTO，直到连接断开、协议错误或
 /// `emit` 返回 false（收的一方不要了）。Ephemeral 订阅不发送 ack；Lag 后只等待 daemon
-/// 的恢复 snapshots。
+/// 的恢复 snapshots。`appearance_requests` 只有本机桌面传 true：外观请求单播给本机，
+/// 远程机器的订阅不订。
 pub fn subscribe_daemon_states_blocking(
     runtime: &smelt_runtime_client::RuntimeClient,
+    appearance_requests: bool,
     mut emit: impl FnMut(DaemonStateEvent) -> bool,
 ) {
     let Ok(mut s) = runtime.connect() else {
         return;
     };
-    let mut client = DaemonStateEventClient::new(SubscriptionShape::DESKTOP);
+    let mut client = DaemonStateEventClient::new(SubscriptionShape {
+        appearance_requests,
+        ..SubscriptionShape::DESKTOP
+    });
     let Ok(request) = client.request_line() else {
         return;
     };

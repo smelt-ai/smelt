@@ -128,8 +128,8 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | `agent.definition.create` | 有副作用 | 新建定义。可带稳定 `id`；缺省生成 UUID。重复 id 返回 `conflict` |
 | `agent.definition.update` | 有副作用 | 按 id 补丁更新；禁止整表覆盖 |
 | `agent.definition.delete` | 有副作用 | 按 id 删除。仍被自动化引用时返回 `failed_precondition` |
-| `settings.get` | 只读 | 返回已登记的外观设置 |
-| `settings.update` | 有副作用 | 按 key patch；未知 key 返回 `invalid_params` |
+| `settings.get` | 只读 | 返回运行时的记忆设置，密钥不回显 |
+| `settings.update` | 有副作用 | 按 key patch；未知 key 返回 `invalid_params`。外观与记忆设置须分两次提交，混合补丁会被拒绝。外观只交给唯一在线的本机桌面，等它校验、保存和安装后回执；超时或断线时结果未知，可能已生效或稍后生效 |
 | `automation.list` | 只读 | 定义清单；webhook 令牌脱敏 |
 | `automation.get` | 只读 | 按 id 读取 |
 | `automation.upsert` | 有副作用 | 新建或覆盖一条自动化，daemon 分配工作区 |
