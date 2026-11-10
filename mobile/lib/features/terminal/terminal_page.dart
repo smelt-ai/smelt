@@ -246,7 +246,10 @@ class _TerminalPageState extends State<TerminalPage>
         });
       case TerminalDataEvent():
         final bytes = _inputFilter.add(event.bytes);
-        if (bytes.isNotEmpty) _byteSink.add(bytes);
+        if (bytes.isEmpty) return;
+        _byteSink.add(bytes);
+        // 几何锁着时尾部在缓冲区中间，xterm 的贴底跟随管不到，由这里跟。
+        if (_terminalGeometryLocked && !_awayFromTail) _followTailAfterLayout();
       case TerminalReplayCompleteEvent():
         if (mounted) {
           setState(() {
@@ -303,7 +306,7 @@ class _TerminalPageState extends State<TerminalPage>
   void _updateAwayFromTail() {
     if (!mounted || !_terminalScrollController.hasClients) return;
     final position = _terminalScrollController.position;
-    final away = position.maxScrollExtent - position.pixels > 1.0;
+    final away = _tailOffset(position) - position.pixels > 1.0;
     if (away == _awayFromTail) return;
     setState(() => _awayFromTail = away);
   }
@@ -312,8 +315,48 @@ class _TerminalPageState extends State<TerminalPage>
     if (!_terminalScrollController.hasClients) return;
     final position = _terminalScrollController.position;
     // 隔着几千行做动画既慢又没意义，直接落到最新输出。
-    position.jumpTo(position.maxScrollExtent);
+    position.jumpTo(_tailOffset(position));
     _updateAwayFromTail();
+  }
+
+  /// 「最新输出」在哪。平时就是缓冲区底部。
+  ///
+  /// 键盘或输入框开着时终端几何是锁住的：缓冲区仍是原来那么多行，视口却矮了一截。
+  /// 新开的终端只在头几行有字，光标下面全是空行，这时落到缓冲区底部就只剩一屏空白。
+  /// 所以锁着时改成让光标行和最后一行有字的行里更靠下的那行贴住视口底部。
+  double _tailOffset(ScrollPosition position) {
+    final max = position.maxScrollExtent;
+    if (!_terminalGeometryLocked) return max;
+    final lineHeight =
+        _terminalViewKey.currentState?.renderTerminal.lineHeight ?? 0;
+    if (lineHeight <= 0) return max;
+    final buffer = _terminal.buffer;
+    final lines = buffer.lines;
+    var lastRow = buffer.absoluteCursorY;
+    for (var row = lines.length - 1; row > lastRow; row--) {
+      if (lines[row].getTrimmedLength() > 0) {
+        lastRow = row;
+        break;
+      }
+    }
+    // maxScrollExtent = 总行高 - 视口高，所以把第 lastRow 行贴到视口底部的偏移是
+    // max 减去它下面那些行的高度。
+    final below = lines.length - 1 - lastRow;
+    return (max - below * lineHeight).clamp(0.0, max);
+  }
+
+  bool _followTailScheduled = false;
+
+  void _followTailAfterLayout() {
+    if (_followTailScheduled) return;
+    _followTailScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _followTailScheduled = false;
+      if (!mounted || !_terminalScrollController.hasClients) return;
+      final position = _terminalScrollController.position;
+      final tail = _tailOffset(position);
+      if ((tail - position.pixels).abs() > 1.0) position.jumpTo(tail);
+    });
   }
 
   /// 滚到顶就去要更老的一段。首屏只带最新的几百行，剩下的按需补。
@@ -382,7 +425,8 @@ class _TerminalPageState extends State<TerminalPage>
           return;
         }
         final position = _terminalScrollController.position;
-        position.jumpTo(position.maxScrollExtent);
+        position.jumpTo(_tailOffset(position));
+        _updateAwayFromTail();
       });
     });
   }
@@ -529,6 +573,9 @@ class _TerminalPageState extends State<TerminalPage>
       if (!_softwareKeyboardWasVisible) {
         _softwareKeyboardWasVisible = true;
         _scrollToTerminalTailAfterLayout();
+      } else if (!_awayFromTail) {
+        // 键盘弹出是逐帧把视口压矮的；尾部不在缓冲区底时 xterm 不贴底，得跟着。
+        _followTailAfterLayout();
       }
       return;
     }
@@ -851,6 +898,8 @@ class _TerminalPageState extends State<TerminalPage>
       autoResize: !_terminalGeometryLocked && !_replayGeometryLocked,
       deleteDetection: true,
       simulateScroll: true,
+      // 打字、键盘弹出时 xterm 会跟到「底」；几何锁着时底在缓冲区中间，见 [_tailOffset]。
+      scrollToBottomOffset: _tailOffset,
       claimTap: _claimLinkTap,
       padding: SmeltTerminalTheme.padding,
       theme: theme,

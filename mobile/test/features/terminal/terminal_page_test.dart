@@ -689,6 +689,67 @@ void main() {
     await _close(tester, model);
   });
 
+  testWidgets('内容少时键盘直接盖住空行，内容多到被挡才往上挤', (tester) async {
+    addTearDown(() => tester.view.viewInsets = FakeViewPadding.zero);
+    final backend = _ScriptedBackend();
+    final model = await _open(tester, backend);
+    // 新开的终端：几何按整屏，内容只有头几行。
+    final geometry = backend.current.geometry;
+    backend.current
+      ..ready(cols: geometry.cols, rows: geometry.rows)
+      ..data('line-0\r\nline-1\r\n\$ ')
+      ..replayComplete();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    final scrollController = _view(tester).scrollController!;
+    await tester.tap(find.byIcon(LucideIcons.keyboard));
+    await tester.pump();
+    // 键盘逐帧弹出，视口一点点变矮。
+    for (final inset in [100.0, 200.0, 300.0]) {
+      tester.view.viewInsets = FakeViewPadding(bottom: inset);
+      await tester.pump();
+      await tester.pump();
+    }
+    expect(scrollController.position.maxScrollExtent, greaterThan(0));
+    expect(scrollController.offset, 0, reason: '内容在顶上几行，不该被挤出去');
+    expect(find.text('Latest'), findsNothing);
+    // 打字时 xterm 也会跟到「底」，同样不能落到空行上。
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '  l',
+        selection: TextSelection.collapsed(offset: 3),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(backend.sentInput.last, 'l');
+    expect(scrollController.offset, 0, reason: '打字不该把内容挤出去');
+
+    // 输出多到光标行会落到键盘下面：往上挤到光标行贴住视口底部为止。
+    backend.current.data(
+      List.generate(geometry.rows - 4, (i) => 'more-$i\r\n').join(),
+    );
+    await tester.pump();
+    await tester.pump();
+    final position = scrollController.position;
+    final lineHeight = tester
+        .state<TerminalViewState>(find.byType(TerminalView))
+        .renderTerminal
+        .lineHeight;
+    final cursorRow = _view(tester).terminal.buffer.absoluteCursorY;
+    final rowsBelowCursor =
+        _view(tester).terminal.buffer.lines.length - 1 - cursorRow;
+    expect(scrollController.offset, greaterThan(0));
+    expect(
+      scrollController.offset,
+      closeTo(position.maxScrollExtent - rowsBelowCursor * lineHeight, 0.5),
+    );
+
+    await _close(tester, model);
+  });
+
   testWidgets('开关软键盘不改 PTY 几何，实时输出照样跟底', (tester) async {
     addTearDown(() => tester.view.viewInsets = FakeViewPadding.zero);
     final backend = _ScriptedBackend();
