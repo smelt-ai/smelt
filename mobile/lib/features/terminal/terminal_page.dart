@@ -17,6 +17,7 @@ import '../../theme/terminal_theme.dart';
 import '../../utils/terminal_links.dart';
 import '../../utils/terminal_paste.dart';
 import '../../utils/xterm_input_filter.dart';
+import '../conversation/composer.dart';
 import 'terminal_chrome.dart';
 import 'terminal_shortcut_bar.dart';
 import 'terminal_stream.dart';
@@ -60,6 +61,11 @@ class _TerminalPageState extends State<TerminalPage>
   bool _softwareKeyboardWasVisible = false;
   bool _terminalGeometryLocked = false;
   bool _replayGeometryLocked = false;
+
+  /// 输入框开着。开着期间终端几何一直锁住：输入框和它唤起的键盘都只是暂时占地方。
+  bool _composing = false;
+  final TextEditingController _composerController = TextEditingController();
+  final FocusNode _composerFocusNode = FocusNode();
   late double _fontSize;
   int _decoderGeneration = 0;
 
@@ -108,7 +114,10 @@ class _TerminalPageState extends State<TerminalPage>
     _streamState = _stream.state;
     _stateSubscription = _stream.stateStream.listen((state) {
       if (!mounted) return;
-      if (!_canWriteIn(state)) _closeSoftwareKeyboard();
+      if (!_canWriteIn(state)) {
+        _closeSoftwareKeyboard();
+        _closeComposer();
+      }
       setState(() {
         _streamState = state;
         if (state == TerminalStreamState.ended) _ctrlLatched = false;
@@ -237,7 +246,10 @@ class _TerminalPageState extends State<TerminalPage>
         });
       case TerminalDataEvent():
         final bytes = _inputFilter.add(event.bytes);
-        if (bytes.isNotEmpty) _byteSink.add(bytes);
+        if (bytes.isEmpty) return;
+        _byteSink.add(bytes);
+        // 几何锁着时尾部在缓冲区中间，xterm 的贴底跟随管不到，由这里跟。
+        if (_terminalGeometryLocked && !_awayFromTail) _followTailAfterLayout();
       case TerminalReplayCompleteEvent():
         if (mounted) {
           setState(() {
@@ -294,7 +306,7 @@ class _TerminalPageState extends State<TerminalPage>
   void _updateAwayFromTail() {
     if (!mounted || !_terminalScrollController.hasClients) return;
     final position = _terminalScrollController.position;
-    final away = position.maxScrollExtent - position.pixels > 1.0;
+    final away = _tailOffset(position) - position.pixels > 1.0;
     if (away == _awayFromTail) return;
     setState(() => _awayFromTail = away);
   }
@@ -303,8 +315,48 @@ class _TerminalPageState extends State<TerminalPage>
     if (!_terminalScrollController.hasClients) return;
     final position = _terminalScrollController.position;
     // 隔着几千行做动画既慢又没意义，直接落到最新输出。
-    position.jumpTo(position.maxScrollExtent);
+    position.jumpTo(_tailOffset(position));
     _updateAwayFromTail();
+  }
+
+  /// 「最新输出」在哪。平时就是缓冲区底部。
+  ///
+  /// 键盘或输入框开着时终端几何是锁住的：缓冲区仍是原来那么多行，视口却矮了一截。
+  /// 新开的终端只在头几行有字，光标下面全是空行，这时落到缓冲区底部就只剩一屏空白。
+  /// 所以锁着时改成让光标行和最后一行有字的行里更靠下的那行贴住视口底部。
+  double _tailOffset(ScrollPosition position) {
+    final max = position.maxScrollExtent;
+    if (!_terminalGeometryLocked) return max;
+    final lineHeight =
+        _terminalViewKey.currentState?.renderTerminal.lineHeight ?? 0;
+    if (lineHeight <= 0) return max;
+    final buffer = _terminal.buffer;
+    final lines = buffer.lines;
+    var lastRow = buffer.absoluteCursorY;
+    for (var row = lines.length - 1; row > lastRow; row--) {
+      if (lines[row].getTrimmedLength() > 0) {
+        lastRow = row;
+        break;
+      }
+    }
+    // maxScrollExtent = 总行高 - 视口高，所以把第 lastRow 行贴到视口底部的偏移是
+    // max 减去它下面那些行的高度。
+    final below = lines.length - 1 - lastRow;
+    return (max - below * lineHeight).clamp(0.0, max);
+  }
+
+  bool _followTailScheduled = false;
+
+  void _followTailAfterLayout() {
+    if (_followTailScheduled) return;
+    _followTailScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _followTailScheduled = false;
+      if (!mounted || !_terminalScrollController.hasClients) return;
+      final position = _terminalScrollController.position;
+      final tail = _tailOffset(position);
+      if ((tail - position.pixels).abs() > 1.0) position.jumpTo(tail);
+    });
   }
 
   /// 滚到顶就去要更老的一段。首屏只带最新的几百行，剩下的按需补。
@@ -373,7 +425,8 @@ class _TerminalPageState extends State<TerminalPage>
           return;
         }
         final position = _terminalScrollController.position;
-        position.jumpTo(position.maxScrollExtent);
+        position.jumpTo(_tailOffset(position));
+        _updateAwayFromTail();
       });
     });
   }
@@ -395,7 +448,10 @@ class _TerminalPageState extends State<TerminalPage>
 
   void _enableSoftwareKeyboard() {
     if (!_canWrite || _softwareKeyboardEnabled) return;
+    // 键盘直接从输入框交给终端，中间不收起，几何锁也不松。
+    _composerFocusNode.unfocus();
     setState(() {
+      _composing = false;
       _softwareKeyboardEnabled = true;
       _softwareKeyboardWasVisible = false;
       _terminalGeometryLocked = true;
@@ -436,12 +492,70 @@ class _TerminalPageState extends State<TerminalPage>
     setState(() {
       _softwareKeyboardEnabled = false;
       _softwareKeyboardWasVisible = false;
-      _terminalGeometryLocked = false;
+      _terminalGeometryLocked = _composing;
       // xterm 4.0 在 closeKeyboard() 之后还留着输入法组字文本；重建视图清掉这份本地
       // 渲染状态，PTY 不受影响。
       _terminalViewKey = GlobalKey<TerminalViewState>();
     });
     _scrollToTerminalTailAfterLayout();
+  }
+
+  // 输入框 -------------------------------------------------------------------
+  //
+  // 整段写好再发：输入法组字、改错、语音输入都在原生输入框里做，不经过 xterm 那套逐字
+  // 转发。发出去走 bracketed paste，多行内容在 Claude Code 等 TUI 里不会被逐行提交，
+  // 末尾再补一个回车。
+
+  void _toggleComposer() {
+    if (_composing) {
+      _closeComposer();
+    } else {
+      _openComposer();
+    }
+  }
+
+  void _openComposer() {
+    if (!_canWrite || _composing) return;
+    final keyboardVisible = View.of(context).viewInsets.bottom > 0;
+    _closeKeyboardAndReleaseFocus();
+    setState(() {
+      if (_softwareKeyboardEnabled) {
+        _softwareKeyboardEnabled = false;
+        _terminalViewKey = GlobalKey<TerminalViewState>();
+      }
+      _composing = true;
+      _terminalGeometryLocked = true;
+      _softwareKeyboardWasVisible = keyboardVisible;
+    });
+    _scrollToTerminalTailAfterLayout();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _composing) _composerFocusNode.requestFocus();
+    });
+  }
+
+  void _closeComposer() {
+    if (!mounted || !_composing) return;
+    _composerFocusNode.unfocus();
+    final keyboardVisible = View.of(context).viewInsets.bottom > 0;
+    setState(() => _composing = false);
+    if (keyboardVisible) {
+      // 等键盘真收起来（didChangeMetrics）再解锁。
+      _softwareKeyboardWasVisible = true;
+    } else {
+      _finishSoftwareKeyboardCycle();
+    }
+  }
+
+  void _sendComposer() {
+    if (!_canWrite) return;
+    final text = _composerController.text;
+    if (text.trim().isEmpty) return;
+    _setCtrlLatched(false);
+    _stream.sendInput(
+      '${encodeTerminalPaste(text, bracketed: _terminal.bracketedPasteMode)}\r',
+    );
+    _composerController.clear();
+    _jumpToTail();
   }
 
   void _closeKeyboardAndReleaseFocus() {
@@ -459,6 +573,9 @@ class _TerminalPageState extends State<TerminalPage>
       if (!_softwareKeyboardWasVisible) {
         _softwareKeyboardWasVisible = true;
         _scrollToTerminalTailAfterLayout();
+      } else if (!_awayFromTail) {
+        // 键盘弹出是逐帧把视口压矮的；尾部不在缓冲区底时 xterm 不贴底，得跟着。
+        _followTailAfterLayout();
       }
       return;
     }
@@ -643,19 +760,6 @@ class _TerminalPageState extends State<TerminalPage>
             steps: Preferences.terminalFontSteps,
             onSelected: _setFontSize,
           ),
-          IconButton(
-            tooltip: !_canWrite
-                ? l10n.terminalKeyboardUnavailable
-                : _softwareKeyboardEnabled
-                ? l10n.terminalHideKeyboard
-                : l10n.terminalShowKeyboard,
-            onPressed: _canWrite ? _toggleSoftwareKeyboard : null,
-            icon: Icon(
-              _softwareKeyboardEnabled
-                  ? LucideIcons.keyboardOff
-                  : LucideIcons.keyboard,
-            ),
-          ),
           const SizedBox(width: Space.xs),
         ],
       ),
@@ -683,6 +787,28 @@ class _TerminalPageState extends State<TerminalPage>
             // 而且键盘开合还会连带改变终端视口高度，白白触发一轮行列重算。
             // 也不能等连上才出现：它得在 attach 之前就把终端视口压到最终高度，否则回放
             // 完成后栏子上屏又要改一次行数，那就是一次多余的 PTY resize。重连期间同理。
+            if (_composing && _streamState != TerminalStreamState.ended)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Space.sm,
+                  Space.xs,
+                  Space.sm,
+                  0,
+                ),
+                child: Composer(
+                  controller: _composerController,
+                  focusNode: _composerFocusNode,
+                  hint: l10n.terminalComposerHint,
+                  canSend: _canWrite,
+                  working: false,
+                  sending: false,
+                  readOnly: !_canWrite,
+                  images: const [],
+                  onSend: _sendComposer,
+                  onStop: () {},
+                  onRemoveImage: (_) {},
+                ),
+              ),
             if (_streamState != TerminalStreamState.ended)
               TerminalShortcutBar(
                 onKey: _sendKey,
@@ -690,6 +816,10 @@ class _TerminalPageState extends State<TerminalPage>
                 onPaste: _pasteClipboard,
                 ctrlLatched: _ctrlLatched,
                 onToggleCtrl: () => _setCtrlLatched(!_ctrlLatched),
+                keyboardEnabled: _softwareKeyboardEnabled,
+                onToggleKeyboard: _canWrite ? _toggleSoftwareKeyboard : null,
+                composing: _composing,
+                onToggleComposer: _canWrite ? _toggleComposer : null,
               ),
           ],
         ),
@@ -768,6 +898,8 @@ class _TerminalPageState extends State<TerminalPage>
       autoResize: !_terminalGeometryLocked && !_replayGeometryLocked,
       deleteDetection: true,
       simulateScroll: true,
+      // 打字、键盘弹出时 xterm 会跟到「底」；几何锁着时底在缓冲区中间，见 [_tailOffset]。
+      scrollToBottomOffset: _tailOffset,
       claimTap: _claimLinkTap,
       padding: SmeltTerminalTheme.padding,
       theme: theme,
@@ -783,6 +915,8 @@ class _TerminalPageState extends State<TerminalPage>
     WidgetsBinding.instance.removeObserver(this);
     _terminalViewKey.currentState?.closeKeyboard();
     _terminalFocusNode.dispose();
+    _composerController.dispose();
+    _composerFocusNode.dispose();
     _terminalScrollController.removeListener(_handleTerminalScroll);
     _terminalScrollController.dispose();
     _decoderGeneration++;

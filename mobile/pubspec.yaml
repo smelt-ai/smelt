@@ -53,7 +53,7 @@ dependencies:
   xterm:
     git:
       url: https://github.com/smelt-ai/xterm.dart.git
-      ref: e4e0c077f0941268ea18aeb250dfba1905a6cfd7
+      ref: 66e77049ae564579c0d95f184e5d33a0f74f04fa
   # 版本必须与 crates/smelt-mobile 里 pin 的 flutter_rust_bridge 完全一致，
   # 否则生成的绑定与运行时对不上，表现为启动即崩。
   flutter_rust_bridge: 2.12.0

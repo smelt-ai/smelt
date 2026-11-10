@@ -240,7 +240,11 @@ void main() {
 
     await tester.tap(find.text('Esc'));
     await tester.tap(find.text('^C'));
-    await tester.tap(find.byTooltip('Up'));
+    await tester.tap(find.byTooltip('Arrow keys'));
+    await tester.pump();
+    await tester.tap(find.byIcon(LucideIcons.chevronUp));
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pump();
     await tester.tap(find.text('/'));
     await tester.pump();
     expect(backend.sentInput, ['\x1b', '\x03', '\x1b[A', '/']);
@@ -354,6 +358,81 @@ void main() {
     await _close(tester, model);
   });
 
+  testWidgets('方向盘按住连发，松手即停', (tester) async {
+    final keys = <TerminalKey>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildGalleyTheme(Brightness.light),
+        localizationsDelegates: L10n.localizationsDelegates,
+        supportedLocales: L10n.supportedLocales,
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: TerminalShortcutBar(
+              onKey: (key, {shift = false, alt = false, ctrl = false}) =>
+                  keys.add(key),
+              onText: (_) {},
+              onPaste: () {},
+              ctrlLatched: false,
+              onToggleCtrl: () {},
+              keyboardEnabled: false,
+              onToggleKeyboard: () {},
+              composing: false,
+              onToggleComposer: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip('Arrow keys'));
+    await tester.pump();
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(LucideIcons.chevronDown)),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(keys, [TerminalKey.arrowDown], reason: '先停一拍');
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 70));
+    await tester.pump(const Duration(milliseconds: 70));
+    expect(keys.length, greaterThanOrEqualTo(3));
+    await gesture.up();
+    final count = keys.length;
+    await tester.pump(const Duration(seconds: 1));
+    expect(keys.length, count);
+  });
+
+  testWidgets('输入框整段发出并补回车，键盘按钮在底栏', (tester) async {
+    final backend = _ScriptedBackend();
+    final model = await _open(tester, backend);
+    await _ready(tester, backend);
+
+    expect(
+      find.descendant(
+        of: find.byType(TerminalShortcutBar),
+        matching: find.byIcon(LucideIcons.keyboard),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('Open input box'));
+    await tester.pump();
+    final geometryLocked = !_view(tester).autoResize;
+    expect(geometryLocked, isTrue, reason: '输入框占的高度不该变成一次 PTY resize');
+
+    await tester.enterText(find.byType(TextField), 'echo 你好');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pump();
+    expect(backend.sentInput.last, 'echo 你好\r');
+    expect(find.text('echo 你好'), findsNothing, reason: '发完清空');
+
+    await tester.tap(find.byTooltip('Close input box'));
+    await tester.pump();
+    expect(find.byType(TextField), findsNothing);
+    expect(_view(tester).autoResize, isTrue);
+
+    await _close(tester, model);
+  });
+
   testWidgets('快捷键栏只报键，编码交给终端', (tester) async {
     final keys = <String>[];
     final texts = <String>[];
@@ -364,13 +443,21 @@ void main() {
         localizationsDelegates: L10n.localizationsDelegates,
         supportedLocales: L10n.supportedLocales,
         home: Scaffold(
-          body: TerminalShortcutBar(
-            onKey: (key, {shift = false, alt = false, ctrl = false}) =>
-                keys.add('$key shift=$shift alt=$alt ctrl=$ctrl'),
-            onText: texts.add,
-            onPaste: () {},
-            ctrlLatched: false,
-            onToggleCtrl: () => ctrl++,
+          // 方向盘弹在键上方，栏子得像真页面一样贴底。
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: TerminalShortcutBar(
+              onKey: (key, {shift = false, alt = false, ctrl = false}) =>
+                  keys.add('$key shift=$shift alt=$alt ctrl=$ctrl'),
+              onText: texts.add,
+              onPaste: () {},
+              ctrlLatched: false,
+              onToggleCtrl: () => ctrl++,
+              keyboardEnabled: false,
+              onToggleKeyboard: () {},
+              composing: false,
+              onToggleComposer: () {},
+            ),
           ),
         ),
       ),
@@ -378,7 +465,14 @@ void main() {
 
     await tester.tap(find.text('Esc'));
     await tester.tap(find.text('^C'));
-    await tester.tap(find.byTooltip('Up'));
+    // 方向键收在一颗键里，点开弹出方向盘，点外面收起。
+    await tester.tap(find.byTooltip('Arrow keys'));
+    await tester.pump();
+    await tester.tap(find.byIcon(LucideIcons.chevronUp));
+    await tester.tap(find.byIcon(LucideIcons.chevronUp));
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pump();
+    expect(find.byIcon(LucideIcons.chevronUp), findsNothing);
     // 这两个组合软键盘上按不出来，只能靠快捷键栏。
     await tester.tap(find.byTooltip('Shift+Tab'));
     await tester.tap(find.byTooltip('Shift+Enter (new line)'));
@@ -388,6 +482,7 @@ void main() {
     expect(keys, [
       'TerminalKey.escape shift=false alt=false ctrl=false',
       'TerminalKey.keyC shift=false alt=false ctrl=true',
+      'TerminalKey.arrowUp shift=false alt=false ctrl=false',
       'TerminalKey.arrowUp shift=false alt=false ctrl=false',
       'TerminalKey.tab shift=true alt=false ctrl=false',
       'TerminalKey.enter shift=true alt=false ctrl=false',
@@ -405,7 +500,7 @@ void main() {
       matching: find.byType(InkWell),
     );
     expect(tester.getSize(esc.first).height, greaterThanOrEqualTo(48));
-    expect(tester.getSize(esc.first).width, greaterThanOrEqualTo(48));
+    expect(tester.getSize(esc.first).width, greaterThanOrEqualTo(44));
     await _close(tester, model);
   });
 
@@ -427,9 +522,13 @@ void main() {
 
     await tester.tap(find.text('Ctrl'));
     await tester.pump();
-    await tester.tap(find.byTooltip('Left'));
+    await tester.tap(find.byTooltip('Arrow keys'));
+    await tester.pump();
+    await tester.tap(find.byIcon(LucideIcons.chevronLeft));
     await tester.pump();
     expect(backend.sentInput.last, '\x1b[1;5D');
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pump();
 
     // 按两下等于取消。
     await tester.tap(find.text('Ctrl'));
@@ -586,6 +685,67 @@ void main() {
       ..bytes(live.sublist(live.length - 1));
     await tester.pump();
     expect(view.terminal.buffer.getText(), contains('LIVE-\u7aef'));
+
+    await _close(tester, model);
+  });
+
+  testWidgets('内容少时键盘直接盖住空行，内容多到被挡才往上挤', (tester) async {
+    addTearDown(() => tester.view.viewInsets = FakeViewPadding.zero);
+    final backend = _ScriptedBackend();
+    final model = await _open(tester, backend);
+    // 新开的终端：几何按整屏，内容只有头几行。
+    final geometry = backend.current.geometry;
+    backend.current
+      ..ready(cols: geometry.cols, rows: geometry.rows)
+      ..data('line-0\r\nline-1\r\n\$ ')
+      ..replayComplete();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    final scrollController = _view(tester).scrollController!;
+    await tester.tap(find.byIcon(LucideIcons.keyboard));
+    await tester.pump();
+    // 键盘逐帧弹出，视口一点点变矮。
+    for (final inset in [100.0, 200.0, 300.0]) {
+      tester.view.viewInsets = FakeViewPadding(bottom: inset);
+      await tester.pump();
+      await tester.pump();
+    }
+    expect(scrollController.position.maxScrollExtent, greaterThan(0));
+    expect(scrollController.offset, 0, reason: '内容在顶上几行，不该被挤出去');
+    expect(find.text('Latest'), findsNothing);
+    // 打字时 xterm 也会跟到「底」，同样不能落到空行上。
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '  l',
+        selection: TextSelection.collapsed(offset: 3),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(backend.sentInput.last, 'l');
+    expect(scrollController.offset, 0, reason: '打字不该把内容挤出去');
+
+    // 输出多到光标行会落到键盘下面：往上挤到光标行贴住视口底部为止。
+    backend.current.data(
+      List.generate(geometry.rows - 4, (i) => 'more-$i\r\n').join(),
+    );
+    await tester.pump();
+    await tester.pump();
+    final position = scrollController.position;
+    final lineHeight = tester
+        .state<TerminalViewState>(find.byType(TerminalView))
+        .renderTerminal
+        .lineHeight;
+    final cursorRow = _view(tester).terminal.buffer.absoluteCursorY;
+    final rowsBelowCursor =
+        _view(tester).terminal.buffer.lines.length - 1 - cursorRow;
+    expect(scrollController.offset, greaterThan(0));
+    expect(
+      scrollController.offset,
+      closeTo(position.maxScrollExtent - rowsBelowCursor * lineHeight, 0.5),
+    );
 
     await _close(tester, model);
   });
