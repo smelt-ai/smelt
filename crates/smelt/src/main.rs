@@ -3404,12 +3404,14 @@ impl Render for Workspace {
             // 整个工作台是一块 Dock，会话列表、舞台、文件这些都是里面的面板。
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .p(shell_padding)
                     .bg(shell_surface)
-                    .child(self.shell_dock.clone()),
+                    .child(self.shell_dock.clone())
+                    .children(self.render_dock_toggles(shell_padding, window)),
             )
             // 确认框、命令面板和图片预览都留在当前 Workspace 的 GPUI 树内。
             .child(self.render_overlay_layers(window, cx))
@@ -3698,6 +3700,18 @@ impl gpui::AssetSource for SmeltAssets {
         if path == "smelt-icons/monitor.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(
                 include_bytes!("../assets/icons/monitor.svg").as_slice(),
+            )));
+        }
+        // 停靠区开合按钮的展开态：分隔线外侧加实心色块。自带的 panel-left / panel-right
+        // 只有一根细线，18px 下开合两态分不清。
+        if path == "smelt-icons/panel-left-filled.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-left-filled.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/panel-right-filled.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-right-filled.svg").as_slice(),
             )));
         }
         gpui_kit_assets::AllAssets.load(path)

@@ -10,7 +10,7 @@
 //! - Dock 的通知（放大、还原只发通知）：重算 [`ShellView`]。
 
 use gpui::{App, Context, Entity, Subscription, Window};
-use gpui_component::dock::{DockArea, DockAreaState, DockEvent};
+use gpui_component::dock::{DockArea, DockAreaState, DockEvent, DockPlacement};
 use sha2::{Digest as _, Sha256};
 use smelt_client_store::WorkspaceLayoutStateRecord;
 
@@ -207,7 +207,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 让一个摆在布局里的视图露出来：选中它所在组里的它。不在布局里返回 `false`。
+    /// 让一个摆在布局里的视图露出来：选中它所在组里的它，它在收起的停靠区里就展开。不在
+    /// 布局里返回 `false`。
     pub(crate) fn show_view(
         &mut self,
         id: &str,
@@ -225,6 +226,13 @@ impl Workspace {
                 .is_some_and(|zoomed| workspace_shell::group_of(area, panel) != Some(zoomed))
             {
                 area.set_zoomed_out(window, cx);
+            }
+            // 收起的停靠区里的先展开。
+            if let Some(placement) = workspace_shell::placement_of(area, panel)
+                && placement != DockPlacement::Center
+                && !area.is_dock_open(placement)
+            {
+                area.toggle_dock(placement, window, cx);
             }
             area.select_panel(panel, window, cx);
         });
@@ -250,15 +258,11 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::{LayoutFile, VERSION, parse_state, to_text, usable_saved_state};
+    use gpui_component::dock::{DockPlacement, PanelState};
     use smelt_client_store::WorkspaceLayoutStateRecord;
 
-    #[test]
-    fn the_default_layout_parses_and_names_only_registered_kinds_of_views() {
-        let file = LayoutFile::default_layout();
-        assert_eq!(file.state.version, Some(VERSION));
-        assert_eq!(file.digest.len(), 64);
-        let mut names = Vec::new();
-        fn walk(state: &gpui_component::dock::PanelState, names: &mut Vec<String>) {
+    fn views(state: &PanelState) -> Vec<String> {
+        fn walk(state: &PanelState, names: &mut Vec<String>) {
             if state.children.is_empty() {
                 names.push(state.panel_name.clone());
             }
@@ -266,19 +270,31 @@ mod tests {
                 walk(child, names);
             }
         }
-        walk(&file.state.center, &mut names);
+        let mut names = Vec::new();
+        walk(state, &mut names);
+        names
+    }
+
+    /// 会话列表在左停靠区、文件那组在右停靠区，都开着、能收起；舞台在中间。
+    #[test]
+    fn the_default_layout_puts_the_side_views_in_open_side_docks() {
+        let file = LayoutFile::default_layout();
+        assert_eq!(file.state.version, Some(VERSION));
+        assert_eq!(file.digest.len(), 64);
+        assert_eq!(views(&file.state.center), ["stage"]);
+        let left = file.state.left_dock.as_ref().expect("有左停靠区");
+        assert_eq!(left.placement(), DockPlacement::Left);
+        assert!(left.open());
+        assert_eq!(views(left.panel()), ["sessions"]);
+        let right = file.state.right_dock.as_ref().expect("有右停靠区");
+        assert_eq!(right.placement(), DockPlacement::Right);
+        assert!(right.open());
         assert_eq!(
-            names,
-            [
-                "sessions",
-                "stage",
-                "files",
-                "git",
-                "history",
-                "com.smelt.skills"
-            ]
+            views(right.panel()),
+            ["files", "git", "history", "com.smelt.skills"]
         );
-        for name in &names[..5] {
+        assert!(file.state.bottom_dock.is_none());
+        for name in ["stage", "sessions", "files", "git", "history"] {
             assert!(crate::builtin_views::Builtin::of(name).is_some(), "{name}");
         }
     }

@@ -57,6 +57,9 @@ const PLACEMENTS: [DockPlacement; 4] = [
 /// 红黄绿按钮占的宽度。
 const TRAFFIC_LIGHTS_WIDTH: f32 = 80.;
 
+/// 左右停靠区开合按钮占的宽度。
+const DOCK_TOGGLE_WIDTH: f32 = 32.;
+
 /// 拖标签时跟着鼠标的那块的大小。和组件库的一样。
 const DRAG_PREVIEW_SIZE: gpui::Size<Pixels> = size(px(96.), px(30.));
 
@@ -313,6 +316,14 @@ pub(crate) fn group_of(area: &DockArea, panel: PanelId) -> Option<NodeId> {
         .find_map(|placement| area.layout(placement)?.find_panel_node(panel))
 }
 
+/// 这块面板在哪个区域：中间，还是左、右、下停靠区。
+pub(crate) fn placement_of(area: &DockArea, panel: PanelId) -> Option<DockPlacement> {
+    PLACEMENTS.into_iter().find(|&placement| {
+        area.layout(placement)
+            .is_some_and(|tree| tree.find_panel_node(panel).is_some())
+    })
+}
+
 /// 摆着什么、看得见什么。Dock 一变就重算（`Workspace::sync_shell_view`），render 只读它。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ShellView {
@@ -323,9 +334,15 @@ pub(crate) struct ShellView {
     /// 看得见、所在组既没有标签条也没有标题带、又贴着窗口上沿的视图：它自己的顶上就是
     /// 窗口顶，拖窗口、标题这些归它自己画。
     pub(crate) bare: HashSet<String>,
-    /// 贴着窗口左上角的组，和它显示着的视图。那组开头要给红黄绿按钮让位。
+    /// 贴着窗口左上角的组，和它显示着的视图。那组开头要给红黄绿按钮和左侧开合按钮让位。
     pub(crate) top_left_group: Option<NodeId>,
     pub(crate) top_left: Option<String>,
+    /// 贴着窗口右上角的组。那组末尾要给右侧开合按钮让位。
+    pub(crate) top_right_group: Option<NodeId>,
+    /// 左、右停靠区的开合按钮：`Some(开着没有)` 是要画，`None` 是布局里没有这个停靠区、
+    /// 或者有组放大着（放大时别的都让开，按钮也不画）。
+    pub(crate) left_dock: Option<bool>,
+    pub(crate) right_dock: Option<bool>,
 }
 
 impl ShellView {
@@ -378,7 +395,31 @@ impl ShellView {
             });
         }
         view.top_left_group = top_left_of(area);
+        view.top_right_group = top_right_of(area);
+        let toggle = |placement| {
+            (zoomed.is_none() && area.is_dock_collapsible(placement))
+                .then(|| area.is_dock_open(placement))
+        };
+        view.left_dock = toggle(DockPlacement::Left);
+        view.right_dock = toggle(DockPlacement::Right);
         view
+    }
+
+    /// 贴左上角的组开头让出的宽度：红黄绿按钮，再加左侧开合按钮。
+    pub(crate) fn leading_inset(&self, window: &Window) -> Pixels {
+        lights_width(window)
+            + match self.left_dock {
+                Some(_) => px(DOCK_TOGGLE_WIDTH),
+                None => px(0.),
+            }
+    }
+
+    /// 贴右上角的组末尾让出的宽度：右侧开合按钮。
+    pub(crate) fn trailing_inset(&self) -> Pixels {
+        match self.right_dock {
+            Some(_) => px(DOCK_TOGGLE_WIDTH),
+            None => px(0.),
+        }
     }
 }
 
@@ -406,15 +447,27 @@ fn top_left_of(area: &DockArea) -> Option<NodeId> {
     if let Some(node) = area.zoomed_group() {
         return Some(node);
     }
-    let root = |placement| {
-        let open = placement == DockPlacement::Center || area.is_dock_open(placement);
-        open.then(|| area.layout(placement))
-            .flatten()
-            .map(|tree| tree.root())
-    };
-    root(DockPlacement::Left)
-        .or(root(DockPlacement::Center))
+    open_root(area, DockPlacement::Left)
+        .or(open_root(area, DockPlacement::Center))
         .and_then(top_left_group)
+}
+
+/// 贴着窗口右上角的组。放大时是放大的那组；不然右 dock 开着从它找，否则从中间找。
+fn top_right_of(area: &DockArea) -> Option<NodeId> {
+    if let Some(node) = area.zoomed_group() {
+        return Some(node);
+    }
+    open_root(area, DockPlacement::Right)
+        .or(open_root(area, DockPlacement::Center))
+        .and_then(top_right_group)
+}
+
+/// 区域的树根。收起的停靠区不算。
+fn open_root(area: &DockArea, placement: DockPlacement) -> Option<&PaneNode> {
+    let open = placement == DockPlacement::Center || area.is_dock_open(placement);
+    open.then(|| area.layout(placement))
+        .flatten()
+        .map(|tree| tree.root())
 }
 
 fn top_left_group(node: &PaneNode) -> Option<NodeId> {
@@ -424,8 +477,20 @@ fn top_left_group(node: &PaneNode) -> Option<NodeId> {
     }
 }
 
+/// 横排取最右一个，竖排取最上一个。
+fn top_right_group(node: &PaneNode) -> Option<NodeId> {
+    match node.kind() {
+        PaneRef::Tabs { .. } => Some(node.id()),
+        PaneRef::Split { axis, children, .. } => match axis {
+            Axis::Horizontal => children.last(),
+            Axis::Vertical => children.first(),
+        }
+        .and_then(top_right_group),
+    }
+}
+
 /// 红黄绿按钮占的宽度：全屏、Windows 下是 0。
-pub(crate) fn lights_width(window: &Window) -> Pixels {
+fn lights_width(window: &Window) -> Pixels {
     if workspace_frame::traffic_lights_visible(window) {
         px(TRAFFIC_LIGHTS_WIDTH)
     } else {
@@ -458,7 +523,8 @@ pub(crate) fn new_area(
     });
     // 上面的闭包在 `cx.new` 返回前就跑完了。
     let skin = skin.expect("DockSkin::new 在构造 Dock 时已经跑过");
-    // 不做收起，面板也不让关：皮肤自带的这两个按钮都不要。
+    // 面板不让关。停靠区的开合按钮由外壳画在窗口上角（`Workspace::render_dock_toggles`）：
+    // 皮肤的画在标签条里，自己管顶上的视图（会话列表、舞台）没有标签条。
     skin.set_toggle_button_visible(false, cx);
     skin.set_close_button_visible(false, cx);
     area
@@ -564,13 +630,22 @@ impl TabGroupRenderer for SmeltTabGroup {
             .filter(|(_, panel)| panel.visible(cx))
             .map(|(ix, _)| ix)
             .collect();
-        let top_left = self.workspace.upgrade().is_some_and(|workspace| {
-            workspace.read(cx).shell_view.top_left_group == Some(group.node())
-        });
-        let leading = if top_left {
-            lights_width(window)
-        } else {
-            px(0.)
+        let (leading, trailing) = match self.workspace.upgrade() {
+            Some(workspace) => {
+                let shell = &workspace.read(cx).shell_view;
+                let at = |corner: Option<NodeId>| corner == Some(group.node());
+                (
+                    match at(shell.top_left_group) {
+                        true => shell.leading_inset(window),
+                        false => px(0.),
+                    },
+                    match at(shell.top_right_group) {
+                        true => shell.trailing_inset(),
+                        false => px(0.),
+                    },
+                )
+            }
+            None => (px(0.), px(0.)),
         };
         match visible.as_slice() {
             [] => gpui::Empty.into_any_element(),
@@ -579,9 +654,9 @@ impl TabGroupRenderer for SmeltTabGroup {
                 if !PanelHandle::of(panel).is_some_and(|handle| handle.title_bar(cx)) {
                     return gpui::Empty.into_any_element();
                 }
-                render_title_band(group, *ix, leading, window, cx)
+                render_title_band(group, *ix, leading, trailing, window, cx)
             }
-            _ => render_tabs(group, visible, leading, window, cx),
+            _ => render_tabs(group, visible, leading, trailing, window, cx),
         }
     }
 
@@ -619,6 +694,7 @@ fn render_title_band(
     group: &TabGroupContext,
     ix: usize,
     leading: Pixels,
+    trailing: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -636,6 +712,7 @@ fn render_title_band(
             .w_full()
             .h(bar_h)
             .pl(leading)
+            .pr(trailing)
             .when(droppable, |this| {
                 this.drag_over::<DragPanel>(|this, _, _, cx| this.bg(cx.theme().tokens.drop_target))
                     .on_drop(move |drag: &DragPanel, window, cx| {
@@ -665,6 +742,7 @@ fn render_tabs(
     group: &TabGroupContext,
     visible: Vec<usize>,
     leading: Pixels,
+    trailing: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -746,6 +824,7 @@ fn render_tabs(
             h_flex()
                 .flex_none()
                 .h(bar_h)
+                .pr(trailing)
                 .children(zoom_button(group, cx)),
         )
         .into_any_element()
@@ -826,6 +905,70 @@ fn zoom_button(group: &TabGroupContext, cx: &App) -> Option<AnyElement> {
     )
 }
 
+// ---- 停靠区开合 ----
+
+impl Workspace {
+    /// 左右停靠区的开合按钮，浮在窗口左上角（红黄绿按钮右边）和右上角，收起、展开都在同一个
+    /// 位置。按停靠区给，不认里面摆的是什么视图：布局把什么放进左右停靠区，什么就能收起。
+    /// 停靠区收起后宽度是 0，什么都画不出来，重新打开只能靠这里。
+    ///
+    /// 贴着这两个角的组给按钮让了位（[`ShellView::leading_inset`]、
+    /// [`ShellView::trailing_inset`]）。`inset` 是 Dock 外面那圈内边距。
+    pub(crate) fn render_dock_toggles(&self, inset: Pixels, window: &Window) -> Vec<AnyElement> {
+        let left = self.shell_view.left_dock.map(|open| {
+            dock_toggle(DockPlacement::Left, open, self.shell_dock.clone())
+                .left(inset + lights_width(window))
+        });
+        let right = self.shell_view.right_dock.map(|open| {
+            dock_toggle(DockPlacement::Right, open, self.shell_dock.clone()).right(inset)
+        });
+        [left, right]
+            .into_iter()
+            .flatten()
+            .map(|toggle| toggle.top(inset).into_any_element())
+            .collect()
+    }
+}
+
+/// 一个停靠区的开合按钮。横向位置由调用方给。
+fn dock_toggle(placement: DockPlacement, open: bool, area: Entity<DockArea>) -> Div {
+    let (id, label, icon): (&str, &str, Icon) = match (placement, open) {
+        (DockPlacement::Left, true) => (
+            "dock-toggle-left",
+            "收起左侧",
+            Icon::empty().path("smelt-icons/panel-left-filled.svg"),
+        ),
+        (DockPlacement::Left, false) => {
+            ("dock-toggle-left", "展开左侧", IconName::PanelLeft.into())
+        }
+        (_, true) => (
+            "dock-toggle-right",
+            "收起右侧",
+            Icon::empty().path("smelt-icons/panel-right-filled.svg"),
+        ),
+        (_, false) => ("dock-toggle-right", "展开右侧", IconName::PanelRight.into()),
+    };
+    div()
+        .absolute()
+        .w(px(DOCK_TOGGLE_WIDTH))
+        .h(workspace_frame::TOP_BAR_HEIGHT)
+        .flex()
+        .items_center()
+        .justify_center()
+        // 浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            Button::new(id)
+                .quiet()
+                .compact()
+                .icon(icon)
+                .icon_action(label)
+                .on_click(move |_, window, cx| {
+                    area.update(cx, |area, cx| area.toggle_dock(placement, window, cx));
+                }),
+        )
+}
+
 // ---- 会话列表和舞台的画法 ----
 
 impl Workspace {
@@ -840,7 +983,7 @@ impl Workspace {
         let animate = self.workspace_window_active && self.view_shown(sessions);
         let at_top = self.shell_view.bare.contains(sessions);
         let drag_left = if self.shell_view.top_left.as_deref() == Some(sessions) {
-            lights_width(window)
+            self.shell_view.leading_inset(window)
         } else {
             px(0.)
         };

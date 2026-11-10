@@ -62,7 +62,7 @@ pub(crate) fn stage_has_page_header(route: &WorkspaceRoute, agent_conversation_o
 /// 舞台贴着窗口顶（单独一组、没有标签条）时，顶上这一条拖窗口；有页头时交给页头。
 ///
 /// `left_guard` 见 [`Workspace::chrome_left_guard`]：`None` 是舞台不贴窗口顶，`Some` 是
-/// 左边要让出的宽度（贴左上角时是红黄绿按钮）。返回值是 `(left, height)`。
+/// 左边要让出的宽度（贴左上角时是红黄绿按钮和左侧开合按钮）。返回值是 `(left, height)`。
 pub(crate) fn stage_content_drag_band(
     left_guard: Option<Pixels>,
     page_header: bool,
@@ -373,13 +373,13 @@ impl Workspace {
     }
 
     /// 舞台上的页头、拖窗口条从哪起。舞台单独一组、没有标签条时贴着窗口顶，返回左边要
-    /// 让出的宽度：贴左上角时让红黄绿按钮，不然是 0。舞台在标签条下面时是 `None`：顶上
+    /// 让出的宽度：贴左上角时让红黄绿按钮和左侧开合按钮，不然是 0。舞台在标签条下面时是 `None`：顶上
     /// 那条归标签条，页头不用再留拖窗口的高度。只读缓存（见 `workspace_layout`）。
     pub(crate) fn chrome_left_guard(&self, window: &Window) -> Option<Pixels> {
         let stage = crate::builtin_views::Builtin::Stage.id();
         self.shell_view.bare.contains(stage).then(|| {
             if self.shell_view.top_left.as_deref() == Some(stage) {
-                crate::workspace_shell::lights_width(window)
+                self.shell_view.leading_inset(window)
             } else {
                 px(0.)
             }
