@@ -13,7 +13,6 @@
   "@terminalTextSizePoints": {"placeholders": {"size": {"type": "int"}}},
   "terminalShowKeyboard": "Show keyboard",
   "terminalHideKeyboard": "Hide keyboard",
-  "terminalKeyboardUnavailable": "Can't type right now",
   "terminalNothingToCopy": "Nothing to copy",
   "terminalCopyFailed": "Couldn't copy",
   "terminalNothingToPaste": "The clipboard is empty",
@@ -40,5 +39,9 @@
   "terminalKeyRight": "Right",
   "terminalKeyNewLine": "Shift+Enter (new line)",
   "terminalKeyPageUp": "Page up",
-  "terminalKeyPageDown": "Page down"
+  "terminalKeyPageDown": "Page down",
+  "terminalOpenComposer": "Open input box",
+  "terminalCloseComposer": "Close input box",
+  "terminalComposerHint": "Message or command",
+  "terminalKeyArrows": "Arrow keys"
 }

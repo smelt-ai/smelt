@@ -10,7 +10,6 @@
   "terminalTextSizePoints": "{size} pt",
   "terminalShowKeyboard": "显示键盘",
   "terminalHideKeyboard": "收起键盘",
-  "terminalKeyboardUnavailable": "现在不能输入",
   "terminalNothingToCopy": "没有可复制的内容",
   "terminalCopyFailed": "复制失败",
   "terminalNothingToPaste": "剪贴板是空的",
@@ -36,5 +35,9 @@
   "terminalKeyRight": "右",
   "terminalKeyNewLine": "Shift+Enter（换行）",
   "terminalKeyPageUp": "上翻页",
-  "terminalKeyPageDown": "下翻页"
+  "terminalKeyPageDown": "下翻页",
+  "terminalOpenComposer": "打开输入框",
+  "terminalCloseComposer": "收起输入框",
+  "terminalComposerHint": "输入消息或命令",
+  "terminalKeyArrows": "方向键"
 }

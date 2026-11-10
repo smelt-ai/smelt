@@ -3811,12 +3811,6 @@ abstract class L10n {
   /// **'Hide keyboard'**
   String get terminalHideKeyboard;
 
-  /// No description provided for @terminalKeyboardUnavailable.
-  ///
-  /// In en, this message translates to:
-  /// **'Can\'t type right now'**
-  String get terminalKeyboardUnavailable;
-
   /// No description provided for @terminalNothingToCopy.
   ///
   /// In en, this message translates to:
@@ -3972,6 +3966,30 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Page down'**
   String get terminalKeyPageDown;
+
+  /// No description provided for @terminalOpenComposer.
+  ///
+  /// In en, this message translates to:
+  /// **'Open input box'**
+  String get terminalOpenComposer;
+
+  /// No description provided for @terminalCloseComposer.
+  ///
+  /// In en, this message translates to:
+  /// **'Close input box'**
+  String get terminalCloseComposer;
+
+  /// No description provided for @terminalComposerHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Message or command'**
+  String get terminalComposerHint;
+
+  /// No description provided for @terminalKeyArrows.
+  ///
+  /// In en, this message translates to:
+  /// **'Arrow keys'**
+  String get terminalKeyArrows;
 
   /// No description provided for @updateSection.
   ///

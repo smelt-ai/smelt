@@ -17,6 +17,7 @@ import '../../theme/terminal_theme.dart';
 import '../../utils/terminal_links.dart';
 import '../../utils/terminal_paste.dart';
 import '../../utils/xterm_input_filter.dart';
+import '../conversation/composer.dart';
 import 'terminal_chrome.dart';
 import 'terminal_shortcut_bar.dart';
 import 'terminal_stream.dart';
@@ -60,6 +61,11 @@ class _TerminalPageState extends State<TerminalPage>
   bool _softwareKeyboardWasVisible = false;
   bool _terminalGeometryLocked = false;
   bool _replayGeometryLocked = false;
+
+  /// 输入框开着。开着期间终端几何一直锁住：输入框和它唤起的键盘都只是暂时占地方。
+  bool _composing = false;
+  final TextEditingController _composerController = TextEditingController();
+  final FocusNode _composerFocusNode = FocusNode();
   late double _fontSize;
   int _decoderGeneration = 0;
 
@@ -108,7 +114,10 @@ class _TerminalPageState extends State<TerminalPage>
     _streamState = _stream.state;
     _stateSubscription = _stream.stateStream.listen((state) {
       if (!mounted) return;
-      if (!_canWriteIn(state)) _closeSoftwareKeyboard();
+      if (!_canWriteIn(state)) {
+        _closeSoftwareKeyboard();
+        _closeComposer();
+      }
       setState(() {
         _streamState = state;
         if (state == TerminalStreamState.ended) _ctrlLatched = false;
@@ -395,7 +404,10 @@ class _TerminalPageState extends State<TerminalPage>
 
   void _enableSoftwareKeyboard() {
     if (!_canWrite || _softwareKeyboardEnabled) return;
+    // 键盘直接从输入框交给终端，中间不收起，几何锁也不松。
+    _composerFocusNode.unfocus();
     setState(() {
+      _composing = false;
       _softwareKeyboardEnabled = true;
       _softwareKeyboardWasVisible = false;
       _terminalGeometryLocked = true;
@@ -436,12 +448,70 @@ class _TerminalPageState extends State<TerminalPage>
     setState(() {
       _softwareKeyboardEnabled = false;
       _softwareKeyboardWasVisible = false;
-      _terminalGeometryLocked = false;
+      _terminalGeometryLocked = _composing;
       // xterm 4.0 在 closeKeyboard() 之后还留着输入法组字文本；重建视图清掉这份本地
       // 渲染状态，PTY 不受影响。
       _terminalViewKey = GlobalKey<TerminalViewState>();
     });
     _scrollToTerminalTailAfterLayout();
+  }
+
+  // 输入框 -------------------------------------------------------------------
+  //
+  // 整段写好再发：输入法组字、改错、语音输入都在原生输入框里做，不经过 xterm 那套逐字
+  // 转发。发出去走 bracketed paste，多行内容在 Claude Code 等 TUI 里不会被逐行提交，
+  // 末尾再补一个回车。
+
+  void _toggleComposer() {
+    if (_composing) {
+      _closeComposer();
+    } else {
+      _openComposer();
+    }
+  }
+
+  void _openComposer() {
+    if (!_canWrite || _composing) return;
+    final keyboardVisible = View.of(context).viewInsets.bottom > 0;
+    _closeKeyboardAndReleaseFocus();
+    setState(() {
+      if (_softwareKeyboardEnabled) {
+        _softwareKeyboardEnabled = false;
+        _terminalViewKey = GlobalKey<TerminalViewState>();
+      }
+      _composing = true;
+      _terminalGeometryLocked = true;
+      _softwareKeyboardWasVisible = keyboardVisible;
+    });
+    _scrollToTerminalTailAfterLayout();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _composing) _composerFocusNode.requestFocus();
+    });
+  }
+
+  void _closeComposer() {
+    if (!mounted || !_composing) return;
+    _composerFocusNode.unfocus();
+    final keyboardVisible = View.of(context).viewInsets.bottom > 0;
+    setState(() => _composing = false);
+    if (keyboardVisible) {
+      // 等键盘真收起来（didChangeMetrics）再解锁。
+      _softwareKeyboardWasVisible = true;
+    } else {
+      _finishSoftwareKeyboardCycle();
+    }
+  }
+
+  void _sendComposer() {
+    if (!_canWrite) return;
+    final text = _composerController.text;
+    if (text.trim().isEmpty) return;
+    _setCtrlLatched(false);
+    _stream.sendInput(
+      '${encodeTerminalPaste(text, bracketed: _terminal.bracketedPasteMode)}\r',
+    );
+    _composerController.clear();
+    _jumpToTail();
   }
 
   void _closeKeyboardAndReleaseFocus() {
@@ -643,19 +713,6 @@ class _TerminalPageState extends State<TerminalPage>
             steps: Preferences.terminalFontSteps,
             onSelected: _setFontSize,
           ),
-          IconButton(
-            tooltip: !_canWrite
-                ? l10n.terminalKeyboardUnavailable
-                : _softwareKeyboardEnabled
-                ? l10n.terminalHideKeyboard
-                : l10n.terminalShowKeyboard,
-            onPressed: _canWrite ? _toggleSoftwareKeyboard : null,
-            icon: Icon(
-              _softwareKeyboardEnabled
-                  ? LucideIcons.keyboardOff
-                  : LucideIcons.keyboard,
-            ),
-          ),
           const SizedBox(width: Space.xs),
         ],
       ),
@@ -683,6 +740,28 @@ class _TerminalPageState extends State<TerminalPage>
             // 而且键盘开合还会连带改变终端视口高度，白白触发一轮行列重算。
             // 也不能等连上才出现：它得在 attach 之前就把终端视口压到最终高度，否则回放
             // 完成后栏子上屏又要改一次行数，那就是一次多余的 PTY resize。重连期间同理。
+            if (_composing && _streamState != TerminalStreamState.ended)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Space.sm,
+                  Space.xs,
+                  Space.sm,
+                  0,
+                ),
+                child: Composer(
+                  controller: _composerController,
+                  focusNode: _composerFocusNode,
+                  hint: l10n.terminalComposerHint,
+                  canSend: _canWrite,
+                  working: false,
+                  sending: false,
+                  readOnly: !_canWrite,
+                  images: const [],
+                  onSend: _sendComposer,
+                  onStop: () {},
+                  onRemoveImage: (_) {},
+                ),
+              ),
             if (_streamState != TerminalStreamState.ended)
               TerminalShortcutBar(
                 onKey: _sendKey,
@@ -690,6 +769,10 @@ class _TerminalPageState extends State<TerminalPage>
                 onPaste: _pasteClipboard,
                 ctrlLatched: _ctrlLatched,
                 onToggleCtrl: () => _setCtrlLatched(!_ctrlLatched),
+                keyboardEnabled: _softwareKeyboardEnabled,
+                onToggleKeyboard: _canWrite ? _toggleSoftwareKeyboard : null,
+                composing: _composing,
+                onToggleComposer: _canWrite ? _toggleComposer : null,
               ),
           ],
         ),
@@ -783,6 +866,8 @@ class _TerminalPageState extends State<TerminalPage>
     WidgetsBinding.instance.removeObserver(this);
     _terminalViewKey.currentState?.closeKeyboard();
     _terminalFocusNode.dispose();
+    _composerController.dispose();
+    _composerFocusNode.dispose();
     _terminalScrollController.removeListener(_handleTerminalScroll);
     _terminalScrollController.dispose();
     _decoderGeneration++;
