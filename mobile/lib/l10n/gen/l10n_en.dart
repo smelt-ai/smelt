@@ -2246,9 +2246,6 @@ class L10nEn extends L10n {
   String get terminalHideKeyboard => 'Hide keyboard';
 
   @override
-  String get terminalKeyboardUnavailable => 'Can\'t type right now';
-
-  @override
   String get terminalNothingToCopy => 'Nothing to copy';
 
   @override
@@ -2326,6 +2323,18 @@ class L10nEn extends L10n {
 
   @override
   String get terminalKeyPageDown => 'Page down';
+
+  @override
+  String get terminalOpenComposer => 'Open input box';
+
+  @override
+  String get terminalCloseComposer => 'Close input box';
+
+  @override
+  String get terminalComposerHint => 'Message or command';
+
+  @override
+  String get terminalKeyArrows => 'Arrow keys';
 
   @override
   String get updateSection => 'Updates';

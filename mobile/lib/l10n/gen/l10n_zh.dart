@@ -2148,9 +2148,6 @@ class L10nZh extends L10n {
   String get terminalHideKeyboard => '收起键盘';
 
   @override
-  String get terminalKeyboardUnavailable => '现在不能输入';
-
-  @override
   String get terminalNothingToCopy => '没有可复制的内容';
 
   @override
@@ -2227,6 +2224,18 @@ class L10nZh extends L10n {
 
   @override
   String get terminalKeyPageDown => '下翻页';
+
+  @override
+  String get terminalOpenComposer => '打开输入框';
+
+  @override
+  String get terminalCloseComposer => '收起输入框';
+
+  @override
+  String get terminalComposerHint => '输入消息或命令';
+
+  @override
+  String get terminalKeyArrows => '方向键';
 
   @override
   String get updateSection => '更新';
