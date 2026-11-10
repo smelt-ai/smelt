@@ -61,6 +61,71 @@ mod appearance_tests {
     }
 
     #[test]
+    fn sibling_themes_are_scoped_by_plugin_owner() {
+        use smelt_model::theme_index::{ThemeEntry, sibling_in};
+        let family = |owner| super::scoped_theme_family(owner, "Shared");
+        let entries = [
+            ThemeEntry::new("First Dark", "dark", family(Some("first"))),
+            ThemeEntry::new("First Light", "light", family(Some("first"))),
+            ThemeEntry::new("Second Light", "light", family(Some("second"))),
+        ];
+        assert_eq!(sibling_in(&entries, "First Dark", "light"), "First Light");
+        let entries = [
+            ThemeEntry::new("First Dark", "dark", family(Some("first"))),
+            ThemeEntry::new("Second Light", "light", family(Some("second"))),
+        ];
+        assert_eq!(sibling_in(&entries, "First Dark", "light"), "Default Light");
+        assert_ne!(family(None), family(Some("")));
+    }
+
+    #[gpui::test]
+    fn requested_appearance_reports_unknown_theme(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
+        let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            cx.set_global(Appearance::default());
+            let result = super::apply_requested_appearance_on(
+                &std::collections::BTreeMap::from([(
+                    "appearance.theme".into(), serde_json::json!("not a registered theme"),
+                )]),
+                &store,
+                cx,
+            );
+            assert!(matches!(result, Err(smelt_model::appearance_settings::SettingsError::Invalid(_))));
+            assert!(store.appearance().unwrap().is_none());
+        });
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[gpui::test]
+    fn requested_appearance_does_not_install_when_saving_fails(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
+        let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
+        let connection = rusqlite::Connection::open(store.path()).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_appearance BEFORE INSERT ON appearance BEGIN SELECT RAISE(FAIL, 'save blocked'); END;").unwrap();
+        drop(connection);
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            cx.set_global(Appearance::default());
+            let original = cx.global::<Appearance>().opacity;
+            let result = super::apply_requested_appearance_on(
+                &std::collections::BTreeMap::from([(
+                    "appearance.opacity".into(), serde_json::json!(0.6),
+                )]),
+                &store,
+                cx,
+            );
+            assert!(matches!(result, Err(smelt_model::appearance_settings::SettingsError::Store(_))));
+            assert_eq!(cx.global::<Appearance>().opacity, original);
+            assert!(store.appearance().unwrap().is_none());
+        });
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn liquid_glass_keeps_a_stable_blurred_window_backdrop() {
         assert_eq!(
             Appearance::default().window_bg(),

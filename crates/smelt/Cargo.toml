@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 smelt-sys = { path = "../smelt-sys" }
 smelt-model = { path = "../smelt-model" }
+smelt-event-protocol = { path = "../smelt-event-protocol" }
 smelt-client = { path = "../smelt-client" }
 smelt-cli = { path = "../smelt-cli" }
 smelt-paths = { path = "../smelt-paths" }
@@ -25,6 +26,7 @@ smelt-ui = { path = "../smelt-ui" }
 smelt-app-state = { path = "../smelt-app-state" }
 smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
 smelt-capabilities = { path = "../plugins/capabilities" }
+smelt-themes = { path = "../plugins/themes" }
 smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -95,8 +97,6 @@ raw-window-handle = "0.6"
 [dev-dependencies]
 # 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
 smelt-store = { path = "../smelt-store" }
-# 版本协商的测试要按这个桌面的事件投影版本扮一台运行时。
-smelt-event-protocol = { path = "../smelt-event-protocol" }
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 

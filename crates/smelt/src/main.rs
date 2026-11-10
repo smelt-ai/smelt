@@ -3837,6 +3837,9 @@ fn main() {
 
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
+        // 主题先登记再恢复外观，插件主题在首帧前即可生效。
+        smelt_themes::register(cx);
+        plugins::register_initial_themes(cx);
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         cx.set_global(appearance.clone());
@@ -4071,7 +4074,11 @@ fn main() {
                 if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
                     if is_local {
                         let settings = settings.clone();
-                        cx.update(|cx| settings::apply_requested_appearance(&settings, cx));
+                        cx.update(|cx| {
+                            if let Err(error) = settings::apply_requested_appearance(&settings, cx) {
+                                crate::status_item::notify_error(format!("外观修改失败：{error}"));
+                            }
+                        });
                     }
                     continue;
                 }

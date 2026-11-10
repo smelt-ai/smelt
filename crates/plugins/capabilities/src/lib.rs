@@ -175,7 +175,9 @@ impl CapabilitiesPage {
                 }
                 cx.notify();
             }
-            HostEvent::ActiveProjectChanged | HostEvent::ViewsChanged => {}
+            HostEvent::ActiveProjectChanged
+            | HostEvent::ViewsChanged
+            | HostEvent::ThemesChanged => {}
         }
     }
 

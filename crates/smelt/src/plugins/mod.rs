@@ -31,6 +31,7 @@ mod host_fs;
 mod host_workspace;
 mod log;
 mod manage;
+mod themes;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -66,6 +67,8 @@ struct Registry {
     /// 已挂载的插件。视图本身在视图注册表里，撤下登记就卸载：视图拥有的任务随视图
     /// 一起取消。
     panels: Vec<PluginPanel>,
+    /// 已登记主题的插件来源，重载时整批撤下再登记。
+    theme_owners: Vec<String>,
     /// 所有插件共享的宿主上下文，`smelt-workspace.sessions()` 读它。
     context: Rc<RefCell<HostContext>>,
     /// `smelt-workspace.open_session` 怎么跳到会话。工作台创建时装上。
@@ -78,6 +81,8 @@ struct PluginPanel {
     version: String,
     root: PathBuf,
     source: PluginSource,
+    /// 纯主题插件没有视图。
+    has_view: bool,
     /// 加载失败的原因。
     error: Option<String>,
 }
@@ -149,16 +154,17 @@ pub(crate) struct InstalledPlugin {
 /// 一变，工作台自己重装布局（见 `Workspace::subscribe_host_events`）。工作台窗口同一时刻
 /// 只有一个，`window` 就是它。
 pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
-    let runtime = match runtime(cx) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("[plugins] 运行时启动失败：{error:#}");
-            return;
-        }
-    };
+    let found = discover();
+    let mut theme_errors = register_theme_contributions(&found, cx);
+    let needs_scripts = found.iter().any(|plugin| {
+        !std::path::Path::new(plugin.manifest.entry())
+            .extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    let runtime = needs_scripts
+        .then(|| runtime(cx).map_err(|error| format!("插件运行时启动失败：{error:#}")));
     let previous = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
 
-    let found = discover();
     // 视图出生时定下权限，所以每次挂载前按这一批插件的声明重新装一遍。
     let hosts = found
         .iter()
@@ -176,20 +182,45 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                  source,
              }| {
                 let id = manifest.id().to_string();
-                // 开关挂在运行时上、加载时读，所以每个插件加载前按它的来源设一次。
-                runtime.set_editor_files(source.editor_files());
-                let plugin = JsPlugin::new();
-                let content = plugin_policy(&id, &capabilities, &plugin, &context)
-                    .and_then(|policy| {
-                        // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
-                        policy::set_default(policy);
-                        let application = runtime.load_application(&root, manifest.entry())?;
-                        runtime.mount_application(&application, window, cx)
-                    })
-                    .map_err(|error| format!("{error:#}"));
+                let theme_error = theme_errors.remove(&id);
+                if std::path::Path::new(manifest.entry())
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    return Some(PluginPanel {
+                        title: manifest.name().to_string(),
+                        version: manifest.version().to_string(),
+                        id,
+                        root,
+                        source,
+                        has_view: false,
+                        error: theme_error,
+                    });
+                }
+                // 纯主题插件已在上面处理；只有脚本插件需要运行时。
+                let plugin = JsPlugin::for_plugin(&id);
+                let content = match runtime.as_ref().expect("脚本插件需要运行时") {
+                    Ok(runtime) => {
+                        // 开关挂在运行时上、加载时读，所以每个插件加载前按来源设一次。
+                        runtime.set_editor_files(source.editor_files());
+                        plugin_policy(&id, &capabilities, &plugin, &context)
+                            .and_then(|policy| {
+                                // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
+                                policy::set_default(policy);
+                                let application =
+                                    runtime.load_application(&root, manifest.entry())?;
+                                runtime.mount_application(&application, window, cx)
+                            })
+                            .map_err(|error| format!("{error:#}"))
+                    }
+                    Err(error) => Err(error.clone()),
+                };
                 match &content {
                     Ok(view) => plugin.attach(view, cx),
-                    Err(error) => eprintln!("[plugins] {id} 加载失败：{error}"),
+                    Err(error) => {
+                        smelt_ui::theme_catalog::unregister_themes(&format!("script:{id}"), cx);
+                        eprintln!("[plugins] {id} 加载失败：{error}");
+                    }
                 }
                 let panel = PluginPanel {
                     title: manifest.name().to_string(),
@@ -197,7 +228,8 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     id,
                     root,
                     source,
-                    error: content.as_ref().err().cloned(),
+                    has_view: true,
+                    error: theme_error.or_else(|| content.as_ref().err().cloned()),
                 };
                 // 同 id 的旧登记被替换，旧视图随之放掉。
                 let view = Rc::new(RefCell::new(Some(content)));
@@ -227,13 +259,22 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     // 默认 Policy 不留最后那个插件的：之后再有脚本在视图外跑，什么都不给。
     policy::set_default(Policy::new());
 
-    for gone in previous
-        .iter()
-        .filter(|old| !panels.iter().any(|panel| panel.id == old.id))
-    {
+    for gone in previous.iter().filter(|old| {
+        old.has_view
+            && !panels
+                .iter()
+                .any(|panel| panel.has_view && panel.id == old.id)
+    }) {
         api::unregister_view(&gone.id, cx);
     }
     REGISTRY.with(|registry| registry.borrow_mut().panels = panels);
+    // 首次挂载时订阅可能还没装；后续重载也只在批次末通知一次。
+    api::emit(api::HostEvent::ThemesChanged, cx);
+    if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {
+        let selected = appearance.theme_name.clone();
+        crate::settings::apply_named_theme(&selected, cx);
+        cx.refresh_windows();
+    }
 }
 
 /// 一个插件自己的 Policy：权限大家一样，宿主模块里的 `smelt-plugin-api` 是它自己的。
@@ -263,7 +304,9 @@ fn plugin_policy(
 pub(crate) fn shutdown(cx: &mut App) {
     let panels = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
     for panel in panels {
-        api::unregister_view(&panel.id, cx);
+        if panel.has_view {
+            api::unregister_view(&panel.id, cx);
+        }
     }
     let (runtime, opener) = REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
@@ -276,6 +319,58 @@ struct Found {
     root: PathBuf,
     manifest: PluginManifest,
     source: PluginSource,
+}
+
+/// 先于窗口和外观恢复，登记已安装插件的主题；纯主题包不执行脚本。
+pub(crate) fn register_initial_themes(cx: &mut App) {
+    let found = discover();
+    for (id, error) in register_theme_contributions(&found, cx) {
+        eprintln!("[plugins] {id} 主题加载失败：{error}");
+    }
+}
+
+/// 按发现顺序登记各插件的主题；重载从文件重建，避免已删或出错的主题残留。
+fn register_theme_contributions(
+    found: &[Found],
+    cx: &mut App,
+) -> std::collections::HashMap<String, String> {
+    let previous =
+        REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().theme_owners));
+    for owner in previous {
+        smelt_ui::theme_catalog::unregister_themes(&owner, cx);
+    }
+    let mut owners = Vec::new();
+    let mut errors = std::collections::HashMap::new();
+    for plugin in found {
+        let id = plugin.manifest.id();
+        let owner = format!("files:{id}");
+        if !std::path::Path::new(plugin.manifest.entry())
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            // JS 登记的主题同样随插件卸载或重载撤下。
+            owners.push(format!("script:{id}"));
+        }
+        let result = themes::read(&plugin.root, plugin.manifest.entry()).and_then(|sources| {
+            if sources.is_empty() {
+                return Ok(false);
+            }
+            let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+            smelt_ui::theme_catalog::register_theme_sets(&owner, &sources, cx)
+                .map(|_| true)
+                .map_err(|error| error.to_string())
+        });
+        match result {
+            Ok(true) => owners.push(owner),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("[plugins] {id} 主题加载失败：{error}");
+                errors.insert(id.to_string(), error);
+            }
+        }
+    }
+    REGISTRY.with(|registry| registry.borrow_mut().theme_owners = owners);
+    errors
 }
 
 /// 按目录顺序找插件，同名 id 先到先得。坏的 manifest 记一笔就跳过，不执行任何脚本。
@@ -468,6 +563,50 @@ fn open_session(id: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{MANIFEST_FILE, PluginManifest, declared_hosts, repo_plugin_dir};
+
+    #[gpui::test]
+    fn theme_files_are_registered_reloaded_and_removed(cx: &mut gpui::TestAppContext) {
+        let dir =
+            std::env::temp_dir().join(format!("smelt-plugin-themes-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("themes")).unwrap();
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            r#"{"id":"com.example.theme-test","name":"Theme Test","entry":"themes/colors.json"}"#,
+        )
+        .unwrap();
+        let path = dir.join("themes/colors.json");
+        std::fs::write(&path, r##"{"name":"Sample","themes":[{"name":"Sample Dark","mode":"dark","colors":{"background":"#123456"}}]}"##).unwrap();
+        let found = super::Found {
+            root: dir.clone(),
+            manifest: PluginManifest::read(&dir).unwrap(),
+            source: super::PluginSource::User,
+        };
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            assert!(
+                super::register_theme_contributions(std::slice::from_ref(&found), cx).is_empty()
+            );
+            assert!(smelt_ui::theme_catalog::contains("Sample Dark", cx));
+            std::fs::write(
+                &path,
+                r#"{"name":"Sample","themes":[{"name":"Sample Light","mode":"light"}]}"#,
+            )
+            .unwrap();
+            assert!(
+                super::register_theme_contributions(std::slice::from_ref(&found), cx).is_empty()
+            );
+            assert!(!smelt_ui::theme_catalog::contains("Sample Dark", cx));
+            assert!(smelt_ui::theme_catalog::contains("Sample Light", cx));
+            std::fs::write(&path, "invalid json").unwrap();
+            assert!(
+                super::register_theme_contributions(&[found], cx)
+                    .contains_key("com.example.theme-test")
+            );
+            assert!(!smelt_ui::theme_catalog::contains("Sample Light", cx));
+            super::register_theme_contributions(&[], cx);
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn declared_hosts_come_from_the_manifest() {

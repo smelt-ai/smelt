@@ -15,7 +15,6 @@ mod markdown_literal_html;
 pub mod markdown_mermaid;
 pub mod motion;
 pub mod theme_catalog;
-pub mod theme_files;
 pub mod truncated_line;
 pub mod ui_theme;
 

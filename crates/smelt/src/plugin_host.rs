@@ -158,12 +158,21 @@ impl Workspace {
         cx.subscribe_in(
             &api::events(cx),
             window,
-            |this, _, event: &HostEvent, window, cx| {
-                if *event == HostEvent::ViewsChanged {
+            |this, _, event: &HostEvent, window, cx| match event {
+                HostEvent::ViewsChanged => {
                     this.reload_layout(window, cx);
                     this.sync_page_route(window, cx);
                     cx.notify();
                 }
+                HostEvent::ThemesChanged => {
+                    if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {
+                        let selected = appearance.theme_name.clone();
+                        crate::settings::apply_named_theme(&selected, cx);
+                        cx.refresh_windows();
+                    }
+                    cx.notify();
+                }
+                _ => {}
             },
         )
     }

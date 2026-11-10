@@ -10932,6 +10932,7 @@ dependencies = [
  "smelt-runtime-client",
  "smelt-store",
  "smelt-sys",
+ "smelt-themes",
  "smelt-ui",
  "smelt-version",
  "smol",
@@ -11254,6 +11255,15 @@ dependencies = [
  "tokio",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "smelt-themes"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
 ]
 
 [[package]]

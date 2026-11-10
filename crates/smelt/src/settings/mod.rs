@@ -319,22 +319,56 @@ pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
     cx.set_global(settings);
 }
 
-/// CLI / Control API 经运行时转来的外观改动：按可脚本目录的规则套到当前外观上，
-/// 存进客户端库并整份重新安装。规则在运行时那边已经校验过一遍，这里再走同一份
-/// 校验，是因为「主题明暗」要按本机当前的主题找同族的另一侧。
+/// 不同插件可以使用相同的族名，明暗切换只能在同一个来源内寻找。
+fn scoped_theme_family(owner: Option<&str>, family: &str) -> String {
+    match owner {
+        Some(owner) => format!("plugin:{}:{owner}{family}", owner.len()),
+        None => format!("builtin:{family}"),
+    }
+}
+
+/// 当前桌面的主题目录。运行时没有桌面插件，主题名和同族明暗都在这里解析。
+fn registered_theme_entries(cx: &App) -> Vec<smelt_model::theme_index::ThemeEntry> {
+    smelt_ui::theme_catalog::themes(cx)
+        .into_iter()
+        .map(|theme| smelt_model::theme_index::ThemeEntry {
+            name: theme.name.to_string(),
+            mode: if theme.mode.is_dark() {
+                "dark"
+            } else {
+                "light"
+            }
+            .into(),
+            family: scoped_theme_family(theme.owner.as_ref().map(|owner| owner.as_ref()), &theme.family),
+        })
+        .collect()
+}
+
+/// CLI / Control API 经运行时转来的外观改动：由当前桌面的主题目录校验，
+/// 存进客户端库并整份重新安装。
 pub fn apply_requested_appearance(
     settings: &std::collections::BTreeMap<String, serde_json::Value>,
     cx: &mut App,
-) {
+) -> Result<(), smelt_model::appearance_settings::SettingsError> {
+    let store = smelt_client_store::client_store()
+        .map_err(|error| smelt_model::appearance_settings::SettingsError::Store(format!("打开客户端库失败：{error}")))?;
+    apply_requested_appearance_on(settings, store, cx)
+}
+
+fn apply_requested_appearance_on(
+    settings: &std::collections::BTreeMap<String, serde_json::Value>,
+    store: &smelt_client_store::ClientStore,
+    cx: &mut App,
+) -> Result<(), smelt_model::appearance_settings::SettingsError> {
     let current = cx.global::<Appearance>().clone();
     let mut snapshot = snapshot_from_appearance(&current);
-    if let Err(error) = smelt_model::appearance_settings::apply_patch(&mut snapshot, settings) {
-        crate::status_item::notify_error(format!("外观修改未生效：{error}"));
-        return;
-    }
+    let catalog = registered_theme_entries(cx);
+    smelt_model::appearance_settings::apply_patch(&mut snapshot, settings, &catalog)?;
     let next = appearance_from_snapshot(snapshot);
-    save_appearance(&next);
+    save_appearance_on(&next, store)
+        .map_err(|error| smelt_model::appearance_settings::SettingsError::Store(format!("保存外观失败：{error}")))?;
     install_appearance(next, cx);
+    Ok(())
 }
 
 /// 把一份完整外观套到所有层并重绘。外观的真源是客户端库，内存里的全局只是它的投影。
@@ -351,17 +385,25 @@ fn install_appearance(appearance: Appearance, cx: &mut App) {
 /// 字号和字体在装完之后写回 Appearance，主题文件里的字号不覆盖用户设置。
 /// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`。
 pub fn apply_named_theme(name: &str, cx: &mut App) {
-    let applied = smelt_ui::theme_catalog::apply(name, cx);
+    let requested_dark = cx
+        .try_global::<Appearance>()
+        .map(|appearance| appearance.theme_mode.is_dark())
+        .unwrap_or(true);
+    let applied = smelt_ui::theme_catalog::apply(name, cx)
+        || smelt_ui::theme_catalog::apply(
+            smelt_model::theme_index::default_for_mode(if requested_dark {
+                "dark"
+            } else {
+                "light"
+            }),
+            cx,
+        );
     let dark = if applied && cx.has_global::<Theme>() {
         cx.global::<Theme>().is_dark()
     } else {
-        cx.try_global::<Appearance>()
-            .map(|appearance| appearance.theme_mode.is_dark())
-            .unwrap_or(true)
+        crate::ui_theme::set_light(!requested_dark);
+        requested_dark
     };
-    if !applied {
-        crate::ui_theme::set_light(!dark);
-    }
     terminal::set_dark_mode(dark);
     sync_theme_fonts(cx);
     publish_terminal_theme();
@@ -484,6 +526,17 @@ pub fn load_appearance() -> Appearance {
 }
 
 fn save_appearance(appearance: &Appearance) {
+    if let Err(error) = smelt_client_store::client_store()
+        .and_then(|store| save_appearance_on(appearance, store))
+    {
+        eprintln!("[storage] 保存外观设置失败: {error}");
+    }
+}
+
+fn save_appearance_on(
+    appearance: &Appearance,
+    store: &smelt_client_store::ClientStore,
+) -> Result<(), smelt_client_store::ClientStoreError> {
     let snapshot = snapshot_from_appearance(appearance);
     let record = smelt_client_store::AppearanceRecord {
         bg_color: snapshot.bg_color,
@@ -499,11 +552,7 @@ fn save_appearance(appearance: &Appearance) {
         font_px: snapshot.font_px,
         font_family: snapshot.font_family,
     };
-    if let Err(error) =
-        smelt_client_store::client_store().and_then(|store| store.put_appearance(&record))
-    {
-        eprintln!("[storage] 保存外观设置失败: {error}");
-    }
+    store.put_appearance(&record)
 }
 
 fn snapshot_from_appearance(

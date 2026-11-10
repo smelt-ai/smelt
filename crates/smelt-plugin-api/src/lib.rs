@@ -20,6 +20,11 @@ pub use smelt_client::runtime::RuntimeKey;
 pub use smelt_model as model;
 pub use smelt_runtime_client as client;
 pub use smelt_ui as ui;
+// 主题目录：内置主题和第三方主题按来源登记、卸下，同一套接口（见 smelt_ui::theme_catalog）。
+pub use smelt_ui::theme_catalog::{
+    ThemeInfo, ThemeRegisterError, ThemeSwatch, apply as apply_theme, contains as theme_contains,
+    swatch as theme_swatch, themes,
+};
 
 mod view;
 
@@ -70,6 +75,8 @@ pub enum HostEvent {
     ActiveProjectChanged,
     /// 视图登记变了：加了、替换了或撤下了（见 [`register_view`]）。
     ViewsChanged,
+    /// 主题登记变了：宿主应重新应用当前主题并更新设置页。
+    ThemesChanged,
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。
@@ -135,6 +142,26 @@ pub fn emit(event: HostEvent, cx: &mut App) {
     {
         events.update(cx, |_, cx| cx.emit(event));
     }
+}
+
+/// 按来源整组登记主题；成功后通知宿主和插件更新目录。
+pub fn register_theme_sets(
+    owner: &str,
+    sources: &[&str],
+    cx: &mut App,
+) -> Result<Vec<gpui::SharedString>, ThemeRegisterError> {
+    let names = smelt_ui::theme_catalog::register_theme_sets(owner, sources, cx)?;
+    emit(HostEvent::ThemesChanged, cx);
+    Ok(names)
+}
+
+/// 撤下来源的主题，并在目录变化时通知宿主和插件。
+pub fn unregister_themes(owner: &str, cx: &mut App) -> Vec<gpui::SharedString> {
+    let removed = smelt_ui::theme_catalog::unregister_themes(owner, cx);
+    if !removed.is_empty() {
+        emit(HostEvent::ThemesChanged, cx);
+    }
+    removed
 }
 
 /// 一次运行时调用的默认上限。大仓库的 status、搜索也该在这个时间里回来。

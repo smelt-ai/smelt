@@ -203,6 +203,27 @@ mod tests {
     }
 
     #[test]
+    fn import_accepts_a_theme_only_plugin_without_javascript() {
+        let scratch = Scratch::new();
+        scratch.write(
+            &format!("src/theme/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.theme","name":"Theme","version":"0.1.0","entry":"themes/colors.json"}"#,
+        );
+        scratch.write(
+            "src/theme/themes/colors.json",
+            r#"{"name":"Example","themes":[{"name":"Example Dark","mode":"dark"}]}"#,
+        );
+        let plugins = scratch.path("plugins");
+        import_into(&scratch.path("src/theme"), &plugins).unwrap();
+        assert!(
+            plugins
+                .join("com.example.theme/themes/colors.json")
+                .is_file()
+        );
+        assert!(!plugins.join("com.example.theme/main.js").exists());
+    }
+
+    #[test]
     fn import_leaves_out_git_editor_files_and_symlinks() {
         let scratch = Scratch::new();
         let source = scratch.plugin("src/demo", "com.example.demo");

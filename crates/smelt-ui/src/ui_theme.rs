@@ -1019,7 +1019,10 @@ mod tests {
             "Catppuccin Latte",
             "Catppuccin Mocha",
         ];
-        for file in crate::theme_files::THEME_FILES {
+        for file in [
+            include_str!("../../plugins/themes/themes/ayu.json"),
+            include_str!("../../plugins/themes/themes/catppuccin.json"),
+        ] {
             let doc: serde_json::Value = serde_json::from_str(file).expect("theme json");
             let Some(themes) = doc["themes"].as_array() else {
                 continue;

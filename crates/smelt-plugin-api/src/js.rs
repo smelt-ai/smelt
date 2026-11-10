@@ -30,6 +30,8 @@ export type Machine = string | null;
 export function active_project(): string | null;
 /** 发送系统通知；显示受系统通知授权和设置影响。 */
 export function notify(subtitle: string, body: string): null;
+/** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
+export function register_themes(themeSets: string[]): null;
 export interface PathRequest {
   /** 选择框标题。 */
   title: string;
@@ -46,7 +48,8 @@ export type HostEvent =
   | { type: "reconnected"; machine: Machine }
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
-  | { type: "views_changed" };
+  | { type: "views_changed" }
+  | { type: "themes_changed" };
 /** 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份。同时只能有一个在等。 */
 export function next_event(): Promise<HostEvent>;
 "#;
@@ -57,6 +60,7 @@ pub struct JsPlugin(Rc<RefCell<PluginState>>);
 
 #[derive(Default)]
 struct PluginState {
+    theme_owner: String,
     queue: VecDeque<HostEvent>,
     waiter: Option<oneshot::Sender<HostEvent>>,
     _events: Option<Subscription>,
@@ -68,9 +72,17 @@ impl JsPlugin {
         Self::default()
     }
 
+    /// 每个插件的脚本主题有独立的来源，不能替换其他插件或内置主题。
+    pub fn for_plugin(id: &str) -> Self {
+        let plugin = Self::default();
+        plugin.0.borrow_mut().theme_owner = format!("script:{id}");
+        plugin
+    }
+
     /// 这个插件的 `smelt-plugin-api` 模块，装进它自己的 Policy。
     pub fn module(&self) -> HostModule {
         let events = self.clone();
+        let theme_owner = self.0.borrow().theme_owner.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_project", |_| {
@@ -83,6 +95,28 @@ impl JsPlugin {
                 let subtitle = arguments.string(0)?;
                 let body = arguments.string(1)?;
                 in_app("notify", |cx| crate::host(cx).notify(subtitle, body))?;
+                Ok(HostValue::Null)
+            })
+            .function("register_themes", move |arguments| {
+                let values = arguments
+                    .value(0)?
+                    .as_array()
+                    .ok_or_else(|| HostError::new("主题集必须是字符串数组"))?;
+                let sources = values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .ok_or_else(|| HostError::new("主题集必须是字符串数组"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if theme_owner.is_empty() {
+                    return Err(HostError::new("插件没有主题来源身份"));
+                }
+                in_app("register_themes", |cx| {
+                    crate::register_theme_sets(&theme_owner, &sources, cx)
+                })?
+                .map_err(|error| HostError::new(error.to_string()))?;
                 Ok(HostValue::Null)
             })
             .async_function("pick_paths", pick_paths)
@@ -230,6 +264,7 @@ fn event_value(event: &HostEvent) -> HostValue {
             HostObject::new().field("type", "active_project_changed")
         }
         HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
+        HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
     };
     object.into()
 }
@@ -265,6 +300,29 @@ mod tests {
             )
             .unwrap_err();
         assert!(outside_script.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn theme_registration_rejects_invalid_arguments_before_entering_app() {
+        let module = JsPlugin::for_plugin("example").module();
+        assert!(
+            module
+                .call("register_themes", &HostArguments::default())
+                .is_err()
+        );
+        assert!(
+            module
+                .call("register_themes", &HostArguments::new([HostValue::Null]))
+                .is_err()
+        );
+        assert!(
+            module
+                .call(
+                    "register_themes",
+                    &HostArguments::new([HostValue::Array(vec![HostValue::Null])])
+                )
+                .is_err()
+        );
     }
 
     #[test]
