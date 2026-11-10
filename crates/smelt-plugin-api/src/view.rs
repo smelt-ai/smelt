@@ -1,7 +1,7 @@
 //! 视图注册表：插件能画的东西。
 //!
-//! 插件只说自己能画什么（id、标题、图标、怎么建），不说摆在哪：摆在侧栏入口、舞台还是
-//! 面板里由宿主定。视图按字符串 id 登记，宿主只记 id，宿主里不出现视图的类型。同一个
+//! 插件只说自己能画什么（id、标题、图标、怎么建），不说摆在哪：摆在哪由布局定，布局归
+//! 用户。视图按字符串 id 登记，宿主只记 id，宿主里不出现视图的类型。同一个
 //! id 只留最后登记的那份，用户插件可以借此替换内置的。建好的视图也记在这里：登记被替换
 //! 或撤下，旧视图跟着放掉。
 
@@ -19,12 +19,18 @@ pub trait PluginView: Render {
     /// 被打开：每次打开都会调，参数由打开的地方给（如 `{"tab": "plugins"}`），认不出的
     /// 字段忽略。
     fn open(&mut self, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>);
+
+    /// 标签上名字后面的角标，如待处理的条数。只读内存：宿主在画标签时调。
+    fn badge(&self, _cx: &App) -> Option<SharedString> {
+        None
+    }
 }
 
 /// 宿主拿着的视图：画出来，或再打开一次。
 pub trait ViewHandle {
     fn view(&self) -> AnyView;
     fn open(&self, args: &serde_json::Value, window: &mut Window, cx: &mut App);
+    fn badge(&self, cx: &App) -> Option<SharedString>;
 }
 
 impl<V: PluginView> ViewHandle for Entity<V> {
@@ -34,6 +40,10 @@ impl<V: PluginView> ViewHandle for Entity<V> {
 
     fn open(&self, args: &serde_json::Value, window: &mut Window, cx: &mut App) {
         self.update(cx, |view, cx| view.open(args, window, cx));
+    }
+
+    fn badge(&self, cx: &App) -> Option<SharedString> {
+        self.read(cx).badge(cx)
     }
 }
 

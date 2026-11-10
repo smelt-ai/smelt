@@ -193,12 +193,9 @@ impl Workspace {
         self.sidebar_cursor.as_ref().map(SidebarItem::key)
     }
 
-    /// ⌘⇧E：把焦点放进侧栏，停在正在看的那一行上；侧栏收着就先打开。
+    /// ⌘⇧E：把焦点放进侧栏，停在正在看的那一行上；会话列表被挡着就先让它露出来。
     pub(crate) fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sidebar_open {
-            self.sidebar_open = true;
-            self.save_state(cx);
-        }
+        self.show_view(crate::builtin_views::Builtin::Sessions.id(), window, cx);
         let items: Vec<SidebarItem> = self
             .sidebar_items(cx)
             .into_iter()

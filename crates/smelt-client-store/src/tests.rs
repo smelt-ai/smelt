@@ -12,12 +12,33 @@ fn temp_store() -> (ClientStore, PathBuf) {
     (store, path)
 }
 
-// 固定旧版 workspace_ui 的形状，不能把当前 schema 的新列带进旧版本迁移夹具。
+// 固定旧版 workspace_ui、conversation_route 的形状，不能把当前 schema 的改动带进旧版本
+// 迁移夹具。
 fn create_v7_schema(connection: &Connection) {
     connection.execute_batch(schema::CREATE_SCHEMA).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_ui;
+            "DROP TABLE workspace_layout_state;
+             DROP TABLE conversation_route;
+             CREATE TABLE conversation_route (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               active_terminal_id TEXT,
+               dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
+               stage_cover TEXT,
+               tool_panel_tab TEXT NOT NULL,
+               tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
+               tool_panel_w REAL NOT NULL,
+               file_tree_selected TEXT,
+               open_file_path TEXT,
+               file_tree_w REAL NOT NULL,
+               file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+               git_tab TEXT NOT NULL,
+               diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+               diff_scope TEXT NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id)
+             ) WITHOUT ROWID;
+             DROP TABLE workspace_ui;
              CREATE TABLE workspace_ui (
                id INTEGER PRIMARY KEY CHECK (id = 1),
                active_session INTEGER NOT NULL CHECK (active_session >= 0),
@@ -61,14 +82,13 @@ fn workspace_ui() -> WorkspaceUiRecord {
         active_session_id: Some("s-1".to_string()),
         route: "session".to_string(),
         selected_agent_id: None,
-        sidebar_w: Some(320.0),
-        sidebar_open: Some(true),
         collapsed_projects: vec![ProjectKey::local("/repo/b"), ProjectKey::local("/repo/a")],
         collapsed_agents: vec!["writer".to_string()],
         sidebar_grouping: "project".to_string(),
         pinned_projects: vec![ProjectKey::local("/repo/z"), ProjectKey::local("/repo/a")],
         sidebar_hide_empty_projects: true,
         archive_expanded: false,
+        layout_id: None,
     }
 }
 
@@ -121,6 +141,92 @@ fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
         .unwrap();
     assert_eq!(backup_version, 7);
     drop(backup);
+    cleanup(&path);
+}
+
+/// v8 的三栏宽度、开合和每段对话的工具面板状态升到 v9 时丢掉，别的界面状态留着；布局存档
+/// 表是空的。
+#[test]
+fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v8 = Connection::open(&path).unwrap();
+    create_v7_schema(&v8);
+    v8.execute_batch(
+        "ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
+           CHECK (archive_expanded IN (0, 1));
+         INSERT INTO workspace_ui VALUES
+           (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1, 1);
+         INSERT INTO conversation_route VALUES
+           ('', 'conv-1', 'term-2', NULL, 'inspector', 'git', 1, 420.0, '/repo/a.rs', NULL,
+            240.0, 0, 'log', 1, 'unstaged');
+         PRAGMA user_version = 8;",
+    )
+    .unwrap();
+    drop(v8);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(
+        store.workspace_ui().unwrap(),
+        Some(WorkspaceUiRecord {
+            collapsed_projects: Vec::new(),
+            collapsed_agents: Vec::new(),
+            pinned_projects: Vec::new(),
+            archive_expanded: true,
+            ..workspace_ui()
+        })
+    );
+    let routes = store.conversation_routes().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].file_tree_selected.as_deref(), Some("/repo/a.rs"));
+    assert_eq!(routes[0].git_tab, "log");
+    assert_eq!(store.workspace_layout_state("default").unwrap(), None);
+    drop(store);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v8"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+/// 布局存档按布局 id 一份，整份覆盖；不是 JSON 的写不进去；删掉就回到没改过。
+#[test]
+fn layout_states_are_kept_per_layout() {
+    let (store, path) = temp_store();
+    let record = |layout_id: &str, state: &str| WorkspaceLayoutStateRecord {
+        layout_id: layout_id.to_string(),
+        file_digest: "digest".to_string(),
+        state: state.to_string(),
+    };
+    store
+        .put_workspace_layout_state(&record("default", r#"{"version":1}"#))
+        .unwrap();
+    store
+        .put_workspace_layout_state(&record("stocks", r#"{"version":1,"center":{}}"#))
+        .unwrap();
+    store
+        .put_workspace_layout_state(&record("default", r#"{"version":2}"#))
+        .unwrap();
+    assert!(
+        store
+            .put_workspace_layout_state(&record("default", "{not json"))
+            .is_err()
+    );
+    assert_eq!(
+        store.workspace_layout_state("default").unwrap(),
+        Some(record("default", r#"{"version":2}"#))
+    );
+    store.delete_workspace_layout_state("default").unwrap();
+    assert_eq!(store.workspace_layout_state("default").unwrap(), None);
+    assert!(store.workspace_layout_state("stocks").unwrap().is_some());
+
+    let ui = WorkspaceUiRecord {
+        layout_id: Some("stocks".to_string()),
+        ..workspace_ui()
+    };
+    store.put_workspace_ui(&ui).unwrap();
+    assert_eq!(store.workspace_ui().unwrap(), Some(ui));
     cleanup(&path);
 }
 
@@ -187,10 +293,6 @@ fn route(runtime_id: Option<&str>, conversation_id: &str) -> ConversationRouteRe
         conversation_id: conversation_id.to_string(),
         active_terminal_id: Some("term-2".to_string()),
         dock_layout: Some(r#"{"v":1,"center":{"terminal":"term-2"}}"#.to_string()),
-        stage_cover: Some("inspector".to_string()),
-        tool_panel_tab: "git".to_string(),
-        tool_panel_open: true,
-        tool_panel_w: 420.0,
         expanded: vec!["/repo/src".to_string(), "/repo/docs".to_string()],
         file_tree_selected: Some("/repo/src/main.rs".to_string()),
         open_file_path: None,
@@ -217,7 +319,6 @@ fn conversation_routes_are_replaced_as_a_whole() {
         ConversationRouteRecord {
             active_terminal_id: None,
             dock_layout: None,
-            stage_cover: None,
             expanded: Vec::new(),
             ..route(None, "conv-2")
         },

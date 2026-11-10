@@ -1,11 +1,10 @@
-//! 面板插件：Tool Panel 里的 gpui-shell 插件（见 `crate::plugins`）的导入、删除和重新加载。
+//! 面板插件：gpui-shell 插件（见 `crate::plugins`，每个插件是一个视图）的导入、删除和重新加载。
 //!
 //! 和能力库里的「智能体插件」（Pi 的技能与扩展）是两回事：这些插件跑在 smelt 界面里，
 //! 只在本机。改磁盘放后台线程；改完在工作台窗口里重新挂载全部插件，不用重启。
 
 use super::*;
 use crate::plugins::{InstalledPlugin, PluginSource};
-use crate::tool_panel::ToolPanelTab;
 
 #[derive(Default)]
 pub(crate) struct PanelPluginsState {
@@ -132,24 +131,11 @@ impl Workspace {
         let view = cx.weak_entity();
         cx.defer(move |cx| {
             let _ = cx.update_window(handle, |_root, window, cx| {
+                // 视图登记变了由工作台自己跟（重装布局、对路由），见 `subscribe_host_events`。
                 crate::plugins::mount_all(window, cx);
-                let _ = view.update(cx, |workspace, cx| {
-                    workspace.leave_unmounted_plugin_tab(cx);
-                    cx.notify();
-                });
+                let _ = view.update(cx, |_, cx| cx.notify());
             });
         });
-    }
-
-    /// 正停在一个已经删掉的插件 tab 上就回到 Files。别的会话、项目里记着的不管：
-    /// 切过去时那个 tab 说明插件已删除，下次启动存档自然降级。
-    fn leave_unmounted_plugin_tab(&mut self, cx: &mut Context<Self>) {
-        if let ToolPanelTab::Plugin(slot) = self.tool_panel_tab
-            && !crate::plugins::is_mounted(slot)
-        {
-            self.tool_panel_tab = ToolPanelTab::Files;
-            self.save_state(cx);
-        }
     }
 
     /// 返回能不能开始：同一时刻只做一件。

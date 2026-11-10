@@ -648,7 +648,8 @@ impl Workspace {
                 .into_any_element()
         } else {
             // 仓库行、提交框和文件行高度不同，用变高虚拟列表，只构造视口附近的行。
-            let row_w = px(self.tool_panel_w.max(160.));
+            // 纵向虚拟列表只用每行的高度，宽度随列表。
+            let row_w = px(160.);
             let sizes = Rc::new(
                 narrow_rows
                     .iter()

@@ -567,19 +567,6 @@ impl Workspace {
         )
     }
 
-    /// 活动项目在远程运行时上时，只支持本机的插件面板该说的话。不能说成
-    /// 「没有项目」：项目明明打开着，只是在另一台机器上。
-    pub(crate) fn remote_project_notice(&self, cx: &App) -> Option<String> {
-        let project = self.active_project_ref(cx)?;
-        if project.runtime == crate::RuntimeKey::Local {
-            return None;
-        }
-        let name = crate::runtimes::runtime_name(&project.runtime, cx);
-        Some(format!(
-            "这是「{name}」上的项目，这个面板暂时只支持本机项目"
-        ))
-    }
-
     /// 把工具面板（变更、文件树）里的文字交给当前会话：终端写进 PTY，对话放进输入框。
     /// 都不带回车，发不发由人定。面板跟着选中的项目走，舞台上的会话不一定是这个项目的；
     /// 不是时不发，不能把 B 项目的评论写进 A 的会话。没送到时告诉用户原因，返回 false。
@@ -1719,16 +1706,6 @@ impl Workspace {
         self.add_session(runtime, cwd, cx);
     }
 
-    /// 切换左侧栏（会话列表与工作区）开合状态。宽度由 Dock 的左栏记住。
-    pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        if !self.sidebar_open {
-            self.focus_active_stage(window, cx);
-        }
-        self.save_state(cx);
-        cx.notify();
-    }
-
     /// 在这个运行时上打开一个目录作为项目并设为活动项目。已经开着就只切活动。项目随
     /// 运行时的推送进侧栏。**不建会话**——项目和会话是两回事，建会话是调用方另外的事。
     pub(crate) fn add_project(
@@ -1753,8 +1730,6 @@ impl Workspace {
             return;
         }
         self.active_project = Some(ProjectRef { runtime, root });
-        // 打开项目 = 想看这个项目，收掉盖在舞台上的覆盖页。
-        self.stage_cover = None;
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -2048,9 +2023,6 @@ impl Workspace {
             paths.len(),
             paths
         );
-        self.stage_cover = None;
-        cx.notify();
-
         let paths: Vec<std::path::PathBuf> = paths.to_vec();
         let (tx, rx) = smol::channel::bounded(1);
         std::thread::Builder::new()
@@ -2343,33 +2315,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 聚焦当前会话的活动终端（ACP 会话的聚焦走视图自身，这里跳过）。
-    /// 设置/收回舞台覆盖页并处理焦点：全屏页自己没有可聚焦元素，焦点认领到根
-    /// 让全局快捷键仍收得到；收回时把焦点还给活动会话（终端 pane / ACP 输入框）。
-    pub(crate) fn set_stage_cover(
-        &mut self,
-        v: Option<StageCover>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = self.stage_cover != v;
-        if v.is_some() {
-            self.desktop = None;
-            self.nav.set_active(WorkspaceRoute::Session);
-        }
-        self.stage_cover = v;
-        match v {
-            Some(_) => window.focus(&self.focus_handle, cx),
-            None => self.focus_active_stage(window, cx),
-        }
-        if changed {
-            // Esc / 返回条也走这里。只改内存不落盘的话，冷启动会按存档再进全屏。
-            self.save_state(cx);
-            self.schedule_visible_refresh(cx);
-        }
-        cx.notify();
-    }
-
     /// 焦点还给活动会话：Term → 活动 pane；ACP → 消息流输入框。
     pub(crate) fn focus_active_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Session {
@@ -2428,7 +2373,7 @@ impl Workspace {
     }
 
     pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
-        if self.stage_cover.is_some() {
+        if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
             return None;
         }
         if !route_views_session(self.active_tab(), self.nav.agents().conversation_sid()) {
@@ -2474,6 +2419,8 @@ impl Workspace {
     }
 
     pub(crate) fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // 要看这个会话：舞台得露出来。舞台不在布局里就看不见，不标已读、不抢焦点。
+        let stage_hidden = !self.show_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
         if ix < self.sessions.len() && self.sessions[ix].is_agent_conversation(cx) {
             self.open_agent_conversation(ix, window, cx);
             return;
@@ -2503,7 +2450,7 @@ impl Workspace {
             self.sync_session_ui(window, cx);
             self.desktop = None;
             self.nav.set_active(WorkspaceRoute::Session);
-            let route_has_overlay = self.stage_cover.is_some();
+            let route_has_overlay = stage_hidden;
             // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
             // 视图更新期间再读它会 panic。
             let restore_settled = self.session_restore_settled(ix, cx);

@@ -36,9 +36,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 通知目标必须真的露出来；Tool Panel 全屏覆盖层若仍保留，activate 会把底下
-        // 会话标已读但用户实际看不到它。
-        self.stage_cover = None;
         if let Some(pane) = pane
             && let Some(session) = self.sessions.get_mut(session_ix)
         {
@@ -111,8 +108,8 @@ impl Workspace {
         }
     }
 
-    /// 返回该通知对应的会话标题，以及它是否正显示在主舞台上。非会话路由和
-    /// Tool Panel 全屏覆盖层都会遮住活动会话，不能只看 active_session 就判定已在看。
+    /// 返回该通知对应的会话标题，以及它是否正显示在主舞台上。非会话路由、舞台被布局
+    /// 里别的视图挡住都看不到活动会话，不能只看 active_session 就判定已在看。
     pub(crate) fn attention_context(
         &self,
         notification: &AttentionItem,

@@ -21,9 +21,8 @@ impl Workspace {
         }
         self.nav.set_active(tab);
         self.pop_active_tab_to_root();
-        if !self.active_tab().is_session() {
-            self.stage_cover = None;
-        }
+        // 这些页都画在舞台上：舞台得露出来。
+        self.show_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
         window.focus(&self.focus_handle, cx);
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
@@ -35,9 +34,6 @@ impl Workspace {
             self.desktop = None;
         }
         self.nav.set_active(tab);
-        if !self.active_tab().is_session() {
-            self.stage_cover = None;
-        }
         self.schedule_visible_refresh(cx);
     }
 
@@ -48,9 +44,6 @@ impl Workspace {
             self.automation_surface.live_sub = None;
             self.automation_surface.editor = None;
             self.automation_surface.selected_run_id = None;
-        }
-        if self.active_tab().is_session() {
-            self.stage_cover = None;
         }
     }
 

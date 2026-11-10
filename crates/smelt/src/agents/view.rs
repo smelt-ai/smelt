@@ -650,7 +650,7 @@ impl Workspace {
         count: usize,
         entity: Entity<Workspace>,
         cx: &App,
-        left_guard: Pixels,
+        left_guard: Option<Pixels>,
     ) -> AnyElement {
         let add_entity = entity;
         let engines = agent_engine_kinds();
@@ -698,7 +698,7 @@ impl Workspace {
         &self,
         name: &str,
         entity: Entity<Workspace>,
-        left_guard: Pixels,
+        left_guard: Option<Pixels>,
     ) -> AnyElement {
         let draft = self.editing_conversation_draft();
         let back_entity = entity.clone();

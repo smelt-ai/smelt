@@ -1,8 +1,8 @@
-//! 舞台和右栏共用的 34px 顶栏：窗口开关 + 可见舞台身份。
-//! 用其他应用打开在项目右键；文件/变更/技能/历史在右抽屉里。
+//! 舞台顶上浮着的东西：可见舞台身份的胶囊，舞台贴着窗口顶时还有拖窗口的条。
+//! 用其他应用打开在项目右键。
 //!
-//! 标题不拉成通栏。它是舞台列正中的一颗胶囊，右栏打开时也不跟着偏到分栏上。
-//! 标题槽只填当前舞台没有自己页头的那一面（项目会话、智能体对话、插件面）。
+//! 标题不拉成通栏。它是舞台正中的一颗胶囊。
+//! 标题槽只填当前舞台没有自己页头的那一面（项目会话、智能体对话）。
 //! 对话里最近一问整条滚出视口后，胶囊换成那一问，按下滚回去。
 //! 智能体/自动化目录和钻取已有页头，铬不重复写，也不回落到上一会话。
 //!
@@ -12,10 +12,8 @@ use gpui::StatefulInteractiveElement;
 use gpui::*;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
-pub(crate) use smelt_ui::Button;
 
-use crate::{StageCover, Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
-use smelt_ui::IconAction as _;
+use crate::{Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
 use smelt_ui::truncated_line::truncated_line;
 
 /// 共用顶栏标题槽。目录/编辑器/自动化钻取都有页头，那些面必须是 `Hidden`。
@@ -51,14 +49,7 @@ impl ChromeTitle {
 }
 
 /// 舞台自己有页头或页签时，拖窗口交给那一条，不要再盖一层把按钮挡住。
-pub(crate) fn stage_has_page_header(
-    route: &WorkspaceRoute,
-    agent_conversation_open: bool,
-    tool_panel_fills_stage: bool,
-) -> bool {
-    if tool_panel_fills_stage {
-        return true;
-    }
+pub(crate) fn stage_has_page_header(route: &WorkspaceRoute, agent_conversation_open: bool) -> bool {
     match route {
         WorkspaceRoute::Agents => !agent_conversation_open,
         WorkspaceRoute::Automations | WorkspaceRoute::Page(_) | WorkspaceRoute::Desktop => {
@@ -68,30 +59,18 @@ pub(crate) fn stage_has_page_header(
     }
 }
 
-/// 内容贴到窗口顶时，交通灯这一条仍然拖窗口。
+/// 舞台贴着窗口顶（单独一组、没有标签条）时，顶上这一条拖窗口；有页头时交给页头。
 ///
-/// 侧栏收起且红绿灯在客户区时从 80px 起，跟侧栏安全条一样躲开红绿灯。
-/// 右栏打开时停在分栏左边。返回值是 `(left, right, height)`。
+/// `left_guard` 见 [`Workspace::chrome_left_guard`]：`None` 是舞台不贴窗口顶，`Some` 是
+/// 左边要让出的宽度（贴左上角时是红黄绿按钮）。返回值是 `(left, height)`。
 pub(crate) fn stage_content_drag_band(
-    sidebar_open: bool,
-    no_traffic_lights: bool,
-    panel_width: Pixels,
+    left_guard: Option<Pixels>,
     page_header: bool,
-) -> Option<(Pixels, Pixels, Pixels)> {
+) -> Option<(Pixels, Pixels)> {
     if page_header {
         return None;
     }
-    let left = if sidebar_open || no_traffic_lights {
-        px(0.)
-    } else {
-        px(80.)
-    };
-    let right = if panel_width > px(0.) {
-        panel_width
-    } else {
-        px(0.)
-    };
-    Some((left, right, workspace_frame::TOP_BAR_HEIGHT))
+    left_guard.map(|left| (left, workspace_frame::TOP_BAR_HEIGHT))
 }
 
 /// 铬标题跟可见面走，不读裸的 `active_session`。
@@ -102,12 +81,7 @@ pub(crate) fn chrome_title_for_stage(
     route: &WorkspaceRoute,
     agent_conversation: Option<ChromeSessionTitle>,
     project_session: Option<ChromeSessionTitle>,
-    tool_panel_fills_stage: bool,
 ) -> ChromeTitle {
-    // 右栏铺满舞台时，页签就是标题。会话胶囊会压在那条页签上。
-    if tool_panel_fills_stage && matches!(route, WorkspaceRoute::Session) {
-        return ChromeTitle::Hidden;
-    }
     match route {
         WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
         WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
@@ -116,9 +90,6 @@ pub(crate) fn chrome_title_for_stage(
         }
     }
 }
-
-/// 右上角两个圆形开关加上右边距。胶囊居中时让开它，页头按钮也别钻到它下面。
-pub(crate) const CHROME_TOGGLE_RESERVE: f32 = 72.;
 
 /// 静止宽度。胶囊浮在内容第一行正中，左右常是终端自己的路径和用量，只能留一个短名字。
 const CHROME_ISLAND_MAX_WIDTH: f32 = 200.;
@@ -401,16 +372,18 @@ impl Workspace {
         }
     }
 
-    /// 侧栏收起时，舞台左缘要让开交通灯和侧栏开关。侧栏开着时让位是 0。
-    /// 客户区没有交通灯（macOS 全屏、Windows 系统标题栏）时只让侧栏开关。
-    pub(crate) fn chrome_left_guard(&self, window: &Window) -> Pixels {
-        if self.sidebar_open {
-            px(0.)
-        } else if !workspace_frame::traffic_lights_visible(window) {
-            px(48.)
-        } else {
-            px(128.)
-        }
+    /// 舞台上的页头、拖窗口条从哪起。舞台单独一组、没有标签条时贴着窗口顶，返回左边要
+    /// 让出的宽度：贴左上角时让红黄绿按钮，不然是 0。舞台在标签条下面时是 `None`：顶上
+    /// 那条归标签条，页头不用再留拖窗口的高度。只读缓存（见 `workspace_layout`）。
+    pub(crate) fn chrome_left_guard(&self, window: &Window) -> Option<Pixels> {
+        let stage = crate::builtin_views::Builtin::Stage.id();
+        self.shell_view.bare.contains(stage).then(|| {
+            if self.shell_view.top_left.as_deref() == Some(stage) {
+                crate::workspace_shell::lights_width(window)
+            } else {
+                px(0.)
+            }
+        })
     }
 
     fn chrome_title(&self, cx: &App) -> ChromeTitle {
@@ -434,22 +407,13 @@ impl Workspace {
                 conversation,
             })
         });
-        chrome_title_for_stage(
-            self.active_tab(),
-            agent_conversation,
-            project_session,
-            self.tool_panel_promoted(),
-        )
+        chrome_title_for_stage(self.active_tab(), agent_conversation, project_session)
     }
 
-    /// 浮在内容上的标题胶囊、右上角开关，以及没有页头时的拖窗口条。
-    /// 不占布局高度。页头和右栏页签自己拖，这里不再盖住它们。
-    /// `panel_reserve` 是停靠右栏的宽度，胶囊按舞台列居中，不漂到右栏上。
-    pub(crate) fn render_shared_right_chrome(
+    /// 浮在舞台内容上的标题胶囊，以及舞台贴窗口顶、没有页头时的拖窗口条。不占布局高度。
+    pub(crate) fn render_stage_chrome(
         &mut self,
-        left_guard: Pixels,
-        panel_reserve: Pixels,
-        no_traffic_lights: bool,
+        left_guard: Option<Pixels>,
         cx: &mut Context<Self>,
     ) -> Div {
         let island = match self.chrome_title(cx) {
@@ -473,111 +437,34 @@ impl Workspace {
                 })
             }
         };
-        // 右栏收起时开关叠在舞台右缘，居中范围要让开它。
-        let stage_right = if panel_reserve > px(0.) {
-            panel_reserve
-        } else {
-            px(CHROME_TOGGLE_RESERVE)
-        };
-        let toggles = self.render_window_trailing_toggles(cx);
         let drag_band = stage_content_drag_band(
-            left_guard <= px(0.),
-            no_traffic_lights,
-            panel_reserve,
+            left_guard,
             stage_has_page_header(
                 self.active_tab(),
                 self.selected_agent_conversation_view(cx).is_some(),
-                self.tool_panel_promoted(),
             ),
         );
         div()
-            .size_full()
-            .relative()
-            // 拖动条在胶囊和开关下面。点到按钮时按钮先拦住，不会把窗口拖走。
-            .children(drag_band.map(|(left, right, height)| {
+            .absolute()
+            .inset_0()
+            // 拖动条在胶囊下面。点到胶囊时胶囊先拦住，不会把窗口拖走。
+            .children(drag_band.map(|(left, height)| {
                 workspace_frame::with_window_drag(
-                    div().absolute().top_0().left(left).right(right).h(height),
+                    div().absolute().top_0().left(left).right_0().h(height),
                 )
             }))
             .children(island.map(|island| {
                 div()
                     .absolute()
                     .top(px(ui_theme::CHROME_ISLAND_TOP_PX))
-                    .left(left_guard)
-                    .right(stage_right)
+                    .left(left_guard.unwrap_or_default())
+                    .right_0()
                     .h(px(ui_theme::CHROME_ISLAND_HEIGHT_PX))
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(island)
             }))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right(px(12.))
-                    .h(workspace_frame::TOP_BAR_HEIGHT)
-                    .flex()
-                    .items_center()
-                    .child(toggles),
-            )
-    }
-
-    /// 窗口级开关：全屏 / 右侧抽屉。挂在共用顶栏右侧，不进浮层。
-    pub(crate) fn render_window_trailing_toggles(&self, cx: &mut Context<Self>) -> Div {
-        let promoted = self.tool_panel_promoted();
-        let panel_visible = self.tool_panel_open || promoted;
-        let fullscreen_label = if promoted {
-            "收回右侧面板"
-        } else {
-            "全屏显示右侧面板"
-        };
-        h_flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            // 挂在拖窗口的顶栏上：按下先拦住，不让它变成拖窗口。
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .children((promoted || self.tool_panel_open).then(|| {
-                Button::new("tool-panel-fullscreen-toggle")
-                    .quiet()
-                    .compact()
-                    .selected(promoted)
-                    .toggled(promoted)
-                    .icon(if promoted {
-                        IconName::Minimize
-                    } else {
-                        IconName::Maximize
-                    })
-                    .icon_action(fullscreen_label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if promoted {
-                            this.set_stage_cover(None, window, cx);
-                            this.set_tool_panel_open(true, cx);
-                        } else {
-                            this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
-                        }
-                        this.save_state(cx);
-                        cx.notify();
-                    }))
-            }))
-            .child(
-                Button::new("tool-panel-toggle")
-                    .quiet()
-                    .compact()
-                    .selected(panel_visible)
-                    .toggled(panel_visible)
-                    .icon(if panel_visible {
-                        Icon::empty().path("smelt-icons/panel-right-filled.svg")
-                    } else {
-                        Icon::new(IconName::PanelRight)
-                    })
-                    .accessibility_label("切换右侧面板")
-                    .tooltip_with_action("切换右侧面板", &crate::ToggleToolPanel, None)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_tool_panel(window, cx);
-                    })),
-            )
     }
 }
 
@@ -609,7 +496,7 @@ mod tests {
     #[test]
     fn leaving_a_session_for_the_agent_catalog_clears_the_chrome_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), false),
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok())),
             ChromeTitle::Hidden,
         );
     }
@@ -617,7 +504,7 @@ mod tests {
     #[test]
     fn automations_do_not_keep_the_previous_session() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Automations, None, Some(grok()), false),
+            chrome_title_for_stage(&WorkspaceRoute::Automations, None, Some(grok())),
             ChromeTitle::Hidden,
         );
     }
@@ -629,7 +516,6 @@ mod tests {
                 &WorkspaceRoute::Agents,
                 Some(agent_chat()),
                 Some(grok()),
-                false,
             ),
             ChromeTitle::Visible {
                 title: "查登录".into(),
@@ -642,7 +528,7 @@ mod tests {
     #[test]
     fn project_stage_still_shows_the_session_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), false),
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok())),
             ChromeTitle::Visible {
                 title: grok().title,
                 model: None,
@@ -650,7 +536,7 @@ mod tests {
             },
         );
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, Some(agent_chat()), None, false),
+            chrome_title_for_stage(&WorkspaceRoute::Session, Some(agent_chat()), None),
             ChromeTitle::Hidden,
         );
     }
@@ -666,61 +552,35 @@ mod tests {
                     model: None,
                     conversation: None,
                 }),
-                false,
             ),
             ChromeTitle::Hidden,
         );
     }
 
     #[test]
-    fn promoted_tool_panel_hides_the_session_capsule() {
-        assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), true),
-            ChromeTitle::Hidden,
+    fn a_stage_at_the_window_top_drags_there() {
+        let band = stage_content_drag_band(Some(px(0.)), false).expect("贴窗口顶要能拖");
+        assert_eq!(band, (px(0.), workspace_frame::TOP_BAR_HEIGHT));
+
+        let corner = stage_content_drag_band(Some(px(80.)), false).expect("左上角让开红黄绿");
+        assert_eq!(corner.0, px(80.));
+
+        assert!(
+            stage_content_drag_band(None, false).is_none(),
+            "在标签条下面，拖窗口归标签条"
         );
-        assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), true),
-            ChromeTitle::Hidden,
-        );
-    }
-
-    #[test]
-    fn session_top_drags_in_the_traffic_light_band() {
-        let band = stage_content_drag_band(true, false, px(0.), false).expect("会话顶要能拖");
-        assert_eq!(band, (px(0.), px(0.), workspace_frame::TOP_BAR_HEIGHT));
-
-        let closed = stage_content_drag_band(false, false, px(0.), false).expect("侧栏收起也能拖");
-        assert_eq!(closed.0, px(80.));
-        assert_eq!(closed.2, workspace_frame::TOP_BAR_HEIGHT);
-
-        let fullscreen = stage_content_drag_band(false, true, px(0.), false).expect("全屏从左边拖");
-        assert_eq!(fullscreen.0, px(0.));
-
-        let docked =
-            stage_content_drag_band(true, false, px(320.), false).expect("停靠右栏时舞台仍能拖");
-        assert_eq!(docked.1, px(320.));
     }
 
     #[test]
     fn page_headers_own_the_drag_instead_of_a_covering_strip() {
-        assert!(stage_content_drag_band(true, false, px(0.), true).is_none());
-        assert!(stage_has_page_header(
-            &WorkspaceRoute::Automations,
-            false,
-            false
-        ));
+        assert!(stage_content_drag_band(Some(px(0.)), true).is_none());
+        assert!(stage_has_page_header(&WorkspaceRoute::Automations, false));
         assert!(stage_has_page_header(
             &WorkspaceRoute::Page("capabilities".into()),
-            false,
             false
         ));
-        assert!(stage_has_page_header(&WorkspaceRoute::Agents, false, false));
-        assert!(!stage_has_page_header(&WorkspaceRoute::Agents, true, false));
-        assert!(!stage_has_page_header(
-            &WorkspaceRoute::Session,
-            false,
-            false
-        ));
-        assert!(stage_has_page_header(&WorkspaceRoute::Session, false, true));
+        assert!(stage_has_page_header(&WorkspaceRoute::Agents, false));
+        assert!(!stage_has_page_header(&WorkspaceRoute::Agents, true));
+        assert!(!stage_has_page_header(&WorkspaceRoute::Session, false));
     }
 }

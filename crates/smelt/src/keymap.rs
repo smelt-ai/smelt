@@ -88,22 +88,6 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
         default: "cmd-n",
         action: || Box::new(NewConversation),
     },
-    Shortcut {
-        id: "toggle_sidebar",
-        label: "切换左侧栏",
-        group: ShortcutGroup::Session,
-        context: None,
-        default: "cmd-b",
-        action: || Box::new(ToggleSidebar),
-    },
-    Shortcut {
-        id: "toggle_tool_panel",
-        label: "切换右侧面板",
-        group: ShortcutGroup::Session,
-        context: None,
-        default: "alt-cmd-b",
-        action: || Box::new(ToggleToolPanel),
-    },
     // ⌘⇧E 跟 VS Code「聚焦资源管理器」一样，侧栏键盘操作见 `session_list::keyboard`。
     Shortcut {
         id: "focus_sidebar",

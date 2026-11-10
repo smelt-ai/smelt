@@ -90,8 +90,16 @@ impl Workspace {
                 WorkspaceRoute::Automations,
                 entity.clone(),
             ))
-            // 插件视图摆在哪由宿主定：眼下每个都是舞台上的一页，入口排在宿主自己的后面。
-            .children(smelt_plugin_api::views(cx).into_iter().map(|view| {
+            // 摆进布局的视图就在布局里看，不再给入口；其余的当舞台上的一页打开，入口排在
+            // 宿主自己的后面。舞台自己当不了舞台上的页。
+            .children(
+                smelt_plugin_api::views(cx)
+                    .into_iter()
+                    .filter(|view| {
+                        !self.shell_view.laid_out.contains(view.id.as_ref())
+                            && view.id.as_ref() != crate::builtin_views::Builtin::Stage.id()
+                    })
+                    .map(|view| {
                 self.render_agent_product_navigation_row(
                     SharedString::from(format!("{}-route", view.id)),
                     view.title,
@@ -100,7 +108,8 @@ impl Workspace {
                     WorkspaceRoute::Page(view.id.to_string()),
                     entity.clone(),
                 )
-            }))
+                    }),
+            )
     }
 
     pub(super) fn render_automation_drill_header(
@@ -110,7 +119,7 @@ impl Workspace {
         trailing: Option<AnyElement>,
         back_tooltip: &'static str,
         entity: Entity<Workspace>,
-        left_guard: Pixels,
+        left_guard: Option<Pixels>,
     ) -> AnyElement {
         let back_entity = entity;
         product_page_chrome(left_guard)

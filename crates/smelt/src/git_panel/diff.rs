@@ -287,7 +287,7 @@ impl GitDiffBody {
                 .quiet()
                 .icon_size()
                 .flex_none()
-                .label("在右侧 FILES 打开")
+                .label("在文件里打开")
                 .text_color(muted)
                 .on_click(move |_ev, window, cx| {
                     let Some(host) = host.upgrade() else {
@@ -295,9 +295,7 @@ impl GitDiffBody {
                     };
                     let path = full_path.clone();
                     host.update(cx, |this, cx| {
-                        this.tool_panel_tab = crate::tool_panel::ToolPanelTab::Files;
-                        this.set_tool_panel_open(true, cx);
-                        this.schedule_visible_refresh(cx);
+                        this.show_view(crate::builtin_views::Builtin::Files.id(), window, cx);
                         this.view_file(path, window, cx);
                         this.save_state(cx);
                     });
@@ -541,9 +539,7 @@ fn diff_header_suffix(
                         path: full.clone(),
                     };
                     host.update(cx, |this, cx| {
-                        this.tool_panel_tab = crate::tool_panel::ToolPanelTab::Files;
-                        this.set_tool_panel_open(true, cx);
-                        this.schedule_visible_refresh(cx);
+                        this.show_view(crate::builtin_views::Builtin::Files.id(), window, cx);
                         this.view_file_on(file, None, window, cx);
                         this.save_state(cx);
                     });

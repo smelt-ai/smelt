@@ -1,5 +1,6 @@
 //! 宿主这一侧的插件接口：实现 [`smelt_plugin_api::Host`]，登记内置插件，决定插件视图摆在
-//! 哪：眼下每个视图都是舞台上的一页（工作台路由 `Page(id)`），侧栏给它一个入口。设计见 `docs/app-plugins.md`。
+//! 哪：布局里摆了它就在它的面板里（见 `workspace_shell`），没摆的是舞台上的一页（工作台
+//! 路由 `Page(id)`），侧栏给它一个入口。设计见 `docs/app-plugins.md`。
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -84,11 +85,21 @@ impl api::Host for SmeltHost {
             .map(PathBuf::from)
     }
 
+    /// 页面画在舞台上、舞台又顶着窗口上沿时，页头让出顶栏、给红黄绿按钮让位、能拖窗口；
+    /// 摆在自己面板里的视图上面有面板的标题带，页头只是一条普通的头。
     fn page_header(&self, window: &Window, cx: &App) -> Div {
-        let left_guard = self
-            .workspace()
-            .map(|workspace| workspace.read(cx).chrome_left_guard(window))
-            .unwrap_or_default();
+        let left_guard = self.workspace().and_then(|workspace| {
+            let workspace = workspace.read(cx);
+            let WorkspaceRoute::Page(id) = workspace.active_tab() else {
+                return None;
+            };
+            let on_stage = !workspace.shell_view.laid_out.contains(id.as_str())
+                && api::built_view(id, cx)
+                    .is_some_and(|view| view.view().entity_id() == window.current_view());
+            on_stage
+                .then(|| workspace.chrome_left_guard(window))
+                .flatten()
+        });
         crate::agents::product_page_chrome(left_guard)
     }
 }
@@ -103,7 +114,8 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
 }
 
 impl Workspace {
-    /// 在舞台上打开一个插件视图。没登记过这个 id 就什么都不做，返回 `false`。
+    /// 打开一个视图：布局里摆了它就让它的面板露出来，没摆就在舞台上开成一页。没登记过
+    /// 这个 id 就什么都不做，返回 `false`。
     pub(crate) fn open_page(
         &mut self,
         id: &str,
@@ -114,17 +126,25 @@ impl Workspace {
         let Some((view, _)) = api::ensure_view(id, window, cx) else {
             return false;
         };
-        self.activate_workspace_tab(WorkspaceRoute::Page(id.to_string()), window, cx);
+        if !self.show_view(id, window, cx) {
+            self.activate_workspace_tab(WorkspaceRoute::Page(id.to_string()), window, cx);
+        }
         view.open(&args, window, cx);
         true
     }
 
     /// 让停着的插件页对上注册表：启动时恢复上次停的那页，视图登记变了（插件加载、
-    /// 卸载、替换）时重新取。视图已经没有了就回会话；新建的视图打开一次，让它读数据。
+    /// 卸载、替换）时重新取。视图已经没有了、或者已经摆进布局了就回会话；新建的视图打开
+    /// 一次，让它读数据。
     pub(crate) fn sync_page_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let WorkspaceRoute::Page(id) = self.active_tab().clone() else {
             return;
         };
+        if self.shell_view.laid_out.contains(id.as_str()) {
+            self.nav.set_active(WorkspaceRoute::Session);
+            self.show_view(&id, window, cx);
+            return;
+        }
         match api::ensure_view(&id, window, cx) {
             Some((view, true)) => view.open(&serde_json::Value::Null, window, cx),
             Some((_, false)) => {}
@@ -132,7 +152,8 @@ impl Workspace {
         }
     }
 
-    /// 宿主事件里工作台自己要管的：视图登记变了要对路由，侧栏入口要重画。
+    /// 宿主事件里工作台自己要管的：视图登记变了要重装布局（新登记的补上、撤下的变
+    /// 占位）、对路由，侧栏入口要重画。
     pub(crate) fn subscribe_host_events(
         &mut self,
         window: &mut Window,
@@ -143,6 +164,7 @@ impl Workspace {
             window,
             |this, _, event: &HostEvent, window, cx| {
                 if *event == HostEvent::ViewsChanged {
+                    this.reload_layout(window, cx);
                     this.sync_page_route(window, cx);
                     cx.notify();
                 }

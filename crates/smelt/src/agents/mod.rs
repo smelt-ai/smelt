@@ -2304,22 +2304,28 @@ fn product_back_button(
 
 /// 目录和编辑器的页头。这些面不画标题胶囊。
 ///
-/// 最上 `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐。分段、标题和按钮放在这条下面，
-/// 不再塞进 34px 里贴着窗口顶。左侧让开交通灯，右侧让开窗口开关，底边是发丝。按钮自己拦住点击。
-pub(crate) fn product_page_chrome(left_guard: Pixels) -> Div {
-    crate::workspace_frame::with_window_drag(
-        div()
-            .w_full()
-            .flex_shrink_0()
-            .pt(crate::workspace_frame::TOP_BAR_HEIGHT)
-            .pb(px(8.))
-            .pl(left_guard + px(20.))
-            .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
-            .border_b_1()
-            .border_color(crate::ui_theme::hairline())
-            .flex()
-            .items_center(),
-    )
+/// `left_guard` 见 `Workspace::chrome_left_guard`。页面贴着窗口顶（`Some`）时，最上
+/// `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐，分段、标题和按钮放在这条下面，
+/// 左侧再让出给的宽度；在标签条下面（`None`）时顶上那条归标签条，这里只留常规内边距。
+/// 底边是发丝。按钮自己拦住点击。
+pub(crate) fn product_page_chrome(left_guard: Option<Pixels>) -> Div {
+    let header = div()
+        .w_full()
+        .flex_shrink_0()
+        .pb(px(8.))
+        .px(px(20.))
+        .border_b_1()
+        .border_color(crate::ui_theme::hairline())
+        .flex()
+        .items_center();
+    match left_guard {
+        Some(left) => crate::workspace_frame::with_window_drag(
+            header
+                .pt(crate::workspace_frame::TOP_BAR_HEIGHT)
+                .pl(left + px(20.)),
+        ),
+        None => header.pt(px(8.)),
+    }
 }
 
 /// 目录页头：和自动化顶栏同一条高度。左边页名加个数，不写副标题；右边是同尺寸的新建按钮。
@@ -2328,7 +2334,7 @@ fn product_page_header(
     count: usize,
     count_unit: &'static str,
     action: AnyElement,
-    left_guard: Pixels,
+    left_guard: Option<Pixels>,
 ) -> AnyElement {
     product_page_chrome(left_guard)
         .justify_between()
