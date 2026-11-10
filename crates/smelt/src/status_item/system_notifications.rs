@@ -28,7 +28,7 @@ const AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.run.";
 const REMOTE_AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.remote-run.";
 const AUTOMATION_THREAD_PREFIX: &str = "automation:";
 const REMOTE_AUTOMATION_THREAD_PREFIX: &str = "automation@";
-const APP_IDENTIFIER: &str = "smelt.app";
+const APP_IDENTIFIER: &str = "smelt.app.";
 
 fn notification_identifier(session_id: &str) -> String {
     format!("{SESSION_IDENTIFIER_PREFIX}{session_id}")
@@ -132,7 +132,7 @@ impl NotificationQueue {
 
     fn enqueue_app(&mut self, subtitle: &str, body: &str) {
         self.enqueue_with_identifier(
-            APP_IDENTIFIER.to_string(),
+            format!("{APP_IDENTIFIER}{}", uuid::Uuid::new_v4()),
             "app".to_string(),
             subtitle,
             body,
@@ -202,14 +202,20 @@ impl NotificationQueue {
             .is_some_and(|pending| pending.generation > generation);
 
         if error.is_some() {
-            if self.active_identifiers.contains(identifier) && !has_newer_request {
+            if identifier.starts_with(APP_IDENTIFIER) {
+                // 应用通知是即时反馈，投递失败就丢弃，不在恢复后补发。
+                self.active_identifiers.remove(identifier);
+            } else if self.active_identifiers.contains(identifier) && !has_newer_request {
                 self.pending.insert(identifier.to_string(), request);
                 // Completion errors can be permanent (for example an invalid app bundle). Do not
                 // spin a submit/fail loop; activation or a settings refresh unlocks one retry.
                 self.retry_blocked = true;
             }
         } else if self.active_identifiers.contains(identifier) {
-            if has_newer_request {
+            if identifier.starts_with(APP_IDENTIFIER) {
+                // 应用通知不再更新或按业务状态撤回，系统接收后不必长期保留队列状态。
+                self.active_identifiers.remove(identifier);
+            } else if has_newer_request {
                 self.submitted.remove(identifier);
                 self.retractions.insert(identifier.to_string());
             } else {
@@ -217,6 +223,19 @@ impl NotificationQueue {
             }
         } else {
             self.retractions.insert(identifier.to_string());
+        }
+    }
+
+    fn discard_pending_app_notifications(&mut self) {
+        let discarded = self
+            .pending
+            .keys()
+            .filter(|id| id.starts_with(APP_IDENTIFIER))
+            .cloned()
+            .collect::<Vec<_>>();
+        for identifier in discarded {
+            self.pending.remove(&identifier);
+            self.active_identifiers.remove(&identifier);
         }
     }
 
@@ -290,6 +309,7 @@ struct BridgeState {
     authorization: SystemNotificationAuthorization,
     settings_check_in_flight: bool,
     authorization_request_in_flight: bool,
+    app_authorization_requested: bool,
     denial_reported: bool,
     queue: NotificationQueue,
     last_error: Option<String>,
@@ -297,6 +317,17 @@ struct BridgeState {
 }
 
 impl BridgeState {
+    fn enqueue_app_notification(&mut self, subtitle: &str, body: &str) {
+        if self.authorization == SystemNotificationAuthorization::Authorized
+            && !self.queue.retry_blocked
+        {
+            self.queue.enqueue_app(subtitle, body);
+        } else {
+            // 不保存无法立即投递的应用通知，但仍需触发首次授权请求。
+            self.app_authorization_requested = true;
+        }
+    }
+
     fn record_error(&mut self, error: String) {
         self.last_error = Some(error.clone());
         if self.errors.len() >= 32 {
@@ -389,13 +420,15 @@ objc2::define_class!(
                         automation_id: automation_id.to_string(),
                         run_id,
                     })
-            } else if identifier == APP_IDENTIFIER {
-                state()
+            } else if identifier.starts_with(APP_IDENTIFIER) {
+                let mut state = state()
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .queue
-                    .remove_identifier(&identifier);
-                send_state_changed();
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // 只有投递回执尚未返回时，队列才可能还在跟踪这条通知。
+                if state.queue.active_identifiers.contains(&identifier) {
+                    state.queue.remove_identifier(&identifier);
+                    send_state_changed();
+                }
                 None
             } else {
                 None
@@ -467,6 +500,16 @@ fn read_settings() {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.settings_check_in_flight = false;
             state.authorization = authorization;
+            let had_pending = state.queue.pending_count() > 0 || state.app_authorization_requested;
+            if authorization != SystemNotificationAuthorization::NotDetermined {
+                state.app_authorization_requested = false;
+            }
+            if matches!(
+                authorization,
+                SystemNotificationAuthorization::Denied | SystemNotificationAuthorization::Unavailable
+            ) {
+                state.queue.discard_pending_app_notifications();
+            }
             if authorization == SystemNotificationAuthorization::Authorized {
                 state.queue.allow_retry();
                 state.denial_reported = false;
@@ -474,13 +517,11 @@ fn read_settings() {
                     state.last_error = None;
                 }
             } else if authorization == SystemNotificationAuthorization::Denied
-                && state.queue.pending_count() > 0
+                && had_pending
                 && !state.denial_reported
             {
                 state.denial_reported = true;
-                state.record_error(
-                    "macOS notification permission is denied; reminders remain queued".to_string(),
-                );
+                state.record_error("macOS notification permission is denied".to_string());
             }
             drop(state);
             send_state_changed();
@@ -497,8 +538,10 @@ fn request_authorization() {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.authorization_request_in_flight = false;
+            state.app_authorization_requested = false;
             if let Some(error) = error {
                 state.authorization = SystemNotificationAuthorization::Unavailable;
+                state.queue.discard_pending_app_notifications();
                 state.record_error(format!(
                     "failed to request macOS notification permission: {error}"
                 ));
@@ -508,12 +551,10 @@ fn request_authorization() {
                 state.denial_reported = false;
             } else {
                 state.authorization = SystemNotificationAuthorization::Denied;
+                state.queue.discard_pending_app_notifications();
                 if !state.denial_reported {
                     state.denial_reported = true;
-                    state.record_error(
-                        "macOS notification permission was denied; reminders remain queued"
-                            .to_string(),
-                    );
+                    state.record_error("macOS notification permission was denied".to_string());
                 }
             }
             drop(state);
@@ -596,10 +637,11 @@ pub fn sync_system_notifications() {
                     BridgeAction::CheckSettings
                 }
                 SystemNotificationAuthorization::NotDetermined
-                    if state.queue.pending_count() > 0
+                    if (state.queue.pending_count() > 0 || state.app_authorization_requested)
                         && !state.authorization_request_in_flight =>
                 {
                     state.authorization_request_in_flight = true;
+                    state.app_authorization_requested = false;
                     BridgeAction::RequestAuthorization
                 }
                 SystemNotificationAuthorization::Authorized => {
@@ -657,7 +699,7 @@ pub fn deliver_app_notification(subtitle: &str, body: &str) {
         let mut state = state()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.queue.enqueue_app(subtitle, body);
+        state.enqueue_app_notification(subtitle, body);
         prepare_queued_notification(&mut state);
     }
     sync_system_notifications();
@@ -845,29 +887,97 @@ mod tests {
     }
 
     #[test]
-    fn app_feedback_coalesces_without_touching_session_alerts() {
+    fn app_notifications_are_independent_and_retire_after_delivery() {
         let mut queue = NotificationQueue::default();
         queue.enqueue("session-1", "done", "session body");
         queue.enqueue_app("错误", "模型 ID 不能为空");
         queue.enqueue_app("完成", "已保存");
 
         let ready = queue.take_ready();
-        assert_eq!(ready.len(), 2);
-        let app = ready
+        assert_eq!(ready.len(), 3);
+        let apps: Vec<_> = ready
             .iter()
-            .find(|request| request.identifier == APP_IDENTIFIER)
-            .unwrap();
-        assert_eq!(app.subtitle, "完成");
-        assert_eq!(app.body, "已保存");
-        assert_eq!(app.thread_identifier, "app");
+            .filter(|request| request.identifier.starts_with(APP_IDENTIFIER))
+            .collect();
+        assert_eq!(apps.len(), 2);
+        assert_ne!(apps[0].identifier, apps[1].identifier);
+        assert!(
+            apps.iter()
+                .any(|request| request.subtitle == "错误" && request.body == "模型 ID 不能为空")
+        );
+        assert!(
+            apps.iter()
+                .any(|request| request.subtitle == "完成" && request.body == "已保存")
+        );
+        assert!(apps.iter().all(|request| request.thread_identifier == "app"));
 
         queue.retain_sessions(&[]);
         assert!(
-            !queue
+            queue
                 .take_retractions()
                 .iter()
-                .any(|id| id == APP_IDENTIFIER)
+                .all(|id| !id.starts_with(APP_IDENTIFIER))
         );
+        for app in apps {
+            queue.complete(&app.identifier, app.generation, None);
+            assert!(!queue.active_identifiers.contains(&app.identifier));
+            assert!(!queue.submitted.contains(&app.identifier));
+        }
+        assert_eq!(queue.pending_count(), 1); // 会话通知仍在等待投递回执
+    }
+
+    #[test]
+    fn failed_app_notification_is_not_retried() {
+        let mut queue = NotificationQueue::default();
+        queue.enqueue_app("提示", "操作完成");
+        let request = queue.take_ready().pop().unwrap();
+        queue.complete(&request.identifier, request.generation, Some("rejected"));
+        assert_eq!(queue.pending_count(), 0);
+        assert!(!queue.active_identifiers.contains(&request.identifier));
+        assert!(!queue.retry_blocked);
+        assert!(queue.take_ready().is_empty());
+    }
+
+    #[test]
+    fn discarding_undeliverable_app_notifications_keeps_session_alerts() {
+        let mut queue = NotificationQueue::default();
+        queue.enqueue("session-1", "done", "session body");
+        queue.enqueue_app("提示", "第一条");
+        queue.enqueue_app("提示", "第二条");
+        queue.discard_pending_app_notifications();
+        let ready = queue.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].identifier, notification_identifier("session-1"));
+        assert!(
+            queue
+                .active_identifiers
+                .iter()
+                .all(|id| !id.starts_with(APP_IDENTIFIER))
+        );
+        assert!(queue.take_retractions().is_empty());
+    }
+
+    #[test]
+    fn app_notifications_queue_only_when_delivery_is_ready() {
+        let mut state = super::BridgeState::default();
+        for authorization in [
+            SystemNotificationAuthorization::Unknown,
+            SystemNotificationAuthorization::NotDetermined,
+            SystemNotificationAuthorization::Denied,
+            SystemNotificationAuthorization::Unavailable,
+        ] {
+            state.authorization = authorization;
+            state.enqueue_app_notification("提示", "操作完成");
+            assert_eq!(state.queue.pending_count(), 0);
+            assert!(state.app_authorization_requested);
+        }
+        state.authorization = SystemNotificationAuthorization::Authorized;
+        state.queue.retry_blocked = true;
+        state.enqueue_app_notification("提示", "操作完成");
+        assert_eq!(state.queue.pending_count(), 0);
+        state.queue.retry_blocked = false;
+        state.enqueue_app_notification("提示", "操作完成");
+        assert_eq!(state.queue.pending_count(), 1);
     }
 
     #[test]

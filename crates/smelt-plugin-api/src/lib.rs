@@ -83,8 +83,8 @@ pub trait Host: 'static {
     fn machines(&self, cx: &App) -> Vec<Machine>;
     /// 那台机器的运行时客户端；机器已经移除是 `None`。
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient>;
-    fn notify_success(&self, message: &str);
-    fn notify_error(&self, message: &str);
+    /// 发送系统通知；是否显示由系统的通知权限和设置决定。
+    fn notify(&self, subtitle: &str, body: &str);
     /// 用系统文本编辑器打开这台电脑上的文件。
     fn open_in_text_editor(&self, path: &Path) -> Result<(), String>;
     /// 在那台机器上选路径。取消了就不调 `done`。

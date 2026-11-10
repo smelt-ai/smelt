@@ -347,9 +347,9 @@ impl Render for CapabilitiesPage {
 }
 
 fn notify_success(message: impl AsRef<str>, cx: &App) {
-    api::host(cx).notify_success(message.as_ref());
+    api::host(cx).notify("完成", message.as_ref());
 }
 
 fn notify_error(message: impl AsRef<str>, cx: &App) {
-    api::host(cx).notify_error(message.as_ref());
+    api::host(cx).notify("错误", message.as_ref());
 }

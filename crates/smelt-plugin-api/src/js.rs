@@ -28,6 +28,8 @@ const DECLARATIONS: &str = r#"
 export type Machine = string | null;
 /** 工作台的当前项目，只算这台电脑上的；远程项目或没有项目时为 null。 */
 export function active_project(): string | null;
+/** 发送系统通知；显示受系统通知授权和设置影响。 */
+export function notify(subtitle: string, body: string): null;
 export interface PathRequest {
   /** 选择框标题。 */
   title: string;
@@ -76,6 +78,12 @@ impl JsPlugin {
                 Ok(project
                     .map(|path| path.to_string_lossy().into_owned())
                     .into())
+            })
+            .function("notify", |arguments| {
+                let subtitle = arguments.string(0)?;
+                let body = arguments.string(1)?;
+                in_app("notify", |cx| crate::host(cx).notify(subtitle, body))?;
+                Ok(HostValue::Null)
             })
             .async_function("pick_paths", pick_paths)
             .async_function("next_event", move |_| Ok(events.next_event()))
@@ -236,6 +244,27 @@ mod tests {
             .module()
             .validate()
             .expect("声明和函数对得上");
+    }
+
+    #[test]
+    fn notification_requires_two_strings_and_a_script_context() {
+        let module = JsPlugin::new().module();
+        let invalid_arguments = [
+            HostArguments::default(),
+            HostArguments::new([HostValue::Null, HostValue::from("正文")]),
+            HostArguments::new([HostValue::from("副标题")]),
+            HostArguments::new([HostValue::from("副标题"), HostValue::Null]),
+        ];
+        for arguments in invalid_arguments {
+            assert!(module.call("notify", &arguments).is_err());
+        }
+        let outside_script = module
+            .call(
+                "notify",
+                &HostArguments::new([HostValue::from("副标题"), HostValue::from("正文")]),
+            )
+            .unwrap_err();
+        assert!(outside_script.message().contains("只能在视图"));
     }
 
     #[test]

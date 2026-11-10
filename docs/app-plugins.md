@@ -43,7 +43,7 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 
 - **宿主服务是一个 gpui 全局。** `smelt-plugin-api` 定义接口，宿主启动时实现并装上，插件用 `smelt_plugin_api::host(cx)` 取：机器列表和客户端、通知、用系统编辑器打开文件、在某台机器上选路径、画页头。运行时话题（`pi_config.changed`、重新订阅上）和机器列表变化由宿主转成插件可订阅的事件（`HostEvent`）。
 - **插件登记视图，不登记位置。** 视图按字符串 id 登记（`register_view`），只记 id、标题、图标、能不能针对某台机器打开、建视图的函数——插件只说「我能画什么」，摆在哪归宿主（见下面「摆放」）。宿主里别处打开它用 `open_page("capabilities", {"tab": "plugins"})`，不出现插件的类型。能针对机器打开的视图，宿主在每台机器的菜单里给一个入口，打开参数带 `{"machine": …}`：这是视图自己的能力，不是位置。`agents`、`automations`、`desktop`、`session` 是宿主自己的路由，视图不能用这几个 id。
-- **JS 插件的宿主模块也叫 `smelt-plugin-api`**，是 Rust 那份接口的薄映射（`smelt_plugin_api::js`）：`active_project`、`pick_paths`、`next_event`。每个插件一份自己的 gpui-shell Policy（应用名是插件 id），模块装在里面，所以宿主函数知道是哪个插件在调。宿主不能回调脚本，事件做成 `await next_event()`：每个插件一条队列，同样的事件只留一份。每个 JS 插件挂载时登记成一个视图，id 就是插件 id（`plugins::mount_all`），和 Rust 视图一样由布局摆放。注册表缓存建好的视图，登记变了宿主收到 `ViewsChanged`，重装布局（新登记的补上、撤下的变占位）再对路由。
+- **JS 插件的宿主模块也叫 `smelt-plugin-api`**，是 Rust 那份接口的薄映射（`smelt_plugin_api::js`）：`active_project`、`pick_paths`、`next_event`、`notify`。通知是系统通知，实际显示受系统授权和设置影响。每个插件一份自己的 gpui-shell Policy（应用名是插件 id），模块装在里面，所以宿主函数知道是哪个插件在调。宿主不能回调脚本，事件做成 `await next_event()`：每个插件一条队列，同样的事件只留一份。每个 JS 插件挂载时登记成一个视图，id 就是插件 id（`plugins::mount_all`），和 Rust 视图一样由布局摆放。注册表缓存建好的视图，登记变了宿主收到 `ViewsChanged`，重装布局（新登记的补上、撤下的变占位）再对路由。
 - **插件 crate 只依赖 `smelt-plugin-api` 和 gpui 组件库。** 插件要用的协议类型（`smelt-model`）和共用组件（`smelt-ui`）由 `smelt-plugin-api` 再导出，和 JS 插件拿到的一致。
 
 ## 摆放

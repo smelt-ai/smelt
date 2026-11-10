@@ -47,12 +47,8 @@ impl api::Host for SmeltHost {
         runtimes::client(machine, cx)
     }
 
-    fn notify_success(&self, message: &str) {
-        crate::status_item::notify_success(message);
-    }
-
-    fn notify_error(&self, message: &str) {
-        crate::status_item::notify_error(message);
+    fn notify(&self, subtitle: &str, body: &str) {
+        crate::status_item::deliver_app_notification(subtitle, body);
     }
 
     fn open_in_text_editor(&self, path: &Path) -> Result<(), String> {
