@@ -43,7 +43,8 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 
 - **宿主服务是一个 gpui 全局。** `smelt-plugin-api` 定义接口，宿主启动时实现并装上，插件用 `smelt_plugin_api::host(cx)` 取：机器列表和客户端、通知、用系统编辑器打开文件、在某台机器上选路径、画页头。运行时话题（`pi_config.changed`、重新订阅上）和机器列表变化由宿主转成插件可订阅的事件（`HostEvent`）。
 - **插件登记视图，不登记位置。** 视图按字符串 id 登记（`register_view`），只记 id、标题、图标、能不能针对某台机器打开、建视图的函数——插件只说「我能画什么」，摆在哪归宿主（见下面「摆放」）。宿主里别处打开它用 `open_page("capabilities", {"tab": "plugins"})`，不出现插件的类型。能针对机器打开的视图，宿主在每台机器的菜单里给一个入口，打开参数带 `{"machine": …}`：这是视图自己的能力，不是位置。`agents`、`automations`、`desktop`、`session` 是宿主自己的路由，视图不能用这几个 id。
-- **JS 插件的宿主模块也叫 `smelt-plugin-api`**，是 Rust 那份接口的薄映射（`smelt_plugin_api::js`）：`active_project`、`pick_paths`、`next_event`、`notify`。通知是系统通知，实际显示受系统授权和设置影响。每个插件一份自己的 gpui-shell Policy（应用名是插件 id），模块装在里面，所以宿主函数知道是哪个插件在调。宿主不能回调脚本，事件做成 `await next_event()`：每个插件一条队列，同样的事件只留一份。每个 JS 插件挂载时登记成一个视图，id 就是插件 id（`plugins::mount_all`），和 Rust 视图一样由布局摆放。注册表缓存建好的视图，登记变了宿主收到 `ViewsChanged`，重装布局（新登记的补上、撤下的变占位）再对路由。
+- **JS 插件的宿主模块也叫 `smelt-plugin-api`**，是 Rust 那份接口的薄映射（`smelt_plugin_api::js`）：`active_project`、`pick_paths`、`next_event`、`notify`、`register_themes`。通知是系统通知，实际显示受系统授权和设置影响。每个插件一份自己的 gpui-shell Policy（应用名是插件 id），模块装在里面，所以宿主函数知道是哪个插件在调。宿主不能回调脚本，事件做成 `await next_event()`：每个插件一条队列，同样的事件只留一份。每个 JS 插件挂载时登记成一个视图，id 就是插件 id（`plugins::mount_all`），和 Rust 视图一样由布局摆放。注册表缓存建好的视图，登记变了宿主收到 `ViewsChanged`，重装布局（新登记的补上、撤下的变占位）再对路由。
+- **主题按来源登记，内置和第三方共用目录。** 主题文件沿用 gpui-kit 的 ThemeSet JSON。插件目录下 `themes/*.json` 是主题贡献；纯主题包把 `gpui-shell.json` 的 `entry` 指向主题 JSON，不需要 JS 视图。JS 插件也可以通过 `register_themes` 登记主题集。重载或卸载时撤下该插件的主题；当前主题不再存在时回落到同明暗的 Default，保留原选择以便重新安装后恢复。主题只在启动和插件变化时读取，不在 render 中读文件。
 - **插件 crate 只依赖 `smelt-plugin-api` 和 gpui 组件库。** 插件要用的协议类型（`smelt-model`）和共用组件（`smelt-ui`）由 `smelt-plugin-api` 再导出，和 JS 插件拿到的一致。
 
 ## 摆放
@@ -66,7 +67,25 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 
 ## 插件的样子
 
-**用户插件**是一个 gpui-shell 文件夹（`gpui-shell.json` + JS），导入文件夹就算装上。
+**用户插件**是一个 gpui-shell 文件夹，导入文件夹就算装上。纯主题包不需要 JS：
+
+```text
+my-theme/
+  gpui-shell.json
+  themes/colors.json
+```
+
+```json
+{"id":"com.example.my-theme","name":"我的主题","version":"1.0.0","entry":"themes/colors.json"}
+```
+
+`colors.json` 是 gpui-kit 的 ThemeSet，例如：
+
+```json
+{"name":"我的主题","themes":[{"name":"我的深色主题","mode":"dark","colors":{"background":"#1a1b26","foreground":"#c0caf5","primary.background":"#7aa2f7"}}]}
+```
+
+在设置的「面板插件」里导入整个目录，再到「外观」选择主题。主题包不会新增面板。
 
 **内置插件**用 Rust 写，每个是一个单独的 crate（`crates/plugins/<name>`），编译进 app。规矩：
 
@@ -94,7 +113,7 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 ## 已知缺口
 
 - gpui-shell 没有拖放绑定（会话列表拖动排序要用）、终端组件；Tree 只有 label，编辑器内容不可读写。缺的组件由宿主提供原生组件，或给上游提 PR，不 fork。
-- gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以插件不在 manifest 里声明，而是在 init 里调宿主函数登记。命令、快捷键照此补。
+- gpui-shell 的 `gpui-shell.json` 拒绝未知字段，所以脚本通过宿主函数登记能力；纯数据主题约定放在 `themes/*.json`。命令、快捷键照此补。
 - **自带视图还是 `Workspace` 代画的**（`builtin_views.rs`）：会话列表、舞台、文件、变更、历史的状态和画法都还在 `Workspace` 上，适配层把它们包成视图登记进注册表，外壳和布局已经不认识它们。这正是「参考」里说不要的封闭枚举，只是过渡：按「迁移方法」每拆走一块，就从适配层删掉一项，删空为止。
 - 布局只有默认那一份，用户能拖、能放大，但加不了没摆进去的视图、换不了布局（见「摆放」）。
 - 别的插件或客户端改了 smeltd 的数据，靠 smeltd 推事件通知，不靠插件自觉广播。Pi 配置已经这样做了（`pi_config.changed`，放在单独的一条订阅里，v7 的运行时不推）。绕过 smeltd 的修改（手改 Pi 配置文件、直接用 `pi` 命令行）目前收不到，要 smeltd 监视文件才能补上；在那之前，能力库的「刷新」只重读能力库自己，不再顺带让对话重拉模型目录。
