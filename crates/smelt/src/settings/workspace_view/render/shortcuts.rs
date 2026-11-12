@@ -1,7 +1,8 @@
-//! 设置页：键盘快捷键。能改的点键帽录新键，改不了的只列出来。改键的规则见 `crate::keymap`。
+//! 设置页：键盘快捷键。登记过的命令按来源分组列出来，点键帽录新键；视图里面改不了的键
+//! 只列出来。改键的规则见 `crate::keymap`。
 
 use super::*;
-use crate::keymap::{self, KeymapState, SHORTCUTS, Shortcut, ShortcutGroup};
+use crate::keymap::{self, Bound, KeymapState};
 
 #[derive(Clone, Copy)]
 struct Palette {
@@ -32,16 +33,9 @@ pub(super) fn shortcuts_page(
 
     SettingPage::new("快捷键").resettable(false).group(
         SettingGroup::new().item(
-            SettingItem::render(move |_, window, cx| {
+            SettingItem::render(move |_, _window, cx| {
                 let state = cx.global::<KeymapState>();
                 let os = cx.platform_info().os;
-                let editable = |group: ShortcutGroup| -> Vec<gpui::AnyElement> {
-                    SHORTCUTS
-                        .iter()
-                        .filter(|shortcut| shortcut.group == group)
-                        .map(|shortcut| editable_row(shortcut, state, os, colors))
-                        .collect()
-                };
                 let fixed = |label: &'static str, keys: &[&'static str]| {
                     row(
                         label,
@@ -53,34 +47,23 @@ pub(super) fn shortcuts_page(
                     )
                 };
 
-                let mut global = editable(ShortcutGroup::Global);
-                global.push(row(
-                    "退出 Smelt",
-                    vec![bound_key(window, &crate::Quit, None, "⌘Q", colors)],
-                    colors,
-                ));
-                let mut session = editable(ShortcutGroup::Session);
-                session.push(row(
-                    "切换到第 1–9 个会话",
-                    (0..9)
-                        .map(|index| {
-                            bound_key(
-                                window,
-                                &crate::ActivateSession { index },
-                                Some("Workspace"),
-                                SESSION_KEY_FALLBACK[index],
-                                colors,
-                            )
-                        })
-                        .collect(),
-                    colors,
-                ));
-                let mut edit = editable(ShortcutGroup::Edit);
-                edit.extend([
+                // 按命令登记的先后分组，组名是来源给的。
+                let mut groups: Vec<(SharedString, Vec<gpui::AnyElement>)> = Vec::new();
+                for command in state.bound() {
+                    let row = editable_row(command, state, os, colors);
+                    match groups
+                        .iter_mut()
+                        .find(|(group, _)| *group == command.info.group)
+                    {
+                        Some((_, rows)) => rows.push(row),
+                        None => groups.push((command.info.group.clone(), vec![row])),
+                    }
+                }
+                let view_keys = vec![
                     fixed("终端内搜索", &["cmd-f"]),
                     fixed("关闭预览或返回", &["escape"]),
                     fixed("终端补全 / 反向补全", &["tab", "shift-tab"]),
-                ]);
+                ];
 
                 v_flex()
                     .w_full()
@@ -91,9 +74,12 @@ pub(super) fn shortcuts_page(
                             .text_color(colors.muted)
                             .child("点键帽录新的快捷键：Esc 取消，⌫ 清掉不用。要带 ⌘，或者用 F 键。"),
                     )
-                    .child(section("全局", global, colors))
-                    .child(section("会话与面板", session, colors))
-                    .child(section("编辑与导航", edit, colors))
+                    .children(
+                        groups
+                            .into_iter()
+                            .map(|(title, rows)| section(title, rows, colors)),
+                    )
+                    .child(section("视图里的按键".into(), view_keys, colors))
                     .into_any_element()
             })
             .keywords(["快捷键", "键盘", "改键", "shortcut", "keyboard", "hotkey", "keybinding"]),
@@ -101,9 +87,7 @@ pub(super) fn shortcuts_page(
     )
 }
 
-const SESSION_KEY_FALLBACK: [&str; 9] = ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "⌘9"];
-
-fn section(title: &'static str, rows: Vec<gpui::AnyElement>, colors: Palette) -> gpui::AnyElement {
+fn section(title: SharedString, rows: Vec<gpui::AnyElement>, colors: Palette) -> gpui::AnyElement {
     v_flex()
         .w_full()
         .gap_1()
@@ -136,14 +120,15 @@ fn row(label: &'static str, keys: Vec<gpui::AnyElement>, colors: Palette) -> gpu
 /// 能改的一行：键帽点了开始录，再点一次不录了；改过的旁边有「恢复默认」。录键时、没改成时、
 /// 撞上别的快捷键等确认改绑时，说明写在名字下面。
 fn editable_row(
-    shortcut: &'static Shortcut,
+    command: &Bound,
     state: &KeymapState,
     os: gpui::OperatingSystem,
     colors: Palette,
 ) -> gpui::AnyElement {
-    let id = shortcut.id;
-    let recording = state.recording == Some(id);
-    let overridden = state.overrides().contains_key(id);
+    let id = command.info.id.clone();
+    let title = command.info.title.clone();
+    let recording = state.recording.as_ref() == Some(&id);
+    let overridden = command.overridden;
     let error = state
         .error
         .as_ref()
@@ -159,7 +144,9 @@ fn editable_row(
         let key = gpui::Keystroke::parse_with_os(&reassign.keystroke, os)
             .map(|stroke| keymap::display(&stroke))
             .unwrap_or_else(|_| reassign.keystroke.clone());
-        let other = keymap::shortcut(reassign.other).map_or(reassign.other, |other| other.label);
+        let other = state
+            .find(&reassign.other)
+            .map_or(reassign.other.clone(), |other| other.info.title.clone());
         Some((
             format!("{key} 已经是「{other}」的快捷键。改绑后「{other}」就没有快捷键了"),
             colors.danger,
@@ -172,8 +159,9 @@ fn editable_row(
     let key: gpui::AnyElement = if recording {
         keycap_text("按下新快捷键…", colors.primary, colors)
     } else {
-        match shortcut
-            .keystroke(state.overrides())
+        match command
+            .key
+            .as_deref()
             .and_then(|spec| gpui::Keystroke::parse_with_os(spec, os).ok())
         {
             Some(stroke) => kbd_cap(gpui_component::kbd::Kbd::new(stroke), colors.border, colors),
@@ -183,15 +171,18 @@ fn editable_row(
     let key = div()
         .id(format!("shortcut-key-{id}"))
         .role(gpui::Role::Button)
-        .aria_label(format!("修改「{}」的快捷键", shortcut.label))
+        .aria_label(format!("修改「{title}」的快捷键"))
         .rounded_md()
         .hover(|style| style.opacity(0.8))
         .child(key)
-        .on_click(move |_, window, cx| {
-            if recording {
-                keymap::stop_recording(cx);
-            } else {
-                keymap::start_recording(id, window, cx);
+        .on_click({
+            let id = id.clone();
+            move |_, window, cx| {
+                if recording {
+                    keymap::stop_recording(cx);
+                } else {
+                    keymap::start_recording(id.clone(), window, cx);
+                }
             }
         });
 
@@ -208,7 +199,7 @@ fn editable_row(
             v_flex()
                 .min_w_0()
                 .gap_0p5()
-                .child(div().text_sm().text_color(colors.fg).child(shortcut.label))
+                .child(div().text_sm().text_color(colors.fg).child(title))
                 .children(note.map(|(text, color)| div().text_xs().text_color(color).child(text))),
         )
         .child(
@@ -237,7 +228,7 @@ fn editable_row(
                             .quiet()
                             .compact()
                             .label("恢复默认")
-                            .on_click(move |_, _, cx| keymap::reset(id, cx)),
+                            .on_click(move |_, _, cx| keymap::reset(id.clone(), cx)),
                     )
                 })
                 .child(key),
@@ -288,21 +279,6 @@ fn fixed_key(spec: &'static str, colors: Palette) -> gpui::AnyElement {
     match gpui::Keystroke::parse(spec) {
         Ok(stroke) => kbd_cap(gpui_component::kbd::Kbd::new(stroke), colors.border, colors),
         Err(_) => keycap(spec, colors),
-    }
-}
-
-/// 读当前键位。`context` 用 Key Context 声明，不用 predicate。
-/// 没有绑定时退回原来的字，避免键帽是空的。
-fn bound_key(
-    window: &Window,
-    action: &dyn gpui::Action,
-    context: Option<&str>,
-    fallback: &'static str,
-    colors: Palette,
-) -> gpui::AnyElement {
-    match gpui_component::kbd::Kbd::binding_for_action(action, context, window) {
-        Some(kbd) => kbd_cap(kbd, colors.border, colors),
-        None => keycap(fallback, colors),
     }
 }
 

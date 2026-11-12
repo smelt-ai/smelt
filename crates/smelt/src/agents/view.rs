@@ -1394,8 +1394,8 @@ fn new_conversation_mark(mark: String) -> Div {
 /// 默认智能体那个按钮最宽多少：名字再长就截断，「新对话」始终占大头。
 const NEW_CONVERSATION_SWITCH_MAX_WIDTH: f32 = 128.;
 
-/// 侧栏最顶的「新对话」按钮。`label` 带着默认智能体的名字，给读屏用。悬停提示写上
-/// ⌘N。
+/// 侧栏最顶的「新对话」按钮。`label` 带着默认智能体的名字，给读屏用。悬停提示带上
+/// 「新对话」命令现在的快捷键。
 fn new_conversation_button(id: &'static str, label: String) -> Button {
     Button::new(id)
         .normal()
@@ -1404,7 +1404,11 @@ fn new_conversation_button(id: &'static str, label: String) -> Button {
         .icon(IconName::Plus)
         .label("新对话")
         .accessibility_label(label)
-        .tooltip_with_action("新对话", &crate::NewConversation, None)
+        .tooltip_with_action(
+            "新对话",
+            &smelt_plugin_api::RunCommand::new("smelt.sessions/new-conversation"),
+            None,
+        )
 }
 
 /// 能开对话的智能体。挂了不止一台机器时按机器分段，段头是机器名。

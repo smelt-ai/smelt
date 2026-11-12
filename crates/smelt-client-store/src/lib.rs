@@ -70,11 +70,11 @@ pub struct NotifyPrefsRecord {
     pub terminal_bell: bool,
 }
 
-/// 用户改过的一条快捷键。`keystroke` 是 GPUI 的按键写法（`cmd-k`），`None` 是用户把这条
-/// 清掉了、不绑任何键。没有记录的动作用出厂键位。
+/// 用户改过的一条快捷键。`command` 是命令 id（`<来源>/<名字>`）；`keystroke` 是 GPUI 的
+/// 按键写法（`cmd-k`），`None` 是用户把这条清掉了、不绑任何键。没有记录的命令用出厂键位。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyBindingRecord {
-    pub action_id: String,
+    pub command: String,
     pub keystroke: Option<String>,
 }
 
@@ -1063,17 +1063,17 @@ impl ClientStore {
         self.write(write_runtime_migrated)
     }
 
-    /// 用户改过的快捷键，按动作名排。
+    /// 用户改过的快捷键，按命令 id 排。
     #[track_caller]
     pub fn key_bindings(&self) -> Result<Vec<KeyBindingRecord>, ClientStoreError> {
         self.with(|connection| {
             let mut statement = connection
-                .prepare("SELECT action_id, keystroke FROM key_binding ORDER BY action_id")
+                .prepare("SELECT command, keystroke FROM key_binding ORDER BY command")
                 .map_err(sql)?;
             let rows = statement
                 .query_map([], |row| {
                     Ok(KeyBindingRecord {
-                        action_id: row.get(0)?,
+                        command: row.get(0)?,
                         keystroke: row.get(1)?,
                     })
                 })
@@ -1082,33 +1082,31 @@ impl ClientStore {
         })
     }
 
-    /// 记下改过的快捷键，同一个动作覆盖旧的。几条一起写：改绑时清掉对方和换上自己要么都成，
+    /// 记下改过的快捷键，同一条命令覆盖旧的。几条一起写：改绑时清掉对方和换上自己要么都成，
     /// 要么都不成。
     #[track_caller]
     pub fn put_key_bindings(&self, records: &[KeyBindingRecord]) -> Result<(), ClientStoreError> {
         self.write(|connection| {
             let mut statement = connection
-                .prepare(
-                    "INSERT OR REPLACE INTO key_binding (action_id, keystroke) VALUES (?1, ?2)",
-                )
+                .prepare("INSERT OR REPLACE INTO key_binding (command, keystroke) VALUES (?1, ?2)")
                 .map_err(sql)?;
             for record in records {
                 statement
-                    .execute(params![record.action_id, record.keystroke])
+                    .execute(params![record.command, record.keystroke])
                     .map_err(sql)?;
             }
             Ok(())
         })
     }
 
-    /// 回到出厂键位：删掉这个动作的记录。
+    /// 回到出厂键位：删掉这条命令的记录。
     #[track_caller]
-    pub fn delete_key_binding(&self, action_id: &str) -> Result<(), ClientStoreError> {
+    pub fn delete_key_binding(&self, command: &str) -> Result<(), ClientStoreError> {
         self.write(|connection| {
             connection
                 .execute(
-                    "DELETE FROM key_binding WHERE action_id = ?1",
-                    params![action_id],
+                    "DELETE FROM key_binding WHERE command = ?1",
+                    params![command],
                 )
                 .map(drop)
                 .map_err(sql)

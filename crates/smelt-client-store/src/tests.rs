@@ -12,13 +12,14 @@ fn temp_store() -> (ClientStore, PathBuf) {
     (store, path)
 }
 
-// 固定旧版 workspace_ui、conversation_route 的形状，不能把当前 schema 的改动带进旧版本
-// 迁移夹具。
+// 固定旧版 workspace_ui、conversation_route、key_binding 的形状，不能把当前 schema 的改动
+// 带进旧版本迁移夹具。
 fn create_v7_schema(connection: &Connection) {
     connection.execute_batch(schema::CREATE_SCHEMA).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_layout_state;
+            "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
+             DROP TABLE workspace_layout_state;
              ALTER TABLE appearance DROP COLUMN layout_id;
              DROP TABLE conversation_route;
              CREATE TABLE conversation_route (
@@ -864,16 +865,16 @@ fn v5_gains_empty_sidebar_order_tables() {
 }
 
 #[test]
-fn key_bindings_override_and_reset_per_action() {
+fn key_bindings_override_and_reset_per_command() {
     let (store, path) = temp_store();
     assert!(store.key_bindings().unwrap().is_empty());
 
     let palette = KeyBindingRecord {
-        action_id: "command_palette".to_string(),
+        command: "smelt.palette/toggle".to_string(),
         keystroke: Some("cmd-j".to_string()),
     };
     let sidebar = KeyBindingRecord {
-        action_id: "toggle_sidebar".to_string(),
+        command: "smelt.sessions/focus-list".to_string(),
         keystroke: None,
     };
     store
@@ -891,8 +892,50 @@ fn key_bindings_override_and_reset_per_action() {
     store
         .put_key_bindings(std::slice::from_ref(&moved))
         .unwrap();
-    store.delete_key_binding("toggle_sidebar").unwrap();
+    store
+        .delete_key_binding("smelt.sessions/focus-list")
+        .unwrap();
     assert_eq!(store.key_bindings().unwrap(), vec![moved]);
+    cleanup(&path);
+}
+
+/// v9 的快捷键按写死的动作名存：升到 v10 时换成命令 id，早已下线的动作名删掉，清掉的键
+/// （`NULL`）照样留着；迁移前留了备份。
+#[test]
+fn v9_key_bindings_move_to_command_ids() {
+    let (store, path) = temp_store();
+    drop(store);
+    // v9 和 v10 只差这一列的名字。
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
+             INSERT INTO key_binding VALUES
+               ('command_palette', 'cmd-j'), ('next_hunk', NULL), ('split_beside', 'cmd-e'),
+               ('toggle_sidebar', 'cmd-b');
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+
+    let store = ClientStore::open(&path).unwrap();
+    let record = |command: &str, keystroke: Option<&str>| KeyBindingRecord {
+        command: command.to_string(),
+        keystroke: keystroke.map(str::to_string),
+    };
+    assert_eq!(
+        store.key_bindings().unwrap(),
+        vec![
+            record("smelt.git/next-hunk", None),
+            record("smelt.palette/toggle", Some("cmd-j")),
+            record("smelt.stage/split-right", Some("cmd-e")),
+        ]
+    );
+    drop(store);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v9"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
     cleanup(&path);
 }
 

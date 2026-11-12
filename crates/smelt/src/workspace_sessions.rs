@@ -2483,26 +2483,6 @@ impl Workspace {
         }
     }
 
-    fn next_project_session(&self, from: usize, delta: i32, cx: &App) -> Option<usize> {
-        let n = self.sessions.len();
-        if n == 0 {
-            return None;
-        }
-        for step in 1..=n {
-            let ix = (from as i32 + delta * step as i32).rem_euclid(n as i32) as usize;
-            if !self.sessions[ix].is_product_conversation(cx) {
-                return Some(ix);
-            }
-        }
-        None
-    }
-
-    pub(crate) fn next_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.next_project_session(self.active_session, 1, cx) {
-            self.activate(ix, window, cx);
-        }
-    }
-
     /// 侧栏右键「强制重启」：ACP 会话卡死（`session/cancel` 打不断正在跑的
     /// 工具调用）时的兜底，见 `AcpView::force_restart` 注释。非 ACP 会话
     /// （`active_acp` 返回 None）是 no-op，调用方（右键菜单）也只在 ACP
@@ -2510,12 +2490,6 @@ impl Workspace {
     pub(crate) fn force_restart_acp_session(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(view) = self.sessions.get(ix).and_then(|s| s.active_acp()).cloned() {
             view.update(cx, |v, cx| v.force_restart(cx));
-        }
-    }
-
-    pub(crate) fn prev_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.next_project_session(self.active_session, -1, cx) {
-            self.activate(ix, window, cx);
         }
     }
 

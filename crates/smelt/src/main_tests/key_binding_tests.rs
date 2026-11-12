@@ -3,23 +3,26 @@
 //! 不拉窗口。`Keymap::bindings_for_input` 就是分发时用的那套优先级。
 
 use gpui::{Action, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
+use smelt_plugin_api::{self as api, RunCommand};
 
-use crate::keymap::{Overrides, app_key_bindings};
+use crate::keymap::{Overrides, app_key_bindings, bind_commands};
 use crate::{
-    ActivateSession, ClosePane, CloseSettingsWindow, CyclePanePrev, DismissWorkspace,
-    FileTreeActivate, FileTreeMoveUp, NextHunk, PrevHunk, Quit, SaveFile, SplitBelow, SplitBeside,
-    ToggleCommandPalette, workspace_key_context,
+    CloseSettingsWindow, DismissWorkspace, FileTreeActivate, FileTreeMoveUp, SidebarOpen,
+    workspace_commands, workspace_key_context,
 };
 
 fn keymap() -> Keymap {
-    let bindings =
-        TestAppContext::single().update(|cx| app_key_bindings(&Overrides::new(), cx));
+    let bindings = TestAppContext::single().update(|cx| {
+        workspace_commands::register_inert(cx);
+        let bound = bind_commands(api::commands(cx), &Overrides::new(), cx.platform_info().os);
+        app_key_bindings(&bound, cx)
+    });
     let mut keymap = Keymap::new(bindings);
-    // 用 Quit 站在 Input 上，模拟编辑器更深的 Outdent / Replace / Escape。
+    // 用 SidebarOpen 站在 Input 上，模拟编辑器更深的 Outdent / Replace / Escape。
     keymap.add_bindings([
-        KeyBinding::new("cmd-[", Quit, Some("Input")),
-        KeyBinding::new("cmd-shift-f", Quit, Some("Input")),
-        KeyBinding::new("escape", Quit, Some("Input")),
+        KeyBinding::new("cmd-[", SidebarOpen, Some("Input")),
+        KeyBinding::new("cmd-shift-f", SidebarOpen, Some("Input")),
+        KeyBinding::new("escape", SidebarOpen, Some("Input")),
     ]);
     keymap
 }
@@ -41,10 +44,23 @@ fn matched(spec: &'static str, stack: &[&str]) -> Vec<KeyBinding> {
     bindings.into_vec()
 }
 
+fn command_of(binding: &KeyBinding) -> Option<String> {
+    binding
+        .action()
+        .as_any()
+        .downcast_ref::<RunCommand>()
+        .map(|run| run.command.to_string())
+}
+
 fn first_is<T: Action>(spec: &'static str, stack: &[&str]) -> bool {
     matched(spec, stack)
         .first()
         .is_some_and(|binding| binding.action().as_any().is::<T>())
+}
+
+/// 命中的第一条绑的是哪条命令。
+fn first_command(spec: &'static str, stack: &[&str]) -> Option<String> {
+    matched(spec, stack).first().and_then(command_of)
 }
 
 #[test]
@@ -60,26 +76,26 @@ fn context_string_only_adds_the_panel_that_is_showing() {
 
 #[test]
 fn workspace_chords_stay_shallower_than_terminal_and_input() {
-    assert!(first_is::<ToggleCommandPalette>(
-        "cmd-k",
-        &["Workspace", "Terminal"]
-    ));
-    assert!(first_is::<SaveFile>(
-        "cmd-s",
-        &["Workspace Files", "Terminal"]
-    ));
+    assert_eq!(
+        first_command("cmd-k", &["Workspace", "Terminal"]).as_deref(),
+        Some("smelt.palette/toggle")
+    );
+    assert_eq!(
+        first_command("cmd-s", &["Workspace Files", "Terminal"]).as_deref(),
+        Some("smelt.files/save")
+    );
     assert!(
         matched("cmd-s", &["Workspace", "Terminal"]).is_empty(),
         "文件页没打开时 Cmd+S 不该命中"
     );
-    assert!(first_is::<NextHunk>(
-        "f7",
-        &["Workspace GitChanges", "Editor"]
-    ));
-    assert!(first_is::<PrevHunk>(
-        "shift-f7",
-        &["Workspace Files GitChanges", "Terminal"]
-    ));
+    assert_eq!(
+        first_command("f7", &["Workspace GitChanges", "Editor"]).as_deref(),
+        Some("smelt.git/next-hunk")
+    );
+    assert_eq!(
+        first_command("shift-f7", &["Workspace Files GitChanges", "Terminal"]).as_deref(),
+        Some("smelt.git/prev-hunk")
+    );
     assert!(
         matched("f7", &["Workspace", "Editor"]).is_empty(),
         "改动页没打开时 F7 不该命中"
@@ -102,17 +118,17 @@ fn workspace_chords_stay_shallower_than_terminal_and_input() {
     );
 
     let cycle = matched("cmd-[", &["Workspace", "Input"]);
-    assert!(cycle[0].action().as_any().is::<Quit>());
+    assert!(cycle[0].action().as_any().is::<SidebarOpen>());
     assert!(
         cycle
             .iter()
-            .any(|binding| binding.action().as_any().is::<CyclePanePrev>())
+            .any(|binding| command_of(binding).as_deref() == Some("smelt.stage/prev-pane"))
     );
 
     let hud = matched("cmd-shift-f", &["Workspace", "Input"]);
-    assert!(hud[0].action().as_any().is::<Quit>());
+    assert!(hud[0].action().as_any().is::<SidebarOpen>());
 
-    assert!(first_is::<Quit>("escape", &["Workspace", "Input"]));
+    assert!(first_is::<SidebarOpen>("escape", &["Workspace", "Input"]));
     assert!(first_is::<DismissWorkspace>(
         "escape",
         &["Workspace", "Terminal"]
@@ -120,32 +136,53 @@ fn workspace_chords_stay_shallower_than_terminal_and_input() {
 }
 
 #[test]
-fn session_and_split_chords_carry_their_actions() {
-    let first = &matched("cmd-1", &["Workspace"])[0];
-    let ActivateSession { index } = first
-        .action()
-        .as_any()
-        .downcast_ref::<ActivateSession>()
-        .expect("cmd-1");
-    assert_eq!(*index, 0);
+fn session_and_split_chords_carry_their_commands() {
+    assert_eq!(
+        first_command("cmd-1", &["Workspace"]).as_deref(),
+        Some("smelt.sessions/activate-1")
+    );
+    assert_eq!(
+        first_command("cmd-9", &["Workspace Files GitChanges"]).as_deref(),
+        Some("smelt.sessions/activate-9")
+    );
+    assert_eq!(
+        first_command("cmd-d", &["Workspace"]).as_deref(),
+        Some("smelt.stage/split-right")
+    );
+    assert_eq!(
+        first_command("shift-cmd-d", &["Workspace"]).as_deref(),
+        Some("smelt.stage/split-down")
+    );
+    assert_eq!(
+        first_command("cmd-w", &["Workspace", "Terminal"]).as_deref(),
+        Some("smelt.stage/close-pane")
+    );
+}
 
-    let last = &matched("cmd-9", &["Workspace Files GitChanges"])[0];
-    let ActivateSession { index } = last
-        .action()
-        .as_any()
-        .downcast_ref::<ActivateSession>()
-        .expect("cmd-9");
-    assert_eq!(*index, 8);
-
-    assert!(first_is::<SplitBeside>("cmd-d", &["Workspace"]));
-    assert!(first_is::<SplitBelow>("shift-cmd-d", &["Workspace"]));
-    assert!(first_is::<ClosePane>("cmd-w", &["Workspace", "Terminal"]));
+/// 设置和退出在设置窗口里也能按，设置窗口把命令转给主窗口。
+#[test]
+fn app_chords_also_work_in_the_settings_window() {
+    for stack in [&["Workspace", "Terminal"][..], &["SettingsWindow"][..]] {
+        assert_eq!(
+            first_command("cmd-q", stack).as_deref(),
+            Some("smelt.app/quit")
+        );
+        assert_eq!(
+            first_command("cmd-,", stack).as_deref(),
+            Some("smelt.app/settings")
+        );
+    }
+    assert!(
+        matched("cmd-k", &["SettingsWindow"]).is_empty(),
+        "工作台的键不该在设置窗口里命中"
+    );
 }
 
 #[test]
-fn migrated_chords_are_not_bound_at_the_root_context() {
+fn workspace_chords_are_not_bound_at_the_root_context() {
     for spec in [
         "cmd-k",
+        "cmd-q",
         "cmd-[",
         "cmd-]",
         "cmd-1",
