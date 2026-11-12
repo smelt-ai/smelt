@@ -135,6 +135,7 @@ mod remote;
 mod runtime_identity;
 mod runtime_upgrade;
 mod service;
+mod session_branch;
 mod session_catalog;
 mod session_control;
 mod session_directory;
@@ -1124,6 +1125,7 @@ fn broadcast_state(event_hub: &EventHubHandle, state: &SessionState) {
     match event_hub.publish_session(state) {
         Ok(true) => {
             with_session_directory(|directory| directory.upsert(state));
+            session_branch::observe(state);
         }
         Ok(false) => {}
         Err(error) => eprintln!("[event-hub] session state publish failed: {error}"),
@@ -1137,6 +1139,7 @@ fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
     match event_hub.remove_session(id, instance) {
         Ok(true) => {
             with_session_directory(|directory| directory.remove_instance(id, instance));
+            session_branch::forget(id);
         }
         Ok(false) => {}
         Err(error) => eprintln!("[event-hub] session removal publish failed: {error}"),
@@ -1148,6 +1151,7 @@ fn suspend_terminal_identity(event_hub: &EventHubHandle, state: &SessionState) -
     if !event_hub.remove_session(&state.id, state.instance).map_err(|error| error.to_string())? {
         return Err("终端实例已替换，不能归档旧实例".to_string());
     }
+    session_branch::forget(&state.id);
     with_session_directory(|directory| directory.suspend_instance(state))
         .unwrap_or_else(|| Err("终端身份目录尚未初始化".to_string()))
 }
@@ -2582,6 +2586,11 @@ fn main() {
     *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(directory);
     let sessions = new_sessions();
     let acp_sessions = new_acp_sessions();
+    session_branch::spawn(
+        Arc::clone(&sessions),
+        Arc::clone(&acp_sessions),
+        Arc::clone(&event_hub),
+    );
 
     let automations = new_automation_store();
 

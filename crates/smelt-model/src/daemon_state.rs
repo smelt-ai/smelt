@@ -85,6 +85,9 @@ pub struct DaemonSessionState {
     pub custom_title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// `cwd` 所在仓库的当前分支，运行时监听 HEAD 维护。不是 git 仓库、旧运行时不报是 None。
+    #[serde(default)]
+    pub branch: Option<String>,
     /// unix 秒，进入当前 phase 的时刻。
     #[serde(default)]
     pub phase_since: u64,
@@ -144,6 +147,7 @@ impl Default for DaemonSessionState {
             conversation_id: None,
             custom_title: None,
             cwd: None,
+            branch: None,
             phase_since: 0,
             turn_started_at: 0,
             updated_at: 0,

@@ -99,7 +99,7 @@ use smelt_model::workspace_directory::{project_labels, project_root_of};
 use terminal_view::TerminalView;
 
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
-use git_panel::{BranchList, GitDiff, GitStatusData, RepoInfo};
+use git_panel::{BranchList, GitDiff, GitStatusData};
 use settings::{Appearance, active_launch_entries, default_launch_entries, load_appearance};
 
 /// 文件事件里有没有名叫 `name` 的文件。
@@ -1233,6 +1233,18 @@ impl Session {
         }
     }
 
+    /// 会话目录所在仓库的当前分支，运行时维护在会话状态里。终端会话取当前 pane 的，和
+    /// [`Self::cwd`] 对应。
+    fn branch(&self, cx: &App) -> Option<String> {
+        match &self.kind {
+            SessionKind::Term { active, .. } => daemon_state_for(active, cx)?.branch,
+            SessionKind::Conversation(view) => {
+                let view = view.read(cx);
+                daemon_state_for_session_id(view.runtime().key(), view.session_id(), cx)?.branch
+            }
+        }
+    }
+
     /// 会话内 pane 数（判断 Cmd+W 是关 pane 还是关整会话）。
     fn pane_count(&self) -> usize {
         match &self.kind {
@@ -2329,8 +2341,9 @@ struct Workspace {
     branches_generation: HashMap<ProjectRef, u64>,
     /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
     branches_inflight: HashSet<ProjectRef>,
-    /// 请运行时建过的监听，见 `ensure_watch`。那台机器重新订阅上时清掉重新登记。
-    watches: HashSet<(git_panel::WatchKind, ProjectRef)>,
+    /// 请运行时建过 `project.watch` 的项目，见 `ensure_watch`。那台机器重新订阅上时清掉
+    /// 重新登记。
+    watches: HashSet<ProjectRef>,
     /// 每个项目上次自动 fetch 的时刻。Git 页开着、窗口在前台时同一项目 60 秒 fetch 一次，
     /// 来回切页不会每次都发。
     git_autofetch_at: HashMap<ProjectRef, Instant>,
@@ -2398,11 +2411,6 @@ struct Workspace {
     _rename_sub: Option<Subscription>,
     /// 「中继…」弹窗（None = 没开）。见 `start_relay_edit`。
     relay_edit: Option<workspace_sessions::RelayEdit>,
-    /// 仓库身份缓存（cwd → 当前分支）：侧栏项目行和会话行显示分支名靠它。None = 探测过
-    /// 但不是 git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
-    repo_info: HashMap<ProjectRef, git_panel::Cached<Option<RepoInfo>>>,
-    /// 正在后台探测仓库身份的 cwd → 这期间 HEAD 有没有变过。
-    repo_info_inflight: HashMap<ProjectRef, bool>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
@@ -2785,8 +2793,6 @@ impl Workspace {
             rename_initial: None,
             _rename_sub: None,
             relay_edit: None,
-            repo_info: HashMap::new(),
-            repo_info_inflight: HashMap::new(),
             dir_picker: None,
             discard_hunk_target: None,
             discard_file_target: None,

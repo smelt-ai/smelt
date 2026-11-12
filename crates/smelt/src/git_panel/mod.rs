@@ -22,7 +22,7 @@ use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::ControlCall;
 use smelt_runtime_client::protocol::git::*;
 pub use smelt_runtime_client::protocol::git::{
-    BranchList, DiffLine, DiffScope, GitSeenChange, GitStatusData, GitTreeRow, RepoInfo,
+    BranchList, DiffLine, DiffScope, GitSeenChange, GitStatusData, GitTreeRow,
     build_git_tree, full_file_path, parse_diff,
 };
 use smelt_ui::IconAction as _;
@@ -144,16 +144,6 @@ pub(crate) fn git_discovery_wait<T>(
                 .saturating_sub(now.saturating_duration_since(cached.fetched_at)),
         ),
     }
-}
-
-/// 请运行时建的监听。建过的（不管成没成功）记在 `Workspace::watched`，那台机器重新订阅上
-/// 之前不再登记第二次。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum WatchKind {
-    /// `project.watch`：整个项目的文件变化。Git 页、文件树、变更角标用。
-    Project,
-    /// `git.watch_head`：只看所在仓库的 HEAD。侧栏每个项目的分支名用。
-    Head,
 }
 
 /// 当前视图下 hunk 该给哪些按钮。

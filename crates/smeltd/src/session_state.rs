@@ -79,8 +79,9 @@ pub(crate) struct SessionState {
     /// 累计花费口径（各轮 cache_read 都加了），**不是**上下文占用，不能当余量分母。
     /// 见 session_history::SessionSummary.total_tokens；目前没接，先占位。
     pub(crate) tokens_used: Option<u64>,
-    /// 撞车预警要用；目前没接（见 smelt_git::GitStatusData），先占位。
+    /// 会话目录所在仓库的当前分支，由 [`crate::session_branch`] 维护。
     pub(crate) branch: Option<String>,
+    /// 撞车预警要用；目前没接（见 smelt_git::GitStatusData），先占位。
     pub(crate) dirty_files: Vec<String>,
     /// 本 daemon 进程内全局单调递增的状态版本。状态锁只保证修改互斥，修改后的
     /// 广播仍可能被线程调度倒序；订阅端用它拒绝旧快照覆盖新事实。

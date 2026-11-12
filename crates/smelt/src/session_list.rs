@@ -524,6 +524,17 @@ pub(crate) fn tool_panel_context_root(
 }
 
 impl Workspace {
+    /// 项目行的分支名：目录就是项目根的会话所报的分支（运行时维护在会话状态里）。
+    pub(crate) fn project_branch(&self, project: &ProjectRef, cx: &App) -> Option<String> {
+        self.sessions.iter().find_map(|session| {
+            let here = session.runtime(cx).key() == &project.runtime
+                && session.cwd(cx).is_some_and(|cwd| {
+                    crate::sidebar_order::same_project_root(&cwd, &project.root)
+                });
+            here.then(|| session.branch(cx)).flatten()
+        })
+    }
+
     /// 侧栏要画的分组：各机器依次铺开，每段内按当前分组方式分组，按项目分组时置顶的在前。
     /// render 和键盘导航共用这一份，两边的顺序才对得上。`each_project` 在分组前看一眼每台
     /// 机器的项目分组（render 要记下每个会话来自哪个项目）。
@@ -709,14 +720,13 @@ impl Workspace {
         let groups =
             self.sidebar_display_groups(statuses, &last_updated_at, cx, |key, project_groups| {
                 for group in project_groups {
-                    let branch = self
-                        .repo_info
-                        .get(&ProjectRef {
+                    let branch = self.project_branch(
+                        &ProjectRef {
                             runtime: key.clone(),
                             root: group.root.clone(),
-                        })
-                        .and_then(|cached| cached.value.as_ref())
-                        .map(|info| info.branch.clone());
+                        },
+                        cx,
+                    );
                     for &ix in &group.sessions {
                         session_projects[ix] = Some((group.label.clone(), branch.clone()));
                     }
@@ -1051,11 +1061,7 @@ impl Workspace {
                 .unwrap_or(AgentStatus::Idle);
 
             // 分支名：git 仓库都显示，跟项目名并排（淡色）。
-            let branch_label = self
-                .repo_info
-                .get(&project)
-                .and_then(|cached| cached.value.as_ref())
-                .map(|info| info.branch.clone());
+            let branch_label = self.project_branch(&project, cx);
 
             let e_toggle = this.clone();
             let toggle_project = project.clone();

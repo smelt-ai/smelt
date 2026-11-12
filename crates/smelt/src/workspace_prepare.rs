@@ -6,12 +6,10 @@
 //! 不能挂在那里——侧栏一个转圈就会让这些活儿跟着每秒跑很多次。真正开销在
 //! `refresh_visible_caches`：事件里排队，绘制前跑完，render 只读已经放好的缓存。
 
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use gpui::*;
 
-use crate::git_panel::WatchKind;
 use crate::settings::Appearance;
 use crate::{SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp};
 
@@ -97,27 +95,12 @@ impl Workspace {
         self.prewarm_ide_catalog_after_idle(window, cx);
 
         if let Some(project) = self.active_project_ref(cx) {
-            self.ensure_watch(WatchKind::Project, project.clone(), cx);
+            self.ensure_watch(project.clone(), cx);
             // 变更角标在任何页面都显示，活动项目各仓库的 status 一直备着。
             self.ensure_git_repos(project, cx);
         }
         self.note_active_project(cx);
         self.note_shown_views(cx);
-
-        // 仓库信息发给会话所在的那台机器。
-        let repo_cwds: HashSet<crate::ProjectRef> = self
-            .sessions
-            .iter()
-            .filter_map(|s| {
-                Some(crate::ProjectRef {
-                    runtime: s.runtime(cx).key().clone(),
-                    root: s.cwd(cx)?,
-                })
-            })
-            .collect();
-        for cwd in repo_cwds {
-            self.ensure_repo_info(cwd, cx);
-        }
 
         if self.git_page_visible()
             && let Some(root) = self.active_project_ref(cx)
@@ -163,7 +146,7 @@ impl Workspace {
                 self.cancel_file_search();
                 for root in &roots {
                     // 目录列表靠运行时的变化通知失效，每个挂出来的根都要有监听。
-                    self.ensure_watch(WatchKind::Project, root.clone(), cx);
+                    self.ensure_watch(root.clone(), cx);
                     self.ensure_git_status(root.clone(), cx);
                     self.ensure_dir_listing(root.clone(), cx);
                 }
