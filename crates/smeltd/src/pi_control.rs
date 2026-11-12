@@ -41,7 +41,6 @@ fn changes_config(method: ControlMethod) -> bool {
             | ControlMethod::PiMcpAddPreset
             | ControlMethod::PiMcpSetEnabled
             | ControlMethod::PiMcpRemove
-            | ControlMethod::PiMcpLogin
             | ControlMethod::PiPluginsRemove
             | ControlMethod::PiPluginsImport
             | ControlMethod::PiAuthLogout
@@ -97,7 +96,11 @@ fn run(
             mutate::<PiMcpSetEnabled>(params, pi_service::set_mcp_enabled)
         }
         ControlMethod::PiMcpRemove => mutate::<PiMcpRemove>(params, pi_service::remove_mcp_server),
-        ControlMethod::PiMcpLogin => mutate::<PiMcpLogin>(params, pi_service::login_mcp_server),
+        ControlMethod::PiMcpLoginStart => call::<PiMcpLoginStart>(params, |p| {
+            Ok(pi_auth_service::LoginIdParams {
+                login_id: pi_auth_service::start_mcp(&p.name)?,
+            })
+        }),
         ControlMethod::PiPluginsRemove => {
             mutate::<PiPluginsRemove>(params, pi_service::remove_plugin)
         }
@@ -178,6 +181,7 @@ mod tests {
             ControlMethod::PiAuthProviders,
             ControlMethod::PiAuthModels,
             ControlMethod::PiAuthLoginStart,
+            ControlMethod::PiMcpLoginStart,
             ControlMethod::PiAuthLoginEvents,
             ControlMethod::PiAuthLoginAnswer,
             ControlMethod::PiAuthLoginCancel,

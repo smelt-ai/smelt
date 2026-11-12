@@ -887,8 +887,10 @@ pi_calls! {
     PiMcpAddPreset => PiMcpAddPreset(crate::pi_service::McpPresetParams) -> crate::pi_service::PiConfig;
     PiMcpSetEnabled => PiMcpSetEnabled(crate::pi_service::McpEnabledParams) -> crate::pi_service::PiConfig;
     PiMcpRemove => PiMcpRemove(crate::pi_service::McpServerParams) -> crate::pi_service::PiConfig;
-    /// 跑 `pi mcp login`，可能要等用户在浏览器里授权。
-    PiMcpLogin => PiMcpLogin(crate::pi_service::McpServerParams) -> crate::pi_service::PiConfig;
+    /// 开始登录一台要 OAuth 的 MCP 服务器，返回登录 id。事件、回答、取消和 provider 登录
+    /// 共用 `pi.auth.login_events` / `login_answer` / `login_cancel`。
+    PiMcpLoginStart => PiMcpLoginStart(crate::pi_service::McpServerParams)
+        -> crate::pi_auth_service::LoginIdParams;
     PiPluginsRemove => PiPluginsRemove(crate::pi_service::PluginIdParams) -> crate::pi_service::PiConfig;
     PiPluginsImport => PiPluginsImport(crate::pi_service::ImportPluginParams) -> crate::pi_service::PiConfig;
     /// 内置 provider 及其凭据现状（起一次凭据助手子进程）。

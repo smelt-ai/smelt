@@ -4,8 +4,8 @@
 //! Smelt 只做配置界面：增删、启停、登录，格式和 Pi 文档（`docs/mcp.md`）一致，写回时
 //! 保留文件里与本次操作无关的内容。会话里怎么连、怎么调用都交给 Pi。
 //!
-//! 登录走 `smelt-agent mcp login <name>`：OAuth 流程
-//! （动态注册、PKCE、回环回调、令牌落盘到 `mcp-auth.json`）全在 Pi 里，这里不重写。
+//! 登录走 `smelt-agent mcp login <name>`（见 [`crate::pi_auth::PiLoginSession::start_mcp`]）：OAuth
+//! 流程（动态注册、PKCE、回环回调、令牌落盘到 `mcp-auth.json`）全在 Pi 里，这里不重写。
 
 pub use smelt_model::pi_mcp::*;
 
@@ -19,9 +19,6 @@ use crate::agent_kind::{
     ConversationLaunchSpec, SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV,
 };
 use crate::pi_model_settings::{pi_agent_dir, read_or_create_json, write_json_file};
-
-/// 登录最多等浏览器这么久，和 `pi mcp login` 的默认值一致。
-const LOGIN_TIMEOUT_SECS: u64 = 300;
 
 pub fn pi_mcp_path() -> PathBuf {
     pi_agent_dir().join("mcp.json")
@@ -302,37 +299,6 @@ fn edit_servers(
         .ok_or_else(|| format!("{} 里的 mcpServers 不是对象", path.display()))?;
     edit(servers)?;
     write_json_file(&path, &doc, false)
-}
-
-/// 跑 `pi mcp login <name>`：Pi 先试连接，需要授权时打开浏览器，等回环回调写好令牌。
-/// 阻塞到结束，调用方放后台线程。成功返回 Pi 的最后一行输出。
-pub fn login_pi_mcp_server(name: &str, status: &dyn Fn(&str)) -> Result<String, String> {
-    let runtime = crate::managed_runtime::sync_managed_pi_agent(status)?;
-    let mut command = runtime.command(Some("mcp"));
-    command
-        .args(["login", name, "--timeout", &LOGIN_TIMEOUT_SECS.to_string()])
-        .stdin(std::process::Stdio::null());
-    let output = command
-        .output()
-        .map_err(|error| format!("启动 Pi MCP 助手失败：{error}"))?;
-    let last_lines = |bytes: &[u8]| last_output_line(&String::from_utf8_lossy(bytes));
-    if output.status.success() {
-        Ok(last_lines(&output.stdout).unwrap_or_else(|| format!("已登录 {name}")))
-    } else {
-        Err(last_lines(&output.stderr)
-            .or_else(|| last_lines(&output.stdout))
-            .unwrap_or_else(|| format!("登录 {name} 失败")))
-    }
-}
-
-/// 助手输出的最后一个非空行，要显示在界面上：OAuth 出错时这一行可能带着令牌端点的
-/// 错误体或带凭据的地址，先打码。
-fn last_output_line(output: &str) -> Option<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())
-        .map(redact_secrets)
 }
 
 #[cfg(test)]
@@ -749,20 +715,6 @@ mod tests {
         let raw = std::fs::read_to_string(dir.join("mcp.json")).unwrap();
         assert!(raw.contains("k1") && raw.contains("t1"), "文件本身不动");
         std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn login_output_line_is_the_last_non_empty_one_and_redacted() {
-        assert_eq!(
-            last_output_line(
-                "Opening browser…\nError: token endpoint https://auth.example.com/token?client_secret=s1 returned {\"access_token\":\"a1\"}\n\n"
-            )
-            .as_deref(),
-            Some(
-                "Error: token endpoint https://auth.example.com/token?client_secret=*** returned {\"access_token\":\"***\"}"
-            )
-        );
-        assert_eq!(last_output_line(" \n\n"), None);
     }
 
     /// 用户把写着令牌的 `mcp.json` 设成 600、还用 dotfiles 链接管着：在设置里切一次开关，

@@ -160,7 +160,7 @@ define_control_methods! {
     PiMcpAddPreset => (PI_MCP_ADD_PRESET_METHOD, "pi.mcp.add_preset"),
     PiMcpSetEnabled => (PI_MCP_SET_ENABLED_METHOD, "pi.mcp.set_enabled"),
     PiMcpRemove => (PI_MCP_REMOVE_METHOD, "pi.mcp.remove"),
-    PiMcpLogin => (PI_MCP_LOGIN_METHOD, "pi.mcp.login"),
+    PiMcpLoginStart => (PI_MCP_LOGIN_START_METHOD, "pi.mcp.login_start"),
     PiPluginsRemove => (PI_PLUGINS_REMOVE_METHOD, "pi.plugins.remove"),
     PiPluginsImport => (PI_PLUGINS_IMPORT_METHOD, "pi.plugins.import"),
     PiAuthProviders => (PI_AUTH_PROVIDERS_METHOD, "pi.auth.providers"),

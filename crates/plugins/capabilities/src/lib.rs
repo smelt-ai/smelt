@@ -103,7 +103,7 @@ pub struct CapabilitiesPage {
     pi_custom_provider_editor: Option<PiCustomProviderEditor>,
     /// Pi 内置 provider 的凭据现状；进模型页签时才异步填。
     pi_auth_providers: Option<PiAuthProvidersState>,
-    /// 正在进行的订阅/API key 登录。
+    /// 正在进行的登录：provider 的订阅/API key，或 MCP 服务器的 OAuth。
     pi_login: Option<PiLoginView>,
     /// 正在为哪个 provider 挑默认模型。
     pi_auth_model_picker: Option<PiAuthModelPicker>,
@@ -111,8 +111,6 @@ pub struct CapabilitiesPage {
     pi_auth_error: Option<String>,
     /// 凭据面板是否展开到全部内置 provider（默认只列可订阅登录的和已配好的）。
     pi_auth_show_all: bool,
-    /// 正在登录的 MCP 服务器名。登录跑在后台子进程里，期间禁用同一行的按钮。
-    pi_mcp_login: Option<String>,
     /// 等用户确认移除的 MCP 服务器名。移除会删掉用户手写的配置，所以要两步。
     pi_mcp_pending_remove: Option<String>,
     /// MCP 配置操作（添加、启停、移除、登录）的最近一次错误。
@@ -146,7 +144,6 @@ impl CapabilitiesPage {
             pi_auth_model_picker: None,
             pi_auth_error: None,
             pi_auth_show_all: false,
-            pi_mcp_login: None,
             pi_mcp_pending_remove: None,
             pi_mcp_error: None,
             pi_model_editor_error: None,

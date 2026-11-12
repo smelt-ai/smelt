@@ -35,7 +35,7 @@ pub(super) fn pi_mcp_page(
                     page.pi_mcp_remote_desktop(cx),
                     palette,
                 ))
-                .child(servers_section(&entity, page, servers, palette))
+                .child(servers_section(&entity, page, servers, palette, cx))
                 .child(footer(&entity, &page.pi_paths().mcp, palette)),
         )
         .into_any_element()
@@ -155,6 +155,7 @@ fn servers_section(
     page: &CapabilitiesPage,
     servers: &[PiMcpServer],
     palette: Palette,
+    cx: &App,
 ) -> Div {
     let mut body = v_flex().w_full().gap_2();
     if let Some(error) = &page.pi_mcp_error {
@@ -191,6 +192,13 @@ fn servers_section(
                 if page.pi_mcp_pending_remove.as_deref() == Some(server.name.as_str()) {
                     item = item.child(confirm_remove(entity, &server.name, palette));
                 }
+                if let Some(view) = page
+                    .pi_login
+                    .as_ref()
+                    .filter(|view| view.mcp_server() == Some(server.name.as_str()))
+                {
+                    item = item.child(super::auth::login_panel(entity.clone(), view, None, cx));
+                }
                 list = list.child(item);
             }
             body = body.child(list);
@@ -212,8 +220,14 @@ fn server_row(
         }
         PiMcpTransport::Unknown => "缺少 url 或 command".to_string(),
     };
-    let logging_in = page.pi_mcp_login.as_deref() == Some(server.name.as_str());
-    let any_login = page.pi_mcp_login.is_some();
+    // 结束了（失败）的登录面板还留着看原因，不再挡按钮：点「登录」就是重试。
+    let running_login = page
+        .pi_login
+        .as_ref()
+        .filter(|view| view.outcome.is_none())
+        .and_then(|view| view.mcp_server());
+    let logging_in = running_login == Some(server.name.as_str());
+    let any_login = running_login.is_some();
     let removing = page.pi_mcp_pending_remove.is_some();
 
     let mut badges = h_flex()
@@ -232,7 +246,7 @@ fn server_row(
         Button::new(format!("pi-mcp-login-{}", server.name))
             .icon_size()
             .label(if logging_in {
-                "等待浏览器授权…"
+                "等待授权…"
             } else if server.signed_in {
                 "重新登录"
             } else {
@@ -240,9 +254,11 @@ fn server_row(
             })
             .tooltip("用浏览器授权；不需要登录的服务器会直接提示已连接")
             .disabled(any_login)
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 let name = name.clone();
-                entity.update(cx, |workspace, cx| workspace.login_pi_mcp_server(name, cx));
+                entity.update(cx, |workspace, cx| {
+                    workspace.start_pi_mcp_login(name, window, cx)
+                });
             })
     });
     let toggle = {
