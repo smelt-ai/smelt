@@ -11,7 +11,6 @@
 
 use gpui::{App, Context, Entity, Subscription, Window};
 use gpui_component::dock::{DockArea, DockAreaState, DockEvent, DockPlacement};
-use sha2::{Digest as _, Sha256};
 use smelt_client_store::WorkspaceLayoutStateRecord;
 
 use crate::workspace_shell::{self, ShellView};
@@ -24,20 +23,8 @@ pub(crate) const VERSION: usize = 1;
 /// 程序里嵌的默认布局。
 const DEFAULT_LAYOUT: &str = include_str!("workspace_layout/default.json");
 
-/// 一份布局文件。
-struct LayoutFile {
-    state: DockAreaState,
-    /// 文件内容的指纹。存档记着它，文件改过（比如新版本换了默认布局）就不用旧存档。
-    digest: String,
-}
-
-impl LayoutFile {
-    fn default_layout() -> Self {
-        Self {
-            state: parse_state(DEFAULT_LAYOUT).expect("内置默认布局是合法的"),
-            digest: format!("{:x}", Sha256::digest(DEFAULT_LAYOUT.as_bytes())),
-        }
-    }
+fn default_layout() -> DockAreaState {
+    parse_state(DEFAULT_LAYOUT).expect("内置默认布局是合法的")
 }
 
 /// 按官方格式解析，`version` 要是 [`VERSION`]。布局文件和存档共用。
@@ -56,14 +43,9 @@ fn to_text(state: &DockAreaState) -> String {
     serde_json::to_string(state).expect("DockAreaState 总能写成 JSON")
 }
 
-/// 这份存档能不能用在这份文件上：指纹对得上、内容是当前版本的布局。
-fn usable_saved_state(
-    record: &WorkspaceLayoutStateRecord,
-    file: &LayoutFile,
-) -> Option<DockAreaState> {
-    if record.file_digest != file.digest {
-        return None;
-    }
+/// 存档能不能用：内容是当前版本的布局就用。布局文件后来改了也照用——那是用户自己摆的
+/// 样子；要新版本的布局，扔掉存档（恢复）就是。
+fn usable_saved_state(record: &WorkspaceLayoutStateRecord) -> Option<DockAreaState> {
     match parse_state(&record.state) {
         Ok(state) => Some(state),
         Err(error) => {
@@ -74,7 +56,7 @@ fn usable_saved_state(
 }
 
 /// 库里这份布局的存档和它的原文。读不出来、用不了都当没存过。
-fn saved_state(id: &str, file: &LayoutFile) -> Option<(DockAreaState, String)> {
+fn saved_state(id: &str) -> Option<(DockAreaState, String)> {
     let record = match smelt_client_store::client_store()
         .and_then(|store| store.workspace_layout_state(id))
     {
@@ -84,7 +66,7 @@ fn saved_state(id: &str, file: &LayoutFile) -> Option<(DockAreaState, String)> {
             return None;
         }
     };
-    let state = usable_saved_state(&record, file)?;
+    let state = usable_saved_state(&record)?;
     Some((state, record.state))
 }
 
@@ -109,14 +91,13 @@ impl Workspace {
     /// `Workspace::new` 里，插件在 `plugins::mount_all`），所以由 `Workspace::new` 推迟到
     /// 建完再调。
     pub(crate) fn install_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let file = LayoutFile::default_layout();
-        let (state, written) = match saved_state(DEFAULT_ID, &file) {
+        let (state, written) = match saved_state(DEFAULT_ID) {
             Some((state, text)) => (state, Some(text)),
-            None => (file.state.clone(), None),
+            None => (default_layout(), None),
         };
         // 按存档装的，装完 dump 出来和库里一样就不用再写。
         self.layout_state_written = written;
-        self.layout_digest = Some(file.digest);
+        self.layout_id = Some(DEFAULT_ID.to_string());
         self.load_shell_state(state, window, cx);
     }
 
@@ -124,7 +105,7 @@ impl Workspace {
     /// 补上，撤下的变占位。
     pub(crate) fn reload_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 还没装过布局：装的时候自然按最新的登记建。
-        if self.layout_digest.is_none() {
+        if self.layout_id.is_none() {
             return;
         }
         let state = self.shell_dock.read(cx).dump(cx);
@@ -158,7 +139,7 @@ impl Workspace {
 
     /// 把 Dock 现在的样子（`dump()` 原样）存进库。和上次写的一样就不写。
     fn save_layout_state(&mut self, cx: &App) {
-        let Some(digest) = self.layout_digest.clone() else {
+        let Some(layout_id) = self.layout_id.clone() else {
             return;
         };
         let state = to_text(&self.shell_dock.read(cx).dump(cx));
@@ -166,8 +147,7 @@ impl Workspace {
             return;
         }
         let record = WorkspaceLayoutStateRecord {
-            layout_id: DEFAULT_ID.to_string(),
-            file_digest: digest,
+            layout_id,
             state: state.clone(),
         };
         match smelt_client_store::client_store()
@@ -257,7 +237,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutFile, VERSION, parse_state, to_text, usable_saved_state};
+    use super::{VERSION, default_layout, parse_state, to_text, usable_saved_state};
     use gpui_component::dock::{DockPlacement, PanelState};
     use smelt_client_store::WorkspaceLayoutStateRecord;
 
@@ -278,22 +258,21 @@ mod tests {
     /// 会话列表在左停靠区、文件那组在右停靠区，都开着、能收起；舞台在中间。
     #[test]
     fn the_default_layout_puts_the_side_views_in_open_side_docks() {
-        let file = LayoutFile::default_layout();
-        assert_eq!(file.state.version, Some(VERSION));
-        assert_eq!(file.digest.len(), 64);
-        assert_eq!(views(&file.state.center), ["stage"]);
-        let left = file.state.left_dock.as_ref().expect("有左停靠区");
+        let state = default_layout();
+        assert_eq!(state.version, Some(VERSION));
+        assert_eq!(views(&state.center), ["stage"]);
+        let left = state.left_dock.as_ref().expect("有左停靠区");
         assert_eq!(left.placement(), DockPlacement::Left);
         assert!(left.open());
         assert_eq!(views(left.panel()), ["sessions"]);
-        let right = file.state.right_dock.as_ref().expect("有右停靠区");
+        let right = state.right_dock.as_ref().expect("有右停靠区");
         assert_eq!(right.placement(), DockPlacement::Right);
         assert!(right.open());
         assert_eq!(
             views(right.panel()),
             ["files", "git", "history", "com.smelt.skills"]
         );
-        assert!(file.state.bottom_dock.is_none());
+        assert!(state.bottom_dock.is_none());
         for name in ["stage", "sessions", "files", "git", "history"] {
             assert!(
                 crate::builtin_views::Builtin::ALL
@@ -304,26 +283,23 @@ mod tests {
         }
     }
 
+    /// 存档只要是当前版本的布局就用，和布局文件现在长什么样无关；版本不对、解析不了不用。
     #[test]
-    fn a_saved_state_is_used_only_for_the_file_it_was_saved_from() {
-        let file = LayoutFile::default_layout();
-        let record = |digest: &str, state: String| WorkspaceLayoutStateRecord {
+    fn a_saved_state_is_used_while_its_version_is_current() {
+        let record = |state: String| WorkspaceLayoutStateRecord {
             layout_id: "default".into(),
-            file_digest: digest.into(),
             state,
         };
-        let saved = to_text(&file.state);
+        let mut moved = default_layout();
+        moved.left_dock = None;
         assert_eq!(
-            usable_saved_state(&record(&file.digest, saved.clone()), &file),
-            Some(file.state.clone())
+            usable_saved_state(&record(to_text(&moved))),
+            Some(moved.clone())
         );
-        assert_eq!(usable_saved_state(&record("other", saved), &file), None);
-        let mut newer = file.state.clone();
+        let mut newer = moved;
         newer.version = Some(VERSION + 1);
-        assert_eq!(
-            usable_saved_state(&record(&file.digest, to_text(&newer)), &file),
-            None
-        );
+        assert_eq!(usable_saved_state(&record(to_text(&newer))), None);
+        assert_eq!(usable_saved_state(&record("{}".into())), None);
         assert!(parse_state("{}").is_err());
     }
 }

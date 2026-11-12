@@ -149,6 +149,10 @@ pub struct Appearance {
     /// 只作用于终端网格、diff、代码块；侧栏和按钮走 `ui_font_family`。
     #[serde(default)]
     pub font_family: String,
+    /// 选的是哪份布局（布局 id）。`None` 是没选过，用第一个登记的布局。选的布局暂时没登记
+    /// （插件还没加载、被卸了）时照样留着，不改写成别的。
+    #[serde(default)]
+    pub layout_id: Option<String>,
 }
 
 impl Default for Appearance {
@@ -168,6 +172,7 @@ impl Default for Appearance {
             ui_font_family: String::new(),
             font_px: default_font_px(),
             font_family: String::new(),
+            layout_id: None,
         }
     }
 }
@@ -364,7 +369,7 @@ fn apply_requested_appearance_on(
     let mut snapshot = snapshot_from_appearance(&current);
     let catalog = registered_theme_entries(cx);
     smelt_model::appearance_settings::apply_patch(&mut snapshot, settings, &catalog)?;
-    let next = appearance_from_snapshot(snapshot);
+    let next = appearance_from_snapshot(snapshot, current.layout_id);
     save_appearance_on(&next, store)
         .map_err(|error| smelt_model::appearance_settings::SettingsError::Store(format!("保存外观失败：{error}")))?;
     install_appearance(next, cx);
@@ -501,8 +506,8 @@ fn current_terminal_theme() -> smelt_model::terminal_theme::TerminalThemeSnapsho
 /// 读取外观设置；缺失/损坏回退默认。外观归客户端，存在客户端库。
 pub fn load_appearance() -> Appearance {
     match smelt_client_store::client_store().and_then(|store| store.appearance()) {
-        Ok(Some(record)) => {
-            appearance_from_snapshot(smelt_model::appearance_settings::AppearanceSnapshot {
+        Ok(Some(record)) => appearance_from_snapshot(
+            smelt_model::appearance_settings::AppearanceSnapshot {
                 bg_color: record.bg_color,
                 bg_image: record.bg_image,
                 bg_image_opacity: record.bg_image_opacity,
@@ -515,8 +520,9 @@ pub fn load_appearance() -> Appearance {
                 ui_font_family: record.ui_font_family,
                 font_px: record.font_px,
                 font_family: record.font_family,
-            })
-        }
+            },
+            record.layout_id,
+        ),
         Ok(None) => Appearance::default(),
         Err(error) => {
             eprintln!("[storage] 读取外观设置失败，使用默认值: {error}");
@@ -551,6 +557,7 @@ fn save_appearance_on(
         ui_font_family: snapshot.ui_font_family,
         font_px: snapshot.font_px,
         font_family: snapshot.font_family,
+        layout_id: appearance.layout_id.clone(),
     };
     store.put_appearance(&record)
 }
@@ -584,8 +591,10 @@ fn snapshot_from_appearance(
     }
 }
 
+/// 快照只有能脚本改的那些键；选的布局不在里面，由调用方带上。
 fn appearance_from_snapshot(
     snapshot: smelt_model::appearance_settings::AppearanceSnapshot,
+    layout_id: Option<String>,
 ) -> Appearance {
     Appearance {
         bg_color: snapshot.bg_color,
@@ -608,6 +617,7 @@ fn appearance_from_snapshot(
         ui_font_family: snapshot.ui_font_family,
         font_px: snapshot.font_px,
         font_family: snapshot.font_family,
+        layout_id,
     }
 }
 

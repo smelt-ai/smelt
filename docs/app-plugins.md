@@ -58,7 +58,7 @@ smelt 的每一项功能都是 gpui-shell 插件，用户也能用同一套接�
 
 现在（2026-11-10）：
 
-- 整个工作台已经是一块 `DockArea`（`Workspace::shell_dock`，外壳画法见 `workspace_shell.rs`，装布局、存档见 `workspace_layout.rs`）。面板名就是视图 id；`DockAreaState` 原样存进客户端库的 `workspace_layout_state`，带布局文件的指纹，文件变了旧存档不用。
+- 整个工作台已经是一块 `DockArea`（`Workspace::shell_dock`，外壳画法见 `workspace_shell.rs`，装布局、存档见 `workspace_layout.rs`）。面板名就是视图 id；`DockAreaState` 原样存进客户端库的 `workspace_layout_state`，按布局 id 一份；布局文件变了存档照用，要新版本就删存档。
 - 只有自带的默认布局（`crates/smelt/src/workspace_layout/default.json`）：会话列表在左停靠区，舞台在中间，文件、变更、历史、技能在右停靠区。插件带布局、切换布局、「把视图加进布局」的命令还没做。
 - 收起是停靠区的，不是视图的：`DockAreaState` 的左右停靠区（`left_dock`、`right_dock`）各自记着开合和宽度，外壳在窗口左上角（交通灯右边）和右上角各画一个开合按钮，布局里有这个停靠区才画。视图不知道自己能不能收起，也不自己画开关：放进左右停靠区的就能收，放在中间的不能。不做开合的命令和快捷键：布局可以任意嵌套，「左侧栏」不是一个固定的东西。打开一个在收起停靠区里的视图（比如聚焦侧栏）会先展开它。下停靠区还没给开合按钮。
 - 布局里没摆的视图在侧栏给入口，当舞台上的一页打开；摆进布局的就在布局里看。布局里提到却没登记的视图、同一个 id 摆了两次的，都占着位置但不显示，存档原样留着，装回来就回来。

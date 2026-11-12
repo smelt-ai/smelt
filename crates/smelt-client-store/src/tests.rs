@@ -19,6 +19,7 @@ fn create_v7_schema(connection: &Connection) {
     connection
         .execute_batch(
             "DROP TABLE workspace_layout_state;
+             ALTER TABLE appearance DROP COLUMN layout_id;
              DROP TABLE conversation_route;
              CREATE TABLE conversation_route (
                runtime_id TEXT NOT NULL,
@@ -73,6 +74,7 @@ fn appearance() -> AppearanceRecord {
         ui_font_family: String::new(),
         font_px: 13,
         font_family: "JetBrains Mono".to_string(),
+        layout_id: None,
     }
 }
 
@@ -88,7 +90,6 @@ fn workspace_ui() -> WorkspaceUiRecord {
         pinned_projects: vec![ProjectKey::local("/repo/z"), ProjectKey::local("/repo/a")],
         sidebar_hide_empty_projects: true,
         archive_expanded: false,
-        layout_id: None,
     }
 }
 
@@ -144,8 +145,8 @@ fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
     cleanup(&path);
 }
 
-/// v8 的三栏宽度、开合和每段对话的工具面板状态升到 v9 时丢掉，别的界面状态留着；布局存档
-/// 表是空的。
+/// v8 的三栏宽度、开合和每段对话的工具面板状态升到 v9 时丢掉，别的界面状态和外观留着；
+/// 外观里还没选过布局，布局存档表是空的。
 #[test]
 fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
     let path = temp_path();
@@ -160,6 +161,9 @@ fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
          INSERT INTO conversation_route VALUES
            ('', 'conv-1', 'term-2', NULL, 'inspector', 'git', 1, 420.0, '/repo/a.rs', NULL,
             240.0, 0, 'log', 1, 'unstaged');
+         INSERT INTO appearance VALUES
+           (1, 1973790, '/Users/me/bg.png', 0.25, 0.95, 1, 'regular', 'dark', 'Default Dark',
+            16, '', 13, 'JetBrains Mono');
          PRAGMA user_version = 8;",
     )
     .unwrap();
@@ -180,6 +184,7 @@ fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].file_tree_selected.as_deref(), Some("/repo/a.rs"));
     assert_eq!(routes[0].git_tab, "log");
+    assert_eq!(store.appearance().unwrap(), Some(appearance()));
     assert_eq!(store.workspace_layout_state("default").unwrap(), None);
     drop(store);
     assert!(
@@ -196,7 +201,6 @@ fn layout_states_are_kept_per_layout() {
     let (store, path) = temp_store();
     let record = |layout_id: &str, state: &str| WorkspaceLayoutStateRecord {
         layout_id: layout_id.to_string(),
-        file_digest: "digest".to_string(),
         state: state.to_string(),
     };
     store
@@ -221,12 +225,13 @@ fn layout_states_are_kept_per_layout() {
     assert_eq!(store.workspace_layout_state("default").unwrap(), None);
     assert!(store.workspace_layout_state("stocks").unwrap().is_some());
 
-    let ui = WorkspaceUiRecord {
+    // 选的是哪份布局记在外观里。
+    let chosen = AppearanceRecord {
         layout_id: Some("stocks".to_string()),
-        ..workspace_ui()
+        ..appearance()
     };
-    store.put_workspace_ui(&ui).unwrap();
-    assert_eq!(store.workspace_ui().unwrap(), Some(ui));
+    store.put_appearance(&chosen).unwrap();
+    assert_eq!(store.appearance().unwrap(), Some(chosen));
     cleanup(&path);
 }
 

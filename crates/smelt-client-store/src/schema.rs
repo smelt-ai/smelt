@@ -26,7 +26,8 @@ CREATE TABLE appearance (
   ui_font_px INTEGER NOT NULL,
   ui_font_family TEXT NOT NULL,
   font_px INTEGER NOT NULL,
-  font_family TEXT NOT NULL
+  font_family TEXT NOT NULL,
+  layout_id TEXT
 );
 CREATE TABLE update_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -49,12 +50,10 @@ CREATE TABLE workspace_ui (
   selected_agent_id TEXT,
   sidebar_grouping TEXT NOT NULL,
   sidebar_hide_empty_projects INTEGER NOT NULL CHECK (sidebar_hide_empty_projects IN (0, 1)),
-  archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1)),
-  layout_id TEXT
+  archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1))
 );
 CREATE TABLE workspace_layout_state (
   layout_id TEXT PRIMARY KEY,
-  file_digest TEXT NOT NULL,
   state TEXT NOT NULL CHECK (json_valid(state))
 ) WITHOUT ROWID;
 CREATE TABLE collapsed_project (
@@ -276,19 +275,18 @@ ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
   CHECK (archive_expanded IN (0, 1));
 ";
 
-/// v9：整个工作台换成一块 Dock。三栏的宽度、开合和每段对话的工具面板状态都没了；布局存档
-/// 按布局 id 存官方 `DockAreaState`，`file_digest` 是存档时那份布局文件的摘要。
+/// v9：整个工作台换成一块 Dock。三栏的宽度、开合和每段对话的工具面板状态都没了；外观里
+/// 记选的是哪份布局（空 = 没选过），每份布局被用户拖成的样子按布局 id 各存一份。
 const MIGRATE_V8_TO_V9: &str = "
 ALTER TABLE workspace_ui DROP COLUMN sidebar_w;
 ALTER TABLE workspace_ui DROP COLUMN sidebar_open;
-ALTER TABLE workspace_ui ADD COLUMN layout_id TEXT;
+ALTER TABLE appearance ADD COLUMN layout_id TEXT;
 ALTER TABLE conversation_route DROP COLUMN stage_cover;
 ALTER TABLE conversation_route DROP COLUMN tool_panel_tab;
 ALTER TABLE conversation_route DROP COLUMN tool_panel_open;
 ALTER TABLE conversation_route DROP COLUMN tool_panel_w;
 CREATE TABLE workspace_layout_state (
   layout_id TEXT PRIMARY KEY,
-  file_digest TEXT NOT NULL,
   state TEXT NOT NULL CHECK (json_valid(state))
 ) WITHOUT ROWID;
 ";
@@ -582,6 +580,7 @@ mod legacy {
                     ui_font_family: old.ui_font_family,
                     font_px: old.font_px,
                     font_family: old.font_family,
+                    layout_id: None,
                 },
             )?;
         }
@@ -628,7 +627,6 @@ mod legacy {
                         .collect(),
                     sidebar_hide_empty_projects: old.sidebar_hide_empty_projects,
                     archive_expanded: false,
-                    layout_id: None,
                 },
             )?;
         }

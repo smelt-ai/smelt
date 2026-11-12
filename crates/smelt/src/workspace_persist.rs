@@ -341,8 +341,6 @@ fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
         pinned_projects: ui.pinned_projects.clone(),
         sidebar_hide_empty_projects: ui.sidebar_hide_empty_projects,
         archive_expanded: ui.archive_expanded,
-        // 眼下只有自带的默认布局。
-        layout_id: None,
     };
     smelt_client_store::client_store()
         .and_then(|store| store.put_workspace_ui(&record))

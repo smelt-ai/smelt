@@ -51,6 +51,8 @@ pub struct AppearanceRecord {
     pub ui_font_family: String,
     pub font_px: u32,
     pub font_family: String,
+    /// 选的是哪份布局。`None` 是没选过，用第一个登记的布局。
+    pub layout_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,16 +145,13 @@ pub struct WorkspaceUiRecord {
     pub pinned_projects: Vec<ProjectKey>,
     pub sidebar_hide_empty_projects: bool,
     pub archive_expanded: bool,
-    /// 用的是哪份布局。`None` 是自带的默认布局。
-    pub layout_id: Option<String>,
 }
 
 /// 一份布局被用户改过之后的样子。`state` 是 Dock 的 `DockAreaState` 原样序列化，格式归
-/// 界面；`file_digest` 是存档时布局文件的摘要，文件改过了存档就作废。
+/// 界面。布局文件后来改了也照用，用户要新版就扔掉存档（[`ClientStore::delete_workspace_layout_state`]）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceLayoutStateRecord {
     pub layout_id: String,
-    pub file_digest: String,
     pub state: String,
 }
 
@@ -247,8 +246,8 @@ pub(crate) fn write_appearance(
         .execute(
             "INSERT OR REPLACE INTO appearance (id, bg_color, bg_image, bg_image_opacity, opacity,
                blur, glass_style, theme_mode, theme_name, ui_font_px, ui_font_family, font_px,
-               font_family)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+               font_family, layout_id)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 record.bg_color,
                 record.bg_image,
@@ -261,7 +260,8 @@ pub(crate) fn write_appearance(
                 record.ui_font_px,
                 record.ui_font_family,
                 record.font_px,
-                record.font_family
+                record.font_family,
+                record.layout_id
             ],
         )
         .map(drop)
@@ -617,8 +617,8 @@ pub(crate) fn write_workspace_ui(
         .execute(
             "INSERT OR REPLACE INTO workspace_ui (id, active_session, active_session_id, route,
                selected_agent_id, sidebar_grouping, sidebar_hide_empty_projects,
-               archive_expanded, layout_id)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+               archive_expanded)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 record.active_session as i64,
                 record.active_session_id,
@@ -626,8 +626,7 @@ pub(crate) fn write_workspace_ui(
                 record.selected_agent_id,
                 record.sidebar_grouping,
                 record.sidebar_hide_empty_projects,
-                record.archive_expanded,
-                record.layout_id
+                record.archive_expanded
             ],
         )
         .map_err(sql)?;
@@ -763,7 +762,8 @@ impl ClientStore {
             connection
                 .query_row(
                     "SELECT bg_color, bg_image, bg_image_opacity, opacity, blur, glass_style,
-                       theme_mode, theme_name, ui_font_px, ui_font_family, font_px, font_family
+                       theme_mode, theme_name, ui_font_px, ui_font_family, font_px, font_family,
+                       layout_id
                      FROM appearance WHERE id = 1",
                     [],
                     |row| {
@@ -780,6 +780,7 @@ impl ClientStore {
                             ui_font_family: row.get(9)?,
                             font_px: row.get(10)?,
                             font_family: row.get(11)?,
+                            layout_id: row.get(12)?,
                         })
                     },
                 )
@@ -854,7 +855,7 @@ impl ClientStore {
             let Some(mut record) = connection
                 .query_row(
                     "SELECT active_session, active_session_id, route, selected_agent_id,
-                       sidebar_grouping, sidebar_hide_empty_projects, archive_expanded, layout_id
+                       sidebar_grouping, sidebar_hide_empty_projects, archive_expanded
                      FROM workspace_ui WHERE id = 1",
                     [],
                     |row| {
@@ -869,7 +870,6 @@ impl ClientStore {
                             pinned_projects: Vec::new(),
                             sidebar_hide_empty_projects: row.get(5)?,
                             archive_expanded: row.get(6)?,
-                            layout_id: row.get(7)?,
                         })
                     },
                 )
@@ -899,14 +899,13 @@ impl ClientStore {
         self.with(|connection| {
             connection
                 .query_row(
-                    "SELECT layout_id, file_digest, state FROM workspace_layout_state
+                    "SELECT layout_id, state FROM workspace_layout_state
                      WHERE layout_id = ?1",
                     [layout_id],
                     |row| {
                         Ok(WorkspaceLayoutStateRecord {
                             layout_id: row.get(0)?,
-                            file_digest: row.get(1)?,
-                            state: row.get(2)?,
+                            state: row.get(1)?,
                         })
                     },
                 )
@@ -923,9 +922,9 @@ impl ClientStore {
         self.write(|connection| {
             connection
                 .execute(
-                    "INSERT OR REPLACE INTO workspace_layout_state (layout_id, file_digest, state)
-                     VALUES (?1, ?2, ?3)",
-                    params![record.layout_id, record.file_digest, record.state],
+                    "INSERT OR REPLACE INTO workspace_layout_state (layout_id, state)
+                     VALUES (?1, ?2)",
+                    params![record.layout_id, record.state],
                 )
                 .map(drop)
                 .map_err(sql)

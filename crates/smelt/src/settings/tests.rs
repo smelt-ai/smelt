@@ -52,7 +52,7 @@ mod appearance_tests {
         let snapshot = super::snapshot_from_appearance(&appearance);
         assert_eq!(snapshot.glass_style, "clear");
         assert_eq!(snapshot.theme_mode, "light");
-        let back = super::appearance_from_snapshot(snapshot);
+        let back = super::appearance_from_snapshot(snapshot, None);
         assert_eq!(back.glass_style, liquid_glass::GlassStyle::Clear);
         assert_eq!(back.theme_mode, ThemeMode::Light);
         assert_eq!(back.theme_name, "Ayu Light");
@@ -94,6 +94,39 @@ mod appearance_tests {
             );
             assert!(matches!(result, Err(smelt_model::appearance_settings::SettingsError::Invalid(_))));
             assert!(store.appearance().unwrap().is_none());
+        });
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 命令行改外观只动它给的键；选的布局不在可改的键里，改完照样留着，库里也是。
+    #[gpui::test]
+    fn requested_appearance_keeps_the_chosen_layout(cx: &mut gpui::TestAppContext) {
+        let dir =
+            std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
+        let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            cx.set_global(Appearance {
+                layout_id: Some("trader/two-columns".to_string()),
+                ..Appearance::default()
+            });
+            super::apply_requested_appearance_on(
+                &std::collections::BTreeMap::from([(
+                    "appearance.opacity".into(),
+                    serde_json::json!(0.6),
+                )]),
+                &store,
+                cx,
+            )
+            .unwrap();
+            assert_eq!(
+                cx.global::<Appearance>().layout_id.as_deref(),
+                Some("trader/two-columns")
+            );
+            let saved = store.appearance().unwrap().unwrap();
+            assert_eq!(saved.opacity, 0.6);
+            assert_eq!(saved.layout_id.as_deref(), Some("trader/two-columns"));
         });
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();

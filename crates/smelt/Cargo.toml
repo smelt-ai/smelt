@@ -31,7 +31,6 @@ smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
 # 插件的 console 输出是 gpui-shell 发的 tracing 事件，接到 app.log（见 src/plugins/log.rs）。
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
@@ -98,7 +97,7 @@ raw-window-handle = "0.6"
 # 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
 smelt-store = { path = "../smelt-store" }
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 # smelt-core 是 smeltd 的进程和套接字层，第 1 步不移植到 Windows。测试里用到它的
 # 代码都在 Unix 上；Windows 的 `cargo check --all-targets` 不该把它编进来。
