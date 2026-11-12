@@ -167,7 +167,10 @@ impl CapabilitiesPage {
             HostEvent::Reconnected(machine) if *machine == self.machine => {
                 self.on_pi_config_changed(cx);
             }
-            HostEvent::RuntimeTopic { .. } | HostEvent::Reconnected(_) => {}
+            HostEvent::RuntimeTopic { .. }
+            | HostEvent::Reconnected(_)
+            | HostEvent::ProjectChanged { .. }
+            | HostEvent::WindowActivated => {}
             HostEvent::MachinesChanged => {
                 // 在配的那台远程机器已经移除时，回到本机。
                 if api::host(cx).client(&self.machine, cx).is_none() {

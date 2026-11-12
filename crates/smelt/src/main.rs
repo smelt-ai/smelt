@@ -2385,7 +2385,8 @@ struct Workspace {
     settings_page_nonce: usize,
     /// 上次告诉插件的当前项目（见 `note_active_project`），只用来判断变没变。
     plugin_project: Option<ProjectRef>,
-    /// 上次告诉插件的看得见的视图（见 `note_shown_views`），只用来判断变没变。
+    /// 看得见的视图：布局里露着的，加上舞台上开着的那页（见 `note_shown_views`）。插件
+    /// 问的 `view_shown` 和自带的文件、变更视图都按这份。
     plugin_shown_views: HashSet<String>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
     ///
@@ -2590,14 +2591,17 @@ impl std::ops::DerefMut for Workspace {
 }
 
 impl Workspace {
-    /// 文件视图此刻看得见。
+    /// 文件视图此刻看得见：摆在布局里露着，或者开成了舞台上的一页。
     fn files_view_visible(&self) -> bool {
-        self.view_shown(builtin_views::Builtin::Files.id())
+        self.plugin_shown_views
+            .contains(builtin_views::Builtin::Files.id())
     }
 
     /// Git「改动」页正在显示。F7 的键位 context 只在这时挂上。
     fn git_changes_shown(&self) -> bool {
-        self.view_shown(builtin_views::Builtin::Git.id()) && self.git_tab == GitTab::Changes
+        self.plugin_shown_views
+            .contains(builtin_views::Builtin::Git.id())
+            && self.git_tab == GitTab::Changes
     }
 
     /// 某个终端网格自己的焦点句柄正被聚焦（搜索框等子元素不算）。
@@ -3806,6 +3810,11 @@ fn main() {
                         };
                         let _ = ws.update(cx, |ws, cx| ws.on_project_changed(project, cx));
                     }
+                    let event = smelt_plugin_api::HostEvent::ProjectChanged {
+                        machine: runtime.clone(),
+                        root: root.clone(),
+                    };
+                    cx.update(|cx| smelt_plugin_api::emit(event, cx));
                     continue;
                 }
                 // 记忆在智能体那台机器上，哪台运行时报的就是哪台的。
@@ -4092,25 +4101,26 @@ fn main() {
                 if paths.is_empty() && internal_files.is_empty() {
                     continue;
                 }
-                let workspace = cx.update(|cx| {
+                cx.update(|cx| {
                     let main = ensure_main_window(&current_ws, cx);
                     if !paths.is_empty() {
                         let _ = main
                             .workspace
                             .update(cx, |ws, cx| ws.open_paths(&paths, cx));
                     }
-                    main.workspace
+                    for link in internal_files {
+                        // 链接带着文件所在的机器：远程的就去那台机器读，不能打开本机同路径的
+                        // 文件。谁来打开由登记的文件打开者定。
+                        let location = smelt_plugin_api::FileLocation {
+                            machine: link.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
+                            path: link.path,
+                            line: link.line,
+                        };
+                        if let Err(error) = smelt_plugin_api::open_file(location, cx) {
+                            status_item::notify_error(error);
+                        }
+                    }
                 });
-                for link in internal_files {
-                    // 链接带着文件所在的机器：远程的就去那台机器读，不能打开本机同路径的文件。
-                    let file = file_tree::FileRef {
-                        runtime: link.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
-                        path: link.path,
-                    };
-                    let _ = workspace.update_in(cx, |ws, window, cx| {
-                        ws.view_file_on(file, link.line, window, cx)
-                    });
-                }
             }
         })
         .detach();

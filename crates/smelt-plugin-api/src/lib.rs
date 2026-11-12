@@ -29,6 +29,7 @@ pub use smelt_ui::theme_catalog::{
 };
 
 mod command;
+mod file;
 mod layout;
 pub mod sessions;
 mod view;
@@ -40,6 +41,7 @@ pub use command::{
     CommandHandler, CommandInfo, CommandSpec, Handled, RunCommand, command, commands, invoke,
     register_commands, run, unregister_commands,
 };
+pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
     register_layouts, unregister_layouts,
@@ -92,8 +94,14 @@ pub enum HostEvent {
     /// [`model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED`]）。宿主只转发话题名，不解读；
     /// 积压丢了事件时，每个话题都当作推过一次。
     RuntimeTopic { machine: RuntimeKey, topic: String },
-    /// 重新订阅上那台机器：断开期间错过的推送要自己重读。
+    /// 重新订阅上那台机器：断开期间错过的推送要自己重读，它替你建的监听（如
+    /// `project.watch`）也要重新登记。
     Reconnected(RuntimeKey),
+    /// 那台机器上 `project.watch` 过的项目里有文件变了（一批变化合并成一次）。只带项目根，
+    /// 分不出是哪个文件。
+    ProjectChanged { machine: RuntimeKey, root: String },
+    /// 主窗口回到前台。监听有收不到的时候（Linux 的 inotify 用完、登记失败），在这里补一次。
+    WindowActivated,
     /// 挂着的机器变了：加了、移除了、改了名或连接状态。
     MachinesChanged,
     /// 工作台的当前项目变了（读 [`Host::active_project`]）。
@@ -151,6 +159,20 @@ pub trait Host: 'static {
     fn page_header(&self, window: &Window, cx: &App) -> Div;
     /// 主窗口（工作台那扇）；还没开或已经关了是 `None`。命令在这里执行（见 [`run`]）。
     fn main_window(&self, cx: &App) -> Option<AnyWindowHandle>;
+    /// 打开一个视图：布局里摆了它就让它露出来，没摆就在舞台上开成一页，再把 `args` 交给它
+    /// （[`PluginView::open`]）。没登记过这个 id 返回 `false`。`window` 是主窗口。
+    fn open_view(
+        &self,
+        id: &str,
+        args: serde_json::Value,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool;
+    /// 把文字交给当前会话：终端会话打进输入，对话填进输入框，都不替用户发出。没有能接的
+    /// 会话时报原因。`window` 是主窗口。
+    fn send_to_session(&self, text: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
+    /// 那台机器上的路径怎么切（`/` 还是 `\`）。远程机器还没连上过时按 POSIX。
+    fn path_style(&self, machine: &RuntimeKey, cx: &App) -> model::runtime_path::PathStyle;
 }
 
 struct HostGlobal {

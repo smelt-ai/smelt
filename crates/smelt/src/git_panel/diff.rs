@@ -281,24 +281,16 @@ impl GitDiffBody {
         );
         let comment_label = chrome.comment_range.as_ref().map(comment_range_label);
         let input = chrome.comment_input.clone();
+        let file_machine = chrome.root.runtime.clone();
         let open_full_file = chrome.worktree_file.clone().map(|full_path| {
-            let host = host.clone();
             Button::new("diff-view-full-file")
                 .quiet()
                 .icon_size()
                 .flex_none()
                 .label("在文件里打开")
                 .text_color(muted)
-                .on_click(move |_ev, window, cx| {
-                    let Some(host) = host.upgrade() else {
-                        return;
-                    };
-                    let path = full_path.clone();
-                    host.update(cx, |this, cx| {
-                        this.show_view(crate::builtin_views::Builtin::Files.id(), window, cx);
-                        this.view_file(path, window, cx);
-                        this.save_state(cx);
-                    });
+                .on_click(move |_ev, _window, cx| {
+                    open_file(file_machine.clone(), full_path.clone(), cx);
                 })
         });
         let collapse_all = chrome.aggregate.then(|| {
@@ -524,29 +516,29 @@ fn diff_header_suffix(
             return row;
         };
         let runtime = root.runtime.clone();
-        let host = host.clone();
         row = row.child(
             Button::new((ElementId::from("diff-open-header"), rel.clone()))
                 .quiet()
                 .icon_size()
                 .label("打开")
-                .on_click(move |_ev, window, cx| {
-                    let Some(host) = host.upgrade() else {
-                        return;
-                    };
-                    let file = crate::file_tree::FileRef {
-                        runtime: runtime.clone(),
-                        path: full.clone(),
-                    };
-                    host.update(cx, |this, cx| {
-                        this.show_view(crate::builtin_views::Builtin::Files.id(), window, cx);
-                        this.view_file_on(file, None, window, cx);
-                        this.save_state(cx);
-                    });
+                .on_click(move |_ev, _window, cx| {
+                    open_file(runtime.clone(), full.clone(), cx);
                 }),
         );
     }
     row
+}
+
+/// 交给登记的文件打开者，失败送系统通知。
+fn open_file(machine: smelt_plugin_api::RuntimeKey, path: String, cx: &mut App) {
+    let location = smelt_plugin_api::FileLocation {
+        machine,
+        path,
+        line: None,
+    };
+    if let Err(error) = smelt_plugin_api::open_file(location, cx) {
+        crate::status_item::notify_error(error);
+    }
 }
 
 fn render_diff_annotation(

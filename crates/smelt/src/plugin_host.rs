@@ -121,6 +121,33 @@ impl api::Host for SmeltHost {
             .as_ref()
             .map(|main| main.window.into())
     }
+
+    fn open_view(
+        &self,
+        id: &str,
+        args: serde_json::Value,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        self.workspace().is_some_and(|workspace| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_page(id, args, window, cx)
+            })
+        })
+    }
+
+    fn send_to_session(&self, text: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
+        let workspace = self
+            .workspace()
+            .ok_or_else(|| "主窗口没有打开".to_string())?;
+        workspace.update(cx, |workspace, cx| {
+            workspace.send_to_session(text, window, cx)
+        })
+    }
+
+    fn path_style(&self, machine: &RuntimeKey, cx: &App) -> api::model::runtime_path::PathStyle {
+        runtimes::path_style(machine, cx)
+    }
 }
 
 /// 启动时、开主窗口之前调一次：装好宿主服务，登记内置插件。

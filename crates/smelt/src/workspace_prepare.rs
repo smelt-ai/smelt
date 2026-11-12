@@ -228,7 +228,8 @@ impl Workspace {
     }
 
     fn git_page_visible(&self) -> bool {
-        self.view_shown(crate::builtin_views::Builtin::Git.id())
+        self.plugin_shown_views
+            .contains(crate::builtin_views::Builtin::Git.id())
     }
 
     /// Git 页开着、窗口在前台时，活动项目每 60 秒自动 fetch 一次，刷新 ahead/behind。

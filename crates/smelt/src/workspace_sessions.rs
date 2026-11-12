@@ -571,6 +571,23 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        match self.send_to_session(text, window, cx) {
+            Ok(()) => true,
+            Err(reason) => {
+                self.report_background_error(reason);
+                false
+            }
+        }
+    }
+
+    /// 把文字交给当前会话：终端打进输入，对话填进输入框，都不替用户发出。插件经
+    /// [`smelt_plugin_api::Host::send_to_session`] 调到这里。
+    pub(crate) fn send_to_session(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let group = self
             .active_project_ref(cx)
             .and_then(|project| self.find_project_group(&project, cx));
@@ -580,13 +597,7 @@ impl Workspace {
                 .as_ref()
                 .map(|group| (group.label.as_str(), group.sessions.as_slice())),
         );
-        let index = match target {
-            Ok(index) => index,
-            Err(reason) => {
-                self.report_background_error(reason);
-                return false;
-            }
-        };
+        let index = target?;
         match &self.sessions[index].kind {
             SessionKind::Term { active, .. } => {
                 active.update(cx, |terminal, cx| terminal.send_text(text, cx));
@@ -595,7 +606,7 @@ impl Workspace {
                 view.update(cx, |view, cx| view.insert_prompt_text(text, window, cx));
             }
         }
-        true
+        Ok(())
     }
 
     /// 活动 session 变化时，完整交换右侧工作区。用 session 自己的稳定 ui_id 判断，
@@ -2395,6 +2406,7 @@ impl Workspace {
             let view = cx.weak_entity();
             cx.defer(move |cx| {
                 let _ = view.update(cx, |this, cx| this.on_window_refocused(cx));
+                smelt_plugin_api::emit(smelt_plugin_api::HostEvent::WindowActivated, cx);
             });
         }
     }

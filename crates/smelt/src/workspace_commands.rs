@@ -387,6 +387,30 @@ pub(crate) const COMMANDS: &[Def] = &[
             },
         ),
     ),
+    // 文件打开者（见 `smelt_plugin_api::open_file`）：对话里的文件链接、变更视图的
+    // 「打开文件」都经它进文件页。参数是 `FileLocation::to_args`。
+    with_args(hidden(def(
+        "smelt.files",
+        "open",
+        "打开文件",
+        None,
+        |this, args, window, cx| {
+            let Some(location) = api::FileLocation::from_args(args) else {
+                eprintln!("[commands] smelt.files/open 参数不对：{args}");
+                return Handled::Done;
+            };
+            let file = file_tree::FileRef {
+                runtime: location.machine,
+                path: location.path,
+            };
+            // 布局里没摆文件页就在舞台上开成一页，不能打开了却看不见。
+            let files = crate::builtin_views::Builtin::Files.id();
+            this.open_page(files, serde_json::Value::Null, window, cx);
+            this.view_file_on(file, location.line, window, cx);
+            this.save_state(cx);
+            Handled::Done
+        },
+    ))),
     // 文件内容视图右键菜单里的那一项，见 `send_open_file_selection`。
     hidden(def(
         "smelt.files",
@@ -486,6 +510,7 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
         },
         cx,
     );
+    api::register_file_opener("smelt.files", "open", cx);
 }
 
 /// 测试里不建工作台，只要登记出来的命令表。
