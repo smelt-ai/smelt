@@ -35,6 +35,7 @@ mod liquid_glass;
 mod local_daemon;
 mod overlay;
 mod plugins;
+mod project_repositories;
 mod provider_quota;
 mod resizable_split;
 mod resource_monitor;
@@ -1095,6 +1096,8 @@ struct Session {
     ui_id: u64,
     /// 对话的稳定 id：跨进程、跨设备都认它。运行时目录和客户端存的界面状态都按它对上。
     conversation_id: String,
+    /// 工作集会话固定绑定到创建它的工作集；普通会话为 None。
+    workset_id: Option<String>,
     kind: SessionKind,
     /// 最近一次会话内容或运行状态变化的 unix 秒时间戳。
     last_updated_at: u64,
@@ -1122,6 +1125,7 @@ impl Session {
         Self {
             ui_id: next_session_ui_id(),
             conversation_id: new_conversation_id(),
+            workset_id: None,
             kind: SessionKind::Term {
                 dock: term_dock::TermDock::single(view.clone(), window, cx),
                 active: view,
@@ -1490,6 +1494,7 @@ fn next_session_ui_id() -> u64 {
 enum RenameTarget {
     Session(usize),
     Pane(Entity<TerminalView>),
+    Workset(String),
     /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
     History {
@@ -1680,6 +1685,7 @@ enum SidebarDrag {
 pub(crate) struct SessionState {
     /// 对话的稳定 id：新建时生成，之后不再变。客户端按它存这段对话的界面状态。
     id: String,
+    workset_id: Option<String>,
     /// 分屏树。刚从运行时读回来、客户端库还没填之前，是终端的默认摆法。
     layout: PaneState,
     /// 当前看的终端在 `layout` 里的位置（深度优先序）。
@@ -1806,7 +1812,10 @@ pub(crate) enum CloseConfirm {
         pane: Option<Entity<TerminalView>>,
     },
     /// 移除一台远程机器：这台电脑不再连它。
-    Runtime { runtime_id: String, name: String },
+    Runtime {
+        runtime_id: String,
+        name: String,
+    },
 }
 
 /// 侧栏的一个项目分组。**身份是 root（路径），不是 label**——两个不同目录的末段名
@@ -2603,6 +2612,7 @@ struct Workspace {
     repo_info_stale: HashSet<ProjectRef>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
+    project_repositories: Option<project_repositories::ProjectRepositoriesState>,
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
     /// reflog，找不回来，所以必须过一道确认。
     discard_hunk_target: Option<(ProjectRef, usize)>,
@@ -3038,6 +3048,7 @@ impl Workspace {
             repo_info_inflight: HashSet::new(),
             repo_info_stale: HashSet::new(),
             dir_picker: None,
+            project_repositories: None,
             discard_hunk_target: None,
             discard_file_target: None,
             discard_all_target: None,
@@ -3444,7 +3455,11 @@ impl Render for Workspace {
                             }
                             if let Some((start_x, start_w)) = workspace.shell_drag_tool_start {
                                 let delta = start_x - mouse_x;
-                                let sidebar_display = if workspace.sidebar_open { workspace.sidebar_w } else { 0.0 };
+                                let sidebar_display = if workspace.sidebar_open {
+                                    workspace.sidebar_w
+                                } else {
+                                    0.0
+                                };
                                 let cap = workspace_shell::tool_cap(viewport, sidebar_display);
                                 let new_w = (start_w + delta).clamp(0.0, cap);
                                 if (new_w - workspace.tool_panel_w).abs() > 0.5 {

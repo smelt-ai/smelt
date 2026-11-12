@@ -147,6 +147,7 @@ mod restore_order_tests {
     fn state(name: &str, acp: bool) -> SessionState {
         SessionState {
             id: format!("conv-{name}"),
+            workset_id: None,
             layout: PaneState::Leaf {
                 cwd: Some(format!("/{name}")),
                 id: None,

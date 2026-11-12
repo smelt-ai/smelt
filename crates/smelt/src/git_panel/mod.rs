@@ -346,7 +346,17 @@ fn resolve_git_write_target(
         {
             selected.to_string()
         }
-        _ => fallback.unwrap_or(project_root).to_string(),
+        _ => fallback
+            .or_else(|| {
+                let set = known?;
+                if set.roots().any(|root| root == project_root) {
+                    None
+                } else {
+                    set.repos.first().map(|repo| repo.root.as_str())
+                }
+            })
+            .unwrap_or(project_root)
+            .to_string(),
     }
 }
 
@@ -845,7 +855,13 @@ fn render_narrow_git_row(
                 .text_xs()
                 .font_semibold()
                 .text_color(rgb(ui_theme::text_faint()))
-                .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(title.clone())))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(truncated_line(title.clone())),
+                )
                 .children(batch.as_ref().map(|batch| {
                     let batch = batch.clone();
                     let batch_root = at(&batch.root);
@@ -931,7 +947,13 @@ fn render_narrow_git_row(
                             .size(px(10.))
                             .flex_shrink_0(),
                         )
-                        .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(row.name.clone())))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(truncated_line(row.name.clone())),
+                        )
                         .child(batch_action)
                         .on_click(move |_ev, _window, cx| {
                             let path = toggle_path.clone();

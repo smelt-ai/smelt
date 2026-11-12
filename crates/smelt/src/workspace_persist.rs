@@ -12,10 +12,14 @@ use smelt_model::workspace_directory::{
     WorkspaceAcp, WorkspaceConversation, WorkspaceConversationIdParams, WorkspaceDirectory,
     WorkspaceProjectParams, WorkspaceTerminal,
 };
-use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode, ControlMethod};
+use smelt_runtime_client::protocol::control::{
+    ControlClientError, ControlErrorCode, ControlMethod,
+};
 
 use crate::runtimes::Runtime;
-use crate::workspace_directory::{DirectoryCommands, DirectoryOutcome, order_by_saved, without_names};
+use crate::workspace_directory::{
+    DirectoryCommands, DirectoryOutcome, order_by_saved, without_names,
+};
 use crate::{
     AcpSaved, PaneState, RuntimeKey, SessionKind, SessionRouteArchive, SessionState,
     SidebarGrouping, Workspace, WorkspaceRoute,
@@ -80,6 +84,7 @@ pub(crate) fn session_state_from_conversation(conversation: WorkspaceConversatio
     };
     SessionState {
         id: conversation.id,
+        workset_id: conversation.workset_id,
         layout,
         active: 0,
         last_updated_at: conversation.last_updated_at.max(0) as u64,
@@ -726,6 +731,8 @@ impl Workspace {
             .get(key)
             .cloned()
             .unwrap_or_default();
+        let repositories = directory.repositories.clone();
+        let worksets = directory.worksets.clone();
         let Some(space) = self.space_mut(key) else {
             return;
         };
@@ -746,6 +753,12 @@ impl Workspace {
         } else {
             saved_order.projects.clone()
         };
+        let worksets_changed = space.worksets != worksets;
+        space.repositories = repositories;
+        space.worksets = worksets;
+        space
+            .collapsed_worksets
+            .retain(|id| space.worksets.iter().any(|workset| &workset.id == id));
         space.projects = order_by_saved(directory.projects, &order, String::as_str);
         let inbound =
             space
@@ -836,6 +849,23 @@ impl Workspace {
         }
         self.save_state(cx);
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
+        if worksets_changed {
+            let worktree_roots = self
+                .space(key)
+                .into_iter()
+                .flat_map(|space| &space.worksets)
+                .flat_map(|workset| &workset.repositories)
+                .map(|repository| repository.worktree.clone())
+                .collect::<Vec<_>>();
+            for root in worktree_roots {
+                let project = crate::ProjectRef {
+                    runtime: key.clone(),
+                    root,
+                };
+                self.ensure_git_watch(project.clone(), cx);
+                self.ensure_git_status(project, cx);
+            }
+        }
         cx.notify();
     }
 
@@ -974,13 +1004,13 @@ impl Workspace {
         // 名字不随对话发出去：只经 `workspace.rename` 写，见 `request_rename`。
         Some(without_names(&WorkspaceConversation {
             id: session.conversation_id.clone(),
-            workset_id: None,
             custom_title: None,
             last_updated_at,
             terminals,
             acp,
             archived_at: None,
             pinned_at: None,
+            workset_id: session.workset_id.clone(),
         }))
     }
 
@@ -1013,6 +1043,85 @@ impl Workspace {
             if let Err(error) = result {
                 let message = format!("改名失败：{}", crate::runtime_call::error_text(error));
                 let _ = this.update(cx, |this, _| this.report_background_error(message));
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn request_workset_rename(
+        &mut self,
+        runtime: Runtime,
+        params: smelt_model::workspace_directory::WorkspaceWorksetRenameParams,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call_on::<
+                            smelt_model::control_api::WorkspaceWorksetRename,
+                        >(
+                            runtime.client(),
+                            params,
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            if let Err(error) = result {
+                let message = format!("重命名工作树失败：{error}");
+                let _ = this.update(cx, |this, _| this.report_background_error(message));
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn request_workset_finish(
+        &mut self,
+        runtime: Runtime,
+        params: smelt_model::workspace_directory::WorkspaceWorksetFinishParams,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call_on::<
+                            smelt_model::control_api::WorkspaceWorksetFinish,
+                        >(
+                            runtime.client(),
+                            params,
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            match result {
+                Ok(result) => {
+                    let mut message = "工作树已收工".to_string();
+                    if !result.retained_branches.is_empty() {
+                        message.push_str(&format!(
+                            "；保留复用分支：{}",
+                            result.retained_branches.join("、")
+                        ));
+                    }
+                    if !result.leftover_entries.is_empty() {
+                        message.push_str(&format!(
+                            "；未删除的目录内容：{}",
+                            result
+                                .leftover_entries
+                                .iter()
+                                .map(|path| format!("「{path}」"))
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        ));
+                    }
+                    crate::status_item::notify_success(message);
+                }
+                Err(error) => {
+                    let message = format!("收工工作树失败：{error}");
+                    let _ = this.update(cx, |this, _| this.report_background_error(message));
+                }
             }
         })
         .detach();
@@ -1394,7 +1503,9 @@ mod agent_conversation_persist_tests {
         conversation_from_record, conversation_record, project_key, project_roots_of,
         session_state_from_conversation,
     };
-    use smelt_model::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal};
+    use smelt_model::workspace_directory::{
+        WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal,
+    };
 
     /// 智能体 space 上的 ACP 对话经运行时目录走一趟，恢复用到的字段都还在。
     #[test]
@@ -1412,10 +1523,12 @@ mod agent_conversation_persist_tests {
         };
         let state = session_state_from_conversation(WorkspaceConversation {
             id: "conv-space".into(),
+            workset_id: Some("workset-1".into()),
             acp: Some(acp.clone()),
             ..WorkspaceConversation::default()
         });
         assert_eq!(state.id, "conv-space");
+        assert_eq!(state.workset_id.as_deref(), Some("workset-1"));
         let saved = state.acp.expect("ACP 细节");
         assert_eq!(saved.cwd.as_deref(), Some(cwd));
         assert_eq!(saved.sid.as_deref(), Some("acp-global-1"));

@@ -126,7 +126,7 @@ impl Workspace {
             }
             self.ensure_git_watch(root.clone(), cx);
             self.ensure_git_repos(root.clone(), cx);
-            let git_repo = self.active_git_repo_root(&root);
+            let git_repo = self.active_git_repo_root(&root, cx);
             self.ensure_branches(git_repo, cx);
             self.prepare_git_panel(window, cx);
         }

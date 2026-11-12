@@ -27,6 +27,8 @@ pub(crate) struct NewAcpSessionRequest {
     pub pending_prompt: Option<String>,
     /// 由哪条自动化创建。None 表示用户手动开的对话。
     pub automation_id: Option<String>,
+    /// 用户从工作树入口创建的会话；自动化和普通项目会话为 None。
+    pub workset_id: Option<String>,
     pub activate: bool,
 }
 
@@ -300,6 +302,7 @@ impl Workspace {
                             Session {
                                 ui_id: next_session_ui_id(),
                                 conversation_id: ss.id.clone(),
+                                workset_id: ss.workset_id.clone(),
                                 kind: SessionKind::Conversation(view),
                                 last_updated_at: ss.last_updated_at,
                                 custom_title: ss.custom_title,
@@ -381,6 +384,7 @@ impl Workspace {
                         Session {
                             ui_id: next_session_ui_id(),
                             conversation_id: ss.id.clone(),
+                            workset_id: ss.workset_id.clone(),
                             kind: SessionKind::Term { dock, active },
                             last_updated_at: ss.last_updated_at,
                             custom_title: ss.custom_title,
@@ -786,8 +790,12 @@ impl Workspace {
                 continue;
             }
             let cwd = s.cwd(cx).unwrap_or_default();
-            let root = self
-                .project_root_for_cwd(runtime, &cwd, cx)
+            let root = s
+                .workset_id
+                .as_deref()
+                .and_then(|id| space.worksets.iter().find(|workset| workset.id == id))
+                .map(|workset| workset.project_root.clone())
+                .or_else(|| self.project_root_for_cwd(runtime, &cwd, cx))
                 .unwrap_or_else(|| cwd.clone());
             match groups.iter_mut().find(|g| same_root(&g.root, &root)) {
                 Some(g) => g.sessions.push(ix),
@@ -844,6 +852,11 @@ impl Workspace {
             .map(|group| group.sessions)
             .collect();
         if !indices_share_group(&groups, from_ix, target_ix) {
+            self.sess_drop_hint = None;
+            cx.notify();
+            return;
+        }
+        if self.sessions[from_ix].workset_id != self.sessions[target_ix].workset_id {
             self.sess_drop_hint = None;
             cx.notify();
             return;
@@ -913,6 +926,34 @@ impl Workspace {
         self.add_session_with_launch(runtime, cwd, None, cx);
     }
 
+    pub(crate) fn add_session_in_workset(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        cwd: Option<String>,
+        workset_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_session_with_launch_in_workset(runtime, cwd, None, Some(workset_id), cx);
+    }
+
+    fn workset_session_cwd_is_valid(
+        &self,
+        runtime: &crate::runtimes::RuntimeKey,
+        workset_id: &str,
+        cwd: &str,
+        cx: &App,
+    ) -> bool {
+        let Some(workset) = self.space(runtime).and_then(|space| {
+            space
+                .worksets
+                .iter()
+                .find(|workset| workset.id == workset_id)
+        }) else {
+            return false;
+        };
+        workset.contains_cwd(crate::runtimes::path_style(runtime, cx), cwd)
+    }
+
     pub(crate) fn touch_acp_session(&mut self, view: &Entity<acp_view::AcpView>) {
         let view_id = view.entity_id();
         if let Some(session) = self.sessions.iter_mut().find(|session| {
@@ -975,13 +1016,17 @@ impl Workspace {
                     cx.notify();
                 }
                 acp_view::AcpViewEvent::NewSession(request) => {
-                    let agent_definition = this.sessions.iter().find_map(|session| {
+                    let source_session = this.sessions.iter().find(|session| {
+                        let SessionKind::Conversation(existing) = &session.kind else {
+                            return false;
+                        };
+                        existing.entity_id() == _view.entity_id()
+                    });
+                    let workset_id = source_session.and_then(|session| session.workset_id.clone());
+                    let agent_definition = source_session.and_then(|session| {
                         let SessionKind::Conversation(existing) = &session.kind else {
                             return None;
                         };
-                        if existing.entity_id() != _view.entity_id() {
-                            return None;
-                        }
                         let id = session.agent_definition_id.as_deref()?;
                         settings::agent_definition(existing.read(cx).runtime().key(), id, cx)
                     });
@@ -996,6 +1041,7 @@ impl Workspace {
                             fallback_cwd: request.cwd.clone(),
                             pending_prompt: None,
                             automation_id: None,
+                            workset_id,
                             activate: true,
                         },
                         window,
@@ -1196,17 +1242,30 @@ impl Workspace {
             .as_ref()
             .filter(|origin| !origin.from_history)
             .map(|origin| origin.session_id.clone());
-        let agent_definition = source_sid.as_deref().and_then(|sid| {
-            self.sessions.iter().find_map(|session| {
+        let source_session = source_sid.as_deref().and_then(|sid| {
+            self.sessions.iter().find(|session| {
                 let SessionKind::Conversation(view) = &session.kind else {
-                    return None;
+                    return false;
                 };
-                if view.read(cx).session_id() != sid {
-                    return None;
-                }
-                let id = session.agent_definition_id.as_deref()?;
-                settings::agent_definition(view.read(cx).runtime().key(), id, cx)
+                view.read(cx).session_id() == sid
             })
+        });
+        let workset_id = source_session.and_then(|session| session.workset_id.clone());
+        if let Some(workset_id) = workset_id.as_deref() {
+            let valid = request.cwd.as_deref().is_some_and(|cwd| {
+                self.workset_session_cwd_is_valid(request.runtime.key(), workset_id, cwd, cx)
+            });
+            if !valid {
+                self.report_background_error("工作树会话不能在工作树目录之外创建新会话");
+                return;
+            }
+        }
+        let agent_definition = source_session.and_then(|session| {
+            let SessionKind::Conversation(view) = &session.kind else {
+                return None;
+            };
+            let id = session.agent_definition_id.as_deref()?;
+            settings::agent_definition(view.read(cx).runtime().key(), id, cx)
         });
         let agent_definition_id = agent_definition.map(|definition| definition.id);
         if agent_definition_id.is_some() {
@@ -1238,6 +1297,7 @@ impl Workspace {
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
             conversation_id: crate::new_conversation_id(),
+            workset_id,
             kind: SessionKind::Conversation(view.clone()),
             last_updated_at: unix_now_secs(),
             custom_title: None,
@@ -1280,8 +1340,18 @@ impl Workspace {
             fallback_cwd,
             pending_prompt,
             automation_id,
+            workset_id,
             activate,
         } = request;
+        if let Some(workset_id) = workset_id.as_deref() {
+            let valid = fallback_cwd.as_deref().is_some_and(|cwd| {
+                self.workset_session_cwd_is_valid(runtime.key(), workset_id, cwd, cx)
+            });
+            if !valid {
+                self.report_background_error("工作树不存在，或会话目录不属于该工作树");
+                return;
+            }
+        }
         // 工作目录属于这次对话/Run，而非 AgentDefinition；项目菜单或触发器传来
         // 的上下文就是本次执行上下文。
         let cwd = fallback_cwd;
@@ -1339,6 +1409,7 @@ impl Workspace {
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
             conversation_id: crate::new_conversation_id(),
+            workset_id,
             kind: SessionKind::Conversation(view.clone()),
             last_updated_at: unix_now_secs(),
             custom_title: None,
@@ -1486,6 +1557,7 @@ impl Workspace {
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
             conversation_id: crate::new_conversation_id(),
+            workset_id: None,
             kind: SessionKind::Conversation(view),
             last_updated_at: unix_now_secs(),
             custom_title,
@@ -1554,6 +1626,26 @@ impl Workspace {
         entry: Option<settings::LaunchEntry>,
         cx: &mut Context<Self>,
     ) {
+        self.add_session_with_launch_in_workset(runtime, cwd, entry, None, cx);
+    }
+
+    pub(crate) fn add_session_with_launch_in_workset(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        cwd: Option<String>,
+        entry: Option<settings::LaunchEntry>,
+        workset_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workset_id) = workset_id.as_deref() {
+            let valid = cwd.as_deref().is_some_and(|cwd| {
+                self.workset_session_cwd_is_valid(runtime.key(), workset_id, cwd, cx)
+            });
+            if !valid {
+                self.report_background_error("工作树不存在，或会话目录不属于该工作树");
+                return;
+            }
+        }
         self.remember_session_project(runtime.key(), cwd.as_deref(), cx);
         let runtime_bg = runtime.clone();
         // spawn 在后台；先把项目落盘，即使进程启动失败也不能让用户刚选中的项目消失。
@@ -1564,6 +1656,7 @@ impl Workspace {
         let label_owned = entry.as_ref().map(|entry| entry.label.clone());
         let sid_bg = sid.clone();
         let launch_bg = launch_owned.clone();
+        let workset_id_bg = workset_id.clone();
         eprintln!("[workspace] 新建会话 cwd={cwd:?} launch={launch_owned:?} sid={sid}");
         cx.notify();
 
@@ -1621,22 +1714,18 @@ impl Workspace {
                             label_owned.as_deref(),
                         )
                     });
-                    let session = Session::single(view, window, cx);
+                    let mut session = Session::single(view, window, cx);
+                    session.workset_id = workset_id_bg;
                     this.sessions.push(session);
                     this.session_list_revision = this.session_list_revision.wrapping_add(1);
                     let ix = this.sessions.len() - 1;
                     // 新的一行闪一下，并且得看得见：所在项目折着就展开，再滚到它。
                     this.sidebar_flash = Some(this.sessions[ix].ui_id);
-                    this.reveal_session_in_sidebar(ix, cx);
-                    this.active_session = ix;
-                    this.note_session_viewed(ix);
-                    this.save_state(cx);
-                    this.schedule_visible_refresh(cx);
+                    this.activate(ix, window, cx);
                     eprintln!(
                         "[workspace] 新建会话成功，当前共 {} 个",
                         this.sessions.len()
                     );
-                    cx.notify();
                 })
             });
         })
@@ -2486,10 +2575,7 @@ impl Workspace {
             return;
         }
         if ix < self.sessions.len() {
-            // 换到别的会话时（⌘↑↓、点通知、新建），它在侧栏里得看得见。
-            if ix != self.active_session {
-                self.reveal_session_in_sidebar(ix, cx);
-            }
+            self.reveal_session_in_sidebar(ix, cx);
             self.active_session_revision = self.active_session_revision.wrapping_add(1);
             self.active_session = ix;
             self.note_session_viewed(ix);
@@ -2499,9 +2585,20 @@ impl Workspace {
                 .into_iter()
                 .find(|g| g.sessions.contains(&ix))
             {
+                let root = self.sessions[ix]
+                    .workset_id
+                    .as_deref()
+                    .and_then(|id| {
+                        self.space(&g.runtime)?
+                            .worksets
+                            .iter()
+                            .find(|workset| workset.id == id)
+                    })
+                    .map(|workset| workset.task_root(crate::runtimes::path_style(&g.runtime, cx)))
+                    .unwrap_or(g.root);
                 self.active_project = Some(ProjectRef {
                     runtime: g.runtime,
-                    root: g.root,
+                    root,
                 });
             }
             self.sync_session_ui(window, cx);
@@ -2617,6 +2714,13 @@ impl Workspace {
                 s.title(cx)
             }
             RenameTarget::Pane(view) => pane_title(view, cx),
+            RenameTarget::Workset(workset_id) => self
+                .spaces
+                .iter()
+                .flat_map(|space| &space.worksets)
+                .find(|workset| workset.id == *workset_id)
+                .map(|workset| workset.task.clone())
+                .unwrap_or_default(),
             RenameTarget::History { current_title, .. } => current_title.clone(),
             RenameTarget::Runtime(runtime_id) => {
                 crate::runtimes::runtime_name(&crate::RuntimeKey::Remote(runtime_id.clone()), cx)
@@ -2732,6 +2836,29 @@ impl Workspace {
                             );
                         }
                     }
+                }
+            }
+            RenameTarget::Workset(workset_id) => {
+                let workset = self.spaces.iter().find_map(|space| {
+                    space
+                        .worksets
+                        .iter()
+                        .find(|workset| workset.id == workset_id)
+                        .map(|workset| (space.runtime.clone(), workset.clone()))
+                });
+                let Some((runtime, _)) = workset else {
+                    self.report_background_error("工作树已不存在，无法重命名");
+                    return;
+                };
+                if let Some(task) = custom_title {
+                    self.request_workset_rename(
+                        runtime,
+                        smelt_model::workspace_directory::WorkspaceWorksetRenameParams {
+                            workset_id,
+                            task,
+                        },
+                        cx,
+                    );
                 }
             }
             // 留空不改：机器总得有个名字。

@@ -40,7 +40,9 @@ impl Workspace {
             ),
             CloseConfirm::DeleteArchived { title, .. } => (
                 "确定永久删除归档会话吗？",
-                format!("「{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再从归档恢复。不会删除项目文件或 Copilot、Claude 等工具自行保存的历史。"),
+                format!(
+                    "「{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再从归档恢复。不会删除项目文件或 Copilot、Claude 等工具自行保存的历史。"
+                ),
                 "永久删除",
             ),
             CloseConfirm::Project {
@@ -555,6 +557,9 @@ impl Workspace {
                 "重命名机器",
                 "侧栏和设置里显示这个名字，只在这台电脑上生效。",
             ),
+            Some(RenameTarget::Workset(_)) => {
+                ("重命名工作树", "会同步重命名工作树目录和参与仓库的分支。")
+            }
             _ => ("重命名会话", "留空则恢复自动识别的标题。"),
         };
 

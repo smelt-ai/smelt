@@ -453,6 +453,31 @@ fn commit_target_follows_the_selected_repository() {
     assert_eq!(resolve_git_write_target("/p", None, Some(&set), None), "/p");
 }
 
+#[test]
+fn task_root_is_not_a_git_write_target_even_when_all_repositories_are_clean() {
+    let set = repo_set(vec![
+        repo("/p/worktrees/task/api", "api", RepoKind::Nested),
+        repo("/p/worktrees/task/web", "web", RepoKind::Nested),
+    ]);
+    assert_eq!(
+        resolve_git_write_target("/p/worktrees/task", None, Some(&set), None),
+        "/p/worktrees/task/api"
+    );
+    assert_eq!(
+        resolve_git_write_target("/p/worktrees/task", Some("/p/repos/api"), Some(&set), None),
+        "/p/worktrees/task/api"
+    );
+    assert_eq!(
+        resolve_git_write_target(
+            "/p/worktrees/task",
+            Some("/p/worktrees/task/web"),
+            Some(&set),
+            None
+        ),
+        "/p/worktrees/task/web"
+    );
+}
+
 /// 选中的仓库已经不在发现结果里（删了 / 换了项目）就回退到项目根，
 /// 不能拿着一个不存在的路径继续跑 git。
 #[test]

@@ -31,6 +31,7 @@ pub(crate) enum SidebarItem {
     Runtime(RuntimeKey),
     /// 分组行：项目，或按状态、时间分组时的那一组。
     Group(ProjectRef),
+    Worktree(ProjectRef, String),
     /// 一个会话（`ui_id`）。
     Session(u64),
     /// 分屏会话里的一个分屏（会话 `ui_id`、分屏视图）。
@@ -61,9 +62,12 @@ pub(crate) fn parent_index(items: &[SidebarItem], ix: usize) -> Option<usize> {
     for (at, above) in items[..ix].iter().enumerate().rev() {
         match (item, above) {
             (Conversation(_), ConversationGroup)
-            | (Session(_) | Pane(..), Group(_))
+            | (Session(_) | Pane(..), Group(_) | Worktree(..))
+            | (Worktree(..), Group(_))
             | (Group(_), Runtime(_)) => return Some(at),
-            (Group(_) | Session(_) | Pane(..), ConversationGroup | Runtime(_)) => return None,
+            (Group(_) | Worktree(..) | Session(_) | Pane(..), ConversationGroup | Runtime(_)) => {
+                return None;
+            }
             _ => {}
         }
     }
@@ -133,11 +137,20 @@ impl Workspace {
                 if self.sidebar_grouping == SidebarGrouping::Project {
                     let is_active = active_project.as_ref().is_some_and(|active| {
                         active.runtime == group.runtime
-                            && crate::sidebar_order::same_project_root(&group.root, &active.root)
+                            && crate::sidebar_order::same_project_root(
+                                &group.root,
+                                &self.context_project_ref(active, cx).root,
+                            )
                     });
                     if !crate::sidebar_order::sidebar_empty_project_visible(
                         self.sidebar_hide_empty_projects,
-                        group.sessions.len(),
+                        group.sessions.len()
+                            + usize::from(space.worksets.iter().any(|workset| {
+                                crate::sidebar_order::same_project_root(
+                                    &workset.project_root,
+                                    &group.root,
+                                )
+                            })),
                         self.is_project_pinned(&project),
                         is_active,
                     ) {
@@ -145,12 +158,27 @@ impl Workspace {
                     }
                 }
                 if self.sidebar_grouping != SidebarGrouping::None {
-                    items.push((SidebarItem::Group(project), group.label.clone()));
+                    items.push((SidebarItem::Group(project.clone()), group.label.clone()));
                 }
                 if space.collapsed_projects.contains(&group.root) {
                     continue;
                 }
-                for &ix in &group.sessions {
+                for row in super::workspaces::rows_for_group(self, group) {
+                    let ix = match row {
+                        super::workspaces::ProjectSessionRow::Worktree(workset) => {
+                            items.push((
+                                SidebarItem::Worktree(project.clone(), workset.id.clone()),
+                                workset.task.clone(),
+                            ));
+                            continue;
+                        }
+                        super::workspaces::ProjectSessionRow::Session { index, workset_id } => {
+                            if workset_id.is_some_and(|id| space.collapsed_worksets.contains(id)) {
+                                continue;
+                            }
+                            index
+                        }
+                    };
                     let session = &self.sessions[ix];
                     if session.pane_count() <= 1 {
                         items.push((SidebarItem::Session(session.ui_id), session.title(cx)));
@@ -333,6 +361,10 @@ impl Workspace {
                     self.toggle_sidebar_container(&cursor, cx);
                 }
             }
+            SidebarItem::Worktree(project, id) => {
+                self.select_worktree(project, id, window, cx);
+                self.toggle_worktree_collapsed(project, id, cx);
+            }
             container => {
                 if self.sidebar_container_open(container, cx).is_some() {
                     self.toggle_sidebar_container(container, cx);
@@ -388,6 +420,13 @@ impl Workspace {
                     .is_some_and(|space| space.collapsed_projects.contains(&project.root));
                 has_sessions.then_some(!collapsed)
             }
+            SidebarItem::Worktree(project, id) => self.space(&project.runtime).and_then(|space| {
+                space
+                    .worksets
+                    .iter()
+                    .any(|workset| &workset.id == id)
+                    .then_some(!space.collapsed_worksets.contains(id))
+            }),
             _ => None,
         }
     }
@@ -400,6 +439,7 @@ impl Workspace {
             }
             SidebarItem::Runtime(key) => self.toggle_runtime_fold(key, cx),
             SidebarItem::Group(project) => self.toggle_project_collapsed(project, cx),
+            SidebarItem::Worktree(project, id) => self.toggle_worktree_collapsed(project, id, cx),
             _ => {}
         }
     }
@@ -444,6 +484,30 @@ mod tests {
             None,
             "没有机器分段时项目行是顶层，不能回到「对话」"
         );
+    }
+
+    #[test]
+    fn worktree_navigation_keeps_sessions_under_their_task() {
+        let project = ProjectRef {
+            runtime: RuntimeKey::Local,
+            root: "/a".into(),
+        };
+        let items = vec![
+            group("/a"),
+            SidebarItem::Session(1),
+            SidebarItem::Worktree(project.clone(), "first".into()),
+            SidebarItem::Session(2),
+            SidebarItem::Worktree(project, "second".into()),
+            SidebarItem::Session(3),
+            group("/b"),
+            SidebarItem::Session(4),
+        ];
+        assert_eq!(parent_index(&items, 1), Some(0));
+        assert_eq!(parent_index(&items, 2), Some(0));
+        assert_eq!(parent_index(&items, 3), Some(2));
+        assert_eq!(parent_index(&items, 4), Some(0));
+        assert_eq!(parent_index(&items, 5), Some(4));
+        assert_eq!(parent_index(&items, 7), Some(6));
     }
 
     #[test]

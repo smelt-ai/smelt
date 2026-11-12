@@ -342,12 +342,49 @@ impl Workspace {
     /// 发现比 status 稳定得多（新增/删除一个仓库是低频事件），所以 TTL 取 15s，
     /// 而不是跟 status 一样 1.5s——它要扫目录还要跑多次 rev-parse，往返成本高。
     pub fn ensure_git_repos(&mut self, project_root: ProjectRef, cx: &mut Context<Self>) {
+        let style = crate::runtimes::path_style(&project_root.runtime, cx);
+        let task_repos = self
+            .space(&project_root.runtime)
+            .and_then(|space| {
+                space.worksets.iter().find(|workset| {
+                    style.clean(&workset.task_root(style)) == style.clean(&project_root.root)
+                })
+            })
+            .map(|workset| {
+                workset
+                    .repositories
+                    .iter()
+                    .map(|repository| DiscoveredRepo {
+                        root: repository.worktree.clone(),
+                        rel_path: repository.name.clone(),
+                        kind: RepoKind::Nested,
+                    })
+                    .collect::<Vec<_>>()
+            });
+        if let Some(repos) = task_repos.as_ref()
+            && self
+                .git_repos
+                .get(&project_root)
+                .is_none_or(|(_, set)| &set.repos != repos)
+        {
+            self.git_repos.insert(
+                project_root.clone(),
+                (
+                    Instant::now(),
+                    RepoSet {
+                        repos: repos.clone(),
+                        truncated: false,
+                    },
+                ),
+            );
+        }
         let fresh = self
             .git_repos
             .get(&project_root)
             .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(15));
         let client = crate::runtime_call::target(&project_root.runtime, cx);
-        if !fresh
+        if task_repos.is_none()
+            && !fresh
             && !self.git_repos_inflight.contains(&project_root)
             && let Ok(client) = client
         {
@@ -426,23 +463,36 @@ impl Workspace {
     /// “子仓改动能暂存却提交不出去”的根因。
     pub fn git_write_target(&self, cx: &mut Context<Self>) -> Option<ProjectRef> {
         let project_root = self.active_project_ref(cx)?;
-        Some(self.active_git_repo_root(&project_root))
+        Some(self.active_git_repo_root(&project_root, cx))
     }
 
     /// 当前写操作（提交/推送/分支）的目标仓库根。
     ///
-    /// 选中的仓库已经不在发现结果里（删了、或换了项目）就回退到项目根，
-    /// 不能拿着一个不存在的路径去跑 git。
-    pub fn active_git_repo_root(&self, project_root: &ProjectRef) -> ProjectRef {
+    /// 选中的仓库失效时回退到有效仓库；任务根不是仓库，不能作为 Git 写入目标。
+    pub fn active_git_repo_root(&self, project_root: &ProjectRef, cx: &App) -> ProjectRef {
         // 没选过就落在第一个有改动的仓库上。不把这个落点写进 `active_git_repo`：
         // 写进去等于替用户做了选择，那个仓库提交干净之后就再也不会挪窝，
         // 别的仓库有改动也看不到 diff 预览。
-        let fallback = self.first_repo_with_changes(project_root);
+        let style = crate::runtimes::path_style(&project_root.runtime, cx);
+        let fallback = self.first_repo_with_changes(project_root).or_else(|| {
+            self.space(&project_root.runtime)?
+                .worksets
+                .iter()
+                .find(|workset| {
+                    style.clean(&workset.task_root(style)) == style.clean(&project_root.root)
+                })?
+                .repositories
+                .first()
+                .map(|repository| project_root.at(repository.worktree.clone()))
+        });
         // 选过的仓库在别的机器上（换了项目）就当没选过。
         let selected = self
             .active_git_repo
             .as_ref()
-            .filter(|repo| repo.runtime == project_root.runtime)
+            .filter(|repo| {
+                repo.runtime == project_root.runtime
+                    && style.starts_with(&repo.root, &project_root.root)
+            })
             .map(|repo| repo.root.as_str());
         project_root.at(resolve_git_write_target(
             &project_root.root,
@@ -610,7 +660,7 @@ impl Workspace {
             return;
         };
         // 预览与历史都跟随当前提交目标仓库，而不是恒为项目根。
-        let root = self.active_git_repo_root(&project_root);
+        let root = self.active_git_repo_root(&project_root, cx);
         // diff 预览属于某个仓库的文件。它跟当前仓库对不上就得丢掉重开——
         // 切了项目、或提交完自动落到下一个有改动的仓库，都会走到这里；
         // 不丢的话右侧会一直停在上一个仓库的 diff 上。

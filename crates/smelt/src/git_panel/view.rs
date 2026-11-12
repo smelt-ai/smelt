@@ -279,7 +279,7 @@ impl Workspace {
         // 不是项目根的。否则在子仓上提交时，头部会显示另一个仓库的分支与领先/落后。
         let root = project.root.clone();
         let style = crate::runtimes::path_style(&project.runtime, cx);
-        let active_repo = self.active_git_repo_root(&project);
+        let active_repo = self.active_git_repo_root(&project, cx);
         let status = self.git_status.get(&active_repo).map(|(_, d)| d);
         let status_refreshing = self.git_status_inflight.contains(&active_repo);
         let status_failure_count = self

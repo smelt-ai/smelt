@@ -11,10 +11,10 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
-use smelt_ui::truncated_line::truncated_line;
 use smelt_runtime_client::protocol::workspace::{
     BrowseDirsParams, BrowseDirsResult, WorkspaceBrowseDirsCall,
 };
+use smelt_ui::truncated_line::truncated_line;
 
 use crate::{Workspace, ui_theme};
 
@@ -23,8 +23,13 @@ use crate::{Workspace, ui_theme};
 pub(crate) enum DirPickerPurpose {
     /// 「打开项目」：选一个目录。
     OpenProject,
+    ProjectRepository {
+        id: u64,
+    },
     /// 给智能体绑定参考目录：可以多选。
-    AgentContextFolders { agent_id: String },
+    AgentContextFolders {
+        agent_id: String,
+    },
     /// 导入插件：技能是目录，扩展可以是单个文件。
     PluginImport {
         kind: smelt_model::pi_plugin_catalog::PiPluginKind,
@@ -35,6 +40,7 @@ impl DirPickerPurpose {
     fn title(&self) -> &'static str {
         match self {
             Self::OpenProject => "选择项目目录",
+            Self::ProjectRepository { .. } => "选择已有 Git 仓库根目录",
             Self::AgentContextFolders { .. } => "选择要绑定的目录",
             Self::PluginImport { .. } => "选择要导入的插件",
         }
@@ -48,6 +54,7 @@ impl DirPickerPurpose {
     fn confirm_label(&self) -> &'static str {
         match self {
             Self::OpenProject => "打开",
+            Self::ProjectRepository { .. } => "选择仓库",
             Self::AgentContextFolders { .. } => "绑定",
             Self::PluginImport { .. } => "导入",
         }
@@ -236,6 +243,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match purpose {
+            DirPickerPurpose::ProjectRepository { id } => {
+                if let Some(source) = chosen.into_iter().next() {
+                    self.project_repository_chosen(id, source, cx);
+                }
+            }
             DirPickerPurpose::OpenProject => {
                 if let Some(dir) = chosen.into_iter().next() {
                     self.add_project(runtime.key().clone(), dir, cx);
@@ -401,6 +413,7 @@ impl Workspace {
             (DirPickerPurpose::PluginImport { .. }, 0) => "导入当前目录",
             (DirPickerPurpose::PluginImport { .. }, _) => "导入所选文件",
             (DirPickerPurpose::OpenProject, _) => "打开当前目录",
+            (DirPickerPurpose::ProjectRepository { .. }, _) => "选择当前仓库目录",
         };
         let content = v_flex()
             .child(Self::modal_title(
