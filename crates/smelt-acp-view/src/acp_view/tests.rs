@@ -6,7 +6,7 @@ use super::{
     LoadedSkillsSnapshot, OwnerIdCache, ProcessGroupInfo, RECONNECT_STABLE_AFTER,
     RESTORED_ENTRY_HEIGHT_HINT_PX, ReconnectBudget, TurnOutcomeAction, ViewHistoryIdentity,
     append_prompt_text, apply_pending_config_selection, background_task_elapsed,
-    background_task_one_line, background_task_output_lines, background_task_summary,
+    background_task_one_line, background_task_summary,
     build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
     build_tool_image_parts, cached_diff_stats, can_load_older_history, classify_attached_paths,
     compact_token_count, compact_tool_headline, compact_tool_run_label,
@@ -3077,7 +3077,7 @@ fn background_task_elapsed_counts_from_the_start() {
 }
 
 #[test]
-fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
+fn background_task_summary_counts_running_tasks() {
     let running = BackgroundTaskView {
         id: "bg-1".into(),
         title: "测试".into(),
@@ -3101,14 +3101,6 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
         ["bg-1"]
     );
     assert!(running_background_tasks(&[done]).is_empty());
-    let output = (1..=12)
-        .map(|n| n.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        background_task_output_lines(&output),
-        ["5", "6", "7", "8", "9", "10", "11", "12"]
-    );
     let command = "git commit -m \"$(cat <<'EOF'\nfeat: 补上目录\n\n侧栏新对话\nEOF\n)\"";
     assert_eq!(
         background_task_one_line(command),
