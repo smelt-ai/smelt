@@ -59,6 +59,7 @@ mod terminal;
 mod terminal_images;
 mod terminal_view;
 mod workspace_attention;
+mod workspace_commands;
 mod workspace_directory;
 mod workspace_frame;
 mod workspace_layout;
@@ -206,38 +207,18 @@ impl WorkspaceDirectoriesGlobal {
     }
 }
 
-// Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
-// 工作区快捷键也走 Action：键位在 `keymap`，处理在 Workspace 根节点。
+// 工作台级的动作都是命令（见 `workspace_commands`），快捷键和菜单绑 `RunCommand`。这里只剩
+// 视图里面、意思随焦点变的键，键位在 `keymap`，处理在各自的视图上。
 // 不绑 `None`——无 context 的键位和最内层同深度，后注册会盖过 Input。
 gpui::actions!(
     smelt,
     [
-        Quit,
-        OpenSettings,
-        CheckForUpdate,
-        ReportIssue,
-        OpenDocs,
-        SendSelectionToTerminal,
-        PrevSession,
-        NextSession,
-        NewConversation,
-        ToggleCommandPalette,
-        CyclePanePrev,
-        CyclePaneNext,
-        SplitBeside,
-        SplitBelow,
-        ClosePane,
-        SaveFile,
-        ToggleDebugHud,
-        NextHunk,
-        PrevHunk,
         DismissWorkspace,
         FileTreeMoveUp,
         FileTreeMoveDown,
         FileTreeMoveLeft,
         FileTreeMoveRight,
         FileTreeActivate,
-        FocusSidebar,
         SidebarUp,
         SidebarDown,
         SidebarCollapse,
@@ -247,24 +228,6 @@ gpui::actions!(
         CloseSettingsWindow,
     ]
 );
-
-/// Cmd+1…9：按侧栏视觉顺序激活第 N 个会话（0 起）。
-#[derive(Clone, PartialEq, Debug, gpui::Action)]
-#[action(namespace = smelt, no_json)]
-pub struct ActivateSession {
-    pub index: usize,
-}
-
-/// 命令面板里的一个可执行动作。
-#[derive(Clone)]
-enum Cmd {
-    NewTab,
-    OpenProject,
-    CloseTab,
-    NextTab,
-    PrevTab,
-    SwitchTab(usize),
-}
 
 /// 按本地日历把 unix 秒归入「今天 / 昨天 / 本周 / 更早」。
 fn last_updated_bucket(timestamp: u64, now: chrono::DateTime<Local>) -> usize {
@@ -2675,6 +2638,8 @@ impl Workspace {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 自带命令先于插件登记：出厂键位撞了先登记的留着，自带的键不让插件抢走。
+        workspace_commands::register(cx.weak_entity(), cx);
         // 插件 tab 必须先于存档读取挂好：存档里的 tab 以插件 id 记录，
         // 注册表为空时会降级成 Files，用户上次停在插件面板就再也回不去。
         plugins::mount_all(window, cx);
@@ -3232,7 +3197,7 @@ impl Render for Workspace {
         let shell_padding = ui_theme::shell_padding();
 
         // 壳层走界面字体（默认系统 UI）；终端/diff/代码块各自绑代码字体。
-        let frame = div()
+        div()
             .relative()
             .flex()
             .flex_col()
@@ -3250,131 +3215,15 @@ impl Render for Workspace {
                 self.files_view_visible(),
                 self.git_changes_shown(),
             ))
-            .on_action(cx.listener(|this, _: &Quit, window, cx| {
-                if this.quit_requested {
-                    return;
-                }
-                this.stop_prompt_names.clear();
-                #[cfg(any(target_os = "macos", windows))]
-                if !matches!(this.update_status, updater::UpdateStatus::Applying { .. })
-                    && this.update_status.ready_update().is_some()
+            // 快捷键、应用菜单、右键菜单执行命令都走这里，见 `workspace_commands`。
+            // 命令眼下不适用（`Pass`）就交给下一条绑定。
+            .on_action(|action: &smelt_plugin_api::RunCommand, window, cx| {
+                if smelt_plugin_api::invoke(&action.command, &action.args, window, cx)
+                    == smelt_plugin_api::Handled::Pass
                 {
-                    // 有待装更新时退出会换包，macOS 还会停掉守护。没有进行中的会话、或者
-                    // 不停守护，就直接走；否则必须先确认，不能把正在输出的对话静默杀掉。
-                    let names = this.busy_work_names(cx);
-                    if !updater::INSTALL_STOPS_LOCAL_DAEMON
-                        || !daemon_restart_prompt::should_confirm(&names)
-                    {
-                        if let Some(update) = this.update_status.ready_update().cloned() {
-                            this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
-                        }
-                        return;
-                    }
-                    this.stop_prompt_names = names;
-                }
-                this.begin_main_modal_focus(window, cx);
-                this.show_quit_confirm = true;
-                cx.notify();
-            }))
-            // Cmd+, / 应用菜单「设置…」：跟侧栏「设置」同一个入口，见 `open_settings`。
-            .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| {
-                this.open_settings(cx);
-            }))
-            // Cmd+↑ / Cmd+↓：上/下一个会话（按侧栏视觉顺序）。
-            .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
-                this.cycle_session(-1, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NextSession, window, cx| {
-                this.cycle_session(1, window, cx);
-            }));
-        // 应用菜单「检查更新…」：顺手发起一次检查，再把设置窗口开到「更新」页看进度。
-        // 更新器只在 macOS 上存在（设计文档 D4）。
-        #[cfg(target_os = "macos")]
-        let frame = frame.on_action(cx.listener(|this, _: &CheckForUpdate, _window, cx| {
-            if this.update_status.can_check() || this.update_status.can_retry_recovery() {
-                this.check_or_recover_update(false, cx);
-            }
-            this.open_settings_section(settings::SettingsSection::app_update(), cx);
-        }));
-        // 应用菜单「帮助」：反馈渠道和帮助文档，链接打包时可换（见 settings::FEEDBACK_URL）。
-        frame.on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
-                cx.open_url(settings::FEEDBACK_URL);
-            }))
-            .on_action(cx.listener(|_this, _: &OpenDocs, _window, cx| {
-                cx.open_url(settings::DOCS_URL);
-            }))
-            // 文件内容视图右键菜单里的「发送选中内容到会话」，见 send_open_file_selection。
-            .on_action(
-                cx.listener(|this, _: &SendSelectionToTerminal, window, cx| {
-                    this.send_open_file_selection(window, cx);
-                }),
-            )
-            .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
-                this.focus_sidebar(window, cx);
-            }))
-            // ⌘N：跟侧栏最顶的「新对话」同一个动作。
-            .on_action(cx.listener(|this, _: &NewConversation, window, cx| {
-                this.begin_new_conversation(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
-                if this.palette.is_some() {
-                    this.close_palette(window, cx);
-                } else {
-                    this.open_palette(window, cx);
-                }
-            }))
-            // 切当前会话内的活动 pane（分屏）。编辑器里的 Outdent/Indent 绑在
-            // 更深的 Input 上，焦点在输入框时由它们接手。
-            .on_action(cx.listener(|this, _: &CyclePanePrev, window, cx| {
-                this.cycle_pane(-1, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &CyclePaneNext, window, cx| {
-                this.cycle_pane(1, window, cx);
-            }))
-            // Cmd+1~9：按侧栏视觉顺序（各项目分组依次铺平）跳到第 N 个会话。
-            .on_action(cx.listener(|this, action: &ActivateSession, window, cx| {
-                let visible = this.sidebar_session_order(cx);
-                if let Some(&ix) = visible.get(action.index) {
-                    this.activate(ix, window, cx);
-                }
-            }))
-            // Cmd+D 右侧并排 / Cmd+Shift+D 下方堆叠。
-            .on_action(cx.listener(|this, _: &SplitBeside, _window, cx| {
-                this.split_active(Axis::Horizontal, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SplitBelow, _window, cx| {
-                this.split_active(Axis::Vertical, cx);
-            }))
-            // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）。
-            .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
-                this.close_active(window, cx);
-            }))
-            // Cmd+S：保存 Files 里打开的文件。键位只在 Files context 上，两种显示方式都算。
-            .on_action(cx.listener(|this, _: &SaveFile, _window, cx| {
-                this.save_open_file(cx);
-            }))
-            // Cmd+Shift+F 切换调试 HUD（帧耗时、GPU/CPU/内存）。
-            // 编辑器把同一组合键绑成 Replace，更深的 Input 优先。
-            .on_action(cx.listener(|this, _: &ToggleDebugHud, _window, cx| {
-                this.debug_hud = !this.debug_hud;
-                cx.notify();
-            }))
-            // F7 / Shift+F7：改动块之间跳。终端网格会把这两键编码进 PTY，
-            // 网格聚焦时让出，交给终端自己的 on_key_down。
-            .on_action(cx.listener(|this, _: &NextHunk, window, cx| {
-                if this.terminal_grid_focused(window, cx) {
                     cx.propagate();
-                    return;
                 }
-                this.jump_hunk(true, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PrevHunk, window, cx| {
-                if this.terminal_grid_focused(window, cx) {
-                    cx.propagate();
-                    return;
-                }
-                this.jump_hunk(false, cx);
-            }))
+            })
             // Esc：先关工作区弹层；没有弹层时还原放大的面板组。
             // 终端网格聚焦时 Esc 属于 PTY（vim 等），不还原。
             .on_action(cx.listener(|this, _: &DismissWorkspace, window, cx| {
@@ -3817,9 +3666,6 @@ fn main() {
                 ),
             ])
             .expect("加载内嵌字体失败");
-        // 快捷键（出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。
-        keymap::init(cx);
-
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
         // 主题先登记再恢复外观，插件主题在首帧前即可生效。
@@ -3926,6 +3772,9 @@ fn main() {
         runtimes::start_runtime_hub(cx);
         // 插件要读机器列表，在 RuntimeHub 之后、开主窗口之前装。
         plugin_host::install(current_ws.clone(), cx);
+        // 快捷键（命令的出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。要订阅宿主事件，
+        // 在插件宿主之后装；命令随后由工作台和插件登记，登记一次重装一次键表。
+        keymap::init(cx);
         // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求这些投影
         // 目前只认本机；会话状态、项目文件变化、智能体记忆变化各运行时都有。
         let runtime_events::RuntimeEventReceivers {

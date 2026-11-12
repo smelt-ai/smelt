@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 9;
+pub(crate) const SCHEMA_VERSION: u32 = 10;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -144,7 +144,7 @@ CREATE TABLE sidebar_conversation_order (
   PRIMARY KEY (runtime_id, conversation_id)
 ) WITHOUT ROWID;
 CREATE TABLE key_binding (
-  action_id TEXT PRIMARY KEY,
+  command TEXT PRIMARY KEY,
   keystroke TEXT
 ) WITHOUT ROWID;
 ";
@@ -291,6 +291,33 @@ CREATE TABLE workspace_layout_state (
 ) WITHOUT ROWID;
 ";
 
+/// v10：快捷键绑的是插件可登记的命令（`<来源>/<名字>`），不再是写死的动作名。旧的
+/// 14 个动作名换成对应的命令 id；别的行是早已下线的动作，留着也用不上，删掉。
+const MIGRATE_V9_TO_V10: &str = "
+ALTER TABLE key_binding RENAME COLUMN action_id TO command;
+DELETE FROM key_binding WHERE command NOT IN (
+  'open_settings', 'command_palette', 'new_conversation', 'focus_sidebar', 'prev_session',
+  'next_session', 'prev_pane', 'next_pane', 'split_beside', 'split_below', 'close_pane',
+  'save_file', 'prev_hunk', 'next_hunk'
+);
+UPDATE key_binding SET command = CASE command
+  WHEN 'open_settings' THEN 'smelt.app/settings'
+  WHEN 'command_palette' THEN 'smelt.palette/toggle'
+  WHEN 'new_conversation' THEN 'smelt.sessions/new-conversation'
+  WHEN 'focus_sidebar' THEN 'smelt.sessions/focus-list'
+  WHEN 'prev_session' THEN 'smelt.sessions/prev'
+  WHEN 'next_session' THEN 'smelt.sessions/next'
+  WHEN 'prev_pane' THEN 'smelt.stage/prev-pane'
+  WHEN 'next_pane' THEN 'smelt.stage/next-pane'
+  WHEN 'split_beside' THEN 'smelt.stage/split-right'
+  WHEN 'split_below' THEN 'smelt.stage/split-down'
+  WHEN 'close_pane' THEN 'smelt.stage/close-pane'
+  WHEN 'save_file' THEN 'smelt.files/save'
+  WHEN 'prev_hunk' THEN 'smelt.git/prev-hunk'
+  WHEN 'next_hunk' THEN 'smelt.git/next-hunk'
+END;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -344,7 +371,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7 | 8 => {}
+        7..=9 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
@@ -355,6 +382,11 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=8).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V8_TO_V9)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=9).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V9_TO_V10)
             .map_err(|error| error.to_string())?;
     }
     transaction
