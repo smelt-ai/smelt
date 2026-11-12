@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use api::model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED;
 use api::serde_json;
 use api::ui::Button;
 use gpui::prelude::FluentBuilder;
@@ -31,7 +32,7 @@ mod state;
 use config::PiConfigSlot;
 use state::*;
 
-pub const VIEW_ID: &str = "capabilities";
+const VIEW_ID: &str = "capabilities";
 
 /// 宿主启动时调一次。
 pub fn register(cx: &mut App) {
@@ -41,6 +42,7 @@ pub fn register(cx: &mut App) {
             title: "能力库".into(),
             icon: IconName::LayoutDashboard.path(),
             per_machine: true,
+            draws_top_bar: false,
             build: Rc::new(|_window, cx| {
                 Rc::new(cx.new(CapabilitiesPage::new)) as Rc<dyn ViewHandle>
             }),
@@ -157,17 +159,15 @@ impl CapabilitiesPage {
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
         match event {
-            // 断开期间可能错过推送，重新连上和收到变化一样重读。
-            HostEvent::PiConfigChanged(machine) | HostEvent::Reconnected(machine)
-                if *machine == self.machine =>
+            HostEvent::RuntimeTopic { machine, topic }
+                if *machine == self.machine && topic == CORE_TOPIC_PI_CONFIG_CHANGED =>
             {
-                self.refresh_pi_library(cx);
-                // 删插件时运行时会顺带清掉智能体的勾选。
-                if self.tab == CapabilitiesTab::Plugins {
-                    self.refresh_plugin_users(cx);
-                }
+                self.on_pi_config_changed(cx);
             }
-            HostEvent::PiConfigChanged(_) | HostEvent::Reconnected(_) => {}
+            HostEvent::Reconnected(machine) if *machine == self.machine => {
+                self.on_pi_config_changed(cx);
+            }
+            HostEvent::RuntimeTopic { .. } | HostEvent::Reconnected(_) => {}
             HostEvent::MachinesChanged => {
                 // 在配的那台远程机器已经移除时，回到本机。
                 if api::host(cx).client(&self.machine, cx).is_none() {
@@ -178,6 +178,15 @@ impl CapabilitiesPage {
             HostEvent::ActiveProjectChanged
             | HostEvent::ViewsChanged
             | HostEvent::ThemesChanged => {}
+        }
+    }
+
+    /// 正在配的那台机器的 Pi 配置变了，或者重新连上（断开期间可能错过推送）：重读。
+    fn on_pi_config_changed(&mut self, cx: &mut Context<Self>) {
+        self.refresh_pi_library(cx);
+        // 删插件时运行时会顺带清掉智能体的勾选。
+        if self.tab == CapabilitiesTab::Plugins {
+            self.refresh_plugin_users(cx);
         }
     }
 

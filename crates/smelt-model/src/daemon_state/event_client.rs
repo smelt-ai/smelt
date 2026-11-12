@@ -8,7 +8,7 @@ use std::fmt;
 
 use smelt_event_protocol::{
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
-    CORE_TOPIC_APPEARANCE_APPLY_REQUESTED, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, CORE_TOPIC_AUTOMATIONS_CHANGED,
     CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_PROJECT_CHANGED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_TERMINAL_NOTIFICATION,
     CORE_TOPIC_TERMINAL_PROGRESS, CORE_TOPIC_WORKSPACE_CHANGED, ConversationWakeRequested,
@@ -237,7 +237,7 @@ impl SubscriptionShape {
             ),
             (
                 self.appearance_requests,
-                CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
+                CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
             ),
             (self.project_changes, CORE_TOPIC_PROJECT_CHANGED),
             (
@@ -528,11 +528,11 @@ impl DaemonStateEventClient {
                     progress: changed.progress,
                 }))
             }
-            CORE_TOPIC_APPEARANCE_APPLY_REQUESTED if self.shape.appearance_requests => {
-                let request: smelt_event_protocol::AppearanceApplyRequested =
+            // v7 核心话题，原样解成旧事件；带回执的 `appearance.apply_requested` 不进核心订阅。
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED if self.shape.appearance_requests => {
+                let request: smelt_event_protocol::AppearanceChangeRequested =
                     decode_payload(payload, topic)?;
-                Ok(Some(DaemonStateEvent::AppearanceApplyRequested {
-                    request_id: request.request_id,
+                Ok(Some(DaemonStateEvent::AppearanceChangeRequested {
                     settings: request.settings,
                 }))
             }
@@ -630,9 +630,9 @@ fn replacement_projection_topic(topic: &str) -> bool {
     )
 }
 
-/// 单播请求没有快照、运行时也不重发，等快照期间（首次连上、lag 恢复）丢了就再也收不到。
+/// 一次性请求没有快照、运行时也不重发，等快照期间（首次连上、lag 恢复）丢了就再也收不到。
 fn unicast_request_topic(topic: &str) -> bool {
-    topic == CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+    topic == CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED
 }
 
 fn decode_payload<T: serde::de::DeserializeOwned>(
@@ -912,7 +912,7 @@ mod tests {
         assert!(
             topics
                 .iter()
-                .any(|topic| topic == CORE_TOPIC_APPEARANCE_APPLY_REQUESTED),
+                .any(|topic| topic == CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED),
             "外观归桌面端，CLI 发来的外观修改只能交给它"
         );
         assert!(
@@ -932,6 +932,43 @@ mod tests {
             second.handshake().request.subscription.id
         );
         assert!(line["auth"].get("capabilities").is_none());
+    }
+
+    #[test]
+    fn desktop_core_subscription_remains_compatible_with_v7_runtimes() {
+        let client = desktop_client();
+        let line: serde_json::Value =
+            serde_json::from_str(client.request_line().unwrap().trim()).unwrap();
+        assert_eq!(line["request"]["protocol"]["max"], 7);
+        let topics = line["request"]["subscription"]["topics"]
+            .as_array()
+            .unwrap();
+        assert!(
+            topics
+                .iter()
+                .any(|topic| topic == "appearance.change_requested")
+        );
+        assert!(
+            topics
+                .iter()
+                .all(|topic| topic != "appearance.apply_requested")
+        );
+    }
+
+    /// 旧 v7 外观事件的载荷只有 `settings`，解成独立的旧变体。
+    #[test]
+    fn legacy_v7_appearance_event_decodes_to_change_requested() {
+        let mut client = desktop_client();
+        let event = client
+            .decode_message(event_message(
+                "appearance.change_requested",
+                serde_json::json!({ "settings": { "theme": "dark" } }),
+            ))
+            .unwrap();
+        assert!(matches!(
+            event,
+            Some(DaemonStateEvent::AppearanceChangeRequested { .. })
+        ));
     }
 
     #[test]
@@ -962,7 +999,7 @@ mod tests {
         );
         for request in [
             CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
-            CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
             CORE_TOPIC_PROJECT_CHANGED,
         ] {
             assert!(
@@ -1257,25 +1294,21 @@ mod tests {
 
     fn appearance_request_message() -> SubscribeMessage<serde_json::Value> {
         event_message(
-            CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
-            serde_json::json!({ "request_id": "request-1", "settings": { "theme": "dark" } }),
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+            serde_json::json!({ "settings": { "theme": "dark" } }),
         )
     }
 
     fn assert_appearance_request(event: Option<DaemonStateEvent>) {
         match event {
-            Some(DaemonStateEvent::AppearanceApplyRequested {
-                request_id,
-                settings,
-            }) => {
-                assert_eq!(request_id, "request-1");
+            Some(DaemonStateEvent::AppearanceChangeRequested { settings }) => {
                 assert_eq!(settings.get("theme"), Some(&serde_json::json!("dark")));
             }
             _ => panic!("expected appearance request"),
         }
     }
 
-    /// 外观请求是单播的，没有快照也不重发：等首批快照期间收到也要交出去。
+    /// 外观请求是一次性的，没有快照也不重发：等首批快照期间收到也要交出去。
     #[test]
     fn appearance_request_is_delivered_while_initial_snapshots_are_pending() {
         let mut client = desktop_client();

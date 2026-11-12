@@ -309,7 +309,6 @@ struct BridgeState {
     authorization: SystemNotificationAuthorization,
     settings_check_in_flight: bool,
     authorization_request_in_flight: bool,
-    app_authorization_requested: bool,
     denial_reported: bool,
     queue: NotificationQueue,
     last_error: Option<String>,
@@ -317,17 +316,6 @@ struct BridgeState {
 }
 
 impl BridgeState {
-    fn enqueue_app_notification(&mut self, subtitle: &str, body: &str) {
-        if self.authorization == SystemNotificationAuthorization::Authorized
-            && !self.queue.retry_blocked
-        {
-            self.queue.enqueue_app(subtitle, body);
-        } else {
-            // 不保存无法立即投递的应用通知，但仍需触发首次授权请求。
-            self.app_authorization_requested = true;
-        }
-    }
-
     fn record_error(&mut self, error: String) {
         self.last_error = Some(error.clone());
         if self.errors.len() >= 32 {
@@ -500,10 +488,7 @@ fn read_settings() {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.settings_check_in_flight = false;
             state.authorization = authorization;
-            let had_pending = state.queue.pending_count() > 0 || state.app_authorization_requested;
-            if authorization != SystemNotificationAuthorization::NotDetermined {
-                state.app_authorization_requested = false;
-            }
+            let had_pending = state.queue.pending_count() > 0;
             if matches!(
                 authorization,
                 SystemNotificationAuthorization::Denied | SystemNotificationAuthorization::Unavailable
@@ -538,7 +523,6 @@ fn request_authorization() {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.authorization_request_in_flight = false;
-            state.app_authorization_requested = false;
             if let Some(error) = error {
                 state.authorization = SystemNotificationAuthorization::Unavailable;
                 state.queue.discard_pending_app_notifications();
@@ -637,11 +621,10 @@ pub fn sync_system_notifications() {
                     BridgeAction::CheckSettings
                 }
                 SystemNotificationAuthorization::NotDetermined
-                    if (state.queue.pending_count() > 0 || state.app_authorization_requested)
+                    if state.queue.pending_count() > 0
                         && !state.authorization_request_in_flight =>
                 {
                     state.authorization_request_in_flight = true;
-                    state.app_authorization_requested = false;
                     BridgeAction::RequestAuthorization
                 }
                 SystemNotificationAuthorization::Authorized => {
@@ -699,7 +682,9 @@ pub fn deliver_app_notification(subtitle: &str, body: &str) {
         let mut state = state()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.enqueue_app_notification(subtitle, body);
+        // 和会话通知一样先排队：权限还没查清（刚启动）或正在问人时也不丢。被拒、不可用时
+        // 查完权限会清掉排着的应用通知（[`NotificationQueue::discard_pending_app_notifications`]）。
+        state.queue.enqueue_app(subtitle, body);
         prepare_queued_notification(&mut state);
     }
     sync_system_notifications();
@@ -813,7 +798,7 @@ mod tests {
         APP_IDENTIFIER, NotificationQueue, authorization_from_settings,
         automation_from_thread_identifier, automation_notification_identifier,
         automation_run_from_identifier, automation_thread_identifier, notification_identifier,
-        session_id_from_identifier,
+        prepare_queued_notification, session_id_from_identifier,
     };
     use crate::RuntimeKey;
     use crate::status_item::SystemNotificationAuthorization;
@@ -958,26 +943,18 @@ mod tests {
     }
 
     #[test]
-    fn app_notifications_queue_only_when_delivery_is_ready() {
+    fn app_notifications_wait_for_authorization() {
+        // 启动后第一条通知常常赶在权限查清之前：排着等，查清了再发或清掉。
         let mut state = super::BridgeState::default();
-        for authorization in [
-            SystemNotificationAuthorization::Unknown,
-            SystemNotificationAuthorization::NotDetermined,
-            SystemNotificationAuthorization::Denied,
-            SystemNotificationAuthorization::Unavailable,
-        ] {
-            state.authorization = authorization;
-            state.enqueue_app_notification("提示", "操作完成");
-            assert_eq!(state.queue.pending_count(), 0);
-            assert!(state.app_authorization_requested);
-        }
-        state.authorization = SystemNotificationAuthorization::Authorized;
-        state.queue.retry_blocked = true;
-        state.enqueue_app_notification("提示", "操作完成");
-        assert_eq!(state.queue.pending_count(), 0);
-        state.queue.retry_blocked = false;
-        state.enqueue_app_notification("提示", "操作完成");
+        assert_eq!(
+            state.authorization,
+            SystemNotificationAuthorization::Unknown
+        );
+        state.queue.enqueue_app("提示", "操作完成");
+        prepare_queued_notification(&mut state);
         assert_eq!(state.queue.pending_count(), 1);
+        state.queue.discard_pending_app_notifications();
+        assert_eq!(state.queue.pending_count(), 0);
     }
 
     #[test]

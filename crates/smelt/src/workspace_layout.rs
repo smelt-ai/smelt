@@ -295,7 +295,12 @@ mod tests {
         );
         assert!(file.state.bottom_dock.is_none());
         for name in ["stage", "sessions", "files", "git", "history"] {
-            assert!(crate::builtin_views::Builtin::of(name).is_some(), "{name}");
+            assert!(
+                crate::builtin_views::Builtin::ALL
+                    .iter()
+                    .any(|builtin| builtin.id() == name),
+                "{name}"
+            );
         }
     }
 

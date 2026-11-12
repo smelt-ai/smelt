@@ -9,8 +9,8 @@ use std::io::{BufRead, BufReader, Write};
 
 /// 阻塞：连接正式 `event_subscribe`，逐行解析稳定 DTO，直到连接断开、协议错误或
 /// `emit` 返回 false（收的一方不要了）。Ephemeral 订阅不发送 ack；Lag 后只等待 daemon
-/// 的恢复 snapshots。`appearance_requests` 只有本机桌面传 true：外观请求单播给本机，
-/// 远程机器的订阅不订。
+/// 的恢复 snapshots。`appearance_requests` 只有本机桌面传 true，用于接收 v7 旧运行时的
+/// 外观广播；带回执的新外观请求使用独立订阅，不进核心订阅。
 pub fn subscribe_daemon_states_blocking(
     runtime: &smelt_runtime_client::RuntimeClient,
     appearance_requests: bool,

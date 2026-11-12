@@ -19,15 +19,17 @@ pub(crate) fn dispatch(
     params: serde_json::Value,
     event_hub: &EventHubHandle,
 ) -> Result<serde_json::Value, ControlError> {
-    let result = run(method, params, event_hub)?;
+    let result = run(method, params, event_hub);
+    // 失败的也发：一次调用可能改了一半（如删插件时勾选已清、实体没删掉），多发一次只是
+    // 让别处重读，漏发则别处一直拿着旧的。
     if changes_config(method) {
         notify_changed(event_hub);
     }
-    Ok(result)
+    result
 }
 
-/// 这次成功的调用一定改了配置。改没改要看结果的（自动模型目录、登录）不在这里，在 `run`
-/// 里各自判断。
+/// 这类调用会改配置（成功时一定改了，失败时可能改了一半）。改没改要看结果的（自动模型
+/// 目录、登录）不在这里，在 `run` 里各自判断。
 fn changes_config(method: ControlMethod) -> bool {
     matches!(
         method,

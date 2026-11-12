@@ -57,6 +57,9 @@ pub struct ViewSpec {
     /// 能针对某台机器打开：宿主给每台机器都留一个入口，从那里打开时参数带
     /// `{"machine": …}`（见 [`crate::machine_to_json`]）。
     pub per_machine: bool,
+    /// 视图自己画顶上那一条（拖窗口、给红黄绿按钮让位、标题）：单独一组时外壳不给它画
+    /// 标题带，也不让放大。画法上的事，和摆在哪无关。
+    pub draws_top_bar: bool,
     /// 第一次打开时建视图；之后一直用这一份，直到登记被替换或撤下。
     pub build: ViewBuilder,
 }
@@ -119,6 +122,11 @@ pub fn views(cx: &App) -> Vec<ViewSpec> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 这个 id 有没有登记。只读内存，render 里可以调：别的视图据此决定要不要给「去那里」的入口。
+pub fn is_registered(id: &str, cx: &App) -> bool {
+    entry(id, cx).is_some()
 }
 
 /// 已经建好的视图。只读内存，render 里取它；没建过或没登记是 `None`。

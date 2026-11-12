@@ -51,11 +51,9 @@ use std::{fmt, str::FromStr};
 /// 升版拦住它们。反过来 v7 的客户端读得了 v6 运行时：多出来的 `projection_version` 忽略，
 /// 没带的字段读成缺省。
 ///
-/// v8：外观修改改成单播加回执，核心订阅里的 `appearance.change_requested` 删掉，换成
-/// `appearance.apply_requested`（带 `request_id`）。升版后 v7 的客户端（包括手机和远程
-/// 桌面）连接 v8 运行时需要升级。最低版本不抬：只有本机桌面订新话题，本机运行时随桌面一起
-/// 发布；连远程机器的订阅不订外观请求，v6、v7 的远程运行时照样读得了。
-pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 8;
+/// 带回执的外观修改（[`CORE_TOPIC_APPEARANCE_APPLY_REQUESTED`]）加在 v7 之后，没有升版本：
+/// 它只走单独的一条订阅，核心订阅仍是 v7 的 `appearance.change_requested`。
+pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
 /// 客户端接受的最低运行时版本，见模块文档「读得了就不抬最低版本」。
 pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 6;
 
@@ -84,8 +82,12 @@ pub const CORE_TOPIC_AGENT_MEMORY_CHANGED: &str = "agent_memory.changed";
 /// 某台机器上 Pi 的配置变了（模型、凭据、MCP、插件），载荷 [`PiConfigChanged`]。不进
 /// 核心订阅，见模块文档。
 pub const CORE_TOPIC_PI_CONFIG_CHANGED: &str = "pi_config.changed";
-/// CLI / Control API 要改外观，载荷 [`AppearanceApplyRequested`]。外观归客户端，运行时校验后
-/// 单播给本机桌面的核心订阅，桌面用 [`AppearanceApplyReceipt`] 回执，不广播。
+/// v7 核心话题：CLI / Control API 要改外观，载荷 [`AppearanceChangeRequested`]。外观归客户端，
+/// 运行时只校验后转给在线的桌面端。
+pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
+/// 带回执的外观修改，载荷 [`AppearanceApplyRequested`]，桌面用 [`AppearanceApplyReceipt`]
+/// 回执。加在 v7 之后、没有升版本，所以不进核心订阅，只放在单独的一条订阅里（同
+/// [`PiConfigChanged`]），不认识该话题的旧运行时只会拒掉那一条。
 pub const CORE_TOPIC_APPEARANCE_APPLY_REQUESTED: &str = "appearance.apply_requested";
 /// 终端里的程序用 OSC 9 / 99 / 777 发了一条通知。运行时在 PTY 字节流上扫一次，
 /// 会话已有结构化 hook 事件时不发；没人连着时发生的就丢了，不补。
@@ -546,7 +548,14 @@ pub struct TerminalProgressChanged {
     pub progress: Option<TerminalProgress>,
 }
 
-/// 单播给本机桌面的外观修改；请求 id 用来关联回执。
+/// v7 话题 [`CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED`] 的载荷，形状不能动。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AppearanceChangeRequested {
+    /// 已由运行时按可脚本目录校验过的外观键值。
+    pub settings: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// 单播给本机桌面的外观修改（独立订阅）；请求 id 用来关联回执。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppearanceApplyRequested {
     pub request_id: String,
@@ -613,6 +622,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
         descriptor(
             CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
             CORE_CAPABILITY_CONVERSATION_WAKE,
+            None,
+            4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+            CORE_CAPABILITY_APPEARANCE_CONTROL,
             None,
             4 * 1024,
         )?,
@@ -940,6 +955,7 @@ mod tests {
                 1,
             ),
             (CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, None, 1),
+            (CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, None, 1),
             (CORE_TOPIC_APPEARANCE_APPLY_REQUESTED, None, 1),
             (CORE_TOPIC_PROJECT_CHANGED, None, 1),
             (CORE_TOPIC_AGENT_MEMORY_CHANGED, None, 1),
@@ -963,6 +979,19 @@ mod tests {
                 "{topic}"
             );
         }
+    }
+
+    /// v7 外观载荷的线上形状：只有 `settings`，不带 `request_id`。
+    #[test]
+    fn legacy_appearance_change_payload_keeps_v7_shape() {
+        assert_eq!(EVENT_BUS_PROTOCOL_VERSION, 7);
+        assert_eq!(
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+            "appearance.change_requested"
+        );
+        let payload = json!({ "settings": { "theme": "dark" } });
+        let request: AppearanceChangeRequested = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), payload);
     }
 
     #[test]

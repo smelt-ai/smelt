@@ -33,7 +33,7 @@ pub mod js;
 
 pub use view::{
     PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec, built_view, ensure_view,
-    register_view, unregister_view, views,
+    is_registered, register_view, unregister_view, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -65,8 +65,10 @@ pub struct PathRequest {
 /// 宿主转给插件的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
-    /// 那台机器推了 `pi_config.changed`。
-    PiConfigChanged(RuntimeKey),
+    /// 那台机器推了一条运行时话题（核心订阅以外的那些，如
+    /// [`model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED`]）。宿主只转发话题名，不解读；
+    /// 积压丢了事件时，每个话题都当作推过一次。
+    RuntimeTopic { machine: RuntimeKey, topic: String },
     /// 重新订阅上那台机器：断开期间错过的推送要自己重读。
     Reconnected(RuntimeKey),
     /// 挂着的机器变了：加了、移除了、改了名或连接状态。

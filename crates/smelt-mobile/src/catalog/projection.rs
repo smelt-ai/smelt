@@ -151,6 +151,7 @@ impl CatalogState {
             | DaemonStateEvent::AgentMemoryChanged { .. }
             | DaemonStateEvent::TerminalNotification { .. }
             | DaemonStateEvent::TerminalProgress { .. }
+            | DaemonStateEvent::AppearanceChangeRequested { .. }
             | DaemonStateEvent::AppearanceApplyRequested { .. }
             | DaemonStateEvent::Disconnected => {}
         }

@@ -2678,21 +2678,6 @@ impl Workspace {
         // 插件 tab 必须先于存档读取挂好：存档里的 tab 以插件 id 记录，
         // 注册表为空时会降级成 Files，用户上次停在插件面板就再也回不去。
         plugins::mount_all(window, cx);
-        // 插件的 `open_session`：和点系统通知一样跳到会话。推到这一轮更新结束后再进
-        // 工作台窗口：插件是在自己的事件里调它的，这时可能正嵌在别的更新里。
-        let window_handle = window.window_handle();
-        let workspace = cx.weak_entity();
-        plugins::set_session_opener(move |session_id, cx| {
-            let workspace = workspace.clone();
-            cx.defer(move |cx| {
-                let _ = cx.update_window(window_handle, |_root, window, cx| {
-                    let _ = workspace.update(cx, |workspace, cx| {
-                        workspace.request_notification_session_jump(session_id, window, cx);
-                    });
-                    window.activate_window();
-                });
-            });
-        });
         // 客户端界面状态（侧栏顺序、当前页）存在本机，同步读，窗口一次成型。
         // 项目和会话属于运行时，随订阅首帧到，到了再恢复会话（见 apply_workspace_directory）。
         let ui = load_workspace_ui();
@@ -3953,27 +3938,35 @@ fn main() {
             use smelt_app_state::provider_status_global::ProviderStatus;
             use smelt_client::daemon_state::{CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage};
             while let Ok((runtime, message)) = topic_rx.recv().await {
-                let pi_config_changed = match &message {
-                    TopicMessage::Event { topic, .. } => topic == CORE_TOPIC_PI_CONFIG_CHANGED,
-                    TopicMessage::Lagged => true,
+                let topics: Vec<String> = match message {
+                    TopicMessage::Event { topic, .. } => vec![topic],
+                    TopicMessage::Lagged => runtime_events::SEPARATE_TOPICS
+                        .iter()
+                        .map(|topic| topic.to_string())
+                        .collect(),
                 };
-                if !pi_config_changed {
-                    continue;
-                }
-                // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的 Pi 目录走。
-                if runtime == RuntimeKey::Local {
-                    cx.update(ProviderStatus::bump_pi_catalog);
-                }
-                // 删插件时运行时顺带清掉了智能体的勾选。
-                cx.update(|cx| {
-                    settings::reload_agent_host(&runtime, cx);
-                    smelt_plugin_api::emit(
-                        smelt_plugin_api::HostEvent::PiConfigChanged(runtime.clone()),
-                        cx,
-                    );
-                });
-                if let Some(ws) = current_workspace(&current_ws_for_topics) {
-                    let _ = ws.update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
+                for topic in topics {
+                    // 宿主自己（会话、智能体编辑器）还要管的 Pi 配置变化。
+                    if topic == CORE_TOPIC_PI_CONFIG_CHANGED {
+                        // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的
+                        // Pi 目录走。
+                        if runtime == RuntimeKey::Local {
+                            cx.update(ProviderStatus::bump_pi_catalog);
+                        }
+                        // 删插件时运行时顺带清掉了智能体的勾选。
+                        cx.update(|cx| settings::reload_agent_host(&runtime, cx));
+                        if let Some(ws) = current_workspace(&current_ws_for_topics) {
+                            let _ = ws
+                                .update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
+                        }
+                    }
+                    let machine = runtime.clone();
+                    cx.update(|cx| {
+                        smelt_plugin_api::emit(
+                            smelt_plugin_api::HostEvent::RuntimeTopic { machine, topic },
+                            cx,
+                        )
+                    });
                 }
             }
         })
@@ -4071,6 +4064,16 @@ fn main() {
                     cx.update(|cx| DaemonStates::set_progress(&runtime, session_id, *progress, cx));
                     continue;
                 }
+                // v7 旧运行时仍用无回执的外观广播；本机桌面继续按原协议处理。
+                if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
+                    if is_local {
+                        let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
+                        if let Err(error) = result {
+                            crate::status_item::notify_error(format!("外观修改失败：{error}"));
+                        }
+                    }
+                    continue;
+                }
                 if let terminal::DaemonStateEvent::AppearanceApplyRequested { request_id, settings } = &event {
                     if is_local {
                         let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
@@ -4149,6 +4152,7 @@ fn main() {
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
                         terminal::DaemonStateEvent::TerminalNotification { .. } => {}
@@ -4203,6 +4207,7 @@ fn main() {
                         terminal::DaemonStateEvent::Automations(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
                         terminal::DaemonStateEvent::TerminalNotification { .. } => {}

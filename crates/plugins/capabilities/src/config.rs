@@ -2,8 +2,8 @@
 //!
 //! 配置文件在运行时那台机器上，读写都走 `pi.*`（[`smelt_model::pi_service`]）。快照只给
 //! 这一页渲染读：打开页面、换机器时读一次，每次修改由运行时回带新快照。别处（另一扇窗口、
-//! 手机、命令行）经运行时改了配置，运行时推 `pi_config.changed`，宿主转成
-//! [`HostEvent::PiConfigChanged`]，正在配那台机器就重读。
+//! 手机、命令行）经运行时改了配置，运行时推 `pi_config.changed`，宿主原样转成
+//! [`HostEvent::RuntimeTopic`]，正在配那台机器就重读。
 
 use super::*;
 use api::client::RuntimeClient;

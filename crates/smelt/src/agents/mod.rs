@@ -2499,7 +2499,9 @@ fn render_agent_plugin_card(
                         .items_center()
                         .gap_1()
                         .child(refresh_button)
-                        .child(manage_button),
+                        .when(workspace::capabilities_available(cx), |row| {
+                            row.child(manage_button)
+                        }),
                 ),
         )
         .child(body)
@@ -3447,7 +3449,9 @@ fn render_agent_mcp_card(
                         .items_center()
                         .gap_1()
                         .child(refresh_button)
-                        .child(manage_button),
+                        .when(workspace::capabilities_available(cx), |row| {
+                            row.child(manage_button)
+                        }),
                 ),
         )
         .child(body)

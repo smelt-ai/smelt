@@ -3,6 +3,14 @@
 //! 页面渲染在 `view.rs` / `automation_view.rs`。字段仍由 main.rs 的 Workspace 持有。
 use super::*;
 
+/// 能力库插件登记的视图 id。宿主不依赖那个插件，只按 id 找它。
+const CAPABILITIES_VIEW: &str = "capabilities";
+
+/// 能力库装着没有：没装就不画「管理」这类去能力库的入口。只读内存。
+pub(crate) fn capabilities_available(cx: &App) -> bool {
+    smelt_plugin_api::is_registered(CAPABILITIES_VIEW, cx)
+}
+
 impl Workspace {
     pub(crate) fn activate_workspace_tab(
         &mut self,
@@ -74,9 +82,16 @@ impl Workspace {
     }
 
     /// 直接打开能力库的某个页签（`plugins`、`mcp`），比如智能体编辑器里「插件 · 管理」。
-    pub(crate) fn open_capabilities(&mut self, tab: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// 能力库是插件，按视图 id 打开；没装就什么都不做（入口在没登记时不画，见
+    /// [`capabilities_available`]）。
+    pub(crate) fn open_capabilities(
+        &mut self,
+        tab: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_page(
-            smelt_capabilities::VIEW_ID,
+            CAPABILITIES_VIEW,
             serde_json::json!({ "tab": tab }),
             window,
             cx,

@@ -6,8 +6,8 @@
 //!
 //! 插件当作可信代码，权限全部一样，和 smelt 自己一样不设限（见 `unrestricted`）。
 //! 每个插件一份自己的 Policy（应用名就是插件 id），里面装 smelt 的宿主模块：
-//! `smelt-plugin-api`（见 `smelt_plugin_api::js`，每个插件一份，模块由此知道是谁在调）、
-//! `smelt-fs`（见 `host_fs`）、`smelt-workspace`（见 `host_workspace`）。gpui-shell 按
+//! `smelt-plugin-api`（见 `smelt_plugin_api::js`，每个插件一份，模块由此知道是谁在调）和
+//! `smelt-fs`（见 `host_fs`）。gpui-shell 按
 //! 调用所在视图的 Policy 分派宿主函数，所以各插件拿到的是自己那份。挂载时把它设成默认
 //! Policy，视图带着它出生（见 `mount_all`）。插件 manifest 的 `capabilities` 里只认
 //! `network.hosts`：gpui-shell 的网络授权只能逐个列主机名，各插件声明的主机合起来授给
@@ -28,7 +28,6 @@
 //! 工作台没有包它，这条暂时用不了。
 
 mod host_fs;
-mod host_workspace;
 mod log;
 mod manage;
 mod themes;
@@ -46,9 +45,6 @@ use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
 use smelt_plugin_api::js::JsPlugin;
 use smelt_plugin_api::{self as api, PluginView, ViewHandle, ViewSpec};
-
-use host_workspace::HostContext;
-pub(crate) use host_workspace::SessionInfo;
 
 pub(crate) use log::install as install_log;
 pub(crate) use manage::{import, uninstall, user_plugin_dir};
@@ -69,10 +65,6 @@ struct Registry {
     panels: Vec<PluginPanel>,
     /// 已登记主题的插件来源，重载时整批撤下再登记。
     theme_owners: Vec<String>,
-    /// 所有插件共享的宿主上下文，`smelt-workspace.sessions()` 读它。
-    context: Rc<RefCell<HostContext>>,
-    /// `smelt-workspace.open_session` 怎么跳到会话。工作台创建时装上。
-    session_opener: Option<Rc<dyn Fn(String, &mut App)>>,
 }
 
 struct PluginPanel {
@@ -171,7 +163,6 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
         .flat_map(|plugin| declared_hosts(&plugin.root))
         .collect::<Vec<_>>();
     let capabilities = unrestricted().network_hosts(hosts);
-    let context = REGISTRY.with(|registry| registry.borrow().context.clone());
 
     let panels: Vec<PluginPanel> = found
         .into_iter()
@@ -203,7 +194,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     Ok(runtime) => {
                         // 开关挂在运行时上、加载时读，所以每个插件加载前按来源设一次。
                         runtime.set_editor_files(source.editor_files());
-                        plugin_policy(&id, &capabilities, &plugin, &context)
+                        plugin_policy(&id, &capabilities, &plugin)
                             .and_then(|policy| {
                                 // 加载时解析导入、挂载时视图拿走的都是默认 Policy。
                                 policy::set_default(policy);
@@ -238,6 +229,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     title: panel.title.clone().into(),
                     icon: gpui_kit_assets::IconName::Puzzle.path(),
                     per_machine: false,
+                    draws_top_bar: false,
                     build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
                         // 内容在挂载时已经建好；视图只建一次，第二次（登记被替换前不会有）
                         // 给一个说明。
@@ -282,7 +274,6 @@ fn plugin_policy(
     id: &str,
     capabilities: &Capabilities,
     plugin: &JsPlugin,
-    context: &Rc<RefCell<HostContext>>,
 ) -> anyhow::Result<Policy> {
     let host_error = |error: gpui_shell::HostError| anyhow::anyhow!(error.message().to_string());
     Policy::new()
@@ -290,9 +281,6 @@ fn plugin_policy(
         .with_capabilities(capabilities.clone())
         .with_host_module(plugin.module())
         .and_then(|policy| policy.with_host_module(host_fs::fs_module(Rc::new(host_fs::HostFs))))
-        .and_then(|policy| {
-            policy.with_host_module(host_workspace::workspace_module(context.clone()))
-        })
         .map_err(host_error)
 }
 
@@ -308,11 +296,8 @@ pub(crate) fn shutdown(cx: &mut App) {
             api::unregister_view(&panel.id, cx);
         }
     }
-    let (runtime, opener) = REGISTRY.with(|registry| {
-        let mut registry = registry.borrow_mut();
-        (registry.runtime.take(), registry.session_opener.take())
-    });
-    drop((runtime, opener));
+    let runtime = REGISTRY.with(|registry| registry.borrow_mut().runtime.take());
+    drop(runtime);
 }
 
 struct Found {
@@ -532,32 +517,6 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
             })
             .collect()
     })
-}
-
-/// 把工作台侧栏的会话同步给插件。只比较、写内存；内容没变时 generation 不动。
-pub(crate) fn set_sessions(sessions: Vec<SessionInfo>) {
-    REGISTRY.with(|registry| {
-        let registry = registry.borrow();
-        let mut context = registry.context.borrow_mut();
-        if context.sessions != sessions {
-            context.sessions = sessions;
-            context.sessions_generation += 1;
-        }
-    });
-}
-
-/// 插件调 `open_session` 时怎么跳到会话。跳转要用工作台窗口和 `Workspace`，
-/// 插件模块够不着，由工作台创建时装上。
-pub(crate) fn set_session_opener(opener: impl Fn(String, &mut App) + 'static) {
-    REGISTRY.with(|registry| registry.borrow_mut().session_opener = Some(Rc::new(opener)));
-}
-
-fn open_session(id: String, cx: &mut App) {
-    // 先取出来再调：跳转可能重入注册表。
-    let opener = REGISTRY.with(|registry| registry.borrow().session_opener.clone());
-    if let Some(opener) = opener {
-        opener(id, cx);
-    }
 }
 
 #[cfg(test)]

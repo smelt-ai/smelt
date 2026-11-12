@@ -310,8 +310,13 @@ pub enum DaemonStateEvent {
         session_id: String,
         progress: Option<TerminalProgress>,
     },
-    /// CLI / Control API 要改外观，已由运行时校验过，单播给本机桌面。一次性请求，不是投影；
-    /// 处理完用 `request_id` 回执。
+    /// v7 核心话题 `appearance.change_requested`：CLI / Control API 要改外观，已由运行时校验过。
+    /// 一次性请求，不是投影，没有回执。
+    AppearanceChangeRequested {
+        settings: std::collections::BTreeMap<String, serde_json::Value>,
+    },
+    /// `appearance.apply_requested`：单播给本机桌面、带回执的外观修改。不进核心订阅（加在 v7
+    /// 之后、没有升版本），只由单独的一条订阅投递；处理完用 `request_id` 回执。
     AppearanceApplyRequested {
         request_id: String,
         settings: std::collections::BTreeMap<String, serde_json::Value>,

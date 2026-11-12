@@ -24,9 +24,9 @@
 //! 别处要读运行时的（工作区目录、配置、额度、终端重连），用 [`wait_online`] 等这里探到
 //! 在线再读，不各自拨号重试。
 //!
-//! 不进核心订阅的话题（[`SEPARATE_TOPICS`]，见 `smelt_event_protocol` 模块文档）每一轮
-//! 在核心订阅之前单独订一条，核心订阅断了就关掉它，下一轮重开。运行时不认识这些话题就拒掉
-//! 那一条：记一笔日志，这一轮不再订，核心订阅照常。
+//! 不进核心订阅的话题（见 `smelt_event_protocol` 模块文档）每一轮在核心订阅之前分别
+//! 订阅，核心订阅断了就关掉，下一轮重开。运行时不认识某个话题时只拒绝那条单独订阅，
+//! 核心订阅和其他话题不受影响。本机外观回执请求也走独立订阅。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,7 +44,8 @@ pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
 pub(crate) type RuntimeTopicEvent = (RuntimeKey, TopicMessage);
 
 /// 单独订的话题。
-const SEPARATE_TOPICS: &[&str] = &[smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED];
+pub(crate) const SEPARATE_TOPICS: &[&str] =
+    &[smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED];
 
 /// 事件的接收端：核心订阅的，和单独订阅的。
 pub(crate) struct RuntimeEventReceivers {
@@ -52,7 +53,7 @@ pub(crate) struct RuntimeEventReceivers {
     pub(crate) topics: smol::channel::Receiver<RuntimeTopicEvent>,
 }
 
-/// 两条订阅的发送端，每条订阅线程一份。
+/// 核心事件和单独话题的发送端，每条订阅线程一份。
 #[derive(Clone)]
 pub(crate) struct RuntimeEventSenders {
     pub(crate) states: smol::channel::Sender<RuntimeEvent>,
@@ -281,40 +282,164 @@ pub(crate) fn start(cx: &mut App) -> RuntimeEventReceivers {
     }
 }
 
+/// 外观请求单独订阅，不让新话题进入 v7 核心订阅。丢事件时请求方会得到结果未知，
+/// 不重放可能已经执行过的操作。
+fn appearance_event(message: TopicMessage) -> Option<DaemonStateEvent> {
+    match message {
+        TopicMessage::Event { topic, payload }
+            if topic == smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED =>
+        {
+            match serde_json::from_value::<smelt_event_protocol::AppearanceApplyRequested>(payload)
+            {
+                Ok(request) => Some(DaemonStateEvent::AppearanceApplyRequested {
+                    request_id: request.request_id,
+                    settings: request.settings,
+                }),
+                Err(error) => {
+                    eprintln!("[runtime-events] 外观请求载荷无效：{error}");
+                    None
+                }
+            }
+        }
+        TopicMessage::Lagged => {
+            eprintln!("[runtime-events] 外观请求订阅积压，丢失的请求不会重放");
+            None
+        }
+        TopicMessage::Event { .. } => None,
+    }
+}
+
 /// 跟着一轮核心订阅的单独订阅：读在自己的线程里，[`Self::close`] 关掉连接并等它退出。
+///
+/// 连接自己断了（核心订阅还连着）就在线程里退避重订，订上后先交一条
+/// [`TopicMessage::Lagged`]：断开期间可能错过了推送，收的一方当作每个话题都推过一次。
+/// 运行时拒掉订阅（多半是比这些话题旧）就停，等下一轮核心订阅再试。
 struct SeparateSubscription {
-    closer: TopicSubscriptionCloser,
+    shared: Arc<SeparateShared>,
     reader: std::thread::JoinHandle<()>,
 }
 
+/// 读线程和 [`SeparateSubscription::close`] 共用。
+struct SeparateShared {
+    state: std::sync::Mutex<SeparateState>,
+    /// 关掉时叫醒退避中的读线程。
+    closed: std::sync::Condvar,
+}
+
+struct SeparateState {
+    closed: bool,
+    /// 眼下那条连接；重订后换成新的。
+    closer: Option<TopicSubscriptionCloser>,
+}
+
+impl SeparateShared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SeparateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// 连上一条单独订阅，连同关它的把手。
+fn open_topics(
+    client: &smelt_runtime_client::RuntimeClient,
+    topics: &[&'static str],
+) -> Result<(TopicSubscriptionCloser, TopicSubscription), String> {
+    TopicSubscription::open(client, topics.to_vec())
+        .and_then(|subscription| Ok((subscription.closer()?, subscription)))
+}
+
 impl SeparateSubscription {
-    /// 连不上、起不了线程就不订，记日志；下一轮核心订阅再试。
-    fn open(runtime: &Runtime, sender: smol::channel::Sender<RuntimeTopicEvent>) -> Option<Self> {
+    /// 第一次连不上、起不了线程就不订，记日志；下一轮核心订阅再试。
+    fn open(
+        runtime: &Runtime,
+        topics: Vec<&'static str>,
+        mut emit: impl FnMut(TopicMessage) -> bool + Send + 'static,
+    ) -> Option<Self> {
         let key = runtime.key().clone();
-        let opened = TopicSubscription::open(runtime.client(), SEPARATE_TOPICS.to_vec())
-            .and_then(|subscription| Ok((subscription.closer()?, subscription)));
-        let (closer, subscription) = match opened {
+        let client = runtime.client().clone();
+        let (closer, first) = match open_topics(&client, &topics) {
             Ok(opened) => opened,
             Err(error) => {
                 eprintln!("[runtime-events] {key:?} 单独订阅连不上：{error}");
                 return None;
             }
         };
+        let shared = Arc::new(SeparateShared {
+            state: std::sync::Mutex::new(SeparateState {
+                closed: false,
+                closer: Some(closer),
+            }),
+            closed: std::sync::Condvar::new(),
+        });
+        let thread_shared = Arc::clone(&shared);
         let thread_key = key.clone();
         let reader = std::thread::Builder::new()
             .name(format!("smelt-topics-{key:?}"))
             .spawn(move || {
-                let result = subscription
-                    .run(|message| sender.try_send((thread_key.clone(), message)).is_ok());
-                // 被拒多半是运行时比这些话题旧：这一轮不再订，等下一轮核心订阅。
-                if let Err(error) = result {
-                    eprintln!("[runtime-events] {thread_key:?} 单独订阅停了：{error}");
+                let shared = thread_shared;
+                let mut current = Some(first);
+                let mut attempt = 0u32;
+                loop {
+                    if let Some(subscription) = current.take() {
+                        let started = Instant::now();
+                        let mut receiver_gone = false;
+                        let result = subscription.run(|message| {
+                            let kept = emit(message);
+                            receiver_gone |= !kept;
+                            kept
+                        });
+                        if let Err(error) = result {
+                            eprintln!("[runtime-events] {thread_key:?} 单独订阅停了：{error}");
+                            return;
+                        }
+                        if receiver_gone {
+                            return;
+                        }
+                        // 连了一阵才断（运行时升级等）从首档退避。
+                        if started.elapsed() >= Duration::from_secs(5) {
+                            attempt = 0;
+                        }
+                    }
+                    // 轮询例外：只有这条订阅断了时，对端能再连不会通知我们；周期 250ms 起
+                    // 翻倍，上限 8s。关掉时由 Condvar 立刻叫醒。
+                    let pause = crate::terminal::daemon_reconnect_backoff(attempt);
+                    attempt = attempt.saturating_add(1);
+                    let state = shared.lock();
+                    let (state, _) = shared
+                        .closed
+                        .wait_timeout_while(state, pause, |state| !state.closed)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if state.closed {
+                        return;
+                    }
+                    drop(state);
+                    match open_topics(&client, &topics) {
+                        Ok((closer, subscription)) => {
+                            let mut state = shared.lock();
+                            if state.closed {
+                                closer.close();
+                                return;
+                            }
+                            state.closer = Some(closer);
+                            drop(state);
+                            if !emit(TopicMessage::Lagged) {
+                                return;
+                            }
+                            current = Some(subscription);
+                        }
+                        Err(error) => {
+                            eprintln!("[runtime-events] {thread_key:?} 单独订阅重连失败：{error}");
+                        }
+                    }
                 }
             });
         match reader {
-            Ok(reader) => Some(Self { closer, reader }),
+            Ok(reader) => Some(Self { shared, reader }),
             Err(error) => {
-                closer.close();
+                if let Some(closer) = shared.lock().closer.take() {
+                    closer.close();
+                }
                 eprintln!("[runtime-events] {key:?} 起单独订阅线程失败：{error}");
                 None
             }
@@ -322,7 +447,14 @@ impl SeparateSubscription {
     }
 
     fn close(self) {
-        self.closer.close();
+        {
+            let mut state = self.shared.lock();
+            state.closed = true;
+            if let Some(closer) = state.closer.take() {
+                closer.close();
+            }
+        }
+        self.shared.closed.notify_all();
         let _ = self.reader.join();
     }
 }
@@ -404,9 +536,33 @@ pub(crate) fn spawn_subscription(
                     }
                     _ => {
                         incompatible_attempt = 0;
-                        // 先订上单独的这条：核心订阅的快照到时，它已经在收了，读的一方在快照时
-                        // 重读一遍就不会漏掉中间的变化。
-                        let separate = SeparateSubscription::open(&runtime, sender.topics.clone());
+                        // 非核心话题分别订阅：旧运行时拒绝新话题时，不能连带其他话题或
+                        // 会话状态一起断开。外观只由本机桌面处理。
+                        let topic_key = key.clone();
+                        let topic_sender = sender.topics.clone();
+                        let separate = SeparateSubscription::open(
+                            &runtime,
+                            SEPARATE_TOPICS.to_vec(),
+                            move |message| {
+                                topic_sender.try_send((topic_key.clone(), message)).is_ok()
+                            },
+                        );
+                        let appearance = if runtime.is_local() {
+                            let appearance_key = key.clone();
+                            let state_sender = sender.states.clone();
+                            SeparateSubscription::open(
+                                &runtime,
+                                vec![smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED],
+                                move |message| match appearance_event(message) {
+                                    Some(event) => state_sender
+                                        .try_send((appearance_key.clone(), event))
+                                        .is_ok(),
+                                    None => true,
+                                },
+                            )
+                        } else {
+                            None
+                        };
                         crate::terminal::subscribe_daemon_states_blocking(
                             runtime.client(),
                             runtime.is_local(),
@@ -417,6 +573,9 @@ pub(crate) fn spawn_subscription(
                         );
                         if let Some(separate) = separate {
                             separate.close();
+                        }
+                        if let Some(appearance) = appearance {
+                            appearance.close();
                         }
                         if stop.load(Ordering::Acquire) {
                             return;
@@ -614,6 +773,37 @@ fn forget_states(key: &RuntimeKey, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_topic_delivers_only_valid_requests() {
+        let event = appearance_event(TopicMessage::Event {
+            topic: smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED.to_string(),
+            payload: serde_json::json!({
+                "request_id": "request-1",
+                "settings": {"theme": "test"},
+            }),
+        });
+        assert!(matches!(
+            event,
+            Some(DaemonStateEvent::AppearanceApplyRequested { request_id, settings })
+                if request_id == "request-1" && settings.get("theme") == Some(&serde_json::json!("test"))
+        ));
+        assert!(
+            appearance_event(TopicMessage::Event {
+                topic: smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED.to_string(),
+                payload: serde_json::json!({"settings": {}}),
+            })
+            .is_none()
+        );
+        assert!(appearance_event(TopicMessage::Lagged).is_none());
+        assert!(
+            appearance_event(TopicMessage::Event {
+                topic: "unrelated".into(),
+                payload: serde_json::json!({}),
+            })
+            .is_none()
+        );
+    }
 
     #[test]
     fn incompatible_backoff_doubles_up_to_ten_minutes() {

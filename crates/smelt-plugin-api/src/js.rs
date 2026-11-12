@@ -44,7 +44,7 @@ export interface PathRequest {
 /** 在那台机器上选路径。取消时为 null。 */
 export function pick_paths(machine: Machine, request: PathRequest): Promise<string[] | null>;
 export type HostEvent =
-  | { type: "pi_config_changed"; machine: Machine }
+  | { type: "runtime_topic"; machine: Machine; topic: string }
   | { type: "reconnected"; machine: Machine }
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
@@ -253,9 +253,13 @@ fn event_value(event: &HostEvent) -> HostValue {
         RuntimeKey::Remote(id) => HostValue::Str(id.clone()),
     };
     let object = match event {
-        HostEvent::PiConfigChanged(key) => HostObject::new()
-            .field("type", "pi_config_changed")
-            .field("machine", machine(key)),
+        HostEvent::RuntimeTopic {
+            machine: key,
+            topic,
+        } => HostObject::new()
+            .field("type", "runtime_topic")
+            .field("machine", machine(key))
+            .field("topic", topic.as_str()),
         HostEvent::Reconnected(key) => HostObject::new()
             .field("type", "reconnected")
             .field("machine", machine(key)),

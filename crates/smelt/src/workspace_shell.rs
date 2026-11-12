@@ -91,14 +91,9 @@ pub(crate) struct ViewPanel {
     view: Rc<dyn ViewHandle>,
     /// 布局里它的 `info.panel`，原样写回存档。
     info: Value,
+    /// 登记时说的 [`smelt_plugin_api::ViewSpec::draws_top_bar`]。
+    owns_top_bar: bool,
     focus_handle: FocusHandle,
-}
-
-impl ViewPanel {
-    /// 会话列表、舞台自己管顶上那一条：单独一组时不要标题带，也不放大。
-    fn owns_top_bar(&self) -> bool {
-        Builtin::of(self.id).is_some_and(Builtin::owns_top_bar)
-    }
 }
 
 impl EventEmitter<PanelEvent> for ViewPanel {}
@@ -120,7 +115,7 @@ impl BasePanel for ViewPanel {
     }
 
     fn zoomable(&self, _: &App) -> bool {
-        !self.owns_top_bar()
+        !self.owns_top_bar
     }
 
     fn dump(&self, _: &App) -> PanelState {
@@ -149,11 +144,11 @@ impl Panel for ViewPanel {
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        (!self.owns_top_bar()).then_some(PanelControl::Toolbar)
+        (!self.owns_top_bar).then_some(PanelControl::Toolbar)
     }
 
     fn title_bar(&self, _: &App) -> bool {
-        !self.owns_top_bar()
+        !self.owns_top_bar
     }
 
     fn inner_padding(&self, _: &App) -> bool {
@@ -267,6 +262,7 @@ fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn
     panel_handle(cx.new(|cx| ViewPanel {
         id: panel_name(id),
         title: spec.title,
+        owns_top_bar: spec.draws_top_bar,
         view,
         info,
         focus_handle: cx.focus_handle(),

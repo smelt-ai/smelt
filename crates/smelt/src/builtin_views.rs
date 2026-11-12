@@ -44,10 +44,6 @@ impl Builtin {
         }
     }
 
-    pub(crate) fn of(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|builtin| builtin.id() == id)
-    }
-
     fn title(self) -> &'static str {
         match self {
             Self::Sessions => "会话",
@@ -71,7 +67,7 @@ impl Builtin {
 
     /// 会话列表和舞台自己管顶上那一条（拖窗口、让红黄绿按钮、标题胶囊）：单独一组时
     /// 外壳不给它们画标题带，也不让放大——舞台本来就是主角，会话列表铺满没有意义。
-    pub(crate) fn owns_top_bar(self) -> bool {
+    fn owns_top_bar(self) -> bool {
         matches!(self, Self::Sessions | Self::Stage)
     }
 }
@@ -144,6 +140,7 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
             title: kind.title().into(),
             icon: kind.icon(),
             per_machine: false,
+            draws_top_bar: kind.owns_top_bar(),
             build: Rc::new(move |_window, cx| -> Rc<dyn ViewHandle> {
                 let workspace = workspace.clone();
                 Rc::new(cx.new(|cx| BuiltinView::new(workspace, kind, cx)))
@@ -160,11 +157,11 @@ mod tests {
     use super::Builtin;
 
     #[test]
-    fn builtin_ids_round_trip_and_are_not_reserved() {
-        for builtin in Builtin::ALL {
-            assert_eq!(Builtin::of(builtin.id()), Some(builtin));
-            assert!(!smelt_plugin_api::RESERVED_VIEW_IDS.contains(&builtin.id()));
+    fn builtin_ids_are_distinct_and_not_reserved() {
+        let ids: std::collections::HashSet<_> = Builtin::ALL.iter().map(|b| b.id()).collect();
+        assert_eq!(ids.len(), Builtin::ALL.len());
+        for id in ids {
+            assert!(!smelt_plugin_api::RESERVED_VIEW_IDS.contains(&id));
         }
-        assert_eq!(Builtin::of("com.smelt.skills"), None);
     }
 }
