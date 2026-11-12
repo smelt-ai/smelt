@@ -1731,8 +1731,8 @@ pub struct AcpView {
     background_tasks: Vec<BackgroundTaskView>,
     /// 输入栏「后台任务」弹层是否打开。
     background_tasks_open: bool,
-    /// 用户展开了输出的后台任务 id。
-    expanded_background_tasks: std::collections::HashSet<String>,
+    /// 用户展开了输出的后台任务 id，各带一个输出区的滚动句柄。
+    expanded_background_tasks: std::collections::HashMap<String, ScrollHandle>,
     /// 用户点了停止、还在等它结束的后台任务 id。任务结束后从这里拿掉。
     stopping_background_tasks: std::collections::HashSet<String>,
     /// 会话宿主报的 Pi 子智能体（本次宿主生命期内的）。卡片按 id 取实时状态。
@@ -2206,7 +2206,7 @@ impl AcpView {
             plan_collapsed: true,
             background_tasks: Vec::new(),
             background_tasks_open: false,
-            expanded_background_tasks: std::collections::HashSet::new(),
+            expanded_background_tasks: std::collections::HashMap::new(),
             stopping_background_tasks: std::collections::HashSet::new(),
             subagents: Vec::new(),
             subagents_open: false,
@@ -4572,6 +4572,14 @@ impl AcpView {
             if running_background_tasks(&self.background_tasks).is_empty() {
                 self.background_tasks_open = false;
             }
+            self.expanded_background_tasks
+                .retain(|id, _| background_tasks.iter().any(|task| &task.id == id));
+            // 停在底部的输出区跟着新输出走；用户往上翻过就不打扰。
+            for scroll in self.expanded_background_tasks.values() {
+                if scroll_at_bottom(scroll) {
+                    scroll.scroll_to_bottom();
+                }
+            }
             self.subagents = snap.subagents;
             self.after_subagents_changed(cx);
             self.model = snap.model;
@@ -5633,11 +5641,9 @@ fn background_task_summary(running: usize) -> String {
     format!("{running} 个后台任务")
 }
 
-fn background_task_output_lines(output: &str) -> Vec<&str> {
-    const MAX_LINES: usize = 8;
-    let lines: Vec<&str> = output.lines().collect();
-    let start = lines.len().saturating_sub(MAX_LINES);
-    lines[start..].to_vec()
+/// 滚动区是否停在底部（含还没溢出的情况）。
+fn scroll_at_bottom(scroll: &ScrollHandle) -> bool {
+    scroll.offset().y <= -scroll.max_offset().y + px(2.)
 }
 
 /// 弹层标题和命令只占一行。GPUI 的 truncate 不吃硬换行，heredoc 会把行高撑开。
