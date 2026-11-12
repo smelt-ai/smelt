@@ -178,7 +178,8 @@ impl CapabilitiesPage {
             HostEvent::ActiveProjectChanged
             | HostEvent::ViewsChanged
             | HostEvent::ThemesChanged
-            | HostEvent::LayoutsChanged => {}
+            | HostEvent::LayoutsChanged
+            | HostEvent::CommandsChanged => {}
         }
     }
 

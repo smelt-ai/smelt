@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{App, AppContext, Div, Entity, EventEmitter, Global, Task, Window};
+use gpui::{AnyWindowHandle, App, AppContext, Div, Entity, EventEmitter, Global, Task, Window};
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, ControlErrorCode};
 
@@ -26,12 +26,17 @@ pub use smelt_ui::theme_catalog::{
     swatch as theme_swatch, themes,
 };
 
+mod command;
 mod layout;
 mod view;
 
 #[cfg(feature = "js")]
 pub mod js;
 
+pub use command::{
+    CommandHandler, CommandInfo, CommandSpec, Handled, RunCommand, command, commands, invoke,
+    register_commands, run, unregister_commands,
+};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
     register_layouts, unregister_layouts,
@@ -86,6 +91,8 @@ pub enum HostEvent {
     ThemesChanged,
     /// 布局登记变了（见 [`register_layouts`]）：选的布局可能刚登记上或撤下了。
     LayoutsChanged,
+    /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
+    CommandsChanged,
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。
@@ -115,6 +122,8 @@ pub trait Host: 'static {
     fn active_project(&self, cx: &App) -> Option<PathBuf>;
     /// 页面的页头底板：留好拖窗口条、交通灯和右上角开关的位置，页面往里放标题和按钮。
     fn page_header(&self, window: &Window, cx: &App) -> Div;
+    /// 主窗口（工作台那扇）；还没开或已经关了是 `None`。命令在这里执行（见 [`run`]）。
+    fn main_window(&self, cx: &App) -> Option<AnyWindowHandle>;
 }
 
 struct HostGlobal {

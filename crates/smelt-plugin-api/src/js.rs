@@ -8,6 +8,9 @@
 //! 一条队列，从挂载完起开始记。插件视图释放时队列一起撤掉，所以插件卸载、重新加载不用
 //! 宿主另外收拾。
 //!
+//! 命令同理：宿主执行插件登记的命令时不能回调脚本，执行记进插件自己的命令队列，脚本
+//! 用 `next_command()` 取。
+//!
 //! 插件摆在哪不由插件定，这里没有登记位置的函数；插件可以登记整份布局，用不用由用户在
 //! 设置里选（见 `docs/app-plugins.md`）。
 
@@ -18,8 +21,9 @@ use std::rc::Rc;
 use futures_channel::oneshot;
 use gpui::{App, Entity, Subscription};
 use gpui_shell::{HostArguments, HostError, HostModule, HostObject, HostValue, ScriptView};
+use serde_json::Value;
 
-use crate::{HostEvent, PathRequest, RuntimeKey};
+use crate::{CommandSpec, Handled, HostEvent, PathRequest, RuntimeKey};
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
@@ -54,6 +58,30 @@ export interface PathRequest {
 }
 /** 在那台机器上选路径。取消时为 null。 */
 export function pick_paths(machine: Machine, request: PathRequest): Promise<string[] | null>;
+export interface Command {
+  /** 本插件内的名字，不含 "/"；命令 id 是 "<插件 id>/<name>"。 */
+  name: string;
+  /** 命令面板和快捷键设置里显示的名字。 */
+  title: string;
+  /** 出厂快捷键，单个按键，如 "cmd-shift-y"；要带 cmd 或者是 F 键。用户可以在设置里改。 */
+  key?: string;
+  /** 快捷键在哪生效，gpui key context 谓词；默认 "Workspace"，即主窗口任何地方。 */
+  context?: string;
+  /** 出现在命令面板里，默认 true。 */
+  palette?: boolean;
+}
+/** 替换本插件登记的命令。空数组撤下全部；一条不合法整组不登记。执行时由 next_command 取到。 */
+export function register_commands(commands: Command[]): null;
+export interface CommandCall {
+  /** 本插件内的名字。 */
+  name: string;
+  /** 执行时带的参数；快捷键、菜单、命令面板执行时为 null。 */
+  args: unknown;
+}
+/** 等本插件命令的下一次执行。从登记起开始记，按顺序一次不落。同时只能有一个在等。 */
+export function next_command(): Promise<CommandCall>;
+/** 执行一条命令，任何来源的都行（id 是 "<来源>/<名字>"）。排到这一轮之后在主窗口里跑；命令不存在时报错。 */
+export function run(command: string, args?: unknown): null;
 export type HostEvent =
   | { type: "runtime_topic"; machine: Machine; topic: string }
   | { type: "reconnected"; machine: Machine }
@@ -61,7 +89,8 @@ export type HostEvent =
   | { type: "active_project_changed" }
   | { type: "views_changed" }
   | { type: "themes_changed" }
-  | { type: "layouts_changed" };
+  | { type: "layouts_changed" }
+  | { type: "commands_changed" };
 /** 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份。同时只能有一个在等。 */
 export function next_event(): Promise<HostEvent>;
 "#;
@@ -72,11 +101,18 @@ pub struct JsPlugin(Rc<RefCell<PluginState>>);
 
 #[derive(Default)]
 struct PluginState {
-    /// 插件 id，它登记的布局按这个来源记。
+    /// 插件 id，它登记的布局、命令按这个来源记。
     id: String,
+    /// 插件的名字，快捷键设置里它的命令按这个分组。
+    name: String,
     theme_owner: String,
     queue: VecDeque<HostEvent>,
     waiter: Option<oneshot::Sender<HostEvent>>,
+    /// 执行过、脚本还没取走的命令：名字和参数。
+    calls: VecDeque<(String, Value)>,
+    call_waiter: Option<oneshot::Sender<(String, Value)>>,
+    /// 视图已经释放：它登记的命令不再接。
+    released: bool,
     _events: Option<Subscription>,
     _release: Option<Subscription>,
 }
@@ -86,12 +122,14 @@ impl JsPlugin {
         Self::default()
     }
 
-    /// 每个插件的脚本主题有独立的来源，不能替换其他插件或内置主题。
-    pub fn for_plugin(id: &str) -> Self {
+    /// 每个插件的脚本主题有独立的来源，不能替换其他插件或内置主题。`name` 是插件给人看
+    /// 的名字。
+    pub fn for_plugin(id: &str, name: &str) -> Self {
         let plugin = Self::default();
         {
             let mut state = plugin.0.borrow_mut();
             state.id = id.to_string();
+            state.name = name.to_string();
             state.theme_owner = format!("script:{id}");
         }
         plugin
@@ -102,6 +140,8 @@ impl JsPlugin {
         let events = self.clone();
         let theme_owner = self.0.borrow().theme_owner.clone();
         let layout_owner = self.0.borrow().id.clone();
+        let commands = self.clone();
+        let calls = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_project", |_| {
@@ -145,11 +185,7 @@ impl JsPlugin {
                 }
                 let sources = layouts
                     .iter()
-                    .map(|(name, title, state)| crate::LayoutSource {
-                        name,
-                        title,
-                        state,
-                    })
+                    .map(|(name, title, state)| crate::LayoutSource { name, title, state })
                     .collect::<Vec<_>>();
                 in_app("register_layouts", |cx| {
                     crate::register_layouts(&layout_owner, &sources, cx)
@@ -157,6 +193,28 @@ impl JsPlugin {
                 .map_err(HostError::new)?;
                 Ok(HostValue::Null)
             })
+            .function("register_commands", move |arguments| {
+                let specs = command_arguments(arguments, &commands)?;
+                let (owner, group) = {
+                    let state = commands.0.borrow();
+                    (state.id.clone(), state.name.clone())
+                };
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有命令来源身份"));
+                }
+                in_app("register_commands", |cx| {
+                    crate::register_commands(&owner, &group, specs, cx)
+                })?
+                .map_err(HostError::new)?;
+                Ok(HostValue::Null)
+            })
+            .function("run", |arguments| {
+                let command = arguments.string(0)?;
+                let args = arguments.get(1).map(json_value).unwrap_or(Value::Null);
+                in_app("run", |cx| crate::run(command, args, cx))?.map_err(HostError::new)?;
+                Ok(HostValue::Null)
+            })
+            .async_function("next_command", move |_| Ok(calls.next_command()))
             .async_function("pick_paths", pick_paths)
             .async_function("next_event", move |_| Ok(events.next_event()))
     }
@@ -214,12 +272,57 @@ impl JsPlugin {
         }
     }
 
-    /// 视图释放了：扔掉队列和订阅。
+    fn next_command(&self) -> impl Future<Output = Result<HostValue, HostError>> + Send + use<> {
+        let (sender, receiver) = oneshot::channel();
+        let mut state = self.0.borrow_mut();
+        match state.calls.pop_front() {
+            Some(call) => {
+                let _ = sender.send(call);
+            }
+            // 上一个还在等的被顶掉，它那边收到 `Canceled`。
+            None => state.call_waiter = Some(sender),
+        }
+        async move {
+            let (name, args) = receiver
+                .await
+                .map_err(|_| HostError::new("next_command：被后一次 next_command 顶掉了"))?;
+            Ok(HostObject::new()
+                .field("name", name)
+                .field("args", host_value(&args))
+                .into())
+        }
+    }
+
+    /// 宿主执行了这个插件的一条命令。视图已经释放就不接，按键交给下一条绑定。
+    fn deliver_command(&self, name: &str, args: &Value) -> Handled {
+        let mut state = self.0.borrow_mut();
+        if state.released {
+            return Handled::Pass;
+        }
+        let call = (name.to_string(), args.clone());
+        let call = match state.call_waiter.take() {
+            Some(waiter) => match waiter.send(call) {
+                Ok(()) => return Handled::Done,
+                // 等的那个 Promise 已经没人要了，照常排队。
+                Err(call) => call,
+            },
+            None => call,
+        };
+        // 每次执行都要到，不去重。
+        state.calls.push_back(call);
+        Handled::Done
+    }
+
+    /// 视图释放了：扔掉队列和订阅。登记的命令由宿主随插件撤下（见 `mount_all`），
+    /// 这里撤会把重新加载后新登记的一起撤掉。
     fn detach(&self) {
         let mut state = self.0.borrow_mut();
         state.queue.clear();
         state.waiter = None;
         state._events = None;
+        state.calls.clear();
+        state.call_waiter = None;
+        state.released = true;
     }
 }
 
@@ -247,6 +350,98 @@ fn layout_arguments(arguments: &HostArguments) -> Result<Vec<(String, String, St
             Ok((field("name")?, field("title")?, field("layout")?))
         })
         .collect()
+}
+
+/// `register_commands` 的参数。处理函数把执行记进插件的命令队列。
+fn command_arguments(
+    arguments: &HostArguments,
+    plugin: &JsPlugin,
+) -> Result<Vec<CommandSpec>, HostError> {
+    let invalid = |what: &str| HostError::new(format!("register_commands：{what}"));
+    arguments
+        .value(0)?
+        .as_array()
+        .ok_or_else(|| invalid("参数要是命令对象的数组"))?
+        .iter()
+        .map(|command| {
+            let text = |name: &str| match command.get(name) {
+                None | Some(HostValue::Null) => Ok(None),
+                Some(HostValue::Str(text)) => Ok(Some(text.clone())),
+                Some(other) => Err(invalid(&format!(
+                    "{name} 要是字符串，收到 {}",
+                    other.describe()
+                ))),
+            };
+            let name = text("name")?.ok_or_else(|| invalid("每条命令都要有 name"))?;
+            let title = text("title")?.ok_or_else(|| invalid("每条命令都要有 title"))?;
+            let palette = match command.get("palette") {
+                None | Some(HostValue::Null) => true,
+                Some(HostValue::Bool(palette)) => *palette,
+                Some(other) => {
+                    return Err(invalid(&format!(
+                        "palette 要是布尔值，收到 {}",
+                        other.describe()
+                    )));
+                }
+            };
+            let state = Rc::downgrade(&plugin.0);
+            let handler_name = name.clone();
+            Ok(CommandSpec {
+                key: text("key")?,
+                context: text("context")?.unwrap_or_else(|| "Workspace".to_string()),
+                palette,
+                handler: Rc::new(move |args, _, _| match state.upgrade() {
+                    Some(state) => JsPlugin(state).deliver_command(&handler_name, args),
+                    None => Handled::Pass,
+                }),
+                name,
+                title,
+            })
+        })
+        .collect()
+}
+
+/// 脚本给的值转成命令参数。整数值的数字写成整数，Rust 这边 `as_u64` 读得出来；
+/// NaN、无穷写不进 JSON，成了 `null`。
+fn json_value(value: &HostValue) -> Value {
+    match value {
+        HostValue::Null => Value::Null,
+        HostValue::Bool(value) => Value::Bool(*value),
+        HostValue::Number(number) => {
+            // ±2^53 以内的整数 f64 和 i64 一一对应。
+            const EXACT: f64 = 9_007_199_254_740_992.0;
+            if number.fract() == 0.0 && number.abs() <= EXACT {
+                Value::from(*number as i64)
+            } else {
+                serde_json::Number::from_f64(*number).map_or(Value::Null, Value::Number)
+            }
+        }
+        HostValue::Str(text) => Value::String(text.clone()),
+        HostValue::Array(values) => Value::Array(values.iter().map(json_value).collect()),
+        HostValue::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), json_value(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// 命令参数转成给脚本的值。JS 的数字都是 f64。
+fn host_value(value: &Value) -> HostValue {
+    match value {
+        Value::Null => HostValue::Null,
+        Value::Bool(value) => HostValue::Bool(*value),
+        Value::Number(number) => number.as_f64().map_or(HostValue::Null, HostValue::Number),
+        Value::String(text) => HostValue::Str(text.clone()),
+        Value::Array(values) => HostValue::Array(values.iter().map(host_value).collect()),
+        Value::Object(fields) => HostValue::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), host_value(value)))
+                .collect(),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------- 选路径
@@ -329,6 +524,7 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
+        HostEvent::CommandsChanged => HostObject::new().field("type", "commands_changed"),
     };
     object.into()
 }
@@ -368,7 +564,7 @@ mod tests {
 
     #[test]
     fn theme_registration_rejects_invalid_arguments_before_entering_app() {
-        let module = JsPlugin::for_plugin("example").module();
+        let module = JsPlugin::for_plugin("example", "示例").module();
         assert!(
             module
                 .call("register_themes", &HostArguments::default())
@@ -391,7 +587,7 @@ mod tests {
 
     #[test]
     fn layout_registration_rejects_invalid_arguments_before_entering_app() {
-        let module = JsPlugin::for_plugin("example").module();
+        let module = JsPlugin::for_plugin("example", "示例").module();
         let layout = |fields: &[(&str, HostValue)]| {
             let mut object = HostObject::new();
             for (name, value) in fields {
@@ -403,10 +599,7 @@ mod tests {
             HostArguments::default(),
             HostArguments::new([HostValue::Null]),
             HostArguments::new([HostValue::Array(vec![HostValue::Null])]),
-            HostArguments::new([layout(&[
-                ("name", "a".into()),
-                ("title", "A".into()),
-            ])]),
+            HostArguments::new([layout(&[("name", "a".into()), ("title", "A".into())])]),
             HostArguments::new([layout(&[
                 ("name", "a".into()),
                 ("title", HostValue::Null),
@@ -414,7 +607,11 @@ mod tests {
             ])]),
         ] {
             let error = module.call("register_layouts", &arguments).unwrap_err();
-            assert!(!error.message().contains("只能在视图"), "{}", error.message());
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
         }
         // 参数对了才进 App；测试里没有 App。
         let error = module
@@ -428,6 +625,80 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn command_registration_rejects_invalid_arguments_before_entering_app() {
+        let module = JsPlugin::for_plugin("example", "示例").module();
+        let command = |fields: &[(&str, HostValue)]| {
+            let mut object = HostObject::new();
+            for (name, value) in fields {
+                object = object.field(*name, value.clone());
+            }
+            HostValue::Array(vec![object.into()])
+        };
+        for arguments in [
+            HostArguments::default(),
+            HostArguments::new([HostValue::Null]),
+            HostArguments::new([HostValue::Array(vec![HostValue::Null])]),
+            HostArguments::new([command(&[("name", "a".into())])]),
+            HostArguments::new([command(&[("title", "A".into())])]),
+            HostArguments::new([command(&[
+                ("name", "a".into()),
+                ("title", "A".into()),
+                ("key", HostValue::Number(1.0)),
+            ])]),
+            HostArguments::new([command(&[
+                ("name", "a".into()),
+                ("title", "A".into()),
+                ("palette", "yes".into()),
+            ])]),
+        ] {
+            let error = module.call("register_commands", &arguments).unwrap_err();
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
+        }
+        let error = module
+            .call(
+                "register_commands",
+                &HostArguments::new([command(&[("name", "a".into()), ("title", "A".into())])]),
+            )
+            .unwrap_err();
+        assert!(error.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn command_calls_are_queued_in_order_and_stop_after_release() {
+        let plugin = JsPlugin::for_plugin("example", "示例");
+        let args = serde_json::json!({ "n": 1 });
+        assert_eq!(plugin.deliver_command("a", &args), Handled::Done);
+        assert_eq!(plugin.deliver_command("a", &args), Handled::Done);
+        let value = smol::block_on(plugin.next_command()).unwrap();
+        assert_eq!(value.get("name").and_then(HostValue::as_str), Some("a"));
+        assert_eq!(
+            value.get("args").and_then(|args| args.get("n")),
+            Some(&HostValue::Number(1.0))
+        );
+        assert_eq!(plugin.0.borrow().calls.len(), 1);
+        assert!(smol::block_on(plugin.next_command()).is_ok());
+        // 队列空了，这次挂起等着；视图释放后它收到错误，不会一直挂着。
+        let waiting = plugin.next_command();
+        assert!(plugin.0.borrow().call_waiter.is_some());
+        plugin.detach();
+        assert!(smol::block_on(waiting).is_err());
+        assert_eq!(plugin.deliver_command("a", &args), Handled::Pass);
+        assert!(plugin.0.borrow().calls.is_empty());
+    }
+
+    #[test]
+    fn command_args_cross_the_script_boundary() {
+        let args = serde_json::json!({ "index": 3, "ratio": 0.5, "tags": ["a", null, true] });
+        assert_eq!(json_value(&host_value(&args)), args);
+        assert_eq!(json_value(&HostValue::Number(f64::NAN)), Value::Null);
+        assert_eq!(json_value(&HostValue::Number(2.0)).as_u64(), Some(2));
     }
 
     #[test]

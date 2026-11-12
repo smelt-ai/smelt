@@ -98,6 +98,13 @@ impl api::Host for SmeltHost {
         });
         crate::agents::product_page_chrome(left_guard)
     }
+
+    fn main_window(&self, _cx: &App) -> Option<AnyWindowHandle> {
+        self.current
+            .borrow()
+            .as_ref()
+            .map(|main| main.window.into())
+    }
 }
 
 /// 启动时、开主窗口之前调一次：装好宿主服务，登记内置插件。
