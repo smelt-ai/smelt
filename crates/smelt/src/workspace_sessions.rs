@@ -244,15 +244,6 @@ impl Workspace {
                         let pending_delivery_id = saved.pending_delivery_id.clone();
                         let pending_agent_preset = saved.pending_agent_preset.clone();
                         let agent_definition_id = saved.agent_definition_id.clone();
-                        if let (Some(resume_id), Some(definition_id)) = (
-                            saved.history_session_id.as_ref(),
-                            agent_definition_id.as_deref(),
-                        ) {
-                            remember_history_agent(&key, agent.into(),
-                                saved.profile_id.as_deref(),
-                                &resume_id.to_string(),
-                                definition_id, cx);
-                        }
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
                         // 第一次连上前由运行时补齐：旧版重启丢掉的插件和 MCP 勾选按当前定义
@@ -928,7 +919,6 @@ impl Workspace {
             |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
                 acp_view::AcpViewEvent::Changed => {
                     this.touch_acp_session(_view);
-                    this.persist_history_agent_definition_for_view(_view, cx);
                     this.save_state(cx);
                     this.sync_notification_surfaces(cx);
                     // save_state 只排队写盘，不会重绘。正文增量只归 AcpView 重画；
@@ -1394,7 +1384,7 @@ impl Workspace {
         // 已经开着的必须是**这一条**历史会话（比对 agent + cwd + 具体 session id），
         // 不能只认 agent+cwd——同项目同 agent 可能同时开着好几条不同的历史会话，
         // 之前只按 agent+cwd 找，点哪条「继续」都会跳到"第一个凑巧匹配的"那条。
-        let target_id = agent_client_protocol::v1::schema::SessionId::new(resume_id.clone());
+        let target_id = agent_client_protocol::v1::schema::SessionId::new(resume_id);
         if let Some(ix) = self.find_open_acp_session(agent, &cwd, &target_id, cx) {
             let view = match &self.sessions[ix].kind {
                 SessionKind::Conversation(view) => view.clone(),
@@ -1427,16 +1417,6 @@ impl Workspace {
         // 用户给这段对话起的名字在运行时，建好后随工作区目录推来（按 provider 身份现算）。
         let custom_title = None;
         let agent_definition_id = definition.map(|definition| definition.id);
-        if let Some(id) = agent_definition_id.as_deref() {
-            remember_history_agent(
-                &runtime_key,
-                agent.into(),
-                profile_id.as_deref(),
-                &resume_id,
-                id,
-                cx,
-            );
-        }
         let view_profile_id = profile_id;
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
@@ -2682,35 +2662,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn persist_history_agent_definition_for_view(
-        &self,
-        changed_view: &Entity<acp_view::AcpView>,
-        cx: &Context<Self>,
-    ) {
-        let Some(session) = self
-            .sessions
-            .iter()
-            .find(|session| session.anchor_id() == changed_view.entity_id())
-        else {
-            return;
-        };
-        let Some(agent_definition_id) = session.agent_definition_id.as_deref() else {
-            return;
-        };
-        let view = changed_view.read(cx);
-        let Some(resume_id) = view.history_session_id_for_save() else {
-            return;
-        };
-        remember_history_agent(
-            session.runtime(cx).key(),
-            view.agent_kind().into(),
-            view.profile_id(),
-            &resume_id.to_string(),
-            agent_definition_id,
-            cx,
-        );
-    }
-
     /// 取消重命名：不落地任何改动。
     pub(crate) fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         self.rename_target = None;
@@ -2862,43 +2813,4 @@ mod rename_tests {
         );
         assert_eq!(submitted_title("smelt", "  "), Some(None));
     }
-}
-
-/// 记下一段历史会话属于哪个产品智能体，以后「继续」时按原来的智能体启动。交给
-/// 运行时异步写，失败只记日志：漏记的后果只是继续时退回裸引擎。
-/// `runtime` 是存档所在的机器。
-fn remember_history_agent(
-    runtime: &RuntimeKey,
-    agent: settings::HistorySourceKind,
-    profile_id: Option<&str>,
-    resume_id: &str,
-    agent_definition_id: &str,
-    cx: &App,
-) {
-    use smelt_runtime_client::protocol::history::{
-        HistoryRememberAgentCall, HistoryRememberAgentParams,
-    };
-    let params = HistoryRememberAgentParams {
-        agent: agent.id().to_string(),
-        profile_id: profile_id.map(str::to_string),
-        resume_id: resume_id.to_string(),
-        agent_definition_id: agent_definition_id.to_string(),
-    };
-    let Ok(client) = crate::runtime_call::target(runtime, cx) else {
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(error) = crate::runtime_call::call_on::<HistoryRememberAgentCall>(
-                &client,
-                params,
-                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-            ) {
-                eprintln!(
-                    "[history] 记录会话归属失败：{}",
-                    crate::runtime_call::error_text(error)
-                );
-            }
-        })
-        .detach();
 }

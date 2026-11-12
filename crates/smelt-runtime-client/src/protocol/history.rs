@@ -31,8 +31,6 @@ history_calls! {
     HistoryDetailCall => HistoryDetail(HistoryDetailParams) -> HistoryDetailResult;
     /// 删除一份历史存档，连同它的自定义标题。只删这个项目的历史列表里确实有的那一份。
     HistoryDeleteCall => HistoryDelete(HistoryDeleteParams) -> EmptyParams;
-    /// 记下一段历史会话属于哪个产品智能体，以后「继续」时按原来的智能体启动。
-    HistoryRememberAgentCall => HistoryRememberAgent(HistoryRememberAgentParams) -> EmptyParams;
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,12 +102,4 @@ pub struct HistoryDeleteParams {
     pub cwd: String,
     pub resume_id: String,
     pub path: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryRememberAgentParams {
-    pub agent: String,
-    pub profile_id: Option<String>,
-    pub resume_id: String,
-    pub agent_definition_id: String,
 }

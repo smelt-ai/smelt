@@ -144,7 +144,6 @@ define_control_methods! {
     AgentMemoryApprove => (AGENT_MEMORY_APPROVE_METHOD, "agent.memory.approve"),
     AutomationRunDetail => (AUTOMATION_RUN_DETAIL_METHOD, "automation.run_detail"),
     AgentSpaceEnsure => (AGENT_SPACE_ENSURE_METHOD, "agent.space.ensure"),
-    HistoryRememberAgent => (HISTORY_REMEMBER_AGENT_METHOD, "history.remember_agent"),
     AgentHooksStatus => (AGENT_HOOKS_STATUS_METHOD, "agent.hooks.status"),
     AgentHooksInstall => (AGENT_HOOKS_INSTALL_METHOD, "agent.hooks.install"),
     AgentHooksUninstall => (AGENT_HOOKS_UNINSTALL_METHOD, "agent.hooks.uninstall"),

@@ -118,8 +118,10 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 按来源列出当前项目下各家 agent 的本地历史（`HistorySourceKind`：九家结构化 agent，
 外加只有 TUI 的 Antigravity）。左列表 + 右详情还原对话；有 ACP 身份的来源可
 「ACP 继续」/「CLI/TUI 继续」，Antigravity 没有 ACP 身份，只能起 CLI。存档的扫描、解析、
-改名、删除在项目所在那台机器的运行时；改名、删除、记下会话归属后运行时推
-`history.changed`，列表跟着重读。agent 自己写新存档没有推送：历史页露出来、换来源、
+改名、删除在项目所在那台机器的运行时；改名、删除后运行时推 `history.changed`，
+列表跟着重读。会话归属（存档由哪个智能体开，「继续」时按它起）是运行时库从对话细节
+推出来的：对话上同时有 provider 身份和智能体，写入那次就记进 `history_agent_binding`，
+客户端不另发调用。agent 自己写新存档、记下新归属都没有推送：历史页露出来、换来源、
 换项目时超过 10 秒才重读，也可以手动刷新，不在后台定时扫。
 实现是内置插件 `crates/plugins/history`，续接、迁移经宿主命令 `smelt.sessions/*`
 （`crates/smelt/src/session_commands.rs`）开会话。

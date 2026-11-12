@@ -59,7 +59,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 36;
+pub const STORE_SCHEMA_VERSION: u32 = 37;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -377,25 +377,6 @@ impl Store {
         profile_id: &str,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         imp::history_agent_bindings(&self.backend, agent, profile_id)
-    }
-
-    pub fn put_history_agent_binding(
-        &self,
-        agent: &str,
-        profile_id: &str,
-        resume_id: &str,
-        agent_definition_id: &str,
-    ) -> Result<(), StoreError> {
-        validate_name("agent", agent)?;
-        validate_name("resume_id", resume_id)?;
-        validate_name("agent_definition_id", agent_definition_id)?;
-        imp::put_history_agent_binding(
-            &self.backend,
-            agent,
-            profile_id,
-            resume_id,
-            agent_definition_id,
-        )
     }
 
     /// 侧栏「新对话」默认用哪个智能体。
@@ -1144,24 +1125,6 @@ mod imp {
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         read(backend, |connection| {
             crate::history::read_history_agent_bindings(connection, agent, profile_id)
-        })
-    }
-
-    pub(super) fn put_history_agent_binding(
-        backend: &Backend,
-        agent: &str,
-        profile_id: &str,
-        resume_id: &str,
-        agent_definition_id: &str,
-    ) -> Result<(), StoreError> {
-        write(backend, |transaction| {
-            crate::history::write_history_agent_binding(
-                transaction,
-                agent,
-                profile_id,
-                resume_id,
-                agent_definition_id,
-            )
         })
     }
 
@@ -2043,6 +2006,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 36 {
+            apply_v37_bind_history_agents(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 35 {
             apply_v36_push_message(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2717,6 +2689,14 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V35_TO_V36)?;
         }
+        apply_v37_bind_history_agents(transaction)
+    }
+
+    /// v37：现有对话上的「存档属于哪个智能体」补进 `history_agent_binding`。只补数据，重跑无害。
+    fn apply_v37_bind_history_agents(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::MIGRATE_V36_TO_V37)?;
         Ok(())
     }
 
@@ -3980,15 +3960,6 @@ mod imp {
         _agent: &str,
         _profile_id: &str,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_history_agent_binding(
-        _backend: &Backend,
-        _agent: &str,
-        _profile_id: &str,
-        _resume_id: &str,
-        _agent_definition_id: &str,
-    ) -> Result<(), StoreError> {
         unsupported()
     }
     pub(super) fn default_conversation_agent(
@@ -6912,6 +6883,116 @@ CREATE TABLE published_session (
         );
     }
 
+    fn with_definition(
+        mut conversation: WorkspaceSessionRecord,
+        definition: Option<&str>,
+    ) -> WorkspaceSessionRecord {
+        if let Some(acp) = conversation.acp.as_mut() {
+            acp.agent_definition_id = definition.map(str::to_string);
+        }
+        conversation
+    }
+
+    /// 「存档属于哪个智能体」由库在写对话细节时自己记：provider 身份和智能体谁后到，都在
+    /// 那次写入里补上绑定；缺一样就不记；换了智能体续接同一份存档，记新的。
+    #[test]
+    fn history_agent_binding_follows_the_conversation() {
+        let dir = temp_dir("history-agent-binding");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let bound = |resume_id: &str| {
+            store
+                .history_agent_binding("claude", "", resume_id)
+                .unwrap()
+        };
+
+        // 先有智能体，守护后确认 provider 身份。
+        let first = with_definition(acp_conversation("c1", Some("acp-1"), None), Some("writer"));
+        store.create_workspace_conversation(&first).unwrap();
+        assert_eq!(bound("h1"), None);
+        store.remember_history_session_id("acp-1", "h1").unwrap();
+        assert_eq!(bound("h1").as_deref(), Some("writer"));
+
+        // 先有 provider 身份（从历史续接），后补智能体。
+        let second = with_definition(
+            acp_conversation("c2", Some("acp-2"), Some("h2")),
+            Some("  "),
+        );
+        store.create_workspace_conversation(&second).unwrap();
+        assert_eq!(bound("h2"), None, "没有智能体就不记");
+        store
+            .update_workspace_conversation(&with_definition(second, Some("coder")))
+            .unwrap();
+        assert_eq!(bound("h2").as_deref(), Some("coder"));
+
+        // 换了智能体续接同一份存档：以对话上现在的为准。
+        let third = with_definition(
+            acp_conversation("c3", Some("acp-3"), Some("h1")),
+            Some("coder"),
+        );
+        store.create_workspace_conversation(&third).unwrap();
+        assert_eq!(bound("h1").as_deref(), Some("coder"));
+
+        // 对话删掉，绑定留着：历史页「继续」靠的就是它。
+        store.delete_workspace_conversation("c3").unwrap();
+        assert_eq!(bound("h1").as_deref(), Some("coder"));
+
+        // 按 agent + profile + 存档 id 分开记。
+        let mut fourth = with_definition(
+            acp_conversation("c4", Some("acp-4"), Some("h1")),
+            Some("quant"),
+        );
+        fourth.acp.as_mut().unwrap().profile_id = Some("work".to_string());
+        store.create_workspace_conversation(&fourth).unwrap();
+        assert_eq!(bound("h1").as_deref(), Some("coder"));
+        assert_eq!(
+            store.history_agent_bindings("claude", "work").unwrap(),
+            std::collections::BTreeMap::from([("h1".to_string(), "quant".to_string())])
+        );
+    }
+
+    /// v36 的库升上来时，对话上已有的「存档属于哪个智能体」补进绑定表，以对话上的为准；
+    /// 对话上没有的旧绑定原样留着。
+    #[test]
+    fn migrates_v36_binding_history_agents() {
+        let dir = temp_dir("migrate-v36-history-agent");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        let store = Store::open_or_create(&path).unwrap();
+        store
+            .create_workspace_conversation(&with_definition(
+                acp_conversation("c1", Some("acp-1"), Some("h1")),
+                Some("writer"),
+            ))
+            .unwrap();
+        store
+            .create_workspace_conversation(&acp_conversation("c2", Some("acp-2"), Some("h2")))
+            .unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DELETE FROM history_agent_binding;
+                 INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
+                 VALUES ('claude', '', 'h1', 'stale'), ('claude', '', 'gone', 'kept');",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 36).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        assert_eq!(
+            store.history_agent_bindings("claude", "").unwrap(),
+            std::collections::BTreeMap::from([
+                ("gone".to_string(), "kept".to_string()),
+                ("h1".to_string(), "writer".to_string()),
+            ])
+        );
+        drop(store);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
     /// 名字只存一处：还认不出 provider 身份时写在对话上；守护确认身份时搬进那段 provider
     /// 对话的名字（`history_title`），对话上的清掉；之后改名写那边，读目录时合起来。真改了才
     /// 推进版本。
@@ -8579,24 +8660,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             .put_new_session_pins(&["b".into(), "a".into(), "b".into()])
             .unwrap();
         assert_eq!(store.new_session_pins().unwrap(), ["b", "a"]);
-
-        store
-            .put_history_agent_binding("pi", "", "resume-1", "writer")
-            .unwrap();
-        store
-            .put_history_agent_binding("pi", "work", "resume-2", "coder")
-            .unwrap();
-        assert_eq!(
-            store
-                .history_agent_binding("pi", "", "resume-1")
-                .unwrap()
-                .as_deref(),
-            Some("writer")
-        );
-        assert_eq!(
-            store.history_agent_bindings("pi", "work").unwrap(),
-            std::collections::BTreeMap::from([("resume-2".to_string(), "coder".to_string())])
-        );
     }
 
     #[cfg(unix)]

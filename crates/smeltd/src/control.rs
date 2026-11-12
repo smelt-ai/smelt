@@ -192,19 +192,13 @@ fn dispatch_control(
         }
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
-        | ControlMethod::HistoryDelete
-        | ControlMethod::HistoryRememberAgent) => {
+        | ControlMethod::HistoryDelete) => {
             match super::history_control::dispatch(history, params) {
                 Ok(result) => {
                     if history == ControlMethod::HistoryDelete {
                         // 删存档连同名字一起清：侧栏里对这段对话的名字跟着变。
                         super::workspace_directory::publish_current(event_hub);
                         super::terminal_names::refresh_all(sessions, event_hub);
-                    }
-                    if matches!(
-                        history,
-                        ControlMethod::HistoryDelete | ControlMethod::HistoryRememberAgent
-                    ) {
                         super::notify_history_changed(event_hub);
                     }
                     success_value(control_version, &request_id, result)
