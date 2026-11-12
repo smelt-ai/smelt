@@ -508,7 +508,7 @@ pub(crate) fn new_area(
         skin = Some(inner.clone());
         DockArea::new(
             "smelt-shell",
-            Some(crate::workspace_layout::VERSION),
+            Some(smelt_plugin_api::LAYOUT_VERSION),
             window,
             cx,
         )

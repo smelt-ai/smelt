@@ -10924,6 +10924,7 @@ dependencies = [
  "smelt-core",
  "smelt-event-protocol",
  "smelt-iroh",
+ "smelt-layouts",
  "smelt-model",
  "smelt-pairing",
  "smelt-paths",
@@ -11129,6 +11130,14 @@ dependencies = [
  "smelt-runtime-client",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "smelt-layouts"
+version = "0.0.0"
+dependencies = [
+ "gpui-pre",
+ "smelt-plugin-api",
 ]
 
 [[package]]

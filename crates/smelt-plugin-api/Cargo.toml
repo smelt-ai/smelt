@@ -25,4 +25,5 @@ gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f44
 js = ["dep:gpui-shell", "dep:futures-channel"]
 
 [dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
 smol = "2"

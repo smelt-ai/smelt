@@ -2196,8 +2196,8 @@ struct Workspace {
     shell_dock: Entity<gpui_component::dock::DockArea>,
     /// Dock 摆着什么、看得见什么的快照。Dock 一变就重算，render 只读它。
     pub(crate) shell_view: workspace_shell::ShellView,
-    /// 装着的布局的 id，存档按它记。`None` 表示还没装布局。
-    layout_id: Option<String>,
+    /// 装着的布局，存档按它的 id 记。
+    layout: workspace_layout::InstalledLayout,
     /// 上次写进库的布局存档原文。一样就不再写。
     layout_state_written: Option<String>,
     _shell_dock_subs: Vec<Subscription>,
@@ -2735,7 +2735,7 @@ impl Workspace {
             sidebar_split_drag: None,
             shell_dock,
             shell_view: Default::default(),
-            layout_id: None,
+            layout: Default::default(),
             layout_state_written: None,
             _shell_dock_subs: Vec::new(),
             diff_comment_input: None,
