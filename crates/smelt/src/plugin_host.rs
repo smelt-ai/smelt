@@ -107,6 +107,7 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     cx.observe_global::<runtimes::RuntimeHub>(|cx| api::emit(HostEvent::MachinesChanged, cx))
         .detach();
     smelt_capabilities::register(cx);
+    smelt_layouts::register(cx);
 }
 
 impl Workspace {
@@ -164,6 +165,7 @@ impl Workspace {
                     this.sync_page_route(window, cx);
                     cx.notify();
                 }
+                HostEvent::LayoutsChanged => this.sync_layout_choice(window, cx),
                 HostEvent::ThemesChanged => {
                     if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {
                         let selected = appearance.theme_name.clone();

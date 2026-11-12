@@ -156,6 +156,11 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     let runtime = needs_scripts
         .then(|| runtime(cx).map_err(|error| format!("插件运行时启动失败：{error:#}")));
     let previous = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
+    // 脚本挂载时自己再登记布局（`register_layouts`）；重载后不再登记的、卸掉的插件的布局
+    // 不能留着。事件在这一轮更新结束才发，工作台看到的是挂完的结果，不会先换走再换回来。
+    for panel in &previous {
+        api::unregister_layouts(&panel.id, cx);
+    }
 
     // 视图出生时定下权限，所以每次挂载前按这一批插件的声明重新装一遍。
     let hosts = found
@@ -209,7 +214,9 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                 match &content {
                     Ok(view) => plugin.attach(view, cx),
                     Err(error) => {
+                        // 脚本可能登记了一半才出错，它给的主题、布局都不留。
                         smelt_ui::theme_catalog::unregister_themes(&format!("script:{id}"), cx);
+                        api::unregister_layouts(&id, cx);
                         eprintln!("[plugins] {id} 加载失败：{error}");
                     }
                 }
@@ -242,6 +249,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                 };
                 if let Err(error) = api::register_view(spec, cx) {
                     eprintln!("[plugins] {} 登记失败：{error}", panel.id);
+                    api::unregister_layouts(&panel.id, cx);
                     return None;
                 }
                 Some(panel)

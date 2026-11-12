@@ -26,11 +26,16 @@ pub use smelt_ui::theme_catalog::{
     swatch as theme_swatch, themes,
 };
 
+mod layout;
 mod view;
 
 #[cfg(feature = "js")]
 pub mod js;
 
+pub use layout::{
+    DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
+    register_layouts, unregister_layouts,
+};
 pub use view::{
     PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec, built_view, ensure_view,
     is_registered, register_view, unregister_view, views,
@@ -79,6 +84,8 @@ pub enum HostEvent {
     ViewsChanged,
     /// 主题登记变了：宿主应重新应用当前主题并更新设置页。
     ThemesChanged,
+    /// 布局登记变了（见 [`register_layouts`]）：选的布局可能刚登记上或撤下了。
+    LayoutsChanged,
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。

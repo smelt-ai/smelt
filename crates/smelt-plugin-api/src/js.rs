@@ -8,7 +8,8 @@
 //! 一条队列，从挂载完起开始记。插件视图释放时队列一起撤掉，所以插件卸载、重新加载不用
 //! 宿主另外收拾。
 //!
-//! 插件摆在哪不由插件定，这里没有登记位置的函数（见 `docs/app-plugins.md`）。
+//! 插件摆在哪不由插件定，这里没有登记位置的函数；插件可以登记整份布局，用不用由用户在
+//! 设置里选（见 `docs/app-plugins.md`）。
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -32,6 +33,16 @@ export function active_project(): string | null;
 export function notify(subtitle: string, body: string): null;
 /** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
 export function register_themes(themeSets: string[]): null;
+export interface Layout {
+  /** 本插件内的名字，不含 "/"；布局 id 是 "<插件 id>/<name>"。 */
+  name: string;
+  /** 设置里显示的名字。 */
+  title: string;
+  /** gpui-base DockAreaState JSON，面板名是视图 id，version 为 1。 */
+  layout: string;
+}
+/** 替换本插件登记的布局。空数组撤下全部；一份不合法整组不登记。用哪份由用户在设置里选。 */
+export function register_layouts(layouts: Layout[]): null;
 export interface PathRequest {
   /** 选择框标题。 */
   title: string;
@@ -49,7 +60,8 @@ export type HostEvent =
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
   | { type: "views_changed" }
-  | { type: "themes_changed" };
+  | { type: "themes_changed" }
+  | { type: "layouts_changed" };
 /** 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份。同时只能有一个在等。 */
 export function next_event(): Promise<HostEvent>;
 "#;
@@ -60,6 +72,8 @@ pub struct JsPlugin(Rc<RefCell<PluginState>>);
 
 #[derive(Default)]
 struct PluginState {
+    /// 插件 id，它登记的布局按这个来源记。
+    id: String,
     theme_owner: String,
     queue: VecDeque<HostEvent>,
     waiter: Option<oneshot::Sender<HostEvent>>,
@@ -75,7 +89,11 @@ impl JsPlugin {
     /// 每个插件的脚本主题有独立的来源，不能替换其他插件或内置主题。
     pub fn for_plugin(id: &str) -> Self {
         let plugin = Self::default();
-        plugin.0.borrow_mut().theme_owner = format!("script:{id}");
+        {
+            let mut state = plugin.0.borrow_mut();
+            state.id = id.to_string();
+            state.theme_owner = format!("script:{id}");
+        }
         plugin
     }
 
@@ -83,6 +101,7 @@ impl JsPlugin {
     pub fn module(&self) -> HostModule {
         let events = self.clone();
         let theme_owner = self.0.borrow().theme_owner.clone();
+        let layout_owner = self.0.borrow().id.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_project", |_| {
@@ -117,6 +136,25 @@ impl JsPlugin {
                     crate::register_theme_sets(&theme_owner, &sources, cx)
                 })?
                 .map_err(|error| HostError::new(error.to_string()))?;
+                Ok(HostValue::Null)
+            })
+            .function("register_layouts", move |arguments| {
+                let layouts = layout_arguments(arguments)?;
+                if layout_owner.is_empty() {
+                    return Err(HostError::new("插件没有布局来源身份"));
+                }
+                let sources = layouts
+                    .iter()
+                    .map(|(name, title, state)| crate::LayoutSource {
+                        name,
+                        title,
+                        state,
+                    })
+                    .collect::<Vec<_>>();
+                in_app("register_layouts", |cx| {
+                    crate::register_layouts(&layout_owner, &sources, cx)
+                })?
+                .map_err(HostError::new)?;
                 Ok(HostValue::Null)
             })
             .async_function("pick_paths", pick_paths)
@@ -188,6 +226,27 @@ impl JsPlugin {
 fn in_app<R>(name: &str, f: impl FnOnce(&mut App) -> R) -> Result<R, HostError> {
     gpui_shell::with_current_app(f)
         .ok_or_else(|| HostError::new(format!("{name} 只能在视图的事件、任务或 init 里调用")))
+}
+
+/// `register_layouts` 的参数：每项的名字、标题、布局原文。
+fn layout_arguments(arguments: &HostArguments) -> Result<Vec<(String, String, String)>, HostError> {
+    let invalid = || HostError::new("布局必须是 { name, title, layout } 字符串对象的数组");
+    arguments
+        .value(0)?
+        .as_array()
+        .ok_or_else(invalid)?
+        .iter()
+        .map(|layout| {
+            let field = |name: &str| {
+                layout
+                    .get(name)
+                    .and_then(HostValue::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(invalid)
+            };
+            Ok((field("name")?, field("title")?, field("layout")?))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- 选路径
@@ -269,6 +328,7 @@ fn event_value(event: &HostEvent) -> HostValue {
         }
         HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
+        HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
     };
     object.into()
 }
@@ -327,6 +387,47 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn layout_registration_rejects_invalid_arguments_before_entering_app() {
+        let module = JsPlugin::for_plugin("example").module();
+        let layout = |fields: &[(&str, HostValue)]| {
+            let mut object = HostObject::new();
+            for (name, value) in fields {
+                object = object.field(*name, value.clone());
+            }
+            HostValue::Array(vec![object.into()])
+        };
+        for arguments in [
+            HostArguments::default(),
+            HostArguments::new([HostValue::Null]),
+            HostArguments::new([HostValue::Array(vec![HostValue::Null])]),
+            HostArguments::new([layout(&[
+                ("name", "a".into()),
+                ("title", "A".into()),
+            ])]),
+            HostArguments::new([layout(&[
+                ("name", "a".into()),
+                ("title", HostValue::Null),
+                ("layout", "{}".into()),
+            ])]),
+        ] {
+            let error = module.call("register_layouts", &arguments).unwrap_err();
+            assert!(!error.message().contains("只能在视图"), "{}", error.message());
+        }
+        // 参数对了才进 App；测试里没有 App。
+        let error = module
+            .call(
+                "register_layouts",
+                &HostArguments::new([layout(&[
+                    ("name", "a".into()),
+                    ("title", "A".into()),
+                    ("layout", "{}".into()),
+                ])]),
+            )
+            .unwrap_err();
+        assert!(error.message().contains("只能在视图"));
     }
 
     #[test]

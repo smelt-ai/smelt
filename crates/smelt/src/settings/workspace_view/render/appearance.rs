@@ -1,4 +1,4 @@
-//! 设置页：外观（主题、字号与字体、窗口与背景）。
+//! 设置页：外观（主题、字号与字体、布局、窗口与背景）。
 
 use super::*;
 use gpui_component::IndexPath;
@@ -15,6 +15,7 @@ pub(super) fn appearance_page(
     SettingPage::new("外观")
         .group(interface_group(snapshot))
         .group(terminal_group(snapshot))
+        .group(layout_group(entity.clone(), cx))
         .group(window_group(entity, snapshot, cx))
 }
 
@@ -78,6 +79,60 @@ fn terminal_group(snapshot: &SettingsRenderSnapshot) -> SettingGroup {
         )
         .description("终端、diff 和代码块共用，建议选等宽；缺字时回落内嵌的 Maple Mono NF"),
     ])
+}
+
+/// 布局：用哪份，和把它恢复成本来的样子。选项是插件登记的布局（只读内存）。
+fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
+    let options: Vec<(SharedString, SharedString)> = smelt_plugin_api::layouts(cx)
+        .into_iter()
+        .map(|layout| (layout.id, layout.title))
+        .collect();
+    if options.is_empty() {
+        let choice = SettingItem::new(
+        "布局",
+        SettingField::render(|_, _, cx: &mut App| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("没有可选的布局")
+        }),
+    )
+    .description("所有视图摆在中间一组；装了带布局的插件后可以在这里换");
+    // 兜底的摆法不存档，没有可恢复的。
+    return SettingGroup::new().title("布局").item(choice);
+    }
+    let choice = SettingItem::new(
+        "布局",
+        SettingField::dropdown(
+            options,
+            // 选的布局暂时没登记时显示实际在用的那份，不改保存的选择。
+            |cx: &App| {
+                crate::workspace_layout::effective_layout(cx)
+                    .unwrap_or_default()
+                    .into()
+            },
+            |id: SharedString, cx: &mut App| {
+                let id = id.to_string();
+                // 工作台盯着外观里的这一项，变了自己换布局。
+                apply_appearance(move |a| a.layout_id = Some(id), cx);
+            },
+        ),
+    )
+    .description("工作台里各个视图怎么摆；插件可以带自己的布局");
+    let restore = SettingItem::new(
+        "恢复布局",
+        SettingField::render(move |_, _, _: &mut App| {
+            let entity = entity.clone();
+            Button::new("restore-layout")
+                .compact()
+                .label("恢复")
+                .on_click(move |_, _, cx: &mut App| {
+                    entity.update(cx, |workspace, cx| workspace.restore_layout(cx));
+                })
+        }),
+    )
+    .description("扔掉拖动、拆分、收起过的样子，回到这份布局本来的样子");
+    SettingGroup::new().title("布局").items(vec![choice, restore])
 }
 
 /// 滑块加右侧数值。数值框留够「100%」的宽度并右对齐，几行的数字对得齐。
