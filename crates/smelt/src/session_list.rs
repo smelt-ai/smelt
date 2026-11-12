@@ -634,14 +634,6 @@ impl Workspace {
         .map(|root| ProjectRef { runtime, root })
     }
 
-    /// 活动项目在本机上时的项目根。只读本机的插件面板用；文件、变更、历史面板按
-    /// [`Self::active_project_ref`] 发给项目所在的机器。
-    pub(crate) fn active_local_project_root(&self, cx: &App) -> Option<String> {
-        self.active_project_ref(cx)
-            .filter(|project| project.runtime == RuntimeKey::Local)
-            .map(|project| project.root)
-    }
-
     /// `root` 是否是某段仍然开着的智能体对话的工作目录。
     fn agent_conversation_workspace_is_open(&self, root: &str, cx: &App) -> bool {
         smelt_model::session_control::is_agent_conversation_cwd(root)

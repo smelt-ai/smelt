@@ -98,6 +98,7 @@ impl Workspace {
             self.ensure_git_watch(project, cx);
         }
         self.note_active_project(cx);
+        self.note_shown_views(cx);
 
         // 仓库信息发给会话所在的那台机器。
         let repo_cwds: HashSet<crate::ProjectRef> = self
@@ -127,45 +128,6 @@ impl Workspace {
             let git_repo = self.active_git_repo_root(&root);
             self.ensure_branches(git_repo, cx);
             self.prepare_git_panel(window, cx);
-        }
-
-        if self.history_page_visible() {
-            if self.history_filter.is_none() {
-                use gpui_component::input::{InputEvent, InputState};
-                let state =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称或原始标题…"));
-                // 过滤在内存里完成，键入只需要重绘，不必再跑一遍目录和 git。
-                self._history_filter_sub =
-                    Some(cx.subscribe(&state, |_, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            cx.notify();
-                        }
-                    }));
-                self.history_filter = Some(state);
-            }
-            let cwd = self.active_project_ref(cx);
-            if self.history_project_root.as_ref() != cwd.as_ref() {
-                self.history_project_root = cwd.clone();
-                self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
-                self.session_detail = None;
-                self.history_detail_list_state.reset(0);
-            }
-            if let Some(root) = cwd {
-                let (agent, pid) = self.history_source(Some(&root), cx);
-                let tabs = crate::session_history::history_source_tabs(
-                    self.history_engine_override(Some(&root), cx),
-                    crate::settings::agent_host_settings(&root.runtime, cx)
-                        .profiles
-                        .iter()
-                        .cloned(),
-                );
-                for tab in tabs {
-                    if tab.kind != agent || tab.profile_id != pid {
-                        self.prefetch_session_list(tab.kind, tab.profile_id, root.clone(), cx);
-                    }
-                }
-                self.ensure_session_list(agent, pid, root, cx);
-            }
         }
 
         if self.files_view_visible() {
@@ -284,10 +246,6 @@ impl Workspace {
 
     fn git_page_visible(&self) -> bool {
         self.view_shown(crate::builtin_views::Builtin::Git.id())
-    }
-
-    fn history_page_visible(&self) -> bool {
-        self.view_shown(crate::builtin_views::Builtin::History.id())
     }
 
     /// 每 2 秒把仍开着的页的 TTL 缓存再对一次。打开页面和切换项目走事件，

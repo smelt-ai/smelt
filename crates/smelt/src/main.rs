@@ -13,7 +13,7 @@
 // 搬出主 crate（acp_view.rs 独立成 smelt-acp-view，其余几个是它和主 GUI 共用的
 // UI 基建，搬进 smelt-ui / smelt-core，见各自文件头注释）。这里用同名 `use`
 // 重新导出成原来的模块路径，全库既有的 `crate::ui_theme::x()` 之类写法不用
-// 逐处改——跟 session_history.rs 对 claude_paths 的重导出是同一个套路。
+// 逐处改。
 pub(crate) use smelt_acp_view::acp_view;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
@@ -47,7 +47,7 @@ mod runtimes;
 mod tool_panel;
 pub(crate) use runtime_space::ProjectRef;
 pub(crate) use runtimes::RuntimeKey;
-mod session_history;
+mod session_commands;
 mod session_list;
 mod settings;
 mod sidebar_order;
@@ -1363,20 +1363,11 @@ enum RenameTarget {
     Pane(Entity<TerminalView>),
     /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
-    History {
-        /// 存档在哪台机器上。
-        runtime: RuntimeKey,
-        agent: settings::HistorySourceKind,
-        profile_id: Option<String>,
-        cwd: String,
-        resume_id: String,
-        current_title: String,
-    },
 }
 
 impl RenameTarget {
     /// 侧栏里的会话行、分屏行、对话行就地改名：输入框画在那一行里，回车或点别处保存，
-    /// Esc 取消。历史会话和机器名不在侧栏的行上，还用弹窗。
+    /// Esc 取消。机器名不在侧栏的行上，还用弹窗。
     fn is_inline(&self) -> bool {
         matches!(self, Self::Session(_) | Self::Pane(_))
     }
@@ -2336,39 +2327,6 @@ struct Workspace {
     /// ahead/behind，但 render 每帧都满足「在 Git 页」，靠这个时间戳去抖（同一 root
     /// 60s 内不重复自动 fetch），避免每帧狂发网络请求。
     git_autofetch_at: HashMap<ProjectRef, Instant>,
-    /// 历史会话列表缓存（`"{agent_id}:{cwd}"` → (取得时刻, 数据)）：后台扫描该 agent
-    /// 在该项目下的本地存储，render 只读。key 带上 agent_id 是因为四家 agent 的历史
-    /// 各存各的，同一个 cwd 换个 tab 就是完全不同的一份数据。
-    /// 注意：总览卡片那边（`self.sessions` 渲染，展示"最近一次 Claude 活动"）也复用
-    /// 这份缓存，固定传 `ConversationAgentKind::Claude`——历史会话页加多 agent tab 不该改变
-    /// 那个功能的行为，两处刻意共享同一套读写路径而不是各建一份。
-    session_list: HashMap<String, (Instant, session_history::HistoryListSnapshot)>,
-    /// 正在后台扫描历史会话列表的 key（同上 `"{agent_id}:{cwd}"`，防重复并发 spawn）。
-    session_list_inflight: HashSet<String>,
-    /// 扫描期间发生删除等变更的 key；旧扫描完成后会自动再扫一次，避免旧快照回写。
-    session_list_invalidated: HashSet<String>,
-    /// 历史会话绑定的智能体（同上 key → `resume_id` → 智能体 id）。跟列表在同一次后台
-    /// 扫描里读出：它要逐条查 SQLite，放进 render 会随每帧重绘重复读库。
-    history_agent_bindings: HashMap<String, Rc<HashMap<String, String>>>,
-    /// 历史会话标题搜索框；只过滤已加载列表，不触发 transcript 重扫。
-    history_filter: Option<Entity<gpui_component::input::InputState>>,
-    _history_filter_sub: Option<Subscription>,
-    /// 当前选中查看的历史会话；None 表示未选。
-    session_detail: Option<session_history::OpenedHistory>,
-    /// 历史会话右键删除的二次确认目标（None = 没在删除）。
-    delete_history_target: Option<session_history::DeleteHistoryTarget>,
-    /// 历史会话右侧消息详情的可变高度虚拟列表状态。
-    history_detail_list_state: gpui::ListState,
-    /// 加载会话详情的自增序号：后台解析完成时用它判断结果是否已过期（切了别的会话）。
-    session_detail_gen: u64,
-    /// 历史会话页当前选中查看哪家 agent 的历史（Claude/Copilot/Codex/
-    /// Grok 分 tab，各自存储格式不同，见 session_history.rs 头部注释）。
-    history_agent: settings::HistorySourceKind,
-    /// 选中的是手动添加的 workspace profile（而不是某个基础 agent 槽位）时是
-    /// `Some(profile_id)`；`history_agent` 这时候是该 profile 底层接的种类。
-    history_profile: Option<String>,
-    /// 上一次渲染历史时使用的项目根。项目切换后在下一次历史渲染前失效旧详情。
-    history_project_root: Option<ProjectRef>,
     /// 调试 HUD 开关（Cmd+Shift+F 切换），见 `overlay::debug_hud`。
     debug_hud: bool,
     /// 退出确认拦截弹窗开关
@@ -2404,7 +2362,9 @@ struct Workspace {
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
     /// 上次告诉插件的当前项目（见 `note_active_project`），只用来判断变没变。
-    plugin_project_root: Option<String>,
+    plugin_project: Option<ProjectRef>,
+    /// 上次告诉插件的看得见的视图（见 `note_shown_views`），只用来判断变没变。
+    plugin_shown_views: HashSet<String>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
     ///
     /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
@@ -2773,21 +2733,6 @@ impl Workspace {
             branches_inflight: HashSet::new(),
             watched_projects: HashSet::new(),
             git_autofetch_at: HashMap::new(),
-            session_list: HashMap::new(),
-            session_list_inflight: HashSet::new(),
-            session_list_invalidated: HashSet::new(),
-            history_agent_bindings: HashMap::new(),
-            history_filter: None,
-            _history_filter_sub: None,
-            session_detail: None,
-            delete_history_target: None,
-            history_detail_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(800.)),
-            session_detail_gen: 0,
-            history_agent: settings::HistorySourceKind::Conversation(
-                settings::ConversationAgentKind::Claude,
-            ),
-            history_profile: None,
-            history_project_root: None,
             launch_inputs: None,
             profile_inputs: None,
             panel_plugins: Default::default(),
@@ -2821,7 +2766,8 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            plugin_project_root: None,
+            plugin_project: None,
+            plugin_shown_views: HashSet::new(),
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_running_count: None,

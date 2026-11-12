@@ -176,6 +176,8 @@ impl CapabilitiesPage {
                 cx.notify();
             }
             HostEvent::ActiveProjectChanged
+            | HostEvent::AgentSettingsChanged
+            | HostEvent::ShownViewsChanged
             | HostEvent::ViewsChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged

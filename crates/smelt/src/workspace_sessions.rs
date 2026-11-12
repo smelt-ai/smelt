@@ -10,6 +10,8 @@ pub(crate) struct AcpResumeRequest {
     pub profile_id: Option<String>,
     pub cwd: String,
     pub resume_id: String,
+    /// 这段会话属于哪个智能体定义（运行时随历史列表给的）。
+    pub agent_definition_id: Option<String>,
 }
 
 /// 新建一段 ACP 对话或自动化 Run 所需的完整输入。产品 Agent 只是可选来源定义；
@@ -246,7 +248,7 @@ impl Workspace {
                             saved.history_session_id.as_ref(),
                             agent_definition_id.as_deref(),
                         ) {
-                            crate::session_history::remember_history_agent(&key, agent.into(),
+                            remember_history_agent(&key, agent.into(),
                                 saved.profile_id.as_deref(),
                                 &resume_id.to_string(),
                                 definition_id, cx);
@@ -1383,6 +1385,7 @@ impl Workspace {
             profile_id,
             cwd,
             resume_id,
+            agent_definition_id,
         } = request;
         let Some(runtime) = crate::runtimes::runtime(&runtime_key, cx) else {
             self.report_background_error("这台机器已经移除，没法在上面继续这段对话");
@@ -1411,17 +1414,7 @@ impl Workspace {
             root: cwd.clone(),
         };
         let definition = crate::workspace_view::space_agent_id(&project, cx)
-            .or_else(|| {
-                // 历史列表加载时运行时一并给了「这段会话属于哪个智能体」。
-                self.history_agent_bindings
-                    .get(&crate::session_history::session_list_key(
-                        &runtime_key,
-                        agent.into(),
-                        profile_id.as_deref(),
-                        &cwd,
-                    ))
-                    .and_then(|bindings| bindings.get(&resume_id).cloned())
-            })
+            .or(agent_definition_id)
             .and_then(|id| settings::agent_definition(&runtime_key, &id, cx));
         // 启动命令、初始配置都按存档所在那台机器的设置。
         let launch =
@@ -1435,7 +1428,7 @@ impl Workspace {
         let custom_title = None;
         let agent_definition_id = definition.map(|definition| definition.id);
         if let Some(id) = agent_definition_id.as_deref() {
-            crate::session_history::remember_history_agent(
+            remember_history_agent(
                 &runtime_key,
                 agent.into(),
                 profile_id.as_deref(),
@@ -2534,7 +2527,6 @@ impl Workspace {
                 s.title(cx)
             }
             RenameTarget::Pane(view) => pane_title(view, cx),
-            RenameTarget::History { current_title, .. } => current_title.clone(),
             RenameTarget::Runtime(runtime_id) => {
                 crate::runtimes::runtime_name(&crate::RuntimeKey::Remote(runtime_id.clone()), cx)
             }
@@ -2657,28 +2649,6 @@ impl Workspace {
                     crate::runtimes::rename_runtime(runtime_id, name, cx);
                 }
             }
-            RenameTarget::History {
-                runtime,
-                agent,
-                profile_id,
-                cwd,
-                resume_id,
-                ..
-            } => {
-                let Some(runtime) = crate::runtimes::runtime(&runtime, cx) else {
-                    self.report_background_error("这台机器已经移除，改不了名字");
-                    return;
-                };
-                self.set_history_custom_title(
-                    &runtime,
-                    agent,
-                    profile_id,
-                    cwd,
-                    resume_id,
-                    custom_title,
-                    cx,
-                );
-            }
         }
         self.save_state(cx);
         cx.notify();
@@ -2707,22 +2677,7 @@ impl Workspace {
             eprintln!("[session-metadata] 保存会话名称失败: {error}");
             return;
         }
-
-        let key =
-            session_history::session_list_key(runtime.key(), agent, profile_id.as_deref(), &cwd);
-        if let Some((_, list)) = self.session_list.get_mut(&key) {
-            let mut updated = list.sessions.as_ref().clone();
-            for session in &mut updated {
-                if session.resume_id == resume_id {
-                    session.custom_title = custom_title.clone();
-                    session.title = custom_title
-                        .clone()
-                        .unwrap_or_else(|| session.agent_title.clone());
-                }
-            }
-            *list = session_history::HistoryListSnapshot::new(updated);
-        }
-
+        // 历史页由运行时推的 `history.changed` 重取列表，这里不用管它。
         self.save_state(cx);
         cx.notify();
     }
@@ -2746,7 +2701,7 @@ impl Workspace {
         let Some(resume_id) = view.history_session_id_for_save() else {
             return;
         };
-        crate::session_history::remember_history_agent(
+        remember_history_agent(
             session.runtime(cx).key(),
             view.agent_kind().into(),
             view.profile_id(),
@@ -2907,4 +2862,43 @@ mod rename_tests {
         );
         assert_eq!(submitted_title("smelt", "  "), Some(None));
     }
+}
+
+/// 记下一段历史会话属于哪个产品智能体，以后「继续」时按原来的智能体启动。交给
+/// 运行时异步写，失败只记日志：漏记的后果只是继续时退回裸引擎。
+/// `runtime` 是存档所在的机器。
+fn remember_history_agent(
+    runtime: &RuntimeKey,
+    agent: settings::HistorySourceKind,
+    profile_id: Option<&str>,
+    resume_id: &str,
+    agent_definition_id: &str,
+    cx: &App,
+) {
+    use smelt_runtime_client::protocol::history::{
+        HistoryRememberAgentCall, HistoryRememberAgentParams,
+    };
+    let params = HistoryRememberAgentParams {
+        agent: agent.id().to_string(),
+        profile_id: profile_id.map(str::to_string),
+        resume_id: resume_id.to_string(),
+        agent_definition_id: agent_definition_id.to_string(),
+    };
+    let Ok(client) = crate::runtime_call::target(runtime, cx) else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(error) = crate::runtime_call::call_on::<HistoryRememberAgentCall>(
+                &client,
+                params,
+                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            ) {
+                eprintln!(
+                    "[history] 记录会话归属失败：{}",
+                    crate::runtime_call::error_text(error)
+                );
+            }
+        })
+        .detach();
 }

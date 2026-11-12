@@ -25,7 +25,6 @@ pub(crate) enum ModalLayer {
     DiscardAll,
     DeleteBranch,
     DeleteFile,
-    DeleteHistory,
     DeleteAgentMemory,
     DeleteAgent,
     DeleteAutomation,
@@ -50,7 +49,6 @@ impl ModalLayer {
             Self::DiscardAll => 6,
             Self::DeleteBranch => 7,
             Self::DeleteFile => 8,
-            Self::DeleteHistory => 9,
             Self::DeleteAgentMemory => 10,
             Self::DeleteAgent => 11,
             Self::DeleteAutomation => 12,
@@ -131,11 +129,6 @@ impl Workspace {
             &mut rank,
             self.delete_file_target.is_some(),
             ModalLayer::DeleteFile.rank(),
-        );
-        raise(
-            &mut rank,
-            self.delete_history_target.is_some(),
-            ModalLayer::DeleteHistory.rank(),
         );
         raise(
             &mut rank,
@@ -340,7 +333,6 @@ impl Workspace {
             || self.discard_all_target.is_some()
             || self.delete_branch_target.is_some()
             || self.delete_file_target.is_some()
-            || self.delete_history_target.is_some()
             || self.agent_surface.pending_delete.is_some()
             || self.agent_surface.pending_memory_delete.is_some()
             || self.automation_surface.pending_delete.is_some()
@@ -352,7 +344,6 @@ impl Workspace {
             self.discard_all_target = None;
             self.delete_branch_target = None;
             self.delete_file_target = None;
-            self.delete_history_target = None;
             self.agent_surface.pending_delete = None;
             self.agent_surface.pending_memory_delete = None;
             self.automation_surface.pending_delete = None;
@@ -570,11 +561,6 @@ impl Workspace {
                 self.delete_file_target
                     .is_some()
                     .then(|| self.render_delete_file_confirm(cx)),
-            )
-            .children(
-                self.delete_history_target
-                    .is_some()
-                    .then(|| self.render_delete_history_confirm(cx)),
             )
             .children(
                 self.agent_surface

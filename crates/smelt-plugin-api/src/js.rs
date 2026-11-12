@@ -31,8 +31,17 @@ pub const MODULE: &str = "smelt-plugin-api";
 const DECLARATIONS: &str = r#"
 /** 一台机器：本机是 null，远程机器是它的 runtime id。 */
 export type Machine = string | null;
-/** 工作台的当前项目，只算这台电脑上的；远程项目或没有项目时为 null。 */
-export function active_project(): string | null;
+export interface Project {
+  machine: Machine;
+  /** 根目录，按那台机器的路径写。 */
+  root: string;
+}
+/** 工作台的当前项目，可能在远程机器上；没有项目时为 null。 */
+export function active_project(): Project | null;
+/** 那台机器的智能体配置（profiles、agents、env 等，形状同运行时的 agent_host.get）；还没读到时为 null。变了发 agent_settings_changed。 */
+export function agent_settings(machine: Machine): unknown | null;
+/** 那个视图此刻看得见。变了发 shown_views_changed。 */
+export function view_shown(view: string): boolean;
 /** 发送系统通知；显示受系统通知授权和设置影响。 */
 export function notify(subtitle: string, body: string): null;
 /** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
@@ -67,8 +76,10 @@ export interface Command {
   key?: string;
   /** 快捷键在哪生效，gpui key context 谓词；默认 "Workspace"，即主窗口任何地方。 */
   context?: string;
-  /** 出现在命令面板里，默认 true。 */
+  /** 出现在命令面板里；默认 true，requires_args 时默认 false。 */
   palette?: boolean;
+  /** 要带参数才能执行：只给代码用 run 调，不能有 key、不进命令面板、不在快捷键设置里出现。默认 false。 */
+  requires_args?: boolean;
 }
 /** 替换本插件登记的命令。空数组撤下全部；一条不合法整组不登记。执行时由 next_command 取到。 */
 export function register_commands(commands: Command[]): null;
@@ -87,6 +98,8 @@ export type HostEvent =
   | { type: "reconnected"; machine: Machine }
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
+  | { type: "agent_settings_changed" }
+  | { type: "shown_views_changed" }
   | { type: "views_changed" }
   | { type: "themes_changed" }
   | { type: "layouts_changed" }
@@ -146,9 +159,31 @@ impl JsPlugin {
             .declarations(DECLARATIONS)
             .function("active_project", |_| {
                 let project = in_app("active_project", |cx| crate::host(cx).active_project(cx))?;
-                Ok(project
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .into())
+                Ok(project.map_or(HostValue::Null, |project| {
+                    HostObject::new()
+                        .field("machine", machine_value(&project.machine))
+                        .field("root", project.root.as_str())
+                        .into()
+                }))
+            })
+            .function("agent_settings", |arguments| {
+                let machine = machine_argument("agent_settings", arguments, 0)?;
+                let settings = in_app("agent_settings", |cx| {
+                    crate::host(cx)
+                        .agent_settings(&machine, cx)
+                        .map(serde_json::to_value)
+                })?;
+                match settings {
+                    None => Ok(HostValue::Null),
+                    Some(Ok(value)) => Ok(host_value(&value)),
+                    Some(Err(error)) => Err(HostError::new(format!(
+                        "agent_settings：配置转不成 JSON：{error}"
+                    ))),
+                }
+            })
+            .function("view_shown", |arguments| {
+                let id = arguments.string(0)?;
+                Ok(in_app("view_shown", |cx| crate::host(cx).view_shown(id, cx))?.into())
             })
             .function("notify", |arguments| {
                 let subtitle = arguments.string(0)?;
@@ -374,22 +409,23 @@ fn command_arguments(
             };
             let name = text("name")?.ok_or_else(|| invalid("每条命令都要有 name"))?;
             let title = text("title")?.ok_or_else(|| invalid("每条命令都要有 title"))?;
-            let palette = match command.get("palette") {
-                None | Some(HostValue::Null) => true,
-                Some(HostValue::Bool(palette)) => *palette,
-                Some(other) => {
-                    return Err(invalid(&format!(
-                        "palette 要是布尔值，收到 {}",
-                        other.describe()
-                    )));
-                }
+            let flag = |name: &str, default: bool| match command.get(name) {
+                None | Some(HostValue::Null) => Ok(default),
+                Some(HostValue::Bool(value)) => Ok(*value),
+                Some(other) => Err(invalid(&format!(
+                    "{name} 要是布尔值，收到 {}",
+                    other.describe()
+                ))),
             };
+            let requires_args = flag("requires_args", false)?;
+            let palette = flag("palette", !requires_args)?;
             let state = Rc::downgrade(&plugin.0);
             let handler_name = name.clone();
             Ok(CommandSpec {
                 key: text("key")?,
                 context: text("context")?.unwrap_or_else(|| "Workspace".to_string()),
                 palette,
+                requires_args,
                 handler: Rc::new(move |args, _, _| match state.upgrade() {
                     Some(state) => JsPlugin(state).deliver_command(&handler_name, args),
                     None => Handled::Pass,
@@ -444,21 +480,35 @@ fn host_value(value: &Value) -> HostValue {
     }
 }
 
+/// 脚本里的机器：本机 `null`，远程机器是 runtime id。
+fn machine_argument(
+    name: &str,
+    arguments: &HostArguments,
+    index: usize,
+) -> Result<RuntimeKey, HostError> {
+    match arguments.value(index)? {
+        HostValue::Null => Ok(RuntimeKey::Local),
+        HostValue::Str(id) => Ok(RuntimeKey::Remote(id.clone())),
+        other => Err(HostError::new(format!(
+            "{name}：机器要是 null 或字符串，收到 {}",
+            other.describe()
+        ))),
+    }
+}
+
+fn machine_value(key: &RuntimeKey) -> HostValue {
+    match key {
+        RuntimeKey::Local => HostValue::Null,
+        RuntimeKey::Remote(id) => HostValue::Str(id.clone()),
+    }
+}
+
 // ---------------------------------------------------------------- 选路径
 
 fn pick_paths(
     arguments: &HostArguments,
 ) -> Result<impl Future<Output = Result<HostValue, HostError>> + Send + use<>, HostError> {
-    let machine = match arguments.value(0)? {
-        HostValue::Null => RuntimeKey::Local,
-        HostValue::Str(id) => RuntimeKey::Remote(id.clone()),
-        other => {
-            return Err(HostError::new(format!(
-                "pick_paths：机器要是 null 或字符串，收到 {}",
-                other.describe()
-            )));
-        }
-    };
+    let machine = machine_argument("pick_paths", arguments, 0)?;
     let request = arguments.value(1)?;
     let text = |name: &str| {
         request
@@ -502,10 +552,7 @@ fn pick_paths(
 // ---------------------------------------------------------------- 事件
 
 fn event_value(event: &HostEvent) -> HostValue {
-    let machine = |key: &RuntimeKey| match key {
-        RuntimeKey::Local => HostValue::Null,
-        RuntimeKey::Remote(id) => HostValue::Str(id.clone()),
-    };
+    let machine = machine_value;
     let object = match event {
         HostEvent::RuntimeTopic {
             machine: key,
@@ -521,6 +568,10 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::ActiveProjectChanged => {
             HostObject::new().field("type", "active_project_changed")
         }
+        HostEvent::AgentSettingsChanged => {
+            HostObject::new().field("type", "agent_settings_changed")
+        }
+        HostEvent::ShownViewsChanged => HostObject::new().field("type", "shown_views_changed"),
         HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
@@ -558,6 +609,27 @@ mod tests {
                 "notify",
                 &HostArguments::new([HostValue::from("副标题"), HostValue::from("正文")]),
             )
+            .unwrap_err();
+        assert!(outside_script.message().contains("只能在视图"));
+    }
+
+    #[test]
+    fn host_queries_check_their_arguments_before_entering_app() {
+        let module = JsPlugin::new().module();
+        for machine in [HostValue::Bool(true), HostValue::Number(1.0)] {
+            let error = module
+                .call("agent_settings", &HostArguments::new([machine]))
+                .unwrap_err();
+            assert!(error.message().contains("机器要是 null 或字符串"));
+        }
+        assert!(
+            module
+                .call("view_shown", &HostArguments::default())
+                .is_err()
+        );
+        // 参数对了才去找宿主，测试里没有脚本上下文。
+        let outside_script = module
+            .call("agent_settings", &HostArguments::new([HostValue::Null]))
             .unwrap_err();
         assert!(outside_script.message().contains("只能在视图"));
     }

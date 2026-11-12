@@ -60,6 +60,9 @@ pub struct CommandSpec {
     pub context: String,
     /// 出现在命令面板里。
     pub palette: bool,
+    /// 要带参数才能执行：只给代码用 [`crate::run`] 调，不进命令面板、不绑键，也不在快捷键
+    /// 设置里出现。这种命令 `key` 要空、`palette` 要关。
+    pub requires_args: bool,
     pub handler: CommandHandler,
 }
 
@@ -74,6 +77,7 @@ pub struct CommandInfo {
     pub key: Option<SharedString>,
     pub context: SharedString,
     pub palette: bool,
+    pub requires_args: bool,
 }
 
 struct Entry {
@@ -122,6 +126,11 @@ pub fn register_commands(
                 return Err(format!("命令「{id}」的快捷键 {key} 解析不了：{error}"));
             }
         }
+        if spec.requires_args && (spec.key.is_some() || spec.palette) {
+            return Err(format!(
+                "命令「{id}」要带参数才能执行，不能有快捷键，也不能进命令面板"
+            ));
+        }
         if let Err(error) = KeyBindingContextPredicate::parse(&spec.context) {
             return Err(format!(
                 "命令「{id}」的 context「{}」写错了：{error}",
@@ -137,6 +146,7 @@ pub fn register_commands(
                 key: spec.key.map(Into::into),
                 context: spec.context.into(),
                 palette: spec.palette,
+                requires_args: spec.requires_args,
             },
             handler: spec.handler,
         });
@@ -242,6 +252,7 @@ mod tests {
             key: key.map(str::to_string),
             context: "Workspace".to_string(),
             palette: true,
+            requires_args: false,
             handler: Rc::new(|_, _, _| Handled::Done),
         }
     }
@@ -289,6 +300,15 @@ mod tests {
                 }],
                 vec![CommandSpec {
                     title: " ".to_string(),
+                    ..spec("b", None)
+                }],
+                // 要参数的命令没法从键、面板执行。
+                vec![CommandSpec {
+                    requires_args: true,
+                    ..spec("b", Some("cmd-k"))
+                }],
+                vec![CommandSpec {
+                    requires_args: true,
                     ..spec("b", None)
                 }],
             ];

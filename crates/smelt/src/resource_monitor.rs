@@ -1079,7 +1079,7 @@ fn process_row(process: &ProcessEntry, colors: RowColors) -> impl IntoElement + 
 #[cfg(test)]
 mod tests {
     // 不用 `use super::*;`：父模块 glob 导入了 `gpui::*`，带进来会把 gpui 的 `test` 宏和整张
-    // trait 解析图一起带进测试模块（见 session_history.rs 的同款注释）。
+    // trait 解析图一起带进测试模块（见历史插件 `crates/plugins/history/src/model.rs` 的同款注释）。
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
 

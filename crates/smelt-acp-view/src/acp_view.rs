@@ -1468,16 +1468,6 @@ pub struct AcpForkOrigin {
     pub from_history: bool,
 }
 
-/// 历史会话页「迁移到」的目标：把这段对话交给谁。
-#[derive(Clone)]
-pub struct AcpHandoffTarget {
-    pub agent: ConversationAgentKind,
-    pub launch: ConversationLaunchSpec,
-    pub profile_id: Option<String>,
-    /// profile 的显示名；基础 agent 槽位为 `None`。
-    pub profile_label: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct AcpHandoffRequest {
     /// 新会话跑在哪个运行时上。

@@ -1,4 +1,4 @@
-//! 宿主自带的视图：会话列表、舞台、文件、变更、历史。
+//! 宿主自带的视图：会话列表、舞台、文件、变更。
 //!
 //! 过渡期的适配层：这几块的状态和画法还在 `Workspace` 上，没搬进各自的插件 crate（迁移
 //! 顺序见 `docs/app-plugins.md`）。这里把每一块包成一个视图，登记进和插件同一张视图注册表，
@@ -21,17 +21,10 @@ pub(crate) enum Builtin {
     Stage,
     Files,
     Git,
-    History,
 }
 
 impl Builtin {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::Sessions,
-        Self::Stage,
-        Self::Files,
-        Self::Git,
-        Self::History,
-    ];
+    pub(crate) const ALL: [Self; 4] = [Self::Sessions, Self::Stage, Self::Files, Self::Git];
 
     /// 视图 id，布局文件里引用的就是它。
     pub(crate) fn id(self) -> &'static str {
@@ -40,7 +33,6 @@ impl Builtin {
             Self::Stage => "stage",
             Self::Files => "files",
             Self::Git => "git",
-            Self::History => "history",
         }
     }
 
@@ -50,7 +42,6 @@ impl Builtin {
             Self::Stage => "舞台",
             Self::Files => "文件",
             Self::Git => "变更",
-            Self::History => "历史",
         }
     }
 
@@ -60,7 +51,6 @@ impl Builtin {
             Self::Stage => IconName::AppWindow,
             Self::Files => IconName::FolderTree,
             Self::Git => IconName::GitBranch,
-            Self::History => IconName::Clock,
         }
         .path()
     }
@@ -105,7 +95,6 @@ impl Render for BuiltinView {
             Builtin::Stage => workspace.render_stage_dock(window, cx),
             Builtin::Files => workspace.render_tool_panel_files(window, cx),
             Builtin::Git => workspace.git_narrow_panel(window, cx),
-            Builtin::History => workspace.render_history_view(cx),
         });
         div()
             .size_full()
