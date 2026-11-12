@@ -38,7 +38,7 @@ impl Workspace {
         let Some(seen) = self
             .git_status
             .get(&root)
-            .and_then(|(_, status)| status.seen_change(&path))
+            .and_then(|cached| cached.value.seen_change(&path))
         else {
             self.report_background_error(format!("{path} 已不在改动列表里，请刷新后再丢弃。"));
             return;
@@ -91,7 +91,7 @@ impl Workspace {
             },
             move |this, result, cx| {
                 // 被拒绝多半是列表已经过时，也要刷新，让用户看到现在的样子。
-                this.invalidate_git_status(&done_root, cx);
+                this.invalidate_git_repo(&done_root, cx);
                 match result {
                     Ok(()) => {
                         // 丢弃的正是当前打开的那个文件时，diff 已经没意义了，关掉。
@@ -165,133 +165,240 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 请运行时监听某个项目（文件在运行时那台机器上）：之后有真实文件变化，运行时发
-    /// `project.changed`，见 [`Self::on_project_changed`]。每个 root 只登记一次；运行时
-    /// 重连后监听随旧进程没了，清空重新登记。活动项目被选中时就装上，不必等打开 Git 页。
-    pub fn ensure_git_watch(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
-        if !self.watched_projects.insert(root.clone()) {
+    /// 请运行时建一个监听，之后那里有变化运行时发 `project.changed`，见
+    /// [`Self::on_project_changed`]。只登记，不取数据。
+    ///
+    /// 每种、每个目录只登记一次，失败了（连不上、旧运行时没有这个方法）也算登记过：那台
+    /// 机器重新订阅上（[`Self::on_runtime_resubscribed_git`]）之前不再试。收不到事件的那段
+    /// 时间靠窗口回到前台兜底（[`Self::on_window_refocused`]）。
+    pub(crate) fn ensure_watch(
+        &mut self,
+        kind: WatchKind,
+        root: ProjectRef,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.watches.insert((kind, root.clone())) {
             return;
         }
-        // 立刻拉一次初值：之后纯靠文件事件驱动，但首帧得先有数据，
-        // 否则文件一直不变时侧栏 GIT 角标永远出不来。
-        self.ensure_git_status(root.clone(), cx);
-        let client = crate::runtime_call::target(&root.runtime, cx);
-        cx.spawn(async move |this, cx| {
-            let watch_root = root.root.clone();
-            let watched = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::runtime_call::call_on::<
+        let Ok(client) = crate::runtime_call::target(&root.runtime, cx) else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                let path = root.root.clone();
+                let watched = match kind {
+                    WatchKind::Project => crate::runtime_call::call_on::<
                         smelt_runtime_client::protocol::files::ProjectWatchCall,
                     >(
-                        &client?,
-                        smelt_runtime_client::protocol::files::ProjectRootParams {
-                            root: watch_root,
-                        },
+                        &client,
+                        smelt_runtime_client::protocol::files::ProjectRootParams { root: path },
                         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                     )
-                    .map_err(crate::runtime_call::error_text)
-                })
-                .await;
-            if let Err(error) = watched {
-                eprintln!("[git] 请运行时监听 {} 失败：{error}", root.root);
-                // 下次刷新再试。
-                let _ = this.update(cx, |this, _| this.watched_projects.remove(&root));
-            }
-        })
-        .detach();
-    }
-
-    /// 运行时说项目里有文件变了：标脏并主动重拉 git status，角标 / Git 页在任何页面都
-    /// 即时刷新。监听是递归的，子仓里的改动也会到这里——所以要把该项目下**所有**仓库
-    /// 的 status 都标脏，只刷项目根会让子仓改动在面板里冻结。ensure_* 内部有 inflight
-    /// 去重，重复通知不会叠并发。
-    ///
-    /// 文件树的目录列表也在这里标旧；打开着的文件没改过就重读，改过就提示。
-    pub(crate) fn on_project_changed(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
-        if !self.watched_projects.contains(&root) {
-            return;
-        }
-        self.mark_project_dirs_stale(&root, cx);
-        self.on_open_file_project_changed(&root, cx);
-        self.forget_repo_info_under(&root, cx);
-        self.invalidate_project_git_status(&root, cx);
-        self.ensure_git_repos(root, cx);
-        cx.notify();
-    }
-
-    /// 某台机器断开：它替我们建的监听随连接没了，重连后重新登记。断线期间分支可能变了，
-    /// 仓库信息也一并重取。
-    pub(crate) fn forget_project_watches(&mut self, runtime: &crate::RuntimeKey) {
-        self.watched_projects
-            .retain(|project| &project.runtime != runtime);
-        self.repo_info_stale.extend(
-            self.repo_info
-                .keys()
-                .filter(|cwd| &cwd.runtime == runtime)
-                .cloned(),
-        );
-    }
-
-    /// 远程项目里的文件变了（可能切了分支）：这个项目下各会话目录的仓库信息下次刷新重取，
-    /// 取回来之前旧分支名照常显示。本机的按 5 秒过期，不用管。
-    fn forget_repo_info_under(&mut self, project: &ProjectRef, cx: &App) {
-        if project.runtime == crate::RuntimeKey::Local {
-            return;
-        }
-        let style = crate::runtimes::path_style(&project.runtime, cx);
-        let stale: Vec<ProjectRef> = self
-            .repo_info
-            .keys()
-            .filter(|cwd| {
-                cwd.runtime == project.runtime && style.starts_with(&cwd.root, &project.root)
+                    .map(drop)
+                    .map_err(crate::runtime_call::error_text),
+                    WatchKind::Head => {
+                        git_call::<GitWatchHeadCall>(&client, GitRootParams { root: path })
+                            .map(drop)
+                    }
+                };
+                if let Err(error) = watched {
+                    eprintln!("[git] 请运行时监听 {kind:?} {} 失败：{error}", root.root);
+                }
             })
+            .detach();
+    }
+
+    /// 运行时报 `project.changed{root}`：按当初登记的种类把缓存标旧，看得见的那些在接下来的
+    /// 可见刷新里重取。同一个目录可能两种都登记了。没登记过的（旧连接的遗留）不理。
+    pub(crate) fn on_project_changed(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
+        let mut watched = false;
+        for kind in [WatchKind::Project, WatchKind::Head] {
+            if self.watches.contains(&(kind, root.clone())) {
+                self.apply_watched_change(kind, &root, cx);
+                watched = true;
+            }
+        }
+        if watched {
+            self.schedule_visible_refresh(cx);
+            cx.notify();
+        }
+    }
+
+    fn apply_watched_change(&mut self, kind: WatchKind, root: &ProjectRef, cx: &mut Context<Self>) {
+        match kind {
+            WatchKind::Project => self.mark_project_changed(root, cx),
+            WatchKind::Head => self.mark_repo_info_stale(root),
+        }
+    }
+
+    /// 项目里有文件变了：它下面的 git status、分支列表、仓库发现、目录列表都标旧，打开着的
+    /// 文件没改过就重读。监听是递归的，事件只带项目根，分不出是哪个仓库、哪个目录。
+    fn mark_project_changed(&mut self, project: &ProjectRef, cx: &mut Context<Self>) {
+        self.mark_project_dirs_stale(project, cx);
+        self.on_open_file_project_changed(project, cx);
+        let style = crate::runtimes::path_style(&project.runtime, cx);
+        let under = |key: &ProjectRef| {
+            key.runtime == project.runtime && style.starts_with(&key.root, &project.root)
+        };
+        self.mark_git_caches_stale(&under);
+    }
+
+    /// 选中的目录下 git status、分支列表、仓库发现、侧栏分支名全部标旧；正在取的那次回来
+    /// 也不算新。分支名也在内：事件只带 root，同一个目录上整项目的监听和 HEAD 监听发来的
+    /// 分不开，这次可能就是切了分支。
+    fn mark_git_caches_stale(&mut self, matches: &dyn Fn(&ProjectRef) -> bool) {
+        let status_roots: HashSet<ProjectRef> = self
+            .git_status
+            .keys()
+            .chain(self.git_status_inflight.iter())
+            .filter(|root| matches(root))
             .cloned()
             .collect();
-        self.repo_info_stale.extend(stale);
+        for root in status_roots {
+            self.mark_git_status_dirty(&root);
+        }
+        let branch_roots: HashSet<ProjectRef> = self
+            .branches
+            .keys()
+            .chain(self.branches_inflight.iter())
+            .filter(|root| matches(root))
+            .cloned()
+            .collect();
+        for root in branch_roots {
+            self.mark_branches_stale(&root);
+        }
+        for (root, cached) in self.git_repos.iter_mut() {
+            if matches(root) {
+                cached.stale = true;
+            }
+        }
+        for (root, changed) in self.git_repos_inflight.iter_mut() {
+            if matches(root) {
+                *changed = true;
+            }
+        }
+        let cwds: Vec<ProjectRef> = self
+            .repo_info
+            .keys()
+            .chain(self.repo_info_inflight.keys())
+            .filter(|cwd| matches(cwd))
+            .cloned()
+            .collect();
+        for cwd in cwds {
+            self.mark_repo_info_stale(&cwd);
+        }
     }
 
-    /// 确保某 cwd 的当前分支缓存新鲜（>5s 或缺失就后台刷新），供侧栏显示分支名。跟
-    /// git_status 不同，这个要对**所有**会话的 cwd 探测（侧栏一直显示全部项目分组，不止
-    /// 当前打开的那个），所以单独走一套缓存，TTL 也放宽到 5s——分支不常变，没必要跟
-    /// git status 一样 1.5s 就重跑。非 git 目录（比如临时终端的 $HOME）缓存 None，
-    /// 同样不重复重试。
-    ///
-    /// 远程机器上的取一次就留着：每 5 秒给每个远程会话过一趟网络不值得。那台机器报
-    /// 项目文件变化、或断线重连时才重取（见 [`Self::forget_repo_info_under`]）。
-    pub fn ensure_repo_info(&mut self, cwd: ProjectRef, cx: &mut Context<Self>) {
-        if cwd.root.is_empty() {
-            return;
+    /// 侧栏某个目录的分支名标旧。正在取的那次回来也不算新。
+    fn mark_repo_info_stale(&mut self, cwd: &ProjectRef) {
+        if let Some(cached) = self.repo_info.get_mut(cwd) {
+            cached.stale = true;
         }
-        let remote = cwd.runtime != crate::RuntimeKey::Local;
-        let fresh = self.repo_info.get(&cwd).is_some_and(|(t, _)| {
-            if remote {
-                !self.repo_info_stale.contains(&cwd)
-            } else {
-                t.elapsed() < std::time::Duration::from_secs(5)
-            }
-        });
-        if fresh || self.repo_info_inflight.contains(&cwd) {
+        if let Some(changed) = self.repo_info_inflight.get_mut(cwd) {
+            *changed = true;
+        }
+    }
+
+    /// 不知道哪里变了：`runtime` 那台机器（`None` 是所有机器）上的缓存全部标旧，打开着的
+    /// 文件按登记过监听的项目各查一次。
+    fn mark_everything_stale(
+        &mut self,
+        runtime: Option<&crate::RuntimeKey>,
+        cx: &mut Context<Self>,
+    ) {
+        let on_runtime = |key: &ProjectRef| runtime.is_none_or(|runtime| &key.runtime == runtime);
+        let projects: Vec<ProjectRef> = self
+            .watches
+            .iter()
+            .filter(|(kind, root)| *kind == WatchKind::Project && on_runtime(root))
+            .map(|(_, root)| root.clone())
+            .collect();
+        for project in &projects {
+            self.on_open_file_project_changed(project, cx);
+        }
+        self.mark_git_caches_stale(&on_runtime);
+        self.mark_runtime_dirs_stale(runtime);
+    }
+
+    /// 某台机器重新订阅上了（新连上、重连、换了进程）。它替我们建的监听可能随旧进程没了，
+    /// 断开期间的变化也收不到：清掉登记记录，缓存全部标旧，下一次可见刷新重新登记、重取。
+    pub(crate) fn on_runtime_resubscribed_git(
+        &mut self,
+        runtime: &crate::RuntimeKey,
+        cx: &mut Context<Self>,
+    ) {
+        self.mark_everything_stale(Some(runtime), cx);
+        self.watches.retain(|(_, root)| &root.runtime != runtime);
+        self.schedule_visible_refresh(cx);
+    }
+
+    /// 窗口回到前台。监听收不到的变化（inotify 数量用完、旧运行时没有 HEAD 监听、登记失败、
+    /// 不是 git 仓库的目录后来 `git init`）在这里补上：看得见的数据重取一次。
+    pub(crate) fn on_window_refocused(&mut self, cx: &mut Context<Self>) {
+        self.mark_everything_stale(None, cx);
+        self.schedule_visible_refresh(cx);
+    }
+
+    /// 确保侧栏某个目录的分支名在缓存里且没被标旧，否则后台重取。要对**所有**会话的目录
+    /// 取（侧栏一直显示全部项目分组），所以不靠整项目的监听：取到是 git 仓库就登记一个
+    /// 只看 HEAD 的监听，切分支时标旧。非 git 目录（比如临时终端的 $HOME）缓存 None。
+    pub fn ensure_repo_info(&mut self, cwd: ProjectRef, cx: &mut Context<Self>) {
+        if cwd.root.is_empty()
+            || self.repo_info_inflight.contains_key(&cwd)
+            || !needs_fetch(self.repo_info.get(&cwd))
+        {
             return;
         }
         let Ok(client) = crate::runtime_call::target(&cwd.runtime, cx) else {
             return;
         };
-        self.repo_info_inflight.insert(cwd.clone());
+        self.repo_info_inflight.insert(cwd.clone(), false);
         cx.spawn(async move |this, cx| {
             let params = root_params(&cwd);
             let info = cx
                 .background_executor()
                 .spawn(async move {
-                    git_call::<GitRepoInfoCall>(&client, params)
-                        .ok()
-                        .and_then(|result| result.info)
+                    git_call::<GitRepoInfoCall>(&client, params).map(|result| result.info)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.repo_info_inflight.remove(&cwd);
-                this.repo_info_stale.remove(&cwd);
-                this.repo_info.insert(cwd, (Instant::now(), info));
+                let changed = this.repo_info_inflight.remove(&cwd).unwrap_or(false);
+                match info {
+                    Ok(info) => {
+                        let is_repo = info.is_some();
+                        this.repo_info.insert(
+                            cwd.clone(),
+                            Cached {
+                                value: info,
+                                stale: changed,
+                                fetched_at: Instant::now(),
+                            },
+                        );
+                        if is_repo {
+                            this.ensure_watch(WatchKind::Head, cwd, cx);
+                        }
+                    }
+                    // 连不上：有旧分支名就接着显示，没有就当不是仓库。重连、窗口回到前台时重取。
+                    Err(error) => {
+                        eprintln!("[git] 读 {} 的分支失败：{error}", cwd.root);
+                        match this.repo_info.get_mut(&cwd) {
+                            Some(cached) => cached.stale = changed,
+                            None => {
+                                this.repo_info.insert(
+                                    cwd,
+                                    Cached {
+                                        value: None,
+                                        stale: changed,
+                                        fetched_at: Instant::now(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    this.schedule_visible_refresh(cx);
+                }
                 cx.notify();
             });
         })
@@ -302,96 +409,117 @@ impl Workspace {
     ///
     /// 不直接 `.remove()`：旧数据留着继续显示，新数据到达后无缝替换。代数用于识别
     /// 请求执行期间是否又发生了变化：成功的中间快照可以先显示，但仍保持过期并立即
-    /// 补拉当前代，不能把它写成“新鲜”后再等一轮 TTL。
+    /// 补拉当前代，不能把它写成“新鲜”。
     fn mark_git_status_dirty(&mut self, root: &ProjectRef) {
         let generation = self.git_status_generation.entry(root.clone()).or_default();
         *generation = generation.wrapping_add(1);
-        if let Some((t, _)) = self.git_status.get_mut(root) {
-            *t = Instant::now() - std::time::Duration::from_secs(3600);
+        if let Some(cached) = self.git_status.get_mut(root) {
+            cached.stale = true;
         }
     }
 
-    pub fn invalidate_git_status(&mut self, root: &ProjectRef, cx: &mut Context<Self>) {
+    /// 分支列表标旧。在途的 `for-each-ref` 不得再把旧列表标成新鲜。
+    fn mark_branches_stale(&mut self, root: &ProjectRef) {
+        let generation = self.branches_generation.entry(root.clone()).or_default();
+        *generation = generation.wrapping_add(1);
+        if let Some(cached) = self.branches.get_mut(root) {
+            cached.stale = true;
+        }
+    }
+
+    /// 自己对某个仓库做完了 git 操作：status 和分支列表都标旧。
+    pub fn invalidate_git_repo(&mut self, root: &ProjectRef, cx: &mut Context<Self>) {
         self.mark_git_status_dirty(root);
+        self.mark_branches_stale(root);
         self.schedule_visible_refresh(cx);
     }
 
-    /// 把一个项目下所有已发现仓库的 status 都标脏。
-    ///
-    /// 文件监听是整棵目录递归的，一次事件分不出是哪个仓库变了；全部标脏交给
-    /// `ensure_git_status` 的 TTL 与 inflight 去重去抓实际开销。
-    pub fn invalidate_project_git_status(
-        &mut self,
-        project_root: &ProjectRef,
-        cx: &mut Context<Self>,
-    ) {
-        let roots: Vec<ProjectRef> = match self.git_repos.get(project_root) {
-            Some((_, set)) if !set.repos.is_empty() => {
-                set.roots().map(|root| project_root.at(root)).collect()
-            }
+    /// 项目里各仓库的根：发现结果还没回来（或一个都没发现）时只有项目根本身。
+    pub(crate) fn project_repo_roots(&self, project_root: &ProjectRef) -> Vec<ProjectRef> {
+        match self.git_repos.get(project_root) {
+            Some(cached) if !cached.value.repos.is_empty() => cached
+                .value
+                .roots()
+                .map(|root| project_root.at(root))
+                .collect(),
             _ => vec![project_root.clone()],
-        };
-        for root in roots {
-            self.mark_git_status_dirty(&root);
         }
-        self.schedule_visible_refresh(cx);
     }
 
-    /// 确保某项目根的仓库发现结果新鲜，并为每个发现到的仓库拉 status。
+    /// 确保某项目根的仓库发现结果没被标旧，并为每个发现到的仓库拉 status。
     ///
-    /// 发现比 status 稳定得多（新增/删除一个仓库是低频事件），所以 TTL 取 15s，
-    /// 而不是跟 status 一样 1.5s——它要扫目录还要跑多次 rev-parse，往返成本高。
+    /// 发现要扫目录还要跑多次 rev-parse，而新增、删除一个仓库又很少见，所以两次之间至少隔
+    /// [`GIT_DISCOVERY_MIN_INTERVAL`]：离上次太近就占着 inflight 等到点，再排一次可见刷新。
     pub fn ensure_git_repos(&mut self, project_root: ProjectRef, cx: &mut Context<Self>) {
-        let fresh = self
-            .git_repos
-            .get(&project_root)
-            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(15));
-        let client = crate::runtime_call::target(&project_root.runtime, cx);
-        if !fresh
-            && !self.git_repos_inflight.contains(&project_root)
-            && let Ok(client) = client
-        {
-            self.git_repos_inflight.insert(project_root.clone());
-            let root_for_task = project_root.clone();
-            cx.spawn(async move |this, cx| {
-                let params = root_params(&root_for_task);
-                let found = cx
-                    .background_executor()
-                    .spawn(async move {
-                        git_call::<GitDiscoverCall>(&client, params).unwrap_or_default()
-                    })
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.git_repos_inflight.remove(&root_for_task);
-                    this.git_repos.insert(
-                        root_for_task.clone(),
-                        (
-                            Instant::now(),
-                            RepoSet {
-                                repos: found.repos,
-                                truncated: found.truncated,
-                            },
-                        ),
-                    );
-                    // 提交框按发现结果来建，而那一步不在 render 里。
-                    this.schedule_visible_refresh(cx);
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-
+        self.discover_git_repos(&project_root, cx);
         // 每个已知仓库都要有自己的 status；发现还没回来时至少先拉项目根的，
         // 首帧不至于空白。
-        let roots: Vec<ProjectRef> = match self.git_repos.get(&project_root) {
-            Some((_, set)) if !set.repos.is_empty() => {
-                set.roots().map(|root| project_root.at(root)).collect()
-            }
-            _ => vec![project_root.clone()],
-        };
-        for root in roots {
+        for root in self.project_repo_roots(&project_root) {
             self.ensure_git_status(root, cx);
         }
+    }
+
+    fn discover_git_repos(&mut self, project_root: &ProjectRef, cx: &mut Context<Self>) {
+        if self.git_repos_inflight.contains_key(project_root) {
+            return;
+        }
+        let Some(wait) = git_discovery_wait(self.git_repos.get(project_root), Instant::now())
+        else {
+            return;
+        };
+        let Ok(client) = crate::runtime_call::target(&project_root.runtime, cx) else {
+            return;
+        };
+        self.git_repos_inflight.insert(project_root.clone(), false);
+        let root = project_root.clone();
+        cx.spawn(async move |this, cx| {
+            if !wait.is_zero() {
+                // 限频，不是轮询：只在事件标旧之后等这一次，到点交给可见刷新，看不见就不取。
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.git_repos_inflight.remove(&root);
+                    this.schedule_visible_refresh(cx);
+                });
+                return;
+            }
+            let params = root_params(&root);
+            let found = cx
+                .background_executor()
+                .spawn(async move { git_call::<GitDiscoverCall>(&client, params) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let changed = this.git_repos_inflight.remove(&root).unwrap_or(false);
+                match found {
+                    Ok(found) => {
+                        this.git_repos.insert(
+                            root,
+                            Cached {
+                                value: RepoSet {
+                                    repos: found.repos,
+                                    truncated: found.truncated,
+                                },
+                                stale: changed,
+                                fetched_at: Instant::now(),
+                            },
+                        );
+                    }
+                    // 连不上：留着旧结果，没有就当只有项目根这一个仓库。
+                    Err(error) => {
+                        eprintln!("[git] 发现 {} 里的仓库失败：{error}", root.root);
+                        let cached = this
+                            .git_repos
+                            .entry(root)
+                            .or_insert_with(|| Cached::fresh(RepoSet::default()));
+                        cached.stale = changed;
+                        cached.fetched_at = Instant::now();
+                    }
+                }
+                // 提交框按发现结果来建，而那一步不在 render 里；新发现的仓库也要拉 status。
+                this.schedule_visible_refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 切换提交目标仓库。
@@ -412,11 +540,11 @@ impl Workspace {
     ///
     /// 只在用户还没亲自选过仓库时用。
     fn first_repo_with_changes(&self, project_root: &ProjectRef) -> Option<ProjectRef> {
-        let (_, set) = self.git_repos.get(project_root)?;
+        let set = &self.git_repos.get(project_root)?.value;
         set.roots().map(|root| project_root.at(root)).find(|root| {
             self.git_status
                 .get(root)
-                .is_some_and(|(_, status)| status.ok && !status.files.is_empty())
+                .is_some_and(|cached| cached.value.ok && !cached.value.files.is_empty())
         })
     }
 
@@ -447,22 +575,16 @@ impl Workspace {
         project_root.at(resolve_git_write_target(
             &project_root.root,
             selected,
-            self.git_repos.get(project_root).map(|(_, set)| set),
+            self.git_repos.get(project_root).map(|cached| &cached.value),
             fallback.as_ref().map(|repo| repo.root.as_str()),
         ))
     }
 
-    /// Git 视图：查看某个改动文件的 diff。已跟踪文件用 `git diff HEAD`，
-    /// 未跟踪文件（??）用 `git diff --no-index` 展示全文（整体当作新增）。
-    /// 确保某 root 的 git status 缓存新鲜（>1.5s 或缺失就后台刷新；ensure_git_watch
-    /// 建的监听命中时会主动标脏缓存，比 1.5s 轮询更快触发这里重新拉取）。
-    /// 绝不阻塞 render：git status 在大仓要 ~90ms，同步跑就是掉帧元凶。
+    /// 确保某 root 的 git status 在缓存里且没被标旧，否则后台重取。标旧靠事件：项目监听、
+    /// 自己做完的 git 操作、重连、窗口回到前台。绝不阻塞 render：git status 在大仓要
+    /// ~90ms，同步跑就是掉帧元凶。
     pub fn ensure_git_status(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
-        let fresh = self
-            .git_status
-            .get(&root)
-            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_millis(1500));
-        if fresh || self.git_status_inflight.contains(&root) {
+        if !needs_fetch(self.git_status.get(&root)) || self.git_status_inflight.contains(&root) {
             return;
         }
         let Ok(client) = crate::runtime_call::target(&root.runtime, cx) else {
@@ -492,51 +614,62 @@ impl Workspace {
                     GitStatusResponseAction::AcceptCurrent => {
                         this.git_status_inflight.remove(&root);
                         this.git_status_failures.remove(&root);
-                        this.git_status.insert(root.clone(), (Instant::now(), data));
+                        this.git_status.insert(root.clone(), Cached::fresh(data));
                         // 当前代数的请求一定在所有已完成 index 操作之后启动；运行中的
                         // 操作仍是 false，不能提前移除。
                         clear_confirmed_git_index_ops(&mut this.git_index_pending, &root);
                     }
                     GitStatusResponseAction::AcceptStaleAndRefresh => {
                         // 这份成功快照不是最终权威状态，但仍比一直保留旧缓存可靠；先
-                        // 展示它并保持过期，再串行补拉当前代。持续有文件事件时也不会
+                        // 展示它并保持标旧，再串行补拉当前代。持续有文件事件时也不会
                         // 因为每个回包都被丢弃而永远卡在启动时的空状态。
                         this.git_status_inflight.remove(&root);
                         this.git_status_failures.remove(&root);
                         this.git_status.insert(
                             root.clone(),
-                            (Instant::now() - std::time::Duration::from_secs(3600), data),
+                            Cached {
+                                value: data,
+                                stale: true,
+                                fetched_at: Instant::now(),
+                            },
                         );
                         this.ensure_git_status(root.clone(), cx);
                     }
                     GitStatusResponseAction::PreserveAndRetry => {
                         // 命令失败不等于工作区干净：保留上一次成功快照；首次加载就失败
-                        // 时只缓存“读取失败”占位，渲染层不会把它解释成干净状态。
+                        // 时只缓存“读取失败”占位，渲染层不会把它解释成干净状态。请求期间
+                        // 来过事件的话它仍是旧的。
+                        let changed = current_generation != request_generation;
                         let failure_count = {
                             let failures =
                                 this.git_status_failures.entry(root.clone()).or_default();
                             *failures = failures.saturating_add(1);
                             *failures
                         };
-                        if let Some((fetched_at, _)) = this.git_status.get_mut(&root) {
-                            *fetched_at = Instant::now();
-                        } else {
-                            this.git_status.insert(root.clone(), (Instant::now(), data));
+                        match this.git_status.get_mut(&root) {
+                            Some(cached) => cached.stale = changed,
+                            None => {
+                                this.git_status.insert(
+                                    root.clone(),
+                                    Cached {
+                                        value: data,
+                                        stale: changed,
+                                        fetched_at: Instant::now(),
+                                    },
+                                );
+                            }
                         }
 
                         if let Some(delay) = git_status_retry_delay(failure_count) {
-                            // inflight 在退避期间继续占位，文件事件和 render 不会再起一条
+                            // inflight 在退避期间继续占位，文件事件和可见刷新不会再起一条
                             // 并发请求；定时器到点后释放并串行重试。
                             let retry_root = root.clone();
                             cx.spawn(async move |this, cx| {
                                 cx.background_executor().timer(delay).await;
                                 let _ = this.update(cx, |this, cx| {
                                     this.git_status_inflight.remove(&retry_root);
-                                    if let Some((fetched_at, _)) =
-                                        this.git_status.get_mut(&retry_root)
-                                    {
-                                        *fetched_at =
-                                            Instant::now() - std::time::Duration::from_secs(3600);
+                                    if let Some(cached) = this.git_status.get_mut(&retry_root) {
+                                        cached.stale = true;
                                     }
                                     this.ensure_git_status(retry_root.clone(), cx);
                                     cx.notify();
@@ -544,13 +677,16 @@ impl Workspace {
                             })
                             .detach();
                         } else {
-                            // 连续失败时停止自动重试，避免非 Git 目录永久轮询；后续文件
-                            // 事件或界面交互超过 TTL 后仍会再尝试。
+                            // 连续失败时停止自动重试，非 Git 目录不会一直重跑；之后每来一次
+                            // 事件（文件变化、自己的操作、重连、窗口回到前台）再试一次。
                             this.git_status_inflight.remove(&root);
+                            if changed {
+                                this.ensure_git_status(root.clone(), cx);
+                            }
                         }
                     }
                 }
-                // 聚合开关和提交框的占位跟着这份快照走，不能只等 2 秒保底。
+                // 聚合开关和提交框的占位跟着这份快照走。
                 this.schedule_visible_refresh(cx);
                 cx.notify();
             });
@@ -558,15 +694,11 @@ impl Workspace {
         .detach();
     }
 
-    /// 确保某 root 的分支列表缓存新鲜（>1.5s 或缺失就后台刷新），Git 页头部分支切换
-    /// 下拉用。`for-each-ref` 一次传两个 pattern 拿全 `refs/heads` + `refs/remotes`，
+    /// 确保某 root 的分支列表在缓存里且没被标旧，否则后台重取，Git 页头部分支切换下拉用。
+    /// `for-each-ref` 一次传两个 pattern 拿全 `refs/heads` + `refs/remotes`，
     /// 靠 refname 前缀区分本地/远程，不用起两次 git 进程。
     pub fn ensure_branches(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
-        let fresh = self
-            .branches
-            .get(&root)
-            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_millis(1500));
-        if fresh || self.branches_inflight.contains(&root) {
+        if !needs_fetch(self.branches.get(&root)) || self.branches_inflight.contains(&root) {
             return;
         }
         let Ok(client) = crate::runtime_call::target(&root.runtime, cx) else {
@@ -578,29 +710,34 @@ impl Workspace {
             let params = root_params(&root);
             let list = cx
                 .background_executor()
-                .spawn(
-                    async move { git_call::<GitBranchesCall>(&client, params).unwrap_or_default() },
-                )
+                .spawn(async move { git_call::<GitBranchesCall>(&client, params) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.branches_inflight.remove(&root);
                 let current_generation = this.branches_generation.get(&root).copied().unwrap_or(0);
-                // 删除分支发生在列举期间时，这一包还含着已删的分支。不写回，再排一次刷新。
-                if current_generation == request_generation {
-                    this.branches.insert(root, (Instant::now(), list));
-                } else {
+                if current_generation != request_generation {
+                    // 列举期间分支变了（删了、切了、外面 fetch 了），这一包是旧的。不写回，
+                    // 缓存仍是标旧的，再排一次刷新。
                     this.schedule_visible_refresh(cx);
+                } else {
+                    match list {
+                        Ok(list) => {
+                            this.branches.insert(root, Cached::fresh(list));
+                        }
+                        // 读失败：留着旧列表，没有就给空的，免得一直转。下一次事件再试。
+                        Err(error) => {
+                            eprintln!("[git] 列 {} 的分支失败：{error}", root.root);
+                            this.branches
+                                .entry(root)
+                                .or_insert_with(|| Cached::fresh(BranchList::default()))
+                                .stale = false;
+                        }
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
-    }
-
-    /// 分支集合变了。在途的 `for-each-ref` 不得再把旧列表标成新鲜。
-    fn bump_branches_generation(&mut self, root: &ProjectRef) {
-        let generation = self.branches_generation.entry(root.clone()).or_default();
-        *generation = generation.wrapping_add(1);
     }
 
     /// Git 页组页面前的数据准备：失效跨仓库 diff、默认打开全部改动、懒建输入框。
@@ -619,12 +756,7 @@ impl Workspace {
         }
         // 每个仓库一个提交框：提交信息属于仓库，不能跨仓库串味。
         // 同时回收已经不在发现结果里的仓库，避免关掉项目后输入框实体一直挂着。
-        let live_roots: Vec<ProjectRef> = match self.git_repos.get(&project_root) {
-            Some((_, set)) if !set.repos.is_empty() => {
-                set.roots().map(|root| project_root.at(root)).collect()
-            }
-            _ => vec![project_root.clone()],
-        };
+        let live_roots = self.project_repo_roots(&project_root);
         self.commit_msg_inputs
             .retain(|root, _| live_roots.iter().any(|live| live == root));
         for repo_root in live_roots {
@@ -635,7 +767,7 @@ impl Workspace {
             let branch = self
                 .git_status
                 .get(&repo_root)
-                .map(|(_, d)| d.branch.clone())
+                .map(|cached| cached.value.branch.clone())
                 .unwrap_or_default();
             let placeholder = if branch.is_empty() {
                 "Commit message（可多行）".to_string()
@@ -650,7 +782,7 @@ impl Workspace {
             self.commit_msg_inputs.insert(repo_root, state);
         }
         if self.git_tab == GitTab::Changes {
-            let status = self.git_status.get(&root).map(|(_, status)| status);
+            let status = self.git_status.get(&root).map(|cached| &cached.value);
             let has_changes = status.is_some_and(|status| status.ok && !status.files.is_empty());
             if should_close_aggregate_diff(
                 status,
@@ -707,7 +839,7 @@ impl Workspace {
             move |this, result, cx| match result {
                 // 切分支后文件列表、ahead/behind 都变了，标脏再刷新；
                 // 分支列表本身（有哪些分支）不受切换影响，不用跟着失效。
-                Ok(()) => this.invalidate_git_status(&status_root, cx),
+                Ok(()) => this.invalidate_git_repo(&status_root, cx),
                 Err(err) => this.report_background_error(err),
             },
             cx,
@@ -776,10 +908,8 @@ impl Workspace {
             },
             move |this, result, cx| match result {
                 Ok(()) => {
-                    this.invalidate_git_status(&done_root, cx);
-                    // 分支没了，列表和日志都得重拉。先推进代次，在途的旧列表不能写回来。
-                    this.bump_branches_generation(&done_root);
-                    this.branches.remove(&done_root);
+                    // 分支没了，列表和日志都得重拉。标旧会推进代次，在途的旧列表不会写回来。
+                    this.invalidate_git_repo(&done_root, cx);
                     this.reload_git_log(done_root, cx);
                 }
                 Err(err) => this.report_background_error(err),
@@ -813,7 +943,7 @@ impl Workspace {
             },
             move |this, result, cx| match result {
                 Ok(()) => {
-                    this.invalidate_git_status(&done_root, cx);
+                    this.invalidate_git_repo(&done_root, cx);
                     this.reload_git_log(done_root, cx);
                 }
                 Err(err) => this.report_background_error(err),
@@ -867,7 +997,7 @@ impl Workspace {
                 // 全部作废；留着它们只会让复选标记跟真实 status 对不上。
                 this.git_index_pending
                     .retain(|(pending_root, _), _| pending_root != &done_root);
-                this.invalidate_git_status(&done_root, cx);
+                this.invalidate_git_repo(&done_root, cx);
                 this.ensure_git_status(done_root, cx);
             },
             cx,
@@ -1175,7 +1305,7 @@ impl Workspace {
             },
             move |this, result, cx| match result {
                 Ok(()) => {
-                    this.invalidate_git_status(&done_root, cx);
+                    this.invalidate_git_repo(&done_root, cx);
                     // 行号已变，重新解析一份，避免下一次点击打在错的位置上。
                     this.open_diff(done_root, path, false, cx);
                 }
@@ -1299,7 +1429,7 @@ impl Workspace {
         let status_files = self
             .git_status
             .get(&root)
-            .map(|(_, status)| status.files.clone())
+            .map(|cached| cached.value.files.clone())
             .unwrap_or_default();
         let untracked_paths = if matches!(scope, DiffScope::All | DiffScope::Unstaged) {
             status_files
@@ -1567,7 +1697,7 @@ impl Workspace {
         let branch = self
             .git_status
             .get(&root)
-            .map(|(_, d)| d.branch.clone())
+            .map(|cached| cached.value.branch.clone())
             .unwrap_or_default();
         let key = root.clone();
         let done_root = root.clone();
@@ -1585,7 +1715,7 @@ impl Workspace {
                 .map(drop)
             },
             move |this, result, cx| match result {
-                Ok(()) => this.invalidate_git_status(&done_root, cx),
+                Ok(()) => this.invalidate_git_repo(&done_root, cx),
                 Err(err) => {
                     this.commit_errors.insert(done_root, err);
                 }
@@ -1621,7 +1751,7 @@ impl Workspace {
             move |client: &RuntimeClient| work(client, &root),
             move |this, result, cx| match result {
                 Ok(()) => {
-                    this.invalidate_git_status(&done_root, cx);
+                    this.invalidate_git_repo(&done_root, cx);
                     if reload_log {
                         this.reload_git_log(done_root, cx);
                     }
@@ -1674,7 +1804,7 @@ impl Workspace {
         let Some(seen) = self
             .git_status
             .get(&root)
-            .map(|(_, status)| status.seen_changes())
+            .map(|cached| cached.value.seen_changes())
         else {
             self.report_background_error("改动列表还没加载出来，请刷新后再丢弃。");
             return;
@@ -1716,7 +1846,7 @@ impl Workspace {
             move |client: &RuntimeClient| git_call::<GitDiscardAllCall>(client, params).map(drop),
             move |this, result, cx| {
                 // 被拒绝多半是列表已经过时，也要刷新，让用户看到现在的样子。
-                this.invalidate_git_status(&done_root, cx);
+                this.invalidate_git_repo(&done_root, cx);
                 match result {
                     Ok(()) => {
                         // 丢弃后当前打开的 diff 大概率没了，关掉免得看空。
@@ -1759,7 +1889,7 @@ impl Workspace {
         let branch = self
             .git_status
             .get(&root)
-            .map(|(_, d)| d.branch.clone())
+            .map(|cached| cached.value.branch.clone())
             .unwrap_or_default();
         let op = if push {
             GitWrite::CommitAndPush
@@ -1786,7 +1916,7 @@ impl Workspace {
             },
             move |this, result, window, cx| match result {
                 Ok(()) => {
-                    this.invalidate_git_status(&done_root, cx);
+                    this.invalidate_git_repo(&done_root, cx);
                     if let Some(input) = this.commit_msg_inputs.get(&done_root).cloned() {
                         input.update(cx, |s, cx| s.set_value("", window, cx));
                     }

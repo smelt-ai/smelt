@@ -1342,6 +1342,14 @@ fn until_turn_minute_changes(turn_started_at: u64, now: u64) -> Option<std::time
     Some(std::time::Duration::from_secs(60 - elapsed % 60))
 }
 
+/// 各会话的目录（按顺序）变没变。
+fn session_cwds_changed(shown: &[SessionFacts], current: &[SessionFacts]) -> bool {
+    !shown
+        .iter()
+        .map(|facts| &facts.cwd)
+        .eq(current.iter().map(|facts| &facts.cwd))
+}
+
 /// 换上这次看到的事实，返回它们变没变。
 fn replace_changed_facts(shown: &mut Vec<SessionFacts>, current: Vec<SessionFacts>) -> bool {
     if *shown == current {
@@ -2285,17 +2293,17 @@ struct Workspace {
     visible_refresh_scheduled: bool,
     /// 正在刷新可见数据。这段里的切会话不再排队第二次。
     visible_refresh_running: bool,
-    /// git status 缓存（root → (取得时刻, 数据)）。Git 页后台刷新，render 只读，
+    /// git status 缓存。事件标旧、看得见时后台重取（见 `git_panel::Cached`），render 只读，
     /// 避免每帧同步跑 git status（大仓要 ~90ms，是掉帧元凶）。
     ///
     /// key 是**仓库**根而不是项目根：一个项目里可能有多个仓库（submodule、
     /// vendor 里的独立仓库、被 .gitignore 忽略的仓库），每个都独立跑自己的 status。
-    git_status: HashMap<ProjectRef, (Instant, GitStatusData)>,
+    git_status: HashMap<ProjectRef, git_panel::Cached<GitStatusData>>,
     /// 项目根 → 该项目里发现的仓库列表（含发现是否被上限截断）。
     /// 发现本身要跑 git，所以跟 status 一样走缓存 + 后台刷新。
-    git_repos: HashMap<ProjectRef, (Instant, git_panel::RepoSet)>,
-    /// 正在后台做仓库发现的项目根（防重复并发 spawn）。
-    git_repos_inflight: HashSet<ProjectRef>,
+    git_repos: HashMap<ProjectRef, git_panel::Cached<git_panel::RepoSet>>,
+    /// 正在后台做仓库发现（或在限频里等着）的项目根 → 这期间有没有来过变化。
+    git_repos_inflight: HashMap<ProjectRef, bool>,
     /// 当前提交操作的目标仓库（仓库根）。多仓工作区里，提交框、推送、分支菜单
     /// 都作用于它；None = 跟随项目根。
     ///
@@ -2309,24 +2317,25 @@ struct Workspace {
     /// 正在后台刷新 status 的 root（防重复并发 spawn）。
     git_status_inflight: HashSet<ProjectRef>,
     /// root → 连续读取失败次数。失败数据不能冒充“工作区干净”；前三次按短退避
-    /// 自动重试，持续失败则等文件事件或后续界面交互再尝试。
+    /// 自动重试，持续失败则等下一次事件再尝试。
     git_status_failures: HashMap<ProjectRef, u8>,
     /// 单文件 git add/reset 的即时 UI 状态。进程是否在跑看 `git_writes`，
     /// 这里只在进程返回后保留到权威 status 回包，避免复选框先回弹再延迟移动分组。
     git_index_pending: HashMap<(ProjectRef, String), git_panel::PendingGitIndexOp>,
-    /// 分支列表缓存（root → (取得时刻, 数据)），Git 页头部分支切换下拉用；同
-    /// git_status 一套只在 Git 页打开时后台刷新。
-    branches: HashMap<ProjectRef, (Instant, BranchList)>,
-    /// 分支列表失效代数。删除分支发生在 `for-each-ref` 期间时，旧回包不得再写回。
+    /// 分支列表缓存，Git 页头部分支切换下拉用；同 git_status 一样事件标旧，只在 Git 页
+    /// 打开时后台重取。
+    branches: HashMap<ProjectRef, git_panel::Cached<BranchList>>,
+    /// 分支列表失效代数。标旧发生在 `for-each-ref` 期间时，旧回包不得再写回。
     branches_generation: HashMap<ProjectRef, u64>,
     /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
     branches_inflight: HashSet<ProjectRef>,
-    /// 已经请运行时监听的项目根，见 ensure_git_watch。运行时重连后清空重新登记。
-    watched_projects: HashSet<ProjectRef>,
-    /// 每个 root 上次「进 Git 页自动 fetch」的时刻：进 Git 页会主动 fetch 一次刷新
-    /// ahead/behind，但 render 每帧都满足「在 Git 页」，靠这个时间戳去抖（同一 root
-    /// 60s 内不重复自动 fetch），避免每帧狂发网络请求。
+    /// 请运行时建过的监听，见 `ensure_watch`。那台机器重新订阅上时清掉重新登记。
+    watches: HashSet<(git_panel::WatchKind, ProjectRef)>,
+    /// 每个项目上次自动 fetch 的时刻。Git 页开着、窗口在前台时同一项目 60 秒 fetch 一次，
+    /// 来回切页不会每次都发。
     git_autofetch_at: HashMap<ProjectRef, Instant>,
+    /// 自动 fetch 的定时任务在跑。见 `ensure_git_autofetch`。
+    git_autofetch_running: bool,
     /// 调试 HUD 开关（Cmd+Shift+F 切换），见 `overlay::debug_hud`。
     debug_hud: bool,
     /// 退出确认拦截弹窗开关
@@ -2391,11 +2400,9 @@ struct Workspace {
     relay_edit: Option<workspace_sessions::RelayEdit>,
     /// 仓库身份缓存（cwd → 当前分支）：侧栏项目行和会话行显示分支名靠它。None = 探测过
     /// 但不是 git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
-    repo_info: HashMap<ProjectRef, (Instant, Option<RepoInfo>)>,
-    /// 正在后台探测仓库身份、避免重复起进程的 cwd 集合。
-    repo_info_inflight: HashSet<ProjectRef>,
-    /// 远程机器上要重取的仓库信息。远程的不按时间过期，见 `ensure_repo_info`。
-    repo_info_stale: HashSet<ProjectRef>,
+    repo_info: HashMap<ProjectRef, git_panel::Cached<Option<RepoInfo>>>,
+    /// 正在后台探测仓库身份的 cwd → 这期间 HEAD 有没有变过。
+    repo_info_inflight: HashMap<ProjectRef, bool>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
@@ -2721,7 +2728,7 @@ impl Workspace {
 
             git_status: HashMap::new(),
             git_repos: HashMap::new(),
-            git_repos_inflight: HashSet::new(),
+            git_repos_inflight: HashMap::new(),
             active_git_repo: None,
             git_repo_collapsed: HashSet::new(),
             git_status_generation: HashMap::new(),
@@ -2731,8 +2738,9 @@ impl Workspace {
             branches: HashMap::new(),
             branches_generation: HashMap::new(),
             branches_inflight: HashSet::new(),
-            watched_projects: HashSet::new(),
+            watches: HashSet::new(),
             git_autofetch_at: HashMap::new(),
+            git_autofetch_running: false,
             launch_inputs: None,
             profile_inputs: None,
             panel_plugins: Default::default(),
@@ -2778,8 +2786,7 @@ impl Workspace {
             _rename_sub: None,
             relay_edit: None,
             repo_info: HashMap::new(),
-            repo_info_inflight: HashSet::new(),
-            repo_info_stale: HashSet::new(),
+            repo_info_inflight: HashMap::new(),
             dir_picker: None,
             discard_hunk_target: None,
             discard_file_target: None,
@@ -2904,7 +2911,6 @@ impl Workspace {
                 this.schedule_visible_refresh(cx)
             }),
         );
-        ws.start_visible_data_watch(cx);
         // 首帧绘制前就把输入框和缓存任务备好。观察器只在之后的外观变化时再排一次。
         ws.refresh_visible_caches(window, cx);
         ws
@@ -3087,11 +3093,15 @@ impl Workspace {
     /// 重画。两条路径都只在会话露在工作台上的事实（见 `SessionFacts`）变了才
     /// 通知，变了就立刻通知，不靠定时合并：同一帧里的多次通知 GPUI 本来就只画一次。
     pub(crate) fn notify_if_session_facts_changed(&mut self, cx: &mut Context<Self>) {
-        let current = self
+        let current: Vec<SessionFacts> = self
             .sessions
             .iter()
             .map(|session| session.facts(cx))
             .collect();
+        // 会话目录变了（新会话、终端 cd 到别处）：侧栏要它的分支名，活动项目也可能跟着换。
+        if session_cwds_changed(&self.shown_session_facts, &current) {
+            self.schedule_visible_refresh(cx);
+        }
         if replace_changed_facts(&mut self.shown_session_facts, current) {
             cx.notify();
             self.arm_turn_clock(cx);
@@ -3781,16 +3791,6 @@ fn main() {
                     }
                     continue;
                 }
-                // 运行时断开（换了进程或网络断了），它替我们建的项目监听也没了：清掉这台
-                // 机器的，下次刷新重新登记。
-                if matches!(event, terminal::DaemonStateEvent::Disconnected)
-                    && let Some(ws) = current_workspace(&current_ws_for_events)
-                {
-                    let _ = ws.update(cx, |ws, cx| {
-                        ws.forget_project_watches(&runtime);
-                        ws.schedule_visible_refresh(cx);
-                    });
-                }
                 // 项目文件在报事件的那台机器上。
                 if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
                     if let Some(ws) = current_workspace(&current_ws_for_events) {
@@ -3820,6 +3820,8 @@ fn main() {
                         terminal::DaemonStateEvent::Snapshot { .. } => {
                             let _ = ws.update(cx, |ws, cx| {
                                 ws.on_runtime_resubscribed(&runtime, cx);
+                                // 项目监听同理；断开期间的文件、分支变化也收不到，缓存全部标旧。
+                                ws.on_runtime_resubscribed_git(&runtime, cx);
                                 // 断开期间 Pi 配置可能变过，单独订阅的事件补不回来。
                                 ws.on_agent_pi_config_changed(&runtime, cx);
                                 settings::reload_agent_host(&runtime, cx);

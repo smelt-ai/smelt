@@ -100,6 +100,62 @@ impl RepoSet {
     }
 }
 
+/// 从运行时取回来的一份数据。一直用到有事件说它变了，不按时间过期。
+///
+/// 事件是 `project.changed`、自己做完的 git 操作、运行时重新订阅、窗口回到前台。它们只
+/// 把这里标旧；看得见的时候才重取，取回来之前旧值照常显示。
+pub(crate) struct Cached<T> {
+    pub(crate) value: T,
+    pub(crate) stale: bool,
+    /// 取回来的时刻。只有仓库发现拿它限频，见 [`git_discovery_wait`]。
+    pub(crate) fetched_at: Instant,
+}
+
+impl<T> Cached<T> {
+    pub(crate) fn fresh(value: T) -> Self {
+        Self {
+            value,
+            stale: false,
+            fetched_at: Instant::now(),
+        }
+    }
+}
+
+/// 要不要重取：还没有，或者被事件标旧了。跟取回来过了多久无关。
+pub(crate) fn needs_fetch<T>(cached: Option<&Cached<T>>) -> bool {
+    cached.is_none_or(|cached| cached.stale)
+}
+
+/// 仓库发现两次之间至少隔这么久。它要扫目录、对每个仓库跑 rev-parse，而 agent 改文件时
+/// `project.changed` 几百毫秒就来一次；新增、删掉一个仓库又很少见。
+pub(crate) const GIT_DISCOVERY_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
+/// 仓库发现什么时候跑：`None` 不用跑，`Some(ZERO)` 现在跑，其余是离上一次太近，还要等多久。
+pub(crate) fn git_discovery_wait<T>(
+    cached: Option<&Cached<T>>,
+    now: Instant,
+) -> Option<std::time::Duration> {
+    match cached {
+        None => Some(std::time::Duration::ZERO),
+        Some(cached) if !cached.stale => None,
+        Some(cached) => Some(
+            GIT_DISCOVERY_MIN_INTERVAL
+                .saturating_sub(now.saturating_duration_since(cached.fetched_at)),
+        ),
+    }
+}
+
+/// 请运行时建的监听。建过的（不管成没成功）记在 `Workspace::watched`，那台机器重新订阅上
+/// 之前不再登记第二次。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum WatchKind {
+    /// `project.watch`：整个项目的文件变化。Git 页、文件树、变更角标用。
+    Project,
+    /// `git.watch_head`：只看所在仓库的 HEAD。侧栏每个项目的分支名用。
+    Head,
+}
+
 /// 当前视图下 hunk 该给哪些按钮。
 fn git_diff_hunk_ops(diff: &GitDiff) -> HunkOps {
     if !diff.patchable {

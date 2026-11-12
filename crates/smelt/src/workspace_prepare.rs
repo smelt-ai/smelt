@@ -1,4 +1,6 @@
-//! 可见数据的刷新时机：选中、切页、数据变化，以及一条 2 秒的保底。
+//! 可见数据的刷新时机：选中、切页、数据变化。没有定时的保底：缓存只被事件标旧
+//! （运行时的 `project.changed`、自己做完的操作、重连、窗口回到前台），这里只取看得见
+//! 又被标旧了的那些。
 //!
 //! `Workspace::render` 每帧都会整段重跑。目录列表、git、历史扫描和窗口材质
 //! 不能挂在那里——侧栏一个转圈就会让这些活儿跟着每秒跑很多次。真正开销在
@@ -9,18 +11,18 @@ use std::time::{Duration, Instant};
 
 use gpui::*;
 
+use crate::git_panel::WatchKind;
 use crate::settings::Appearance;
 use crate::{SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp};
 
-/// Git 页可见时，同一仓库 60 秒内只自动 fetch 一次。页不可见时不发。
-pub(crate) fn git_autofetch_due(last: Option<Instant>, now: Instant, git_visible: bool) -> bool {
-    if !git_visible {
-        return false;
-    }
-    match last {
-        None => true,
-        Some(at) => now.saturating_duration_since(at) >= Duration::from_secs(60),
-    }
+/// 同一项目两次自动 fetch 至少隔这么久。
+const GIT_AUTOFETCH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 离下一次自动 fetch 还有多久；`ZERO` 是现在就该 fetch。
+pub(crate) fn git_autofetch_wait(last: Option<Instant>, now: Instant) -> Duration {
+    last.map_or(Duration::ZERO, |at| {
+        GIT_AUTOFETCH_INTERVAL.saturating_sub(now.saturating_duration_since(at))
+    })
 }
 
 impl Workspace {
@@ -95,7 +97,9 @@ impl Workspace {
         self.prewarm_ide_catalog_after_idle(window, cx);
 
         if let Some(project) = self.active_project_ref(cx) {
-            self.ensure_git_watch(project, cx);
+            self.ensure_watch(WatchKind::Project, project.clone(), cx);
+            // 变更角标在任何页面都显示，活动项目各仓库的 status 一直备着。
+            self.ensure_git_repos(project, cx);
         }
         self.note_active_project(cx);
         self.note_shown_views(cx);
@@ -118,13 +122,9 @@ impl Workspace {
         if self.git_page_visible()
             && let Some(root) = self.active_project_ref(cx)
         {
-            let now = Instant::now();
-            if git_autofetch_due(self.git_autofetch_at.get(&root).copied(), now, true) {
-                self.git_autofetch_at.insert(root.clone(), now);
-                self.git_fetch_silent(cx);
+            if self.workspace_window_active {
+                self.ensure_git_autofetch(cx);
             }
-            self.ensure_git_watch(root.clone(), cx);
-            self.ensure_git_repos(root.clone(), cx);
             let git_repo = self.active_git_repo_root(&root);
             self.ensure_branches(git_repo, cx);
             self.prepare_git_panel(window, cx);
@@ -163,7 +163,7 @@ impl Workspace {
                 self.cancel_file_search();
                 for root in &roots {
                     // 目录列表靠运行时的变化通知失效，每个挂出来的根都要有监听。
-                    self.ensure_git_watch(root.clone(), cx);
+                    self.ensure_watch(WatchKind::Project, root.clone(), cx);
                     self.ensure_git_status(root.clone(), cx);
                     self.ensure_dir_listing(root.clone(), cx);
                 }
@@ -248,46 +248,69 @@ impl Workspace {
         self.view_shown(crate::builtin_views::Builtin::Git.id())
     }
 
-    /// 每 2 秒把仍开着的页的 TTL 缓存再对一次。打开页面和切换项目走事件，
-    /// 不会等这一拍；这里只兜住没挂上事件的目录变化。
-    pub(crate) fn start_visible_data_watch(&mut self, cx: &mut Context<Self>) {
+    /// Git 页开着、窗口在前台时，活动项目每 60 秒自动 fetch 一次，刷新 ahead/behind。
+    ///
+    /// 一个任务按到期时刻睡，醒来时页关了、窗口到后台了就结束，可见刷新下次再起。
+    fn ensure_git_autofetch(&mut self, cx: &mut Context<Self>) {
+        if self.git_autofetch_running {
+            return;
+        }
+        self.git_autofetch_running = true;
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
-                let ok = this.update(cx, |this, cx| this.schedule_visible_refresh(cx));
-                if ok.is_err() {
+                let wait = this
+                    .update(cx, |this, cx| this.git_autofetch_tick(cx))
+                    .ok()
+                    .flatten();
+                let Some(wait) = wait else {
                     break;
-                }
+                };
+                // 轮询例外：远端仓库变了没有事件可等；周期 60 秒，上限是 Git 页开着且窗口在
+                // 前台的这段时间，离开后最多再醒一次就结束。
+                cx.background_executor().timer(wait).await;
             }
+            let _ = this.update(cx, |this, _| this.git_autofetch_running = false);
         })
         .detach();
+    }
+
+    /// 到期就 fetch，返回离下一次还有多久；不该再跑了返回 None。
+    fn git_autofetch_tick(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
+        if !self.git_page_visible() || !self.workspace_window_active {
+            return None;
+        }
+        let root = self.active_project_ref(cx)?;
+        let now = Instant::now();
+        let wait = git_autofetch_wait(self.git_autofetch_at.get(&root).copied(), now);
+        if !wait.is_zero() {
+            return Some(wait);
+        }
+        self.git_autofetch_at.insert(root, now);
+        self.git_fetch_silent(cx);
+        Some(GIT_AUTOFETCH_INTERVAL)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::git_autofetch_due;
+    use super::git_autofetch_wait;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn git_autofetch_due_is_false_while_the_git_page_is_hidden() {
+    fn git_autofetch_runs_at_once_the_first_time_then_every_sixty_seconds() {
         let now = Instant::now();
-        assert!(!git_autofetch_due(None, now, false));
-        assert!(!git_autofetch_due(Some(now), now, false));
-    }
-
-    #[test]
-    fn git_autofetch_due_on_a_visible_git_page_waits_sixty_seconds() {
-        let now = Instant::now();
-        assert!(git_autofetch_due(None, now, true));
-        assert!(!git_autofetch_due(Some(now), now, true));
+        assert_eq!(git_autofetch_wait(None, now), Duration::ZERO);
+        assert_eq!(git_autofetch_wait(Some(now), now), Duration::from_secs(60));
         let recent = now
             .checked_sub(Duration::from_secs(59))
             .expect("test clock");
-        assert!(!git_autofetch_due(Some(recent), now, true));
+        assert_eq!(
+            git_autofetch_wait(Some(recent), now),
+            Duration::from_secs(1)
+        );
         let due = now
-            .checked_sub(Duration::from_secs(60))
+            .checked_sub(Duration::from_secs(61))
             .expect("test clock");
-        assert!(git_autofetch_due(Some(due), now, true));
+        assert_eq!(git_autofetch_wait(Some(due), now), Duration::ZERO);
     }
 }

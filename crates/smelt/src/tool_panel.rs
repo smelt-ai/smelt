@@ -18,17 +18,14 @@ pub(crate) const MAX_FILE_TREE_WIDTH: f32 = 320.0;
 /// 只数项目根一个仓库会让子仓里的改动在角标上隐形，而角标正是用户判断
 /// “要不要点进去看”的唯一依据。
 pub(crate) fn git_changes_badge(ws: &Workspace, cx: &App) -> usize {
-    let Some(cwd) = ws.current_cwd(cx) else {
+    // 和 Git 页同一个范围：活动项目里的各个仓库。可见刷新一直备着这些仓库的 status。
+    let Some(project) = ws.active_project_ref(cx) else {
         return 0;
     };
-    let roots: Vec<crate::ProjectRef> = match ws.git_repos.get(&cwd) {
-        Some((_, set)) if !set.repos.is_empty() => set.roots().map(|root| cwd.at(root)).collect(),
-        _ => vec![cwd],
-    };
-    roots
+    ws.project_repo_roots(&project)
         .iter()
         .filter_map(|root| ws.git_status.get(root))
-        .map(|(_, d)| d.files.len())
+        .map(|cached| cached.value.files.len())
         .sum()
 }
 
@@ -160,7 +157,7 @@ impl Workspace {
                     runtime: runtime.clone(),
                     root: root.to_string(),
                 })
-                .map(|(_, status)| status)
+                .map(|cached| &cached.value)
         };
         let tree = if has_query {
             match &self.search_results {

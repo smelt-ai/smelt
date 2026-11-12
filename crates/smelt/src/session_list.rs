@@ -715,7 +715,7 @@ impl Workspace {
                             runtime: key.clone(),
                             root: group.root.clone(),
                         })
-                        .and_then(|(_, info)| info.as_ref())
+                        .and_then(|cached| cached.value.as_ref())
                         .map(|info| info.branch.clone());
                     for &ix in &group.sessions {
                         session_projects[ix] = Some((group.label.clone(), branch.clone()));
@@ -1054,7 +1054,7 @@ impl Workspace {
             let branch_label = self
                 .repo_info
                 .get(&project)
-                .and_then(|(_, info)| info.as_ref())
+                .and_then(|cached| cached.value.as_ref())
                 .map(|info| info.branch.clone());
 
             let e_toggle = this.clone();
