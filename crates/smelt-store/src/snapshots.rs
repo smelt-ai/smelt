@@ -34,7 +34,38 @@ pub struct HistoryTitleRecord {
 pub struct WorkspaceSnapshot {
     /// 项目根目录，按侧栏顺序。
     pub projects: Vec<String>,
+    pub repositories: Vec<WorkspaceProjectRepositoryRecord>,
+    pub worksets: Vec<WorkspaceWorksetRecord>,
     pub sessions: Vec<WorkspaceSessionRecord>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceProjectRepositoryRecord {
+    pub project_root: String,
+    pub name: String,
+    pub root: String,
+    pub position: u32,
+    pub managed_link: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceWorksetRecord {
+    pub id: String,
+    pub project_root: String,
+    pub task: String,
+    pub branch: String,
+    pub position: u32,
+    pub repositories: Vec<WorkspaceWorksetRepositoryRecord>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceWorksetRepositoryRecord {
+    pub name: String,
+    pub root: String,
+    pub worktree: String,
+    pub base_ref: String,
+    pub branch_created: bool,
+    pub position: u32,
 }
 
 /// 工作区目录现在是哪一份、改到第几次。版本号只在同一个 `epoch` 里能比：库换过（删了
@@ -62,6 +93,7 @@ pub struct WorkspaceSessionRecord {
     pub last_updated_at: i64,
     pub archived_at: Option<i64>,
     pub pinned_at: Option<i64>,
+    pub workset_id: Option<String>,
     /// 这段对话里的终端，按客户端给的顺序。
     pub terminals: Vec<WorkspaceTerminalRecord>,
     pub acp: Option<WorkspaceAcpRecord>,

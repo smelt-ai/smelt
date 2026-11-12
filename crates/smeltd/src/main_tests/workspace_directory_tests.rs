@@ -1,7 +1,180 @@
 use super::*;
-use smelt_core::workspace_directory::{WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal};
+use smelt_core::workspace_catalog;
+use smelt_core::workspace_directory::{
+    WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+};
+use smelt_core::workspace_directory::{
+    WorkspaceProjectRepositoryAction as RepositoryAction, WorkspaceProjectRepositoryActionParams,
+};
 use smelt_event_protocol::{CORE_SNAPSHOT_WORKSPACE, CoreProjectionEvent, SnapshotKind};
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
+
+fn init_repository(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(path)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn repository_discovery_respects_a_removed_root_repository() {
+    let temp = TempStore::new();
+    let project = temp.dir.join("project");
+    init_repository(&project);
+    let root = project.to_str().unwrap();
+    let event_hub = new_event_hub();
+    workspace_directory::open_project(&temp.store, root, &event_hub).unwrap();
+    let directory = workspace_catalog::directory_on(&temp.store).unwrap();
+    assert_eq!(directory.repositories.len(), 1);
+    let name = directory.repositories[0].name.clone();
+    crate::workset_control::repository_action(
+        &temp.store,
+        WorkspaceProjectRepositoryActionParams {
+            project_root: root.into(),
+            action: RepositoryAction::Remove { name },
+        },
+        &event_hub,
+    )
+    .unwrap();
+    let directory = crate::workset_control::repository_action(
+        &temp.store,
+        WorkspaceProjectRepositoryActionParams {
+            project_root: root.into(),
+            action: RepositoryAction::Discover,
+        },
+        &event_hub,
+    )
+    .unwrap();
+    assert!(directory.repositories.is_empty());
+    workspace_directory::close_project(&temp.store, root, &event_hub).unwrap();
+    workspace_directory::open_project(&temp.store, root, &event_hub).unwrap();
+    assert!(
+        workspace_catalog::directory_on(&temp.store)
+            .unwrap()
+            .repositories
+            .is_empty()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn referenced_repository_cannot_be_removed_and_owned_link_is_preserved() {
+    let temp = TempStore::new();
+    let project = temp.dir.join("project");
+    let source = temp.dir.join("source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_repository(&source);
+    let project_root = project.to_str().unwrap().to_string();
+    let event_hub = new_event_hub();
+    let directory = crate::workset_control::repository_action(
+        &temp.store,
+        WorkspaceProjectRepositoryActionParams {
+            project_root: project_root.clone(),
+            action: RepositoryAction::Bind {
+                source: source.to_str().unwrap().into(),
+                name: "api".into(),
+            },
+        },
+        &event_hub,
+    )
+    .unwrap();
+    let repository = &directory.repositories[0];
+    assert!(repository.managed_link.is_some());
+    temp.store
+        .create_workspace_workset(&smelt_store::WorkspaceWorksetRecord {
+            id: "workset-1".into(),
+            project_root: project_root.clone(),
+            task: "issue-1".into(),
+            branch: "feat/issue-1".into(),
+            position: 0,
+            repositories: vec![smelt_store::WorkspaceWorksetRepositoryRecord {
+                name: "api".into(),
+                root: repository.root.clone(),
+                worktree: project
+                    .join("worktrees/issue-1/api")
+                    .to_str()
+                    .unwrap()
+                    .into(),
+                base_ref: "HEAD".into(),
+                branch_created: true,
+                position: 0,
+            }],
+        })
+        .unwrap();
+    let error = crate::workset_control::repository_action(
+        &temp.store,
+        WorkspaceProjectRepositoryActionParams {
+            project_root,
+            action: RepositoryAction::Remove { name: "api".into() },
+        },
+        &event_hub,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("issue-1"));
+    assert!(project.join("repos/api").exists());
+    assert!(source.join(".git").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn discovering_repository_links_does_not_claim_or_delete_user_links() {
+    let temp = TempStore::new();
+    let project = temp.dir.join("project");
+    let source = temp.dir.join("source");
+    init_repository(&source);
+    std::fs::create_dir_all(project.join("repos")).unwrap();
+    let link = project.join("repos/api");
+    std::os::unix::fs::symlink(&source, &link).unwrap();
+    let project_root = project.to_str().unwrap().to_string();
+    let event_hub = new_event_hub();
+    let directory = crate::workset_control::repository_action(
+        &temp.store,
+        WorkspaceProjectRepositoryActionParams {
+            project_root: project_root.clone(),
+            action: RepositoryAction::Discover,
+        },
+        &event_hub,
+    )
+    .unwrap();
+    assert_eq!(directory.repositories.len(), 1);
+    assert_eq!(directory.repositories[0].managed_link, None);
+    let error = crate::workset_control::repository_action(
+        &temp.store,
+        WorkspaceProjectRepositoryActionParams {
+            project_root: project_root.clone(),
+            action: RepositoryAction::Bind {
+                source: source.to_str().unwrap().into(),
+                name: "duplicate".into(),
+            },
+        },
+        &event_hub,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("重复"));
+    let directory = crate::workset_control::repository_action(
+        &temp.store,
+        WorkspaceProjectRepositoryActionParams {
+            project_root,
+            action: RepositoryAction::Remove { name: "api".into() },
+        },
+        &event_hub,
+    )
+    .unwrap();
+    assert!(directory.repositories.is_empty());
+    assert!(
+        std::fs::symlink_metadata(link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(source.join(".git").exists());
+}
 
 /// 守护测试不开默认主库，目录命令跑在临时库上。
 struct TempStore {
@@ -144,9 +317,8 @@ fn directory_commands_publish_the_changed_directory() {
     assert!(published.revision > created.revision);
     assert!(published.conversations.is_empty());
 
-    let late =
-        workspace_directory::update_conversation(&temp.store, &conversation, &event_hub)
-            .unwrap_err();
+    let late = workspace_directory::update_conversation(&temp.store, &conversation, &event_hub)
+        .unwrap_err();
     assert_eq!(late.code, ControlErrorCode::NotFound);
 }
 
@@ -155,8 +327,7 @@ fn directory_commands_publish_the_changed_directory() {
 fn a_command_that_changes_nothing_does_not_publish() {
     let temp = TempStore::new();
     let conversation = terminal_conversation();
-    workspace_directory::create_conversation(&temp.store, &conversation, &new_event_hub())
-        .unwrap();
+    workspace_directory::create_conversation(&temp.store, &conversation, &new_event_hub()).unwrap();
 
     let event_hub = new_event_hub();
     workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
@@ -210,7 +381,10 @@ fn a_deleted_session_leaves_the_directory() {
     workspace_directory::forget_session(&temp.store, "term-right", &event_hub).unwrap();
     workspace_directory::forget_session(&temp.store, "acp-1", &event_hub).unwrap();
     let published = published_directory(&event_hub).unwrap();
-    assert!(published.conversations.is_empty(), "最后一格、ACP 会话都删整段对话");
+    assert!(
+        published.conversations.is_empty(),
+        "最后一格、ACP 会话都删整段对话"
+    );
 
     // 不在目录里的（远程目录里的会话）不改目录。
     let revision = published.revision;
@@ -261,7 +435,11 @@ fn a_subscriber_gets_the_directory_the_daemon_could_not_read_at_startup() {
         })
     };
     let event_hub = crate::event_hub::DaemonEventHub::new(reader).unwrap();
-    assert_eq!(published_directory(&event_hub), None, "库读不出来时首帧不带目录");
+    assert_eq!(
+        published_directory(&event_hub),
+        None,
+        "库读不出来时首帧不带目录"
+    );
 
     readable.store(true, Ordering::Release);
     let published = published_directory(&event_hub).expect("库好了，新订阅拿到目录");

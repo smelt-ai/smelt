@@ -974,6 +974,7 @@ impl Workspace {
         // 名字不随对话发出去：只经 `workspace.rename` 写，见 `request_rename`。
         Some(without_names(&WorkspaceConversation {
             id: session.conversation_id.clone(),
+            workset_id: None,
             custom_title: None,
             last_updated_at,
             terminals,

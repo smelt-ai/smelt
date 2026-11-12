@@ -86,6 +86,15 @@ pub enum StoreError {
     #[error("项目根目录不能为空")]
     EmptyProjectRoot,
 
+    #[error("工作树不存在：{id}")]
+    WorkspaceWorksetNotFound { id: String },
+
+    #[error("工作树仍绑定会话，不能删除：{id}")]
+    WorkspaceWorksetInUse { id: String },
+
+    #[error("工作树 id 已用于不同内容：{id}")]
+    WorkspaceWorksetConflict { id: String },
+
     #[error("KV 数字 {path} 无效: {source}")]
     InvalidKvNumber {
         path: String,

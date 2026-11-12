@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 40] = [
+pub const TABLES: [&str; 44] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -41,6 +41,8 @@ pub const TABLES: [&str; 40] = [
     "new_session_pin",
     "paired_device",
     "project",
+    "project_repository",
+    "project_repository_catalog",
     "published_session",
     "push_registration",
     "quota_cache",
@@ -54,6 +56,8 @@ pub const TABLES: [&str; 40] = [
     "session_group",
     "terminal_theme",
     "terminal_theme_palette",
+    "workset",
+    "workset_repository",
     "workspace_catalog",
 ];
 
@@ -237,13 +241,52 @@ CREATE TABLE project (
   position INTEGER NOT NULL UNIQUE CHECK (position >= 0)
 );
 
+CREATE TABLE project_repository (
+  project_root TEXT NOT NULL,
+  name TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  managed_link TEXT,
+  PRIMARY KEY (project_root, name),
+  UNIQUE (project_root, root),
+  UNIQUE (project_root, position)
+) WITHOUT ROWID;
+
+CREATE TABLE project_repository_catalog (
+  project_root TEXT PRIMARY KEY
+) WITHOUT ROWID;
+
+CREATE TABLE workset (
+  id TEXT PRIMARY KEY,
+  project_root TEXT NOT NULL,
+  task TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  UNIQUE (project_root, task),
+  UNIQUE (project_root, branch),
+  UNIQUE (project_root, position)
+);
+
+CREATE TABLE workset_repository (
+  workset_id TEXT NOT NULL REFERENCES workset(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  root TEXT NOT NULL,
+  worktree TEXT NOT NULL,
+  base_ref TEXT NOT NULL,
+  branch_created INTEGER NOT NULL CHECK (branch_created IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  PRIMARY KEY (workset_id, name),
+  UNIQUE (workset_id, position)
+) WITHOUT ROWID;
+
 CREATE TABLE session_group (
   id TEXT PRIMARY KEY,
   position INTEGER NOT NULL UNIQUE CHECK (position >= 0),
   custom_title TEXT,
   last_updated_at INTEGER NOT NULL DEFAULT 0,
   archived_at INTEGER,
-  pinned_at INTEGER
+  pinned_at INTEGER,
+  workset_id TEXT REFERENCES workset(id) ON DELETE SET NULL
 );
 
 CREATE TABLE session (
@@ -1782,6 +1825,62 @@ DROP TABLE agent_acp_command;
 /// v36：推送登记加「智能体消息」开关。消息正文原样显示，旧版 App 也认，已有的登记默认推。
 pub const MIGRATE_V35_TO_V36: &str = "
 ALTER TABLE push_registration ADD COLUMN notify_message INTEGER NOT NULL DEFAULT 1 CHECK (notify_message IN (0, 1));
+";
+
+/// v37：项目可管理仓库，工作集和会话绑定关系由运行时目录持久化。
+pub const MIGRATE_V36_TO_V37: &str = "
+CREATE TABLE project_repository (
+  project_root TEXT NOT NULL,
+  name TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  PRIMARY KEY (project_root, name),
+  UNIQUE (project_root, root),
+  UNIQUE (project_root, position)
+) WITHOUT ROWID;
+CREATE TABLE workset (
+  id TEXT PRIMARY KEY,
+  project_root TEXT NOT NULL,
+  task TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  UNIQUE (project_root, task),
+  UNIQUE (project_root, branch),
+  UNIQUE (project_root, position)
+);
+CREATE TABLE workset_repository (
+  workset_id TEXT NOT NULL REFERENCES workset(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  root TEXT NOT NULL,
+  worktree TEXT NOT NULL,
+  base_ref TEXT NOT NULL,
+  branch_created INTEGER NOT NULL CHECK (branch_created IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  PRIMARY KEY (workset_id, name),
+  UNIQUE (workset_id, position)
+) WITHOUT ROWID;
+ALTER TABLE session_group ADD COLUMN workset_id TEXT REFERENCES workset(id) ON DELETE SET NULL;
+";
+
+pub const MIGRATE_V37_TO_V38: &str = "
+ALTER TABLE project_repository RENAME TO project_repository_v37;
+CREATE TABLE project_repository (
+  project_root TEXT NOT NULL,
+  name TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  managed_link TEXT,
+  PRIMARY KEY (project_root, name),
+  UNIQUE (project_root, root),
+  UNIQUE (project_root, position)
+) WITHOUT ROWID;
+INSERT INTO project_repository(project_root, name, root, position)
+SELECT project_root, name, root, position FROM project_repository_v37;
+DROP TABLE project_repository_v37;
+CREATE TABLE project_repository_catalog (
+  project_root TEXT PRIMARY KEY
+) WITHOUT ROWID;
+INSERT INTO project_repository_catalog SELECT DISTINCT project_root FROM project_repository;
 ";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。

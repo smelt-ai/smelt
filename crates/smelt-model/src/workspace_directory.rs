@@ -21,9 +21,71 @@ pub struct WorkspaceDirectory {
     /// 打开的项目根目录，按打开的先后。
     #[serde(default)]
     pub projects: Vec<String>,
+    /// 项目手动纳入工作集的 Git 仓库。
+    #[serde(default)]
+    pub repositories: Vec<WorkspaceProjectRepository>,
+    /// 项目下已创建的工作集，按创建顺序。
+    #[serde(default)]
+    pub worksets: Vec<WorkspaceWorkset>,
     /// 按新建的先后。
     #[serde(default)]
     pub conversations: Vec<WorkspaceConversation>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProjectRepository {
+    pub project_root: String,
+    pub name: String,
+    pub root: String,
+    pub position: u32,
+    #[serde(default)]
+    pub managed_link: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProjectRepositoryActionParams {
+    pub project_root: String,
+    pub action: WorkspaceProjectRepositoryAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceProjectRepositoryAction {
+    Discover,
+    Bind { source: String, name: String },
+    Clone { url: String, name: String },
+    Remove { name: String },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorkset {
+    pub id: String,
+    pub project_root: String,
+    pub task: String,
+    pub branch: String,
+    pub position: u32,
+    pub repositories: Vec<WorkspaceWorksetRepository>,
+}
+
+impl WorkspaceWorkset {
+    pub fn task_root(&self, style: PathStyle) -> String {
+        style.join(&style.join(&self.project_root, "worktrees"), &self.task)
+    }
+
+    pub fn contains_cwd(&self, style: PathStyle, cwd: &str) -> bool {
+        style.is_absolute(cwd)
+            && style.starts_with(&style.clean(cwd), &style.clean(&self.task_root(style)))
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetRepository {
+    pub name: String,
+    pub root: String,
+    pub worktree: String,
+    pub base_ref: String,
+    pub branch_created: bool,
+    pub position: u32,
 }
 
 /// 一段对话：侧栏里的一条。要么是一段 ACP 对话，要么是一组终端。
@@ -42,6 +104,9 @@ pub struct WorkspaceConversation {
     /// 项目组内置顶；归档时清除。
     #[serde(default)]
     pub pinned_at: Option<i64>,
+    /// 新会话创建时绑定的工作集；旧会话保持未绑定。
+    #[serde(default)]
+    pub workset_id: Option<String>,
     /// 这段对话里的终端，按客户端给的顺序。ACP 对话没有。
     #[serde(default)]
     pub terminals: Vec<WorkspaceTerminal>,
@@ -130,6 +195,37 @@ pub struct WorkspaceRenameParams {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceProjectParams {
     pub root: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetCreateParams {
+    pub project_root: String,
+    pub task: String,
+    #[serde(default = "default_workset_branch_prefix")]
+    pub branch_prefix: String,
+    pub repository_names: Vec<String>,
+}
+
+fn default_workset_branch_prefix() -> String {
+    "feat".to_string()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetRenameParams {
+    pub workset_id: String,
+    pub task: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetFinishParams {
+    pub workset_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWorksetFinishResult {
+    pub revision: WorkspaceRevision,
+    pub retained_branches: Vec<String>,
+    pub leftover_entries: Vec<String>,
 }
 
 /// 目录的版本：哪一份（`epoch`）、改到第几次。命令回执也是它，没改动时是原来的版本。
@@ -224,16 +320,71 @@ fn label_with_parents(style: PathStyle, root: &str, base: &str, extra: usize) ->
         PathStyle::Posix => (&['/'], "/"),
         PathStyle::Windows => (&['\\', '/'], "\\"),
     };
-    let segs: Vec<&str> = root
-        .split(separators)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segs: Vec<&str> = root.split(separators).filter(|s| !s.is_empty()).collect();
     let end = segs.len().saturating_sub(1); // base 已经代表末段
     let start = end.saturating_sub(extra);
     if start >= end {
         return base.to_string();
     }
     format!("{} · {}", segs[start..end].join(joiner), base)
+}
+
+#[cfg(test)]
+mod workset_tests {
+    use super::{PathStyle, WorkspaceWorkset, WorkspaceWorksetRepository};
+
+    #[test]
+    fn workset_sessions_start_at_the_task_root_for_any_repository_count() {
+        let mut workset = WorkspaceWorkset {
+            project_root: "/project".into(),
+            task: "task".into(),
+            ..Default::default()
+        };
+        for count in [1, 3] {
+            workset.repositories = vec![WorkspaceWorksetRepository::default(); count];
+            assert_eq!(
+                workset.task_root(PathStyle::Posix),
+                "/project/worktrees/task"
+            );
+        }
+        workset.project_root = r"C:\projects\app".into();
+        assert_eq!(
+            workset.task_root(PathStyle::Windows),
+            r"C:\projects\app\worktrees\task"
+        );
+    }
+
+    #[test]
+    fn workset_directory_accepts_root_and_children_but_not_siblings_or_escape() {
+        let workset = WorkspaceWorkset {
+            project_root: "/project".into(),
+            task: "task".into(),
+            ..Default::default()
+        };
+        for cwd in [
+            "/project/worktrees/task",
+            "/project/worktrees/task/backend/src",
+        ] {
+            assert!(workset.contains_cwd(PathStyle::Posix, cwd));
+        }
+        for cwd in [
+            "/project",
+            "/project/worktrees/task-other",
+            "/project/worktrees/task/../other",
+            "project/worktrees/task",
+        ] {
+            assert!(!workset.contains_cwd(PathStyle::Posix, cwd), "{cwd}");
+        }
+        let windows = WorkspaceWorkset {
+            project_root: r"C:\projects\app".into(),
+            ..workset
+        };
+        assert!(windows.contains_cwd(PathStyle::Windows, r"c:\projects\app\worktrees\task\api"));
+        assert!(!windows.contains_cwd(
+            PathStyle::Windows,
+            r"C:\projects\app\worktrees\task\..\other"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -336,7 +487,10 @@ mod project_tests {
             project_root_of(PathStyle::Posix, &p, "/Users/me/dev/smelt/crates/smeltd"),
             Some("/Users/me/dev/smelt")
         );
-        assert_eq!(project_root_of(PathStyle::Posix, &p, "/Users/me/dev/other"), None);
+        assert_eq!(
+            project_root_of(PathStyle::Posix, &p, "/Users/me/dev/other"),
+            None
+        );
         assert_eq!(project_root_of(PathStyle::Posix, &p, ""), None);
     }
 
@@ -347,15 +501,24 @@ mod project_tests {
         let p = projects(&["/a/smelt"]);
         assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/smelt-old"), None);
         assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/smeltd"), None);
-        assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/smelt/sub"), Some("/a/smelt"));
+        assert_eq!(
+            project_root_of(PathStyle::Posix, &p, "/a/smelt/sub"),
+            Some("/a/smelt")
+        );
     }
 
     /// 父子项目都打开着时，会话归最深的那个（不然子项目永远空着）。
     #[test]
     fn deepest_matching_project_wins() {
         let p = projects(&["/a", "/a/b", "/a/b/c"]);
-        assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/c/x"), Some("/a/b/c"));
-        assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/x"), Some("/a/b"));
+        assert_eq!(
+            project_root_of(PathStyle::Posix, &p, "/a/b/c/x"),
+            Some("/a/b/c")
+        );
+        assert_eq!(
+            project_root_of(PathStyle::Posix, &p, "/a/b/x"),
+            Some("/a/b")
+        );
         assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/x"), Some("/a"));
     }
 
@@ -383,6 +546,9 @@ mod project_tests {
         let p = projects(&["/a/b/"]);
         assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b"), Some("/a/b"));
         assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/"), Some("/a/b"));
-        assert_eq!(project_root_of(PathStyle::Posix, &p, "/a/b/c"), Some("/a/b"));
+        assert_eq!(
+            project_root_of(PathStyle::Posix, &p, "/a/b/c"),
+            Some("/a/b")
+        );
     }
 }

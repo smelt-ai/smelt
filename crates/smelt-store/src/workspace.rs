@@ -2,8 +2,9 @@
 //! 分屏归客户端，不在这里（设计文档 D1）。
 
 use crate::{
-    StoreError, StoredHistoryIdentity, WorkspaceAcpRecord, WorkspaceSessionRecord,
-    WorkspaceSnapshot, WorkspaceTerminalRecord,
+    StoreError, StoredHistoryIdentity, WorkspaceAcpRecord, WorkspaceProjectRepositoryRecord,
+    WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord, WorkspaceWorksetRecord,
+    WorkspaceWorksetRepositoryRecord,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -58,8 +59,9 @@ fn insert_conversation(
 ) -> Result<(), StoreError> {
     let group_id = saved.id.trim();
     transaction.execute(
-        "INSERT INTO session_group(id, position, custom_title, last_updated_at, archived_at, pinned_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO session_group(
+             id, position, custom_title, last_updated_at, archived_at, pinned_at, workset_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             group_id,
             position,
@@ -67,6 +69,7 @@ fn insert_conversation(
             saved.last_updated_at,
             saved.archived_at,
             saved.pinned_at,
+            saved.workset_id.as_deref(),
         ],
     )?;
 
@@ -206,6 +209,7 @@ pub(crate) fn update_conversation(
     if let Some(before) = &before {
         saved.archived_at = before.archived_at;
         saved.pinned_at = before.pinned_at;
+        saved.workset_id = before.workset_id.clone();
     }
     transaction.execute("DELETE FROM session_group WHERE id = ?1", [group_id])?;
     insert_conversation(
@@ -311,6 +315,223 @@ pub(crate) fn open_project(transaction: &Transaction<'_>, root: &str) -> Result<
 pub(crate) fn close_project(transaction: &Transaction<'_>, root: &str) -> Result<bool, StoreError> {
     let removed = transaction.execute("DELETE FROM project WHERE root = ?1", [root.trim()])?;
     Ok(removed > 0)
+}
+
+pub(crate) fn set_project_repositories(
+    transaction: &Transaction<'_>,
+    project_root: &str,
+    repositories: &[WorkspaceProjectRepositoryRecord],
+) -> Result<bool, StoreError> {
+    let project_root = project_root.trim();
+    if project_root.is_empty() {
+        return Err(StoreError::EmptyProjectRoot);
+    }
+    let mut names = HashSet::new();
+    let mut roots = HashSet::new();
+    for repository in repositories {
+        if repository.project_root.trim() != project_root
+            || repository.name.trim().is_empty()
+            || repository.root.trim().is_empty()
+        {
+            return Err(StoreError::empty_name("项目仓库"));
+        }
+        if !names.insert(repository.name.trim()) || !roots.insert(repository.root.trim()) {
+            return Err(StoreError::empty_name("重复的项目仓库"));
+        }
+    }
+    let existing = {
+        let mut statement = transaction.prepare(
+            "SELECT name, root, position, managed_link FROM project_repository
+             WHERE project_root = ?1 ORDER BY position",
+        )?;
+        statement
+            .query_map([project_root], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let requested = repositories
+        .iter()
+        .enumerate()
+        .map(|(position, repository)| {
+            (
+                repository.name.trim().to_string(),
+                repository.root.trim().to_string(),
+                position as u32,
+                repository.managed_link.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let initialized = transaction.execute(
+        "INSERT OR IGNORE INTO project_repository_catalog(project_root) VALUES (?1)",
+        [project_root],
+    )? > 0;
+    if existing == requested {
+        return Ok(initialized);
+    }
+    transaction.execute(
+        "DELETE FROM project_repository WHERE project_root = ?1",
+        [project_root],
+    )?;
+    for (name, root, position, managed_link) in requested {
+        transaction.execute(
+            "INSERT INTO project_repository(project_root, name, root, position, managed_link)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project_root, name, root, position, managed_link],
+        )?;
+    }
+    Ok(true)
+}
+
+pub(crate) fn create_workset(
+    transaction: &Transaction<'_>,
+    workset: &WorkspaceWorksetRecord,
+) -> Result<bool, StoreError> {
+    let id = workset.id.trim();
+    let project_root = workset.project_root.trim();
+    let task = workset.task.trim();
+    let branch = workset.branch.trim();
+    for (label, value) in [
+        ("工作树 id", id),
+        ("项目根目录", project_root),
+        ("工作树名称", task),
+        ("工作树分支", branch),
+    ] {
+        if value.is_empty() {
+            return Err(StoreError::empty_name(label));
+        }
+    }
+    if workset.repositories.is_empty() {
+        return Err(StoreError::empty_name("工作树仓库"));
+    }
+    let existing = transaction
+        .query_row(
+            "SELECT project_root, task, branch FROM workset WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((existing_root, existing_task, existing_branch)) = existing {
+        if (
+            existing_root.as_str(),
+            existing_task.as_str(),
+            existing_branch.as_str(),
+        ) == (project_root, task, branch)
+        {
+            return Ok(false);
+        }
+        return Err(StoreError::WorkspaceWorksetConflict { id: id.into() });
+    }
+    let position: u32 = transaction.query_row(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM workset WHERE project_root = ?1",
+        [project_root],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO workset(id, project_root, task, branch, position)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, project_root, task, branch, position],
+    )?;
+    let mut names = HashSet::new();
+    let mut roots = HashSet::new();
+    let mut worktrees = HashSet::new();
+    for (position, repository) in workset.repositories.iter().enumerate() {
+        if repository.name.trim().is_empty()
+            || repository.root.trim().is_empty()
+            || repository.worktree.trim().is_empty()
+            || repository.base_ref.trim().is_empty()
+        {
+            return Err(StoreError::empty_name("工作树仓库"));
+        }
+        if !names.insert(repository.name.trim())
+            || !roots.insert(repository.root.trim())
+            || !worktrees.insert(repository.worktree.trim())
+        {
+            return Err(StoreError::empty_name("重复的工作树仓库"));
+        }
+        transaction.execute(
+            "INSERT INTO workset_repository(
+                 workset_id, name, root, worktree, base_ref, branch_created, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                repository.name.trim(),
+                repository.root.trim(),
+                repository.worktree.trim(),
+                repository.base_ref.trim(),
+                repository.branch_created,
+                position as u32,
+            ],
+        )?;
+    }
+    Ok(true)
+}
+
+pub(crate) fn rename_workset(
+    transaction: &Transaction<'_>,
+    workset: &WorkspaceWorksetRecord,
+) -> Result<bool, StoreError> {
+    let id = workset.id.trim();
+    let task = workset.task.trim();
+    let branch = workset.branch.trim();
+    if id.is_empty() || task.is_empty() || branch.is_empty() {
+        return Err(StoreError::empty_name("工作树"));
+    }
+    let changed = transaction.execute(
+        "UPDATE workset SET task = ?2, branch = ?3 WHERE id = ?1
+         AND (task != ?2 OR branch != ?3)",
+        params![id, task, branch],
+    )?;
+    if changed == 0 {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workset WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::WorkspaceWorksetNotFound { id: id.into() });
+        }
+    }
+    for repository in &workset.repositories {
+        transaction.execute(
+            "UPDATE workset_repository SET worktree = ?3
+             WHERE workset_id = ?1 AND name = ?2 AND worktree != ?3",
+            params![id, repository.name, repository.worktree],
+        )?;
+    }
+    let count: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM workset_repository WHERE workset_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    if count as usize != workset.repositories.len() {
+        return Err(StoreError::WorkspaceWorksetConflict { id: id.into() });
+    }
+    Ok(changed > 0)
+}
+
+pub(crate) fn delete_workset(transaction: &Transaction<'_>, id: &str) -> Result<bool, StoreError> {
+    let id = id.trim();
+    let in_use: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_group WHERE workset_id = ?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    if in_use {
+        return Err(StoreError::WorkspaceWorksetInUse { id: id.into() });
+    }
+    Ok(transaction.execute("DELETE FROM workset WHERE id = ?1", [id])? > 0)
 }
 
 fn validated_conversation_id(saved: &WorkspaceSessionRecord) -> Result<&str, StoreError> {
@@ -733,7 +954,12 @@ pub(crate) fn read_workspace_snapshot(
         connection.query_row("SELECT EXISTS(SELECT 1 FROM session_group)", [], |row| {
             row.get(0)
         })?;
-    if !has_projects && !has_groups {
+    let has_task_metadata: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_repository) OR EXISTS(SELECT 1 FROM workset)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_projects && !has_groups && !has_task_metadata {
         return Ok(None);
     }
 
@@ -742,12 +968,76 @@ pub(crate) fn read_workspace_snapshot(
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
+    let repositories = connection
+        .prepare(
+            "SELECT project_root, name, root, position, managed_link
+             FROM project_repository ORDER BY project_root, position",
+        )?
+        .query_map([], |row| {
+            Ok(WorkspaceProjectRepositoryRecord {
+                project_root: row.get(0)?,
+                name: row.get(1)?,
+                root: row.get(2)?,
+                position: row.get(3)?,
+                managed_link: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut worksets = {
+        let mut statement = connection.prepare(
+            "SELECT id, project_root, task, branch, position
+             FROM workset ORDER BY project_root, position",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(WorkspaceWorksetRecord {
+                id: row.get(0)?,
+                project_root: row.get(1)?,
+                task: row.get(2)?,
+                branch: row.get(3)?,
+                position: row.get(4)?,
+                repositories: Vec::new(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let workset_indices = worksets
+        .iter()
+        .enumerate()
+        .map(|(index, workset)| (workset.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    {
+        let mut statement = connection.prepare(
+            "SELECT workset_id, name, root, worktree, base_ref, branch_created, position
+             FROM workset_repository ORDER BY workset_id, position",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                WorkspaceWorksetRepositoryRecord {
+                    name: row.get(1)?,
+                    root: row.get(2)?,
+                    worktree: row.get(3)?,
+                    base_ref: row.get(4)?,
+                    branch_created: row.get(5)?,
+                    position: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (workset_id, repository) = row?;
+            if let Some(index) = workset_indices.get(&workset_id) {
+                worksets[*index].repositories.push(repository);
+            }
+        }
+    }
+
     let groups = connection
         // 对话的名字：认得出 provider 身份的 ACP 对话用那段对话的名字（`history_title`），
         // 没有身份的用对话自己的。一个名字只存在其中一处，读的时候合起来。
         .prepare(
             "SELECT g.id, COALESCE(h.custom_title, g.custom_title), g.last_updated_at,
-                    g.archived_at, g.pinned_at
+                    g.archived_at, g.pinned_at, g.workset_id
              FROM session_group g
              LEFT JOIN session s ON s.group_id = g.id AND s.kind = 'acp'
              LEFT JOIN acp_detail a ON a.session_id = s.id
@@ -764,12 +1054,13 @@ pub(crate) fn read_workspace_snapshot(
                 row.get::<_, i64>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut cache = WorkspaceReadCache::load(connection)?;
     let mut sessions = Vec::new();
-    for (group_id, custom_title, last_updated_at, archived_at, pinned_at) in groups {
+    for (group_id, custom_title, last_updated_at, archived_at, pinned_at, workset_id) in groups {
         let terminals = cache
             .terminals_by_group
             .remove(&group_id)
@@ -784,11 +1075,17 @@ pub(crate) fn read_workspace_snapshot(
             last_updated_at: last_updated_at.max(0),
             archived_at,
             pinned_at,
+            workset_id,
             terminals,
             acp,
         });
     }
-    Ok(Some(WorkspaceSnapshot { projects, sessions }))
+    Ok(Some(WorkspaceSnapshot {
+        projects,
+        repositories,
+        worksets,
+        sessions,
+    }))
 }
 
 /// 一次把工作区相关的表都读进内存，再拼成快照，免得每段对话一次查询。

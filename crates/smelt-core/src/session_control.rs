@@ -501,6 +501,8 @@ mod tests {
             revision: 1,
             epoch: String::new(),
             projects: Vec::new(),
+            repositories: Vec::new(),
+            worksets: Vec::new(),
             conversations: vec![
                 WorkspaceConversation {
                     id: "c-term".into(),
@@ -534,5 +536,4 @@ mod tests {
         assert_eq!(directory_session_kind(&directory, "c-term"), None);
         assert_eq!(directory_session_kind(&directory, "missing"), None);
     }
-
 }

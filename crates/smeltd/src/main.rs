@@ -110,7 +110,6 @@ mod agent_notify;
 mod automation_runtime;
 mod client_conn;
 mod control;
-mod memory_peer_auth;
 mod conversation_image;
 mod desktop;
 mod devices;
@@ -118,6 +117,7 @@ mod event_hub;
 mod files_control;
 mod git_control;
 mod history_control;
+mod memory_peer_auth;
 mod memory_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
@@ -138,8 +138,8 @@ mod session_catalog;
 mod session_control;
 mod session_directory;
 mod session_state;
-mod terminal_names;
 mod terminal_graphics;
+mod terminal_names;
 mod terminal_output;
 mod terminal_progress;
 mod terminal_registry;
@@ -147,6 +147,7 @@ mod terminal_resume;
 mod terminal_shell;
 mod terminal_snapshot;
 mod webhook;
+mod workset_control;
 mod workspace_directory;
 
 use acp_host::*;
@@ -167,10 +168,10 @@ use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboun
 use smelt_core::automation_store::{
     AutomationStore, local_timezone_fingerprint, new_automation_store,
 };
+use smelt_core::kitty_graphics::GraphicsSplitter;
 use smelt_core::osc::{
     OscEvent, OscScan, TerminalGeometryOsc, program_status_reply, terminal_geometry_osc,
 };
-use smelt_core::kitty_graphics::GraphicsSplitter;
 use smelt_core::session_control::find_agent_option_for;
 use terminal_graphics::{FedOutput, TerminalGraphics, feed_output};
 use terminal_output::{KeyframeNeed, OutputAttachment, SessionOutput, enqueue_session_streams};
@@ -594,10 +595,7 @@ enum PixelQuery {
 impl PixelQuery {
     fn answer(&self, window: WindowSize) -> String {
         match self {
-            Self::Cell => format!(
-                "\x1b[6;{};{}t",
-                window.cell_height, window.cell_width
-            ),
+            Self::Cell => format!("\x1b[6;{};{}t", window.cell_height, window.cell_width),
             Self::TextArea(format) => format(window),
         }
     }
@@ -1142,9 +1140,15 @@ fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
     }
 }
 
-fn suspend_terminal_identity(event_hub: &EventHubHandle, state: &SessionState) -> Result<(), String> {
+fn suspend_terminal_identity(
+    event_hub: &EventHubHandle,
+    state: &SessionState,
+) -> Result<(), String> {
     let _commit = STATE_DIRECTORY_COMMIT_GATE.lock().unwrap();
-    if !event_hub.remove_session(&state.id, state.instance).map_err(|error| error.to_string())? {
+    if !event_hub
+        .remove_session(&state.id, state.instance)
+        .map_err(|error| error.to_string())?
+    {
         return Err("终端实例已替换，不能归档旧实例".to_string());
     }
     with_session_directory(|directory| directory.suspend_instance(state))
@@ -1367,9 +1371,9 @@ impl EventListener for StateListener {
             Event::ColorRequest(index, format) => {
                 Some(TermReply::Color(*index, Arc::clone(format)))
             }
-            Event::TextAreaSizeRequest(format) => Some(TermReply::Pixels(PixelQuery::TextArea(
-                Arc::clone(format),
-            ))),
+            Event::TextAreaSizeRequest(format) => {
+                Some(TermReply::Pixels(PixelQuery::TextArea(Arc::clone(format))))
+            }
             _ => None,
         };
         if let Some(reply) = reply {
@@ -2525,7 +2529,9 @@ fn main() {
         match smelt_sys::process::retire_predecessor(pid, Duration::from_secs(30)) {
             Ok(false) => {}
             Ok(true) => dlog(&format!("升级接班：前任 {pid} 30 秒内没退出，已结束它")),
-            Err(error) => dlog(&format!("升级接班：等前任 {pid} 退出失败，照常绑定：{error}")),
+            Err(error) => dlog(&format!(
+                "升级接班：等前任 {pid} 退出失败，照常绑定：{error}"
+            )),
         }
     }
     let bound = match bind_fresh_daemon(&path) {

@@ -5,16 +5,29 @@
 //! 原子执行，按 id 幂等，不带基准版本，多个客户端同时改不会互相覆盖；真改了才推进版本。
 //! 改完返回整份目录，由守护经 `workspace.changed` 推给所有客户端。
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use smelt_model::agent_kind::ConversationLaunchSpec;
 use smelt_model::conversation::ConversationBinding;
 use smelt_model::workspace_directory::{
-    WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+    WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceProjectRepository,
+    WorkspaceTerminal, WorkspaceWorkset, WorkspaceWorksetRepository,
 };
 
 /// 改动和随后读回整份目录要连在一起，见 [`change_on`]。
 static CATALOG_LOCK: Mutex<()> = Mutex::new(());
+
+pub struct CatalogGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+pub fn lock_catalog() -> CatalogGuard {
+    CatalogGuard {
+        _guard: CATALOG_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    }
+}
 
 /// 单条改动（`workspace.conversation.*`、`workspace.project.*`）失败的原因。
 #[derive(Debug, PartialEq, Eq)]
@@ -46,6 +59,9 @@ impl From<smelt_store::StoreError> for DirectoryError {
             | StoreError::AcpConversationMissingSid { .. }
             | StoreError::DuplicateSessionId { .. }
             | StoreError::EmptyProjectRoot => Self::Invalid(error.to_string()),
+            StoreError::WorkspaceWorksetInUse { .. }
+            | StoreError::WorkspaceWorksetConflict { .. } => Self::Invalid(error.to_string()),
+            StoreError::WorkspaceWorksetNotFound { .. } => Self::NotFound(error.to_string()),
             StoreError::ConversationArchived { .. } => Self::Invalid(error.to_string()),
             error => Self::Store(error.to_string()),
         }
@@ -60,7 +76,13 @@ pub struct DirectoryChange {
 }
 
 pub fn directory_on(store: &smelt_store::Store) -> Result<WorkspaceDirectory, DirectoryError> {
-    let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = lock_catalog();
+    directory_on_locked(store)
+}
+
+pub fn directory_on_locked(
+    store: &smelt_store::Store,
+) -> Result<WorkspaceDirectory, DirectoryError> {
     let (version, snapshot) = store.workspace_directory()?;
     Ok(directory_from_snapshot(version, snapshot))
 }
@@ -145,6 +167,99 @@ pub fn close_project_on(
     })
 }
 
+pub fn set_project_repositories_on(
+    store: &smelt_store::Store,
+    project_root: &str,
+    repositories: &[WorkspaceProjectRepository],
+) -> Result<DirectoryChange, DirectoryError> {
+    let _guard = lock_catalog();
+    set_project_repositories_on_locked(store, project_root, repositories)
+}
+
+pub fn set_project_repositories_on_locked(
+    store: &smelt_store::Store,
+    project_root: &str,
+    repositories: &[WorkspaceProjectRepository],
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on_locked(store, |store| {
+        let repositories = repositories
+            .iter()
+            .enumerate()
+            .map(
+                |(position, repository)| smelt_store::WorkspaceProjectRepositoryRecord {
+                    project_root: repository.project_root.clone(),
+                    name: repository.name.clone(),
+                    root: repository.root.clone(),
+                    position: position as u32,
+                    managed_link: repository.managed_link.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let commit = store.set_workspace_project_repositories(project_root, &repositories)?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn create_workset_on(
+    store: &smelt_store::Store,
+    workset: &WorkspaceWorkset,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let commit = store.create_workspace_workset(&workset_record(workset))?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn create_workset_on_locked(
+    store: &smelt_store::Store,
+    workset: &WorkspaceWorkset,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on_locked(store, |store| {
+        let commit = store.create_workspace_workset(&workset_record(workset))?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn rename_workset_on(
+    store: &smelt_store::Store,
+    workset: &WorkspaceWorkset,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let commit = store.rename_workspace_workset(&workset_record(workset))?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn rename_workset_on_locked(
+    store: &smelt_store::Store,
+    workset: &WorkspaceWorkset,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on_locked(store, |store| {
+        let commit = store.rename_workspace_workset(&workset_record(workset))?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn delete_workset_on(
+    store: &smelt_store::Store,
+    id: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let commit = store.delete_workspace_workset(id)?;
+        Ok((commit.changed, None))
+    })
+}
+
+pub fn delete_workset_on_locked(
+    store: &smelt_store::Store,
+    id: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on_locked(store, |store| {
+        let commit = store.delete_workspace_workset(id)?;
+        Ok((commit.changed, None))
+    })
+}
+
 /// 一个会话被删掉了（手机、命令行的 `session.delete`；进程调用方已经收掉）：从目录里摘掉。
 /// ACP 会话删整段对话；终端只摘这一格，摘完没有终端了删整段对话。不在目录里的会话
 /// （只在远程目录里的）不改。读和改在同一把锁里，不会夹进别的改动。
@@ -156,7 +271,10 @@ pub fn forget_session_on(
         let (version, snapshot) = store.workspace_directory()?;
         let directory = directory_from_snapshot(version, snapshot);
         let Some(conversation) = directory.conversations.into_iter().find(|conversation| {
-            conversation.acp.as_ref().is_some_and(|acp| acp.sid == session_id)
+            conversation
+                .acp
+                .as_ref()
+                .is_some_and(|acp| acp.sid == session_id)
                 || conversation
                     .terminals
                     .iter()
@@ -263,7 +381,16 @@ fn change_on(
         &smelt_store::Store,
     ) -> Result<(bool, Option<WorkspaceConversation>), smelt_store::StoreError>,
 ) -> Result<DirectoryChange, DirectoryError> {
-    let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = lock_catalog();
+    change_on_locked(store, change)
+}
+
+fn change_on_locked(
+    store: &smelt_store::Store,
+    change: impl FnOnce(
+        &smelt_store::Store,
+    ) -> Result<(bool, Option<WorkspaceConversation>), smelt_store::StoreError>,
+) -> Result<DirectoryChange, DirectoryError> {
     let (changed, removed) = change(store)?;
     let (version, snapshot) = store.workspace_directory()?;
     Ok(DirectoryChange {
@@ -289,6 +416,40 @@ fn directory_from_snapshot(
         epoch: version.epoch,
         revision: version.revision,
         projects: snapshot.projects,
+        repositories: snapshot
+            .repositories
+            .into_iter()
+            .map(|repository| WorkspaceProjectRepository {
+                project_root: repository.project_root,
+                name: repository.name,
+                root: repository.root,
+                position: repository.position,
+                managed_link: repository.managed_link,
+            })
+            .collect(),
+        worksets: snapshot
+            .worksets
+            .into_iter()
+            .map(|workset| WorkspaceWorkset {
+                id: workset.id,
+                project_root: workset.project_root,
+                task: workset.task,
+                branch: workset.branch,
+                position: workset.position,
+                repositories: workset
+                    .repositories
+                    .into_iter()
+                    .map(|repository| WorkspaceWorksetRepository {
+                        name: repository.name,
+                        root: repository.root,
+                        worktree: repository.worktree,
+                        base_ref: repository.base_ref,
+                        branch_created: repository.branch_created,
+                        position: repository.position,
+                    })
+                    .collect(),
+            })
+            .collect(),
         conversations: snapshot
             .sessions
             .into_iter()
@@ -306,6 +467,7 @@ fn conversation_record(
         last_updated_at: conversation.last_updated_at,
         archived_at: conversation.archived_at,
         pinned_at: conversation.pinned_at,
+        workset_id: conversation.workset_id.clone(),
         terminals: conversation
             .terminals
             .iter()
@@ -318,6 +480,31 @@ fn conversation_record(
             })
             .collect(),
         acp: conversation.acp.as_ref().map(acp_record),
+    }
+}
+
+fn workset_record(workset: &WorkspaceWorkset) -> smelt_store::WorkspaceWorksetRecord {
+    smelt_store::WorkspaceWorksetRecord {
+        id: workset.id.clone(),
+        project_root: workset.project_root.clone(),
+        task: workset.task.clone(),
+        branch: workset.branch.clone(),
+        position: workset.position,
+        repositories: workset
+            .repositories
+            .iter()
+            .enumerate()
+            .map(
+                |(position, repository)| smelt_store::WorkspaceWorksetRepositoryRecord {
+                    name: repository.name.clone(),
+                    root: repository.root.clone(),
+                    worktree: repository.worktree.clone(),
+                    base_ref: repository.base_ref.clone(),
+                    branch_created: repository.branch_created,
+                    position: position as u32,
+                },
+            )
+            .collect(),
     }
 }
 
@@ -357,6 +544,7 @@ fn conversation_from_record(record: smelt_store::WorkspaceSessionRecord) -> Work
         last_updated_at: record.last_updated_at,
         archived_at: record.archived_at,
         pinned_at: record.pinned_at,
+        workset_id: record.workset_id,
         terminals: record
             .terminals
             .into_iter()
@@ -420,6 +608,7 @@ mod tests {
             last_updated_at: 7,
             archived_at: None,
             pinned_at: None,
+            workset_id: None,
             terminals: Vec::new(),
             acp: Some(WorkspaceAcp {
                 cwd: Some("/repo".to_string()),
