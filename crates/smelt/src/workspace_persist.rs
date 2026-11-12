@@ -858,6 +858,7 @@ impl Workspace {
             if is_local {
                 self.check_daemon_outdated(cx);
             }
+            self.schedule_visible_refresh(cx);
             return;
         }
         eprintln!(

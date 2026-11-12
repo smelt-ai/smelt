@@ -288,6 +288,20 @@ pub fn load_repo_info(root: &str) -> Option<RepoInfo> {
     load_repo_info_with(&LocalSubprocess, root)
 }
 
+/// `root` 所在仓库的 git 目录（绝对路径）。worktree 里是 `.git/worktrees/<名字>`，HEAD 在
+/// 那里，不在主仓库的 `.git` 下。不在 git 仓库里时报错。
+pub fn git_dir(root: &str) -> Result<std::path::PathBuf, String> {
+    let out = run_git(root, &["rev-parse", "--absolute-git-dir"]).map_err(|e| e.to_string())?;
+    if !out.success() {
+        return Err(git_err(&out, "不是 git 仓库"));
+    }
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if dir.is_empty() {
+        return Err("git 没有给出仓库目录".to_string());
+    }
+    Ok(std::path::PathBuf::from(dir))
+}
+
 fn checked(result: std::io::Result<Output>, fallback: &str) -> Result<(), String> {
     let out = result.map_err(|error| error.to_string())?;
     if out.success() {

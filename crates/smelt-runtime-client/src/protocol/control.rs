@@ -95,6 +95,7 @@ define_control_methods! {
     AutomationRunOnce => (AUTOMATION_RUN_ONCE_METHOD, "automation.run_once"),
     GitDiscover => (GIT_DISCOVER_METHOD, "git.discover"),
     GitRepoInfo => (GIT_REPO_INFO_METHOD, "git.repo_info"),
+    GitWatchHead => (GIT_WATCH_HEAD_METHOD, "git.watch_head"),
     GitStatus => (GIT_STATUS_METHOD, "git.status"),
     GitBranches => (GIT_BRANCHES_METHOD, "git.branches"),
     GitCheckout => (GIT_CHECKOUT_METHOD, "git.checkout"),
@@ -225,6 +226,8 @@ impl ControlMethod {
         // 额度开关：旧运行时没有，设置页显示读取失败，侧栏额度照常。
         Self::QuotaSettingsGet,
         Self::QuotaSetEnabled,
+        // 侧栏分支名跟着 HEAD 变：旧运行时没有，分支名只在窗口回到前台、重连时更新。
+        Self::GitWatchHead,
     ];
 
     /// 运行时必须有这个方法：缺了就是运行时比客户端旧。

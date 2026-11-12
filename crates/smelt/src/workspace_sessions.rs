@@ -449,6 +449,8 @@ impl Workspace {
                         view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
                     }
                 }
+                // 恢复完才知道各会话的目录、该不该把对话带回对话页、远程的活动对话要不要续上。
+                this.schedule_visible_refresh(cx);
                 this.save_state(cx);
                 let Some(space) = this.space_mut(&key) else {
                     return;
@@ -2388,6 +2390,12 @@ impl Workspace {
             self.mark_visible_session_read(cx);
             // 离线的远程机器隔几分钟才探一次；人回到这里时多半要用，立刻探一次。
             crate::runtime_events::probe_remotes(cx);
+            // 监听收不到的变化（监听登记失败、旧运行时）在人回来时补上。这里在绘制路径上，
+            // 标旧和排刷新挪到这一帧之后。
+            let view = cx.weak_entity();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |this, cx| this.on_window_refocused(cx));
+            });
         }
     }
 

@@ -651,6 +651,21 @@ fn dispatch_control(
                 ),
             }
         }
+        ControlMethod::GitWatchHead => {
+            let params: smelt_runtime_client::protocol::git::GitRootParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::project_watch::watch_head(&params.root, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
         ControlMethod::AgentMemoryWatch => {
             let params: AgentDefinitionIdParams =
                 match params_or_error(control_version, &request_id, params) {
