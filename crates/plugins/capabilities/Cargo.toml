@@ -1,0 +1,14 @@
+# 内置插件「能力库」：给某台机器上的 Pi 配模型与凭据、MCP、技能与扩展、记忆召回。
+# 只依赖插件接口和 gpui 组件库，宿主里没有它的类型（见 docs/app-plugins.md）。
+[package]
+name = "smelt-capabilities"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }

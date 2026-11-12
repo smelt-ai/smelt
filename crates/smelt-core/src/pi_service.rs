@@ -200,7 +200,14 @@ pub fn set_mcp_enabled(params: McpEnabledParams) -> Result<(), String> {
     crate::pi_mcp::set_pi_mcp_server_enabled(&params.name, params.enabled)
 }
 
+/// 先清掉这台机器上各智能体对这台服务器的勾选，再从 `mcp.json` 删掉它。
+///
+/// 顺序不能反：先删服务器的话，清勾选失败后服务器已经不在列表里，用户没处再删一次，
+/// 残留的勾选会在以后添加同名服务器时自动生效。先清勾选，中途失败时服务器还在列表里，
+/// 再删一次会把剩下的勾选清完（清勾选可重入）；清完了删失败，同样再删一次即可。
 pub fn remove_mcp_server(params: McpServerParams) -> Result<(), String> {
+    crate::agent_definition_store::forget_mcp_server(&params.name)
+        .map_err(|error| format!("清理智能体里的勾选失败，服务器没有删除：{error}"))?;
     crate::pi_mcp::remove_pi_mcp_server(&params.name)
 }
 
@@ -210,12 +217,15 @@ pub fn login_mcp_server(params: McpServerParams) -> Result<(), String> {
     crate::pi_mcp::login_pi_mcp_server(&params.name, &|_| {}).map(|_| ())
 }
 
-/// 删 `~/.pi` 下的插件实体。引用它的智能体勾选由调用方经智能体配置清掉。
+/// 先清掉这台机器上各智能体对这个插件的勾选，再删 `~/.pi` 下的插件实体。顺序的道理同
+/// [`remove_mcp_server`]。
 pub fn remove_plugin(params: PluginIdParams) -> Result<(), String> {
     let plugin = crate::pi_plugin_catalog::discover_plugins()
         .into_iter()
         .find(|plugin| plugin.id == params.id)
         .ok_or_else(|| format!("插件不存在：{}", params.id))?;
+    crate::agent_definition_store::forget_plugin(&plugin.id)
+        .map_err(|error| format!("清理智能体里的勾选失败，插件没有删除：{error}"))?;
     crate::pi_plugin_catalog::remove_plugin(&plugin)
 }
 
@@ -226,20 +236,25 @@ pub fn import_plugin(params: ImportPluginParams) -> Result<(), String> {
 
 /// 照端点刷新所有「自动」provider 的模型目录。桌面启动时请运行时做一次；每个
 /// provider 一次网络往返，单个失败不影响其余，也不改动它的目录。
-pub fn refresh_auto_models() {
+/// 返回有没有写过配置（刷新了目录或清掉了标记）；全都没问到就是没写。
+pub fn refresh_auto_models() -> bool {
+    let mut wrote = false;
     for outcome in crate::pi_auto_models::refresh_auto_model_catalogs() {
         match outcome {
             crate::pi_auto_models::AutoRefreshOutcome::Refreshed { provider, models } => {
+                wrote = true;
                 eprintln!("[pi] {provider} 的模型目录已刷新：{models} 个模型");
             }
             crate::pi_auto_models::AutoRefreshOutcome::Kept { provider, reason } => {
                 eprintln!("[pi] {provider} 的模型目录保持不变：{reason}");
             }
             crate::pi_auto_models::AutoRefreshOutcome::Forgotten { provider } => {
+                wrote = true;
                 eprintln!("[pi] {provider} 已不在配置中，不再自动刷新其模型目录");
             }
         }
     }
+    wrote
 }
 
 #[cfg(test)]

@@ -19,47 +19,46 @@ use smelt_runtime_client::protocol::workspace::{
 use crate::{Workspace, ui_theme};
 
 /// 选好之后拿路径去做什么。
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DirPickerPurpose {
     /// 「打开项目」：选一个目录。
     OpenProject,
     /// 给智能体绑定参考目录：可以多选。
     AgentContextFolders { agent_id: String },
-    /// 导入插件：技能是目录，扩展可以是单个文件。
-    PluginImport {
-        kind: smelt_model::pi_plugin_catalog::PiPluginKind,
+    /// 插件要的路径（[`smelt_plugin_api::Host::pick_paths`]）：怎么选由插件说，选好交回给它。
+    Plugin {
+        request: smelt_plugin_api::PathRequest,
+        done: smelt_plugin_api::PathsPicked,
     },
 }
 
 impl DirPickerPurpose {
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         match self {
             Self::OpenProject => "选择项目目录",
             Self::AgentContextFolders { .. } => "选择要绑定的目录",
-            Self::PluginImport { .. } => "选择要导入的插件",
+            Self::Plugin { request, .. } => &request.title,
         }
     }
 
     fn multiple(&self) -> bool {
-        matches!(self, Self::AgentContextFolders { .. })
+        match self {
+            Self::OpenProject => false,
+            Self::AgentContextFolders { .. } => true,
+            Self::Plugin { request, .. } => request.multiple,
+        }
     }
 
     /// 系统选择框的确认按钮。
-    fn confirm_label(&self) -> &'static str {
+    fn confirm_label(&self) -> &str {
         match self {
             Self::OpenProject => "打开",
             Self::AgentContextFolders { .. } => "绑定",
-            Self::PluginImport { .. } => "导入",
+            Self::Plugin { request, .. } => &request.confirm,
         }
     }
 
     fn include_files(&self) -> bool {
-        matches!(
-            self,
-            Self::PluginImport {
-                kind: smelt_model::pi_plugin_catalog::PiPluginKind::Extension
-            }
-        )
+        matches!(self, Self::Plugin { request, .. } if request.files)
     }
 }
 
@@ -244,11 +243,7 @@ impl Workspace {
             DirPickerPurpose::AgentContextFolders { agent_id } => {
                 self.add_agent_context_folders(agent_id, chosen, cx);
             }
-            DirPickerPurpose::PluginImport { kind } => {
-                if let Some(source) = chosen.into_iter().next() {
-                    self.import_pi_plugin_from(kind, source, cx);
-                }
-            }
+            DirPickerPurpose::Plugin { done, .. } => done(chosen, cx),
         }
         cx.notify();
     }
@@ -395,12 +390,16 @@ impl Workspace {
                 .into_any_element(),
         };
 
-        let confirm_label: &'static str = match (&picker.purpose, picker.selected.len()) {
-            (DirPickerPurpose::AgentContextFolders { .. }, 0) => "绑定当前目录",
-            (DirPickerPurpose::AgentContextFolders { .. }, _) => "绑定所选目录",
-            (DirPickerPurpose::PluginImport { .. }, 0) => "导入当前目录",
-            (DirPickerPurpose::PluginImport { .. }, _) => "导入所选文件",
-            (DirPickerPurpose::OpenProject, _) => "打开当前目录",
+        let confirm_label: SharedString = match (&picker.purpose, picker.selected.len()) {
+            (DirPickerPurpose::AgentContextFolders { .. }, 0) => "绑定当前目录".into(),
+            (DirPickerPurpose::AgentContextFolders { .. }, _) => "绑定所选目录".into(),
+            (DirPickerPurpose::Plugin { request, .. }, 0) => {
+                format!("{}当前目录", request.confirm).into()
+            }
+            (DirPickerPurpose::Plugin { request, .. }, _) => {
+                format!("{}所选项", request.confirm).into()
+            }
+            (DirPickerPurpose::OpenProject, _) => "打开当前目录".into(),
         };
         let content = v_flex()
             .child(Self::modal_title(
@@ -461,7 +460,7 @@ fn system_prompt_options(purpose: &DirPickerPurpose) -> PathPromptOptions {
         files: purpose.include_files(),
         directories: true,
         multiple: purpose.multiple(),
-        prompt: Some(purpose.confirm_label().into()),
+        prompt: Some(purpose.confirm_label().to_string().into()),
     }
 }
 
@@ -469,7 +468,6 @@ fn system_prompt_options(purpose: &DirPickerPurpose) -> PathPromptOptions {
 mod tests {
     // 不能 `use super::*`：上面 glob 了 `gpui::*`，`gpui::test` 会顶掉 `#[test]`，展开时无限递归。
     use super::{DirPickerPurpose, system_prompt_options};
-    use smelt_model::pi_plugin_catalog::PiPluginKind;
 
     #[test]
     fn system_prompt_options_follow_the_purpose() {
@@ -481,14 +479,20 @@ mod tests {
         });
         assert!(folders.directories && !folders.files && folders.multiple);
 
-        let skill = system_prompt_options(&DirPickerPurpose::PluginImport {
-            kind: PiPluginKind::Skill,
-        });
-        assert!(skill.directories && !skill.files && !skill.multiple);
+        let plugin = |files, multiple| DirPickerPurpose::Plugin {
+            request: smelt_plugin_api::PathRequest {
+                title: "选择".to_string(),
+                confirm: "导入".to_string(),
+                files,
+                multiple,
+            },
+            done: Box::new(|_, _| {}),
+        };
+        let dirs = system_prompt_options(&plugin(false, false));
+        assert!(dirs.directories && !dirs.files && !dirs.multiple);
+        assert_eq!(dirs.prompt.as_deref(), Some("导入"));
 
-        let extension = system_prompt_options(&DirPickerPurpose::PluginImport {
-            kind: PiPluginKind::Extension,
-        });
-        assert!(extension.directories && extension.files && !extension.multiple);
+        let files = system_prompt_options(&plugin(true, true));
+        assert!(files.directories && files.files && files.multiple);
     }
 }

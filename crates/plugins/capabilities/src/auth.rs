@@ -1,7 +1,7 @@
 //! 设置页：Pi 内置 provider 的登录与注销。
 //!
-//! 凭据助手跑在运行时那台机器上（`pi.auth.*`，见 [`smelt_model::pi_auth_service`]）。
-//! 本文件只做两件事：把登录事件搬进 `Workspace` 的状态，以及把用户在面板上的动作
+//! 凭据助手跑在运行时那台机器上（`pi.auth.*`，见 [`api::model::pi_auth_service`]）。
+//! 本文件只做两件事：把登录事件搬进 `CapabilitiesPage` 的状态，以及把用户在面板上的动作
 //! 发回运行时。
 //!
 //! **为什么登录是一条常驻的事件流而不是一次异步调用。** OAuth 中途要把授权链接
@@ -9,20 +9,20 @@
 //! 粘贴还会互相抢跑。所以这里拿着登录 id 长轮询事件，边取边 fold 进视图状态。
 
 use super::*;
-use smelt_model::control_api::{
+use api::client::protocol::control::EmptyParams;
+use api::model::control_api::{
     PiAuthLoginAnswer, PiAuthLoginCancel, PiAuthLoginEvents, PiAuthLoginStart, PiAuthLogout,
     PiAuthModels, PiAuthProviders,
 };
-use smelt_model::pi_auth_service::{
+use api::model::pi_auth_service::{
     LoginAnswerParams, LoginEventsParams, LoginIdParams, LoginStartParams,
 };
-use smelt_model::pi_service::ProviderIdParams;
-use smelt_runtime_client::protocol::control::EmptyParams;
+use api::model::pi_service::ProviderIdParams;
 
 /// 凭据助手首次使用可能要装运行时，给得宽一些。
 const AUTH_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
-impl Workspace {
+impl CapabilitiesPage {
     /// 打开凭据面板时问一次：有哪些 provider、各自登录了没有。
     ///
     /// 已经在问的时候不重复问：这会多起一个子进程，还会让面板在两次结果之间跳。
@@ -58,7 +58,7 @@ impl Workspace {
         &mut self,
         provider_id: String,
         provider_name: String,
-        method: smelt_model::pi_auth::PiLoginMethod,
+        method: api::model::pi_auth::PiLoginMethod,
         ask_all: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -123,7 +123,7 @@ impl Workspace {
                 .spawn(async move {
                     start_client
                         .call::<PiAuthLoginStart>(&params, AUTH_CALL_TIMEOUT)
-                        .map_err(crate::runtime_call::error_text)
+                        .map_err(api::call_error_text)
                 })
                 .await;
             let login_id = match outcome {
@@ -167,17 +167,14 @@ impl Workspace {
                     .background_executor()
                     .spawn(async move {
                         poll_client
-                            .call::<PiAuthLoginEvents>(
-                                &params,
-                                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                            )
-                            .map_err(crate::runtime_call::error_text)
+                            .call::<PiAuthLoginEvents>(&params, api::CALL_TIMEOUT)
+                            .map_err(api::call_error_text)
                     })
                     .await;
                 let batch = match polled {
                     Ok(batch) => batch,
-                    Err(error) => smelt_model::pi_auth_service::LoginEventsResult {
-                        events: vec![smelt_model::pi_auth::PiLoginEvent::Error { message: error }],
+                    Err(error) => api::model::pi_auth_service::LoginEventsResult {
+                        events: vec![api::model::pi_auth::PiLoginEvent::Error { message: error }],
                         finished: true,
                     },
                 };
@@ -205,10 +202,10 @@ impl Workspace {
     fn apply_pi_login_event(
         &mut self,
         login_id: &str,
-        event: smelt_model::pi_auth::PiLoginEvent,
+        event: api::model::pi_auth::PiLoginEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        use smelt_model::pi_auth::PiLoginEvent;
+        use api::model::pi_auth::PiLoginEvent;
 
         let Some(view) = self.pi_login.as_mut() else {
             return false;
@@ -263,7 +260,7 @@ impl Workspace {
                 view.device_code = None;
                 view.outcome = Some(Ok(()));
                 let provider_id = view.provider_id.clone();
-                self.reload_pi_model_settings(cx);
+                self.refresh_pi_library(cx);
                 self.refresh_pi_auth_providers(cx);
                 self.load_pi_models_for(provider_id, cx);
             }
@@ -391,7 +388,7 @@ impl Workspace {
                 prompt_id,
                 value,
             },
-            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            api::CALL_TIMEOUT,
             cx,
             |this, result, cx| {
                 if let Err(error) = result {
@@ -409,7 +406,7 @@ impl Workspace {
                 LoginIdParams {
                     login_id: view.login_id,
                 },
-                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                api::CALL_TIMEOUT,
                 cx,
                 |_, _, _| {},
             );
@@ -425,8 +422,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let label = format!("{provider_id} / {model_id}");
-        let params = smelt_model::pi_service::SaveDefaultModelParams {
-            config: smelt_model::pi_model_settings::PiDefaultModelConfig {
+        let params = api::model::pi_service::SaveDefaultModelParams {
+            config: api::model::pi_model_settings::PiDefaultModelConfig {
                 provider: provider_id,
                 model: model_id,
                 base_url: String::new(),
@@ -435,19 +432,19 @@ impl Workspace {
             api_key: None,
             reset_base_url: false,
         };
-        self.run_pi_call::<smelt_model::control_api::PiModelsSaveDefault>(
+        self.run_pi_call::<api::model::control_api::PiModelsSaveDefault>(
             params,
-            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            api::CALL_TIMEOUT,
             cx,
             move |this, result, cx| match result {
                 Ok(config) => {
                     this.pi_auth_model_picker = None;
-                    this.adopt_pi_config(config, true, cx);
-                    crate::status_item::notify_success(format!("已设为默认模型：{label}"));
+                    this.adopt_pi_config(config, cx);
+                    notify_success(format!("已设为默认模型：{label}"), cx);
                 }
                 Err(error) => {
                     this.pi_auth_error = Some(error.clone());
-                    crate::status_item::notify_error(&error);
+                    notify_error(&error, cx);
                 }
             },
         );
@@ -468,7 +465,7 @@ impl Workspace {
                 if let Err(error) = outcome {
                     this.pi_auth_error = Some(error);
                 } else {
-                    this.reload_pi_model_settings(cx);
+                    this.refresh_pi_library(cx);
                     // 凭据没了，它报过的模型也就不能选了。
                     if this
                         .pi_auth_model_picker

@@ -128,8 +128,8 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | `agent.definition.create` | 有副作用 | 新建定义。可带稳定 `id`；缺省生成 UUID。重复 id 返回 `conflict` |
 | `agent.definition.update` | 有副作用 | 按 id 补丁更新；禁止整表覆盖 |
 | `agent.definition.delete` | 有副作用 | 按 id 删除。仍被自动化引用时返回 `failed_precondition` |
-| `settings.get` | 只读 | 返回已登记的外观设置 |
-| `settings.update` | 有副作用 | 按 key patch；未知 key 返回 `invalid_params` |
+| `settings.get` | 只读 | 返回运行时的记忆设置，密钥不回显 |
+| `settings.update` | 有副作用 | 按 key patch；未知 key 返回 `invalid_params`。外观与记忆设置须分两次提交，混合补丁会被拒绝。外观只交给唯一在线的本机桌面，等它校验、保存和安装后回执；超时或断线时结果未知，可能已生效或稍后生效 |
 | `automation.list` | 只读 | 定义清单；webhook 令牌脱敏 |
 | `automation.get` | 只读 | 按 id 读取 |
 | `automation.upsert` | 有副作用 | 新建或覆盖一条自动化，daemon 分配工作区 |
@@ -146,7 +146,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | 工作区与文件 | `workspace.conversation.create` / `update` / `delete`、`workspace.project.open` / `close`、`workspace.rename`（改名的唯一入口，名字写在哪由运行时定，在跑的对话同步给 agent）、`workspace.directory`（只读整份目录；目录只经前面几条单条改动写，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
 | 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
-| Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`；`quota.get` / `quota.refresh` / `quota.settings.get` / `quota.set_enabled` |
+| Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`（`pi.plugins.remove`、`pi.mcp.remove` 同时清掉这台机器上各智能体对它的勾选；改了配置的调用成功后运行时推 `pi_config.changed`，这个话题只在单独的一条订阅里，见 `smelt-event-protocol` 模块文档）；`quota.get` / `quota.refresh` / `quota.settings.get` / `quota.set_enabled` |
 | 其它 | `resource.usage`（守护进程和各会话进程树的 CPU、内存）、`agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`history.*`、`desktop.type_text`、`automation.run_detail` |
 
 ### `agent.memory.*`
@@ -178,7 +178,7 @@ CLI：`smelt agent` / `smelt conversation` / `smelt automation` / `smelt mcp` / 
    旧桌面连新运行时的 Git 面板需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
    的文档形状，同时删掉跨 Agent 消息的 `agent.list` / `agent.send`，两边最低版本都抬到 2。
    v2 → v3：删掉 DeepSeek Harness 之后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置去掉 `native_dsh_profiles`。旧运行时缺这个字段会拒收修改，所以最低版本抬到 3。同一版 `system.describe` 的 daemon 信息增加 `smelt_home`。
-   删方法不升版本：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，这几条是必需方法，旧运行时没有就判为需要升级运行时。同月删掉桌面发布的侧栏菜单（`workspace_menu` 这条守护命令和 `workspace_menu.changed` 话题），手机和守护都改读工作区目录。订阅里带着运行时不认识的话题会被整条拒掉，所以事件总线协议升到 v3（`EVENT_BUS_PROTOCOL_VERSION`），新旧两边在订阅握手时就拿到版本不兼容。之后又删掉远程会话目录：守护命令 `remote_sessions`、`remote_rename_resume`、`acp_create`（后两条早已没人发）和 `remote_sessions.changed` 话题都下线，手机等新建的对话由运行时直接写进工作区目录，事件总线协议升到 v4。命令行这类不订推送的客户端用新增的 `workspace.directory` 读整份目录。再之后会话状态加了 `custom_title`（终端当前那段对话的名字，守护按身份查好推来，取代桌面轮询的 `history.titles`，后者删掉），会话状态严格解码，事件总线协议升到 v5。会话状态又加了 `pending_request`（对话会话正在等的那个审批或选择题的身份，手机指挥台按它判断单据详情还是不是同一个请求），事件总线协议升到 v6。v7 起推送载荷改成宽容读取（规则见 `smelt-event-protocol` 的模块文档），推送加字段不再升版本，相位这类枚举加值、加话题仍然要升；客户端只看 `system.describe` 里 `events.protocol_version` 是否落在自己支持的区间，`projection_version`、`session_projection_version`、`session_state_schema_version` 冻结、不再检查，只为 v6 及更早的客户端照旧报出。按 agent 改启动命令的设置删掉时没有升版：`agent.host.*` 的配置在线上仍带一个恒为空的 `commands`，v3 运行时照常解析，合并时什么都不改。没升级的运行时读得了就照常连：客户端接受事件协议 v6 起的运行时，后加的、缺了只是某项功能用不了的控制方法（`ControlMethod::OPTIONAL`）缺了不拦，用到时照常报错，不为旧运行时另写降级。
+   删方法不升版本：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，这几条是必需方法，旧运行时没有就判为需要升级运行时。同月删掉桌面发布的侧栏菜单（`workspace_menu` 这条守护命令和 `workspace_menu.changed` 话题），手机和守护都改读工作区目录。订阅里带着运行时不认识的话题会被整条拒掉，所以事件总线协议升到 v3（`EVENT_BUS_PROTOCOL_VERSION`），新旧两边在订阅握手时就拿到版本不兼容。之后又删掉远程会话目录：守护命令 `remote_sessions`、`remote_rename_resume`、`acp_create`（后两条早已没人发）和 `remote_sessions.changed` 话题都下线，手机等新建的对话由运行时直接写进工作区目录，事件总线协议升到 v4。命令行这类不订推送的客户端用新增的 `workspace.directory` 读整份目录。再之后会话状态加了 `custom_title`（终端当前那段对话的名字，守护按身份查好推来，取代桌面轮询的 `history.titles`，后者删掉），会话状态严格解码，事件总线协议升到 v5。会话状态又加了 `pending_request`（对话会话正在等的那个审批或选择题的身份，手机指挥台按它判断单据详情还是不是同一个请求），事件总线协议升到 v6。v7 起推送载荷改成宽容读取（规则见 `smelt-event-protocol` 的模块文档），推送加字段不再升版本；相位这类枚举加值和核心订阅加话题会破坏兼容，新增功能的话题应单独订阅；客户端只看 `system.describe` 里 `events.protocol_version` 是否落在自己支持的区间，`projection_version`、`session_projection_version`、`session_state_schema_version` 冻结、不再检查，只为 v6 及更早的客户端照旧报出。按 agent 改启动命令的设置删掉时没有升版：`agent.host.*` 的配置在线上仍带一个恒为空的 `commands`，v3 运行时照常解析，合并时什么都不改。没升级的运行时读得了就照常连：客户端接受事件协议 v6 起的运行时，后加的、缺了只是某项功能用不了的控制方法（`ControlMethod::OPTIONAL`）缺了不拦，用到时照常报错，不为旧运行时另写降级。
 2. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
    条件、冲突、忙碌和临时不可用分别返回 `invalid_params`、`permission_denied`、
    `not_found`、`failed_precondition`、`conflict`、`busy`、

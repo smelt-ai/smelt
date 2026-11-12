@@ -3,7 +3,7 @@
 //! 配置属于运行时：读写走 `settings.get` / `settings.update`，连接测试走
 //! `memory.test_embedding`——服务地址常是 `localhost`，说的是运行时那台机器。表单配的是
 //! 能力库眼下选中的那台机器，调用都发给它。这里只管表单。表单状态挂在页面自己的 keyed
-//! state 上而不是 `Workspace`，按机器分开：它只在这一页可见时活着，每次打开页面、换一台
+//! state 上而不是 `CapabilitiesPage`，按机器分开：它只在这一页可见时活着，每次打开页面、换一台
 //! 机器都重新读一次。
 //!
 //! 已存的 API Key 客户端看不到，只知道设没设：输入框留空表示「保持不变」，要删得点
@@ -11,21 +11,18 @@
 
 use std::collections::BTreeMap;
 
-use gpui::{AppContext, Context, Entity, Window};
-use gpui_component::input::InputState;
-use serde_json::Value;
-use smelt_model::appearance_settings::{SettingsPatch, SettingsResult};
-use smelt_model::control_api::{
-    MemoryTestEmbedding, MemoryTestParams, SettingsGet, SettingsUpdate,
-};
-use smelt_model::memory_settings::{
+use api::client::RuntimeClient;
+use api::client::protocol::control::{ControlCall, EmptyParams};
+use api::model::appearance_settings::{SettingsPatch, SettingsResult};
+use api::model::control_api::{MemoryTestEmbedding, MemoryTestParams, SettingsGet, SettingsUpdate};
+use api::model::memory_settings::{
     EMBEDDING_API_KEY, EMBEDDING_BASE_URL, EMBEDDING_MODEL, RERANK_MODEL_ID, RERANK_MODEL_PROVIDER,
     RerankModel,
 };
-use smelt_runtime_client::RuntimeClient;
-use smelt_runtime_client::protocol::control::{ControlCall, EmptyParams};
-
-use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call_on, error_text};
+use api::serde_json::Value;
+use gpui::{AppContext, Context, Entity, Window};
+use gpui_component::input::InputState;
+use smelt_plugin_api::{self as api, RuntimeKey};
 
 const KEY_SET_PLACEHOLDER: &str = "已设置";
 const KEY_EMPTY_PLACEHOLDER: &str = "可选，本地服务一般不需要";
@@ -78,8 +75,6 @@ fn patch_of(entries: &[(&str, String)]) -> SettingsPatch {
 }
 
 pub(crate) struct MemorySettingsForm {
-    /// 配的是哪台机器。重排模型从这台机器的模型里选。
-    pub runtime: crate::RuntimeKey,
     /// 发给那台机器的客户端；机器已经移除时是给人看的原因。
     client: Result<RuntimeClient, String>,
     pub base_url: Entity<InputState>,
@@ -99,8 +94,10 @@ pub(crate) struct MemorySettingsForm {
 }
 
 impl MemorySettingsForm {
-    pub fn new(runtime: crate::RuntimeKey, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let client = crate::runtime_call::target(&runtime, cx);
+    pub fn new(runtime: &RuntimeKey, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let client = api::host(cx)
+            .client(runtime, cx)
+            .ok_or_else(|| api::MACHINE_REMOVED.to_string());
         let base_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("如 http://localhost:11434/v1"));
         let model = cx.new(|cx| InputState::new(window, cx).placeholder("如 bge-m3"));
@@ -109,7 +106,7 @@ impl MemorySettingsForm {
                 .masked(true)
                 .placeholder(KEY_EMPTY_PLACEHOLDER)
         });
-        let load = send::<SettingsGet>(&client, EmptyParams::default(), RUNTIME_CALL_TIMEOUT);
+        let load = send::<SettingsGet>(&client, EmptyParams::default(), api::CALL_TIMEOUT);
         cx.spawn_in(window, async move |this, cx| {
             let loaded = cx.background_spawn(load).await;
             let _ = this.update_in(cx, |form, window, cx| {
@@ -119,7 +116,6 @@ impl MemorySettingsForm {
         })
         .detach();
         Self {
-            runtime,
             client,
             base_url,
             model,
@@ -141,7 +137,7 @@ impl MemorySettingsForm {
             .map(|model| (model.provider.clone(), model.id.clone()))
             .unwrap_or_default();
         let patch = patch_of(&[(RERANK_MODEL_PROVIDER, provider), (RERANK_MODEL_ID, id)]);
-        let update = send::<SettingsUpdate>(&self.client, patch, RUNTIME_CALL_TIMEOUT);
+        let update = send::<SettingsUpdate>(&self.client, patch, api::CALL_TIMEOUT);
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(update).await;
             let _ = this.update(cx, |form, cx| {
@@ -257,7 +253,7 @@ impl MemorySettingsForm {
         cx: &mut Context<Self>,
     ) {
         let patch = patch_of(&patch);
-        let update = send::<SettingsUpdate>(&self.client, patch, RUNTIME_CALL_TIMEOUT);
+        let update = send::<SettingsUpdate>(&self.client, patch, api::CALL_TIMEOUT);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_spawn(update).await;
             let _ = this.update_in(cx, |form, window, cx| {
@@ -319,7 +315,11 @@ where
     C::Result: Send + 'static,
 {
     let client = client.clone();
-    async move { call_on::<C>(&client?, params, timeout).map_err(error_text) }
+    async move {
+        client?
+            .call::<C>(&params, timeout)
+            .map_err(api::call_error_text)
+    }
 }
 
 fn key_placeholder(saved: &SavedMemory) -> &'static str {

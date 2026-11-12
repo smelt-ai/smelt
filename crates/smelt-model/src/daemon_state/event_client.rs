@@ -319,28 +319,7 @@ impl DaemonStateEventClient {
     /// 身份总是桌面第一方：本机连接按进程身份核验；已配对的远程设备（含手机）运行时
     /// 不看这个字段，一律按桌面第一方处理。手机和桌面的差别只在订阅形状。
     pub fn new(shape: SubscriptionShape) -> Self {
-        let subscription_id =
-            SubscriptionId::new(format!("desktop-{}", uuid::Uuid::new_v4().simple()))
-                .expect("generated subscription id is valid");
-        let handshake = EventSubscribeRequest {
-            auth: EventClientAuth::FirstParty {
-                kind: FirstPartyClientKind::Desktop,
-            },
-            request: SubscribeRequest {
-                protocol: ProtocolRange {
-                    min: MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION,
-                    max: EVENT_BUS_PROTOCOL_VERSION,
-                },
-                subscription: SubscriptionDeclaration {
-                    id: subscription_id,
-                    topics: shape
-                        .topics()
-                        .into_iter()
-                        .map(|topic| Topic::new(topic).expect("core topic is valid"))
-                        .collect(),
-                },
-            },
-        };
+        let handshake = desktop_handshake(shape.topics());
         let mut pending = PendingSnapshots::default();
         pending.begin();
         Self {
@@ -358,17 +337,7 @@ impl DaemonStateEventClient {
     }
 
     pub fn request_line(&self) -> Result<String, DaemonEventClientError> {
-        let value = serde_json::json!({
-            "op": DaemonOperation::EventSubscribe,
-            "auth": &self.handshake.auth,
-            "request": &self.handshake.request,
-        });
-        serde_json::to_string(&value)
-            .map(|mut line| {
-                line.push('\n');
-                line
-            })
-            .map_err(|error| DaemonEventClientError::Protocol(error.to_string()))
+        request_line(&self.handshake)
     }
 
     pub fn decode_line(
@@ -392,7 +361,10 @@ impl DaemonStateEventClient {
                 ..
             } => self.decode_snapshot(kind.0.as_str(), revision, payload),
             SubscribeMessage::Event { envelope, .. } => {
-                if self.pending.active && !replacement_projection_topic(envelope.topic.as_str()) {
+                if self.pending.active
+                    && !replacement_projection_topic(envelope.topic.as_str())
+                    && !unicast_request_topic(envelope.topic.as_str())
+                {
                     return Ok(None);
                 }
                 // 载荷宽容读取，不看话题的 schema 版本：破坏性改动升的是握手时对过的协议版本。
@@ -556,6 +528,7 @@ impl DaemonStateEventClient {
                     progress: changed.progress,
                 }))
             }
+            // v7 核心话题，原样解成旧事件；带回执的 `appearance.apply_requested` 不进核心订阅。
             CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED if self.shape.appearance_requests => {
                 let request: smelt_event_protocol::AppearanceChangeRequested =
                     decode_payload(payload, topic)?;
@@ -609,11 +582,57 @@ impl DaemonStateEventClient {
     }
 }
 
+/// 桌面第一方身份订这些话题的握手，每次一个新的订阅 id。
+pub(super) fn desktop_handshake(topics: Vec<&str>) -> EventSubscribeRequest {
+    let subscription_id = SubscriptionId::new(format!("desktop-{}", uuid::Uuid::new_v4().simple()))
+        .expect("generated subscription id is valid");
+    EventSubscribeRequest {
+        auth: EventClientAuth::FirstParty {
+            kind: FirstPartyClientKind::Desktop,
+        },
+        request: SubscribeRequest {
+            protocol: ProtocolRange {
+                min: MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION,
+                max: EVENT_BUS_PROTOCOL_VERSION,
+            },
+            subscription: SubscriptionDeclaration {
+                id: subscription_id,
+                topics: topics
+                    .into_iter()
+                    .map(|topic| Topic::new(topic).expect("core topic is valid"))
+                    .collect(),
+            },
+        },
+    }
+}
+
+/// 写进连接的那一行请求。
+pub(super) fn request_line(
+    handshake: &EventSubscribeRequest,
+) -> Result<String, DaemonEventClientError> {
+    let value = serde_json::json!({
+        "op": DaemonOperation::EventSubscribe,
+        "auth": &handshake.auth,
+        "request": &handshake.request,
+    });
+    serde_json::to_string(&value)
+        .map(|mut line| {
+            line.push('\n');
+            line
+        })
+        .map_err(|error| DaemonEventClientError::Protocol(error.to_string()))
+}
+
 fn replacement_projection_topic(topic: &str) -> bool {
     matches!(
         topic,
         CORE_TOPIC_AUTOMATIONS_CHANGED | CORE_TOPIC_WORKSPACE_CHANGED
     )
+}
+
+/// 一次性请求没有快照、运行时也不重发，等快照期间（首次连上、lag 恢复）丢了就再也收不到。
+fn unicast_request_topic(topic: &str) -> bool {
+    topic == CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED
 }
 
 fn decode_payload<T: serde::de::DeserializeOwned>(
@@ -913,6 +932,43 @@ mod tests {
             second.handshake().request.subscription.id
         );
         assert!(line["auth"].get("capabilities").is_none());
+    }
+
+    #[test]
+    fn desktop_core_subscription_remains_compatible_with_v7_runtimes() {
+        let client = desktop_client();
+        let line: serde_json::Value =
+            serde_json::from_str(client.request_line().unwrap().trim()).unwrap();
+        assert_eq!(line["request"]["protocol"]["max"], 7);
+        let topics = line["request"]["subscription"]["topics"]
+            .as_array()
+            .unwrap();
+        assert!(
+            topics
+                .iter()
+                .any(|topic| topic == "appearance.change_requested")
+        );
+        assert!(
+            topics
+                .iter()
+                .all(|topic| topic != "appearance.apply_requested")
+        );
+    }
+
+    /// 旧 v7 外观事件的载荷只有 `settings`，解成独立的旧变体。
+    #[test]
+    fn legacy_v7_appearance_event_decodes_to_change_requested() {
+        let mut client = desktop_client();
+        let event = client
+            .decode_message(event_message(
+                "appearance.change_requested",
+                serde_json::json!({ "settings": { "theme": "dark" } }),
+            ))
+            .unwrap();
+        assert!(matches!(
+            event,
+            Some(DaemonStateEvent::AppearanceChangeRequested { .. })
+        ));
     }
 
     #[test]
@@ -1233,6 +1289,54 @@ mod tests {
         assert!(matches!(
             client.decode_message(next).unwrap(),
             Some(DaemonStateEvent::Update(state)) if state.revision == 3
+        ));
+    }
+
+    fn appearance_request_message() -> SubscribeMessage<serde_json::Value> {
+        event_message(
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+            serde_json::json!({ "settings": { "theme": "dark" } }),
+        )
+    }
+
+    fn assert_appearance_request(event: Option<DaemonStateEvent>) {
+        match event {
+            Some(DaemonStateEvent::AppearanceChangeRequested { settings }) => {
+                assert_eq!(settings.get("theme"), Some(&serde_json::json!("dark")));
+            }
+            _ => panic!("expected appearance request"),
+        }
+    }
+
+    /// 外观请求是一次性的，没有快照也不重发：等首批快照期间收到也要交出去。
+    #[test]
+    fn appearance_request_is_delivered_while_initial_snapshots_are_pending() {
+        let mut client = desktop_client();
+        assert_appearance_request(client.decode_message(appearance_request_message()).unwrap());
+        assert!(matches!(
+            complete_snapshot(&mut client, 1, vec![session_dto("s1", 1, 1)]),
+            DaemonStateEvent::Snapshot { .. }
+        ));
+    }
+
+    /// 同上，lag 后等恢复快照期间收到的外观请求也不能丢。
+    #[test]
+    fn appearance_request_is_delivered_during_lag_recovery() {
+        let mut client = desktop_client();
+        let _ = complete_snapshot(&mut client, 7, vec![session_dto("s1", 1, 10)]);
+        assert!(
+            client
+                .decode_message(SubscribeMessage::Lag {
+                    dropped: 1,
+                    resume_after: Some(10),
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert_appearance_request(client.decode_message(appearance_request_message()).unwrap());
+        assert!(matches!(
+            complete_snapshot(&mut client, 8, vec![session_dto("s1", 1, 11)]),
+            DaemonStateEvent::Snapshot { .. }
         ));
     }
 

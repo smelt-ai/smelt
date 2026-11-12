@@ -3,23 +3,23 @@
 //! 和「自定义 Provider」那一节的分工：那边是填一个网关地址加一把 key，这边是
 //! Pi 自己认识的 provider——它们的凭据要么来自订阅登录（授权链接 / device code），
 //! 要么是一把存进 `auth.json` 的 key，两条路都由 Pi 的登录流程自己跑（见
-//! [`smelt_model::pi_auth`]）。
+//! [`api::model::pi_auth`]）。
 //!
 //! 列表本身（和自定义 Provider 合并、排序、折叠）在 `pi_model.rs`；这里只画内置
 //! Provider 的一行，以及就地展开的登录面板和模型选择面板。
 
 use super::*;
-use smelt_model::pi_auth::{PiAuthProvider, PiAuthStatus, PiLoginMethod, PiPromptKind};
-use smelt_ui::truncated_line::truncated_line;
+use api::model::pi_auth::{PiAuthProvider, PiAuthStatus, PiLoginMethod, PiPromptKind};
+use api::ui::truncated_line::truncated_line;
 
 /// 内置 Provider 的一行。按钮区只放当下最该点的那一个，其余动作收进「⋯」：
 /// 原来一行最多五个按钮，扫一眼分不出哪个是正路。
 pub(super) fn builtin_provider_row(
-    entity: Entity<Workspace>,
+    entity: Entity<CapabilitiesPage>,
     provider: &PiAuthProvider,
     is_default: bool,
     login_busy: bool,
-    palette: super::pi_model::Palette,
+    palette: super::models::Palette,
 ) -> Div {
     let configured = provider.status.configured();
     let status_text = match provider.status {
@@ -201,7 +201,7 @@ pub(super) fn builtin_provider_row(
 }
 
 pub(super) fn login_panel(
-    entity: Entity<Workspace>,
+    entity: Entity<CapabilitiesPage>,
     view: &PiLoginView,
     current_default: Option<&str>,
     cx: &App,
@@ -278,7 +278,7 @@ pub(super) fn login_panel(
                                 .px_3()
                                 .py_1()
                                 .rounded_lg()
-                                .bg(crate::ui_theme::overlay(0x18))
+                                .bg(api::ui::ui_theme::overlay(0x18))
                                 .text_lg()
                                 .font_semibold()
                                 .text_color(fg)
@@ -430,7 +430,7 @@ pub(super) fn login_panel(
             panel = panel.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(crate::ui_theme::green()))
+                    .text_color(rgb(api::ui::ui_theme::green()))
                     .child("登录成功，凭据已写入 ~/.pi/agent/auth.json。"),
             );
             panel = panel.child(model_choices(
@@ -454,9 +454,9 @@ pub(super) fn login_panel(
 /// 模型列表来自 Pi 的 `getAvailable`，已按凭据过滤（Copilot 只给账号启用过的
 /// 那些）。让用户回头去默认模型表单手打一个 ID，多半会打到一个这把凭据用不了的。
 fn model_choices(
-    entity: Entity<Workspace>,
+    entity: Entity<CapabilitiesPage>,
     provider_id: &str,
-    models: Option<&Result<Vec<smelt_model::provider_api::DiscoveredModel>, String>>,
+    models: Option<&Result<Vec<api::model::provider_api::DiscoveredModel>, String>>,
     current_default: Option<&str>,
     fg: gpui::Hsla,
     muted: gpui::Hsla,
@@ -549,7 +549,7 @@ fn model_choices(
 
 /// 对着某个已配置 provider 打开的模型选择器。
 pub(super) fn model_picker_panel(
-    entity: Entity<Workspace>,
+    entity: Entity<CapabilitiesPage>,
     picker: &PiAuthModelPicker,
     current_default: Option<&str>,
     fg: gpui::Hsla,

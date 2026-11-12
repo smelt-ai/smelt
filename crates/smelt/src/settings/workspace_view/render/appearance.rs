@@ -104,12 +104,17 @@ fn theme_item() -> SettingItem {
     SettingItem::new(
         "主题",
         SettingField::render(|_, window, cx: &mut App| {
-            let picker = window.use_keyed_state("settings-theme-picker", cx, ThemePicker::new);
+            let key: SharedString = format!(
+                "settings-theme-picker-{}",
+                smelt_ui::theme_catalog::generation(cx)
+            )
+            .into();
+            let picker = window.use_keyed_state(key, cx, ThemePicker::new);
             let select = picker.read(cx).select.clone();
             let border = cx.theme().border;
             // 别处换了主题（命令面板等）时，下拉跟着对上，不停在旧的那项。只对目录里
             // 有的名字同步：选不中的名字每次重绘都会再选一遍，停不下来。
-            let current = SharedString::from(cx.global::<Appearance>().theme_name.clone());
+            let current = SharedString::from(displayed_theme_name(cx));
             let swatch = picker.read(cx).swatches.get(&current).copied();
             if swatch.is_some() && select.read(cx).selected_value() != Some(&current) {
                 select.update(cx, |select, cx| {
@@ -131,6 +136,21 @@ fn theme_item() -> SettingItem {
     .description("界面和终端配色一起换，明暗跟着主题走")
 }
 
+/// 主题暂时不可用时显示实际生效的 Default，不覆盖保存的用户选择。
+fn displayed_theme_name(cx: &App) -> String {
+    let appearance = cx.global::<Appearance>();
+    if smelt_ui::theme_catalog::contains(&appearance.theme_name, cx) {
+        appearance.theme_name.clone()
+    } else {
+        smelt_model::theme_index::default_for_mode(if appearance.theme_mode.is_dark() {
+            "dark"
+        } else {
+            "light"
+        })
+        .to_string()
+    }
+}
+
 /// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置窗口的元素状态上，窗口关了就丢。
 struct ThemePicker {
     select: Entity<SelectState<SearchableVec<ThemeOption>>>,
@@ -141,13 +161,13 @@ struct ThemePicker {
 
 impl ThemePicker {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let current = cx.global::<Appearance>().theme_name.clone();
-        let options = smelt_model::theme_index::entries()
-            .iter()
+        let current = displayed_theme_name(cx);
+        let options = smelt_ui::theme_catalog::themes(cx)
+            .into_iter()
             .map(|entry| ThemeOption {
-                name: entry.name.clone().into(),
-                family: entry.family.clone().into(),
                 swatch: smelt_ui::theme_catalog::swatch(&entry.name, cx),
+                name: entry.name,
+                family: entry.family,
             })
             .collect::<Vec<_>>();
         let selected = options
@@ -200,7 +220,13 @@ impl SelectItem for ThemeOption {
             .items_center()
             .gap_2()
             .children(self.swatch.map(|swatch| theme_dots(swatch, border)))
-            .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(self.name.clone())))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(truncated_line(self.name.clone())),
+            )
             .child(
                 div()
                     .flex_none()
@@ -222,10 +248,13 @@ impl SelectItem for ThemeOption {
 }
 
 fn select_theme(name: String, cx: &mut App) {
-    let Some(entry) = smelt_model::theme_index::find(&name) else {
+    let Some(entry) = smelt_ui::theme_catalog::themes(cx)
+        .into_iter()
+        .find(|entry| entry.name.as_ref() == name)
+    else {
         return;
     };
-    let mode = if entry.mode == "light" {
+    let mode = if !entry.mode.is_dark() {
         ThemeMode::Light
     } else {
         ThemeMode::Dark

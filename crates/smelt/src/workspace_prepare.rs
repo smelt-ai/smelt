@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::*;
 
 use crate::settings::Appearance;
-use crate::{
-    SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp, tool_panel,
-};
+use crate::{SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp};
 
 /// Git 页可见时，同一仓库 60 秒内只自动 fetch 一次。页不可见时不发。
 pub(crate) fn git_autofetch_due(last: Option<Instant>, now: Instant, git_visible: bool) -> bool {
@@ -93,13 +91,13 @@ impl Workspace {
         // 因为这次刷新还会继续往下走。
         self.sync_session_ui(window, cx);
         self.align_visible_route(window, cx);
-        self.sync_capabilities_view(window, cx);
         self.sync_notification_surfaces(cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
 
         if let Some(project) = self.active_project_ref(cx) {
             self.ensure_git_watch(project, cx);
         }
+        self.note_active_project(cx);
 
         // 仓库信息发给会话所在的那台机器。
         let repo_cwds: HashSet<crate::ProjectRef> = self
@@ -285,13 +283,11 @@ impl Workspace {
     }
 
     fn git_page_visible(&self) -> bool {
-        self.tool_panel_stage_active(tool_panel::ToolPanelTab::Git)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Git)
+        self.view_shown(crate::builtin_views::Builtin::Git.id())
     }
 
     fn history_page_visible(&self) -> bool {
-        self.tool_panel_stage_active(tool_panel::ToolPanelTab::History)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::History)
+        self.view_shown(crate::builtin_views::Builtin::History.id())
     }
 
     /// 每 2 秒把仍开着的页的 TTL 缓存再对一次。打开页面和切换项目走事件，

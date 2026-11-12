@@ -37,18 +37,19 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，`SCHEMA_VERSION = 7`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。
+只属于这台桌面，`SCHEMA_VERSION = 9`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。v7 → v8：`workspace_ui` 增加 `archive_expanded`。v8 → v9：整个工作台换成一块 Dock，`workspace_ui` 去掉侧栏宽度和开合，`appearance` 增加 `layout_id`，`conversation_route` 去掉舞台覆盖页和工具面板的开合、页签、宽度，新建 `workspace_layout_state`。
 
 | 表 | 内容 |
 | --- | --- |
-| `appearance` | 主题、界面字号、终端字体、背景、透明度、玻璃 |
+| `appearance` | 主题、界面字号、终端字体、背景、透明度、玻璃，选的布局（`layout_id`，空是没选过，用第一个登记的布局；选的布局暂时没登记时照样留着） |
 | `update_settings` / `update_state` / `staged_update` / `installer_attempt` | 这台 App 的更新 |
 | `notify_prefs` | 通知开关 |
 | `key_binding` | 用户改过的快捷键：动作名 → 按键，按键为空是用户清掉了。没有行的动作用出厂键位 |
-| `workspace_ui` | 当前路由、侧栏宽度和开合 |
+| `workspace_ui` | 当前路由、归档分段展开 |
+| `workspace_layout_state` | 每份布局被用户拖成的样子：gpui-base 的 `DockAreaState` 原文。版本对得上就用，布局文件后来改了也照用；要回到布局文件就删掉这份存档 |
 | `collapsed_project` / `pinned_project` / `collapsed_agent` | 按 `runtime_id` 记住折叠和置顶 |
 | `sidebar_project_order` / `sidebar_conversation_order` | 按 `runtime_id` 记住侧栏里项目、对话从上到下的顺序。每台设备各记各的，运行时目录里只有新建的先后 |
-| `conversation_route` / `conversation_route_path` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端、工具面板、打开的文件、Git 视图 |
+| `conversation_route` / `conversation_route_path` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端、打开的文件、Git 视图 |
 | `runtime_connection` | 这台桌面连过哪些运行时（endpoint、relay、名字、`smelt_home`） |
 | `runtime_migration` | 客户端数据迁出运行时库的标记 |
 

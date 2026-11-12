@@ -8,8 +8,8 @@
 // 展开一层；「导入」展开在列表顶部。问题就标在出问题的那一行上，不另设汇总横幅。表单见 `editors.js`，小部件见
 // `ui.js`。只有删除、清理这类确认用居中的 `AlertDialog`。
 //
-// 当前项目由宿主写进 `smelt-workspace.context()`。脚本没法被宿主直接通知，
-// 所以每秒看一眼 `generation`，变了才重扫——轮询读的是内存，不碰磁盘。
+// 当前项目读 `active_project()`。项目变了宿主发 `active_project_changed`，这里 await
+// `next_event()` 等它，变了才重扫，不轮询。
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -26,7 +26,9 @@ import {
   InputState,
   Radio,
 } from "gpui-component";
-import { context } from "smelt-workspace";
+import { homedir } from "os";
+import { realpath } from "smelt-fs";
+import { active_project, next_event } from "smelt-plugin-api";
 import {
   scan,
   repairBridges,
@@ -44,7 +46,8 @@ import { SPACE, MONO, TRASH, button, tag, hint, box, section, confirm, edited, p
 export default class Skills extends View {
   init(_props, cx) {
     this.state = { skills: [], broken: [], installed: [] };
-    this.home = "";
+    // 取真实路径：扫描结果里的目录都是解开软链后的，比较时两边要一致。
+    this.home = realpath(homedir()) ?? homedir();
     this.projectRoot = null;
     this.notice = null;
     // 展开的是哪一行（skill 目录）。一次只展开一行。
@@ -57,7 +60,6 @@ export default class Skills extends View {
     this.keep = new Map();
     this.query = "";
     this.search = InputState.new("搜索名称或描述");
-    this.generation = -1;
 
     // 两个表单的状态。
     const env = {
@@ -71,27 +73,27 @@ export default class Skills extends View {
     cx.spawn(async (cx) => {
       await this.load();
       cx.notify();
-    });
-    this.watch = cx.timer.every(1000, (cx) => {
-      if (context().generation === this.generation) return;
-      cx.spawn(async (cx) => {
-        await this.reload(cx);
+      // 事件从插件挂载完就在记，扫描期间换了项目也不会漏。视图卸载时任务跟着取消。
+      for (;;) {
+        const event = await next_event();
+        if (event.type !== "active_project_changed") continue;
+        try {
+          await this.reload(cx);
+        } catch (error) {
+          this.notice = { level: "error", text: `刷新失败：${message(error)}` };
+        }
         cx.notify();
-      });
+      }
     });
   }
 
   // ---------------------------------------------------------------- 数据
 
-  /// 重扫磁盘。只在 init、定时器、事件里调用，不在 render 里。
-  /// `generation` 在第一个 await 之前就记下，扫描期间定时器不会再触发一次。
+  /// 重扫磁盘。只在 init、事件里调用，不在 render 里。
   async load() {
-    const ctx = context();
-    this.generation = ctx.generation;
-    this.home = ctx.home;
-    this.projectRoot = ctx.project_root;
+    this.projectRoot = active_project();
     try {
-      this.state = await scan(ctx.home, ctx.project_root);
+      this.state = await scan(this.home, this.projectRoot);
     } catch (error) {
       this.notice = { level: "error", text: `扫描失败：${message(error)}` };
     }

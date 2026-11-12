@@ -38,6 +38,7 @@ use super::{
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
+use smelt_app_state::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_client::daemon_state::DaemonPhase;
 use smelt_model::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
 use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
@@ -49,7 +50,6 @@ use smelt_model::acp_session::{
     SubagentView, TurnTiming,
 };
 use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
-use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
 use std::time::{Duration, Instant};
 

@@ -36,9 +36,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 通知目标必须真的露出来；Tool Panel 全屏覆盖层若仍保留，activate 会把底下
-        // 会话标已读但用户实际看不到它。
-        self.stage_cover = None;
         if let Some(pane) = pane
             && let Some(session) = self.sessions.get_mut(session_ix)
         {
@@ -111,8 +108,8 @@ impl Workspace {
         }
     }
 
-    /// 返回该通知对应的会话标题，以及它是否正显示在主舞台上。非会话路由和
-    /// Tool Panel 全屏覆盖层都会遮住活动会话，不能只看 active_session 就判定已在看。
+    /// 返回该通知对应的会话标题，以及它是否正显示在主舞台上。非会话路由、舞台被布局
+    /// 里别的视图挡住都看不到活动会话，不能只看 active_session 就判定已在看。
     pub(crate) fn attention_context(
         &self,
         notification: &AttentionItem,
@@ -226,35 +223,6 @@ impl Workspace {
             status_item::update_menu(&menu_snapshot);
             self.status_menu_snapshot = Some(menu_snapshot);
         }
-
-        // 插件经 `smelt-workspace.sessions()` 读：全部会话按侧栏顺序，挂着要处理的提醒也算「要你」。
-        let viewed = self.viewed_session_id(cx);
-        let plugin_sessions = self
-            .sessions
-            .iter()
-            .zip(&statuses)
-            .filter_map(|(session, &status)| {
-                let ids = session_attention_ids(session, cx);
-                let active_id = session
-                    .active_term()
-                    .map(|pane| pane.read(cx).session_id().to_string());
-                let id = menu_jump_target(&ids, &badge, active_id.as_deref())?;
-                let requires_action = ids.iter().any(|id| badge.get(id) == Some(&true));
-                Some(crate::plugins::SessionInfo {
-                    viewing: ids.iter().any(|id| Some(id.as_str()) == viewed.as_deref()),
-                    id,
-                    title: Self::title_with_runtime(session, cx),
-                    agent: session.agent_icon_id(cx),
-                    status: if requires_action {
-                        AgentStatus::NeedsYou
-                    } else {
-                        status
-                    },
-                    cwd: session.cwd(cx),
-                })
-            })
-            .collect();
-        crate::plugins::set_sessions(plugin_sessions);
     }
 }
 

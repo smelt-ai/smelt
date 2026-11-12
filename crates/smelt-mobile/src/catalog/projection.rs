@@ -152,6 +152,7 @@ impl CatalogState {
             | DaemonStateEvent::TerminalNotification { .. }
             | DaemonStateEvent::TerminalProgress { .. }
             | DaemonStateEvent::AppearanceChangeRequested { .. }
+            | DaemonStateEvent::AppearanceApplyRequested { .. }
             | DaemonStateEvent::Disconnected => {}
         }
         // 投递队列自带 60 秒去重；不取走会一直涨。

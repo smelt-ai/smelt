@@ -16,7 +16,9 @@ use smelt_model::appearance_settings::SettingsPatch;
 use smelt_model::control_api::{
     NotifySend, NotifySendParams, QuotaGet, SettingsGet, SettingsUpdate,
 };
-use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, EmptyParams};
+use smelt_runtime_client::protocol::control::{
+    ControlCall, ControlClientError, ControlMethod, EmptyParams,
+};
 use std::collections::BTreeMap;
 
 pub fn maybe_run<I, S>(args: I) -> Option<i32>
@@ -134,11 +136,7 @@ fn parse_notify(args: &[String]) -> Result<NotifySendParams, String> {
         match args[index].as_str() {
             "--title" => {
                 index += 1;
-                title = Some(
-                    args.get(index)
-                        .ok_or("--title 后面要跟标题")?
-                        .to_string(),
-                );
+                title = Some(args.get(index).ok_or("--title 后面要跟标题")?.to_string());
             }
             word => words.push(word),
         }
@@ -157,6 +155,16 @@ fn control<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
         .call::<C>(&params, std::time::Duration::from_secs(10))
         .map_err(|error| match error {
             ControlClientError::Protocol(error) => error.message,
+            ControlClientError::Transport(message)
+                if C::METHOD == ControlMethod::SettingsUpdate =>
+            {
+                format!("与 smeltd 通信失败；如果请求已送出，设置修改结果可能未知：{message}")
+            }
+            ControlClientError::InvalidResponse(message)
+                if C::METHOD == ControlMethod::SettingsUpdate =>
+            {
+                format!("smeltd 的响应无效，设置修改结果未知：{message}")
+            }
             ControlClientError::Transport(message) => {
                 format!("连不上 smeltd（需要它在运行）：{message}")
             }

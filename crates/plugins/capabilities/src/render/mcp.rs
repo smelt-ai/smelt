@@ -1,22 +1,22 @@
 //! 能力库「MCP」页签：内置服务器一键添加，`~/.pi/agent/mcp.json` 里的服务器启停、
 //! 登录、移除。排版和模型页签同一套（居中限宽、行内按钮 xsmall）。
 
-use super::pi_model::{Palette, card, section};
+use super::models::{Palette, card, section};
 use super::*;
-use crate::settings::workspace::PiConfigFileKind;
-use smelt_model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
-use smelt_ui::IconAction as _;
-use smelt_ui::truncated_line::truncated_line;
+use crate::models::PiConfigFileKind;
+use api::model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
+use api::ui::IconAction as _;
+use api::ui::truncated_line::truncated_line;
 
 const PAGE_MAX_WIDTH: f32 = 760.;
 
 pub(super) fn pi_mcp_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     cx: &App,
 ) -> AnyElement {
     let palette = Palette::new(cx);
-    let servers: &[PiMcpServer] = snapshot.pi_mcp_servers.as_deref().unwrap_or_default();
+    let servers: &[PiMcpServer] = page.pi_mcp_servers().map(Vec::as_slice).unwrap_or_default();
     div()
         .id("pi-mcp-page")
         .size_full()
@@ -32,11 +32,11 @@ pub(super) fn pi_mcp_page(
                 .child(presets_section(
                     &entity,
                     servers,
-                    snapshot.pi_mcp_remote_desktop,
+                    page.pi_mcp_remote_desktop(cx),
                     palette,
                 ))
-                .child(servers_section(&entity, snapshot, servers, palette))
-                .child(footer(&entity, &snapshot.pi_paths.mcp, palette)),
+                .child(servers_section(&entity, page, servers, palette))
+                .child(footer(&entity, &page.pi_paths().mcp, palette)),
         )
         .into_any_element()
 }
@@ -67,7 +67,7 @@ fn row_detail(text: impl Into<SharedString>, palette: Palette) -> Div {
 }
 
 fn presets_section(
-    entity: &Entity<Workspace>,
+    entity: &Entity<CapabilitiesPage>,
     servers: &[PiMcpServer],
     remote_desktop: bool,
     palette: Palette,
@@ -83,7 +83,7 @@ fn presets_section(
 }
 
 fn preset_row(
-    entity: &Entity<Workspace>,
+    entity: &Entity<CapabilitiesPage>,
     preset: &'static PiMcpPreset,
     added: bool,
     palette: Palette,
@@ -151,13 +151,13 @@ fn preset_row(
 }
 
 fn servers_section(
-    entity: &Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: &Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     servers: &[PiMcpServer],
     palette: Palette,
 ) -> Div {
     let mut body = v_flex().w_full().gap_2();
-    if let Some(error) = &snapshot.pi_mcp_error {
+    if let Some(error) = &page.pi_mcp_error {
         body = body.child(
             div()
                 .text_xs()
@@ -165,7 +165,7 @@ fn servers_section(
                 .child(format!("操作失败：{error}")),
         );
     }
-    match &snapshot.pi_mcp_servers {
+    match page.pi_mcp_servers() {
         Err(error) => {
             body = body.child(
                 div()
@@ -187,9 +187,8 @@ fn servers_section(
         Ok(_) => {
             let mut list = card(palette);
             for (index, server) in servers.iter().enumerate() {
-                let mut item =
-                    row(index, palette).child(server_row(entity, snapshot, server, palette));
-                if snapshot.pi_mcp_pending_remove.as_deref() == Some(server.name.as_str()) {
+                let mut item = row(index, palette).child(server_row(entity, page, server, palette));
+                if page.pi_mcp_pending_remove.as_deref() == Some(server.name.as_str()) {
                     item = item.child(confirm_remove(entity, &server.name, palette));
                 }
                 list = list.child(item);
@@ -201,8 +200,8 @@ fn servers_section(
 }
 
 fn server_row(
-    entity: &Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: &Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     server: &PiMcpServer,
     palette: Palette,
 ) -> Div {
@@ -213,9 +212,9 @@ fn server_row(
         }
         PiMcpTransport::Unknown => "缺少 url 或 command".to_string(),
     };
-    let logging_in = snapshot.pi_mcp_login.as_deref() == Some(server.name.as_str());
-    let any_login = snapshot.pi_mcp_login.is_some();
-    let removing = snapshot.pi_mcp_pending_remove.is_some();
+    let logging_in = page.pi_mcp_login.as_deref() == Some(server.name.as_str());
+    let any_login = page.pi_mcp_login.is_some();
+    let removing = page.pi_mcp_pending_remove.is_some();
 
     let mut badges = h_flex()
         .gap_2()
@@ -268,7 +267,7 @@ fn server_row(
         Button::new(format!("pi-mcp-remove-{}", server.name))
             .quiet()
             .icon_size()
-            .icon(crate::trash_icon())
+            .icon(api::ui::trash_icon())
             .icon_action("从 mcp.json 移除")
             .disabled(logging_in || removing)
             .on_click(move |_, _, cx| {
@@ -303,7 +302,7 @@ fn server_row(
         )
 }
 
-fn confirm_remove(entity: &Entity<Workspace>, name: &str, palette: Palette) -> Div {
+fn confirm_remove(entity: &Entity<CapabilitiesPage>, name: &str, palette: Palette) -> Div {
     let confirm_entity = entity.clone();
     let cancel_entity = entity.clone();
     let confirm_name = name.to_string();
@@ -347,7 +346,7 @@ fn confirm_remove(entity: &Entity<Workspace>, name: &str, palette: Palette) -> D
 }
 
 /// 原生文件入口，以及「改了要怎样才生效」的提示：Pi 只在会话启动时读 mcp.json。
-fn footer(entity: &Entity<Workspace>, mcp_path: &str, palette: Palette) -> Div {
+fn footer(entity: &Entity<CapabilitiesPage>, mcp_path: &str, palette: Palette) -> Div {
     let open_entity = entity.clone();
     v_flex()
         .w_full()

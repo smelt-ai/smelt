@@ -1,18 +1,23 @@
 //! 运行时推给客户端的会话状态和事件：会话的相位、标题、需要关注的问题，远程目录、
 //! 菜单、自动化投影的替换，以及断线重连的退避节奏。订阅请求怎么写、回来的行怎么
-//! 解在 [`DaemonStateEventClient`]；连接本身在客户端。
+//! 解在 [`DaemonStateEventClient`]（不进核心订阅的话题在 [`TopicEventClient`]）；连接
+//! 本身在客户端。
 
 use std::collections::HashSet;
 use std::time::Duration;
 
-pub use smelt_event_protocol::{TerminalProgress, TerminalProgressState};
+pub use smelt_event_protocol::{
+    CORE_TOPIC_PI_CONFIG_CHANGED, TerminalProgress, TerminalProgressState,
+};
 
 use crate::automation::AutomationFile;
 use crate::workspace_directory::WorkspaceDirectory;
 
 mod event_client;
+mod topic_client;
 
 pub use event_client::{DaemonEventClientError, DaemonStateEventClient, SubscriptionShape};
+pub use topic_client::{TopicEventClient, TopicMessage};
 
 /// 断线后快速首试、连续失败逐步退让，避免 daemon 正在升级/尚未启动时各个客户端
 /// 同步地每两秒撞一次 socket。上限保证守护恢复后不会长期不可见。
@@ -305,8 +310,15 @@ pub enum DaemonStateEvent {
         session_id: String,
         progress: Option<TerminalProgress>,
     },
-    /// CLI / Control API 要改外观，已由运行时校验过。一次性请求，不是投影。
+    /// v7 核心话题 `appearance.change_requested`：CLI / Control API 要改外观，已由运行时校验过。
+    /// 一次性请求，不是投影，没有回执。
     AppearanceChangeRequested {
+        settings: std::collections::BTreeMap<String, serde_json::Value>,
+    },
+    /// `appearance.apply_requested`：单播给本机桌面、带回执的外观修改。不进核心订阅（加在 v7
+    /// 之后、没有升版本），只由单独的一条订阅投递；处理完用 `request_id` 回执。
+    AppearanceApplyRequested {
+        request_id: String,
         settings: std::collections::BTreeMap<String, serde_json::Value>,
     },
     /// 当前这条 subscribe 连接已断开（守护 exec / 崩溃 / socket 没了）。

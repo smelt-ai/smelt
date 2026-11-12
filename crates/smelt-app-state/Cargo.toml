@@ -1,0 +1,23 @@
+# 桌面进程里跨功能共享的状态（GPUI Global）：守护上报的会话状态镜像、关注事件、
+# provider 账户状态、各台机器的智能体宿主配置。主 GUI 和 smelt-acp-view 都要读写，
+# 放在这里免得互相依赖。界面组件在 smelt-ui，那边不碰客户端库和运行时。
+[package]
+name = "smelt-app-state"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-model = { path = "../smelt-model" }
+smelt-client = { path = "../smelt-client" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-client-store = { path = "../smelt-client-store" }
+# 智能体配置的修改按顺序排队提交给运行时（agent_host_state）。
+smol = "2"
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+
+[dev-dependencies]
+serde_json = "1"
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

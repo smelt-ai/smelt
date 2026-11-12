@@ -5,11 +5,11 @@
 //! 编辑表单就地展开在被点的那一行下面，不追加到页底。
 
 use super::*;
-use crate::settings::workspace::PiConfigFileKind;
-use smelt_model::pi_auth::PiAuthProvider;
-use smelt_model::pi_model_settings::{PiCustomProvider, PiModelSettings};
-use smelt_ui::IconAction as _;
-use smelt_ui::truncated_line::truncated_line;
+use crate::models::PiConfigFileKind;
+use api::model::pi_auth::PiAuthProvider;
+use api::model::pi_model_settings::{PiCustomProvider, PiModelSettings};
+use api::ui::IconAction as _;
+use api::ui::truncated_line::truncated_line;
 
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
 const PAGE_MAX_WIDTH: f32 = 760.;
@@ -38,8 +38,8 @@ impl Palette {
 }
 
 pub(super) fn pi_model_page(
-    entity: Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     cx: &App,
 ) -> AnyElement {
     let palette = Palette::new(cx);
@@ -55,9 +55,9 @@ pub(super) fn pi_model_page(
                 .px_6()
                 .py_6()
                 .gap_8()
-                .child(default_model_section(&entity, snapshot, palette))
-                .child(provider_section(&entity, snapshot, palette, cx))
-                .child(config_files_footer(&entity, &snapshot.pi_paths, palette)),
+                .child(default_model_section(&entity, page, palette))
+                .child(provider_section(&entity, page, palette, cx))
+                .child(config_files_footer(&entity, &page.pi_paths(), palette)),
         )
         .into_any_element()
 }
@@ -104,26 +104,26 @@ pub(super) fn card(palette: Palette) -> Div {
 /// （deepseek / deepseek-chat）。两处数据要一起看：标题显示实际会用的模型，状态行
 /// 说明它是用户选的还是兜底值，免得「尚未设置」和一个具体模型名同时出现、互相矛盾。
 fn default_model_section(
-    entity: &Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: &Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     palette: Palette,
 ) -> Div {
-    let explicit = explicit_default(snapshot);
-    let effective = snapshot.pi_model_settings.as_ref().ok();
+    let explicit = explicit_default(page);
+    let effective = page.pi_model_settings().ok();
     let current = effective.map(|settings| {
         (
             settings.default_model.provider.clone(),
             settings.default_model.model.clone(),
         )
     });
-    let title = match (&snapshot.pi_model_settings, &current) {
+    let title = match (page.pi_model_settings(), &current) {
         (_, Some((provider, model))) => format!("{provider} / {model}"),
         (Err(_), _) => "无法读取模型配置".to_string(),
         _ => String::new(),
     };
 
     let mut status = h_flex().gap_2().items_center().flex_wrap();
-    match &snapshot.pi_settings {
+    match page.pi_settings() {
         Err(error) => {
             status = status.child(
                 Tag::danger()
@@ -142,7 +142,7 @@ fn default_model_section(
         }
         Ok(_) => {}
     }
-    match &snapshot.pi_model_settings {
+    match page.pi_model_settings() {
         Ok(settings) if settings.credential_configured => {
             status = status.child(
                 Tag::success()
@@ -155,23 +155,13 @@ fn default_model_section(
             status = status.child(Tag::warning().rounded_full().flex_none().child("缺少凭据"));
         }
         Err(error) => {
-            status = status.child(
-                div()
-                    .text_xs()
-                    .text_color(palette.danger)
-                    .child(error.clone()),
-            );
+            status = status.child(div().text_xs().text_color(palette.danger).child(error));
         }
     }
 
-    let editing = snapshot.pi_model_editor.is_some();
-    let change = change_model_button(
-        entity,
-        snapshot.pi_library_runtime.clone(),
-        current.clone(),
-        editing,
-    );
-    let thinking = thinking_level_row(entity, snapshot, explicit.is_some(), palette);
+    let editing = page.pi_model_editor.is_some();
+    let change = change_model_button(entity, current, editing);
+    let thinking = thinking_level_row(entity, page, explicit.is_some(), palette);
 
     let mut body = card(palette)
         .p_4()
@@ -202,8 +192,8 @@ fn default_model_section(
         .child(thinking);
 
     // 自定义 Provider 表单打开时，它的错误显示在表单里，这里不重复。
-    if snapshot.pi_custom_provider_editor.is_none()
-        && let Some(error) = &snapshot.pi_model_editor_error
+    if page.pi_custom_provider_editor.is_none()
+        && let Some(error) = &page.pi_model_editor_error
     {
         body = body.child(
             div()
@@ -212,7 +202,7 @@ fn default_model_section(
                 .child(format!("操作失败：{error}")),
         );
     }
-    if let Some(editor) = &snapshot.pi_model_editor {
+    if let Some(editor) = &page.pi_model_editor {
         body = body.child(default_model_form(
             entity.clone(),
             editor,
@@ -226,11 +216,9 @@ fn default_model_section(
 
 /// `settings.json` 里用户真的选过的默认模型；没选过返回 `None`。
 fn explicit_default(
-    snapshot: &SettingsRenderSnapshot,
-) -> Option<&smelt_model::pi_model_settings::PiDefaultModelSummary> {
-    snapshot
-        .pi_settings
-        .as_ref()
+    page: &CapabilitiesPage,
+) -> Option<&api::model::pi_model_settings::PiDefaultModelSummary> {
+    page.pi_settings()
         .ok()
         .and_then(|settings| settings.default_model.as_ref())
         .filter(|model| {
@@ -243,10 +231,9 @@ fn explicit_default(
 }
 
 /// 「更换模型」：列出已登录 / 已配置 Provider 的模型，选中即设为默认。
-/// 目录在菜单打开时才读盘，不进每次刷新的快照。
+/// 菜单打开时才取那台机器快照里的模型目录。
 fn change_model_button(
-    entity: &Entity<Workspace>,
-    runtime: crate::RuntimeKey,
+    entity: &Entity<CapabilitiesPage>,
     current: Option<(String, String)>,
     editing: bool,
 ) -> impl IntoElement {
@@ -256,7 +243,7 @@ fn change_model_button(
         .label("更换模型")
         .disabled(editing)
         .dropdown_menu(move |mut menu, window, cx| {
-            let groups = crate::settings::pi_model_choice_groups(&runtime, cx);
+            let groups = entity.read(cx).pi_model_choice_groups();
             if groups.is_empty() {
                 menu = menu.item(
                     PopupMenuItem::new("还没有可选的模型：先在下面登录或添加 Provider")
@@ -309,17 +296,15 @@ fn change_model_button(
 /// 推理强度直接写盘。没选过默认模型时禁用：写它会顺带把 Pi 的兜底模型固化成
 /// 用户的选择。
 fn thinking_level_row(
-    entity: &Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: &Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     enabled: bool,
     palette: Palette,
 ) -> Div {
-    let current = explicit_default(snapshot)
+    let current = explicit_default(page)
         .and_then(|model| model.thinking_level.clone())
         .or_else(|| {
-            snapshot
-                .pi_model_settings
-                .as_ref()
+            page.pi_model_settings()
                 .ok()
                 .map(|settings| settings.default_model.thinking_level.clone())
         })
@@ -426,12 +411,12 @@ fn merge_providers<'a>(
 }
 
 fn provider_section(
-    entity: &Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: &Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     palette: Palette,
     cx: &App,
 ) -> Div {
-    let settings: Option<&PiModelSettings> = snapshot.pi_model_settings.as_ref().ok();
+    let settings: Option<&PiModelSettings> = page.pi_model_settings().ok();
     let default_provider = settings
         .map(|settings| settings.default_model.provider.as_str())
         .unwrap_or_default();
@@ -439,15 +424,15 @@ fn provider_section(
     let custom: &[PiCustomProvider] = settings
         .map(|settings| settings.custom_providers.as_slice())
         .unwrap_or_default();
-    let builtin: &[PiAuthProvider] = match &snapshot.pi_auth_providers {
+    let builtin: &[PiAuthProvider] = match &page.pi_auth_providers {
         Some(PiAuthProvidersState::Ready(list)) => list,
         _ => &[],
     };
     let (entries, hidden) =
-        merge_providers(builtin, custom, default_provider, snapshot.pi_auth_show_all);
-    let custom_editor = snapshot.pi_custom_provider_editor.as_ref();
-    let login = snapshot.pi_login.as_ref();
-    let picker = snapshot.pi_auth_model_picker.as_ref();
+        merge_providers(builtin, custom, default_provider, page.pi_auth_show_all);
+    let custom_editor = page.pi_custom_provider_editor.as_ref();
+    let login = page.pi_login.as_ref();
+    let picker = page.pi_auth_model_picker.as_ref();
     let login_busy = login.is_some();
 
     let add_entity = entity.clone();
@@ -466,7 +451,7 @@ fn provider_section(
         .into_any_element();
 
     let mut body = v_flex().w_full().gap_2();
-    if let Some(error) = &snapshot.pi_auth_error {
+    if let Some(error) = &page.pi_auth_error {
         body = body.child(
             div()
                 .text_xs()
@@ -479,7 +464,7 @@ fn provider_section(
         body = body.child(custom_provider_form(
             entity.clone(),
             editor,
-            snapshot.pi_model_editor_error.clone(),
+            page.pi_model_editor_error.clone(),
             palette,
             cx,
         ));
@@ -495,7 +480,7 @@ fn provider_section(
         }
         match entry {
             ProviderEntry::Builtin(provider) => {
-                row = row.child(super::pi_auth::builtin_provider_row(
+                row = row.child(super::auth::builtin_provider_row(
                     entity.clone(),
                     provider,
                     provider.id == default_provider,
@@ -504,7 +489,7 @@ fn provider_section(
                 ));
                 if let Some(view) = login.filter(|view| view.provider_id == provider.id) {
                     rendered_login = true;
-                    row = row.child(super::pi_auth::login_panel(
+                    row = row.child(super::auth::login_panel(
                         entity.clone(),
                         view,
                         current_default_model,
@@ -513,7 +498,7 @@ fn provider_section(
                 }
                 if let Some(picker) = picker.filter(|picker| picker.provider_id == provider.id) {
                     rendered_picker = true;
-                    row = row.child(super::pi_auth::model_picker_panel(
+                    row = row.child(super::auth::model_picker_panel(
                         entity.clone(),
                         picker,
                         current_default_model,
@@ -537,7 +522,7 @@ fn provider_section(
                     row = row.child(custom_provider_form(
                         entity.clone(),
                         editor,
-                        snapshot.pi_model_editor_error.clone(),
+                        page.pi_model_editor_error.clone(),
                         palette,
                         cx,
                     ));
@@ -550,7 +535,7 @@ fn provider_section(
     // 登录 / 选模型的那个 Provider 可能被折叠了（比如刚切回「只看常用」），面板不能跟着消失。
     let mut orphans = v_flex().w_full().gap_2();
     if let Some(view) = login.filter(|_| !rendered_login) {
-        orphans = orphans.child(super::pi_auth::login_panel(
+        orphans = orphans.child(super::auth::login_panel(
             entity.clone(),
             view,
             current_default_model,
@@ -558,7 +543,7 @@ fn provider_section(
         ));
     }
     if let Some(picker) = picker.filter(|_| !rendered_picker) {
-        orphans = orphans.child(super::pi_auth::model_picker_panel(
+        orphans = orphans.child(super::auth::model_picker_panel(
             entity.clone(),
             picker,
             current_default_model,
@@ -568,7 +553,7 @@ fn provider_section(
         ));
     }
 
-    let footer = provider_list_footer(entity, snapshot, hidden, !entries.is_empty(), palette);
+    let footer = provider_list_footer(entity, page, hidden, !entries.is_empty(), palette);
     list = list.child(footer);
     body = body.child(orphans).child(list);
     section("Provider", Some(add), body, palette)
@@ -576,8 +561,8 @@ fn provider_section(
 
 /// 表尾：读取状态，以及「显示全部内置 Provider」开关。
 fn provider_list_footer(
-    entity: &Entity<Workspace>,
-    snapshot: &SettingsRenderSnapshot,
+    entity: &Entity<CapabilitiesPage>,
+    page: &CapabilitiesPage,
     hidden: usize,
     has_rows: bool,
     palette: Palette,
@@ -604,7 +589,7 @@ fn provider_list_footer(
                 entity.update(cx, |workspace, cx| workspace.refresh_pi_auth_providers(cx));
             })
     };
-    match &snapshot.pi_auth_providers {
+    match &page.pi_auth_providers {
         // 进页签时会自动读；这里只是读之前的一帧。
         None | Some(PiAuthProvidersState::Loading) => footer.child(
             div()
@@ -623,7 +608,7 @@ fn provider_list_footer(
             )
             .child(retry("重试")),
         Some(PiAuthProvidersState::Ready(_)) => {
-            let show_all = snapshot.pi_auth_show_all;
+            let show_all = page.pi_auth_show_all;
             let toggle_entity = entity.clone();
             let toggle = (show_all || hidden > 0).then(|| {
                 Button::new("pi-auth-toggle-all")
@@ -648,7 +633,7 @@ fn provider_list_footer(
 }
 
 fn custom_provider_row(
-    entity: &Entity<Workspace>,
+    entity: &Entity<CapabilitiesPage>,
     provider: &PiCustomProvider,
     is_default: bool,
     editor_open: bool,
@@ -729,7 +714,7 @@ fn custom_provider_row(
                     Button::new(format!("pi-delete-custom-provider-{delete_id}"))
                         .quiet()
                         .icon_size()
-                        .icon(crate::trash_icon())
+                        .icon(api::ui::trash_icon())
                         .icon_action("删除此 Provider")
                         .disabled(editor_open)
                         .on_click(move |_, window, cx| {
@@ -744,8 +729,8 @@ fn custom_provider_row(
 
 /// 直接改 Pi 原生文件的逃生口。平时用不到，压成一行放在页底。
 fn config_files_footer(
-    entity: &Entity<Workspace>,
-    paths: &smelt_model::pi_service::PiConfigPaths,
+    entity: &Entity<CapabilitiesPage>,
+    paths: &api::model::pi_service::PiConfigPaths,
     palette: Palette,
 ) -> Div {
     let file_button =
@@ -801,9 +786,7 @@ fn config_files_footer(
             Button::new("pi-refresh-settings")
                 .quiet()
                 .icon_size()
-                .icon(gpui_component::Icon::new(
-                    gpui_kit_assets::IconName::RefreshCw,
-                ))
+                .icon(gpui_component::Icon::new(IconName::RefreshCw))
                 .icon_action("重新读取 ~/.pi/agent/ 下的配置")
                 .on_click(move |_, _, cx| {
                     refresh_entity.update(cx, |workspace, cx| {
@@ -816,14 +799,14 @@ fn config_files_footer(
 
 /// 「手动填写」：直接填 provider / 模型 ID / 地址 / key。给菜单里找不到的模型用。
 fn default_model_form(
-    manage_entity: Entity<Workspace>,
+    manage_entity: Entity<CapabilitiesPage>,
     editor: &PiModelEditor,
     fg: Hsla,
     muted: Hsla,
     border: Hsla,
 ) -> AnyElement {
     let save_entity = manage_entity.clone();
-    let cancel_entity = manage_entity.clone();
+    let cancel_entity = manage_entity;
     let credential_status = if editor.credential_configured {
         "当前 API key 已配置；留空不会改动它。"
     } else {
@@ -953,7 +936,7 @@ fn default_model_form(
 }
 
 fn custom_provider_form(
-    manage_entity: Entity<Workspace>,
+    manage_entity: Entity<CapabilitiesPage>,
     editor: &PiCustomProviderEditor,
     model_editor_error: Option<String>,
     palette: Palette,
@@ -1018,7 +1001,7 @@ fn custom_provider_form(
                             Button::new("pi-remove-custom-model")
                                 .quiet()
                                 .compact()
-                                .icon(crate::trash_icon())
+                                .icon(api::ui::trash_icon())
                                 .icon_action("移除此模型")
                                 .on_click(move |_, _, cx| {
                                     remove_entity.update(cx, |workspace, cx| {
@@ -1174,7 +1157,7 @@ fn custom_provider_form(
                                 .compact()
                                 .label(editor.api.clone())
                                 .dropdown_menu(move |mut menu, _window, _cx| {
-                                    for api in smelt_model::provider_api::PROVIDER_API_PROTOCOLS {
+                                    for api in api::model::provider_api::PROVIDER_API_PROTOCOLS {
                                         let api_entity = api_entity.clone();
                                         menu = menu.item(PopupMenuItem::new(*api).on_click(
                                             move |_ev, _window, cx| {
@@ -1258,16 +1241,14 @@ fn custom_provider_form(
             discovery_state,
             adopted_models,
             manual_rows,
-            manage_entity.clone(),
-            Workspace::adopt_pi_discovered_model,
+            manage_entity,
+            CapabilitiesPage::adopt_pi_discovered_model,
             muted,
             danger_fg,
         ))
         .child(model_rows)
         .children(
-            model_editor_error
-                .clone()
-                .map(|error| div().text_xs().text_color(danger_fg).child(error)),
+            model_editor_error.map(|error| div().text_xs().text_color(danger_fg).child(error)),
         )
         .child(
             h_flex()
@@ -1315,8 +1296,8 @@ mod tests {
     // 不用 `super::*`：那条 glob 链会带进 `gpui::*` 里的 `test` 属性宏，把这里的
     // `#[test]` 换成 gpui 的版本，展开时撞上递归上限。
     use super::{ProviderEntry, merge_providers};
-    use smelt_model::pi_auth::{PiAuthProvider, PiAuthStatus};
-    use smelt_model::pi_model_settings::PiCustomProvider;
+    use smelt_plugin_api::model::pi_auth::{PiAuthProvider, PiAuthStatus};
+    use smelt_plugin_api::model::pi_model_settings::PiCustomProvider;
 
     fn builtin(id: &str, oauth: bool, status: PiAuthStatus) -> PiAuthProvider {
         PiAuthProvider {

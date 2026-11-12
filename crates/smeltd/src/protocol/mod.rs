@@ -152,6 +152,25 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         DaemonOperation::EventSubscribe => {
             handle_event_subscribe_op(conn, &v, &principal, &event_hub)
         }
+        DaemonOperation::AppearanceReceipt => {
+            let mut conn = conn;
+            let result = (|| {
+                if principal.is_remote() {
+                    return Err("外观回执只接受本机桌面".to_string());
+                }
+                let peer = conn.peer_identity()?;
+                authenticate_first_party_desktop(&peer)?;
+                let receipt: smelt_event_protocol::AppearanceApplyReceipt =
+                    serde_json::from_value(v.get("receipt").cloned().ok_or("缺少外观回执")?)
+                        .map_err(|error| error.to_string())?;
+                event_hub.appearance_requests.respond(&peer, &receipt.request_id, receipt.outcome)
+            })();
+            let reply = match result {
+                Ok(()) => serde_json::json!({"ok": true}),
+                Err(error) => serde_json::json!({"ok": false, "error": error}),
+            };
+            let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &reply);
+        }
         DaemonOperation::AcpOpen => {
             handle_acp_open(conn, reader, &v, sessions, acp_sessions, event_hub)
         }

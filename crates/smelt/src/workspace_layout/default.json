@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "center": {
+    "panel_name": "StackPanel",
+    "info": { "stack": { "sizes": [820], "axis": 0 } },
+    "children": [
+      {
+        "panel_name": "TabPanel",
+        "info": { "tabs": { "active_index": 0 } },
+        "children": [
+          { "panel_name": "stage", "children": [], "info": { "panel": null } }
+        ]
+      }
+    ]
+  },
+  "left_dock": {
+    "placement": "left",
+    "size": 260.0,
+    "open": true,
+    "panel": {
+      "panel_name": "TabPanel",
+      "info": { "tabs": { "active_index": 0 } },
+      "children": [
+        { "panel_name": "sessions", "children": [], "info": { "panel": null } }
+      ]
+    }
+  },
+  "right_dock": {
+    "placement": "right",
+    "size": 340.0,
+    "open": true,
+    "panel": {
+      "panel_name": "TabPanel",
+      "info": { "tabs": { "active_index": 0 } },
+      "children": [
+        { "panel_name": "files", "children": [], "info": { "panel": null } },
+        { "panel_name": "git", "children": [], "info": { "panel": null } },
+        { "panel_name": "history", "children": [], "info": { "panel": null } },
+        { "panel_name": "com.smelt.skills", "children": [], "info": { "panel": null } }
+      ]
+    }
+  }
+}

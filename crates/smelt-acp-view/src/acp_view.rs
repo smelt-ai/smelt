@@ -29,6 +29,8 @@ use smelt_ui::ListRow;
 
 use agent_client_protocol::v1::schema::SessionId;
 
+use smelt_app_state::daemon_states_global::AttentionGlobal;
+use smelt_app_state::provider_status_global::ProviderStatus;
 use smelt_client::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientHandle, ConversationClientLaunch, load_acp_history,
     spawn_acp_client,
@@ -45,7 +47,6 @@ use smelt_model::acp_session::{
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_ui::IconAction as _;
-use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::markdown_links::FileLinks;
 use smelt_ui::motion::{
     BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_activated,
@@ -53,7 +54,6 @@ use smelt_ui::motion::{
     copy_ack_opacity, ease_overshoot, ease_snap, enter_offset_px, mix_rgba, quiet_dots,
     running_sweep, unit_transition,
 };
-use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
 use smelt_ui::truncated_line::truncated_line;
 
@@ -2336,7 +2336,7 @@ impl AcpView {
         }
         if !preserve_launch
             // 按这段对话所在那台机器当前的配置重拼；那台机器的配置还没读到就沿用原来的。
-            && let Some(cfg) = smelt_ui::agent_host_state::agent_hosts(cx)
+            && let Some(cfg) = smelt_app_state::agent_host_state::agent_hosts(cx)
                 .and_then(|hosts| hosts.settings(self.runtime.key()))
         {
             self.launch = resolve_restart_launch(
@@ -3317,7 +3317,7 @@ impl AcpView {
     /// 只读内存里的配置，render 里可以调。
     pub fn custom_agent_label(&self, cx: &App) -> Option<String> {
         let id = self.profile_id.as_deref()?;
-        smelt_ui::agent_host_state::agent_hosts(cx)?
+        smelt_app_state::agent_host_state::agent_hosts(cx)?
             .settings(self.runtime.key())?
             .find_profile(id)
             .map(|profile| profile.label.trim().to_string())

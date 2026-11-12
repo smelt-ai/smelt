@@ -3,18 +3,17 @@
 //! 都由运行时执行（`pi.mcp.*`），每次修改回带新的 Pi 配置快照；这里只管视图状态。
 
 use super::*;
-use smelt_model::control_api::{PiMcpAddPreset, PiMcpLogin, PiMcpRemove, PiMcpSetEnabled};
-use smelt_model::pi_service::{McpEnabledParams, McpPresetParams, McpServerParams};
+use api::model::control_api::{PiMcpAddPreset, PiMcpLogin, PiMcpRemove, PiMcpSetEnabled};
+use api::model::pi_service::{McpEnabledParams, McpPresetParams, McpServerParams};
 
 /// 登录要等用户在浏览器里授权。
 const MCP_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-impl Workspace {
+impl CapabilitiesPage {
     pub fn add_pi_mcp_preset(&mut self, id: &'static str, cx: &mut Context<Self>) {
         self.pi_mcp_error = None;
         self.run_pi_mutation::<PiMcpAddPreset>(
             McpPresetParams { id: id.to_string() },
-            false,
             cx,
             |this, error, _| this.pi_mcp_error = Some(error),
         );
@@ -29,7 +28,6 @@ impl Workspace {
         self.pi_mcp_error = None;
         self.run_pi_mutation::<PiMcpSetEnabled>(
             McpEnabledParams { name, enabled },
-            false,
             cx,
             |this, error, _| this.pi_mcp_error = Some(error),
         );
@@ -48,12 +46,9 @@ impl Workspace {
     pub fn confirm_pi_mcp_remove(&mut self, name: String, cx: &mut Context<Self>) {
         self.pi_mcp_pending_remove = None;
         self.pi_mcp_error = None;
-        self.run_pi_mutation::<PiMcpRemove>(
-            McpServerParams { name },
-            false,
-            cx,
-            |this, error, _| this.pi_mcp_error = Some(error),
-        );
+        self.run_pi_mutation::<PiMcpRemove>(McpServerParams { name }, cx, |this, error, _| {
+            this.pi_mcp_error = Some(error)
+        });
         cx.notify();
     }
 
@@ -74,8 +69,8 @@ impl Workspace {
                 this.pi_mcp_login = None;
                 match outcome {
                     Ok(config) => {
-                        this.adopt_pi_config(config, false, cx);
-                        crate::status_item::notify_success(format!("MCP 服务器 {name} 已登录"));
+                        this.adopt_pi_config(config, cx);
+                        notify_success(format!("MCP 服务器 {name} 已登录"), cx);
                     }
                     Err(error) => this.pi_mcp_error = Some(error),
                 }

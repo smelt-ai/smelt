@@ -1545,7 +1545,7 @@ impl Workspace {
                 let progress = match &self.sessions[ix].kind {
                     SessionKind::Term { active, .. } => {
                         let view = active.read(cx);
-                        smelt_ui::daemon_states_global::DaemonStates::progress(
+                        smelt_app_state::daemon_states_global::DaemonStates::progress(
                             view.runtime().key(),
                             view.session_id(),
                             cx,

@@ -63,7 +63,8 @@ cargo run --bin smelt
 - **`crates/smelt-event-bus`** —— 系统内部进程间事件总线（EventHub）。
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
-- **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
+- **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的界面组件（`ui_theme`/`markdown_mermaid`/按钮、列表行等），不碰客户端库和运行时。
+- **`crates/smelt-app-state`** —— 桌面进程里跨功能共享的状态（GPUI Global）：守护上报的会话状态、关注事件、provider 账户状态、各机器智能体宿主配置。
 - **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 34，按字段建表，没有通用 kv）。工作区目录（项目、对话）只由运行时写：客户端发 `workspace.conversation.*` / `workspace.project.*` 单条命令，经 `workspace.changed` 收整份目录。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
@@ -81,7 +82,9 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 不属于项目的对话按最近活动排在「最近对话」，行首头像标出智能体；项目里的对话
 留在项目下，同样带头像。点对话是独立页。
 
-会话右侧 Tool Panel、设置窗、确认框都不是一级入口。落盘是 `route`。实现见 `crates/smelt/src/workspace_nav.rs`。
+布局里的面板（文件、变更、历史、插件）、设置窗、确认框都不是一级入口。落盘是 `route`。实现见 `crates/smelt/src/workspace_nav.rs`。
+
+默认布局里会话列表在左停靠区，文件、变更、历史、技能在右停靠区。窗口左上角（交通灯右边）和右上角的按钮收起、展开这两个停靠区，没有快捷键；聚焦侧栏时左停靠区收着会先展开。
 
 ---
 
@@ -159,9 +162,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 | `Cmd+N` | 新对话 |
 | `Cmd+↑` / `Cmd+↓` | 上一个 / 下一个会话（输入框里是文首 / 文末） |
 | `Cmd+Shift+E` | 聚焦侧栏 |
-| `Cmd+B` | 切换左侧栏 |
-| `Opt+Cmd+B` | 切换右侧 Tool Panel（Files / Git / History，以及插件的 tab） |
-| `Esc` | 收起舞台上的全屏覆盖页（总览/文件树/Git/历史），回到当前会话 |
+| `Esc` | 还原放大的面板 |
 | `Cmd+[` / `Cmd+]` | 循环切换当前会话内的 pane（分屏） |
 | `Cmd+1` ~ `Cmd+9` | 跳到会话列表里第 N 个会话（按显示顺序，跨项目连续数） |
 | `Cmd+D` | 竖切分屏（右侧并排） |

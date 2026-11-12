@@ -495,21 +495,7 @@ impl Workspace {
         if runtime == self.file_tree_runtime(cx) {
             self.reveal_in_file_tree(&path, cx);
         }
-        // 点文件不再抢占舞台：Tool Panel 的 FILES tab 自己就能分
-        // 左右两栏显示内容 + 树，中间舞台的终端/ACP 对话完全不受影响。只有
-        // 已经把 Files 提升到舞台全宽（双栏）时，才保持那个双栏视图跟着切换
-        // 显示的文件（不触碰 stage_cover，本来就是 Some(Files) 不用改）。
-        //
-        // 停靠面板默认 344px 分给树 + 内容太挤，第一次在这个面板里开文件时
-        // 顺手把面板拉宽一些（参考 Codex App 点文件自动展开面板），后续用户
-        // 拖宽/拖窄的手动结果不再覆盖。
-        if self.tool_panel_open
-            && matches!(self.tool_panel_tab, crate::tool_panel::ToolPanelTab::Files)
-            && !self.tool_panel_promoted()
-            && self.tool_panel_w < 640.
-        {
-            self.tool_panel_w = 640.;
-        }
+        // 文件在「文件」视图里打开，露不露出来由调用方定：点文件树的人本来就在看它。
 
         self.file_gen = self.file_gen.wrapping_add(1);
         let r#gen = self.file_gen;

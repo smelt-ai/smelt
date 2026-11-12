@@ -7,7 +7,7 @@ use super::{
     APP_KEYMAP, Overrides, Recorded, SHORTCUTS, app_key_bindings, overrides_from_records,
     recorded, splice_app_bindings,
 };
-use crate::{OpenDocs, ReportIssue, ToggleCommandPalette, ToggleSidebar};
+use crate::{NewConversation, OpenDocs, ReportIssue, ToggleCommandPalette};
 
 /// 测试 App 的本机系统，录键判定和解析都按它来，跟 `app_key_bindings` 一致。
 fn os() -> OperatingSystem {
@@ -107,7 +107,7 @@ fn unknown_actions_and_broken_keystrokes_fall_back_to_defaults() {
                 keystroke: Some("cmd-j".to_string()),
             },
             KeyBindingRecord {
-                action_id: "toggle_sidebar".to_string(),
+                action_id: "new_conversation".to_string(),
                 keystroke: None,
             },
             KeyBindingRecord {
@@ -124,7 +124,7 @@ fn unknown_actions_and_broken_keystrokes_fall_back_to_defaults() {
     );
     assert_eq!(
         loaded,
-        overrides(&[("command_palette", Some("cmd-j")), ("toggle_sidebar", None)])
+        overrides(&[("command_palette", Some("cmd-j")), ("new_conversation", None)])
     );
 }
 
@@ -137,7 +137,7 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
     existing.extend(app_bindings(&Overrides::new()));
     existing.push(after);
 
-    let app = app_bindings(&overrides(&[("toggle_sidebar", Some("cmd-shift-b"))]));
+    let app = app_bindings(&overrides(&[("new_conversation", Some("cmd-shift-m"))]));
     let app_len = app.len();
     let rebuilt = splice_app_bindings(existing, app);
 
@@ -145,12 +145,12 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
     assert!(rebuilt[0].action().as_any().is::<OpenDocs>());
     assert!(rebuilt[1..=app_len].iter().all(|b| b.meta() == Some(APP_KEYMAP)));
     assert!(rebuilt[app_len + 1].action().as_any().is::<ReportIssue>());
-    let sidebar: Vec<_> = rebuilt
+    let moved: Vec<_> = rebuilt
         .iter()
-        .filter(|binding| binding.action().as_any().is::<ToggleSidebar>())
+        .filter(|binding| binding.action().as_any().is::<NewConversation>())
         .collect();
-    assert_eq!(sidebar.len(), 1, "旧的那段不能留下来");
-    assert_eq!(sidebar[0].keystrokes()[0].inner(), &stroke("cmd-shift-b"));
+    assert_eq!(moved.len(), 1, "旧的那段不能留下来");
+    assert_eq!(moved[0].keystrokes()[0].inner(), &stroke("cmd-shift-m"));
 }
 
 #[test]
@@ -183,16 +183,16 @@ fn keys_without_command_are_left_to_the_terminal_and_inputs() {
 #[test]
 fn a_key_used_by_another_shortcut_asks_to_reassign() {
     let none = Overrides::new();
-    match judge("command_palette", "cmd-b", &none) {
+    match judge("command_palette", "cmd-n", &none) {
         Recorded::Taken { other, keystroke } => {
-            assert_eq!(other, "toggle_sidebar");
-            assert_eq!(stroke(&keystroke), stroke("cmd-b"));
+            assert_eq!(other, "new_conversation");
+            assert_eq!(stroke(&keystroke), stroke("cmd-n"));
         }
         other => panic!("应该问要不要改绑，实际是 {other:?}"),
     }
     // 改走以后，原来的键就空出来了。
-    let moved = overrides(&[("toggle_sidebar", Some("cmd-shift-b"))]);
-    assert_set(judge("command_palette", "cmd-b", &moved), "cmd-b");
+    let moved = overrides(&[("new_conversation", Some("cmd-shift-m"))]);
+    assert_set(judge("command_palette", "cmd-n", &moved), "cmd-n");
     // 自己现在的键不算冲突。
     assert_eq!(judge("command_palette", "cmd-k", &none), Recorded::Reset);
 }

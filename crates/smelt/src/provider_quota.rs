@@ -12,8 +12,10 @@ use smelt_model::control_api::{QuotaGet, QuotaRefresh};
 use smelt_model::quota_service::QuotaRefreshParams;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
+pub(crate) use smelt_app_state::provider_status_global::{
+    ProviderStatus, QuotaStatus, QuotaTarget,
+};
 pub(crate) use smelt_model::provider_quota::ProviderQuotaData;
-pub(crate) use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 
 use crate::Workspace;
 

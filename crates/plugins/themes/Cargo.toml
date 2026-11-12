@@ -1,0 +1,17 @@
+# 内置插件「主题」：把随程序带的主题文件登记进宿主的主题目录。
+# 只依赖插件接口和 gpui，宿主里没有它的类型（见 docs/app-plugins.md）。
+[package]
+name = "smelt-themes"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
