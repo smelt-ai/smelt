@@ -850,6 +850,7 @@ impl AcpView {
                                         .group(PEEK_ROW_GROUP)
                                         .accessibility_label(headline)
                                         .child(row),
+                                    cx,
                                 )
                                 .into_any_element()
                             } else {
@@ -1646,6 +1647,7 @@ impl AcpView {
                             .group(PEEK_ROW_GROUP)
                             .accessibility_label(headline)
                             .child(row),
+                        cx,
                     )
                     .into_any_element()
                 } else {
@@ -2424,7 +2426,13 @@ impl AcpView {
         col.into_any_element()
     }
 
-    fn tool_output_popover(&self, entry_ix: usize, muted: gpui::Hsla, trigger: Button) -> Popover {
+    fn tool_output_popover(
+        &self,
+        entry_ix: usize,
+        muted: gpui::Hsla,
+        trigger: Button,
+        cx: &Context<Self>,
+    ) -> Popover {
         let (tool_id, kind, output, children, diffs, images) = match self.entries.get(entry_ix) {
             Some(AcpEntry::ToolCall {
                 id,
@@ -2449,12 +2457,15 @@ impl AcpView {
             }
         };
         let border: gpui::Hsla = ui_theme::card_stroke().into();
+        let view = cx.weak_entity();
         Popover::new(owner_id("acp-tool-output-pop", &tool_id))
             .anchor(Anchor::BottomLeft)
             .appearance(false)
             .p_0()
             .trigger(trigger)
             .content(move |_, _, cx| {
+                let view = view.clone();
+                let popover = cx.weak_entity();
                 // 折叠卡片只有 hover 预览这一条显示路径，解码必须在这里触发，
                 // 否则缩略图永远停在占位。已在途/已完成时是空操作。
                 for image in images.iter().flatten().flatten() {
@@ -2469,6 +2480,12 @@ impl AcpView {
                     children: &children,
                     muted,
                     border,
+                    on_preview_image: std::rc::Rc::new(move |image, window, cx| {
+                        // 先收起 hover 卡片，再交给工作台弹大图，避免两层浮层叠在一起。
+                        popover.update(cx, |state, cx| state.dismiss(window, cx)).ok();
+                        view.update(cx, |_, cx| cx.emit(AcpViewEvent::PreviewImage(image)))
+                            .ok();
+                    }),
                 })
             })
     }
@@ -2822,7 +2839,12 @@ struct ToolOutputPopoverBody<'a> {
     children: &'a [AcpEntry],
     muted: gpui::Hsla,
     border: gpui::Hsla,
+    /// 点缩略图看大图。hover 卡片拿不到 `Context<AcpView>`，经弱引用转发事件。
+    on_preview_image: PreviewImageHandler,
 }
+
+type PreviewImageHandler =
+    std::rc::Rc<dyn Fn(std::sync::Arc<gpui::Image>, &mut Window, &mut App)>;
 
 fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::AnyElement {
     let ToolOutputPopoverBody {
@@ -2834,6 +2856,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
         children,
         muted,
         border,
+        on_preview_image,
     } = body;
     // 滚动容器必须是 block。v_flex 会把子项压进 max_h，content 高度等于视口，
     // 滚轮加在 offset 上也会被钳回 0。卡片本身不滚时，长日志的行视口自己滚。
@@ -2874,9 +2897,26 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                     .and_then(|parts| parts.get(part_ix))
                     .and_then(Option::as_ref)
                 {
-                    // hover 预览没有 `Context<AcpView>`，只出缩略图，不接点击大图；
                     // 解码由 popover 的 content 闭包触发（缓存按图片 id 全局共享）。
-                    Some(image) => col.child(image_thumb_element(image)),
+                    Some(image) => {
+                        let preview_image = image.clone();
+                        let on_preview = on_preview_image.clone();
+                        col.child(
+                            div()
+                                .id(owner_part("acp-tool-pop-image", &tool_id, part_ix))
+                                .overflow_hidden()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(border)
+                                .hover(|s| {
+                                    s.border_color(ui_theme::tint(ui_theme::accent(), 0x72))
+                                })
+                                .on_click(move |_, window, cx| {
+                                    on_preview(preview_image.clone(), window, cx)
+                                })
+                                .child(image_thumb_element(image)),
+                        )
+                    }
                     None => col,
                 }
             }
