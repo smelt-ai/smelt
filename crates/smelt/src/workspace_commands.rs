@@ -10,7 +10,8 @@ use smelt_plugin_api::{self as api, CommandHandler, CommandSpec, Handled};
 
 use super::*;
 
-type Run = fn(&mut Workspace, &mut Window, &mut Context<Workspace>) -> Handled;
+/// 处理函数：工作台、执行时带的参数（快捷键、菜单、命令面板执行时是 `null`）。
+type Run = fn(&mut Workspace, &serde_json::Value, &mut Window, &mut Context<Workspace>) -> Handled;
 
 /// 一条自带命令。键位规则见 [`CommandSpec`]。
 pub(crate) struct Def {
@@ -20,6 +21,7 @@ pub(crate) struct Def {
     pub(crate) key: Option<&'static str>,
     pub(crate) context: &'static str,
     pub(crate) palette: bool,
+    pub(crate) requires_args: bool,
     run: Run,
 }
 
@@ -50,6 +52,7 @@ const fn def(
         key,
         context: "Workspace",
         palette: true,
+        requires_args: false,
         run,
     }
 }
@@ -57,6 +60,15 @@ const fn def(
 const fn hidden(def: Def) -> Def {
     Def {
         palette: false,
+        ..def
+    }
+}
+
+/// 要带参数才能执行的命令：只给插件用 `run` 调，不进面板、不绑键。
+const fn with_args(def: Def) -> Def {
+    Def {
+        palette: false,
+        requires_args: true,
         ..def
     }
 }
@@ -73,7 +85,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             "settings",
             "打开设置",
             Some("cmd-,"),
-            |this, _, cx| {
+            |this, _, _, cx| {
                 this.open_settings(cx);
                 Handled::Done
             },
@@ -86,7 +98,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             "quit",
             "退出 Smelt",
             Some("cmd-q"),
-            |this, window, cx| {
+            |this, _, window, cx| {
                 this.request_quit(window, cx);
                 Handled::Done
             },
@@ -99,7 +111,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "check-update",
         "检查更新",
         None,
-        |this, _, cx| {
+        |this, _, _, cx| {
             // 顺手发起一次检查，再把设置窗口开到「更新」页看进度。
             if this.update_status.can_check() || this.update_status.can_retry_recovery() {
                 this.check_or_recover_update(false, cx);
@@ -109,7 +121,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         },
     ),
     // 链接打包时可换，见 `settings::DOCS_URL`。
-    def("smelt.app", "docs", "帮助文档", None, |_, _, cx| {
+    def("smelt.app", "docs", "帮助文档", None, |_, _, _, cx| {
         cx.open_url(settings::DOCS_URL);
         Handled::Done
     }),
@@ -118,7 +130,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "report-issue",
         "反馈问题",
         None,
-        |_, _, cx| {
+        |_, _, _, cx| {
             cx.open_url(settings::FEEDBACK_URL);
             Handled::Done
         },
@@ -129,7 +141,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "debug-hud",
         "切换调试面板",
         Some("cmd-shift-f"),
-        |this, _, cx| {
+        |this, _, _, cx| {
             this.debug_hud = !this.debug_hud;
             cx.notify();
             Handled::Done
@@ -140,7 +152,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "toggle",
         "打开命令面板",
         Some("cmd-k"),
-        |this, window, cx| {
+        |this, _, window, cx| {
             if this.palette.is_some() {
                 this.close_palette(window, cx);
             } else {
@@ -155,7 +167,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "new-conversation",
         "新对话",
         Some("cmd-n"),
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.begin_new_conversation(window, cx);
             Handled::Done
         },
@@ -166,7 +178,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "new-session",
         "新建会话",
         None,
-        |this, _, cx| {
+        |this, _, _, cx| {
             this.new_tab(cx);
             Handled::Done
         },
@@ -176,7 +188,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "open-project",
         "打开项目…",
         None,
-        |this, _, cx| {
+        |this, _, _, cx| {
             this.open_project(cx);
             Handled::Done
         },
@@ -187,7 +199,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "focus-list",
         "聚焦侧栏",
         Some("cmd-shift-e"),
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.focus_sidebar(window, cx);
             Handled::Done
         },
@@ -199,7 +211,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "prev",
         "上一个会话",
         Some("cmd-up"),
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.cycle_session(-1, window, cx);
             Handled::Done
         },
@@ -209,7 +221,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "next",
         "下一个会话",
         Some("cmd-down"),
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.cycle_session(1, window, cx);
             Handled::Done
         },
@@ -277,6 +289,37 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-9"),
         activate_nth::<8>,
     )),
+    // 插件要开会话时调，参数见 `smelt_plugin_api::sessions`。
+    with_args(def(
+        "smelt.sessions",
+        "resume",
+        "续接历史会话",
+        None,
+        |this, args, window, cx| {
+            this.run_resume_command(args, window, cx);
+            Handled::Done
+        },
+    )),
+    with_args(def(
+        "smelt.sessions",
+        "resume-in-terminal",
+        "在终端里续接历史会话",
+        None,
+        |this, args, _, cx| {
+            this.run_resume_in_terminal_command(args, cx);
+            Handled::Done
+        },
+    )),
+    with_args(def(
+        "smelt.sessions",
+        "handoff",
+        "交接给另一家 agent",
+        None,
+        |this, args, window, cx| {
+            this.run_handoff_command(args, window, cx);
+            Handled::Done
+        },
+    )),
     // 当前会话的分屏树里循环切活动 pane。编辑器的 Outdent / Indent 绑在更深的 Input 上，
     // 焦点在输入框时由它们接手。
     def(
@@ -284,7 +327,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "prev-pane",
         "上一个分屏",
         Some("cmd-["),
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.cycle_pane(-1, window, cx);
             Handled::Done
         },
@@ -294,7 +337,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "next-pane",
         "下一个分屏",
         Some("cmd-]"),
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.cycle_pane(1, window, cx);
             Handled::Done
         },
@@ -304,7 +347,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "split-right",
         "左右分屏",
         Some("cmd-d"),
-        |this, _, cx| {
+        |this, _, _, cx| {
             this.split_active(Axis::Horizontal, cx);
             Handled::Done
         },
@@ -314,7 +357,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "split-down",
         "上下分屏",
         Some("shift-cmd-d"),
-        |this, _, cx| {
+        |this, _, _, cx| {
             this.split_active(Axis::Vertical, cx);
             Handled::Done
         },
@@ -325,7 +368,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "close-pane",
         "关闭当前分屏或会话",
         Some("cmd-w"),
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.close_active(window, cx);
             Handled::Done
         },
@@ -338,7 +381,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             "save",
             "保存当前文件",
             Some("cmd-s"),
-            |this, _, cx| {
+            |this, _, _, cx| {
                 this.save_open_file(cx);
                 Handled::Done
             },
@@ -350,7 +393,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         "send-selection",
         "发送选中内容到会话",
         None,
-        |this, window, cx| {
+        |this, _, window, cx| {
             this.send_open_file_selection(window, cx);
             Handled::Done
         },
@@ -362,7 +405,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             "prev-hunk",
             "上一个差异",
             Some("shift-f7"),
-            |this, window, cx| jump_hunk(this, false, window, cx),
+            |this, _, window, cx| jump_hunk(this, false, window, cx),
         ),
     ),
     within(
@@ -372,7 +415,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             "next-hunk",
             "下一个差异",
             Some("f7"),
-            |this, window, cx| jump_hunk(this, true, window, cx),
+            |this, _, window, cx| jump_hunk(this, true, window, cx),
         ),
     ),
 ];
@@ -380,6 +423,7 @@ pub(crate) const COMMANDS: &[Def] = &[
 /// 按侧栏视觉顺序（各项目分组依次铺平）跳到第 `N + 1` 个会话。
 fn activate_nth<const N: usize>(
     this: &mut Workspace,
+    _: &serde_json::Value,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Handled {
@@ -415,6 +459,7 @@ fn register_with(handler: impl Fn(&'static Def) -> CommandHandler, cx: &mut App)
                 key: def.key.map(str::to_string),
                 context: def.context.to_string(),
                 palette: def.palette,
+                requires_args: def.requires_args,
                 handler: handler(def),
             })
             .collect();
@@ -432,9 +477,9 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
             let workspace = workspace.clone();
             let run = def.run;
             Rc::new(
-                move |_: &serde_json::Value, window: &mut Window, cx: &mut App| {
+                move |args: &serde_json::Value, window: &mut Window, cx: &mut App| {
                     workspace
-                        .update(cx, |this, cx| run(this, window, cx))
+                        .update(cx, |this, cx| run(this, args, window, cx))
                         .unwrap_or(Handled::Pass)
                 },
             )

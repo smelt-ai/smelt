@@ -7,7 +7,7 @@
 //! 宿主到插件的通知是 gpui 事件（[`HostEvent`]），插件用 `cx.subscribe(&events(cx), …)`
 //! 订阅，不轮询。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -17,6 +17,8 @@ use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, C
 
 pub use serde_json;
 pub use smelt_client::runtime::RuntimeKey;
+// 发给运行时的短请求（守护协议），如改历史会话的名字。
+pub use smelt_client::session_ops;
 pub use smelt_model as model;
 pub use smelt_runtime_client as client;
 pub use smelt_ui as ui;
@@ -28,6 +30,7 @@ pub use smelt_ui::theme_catalog::{
 
 mod command;
 mod layout;
+pub mod sessions;
 mod view;
 
 #[cfg(feature = "js")]
@@ -55,6 +58,16 @@ pub struct Machine {
     pub unavailable: Option<String>,
     /// 装了远程桌面、眼下连着。
     pub has_desktop: bool,
+    /// 那台机器的 `SMELT_HOME`，按那台机器的路径写。远程机器还没连上过（或运行时太旧
+    /// 不报）是 `None`。智能体的 space 在它下面。
+    pub smelt_home: Option<String>,
+}
+
+/// 一个项目：在哪台机器上、根目录（那台机器上的路径）。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Project {
+    pub machine: RuntimeKey,
+    pub root: String,
 }
 
 /// 选好路径后交回给插件的回调。用户取消就不调。
@@ -85,6 +98,10 @@ pub enum HostEvent {
     MachinesChanged,
     /// 工作台的当前项目变了（读 [`Host::active_project`]）。
     ActiveProjectChanged,
+    /// 某台机器的智能体配置变了（读 [`Host::agent_settings`]）。
+    AgentSettingsChanged,
+    /// 看得见的视图变了：有的露出来、有的被挡住或收起（读 [`Host::view_shown`]）。
+    ShownViewsChanged,
     /// 视图登记变了：加了、替换了或撤下了（见 [`register_view`]）。
     ViewsChanged,
     /// 主题登记变了：宿主应重新应用当前主题并更新设置页。
@@ -118,8 +135,18 @@ pub trait Host: 'static {
         done: PathsPicked,
         cx: &mut App,
     );
-    /// 工作台的当前项目，只算这台电脑上的；当前是远程项目或没有项目时是 `None`。
-    fn active_project(&self, cx: &App) -> Option<PathBuf>;
+    /// 工作台的当前项目，可能在远程机器上；没有项目时是 `None`。
+    fn active_project(&self, cx: &App) -> Option<Project>;
+    /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。还没读到是
+    /// `None`。只读；变了发 [`HostEvent::AgentSettingsChanged`]。
+    fn agent_settings<'a>(
+        &self,
+        machine: &RuntimeKey,
+        cx: &'a App,
+    ) -> Option<&'a model::agent_host::AgentHostSettings>;
+    /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页。变了发
+    /// [`HostEvent::ShownViewsChanged`]。
+    fn view_shown(&self, id: &str, cx: &App) -> bool;
     /// 页面的页头底板：留好拖窗口条、交通灯和右上角开关的位置，页面往里放标题和按钮。
     fn page_header(&self, window: &Window, cx: &App) -> Div;
     /// 主窗口（工作台那扇）；还没开或已经关了是 `None`。命令在这里执行（见 [`run`]）。

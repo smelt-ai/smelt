@@ -3,11 +3,12 @@
 //! 路由 `Page(id)`），侧栏给它一个入口。设计见 `docs/app-plugins.md`。
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::Path;
 use std::rc::Rc;
 
 use gpui::*;
-use smelt_plugin_api::{self as api, HostEvent, Machine, PathRequest, RuntimeKey};
+use smelt_plugin_api::{self as api, HostEvent, Machine, PathRequest, Project, RuntimeKey};
 use smelt_runtime_client::RuntimeClient;
 
 use crate::dir_picker::DirPickerPurpose;
@@ -38,6 +39,7 @@ impl api::Host for SmeltHost {
                 name: runtimes::runtime_name(&key, cx),
                 unavailable: runtimes::runtime_unavailable_label(&key, cx).map(str::to_string),
                 has_desktop: runtimes::runtime_has_desktop(&key, cx),
+                smelt_home: runtimes::smelt_home(&key, cx),
                 key,
             })
             .collect()
@@ -74,11 +76,25 @@ impl api::Host for SmeltHost {
         });
     }
 
-    fn active_project(&self, cx: &App) -> Option<PathBuf> {
-        self.workspace()?
-            .read(cx)
-            .active_local_project_root(cx)
-            .map(PathBuf::from)
+    fn active_project(&self, cx: &App) -> Option<Project> {
+        let project = self.workspace()?.read(cx).active_project_ref(cx)?;
+        Some(Project {
+            machine: project.runtime,
+            root: project.root,
+        })
+    }
+
+    fn agent_settings<'a>(
+        &self,
+        machine: &RuntimeKey,
+        cx: &'a App,
+    ) -> Option<&'a api::model::agent_host::AgentHostSettings> {
+        crate::settings::agent_hosts(cx)?.settings(machine)
+    }
+
+    fn view_shown(&self, id: &str, cx: &App) -> bool {
+        self.workspace()
+            .is_some_and(|workspace| workspace.read(cx).plugin_shown_views.contains(id))
     }
 
     /// 页面画在舞台上、舞台又顶着窗口上沿时，页头让出顶栏、给红黄绿按钮让位、能拖窗口；
@@ -113,7 +129,13 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     // 机器加了、移除了、改名、连上断开都记在 RuntimeHub 上。
     cx.observe_global::<runtimes::RuntimeHub>(|cx| api::emit(HostEvent::MachinesChanged, cx))
         .detach();
+    // 各台机器的智能体配置读到、改了、重读了都写在这个全局上。
+    cx.observe_global::<crate::settings::AgentHosts>(|cx| {
+        api::emit(HostEvent::AgentSettingsChanged, cx)
+    })
+    .detach();
     smelt_capabilities::register(cx);
+    smelt_history::register(cx);
     smelt_layouts::register(cx);
 }
 
@@ -201,10 +223,28 @@ impl Workspace {
     /// 当前项目变了就告诉插件。在可见刷新里调：当前项目跟着会话、侧栏选中、项目分组
     /// 变，这些变更都会排一次可见刷新。
     pub(crate) fn note_active_project(&mut self, cx: &mut Context<Self>) {
-        let root = self.active_local_project_root(cx);
-        if self.plugin_project_root != root {
-            self.plugin_project_root = root;
+        let project = self.active_project_ref(cx);
+        if self.plugin_project != project {
+            self.plugin_project = project;
             api::emit(HostEvent::ActiveProjectChanged, cx);
+        }
+    }
+
+    /// 看得见的视图变了就告诉插件：布局里所在组显示着的，加上舞台上开成当前页的那个。
+    /// Dock 变了（`sync_shell_view`）和路由变了（可见刷新）时调。
+    pub(crate) fn note_shown_views(&mut self, cx: &mut Context<Self>) {
+        let mut shown: HashSet<String> = self.shell_view.shown.clone();
+        if let WorkspaceRoute::Page(id) = self.active_tab()
+            && self
+                .shell_view
+                .shown
+                .contains(crate::builtin_views::Builtin::Stage.id())
+        {
+            shown.insert(id.clone());
+        }
+        if self.plugin_shown_views != shown {
+            self.plugin_shown_views = shown;
+            api::emit(HostEvent::ShownViewsChanged, cx);
         }
     }
 }

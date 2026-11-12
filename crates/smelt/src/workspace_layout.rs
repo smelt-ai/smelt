@@ -279,6 +279,7 @@ impl Workspace {
                 .shown
                 .contains(crate::builtin_views::Builtin::Stage.id());
         self.shell_view = next;
+        self.note_shown_views(cx);
         if revealed {
             self.schedule_visible_refresh(cx);
         }

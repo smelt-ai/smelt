@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 pub use smelt_event_protocol::{
-    CORE_TOPIC_PI_CONFIG_CHANGED, TerminalProgress, TerminalProgressState,
+    CORE_TOPIC_HISTORY_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED, TerminalProgress,
+    TerminalProgressState,
 };
 
 use crate::automation::AutomationFile;

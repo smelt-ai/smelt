@@ -15,6 +15,7 @@ smelt-model = { path = "../smelt-model" }
 smelt-client = { path = "../smelt-client" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-ui = { path = "../smelt-ui" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }

@@ -76,6 +76,11 @@ pub(crate) fn bind_commands(
     overrides: &Overrides,
     os: OperatingSystem,
 ) -> Vec<Bound> {
+    // 要参数的命令只给代码调，没有键可绑，快捷键设置里也不列。
+    let commands: Vec<CommandInfo> = commands
+        .into_iter()
+        .filter(|command| !command.requires_args)
+        .collect();
     let mut used: Vec<Keystroke> = Vec::new();
     let mut take = |id: &str, spec: &str, is_default: bool| -> bool {
         let Ok(stroke) = Keystroke::parse_with_os(spec, os) else {

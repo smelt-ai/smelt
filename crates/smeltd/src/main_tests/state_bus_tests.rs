@@ -295,3 +295,20 @@ fn pi_config_changes_reach_subscribers() {
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
 }
+
+/// 经运行时改了历史存档，订了的都收到；没人订就不发。
+#[test]
+fn history_changes_reach_subscribers() {
+    use smelt_event_protocol::CORE_TOPIC_HISTORY_CHANGED;
+    let event_hub = new_event_hub();
+    event_hub.publish_history_changed().unwrap();
+    let subscription = subscribe(&event_hub, &[CORE_TOPIC_HISTORY_CHANGED]);
+    event_hub.publish_history_changed().unwrap();
+    let event = recv_event(&subscription);
+    assert_eq!(event.envelope.topic.as_str(), CORE_TOPIC_HISTORY_CHANGED);
+    assert_eq!(event.envelope.payload, serde_json::json!({}));
+    assert!(matches!(
+        subscription.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}

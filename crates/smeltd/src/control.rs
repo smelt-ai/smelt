@@ -201,6 +201,12 @@ fn dispatch_control(
                         super::workspace_directory::publish_current(event_hub);
                         super::terminal_names::refresh_all(sessions, event_hub);
                     }
+                    if matches!(
+                        history,
+                        ControlMethod::HistoryDelete | ControlMethod::HistoryRememberAgent
+                    ) {
+                        super::notify_history_changed(event_hub);
+                    }
                     success_value(control_version, &request_id, result)
                 }
                 Err(error) => error_value(control_version, request_id, error),

@@ -43,9 +43,11 @@ pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
 /// 单独订阅收到的：哪台运行时的。
 pub(crate) type RuntimeTopicEvent = (RuntimeKey, TopicMessage);
 
-/// 单独订的话题。
-pub(crate) const SEPARATE_TOPICS: &[&str] =
-    &[smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED];
+/// 单独订的话题，各占一条订阅：后加的话题旧运行时不认，会拒掉整条订阅，不能连累别的。
+pub(crate) const SEPARATE_TOPICS: &[&str] = &[
+    smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
+    smelt_client::daemon_state::CORE_TOPIC_HISTORY_CHANGED,
+];
 
 /// 事件的接收端：核心订阅的，和单独订阅的。
 pub(crate) struct RuntimeEventReceivers {
@@ -538,15 +540,16 @@ pub(crate) fn spawn_subscription(
                         incompatible_attempt = 0;
                         // 非核心话题分别订阅：旧运行时拒绝新话题时，不能连带其他话题或
                         // 会话状态一起断开。外观只由本机桌面处理。
-                        let topic_key = key.clone();
-                        let topic_sender = sender.topics.clone();
-                        let separate = SeparateSubscription::open(
-                            &runtime,
-                            SEPARATE_TOPICS.to_vec(),
-                            move |message| {
-                                topic_sender.try_send((topic_key.clone(), message)).is_ok()
-                            },
-                        );
+                        let separate: Vec<SeparateSubscription> = SEPARATE_TOPICS
+                            .iter()
+                            .filter_map(|topic| {
+                                let topic_key = key.clone();
+                                let topic_sender = sender.topics.clone();
+                                SeparateSubscription::open(&runtime, vec![topic], move |message| {
+                                    topic_sender.try_send((topic_key.clone(), message)).is_ok()
+                                })
+                            })
+                            .collect();
                         let appearance = if runtime.is_local() {
                             let appearance_key = key.clone();
                             let state_sender = sender.states.clone();
@@ -571,7 +574,7 @@ pub(crate) fn spawn_subscription(
                                     && sender.states.try_send((key.clone(), event)).is_ok()
                             },
                         );
-                        if let Some(separate) = separate {
+                        for separate in separate {
                             separate.close();
                         }
                         if let Some(appearance) = appearance {

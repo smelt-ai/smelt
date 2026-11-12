@@ -10923,6 +10923,7 @@ dependencies = [
  "smelt-client-store",
  "smelt-core",
  "smelt-event-protocol",
+ "smelt-history",
  "smelt-iroh",
  "smelt-layouts",
  "smelt-model",
@@ -11113,6 +11114,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-history"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "smelt-plugin-api",
+]
+
+[[package]]
 name = "smelt-iroh"
 version = "0.0.0"
 dependencies = [
@@ -11187,6 +11198,7 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "gpui-shell",
+ "serde",
  "serde_json",
  "smelt-client",
  "smelt-model",

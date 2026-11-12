@@ -8,8 +8,9 @@
 // 展开一层；「导入」展开在列表顶部。问题就标在出问题的那一行上，不另设汇总横幅。表单见 `editors.js`，小部件见
 // `ui.js`。只有删除、清理这类确认用居中的 `AlertDialog`。
 //
-// 当前项目读 `active_project()`。项目变了宿主发 `active_project_changed`，这里 await
-// `next_event()` 等它，变了才重扫，不轮询。
+// 当前项目读 `active_project()`，技能读写的是这台电脑的磁盘，只认本机项目（`machine`
+// 为 null）。项目变了宿主发 `active_project_changed`，这里 await `next_event()` 等它，
+// 变了才重扫，不轮询。
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -91,7 +92,8 @@ export default class Skills extends View {
 
   /// 重扫磁盘。只在 init、事件里调用，不在 render 里。
   async load() {
-    this.projectRoot = active_project();
+    const project = active_project();
+    this.projectRoot = project !== null && project.machine === null ? project.root : null;
     try {
       this.state = await scan(this.home, this.projectRoot);
     } catch (error) {

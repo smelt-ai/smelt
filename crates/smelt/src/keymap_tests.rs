@@ -52,6 +52,7 @@ fn info(id: &str, key: Option<&str>) -> CommandInfo {
         key: key.map(|key| key.to_string().into()),
         context: "Workspace".into(),
         palette: true,
+        requires_args: false,
     }
 }
 
@@ -102,8 +103,9 @@ fn judge(id: &str, spec: &str, overrides: &Overrides) -> Recorded {
 #[test]
 fn every_builtin_default_key_is_bound() {
     let bound = bound(&Overrides::new());
-    assert_eq!(bound.len(), COMMANDS.len());
-    for def in COMMANDS {
+    let keyed: Vec<_> = COMMANDS.iter().filter(|def| !def.requires_args).collect();
+    assert_eq!(bound.len(), keyed.len());
+    for def in keyed {
         let id = format!("{}/{}", def.owner, def.name);
         let command = bound
             .iter()
@@ -174,6 +176,41 @@ fn overrides_win_and_bad_or_clashing_defaults_stay_unbound() {
     let bound = bind_commands(commands, &Overrides::new(), os());
     assert_eq!(bound[0].key.as_deref(), Some("cmd-j"));
     assert_eq!(bound[1].key, None);
+}
+
+/// 要参数的命令只给代码调：就算库里有它的覆盖也不绑，快捷键设置里也不列。
+#[test]
+fn commands_that_require_args_are_never_bound() {
+    let commands = vec![
+        info("a/plain", None),
+        CommandInfo {
+            requires_args: true,
+            palette: false,
+            ..info("a/resume", None)
+        },
+    ];
+    let bound = bind_commands(commands, &overrides(&[("a/resume", Some("cmd-j"))]), os());
+    assert_eq!(keys(&bound), vec![("a/plain".to_string(), None)]);
+}
+
+/// 插件开会话的命令登记成「要参数」：id 和插件接口里的常量对得上，不进面板、不绑键。
+#[test]
+fn session_commands_for_plugins_require_args() {
+    TestAppContext::single().update(|cx| {
+        workspace_commands::register_inert(cx);
+        for id in [
+            api::sessions::RESUME,
+            api::sessions::RESUME_IN_TERMINAL,
+            api::sessions::HANDOFF,
+        ] {
+            let command = api::command(id, cx).unwrap_or_else(|| panic!("{id} 没登记上"));
+            assert!(command.requires_args, "{id} 要参数");
+            assert!(
+                !command.palette && command.key.is_none(),
+                "{id} 不进面板、不绑键"
+            );
+        }
+    });
 }
 
 /// 还没登记的命令（插件没加载）的覆盖留着，解析不了的按键丢掉。
