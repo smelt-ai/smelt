@@ -4,6 +4,8 @@
 //! 把同一套逻辑跑到别的执行世界（远程 / 沙箱）里；便捷包装让本地调用点保持简短。
 
 pub mod discovery;
+pub mod project_repository;
+pub mod worktree;
 
 use smelt_core::fs::FileSystem as _;
 pub use smelt_core::subprocess::{LocalSubprocess, Output, Subprocess};
@@ -921,7 +923,11 @@ husky - pre-commit hook exited with code 127 (error)"
         run_git(&root, &["push", "-q", "-u", "work", "feature"]).unwrap();
         // 让上游远端变得不可达：模拟网络 / 权限一类与「缺上游」无关的失败。
         let gone = tmp.path().join("gone.git");
-        run_git(&root, &["remote", "set-url", "work", gone.to_str().unwrap()]).unwrap();
+        run_git(
+            &root,
+            &["remote", "set-url", "work", gone.to_str().unwrap()],
+        )
+        .unwrap();
         std::fs::write(Path::new(&root).join("a.txt"), "two\n").unwrap();
         run_git(&root, &["commit", "-qam", "next"]).unwrap();
 
