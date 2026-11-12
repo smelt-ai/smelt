@@ -59,12 +59,12 @@ cargo run --bin smelt
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
 - **`crates/smelt-paths`** —— 统一环境路径推导（`~/.smelt`）与单用例测试隔离沙箱。
 - **`crates/smelt-sys`** —— 桌面和运行时共用的底层工具（进程等待、日志、守护映像、主机名）。没有单独的 `smelt-process-wait` crate，等待进程在这里。
-- **`crates/smelt-git`** —— 独立的 Git 领域层（多仓库发现/状态解析/diff/写操作，不含 UI）。smelt 不管 worktree。
+- **`crates/smelt-git`** —— 独立的 Git 领域层（多仓库发现/状态解析/diff/写操作、项目仓库接入与多仓库 worktree 生命周期，不含 UI）。
 - **`crates/smelt-event-bus`** —— 系统内部进程间事件总线（EventHub）。
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
 - **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
-- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 34，按字段建表，没有通用 kv）。工作区目录（项目、对话）只由运行时写：客户端发 `workspace.conversation.*` / `workspace.project.*` 单条命令，经 `workspace.changed` 收整份目录。
+- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 38，按字段建表，没有通用 kv）。工作区目录（项目、项目仓库、工作集、对话）只由运行时写：客户端发 `workspace.conversation.*` / `workspace.project.*` / `workspace.workset.*` 单条命令，经 `workspace.changed` 收整份目录。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
 - **`crates/smelt-mobile`** —— 手机 Rust 内核（身份、连接、目录、对话、终端、离线缓存），经 flutter_rust_bridge 给 Flutter。
@@ -95,6 +95,26 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
   状态由运行时同步，手机列表隐藏归档项并在各项目组内优先展示置顶对话。
   命令是 `workspace.conversation.archive` / `.pin`。
 - **会话列表**：左侧按项目分组，点击切换、`+` 新建、关闭（至少保留一个）
+- **项目仓库与工作树**：项目行已有 `+` 菜单和右键菜单提供「管理项目仓库…」「新建工作树…」。
+  项目根恰好是 Git 仓库时首次自动加入，也会发现 `repos/` 下已有仓库；主动移除后不会反复加回。
+  选择已有仓库使用本机系统文件夹选择器或远程目录浏览；项目内直接绑定，项目外只在 `repos/<名称>` 建软链接。
+  也可填写 Git URL 克隆到 `repos/<名称>`。新建工作树填写单段任务名并勾选仓库，在
+  `worktrees/<任务>/<仓库>` 创建 worktree，统一使用 `feat/<任务>` 分支。
+  会话绑定整个任务工作树，不在原会话内 checkout，也不绑定某个单独仓库。新会话始终从
+  `worktrees/<任务>` 启动，单仓库和多仓库规则相同，不再选择仓库。
+  项目分组模式使用「项目 → 工作树 → 会话」：未绑定的普通会话直接显示在项目下，
+  同一工作树的多个会话集中展示，共享文件和分支，但保持独立的对话历史。
+  工作树行使用折叠箭头和分支图标，会话保留各自的类型图标；不分配身份色。
+  工作树行的 `＋` 只新建该树会话，项目行的 `＋` 仍支持普通会话和独立的新建工作树入口。
+  按状态／时间或不分组时保持平铺，以会话名称右侧的分支图标标签标明工作树。
+  项目行 `工作树·N` 圆角标签可悬浮查看名字、仓库数量和名称概览、绑定分支及 Git 状态；
+  无会话的工作树仍计数，但不铺空分组。点击或键盘可打开总览，悬浮不夺取终端焦点。
+  总览条目「⋯」提供显式新建会话、重命名及收工入口；创建和浏览工作树均不隐式启动终端。
+  文件树与工具面板定位整个任务根，Git 写操作仍按实际仓库独立执行。
+  已有会话保留原进程目录和绑定，不自动迁移或清理；激活绑定会话时工具面板定位任务根。
+  仓库被工作树引用时不能移除；取消关联不删除实际仓库，仅清理 Smelt 自建且未被改指向的软链接。
+  创建失败保留表单和就地错误；收工仍保护脏 worktree、未合并分支及绑定中的会话。
+  设计见[任务工作树与会话分组](superpowers/specs/2026-11-12-task-worktrees-design.md)。
 
 ### 产品级智能体
 
