@@ -1784,6 +1784,18 @@ pub const MIGRATE_V35_TO_V36: &str = "
 ALTER TABLE push_registration ADD COLUMN notify_message INTEGER NOT NULL DEFAULT 1 CHECK (notify_message IN (0, 1));
 ";
 
+/// v37：不改结构，只补数据。以前「存档属于哪个智能体」由桌面端另发一次控制调用记下，发不出去
+/// 就漏；从 v37 起由库在写对话细节时自己记。这里把现有对话上已经有的补进来，以对话上的为准。
+pub const MIGRATE_V36_TO_V37: &str = "
+INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
+SELECT agent, COALESCE(profile_id, ''), TRIM(history_session_id), TRIM(agent_definition_id)
+FROM acp_detail
+WHERE TRIM(COALESCE(history_session_id, '')) != ''
+  AND TRIM(COALESCE(agent_definition_id, '')) != ''
+ON CONFLICT(agent, profile_id, resume_id) DO UPDATE SET
+  agent_definition_id = excluded.agent_definition_id;
+";
+
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。
 pub const MIGRATE_V29_TO_V30: &str = "
 CREATE TABLE push_registration (

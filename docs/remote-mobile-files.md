@@ -107,7 +107,7 @@
 
 ### 2.6.1 历史面板
 
-运行时本来就有 `history.list` / `detail` / `delete` / `remember_agent`（手机端已经按机器在用），
+运行时本来就有 `history.list` / `detail` / `delete`（手机端已经按机器在用），
 桌面历史面板改成发给项目所在的机器：列表缓存 key 带上机器；来源 tab、profile、智能体定义按那台
 机器的设置；智能体 space 用那台机器的 `SMELT_HOME` 认；ACP 继续、CLI/TUI 继续、迁移都开在存档
 所在的机器上。

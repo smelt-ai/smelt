@@ -217,7 +217,13 @@ pub(crate) fn write_v18_state(
         )?;
     }
     for (agent, profile, resume, id) in &state.history_agent_bindings {
-        crate::history::write_history_agent_binding(transaction, agent, profile, resume, id)?;
+        transaction.execute(
+            "INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(agent, profile_id, resume_id) DO UPDATE SET
+               agent_definition_id = excluded.agent_definition_id",
+            [agent, profile, resume, id],
+        )?;
     }
     if let Some(id) = &state.default_conversation_agent {
         crate::config::write_default_conversation_agent(transaction, Some(id))?;

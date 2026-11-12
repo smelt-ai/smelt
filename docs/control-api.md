@@ -147,7 +147,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
 | 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
 | Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`（`pi.plugins.remove`、`pi.mcp.remove` 同时清掉这台机器上各智能体对它的勾选；改了配置的调用成功后运行时推 `pi_config.changed`，这个话题只在单独的一条订阅里，见 `smelt-event-protocol` 模块文档）；`quota.get` / `quota.refresh` / `quota.settings.get` / `quota.set_enabled` |
-| 其它 | `resource.usage`（守护进程和各会话进程树的 CPU、内存）、`agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`history.*`（`history.delete`、`history.remember_agent` 和守护命令 `history_rename` 成功后运行时推 `history.changed`，同 `pi_config.changed` 单独一条订阅；agent 自己写进存档的新会话不推）、`desktop.type_text`、`automation.run_detail` |
+| 其它 | `resource.usage`（守护进程和各会话进程树的 CPU、内存）、`agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`history.*`（`history.delete` 和守护命令 `history_rename` 成功后运行时推 `history.changed`，同 `pi_config.changed` 单独一条订阅；agent 自己写进存档的新会话不推）、`desktop.type_text`、`automation.run_detail` |
 
 ### `agent.memory.*`
 
