@@ -32,7 +32,6 @@ pub(crate) const OWNERS: &[(&str, &str)] = &[
     ("smelt.sessions", "会话"),
     ("smelt.stage", "分屏"),
     ("smelt.files", "文件"),
-    ("smelt.git", "改动"),
 ];
 
 /// 设置窗口里也要能用的键：设置窗口把收到的命令转给主窗口执行。
@@ -422,26 +421,6 @@ pub(crate) const COMMANDS: &[Def] = &[
             Handled::Done
         },
     )),
-    within(
-        "GitChanges",
-        def(
-            "smelt.git",
-            "prev-hunk",
-            "上一个差异",
-            Some("shift-f7"),
-            |this, _, window, cx| jump_hunk(this, false, window, cx),
-        ),
-    ),
-    within(
-        "GitChanges",
-        def(
-            "smelt.git",
-            "next-hunk",
-            "下一个差异",
-            Some("f7"),
-            |this, _, window, cx| jump_hunk(this, true, window, cx),
-        ),
-    ),
 ];
 
 /// 按侧栏视觉顺序（各项目分组依次铺平）跳到第 `N + 1` 个会话。
@@ -454,20 +433,6 @@ fn activate_nth<const N: usize>(
     if let Some(&ix) = this.sidebar_session_order(cx).get(N) {
         this.activate(ix, window, cx);
     }
-    Handled::Done
-}
-
-/// 终端网格会把 F7 / Shift+F7 编码进 PTY，网格聚焦时让出，交给终端自己的 on_key_down。
-fn jump_hunk(
-    this: &mut Workspace,
-    forward: bool,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) -> Handled {
-    if this.terminal_grid_focused(window, cx) {
-        return Handled::Pass;
-    }
-    this.jump_hunk(forward, cx);
     Handled::Done
 }
 

@@ -7,12 +7,14 @@ use std::rc::Rc;
 
 use gpui::*;
 
+mod git_marks;
 mod html_preview;
 #[cfg(test)]
 mod tests;
 mod view;
 mod workspace;
 
+pub(crate) use git_marks::GitMarks;
 pub(crate) use view::FileTreeParams;
 pub use view::{file_content_parts, file_tree, search_results_view};
 

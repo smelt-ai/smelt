@@ -3,7 +3,7 @@
 //! 文件列表、暂存范围、丢弃确认留在面板里。块操作没有 hunk 头槽位，
 //! 挂在该块第一行的注释下面。当前文件名由 Diff 钉在视口顶上。
 //!
-//! 正文是单独的缓存视图。渲染时不能 `update` Workspace，否则这次读取
+//! 正文是单独的缓存视图。渲染时不能 `update` GitPanel，否则这次读取
 //! 会记进缓存视图的依赖，文件列表一滚动就把长 diff 再排一遍。
 //! 工具条和批注用的快照在装补丁、改评论时写进来。
 
@@ -99,15 +99,15 @@ struct DiffChrome {
     comment_input: Option<Entity<gpui_component::input::TextareaState>>,
 }
 
-/// 变更栏 diff 正文。Workspace 持有它，它只弱引用 Workspace，避免互相留住。
+/// 变更栏 diff 正文。GitPanel 持有它，它只弱引用 GitPanel，避免互相留住。
 /// 渲染只读自己的快照和 `DiffState`。
 pub(crate) struct GitDiffBody {
-    host: WeakEntity<Workspace>,
+    host: WeakEntity<GitPanel>,
     chrome: Option<DiffChrome>,
 }
 
 impl GitDiffBody {
-    pub(crate) fn new(host: WeakEntity<Workspace>) -> Self {
+    pub(crate) fn new(host: WeakEntity<GitPanel>) -> Self {
         Self { host, chrome: None }
     }
 
@@ -157,11 +157,11 @@ pub(crate) fn diff_parse_failure(patch: &str, message: &str) -> String {
     }
 }
 
-impl Workspace {
+impl GitPanel {
     /// 变更栏左侧的 diff 正文。加载和报错留在这里；已装上的 Diff 交给缓存视图。
     ///
     /// 这里不能 `read` DiffState。render 期间读到的实体，之后每次 `notify`
-    /// 都会把整个 Workspace 标脏，右侧文件列表就跟着 diff 的高亮和滚动重排。
+    /// 都会把整个 GitPanel 标脏，右侧文件列表就跟着 diff 的高亮和滚动重排。
     pub(crate) fn git_diff_pane(&self, empty_hint: &str, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         let Some(diff) = self.git_diff.as_ref() else {
@@ -481,7 +481,7 @@ fn diff_header_suffix(
     ops: HunkOps,
     stage_path: Option<String>,
     root: &ProjectRef,
-    host: &WeakEntity<Workspace>,
+    host: &WeakEntity<GitPanel>,
 ) -> Div {
     let mut row = div().flex().items_center().gap_2();
     if let Some(path) = stage_path {
@@ -537,7 +537,7 @@ fn open_file(machine: smelt_plugin_api::RuntimeKey, path: String, cx: &mut App) 
         line: None,
     };
     if let Err(error) = smelt_plugin_api::open_file(location, cx) {
-        crate::status_item::notify_error(error);
+        crate::notify_error(&error, cx);
     }
 }
 
@@ -547,7 +547,7 @@ fn render_diff_annotation(
     root: ProjectRef,
     comment_label: Option<String>,
     input: Option<Entity<gpui_component::input::TextareaState>>,
-    host: WeakEntity<Workspace>,
+    host: WeakEntity<GitPanel>,
     cx: &mut App,
 ) -> AnyElement {
     match annotation.id() {
@@ -568,7 +568,7 @@ fn hunk_ops_row(
     idx: usize,
     ops: HunkOps,
     root: ProjectRef,
-    host: WeakEntity<Workspace>,
+    host: WeakEntity<GitPanel>,
     _cx: &App,
 ) -> Div {
     let quiet = |id: &'static str, label: &'static str| {
@@ -593,12 +593,12 @@ fn hunk_ops_row(
                 }),
             )
             .child(
-                danger("hunk-discard", "丢弃块").on_click(move |_ev, _window, cx| {
+                danger("hunk-discard", "丢弃块").on_click(move |_ev, window, cx| {
                     let Some(host) = discard_host.upgrade() else {
                         return;
                     };
                     let root = discard_root.clone();
-                    host.update(cx, |this, cx| this.start_discard_hunk(root, idx, cx));
+                    host.update(cx, |this, cx| this.start_discard_hunk(root, idx, window, cx));
                 }),
             )
         }
@@ -617,7 +617,7 @@ fn hunk_ops_row(
 fn diff_comment_composer(
     range_label: String,
     input: Option<Entity<gpui_component::input::TextareaState>>,
-    host: WeakEntity<Workspace>,
+    host: WeakEntity<GitPanel>,
     cx: &mut App,
 ) -> Div {
     let (muted, border) = {

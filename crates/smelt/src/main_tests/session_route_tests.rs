@@ -1,5 +1,5 @@
 use super::{
-    GitTab, ProjectRef, RuntimeKey, SessionRouteArchive, SessionUiState, WorkspaceRoute,
+    ProjectRef, RuntimeKey, SessionRouteArchive, SessionUiState, WorkspaceRoute,
     agents::agent_engine_kinds, resync_session_with_project_ui, settings::ConversationAgentKind,
     swap_session_ui_state, tool_panel,
 };
@@ -12,9 +12,10 @@ fn local(root: &str) -> ProjectRef {
     }
 }
 
-fn drawer_ui(git_tab: GitTab, expanded: &str) -> SessionUiState {
+/// `tree_open` 当记号：默认是开着的，收起的那份能认出是谁的现场。
+fn drawer_ui(tree_open: bool, expanded: &str) -> SessionUiState {
     SessionUiState {
-        git_tab,
+        file_tree_open: tree_open,
         expanded: HashSet::from([expanded.to_string()]),
         file_tree_selected: Some(format!("{expanded}/main.rs")),
         ..Default::default()
@@ -22,20 +23,20 @@ fn drawer_ui(git_tab: GitTab, expanded: &str) -> SessionUiState {
 }
 
 #[test]
-fn take_project_ui_parks_the_git_tab_and_resets_the_session() {
-    let mut session = drawer_ui(GitTab::Log, "/tmp/project-a/src");
+fn take_project_ui_parks_the_drawer_and_resets_the_session() {
+    let mut session = drawer_ui(false, "/tmp/project-a/src");
 
     let parked = session.take_project_ui();
-    assert!(matches!(parked.git_tab, GitTab::Log));
-    assert!(matches!(session.git_tab, GitTab::Changes));
+    assert!(!parked.file_tree_open);
+    assert!(session.file_tree_open);
 }
 
 #[test]
 fn same_project_session_switch_keeps_live_drawer() {
-    let mut active = drawer_ui(GitTab::Log, "/tmp/project-a/src");
+    let mut active = drawer_ui(false, "/tmp/project-a/src");
 
     let mut old_session = SessionUiState::default();
-    let mut new_session = drawer_ui(GitTab::Changes, "/tmp/project-a/stale");
+    let mut new_session = drawer_ui(true, "/tmp/project-a/stale");
 
     let mut project_ui = HashMap::new();
     let mut active_key = Some(local("/tmp/project-a"));
@@ -48,22 +49,22 @@ fn same_project_session_switch_keeps_live_drawer() {
         Some(local("/tmp/project-a")),
     );
 
-    assert!(matches!(active.git_tab, GitTab::Log));
+    assert!(!active.file_tree_open);
     assert!(active.expanded.contains("/tmp/project-a/src"));
     assert_eq!(
         active.file_tree_selected.as_deref(),
         Some("/tmp/project-a/src/main.rs")
     );
-    assert!(matches!(old_session.git_tab, GitTab::Log));
+    assert!(!old_session.file_tree_open);
     assert_eq!(active_key, Some(local("/tmp/project-a")));
 }
 
 #[test]
 fn different_project_session_switch_restores_each_drawer() {
-    let mut active = drawer_ui(GitTab::Log, "/tmp/project-a/src");
+    let mut active = drawer_ui(false, "/tmp/project-a/src");
 
     let mut session_a = SessionUiState::default();
-    let mut session_b = drawer_ui(GitTab::Changes, "/tmp/project-b/lib");
+    let mut session_b = drawer_ui(true, "/tmp/project-b/lib");
 
     let mut project_ui = HashMap::new();
     let mut active_key = Some(local("/tmp/project-a"));
@@ -77,7 +78,7 @@ fn different_project_session_switch_restores_each_drawer() {
     );
 
     assert!(active.expanded.contains("/tmp/project-b/lib"));
-    assert!(matches!(session_a.git_tab, GitTab::Log));
+    assert!(!session_a.file_tree_open);
 
     let mut session_b_parked = SessionUiState::default();
     resync_session_with_project_ui(
@@ -89,15 +90,15 @@ fn different_project_session_switch_restores_each_drawer() {
         Some(local("/tmp/project-a")),
     );
 
-    assert!(matches!(active.git_tab, GitTab::Log));
+    assert!(!active.file_tree_open);
     assert!(active.expanded.contains("/tmp/project-a/src"));
 }
 
 #[test]
 fn same_path_on_another_machine_parks_its_own_drawer() {
-    let mut active = drawer_ui(GitTab::Log, "/home/u/app/src");
+    let mut active = drawer_ui(false, "/home/u/app/src");
     let mut local_session = SessionUiState::default();
-    let mut remote_session = drawer_ui(GitTab::Changes, "/home/u/app/lib");
+    let mut remote_session = drawer_ui(true, "/home/u/app/lib");
     let remote = ProjectRef {
         runtime: RuntimeKey::Remote("box".into()),
         root: "/home/u/app".into(),
@@ -124,7 +125,7 @@ fn same_path_on_another_machine_parks_its_own_drawer() {
 fn route_swap_keeps_file_tree_width_in_range() {
     let mut active = SessionUiState {
         file_tree_w: 10_000.0,
-        git_tab: GitTab::Log,
+        file_tree_open: false,
         ..Default::default()
     };
     let mut parked = SessionUiState::default();
@@ -133,7 +134,7 @@ fn route_swap_keeps_file_tree_width_in_range() {
 
     assert_eq!(parked.file_tree_w, tool_panel::MAX_FILE_TREE_WIDTH);
     assert_eq!(active.file_tree_w, SessionUiState::default().file_tree_w);
-    assert!(matches!(parked.git_tab, GitTab::Log));
+    assert!(!parked.file_tree_open);
 }
 
 #[test]
@@ -142,7 +143,6 @@ fn route_archive_roundtrips_without_workspace_knowing_its_fields() {
         file_tree_selected: Some("/tmp/project/src/main.rs".into()),
         file_tree_w: 312.0,
         file_tree_open: false,
-        git_tab: GitTab::Log,
         ..Default::default()
     };
 
@@ -156,23 +156,12 @@ fn route_archive_roundtrips_without_workspace_knowing_its_fields() {
         Some("/tmp/project/src/main.rs")
     );
     assert!(!restored.file_tree_open);
-    assert!(matches!(restored.git_tab, GitTab::Log));
-}
-
-#[test]
-fn removed_hotspot_tab_migrates_to_changes() {
-    let archive: SessionRouteArchive = serde_json::from_value(serde_json::json!({
-        "version": 1,
-        "git_tab": "hotspot"
-    }))
-    .unwrap();
-
-    assert!(matches!(archive.git_tab, GitTab::Changes));
 }
 
 #[test]
 fn retired_panel_fields_in_old_archives_are_ignored() {
-    // 侧栏、工具面板、舞台覆盖页都归布局管了，旧存档里的这些字段直接丢弃。
+    // 侧栏、工具面板、舞台覆盖页都归布局管了，变更视图的现场归它的插件，旧存档里的这些
+    // 字段直接丢弃。
     let archive: SessionRouteArchive = serde_json::from_value(serde_json::json!({
         "version": 1,
         "stage_override": "inspector",
@@ -180,12 +169,14 @@ fn retired_panel_fields_in_old_archives_are_ignored() {
         "tool_panel_tab": "git",
         "tool_panel_w": 488.0,
         "bottom_drawer_open": true,
-        "git_tab": "log"
+        "git_tab": "log",
+        "file_tree_open": false
     }))
     .unwrap();
     let restored = SessionUiState::restore(archive);
-    assert!(matches!(restored.git_tab, GitTab::Log));
+    assert!(!restored.file_tree_open);
     let json = serde_json::to_string(&restored.archive()).unwrap();
+    assert!(!json.contains("git_tab"), "{json}");
     assert!(!json.contains("tool_panel"), "{json}");
     assert!(!json.contains("stage_override"), "{json}");
 }

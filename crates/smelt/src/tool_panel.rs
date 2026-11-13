@@ -1,4 +1,4 @@
-//! 文件面板：文件树和打开的文件（内容在左、树在右），以及变更面板标签上的角标。
+//! 文件面板：文件树和打开的文件（内容在左、树在右）。
 //!
 //! 从 main.rs 拆出的 `impl Workspace` 方法，字段仍在 main.rs。摆在哪归布局（见
 //! `builtin_views`）。
@@ -13,24 +13,8 @@ pub(crate) const MIN_FILE_TREE_WIDTH: f32 = 190.0;
 /// 宽度，也能保证编辑器至少保有可读空间。该值只在恢复或拖树自身分隔条时变化。
 pub(crate) const MAX_FILE_TREE_WIDTH: f32 = 320.0;
 
-/// 变更角标：当前项目里**所有**仓库的改动文件总数。
-///
-/// 只数项目根一个仓库会让子仓里的改动在角标上隐形，而角标正是用户判断
-/// “要不要点进去看”的唯一依据。
-pub(crate) fn git_changes_badge(ws: &Workspace, cx: &App) -> usize {
-    // 和 Git 页同一个范围：活动项目里的各个仓库。可见刷新一直备着这些仓库的 status。
-    let Some(project) = ws.active_project_ref(cx) else {
-        return 0;
-    };
-    ws.project_repo_roots(&project)
-        .iter()
-        .filter_map(|root| ws.git_status.get(root))
-        .map(|cached| cached.value.files.len())
-        .sum()
-}
-
 impl Workspace {
-    /// Files 与 Git 右侧树列的固定像素分隔条。面板改宽时，普通 flex 布局
+    /// Files 右侧树列的固定像素分隔条。面板改宽时，普通 flex 布局
     /// 只会让左侧内容区伸缩；树列的 `.w(file_tree_w).flex_none()` 不会被重新分配。
     /// 拖动条本身才修改这个会话保存的宽度。
     pub(crate) fn file_tree_resize_handle(

@@ -42,6 +42,8 @@ export function active_project(): Project | null;
 export function agent_settings(machine: Machine): unknown | null;
 /** 那个视图此刻看得见。变了发 shown_views_changed。 */
 export function view_shown(view: string): boolean;
+/** 主窗口此刻在前台。回到前台发 window_activated，去后台不发：定时做事的醒来时问这里，不在前台就停。 */
+export function window_active(): boolean;
 /** 发送系统通知；显示受系统通知授权和设置影响。 */
 export function notify(subtitle: string, body: string): null;
 /** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
@@ -197,6 +199,9 @@ impl JsPlugin {
             .function("view_shown", |arguments| {
                 let id = arguments.string(0)?;
                 Ok(in_app("view_shown", |cx| crate::host(cx).view_shown(id, cx))?.into())
+            })
+            .function("window_active", |_arguments| {
+                Ok(in_app("window_active", |cx| crate::host(cx).window_active(cx))?.into())
             })
             .function("notify", |arguments| {
                 let subtitle = arguments.string(0)?;

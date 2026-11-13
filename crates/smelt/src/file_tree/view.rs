@@ -13,7 +13,7 @@ use gpui_component::*;
 pub(crate) use smelt_ui::Button;
 use std::rc::Rc;
 
-use crate::git_panel::GitStatusData;
+use smelt_runtime_client::protocol::git::GitStatusData;
 use crate::{Workspace, placeholder_view};
 use smelt_model::runtime_path::PathStyle;
 use smelt_ui::IconAction as _;

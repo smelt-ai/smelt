@@ -65,13 +65,8 @@ fn first_command(spec: &'static str, stack: &[&str]) -> Option<String> {
 
 #[test]
 fn context_string_only_adds_the_panel_that_is_showing() {
-    assert_eq!(workspace_key_context(false, false), "Workspace");
-    assert_eq!(workspace_key_context(true, false), "Workspace Files");
-    assert_eq!(workspace_key_context(false, true), "Workspace GitChanges");
-    assert_eq!(
-        workspace_key_context(true, true),
-        "Workspace Files GitChanges"
-    );
+    assert_eq!(workspace_key_context(false), "Workspace");
+    assert_eq!(workspace_key_context(true), "Workspace Files");
 }
 
 #[test]
@@ -87,18 +82,6 @@ fn workspace_chords_stay_shallower_than_terminal_and_input() {
     assert!(
         matched("cmd-s", &["Workspace", "Terminal"]).is_empty(),
         "文件页没打开时 Cmd+S 不该命中"
-    );
-    assert_eq!(
-        first_command("f7", &["Workspace GitChanges", "Editor"]).as_deref(),
-        Some("smelt.git/next-hunk")
-    );
-    assert_eq!(
-        first_command("shift-f7", &["Workspace Files GitChanges", "Terminal"]).as_deref(),
-        Some("smelt.git/prev-hunk")
-    );
-    assert!(
-        matched("f7", &["Workspace", "Editor"]).is_empty(),
-        "改动页没打开时 F7 不该命中"
     );
     assert!(first_is::<FileTreeMoveUp>(
         "up",
@@ -142,7 +125,7 @@ fn session_and_split_chords_carry_their_commands() {
         Some("smelt.sessions/activate-1")
     );
     assert_eq!(
-        first_command("cmd-9", &["Workspace Files GitChanges"]).as_deref(),
+        first_command("cmd-9", &["Workspace Files"]).as_deref(),
         Some("smelt.sessions/activate-9")
     );
     assert_eq!(
@@ -191,8 +174,6 @@ fn workspace_chords_are_not_bound_at_the_root_context() {
         "cmd-w",
         "cmd-s",
         "cmd-shift-f",
-        "f7",
-        "shift-f7",
         "escape",
         "up",
         "enter",
@@ -200,7 +181,7 @@ fn workspace_chords_are_not_bound_at_the_root_context() {
         let (bindings, _) = keymap().bindings_for_input(&[stroke(spec)], &contexts(&["Terminal"]));
         assert!(
             bindings.is_empty(),
-            "{spec} 不该在没有 Workspace / Files / GitChanges / FileTree 时命中"
+            "{spec} 不该在没有 Workspace / Files / FileTree 时命中"
         );
     }
 }

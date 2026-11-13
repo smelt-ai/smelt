@@ -237,7 +237,6 @@ fn conversation_record(
     key: &ConversationKey,
     saved: &SavedConversationUi,
 ) -> ConversationRouteRecord {
-    use crate::settings::enum_name;
     let route = &saved.route;
     ConversationRouteRecord {
         runtime_id: project_key(&key.0, "").runtime_id,
@@ -251,18 +250,18 @@ fn conversation_record(
         file_tree_open: route.file_tree_open,
         pinned_roots: route.pinned_roots.clone(),
         collapsed_roots: sorted_paths(&route.collapsed_roots),
-        git_tab: enum_name(&route.git_tab),
-        diff_split: route.diff_split,
-        git_tree_collapsed: sorted_paths(&route.git_tree_collapsed),
-        diff_scope: enum_name(&route.diff_scope),
+        // 下面四列是变更视图的现场，视图已经是插件，现场归它自己管。列等存储那一步再删，
+        // 这之前写出厂值、读时不理。
+        git_tab: "changes".into(),
+        diff_split: false,
+        git_tree_collapsed: Vec::new(),
+        diff_scope: "all".into(),
     }
 }
 
-/// 认不出的枚举名（别的版本写的）用出厂值。
 fn conversation_from_record(
     record: ConversationRouteRecord,
 ) -> (ConversationKey, SavedConversationUi) {
-    use crate::settings::enum_from_name;
     let defaults = SessionRouteArchive::default();
     let runtime = record
         .runtime_id
@@ -276,10 +275,6 @@ fn conversation_from_record(
         file_tree_open: record.file_tree_open,
         pinned_roots: record.pinned_roots,
         collapsed_roots: record.collapsed_roots.into_iter().collect(),
-        git_tab: enum_from_name(&record.git_tab).unwrap_or(defaults.git_tab),
-        diff_split: record.diff_split,
-        git_tree_collapsed: record.git_tree_collapsed.into_iter().collect(),
-        diff_scope: enum_from_name(&record.diff_scope).unwrap_or(defaults.diff_scope),
         ..defaults
     };
     (
@@ -1457,13 +1452,9 @@ mod agent_conversation_persist_tests {
             file_tree_selected: Some("/srv/app/main.rs".into()),
             file_tree_open: false,
             pinned_roots: vec!["/srv/app".into(), "/srv/lib".into()],
-            git_tab: crate::GitTab::Log,
-            diff_split: true,
-            diff_scope: crate::git_panel::DiffScope::Staged,
             ..Default::default()
         };
         route.expanded.insert("/srv/app/src".into());
-        route.git_tree_collapsed.insert("src".into());
         let key = (RuntimeKey::Remote("rt-linux".into()), "conv-1".to_string());
         let saved = SavedConversationUi {
             route: route.clone(),

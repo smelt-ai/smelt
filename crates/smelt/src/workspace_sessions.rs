@@ -538,16 +538,6 @@ impl Workspace {
         self.sessions.get(self.active_session)
     }
 
-    /// 当前会话的工作目录，连同它在哪台机器上。git、文件这些查询要发给那台机器：
-    /// 远程会话的路径拿去问本机，要么查不到，要么查到同名的另一个目录。
-    pub(crate) fn current_cwd(&self, cx: &App) -> Option<ProjectRef> {
-        let session = self.cur()?;
-        Some(ProjectRef {
-            runtime: session.runtime(cx).key().clone(),
-            root: session.cwd(cx)?,
-        })
-    }
-
     /// 会话标题，远程会话后面跟上运行时名字。舞台、命令面板、通知这些地方没有侧栏那样
     /// 的运行时分段，本机和远程有同名会话时要分得清。
     pub(crate) fn title_with_runtime(session: &Session, cx: &App) -> String {

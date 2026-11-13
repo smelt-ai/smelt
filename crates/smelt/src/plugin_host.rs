@@ -115,6 +115,11 @@ impl api::Host for SmeltHost {
         crate::agents::product_page_chrome(left_guard)
     }
 
+    fn window_active(&self, cx: &App) -> bool {
+        self.workspace()
+            .is_some_and(|workspace| workspace.read(cx).workspace_window_active)
+    }
+
     fn main_window(&self, _cx: &App) -> Option<AnyWindowHandle> {
         self.current
             .borrow()
@@ -162,6 +167,7 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     })
     .detach();
     smelt_capabilities::register(cx);
+    smelt_git_ui::register(cx);
     smelt_history::register(cx);
     smelt_layouts::register(cx);
 }

@@ -10,8 +10,8 @@
 //!
 //! 提交列表和文件清单由运行时执行 git 后返回（`git.log` 等），这里只做布局和展示。
 
-pub use smelt_runtime_client::protocol::git::{CommitNode, LogScope};
-use smelt_runtime_client::protocol::git::{
+pub use smelt_plugin_api::client::protocol::git::{CommitNode, LogScope};
+use smelt_plugin_api::client::protocol::git::{
     GitCommitFileDiffCall, GitCommitFileParams, GitCommitFilesCall, GitCommitRefParams, GitLogCall,
     GitLogParams,
 };
@@ -177,7 +177,7 @@ pub struct GitLogState {
     /// 日志 diff 正文。和变更栏的 `DiffState` 分开。
     pub detail_view: Option<gpui::Entity<gpui_component::diff::DiffState>>,
     /// 正文的缓存视图。渲染提交列表时不读 `detail_view`。
-    pub detail_body: Option<gpui::Entity<crate::git_log_view::GitLogDiffBody>>,
+    pub detail_body: Option<gpui::Entity<crate::log_view::GitLogDiffBody>>,
     /// 已加载的仓库根，切项目时用来判断要不要重拉。
     pub loaded_root: Option<crate::ProjectRef>,
     /// 提交列表（uniform_list）的滚动句柄。分支图是列表装饰，不再读这个偏移。
@@ -212,12 +212,12 @@ impl Default for GitLogState {
 pub const LOG_LIMIT: usize = 500;
 
 /// 拼 `git log` 的参数。
-// ===================== Workspace 方法 =====================
-use crate::git_panel::git_call;
-use crate::{ProjectRef, Workspace};
+// ===================== GitPanel 方法 =====================
+use crate::panel::git_call;
+use crate::{GitPanel, ProjectRef};
 use gpui::{AppContext, Context};
 
-impl Workspace {
+impl GitPanel {
     /// 进「日志」页时确保数据在（换了仓库也重拉）。可见数据刷新调用，必须便宜：
     /// 已经是这个 root 就直接返回，真正的 git 调用都在后台。
     pub fn ensure_git_log(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
@@ -229,7 +229,7 @@ impl Workspace {
 
     /// 强制重拉提交列表（「刷新」按钮、切分支）。
     pub fn reload_git_log(&mut self, root: ProjectRef, cx: &mut Context<Self>) {
-        let client = crate::runtime_call::target(&root.runtime, cx);
+        let client = crate::rt::target(&root.runtime, cx);
         self.git_log.loading = true;
         self.git_log.loaded_root = Some(root.clone());
         cx.notify();
@@ -276,7 +276,7 @@ impl Workspace {
 
     /// 点某条提交：拉它改了哪些文件。
     pub fn select_commit(&mut self, root: ProjectRef, hash: String, cx: &mut Context<Self>) {
-        let client = crate::runtime_call::target(&root.runtime, cx);
+        let client = crate::rt::target(&root.runtime, cx);
         self.git_log.selected = Some(hash.clone());
         self.git_log.detail_loading = true;
         self.git_log.detail_files.clear();
@@ -312,7 +312,7 @@ impl Workspace {
         let Some(hash) = self.git_log.selected.clone() else {
             return;
         };
-        let client = crate::runtime_call::target(&root.runtime, cx);
+        let client = crate::rt::target(&root.runtime, cx);
         self.git_log.detail_selected_file = Some(path.clone());
         self.git_log.detail_patch = None;
         self.git_log.detail_error = None;
@@ -336,7 +336,7 @@ impl Workspace {
                         .map(|result| result.text)
                         .unwrap_or_else(|err| format!("无法执行 git show：{err}"));
                     let files = gpui_component::diff::DiffFile::parse(&text).map_err(|err| {
-                        crate::git_panel::diff_parse_failure(&text, &err.to_string())
+                        crate::panel::diff_parse_failure(&text, &err.to_string())
                     });
                     (text, files)
                 })
@@ -416,14 +416,14 @@ impl Workspace {
         if view.is_none() {
             return;
         }
-        self.git_log.detail_body = Some(cx.new(|_| crate::git_log_view::GitLogDiffBody::new(view)));
+        self.git_log.detail_body = Some(cx.new(|_| crate::log_view::GitLogDiffBody::new(view)));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{CommitNode, Edge, layout_graph};
-    use smelt_runtime_client::protocol::git::parse_log;
+    use smelt_plugin_api::client::protocol::git::parse_log;
 
     fn c(hash: &str, parents: &[&str]) -> CommitNode {
         CommitNode {
@@ -497,7 +497,7 @@ mod tests {
     /// merge 的仓库，确认解析和布局都不崩、merge 行确实分出两条线。
     #[test]
     fn layouts_a_real_repo_with_a_merge() {
-        use smelt_runtime_client::protocol::git::LOG_FORMAT;
+        use smelt_plugin_api::client::protocol::git::LOG_FORMAT;
         // GUI 不再自己起 git；测试里造仓库直接用命令行。
         let run_git = |dir: &str, args: &[&str]| {
             std::process::Command::new("git")

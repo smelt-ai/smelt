@@ -5,7 +5,7 @@ use super::view::{
     BreadcrumbSeg, FileTreeRow, breadcrumb_segments, collect_file_tree_rows, file_tree_row_id,
 };
 use super::{DirCache, DirListing, SearchHit, build_search_tree};
-use crate::git_panel::GitStatusData;
+use smelt_runtime_client::protocol::git::GitStatusData;
 use smelt_model::runtime_path::PathStyle;
 
 #[test]

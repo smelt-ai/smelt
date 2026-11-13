@@ -20,10 +20,6 @@ pub(crate) enum ModalLayer {
     #[cfg(target_os = "macos")]
     MoveApp,
     CloseConfirm,
-    DiscardHunk,
-    DiscardFile,
-    DiscardAll,
-    DeleteBranch,
     DeleteFile,
     DeleteAgentMemory,
     DeleteAgent,
@@ -44,10 +40,6 @@ impl ModalLayer {
             #[cfg(target_os = "macos")]
             Self::MoveApp => 14,
             Self::CloseConfirm => 3,
-            Self::DiscardHunk => 4,
-            Self::DiscardFile => 5,
-            Self::DiscardAll => 6,
-            Self::DeleteBranch => 7,
             Self::DeleteFile => 8,
             Self::DeleteAgentMemory => 10,
             Self::DeleteAgent => 11,
@@ -104,26 +96,6 @@ impl Workspace {
             &mut rank,
             self.close_confirm.is_some(),
             ModalLayer::CloseConfirm.rank(),
-        );
-        raise(
-            &mut rank,
-            self.discard_hunk_target.is_some(),
-            ModalLayer::DiscardHunk.rank(),
-        );
-        raise(
-            &mut rank,
-            self.discard_file_target.is_some(),
-            ModalLayer::DiscardFile.rank(),
-        );
-        raise(
-            &mut rank,
-            self.discard_all_target.is_some(),
-            ModalLayer::DiscardAll.rank(),
-        );
-        raise(
-            &mut rank,
-            self.delete_branch_target.is_some(),
-            ModalLayer::DeleteBranch.rank(),
         );
         raise(
             &mut rank,
@@ -328,10 +300,6 @@ impl Workspace {
             }
             true
         } else if self.close_confirm.is_some()
-            || self.discard_hunk_target.is_some()
-            || self.discard_file_target.is_some()
-            || self.discard_all_target.is_some()
-            || self.delete_branch_target.is_some()
             || self.delete_file_target.is_some()
             || self.agent_surface.pending_delete.is_some()
             || self.agent_surface.pending_memory_delete.is_some()
@@ -339,10 +307,6 @@ impl Workspace {
             || self.pending_file_switch.is_some()
         {
             self.close_confirm = None;
-            self.discard_hunk_target = None;
-            self.discard_file_target = None;
-            self.discard_all_target = None;
-            self.delete_branch_target = None;
             self.delete_file_target = None;
             self.agent_surface.pending_delete = None;
             self.agent_surface.pending_memory_delete = None;
@@ -536,26 +500,6 @@ impl Workspace {
                 self.close_confirm
                     .is_some()
                     .then(|| self.render_close_confirm(cx)),
-            )
-            .children(
-                self.discard_hunk_target
-                    .is_some()
-                    .then(|| self.render_discard_hunk_confirm(cx)),
-            )
-            .children(
-                self.discard_file_target
-                    .is_some()
-                    .then(|| self.render_discard_file_confirm(cx)),
-            )
-            .children(
-                self.discard_all_target
-                    .is_some()
-                    .then(|| self.render_discard_all_confirm(cx)),
-            )
-            .children(
-                self.delete_branch_target
-                    .is_some()
-                    .then(|| self.render_delete_branch_confirm(cx)),
             )
             .children(
                 self.delete_file_target

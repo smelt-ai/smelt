@@ -159,6 +159,10 @@ pub trait Host: 'static {
     fn page_header(&self, window: &Window, cx: &App) -> Div;
     /// 主窗口（工作台那扇）；还没开或已经关了是 `None`。命令在这里执行（见 [`run`]）。
     fn main_window(&self, cx: &App) -> Option<AnyWindowHandle>;
+    /// 主窗口此刻在前台、人在用。回到前台发 [`HostEvent::WindowActivated`]；去后台不发，
+    /// 定时做事的在醒来时问这里，不在前台就停。窗口自己的激活位在 macOS 全屏切 Space 时
+    /// 不准，插件不要自己问窗口。
+    fn window_active(&self, cx: &App) -> bool;
     /// 打开一个视图：布局里摆了它就让它露出来，没摆就在舞台上开成一页，再把 `args` 交给它
     /// （[`PluginView::open`]）。没登记过这个 id 返回 `false`。`window` 是主窗口。
     fn open_view(

@@ -1147,7 +1147,7 @@ impl Workspace {
     }
 
     /// 文件树右键「发送到会话」：把路径转成相对项目根的 @提及，交给这个项目里正在看的
-    /// 会话（不带回车，同 send_diff_comments 的做法）。
+    /// 会话（不带回车，和变更视图发 diff 评论一样）。
     pub fn send_path_to_session(
         &mut self,
         path: String,
