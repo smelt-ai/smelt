@@ -1125,7 +1125,7 @@ impl Workspace {
                         &self.context_project_ref(active, cx).root,
                     )
             });
-            let empty_group = ixs.is_empty();
+            let empty_group = ixs.is_empty() && !(is_project_group && has_worksets);
             let is_pinned = is_project_group && self.is_project_pinned(&project);
             if is_project_group
                 && !crate::sidebar_order::sidebar_empty_project_visible(
@@ -1323,7 +1323,7 @@ impl Workspace {
                                         .child(format!("{repository_count} 仓库"))
                                 })),
                         )
-                        .children(is_project_group.then(|| {
+                        .children((is_project_group && has_worksets).then(|| {
                             workspaces::workspace_badge(this.clone(), project.clone())
                         }))
                         .child(
@@ -1350,7 +1350,7 @@ impl Workspace {
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
-                                        .when(collapsed && !empty_group, |d| {
+                                        .when(collapsed && !ixs.is_empty(), |d| {
                                             d.child(ixs.len().to_string())
                                         }),
                                 )

@@ -27,6 +27,7 @@ pub(crate) struct RuntimeSpace {
     /// 侧栏里被折叠起来的项目（存 root 路径）。
     pub(crate) collapsed_projects: HashSet<String>,
     pub(crate) collapsed_worksets: HashSet<String>,
+    pub(crate) pinned_worksets: HashSet<String>,
     /// 侧栏被固定的项目根。固定后即使开了「隐藏无会话」也留在列表里。
     pub(crate) pinned_projects: HashSet<String>,
     /// 侧栏里这台机器的分段，用户这次运行里亲手折起（`Some(true)`）或展开过。不落盘：
@@ -50,6 +51,19 @@ pub(crate) struct RuntimeSpace {
 
 impl RuntimeSpace {
     pub(crate) fn new(runtime: Runtime) -> Self {
+        let runtime_id = match runtime.key() {
+            RuntimeKey::Local => None,
+            RuntimeKey::Remote(id) => Some(id.as_str()),
+        };
+        let pinned_worksets = match smelt_client_store::client_store()
+            .and_then(|store| store.pinned_worksets(runtime_id))
+        {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(error) => {
+                eprintln!("[workspace] 读取工作树置顶状态失败：{error}");
+                HashSet::new()
+            }
+        };
         Self {
             runtime,
             projects: Vec::new(),
@@ -57,6 +71,7 @@ impl RuntimeSpace {
             worksets: Vec::new(),
             collapsed_projects: HashSet::new(),
             collapsed_worksets: HashSet::new(),
+            pinned_worksets,
             pinned_projects: HashSet::new(),
             folded: None,
             scroll: ScrollHandle::new(),

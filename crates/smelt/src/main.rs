@@ -1804,6 +1804,11 @@ pub(crate) enum CloseConfirm {
         project: ProjectRef,
         sessions: usize,
     },
+    Workset {
+        project: ProjectRef,
+        id: String,
+        title: String,
+    },
     /// 关一个正在跑的会话。用 ui_id 认会话：弹窗开着时侧栏可能重排，下标会变。
     /// `pane` 有值时只关这一个分屏。
     Session {

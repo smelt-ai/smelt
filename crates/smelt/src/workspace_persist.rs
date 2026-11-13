@@ -1082,6 +1082,8 @@ impl Workspace {
         params: smelt_model::workspace_directory::WorkspaceWorksetFinishParams,
         cx: &mut Context<Self>,
     ) {
+        let runtime_key = runtime.key().clone();
+        let workset_id = params.workset_id.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1098,6 +1100,25 @@ impl Workspace {
                 .await;
             match result {
                 Ok(result) => {
+                    let _ = this.update(cx, |this, cx| {
+                        let runtime_id = match &runtime_key {
+                            RuntimeKey::Local => None,
+                            RuntimeKey::Remote(id) => Some(id.as_str()),
+                        };
+                        match smelt_client_store::client_store().and_then(|store| {
+                            store.set_workset_pinned(runtime_id, &workset_id, false)
+                        }) {
+                            Ok(()) => {
+                                if let Some(space) = this.space_mut(&runtime_key) {
+                                    space.pinned_worksets.remove(&workset_id);
+                                }
+                                cx.notify();
+                            }
+                            Err(error) => this.report_background_error(format!(
+                                "清理工作树置顶状态失败：{error}"
+                            )),
+                        }
+                    });
                     let mut message = "工作树已收工".to_string();
                     if !result.retained_branches.is_empty() {
                         message.push_str(&format!(

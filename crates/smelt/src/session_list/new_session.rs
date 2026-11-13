@@ -9,8 +9,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, App, Context, ElementId, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
+    Anchor, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
@@ -849,7 +849,6 @@ pub(super) struct NewSessionPicker {
     workset_id: Option<String>,
     workset: Option<WorkspaceWorkset>,
     trigger: Button,
-    on_open_change: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
 }
 
 impl NewSessionPicker {
@@ -860,14 +859,6 @@ impl NewSessionPicker {
             .tab_stop(true)
             .icon(IconName::Plus)
             .icon_action("在此工作树新建会话");
-        self
-    }
-
-    pub(super) fn on_open_change(
-        mut self,
-        handler: impl Fn(&bool, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_open_change = Some(Box::new(handler));
         self
     }
 }
@@ -902,7 +893,6 @@ pub(super) fn new_session_picker(
         workset_id,
         workset: None,
         trigger,
-        on_open_change: None,
     }
 }
 
@@ -921,8 +911,51 @@ pub(super) fn workset_session_picker(
             .tab_stop(true)
             .label("新建会话…"),
         workset: Some(workset),
-        on_open_change: None,
     }
+}
+
+pub(super) fn workset_session_submenu(
+    menu: gpui_component::menu::PopupMenu,
+    workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
+    workset: WorkspaceWorkset,
+    window: &mut Window,
+    cx: &mut Context<gpui_component::menu::PopupMenu>,
+) -> gpui_component::menu::PopupMenu {
+    let actions = available_new_session_actions(runtime.key(), cx);
+    refresh_remote_launch_catalog(runtime.clone(), cx);
+    menu.submenu("新建会话", window, cx, move |mut menu, _, _| {
+        for action in &actions {
+            let label = format!("{} · {}", action.label, action.kind.label());
+            let action = action.clone();
+            let workspace = workspace.clone();
+            let runtime = runtime.clone();
+            let workset = workset.clone();
+            menu = menu.item(gpui_component::menu::PopupMenuItem::new(label).on_click(
+                move |_, window, cx| {
+                    let picker = cx.new(|cx| {
+                        let mut picker = NewSessionPickerState::new(
+                            workspace.clone(),
+                            runtime.clone(),
+                            None,
+                            Some(workset.id.clone()),
+                            Some(workset.clone()),
+                            cx,
+                        );
+                        picker.sections[0].push(action.clone());
+                        picker.selected_index = picker.first_index();
+                        picker
+                    });
+                    picker.update(cx, |picker, cx| picker.confirm(window, cx));
+                    if let Some(error) = picker.read(cx).error.clone() {
+                        workspace
+                            .update(cx, |workspace, _| workspace.report_background_error(error));
+                    }
+                },
+            ));
+        }
+        menu
+    })
 }
 
 impl RenderOnce for NewSessionPicker {
@@ -931,7 +964,6 @@ impl RenderOnce for NewSessionPicker {
         let cwd = self.cwd;
         let workset_id = self.workset_id;
         let workset = self.workset;
-        let on_open_change = self.on_open_change;
         let runtime = self.runtime;
         let runtime_key = runtime.key().clone();
         let refresh_runtime = runtime.clone();
@@ -960,13 +992,10 @@ impl RenderOnce for NewSessionPicker {
             .p_0()
             .trigger(self.trigger)
             .track_focus(&focus_handle)
-            .on_open_change(move |open, window, cx| {
+            .on_open_change(move |open, _, cx| {
                 if *open {
                     current_new_session_preferences(cx);
                     refresh_remote_launch_catalog(refresh_runtime.clone(), cx);
-                }
-                if let Some(handler) = &on_open_change {
-                    handler(open, window, cx);
                 }
             })
             .content(move |_, _window, cx| {

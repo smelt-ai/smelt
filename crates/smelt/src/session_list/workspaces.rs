@@ -1,7 +1,7 @@
 use super::*;
 use gpui_base::actions::{Cancel, Confirm};
-use gpui_component::popover::Popover;
 use smelt_model::workspace_directory::WorkspaceWorkset;
+use std::collections::HashSet;
 
 fn project_worksets<'a>(
     worksets: &'a [WorkspaceWorkset],
@@ -29,9 +29,11 @@ fn project_session_rows<'a>(
     worksets: &'a [WorkspaceWorkset],
     project_root: &str,
     members: &[(usize, Option<&str>)],
+    pinned: &HashSet<String>,
 ) -> Vec<ProjectSessionRow<'a>> {
-    let worksets = project_worksets(worksets, project_root);
-    let mut rows = members
+    let mut worksets = project_worksets(worksets, project_root);
+    worksets.sort_by_key(|workset| !pinned.contains(&workset.id));
+    let ordinary = members
         .iter()
         .filter(|(_, id)| {
             !worksets
@@ -43,14 +45,18 @@ fn project_session_rows<'a>(
             workset_id: None,
         })
         .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut ordinary = Some(ordinary);
     for workset in worksets {
+        if !pinned.contains(&workset.id) {
+            if let Some(ordinary) = ordinary.take() {
+                rows.extend(ordinary);
+            }
+        }
         let members = members
             .iter()
             .filter(|(_, id)| *id == Some(workset.id.as_str()))
             .collect::<Vec<_>>();
-        if members.is_empty() {
-            continue;
-        }
         rows.push(ProjectSessionRow::Worktree(workset));
         rows.extend(
             members
@@ -60,6 +66,9 @@ fn project_session_rows<'a>(
                     workset_id: Some(workset.id.as_str()),
                 }),
         );
+    }
+    if let Some(ordinary) = ordinary {
+        rows.extend(ordinary);
     }
     rows
 }
@@ -74,14 +83,16 @@ pub(super) fn rows_for_group<'a>(
         .map(|&index| (index, workspace.sessions[index].workset_id.as_deref()))
         .collect::<Vec<_>>();
     if workspace.sidebar_grouping == SidebarGrouping::Project {
-        project_session_rows(
-            workspace
-                .space(&group.runtime)
-                .map(|space| space.worksets.as_slice())
-                .unwrap_or_default(),
-            &group.root,
-            &members,
-        )
+        if let Some(space) = workspace.space(&group.runtime) {
+            project_session_rows(
+                &space.worksets,
+                &group.root,
+                &members,
+                &space.pinned_worksets,
+            )
+        } else {
+            project_session_rows(&[], &group.root, &members, &HashSet::new())
+        }
     } else {
         members
             .into_iter()
@@ -94,6 +105,39 @@ pub(super) fn rows_for_group<'a>(
 }
 
 impl Workspace {
+    fn toggle_workset_pinned(&mut self, project: &ProjectRef, id: &str, cx: &mut Context<Self>) {
+        let Some(space) = self.space(&project.runtime) else {
+            self.report_background_error("运行时已断开，无法修改工作树置顶状态");
+            return;
+        };
+        if !space.worksets.iter().any(|workset| {
+            workset.id == id
+                && crate::sidebar_order::same_project_root(&workset.project_root, &project.root)
+        }) {
+            self.report_background_error("工作树已不存在，请刷新后重试");
+            return;
+        }
+        let pinned = !space.pinned_worksets.contains(id);
+        let runtime_id = match &project.runtime {
+            RuntimeKey::Local => None,
+            RuntimeKey::Remote(id) => Some(id.as_str()),
+        };
+        if let Err(error) = smelt_client_store::client_store()
+            .and_then(|store| store.set_workset_pinned(runtime_id, id, pinned))
+        {
+            self.report_background_error(format!("保存工作树置顶状态失败：{error}"));
+            return;
+        }
+        if let Some(space) = self.space_mut(&project.runtime) {
+            if pinned {
+                space.pinned_worksets.insert(id.to_string());
+            } else {
+                space.pinned_worksets.remove(id);
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn project_session_order(&self, group: &crate::ProjectGroup) -> Vec<usize> {
         rows_for_group(self, group)
             .into_iter()
@@ -155,6 +199,9 @@ pub(super) fn worktree_row(
     let collapsed = workspace
         .space(&project.runtime)
         .is_some_and(|space| space.collapsed_worksets.contains(&workset.id));
+    let pinned = workspace
+        .space(&project.runtime)
+        .is_some_and(|space| space.pinned_worksets.contains(&workset.id));
     let key = keyboard::SidebarItem::Worktree(project.clone(), workset.id.clone()).key();
     let click_entity = entity.clone();
     let click_project = project.clone();
@@ -170,6 +217,10 @@ pub(super) fn worktree_row(
     let runtime = workspace
         .space(&project.runtime)
         .map(|space| space.runtime.clone());
+    let menu_entity = entity.clone();
+    let menu_project = project.clone();
+    let menu_workset = workset.clone();
+    let menu_runtime = runtime.clone();
     let tooltip = format!(
         "工作树：{}\n分支：{}\n{}",
         workset.task,
@@ -181,6 +232,7 @@ pub(super) fn worktree_row(
         project,
         &workset.id,
     ))
+    .group("task-worktree-row")
     .relative()
     .flex()
     .items_center()
@@ -195,17 +247,17 @@ pub(super) fn worktree_row(
         scroll,
         entity.clone(),
     ))
-    .child(
-        Icon::new(project_disclosure_icon(collapsed))
-            .size(px(12.))
-            .flex_shrink_0(),
-    )
-    .child(
+    .child(row::group_disclosure(
+        workset_element_id("task-worktree-disclosure", project, &workset.id),
+        "task-worktree-row",
         Icon::empty()
             .path("smelt-icons/git-branch.svg")
             .size(px(16.))
             .flex_shrink_0(),
-    )
+        collapsed,
+        count > 0,
+        None,
+    ))
     .child(
         div()
             .flex_1()
@@ -214,6 +266,11 @@ pub(super) fn worktree_row(
             .text_color(rgb(ui_theme::text_muted()))
             .child(truncated_line(workset.task.clone())),
     )
+    .children(pinned.then(|| {
+        Icon::new(gpui_kit_assets::IconName::Pin)
+            .size(px(12.))
+            .text_color(rgb(ui_theme::text_faint()))
+    }))
     .child(
         div()
             .text_xs()
@@ -232,8 +289,57 @@ pub(super) fn worktree_row(
         cx.stop_propagation();
         click_entity.update(cx, |workspace, cx| {
             workspace.select_worktree(&click_project, &click_id, window, cx);
-            workspace.toggle_worktree_collapsed(&click_project, &click_id, cx);
+            if count > 0 {
+                workspace.toggle_worktree_collapsed(&click_project, &click_id, cx);
+            }
         });
+    })
+    .context_menu(move |menu, window, cx| {
+        let pin_entity = menu_entity.clone();
+        let pin_project = menu_project.clone();
+        let pin_id = menu_workset.id.clone();
+        let rename_entity = menu_entity.clone();
+        let rename_id = menu_workset.id.clone();
+        let close_entity = menu_entity.clone();
+        let close_project = menu_project.clone();
+        let close_id = menu_workset.id.clone();
+        let mut menu = menu;
+        if let Some(runtime) = menu_runtime.clone() {
+            menu = new_session::workset_session_submenu(
+                menu,
+                menu_entity.clone(),
+                runtime,
+                menu_workset.clone(),
+                window,
+                cx,
+            );
+        }
+        menu.item(
+            PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
+                .icon(Icon::new(gpui_kit_assets::IconName::Pin))
+                .on_click(move |_, _, cx| {
+                    pin_entity.update(cx, |ws, cx| {
+                        ws.toggle_workset_pinned(&pin_project, &pin_id, cx)
+                    });
+                }),
+        )
+        .item(
+            PopupMenuItem::new("重命名工作树…").on_click(move |_, window, cx| {
+                rename_entity.update(cx, |ws, cx| {
+                    ws.start_rename(RenameTarget::Workset(rename_id.clone()), window, cx)
+                });
+            }),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new("关闭工作树…")
+                .icon(Icon::empty().path("smelt-icons/trash.svg"))
+                .on_click(move |_, _, cx| {
+                    close_entity.update(cx, |ws, cx| {
+                        ws.start_close_workset(close_project.clone(), close_id.clone(), cx)
+                    });
+                }),
+        )
     })
     .into_any_element()
 }
@@ -376,8 +482,6 @@ struct WorkspaceOverview {
     content_focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
     close_task: Option<Task<()>>,
-    open_menu: Option<String>,
-    nested_picker: Option<String>,
     _workspace_refresh: Subscription,
 }
 
@@ -391,20 +495,7 @@ impl WorkspaceOverview {
             content_focus: cx.focus_handle(),
             previous_focus: None,
             close_task: None,
-            open_menu: None,
-            nested_picker: None,
-            _workspace_refresh: cx.observe(&workspace, |this, workspace, cx| {
-                if this.open_menu.as_ref().is_some_and(|id| {
-                    !workspace
-                        .read(cx)
-                        .space(&this.project.runtime)
-                        .is_some_and(|space| space.worksets.iter().any(|workset| workset.id == *id))
-                }) {
-                    this.open_menu = None;
-                    this.nested_picker = None;
-                    this.visibility.dismiss();
-                    this.close_task = None;
-                }
+            _workspace_refresh: cx.observe(&workspace, |_this, _workspace, cx| {
                 cx.notify();
             }),
         }
@@ -445,8 +536,6 @@ impl WorkspaceOverview {
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_task = None;
         self.visibility.dismiss();
-        self.open_menu = None;
-        self.nested_picker = None;
         if self.content_focus.contains_focused(window, cx) {
             if let Some(previous) = self.previous_focus.take() {
                 previous.focus(window, cx);
@@ -459,13 +548,7 @@ impl WorkspaceOverview {
         cx.notify();
     }
 
-    fn manage(
-        &mut self,
-        workset_id: String,
-        finish: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn manage(&mut self, workset_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -476,31 +559,7 @@ impl WorkspaceOverview {
                 crate::status_item::notify_error(format!("工作树操作不可用：{label}"));
                 return;
             }
-            let Some(runtime) = workspace.space(&project.runtime).and_then(|space| {
-                space
-                    .worksets
-                    .iter()
-                    .any(|workset| {
-                        workset.id == workset_id
-                            && crate::sidebar_order::same_project_root(
-                                &workset.project_root,
-                                &project.root,
-                            )
-                    })
-                    .then(|| space.runtime.clone())
-            }) else {
-                crate::status_item::notify_error("工作树已不存在，请刷新后重试");
-                return;
-            };
-            if finish {
-                workspace.request_workset_finish(
-                    runtime,
-                    smelt_model::workspace_directory::WorkspaceWorksetFinishParams { workset_id },
-                    cx,
-                );
-            } else {
-                workspace.start_rename(RenameTarget::Workset(workset_id), window, cx);
-            }
+            workspace.start_close_workset(project, workset_id, cx);
         });
     }
 }
@@ -510,7 +569,7 @@ impl Render for WorkspaceOverview {
         let Some(workspace) = self.workspace.upgrade() else {
             return div().into_any_element();
         };
-        let (rows, count, runtime, loaded) = {
+        let (rows, count, loaded) = {
             let ws = workspace.read(cx);
             let Some(space) = ws.space(&self.project.runtime) else {
                 return div().into_any_element();
@@ -536,7 +595,7 @@ impl Render for WorkspaceOverview {
             } else {
                 Vec::new()
             };
-            (rows, count, space.runtime.clone(), space.directory.loaded())
+            (rows, count, space.directory.loaded())
         };
         let unavailable = crate::runtimes::runtime_unavailable_label(&self.project.runtime, cx);
         let label = if loaded {
@@ -582,7 +641,7 @@ impl Render for WorkspaceOverview {
             );
         let mut popup = gpui_base::Popup::new("workspace-overview-popup", trigger)
             .flex_shrink_0()
-            .anchor(Anchor::TopRight)
+            .anchor(Anchor::TopLeft)
             .offset(px(4.));
         if self.visibility.open {
             let view = cx.entity();
@@ -618,15 +677,13 @@ impl Render for WorkspaceOverview {
                         }),
                     )
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                        if this.open_menu.is_none() && !this.visibility.trigger_hovered {
+                        if !this.visibility.trigger_hovered {
                             this.dismiss(window, cx);
                         }
                     }))
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .on_action(cx.listener(|this, _: &Cancel, window, cx| {
-                        if this.open_menu.is_none() {
-                            this.dismiss(window, cx);
-                        }
+                        this.dismiss(window, cx);
                     }))
                     .child(
                         div()
@@ -667,111 +724,24 @@ impl Render for WorkspaceOverview {
                 }));
             }
             for (workset, status, active) in rows {
-                let menu_view = view.clone();
-                let menu_workspace = workspace.clone();
-                let menu_runtime = runtime.clone();
-                let menu_workset = workset.clone();
-                let open_menu_id = workset.id.clone();
-                let menu_id = workset_element_id("workspace-actions", &self.project, &workset.id);
+                let finish_view = view.clone();
+                let finish_id = workset.id.clone();
                 let online = unavailable.is_none() && loaded;
-                let menu = Popover::new(menu_id)
-                    .anchor(Anchor::TopRight)
-                    .overlay_closable(self.nested_picker.as_deref() != Some(workset.id.as_str()))
-                    .trigger(
-                        Button::new("workspace-more")
-                            .quiet()
-                            .icon_size()
-                            .tab_stop(true)
-                            .icon(IconName::Ellipsis)
-                            .icon_action("工作树操作")
-                            .disabled(!online),
-                    )
-                    .on_open_change(move |open, window, cx| {
-                        menu_view.update(cx, |view, cx| {
-                            if *open {
-                                view.open_menu = Some(open_menu_id.clone());
-                                view.close_task = None;
-                                view.visibility.pin();
-                                cx.notify();
-                            } else if view.open_menu.as_deref() == Some(open_menu_id.as_str()) {
-                                view.open_menu = None;
-                                view.nested_picker = None;
-                                if !view.visibility.trigger_hovered
-                                    && !view.visibility.content_hovered
-                                {
-                                    view.dismiss(window, cx);
-                                } else {
-                                    cx.notify();
-                                }
-                            }
-                        });
-                    })
-                    .content({
-                        let view = view.clone();
-                        move |_, _, cx| {
-                            let rename_view = view.clone();
-                            let finish_view = view.clone();
-                            let rename_id = menu_workset.id.clone();
-                            let finish_id = menu_workset.id.clone();
-                            let menu = cx.entity();
-                            let rename_menu = menu.clone();
-                            let finish_menu = menu;
-                            let picker_view = view.clone();
-                            let picker_id = menu_workset.id.clone();
-                            div()
-                                .p_1()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    new_session::workset_session_picker(
-                                        menu_workspace.clone(),
-                                        menu_runtime.clone(),
-                                        menu_workset.clone(),
-                                    )
-                                    .on_open_change(
-                                        move |open, _, cx| {
-                                            picker_view.update(cx, |view, cx| {
-                                                if *open {
-                                                    view.nested_picker = Some(picker_id.clone());
-                                                } else if view.nested_picker.as_deref()
-                                                    == Some(picker_id.as_str())
-                                                {
-                                                    view.nested_picker = None;
-                                                }
-                                                cx.notify();
-                                            });
-                                        },
-                                    ),
-                                )
-                                .child(
-                                    Button::new("rename-workspace")
-                                        .quiet()
-                                        .tab_stop(true)
-                                        .label("重命名工作树…")
-                                        .on_click(move |_, window, cx| {
-                                            rename_menu
-                                                .update(cx, |menu, cx| menu.dismiss(window, cx));
-                                            rename_view.update(cx, |view, cx| {
-                                                view.manage(rename_id.clone(), false, window, cx)
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    Button::new("finish-workspace")
-                                        .quiet()
-                                        .tab_stop(true)
-                                        .label("收工并删除工作树…")
-                                        .on_click(move |_, window, cx| {
-                                            finish_menu
-                                                .update(cx, |menu, cx| menu.dismiss(window, cx));
-                                            finish_view.update(cx, |view, cx| {
-                                                view.manage(finish_id.clone(), true, window, cx)
-                                            });
-                                        }),
-                                )
-                        }
-                    });
+                let finish = Button::new(workset_element_id(
+                    "finish-workspace",
+                    &self.project,
+                    &workset.id,
+                ))
+                .quiet()
+                .icon_size()
+                .tab_stop(true)
+                .icon(Icon::empty().path("smelt-icons/trash.svg"))
+                .icon_action("关闭工作树")
+                .disabled(!online)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    finish_view.update(cx, |view, cx| view.manage(finish_id.clone(), window, cx));
+                });
                 let summary = repository_summary(&workset);
                 let full_summary = summary.clone();
                 let branch = workset.branch.clone();
@@ -796,7 +766,7 @@ impl Render for WorkspaceOverview {
                                 .gap_1()
                                 .child(div().flex_1().min_w_0().child(truncated_line(workset.task)))
                                 .children(active.then(|| div().text_xs().child("当前会话")))
-                                .child(menu),
+                                .child(finish),
                         )
                         .child(
                             div()
@@ -851,6 +821,7 @@ mod tests {
     };
     use gpui::{App, Context, Entity, IntoElement, Render, RenderOnce, Subscription, Window, div};
     use smelt_model::workspace_directory::{WorkspaceWorkset, WorkspaceWorksetRepository};
+    use std::collections::HashSet;
 
     struct RefreshHost {
         refreshes: std::rc::Rc<std::cell::Cell<usize>>,
@@ -960,7 +931,7 @@ mod tests {
             (4, Some("missing")),
             (5, Some("foreign")),
         ];
-        let rows = project_session_rows(&worksets, "/project", &members);
+        let rows = project_session_rows(&worksets, "/project", &members, &HashSet::new());
         let labels = rows
             .iter()
             .map(|row| match row {
@@ -978,9 +949,50 @@ mod tests {
                 "session-2",
                 "later",
                 "session-0",
-                "session-3"
+                "session-3",
+                "empty"
             ]
         );
+    }
+
+    #[test]
+    fn worktree_row_survives_removal_of_its_last_session() {
+        let worksets = vec![workset("task", "/project", 0)];
+        let before =
+            project_session_rows(&worksets, "/project", &[(0, Some("task"))], &HashSet::new());
+        assert_eq!(before.len(), 2);
+        assert!(matches!(before[0], ProjectSessionRow::Worktree(_)));
+        assert!(matches!(before[1], ProjectSessionRow::Session { .. }));
+
+        let after = project_session_rows(&worksets, "/project", &[], &HashSet::new());
+        assert_eq!(after.len(), 1);
+        assert!(matches!(&after[0], ProjectSessionRow::Worktree(workset) if workset.id == "task"));
+        assert!(project_session_rows(&[], "/project", &[], &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn pinned_worktrees_precede_other_worktrees_and_keep_their_sessions() {
+        let worksets = vec![
+            workset("first", "/project", 0),
+            workset("pinned", "/project", 1),
+        ];
+        let pinned = HashSet::from(["pinned".to_string()]);
+        let rows = project_session_rows(
+            &worksets,
+            "/project",
+            &[(0, Some("first")), (1, Some("pinned")), (2, None)],
+            &pinned,
+        );
+        assert!(matches!(&rows[0], ProjectSessionRow::Worktree(workset) if workset.id == "pinned"));
+        assert!(matches!(
+            &rows[1],
+            ProjectSessionRow::Session { index: 1, .. }
+        ));
+        assert!(matches!(
+            &rows[2],
+            ProjectSessionRow::Session { index: 2, .. }
+        ));
+        assert!(matches!(&rows[3], ProjectSessionRow::Worktree(workset) if workset.id == "first"));
     }
 
     #[test]

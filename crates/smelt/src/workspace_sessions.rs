@@ -1887,6 +1887,36 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn start_close_workset(
+        &mut self,
+        project: ProjectRef,
+        id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(label) = crate::runtimes::runtime_unavailable_label(&project.runtime, cx) {
+            self.report_background_error(format!("工作树操作不可用：{label}"));
+            return;
+        }
+        let Some(title) = self.space(&project.runtime).and_then(|space| {
+            space
+                .worksets
+                .iter()
+                .find(|workset| {
+                    workset.id == id
+                        && crate::sidebar_order::same_project_root(
+                            &workset.project_root,
+                            &project.root,
+                        )
+                })
+                .map(|workset| workset.task.clone())
+        }) else {
+            self.report_background_error("工作树已不存在，请刷新后重试");
+            return;
+        };
+        self.close_confirm = Some(CloseConfirm::Workset { project, id, title });
+        cx.notify();
+    }
+
     pub(crate) fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.close_confirm.take() {
             Some(CloseConfirm::Archive { ui_id, .. }) => {
@@ -1900,6 +1930,22 @@ impl Workspace {
                 );
             }
             Some(CloseConfirm::Project { project, .. }) => self.close_project(&project, cx),
+            Some(CloseConfirm::Workset { project, id, .. }) => {
+                if let Some(runtime) = self
+                    .space(&project.runtime)
+                    .map(|space| space.runtime.clone())
+                {
+                    self.request_workset_finish(
+                        runtime,
+                        smelt_model::workspace_directory::WorkspaceWorksetFinishParams {
+                            workset_id: id,
+                        },
+                        cx,
+                    );
+                } else {
+                    self.report_background_error("运行时已断开，无法关闭工作树");
+                }
+            }
             Some(CloseConfirm::Runtime { runtime_id, .. }) => {
                 // 能力库正配着这台机器的话，退回本机。
                 if *self.pi_library_runtime() == crate::RuntimeKey::Remote(runtime_id.clone()) {
