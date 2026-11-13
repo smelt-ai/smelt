@@ -19,6 +19,8 @@ pub use serde_json;
 pub use smelt_client::runtime::RuntimeKey;
 // 发给运行时的短请求（守护协议），如改历史会话的名字。
 pub use smelt_client::session_ops;
+// 插件自己的库：每个来源一个 SQLite 文件，表由插件自己建、自己迁移。
+pub use smelt_client_store::{PluginStore, plugin_store, rusqlite};
 pub use smelt_model as model;
 pub use smelt_runtime_client as client;
 pub use smelt_ui as ui;

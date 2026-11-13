@@ -20,10 +20,12 @@ use std::rc::Rc;
 
 use futures_channel::oneshot;
 use gpui::{App, Entity, Subscription};
-use gpui_shell::{HostArguments, HostError, HostModule, HostObject, HostValue, ScriptView};
+use gpui_shell::{
+    HostArguments, HostError, HostModule, HostObject, HostResult, HostValue, ScriptView,
+};
 use serde_json::Value;
 
-use crate::{CommandSpec, Handled, HostEvent, PathRequest, RuntimeKey};
+use crate::{CommandSpec, Handled, HostEvent, PathRequest, RuntimeKey, rusqlite};
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
@@ -105,6 +107,12 @@ export function path_style(machine: Machine): "posix" | "windows";
 export function open_file(machine: Machine, path: string, line?: number): null;
 /** 让本插件的命令 name 当文件打开者（它要另外登记，requires_args）；执行时参数是 { machine, path, line }。只认最后登记的打开者。 */
 export function register_file_opener(name: string): null;
+/** SQL 参数。true / false 存成 1 / 0。 */
+export type SqlValue = string | number | boolean | null;
+/** 在本插件自己的 SQLite 库（~/.smelt/plugin-data/<插件 id>.sqlite3）里查询，每行是列名到值的对象。表由插件自己建；表结构的版本可以记在 PRAGMA user_version。BLOB 列取不出来。 */
+export function store_query(sql: string, params?: SqlValue[]): Promise<Record<string, string | number | null>[]>;
+/** 在本插件自己的库里执行一条语句，返回改动的行数。 */
+export function store_execute(sql: string, params?: SqlValue[]): Promise<number>;
 export type HostEvent =
   | { type: "runtime_topic"; machine: Machine; topic: string }
   | { type: "reconnected"; machine: Machine }
@@ -170,6 +178,8 @@ impl JsPlugin {
         let commands = self.clone();
         let calls = self.clone();
         let opener_owner = self.0.borrow().id.clone();
+        let query_owner = self.0.borrow().id.clone();
+        let execute_owner = query_owner.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_project", |_| {
@@ -309,6 +319,16 @@ impl JsPlugin {
                     crate::register_file_opener(&opener_owner, name, cx)
                 })?;
                 Ok(HostValue::Null)
+            })
+            .async_function("store_query", move |arguments| {
+                let (sql, params) = sql_arguments("store_query", arguments)?;
+                let owner = query_owner.clone();
+                Ok(async move { store_query(&owner, &sql, params) })
+            })
+            .async_function("store_execute", move |arguments| {
+                let (sql, params) = sql_arguments("store_execute", arguments)?;
+                let owner = execute_owner.clone();
+                Ok(async move { store_execute(&owner, &sql, params) })
             })
             .async_function("open_view", |arguments| {
                 let id = arguments.string(0)?.to_string();
@@ -470,6 +490,102 @@ where
             .await
             .unwrap_or_else(|_| Err(HostError::new(format!("{name}：没有执行"))))
     })
+}
+
+/// `store_query` / `store_execute` 的参数：SQL 和可选的参数数组。
+fn sql_arguments(
+    name: &str,
+    arguments: &HostArguments,
+) -> Result<(String, Vec<rusqlite::types::Value>), HostError> {
+    use rusqlite::types::Value as Sql;
+    let sql = arguments.string(0)?.to_string();
+    let params = match arguments.get(1) {
+        None | Some(HostValue::Null) => Vec::new(),
+        Some(HostValue::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                HostValue::Null => Ok(Sql::Null),
+                HostValue::Bool(value) => Ok(Sql::Integer(i64::from(*value))),
+                HostValue::Number(number)
+                    if number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER =>
+                {
+                    Ok(Sql::Integer(*number as i64))
+                }
+                HostValue::Number(number) => Ok(Sql::Real(*number)),
+                HostValue::Str(text) => Ok(Sql::Text(text.clone())),
+                other => Err(HostError::new(format!(
+                    "{name}：参数只能是字符串、数字、布尔或 null，收到 {}",
+                    other.describe()
+                ))),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(other) => {
+            return Err(HostError::new(format!(
+                "{name}：params 要是数组，收到 {}",
+                other.describe()
+            )));
+        }
+    };
+    Ok((sql, params))
+}
+
+/// JS 数字能精确表示的最大整数，`Number.MAX_SAFE_INTEGER`。
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+fn plugin_store(owner: &str) -> Result<std::sync::Arc<crate::PluginStore>, HostError> {
+    if owner.is_empty() {
+        return Err(HostError::new("插件没有来源身份，不能用库"));
+    }
+    crate::plugin_store(owner).map_err(|error| HostError::new(error.to_string()))
+}
+
+fn store_query(owner: &str, sql: &str, params: Vec<rusqlite::types::Value>) -> HostResult {
+    use rusqlite::types::ValueRef;
+    let store = plugin_store(owner)?;
+    let rows = store
+        .read(|db| {
+            let mut statement = db.prepare(sql)?;
+            let columns: Vec<String> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let mut rows = statement.query(rusqlite::params_from_iter(params))?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let mut object = HostObject::new();
+                for (index, column) in columns.iter().enumerate() {
+                    let value = match row.get_ref(index)? {
+                        ValueRef::Null => HostValue::Null,
+                        ValueRef::Integer(value) => HostValue::from(value),
+                        ValueRef::Real(value) => HostValue::from(value),
+                        ValueRef::Text(text) => {
+                            HostValue::from(String::from_utf8_lossy(text).into_owned())
+                        }
+                        ValueRef::Blob(_) => {
+                            return Err(rusqlite::Error::InvalidColumnType(
+                                index,
+                                column.clone(),
+                                rusqlite::types::Type::Blob,
+                            ));
+                        }
+                    };
+                    object = object.field(column.as_str(), value);
+                }
+                out.push(HostValue::from(object));
+            }
+            Ok(out)
+        })
+        .map_err(|error| HostError::new(format!("store_query：{error}")))?;
+    Ok(HostValue::Array(rows))
+}
+
+fn store_execute(owner: &str, sql: &str, params: Vec<rusqlite::types::Value>) -> HostResult {
+    let store = plugin_store(owner)?;
+    let changed = store
+        .read(|db| db.execute(sql, rusqlite::params_from_iter(params)))
+        .map_err(|error| HostError::new(format!("store_execute：{error}")))?;
+    Ok(HostValue::from(changed))
 }
 
 /// `register_layouts` 的参数：每项的名字、标题、布局原文。
@@ -919,5 +1035,56 @@ mod tests {
             Some("machines_changed")
         );
         assert!(plugin.0.borrow().queue.is_empty());
+    }
+
+    #[test]
+    fn store_functions_round_trip_in_the_plugins_own_database() {
+        let owner = format!("js-store-test-{}", std::process::id());
+        let module = JsPlugin::for_plugin(&owner, "库").module();
+        let run = |name: &str, values: Vec<HostValue>| {
+            smol::block_on(module.begin(name, &HostArguments::new(values)).unwrap())
+        };
+        run(
+            "store_execute",
+            vec!["CREATE TABLE IF NOT EXISTS note (id INTEGER, body TEXT, score REAL, done INTEGER)".into()],
+        )
+        .unwrap();
+        let inserted = run(
+            "store_execute",
+            vec![
+                "INSERT INTO note VALUES (?1, ?2, ?3, ?4)".into(),
+                HostValue::Array(vec![
+                    HostValue::from(7),
+                    HostValue::from("你好"),
+                    HostValue::from(1.5),
+                    HostValue::Bool(true),
+                ]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(inserted, HostValue::from(1));
+        let rows = run("store_query", vec!["SELECT * FROM note".into()]).unwrap();
+        let expected: HostValue = HostObject::new()
+            .field("id", 7)
+            .field("body", "你好")
+            .field("score", 1.5)
+            .field("done", 1)
+            .into();
+        assert_eq!(rows, HostValue::Array(vec![expected]));
+
+        // 参数形状不对在主线程上就报，不进库。
+        let nested = HostArguments::new([
+            "SELECT ?1".into(),
+            HostValue::Array(vec![HostValue::Array(Vec::new())]),
+        ]);
+        assert!(module.begin("store_query", &nested).is_err());
+        let blob = run("store_query", vec!["SELECT x'00' AS b".into()]);
+        assert!(blob.is_err(), "BLOB 列取不出来");
+        // 没有来源身份的不给库。
+        let anonymous = JsPlugin::new().module();
+        let begun = anonymous
+            .begin("store_query", &HostArguments::new(["SELECT 1".into()]))
+            .unwrap();
+        assert!(smol::block_on(begun).is_err());
     }
 }
