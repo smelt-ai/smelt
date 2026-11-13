@@ -156,6 +156,7 @@ fn change(verb: &str, id: &str) -> Result<serde_json::Value, String> {
             control::<WorkspaceConversationArchive>(WorkspaceConversationArchiveParams {
                 conversation_id: conversation_id.clone(),
                 archived: verb == "archive",
+                target_workset_id: None,
             })
         }
         "pin" | "unpin" => control::<WorkspaceConversationPin>(WorkspaceConversationPinParams {

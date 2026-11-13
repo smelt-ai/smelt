@@ -94,6 +94,7 @@ pub struct WorkspaceSessionRecord {
     pub archived_at: Option<i64>,
     pub pinned_at: Option<i64>,
     pub workset_id: Option<String>,
+    pub closed_workset_root: Option<String>,
     /// 这段对话里的终端，按客户端给的顺序。
     pub terminals: Vec<WorkspaceTerminalRecord>,
     pub acp: Option<WorkspaceAcpRecord>,

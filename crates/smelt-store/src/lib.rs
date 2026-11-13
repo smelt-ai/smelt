@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 38;
+pub const STORE_SCHEMA_VERSION: u32 = 39;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -343,6 +343,16 @@ impl Store {
     ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::write_workspace(&self.backend, |transaction| {
             crate::workspace::set_conversation_archived(transaction, id, archived_at)
+        })
+    }
+
+    pub fn restore_workspace_conversation_into_workset(
+        &self,
+        id: &str,
+        workset_id: &str,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::restore_conversation_into_workset(transaction, id, workset_id)
         })
     }
 
@@ -2136,6 +2146,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 38 {
+            apply_v39_closed_worksets(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 36 {
             apply_v37_worksets(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2465,6 +2484,18 @@ mod imp {
         transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
         if !schema_matches_current(transaction)? {
             return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+        }
+        Ok(())
+    }
+
+    fn apply_v39_closed_worksets(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "session_group")?
+            .iter()
+            .any(|column| column == "closed_workset_root")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V38_TO_V39)?;
         }
         Ok(())
     }
@@ -2852,7 +2883,7 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V37_TO_V38)?;
         }
-        Ok(())
+        apply_v39_closed_worksets(transaction)
     }
 
     /// v34 时一家 agent 在迁移里要用到的东西。这是冻结的历史，以后改出厂命令、改数据目录变量
@@ -3568,6 +3599,7 @@ mod imp {
                     "archived_at",
                     "pinned_at",
                     "workset_id",
+                    "closed_workset_root",
                 ],
             )
         };
@@ -6776,6 +6808,7 @@ CREATE TABLE published_session (
                 archived_at: None,
                 pinned_at: None,
                 workset_id: None,
+                closed_workset_root: None,
                 terminals: vec![
                     WorkspaceTerminalRecord {
                         id: Some("term-1".into()),
@@ -6801,6 +6834,7 @@ CREATE TABLE published_session (
                 archived_at: None,
                 pinned_at: None,
                 workset_id: None,
+                closed_workset_root: None,
                 terminals: Vec::new(),
                 acp: Some(WorkspaceAcpRecord {
                     cwd: Some("/repo".into()),
@@ -7458,6 +7492,7 @@ CREATE TABLE published_session (
             archived_at: None,
             pinned_at: None,
             workset_id: None,
+            closed_workset_root: None,
             terminals: vec![WorkspaceTerminalRecord {
                 id: Some(terminal.to_string()),
                 cwd: Some(cwd.to_string()),
@@ -7481,6 +7516,7 @@ CREATE TABLE published_session (
             archived_at: None,
             pinned_at: None,
             workset_id: None,
+            closed_workset_root: None,
             terminals: Vec::new(),
             acp: Some(WorkspaceAcpRecord {
                 cwd: Some("/repo".to_string()),
@@ -7879,6 +7915,29 @@ CREATE TABLE published_session (
     }
 
     #[test]
+    fn migrates_v38_and_preserves_archived_conversations() {
+        let dir = temp_dir("migrate-v38-archived");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let conversation = terminal_conversation("archived", "terminal", "/project");
+        store.create_workspace_conversation(&conversation).unwrap();
+        store
+            .set_workspace_conversation_archived("archived", Some(42))
+            .unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "ALTER TABLE session_group DROP COLUMN closed_workset_root; PRAGMA user_version = 38;"
+        ).unwrap();
+        drop(connection);
+        let store = Store::open(&path).unwrap();
+        let snapshot = store.workspace_directory().unwrap().1;
+        assert_eq!(snapshot.sessions[0].archived_at, Some(42));
+        assert_eq!(snapshot.sessions[0].closed_workset_root, None);
+        drop(store);
+    }
+
+    #[test]
     fn migrates_v37_repositories_and_preserves_explicit_configuration() {
         let dir = temp_dir("migrate-v37-repositories");
         let path = dir.join(DATABASE_FILE_NAME);
@@ -7930,6 +7989,7 @@ CREATE TABLE published_session (
     }
 
     const V36_WITHOUT_WORKSETS: &str = "
+ALTER TABLE session_group DROP COLUMN closed_workset_root;
 ALTER TABLE session_group DROP COLUMN workset_id;
 DROP TABLE workset_repository;
 DROP TABLE workset;
@@ -8652,6 +8712,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             archived_at: None,
             pinned_at: None,
             workset_id: None,
+            closed_workset_root: None,
             terminals: vec![
                 terminal("term-3", "/repo"),
                 WorkspaceTerminalRecord {

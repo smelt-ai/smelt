@@ -60,8 +60,9 @@ fn insert_conversation(
     let group_id = saved.id.trim();
     transaction.execute(
         "INSERT INTO session_group(
-             id, position, custom_title, last_updated_at, archived_at, pinned_at, workset_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             id, position, custom_title, last_updated_at, archived_at, pinned_at, workset_id,
+             closed_workset_root
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             group_id,
             position,
@@ -70,6 +71,7 @@ fn insert_conversation(
             saved.archived_at,
             saved.pinned_at,
             saved.workset_id.as_deref(),
+            saved.closed_workset_root.as_deref(),
         ],
     )?;
 
@@ -166,6 +168,7 @@ pub(crate) fn create_conversation(
     let mut saved = with_names(saved, &StoredNames::default());
     saved.archived_at = None;
     saved.pinned_at = None;
+    saved.closed_workset_root = None;
     let saved = &saved;
     if conversation_position(transaction, group_id)?.is_some() {
         return Ok(false);
@@ -201,8 +204,52 @@ pub(crate) fn update_conversation(
             id: group_id.to_string(),
         }
     })?;
-    let (acp_id, terminal_ids) = conversation_session_ids(transaction, saved)?;
     let before = read_conversation(transaction, group_id)?;
+    if before.as_ref().is_some_and(|before| {
+        before.archived_at.is_some()
+            && (before.workset_id.is_some() || before.closed_workset_root.is_some())
+    }) {
+        return Err(StoreError::ConversationArchived {
+            id: group_id.into(),
+        });
+    }
+    let (acp_id, terminal_ids) = conversation_session_ids(transaction, saved)?;
+    if let Some(workset_id) = before
+        .as_ref()
+        .and_then(|before| before.workset_id.as_deref())
+    {
+        let (project_root, task): (String, String) = transaction.query_row(
+            "SELECT project_root, task FROM workset WHERE id = ?1",
+            [workset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let root = std::path::Path::new(&project_root)
+            .join("worktrees")
+            .join(task);
+        let valid = |cwd: Option<&str>| {
+            cwd.is_some_and(|cwd| {
+                let path = std::path::Path::new(cwd);
+                path.is_absolute()
+                    && path.starts_with(&root)
+                    && !path
+                        .components()
+                        .any(|component| component == std::path::Component::ParentDir)
+            })
+        };
+        if saved
+            .acp
+            .as_ref()
+            .is_some_and(|acp| !valid(acp.cwd.as_deref()))
+            || saved
+                .terminals
+                .iter()
+                .any(|terminal| !valid(terminal.cwd.as_deref()))
+        {
+            return Err(StoreError::WorksetCwdOutside {
+                id: group_id.into(),
+            });
+        }
+    }
     // 恢复身份、名字、agent 标题都以库里的为准，要在删行之前读出来。
     let preserved_history = preserved_history_session_ids(transaction)?;
     let mut saved = with_names(saved, &stored_names(transaction, group_id)?);
@@ -210,6 +257,7 @@ pub(crate) fn update_conversation(
         saved.archived_at = before.archived_at;
         saved.pinned_at = before.pinned_at;
         saved.workset_id = before.workset_id.clone();
+        saved.closed_workset_root = before.closed_workset_root.clone();
     }
     transaction.execute("DELETE FROM session_group WHERE id = ?1", [group_id])?;
     insert_conversation(
@@ -246,11 +294,104 @@ pub(crate) fn set_conversation_archived(
     if current.archived_at.is_some() == archived_at.is_some() {
         return Ok(false);
     }
+    if archived_at.is_none()
+        && current.closed_workset_root.is_some()
+        && current.workset_id.is_none()
+    {
+        return Err(StoreError::ClosedWorksetRestoreRequired { id: id.into() });
+    }
+    if archived_at.is_none()
+        && let Some(workset_id) = current.workset_id.as_deref()
+    {
+        validate_restore_workset(transaction, workset_id)?;
+    }
     transaction.execute(
         "UPDATE session_group SET archived_at = ?2, pinned_at = NULL WHERE id = ?1",
         params![id, archived_at],
     )?;
     Ok(true)
+}
+
+pub(crate) fn restore_conversation_into_workset(
+    transaction: &Transaction<'_>,
+    id: &str,
+    workset_id: &str,
+) -> Result<bool, StoreError> {
+    let id = id.trim();
+    let conversation = read_conversation(transaction, id)?
+        .ok_or_else(|| StoreError::ConversationNotFound { id: id.into() })?;
+    let old_root = conversation.closed_workset_root.as_deref().ok_or_else(|| {
+        StoreError::InvalidWorksetRestore {
+            message: "该会话不需要重新选择工作树".into(),
+        }
+    })?;
+    if conversation.archived_at.is_none() || conversation.workset_id.is_some() {
+        return Err(StoreError::InvalidWorksetRestore {
+            message: "会话未处于等待选择工作树的归档状态".into(),
+        });
+    }
+    let (project_root, target) = validate_restore_workset(transaction, workset_id)?;
+    let project = std::path::Path::new(&project_root);
+    if std::path::Path::new(old_root)
+        .parent()
+        .and_then(|path| path.parent())
+        != Some(project)
+    {
+        return Err(StoreError::InvalidWorksetRestore {
+            message: "只能选择原项目下的工作树".into(),
+        });
+    }
+    let target = target
+        .to_str()
+        .ok_or_else(|| StoreError::empty_name("工作树路径"))?;
+    transaction.execute(
+        "UPDATE session SET cwd = ?2 WHERE group_id = ?1",
+        params![id, target],
+    )?;
+    transaction.execute(
+        "UPDATE session_group SET workset_id = ?2, archived_at = NULL, pinned_at = NULL WHERE id = ?1",
+        params![id, workset_id],
+    )?;
+    Ok(true)
+}
+
+fn validate_restore_workset(
+    transaction: &Transaction<'_>,
+    workset_id: &str,
+) -> Result<(String, std::path::PathBuf), StoreError> {
+    let (project_root, task): (String, String) = transaction
+        .query_row(
+            "SELECT project_root, task FROM workset WHERE id = ?1",
+            [workset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::WorkspaceWorksetNotFound {
+            id: workset_id.into(),
+        })?;
+    let target = std::path::Path::new(&project_root)
+        .join("worktrees")
+        .join(task);
+    if !target.is_dir() {
+        return Err(StoreError::InvalidWorksetRestore {
+            message: format!("目标工作树目录不存在：{}", target.display()),
+        });
+    }
+    let mut repositories = transaction.prepare(
+        "SELECT name, worktree FROM workset_repository WHERE workset_id = ?1 ORDER BY position",
+    )?;
+    let repositories = repositories.query_map([workset_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for repository in repositories {
+        let (name, path) = repository?;
+        if !std::path::Path::new(&path).is_dir() {
+            return Err(StoreError::InvalidWorksetRestore {
+                message: format!("目标工作树的仓库 {name} 目录不存在：{path}"),
+            });
+        }
+    }
+    Ok((project_root, target))
 }
 
 pub(crate) fn set_conversation_pinned(
@@ -524,12 +665,31 @@ pub(crate) fn rename_workset(
 pub(crate) fn delete_workset(transaction: &Transaction<'_>, id: &str) -> Result<bool, StoreError> {
     let id = id.trim();
     let in_use: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_group WHERE workset_id = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM session_group WHERE workset_id = ?1 AND archived_at IS NULL)",
         [id],
         |row| row.get(0),
     )?;
     if in_use {
         return Err(StoreError::WorkspaceWorksetInUse { id: id.into() });
+    }
+    let root: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT project_root, task FROM workset WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((project_root, task)) = root {
+        let task_root = std::path::Path::new(&project_root)
+            .join("worktrees")
+            .join(task);
+        let task_root = task_root
+            .to_str()
+            .ok_or_else(|| StoreError::empty_name("工作树路径"))?;
+        transaction.execute(
+            "UPDATE session_group SET closed_workset_root = ?2 WHERE workset_id = ?1",
+            params![id, task_root],
+        )?;
     }
     Ok(transaction.execute("DELETE FROM workset WHERE id = ?1", [id])? > 0)
 }
@@ -1037,7 +1197,7 @@ pub(crate) fn read_workspace_snapshot(
         // 没有身份的用对话自己的。一个名字只存在其中一处，读的时候合起来。
         .prepare(
             "SELECT g.id, COALESCE(h.custom_title, g.custom_title), g.last_updated_at,
-                    g.archived_at, g.pinned_at, g.workset_id
+                    g.archived_at, g.pinned_at, g.workset_id, g.closed_workset_root
              FROM session_group g
              LEFT JOIN session s ON s.group_id = g.id AND s.kind = 'acp'
              LEFT JOIN acp_detail a ON a.session_id = s.id
@@ -1055,12 +1215,22 @@ pub(crate) fn read_workspace_snapshot(
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut cache = WorkspaceReadCache::load(connection)?;
     let mut sessions = Vec::new();
-    for (group_id, custom_title, last_updated_at, archived_at, pinned_at, workset_id) in groups {
+    for (
+        group_id,
+        custom_title,
+        last_updated_at,
+        archived_at,
+        pinned_at,
+        workset_id,
+        closed_workset_root,
+    ) in groups
+    {
         let terminals = cache
             .terminals_by_group
             .remove(&group_id)
@@ -1076,6 +1246,7 @@ pub(crate) fn read_workspace_snapshot(
             archived_at,
             pinned_at,
             workset_id,
+            closed_workset_root,
             terminals,
             acp,
         });

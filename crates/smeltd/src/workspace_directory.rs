@@ -205,6 +205,17 @@ pub(crate) fn pin_conversation(
     Ok(publish(&change, event_hub))
 }
 
+pub(crate) fn restore_conversation_into_workset(
+    store: &Store,
+    id: &str,
+    workset_id: &str,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceRevision, ControlError> {
+    let change = workspace_catalog::restore_conversation_into_workset_on(store, id, workset_id)
+        .map_err(control_error)?;
+    Ok(publish(&change, event_hub))
+}
+
 pub(crate) fn close_project(
     store: &Store,
     root: &str,

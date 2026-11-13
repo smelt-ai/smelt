@@ -555,10 +555,6 @@ impl WorkspaceOverview {
         let project = self.project.clone();
         self.dismiss(window, cx);
         workspace.update(cx, |workspace, cx| {
-            if let Some(label) = crate::runtimes::runtime_unavailable_label(&project.runtime, cx) {
-                crate::status_item::notify_error(format!("工作树操作不可用：{label}"));
-                return;
-            }
             workspace.start_close_workset(project, workset_id, cx);
         });
     }

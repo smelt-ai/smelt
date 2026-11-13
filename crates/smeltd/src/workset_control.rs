@@ -356,14 +356,13 @@ pub(crate) fn finish(
         .iter()
         .find(|workset| workset.id == params.workset_id)
         .ok_or_else(|| ControlError::new(ControlErrorCode::NotFound, "工作树不存在"))?;
-    if directory
-        .conversations
-        .iter()
-        .any(|conversation| conversation.workset_id.as_deref() == Some(workset.id.as_str()))
-    {
+    if directory.conversations.iter().any(|conversation| {
+        conversation.workset_id.as_deref() == Some(workset.id.as_str())
+            && conversation.archived_at.is_none()
+    }) {
         return Err(ControlError::new(
             ControlErrorCode::FailedPrecondition,
-            "工作树仍绑定会话；先关闭并删除这些会话再收工",
+            "工作树仍绑定未归档会话；请先关闭或归档这些会话",
         ));
     }
     let report =

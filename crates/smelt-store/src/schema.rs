@@ -286,7 +286,8 @@ CREATE TABLE session_group (
   last_updated_at INTEGER NOT NULL DEFAULT 0,
   archived_at INTEGER,
   pinned_at INTEGER,
-  workset_id TEXT REFERENCES workset(id) ON DELETE SET NULL
+  workset_id TEXT REFERENCES workset(id) ON DELETE SET NULL,
+  closed_workset_root TEXT
 );
 
 CREATE TABLE session (
@@ -1881,6 +1882,10 @@ CREATE TABLE project_repository_catalog (
   project_root TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 INSERT INTO project_repository_catalog SELECT DISTINCT project_root FROM project_repository;
+";
+
+pub const MIGRATE_V38_TO_V39: &str = "
+ALTER TABLE session_group ADD COLUMN closed_workset_root TEXT;
 ";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。

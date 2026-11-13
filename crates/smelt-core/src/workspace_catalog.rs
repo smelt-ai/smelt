@@ -60,7 +60,10 @@ impl From<smelt_store::StoreError> for DirectoryError {
             | StoreError::DuplicateSessionId { .. }
             | StoreError::EmptyProjectRoot => Self::Invalid(error.to_string()),
             StoreError::WorkspaceWorksetInUse { .. }
-            | StoreError::WorkspaceWorksetConflict { .. } => Self::Invalid(error.to_string()),
+            | StoreError::WorkspaceWorksetConflict { .. }
+            | StoreError::InvalidWorksetRestore { .. }
+            | StoreError::WorksetCwdOutside { .. }
+            | StoreError::ClosedWorksetRestoreRequired { .. } => Self::Invalid(error.to_string()),
             StoreError::WorkspaceWorksetNotFound { .. } => Self::NotFound(error.to_string()),
             StoreError::ConversationArchived { .. } => Self::Invalid(error.to_string()),
             error => Self::Store(error.to_string()),
@@ -152,6 +155,21 @@ pub fn pin_conversation_on(
         Ok((
             store
                 .set_workspace_conversation_pinned(id, timestamp)?
+                .changed,
+            None,
+        ))
+    })
+}
+
+pub fn restore_conversation_into_workset_on(
+    store: &smelt_store::Store,
+    id: &str,
+    workset_id: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((
+            store
+                .restore_workspace_conversation_into_workset(id, workset_id)?
                 .changed,
             None,
         ))
@@ -468,6 +486,7 @@ fn conversation_record(
         archived_at: conversation.archived_at,
         pinned_at: conversation.pinned_at,
         workset_id: conversation.workset_id.clone(),
+        closed_workset_root: conversation.closed_workset_root.clone(),
         terminals: conversation
             .terminals
             .iter()
@@ -545,6 +564,7 @@ fn conversation_from_record(record: smelt_store::WorkspaceSessionRecord) -> Work
         archived_at: record.archived_at,
         pinned_at: record.pinned_at,
         workset_id: record.workset_id,
+        closed_workset_root: record.closed_workset_root,
         terminals: record
             .terminals
             .into_iter()
@@ -609,6 +629,7 @@ mod tests {
             archived_at: None,
             pinned_at: None,
             workset_id: None,
+            closed_workset_root: None,
             terminals: Vec::new(),
             acp: Some(WorkspaceAcp {
                 cwd: Some("/repo".to_string()),

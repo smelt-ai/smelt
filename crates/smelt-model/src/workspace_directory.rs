@@ -107,6 +107,9 @@ pub struct WorkspaceConversation {
     /// 新会话创建时绑定的工作集；旧会话保持未绑定。
     #[serde(default)]
     pub workset_id: Option<String>,
+    /// 已关闭的工作树原目录；未绑定时恢复前必须选择新的工作树。
+    #[serde(default)]
+    pub closed_workset_root: Option<String>,
     /// 这段对话里的终端，按客户端给的顺序。ACP 对话没有。
     #[serde(default)]
     pub terminals: Vec<WorkspaceTerminal>,
@@ -173,6 +176,8 @@ pub struct WorkspaceConversationIdParams {
 pub struct WorkspaceConversationArchiveParams {
     pub conversation_id: String,
     pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_workset_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

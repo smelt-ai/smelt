@@ -853,6 +853,20 @@ fn dispatch_control(
                 control_version,
                 request_id,
                 super::workspace_directory::default_store().and_then(|store| {
+                    if let Some(workset_id) = params.target_workset_id.as_deref() {
+                        if params.archived {
+                            return Err(ControlError::new(
+                                ControlErrorCode::InvalidParams,
+                                "归档时不能指定目标工作树",
+                            ));
+                        }
+                        return super::workspace_directory::restore_conversation_into_workset(
+                            &store,
+                            &params.conversation_id,
+                            workset_id,
+                            event_hub,
+                        );
+                    }
                     super::workspace_directory::archive_conversation(
                         &store,
                         &params.conversation_id,

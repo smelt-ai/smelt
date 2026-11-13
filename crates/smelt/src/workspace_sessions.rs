@@ -1883,6 +1883,15 @@ impl Workspace {
     }
 
     pub(crate) fn cancel_close_confirm(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.close_confirm,
+            Some(
+                CloseConfirm::Workset { pending: true, .. }
+                    | CloseConfirm::RestoreWorkset { pending: true, .. }
+            )
+        ) {
+            return;
+        }
         self.close_confirm = None;
         cx.notify();
     }
@@ -1893,11 +1902,8 @@ impl Workspace {
         id: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(label) = crate::runtimes::runtime_unavailable_label(&project.runtime, cx) {
-            self.report_background_error(format!("工作树操作不可用：{label}"));
-            return;
-        }
-        let Some(title) = self.space(&project.runtime).and_then(|space| {
+        let unavailable = crate::runtimes::runtime_unavailable_label(&project.runtime, cx);
+        let title = self.space(&project.runtime).and_then(|space| {
             space
                 .worksets
                 .iter()
@@ -1909,15 +1915,34 @@ impl Workspace {
                         )
                 })
                 .map(|workset| workset.task.clone())
-        }) else {
-            self.report_background_error("工作树已不存在，请刷新后重试");
-            return;
-        };
-        self.close_confirm = Some(CloseConfirm::Workset { project, id, title });
+        });
+        let error = unavailable
+            .map(|label| format!("工作树操作不可用：{label}"))
+            .or_else(|| {
+                title
+                    .is_none()
+                    .then(|| "工作树已不存在，请刷新后重试".to_string())
+            });
+        self.close_confirm = Some(CloseConfirm::Workset {
+            project,
+            title: title.unwrap_or_else(|| id.clone()),
+            id,
+            pending: false,
+            error,
+        });
         cx.notify();
     }
 
     pub(crate) fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.close_confirm,
+            Some(
+                CloseConfirm::Workset { pending: true, .. }
+                    | CloseConfirm::RestoreWorkset { pending: true, .. }
+            )
+        ) {
+            return;
+        }
         match self.close_confirm.take() {
             Some(CloseConfirm::Archive { ui_id, .. }) => {
                 self.archive_conversation_ui(ui_id, cx);
@@ -1929,12 +1954,23 @@ impl Workspace {
                     cx,
                 );
             }
+            Some(CloseConfirm::RestoreWorkset { .. }) => {}
             Some(CloseConfirm::Project { project, .. }) => self.close_project(&project, cx),
-            Some(CloseConfirm::Workset { project, id, .. }) => {
+            Some(CloseConfirm::Workset {
+                project, id, title, ..
+            }) => {
                 if let Some(runtime) = self
                     .space(&project.runtime)
                     .map(|space| space.runtime.clone())
                 {
+                    self.close_confirm = Some(CloseConfirm::Workset {
+                        project,
+                        id: id.clone(),
+                        title,
+                        pending: true,
+                        error: None,
+                    });
+                    cx.notify();
                     self.request_workset_finish(
                         runtime,
                         smelt_model::workspace_directory::WorkspaceWorksetFinishParams {
@@ -1943,7 +1979,14 @@ impl Workspace {
                         cx,
                     );
                 } else {
-                    self.report_background_error("运行时已断开，无法关闭工作树");
+                    self.close_confirm = Some(CloseConfirm::Workset {
+                        project,
+                        id,
+                        title,
+                        pending: false,
+                        error: Some("运行时已断开，无法关闭工作树".into()),
+                    });
+                    cx.notify();
                 }
             }
             Some(CloseConfirm::Runtime { runtime_id, .. }) => {

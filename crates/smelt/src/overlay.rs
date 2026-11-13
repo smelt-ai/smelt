@@ -357,6 +357,15 @@ impl Workspace {
             || self.automation_surface.pending_delete.is_some()
             || self.pending_file_switch.is_some()
         {
+            if matches!(
+                self.close_confirm,
+                Some(
+                    CloseConfirm::Workset { pending: true, .. }
+                        | CloseConfirm::RestoreWorkset { pending: true, .. }
+                )
+            ) {
+                return true;
+            }
             self.close_confirm = None;
             self.discard_hunk_target = None;
             self.discard_file_target = None;
