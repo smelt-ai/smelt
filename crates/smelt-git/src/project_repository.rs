@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use smelt_core::fs::{FileSystem as _, LocalFs};
+
 #[derive(Clone, Debug)]
 pub struct BoundRepository {
     pub root: PathBuf,
@@ -87,11 +89,14 @@ pub fn clone_repository(project: &Path, url: &str, name: &str) -> Result<BoundRe
     exclude_managed_directory(project, "repos")?;
     // Reserve the destination exclusively; Git accepts an existing empty directory.
     fs::create_dir(&target).map_err(|error| format!("无法创建克隆目标：{error}"))?;
-    let output = std::process::Command::new("git")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["clone", "--", url])
-        .arg(&target)
-        .output();
+    // Git's clone destination must not carry Windows' verbatim path prefix.
+    let output = LocalFs.canonicalize(&target).and_then(|git_target| {
+        std::process::Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["clone", "--", url])
+            .arg(git_target)
+            .output()
+    });
     match output {
         Ok(output) if output.status.success() => Ok(BoundRepository {
             root: repository_root(&target)?,
@@ -101,7 +106,7 @@ pub fn clone_repository(project: &Path, url: &str, name: &str) -> Result<BoundRe
             // Do not echo stderr: Git may include credentials embedded in the URL.
             let reason = match result {
                 Ok(_) => "Git 克隆失败，请检查 URL、网络和 SSH/凭据配置".to_string(),
-                Err(error) => format!("无法启动 Git：{error}"),
+                Err(error) => format!("无法准备或启动 Git 克隆：{error}"),
             };
             // Never recursively delete a failed clone: it may contain useful data.
             let retained = match fs::remove_dir(&target) {

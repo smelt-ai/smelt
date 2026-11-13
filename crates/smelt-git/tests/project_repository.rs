@@ -56,10 +56,17 @@ fn project_root_can_be_bound_without_a_link() {
 
 #[test]
 fn clone_publishes_an_existing_local_git_repository() {
-    let project = tempfile::tempdir().unwrap();
-    let source = tempfile::tempdir().unwrap();
+    let project = tempfile::Builder::new()
+        .prefix("smelt project ")
+        .tempdir()
+        .unwrap();
+    let source = tempfile::Builder::new()
+        .prefix("smelt source ")
+        .tempdir()
+        .unwrap();
     init(source.path());
-    let bound = clone_repository(project.path(), source.path().to_str().unwrap(), "api").unwrap();
+    let project_root = fs::canonicalize(project.path()).unwrap();
+    let bound = clone_repository(&project_root, source.path().to_str().unwrap(), "api").unwrap();
     assert!(bound.root.join(".git").exists());
     assert!(bound.managed_link.is_none());
     assert!(source.path().join(".git").exists());
