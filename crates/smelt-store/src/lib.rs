@@ -7887,29 +7887,34 @@ CREATE TABLE published_session (
     fn workset_metadata_round_trips_and_sessions_keep_their_binding() {
         let dir = temp_dir("workset-directory");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let project = std::fs::canonicalize(&*dir).unwrap().join("project");
+        let task_root = project.join("worktrees/issue-1");
         let repository = WorkspaceProjectRepositoryRecord {
-            project_root: "/project".into(),
+            project_root: project.to_str().unwrap().into(),
             name: "api".into(),
-            root: "/project/repos/api".into(),
+            root: project.join("repos/api").to_str().unwrap().into(),
             position: 0,
-            managed_link: Some("/project/repos/linked-api".into()),
+            managed_link: Some(project.join("repos/linked-api").to_str().unwrap().into()),
         };
         assert!(
             store
-                .set_workspace_project_repositories("/project", &[repository.clone()])
+                .set_workspace_project_repositories(
+                    project.to_str().unwrap(),
+                    &[repository.clone()],
+                )
                 .unwrap()
                 .changed
         );
         let workset = WorkspaceWorksetRecord {
             id: "workset-1".into(),
-            project_root: "/project".into(),
+            project_root: project.to_str().unwrap().into(),
             task: "issue-1".into(),
             branch: "feat/issue-1".into(),
             position: 0,
             repositories: vec![WorkspaceWorksetRepositoryRecord {
                 name: "api".into(),
                 root: repository.root.clone(),
-                worktree: "/project/worktrees/issue-1/api".into(),
+                worktree: task_root.join("api").to_str().unwrap().into(),
                 base_ref: "refs/remotes/origin/main".into(),
                 branch_created: true,
                 position: 0,
@@ -7922,7 +7927,7 @@ CREATE TABLE published_session (
             "task metadata remains visible without an open project or conversation"
         );
         let mut conversation =
-            terminal_conversation("conversation-1", "terminal-1", "/project/worktrees/issue-1");
+            terminal_conversation("conversation-1", "terminal-1", task_root.to_str().unwrap());
         conversation.workset_id = Some(workset.id.clone());
         store.create_workspace_conversation(&conversation).unwrap();
         let (_, directory) = store.workspace_directory().unwrap();
@@ -7932,6 +7937,19 @@ CREATE TABLE published_session (
             directory.sessions[0].workset_id.as_deref(),
             Some("workset-1")
         );
+
+        for outside in [
+            project.join("worktrees/issue-10"),
+            task_root.join("../other"),
+            PathBuf::from("worktrees/issue-1"),
+        ] {
+            let mut invalid = conversation.clone();
+            invalid.terminals[0].cwd = Some(outside.to_str().unwrap().into());
+            assert!(matches!(
+                store.update_workspace_conversation(&invalid),
+                Err(StoreError::WorksetCwdOutside { .. })
+            ));
+        }
 
         conversation.workset_id = None;
         store.update_workspace_conversation(&conversation).unwrap();
