@@ -10,6 +10,8 @@ pub(crate) struct AcpResumeRequest {
     pub profile_id: Option<String>,
     pub cwd: String,
     pub resume_id: String,
+    /// 这段会话属于哪个智能体定义（运行时随历史列表给的）。
+    pub agent_definition_id: Option<String>,
 }
 
 /// 新建一段 ACP 对话或自动化 Run 所需的完整输入。产品 Agent 只是可选来源定义；
@@ -244,15 +246,6 @@ impl Workspace {
                         let pending_delivery_id = saved.pending_delivery_id.clone();
                         let pending_agent_preset = saved.pending_agent_preset.clone();
                         let agent_definition_id = saved.agent_definition_id.clone();
-                        if let (Some(resume_id), Some(definition_id)) = (
-                            saved.history_session_id.as_ref(),
-                            agent_definition_id.as_deref(),
-                        ) {
-                            crate::session_history::remember_history_agent(&key, agent.into(),
-                                saved.profile_id.as_deref(),
-                                &resume_id.to_string(),
-                                definition_id, cx);
-                        }
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
                         // 第一次连上前由运行时补齐：旧版重启丢掉的插件和 MCP 勾选按当前定义
@@ -460,6 +453,8 @@ impl Workspace {
                         view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
                     }
                 }
+                // 恢复完才知道各会话的目录、该不该把对话带回对话页、远程的活动对话要不要续上。
+                this.schedule_visible_refresh(cx);
                 this.save_state(cx);
                 let Some(space) = this.space_mut(&key) else {
                     return;
@@ -569,19 +564,6 @@ impl Workspace {
             "{title} · {}",
             crate::runtimes::runtime_name(runtime.key(), cx)
         )
-    }
-
-    /// 活动项目在远程运行时上时，只支持本机的插件面板该说的话。不能说成
-    /// 「没有项目」：项目明明打开着，只是在另一台机器上。
-    pub(crate) fn remote_project_notice(&self, cx: &App) -> Option<String> {
-        let project = self.active_project_ref(cx)?;
-        if project.runtime == crate::RuntimeKey::Local {
-            return None;
-        }
-        let name = crate::runtimes::runtime_name(&project.runtime, cx);
-        Some(format!(
-            "这是「{name}」上的项目，这个面板暂时只支持本机项目"
-        ))
     }
 
     /// 把工具面板（变更、文件树）里的文字交给当前会话：终端写进 PTY，对话放进输入框。
@@ -980,7 +962,6 @@ impl Workspace {
             |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
                 acp_view::AcpViewEvent::Changed => {
                     this.touch_acp_session(_view);
-                    this.persist_history_agent_definition_for_view(_view, cx);
                     this.save_state(cx);
                     this.sync_notification_surfaces(cx);
                     // save_state 只排队写盘，不会重绘。正文增量只归 AcpView 重画；
@@ -1179,7 +1160,7 @@ impl Workspace {
                     }
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: false } => {
-                    this.open_capabilities(crate::CapabilitiesTab::Plugins, window, cx);
+                    this.open_capabilities("plugins", window, cx);
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: true } => {
                     // 智能体定义已经删了就停在智能体列表。
@@ -1467,6 +1448,7 @@ impl Workspace {
             profile_id,
             cwd,
             resume_id,
+            agent_definition_id,
         } = request;
         let Some(runtime) = crate::runtimes::runtime(&runtime_key, cx) else {
             self.report_background_error("这台机器已经移除，没法在上面继续这段对话");
@@ -1475,7 +1457,7 @@ impl Workspace {
         // 已经开着的必须是**这一条**历史会话（比对 agent + cwd + 具体 session id），
         // 不能只认 agent+cwd——同项目同 agent 可能同时开着好几条不同的历史会话，
         // 之前只按 agent+cwd 找，点哪条「继续」都会跳到"第一个凑巧匹配的"那条。
-        let target_id = agent_client_protocol::v1::schema::SessionId::new(resume_id.clone());
+        let target_id = agent_client_protocol::v1::schema::SessionId::new(resume_id);
         if let Some(ix) = self.find_open_acp_session(agent, &cwd, &target_id, cx) {
             let view = match &self.sessions[ix].kind {
                 SessionKind::Conversation(view) => view.clone(),
@@ -1495,17 +1477,7 @@ impl Workspace {
             root: cwd.clone(),
         };
         let definition = crate::workspace_view::space_agent_id(&project, cx)
-            .or_else(|| {
-                // 历史列表加载时运行时一并给了「这段会话属于哪个智能体」。
-                self.history_agent_bindings
-                    .get(&crate::session_history::session_list_key(
-                        &runtime_key,
-                        agent.into(),
-                        profile_id.as_deref(),
-                        &cwd,
-                    ))
-                    .and_then(|bindings| bindings.get(&resume_id).cloned())
-            })
+            .or(agent_definition_id)
             .and_then(|id| settings::agent_definition(&runtime_key, &id, cx));
         // 启动命令、初始配置都按存档所在那台机器的设置。
         let launch =
@@ -1518,16 +1490,6 @@ impl Workspace {
         // 用户给这段对话起的名字在运行时，建好后随工作区目录推来（按 provider 身份现算）。
         let custom_title = None;
         let agent_definition_id = definition.map(|definition| definition.id);
-        if let Some(id) = agent_definition_id.as_deref() {
-            crate::session_history::remember_history_agent(
-                &runtime_key,
-                agent.into(),
-                profile_id.as_deref(),
-                &resume_id,
-                id,
-                cx,
-            );
-        }
         let view_profile_id = profile_id;
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
@@ -1808,16 +1770,6 @@ impl Workspace {
         self.add_session(runtime, cwd, cx);
     }
 
-    /// 切换左侧栏（会话列表与工作区）开合状态。宽度由 Dock 的左栏记住。
-    pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        if !self.sidebar_open {
-            self.focus_active_stage(window, cx);
-        }
-        self.save_state(cx);
-        cx.notify();
-    }
-
     /// 在这个运行时上打开一个目录作为项目并设为活动项目。已经开着就只切活动。项目随
     /// 运行时的推送进侧栏。**不建会话**——项目和会话是两回事，建会话是调用方另外的事。
     pub(crate) fn add_project(
@@ -1842,8 +1794,6 @@ impl Workspace {
             return;
         }
         self.active_project = Some(ProjectRef { runtime, root });
-        // 打开项目 = 想看这个项目，收掉盖在舞台上的覆盖页。
-        self.stage_cover = None;
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -1988,10 +1938,6 @@ impl Workspace {
                 }
             }
             Some(CloseConfirm::Runtime { runtime_id, .. }) => {
-                // 能力库正配着这台机器的话，退回本机。
-                if *self.pi_library_runtime() == crate::RuntimeKey::Remote(runtime_id.clone()) {
-                    self.select_pi_library_runtime(crate::RuntimeKey::Local, cx);
-                }
                 crate::runtimes::remove_runtime(runtime_id, cx);
                 cx.notify();
             }
@@ -2228,9 +2174,6 @@ impl Workspace {
             paths.len(),
             paths
         );
-        self.stage_cover = None;
-        cx.notify();
-
         let paths: Vec<std::path::PathBuf> = paths.to_vec();
         let (tx, rx) = smol::channel::bounded(1);
         std::thread::Builder::new()
@@ -2523,33 +2466,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 聚焦当前会话的活动终端（ACP 会话的聚焦走视图自身，这里跳过）。
-    /// 设置/收回舞台覆盖页并处理焦点：全屏页自己没有可聚焦元素，焦点认领到根
-    /// 让全局快捷键仍收得到；收回时把焦点还给活动会话（终端 pane / ACP 输入框）。
-    pub(crate) fn set_stage_cover(
-        &mut self,
-        v: Option<StageCover>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = self.stage_cover != v;
-        if v.is_some() {
-            self.desktop = None;
-            self.nav.set_active(WorkspaceRoute::Session);
-        }
-        self.stage_cover = v;
-        match v {
-            Some(_) => window.focus(&self.focus_handle, cx),
-            None => self.focus_active_stage(window, cx),
-        }
-        if changed {
-            // Esc / 返回条也走这里。只改内存不落盘的话，冷启动会按存档再进全屏。
-            self.save_state(cx);
-            self.schedule_visible_refresh(cx);
-        }
-        cx.notify();
-    }
-
     /// 焦点还给活动会话：Term → 活动 pane；ACP → 消息流输入框。
     pub(crate) fn focus_active_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Session {
@@ -2608,7 +2524,7 @@ impl Workspace {
     }
 
     pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
-        if self.stage_cover.is_some() {
+        if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
             return None;
         }
         if !route_views_session(self.active_tab(), self.nav.agents().conversation_sid()) {
@@ -2650,10 +2566,18 @@ impl Workspace {
             self.mark_visible_session_read(cx);
             // 离线的远程机器隔几分钟才探一次；人回到这里时多半要用，立刻探一次。
             crate::runtime_events::probe_remotes(cx);
+            // 监听收不到的变化（监听登记失败、旧运行时）在人回来时补上。这里在绘制路径上，
+            // 标旧和排刷新挪到这一帧之后。
+            let view = cx.weak_entity();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |this, cx| this.on_window_refocused(cx));
+            });
         }
     }
 
     pub(crate) fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // 要看这个会话：舞台得露出来。舞台不在布局里就看不见，不标已读、不抢焦点。
+        let stage_hidden = !self.show_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
         if ix < self.sessions.len() && self.sessions[ix].is_agent_conversation(cx) {
             self.open_agent_conversation(ix, window, cx);
             return;
@@ -2691,7 +2615,7 @@ impl Workspace {
             self.sync_session_ui(window, cx);
             self.desktop = None;
             self.nav.set_active(WorkspaceRoute::Session);
-            let route_has_overlay = self.stage_cover.is_some();
+            let route_has_overlay = stage_hidden;
             // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
             // 视图更新期间再读它会 panic。
             let restore_settled = self.session_restore_settled(ix, cx);
@@ -2724,26 +2648,6 @@ impl Workspace {
         }
     }
 
-    fn next_project_session(&self, from: usize, delta: i32, cx: &App) -> Option<usize> {
-        let n = self.sessions.len();
-        if n == 0 {
-            return None;
-        }
-        for step in 1..=n {
-            let ix = (from as i32 + delta * step as i32).rem_euclid(n as i32) as usize;
-            if !self.sessions[ix].is_product_conversation(cx) {
-                return Some(ix);
-            }
-        }
-        None
-    }
-
-    pub(crate) fn next_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.next_project_session(self.active_session, 1, cx) {
-            self.activate(ix, window, cx);
-        }
-    }
-
     /// 侧栏右键「强制重启」：ACP 会话卡死（`session/cancel` 打不断正在跑的
     /// 工具调用）时的兜底，见 `AcpView::force_restart` 注释。非 ACP 会话
     /// （`active_acp` 返回 None）是 no-op，调用方（右键菜单）也只在 ACP
@@ -2751,12 +2655,6 @@ impl Workspace {
     pub(crate) fn force_restart_acp_session(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(view) = self.sessions.get(ix).and_then(|s| s.active_acp()).cloned() {
             view.update(cx, |v, cx| v.force_restart(cx));
-        }
-    }
-
-    pub(crate) fn prev_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.next_project_session(self.active_session, -1, cx) {
-            self.activate(ix, window, cx);
         }
     }
 
@@ -2808,7 +2706,6 @@ impl Workspace {
                 .find(|workset| workset.id == *workset_id)
                 .map(|workset| workset.task.clone())
                 .unwrap_or_default(),
-            RenameTarget::History { current_title, .. } => current_title.clone(),
             RenameTarget::Runtime(runtime_id) => {
                 crate::runtimes::runtime_name(&crate::RuntimeKey::Remote(runtime_id.clone()), cx)
             }
@@ -2954,28 +2851,6 @@ impl Workspace {
                     crate::runtimes::rename_runtime(runtime_id, name, cx);
                 }
             }
-            RenameTarget::History {
-                runtime,
-                agent,
-                profile_id,
-                cwd,
-                resume_id,
-                ..
-            } => {
-                let Some(runtime) = crate::runtimes::runtime(&runtime, cx) else {
-                    self.report_background_error("这台机器已经移除，改不了名字");
-                    return;
-                };
-                self.set_history_custom_title(
-                    &runtime,
-                    agent,
-                    profile_id,
-                    cwd,
-                    resume_id,
-                    custom_title,
-                    cx,
-                );
-            }
         }
         self.save_state(cx);
         cx.notify();
@@ -3004,53 +2879,9 @@ impl Workspace {
             eprintln!("[session-metadata] 保存会话名称失败: {error}");
             return;
         }
-
-        let key =
-            session_history::session_list_key(runtime.key(), agent, profile_id.as_deref(), &cwd);
-        if let Some((_, list)) = self.session_list.get_mut(&key) {
-            let mut updated = list.sessions.as_ref().clone();
-            for session in &mut updated {
-                if session.resume_id == resume_id {
-                    session.custom_title = custom_title.clone();
-                    session.title = custom_title
-                        .clone()
-                        .unwrap_or_else(|| session.agent_title.clone());
-                }
-            }
-            *list = session_history::HistoryListSnapshot::new(updated);
-        }
-
+        // 历史页由运行时推的 `history.changed` 重取列表，这里不用管它。
         self.save_state(cx);
         cx.notify();
-    }
-
-    pub(crate) fn persist_history_agent_definition_for_view(
-        &self,
-        changed_view: &Entity<acp_view::AcpView>,
-        cx: &Context<Self>,
-    ) {
-        let Some(session) = self
-            .sessions
-            .iter()
-            .find(|session| session.anchor_id() == changed_view.entity_id())
-        else {
-            return;
-        };
-        let Some(agent_definition_id) = session.agent_definition_id.as_deref() else {
-            return;
-        };
-        let view = changed_view.read(cx);
-        let Some(resume_id) = view.history_session_id_for_save() else {
-            return;
-        };
-        crate::session_history::remember_history_agent(
-            session.runtime(cx).key(),
-            view.agent_kind().into(),
-            view.profile_id(),
-            &resume_id.to_string(),
-            agent_definition_id,
-            cx,
-        );
     }
 
     /// 取消重命名：不落地任何改动。

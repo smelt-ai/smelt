@@ -1,5 +1,7 @@
 //! 命令面板（Cmd+K）：打开、关闭、命令列表与执行。
 
+use smelt_plugin_api::CommandInfo;
+
 use super::*;
 
 impl Workspace {
@@ -16,19 +18,13 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 命令面板的两组条目。分组下标就是确认回调里的 `IndexPath.section`：
-    /// 0 是命令，1 是切换会话。过滤不改变这个坐标。
-    ///
-    /// 这里不挂 `PrevSession` / `NextSession`。确认会先派发 Action 再跑回调，
-    /// 而那两个 Action 按侧栏视觉顺序切，面板这里按会话数组顺序切。
-    pub(crate) fn palette_groups(&self, cx: &App) -> [Vec<(String, Cmd)>; 2] {
-        let commands = vec![
-            ("新建会话".to_string(), Cmd::NewTab),
-            ("打开项目…".to_string(), Cmd::OpenProject),
-            ("关闭当前会话/窗格".to_string(), Cmd::CloseTab),
-            ("下一个会话".to_string(), Cmd::NextTab),
-            ("上一个会话".to_string(), Cmd::PrevTab),
-        ];
+    /// 命令面板的两组条目：登记过、要进面板的命令，和切换会话。分组下标就是确认回调里的
+    /// `IndexPath.section`：0 是命令，1 是会话。过滤不改变这个坐标。只读内存。
+    pub(crate) fn palette_groups(&self, cx: &App) -> (Vec<CommandInfo>, Vec<(String, usize)>) {
+        let commands = smelt_plugin_api::commands(cx)
+            .into_iter()
+            .filter(|command| command.palette)
+            .collect();
         let sessions = self
             .sessions
             .iter()
@@ -36,22 +32,36 @@ impl Workspace {
             .map(|(i, session)| {
                 (
                     format!("切换到: {}", Self::title_with_runtime(session, cx)),
-                    Cmd::SwitchTab(i),
+                    i,
                 )
             })
             .collect();
-        [commands, sessions]
+        (commands, sessions)
     }
 
-    pub(crate) fn exec_cmd(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
+    /// 面板里选了一个会话。
+    pub(crate) fn palette_switch_session(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_palette(window, cx);
-        match cmd {
-            Cmd::NewTab => self.new_tab(cx),
-            Cmd::OpenProject => self.open_project(cx),
-            Cmd::CloseTab => self.close_active(window, cx),
-            Cmd::NextTab => self.next_active(window, cx),
-            Cmd::PrevTab => self.prev_active(window, cx),
-            Cmd::SwitchTab(i) => self.activate(i, window, cx),
+        if ix < self.sessions.len() {
+            self.activate(ix, window, cx);
         }
     }
+}
+
+/// 面板里选了一条命令：先关面板（关面板会把焦点还给当前会话），再执行，命令自己挪的焦点
+/// 才不会被关面板盖掉。不能用 `CommandItem::action`：面板确认时先派发 action 再回调，
+/// 命令会跑在关面板之前。
+pub(crate) fn run_palette_command(
+    workspace: &Entity<Workspace>,
+    command: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    workspace.update(cx, |this, cx| this.close_palette(window, cx));
+    smelt_plugin_api::invoke(command, &serde_json::Value::Null, window, cx);
 }

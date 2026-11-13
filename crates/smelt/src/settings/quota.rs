@@ -4,10 +4,10 @@
 //! 侧栏隐藏没有额度的账户，所以被拒绝的账户只能在这里手动重试。
 
 use gpui::{App, Entity, Global};
+use smelt_app_state::provider_status_global::ProviderStatus;
 use smelt_model::control_api::{QuotaSetEnabled, QuotaSettingsGet};
 use smelt_model::quota_service::{QuotaProviderSetting, QuotaSetEnabledParams, QuotaTarget};
 use smelt_runtime_client::protocol::control::EmptyParams;
-use smelt_ui::provider_status_global::ProviderStatus;
 
 use super::remote::run_call;
 

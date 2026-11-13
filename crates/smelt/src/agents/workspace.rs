@@ -3,6 +3,14 @@
 //! 页面渲染在 `view.rs` / `automation_view.rs`。字段仍由 main.rs 的 Workspace 持有。
 use super::*;
 
+/// 能力库插件登记的视图 id。宿主不依赖那个插件，只按 id 找它。
+const CAPABILITIES_VIEW: &str = "capabilities";
+
+/// 能力库装着没有：没装就不画「管理」这类去能力库的入口。只读内存。
+pub(crate) fn capabilities_available(cx: &App) -> bool {
+    smelt_plugin_api::is_registered(CAPABILITIES_VIEW, cx)
+}
+
 impl Workspace {
     pub(crate) fn activate_workspace_tab(
         &mut self,
@@ -21,9 +29,8 @@ impl Workspace {
         }
         self.nav.set_active(tab);
         self.pop_active_tab_to_root();
-        if !self.active_tab().is_session() {
-            self.stage_cover = None;
-        }
+        // 这些页都画在舞台上：舞台得露出来。
+        self.show_view(crate::builtin_views::Builtin::Stage.id(), window, cx);
         window.focus(&self.focus_handle, cx);
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
@@ -35,9 +42,6 @@ impl Workspace {
             self.desktop = None;
         }
         self.nav.set_active(tab);
-        if !self.active_tab().is_session() {
-            self.stage_cover = None;
-        }
         self.schedule_visible_refresh(cx);
     }
 
@@ -49,9 +53,6 @@ impl Workspace {
             self.automation_surface.editor = None;
             self.automation_surface.selected_run_id = None;
         }
-        if self.active_tab().is_session() {
-            self.stage_cover = None;
-        }
     }
 
     pub(super) fn open_agent_product_route(
@@ -60,37 +61,41 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        debug_assert!(matches!(
-            route,
-            WorkspaceRoute::Agents | WorkspaceRoute::Automations | WorkspaceRoute::Capabilities
-        ));
-        if route == WorkspaceRoute::Agents {
-            settings::reload_agent_hosts(cx);
+        match route {
+            WorkspaceRoute::Agents => {
+                settings::reload_agent_hosts(cx);
+                self.activate_workspace_tab(route, window, cx);
+            }
+            WorkspaceRoute::Automations => self.activate_workspace_tab(route, window, cx),
+            WorkspaceRoute::Page(id) => {
+                self.open_page(&id, serde_json::Value::Null, window, cx);
+            }
+            WorkspaceRoute::Desktop | WorkspaceRoute::Session => {
+                debug_assert!(false, "侧栏产品入口不会开 {route:?}");
+                self.activate_workspace_tab(route, window, cx);
+            }
         }
-        self.activate_workspace_tab(route, window, cx);
     }
 
     pub(crate) fn open_agents_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_agent_product_route(WorkspaceRoute::Agents, window, cx);
     }
 
-    /// 直接打开能力库的某个页签，比如智能体编辑器里「插件 · 管理」。
+    /// 直接打开能力库的某个页签（`plugins`、`mcp`），比如智能体编辑器里「插件 · 管理」。
+    /// 能力库是插件，按视图 id 打开；没装就什么都不做（入口在没登记时不画，见
+    /// [`capabilities_available`]）。
     pub(crate) fn open_capabilities(
         &mut self,
-        tab: CapabilitiesTab,
+        tab: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.nav.set_capabilities_tab(tab);
-        self.open_agent_product_route(WorkspaceRoute::Capabilities, window, cx);
-    }
-
-    pub(super) fn select_capabilities_tab(&mut self, tab: CapabilitiesTab, cx: &mut Context<Self>) {
-        if self.nav.capabilities_tab() != tab {
-            self.nav.set_capabilities_tab(tab);
-            self.schedule_visible_refresh(cx);
-            cx.notify();
-        }
+        self.open_page(
+            CAPABILITIES_VIEW,
+            serde_json::json!({ "tab": tab }),
+            window,
+            cx,
+        );
     }
 
     /// 编辑器正开着的那个智能体在哪台机器上。编辑器里的修改只认它：只给 id 不知道
@@ -412,17 +417,64 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 请运行时重新扫描插件和 MCP。用户在设置里装完插件后不用重开编辑器；新快照到了
-    /// 会顺带更新打开着的编辑器。
+    /// 请运行时重新扫描插件和 MCP。用户在能力库里装完插件后不用重开编辑器。
     pub(super) fn refresh_agent_plugins(&mut self, cx: &mut Context<Self>) {
-        if let Some(runtime) = self
+        self.refresh_agent_pi_config(cx);
+    }
+
+    /// 那台机器上的 Pi 配置变了，或者重新连上了它：开着的编辑器属于那台机器就重读。
+    pub(crate) fn on_agent_pi_config_changed(
+        &mut self,
+        runtime: &crate::RuntimeKey,
+        cx: &mut Context<Self>,
+    ) {
+        if self
             .agent_surface
             .editor
             .as_ref()
-            .map(|e| e.agent.runtime.clone())
+            .is_some_and(|editor| editor.agent.runtime == *runtime)
         {
-            self.refresh_pi_config(runtime, cx);
+            self.refresh_agent_pi_config(cx);
         }
+    }
+
+    /// 向智能体那台机器读一次 Pi 配置给编辑器。回来时编辑器已经换了智能体，或者又发了
+    /// 一次读取，这份就丢掉。
+    fn refresh_agent_pi_config(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_surface.editor.as_mut() else {
+            return;
+        };
+        editor.pi.generation += 1;
+        let generation = editor.pi.generation;
+        let agent = editor.agent.clone();
+        let task = smelt_plugin_api::call::<smelt_model::control_api::PiConfigGet>(
+            &agent.runtime,
+            smelt_runtime_client::protocol::control::EmptyParams::default(),
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(editor) = this.agent_surface.editor.as_mut().filter(|editor| {
+                    editor.agent == agent && editor.pi.generation == generation
+                }) else {
+                    return;
+                };
+                match result {
+                    Ok(config) => {
+                        editor.pi.config = Some(config);
+                        editor.pi.error = None;
+                    }
+                    Err(error) => {
+                        eprintln!("[agents] 读取 Pi 配置失败：{error}");
+                        editor.pi.error = Some(format!("读取这台机器的 Pi 配置失败：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 向运行时重新取当前编辑器那个智能体的记忆。回来时编辑器已换人就丢掉。
@@ -866,22 +918,13 @@ impl Workspace {
         }));
 
         let memories = AgentMemories::default();
-        let pi_config = self.pi_config_on(&agent_ref.runtime);
-        let plugins = pi_config
-            .map(|config| config.plugins.clone())
-            .unwrap_or_default();
-        let mcp_servers = pi_config
-            .and_then(|config| config.mcp_servers.clone().ok())
-            .unwrap_or_default();
-        let runtime = agent_ref.runtime.clone();
         self.agent_surface.editor = Some(AgentEditor {
             agent: agent_ref,
             name,
             name_editing: false,
             instructions,
             context_link,
-            plugins,
-            mcp_servers,
+            pi: Default::default(),
             memories,
             tab: self
                 .agent_surface
@@ -894,7 +937,7 @@ impl Workspace {
             _subscriptions: subscriptions,
         });
         self.refresh_agent_memories(cx);
-        self.refresh_pi_config(runtime, cx);
+        self.refresh_agent_pi_config(cx);
         window.focus(&self.focus_handle, cx);
     }
 

@@ -8,9 +8,8 @@ use super::*;
 use smelt_event_protocol::FirstPartyClientKind;
 use smelt_event_protocol::{
     CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
-    CORE_CAPABILITY_SESSION_READ,
-    CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
-    EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, PluginId, ProtocolRange,
+    CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_SESSION_STATE_CHANGED,
+    Capability, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, PluginId, ProtocolRange,
     SubscribeErrorCode, SubscribeMessage, SubscribeRequest, SubscriptionDeclaration,
     SubscriptionId,
 };
@@ -173,6 +172,182 @@ fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
         )
         .expect("disconnect must remove the prior subscription");
     drop(replacement);
+}
+
+#[test]
+fn appearance_request_is_unicast_to_the_authenticated_local_subscription() {
+    use smelt_event_protocol::{
+        AppearanceApplyOutcome, AppearanceApplyRequested, CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
+        FirstPartyClientKind,
+    };
+    let event_hub = super::super::new_event_hub();
+    let mut request = request("appearance-desktop", CORE_TOPIC_SESSION_STATE_CHANGED);
+    request["subscription"]["topics"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(CORE_TOPIC_APPEARANCE_APPLY_REQUESTED));
+    let desktop = peer(123, None);
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker_hub = Arc::clone(&event_hub);
+    let worker_peer = desktop.clone();
+    let worker = thread::spawn(move || {
+        subscribe::handle_event_subscribe_with_peer(
+            server,
+            Some(&request),
+            Ok(auth::first_party_event_client(
+                FirstPartyClientKind::Desktop,
+            )),
+            Some(worker_peer),
+            &worker_hub,
+        )
+    });
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    assert!(matches!(
+        read_message(&mut reader),
+        SubscribeMessage::Snapshot { .. }
+    ));
+    let pending = event_hub
+        .appearance_requests
+        .dispatch(std::collections::BTreeMap::from([(
+            "appearance.theme".into(),
+            serde_json::json!("unknown theme"),
+        )]))
+        .unwrap();
+    let SubscribeMessage::Event { envelope, .. } = read_message(&mut reader) else {
+        panic!("expected appearance request");
+    };
+    assert_eq!(
+        envelope.topic.as_str(),
+        CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+    );
+    let request: AppearanceApplyRequested = serde_json::from_value(envelope.payload).unwrap();
+    event_hub
+        .appearance_requests
+        .respond(
+            &desktop,
+            &request.request_id,
+            AppearanceApplyOutcome::Invalid {
+                message: "未知主题".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(pending.wait(Duration::from_secs(1)),
+        Err(crate::appearance_requests::RequestError::Invalid(message)) if message == "未知主题"));
+    client.shutdown(Shutdown::Both).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn appearance_subscription_is_rejected_without_local_peer() {
+    use smelt_event_protocol::{CORE_TOPIC_APPEARANCE_APPLY_REQUESTED, FirstPartyClientKind};
+    let event_hub = super::super::new_event_hub();
+    let request = request("remote-appearance", CORE_TOPIC_APPEARANCE_APPLY_REQUESTED);
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker = thread::spawn(move || {
+        handle_event_subscribe(
+            server,
+            Some(&request),
+            Ok(auth::first_party_event_client(
+                FirstPartyClientKind::Desktop,
+            )),
+            &event_hub,
+        )
+    });
+    let mut reader = BufReader::new(client);
+    assert!(matches!(
+        read_message(&mut reader),
+        SubscribeMessage::Error { .. }
+    ));
+    worker.join().unwrap();
+}
+
+/// origin/main（协议 v7）`DaemonStateEventClient::new` 发出的订阅请求原样：协议范围
+/// `MIN_SUPPORTED(6)..=7`，订阅 id 为 `desktop-<uuid simple>`，topic 按
+/// `SubscriptionShape::topics()` 的固定顺序。这里写字面量，避免测试随当前代码改动而变形。
+fn v7_subscribe_request(topics: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": { "min": 6, "max": 7 },
+        "subscription": {
+            "id": "desktop-0123456789abcdef0123456789abcdef",
+            "topics": topics,
+        },
+    })
+}
+
+/// v7 `SubscriptionShape::CATALOG`（手机目录）。
+const V7_CATALOG_TOPICS: &[&str] = &[
+    "session.state_changed",
+    "session.removed",
+    "workspace.changed",
+    "automations.changed",
+];
+
+/// v7 `SubscriptionShape::DESKTOP`（桌面核心订阅），含旧话题 `appearance.change_requested`。
+const V7_DESKTOP_TOPICS: &[&str] = &[
+    "session.state_changed",
+    "session.removed",
+    "workspace.changed",
+    "automations.changed",
+    "conversation.wake_requested",
+    "appearance.change_requested",
+    "project.changed",
+    "agent_memory.changed",
+    "terminal.notification",
+    "terminal.progress",
+];
+
+/// v7 客户端身份恒为桌面第一方（见 origin/main `DaemonStateEventClient::new`）。
+fn expect_v7_snapshot(request: serde_json::Value, local_peer: Option<PeerIdentity>) {
+    let event_hub = super::super::new_event_hub();
+    let (server, client) = RuntimeStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker = thread::spawn(move || {
+        subscribe::handle_event_subscribe_with_peer(
+            server,
+            Some(&request),
+            Ok(auth::first_party_event_client(
+                smelt_event_protocol::FirstPartyClientKind::Desktop,
+            )),
+            local_peer,
+            &event_hub,
+        )
+    });
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    let message = read_message(&mut reader);
+    assert!(
+        matches!(message, SubscribeMessage::Snapshot { .. }),
+        "v7 subscription must be accepted, got {message:?}"
+    );
+    client.shutdown(Shutdown::Both).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn v7_mobile_catalog_subscription_connects_to_new_runtime() {
+    // 手机走远程配对：`handle_event_subscribe_op` 按桌面第一方身份、无本机对端处理。
+    expect_v7_snapshot(v7_subscribe_request(V7_CATALOG_TOPICS), None);
+}
+
+#[test]
+fn v7_local_desktop_core_subscription_connects_to_new_runtime() {
+    expect_v7_snapshot(
+        v7_subscribe_request(V7_DESKTOP_TOPICS),
+        Some(peer(123, None)),
+    );
+}
+
+#[test]
+fn v7_remote_desktop_core_subscription_connects_to_new_runtime() {
+    // 已配对的另一台旧桌面经远程通道接入，同样没有本机对端。
+    expect_v7_snapshot(v7_subscribe_request(V7_DESKTOP_TOPICS), None);
 }
 
 #[test]

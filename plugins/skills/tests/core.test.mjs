@@ -1,4 +1,4 @@
-// core.js 的磁盘逻辑测试。在仓库根目录跑：node --test plugins/skills/tests/
+// core.js 的磁盘逻辑测试。在仓库根目录跑：node --test plugins/skills/tests/core.test.mjs
 // 宿主模块换成同目录下的 Node 实现，每个用例在临时目录里造一个用户主目录。
 
 import { test } from "node:test";
@@ -10,7 +10,7 @@ import { registerHooks } from "node:module";
 
 const SHIMS = {
   "smelt-fs": new URL("./smelt-fs.mjs", import.meta.url).href,
-  "smelt-workspace": new URL("./smelt-workspace.mjs", import.meta.url).href,
+  "smelt-plugin-api": new URL("./smelt-plugin-api.mjs", import.meta.url).href,
 };
 
 registerHooks({

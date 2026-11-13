@@ -1,7 +1,8 @@
-# 共享 GPUI UI 基建：主 GUI 和未来的 acp-view 渲染层都要用的一批组件/工具
-# （语义色板、markdown+mermaid 渲染、@/ 补全、ACP agent UI 偏好数据模型）。
+# 共享 GPUI UI 基建：主 GUI 和 acp-view 渲染层都要用的一批组件/工具
+# （语义色板、markdown+mermaid 渲染、@/ 补全）。
 # 允许引 GPUI（跟 smelt-core 的边界不同）——这里不是 GUI 无关的纯逻辑，而是
 # 「不属于哪个具体页面、被多处复用」的 UI 层基建。
+# 只放界面：不依赖客户端库和运行时客户端，跨功能共享的状态在 smelt-app-state。
 [package]
 name = "smelt-ui"
 version.workspace = true
@@ -11,14 +12,9 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-smelt-sys = { path = "../smelt-sys" }
 smelt-model = { path = "../smelt-model" }
-smelt-client = { path = "../smelt-client" }
-smelt-runtime-client = { path = "../smelt-runtime-client" }
-smelt-client-store = { path = "../smelt-client-store" }
-# 智能体配置的修改按顺序排队提交给运行时（agent_host_state）。
+# 异步里等全局状态到位（global_wait）。
 smol = "2"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
@@ -45,9 +41,6 @@ url = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
-# 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
-smelt-core = { path = "../smelt-core" }
-smelt-store = { path = "../smelt-store" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
 

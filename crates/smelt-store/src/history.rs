@@ -84,20 +84,3 @@ pub(crate) fn read_history_agent_bindings(
     rows.collect::<Result<BTreeMap<_, _>, _>>()
         .map_err(StoreError::from)
 }
-
-pub(crate) fn write_history_agent_binding(
-    transaction: &Transaction<'_>,
-    agent: &str,
-    profile_id: &str,
-    resume_id: &str,
-    agent_definition_id: &str,
-) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(agent, profile_id, resume_id) DO UPDATE SET
-           agent_definition_id = excluded.agent_definition_id",
-        params![agent, profile_id, resume_id, agent_definition_id],
-    )?;
-    Ok(())
-}

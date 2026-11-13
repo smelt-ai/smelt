@@ -1888,6 +1888,17 @@ pub const MIGRATE_V38_TO_V39: &str = "
 ALTER TABLE session_group ADD COLUMN closed_workset_root TEXT;
 ";
 
+/// v40：补齐由运行时维护的历史智能体归属。
+pub const MIGRATE_V39_TO_V40: &str = "
+INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
+SELECT agent, COALESCE(profile_id, ''), TRIM(history_session_id), TRIM(agent_definition_id)
+FROM acp_detail
+WHERE TRIM(COALESCE(history_session_id, '')) != ''
+  AND TRIM(COALESCE(agent_definition_id, '')) != ''
+ON CONFLICT(agent, profile_id, resume_id) DO UPDATE SET
+  agent_definition_id = excluded.agent_definition_id;
+";
+
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。
 pub const MIGRATE_V29_TO_V30: &str = "
 CREATE TABLE push_registration (

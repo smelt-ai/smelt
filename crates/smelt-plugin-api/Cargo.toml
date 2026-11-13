@@ -1,0 +1,30 @@
+# 插件和宿主之间唯一的接口（设计见 docs/app-plugins.md）。宿主 crate `smelt` 实现它，
+# 内置插件 crate（crates/plugins/*）只依赖它和 gpui 组件库：插件要用的协议类型、共用
+# 界面由这里再导出。`js` 特性把同一套接口映射成 JS 插件导入的 `smelt-plugin-api` 模块，
+# 只有宿主开它（插件 crate 用不着 gpui-shell）。
+[package]
+name = "smelt-plugin-api"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-model = { path = "../smelt-model" }
+smelt-client = { path = "../smelt-client" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-ui = { path = "../smelt-ui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
+futures-channel = { version = "0.3", optional = true }
+gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", default-features = false, features = ["quickjs", "components"], optional = true }
+
+[features]
+js = ["dep:gpui-shell", "dep:futures-channel"]
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+smol = "2"

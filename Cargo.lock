@@ -6246,9 +6246,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -9890,9 +9890,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -10916,18 +10916,24 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-acp-view",
+ "smelt-app-state",
+ "smelt-capabilities",
  "smelt-cli",
  "smelt-client",
  "smelt-client-store",
  "smelt-core",
  "smelt-event-protocol",
+ "smelt-history",
  "smelt-iroh",
+ "smelt-layouts",
  "smelt-model",
  "smelt-pairing",
  "smelt-paths",
+ "smelt-plugin-api",
  "smelt-runtime-client",
  "smelt-store",
  "smelt-sys",
+ "smelt-themes",
  "smelt-ui",
  "smelt-version",
  "smol",
@@ -10950,6 +10956,7 @@ dependencies = [
  "gpui-pre",
  "serde",
  "serde_json",
+ "smelt-app-state",
  "smelt-client",
  "smelt-core",
  "smelt-model",
@@ -10958,6 +10965,28 @@ dependencies = [
  "smelt-ui",
  "smol",
  "uuid",
+]
+
+[[package]]
+name = "smelt-app-state"
+version = "0.0.0"
+dependencies = [
+ "gpui-pre",
+ "serde_json",
+ "smelt-client",
+ "smelt-client-store",
+ "smelt-model",
+ "smelt-runtime-client",
+ "smol",
+]
+
+[[package]]
+name = "smelt-capabilities"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
 ]
 
 [[package]]
@@ -11085,6 +11114,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-history"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "smelt-plugin-api",
+]
+
+[[package]]
 name = "smelt-iroh"
 version = "0.0.0"
 dependencies = [
@@ -11102,6 +11141,14 @@ dependencies = [
  "smelt-runtime-client",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "smelt-layouts"
+version = "0.0.0"
+dependencies = [
+ "gpui-pre",
+ "smelt-plugin-api",
 ]
 
 [[package]]
@@ -11123,6 +11170,7 @@ dependencies = [
  "smelt-paths",
  "smelt-runtime-client",
  "tempfile",
+ "url",
  "uuid",
 ]
 
@@ -11140,6 +11188,23 @@ dependencies = [
  "dirs 5.0.1",
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "smelt-plugin-api"
+version = "0.0.0"
+dependencies = [
+ "futures-channel",
+ "gpui-component",
+ "gpui-pre",
+ "gpui-shell",
+ "serde",
+ "serde_json",
+ "smelt-client",
+ "smelt-model",
+ "smelt-runtime-client",
+ "smelt-ui",
+ "smol",
 ]
 
 [[package]]
@@ -11213,6 +11278,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-themes"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
+]
+
+[[package]]
 name = "smelt-ui"
 version = "0.0.0"
 dependencies = [
@@ -11225,16 +11299,9 @@ dependencies = [
  "image",
  "merman",
  "rustybuzz",
- "serde",
  "serde_json",
  "sha2 0.11.1",
- "smelt-client",
- "smelt-client-store",
- "smelt-core",
  "smelt-model",
- "smelt-runtime-client",
- "smelt-store",
- "smelt-sys",
  "smol",
  "url",
  "usvg 0.46.0",

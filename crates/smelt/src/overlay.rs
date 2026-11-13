@@ -26,7 +26,6 @@ pub(crate) enum ModalLayer {
     DiscardAll,
     DeleteBranch,
     DeleteFile,
-    DeleteHistory,
     DeleteAgentMemory,
     DeleteAgent,
     DeleteAutomation,
@@ -52,7 +51,6 @@ impl ModalLayer {
             Self::DiscardAll => 6,
             Self::DeleteBranch => 7,
             Self::DeleteFile => 8,
-            Self::DeleteHistory => 9,
             Self::DeleteAgentMemory => 10,
             Self::DeleteAgent => 11,
             Self::DeleteAutomation => 12,
@@ -138,11 +136,6 @@ impl Workspace {
             &mut rank,
             self.delete_file_target.is_some(),
             ModalLayer::DeleteFile.rank(),
-        );
-        raise(
-            &mut rank,
-            self.delete_history_target.is_some(),
-            ModalLayer::DeleteHistory.rank(),
         );
         raise(
             &mut rank,
@@ -351,7 +344,6 @@ impl Workspace {
             || self.discard_all_target.is_some()
             || self.delete_branch_target.is_some()
             || self.delete_file_target.is_some()
-            || self.delete_history_target.is_some()
             || self.agent_surface.pending_delete.is_some()
             || self.agent_surface.pending_memory_delete.is_some()
             || self.automation_surface.pending_delete.is_some()
@@ -372,7 +364,6 @@ impl Workspace {
             self.discard_all_target = None;
             self.delete_branch_target = None;
             self.delete_file_target = None;
-            self.delete_history_target = None;
             self.agent_surface.pending_delete = None;
             self.agent_surface.pending_memory_delete = None;
             self.automation_surface.pending_delete = None;
@@ -391,79 +382,90 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.sync_main_modal_focus(window, cx);
-        let palette_overlay =
-            self.palette.as_ref().map(|state| {
-                let [commands, sessions] = self.palette_groups(cx);
-                let command_cmds: Vec<Cmd> = commands.iter().map(|(_, cmd)| cmd.clone()).collect();
-                let session_cmds: Vec<Cmd> = sessions.iter().map(|(_, cmd)| cmd.clone()).collect();
-                let host = cx.entity().downgrade();
-                let confirm_host = host.clone();
-                let command_group = gpui_component::command::CommandGroup::new()
-                    .label("命令")
-                    .items(commands.into_iter().map(|(label, _)| {
-                        gpui_component::command::CommandItem::new().label(label)
-                    }));
-                let session_group = gpui_component::command::CommandGroup::new()
+        let palette_overlay = self.palette.as_ref().map(|state| {
+            let (commands, sessions) = self.palette_groups(cx);
+            let command_ids: Vec<SharedString> =
+                commands.iter().map(|command| command.id.clone()).collect();
+            let session_ixs: Vec<usize> = sessions.iter().map(|(_, ix)| *ix).collect();
+            let host = cx.entity().downgrade();
+            let confirm_host = host.clone();
+            let command_group = gpui_component::command::CommandGroup::new()
+                .label("命令")
+                .items(commands.into_iter().map(|command| {
+                    gpui_component::command::CommandItem::new()
+                        .label(command.title)
+                        .keywords([command.group, command.id])
+                }));
+            let session_group =
+                gpui_component::command::CommandGroup::new()
                     .label("切换会话")
                     .items(sessions.into_iter().map(|(label, _)| {
                         gpui_component::command::CommandItem::new().label(label)
                     }));
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .justify_center()
-                    .pt(px(80.))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
-                    )
-                    .child(
-                        div()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .w(px(520.))
-                            .h(px(360.))
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
-                            .bg(ui_theme::glass_floating())
-                            .border_1()
-                            .border_color(ui_theme::overlay(0x22))
-                            .rounded(ui_theme::composer_radius())
-                            .shadow_lg()
-                            .child(
-                                gpui_component::command::Command::new(state)
-                                    .group(command_group)
-                                    .group(session_group)
-                                    .placeholder("想做什么？")
-                                    .bordered(false)
-                                    .max_h(px(360.))
-                                    .size_full()
-                                    .on_confirm(move |index, window, cx| {
-                                        // 回调被推迟到这次更新结束后。用打开这一帧的快照，
-                                        // 避免中途重建把下标对到另一条命令上。
-                                        let cmd = match index.section {
-                                            0 => command_cmds.get(index.row).cloned(),
-                                            1 => session_cmds.get(index.row).cloned(),
-                                            _ => None,
-                                        };
-                                        let Some(cmd) = cmd else {
-                                            return;
-                                        };
-                                        let Some(host) = confirm_host.upgrade() else {
-                                            return;
-                                        };
-                                        host.update(cx, |this, cx| this.exec_cmd(cmd, window, cx));
-                                    })
-                                    .on_cancel(move |window, cx| {
-                                        let Some(host) = host.upgrade() else {
-                                            return;
-                                        };
-                                        host.update(cx, |this, cx| this.close_palette(window, cx));
-                                    }),
-                            ),
-                    )
-            });
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .pt(px(80.))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                )
+                .child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .w(px(520.))
+                        .h(px(360.))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .bg(ui_theme::glass_floating())
+                        .border_1()
+                        .border_color(ui_theme::overlay(0x22))
+                        .rounded(ui_theme::composer_radius())
+                        .shadow_lg()
+                        .child(
+                            gpui_component::command::Command::new(state)
+                                .group(command_group)
+                                .group(session_group)
+                                .placeholder("想做什么？")
+                                .bordered(false)
+                                .max_h(px(360.))
+                                .size_full()
+                                .on_confirm(move |index, window, cx| {
+                                    // 回调被推迟到这次更新结束后。用打开这一帧的快照，
+                                    // 避免中途重建把下标对到另一条命令上。
+                                    let Some(host) = confirm_host.upgrade() else {
+                                        return;
+                                    };
+                                    match index.section {
+                                        0 => {
+                                            if let Some(id) = command_ids.get(index.row) {
+                                                crate::workspace_palette::run_palette_command(
+                                                    &host, id, window, cx,
+                                                );
+                                            }
+                                        }
+                                        1 => {
+                                            if let Some(&ix) = session_ixs.get(index.row) {
+                                                host.update(cx, |this, cx| {
+                                                    this.palette_switch_session(ix, window, cx)
+                                                });
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                })
+                                .on_cancel(move |window, cx| {
+                                    let Some(host) = host.upgrade() else {
+                                        return;
+                                    };
+                                    host.update(cx, |this, cx| this.close_palette(window, cx));
+                                }),
+                        ),
+                )
+        });
 
         let preview_render = self
             .acp_image_preview
@@ -580,11 +582,6 @@ impl Workspace {
                 self.delete_file_target
                     .is_some()
                     .then(|| self.render_delete_file_confirm(cx)),
-            )
-            .children(
-                self.delete_history_target
-                    .is_some()
-                    .then(|| self.render_delete_history_confirm(cx)),
             )
             .children(
                 self.agent_surface

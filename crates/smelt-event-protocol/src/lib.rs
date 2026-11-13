@@ -13,7 +13,9 @@
 //! - **读得了就不抬最低版本**：[`MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION`] 不跟着当前版本
 //!   走，新客户端读得了的旧运行时照常连，个别功能不对等它升级。读不了（形状变了、没法宽容
 //!   读取）才抬，旧运行时判为过旧、请它升级。不为旧运行时写专门的兼容分支。
-//! - **加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会反复重连。
+//! - **核心订阅加话题也要升**：运行时遇到不认识的话题会拒掉整个订阅，新客户端连旧运行时只会
+//!   反复重连。不升版本的新话题只能放进单独的一条订阅（见 [`PiConfigChanged`]）：旧运行时拒掉
+//!   的只是那一条，客户端不重试，那项功能在这台机器上不可用。
 //! - **其余枚举加值也要升**：它们解不出会让整条消息失败，比如相位、自动化状态。相位还决定客户端
 //!   怎么判断会话在不在忙，没有安全的兜底含义。
 //! - **请求不宽容**：订阅请求和 `ConversationInput` 保持严格。旧运行时要是忽略新字段，用户的
@@ -48,6 +50,9 @@ use std::{fmt, str::FromStr};
 /// 去掉 `projection_version`。v6 的客户端严格解码，读不了这一版运行时的载荷，所以运行时要
 /// 升版拦住它们。反过来 v7 的客户端读得了 v6 运行时：多出来的 `projection_version` 忽略，
 /// 没带的字段读成缺省。
+///
+/// 带回执的外观修改（[`CORE_TOPIC_APPEARANCE_APPLY_REQUESTED`]）加在 v7 之后，没有升版本：
+/// 它只走单独的一条订阅，核心订阅仍是 v7 的 `appearance.change_requested`。
 pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 7;
 /// 客户端接受的最低运行时版本，见模块文档「读得了就不抬最低版本」。
 pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 6;
@@ -69,13 +74,25 @@ pub const CORE_TOPIC_AUTOMATIONS_CHANGED: &str = "automations.changed";
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
 pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requested";
 /// 项目目录里的文件变了（已滤掉构建产物、依赖目录）。只在客户端用 `project.watch`
-/// 关注过的项目上发；客户端据此重取 git 状态、文件树。
+/// 关注过的项目上发；客户端据此重取 git 状态、文件树。用 `git.watch_head` 关注过的
+/// 目录，所在仓库切了分支时也发，`root` 是当初登记的那个目录。
 pub const CORE_TOPIC_PROJECT_CHANGED: &str = "project.changed";
 /// 智能体的记忆目录里有文件变了。只在客户端用 `agent.memory.watch` 关注过的智能体上发；
 /// 客户端据此重取记忆列表。
 pub const CORE_TOPIC_AGENT_MEMORY_CHANGED: &str = "agent_memory.changed";
-/// CLI / Control API 要改外观。外观归客户端，运行时只校验后转给在线的桌面端。
+/// 某台机器上 Pi 的配置变了（模型、凭据、MCP、插件），载荷 [`PiConfigChanged`]。不进
+/// 核心订阅，见模块文档。
+pub const CORE_TOPIC_PI_CONFIG_CHANGED: &str = "pi_config.changed";
+/// 某台机器上 agent 的历史存档经运行时改过（改名、删除、记下所属智能体），载荷
+/// [`HistoryChanged`]。不进核心订阅，同 [`CORE_TOPIC_PI_CONFIG_CHANGED`]。
+pub const CORE_TOPIC_HISTORY_CHANGED: &str = "history.changed";
+/// v7 核心话题：CLI / Control API 要改外观，载荷 [`AppearanceChangeRequested`]。外观归客户端，
+/// 运行时只校验后转给在线的桌面端。
 pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
+/// 带回执的外观修改，载荷 [`AppearanceApplyRequested`]，桌面用 [`AppearanceApplyReceipt`]
+/// 回执。加在 v7 之后、没有升版本，所以不进核心订阅，只放在单独的一条订阅里（同
+/// [`PiConfigChanged`]），不认识该话题的旧运行时只会拒掉那一条。
+pub const CORE_TOPIC_APPEARANCE_APPLY_REQUESTED: &str = "appearance.apply_requested";
 /// 终端里的程序用 OSC 9 / 99 / 777 发了一条通知。运行时在 PTY 字节流上扫一次，
 /// 会话已有结构化 hook 事件时不发；没人连着时发生的就丢了，不补。
 pub const CORE_TOPIC_TERMINAL_NOTIFICATION: &str = "terminal.notification";
@@ -488,6 +505,23 @@ pub struct AgentMemoryChanged {
     pub agent_id: Option<String>,
 }
 
+/// 经运行时改了 Pi 的配置：谁改的都发（桌面、手机、命令行），读的一方据此重取
+/// `pi.config.get`，不靠改的那一方去通知别人。绕过运行时的修改（手改配置文件、直接用 `pi`
+/// 命令行）不在内。没有字段：读的一方重取自己关心的那部分。删插件、MCP 服务器时运行时还会清掉
+/// 各智能体对它的勾选，所以缓存了智能体配置的一方也要重取 `agent.host.get`。
+///
+/// 这个话题加在事件协议 v7 之后、没有升版本，所以只放在单独的一条订阅里，v7 的运行时会拒掉
+/// 那一条。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PiConfigChanged {}
+
+/// 经运行时改了历史存档：谁改的都发，读的一方据此重取 `history.list`。agent 自己往存档里
+/// 写新会话不在内（运行时不盯存档目录）。没有字段：读的一方重取自己在看的那几份列表。
+///
+/// 加在事件协议 v7 之后、没有升版本，所以单独占一条订阅，旧运行时只会拒掉那一条。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryChanged {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalNotification {
     pub session_id: String,
@@ -525,10 +559,32 @@ pub struct TerminalProgressChanged {
     pub progress: Option<TerminalProgress>,
 }
 
+/// v7 话题 [`CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED`] 的载荷，形状不能动。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppearanceChangeRequested {
     /// 已由运行时按可脚本目录校验过的外观键值。
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// 单播给本机桌面的外观修改（独立订阅）；请求 id 用来关联回执。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AppearanceApplyRequested {
+    pub request_id: String,
+    pub settings: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AppearanceApplyOutcome {
+    Applied,
+    Invalid { message: String },
+    Failed { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppearanceApplyReceipt {
+    pub request_id: String,
+    pub outcome: AppearanceApplyOutcome,
 }
 
 pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError> {
@@ -587,6 +643,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             4 * 1024,
         )?,
         descriptor(
+            CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
+            CORE_CAPABILITY_APPEARANCE_CONTROL,
+            None,
+            4 * 1024,
+        )?,
+        descriptor(
             CORE_TOPIC_PROJECT_CHANGED,
             CORE_CAPABILITY_WORKSPACE_READ,
             None,
@@ -597,6 +659,18 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_CAPABILITY_WORKSPACE_READ,
             None,
             4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_PI_CONFIG_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_HISTORY_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            1024,
         )?,
         // 正文最多 4096 字节（扫描器上限），JSON 转义后可能翻倍。
         descriptor(
@@ -887,7 +961,11 @@ mod tests {
                 CORE_SESSION_STATE_SCHEMA_VERSION,
             ),
             (CORE_TOPIC_SESSION_REMOVED, Some(CORE_SNAPSHOT_SESSIONS), 1),
-            (CORE_TOPIC_WORKSPACE_CHANGED, Some(CORE_SNAPSHOT_WORKSPACE), 1),
+            (
+                CORE_TOPIC_WORKSPACE_CHANGED,
+                Some(CORE_SNAPSHOT_WORKSPACE),
+                1,
+            ),
             (
                 CORE_TOPIC_AUTOMATIONS_CHANGED,
                 Some(CORE_SNAPSHOT_AUTOMATIONS),
@@ -895,8 +973,11 @@ mod tests {
             ),
             (CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, None, 1),
             (CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, None, 1),
+            (CORE_TOPIC_APPEARANCE_APPLY_REQUESTED, None, 1),
             (CORE_TOPIC_PROJECT_CHANGED, None, 1),
             (CORE_TOPIC_AGENT_MEMORY_CHANGED, None, 1),
+            (CORE_TOPIC_PI_CONFIG_CHANGED, None, 1),
+            (CORE_TOPIC_HISTORY_CHANGED, None, 1),
             (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
             (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
         ];
@@ -914,6 +995,42 @@ mod tests {
                     .map(|kind| kind.0.as_str()),
                 snapshot,
                 "{topic}"
+            );
+        }
+    }
+
+    /// v7 外观载荷的线上形状：只有 `settings`，不带 `request_id`。
+    #[test]
+    fn legacy_appearance_change_payload_keeps_v7_shape() {
+        assert_eq!(EVENT_BUS_PROTOCOL_VERSION, 7);
+        assert_eq!(
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+            "appearance.change_requested"
+        );
+        let payload = json!({ "settings": { "theme": "dark" } });
+        let request: AppearanceChangeRequested = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), payload);
+    }
+
+    #[test]
+    fn appearance_receipts_round_trip_success_and_failures() {
+        for outcome in [
+            AppearanceApplyOutcome::Applied,
+            AppearanceApplyOutcome::Invalid {
+                message: "未知主题".into(),
+            },
+            AppearanceApplyOutcome::Failed {
+                message: "保存失败".into(),
+            },
+        ] {
+            let receipt = AppearanceApplyReceipt {
+                request_id: "request-1".into(),
+                outcome,
+            };
+            let encoded = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(
+                serde_json::from_value::<AppearanceApplyReceipt>(encoded).unwrap(),
+                receipt
             );
         }
     }

@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.23"
 # 离线缓存（会话列表、最近对话的尾部）。业务持久化统一用 SQLite；bundled 自带源码，
 # iOS / Android 都能编，不依赖系统库版本。
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 # 文件预览的语法高亮。syntect 解析 Sublime / TextMate 语法，two-face 补上 bat 那套语法
 # （TypeScript、TOML、Kotlin、Swift、Dart、Vue 等 syntect 自带的没有）。正则用 oniguruma：

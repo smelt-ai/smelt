@@ -23,24 +23,54 @@ pub fn get_settings_on(store: &smelt_store::Store) -> Result<SettingsResult, Set
     })
 }
 
-pub fn update_settings_on(
-    store: &smelt_store::Store,
-    patch: SettingsPatch,
-) -> Result<SettingsUpdate, SettingsError> {
+/// 外观和记忆归不同的库，不能在同一个补丁里原子提交。
+fn reject_mixed_patch(patch: &SettingsPatch) -> Result<(), SettingsError> {
+    let has_memory = patch
+        .settings
+        .keys()
+        .any(|key| crate::memory_settings::is_memory_key(key));
+    let has_other = patch
+        .settings
+        .keys()
+        .any(|key| !crate::memory_settings::is_memory_key(key));
+    if has_memory && has_other {
+        return Err(SettingsError::Invalid("外观和记忆设置请分两次提交".into()));
+    }
+    Ok(())
+}
+
+/// 一个补丁拆成的两份：记忆的、外观的。
+type SplitPatch = (
+    BTreeMap<String, serde_json::Value>,
+    BTreeMap<String, serde_json::Value>,
+);
+
+/// 不碰库就能做完的检查：空补丁、混合补丁、外观的形状。坏输入就报坏输入，不因为库
+/// 打不开报成别的错。
+fn check_patch(patch: SettingsPatch) -> Result<SplitPatch, SettingsError> {
     if patch.settings.is_empty() {
         return Err(SettingsError::Invalid("没有要更新的设置".into()));
     }
-    let (memory, appearance): (BTreeMap<_, _>, BTreeMap<_, _>) = patch
+    reject_mixed_patch(&patch)?;
+    let (memory, appearance): SplitPatch = patch
         .settings
         .into_iter()
         .partition(|(key, _)| crate::memory_settings::is_memory_key(key));
-    // 外观先在出厂外观上演算一遍：键名、取值范围、主题名在这里就拒掉，坏请求不转给
-    // 客户端；也保证一个补丁要么整体生效，要么什么都没写。
-    if !appearance.is_empty() {
-        apply_patch(&mut default_snapshot(), &appearance)?;
-    }
-    for (key, value) in &memory {
-        crate::memory_settings::apply_on(store, key, value).map_err(SettingsError::Invalid)?;
+    // 外观只校验形状：主题目录（含插件主题）只有桌面知道，主题名是否存在、明暗
+    // 换到哪个同族主题由桌面用 `apply_patch` 按它的目录判定。
+    validate_patch(&appearance)?;
+    Ok((memory, appearance))
+}
+
+/// 写记忆、读回快照。外观补丁也要读快照（方法总是回带运行时的设置），而且必须在
+/// 调用方把外观转给桌面之前读：桌面改了就撤不回，读库失败放在那之后会把已经生效的
+/// 修改报成失败。
+fn apply_on(
+    store: &smelt_store::Store,
+    (memory, appearance): SplitPatch,
+) -> Result<SettingsUpdate, SettingsError> {
+    if !memory.is_empty() {
+        crate::memory_settings::apply_patch_on(store, &memory).map_err(SettingsError::Invalid)?;
     }
     Ok(SettingsUpdate {
         result: get_settings_on(store)?,
@@ -48,12 +78,21 @@ pub fn update_settings_on(
     })
 }
 
+pub fn update_settings_on(
+    store: &smelt_store::Store,
+    patch: SettingsPatch,
+) -> Result<SettingsUpdate, SettingsError> {
+    apply_on(store, check_patch(patch)?)
+}
+
 pub fn get_settings() -> Result<SettingsResult, SettingsError> {
     get_settings_on(&default_store()?)
 }
 
+/// 先查完输入再开库，见 [`check_patch`]。
 pub fn update_settings(patch: SettingsPatch) -> Result<SettingsUpdate, SettingsError> {
-    update_settings_on(&default_store()?, patch)
+    let split = check_patch(patch)?;
+    apply_on(&default_store()?, split)
 }
 
 fn default_store() -> Result<smelt_store::Store, SettingsError> {
@@ -74,13 +113,26 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_are_rejected_before_anything_is_written() {
+    fn unknown_keys_are_rejected() {
+        let (_dir, store) = open_store();
+        let error = update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([("appearance.nope".into(), json!("x"))]),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SettingsError::Invalid(_)));
+    }
+
+    #[test]
+    fn mixed_memory_and_appearance_are_rejected_without_writing() {
         let (_dir, store) = open_store();
         let error = update_settings_on(
             &store,
             SettingsPatch {
                 settings: BTreeMap::from([
-                    ("appearance.nope".into(), json!("x")),
+                    (THEME_NAME.into(), json!("Some Plugin Theme")),
                     (
                         crate::memory_settings::EMBEDDING_MODEL.into(),
                         json!("bge-m3"),
@@ -89,12 +141,88 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(error, SettingsError::Invalid(_)));
+        assert!(matches!(error, SettingsError::Invalid(ref message) if message.contains("分两次")));
         assert_eq!(
             get_settings_on(&store).unwrap().settings[crate::memory_settings::EMBEDDING_MODEL],
-            "",
-            "补丁里有坏键时，记忆配置也不能写进去"
+            ""
         );
+    }
+
+    /// 默认库入口也要拒绝混合补丁。测试进程不启用默认库：报的是输入错，就说明检查在
+    /// 开库之前。
+    #[test]
+    fn default_entry_rejects_mixed_patch() {
+        let error = update_settings(SettingsPatch {
+            settings: BTreeMap::from([
+                (THEME_NAME.into(), json!("Some Plugin Theme")),
+                (
+                    crate::memory_settings::EMBEDDING_MODEL.into(),
+                    json!("bge-m3"),
+                ),
+            ]),
+        })
+        .unwrap_err();
+        assert!(matches!(error, SettingsError::Invalid(ref message) if message.contains("分两次")));
+    }
+
+    /// 外观形状不对同样在开库之前报出来，不被库打不开盖住。
+    #[test]
+    fn default_entry_validates_appearance_before_opening_store() {
+        let error = update_settings(SettingsPatch {
+            settings: BTreeMap::from([(THEME_MODE.into(), json!("purple"))]),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, SettingsError::Invalid(ref message) if message.contains("dark 或 light")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn memory_patch_is_atomic_when_a_later_field_is_invalid() {
+        let (_dir, store) = open_store();
+        let error = update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([
+                    (
+                        crate::memory_settings::EMBEDDING_API_KEY.into(),
+                        json!("secret"),
+                    ),
+                    (
+                        crate::memory_settings::EMBEDDING_BASE_URL.into(),
+                        json!("invalid"),
+                    ),
+                ]),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SettingsError::Invalid(_)));
+        assert_eq!(crate::memory_settings::load_on(&store).unwrap().api_key, "");
+    }
+
+    #[test]
+    fn memory_patch_updates_multiple_fields() {
+        let (_dir, store) = open_store();
+        update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([
+                    (
+                        crate::memory_settings::EMBEDDING_BASE_URL.into(),
+                        json!("https://example.com/v1"),
+                    ),
+                    (
+                        crate::memory_settings::EMBEDDING_MODEL.into(),
+                        json!("bge-m3"),
+                    ),
+                ]),
+            },
+        )
+        .unwrap();
+        let saved = crate::memory_settings::load_on(&store).unwrap();
+        assert_eq!(saved.base_url, "https://example.com/v1");
+        assert_eq!(saved.model, "bge-m3");
     }
 
     /// 外观不进运行时的库：校验过的改动原样交给调用方转给客户端。
@@ -116,34 +244,39 @@ mod tests {
         assert!(!update.result.settings.contains_key(THEME_MODE));
     }
 
+    /// 运行时不认主题目录：插件主题名照样转发，存在与否由桌面判定。
     #[test]
-    fn theme_name_selects_a_catalog_entry_and_sets_mode() {
-        let mut snapshot = default_snapshot();
-        apply_patch(
-            &mut snapshot,
-            &BTreeMap::from([(THEME_NAME.into(), json!("Ayu Light"))]),
+    fn theme_name_is_shape_checked_and_forwarded_without_catalog_lookup() {
+        let (_dir, store) = open_store();
+        let update = update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([(THEME_NAME.into(), json!("Some Plugin Theme"))]),
+            },
         )
         .unwrap();
-        assert_eq!(snapshot.theme_name, "Ayu Light");
-        assert_eq!(snapshot.theme_mode, "light");
+        assert_eq!(update.appearance[THEME_NAME], "Some Plugin Theme");
 
-        let error = apply_patch(
-            &mut snapshot,
-            &BTreeMap::from([(THEME_NAME.into(), json!("Not A Theme"))]),
+        let error = update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([(THEME_NAME.into(), json!(""))]),
+            },
         )
         .unwrap_err();
         assert!(matches!(error, SettingsError::Invalid(_)));
     }
 
     #[test]
-    fn theme_mode_flips_to_the_sibling_of_the_current_theme() {
-        let mut snapshot = default_snapshot();
-        apply_patch(
-            &mut snapshot,
-            &BTreeMap::from([(THEME_MODE.into(), json!("light"))]),
+    fn bad_theme_mode_is_rejected() {
+        let (_dir, store) = open_store();
+        let error = update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([(THEME_MODE.into(), json!("sepia"))]),
+            },
         )
-        .unwrap();
-        assert_eq!(snapshot.theme_mode, "light");
-        assert_eq!(snapshot.theme_name, "Default Light");
+        .unwrap_err();
+        assert!(matches!(error, SettingsError::Invalid(_)));
     }
 }

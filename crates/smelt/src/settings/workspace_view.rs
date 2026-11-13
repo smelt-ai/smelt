@@ -47,55 +47,6 @@ impl Workspace {
                 .as_ref()
                 .map(|inputs| inputs.rows.clone())
                 .unwrap_or_default(),
-            pi_model_editor: self.pi_model_editor.clone(),
-            pi_custom_provider_editor: self.pi_custom_provider_editor.clone(),
-            pi_auth_providers: self.pi_auth_providers.clone(),
-            pi_login: self.pi_login.clone(),
-            pi_auth_model_picker: self.pi_auth_model_picker.clone(),
-            pi_auth_error: self.pi_auth_error.clone(),
-            pi_auth_show_all: self.pi_auth_show_all,
-            pi_mcp_servers: self
-                .pi_library_config()
-                .map(|config| config.mcp_servers.clone())
-                .unwrap_or_else(|| Err(self.pi_library_pending_text())),
-            pi_library_runtime: self.pi_library_runtime().clone(),
-            pi_mcp_remote_desktop: crate::runtimes::runtime_has_desktop(
-                self.pi_library_runtime(),
-                cx,
-            ),
-            pi_mcp_login: self.pi_mcp_login.clone(),
-            pi_mcp_pending_remove: self.pi_mcp_pending_remove.clone(),
-            pi_mcp_error: self.pi_mcp_error.clone(),
-            pi_model_editor_error: self.pi_model_editor_error.clone(),
-            pi_model_settings: self.pi_model_settings_view(),
-            pi_settings: self
-                .pi_library_config()
-                .map(|config| config.settings_summary.clone())
-                .unwrap_or_else(|| Err(self.pi_library_pending_text())),
-            pi_plugins: self
-                .pi_library_config()
-                .map(|config| config.plugins.clone())
-                .unwrap_or_default(),
-            pi_paths: self
-                .pi_library_config()
-                .map(|config| config.paths.clone())
-                .unwrap_or_default(),
-            pi_plugin_pending_delete: self.pi_plugin_pending_delete.clone(),
-            pi_plugin_error: self.pi_plugin_error.clone(),
-            agent_names_using_plugin: {
-                let mut map: std::collections::HashMap<String, Vec<String>> = Default::default();
-                for agent in super::agent_host_settings(self.pi_library_runtime(), cx)
-                    .agents
-                    .iter()
-                {
-                    for plugin_id in &agent.plugins {
-                        map.entry(plugin_id.clone())
-                            .or_default()
-                            .push(agent.name.clone());
-                    }
-                }
-                map
-            },
             panel_plugins: self.panel_plugins_snapshot(),
             #[cfg(any(target_os = "macos", windows))]
             update_status: self.update_status.clone(),
@@ -109,7 +60,6 @@ impl Workspace {
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
-            capabilities_tab: self.nav.capabilities_tab(),
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             show_update_install_confirm: self.show_update_install_confirm,
             session_manager_open: self.session_manager_open,
@@ -125,14 +75,6 @@ impl Workspace {
         cx: &App,
     ) -> Div {
         render::render_settings_content(entity, snapshot, cx)
-    }
-
-    pub(super) fn render_capabilities_content(
-        entity: Entity<Workspace>,
-        snapshot: &SettingsRenderSnapshot,
-        cx: &App,
-    ) -> Div {
-        render::render_capabilities_content(entity, snapshot, cx)
     }
 
     /// 设置里有没有要你处理的事，有的话落在哪一页：有新版本、后台服务旧了 → 系统；有机器
@@ -177,42 +119,6 @@ impl Workspace {
         self.open_settings_window(cx);
     }
 
-    /// 能力库正文只在这条路由可见时存在。离开就丢掉：它观察 Workspace，每次通知都可能
-    /// 重读 Pi 的配置文件，看不见时没必要付这份代价。回来时重建，快照自然是最新的。
-    pub(crate) fn sync_capabilities_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab() != &crate::WorkspaceRoute::Capabilities {
-            self.capabilities_view = None;
-            return;
-        }
-        // 模型页签一打开就读内置 Provider 的登录状态，不用再点「查看」。失败后停在
-        // Failed，由用户点重试，不会每帧重来。
-        if self.nav.capabilities_tab() == crate::CapabilitiesTab::Models
-            && self.pi_auth_providers.is_none()
-        {
-            self.refresh_pi_auth_providers(cx);
-        }
-        self.ensure_pi_library_runtime(cx);
-        if crate::runtimes::client(self.pi_library_runtime(), cx).is_none() {
-            self.capabilities_view = None;
-            return;
-        }
-        if self.capabilities_view.is_some() {
-            return;
-        }
-        self.refresh_pi_library(cx);
-        let snapshot = self.settings_render_snapshot(cx);
-        let workspace = cx.entity();
-        self.capabilities_view = Some(cx.new(|cx| {
-            SettingsContentView::new(
-                workspace,
-                SettingsSurface::Capabilities,
-                snapshot,
-                window,
-                cx,
-            )
-        }));
-    }
-
     /// 打开独立设置窗口：已经开着就聚焦提到前台，不重复开第二扇。窗口只持有设置
     /// 快照，颜色选择器和配置输入框等状态仍挂在 Workspace；观察器负责同步两者。
     ///
@@ -233,8 +139,6 @@ impl Workspace {
             // 延迟平时只在连接换路径时读；停在远程页时重读一次，看到的是现在的数。
             crate::runtimes::sample_links(cx);
         }
-        self.ensure_pi_library_runtime(cx);
-        self.refresh_pi_config(crate::RuntimeKey::Local, cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {
             if let Some(handle) = cx
@@ -279,7 +183,6 @@ impl Workspace {
                     let content = cx.new(|cx| {
                         SettingsContentView::new(
                             workspace.clone(),
-                            SettingsSurface::Window,
                             snapshot,
                             window,
                             cx,

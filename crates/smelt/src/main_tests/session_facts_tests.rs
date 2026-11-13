@@ -1,4 +1,4 @@
-use super::{AgentStatus, PaneFacts, SessionFacts, replace_changed_facts};
+use super::{AgentStatus, PaneFacts, SessionFacts, replace_changed_facts, session_cwds_changed};
 use smelt_client::daemon_state::{TerminalProgress, TerminalProgressState};
 
 fn pane(progress: Option<TerminalProgress>) -> PaneFacts {
@@ -83,4 +83,19 @@ fn a_split_pane_progress_change_notifies_the_workspace() {
 fn opening_or_closing_a_session_notifies_the_workspace() {
     let mut shown = vec![session(AgentStatus::Idle, 100, Vec::new())];
     assert!(replace_changed_facts(&mut shown, Vec::new()));
+}
+
+#[test]
+fn only_a_session_directory_change_refreshes_branch_names() {
+    let running = vec![session(AgentStatus::Running, 100, Vec::new())];
+    let idle = vec![session(AgentStatus::Idle, 200, Vec::new())];
+    assert!(
+        !session_cwds_changed(&running, &idle),
+        "状态、时间这类推送很频繁，不该每次都排可见刷新"
+    );
+    let mut moved = idle.clone();
+    moved[0].cwd = Some("/other".into());
+    assert!(session_cwds_changed(&idle, &moved), "终端 cd 到别的仓库");
+    assert!(session_cwds_changed(&[], &idle), "新开了会话");
+    assert!(session_cwds_changed(&idle, &[]), "关了会话");
 }

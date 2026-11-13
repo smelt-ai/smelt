@@ -12,12 +12,35 @@ fn temp_store() -> (ClientStore, PathBuf) {
     (store, path)
 }
 
-// 固定旧版 workspace_ui 的形状，不能把当前 schema 的新列带进旧版本迁移夹具。
+// 固定旧版 workspace_ui、conversation_route、key_binding 的形状，不能把当前 schema 的改动
+// 带进旧版本迁移夹具。
 fn create_v7_schema(connection: &Connection) {
     connection.execute_batch(schema::CREATE_SCHEMA).unwrap();
     connection
         .execute_batch(
             "DROP TABLE pinned_workset;
+             ALTER TABLE key_binding RENAME COLUMN command TO action_id;
+             DROP TABLE workspace_layout_state;
+             ALTER TABLE appearance DROP COLUMN layout_id;
+             DROP TABLE conversation_route;
+             CREATE TABLE conversation_route (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               active_terminal_id TEXT,
+               dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
+               stage_cover TEXT,
+               tool_panel_tab TEXT NOT NULL,
+               tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
+               tool_panel_w REAL NOT NULL,
+               file_tree_selected TEXT,
+               open_file_path TEXT,
+               file_tree_w REAL NOT NULL,
+               file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+               git_tab TEXT NOT NULL,
+               diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+               diff_scope TEXT NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id)
+             ) WITHOUT ROWID;
              DROP TABLE workspace_ui;
              CREATE TABLE workspace_ui (
                id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -53,6 +76,7 @@ fn appearance() -> AppearanceRecord {
         ui_font_family: String::new(),
         font_px: 13,
         font_family: "JetBrains Mono".to_string(),
+        layout_id: None,
     }
 }
 
@@ -62,8 +86,6 @@ fn workspace_ui() -> WorkspaceUiRecord {
         active_session_id: Some("s-1".to_string()),
         route: "session".to_string(),
         selected_agent_id: None,
-        sidebar_w: Some(320.0),
-        sidebar_open: Some(true),
         collapsed_projects: vec![ProjectKey::local("/repo/b"), ProjectKey::local("/repo/a")],
         collapsed_agents: vec!["writer".to_string()],
         sidebar_grouping: "project".to_string(),
@@ -132,6 +154,60 @@ fn v8_migrates_worktree_pins_without_losing_workspace_state() {
 }
 
 #[test]
+fn branch_v9_preserves_pins_while_migrating_layout_and_shortcuts() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(&path).unwrap();
+    create_v7_schema(&connection);
+    connection
+        .execute_batch(
+            "ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0;
+             CREATE TABLE pinned_workset (
+               runtime_id TEXT NOT NULL, workset_id TEXT NOT NULL,
+               PRIMARY KEY (runtime_id, workset_id)
+             ) WITHOUT ROWID;
+             INSERT INTO pinned_workset VALUES ('', 'task');
+             INSERT INTO key_binding VALUES ('command_palette', 'cmd-j');
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+    drop(connection);
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
+    assert!(
+        store
+            .key_bindings()
+            .unwrap()
+            .iter()
+            .any(|binding| binding.command == "smelt.palette/toggle")
+    );
+    assert!(store.workspace_layout_state("default").unwrap().is_none());
+    drop(store);
+    cleanup(&path);
+}
+
+#[test]
+fn upstream_v10_gains_worktree_pins_without_losing_layout() {
+    let (store, path) = temp_store();
+    drop(store);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE pinned_workset;
+             INSERT INTO workspace_layout_state VALUES ('default', '{\"version\":1}');
+             PRAGMA user_version = 10;",
+        )
+        .unwrap();
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.pinned_worksets(None).unwrap().is_empty());
+    assert!(store.workspace_layout_state("default").unwrap().is_some());
+    store.set_workset_pinned(None, "task", true).unwrap();
+    assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
+    drop(store);
+    cleanup(&path);
+}
+
+#[test]
 fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
     let path = temp_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -167,6 +243,96 @@ fn v7_gains_a_collapsed_archive_section_and_preserves_workspace_state() {
         .unwrap();
     assert_eq!(backup_version, 7);
     drop(backup);
+    cleanup(&path);
+}
+
+/// v8 的三栏宽度、开合和每段对话的工具面板状态升到 v9 时丢掉，别的界面状态和外观留着；
+/// 外观里还没选过布局，布局存档表是空的。
+#[test]
+fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v8 = Connection::open(&path).unwrap();
+    create_v7_schema(&v8);
+    v8.execute_batch(
+        "ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
+           CHECK (archive_expanded IN (0, 1));
+         INSERT INTO workspace_ui VALUES
+           (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1, 1);
+         INSERT INTO conversation_route VALUES
+           ('', 'conv-1', 'term-2', NULL, 'inspector', 'git', 1, 420.0, '/repo/a.rs', NULL,
+            240.0, 0, 'log', 1, 'unstaged');
+         INSERT INTO appearance VALUES
+           (1, 1973790, '/Users/me/bg.png', 0.25, 0.95, 1, 'regular', 'dark', 'Default Dark',
+            16, '', 13, 'JetBrains Mono');
+         PRAGMA user_version = 8;",
+    )
+    .unwrap();
+    drop(v8);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(
+        store.workspace_ui().unwrap(),
+        Some(WorkspaceUiRecord {
+            collapsed_projects: Vec::new(),
+            collapsed_agents: Vec::new(),
+            pinned_projects: Vec::new(),
+            archive_expanded: true,
+            ..workspace_ui()
+        })
+    );
+    let routes = store.conversation_routes().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].file_tree_selected.as_deref(), Some("/repo/a.rs"));
+    assert_eq!(routes[0].git_tab, "log");
+    assert_eq!(store.appearance().unwrap(), Some(appearance()));
+    assert_eq!(store.workspace_layout_state("default").unwrap(), None);
+    drop(store);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v8"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+/// 布局存档按布局 id 一份，整份覆盖；不是 JSON 的写不进去；删掉就回到没改过。
+#[test]
+fn layout_states_are_kept_per_layout() {
+    let (store, path) = temp_store();
+    let record = |layout_id: &str, state: &str| WorkspaceLayoutStateRecord {
+        layout_id: layout_id.to_string(),
+        state: state.to_string(),
+    };
+    store
+        .put_workspace_layout_state(&record("default", r#"{"version":1}"#))
+        .unwrap();
+    store
+        .put_workspace_layout_state(&record("stocks", r#"{"version":1,"center":{}}"#))
+        .unwrap();
+    store
+        .put_workspace_layout_state(&record("default", r#"{"version":2}"#))
+        .unwrap();
+    assert!(
+        store
+            .put_workspace_layout_state(&record("default", "{not json"))
+            .is_err()
+    );
+    assert_eq!(
+        store.workspace_layout_state("default").unwrap(),
+        Some(record("default", r#"{"version":2}"#))
+    );
+    store.delete_workspace_layout_state("default").unwrap();
+    assert_eq!(store.workspace_layout_state("default").unwrap(), None);
+    assert!(store.workspace_layout_state("stocks").unwrap().is_some());
+
+    // 选的是哪份布局记在外观里。
+    let chosen = AppearanceRecord {
+        layout_id: Some("stocks".to_string()),
+        ..appearance()
+    };
+    store.put_appearance(&chosen).unwrap();
+    assert_eq!(store.appearance().unwrap(), Some(chosen));
     cleanup(&path);
 }
 
@@ -233,10 +399,6 @@ fn route(runtime_id: Option<&str>, conversation_id: &str) -> ConversationRouteRe
         conversation_id: conversation_id.to_string(),
         active_terminal_id: Some("term-2".to_string()),
         dock_layout: Some(r#"{"v":1,"center":{"terminal":"term-2"}}"#.to_string()),
-        stage_cover: Some("inspector".to_string()),
-        tool_panel_tab: "git".to_string(),
-        tool_panel_open: true,
-        tool_panel_w: 420.0,
         expanded: vec!["/repo/src".to_string(), "/repo/docs".to_string()],
         file_tree_selected: Some("/repo/src/main.rs".to_string()),
         open_file_path: None,
@@ -263,7 +425,6 @@ fn conversation_routes_are_replaced_as_a_whole() {
         ConversationRouteRecord {
             active_terminal_id: None,
             dock_layout: None,
-            stage_cover: None,
             expanded: Vec::new(),
             ..route(None, "conv-2")
         },
@@ -812,16 +973,16 @@ fn v5_gains_empty_sidebar_order_tables() {
 }
 
 #[test]
-fn key_bindings_override_and_reset_per_action() {
+fn key_bindings_override_and_reset_per_command() {
     let (store, path) = temp_store();
     assert!(store.key_bindings().unwrap().is_empty());
 
     let palette = KeyBindingRecord {
-        action_id: "command_palette".to_string(),
+        command: "smelt.palette/toggle".to_string(),
         keystroke: Some("cmd-j".to_string()),
     };
     let sidebar = KeyBindingRecord {
-        action_id: "toggle_sidebar".to_string(),
+        command: "smelt.sessions/focus-list".to_string(),
         keystroke: None,
     };
     store
@@ -839,8 +1000,50 @@ fn key_bindings_override_and_reset_per_action() {
     store
         .put_key_bindings(std::slice::from_ref(&moved))
         .unwrap();
-    store.delete_key_binding("toggle_sidebar").unwrap();
+    store
+        .delete_key_binding("smelt.sessions/focus-list")
+        .unwrap();
     assert_eq!(store.key_bindings().unwrap(), vec![moved]);
+    cleanup(&path);
+}
+
+/// v9 的快捷键按写死的动作名存：升到 v10 时换成命令 id，早已下线的动作名删掉，清掉的键
+/// （`NULL`）照样留着；迁移前留了备份。
+#[test]
+fn v9_key_bindings_move_to_command_ids() {
+    let (store, path) = temp_store();
+    drop(store);
+    // v9 和 v10 只差这一列的名字。
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
+             INSERT INTO key_binding VALUES
+               ('command_palette', 'cmd-j'), ('next_hunk', NULL), ('split_beside', 'cmd-e'),
+               ('toggle_sidebar', 'cmd-b');
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+
+    let store = ClientStore::open(&path).unwrap();
+    let record = |command: &str, keystroke: Option<&str>| KeyBindingRecord {
+        command: command.to_string(),
+        keystroke: keystroke.map(str::to_string),
+    };
+    assert_eq!(
+        store.key_bindings().unwrap(),
+        vec![
+            record("smelt.git/next-hunk", None),
+            record("smelt.palette/toggle", Some("cmd-j")),
+            record("smelt.stage/split-right", Some("cmd-e")),
+        ]
+    );
+    drop(store);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v9"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
     cleanup(&path);
 }
 

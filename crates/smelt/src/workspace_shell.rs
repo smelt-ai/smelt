@@ -1,563 +1,1129 @@
-//! 工作台外壳分栏与伸缩动画。
+//! 工作台外壳：整个工作台是一块 `DockArea`，这里是 smelt 给它的皮肤和面板。
 //!
-//! 左栏（会话列表与机器管理）、中间舞台与右栏（工具面板）采用直接分栏排布：
-//! - 侧栏与工具栏的开合由平滑动画驱动，在 0px 与目标宽度之间丝滑过渡，没有底层硬截断；
-//! - 展开状态下在栏间提供拖拽分隔条调节宽度，松手时落盘；拖过收起线时平滑闭合；
-//! - 终端分屏是舞台里的专用 Dock（`term_dock`），不与顶层外壳耦合。
+//! 摆什么、怎么切、选中哪个、放大都在 Dock 上（布局和存档就是它的 `DockAreaState`，见
+//! `workspace_layout`）。这里只管：
+//! - 面板（[`ViewPanel`]）：视图注册表里的一个视图（`smelt_plugin_api::view`），面板名就是
+//!   视图 id。外壳不认识视图是什么，自带的也一样（见 `builtin_views`）。
+//! - 占位（[`PlaceholderPanel`]）：没登记的视图、同一个视图摆了第二份。不显示，存档时原样
+//!   写回：插件装回来就又出现了。
+//! - 皮肤（[`SmeltDockRenderer`] / [`SmeltTabGroup`]）：组件库 `DockSkin` 外面包一层，标签条
+//!   由 smelt 画——角标、拖窗口的空白、给红黄绿按钮让位、放大按钮、拖动重排。
+//! - 读 Dock：[`ShellView`] 是摆着什么、看得见什么的快照，工作台缓存一份给 render 读。
+//!
+//! 终端分屏是舞台里另一个 Dock（`term_dock`），和这里无关。
 
-use std::time::Duration;
-use gpui_base::{Easing, Transition};
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
+use std::sync::Arc;
+
 use gpui::{
-    AnyElement, Context, ExternalPaths, Hsla, MouseButton, MouseDownEvent, Pixels, Window,
-    div, prelude::*, px, rgb,
+    AnyElement, App, AppContext as _, Axis, Context, Div, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, Hsla, Pixels, SharedString, Stateful, Window, div, prelude::*, px, rgb,
+    size,
 };
-use gpui_component::{ActiveTheme, Icon};
+use gpui_base::ResizeHandleContext;
+use gpui_component::dock::{
+    BasePanel, BasePanelView, DockArea, DockAreaRenderer, DockAreaState, DockContext,
+    DockPlacement, DockSkin, DragPanel, DropIndicator, NodeId, PaneNode, PaneRef, Panel,
+    PanelControl, PanelEvent, PanelHandle, PanelId, PanelInfo, PanelState, TabGroupContext,
+    TabGroupRenderer, panel_handle,
+};
 use gpui_component::empty::{
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
+use gpui_component::tab::{Tab, TabBar};
+use gpui_component::tag::Tag;
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex};
+use serde_json::Value;
+use smelt_plugin_api::{self as api, ViewHandle};
 pub(crate) use smelt_ui::Button;
+use smelt_ui::IconAction as _;
 
+use crate::builtin_views::Builtin;
 use crate::settings::Appearance;
 use crate::{
-    AgentStatus, MIN_SIDEBAR_WIDTH, MIN_TOOL_PANEL_WIDTH, MIN_WORKSPACE_CONTENT_WIDTH, SessionKind,
-    Workspace, WorkspaceRoute, terminal, ui_theme, workspace_frame,
+    AgentStatus, SessionKind, Workspace, WorkspaceRoute, terminal, ui_theme, workspace_frame,
 };
 
-/// 允许拖到的侧栏上限。
-pub(crate) fn sidebar_cap(viewport: Pixels) -> f32 {
-    let shell = f32::from(ui_theme::shell_padding()) * 2.0;
-    (f32::from(viewport) - shell - MIN_WORKSPACE_CONTENT_WIDTH).max(MIN_SIDEBAR_WIDTH)
+/// Dock 的四个区域，按画的先后。
+const PLACEMENTS: [DockPlacement; 4] = [
+    DockPlacement::Center,
+    DockPlacement::Left,
+    DockPlacement::Right,
+    DockPlacement::Bottom,
+];
+
+/// 红黄绿按钮占的宽度。
+const TRAFFIC_LIGHTS_WIDTH: f32 = 80.;
+
+/// 左右停靠区开合按钮占的宽度。
+const DOCK_TOGGLE_WIDTH: f32 = 32.;
+
+/// 拖标签时跟着鼠标的那块的大小。和组件库的一样。
+const DRAG_PREVIEW_SIZE: gpui::Size<Pixels> = size(px(96.), px(30.));
+
+// ---- 面板 ----
+
+thread_local! {
+    /// 面板名要 `&'static str`，视图 id 是运行时登记的：每个 id 第一次见到时留一份。
+    /// 只增不删，数量就是见过的视图 id 个数。
+    static PANEL_NAMES: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
 }
 
-/// 允许拖到的工具栏上限。
-pub(crate) fn tool_cap(viewport: Pixels, sidebar_on_screen: f32) -> f32 {
-    let shell = f32::from(ui_theme::shell_padding()) * 2.0;
-    (f32::from(viewport) - shell - sidebar_on_screen - MIN_WORKSPACE_CONTENT_WIDTH)
-        .max(MIN_TOOL_PANEL_WIDTH)
+fn panel_name(id: &str) -> &'static str {
+    PANEL_NAMES.with(|names| {
+        let mut names = names.borrow_mut();
+        if let Some(name) = names.get(id) {
+            return *name;
+        }
+        let name: &'static str = Box::leak(id.to_string().into_boxed_str());
+        names.insert(name);
+        name
+    })
 }
 
-pub(crate) fn tool_display(preference: f32, viewport: Pixels, sidebar_on_screen: f32) -> f32 {
-    preference.clamp(MIN_TOOL_PANEL_WIDTH, tool_cap(viewport, sidebar_on_screen))
+/// 视图注册表里的一个视图摆进 Dock 的壳。视图本身归注册表，重新装布局时壳换新的，视图
+/// 还是那一份，不丢状态。
+pub(crate) struct ViewPanel {
+    id: &'static str,
+    title: SharedString,
+    view: Rc<dyn ViewHandle>,
+    /// 布局里它的 `info.panel`，原样写回存档。
+    info: Value,
+    /// 登记时说的 [`smelt_plugin_api::ViewSpec::draws_top_bar`]。
+    owns_top_bar: bool,
+    focus_handle: FocusHandle,
 }
 
-/// 松手时窄于收起线，就用按下前的宽度，并把它抬到这一栏的最小宽度以上。
-/// 否则这次松手不收起。
-pub(crate) fn width_after_collapse(gesture_width: f32, current_width: f32, min_width: f32) -> Option<f32> {
-    if current_width < crate::DOCK_COLLAPSE_WIDTH {
-        Some(gesture_width.max(min_width))
-    } else {
-        None
+impl EventEmitter<PanelEvent> for ViewPanel {}
+
+impl Focusable for ViewPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
-pub(crate) fn sidebar_width_after_collapse(gesture_width: f32, current_width: f32) -> Option<f32> {
-    width_after_collapse(gesture_width, current_width, crate::MIN_SIDEBAR_WIDTH)
-}
-
-pub(crate) fn tool_panel_width_after_collapse(gesture_width: f32, current_width: f32) -> Option<f32> {
-    width_after_collapse(gesture_width, current_width, crate::MIN_TOOL_PANEL_WIDTH)
-}
-
-/// 分隔条拖动和窗口变宽时，像素与存档宽度怎么对齐。保留纯计算逻辑供单元测试。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ShellSizeStep {
-    pub(crate) preference: f32,
-    pub(crate) applied: f32,
-    pub(crate) dock: f32,
-    pub(crate) display: f32,
-    pub(crate) min: f32,
-    pub(crate) max: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum ShellSizeAction {
-    Keep,
-    Adopt {
-        preference: f32,
-        push: Option<f32>,
-    },
-    Push(f32),
-}
-
-pub(crate) fn shell_size_action(step: ShellSizeStep) -> ShellSizeAction {
-    let cap = step.max.max(step.min);
-    if (step.dock - step.applied).abs() > 0.5 {
-        let preference = step.dock.clamp(step.min, cap);
-        let push = ((preference - step.dock).abs() > 0.5).then_some(preference);
-        ShellSizeAction::Adopt { preference, push }
-    } else if (step.dock - step.display).abs() > 0.5 {
-        ShellSizeAction::Push(step.display.clamp(step.min, cap))
-    } else {
-        ShellSizeAction::Keep
+impl BasePanel for ViewPanel {
+    fn panel_name(&self) -> &'static str {
+        self.id
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ShellSizeDecision {
-    pub(crate) preference: f32,
-    pub(crate) applied: f32,
-    pub(crate) push: Option<f32>,
-    pub(crate) dragged: bool,
-}
+    /// 不让关：还没有把视图加回布局的入口。
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
 
-pub(crate) fn decide_shell_size(step: ShellSizeStep, pointer_down: bool) -> ShellSizeDecision {
-    match shell_size_action(step) {
-        ShellSizeAction::Keep => ShellSizeDecision {
-            preference: step.preference,
-            applied: step.applied,
-            push: None,
-            dragged: false,
-        },
-        ShellSizeAction::Adopt { preference, push } => ShellSizeDecision {
-            preference,
-            applied: if pointer_down {
-                step.dock
-            } else {
-                push.unwrap_or(preference)
-            },
-            push: if pointer_down { None } else { push },
-            dragged: true,
-        },
-        ShellSizeAction::Push(next) => {
-            if pointer_down {
-                ShellSizeDecision {
-                    preference: step.preference,
-                    applied: step.applied,
-                    push: None,
-                    dragged: false,
-                }
-            } else {
-                ShellSizeDecision {
-                    preference: step.preference,
-                    applied: next,
-                    push: Some(next),
-                    dragged: false,
-                }
-            }
+    fn zoomable(&self, _: &App) -> bool {
+        !self.owns_top_bar
+    }
+
+    fn dump(&self, _: &App) -> PanelState {
+        PanelState {
+            panel_name: self.id.to_string(),
+            children: Vec::new(),
+            info: PanelInfo::panel(self.info.clone()),
         }
     }
 }
 
-impl Workspace {
-    /// 计算侧栏与工具栏在当前动画帧中的像素跨度与动画进度。
-    pub(crate) fn shell_animated_spans(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> (f32, f32, f32, f32) {
-        let viewport = window.viewport_size().width;
-        let sidebar_open = self.sidebar_open;
-        let tool_open = self.tool_panel_open && !self.tool_panel_promoted();
-
-        let sidebar_display = crate::sidebar_width_for_viewport(self.sidebar_w, viewport);
-        let sidebar_policy = Transition::new(Duration::from_millis(200)).easing(Easing::EaseOut);
-        let sidebar_progress: f32 = gpui_base::transition(
-            gpui::ElementId::from("workspace-shell-sidebar-collapse"),
-            if sidebar_open { 1.0f32 } else { 0.0f32 },
-            sidebar_policy,
-            window,
-            cx,
-        );
-
-        let tool_policy = Transition::new(Duration::from_millis(200)).easing(Easing::EaseOut);
-        let tool_progress: f32 = gpui_base::transition(
-            gpui::ElementId::from("workspace-shell-tool-collapse"),
-            if tool_open { 1.0f32 } else { 0.0f32 },
-            tool_policy,
-            window,
-            cx,
-        );
-
-        let animated_sidebar_w = (sidebar_display * sidebar_progress).max(0.0);
-        let tool_shown = tool_display(self.tool_panel_w, viewport, animated_sidebar_w);
-        let animated_tool_w = (tool_shown * tool_progress).max(0.0);
-
-        (
-            animated_sidebar_w,
-            animated_tool_w,
-            sidebar_progress,
-            tool_progress,
-        )
+impl Panel for ViewPanel {
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some(self.title.clone())
     }
 
-    /// 渲染外壳主体三栏及栏间分隔条。
-    pub(crate) fn render_shell_columns(
-        &mut self,
-        animated_sidebar_w: f32,
-        animated_tool_w: f32,
-        sidebar_progress: f32,
-        tool_progress: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let sidebar_open = self.sidebar_open;
-        let tool_open = self.tool_panel_open && !self.tool_panel_promoted();
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.title.clone()
+    }
 
+    /// 角标由视图自己给（`PluginView::badge`）。
+    fn title_suffix(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.view
+            .badge(cx)
+            .map(|badge| Tag::primary().small().rounded_full().child(badge))
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        (!self.owns_top_bar).then_some(PanelControl::Toolbar)
+    }
+
+    fn title_bar(&self, _: &App) -> bool {
+        !self.owns_top_bar
+    }
+
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl Render for ViewPanel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .min_h_0()
             .flex()
-            .flex_row()
-            .when(animated_sidebar_w > 0.001, |row| {
-                row.child(
-                    div()
-                        .w(px(animated_sidebar_w))
-                        .h_full()
-                        .overflow_hidden()
-                        .flex_none()
-                        .relative()
-                        .child(self.render_sidebar_dock(window, cx))
-                        .when(sidebar_open && sidebar_progress >= 0.999, |col| {
-                            col.child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .right_0()
-                                    .w(ui_theme::chrome_gap())
-                                    .child(self.render_sidebar_resize_handle(cx)),
-                            )
-                        }),
+            .flex_col()
+            .child(self.view.view())
+    }
+}
+
+/// 建不出来的面板：视图没登记（插件没装、删了），或者同一个视图摆了第二份（一个视图只能
+/// 画在一处）。不显示，存档时把原来的样子原样写回。
+pub(crate) struct PlaceholderPanel {
+    state: PanelState,
+    focus_handle: FocusHandle,
+}
+
+impl EventEmitter<PanelEvent> for PlaceholderPanel {}
+
+impl Focusable for PlaceholderPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl BasePanel for PlaceholderPanel {
+    fn panel_name(&self) -> &'static str {
+        "smelt.placeholder"
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        false
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+
+    fn zoomable(&self, _: &App) -> bool {
+        false
+    }
+
+    fn dump(&self, _: &App) -> PanelState {
+        self.state.clone()
+    }
+}
+
+impl Panel for PlaceholderPanel {}
+
+impl Render for PlaceholderPanel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// 一次 `load` 期间记的东西：这次摆出来的视图（第二份变占位），和这次新建的视图（装完
+/// 要 `open` 一次，让它读数据）。
+#[derive(Default)]
+struct LoadPass {
+    placed: HashSet<String>,
+    built: Vec<Rc<dyn ViewHandle>>,
+}
+
+thread_local! {
+    static LOAD_PASS: RefCell<Option<LoadPass>> = const { RefCell::new(None) };
+}
+
+/// 布局里的一个面板名换成面板。Dock 自己的注册表里什么都没登记，所有面板都从这里建
+/// （[`SmeltDockRenderer::build_placeholder`]）。
+fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn BasePanelView> {
+    let id = state.panel_name.as_str();
+    let first = LOAD_PASS.with(|pass| {
+        pass.borrow_mut()
+            .as_mut()
+            .is_none_or(|pass| pass.placed.insert(id.to_string()))
+    });
+    let spec = api::views(cx)
+        .into_iter()
+        .find(|spec| spec.id.as_ref() == id);
+    let built = first
+        .then(|| spec.and_then(|spec| Some((spec, api::ensure_view(id, window, cx)?))))
+        .flatten();
+    let Some((spec, (view, new))) = built else {
+        if !first {
+            eprintln!("[layout] 视图 `{id}` 摆了不止一份，多出来的不显示");
+        }
+        return Arc::new(cx.new(|cx| PlaceholderPanel {
+            state: state.clone(),
+            focus_handle: cx.focus_handle(),
+        }));
+    };
+    if new {
+        LOAD_PASS.with(|pass| {
+            if let Some(pass) = pass.borrow_mut().as_mut() {
+                pass.built.push(view.clone());
+            }
+        });
+    }
+    let info = match &state.info {
+        PanelInfo::Panel(info) => info.clone(),
+        PanelInfo::Stack { .. } | PanelInfo::Tabs { .. } => Value::Null,
+    };
+    panel_handle(cx.new(|cx| ViewPanel {
+        id: panel_name(id),
+        title: spec.title,
+        owns_top_bar: spec.draws_top_bar,
+        view,
+        info,
+        focus_handle: cx.focus_handle(),
+    }))
+}
+
+/// 按 `state` 装布局。这次新建的视图装完打开一次。
+pub(crate) fn load(
+    area: &Entity<DockArea>,
+    state: DockAreaState,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    LOAD_PASS.with(|pass| *pass.borrow_mut() = Some(LoadPass::default()));
+    let loaded = area.update(cx, |area, cx| area.load(state, window, cx));
+    let pass = LOAD_PASS
+        .with(|pass| pass.borrow_mut().take())
+        .unwrap_or_default();
+    for view in pass.built {
+        view.open(&Value::Null, window, cx);
+    }
+    loaded
+}
+
+// ---- 读 Dock ----
+
+/// 布局里的面板，按树的先后（中间、左、右、下）。
+fn all_panels(area: &DockArea) -> impl Iterator<Item = PanelId> + '_ {
+    PLACEMENTS
+        .into_iter()
+        .filter_map(|placement| area.layout(placement))
+        .flat_map(|tree| tree.panels())
+}
+
+/// 布局里摆着这个视图的面板。占位不算。
+pub(crate) fn find_view(area: &DockArea, id: &str, cx: &App) -> Option<PanelId> {
+    all_panels(area).find(|&panel| {
+        area.panel(panel)
+            .is_some_and(|panel| panel.visible(cx) && panel.panel_name(cx) == id)
+    })
+}
+
+/// 放着这块面板的组。
+pub(crate) fn group_of(area: &DockArea, panel: PanelId) -> Option<NodeId> {
+    PLACEMENTS
+        .into_iter()
+        .find_map(|placement| area.layout(placement)?.find_panel_node(panel))
+}
+
+/// 这块面板在哪个区域：中间，还是左、右、下停靠区。
+pub(crate) fn placement_of(area: &DockArea, panel: PanelId) -> Option<DockPlacement> {
+    PLACEMENTS.into_iter().find(|&placement| {
+        area.layout(placement)
+            .is_some_and(|tree| tree.find_panel_node(panel).is_some())
+    })
+}
+
+/// 摆着什么、看得见什么。Dock 一变就重算（`Workspace::sync_shell_view`），render 只读它。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ShellView {
+    /// 布局里摆着的视图。
+    pub(crate) laid_out: HashSet<String>,
+    /// 此刻看得见的视图：所在组显示着的那个，没被另一组的放大挡住，也不在收起的 dock 里。
+    pub(crate) shown: HashSet<String>,
+    /// 看得见、所在组既没有标签条也没有标题带、又贴着窗口上沿的视图：它自己的顶上就是
+    /// 窗口顶，拖窗口、标题这些归它自己画。
+    pub(crate) bare: HashSet<String>,
+    /// 贴着窗口左上角的组，和它显示着的视图。那组开头要给红黄绿按钮和左侧开合按钮让位。
+    pub(crate) top_left_group: Option<NodeId>,
+    pub(crate) top_left: Option<String>,
+    /// 贴着窗口右上角的组。那组末尾要给右侧开合按钮让位。
+    pub(crate) top_right_group: Option<NodeId>,
+    /// 左、右停靠区的开合按钮：`Some(开着没有)` 是要画，`None` 是布局里没有这个停靠区、
+    /// 或者有组放大着（放大时别的都让开，按钮也不画）。
+    pub(crate) left_dock: Option<bool>,
+    pub(crate) right_dock: Option<bool>,
+}
+
+impl ShellView {
+    pub(crate) fn of(area: &DockArea, cx: &App) -> Self {
+        let zoomed = area.zoomed_group();
+        let mut view = Self::default();
+        let mut top_groups = HashSet::new();
+        for placement in PLACEMENTS {
+            let open = placement == DockPlacement::Center || area.is_dock_open(placement);
+            let Some(tree) = area.layout(placement) else {
+                continue;
+            };
+            if open && placement != DockPlacement::Bottom {
+                top_edge_groups(tree.root(), &mut top_groups);
+            }
+            tree.root().walk(&mut |node| {
+                let PaneRef::Tabs { panels, active_ix } = node.kind() else {
+                    return;
+                };
+                let visible: Vec<(usize, &Arc<dyn BasePanelView>)> = panels
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ix, id)| Some((ix, area.panel(*id)?)))
+                    .filter(|(_, panel)| panel.visible(cx))
+                    .collect();
+                for (_, panel) in &visible {
+                    view.laid_out.insert(panel.panel_name(cx).to_string());
+                }
+                if !open || zoomed.is_some_and(|zoomed| zoomed != node.id()) {
+                    return;
+                }
+                // 选中的那个被藏起来时，Dock 画第一个看得见的。
+                let Some((_, displayed)) = visible
+                    .iter()
+                    .find(|(ix, _)| *ix == active_ix)
+                    .or(visible.first())
+                else {
+                    return;
+                };
+                let id = displayed.panel_name(cx).to_string();
+                let no_bar = visible.len() == 1
+                    && !PanelHandle::of(displayed).is_some_and(|handle| handle.title_bar(cx));
+                if no_bar && (zoomed.is_some() || top_groups.contains(&node.id())) {
+                    view.bare.insert(id.clone());
+                }
+                if Some(node.id()) == top_left_of(area) {
+                    view.top_left = Some(id.clone());
+                }
+                view.shown.insert(id);
+            });
+        }
+        view.top_left_group = top_left_of(area);
+        view.top_right_group = top_right_of(area);
+        let toggle = |placement| {
+            (zoomed.is_none() && area.is_dock_collapsible(placement))
+                .then(|| area.is_dock_open(placement))
+        };
+        view.left_dock = toggle(DockPlacement::Left);
+        view.right_dock = toggle(DockPlacement::Right);
+        view
+    }
+
+    /// 贴左上角的组开头让出的宽度：红黄绿按钮，再加左侧开合按钮。
+    pub(crate) fn leading_inset(&self, window: &Window) -> Pixels {
+        lights_width(window)
+            + match self.left_dock {
+                Some(_) => px(DOCK_TOGGLE_WIDTH),
+                None => px(0.),
+            }
+    }
+
+    /// 贴右上角的组末尾让出的宽度：右侧开合按钮。
+    pub(crate) fn trailing_inset(&self) -> Pixels {
+        match self.right_dock {
+            Some(_) => px(DOCK_TOGGLE_WIDTH),
+            None => px(0.),
+        }
+    }
+}
+
+/// 贴着窗口上沿的组：横排的每一个子节点都贴着，竖排只有最上面一个。
+fn top_edge_groups(node: &PaneNode, groups: &mut HashSet<NodeId>) {
+    match node.kind() {
+        PaneRef::Tabs { .. } => {
+            groups.insert(node.id());
+        }
+        PaneRef::Split { axis, children, .. } => match axis {
+            Axis::Horizontal => children
+                .iter()
+                .for_each(|child| top_edge_groups(child, groups)),
+            Axis::Vertical => {
+                if let Some(first) = children.first() {
+                    top_edge_groups(first, groups);
+                }
+            }
+        },
+    }
+}
+
+/// 贴着窗口左上角的组。放大时是放大的那组；不然左 dock 开着从它找，否则从中间找。
+fn top_left_of(area: &DockArea) -> Option<NodeId> {
+    if let Some(node) = area.zoomed_group() {
+        return Some(node);
+    }
+    open_root(area, DockPlacement::Left)
+        .or(open_root(area, DockPlacement::Center))
+        .and_then(top_left_group)
+}
+
+/// 贴着窗口右上角的组。放大时是放大的那组；不然右 dock 开着从它找，否则从中间找。
+fn top_right_of(area: &DockArea) -> Option<NodeId> {
+    if let Some(node) = area.zoomed_group() {
+        return Some(node);
+    }
+    open_root(area, DockPlacement::Right)
+        .or(open_root(area, DockPlacement::Center))
+        .and_then(top_right_group)
+}
+
+/// 区域的树根。收起的停靠区不算。
+fn open_root(area: &DockArea, placement: DockPlacement) -> Option<&PaneNode> {
+    let open = placement == DockPlacement::Center || area.is_dock_open(placement);
+    open.then(|| area.layout(placement))
+        .flatten()
+        .map(|tree| tree.root())
+}
+
+fn top_left_group(node: &PaneNode) -> Option<NodeId> {
+    match node.kind() {
+        PaneRef::Tabs { .. } => Some(node.id()),
+        PaneRef::Split { children, .. } => children.first().and_then(top_left_group),
+    }
+}
+
+/// 横排取最右一个，竖排取最上一个。
+fn top_right_group(node: &PaneNode) -> Option<NodeId> {
+    match node.kind() {
+        PaneRef::Tabs { .. } => Some(node.id()),
+        PaneRef::Split { axis, children, .. } => match axis {
+            Axis::Horizontal => children.last(),
+            Axis::Vertical => children.first(),
+        }
+        .and_then(top_right_group),
+    }
+}
+
+/// 红黄绿按钮占的宽度：全屏、Windows 下是 0。
+fn lights_width(window: &Window) -> Pixels {
+    if workspace_frame::traffic_lights_visible(window) {
+        px(TRAFFIC_LIGHTS_WIDTH)
+    } else {
+        px(0.)
+    }
+}
+
+// ---- 皮肤 ----
+
+/// 建好整个工作台的 Dock，套上 smelt 的皮肤。里面还是空的，布局由 `workspace_layout` 装。
+pub(crate) fn new_area(
+    workspace: gpui::WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<DockArea> {
+    let mut skin = None;
+    let area = cx.new(|cx| {
+        let inner = DockSkin::new(cx);
+        skin = Some(inner.clone());
+        DockArea::new(
+            "smelt-shell",
+            Some(smelt_plugin_api::LAYOUT_VERSION),
+            window,
+            cx,
+        )
+        .with_renderer(Rc::new(SmeltDockRenderer {
+            skin: inner,
+            workspace,
+        }))
+    });
+    // 上面的闭包在 `cx.new` 返回前就跑完了。
+    let skin = skin.expect("DockSkin::new 在构造 Dock 时已经跑过");
+    // 面板不让关。停靠区的开合按钮由外壳画在窗口上角（`Workspace::render_dock_toggles`）：
+    // 皮肤的画在标签条里，自己管顶上的视图（会话列表、舞台）没有标签条。
+    skin.set_toggle_button_visible(false, cx);
+    skin.set_close_button_visible(false, cx);
+    area
+}
+
+/// 外层 Dock 的画法：`DockSkin` 的全部，加上 smelt 的标签条和面板。
+struct SmeltDockRenderer {
+    skin: Rc<DockSkin>,
+    workspace: gpui::WeakEntity<Workspace>,
+}
+
+impl DockAreaRenderer for SmeltDockRenderer {
+    fn frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        DockAreaRenderer::frame(&*self.skin, window, cx)
+    }
+
+    fn center_frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        DockAreaRenderer::center_frame(&*self.skin, window, cx)
+    }
+
+    fn split_frame(
+        &self,
+        node: NodeId,
+        axis: Axis,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Stateful<Div> {
+        DockAreaRenderer::split_frame(&*self.skin, node, axis, window, cx)
+    }
+
+    fn render_split_handle(
+        &self,
+        handle: &ResizeHandleContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        DockAreaRenderer::render_split_handle(&*self.skin, handle, window, cx)
+    }
+
+    fn render_dock(
+        &self,
+        dock: &DockContext,
+        content: AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        DockAreaRenderer::render_dock(&*self.skin, dock, content, window, cx)
+    }
+
+    /// Dock 自己的注册表是空的，每个面板都走到这里，按面板名去视图注册表里取。
+    fn build_placeholder(
+        &self,
+        state: &PanelState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Arc<dyn BasePanelView>> {
+        Some(build_panel(state, window, cx))
+    }
+
+    fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
+        Rc::new(SmeltTabGroup {
+            inner: DockAreaRenderer::tab_group_renderer(&*self.skin),
+            workspace: self.workspace.clone(),
+        })
+    }
+}
+
+/// 标签组的画法：标签条是 smelt 的，其余交给皮肤。
+struct SmeltTabGroup {
+    inner: Rc<dyn TabGroupRenderer>,
+    workspace: gpui::WeakEntity<Workspace>,
+}
+
+impl TabGroupRenderer for SmeltTabGroup {
+    /// 组的底色是栏的底色，不用主题的背景色：主题色可能带透明度，会透出窗口后面。
+    fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        self.inner
+            .frame(group, window, cx)
+            .bg(Hsla::from(rgb(ui_theme::bg_column())))
+    }
+
+    fn content_frame(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Stateful<Div> {
+        self.inner.content_frame(group, window, cx)
+    }
+
+    /// 组里两个以上面板画一排标签；只有一个时画一条居中的标题带，自己管顶上的视图
+    /// （会话列表、舞台）什么都不画。
+    fn render_tab_bar(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let visible: Vec<usize> = group
+            .panels()
+            .iter()
+            .enumerate()
+            .filter(|(_, panel)| panel.visible(cx))
+            .map(|(ix, _)| ix)
+            .collect();
+        let (leading, trailing) = match self.workspace.upgrade() {
+            Some(workspace) => {
+                let shell = &workspace.read(cx).shell_view;
+                let at = |corner: Option<NodeId>| corner == Some(group.node());
+                (
+                    match at(shell.top_left_group) {
+                        true => shell.leading_inset(window),
+                        false => px(0.),
+                    },
+                    match at(shell.top_right_group) {
+                        true => shell.trailing_inset(),
+                        false => px(0.),
+                    },
                 )
+            }
+            None => (px(0.), px(0.)),
+        };
+        match visible.as_slice() {
+            [] => gpui::Empty.into_any_element(),
+            [ix] => {
+                let panel = &group.panels()[*ix];
+                if !PanelHandle::of(panel).is_some_and(|handle| handle.title_bar(cx)) {
+                    return gpui::Empty.into_any_element();
+                }
+                render_title_band(group, *ix, leading, trailing, window, cx)
+            }
+            _ => render_tabs(group, visible, leading, trailing, window, cx),
+        }
+    }
+
+    fn render_active_panel(
+        &self,
+        panel: gpui::AnyView,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        self.inner.render_active_panel(panel, group, window, cx)
+    }
+
+    fn render_drop_indicator(
+        &self,
+        indicator: DropIndicator,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.inner.render_drop_indicator(indicator, window, cx)
+    }
+
+    fn render_empty(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.inner.render_empty(group, window, cx)
+    }
+}
+
+/// 只有一块面板的组：一条居中的标题，整条拖窗口；别的组的标签拖到这里，并进这一组。
+fn render_title_band(
+    group: &TabGroupContext,
+    ix: usize,
+    leading: Pixels,
+    trailing: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let bar_h = workspace_frame::TOP_BAR_HEIGHT;
+    let panel = &group.panels()[ix];
+    let title = panel_label(panel, window, cx);
+    let badge = PanelHandle::of(panel).and_then(|handle| handle.title_suffix(window, cx));
+    let muted = cx.theme().muted_foreground;
+    let droppable = group.is_droppable();
+    let target = group.clone();
+    workspace_frame::with_window_drag(
+        h_flex()
+            .id("smelt-title-band")
+            .flex_none()
+            .w_full()
+            .h(bar_h)
+            .pl(leading)
+            .pr(trailing)
+            .when(droppable, |this| {
+                this.drag_over::<DragPanel>(|this, _, _, cx| this.bg(cx.theme().tokens.drop_target))
+                    .on_drop(move |drag: &DragPanel, window, cx| {
+                        target.drop_panel(drag.clone(), None, true, window, cx);
+                    })
             })
             .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.render_stage_dock(window, cx)),
+                    .gap_1()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(title)
+                    .children(badge),
             )
-            .when(animated_tool_w > 0.001, |row| {
-                row.child(
-                    div()
-                        .w(px(animated_tool_w))
-                        .h_full()
-                        .overflow_hidden()
-                        .flex_none()
-                        .relative()
-                        .child(self.render_tool_dock(window, cx))
-                        .when(tool_open && tool_progress >= 0.999, |col| {
-                            col.child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .left_0()
-                                    .w(ui_theme::chrome_gap())
-                                    .child(self.render_tool_resize_handle(cx)),
-                            )
-                        }),
-                )
-            })
-            .into_any_element()
-    }
+            .children(zoom_button(group, cx)),
+    )
+    .into_any_element()
+}
 
-    /// 侧栏与舞台之间的拖拽调节发丝。
-    pub(crate) fn render_sidebar_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let is_dragging = self.shell_drag_sidebar_start.is_some();
-        div()
-            .id("sidebar-shell-resize-handle")
-            .size_full()
-            .cursor_col_resize()
-            .group("sidebar-handle")
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(2.))
-                    .w(px(1.))
-                    .bg(rgb(if is_dragging {
-                        ui_theme::text_faint()
-                    } else {
-                        ui_theme::border_dim()
-                    }))
-                    .group_hover("sidebar-handle", |line| line.bg(rgb(ui_theme::text_faint()))),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.shell_drag_sidebar_start = Some((
-                        f32::from(event.position.x),
-                        this.sidebar_w,
-                    ));
-                    this.shell_gesture_sidebar_w = Some(this.sidebar_w);
-                    this.shell_pointer_down = true;
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
-    }
-
-    /// 舞台与工具栏之间的拖拽调节发丝。
-    pub(crate) fn render_tool_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let is_dragging = self.shell_drag_tool_start.is_some();
-        div()
-            .id("tool-shell-resize-handle")
-            .size_full()
-            .cursor_col_resize()
-            .group("tool-handle")
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(3.))
-                    .w(px(1.))
-                    .bg(rgb(if is_dragging {
-                        ui_theme::text_faint()
-                    } else {
-                        ui_theme::border_dim()
-                    }))
-                    .group_hover("tool-handle", |line| line.bg(rgb(ui_theme::text_faint()))),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.shell_drag_tool_start = Some((
-                        f32::from(event.position.x),
-                        this.tool_panel_w,
-                    ));
-                    this.shell_gesture_tool_w = Some(this.tool_panel_w);
-                    this.shell_pointer_down = true;
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
-    }
-
-    /// 松开鼠标指针时提交拖拽结果并判定是否收起。
-    pub(crate) fn commit_shell_pointer(
-        &mut self,
-        window: &mut Window,
-        _viewport: Pixels,
-        cx: &mut Context<Self>,
-    ) {
-        self.shell_pointer_down = false;
-        let mut changed = false;
-        if let Some((_, _)) = self.shell_drag_sidebar_start.take() {
-            let gesture_w = self
-                .shell_gesture_sidebar_w
-                .take()
-                .unwrap_or(self.sidebar_w);
-            if self.sidebar_w < crate::DOCK_COLLAPSE_WIDTH {
-                self.sidebar_w = gesture_w.max(crate::MIN_SIDEBAR_WIDTH);
-                self.sidebar_open = false;
-                self.focus_active_stage(window, cx);
-            } else {
-                self.sidebar_w = self.sidebar_w.max(crate::MIN_SIDEBAR_WIDTH);
+/// 两块以上面板的组：一排标签，拖标签重排、拖进别的组。标签本身不拖窗口，开头的让位和
+/// 标签后的空白拖。
+fn render_tabs(
+    group: &TabGroupContext,
+    visible: Vec<usize>,
+    leading: Pixels,
+    trailing: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let bar_h = workspace_frame::TOP_BAR_HEIGHT;
+    let selected = visible.iter().position(|ix| *ix == group.active_ix());
+    let draggable = group.is_draggable();
+    let droppable = group.is_droppable();
+    let tabs: Vec<Tab> = visible
+        .iter()
+        .map(|&ix| {
+            let panel = group.panels()[ix].clone();
+            // 角标由面板自己给（`Panel::title_suffix`），这里不认具体是哪块。
+            let badge = PanelHandle::of(&panel).and_then(|handle| handle.title_suffix(window, cx));
+            let label = panel_label(&panel, window, cx);
+            let drag = draggable.then(|| group.drag_panel(ix, cx)).flatten();
+            Tab::new()
+                .child(label)
+                .when_some(badge, |tab, badge| tab.suffix(badge))
+                .when_some(drag, |tab, drag| {
+                    tab.on_drag(drag, move |drag, offset, _window, cx| {
+                        cx.stop_propagation();
+                        drag.set_drag_offset(offset);
+                        drag.set_preview_size(DRAG_PREVIEW_SIZE);
+                        let title: SharedString = panel_text(&panel, cx);
+                        cx.new(|_| DragPreview { title })
+                    })
+                })
+                .when(droppable, |tab| {
+                    let group = group.clone();
+                    tab.drag_over::<DragPanel>(|this, _, _, cx| {
+                        this.border_l_2().border_color(cx.theme().drag_border)
+                    })
+                    .on_drop(move |drag: &DragPanel, window, cx| {
+                        group.drop_panel(drag.clone(), Some(ix), true, window, cx);
+                    })
+                })
+        })
+        .collect();
+    let tabs_count = group.panels().len();
+    let select = group.clone();
+    let tail = group.clone();
+    let node = group.node();
+    TabBar::new("smelt-tab-bar")
+        .underline()
+        .xsmall()
+        .w_full()
+        .h(bar_h)
+        .flex_none()
+        .when_some(selected, |bar, ix| bar.selected_index(ix))
+        // 标签条按显示的先后编号，隐藏的面板不占号，换回组里的下标再选。
+        .on_click(move |shown: &usize, window, cx| {
+            if let Some(&ix) = visible.get(*shown) {
+                select.select_tab(ix, window, cx);
             }
-            changed = true;
-        }
-        if let Some((_, _)) = self.shell_drag_tool_start.take() {
-            let gesture_w = self
-                .shell_gesture_tool_w
-                .take()
-                .unwrap_or(self.tool_panel_w);
-            if self.tool_panel_w < crate::DOCK_COLLAPSE_WIDTH {
-                self.tool_panel_w = gesture_w.max(crate::MIN_TOOL_PANEL_WIDTH);
-                self.set_tool_panel_open(false, cx);
-                self.focus_active_stage(window, cx);
-            } else {
-                self.tool_panel_w = self.tool_panel_w.max(crate::MIN_TOOL_PANEL_WIDTH);
-            }
-            changed = true;
-        }
-        if changed || self.shell_needs_save {
-            self.shell_needs_save = false;
-            self.save_state(cx);
-            cx.notify();
-        }
-    }
+        })
+        .children(tabs)
+        .prefix(workspace_frame::with_window_drag(
+            div().w(leading + px(16.)).h(bar_h).flex_none(),
+        ))
+        // 标签后的空白：拖窗口，也收拖过来的标签（放到最后）。
+        .last_empty_space(workspace_frame::with_window_drag(
+            div()
+                .id("smelt-tab-bar-empty")
+                .flex_1()
+                .min_w_0()
+                .h(bar_h)
+                .when(droppable, |this| {
+                    this.drag_over::<DragPanel>(|this, _, _, cx| {
+                        this.bg(cx.theme().tokens.drop_target)
+                    })
+                    .on_drop(move |drag: &DragPanel, window, cx| {
+                        // 自己组里的拖到最后一格；别处来的追加在后面，不抢显示。
+                        let ix = (drag.source() == node).then(|| tabs_count - 1);
+                        tail.drop_panel(drag.clone(), ix, false, window, cx);
+                    })
+                }),
+        ))
+        .suffix(
+            h_flex()
+                .flex_none()
+                .h(bar_h)
+                .pr(trailing)
+                .children(zoom_button(group, cx)),
+        )
+        .into_any_element()
+}
 
-    pub(crate) fn collapse_sidebar(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_w = width.max(crate::MIN_SIDEBAR_WIDTH);
-        self.sidebar_open = false;
-        self.focus_active_stage(window, cx);
-        self.save_state(cx);
-        cx.notify();
-    }
+/// 拖标签时跟着鼠标的那块。组件库的 `DragPanelPreview` 建不出来（字段私有），照它的样子画。
+struct DragPreview {
+    title: SharedString,
+}
 
-    pub(crate) fn collapse_tool_panel(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.tool_panel_w = width.max(crate::MIN_TOOL_PANEL_WIDTH);
-        self.set_tool_panel_open(false, cx);
-        self.focus_active_stage(window, cx);
-        self.save_state(cx);
-        cx.notify();
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .id("smelt-drag-panel")
+            .cursor_grab()
+            .py_1()
+            .px_3()
+            .w_24()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .text_color(theme.tab_foreground)
+            .bg(theme.tokens.tab_active)
+            .opacity(0.75)
+            .child(self.title.clone())
     }
+}
 
+/// 标签上的名字：面板给的短名，没有就用它的标题。
+fn panel_label(panel: &Arc<dyn BasePanelView>, window: &mut Window, cx: &mut App) -> AnyElement {
+    match PanelHandle::of(panel) {
+        Some(handle) => match handle.tab_name(cx) {
+            Some(name) => name.into_any_element(),
+            None => handle.title(window, cx),
+        },
+        None => panel_text(panel, cx).into_any_element(),
+    }
+}
+
+/// 面板名字的纯文本，拖动预览用。只读内存。
+fn panel_text(panel: &Arc<dyn BasePanelView>, cx: &App) -> SharedString {
+    PanelHandle::of(panel)
+        .and_then(|handle| handle.tab_name(cx))
+        .unwrap_or_else(|| panel.panel_name(cx).into())
+}
+
+/// 放大 / 还原这一组。放大是 Dock 自己的：这一组铺满整个工作台，别的都让开。
+fn zoom_button(group: &TabGroupContext, cx: &App) -> Option<AnyElement> {
+    let zoomed = group.is_zoomed();
+    if !zoomed && !group.active_panel().is_some_and(|panel| panel.zoomable(cx)) {
+        return None;
+    }
+    let group = group.clone();
+    Some(
+        div()
+            .flex_none()
+            .px_1()
+            // 在拖窗口的条上：按下先拦住，不让它变成拖窗口。
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new("smelt-dock-zoom")
+                    .quiet()
+                    .compact()
+                    .selected(zoomed)
+                    .toggled(zoomed)
+                    .icon(if zoomed {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    })
+                    .icon_action(if zoomed { "还原" } else { "放大" })
+                    .on_click(move |_, window, cx| group.toggle_zoom(window, cx)),
+            )
+            .into_any_element(),
+    )
+}
+
+// ---- 停靠区开合 ----
+
+impl Workspace {
+    /// 左右停靠区的开合按钮，浮在窗口左上角（红黄绿按钮右边）和右上角，收起、展开都在同一个
+    /// 位置。按停靠区给，不认里面摆的是什么视图：布局把什么放进左右停靠区，什么就能收起。
+    /// 停靠区收起后宽度是 0，什么都画不出来，重新打开只能靠这里。
+    ///
+    /// 贴着这两个角的组给按钮让了位（[`ShellView::leading_inset`]、
+    /// [`ShellView::trailing_inset`]）。`inset` 是 Dock 外面那圈内边距。
+    pub(crate) fn render_dock_toggles(&self, inset: Pixels, window: &Window) -> Vec<AnyElement> {
+        let left = self.shell_view.left_dock.map(|open| {
+            dock_toggle(DockPlacement::Left, open, self.shell_dock.clone())
+                .left(inset + lights_width(window))
+        });
+        let right = self.shell_view.right_dock.map(|open| {
+            dock_toggle(DockPlacement::Right, open, self.shell_dock.clone()).right(inset)
+        });
+        [left, right]
+            .into_iter()
+            .flatten()
+            .map(|toggle| toggle.top(inset).into_any_element())
+            .collect()
+    }
+}
+
+/// 一个停靠区的开合按钮。横向位置由调用方给。
+fn dock_toggle(placement: DockPlacement, open: bool, area: Entity<DockArea>) -> Div {
+    let (id, label, icon): (&str, &str, Icon) = match (placement, open) {
+        (DockPlacement::Left, true) => (
+            "dock-toggle-left",
+            "收起左侧",
+            Icon::empty().path("smelt-icons/panel-left-filled.svg"),
+        ),
+        (DockPlacement::Left, false) => {
+            ("dock-toggle-left", "展开左侧", IconName::PanelLeft.into())
+        }
+        (_, true) => (
+            "dock-toggle-right",
+            "收起右侧",
+            Icon::empty().path("smelt-icons/panel-right-filled.svg"),
+        ),
+        (_, false) => ("dock-toggle-right", "展开右侧", IconName::PanelRight.into()),
+    };
+    div()
+        .absolute()
+        .w(px(DOCK_TOGGLE_WIDTH))
+        .h(workspace_frame::TOP_BAR_HEIGHT)
+        .flex()
+        .items_center()
+        .justify_center()
+        // 浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            Button::new(id)
+                .quiet()
+                .compact()
+                .icon(icon)
+                .icon_action(label)
+                .on_click(move |_, window, cx| {
+                    area.update(cx, |area, cx| area.toggle_dock(placement, window, cx));
+                }),
+        )
+}
+
+// ---- 会话列表和舞台的画法 ----
+
+impl Workspace {
+    /// 会话列表。自己顶着窗口上沿时（单独一组、贴顶）让出顶栏的高度，空白处拖窗口；
+    /// 贴左上角时拖窗口的条从红黄绿按钮右边开始。
     pub(crate) fn render_sidebar_dock(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let surface: Hsla = rgb(ui_theme::bg_column()).into();
-        let animate = self.workspace_window_active && self.sidebar_open;
+        let sessions = Builtin::Sessions.id();
+        let animate = self.workspace_window_active && self.view_shown(sessions);
+        let at_top = self.shell_view.bare.contains(sessions);
+        let drag_left = if self.shell_view.top_left.as_deref() == Some(sessions) {
+            self.shell_view.leading_inset(window)
+        } else {
+            px(0.)
+        };
         let statuses: Vec<AgentStatus> = self
             .sessions
             .iter()
             .map(|session| session.status(cx))
             .collect();
         let focused_key = self.sidebar_focused_key(window);
-        let list = self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
-        let viewport = window.viewport_size().width;
-        let sidebar_display = crate::sidebar_width_for_viewport(self.sidebar_w, viewport);
-        div()
-            .size_full()
-            .pr(ui_theme::chrome_gap())
-            .child(
-                workspace_frame::card(surface)
-                    .pt(workspace_frame::TOP_BAR_HEIGHT)
-                    // 从访达拖文件夹进侧栏 = 打开项目。只认侧栏，不挂整个窗口：对话输入框要自己收文件。
-                    .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
-                        style.bg(cx.theme().drop_target)
-                    })
-                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-                        this.open_paths(paths.paths(), cx);
-                    }))
-                    .child(
-                        div()
-                            .w(px(sidebar_display))
-                            .h_full()
-                            .flex_none()
-                            .child(list),
-                    )
-                    .child(workspace_frame::with_window_drag(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left(px(80.))
-                            .right_0()
-                            .h(workspace_frame::TOP_BAR_HEIGHT),
-                    )),
-            )
+        let list =
+            self.render_session_list(cx.entity(), window, cx, &statuses, animate, focused_key);
+        workspace_frame::card(rgb(ui_theme::bg_column()).into())
+            .when(at_top, |card| card.pt(workspace_frame::TOP_BAR_HEIGHT))
+            // 从访达拖文件夹进会话列表 = 打开项目。不挂整个窗口：对话输入框要自己收文件。
+            .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
+                style.bg(cx.theme().drop_target)
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                this.open_paths(paths.paths(), cx);
+            }))
+            .child(div().size_full().min_w_0().child(list))
+            .when(at_top, |card| {
+                card.child(workspace_frame::with_window_drag(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(drag_left)
+                        .right_0()
+                        .h(workspace_frame::TOP_BAR_HEIGHT),
+                ))
+            })
             .into_any_element()
     }
 
-    pub(crate) fn render_tool_dock(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let surface: Hsla = rgb(ui_theme::bg_column()).into();
-        let tool_w = self.tool_panel_w;
-        div()
-            .size_full()
-            .pl(ui_theme::chrome_gap())
-            .child(
-                workspace_frame::card(surface)
-                    .justify_end()
-                    .child(
-                        div()
-                            .w(px(tool_w))
-                            .h_full()
-                            .flex_none()
-                            .child(self.render_tool_panel(window, cx)),
-                    ),
-            )
-            .into_any_element()
-    }
-
+    /// 舞台：当前会话，或宿主自己的页面（智能体、自动化、远程桌面），或没摆进布局的插件视图。
     pub(crate) fn render_stage_dock(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let stage_surface: Hsla = rgb(ui_theme::bg_stage()).into();
-        let left_guard = self.chrome_left_guard(window);
-        let stage_content: AnyElement = match self.active_tab() {
+        let stage_content: AnyElement = match self.active_tab().clone() {
             WorkspaceRoute::Agents => self.render_agents_page(window, cx),
             WorkspaceRoute::Automations => self.render_automations_page(window, cx),
-            WorkspaceRoute::Capabilities => self.render_capabilities_page(window, cx),
-            WorkspaceRoute::Desktop => self.render_desktop_page(window, cx),
-            WorkspaceRoute::Session => {
-                if self.tool_panel_promoted() {
-                    self.render_tool_panel_stage(left_guard, window, cx)
-                } else {
-                    let background_image = cx.global::<Appearance>().bg_image.clone();
-                    let content = if self
-                        .sessions
-                        .get(self.active_session)
-                        .is_some_and(|session| !session.is_product_conversation(cx))
-                    {
-                        div().flex_1().min_w_0().min_h_0().flex().flex_col().child(
-                            div().flex_1().min_w_0().min_h_0().flex().child(
-                                match &self.sessions[self.active_session].kind {
-                                    SessionKind::Term { dock, .. } => div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .min_h_0()
-                                        .flex()
-                                        .bg(rgb(terminal::default_bg()))
-                                        .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
-                                        .child(dock.area().clone())
-                                        .into_any_element(),
-                                    SessionKind::Conversation(view) => {
-                                        let bg_image_opacity =
-                                            cx.global::<Appearance>().bg_image_opacity;
-                                        div()
-                                            .relative()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .min_h_0()
-                                            .flex()
-                                            .bg(rgb(ui_theme::bg_stage()))
-                                            .children(background_image.as_deref().map(|path| {
-                                                workspace_frame::background_image_layer(
-                                                    path,
-                                                    bg_image_opacity,
-                                                    cx,
-                                                )
-                                            }))
-                                            .child(view.clone().cached(
-                                                gpui::StyleRefinement::default().size_full(),
-                                            ))
-                                            .into_any_element()
-                                    }
-                                },
-                            ),
-                        )
-                    } else if self.spaces.is_empty() {
-                        stage_empty_state(
-                            gpui_kit_assets::IconName::Server,
-                            "添加远程机器",
-                            "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
-                            Some(
-                                Button::new("empty-add-runtime")
-                                    .commit()
-                                    .label("添加远程机器")
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.open_settings_section(
-                                            crate::settings::SettingsSection::Remote,
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                        )
-                    } else {
-                        stage_empty_state(
-                            gpui_kit_assets::IconName::Coffee,
-                            "休息一下",
-                            "没有打开的会话",
-                            None,
-                        )
-                    };
-                    content.into_any_element()
-                }
+            // 摆进布局的视图画在它自己的面板里，一个视图不能画两处。
+            WorkspaceRoute::Page(id) if self.shell_view.laid_out.contains(id.as_str()) => {
+                div().flex_1().into_any_element()
             }
+            WorkspaceRoute::Page(id) => self.render_page(&id, cx),
+            WorkspaceRoute::Desktop => self.render_desktop_page(window, cx),
+            WorkspaceRoute::Session => self.render_stage_session(cx),
         };
-        let stage = div()
+        let content = div()
             .size_full()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
             .child(stage_content);
-        div()
-            .size_full()
-            .child(workspace_frame::card(stage_surface).child(stage))
+        // 标题胶囊和拖窗口的顶带浮在舞台内容上沿，只盖舞台自己。
+        let chrome = self.render_stage_chrome(self.chrome_left_guard(window), cx);
+        workspace_frame::card(rgb(ui_theme::bg_stage()).into())
+            .child(content)
+            .child(chrome)
             .into_any_element()
+    }
+
+    fn render_stage_session(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(session) = self
+            .sessions
+            .get(self.active_session)
+            .filter(|session| !session.is_product_conversation(cx))
+        else {
+            return self.render_stage_empty(cx);
+        };
+        let body = match &session.kind {
+            SessionKind::Term { dock, .. } => div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .bg(rgb(terminal::default_bg()))
+                .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
+                .child(dock.area().clone())
+                .into_any_element(),
+            SessionKind::Conversation(view) => {
+                let appearance = cx.global::<Appearance>();
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .bg(rgb(ui_theme::bg_stage()))
+                    .children(appearance.bg_image.as_deref().map(|path| {
+                        workspace_frame::background_image_layer(
+                            path,
+                            appearance.bg_image_opacity,
+                            cx,
+                        )
+                    }))
+                    .child(
+                        view.clone()
+                            .cached(gpui::StyleRefinement::default().size_full()),
+                    )
+                    .into_any_element()
+            }
+        };
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_w_0().min_h_0().flex().child(body))
+            .into_any_element()
+    }
+
+    fn render_stage_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.spaces.is_empty() {
+            return stage_empty_state(
+                gpui_kit_assets::IconName::Server,
+                "添加远程机器",
+                "配对一台 Linux 或 macOS 机器后，就可以在这里打开项目、对话和终端。",
+                Some(
+                    Button::new("empty-add-runtime")
+                        .commit()
+                        .label("添加远程机器")
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.open_settings_section(
+                                crate::settings::SettingsSection::Remote,
+                                cx,
+                            );
+                        })),
+                ),
+            )
+            .into_any_element();
+        }
+        stage_empty_state(
+            gpui_kit_assets::IconName::Coffee,
+            "休息一下",
+            "没有打开的会话",
+            None,
+        )
+        .into_any_element()
     }
 }
 
@@ -567,7 +1133,7 @@ fn stage_empty_state(
     title: &'static str,
     description: &'static str,
     action: Option<Button>,
-) -> gpui::Div {
+) -> Div {
     let empty = Empty::new()
         .header(
             EmptyHeader::new()
@@ -587,157 +1153,13 @@ fn stage_empty_state(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ShellSizeAction, ShellSizeDecision, ShellSizeStep, decide_shell_size, shell_size_action,
-        sidebar_width_after_collapse, tool_panel_width_after_collapse,
-    };
-
-    fn step(preference: f32, applied: f32, dock: f32, display: f32) -> ShellSizeStep {
-        ShellSizeStep {
-            preference,
-            applied,
-            dock,
-            display,
-            min: 240.,
-            max: 10_000.,
-        }
-    }
-
-    fn capped(dock: f32, max: f32) -> ShellSizeStep {
-        ShellSizeStep {
-            preference: 320.,
-            applied: 320.,
-            dock,
-            display: 320.,
-            min: 240.,
-            max,
-        }
-    }
+    use super::panel_name;
 
     #[test]
-    fn drag_adopts_the_dock_width() {
-        assert_eq!(
-            shell_size_action(step(240., 240., 320., 240.)),
-            ShellSizeAction::Adopt {
-                preference: 320.,
-                push: None,
-            }
-        );
-    }
-
-    #[test]
-    fn drag_below_the_minimum_is_pushed_back() {
-        assert_eq!(
-            shell_size_action(step(240., 240., 100., 240.)),
-            ShellSizeAction::Adopt {
-                preference: 240.,
-                push: Some(240.),
-            }
-        );
-    }
-
-    #[test]
-    fn a_narrow_window_pushes_the_display_and_keeps_the_preference() {
-        assert_eq!(
-            shell_size_action(step(360., 360., 360., 280.)),
-            ShellSizeAction::Push(280.)
-        );
-    }
-
-    #[test]
-    fn growing_the_window_restores_the_preference() {
-        assert_eq!(
-            shell_size_action(step(360., 280., 280., 360.)),
-            ShellSizeAction::Push(360.)
-        );
-    }
-
-    #[test]
-    fn an_aligned_dock_is_left_alone() {
-        assert_eq!(
-            shell_size_action(step(320., 320., 320., 320.)),
-            ShellSizeAction::Keep
-        );
-    }
-
-    #[test]
-    fn a_drag_past_the_cap_is_clamped() {
-        assert_eq!(
-            shell_size_action(capped(700., 536.)),
-            ShellSizeAction::Adopt {
-                preference: 536.,
-                push: Some(536.),
-            }
-        );
-    }
-
-    #[test]
-    fn a_held_pointer_follows_the_dock_and_does_not_push() {
-        assert_eq!(
-            decide_shell_size(capped(700., 536.), true),
-            ShellSizeDecision {
-                preference: 536.,
-                applied: 700.,
-                push: None,
-                dragged: true,
-            }
-        );
-    }
-
-    #[test]
-    fn releasing_the_pointer_pushes_a_capped_drag_back() {
-        assert_eq!(
-            decide_shell_size(capped(700., 536.), false),
-            ShellSizeDecision {
-                preference: 536.,
-                applied: 536.,
-                push: Some(536.),
-                dragged: true,
-            }
-        );
-    }
-
-    #[test]
-    fn releasing_below_the_collapse_line_keeps_the_width_from_before_the_drag() {
-        assert_eq!(sidebar_width_after_collapse(360., 100.), Some(360.));
-        assert_eq!(sidebar_width_after_collapse(360., 159.9), Some(360.));
-    }
-
-    #[test]
-    fn releasing_on_the_collapse_line_stays_open() {
-        assert_eq!(
-            sidebar_width_after_collapse(360., crate::DOCK_COLLAPSE_WIDTH),
-            None
-        );
-        assert_eq!(sidebar_width_after_collapse(360., 240.), None);
-    }
-
-    #[test]
-    fn a_collapse_repairs_a_gesture_width_below_the_minimum() {
-        assert_eq!(sidebar_width_after_collapse(100., 100.), Some(240.));
-    }
-
-    #[test]
-    fn releasing_a_narrow_tool_panel_keeps_the_width_from_before_the_drag() {
-        assert_eq!(tool_panel_width_after_collapse(480., 100.), Some(480.));
-        assert_eq!(tool_panel_width_after_collapse(480., 159.9), Some(480.));
-        assert_eq!(
-            tool_panel_width_after_collapse(480., crate::DOCK_COLLAPSE_WIDTH),
-            None
-        );
-        assert_eq!(tool_panel_width_after_collapse(200., 100.), Some(320.));
-    }
-
-    #[test]
-    fn a_held_pointer_does_not_push_a_narrow_window() {
-        assert_eq!(
-            decide_shell_size(step(360., 360., 360., 280.), true),
-            ShellSizeDecision {
-                preference: 360.,
-                applied: 360.,
-                push: None,
-                dragged: false,
-            }
-        );
+    fn panel_names_are_interned_once_per_id() {
+        let first = panel_name("com.example.view");
+        let again = panel_name(&String::from("com.example.view"));
+        assert!(std::ptr::eq(first, again));
+        assert_eq!(first, "com.example.view");
     }
 }

@@ -14,7 +14,7 @@ pub(crate) use smelt_ui::Button;
 use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
-use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
+use crate::{Workspace, placeholder_view};
 use smelt_model::runtime_path::PathStyle;
 use smelt_ui::IconAction as _;
 use smelt_ui::truncated_line::truncated_line;
@@ -1053,7 +1053,12 @@ pub fn file_content_parts(
                                     .separator()
                                     .menu("全选", Box::new(gpui_component::input::SelectAll))
                                     .separator()
-                                    .menu("发送选中内容到会话", Box::new(SendSelectionToTerminal))
+                                    .menu(
+                                        "发送选中内容到会话",
+                                        Box::new(smelt_plugin_api::RunCommand::new(
+                                            "smelt.files/send-selection",
+                                        )),
+                                    )
                             }),
                     )
                     .into_any_element()

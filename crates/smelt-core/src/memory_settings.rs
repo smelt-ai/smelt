@@ -60,6 +60,31 @@ pub fn load_on(store: &smelt_store::Store) -> Result<EmbeddingSettings, smelt_st
 
 /// 校验并写入一项。空字符串表示清除。
 pub fn apply_on(store: &smelt_store::Store, key: &str, value: &Value) -> Result<(), String> {
+    store
+        .modify_memory_settings(|record| apply_to_record(record, key, value))
+        .map(|_| ())
+}
+
+/// 在同一事务里校验并写入整组记忆设置，任一项失败则整组不写入。
+pub fn apply_patch_on(
+    store: &smelt_store::Store,
+    patch: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    store
+        .modify_memory_settings(|record| {
+            for (key, value) in patch {
+                apply_to_record(record, key, value)?;
+            }
+            Ok::<_, String>(())
+        })
+        .map(|_| ())
+}
+
+fn apply_to_record(
+    record: &mut smelt_store::MemorySettingsRecord,
+    key: &str,
+    value: &Value,
+) -> Result<(), String> {
     let text = match value {
         Value::String(text) => text.trim().to_string(),
         Value::Null => String::new(),
@@ -71,13 +96,9 @@ pub fn apply_on(store: &smelt_store::Store, key: &str, value: &Value) -> Result<
     {
         return Err(format!("{key} 必须是 http:// 或 https:// 开头的地址"));
     }
-    store
-        .modify_memory_settings(|record| {
-            let slot = field(record, key).ok_or_else(|| format!("未知的记忆设置：{key}"))?;
-            *slot = text;
-            Ok::<_, String>(())
-        })
-        .map(|_| ())
+    let slot = field(record, key).ok_or_else(|| format!("未知的记忆设置：{key}"))?;
+    *slot = text;
+    Ok(())
 }
 
 /// 给 `settings get` 和设置页看的形状：密钥只显示设没设。

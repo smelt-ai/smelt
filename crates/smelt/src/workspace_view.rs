@@ -8,7 +8,6 @@ use gpui_component::input::Input;
 use gpui_component::*;
 use smelt_ui::truncated_line::truncated_line;
 
-use crate::session_history::{HistoryListState, HistoryViewParams, history_view};
 use crate::{CloseConfirm, RenameTarget, Workspace, request_app_quit, ui_theme};
 #[cfg(any(target_os = "macos", windows))]
 use crate::{UpdateInstallTrigger, updater};
@@ -722,7 +721,6 @@ impl Workspace {
         // 会话行和分屏子行共用这个弹窗，标题得说清改的是哪个。
         let (heading, hint) = match self.rename_target {
             Some(RenameTarget::Pane(_)) => ("重命名终端", "留空则恢复自动识别的标题。"),
-            Some(RenameTarget::History { .. }) => ("重命名历史会话", "留空则恢复自动识别的标题。"),
             Some(RenameTarget::Runtime(_)) => (
                 "重命名机器",
                 "侧栏和设置里显示这个名字，只在这台电脑上生效。",
@@ -980,137 +978,6 @@ impl Workspace {
             crate::overlay::ModalLayer::UnsavedFile,
             cx,
         )
-    }
-
-    /// 智能体的 space 里只可能有底层引擎自己的历史，别家的在这个目录下不可能
-    /// 存在。返回 `Some(kind)` 表示当前处在某个智能体的上下文里。
-    pub(crate) fn history_engine_override(
-        &self,
-        project: Option<&crate::ProjectRef>,
-        cx: &App,
-    ) -> Option<crate::settings::ConversationAgentKind> {
-        let project = project?;
-        let id = space_agent_id(project, cx)?;
-        crate::settings::agent_hosts(cx)?
-            .agent(&project.runtime, &id)
-            .and_then(|agent| agent.engine_kind())
-    }
-
-    /// 历史列表要按哪个引擎、哪份 profile 去扫。渲染和后台扫描必须用同一个答案，
-    /// 否则扫的是 A 的数据、显示的是 B 的 tab，列表会永远空着。
-    pub(crate) fn history_source(
-        &self,
-        project: Option<&crate::ProjectRef>,
-        cx: &App,
-    ) -> (crate::settings::HistorySourceKind, Option<String>) {
-        match self.history_engine_override(project, cx) {
-            Some(kind) => (kind.into(), None),
-            None => (self.history_agent, self.history_profile.clone()),
-        }
-    }
-
-    /// 历史内容由 Tool Panel 统一承载；停靠和全屏只改变外层容器尺寸，
-    /// 不在历史视图内部做特殊布局分支。
-    pub(crate) fn render_history_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        // 历史存档在项目所在的那台机器上，列表、profile 和智能体定义都按它认。
-        let project = self.active_project_ref(cx);
-        let runtime = project
-            .as_ref()
-            .map_or(crate::RuntimeKey::Local, |project| project.runtime.clone());
-        let cwd = project.as_ref().map(|project| project.root.clone());
-        let restrict_to_kind = self.history_engine_override(project.as_ref(), cx);
-        let (agent, profile_id) = self.history_source(project.as_ref(), cx);
-        let list_key = cwd.as_ref().map(|c| {
-            crate::session_history::session_list_key(&runtime, agent, profile_id.as_deref(), c)
-        });
-        let (sessions, row_text, row_keys) =
-            match list_key.as_ref().and_then(|key| self.session_list.get(key)) {
-                Some((_, list)) => (
-                    Some(list.sessions.clone()),
-                    list.row_text.clone(),
-                    list.row_keys.clone(),
-                ),
-                None => (
-                    None,
-                    std::rc::Rc::new(Vec::new()),
-                    std::rc::Rc::new(Vec::new()),
-                ),
-            };
-        let list_state = match (cwd.as_ref(), sessions) {
-            (None, _) => HistoryListState::NoProject,
-            (Some(_), None) => HistoryListState::Loading,
-            (Some(_), Some(s)) if s.is_empty() => HistoryListState::Empty,
-            (Some(_), Some(s)) => HistoryListState::Ready(s),
-        };
-        let (source_tabs, launch_override, profile_label, history_agent_ids) = {
-            let config = crate::settings::agent_host_settings(&runtime, cx);
-            let source_tabs = crate::session_history::tabs_with_sessions(
-                crate::session_history::history_source_tabs(
-                    restrict_to_kind,
-                    config.profiles.iter().cloned(),
-                ),
-                (agent, profile_id.as_deref()),
-                |tab| {
-                    cwd.as_deref().is_some_and(|cwd| {
-                        let key = crate::session_history::session_list_key(
-                            &runtime,
-                            tab.kind,
-                            tab.profile_id.as_deref(),
-                            cwd,
-                        );
-                        self.session_list
-                            .get(&key)
-                            .is_some_and(|(_, list)| !list.sessions.is_empty())
-                    })
-                },
-            );
-            let launch_override = profile_id.as_deref().and_then(|id| {
-                config
-                    .find_profile(id)
-                    .and_then(|profile| config.profile_launch_spec(profile).ok())
-            });
-            let profile_label = profile_id
-                .as_deref()
-                .and_then(|id| config.find_profile(id).map(|profile| profile.label.clone()));
-            let known: std::collections::HashSet<&str> = config
-                .agents
-                .iter()
-                .map(|agent| agent.id.as_str())
-                .collect();
-            let mut history_agent_ids = list_key
-                .as_ref()
-                .and_then(|key| self.history_agent_bindings.get(key))
-                .map(|bindings| bindings.as_ref().clone())
-                .unwrap_or_default();
-            history_agent_ids.retain(|_, id| known.contains(id.as_str()));
-            (
-                source_tabs,
-                launch_override,
-                profile_label,
-                std::rc::Rc::new(history_agent_ids),
-            )
-        };
-        history_view(
-            HistoryViewParams {
-                agent,
-                profile_id,
-                runtime,
-                cwd,
-                list: list_state,
-                detail: &self.session_detail,
-                detail_list_state: self.history_detail_list_state.clone(),
-                filter: self.history_filter.clone(),
-                restrict_to_kind,
-                source_tabs,
-                launch_override,
-                profile_label,
-                history_agent_ids,
-                row_text,
-                row_keys,
-            },
-            cx,
-        )
-        .into_any_element()
     }
 }
 

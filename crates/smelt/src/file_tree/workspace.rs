@@ -255,7 +255,7 @@ impl Workspace {
                         runtime: runtime.clone(),
                         root: root.to_string(),
                     })
-                    .map(|(_, status)| status)
+                    .map(|cached| &cached.value)
             },
         )
     }
@@ -495,21 +495,7 @@ impl Workspace {
         if runtime == self.file_tree_runtime(cx) {
             self.reveal_in_file_tree(&path, cx);
         }
-        // 点文件不再抢占舞台：Tool Panel 的 FILES tab 自己就能分
-        // 左右两栏显示内容 + 树，中间舞台的终端/ACP 对话完全不受影响。只有
-        // 已经把 Files 提升到舞台全宽（双栏）时，才保持那个双栏视图跟着切换
-        // 显示的文件（不触碰 stage_cover，本来就是 Some(Files) 不用改）。
-        //
-        // 停靠面板默认 344px 分给树 + 内容太挤，第一次在这个面板里开文件时
-        // 顺手把面板拉宽一些（参考 Codex App 点文件自动展开面板），后续用户
-        // 拖宽/拖窄的手动结果不再覆盖。
-        if self.tool_panel_open
-            && matches!(self.tool_panel_tab, crate::tool_panel::ToolPanelTab::Files)
-            && !self.tool_panel_promoted()
-            && self.tool_panel_w < 640.
-        {
-            self.tool_panel_w = 640.;
-        }
+        // 文件在「文件」视图里打开，露不露出来由调用方定：点文件树的人本来就在看它。
 
         self.file_gen = self.file_gen.wrapping_add(1);
         let r#gen = self.file_gen;
@@ -944,8 +930,8 @@ impl Workspace {
                             },
                         );
                     }
-                    // 连不上或目录没了：有旧列表就留着（仍标旧，下次刷新再试），
-                    // 没有就记一份空的，免得一直转「加载中」。
+                    // 连不上或目录没了：有旧列表就留着，没有就记一份空的，免得一直转「加载中」。
+                    // 都算取过了，下一次事件（变化、重连、窗口回到前台）再试，不是每次刷新都试。
                     Err(error) => {
                         eprintln!("[files] 列目录 {} 失败：{}", dir.root, error_text(error));
                         this.dir_cache
@@ -955,7 +941,8 @@ impl Workspace {
                             .or_insert_with(|| DirListing {
                                 entries: Rc::new(Vec::new()),
                                 stale: false,
-                            });
+                            })
+                            .stale = false;
                     }
                 }
                 this.try_flush_file_tree_reveal(cx);
@@ -981,13 +968,34 @@ impl Workspace {
     /// 根，分不出是哪个目录。只有界面上看得到的目录会在下一次刷新时重取。
     pub(crate) fn mark_project_dirs_stale(&mut self, project: &ProjectRef, cx: &App) {
         let style = crate::runtimes::path_style(&project.runtime, cx);
-        let Some(cache) = self.dir_cache.get_mut(&project.runtime) else {
-            return;
-        };
-        for (dir, listing) in cache.iter_mut() {
-            if style.starts_with(dir, &project.root) {
-                listing.stale = true;
+        self.mark_dirs_stale_where(&|runtime, dir| {
+            runtime == &project.runtime && style.starts_with(dir, &project.root)
+        });
+    }
+
+    /// 不知道哪里变了（重连、窗口回到前台）：`runtime` 那台机器（`None` 是所有机器）上的
+    /// 目录列表都标旧。
+    pub(crate) fn mark_runtime_dirs_stale(&mut self, runtime: Option<&crate::RuntimeKey>) {
+        self.mark_dirs_stale_where(&|dir_runtime, _| runtime.is_none_or(|r| r == dir_runtime));
+    }
+
+    /// 选中的目录列表标旧；正在读的那次回来也不算新。
+    fn mark_dirs_stale_where(&mut self, matches: &dyn Fn(&crate::RuntimeKey, &str) -> bool) {
+        for (runtime, cache) in self.dir_cache.iter_mut() {
+            for (dir, listing) in cache.iter_mut() {
+                if matches(runtime, dir) {
+                    listing.stale = true;
+                }
             }
+        }
+        let inflight: Vec<ProjectRef> = self
+            .dir_inflight
+            .iter()
+            .filter(|dir| matches(&dir.runtime, &dir.root))
+            .cloned()
+            .collect();
+        for dir in inflight {
+            self.bump_dir_generation(&dir);
         }
     }
 

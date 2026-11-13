@@ -1,4 +1,4 @@
-//! 设置页：外观（主题、字号与字体、窗口与背景）。
+//! 设置页：外观（主题、字号与字体、布局、窗口与背景）。
 
 use super::*;
 use gpui_component::IndexPath;
@@ -15,6 +15,7 @@ pub(super) fn appearance_page(
     SettingPage::new("外观")
         .group(interface_group(snapshot))
         .group(terminal_group(snapshot))
+        .group(layout_group(entity.clone(), cx))
         .group(window_group(entity, snapshot, cx))
 }
 
@@ -80,6 +81,60 @@ fn terminal_group(snapshot: &SettingsRenderSnapshot) -> SettingGroup {
     ])
 }
 
+/// 布局：用哪份，和把它恢复成本来的样子。选项是插件登记的布局（只读内存）。
+fn layout_group(entity: Entity<Workspace>, cx: &App) -> SettingGroup {
+    let options: Vec<(SharedString, SharedString)> = smelt_plugin_api::layouts(cx)
+        .into_iter()
+        .map(|layout| (layout.id, layout.title))
+        .collect();
+    if options.is_empty() {
+        let choice = SettingItem::new(
+        "布局",
+        SettingField::render(|_, _, cx: &mut App| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("没有可选的布局")
+        }),
+    )
+    .description("所有视图摆在中间一组；装了带布局的插件后可以在这里换");
+    // 兜底的摆法不存档，没有可恢复的。
+    return SettingGroup::new().title("布局").item(choice);
+    }
+    let choice = SettingItem::new(
+        "布局",
+        SettingField::dropdown(
+            options,
+            // 选的布局暂时没登记时显示实际在用的那份，不改保存的选择。
+            |cx: &App| {
+                crate::workspace_layout::effective_layout(cx)
+                    .unwrap_or_default()
+                    .into()
+            },
+            |id: SharedString, cx: &mut App| {
+                let id = id.to_string();
+                // 工作台盯着外观里的这一项，变了自己换布局。
+                apply_appearance(move |a| a.layout_id = Some(id), cx);
+            },
+        ),
+    )
+    .description("工作台里各个视图怎么摆；插件可以带自己的布局");
+    let restore = SettingItem::new(
+        "恢复布局",
+        SettingField::render(move |_, _, _: &mut App| {
+            let entity = entity.clone();
+            Button::new("restore-layout")
+                .compact()
+                .label("恢复")
+                .on_click(move |_, _, cx: &mut App| {
+                    entity.update(cx, |workspace, cx| workspace.restore_layout(cx));
+                })
+        }),
+    )
+    .description("扔掉拖动、拆分、收起过的样子，回到这份布局本来的样子");
+    SettingGroup::new().title("布局").items(vec![choice, restore])
+}
+
 /// 滑块加右侧数值。数值框留够「100%」的宽度并右对齐，几行的数字对得齐。
 fn slider_with_value(
     slider: Option<Entity<SliderState>>,
@@ -104,12 +159,17 @@ fn theme_item() -> SettingItem {
     SettingItem::new(
         "主题",
         SettingField::render(|_, window, cx: &mut App| {
-            let picker = window.use_keyed_state("settings-theme-picker", cx, ThemePicker::new);
+            let key: SharedString = format!(
+                "settings-theme-picker-{}",
+                smelt_ui::theme_catalog::generation(cx)
+            )
+            .into();
+            let picker = window.use_keyed_state(key, cx, ThemePicker::new);
             let select = picker.read(cx).select.clone();
             let border = cx.theme().border;
             // 别处换了主题（命令面板等）时，下拉跟着对上，不停在旧的那项。只对目录里
             // 有的名字同步：选不中的名字每次重绘都会再选一遍，停不下来。
-            let current = SharedString::from(cx.global::<Appearance>().theme_name.clone());
+            let current = SharedString::from(displayed_theme_name(cx));
             let swatch = picker.read(cx).swatches.get(&current).copied();
             if swatch.is_some() && select.read(cx).selected_value() != Some(&current) {
                 select.update(cx, |select, cx| {
@@ -131,6 +191,21 @@ fn theme_item() -> SettingItem {
     .description("界面和终端配色一起换，明暗跟着主题走")
 }
 
+/// 主题暂时不可用时显示实际生效的 Default，不覆盖保存的用户选择。
+fn displayed_theme_name(cx: &App) -> String {
+    let appearance = cx.global::<Appearance>();
+    if smelt_ui::theme_catalog::contains(&appearance.theme_name, cx) {
+        appearance.theme_name.clone()
+    } else {
+        smelt_model::theme_index::default_for_mode(if appearance.theme_mode.is_dark() {
+            "dark"
+        } else {
+            "light"
+        })
+        .to_string()
+    }
+}
+
 /// 主题下拉：可搜索，每项带三个色点和所属系列。挂在设置窗口的元素状态上，窗口关了就丢。
 struct ThemePicker {
     select: Entity<SelectState<SearchableVec<ThemeOption>>>,
@@ -141,13 +216,13 @@ struct ThemePicker {
 
 impl ThemePicker {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let current = cx.global::<Appearance>().theme_name.clone();
-        let options = smelt_model::theme_index::entries()
-            .iter()
+        let current = displayed_theme_name(cx);
+        let options = smelt_ui::theme_catalog::themes(cx)
+            .into_iter()
             .map(|entry| ThemeOption {
-                name: entry.name.clone().into(),
-                family: entry.family.clone().into(),
                 swatch: smelt_ui::theme_catalog::swatch(&entry.name, cx),
+                name: entry.name,
+                family: entry.family,
             })
             .collect::<Vec<_>>();
         let selected = options
@@ -200,7 +275,13 @@ impl SelectItem for ThemeOption {
             .items_center()
             .gap_2()
             .children(self.swatch.map(|swatch| theme_dots(swatch, border)))
-            .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(self.name.clone())))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(truncated_line(self.name.clone())),
+            )
             .child(
                 div()
                     .flex_none()
@@ -222,10 +303,13 @@ impl SelectItem for ThemeOption {
 }
 
 fn select_theme(name: String, cx: &mut App) {
-    let Some(entry) = smelt_model::theme_index::find(&name) else {
+    let Some(entry) = smelt_ui::theme_catalog::themes(cx)
+        .into_iter()
+        .find(|entry| entry.name.as_ref() == name)
+    else {
         return;
     };
-    let mode = if entry.mode == "light" {
+    let mode = if !entry.mode.is_dark() {
         ThemeMode::Light
     } else {
         ThemeMode::Dark

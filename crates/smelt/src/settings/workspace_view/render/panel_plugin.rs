@@ -1,4 +1,4 @@
-//! 设置页：面板插件（Tool Panel 里的 gpui-shell 插件）。
+//! 设置页：面板插件（gpui-shell 插件，每个是工作台布局里的一个视图）。
 //!
 //! 列出眼下加载的插件，导入、删除自己装的插件，重新加载全部插件。App 自带的插件跟着
 //! smelt 更新，不能删；用户装一个同 id 的副本就能盖过它。
@@ -15,7 +15,7 @@ pub(super) fn panel_plugin_page(
 ) -> SettingPage {
     let state = &snapshot.panel_plugins;
     let mut page = SettingPage::new("面板插件")
-        .description("每个插件是右侧 Tool Panel 里的一个页签。")
+        .description("每个插件是一个视图：摆进工作台布局的是面板，没摆进去的从侧栏当页面打开。")
         .resettable(false);
     if let Some(error) = state.error.clone() {
         page = page.group(

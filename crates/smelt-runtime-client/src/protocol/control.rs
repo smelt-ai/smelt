@@ -95,6 +95,7 @@ define_control_methods! {
     AutomationRunOnce => (AUTOMATION_RUN_ONCE_METHOD, "automation.run_once"),
     GitDiscover => (GIT_DISCOVER_METHOD, "git.discover"),
     GitRepoInfo => (GIT_REPO_INFO_METHOD, "git.repo_info"),
+    GitWatchHead => (GIT_WATCH_HEAD_METHOD, "git.watch_head"),
     GitStatus => (GIT_STATUS_METHOD, "git.status"),
     GitBranches => (GIT_BRANCHES_METHOD, "git.branches"),
     GitCheckout => (GIT_CHECKOUT_METHOD, "git.checkout"),
@@ -148,7 +149,6 @@ define_control_methods! {
     AgentMemoryApprove => (AGENT_MEMORY_APPROVE_METHOD, "agent.memory.approve"),
     AutomationRunDetail => (AUTOMATION_RUN_DETAIL_METHOD, "automation.run_detail"),
     AgentSpaceEnsure => (AGENT_SPACE_ENSURE_METHOD, "agent.space.ensure"),
-    HistoryRememberAgent => (HISTORY_REMEMBER_AGENT_METHOD, "history.remember_agent"),
     AgentHooksStatus => (AGENT_HOOKS_STATUS_METHOD, "agent.hooks.status"),
     AgentHooksInstall => (AGENT_HOOKS_INSTALL_METHOD, "agent.hooks.install"),
     AgentHooksUninstall => (AGENT_HOOKS_UNINSTALL_METHOD, "agent.hooks.uninstall"),
@@ -165,7 +165,7 @@ define_control_methods! {
     PiMcpAddPreset => (PI_MCP_ADD_PRESET_METHOD, "pi.mcp.add_preset"),
     PiMcpSetEnabled => (PI_MCP_SET_ENABLED_METHOD, "pi.mcp.set_enabled"),
     PiMcpRemove => (PI_MCP_REMOVE_METHOD, "pi.mcp.remove"),
-    PiMcpLogin => (PI_MCP_LOGIN_METHOD, "pi.mcp.login"),
+    PiMcpLoginStart => (PI_MCP_LOGIN_START_METHOD, "pi.mcp.login_start"),
     PiPluginsRemove => (PI_PLUGINS_REMOVE_METHOD, "pi.plugins.remove"),
     PiPluginsImport => (PI_PLUGINS_IMPORT_METHOD, "pi.plugins.import"),
     PiAuthProviders => (PI_AUTH_PROVIDERS_METHOD, "pi.auth.providers"),
@@ -234,6 +234,8 @@ impl ControlMethod {
         // 额度开关：旧运行时没有，设置页显示读取失败，侧栏额度照常。
         Self::QuotaSettingsGet,
         Self::QuotaSetEnabled,
+        // 侧栏分支名跟着 HEAD 变：旧运行时没有，分支名只在窗口回到前台、重连时更新。
+        Self::GitWatchHead,
     ];
 
     /// 运行时必须有这个方法：缺了就是运行时比客户端旧。

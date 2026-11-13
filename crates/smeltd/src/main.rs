@@ -113,6 +113,7 @@ mod control;
 mod conversation_image;
 mod desktop;
 mod devices;
+mod appearance_requests;
 mod event_hub;
 mod files_control;
 mod git_control;
@@ -1187,6 +1188,7 @@ fn handle_history_rename<C: ClientSocket>(
         apply_history_rename(kind, profile_id, resume_id, title)?;
         workspace_directory::publish_current(event_hub);
         terminal_names::refresh_all(sessions, event_hub);
+        notify_history_changed(event_hub);
         Ok(())
     })();
     let response = match result {
@@ -1194,6 +1196,13 @@ fn handle_history_rename<C: ClientSocket>(
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
+}
+
+/// 历史存档改过了：在看历史列表的客户端重取。发不出去只记日志，改动本身已经成了。
+pub(crate) fn notify_history_changed(event_hub: &EventHubHandle) {
+    if let Err(error) = event_hub.publish_history_changed() {
+        eprintln!("[history] 通知历史变化失败：{error}");
+    }
 }
 
 pub(crate) fn recover_locked_automations(

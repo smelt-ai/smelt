@@ -718,14 +718,6 @@ impl Workspace {
         .map(|root| ProjectRef { runtime, root })
     }
 
-    /// 活动项目在本机上时的项目根。只读本机的插件面板用；文件、变更、历史面板按
-    /// [`Self::active_project_ref`] 发给项目所在的机器。
-    pub(crate) fn active_local_project_root(&self, cx: &App) -> Option<String> {
-        self.active_project_ref(cx)
-            .filter(|project| project.runtime == RuntimeKey::Local)
-            .map(|project| project.root)
-    }
-
     pub(crate) fn context_project_ref(&self, context: &ProjectRef, cx: &App) -> ProjectRef {
         let style = crate::runtimes::path_style(&context.runtime, cx);
         let workset = self.space(&context.runtime).and_then(|space| {
@@ -820,7 +812,7 @@ impl Workspace {
                             runtime: key.clone(),
                             root: group.root.clone(),
                         })
-                        .and_then(|(_, info)| info.as_ref())
+                        .and_then(|cached| cached.value.as_ref())
                         .map(|info| info.branch.clone());
                     for &ix in &group.sessions {
                         session_projects[ix] = Some((group.label.clone(), branch.clone()));
@@ -1170,7 +1162,7 @@ impl Workspace {
             let branch_label = self
                 .repo_info
                 .get(&project)
-                .and_then(|(_, info)| info.as_ref())
+                .and_then(|cached| cached.value.as_ref())
                 .map(|info| info.branch.clone());
             let repository_count = self
                 .space(&group.runtime)
@@ -1706,7 +1698,7 @@ impl Workspace {
                 let progress = match &self.sessions[ix].kind {
                     SessionKind::Term { active, .. } => {
                         let view = active.read(cx);
-                        smelt_ui::daemon_states_global::DaemonStates::progress(
+                        smelt_app_state::daemon_states_global::DaemonStates::progress(
                             view.runtime().key(),
                             view.session_id(),
                             cx,

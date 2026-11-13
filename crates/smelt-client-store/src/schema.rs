@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 9;
+pub(crate) const SCHEMA_VERSION: u32 = 11;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -26,7 +26,8 @@ CREATE TABLE appearance (
   ui_font_px INTEGER NOT NULL,
   ui_font_family TEXT NOT NULL,
   font_px INTEGER NOT NULL,
-  font_family TEXT NOT NULL
+  font_family TEXT NOT NULL,
+  layout_id TEXT
 );
 CREATE TABLE update_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -47,12 +48,14 @@ CREATE TABLE workspace_ui (
   active_session_id TEXT,
   route TEXT NOT NULL,
   selected_agent_id TEXT,
-  sidebar_w REAL,
-  sidebar_open INTEGER CHECK (sidebar_open IN (0, 1)),
   sidebar_grouping TEXT NOT NULL,
   sidebar_hide_empty_projects INTEGER NOT NULL CHECK (sidebar_hide_empty_projects IN (0, 1)),
   archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1))
 );
+CREATE TABLE workspace_layout_state (
+  layout_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (json_valid(state))
+) WITHOUT ROWID;
 CREATE TABLE collapsed_project (
   runtime_id TEXT NOT NULL,
   root TEXT NOT NULL,
@@ -79,10 +82,6 @@ CREATE TABLE conversation_route (
   conversation_id TEXT NOT NULL,
   active_terminal_id TEXT,
   dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
-  stage_cover TEXT,
-  tool_panel_tab TEXT NOT NULL,
-  tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
-  tool_panel_w REAL NOT NULL,
   file_tree_selected TEXT,
   open_file_path TEXT,
   file_tree_w REAL NOT NULL,
@@ -150,7 +149,7 @@ CREATE TABLE sidebar_conversation_order (
   PRIMARY KEY (runtime_id, conversation_id)
 ) WITHOUT ROWID;
 CREATE TABLE key_binding (
-  action_id TEXT PRIMARY KEY,
+  command TEXT PRIMARY KEY,
   keystroke TEXT
 ) WITHOUT ROWID;
 ";
@@ -281,12 +280,55 @@ ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
   CHECK (archive_expanded IN (0, 1));
 ";
 
-const MIGRATE_V8_TO_V9: &str = "
-CREATE TABLE pinned_workset (
+const MIGRATE_V10_TO_V11: &str = "
+CREATE TABLE IF NOT EXISTS pinned_workset (
   runtime_id TEXT NOT NULL,
   workset_id TEXT NOT NULL,
   PRIMARY KEY (runtime_id, workset_id)
 ) WITHOUT ROWID;
+";
+
+/// v9：整个工作台换成一块 Dock。三栏的宽度、开合和每段对话的工具面板状态都没了；外观里
+/// 记选的是哪份布局（空 = 没选过），每份布局被用户拖成的样子按布局 id 各存一份。
+const MIGRATE_V8_TO_V9: &str = "
+ALTER TABLE workspace_ui DROP COLUMN sidebar_w;
+ALTER TABLE workspace_ui DROP COLUMN sidebar_open;
+ALTER TABLE appearance ADD COLUMN layout_id TEXT;
+ALTER TABLE conversation_route DROP COLUMN stage_cover;
+ALTER TABLE conversation_route DROP COLUMN tool_panel_tab;
+ALTER TABLE conversation_route DROP COLUMN tool_panel_open;
+ALTER TABLE conversation_route DROP COLUMN tool_panel_w;
+CREATE TABLE workspace_layout_state (
+  layout_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (json_valid(state))
+) WITHOUT ROWID;
+";
+
+/// v10：快捷键绑的是插件可登记的命令（`<来源>/<名字>`），不再是写死的动作名。旧的
+/// 14 个动作名换成对应的命令 id；别的行是早已下线的动作，留着也用不上，删掉。
+const MIGRATE_V9_TO_V10: &str = "
+ALTER TABLE key_binding RENAME COLUMN action_id TO command;
+DELETE FROM key_binding WHERE command NOT IN (
+  'open_settings', 'command_palette', 'new_conversation', 'focus_sidebar', 'prev_session',
+  'next_session', 'prev_pane', 'next_pane', 'split_beside', 'split_below', 'close_pane',
+  'save_file', 'prev_hunk', 'next_hunk'
+);
+UPDATE key_binding SET command = CASE command
+  WHEN 'open_settings' THEN 'smelt.app/settings'
+  WHEN 'command_palette' THEN 'smelt.palette/toggle'
+  WHEN 'new_conversation' THEN 'smelt.sessions/new-conversation'
+  WHEN 'focus_sidebar' THEN 'smelt.sessions/focus-list'
+  WHEN 'prev_session' THEN 'smelt.sessions/prev'
+  WHEN 'next_session' THEN 'smelt.sessions/next'
+  WHEN 'prev_pane' THEN 'smelt.stage/prev-pane'
+  WHEN 'next_pane' THEN 'smelt.stage/next-pane'
+  WHEN 'split_beside' THEN 'smelt.stage/split-right'
+  WHEN 'split_below' THEN 'smelt.stage/split-down'
+  WHEN 'close_pane' THEN 'smelt.stage/close-pane'
+  WHEN 'save_file' THEN 'smelt.files/save'
+  WHEN 'prev_hunk' THEN 'smelt.git/prev-hunk'
+  WHEN 'next_hunk' THEN 'smelt.git/next-hunk'
+END;
 ";
 
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
@@ -342,7 +384,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7 | 8 => {}
+        7..=10 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
@@ -350,9 +392,19 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
             .execute_batch(MIGRATE_V7_TO_V8)
             .map_err(|error| error.to_string())?;
     }
-    if (1..=8).contains(&version) {
+    if (1..=9).contains(&version) && !has_table(&transaction, "workspace_layout_state")? {
         transaction
             .execute_batch(MIGRATE_V8_TO_V9)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=9).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V9_TO_V10)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=10).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V10_TO_V11)
             .map_err(|error| error.to_string())?;
     }
     transaction
@@ -482,10 +534,6 @@ mod legacy {
         #[serde(default)]
         selected_agent_id: Option<String>,
         #[serde(default)]
-        sidebar_w: Option<f32>,
-        #[serde(default)]
-        sidebar_open: Option<bool>,
-        #[serde(default)]
         collapsed_projects: Vec<String>,
         #[serde(default)]
         collapsed_agents: Vec<String>,
@@ -582,6 +630,7 @@ mod legacy {
                     ui_font_family: old.ui_font_family,
                     font_px: old.font_px,
                     font_family: old.font_family,
+                    layout_id: None,
                 },
             )?;
         }
@@ -614,8 +663,6 @@ mod legacy {
                     active_session_id: old.active_session_id,
                     route: old.route,
                     selected_agent_id: old.selected_agent_id,
-                    sidebar_w: old.sidebar_w,
-                    sidebar_open: old.sidebar_open,
                     collapsed_projects: old
                         .collapsed_projects
                         .into_iter()

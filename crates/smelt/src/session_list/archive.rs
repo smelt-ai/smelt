@@ -342,7 +342,7 @@ impl Workspace {
                         .child(
                             Button::new(SharedString::from(format!("{element_id}-delete")))
                                 .dismiss()
-                                .icon(crate::trash_icon())
+                                .icon(smelt_ui::trash_icon())
                                 .icon_action("永久删除")
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
@@ -372,7 +372,7 @@ impl Workspace {
                     }))
                     .item(
                         PopupMenuItem::new("永久删除")
-                            .icon(crate::trash_icon())
+                            .icon(smelt_ui::trash_icon())
                             .on_click(move |_, _, cx| {
                                 e_delete.update(cx, |ws, cx| {
                                     ws.request_delete_archived(

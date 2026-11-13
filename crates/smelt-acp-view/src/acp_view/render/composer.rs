@@ -1409,8 +1409,10 @@ impl AcpView {
                 
                 .hover(|row| row.bg(ui_theme::overlay(0x14)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                    if !this.expanded_background_tasks.remove(&id) {
-                        this.expanded_background_tasks.insert(id.clone());
+                    if this.expanded_background_tasks.remove(&id).is_none() {
+                        let scroll = ScrollHandle::new();
+                        scroll.scroll_to_bottom();
+                        this.expanded_background_tasks.insert(id.clone(), scroll);
                     }
                     cx.notify();
                 }))
@@ -1481,14 +1483,22 @@ impl AcpView {
                         .text_color(gpui::rgb(ui_theme::text_muted()))
                         .child(truncated_line(background_task_one_line(&task.command))),
                 );
-            if self.expanded_background_tasks.contains(&task.id) && !task.output.is_empty() {
+            if let Some(scroll) = self.expanded_background_tasks.get(&task.id)
+                && !task.output.is_empty()
+            {
+                // 输出区自己滚动，长行折行显示；点在里面不收起这一行。
                 let mut output = v_flex()
+                    .id((gpui::ElementId::from("acp-background-task-output"), task.id.clone()))
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .track_scroll(scroll)
                     .pl(px(4.))
                     .font_family(mono.clone())
                     .text_xs()
-                    .text_color(gpui::rgb(ui_theme::text_mid()));
-                for line in background_task_output_lines(&task.output) {
-                    output = output.child(div().overflow_hidden().child(truncated_line(line.to_string())));
+                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .on_click(|_event, _window, cx| cx.stop_propagation());
+                for line in task.output.lines() {
+                    output = output.child(div().w_full().min_w_0().child(line.to_string()));
                 }
                 row = row.child(output);
             }

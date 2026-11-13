@@ -29,6 +29,8 @@ use smelt_ui::ListRow;
 
 use agent_client_protocol::v1::schema::SessionId;
 
+use smelt_app_state::daemon_states_global::AttentionGlobal;
+use smelt_app_state::provider_status_global::ProviderStatus;
 use smelt_client::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientHandle, ConversationClientLaunch, load_acp_history,
     spawn_acp_client,
@@ -45,7 +47,6 @@ use smelt_model::acp_session::{
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_ui::IconAction as _;
-use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::markdown_links::FileLinks;
 use smelt_ui::motion::{
     BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_activated,
@@ -53,7 +54,6 @@ use smelt_ui::motion::{
     copy_ack_opacity, ease_overshoot, ease_snap, enter_offset_px, mix_rgba, quiet_dots,
     running_sweep, unit_transition,
 };
-use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
 use smelt_ui::truncated_line::truncated_line;
 
@@ -1468,16 +1468,6 @@ pub struct AcpForkOrigin {
     pub from_history: bool,
 }
 
-/// 历史会话页「迁移到」的目标：把这段对话交给谁。
-#[derive(Clone)]
-pub struct AcpHandoffTarget {
-    pub agent: ConversationAgentKind,
-    pub launch: ConversationLaunchSpec,
-    pub profile_id: Option<String>,
-    /// profile 的显示名；基础 agent 槽位为 `None`。
-    pub profile_label: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct AcpHandoffRequest {
     /// 新会话跑在哪个运行时上。
@@ -1741,8 +1731,8 @@ pub struct AcpView {
     background_tasks: Vec<BackgroundTaskView>,
     /// 输入栏「后台任务」弹层是否打开。
     background_tasks_open: bool,
-    /// 用户展开了输出的后台任务 id。
-    expanded_background_tasks: std::collections::HashSet<String>,
+    /// 用户展开了输出的后台任务 id，各带一个输出区的滚动句柄。
+    expanded_background_tasks: std::collections::HashMap<String, ScrollHandle>,
     /// 用户点了停止、还在等它结束的后台任务 id。任务结束后从这里拿掉。
     stopping_background_tasks: std::collections::HashSet<String>,
     /// 会话宿主报的 Pi 子智能体（本次宿主生命期内的）。卡片按 id 取实时状态。
@@ -2216,7 +2206,7 @@ impl AcpView {
             plan_collapsed: true,
             background_tasks: Vec::new(),
             background_tasks_open: false,
-            expanded_background_tasks: std::collections::HashSet::new(),
+            expanded_background_tasks: std::collections::HashMap::new(),
             stopping_background_tasks: std::collections::HashSet::new(),
             subagents: Vec::new(),
             subagents_open: false,
@@ -2336,7 +2326,7 @@ impl AcpView {
         }
         if !preserve_launch
             // 按这段对话所在那台机器当前的配置重拼；那台机器的配置还没读到就沿用原来的。
-            && let Some(cfg) = smelt_ui::agent_host_state::agent_hosts(cx)
+            && let Some(cfg) = smelt_app_state::agent_host_state::agent_hosts(cx)
                 .and_then(|hosts| hosts.settings(self.runtime.key()))
         {
             self.launch = resolve_restart_launch(
@@ -3317,7 +3307,7 @@ impl AcpView {
     /// 只读内存里的配置，render 里可以调。
     pub fn custom_agent_label(&self, cx: &App) -> Option<String> {
         let id = self.profile_id.as_deref()?;
-        smelt_ui::agent_host_state::agent_hosts(cx)?
+        smelt_app_state::agent_host_state::agent_hosts(cx)?
             .settings(self.runtime.key())?
             .find_profile(id)
             .map(|profile| profile.label.trim().to_string())
@@ -4582,6 +4572,14 @@ impl AcpView {
             if running_background_tasks(&self.background_tasks).is_empty() {
                 self.background_tasks_open = false;
             }
+            self.expanded_background_tasks
+                .retain(|id, _| background_tasks.iter().any(|task| &task.id == id));
+            // 停在底部的输出区跟着新输出走；用户往上翻过就不打扰。
+            for scroll in self.expanded_background_tasks.values() {
+                if scroll_at_bottom(scroll) {
+                    scroll.scroll_to_bottom();
+                }
+            }
             self.subagents = snap.subagents;
             self.after_subagents_changed(cx);
             self.model = snap.model;
@@ -5643,11 +5641,9 @@ fn background_task_summary(running: usize) -> String {
     format!("{running} 个后台任务")
 }
 
-fn background_task_output_lines(output: &str) -> Vec<&str> {
-    const MAX_LINES: usize = 8;
-    let lines: Vec<&str> = output.lines().collect();
-    let start = lines.len().saturating_sub(MAX_LINES);
-    lines[start..].to_vec()
+/// 滚动区是否停在底部（含还没溢出的情况）。
+fn scroll_at_bottom(scroll: &ScrollHandle) -> bool {
+    scroll.offset().y <= -scroll.max_offset().y + px(2.)
 }
 
 /// 弹层标题和命令只占一行。GPUI 的 truncate 不吃硬换行，heredoc 会把行高撑开。

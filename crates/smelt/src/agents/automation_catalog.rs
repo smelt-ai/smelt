@@ -15,7 +15,7 @@ impl Workspace {
     pub(super) fn render_automations_catalog_header(
         &self,
         entity: Entity<Workspace>,
-        left_guard: Pixels,
+        left_guard: Option<Pixels>,
         cx: &App,
     ) -> AnyElement {
         const TABS: [(AutomationCatalogTab, &str); 2] = [
@@ -648,7 +648,7 @@ fn render_automation_row_menu(
         let delete_id = delete_id.clone();
         menu.item(
             PopupMenuItem::new("删除自动化")
-                .icon(crate::trash_icon())
+                .icon(smelt_ui::trash_icon())
                 .on_click(move |_, _, cx| {
                     let id = delete_id.clone();
                     delete_entity.update(cx, |workspace, cx| {

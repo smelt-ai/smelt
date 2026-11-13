@@ -63,7 +63,8 @@ const MAX_UNIX_SOCKET_PATH: usize = 103;
 const LOG_CAP: u64 = 2 * 1024 * 1024;
 const OUTPUT_DEFAULT: u64 = 16 * 1024;
 const OUTPUT_MAX: u64 = 64 * 1024;
-const UI_TAIL: u64 = 2_000;
+/// 弹层里能往回翻的输出量。
+const UI_TAIL: u64 = 8 * 1024;
 /// 交给模型的输出尾部。人看到的状态行只用其中最后几行。
 const MODEL_TAIL: u64 = 8 * 1024;
 /// 有新输出时，界面最快这么久刷新一次。没有新输出就不再醒。
@@ -2053,8 +2054,16 @@ fn complete_utf8_prefix(bytes: &[u8]) -> usize {
     if len - lead < expected { lead } else { len }
 }
 
+/// 按字节截的尾巴开头那行多半不完整，界面上去掉它。
 fn log_tail(path: &Path) -> String {
-    log_tail_limited(path, UI_TAIL)
+    let text = log_tail_limited(path, UI_TAIL);
+    if log_len(path) <= UI_TAIL {
+        return text;
+    }
+    match text.split_once('\n') {
+        Some((_, rest)) => rest.to_string(),
+        None => text,
+    }
 }
 
 fn log_tail_limited(path: &Path, cap: u64) -> String {
@@ -2261,6 +2270,22 @@ mod tests {
         let supervisor =
             BackgroundSupervisor::start("test", Some(cwd), events, outbound, None).unwrap();
         (supervisor, event_rx, outbound_rx)
+    }
+
+    /// 界面上的输出尾巴按字节截，截到半行时去掉那半行；没截时原样给。
+    #[test]
+    fn ui_tail_drops_partial_first_line() {
+        let dir = std::env::temp_dir().join(format!("smelt-ui-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log");
+        std::fs::write(&path, "short\nlog").unwrap();
+        assert_eq!(log_tail(&path), "short\nlog");
+
+        let mut long = "x".repeat(UI_TAIL as usize);
+        long.push_str("\nlast line");
+        std::fs::write(&path, &long).unwrap();
+        assert_eq!(log_tail(&path), "last line");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     struct Listen {

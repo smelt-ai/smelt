@@ -205,9 +205,10 @@ fn git_status_runs_on_the_runtime() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// 外观归桌面端。没有在线的桌面端时，外观修改无处生效，要明确拒绝，而不是回个成功。
+/// 外观补丁的形状不对，在碰库、找桌面之前就按输入错拒掉。测试进程不启用默认库、也没有
+/// 桌面：报的是输入错，就说明顺序对。没有桌面时的错误码见 `control` 的单元测试。
 #[test]
-fn appearance_update_without_a_desktop_is_refused() {
+fn invalid_appearance_patch_is_rejected_before_store_and_desktop() {
     use smelt_core::appearance_settings::SettingsPatch;
     use smelt_core::control_api::SettingsUpdate;
 
@@ -216,7 +217,7 @@ fn appearance_update_without_a_desktop_is_refused() {
             &SettingsPatch {
                 settings: std::collections::BTreeMap::from([(
                     "appearance.theme_mode".to_string(),
-                    serde_json::json!("light"),
+                    serde_json::json!("purple"),
                 )]),
             },
             DEFAULT_REQUEST_TIMEOUT,
@@ -226,7 +227,42 @@ fn appearance_update_without_a_desktop_is_refused() {
     let ControlClientError::Protocol(error) = error else {
         panic!("expected a protocol error, got {error}");
     };
-    assert_eq!(error.code, ControlErrorCode::FailedPrecondition);
+    assert_eq!(
+        error.code,
+        ControlErrorCode::InvalidParams,
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn mixed_appearance_and_memory_patch_is_rejected_before_desktop_check() {
+    use smelt_core::appearance_settings::SettingsPatch;
+    use smelt_core::control_api::SettingsUpdate;
+
+    let error = in_process_runtime()
+        .call::<SettingsUpdate>(
+            &SettingsPatch {
+                settings: std::collections::BTreeMap::from([
+                    (
+                        "appearance.theme_mode".to_string(),
+                        serde_json::json!("light"),
+                    ),
+                    (
+                        "memory.embedding_model".to_string(),
+                        serde_json::json!("bge-m3"),
+                    ),
+                ]),
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap_err();
+
+    let ControlClientError::Protocol(error) = error else {
+        panic!("expected a protocol error, got {error}");
+    };
+    assert_eq!(error.code, ControlErrorCode::InvalidParams);
+    assert!(error.message.contains("分两次"), "{}", error.message);
 }
 
 #[test]

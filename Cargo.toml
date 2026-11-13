@@ -30,7 +30,13 @@ members = [
     "crates/smelt-git",
     "crates/smeltd",
     "crates/smelt-ui",
+    "crates/smelt-app-state",
     "crates/smelt-acp-view",
+    "crates/smelt-plugin-api",
+    "crates/plugins/capabilities",
+    "crates/plugins/history",
+    "crates/plugins/layouts",
+    "crates/plugins/themes",
     "crates/smelt",
     "crates/smelt-iroh",
     "crates/smelt-mobile", # package 名是 smelt_mobile（cargokit 要求，见其 Cargo.toml）

@@ -192,14 +192,14 @@ fn dispatch_control(
         }
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
-        | ControlMethod::HistoryDelete
-        | ControlMethod::HistoryRememberAgent) => {
+        | ControlMethod::HistoryDelete) => {
             match super::history_control::dispatch(history, params) {
                 Ok(result) => {
                     if history == ControlMethod::HistoryDelete {
                         // 删存档连同名字一起清：侧栏里对这段对话的名字跟着变。
                         super::workspace_directory::publish_current(event_hub);
                         super::terminal_names::refresh_all(sessions, event_hub);
+                        super::notify_history_changed(event_hub);
                     }
                     success_value(control_version, &request_id, result)
                 }
@@ -217,7 +217,7 @@ fn dispatch_control(
         | ControlMethod::PiMcpAddPreset
         | ControlMethod::PiMcpSetEnabled
         | ControlMethod::PiMcpRemove
-        | ControlMethod::PiMcpLogin
+        | ControlMethod::PiMcpLoginStart
         | ControlMethod::PiPluginsRemove
         | ControlMethod::PiPluginsImport
         | ControlMethod::PiAuthProviders
@@ -226,10 +226,12 @@ fn dispatch_control(
         | ControlMethod::PiAuthLoginStart
         | ControlMethod::PiAuthLoginEvents
         | ControlMethod::PiAuthLoginAnswer
-        | ControlMethod::PiAuthLoginCancel) => match super::pi_control::dispatch(pi, params) {
-            Ok(result) => success_value(control_version, &request_id, result),
-            Err(error) => error_value(control_version, request_id, error),
-        },
+        | ControlMethod::PiAuthLoginCancel) => {
+            match super::pi_control::dispatch(pi, params, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::SessionLaunchPrepare => {
             let params: smelt_core::agent_definition_store::LaunchPrepareParams =
                 match params_or_error(control_version, &request_id, params) {
@@ -641,6 +643,21 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             match super::project_watch::watch(&params.root, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::GitWatchHead => {
+            let params: smelt_runtime_client::protocol::git::GitRootParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::project_watch::watch_head(&params.root, event_hub) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(
                     control_version,
@@ -1243,31 +1260,23 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            // 外观归桌面端：没有在线的桌面端就整单拒绝，别让记忆配置写了一半。
-            let wants_appearance = params
-                .settings
-                .keys()
-                .any(|key| !smelt_core::memory_settings::is_memory_key(key));
-            if wants_appearance && !event_hub.has_appearance_listener().unwrap_or(false) {
-                return error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(
-                        ControlErrorCode::FailedPrecondition,
-                        "外观属于桌面客户端，现在没有打开的桌面客户端来接收这次修改",
-                    ),
-                );
-            }
+            // 顺序：先查输入（不碰库），再写记忆、读回快照，最后才把外观交给桌面。桌面改了
+            // 就撤不回，能失败的读库得在它之前，见 `appearance_settings::update_settings`。
             match appearance_settings::update_settings(params).map_err(control_error_for_settings) {
                 Ok(update) => {
-                    if !update.appearance.is_empty()
-                        && let Err(error) = event_hub.request_appearance_change(update.appearance)
-                    {
-                        return error_value(
-                            control_version,
-                            request_id,
-                            ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
-                        );
+                    if !update.appearance.is_empty() {
+                        // 普通控制调用默认等 5 秒；留 1 秒传回结果，超时只说明结果未知。
+                        let result = event_hub
+                            .appearance_requests
+                            .dispatch(update.appearance)
+                            .and_then(|pending| pending.wait(std::time::Duration::from_secs(4)));
+                        if let Err(error) = result {
+                            return error_value(
+                                control_version,
+                                request_id,
+                                control_error_for_appearance(error),
+                            );
+                        }
                     }
                     success_value(control_version, &request_id, update.result)
                 }
@@ -1436,6 +1445,35 @@ fn control_error_for_settings(error: SettingsError) -> ControlError {
     }
 }
 
+/// 外观交给桌面没成。没有或认不准桌面是前提不满足（调用方能处理：开桌面、关掉多余的）；
+/// 投递失败、没等到回执是操作失败，后者结果未知。
+fn control_error_for_appearance(error: crate::appearance_requests::RequestError) -> ControlError {
+    use crate::appearance_requests::RequestError;
+    match error {
+        RequestError::NoDesktop => ControlError::new(
+            ControlErrorCode::FailedPrecondition,
+            "外观属于本机桌面客户端，现在没有可接收修改的本机桌面",
+        ),
+        RequestError::MultipleDesktops => ControlError::new(
+            ControlErrorCode::FailedPrecondition,
+            "有多个本机桌面，无法确定由哪一个修改外观",
+        ),
+        RequestError::DeliveryFailed => {
+            ControlError::new(ControlErrorCode::OperationFailed, "外观请求无法投递到桌面")
+        }
+        RequestError::OutcomeUnknown => ControlError::new(
+            ControlErrorCode::OperationFailed,
+            "没有收到桌面回执，修改结果未知（可能已生效或稍后生效）",
+        ),
+        RequestError::Invalid(message) => {
+            ControlError::new(ControlErrorCode::InvalidParams, message)
+        }
+        RequestError::Desktop(message) => {
+            ControlError::new(ControlErrorCode::OperationFailed, message)
+        }
+    }
+}
+
 fn control_error_for_automation(error: String) -> ControlError {
     let code = if error.contains("不存在") {
         ControlErrorCode::NotFound
@@ -1564,6 +1602,24 @@ mod tests {
     };
 
     use super::*;
+
+    /// 找不到唯一的桌面是前提不满足，不是操作失败：调用方据此提示去开桌面。
+    #[test]
+    fn missing_or_ambiguous_desktop_is_a_failed_precondition() {
+        use crate::appearance_requests::RequestError;
+        for error in [RequestError::NoDesktop, RequestError::MultipleDesktops] {
+            assert_eq!(
+                control_error_for_appearance(error).code,
+                ControlErrorCode::FailedPrecondition
+            );
+        }
+        for error in [RequestError::DeliveryFailed, RequestError::OutcomeUnknown] {
+            assert_eq!(
+                control_error_for_appearance(error).code,
+                ControlErrorCode::OperationFailed
+            );
+        }
+    }
 
     #[test]
     fn describe_is_a_typed_short_rpc_and_echoes_request_id() {

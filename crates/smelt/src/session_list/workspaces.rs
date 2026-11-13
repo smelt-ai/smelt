@@ -439,7 +439,7 @@ fn status_summary(
                     runtime: project.runtime.clone(),
                     root: repository.worktree.clone(),
                 })
-                .map(|(_, status)| status)
+                .map(|cached| &cached.value)
         })
         .collect::<Vec<_>>();
     summarize_statuses(&statuses, workset.repositories.len())

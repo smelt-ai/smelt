@@ -90,14 +90,26 @@ impl Workspace {
                 WorkspaceRoute::Automations,
                 entity.clone(),
             ))
-            .child(self.render_agent_product_navigation_row(
-                "capabilities-route",
-                "能力库",
-                IconName::LayoutDashboard,
-                false,
-                WorkspaceRoute::Capabilities,
-                entity,
-            ))
+            // 摆进布局的视图就在布局里看，不再给入口；其余的当舞台上的一页打开，入口排在
+            // 宿主自己的后面。舞台自己当不了舞台上的页。
+            .children(
+                smelt_plugin_api::views(cx)
+                    .into_iter()
+                    .filter(|view| {
+                        !self.shell_view.laid_out.contains(view.id.as_ref())
+                            && view.id.as_ref() != crate::builtin_views::Builtin::Stage.id()
+                    })
+                    .map(|view| {
+                self.render_agent_product_navigation_row(
+                    SharedString::from(format!("{}-route", view.id)),
+                    view.title,
+                    gpui_component::Icon::empty().path(view.icon),
+                    false,
+                    WorkspaceRoute::Page(view.id.to_string()),
+                    entity.clone(),
+                )
+                    }),
+            )
     }
 
     pub(super) fn render_automation_drill_header(
@@ -107,7 +119,7 @@ impl Workspace {
         trailing: Option<AnyElement>,
         back_tooltip: &'static str,
         entity: Entity<Workspace>,
-        left_guard: Pixels,
+        left_guard: Option<Pixels>,
     ) -> AnyElement {
         let back_entity = entity;
         product_page_chrome(left_guard)
@@ -225,7 +237,7 @@ impl Workspace {
                         let delete_id = delete_id.clone();
                         menu.item(
                             PopupMenuItem::new("删除自动化")
-                                .icon(crate::trash_icon())
+                                .icon(smelt_ui::trash_icon())
                                 .on_click(move |_, _, cx| {
                                     let id = delete_id.clone();
                                     delete_entity.update(cx, |workspace, cx| {

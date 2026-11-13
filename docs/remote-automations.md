@@ -30,7 +30,7 @@
 ### 桌面：整条链路只认本机
 
 - `main.rs` 的事件循环里，远程机器首帧里的自动化只 `save_state`，远程的 `Automations` 增量直接丢掉。
-- 自动化投影存在全局 `AgentHostState`（`crates/smelt-ui/src/agent_host_state.rs`）里，一份单例：
+- 自动化投影存在全局 `AgentHostState`（`crates/smelt-app-state/src/agent_host_state.rs`）里，一份单例：
   `automations`、`automation_store_id`、`automation_revision`、`automation_states`、`automation_runs`、
   `automation_store_error`、`webhook_base_url`，不带机器。对照：智能体配置已经是
   `AgentHosts { machines: BTreeMap<RuntimeKey, …> }`。

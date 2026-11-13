@@ -1,5 +1,8 @@
 //! 桌面客户端和运行时共用的纯类型与纯函数。见 Cargo.toml 的说明。
 
+// 公开类型里有 chrono 的时间（如历史会话的起止时间），用的人按同一份 chrono 处理。
+pub use chrono;
+
 pub mod acp_chat;
 pub mod acp_conn;
 pub mod acp_session;

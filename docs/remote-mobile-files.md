@@ -23,6 +23,7 @@
 | `file.open{path}` | 一次读完整个文件，返回 `kind` 四选一：`text{text,version}`（version 是内容 sha256）、`image{data(base64)}`（按扩展名判断，含 svg）、`binary`、`too_large{size,limit}`；文本上限 8MB，图片 20MB |
 | `file.save{path,text,base_version}` | 带 `base_version` 时先比对磁盘内容的 sha256，不一致返回 `Conflict`；不带表示确认覆盖 |
 | `project.watch{root}` | 登记监听，变化经事件总线 `project.changed` 推送，只带 `root`，200ms 合并一次；丢弃 `target`、`node_modules`、`dist`、`build`、`.next`、`.cache` 里的变化 |
+| `git.watch_head{root}` | 只看 `root` 所在仓库的 HEAD，切分支时同样推 `project.changed{root}`；侧栏各项目的分支名靠它，不必递归监听每个项目。旧运行时没有，分支名只在窗口回到前台、重连时更新 |
 | `git.*` | `status`、`diff.file`、`discover`、`repo_info` 等读写方法齐全 |
 
 `file.open` / `file.save` 有意不限制路径（文件可能来自 `smelt open` 或对话里的链接）。远程连接只放行配对过的设备，
@@ -87,8 +88,13 @@
 ### 2.4 缓存失效靠 `project.watch` 推送
 
 - 事件循环里 `ProjectChanged` 不再判断本机，带着来源机器转给 `on_project_changed(runtime, root)`。
-- 机器断开时只清那台机器的 `watched_projects`；重新订阅上（`Snapshot`）时重新登记，做法同智能体记忆的监听。
+- 重新订阅上（`Snapshot`）时清掉那台机器的监听记录、把它的缓存全部标旧，再重新登记，做法同智能体记忆的监听。
+  登记失败的记下来，直到下一次重新订阅都不再试。
 - 项目被激活时登记监听（现在已有，改成按机器）。
+- 缓存（git status、分支列表、仓库发现、侧栏分支名、目录列表）都不按时间过期，只在收到事件时标旧：
+  `ProjectChanged`、自己做完的 git 操作、重新订阅、窗口回到前台（兜住 inotify 用完、旧运行时这类收不到事件的情况）。
+  标旧的数据在看得见时才重取。仓库发现开销大，两次之间至少隔 15 秒。Git 页开着且窗口在前台时每 60 秒自动 fetch 一次，
+  远端变化没有事件可等。
 - 目录缓存去掉「2 秒内算新鲜」，改成收到这个项目的 `ProjectChanged` 才失效。
   展开目录时先显示缓存，同时后台重取这一层，补上 watch 丢掉的那些目录（`target`、`node_modules` 等）里的变化。
   这对本机同样适用，两边一套逻辑。
@@ -107,7 +113,7 @@
 
 ### 2.6.1 历史面板
 
-运行时本来就有 `history.list` / `detail` / `delete` / `remember_agent`（手机端已经按机器在用），
+运行时本来就有 `history.list` / `detail` / `delete`（手机端已经按机器在用），
 桌面历史面板改成发给项目所在的机器：列表缓存 key 带上机器；来源 tab、profile、智能体定义按那台
 机器的设置；智能体 space 用那台机器的 `SMELT_HOME` 认；ACP 继续、CLI/TUI 继续、迁移都开在存档
 所在的机器上。
@@ -304,8 +310,7 @@ FRB 没开 freezed，带数据的 enum 生成不了 Dart 的 sealed class。文�
 ## 7 · 风险
 
 - `project.watch` 丢弃构建产物目录的变化，去掉目录缓存的时间过期后，这些目录要靠展开时后台重取来更新。
-- git status 仍是 1.5 秒过期、跟着可见数据刷新的 2 秒保底重取；Git / 文件页开着远程项目时，
-  每两秒会给那台机器发一次 `git.status`。改成纯事件驱动要动本机行为，另开 issue 处理。
-  侧栏的远程仓库信息（分支名）不按时间过期，只在那台机器报项目变化或断线重连时重取。
+- git status、分支列表、仓库发现、侧栏分支名都已改成纯事件驱动（见 2.4），本机远程一套逻辑，
+  没有定时重取。监听登记失败或 inotify 用完时收不到变化，只能等窗口回到前台、重连时补上。
 - `file.open` / `file.save` 不限路径，配对设备能读写那台机器上的任意文件。这是现有设计，本次不改，但远程编辑放开后暴露面变大，值得在 #76 收尾时复查。
 - 旧运行时：这些方法早已存在，不涉及新协议；`runtime_call::error_text` 对 `MethodNotFound` 已有升级提示。

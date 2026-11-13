@@ -280,7 +280,10 @@ impl Workspace {
         let root = project.root.clone();
         let style = crate::runtimes::path_style(&project.runtime, cx);
         let active_repo = self.active_git_repo_root(&project, cx);
-        let status = self.git_status.get(&active_repo).map(|(_, d)| d);
+        let status = self
+            .git_status
+            .get(&active_repo)
+            .map(|cached| &cached.value);
         let status_refreshing = self.git_status_inflight.contains(&active_repo);
         let status_failure_count = self
             .git_status_failures
@@ -313,7 +316,10 @@ impl Workspace {
         };
         let tab_view = cx.entity();
         // 仓库集合要在头部之前算好：历史页的仓库选择器和改动页的分组都用它。
-        let repo_set = self.git_repos.get(&project).map(|(_, set)| set.clone());
+        let repo_set = self
+            .git_repos
+            .get(&project)
+            .map(|cached| cached.value.clone());
         let repos: Vec<DiscoveredRepo> = match &repo_set {
             Some(set) if !set.repos.is_empty() => set.repos.clone(),
             // 发现还没回来：先当单仓渲染，首帧不至于空白。
@@ -500,7 +506,7 @@ impl Workspace {
         let mut anything_to_do = false;
         for repo in &repos {
             let repo_ref = project.at(repo.root.clone());
-            let repo_status = self.git_status.get(&repo_ref).map(|(_, d)| d);
+            let repo_status = self.git_status.get(&repo_ref).map(|cached| &cached.value);
             let (staged, changed) = match repo_status {
                 Some(d) => split_staged_and_changed(&d.files),
                 None => (Vec::new(), Vec::new()),
@@ -648,7 +654,8 @@ impl Workspace {
                 .into_any_element()
         } else {
             // 仓库行、提交框和文件行高度不同，用变高虚拟列表，只构造视口附近的行。
-            let row_w = px(self.tool_panel_w.max(160.));
+            // 纵向虚拟列表只用每行的高度，宽度随列表。
+            let row_w = px(160.);
             let sizes = Rc::new(
                 narrow_rows
                     .iter()
@@ -796,13 +803,13 @@ impl Workspace {
         cx: &mut Context<Workspace>,
     ) -> AnyElement {
         // `root` 现在是当前选中的仓库根（不是项目根），分支与 HEAD 都读它自己的缓存。
-        let branches = self.branches.get(&root).map(|(_, b)| b);
+        let branches = self.branches.get(&root).map(|cached| &cached.value);
         // 当前检出的分支：日志默认看它，分支树里也要标出来。复用 Git 页已有的
         // status 缓存，不另跑一次 git。
         let head_branch = self
             .git_status
             .get(&root)
-            .map(|(_, d)| d.branch_name().to_string())
+            .map(|cached| cached.value.branch_name().to_string())
             .filter(|b| !b.is_empty());
         // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死宽度的话中间的提交
         // 列表会被挤得没法看。

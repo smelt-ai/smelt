@@ -9,6 +9,9 @@
 //! `node_modules` 的仓库一递归就能用光：噪音目录只在事件层滤掉没用，watch 照样占着。
 //! 所以别的平台自己遍历，只给非噪音目录逐个加非递归 watch，新建的目录在事件里补上；
 //! `.git` 只看它本身（index、HEAD）和 `refs`。上限用完就只监听已经加上的那部分。
+//!
+//! `git.watch_head` 是轻量的另一种：只看一个目录所在仓库的 HEAD，切分支时同样发
+//! `project.changed`。侧栏给每个项目显示分支名，为此递归监听每个项目太贵。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,13 @@ type SharedWatcher = Arc<Mutex<notify::RecommendedWatcher>>;
 
 fn watches() -> &'static Mutex<HashMap<String, SharedWatcher>> {
     static WATCHES: OnceLock<Mutex<HashMap<String, SharedWatcher>>> = OnceLock::new();
+    WATCHES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `git.watch_head` 的监听，按客户端给的目录存。和整项目的监听分开：同一个目录两种都
+/// 可能登记。
+fn head_watches() -> &'static Mutex<HashMap<String, notify::RecommendedWatcher>> {
+    static WATCHES: OnceLock<Mutex<HashMap<String, notify::RecommendedWatcher>>> = OnceLock::new();
     WATCHES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -144,6 +154,15 @@ pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String
             .map_err(|error| format!("启动监听线程失败：{error}"))?;
     }
     watches.insert(root.to_string(), watcher);
+    spawn_notifier(root, dirty_rx, event_hub)
+}
+
+/// 一批变化攒 [`DEBOUNCE`] 再发一次 `project.changed{root}`。监听器（发送端）在，线程就在。
+fn spawn_notifier(
+    root: &str,
+    dirty_rx: std::sync::mpsc::Receiver<()>,
+    event_hub: &EventHubHandle,
+) -> Result<(), String> {
     let hub = Arc::clone(event_hub);
     let root = root.to_string();
     std::thread::Builder::new()
@@ -161,6 +180,37 @@ pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String
     Ok(())
 }
 
+/// 这批事件里有没有 HEAD 本身。git 写 HEAD 是先写 `HEAD.lock` 再改名，改名事件里带着
+/// `HEAD`；同目录里的 index、FETCH_HEAD、ORIG_HEAD 变化跟分支名无关。
+fn touches_head(paths: &[PathBuf]) -> bool {
+    paths
+        .iter()
+        .any(|path| path.file_name().is_some_and(|name| name == "HEAD"))
+}
+
+/// `git.watch_head`：`root` 所在仓库的 HEAD 一变就发 `project.changed{root}`。
+///
+/// 只非递归地看 git 目录一层（HEAD 就在那里），各平台都只占一个 watch。
+pub(crate) fn watch_head(root: &str, event_hub: &EventHubHandle) -> Result<(), String> {
+    let mut watches = head_watches().lock().map_err(|error| error.to_string())?;
+    if watches.contains_key(root) {
+        return Ok(());
+    }
+    let git_dir = smelt_git::git_dir(root)?;
+    let (dirty_tx, dirty_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok_and(|event| touches_head(&event.paths)) {
+            let _ = dirty_tx.try_send(());
+        }
+    })
+    .map_err(|error| format!("监听 {root} 的 HEAD 失败：{error}"))?;
+    watcher
+        .watch(&git_dir, RecursiveMode::NonRecursive)
+        .map_err(|error| format!("监听 {root} 的 HEAD 失败：{error}"))?;
+    watches.insert(root.to_string(), watcher);
+    spawn_notifier(root, dirty_rx, event_hub)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +223,18 @@ mod tests {
         )));
         assert!(!is_noise_path(Path::new("/repo/src/main.rs")));
         assert!(!is_noise_path(Path::new("/repo/.git/index")));
+    }
+
+    #[test]
+    fn only_head_itself_counts_as_a_branch_change() {
+        let git = Path::new("/repo/.git");
+        assert!(touches_head(&[git.join("HEAD")]));
+        // 改名事件两端都在：HEAD.lock → HEAD。
+        assert!(touches_head(&[git.join("HEAD.lock"), git.join("HEAD")]));
+        assert!(!touches_head(&[git.join("HEAD.lock")]));
+        assert!(!touches_head(&[git.join("index")]));
+        assert!(!touches_head(&[git.join("FETCH_HEAD")]));
+        assert!(!touches_head(&[git.join("ORIG_HEAD")]));
     }
 
     /// 噪音目录和 `.git/objects` 不占 watch；源码目录逐个非递归监听。

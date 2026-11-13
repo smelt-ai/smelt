@@ -24,7 +24,7 @@ pub(crate) use smelt_ui::Button;
 use smelt_ui::ListRow;
 
 use crate::workspace_sessions::NewAcpSessionRequest;
-use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
+use crate::{AgentStatus, Workspace, WorkspaceRoute, acp_view, settings};
 use smelt_model::pi_plugin_catalog::PiPlugin;
 use smelt_ui::IconAction as _;
 use smelt_ui::truncated_line::truncated_line;
@@ -173,10 +173,9 @@ pub(crate) struct AgentEditor {
     instructions: Entity<TextareaState>,
     /// 绑定参考链接用的输入框。目录走原生选择框，链接只能手输。
     context_link: Entity<InputState>,
-    /// 智能体那台机器扫出的插件目录，取自 Workspace 的 Pi 配置快照；快照更新时跟着换。
-    plugins: Vec<PiPlugin>,
-    /// 运行时那台机器上 `~/.pi/agent/mcp.json` 里的服务器，同上。
-    mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
+    /// 智能体那台机器的 Pi 配置：插件、MCP 服务器、可选模型都从这里取。编辑器自己读、
+    /// 自己留一份，不和能力库共用。
+    pi: AgentPiSnapshot,
     /// 同理，记忆不在渲染里扫：打开编辑器、运行时报记忆目录有变化、有对话停下来、
     /// 点刷新或删除后才重扫。
     memories: AgentMemories,
@@ -191,20 +190,58 @@ pub(crate) struct AgentEditor {
 }
 
 impl AgentEditor {
-    /// 换上 `runtime` 那台机器新给的插件和 MCP 目录。别的机器的目录不是这个智能体能用的，
-    /// 不换。
-    pub(crate) fn set_pi_catalog(
-        &mut self,
-        runtime: &crate::RuntimeKey,
-        plugins: Vec<PiPlugin>,
-        mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
-    ) {
-        if self.agent.runtime != *runtime {
-            return;
-        }
-        self.plugins = plugins;
-        self.mcp_servers = mcp_servers;
+    /// 智能体那台机器上扫出的插件；还没读到是空的。
+    pub(crate) fn pi_plugins(&self) -> &[PiPlugin] {
+        self.pi
+            .config
+            .as_ref()
+            .map(|config| config.plugins.as_slice())
+            .unwrap_or_default()
     }
+
+    /// 那台机器 `~/.pi/agent/mcp.json` 里的服务器；还没读到或读不出来是空的。
+    pub(crate) fn pi_mcp_servers(&self) -> &[smelt_model::pi_mcp::PiMcpServer] {
+        self.pi
+            .config
+            .as_ref()
+            .and_then(|config| config.mcp_servers.as_ref().ok())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// 那台机器上可选的模型；还没读到是空的。
+    pub(crate) fn pi_model_choice_groups(
+        &self,
+    ) -> &[smelt_model::pi_model_settings::PiModelChoiceGroup] {
+        self.pi
+            .config
+            .as_ref()
+            .map(|config| config.model_choice_groups.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// 还没读到配置时显示的话；读到了是 `None`。
+    pub(crate) fn pi_pending_text(&self) -> Option<String> {
+        if self.pi.config.is_some() {
+            return None;
+        }
+        Some(
+            self.pi
+                .error
+                .clone()
+                .unwrap_or_else(|| "正在读取这台机器的 Pi 配置…".to_string()),
+        )
+    }
+}
+
+/// 编辑器读到的那台机器的 Pi 配置。
+#[derive(Default)]
+pub(crate) struct AgentPiSnapshot {
+    config: Option<smelt_model::pi_service::PiConfig>,
+    /// 最近一次读取失败的原因。
+    error: Option<String>,
+    /// 读取的代数：晚回来的旧读取不能盖掉更新的那份。
+    generation: u64,
 }
 
 /// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。由运行时列出。
@@ -1314,7 +1351,7 @@ fn render_trigger_entry(
                 )
                 .child(
                     compact_chip("automation-remove-trigger")
-                        .icon(crate::trash_icon())
+                        .icon(smelt_ui::trash_icon())
                         .icon_action("删除触发器")
                         .on_click(move |_, _, cx| {
                             remove_entity.update(cx, |workspace, cx| {
@@ -1802,7 +1839,7 @@ fn render_schedule_rule(
     let remove = can_remove.then(|| {
         let remove_entity = entity.clone();
         compact_chip("automation-remove-schedule")
-            .icon(crate::trash_icon())
+            .icon(smelt_ui::trash_icon())
             .icon_action("删除时间设置")
             .on_click(move |_, _, cx| {
                 remove_entity.update(cx, |workspace, cx| {
@@ -2189,8 +2226,15 @@ fn render_agent_model_control(
                         });
                     }),
             );
-            // 模型在智能体那台机器上跑，可选的也是那台机器的。
-            let groups = crate::settings::pi_model_choice_groups(&agent.runtime, cx);
+            // 模型在智能体那台机器上跑，可选的也是那台机器的：取编辑器读到的那份。
+            let groups = entity
+                .read(cx)
+                .agent_surface
+                .editor
+                .as_ref()
+                .filter(|editor| editor.agent == agent)
+                .map(|editor| editor.pi_model_choice_groups().to_vec())
+                .unwrap_or_default();
             if !groups.is_empty() {
                 menu = menu.separator();
             }
@@ -2260,22 +2304,28 @@ fn product_back_button(
 
 /// 目录和编辑器的页头。这些面不画标题胶囊。
 ///
-/// 最上 `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐。分段、标题和按钮放在这条下面，
-/// 不再塞进 34px 里贴着窗口顶。左侧让开交通灯，右侧让开窗口开关，底边是发丝。按钮自己拦住点击。
-pub(crate) fn product_page_chrome(left_guard: Pixels) -> Div {
-    crate::workspace_frame::with_window_drag(
-        div()
-            .w_full()
-            .flex_shrink_0()
-            .pt(crate::workspace_frame::TOP_BAR_HEIGHT)
-            .pb(px(8.))
-            .pl(left_guard + px(20.))
-            .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
-            .border_b_1()
-            .border_color(crate::ui_theme::hairline())
-            .flex()
-            .items_center(),
-    )
+/// `left_guard` 见 `Workspace::chrome_left_guard`。页面贴着窗口顶（`Some`）时，最上
+/// `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐，分段、标题和按钮放在这条下面，
+/// 左侧再让出给的宽度；在标签条下面（`None`）时顶上那条归标签条，这里只留常规内边距。
+/// 底边是发丝。按钮自己拦住点击。
+pub(crate) fn product_page_chrome(left_guard: Option<Pixels>) -> Div {
+    let header = div()
+        .w_full()
+        .flex_shrink_0()
+        .pb(px(8.))
+        .px(px(20.))
+        .border_b_1()
+        .border_color(crate::ui_theme::hairline())
+        .flex()
+        .items_center();
+    match left_guard {
+        Some(left) => crate::workspace_frame::with_window_drag(
+            header
+                .pt(crate::workspace_frame::TOP_BAR_HEIGHT)
+                .pl(left + px(20.)),
+        ),
+        None => header.pt(px(8.)),
+    }
 }
 
 /// 目录页头：和自动化顶栏同一条高度。左边页名加个数，不写副标题；右边是同尺寸的新建按钮。
@@ -2284,7 +2334,7 @@ fn product_page_header(
     count: usize,
     count_unit: &'static str,
     action: AnyElement,
-    left_guard: Pixels,
+    left_guard: Option<Pixels>,
 ) -> AnyElement {
     product_page_chrome(left_guard)
         .justify_between()
@@ -2339,13 +2389,13 @@ fn render_agent_plugin_card(
         .tooltip("去能力库导入或删除插件")
         .on_click(move |_, window, cx| {
             manage_entity.update(cx, |workspace, cx| {
-                workspace.open_capabilities(CapabilitiesTab::Plugins, window, cx);
+                workspace.open_capabilities("plugins", window, cx);
             });
         });
 
     // 已勾选但磁盘上已经没有的条目也要露出来，否则用户没法取消它。
     let mut rows: Vec<AnyElement> = editor
-        .plugins
+        .pi_plugins()
         .iter()
         .map(|plugin| {
             agent_plugin_row(
@@ -2363,8 +2413,10 @@ fn render_agent_plugin_card(
             )
         })
         .collect();
-    for id in &selected {
-        if editor.plugins.iter().any(|plugin| plugin.id == *id) {
+    // 目录还没读到时不知道哪些已经没了，先不标。
+    let pending = editor.pi_pending_text();
+    for id in selected.iter().filter(|_| pending.is_none()) {
+        if editor.pi_plugins().iter().any(|plugin| plugin.id == *id) {
             continue;
         }
         let (kind_label, name) = match smelt_model::pi_plugin_catalog::split_plugin_id(id) {
@@ -2392,7 +2444,9 @@ fn render_agent_plugin_card(
             .py_4()
             .text_xs()
             .text_color(rgb(crate::ui_theme::text_faint()))
-            .child("还没有装任何插件。去「设置 → 智能体插件」导入技能或扩展。")
+            .child(pending.unwrap_or_else(|| {
+                "还没有装任何插件。点「管理」去能力库导入技能或扩展。".to_string()
+            }))
             .into_any_element()
     } else {
         div()
@@ -2445,7 +2499,9 @@ fn render_agent_plugin_card(
                         .items_center()
                         .gap_1()
                         .child(refresh_button)
-                        .child(manage_button),
+                        .when(workspace::capabilities_available(cx), |row| {
+                            row.child(manage_button)
+                        }),
                 ),
         )
         .child(body)
@@ -3228,7 +3284,7 @@ fn agent_context_row(
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
                 .icon_size()
-                .icon(crate::trash_icon())
+                .icon(smelt_ui::trash_icon())
                 .icon_action(if is_folder {
                     "解除这个目录的绑定"
                 } else {
@@ -3274,12 +3330,12 @@ fn render_agent_mcp_card(
         .tooltip("去能力库添加、登录或停用 MCP 服务器")
         .on_click(move |_, window, cx| {
             manage_entity.update(cx, |workspace, cx| {
-                workspace.open_capabilities(CapabilitiesTab::Mcp, window, cx);
+                workspace.open_capabilities("mcp", window, cx);
             });
         });
 
     let mut rows: Vec<AnyElement> = editor
-        .mcp_servers
+        .pi_mcp_servers()
         .iter()
         .map(|server| {
             let (kind_label, detail) = match &server.transport {
@@ -3307,8 +3363,13 @@ fn render_agent_mcp_card(
         })
         .collect();
     // 已勾选但 mcp.json 里已经删掉的也要露出来，否则用户没法取消它。
-    for name in &selected {
-        if editor.mcp_servers.iter().any(|server| server.name == *name) {
+    let pending = editor.pi_pending_text();
+    for name in selected.iter().filter(|_| pending.is_none()) {
+        if editor
+            .pi_mcp_servers()
+            .iter()
+            .any(|server| server.name == *name)
+        {
             continue;
         }
         rows.push(agent_plugin_row(
@@ -3326,23 +3387,26 @@ fn render_agent_mcp_card(
         ));
     }
 
-    let body = if rows.is_empty() {
-        div()
-            .px_5()
-            .py_4()
-            .text_xs()
-            .text_color(rgb(crate::ui_theme::text_faint()))
-            .child("还没有配置 MCP 服务器。点「管理」去能力库添加。")
-            .into_any_element()
-    } else {
-        div()
-            .px_2()
-            .pb_2()
-            .flex()
-            .flex_col()
-            .children(rows)
-            .into_any_element()
-    };
+    let body =
+        if rows.is_empty() {
+            div()
+                .px_5()
+                .py_4()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child(pending.unwrap_or_else(|| {
+                    "还没有配置 MCP 服务器。点「管理」去能力库添加。".to_string()
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .px_2()
+                .pb_2()
+                .flex()
+                .flex_col()
+                .children(rows)
+                .into_any_element()
+        };
 
     agent_surface_card()
         .flex()
@@ -3385,7 +3449,9 @@ fn render_agent_mcp_card(
                         .items_center()
                         .gap_1()
                         .child(refresh_button)
-                        .child(manage_button),
+                        .when(workspace::capabilities_available(cx), |row| {
+                            row.child(manage_button)
+                        }),
                 ),
         )
         .child(body)

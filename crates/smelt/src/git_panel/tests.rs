@@ -5,6 +5,7 @@
 // 用到的名字。
 use super::RepoSet;
 use super::workspace::apply_collapsed_files;
+use super::{Cached, GIT_DISCOVERY_MIN_INTERVAL, git_discovery_wait, needs_fetch};
 use super::{
     DiffScope, GitDiff, GitStatusData, GitStatusResponseAction, GitWrite, PendingGitIndexOp,
     aggregate_diff_ready_for_file, build_git_tree, clear_confirmed_git_index_ops,
@@ -593,4 +594,54 @@ fn aggregate_diff_files_stay_expanded_unless_collapsed(cx: &mut gpui::TestAppCon
         assert!(!state.is_file_collapsed("a.rs"));
         assert!(!state.is_file_collapsed("b.rs"));
     });
+}
+
+fn cached_at(stale: bool, fetched_at: std::time::Instant) -> Cached<u8> {
+    Cached {
+        value: 0,
+        stale,
+        fetched_at,
+    }
+}
+
+#[test]
+fn a_cache_without_events_is_never_refetched_however_old() {
+    let now = std::time::Instant::now();
+    let hour_ago = now
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .expect("test clock");
+    assert!(
+        !needs_fetch(Some(&cached_at(false, hour_ago))),
+        "没有事件说它变了，放多久都不重取；按时间重取就是轮询"
+    );
+    assert!(needs_fetch(Some(&cached_at(true, now))), "事件标旧了就重取");
+    assert!(needs_fetch::<u8>(None), "还没有就取");
+}
+
+#[test]
+fn repo_discovery_after_an_event_waits_out_the_minimum_interval() {
+    let now = std::time::Instant::now();
+    let ago = |secs| {
+        now.checked_sub(std::time::Duration::from_secs(secs))
+            .expect("test clock")
+    };
+    assert_eq!(
+        git_discovery_wait::<u8>(None, now),
+        Some(std::time::Duration::ZERO),
+        "第一次立刻发现"
+    );
+    assert_eq!(
+        git_discovery_wait(Some(&cached_at(false, ago(3600))), now),
+        None,
+        "没被标旧就不发现"
+    );
+    assert_eq!(
+        git_discovery_wait(Some(&cached_at(true, ago(5))), now),
+        Some(GIT_DISCOVERY_MIN_INTERVAL - std::time::Duration::from_secs(5)),
+        "标旧了但离上次太近，等到点再发现"
+    );
+    assert_eq!(
+        git_discovery_wait(Some(&cached_at(true, ago(60))), now),
+        Some(std::time::Duration::ZERO)
+    );
 }

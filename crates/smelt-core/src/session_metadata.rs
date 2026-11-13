@@ -207,28 +207,6 @@ fn history_agent_store(path: &Path) -> Result<smelt_store::Store, String> {
     crate::sqlite_state::open_sqlite_store(&database_path(path))
 }
 
-fn remember_agent_definition_at(
-    path: &Path,
-    agent: HistorySourceKind,
-    profile_id: Option<&str>,
-    resume_id: &str,
-    agent_definition_id: &str,
-) -> Result<(), String> {
-    let resume_id = resume_id.trim();
-    let agent_definition_id = agent_definition_id.trim();
-    if resume_id.is_empty() || agent_definition_id.is_empty() {
-        return Ok(());
-    }
-    history_agent_store(path)?
-        .put_history_agent_binding(
-            agent.id(),
-            profile_id.unwrap_or(""),
-            resume_id,
-            agent_definition_id,
-        )
-        .map_err(Into::into)
-}
-
 fn agent_definition_id_at(
     path: &Path,
     agent: HistorySourceKind,
@@ -259,23 +237,6 @@ fn agent_definition_ids_at(
         .into_iter()
         .filter(|(_, id)| !id.trim().is_empty())
         .collect()
-}
-
-/// 把「这条历史会话属于哪个产品智能体」记在 `resume_id` 上。
-///
-/// 工作区快照只保活体会话；关掉后历史页只拿得到引擎的 session id。
-/// 不记这份绑定，项目里用智能体开的对话就会被当成裸引擎续接，插件与人设都丢。
-pub fn remember_agent_definition(
-    agent: HistorySourceKind,
-    profile_id: Option<&str>,
-    resume_id: &str,
-    agent_definition_id: &str,
-) -> Result<(), String> {
-    let Some(path) = store_path() else {
-        return Err("找不到用户目录".into());
-    };
-    let _guard = STORE_LOCK.lock().unwrap();
-    remember_agent_definition_at(&path, agent, profile_id, resume_id, agent_definition_id)
 }
 
 /// 查这条历史会话是否绑过产品智能体。
@@ -490,39 +451,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    /// 绑定由工作区目录写对话细节时推出来（见 smelt-store）；这里只读。
+    fn seed_binding(path: &Path, agent: &str, profile_id: &str, resume_id: &str, id: &str) {
+        drop(history_agent_store(path).unwrap());
+        rusqlite::Connection::open(database_path(path))
+            .unwrap()
+            .execute(
+                "INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+                [agent, profile_id, resume_id, id],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn agent_bindings_are_scoped_by_agent_profile_and_resume_id() {
         let path = temp_path("agent-binding");
-        remember_agent_definition_at(
-            &path,
-            HistorySourceKind::from(Acp::Pi),
-            None,
-            "session-1",
-            "writer",
-        )
-        .unwrap();
-        remember_agent_definition_at(
-            &path,
-            HistorySourceKind::from(Acp::Pi),
-            Some("work"),
-            "session-1",
-            "quant",
-        )
-        .unwrap();
+        let pi = HistorySourceKind::from(Acp::Pi);
+        seed_binding(&path, pi.id(), "", "session-1", "writer");
+        seed_binding(&path, pi.id(), "work", "session-1", "quant");
 
         assert_eq!(
-            agent_definition_id_at(&path, HistorySourceKind::from(Acp::Pi), None, "session-1")
-                .unwrap(),
+            agent_definition_id_at(&path, pi, None, "session-1").unwrap(),
             Some("writer".to_string())
         );
         assert_eq!(
-            agent_definition_id_at(
-                &path,
-                HistorySourceKind::from(Acp::Pi),
-                Some("work"),
-                "session-1"
-            )
-            .unwrap(),
+            agent_definition_id_at(&path, pi, Some("work"), "session-1").unwrap(),
             Some("quant".to_string())
         );
         assert_eq!(
@@ -536,31 +490,18 @@ mod tests {
             None
         );
         assert_eq!(
-            agent_definition_ids_at(&path, HistorySourceKind::from(Acp::Pi), None).get("session-1"),
+            agent_definition_id_at(&path, pi, None, "  ").unwrap(),
+            None,
+            "空 id 不查"
+        );
+        assert_eq!(
+            agent_definition_ids_at(&path, pi, None).get("session-1"),
             Some(&"writer".to_string())
         );
         assert_eq!(
-            agent_definition_ids_at(&path, HistorySourceKind::from(Acp::Pi), Some("work"))
-                .get("session-1"),
+            agent_definition_ids_at(&path, pi, Some("work")).get("session-1"),
             Some(&"quant".to_string())
         );
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn blank_agent_bindings_are_ignored() {
-        let path = temp_path("blank-agent-binding");
-        remember_agent_definition_at(&path, HistorySourceKind::from(Acp::Pi), None, "", "writer")
-            .unwrap();
-        remember_agent_definition_at(
-            &path,
-            HistorySourceKind::from(Acp::Pi),
-            None,
-            "session-1",
-            "  ",
-        )
-        .unwrap();
-        assert!(agent_definition_ids_at(&path, HistorySourceKind::from(Acp::Pi), None).is_empty());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

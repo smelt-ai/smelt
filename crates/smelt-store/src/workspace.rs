@@ -155,6 +155,26 @@ fn write_acp_record(
             params![session_id, position as i64, config_id, value_id],
         )?;
     }
+    bind_history_agent(transaction, session_id)
+}
+
+/// 「这份 provider 存档是哪个智能体开的」由对话细节推出来：ACP 会话既有 provider 身份又有
+/// 智能体时，就记一条 `history_agent_binding`。两样谁后写到，都在写它的那个事务里补上，
+/// 会话关掉、对话删掉后历史页「继续」仍按原来的智能体起。以对话上现在的为准：同一份存档
+/// 换了智能体续接，记新的。
+fn bind_history_agent(transaction: &Transaction<'_>, session_id: &str) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
+         SELECT agent, COALESCE(profile_id, ''), history_session_id, TRIM(agent_definition_id)
+         FROM acp_detail
+         WHERE session_id = ?1
+           AND TRIM(COALESCE(history_session_id, '')) != ''
+           AND TRIM(COALESCE(agent_definition_id, '')) != ''
+         ON CONFLICT(agent, profile_id, resume_id) DO UPDATE SET
+           agent_definition_id = excluded.agent_definition_id
+         WHERE agent_definition_id IS NOT excluded.agent_definition_id",
+        [session_id],
+    )?;
     Ok(())
 }
 
@@ -799,6 +819,7 @@ pub(crate) fn remember_history_session_id(
     // 有了身份，名字就属于那段 provider 对话：对话上起过的名字搬进 `history_title`（那边
     // 已经有名字就以那边的为准），对话上的清掉。名字任何时候只在一处。
     let moved = move_conversation_name_to_history(transaction, &session_id)?;
+    bind_history_agent(transaction, &session_id)?;
     Ok(Some(updated > 0 || moved))
 }
 

@@ -7,15 +7,15 @@
 use std::time::Duration;
 
 use smelt_runtime_client::RuntimeClient;
-use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, ControlErrorCode};
+use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError};
 
 use crate::RuntimeKey;
 
 /// 本机操作的默认上限。大仓库的 status、搜索也该在这个时间里回来。
-pub(crate) const RUNTIME_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const RUNTIME_CALL_TIMEOUT: Duration = smelt_plugin_api::CALL_TIMEOUT;
 
-/// 目标机器已经从这台桌面移除时报的话。
-const RUNTIME_REMOVED: &str = "这台机器已经移除";
+/// 给人看的失败原因。宿主和插件说法一致，定义在插件接口里。
+pub(crate) use smelt_plugin_api::call_error_text as error_text;
 
 /// 发给本机运行时。
 pub(crate) fn call<C: ControlCall>(
@@ -36,23 +36,11 @@ pub(crate) fn call_on<C: ControlCall>(
 
 /// 机器已经移除时给人看的话。
 pub(crate) fn removed_text() -> String {
-    RUNTIME_REMOVED.to_string()
+    smelt_plugin_api::MACHINE_REMOVED.to_string()
 }
 
 /// 调用要发给的那台机器的客户端。要读桌面挂着哪些机器，只能在主线程取；取到的客户端
 /// 带去后台用。机器已经移除时给出可以直接显示的原因。
 pub(crate) fn target(key: &RuntimeKey, cx: &gpui::App) -> Result<RuntimeClient, String> {
     crate::runtimes::client(key, cx).ok_or_else(removed_text)
-}
-
-/// 给人看的失败原因：运行时报的业务错误原样给出，连不上运行时则是传输错误。
-pub(crate) fn error_text(error: ControlClientError) -> String {
-    match error {
-        // 应用刚更新、守护还没换到新版时会这样：守护要等空闲才升级。
-        ControlClientError::Protocol(error) if error.code == ControlErrorCode::MethodNotFound => {
-            "正在运行的 smeltd 版本较旧，还不支持这个操作；升级守护进程后重试".to_string()
-        }
-        ControlClientError::Protocol(error) => error.message,
-        other => other.to_string(),
-    }
 }

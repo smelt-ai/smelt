@@ -1,0 +1,16 @@
+# 内置插件「布局」：随程序带的工作台布局，登记进宿主的布局注册表。
+# 只依赖插件接口和 gpui，宿主里没有它的类型（见 docs/app-plugins.md）。
+[package]
+name = "smelt-layouts"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

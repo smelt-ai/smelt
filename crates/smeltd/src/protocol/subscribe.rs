@@ -25,23 +25,28 @@ pub(super) fn handle_event_subscribe_op<C: ClientSocket + PeerSource>(
         handle_event_subscribe(conn, v.get("request"), identity, event_hub);
         return;
     }
-    let identity = daemon_executable_path()
+    let authenticated = daemon_executable_path()
         .map_err(|error| format!("cannot determine smeltd executable: {error}"))
         .and_then(|daemon_executable| {
             let peer = conn.peer_identity()?;
-            super::auth::authenticate_event_client_for_platform(
+            let identity = super::auth::authenticate_event_client_for_platform(
                 v,
                 &peer,
                 std::process::id(),
                 &daemon_executable,
-            )
+            )?;
+            Ok((identity, peer))
         });
     // 本机桌面 App 连着：推送据此判断人可能就在这台 Mac 前（见 `crate::presence`）。
-    let _local_desktop = identity
+    let _local_desktop = authenticated
         .as_ref()
-        .is_ok_and(|identity| identity.plugin_id.as_str() == FIRST_PARTY_DESKTOP_PLUGIN_ID)
+        .is_ok_and(|(identity, _)| identity.plugin_id.as_str() == FIRST_PARTY_DESKTOP_PLUGIN_ID)
         .then(crate::presence::LocalDesktopLease::acquire);
-    handle_event_subscribe(conn, v.get("request"), identity, event_hub);
+    let (identity, peer) = match authenticated {
+        Ok((identity, peer)) => (Ok(identity), Some(peer)),
+        Err(error) => (Err(error), None),
+    };
+    handle_event_subscribe_with_peer(conn, v.get("request"), identity, peer, event_hub);
 }
 pub(crate) fn collect_subscription_snapshot(
     sessions: &Sessions,
@@ -64,7 +69,10 @@ pub(super) fn write_event_protocol_value<C: ClientSocket>(
     smelt_runtime_client::protocol::write_json_line(conn, &value).map_err(|error| error.to_string())
 }
 
-pub(super) fn write_event_protocol_error<C: ClientSocket>(conn: &mut C, error: impl std::fmt::Display) {
+pub(super) fn write_event_protocol_error<C: ClientSocket>(
+    conn: &mut C,
+    error: impl std::fmt::Display,
+) {
     let _ = write_event_protocol_value(
         conn,
         SubscribeMessage::<serde_json::Value>::Error {
@@ -74,15 +82,16 @@ pub(super) fn write_event_protocol_error<C: ClientSocket>(conn: &mut C, error: i
     );
 }
 
-const CONNECTION_MAILBOX_LIMIT: usize = 256;
+pub(crate) const CONNECTION_MAILBOX_LIMIT: usize = 256;
 
-enum ConnectionMail {
+pub(crate) enum ConnectionMail {
     /// 订阅建立后客户端不该再发任何东西；发了就是协议错误，读出错也算。
     ClientError(String),
     Delivery(Delivery),
+    AppearanceRequest(smelt_event_protocol::AppearanceApplyRequested),
 }
 
-struct ConnectionMailbox {
+pub(crate) struct ConnectionMailbox {
     state: Mutex<ConnectionMailboxState>,
     wake: Condvar,
 }
@@ -95,7 +104,7 @@ struct ConnectionMailboxState {
 }
 
 impl ConnectionMailbox {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(ConnectionMailboxState {
                 items: VecDeque::new(),
@@ -105,6 +114,21 @@ impl ConnectionMailbox {
             }),
             wake: Condvar::new(),
         }
+    }
+
+    /// 外观请求在登记锁内投递，不能在队列满时等待。
+    pub(crate) fn try_push(&self, item: ConnectionMail) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.stopped
+            || state.client_closed
+            || state.hub_closed
+            || state.items.len() >= CONNECTION_MAILBOX_LIMIT
+        {
+            return false;
+        }
+        state.items.push_back(item);
+        self.wake.notify_all();
+        true
     }
 
     fn push(&self, item: ConnectionMail) -> bool {
@@ -134,7 +158,7 @@ impl ConnectionMailbox {
         self.wake.notify_all();
     }
 
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
         let mut state = self.state.lock().unwrap();
         state.stopped = true;
         self.wake.notify_all();
@@ -142,7 +166,7 @@ impl ConnectionMailbox {
 
     /// 客户端出错先交，再交出至多一条投递。客户端关掉或订阅通道关掉之后，剩下的投递
     /// 不再交。
-    fn next(&self) -> Option<ConnectionMail> {
+    pub(crate) fn next(&self) -> Option<ConnectionMail> {
         let mut state = self.state.lock().unwrap();
         loop {
             if let Some(index) = state
@@ -167,9 +191,19 @@ impl ConnectionMailbox {
 }
 
 pub(crate) fn handle_event_subscribe<C: ClientSocket>(
+    conn: C,
+    request: Option<&serde_json::Value>,
+    identity: Result<AuthenticatedEventClient, String>,
+    event_hub: &EventHubHandle,
+) {
+    handle_event_subscribe_with_peer(conn, request, identity, None, event_hub);
+}
+
+pub(super) fn handle_event_subscribe_with_peer<C: ClientSocket>(
     mut conn: C,
     request: Option<&serde_json::Value>,
     identity: Result<AuthenticatedEventClient, String>,
+    local_peer: Option<super::PeerIdentity>,
     event_hub: &EventHubHandle,
 ) {
     let setup = (|| {
@@ -196,6 +230,13 @@ pub(crate) fn handle_event_subscribe<C: ClientSocket>(
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
+        if topics.iter().any(|topic| {
+            topic.as_str() == smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+        }) && (local_peer.is_none()
+            || identity.plugin_id.as_str() != FIRST_PARTY_DESKTOP_PLUGIN_ID)
+        {
+            return Err("外观修改只由本机桌面处理".to_string());
+        }
         if topics.len() != request.subscription.topics.len() {
             return Err("subscription contains duplicate topics".to_string());
         }
@@ -314,6 +355,15 @@ pub(crate) fn handle_event_subscribe<C: ClientSocket>(
         return;
     };
 
+    // 只登记显式订阅单播外观请求的本机桌面；其他独立订阅不算桌面。
+    let appearance_lease = local_peer
+        .filter(|_| {
+            request.subscription.topics.iter().any(|topic| {
+                topic.as_str() == smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+            })
+        })
+        .map(|peer| event_hub.appearance_requests.register(peer, &mailbox));
+
     'connection: loop {
         let Some(mail) = mailbox.next() else {
             break;
@@ -370,9 +420,33 @@ pub(crate) fn handle_event_subscribe<C: ClientSocket>(
                     break;
                 }
             }
+            ConnectionMail::AppearanceRequest(request) => {
+                let id = request.request_id.clone();
+                let envelope = event_hub::core_envelope(
+                    smelt_event_protocol::EventId::new(format!("event-{id}")).unwrap(),
+                    smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED,
+                    serde_json::to_value(request).unwrap(),
+                    None,
+                    event_hub::now_ms(),
+                    smelt_event_protocol::CorrelationId::new(format!("correlation-{id}")).unwrap(),
+                );
+                if write_event_protocol_value(
+                    &mut conn,
+                    SubscribeMessage::Event {
+                        sequence: None,
+                        envelope,
+                    },
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
         }
     }
 
+    // 先注销桌面再停信箱：不再把已断开的连接算作桌面，在途请求立即得到“结果未知”。
+    drop(appearance_lease);
     drop(resume_tx);
     mailbox.stop();
     let _ = conn.shutdown(Shutdown::Both);

@@ -249,7 +249,6 @@ impl crate::Workspace {
             changed = true;
             // 目录随订阅首帧到，到了再恢复会话（见 `apply_workspace_directory`）。
             self.spaces.push(RuntimeSpace::new(runtime.clone()));
-            self.ensure_pi_library_runtime(cx);
         }
         if changed {
             self.save_state(cx);

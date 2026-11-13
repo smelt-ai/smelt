@@ -13,13 +13,14 @@
 // 搬出主 crate（acp_view.rs 独立成 smelt-acp-view，其余几个是它和主 GUI 共用的
 // UI 基建，搬进 smelt-ui / smelt-core，见各自文件头注释）。这里用同名 `use`
 // 重新导出成原来的模块路径，全库既有的 `crate::ui_theme::x()` 之类写法不用
-// 逐处改——跟 session_history.rs 对 claude_paths 的重导出是同一个套路。
+// 逐处改。
 pub(crate) use smelt_acp_view::acp_view;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
 
 pub(crate) mod agents;
 mod automation_notifications;
+mod builtin_views;
 mod conversation_layout;
 mod daemon_restart_prompt;
 mod desktop_view;
@@ -34,6 +35,7 @@ mod keymap;
 mod liquid_glass;
 mod local_daemon;
 mod overlay;
+mod plugin_host;
 mod plugins;
 mod project_repositories;
 mod provider_quota;
@@ -46,7 +48,7 @@ mod runtimes;
 mod tool_panel;
 pub(crate) use runtime_space::ProjectRef;
 pub(crate) use runtimes::RuntimeKey;
-mod session_history;
+mod session_commands;
 mod session_list;
 mod settings;
 mod sidebar_order;
@@ -58,8 +60,10 @@ mod terminal;
 mod terminal_images;
 mod terminal_view;
 mod workspace_attention;
+mod workspace_commands;
 mod workspace_directory;
 mod workspace_frame;
+mod workspace_layout;
 mod workspace_nav;
 mod workspace_palette;
 mod workspace_persist;
@@ -70,7 +74,7 @@ mod workspace_update;
 mod workspace_view;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
-pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
+pub(crate) use workspace_nav::{WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::load_workspace_ui;
 #[cfg(test)]
 pub(crate) use workspace_persist::persisted_active_position;
@@ -99,14 +103,6 @@ use file_tree::{DeleteFileTarget, OpenFile, SearchState};
 use git_panel::{BranchList, GitDiff, GitStatusData, RepoInfo};
 use settings::{Appearance, active_launch_entries, default_launch_entries, load_appearance};
 
-const MIN_SIDEBAR_WIDTH: f32 = 240.0;
-/// 左栏和右栏拖到这条以下松开就收起。停靠层最窄只到 100。
-const DOCK_COLLAPSE_WIDTH: f32 = 160.0;
-const MIN_WORKSPACE_CONTENT_WIDTH: f32 = 400.0;
-const MIN_TOOL_PANEL_WIDTH: f32 = 320.0;
-const DEFAULT_SIDEBAR_WIDTH: f32 = MIN_SIDEBAR_WIDTH;
-const DEFAULT_TOOL_PANEL_WIDTH: f32 = MIN_TOOL_PANEL_WIDTH;
-
 /// 文件事件里有没有名叫 `name` 的文件。
 fn event_touches_file(event: &notify::Event, name: &std::ffi::OsStr) -> bool {
     event
@@ -132,13 +128,6 @@ fn until_next_midnight<Tz: TimeZone>(now: &chrono::DateTime<Tz>) -> Duration {
         .and_then(|next| next.signed_duration_since(now).to_std().ok())
         // 算不出来（日期到头了）就一小时后再看。
         .unwrap_or(Duration::from_secs(3600))
-}
-
-fn sidebar_width_for_viewport(preferred: f32, viewport_width: Pixels) -> f32 {
-    let shell_inset = f32::from(ui_theme::shell_padding()) * 2.0;
-    let available = (f32::from(viewport_width) - shell_inset - MIN_WORKSPACE_CONTENT_WIDTH)
-        .max(MIN_SIDEBAR_WIDTH);
-    preferred.max(MIN_SIDEBAR_WIDTH).min(available)
 }
 
 #[cfg(target_os = "macos")]
@@ -219,40 +208,18 @@ impl WorkspaceDirectoriesGlobal {
     }
 }
 
-// Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
-// 工作区快捷键也走 Action：键位在 `keymap`，处理在 Workspace 根节点。
+// 工作台级的动作都是命令（见 `workspace_commands`），快捷键和菜单绑 `RunCommand`。这里只剩
+// 视图里面、意思随焦点变的键，键位在 `keymap`，处理在各自的视图上。
 // 不绑 `None`——无 context 的键位和最内层同深度，后注册会盖过 Input。
 gpui::actions!(
     smelt,
     [
-        Quit,
-        OpenSettings,
-        CheckForUpdate,
-        ReportIssue,
-        OpenDocs,
-        SendSelectionToTerminal,
-        PrevSession,
-        NextSession,
-        ToggleSidebar,
-        ToggleToolPanel,
-        NewConversation,
-        ToggleCommandPalette,
-        CyclePanePrev,
-        CyclePaneNext,
-        SplitBeside,
-        SplitBelow,
-        ClosePane,
-        SaveFile,
-        ToggleDebugHud,
-        NextHunk,
-        PrevHunk,
         DismissWorkspace,
         FileTreeMoveUp,
         FileTreeMoveDown,
         FileTreeMoveLeft,
         FileTreeMoveRight,
         FileTreeActivate,
-        FocusSidebar,
         SidebarUp,
         SidebarDown,
         SidebarCollapse,
@@ -262,24 +229,6 @@ gpui::actions!(
         CloseSettingsWindow,
     ]
 );
-
-/// Cmd+1…9：按侧栏视觉顺序激活第 N 个会话（0 起）。
-#[derive(Clone, PartialEq, Debug, gpui::Action)]
-#[action(namespace = smelt, no_json)]
-pub struct ActivateSession {
-    pub index: usize,
-}
-
-/// 命令面板里的一个可执行动作。
-#[derive(Clone)]
-enum Cmd {
-    NewTab,
-    OpenProject,
-    CloseTab,
-    NextTab,
-    PrevTab,
-    SwitchTab(usize),
-}
 
 /// 按本地日历把 unix 秒归入「今天 / 昨天 / 本周 / 更早」。
 fn last_updated_bucket(timestamp: u64, now: chrono::DateTime<Local>) -> usize {
@@ -302,29 +251,6 @@ fn unix_now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
-}
-
-/// 舞台覆盖页：盖在当前会话舞台上，不是一级导航（一级导航是 `WorkspaceRoute`）。
-///
-/// 存档 JSON 键仍是 `stage_override`；`ToolPanel` 的 wire 值仍是 `inspector`。
-/// 实际内容由 `tool_panel_tab` 决定。旧的 `files`/`git`/`skills`/`history` 不再识别，
-/// 读到即视为没有覆盖页。
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StageCover {
-    /// Tool Panel 全屏；持久化沿用旧 wire 名 `inspector`。
-    #[serde(rename = "inspector", alias = "tool_panel")]
-    ToolPanel,
-    /// 未知覆盖页。读到即视为没有覆盖页。
-    #[serde(other)]
-    Unknown,
-}
-
-impl StageCover {
-    /// 是否是 Tool Panel 的舞台全屏。
-    pub(crate) fn is_tool_panel_cover(self) -> bool {
-        matches!(self, Self::ToolPanel)
-    }
 }
 
 /// 当前主工作台。窗口在不在只看 `window`：设置窗口强持有同一份 `Workspace`，
@@ -462,16 +388,12 @@ fn apply_automation_projection(
 }
 
 /// 一个长期存活的右侧路由实例。左侧 session 路由器只整体交换这个对象，不读取其中
-/// 任何实现字段；缓存实体（例如 Tool Panel 的编辑器、diff 状态）而不只缓存描述，切回来才能停在原来的
+/// 任何实现字段；缓存实体（例如文件编辑器、diff 状态）而不只缓存描述，切回来才能停在原来的
 /// 进程、页面和尺寸上。
 struct SessionUiState {
     restored_from_archive: bool,
     /// 冷恢复后首次激活 route 时重新打开；运行期打开完成后即清空。
     pending_restore_file: Option<String>,
-    stage_cover: Option<StageCover>,
-    tool_panel_tab: tool_panel::ToolPanelTab,
-    tool_panel_open: bool,
-    tool_panel_w: f32,
     expanded: HashSet<String>,
     file_tree_selected: Option<String>,
     open_file: Option<OpenFile>,
@@ -513,11 +435,6 @@ impl Default for SessionUiState {
         Self {
             restored_from_archive: false,
             pending_restore_file: None,
-            stage_cover: None,
-            tool_panel_tab: tool_panel::ToolPanelTab::Files,
-            // 新会话把舞台完整留给当前工作；需要工具时再从右上角打开。
-            tool_panel_open: false,
-            tool_panel_w: DEFAULT_TOOL_PANEL_WIDTH,
             expanded: HashSet::new(),
             file_tree_selected: None,
             open_file: None,
@@ -550,14 +467,6 @@ impl Default for SessionUiState {
 #[serde(default)]
 struct SessionRouteArchive {
     version: u32,
-    #[serde(rename = "stage_override")]
-    stage_cover: Option<StageCover>,
-    #[serde(alias = "inspector_tab")]
-    tool_panel_tab: tool_panel::ToolPanelTab,
-    #[serde(alias = "inspector_open")]
-    tool_panel_open: bool,
-    #[serde(alias = "inspector_w")]
-    tool_panel_w: f32,
     expanded: HashSet<String>,
     file_tree_selected: Option<String>,
     open_file_path: Option<String>,
@@ -575,11 +484,6 @@ impl Default for SessionRouteArchive {
     fn default() -> Self {
         Self {
             version: 1,
-            stage_cover: None,
-            tool_panel_tab: tool_panel::ToolPanelTab::Files,
-            // 兼容没有该字段的旧 route 时，也采用当前的新会话默认值。
-            tool_panel_open: false,
-            tool_panel_w: DEFAULT_TOOL_PANEL_WIDTH,
             expanded: HashSet::new(),
             file_tree_selected: None,
             open_file_path: None,
@@ -598,13 +502,6 @@ impl Default for SessionRouteArchive {
 impl SessionUiState {
     fn archive(&self) -> SessionRouteArchive {
         SessionRouteArchive {
-            stage_cover: self
-                .stage_cover
-                .filter(|view| view.is_tool_panel_cover())
-                .map(|_| StageCover::ToolPanel),
-            tool_panel_tab: self.tool_panel_tab,
-            tool_panel_open: self.tool_panel_open,
-            tool_panel_w: self.tool_panel_w,
             expanded: self.expanded.clone(),
             file_tree_selected: self.file_tree_selected.clone(),
             open_file_path: self
@@ -628,14 +525,6 @@ impl SessionUiState {
         Self {
             restored_from_archive: true,
             pending_restore_file: archive.open_file_path,
-            // 不认识的覆盖页（含已删除的 files/git/skills/history）不占用舞台。
-            stage_cover: match archive.stage_cover {
-                Some(StageCover::ToolPanel) => Some(StageCover::ToolPanel),
-                Some(StageCover::Unknown) | None => None,
-            },
-            tool_panel_tab: archive.tool_panel_tab,
-            tool_panel_open: archive.tool_panel_open,
-            tool_panel_w: archive.tool_panel_w.max(MIN_TOOL_PANEL_WIDTH),
             expanded: archive.expanded,
             file_tree_selected: archive.file_tree_selected,
             open_file: None,
@@ -667,8 +556,6 @@ impl SessionUiState {
 
 fn swap_session_ui_state(current: &mut SessionUiState, parked: &mut SessionUiState) {
     std::mem::swap(current, parked);
-    current.tool_panel_w = current.tool_panel_w.max(MIN_TOOL_PANEL_WIDTH);
-    parked.tool_panel_w = parked.tool_panel_w.max(MIN_TOOL_PANEL_WIDTH);
     current.file_tree_w = current.file_tree_w.clamp(
         tool_panel::MIN_FILE_TREE_WIDTH,
         tool_panel::MAX_FILE_TREE_WIDTH,
@@ -679,13 +566,9 @@ fn swap_session_ui_state(current: &mut SessionUiState, parked: &mut SessionUiSta
     );
 }
 
-/// 右侧抽屉现场：Tool Panel / 文件树 / Git。跟选中的项目走，不跟每条会话。
+/// 文件和变更的现场：文件树、打开的文件、Git。跟选中的项目走，不跟每条会话。
 struct ProjectUiState {
     pending_restore_file: Option<String>,
-    stage_cover: Option<StageCover>,
-    tool_panel_tab: tool_panel::ToolPanelTab,
-    tool_panel_open: bool,
-    tool_panel_w: f32,
     expanded: HashSet<String>,
     file_tree_selected: Option<String>,
     open_file: Option<OpenFile>,
@@ -721,10 +604,6 @@ impl SessionUiState {
         let defaults = SessionUiState::default();
         ProjectUiState {
             pending_restore_file: std::mem::take(&mut self.pending_restore_file),
-            stage_cover: self.stage_cover.take(),
-            tool_panel_tab: std::mem::replace(&mut self.tool_panel_tab, defaults.tool_panel_tab),
-            tool_panel_open: std::mem::replace(&mut self.tool_panel_open, defaults.tool_panel_open),
-            tool_panel_w: std::mem::replace(&mut self.tool_panel_w, defaults.tool_panel_w),
             expanded: std::mem::take(&mut self.expanded),
             file_tree_selected: self.file_tree_selected.take(),
             open_file: self.open_file.take(),
@@ -752,10 +631,6 @@ impl SessionUiState {
 
     fn apply_project_ui(&mut self, ui: ProjectUiState) {
         self.pending_restore_file = ui.pending_restore_file;
-        self.stage_cover = ui.stage_cover;
-        self.tool_panel_tab = ui.tool_panel_tab;
-        self.tool_panel_open = ui.tool_panel_open;
-        self.tool_panel_w = ui.tool_panel_w.max(MIN_TOOL_PANEL_WIDTH);
         self.expanded = ui.expanded;
         self.file_tree_selected = ui.file_tree_selected;
         self.open_file = ui.open_file;
@@ -792,10 +667,6 @@ impl ProjectUiState {
             .as_ref()
             .map(|file| file.path.clone())
             .or_else(|| self.pending_restore_file.clone());
-        dest.stage_cover = self.stage_cover;
-        dest.tool_panel_tab = self.tool_panel_tab;
-        dest.tool_panel_open = self.tool_panel_open;
-        dest.tool_panel_w = self.tool_panel_w.max(MIN_TOOL_PANEL_WIDTH);
         dest.expanded = self.expanded.clone();
         dest.file_tree_selected = self.file_tree_selected.clone();
         dest.file_tree_w = self.file_tree_w.clamp(
@@ -881,9 +752,9 @@ pub(crate) use smelt_model::agent_status::AgentStatus;
 
 // DaemonStates（守护上报的会话状态镜像）/ AttentionGlobal（统一关注事件 store）：
 // ACP 视图独立成 smelt-acp-view 后要跨
-// crate 读写，搬进 smelt-ui（daemon_states_global.rs）共享，这里重导出成原来
+// crate 读写，放在 smelt-app-state（daemon_states_global.rs）共享，这里重导出成原来
 // 的裸名字。
-pub(crate) use smelt_ui::daemon_states_global::{
+pub(crate) use smelt_app_state::daemon_states_global::{
     AttentionGlobal, AttentionItem, AttentionKind, DaemonStates,
 };
 
@@ -1475,6 +1346,14 @@ fn until_turn_minute_changes(turn_started_at: u64, now: u64) -> Option<std::time
     Some(std::time::Duration::from_secs(60 - elapsed % 60))
 }
 
+/// 各会话的目录（按顺序）变没变。
+fn session_cwds_changed(shown: &[SessionFacts], current: &[SessionFacts]) -> bool {
+    !shown
+        .iter()
+        .map(|facts| &facts.cwd)
+        .eq(current.iter().map(|facts| &facts.cwd))
+}
+
 /// 换上这次看到的事实，返回它们变没变。
 fn replace_changed_facts(shown: &mut Vec<SessionFacts>, current: Vec<SessionFacts>) -> bool {
     if *shown == current {
@@ -1497,20 +1376,11 @@ enum RenameTarget {
     Workset(String),
     /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
-    History {
-        /// 存档在哪台机器上。
-        runtime: RuntimeKey,
-        agent: settings::HistorySourceKind,
-        profile_id: Option<String>,
-        cwd: String,
-        resume_id: String,
-        current_title: String,
-    },
 }
 
 impl RenameTarget {
     /// 侧栏里的会话行、分屏行、对话行就地改名：输入框画在那一行里，回车或点别处保存，
-    /// Esc 取消。历史会话和机器名不在侧栏的行上，还用弹窗。
+    /// Esc 取消。机器名不在侧栏的行上，还用弹窗。
     fn is_inline(&self) -> bool {
         matches!(self, Self::Session(_) | Self::Pane(_))
     }
@@ -2318,20 +2188,15 @@ struct Workspace {
         std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
     /// 正在拖的分隔条：(起点 y, 上方分段起始像素高度, 下方分段起始像素高度, 两者权重之和)。
     pub(crate) sidebar_split_drag: Option<(f32, f32, f32, f32)>,
-    /// 左侧会话栏是否展开。
-    sidebar_open: bool,
-    sidebar_w: f32,
-    /// 侧栏拖动调节起点：(按下时的鼠标 x, 按下时的侧栏宽)。
-    pub(crate) shell_drag_sidebar_start: Option<(f32, f32)>,
-    /// 工具面板拖动调节起点：(按下时的鼠标 x, 按下时的工具栏宽)。
-    pub(crate) shell_drag_tool_start: Option<(f32, f32)>,
-    /// 分隔条拖动改过宽度，松手时落盘。
-    shell_needs_save: bool,
-    /// 左键还按着。这段时间不把 Dock 宽度推回去，免得和拖动对着干。
-    shell_pointer_down: bool,
-    /// 这次按下时的左右栏宽度。拖过收起线再松开就回到这个宽度，不把拖动中的夹紧值存下来。
-    shell_gesture_sidebar_w: Option<f32>,
-    shell_gesture_tool_w: Option<f32>,
+    /// 整个工作台：一块 Dock，会话列表、舞台、文件这些都是里面的面板（见 `workspace_shell`）。
+    shell_dock: Entity<gpui_component::dock::DockArea>,
+    /// Dock 摆着什么、看得见什么的快照。Dock 一变就重算，render 只读它。
+    pub(crate) shell_view: workspace_shell::ShellView,
+    /// 装着的布局，存档按它的 id 记。
+    layout: workspace_layout::InstalledLayout,
+    /// 上次写进库的布局存档原文。一样就不再写。
+    layout_state_written: Option<String>,
+    _shell_dock_subs: Vec<Subscription>,
     /// 交互式 diff：选中待评论的行号集合（对应 GitDiff.lines 下标），换文件/重开 diff 时清空。
     /// 交互式 diff 的评论输入框（懒创建，随 Git 视图渲染出待发送的 diff 时创建）。
     diff_comment_input: Option<Entity<gpui_component::input::TextareaState>>,
@@ -2437,38 +2302,7 @@ struct Workspace {
     launch_inputs: Option<settings::LaunchInputs>,
     /// 手动添加 workspace 列表编辑器（设置页「Agent 集成」分组懒创建）。
     profile_inputs: Option<settings::ProfileInputs>,
-    /// 原生 Pi 模型设置表单。
-    pi_model_editor: Option<settings::PiModelEditor>,
-    /// 原生 Pi 自定义 Provider 表单。
-    pi_custom_provider_editor: Option<settings::PiCustomProviderEditor>,
-    /// Pi 内置 provider 的凭据现状缓存；打开凭据面板时才异步填。
-    pi_auth_providers: Option<settings::PiAuthProvidersState>,
-    /// 正在进行的订阅/API key 登录；持有登录子进程。
-    pi_login: Option<settings::PiLoginView>,
-    /// 正在为哪个 provider 挑默认模型。
-    pi_auth_model_picker: Option<settings::PiAuthModelPicker>,
-    /// Pi 凭据操作（列表、注销）的最近一次错误。
-    pi_auth_error: Option<String>,
-    /// 凭据面板是否展开到全部内置 provider（默认只列可订阅登录的和已配好的）。
-    pi_auth_show_all: bool,
-    /// 正在登录的 MCP 服务器名。登录跑在后台子进程里，期间禁用同一行的按钮。
-    pi_mcp_login: Option<String>,
-    /// 等用户确认移除的 MCP 服务器名。移除会删掉用户手写的配置，所以要两步。
-    pi_mcp_pending_remove: Option<String>,
-    /// MCP 配置操作（添加、启停、移除、登录）的最近一次错误。
-    pi_mcp_error: Option<String>,
-    /// 各台机器的 Pi 配置快照（模型、MCP、插件……）。渲染只读它；打开设置窗口、进
-    /// 能力库、开智能体编辑器时刷新，修改由运行时回带新快照。
-    pi_configs: HashMap<RuntimeKey, settings::PiConfigSlot>,
-    /// 能力库在配哪台机器。
-    pi_library: settings::PiLibrary,
-    /// 交互式原生 Pi 模型表单错误。
-    pi_model_editor_error: Option<String>,
-    /// 正在等二次确认删除的插件 id。
-    pi_plugin_pending_delete: Option<String>,
-    /// 插件导入 / 删除的最近一次错误。
-    pi_plugin_error: Option<String>,
-    /// 面板插件（Tool Panel 里的 gpui-shell 插件）设置页的状态，见 `settings::panel_plugins`。
+    /// 面板插件（gpui-shell 插件，每个是一个视图）设置页的状态，见 `settings::panel_plugins`。
     panel_plugins: settings::PanelPluginsState,
     /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 界面字号滑块 + 终端字号滑块 + 背景色取色器
     /// + 背景图透明度滑块。
@@ -2493,17 +2327,17 @@ struct Workspace {
     visible_refresh_scheduled: bool,
     /// 正在刷新可见数据。这段里的切会话不再排队第二次。
     visible_refresh_running: bool,
-    /// git status 缓存（root → (取得时刻, 数据)）。Git 页后台刷新，render 只读，
+    /// git status 缓存。事件标旧、看得见时后台重取（见 `git_panel::Cached`），render 只读，
     /// 避免每帧同步跑 git status（大仓要 ~90ms，是掉帧元凶）。
     ///
     /// key 是**仓库**根而不是项目根：一个项目里可能有多个仓库（submodule、
     /// vendor 里的独立仓库、被 .gitignore 忽略的仓库），每个都独立跑自己的 status。
-    git_status: HashMap<ProjectRef, (Instant, GitStatusData)>,
+    git_status: HashMap<ProjectRef, git_panel::Cached<GitStatusData>>,
     /// 项目根 → 该项目里发现的仓库列表（含发现是否被上限截断）。
     /// 发现本身要跑 git，所以跟 status 一样走缓存 + 后台刷新。
-    git_repos: HashMap<ProjectRef, (Instant, git_panel::RepoSet)>,
-    /// 正在后台做仓库发现的项目根（防重复并发 spawn）。
-    git_repos_inflight: HashSet<ProjectRef>,
+    git_repos: HashMap<ProjectRef, git_panel::Cached<git_panel::RepoSet>>,
+    /// 正在后台做仓库发现（或在限频里等着）的项目根 → 这期间有没有来过变化。
+    git_repos_inflight: HashMap<ProjectRef, bool>,
     /// 当前提交操作的目标仓库（仓库根）。多仓工作区里，提交框、推送、分支菜单
     /// 都作用于它；None = 跟随项目根。
     ///
@@ -2517,57 +2351,25 @@ struct Workspace {
     /// 正在后台刷新 status 的 root（防重复并发 spawn）。
     git_status_inflight: HashSet<ProjectRef>,
     /// root → 连续读取失败次数。失败数据不能冒充“工作区干净”；前三次按短退避
-    /// 自动重试，持续失败则等文件事件或后续界面交互再尝试。
+    /// 自动重试，持续失败则等下一次事件再尝试。
     git_status_failures: HashMap<ProjectRef, u8>,
     /// 单文件 git add/reset 的即时 UI 状态。进程是否在跑看 `git_writes`，
     /// 这里只在进程返回后保留到权威 status 回包，避免复选框先回弹再延迟移动分组。
     git_index_pending: HashMap<(ProjectRef, String), git_panel::PendingGitIndexOp>,
-    /// 分支列表缓存（root → (取得时刻, 数据)），Git 页头部分支切换下拉用；同
-    /// git_status 一套只在 Git 页打开时后台刷新。
-    branches: HashMap<ProjectRef, (Instant, BranchList)>,
-    /// 分支列表失效代数。删除分支发生在 `for-each-ref` 期间时，旧回包不得再写回。
+    /// 分支列表缓存，Git 页头部分支切换下拉用；同 git_status 一样事件标旧，只在 Git 页
+    /// 打开时后台重取。
+    branches: HashMap<ProjectRef, git_panel::Cached<BranchList>>,
+    /// 分支列表失效代数。标旧发生在 `for-each-ref` 期间时，旧回包不得再写回。
     branches_generation: HashMap<ProjectRef, u64>,
     /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
     branches_inflight: HashSet<ProjectRef>,
-    /// 已经请运行时监听的项目根，见 ensure_git_watch。运行时重连后清空重新登记。
-    watched_projects: HashSet<ProjectRef>,
-    /// 每个 root 上次「进 Git 页自动 fetch」的时刻：进 Git 页会主动 fetch 一次刷新
-    /// ahead/behind，但 render 每帧都满足「在 Git 页」，靠这个时间戳去抖（同一 root
-    /// 60s 内不重复自动 fetch），避免每帧狂发网络请求。
+    /// 请运行时建过的监听，见 `ensure_watch`。那台机器重新订阅上时清掉重新登记。
+    watches: HashSet<(git_panel::WatchKind, ProjectRef)>,
+    /// 每个项目上次自动 fetch 的时刻。Git 页开着、窗口在前台时同一项目 60 秒 fetch 一次，
+    /// 来回切页不会每次都发。
     git_autofetch_at: HashMap<ProjectRef, Instant>,
-    /// 历史会话列表缓存（`"{agent_id}:{cwd}"` → (取得时刻, 数据)）：后台扫描该 agent
-    /// 在该项目下的本地存储，render 只读。key 带上 agent_id 是因为四家 agent 的历史
-    /// 各存各的，同一个 cwd 换个 tab 就是完全不同的一份数据。
-    /// 注意：总览卡片那边（`self.sessions` 渲染，展示"最近一次 Claude 活动"）也复用
-    /// 这份缓存，固定传 `ConversationAgentKind::Claude`——历史会话页加多 agent tab 不该改变
-    /// 那个功能的行为，两处刻意共享同一套读写路径而不是各建一份。
-    session_list: HashMap<String, (Instant, session_history::HistoryListSnapshot)>,
-    /// 正在后台扫描历史会话列表的 key（同上 `"{agent_id}:{cwd}"`，防重复并发 spawn）。
-    session_list_inflight: HashSet<String>,
-    /// 扫描期间发生删除等变更的 key；旧扫描完成后会自动再扫一次，避免旧快照回写。
-    session_list_invalidated: HashSet<String>,
-    /// 历史会话绑定的智能体（同上 key → `resume_id` → 智能体 id）。跟列表在同一次后台
-    /// 扫描里读出：它要逐条查 SQLite，放进 render 会随每帧重绘重复读库。
-    history_agent_bindings: HashMap<String, Rc<HashMap<String, String>>>,
-    /// 历史会话标题搜索框；只过滤已加载列表，不触发 transcript 重扫。
-    history_filter: Option<Entity<gpui_component::input::InputState>>,
-    _history_filter_sub: Option<Subscription>,
-    /// 当前选中查看的历史会话；None 表示未选。
-    session_detail: Option<session_history::OpenedHistory>,
-    /// 历史会话右键删除的二次确认目标（None = 没在删除）。
-    delete_history_target: Option<session_history::DeleteHistoryTarget>,
-    /// 历史会话右侧消息详情的可变高度虚拟列表状态。
-    history_detail_list_state: gpui::ListState,
-    /// 加载会话详情的自增序号：后台解析完成时用它判断结果是否已过期（切了别的会话）。
-    session_detail_gen: u64,
-    /// 历史会话页当前选中查看哪家 agent 的历史（Claude/Copilot/Codex/
-    /// Grok 分 tab，各自存储格式不同，见 session_history.rs 头部注释）。
-    history_agent: settings::HistorySourceKind,
-    /// 选中的是手动添加的 workspace profile（而不是某个基础 agent 槽位）时是
-    /// `Some(profile_id)`；`history_agent` 这时候是该 profile 底层接的种类。
-    history_profile: Option<String>,
-    /// 上一次渲染历史时使用的项目根。项目切换后在下一次历史渲染前失效旧详情。
-    history_project_root: Option<ProjectRef>,
+    /// 自动 fetch 的定时任务在跑。见 `ensure_git_autofetch`。
+    git_autofetch_running: bool,
     /// 调试 HUD 开关（Cmd+Shift+F 切换），见 `overlay::debug_hud`。
     debug_hud: bool,
     /// 退出确认拦截弹窗开关
@@ -2602,8 +2404,10 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 能力库正文。只在能力库路由可见时存在，见 `sync_capabilities_view`。
-    capabilities_view: Option<Entity<settings::SettingsContentView>>,
+    /// 上次告诉插件的当前项目（见 `note_active_project`），只用来判断变没变。
+    plugin_project: Option<ProjectRef>,
+    /// 上次告诉插件的看得见的视图（见 `note_shown_views`），只用来判断变没变。
+    plugin_shown_views: HashSet<String>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
     ///
     /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
@@ -2630,11 +2434,9 @@ struct Workspace {
     relay_edit: Option<workspace_sessions::RelayEdit>,
     /// 仓库身份缓存（cwd → 当前分支）：侧栏项目行和会话行显示分支名靠它。None = 探测过
     /// 但不是 git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
-    repo_info: HashMap<ProjectRef, (Instant, Option<RepoInfo>)>,
-    /// 正在后台探测仓库身份、避免重复起进程的 cwd 集合。
-    repo_info_inflight: HashSet<ProjectRef>,
-    /// 远程机器上要重取的仓库信息。远程的不按时间过期，见 `ensure_repo_info`。
-    repo_info_stale: HashSet<ProjectRef>,
+    repo_info: HashMap<ProjectRef, git_panel::Cached<Option<RepoInfo>>>,
+    /// 正在后台探测仓库身份的 cwd → 这期间 HEAD 有没有变过。
+    repo_info_inflight: HashMap<ProjectRef, bool>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
     project_repositories: Option<project_repositories::ProjectRepositoriesState>,
@@ -2691,6 +2493,8 @@ struct Workspace {
     _workspace_directories_sub: Option<Subscription>,
     /// 远程运行时增删时同步侧栏的空间。
     _runtime_hub_sub: Option<Subscription>,
+    /// 宿主转给插件的事件里，工作台自己要管的（见 `subscribe_host_events`）。
+    _host_events_sub: Option<Subscription>,
     /// 自动化目录读 AgentHostState；不观察的话，投影写进 global 后当前页不会重绘。
     _agent_host_sub: Option<Subscription>,
     /// 智能体页、侧栏读各台机器的智能体配置（`AgentHosts`），理由同上。
@@ -2795,7 +2599,7 @@ fn daemon_owns_acp_delivery_session(delivery_id: Option<&str>) -> bool {
 }
 
 /// 字段归属约定（写新代码前先读）：
-/// - 右侧抽屉（Tool Panel / 文件树 / Git）跟**选中的项目**走，热场在
+/// - 文件、变更这些视图的现场（文件树、打开的文件、Git）跟**选中的项目**走，热场在
 ///   `active_session_ui` 里，按项目根停到 `project_ui`。
 /// - `Workspace` 放跨会话共享的缓存与后台任务：git status、watcher、目录缓存。
 impl std::ops::Deref for Workspace {
@@ -2813,17 +2617,14 @@ impl std::ops::DerefMut for Workspace {
 }
 
 impl Workspace {
-    /// Files 既可能展开到舞台，也可能停靠在 Tool Panel；两种状态都视为文件视图可见。
+    /// 文件视图此刻看得见。
     fn files_view_visible(&self) -> bool {
-        self.tool_panel_stage_active(tool_panel::ToolPanelTab::Files)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Files)
+        self.view_shown(builtin_views::Builtin::Files.id())
     }
 
-    /// Git「改动」页正在显示（舞台展开或停靠）。F7 的键位 context 只在这时挂上。
+    /// Git「改动」页正在显示。F7 的键位 context 只在这时挂上。
     fn git_changes_shown(&self) -> bool {
-        (self.tool_panel_stage_active(tool_panel::ToolPanelTab::Git)
-            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Git))
-            && self.git_tab == GitTab::Changes
+        self.view_shown(builtin_views::Builtin::Git.id()) && self.git_tab == GitTab::Changes
     }
 
     /// 某个终端网格自己的焦点句柄正被聚焦（搜索框等子元素不算）。
@@ -2839,25 +2640,12 @@ impl Workspace {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 自带命令先于插件登记：出厂键位撞了先登记的留着，自带的键不让插件抢走。
+        workspace_commands::register(cx.weak_entity(), cx);
         // 插件 tab 必须先于存档读取挂好：存档里的 tab 以插件 id 记录，
         // 注册表为空时会降级成 Files，用户上次停在插件面板就再也回不去。
         plugins::mount_all(window, cx);
-        // 插件的 `open_session`：和点系统通知一样跳到会话。推到这一轮更新结束后再进
-        // 工作台窗口：插件是在自己的事件里调它的，这时可能正嵌在别的更新里。
-        let window_handle = window.window_handle();
-        let workspace = cx.weak_entity();
-        plugins::set_session_opener(move |session_id, cx| {
-            let workspace = workspace.clone();
-            cx.defer(move |cx| {
-                let _ = cx.update_window(window_handle, |_root, window, cx| {
-                    let _ = workspace.update(cx, |workspace, cx| {
-                        workspace.request_notification_session_jump(session_id, window, cx);
-                    });
-                    window.activate_window();
-                });
-            });
-        });
-        // 客户端界面状态（侧栏开合和顺序、当前页、Dock 布局）存在本机，同步读，窗口一次成型。
+        // 客户端界面状态（侧栏顺序、当前页）存在本机，同步读，窗口一次成型。
         // 项目和会话属于运行时，随订阅首帧到，到了再恢复会话（见 apply_workspace_directory）。
         let ui = load_workspace_ui();
         let startup_active_session = ui.active_session;
@@ -2878,13 +2666,7 @@ impl Workspace {
                 .collect();
             space
         };
-        // 旧版开合动画曾把过渡中的接近零宽度误存为用户偏好；加载时按侧栏
-        // 可拖拽下限修复这类状态，避免下一次展开仍以错误宽度为目标。
-        let sidebar_w = ui
-            .sidebar_w
-            .unwrap_or(DEFAULT_SIDEBAR_WIDTH)
-            .max(MIN_SIDEBAR_WIDTH);
-        let sidebar_open = ui.sidebar_open.unwrap_or(true);
+        let shell_dock = workspace_shell::new_area(cx.weak_entity(), window, cx);
         let saved_active_session_id = ui.active_session_id.clone().filter(|id| !id.is_empty());
         let sessions: Vec<Session> = Vec::new();
         // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
@@ -2918,14 +2700,11 @@ impl Workspace {
             sidebar_section_heights: Default::default(),
             sidebar_section_weights: Default::default(),
             sidebar_split_drag: None,
-            sidebar_open,
-            sidebar_w,
-            shell_drag_sidebar_start: None,
-            shell_drag_tool_start: None,
-            shell_needs_save: false,
-            shell_pointer_down: false,
-            shell_gesture_sidebar_w: None,
-            shell_gesture_tool_w: None,
+            shell_dock,
+            shell_view: Default::default(),
+            layout: Default::default(),
+            layout_state_written: None,
+            _shell_dock_subs: Vec::new(),
             diff_comment_input: None,
             diff_body: None,
             commit_msg_inputs: HashMap::new(),
@@ -2984,7 +2763,7 @@ impl Workspace {
 
             git_status: HashMap::new(),
             git_repos: HashMap::new(),
-            git_repos_inflight: HashSet::new(),
+            git_repos_inflight: HashMap::new(),
             active_git_repo: None,
             git_repo_collapsed: HashSet::new(),
             git_status_generation: HashMap::new(),
@@ -2994,40 +2773,11 @@ impl Workspace {
             branches: HashMap::new(),
             branches_generation: HashMap::new(),
             branches_inflight: HashSet::new(),
-            watched_projects: HashSet::new(),
+            watches: HashSet::new(),
             git_autofetch_at: HashMap::new(),
-            session_list: HashMap::new(),
-            session_list_inflight: HashSet::new(),
-            session_list_invalidated: HashSet::new(),
-            history_agent_bindings: HashMap::new(),
-            history_filter: None,
-            _history_filter_sub: None,
-            session_detail: None,
-            delete_history_target: None,
-            history_detail_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(800.)),
-            session_detail_gen: 0,
-            history_agent: settings::HistorySourceKind::Conversation(
-                settings::ConversationAgentKind::Claude,
-            ),
-            history_profile: None,
-            history_project_root: None,
+            git_autofetch_running: false,
             launch_inputs: None,
             profile_inputs: None,
-            pi_model_editor: None,
-            pi_custom_provider_editor: None,
-            pi_auth_providers: None,
-            pi_login: None,
-            pi_auth_model_picker: None,
-            pi_auth_error: None,
-            pi_auth_show_all: false,
-            pi_mcp_login: None,
-            pi_mcp_pending_remove: None,
-            pi_mcp_error: None,
-            pi_configs: HashMap::new(),
-            pi_library: Default::default(),
-            pi_model_editor_error: None,
-            pi_plugin_pending_delete: None,
-            pi_plugin_error: None,
             panel_plugins: Default::default(),
             opacity_slider: None,
             ui_font_size_slider: None,
@@ -3059,7 +2809,8 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            capabilities_view: None,
+            plugin_project: None,
+            plugin_shown_views: HashSet::new(),
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_running_count: None,
@@ -3070,8 +2821,7 @@ impl Workspace {
             _rename_sub: None,
             relay_edit: None,
             repo_info: HashMap::new(),
-            repo_info_inflight: HashSet::new(),
-            repo_info_stale: HashSet::new(),
+            repo_info_inflight: HashMap::new(),
             dir_picker: None,
             project_repositories: None,
             discard_hunk_target: None,
@@ -3097,6 +2847,7 @@ impl Workspace {
             saved_sidebar_orders: workspace_persist::load_sidebar_orders(),
             _workspace_directories_sub: None,
             _runtime_hub_sub: None,
+            _host_events_sub: None,
             _agent_host_sub: None,
             _agent_hosts_sub: None,
             _provider_status_sub: None,
@@ -3155,12 +2906,21 @@ impl Workspace {
                 this.apply_received_workspace_directories(window, cx)
             }),
         );
-        ws.ensure_pi_library_runtime(cx);
         ws._runtime_hub_sub = Some(
             cx.observe_global_in::<crate::runtimes::RuntimeHub>(window, |this, _window, cx| {
                 this.sync_remote_spaces(cx)
             }),
         );
+        // 自带视图和插件登记在同一张视图注册表里，布局按 id 摆它们。先登记再订阅：
+        // 这几次登记不用重装布局，布局本来就还没装。
+        builtin_views::register(cx.weak_entity(), cx);
+        ws._host_events_sub = Some(ws.subscribe_host_events(window, cx));
+        ws._shell_dock_subs = workspace_layout::watch_shell_dock(&ws.shell_dock, window, cx);
+        // 装布局要用 `cx.entity()` 背后的工作台（自带视图画它），等它建好。
+        cx.defer_in(window, |this, window, cx| {
+            this.install_layout(window, cx);
+            this.sync_page_route(window, cx);
+        });
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -3177,7 +2937,7 @@ impl Workspace {
         ws._agent_hosts_sub =
             Some(cx.observe_global_in::<settings::AgentHosts>(window, |_, _, cx| cx.notify()));
         ws._provider_status_sub = Some(
-            cx.observe_global_in::<smelt_ui::provider_status_global::ProviderStatus>(
+            cx.observe_global_in::<smelt_app_state::provider_status_global::ProviderStatus>(
                 window,
                 |_, _, cx| cx.notify(),
             ),
@@ -3187,7 +2947,6 @@ impl Workspace {
                 this.schedule_visible_refresh(cx)
             }),
         );
-        ws.start_visible_data_watch(cx);
         // 首帧绘制前就把输入框和缓存任务备好。观察器只在之后的外观变化时再排一次。
         ws.refresh_visible_caches(window, cx);
         ws
@@ -3370,11 +3129,15 @@ impl Workspace {
     /// 重画。两条路径都只在会话露在工作台上的事实（见 `SessionFacts`）变了才
     /// 通知，变了就立刻通知，不靠定时合并：同一帧里的多次通知 GPUI 本来就只画一次。
     pub(crate) fn notify_if_session_facts_changed(&mut self, cx: &mut Context<Self>) {
-        let current = self
+        let current: Vec<SessionFacts> = self
             .sessions
             .iter()
             .map(|session| session.facts(cx))
             .collect();
+        // 会话目录变了（新会话、终端 cd 到别处）：侧栏要它的分支名，活动项目也可能跟着换。
+        if session_cwds_changed(&self.shown_session_facts, &current) {
+            self.schedule_visible_refresh(cx);
+        }
         if replace_changed_facts(&mut self.shown_session_facts, current) {
             cx.notify();
             self.arm_turn_clock(cx);
@@ -3425,97 +3188,8 @@ impl Render for Workspace {
         let shell_surface: Hsla = rgb(ui_theme::bg_rail()).into();
         let shell_padding = ui_theme::shell_padding();
 
-        let (animated_sidebar_w, animated_tool_w, sidebar_progress, tool_progress) =
-            self.shell_animated_spans(window, cx);
-        let sidebar_span = px(animated_sidebar_w);
-        let tool_span = px(animated_tool_w);
-        let max_guard = if !workspace_frame::traffic_lights_visible(window) {
-            48.0
-        } else {
-            128.0
-        };
-        let left_guard = px((max_guard - f32::from(sidebar_span)).max(0.0));
-        let shell_chrome = self.render_shared_right_chrome(
-            left_guard,
-            tool_span,
-            !workspace_frame::traffic_lights_visible(window),
-            cx,
-        );
-        // 外壳分栏拖动要在窗口级听按下、移动和松开：弹出菜单等元素会拿走焦点、停止事件
-        // 传播，只靠 Workspace 根节点收不全。在 paint 阶段注册窗口级监听。
-        let shell_pointer_bridge = {
-            let workspace = cx.entity().downgrade();
-            canvas(
-                |_, _, _| {},
-                move |_bounds, _, window, _cx| {
-                    let workspace_for_mouse = workspace.clone();
-                    window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
-                        if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-                            let _ = workspace_for_mouse.update(cx, |workspace, _cx| {
-                                if !workspace.shell_pointer_down {
-                                    workspace.shell_gesture_sidebar_w = Some(workspace.sidebar_w);
-                                    workspace.shell_gesture_tool_w = Some(workspace.tool_panel_w);
-                                }
-                                workspace.shell_pointer_down = true;
-                            });
-                        }
-                    });
-                    let workspace_for_move = workspace.clone();
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                        if !phase.bubble() || event.pressed_button != Some(MouseButton::Left) {
-                            return;
-                        }
-                        let viewport = window.viewport_size().width;
-                        let _ = workspace_for_move.update(cx, |workspace, cx| {
-                            let mouse_x = f32::from(event.position.x);
-                            let mut changed = false;
-                            if let Some((start_x, start_w)) = workspace.shell_drag_sidebar_start {
-                                let delta = mouse_x - start_x;
-                                let cap = workspace_shell::sidebar_cap(viewport);
-                                let new_w = (start_w + delta).clamp(0.0, cap);
-                                if (new_w - workspace.sidebar_w).abs() > 0.5 {
-                                    workspace.sidebar_w = new_w;
-                                    changed = true;
-                                }
-                            }
-                            if let Some((start_x, start_w)) = workspace.shell_drag_tool_start {
-                                let delta = start_x - mouse_x;
-                                let sidebar_display = if workspace.sidebar_open {
-                                    workspace.sidebar_w
-                                } else {
-                                    0.0
-                                };
-                                let cap = workspace_shell::tool_cap(viewport, sidebar_display);
-                                let new_w = (start_w + delta).clamp(0.0, cap);
-                                if (new_w - workspace.tool_panel_w).abs() > 0.5 {
-                                    workspace.tool_panel_w = new_w;
-                                    changed = true;
-                                }
-                            }
-                            if changed {
-                                cx.notify();
-                            }
-                        });
-                    });
-                    let workspace_for_up = workspace;
-                    window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-                        let viewport = window.viewport_size().width;
-                        let _ = workspace_for_up.update(cx, |workspace, cx| {
-                            workspace.commit_shell_pointer(window, viewport, cx);
-                        });
-                    });
-                },
-            )
-            .absolute()
-            .inset_0()
-            .into_any_element()
-        };
-
         // 壳层走界面字体（默认系统 UI）；终端/diff/代码块各自绑代码字体。
-        let frame = div()
+        div()
             .relative()
             .flex()
             .flex_col()
@@ -3533,265 +3207,41 @@ impl Render for Workspace {
                 self.files_view_visible(),
                 self.git_changes_shown(),
             ))
-            .on_action(cx.listener(|this, _: &Quit, window, cx| {
-                if this.quit_requested {
-                    return;
-                }
-                this.stop_prompt_names.clear();
-                #[cfg(any(target_os = "macos", windows))]
-                if !matches!(this.update_status, updater::UpdateStatus::Applying { .. })
-                    && this.update_status.ready_update().is_some()
+            // 快捷键、应用菜单、右键菜单执行命令都走这里，见 `workspace_commands`。
+            // 命令眼下不适用（`Pass`）就交给下一条绑定。
+            .on_action(|action: &smelt_plugin_api::RunCommand, window, cx| {
+                if smelt_plugin_api::invoke(&action.command, &action.args, window, cx)
+                    == smelt_plugin_api::Handled::Pass
                 {
-                    // 有待装更新时退出会换包，macOS 还会停掉守护。没有进行中的会话、或者
-                    // 不停守护，就直接走；否则必须先确认，不能把正在输出的对话静默杀掉。
-                    let names = this.busy_work_names(cx);
-                    if !updater::INSTALL_STOPS_LOCAL_DAEMON
-                        || !daemon_restart_prompt::should_confirm(&names)
-                    {
-                        if let Some(update) = this.update_status.ready_update().cloned() {
-                            this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
-                        }
-                        return;
-                    }
-                    this.stop_prompt_names = names;
-                }
-                this.begin_main_modal_focus(window, cx);
-                this.show_quit_confirm = true;
-                cx.notify();
-            }))
-            // Cmd+, / 应用菜单「设置…」：跟侧栏「设置」同一个入口，见 `open_settings`。
-            .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| {
-                this.open_settings(cx);
-            }))
-            // Cmd+↑ / Cmd+↓：上/下一个会话（按侧栏视觉顺序）。
-            .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
-                this.cycle_session(-1, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NextSession, window, cx| {
-                this.cycle_session(1, window, cx);
-            }));
-        // 应用菜单「检查更新…」：顺手发起一次检查，再把设置窗口开到「更新」页看进度。
-        // 更新器只在 macOS 上存在（设计文档 D4）。
-        #[cfg(target_os = "macos")]
-        let frame = frame.on_action(cx.listener(|this, _: &CheckForUpdate, _window, cx| {
-            if this.update_status.can_check() || this.update_status.can_retry_recovery() {
-                this.check_or_recover_update(false, cx);
-            }
-            this.open_settings_section(settings::SettingsSection::app_update(), cx);
-        }));
-        // 应用菜单「帮助」：反馈渠道和帮助文档，链接打包时可换（见 settings::FEEDBACK_URL）。
-        frame.on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
-                cx.open_url(settings::FEEDBACK_URL);
-            }))
-            .on_action(cx.listener(|_this, _: &OpenDocs, _window, cx| {
-                cx.open_url(settings::DOCS_URL);
-            }))
-            // 文件内容视图右键菜单里的「发送选中内容到会话」，见 send_open_file_selection。
-            .on_action(
-                cx.listener(|this, _: &SendSelectionToTerminal, window, cx| {
-                    this.send_open_file_selection(window, cx);
-                }),
-            )
-            // 左右侧边栏切换（全局 Action，焦点在子组件或输入框内也能响应）
-            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
-                this.toggle_sidebar(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleToolPanel, window, cx| {
-                this.toggle_tool_panel(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
-                this.focus_sidebar(window, cx);
-            }))
-            // ⌘N：跟侧栏最顶的「新对话」同一个动作。
-            .on_action(cx.listener(|this, _: &NewConversation, window, cx| {
-                this.begin_new_conversation(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
-                if this.palette.is_some() {
-                    this.close_palette(window, cx);
-                } else {
-                    this.open_palette(window, cx);
-                }
-            }))
-            // 切当前会话内的活动 pane（分屏）。编辑器里的 Outdent/Indent 绑在
-            // 更深的 Input 上，焦点在输入框时由它们接手。
-            .on_action(cx.listener(|this, _: &CyclePanePrev, window, cx| {
-                this.cycle_pane(-1, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &CyclePaneNext, window, cx| {
-                this.cycle_pane(1, window, cx);
-            }))
-            // Cmd+1~9：按侧栏视觉顺序（各项目分组依次铺平）跳到第 N 个会话。
-            .on_action(cx.listener(|this, action: &ActivateSession, window, cx| {
-                let visible = this.sidebar_session_order(cx);
-                if let Some(&ix) = visible.get(action.index) {
-                    this.activate(ix, window, cx);
-                }
-            }))
-            // Cmd+D 右侧并排 / Cmd+Shift+D 下方堆叠。
-            .on_action(cx.listener(|this, _: &SplitBeside, _window, cx| {
-                this.split_active(Axis::Horizontal, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SplitBelow, _window, cx| {
-                this.split_active(Axis::Vertical, cx);
-            }))
-            // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）。
-            .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
-                this.close_active(window, cx);
-            }))
-            // Cmd+S：保存 Files 里打开的文件。键位只在 Files context 上，两种显示方式都算。
-            .on_action(cx.listener(|this, _: &SaveFile, _window, cx| {
-                this.save_open_file(cx);
-            }))
-            // Cmd+Shift+F 切换调试 HUD（帧耗时、GPU/CPU/内存）。
-            // 编辑器把同一组合键绑成 Replace，更深的 Input 优先。
-            .on_action(cx.listener(|this, _: &ToggleDebugHud, _window, cx| {
-                this.debug_hud = !this.debug_hud;
-                cx.notify();
-            }))
-            // F7 / Shift+F7：改动块之间跳。终端网格会把这两键编码进 PTY，
-            // 网格聚焦时让出，交给终端自己的 on_key_down。
-            .on_action(cx.listener(|this, _: &NextHunk, window, cx| {
-                if this.terminal_grid_focused(window, cx) {
                     cx.propagate();
-                    return;
                 }
-                this.jump_hunk(true, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PrevHunk, window, cx| {
-                if this.terminal_grid_focused(window, cx) {
-                    cx.propagate();
-                    return;
-                }
-                this.jump_hunk(false, cx);
-            }))
-            // Esc：先关工作区弹层；没有弹层时收掉 session 舞台覆盖。
-            // 终端网格聚焦时 Esc 属于 PTY（vim 等），不关覆盖页。
+            })
+            // Esc：先关工作区弹层；没有弹层时还原放大的面板组。
+            // 终端网格聚焦时 Esc 属于 PTY（vim 等），不还原。
             .on_action(cx.listener(|this, _: &DismissWorkspace, window, cx| {
                 if this.dismiss_workspace_overlay(window, cx) {
                     return;
                 }
-                if !this.terminal_grid_focused(window, cx)
-                    && this.active_tab().is_session()
-                    && this.stage_cover.is_some()
-                {
-                    this.set_stage_cover(None, window, cx);
+                if !this.terminal_grid_focused(window, cx) && this.unzoom_layout(window, cx) {
                     return;
                 }
                 cx.propagate();
             }))
-            // 主体先绘制；透明标题栏随后覆盖在顶部 safe area 上，避免面板背景
-            // 把铃铛和 Tool Panel 开关压成若隐若现的轮廓。
+            // 整个工作台是一块 Dock，会话列表、舞台、文件这些都是里面的面板。
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .p(shell_padding)
                     .bg(shell_surface)
-                    .child(
-                        div()
-                            .w_0()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex()
-                            .relative()
-                            .child(self.render_shell_columns(
-                                animated_sidebar_w,
-                                animated_tool_w,
-                                sidebar_progress,
-                                tool_progress,
-                                window,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .left(sidebar_span)
-                                    .right_0()
-                                    // 停靠把手的发丝贴在分栏边上，从窗口顶画到窗口底。
-                                    // 顶带这两像素盖成壳的底色，分栏从顶带下面才看得见。
-                                    // 盖层不接鼠标，拖分隔条仍落在原来的把手上。
-                                    .children(
-                                        (sidebar_span > px(0.))
-                                            .then(|| seam_cap(shell_surface).left(px(-1.))),
-                                    )
-                                    .children(
-                                        (tool_span > px(0.)).then(|| {
-                                            seam_cap(shell_surface).right(tool_span - px(1.))
-                                        }),
-                                    )
-                                    .child(shell_chrome),
-                            ),
-                    ),
-            )
-            // 浮层只留左侧栏开关。窗口开关在右侧共用顶栏，跟 tab 同一条 flex。
-            .child(
-                div()
-                    .absolute()
-                    // 跟主体内的共用顶栏使用同一个纵向原点；外壳内边距若以后
-                    // 恢复，左侧开关与原生交通灯都会一起移动。
-                    .top(shell_padding)
-                    .left_0()
-                    .right_0()
-                    .h(workspace_frame::TOP_BAR_HEIGHT)
-                    .flex()
-                    .items_center()
-                    .child(
-                        // 这一条浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
-                        div()
-                            // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
-                            // 隐藏红绿灯、Windows 用系统标题栏不在客户区画红绿灯，
-                            // 这 92px 就全空了，按钮回到窗口左侧
-                            // 18px 的统一视觉基准。纵向不再手算 top：由共用顶栏的
-                            // flex 居中，UI 字号改变、按钮尺寸随 rem 缩放时也不会偏。
-                            .ml(px(if workspace_frame::traffic_lights_visible(window) {
-                                92.
-                            } else {
-                                18.
-                            }))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(
-                                smelt_ui::Button::new("sidebar-toggle")
-                                    .quiet()
-                                    .compact()
-                                    // 跟右侧两个开关同一套「细线 ↔ 实心色块」区分开合：
-                                    // 收起态用 bundled 的细线 PanelLeft，展开态换成
-                                    // panel-left-filled 实心色块，不再用带箭头的
-                                    // -open/-close 变体（对齐 Codex 工具栏风格）。
-                                    .icon(if self.sidebar_open {
-                                        Icon::empty().path("smelt-icons/panel-left-filled.svg")
-                                    } else {
-                                        Icon::new(IconName::PanelLeft)
-                                    })
-                                    .accessibility_label("切换左侧栏")
-                                    .tooltip_with_action("切换左侧栏", &ToggleSidebar, None)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_sidebar(window, cx);
-                                    })),
-                            ),
-                    )
-                    // 中间点穿。窗口开关在右侧共用顶栏里，不在这条浮层。
-                    .child(div().flex_1().min_w_0()),
+                    .child(self.shell_dock.clone())
+                    .children(self.render_dock_toggles(shell_padding, window)),
             )
             // 确认框、命令面板和图片预览都留在当前 Workspace 的 GPUI 树内。
             .child(self.render_overlay_layers(window, cx))
-            .child(shell_pointer_bridge)
     }
-}
-
-/// 盖住顶带里的 1px 停靠发丝，并向分栏两侧各探 1px，避免像素对齐后露出一条缝。
-/// 不接鼠标：拖分隔条仍命中下面的把手。
-fn seam_cap(surface: Hsla) -> Div {
-    div()
-        .absolute()
-        .top_0()
-        .w(px(2.))
-        .h(workspace_frame::TOP_BAR_HEIGHT)
-        .bg(surface)
 }
 
 /// 居中空状态/加载中占位视图（供文件树、Git 提交列表、历史会话等在无数据或加载时复用）。
@@ -4027,12 +3477,6 @@ const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
     ("custom", include_bytes!("../assets/icons/agent-custom.svg")),
 ];
 
-/// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
-/// 删除/移除统一用这枚 Lucide trash-2。
-pub(crate) fn trash_icon() -> Icon {
-    Icon::empty().path("smelt-icons/trash.svg")
-}
-
 /// `smelt-icons/agent-<id>.svg` → 图标字节；不是 agent 图标路径返回 None。
 fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
     let id = path
@@ -4044,41 +3488,15 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
-// 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
-// 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
-gpui_kit_assets::icon_assets!(
-    LucideExtras,
-    [
-        Archive,
-        BellOff,
-        Clock,
-        Coffee,
-        Keyboard,
-        Laptop,
-        LaptopMinimal,
-        MessageSquare,
-        Monitor,
-        Pin,
-        Puzzle,
-        RefreshCw,
-        RotateCw,
-        Server,
-        SlidersHorizontal,
-        Webhook,
-        Workflow,
-        Wrench,
-    ]
-);
-
+// 图标用组件库的全套目录（`AllAssets`，Lucide 全部 + 组件库自己的），不只打包组件用到的
+// 那一百来个：插件（包括用户写的 JS 插件）按 Lucide 名字取图标，只编一部分进来，没编进来
+// 的图标位置就空着。全套 SVG 约 0.7 MB。
 struct SmeltAssets;
 
 impl gpui::AssetSource for SmeltAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         if let Some(bytes) = agent_icon_svg(path) {
             return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
-        }
-        if let Some(bytes) = LucideExtras.load(path)? {
-            return Ok(Some(bytes));
         }
         if path == "smelt-icons/git-branch.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(
@@ -4110,27 +3528,23 @@ impl gpui::AssetSource for SmeltAssets {
                 include_bytes!("../assets/icons/monitor.svg").as_slice(),
             )));
         }
-        // panel-right-filled / panel-left-filled：bundled 的 panel-right /
-        // panel-left 只是一根细分隔线，18px 图标下开合两态区分度太低；这两枚在
-        // 分隔线的另一侧加了实心色块，开启态一眼可辨，跟 Codex 工具栏那种「大色块
-        // 表示已展开」的简洁风格对齐，不用带箭头的 -open/-close 变体。
-        if path == "smelt-icons/panel-right-filled.svg" {
-            return Ok(Some(std::borrow::Cow::Borrowed(
-                include_bytes!("../assets/icons/panel-right-filled.svg").as_slice(),
-            )));
-        }
-        // panel-left-filled：左侧栏开关的开启态，跟 panel-right-filled 同一套
-        // 「细线外框 + 实心色块」风格（右侧两个开关已统一，左侧这枚补上对齐）。
+        // 停靠区开合按钮的展开态：分隔线外侧加实心色块。自带的 panel-left / panel-right
+        // 只有一根细线，18px 下开合两态分不清。
         if path == "smelt-icons/panel-left-filled.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(
                 include_bytes!("../assets/icons/panel-left-filled.svg").as_slice(),
             )));
         }
-        gpui_kit_assets::Assets.load(path)
+        if path == "smelt-icons/panel-right-filled.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-right-filled.svg").as_slice(),
+            )));
+        }
+        gpui_kit_assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-        gpui_kit_assets::Assets.list(path)
+        gpui_kit_assets::AllAssets.list(path)
     }
 }
 
@@ -4244,11 +3658,11 @@ fn main() {
                 ),
             ])
             .expect("加载内嵌字体失败");
-        // 快捷键（出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。
-        keymap::init(cx);
-
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
+        // 主题先登记再恢复外观，插件主题在首帧前即可生效。
+        smelt_themes::register(cx);
+        plugins::register_initial_themes(cx);
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         cx.set_global(appearance.clone());
@@ -4279,7 +3693,7 @@ fn main() {
         cx.set_global(WorkspaceDirectoriesGlobal::default());
         // provider 账户状态（额度 + Pi 模型目录版本）：刷新循环写，侧栏和对话
         // 模型菜单读。必须在建 Workspace 之前装好，否则启动首查无处可写。
-        cx.set_global(smelt_ui::provider_status_global::ProviderStatus::default());
+        cx.set_global(smelt_app_state::provider_status_global::ProviderStatus::default());
         let attention = AttentionGlobal::default();
         cx.set_global(attention);
         let current_ws_for_attention = current_ws.clone();
@@ -4348,9 +3762,56 @@ fn main() {
         });
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
+        // 插件要读机器列表，在 RuntimeHub 之后、开主窗口之前装。
+        plugin_host::install(current_ws.clone(), cx);
+        // 快捷键（命令的出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。要订阅宿主事件，
+        // 在插件宿主之后装；命令随后由工作台和插件登记，登记一次重装一次键表。
+        keymap::init(cx);
         // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求这些投影
         // 目前只认本机；会话状态、项目文件变化、智能体记忆变化各运行时都有。
-        let daemon_state_rx = runtime_events::start(cx);
+        let runtime_events::RuntimeEventReceivers {
+            states: daemon_state_rx,
+            topics: topic_rx,
+        } = runtime_events::start(cx);
+        // 单独订阅的话题。积压丢了事件（`Lagged`）就当作都变过。
+        let current_ws_for_topics = current_ws.clone();
+        cx.spawn(async move |cx| {
+            use smelt_app_state::provider_status_global::ProviderStatus;
+            use smelt_client::daemon_state::{CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage};
+            while let Ok((runtime, message)) = topic_rx.recv().await {
+                let topics: Vec<String> = match message {
+                    TopicMessage::Event { topic, .. } => vec![topic],
+                    TopicMessage::Lagged => runtime_events::SEPARATE_TOPICS
+                        .iter()
+                        .map(|topic| topic.to_string())
+                        .collect(),
+                };
+                for topic in topics {
+                    // 宿主自己（会话、智能体编辑器）还要管的 Pi 配置变化。
+                    if topic == CORE_TOPIC_PI_CONFIG_CHANGED {
+                        // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的
+                        // Pi 目录走。
+                        if runtime == RuntimeKey::Local {
+                            cx.update(ProviderStatus::bump_pi_catalog);
+                        }
+                        // 删插件时运行时顺带清掉了智能体的勾选。
+                        cx.update(|cx| settings::reload_agent_host(&runtime, cx));
+                        if let Some(ws) = current_workspace(&current_ws_for_topics) {
+                            let _ = ws
+                                .update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
+                        }
+                    }
+                    let machine = runtime.clone();
+                    cx.update(|cx| {
+                        smelt_plugin_api::emit(
+                            smelt_plugin_api::HostEvent::RuntimeTopic { machine, topic },
+                            cx,
+                        )
+                    });
+                }
+            }
+        })
+        .detach();
         let current_ws_for_events = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok((runtime, event)) = daemon_state_rx.recv().await {
@@ -4365,16 +3826,6 @@ fn main() {
                         });
                     }
                     continue;
-                }
-                // 运行时断开（换了进程或网络断了），它替我们建的项目监听也没了：清掉这台
-                // 机器的，下次刷新重新登记。
-                if matches!(event, terminal::DaemonStateEvent::Disconnected)
-                    && let Some(ws) = current_workspace(&current_ws_for_events)
-                {
-                    let _ = ws.update(cx, |ws, cx| {
-                        ws.forget_project_watches(&runtime);
-                        ws.schedule_visible_refresh(cx);
-                    });
                 }
                 // 项目文件在报事件的那台机器上。
                 if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
@@ -4404,7 +3855,18 @@ fn main() {
                         }
                         terminal::DaemonStateEvent::Snapshot { .. } => {
                             let _ = ws.update(cx, |ws, cx| {
-                                ws.on_runtime_resubscribed(&runtime, cx)
+                                ws.on_runtime_resubscribed(&runtime, cx);
+                                // 项目监听同理；断开期间的文件、分支变化也收不到，缓存全部标旧。
+                                ws.on_runtime_resubscribed_git(&runtime, cx);
+                                // 断开期间 Pi 配置可能变过，单独订阅的事件补不回来。
+                                ws.on_agent_pi_config_changed(&runtime, cx);
+                                settings::reload_agent_host(&runtime, cx);
+                            });
+                            cx.update(|cx| {
+                                smelt_plugin_api::emit(
+                                    smelt_plugin_api::HostEvent::Reconnected(runtime.clone()),
+                                    cx,
+                                )
                             });
                         }
                         _ => {}
@@ -4435,10 +3897,43 @@ fn main() {
                     cx.update(|cx| DaemonStates::set_progress(&runtime, session_id, *progress, cx));
                     continue;
                 }
+                // v7 旧运行时仍用无回执的外观广播；本机桌面继续按原协议处理。
                 if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
                     if is_local {
-                        let settings = settings.clone();
-                        cx.update(|cx| settings::apply_requested_appearance(&settings, cx));
+                        let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
+                        if let Err(error) = result {
+                            crate::status_item::notify_error(format!("外观修改失败：{error}"));
+                        }
+                    }
+                    continue;
+                }
+                if let terminal::DaemonStateEvent::AppearanceApplyRequested { request_id, settings } = &event {
+                    if is_local {
+                        let result = cx.update(|cx| settings::apply_requested_appearance(settings, cx));
+                        let outcome = match result {
+                            Ok(()) => smelt_event_protocol::AppearanceApplyOutcome::Applied,
+                            Err(smelt_model::appearance_settings::SettingsError::Invalid(message)) => {
+                                smelt_event_protocol::AppearanceApplyOutcome::Invalid { message }
+                            }
+                            Err(smelt_model::appearance_settings::SettingsError::Store(message)) => {
+                                smelt_event_protocol::AppearanceApplyOutcome::Failed { message }
+                            }
+                        };
+                        let receipt = smelt_event_protocol::AppearanceApplyReceipt {
+                            request_id: request_id.clone(),
+                            outcome,
+                        };
+                        cx.background_executor().spawn(async move {
+                            let request = serde_json::json!({
+                                "op": smelt_runtime_client::protocol::daemon::DaemonOperation::AppearanceReceipt,
+                                "receipt": receipt,
+                            });
+                            if let Err(error) = smelt_client::daemon_state::local_runtime().request_ok(
+                                &request, std::time::Duration::from_secs(4),
+                            ) {
+                                eprintln!("[appearance] 发送外观修改回执失败：{error}");
+                            }
+                        }).detach();
                     }
                     continue;
                 }
@@ -4489,6 +3984,7 @@ fn main() {
                         terminal::DaemonStateEvent::Removed { .. } => {}
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
@@ -4543,6 +4039,7 @@ fn main() {
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::Automations(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceApplyRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::AgentMemoryChanged { .. } => {}
@@ -4589,7 +4086,7 @@ fn main() {
         let current_ws_quit = current_ws.clone();
         let quit_subscription = cx.on_app_quit(move |cx| {
             // 插件要在这里释放，别留到线程局部变量析构时（见 `plugins::shutdown`）。
-            plugins::shutdown();
+            plugins::shutdown(cx);
             let flush_done = current_ws_quit
                 .borrow()
                 .as_ref()
