@@ -400,11 +400,35 @@ impl OverviewVisibility {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct WorktreeStatusSummary {
+    changed: bool,
+    ahead: u32,
+    behind: u32,
+}
+
+fn summarize_statuses(
+    statuses: &[&crate::GitStatusData],
+    repository_count: usize,
+) -> Option<WorktreeStatusSummary> {
+    if statuses.is_empty()
+        || statuses.len() != repository_count
+        || statuses.iter().any(|status| !status.ok)
+    {
+        return None;
+    }
+    Some(WorktreeStatusSummary {
+        changed: statuses.iter().any(|status| !status.files.is_empty()),
+        ahead: statuses.iter().map(|status| status.ahead).sum(),
+        behind: statuses.iter().map(|status| status.behind).sum(),
+    })
+}
+
 fn status_summary(
     workspace: &Workspace,
     project: &ProjectRef,
     workset: &WorkspaceWorkset,
-) -> String {
+) -> Option<WorktreeStatusSummary> {
     let statuses = workset
         .repositories
         .iter()
@@ -418,26 +442,7 @@ fn status_summary(
                 .map(|(_, status)| status)
         })
         .collect::<Vec<_>>();
-    if statuses.is_empty()
-        || statuses.len() != workset.repositories.len()
-        || statuses.iter().any(|status| !status.ok)
-    {
-        return "状态未知".into();
-    }
-    let mut label = if statuses.iter().any(|status| !status.files.is_empty()) {
-        "脏".to_string()
-    } else {
-        "净".to_string()
-    };
-    let ahead = statuses.iter().map(|status| status.ahead).sum::<u32>();
-    let behind = statuses.iter().map(|status| status.behind).sum::<u32>();
-    if ahead > 0 {
-        label.push_str(&format!(" ↑{ahead}"));
-    }
-    if behind > 0 {
-        label.push_str(&format!(" ↓{behind}"));
-    }
-    label
+    summarize_statuses(&statuses, workset.repositories.len())
 }
 
 #[derive(IntoElement)]
@@ -741,6 +746,32 @@ impl Render for WorkspaceOverview {
                 let summary = repository_summary(&workset);
                 let full_summary = summary.clone();
                 let branch = workset.branch.clone();
+                let status = match status {
+                    Some(status) => {
+                        let (icon, description) = if status.changed {
+                            (
+                                Icon::empty().path("smelt-icons/square-pen.svg"),
+                                "有未提交修改或未跟踪文件",
+                            )
+                        } else {
+                            (Icon::new(IconName::CircleCheck), "没有未提交修改")
+                        };
+                        div()
+                            .id("workspace-git-status")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .aria_label(description)
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(description).build(window, cx)
+                            })
+                            .child(icon.size(px(13.)).flex_shrink_0())
+                            .children((status.ahead > 0).then(|| format!("↑{}", status.ahead)))
+                            .children((status.behind > 0).then(|| format!("↓{}", status.behind)))
+                            .into_any_element()
+                    }
+                    None => div().child("状态未知").into_any_element(),
+                };
                 content = content.child(
                     div()
                         .id(workset_element_id(
@@ -783,10 +814,6 @@ impl Render for WorkspaceOverview {
                                 .gap_1()
                                 .text_xs()
                                 .text_color(rgb(ui_theme::text_muted()))
-                                .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(branch.clone())
-                                        .build(window, cx)
-                                })
                                 .child(
                                     Icon::empty()
                                         .path("smelt-icons/git-branch.svg")
@@ -795,8 +822,13 @@ impl Render for WorkspaceOverview {
                                 )
                                 .child(
                                     div()
+                                        .id("workspace-branch-label")
                                         .flex_1()
                                         .min_w_0()
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(branch.clone())
+                                                .build(window, cx)
+                                        })
                                         .child(truncated_line(workset.branch)),
                                 )
                                 .child(status),
@@ -812,12 +844,49 @@ impl Render for WorkspaceOverview {
 #[cfg(test)]
 mod tests {
     use super::{
-        OverviewVisibility, ProjectSessionRow, overview_view, project_session_rows,
-        project_worksets, repository_summary,
+        OverviewVisibility, ProjectSessionRow, WorktreeStatusSummary, overview_view,
+        project_session_rows, project_worksets, repository_summary, summarize_statuses,
     };
     use gpui::{App, Context, Entity, IntoElement, Render, RenderOnce, Subscription, Window, div};
     use smelt_model::workspace_directory::{WorkspaceWorkset, WorkspaceWorksetRepository};
     use std::collections::HashSet;
+
+    #[test]
+    fn worktree_status_summarizes_changes_and_preserves_sync_counts() {
+        let clean = crate::GitStatusData {
+            ok: true,
+            ahead: 2,
+            ..Default::default()
+        };
+        let changed = crate::GitStatusData {
+            ok: true,
+            behind: 3,
+            files: vec![("??".into(), "new-file".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            summarize_statuses(&[&clean], 1),
+            Some(WorktreeStatusSummary {
+                changed: false,
+                ahead: 2,
+                behind: 0,
+            })
+        );
+        assert_eq!(
+            summarize_statuses(&[&clean, &changed], 2),
+            Some(WorktreeStatusSummary {
+                changed: true,
+                ahead: 2,
+                behind: 3,
+            })
+        );
+        assert_eq!(summarize_statuses(&[], 0), None);
+        assert_eq!(summarize_statuses(&[&clean], 2), None);
+        assert_eq!(
+            summarize_statuses(&[&crate::GitStatusData::default()], 1),
+            None
+        );
+    }
 
     struct RefreshHost {
         refreshes: std::rc::Rc<std::cell::Cell<usize>>,
