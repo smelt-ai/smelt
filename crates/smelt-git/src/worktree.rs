@@ -6,6 +6,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use smelt_core::fs::{FileSystem as _, LocalFs};
+
 use crate::{GitOutput, run_git};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,12 +94,15 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
         return Err(WorktreeError::new("分支名不能为空或包含首尾空格"));
     }
 
-    let project_root = fs::canonicalize(&request.project_root).map_err(|error| {
-        WorktreeError::new(format!(
-            "无法解析项目目录 {}：{error}",
-            request.project_root.display()
-        ))
-    })?;
+    // Keep Windows verbatim prefixes out of paths passed to Git and compared with its output.
+    let project_root = LocalFs
+        .canonicalize(&request.project_root)
+        .map_err(|error| {
+            WorktreeError::new(format!(
+                "无法解析项目目录 {}：{error}",
+                request.project_root.display()
+            ))
+        })?;
     crate::project_repository::exclude_managed_directory(&project_root, "worktrees")
         .map_err(WorktreeError::new)?;
 
@@ -125,7 +130,7 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
                 repository.name
             )));
         }
-        let root = fs::canonicalize(&repository.root).map_err(|error| {
+        let root = LocalFs.canonicalize(&repository.root).map_err(|error| {
             WorktreeError::new(format!(
                 "无法解析仓库 {}（{}）：{error}",
                 repository.name,
@@ -144,12 +149,14 @@ pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> 
                 repository.name
             ))
         })?;
-        let git_root = fs::canonicalize(top.stdout_str().trim()).map_err(|error| {
-            WorktreeError::new(format!(
-                "仓库 {} 返回了无效的 Git 根目录：{error}",
-                repository.name
-            ))
-        })?;
+        let git_root = LocalFs
+            .canonicalize(Path::new(top.stdout_str().trim()))
+            .map_err(|error| {
+                WorktreeError::new(format!(
+                    "仓库 {} 返回了无效的 Git 根目录：{error}",
+                    repository.name
+                ))
+            })?;
         if git_root != root {
             return Err(WorktreeError::new(format!(
                 "{} 不是仓库根目录（Git 根目录是 {}）",

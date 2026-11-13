@@ -128,13 +128,31 @@ fn creates_each_selected_repo_on_the_shared_prefixed_branch() {
             "feat/workspace-session-binding\n"
         );
         assert_eq!(
-            repository.worktree,
+            fs::canonicalize(&repository.worktree).unwrap(),
             fs::canonicalize(project)
                 .unwrap()
                 .join("worktrees/workspace-session-binding")
                 .join(&repository.name)
         );
     }
+}
+
+#[test]
+fn canonicalized_paths_support_creation_rename_and_finish() {
+    let temp = tempfile::Builder::new()
+        .prefix("smelt worktree ")
+        .tempdir()
+        .unwrap();
+    let mut repository = repo(temp.path(), "api");
+    repository.root = fs::canonicalize(&repository.root).unwrap();
+    let project = fs::canonicalize(temp.path()).unwrap();
+
+    let workset = create_workset(request(&project, vec![repository])).unwrap();
+    let renamed = rename_workset(&workset, "renamed task").unwrap();
+    assert!(renamed.repositories[0].worktree.join("seed.txt").exists());
+
+    finish_workset(&renamed).unwrap();
+    assert!(!project.join("worktrees/renamed task").exists());
 }
 
 #[test]
