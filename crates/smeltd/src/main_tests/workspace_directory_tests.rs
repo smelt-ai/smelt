@@ -267,6 +267,248 @@ fn archiving_preserves_the_record_and_restoring_publishes_it_again() {
 }
 
 #[test]
+fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let project_root = temp.dir.join("project").to_string_lossy().into_owned();
+    let repository_root = temp.dir.join("repository");
+    init_repository(&repository_root);
+    temp.store
+        .create_workspace_workset(&smelt_store::WorkspaceWorksetRecord {
+            id: "workset-1".into(),
+            project_root: project_root.clone(),
+            task: "task".into(),
+            branch: "feat/task".into(),
+            position: 0,
+            repositories: vec![smelt_store::WorkspaceWorksetRepositoryRecord {
+                name: "repo".into(),
+                root: repository_root.to_string_lossy().into_owned(),
+                worktree: format!("{project_root}/worktrees/task/repo"),
+                base_ref: "HEAD".into(),
+                branch_created: false,
+                position: 0,
+            }],
+        })
+        .unwrap();
+    let mut conversation = terminal_conversation();
+    conversation.workset_id = Some("workset-1".into());
+    conversation.terminals[0].cwd = Some(format!("{project_root}/worktrees/task"));
+    workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
+    let active_error = crate::workset_control::finish(
+        &temp.store,
+        smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
+            workset_id: "workset-1".into(),
+        },
+        &event_hub,
+    )
+    .unwrap_err();
+    assert!(active_error.message.contains("未归档会话"));
+    temp.store
+        .set_workspace_conversation_archived(&conversation.id, Some(1))
+        .unwrap();
+
+    let missing_root = workspace_directory::archive_conversation(
+        &temp.store,
+        &conversation.id,
+        false,
+        &new_sessions(),
+        &new_acp_sessions(),
+        &new_test_automation_store(),
+        &event_hub,
+    )
+    .unwrap_err();
+    assert!(missing_root.message.contains("工作树"));
+    crate::workset_control::finish(
+        &temp.store,
+        smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
+            workset_id: "workset-1".into(),
+        },
+        &event_hub,
+    )
+    .unwrap();
+    let directory = workspace_catalog::directory_on(&temp.store).unwrap();
+    assert!(directory.worksets.is_empty());
+    assert_eq!(directory.conversations.len(), 1);
+    assert!(directory.conversations[0].archived_at.is_some());
+    assert_eq!(directory.conversations[0].workset_id, None);
+    assert_eq!(
+        directory.conversations[0].closed_workset_root.as_deref(),
+        Some(format!("{project_root}/worktrees/task").as_str())
+    );
+    assert_eq!(directory.conversations[0].terminals, conversation.terminals);
+
+    let error = workspace_directory::archive_conversation(
+        &temp.store,
+        &conversation.id,
+        false,
+        &new_sessions(),
+        &new_acp_sessions(),
+        &new_test_automation_store(),
+        &event_hub,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("工作树"));
+    assert!(
+        workspace_catalog::directory_on(&temp.store)
+            .unwrap()
+            .conversations[0]
+            .archived_at
+            .is_some()
+    );
+    let mut stale = conversation.clone();
+    stale.terminals[0].cwd = Some("/wrong-directory".into());
+    assert!(workspace_directory::update_conversation(&temp.store, &stale, &event_hub).is_err());
+    assert_eq!(
+        workspace_catalog::directory_on(&temp.store)
+            .unwrap()
+            .conversations[0]
+            .terminals,
+        conversation.terminals
+    );
+}
+
+#[test]
+fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let project = temp.dir.join("project");
+    let repository = temp.dir.join("repository");
+    init_repository(&repository);
+    let target_root = project.join("worktrees/target");
+    std::fs::create_dir_all(&target_root).unwrap();
+    let record = |id: &str, task: &str| smelt_store::WorkspaceWorksetRecord {
+        id: id.into(),
+        project_root: project.to_string_lossy().into_owned(),
+        task: task.into(),
+        branch: format!("feat/{task}"),
+        position: if task == "old" { 0 } else { 1 },
+        repositories: vec![smelt_store::WorkspaceWorksetRepositoryRecord {
+            name: "repo".into(),
+            root: repository.to_string_lossy().into_owned(),
+            worktree: project
+                .join("worktrees")
+                .join(task)
+                .join("repo")
+                .to_string_lossy()
+                .into_owned(),
+            base_ref: "HEAD".into(),
+            branch_created: false,
+            position: 0,
+        }],
+    };
+    temp.store
+        .create_workspace_workset(&record("old", "old"))
+        .unwrap();
+    temp.store
+        .create_workspace_workset(&record("target", "target"))
+        .unwrap();
+    let mut conversation = terminal_conversation();
+    conversation.workset_id = Some("old".into());
+    conversation.terminals[0].cwd =
+        Some(project.join("worktrees/old").to_string_lossy().into_owned());
+    workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
+    let acp = WorkspaceConversation {
+        id: "acp-archive".into(),
+        workset_id: Some("old".into()),
+        acp: Some(smelt_core::workspace_directory::WorkspaceAcp {
+            sid: "acp-session".into(),
+            agent: "pi".into(),
+            cwd: conversation.terminals[0].cwd.clone(),
+            history_session_id: Some("provider-history".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    workspace_directory::create_conversation(&temp.store, &acp, &event_hub).unwrap();
+    temp.store
+        .set_workspace_conversation_archived(&conversation.id, Some(1))
+        .unwrap();
+    temp.store
+        .set_workspace_conversation_archived(&acp.id, Some(1))
+        .unwrap();
+    crate::workset_control::finish(
+        &temp.store,
+        smelt_core::workspace_directory::WorkspaceWorksetFinishParams {
+            workset_id: "old".into(),
+        },
+        &event_hub,
+    )
+    .unwrap();
+
+    let error = workspace_directory::restore_conversation_into_workset(
+        &temp.store,
+        &conversation.id,
+        "target",
+        &event_hub,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("repo"));
+    let still_archived = workspace_catalog::directory_on(&temp.store).unwrap();
+    assert!(still_archived.conversations[0].archived_at.is_some());
+    std::fs::create_dir_all(target_root.join("repo")).unwrap();
+
+    workspace_directory::restore_conversation_into_workset(
+        &temp.store,
+        &conversation.id,
+        "target",
+        &event_hub,
+    )
+    .unwrap();
+    workspace_directory::restore_conversation_into_workset(
+        &temp.store,
+        &acp.id,
+        "target",
+        &event_hub,
+    )
+    .unwrap();
+    let directory = workspace_catalog::directory_on(&temp.store).unwrap();
+    let restored = &directory.conversations[0];
+    assert_eq!(restored.workset_id.as_deref(), Some("target"));
+    assert_eq!(
+        restored.closed_workset_root.as_deref(),
+        project.join("worktrees/old").to_str()
+    );
+    assert_eq!(restored.archived_at, None);
+    assert_eq!(restored.terminals[0].cwd.as_deref(), target_root.to_str());
+    let restored_acp = directory.conversations[1].acp.as_ref().unwrap();
+    assert_eq!(restored_acp.cwd.as_deref(), target_root.to_str());
+    assert_eq!(
+        restored_acp.history_session_id.as_deref(),
+        Some("provider-history")
+    );
+    assert_eq!(restored_acp.sid, "acp-session");
+    let stale_update =
+        workspace_directory::update_conversation(&temp.store, &conversation, &event_hub);
+    assert!(
+        stale_update.is_err(),
+        "旧客户端不能把恢复后的会话改回失效目录"
+    );
+    let current = workspace_catalog::directory_on(&temp.store).unwrap();
+    assert_eq!(
+        current.conversations[0].terminals[0].cwd.as_deref(),
+        target_root.to_str()
+    );
+    temp.store
+        .set_workspace_conversation_archived(&conversation.id, Some(2))
+        .unwrap();
+    workspace_directory::archive_conversation(
+        &temp.store,
+        &conversation.id,
+        false,
+        &new_sessions(),
+        &new_acp_sessions(),
+        &new_test_automation_store(),
+        &event_hub,
+    )
+    .unwrap();
+    let current = workspace_catalog::directory_on(&temp.store).unwrap();
+    assert_eq!(
+        current.conversations[0].workset_id.as_deref(),
+        Some("target")
+    );
+}
+
+#[test]
 fn automation_owned_conversations_cannot_be_archived() {
     let temp = TempStore::new();
     let event_hub = new_event_hub();
