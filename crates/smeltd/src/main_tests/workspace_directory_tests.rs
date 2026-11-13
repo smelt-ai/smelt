@@ -270,20 +270,21 @@ fn archiving_preserves_the_record_and_restoring_publishes_it_again() {
 fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
     let temp = TempStore::new();
     let event_hub = new_event_hub();
-    let project_root = temp.dir.join("project").to_string_lossy().into_owned();
+    let project_root = temp.dir.join("project");
+    let task_root = project_root.join("worktrees").join("task");
     let repository_root = temp.dir.join("repository");
     init_repository(&repository_root);
     temp.store
         .create_workspace_workset(&smelt_store::WorkspaceWorksetRecord {
             id: "workset-1".into(),
-            project_root: project_root.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
             task: "task".into(),
             branch: "feat/task".into(),
             position: 0,
             repositories: vec![smelt_store::WorkspaceWorksetRepositoryRecord {
                 name: "repo".into(),
                 root: repository_root.to_string_lossy().into_owned(),
-                worktree: format!("{project_root}/worktrees/task/repo"),
+                worktree: task_root.join("repo").to_string_lossy().into_owned(),
                 base_ref: "HEAD".into(),
                 branch_created: false,
                 position: 0,
@@ -292,7 +293,7 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
         .unwrap();
     let mut conversation = terminal_conversation();
     conversation.workset_id = Some("workset-1".into());
-    conversation.terminals[0].cwd = Some(format!("{project_root}/worktrees/task"));
+    conversation.terminals[0].cwd = Some(task_root.to_string_lossy().into_owned());
     workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
     let active_error = crate::workset_control::finish(
         &temp.store,
@@ -333,7 +334,7 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
     assert_eq!(directory.conversations[0].workset_id, None);
     assert_eq!(
         directory.conversations[0].closed_workset_root.as_deref(),
-        Some(format!("{project_root}/worktrees/task").as_str())
+        task_root.to_str()
     );
     assert_eq!(directory.conversations[0].terminals, conversation.terminals);
 
@@ -356,7 +357,12 @@ fn finishing_workset_preserves_archive_and_prevents_unsafe_restore() {
             .is_some()
     );
     let mut stale = conversation.clone();
-    stale.terminals[0].cwd = Some("/wrong-directory".into());
+    stale.terminals[0].cwd = Some(
+        temp.dir
+            .join("wrong-directory")
+            .to_string_lossy()
+            .into_owned(),
+    );
     assert!(workspace_directory::update_conversation(&temp.store, &stale, &event_hub).is_err());
     assert_eq!(
         workspace_catalog::directory_on(&temp.store)
@@ -374,7 +380,8 @@ fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
     let project = temp.dir.join("project");
     let repository = temp.dir.join("repository");
     init_repository(&repository);
-    let target_root = project.join("worktrees/target");
+    let old_root = project.join("worktrees").join("old");
+    let target_root = project.join("worktrees").join("target");
     std::fs::create_dir_all(&target_root).unwrap();
     let record = |id: &str, task: &str| smelt_store::WorkspaceWorksetRecord {
         id: id.into(),
@@ -404,8 +411,7 @@ fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
         .unwrap();
     let mut conversation = terminal_conversation();
     conversation.workset_id = Some("old".into());
-    conversation.terminals[0].cwd =
-        Some(project.join("worktrees/old").to_string_lossy().into_owned());
+    conversation.terminals[0].cwd = Some(old_root.to_string_lossy().into_owned());
     workspace_directory::create_conversation(&temp.store, &conversation, &event_hub).unwrap();
     let acp = WorkspaceConversation {
         id: "acp-archive".into(),
@@ -464,10 +470,7 @@ fn restoring_closed_workset_archive_rebinds_to_selected_workset() {
     let directory = workspace_catalog::directory_on(&temp.store).unwrap();
     let restored = &directory.conversations[0];
     assert_eq!(restored.workset_id.as_deref(), Some("target"));
-    assert_eq!(
-        restored.closed_workset_root.as_deref(),
-        project.join("worktrees/old").to_str()
-    );
+    assert_eq!(restored.closed_workset_root.as_deref(), old_root.to_str());
     assert_eq!(restored.archived_at, None);
     assert_eq!(restored.terminals[0].cwd.as_deref(), target_root.to_str());
     let restored_acp = directory.conversations[1].acp.as_ref().unwrap();
