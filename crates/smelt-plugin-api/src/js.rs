@@ -25,7 +25,7 @@ use gpui_shell::{
 };
 use serde_json::Value;
 
-use crate::{CommandSpec, Handled, HostEvent, PathRequest, RuntimeKey, rusqlite};
+use crate::{CommandSpec, Handled, HostEvent, RuntimeKey, rusqlite};
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
@@ -48,8 +48,6 @@ export function view_shown(view: string): boolean;
 export function window_active(): boolean;
 /** 主窗口里宿主的遮罩层（确认框、命令面板、大图预览）开着。开关时发 overlay_changed。 */
 export function overlay_open(): boolean;
-/** 发送系统通知；显示受系统通知授权和设置影响。 */
-export function notify(subtitle: string, body: string): null;
 /** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
 export function register_themes(themeSets: string[]): null;
 export interface Layout {
@@ -62,17 +60,6 @@ export interface Layout {
 }
 /** 替换本插件登记的布局。空数组撤下全部；一份不合法整组不登记。用哪份由用户在设置里选。 */
 export function register_layouts(layouts: Layout[]): null;
-export interface PathRequest {
-  /** 选择框标题。 */
-  title: string;
-  /** 确认按钮上的动词，如「导入」。 */
-  confirm: string;
-  /** 除了目录还能选文件。 */
-  files?: boolean;
-  multiple?: boolean;
-}
-/** 在那台机器上选路径。取消时为 null。 */
-export function pick_paths(machine: Machine, request: PathRequest): Promise<string[] | null>;
 export interface Command {
   /** 本插件内的名字，不含 "/"；命令 id 是 "<插件 id>/<name>"。 */
   name: string;
@@ -97,16 +84,27 @@ export interface CommandCall {
 }
 /** 等本插件命令的下一次执行。从登记起开始记，按顺序一次不落。同时只能有一个在等。 */
 export function next_command(): Promise<CommandCall>;
-/** 执行一条命令，任何来源的都行（id 是 "<来源>/<名字>"）。排到这一轮之后在主窗口里跑；命令不存在时报错。 */
-export function run(command: string, args?: unknown): null;
-/** 打开一个视图：布局里摆了它就让它露出来，没摆就在舞台上开成一页，再把 args 交给它。没有这个视图时为 false。 */
-export function open_view(view: string, args?: unknown): Promise<boolean>;
-/** 把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）。没有能接的会话时报错。 */
-export function send_to_session(text: string): Promise<null>;
+/**
+ * 执行一条命令，任何来源的都行（id 是 "<来源>/<名字>"），兑现为命令交回的结果。排到这一轮之后在主窗口里跑；
+ * 命令不存在、眼下不适用、执行失败时 reject，带可以直接给人看的原因。不 await 命令也照样跑完。
+ * 脚本登记的命令接到就算成功，结果是 null。
+ *
+ * 宿主的动作也是命令：
+ * - "smelt.app/notify" { subtitle: string, body: string }：发系统通知，显示受系统通知授权和设置影响。
+ * - "smelt.app/open-in-text-editor" { path: string }：用系统文本编辑器打开这台电脑上的文件。
+ * - "smelt.app/pick-paths" { machine: Machine, title: string, confirm: string, files?: boolean, multiple?: boolean }
+ *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
+ * - "smelt.app/open-view" { view: string, args?: unknown } → boolean：打开一个视图，布局里摆了它就让它露出来，
+ *   没摆就在舞台上开成一页，再把 args 交给它；没有这个视图时为 false。
+ * - "smelt.sessions/send-text" { text: string }：把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）；
+ *   没有能接的会话时 reject。
+ * - "smelt.sessions/resume" / "smelt.sessions/resume-in-terminal" / "smelt.sessions/handoff"：续接、交接历史会话。
+ */
+export function run(command: string, args?: unknown): Promise<unknown>;
 /** 那台机器上的路径怎么切。 */
 export function path_style(machine: Machine): "posix" | "windows";
-/** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的报错。line 从 1 数。 */
-export function open_file(machine: Machine, path: string, line?: number): null;
+/** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的 reject。line 从 1 数。 */
+export function open_file(machine: Machine, path: string, line?: number): Promise<null>;
 /** 让本插件的命令 name 当文件打开者（它要另外登记，requires_args）；执行时参数是 { machine, path, line }。只认最后登记的打开者。 */
 export function register_file_opener(name: string): null;
 /** SQL 参数。true / false 存成 1 / 0。 */
@@ -219,12 +217,6 @@ impl JsPlugin {
             .function("overlay_open", |_arguments| {
                 Ok(in_app("overlay_open", |cx| crate::host(cx).overlay_open(cx))?.into())
             })
-            .function("notify", |arguments| {
-                let subtitle = arguments.string(0)?;
-                let body = arguments.string(1)?;
-                in_app("notify", |cx| crate::host(cx).notify(subtitle, body))?;
-                Ok(HostValue::Null)
-            })
             .function("register_themes", move |arguments| {
                 let values = arguments
                     .value(0)?
@@ -277,11 +269,14 @@ impl JsPlugin {
                 .map_err(HostError::new)?;
                 Ok(HostValue::Null)
             })
-            .function("run", |arguments| {
-                let command = arguments.string(0)?;
+            .async_function("run", |arguments| {
+                let command = arguments.string(0)?.to_string();
                 let args = arguments.get(1).map(json_value).unwrap_or(Value::Null);
-                in_app("run", |cx| crate::run(command, args, cx))?.map_err(HostError::new)?;
-                Ok(HostValue::Null)
+                in_task(
+                    "run",
+                    move |cx| crate::run(&command, args, cx),
+                    |value| host_value(&value),
+                )
             })
             .function("path_style", |arguments| {
                 let machine = machine_argument("path_style", arguments, 0)?;
@@ -292,7 +287,7 @@ impl JsPlugin {
                 }
                 .into())
             })
-            .function("open_file", |arguments| {
+            .async_function("open_file", |arguments| {
                 let machine = machine_argument("open_file", arguments, 0)?;
                 let path = arguments.string(1)?.to_string();
                 let line = match arguments.get(2) {
@@ -312,9 +307,11 @@ impl JsPlugin {
                     path,
                     line,
                 };
-                in_app("open_file", |cx| crate::open_file(location, cx))?
-                    .map_err(HostError::new)?;
-                Ok(HostValue::Null)
+                in_task(
+                    "open_file",
+                    move |cx| crate::open_file(location, cx),
+                    |()| HostValue::Null,
+                )
             })
             .function("register_file_opener", move |arguments| {
                 let name = arguments.string(0)?;
@@ -336,24 +333,7 @@ impl JsPlugin {
                 let owner = execute_owner.clone();
                 Ok(async move { store_execute(&owner, &sql, params) })
             })
-            .async_function("open_view", |arguments| {
-                let id = arguments.string(0)?.to_string();
-                let args = arguments.get(1).map(json_value).unwrap_or(Value::Null);
-                in_main_window("open_view", move |window, cx| {
-                    Ok(crate::host(cx).open_view(&id, args, window, cx).into())
-                })
-            })
-            .async_function("send_to_session", |arguments| {
-                let text = arguments.string(0)?.to_string();
-                in_main_window("send_to_session", move |window, cx| {
-                    crate::host(cx)
-                        .send_to_session(&text, window, cx)
-                        .map(|()| HostValue::Null)
-                        .map_err(HostError::new)
-                })
-            })
             .async_function("next_command", move |_| Ok(calls.next_command()))
-            .async_function("pick_paths", pick_paths)
             .async_function("next_event", move |_| Ok(events.next_event()))
     }
 
@@ -440,7 +420,7 @@ impl JsPlugin {
         let call = (name.to_string(), args.clone());
         let call = match state.call_waiter.take() {
             Some(waiter) => match waiter.send(call) {
-                Ok(()) => return Handled::Done,
+                Ok(()) => return Handled::ok(),
                 // 等的那个 Promise 已经没人要了，照常排队。
                 Err(call) => call,
             },
@@ -448,7 +428,7 @@ impl JsPlugin {
         };
         // 每次执行都要到，不去重。
         state.calls.push_back(call);
-        Handled::Done
+        Handled::ok()
     }
 
     /// 视图释放了：扔掉队列和订阅。登记的命令由宿主随插件撤下（见 `mount_all`），
@@ -469,32 +449,27 @@ fn in_app<R>(name: &str, f: impl FnOnce(&mut App) -> R) -> Result<R, HostError> 
         .ok_or_else(|| HostError::new(format!("{name} 只能在视图的事件、任务或 init 里调用")))
 }
 
-/// 在主窗口里做 `f`，结果用 Promise 交回。脚本可能正嵌在主窗口自己的更新里调，进不了
-/// 窗口，所以推到这一轮之后。
-fn in_main_window<F>(
+/// 起一个宿主任务，结果经 `convert` 用 Promise 交回。gpui 的任务只能在主线程上等，脚本
+/// 那边要的是能跨线程的 future，中间用一个 oneshot 接。
+fn in_task<T: Send + 'static>(
     name: &'static str,
-    f: F,
-) -> Result<impl Future<Output = Result<HostValue, HostError>> + Send + use<F>, HostError>
-where
-    F: FnOnce(&mut gpui::Window, &mut App) -> Result<HostValue, HostError> + 'static,
-{
-    let (sender, receiver) = oneshot::channel::<Result<HostValue, HostError>>();
+    start: impl FnOnce(&mut App) -> gpui::Task<Result<T, String>>,
+    convert: impl FnOnce(T) -> HostValue + Send + 'static,
+) -> Result<impl Future<Output = Result<HostValue, HostError>> + Send, HostError> {
+    let (sender, receiver) = oneshot::channel::<Result<T, String>>();
     in_app(name, |cx| {
-        let Some(window) = crate::host(cx).main_window(cx) else {
-            let _ = sender.send(Err(HostError::new(format!("{name}：主窗口没有打开"))));
-            return;
-        };
-        cx.defer(move |cx| {
-            let result = window
-                .update(cx, |_, window, cx| f(window, cx))
-                .unwrap_or_else(|_| Err(HostError::new(format!("{name}：主窗口已经关了"))));
-            let _ = sender.send(result);
-        });
+        let task = start(cx);
+        cx.spawn(async move |_| {
+            let _ = sender.send(task.await);
+        })
+        .detach();
     })?;
     Ok(async move {
         receiver
             .await
-            .unwrap_or_else(|_| Err(HostError::new(format!("{name}：没有执行"))))
+            .unwrap_or_else(|_| Err(format!("{name}：没有执行完")))
+            .map(convert)
+            .map_err(HostError::new)
     })
 }
 
@@ -731,52 +706,6 @@ fn machine_value(key: &RuntimeKey) -> HostValue {
     }
 }
 
-// ---------------------------------------------------------------- 选路径
-
-fn pick_paths(
-    arguments: &HostArguments,
-) -> Result<impl Future<Output = Result<HostValue, HostError>> + Send + use<>, HostError> {
-    let machine = machine_argument("pick_paths", arguments, 0)?;
-    let request = arguments.value(1)?;
-    let text = |name: &str| {
-        request
-            .get(name)
-            .and_then(HostValue::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| HostError::new(format!("pick_paths：{name} 要是字符串")))
-    };
-    let flag = |name: &str| {
-        request
-            .get(name)
-            .and_then(HostValue::as_bool)
-            .unwrap_or(false)
-    };
-    let request = PathRequest {
-        title: text("title")?,
-        confirm: text("confirm")?,
-        files: flag("files"),
-        multiple: flag("multiple"),
-    };
-    let (sender, receiver) = oneshot::channel::<Vec<String>>();
-    in_app("pick_paths", |cx| {
-        let host = crate::host(cx);
-        // 脚本可能正嵌在宿主别的更新里调它；选择框要进工作台，推到这一轮之后。
-        cx.defer(move |cx| {
-            let done = Box::new(move |paths: Vec<String>, _: &mut App| {
-                let _ = sender.send(paths);
-            });
-            host.pick_paths(&machine, request, done, cx);
-        });
-    })?;
-    // 取消了宿主不调 `done`，它被扔掉，这边就收到 `Canceled`。
-    Ok(async move {
-        Ok(match receiver.await {
-            Ok(paths) => paths.into(),
-            Err(oneshot::Canceled) => HostValue::Null,
-        })
-    })
-}
-
 // ---------------------------------------------------------------- 事件
 
 fn event_value(event: &HostEvent) -> HostValue {
@@ -827,23 +756,22 @@ mod tests {
     }
 
     #[test]
-    fn notification_requires_two_strings_and_a_script_context() {
+    fn run_requires_a_command_id_and_a_script_context() {
         let module = JsPlugin::new().module();
-        let invalid_arguments = [
+        for arguments in [
             HostArguments::default(),
-            HostArguments::new([HostValue::Null, HostValue::from("正文")]),
-            HostArguments::new([HostValue::from("副标题")]),
-            HostArguments::new([HostValue::from("副标题"), HostValue::Null]),
-        ];
-        for arguments in invalid_arguments {
-            assert!(module.call("notify", &arguments).is_err());
+            HostArguments::new([HostValue::Null]),
+            HostArguments::new([HostValue::Number(1.0)]),
+        ] {
+            assert!(module.begin("run", &arguments).is_err());
         }
         let outside_script = module
-            .call(
-                "notify",
-                &HostArguments::new([HostValue::from("副标题"), HostValue::from("正文")]),
+            .begin(
+                "run",
+                &HostArguments::new([HostValue::from("smelt.app/notify")]),
             )
-            .unwrap_err();
+            .err()
+            .expect("测试里没有脚本上下文");
         assert!(outside_script.message().contains("只能在视图"));
     }
 
@@ -980,8 +908,8 @@ mod tests {
     fn command_calls_are_queued_in_order_and_stop_after_release() {
         let plugin = JsPlugin::for_plugin("example", "示例");
         let args = serde_json::json!({ "n": 1 });
-        assert_eq!(plugin.deliver_command("a", &args), Handled::Done);
-        assert_eq!(plugin.deliver_command("a", &args), Handled::Done);
+        assert!(!plugin.deliver_command("a", &args).is_pass());
+        assert!(!plugin.deliver_command("a", &args).is_pass());
         let value = smol::block_on(plugin.next_command()).unwrap();
         assert_eq!(value.get("name").and_then(HostValue::as_str), Some("a"));
         assert_eq!(
@@ -995,7 +923,7 @@ mod tests {
         assert!(plugin.0.borrow().call_waiter.is_some());
         plugin.detach();
         assert!(smol::block_on(waiting).is_err());
-        assert_eq!(plugin.deliver_command("a", &args), Handled::Pass);
+        assert!(plugin.deliver_command("a", &args).is_pass());
         assert!(plugin.0.borrow().calls.is_empty());
     }
 

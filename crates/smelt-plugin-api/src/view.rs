@@ -9,7 +9,22 @@ use std::rc::Rc;
 
 use gpui::{AnyView, App, Context, Entity, Global, Render, SharedString, Window};
 
-use crate::HostEvent;
+use serde::{Deserialize, Serialize};
+
+use crate::{Command, HostEvent};
+
+/// 打开一个视图：布局里摆了它就让它露出来，没摆就在舞台上开成一页，再把 `args` 交给它
+/// （[`PluginView::open`]）。没登记过这个 id 结果是 `false`。
+pub const OPEN_VIEW: Command<OpenView, bool> = Command::new("smelt.app/open-view");
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OpenView {
+    /// 视图 id。
+    pub view: String,
+    /// 交给视图的参数，认不出的字段视图忽略。
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
 
 /// 宿主自己的路由，视图不能用这几个 id。
 pub const RESERVED_VIEW_IDS: [&str; 4] = ["agents", "automations", "desktop", "session"];

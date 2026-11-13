@@ -600,12 +600,18 @@ impl CapabilitiesPage {
                         return;
                     }
                 };
-                match api::host(cx).open_in_text_editor(&path) {
-                    Ok(()) => {
-                        notify_success(format!("已在系统文本编辑器打开 {}", path.display()), cx)
-                    }
-                    Err(error) => notify_error(error, cx),
-                }
+                let opened =
+                    api::OPEN_IN_TEXT_EDITOR.run(&api::OpenInTextEditor { path: path.clone() }, cx);
+                cx.spawn(async move |_, cx| {
+                    let message = opened.await;
+                    cx.update(|cx| match message {
+                        Ok(()) => {
+                            notify_success(format!("已在系统文本编辑器打开 {}", path.display()), cx)
+                        }
+                        Err(error) => notify_error(error, cx),
+                    })
+                })
+                .detach();
             },
         );
     }
@@ -665,24 +671,28 @@ impl CapabilitiesPage {
         use api::model::pi_plugin_catalog::PiPluginKind;
 
         let request = api::PathRequest {
+            machine: self.machine.clone(),
             title: "选择要导入的插件".to_string(),
             confirm: "导入".to_string(),
             // 扩展可以是单个文件，技能是目录。
             files: kind == PiPluginKind::Extension,
             multiple: false,
         };
-        let page = cx.weak_entity();
-        api::host(cx).pick_paths(
-            &self.machine.clone(),
-            request,
-            Box::new(move |paths, cx| {
-                let Some(source) = paths.into_iter().next() else {
+        let picked = api::PICK_PATHS.run(&request, cx);
+        cx.spawn(async move |page, cx| {
+            let source = match picked.await {
+                Ok(paths) => paths.and_then(|paths| paths.into_iter().next()),
+                Err(error) => {
+                    cx.update(|cx| notify_error(error, cx));
                     return;
-                };
-                let _ = page.update(cx, |page, cx| page.import_pi_plugin_from(kind, source, cx));
-            }),
-            cx,
-        );
+                }
+            };
+            if let Some(source) = source {
+                page.update(cx, |page, cx| page.import_pi_plugin_from(kind, source, cx))
+                    .ok();
+            }
+        })
+        .detach();
     }
 
     fn import_pi_plugin_from(

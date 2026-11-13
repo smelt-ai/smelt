@@ -103,9 +103,8 @@ fn judge(id: &str, spec: &str, overrides: &Overrides) -> Recorded {
 #[test]
 fn every_builtin_default_key_is_bound() {
     let bound = bound(&Overrides::new());
-    let keyed: Vec<_> = COMMANDS.iter().filter(|def| !def.requires_args).collect();
-    assert_eq!(bound.len(), keyed.len());
-    for def in keyed {
+    assert_eq!(bound.len(), COMMANDS.len());
+    for def in COMMANDS {
         let id = format!("{}/{}", def.owner, def.name);
         let command = bound
             .iter()
@@ -193,15 +192,20 @@ fn commands_that_require_args_are_never_bound() {
     assert_eq!(keys(&bound), vec![("a/plain".to_string(), None)]);
 }
 
-/// 插件开会话的命令登记成「要参数」：id 和插件接口里的常量对得上，不进面板、不绑键。
+/// 带类型的宿主动作登记成「要参数」：id 和插件接口里的常量对得上，不进面板、不绑键。
 #[test]
-fn session_commands_for_plugins_require_args() {
+fn typed_host_commands_require_args() {
     TestAppContext::single().update(|cx| {
         workspace_commands::register_inert(cx);
         for id in [
-            api::sessions::RESUME,
-            api::sessions::RESUME_IN_TERMINAL,
-            api::sessions::HANDOFF,
+            api::NOTIFY.id(),
+            api::OPEN_IN_TEXT_EDITOR.id(),
+            api::PICK_PATHS.id(),
+            api::OPEN_VIEW.id(),
+            api::sessions::RESUME.id(),
+            api::sessions::RESUME_IN_TERMINAL.id(),
+            api::sessions::HANDOFF.id(),
+            api::sessions::SEND_TEXT.id(),
         ] {
             let command = api::command(id, cx).unwrap_or_else(|| panic!("{id} 没登记上"));
             assert!(command.requires_args, "{id} 要参数");

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use smelt_plugin_api::{self as api, CommandHandler, CommandSpec, Handled};
 
 use super::*;
+use crate::plugin_host::WorkspaceRef;
 
 /// 处理函数：工作台、执行时带的参数（快捷键、菜单、命令面板执行时是 `null`）。
 type Run = fn(&mut Workspace, &serde_json::Value, &mut Window, &mut Context<Workspace>) -> Handled;
@@ -21,7 +22,6 @@ pub(crate) struct Def {
     pub(crate) key: Option<&'static str>,
     pub(crate) context: &'static str,
     pub(crate) palette: bool,
-    pub(crate) requires_args: bool,
     run: Run,
 }
 
@@ -50,7 +50,6 @@ const fn def(
         key,
         context: "Workspace",
         palette: true,
-        requires_args: false,
         run,
     }
 }
@@ -58,15 +57,6 @@ const fn def(
 const fn hidden(def: Def) -> Def {
     Def {
         palette: false,
-        ..def
-    }
-}
-
-/// 要带参数才能执行的命令：只给插件用 `run` 调，不进面板、不绑键。
-const fn with_args(def: Def) -> Def {
-    Def {
-        palette: false,
-        requires_args: true,
         ..def
     }
 }
@@ -85,7 +75,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             Some("cmd-,"),
             |this, _, _, cx| {
                 this.open_settings(cx);
-                Handled::Done
+                Handled::ok()
             },
         ),
     ),
@@ -98,7 +88,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             Some("cmd-q"),
             |this, _, window, cx| {
                 this.request_quit(window, cx);
-                Handled::Done
+                Handled::ok()
             },
         ),
     ),
@@ -115,13 +105,13 @@ pub(crate) const COMMANDS: &[Def] = &[
                 this.check_or_recover_update(false, cx);
             }
             this.open_settings_section(settings::SettingsSection::app_update(), cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     // 链接打包时可换，见 `settings::DOCS_URL`。
     def("smelt.app", "docs", "帮助文档", None, |_, _, _, cx| {
         cx.open_url(settings::DOCS_URL);
-        Handled::Done
+        Handled::ok()
     }),
     def(
         "smelt.app",
@@ -130,7 +120,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         None,
         |_, _, _, cx| {
             cx.open_url(settings::FEEDBACK_URL);
-            Handled::Done
+            Handled::ok()
         },
     ),
     // 帧耗时、GPU/CPU/内存。编辑器把同一组合键绑成 Replace，更深的 Input 优先。
@@ -142,7 +132,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         |this, _, _, cx| {
             this.debug_hud = !this.debug_hud;
             cx.notify();
-            Handled::Done
+            Handled::ok()
         },
     )),
     hidden(def(
@@ -156,7 +146,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             } else {
                 this.open_palette(window, cx);
             }
-            Handled::Done
+            Handled::ok()
         },
     )),
     // 跟侧栏最顶的「新对话」同一个动作。
@@ -167,7 +157,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-n"),
         |this, _, window, cx| {
             this.begin_new_conversation(window, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     // 沿用当前会话的运行时和目录开一个终端会话。
@@ -178,7 +168,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         None,
         |this, _, _, cx| {
             this.new_tab(cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     def(
@@ -188,7 +178,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         None,
         |this, _, _, cx| {
             this.open_project(cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     // ⌘⇧E 跟 VS Code「聚焦资源管理器」一样，侧栏键盘操作见 `session_list::keyboard`。
@@ -199,7 +189,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-shift-e"),
         |this, _, window, cx| {
             this.focus_sidebar(window, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     // 按侧栏视觉顺序跨项目切，到头循环。绑在 Workspace 上比 Input 浅：输入框里是
@@ -211,7 +201,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-up"),
         |this, _, window, cx| {
             this.cycle_session(-1, window, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     def(
@@ -221,7 +211,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-down"),
         |this, _, window, cx| {
             this.cycle_session(1, window, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     hidden(def(
@@ -287,37 +277,6 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-9"),
         activate_nth::<8>,
     )),
-    // 插件要开会话时调，参数见 `smelt_plugin_api::sessions`。
-    with_args(def(
-        "smelt.sessions",
-        "resume",
-        "续接历史会话",
-        None,
-        |this, args, window, cx| {
-            this.run_resume_command(args, window, cx);
-            Handled::Done
-        },
-    )),
-    with_args(def(
-        "smelt.sessions",
-        "resume-in-terminal",
-        "在终端里续接历史会话",
-        None,
-        |this, args, _, cx| {
-            this.run_resume_in_terminal_command(args, cx);
-            Handled::Done
-        },
-    )),
-    with_args(def(
-        "smelt.sessions",
-        "handoff",
-        "交接给另一家 agent",
-        None,
-        |this, args, window, cx| {
-            this.run_handoff_command(args, window, cx);
-            Handled::Done
-        },
-    )),
     // 当前会话的分屏树里循环切活动 pane。编辑器的 Outdent / Indent 绑在更深的 Input 上，
     // 焦点在输入框时由它们接手。
     def(
@@ -327,7 +286,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-["),
         |this, _, window, cx| {
             this.cycle_pane(-1, window, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     def(
@@ -337,7 +296,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-]"),
         |this, _, window, cx| {
             this.cycle_pane(1, window, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     def(
@@ -347,7 +306,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-d"),
         |this, _, _, cx| {
             this.split_active(Axis::Horizontal, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     def(
@@ -357,7 +316,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("shift-cmd-d"),
         |this, _, _, cx| {
             this.split_active(Axis::Vertical, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
     // 会话只剩一个 pane 时关掉整个会话（至少留一个会话）。
@@ -368,7 +327,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         Some("cmd-w"),
         |this, _, window, cx| {
             this.close_active(window, cx);
-            Handled::Done
+            Handled::ok()
         },
     ),
 ];
@@ -383,12 +342,22 @@ fn activate_nth<const N: usize>(
     if let Some(&ix) = this.sidebar_session_order(cx).get(N) {
         this.activate(ix, window, cx);
     }
-    Handled::Done
+    Handled::ok()
 }
 
-/// 登记全部自带命令，处理函数由 `handler` 按 [`Def`] 做出来。一组登记失败是表写错了。
-fn register_with(handler: impl Fn(&'static Def) -> CommandHandler, cx: &mut App) {
+/// 登记全部自带命令，处理函数由 `handler` 按 [`Def`] 做出来；带类型的宿主动作（插件用
+/// `smelt_plugin_api` 里的常量调）从 `workspace` 取工作台。一组登记失败是表写错了。
+fn register_with(
+    handler: impl Fn(&'static Def) -> CommandHandler,
+    workspace: &WorkspaceRef,
+    cx: &mut App,
+) {
     for (owner, group) in OWNERS {
+        let typed = match *owner {
+            "smelt.app" => crate::plugin_host::app_commands(workspace),
+            "smelt.sessions" => crate::session_commands::commands(workspace),
+            _ => Vec::new(),
+        };
         let specs = COMMANDS
             .iter()
             .filter(|def| def.owner == *owner)
@@ -398,9 +367,10 @@ fn register_with(handler: impl Fn(&'static Def) -> CommandHandler, cx: &mut App)
                 key: def.key.map(str::to_string),
                 context: def.context.to_string(),
                 palette: def.palette,
-                requires_args: def.requires_args,
+                requires_args: false,
                 handler: handler(def),
             })
+            .chain(typed)
             .collect();
         if let Err(error) = api::register_commands(owner, group, specs, cx) {
             debug_assert!(false, "自带命令 {owner} 登记失败：{error}");
@@ -411,6 +381,10 @@ fn register_with(handler: impl Fn(&'static Def) -> CommandHandler, cx: &mut App)
 
 /// 工作台建好时登记。工作台没了的话命令什么都不做，按键交给下一条绑定。
 pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
+    let typed: WorkspaceRef = {
+        let workspace = workspace.clone();
+        Rc::new(move |_: &App| workspace.upgrade())
+    };
     register_with(
         |def| {
             let workspace = workspace.clone();
@@ -423,14 +397,38 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
                 },
             )
         },
+        &typed,
         cx,
     );
+}
+
+/// 快捷键、菜单、命令面板执行完命令的收尾：失败统一在这里报给用户，命令自己不报。返回命令
+/// 是否眼下不适用（`Pass`），由调用方决定交给下一条绑定还是算了。
+pub(crate) fn finish(handled: Handled, cx: &mut App) -> bool {
+    match handled {
+        Handled::Pass => true,
+        Handled::Done(result) => {
+            report_failure(result, cx);
+            false
+        }
+    }
+}
+
+/// 等命令跑完，失败了报出来。
+pub(crate) fn report_failure<T: 'static>(result: Task<Result<T, String>>, cx: &mut App) {
+    cx.spawn(async move |_| {
+        if let Err(error) = result.await {
+            crate::status_item::notify_error(error);
+        }
+    })
+    .detach();
 }
 
 /// 测试里不建工作台，只要登记出来的命令表。
 #[cfg(test)]
 pub(crate) fn register_inert(cx: &mut App) {
-    register_with(|_| Rc::new(|_, _, _| Handled::Done), cx);
+    let no_workspace: WorkspaceRef = Rc::new(|_: &App| None);
+    register_with(|_| Rc::new(|_, _, _| Handled::ok()), &no_workspace, cx);
 }
 
 impl Workspace {

@@ -390,7 +390,7 @@ impl HistoryPage {
             .get(&session.resume_id)
             .cloned();
         let args = Resume {
-            machine: sessions::machine_arg(&project.machine),
+            machine: project.machine.clone(),
             agent: agent.id().to_string(),
             profile_id,
             cwd: project.root.clone(),
@@ -402,7 +402,7 @@ impl HistoryPage {
         } else {
             sessions::RESUME
         };
-        run_command(command, serde_json::to_value(args), cx);
+        report_failure(command.run(&args, cx), cx);
     }
 
     /// 当前列表里、这台机器上还认得的「会话 → 智能体定义」。
@@ -465,14 +465,14 @@ impl HistoryPage {
                     }
                 };
                 let args = Handoff {
-                    machine: sessions::machine_arg(&project.machine),
+                    machine: project.machine.clone(),
                     cwd: source.cwd.clone(),
                     agent: target.agent.id().to_string(),
                     profile_id: target.profile_id.clone(),
                     prompt: handoff_prompt(&source, &detail, &target),
                     source_session_id: resume_id,
                 };
-                run_command(sessions::HANDOFF, serde_json::to_value(args), cx);
+                report_failure(sessions::HANDOFF.run(&args, cx), cx);
             });
         })
         .detach();
@@ -623,7 +623,7 @@ impl HistoryPage {
         cx.spawn(async move |_, cx| {
             let result = call.await;
             cx.update(|cx| match result {
-                Ok(_) => api::host(cx).notify("完成", &format!("已删除历史会话「{title}」")),
+                Ok(_) => notify("完成", &format!("已删除历史会话「{title}」"), cx),
                 Err(error) => notify_error(&format!("删除历史会话失败：{error}"), cx),
             });
         })
@@ -678,16 +678,25 @@ fn load_detail(
     cx.background_spawn(async move { Ok(call.await?.detail.map(detail_from_wire)) })
 }
 
-fn run_command(id: &str, args: Result<serde_json::Value, serde_json::Error>, cx: &mut App) {
-    let result = args
-        .map_err(|error| error.to_string())
-        .and_then(|args| api::run(id, args, cx));
-    if let Err(error) = result {
-        notify_error(&error, cx);
-    }
+/// 等宿主命令跑完，失败了报出来（命令自己不报）。
+fn report_failure(ran: Task<Result<(), String>>, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        if let Err(error) = ran.await {
+            cx.update(|cx| notify_error(&error, cx));
+        }
+    })
+    .detach();
 }
 
-fn notify_error(message: &str, cx: &App) {
+fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[history] {message}");
-    api::host(cx).notify("错误", message);
+    notify("错误", message, cx);
+}
+
+fn notify(subtitle: &str, body: &str, cx: &mut App) {
+    let notify = api::Notify {
+        subtitle: subtitle.to_string(),
+        body: body.to_string(),
+    };
+    api::NOTIFY.run(&notify, cx).detach();
 }

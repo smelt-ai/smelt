@@ -7,11 +7,12 @@
 //! 宿主到插件的通知是 gpui 事件（[`HostEvent`]），插件用 `cx.subscribe(&events(cx), …)`
 //! 订阅，不轮询。
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{AnyWindowHandle, App, AppContext, Div, Entity, EventEmitter, Global, Task, Window};
+use serde::{Deserialize, Serialize};
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, ControlErrorCode};
 
@@ -40,8 +41,8 @@ mod view;
 pub mod js;
 
 pub use command::{
-    CommandHandler, CommandInfo, CommandSpec, Handled, RunCommand, command, commands, invoke,
-    register_commands, run, unregister_commands,
+    Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, RunCommand, command,
+    commands, invoke, register_commands, run, unregister_commands,
 };
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
@@ -49,8 +50,8 @@ pub use layout::{
     register_layouts, unregister_layouts,
 };
 pub use view::{
-    PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec, built_view, ensure_view,
-    is_registered, register_view, unregister_view, views,
+    OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec,
+    built_view, ensure_view, is_registered, register_view, unregister_view, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -74,18 +75,47 @@ pub struct Project {
     pub root: String,
 }
 
-/// 选好路径后交回给插件的回调。用户取消就不调。
-pub type PathsPicked = Box<dyn FnOnce(Vec<String>, &mut App)>;
+// ---------------------------------------------------------------- 宿主的动作
+//
+// 宿主做的事都是命令（见 [`Command`]），和插件互调、快捷键、命令面板走同一条路。
+
+/// 发送系统通知；是否显示由系统的通知权限和设置决定。
+pub const NOTIFY: Command<Notify, ()> = Command::new("smelt.app/notify");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notify {
+    pub subtitle: String,
+    pub body: String,
+}
+
+/// 用系统文本编辑器打开这台电脑上的文件。
+pub const OPEN_IN_TEXT_EDITOR: Command<OpenInTextEditor, ()> =
+    Command::new("smelt.app/open-in-text-editor");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenInTextEditor {
+    /// 这台电脑上的绝对路径。
+    pub path: PathBuf,
+}
 
 /// 在某台机器上选路径。本机弹系统选择框，远程机器由宿主画一个浏览那台机器的选择框。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 取消了结果是 `None`。
+pub const PICK_PATHS: Command<PathRequest, Option<Vec<String>>> =
+    Command::new("smelt.app/pick-paths");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathRequest {
+    /// 在哪台机器上选。
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
     /// 选择框标题，如「选择要导入的插件」。
     pub title: String,
     /// 确认按钮上的动词，如「导入」。
     pub confirm: String,
     /// 除了目录还能选文件。
+    #[serde(default)]
     pub files: bool,
+    #[serde(default)]
     pub multiple: bool,
 }
 
@@ -129,24 +159,13 @@ pub struct HostEvents;
 
 impl EventEmitter<HostEvent> for HostEvents {}
 
-/// 宿主给插件的服务。只有宿主实现它。
+/// 宿主给插件的服务里读的那一半：查状态，只读内存，render 里可以调。要宿主做事用命令
+/// （[`NOTIFY`] 这些）。只有宿主实现它。
 pub trait Host: 'static {
     /// 桌面挂着的机器，本机在最前。
     fn machines(&self, cx: &App) -> Vec<Machine>;
     /// 那台机器的运行时客户端；机器已经移除是 `None`。
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient>;
-    /// 发送系统通知；是否显示由系统的通知权限和设置决定。
-    fn notify(&self, subtitle: &str, body: &str);
-    /// 用系统文本编辑器打开这台电脑上的文件。
-    fn open_in_text_editor(&self, path: &Path) -> Result<(), String>;
-    /// 在那台机器上选路径。取消了就不调 `done`。
-    fn pick_paths(
-        &self,
-        machine: &RuntimeKey,
-        request: PathRequest,
-        done: PathsPicked,
-        cx: &mut App,
-    );
     /// 工作台的当前项目，可能在远程机器上；没有项目时是 `None`。
     fn active_project(&self, cx: &App) -> Option<Project>;
     /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。还没读到是
@@ -171,18 +190,6 @@ pub trait Host: 'static {
     /// 贴在窗口上、盖得住这些层，开着时要让开；开关时发 [`HostEvent::OverlayChanged`]。
     /// 插件自己用 `open_dialog` 开的对话框不算在内，用 `Window::has_active_dialog` 看。
     fn overlay_open(&self, cx: &App) -> bool;
-    /// 打开一个视图：布局里摆了它就让它露出来，没摆就在舞台上开成一页，再把 `args` 交给它
-    /// （[`PluginView::open`]）。没登记过这个 id 返回 `false`。`window` 是主窗口。
-    fn open_view(
-        &self,
-        id: &str,
-        args: serde_json::Value,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> bool;
-    /// 把文字交给当前会话：终端会话打进输入，对话填进输入框，都不替用户发出。没有能接的
-    /// 会话时报原因。`window` 是主窗口。
-    fn send_to_session(&self, text: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
     /// 那台机器上的路径怎么切（`/` 还是 `\`）。远程机器还没连上过时按 POSIX。
     fn path_style(&self, machine: &RuntimeKey, cx: &App) -> model::runtime_path::PathStyle;
 }
@@ -289,6 +296,29 @@ pub fn machine_to_json(machine: &RuntimeKey) -> serde_json::Value {
     }
 }
 
+/// 命令参数里的机器字段：`#[serde(with = "smelt_plugin_api::machine_json")]`，写法同
+/// [`machine_to_json`]。
+pub mod machine_json {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::RuntimeKey;
+
+    pub fn serialize<S: Serializer>(
+        machine: &RuntimeKey,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match machine {
+            RuntimeKey::Local => serializer.serialize_none(),
+            RuntimeKey::Remote(id) => serializer.serialize_some(id),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RuntimeKey, D::Error> {
+        Ok(Option::<String>::deserialize(deserializer)?
+            .map_or(RuntimeKey::Local, RuntimeKey::Remote))
+    }
+}
+
 /// [`machine_to_json`] 的反过来；不是这两种形状是 `None`。
 pub fn machine_from_json(value: &serde_json::Value) -> Option<RuntimeKey> {
     match value {
@@ -308,5 +338,28 @@ mod tests {
             assert_eq!(machine_from_json(&machine_to_json(&machine)), Some(machine));
         }
         assert_eq!(machine_from_json(&serde_json::json!(1)), None);
+    }
+
+    #[test]
+    fn command_args_write_machines_like_page_args() {
+        for machine in [RuntimeKey::Local, RuntimeKey::Remote("abc".to_string())] {
+            let request = PathRequest {
+                machine: machine.clone(),
+                title: "选择".into(),
+                confirm: "导入".into(),
+                files: true,
+                multiple: false,
+            };
+            let value = serde_json::to_value(&request).unwrap();
+            assert_eq!(value["machine"], machine_to_json(&machine));
+            assert_eq!(
+                serde_json::from_value::<PathRequest>(value).unwrap(),
+                request
+            );
+        }
+        // JS 插件可以不写开关。
+        let bare = serde_json::json!({ "machine": null, "title": "选择", "confirm": "导入" });
+        let request: PathRequest = serde_json::from_value(bare).unwrap();
+        assert!(!request.files && !request.multiple);
     }
 }

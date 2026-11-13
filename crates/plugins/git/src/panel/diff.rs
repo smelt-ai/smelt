@@ -536,9 +536,13 @@ fn open_file(machine: smelt_plugin_api::RuntimeKey, path: String, cx: &mut App) 
         path,
         line: None,
     };
-    if let Err(error) = smelt_plugin_api::open_file(location, cx) {
-        crate::notify_error(&error, cx);
-    }
+    let opened = smelt_plugin_api::open_file(location, cx);
+    cx.spawn(async move |cx| {
+        if let Err(error) = opened.await {
+            cx.update(|cx| crate::notify_error(&error, cx));
+        }
+    })
+    .detach();
 }
 
 fn render_diff_annotation(

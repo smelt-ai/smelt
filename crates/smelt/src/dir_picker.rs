@@ -24,10 +24,11 @@ pub(crate) enum DirPickerPurpose {
     OpenProject,
     /// 给智能体绑定参考目录：可以多选。
     AgentContextFolders { agent_id: String },
-    /// 插件要的路径（[`smelt_plugin_api::Host::pick_paths`]）：怎么选由插件说，选好交回给它。
+    /// 插件要的路径（[`smelt_plugin_api::PICK_PATHS`]）：怎么选由插件说，选好从 `done`
+    /// 交回；取消时它随选择框扔掉。
     Plugin {
         request: smelt_plugin_api::PathRequest,
-        done: smelt_plugin_api::PathsPicked,
+        done: smol::channel::Sender<Vec<String>>,
     },
 }
 
@@ -243,7 +244,9 @@ impl Workspace {
             DirPickerPurpose::AgentContextFolders { agent_id } => {
                 self.add_agent_context_folders(agent_id, chosen, cx);
             }
-            DirPickerPurpose::Plugin { done, .. } => done(chosen, cx),
+            DirPickerPurpose::Plugin { done, .. } => {
+                let _ = done.try_send(chosen);
+            }
         }
         cx.notify();
     }
@@ -481,12 +484,13 @@ mod tests {
 
         let plugin = |files, multiple| DirPickerPurpose::Plugin {
             request: smelt_plugin_api::PathRequest {
+                machine: smelt_plugin_api::RuntimeKey::Local,
                 title: "选择".to_string(),
                 confirm: "导入".to_string(),
                 files,
                 multiple,
             },
-            done: Box::new(|_, _| {}),
+            done: smol::channel::bounded(1).0,
         };
         let dirs = system_prompt_options(&plugin(false, false));
         assert!(dirs.directories && !dirs.files && !dirs.multiple);

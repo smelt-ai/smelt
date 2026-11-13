@@ -73,7 +73,7 @@ fn jump_hunk_command(name: &str, title: &str, key: &str, forward: bool) -> Comma
                 return Handled::Pass;
             };
             panel.update(cx, |panel, cx| panel.jump_hunk(forward, cx));
-            Handled::Done
+            Handled::ok()
         }),
     }
 }
@@ -159,9 +159,13 @@ pub(crate) fn mono_font() -> String {
 }
 
 /// 后台失败：日志里留一份，再发系统通知。
-pub(crate) fn notify_error(message: &str, cx: &App) {
+pub(crate) fn notify_error(message: &str, cx: &mut App) {
     eprintln!("[git] {message}");
-    api::host(cx).notify("错误", message);
+    let notify = api::Notify {
+        subtitle: "错误".to_string(),
+        body: message.to_string(),
+    };
+    api::NOTIFY.run(&notify, cx).detach();
 }
 
 /// 在 Finder 里选中本机的一个文件；Linux 打开所在目录。
@@ -496,10 +500,8 @@ impl GitPanel {
     }
 
     /// 后台失败当时就送出系统通知。
-    pub(crate) fn report_background_error(&self, message: impl Into<String>) {
-        let message = message.into();
-        eprintln!("[git] {message}");
-        self.host.notify("错误", &message);
+    pub(crate) fn report_background_error(&self, message: impl Into<String>, cx: &mut App) {
+        notify_error(&message.into(), cx);
     }
 
     /// 把一次刷新排到这一轮之后。同一轮里多次调用合并成一次；刷新要窗口（建输入框），

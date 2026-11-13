@@ -5,7 +5,7 @@
 //! [`FileLocation::to_args`]。用命令而不是另一种回调，JS 插件也能当打开者（执行照常进它的
 //! 命令队列）。只认最后登记的那一个：用户插件可以借此替换内置的；它撤下了，之前的接着用。
 
-use gpui::{App, Global};
+use gpui::{App, Global, Task};
 
 use crate::RuntimeKey;
 
@@ -75,15 +75,21 @@ fn opener(cx: &App) -> Option<String> {
         .cloned()
 }
 
-/// 打开一个文件位置。排到这一轮之后在主窗口里执行。没有打开者时，本机的文件交给系统
-/// 文本编辑器，远程的报错。失败给的是可以直接显示的原因。
-pub fn open_file(location: FileLocation, cx: &mut App) -> Result<(), String> {
+/// 打开一个文件位置。排到这一轮之后在主窗口里执行（见 [`crate::run`]）。没有打开者时，
+/// 本机的文件交给系统文本编辑器，远程的失败。失败给的是可以直接显示的原因。
+pub fn open_file(location: FileLocation, cx: &mut App) -> Task<Result<(), String>> {
     if let Some(command) = opener(cx) {
-        return crate::run(&command, location.to_args(), cx);
+        let opened = crate::run(&command, location.to_args(), cx);
+        return cx.spawn(async move |_| opened.await.map(drop));
     }
     match location.machine {
-        RuntimeKey::Local => crate::host(cx).open_in_text_editor(location.path.as_ref()),
-        RuntimeKey::Remote(_) => Err("没有能打开远程文件的插件".to_string()),
+        RuntimeKey::Local => crate::OPEN_IN_TEXT_EDITOR.run(
+            &crate::OpenInTextEditor {
+                path: location.path.into(),
+            },
+            cx,
+        ),
+        RuntimeKey::Remote(_) => Task::ready(Err("没有能打开远程文件的插件".to_string())),
     }
 }
 
@@ -104,7 +110,7 @@ mod tests {
             context: "Workspace".to_string(),
             palette: false,
             requires_args: true,
-            handler: Rc::new(|_, _, _| Handled::Done),
+            handler: Rc::new(|_, _, _| Handled::ok()),
         }
     }
 

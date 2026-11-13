@@ -551,7 +551,7 @@ impl FilesPanel {
 
     /// 编辑器右键「发送选中内容到会话」：带上文件名和选中的文字，交给当前会话（不替用户
     /// 发出）。
-    pub(crate) fn send_open_file_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn send_open_file_selection(&mut self, cx: &mut Context<Self>) {
         let Some(of) = &self.open_file else {
             return;
         };
@@ -567,6 +567,6 @@ impl FilesPanel {
             .and_then(|project| style.strip_prefix(&of.path, &project.root))
             .unwrap_or_else(|| of.path.clone());
         let message = format!("{rel} 里选中的这段：\n```\n{selected}\n```\n");
-        self.send_to_session(&message, window, cx);
+        self.send_to_session(message, cx);
     }
 }

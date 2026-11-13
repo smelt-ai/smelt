@@ -543,7 +543,7 @@ impl Workspace {
     }
 
     /// 把文字交给当前会话：终端打进输入，对话填进输入框，都不替用户发出。插件经
-    /// [`smelt_plugin_api::Host::send_to_session`] 调到这里。
+    /// [`smelt_plugin_api::sessions::SEND_TEXT`] 调到这里。
     pub(crate) fn send_to_session(
         &mut self,
         text: &str,

@@ -103,7 +103,7 @@ pub fn register(cx: &mut App) {
                     return Handled::Pass;
                 };
                 panel.update(cx, |panel, cx| panel.save_open_file(cx));
-                Handled::Done
+                Handled::ok()
             }),
         },
         // 文件打开者（见 `smelt_plugin_api::open_file`）：对话里的文件链接、变更视图的
@@ -115,13 +115,21 @@ pub fn register(cx: &mut App) {
             context: "Workspace".into(),
             palette: false,
             requires_args: true,
-            handler: Rc::new(|args, window, cx| {
+            handler: Rc::new(|args, _, cx| {
                 if api::FileLocation::from_args(args).is_none() {
-                    eprintln!("[files] smelt.files/open 参数不对：{args}");
-                    return Handled::Done;
+                    return Handled::err(format!("打开文件的参数不对：{args}"));
                 }
-                api::host(cx).open_view(VIEW_ID, args.clone(), window, cx);
-                Handled::Done
+                let opened = api::OPEN_VIEW.run(
+                    &api::OpenView {
+                        view: VIEW_ID.to_string(),
+                        args: args.clone(),
+                    },
+                    cx,
+                );
+                Handled::Done(cx.spawn(async move |_| match opened.await? {
+                    true => Ok(api::serde_json::Value::Null),
+                    false => Err("文件视图没登记上".to_string()),
+                }))
             }),
         },
         // 编辑器右键菜单里的那一项，见 `send_open_file_selection`。
@@ -132,12 +140,12 @@ pub fn register(cx: &mut App) {
             context: FILES_KEY_CONTEXT.into(),
             palette: false,
             requires_args: false,
-            handler: Rc::new(|_, window, cx| {
+            handler: Rc::new(|_, _, cx| {
                 let Some(panel) = built_panel(cx) else {
                     return Handled::Pass;
                 };
-                panel.update(cx, |panel, cx| panel.send_open_file_selection(window, cx));
-                Handled::Done
+                panel.update(cx, |panel, cx| panel.send_open_file_selection(cx));
+                Handled::ok()
             }),
         },
     ];
@@ -470,10 +478,8 @@ impl FilesPanel {
     }
 
     /// 后台失败：日志里留一份，再发系统通知。
-    pub(crate) fn report_background_error(&self, message: impl Into<String>) {
-        let message = message.into();
-        eprintln!("[files] {message}");
-        self.host.notify("错误", &message);
+    pub(crate) fn report_background_error(&self, message: impl Into<String>, cx: &mut App) {
+        notify_error(message.into(), cx);
     }
 
     /// 把一次刷新排到这一轮之后。同一轮里多次调用合并成一次；刷新要窗口（打开文件要建
@@ -566,4 +572,14 @@ impl Render for FilesPanel {
             })
             .child(self.render_panel(window, cx))
     }
+}
+
+/// 后台失败：日志里留一份，再发系统通知。
+pub(crate) fn notify_error(message: String, cx: &mut App) {
+    eprintln!("[files] {message}");
+    let notify = api::Notify {
+        subtitle: "错误".to_string(),
+        body: message,
+    };
+    api::NOTIFY.run(&notify, cx).detach();
 }

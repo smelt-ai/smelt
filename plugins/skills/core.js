@@ -9,7 +9,7 @@
 import { join, basename, dirname } from "path";
 import * as fs from "fs/promises";
 import { lstat, realpath, symlink, rename, unlink, exchange, copy as copyTree } from "smelt-fs";
-import { pick_paths } from "smelt-plugin-api";
+import { run } from "smelt-plugin-api";
 import { AGENTS } from "./agents.js";
 
 const UNIVERSAL = ".agents/skills";
@@ -662,7 +662,11 @@ export async function previewImport(home, projectRoot, rawRequest, source) {
 
 /// 用户在这台电脑上选一个目录。取消时返回 null。
 export async function pickSkillDirectory() {
-  const paths = await pick_paths(null, { title: "选择要导入的 skill 目录（需含 SKILL.md）", confirm: "导入" });
+  const paths = await run("smelt.app/pick-paths", {
+    machine: null,
+    title: "选择要导入的 skill 目录（需含 SKILL.md）",
+    confirm: "导入",
+  });
   return paths?.[0] ?? null;
 }
 

@@ -889,13 +889,10 @@ fn render_tree_row(row: &FileTreeRow, paint: &RowPaint) -> AnyElement {
                     let copy = menu_path.clone();
                     let finder = menu_path.clone();
                     let delete = (menu_view.clone(), menu_path.clone());
-                    menu.item(
-                        PopupMenuItem::new("发送到会话").on_click(move |_, window, cx| {
-                            send.0.update(cx, |this, cx| {
-                                this.send_path_to_session(&send.1, window, cx)
-                            });
-                        }),
-                    )
+                    menu.item(PopupMenuItem::new("发送到会话").on_click(move |_, _, cx| {
+                        send.0
+                            .update(cx, |this, cx| this.send_path_to_session(&send.1, cx));
+                    }))
                     .item(
                         PopupMenuItem::new("复制文件路径").on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));

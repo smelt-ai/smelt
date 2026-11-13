@@ -1387,11 +1387,8 @@ impl Render for SettingsWindow {
             .on_action(|_: &crate::CloseSettingsWindow, window, _| window.remove_window())
             // 设置窗口里按的命令键（⌘, ⌘Q）、点的应用菜单交给主窗口执行，见 `workspace_commands`。
             .on_action(|action: &smelt_plugin_api::RunCommand, _, cx| {
-                if let Err(error) =
-                    smelt_plugin_api::run(&action.command, action.args.clone(), cx)
-                {
-                    eprintln!("[commands] {} 没执行：{error}", action.command);
-                }
+                let result = smelt_plugin_api::run(&action.command, action.args.clone(), cx);
+                crate::workspace_commands::report_failure(result, cx);
             })
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;

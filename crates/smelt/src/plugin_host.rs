@@ -4,11 +4,10 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::path::Path;
 use std::rc::Rc;
 
 use gpui::*;
-use smelt_plugin_api::{self as api, HostEvent, Machine, PathRequest, Project, RuntimeKey};
+use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, Project, RuntimeKey};
 use smelt_runtime_client::RuntimeClient;
 
 use crate::dir_picker::DirPickerPurpose;
@@ -47,33 +46,6 @@ impl api::Host for SmeltHost {
 
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient> {
         runtimes::client(machine, cx)
-    }
-
-    fn notify(&self, subtitle: &str, body: &str) {
-        crate::status_item::deliver_app_notification(subtitle, body);
-    }
-
-    fn open_in_text_editor(&self, path: &Path) -> Result<(), String> {
-        crate::ide::open_in_system_text_editor(path)
-    }
-
-    fn pick_paths(
-        &self,
-        machine: &RuntimeKey,
-        request: PathRequest,
-        done: api::PathsPicked,
-        cx: &mut App,
-    ) {
-        let Some(runtime) = runtimes::runtime(machine, cx) else {
-            crate::status_item::notify_error(api::MACHINE_REMOVED);
-            return;
-        };
-        let Some(workspace) = self.workspace() else {
-            return;
-        };
-        workspace.update(cx, |workspace, cx| {
-            workspace.open_dir_picker(runtime, DirPickerPurpose::Plugin { request, done }, cx);
-        });
     }
 
     fn active_project(&self, cx: &App) -> Option<Project> {
@@ -132,32 +104,56 @@ impl api::Host for SmeltHost {
             .map(|main| main.window.into())
     }
 
-    fn open_view(
-        &self,
-        id: &str,
-        args: serde_json::Value,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> bool {
-        self.workspace().is_some_and(|workspace| {
-            workspace.update(cx, |workspace, cx| {
-                workspace.open_page(id, args, window, cx)
-            })
-        })
-    }
-
-    fn send_to_session(&self, text: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
-        let workspace = self
-            .workspace()
-            .ok_or_else(|| "主窗口没有打开".to_string())?;
-        workspace.update(cx, |workspace, cx| {
-            workspace.send_to_session(text, window, cx)
-        })
-    }
-
     fn path_style(&self, machine: &RuntimeKey, cx: &App) -> api::model::runtime_path::PathStyle {
         runtimes::path_style(machine, cx)
     }
+}
+
+/// 宿主动作命令取工作台用：工作台没建（测试里只登记命令表）时是 `None`。
+pub(crate) type WorkspaceRef = Rc<dyn Fn(&App) -> Option<Entity<Workspace>>>;
+
+/// 在工作台里做 `f`；工作台没了算失败。
+pub(crate) fn update_workspace<R>(
+    workspace: &WorkspaceRef,
+    cx: &mut App,
+    f: impl FnOnce(&mut Workspace, &mut Context<Workspace>) -> Result<R, String>,
+) -> Result<R, String> {
+    let workspace = workspace(cx).ok_or_else(|| "主窗口没有打开".to_string())?;
+    workspace.update(cx, f)
+}
+
+/// 宿主的动作 `smelt.app/*`（参数、结果见 `smelt_plugin_api` 里的同名常量）。
+pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
+    let picker = workspace.clone();
+    let views = workspace.clone();
+    vec![
+        api::NOTIFY.spec("发送系统通知", |args, _, _| {
+            crate::status_item::deliver_app_notification(&args.subtitle, &args.body);
+            Ok(())
+        }),
+        api::OPEN_IN_TEXT_EDITOR.spec("用系统文本编辑器打开", |args, _, _| {
+            crate::ide::open_in_system_text_editor(&args.path)
+        }),
+        api::PICK_PATHS.spec_async("选择路径", move |request, _, cx| {
+            let Some(runtime) = runtimes::runtime(&request.machine, cx) else {
+                return Task::ready(Err(api::MACHINE_REMOVED.to_string()));
+            };
+            let (done, picked) = smol::channel::bounded(1);
+            if let Err(error) = update_workspace(&picker, cx, |workspace, cx| {
+                workspace.open_dir_picker(runtime, DirPickerPurpose::Plugin { request, done }, cx);
+                Ok(())
+            }) {
+                return Task::ready(Err(error));
+            }
+            // 取消时选择框连同 `done` 一起扔掉，这边收到关闭。
+            cx.spawn(async move |_| Ok(picked.recv().await.ok()))
+        }),
+        api::OPEN_VIEW.spec("打开视图", move |args, window, cx| {
+            update_workspace(&views, cx, |workspace, cx| {
+                Ok(workspace.open_page(&args.view, args.args, window, cx))
+            })
+        }),
+    ]
 }
 
 /// 启动时、开主窗口之前调一次：装好宿主服务，登记内置插件。
