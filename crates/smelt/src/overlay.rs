@@ -20,11 +20,9 @@ pub(crate) enum ModalLayer {
     #[cfg(target_os = "macos")]
     MoveApp,
     CloseConfirm,
-    DeleteFile,
     DeleteAgentMemory,
     DeleteAgent,
     DeleteAutomation,
-    UnsavedFile,
     SessionManager,
     DaemonRestart,
     UpdateInstall,
@@ -40,11 +38,9 @@ impl ModalLayer {
             #[cfg(target_os = "macos")]
             Self::MoveApp => 14,
             Self::CloseConfirm => 3,
-            Self::DeleteFile => 8,
             Self::DeleteAgentMemory => 10,
             Self::DeleteAgent => 11,
             Self::DeleteAutomation => 12,
-            Self::UnsavedFile => 13,
             Self::SessionManager => 1,
             Self::DaemonRestart => 2,
             Self::UpdateInstall => 3,
@@ -99,11 +95,6 @@ impl Workspace {
         );
         raise(
             &mut rank,
-            self.delete_file_target.is_some(),
-            ModalLayer::DeleteFile.rank(),
-        );
-        raise(
-            &mut rank,
             self.agent_surface.pending_memory_delete.is_some(),
             ModalLayer::DeleteAgentMemory.rank(),
         );
@@ -116,11 +107,6 @@ impl Workspace {
             &mut rank,
             self.automation_surface.pending_delete.is_some(),
             ModalLayer::DeleteAutomation.rank(),
-        );
-        raise(
-            &mut rank,
-            self.pending_file_switch.is_some(),
-            ModalLayer::UnsavedFile.rank(),
         );
         rank
     }
@@ -300,18 +286,14 @@ impl Workspace {
             }
             true
         } else if self.close_confirm.is_some()
-            || self.delete_file_target.is_some()
             || self.agent_surface.pending_delete.is_some()
             || self.agent_surface.pending_memory_delete.is_some()
             || self.automation_surface.pending_delete.is_some()
-            || self.pending_file_switch.is_some()
         {
             self.close_confirm = None;
-            self.delete_file_target = None;
             self.agent_surface.pending_delete = None;
             self.agent_surface.pending_memory_delete = None;
             self.automation_surface.pending_delete = None;
-            self.pending_file_switch = None;
             cx.notify();
             true
         } else {
@@ -502,11 +484,6 @@ impl Workspace {
                     .then(|| self.render_close_confirm(cx)),
             )
             .children(
-                self.delete_file_target
-                    .is_some()
-                    .then(|| self.render_delete_file_confirm(cx)),
-            )
-            .children(
                 self.agent_surface
                     .pending_delete
                     .is_some()
@@ -523,11 +500,6 @@ impl Workspace {
                     .pending_delete
                     .is_some()
                     .then(|| self.render_delete_automation_confirm(cx)),
-            )
-            .children(
-                self.pending_file_switch
-                    .clone()
-                    .map(|target| self.render_unsaved_file_confirm(target, cx)),
             )
             .children(self.debug_hud.then(|| debug_hud(window, cx)))
             .children(image_preview_overlay)

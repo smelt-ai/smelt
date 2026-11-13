@@ -104,6 +104,8 @@ pub enum HostEvent {
     ProjectChanged { machine: RuntimeKey, root: String },
     /// 主窗口回到前台。监听有收不到的时候（Linux 的 inotify 用完、登记失败），在这里补一次。
     WindowActivated,
+    /// 主窗口里宿主的遮罩层开了或关了（读 [`Host::overlay_open`]）。
+    OverlayChanged,
     /// 挂着的机器变了：加了、移除了、改了名或连接状态。
     MachinesChanged,
     /// 工作台的当前项目变了（读 [`Host::active_project`]）。
@@ -165,6 +167,10 @@ pub trait Host: 'static {
     /// 定时做事的在醒来时问这里，不在前台就停。窗口自己的激活位在 macOS 全屏切 Space 时
     /// 不准，插件不要自己问窗口。
     fn window_active(&self, cx: &App) -> bool;
+    /// 主窗口里宿主自己的遮罩层（确认框、命令面板、大图预览）开着。原生子视图（网页视图）
+    /// 贴在窗口上、盖得住这些层，开着时要让开；开关时发 [`HostEvent::OverlayChanged`]。
+    /// 插件自己用 `open_dialog` 开的对话框不算在内，用 `Window::has_active_dialog` 看。
+    fn overlay_open(&self, cx: &App) -> bool;
     /// 打开一个视图：布局里摆了它就让它露出来，没摆就在舞台上开成一页，再把 `args` 交给它
     /// （[`PluginView::open`]）。没登记过这个 id 返回 `false`。`window` 是主窗口。
     fn open_view(

@@ -34,6 +34,7 @@ members = [
     "crates/smelt-acp-view",
     "crates/smelt-plugin-api",
     "crates/plugins/capabilities",
+    "crates/plugins/files",
     "crates/plugins/git",
     "crates/plugins/history",
     "crates/plugins/layouts",

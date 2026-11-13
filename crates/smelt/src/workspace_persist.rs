@@ -17,8 +17,8 @@ use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCo
 use crate::runtimes::Runtime;
 use crate::workspace_directory::{DirectoryCommands, DirectoryOutcome, order_by_saved, without_names};
 use crate::{
-    AcpSaved, PaneState, RuntimeKey, SessionKind, SessionRouteArchive, SessionState,
-    SidebarGrouping, Workspace, WorkspaceRoute,
+    AcpSaved, PaneState, RuntimeKey, SessionKind, SessionState, SidebarGrouping, Workspace,
+    WorkspaceRoute,
 };
 
 pub(crate) fn merge_restore_pending<T: Clone>(
@@ -85,7 +85,6 @@ pub(crate) fn session_state_from_conversation(conversation: WorkspaceConversatio
         last_updated_at: conversation.last_updated_at.max(0) as u64,
         custom_title: conversation.custom_title,
         acp,
-        route: None,
     }
 }
 
@@ -188,10 +187,9 @@ pub(crate) fn project_roots_of(keys: &[ProjectKey], runtime: &RuntimeKey) -> Vec
 /// 一段对话在客户端库里的身份：哪个运行时上的哪段对话（对话 id）。
 pub(crate) type ConversationKey = (RuntimeKey, String);
 
-/// 客户端存的一段对话的界面状态（设计文档 D1）：终端怎么分屏、当前看哪个，右侧 route。
+/// 客户端存的一段对话的界面状态（设计文档 D1）：终端怎么分屏、当前看哪个。
 #[derive(Clone, Default)]
 pub(crate) struct SavedConversationUi {
-    pub(crate) route: SessionRouteArchive,
     /// 分屏布局，格式见 [`crate::conversation_layout`]。ACP 对话没有。
     pub(crate) dock_layout: Option<String>,
     pub(crate) active_terminal_id: Option<String>,
@@ -202,7 +200,6 @@ impl SavedConversationUi {
     fn of_state(state: &SessionState) -> Self {
         let is_terminal = state.acp.is_none();
         Self {
-            route: state.route.clone().unwrap_or_default(),
             dock_layout: is_terminal
                 .then(|| crate::conversation_layout::encode(&state.layout))
                 .flatten(),
@@ -214,7 +211,6 @@ impl SavedConversationUi {
 
     /// 把它填回刚从运行时读回来的会话：终端按存下的布局摆，以运行时的终端为准。
     fn apply_to(self, state: &mut SessionState) {
-        state.route = Some(self.route);
         if state.acp.is_none() {
             let terminals = crate::conversation_layout::terminals_of(&state.layout);
             state.layout =
@@ -227,60 +223,28 @@ impl SavedConversationUi {
     }
 }
 
-fn sorted_paths(paths: &std::collections::HashSet<String>) -> Vec<String> {
-    let mut paths: Vec<String> = paths.iter().cloned().collect();
-    paths.sort();
-    paths
-}
-
 fn conversation_record(
     key: &ConversationKey,
     saved: &SavedConversationUi,
 ) -> ConversationRouteRecord {
-    let route = &saved.route;
     ConversationRouteRecord {
         runtime_id: project_key(&key.0, "").runtime_id,
         conversation_id: key.1.clone(),
         active_terminal_id: saved.active_terminal_id.clone(),
         dock_layout: saved.dock_layout.clone(),
-        expanded: sorted_paths(&route.expanded),
-        file_tree_selected: route.file_tree_selected.clone(),
-        open_file_path: route.open_file_path.clone(),
-        file_tree_w: route.file_tree_w,
-        file_tree_open: route.file_tree_open,
-        pinned_roots: route.pinned_roots.clone(),
-        collapsed_roots: sorted_paths(&route.collapsed_roots),
-        // 下面四列是变更视图的现场，视图已经是插件，现场归它自己管。列等存储那一步再删，
-        // 这之前写出厂值、读时不理。
-        git_tab: "changes".into(),
-        diff_split: false,
-        git_tree_collapsed: Vec::new(),
-        diff_scope: "all".into(),
     }
 }
 
 fn conversation_from_record(
     record: ConversationRouteRecord,
 ) -> (ConversationKey, SavedConversationUi) {
-    let defaults = SessionRouteArchive::default();
     let runtime = record
         .runtime_id
         .map(RuntimeKey::Remote)
         .unwrap_or(RuntimeKey::Local);
-    let route = SessionRouteArchive {
-        expanded: record.expanded.into_iter().collect(),
-        file_tree_selected: record.file_tree_selected,
-        open_file_path: record.open_file_path,
-        file_tree_w: record.file_tree_w,
-        file_tree_open: record.file_tree_open,
-        pinned_roots: record.pinned_roots,
-        collapsed_roots: record.collapsed_roots.into_iter().collect(),
-        ..defaults
-    };
     (
         (runtime, record.conversation_id),
         SavedConversationUi {
-            route,
             dock_layout: record.dock_layout,
             active_terminal_id: record.active_terminal_id,
         },
@@ -651,7 +615,7 @@ fn snapshot_acp_view(
 }
 
 impl Workspace {
-    /// 把所有会话（各自分屏树 + 活动叶子遍历序）+ 侧栏宽度 + 文件树列宽写入
+    /// 把所有会话（各自分屏树 + 活动叶子遍历序）和工作台界面状态写入
     /// SQLite 工作区类型化快照。
     ///
     /// 主线程只做纯内存快照（构建 + 序列化），读盘/写盘一律挪到后台线程——
@@ -801,7 +765,7 @@ impl Workspace {
         if inbound.first {
             added = order_by_saved(added, &saved_order.conversations, |state| state.id.as_str());
         }
-        // 对话的界面状态（分屏、当前看哪个、右侧 route）存在客户端：按对话 id 填回来。
+        // 对话的界面状态（分屏、当前看哪个）存在客户端：按对话 id 填回来。
         for session in &mut added {
             if let Some(saved) = self
                 .saved_conversation_ui
@@ -1209,11 +1173,6 @@ impl Workspace {
     }
 
     fn saved_ui_of_session(&self, session: &crate::Session, cx: &App) -> SavedConversationUi {
-        let route = if self.ui_session_id == Some(session.ui_id) {
-            self.active_session_ui.archive()
-        } else {
-            session.ui_state.archive()
-        };
         let (dock_layout, active_terminal_id) = match &session.kind {
             SessionKind::Term { dock, active } => (
                 dock.pane_state(cx)
@@ -1223,7 +1182,6 @@ impl Workspace {
             SessionKind::Conversation(_) => (None, None),
         };
         SavedConversationUi {
-            route,
             dock_layout,
             active_terminal_id,
         }
@@ -1448,26 +1406,14 @@ mod agent_conversation_persist_tests {
     /// 对话的界面状态存进客户端库再读回来一样不少。
     #[test]
     fn conversation_ui_lives_in_the_client_store() {
-        let mut route = crate::SessionRouteArchive {
-            file_tree_selected: Some("/srv/app/main.rs".into()),
-            file_tree_open: false,
-            pinned_roots: vec!["/srv/app".into(), "/srv/lib".into()],
-            ..Default::default()
-        };
-        route.expanded.insert("/srv/app/src".into());
         let key = (RuntimeKey::Remote("rt-linux".into()), "conv-1".to_string());
         let saved = SavedConversationUi {
-            route: route.clone(),
             dock_layout: Some(r#"{"v":1,"center":{"terminal":"t-1"}}"#.into()),
             active_terminal_id: Some("t-1".into()),
         };
 
         let (back_key, back) = conversation_from_record(conversation_record(&key, &saved));
         assert_eq!(back_key, key);
-        assert_eq!(
-            serde_json::to_value(&back.route).unwrap(),
-            serde_json::to_value(&route).unwrap()
-        );
         assert_eq!(back.dock_layout, saved.dock_layout);
         assert_eq!(back.active_terminal_id.as_deref(), Some("t-1"));
     }

@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 10;
+pub(crate) const SCHEMA_VERSION: u32 = 11;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -77,22 +77,7 @@ CREATE TABLE conversation_route (
   conversation_id TEXT NOT NULL,
   active_terminal_id TEXT,
   dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
-  file_tree_selected TEXT,
-  open_file_path TEXT,
-  file_tree_w REAL NOT NULL,
-  file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
-  git_tab TEXT NOT NULL,
-  diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
-  diff_scope TEXT NOT NULL,
   PRIMARY KEY (runtime_id, conversation_id)
-) WITHOUT ROWID;
-CREATE TABLE conversation_route_path (
-  runtime_id TEXT NOT NULL,
-  conversation_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
-  path TEXT NOT NULL,
-  position INTEGER NOT NULL,
-  PRIMARY KEY (runtime_id, conversation_id, kind, path)
 ) WITHOUT ROWID;
 CREATE TABLE update_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -318,6 +303,19 @@ UPDATE key_binding SET command = CASE command
 END;
 ";
 
+/// v11：文件树和变更页拆成了插件，各自的界面状态存在插件自己的库里。对话界面状态只剩
+/// 终端的分屏和当前终端；文件树、Git 页的列和路径表删掉，旧的选中、展开不搬。
+const MIGRATE_V10_TO_V11: &str = "
+ALTER TABLE conversation_route DROP COLUMN file_tree_selected;
+ALTER TABLE conversation_route DROP COLUMN open_file_path;
+ALTER TABLE conversation_route DROP COLUMN file_tree_w;
+ALTER TABLE conversation_route DROP COLUMN file_tree_open;
+ALTER TABLE conversation_route DROP COLUMN git_tab;
+ALTER TABLE conversation_route DROP COLUMN diff_split;
+ALTER TABLE conversation_route DROP COLUMN diff_scope;
+DROP TABLE conversation_route_path;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -371,7 +369,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7..=9 => {}
+        7..=10 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
@@ -387,6 +385,11 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=9).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V9_TO_V10)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=10).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V10_TO_V11)
             .map_err(|error| error.to_string())?;
     }
     transaction

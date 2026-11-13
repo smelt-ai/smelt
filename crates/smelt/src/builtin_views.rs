@@ -1,4 +1,4 @@
-//! 宿主自带的视图：会话列表、舞台、文件。
+//! 宿主自带的视图：会话列表、舞台。
 //!
 //! 过渡期的适配层：这几块的状态和画法还在 `Workspace` 上，没搬进各自的插件 crate（迁移
 //! 顺序见 `docs/app-plugins.md`）。这里把每一块包成一个视图，登记进和插件同一张视图注册表，
@@ -19,18 +19,16 @@ use crate::Workspace;
 pub(crate) enum Builtin {
     Sessions,
     Stage,
-    Files,
 }
 
 impl Builtin {
-    pub(crate) const ALL: [Self; 3] = [Self::Sessions, Self::Stage, Self::Files];
+    pub(crate) const ALL: [Self; 2] = [Self::Sessions, Self::Stage];
 
     /// 视图 id，布局文件里引用的就是它。
     pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Sessions => "sessions",
             Self::Stage => "stage",
-            Self::Files => "files",
         }
     }
 
@@ -38,7 +36,6 @@ impl Builtin {
         match self {
             Self::Sessions => "会话",
             Self::Stage => "舞台",
-            Self::Files => "文件",
         }
     }
 
@@ -46,7 +43,6 @@ impl Builtin {
         match self {
             Self::Sessions => IconName::MessagesSquare,
             Self::Stage => IconName::AppWindow,
-            Self::Files => IconName::FolderTree,
         }
         .path()
     }
@@ -89,7 +85,6 @@ impl Render for BuiltinView {
         let content = self.workspace.update(cx, |workspace, cx| match kind {
             Builtin::Sessions => workspace.render_sidebar_dock(window, cx),
             Builtin::Stage => workspace.render_stage_dock(window, cx),
-            Builtin::Files => workspace.render_tool_panel_files(window, cx),
         });
         div()
             .size_full()

@@ -31,7 +31,6 @@ pub(crate) const OWNERS: &[(&str, &str)] = &[
     ("smelt.palette", "应用"),
     ("smelt.sessions", "会话"),
     ("smelt.stage", "分屏"),
-    ("smelt.files", "文件"),
 ];
 
 /// 设置窗口里也要能用的键：设置窗口把收到的命令转给主窗口执行。
@@ -372,55 +371,6 @@ pub(crate) const COMMANDS: &[Def] = &[
             Handled::Done
         },
     ),
-    // 键位只在 Files context 上，文件页的两种显示方式都算。
-    within(
-        "Files",
-        def(
-            "smelt.files",
-            "save",
-            "保存当前文件",
-            Some("cmd-s"),
-            |this, _, _, cx| {
-                this.save_open_file(cx);
-                Handled::Done
-            },
-        ),
-    ),
-    // 文件打开者（见 `smelt_plugin_api::open_file`）：对话里的文件链接、变更视图的
-    // 「打开文件」都经它进文件页。参数是 `FileLocation::to_args`。
-    with_args(hidden(def(
-        "smelt.files",
-        "open",
-        "打开文件",
-        None,
-        |this, args, window, cx| {
-            let Some(location) = api::FileLocation::from_args(args) else {
-                eprintln!("[commands] smelt.files/open 参数不对：{args}");
-                return Handled::Done;
-            };
-            let file = file_tree::FileRef {
-                runtime: location.machine,
-                path: location.path,
-            };
-            // 布局里没摆文件页就在舞台上开成一页，不能打开了却看不见。
-            let files = crate::builtin_views::Builtin::Files.id();
-            this.open_page(files, serde_json::Value::Null, window, cx);
-            this.view_file_on(file, location.line, window, cx);
-            this.save_state(cx);
-            Handled::Done
-        },
-    ))),
-    // 文件内容视图右键菜单里的那一项，见 `send_open_file_selection`。
-    hidden(def(
-        "smelt.files",
-        "send-selection",
-        "发送选中内容到会话",
-        None,
-        |this, _, window, cx| {
-            this.send_open_file_selection(window, cx);
-            Handled::Done
-        },
-    )),
 ];
 
 /// 按侧栏视觉顺序（各项目分组依次铺平）跳到第 `N + 1` 个会话。
@@ -475,7 +425,6 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
         },
         cx,
     );
-    api::register_file_opener("smelt.files", "open", cx);
 }
 
 /// 测试里不建工作台，只要登记出来的命令表。

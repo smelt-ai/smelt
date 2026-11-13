@@ -299,11 +299,6 @@ impl Workspace {
                                 agent_definition_id,
                                 automation_id,
                                 _acp_persist_sub,
-                                ui_state: ss
-                                    .route
-                                    .clone()
-                                    .map(SessionUiState::restore)
-                                    .unwrap_or_default(),
                             },
                         );
                         record_restored_index(
@@ -380,11 +375,6 @@ impl Workspace {
                             agent_definition_id: None,
                             automation_id: None,
                             _acp_persist_sub: None,
-                            ui_state: ss
-                                .route
-                                .clone()
-                                .map(SessionUiState::restore)
-                                .unwrap_or_default(),
                         },
                     );
                     record_restored_index(
@@ -438,7 +428,7 @@ impl Workspace {
                         this.active_session_revision != restore_active_revision,
                         this.active_session,
                     );
-                    this.sync_session_ui(window, cx);
+                    this.sync_session_ui(cx);
                     this.consume_pending_notification_session_jump(window, cx);
                     this.consume_pending_conversation_wakes(window, cx);
                     if let Some(Session {
@@ -552,24 +542,6 @@ impl Workspace {
         )
     }
 
-    /// 把工具面板（变更、文件树）里的文字交给当前会话：终端写进 PTY，对话放进输入框。
-    /// 都不带回车，发不发由人定。面板跟着选中的项目走，舞台上的会话不一定是这个项目的；
-    /// 不是时不发，不能把 B 项目的评论写进 A 的会话。没送到时告诉用户原因，返回 false。
-    pub(crate) fn send_to_panel_session(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        match self.send_to_session(text, window, cx) {
-            Ok(()) => true,
-            Err(reason) => {
-                self.report_background_error(reason);
-                false
-            }
-        }
-    }
-
     /// 把文字交给当前会话：终端打进输入，对话填进输入框，都不替用户发出。插件经
     /// [`smelt_plugin_api::Host::send_to_session`] 调到这里。
     pub(crate) fn send_to_session(
@@ -599,97 +571,13 @@ impl Workspace {
         Ok(())
     }
 
-    /// 活动 session 变化时，完整交换右侧工作区。用 session 自己的稳定 ui_id 判断，
-    /// 不依赖数组下标，所以拖拽排序、关闭前面的 session 都不会把快照串给别人。
-    pub(crate) fn sync_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(new_id) = self.cur().map(|session| session.ui_id) else {
-            let changed = self.ui_session_id.is_some();
-            self.park_active_project_ui();
-            self.ui_session_id = None;
-            if changed {
-                self.schedule_visible_refresh(cx);
-            }
-            return;
-        };
-        if self.ui_session_id == Some(new_id) {
-            return;
-        }
-        // 抽屉跟项目走：必须在会话交换之前停放，否则同项目切会话会把新会话
-        // 存档里那份过期抽屉当成该项目的现场。
-        let parked_key = self.park_active_project_ui();
-        if let Some(old_id) = self.ui_session_id {
-            if let Some(old_ix) = self.sessions.iter().position(|s| s.ui_id == old_id) {
-                swap_session_ui_state(
-                    &mut self.active_session_ui,
-                    &mut self.sessions[old_ix].ui_state,
-                );
-                if let Some(key) = parked_key.as_ref()
-                    && let Some(ui) = self.project_ui.get(key)
-                {
-                    ui.copy_persistable_into(&mut self.sessions[old_ix].ui_state);
-                }
-            }
-            if let Some(new_ix) = self.sessions.iter().position(|s| s.ui_id == new_id) {
-                swap_session_ui_state(
-                    &mut self.active_session_ui,
-                    &mut self.sessions[new_ix].ui_state,
-                );
-            }
-        } else if let Some(new_ix) = self.sessions.iter().position(|s| s.ui_id == new_id) {
-            // 空工作台没有任何会话可归属。首次挂载直接接管新会话的 UI 状态，
-            // 不能把空态期间临时点开的面板存回第一条新会话。
-            self.active_session_ui = std::mem::take(&mut self.sessions[new_ix].ui_state);
-        }
-        self.ui_session_id = Some(new_id);
-        self.apply_active_project_ui(window, cx);
-        self.schedule_visible_refresh(cx);
-    }
-
-    fn project_ui_key(&self, cx: &App) -> Option<ProjectRef> {
-        self.active_project_ref(cx)
-            .map(|project| project.at(crate::sidebar_order::normalize_project_root(&project.root)))
-            .filter(|project| !project.root.is_empty())
-    }
-
-    fn park_active_project_ui(&mut self) -> Option<ProjectRef> {
-        park_project_ui(
-            &mut self.active_session_ui,
-            &mut self.project_ui,
-            &mut self.active_project_ui_key,
-        )
-    }
-
-    fn apply_active_project_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let new_key = self.project_ui_key(cx);
-        apply_project_ui_for_root(
-            &mut self.active_session_ui,
-            &mut self.project_ui,
-            &mut self.active_project_ui_key,
-            new_key,
-        );
-        self.restore_active_route_runtime(window, cx);
-    }
-
-    /// 抽屉现场按项目根停放。会话没变、只换了选中项目时走这里。
-    pub(crate) fn sync_project_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let new_key = self.project_ui_key(cx);
-        if self.active_project_ui_key == new_key {
-            return;
-        }
-        self.park_active_project_ui();
-        self.apply_active_project_ui(window, cx);
-        self.schedule_visible_refresh(cx);
-    }
-
-    pub(crate) fn restore_active_route_runtime(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.active_session_ui.restored_from_archive = false;
-        self.file_tree_drag_start = None;
-        if let Some(path) = self.pending_restore_file.take() {
-            self.view_file(path, window, cx);
+    /// 活动会话变了就排一次可见数据刷新。用会话自己的稳定 ui_id 判断，不依赖数组下标，
+    /// 拖拽排序、关掉前面的会话都不会误判。
+    pub(crate) fn sync_session_ui(&mut self, cx: &mut Context<Self>) {
+        let new_id = self.cur().map(|session| session.ui_id);
+        if self.ui_session_id != new_id {
+            self.ui_session_id = new_id;
+            self.schedule_visible_refresh(cx);
         }
     }
 
@@ -1226,11 +1114,10 @@ impl Workspace {
             agent_definition_id,
             automation_id: None,
             _acp_persist_sub,
-            ui_state: SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
-        self.sync_session_ui(window, cx);
+        self.sync_session_ui(cx);
         view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
@@ -1327,7 +1214,6 @@ impl Workspace {
             agent_definition_id,
             automation_id,
             _acp_persist_sub,
-            ui_state: SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         let ix = self.sessions.len() - 1;
@@ -1455,7 +1341,6 @@ impl Workspace {
             agent_definition_id,
             automation_id: None,
             _acp_persist_sub,
-            ui_state: SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         let ix = self.sessions.len() - 1;
@@ -1881,12 +1766,6 @@ impl Workspace {
         }) {
             self.active_project = None;
         }
-        let project_key = project.at(crate::sidebar_order::normalize_project_root(&root));
-        self.project_ui.remove(&project_key);
-        if self.active_project_ui_key.as_ref() == Some(&project_key) {
-            self.active_project_ui_key = None;
-            let _ = self.active_session_ui.take_project_ui();
-        }
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -1895,21 +1774,12 @@ impl Workspace {
     /// 点选侧栏项目行：抽屉立刻绑到这个项目。此方法只更新项目上下文，不隐式改折叠
     /// 状态；标题事件会在同一次点击里显式调用 `toggle_project_collapsed`。不切舞台会话
     /// ——点项目只换项目上下文（文件树等），会话要点会话行才切。
-    pub(crate) fn select_project(
-        &mut self,
-        project: ProjectRef,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn select_project(&mut self, project: ProjectRef, cx: &mut Context<Self>) {
         let project = ProjectRef {
             root: project.root.trim_end_matches('/').to_string(),
             ..project
         };
-        let exists = self.find_project_group(&project, cx).is_some();
         self.active_project = Some(project);
-        if exists {
-            self.sync_project_ui(window, cx);
-        }
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -2391,11 +2261,9 @@ impl Workspace {
             self.mark_visible_session_read(cx);
             // 离线的远程机器隔几分钟才探一次；人回到这里时多半要用，立刻探一次。
             crate::runtime_events::probe_remotes(cx);
-            // 监听收不到的变化（监听登记失败、旧运行时）在人回来时补上。这里在绘制路径上，
-            // 标旧和排刷新挪到这一帧之后。
-            let view = cx.weak_entity();
-            cx.defer(move |cx| {
-                let _ = view.update(cx, |this, cx| this.on_window_refocused(cx));
+            // 监听收不到的变化（监听登记失败、旧运行时）由插件在人回来时补上。这里在绘制
+            // 路径上，事件挪到这一帧之后发。
+            cx.defer(|cx| {
                 smelt_plugin_api::emit(smelt_plugin_api::HostEvent::WindowActivated, cx);
             });
         }
@@ -2430,7 +2298,7 @@ impl Workspace {
                     root: g.root,
                 });
             }
-            self.sync_session_ui(window, cx);
+            self.sync_session_ui(cx);
             self.desktop = None;
             self.nav.set_active(WorkspaceRoute::Session);
             let route_has_overlay = stage_hidden;

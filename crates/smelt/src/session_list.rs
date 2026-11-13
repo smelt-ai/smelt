@@ -12,7 +12,7 @@
 //! 按项目分组时可整组/整行拖拽排序：项目改 `projects`，组内会话改 `sessions`，
 //! 都通过 `save_state` 落盘。
 //!
-//! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
+//! `impl Workspace` 方法，字段仍在 main.rs。
 
 use crate::{ProjectRef, RuntimeKey};
 use chrono::Local;
@@ -1271,14 +1271,14 @@ impl Workspace {
                                 this.clone(),
                             )
                         })
-                        .on_mouse_up(MouseButton::Left, move |_ev, window, cx| {
+                        .on_mouse_up(MouseButton::Left, move |_ev, _window, cx| {
                             let project = toggle_project.clone();
                             e_toggle.update(cx, |ws, cx| {
                                 // 整行也挂了 on_drag：超过阈值起拖后不要再当成点选。
                                 if ws.sidebar_drag.is_some() {
                                     return;
                                 }
-                                ws.select_project(project.clone(), window, cx);
+                                ws.select_project(project.clone(), cx);
                                 if crate::sidebar_order::project_header_click_toggles_collapse(
                                     !empty_group,
                                 ) {
@@ -1287,7 +1287,6 @@ impl Workspace {
                             });
                         })
                         .context_menu({
-                            let e_pin = e_menu.clone();
                             let e_sidebar_pin = e_menu.clone();
                             let e_close_proj = e_menu.clone();
                             let path = cwd.clone();
@@ -1299,8 +1298,8 @@ impl Workspace {
                                 if !is_project_group {
                                     return menu;
                                 }
-                                // 远程项目的文件不在这台机器上：用本机程序打开、钉进文件树
-                                // 都做不了，只给通用的几项。
+                                // 远程项目的文件不在这台机器上，用本机程序打开做不了，只给
+                                // 通用的几项。
                                 if !is_local_group {
                                     return remote_project_menu(
                                         menu,
@@ -1311,21 +1310,11 @@ impl Workspace {
                                     );
                                 }
                                 let copy_path = path.clone();
-                                let pin_path = path.clone();
                                 let sidebar_pin_project = close_project.clone();
-                                let e_pin = e_pin.clone();
                                 let e_sidebar_pin = e_sidebar_pin.clone();
                                 let e_close_proj = e_close_proj.clone();
                                 let close_project = close_project.clone();
                                 let copy_branch = copy_branch.clone();
-                                // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
-                                // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
-                                let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
-                                let pin_label = if pinned {
-                                    "从文件树移除"
-                                } else {
-                                    "加到文件树"
-                                };
                                 let sidebar_pinned =
                                     e_sidebar_pin.read(cx).is_project_pinned(&sidebar_pin_project);
                                 let sidebar_pin_label = if sidebar_pinned {
@@ -1382,16 +1371,6 @@ impl Workspace {
                                                 let project = sidebar_pin_project.clone();
                                                 e_sidebar_pin.update(cx, |ws, cx| {
                                                     ws.toggle_project_pinned(project, cx)
-                                                });
-                                            }),
-                                    )
-                                    .item(
-                                        PopupMenuItem::new(pin_label)
-                                            .icon(IconName::Folder)
-                                            .on_click(move |_ev, _window, cx| {
-                                                let pin_path = pin_path.clone();
-                                                e_pin.update(cx, |ws, cx| {
-                                                    ws.toggle_file_tree_root(pin_path, cx)
                                                 });
                                             }),
                                     )

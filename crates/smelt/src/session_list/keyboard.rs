@@ -325,7 +325,7 @@ impl Workspace {
             }
             SidebarItem::Group(project) if self.sidebar_grouping == SidebarGrouping::Project => {
                 // 跟点项目行一样：选中这个项目，有会话才开合。
-                self.select_project(project.clone(), window, cx);
+                self.select_project(project.clone(), cx);
                 if self.sidebar_container_open(&cursor, cx).is_some() {
                     self.toggle_sidebar_container(&cursor, cx);
                 }

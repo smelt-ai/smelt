@@ -77,66 +77,13 @@ impl Workspace {
         // 先把活动和路由对齐，后面的文件树才看得到这一次切换的结果。
         // 对齐里的 activate 会再请求刷新；running 让那次请求直接丢掉，
         // 因为这次刷新还会继续往下走。
-        self.sync_session_ui(window, cx);
+        self.sync_session_ui(cx);
         self.align_visible_route(window, cx);
         self.sync_notification_surfaces(cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
 
         self.note_active_project(cx);
         self.note_shown_views(cx);
-
-        if self.files_view_visible() {
-            if self.file_filter.is_none() {
-                use gpui_component::input::{InputEvent, InputState};
-                let state =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
-                self._file_filter_sub =
-                    Some(cx.subscribe(&state, |this, _, ev: &InputEvent, cx| {
-                        if matches!(ev, InputEvent::Change) {
-                            this.schedule_visible_refresh(cx);
-                            cx.notify();
-                        }
-                    }));
-                self.file_filter = Some(state);
-            }
-            let query = self
-                .file_filter
-                .as_ref()
-                .map(|s| s.read(cx).value().trim().to_string())
-                .unwrap_or_default();
-            let runtime = self.file_tree_runtime(cx);
-            let roots: Vec<crate::ProjectRef> = self
-                .workspace_roots(cx)
-                .into_iter()
-                .map(|root| crate::ProjectRef {
-                    runtime: runtime.clone(),
-                    root,
-                })
-                .collect();
-            if query.is_empty() {
-                self.search_results = None;
-                self.cancel_file_search();
-                for root in &roots {
-                    // 目录列表靠运行时的变化通知失效，每个挂出来的根都要有监听。
-                    self.ensure_watch(root.clone(), cx);
-                    self.ensure_git_status(root.clone(), cx);
-                    self.ensure_dir_listing(root.clone(), cx);
-                }
-                for dir in self.expanded.clone() {
-                    self.ensure_dir_listing(
-                        crate::ProjectRef {
-                            runtime: runtime.clone(),
-                            root: dir,
-                        },
-                        cx,
-                    );
-                }
-                self.try_flush_file_tree_reveal(cx);
-            } else if let Some(root) = self.active_project_ref(cx) {
-                self.ensure_git_status(root.clone(), cx);
-                self.ensure_search(root, query, cx);
-            }
-        }
 
         let want_bg = cx.global::<Appearance>().window_bg();
         let glass_style = cx.global::<Appearance>().glass_style;

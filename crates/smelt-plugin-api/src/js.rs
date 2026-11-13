@@ -46,6 +46,8 @@ export function agent_settings(machine: Machine): unknown | null;
 export function view_shown(view: string): boolean;
 /** 主窗口此刻在前台。回到前台发 window_activated，去后台不发：定时做事的醒来时问这里，不在前台就停。 */
 export function window_active(): boolean;
+/** 主窗口里宿主的遮罩层（确认框、命令面板、大图预览）开着。开关时发 overlay_changed。 */
+export function overlay_open(): boolean;
 /** 发送系统通知；显示受系统通知授权和设置影响。 */
 export function notify(subtitle: string, body: string): null;
 /** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
@@ -118,6 +120,7 @@ export type HostEvent =
   | { type: "reconnected"; machine: Machine }
   | { type: "project_changed"; machine: Machine; root: string }
   | { type: "window_activated" }
+  | { type: "overlay_changed" }
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
   | { type: "agent_settings_changed" }
@@ -212,6 +215,9 @@ impl JsPlugin {
             })
             .function("window_active", |_arguments| {
                 Ok(in_app("window_active", |cx| crate::host(cx).window_active(cx))?.into())
+            })
+            .function("overlay_open", |_arguments| {
+                Ok(in_app("overlay_open", |cx| crate::host(cx).overlay_open(cx))?.into())
             })
             .function("notify", |arguments| {
                 let subtitle = arguments.string(0)?;
@@ -791,6 +797,7 @@ fn event_value(event: &HostEvent) -> HostValue {
             .field("machine", machine(key))
             .field("root", root.as_str()),
         HostEvent::WindowActivated => HostObject::new().field("type", "window_activated"),
+        HostEvent::OverlayChanged => HostObject::new().field("type", "overlay_changed"),
         HostEvent::MachinesChanged => HostObject::new().field("type", "machines_changed"),
         HostEvent::ActiveProjectChanged => {
             HostObject::new().field("type", "active_project_changed")

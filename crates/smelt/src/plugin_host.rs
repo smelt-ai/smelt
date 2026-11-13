@@ -120,6 +120,11 @@ impl api::Host for SmeltHost {
             .is_some_and(|workspace| workspace.read(cx).workspace_window_active)
     }
 
+    fn overlay_open(&self, cx: &App) -> bool {
+        self.workspace()
+            .is_some_and(|workspace| workspace.read(cx).main_overlay_open())
+    }
+
     fn main_window(&self, _cx: &App) -> Option<AnyWindowHandle> {
         self.current
             .borrow()
@@ -167,6 +172,7 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
     })
     .detach();
     smelt_capabilities::register(cx);
+    smelt_files_ui::register(cx);
     smelt_git_ui::register(cx);
     smelt_history::register(cx);
     smelt_layouts::register(cx);
@@ -278,6 +284,16 @@ impl Workspace {
         if self.plugin_shown_views != shown {
             self.plugin_shown_views = shown;
             api::emit(HostEvent::ShownViewsChanged, cx);
+        }
+    }
+
+    /// 遮罩层开了或关了就告诉插件：画着原生网页视图的插件要让开。插件视图在面板里是缓存着
+    /// 画的，工作台重画不会带着它重画，只能靠事件。
+    pub(crate) fn note_overlay(&mut self, cx: &mut Context<Self>) {
+        let open = self.main_overlay_open();
+        if self.plugin_overlay_open != open {
+            self.plugin_overlay_open = open;
+            api::emit(HostEvent::OverlayChanged, cx);
         }
     }
 }

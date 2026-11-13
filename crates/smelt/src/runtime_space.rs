@@ -128,16 +128,6 @@ pub(crate) struct ProjectRef {
     pub(crate) root: String,
 }
 
-impl ProjectRef {
-    /// 同一台机器上的另一个目录。
-    pub(crate) fn at(&self, root: impl Into<String>) -> ProjectRef {
-        ProjectRef {
-            runtime: self.runtime.clone(),
-            root: root.into(),
-        }
-    }
-}
-
 impl crate::Workspace {
     /// 属于这个运行时的会话下标（升序）。
     pub(crate) fn space_members(
