@@ -2,7 +2,9 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	compact,
+	convertToLlm,
 	type ExtensionContext,
+	serializeConversation,
 	type SessionBeforeCompactEvent,
 	type SessionBeforeCompactResult,
 } from "@earendil-works/pi-coding-agent";
@@ -114,10 +116,42 @@ export function shrinkPreparation(preparation: CompactionPreparation): Compactio
 	return undefined;
 }
 
+/** 中文多，按 3 个字符一个 token 偏保守地估。 */
+const CHARS_PER_TOKEN = 3;
+/** 系统提示、交接指令、上一次摘要之外的余量。 */
+const PROMPT_MARGIN_TOKENS = 8_000;
+
+/** 估算摘要请求的输入大小，口径与 Pi 一致：先 `convertToLlm` 再 `serializeConversation`。 */
+export function estimateSummaryInputTokens(preparation: CompactionPreparation): number {
+	const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+	const text = serializeConversation(convertToLlm(messages));
+	return Math.ceil((text.length + (preparation.previousSummary?.length ?? 0)) / CHARS_PER_TOKEN);
+}
+
+/**
+ * 发请求前先按窗口估一下，放不下就从最老的历史丢起。
+ * 典型场景：在 1M 窗口的模型上聊到 50 万，切到 256K 的模型再压缩。
+ */
+export function fitPreparationToWindow(
+	preparation: CompactionPreparation,
+	model: { contextWindow?: number; maxTokens?: number },
+): CompactionPreparation {
+	if (!model.contextWindow) return preparation;
+	const budget = model.contextWindow - (model.maxTokens ?? 0) - PROMPT_MARGIN_TOKENS;
+	let current = preparation;
+	while (estimateSummaryInputTokens(current) > budget) {
+		const smaller = shrinkPreparation(current);
+		if (!smaller) break;
+		current = smaller;
+	}
+	return current;
+}
+
 /**
  * 执行结构化 Handoff 压缩。
  * 如果缺少模型或凭据，返回 undefined 自动回退到 Pi 默认压缩实现。
- * 摘要请求本身超窗时，丢最老的历史重试，最多 {@link MAX_OVERFLOW_RETRIES} 次。
+ * 发请求前先按窗口裁掉放不下的最老历史；估算不准仍超窗时，再丢最老的历史重试，
+ * 最多 {@link MAX_OVERFLOW_RETRIES} 次。
  */
 export async function runHandoffCompaction(
 	preparation: CompactionPreparation,
@@ -136,7 +170,7 @@ export async function runHandoffCompaction(
 		}
 		const instructions = buildHandoffInstructions(customInstructions);
 		const model = summarizationModel(ctx.model, preparation.settings);
-		let current = preparation;
+		let current = fitPreparationToWindow(preparation, model);
 		for (let attempt = 0; ; attempt += 1) {
 			try {
 				return await compactFn(

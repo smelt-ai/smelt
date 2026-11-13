@@ -5,6 +5,8 @@ import {
 	DEFAULT_HANDOFF_INSTRUCTIONS,
 	MAX_OVERFLOW_RETRIES,
 	runHandoffCompaction,
+	estimateSummaryInputTokens,
+	fitPreparationToWindow,
 	shrinkPreparation,
 	summarizationModel,
 	TRUNCATED_FOR_RETRY_MARKER,
@@ -151,6 +153,18 @@ describe("compaction overflow retry", () => {
 			TRUNCATED_FOR_RETRY_MARKER, "p1", "p2", "p3", "p4",
 		]);
 		expect(shrinkPreparation(preparation([user("only")]))).toBeUndefined();
+	});
+
+	test("trims history that cannot fit the summary model before sending", () => {
+		const messages = Array.from({ length: 10 }, (_, i) => user(`${i}`.repeat(3_000)));
+		const model = { contextWindow: 14_000, maxTokens: 0 };
+		const fitted = fitPreparationToWindow(preparation(messages), model);
+		expect(estimateSummaryInputTokens(fitted)).toBeLessThanOrEqual(14_000 - 8_000);
+		expect(fitted.messagesToSummarize[0]).toMatchObject({ content: TRUNCATED_FOR_RETRY_MARKER });
+		expect(fitted.messagesToSummarize.at(-1)).toBe(messages.at(-1));
+		// 放得下就原样返回
+		const roomy = preparation(messages);
+		expect(fitPreparationToWindow(roomy, { contextWindow: 1_000_000, maxTokens: 16_000 })).toBe(roomy);
 	});
 
 	test("retries a context overflow with less history", async () => {
