@@ -379,7 +379,8 @@ fn register_with(
     }
 }
 
-/// 工作台建好时登记。工作台没了的话命令什么都不做，按键交给下一条绑定。
+/// 工作台建好时登记。工作台没了的话命令什么都不做，按键交给下一条绑定；自带命令都要
+/// 主窗口，没开时交回 [`api::NO_MAIN_WINDOW`]。
 pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
     let typed: WorkspaceRef = {
         let workspace = workspace.clone();
@@ -390,7 +391,10 @@ pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut App) {
             let workspace = workspace.clone();
             let run = def.run;
             Rc::new(
-                move |args: &serde_json::Value, window: &mut Window, cx: &mut App| {
+                move |args: &serde_json::Value, window: Option<&mut Window>, cx: &mut App| {
+                    let Some(window) = window else {
+                        return Handled::err(api::NO_MAIN_WINDOW);
+                    };
                     workspace
                         .update(cx, |this, cx| run(this, args, window, cx))
                         .unwrap_or(Handled::Pass)

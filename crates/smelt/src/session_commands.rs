@@ -8,7 +8,7 @@ use smelt_plugin_api::CommandSpec;
 use smelt_plugin_api::sessions::{self, Handoff, Resume};
 
 use super::*;
-use crate::plugin_host::{WorkspaceRef, update_workspace};
+use crate::plugin_host::{WorkspaceRef, main_window, update_workspace};
 
 /// 宿主登记的会话命令，跟 `smelt.sessions` 的自带命令一起登记。
 pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
@@ -18,6 +18,7 @@ pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let send = workspace.clone();
     vec![
         sessions::RESUME.spec("续接历史会话", move |args, window, cx| {
+            let window = main_window(window)?;
             update_workspace(&resume, cx, |this, cx| {
                 this.resume_from_history(args, window, cx)
             })
@@ -28,9 +29,11 @@ pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             })
         }),
         sessions::HANDOFF.spec("交接给另一家 agent", move |args, window, cx| {
+            let window = main_window(window)?;
             update_workspace(&handoff, cx, |this, cx| this.hand_off(args, window, cx))
         }),
         sessions::SEND_TEXT.spec("交给当前会话", move |args, window, cx| {
+            let window = main_window(window)?;
             update_workspace(&send, cx, |this, cx| {
                 this.send_to_session(&args.text, window, cx)
             })

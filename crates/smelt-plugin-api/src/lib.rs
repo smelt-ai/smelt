@@ -41,8 +41,8 @@ mod view;
 pub mod js;
 
 pub use command::{
-    Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, RunCommand, command,
-    commands, invoke, register_commands, run, unregister_commands,
+    Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, NO_MAIN_WINDOW,
+    RunCommand, command, commands, invoke, register_commands, run, unregister_commands,
 };
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{

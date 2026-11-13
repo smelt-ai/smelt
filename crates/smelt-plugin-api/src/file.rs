@@ -75,7 +75,7 @@ fn opener(cx: &App) -> Option<String> {
         .cloned()
 }
 
-/// 打开一个文件位置。排到这一轮之后在主窗口里执行（见 [`crate::run`]）。没有打开者时，
+/// 打开一个文件位置。排到这一轮之后执行（见 [`crate::run`]）。没有打开者时，
 /// 本机的文件交给系统文本编辑器，远程的失败。失败给的是可以直接显示的原因。
 pub fn open_file(location: FileLocation, cx: &mut App) -> Task<Result<(), String>> {
     if let Some(command) = opener(cx) {

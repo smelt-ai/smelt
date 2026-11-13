@@ -112,14 +112,20 @@ impl api::Host for SmeltHost {
 /// 宿主动作命令取工作台用：工作台没建（测试里只登记命令表）时是 `None`。
 pub(crate) type WorkspaceRef = Rc<dyn Fn(&App) -> Option<Entity<Workspace>>>;
 
-/// 在工作台里做 `f`；工作台没了算失败。
+/// 在工作台里做 `f`；工作台没了算失败。主窗口就是工作台所在的窗口，所以用得到窗口的
+/// 命令先取窗口（[`main_window`]），再进这里。
 pub(crate) fn update_workspace<R>(
     workspace: &WorkspaceRef,
     cx: &mut App,
     f: impl FnOnce(&mut Workspace, &mut Context<Workspace>) -> Result<R, String>,
 ) -> Result<R, String> {
-    let workspace = workspace(cx).ok_or_else(|| "主窗口没有打开".to_string())?;
+    let workspace = workspace(cx).ok_or_else(|| api::NO_MAIN_WINDOW.to_string())?;
     workspace.update(cx, f)
+}
+
+/// 命令拿到的主窗口；没开时交回 [`api::NO_MAIN_WINDOW`]。
+pub(crate) fn main_window(window: Option<&mut Window>) -> Result<&mut Window, String> {
+    window.ok_or_else(|| api::NO_MAIN_WINDOW.to_string())
 }
 
 /// 宿主的动作 `smelt.app/*`（参数、结果见 `smelt_plugin_api` 里的同名常量）。
@@ -149,6 +155,7 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             cx.spawn(async move |_| Ok(picked.recv().await.ok()))
         }),
         api::OPEN_VIEW.spec("打开视图", move |args, window, cx| {
+            let window = main_window(window)?;
             update_workspace(&views, cx, |workspace, cx| {
                 Ok(workspace.open_page(&args.view, args.args, window, cx))
             })
