@@ -371,7 +371,7 @@ pub(crate) fn finish(
         workspace_catalog::delete_workset_on_locked(store, &workset.id).map_err(|error| {
             ControlError::new(
                 ControlErrorCode::OperationFailed,
-                format!("Git worktree 已收工，但删除工作树记录失败：{error}"),
+                format!("Git worktree 已关闭，但删除工作树记录失败：{error}"),
             )
         })?;
     publish_change(&change, event_hub);

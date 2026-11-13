@@ -334,7 +334,7 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
             }
             if !status.stdout.is_empty() {
                 return Err(WorktreeError::new(format!(
-                    "仓库 {} 有未提交改动，已阻止整组收工",
+                    "仓库 {} 有未提交改动或未跟踪文件，已阻止关闭工作树",
                     repository.name
                 )));
             }
@@ -359,7 +359,7 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
             if !merged.success() {
                 if merged.code == Some(1) {
                     return Err(WorktreeError::new(format!(
-                        "仓库 {} 的分支 {} 尚未合并，已阻止整组收工",
+                        "仓库 {} 的分支 {} 尚未合并，已阻止关闭工作树",
                         repository.name, workset.branch
                     )));
                 }
@@ -423,7 +423,7 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
             return Err(WorktreeError::new(format!(
-                "已收工，但无法读取工作树目录 {}：{error}",
+                "工作树已关闭，但无法读取工作树目录 {}：{error}",
                 task_root.display()
             )));
         }
@@ -431,7 +431,7 @@ pub fn finish_workset(workset: &Workset) -> Result<FinishReport, WorktreeError> 
     if leftover_entries.is_empty() && task_root.exists() {
         fs::remove_dir(&task_root).map_err(|error| {
             WorktreeError::new(format!(
-                "已收工，但无法移除空工作树目录 {}：{error}",
+                "工作树已关闭，但无法移除空工作树目录 {}：{error}",
                 task_root.display()
             ))
         })?;
