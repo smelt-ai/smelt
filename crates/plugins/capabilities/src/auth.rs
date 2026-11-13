@@ -1,4 +1,4 @@
-//! 设置页：Pi 内置 provider 的登录与注销。
+//! 设置页：Pi 内置 provider 的登录与注销，以及 MCP 服务器的 OAuth 登录（同一套登录会话和面板）。
 //!
 //! 凭据助手跑在运行时那台机器上（`pi.auth.*`，见 [`api::model::pi_auth_service`]）。
 //! 本文件只做两件事：把登录事件搬进 `CapabilitiesPage` 的状态，以及把用户在面板上的动作
@@ -9,15 +9,16 @@
 //! 粘贴还会互相抢跑。所以这里拿着登录 id 长轮询事件，边取边 fold 进视图状态。
 
 use super::*;
+use api::client::RuntimeClient;
 use api::client::protocol::control::EmptyParams;
 use api::model::control_api::{
     PiAuthLoginAnswer, PiAuthLoginCancel, PiAuthLoginEvents, PiAuthLoginStart, PiAuthLogout,
-    PiAuthModels, PiAuthProviders,
+    PiAuthModels, PiAuthProviders, PiMcpLoginStart,
 };
 use api::model::pi_auth_service::{
     LoginAnswerParams, LoginEventsParams, LoginIdParams, LoginStartParams,
 };
-use api::model::pi_service::ProviderIdParams;
+use api::model::pi_service::{McpServerParams, ProviderIdParams};
 
 /// 凭据助手首次使用可能要装运行时，给得宽一些。
 const AUTH_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
@@ -53,7 +54,7 @@ impl CapabilitiesPage {
         cx.notify();
     }
 
-    /// 开始一次登录。
+    /// 开始一次 provider 登录。
     pub fn start_pi_login(
         &mut self,
         provider_id: String,
@@ -63,10 +64,71 @@ impl CapabilitiesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let params = LoginStartParams {
+            provider_id: provider_id.clone(),
+            method,
+            ask_all,
+        };
+        self.run_pi_login(
+            PiLoginTarget::Provider {
+                id: provider_id,
+                name: provider_name,
+            },
+            move |client| {
+                client
+                    .call::<PiAuthLoginStart>(&params, AUTH_CALL_TIMEOUT)
+                    .map(|started| started.login_id)
+                    .map_err(api::call_error_text)
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// 登录一台要 OAuth 的 MCP 服务器。授权链接由运行时交回来，在这台机器上打开：运行时那台
+    /// 可能没有桌面，用户也可能不在它跟前。
+    pub fn start_pi_mcp_login(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pi_mcp_error = None;
+        let params = McpServerParams { name: name.clone() };
+        self.run_pi_login(
+            PiLoginTarget::Mcp { name },
+            move |client| {
+                client
+                    .call::<PiMcpLoginStart>(&params, AUTH_CALL_TIMEOUT)
+                    .map(|started| started.login_id)
+                    .map_err(api::call_error_text)
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// 起一次登录并一直取事件到结束。面板立刻出来，登录 id 回来后补上。
+    fn run_pi_login(
+        &mut self,
+        target: PiLoginTarget,
+        start: impl FnOnce(RuntimeClient) -> Result<String, String> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use gpui_component::input::{InputEvent, InputState};
 
         self.cancel_pi_login(cx);
         self.pi_auth_error = None;
+        // 登录在能力库眼下那台机器上跑，整条事件流都问它。
+        let client = match self.pi_library_client(cx) {
+            Ok(client) => client,
+            Err(error) => {
+                self.report_login_error(&target, error);
+                cx.notify();
+                return;
+            }
+        };
         // 输入框必须在这里建：提问从子进程的事件流里来，那里没有 `Window`。
         let input = cx.new(|cx| InputState::new(window, cx));
         let secret_input = cx.new(|cx| InputState::new(window, cx).masked(true));
@@ -97,65 +159,61 @@ impl CapabilitiesPage {
                 },
             ),
         ]);
+        self.pi_login = Some(PiLoginView {
+            target: target.clone(),
+            login_id: None,
+            messages: Vec::new(),
+            auth_url: None,
+            instructions: None,
+            device_code: None,
+            prompt: None,
+            input,
+            secret_input,
+            input_subscriptions,
+            outcome: None,
+            models: None,
+        });
         cx.notify();
-        let started_id = provider_id;
-        // 登录在能力库眼下那台机器上跑，整条事件流都问它。
-        let client = self.pi_library_client(cx);
         cx.spawn(async move |this, cx| {
-            let client = match client {
-                Ok(client) => client,
-                Err(error) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.pi_auth_error = Some(error);
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            let params = LoginStartParams {
-                provider_id: started_id.clone(),
-                method,
-                ask_all,
-            };
             let start_client = client.clone();
             let outcome = cx
                 .background_executor()
-                .spawn(async move {
-                    start_client
-                        .call::<PiAuthLoginStart>(&params, AUTH_CALL_TIMEOUT)
-                        .map_err(api::call_error_text)
-                })
+                .spawn(async move { start(start_client) })
                 .await;
-            let login_id = match outcome {
-                Ok(started) => started.login_id,
-                Err(error) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.pi_auth_error = Some(error);
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.pi_login = Some(PiLoginView {
-                    provider_id: started_id.clone(),
-                    provider_name,
-                    login_id: login_id.clone(),
-                    messages: Vec::new(),
-                    auth_url: None,
-                    instructions: None,
-                    device_code: None,
-                    prompt: None,
-                    input,
-                    secret_input,
-                    input_subscriptions,
-                    outcome: None,
-                    models: None,
-                });
+            // 等的这段时间里面板可能被关掉、换成了别的登录：这次起的就没人要了，撤掉。
+            let login_id = match this.update(cx, |this, cx| {
+                let view = this
+                    .pi_login
+                    .as_mut()
+                    .filter(|view| view.target == target && view.login_id.is_none());
+                let result = match (view, outcome) {
+                    (Some(view), Ok(login_id)) => {
+                        view.login_id = Some(login_id.clone());
+                        Some(login_id)
+                    }
+                    (Some(view), Err(error)) => {
+                        view.outcome = Some(Err(error));
+                        None
+                    }
+                    (None, Ok(login_id)) => {
+                        this.run_pi_call::<PiAuthLoginCancel>(
+                            LoginIdParams { login_id },
+                            api::CALL_TIMEOUT,
+                            cx,
+                            |_, _, _| {},
+                        );
+                        None
+                    }
+                    (None, Err(_)) => None,
+                };
                 cx.notify();
-            });
-            // 一直取到登录结束。面板换了 provider、关了，或窗口没了，就不再取：运行时
-            // 那边没人来取事件，过一会儿会自己杀掉子进程。
+                result
+            }) {
+                Ok(Some(login_id)) => login_id,
+                _ => return,
+            };
+            // 一直取到登录结束。面板换了登录、关了，或窗口没了，就不再取：运行时那边没人
+            // 来取事件，过一会儿会自己杀掉子进程。
             let mut after = 0;
             loop {
                 let params = LoginEventsParams {
@@ -198,6 +256,14 @@ impl CapabilitiesPage {
         .detach();
     }
 
+    /// 登录面板还没有（或已经没了）时的错误，记在对应页签上。
+    fn report_login_error(&mut self, target: &PiLoginTarget, error: String) {
+        match target {
+            PiLoginTarget::Provider { .. } => self.pi_auth_error = Some(error),
+            PiLoginTarget::Mcp { .. } => self.pi_mcp_error = Some(error),
+        }
+    }
+
     /// 把一个登录事件 fold 进面板状态。返回 false 表示这条流已经没人要了。
     fn apply_pi_login_event(
         &mut self,
@@ -210,7 +276,7 @@ impl CapabilitiesPage {
         let Some(view) = self.pi_login.as_mut() else {
             return false;
         };
-        if view.login_id != login_id {
+        if view.login_id.as_deref() != Some(login_id) {
             return false;
         }
         match event {
@@ -259,15 +325,27 @@ impl CapabilitiesPage {
                 view.auth_url = None;
                 view.device_code = None;
                 view.outcome = Some(Ok(()));
-                let provider_id = view.provider_id.clone();
+                let target = view.target.clone();
                 self.refresh_pi_library(cx);
-                self.refresh_pi_auth_providers(cx);
-                self.load_pi_models_for(provider_id, cx);
+                match target {
+                    PiLoginTarget::Provider { id, .. } => {
+                        self.refresh_pi_auth_providers(cx);
+                        self.load_pi_models_for(id, cx);
+                    }
+                    // 没有后续可做，面板直接收起；「已登录」标签随刷新的配置出来。
+                    PiLoginTarget::Mcp { name } => {
+                        self.pi_login = None;
+                        notify_success(format!("MCP 服务器 {name} 已登录"), cx);
+                    }
+                }
             }
             // `parse_login_event` 把它挡在流外了，走不到这里。
             PiLoginEvent::Unknown => {}
             PiLoginEvent::Error { message } => {
                 view.prompt = None;
+                // 授权链接和验证码只对这一次登录有效，失败后再点只会撞上关掉的回调。
+                view.auth_url = None;
+                view.device_code = None;
                 // 用户自己点的取消不是失败，会话已经被丢掉，走不到这里。
                 view.outcome = Some(Err(message));
             }
@@ -291,7 +369,7 @@ impl CapabilitiesPage {
             move |this, outcome, cx| {
                 let outcome = outcome.map(|result| result.models);
                 if let Some(view) = this.pi_login.as_mut()
-                    && view.provider_id == provider_id
+                    && view.provider_id() == Some(provider_id.as_str())
                 {
                     view.models = Some(outcome.clone());
                 }
@@ -350,8 +428,11 @@ impl CapabilitiesPage {
         let Some(input) = view.active_input().cloned() else {
             return;
         };
+        let Some(login_id) = view.login_id.clone() else {
+            return;
+        };
         let value = input.read(cx).value().trim().to_string();
-        self.answer_pi_login(view.login_id.clone(), prompt.id.clone(), value, cx);
+        self.answer_pi_login(login_id, prompt.id.clone(), value, cx);
         // 输入框是整场登录共用的，答完就清空：下一个提问不该带着上一个的内容。
         input.update(cx, |state, cx| state.set_value("", window, cx));
         if let Some(view) = self.pi_login.as_mut() {
@@ -368,7 +449,10 @@ impl CapabilitiesPage {
         let Some(prompt) = view.prompt.as_ref() else {
             return;
         };
-        self.answer_pi_login(view.login_id.clone(), prompt.id.clone(), option_id, cx);
+        let Some(login_id) = view.login_id.clone() else {
+            return;
+        };
+        self.answer_pi_login(login_id, prompt.id.clone(), option_id, cx);
         if let Some(view) = self.pi_login.as_mut() {
             view.prompt = None;
         }
@@ -392,7 +476,10 @@ impl CapabilitiesPage {
             cx,
             |this, result, cx| {
                 if let Err(error) = result {
-                    this.pi_auth_error = Some(error);
+                    match this.pi_login.as_mut() {
+                        Some(view) => view.messages.push(format!("提交失败：{error}")),
+                        None => this.pi_auth_error = Some(error),
+                    }
                     cx.notify();
                 }
             },
@@ -401,11 +488,9 @@ impl CapabilitiesPage {
 
     /// 取消（或关掉）登录面板。运行时撤掉回调服务器、杀掉子进程。
     pub fn cancel_pi_login(&mut self, cx: &mut Context<Self>) {
-        if let Some(view) = self.pi_login.take() {
+        if let Some(login_id) = self.pi_login.take().and_then(|view| view.login_id) {
             self.run_pi_call::<PiAuthLoginCancel>(
-                LoginIdParams {
-                    login_id: view.login_id,
-                },
+                LoginIdParams { login_id },
                 api::CALL_TIMEOUT,
                 cx,
                 |_, _, _| {},

@@ -211,12 +211,6 @@ pub fn remove_mcp_server(params: McpServerParams) -> Result<(), String> {
     crate::pi_mcp::remove_pi_mcp_server(&params.name)
 }
 
-/// 跑 `pi mcp login <name>`：需要授权时 Pi 打开浏览器，等回调写好令牌。
-/// 浏览器开在运行时那台机器上；远程运行时上的 OAuth 登录要等登录地址能转给客户端。
-pub fn login_mcp_server(params: McpServerParams) -> Result<(), String> {
-    crate::pi_mcp::login_pi_mcp_server(&params.name, &|_| {}).map(|_| ())
-}
-
 /// 先清掉这台机器上各智能体对这个插件的勾选，再删 `~/.pi` 下的插件实体。顺序的道理同
 /// [`remove_mcp_server`]。
 pub fn remove_plugin(params: PluginIdParams) -> Result<(), String> {

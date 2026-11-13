@@ -77,13 +77,22 @@ pub struct PiLoginPrompt {
     pub options: Vec<api::model::pi_auth::PiPromptOption>,
 }
 
+/// 登录的是什么。两种登录在运行时那边是同一套会话（授权链接、粘贴、取消），面板也共用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PiLoginTarget {
+    /// Pi 内置 provider 的订阅 / API key 登录。
+    Provider { id: String, name: String },
+    /// `~/.pi/agent/mcp.json` 里一台要 OAuth 的 HTTP MCP 服务器。
+    Mcp { name: String },
+}
+
 /// 一次进行中的（或刚结束的）登录。登录本身跑在运行时那边，这里只拿着它的 id。
 #[derive(Clone)]
 pub struct PiLoginView {
-    pub provider_id: String,
-    pub provider_name: String,
-    /// 运行时给的登录 id：取事件、回答、取消都带着它。
-    pub login_id: String,
+    pub target: PiLoginTarget,
+    /// 运行时给的登录 id：取事件、回答、取消都带着它。`None` 是还在请运行时起登录
+    /// （首次可能要先装运行时），面板先出来，点了不至于没反应。
+    pub login_id: Option<String>,
     /// progress / info 的流水，最新的在最后。
     pub messages: Vec<String>,
     pub auth_url: Option<String>,
@@ -106,6 +115,27 @@ pub struct PiLoginView {
 }
 
 impl PiLoginView {
+    /// 登录的是哪个内置 provider。
+    pub fn provider_id(&self) -> Option<&str> {
+        match &self.target {
+            PiLoginTarget::Provider { id, .. } => Some(id),
+            PiLoginTarget::Mcp { .. } => None,
+        }
+    }
+
+    /// 登录的是哪台 MCP 服务器。
+    pub fn mcp_server(&self) -> Option<&str> {
+        match &self.target {
+            PiLoginTarget::Mcp { name } => Some(name),
+            PiLoginTarget::Provider { .. } => None,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        match &self.target {
+            PiLoginTarget::Provider { name, .. } | PiLoginTarget::Mcp { name } => name,
+        }
+    }
     /// 当前提问该用哪个输入框。
     pub fn active_input(&self) -> Option<&Entity<gpui_component::input::InputState>> {
         match self.prompt.as_ref()?.kind {

@@ -85,7 +85,6 @@ impl CapabilitiesPage {
         self.pi_auth_providers = None;
         self.pi_auth_model_picker = None;
         self.pi_auth_error = None;
-        self.pi_mcp_login = None;
         self.pi_mcp_pending_remove = None;
         self.pi_mcp_error = None;
         self.pi_model_editor_error = None;

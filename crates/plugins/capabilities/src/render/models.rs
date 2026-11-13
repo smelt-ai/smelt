@@ -431,7 +431,11 @@ fn provider_section(
     let (entries, hidden) =
         merge_providers(builtin, custom, default_provider, page.pi_auth_show_all);
     let custom_editor = page.pi_custom_provider_editor.as_ref();
-    let login = page.pi_login.as_ref();
+    // MCP 服务器的登录画在 MCP 页签。
+    let login = page
+        .pi_login
+        .as_ref()
+        .filter(|view| view.provider_id().is_some());
     let picker = page.pi_auth_model_picker.as_ref();
     let login_busy = login.is_some();
 
@@ -487,7 +491,9 @@ fn provider_section(
                     login_busy,
                     palette,
                 ));
-                if let Some(view) = login.filter(|view| view.provider_id == provider.id) {
+                if let Some(view) =
+                    login.filter(|view| view.provider_id() == Some(provider.id.as_str()))
+                {
                     rendered_login = true;
                     row = row.child(super::auth::login_panel(
                         entity.clone(),

@@ -217,7 +217,7 @@ fn dispatch_control(
         | ControlMethod::PiMcpAddPreset
         | ControlMethod::PiMcpSetEnabled
         | ControlMethod::PiMcpRemove
-        | ControlMethod::PiMcpLogin
+        | ControlMethod::PiMcpLoginStart
         | ControlMethod::PiPluginsRemove
         | ControlMethod::PiPluginsImport
         | ControlMethod::PiAuthProviders

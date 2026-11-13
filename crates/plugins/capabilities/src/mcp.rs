@@ -1,13 +1,11 @@
-//! 能力库「MCP」页签背后的操作：改 `~/.pi/agent/mcp.json`、跑 `pi mcp login`。
+//! 能力库「MCP」页签背后的操作：改 `~/.pi/agent/mcp.json`。登录和 provider 登录共用一套，
+//! 见 `auth.rs` 的 `start_pi_mcp_login`。
 //!
 //! 都由运行时执行（`pi.mcp.*`），每次修改回带新的 Pi 配置快照；这里只管视图状态。
 
 use super::*;
-use api::model::control_api::{PiMcpAddPreset, PiMcpLogin, PiMcpRemove, PiMcpSetEnabled};
+use api::model::control_api::{PiMcpAddPreset, PiMcpRemove, PiMcpSetEnabled};
 use api::model::pi_service::{McpEnabledParams, McpPresetParams, McpServerParams};
-
-/// 登录要等用户在浏览器里授权。
-const MCP_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 impl CapabilitiesPage {
     pub fn add_pi_mcp_preset(&mut self, id: &'static str, cx: &mut Context<Self>) {
@@ -50,32 +48,5 @@ impl CapabilitiesPage {
             this.pi_mcp_error = Some(error)
         });
         cx.notify();
-    }
-
-    /// 请运行时跑 `pi mcp login <name>`：需要授权时 Pi 自己打开浏览器，等回调写好令牌。
-    /// 同一时间只登录一台服务器。
-    pub fn login_pi_mcp_server(&mut self, name: String, cx: &mut Context<Self>) {
-        if self.pi_mcp_login.is_some() {
-            return;
-        }
-        self.pi_mcp_error = None;
-        self.pi_mcp_login = Some(name.clone());
-        cx.notify();
-        self.run_pi_call::<PiMcpLogin>(
-            McpServerParams { name: name.clone() },
-            MCP_LOGIN_TIMEOUT,
-            cx,
-            move |this, outcome, cx| {
-                this.pi_mcp_login = None;
-                match outcome {
-                    Ok(config) => {
-                        this.adopt_pi_config(config, cx);
-                        notify_success(format!("MCP 服务器 {name} 已登录"), cx);
-                    }
-                    Err(error) => this.pi_mcp_error = Some(error),
-                }
-                cx.notify();
-            },
-        );
     }
 }

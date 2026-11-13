@@ -228,7 +228,7 @@ pub(super) fn login_panel(
                         .text_sm()
                         .font_semibold()
                         .text_color(fg)
-                        .child(format!("登录 {}", view.provider_name)),
+                        .child(format!("登录 {}", view.title())),
                 )
                 .child({
                     let cancel_entity = entity.clone();
@@ -431,17 +431,23 @@ pub(super) fn login_panel(
                 div()
                     .text_xs()
                     .text_color(rgb(api::ui::ui_theme::green()))
-                    .child("登录成功，凭据已写入 ~/.pi/agent/auth.json。"),
+                    .child(if view.mcp_server().is_some() {
+                        "登录成功，凭据已写入 ~/.pi/agent/mcp-auth.json。"
+                    } else {
+                        "登录成功，凭据已写入 ~/.pi/agent/auth.json。"
+                    }),
             );
-            panel = panel.child(model_choices(
-                entity,
-                &view.provider_id,
-                view.models.as_ref(),
-                current_default,
-                fg,
-                muted,
-                border,
-            ));
+            if let Some(provider_id) = view.provider_id() {
+                panel = panel.child(model_choices(
+                    entity,
+                    provider_id,
+                    view.models.as_ref(),
+                    current_default,
+                    fg,
+                    muted,
+                    border,
+                ));
+            }
         }
         None => {}
     }

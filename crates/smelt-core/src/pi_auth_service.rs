@@ -1,4 +1,5 @@
-//! `pi.auth.*`：Pi 内置 provider 的登录、注销、模型目录。
+//! `pi.auth.*`：Pi 内置 provider 的登录、注销、模型目录；`pi.mcp.login_start` 起的 MCP 服务器
+//! 登录也挂在这里，事件、回答、取消共用。
 //!
 //! 凭据助手是运行时那台机器上的子进程，凭据也写在那里。登录是一场有来有回的会话
 //! （授权链接、device code、要用户粘回来的 code），这里把它挂在一个登录 id 上：客户端
@@ -66,9 +67,25 @@ fn drop_abandoned(entries: &mut HashMap<String, Login>) {
 pub fn start(params: LoginStartParams) -> Result<String, String> {
     let (session, receiver) =
         PiLoginSession::start(&params.provider_id, params.method, params.ask_all, &|_| {})?;
+    Ok(register(session, receiver))
+}
+
+/// 登录一台 MCP 服务器。事件、回答、取消和 provider 登录走同一套（[`events`] 等）。
+pub fn start_mcp(server: &str) -> Result<String, String> {
+    let (session, receiver) = PiLoginSession::start_mcp(server, &|_| {})?;
+    Ok(register(session, receiver))
+}
+
+fn register(
+    session: PiLoginSession,
+    receiver: futures::channel::mpsc::UnboundedReceiver<PiLoginEvent>,
+) -> String {
     let login_id = uuid::Uuid::new_v4().simple().to_string();
     {
-        let mut entries = logins().entries.lock().map_err(|e| e.to_string())?;
+        let mut entries = logins()
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         drop_abandoned(&mut entries);
         entries.insert(
             login_id.clone(),
@@ -103,7 +120,7 @@ pub fn start(params: LoginStartParams) -> Result<String, String> {
             logins.changed.notify_all();
         }
     });
-    Ok(login_id)
+    login_id
 }
 
 /// 取 `after` 之后的事件；没有新事件时最多等 [`POLL_WAIT`]。结束且取完后登录被清掉，
