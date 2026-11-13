@@ -271,10 +271,11 @@ pub(crate) fn create(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let branch = params.branch_name();
     let workset = smelt_git::worktree::create_workset(smelt_git::worktree::CreateWorkset {
         project_root: PathBuf::from(&params.project_root),
         task: params.task,
-        branch_prefix: params.branch_prefix,
+        branch,
         repositories,
     })
     .map_err(worktree_error)?;

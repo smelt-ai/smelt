@@ -18,7 +18,7 @@ pub struct Repository {
 pub struct CreateWorkset {
     pub project_root: PathBuf,
     pub task: String,
-    pub branch_prefix: String,
+    pub branch: String,
     pub repositories: Vec<Repository>,
 }
 
@@ -87,11 +87,10 @@ struct PreparedRepository {
 
 pub fn create_workset(request: CreateWorkset) -> Result<Workset, WorktreeError> {
     let task = validate_segment(&request.task, "工作树名称")?;
-    let prefix = request.branch_prefix.trim_matches('/');
-    if prefix.is_empty() || prefix.trim() != prefix {
-        return Err(WorktreeError::new("分支前缀不能为空或包含首尾空格"));
+    let branch = request.branch;
+    if branch.is_empty() || branch.trim() != branch {
+        return Err(WorktreeError::new("分支名不能为空或包含首尾空格"));
     }
-    let branch = format!("{prefix}/{task}");
 
     let project_root = fs::canonicalize(&request.project_root).map_err(|error| {
         WorktreeError::new(format!(
@@ -471,12 +470,6 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
             new_task_root.display()
         )));
     }
-    let prefix = workset
-        .branch
-        .strip_suffix(&workset.task)
-        .filter(|prefix| prefix.ends_with('/'))
-        .ok_or_else(|| WorktreeError::new("工作树分支名与工作树名称不匹配"))?;
-    let branch = format!("{prefix}{task}");
     for repository in &workset.repositories {
         let expected_path = old_task_root.join(&repository.name);
         if repository.worktree != expected_path {
@@ -518,15 +511,6 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
                 repository.name, workset.branch
             )));
         }
-        if local_branch_exists(&repository.root, &branch)? {
-            return Err(WorktreeError::new(format!(
-                "仓库 {} 已存在目标分支 {branch}",
-                repository.name
-            )));
-        }
-        if !git_succeeds(&repository.root, &["check-ref-format", "--branch", &branch])? {
-            return Err(WorktreeError::new(format!("无效的 Git 分支名：{branch}")));
-        }
     }
     fs::create_dir_all(&new_task_root).map_err(|error| {
         WorktreeError::new(format!(
@@ -540,7 +524,7 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
         let new_path = new_task_root.join(&repository.name);
         let old_branch =
             git_output(&repository.worktree, &["branch", "--show-current"]).map_err(|error| {
-                let errors = rollback_renames(&progress, &workset.branch, &branch, &new_task_root);
+                let errors = rollback_renames(&progress, &new_task_root);
                 WorktreeError::new(format!(
                     "读取仓库 {} 当前分支失败：{error}",
                     repository.name
@@ -548,28 +532,10 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
                 .with_rollback(errors)
             })?;
         if !old_branch.success() || old_branch.stdout_str().trim() != workset.branch {
-            let errors = rollback_renames(&progress, &workset.branch, &branch, &new_task_root);
+            let errors = rollback_renames(&progress, &new_task_root);
             return Err(WorktreeError::new(format!(
                 "仓库 {} 当前分支已变化，已取消重命名",
                 repository.name
-            ))
-            .with_rollback(errors));
-        }
-        let renamed = git_output(
-            &repository.worktree,
-            &["branch", "-m", &workset.branch, &branch],
-        )
-        .map_err(|error| {
-            let errors = rollback_renames(&progress, &workset.branch, &branch, &new_task_root);
-            WorktreeError::new(format!("仓库 {} 分支重命名失败：{error}", repository.name))
-                .with_rollback(errors)
-        })?;
-        if !renamed.success() {
-            let errors = rollback_renames(&progress, &workset.branch, &branch, &new_task_root);
-            return Err(WorktreeError::new(format!(
-                "仓库 {} 分支重命名失败：{}",
-                repository.name,
-                git_error(&renamed, "git branch -m 失败")
             ))
             .with_rollback(errors));
         }
@@ -588,7 +554,7 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
                 }
             }
             Ok(output) => {
-                let errors = rollback_renames(&progress, &workset.branch, &branch, &new_task_root);
+                let errors = rollback_renames(&progress, &new_task_root);
                 return Err(WorktreeError::new(format!(
                     "移动仓库 {} 的 worktree 失败：{}",
                     repository.name,
@@ -597,7 +563,7 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
                 .with_rollback(errors));
             }
             Err(error) => {
-                let errors = rollback_renames(&progress, &workset.branch, &branch, &new_task_root);
+                let errors = rollback_renames(&progress, &new_task_root);
                 return Err(WorktreeError::new(format!(
                     "移动仓库 {} 的 worktree 失败：{error}",
                     repository.name
@@ -609,7 +575,7 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
 
     if old_task_root.exists() {
         if let Err(error) = fs::remove_dir(&old_task_root) {
-            let rollback = rollback_renames(&progress, &workset.branch, &branch, &new_task_root);
+            let rollback = rollback_renames(&progress, &new_task_root);
             return Err(WorktreeError::new(format!(
                 "工作树已重命名，但无法移除旧目录 {}：{error}",
                 old_task_root.display()
@@ -628,32 +594,25 @@ pub fn rename_workset(workset: &Workset, new_task: &str) -> Result<Workset, Work
     Ok(Workset {
         project_root: workset.project_root.clone(),
         task,
-        branch,
+        branch: workset.branch.clone(),
         repositories,
     })
 }
 
 fn rollback_renames(
     progress: &[(WorktreeRepository, PathBuf, bool)],
-    old_branch: &str,
-    new_branch: &str,
     new_task_root: &Path,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for (repository, new_path, moved) in progress.iter().rev() {
-        let mut current_path = if *moved {
-            new_path.clone()
-        } else {
-            repository.worktree.clone()
-        };
         let old_path = repository.worktree.to_string_lossy().into_owned();
         if *moved {
-            let current_path_text = current_path.to_string_lossy().into_owned();
+            let current_path_text = new_path.to_string_lossy().into_owned();
             match git_output(
                 &repository.root,
                 &["worktree", "move", &current_path_text, &old_path],
             ) {
-                Ok(output) if output.success() => current_path = repository.worktree.clone(),
+                Ok(output) if output.success() => {}
                 Ok(output) => errors.push(format!(
                     "{} worktree 回滚: {}",
                     repository.name,
@@ -661,15 +620,6 @@ fn rollback_renames(
                 )),
                 Err(error) => errors.push(format!("{} worktree 回滚: {error}", repository.name)),
             }
-        }
-        match git_output(&current_path, &["branch", "-m", new_branch, old_branch]) {
-            Ok(output) if output.success() => {}
-            Ok(output) => errors.push(format!(
-                "{} 分支回滚: {}",
-                repository.name,
-                git_error(&output, "git branch -m 失败")
-            )),
-            Err(error) => errors.push(format!("{} 分支回滚: {error}", repository.name)),
         }
     }
     match fs::remove_dir(new_task_root) {
@@ -726,7 +676,7 @@ fn local_branch_exists(root: &Path, branch: &str) -> Result<bool, WorktreeError>
 }
 
 fn checked_out_at(root: &Path, branch: &str) -> Result<Option<PathBuf>, WorktreeError> {
-    let output = git_output(root, &["worktree", "list", "--porcelain"])
+    let output = git_output(root, &["worktree", "list", "--porcelain", "-z"])
         .map_err(|error| WorktreeError::new(format!("读取 worktree 列表失败：{error}")))?;
     if !output.success() {
         return Err(WorktreeError::new(format!(
@@ -736,7 +686,9 @@ fn checked_out_at(root: &Path, branch: &str) -> Result<Option<PathBuf>, Worktree
     }
     let expected = format!("branch refs/heads/{branch}");
     let mut path = None;
-    for line in output.stdout_str().lines() {
+    let output_text = std::str::from_utf8(&output.stdout)
+        .map_err(|error| WorktreeError::new(format!("读取 worktree 路径编码失败：{error}")))?;
+    for line in output_text.split('\0') {
         if let Some(value) = line.strip_prefix("worktree ") {
             path = Some(PathBuf::from(value));
         } else if line == expected {

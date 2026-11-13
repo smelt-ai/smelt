@@ -51,9 +51,64 @@ fn request(project: &Path, repositories: Vec<Repository>) -> CreateWorkset {
     CreateWorkset {
         project_root: project.to_path_buf(),
         task: "workspace-session-binding".to_string(),
-        branch_prefix: "feat".to_string(),
+        branch: "feat/workspace-session-binding".to_string(),
         repositories,
     }
+}
+
+#[test]
+fn creates_and_finishes_chinese_task_with_custom_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let mut request = request(project, vec![repo(project, "api"), repo(project, "web")]);
+    request.task = "搜索 功能".into();
+    request.branch = "fix/search-box".into();
+
+    let workset = create_workset(request).unwrap();
+    assert_eq!(workset.task, "搜索 功能");
+    assert_eq!(workset.branch, "fix/search-box");
+    for repository in &workset.repositories {
+        assert!(
+            repository
+                .worktree
+                .ends_with(format!("搜索 功能/{}", repository.name))
+        );
+        assert_eq!(
+            String::from_utf8_lossy(
+                &git(&repository.worktree, &["branch", "--show-current"]).stdout
+            ),
+            "fix/search-box\n"
+        );
+    }
+    finish_workset(&workset).unwrap();
+    assert!(!project.join("worktrees/搜索 功能").exists());
+}
+
+#[test]
+fn supports_chinese_branch_and_renaming_to_a_chinese_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let mut request = request(project, vec![repo(project, "api")]);
+    request.task = "搜索".into();
+    request.branch = "feat/搜索".into();
+
+    let workset = create_workset(request).unwrap();
+    let renamed = rename_workset(&workset, "搜索 改进").unwrap();
+    assert_eq!(renamed.branch, "feat/搜索");
+    assert!(renamed.repositories[0].worktree.exists());
+    finish_workset(&renamed).unwrap();
+}
+
+#[test]
+fn rejects_invalid_custom_branch_without_creating_a_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let mut request = request(project, vec![repo(project, "api")]);
+    request.task = "任务".into();
+    request.branch = "invalid branch".into();
+
+    assert!(create_workset(request).is_err());
+    assert!(!project.join("worktrees/任务").exists());
 }
 
 #[test]
@@ -185,7 +240,7 @@ fn finish_preserves_a_reused_branch_but_removes_workset_created_branches() {
 }
 
 #[test]
-fn rename_moves_worktree_directories_and_shared_branches() {
+fn rename_moves_worktree_directories_and_preserves_shared_branches() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path();
     let workset = create_workset(request(
@@ -197,7 +252,7 @@ fn rename_moves_worktree_directories_and_shared_branches() {
     let renamed = rename_workset(&workset, "new-name").unwrap();
 
     assert_eq!(renamed.task, "new-name");
-    assert_eq!(renamed.branch, "feat/new-name");
+    assert_eq!(renamed.branch, "feat/workspace-session-binding");
     for repository in &renamed.repositories {
         assert!(
             !project
@@ -210,7 +265,7 @@ fn rename_moves_worktree_directories_and_shared_branches() {
             String::from_utf8_lossy(
                 &git(&repository.worktree, &["branch", "--show-current"]).stdout
             ),
-            "feat/new-name\n"
+            "feat/workspace-session-binding\n"
         );
     }
 }
@@ -243,22 +298,27 @@ fn rename_refuses_if_any_repo_is_dirty_before_changing_anything() {
 }
 
 #[test]
-fn rename_refuses_if_any_repo_already_has_the_target_branch() {
+fn rename_preserves_custom_branch_even_when_the_new_task_has_a_matching_branch() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path();
     let api = repo(project, "api");
     let web = repo(project, "web");
     git(&web.root, &["branch", "feat/new-name"]);
-    let workset = create_workset(request(project, vec![api, web])).unwrap();
+    let mut request = request(project, vec![api, web]);
+    request.task = "旧任务".into();
+    request.branch = "fix/independent".into();
+    let workset = create_workset(request).unwrap();
 
-    assert!(rename_workset(&workset, "new-name").is_err());
-    for repository in &workset.repositories {
+    let renamed = rename_workset(&workset, "new-name").unwrap();
+    assert_eq!(renamed.branch, "fix/independent");
+    for repository in &renamed.repositories {
         assert!(repository.worktree.exists());
         assert_eq!(
             String::from_utf8_lossy(
                 &git(&repository.worktree, &["branch", "--show-current"]).stdout
             ),
-            "feat/workspace-session-binding\n"
+            "fix/independent\n"
         );
     }
+    finish_workset(&renamed).unwrap();
 }

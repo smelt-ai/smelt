@@ -203,7 +203,17 @@ pub struct WorkspaceWorksetCreateParams {
     pub task: String,
     #[serde(default = "default_workset_branch_prefix")]
     pub branch_prefix: String,
+    #[serde(default)]
+    pub branch: Option<String>,
     pub repository_names: Vec<String>,
+}
+
+impl WorkspaceWorksetCreateParams {
+    pub fn branch_name(&self) -> String {
+        self.branch
+            .clone()
+            .unwrap_or_else(|| format!("{}/{}", self.branch_prefix.trim_matches('/'), self.task))
+    }
 }
 
 fn default_workset_branch_prefix() -> String {
@@ -331,7 +341,24 @@ fn label_with_parents(style: PathStyle, root: &str, base: &str, extra: usize) ->
 
 #[cfg(test)]
 mod workset_tests {
-    use super::{PathStyle, WorkspaceWorkset, WorkspaceWorksetRepository};
+    use super::{
+        PathStyle, WorkspaceWorkset, WorkspaceWorksetCreateParams, WorkspaceWorksetRepository,
+    };
+
+    #[test]
+    fn workset_branch_defaults_to_feat_but_supports_prefixes_and_custom_names() {
+        let mut params: WorkspaceWorksetCreateParams = serde_json::from_value(serde_json::json!({
+            "project_root": "/project",
+            "task": "搜索",
+            "repository_names": ["api"]
+        }))
+        .unwrap();
+        assert_eq!(params.branch_name(), "feat/搜索");
+        params.branch_prefix = "fix".into();
+        assert_eq!(params.branch_name(), "fix/搜索");
+        params.branch = Some("hotfix/custom-name".into());
+        assert_eq!(params.branch_name(), "hotfix/custom-name");
+    }
 
     #[test]
     fn workset_sessions_start_at_the_task_root_for_any_repository_count() {

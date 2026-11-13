@@ -138,8 +138,8 @@ define_control_methods! {
     WorkspaceProjectOpen => (WORKSPACE_PROJECT_OPEN_METHOD, "workspace.project.open"),
     WorkspaceProjectClose => (WORKSPACE_PROJECT_CLOSE_METHOD, "workspace.project.close"),
     WorkspaceProjectRepositoryAction => (WORKSPACE_PROJECT_REPOSITORY_ACTION_METHOD, "workspace.project.repository.action"),
-    WorkspaceWorksetCreate => (WORKSPACE_WORKSET_CREATE_METHOD, "workspace.workset.create"),
-    WorkspaceWorksetRename => (WORKSPACE_WORKSET_RENAME_METHOD, "workspace.workset.rename"),
+    WorkspaceWorksetCreate => (WORKSPACE_WORKSET_CREATE_METHOD, "workspace.workset.create_with_branch"),
+    WorkspaceWorksetRename => (WORKSPACE_WORKSET_RENAME_METHOD, "workspace.workset.rename_preserving_branch"),
     WorkspaceWorksetFinish => (WORKSPACE_WORKSET_FINISH_METHOD, "workspace.workset.finish"),
     WorkspaceDirectoryGet => (WORKSPACE_DIRECTORY_GET_METHOD, "workspace.directory"),
     WorkspaceRename => (WORKSPACE_RENAME_METHOD, "workspace.rename"),
@@ -678,6 +678,18 @@ mod tests {
                 Some(*method)
             );
         }
+    }
+
+    #[test]
+    fn older_worktree_methods_cannot_silently_change_branch_semantics() {
+        assert_eq!(
+            ControlMethod::from_wire_name("workspace.workset.create"),
+            None
+        );
+        assert_eq!(
+            ControlMethod::from_wire_name("workspace.workset.rename"),
+            None
+        );
     }
 
     #[test]

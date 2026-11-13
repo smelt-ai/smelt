@@ -34,6 +34,7 @@ pub(crate) struct ProjectRepositoriesState {
     selected: BTreeSet<String>,
     source: Option<String>,
     task: Entity<InputState>,
+    branch: Entity<InputState>,
     name: Entity<InputState>,
     url: Entity<InputState>,
     busy: bool,
@@ -93,10 +94,14 @@ impl Workspace {
             return;
         }
         self.begin_main_modal_focus(window, cx);
-        let task = cx.new(|cx| InputState::new(window, cx).placeholder("例如 add-search，不含 /"));
+        let task =
+            cx.new(|cx| InputState::new(window, cx).placeholder("例如 add-search 或 搜索功能"));
+        let branch = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("留空使用默认分支，或填写完整分支名")
+        });
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("留空使用下方建议名称"));
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("HTTPS 或 SSH Git URL"));
-        let subscriptions = [&task, &name, &url]
+        let subscriptions = [&task, &branch, &name, &url]
             .into_iter()
             .map(|input| {
                 cx.subscribe(input, |_, _, event: &InputEvent, cx| {
@@ -133,6 +138,7 @@ impl Workspace {
             selected,
             source: None,
             task,
+            branch,
             name,
             url,
             busy: false,
@@ -290,6 +296,10 @@ impl Workspace {
             project_root: state.project_root.clone(),
             task,
             branch_prefix: "feat".into(),
+            branch: {
+                let value = state.branch.read(cx).value().trim().to_string();
+                (!value.is_empty()).then_some(value)
+            },
             repository_names: state.selected.iter().cloned().collect(),
         };
         let id = state.id;
@@ -358,8 +368,16 @@ impl Workspace {
             content = content
                 .child(div().text_sm().child("任务名"))
                 .child(Input::new(&state.task).disabled(busy))
-                .child(div().text_sm().text_color(muted).child(format!(
-                    "分支：feat/{} · 在 worktrees/<任务>/<仓库> 创建独立工作目录",
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("支持中文；建议使用与分支名接近的英文名，不含路径分隔符。"),
+                )
+                .child(div().text_sm().child("分支名"))
+                .child(Input::new(&state.branch).disabled(busy))
+                .child(div().text_xs().text_color(muted).child(format!(
+                    "留空使用 feat/{}；也可输入完整分支名（如 fix/search）。分支名不能包含空格。",
                     if task.is_empty() {
                         "<任务名>"
                     } else {
