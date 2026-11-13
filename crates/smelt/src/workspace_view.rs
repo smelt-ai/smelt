@@ -192,7 +192,7 @@ impl Workspace {
             CloseConfirm::Workset { title, .. } => (
                 "确定关闭这个工作树吗？",
                 format!(
-                    "将收工并删除「{title}」的工作树目录及其创建的已合并分支，复用的分支会保留。Git 忽略的文件也可能被删除。未归档会话、未提交修改或未合并分支会阻止关闭。归档会话将保留，恢复时需选择工作树。"
+                    "将关闭并删除「{title}」的工作树目录及其创建的已合并分支，复用的分支会保留。Git 忽略的文件也可能被删除。未归档会话、未提交修改或未合并分支会阻止关闭。归档会话将保留，恢复时需选择工作树。"
                 ),
                 "关闭工作树",
             ),
@@ -233,6 +233,12 @@ impl Workspace {
                     .text_color(cx.theme().danger)
                     .child(error.clone())
             }))
+            .children(error.map(|_| {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("请处理问题后取消并重新打开此弹窗，再尝试关闭。")
+            }))
             .child(
                 h_flex()
                     .justify_end()
@@ -257,7 +263,7 @@ impl Workspace {
                             |this, _, window, cx| this.confirm_close(window, cx),
                             cx,
                         )
-                        .disabled(pending),
+                        .disabled(target.confirmation_blocked()),
                     ),
             );
         self.modal_shell(

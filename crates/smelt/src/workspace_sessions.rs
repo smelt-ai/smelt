@@ -1934,13 +1934,11 @@ impl Workspace {
     }
 
     pub(crate) fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(
-            self.close_confirm,
-            Some(
-                CloseConfirm::Workset { pending: true, .. }
-                    | CloseConfirm::RestoreWorkset { pending: true, .. }
-            )
-        ) {
+        if self
+            .close_confirm
+            .as_ref()
+            .is_some_and(CloseConfirm::confirmation_blocked)
+        {
             return;
         }
         match self.close_confirm.take() {

@@ -1832,6 +1832,17 @@ pub(crate) enum CloseConfirm {
     },
 }
 
+impl CloseConfirm {
+    pub(crate) fn confirmation_blocked(&self) -> bool {
+        matches!(
+            self,
+            Self::Workset { pending: true, .. }
+                | Self::Workset { error: Some(_), .. }
+                | Self::RestoreWorkset { pending: true, .. }
+        )
+    }
+}
+
 /// 侧栏的一个项目分组。**身份是 root（路径），不是 label**——两个不同目录的末段名
 /// 可能一模一样（`~/a/smelt` 和 `~/b/smelt`），拿显示名当 key 会把它们认成同一个项目：
 /// 第二个连行都不显示、会话挂错组、关一个连带关掉另一个的会话。

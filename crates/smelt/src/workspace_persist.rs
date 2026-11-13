@@ -1162,7 +1162,7 @@ impl Workspace {
                         }
                         cx.notify();
                     });
-                    let mut message = "工作树已收工".to_string();
+                    let mut message = "工作树已关闭".to_string();
                     if !result.retained_branches.is_empty() {
                         message.push_str(&format!(
                             "；保留复用分支：{}",
@@ -1183,7 +1183,7 @@ impl Workspace {
                     crate::status_item::notify_success(message);
                 }
                 Err(error) => {
-                    let message = format!("收工工作树失败：{error}");
+                    let message = format!("关闭工作树失败：{error}");
                     let _ = this.update(cx, |this, cx| {
                         if apply_workset_finish_result(
                             &mut this.close_confirm,
@@ -1574,7 +1574,7 @@ mod workset_finish_feedback_tests {
     use super::apply_workset_finish_result;
     use crate::{CloseConfirm, ProjectRef, RuntimeKey};
 
-    fn pending() -> Option<CloseConfirm> {
+    fn workset_confirmation(pending: bool) -> Option<CloseConfirm> {
         Some(CloseConfirm::Workset {
             project: ProjectRef {
                 runtime: RuntimeKey::Local,
@@ -1582,14 +1582,15 @@ mod workset_finish_feedback_tests {
             },
             id: "task".into(),
             title: "task".into(),
-            pending: true,
+            pending,
             error: None,
         })
     }
 
     #[test]
-    fn failed_close_remains_visible_with_the_reason_and_can_be_retried() {
-        let mut confirmation = pending();
+    fn failed_close_remains_visible_and_blocks_confirmation_until_reopened() {
+        let mut confirmation = workset_confirmation(true);
+        assert!(confirmation.as_ref().unwrap().confirmation_blocked());
         assert!(apply_workset_finish_result(
             &mut confirmation,
             &RuntimeKey::Local,
@@ -1601,11 +1602,14 @@ mod workset_finish_feedback_tests {
             Some(CloseConfirm::Workset { pending: false, error: Some(ref error), .. })
                 if error.contains("仍绑定会话")
         ));
+        assert!(confirmation.as_ref().unwrap().confirmation_blocked());
+        let reopened = workset_confirmation(false);
+        assert!(!reopened.as_ref().unwrap().confirmation_blocked());
     }
 
     #[test]
     fn success_closes_only_the_matching_confirmation() {
-        let mut confirmation = pending();
+        let mut confirmation = workset_confirmation(true);
         assert!(!apply_workset_finish_result(
             &mut confirmation,
             &RuntimeKey::Remote("other".into()),
