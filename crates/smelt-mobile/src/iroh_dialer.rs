@@ -146,6 +146,7 @@ impl Route for IrohRoute {
         let connector = Arc::new(self.client.connector(self.endpoint, self.relay.as_ref()));
         let for_client = Arc::clone(&connector);
         let for_watch = Arc::clone(&connector);
+        let for_close = Arc::clone(&connector);
         Link {
             client: RuntimeClient::new(move || for_client.connect()),
             metrics: Arc::new(move || link_metrics(connector.path_status())),
@@ -157,6 +158,7 @@ impl Route for IrohRoute {
                     })
                 }))
             }),
+            close: Arc::new(move || for_close.close()),
         }
     }
 }

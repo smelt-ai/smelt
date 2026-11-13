@@ -830,6 +830,9 @@ impl Watch {
     fn run_reader(self: &Arc<Self>, source: &dyn RuntimeSource) {
         let mut failures = 0u32;
         let mut reported = false;
+        // 上一次也是连着却没订上。只失败一次不报：链路刚断时订阅往往比状态机先读到 EOF，
+        // 这时报出来的「断开」过一会儿就被重连盖掉，只会吓人。
+        let mut struck = false;
         loop {
             let generation = {
                 let mut state = self.lock();
@@ -844,6 +847,7 @@ impl Watch {
                 }
                 if std::mem::take(&mut state.reconnected) {
                     failures = 0;
+                    struck = false;
                 }
                 state.generation
             };
@@ -878,17 +882,21 @@ impl Watch {
                     if frames > 0 {
                         failures = 0;
                         reported = false;
+                        struck = false;
                     }
                     failures = failures.saturating_add(1);
-                    // 掉线（状态机已不在 Connected）由连接状态告诉界面，这里只报连着却订不上的。
-                    // 先取值再判断：条件里的锁守卫会活到块尾，而 emit 可能回头拿这把锁。
+                    // 掉线（状态机已不在 Connected）由连接状态告诉界面，这里只报连着、连续两次都
+                    // 订不上的。先取值再判断：条件里的锁守卫会活到块尾，而 emit 可能回头拿这把锁。
                     let connected = self.lock().connected;
-                    if let Some(error) = error
-                        && !reported
-                        && connected
-                    {
-                        reported = true;
-                        self.emit(message_event(ConversationEventKind::Error, error));
+                    match error {
+                        Some(error) if connected && !reported => {
+                            if std::mem::replace(&mut struck, true) {
+                                reported = true;
+                                self.emit(message_event(ConversationEventKind::Error, error));
+                            }
+                        }
+                        _ if !connected => struck = false,
+                        _ => {}
                     }
                     // 轮询例外：连着却订不上、或订上后断了，运行时不会再通知我们，只能隔一会儿重订
                     // （掉线、换代、重新连上由监听叫醒）；周期 1 秒起逐次翻倍，上限 15 秒。

@@ -40,8 +40,10 @@ struct FakeRuntime {
     links: AtomicUsize,
     /// 编号小于它的链路僵死了：开流成功，但永远不回包（同后台冻结后的 QUIC 连接）。
     zombie_below: AtomicUsize,
-    /// 僵死链路开出的流的服务端，握着不放，客户端只能等到超时。
-    zombie_streams: Mutex<Vec<RuntimeStream>>,
+    /// 僵死链路开出的流的服务端（连同链路编号），握着不放，客户端只能等到超时或链路被关掉。
+    zombie_streams: Mutex<Vec<(usize, RuntimeStream)>>,
+    /// 被关掉的链路编号：上面再开流直接失败。
+    closed_links: Mutex<Vec<usize>>,
     /// 各链路登记的连接变化回调。
     watchers: Mutex<Vec<OnLinkChange>>,
     rtt_ms: Mutex<Option<u32>>,
@@ -61,6 +63,7 @@ impl FakeRuntime {
             links: AtomicUsize::new(0),
             zombie_below: AtomicUsize::new(0),
             zombie_streams: Mutex::new(Vec::new()),
+            closed_links: Mutex::new(Vec::new()),
             watchers: Mutex::new(Vec::new()),
             rtt_ms: Mutex::new(None),
             event_protocol: Mutex::new(EVENT_BUS_PROTOCOL_VERSION),
@@ -175,8 +178,15 @@ impl Route for FakeRoute {
         let runtime = Arc::clone(&self.0);
         let for_metrics = Arc::clone(&self.0);
         let for_watch = Arc::clone(&self.0);
+        let for_close = Arc::clone(&self.0);
         Link {
             client: RuntimeClient::new(move || {
+                if runtime.closed_links.lock().unwrap().contains(&index) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "这条链路已经关掉",
+                    ));
+                }
                 if !*runtime.online.lock().unwrap() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -185,7 +195,7 @@ impl Route for FakeRoute {
                 }
                 let (client, server) = RuntimeStream::pair()?;
                 if index < runtime.zombie_below.load(Ordering::SeqCst) {
-                    runtime.zombie_streams.lock().unwrap().push(server);
+                    runtime.zombie_streams.lock().unwrap().push((index, server));
                     return Ok(client);
                 }
                 let runtime = Arc::clone(&runtime);
@@ -211,6 +221,15 @@ impl Route for FakeRoute {
                     for_watch.watchers.lock().unwrap().push(on_change);
                 }
                 Box::new(())
+            }),
+            close: Arc::new(move || {
+                // 同真实传输：这条链路上的流随之结束（服务端一放，客户端读到 EOF）。
+                for_close.closed_links.lock().unwrap().push(index);
+                for_close
+                    .zombie_streams
+                    .lock()
+                    .unwrap()
+                    .retain(|(link, _)| *link != index);
             }),
         }
     }
@@ -653,6 +672,44 @@ fn verify_on_a_zombie_link_redials_at_once_without_backoff() {
     );
     assert!(events.last().unwrap().error.is_none());
     wait_until("盯上新链路", || runtime.watchers() == 2);
+    hub.disconnect();
+}
+
+/// 还拿着旧客户端的长连接（对话、会话目录的订阅）不能挂在僵死的旧连接上等 QUIC 空闲超时：
+/// 确认失败就关掉旧链路，流立刻结束，旧客户端也不再开得出流。
+#[test]
+fn a_link_that_fails_verification_is_closed() {
+    use std::io::Read as _;
+
+    let runtime = FakeRuntime::paired("runtime-a");
+    let dialer = FakeDialer(vec![("ep-a".into(), Arc::clone(&runtime))]);
+    let hub = ConnectionHub::new(FAST);
+    let events = record(&hub);
+    hub.connect(&dialer, target("ep-a")).unwrap();
+    wait_until("盯上链路", || runtime.watchers() == 1);
+    let links = runtime.links.load(Ordering::SeqCst);
+    runtime.zombie_below.store(links, Ordering::SeqCst);
+    // 回前台后旧客户端上开的长连接：开流成功，回包永远不来。
+    let old = hub.current().unwrap().client;
+    let mut stream = old.connect().unwrap();
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1];
+        let _ = done.send(stream.read(&mut buf).map_err(|e| e.kind()));
+    });
+
+    hub.verify();
+
+    assert_eq!(
+        ended.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Ok(0),
+        "旧链路上的流读到 EOF"
+    );
+    assert!(old.connect().is_err(), "旧客户端不再开流");
+    wait_until("换新链路重新连上", || {
+        last(&events).state == ConnectionState::Connected
+    });
+    assert!(hub.current().unwrap().client.connect().is_ok());
     hub.disconnect();
 }
 
