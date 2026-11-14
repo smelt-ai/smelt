@@ -69,7 +69,14 @@ fn create_v7_schema(connection: &Connection) {
 
 /// v11 及以前客户端库里还有通知偏好表。
 /// v12 及更早没有固定工作树的表。
+fn restore_v13_selected_agent(connection: &Connection) {
+    connection
+        .execute_batch("ALTER TABLE workspace_ui ADD COLUMN selected_agent_id TEXT;")
+        .unwrap();
+}
+
 fn restore_v12_without_pinned_worksets(connection: &Connection) {
+    restore_v13_selected_agent(connection);
     connection
         .execute_batch("DROP TABLE pinned_workset;")
         .unwrap();
@@ -161,7 +168,6 @@ fn workspace_ui() -> WorkspaceUiRecord {
         active_session: 2,
         active_session_id: Some("s-1".to_string()),
         route: "session".to_string(),
-        selected_agent_id: None,
         collapsed_projects: vec![ProjectKey::local("/repo/b"), ProjectKey::local("/repo/a")],
         collapsed_agents: vec!["writer".to_string()],
         sidebar_grouping: "project".to_string(),
@@ -225,6 +231,47 @@ fn v8_migrates_worktree_pins_without_losing_workspace_state() {
     drop(store);
     let store = ClientStore::open(&path).unwrap();
     assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
+    drop(store);
+    cleanup(&path);
+}
+
+/// v13 → v14：选中的智能体那一列删掉，别的界面状态留着；改过的「新对话」快捷键跟着命令
+/// 搬到智能体插件的 id 上。
+#[test]
+fn v13_drops_the_selected_agent_and_moves_the_new_conversation_key() {
+    let (store, path) = temp_store();
+    drop(store);
+    let v13 = Connection::open(&path).unwrap();
+    restore_v13_selected_agent(&v13);
+    v13.execute_batch(
+        "INSERT INTO workspace_ui
+           (id, active_session, active_session_id, route, sidebar_grouping,
+            sidebar_hide_empty_projects, archive_expanded, selected_agent_id)
+           VALUES (1, 2, 's-1', 'agents', 'project', 1, 0, 'writer');
+         INSERT INTO key_binding VALUES ('smelt.sessions/new-conversation', 'cmd-shift-m');
+         INSERT INTO key_binding VALUES ('smelt.palette/toggle', 'cmd-j');
+         PRAGMA user_version = 13;",
+    )
+    .unwrap();
+    drop(v13);
+    let store = ClientStore::open(&path).unwrap();
+    let ui = store.workspace_ui().unwrap().unwrap();
+    assert_eq!(ui.route, "agents");
+    assert_eq!(ui.active_session_id.as_deref(), Some("s-1"));
+    assert!(ui.sidebar_hide_empty_projects);
+    assert_eq!(
+        store.key_bindings().unwrap(),
+        vec![
+            KeyBindingRecord {
+                command: "smelt.agents/new-conversation".to_string(),
+                keystroke: Some("cmd-shift-m".to_string()),
+            },
+            KeyBindingRecord {
+                command: "smelt.palette/toggle".to_string(),
+                keystroke: Some("cmd-j".to_string()),
+            },
+        ]
+    );
     drop(store);
     cleanup(&path);
 }

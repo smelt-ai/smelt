@@ -31,7 +31,7 @@
 ### 桌面：调用都只发本机
 
 按机器调用的底座随 #78 已经落地：主线程 `runtime_call::target(&key, cx)` 取 `RuntimeClient`，
-后台 `call_on::<C>(&client, params, timeout)`。智能体模块（`crates/smelt/src/agents/`）已经这样用。
+后台 `call_on::<C>(&client, params, timeout)`。智能体插件（`crates/plugins/agents`）已经这样用。
 
 文件相关的模块还没接上：
 

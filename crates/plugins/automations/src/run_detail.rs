@@ -5,32 +5,32 @@
 //! 反序列化放进 render 会把整个窗口拖卡。
 use std::collections::HashSet;
 
-use smelt_model::acp_chat::{AcpEntry, DiffLineTag, ToolCallStatus, ToolOutputPart};
-use smelt_model::automation::{AutomationRun, AutomationRunStatus};
+use api::model::acp_chat::{AcpEntry, DiffLineTag, ToolCallStatus, ToolOutputPart};
+use api::model::automation::{AutomationRun, AutomationRunStatus};
 
-use super::*;
-use smelt_ui::truncated_line::truncated_line;
+use crate::prelude::*;
+use crate::tools::{compact_tool_headline, process_icon};
 
 /// 单块工具输出最多展示的行数。这里供排查，不是完整日志。
-const TOOL_OUTPUT_MAX_LINES: usize = 400;
+pub(crate) const TOOL_OUTPUT_MAX_LINES: usize = 400;
 
-const BLOCK_PROCESS: &str = "process";
-const BLOCK_INPUT: &str = "input";
-const BLOCK_INSTRUCTIONS: &str = "instructions";
-const BLOCK_META: &str = "meta";
+pub(crate) const BLOCK_PROCESS: &str = "process";
+pub(crate) const BLOCK_INPUT: &str = "input";
+pub(crate) const BLOCK_INSTRUCTIONS: &str = "instructions";
+pub(crate) const BLOCK_META: &str = "meta";
 
 /// 落库内容对应的运行版本：运行没换、状态没推进，读过的就还算数。
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RunDetailKey {
     /// 运行在哪台机器上：两台机器上的运行 id 互不相干。
-    runtime: crate::RuntimeKey,
-    run_id: String,
-    status: AutomationRunStatus,
-    finished_at: Option<i64>,
+    pub(crate) runtime: RuntimeKey,
+    pub(crate) run_id: String,
+    pub(crate) status: AutomationRunStatus,
+    pub(crate) finished_at: Option<i64>,
 }
 
 impl RunDetailKey {
-    fn of(runtime: &crate::RuntimeKey, run: &AutomationRun) -> Self {
+    pub(crate) fn of(runtime: &RuntimeKey, run: &AutomationRun) -> Self {
         Self {
             runtime: runtime.clone(),
             run_id: run.id.clone(),
@@ -42,17 +42,17 @@ impl RunDetailKey {
 
 /// 选中运行的落库内容，外加这页上展开着的折叠块。
 pub(crate) struct AutomationRunDetail {
-    key: RunDetailKey,
-    output: Option<String>,
-    instructions: Option<String>,
-    transcript: Vec<AcpEntry>,
+    pub(crate) key: RunDetailKey,
+    pub(crate) output: Option<String>,
+    pub(crate) instructions: Option<String>,
+    pub(crate) transcript: Vec<AcpEntry>,
     /// 区块名，或工具调用在对话里的路径（`t/3/1`）。
-    expanded: HashSet<String>,
+    pub(crate) expanded: HashSet<String>,
 }
 
 impl AutomationRunDetail {
     /// `archived` 是库里整份运行，只在内存里的运行缺结果或指令快照时才读。
-    fn new(
+    pub(crate) fn new(
         key: RunDetailKey,
         run: &AutomationRun,
         archived: Option<AutomationRun>,
@@ -77,16 +77,16 @@ impl AutomationRunDetail {
         }
     }
 
-    fn run_id(&self) -> &str {
+    pub(crate) fn run_id(&self) -> &str {
         &self.key.run_id
     }
 
-    fn is_expanded(&self, key: &str) -> bool {
+    pub(crate) fn is_expanded(&self, key: &str) -> bool {
         self.expanded.contains(key)
     }
 
     /// 对话最后一条助手正文就是运行结果，详情顶上已经画过，对话里不再整段重复。
-    fn final_reply_index(&self) -> Option<usize> {
+    pub(crate) fn final_reply_index(&self) -> Option<usize> {
         let output = self.output.as_deref()?.trim();
         self.transcript
             .iter()
@@ -97,57 +97,43 @@ impl AutomationRunDetail {
     }
 }
 
-impl Workspace {
+impl AutomationsPage {
     /// 选中运行的落库内容过期了就排一次后台读取；已是最新或正在读就什么都不做。
-    /// 渲染里调用，自身不碰 SQLite。
-    pub(super) fn sync_automation_run_detail(
+    /// 选中运行、运行状态推进时调用，不在 render 里。
+    pub(crate) fn sync_automation_run_detail(
         &mut self,
-        runtime: &crate::RuntimeKey,
+        runtime: &RuntimeKey,
         run: &AutomationRun,
         cx: &mut Context<Self>,
     ) {
         let key = RunDetailKey::of(runtime, run);
-        let surface = &mut self.automation_surface;
-        if surface
+        if self
             .run_detail
             .as_ref()
             .is_some_and(|detail| detail.key == key)
-            || surface.run_detail_loading.as_ref() == Some(&key)
+            || self.run_detail_loading.as_ref() == Some(&key)
         {
             return;
         }
-        // 运行记录在跑它的那台机器的库里。
-        let client = crate::runtime_call::target(runtime, cx);
-        self.automation_surface.run_detail_loading = Some(key.clone());
+        self.run_detail_loading = Some(key.clone());
         let need_archive = run.output.is_none() || run.context.agent_instructions.is_none();
         let run = run.clone();
+        // 运行记录在跑它的那台机器的库里。
+        let detail = api::call::<api::model::control_api::AutomationRunDetail>(
+            runtime,
+            api::model::control_api::AutomationRunDetailParams {
+                run_id: run.id.clone(),
+                include_archived_run: need_archive,
+            },
+            api::CALL_TIMEOUT,
+            cx,
+        );
         cx.spawn(async move |this, cx| {
-            let run_id = run.id.clone();
-            let (archived, transcript) = cx
-                .background_executor()
-                .spawn(async move {
-                    // 读不到（机器移除、连不上）时按「没有归档、没有对话记录」显示。
-                    let detail = client
-                        .ok()
-                        .and_then(|client| {
-                            crate::runtime_call::call_on::<
-                                smelt_model::control_api::AutomationRunDetail,
-                            >(
-                                &client,
-                                smelt_model::control_api::AutomationRunDetailParams {
-                                    run_id,
-                                    include_archived_run: need_archive,
-                                },
-                                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                            )
-                            .ok()
-                        })
-                        .unwrap_or_default();
-                    (detail.archived_run, detail.transcript)
-                })
-                .await;
+            // 读不到（机器移除、连不上）时按「没有归档、没有对话记录」显示。
+            let detail = detail.await.unwrap_or_default();
+            let (archived, transcript) = (detail.archived_run, detail.transcript);
             let _ = this.update(cx, |this, cx| {
-                let surface = &mut this.automation_surface;
+                let surface = this;
                 // 读的过程中又换了运行或状态又推进了：这份结果作废，由新的那次读取接手。
                 if surface.run_detail_loading.as_ref() != Some(&key) {
                     return;
@@ -169,8 +155,8 @@ impl Workspace {
         .detach();
     }
 
-    fn toggle_automation_run_block(&mut self, key: String, cx: &mut Context<Self>) {
-        let Some(detail) = self.automation_surface.run_detail.as_mut() else {
+    pub(crate) fn toggle_automation_run_block(&mut self, key: String, cx: &mut Context<Self>) {
+        let Some(detail) = self.run_detail.as_mut() else {
             return;
         };
         if !detail.expanded.remove(&key) {
@@ -179,20 +165,19 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn render_automation_run_detail(
+    pub(crate) fn render_automation_run_detail(
         &self,
         run: &AutomationRun,
-        entity: Entity<Workspace>,
+        entity: Entity<AutomationsPage>,
     ) -> AnyElement {
         let Some(detail) = self
-            .automation_surface
             .run_detail
             .as_ref()
             .filter(|detail| detail.run_id() == run.id)
         else {
             return div()
                 .text_sm()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("正在读取运行记录…")
                 .into_any_element();
         };
@@ -230,7 +215,7 @@ impl Workspace {
                         .clone()
                         .filter(|prompt| !prompt.trim().is_empty())
                         .unwrap_or_else(|| "（无）".to_string());
-                    detail_card(crate::markdown_mermaid::markdown_view(
+                    detail_card(markdown_mermaid::markdown_view(
                         format!("automation-run-prompt-{}", run.id),
                         prompt,
                     ))
@@ -244,7 +229,7 @@ impl Workspace {
                     detail,
                     &entity,
                     || {
-                        detail_card(crate::markdown_mermaid::markdown_view(
+                        detail_card(markdown_mermaid::markdown_view(
                             format!("automation-run-instructions-{}", run.id),
                             instructions,
                         ))
@@ -263,25 +248,23 @@ impl Workspace {
     }
 }
 
-fn run_status_color(status: AutomationRunStatus) -> u32 {
+pub(crate) fn run_status_color(status: AutomationRunStatus) -> u32 {
     match status {
-        AutomationRunStatus::Completed => crate::ui_theme::green(),
-        AutomationRunStatus::Failed => crate::ui_theme::red(),
-        AutomationRunStatus::Cancelled | AutomationRunStatus::Skipped => {
-            crate::ui_theme::text_faint()
-        }
+        AutomationRunStatus::Completed => ui_theme::green(),
+        AutomationRunStatus::Failed => ui_theme::red(),
+        AutomationRunStatus::Cancelled | AutomationRunStatus::Skipped => ui_theme::text_faint(),
         AutomationRunStatus::AwaitingApproval | AutomationRunStatus::WaitingForUser => {
-            crate::ui_theme::yellow()
+            ui_theme::yellow()
         }
         AutomationRunStatus::Starting
         | AutomationRunStatus::Queued
         | AutomationRunStatus::Dispatching
-        | AutomationRunStatus::Running => crate::ui_theme::blue(),
+        | AutomationRunStatus::Running => ui_theme::blue(),
     }
 }
 
 /// 运行列表和详情头共用的状态点。
-pub(super) fn run_status_dot(status: AutomationRunStatus) -> Div {
+pub(crate) fn run_status_dot(status: AutomationRunStatus) -> Div {
     div()
         .size(px(7.))
         .flex_shrink_0()
@@ -290,7 +273,7 @@ pub(super) fn run_status_dot(status: AutomationRunStatus) -> Div {
 }
 
 /// 一行交代谁、什么时候、跑了多久。
-fn run_summary_line(run: &AutomationRun) -> AnyElement {
+pub(crate) fn run_summary_line(run: &AutomationRun) -> AnyElement {
     let agent = run
         .context
         .agent_definition_name
@@ -306,38 +289,30 @@ fn run_summary_line(run: &AutomationRun) -> AnyElement {
         .items_center()
         .gap_2()
         .text_xs()
-        .text_color(rgb(crate::ui_theme::text_muted()))
+        .text_color(rgb(ui_theme::text_muted()))
         .child(
             Icon::new(IconName::Bot)
                 .size(px(13.))
-                .text_color(rgb(crate::ui_theme::text_muted())),
+                .text_color(rgb(ui_theme::text_muted())),
         )
-        .child(
-            div()
-                .text_color(rgb(crate::ui_theme::text_mid()))
-                .child(agent),
-        )
-        .child(
-            div()
-                .text_color(rgb(crate::ui_theme::text_faint()))
-                .child("·"),
-        )
+        .child(div().text_color(rgb(ui_theme::text_mid())).child(agent))
+        .child(div().text_color(rgb(ui_theme::text_faint())).child("·"))
         .child(div().child(parts.join(" · ")))
         .into_any_element()
 }
 
-fn run_error_card(error: String) -> AnyElement {
-    let red = crate::ui_theme::red();
+pub(crate) fn run_error_card(error: String) -> AnyElement {
+    let red = ui_theme::red();
     div()
         .w_full()
         .flex()
         .gap_2()
         .px_3()
         .py_2p5()
-        .rounded(crate::ui_theme::row_radius())
+        .rounded(ui_theme::row_radius())
         .border_1()
-        .border_color(crate::ui_theme::tint(red, 0x40))
-        .bg(crate::ui_theme::tint(red, 0x14))
+        .border_color(ui_theme::tint(red, 0x40))
+        .bg(ui_theme::tint(red, 0x14))
         .child(
             div().pt(px(2.)).child(
                 Icon::new(IconName::CircleX)
@@ -362,16 +337,16 @@ fn run_error_card(error: String) -> AnyElement {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(crate::ui_theme::text()))
+                        .text_color(rgb(ui_theme::text()))
                         .child(error),
                 ),
         )
         .into_any_element()
 }
 
-fn run_result_section(run: &AutomationRun, detail: &AutomationRunDetail) -> AnyElement {
+pub(crate) fn run_result_section(run: &AutomationRun, detail: &AutomationRunDetail) -> AnyElement {
     let body = match detail.output.clone() {
-        Some(output) => detail_card(crate::markdown_mermaid::markdown_view(
+        Some(output) => detail_card(markdown_mermaid::markdown_view(
             format!("automation-run-output-{}", run.id),
             output,
         )),
@@ -385,7 +360,7 @@ fn run_result_section(run: &AutomationRun, detail: &AutomationRunDetail) -> AnyE
             };
             div()
                 .text_sm()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child(hint)
                 .into_any_element()
         }
@@ -399,30 +374,30 @@ fn run_result_section(run: &AutomationRun, detail: &AutomationRunDetail) -> AnyE
             div()
                 .text_sm()
                 .font_medium()
-                .text_color(rgb(crate::ui_theme::text_bright()))
+                .text_color(rgb(ui_theme::text_bright()))
                 .child("运行结果"),
         )
         .child(body)
         .into_any_element()
 }
 
-fn detail_card(body: impl IntoElement) -> AnyElement {
+pub(crate) fn detail_card(body: impl IntoElement) -> AnyElement {
     content_card()
         .w_full()
         .min_w_0()
-        .p(crate::ui_theme::card_padding())
+        .p(ui_theme::card_padding())
         .text_sm()
         .child(body)
         .into_any_element()
 }
 
 /// 可折叠区块：标题行常驻，正文只在展开时才构建，折着的区块不花渲染成本。
-fn run_detail_disclosure(
+pub(crate) fn run_detail_disclosure(
     key: &'static str,
     title: &'static str,
     meta: Option<String>,
     detail: &AutomationRunDetail,
-    entity: &Entity<Workspace>,
+    entity: &Entity<AutomationsPage>,
     body: impl FnOnce() -> AnyElement,
 ) -> AnyElement {
     let expanded = detail.is_expanded(key);
@@ -439,25 +414,25 @@ fn run_detail_disclosure(
                 .gap_1p5()
                 .mx(px(-6.))
                 .px(px(6.))
-                .h(crate::ui_theme::height::xs())
-                .rounded(crate::ui_theme::row_radius())
+                .h(ui_theme::height::xs())
+                .rounded(ui_theme::row_radius())
                 .child(disclosure_chevron(expanded))
                 .child(
                     div()
                         .text_sm()
                         .font_medium()
-                        .text_color(rgb(crate::ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text_bright()))
                         .child(title),
                 )
                 .children(meta.map(|meta| {
                     div()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::text_faint()))
                         .child(meta)
                 }))
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |workspace, cx| {
-                        workspace.toggle_automation_run_block(key.to_string(), cx)
+                    entity.update(cx, |page, cx| {
+                        page.toggle_automation_run_block(key.to_string(), cx)
                     });
                 }),
         )
@@ -465,18 +440,18 @@ fn run_detail_disclosure(
         .into_any_element()
 }
 
-fn disclosure_chevron(expanded: bool) -> Icon {
+pub(crate) fn disclosure_chevron(expanded: bool) -> Icon {
     Icon::new(if expanded {
         IconName::ChevronDown
     } else {
         IconName::ChevronRight
     })
     .size(px(12.))
-    .text_color(rgb(crate::ui_theme::text_faint()))
+    .text_color(rgb(ui_theme::text_faint()))
 }
 
-fn transcript_summary(entries: &[AcpEntry]) -> String {
-    fn count(entries: &[AcpEntry], tools: &mut usize, failed: &mut usize) {
+pub(crate) fn transcript_summary(entries: &[AcpEntry]) -> String {
+    pub(crate) fn count(entries: &[AcpEntry], tools: &mut usize, failed: &mut usize) {
         for entry in entries {
             if let AcpEntry::ToolCall {
                 status, children, ..
@@ -501,12 +476,12 @@ fn transcript_summary(entries: &[AcpEntry]) -> String {
 
 /// 对话按条画：说的话是正文，工具和思考是一行可展开的步骤。`path` 让嵌套的
 /// 子代理步骤有各自的展开键。
-fn render_transcript(
+pub(crate) fn render_transcript(
     entries: &[AcpEntry],
     path: &str,
     final_reply: Option<usize>,
     detail: &AutomationRunDetail,
-    entity: &Entity<Workspace>,
+    entity: &Entity<AutomationsPage>,
 ) -> AnyElement {
     let mut column = div().w_full().min_w_0().flex().flex_col().gap_1();
     for (ix, entry) in entries.iter().enumerate() {
@@ -519,7 +494,7 @@ fn render_transcript(
             AcpEntry::Assistant { thought: false, .. } if final_reply == Some(ix) => div()
                 .py_1()
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("最终回复，见上方运行结果")
                 .into_any_element(),
             AcpEntry::Assistant {
@@ -532,7 +507,7 @@ fn render_transcript(
                 div()
                     .py_1()
                     .text_sm()
-                    .child(crate::markdown_mermaid::markdown_view(
+                    .child(markdown_mermaid::markdown_view(
                         format!("automation-run-reply-{}-{key}", detail.run_id()),
                         text.clone(),
                     ))
@@ -549,7 +524,7 @@ fn render_transcript(
                 let preview = text.lines().next().unwrap_or_default().to_string();
                 transcript_step(
                     &key,
-                    process_icon(&smelt_model::acp_chat::ToolKind::Think),
+                    process_icon(&api::model::acp_chat::ToolKind::Think),
                     format!("思考  {preview}"),
                     None,
                     detail,
@@ -557,7 +532,7 @@ fn render_transcript(
                     Some(|| {
                         div()
                             .text_xs()
-                            .text_color(rgb(crate::ui_theme::text_muted()))
+                            .text_color(rgb(ui_theme::text_muted()))
                             .child(text.to_string())
                             .into_any_element()
                     }),
@@ -584,7 +559,7 @@ fn render_transcript(
                 transcript_step(
                     &key,
                     process_icon(kind),
-                    acp_view::compact_tool_headline(*kind, title),
+                    compact_tool_headline(*kind, title),
                     flag,
                     detail,
                     entity,
@@ -616,15 +591,15 @@ fn render_transcript(
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().flex_1().h(px(1.)).bg(crate::ui_theme::hairline()))
+                .child(div().flex_1().h(px(1.)).bg(ui_theme::hairline()))
                 .when(!label.trim().is_empty(), |row| {
                     row.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(crate::ui_theme::text_faint()))
+                            .text_color(rgb(ui_theme::text_faint()))
                             .child(label.trim().to_string()),
                     )
-                    .child(div().flex_1().h(px(1.)).bg(crate::ui_theme::hairline()))
+                    .child(div().flex_1().h(px(1.)).bg(ui_theme::hairline()))
                 })
                 .into_any_element(),
             AcpEntry::TaskNote(note) => {
@@ -648,11 +623,7 @@ fn render_transcript(
     column.into_any_element()
 }
 
-fn process_icon(kind: &smelt_model::acp_chat::ToolKind) -> Icon {
-    acp_view::process_timeline_icon(kind)
-}
-
-fn transcript_user(key: &str, run_id: &str, text: &str, images: usize) -> AnyElement {
+pub(crate) fn transcript_user(key: &str, run_id: &str, text: &str, images: usize) -> AnyElement {
     let mut body = text.trim().to_string();
     if images > 0 {
         if !body.is_empty() {
@@ -668,10 +639,10 @@ fn transcript_user(key: &str, run_id: &str, text: &str, images: usize) -> AnyEle
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("输入"),
         )
-        .child(detail_card(crate::markdown_mermaid::markdown_view(
+        .child(detail_card(markdown_mermaid::markdown_view(
             format!("automation-run-user-{run_id}-{key}"),
             body,
         )))
@@ -680,43 +651,43 @@ fn transcript_user(key: &str, run_id: &str, text: &str, images: usize) -> AnyEle
 
 /// 步骤行尾的状态。正常完成的不标。
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum StepFlag {
+pub(crate) enum StepFlag {
     Failed,
     Unfinished,
 }
 
 impl StepFlag {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Failed => "失败",
             Self::Unfinished => "未完成",
         }
     }
 
-    fn color(self) -> u32 {
+    pub(crate) fn color(self) -> u32 {
         match self {
-            Self::Failed => crate::ui_theme::red(),
-            Self::Unfinished => crate::ui_theme::text_faint(),
+            Self::Failed => ui_theme::red(),
+            Self::Unfinished => ui_theme::text_faint(),
         }
     }
 }
 
 /// 一行步骤：图标、动词句、可选状态。能展开的整行可点，正文缩进挂在下面。
-fn transcript_step(
+pub(crate) fn transcript_step(
     key: &str,
     icon: impl Into<Icon>,
     headline: String,
     flag: Option<StepFlag>,
     detail: &AutomationRunDetail,
-    entity: &Entity<Workspace>,
+    entity: &Entity<AutomationsPage>,
     body: Option<impl FnOnce() -> AnyElement>,
 ) -> AnyElement {
     let expandable = body.is_some();
     let expanded = expandable && detail.is_expanded(key);
     let ink = if flag == Some(StepFlag::Failed) {
-        crate::ui_theme::red()
+        ui_theme::red()
     } else {
-        crate::ui_theme::text_muted()
+        ui_theme::text_muted()
     };
     let toggle_key = key.to_string();
     let toggle_entity = entity.clone();
@@ -728,7 +699,7 @@ fn transcript_step(
         .flex()
         .items_center()
         .gap_2()
-        .rounded(crate::ui_theme::row_radius())
+        .rounded(ui_theme::row_radius())
         .child(Icon::new(icon).size(px(12.)).text_color(rgb(ink)))
         .child(
             div()
@@ -749,9 +720,7 @@ fn transcript_step(
         .when(expandable, |row| row.child(disclosure_chevron(expanded)))
         .on_click(move |_, _, cx| {
             let key = toggle_key.clone();
-            toggle_entity.update(cx, |workspace, cx| {
-                workspace.toggle_automation_run_block(key, cx)
-            });
+            toggle_entity.update(cx, |page, cx| page.toggle_automation_run_block(key, cx));
         });
     let body = body.filter(|_| expanded);
     div()
@@ -773,7 +742,7 @@ fn transcript_step(
 
 /// 工具输出原样进围栏代码块：等宽、可选中、右上角带复制，`---` 和 `#` 不会被
 /// 当成 Markdown 结构。超长输出截掉尾部，只留排查要用的部分。
-fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
+pub(crate) fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
     let mut blocks = Vec::new();
     for part in parts {
         match part {
@@ -805,7 +774,7 @@ fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
                 old_text,
                 new_text,
             } => {
-                let lines = smelt_model::acp_chat::diff_lines(
+                let lines = api::model::acp_chat::diff_lines(
                     old_text.as_deref().unwrap_or_default(),
                     new_text,
                 );
@@ -832,7 +801,7 @@ fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
     if blocks.is_empty() {
         return div()
             .text_xs()
-            .text_color(rgb(crate::ui_theme::text_faint()))
+            .text_color(rgb(ui_theme::text_faint()))
             .child("（无输出）")
             .into_any_element();
     }
@@ -840,15 +809,12 @@ fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
         .w_full()
         .min_w_0()
         .text_xs()
-        .child(crate::markdown_mermaid::markdown_view(
-            id,
-            blocks.join("\n\n"),
-        ))
+        .child(markdown_mermaid::markdown_view(id, blocks.join("\n\n")))
         .into_any_element()
 }
 
 /// 围栏比正文里最长的反引号串多一个，输出里带 ``` 也不会提前闭合。
-fn fenced_block(lang: &str, body: &str) -> String {
+pub(crate) fn fenced_block(lang: &str, body: &str) -> String {
     let total = body.lines().count();
     let mut body = if total > TOOL_OUTPUT_MAX_LINES {
         let mut clipped = body
@@ -876,7 +842,7 @@ fn fenced_block(lang: &str, body: &str) -> String {
     body
 }
 
-fn run_metadata(run: &AutomationRun) -> AnyElement {
+pub(crate) fn run_metadata(run: &AutomationRun) -> AnyElement {
     let mut rows = vec![
         ("来源", run_source_label(run.source).to_string()),
         (
@@ -926,7 +892,7 @@ fn run_metadata(run: &AutomationRun) -> AnyElement {
     }
     content_card()
         .w_full()
-        .px(crate::ui_theme::card_padding())
+        .px(ui_theme::card_padding())
         .py_2()
         .flex()
         .flex_col()
@@ -940,21 +906,21 @@ fn run_metadata(run: &AutomationRun) -> AnyElement {
                     div()
                         .w(px(96.))
                         .flex_shrink_0()
-                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::text_faint()))
                         .child(label),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_color(rgb(crate::ui_theme::text_mid()))
+                        .text_color(rgb(ui_theme::text_mid()))
                         .child(value),
                 )
         }))
         .into_any_element()
 }
 
-fn format_elapsed(seconds: i64) -> String {
+pub(crate) fn format_elapsed(seconds: i64) -> String {
     let seconds = seconds.max(0);
     match seconds {
         0..60 => format!("{seconds} 秒"),
@@ -971,6 +937,7 @@ mod tests {
         AcpEntry, AutomationRunDetail, AutomationRunStatus, HashSet, RunDetailKey,
         TOOL_OUTPUT_MAX_LINES, fenced_block, format_elapsed,
     };
+    use smelt_plugin_api::RuntimeKey;
 
     #[test]
     fn fence_outgrows_backticks_inside_output() {
@@ -999,7 +966,7 @@ mod tests {
     fn detail(output: Option<&str>, transcript: Vec<AcpEntry>) -> AutomationRunDetail {
         AutomationRunDetail {
             key: RunDetailKey {
-                runtime: crate::RuntimeKey::Local,
+                runtime: RuntimeKey::Local,
                 run_id: "run".into(),
                 status: AutomationRunStatus::Completed,
                 finished_at: None,

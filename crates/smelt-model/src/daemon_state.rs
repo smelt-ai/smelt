@@ -7,9 +7,10 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 pub use smelt_event_protocol::{
-    AttentionChanged, AttentionItem, AttentionKind, AttentionSnapshot,
-    CORE_TOPIC_ATTENTION_CHANGED, CORE_TOPIC_HISTORY_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED,
-    SessionAttention, TerminalProgress, TerminalProgressState,
+    AgentMemoryChanged, AttentionChanged, AttentionItem, AttentionKind, AttentionSnapshot,
+    CORE_TOPIC_AGENT_MEMORY_CHANGED, CORE_TOPIC_ATTENTION_CHANGED, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_TOPIC_HISTORY_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED, SessionAttention, TerminalProgress,
+    TerminalProgressState,
 };
 
 use crate::automation::AutomationFile;
@@ -301,8 +302,6 @@ pub enum DaemonStateEvent {
     ConversationWakeRequested { session_id: String },
     /// 关注过的项目目录里有文件变了。
     ProjectChanged { root: String },
-    /// 关注过的智能体的记忆目录里有文件变了（`None` 是用户全局记忆）。
-    AgentMemoryChanged { agent_id: Option<String> },
     /// 会话里的终端程序发了一条 OSC 9/99/777 通知（会话已有结构化 hook 事件时运行时不会
     /// 发），或智能体主动发了一条通知（带 `title`）。一次性事件，不是投影。
     TerminalNotification {

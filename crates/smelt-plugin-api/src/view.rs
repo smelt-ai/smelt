@@ -27,25 +27,19 @@ pub struct OpenView {
 }
 
 /// 宿主自己的路由，视图不能用这几个 id。
-pub const RESERVED_VIEW_IDS: [&str; 4] = ["agents", "automations", "desktop", "session"];
+pub const RESERVED_VIEW_IDS: [&str; 3] = ["conversation", "desktop", "session"];
 
 /// 插件的一个视图。
 pub trait PluginView: Render {
     /// 被打开：每次打开都会调，参数由打开的地方给（如 `{"tab": "plugins"}`），认不出的
     /// 字段忽略。
     fn open(&mut self, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>);
-
-    /// 标签上名字后面的角标，如待处理的条数。只读内存：宿主在画标签时调。
-    fn badge(&self, _cx: &App) -> Option<SharedString> {
-        None
-    }
 }
 
 /// 宿主拿着的视图：画出来，或再打开一次。
 pub trait ViewHandle {
     fn view(&self) -> AnyView;
     fn open(&self, args: &serde_json::Value, window: &mut Window, cx: &mut App);
-    fn badge(&self, cx: &App) -> Option<SharedString>;
 }
 
 impl<V: PluginView> ViewHandle for Entity<V> {
@@ -56,10 +50,43 @@ impl<V: PluginView> ViewHandle for Entity<V> {
     fn open(&self, args: &serde_json::Value, window: &mut Window, cx: &mut App) {
         self.update(cx, |view, cx| view.open(args, window, cx));
     }
+}
 
-    fn badge(&self, cx: &App) -> Option<SharedString> {
-        self.read(cx).badge(cx)
+/// 设视图的角标：名字后面的短字，如待处理的条数。宿主画在视图的入口上（面板标签、侧栏
+/// 里的那一行），视图建没建都画。状态变了由插件推，宿主不来问。
+pub const SET_VIEW_BADGE: Command<ViewBadge, ()> = Command::new("smelt.app/set-view-badge");
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewBadge {
+    /// 视图 id。
+    pub view: String,
+    /// 角标上的字；`None` 清掉。
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Default)]
+struct ViewBadges(std::collections::BTreeMap<String, SharedString>);
+
+impl Global for ViewBadges {}
+
+/// 设视图的角标，见 [`SET_VIEW_BADGE`]。变了发 [`HostEvent::ViewBadgesChanged`]。登记
+/// 视图之前设也行；撤下视图不清，插件自己清。
+pub fn set_view_badge(id: &str, label: Option<SharedString>, cx: &mut App) {
+    let label = label.filter(|label| !label.is_empty());
+    let badges = &mut cx.default_global::<ViewBadges>().0;
+    let changed = match label {
+        Some(label) => badges.insert(id.to_string(), label.clone()).as_ref() != Some(&label),
+        None => badges.remove(id).is_some(),
+    };
+    if changed {
+        crate::emit(HostEvent::ViewBadgesChanged, cx);
     }
+}
+
+/// 视图的角标。只读内存，render 里可以调。
+pub fn view_badge(id: &str, cx: &App) -> Option<SharedString> {
+    cx.try_global::<ViewBadges>()?.0.get(id).cloned()
 }
 
 /// 登记一个视图要给的东西。没有位置：摆在哪归宿主。

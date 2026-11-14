@@ -16,7 +16,6 @@ mod pane_state_tests;
 mod project_tests;
 mod remote_terminal_bench;
 mod session_facts_tests;
-mod session_route_tests;
 mod sidebar_order_tests;
 mod term_dock_tests;
 mod workspace_state_tests;

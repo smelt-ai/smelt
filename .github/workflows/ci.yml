@@ -55,6 +55,7 @@ jobs:
               - *workflow
               - *toolchain
               - 'crates/**'
+              - 'scripts/lint-*.sh'
               - 'agent/**'
               - 'assets/**'
             advisories:
@@ -134,6 +135,11 @@ jobs:
       # 手型光标是调用点约定，grep 能在编译之前就失败。
       - name: 禁止手型光标
         run: ./scripts/lint-pointer.sh
+
+      # 插件只依赖 smelt-plugin-api、能力 crate 不依赖插件（AGENTS.md「crate 按两条轴分」）。
+      # 只读 cargo metadata，几秒钟，放在编译之前。
+      - name: crate 依赖分层
+        run: ./scripts/lint-crate-deps.sh
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

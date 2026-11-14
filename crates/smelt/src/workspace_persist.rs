@@ -161,7 +161,6 @@ pub(crate) struct WorkspaceUiState {
     pub(crate) active_session: usize,
     pub(crate) active_session_id: Option<String>,
     pub(crate) route: WorkspaceRoute,
-    pub(crate) selected_agent_id: Option<String>,
     /// 各运行时上折叠、置顶的项目。
     pub(crate) collapsed_projects: Vec<ProjectKey>,
     pub(crate) collapsed_agents: Vec<String>,
@@ -282,7 +281,6 @@ pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
         active_session: record.active_session,
         active_session_id: record.active_session_id,
         route: crate::settings::enum_from_name(&record.route).unwrap_or_default(),
-        selected_agent_id: record.selected_agent_id,
         collapsed_projects: record.collapsed_projects,
         collapsed_agents: record.collapsed_agents,
         sidebar_grouping: crate::settings::enum_from_name(&record.sidebar_grouping)
@@ -298,7 +296,6 @@ fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
         active_session: ui.active_session,
         active_session_id: ui.active_session_id.clone(),
         route: crate::settings::enum_name(&ui.route),
-        selected_agent_id: ui.selected_agent_id.clone(),
         collapsed_projects: ui.collapsed_projects.clone(),
         collapsed_agents: ui.collapsed_agents.clone(),
         sidebar_grouping: crate::settings::enum_name(&ui.sidebar_grouping),
@@ -1292,7 +1289,6 @@ impl Workspace {
                 .or_else(|| self.saved_active_session_id.clone())
                 .filter(|id| !id.is_empty()),
             route: self.nav.persist(),
-            selected_agent_id: self.agent_surface.selected_id.clone(),
             collapsed_projects: Vec::new(),
             collapsed_agents: self.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,

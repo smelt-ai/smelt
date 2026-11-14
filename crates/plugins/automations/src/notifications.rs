@@ -1,7 +1,7 @@
+use smelt_plugin_api as api;
 use std::collections::HashMap;
 
-use smelt_client::daemon_state::DaemonPhase;
-use smelt_model::automation::{AutomationRun, AutomationRunStatus};
+use api::model::automation::{AutomationRun, AutomationRunStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomationProjectionOrigin {
@@ -119,27 +119,10 @@ fn notification_excerpt(value: &str) -> Option<String> {
     Some(excerpt)
 }
 
-pub(crate) fn owns_session(runs: &[AutomationRun], session_id: &str) -> bool {
-    runs.iter()
-        .any(|run| run.session_id.as_deref() == Some(session_id))
-}
-
-pub(crate) fn suppress_runtime_terminal_attention(
-    runs: &[AutomationRun],
-    session_id: &str,
-    phase: DaemonPhase,
-) -> bool {
-    owns_session(runs, session_id)
-        && matches!(
-            phase,
-            DaemonPhase::Succeeded | DaemonPhase::Failed | DaemonPhase::Dead
-        )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_model::automation::{AutomationAction, AutomationRunContext, AutomationRunSource};
+    use api::model::automation::{AutomationAction, AutomationRunContext, AutomationRunSource};
 
     fn run(status: AutomationRunStatus) -> AutomationRun {
         AutomationRun {
@@ -320,34 +303,5 @@ mod tests {
             )
             .is_empty()
         );
-    }
-
-    #[test]
-    fn automation_runtime_terminal_attention_is_suppressed_for_every_failure_path() {
-        let mut agent_run = run(AutomationRunStatus::Running);
-        agent_run.session_id = Some("acp-automation-1".into());
-        let runs = [agent_run];
-
-        for phase in [
-            DaemonPhase::Succeeded,
-            DaemonPhase::Failed,
-            DaemonPhase::Dead,
-        ] {
-            assert!(suppress_runtime_terminal_attention(
-                &runs,
-                "acp-automation-1",
-                phase
-            ));
-        }
-        assert!(!suppress_runtime_terminal_attention(
-            &runs,
-            "acp-automation-1",
-            DaemonPhase::Thinking
-        ));
-        assert!(!suppress_runtime_terminal_attention(
-            &[],
-            "acp-automation-1",
-            DaemonPhase::Failed
-        ));
     }
 }

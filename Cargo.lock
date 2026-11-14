@@ -10916,7 +10916,9 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-acp-view",
+ "smelt-agents",
  "smelt-app-state",
+ "smelt-automations",
  "smelt-capabilities",
  "smelt-cli",
  "smelt-client",
@@ -10971,6 +10973,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-agents"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "smelt-plugin-api",
+ "uuid",
+]
+
+[[package]]
 name = "smelt-app-state"
 version = "0.0.0"
 dependencies = [
@@ -10981,6 +10995,20 @@ dependencies = [
  "smelt-model",
  "smelt-runtime-client",
  "smol",
+]
+
+[[package]]
+name = "smelt-automations"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "serde",
+ "smelt-plugin-api",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -11331,7 +11359,6 @@ dependencies = [
 name = "smelt-ui"
 version = "0.0.0"
 dependencies = [
- "chrono",
  "gpui-base",
  "gpui-component",
  "gpui-pre",

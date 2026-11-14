@@ -1,162 +1,21 @@
 //! 智能体宿主状态：每台机器上运行时那部分配置（启动命令、env、profile、智能体定义、
-//! hook 开关），加上各台机器推来的自动化投影。
+//! hook 开关）。
 //!
 //! 需要 `gpui::Global`，所以不能进不许引 GPUI 的 smelt-core。设置页怎么渲染
 //! 这些字段仍在主 crate 的 settings 模块。
 
 use gpui::{App, AsyncApp, Global};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 pub use smelt_client::runtime::RuntimeKey;
 pub use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::agent_host::{AgentHostEdit, AgentHostSettings};
-use smelt_model::automation::{Automation, AutomationFile, AutomationRun, AutomationState};
 use smelt_model::control_api::{AgentHostApplyEdit, AgentHostGet};
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 /// 读写运行时配置的上限。一次合并写库，正常是毫秒级。
 const RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// 客户端这边的：各台机器推来的自动化投影。运行时那部分按机器放在 [`AgentHosts`]。
-#[derive(Clone, Default)]
-pub struct AgentHostState {
-    /// 每台机器的自动化投影。每台运行时有自己的自动化库，两台上同 id 的自动化是两回事。
-    pub automations: BTreeMap<RuntimeKey, MachineAutomations>,
-}
-
-impl AgentHostState {
-    /// 这台机器的自动化投影；还没收到过快照是 `None`。
-    pub fn automations_on(&self, runtime: &RuntimeKey) -> Option<&MachineAutomations> {
-        self.automations.get(runtime)
-    }
-
-    /// 按某台机器上的智能体找挂着它的自动化。
-    pub fn automations_for<'a>(
-        &'a self,
-        runtime: &RuntimeKey,
-        agent_id: &str,
-    ) -> Vec<&'a Automation> {
-        self.automations_on(runtime)
-            .map(|machine| machine.automations_for(agent_id))
-            .unwrap_or_default()
-    }
-
-    /// 收下一台机器推来的快照。旧的、已退休的库发来的不收；返回有没有变化。
-    pub fn replace_automation_snapshot(
-        &mut self,
-        runtime: &RuntimeKey,
-        snapshot: AutomationFile,
-    ) -> bool {
-        self.automations
-            .entry(runtime.clone())
-            .or_default()
-            .replace_snapshot(snapshot)
-    }
-
-    /// 机器被移除：它的自动化不再显示。
-    pub fn forget_automations(&mut self, runtime: &RuntimeKey) -> bool {
-        self.automations.remove(runtime).is_some()
-    }
-}
-
-impl Global for AgentHostState {}
-
-/// 一台机器推来的自动化投影；GUI 不据此调度。
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MachineAutomations {
-    pub automations: Vec<Automation>,
-    pub store_id: String,
-    pub retired_store_ids: HashSet<String>,
-    pub revision: u64,
-    pub states: Vec<AutomationState>,
-    pub runs: Vec<AutomationRun>,
-    pub store_error: Option<String>,
-    /// 这台机器的 webhook 地址前缀。
-    pub webhook_base_url: Option<String>,
-}
-
-impl MachineAutomations {
-    pub fn automation(&self, automation_id: &str) -> Option<&Automation> {
-        self.automations
-            .iter()
-            .find(|automation| automation.id == automation_id)
-    }
-
-    pub fn automations_for<'a>(&'a self, agent_id: &str) -> Vec<&'a Automation> {
-        self.automations
-            .iter()
-            .filter(|automation| automation.agent_definition_id() == Some(agent_id))
-            .collect()
-    }
-
-    pub fn state_for(&self, automation_id: &str) -> Option<&AutomationState> {
-        self.states
-            .iter()
-            .find(|state| state.automation_id == automation_id)
-    }
-
-    pub fn active_run(&self, automation_id: &str) -> Option<&AutomationRun> {
-        self.runs
-            .iter()
-            .find(|run| run.automation_id == automation_id && run.blocks_overlap())
-    }
-
-    pub fn latest_run(&self, automation_id: &str) -> Option<&AutomationRun> {
-        self.runs
-            .iter()
-            .filter(|run| run.automation_id == automation_id)
-            .max_by_key(|run| (run.created_at, run.id.as_str()))
-    }
-
-    pub fn runs_for(&self, automation_id: &str) -> Vec<&AutomationRun> {
-        let mut runs = self
-            .runs
-            .iter()
-            .filter(|run| run.automation_id == automation_id)
-            .collect::<Vec<_>>();
-        runs.sort_by_key(|run| std::cmp::Reverse((run.created_at, run.id.as_str())));
-        runs
-    }
-
-    pub fn is_retired_store(&self, store_id: &str) -> bool {
-        self.retired_store_ids.contains(store_id)
-    }
-
-    /// 同一个库：版本旧了不收，内容没变也不算变化。换了库（运行时重建了库）：旧库从此
-    /// 退休，它迟到的快照不再收。
-    pub fn replace_snapshot(&mut self, snapshot: AutomationFile) -> bool {
-        if snapshot.store_id == self.store_id {
-            if snapshot.revision < self.revision {
-                return false;
-            }
-            if snapshot.revision == self.revision
-                && snapshot.automations == self.automations
-                && snapshot.states == self.states
-                && snapshot.runs == self.runs
-                && snapshot.store_error == self.store_error
-                && snapshot.webhook_base_url == self.webhook_base_url
-            {
-                return false;
-            }
-        } else {
-            if self.retired_store_ids.contains(&snapshot.store_id) {
-                return false;
-            }
-            if !self.store_id.is_empty() {
-                self.retired_store_ids.insert(self.store_id.clone());
-            }
-        }
-        self.store_id = snapshot.store_id;
-        self.revision = snapshot.revision;
-        self.automations = snapshot.automations;
-        self.states = snapshot.states;
-        self.runs = snapshot.runs;
-        self.store_error = snapshot.store_error;
-        self.webhook_base_url = snapshot.webhook_base_url;
-        true
-    }
-}
 
 // ===================== 运行时那部分：按机器缓存 + 异步提交 =====================
 
@@ -477,80 +336,6 @@ pub fn reload_agent_host(key: &RuntimeKey, cx: &mut App) {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
-
-    #[test]
-    fn automation_snapshot_rejects_stale_revisions_and_retired_stores() {
-        let mut config = AgentHostState::default();
-        let local = RuntimeKey::Local;
-        let mut store_a = AutomationFile {
-            store_id: "store-a".into(),
-            revision: 10,
-            ..Default::default()
-        };
-        assert!(config.replace_automation_snapshot(&local, store_a.clone()));
-        assert!(
-            !config.replace_automation_snapshot(&local, store_a.clone()),
-            "同一 revision 的相同投影不应再刷新"
-        );
-        store_a.webhook_base_url = Some("http://127.0.0.1:17827".into());
-        assert!(
-            config.replace_automation_snapshot(&local, store_a.clone()),
-            "同 revision 补上 webhook 根地址仍要应用"
-        );
-
-        store_a.revision = 9;
-        assert!(!config.replace_automation_snapshot(&local, store_a.clone()));
-        assert_eq!(config.automations_on(&local).unwrap().revision, 10);
-
-        let store_b = AutomationFile {
-            store_id: "store-b".into(),
-            revision: 1,
-            ..Default::default()
-        };
-        assert!(config.replace_automation_snapshot(&local, store_b));
-        assert_eq!(config.automations_on(&local).unwrap().store_id, "store-b");
-        assert_eq!(config.automations_on(&local).unwrap().revision, 1);
-
-        store_a.revision = 11;
-        assert!(!config.replace_automation_snapshot(&local, store_a));
-        assert_eq!(config.automations_on(&local).unwrap().store_id, "store-b");
-    }
-
-    #[test]
-    fn each_machine_keeps_its_own_automation_store() {
-        let mut config = AgentHostState::default();
-        let local = RuntimeKey::Local;
-        let remote = RuntimeKey::Remote("box".into());
-        let store = |id: &str, revision| AutomationFile {
-            store_id: id.into(),
-            revision,
-            webhook_base_url: Some(format!("http://{id}")),
-            ..Default::default()
-        };
-        assert!(config.replace_automation_snapshot(&local, store("local-a", 5)));
-        // 远程机器的库是另一份：版本号更小、库 id 不同，都不能当成本机库的旧快照或换库。
-        assert!(config.replace_automation_snapshot(&remote, store("remote-a", 1)));
-        assert_eq!(config.automations_on(&local).unwrap().store_id, "local-a");
-        assert!(
-            config
-                .automations_on(&local)
-                .unwrap()
-                .retired_store_ids
-                .is_empty()
-        );
-        assert_eq!(
-            config
-                .automations_on(&remote)
-                .unwrap()
-                .webhook_base_url
-                .as_deref(),
-            Some("http://remote-a")
-        );
-
-        assert!(config.forget_automations(&remote));
-        assert!(config.automations_on(&remote).is_none());
-        assert!(config.automations_on(&local).is_some());
-    }
 
     /// 假运行时：`agent_host.get` 回它手里那份，`agent_host.apply_edit` 按 `after` 换上；
     /// `fail_edits` 时修改一律报错。每台机器各一个，用来确认调用发到了对的机器。

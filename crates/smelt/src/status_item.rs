@@ -17,12 +17,6 @@ pub enum StatusItemEvent {
         command: String,
         args: serde_json::Value,
     },
-    /// 跳到某台机器上某条自动化的一次运行。
-    JumpToAutomationRun {
-        runtime: crate::RuntimeKey,
-        automation_id: String,
-        run_id: String,
-    },
     /// UserNotifications 的异步权限或投递回执已更新；主线程应继续推进队列。
     SystemNotificationStateChanged,
 }
@@ -377,16 +371,6 @@ mod imp {
     pub fn notify_success(message: impl AsRef<str>) {
         deliver_app_notification("完成", message.as_ref());
     }
-    pub fn deliver_automation_notification(
-        _runtime: &crate::RuntimeKey,
-        _automation_id: &str,
-        _run_id: &str,
-        _subtitle: &str,
-        _body: &str,
-    ) {
-    }
-    pub fn retain_automation_notifications(_runtime: &crate::RuntimeKey, _run_ids: &[String]) {}
-    pub fn remove_automation_notification(_runtime: &crate::RuntimeKey, _run_id: &str) {}
     pub fn refresh_system_notification_authorization() {}
     pub fn request_system_notification_authorization() {}
     pub fn system_notification_settings_url() -> Option<String> {
@@ -410,18 +394,16 @@ pub use imp::{activate_app, is_app_active, set_menu, setup};
 
 #[cfg(target_os = "macos")]
 pub use system_notifications::{
-    deliver_automation_notification, deliver_plugin_notification, notify_error, notify_success,
-    refresh_system_notification_authorization, remove_automation_notification,
-    request_system_notification_authorization, retain_automation_notifications,
+    deliver_plugin_notification, notify_error, notify_success,
+    refresh_system_notification_authorization, request_system_notification_authorization,
     sync_system_notifications, system_notification_settings_url, system_notification_status,
     take_system_notification_errors, withdraw_plugin_notification,
 };
 
 #[cfg(not(target_os = "macos"))]
 pub use imp::{
-    deliver_automation_notification, deliver_plugin_notification, notify_error, notify_success,
-    refresh_system_notification_authorization, remove_automation_notification,
-    request_system_notification_authorization, retain_automation_notifications,
+    deliver_plugin_notification, notify_error, notify_success,
+    refresh_system_notification_authorization, request_system_notification_authorization,
     sync_system_notifications, system_notification_settings_url, system_notification_status,
     take_system_notification_errors, withdraw_plugin_notification,
 };

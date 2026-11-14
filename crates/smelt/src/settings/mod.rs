@@ -802,28 +802,22 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 
 // ===================== Agent 身份与宿主状态 =====================
 //
-// ConversationAgentKind / AcpProfile 在 smelt-model（本身不需要 GPUI），AgentHostState
-// 和按机器的 AgentHosts（需要 `gpui::Global`）在 smelt-ui——都是 acp_view.rs 独立成
+// ConversationAgentKind / AcpProfile 在 smelt-model（本身不需要 GPUI），按机器的
+// AgentHosts（需要 `gpui::Global`）在 smelt-ui——都是 acp_view.rs 独立成
 // smelt-acp-view crate 之后要跨 crate 共用的数据模型。这里重导出成裸名字。
 //
 // 智能体配置（启动命令、env、profile、定义）归运行时，每台机器一份：读、改都要说明是
 // 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
 pub use smelt_app_state::agent_host_state::{
-    AgentDefinition, AgentHostState, AgentHosts, MachineAutomations, agent_host_loaded,
-    agent_host_settled, agent_hosts, apply_agent_host, detach_agent_host, reload_agent_host,
-    reload_agent_hosts, try_apply_agent_host,
+    AgentDefinition, AgentHosts, agent_host_loaded, agent_host_settled, agent_hosts,
+    apply_agent_host, detach_agent_host, reload_agent_host, reload_agent_hosts,
+    try_apply_agent_host,
 };
 pub use smelt_model::agent_host::AgentHostSettings;
 pub use smelt_model::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
 use smelt_model::agent_kind::{ConversationLaunchSpec, format_env_lines, parse_env_lines};
-pub use smelt_ui::automation::{
-    Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,
-    AutomationSchedule, AutomationSink, AutomationTrigger, AutomationTriggerKindId,
-    AutomationTriggerPresetId, BUILTIN_AUTOMATION_ACTIONS, BUILTIN_AUTOMATION_TRIGGER_PRESETS,
-    EventIngress, WebhookIngress,
-};
 
 /// 挂上一台机器并在后台读它的配置：等那台机器在线再读，读失败就退避后回去等（见
 /// [`crate::runtime_events::wait_online`]），直到读到或机器被移除。已经挂着的只换客户端
@@ -1224,7 +1218,6 @@ impl SettingsContentView {
             _observe_settings_globals: vec![
                 Self::observe_settings_global::<Appearance>(window, cx),
                 Self::observe_settings_global::<LaunchConfig>(window, cx),
-                Self::observe_settings_global::<AgentHostState>(window, cx),
                 Self::observe_settings_global::<AgentHosts>(window, cx),
                 Self::observe_settings_global::<AcpRuntimeState>(window, cx),
                 #[cfg(any(target_os = "macos", windows))]

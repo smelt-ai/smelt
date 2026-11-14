@@ -33,6 +33,8 @@ members = [
     "crates/smelt-app-state",
     "crates/smelt-acp-view",
     "crates/smelt-plugin-api",
+    "crates/plugins/agents",
+    "crates/plugins/automations",
     "crates/plugins/capabilities",
     "crates/plugins/files",
     "crates/plugins/git",

@@ -337,6 +337,8 @@ pub(crate) struct GitPanel {
     git_writes: HashMap<ProjectRef, GitWrite>,
     refresh_scheduled: bool,
     _events: Subscription,
+    /// 每次重画都对一下角标（改动数），变了才推给宿主。
+    _badge: Subscription,
 }
 
 impl GitPanel {
@@ -349,6 +351,9 @@ impl GitPanel {
         let project = api::active_context(cx).project.map(|project| ProjectRef {
             runtime: project.machine,
             root: project.root,
+        });
+        let _badge = cx.observe_self(|this, cx| {
+            api::set_view_badge(VIEW_ID, this.badge(), cx);
         });
         let mut panel = Self {
             host,
@@ -400,6 +405,7 @@ impl GitPanel {
             git_writes: HashMap::new(),
             refresh_scheduled: false,
             _events,
+            _badge,
         };
         // 布局恢复时一建出来就看得见，不会再有「露出来」的事件。建的过程中实体还没落地，
         // 排到这一轮之后再取。
@@ -681,9 +687,11 @@ impl Focusable for GitPanel {
 impl PluginView for GitPanel {
     /// 打开时看的是当前项目，参数没有用处。
     fn open(&mut self, _: &api::serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+}
 
+impl GitPanel {
     /// 当前项目里**所有**仓库的改动文件数。只数项目根会让子仓里的改动在角标上隐形。
-    fn badge(&self, _cx: &App) -> Option<SharedString> {
+    fn badge(&self) -> Option<SharedString> {
         let project = self.project.as_ref()?;
         let count: usize = self
             .project_repo_roots(project)

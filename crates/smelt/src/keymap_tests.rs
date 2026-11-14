@@ -227,7 +227,7 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
                 keystroke: Some("cmd-j".to_string()),
             },
             KeyBindingRecord {
-                command: "smelt.sessions/new-conversation".to_string(),
+                command: "smelt.sessions/focus-list".to_string(),
                 keystroke: None,
             },
             KeyBindingRecord {
@@ -246,7 +246,7 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
         loaded,
         overrides(&[
             (PALETTE, Some("cmd-j")),
-            ("smelt.sessions/new-conversation", None),
+            ("smelt.sessions/focus-list", None),
             ("trader/buy", Some("cmd-l")),
         ])
     );
@@ -268,7 +268,7 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
     existing.push(after);
 
     let app = app_bindings(&overrides(&[(
-        "smelt.sessions/new-conversation",
+        "smelt.sessions/focus-list",
         Some("cmd-shift-m"),
     )]));
     let app_len = app.len();
@@ -286,10 +286,10 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
         rebuilt[app_len + 1].keystrokes()[0].inner(),
         &stroke("cmd-shift-y")
     );
-    let new_conversation = RunCommand::new("smelt.sessions/new-conversation");
+    let focus_list = RunCommand::new("smelt.sessions/focus-list");
     let moved: Vec<_> = rebuilt
         .iter()
-        .filter(|binding| binding.action().partial_eq(&new_conversation))
+        .filter(|binding| binding.action().partial_eq(&focus_list))
         .collect();
     assert_eq!(moved.len(), 1, "旧的那段不能留下来");
     assert_eq!(moved[0].keystrokes()[0].inner(), &stroke("cmd-shift-m"));
@@ -326,7 +326,7 @@ fn keys_without_command_are_left_to_the_terminal_and_inputs() {
 fn a_key_used_by_another_command_asks_to_reassign() {
     let none = Overrides::new();
     for (spec, other) in [
-        ("cmd-n", "smelt.sessions/new-conversation"),
+        ("cmd-shift-e", "smelt.sessions/focus-list"),
         ("cmd-q", "smelt.app/quit"),
         ("cmd-1", "smelt.sessions/activate-1"),
     ] {
@@ -342,8 +342,8 @@ fn a_key_used_by_another_command_asks_to_reassign() {
         }
     }
     // 改走以后，原来的键就空出来了。
-    let moved = overrides(&[("smelt.sessions/new-conversation", Some("cmd-shift-m"))]);
-    assert_set(judge(PALETTE, "cmd-n", &moved), "cmd-n");
+    let moved = overrides(&[("smelt.sessions/focus-list", Some("cmd-shift-m"))]);
+    assert_set(judge(PALETTE, "cmd-shift-e", &moved), "cmd-shift-e");
     // 自己现在的键不算冲突。
     assert_eq!(judge(PALETTE, "cmd-k", &none), Recorded::Reset);
 }

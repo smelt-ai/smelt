@@ -77,7 +77,7 @@ impl api::Host for SmeltHost {
                 .then(|| workspace.chrome_left_guard(window))
                 .flatten()
         });
-        crate::agents::product_page_chrome(left_guard)
+        crate::workspace_frame::page_chrome(left_guard)
     }
 
     fn window_active(&self, cx: &App) -> bool {
@@ -126,6 +126,27 @@ impl api::Host for SmeltHost {
 
     fn notification_permission(&self, _cx: &App) -> api::NotificationPermission {
         status_item::notification_permission()
+    }
+
+    fn agent_settings_error(&self, machine: &RuntimeKey, cx: &App) -> Option<String> {
+        crate::settings::agent_hosts(cx)?
+            .machine(machine)?
+            .error
+            .clone()
+    }
+
+    fn embed_conversation(
+        &self,
+        request: api::EmbedConversation,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<api::EmbeddedConversation, String> {
+        let workspace = self
+            .workspace()
+            .ok_or_else(|| api::NO_MAIN_WINDOW.to_string())?;
+        workspace.update(cx, |workspace, cx| {
+            workspace.embed_conversation(request, window, cx)
+        })
     }
 }
 
@@ -232,6 +253,16 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
         api::OPEN_IN_TEXT_EDITOR.spec("用系统文本编辑器打开", |args, _, _| {
             crate::ide::open_in_system_text_editor(&args.path)
         }),
+        api::OPEN_IN_FILE_MANAGER.spec("用文件管理器打开", |args, _, _| {
+            crate::ide::open_in_file_manager(&args.path)
+        }),
+        api::EDIT_AGENT_SETTINGS.spec("改智能体配置", |edit, _, cx| {
+            edit_agent_settings(edit, cx)
+        }),
+        api::RELOAD_AGENT_SETTINGS.spec("重读智能体配置", |_, _, cx| {
+            crate::settings::reload_agent_hosts(cx);
+            Ok(())
+        }),
         api::PICK_PATHS.spec_async("选择路径", move |request, window, cx| {
             let Some(runtime) = runtimes::runtime(&request.machine, cx) else {
                 return Task::ready(Err(api::MACHINE_REMOVED.to_string()));
@@ -253,6 +284,10 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             // 取消时选择框连同 `done` 一起扔掉，这边收到关闭。
             cx.spawn(async move |_| Ok(received.recv().await.ok()))
         }),
+        api::SET_VIEW_BADGE.spec("设视图角标", |args, _, cx| {
+            api::set_view_badge(&args.view, args.label.map(Into::into), cx);
+            Ok(())
+        }),
         api::OPEN_VIEW.spec("打开视图", move |args, window, cx| {
             let window = main_window(window)?;
             update_workspace(&views, cx, |workspace, cx| {
@@ -260,6 +295,27 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             })
         }),
     ]
+}
+
+/// 插件改智能体配置：宿主手里的那份还是插件读到的 `before` 才接受，免得盖掉这期间别处
+/// 的修改。
+fn edit_agent_settings(edit: api::AgentSettingsEdit, cx: &mut App) -> Result<(), String> {
+    let current = crate::settings::agent_hosts(cx)
+        .and_then(|hosts| hosts.settings(&edit.machine))
+        .cloned()
+        .ok_or_else(|| "这台机器的智能体配置还没读到，稍后再改".to_string())?;
+    if current != edit.before {
+        return Err("智能体配置刚被别处改过，请重试".to_string());
+    }
+    let after = edit.after;
+    if crate::settings::try_apply_agent_host(&edit.machine, move |settings| *settings = after, cx) {
+        Ok(())
+    } else {
+        Err(crate::settings::agent_hosts(cx)
+            .and_then(|hosts| hosts.machine(&edit.machine))
+            .and_then(|machine| machine.error.clone())
+            .unwrap_or_else(|| "这台机器的智能体配置改不了".to_string()))
+    }
 }
 
 /// 启动时、开主窗口之前调一次：装好宿主服务，登记内置插件。
@@ -281,6 +337,8 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::SessionsChanged, cx)
     })
     .detach();
+    smelt_agents::register(cx);
+    smelt_automations::register(cx);
     smelt_capabilities::register(cx);
     smelt_files_ui::register(cx);
     smelt_git_ui::register(cx);
@@ -344,6 +402,8 @@ impl Workspace {
                     this.sync_page_route(window, cx);
                     cx.notify();
                 }
+                // 侧栏里插件页的入口带角标。
+                HostEvent::ViewBadgesChanged => cx.notify(),
                 HostEvent::LayoutsChanged => this.sync_layout_choice(window, cx),
                 HostEvent::ThemesChanged => {
                     if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {

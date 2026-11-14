@@ -149,17 +149,6 @@ pub(crate) const COMMANDS: &[Def] = &[
             Handled::ok()
         },
     )),
-    // 跟侧栏最顶的「新对话」同一个动作。
-    def(
-        "smelt.sessions",
-        "new-conversation",
-        "新对话",
-        Some("cmd-n"),
-        |this, _, window, cx| {
-            this.begin_new_conversation(window, cx);
-            Handled::ok()
-        },
-    ),
     // 沿用当前会话的运行时和目录开一个终端会话。
     def(
         "smelt.sessions",

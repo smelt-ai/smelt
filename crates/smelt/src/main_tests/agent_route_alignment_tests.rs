@@ -1,54 +1,36 @@
-//! 工作台路由与智能体对话的对齐规则。
-//!
-//! 这里锁住一条真实踩过的坑：冷恢复补位必须是一次性的。它曾经每帧都跑，把用户点
-//! 侧栏「智能体」返回目录的动作在下一帧顶回对话页，表现为「点了完全没反应」。
+//! 工作台路由与侧栏对话的对齐规则。
 
 use super::{
-    WorkspaceRoute, agent_conversation_occupies_project_stage,
-    should_correct_agent_conversation_on_project_stage, should_open_restored_agent_conversation,
+    WorkspaceRoute, agent_conversation_occupies_project_stage, conversation_route_needs_target,
+    should_correct_agent_conversation_on_project_stage,
 };
 
 #[test]
-fn returning_to_the_agent_catalog_is_not_undone_on_the_next_frame() {
-    // 冷恢复第一帧：活动项是智能体对话，路由停在工作台 → 补位打开那段对话。
-    assert!(should_open_restored_agent_conversation(
-        true,
+fn a_restored_conversation_route_waits_for_sessions_then_finds_its_target() {
+    // 看哪段对话不落盘：会话还没恢复完就动路由，会把用户甩到一个马上要变的地方。
+    assert!(!conversation_route_needs_target(
         false,
-        true,
-        &WorkspaceRoute::Agents,
+        &WorkspaceRoute::Conversation,
+        false,
     ));
-
-    // 补位过之后用户点「智能体」回目录：后续每一帧都不能再抢路由。
-    assert!(!should_open_restored_agent_conversation(
+    assert!(conversation_route_needs_target(
         true,
-        true,
-        true,
-        &WorkspaceRoute::Agents,
+        &WorkspaceRoute::Conversation,
+        false,
     ));
-}
-
-#[test]
-fn restore_alignment_waits_for_sessions_and_stays_off_other_routes() {
-    // 会话还没恢复完就动路由，会把用户甩到一个马上要变的地方。
-    assert!(!should_open_restored_agent_conversation(
-        false,
-        false,
+    // 对上了就不再动。
+    assert!(!conversation_route_needs_target(
         true,
-        &WorkspaceRoute::Agents,
-    ));
-
-    // 活动项不是智能体对话时没有要补位的东西。
-    assert!(!should_open_restored_agent_conversation(
+        &WorkspaceRoute::Conversation,
         true,
-        false,
-        false,
-        &WorkspaceRoute::Agents,
     ));
-
-    // 恢复出来的路由在别处，用户看的就是别处，不许抢。
-    for route in [WorkspaceRoute::Automations, WorkspaceRoute::Session] {
+    // 别的路由不归这条管：用户看的就是别处，不许抢。
+    for route in [
+        WorkspaceRoute::Page("agents".into()),
+        WorkspaceRoute::Session,
+    ] {
         assert!(
-            !should_open_restored_agent_conversation(true, false, true, &route),
+            !conversation_route_needs_target(true, &route, false),
             "{route:?}"
         );
     }
@@ -61,10 +43,8 @@ fn an_agent_conversation_never_occupies_the_project_stage() {
         &WorkspaceRoute::Session,
         true,
     ));
-
-    // 这条是不变量，和一次性补位无关：工作台路由自己管子页，不受它影响。
     assert!(!agent_conversation_occupies_project_stage(
-        &WorkspaceRoute::Agents,
+        &WorkspaceRoute::Conversation,
         true,
     ));
     assert!(!agent_conversation_occupies_project_stage(

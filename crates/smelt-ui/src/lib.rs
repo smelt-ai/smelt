@@ -3,7 +3,6 @@
 //! 页面、被多处复用」的东西，别把整个应用的 UI 都塞进来。
 
 pub mod acp_completion;
-pub mod automation;
 pub mod button;
 pub mod frame_stats;
 pub mod global_wait;

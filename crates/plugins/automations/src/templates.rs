@@ -3,9 +3,10 @@
 //! 目录页只消费 [`AutomationTemplate`]，不关心来源。内置模板是产品预填，
 //! 方便从空白编辑器起步；后续若插件要注册模板，往同一份结构靠即可。
 
-use smelt_model::automation::{
+use api::model::automation::{
     AutomationSchedule, SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_DAY_WED,
 };
+use smelt_plugin_api as api;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomationTemplateCategory {
@@ -15,9 +16,9 @@ pub(crate) enum AutomationTemplateCategory {
 }
 
 impl AutomationTemplateCategory {
-    pub(super) const ALL: [Self; 3] = [Self::Work, Self::Engineering, Self::Research];
+    pub(crate) const ALL: [Self; 3] = [Self::Work, Self::Engineering, Self::Research];
 
-    pub(super) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Work => "工作",
             Self::Engineering => "工程",
@@ -27,7 +28,7 @@ impl AutomationTemplateCategory {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AutomationTemplateGlyph {
+pub(crate) enum AutomationTemplateGlyph {
     Sun,
     Calendar,
     Inbox,
@@ -40,7 +41,7 @@ pub(super) enum AutomationTemplateGlyph {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct AutomationTemplate {
+pub(crate) struct AutomationTemplate {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
@@ -50,7 +51,7 @@ pub(super) struct AutomationTemplate {
     pub schedule: AutomationSchedule,
 }
 
-const BUILTIN: &[AutomationTemplate] = &[
+pub(crate) const BUILTIN: &[AutomationTemplate] = &[
     AutomationTemplate {
         id: "morning-brief",
         name: "每日晨报",
@@ -159,15 +160,15 @@ const BUILTIN: &[AutomationTemplate] = &[
     },
 ];
 
-pub(super) fn builtin_automation_templates() -> &'static [AutomationTemplate] {
+pub(crate) fn builtin_automation_templates() -> &'static [AutomationTemplate] {
     BUILTIN
 }
 
-pub(super) fn automation_template(id: &str) -> Option<&'static AutomationTemplate> {
+pub(crate) fn automation_template(id: &str) -> Option<&'static AutomationTemplate> {
     BUILTIN.iter().find(|template| template.id == id)
 }
 
-pub(super) fn filtered_templates(
+pub(crate) fn filtered_templates(
     filter: Option<AutomationTemplateCategory>,
 ) -> impl Iterator<Item = &'static AutomationTemplate> {
     builtin_automation_templates()

@@ -1,0 +1,26 @@
+# 内置插件「自动化」：每台机器上的定时、间隔、webhook 任务，它们的运行记录和完成提醒。
+# 只依赖插件接口和 gpui 组件库，宿主里没有它的类型（见 docs/app-plugins.md）。
+[package]
+name = "smelt-automations"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
+# 完整的 lucide 图标表：组件库自带的 `IconName` 里没有工作流。
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+# 运行时间、下次运行按本地时区显示。
+chrono = "0.4"
+# 打开页面的参数、通知点击带的命令参数。
+serde = { version = "1", features = ["derive"] }
+# 新建自动化的 id、编辑器实例。
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

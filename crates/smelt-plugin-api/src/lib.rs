@@ -57,8 +57,9 @@ pub use settings::{
     settings_page, settings_pages, settings_pane, unregister_settings_pages,
 };
 pub use view::{
-    OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec,
-    built_view, ensure_view, is_registered, register_view, unregister_view, views,
+    OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, SET_VIEW_BADGE, ViewBadge, ViewBuilder,
+    ViewHandle, ViewSpec, built_view, ensure_view, is_registered, register_view, set_view_badge,
+    unregister_view, view_badge, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -239,6 +240,116 @@ pub struct DockBadge {
     pub label: Option<String>,
 }
 
+/// 用系统文件管理器（访达等）打开这台电脑上的一个目录。
+pub const OPEN_IN_FILE_MANAGER: Command<OpenInFileManager, ()> =
+    Command::new("smelt.app/open-in-file-manager");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenInFileManager {
+    /// 这台电脑上目录的绝对路径。
+    pub path: PathBuf,
+}
+
+/// 改一台机器的智能体配置（[`Host::agent_settings`]）。`before` 是改之前读到的那份，
+/// `after` 是改成的那份；运行时按两者的差别合并，只写真正改了的字段。宿主手里的那份已经
+/// 不是 `before`（这期间别处改过）就不接受，重读再改。本地立刻生效，再按机器排队提交给
+/// 运行时；提交失败退回运行时的那份，原因见 [`Host::agent_settings_error`]。
+pub const EDIT_AGENT_SETTINGS: Command<AgentSettingsEdit, ()> =
+    Command::new("smelt.app/edit-agent-settings");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSettingsEdit {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    pub before: model::agent_host::AgentHostSettings,
+    pub after: model::agent_host::AgentHostSettings,
+}
+
+/// 从各台机器重读智能体配置。CLI、Control API 改了定义不会推过来，看定义的页面打开时
+/// 调一次。
+pub const RELOAD_AGENT_SETTINGS: Command<(), ()> = Command::new("smelt.app/reload-agent-settings");
+
+/// 改 [`Host::agent_settings`] 那份配置：按 [`EDIT_AGENT_SETTINGS`] 发出 `f` 改出来的结果。
+/// 配置还没读到、或 `f` 什么都没改时不发。
+///
+/// 宿主只收基于它手里那份配置的修改，同一拍里发出的两份后一份必被拒；所以这里排队，
+/// 一次只发一份，轮到时才按那时的配置调 `f`。连着调几次就按调用的顺序都改上。
+pub fn edit_agent_settings(
+    machine: &RuntimeKey,
+    f: impl FnOnce(&mut model::agent_host::AgentHostSettings) + 'static,
+    cx: &mut App,
+) -> Task<Result<(), String>> {
+    let (done, result) = futures_channel::oneshot::channel();
+    let edits = cx.default_global::<AgentSettingsEdits>();
+    edits.queue.push_back(AgentSettingsEditJob {
+        machine: machine.clone(),
+        edit: Box::new(f),
+        done,
+    });
+    if !edits.running {
+        edits.running = true;
+        cx.spawn(async move |cx| {
+            while let Some((task, done)) = cx.update(next_agent_settings_edit) {
+                let _ = done.send(task.await);
+            }
+        })
+        .detach();
+    }
+    cx.spawn(async move |_| {
+        result
+            .await
+            .unwrap_or_else(|_| Err("智能体配置没有改完".to_string()))
+    })
+}
+
+/// 等着发的配置修改。
+#[derive(Default)]
+struct AgentSettingsEdits {
+    queue: std::collections::VecDeque<AgentSettingsEditJob>,
+    /// 有一份正在发，后面的排着。
+    running: bool,
+}
+
+impl Global for AgentSettingsEdits {}
+
+struct AgentSettingsEditJob {
+    machine: RuntimeKey,
+    edit: Box<dyn FnOnce(&mut model::agent_host::AgentHostSettings)>,
+    done: futures_channel::oneshot::Sender<Result<(), String>>,
+}
+
+type AgentSettingsEditStart = (
+    Task<Result<(), String>>,
+    futures_channel::oneshot::Sender<Result<(), String>>,
+);
+
+/// 取下一份修改，按眼下的配置算出来发出去；队列空了就停。
+fn next_agent_settings_edit(cx: &mut App) -> Option<AgentSettingsEditStart> {
+    let edits = cx.global_mut::<AgentSettingsEdits>();
+    let Some(job) = edits.queue.pop_front() else {
+        edits.running = false;
+        return None;
+    };
+    let Some(before) = host(cx).agent_settings(&job.machine, cx).cloned() else {
+        let error = "这台机器的智能体配置还没读到，稍后再改".to_string();
+        return Some((Task::ready(Err(error)), job.done));
+    };
+    let mut after = before.clone();
+    (job.edit)(&mut after);
+    if after == before {
+        return Some((Task::ready(Ok(())), job.done));
+    }
+    let task = EDIT_AGENT_SETTINGS.run(
+        &AgentSettingsEdit {
+            machine: job.machine,
+            before,
+            after,
+        },
+        cx,
+    );
+    Some((task, job.done))
+}
+
 /// 宿主转给插件的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
@@ -275,6 +386,8 @@ pub enum HostEvent {
     ShownViewsChanged,
     /// 视图登记变了：加了、替换了或撤下了（见 [`register_view`]）。
     ViewsChanged,
+    /// 有视图的角标变了（读 [`view_badge`]）。
+    ViewBadgesChanged,
     /// 主题登记变了：宿主应重新应用当前主题并更新设置页。
     ThemesChanged,
     /// 布局登记变了（见 [`register_layouts`]）：选的布局可能刚登记上或撤下了。
@@ -316,6 +429,9 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &'a App,
     ) -> Option<&'a model::agent_host::AgentHostSettings>;
+    /// 那台机器的智能体配置最近一次读取或保存失败的原因；没有失败是 `None`。变了发
+    /// [`HostEvent::AgentSettingsChanged`]。
+    fn agent_settings_error(&self, machine: &RuntimeKey, cx: &App) -> Option<String>;
     /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页。变了发
     /// [`HostEvent::ShownViewsChanged`]。
     fn view_shown(&self, id: &str, cx: &App) -> bool;
@@ -350,6 +466,37 @@ pub trait Host: 'static {
     /// 系统通知的授权。应用回到前台时重查；变了发
     /// [`HostEvent::NotificationPermissionChanged`]。
     fn notification_permission(&self, cx: &App) -> NotificationPermission;
+    /// 宿主的对话视图，接上守护里正在跑的那段对话，嵌进插件自己的页面（如自动化运行的
+    /// 现场）。对话的显示、输入、权限确认、重连都归宿主；它不进侧栏和工作区目录。守护里
+    /// 已经没有这段会话就接不上，先用 [`Host::session_states`] 看。只给 Rust 插件。
+    fn embed_conversation(
+        &self,
+        request: EmbedConversation,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<EmbeddedConversation, String>;
+}
+
+/// 要嵌哪段对话，见 [`Host::embed_conversation`]。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbedConversation {
+    pub machine: RuntimeKey,
+    /// 守护会话 id。
+    pub session_id: String,
+    /// 跑这段对话的 agent（`ConversationAgentKind::id`）。
+    pub agent: String,
+    pub cwd: String,
+    /// 这段对话是谁起的（自动化运行等），对话里据此显示来历。
+    pub binding: model::conversation::ConversationBinding,
+    /// 接上之前占位处显示的话，如「正在打开运行现场…」。
+    pub reason: String,
+}
+
+/// 嵌着的对话。留着它视图才跟宿主连着；扔掉就断开（会话本身不受影响）。
+pub struct EmbeddedConversation {
+    pub view: gpui::AnyView,
+    pub session_id: String,
+    pub _subscription: gpui::Subscription,
 }
 
 struct HostGlobal {
@@ -561,5 +708,115 @@ mod tests {
         let bare = serde_json::json!({ "machine": null, "title": "选择", "confirm": "导入" });
         let request: PathRequest = serde_json::from_value(bare).unwrap();
         assert!(!request.files && !request.multiple);
+    }
+
+    /// 只有智能体配置的宿主：配置记在全局上，改配置走 [`EDIT_AGENT_SETTINGS`]。
+    struct SettingsHost;
+
+    struct FakeSettings(model::agent_host::AgentHostSettings);
+
+    impl Global for FakeSettings {}
+
+    impl Host for SettingsHost {
+        fn machines(&self, _: &App) -> Vec<Machine> {
+            Vec::new()
+        }
+        fn client(&self, _: &RuntimeKey, _: &App) -> Option<RuntimeClient> {
+            None
+        }
+        fn agent_settings<'a>(
+            &self,
+            _: &RuntimeKey,
+            cx: &'a App,
+        ) -> Option<&'a model::agent_host::AgentHostSettings> {
+            Some(&cx.global::<FakeSettings>().0)
+        }
+        fn agent_settings_error(&self, _: &RuntimeKey, _: &App) -> Option<String> {
+            None
+        }
+        fn view_shown(&self, _: &str, _: &App) -> bool {
+            false
+        }
+        fn page_header(&self, _: &Window, _: &App) -> Div {
+            gpui::div()
+        }
+        fn main_window(&self, _: &App) -> Option<AnyWindowHandle> {
+            None
+        }
+        fn window_active(&self, _: &App) -> bool {
+            false
+        }
+        fn overlay_open(&self, _: &App) -> bool {
+            false
+        }
+        fn path_style(&self, _: &RuntimeKey, _: &App) -> model::runtime_path::PathStyle {
+            model::runtime_path::PathStyle::Posix
+        }
+        fn session_states(
+            &self,
+            _: &RuntimeKey,
+            _: &App,
+        ) -> Vec<model::daemon_state::DaemonSessionState> {
+            Vec::new()
+        }
+        fn workspace_directory(
+            &self,
+            _: &RuntimeKey,
+            _: &App,
+        ) -> Option<model::workspace_directory::WorkspaceDirectory> {
+            None
+        }
+        fn notification_permission(&self, _: &App) -> NotificationPermission {
+            NotificationPermission::Checking
+        }
+        fn embed_conversation(
+            &self,
+            _: EmbedConversation,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Result<EmbeddedConversation, String> {
+            Err("没有对话".to_string())
+        }
+    }
+
+    #[gpui::test]
+    fn edits_in_one_tick_all_apply_in_order(cx: &mut gpui::TestAppContext) {
+        let (first, second) = cx.update(|cx| {
+            cx.set_global(FakeSettings(model::agent_host::AgentHostSettings::fresh()));
+            install(SettingsHost, cx);
+            // 和宿主一样：手里那份不是 `before` 就拒。
+            let edit = EDIT_AGENT_SETTINGS.spec("改智能体配置", |edit, _, cx| {
+                let settings = &mut cx.global_mut::<FakeSettings>().0;
+                if *settings != edit.before {
+                    return Err("智能体配置刚被别处改过，请重试".to_string());
+                }
+                *settings = edit.after;
+                Ok(())
+            });
+            register_commands("smelt.app", "应用", vec![edit], cx).unwrap();
+            let first = edit_agent_settings(
+                &RuntimeKey::Local,
+                |settings| settings.default_conversation_agent = Some("a".to_string()),
+                cx,
+            );
+            // 第二份要在第一份改完之后才算：看得到第一份的结果。
+            let second = edit_agent_settings(
+                &RuntimeKey::Local,
+                |settings| {
+                    assert_eq!(settings.default_conversation_agent.as_deref(), Some("a"));
+                    settings.hooks_enabled = false;
+                },
+                cx,
+            );
+            (first, second)
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.foreground_executor().block_test(first), Ok(()));
+        assert_eq!(cx.foreground_executor().block_test(second), Ok(()));
+        cx.update(|cx| {
+            let settings = &cx.global::<FakeSettings>().0;
+            assert_eq!(settings.default_conversation_agent.as_deref(), Some("a"));
+            assert!(!settings.hooks_enabled);
+        });
     }
 }

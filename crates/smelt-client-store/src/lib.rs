@@ -122,7 +122,6 @@ pub struct WorkspaceUiRecord {
     /// 当前看的那段对话的稳定 id。
     pub active_session_id: Option<String>,
     pub route: String,
-    pub selected_agent_id: Option<String>,
     pub collapsed_projects: Vec<ProjectKey>,
     pub collapsed_agents: Vec<String>,
     pub sidebar_grouping: String,
@@ -488,14 +487,12 @@ pub(crate) fn write_workspace_ui(
     connection
         .execute(
             "INSERT OR REPLACE INTO workspace_ui (id, active_session, active_session_id, route,
-               selected_agent_id, sidebar_grouping, sidebar_hide_empty_projects,
-               archive_expanded)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+               sidebar_grouping, sidebar_hide_empty_projects, archive_expanded)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 record.active_session as i64,
                 record.active_session_id,
                 record.route,
-                record.selected_agent_id,
                 record.sidebar_grouping,
                 record.sidebar_hide_empty_projects,
                 record.archive_expanded
@@ -698,8 +695,8 @@ impl ClientStore {
         self.with(|connection| {
             let Some(mut record) = connection
                 .query_row(
-                    "SELECT active_session, active_session_id, route, selected_agent_id,
-                       sidebar_grouping, sidebar_hide_empty_projects, archive_expanded
+                    "SELECT active_session, active_session_id, route, sidebar_grouping,
+                       sidebar_hide_empty_projects, archive_expanded
                      FROM workspace_ui WHERE id = 1",
                     [],
                     |row| {
@@ -707,13 +704,12 @@ impl ClientStore {
                             active_session: row.get::<_, i64>(0)? as usize,
                             active_session_id: row.get(1)?,
                             route: row.get(2)?,
-                            selected_agent_id: row.get(3)?,
                             collapsed_projects: Vec::new(),
                             collapsed_agents: Vec::new(),
-                            sidebar_grouping: row.get(4)?,
+                            sidebar_grouping: row.get(3)?,
                             pinned_projects: Vec::new(),
-                            sidebar_hide_empty_projects: row.get(5)?,
-                            archive_expanded: row.get(6)?,
+                            sidebar_hide_empty_projects: row.get(4)?,
+                            archive_expanded: row.get(5)?,
                         })
                     },
                 )

@@ -2091,3 +2091,210 @@ mod redaction_tests {
         assert_eq!(edited.trigger.webhooks, stored.trigger.webhooks);
     }
 }
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    fn at(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+    ) -> chrono::DateTime<FixedOffset> {
+        FixedOffset::east_opt(8 * 3600)
+            .expect("CST")
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("valid local time")
+    }
+
+    #[test]
+    fn simple_schedule_labels_remain_stable() {
+        assert_eq!(
+            AutomationSchedule::Weekly {
+                days: SCHEDULE_WEEKDAYS_MASK,
+                hour: 9,
+                minute: 35,
+            }
+            .summary(),
+            "每周一、二、三、四、五 · 09:35"
+        );
+        assert_eq!(
+            AutomationSchedule::Daily { hour: 9, minute: 0 }.summary(),
+            "每天 09:00"
+        );
+        assert_eq!(
+            AutomationSchedule::EveryMinutes { minutes: 15 }.summary(),
+            "每隔 15 分钟"
+        );
+        assert_eq!(
+            AutomationSchedule::EveryHours { hours: 1 }.summary(),
+            "每隔 1 小时"
+        );
+        assert_eq!(
+            AutomationSchedule::During {
+                minutes: 15,
+                days: SCHEDULE_WEEKDAYS_MASK,
+                start_hour: 9,
+                start_minute: 30,
+                end_hour: 15,
+                end_minute: 0,
+            }
+            .summary(),
+            "每周一、二、三、四、五 09:30–15:00 · 每隔 15 分钟"
+        );
+        assert_eq!(
+            AutomationSchedule::Weekly {
+                days: SCHEDULE_DAY_MON | SCHEDULE_DAY_WED | SCHEDULE_DAY_FRI,
+                hour: 9,
+                minute: 35,
+            }
+            .summary(),
+            "每周一、三、五 · 09:35"
+        );
+    }
+
+    #[test]
+    fn legacy_weekdays_json_loads_as_weekly_days() {
+        let loaded: AutomationSchedule = serde_json::from_value(serde_json::json!({
+            "type": "weekdays",
+            "hour": 9,
+            "minute": 35
+        }))
+        .unwrap();
+        assert_eq!(
+            loaded,
+            AutomationSchedule::Weekly {
+                days: SCHEDULE_WEEKDAYS_MASK,
+                hour: 9,
+                minute: 35,
+            }
+        );
+        let stored = serde_json::to_value(loaded).unwrap();
+        assert_eq!(stored["type"], "weekly");
+        assert!(stored.get("days").is_some());
+    }
+
+    #[test]
+    fn weekday_schedule_skips_the_weekend() {
+        let schedule = AutomationSchedule::Weekly {
+            days: SCHEDULE_WEEKDAYS_MASK,
+            hour: 9,
+            minute: 35,
+        };
+        assert_eq!(
+            schedule.next_after(at(2026, 9, 4, 18, 0)),
+            at(2026, 9, 7, 9, 35)
+        );
+    }
+
+    #[test]
+    fn weekly_schedule_honors_selected_days() {
+        let schedule = AutomationSchedule::Weekly {
+            days: SCHEDULE_DAY_MON | SCHEDULE_DAY_WED,
+            hour: 9,
+            minute: 35,
+        };
+        assert_eq!(
+            schedule.next_after(at(2026, 9, 4, 18, 0)),
+            at(2026, 9, 7, 9, 35)
+        );
+        assert_eq!(
+            schedule.next_after(at(2026, 9, 7, 10, 0)),
+            at(2026, 9, 9, 9, 35)
+        );
+    }
+
+    /// 触发的摘要逐条列出，外部触发不带令牌。
+    #[test]
+    fn trigger_summary_lists_every_trigger_without_the_token() {
+        assert_eq!(
+            AutomationTrigger::webhook_with_secret("tok_should_not_leak").summary(),
+            "外部触发"
+        );
+        let both = AutomationTrigger::schedule(AutomationSchedule::daily_morning())
+            .with_webhook_secret("tok");
+        assert_eq!(both.summary(), "每天 09:00；外部触发");
+        let two_hooks = AutomationTrigger {
+            webhooks: vec![
+                WebhookIngress {
+                    endpoint: "a".into(),
+                    secret: Some("a".into()),
+                },
+                WebhookIngress {
+                    endpoint: "b".into(),
+                    secret: Some("b".into()),
+                },
+            ],
+            ..AutomationTrigger::default()
+        };
+        assert_eq!(two_hooks.summary(), "外部触发；外部触发");
+    }
+
+    /// 立即运行不要求先有一段对话：上下文全来自自动化本身。
+    #[test]
+    fn automation_run_does_not_require_an_existing_conversation() {
+        let workspace = std::env::temp_dir().to_string_lossy().into_owned();
+        let automation = Automation {
+            id: "open-scan".into(),
+            name: "开盘扫描".into(),
+            enabled: true,
+            workspace_dir: Some(workspace.clone()),
+            trigger: AutomationTrigger::schedule(AutomationSchedule::daily_morning()),
+            action: AutomationAction::Agent {
+                agent_definition_id: "quant".into(),
+                prompt: Some("拉取行情并输出".into()),
+            },
+            sinks: Vec::new(),
+        };
+        let mut file = AutomationFile::default();
+        apply_automation_command(
+            &mut file,
+            AutomationCommand::Upsert {
+                automation: Box::new(automation),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+
+        let run = apply_automation_command(
+            &mut file,
+            AutomationCommand::RunOnce {
+                automation_id: "open-scan".into(),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .run()
+        .unwrap();
+
+        assert_eq!(run.context.prompt.as_deref(), Some("拉取行情并输出"));
+        assert_eq!(run.context.action.agent_definition_id(), Some("quant"));
+        assert_eq!(run.context.cwd, workspace);
+        assert_eq!(run.context.automation_name, "开盘扫描");
+    }
+
+    /// 没选工作目录也能存（就绪、校验通过），只是执行前的上下文校验不过。
+    #[test]
+    fn automation_definition_does_not_require_a_user_selected_workspace() {
+        let automation = Automation {
+            id: "open-scan".into(),
+            name: "开盘扫描".into(),
+            enabled: true,
+            workspace_dir: None,
+            trigger: AutomationTrigger::schedule(AutomationSchedule::daily_morning()),
+            action: AutomationAction::Agent {
+                agent_definition_id: "quant".into(),
+                prompt: Some("拉取行情并输出".into()),
+            },
+            sinks: Vec::new(),
+        };
+
+        assert!(automation.is_ready());
+        assert!(automation.validate().is_ok());
+        assert!(automation.validate_execution_context().is_err());
+    }
+}

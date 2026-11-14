@@ -182,6 +182,7 @@ impl CapabilitiesPage {
             | HostEvent::AgentSettingsChanged
             | HostEvent::ShownViewsChanged
             | HostEvent::ViewsChanged
+            | HostEvent::ViewBadgesChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
             | HostEvent::CommandsChanged
