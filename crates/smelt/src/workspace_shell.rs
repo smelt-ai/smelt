@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Div, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Hsla, Pixels, SharedString, Stateful, Window, div, prelude::*, px, rgb,
-    size,
+    FocusHandle, Focusable, Hsla, Pixels, SharedString, Stateful, Subscription, Window, div,
+    prelude::*, px, rgb, size,
 };
 use gpui_base::ResizeHandleContext;
 use gpui_component::dock::{
@@ -94,6 +94,8 @@ pub(crate) struct ViewPanel {
     /// 登记时说的 [`smelt_plugin_api::ViewSpec::draws_top_bar`]。
     owns_top_bar: bool,
     focus_handle: FocusHandle,
+    /// 角标变了重画标签。
+    _badges: Subscription,
 }
 
 impl EventEmitter<PanelEvent> for ViewPanel {}
@@ -136,10 +138,9 @@ impl Panel for ViewPanel {
         self.title.clone()
     }
 
-    /// 角标由视图自己给（`PluginView::badge`）。
+    /// 角标由插件推（`smelt_plugin_api::set_view_badge`）。
     fn title_suffix(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        self.view
-            .badge(cx)
+        smelt_plugin_api::view_badge(self.id, cx)
             .map(|badge| Tag::primary().small().rounded_full().child(badge))
     }
 
@@ -266,6 +267,14 @@ fn build_panel(state: &PanelState, window: &mut Window, cx: &mut App) -> Arc<dyn
         view,
         info,
         focus_handle: cx.focus_handle(),
+        _badges: cx.subscribe(
+            &smelt_plugin_api::events(cx),
+            |_, _, event: &smelt_plugin_api::HostEvent, cx| {
+                if *event == smelt_plugin_api::HostEvent::ViewBadgesChanged {
+                    cx.notify();
+                }
+            },
+        ),
     }))
 }
 

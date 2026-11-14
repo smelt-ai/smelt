@@ -24,6 +24,22 @@ pub const SEND_TEXT: Command<SendText, ()> = Command::new("smelt.sessions/send-t
 /// 恢复的话等恢复完再跳，恢复完还没有就算了。
 pub const ACTIVATE: Command<Activate, ()> = Command::new("smelt.sessions/activate");
 
+/// 跟一个智能体开一段新对话：开在那台机器上、`cwd` 里，按智能体定义的引擎、模型和启动
+/// 命令起，露在主窗口里。智能体不在了、还不能对话、引擎不开放都算失败。
+pub const START_CONVERSATION: Command<StartConversation, ()> =
+    Command::new("smelt.sessions/start-conversation");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartConversation {
+    /// 智能体定义所在的机器，对话也开在那台机器上。
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    /// 智能体定义的 id（[`crate::Host::agent_settings`] 里的 `agents`）。
+    pub agent_definition_id: String,
+    /// 那台机器上的工作目录。智能体自己的工作区用 `agent.space.ensure` 取。
+    pub cwd: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activate {
     /// 守护会话 id，同 [`crate::Host::session_states`] 里的。

@@ -5,7 +5,7 @@
 
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind};
 use smelt_plugin_api::CommandSpec;
-use smelt_plugin_api::sessions::{self, Handoff, Resume};
+use smelt_plugin_api::sessions::{self, Handoff, Resume, StartConversation};
 
 use super::*;
 use crate::plugin_host::{WorkspaceRef, in_main_window, main_window, update_workspace};
@@ -17,7 +17,13 @@ pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let handoff = workspace.clone();
     let send = workspace.clone();
     let activate = workspace.clone();
+    let start = workspace.clone();
     vec![
+        sessions::START_CONVERSATION.spec("跟智能体开对话", move |args, window, cx| {
+            in_main_window(window, &start, cx, |this, window, cx| {
+                this.start_conversation_with(args, window, cx)
+            })?
+        }),
         sessions::ACTIVATE.spec("跳到会话", move |args, window, cx| {
             in_main_window(window, &activate, cx, |this, window, cx| {
                 this.request_notification_session_jump(args.session_id, window, cx)
@@ -48,6 +54,91 @@ pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
 }
 
 impl Workspace {
+    /// 跟一个智能体开一段新对话。启动命令、环境变量取智能体那台机器自己的。
+    fn start_conversation_with(
+        &mut self,
+        args: StartConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let agent = settings::agent_definition(&args.machine, &args.agent_definition_id, cx)
+            .ok_or_else(|| "智能体已经不存在".to_string())?;
+        if agent.engine_kind().is_none() {
+            return Err("请选择一个可用的执行引擎".to_string());
+        }
+        let (kind, launch) =
+            settings::agent_host_settings(&args.machine, cx).resolve_agent(&agent)?;
+        if !smelt_model::agent_definition::agent_engine_kinds().contains(&kind) {
+            return Err(format!(
+                "{} 暂未开放为产品级智能体引擎，请改用 Pi",
+                kind.short_label()
+            ));
+        }
+        let runtime = crate::runtimes::runtime(&args.machine, cx)
+            .ok_or_else(crate::runtime_call::removed_text)?;
+        self.add_acp_session(
+            crate::workspace_sessions::NewAcpSessionRequest {
+                runtime,
+                agent: kind,
+                launch_override: Some(launch),
+                profile_id: None,
+                agent_definition: Some(agent),
+                fallback_cwd: Some(args.cwd),
+                pending_prompt: None,
+                automation_id: None,
+                workset_id: None,
+                activate: true,
+            },
+            window,
+            cx,
+        );
+        Ok(())
+    }
+
+    /// 宿主的对话视图接上守护里那段会话，给插件嵌进自己的页面（见
+    /// `smelt_plugin_api::Host::embed_conversation`）。事件照工作台里的对话处理。
+    pub(crate) fn embed_conversation(
+        &mut self,
+        request: smelt_plugin_api::EmbedConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<smelt_plugin_api::EmbeddedConversation, String> {
+        let agent = ConversationAgentKind::from_id(&request.agent)
+            .ok_or_else(|| format!("认不出 agent「{}」", request.agent))?;
+        let runtime = crate::runtimes::runtime(&request.machine, cx)
+            .ok_or_else(crate::runtime_call::removed_text)?;
+        let session_id = request.session_id;
+        let view = cx.new(|cx| {
+            acp_view::AcpView::placeholder(
+                cx,
+                acp_view::AcpViewOrigin {
+                    runtime,
+                    launch_prep: None,
+                    agent,
+                    // 接的是守护里正在跑的会话，不按这份规格重新起。
+                    launch: agent.default_launch(),
+                    refresh_launch_from_settings: false,
+                    profile_id: None,
+                    cwd: Some(request.cwd),
+                    reason: request.reason,
+                    entries: Vec::new(),
+                    resume_session_id: None,
+                    saved_sid: Some(session_id.clone()),
+                },
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.restore_conversation_binding(request.binding);
+            view.maybe_auto_resume(window, cx);
+        });
+        let subscription = self.subscribe_acp_persist(&view, window, cx);
+        Ok(smelt_plugin_api::EmbeddedConversation {
+            view: view.into(),
+            session_id,
+            _subscription: subscription,
+        })
+    }
+
     fn resume_from_history(
         &mut self,
         args: Resume,

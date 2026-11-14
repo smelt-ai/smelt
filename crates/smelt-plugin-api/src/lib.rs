@@ -57,8 +57,9 @@ pub use settings::{
     settings_page, settings_pages, settings_pane, unregister_settings_pages,
 };
 pub use view::{
-    OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec,
-    built_view, ensure_view, is_registered, register_view, unregister_view, views,
+    OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, SET_VIEW_BADGE, ViewBadge, ViewBuilder,
+    ViewHandle, ViewSpec, built_view, ensure_view, is_registered, register_view, set_view_badge,
+    unregister_view, view_badge, views,
 };
 
 /// 桌面挂着的一台机器。
@@ -239,6 +240,60 @@ pub struct DockBadge {
     pub label: Option<String>,
 }
 
+/// 用系统文件管理器（访达等）打开这台电脑上的一个目录。
+pub const OPEN_IN_FILE_MANAGER: Command<OpenInFileManager, ()> =
+    Command::new("smelt.app/open-in-file-manager");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenInFileManager {
+    /// 这台电脑上目录的绝对路径。
+    pub path: PathBuf,
+}
+
+/// 改一台机器的智能体配置（[`Host::agent_settings`]）。`before` 是改之前读到的那份，
+/// `after` 是改成的那份；运行时按两者的差别合并，只写真正改了的字段。宿主手里的那份已经
+/// 不是 `before`（这期间别处改过）就不接受，重读再改。本地立刻生效，再按机器排队提交给
+/// 运行时；提交失败退回运行时的那份，原因见 [`Host::agent_settings_error`]。
+pub const EDIT_AGENT_SETTINGS: Command<AgentSettingsEdit, ()> =
+    Command::new("smelt.app/edit-agent-settings");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSettingsEdit {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    pub before: model::agent_host::AgentHostSettings,
+    pub after: model::agent_host::AgentHostSettings,
+}
+
+/// 从各台机器重读智能体配置。CLI、Control API 改了定义不会推过来，看定义的页面打开时
+/// 调一次。
+pub const RELOAD_AGENT_SETTINGS: Command<(), ()> = Command::new("smelt.app/reload-agent-settings");
+
+/// 改 [`Host::agent_settings`] 那份配置：按 [`EDIT_AGENT_SETTINGS`] 发出 `f` 改出来的结果。
+/// 配置还没读到、或 `f` 什么都没改时不发。
+pub fn edit_agent_settings(
+    machine: &RuntimeKey,
+    f: impl FnOnce(&mut model::agent_host::AgentHostSettings),
+    cx: &mut App,
+) -> Task<Result<(), String>> {
+    let Some(before) = host(cx).agent_settings(machine, cx).cloned() else {
+        return Task::ready(Err("这台机器的智能体配置还没读到，稍后再改".to_string()));
+    };
+    let mut after = before.clone();
+    f(&mut after);
+    if after == before {
+        return Task::ready(Ok(()));
+    }
+    EDIT_AGENT_SETTINGS.run(
+        &AgentSettingsEdit {
+            machine: machine.clone(),
+            before,
+            after,
+        },
+        cx,
+    )
+}
+
 /// 宿主转给插件的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
@@ -275,6 +330,8 @@ pub enum HostEvent {
     ShownViewsChanged,
     /// 视图登记变了：加了、替换了或撤下了（见 [`register_view`]）。
     ViewsChanged,
+    /// 有视图的角标变了（读 [`view_badge`]）。
+    ViewBadgesChanged,
     /// 主题登记变了：宿主应重新应用当前主题并更新设置页。
     ThemesChanged,
     /// 布局登记变了（见 [`register_layouts`]）：选的布局可能刚登记上或撤下了。
@@ -316,6 +373,9 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &'a App,
     ) -> Option<&'a model::agent_host::AgentHostSettings>;
+    /// 那台机器的智能体配置最近一次读取或保存失败的原因；没有失败是 `None`。变了发
+    /// [`HostEvent::AgentSettingsChanged`]。
+    fn agent_settings_error(&self, machine: &RuntimeKey, cx: &App) -> Option<String>;
     /// 那个视图此刻看得见：摆在布局里且所在组显示着它，或在舞台上开成了当前页。变了发
     /// [`HostEvent::ShownViewsChanged`]。
     fn view_shown(&self, id: &str, cx: &App) -> bool;
@@ -350,6 +410,37 @@ pub trait Host: 'static {
     /// 系统通知的授权。应用回到前台时重查；变了发
     /// [`HostEvent::NotificationPermissionChanged`]。
     fn notification_permission(&self, cx: &App) -> NotificationPermission;
+    /// 宿主的对话视图，接上守护里正在跑的那段对话，嵌进插件自己的页面（如自动化运行的
+    /// 现场）。对话的显示、输入、权限确认、重连都归宿主；它不进侧栏和工作区目录。守护里
+    /// 已经没有这段会话就接不上，先用 [`Host::session_states`] 看。只给 Rust 插件。
+    fn embed_conversation(
+        &self,
+        request: EmbedConversation,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<EmbeddedConversation, String>;
+}
+
+/// 要嵌哪段对话，见 [`Host::embed_conversation`]。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbedConversation {
+    pub machine: RuntimeKey,
+    /// 守护会话 id。
+    pub session_id: String,
+    /// 跑这段对话的 agent（`ConversationAgentKind::id`）。
+    pub agent: String,
+    pub cwd: String,
+    /// 这段对话是谁起的（自动化运行等），对话里据此显示来历。
+    pub binding: model::conversation::ConversationBinding,
+    /// 接上之前占位处显示的话，如「正在打开运行现场…」。
+    pub reason: String,
+}
+
+/// 嵌着的对话。留着它视图才跟宿主连着；扔掉就断开（会话本身不受影响）。
+pub struct EmbeddedConversation {
+    pub view: gpui::AnyView,
+    pub session_id: String,
+    pub _subscription: gpui::Subscription,
 }
 
 struct HostGlobal {

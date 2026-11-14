@@ -79,6 +79,8 @@ export type StatusMenuItem =
   | { type: "separator" };
 /** 那台机器的智能体配置（profiles、agents、env 等，形状同运行时的 agent_host.get）；还没读到时为 null。变了发 agent_settings_changed。 */
 export function agent_settings(machine: Machine): unknown | null;
+/** 那台机器的智能体配置最近一次读取或保存失败的原因；没有失败为 null。变了发 agent_settings_changed。 */
+export function agent_settings_error(machine: Machine): string | null;
 /** 那个视图此刻看得见。变了发 shown_views_changed。 */
 export function view_shown(view: string): boolean;
 /** 主窗口此刻在前台。回到前台发 window_activated，去后台不发：定时做事的醒来时问这里，不在前台就停。 */
@@ -145,6 +147,14 @@ export function next_command(): Promise<CommandCall>;
  * - "smelt.app/set-status-menu" { title?: string, tooltip?: string, items?: StatusMenuItem[] }：设置菜单栏图标旁的字、
  *   提示和点开的菜单，后设的为准；只有 macOS 有。
  * - "smelt.app/set-dock-badge" { label: string | null }：设置 Dock 图标的角标，null 清掉；只有 macOS 有。
+ * - "smelt.app/set-view-badge" { view: string, label: string | null }：设视图入口（面板标签、侧栏那一行）上的角标，
+ *   null 清掉；视图建没建都画，变了发 view_badges_changed。
+ * - "smelt.app/open-in-file-manager" { path: string }：用系统文件管理器打开这台电脑上的一个目录。
+ * - "smelt.app/edit-agent-settings" { machine: Machine, before: unknown, after: unknown }：改那台机器的智能体配置，
+ *   before 是 agent_settings 读到的那份、after 是改成的那份；宿主手里的已经不是 before 时 reject，重读再改。
+ * - "smelt.app/reload-agent-settings"：从各台机器重读智能体配置（CLI 改过定义不会推过来）。
+ * - "smelt.sessions/start-conversation" { machine: Machine, agent_definition_id: string, cwd: string }：
+ *   跟一个智能体在那台机器的 cwd 里开一段新对话，露在主窗口里。
  * - "smelt.sessions/activate" { session_id: string }：在主窗口里露出这个会话并拿到前面来，主窗口关着就先开。
  * - "smelt.sessions/send-text" { text: string }：把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）；
  *   没有能接的会话时 reject。
@@ -195,6 +205,7 @@ export type HostEvent =
   | { type: "agent_settings_changed" }
   | { type: "shown_views_changed" }
   | { type: "views_changed" }
+  | { type: "view_badges_changed" }
   | { type: "themes_changed" }
   | { type: "layouts_changed" }
   | { type: "commands_changed" }
@@ -343,6 +354,13 @@ impl JsPlugin {
                         "agent_settings：配置转不成 JSON：{error}"
                     ))),
                 }
+            })
+            .function("agent_settings_error", |arguments| {
+                let machine = machine_argument("agent_settings_error", arguments, 0)?;
+                let error = in_app("agent_settings_error", |cx| {
+                    crate::host(cx).agent_settings_error(&machine, cx)
+                })?;
+                Ok(error.map_or(HostValue::Null, |error| error.into()))
             })
             .function("session_states", |arguments| {
                 let machine = machine_argument("session_states", arguments, 0)?;
@@ -1046,6 +1064,7 @@ fn event_value(event: &HostEvent) -> HostValue {
         }
         HostEvent::ShownViewsChanged => HostObject::new().field("type", "shown_views_changed"),
         HostEvent::ViewsChanged => HostObject::new().field("type", "views_changed"),
+        HostEvent::ViewBadgesChanged => HostObject::new().field("type", "view_badges_changed"),
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
         HostEvent::CommandsChanged => HostObject::new().field("type", "commands_changed"),
@@ -1091,7 +1110,12 @@ mod tests {
     #[test]
     fn host_queries_check_their_arguments_before_entering_app() {
         let module = JsPlugin::new().module();
-        for query in ["agent_settings", "session_states", "workspace_directory"] {
+        for query in [
+            "agent_settings",
+            "agent_settings_error",
+            "session_states",
+            "workspace_directory",
+        ] {
             for machine in [HostValue::Bool(true), HostValue::Number(1.0)] {
                 let error = module
                     .call(query, &HostArguments::new([machine]))

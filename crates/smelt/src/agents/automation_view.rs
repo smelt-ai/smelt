@@ -104,7 +104,7 @@ impl Workspace {
                     SharedString::from(format!("{}-route", view.id)),
                     view.title,
                     gpui_component::Icon::empty().path(view.icon),
-                    false,
+                    smelt_plugin_api::view_badge(&view.id, cx).is_some(),
                     WorkspaceRoute::Page(view.id.to_string()),
                     entity.clone(),
                 )
