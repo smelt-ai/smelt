@@ -88,6 +88,42 @@ pub fn acp_display_title(
     }
 }
 
+/// 终端会话（一段对话里的一组终端）显示名的来源。名字取自一格「代表格」：侧栏用活动
+/// 的那格，没有界面状态的调用方（菜单栏）用第一格。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TerminalTitle<'a> {
+    /// 代表格里那段 agent 对话的用户命名（历史页 / 侧栏改名写的同一份，运行时随会话
+    /// 状态推来）。
+    pub conversation_custom: Option<&'a str>,
+    /// 用户给整段会话起的名。
+    pub session_custom: Option<&'a str>,
+    /// 这段会话里有几格终端。
+    pub pane_count: usize,
+    /// 用户给代表格起的名。
+    pub pane_custom: Option<&'a str>,
+    /// 代表格已经决定的会话名（provider 标题或首条 prompt 兜底）。
+    pub session_title: Option<&'a str>,
+    pub launch_label: Option<&'a str>,
+    /// 都没有时的兜底（终端标题栏、目录名）。
+    pub fallback: Option<&'a str>,
+}
+
+impl TerminalTitle<'_> {
+    /// 「当前对话的用户命名」排在最前：终端里的 agent 换一段对话，名字就该跟着换，
+    /// 而不是继续顶着上一段对话的标题。会话级 / 格子级的名字只服务于没有对话身份的
+    /// 终端（裸 shell、hook 不带 id 的 provider）；分屏时格子名不能反过来改掉会话名。
+    pub fn display(&self) -> String {
+        let pinned = nonempty(self.conversation_custom)
+            .or_else(|| nonempty(self.session_custom))
+            .or_else(|| {
+                (self.pane_count == 1)
+                    .then(|| nonempty(self.pane_custom))
+                    .flatten()
+            });
+        display_title(pinned, self.session_title, self.launch_label, self.fallback)
+    }
+}
+
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -110,6 +146,70 @@ pub fn session_name(provider_title: Option<&str>, prompt_fallback: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal<'a>(
+        conversation_custom: Option<&'a str>,
+        session_custom: Option<&'a str>,
+        pane_count: usize,
+        pane_custom: Option<&'a str>,
+    ) -> String {
+        TerminalTitle {
+            conversation_custom,
+            session_custom,
+            pane_count,
+            pane_custom,
+            session_title: Some("自动标题"),
+            ..Default::default()
+        }
+        .display()
+    }
+
+    #[test]
+    fn single_pane_title_keeps_the_surviving_pane_name() {
+        assert_eq!(
+            terminal(None, None, 1, Some("跑测试的终端")),
+            "跑测试的终端"
+        );
+        assert_eq!(
+            terminal(None, Some("整个会话"), 1, Some("跑测试的终端")),
+            "整个会话"
+        );
+        assert_eq!(
+            terminal(None, None, 2, Some("左侧 pane")),
+            "自动标题",
+            "分屏时 pane 名不能反向改掉会话名"
+        );
+    }
+
+    /// 终端里跑的是可识别的 agent 对话时，名字属于那段对话：它必须盖过会话/pane
+    /// 上遗留的名字，否则用户换一段对话，还顶着上一段的名字。
+    #[test]
+    fn conversation_name_outranks_stale_session_and_pane_names() {
+        assert_eq!(
+            terminal(
+                Some("记忆方案研究"),
+                Some("上一段对话的旧名字"),
+                1,
+                Some("pane 旧名字"),
+            ),
+            "记忆方案研究"
+        );
+        // 换到一段还没被命名的对话：回落到自动标题，而不是继续用空白的名字。
+        assert_eq!(terminal(None, Some("  "), 1, None), "自动标题");
+    }
+
+    #[test]
+    fn terminal_without_any_name_uses_launch_label_then_fallback() {
+        let mut title = TerminalTitle {
+            pane_count: 1,
+            launch_label: Some("Claude Code"),
+            fallback: Some("smelt"),
+            ..Default::default()
+        };
+        assert_eq!(title.display(), "Claude Code");
+        title.launch_label = None;
+        assert_eq!(title.display(), "smelt");
+    }
 
     #[test]
     fn provider_title_replaces_only_when_nonempty_and_prompt_is_the_fallback() {

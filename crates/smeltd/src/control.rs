@@ -372,6 +372,15 @@ fn dispatch_control(
                 ),
             }
         }
+        ControlMethod::AttentionMarkRead => {
+            let params: smelt_core::control_api::AttentionMarkReadParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            event_hub.mark_attention_read(&params.session_id);
+            success_value(control_version, &request_id, EmptyParams::default())
+        }
         device @ (ControlMethod::DevicePairBegin
         | ControlMethod::DevicePair
         | ControlMethod::DeviceList

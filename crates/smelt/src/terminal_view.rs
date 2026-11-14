@@ -5,12 +5,11 @@ use std::cell::Cell as StdCell;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
-use smelt_app_state::daemon_states_global::{AttentionGlobal, AttentionItem, AttentionKind};
 use smelt_client::daemon_state::RuntimePresence;
 use smol::Timer;
 
@@ -188,15 +187,8 @@ pub struct TerminalView {
     hover_url: Option<Vec<(usize, usize, usize)>>,
     /// 最近一帧的光标位置 (行, 列)，供 IME 定位候选窗（bounds_for_range）。
     cursor: Option<(usize, usize)>,
-    /// 结构化状态上一帧是否已经是 Succeeded；hook 激活后完成边沿以此为准，
-    /// 防止同一完成快照重复产生关注事件。
-    was_structured_succeeded: bool,
     /// 守护里的会话 id（持久化到工作区快照；重开 GUI 按它 reattach）。
     session_id: String,
-    /// 刚收到但尚未展示的 BEL。已有结构化状态后抑制它，避免重复通知。
-    pending_bell_at: Option<Instant>,
-    /// 使已经过期的 BEL grace timer 失效。
-    bell_timer_generation: u64,
     /// 触控板滚轮的像素余数：触控板每帧只送几像素的增量，若逐事件独立按
     /// LINE_PX 取整会把大部分小增量截断成 0（滚了但没反应），造成"很不跟手"
     /// 的卡顿感。改为跨事件累加像素，攒够一整行再吐出、余数留到下次。
@@ -245,10 +237,6 @@ impl RecoveryInput {
     }
 }
 
-/// 同一终端同文本的系统通知最小间隔。
-/// BEL 常和 agent 的完成信号出现在同一批输出中。稍等一帧窗口，让更准确的
-/// Succeeded/Failed/Waiting 通知优先，避免通知中心同时出现“响铃”和“已完成”。
-const BELL_NOTIFICATION_GRACE: Duration = Duration::from_millis(250);
 /// 与底层 writer 的待写输入上限一致。超过这个量时继续保存只会放大内存占用，且用户
 /// 已经无法确认整段内容是否应在旧会话结束后补发。
 const TERMINAL_RECOVERY_INPUT_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -256,28 +244,10 @@ const TERMINAL_RECOVERY_OVERFLOW_MESSAGE: &str = "终端重连期间待发送的
 const TERMINAL_SESSION_ENDED_MESSAGE: &str = "终端会话已结束，未发送的输入已取消";
 const TERMINAL_REOPENED_MESSAGE: &str = "运行时重启过，终端已重新打开，未发送的输入已取消";
 
-fn bell_notification_due(pending_at: Option<Instant>, now: Instant) -> bool {
-    pending_at.is_some_and(|at| now.duration_since(at) >= BELL_NOTIFICATION_GRACE)
-}
-
 /// PTY 批次只有在网格内容或守护几何状态变化时才需要重画终端。
 /// 后者不能只靠 alacritty damage：远端接管/释放尺寸租约时，行列可能完全没变。
 fn terminal_event_needs_redraw(grid_damaged: bool, daemon_geometry_changed: bool) -> bool {
     grid_damaged || daemon_geometry_changed
-}
-
-fn daemon_agent_state(
-    runtime: &crate::runtimes::Runtime,
-    session_id: &str,
-    cx: &App,
-) -> Option<smelt_client::daemon_state::DaemonSessionState> {
-    smelt_app_state::daemon_states_global::DaemonStates::get(runtime.key(), session_id, cx)
-}
-
-fn terminal_bell_notifications_enabled(cx: &App) -> bool {
-    cx.try_global::<smelt_app_state::agent_host_state::AgentHostState>()
-        .map(|config| config.notify_terminal_bell)
-        .unwrap_or(true)
 }
 
 /// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里注册的终端 agent
@@ -344,7 +314,7 @@ impl TerminalView {
             .unwrap_or("终端")
             .to_string();
 
-        let mut view = Self {
+        Self {
             runtime,
             terminal,
             terminal_generation: 0,
@@ -372,10 +342,7 @@ impl TerminalView {
             grid_size: Rc::new(StdCell::new((0.0, 0.0))),
             hover_url: None,
             cursor: None,
-            was_structured_succeeded: false,
             session_id,
-            pending_bell_at: None,
-            bell_timer_generation: 0,
             scroll_accum: 0.0,
             launch_kind,
             launch_label,
@@ -387,11 +354,7 @@ impl TerminalView {
             recovery_input_bytes: 0,
             write_error: None,
             session_runtime_gone: false,
-        };
-        if let Some(state) = daemon_agent_state(&view.runtime, &view.session_id, cx) {
-            view.handle_daemon_state(&state, cx);
         }
-        view
     }
 
     /// 建终端时的启动方式（侧栏行图标对齐「+」菜单用）。
@@ -442,34 +405,13 @@ impl TerminalView {
         .detach();
     }
 
-    /// PTY 读线程每批输出只唤醒一次。终端内容与 BEL 提醒在这里消费；OSC 通知由运行时
-    /// 扫好走事件总线，不经过这里。
+    /// PTY 读线程每批输出只唤醒一次，终端内容在这里消费。响铃、OSC 通知由运行时扫输出
+    /// 判定成提醒，不经过这里。
     fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
         // kitty 图形换下来的纹理在前台释放（见 terminal_images）。
         for image in self.terminal.take_released_images() {
             cx.drop_image(image, None);
         }
-        let daemon_state = daemon_agent_state(&self.runtime, &self.session_id, cx);
-        let structured_events = daemon_state
-            .as_ref()
-            .is_some_and(|state| state.structured_events);
-        let bell_received = self.terminal.take_bell_notification().is_some();
-        let now = Instant::now();
-        let bell_notifications_enabled = terminal_bell_notifications_enabled(cx);
-
-        // 结构化插件一旦激活，OSC/BEL fallback 永久让位给明确的 phase。
-        if structured_events || !bell_notifications_enabled {
-            self.invalidate_bell_timer();
-        } else if bell_received {
-            self.pending_bell_at = Some(now);
-            self.bell_timer_generation = self.bell_timer_generation.wrapping_add(1);
-            self.schedule_bell_timer(cx);
-        }
-        // 上面已按结构化事件和设置清掉了待发的响铃，这里只剩到点的那种。
-        self.flush_bell_if_due(now, cx);
-
-        self.handle_structured_state(daemon_state.as_ref(), cx);
-
         let daemon_geometry_changed = self.terminal.sync_daemon_geometry();
         let grid_damaged = self.terminal.take_damage();
         if terminal_event_needs_redraw(grid_damaged, daemon_geometry_changed) {
@@ -479,77 +421,6 @@ impl TerminalView {
         }
         // 纯 OSC 标题 / BEL 没有终端网格 damage，不重画画布。
         // 会话名来自 daemon 的 provider 标题或 prompt 兜底，不来自这里的 OSC。
-    }
-
-    fn invalidate_bell_timer(&mut self) {
-        self.pending_bell_at = None;
-        self.bell_timer_generation = self.bell_timer_generation.wrapping_add(1);
-    }
-
-    fn schedule_bell_timer(&mut self, cx: &mut Context<Self>) {
-        let generation = self.bell_timer_generation;
-        cx.spawn(async move |this, cx| {
-            Timer::after(BELL_NOTIFICATION_GRACE).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.bell_timer_generation != generation {
-                    return;
-                }
-                let structured = daemon_agent_state(&this.runtime, &this.session_id, cx)
-                    .as_ref()
-                    .is_some_and(|state| state.structured_events);
-                if structured || !terminal_bell_notifications_enabled(cx) {
-                    this.invalidate_bell_timer();
-                    return;
-                }
-                if this.flush_bell_if_due(Instant::now(), cx) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn flush_bell_if_due(&mut self, now: Instant, cx: &mut Context<Self>) -> bool {
-        if bell_notification_due(self.pending_bell_at, now) {
-            self.invalidate_bell_timer();
-            self.publish_attention(AttentionKind::Bell, "响铃", "🔔 响铃".to_string(), cx);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn handle_structured_state(
-        &mut self,
-        daemon_state: Option<&smelt_client::daemon_state::DaemonSessionState>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(state) = daemon_state.filter(|state| state.phase_is_authoritative()) else {
-            return;
-        };
-        let succeeded = state.phase == crate::terminal::DaemonPhase::Succeeded;
-        if succeeded && !self.was_structured_succeeded {
-            self.finish_structured_session(cx);
-        }
-        self.was_structured_succeeded = succeeded;
-    }
-
-    /// 由 daemon 状态订阅直接分发，独立于该 pane 当前是否正在渲染。
-    pub fn handle_daemon_state(
-        &mut self,
-        state: &smelt_client::daemon_state::DaemonSessionState,
-        cx: &mut Context<Self>,
-    ) {
-        if state.id != self.session_id {
-            return;
-        }
-        self.handle_structured_state(Some(state), cx);
-        // phase / 标题由 Workspace 的 daemon 订阅统一刷新侧栏。这个 view
-        // 只处理结构化完成边沿，不要因此重画终端网格。
-    }
-
-    fn finish_structured_session(&mut self, cx: &mut Context<Self>) {
-        self.publish_attention(AttentionKind::Success, "已完成", "已完成".to_string(), cx);
     }
 
     /// 断线自动重连（后台）。会话还活在守护里时 reattach 恢复画面；守护崩溃过、
@@ -634,7 +505,7 @@ impl TerminalView {
                     .await;
                 match term {
                     Ok(t) => {
-                        // 主线程挂回：adopt_terminal 换 Terminal、清 attention、
+                        // 主线程挂回：adopt_terminal 换 Terminal、
                         // 重置交互态并触发重绘。
                         let done = this.update(cx, |this, cx| {
                             if this.terminal_generation != generation {
@@ -691,9 +562,6 @@ impl TerminalView {
         // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 Err
         // 自行退出；这里给新连接挂一个新的重绘任务。
         Self::drive_redraws(self.terminal.redraw_channel(), self.terminal_generation, cx);
-        self.clear_attention(cx);
-        self.was_structured_succeeded = false;
-        self.invalidate_bell_timer();
         // 新 Terminal 自带空选区，只需重置本视图的拖选 / 应用鼠标交互态。
         self.selecting = false;
         self.app_mouse = false;
@@ -703,35 +571,7 @@ impl TerminalView {
         self.pty_kick_pending = true;
         self.session_runtime_gone = false;
         self.flush_recovery_input(cx);
-        if let Some(state) = daemon_agent_state(&self.runtime, &self.session_id, cx) {
-            self.handle_daemon_state(&state, cx);
-        }
         cx.notify();
-    }
-
-    fn publish_attention(&self, kind: AttentionKind, title: &str, message: String, cx: &mut App) {
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            AttentionGlobal::publish_terminal_notification(
-                AttentionItem {
-                    session_id: self.session_id.clone(),
-                    title: title.to_string(),
-                    message,
-                    kind,
-                },
-                Instant::now(),
-                cx,
-            );
-        }
-    }
-
-    fn clear_attention(&self, cx: &mut App) {
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            AttentionGlobal::mark_read(&self.session_id, cx);
-        }
-    }
-
-    pub fn mark_read(&mut self, cx: &mut Context<Self>) {
-        self.clear_attention(cx);
     }
 
     pub fn title(&self) -> &str {
@@ -762,7 +602,6 @@ impl TerminalView {
             self.defer_input(RecoveryInput::Paste(text.to_string()));
             self.recover_input_transport(cx);
         }
-        self.clear_attention(cx);
         cx.notify();
     }
 
@@ -771,7 +610,6 @@ impl TerminalView {
             self.defer_input(RecoveryInput::Paste(text.to_string()));
             self.recover_input_transport(cx);
         }
-        self.clear_attention(cx);
         cx.notify();
     }
 
@@ -1176,7 +1014,6 @@ impl EntityInputHandler for TerminalView {
         self.marked_text = None;
         if !text.is_empty() {
             self.send_input(text.as_bytes(), cx);
-            self.clear_attention(cx);
         }
         cx.notify();
     }
@@ -1393,13 +1230,11 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
                 this.send_input(b"\t", cx);
                 this.terminal.scroll_to_bottom();
-                this.clear_attention(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TerminalBackTab, _window, cx| {
                 this.send_input(b"\x1b[Z", cx); // xterm 反向 Tab（back-tab）序列
                 this.terminal.scroll_to_bottom();
-                this.clear_attention(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TerminalFind, window, cx| {
@@ -1477,7 +1312,6 @@ impl Render for TerminalView {
                 ) {
                     this.send_input(&bytes, cx);
                     this.terminal.scroll_to_bottom(); // 敲键盘即回到最新输出，跟真实终端一致
-                    this.clear_attention(cx);
                     cx.notify();
                     cx.stop_propagation();
                 }
@@ -2909,14 +2743,13 @@ fn super_natural_edit(key: &str) -> Option<Vec<u8>> {
 mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
-        BELL_NOTIFICATION_GRACE, CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bell_notification_due,
-        bg_spans, cells_to_token, classify_launch, expand_existing_path, keystroke_to_bytes,
-        link_at, scrollbar_thumb, terminal_event_needs_redraw, text_batches, visible_end,
+        CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bg_spans, cells_to_token, classify_launch,
+        expand_existing_path, keystroke_to_bytes, link_at, scrollbar_thumb,
+        terminal_event_needs_redraw, text_batches, visible_end,
     };
     use crate::terminal;
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
-    use std::time::{Duration, Instant};
 
     /// 默认样式：bg = None 表示「终端默认底色」（不画底色矩形）。
     const PLAIN: CellStyle = CellStyle {
@@ -2952,21 +2785,6 @@ mod tests {
             LaunchKind::Agent(crate::settings::TerminalAgentKind::Grok)
         );
         assert_eq!(classify_launch(Some("zsh")), LaunchKind::Terminal);
-    }
-
-    #[test]
-    fn terminal_bell_waits_for_completion_grace_period() {
-        let received_at = Instant::now();
-        assert!(!bell_notification_due(Some(received_at), received_at));
-        assert!(!bell_notification_due(
-            Some(received_at),
-            received_at + BELL_NOTIFICATION_GRACE - Duration::from_millis(1)
-        ));
-        assert!(bell_notification_due(
-            Some(received_at),
-            received_at + BELL_NOTIFICATION_GRACE
-        ));
-        assert!(!bell_notification_due(None, received_at));
     }
 
     /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。

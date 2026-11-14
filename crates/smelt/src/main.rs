@@ -80,7 +80,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
@@ -145,15 +145,6 @@ struct AppQuitSubscription {
 }
 
 impl Global for AppQuitSubscription {}
-
-/// App 全局持有关注事件投递观察器。它不能挂在 Workspace render 生命周期上：
-/// macOS 原生全屏窗口切到其它 Space 后会暂停帧回调，正是后台通知延迟到切回来
-/// 才出现的根因。
-struct AttentionDeliverySubscription {
-    _subscription: Subscription,
-}
-
-impl Global for AttentionDeliverySubscription {}
 
 struct DaemonStatesSubscription {
     _subscription: Subscription,
@@ -330,8 +321,6 @@ fn apply_automation_projection(
     if !config.replace_automation_snapshot(runtime, snapshot) {
         return;
     }
-    let notify_success = config.notify_success;
-    let notify_failure = config.notify_failure;
     cx.set_global(config);
 
     // 远程机器上的运行，通知标题前写上机器名。
@@ -340,16 +329,13 @@ fn apply_automation_projection(
         RuntimeKey::Remote(_) => Some(runtimes::runtime_name(runtime, cx)),
     };
     status_item::retain_automation_notifications(runtime, &retained_run_ids);
+    // 发不发只看这条自动化自己的「通知 App」：那是它的通知开关。
     for notification in notifications {
-        let enabled = match notification.kind {
-            automation_notifications::AutomationRunNotificationKind::Success => notify_success,
-            automation_notifications::AutomationRunNotificationKind::Failure => notify_failure,
-        };
         let app_ok = app_notify_by_automation
             .get(&notification.automation_id)
             .copied()
             .unwrap_or(true);
-        if enabled && app_ok {
+        if app_ok {
             let subtitle = match &machine {
                 Some(machine) => format!("{machine} · {}", notification.subtitle),
                 None => notification.subtitle.clone(),
@@ -377,13 +363,9 @@ fn apply_automation_projection(
 // 全库既有的 `AgentStatus::x` 写法不用逐处改。
 pub(crate) use smelt_model::agent_status::AgentStatus;
 
-// DaemonStates（守护上报的会话状态镜像）/ AttentionGlobal（统一关注事件 store）：
-// ACP 视图独立成 smelt-acp-view 后要跨
-// crate 读写，放在 smelt-app-state（daemon_states_global.rs）共享，这里重导出成原来
-// 的裸名字。
-pub(crate) use smelt_app_state::daemon_states_global::{
-    AttentionGlobal, AttentionItem, AttentionKind, DaemonStates,
-};
+// DaemonStates（守护上报的会话状态镜像）：ACP 视图独立成 smelt-acp-view 后要跨 crate
+// 读写，放在 smelt-app-state（daemon_states_global.rs）共享，这里重导出成原来的裸名字。
+pub(crate) use smelt_app_state::daemon_states_global::DaemonStates;
 
 /// 按稳定 session id 读取守护状态镜像；终端 pane 和 ACP 会话必须共用这一个入口，
 /// 否则状态栏会出现 attention 已完成、ACP 本地快照仍显示运行中的双事实源竞态。
@@ -400,180 +382,6 @@ fn daemon_state_for_session_id(
 fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::DaemonSessionState> {
     let view = view.read(cx);
     daemon_state_for_session_id(view.runtime().key(), view.session_id(), cx)
-}
-
-fn agent_notification_enabled(config: &settings::AgentHostState, kind: AttentionKind) -> bool {
-    match kind {
-        AttentionKind::Approval => config.notify_approval,
-        AttentionKind::Input => config.notify_input,
-        AttentionKind::Success => config.notify_success,
-        AttentionKind::Failure => config.notify_failure,
-        AttentionKind::Bell => config.notify_terminal_bell,
-        AttentionKind::Notice => true,
-    }
-}
-
-/// 自动化运行的会话结束时不另发会话提醒：运行结果由自动化通知负责。按会话所在的机器
-/// 找运行，别的机器上同 id 的会话不相干。
-fn daemon_attention_suppressed(
-    runtime: &RuntimeKey,
-    state: &terminal::DaemonSessionState,
-    cx: &App,
-) -> bool {
-    cx.try_global::<settings::AgentHostState>()
-        .and_then(|config| config.automations_on(runtime))
-        .is_some_and(|machine| {
-            automation_notifications::suppress_runtime_terminal_attention(
-                &machine.runs,
-                &state.id,
-                state.effective_phase(),
-            )
-        })
-}
-
-/// 终端程序的 OSC 通知（运行时已滤掉有结构化 hook 的会话）和智能体主动发的通知（带标题）。
-/// 进同一个关注 store，正在看的会话由 store 标已读、不弹。自动化运行的会话不在侧栏里、命令行
-/// 发的没有会话，都没处标已读：直接弹一条应用通知，不记未读，免得角标一直挂着。
-fn publish_session_notification(
-    runtime: &RuntimeKey,
-    session_id: &str,
-    title: Option<&str>,
-    message: &str,
-    cx: &mut App,
-) {
-    let title = title.unwrap_or("终端通知");
-    let outside_sidebar = session_id.is_empty()
-        || cx
-            .try_global::<settings::AgentHostState>()
-            .and_then(|config| config.automations_on(runtime))
-            .is_some_and(|machine| {
-                automation_notifications::owns_session(&machine.runs, session_id)
-            });
-    if outside_sidebar {
-        status_item::deliver_app_notification(title, message);
-        return;
-    }
-    let item = AttentionItem {
-        session_id: session_id.to_string(),
-        title: title.to_string(),
-        message: message.to_string(),
-        kind: AttentionKind::Notice,
-    };
-    AttentionGlobal::publish_terminal_notification(item, Instant::now(), cx);
-}
-
-fn apply_daemon_attention(
-    runtime: &RuntimeKey,
-    previous: Option<&terminal::DaemonSessionState>,
-    state: &terminal::DaemonSessionState,
-    now: Instant,
-    cx: &mut App,
-) {
-    if daemon_attention_suppressed(runtime, state, cx) {
-        // AutomationRun is the notification authority for automation results. The hidden ACP runtime
-        // disappears immediately after completion and cannot be a stable notification target.
-        AttentionGlobal::remove_session(&state.id, cx);
-        return;
-    }
-    AttentionGlobal::apply_daemon_transition(previous, state, now, cx);
-}
-
-fn apply_daemon_attention_baseline(
-    runtime: &RuntimeKey,
-    state: &terminal::DaemonSessionState,
-    cx: &mut App,
-) {
-    if daemon_attention_suppressed(runtime, state, cx) {
-        AttentionGlobal::remove_session(&state.id, cx);
-        return;
-    }
-    AttentionGlobal::apply_daemon_baseline(state, cx);
-}
-
-/// 新关注事件入队后的应用级协调出口。这里一次性完成角标、菜单和通知投递；
-/// `Workspace::render` 不参与消费队列，因此原生全屏窗口在其它 Space 暂停绘制时，
-/// hook/OSC/ACP 事件仍会立即变成系统通知。
-fn dispatch_pending_attention(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
-    let workspace = current_workspace(current_ws);
-    let app_active = status_item::is_app_active();
-    let Some(store) = cx
-        .try_global::<AttentionGlobal>()
-        .map(|global| global.0.clone())
-    else {
-        return;
-    };
-    // The batch leaves AttentionStore here, but system-channel payloads are synchronously copied
-    // into the native bridge's retry queue before any asynchronous UserNotifications call starts.
-    let (badge_count, batch, unread_session_ids) = {
-        let mut store = store.lock().unwrap();
-        let unread_session_ids = store
-            .unread_items()
-            .into_iter()
-            .map(|item| item.session_id)
-            .collect::<Vec<_>>();
-        (
-            store.badge_count(),
-            store.drain_deliveries(),
-            unread_session_ids,
-        )
-    };
-    dock::set_badge(badge_count);
-    status_item::set_attention_count(badge_count);
-    status_item::retain_system_notifications(&unread_session_ids);
-
-    // `NSApplication.isActive` 只回答“Smelt 是否在前台”；应用内可能还有设置窗口。
-    // 只有主工作区窗口本身也拿到焦点，逻辑上的当前 pane 才算用户真的正在看。
-    // 未查看的事件一律走系统通知；后台分流仍只依赖 app_active，避免原生全屏窗口
-    // 留着 key-window 状态时被误判成正在看。
-    let main_window = current_ws.borrow().as_ref().map(|main| main.window);
-    let workspace_window_active = app_active
-        && main_window
-            .and_then(|window| window.is_active(cx))
-            .unwrap_or(false);
-    let contexts = workspace
-        .as_ref()
-        .and_then(|workspace| {
-            workspace
-                .update(cx, |workspace, cx| {
-                    workspace.sync_notification_surfaces(cx);
-                    if workspace_window_active {
-                        workspace.mark_visible_session_read(cx);
-                    }
-                    batch
-                        .iter()
-                        .map(|notification| workspace.attention_context(notification, cx))
-                        .collect::<Vec<_>>()
-                })
-                .ok()
-        })
-        .unwrap_or_else(|| vec![(false, None); batch.len()]);
-    let notify_config = cx
-        .try_global::<settings::AgentHostState>()
-        .cloned()
-        .unwrap_or_default();
-    for (notification, (is_current_view, session_title)) in batch.into_iter().zip(contexts) {
-        let display_title = session_title
-            .map(|session| format!("{} · {session}", notification.title))
-            .unwrap_or_else(|| notification.title.clone());
-        let enabled = agent_notification_enabled(&notify_config, notification.kind);
-        match smelt_model::attention::delivery_channel(
-            enabled,
-            app_active,
-            workspace_window_active,
-            is_current_view,
-        ) {
-            smelt_model::attention::DeliveryChannel::Suppress => {
-                status_item::remove_system_notification(&notification.session_id);
-            }
-            smelt_model::attention::DeliveryChannel::System => {
-                status_item::deliver_notification(
-                    &notification.session_id,
-                    &display_title,
-                    &notification.message,
-                );
-            }
-        }
-    }
 }
 
 /// 一个会话的内容形态。Term 是第一通道（PTY 分屏树），Acp 是第二通道（结构化
@@ -648,8 +456,7 @@ impl Session {
         }
     }
 
-    /// ACP 会话的视图；终端会话返回 None（跟 `active_term` 反过来，供侧栏右键
-    /// 的「强制重启」这类 ACP 专属操作用）。
+    /// ACP 会话的视图；终端会话返回 None（跟 `active_term` 反过来）。
     fn active_acp(&self) -> Option<&Entity<acp_view::AcpView>> {
         match &self.kind {
             SessionKind::Term { .. } => None,
@@ -802,15 +609,19 @@ impl Session {
     fn title(&self, cx: &App) -> String {
         match &self.kind {
             SessionKind::Term { active, .. } => {
-                let pane_custom = active.read(cx).custom_title().map(str::to_string);
-                let conversation_custom = pane_conversation_custom_title(active, cx);
-                terminal_session_display_title(
-                    conversation_custom.as_deref(),
-                    self.custom_title.as_deref(),
-                    self.pane_count(),
-                    pane_custom.as_deref(),
-                    pane_auto_title(active, cx),
-                )
+                let view = active.read(cx);
+                let state = daemon_state_for(active, cx);
+                let state = state.as_ref();
+                smelt_model::session_title::TerminalTitle {
+                    conversation_custom: state.and_then(|state| state.custom_title.as_deref()),
+                    session_custom: self.custom_title.as_deref(),
+                    pane_count: self.pane_count(),
+                    pane_custom: view.custom_title(),
+                    session_title: state.and_then(|state| state.title.as_deref()),
+                    launch_label: view.launch_label(),
+                    fallback: Some(view.title()),
+                }
+                .display()
             }
             SessionKind::Conversation(view) => self.custom_title.clone().unwrap_or_else(|| {
                 let view = view.read(cx);
@@ -1032,33 +843,6 @@ fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
         t.launch_label(),
         Some(t.title()),
     )
-}
-
-/// 侧栏会话行显示名。
-///
-/// 「当前对话的用户命名」排在最前：终端里的 agent 换一段对话，这一行就该跟着
-/// 换名字，而不是继续顶着上一段对话的标题。会话级/pane 级的 pin 只服务于没有
-/// 对话身份的终端（裸 shell、hook 不带 id 的 provider）。
-fn terminal_session_display_title(
-    conversation_custom: Option<&str>,
-    session_custom: Option<&str>,
-    pane_count: usize,
-    pane_custom: Option<&str>,
-    auto_title: String,
-) -> String {
-    nonempty_title(conversation_custom)
-        .or_else(|| nonempty_title(session_custom))
-        .or_else(|| {
-            (pane_count == 1)
-                .then(|| nonempty_title(pane_custom))
-                .flatten()
-        })
-        .map(str::to_string)
-        .unwrap_or(auto_title)
-}
-
-fn nonempty_title(title: Option<&str>) -> Option<&str> {
-    title.map(str::trim).filter(|title| !title.is_empty())
 }
 
 fn resolve_terminal_provider(
@@ -1877,8 +1661,6 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
-    /// 上次告诉插件的当前项目（见 `note_active_project`），只用来判断变没变。
-    plugin_project: Option<ProjectRef>,
     /// 看得见的视图：布局里露着的，加上舞台上开着的那页（见 `note_shown_views`）。插件
     /// 问的 `view_shown` 和自带的文件、变更视图都按这份。
     plugin_shown_views: HashSet<String>,
@@ -1891,13 +1673,6 @@ struct Workspace {
     /// 它原先直接写在 `render_settings_content` 里，设置窗口每帧都要重算一遍，下拉一
     /// 展开就肉眼可见掉帧。字体列表在进程生命周期内几乎不变，不值得每帧重扫。
     font_options: std::cell::OnceCell<std::sync::Arc<Vec<(SharedString, SharedString)>>>,
-    /// 上次同步给 Dock 的待关注会话数；None 强制首次同步。
-    dock_badge_count: Option<usize>,
-    /// 上次同步给菜单栏图标的运行中会话数；None 强制首次同步。
-    status_running_count: Option<usize>,
-    /// 上次同步给菜单栏下拉菜单的会话快照；None 强制首次同步。只在快照真的变化
-    /// 时才重建 AppKit 菜单，避免高频 daemon 状态事件反复拆建。
-    status_menu_snapshot: Option<Vec<status_item::SessionEntry>>,
     /// 正在重命名的对象 + 弹窗里的文本框（None = 没在重命名）。见
     /// `start_rename`/`confirm_rename`。
     rename_target: Option<RenameTarget>,
@@ -1944,6 +1719,9 @@ struct Workspace {
     session_manager_tombstones: HashSet<String>,
     /// 上一帧工作区窗口是否在前台。上升沿用来清正在看的会话未读。
     workspace_window_active: bool,
+    /// 主窗口是不是 key window，窗口激活变化时和每帧记下。插件问窗口在不在前台时和现问的
+    /// 应用前台合起来答（见 `SmeltHost::window_active`）。
+    main_window_key: bool,
     /// 各运行时的工作区目录来自 app 级唯一 daemon 订阅，见 [`WorkspaceDirectoriesGlobal`]；
     /// 随 Workspace 释放，避免创建第二条 socket 订阅或后台轮询线程。
     _workspace_directories_sub: Option<Subscription>,
@@ -2189,13 +1967,9 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
-            plugin_project: None,
             plugin_shown_views: HashSet::new(),
             plugin_overlay_open: false,
             font_options: std::cell::OnceCell::new(),
-            dock_badge_count: None,
-            status_running_count: None,
-            status_menu_snapshot: None,
             rename_target: None,
             rename_input: None,
             rename_initial: None,
@@ -2216,6 +1990,7 @@ impl Workspace {
             session_manager_list: None,
             session_manager_tombstones: HashSet::new(),
             workspace_window_active: false,
+            main_window_key: false,
             saved_active_session_id,
             saved_conversation_ui: workspace_persist::load_conversation_ui(),
             saved_sidebar_orders: workspace_persist::load_sidebar_orders(),
@@ -2300,6 +2075,7 @@ impl Workspace {
         ws.start_daemon_outdated_watch(cx);
         ws.start_date_change_watch(cx);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.note_window_activation(window, cx);
             if window.is_window_active() {
                 this.recheck_date(cx);
                 this.check_daemon_outdated_on_event(cx);
@@ -2474,30 +2250,6 @@ impl Workspace {
             .collect::<Vec<_>>();
         for (key, directory) in fresh {
             self.apply_workspace_directory(&key, directory, window, cx);
-        }
-    }
-
-    /// Daemon 状态事件直接分发给所有终端 pane；不能依赖 TerminalView::render，
-    /// 因为非当前顶层会话不会被挂进当前窗口的渲染树。
-    fn handle_daemon_state_event(
-        &mut self,
-        runtime: &RuntimeKey,
-        state: &terminal::DaemonSessionState,
-        cx: &mut Context<Self>,
-    ) {
-        let panes: Vec<Entity<TerminalView>> = self
-            .sessions
-            .iter()
-            .flat_map(Session::term_leaves)
-            .collect();
-        // 状态/相位变化不直接标脏 TerminalView：侧栏与徽标由
-        // notify_if_session_facts_changed 刷新。终端内容本身走
-        // TerminalView::drive_redraws 的事件通道即时重绘，不依赖这里。
-        for pane in panes {
-            let pane_view = pane.read(cx);
-            if pane_view.session_id() == state.id && pane_view.runtime().key() == runtime {
-                pane.update(cx, |terminal, cx| terminal.handle_daemon_state(state, cx));
-            }
         }
     }
 
@@ -3034,27 +2786,14 @@ fn main() {
         // provider 账户状态（额度 + Pi 模型目录版本）：刷新循环写，侧栏和对话
         // 模型菜单读。必须在建 Workspace 之前装好，否则启动首查无处可写。
         cx.set_global(smelt_app_state::provider_status_global::ProviderStatus::default());
-        let attention = AttentionGlobal::default();
-        cx.set_global(attention);
-        let current_ws_for_attention = current_ws.clone();
-        let attention_delivery_subscription = cx.observe_global::<AttentionGlobal>(move |cx| {
-            dispatch_pending_attention(&current_ws_for_attention, cx);
-        });
-        cx.set_global(AttentionDeliverySubscription {
-            _subscription: attention_delivery_subscription,
-        });
         let current_ws_for_daemon_states = current_ws.clone();
         let daemon_states_subscription = cx.observe_global::<DaemonStates>(move |cx| {
             let states = DaemonStates::drain_pending(cx);
             if let Some(ws) = current_workspace(&current_ws_for_daemon_states) {
                 let _ = ws.update(cx, |ws, cx| {
-                    for (runtime, state) in &states {
-                        ws.handle_daemon_state_event(runtime, state, cx);
-                    }
                     let states: Vec<_> = states.into_iter().map(|(_, state)| state).collect();
                     ws.refresh_agent_memories_after_turns(&states, cx);
                     ws.retry_daemon_restart_when_idle(cx);
-                    ws.sync_notification_surfaces(cx);
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);
                     }
@@ -3067,7 +2806,7 @@ fn main() {
         });
         // 智能体配置归运行时：先放客户端那部分（通知偏好），运行时那部分在后台加载，
         // 好了之后才按 hook 开关决定要不要安装。
-        cx.set_global(settings::initial_agent_host_state());
+        cx.set_global(settings::AgentHostState::default());
         cx.set_global(settings::AcpRuntimeState::default());
         // hook 配置和 helper 必须作为一个版本单元升级：先把 App 内最新版同步到稳定
         // managed 路径，再改写各 provider 的 hook 命令。失败时保留旧 helper，不阻塞 GUI。
@@ -3113,42 +2852,44 @@ fn main() {
             states: daemon_state_rx,
             topics: topic_rx,
         } = runtime_events::start(cx);
-        // 单独订阅的话题。积压丢了事件（`Lagged`）就当作都变过。
+        // 单独订阅的话题，原样转给插件。
         let current_ws_for_topics = current_ws.clone();
         cx.spawn(async move |cx| {
             use smelt_app_state::provider_status_global::ProviderStatus;
             use smelt_client::daemon_state::{CORE_TOPIC_PI_CONFIG_CHANGED, TopicMessage};
-            while let Ok((runtime, message)) = topic_rx.recv().await {
-                let topics: Vec<String> = match message {
-                    TopicMessage::Event { topic, .. } => vec![topic],
-                    TopicMessage::Lagged => runtime_events::SEPARATE_TOPICS
-                        .iter()
-                        .map(|topic| topic.to_string())
-                        .collect(),
-                };
-                for topic in topics {
-                    // 宿主自己（会话、智能体编辑器）还要管的 Pi 配置变化。
-                    if topic == CORE_TOPIC_PI_CONFIG_CHANGED {
-                        // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的
-                        // Pi 目录走。
-                        if runtime == RuntimeKey::Local {
-                            cx.update(ProviderStatus::bump_pi_catalog);
-                        }
-                        // 删插件时运行时顺带清掉了智能体的勾选。
-                        cx.update(|cx| settings::reload_agent_host(&runtime, cx));
-                        if let Some(ws) = current_workspace(&current_ws_for_topics) {
-                            let _ = ws
-                                .update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
-                        }
+            while let Ok((runtime, topic, message)) = topic_rx.recv().await {
+                let message = match message {
+                    TopicMessage::Event { payload, .. } => {
+                        smelt_plugin_api::TopicMessage::Event(payload)
                     }
-                    let machine = runtime.clone();
-                    cx.update(|cx| {
-                        smelt_plugin_api::emit(
-                            smelt_plugin_api::HostEvent::RuntimeTopic { machine, topic },
-                            cx,
-                        )
-                    });
+                    TopicMessage::Snapshot { payload, .. } => {
+                        smelt_plugin_api::TopicMessage::Snapshot(payload)
+                    }
+                    TopicMessage::Lagged => smelt_plugin_api::TopicMessage::Lagged,
+                };
+                // 宿主自己（会话、智能体编辑器）还要管的 Pi 配置变化；积压丢了事件也当作变过。
+                if topic == CORE_TOPIC_PI_CONFIG_CHANGED {
+                    // 凭据或模型可能变了：活着的会话重拉模型目录。会话眼下只跟本机的
+                    // Pi 目录走。
+                    if runtime == RuntimeKey::Local {
+                        cx.update(ProviderStatus::bump_pi_catalog);
+                    }
+                    // 删插件时运行时顺带清掉了智能体的勾选。
+                    cx.update(|cx| settings::reload_agent_host(&runtime, cx));
+                    if let Some(ws) = current_workspace(&current_ws_for_topics) {
+                        let _ = ws.update(cx, |ws, cx| ws.on_agent_pi_config_changed(&runtime, cx));
+                    }
                 }
+                cx.update(|cx| {
+                    smelt_plugin_api::emit(
+                        smelt_plugin_api::HostEvent::RuntimeTopic {
+                            machine: runtime,
+                            topic: topic.to_string(),
+                            message,
+                        },
+                        cx,
+                    )
+                });
             }
         })
         .detach();
@@ -3207,23 +2948,6 @@ fn main() {
                         }
                         _ => {}
                     }
-                }
-                if let terminal::DaemonStateEvent::TerminalNotification {
-                    session_id,
-                    title,
-                    message,
-                } = &event
-                {
-                    cx.update(|cx| {
-                        publish_session_notification(
-                            &runtime,
-                            session_id,
-                            title.as_deref(),
-                            message,
-                            cx,
-                        );
-                    });
-                    continue;
                 }
                 if let terminal::DaemonStateEvent::TerminalProgress {
                     session_id,
@@ -3330,47 +3054,13 @@ fn main() {
                     }
                     match event {
                         terminal::DaemonStateEvent::Snapshot { sessions: list, .. } => {
-                            let initial_snapshot = !DaemonStates::is_primed(&runtime, cx);
-                            // attention 必须在 signal 前算完：先读旧镜像，写完
-                            // 再 replace_all 唤醒观察器做 pane 副作用和侧栏刷新。
-                            let previous = list
-                                .iter()
-                                .map(|state| DaemonStates::get(&runtime, &state.id, cx))
-                                .collect::<Vec<_>>();
-                            let now = Instant::now();
-                            for (state, previous) in list.iter().zip(previous.iter()) {
-                                if initial_snapshot {
-                                    apply_daemon_attention_baseline(&runtime, state, cx);
-                                } else {
-                                    apply_daemon_attention(
-                                        &runtime,
-                                        previous.as_ref(),
-                                        state,
-                                        now,
-                                        cx,
-                                    );
-                                }
-                            }
-                            let stale_attention_ids =
-                                DaemonStates::replace_all(&runtime, list, cx);
-                            for id in stale_attention_ids {
-                                AttentionGlobal::remove_session(&id, cx);
-                            }
+                            DaemonStates::replace_all(&runtime, list, cx);
                         }
                         terminal::DaemonStateEvent::Update(s) => {
-                            let previous = DaemonStates::get(&runtime, &s.id, cx);
-                            apply_daemon_attention(
-                                &runtime,
-                                previous.as_ref(),
-                                &s,
-                                Instant::now(),
-                                cx,
-                            );
                             DaemonStates::upsert(&runtime, s, cx);
                         }
                         terminal::DaemonStateEvent::Removed { id } => {
                             DaemonStates::remove(&runtime, &id, cx);
-                            AttentionGlobal::remove_session(&id, cx);
                         }
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::Automations(_) => {}
@@ -3485,6 +3175,7 @@ fn main() {
         // 设置窗口再重开，避免设置页留在旧 Workspace 上。稳定的 daemon/run id 在恢复后
         // 仍可继续导航，只有菜单临时下标在新窗口里已经失去意义。
         cx.spawn(async move |cx| {
+            let mut notification_permission = status_item::notification_permission();
             while let Ok(event) = status_rx.recv().await {
                 if matches!(
                     &event,
@@ -3498,19 +3189,31 @@ fn main() {
                             notification_status.authorization, notification_status.pending_count
                         );
                     }
-                    if let Some(ws) = current_workspace(&current_ws_status) {
-                        let _ = ws.update(cx, |_, cx| cx.notify());
+                    let permission = status_item::notification_permission();
+                    if permission != notification_permission {
+                        notification_permission = permission;
+                        cx.update(|cx| {
+                            smelt_plugin_api::emit(
+                                smelt_plugin_api::HostEvent::NotificationPermissionChanged,
+                                cx,
+                            )
+                        });
                     }
                     continue;
                 }
-                // 窗口句柄失效时先关掉设置窗口再重开，避免菜单栏跳出第二份 Workspace。
+                // 菜单栏菜单项带的命令照常执行，开不开窗口由命令自己定。
+                if let status_item::StatusItemEvent::RunCommand { command, args } = event {
+                    cx.update(|cx| {
+                        let result = smelt_plugin_api::run(&command, args, cx);
+                        workspace_commands::report_failure(result, cx);
+                    });
+                    continue;
+                }
+                // 窗口句柄失效时先关掉设置窗口再重开，避免通知点击跳出第二份 Workspace。
                 let workspace =
                     cx.update(|cx| ensure_main_window(&current_ws_status, cx).workspace);
                 let _ = workspace.update_in(cx, |ws, window, cx| {
                     match &event {
-                        status_item::StatusItemEvent::JumpToDaemonSession(id) => {
-                            ws.request_notification_session_jump(id.clone(), window, cx);
-                        }
                         status_item::StatusItemEvent::JumpToAutomationRun {
                             runtime,
                             automation_id,
@@ -3523,7 +3226,7 @@ fn main() {
                                 cx,
                             );
                         }
-                        status_item::StatusItemEvent::ActivateMain
+                        status_item::StatusItemEvent::RunCommand { .. }
                         | status_item::StatusItemEvent::SystemNotificationStateChanged => {}
                     }
                     // activateIgnoringOtherApps 负责前置应用；这里再显式激活主窗口，

@@ -10929,6 +10929,7 @@ dependencies = [
  "smelt-iroh",
  "smelt-layouts",
  "smelt-model",
+ "smelt-notifications",
  "smelt-pairing",
  "smelt-paths",
  "smelt-plugin-api",
@@ -11201,6 +11202,16 @@ dependencies = [
  "tempfile",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "smelt-notifications"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
+ "tempfile",
 ]
 
 [[package]]

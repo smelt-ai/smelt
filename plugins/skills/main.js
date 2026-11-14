@@ -8,9 +8,9 @@
 // 展开一层；「导入」展开在列表顶部。问题就标在出问题的那一行上，不另设汇总横幅。表单见 `editors.js`，小部件见
 // `ui.js`。只有删除、清理这类确认用居中的 `AlertDialog`。
 //
-// 当前项目读 `active_project()`，技能读写的是这台电脑的磁盘，只认本机项目（`machine`
-// 为 null）。项目变了宿主发 `active_project_changed`，这里 await `next_event()` 等它，
-// 变了才重扫，不轮询。
+// 当前项目读 `active_context().project`，技能读写的是这台电脑的磁盘，只认本机项目
+// （`machine` 为 null）。活动上下文变了宿主发 `active_context_changed`（切会话、翻历史
+// 也会发），这里 await `next_event()` 等它，本机项目真的换了才重扫，不轮询。
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -29,7 +29,7 @@ import {
 } from "gpui-component";
 import { homedir } from "os";
 import { realpath } from "smelt-fs";
-import { active_project, next_event } from "smelt-plugin-api";
+import { active_context, next_event } from "smelt-plugin-api";
 import {
   scan,
   repairBridges,
@@ -43,6 +43,12 @@ import {
 } from "./core.js";
 import { ScopeSession, ImportSession, scopeForm, planView, importSource, importWarnings } from "./editors.js";
 import { SPACE, MONO, TRASH, button, tag, hint, box, section, confirm, edited, pretty } from "./ui.js";
+
+/// 当前项目在本机时的根目录；远程项目或没有项目是 null。
+function localProjectRoot() {
+  const project = active_context().project;
+  return project !== null && project.machine === null ? project.root : null;
+}
 
 export default class Skills extends View {
   init(_props, cx) {
@@ -77,7 +83,8 @@ export default class Skills extends View {
       // 事件从插件挂载完就在记，扫描期间换了项目也不会漏。视图卸载时任务跟着取消。
       for (;;) {
         const event = await next_event();
-        if (event.type !== "active_project_changed") continue;
+        if (event.type !== "active_context_changed") continue;
+        if (localProjectRoot() === this.projectRoot) continue;
         try {
           await this.reload(cx);
         } catch (error) {
@@ -92,8 +99,7 @@ export default class Skills extends View {
 
   /// 重扫磁盘。只在 init、事件里调用，不在 render 里。
   async load() {
-    const project = active_project();
-    this.projectRoot = project !== null && project.machine === null ? project.root : null;
+    this.projectRoot = localProjectRoot();
     try {
       this.state = await scan(this.home, this.projectRoot);
     } catch (error) {

@@ -32,9 +32,11 @@ pub use smelt_ui::theme_catalog::{
 };
 
 mod command;
+mod context;
 mod file;
 mod layout;
 pub mod sessions;
+mod settings;
 mod view;
 
 #[cfg(feature = "js")]
@@ -44,10 +46,15 @@ pub use command::{
     Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, NO_MAIN_WINDOW,
     RunCommand, command, commands, invoke, register_commands, run, unregister_commands,
 };
+pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
     register_layouts, unregister_layouts,
+};
+pub use settings::{
+    SettingsGroup, SettingsPage, SettingsPageBuilder, SettingsPageSpec, register_settings_pages,
+    settings_page, settings_pages, settings_pane, unregister_settings_pages,
 };
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec,
@@ -82,10 +89,36 @@ pub struct Project {
 /// 发送系统通知；是否显示由系统的通知权限和设置决定。
 pub const NOTIFY: Command<Notify, ()> = Command::new("smelt.app/notify");
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notify {
+    /// 给了 id 的通知留在通知中心里由插件管：同一个 id 再发换掉上一条，用
+    /// [`WITHDRAW_NOTIFICATION`] 撤回，应用重启后也认得。id 以插件 id 开头（`<插件 id>/…`），
+    /// 免得和别的插件撞上。不给是一次性的提示，投递完就不管了。
+    #[serde(default)]
+    pub id: Option<String>,
     pub subtitle: String,
     pub body: String,
+    /// 点这条通知时执行的命令。不给就只是把应用拿到前面来。
+    #[serde(default)]
+    pub on_click: Option<NotificationClick>,
+}
+
+/// 点通知执行的命令。存在通知里，应用重启后点也照样执行。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationClick {
+    pub command: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+/// 撤回 [`NOTIFY`] 发过的、给了 id 的通知：还没投递的不再投递，通知中心里的撤掉。没有这条
+/// 通知也不算错。
+pub const WITHDRAW_NOTIFICATION: Command<WithdrawNotification, ()> =
+    Command::new("smelt.app/withdraw-notification");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawNotification {
+    pub id: String,
 }
 
 /// 用系统文本编辑器打开这台电脑上的文件。
@@ -119,13 +152,104 @@ pub struct PathRequest {
     pub multiple: bool,
 }
 
+/// 把主窗口拿到前面来；已经关了就新开一扇。
+pub const SHOW_MAIN_WINDOW: Command<(), ()> = Command::new("smelt.app/show-main-window");
+
+/// 设置菜单栏图标旁的文字和点开的菜单。菜单栏图标只有一个、是应用图标，后设的为准；没人
+/// 设过就不显示。只有 macOS 有，别的系统什么都不做。
+pub const SET_STATUS_MENU: Command<StatusMenu, ()> = Command::new("smelt.app/set-status-menu");
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusMenu {
+    /// 图标右边的字；空的只显示图标。
+    #[serde(default)]
+    pub title: String,
+    /// 鼠标停在图标上时的提示。
+    #[serde(default)]
+    pub tooltip: String,
+    /// 点开的菜单，从上往下。
+    #[serde(default)]
+    pub items: Vec<StatusMenuItem>,
+}
+
+/// 菜单里的一项。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StatusMenuItem {
+    /// 点了执行 `command`（带 `args`），失败由宿主报给用户。
+    Action {
+        label: String,
+        #[serde(default)]
+        icon: Option<StatusIcon>,
+        command: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+    Separator,
+}
+
+/// 菜单项左边的小图标：只取 PNG 的透明度当形状，涂成 `color`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusIcon {
+    pub png: Vec<u8>,
+    /// `0xRRGGBB`。
+    pub color: u32,
+}
+
+/// 打开系统设置里本应用的通知设置，用户在那里开关通知权限。只有 macOS 有，别的系统什么
+/// 都不做。
+pub const OPEN_NOTIFICATION_SETTINGS: Command<(), ()> =
+    Command::new("smelt.app/open-notification-settings");
+
+/// 还没问过用户（[`NotificationPermission::NotRequested`]）时请系统问一次，不必等第一条通知。
+/// 问过了、别的系统上什么都不做；结果从 [`HostEvent::NotificationPermissionChanged`] 来。
+pub const REQUEST_NOTIFICATION_PERMISSION: Command<(), ()> =
+    Command::new("smelt.app/request-notification-permission");
+
+/// 系统通知的授权（[`Host::notification_permission`]）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotificationPermission {
+    /// 正在读系统设置。
+    Checking,
+    /// 还没问过用户；第一次发通知时系统会问，也可以用 [`REQUEST_NOTIFICATION_PERMISSION`] 先问。
+    NotRequested,
+    /// 允许了。各项是用户在系统设置里给这个应用开着的，关掉的那项系统不做。
+    Granted {
+        /// 弹横幅或提醒（提醒样式不是「无」）。关了只进通知中心。
+        banners: bool,
+        sound: bool,
+        /// Dock 图标上的角标（[`SET_DOCK_BADGE`]）。
+        badge: bool,
+    },
+    /// 用户在系统设置里关了，用 [`OPEN_NOTIFICATION_SETTINGS`] 带他去开。
+    Denied,
+    /// 系统报错，读不到；带给人看的原因。
+    Unavailable(String),
+    /// 这个系统上没有系统通知。
+    Unsupported,
+}
+
+/// 设置 Dock 图标上的角标。只有 macOS 有，别的系统什么都不做。
+pub const SET_DOCK_BADGE: Command<DockBadge, ()> = Command::new("smelt.app/set-dock-badge");
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockBadge {
+    /// 角标上的字；`None` 清掉。
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 /// 宿主转给插件的事。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
     /// 那台机器推了一条运行时话题（核心订阅以外的那些，如
-    /// [`model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED`]）。宿主只转发话题名，不解读；
-    /// 积压丢了事件时，每个话题都当作推过一次。
-    RuntimeTopic { machine: RuntimeKey, topic: String },
+    /// [`model::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED`]、
+    /// [`model::daemon_state::CORE_TOPIC_ATTENTION_CHANGED`]）。宿主原样转发，不解读。
+    RuntimeTopic {
+        machine: RuntimeKey,
+        topic: String,
+        message: TopicMessage,
+    },
     /// 重新订阅上那台机器：断开期间错过的推送要自己重读，它替你建的监听（如
     /// `project.watch`）也要重新登记。
     Reconnected(RuntimeKey),
@@ -138,8 +262,13 @@ pub enum HostEvent {
     OverlayChanged,
     /// 挂着的机器变了：加了、移除了、改了名或连接状态。
     MachinesChanged,
-    /// 工作台的当前项目变了（读 [`Host::active_project`]）。
-    ActiveProjectChanged,
+    /// 活动上下文变了：当前项目或舞台上露着的会话（读 [`active_context`]）。
+    ActiveContextChanged,
+    /// 有机器的会话状态或工作区目录变了（读 [`Host::session_states`]、
+    /// [`Host::workspace_directory`]）。
+    SessionsChanged,
+    /// 系统通知的授权变了（读 [`Host::notification_permission`]）。
+    NotificationPermissionChanged,
     /// 某台机器的智能体配置变了（读 [`Host::agent_settings`]）。
     AgentSettingsChanged,
     /// 看得见的视图变了：有的露出来、有的被挡住或收起（读 [`Host::view_shown`]）。
@@ -152,6 +281,20 @@ pub enum HostEvent {
     LayoutsChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
+    /// 设置页登记变了（见 [`register_settings_pages`]）：设置侧栏要跟着变。
+    SettingsPagesChanged,
+}
+
+/// 一条运行时话题推来的东西。载荷的形状见协议里那个话题的类型。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TopicMessage {
+    /// 一条事件。
+    Event(serde_json::Value),
+    /// 带快照的话题的整份状态：订上（含重连）时一份，积压丢了事件后再一份。收到就整份换掉
+    /// 自己留的那份。
+    Snapshot(serde_json::Value),
+    /// 断开或积压，可能错过了事件。没有快照的话题要自己重读；带快照的话题后面跟着一份快照。
+    Lagged,
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。
@@ -166,8 +309,6 @@ pub trait Host: 'static {
     fn machines(&self, cx: &App) -> Vec<Machine>;
     /// 那台机器的运行时客户端；机器已经移除是 `None`。
     fn client(&self, machine: &RuntimeKey, cx: &App) -> Option<RuntimeClient>;
-    /// 工作台的当前项目，可能在远程机器上；没有项目时是 `None`。
-    fn active_project(&self, cx: &App) -> Option<Project>;
     /// 那台机器的智能体配置：自定义 Agent（profile）、智能体定义、环境变量。还没读到是
     /// `None`。只读；变了发 [`HostEvent::AgentSettingsChanged`]。
     fn agent_settings<'a>(
@@ -192,6 +333,23 @@ pub trait Host: 'static {
     fn overlay_open(&self, cx: &App) -> bool;
     /// 那台机器上的路径怎么切（`/` 还是 `\`）。远程机器还没连上过时按 POSIX。
     fn path_style(&self, machine: &RuntimeKey, cx: &App) -> model::runtime_path::PathStyle;
+    /// 那台机器的运行时报的会话状态：每格终端、每段对话一条，id 是守护会话 id。没连上过
+    /// 是空的。主窗口关着也照常更新；变了发 [`HostEvent::SessionsChanged`]。
+    fn session_states(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Vec<model::daemon_state::DaemonSessionState>;
+    /// 那台机器的工作区目录：开着的项目和对话，是会话的名册（会话状态里没有的对话是还没
+    /// 起过）。还没收到是 `None`。变了发 [`HostEvent::SessionsChanged`]。
+    fn workspace_directory(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Option<model::workspace_directory::WorkspaceDirectory>;
+    /// 系统通知的授权。应用回到前台时重查；变了发
+    /// [`HostEvent::NotificationPermissionChanged`]。
+    fn notification_permission(&self, cx: &App) -> NotificationPermission;
 }
 
 struct HostGlobal {
@@ -338,6 +496,48 @@ mod tests {
             assert_eq!(machine_from_json(&machine_to_json(&machine)), Some(machine));
         }
         assert_eq!(machine_from_json(&serde_json::json!(1)), None);
+    }
+
+    #[test]
+    fn status_menu_items_are_tagged_for_scripts() {
+        let menu = StatusMenu {
+            title: "1@".into(),
+            tooltip: String::new(),
+            items: vec![
+                StatusMenuItem::Action {
+                    label: "会话".into(),
+                    icon: Some(StatusIcon {
+                        png: vec![1, 2],
+                        color: 0x112233,
+                    }),
+                    command: "smelt.sessions/activate".into(),
+                    args: serde_json::json!({ "session_id": "s" }),
+                },
+                StatusMenuItem::Separator,
+            ],
+        };
+        let value = serde_json::to_value(&menu).unwrap();
+        assert_eq!(value["items"][0]["type"], "action");
+        assert_eq!(value["items"][0]["icon"]["png"], serde_json::json!([1, 2]));
+        assert_eq!(
+            value["items"][1],
+            serde_json::json!({ "type": "separator" })
+        );
+        assert_eq!(serde_json::from_value::<StatusMenu>(value).unwrap(), menu);
+        // 脚本可以只给菜单项，项里可以不带图标和参数。
+        let bare: StatusMenu = serde_json::from_value(serde_json::json!({
+            "items": [{ "type": "action", "label": "打开", "command": "smelt.app/show-main-window" }],
+        }))
+        .unwrap();
+        assert_eq!(bare.title, "");
+        assert!(matches!(
+            &bare.items[0],
+            StatusMenuItem::Action {
+                icon: None,
+                args: serde_json::Value::Null,
+                ..
+            }
+        ));
     }
 
     #[test]

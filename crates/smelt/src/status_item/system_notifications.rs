@@ -4,24 +4,28 @@
 //! authorization requests, and request submission. This module owns notifications after the
 //! attention coordinator hands them off, and only retires them after the completion handler.
 
-use super::{StatusItemEvent, SystemNotificationAuthorization, SystemNotificationStatus};
+use super::{
+    StatusItemEvent, SystemNotificationAuthorization, SystemNotificationDelivery,
+    SystemNotificationStatus,
+};
 use crate::RuntimeKey;
 use block2::{DynBlock, RcBlock};
 use objc2::AnyThread;
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, ProtocolObject};
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
+use objc2_foundation::{
+    NSArray, NSBundle, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString,
+};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
-    UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-    UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
-    UNUserNotificationCenterDelegate,
+    UNAlertStyle, UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+    UNNotification, UNNotificationPresentationOptions, UNNotificationRequest,
+    UNNotificationResponse, UNNotificationSetting, UNNotificationSettings, UNNotificationSound,
+    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr::NonNull;
 use std::sync::{Mutex, OnceLock};
 
-const SESSION_IDENTIFIER_PREFIX: &str = "smelt.session.";
 const AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.run.";
 /// 远程机器上的运行：前缀后面是 `运行时 id.运行 id`。本机的沿用老格式，已经挂在通知中心
 /// 里的旧通知点了照样能跳。
@@ -29,9 +33,14 @@ const REMOTE_AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.remote-r
 const AUTOMATION_THREAD_PREFIX: &str = "automation:";
 const REMOTE_AUTOMATION_THREAD_PREFIX: &str = "automation@";
 const APP_IDENTIFIER: &str = "smelt.app.";
+/// 插件给了 id 的通知：前缀后面是插件给的 id。同一个 id 再发换掉上一条，可以撤回。
+const PLUGIN_IDENTIFIER_PREFIX: &str = "smelt.notify.";
+/// 点通知要执行的命令（[`smelt_plugin_api::NotificationClick`] 的 JSON）存在通知内容的
+/// userInfo 里这个键下，应用重启后点也找得到。
+const CLICK_COMMAND_KEY: &str = "smelt.click";
 
-fn notification_identifier(session_id: &str) -> String {
-    format!("{SESSION_IDENTIFIER_PREFIX}{session_id}")
+fn plugin_notification_identifier(id: &str) -> String {
+    format!("{PLUGIN_IDENTIFIER_PREFIX}{id}")
 }
 
 fn automation_notification_identifier(runtime: &RuntimeKey, run_id: &str) -> String {
@@ -47,12 +56,6 @@ fn automation_thread_identifier(runtime: &RuntimeKey, automation_id: &str) -> St
         RuntimeKey::Local => format!("{AUTOMATION_THREAD_PREFIX}{automation_id}"),
         RuntimeKey::Remote(id) => format!("{REMOTE_AUTOMATION_THREAD_PREFIX}{id}:{automation_id}"),
     }
-}
-
-fn session_id_from_identifier(identifier: &str) -> Option<&str> {
-    identifier
-        .strip_prefix(SESSION_IDENTIFIER_PREFIX)
-        .filter(|session_id| !session_id.is_empty())
 }
 
 /// 运行时 id 是 UUID，不含 `.` 和 `:`，从第一个分隔符切开就是机器和后半段。
@@ -88,11 +91,13 @@ struct QueuedNotification {
     thread_identifier: String,
     subtitle: String,
     body: String,
+    /// 点它执行的命令，JSON。
+    on_click: Option<String>,
     generation: u64,
 }
 
 /// Owns requests until UserNotifications confirms that it accepted them. Pending requests are
-/// coalesced by stable session identifier, while generations serialize updates racing a callback.
+/// coalesced by stable identifier, while generations serialize updates racing a callback.
 #[derive(Default)]
 struct NotificationQueue {
     next_generation: u64,
@@ -105,15 +110,6 @@ struct NotificationQueue {
 }
 
 impl NotificationQueue {
-    fn enqueue(&mut self, session_id: &str, subtitle: &str, body: &str) {
-        self.enqueue_with_identifier(
-            notification_identifier(session_id),
-            session_id.to_string(),
-            subtitle,
-            body,
-        );
-    }
-
     fn enqueue_automation_run(
         &mut self,
         runtime: &RuntimeKey,
@@ -127,15 +123,29 @@ impl NotificationQueue {
             automation_thread_identifier(runtime, automation_id),
             subtitle,
             body,
+            None,
         );
     }
 
-    fn enqueue_app(&mut self, subtitle: &str, body: &str) {
+    fn enqueue_app(&mut self, subtitle: &str, body: &str, on_click: Option<String>) {
         self.enqueue_with_identifier(
             format!("{APP_IDENTIFIER}{}", uuid::Uuid::new_v4()),
             "app".to_string(),
             subtitle,
             body,
+            on_click,
+        );
+    }
+
+    /// 插件给了 id 的通知：同一个 id 再发换掉上一条（还在排队的直接换，投递过的由系统按同一个
+    /// 标识替换），通知中心里同一个 id 归一组。
+    fn enqueue_plugin(&mut self, id: &str, subtitle: &str, body: &str, on_click: Option<String>) {
+        self.enqueue_with_identifier(
+            plugin_notification_identifier(id),
+            id.to_string(),
+            subtitle,
+            body,
+            on_click,
         );
     }
 
@@ -145,6 +155,7 @@ impl NotificationQueue {
         thread_identifier: String,
         subtitle: &str,
         body: &str,
+        on_click: Option<String>,
     ) {
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         self.active_identifiers.insert(identifier.clone());
@@ -155,6 +166,7 @@ impl NotificationQueue {
                 thread_identifier,
                 subtitle: subtitle.to_string(),
                 body: body.to_string(),
+                on_click,
                 generation: self.next_generation,
             },
         );
@@ -239,16 +251,6 @@ impl NotificationQueue {
         }
     }
 
-    fn retain_sessions(&mut self, session_ids: &[String]) {
-        let retained = session_ids
-            .iter()
-            .map(|session_id| notification_identifier(session_id))
-            .collect::<HashSet<_>>();
-        self.retain_scope(&retained, |identifier| {
-            session_id_from_identifier(identifier).is_some()
-        });
-    }
-
     /// 只动这台机器的运行通知：别的机器上的运行不在这份快照里，不能当成已删除。
     fn retain_automation_runs(&mut self, runtime: &RuntimeKey, run_ids: &[String]) {
         let retained = run_ids
@@ -260,8 +262,8 @@ impl NotificationQueue {
         });
     }
 
-    /// A retention pass owns one identifier namespace only. Session unread updates must never
-    /// retract automation results, and automation history pruning must not touch session alerts.
+    /// A retention pass owns one identifier namespace only: automation history pruning must not
+    /// touch other notifications.
     fn retain_scope(&mut self, retained: &HashSet<String>, in_scope: impl Fn(&str) -> bool) {
         let stale = self
             .active_identifiers
@@ -274,12 +276,12 @@ impl NotificationQueue {
         }
     }
 
-    fn remove_session(&mut self, session_id: &str) {
-        self.remove_identifier(&notification_identifier(session_id));
-    }
-
     fn remove_automation_run(&mut self, runtime: &RuntimeKey, run_id: &str) {
         self.remove_identifier(&automation_notification_identifier(runtime, run_id));
+    }
+
+    fn remove_plugin(&mut self, id: &str) {
+        self.remove_identifier(&plugin_notification_identifier(id));
     }
 
     fn remove_identifier(&mut self, identifier: &str) {
@@ -309,7 +311,14 @@ struct BridgeState {
     authorization: SystemNotificationAuthorization,
     settings_check_in_flight: bool,
     authorization_request_in_flight: bool,
+    /// 已授权但当初没要角标（早先的版本只要了横幅和声音）：补要一次。系统不会再弹框，只是
+    /// 在通知设置里加出角标开关；没有这项，Dock 角标设了也不显示。
+    badge_missing: bool,
+    /// 这次运行里补要过了：系统照旧不给也不再要，免得来回重查。
+    badge_requested: bool,
     denial_reported: bool,
+    /// 上一次从系统读到的（[`SystemNotificationStatus::last_read`]）。
+    last_read: Option<(SystemNotificationAuthorization, SystemNotificationDelivery)>,
     queue: NotificationQueue,
     last_error: Option<String>,
     errors: VecDeque<String>,
@@ -378,16 +387,7 @@ objc2::define_class!(
             completion_handler: &DynBlock<dyn Fn()>,
         ) {
             let identifier = response.notification().request().identifier().to_string();
-            let event = if let Some(session_id) =
-                session_id_from_identifier(&identifier).map(str::to_string)
-            {
-                state()
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .queue
-                    .remove_session(&session_id);
-                Some(StatusItemEvent::JumpToDaemonSession(session_id))
-            } else if let Some((runtime, run_id)) = automation_run_from_identifier(&identifier)
+            let event = if let Some((runtime, run_id)) = automation_run_from_identifier(&identifier)
                 .map(|(runtime, run_id)| (runtime, run_id.to_string()))
             {
                 state()
@@ -408,16 +408,19 @@ objc2::define_class!(
                         automation_id: automation_id.to_string(),
                         run_id,
                     })
-            } else if identifier.starts_with(APP_IDENTIFIER) {
+            } else if identifier.starts_with(APP_IDENTIFIER)
+                || identifier.starts_with(PLUGIN_IDENTIFIER_PREFIX)
+            {
                 let mut state = state()
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                // 只有投递回执尚未返回时，队列才可能还在跟踪这条通知。
+                // 应用通知只有投递回执尚未返回时队列才还在跟踪；插件的点过就不在了，撤掉。
                 if state.queue.active_identifiers.contains(&identifier) {
                     state.queue.remove_identifier(&identifier);
                     send_state_changed();
                 }
-                None
+                drop(state);
+                click_command(response)
             } else {
                 None
             };
@@ -431,6 +434,24 @@ objc2::define_class!(
         }
     }
 );
+
+/// 通知里存的点击命令；没存或存的不认识是 `None`（那就只把应用拿到前面来）。
+fn click_command(response: &UNNotificationResponse) -> Option<StatusItemEvent> {
+    let user_info = response.notification().request().content().userInfo();
+    let key = NSString::from_str(CLICK_COMMAND_KEY);
+    let key: &AnyObject = &key;
+    let json = user_info.objectForKey(key)?.downcast::<NSString>().ok()?;
+    match serde_json::from_str::<smelt_plugin_api::NotificationClick>(&json.to_string()) {
+        Ok(click) => Some(StatusItemEvent::RunCommand {
+            command: click.command,
+            args: click.args,
+        }),
+        Err(error) => {
+            eprintln!("[notifications] 通知里的点击命令认不出：{error}");
+            None
+        }
+    }
+}
 
 impl NotificationDelegate {
     fn new() -> Retained<Self> {
@@ -481,13 +502,23 @@ fn read_settings() {
         RcBlock::new(|settings: NonNull<UNNotificationSettings>| {
             // SAFETY: The binding models this callback argument as NonNull and it remains valid
             // for the duration of the callback.
-            let authorization =
-                authorization_from_settings(unsafe { settings.as_ref() }.authorizationStatus());
+            let settings = unsafe { settings.as_ref() };
+            let authorization = authorization_from_settings(settings.authorizationStatus());
+            let delivery = SystemNotificationDelivery {
+                banners: settings.alertSetting() == UNNotificationSetting::Enabled
+                    && settings.alertStyle() != UNAlertStyle::None,
+                sound: settings.soundSetting() == UNNotificationSetting::Enabled,
+                badge: settings.badgeSetting() == UNNotificationSetting::Enabled,
+            };
             let mut state = state()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.settings_check_in_flight = false;
             state.authorization = authorization;
+            state.last_read = Some((authorization, delivery));
+            state.badge_missing = authorization == SystemNotificationAuthorization::Authorized
+                && settings.badgeSetting() == UNNotificationSetting::NotSupported
+                && !state.badge_requested;
             let had_pending = state.queue.pending_count() > 0;
             if matches!(
                 authorization,
@@ -517,7 +548,7 @@ fn read_settings() {
 fn request_authorization() {
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let completion: RcBlock<dyn Fn(Bool, *mut NSError)> =
-        RcBlock::new(|granted: Bool, error: *mut NSError| {
+        RcBlock::new(|_granted: Bool, error: *mut NSError| {
             let error = error_description(error);
             let mut state = state()
                 .lock()
@@ -529,23 +560,18 @@ fn request_authorization() {
                 state.record_error(format!(
                     "failed to request macOS notification permission: {error}"
                 ));
-            } else if granted.as_bool() {
-                // Query settings again so provisional/authorized details come from one source.
-                state.authorization = SystemNotificationAuthorization::Unknown;
-                state.denial_reported = false;
             } else {
-                state.authorization = SystemNotificationAuthorization::Denied;
-                state.queue.discard_pending_app_notifications();
-                if !state.denial_reported {
-                    state.denial_reported = true;
-                    state.record_error("macOS notification permission was denied".to_string());
-                }
+                // 给没给、给了哪几项都以设置为准，重查一次（拒绝也在那里报）。`granted` 只说横幅
+                // 那几项整体，已授权的 App 补要角标时它说明不了什么。
+                state.authorization = SystemNotificationAuthorization::Unknown;
             }
             drop(state);
             send_state_changed();
         });
     center.requestAuthorizationWithOptions_completionHandler(
-        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+        UNAuthorizationOptions::Alert
+            | UNAuthorizationOptions::Sound
+            | UNAuthorizationOptions::Badge,
         &completion,
     );
 }
@@ -557,6 +583,16 @@ fn submit(notification: QueuedNotification) {
     content.setBody(&NSString::from_str(&notification.body));
     content.setThreadIdentifier(&NSString::from_str(&notification.thread_identifier));
     content.setSound(Some(&UNNotificationSound::defaultSound()));
+    if let Some(on_click) = &notification.on_click {
+        let key = NSString::from_str(CLICK_COMMAND_KEY);
+        let value = NSString::from_str(on_click);
+        let user_info = NSDictionary::<NSString, NSString>::from_slices(&[&*key], &[&*value]);
+        // SAFETY: userInfo 要的是能存进属性列表的键值，这里键值都是 NSString；只是把泛型参数
+        // 换成 setter 声明的 AnyObject。
+        unsafe {
+            content.setUserInfo(&Retained::cast_unchecked::<NSDictionary>(user_info));
+        }
+    }
 
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
         &NSString::from_str(&notification.identifier),
@@ -625,6 +661,15 @@ pub fn sync_system_notifications() {
                         && !state.authorization_request_in_flight =>
                 {
                     state.authorization_request_in_flight = true;
+                    state.badge_requested = true;
+                    BridgeAction::RequestAuthorization
+                }
+                SystemNotificationAuthorization::Authorized
+                    if state.badge_missing && !state.authorization_request_in_flight =>
+                {
+                    state.authorization_request_in_flight = true;
+                    state.badge_missing = false;
+                    state.badge_requested = true;
                     BridgeAction::RequestAuthorization
                 }
                 SystemNotificationAuthorization::Authorized => {
@@ -665,28 +710,50 @@ fn prepare_queued_notification(state: &mut BridgeState) {
     }
 }
 
-/// Queues synchronously; authorization and native submission continue asynchronously.
-pub fn deliver_notification(session_id: &str, subtitle: &str, body: &str) {
-    {
-        let mut state = state()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.queue.enqueue(session_id, subtitle, body);
-        prepare_queued_notification(&mut state);
-    }
-    sync_system_notifications();
-}
-
-pub fn deliver_app_notification(subtitle: &str, body: &str) {
+fn deliver_app_notification(subtitle: &str, body: &str) {
     {
         let mut state = state()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // 和会话通知一样先排队：权限还没查清（刚启动）或正在问人时也不丢。被拒、不可用时
         // 查完权限会清掉排着的应用通知（[`NotificationQueue::discard_pending_app_notifications`]）。
-        state.queue.enqueue_app(subtitle, body);
+        state.queue.enqueue_app(subtitle, body, None);
         prepare_queued_notification(&mut state);
     }
+    sync_system_notifications();
+}
+
+/// 插件发的通知（`smelt.app/notify`）。没给 id 的同应用通知，一次性；给了 id 的像会话通知
+/// 一样留着，投递失败等权限恢复再发，直到插件撤回或人点掉。
+pub fn deliver_plugin_notification(notify: &smelt_plugin_api::Notify) {
+    let on_click = notify
+        .on_click
+        .as_ref()
+        .and_then(|click| serde_json::to_string(click).ok());
+    {
+        let mut state = state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &notify.id {
+            Some(id) => state
+                .queue
+                .enqueue_plugin(id, &notify.subtitle, &notify.body, on_click),
+            None => state
+                .queue
+                .enqueue_app(&notify.subtitle, &notify.body, on_click),
+        }
+        prepare_queued_notification(&mut state);
+    }
+    sync_system_notifications();
+}
+
+/// 撤回插件给了 id 的通知。应用重启前发的也撤得掉：通知中心按标识撤，不看队列记没记着。
+pub fn withdraw_plugin_notification(id: &str) {
+    state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .queue
+        .remove_plugin(id);
     sync_system_notifications();
 }
 
@@ -717,31 +784,12 @@ pub fn deliver_automation_notification(
     sync_system_notifications();
 }
 
-/// Retires system-channel intent for sessions that are no longer unread.
-pub fn retain_system_notifications(session_ids: &[String]) {
-    state()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .queue
-        .retain_sessions(session_ids);
-    sync_system_notifications();
-}
-
 pub fn retain_automation_notifications(runtime: &RuntimeKey, run_ids: &[String]) {
     state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .queue
         .retain_automation_runs(runtime, run_ids);
-    sync_system_notifications();
-}
-
-pub fn remove_system_notification(session_id: &str) {
-    state()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .queue
-        .remove_session(session_id);
     sync_system_notifications();
 }
 
@@ -752,6 +800,33 @@ pub fn remove_automation_notification(runtime: &RuntimeKey, run_id: &str) {
         .queue
         .remove_automation_run(runtime, run_id);
     sync_system_notifications();
+}
+
+/// 还没问过用户时请系统问一次（设置页上的按钮），不等第一条通知。问过了什么都不做。
+pub fn request_system_notification_authorization() {
+    {
+        let mut state = state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.initialized
+            || state.authorization_request_in_flight
+            || state.authorization != SystemNotificationAuthorization::NotDetermined
+        {
+            return;
+        }
+        state.authorization_request_in_flight = true;
+        state.badge_requested = true;
+    }
+    request_authorization();
+}
+
+/// 系统设置里本应用的通知设置：带上 bundle id 直接落到这个应用那一页。
+pub fn system_notification_settings_url() -> Option<String> {
+    const PANE: &str = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
+    Some(match NSBundle::mainBundle().bundleIdentifier() {
+        Some(id) => format!("{PANE}?id={id}"),
+        None => PANE.to_string(),
+    })
 }
 
 /// Rechecks authorization and unlocks one retry after returning from System Settings.
@@ -778,6 +853,7 @@ pub fn system_notification_status() -> SystemNotificationStatus {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     SystemNotificationStatus {
         authorization: state.authorization,
+        last_read: state.last_read,
         pending_count: state.queue.pending_count(),
         last_error: state.last_error.clone(),
     }
@@ -797,8 +873,8 @@ mod tests {
     use super::{
         APP_IDENTIFIER, NotificationQueue, authorization_from_settings,
         automation_from_thread_identifier, automation_notification_identifier,
-        automation_run_from_identifier, automation_thread_identifier, notification_identifier,
-        prepare_queued_notification, session_id_from_identifier,
+        automation_run_from_identifier, automation_thread_identifier,
+        plugin_notification_identifier, prepare_queued_notification,
     };
     use crate::RuntimeKey;
     use crate::status_item::SystemNotificationAuthorization;
@@ -824,17 +900,36 @@ mod tests {
         );
     }
 
+    /// 插件给了 id 的通知：同一个 id 再发换掉排着的那条，撤回后不再投递，也撤掉投递过的。
+    #[test]
+    fn plugin_notifications_replace_by_id_and_withdraw() {
+        let mut queue = NotificationQueue::default();
+        let click = Some(r#"{"command":"smelt.sessions/activate","args":{}}"#.to_string());
+        queue.enqueue_plugin("smelt-notifications/s1", "完成", "第一条", None);
+        queue.enqueue_plugin("smelt-notifications/s1", "完成", "第二条", click.clone());
+        let ready = queue.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            ready[0].identifier,
+            plugin_notification_identifier("smelt-notifications/s1")
+        );
+        assert_eq!(ready[0].body, "第二条");
+        assert_eq!(ready[0].on_click, click);
+        queue.complete(&ready[0].identifier, ready[0].generation, None);
+        assert!(queue.take_retractions().is_empty());
+        // 投递过的留着，直到插件撤回。
+        assert!(queue.active_identifiers.contains(&ready[0].identifier));
+        queue.remove_plugin("smelt-notifications/s1");
+        assert_eq!(queue.take_retractions(), vec![ready[0].identifier.clone()]);
+        assert!(queue.take_ready().is_empty());
+        // 重启后队列里没有它，撤回照样交给通知中心去撤。
+        let mut fresh = NotificationQueue::default();
+        fresh.remove_plugin("smelt-notifications/s1");
+        assert_eq!(fresh.take_retractions(), vec![ready[0].identifier.clone()]);
+    }
+
     #[test]
     fn identifier_is_stable_and_reversible() {
-        let identifier = notification_identifier("daemon/session 42");
-        assert_eq!(identifier, "smelt.session.daemon/session 42");
-        assert_eq!(
-            session_id_from_identifier(&identifier),
-            Some("daemon/session 42")
-        );
-        assert_eq!(session_id_from_identifier("unrelated"), None);
-        assert_eq!(session_id_from_identifier("smelt.session."), None);
-
         // 本机沿用老格式：升级前发出的通知点了照样能跳。
         let automation =
             automation_notification_identifier(&RuntimeKey::Local, "event:auto-1:evt-9");
@@ -874,9 +969,9 @@ mod tests {
     #[test]
     fn app_notifications_are_independent_and_retire_after_delivery() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "done", "session body");
-        queue.enqueue_app("错误", "模型 ID 不能为空");
-        queue.enqueue_app("完成", "已保存");
+        queue.enqueue_plugin("session-1", "done", "session body", None);
+        queue.enqueue_app("错误", "模型 ID 不能为空", None);
+        queue.enqueue_app("完成", "已保存", None);
 
         let ready = queue.take_ready();
         assert_eq!(ready.len(), 3);
@@ -896,7 +991,7 @@ mod tests {
         );
         assert!(apps.iter().all(|request| request.thread_identifier == "app"));
 
-        queue.retain_sessions(&[]);
+        queue.remove_plugin("session-1");
         assert!(
             queue
                 .take_retractions()
@@ -908,13 +1003,13 @@ mod tests {
             assert!(!queue.active_identifiers.contains(&app.identifier));
             assert!(!queue.submitted.contains(&app.identifier));
         }
-        assert_eq!(queue.pending_count(), 1); // 会话通知仍在等待投递回执
+        assert_eq!(queue.pending_count(), 1); // 撤掉的插件通知仍在等待投递回执
     }
 
     #[test]
     fn failed_app_notification_is_not_retried() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue_app("提示", "操作完成");
+        queue.enqueue_app("提示", "操作完成", None);
         let request = queue.take_ready().pop().unwrap();
         queue.complete(&request.identifier, request.generation, Some("rejected"));
         assert_eq!(queue.pending_count(), 0);
@@ -924,15 +1019,18 @@ mod tests {
     }
 
     #[test]
-    fn discarding_undeliverable_app_notifications_keeps_session_alerts() {
+    fn discarding_undeliverable_app_notifications_keeps_plugin_notifications() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "done", "session body");
-        queue.enqueue_app("提示", "第一条");
-        queue.enqueue_app("提示", "第二条");
+        queue.enqueue_plugin("session-1", "done", "session body", None);
+        queue.enqueue_app("提示", "第一条", None);
+        queue.enqueue_app("提示", "第二条", None);
         queue.discard_pending_app_notifications();
         let ready = queue.take_ready();
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].identifier, notification_identifier("session-1"));
+        assert_eq!(
+            ready[0].identifier,
+            plugin_notification_identifier("session-1")
+        );
         assert!(
             queue
                 .active_identifiers
@@ -950,7 +1048,7 @@ mod tests {
             state.authorization,
             SystemNotificationAuthorization::Unknown
         );
-        state.queue.enqueue_app("提示", "操作完成");
+        state.queue.enqueue_app("提示", "操作完成", None);
         prepare_queued_notification(&mut state);
         assert_eq!(state.queue.pending_count(), 1);
         state.queue.discard_pending_app_notifications();
@@ -960,8 +1058,8 @@ mod tests {
     #[test]
     fn queue_coalesces_and_retains_failed_delivery() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "first", "old body");
-        queue.enqueue("session-1", "second", "new body");
+        queue.enqueue_plugin("session-1", "first", "old body", None);
+        queue.enqueue_plugin("session-1", "second", "new body", None);
 
         let mut ready = queue.take_ready();
         assert_eq!(ready.len(), 1);
@@ -981,9 +1079,9 @@ mod tests {
     #[test]
     fn failed_old_generation_does_not_block_a_newer_request() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "old", "old body");
+        queue.enqueue_plugin("session-1", "old", "old body", None);
         let old = queue.take_ready().pop().unwrap();
-        queue.enqueue("session-1", "new", "new body");
+        queue.enqueue_plugin("session-1", "new", "new body", None);
 
         queue.complete(&old.identifier, old.generation, Some("rejected"));
 
@@ -995,12 +1093,12 @@ mod tests {
     #[test]
     fn newer_notification_waits_for_retracted_in_flight_generation() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "old", "old body");
+        queue.enqueue_plugin("session-1", "old", "old body", None);
         let old = queue.take_ready().pop().unwrap();
 
-        queue.remove_session("session-1");
+        queue.remove_plugin("session-1");
         assert_eq!(queue.take_retractions(), vec![old.identifier.clone()]);
-        queue.enqueue("session-1", "new", "new body");
+        queue.enqueue_plugin("session-1", "new", "new body", None);
         assert!(queue.take_ready().is_empty());
 
         queue.complete(&old.identifier, old.generation, None);
@@ -1011,39 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn unread_state_does_not_reactivate_a_non_system_channel() {
-        let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "old", "body");
-        let request = queue.take_ready().pop().unwrap();
-
-        queue.remove_session("session-1");
-        queue.take_retractions();
-        queue.retain_sessions(&["session-1".to_string()]);
-        queue.complete(&request.identifier, request.generation, None);
-
-        assert_eq!(
-            queue.take_retractions(),
-            vec![notification_identifier("session-1")]
-        );
-    }
-
-    #[test]
-    fn queue_retracts_read_or_resolved_sessions() {
-        let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "done", "body");
-        let request = queue.take_ready().pop().unwrap();
-        queue.complete(&request.identifier, request.generation, None);
-
-        queue.retain_sessions(&[]);
-        assert_eq!(
-            queue.take_retractions(),
-            vec![notification_identifier("session-1")]
-        );
-        assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[test]
-    fn session_and_automation_retention_are_isolated() {
+    fn automation_retention_is_isolated() {
         let mut automation_queue = NotificationQueue::default();
         automation_queue.enqueue_automation_run(
             &RuntimeKey::Local,
@@ -1060,8 +1126,6 @@ mod tests {
         assert_eq!(request.thread_identifier, "automation:automation-1");
         automation_queue.complete(&request.identifier, request.generation, None);
 
-        automation_queue.retain_sessions(&[]);
-        assert!(automation_queue.take_retractions().is_empty());
         // 别的机器的快照不撤本机的运行通知。
         automation_queue.retain_automation_runs(&RuntimeKey::Remote("box".into()), &[]);
         assert!(automation_queue.take_retractions().is_empty());
@@ -1074,17 +1138,12 @@ mod tests {
             )]
         );
 
-        let mut session_queue = NotificationQueue::default();
-        session_queue.enqueue("session-1", "done", "body");
-        let request = session_queue.take_ready().pop().unwrap();
-        session_queue.complete(&request.identifier, request.generation, None);
+        let mut plugin_queue = NotificationQueue::default();
+        plugin_queue.enqueue_plugin("session-1", "done", "body", None);
+        let request = plugin_queue.take_ready().pop().unwrap();
+        plugin_queue.complete(&request.identifier, request.generation, None);
 
-        session_queue.retain_automation_runs(&RuntimeKey::Local, &[]);
-        assert!(session_queue.take_retractions().is_empty());
-        session_queue.retain_sessions(&[]);
-        assert_eq!(
-            session_queue.take_retractions(),
-            vec![notification_identifier("session-1")]
-        );
+        plugin_queue.retain_automation_runs(&RuntimeKey::Local, &[]);
+        assert!(plugin_queue.take_retractions().is_empty());
     }
 }

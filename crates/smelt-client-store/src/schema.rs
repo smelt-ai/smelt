@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 11;
+pub(crate) const SCHEMA_VERSION: u32 = 12;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -33,14 +33,6 @@ CREATE TABLE update_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   channel TEXT NOT NULL,
   auto_install INTEGER NOT NULL CHECK (auto_install IN (0, 1))
-);
-CREATE TABLE notify_prefs (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  approval INTEGER NOT NULL CHECK (approval IN (0, 1)),
-  input INTEGER NOT NULL CHECK (input IN (0, 1)),
-  success INTEGER NOT NULL CHECK (success IN (0, 1)),
-  failure INTEGER NOT NULL CHECK (failure IN (0, 1)),
-  terminal_bell INTEGER NOT NULL CHECK (terminal_bell IN (0, 1))
 );
 CREATE TABLE workspace_ui (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -316,6 +308,12 @@ ALTER TABLE conversation_route DROP COLUMN diff_scope;
 DROP TABLE conversation_route_path;
 ";
 
+/// 通知偏好归通知插件（存在它自己的库里），客户端库不再留一份。旧值不搬：宿主不认识插件
+/// 的表，插件的开关默认都开。
+const MIGRATE_V11_TO_V12: &str = "
+DROP TABLE notify_prefs;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -369,7 +367,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7..=10 => {}
+        7..=11 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
@@ -390,6 +388,11 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=10).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V10_TO_V11)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=11).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V11_TO_V12)
             .map_err(|error| error.to_string())?;
     }
     transaction
@@ -431,14 +434,15 @@ fn has_table(connection: &Connection, name: &str) -> Result<bool, String> {
 }
 
 /// 第一版客户端库是一张「作用域 + 键 → JSON 值」的偏好表。打开时一次性搬进正式的表，
-/// 然后删掉它。字段缺省按当时的出厂值补；某一项解析不了就丢掉这一项，用出厂值重来。
+/// 然后删掉它。字段缺省按当时的出厂值补；某一项解析不了就丢掉这一项，用出厂值重来。通知
+/// 偏好不搬：它归通知插件了。
 mod legacy {
     use serde::Deserialize;
 
     use super::Transaction;
     use crate::{
-        AppearanceRecord, InstallerAttemptRecord, NotifyPrefsRecord, StagedUpdateRecord,
-        UpdateSettingsRecord, UpdateStateRecord, WorkspaceUiRecord,
+        AppearanceRecord, InstallerAttemptRecord, StagedUpdateRecord, UpdateSettingsRecord,
+        UpdateStateRecord, WorkspaceUiRecord,
     };
 
     #[derive(Deserialize)]
@@ -497,15 +501,6 @@ mod legacy {
 
     fn default_channel() -> String {
         "prod".to_string()
-    }
-
-    #[derive(Deserialize)]
-    struct NotifyPrefs {
-        approval: bool,
-        input: bool,
-        success: bool,
-        failure: bool,
-        terminal_bell: bool,
     }
 
     #[derive(Deserialize)]
@@ -625,18 +620,6 @@ mod legacy {
                 &UpdateSettingsRecord {
                     channel: old.channel,
                     auto_install: old.auto_install,
-                },
-            )?;
-        }
-        if let Some(old) = value::<NotifyPrefs>(transaction, "notify", "prefs")? {
-            crate::write_notify_prefs(
-                transaction,
-                &NotifyPrefsRecord {
-                    approval: old.approval,
-                    input: old.input,
-                    success: old.success,
-                    failure: old.failure,
-                    terminal_bell: old.terminal_bell,
                 },
             )?;
         }

@@ -123,7 +123,12 @@ fn stop_terminal_session(
     Ok(())
 }
 
-pub(super) fn handle_action<C: ClientSocket>(conn: C, v: &serde_json::Value, sessions: &Sessions) {
+pub(super) fn handle_action<C: ClientSocket>(
+    conn: C,
+    v: &serde_json::Value,
+    sessions: &Sessions,
+    event_hub: &EventHubHandle,
+) {
     let id = v["id"].as_str().unwrap_or_default();
     let mut c = conn;
     let payload = match action_payload(v["kind"].as_str(), v["text"].as_str()) {
@@ -148,6 +153,8 @@ pub(super) fn handle_action<C: ClientSocket>(conn: C, v: &serde_json::Value, ses
         .unwrap_or_else(|| Err("会话不存在".to_string()));
     match write_result {
         Ok(()) => {
+            // 手机上批准、回复就是看过了。
+            event_hub.mark_attention_read(id);
             let _ = smelt_runtime_client::protocol::write_json_line(
                 &mut c,
                 &serde_json::json!({ "ok": true }),
@@ -162,7 +169,12 @@ pub(super) fn handle_action<C: ClientSocket>(conn: C, v: &serde_json::Value, ses
     }
 }
 
-pub(super) fn handle_raw_input<C: ClientSocket>(conn: C, v: &serde_json::Value, sessions: &Sessions) {
+pub(super) fn handle_raw_input<C: ClientSocket>(
+    conn: C,
+    v: &serde_json::Value,
+    sessions: &Sessions,
+    event_hub: &EventHubHandle,
+) {
     // 原始输入：工作延续，无 phase 门闩。权限在连接身份（未配对的设备进不来），这里
     // 只做「会话在不在 + 载荷非空 + 写进 master」。
     let id = v["id"].as_str().unwrap_or_default();
@@ -181,6 +193,8 @@ pub(super) fn handle_raw_input<C: ClientSocket>(conn: C, v: &serde_json::Value, 
         .unwrap_or_else(|| Err("会话不存在".to_string()));
     match write_result {
         Ok(()) => {
+            // 手机上批准、回复就是看过了。
+            event_hub.mark_attention_read(id);
             let _ = smelt_runtime_client::protocol::write_json_line(
                 &mut c,
                 &serde_json::json!({ "ok": true }),
@@ -408,7 +422,6 @@ pub(crate) fn open_terminal_runtime<R>(
                 cols,
                 cwd.as_deref(),
                 terminal_launch,
-                event_hub,
             );
             let (sess, pty_reader) = match result {
                 Ok(result) => result,
@@ -604,6 +617,8 @@ pub(crate) fn handle_open<C: ClientSocket>(
                 {
                     break;
                 }
+                // 在终端里打字就是看过了。
+                event_hub.mark_attention_read(&id);
             }
             1 if len == 8 || len == 16 => {
                 let cols = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as u16;

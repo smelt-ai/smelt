@@ -65,15 +65,6 @@ pub struct UpdateSettingsRecord {
     pub auto_install: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotifyPrefsRecord {
-    pub approval: bool,
-    pub input: bool,
-    pub success: bool,
-    pub failure: bool,
-    pub terminal_bell: bool,
-}
-
 /// 用户改过的一条快捷键。`command` 是命令 id（`<来源>/<名字>`）；`keystroke` 是 GPUI 的
 /// 按键写法（`cmd-k`），`None` 是用户把这条清掉了、不绑任何键。没有记录的命令用出厂键位。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,26 +260,6 @@ pub(crate) fn write_update_settings(
         .execute(
             "INSERT OR REPLACE INTO update_settings (id, channel, auto_install) VALUES (1, ?1, ?2)",
             params![record.channel, record.auto_install],
-        )
-        .map(drop)
-        .map_err(sql)
-}
-
-pub(crate) fn write_notify_prefs(
-    connection: &Connection,
-    record: &NotifyPrefsRecord,
-) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO notify_prefs (id, approval, input, success, failure, terminal_bell)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-            params![
-                record.approval,
-                record.input,
-                record.success,
-                record.failure,
-                record.terminal_bell
-            ],
         )
         .map(drop)
         .map_err(sql)
@@ -720,34 +691,6 @@ impl ClientStore {
         record: &UpdateSettingsRecord,
     ) -> Result<(), ClientStoreError> {
         self.write(|connection| write_update_settings(connection, record))
-    }
-
-    #[track_caller]
-    pub fn notify_prefs(&self) -> Result<Option<NotifyPrefsRecord>, ClientStoreError> {
-        self.with(|connection| {
-            connection
-                .query_row(
-                    "SELECT approval, input, success, failure, terminal_bell
-                     FROM notify_prefs WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok(NotifyPrefsRecord {
-                            approval: row.get(0)?,
-                            input: row.get(1)?,
-                            success: row.get(2)?,
-                            failure: row.get(3)?,
-                            terminal_bell: row.get(4)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(sql)
-        })
-    }
-
-    #[track_caller]
-    pub fn put_notify_prefs(&self, record: &NotifyPrefsRecord) -> Result<(), ClientStoreError> {
-        self.write(|connection| write_notify_prefs(connection, record))
     }
 
     #[track_caller]

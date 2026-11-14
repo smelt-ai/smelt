@@ -43,7 +43,7 @@ use gpui_component::ActiveTheme as _;
 use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
 use gpui_shell::policy::{self, Policy};
 use gpui_shell::{Capabilities, ExecuteGrant, ScriptView, ShellRuntime};
-use smelt_plugin_api::js::JsPlugin;
+use smelt_plugin_api::js::{JsPlugin, SettingsPageLoader};
 use smelt_plugin_api::{self as api, PluginView, ViewHandle, ViewSpec};
 
 pub(crate) use log::install as install_log;
@@ -65,6 +65,8 @@ struct Registry {
     panels: Vec<PluginPanel>,
     /// 已登记主题的插件来源，重载时整批撤下再登记。
     theme_owners: Vec<String>,
+    /// 这一批插件的权限，设置页在设置窗口里单独加载时也用它。
+    capabilities: Option<Capabilities>,
 }
 
 struct PluginPanel {
@@ -104,6 +106,26 @@ impl Render for JsPluginView {
 impl PluginView for JsPluginView {
     /// 脚本自己管打开时看什么，宿主不传参数。
     fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+}
+
+/// 插件的一页设置：设置窗口里单独加载的那份脚本，或加载失败的原因。底色用设置窗口的，
+/// 不另铺。
+struct JsSettingsPage {
+    content: Result<Entity<ScriptView>, String>,
+}
+
+impl Render for JsSettingsPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let base = div().size_full().min_h_0().flex().flex_col();
+        match &self.content {
+            Ok(view) => base.child(view.clone()),
+            Err(error) => base
+                .p_6()
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(format!("设置页加载失败：{error}")),
+        }
+    }
 }
 
 /// 插件从哪个目录加载的。
@@ -159,9 +181,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     // 脚本挂载时自己再登记布局、命令；重载后不再登记的、卸掉的插件的不能留着。事件在
     // 这一轮更新结束才发，工作台看到的是挂完的结果，不会先换走再换回来。
     for panel in &previous {
-        api::unregister_layouts(&panel.id, cx);
-        api::unregister_commands(&panel.id, cx);
-        api::unregister_file_opener(&panel.id, cx);
+        unregister_contributions(&panel.id, cx);
     }
 
     // 视图出生时定下权限，所以每次挂载前按这一批插件的声明重新装一遍。
@@ -170,6 +190,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
         .flat_map(|plugin| declared_hosts(&plugin.root))
         .collect::<Vec<_>>();
     let capabilities = unrestricted().network_hosts(hosts);
+    REGISTRY.with(|registry| registry.borrow_mut().capabilities = Some(capabilities.clone()));
 
     let panels: Vec<PluginPanel> = found
         .into_iter()
@@ -196,7 +217,8 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     });
                 }
                 // 纯主题插件已在上面处理；只有脚本插件需要运行时。
-                let plugin = JsPlugin::for_plugin(&id, manifest.name());
+                let plugin = JsPlugin::for_plugin(&id, manifest.name())
+                    .with_settings_loader(settings_loader(&id, manifest.name(), &root, source));
                 let content = match runtime.as_ref().expect("脚本插件需要运行时") {
                     Ok(runtime) => {
                         // 开关挂在运行时上、加载时读，所以每个插件加载前按来源设一次。
@@ -218,9 +240,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     Err(error) => {
                         // 脚本可能登记了一半才出错，它给的主题、布局、命令都不留。
                         smelt_ui::theme_catalog::unregister_themes(&format!("script:{id}"), cx);
-                        api::unregister_layouts(&id, cx);
-                        api::unregister_commands(&id, cx);
-                        api::unregister_file_opener(&id, cx);
+                        unregister_contributions(&id, cx);
                         eprintln!("[plugins] {id} 加载失败：{error}");
                     }
                 }
@@ -253,9 +273,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                 };
                 if let Err(error) = api::register_view(spec, cx) {
                     eprintln!("[plugins] {} 登记失败：{error}", panel.id);
-                    api::unregister_layouts(&panel.id, cx);
-                    api::unregister_commands(&panel.id, cx);
-                    api::unregister_file_opener(&panel.id, cx);
+                    unregister_contributions(&panel.id, cx);
                     return None;
                 }
                 Some(panel)
@@ -283,6 +301,83 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// 脚本挂载时登记的东西：布局、命令、文件打开者、设置页。主题另算（见
+/// `register_theme_contributions`）。
+fn unregister_contributions(id: &str, cx: &mut App) {
+    api::unregister_layouts(id, cx);
+    api::unregister_commands(id, cx);
+    api::unregister_file_opener(id, cx);
+    api::unregister_settings_pages(id, cx);
+}
+
+/// 插件的设置页怎么建：入口是插件目录里的另一个脚本，点开那一页时在设置窗口里单独加载、
+/// 挂载，和主入口是两份实例（像浏览器扩展的 options 页）。
+fn settings_loader(
+    id: &str,
+    name: &str,
+    root: &std::path::Path,
+    source: PluginSource,
+) -> SettingsPageLoader {
+    let (id, name, root) = (id.to_string(), name.to_string(), root.to_path_buf());
+    SettingsPageLoader {
+        icon: gpui_kit_assets::IconName::Puzzle.path(),
+        load: Rc::new(move |entry| {
+            check_settings_entry(&root, entry)?;
+            let (id, name, root, entry) =
+                (id.clone(), name.clone(), root.clone(), entry.to_string());
+            Ok(Rc::new(move |window, cx| -> AnyView {
+                let content = mount_settings_page(&id, &name, &root, &entry, source, window, cx);
+                cx.new(|_| JsSettingsPage { content }).into()
+            }))
+        }),
+    }
+}
+
+/// 设置页入口要是插件目录里的文件，写相对路径，不能用 `..` 跑出去。
+fn check_settings_entry(root: &std::path::Path, entry: &str) -> Result<(), String> {
+    use std::path::{Component, Path};
+    let path = Path::new(entry);
+    if entry.is_empty()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(format!("「{entry}」要是插件目录里的相对路径"));
+    }
+    if !root.join(path).is_file() {
+        return Err(format!("插件目录里没有「{entry}」"));
+    }
+    Ok(())
+}
+
+/// 在设置窗口里加载、挂载插件的一页设置。权限和主入口一样，身份是同一个插件，但不能登记。
+fn mount_settings_page(
+    id: &str,
+    name: &str,
+    root: &std::path::Path,
+    entry: &str,
+    source: PluginSource,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<Entity<ScriptView>, String> {
+    let runtime = runtime(cx).map_err(|error| format!("插件运行时启动失败：{error:#}"))?;
+    let capabilities = REGISTRY
+        .with(|registry| registry.borrow().capabilities.clone())
+        .ok_or("插件还没加载")?;
+    let plugin = JsPlugin::for_settings_page(id, name);
+    runtime.set_editor_files(source.editor_files());
+    let view = plugin_policy(id, &capabilities, &plugin).and_then(|policy| {
+        policy::set_default(policy);
+        let application = runtime.load_application(root, entry)?;
+        runtime.mount_application(&application, window, cx)
+    });
+    // 默认 Policy 不留这个插件的，同 `mount_all`。
+    policy::set_default(Policy::new());
+    let view = view.map_err(|error| format!("{error:#}"))?;
+    plugin.attach(&view, cx);
+    Ok(view)
+}
+
 /// 一个插件自己的 Policy：权限大家一样，宿主模块里的 `smelt-plugin-api` 是它自己的。
 fn plugin_policy(
     id: &str,
@@ -306,6 +401,8 @@ fn plugin_policy(
 pub(crate) fn shutdown(cx: &mut App) {
     let panels = REGISTRY.with(|registry| std::mem::take(&mut registry.borrow_mut().panels));
     for panel in panels {
+        // 设置页的建页函数要在运行时之前放掉，理由同上。
+        api::unregister_settings_pages(&panel.id, cx);
         if panel.has_view {
             api::unregister_view(&panel.id, cx);
         }
@@ -578,6 +675,29 @@ mod tests {
             assert!(!smelt_ui::theme_catalog::contains("Sample Light", cx));
             super::register_theme_contributions(&[], cx);
         });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_entries_stay_inside_the_plugin_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("smelt-plugin-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("pages")).unwrap();
+        std::fs::write(dir.join("pages/settings.tsx"), "").unwrap();
+        std::fs::write(dir.join("settings.tsx"), "").unwrap();
+        assert!(super::check_settings_entry(&dir, "settings.tsx").is_ok());
+        assert!(super::check_settings_entry(&dir, "pages/settings.tsx").is_ok());
+        assert!(super::check_settings_entry(&dir, "./settings.tsx").is_ok());
+        for entry in [
+            "",
+            "missing.tsx",
+            "pages",
+            "../settings.tsx",
+            "pages/../settings.tsx",
+            "/etc/hosts",
+        ] {
+            assert!(super::check_settings_entry(&dir, entry).is_err(), "{entry}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

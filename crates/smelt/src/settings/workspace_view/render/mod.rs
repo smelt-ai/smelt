@@ -7,7 +7,6 @@
 //! 不把整组设置堆进一个可滚动长页。
 
 use super::*;
-use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputState, Textarea};
 use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 
@@ -15,19 +14,21 @@ mod agent;
 mod appearance;
 mod collaboration;
 mod maintenance;
-mod notify;
 mod panel_plugin;
 mod shortcuts;
 
-/// 渲染独立设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。
+/// 渲染独立设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。选中插件的页时
+/// `plugin_page` 是建好的那一页（由设置内容视图在事件里建，见 `SettingsContentView`）。
 pub(super) fn render_settings_content(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
+    plugin_page: Option<AnyView>,
     _cx: &App,
 ) -> Div {
     div().size_full().child(SettingsShell {
         entity,
         snapshot: snapshot.clone(),
+        plugin_page,
     })
 }
 
@@ -35,6 +36,7 @@ pub(super) fn render_settings_content(
 struct SettingsShell {
     entity: Entity<Workspace>,
     snapshot: SettingsRenderSnapshot,
+    plugin_page: Option<AnyView>,
 }
 
 impl RenderOnce for SettingsShell {
@@ -43,9 +45,28 @@ impl RenderOnce for SettingsShell {
             InputState::new(window, cx).placeholder("搜索设置、功能或命令")
         });
         let query = search.read(cx).value().to_string();
-        let nav = filter_settings_nav(&settings_nav(), &query);
+        let nav = filter_settings_nav(&settings_nav(&smelt_plugin_api::settings_pages(cx)), &query);
         let selected = self.snapshot.settings_section.clone();
-        let page = section_page(self.entity.clone(), &self.snapshot, &selected, cx);
+        let content = match section_page(self.entity.clone(), &self.snapshot, &selected, cx) {
+            Some(page) => smelt_plugin_api::settings_pane(
+                SharedString::from(format!(
+                    "settings-pane:{}:{}",
+                    selected.element_key(),
+                    self.snapshot.settings_page_nonce
+                )),
+                page,
+            )
+            .into_any_element(),
+            None => match self.plugin_page {
+                Some(page) => page.into_any_element(),
+                None => div()
+                    .p_6()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("这一页已经撤下了：登记它的插件卸载了，或重新加载时出错。")
+                    .into_any_element(),
+            },
+        };
 
         h_flex()
             .size_full()
@@ -58,22 +79,7 @@ impl RenderOnce for SettingsShell {
                 search,
                 cx,
             ))
-            .child(
-                div().flex_1().min_w_0().h_full().child(
-                    // Settings 自带侧栏是按 group 滚动的，这里关掉它，只借用内容渲染。
-                    Settings::new(SharedString::from(format!(
-                        "settings-pane:{}:{}",
-                        selected.element_key(),
-                        self.snapshot.settings_page_nonce
-                    )))
-                    // 每一节一张描边卡片。不用 Fill：它的底色是背景混 30% 的次级色，近黑主题上
-                    // 跟背景几乎分不出来；描边在各主题下都看得见。
-                    .with_group_variant(GroupBoxVariant::Outline)
-                    .sidebar_width(px(0.))
-                    .sidebar_size_range(px(0.)..px(0.))
-                    .pages(vec![page]),
-                ),
-            )
+            .child(div().flex_1().min_w_0().h_full().child(content))
     }
 }
 
@@ -171,15 +177,15 @@ fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut
     });
 }
 
+/// 宿主自己的页。插件的页是 `None`：它是插件建好的视图，不是 `SettingPage`。
 fn section_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     selected: &SettingsSection,
     cx: &App,
-) -> SettingPage {
-    match selected {
+) -> Option<SettingPage> {
+    Some(match selected {
         SettingsSection::Appearance => appearance::appearance_page(entity, snapshot, cx),
-        SettingsSection::Notifications => notify::notify_page(),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
         SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
         SettingsSection::Agents => {
@@ -197,5 +203,6 @@ fn section_page(
         }
         SettingsSection::Maintenance => maintenance::maintenance_page(entity, snapshot, cx),
         SettingsSection::About => maintenance::about_page(entity, snapshot, cx),
-    }
+        SettingsSection::Plugin(_) => return None,
+    })
 }

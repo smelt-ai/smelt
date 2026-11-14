@@ -19,13 +19,16 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
-use gpui::{App, Entity, Subscription};
+use gpui::{App, Entity, SharedString, Subscription};
 use gpui_shell::{
     HostArguments, HostError, HostModule, HostObject, HostResult, HostValue, ScriptView,
 };
 use serde_json::Value;
 
-use crate::{CommandSpec, Handled, HostEvent, RuntimeKey, rusqlite};
+use crate::{
+    CommandSpec, Handled, HostEvent, NotificationPermission, RuntimeKey, SettingsGroup,
+    SettingsPageBuilder, SettingsPageSpec, TopicMessage, rusqlite,
+};
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
@@ -38,8 +41,42 @@ export interface Project {
   /** 根目录，按那台机器的路径写。 */
   root: string;
 }
-/** 工作台的当前项目，可能在远程机器上；没有项目时为 null。 */
-export function active_project(): Project | null;
+/** 舞台上露着的一段会话。 */
+export interface ViewedSession {
+  machine: Machine;
+  /** 守护会话 id（终端是那一格），同 session_states 里的。 */
+  id: string;
+  /** 最新的内容在眼前；对话往上翻着看历史时为 false，终端总是 true。 */
+  at_latest: boolean;
+}
+/** 用户眼下在看什么。 */
+export interface ActiveContext {
+  /** 当前项目，可能在远程机器上；没有项目时为 null。 */
+  project: Project | null;
+  /** 舞台上露着的会话；舞台被挡住、收起、换成别的页，或没有会话时为 null。 */
+  session: ViewedSession | null;
+}
+/** 用户眼下在看什么。变了发 active_context_changed。 */
+export function active_context(): ActiveContext;
+/** 那台机器的运行时报的会话状态，每格终端、每段对话一条（形状同运行时 subscribe 推的会话状态）。主窗口关着也照常更新；变了发 sessions_changed。 */
+export function session_states(machine: Machine): unknown[];
+/** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
+export function workspace_directory(machine: Machine): unknown | null;
+/**
+ * 系统通知的授权：checking 正在读系统设置，not_requested 还没问过用户（第一次发通知时系统会问，也可以用
+ * "smelt.app/request-notification-permission" 先问），granted 允许了（banners 弹横幅、sound 声音、badge Dock
+ * 角标是用户给这个应用开着的几项，关掉的系统不做），denied 用户在系统设置里关了（用
+ * "smelt.app/open-notification-settings" 带他去开），unavailable 系统报错（error 是原因），unsupported 这个系统上
+ * 没有系统通知。应用回到前台时重查；变了发 notification_permission_changed。
+ */
+export function notification_permission():
+  | { state: "checking" | "not_requested" | "denied" | "unsupported" }
+  | { state: "granted"; banners: boolean; sound: boolean; badge: boolean }
+  | { state: "unavailable"; error: string };
+/** 菜单栏菜单里的一项。icon 只取 PNG（字节数组）的透明度当形状，涂成 color（0xRRGGBB）。 */
+export type StatusMenuItem =
+  | { type: "action"; label: string; icon?: { png: number[]; color: number } | null; command: string; args?: unknown }
+  | { type: "separator" };
 /** 那台机器的智能体配置（profiles、agents、env 等，形状同运行时的 agent_host.get）；还没读到时为 null。变了发 agent_settings_changed。 */
 export function agent_settings(machine: Machine): unknown | null;
 /** 那个视图此刻看得见。变了发 shown_views_changed。 */
@@ -91,12 +128,24 @@ export function next_command(): Promise<CommandCall>;
  * 脚本登记的命令接到就算成功，结果是 null。
  *
  * 宿主的动作也是命令：
- * - "smelt.app/notify" { subtitle: string, body: string }：发系统通知，显示受系统通知授权和设置影响。
+ * - "smelt.app/notify" { id?: string, subtitle: string, body: string, on_click?: { command: string, args?: unknown } }：
+ *   发系统通知，显示受系统通知授权和设置影响。给了 id（以插件 id 开头，"<插件 id>/…"）的留在通知中心里由插件管：
+ *   同一个 id 再发换掉上一条，可以撤回，应用重启后也认得；不给是一次性的提示。on_click 是点它时执行的命令，
+ *   不给就只是把应用拿到前面来。
+ * - "smelt.app/withdraw-notification" { id: string }：撤回给了 id 的通知；没有这条也不算错。
+ * - "smelt.app/open-notification-settings"：打开系统设置里本应用的通知设置；只有 macOS 有。
+ * - "smelt.app/request-notification-permission"：还没问过用户时请系统问一次通知授权；问过了什么都不做，结果看
+ *   notification_permission_changed。
  * - "smelt.app/open-in-text-editor" { path: string }：用系统文本编辑器打开这台电脑上的文件。
  * - "smelt.app/pick-paths" { machine: Machine, title: string, confirm: string, files?: boolean, multiple?: boolean }
  *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
  * - "smelt.app/open-view" { view: string, args?: unknown } → boolean：打开一个视图，布局里摆了它就让它露出来，
  *   没摆就在舞台上开成一页，再把 args 交给它；没有这个视图时为 false。
+ * - "smelt.app/show-main-window"：把主窗口拿到前面来，已经关了就新开一扇。
+ * - "smelt.app/set-status-menu" { title?: string, tooltip?: string, items?: StatusMenuItem[] }：设置菜单栏图标旁的字、
+ *   提示和点开的菜单，后设的为准；只有 macOS 有。
+ * - "smelt.app/set-dock-badge" { label: string | null }：设置 Dock 图标的角标，null 清掉；只有 macOS 有。
+ * - "smelt.sessions/activate" { session_id: string }：在主窗口里露出这个会话并拿到前面来，主窗口关着就先开。
  * - "smelt.sessions/send-text" { text: string }：把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）；
  *   没有能接的会话时 reject。
  * - "smelt.sessions/resume" / "smelt.sessions/resume-in-terminal" / "smelt.sessions/handoff"：续接、交接历史会话。
@@ -106,6 +155,25 @@ export function run(command: string, args?: unknown): Promise<unknown>;
 export function path_style(machine: Machine): "posix" | "windows";
 /** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的 reject。line 从 1 数。 */
 export function open_file(machine: Machine, path: string, line?: number): Promise<null>;
+export interface SettingsPage {
+  /** 本插件内的名字，不含 "/"；设置页 id 是 "<插件 id>/<name>"。 */
+  name: string;
+  /** 设置侧栏上的名字。 */
+  title: string;
+  /**
+   * 页面的入口脚本，插件目录里的相对路径，如 "settings.tsx"。设置窗口里点开这一页时单独加载、挂载它，
+   * 和主入口是两份脚本实例，不共享内存：值存在插件自己的库里（store_query / store_execute），
+   * 要主入口跟着变就 run 一条它登记的命令。设置窗口关了这一份就放掉。
+   * 入口脚本里不能调 register_* 登记东西，登记都在主入口里做。
+   */
+  entry: string;
+  /** 放进设置侧栏的哪一组，默认 "plugins"。 */
+  group?: "general" | "agents" | "system" | "plugins";
+  /** 搜索时除了标题还能按这些词找到这一页。 */
+  keywords?: string[];
+}
+/** 替换本插件登记的设置页。空数组撤下全部；一页不合法整组不登记。 */
+export function register_settings_pages(pages: SettingsPage[]): null;
 /** 让本插件的命令 name 当文件打开者（它要另外登记，requires_args）；执行时参数是 { machine, path, line }。只认最后登记的打开者。 */
 export function register_file_opener(name: string): null;
 /** SQL 参数。true / false 存成 1 / 0。 */
@@ -115,22 +183,48 @@ export function store_query(sql: string, params?: SqlValue[]): Promise<Record<st
 /** 在本插件自己的库里执行一条语句，返回改动的行数。 */
 export function store_execute(sql: string, params?: SqlValue[]): Promise<number>;
 export type HostEvent =
-  | { type: "runtime_topic"; machine: Machine; topic: string }
+  | { type: "runtime_topic"; machine: Machine; topic: string; message: TopicMessage }
   | { type: "reconnected"; machine: Machine }
   | { type: "project_changed"; machine: Machine; root: string }
   | { type: "window_activated" }
   | { type: "overlay_changed" }
   | { type: "machines_changed" }
-  | { type: "active_project_changed" }
+  | { type: "active_context_changed" }
+  | { type: "sessions_changed" }
+  | { type: "notification_permission_changed" }
   | { type: "agent_settings_changed" }
   | { type: "shown_views_changed" }
   | { type: "views_changed" }
   | { type: "themes_changed" }
   | { type: "layouts_changed" }
-  | { type: "commands_changed" };
-/** 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份。同时只能有一个在等。 */
+  | { type: "commands_changed" }
+  | { type: "settings_pages_changed" };
+/**
+ * 运行时话题推来的：一条事件；带快照的话题（如 attention.changed）订上和积压后的整份状态，收到就整份换掉
+ * 自己留的；断开或积压可能错过了事件（没有快照的话题自己重读）。载荷形状见协议里那个话题的类型。
+ */
+export type TopicMessage =
+  | { kind: "event"; payload: unknown }
+  | { kind: "snapshot"; payload: unknown }
+  | { kind: "lagged" };
+/**
+ * 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份；一台机器一个话题的快照或积压到了，
+ * 这个话题之前没取走的就不留了。同时只能有一个在等。
+ */
 export function next_event(): Promise<HostEvent>;
 "#;
+
+/// 宿主怎么把插件目录里的一个入口建成设置页（见 `register_settings_pages`）。
+#[derive(Clone)]
+pub struct SettingsPageLoader {
+    /// JS 设置页在侧栏上一律用这个图标。
+    pub icon: SharedString,
+    /// 校验入口（插件目录里的相对路径），给出建页的函数。
+    pub load: LoadSettingsPage,
+}
+
+/// 校验 JS 设置页入口、给出建页函数的宿主函数。
+pub type LoadSettingsPage = Rc<dyn Fn(&str) -> Result<SettingsPageBuilder, String>>;
 
 /// 一个 JS 插件在宿主这边的身份。
 #[derive(Clone, Default)]
@@ -150,6 +244,9 @@ struct PluginState {
     call_waiter: Option<oneshot::Sender<(String, Value)>>,
     /// 视图已经释放：它登记的命令不再接。
     released: bool,
+    /// 设置页那份脚本：和主入口同一个身份，但不能登记，登记会顶掉主入口登记的那组。
+    settings_page: bool,
+    settings_loader: Option<SettingsPageLoader>,
     _events: Option<Subscription>,
     _release: Option<Subscription>,
 }
@@ -172,6 +269,30 @@ impl JsPlugin {
         plugin
     }
 
+    /// 主入口登记设置页时，入口怎么建成页。没给就不能登记设置页。
+    pub fn with_settings_loader(self, loader: SettingsPageLoader) -> Self {
+        self.0.borrow_mut().settings_loader = Some(loader);
+        self
+    }
+
+    /// 设置页那份脚本的身份：读写的是同一个插件的库、执行的是同样的命令，但 `register_*`
+    /// 一律报错。
+    pub fn for_settings_page(id: &str, name: &str) -> Self {
+        let plugin = Self::for_plugin(id, name);
+        plugin.0.borrow_mut().settings_page = true;
+        plugin
+    }
+
+    /// 登记前先过这一关：设置页那份脚本不能登记。
+    fn may_register(&self, name: &str) -> Result<(), HostError> {
+        if self.0.borrow().settings_page {
+            return Err(HostError::new(format!(
+                "{name}：设置页入口里不能登记，登记放在插件主入口里"
+            )));
+        }
+        Ok(())
+    }
+
     /// 这个插件的 `smelt-plugin-api` 模块，装进它自己的 Policy。
     pub fn module(&self) -> HostModule {
         let events = self.clone();
@@ -182,16 +303,31 @@ impl JsPlugin {
         let opener_owner = self.0.borrow().id.clone();
         let query_owner = self.0.borrow().id.clone();
         let execute_owner = query_owner.clone();
+        let themes = self.clone();
+        let layouts = self.clone();
+        let openers = self.clone();
+        let settings = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
-            .function("active_project", |_| {
-                let project = in_app("active_project", |cx| crate::host(cx).active_project(cx))?;
-                Ok(project.map_or(HostValue::Null, |project| {
+            .function("active_context", |_| {
+                let context = in_app("active_context", |cx| crate::active_context(cx))?;
+                let project = context.project.map_or(HostValue::Null, |project| {
                     HostObject::new()
                         .field("machine", machine_value(&project.machine))
                         .field("root", project.root.as_str())
                         .into()
-                }))
+                });
+                let session = context.session.map_or(HostValue::Null, |session| {
+                    HostObject::new()
+                        .field("machine", machine_value(&session.machine))
+                        .field("id", session.id.as_str())
+                        .field("at_latest", session.at_latest)
+                        .into()
+                });
+                Ok(HostObject::new()
+                    .field("project", project)
+                    .field("session", session)
+                    .into())
             })
             .function("agent_settings", |arguments| {
                 let machine = machine_argument("agent_settings", arguments, 0)?;
@@ -208,6 +344,26 @@ impl JsPlugin {
                     ))),
                 }
             })
+            .function("session_states", |arguments| {
+                let machine = machine_argument("session_states", arguments, 0)?;
+                let states = in_app("session_states", |cx| {
+                    crate::host(cx).session_states(&machine, cx)
+                })?;
+                serialized("session_states", &states)
+            })
+            .function("workspace_directory", |arguments| {
+                let machine = machine_argument("workspace_directory", arguments, 0)?;
+                let directory = in_app("workspace_directory", |cx| {
+                    crate::host(cx).workspace_directory(&machine, cx)
+                })?;
+                serialized("workspace_directory", &directory)
+            })
+            .function("notification_permission", |_| {
+                let permission = in_app("notification_permission", |cx| {
+                    crate::host(cx).notification_permission(cx)
+                })?;
+                Ok(permission_value(&permission))
+            })
             .function("view_shown", |arguments| {
                 let id = arguments.string(0)?;
                 Ok(in_app("view_shown", |cx| crate::host(cx).view_shown(id, cx))?.into())
@@ -219,6 +375,7 @@ impl JsPlugin {
                 Ok(in_app("overlay_open", |cx| crate::host(cx).overlay_open(cx))?.into())
             })
             .function("register_themes", move |arguments| {
+                themes.may_register("register_themes")?;
                 let values = arguments
                     .value(0)?
                     .as_array()
@@ -241,6 +398,7 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_layouts", move |arguments| {
+                layouts.may_register("register_layouts")?;
                 let layouts = layout_arguments(arguments)?;
                 if layout_owner.is_empty() {
                     return Err(HostError::new("插件没有布局来源身份"));
@@ -256,6 +414,7 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_commands", move |arguments| {
+                commands.may_register("register_commands")?;
                 let specs = command_arguments(arguments, &commands)?;
                 let (owner, group) = {
                     let state = commands.0.borrow();
@@ -315,6 +474,7 @@ impl JsPlugin {
                 )
             })
             .function("register_file_opener", move |arguments| {
+                openers.may_register("register_file_opener")?;
                 let name = arguments.string(0)?;
                 if opener_owner.is_empty() {
                     return Err(HostError::new("插件没有命令来源身份"));
@@ -322,6 +482,25 @@ impl JsPlugin {
                 in_app("register_file_opener", |cx| {
                     crate::register_file_opener(&opener_owner, name, cx)
                 })?;
+                Ok(HostValue::Null)
+            })
+            .function("register_settings_pages", move |arguments| {
+                settings.may_register("register_settings_pages")?;
+                let (owner, loader) = {
+                    let state = settings.0.borrow();
+                    (state.id.clone(), state.settings_loader.clone())
+                };
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有设置页来源身份"));
+                }
+                let loader = loader.ok_or_else(|| {
+                    HostError::new("register_settings_pages：这个插件不能登记设置页")
+                })?;
+                let specs = settings_page_arguments(arguments, &loader)?;
+                in_app("register_settings_pages", |cx| {
+                    crate::register_settings_pages(&owner, specs, cx)
+                })?
+                .map_err(HostError::new)?;
                 Ok(HostValue::Null)
             })
             .async_function("store_query", move |arguments| {
@@ -386,9 +565,22 @@ impl JsPlugin {
             },
             None => event.clone(),
         };
-        if !state.queue.contains(&event) {
-            state.queue.push_back(event);
+        if state.queue.contains(&event) {
+            return;
         }
+        // 快照、积压之前同一台机器同一个话题没取走的，被它取代了。
+        if let HostEvent::RuntimeTopic {
+            machine,
+            topic,
+            message: TopicMessage::Snapshot(_) | TopicMessage::Lagged,
+        } = &event
+        {
+            state.queue.retain(|queued| {
+                !matches!(queued, HostEvent::RuntimeTopic { machine: m, topic: t, .. }
+                    if m == machine && t == topic)
+            });
+        }
+        state.queue.push_back(event);
     }
 
     fn next_command(&self) -> impl Future<Output = Result<HostValue, HostError>> + Send + use<> {
@@ -591,6 +783,71 @@ fn layout_arguments(arguments: &HostArguments) -> Result<Vec<(String, String, St
         .collect()
 }
 
+/// `register_settings_pages` 的参数。入口交给宿主的加载器校验、变成建页函数。
+fn settings_page_arguments(
+    arguments: &HostArguments,
+    loader: &SettingsPageLoader,
+) -> Result<Vec<SettingsPageSpec>, HostError> {
+    let invalid = |what: &str| HostError::new(format!("register_settings_pages：{what}"));
+    arguments
+        .value(0)?
+        .as_array()
+        .ok_or_else(|| invalid("参数要是设置页对象的数组"))?
+        .iter()
+        .map(|page| {
+            let text = |name: &str| match page.get(name) {
+                None | Some(HostValue::Null) => Ok(None),
+                Some(HostValue::Str(text)) => Ok(Some(text.clone())),
+                Some(other) => Err(invalid(&format!(
+                    "{name} 要是字符串，收到 {}",
+                    other.describe()
+                ))),
+            };
+            let name = text("name")?.ok_or_else(|| invalid("每一页都要有 name"))?;
+            let title = text("title")?.ok_or_else(|| invalid("每一页都要有 title"))?;
+            let entry = text("entry")?.ok_or_else(|| invalid("每一页都要有 entry"))?;
+            let group = match text("group")?.as_deref() {
+                None | Some("plugins") => SettingsGroup::Plugins,
+                Some("general") => SettingsGroup::General,
+                Some("agents") => SettingsGroup::Agents,
+                Some("system") => SettingsGroup::System,
+                Some(other) => {
+                    return Err(invalid(&format!(
+                        "group 只能是 general、agents、system、plugins，收到「{other}」"
+                    )));
+                }
+            };
+            let keywords = match page.get("keywords") {
+                None | Some(HostValue::Null) => Vec::new(),
+                Some(HostValue::Array(words)) => words
+                    .iter()
+                    .map(|word| {
+                        word.as_str()
+                            .map(|word| SharedString::from(word.to_string()))
+                            .ok_or_else(|| invalid("keywords 要是字符串数组"))
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(other) => {
+                    return Err(invalid(&format!(
+                        "keywords 要是字符串数组，收到 {}",
+                        other.describe()
+                    )));
+                }
+            };
+            let build = (loader.load)(&entry)
+                .map_err(|error| invalid(&format!("「{name}」的 entry：{error}")))?;
+            Ok(SettingsPageSpec {
+                name: name.into(),
+                title: title.into(),
+                icon: loader.icon.clone(),
+                group,
+                keywords,
+                build,
+            })
+        })
+        .collect()
+}
+
 /// `register_commands` 的参数。处理函数把执行记进插件的命令队列。
 fn command_arguments(
     arguments: &HostArguments,
@@ -667,6 +924,13 @@ fn json_value(value: &HostValue) -> Value {
     }
 }
 
+/// 宿主的数据转成给脚本的值。
+fn serialized(name: &str, value: &impl serde::Serialize) -> Result<HostValue, HostError> {
+    serde_json::to_value(value)
+        .map(|value| host_value(&value))
+        .map_err(|error| HostError::new(format!("{name}：转不成 JSON：{error}")))
+}
+
 /// 命令参数转成给脚本的值。JS 的数字都是 f64。
 fn host_value(value: &Value) -> HostValue {
     match value {
@@ -707,6 +971,34 @@ fn machine_value(key: &RuntimeKey) -> HostValue {
     }
 }
 
+fn permission_value(permission: &NotificationPermission) -> HostValue {
+    let state = match permission {
+        NotificationPermission::Checking => "checking",
+        NotificationPermission::NotRequested => "not_requested",
+        NotificationPermission::Granted {
+            banners,
+            sound,
+            badge,
+        } => {
+            return HostObject::new()
+                .field("state", "granted")
+                .field("banners", *banners)
+                .field("sound", *sound)
+                .field("badge", *badge)
+                .into();
+        }
+        NotificationPermission::Denied => "denied",
+        NotificationPermission::Unsupported => "unsupported",
+        NotificationPermission::Unavailable(error) => {
+            return HostObject::new()
+                .field("state", "unavailable")
+                .field("error", error.as_str())
+                .into();
+        }
+    };
+    HostObject::new().field("state", state).into()
+}
+
 // ---------------------------------------------------------------- 事件
 
 fn event_value(event: &HostEvent) -> HostValue {
@@ -715,10 +1007,23 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::RuntimeTopic {
             machine: key,
             topic,
-        } => HostObject::new()
-            .field("type", "runtime_topic")
-            .field("machine", machine(key))
-            .field("topic", topic.as_str()),
+            message,
+        } => {
+            let message = match message {
+                TopicMessage::Event(payload) => HostObject::new()
+                    .field("kind", "event")
+                    .field("payload", host_value(payload)),
+                TopicMessage::Snapshot(payload) => HostObject::new()
+                    .field("kind", "snapshot")
+                    .field("payload", host_value(payload)),
+                TopicMessage::Lagged => HostObject::new().field("kind", "lagged"),
+            };
+            HostObject::new()
+                .field("type", "runtime_topic")
+                .field("machine", machine(key))
+                .field("topic", topic.as_str())
+                .field("message", message)
+        }
         HostEvent::Reconnected(key) => HostObject::new()
             .field("type", "reconnected")
             .field("machine", machine(key)),
@@ -729,8 +1034,12 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::WindowActivated => HostObject::new().field("type", "window_activated"),
         HostEvent::OverlayChanged => HostObject::new().field("type", "overlay_changed"),
         HostEvent::MachinesChanged => HostObject::new().field("type", "machines_changed"),
-        HostEvent::ActiveProjectChanged => {
-            HostObject::new().field("type", "active_project_changed")
+        HostEvent::ActiveContextChanged => {
+            HostObject::new().field("type", "active_context_changed")
+        }
+        HostEvent::SessionsChanged => HostObject::new().field("type", "sessions_changed"),
+        HostEvent::NotificationPermissionChanged => {
+            HostObject::new().field("type", "notification_permission_changed")
         }
         HostEvent::AgentSettingsChanged => {
             HostObject::new().field("type", "agent_settings_changed")
@@ -740,6 +1049,9 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
         HostEvent::CommandsChanged => HostObject::new().field("type", "commands_changed"),
+        HostEvent::SettingsPagesChanged => {
+            HostObject::new().field("type", "settings_pages_changed")
+        }
     };
     object.into()
 }
@@ -779,11 +1091,13 @@ mod tests {
     #[test]
     fn host_queries_check_their_arguments_before_entering_app() {
         let module = JsPlugin::new().module();
-        for machine in [HostValue::Bool(true), HostValue::Number(1.0)] {
-            let error = module
-                .call("agent_settings", &HostArguments::new([machine]))
-                .unwrap_err();
-            assert!(error.message().contains("机器要是 null 或字符串"));
+        for query in ["agent_settings", "session_states", "workspace_directory"] {
+            for machine in [HostValue::Bool(true), HostValue::Number(1.0)] {
+                let error = module
+                    .call(query, &HostArguments::new([machine]))
+                    .unwrap_err();
+                assert!(error.message().contains("机器要是 null 或字符串"));
+            }
         }
         assert!(
             module
@@ -905,6 +1219,129 @@ mod tests {
         assert!(error.message().contains("只能在视图"));
     }
 
+    fn object(fields: &[(&str, HostValue)]) -> HostValue {
+        let mut object = HostObject::new();
+        for (name, value) in fields {
+            object = object.field(*name, value.clone());
+        }
+        object.into()
+    }
+
+    /// 只认 `settings.tsx`，记下问过哪些入口。
+    fn loader(asked: Rc<RefCell<Vec<String>>>) -> SettingsPageLoader {
+        SettingsPageLoader {
+            icon: "icons/puzzle.svg".into(),
+            load: Rc::new(move |entry| {
+                asked.borrow_mut().push(entry.to_string());
+                if entry == "settings.tsx" {
+                    Ok(Rc::new(|_, _| unreachable!("登记时不建页")))
+                } else {
+                    Err(format!("插件目录里没有 {entry}"))
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn settings_page_registration_rejects_invalid_arguments_before_entering_app() {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let module = JsPlugin::for_plugin("example", "示例")
+            .with_settings_loader(loader(asked.clone()))
+            .module();
+        let page = |fields: &[(&str, HostValue)]| HostValue::Array(vec![object(fields)]);
+        let valid = [
+            ("name", HostValue::from("prefs")),
+            ("title", "偏好".into()),
+            ("entry", "settings.tsx".into()),
+        ];
+        let with = |extra: (&str, HostValue)| {
+            let mut fields = valid.to_vec();
+            fields.push(extra);
+            page(&fields)
+        };
+        for arguments in [
+            HostArguments::default(),
+            HostArguments::new([HostValue::Null]),
+            HostArguments::new([HostValue::Array(vec![HostValue::Null])]),
+            HostArguments::new([page(&valid[..2])]),
+            HostArguments::new([page(&[valid[0].clone(), valid[2].clone()])]),
+            HostArguments::new([with(("group", "sidebar".into()))]),
+            HostArguments::new([with(("keywords", "通知".into()))]),
+            HostArguments::new([with((
+                "keywords",
+                HostValue::Array(vec![HostValue::Number(1.0)]),
+            ))]),
+            HostArguments::new([page(&[
+                valid[0].clone(),
+                valid[1].clone(),
+                ("entry", "missing.tsx".into()),
+            ])]),
+        ] {
+            let error = module
+                .call("register_settings_pages", &arguments)
+                .unwrap_err();
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
+        }
+        // 参数对了才进 App；测试里没有 App。入口在进 App 前就交给加载器校验过。
+        let error = module
+            .call(
+                "register_settings_pages",
+                &HostArguments::new([with(("group", "general".into()))]),
+            )
+            .unwrap_err();
+        assert!(
+            error.message().contains("只能在视图"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(
+            asked.borrow().last().map(String::as_str),
+            Some("settings.tsx")
+        );
+    }
+
+    #[test]
+    fn settings_pages_need_a_loader() {
+        let module = JsPlugin::for_plugin("example", "示例").module();
+        let error = module
+            .call(
+                "register_settings_pages",
+                &HostArguments::new([HostValue::Array(Vec::new())]),
+            )
+            .unwrap_err();
+        assert!(
+            error.message().contains("不能登记设置页"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn a_settings_page_script_cannot_register_anything() {
+        let module = JsPlugin::for_settings_page("example", "示例")
+            .with_settings_loader(loader(Rc::default()))
+            .module();
+        for name in [
+            "register_themes",
+            "register_layouts",
+            "register_commands",
+            "register_settings_pages",
+        ] {
+            let error = module
+                .call(name, &HostArguments::new([HostValue::Array(Vec::new())]))
+                .unwrap_err();
+            assert!(error.message().contains("设置页入口里不能登记"), "{name}");
+        }
+        let error = module
+            .call("register_file_opener", &HostArguments::new(["open".into()]))
+            .unwrap_err();
+        assert!(error.message().contains("设置页入口里不能登记"));
+    }
+
     #[test]
     fn command_calls_are_queued_in_order_and_stop_after_release() {
         let plugin = JsPlugin::for_plugin("example", "示例");
@@ -939,13 +1376,55 @@ mod tests {
     #[test]
     fn queued_events_are_not_duplicated() {
         let plugin = JsPlugin::new();
-        plugin.deliver(&HostEvent::ActiveProjectChanged);
-        plugin.deliver(&HostEvent::ActiveProjectChanged);
+        plugin.deliver(&HostEvent::ActiveContextChanged);
+        plugin.deliver(&HostEvent::ActiveContextChanged);
         plugin.deliver(&HostEvent::MachinesChanged);
         assert_eq!(
             plugin.0.borrow().queue,
-            [HostEvent::ActiveProjectChanged, HostEvent::MachinesChanged]
+            [HostEvent::ActiveContextChanged, HostEvent::MachinesChanged]
         );
+    }
+
+    /// 话题事件按顺序排着；快照到了，同一台机器同一个话题之前排着的就不要了。
+    #[test]
+    fn a_topic_snapshot_supersedes_queued_messages_of_that_topic() {
+        let topic =
+            |machine: RuntimeKey, topic: &str, message: TopicMessage| HostEvent::RuntimeTopic {
+                machine,
+                topic: topic.to_string(),
+                message,
+            };
+        let plugin = JsPlugin::new();
+        let first = topic(
+            RuntimeKey::Local,
+            "attention.changed",
+            TopicMessage::Event(serde_json::json!({ "revision": 1 })),
+        );
+        let other_machine = topic(
+            RuntimeKey::Remote("box".into()),
+            "attention.changed",
+            TopicMessage::Event(serde_json::json!({ "revision": 1 })),
+        );
+        let other_topic = topic(RuntimeKey::Local, "history.changed", TopicMessage::Lagged);
+        let snapshot = topic(
+            RuntimeKey::Local,
+            "attention.changed",
+            TopicMessage::Snapshot(serde_json::json!({ "revision": 2, "sessions": [] })),
+        );
+        for event in [&first, &other_machine, &other_topic, &snapshot] {
+            plugin.deliver(event);
+        }
+        assert_eq!(
+            plugin.0.borrow().queue,
+            [other_machine, other_topic, snapshot.clone()]
+        );
+        let value = event_value(&snapshot);
+        let message = value.get("message").expect("带着消息");
+        assert_eq!(
+            message.get("kind").and_then(HostValue::as_str),
+            Some("snapshot")
+        );
+        assert!(message.get("payload").is_some());
     }
 
     #[test]

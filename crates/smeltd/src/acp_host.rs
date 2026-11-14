@@ -2875,6 +2875,25 @@ pub(crate) fn apply_acp_user_action(
         let id = sess.state.lock().id.clone();
         crate::peer_messages::reset_chain(&id);
     }
+    // 回复、批准、回答、停下、重试：用户看过这段对话了。带投递 id 的是任务、自动化送来的。
+    if matches!(
+        action,
+        AcpUserAction::Prompt {
+            delivery_id: None,
+            ..
+        } | AcpUserAction::FollowUp { .. }
+            | AcpUserAction::DeliverQueuedNow { .. }
+            | AcpUserAction::Cancel
+            | AcpUserAction::RetryLastTurn
+            | AcpUserAction::PermissionSelect { .. }
+            | AcpUserAction::ElicitationChoose { .. }
+            | AcpUserAction::ElicitationText { .. }
+            | AcpUserAction::ElicitationSubmit
+            | AcpUserAction::ElicitationDismiss
+    ) {
+        let id = sess.state.lock().id.clone();
+        subscribers.mark_attention_read(&id);
+    }
     apply_acp_user_action_inner(sess, action, subscribers, false)
 }
 
@@ -3331,8 +3350,9 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
                 "conversation input is empty",
             ));
         }
-        // 用户在这个对话里说话了，别的对话发来的消息链断在这里。
+        // 用户在这个对话里说话了，别的对话发来的消息链断在这里，提醒也算看过。
         crate::peer_messages::reset_chain(id);
+        subscribers.mark_attention_read(id);
         let slot = ensure_conversation_runtime(id, acp_sessions, workspace_directory, subscribers)
             .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
         acp_sessions

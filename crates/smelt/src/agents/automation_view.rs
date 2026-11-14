@@ -618,7 +618,6 @@ impl Workspace {
             .automation_surface
             .error
             .clone()
-            .or_else(|| config.persistence_error.clone())
             .or_else(|| {
                 config
                     .automations_on(&crate::RuntimeKey::Local)

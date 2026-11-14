@@ -30,6 +30,7 @@ smelt-files-ui = { path = "../plugins/files" }
 smelt-git-ui = { path = "../plugins/git" }
 smelt-history = { path = "../plugins/history" }
 smelt-layouts = { path = "../plugins/layouts" }
+smelt-notifications = { path = "../plugins/notifications" }
 smelt-themes = { path = "../plugins/themes" }
 smelt-acp-view = { path = "../smelt-acp-view" }
 tokio = { version = "1", features = ["full"] }
@@ -93,7 +94,7 @@ wry = { package = "lb-wry", version = "0.53.3" }
 objc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSObject", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSDictionary", "NSError", "NSObject", "NSString"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 raw-window-handle = "0.6"
 

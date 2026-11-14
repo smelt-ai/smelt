@@ -1539,13 +1539,11 @@ impl Workspace {
                 let project_context = (grouping != SidebarGrouping::Project)
                     .then(|| session_projects.get(ix).cloned().flatten())
                     .flatten();
-                let is_acp = matches!(self.sessions[ix].kind, SessionKind::Conversation(_));
                 // 终端会话取当前活动 pane，ACP 会话取自身。分屏子行会在各自的菜单中复制自己的 ID。
                 let copy_id_source = crate::CopySessionIdSource::of(&self.sessions[ix].kind);
                 let e_act = this.clone();
                 let e_close = this.clone();
                 let e_rename = this.clone();
-                let e_restart = this.clone();
                 let e_organization = this.clone();
                 let ui_id = self.sessions[ix].ui_id;
                 let is_pinned =
@@ -1785,10 +1783,8 @@ impl Workspace {
                     .context_menu(move |menu, _window, cx| {
                         let menu = archive::organization_menu(menu, e_organization.clone(), ui_id, cx);
                         let e_rename = e_rename.clone();
-                        let e_restart = e_restart.clone();
                         let copy_id_source = copy_id_source.clone();
-                        let sess_ix = ix;
-                        let mut menu = menu
+                        menu
                             .item(
                                 PopupMenuItem::new("重命名")
                                     .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
@@ -1806,21 +1802,7 @@ impl Workspace {
                                             copy_id_source.session_id(cx),
                                         ));
                                     }),
-                            );
-                        // 只有 ACP 对话会话才需要「强制重启」：卡在工具调用里、
-                        // 「停止」按钮打不断时的兜底，见 `force_restart_acp_session`。
-                        if is_acp {
-                            menu = menu.item(
-                                PopupMenuItem::new("强制重启")
-                                    .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RotateCw))
-                                    .on_click(move |_ev, _window, cx| {
-                                        e_restart.update(cx, |ws, cx| {
-                                            ws.force_restart_acp_session(sess_ix, cx)
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
+                            )
                     })
                     .when(can_drag && dragging, |row| {
                         attach_session_drop_layers(

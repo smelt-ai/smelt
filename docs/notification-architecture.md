@@ -12,9 +12,9 @@
 OSC 7501 程序状态根记录（smeltd 扫）──┐
                                       ↓
                                smeltd reducer → DaemonPhase + 会话名 → AgentStatus + AttentionItem
-OSC 9/99/777（smeltd 扫）/ BEL（TerminalView）──→ Informational AttentionItem
+OSC 9/99/777 / BEL（smeltd 扫）──────→ Informational AttentionItem
                                                        ↓
-                                            铃铛 / 系统通知 / Dock / 菜单栏
+                         smeltd 提醒台账（attention.changed）→ 手机推送 / 桌面 / 手机
 ```
 
 ## 领域模型
@@ -90,9 +90,10 @@ provider 工具名只在适配层用于把原始 hook 判定为这些稳定语�
 OSC 9/99/777 由 smeltd 在 PTY 输出泵里扫（alacritty 不解析），会话没有结构化事件时发
 `terminal.notification`，桌面收到后进同一个 store。只扫实时输出：reattach / resume 的
 keyframe 不经过这里，历史通知不会被当成新的再弹。这样通知不依赖终端 pane 是否打开、
-终端连接是否 attach、慢客户端是否被流控合并跳过了这段输出。没有任何桌面订阅（应用
-没开）时发生的通知直接丢弃，不补发。BEL 仍由 `TerminalView` 处理（有宽限期，受设置
-开关控制）。
+终端连接是否 attach、慢客户端是否被流控合并跳过了这段输出。BEL 在同一处由终端模拟器的
+响铃事件记下，每批输出喂完取一次，一批里响几次都只算一次；reattach 前的 keyframe 里的
+响铃先丢掉。两者都进运行时提醒台账（见下），`terminal.notification` 只是给还没改订阅
+`attention.changed` 的桌面留的。
 
 OSC 7501（[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)）
 在同一处扫。smeltd 回应 `OSC 7501 ; ?` 探测（在把这批输出交给客户端之前写回 PTY，保证
@@ -119,30 +120,62 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
 的启动命令 `launch`；它与标题通过 `session.state_changed` 下发。会话状态宽容读取，旧 daemon
 没带的字段读成缺省。
 
-所有出口读取同一个 store：
+### 运行时提醒台账
 
-- 正在查看对应 pane：标记已读，不弹通知。
-- 「智能体 > 对话」与项目会话都通过同一个 `viewed_session_id` 判断当前 pane，不能因
-  顶层 route 不是 `Session` 就把用户眼前的智能体对话误判成后台会话。
-- 其余未查看事件一律走 macOS 系统通知。
-- 前后台以 `NSApplication.isActive` 为事实源；不能用全屏窗口的 key 状态代替。抑制
-  系统通知还要求主工作区窗口本身聚焦；焦点在设置窗口时仍投递系统通知。
-- 应用级 observer 在事件到达时立即把投递 batch 转交给渠道协调器并同步 Dock/菜单栏；
-  窗口 render 不参与通知正确性，切换 Space 或窗口暂停绘制不会延迟通知。
-- daemon 首次订阅快照只建立基线，不把历史终态当作新边沿：成功不生成关注项；审批、
-  等待输入和失败静默恢复成已读行动项，保留角标但不进入系统投递队列。断线重连保留
-  旧镜像并正常比较边沿，不能漏掉断线期间的变化。
-- macOS 系统渠道使用 `UNUserNotificationCenter`。首次确有待投递项时才请求授权；授权状态、
-  请求错误和 `addNotificationRequest` completion 都写回可观测桥状态，不能把“调用了 API”
-  当作系统已接收。
-- 通知设置页直接展示该桥的授权状态和待发送数量；拒绝态提供 macOS 系统设置入口与
-  手动重新检查，提醒类型偏好开启不再伪装成系统渠道可用。
-- 系统通知按 `smelt.session.<session-id>` 使用稳定 identifier。权限尚未决定、被拒绝或提交
-  失败时，桥按 identifier 合并并保留最新待投递项；提交错误会暂停自动重试，应用重新激活
-  或新事件到达后重读系统设置，再尝试一次，不能形成失败自旋。
-- 会话已读、已解决、关闭，或新事件改走 suppress 时，同时撤回该 identifier 对应的
-  pending 与 delivered 系统通知。这样 AttentionStore 的投递 batch 即使已经取走，异步系统
-  拒绝也不会静默丢失，Notification Center 里也不会长期保留已处理提醒。
+提醒（要处理的事、没看过的事）由 smeltd 判定，各端只显示：`crates/smeltd/src/attention.rs`
+的 `AttentionLedger` 挂在事件中枢上，每次发 `session.state_changed` 时用同一份状态比较
+相位边沿，会话删除时清掉。每个会话最多两项：
+
+- `action`：等批准、等输入、失败。会话离开这个相位才清，用户看过不清。
+- `unread`：最近一条没看过的提醒（审批、输入、成功、失败、终端通知、响铃）。用户在这个
+  会话里有动作就清：终端里打字、手机上批准 / 回复、对话里发消息、批准、回答、停下、重试，
+  或任何一端调 Control API `attention.mark_read`。任务、自动化投递进来的消息不算。
+
+第一次见到一个会话（smeltd 启动、恢复会话）只建基线：已经在等的记成 `action`，不记未读、
+不响。只认结构化、权威的相位；猜出来的不算。自动化运行的会话完成、失败不提醒（结果走
+`automations.changed`），后台对话的终端通知只响不记未读。每条要「响」的提醒（`alert`）
+同一会话同样的内容 60 秒内只响一次。
+
+台账以快照 `core.attention.v1` + 事件 `attention.changed`（带 revision、该会话的新状态、
+要响的那条）发布，单独一条订阅：v7 运行时不认这个话题。没有订阅者时不编码事件。
+
+桌面上的出口全在内置插件 `crates/plugins/notifications`（`smelt.notifications`），宿主不认识
+会话提醒：
+
+- 插件订阅各台机器的 `attention.changed`（宿主转成 `HostEvent::RuntimeTopic`），按机器
+  镜像台账（`attention.rs`）。快照整份换；比手里旧的变化丢掉；没收到快照的机器不拿「镜像里
+  没有」当「看过了」。宿主不再自己比较相位边沿、不再在本地扫 BEL。
+- 变化带 `alert` 时：设置里关了这类，或人正看着这段会话（主窗口在前台、舞台上露着、翻在
+  最新处，取自 `active_context` + `window_active`），不发，并撤掉这段会话之前那条；否则发
+  系统通知。看着的会话有未读，插件调 `attention.mark_read` 告诉运行时，运行时清掉后推来
+  变化，通知随之撤掉。
+- 有 `unread` 的会话发带 id 的通知（`smelt.notifications/<local|remote:运行时 id>/<会话 id>`），
+  点了执行 `sessions::ACTIVATE` 跳过去；运行时说它没有未读了（哪一端看过、开了新一轮），
+  按 id 撤回。发过哪些记在插件自己的库里，重启后也撤得掉；机器移除时撤掉它的。没记未读的
+  （后台对话的终端通知等）发一次性的。
+- 哪类提醒发系统通知是这台设备自己的偏好，存在插件库里，设置窗口「通知」页由插件登记
+  （`register_settings_pages`）。终端通知、智能体的消息没有开关。页面标题旁显示系统授权
+  （`Host::notification_permission`，变了发 `NotificationPermissionChanged`），一直显示：还没
+  问过的给「请求授权」（`REQUEST_NOTIFICATION_PERMISSION`）；其余都给按钮执行
+  `OPEN_NOTIFICATION_SETTINGS`，直接落到系统设置里本应用那一页。被禁止，或允许了但横幅（提醒
+  样式是「无」）、Dock 角标被关掉的，写明是哪项；声音关了不算问题。
+- Dock 角标和菜单栏也由这个插件画：读镜像和 `session_states`、`workspace_directory`，用
+  `SET_DOCK_BADGE`、`SET_STATUS_MENU` 交给宿主。宿主只提供菜单栏图标和 Dock 的机制，不知道
+  菜单里是什么；菜单项点了执行插件给的命令。
+- 铃铛展示未读；Dock 数字统计未读或仍需行动的会话（每个会话计 1）。菜单栏图标右侧
+  使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。菜单里列出运行中、
+  要你处理和有未读的对话。
+- 宿主的系统通知桥（`status_item/system_notifications.rs`）只是机制：`smelt.app/notify`、
+  `smelt.app/withdraw-notification` 按插件给的 id 换掉、撤回；用 `UNUserNotificationCenter`，
+  首次确有待投递项时才请求授权（横幅、声音、角标；没有角标授权，Dock 角标设了也不显示）。
+  早先只要了横幅和声音的，读设置时发现已授权但角标是 NotSupported，就补要一次：系统不再弹框，
+  只在通知设置里加出角标开关，每次运行最多补一次。请求返回后一律重读设置，给了哪几项以设置
+  为准。读到的授权和横幅、声音、角标各项原样带给插件（`NotificationPermission::Granted`）；
+  回到前台重查期间报上一次读到的，提示不闪。授权、请求错误和 `addNotificationRequest` completion 都写回
+  桥状态，不把「调用了 API」当作系统已接收。权限未定、被拒或提交失败时按 id 合并保留最新
+  一条；提交错误暂停自动重试，应用重新激活后重读系统设置再试一次，不形成失败自旋。
+- 跳转按稳定的会话 id。主窗口还在恢复时先挂起，目标会话一恢复就消费；不使用已经失效的
+  侧栏下标。
 - ACP `TurnEnded` 在 smeltd 中直接投影为 `Succeeded`；状态栏、角标和通知读取同一份
   daemon 镜像，不能再以 ACP 视图快照作为第二个跨窗口事实源。取消、限额、拒绝等结果
   保存在独立 `turn_outcome`，不会把所有 Idle 都猜成成功。
@@ -151,12 +184,6 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
 - 结构化 hook 或 OSC 7501 一旦接通，OSC 9/99/777 和 BEL 不再参与该会话的关注通知；终端
   原始内容照常解析和显示。OSC 7501 根记录是唯一能改 phase 的终端序列，接通后由它而不是
   hook 决定该会话的 phase（见上）。
-- 铃铛展示未读；Dock 数字统计未读或仍需行动的会话（每个会话计 1）。菜单栏图标右侧
-  使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。
-- 用户看过审批/输入只会标记已读；daemon 离开等待 phase 后才真正解决行动项。
-- 用户关闭会话或 pane 时清理对应 store 条目和待投递事件。
-- 系统通知点击携带稳定 daemon session id。主窗口已关闭或仍在恢复时先挂起跳转，目标
-  会话一恢复就消费；不能只重开窗口，也不能使用已经失效的侧栏下标。
 - 通知设置只控制系统通知渠道，不会抹掉状态事实或未读记录。
 
 ### 自动化 Run 结果
@@ -170,7 +197,7 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
 `Failed` / `Skipped` 走失败通知，用户主动 `Cancelled` 不提醒。首次连接的全量快照只建立
 基线，不补发历史结果；同一 `store_id` 断线重连时继续和内存中的旧投影比较，不能漏掉断线
 期间完成的 Run。Agent 自动化的隐藏 runtime 进入 `Succeeded` / `Failed` / `Dead` 时不再
-生产普通 session 完成通知，避免同一结果双投递。
+生产普通 session 完成通知，避免同一结果双投递。发不发只看这条自动化自己的「通知 App」（`notifies_app`），不受「通知」页的开关管。
 
 macOS request 使用独立的 `smelt.automation.run.<run-id>` identifier，并以 automation id
 作为 thread identifier。点击事件同时携带 `automation_id + run_id`，直接打开自动化 Run
@@ -206,11 +233,9 @@ iOS 把 App 挂起后 iroh 连接就断了，等批准、等输入、运行失�
 smeltd 自己产生，不依赖手机连着，也不依赖桌面 GUI 在线；APNs 的 `.p8` 私钥在推送中继
 （`smelt-push-relay`）上，部署见 [`push-relay-deployment.md`](push-relay-deployment.md)。
 
-- **同源判定**：smeltd 在进程内订阅自己的 `session.state_changed` / `session.removed`，用
-  客户端同一个 `DaemonStateEventClient` 解码，再用同一套 `apply_daemon_baseline` /
-  `apply_daemon_transition` 算边沿（`crates/smeltd/src/push.rs`）。首份快照只建基线；落后时
-  按快照重新对齐，之后照常比较边沿。推审批、输入、失败、成功四种，响铃和普通提示不推；
-  另有智能体主动发的消息，见上一节。
+- **同源判定**：推送直接由运行时提醒台账驱动（见上），和桌面、手机看到的是同一次判定。
+  要响的审批、输入、失败、成功推出去，响铃和终端通知不推；`action` 清掉（处理了、会话没了）
+  就撤掉还没送出的那条。另有智能体主动发的消息，见上一节。
 - **登记**：手机先找中继用 APNs 令牌换**句柄**（中继用自己的密钥加密过的令牌，中继不存
   设备表），再经 iroh 调 `push.register` 把句柄、中继地址和要推的类型登记到每台机器。
   smeltd 按连接的设备身份写 `push_registration` 表（外键挂在 `paired_device` 上，撤销设备
