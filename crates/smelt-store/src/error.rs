@@ -86,6 +86,24 @@ pub enum StoreError {
     #[error("项目根目录不能为空")]
     EmptyProjectRoot,
 
+    #[error("工作树不存在：{id}")]
+    WorkspaceWorksetNotFound { id: String },
+
+    #[error("工作树仍绑定会话，不能删除：{id}")]
+    WorkspaceWorksetInUse { id: String },
+
+    #[error("工作树 id 已用于不同内容：{id}")]
+    WorkspaceWorksetConflict { id: String },
+
+    #[error("原工作树已关闭，请选择或重新创建工作树后恢复：{id}")]
+    ClosedWorksetRestoreRequired { id: String },
+
+    #[error("无法恢复归档会话：{message}")]
+    InvalidWorksetRestore { message: String },
+
+    #[error("会话 {id} 的工作目录不属于绑定的工作树")]
+    WorksetCwdOutside { id: String },
+
     #[error("KV 数字 {path} 无效: {source}")]
     InvalidKvNumber {
         path: String,

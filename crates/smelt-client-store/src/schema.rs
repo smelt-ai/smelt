@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 12;
+pub(crate) const SCHEMA_VERSION: u32 = 13;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -63,6 +63,11 @@ CREATE TABLE pinned_project (
   root TEXT NOT NULL,
   position INTEGER NOT NULL,
   PRIMARY KEY (runtime_id, root)
+) WITHOUT ROWID;
+CREATE TABLE pinned_workset (
+  runtime_id TEXT NOT NULL,
+  workset_id TEXT NOT NULL,
+  PRIMARY KEY (runtime_id, workset_id)
 ) WITHOUT ROWID;
 CREATE TABLE conversation_route (
   runtime_id TEXT NOT NULL,
@@ -314,6 +319,15 @@ const MIGRATE_V11_TO_V12: &str = "
 DROP TABLE notify_prefs;
 ";
 
+/// v13：侧栏里固定的工作树，按运行时分开记。
+const MIGRATE_V12_TO_V13: &str = "
+CREATE TABLE pinned_workset (
+  runtime_id TEXT NOT NULL,
+  workset_id TEXT NOT NULL,
+  PRIMARY KEY (runtime_id, workset_id)
+) WITHOUT ROWID;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -367,7 +381,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7..=11 => {}
+        7..=12 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
@@ -393,6 +407,11 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=11).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V11_TO_V12)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=12).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V12_TO_V13)
             .map_err(|error| error.to_string())?;
     }
     transaction

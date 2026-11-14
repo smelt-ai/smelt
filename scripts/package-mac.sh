@@ -334,6 +334,12 @@ elif [[ "$IDENTITY" == "Smelt Local Signing" ]] \
   && security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
   # 自签名没有系统信任链，find-identity 可能不列出，但 codesign 仍能用导入的私钥。
   IDENTITY_FOUND=true
+elif [[ "$IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]] \
+  && security find-certificate -a -c "Smelt Local Signing" -Z 2>/dev/null \
+    | grep -Fqi "SHA-1 hash: $IDENTITY"; then
+  # 自签名证书可能因没有信任链而不出现在 find-identity；按指纹可绕过同名证书歧义。
+  IDENTITY_FOUND=true
+  IDENTITY_NAME="Smelt Local Signing"
 fi
 if [[ "$IDENTITY_FOUND" != true ]]; then
   if [[ "$IDENTITY" == "Developer ID Application"* ]]; then

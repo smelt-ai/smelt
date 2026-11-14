@@ -1501,6 +1501,8 @@ mod tests {
             epoch: "e".to_string(),
             revision,
             projects: vec!["/workspace".to_string()],
+            repositories: Vec::new(),
+            worksets: Vec::new(),
             conversations: Vec::new(),
         }
     }

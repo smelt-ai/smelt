@@ -1010,6 +1010,7 @@ impl Workspace {
                         fallback_cwd: Some(space.path),
                         pending_prompt: None,
                         automation_id: None,
+                        workset_id: None,
                         activate: true,
                     },
                     window,

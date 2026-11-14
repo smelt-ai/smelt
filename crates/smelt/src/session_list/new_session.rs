@@ -9,8 +9,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, App, Context, ElementId, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
+    Anchor, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
@@ -32,6 +32,7 @@ use smelt_model::new_session::{
     build_sections, new_session_actions,
 };
 use smelt_model::session_control::AcpAgentOption;
+use smelt_model::workspace_directory::WorkspaceWorkset;
 
 use super::row::{acp_provider_icon, provider_icon};
 
@@ -80,6 +81,12 @@ fn current_new_session_preferences(cx: &mut App) -> NewSessionPreferences {
         .detach();
     }
     cx.global::<NewSessionPins>().preferences.clone()
+}
+
+fn cached_new_session_preferences(cx: &App) -> NewSessionPreferences {
+    cx.try_global::<NewSessionPins>()
+        .map(|pins| pins.preferences.clone())
+        .unwrap_or_default()
 }
 
 /// 远程运行时那台机器上的启动项和 CLI 探测结果。启动项按运行时各存一份，装没装
@@ -369,6 +376,9 @@ struct NewSessionPickerState {
     workspace: Entity<Workspace>,
     runtime: crate::runtimes::Runtime,
     cwd: Option<String>,
+    workset_id: Option<String>,
+    workset: Option<WorkspaceWorkset>,
+    error: Option<String>,
     source_actions: Vec<NewSessionAction>,
     sections: [Vec<NewSessionAction>; 3],
     selected_index: Option<IndexPath>,
@@ -381,12 +391,17 @@ impl NewSessionPickerState {
         workspace: Entity<Workspace>,
         runtime: crate::runtimes::Runtime,
         cwd: Option<String>,
+        workset_id: Option<String>,
+        workset: Option<WorkspaceWorkset>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             workspace,
             runtime,
             cwd,
+            workset_id,
+            workset,
+            error: None,
             source_actions: Vec::new(),
             sections: [Vec::new(), Vec::new(), Vec::new()],
             selected_index: None,
@@ -479,6 +494,26 @@ impl NewSessionPickerState {
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(label) = crate::runtimes::runtime_unavailable_label(self.runtime.key(), cx) {
+            self.error = Some(format!("运行时{label}，暂时无法新建会话"));
+            cx.notify();
+            return;
+        }
+        self.sync_workset(cx);
+        let cwd = if self.workset_id.is_some() {
+            match self.workset.as_ref() {
+                Some(workset) => {
+                    Some(workset.task_root(crate::runtimes::path_style(self.runtime.key(), cx)))
+                }
+                None => {
+                    self.error = Some("工作树已不可用，请重新打开选择器".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            self.cwd.clone()
+        };
         let Some(target) = self
             .selected_index
             .and_then(|index| self.item_at(index))
@@ -486,20 +521,20 @@ impl NewSessionPickerState {
         else {
             return;
         };
-        let cwd = self.cwd.clone();
         let runtime = self.runtime.clone();
+        let workset_id = self.workset_id.clone();
         let conversation = match &target {
             NewSessionTarget::Conversation {
                 agent_option_id, ..
             } => {
                 let Some(resolved) = conversation_launch(runtime.key(), agent_option_id, cx) else {
-                    // 配置在弹层开着的时候被改没了：静默关掉比建出一场引擎不明的
-                    // 对话安全。
-                    self.dismiss(window, cx);
+                    self.error = Some("智能体配置已变更，请重新选择启动项".into());
+                    cx.notify();
                     return;
                 };
                 Some(resolved)
             }
+
             _ => None,
         };
         self.workspace.update(cx, |workspace, cx| match target {
@@ -518,25 +553,76 @@ impl NewSessionPickerState {
                         fallback_cwd: cwd,
                         pending_prompt: None,
                         automation_id: None,
+                        workset_id,
                         activate: true,
                     },
                     window,
                     cx,
                 )
             }
-            NewSessionTarget::Terminal { command, provider } => workspace.add_session_with_launch(
-                runtime,
-                cwd,
-                Some(LaunchEntry {
+            NewSessionTarget::Terminal { command, provider } => {
+                let entry = Some(LaunchEntry {
                     label: String::new(),
                     command,
                     provider,
-                }),
-                cx,
-            ),
-            NewSessionTarget::BlankTerminal => workspace.add_session(runtime, cwd, cx),
+                });
+                if let Some(workset_id) = workset_id {
+                    workspace.add_session_with_launch_in_workset(
+                        runtime,
+                        cwd,
+                        entry,
+                        Some(workset_id),
+                        cx,
+                    )
+                } else {
+                    workspace.add_session_with_launch(runtime, cwd, entry, cx)
+                }
+            }
+            NewSessionTarget::BlankTerminal => {
+                if let Some(workset_id) = workset_id {
+                    workspace.add_session_in_workset(runtime, cwd, workset_id, cx)
+                } else {
+                    workspace.add_session(runtime, cwd, cx)
+                }
+            }
         });
         self.dismiss(window, cx);
+    }
+
+    fn sync_workset(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.workset_id.as_deref() else {
+            return;
+        };
+        let workset = self
+            .workspace
+            .read(cx)
+            .space(self.runtime.key())
+            .and_then(|space| space.worksets.iter().find(|workset| workset.id == id))
+            .cloned();
+        if self.workset != workset {
+            self.workset = workset;
+            if self.workset.is_none() {
+                self.error = Some("工作树已不存在，请重新打开选择器".into());
+            }
+            cx.notify();
+        }
+    }
+
+    fn open_project_repositories(
+        &mut self,
+        create: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workset_id.is_some() {
+            return;
+        }
+        let Some(root) = self.cwd.clone() else { return };
+        let runtime = self.runtime.clone();
+        self.dismiss(window, cx);
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.open_project_repositories(runtime, root, create, window, cx);
+        });
     }
 
     fn dismiss(&self, window: &mut Window, cx: &mut App) {
@@ -552,7 +638,8 @@ fn sync_picker_state(
     popover: WeakEntity<PopoverState>,
     cx: &mut Context<NewSessionPickerState>,
 ) {
-    let preferences = current_new_session_preferences(cx);
+    state.sync_workset(cx);
+    let preferences = cached_new_session_preferences(cx);
     let current_selection = state.selected_index;
     let selected_key = current_selection
         .and_then(|index| state.item_at(index))
@@ -598,6 +685,42 @@ impl Render for NewSessionPickerState {
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.select_previous(cx)))
             .on_action(cx.listener(|this, _: &Confirm, window, cx| this.confirm(window, cx)))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| this.dismiss(window, cx)));
+
+        if let Some(error) = &self.error {
+            content = content.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .child(format!("无法新建：{error}")),
+            );
+        }
+        if let Some(workset) = &self.workset {
+            content = content.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .child(truncated_line(format!("工作树：{}", workset.task))),
+            );
+            {
+                let cwd = workset.task_root(crate::runtimes::path_style(self.runtime.key(), cx));
+                let full_path = cwd.clone();
+                content = content.child(
+                    div()
+                        .id("workset-launch-cwd")
+                        .px_2()
+                        .text_xs()
+                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(full_path.clone())
+                                .build(window, cx)
+                        })
+                        .child(truncated_line(cwd)),
+                );
+            }
+        }
 
         for (section, items) in self.sections.clone().into_iter().enumerate() {
             if items.is_empty() {
@@ -723,7 +846,21 @@ pub(super) struct NewSessionPicker {
     workspace: Entity<Workspace>,
     runtime: crate::runtimes::Runtime,
     cwd: Option<String>,
+    workset_id: Option<String>,
+    workset: Option<WorkspaceWorkset>,
     trigger: Button,
+}
+
+impl NewSessionPicker {
+    pub(super) fn icon_trigger(mut self, id: ElementId) -> Self {
+        self.trigger = Button::new(id)
+            .quiet()
+            .icon_size()
+            .tab_stop(true)
+            .icon(IconName::Plus)
+            .icon_action("在此工作树新建会话");
+        self
+    }
 }
 
 /// 构造与会话数完全同槽的「+」触发器；命中区比旧版 xsmall 更大，但可见性仍只由
@@ -733,43 +870,119 @@ pub(super) fn new_session_picker(
     workspace: Entity<Workspace>,
     runtime: crate::runtimes::Runtime,
     cwd: String,
+    workset_id: Option<String>,
     _cx: &App,
 ) -> NewSessionPicker {
     let trigger_id = ElementId::from((ElementId::from("proj-new"), cwd.clone()));
+    let trigger = Button::new(trigger_id)
+        .quiet()
+        .icon_size()
+        .icon(IconName::Plus)
+        .icon_action("新建会话");
+    let trigger = if workset_id.is_some() {
+        trigger
+    } else {
+        trigger
+            .opacity(0.0)
+            .group_hover(super::PROJ_HEADER_GROUP, |style| style.opacity(1.0))
+    };
     NewSessionPicker {
         workspace,
         runtime,
         cwd: (!cwd.is_empty()).then_some(cwd),
-        trigger: Button::new(trigger_id)
-            .quiet()
-            .icon_size()
-            .opacity(0.0)
-            .group_hover(super::PROJ_HEADER_GROUP, |style| style.opacity(1.0))
-            .icon(IconName::Plus)
-            .icon_action("新建会话"),
+        workset_id,
+        workset: None,
+        trigger,
     }
+}
+
+pub(super) fn workset_session_picker(
+    workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
+    workset: WorkspaceWorkset,
+) -> NewSessionPicker {
+    NewSessionPicker {
+        workspace,
+        runtime,
+        cwd: None,
+        workset_id: Some(workset.id.clone()),
+        trigger: Button::new((ElementId::from("workset-new-session"), workset.id.clone()))
+            .quiet()
+            .tab_stop(true)
+            .label("新建会话…"),
+        workset: Some(workset),
+    }
+}
+
+pub(super) fn workset_session_submenu(
+    menu: gpui_component::menu::PopupMenu,
+    workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
+    workset: WorkspaceWorkset,
+    window: &mut Window,
+    cx: &mut Context<gpui_component::menu::PopupMenu>,
+) -> gpui_component::menu::PopupMenu {
+    let actions = available_new_session_actions(runtime.key(), cx);
+    refresh_remote_launch_catalog(runtime.clone(), cx);
+    menu.submenu("新建会话", window, cx, move |mut menu, _, _| {
+        for action in &actions {
+            let label = format!("{} · {}", action.label, action.kind.label());
+            let action = action.clone();
+            let workspace = workspace.clone();
+            let runtime = runtime.clone();
+            let workset = workset.clone();
+            menu = menu.item(gpui_component::menu::PopupMenuItem::new(label).on_click(
+                move |_, window, cx| {
+                    let picker = cx.new(|cx| {
+                        let mut picker = NewSessionPickerState::new(
+                            workspace.clone(),
+                            runtime.clone(),
+                            None,
+                            Some(workset.id.clone()),
+                            Some(workset.clone()),
+                            cx,
+                        );
+                        picker.sections[0].push(action.clone());
+                        picker.selected_index = picker.first_index();
+                        picker
+                    });
+                    picker.update(cx, |picker, cx| picker.confirm(window, cx));
+                    if let Some(error) = picker.read(cx).error.clone() {
+                        workspace
+                            .update(cx, |workspace, _| workspace.report_background_error(error));
+                    }
+                },
+            ));
+        }
+        menu
+    })
 }
 
 impl RenderOnce for NewSessionPicker {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let workspace = self.workspace;
         let cwd = self.cwd;
+        let workset_id = self.workset_id;
+        let workset = self.workset;
         let runtime = self.runtime;
         let runtime_key = runtime.key().clone();
         let refresh_runtime = runtime.clone();
         // 项目排序会改变下标。状态以运行时加项目路径为主键，拖动后同一个列表位置不能
         // 把新会话建到旧项目，两个运行时上的同名路径也不能共用一份。
         let picker_root = format!(
-            "{:?}:{}",
+            "{:?}:{}:{}",
             runtime.key(),
-            cwd.as_deref().unwrap_or("default")
+            cwd.as_deref().unwrap_or("default"),
+            workset_id.as_deref().unwrap_or("project")
         );
         let picker_key =
             ElementId::from((ElementId::from("new-session-picker"), picker_root.clone()));
         let picker_state_key =
             ElementId::from((ElementId::from("new-session-picker-state"), picker_root));
         let picker = window.use_keyed_state(picker_state_key, cx, {
-            move |_, cx| NewSessionPickerState::new(workspace, runtime, cwd, cx)
+            move |_, cx| {
+                NewSessionPickerState::new(workspace, runtime, cwd, workset_id, workset, cx)
+            }
         });
         let focus_handle = picker.read(cx).focus_handle(cx);
 
@@ -781,6 +994,7 @@ impl RenderOnce for NewSessionPicker {
             .track_focus(&focus_handle)
             .on_open_change(move |open, _, cx| {
                 if *open {
+                    current_new_session_preferences(cx);
                     refresh_remote_launch_catalog(refresh_runtime.clone(), cx);
                 }
             })
@@ -819,6 +1033,10 @@ impl RenderOnce for NewSessionPicker {
                     (item_count.min(PICKER_MAX_VISIBLE_ROWS) as f32 * PICKER_ROW_HEIGHT)
                         + (section_count as f32 * PICKER_SECTION_HEIGHT)
                 };
+                let list_height = {
+                    let state = picker.read(cx);
+                    if state.workset_id.is_some() { list_height + 64. } else { list_height }
+                };
 
                 div()
                     .w_full()
@@ -839,6 +1057,22 @@ impl RenderOnce for NewSessionPicker {
                             .overflow_y_scroll()
                             .child(picker.clone()),
                     )
+                    .children({
+                        let state = picker.read(cx);
+                        (state.workset_id.is_none() && state.cwd.is_some()).then(|| {
+                            let create_picker = picker.clone();
+                            let manage_picker = picker.clone();
+                            div().border_t_1().border_color(ui_theme::hairline()).p_1().flex().flex_col().gap_1()
+                                .child(Button::new("project-plus-create-workset").quiet().compact().label("新建工作树…")
+                                    .on_click(move |_, window, cx| {
+                                        create_picker.update(cx, |state, cx| state.open_project_repositories(true, window, cx));
+                                    }))
+                                .child(Button::new("project-plus-manage-repos").quiet().compact().label("管理项目仓库…")
+                                    .on_click(move |_, window, cx| {
+                                        manage_picker.update(cx, |state, cx| state.open_project_repositories(false, window, cx));
+                                    }))
+                        })
+                    })
                     .child(
                         div()
                             .h(px(PICKER_FOOTER_HEIGHT))

@@ -12,10 +12,14 @@ use smelt_model::workspace_directory::{
     WorkspaceAcp, WorkspaceConversation, WorkspaceConversationIdParams, WorkspaceDirectory,
     WorkspaceProjectParams, WorkspaceTerminal,
 };
-use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode, ControlMethod};
+use smelt_runtime_client::protocol::control::{
+    ControlClientError, ControlErrorCode, ControlMethod,
+};
 
 use crate::runtimes::Runtime;
-use crate::workspace_directory::{DirectoryCommands, DirectoryOutcome, order_by_saved, without_names};
+use crate::workspace_directory::{
+    DirectoryCommands, DirectoryOutcome, order_by_saved, without_names,
+};
 use crate::{
     AcpSaved, PaneState, RuntimeKey, SessionKind, SessionState, SidebarGrouping, Workspace,
     WorkspaceRoute,
@@ -80,6 +84,7 @@ pub(crate) fn session_state_from_conversation(conversation: WorkspaceConversatio
     };
     SessionState {
         id: conversation.id,
+        workset_id: conversation.workset_id,
         layout,
         active: 0,
         last_updated_at: conversation.last_updated_at.max(0) as u64,
@@ -462,6 +467,7 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
                     &WorkspaceConversationArchiveParams {
                         conversation_id: id.clone(),
                         archived: *archived,
+                        target_workset_id: None,
                     },
                     timeout,
                 ),
@@ -671,6 +677,8 @@ impl Workspace {
             .get(key)
             .cloned()
             .unwrap_or_default();
+        let repositories = directory.repositories.clone();
+        let worksets = directory.worksets.clone();
         let Some(space) = self.space_mut(key) else {
             return;
         };
@@ -691,6 +699,11 @@ impl Workspace {
         } else {
             saved_order.projects.clone()
         };
+        space.repositories = repositories;
+        space.worksets = worksets;
+        space
+            .collapsed_worksets
+            .retain(|id| space.worksets.iter().any(|workset| &workset.id == id));
         space.projects = order_by_saved(directory.projects, &order, String::as_str);
         let inbound =
             space
@@ -926,6 +939,8 @@ impl Workspace {
             acp,
             archived_at: None,
             pinned_at: None,
+            workset_id: session.workset_id.clone(),
+            closed_workset_root: None,
         }))
     }
 
@@ -959,6 +974,201 @@ impl Workspace {
                 let message = format!("改名失败：{}", crate::runtime_call::error_text(error));
                 let _ = this.update(cx, |this, _| this.report_background_error(message));
             }
+        })
+        .detach();
+    }
+
+    pub(crate) fn request_workset_rename(
+        &mut self,
+        runtime: Runtime,
+        params: smelt_model::workspace_directory::WorkspaceWorksetRenameParams,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call_on::<
+                            smelt_model::control_api::WorkspaceWorksetRename,
+                        >(
+                            runtime.client(),
+                            params,
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            if let Err(error) = result {
+                let message = format!("重命名工作树失败：{error}");
+                let _ = this.update(cx, |this, _| this.report_background_error(message));
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn request_workset_finish(
+        &mut self,
+        runtime: Runtime,
+        params: smelt_model::workspace_directory::WorkspaceWorksetFinishParams,
+        cx: &mut Context<Self>,
+    ) {
+        let runtime_key = runtime.key().clone();
+        let workset_id = params.workset_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call_on::<
+                            smelt_model::control_api::WorkspaceWorksetFinish,
+                        >(
+                            runtime.client(),
+                            params,
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            match result {
+                Ok(result) => {
+                    let _ = this.update(cx, |this, cx| {
+                        apply_workset_finish_result(
+                            &mut this.close_confirm,
+                            &runtime_key,
+                            &workset_id,
+                            Ok(()),
+                        );
+                        let runtime_id = match &runtime_key {
+                            RuntimeKey::Local => None,
+                            RuntimeKey::Remote(id) => Some(id.as_str()),
+                        };
+                        match smelt_client_store::client_store().and_then(|store| {
+                            store.set_workset_pinned(runtime_id, &workset_id, false)
+                        }) {
+                            Ok(()) => {
+                                if let Some(space) = this.space_mut(&runtime_key) {
+                                    space.pinned_worksets.remove(&workset_id);
+                                }
+                            }
+                            Err(error) => this.report_background_error(format!(
+                                "清理工作树置顶状态失败：{error}"
+                            )),
+                        }
+                        cx.notify();
+                    });
+                    let mut message = "工作树已关闭".to_string();
+                    if !result.retained_branches.is_empty() {
+                        message.push_str(&format!(
+                            "；保留复用分支：{}",
+                            result.retained_branches.join("、")
+                        ));
+                    }
+                    if !result.leftover_entries.is_empty() {
+                        message.push_str(&format!(
+                            "；未删除的目录内容：{}",
+                            result
+                                .leftover_entries
+                                .iter()
+                                .map(|path| format!("「{path}」"))
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        ));
+                    }
+                    crate::status_item::notify_success(message);
+                }
+                Err(error) => {
+                    let message = format!("关闭工作树失败：{error}");
+                    let _ = this.update(cx, |this, cx| {
+                        if apply_workset_finish_result(
+                            &mut this.close_confirm,
+                            &runtime_key,
+                            &workset_id,
+                            Err(message.clone()),
+                        ) {
+                            cx.notify();
+                        } else {
+                            this.report_background_error(message);
+                        }
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn restore_archived_into_workset(
+        &mut self,
+        workset_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(crate::CloseConfirm::RestoreWorkset {
+            runtime,
+            id,
+            pending,
+            ..
+        }) = self.close_confirm.as_mut()
+        else {
+            return;
+        };
+        if *pending {
+            return;
+        }
+        let runtime_key = runtime.clone();
+        let conversation_id = id.clone();
+        let Some(runtime) = self.space(&runtime_key).map(|space| space.runtime.clone()) else {
+            if let Some(crate::CloseConfirm::RestoreWorkset { error, .. }) = &mut self.close_confirm
+            {
+                *error = Some("运行时已断开，无法恢复会话".into());
+            }
+            cx.notify();
+            return;
+        };
+        if let Some(crate::CloseConfirm::RestoreWorkset { pending, error, .. }) =
+            &mut self.close_confirm
+        {
+            *pending = true;
+            *error = None;
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let request_id = conversation_id.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call_on::<
+                        smelt_model::control_api::WorkspaceConversationArchive,
+                    >(
+                        runtime.client(),
+                        smelt_model::workspace_directory::WorkspaceConversationArchiveParams {
+                            conversation_id: request_id,
+                            archived: false,
+                            target_workset_id: Some(workset_id),
+                        },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(crate::CloseConfirm::RestoreWorkset {
+                    runtime,
+                    id,
+                    pending,
+                    error,
+                    ..
+                }) = &mut this.close_confirm
+                    && *runtime == runtime_key
+                    && *id == conversation_id
+                {
+                    match result {
+                        Ok(_) => this.close_confirm = None,
+                        Err(message) => {
+                            *pending = false;
+                            *error = Some(format!("恢复失败：{message}"));
+                        }
+                    }
+                    cx.notify();
+                }
+            });
         })
         .detach();
     }
@@ -1215,6 +1425,93 @@ impl Workspace {
     }
 }
 
+fn apply_workset_finish_result(
+    confirmation: &mut Option<crate::CloseConfirm>,
+    runtime: &RuntimeKey,
+    id: &str,
+    result: Result<(), String>,
+) -> bool {
+    let Some(crate::CloseConfirm::Workset {
+        project,
+        id: current_id,
+        pending,
+        error,
+        ..
+    }) = confirmation
+    else {
+        return false;
+    };
+    if &project.runtime != runtime || current_id != id || !*pending {
+        return false;
+    }
+    match result {
+        Ok(()) => *confirmation = None,
+        Err(message) => {
+            *pending = false;
+            *error = Some(message);
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod workset_finish_feedback_tests {
+    use super::apply_workset_finish_result;
+    use crate::{CloseConfirm, ProjectRef, RuntimeKey};
+
+    fn workset_confirmation(pending: bool) -> Option<CloseConfirm> {
+        Some(CloseConfirm::Workset {
+            project: ProjectRef {
+                runtime: RuntimeKey::Local,
+                root: "/project".into(),
+            },
+            id: "task".into(),
+            title: "task".into(),
+            pending,
+            error: None,
+        })
+    }
+
+    #[test]
+    fn failed_close_remains_visible_and_blocks_confirmation_until_reopened() {
+        let mut confirmation = workset_confirmation(true);
+        assert!(confirmation.as_ref().unwrap().confirmation_blocked());
+        assert!(apply_workset_finish_result(
+            &mut confirmation,
+            &RuntimeKey::Local,
+            "task",
+            Err("工作树仍绑定会话".into()),
+        ));
+        assert!(matches!(
+            confirmation,
+            Some(CloseConfirm::Workset { pending: false, error: Some(ref error), .. })
+                if error.contains("仍绑定会话")
+        ));
+        assert!(confirmation.as_ref().unwrap().confirmation_blocked());
+        let reopened = workset_confirmation(false);
+        assert!(!reopened.as_ref().unwrap().confirmation_blocked());
+    }
+
+    #[test]
+    fn success_closes_only_the_matching_confirmation() {
+        let mut confirmation = workset_confirmation(true);
+        assert!(!apply_workset_finish_result(
+            &mut confirmation,
+            &RuntimeKey::Remote("other".into()),
+            "task",
+            Ok(()),
+        ));
+        assert!(confirmation.is_some());
+        assert!(apply_workset_finish_result(
+            &mut confirmation,
+            &RuntimeKey::Local,
+            "task",
+            Ok(()),
+        ));
+        assert!(confirmation.is_none());
+    }
+}
+
 #[cfg(test)]
 mod workspace_snapshot_write_queue_tests {
     use super::{ProjectOp, SnapshotJob, WorkspaceSnapshotWriteQueue};
@@ -1331,7 +1628,9 @@ mod agent_conversation_persist_tests {
         conversation_from_record, conversation_record, project_key, project_roots_of,
         session_state_from_conversation,
     };
-    use smelt_model::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal};
+    use smelt_model::workspace_directory::{
+        WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal,
+    };
 
     /// 智能体 space 上的 ACP 对话经运行时目录走一趟，恢复用到的字段都还在。
     #[test]
@@ -1349,10 +1648,12 @@ mod agent_conversation_persist_tests {
         };
         let state = session_state_from_conversation(WorkspaceConversation {
             id: "conv-space".into(),
+            workset_id: Some("workset-1".into()),
             acp: Some(acp.clone()),
             ..WorkspaceConversation::default()
         });
         assert_eq!(state.id, "conv-space");
+        assert_eq!(state.workset_id.as_deref(), Some("workset-1"));
         let saved = state.acp.expect("ACP 细节");
         assert_eq!(saved.cwd.as_deref(), Some(cwd));
         assert_eq!(saved.sid.as_deref(), Some("acp-global-1"));

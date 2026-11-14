@@ -19,12 +19,147 @@ enum ModalRole {
 }
 
 impl Workspace {
+    fn render_restore_workset(
+        &self,
+        runtime: &crate::RuntimeKey,
+        old_root: &str,
+        pending: bool,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let style = crate::runtimes::path_style(runtime, cx);
+        let project_root = style.parent(old_root).and_then(|path| style.parent(&path));
+        let worksets = self
+            .space(runtime)
+            .into_iter()
+            .flat_map(|space| &space.worksets)
+            .filter(|workset| {
+                project_root
+                    .as_ref()
+                    .is_some_and(|root| style.clean(root) == style.clean(&workset.project_root))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut content = v_flex()
+            .child(Self::modal_title(cx.theme().foreground, "原工作树已关闭"))
+            .child(div().text_sm().text_color(cx.theme().muted_foreground)
+                .child(format!("原目录：{old_root}")))
+            .child(div().text_sm().child(
+                "请选择原项目的工作树。恢复后终端和智能体的工作目录将改为所选工作树根目录，工作树外已打开的文件及固定目录不会恢复；智能体能否续接取决于其服务商。"
+            ));
+        if worksets.is_empty() {
+            content = content.child(div().text_sm().child("没有可用工作树，请先新建。"));
+        }
+        let mut list = div()
+            .id("restore-workset-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(240.))
+            .overflow_y_scroll();
+        for workset in worksets {
+            let workset_id = workset.id.clone();
+            let label = format!("{} · {}", workset.task, workset.branch);
+            list = list.child(
+                smelt_ui::Button::new(SharedString::from(format!(
+                    "restore-workset-{}",
+                    workset.id
+                )))
+                .normal()
+                .label(label)
+                .disabled(pending)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.restore_archived_into_workset(workset_id.clone(), cx);
+                })),
+            );
+        }
+        content = content.child(list);
+        if let Some(message) = error {
+            content = content.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(message.to_string()),
+            );
+        }
+        let runtime = runtime.clone();
+        content = content.child(
+            h_flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Self::modal_normal_button(
+                        "restore-workset-cancel",
+                        "取消",
+                        |this, _, _, cx| this.cancel_close_confirm(cx),
+                        cx,
+                    )
+                    .disabled(pending),
+                )
+                .child(
+                    Self::modal_normal_button(
+                        "restore-workset-create",
+                        "新建工作树…",
+                        move |this, _, window, cx| {
+                            let Some(root) = project_root.clone() else {
+                                if let Some(CloseConfirm::RestoreWorkset { error, .. }) =
+                                    &mut this.close_confirm
+                                {
+                                    *error = Some("无法识别原项目目录".into());
+                                }
+                                cx.notify();
+                                return;
+                            };
+                            let Some(target_runtime) =
+                                this.space(&runtime).map(|space| space.runtime.clone())
+                            else {
+                                if let Some(CloseConfirm::RestoreWorkset { error, .. }) =
+                                    &mut this.close_confirm
+                                {
+                                    *error = Some("运行时已断开，无法新建工作树".into());
+                                }
+                                cx.notify();
+                                return;
+                            };
+                            this.close_confirm = None;
+                            this.open_project_repositories(target_runtime, root, true, window, cx);
+                        },
+                        cx,
+                    )
+                    .disabled(pending),
+                ),
+        );
+        content = content.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("新建完成后，请再次点击归档会话的恢复按钮。"),
+        );
+        self.modal_shell(
+            460.,
+            true,
+            content,
+            crate::overlay::ModalLayer::CloseConfirm,
+            cx,
+        )
+    }
+
     /// 关闭确认弹窗：关项目说清会连带关掉几个会话；关正在跑的会话说清这一轮会被终止。
     /// 用危险配色。
     pub(crate) fn render_close_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(target) = self.close_confirm.clone() else {
             return div().into_any_element();
         };
+        if let CloseConfirm::RestoreWorkset {
+            runtime,
+            old_root,
+            pending,
+            error,
+            ..
+        } = &target
+        {
+            return self.render_restore_workset(runtime, old_root, *pending, error.as_deref(), cx);
+        }
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -39,7 +174,9 @@ impl Workspace {
             ),
             CloseConfirm::DeleteArchived { title, .. } => (
                 "确定永久删除归档会话吗？",
-                format!("「{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再从归档恢复。不会删除项目文件或 Copilot、Claude 等工具自行保存的历史。"),
+                format!(
+                    "「{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再从归档恢复。不会删除项目文件或 Copilot、Claude 等工具自行保存的历史。"
+                ),
                 "永久删除",
             ),
             CloseConfirm::Project {
@@ -51,6 +188,14 @@ impl Workspace {
                 ),
                 "关闭项目",
             ),
+            CloseConfirm::Workset { title, .. } => (
+                "确定关闭这个工作树吗？",
+                format!(
+                    "将关闭并删除「{title}」的工作树目录及其创建的已合并分支，复用的分支会保留。Git 忽略的文件也可能被删除。未归档会话、未提交修改或未合并分支会阻止关闭。归档会话将保留，恢复时需选择工作树。"
+                ),
+                "关闭工作树",
+            ),
+            CloseConfirm::RestoreWorkset { .. } => unreachable!(),
             CloseConfirm::Runtime { name, .. } => (
                 "确定移除这台机器吗？",
                 format!(
@@ -73,25 +218,52 @@ impl Workspace {
             ),
         };
 
+        let pending = matches!(&target, CloseConfirm::Workset { pending: true, .. });
+        let error = match &target {
+            CloseConfirm::Workset { error, .. } => error.as_ref(),
+            _ => None,
+        };
         let content = v_flex()
             .child(Self::modal_title(fg, title))
             .child(div().text_sm().text_color(muted).child(body))
+            .children(error.map(|error| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(error.clone())
+            }))
+            .children(error.map(|_| {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("请处理问题后取消并重新打开此弹窗，再尝试关闭。")
+            }))
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
-                        "cancel-close-confirm",
-                        "取消",
-                        |this, _, _, cx| this.cancel_close_confirm(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_danger_button(
-                        "confirm-close-confirm",
-                        confirm_label,
-                        |this, _, window, cx| this.confirm_close(window, cx),
-                        cx,
-                    )),
+                    .child(
+                        Self::modal_normal_button(
+                            "cancel-close-confirm",
+                            "取消",
+                            |this, _, _, cx| this.cancel_close_confirm(cx),
+                            cx,
+                        )
+                        .disabled(pending),
+                    )
+                    .child(
+                        Self::modal_danger_button(
+                            "confirm-close-confirm",
+                            if pending {
+                                "关闭中…"
+                            } else {
+                                confirm_label
+                            },
+                            |this, _, window, cx| this.confirm_close(window, cx),
+                            cx,
+                        )
+                        .disabled(target.confirmation_blocked()),
+                    ),
             );
         self.modal_shell(
             380.,
@@ -553,6 +725,9 @@ impl Workspace {
                 "重命名机器",
                 "侧栏和设置里显示这个名字，只在这台电脑上生效。",
             ),
+            Some(RenameTarget::Workset(_)) => {
+                ("重命名工作树", "会同步重命名工作树目录，分支名保持不变。")
+            }
             _ => ("重命名会话", "留空则恢复自动识别的标题。"),
         };
 

@@ -864,6 +864,20 @@ fn dispatch_control(
                 control_version,
                 request_id,
                 super::workspace_directory::default_store().and_then(|store| {
+                    if let Some(workset_id) = params.target_workset_id.as_deref() {
+                        if params.archived {
+                            return Err(ControlError::new(
+                                ControlErrorCode::InvalidParams,
+                                "归档时不能指定目标工作树",
+                            ));
+                        }
+                        return super::workspace_directory::restore_conversation_into_workset(
+                            &store,
+                            &params.conversation_id,
+                            workset_id,
+                            event_hub,
+                        );
+                    }
                     super::workspace_directory::archive_conversation(
                         &store,
                         &params.conversation_id,
@@ -908,6 +922,58 @@ fn dispatch_control(
                     super::workspace_directory::open_project(&store, &params.root, event_hub)
                 }),
             )
+        }
+        ControlMethod::WorkspaceProjectRepositoryAction => {
+            let params: smelt_core::workspace_directory::WorkspaceProjectRepositoryActionParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::workspace_directory::default_store().and_then(|store| {
+                super::workset_control::repository_action(&store, params, event_hub)
+            }) {
+                Ok(directory) => success_value(control_version, &request_id, directory),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::WorkspaceWorksetCreate => {
+            let params: smelt_core::workspace_directory::WorkspaceWorksetCreateParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::workspace_directory::default_store()
+                .and_then(|store| super::workset_control::create(&store, params, event_hub))
+            {
+                Ok(revision) => success_value(control_version, &request_id, revision),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::WorkspaceWorksetRename => {
+            let params: smelt_core::workspace_directory::WorkspaceWorksetRenameParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::workspace_directory::default_store()
+                .and_then(|store| super::workset_control::rename(&store, params, event_hub))
+            {
+                Ok(revision) => success_value(control_version, &request_id, revision),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::WorkspaceWorksetFinish => {
+            let params: smelt_core::workspace_directory::WorkspaceWorksetFinishParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::workspace_directory::default_store()
+                .and_then(|store| super::workset_control::finish(&store, params, event_hub))
+            {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
         }
         ControlMethod::WorkspaceRename => {
             let params: smelt_core::workspace_directory::WorkspaceRenameParams =

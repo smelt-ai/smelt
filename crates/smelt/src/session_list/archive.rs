@@ -117,6 +117,37 @@ impl Workspace {
         cx.notify();
     }
 
+    fn request_restore_archived(&mut self, runtime: &RuntimeKey, id: &str, cx: &mut Context<Self>) {
+        let closed_root = self.space(runtime).and_then(|space| {
+            space
+                .directory
+                .archived()
+                .iter()
+                .find(|conversation| conversation.id == id)
+                .filter(|conversation| conversation.workset_id.is_none())
+                .and_then(|conversation| conversation.closed_workset_root.clone())
+        });
+        if let Some(old_root) = closed_root {
+            self.close_confirm = Some(crate::CloseConfirm::RestoreWorkset {
+                runtime: runtime.clone(),
+                id: id.to_string(),
+                old_root,
+                pending: false,
+                error: None,
+            });
+            cx.notify();
+        } else {
+            self.request_conversation_op(
+                runtime,
+                ConversationOp::Archive {
+                    id: id.to_string(),
+                    archived: false,
+                },
+                cx,
+            );
+        }
+    }
+
     pub(super) fn render_archive_parts(
         &self,
         this: Entity<Self>,
@@ -304,14 +335,7 @@ impl Workspace {
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
                                     e_restore.update(cx, |ws, cx| {
-                                        ws.request_conversation_op(
-                                            &restore_key,
-                                            ConversationOp::Archive {
-                                                id: restore_id.clone(),
-                                                archived: false,
-                                            },
-                                            cx,
-                                        )
+                                        ws.request_restore_archived(&restore_key, &restore_id, cx)
                                     });
                                 }),
                         )
@@ -343,14 +367,7 @@ impl Workspace {
                     let delete_title = menu_title.clone();
                     menu.item(PopupMenuItem::new("恢复").on_click(move |_, _, cx| {
                         e_restore.update(cx, |ws, cx| {
-                            ws.request_conversation_op(
-                                &restore_key,
-                                ConversationOp::Archive {
-                                    id: restore_id.clone(),
-                                    archived: false,
-                                },
-                                cx,
-                            )
+                            ws.request_restore_archived(&restore_key, &restore_id, cx)
                         });
                     }))
                     .item(

@@ -11,10 +11,10 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
-use smelt_ui::truncated_line::truncated_line;
 use smelt_runtime_client::protocol::workspace::{
     BrowseDirsParams, BrowseDirsResult, WorkspaceBrowseDirsCall,
 };
+use smelt_ui::truncated_line::truncated_line;
 
 use crate::{Workspace, ui_theme};
 
@@ -22,6 +22,9 @@ use crate::{Workspace, ui_theme};
 pub(crate) enum DirPickerPurpose {
     /// 「打开项目」：选一个目录。
     OpenProject,
+    ProjectRepository {
+        id: u64,
+    },
     /// 给智能体绑定参考目录：可以多选。
     AgentContextFolders { agent_id: String },
     /// 插件要的路径（[`smelt_plugin_api::PICK_PATHS`]）：怎么选由插件说，选好从 `done`
@@ -36,6 +39,7 @@ impl DirPickerPurpose {
     fn title(&self) -> &str {
         match self {
             Self::OpenProject => "选择项目目录",
+            Self::ProjectRepository { .. } => "选择已有 Git 仓库根目录",
             Self::AgentContextFolders { .. } => "选择要绑定的目录",
             Self::Plugin { request, .. } => &request.title,
         }
@@ -44,6 +48,7 @@ impl DirPickerPurpose {
     fn multiple(&self) -> bool {
         match self {
             Self::OpenProject => false,
+            Self::ProjectRepository { .. } => false,
             Self::AgentContextFolders { .. } => true,
             Self::Plugin { request, .. } => request.multiple,
         }
@@ -53,6 +58,7 @@ impl DirPickerPurpose {
     fn confirm_label(&self) -> &str {
         match self {
             Self::OpenProject => "打开",
+            Self::ProjectRepository { .. } => "选择仓库",
             Self::AgentContextFolders { .. } => "绑定",
             Self::Plugin { request, .. } => &request.confirm,
         }
@@ -219,6 +225,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match purpose {
+            DirPickerPurpose::ProjectRepository { id } => {
+                if let Some(source) = chosen.into_iter().next() {
+                    self.project_repository_chosen(id, source, cx);
+                }
+            }
             DirPickerPurpose::OpenProject => {
                 if let Some(dir) = chosen.into_iter().next() {
                     self.add_project(runtime.key().clone(), dir, cx);
@@ -386,6 +397,7 @@ impl Workspace {
                 format!("{}所选项", request.confirm).into()
             }
             (DirPickerPurpose::OpenProject, _) => "打开当前目录".into(),
+            (DirPickerPurpose::ProjectRepository { .. }, _) => "选择当前仓库目录".into(),
         };
         let content = v_flex()
             .child(Self::modal_title(

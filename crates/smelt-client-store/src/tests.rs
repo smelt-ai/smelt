@@ -68,7 +68,15 @@ fn create_v7_schema(connection: &Connection) {
 }
 
 /// v11 及以前客户端库里还有通知偏好表。
+/// v12 及更早没有固定工作树的表。
+fn restore_v12_without_pinned_worksets(connection: &Connection) {
+    connection
+        .execute_batch("DROP TABLE pinned_workset;")
+        .unwrap();
+}
+
 fn restore_v11_notify_prefs(connection: &Connection) {
+    restore_v12_without_pinned_worksets(connection);
     connection
         .execute_batch(
             "CREATE TABLE notify_prefs (
@@ -172,6 +180,72 @@ fn archive_expansion_round_trips() {
     drop(store);
     let store = ClientStore::open(&path).unwrap();
     assert!(store.workspace_ui().unwrap().unwrap().archive_expanded);
+    drop(store);
+    cleanup(&path);
+}
+
+#[test]
+fn worktree_pins_are_persistent_and_isolated_by_runtime() {
+    let (store, path) = temp_store();
+    store.set_workset_pinned(None, "shared-id", true).unwrap();
+    store
+        .set_workset_pinned(Some("remote"), "shared-id", true)
+        .unwrap();
+    store.set_workset_pinned(None, "shared-id", false).unwrap();
+    drop(store);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.pinned_worksets(None).unwrap().is_empty());
+    assert_eq!(
+        store.pinned_worksets(Some("remote")).unwrap(),
+        vec!["shared-id"]
+    );
+    drop(store);
+    cleanup(&path);
+}
+
+#[test]
+fn v8_migrates_worktree_pins_without_losing_workspace_state() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v8 = Connection::open(&path).unwrap();
+    create_v7_schema(&v8);
+    v8.execute_batch(
+        "ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0;
+         INSERT INTO workspace_ui VALUES
+           (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1, 1);
+         PRAGMA user_version = 8;",
+    )
+    .unwrap();
+    drop(v8);
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.workspace_ui().unwrap().unwrap().archive_expanded);
+    assert!(store.pinned_worksets(None).unwrap().is_empty());
+    store.set_workset_pinned(None, "task", true).unwrap();
+    drop(store);
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
+    drop(store);
+    cleanup(&path);
+}
+
+#[test]
+fn v12_gains_worktree_pins_without_losing_layout() {
+    let (store, path) = temp_store();
+    drop(store);
+    let v12 = Connection::open(&path).unwrap();
+    restore_v12_without_pinned_worksets(&v12);
+    v12.execute_batch(
+        "INSERT INTO workspace_layout_state VALUES ('default', '{\"version\":1}');
+         PRAGMA user_version = 12;",
+    )
+    .unwrap();
+    drop(v12);
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.pinned_worksets(None).unwrap().is_empty());
+    assert!(store.workspace_layout_state("default").unwrap().is_some());
+    store.set_workset_pinned(None, "task", true).unwrap();
+    assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
     drop(store);
     cleanup(&path);
 }
@@ -750,7 +824,10 @@ fn v4_runtime_connections_gain_an_empty_os() {
     let store = ClientStore::open(&path).unwrap();
     let listed = store.runtime_connections().unwrap();
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].smelt_home.as_deref(), Some("C:\\Users\\w\\.smelt"));
+    assert_eq!(
+        listed[0].smelt_home.as_deref(),
+        Some("C:\\Users\\w\\.smelt")
+    );
     assert_eq!(listed[0].os, None);
     store
         .put_runtime_connection(&RuntimeConnection {
@@ -799,7 +876,12 @@ fn sidebar_orders_round_trip() {
     store
         .put_sidebar_orders(std::slice::from_ref(&conversations_only))
         .unwrap();
-    assert!(store.sidebar_orders().unwrap().contains(&conversations_only));
+    assert!(
+        store
+            .sidebar_orders()
+            .unwrap()
+            .contains(&conversations_only)
+    );
     cleanup(&path);
 }
 

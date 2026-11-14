@@ -33,6 +33,7 @@ mod local_daemon;
 mod overlay;
 mod plugin_host;
 mod plugins;
+mod project_repositories;
 mod provider_quota;
 mod resource_monitor;
 mod runtime_call;
@@ -402,6 +403,8 @@ struct Session {
     ui_id: u64,
     /// 对话的稳定 id：跨进程、跨设备都认它。运行时目录和客户端存的界面状态都按它对上。
     conversation_id: String,
+    /// 工作集会话固定绑定到创建它的工作集；普通会话为 None。
+    workset_id: Option<String>,
     kind: SessionKind,
     /// 最近一次会话内容或运行状态变化的 unix 秒时间戳。
     last_updated_at: u64,
@@ -427,6 +430,7 @@ impl Session {
         Self {
             ui_id: next_session_ui_id(),
             conversation_id: new_conversation_id(),
+            workset_id: None,
             kind: SessionKind::Term {
                 dock: term_dock::TermDock::single(view.clone(), window, cx),
                 active: view,
@@ -817,6 +821,7 @@ fn next_session_ui_id() -> u64 {
 enum RenameTarget {
     Session(usize),
     Pane(Entity<TerminalView>),
+    Workset(String),
     /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
 }
@@ -971,6 +976,7 @@ enum SidebarDrag {
 pub(crate) struct SessionState {
     /// 对话的稳定 id：新建时生成，之后不再变。客户端按它存这段对话的界面状态。
     id: String,
+    workset_id: Option<String>,
     /// 分屏树。刚从运行时读回来、客户端库还没填之前，是终端的默认摆法。
     layout: PaneState,
     /// 当前看的终端在 `layout` 里的位置（深度优先序）。
@@ -1087,6 +1093,20 @@ pub(crate) enum CloseConfirm {
         project: ProjectRef,
         sessions: usize,
     },
+    Workset {
+        project: ProjectRef,
+        id: String,
+        title: String,
+        pending: bool,
+        error: Option<String>,
+    },
+    RestoreWorkset {
+        runtime: RuntimeKey,
+        id: String,
+        old_root: String,
+        pending: bool,
+        error: Option<String>,
+    },
     /// 关一个正在跑的会话。用 ui_id 认会话：弹窗开着时侧栏可能重排，下标会变。
     /// `pane` 有值时只关这一个分屏。
     Session {
@@ -1095,7 +1115,21 @@ pub(crate) enum CloseConfirm {
         pane: Option<Entity<TerminalView>>,
     },
     /// 移除一台远程机器：这台电脑不再连它。
-    Runtime { runtime_id: String, name: String },
+    Runtime {
+        runtime_id: String,
+        name: String,
+    },
+}
+
+impl CloseConfirm {
+    pub(crate) fn confirmation_blocked(&self) -> bool {
+        matches!(
+            self,
+            Self::Workset { pending: true, .. }
+                | Self::Workset { error: Some(_), .. }
+                | Self::RestoreWorkset { pending: true, .. }
+        )
+    }
 }
 
 /// 侧栏的一个项目分组。**身份是 root（路径），不是 label**——两个不同目录的末段名
@@ -1685,6 +1719,7 @@ struct Workspace {
     relay_edit: Option<workspace_sessions::RelayEdit>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
+    project_repositories: Option<project_repositories::ProjectRepositoriesState>,
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
@@ -1976,6 +2011,7 @@ impl Workspace {
             _rename_sub: None,
             relay_edit: None,
             dir_picker: None,
+            project_repositories: None,
             provider_quota_refresh_tx: None,
             resource_monitor: Default::default(),
 

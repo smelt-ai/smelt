@@ -108,7 +108,11 @@ pub(crate) fn delete_conversation(
     else {
         return Ok(directory.version());
     };
-    for terminal in conversation.terminals.iter().filter_map(|t| t.id.as_deref()) {
+    for terminal in conversation
+        .terminals
+        .iter()
+        .filter_map(|t| t.id.as_deref())
+    {
         super::kill_terminal_session(terminal, sessions, event_hub)
             .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
     }
@@ -129,7 +133,19 @@ pub(crate) fn open_project(
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
     let change = workspace_catalog::open_project_on(store, root).map_err(control_error)?;
-    Ok(publish(&change, event_hub))
+    let revision = publish(&change, event_hub);
+    if change.changed && std::path::Path::new(root).is_dir() {
+        let directory = super::workset_control::repository_action(
+            store,
+            smelt_core::workspace_directory::WorkspaceProjectRepositoryActionParams {
+                project_root: root.to_string(),
+                action: smelt_core::workspace_directory::WorkspaceProjectRepositoryAction::Discover,
+            },
+            event_hub,
+        )?;
+        return Ok(directory.version());
+    }
+    Ok(revision)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -186,6 +202,17 @@ pub(crate) fn pin_conversation(
 ) -> Result<WorkspaceRevision, ControlError> {
     let change =
         workspace_catalog::pin_conversation_on(store, id.trim(), pinned).map_err(control_error)?;
+    Ok(publish(&change, event_hub))
+}
+
+pub(crate) fn restore_conversation_into_workset(
+    store: &Store,
+    id: &str,
+    workset_id: &str,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceRevision, ControlError> {
+    let change = workspace_catalog::restore_conversation_into_workset_on(store, id, workset_id)
+        .map_err(control_error)?;
     Ok(publish(&change, event_hub))
 }
 

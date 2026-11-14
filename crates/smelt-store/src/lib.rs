@@ -24,8 +24,6 @@ mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod devices;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
-mod push;
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod history;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod launch;
@@ -33,6 +31,8 @@ mod launch;
 mod memory;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod migrate_v18;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod push;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
 mod snapshots;
@@ -47,7 +47,9 @@ pub use snapshots::{
     PublishedSessionRecord, PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota,
     QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref,
     RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogVersion,
-    WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord,
+    WorkspaceDirectoryCommit, WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord,
+    WorkspaceSnapshot, WorkspaceTerminalRecord, WorkspaceWorksetRecord,
+    WorkspaceWorksetRepositoryRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -59,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 37;
+pub const STORE_SCHEMA_VERSION: u32 = 38;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -264,7 +266,10 @@ impl Store {
     }
 
     /// 打开一个项目。已经开着时不改动。
-    pub fn open_workspace_project(&self, root: &str) -> Result<WorkspaceDirectoryCommit, StoreError> {
+    pub fn open_workspace_project(
+        &self,
+        root: &str,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::open_workspace_project(&self.backend, root)
     }
 
@@ -274,6 +279,39 @@ impl Store {
         root: &str,
     ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::close_workspace_project(&self.backend, root)
+    }
+
+    pub fn set_workspace_project_repositories(
+        &self,
+        project_root: &str,
+        repositories: &[WorkspaceProjectRepositoryRecord],
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::set_workspace_project_repositories(&self.backend, project_root, repositories)
+    }
+
+    pub fn project_repositories_initialized(&self, root: &str) -> Result<bool, StoreError> {
+        imp::project_repositories_initialized(&self.backend, root)
+    }
+
+    pub fn create_workspace_workset(
+        &self,
+        workset: &WorkspaceWorksetRecord,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::create_workspace_workset(&self.backend, workset)
+    }
+
+    pub fn rename_workspace_workset(
+        &self,
+        workset: &WorkspaceWorksetRecord,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::rename_workspace_workset(&self.backend, workset)
+    }
+
+    pub fn delete_workspace_workset(
+        &self,
+        id: &str,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::delete_workspace_workset(&self.backend, id)
     }
 
     /// 把以 `sid` 为 ACP 会话的那段对话改名，`None` 是清掉。没有这段对话、或名字本来就是它，
@@ -305,6 +343,16 @@ impl Store {
     ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::write_workspace(&self.backend, |transaction| {
             crate::workspace::set_conversation_archived(transaction, id, archived_at)
+        })
+    }
+
+    pub fn restore_workspace_conversation_into_workset(
+        &self,
+        id: &str,
+        workset_id: &str,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::restore_conversation_into_workset(transaction, id, workset_id)
         })
     }
 
@@ -653,7 +701,10 @@ impl Store {
     }
 
     /// 登记或更新一台已配对设备的推送。设备不在白名单里时什么都不写，返回 false。
-    pub fn put_push_registration(&self, registration: &PushRegistration) -> Result<bool, StoreError> {
+    pub fn put_push_registration(
+        &self,
+        registration: &PushRegistration,
+    ) -> Result<bool, StoreError> {
         imp::put_push_registration(&self.backend, registration)
     }
 
@@ -931,7 +982,9 @@ mod imp {
                 ))
                 .into());
             }
-            connection.close().map_err(|(_, error)| StoreError::from(error))?;
+            connection
+                .close()
+                .map_err(|(_, error)| StoreError::from(error))?;
             set_owner_only(&staging)
         })();
         let published = built.and_then(|()| match std::fs::hard_link(&staging, path) {
@@ -1086,6 +1139,56 @@ mod imp {
             Ok((crate::workspace::close_project(transaction, root)?, ()))
         })
         .map(|(commit, ())| commit)
+    }
+
+    pub(super) fn set_workspace_project_repositories(
+        backend: &Backend,
+        project_root: &str,
+        repositories: &[super::WorkspaceProjectRepositoryRecord],
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_workspace(backend, |transaction| {
+            crate::workspace::set_project_repositories(transaction, project_root, repositories)
+        })
+    }
+
+    pub(super) fn project_repositories_initialized(
+        backend: &Backend,
+        root: &str,
+    ) -> Result<bool, StoreError> {
+        read(backend, |connection| {
+            Ok(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM project_repository_catalog WHERE project_root = ?1)",
+                [root],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
+    pub(super) fn create_workspace_workset(
+        backend: &Backend,
+        workset: &super::WorkspaceWorksetRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_workspace(backend, |transaction| {
+            crate::workspace::create_workset(transaction, workset)
+        })
+    }
+
+    pub(super) fn rename_workspace_workset(
+        backend: &Backend,
+        workset: &super::WorkspaceWorksetRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_workspace(backend, |transaction| {
+            crate::workspace::rename_workset(transaction, workset)
+        })
+    }
+
+    pub(super) fn delete_workspace_workset(
+        backend: &Backend,
+        id: &str,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_workspace(backend, |transaction| {
+            crate::workspace::delete_workset(transaction, id)
+        })
     }
 
     pub(super) fn rename_workspace_acp_conversation(
@@ -2006,6 +2109,15 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 37 {
+            apply_v38_worksets(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 36 {
             apply_v37_bind_history_agents(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2600,7 +2712,9 @@ mod imp {
 
     /// v29：工作区目录带上这份库的随机身份（epoch）。客户端靠它认出库换过，版本号从头数
     /// 时不把新目录当成旧的扔掉。
-    fn apply_v29_workspace_epoch(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+    fn apply_v29_workspace_epoch(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
         if !table_columns(transaction, "workspace_catalog")?
             .iter()
             .any(|column| column == "epoch")
@@ -2692,11 +2806,21 @@ mod imp {
         apply_v37_bind_history_agents(transaction)
     }
 
-    /// v37：现有对话上的「存档属于哪个智能体」补进 `history_agent_binding`。只补数据，重跑无害。
     fn apply_v37_bind_history_agents(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
         transaction.execute_batch(crate::schema::MIGRATE_V36_TO_V37)?;
+        apply_v38_worksets(transaction)
+    }
+
+    /// v38：项目仓库、工作树和对话的绑定。已经有 `workset` 表的库（用当前结构造的夹具）跳过。
+    fn apply_v38_worksets(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "workset")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V37_TO_V38)?;
+        }
         Ok(())
     }
 
@@ -3412,6 +3536,8 @@ mod imp {
                     "last_updated_at",
                     "archived_at",
                     "pinned_at",
+                    "workset_id",
+                    "closed_workset_root",
                 ],
             )
         };
@@ -3931,6 +4057,37 @@ mod imp {
     pub(super) fn close_workspace_project(
         _backend: &Backend,
         _root: &str,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn set_workspace_project_repositories(
+        _backend: &Backend,
+        _project_root: &str,
+        _repositories: &[super::WorkspaceProjectRepositoryRecord],
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn project_repositories_initialized(
+        _backend: &Backend,
+        _root: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn create_workspace_workset(
+        _backend: &Backend,
+        _workset: &super::WorkspaceWorksetRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn rename_workspace_workset(
+        _backend: &Backend,
+        _workset: &super::WorkspaceWorksetRecord,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn delete_workspace_workset(
+        _backend: &Backend,
+        _id: &str,
     ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
         unsupported()
     }
@@ -5657,8 +5814,11 @@ CREATE TABLE published_session (
         connection.execute_batch(V30_AGENT_PROFILE).unwrap();
         connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
         connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
+        connection.execute_batch(V37_WITHOUT_WORKSETS).unwrap();
         connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
-        connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
+        connection
+            .execute_batch(V25_WORKSPACE_CATALOG_WRITER)
+            .unwrap();
         connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
         // 再把 auto_model_provider 换回带 harness 列的形状，就是一个 v23 库。
         connection
@@ -6576,6 +6736,8 @@ CREATE TABLE published_session (
                 last_updated_at: 42,
                 archived_at: None,
                 pinned_at: None,
+                workset_id: None,
+                closed_workset_root: None,
                 terminals: vec![
                     WorkspaceTerminalRecord {
                         id: Some("term-1".into()),
@@ -6600,6 +6762,8 @@ CREATE TABLE published_session (
                 last_updated_at: 84,
                 archived_at: None,
                 pinned_at: None,
+                workset_id: None,
+                closed_workset_root: None,
                 terminals: Vec::new(),
                 acp: Some(WorkspaceAcpRecord {
                     cwd: Some("/repo".into()),
@@ -6864,7 +7028,9 @@ CREATE TABLE published_session (
             Some(commit(2, false))
         );
         assert_eq!(
-            store.remember_history_session_id("acp-missing", "h1").unwrap(),
+            store
+                .remember_history_session_id("acp-missing", "h1")
+                .unwrap(),
             None
         );
         assert_eq!(store.workspace_catalog_revision().unwrap(), 2);
@@ -7018,20 +7184,36 @@ CREATE TABLE published_session (
         };
 
         let before = revision(&store);
-        assert!(store.rename_workspace_acp_conversation("acp-1", Some("草稿")).unwrap().changed);
+        assert!(
+            store
+                .rename_workspace_acp_conversation("acp-1", Some("草稿"))
+                .unwrap()
+                .changed
+        );
         assert_eq!(title_of(&store).as_deref(), Some("草稿"));
         assert_eq!(history_titles(&store), 0, "没有身份时名字只在对话上");
-        assert!(!store.rename_workspace_acp_conversation("acp-1", Some("草稿")).unwrap().changed);
+        assert!(
+            !store
+                .rename_workspace_acp_conversation("acp-1", Some("草稿"))
+                .unwrap()
+                .changed
+        );
         assert_eq!(revision(&store), before + 1);
 
         store.remember_history_session_id("acp-1", "h1").unwrap();
-        assert_eq!(title_of(&store).as_deref(), Some("草稿"), "身份确认后名字照样在");
+        assert_eq!(
+            title_of(&store).as_deref(),
+            Some("草稿"),
+            "身份确认后名字照样在"
+        );
         assert_eq!(history_titles(&store), 1, "搬进了 provider 对话的名字");
         let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
         let group_title: Option<String> = connection
-            .query_row("SELECT custom_title FROM session_group WHERE id = 'c1'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT custom_title FROM session_group WHERE id = 'c1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(group_title, None, "对话上的那份清掉了");
 
@@ -7056,11 +7238,19 @@ CREATE TABLE published_session (
                 .unwrap()
                 .changed
         );
-        let acp = store.workspace_directory().unwrap().1.sessions[0].acp.clone().unwrap();
+        let acp = store.workspace_directory().unwrap().1.sessions[0]
+            .acp
+            .clone()
+            .unwrap();
         assert_eq!(acp.session_title.as_deref(), Some("agent 报的"));
 
         // 清掉名字。
-        assert!(store.rename_workspace_conversation("c1", None).unwrap().changed);
+        assert!(
+            store
+                .rename_workspace_conversation("c1", None)
+                .unwrap()
+                .changed
+        );
         assert_eq!(title_of(&store), None);
         assert!(matches!(
             store.rename_workspace_conversation("missing", Some("x")),
@@ -7340,6 +7530,8 @@ CREATE TABLE published_session (
             last_updated_at: 1,
             archived_at: None,
             pinned_at: None,
+            workset_id: None,
+            closed_workset_root: None,
             terminals: vec![WorkspaceTerminalRecord {
                 id: Some(terminal.to_string()),
                 cwd: Some(cwd.to_string()),
@@ -7362,6 +7554,8 @@ CREATE TABLE published_session (
             last_updated_at: 1,
             archived_at: None,
             pinned_at: None,
+            workset_id: None,
+            closed_workset_root: None,
             terminals: Vec::new(),
             acp: Some(WorkspaceAcpRecord {
                 cwd: Some("/repo".to_string()),
@@ -7470,11 +7664,12 @@ CREATE TABLE published_session (
         drop(store);
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
-            .execute_batch(
-                "ALTER TABLE session_group DROP COLUMN archived_at;
+            .execute_batch(&format!(
+                "{V37_WITHOUT_WORKSETS}
+             ALTER TABLE session_group DROP COLUMN archived_at;
              ALTER TABLE session_group DROP COLUMN pinned_at;
-             PRAGMA user_version = 33;",
-            )
+             PRAGMA user_version = 33;"
+            ))
             .unwrap();
         drop(connection);
         let store = Store::open(&path).unwrap();
@@ -7663,6 +7858,159 @@ CREATE TABLE published_session (
             Err(StoreError::EmptyProjectRoot)
         ));
     }
+
+    #[test]
+    fn workset_metadata_round_trips_and_sessions_keep_their_binding() {
+        let dir = temp_dir("workset-directory");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let project = std::fs::canonicalize(&*dir).unwrap().join("project");
+        let task_root = project.join("worktrees/issue-1");
+        let repository = WorkspaceProjectRepositoryRecord {
+            project_root: project.to_str().unwrap().into(),
+            name: "api".into(),
+            root: project.join("repos/api").to_str().unwrap().into(),
+            position: 0,
+            managed_link: Some(project.join("repos/linked-api").to_str().unwrap().into()),
+        };
+        assert!(
+            store
+                .set_workspace_project_repositories(
+                    project.to_str().unwrap(),
+                    &[repository.clone()],
+                )
+                .unwrap()
+                .changed
+        );
+        let workset = WorkspaceWorksetRecord {
+            id: "workset-1".into(),
+            project_root: project.to_str().unwrap().into(),
+            task: "issue-1".into(),
+            branch: "feat/issue-1".into(),
+            position: 0,
+            repositories: vec![WorkspaceWorksetRepositoryRecord {
+                name: "api".into(),
+                root: repository.root.clone(),
+                worktree: task_root.join("api").to_str().unwrap().into(),
+                base_ref: "refs/remotes/origin/main".into(),
+                branch_created: true,
+                position: 0,
+            }],
+        };
+        assert!(store.create_workspace_workset(&workset).unwrap().changed);
+        assert_eq!(
+            store.workspace_directory().unwrap().1.worksets,
+            [workset.clone()],
+            "task metadata remains visible without an open project or conversation"
+        );
+        let mut conversation =
+            terminal_conversation("conversation-1", "terminal-1", task_root.to_str().unwrap());
+        conversation.workset_id = Some(workset.id.clone());
+        store.create_workspace_conversation(&conversation).unwrap();
+        let (_, directory) = store.workspace_directory().unwrap();
+        assert_eq!(directory.repositories, [repository]);
+        assert_eq!(directory.worksets, [workset.clone()]);
+        assert_eq!(
+            directory.sessions[0].workset_id.as_deref(),
+            Some("workset-1")
+        );
+
+        for outside in [
+            project.join("worktrees/issue-10"),
+            task_root.join("../other"),
+            PathBuf::from("worktrees/issue-1"),
+        ] {
+            let mut invalid = conversation.clone();
+            invalid.terminals[0].cwd = Some(outside.to_str().unwrap().into());
+            assert!(matches!(
+                store.update_workspace_conversation(&invalid),
+                Err(StoreError::WorksetCwdOutside { .. })
+            ));
+        }
+
+        conversation.workset_id = None;
+        store.update_workspace_conversation(&conversation).unwrap();
+        assert_eq!(
+            store.workspace_directory().unwrap().1.sessions[0]
+                .workset_id
+                .as_deref(),
+            Some("workset-1")
+        );
+        assert!(matches!(
+            store.delete_workspace_workset("workset-1"),
+            Err(StoreError::WorkspaceWorksetInUse { .. })
+        ));
+
+        store
+            .delete_workspace_conversation("conversation-1")
+            .unwrap();
+        assert!(store.delete_workspace_workset("workset-1").unwrap().changed);
+        drop(store);
+    }
+
+    #[test]
+    fn repository_initialization_survives_removal_and_reopening() {
+        let dir = temp_dir("repository-initialization");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        assert!(!store.project_repositories_initialized("/project").unwrap());
+        assert!(
+            store
+                .set_workspace_project_repositories("/project", &[])
+                .unwrap()
+                .changed
+        );
+        assert!(
+            !store
+                .set_workspace_project_repositories("/project", &[])
+                .unwrap()
+                .changed
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.project_repositories_initialized("/project").unwrap());
+        drop(store);
+    }
+
+    #[test]
+    fn migrates_v36_without_workset_tables() {
+        let dir = temp_dir("migrate-v36-worksets");
+        let path = dir.join(DATABASE_FILE_NAME);
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!("{V37_WITHOUT_WORKSETS} PRAGMA user_version = 36;"))
+            .unwrap();
+        drop(connection);
+        let store = Store::open(&path).unwrap();
+        assert!(!store.project_repositories_initialized("/project").unwrap());
+        assert!(store.workspace_directory().unwrap().1.worksets.is_empty());
+        drop(store);
+    }
+
+    #[test]
+    fn migrates_v37_without_workset_tables() {
+        let dir = temp_dir("migrate-v37-worksets");
+        let path = dir.join(DATABASE_FILE_NAME);
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!("{V37_WITHOUT_WORKSETS} PRAGMA user_version = 37;"))
+            .unwrap();
+        drop(connection);
+        let store = Store::open(&path).unwrap();
+        assert!(store.workspace_directory().unwrap().1.worksets.is_empty());
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+    }
+
+    /// v37 及更早还没有、v38 加上的项目仓库和工作树。用当前结构的库退回旧版本做夹具时删掉。
+    const V37_WITHOUT_WORKSETS: &str = "
+ALTER TABLE session_group DROP COLUMN closed_workset_root;
+ALTER TABLE session_group DROP COLUMN workset_id;
+DROP TABLE workset_repository;
+DROP TABLE workset;
+DROP TABLE project_repository;
+DROP TABLE project_repository_catalog;
+";
 
     /// v19 到 v25 的工作区目录记着写入方两列，v26 删掉。用当前结构的库退回这几个版本做
     /// 夹具时补上；加在表尾，和当年 `ALTER TABLE … ADD COLUMN` 的结果一致。
@@ -8189,6 +8537,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             .execute_batch(&format!(
                 "{V28_WORKSPACE_EPOCH}
                  {V27_REMOTE_SESSION_TABLES}
+                 {V37_WITHOUT_WORKSETS}
                  {V26_PROJECT_ROOT_AND_MENU}
                  INSERT INTO project(root, position) VALUES ('/repo', 0);
                  INSERT INTO session_group(id, position, custom_title, last_updated_at, project_root)
@@ -8222,7 +8571,9 @@ CREATE TABLE worktree_inherit_skip_pattern (
                 .unwrap()
         };
         assert_eq!(
-            rows("SELECT id || ':' || position || ':' || COALESCE(custom_title, '') FROM session_group ORDER BY position"),
+            rows(
+                "SELECT id || ':' || position || ':' || COALESCE(custom_title, '') FROM session_group ORDER BY position"
+            ),
             ["g-term:0:终端", "g-acp:1:"]
         );
         assert_eq!(
@@ -8230,11 +8581,19 @@ CREATE TABLE worktree_inherit_skip_pattern (
             ["a1:g-acp:0", "t1:g-term:0", "t2:g-term:1"]
         );
         assert_eq!(rows("SELECT session_title FROM acp_detail"), ["标题"]);
-        assert_eq!(rows("SELECT name || '=' || value FROM acp_launch_env"), ["K=v"]);
-        assert_eq!(rows("SELECT config_id || '=' || value_id FROM acp_config_value"), ["model=m"]);
+        assert_eq!(
+            rows("SELECT name || '=' || value FROM acp_launch_env"),
+            ["K=v"]
+        );
+        assert_eq!(
+            rows("SELECT config_id || '=' || value_id FROM acp_config_value"),
+            ["model=m"]
+        );
         assert!(rows("PRAGMA foreign_key_check").is_empty());
         // 外键接在新表上：删一段对话，它的会话和 ACP 明细跟着走。
-        connection.pragma_update(None, "foreign_keys", "ON").unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
         connection
             .execute("DELETE FROM session_group WHERE id = 'g-acp'", [])
             .unwrap();
@@ -8292,6 +8651,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
             snapshot,
             WorkspaceSnapshot {
                 projects: vec!["/a".to_string()],
+                repositories: Vec::new(),
+                worksets: Vec::new(),
                 sessions: Vec::new(),
             }
         );
@@ -8365,6 +8726,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
             last_updated_at: 7,
             archived_at: None,
             pinned_at: None,
+            workset_id: None,
+            closed_workset_root: None,
             terminals: vec![
                 terminal("term-3", "/repo"),
                 WorkspaceTerminalRecord {
@@ -8509,6 +8872,7 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
                 .execute_batch(&format!(
                     "{V28_WORKSPACE_EPOCH}
                  {V27_REMOTE_SESSION_TABLES}
+                     {V37_WITHOUT_WORKSETS}
                      {V26_PROJECT_ROOT_AND_MENU}
                      {V21_SESSION_TABLES}
                      {layout_node_table}
@@ -8764,7 +9128,10 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         let path = dir.join(DATABASE_FILE_NAME);
         std::fs::write(&path, []).unwrap();
         let error = Store::open_or_create(&path).unwrap_err();
-        assert!(matches!(error, StoreError::UninitializedDatabase), "{error}");
+        assert!(
+            matches!(error, StoreError::UninitializedDatabase),
+            "{error}"
+        );
     }
 
     #[test]

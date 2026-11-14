@@ -31,6 +31,7 @@ pub(crate) enum SidebarItem {
     Runtime(RuntimeKey),
     /// 分组行：项目，或按状态、时间分组时的那一组。
     Group(ProjectRef),
+    Worktree(ProjectRef, String),
     /// 一个会话（`ui_id`）。
     Session(u64),
     /// 分屏会话里的一个分屏（会话 `ui_id`、分屏视图）。
@@ -55,15 +56,30 @@ impl SidebarItem {
 /// `items` 里第 `ix` 行的上一级：对话归「对话」分组，会话、分屏归它前面最近的分组行，
 /// 分组行归它前面最近的机器标题。往上找时先碰到别的顶层行，说明它本身就在顶层（比如没有
 /// 机器分段时的项目行、不分组时的会话），没有上一级。
+#[cfg(test)]
 pub(crate) fn parent_index(items: &[SidebarItem], ix: usize) -> Option<usize> {
+    parent_index_with_workset(items, ix, |_, _| true)
+}
+
+fn parent_index_with_workset(
+    items: &[SidebarItem],
+    ix: usize,
+    belongs: impl Fn(u64, &str) -> bool,
+) -> Option<usize> {
     use SidebarItem::*;
     let item = items.get(ix)?;
     for (at, above) in items[..ix].iter().enumerate().rev() {
         match (item, above) {
             (Conversation(_), ConversationGroup)
             | (Session(_) | Pane(..), Group(_))
+            | (Worktree(..), Group(_))
             | (Group(_), Runtime(_)) => return Some(at),
-            (Group(_) | Session(_) | Pane(..), ConversationGroup | Runtime(_)) => return None,
+            (Session(ui_id) | Pane(ui_id, _), Worktree(_, id)) if belongs(*ui_id, id) => {
+                return Some(at);
+            }
+            (Group(_) | Worktree(..) | Session(_) | Pane(..), ConversationGroup | Runtime(_)) => {
+                return None;
+            }
             _ => {}
         }
     }
@@ -89,6 +105,15 @@ pub(crate) fn typeahead_match(
 }
 
 impl Workspace {
+    fn sidebar_parent_index(&self, items: &[SidebarItem], ix: usize) -> Option<usize> {
+        parent_index_with_workset(items, ix, |ui_id, id| {
+            self.sessions
+                .iter()
+                .find(|session| session.ui_id == ui_id)
+                .is_some_and(|session| session.workset_id.as_deref() == Some(id))
+        })
+    }
+
     /// 侧栏里现在看得见的行，从上到下，带着打字跳转用的名字。
     pub(crate) fn sidebar_items(&self, cx: &App) -> Vec<(SidebarItem, String)> {
         let mut items = Vec::new();
@@ -133,11 +158,20 @@ impl Workspace {
                 if self.sidebar_grouping == SidebarGrouping::Project {
                     let is_active = active_project.as_ref().is_some_and(|active| {
                         active.runtime == group.runtime
-                            && crate::sidebar_order::same_project_root(&group.root, &active.root)
+                            && crate::sidebar_order::same_project_root(
+                                &group.root,
+                                &self.context_project_ref(active, cx).root,
+                            )
                     });
                     if !crate::sidebar_order::sidebar_empty_project_visible(
                         self.sidebar_hide_empty_projects,
-                        group.sessions.len(),
+                        group.sessions.len()
+                            + usize::from(space.worksets.iter().any(|workset| {
+                                crate::sidebar_order::same_project_root(
+                                    &workset.project_root,
+                                    &group.root,
+                                )
+                            })),
                         self.is_project_pinned(&project),
                         is_active,
                     ) {
@@ -145,12 +179,27 @@ impl Workspace {
                     }
                 }
                 if self.sidebar_grouping != SidebarGrouping::None {
-                    items.push((SidebarItem::Group(project), group.label.clone()));
+                    items.push((SidebarItem::Group(project.clone()), group.label.clone()));
                 }
                 if space.collapsed_projects.contains(&group.root) {
                     continue;
                 }
-                for &ix in &group.sessions {
+                for row in super::workspaces::rows_for_group(self, group) {
+                    let ix = match row {
+                        super::workspaces::ProjectSessionRow::Worktree(workset) => {
+                            items.push((
+                                SidebarItem::Worktree(project.clone(), workset.id.clone()),
+                                workset.task.clone(),
+                            ));
+                            continue;
+                        }
+                        super::workspaces::ProjectSessionRow::Session { index, workset_id } => {
+                            if workset_id.is_some_and(|id| space.collapsed_worksets.contains(id)) {
+                                continue;
+                            }
+                            index
+                        }
+                    };
                     let session = &self.sessions[ix];
                     if session.pane_count() <= 1 {
                         items.push((SidebarItem::Session(session.ui_id), session.title(cx)));
@@ -265,7 +314,7 @@ impl Workspace {
         };
         if self.sidebar_container_open(&items[ix], cx) == Some(true) {
             self.toggle_sidebar_container(&items[ix], cx);
-        } else if let Some(parent) = parent_index(&items, ix) {
+        } else if let Some(parent) = self.sidebar_parent_index(&items, ix) {
             self.set_sidebar_cursor(Some(items[parent].clone()), cx);
         }
     }
@@ -285,7 +334,7 @@ impl Workspace {
             Some(true) => {
                 if let Some(child) = items
                     .get(ix + 1)
-                    .filter(|_| parent_index(&items, ix + 1) == Some(ix))
+                    .filter(|_| self.sidebar_parent_index(&items, ix + 1) == Some(ix))
                 {
                     self.set_sidebar_cursor(Some(child.clone()), cx);
                 }
@@ -324,8 +373,14 @@ impl Workspace {
                 }
             }
             SidebarItem::Group(project) if self.sidebar_grouping == SidebarGrouping::Project => {
-                // 跟点项目行一样：选中这个项目，有会话才开合。
+                // 跟点项目行一样：选中这个项目，有子项才开合。
                 self.select_project(project.clone(), cx);
+                if self.sidebar_container_open(&cursor, cx).is_some() {
+                    self.toggle_sidebar_container(&cursor, cx);
+                }
+            }
+            SidebarItem::Worktree(project, id) => {
+                self.select_worktree(project, id, cx);
                 if self.sidebar_container_open(&cursor, cx).is_some() {
                     self.toggle_sidebar_container(&cursor, cx);
                 }
@@ -375,16 +430,32 @@ impl Workspace {
             SidebarItem::ConversationGroup => Some(!self.sidebar_conversations_collapsed),
             SidebarItem::Runtime(key) => Some(!self.runtime_folded(key)),
             SidebarItem::Group(project) => {
-                let has_sessions = self
+                let has_children = self
                     .project_groups(&project.runtime, cx)
                     .iter()
                     .any(|group| group.root == project.root && !group.sessions.is_empty())
+                    || self.space(&project.runtime).is_some_and(|space| {
+                        space.worksets.iter().any(|workset| {
+                            crate::sidebar_order::same_project_root(
+                                &workset.project_root,
+                                &project.root,
+                            )
+                        })
+                    })
                     || self.sidebar_grouping != SidebarGrouping::Project;
                 let collapsed = self
                     .space(&project.runtime)
                     .is_some_and(|space| space.collapsed_projects.contains(&project.root));
-                has_sessions.then_some(!collapsed)
+                has_children.then_some(!collapsed)
             }
+            SidebarItem::Worktree(project, id) => self.space(&project.runtime).and_then(|space| {
+                (space.worksets.iter().any(|workset| &workset.id == id)
+                    && self.sessions.iter().any(|session| {
+                        session.runtime(cx).key() == &project.runtime
+                            && session.workset_id.as_deref() == Some(id.as_str())
+                    }))
+                .then_some(!space.collapsed_worksets.contains(id))
+            }),
             _ => None,
         }
     }
@@ -397,6 +468,7 @@ impl Workspace {
             }
             SidebarItem::Runtime(key) => self.toggle_runtime_fold(key, cx),
             SidebarItem::Group(project) => self.toggle_project_collapsed(project, cx),
+            SidebarItem::Worktree(project, id) => self.toggle_worktree_collapsed(project, id, cx),
             _ => {}
         }
     }
@@ -406,7 +478,7 @@ impl Workspace {
 mod tests {
     // 不用 `use super::*`：它连带把上面 `use gpui::*` 里的 `gpui::test` 引进来，盖掉标准的
     // `#[test]`；`gpui::test` 展开出来又是 `#[test]`，编测试时无限展开。
-    use super::{SidebarItem, parent_index, typeahead_match};
+    use super::{SidebarItem, parent_index, parent_index_with_workset, typeahead_match};
     use crate::{ProjectRef, RuntimeKey};
 
     fn group(root: &str) -> SidebarItem {
@@ -441,6 +513,47 @@ mod tests {
             None,
             "没有机器分段时项目行是顶层，不能回到「对话」"
         );
+    }
+
+    #[test]
+    fn worktree_navigation_keeps_sessions_under_their_task() {
+        let project = ProjectRef {
+            runtime: RuntimeKey::Local,
+            root: "/a".into(),
+        };
+        let items = vec![
+            group("/a"),
+            SidebarItem::Session(1),
+            SidebarItem::Worktree(project.clone(), "first".into()),
+            SidebarItem::Session(2),
+            SidebarItem::Worktree(project, "second".into()),
+            SidebarItem::Session(3),
+            group("/b"),
+            SidebarItem::Session(4),
+        ];
+        assert_eq!(parent_index(&items, 1), Some(0));
+        assert_eq!(parent_index(&items, 2), Some(0));
+        assert_eq!(parent_index(&items, 3), Some(2));
+        assert_eq!(parent_index(&items, 4), Some(0));
+        assert_eq!(parent_index(&items, 5), Some(4));
+        assert_eq!(parent_index(&items, 7), Some(6));
+    }
+
+    #[test]
+    fn ordinary_session_after_pinned_worktree_belongs_to_project() {
+        let project = ProjectRef {
+            runtime: RuntimeKey::Local,
+            root: "/a".into(),
+        };
+        let items = vec![
+            group("/a"),
+            SidebarItem::Worktree(project, "pinned".into()),
+            SidebarItem::Session(1),
+            SidebarItem::Session(2),
+        ];
+        let belongs = |ui_id, id: &str| ui_id == 1 && id == "pinned";
+        assert_eq!(parent_index_with_workset(&items, 2, belongs), Some(1));
+        assert_eq!(parent_index_with_workset(&items, 3, belongs), Some(0));
     }
 
     #[test]

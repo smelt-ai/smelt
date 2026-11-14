@@ -15,6 +15,7 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModalLayer {
     Rename,
+    ProjectRepositories,
     RelayEdit,
     Quit,
     #[cfg(target_os = "macos")]
@@ -33,6 +34,7 @@ impl ModalLayer {
     pub(crate) fn rank(self) -> u8 {
         match self {
             Self::Rename => 1,
+            Self::ProjectRepositories => 1,
             Self::RelayEdit => 1,
             Self::Quit => 2,
             #[cfg(target_os = "macos")]
@@ -75,6 +77,11 @@ impl Workspace {
             &mut rank,
             self.rename_target.is_some(),
             ModalLayer::Rename.rank(),
+        );
+        raise(
+            &mut rank,
+            self.project_repositories.is_some(),
+            ModalLayer::ProjectRepositories.rank(),
         );
         raise(
             &mut rank,
@@ -254,15 +261,19 @@ impl Workspace {
         } else if self.palette.is_some() {
             self.close_palette(window, cx);
             true
+        } else if self.dir_picker.is_some() {
+            self.cancel_dir_picker(cx);
+            true
+        } else if self.project_repositories.is_some()
+            && self.modal_is_top(ModalLayer::ProjectRepositories)
+        {
+            self.close_project_repositories(cx);
+            true
         } else if self.rename_target.is_some() {
             self.cancel_rename(cx);
             true
         } else if self.relay_edit.is_some() {
             self.cancel_relay_edit(cx);
-            true
-        } else if self.dir_picker.is_some() {
-            self.dir_picker = None;
-            cx.notify();
             true
         } else if self.show_quit_confirm {
             self.show_quit_confirm = false;
@@ -290,6 +301,15 @@ impl Workspace {
             || self.agent_surface.pending_memory_delete.is_some()
             || self.automation_surface.pending_delete.is_some()
         {
+            if matches!(
+                self.close_confirm,
+                Some(
+                    CloseConfirm::Workset { pending: true, .. }
+                        | CloseConfirm::RestoreWorkset { pending: true, .. }
+                )
+            ) {
+                return true;
+            }
             self.close_confirm = None;
             self.agent_surface.pending_delete = None;
             self.agent_surface.pending_memory_delete = None;
@@ -473,6 +493,7 @@ impl Workspace {
                     .is_some()
                     .then(|| self.render_relay_edit(cx)),
             )
+            .children(self.project_repositories.is_some().then(|| self.render_project_repositories(cx)))
             .children(
                 self.dir_picker
                     .is_some()

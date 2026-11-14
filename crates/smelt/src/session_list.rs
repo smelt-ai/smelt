@@ -78,6 +78,18 @@ fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
     (ElementId::from(name), key).into()
 }
 
+fn workset_element_id(name: &'static str, project: &ProjectRef, workset_id: &str) -> ElementId {
+    let runtime = match &project.runtime {
+        RuntimeKey::Local => "local".to_string(),
+        RuntimeKey::Remote(id) => id.clone(),
+    };
+    (
+        ElementId::from(name),
+        format!("{runtime}:{}:{workset_id}", project.root),
+    )
+        .into()
+}
+
 /// 机器名字，远程的由机器图标颜色体现连接状态；悬停看完整的连接说明。
 fn runtime_name_with_indicator(
     key: &RuntimeKey,
@@ -296,35 +308,91 @@ fn remote_project_menu(
     let copy_path = project.root.clone();
     let pin_project = project.clone();
     let pin_workspace = workspace.clone();
-    menu.item(
-        PopupMenuItem::new("复制项目路径")
-            .icon(IconName::Copy)
+    project_workset_menu(menu, project.clone(), workspace.clone(), cx)
+        .item(
+            PopupMenuItem::new("复制项目路径")
+                .icon(IconName::Copy)
+                .on_click(move |_ev, _window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                }),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
+                .icon(Icon::new(gpui_kit_assets::IconName::Pin))
+                .on_click(move |_ev, _window, cx| {
+                    let project = pin_project.clone();
+                    pin_workspace.update(cx, |ws, cx| ws.toggle_project_pinned(project, cx));
+                }),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new(if session_count > 0 {
+                format!("关闭项目（含 {session_count} 个会话）")
+            } else {
+                "关闭项目".to_string()
+            })
+            .icon(IconName::Close)
             .on_click(move |_ev, _window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                let project = project.clone();
+                workspace.update(cx, |ws, cx| ws.start_close_project(project, cx));
             }),
-    )
-    .separator()
-    .item(
-        PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
-            .icon(Icon::new(gpui_kit_assets::IconName::Pin))
-            .on_click(move |_ev, _window, cx| {
-                let project = pin_project.clone();
-                pin_workspace.update(cx, |ws, cx| ws.toggle_project_pinned(project, cx));
-            }),
-    )
-    .separator()
-    .item(
-        PopupMenuItem::new(if session_count > 0 {
-            format!("关闭项目（含 {session_count} 个会话）")
-        } else {
-            "关闭项目".to_string()
-        })
-        .icon(IconName::Close)
-        .on_click(move |_ev, _window, cx| {
-            let project = project.clone();
-            workspace.update(cx, |ws, cx| ws.start_close_project(project, cx));
-        }),
-    )
+        )
+}
+
+fn project_workset_menu(
+    menu: PopupMenu,
+    project: ProjectRef,
+    workspace: Entity<Workspace>,
+    _cx: &App,
+) -> PopupMenu {
+    let create_workspace = workspace.clone();
+    let create_project = project.clone();
+    let edit_workspace = workspace.clone();
+    let edit_project = project.clone();
+    menu.separator()
+        .item(
+            PopupMenuItem::new("管理项目仓库…")
+                .icon(IconName::Folder)
+                .on_click(move |_ev, window, cx| {
+                    let project = edit_project.clone();
+                    edit_workspace.update(cx, |ws, cx| {
+                        let Some(runtime) = ws.space(&project.runtime).map(|s| s.runtime.clone())
+                        else {
+                            ws.report_background_error("运行时已断开，无法配置项目仓库");
+                            return;
+                        };
+                        ws.open_project_repositories(
+                            runtime,
+                            project.root.clone(),
+                            false,
+                            window,
+                            cx,
+                        );
+                    });
+                }),
+        )
+        .item(
+            PopupMenuItem::new("新建工作树…")
+                .icon(IconName::Plus)
+                .on_click(move |_ev, window, cx| {
+                    let project = create_project.clone();
+                    create_workspace.update(cx, |ws, cx| {
+                        let Some(runtime) = ws.space(&project.runtime).map(|s| s.runtime.clone())
+                        else {
+                            ws.report_background_error("运行时已断开，无法创建工作树");
+                            return;
+                        };
+                        ws.open_project_repositories(
+                            runtime,
+                            project.root.clone(),
+                            true,
+                            window,
+                            cx,
+                        );
+                    });
+                }),
+        )
 }
 
 /// 底栏额度弹层的宽度：名字一栏、用量条、百分比放得下。
@@ -446,6 +514,7 @@ mod keyboard;
 mod machines;
 mod new_session;
 mod reveal;
+mod workspaces;
 
 pub(crate) use keyboard::SidebarItem;
 
@@ -503,19 +572,19 @@ use row::{
 ///
 /// - `selected`：用户最后一次选定的上下文（点项目行或打开对话都写它）
 /// - `selected_group_root`：`selected` 命中的项目组 root
-/// - `selected_is_open_conversation`：`selected` 是某段仍开着的对话的工作目录
+/// - `selected_is_context_root`：`selected` 是仍有效的对话工作目录或任务工作树根
 /// - `active_session_group_root` / `first_group_root`：选定项已失效时的回退
 pub(crate) fn tool_panel_context_root(
     selected: Option<&str>,
     selected_group_root: Option<&str>,
-    selected_is_open_conversation: bool,
+    selected_is_context_root: bool,
     active_session_group_root: Option<&str>,
     first_group_root: Option<&str>,
 ) -> Option<String> {
     if let Some(root) = selected_group_root {
         return Some(root.to_string());
     }
-    if selected_is_open_conversation && let Some(root) = selected {
+    if selected_is_context_root && let Some(root) = selected {
         return Some(root.to_string());
     }
     active_session_group_root
@@ -592,6 +661,10 @@ impl Workspace {
             .find(|group| group.sessions.contains(&ix))
         {
             let folded = self.runtime_folded(&group.runtime);
+            let workset_id = self
+                .sessions
+                .get(ix)
+                .and_then(|session| session.workset_id.clone());
             if let Some(space) = self.space_mut(&group.runtime) {
                 if folded {
                     space.folded = Some(false);
@@ -599,6 +672,9 @@ impl Workspace {
                 space
                     .collapsed_projects
                     .retain(|root| !crate::sidebar_order::same_project_root(root, &group.root));
+                if let Some(id) = workset_id {
+                    space.collapsed_worksets.remove(&id);
+                }
             }
         }
         self.sidebar_reveal.request(ui_id);
@@ -630,12 +706,20 @@ impl Workspace {
         });
         // 对话关掉或目录已被清理时这里不再命中，自然回退到项目分组，
         // 不会把工具面板钉死在一个不存在的路径上。
-        let selected_is_open_conversation =
-            selected.is_some_and(|root| self.agent_conversation_workspace_is_open(root, cx));
+        let selected_is_context_root = selected.is_some_and(|root| {
+            self.agent_conversation_workspace_is_open(root, cx)
+                || self.space(&runtime).is_some_and(|space| {
+                    let style = crate::runtimes::path_style(&runtime, cx);
+                    space
+                        .worksets
+                        .iter()
+                        .any(|workset| style.clean(&workset.task_root(style)) == style.clean(root))
+                })
+        });
         tool_panel_context_root(
             selected,
             selected_group_root,
-            selected_is_open_conversation,
+            selected_is_context_root,
             groups
                 .iter()
                 .find(|g| g.sessions.contains(&self.active_session))
@@ -643,6 +727,19 @@ impl Workspace {
             groups.first().map(|g| g.root.as_str()),
         )
         .map(|root| ProjectRef { runtime, root })
+    }
+
+    pub(crate) fn context_project_ref(&self, context: &ProjectRef, cx: &App) -> ProjectRef {
+        let style = crate::runtimes::path_style(&context.runtime, cx);
+        let workset = self.space(&context.runtime).and_then(|space| {
+            space.worksets.iter().find(|workset| {
+                style.clean(&workset.task_root(style)) == style.clean(&context.root)
+            })
+        });
+        context.at(workset
+            .map(|workset| workset.project_root.clone())
+            .or_else(|| self.project_root_for_cwd(&context.runtime, &context.root, cx))
+            .unwrap_or_else(|| context.root.clone()))
     }
 
     /// `root` 是否是某段仍然开着的智能体对话的工作目录。
@@ -1014,17 +1111,28 @@ impl Workspace {
             let is_local_group = group.runtime == RuntimeKey::Local;
             let name = &group.label;
             let ixs = &group.sessions;
+            let has_worksets = self
+                .space(&group.runtime)
+                .map(|space| {
+                    space.worksets.iter().any(|workset| {
+                        crate::sidebar_order::same_project_root(&workset.project_root, cwd)
+                    })
+                })
+                .unwrap_or_default();
             let collapsed = space.collapsed_projects.contains(cwd);
             let is_active_group = active_project.as_ref().is_some_and(|active| {
                 active.runtime == group.runtime
-                    && crate::sidebar_order::same_project_root(cwd, &active.root)
+                    && crate::sidebar_order::same_project_root(
+                        cwd,
+                        &self.context_project_ref(active, cx).root,
+                    )
             });
-            let empty_group = ixs.is_empty();
+            let empty_group = ixs.is_empty() && !(is_project_group && has_worksets);
             let is_pinned = is_project_group && self.is_project_pinned(&project);
             if is_project_group
                 && !crate::sidebar_order::sidebar_empty_project_visible(
                     hide_empty,
-                    ixs.len(),
+                    ixs.len() + usize::from(has_worksets),
                     is_pinned,
                     is_active_group,
                 )
@@ -1062,6 +1170,16 @@ impl Workspace {
 
             // 分支名：git 仓库都显示，跟项目名并排（淡色）。
             let branch_label = self.project_branch(&project, cx);
+            let repository_count = self
+                .space(&group.runtime)
+                .map(|space| {
+                    space
+                        .repositories
+                        .iter()
+                        .filter(|repository| repository.project_root == *cwd)
+                        .count()
+                })
+                .unwrap_or_default();
 
             let e_toggle = this.clone();
             let toggle_project = project.clone();
@@ -1144,7 +1262,8 @@ impl Workspace {
                                     // muted，不降到 faint：它仍是能点、能新建会话的条目，faint
                                     // 读起来像禁用。
                                     div()
-                                        .flex_shrink_0()
+                                        .min_w_0()
+                                        .overflow_hidden()
                                         .text_sm()
                                         // 项目行自己被选中（它的会话没露出来）时跟会话行一样：
                                         // 选中字色加中等字重。
@@ -1161,7 +1280,7 @@ impl Workspace {
                                         } else {
                                             ui_theme::text_mid()
                                         }))
-                                        .child(group_name.clone()),
+                                        .child(truncated_line(group_name.clone())),
                                 )
                                 .when(is_pinned, |row| {
                                     row.child(pinned_marker(project_element_id("proj-pin", &project)))
@@ -1193,8 +1312,18 @@ impl Workspace {
                                             .build(window, cx)
                                         })
                                         .child(truncated_line(b.clone()))
+                                }))
+                                .children((repository_count > 0).then(|| {
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(rgb(ui_theme::text_faint()))
+                                        .child(format!("{repository_count} 仓库"))
                                 })),
                         )
+                        .children((is_project_group && has_worksets).then(|| {
+                            workspaces::workspace_badge(this.clone(), project.clone())
+                        }))
                         .child(
                             // 数字和「+」不是两套右对齐元素，而是同一个方形槽里的
                             // 两个满铺图层；hover 只切透明度，因此字形中心不会横跳。
@@ -1219,7 +1348,7 @@ impl Workspace {
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
-                                        .when(collapsed && !empty_group, |d| {
+                                        .when(collapsed && !ixs.is_empty(), |d| {
                                             d.child(ixs.len().to_string())
                                         }),
                                 )
@@ -1248,6 +1377,7 @@ impl Workspace {
                                                 e_menu.clone(),
                                                 menu_runtime.clone(),
                                                 menu_cwd.clone(),
+                                                None,
                                                 cx,
                                             )),
                                     )
@@ -1325,7 +1455,12 @@ impl Workspace {
                                 // 按「复制 / 项目 / 离开」分段。
                                 let open_root = copy_path.clone();
                                 let e_open = e_menu.clone();
-                                menu
+                                project_workset_menu(
+                                    menu,
+                                    menu_project.clone(),
+                                    e_close_proj.clone(),
+                                    cx,
+                                )
                                     .submenu_with_icon(
                                         Some(IconName::ExternalLink.into()),
                                         "用其他应用打开",
@@ -1429,7 +1564,7 @@ impl Workspace {
                 continue;
             }
 
-            if ixs.is_empty() {
+            if ixs.is_empty() && !has_worksets {
                 // 空项目不占一行说明。Grok 的空分组就是没有条目，新建走标题上的 +。
                 let entry = flip_slot(project_flip_id(&project), reorder_generation, group_rows)
                     .from_top(drop_origin(crate::SidebarDrag::Project(project.clone())))
@@ -1472,7 +1607,33 @@ impl Workspace {
                     d.pl(px(PROJECT_SESSION_INDENT))
                 })
                 .when(grouping == SidebarGrouping::None, |d| d.px_2());
-            for &ix in ixs {
+            let mut visible_leaf_rows = 0;
+            for entry in workspaces::rows_for_group(self, group) {
+                let (ix, nested_worktree) = match entry {
+                    workspaces::ProjectSessionRow::Worktree(workset) => {
+                        visible_leaf_rows += 1;
+                        group_body = group_body.child(workspaces::worktree_row(
+                            self,
+                            this.clone(),
+                            workset,
+                            &project,
+                            runtime_scroll.clone(),
+                            focused_key,
+                            cx,
+                        ));
+                        continue;
+                    }
+                    workspaces::ProjectSessionRow::Session { index, workset_id } => {
+                        if workset_id.is_some_and(|id| {
+                            self.space(&group.runtime)
+                                .is_some_and(|space| space.collapsed_worksets.contains(id))
+                        }) {
+                            continue;
+                        }
+                        (index, workset_id.is_some())
+                    }
+                };
+                visible_leaf_rows += self.sessions[ix].pane_count().max(1);
                 let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
                 let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
                 let provider = self.sessions[ix].provider_kind(cx);
@@ -1539,6 +1700,18 @@ impl Workspace {
                 let project_context = (grouping != SidebarGrouping::Project)
                     .then(|| session_projects.get(ix).cloned().flatten())
                     .flatten();
+                let workset_label = (!nested_worktree).then_some(()).and_then(|_| {
+                    self.sessions[ix]
+                        .workset_id
+                        .as_deref()
+                        .and_then(|workset_id| {
+                            self.space(self.sessions[ix].runtime(cx).key())?
+                                .worksets
+                                .iter()
+                                .find(|workset| workset.id == workset_id)
+                                .map(|workset| (workset.task.clone(), workset.branch.clone()))
+                        })
+                });
                 // 终端会话取当前活动 pane，ACP 会话取自身。分屏子行会在各自的菜单中复制自己的 ID。
                 let copy_id_source = crate::CopySessionIdSource::of(&self.sessions[ix].kind);
                 let e_act = this.clone();
@@ -1693,6 +1866,28 @@ impl Workspace {
                     .when(is_pinned, |row| {
                         row.child(pinned_marker(("session-pin", ui_id)))
                     })
+                    .children(workset_label.map(|(task, branch)| {
+                        let tooltip = format!("工作树：{task}\n分支：{branch}");
+                        div()
+                            .id(("session-workspace", ui_id))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .max_w(px(104.))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .px_1()
+                            .rounded(px(3.))
+                            .text_xs()
+                            .text_color(rgb(ui_theme::text_muted()))
+                            .bg(ui_theme::hairline())
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                            .child(Icon::empty().path("smelt-icons/git-branch.svg").size(px(12.)).flex_shrink_0())
+                            .child(div().min_w_0().child(truncated_line(task)))
+                    }))
                     // 分屏数用行尾小角标，跟在时间前面。
                     .children(subtitle.as_ref().map(|s| {
                         div()
@@ -1818,8 +2013,12 @@ impl Workspace {
                 // 圈在一起平铺，pane 行本身只管「切到该 pane」。
                 if self.sessions[ix].pane_count() <= 1 {
                     group_body = group_body.child(
-                        flip_slot(("sidebar-flip-session", ui_id), reorder_generation, row)
-                            .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))),
+                        div()
+                            .when(nested_worktree, |row| row.pl(px(PROJECT_SESSION_INDENT)))
+                            .child(
+                                flip_slot(("sidebar-flip-session", ui_id), reorder_generation, row)
+                                    .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))),
+                            ),
                     );
                 } else {
                     let leaves = self.sessions[ix].term_leaves();
@@ -2117,12 +2316,16 @@ impl Workspace {
                         );
 
                     group_body = group_body.child(
-                        flip_slot(
-                            ("sidebar-flip-session", ui_id),
-                            reorder_generation,
-                            pane_group,
-                        )
-                        .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))),
+                        div()
+                            .when(nested_worktree, |row| row.pl(px(PROJECT_SESSION_INDENT)))
+                            .child(
+                                flip_slot(
+                                    ("sidebar-flip-session", ui_id),
+                                    reorder_generation,
+                                    pane_group,
+                                )
+                                .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))),
+                            ),
                     );
                 }
             }
@@ -2131,12 +2334,8 @@ impl Workspace {
                 .id(project_element_id("proj-body-clip", &project))
                 .relative()
                 .when(is_animating, |d| {
-                    let total_leaf_rows: usize = ixs
-                        .iter()
-                        .map(|&ix| self.sessions[ix].term_leaves().len().max(1))
-                        .sum();
-                    let estimated_body_h = (total_leaf_rows as f32 * 32.0
-                        + total_leaf_rows.saturating_sub(1) as f32 * 1.0
+                    let estimated_body_h = (visible_leaf_rows as f32 * 32.0
+                        + visible_leaf_rows.saturating_sub(1) as f32 * 1.0
                         + 4.0)
                         .max(32.0);
                     let cur_h = estimated_body_h * proj_progress;
@@ -2157,7 +2356,7 @@ impl Workspace {
             if runtime_sections {
                 *row_counts_by_runtime
                     .entry(group.runtime.clone())
-                    .or_default() += 1 + (ixs.len() as f32 * proj_progress).ceil() as usize;
+                    .or_default() += 1 + (visible_leaf_rows as f32 * proj_progress).ceil() as usize;
                 groups_by_runtime
                     .entry(group.runtime.clone())
                     .or_default()

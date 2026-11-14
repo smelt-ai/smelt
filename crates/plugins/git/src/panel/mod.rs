@@ -379,6 +379,7 @@ fn clear_confirmed_git_index_ops<K, Q>(
 /// `fallback` 是用户没选过时的默认落点（调用方给的是"第一个有改动的仓库"）。
 /// 没有它就只能死认项目根，而项目根常常自己是干净的——改动全在子仓，或者
 /// submodule 配了 `ignore`——于是面板会判定"没有改动"，连 diff 预览都不开。
+/// 都没有时，项目根本身不是仓库（多仓库工作树的任务目录）就落到发现的第一个仓库。
 fn resolve_git_write_target(
     project_root: &str,
     selected: Option<&str>,
@@ -392,7 +393,17 @@ fn resolve_git_write_target(
         {
             selected.to_string()
         }
-        _ => fallback.unwrap_or(project_root).to_string(),
+        _ => fallback
+            .or_else(|| {
+                let set = known?;
+                if set.roots().any(|root| root == project_root) {
+                    None
+                } else {
+                    set.repos.first().map(|repo| repo.root.as_str())
+                }
+            })
+            .unwrap_or(project_root)
+            .to_string(),
     }
 }
 
@@ -892,7 +903,13 @@ fn render_narrow_git_row(
                 .text_xs()
                 .font_semibold()
                 .text_color(rgb(ui_theme::text_faint()))
-                .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(title.clone())))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(truncated_line(title.clone())),
+                )
                 .children(batch.as_ref().map(|batch| {
                     let batch = batch.clone();
                     let batch_root = at(&batch.root);
@@ -978,7 +995,13 @@ fn render_narrow_git_row(
                             .size(px(10.))
                             .flex_shrink_0(),
                         )
-                        .child(div().flex_1().min_w_0().overflow_hidden().child(truncated_line(row.name.clone())))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(truncated_line(row.name.clone())),
+                        )
                         .child(batch_action)
                         .on_click(move |_ev, _window, cx| {
                             let path = toggle_path.clone();

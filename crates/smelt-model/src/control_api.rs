@@ -998,6 +998,18 @@ pi_calls! {
     /// 关闭一个项目。项目下的对话留着，不收进程。
     WorkspaceProjectClose => WorkspaceProjectClose(crate::workspace_directory::WorkspaceProjectParams)
         -> crate::workspace_directory::WorkspaceRevision;
+    /// 在运行时绑定、克隆或解除项目仓库。
+    WorkspaceProjectRepositoryAction => WorkspaceProjectRepositoryAction(crate::workspace_directory::WorkspaceProjectRepositoryActionParams)
+        -> crate::workspace_directory::WorkspaceDirectory;
+    /// 在已配置的仓库中创建一个多仓库工作集。
+    WorkspaceWorksetCreate => WorkspaceWorksetCreate(crate::workspace_directory::WorkspaceWorksetCreateParams)
+        -> crate::workspace_directory::WorkspaceRevision;
+    /// 重命名工作树并移动 worktree，保留原分支。
+    WorkspaceWorksetRename => WorkspaceWorksetRename(crate::workspace_directory::WorkspaceWorksetRenameParams)
+        -> crate::workspace_directory::WorkspaceRevision;
+    /// 安全收工并删除工作集记录。
+    WorkspaceWorksetFinish => WorkspaceWorksetFinish(crate::workspace_directory::WorkspaceWorksetFinishParams)
+        -> crate::workspace_directory::WorkspaceWorksetFinishResult;
     /// 读当前整份工作区目录。命令行这类不订推送的客户端用；订了 `workspace.changed` 的
     /// 客户端首帧就有。
     WorkspaceDirectoryGet => WorkspaceDirectoryGet(EmptyParams)

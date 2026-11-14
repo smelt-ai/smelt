@@ -12,6 +12,7 @@ use crate::SessionState;
 use crate::runtimes::{Runtime, RuntimeKey};
 use crate::workspace_directory::DirectorySync;
 use crate::workspace_persist::WorkspaceSnapshotWriteQueue;
+use smelt_model::workspace_directory::{WorkspaceProjectRepository, WorkspaceWorkset};
 
 pub(crate) struct RuntimeSpace {
     pub(crate) runtime: Runtime,
@@ -20,8 +21,13 @@ pub(crate) struct RuntimeSpace {
     /// 只改顺序（拖拽排序）。项目下最后一个会话关掉了，这一条也还在（侧栏显示 0 个会话
     /// 的空项目）。会话按 cwd 挂到项目下；挂不上的仍按自己的 cwd 自建隐式分组。
     pub(crate) projects: Vec<String>,
+    /// 工作区目录中的已配置仓库和工作集，供侧栏只读呈现。
+    pub(crate) repositories: Vec<WorkspaceProjectRepository>,
+    pub(crate) worksets: Vec<WorkspaceWorkset>,
     /// 侧栏里被折叠起来的项目（存 root 路径）。
     pub(crate) collapsed_projects: HashSet<String>,
+    pub(crate) collapsed_worksets: HashSet<String>,
+    pub(crate) pinned_worksets: HashSet<String>,
     /// 侧栏被固定的项目根。固定后即使开了「隐藏无会话」也留在列表里。
     pub(crate) pinned_projects: HashSet<String>,
     /// 侧栏里这台机器的分段，用户这次运行里亲手折起（`Some(true)`）或展开过。不落盘：
@@ -45,10 +51,27 @@ pub(crate) struct RuntimeSpace {
 
 impl RuntimeSpace {
     pub(crate) fn new(runtime: Runtime) -> Self {
+        let runtime_id = match runtime.key() {
+            RuntimeKey::Local => None,
+            RuntimeKey::Remote(id) => Some(id.as_str()),
+        };
+        let pinned_worksets = match smelt_client_store::client_store()
+            .and_then(|store| store.pinned_worksets(runtime_id))
+        {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(error) => {
+                eprintln!("[workspace] 读取工作树置顶状态失败：{error}");
+                HashSet::new()
+            }
+        };
         Self {
             runtime,
             projects: Vec::new(),
+            repositories: Vec::new(),
+            worksets: Vec::new(),
             collapsed_projects: HashSet::new(),
+            collapsed_worksets: HashSet::new(),
+            pinned_worksets,
             pinned_projects: HashSet::new(),
             folded: None,
             scroll: ScrollHandle::new(),
@@ -57,6 +80,16 @@ impl RuntimeSpace {
             restore_pending: Vec::new(),
             restore_retry_attempt: 0,
             sessions_restored: false,
+        }
+    }
+}
+
+impl ProjectRef {
+    /// 同一台机器上的另一个目录。
+    pub(crate) fn at(&self, root: impl Into<String>) -> ProjectRef {
+        ProjectRef {
+            runtime: self.runtime.clone(),
+            root: root.into(),
         }
     }
 }
@@ -166,20 +199,9 @@ impl crate::Workspace {
             .iter()
             .map(|session| session.effective_updated_at(cx))
             .collect::<Vec<_>>();
-        self.space_keys()
-            .iter()
-            .flat_map(|key| {
-                let members = self.space_members(key, cx);
-                crate::sidebar_groups(
-                    key,
-                    self.sidebar_grouping,
-                    self.project_groups(key, cx),
-                    &statuses,
-                    &last_updated_at,
-                    &members,
-                )
-            })
-            .flat_map(|group| group.sessions)
+        self.sidebar_display_groups(&statuses, &last_updated_at, cx, |_, _| {})
+            .into_iter()
+            .flat_map(|group| self.project_session_order(&group))
             .collect()
     }
 }

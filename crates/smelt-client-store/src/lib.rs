@@ -734,6 +734,43 @@ impl ClientStore {
         self.write(|connection| write_workspace_ui(connection, record))
     }
 
+    pub fn pinned_worksets(
+        &self,
+        runtime_id: Option<&str>,
+    ) -> Result<Vec<String>, ClientStoreError> {
+        self.with(|connection| {
+            let mut statement = connection
+                .prepare("SELECT workset_id FROM pinned_workset WHERE runtime_id = ?1 ORDER BY workset_id")
+                .map_err(sql)?;
+            let rows = statement
+                .query_map([runtime_id.unwrap_or(LOCAL_RUNTIME_ID)], |row| row.get(0))
+                .map_err(sql)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sql)
+        })
+    }
+
+    pub fn set_workset_pinned(
+        &self,
+        runtime_id: Option<&str>,
+        workset_id: &str,
+        pinned: bool,
+    ) -> Result<(), ClientStoreError> {
+        self.write(|connection| {
+            let statement = if pinned {
+                "INSERT OR IGNORE INTO pinned_workset (runtime_id, workset_id) VALUES (?1, ?2)"
+            } else {
+                "DELETE FROM pinned_workset WHERE runtime_id = ?1 AND workset_id = ?2"
+            };
+            connection
+                .execute(
+                    statement,
+                    params![runtime_id.unwrap_or(LOCAL_RUNTIME_ID), workset_id],
+                )
+                .map_err(sql)?;
+            Ok(())
+        })
+    }
+
     /// 一份布局的存档。没改过是 `None`。
     #[track_caller]
     pub fn workspace_layout_state(

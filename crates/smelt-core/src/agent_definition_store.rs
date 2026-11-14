@@ -130,6 +130,8 @@ fn session_agent_definition_ids(
                 last_updated_at: 0,
                 archived_at: None,
                 pinned_at: None,
+                workset_id: None,
+                closed_workset_root: None,
                 terminals: Vec::new(),
                 acp: Some(smelt_store::WorkspaceAcpRecord {
                     cwd: Some(cwd.to_string()),
