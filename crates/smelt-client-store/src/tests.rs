@@ -40,6 +40,15 @@ fn create_v7_schema(connection: &Connection) {
                diff_scope TEXT NOT NULL,
                PRIMARY KEY (runtime_id, conversation_id)
              ) WITHOUT ROWID;
+             CREATE TABLE conversation_route_path (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               kind TEXT NOT NULL
+                 CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
+               path TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id, kind, path)
+             ) WITHOUT ROWID;
              DROP TABLE workspace_ui;
              CREATE TABLE workspace_ui (
                id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -53,6 +62,38 @@ fn create_v7_schema(connection: &Connection) {
                sidebar_hide_empty_projects INTEGER NOT NULL
                  CHECK (sidebar_hide_empty_projects IN (0, 1))
              );",
+        )
+        .unwrap();
+}
+
+/// 把当前结构的对话界面状态退回 v10 的形状：文件树、Git 页的列还在，路径单独一张表。
+fn restore_v10_conversation_route(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE conversation_route;
+             CREATE TABLE conversation_route (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               active_terminal_id TEXT,
+               dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
+               file_tree_selected TEXT,
+               open_file_path TEXT,
+               file_tree_w REAL NOT NULL,
+               file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+               git_tab TEXT NOT NULL,
+               diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+               diff_scope TEXT NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE conversation_route_path (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               kind TEXT NOT NULL
+                 CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
+               path TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id, kind, path)
+             ) WITHOUT ROWID;",
         )
         .unwrap();
 }
@@ -183,8 +224,7 @@ fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
     );
     let routes = store.conversation_routes().unwrap();
     assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].file_tree_selected.as_deref(), Some("/repo/a.rs"));
-    assert_eq!(routes[0].git_tab, "log");
+    assert_eq!(routes[0].active_terminal_id.as_deref(), Some("term-2"));
     assert_eq!(store.appearance().unwrap(), Some(appearance()));
     assert_eq!(store.workspace_layout_state("default").unwrap(), None);
     drop(store);
@@ -299,17 +339,6 @@ fn route(runtime_id: Option<&str>, conversation_id: &str) -> ConversationRouteRe
         conversation_id: conversation_id.to_string(),
         active_terminal_id: Some("term-2".to_string()),
         dock_layout: Some(r#"{"v":1,"center":{"terminal":"term-2"}}"#.to_string()),
-        expanded: vec!["/repo/src".to_string(), "/repo/docs".to_string()],
-        file_tree_selected: Some("/repo/src/main.rs".to_string()),
-        open_file_path: None,
-        file_tree_w: 240.0,
-        file_tree_open: false,
-        pinned_roots: vec!["/repo".to_string()],
-        collapsed_roots: Vec::new(),
-        git_tab: "log".to_string(),
-        diff_split: true,
-        git_tree_collapsed: vec!["src".to_string()],
-        diff_scope: "unstaged".to_string(),
     }
 }
 
@@ -325,7 +354,6 @@ fn conversation_routes_are_replaced_as_a_whole() {
         ConversationRouteRecord {
             active_terminal_id: None,
             dock_layout: None,
-            expanded: Vec::new(),
             ..route(None, "conv-2")
         },
     ];
@@ -905,17 +933,18 @@ fn key_bindings_override_and_reset_per_command() {
 fn v9_key_bindings_move_to_command_ids() {
     let (store, path) = temp_store();
     drop(store);
-    // v9 和 v10 只差这一列的名字。
-    Connection::open(&path)
-        .unwrap()
-        .execute_batch(
-            "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
-             INSERT INTO key_binding VALUES
-               ('command_palette', 'cmd-j'), ('next_hunk', NULL), ('split_beside', 'cmd-e'),
-               ('toggle_sidebar', 'cmd-b');
-             PRAGMA user_version = 9;",
-        )
-        .unwrap();
+    // v9 比 v10 只差快捷键表这一列的名字；对话界面状态先退回 v10 的形状。
+    let v9 = Connection::open(&path).unwrap();
+    restore_v10_conversation_route(&v9);
+    v9.execute_batch(
+        "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
+         INSERT INTO key_binding VALUES
+           ('command_palette', 'cmd-j'), ('next_hunk', NULL), ('split_beside', 'cmd-e'),
+           ('toggle_sidebar', 'cmd-b');
+         PRAGMA user_version = 9;",
+    )
+    .unwrap();
+    drop(v9);
 
     let store = ClientStore::open(&path).unwrap();
     let record = |command: &str, keystroke: Option<&str>| KeyBindingRecord {
@@ -933,6 +962,53 @@ fn v9_key_bindings_move_to_command_ids() {
     drop(store);
     assert!(
         path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v9"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+/// v10 的对话界面状态带着文件树、Git 页的状态：升到 v11 时这些列和路径表删掉，终端的
+/// 分屏和当前终端留着；迁移前留了备份。
+#[test]
+fn v10_conversation_routes_keep_only_terminal_state() {
+    let (store, path) = temp_store();
+    drop(store);
+    let v10 = Connection::open(&path).unwrap();
+    restore_v10_conversation_route(&v10);
+    v10.execute_batch(
+        "INSERT INTO conversation_route VALUES
+           ('', 'conv-1', 'term-2', '{\"v\":1}', '/repo/a.rs', '/repo/a.rs', 240.0, 1,
+            'log', 1, 'unstaged');
+         INSERT INTO conversation_route_path VALUES ('', 'conv-1', 'expanded', '/repo/src', 0);
+         PRAGMA user_version = 10;",
+    )
+    .unwrap();
+    drop(v10);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(
+        store.conversation_routes().unwrap(),
+        vec![ConversationRouteRecord {
+            runtime_id: None,
+            conversation_id: "conv-1".to_string(),
+            active_terminal_id: Some("term-2".to_string()),
+            dock_layout: Some(r#"{"v":1}"#.to_string()),
+        }]
+    );
+    drop(store);
+    let connection = Connection::open(&path).unwrap();
+    let path_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'conversation_route_path'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(path_tables, 0);
+    drop(connection);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v10"))
             .exists(),
         "迁移前必须留下备份"
     );

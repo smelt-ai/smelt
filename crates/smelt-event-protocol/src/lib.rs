@@ -74,8 +74,7 @@ pub const CORE_TOPIC_AUTOMATIONS_CHANGED: &str = "automations.changed";
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
 pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requested";
 /// 项目目录里的文件变了（已滤掉构建产物、依赖目录）。只在客户端用 `project.watch`
-/// 关注过的项目上发；客户端据此重取 git 状态、文件树。用 `git.watch_head` 关注过的
-/// 目录，所在仓库切了分支时也发，`root` 是当初登记的那个目录。
+/// 关注过的项目上发；客户端据此重取 git 状态、文件树。
 pub const CORE_TOPIC_PROJECT_CHANGED: &str = "project.changed";
 /// 智能体的记忆目录里有文件变了。只在客户端用 `agent.memory.watch` 关注过的智能体上发；
 /// 客户端据此重取记忆列表。
@@ -456,6 +455,8 @@ pub struct SessionStateChanged {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_request: Option<String>,
     pub tokens_used: Option<u64>,
+    /// 会话目录所在仓库的当前分支，运行时监听 HEAD 维护，切了分支会再推一次。不是 git
+    /// 仓库、仓库还没有提交是 None，分离头指针是 `HEAD`。旧运行时不报。
     pub branch: Option<String>,
     pub dirty_files: Vec<String>,
     #[serde(rename = "updated_at")]

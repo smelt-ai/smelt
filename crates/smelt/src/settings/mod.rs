@@ -1,7 +1,7 @@
 //! 设置面板：「通用」「Agent 与运行」两组共 8 页，含独立设置窗口的渲染逻辑。
 //! 左侧按分组列出各页，每页对应独立内容页，页内再分节。
 //!
-//! 跟 git_panel / file_tree 同一个套路：从 main.rs 拆出来的 `impl Workspace`
+//! 跟 agents 同一个套路：从 main.rs 拆出来的 `impl Workspace`
 //! 方法 + 独立类型/函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
 //!
 //! 自动更新（`update_status`/`check_for_update`/`request_daemon_restart` 等）**不在

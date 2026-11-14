@@ -10923,6 +10923,8 @@ dependencies = [
  "smelt-client-store",
  "smelt-core",
  "smelt-event-protocol",
+ "smelt-files-ui",
+ "smelt-git-ui",
  "smelt-history",
  "smelt-iroh",
  "smelt-layouts",
@@ -11103,6 +11105,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-files-ui"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "gpui-webview",
+ "lb-wry",
+ "smelt-plugin-api",
+ "smol",
+ "tempfile",
+ "url",
+]
+
+[[package]]
 name = "smelt-git"
 version = "0.0.0"
 dependencies = [
@@ -11111,6 +11128,18 @@ dependencies = [
  "smelt-core",
  "smelt-runtime-client",
  "tempfile",
+]
+
+[[package]]
+name = "smelt-git-ui"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "gpui-base",
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "smelt-plugin-api",
 ]
 
 [[package]]
@@ -11201,6 +11230,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-client",
+ "smelt-client-store",
  "smelt-model",
  "smelt-runtime-client",
  "smelt-ui",

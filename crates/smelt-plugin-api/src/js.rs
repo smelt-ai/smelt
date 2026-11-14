@@ -20,10 +20,12 @@ use std::rc::Rc;
 
 use futures_channel::oneshot;
 use gpui::{App, Entity, Subscription};
-use gpui_shell::{HostArguments, HostError, HostModule, HostObject, HostValue, ScriptView};
+use gpui_shell::{
+    HostArguments, HostError, HostModule, HostObject, HostResult, HostValue, ScriptView,
+};
 use serde_json::Value;
 
-use crate::{CommandSpec, Handled, HostEvent, PathRequest, RuntimeKey};
+use crate::{CommandSpec, Handled, HostEvent, PathRequest, RuntimeKey, rusqlite};
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
@@ -42,6 +44,10 @@ export function active_project(): Project | null;
 export function agent_settings(machine: Machine): unknown | null;
 /** 那个视图此刻看得见。变了发 shown_views_changed。 */
 export function view_shown(view: string): boolean;
+/** 主窗口此刻在前台。回到前台发 window_activated，去后台不发：定时做事的醒来时问这里，不在前台就停。 */
+export function window_active(): boolean;
+/** 主窗口里宿主的遮罩层（确认框、命令面板、大图预览）开着。开关时发 overlay_changed。 */
+export function overlay_open(): boolean;
 /** 发送系统通知；显示受系统通知授权和设置影响。 */
 export function notify(subtitle: string, body: string): null;
 /** 替换本插件由脚本登记的主题，每项是 gpui-kit ThemeSet JSON。空数组撤下全部。 */
@@ -93,9 +99,28 @@ export interface CommandCall {
 export function next_command(): Promise<CommandCall>;
 /** 执行一条命令，任何来源的都行（id 是 "<来源>/<名字>"）。排到这一轮之后在主窗口里跑；命令不存在时报错。 */
 export function run(command: string, args?: unknown): null;
+/** 打开一个视图：布局里摆了它就让它露出来，没摆就在舞台上开成一页，再把 args 交给它。没有这个视图时为 false。 */
+export function open_view(view: string, args?: unknown): Promise<boolean>;
+/** 把文字交给当前会话（终端打进输入、对话填进输入框，不替用户发出）。没有能接的会话时报错。 */
+export function send_to_session(text: string): Promise<null>;
+/** 那台机器上的路径怎么切。 */
+export function path_style(machine: Machine): "posix" | "windows";
+/** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的报错。line 从 1 数。 */
+export function open_file(machine: Machine, path: string, line?: number): null;
+/** 让本插件的命令 name 当文件打开者（它要另外登记，requires_args）；执行时参数是 { machine, path, line }。只认最后登记的打开者。 */
+export function register_file_opener(name: string): null;
+/** SQL 参数。true / false 存成 1 / 0。 */
+export type SqlValue = string | number | boolean | null;
+/** 在本插件自己的 SQLite 库（~/.smelt/plugin-data/<插件 id>.sqlite3）里查询，每行是列名到值的对象。表由插件自己建；表结构的版本可以记在 PRAGMA user_version。BLOB 列取不出来。 */
+export function store_query(sql: string, params?: SqlValue[]): Promise<Record<string, string | number | null>[]>;
+/** 在本插件自己的库里执行一条语句，返回改动的行数。 */
+export function store_execute(sql: string, params?: SqlValue[]): Promise<number>;
 export type HostEvent =
   | { type: "runtime_topic"; machine: Machine; topic: string }
   | { type: "reconnected"; machine: Machine }
+  | { type: "project_changed"; machine: Machine; root: string }
+  | { type: "window_activated" }
+  | { type: "overlay_changed" }
   | { type: "machines_changed" }
   | { type: "active_project_changed" }
   | { type: "agent_settings_changed" }
@@ -155,6 +180,9 @@ impl JsPlugin {
         let layout_owner = self.0.borrow().id.clone();
         let commands = self.clone();
         let calls = self.clone();
+        let opener_owner = self.0.borrow().id.clone();
+        let query_owner = self.0.borrow().id.clone();
+        let execute_owner = query_owner.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_project", |_| {
@@ -184,6 +212,12 @@ impl JsPlugin {
             .function("view_shown", |arguments| {
                 let id = arguments.string(0)?;
                 Ok(in_app("view_shown", |cx| crate::host(cx).view_shown(id, cx))?.into())
+            })
+            .function("window_active", |_arguments| {
+                Ok(in_app("window_active", |cx| crate::host(cx).window_active(cx))?.into())
+            })
+            .function("overlay_open", |_arguments| {
+                Ok(in_app("overlay_open", |cx| crate::host(cx).overlay_open(cx))?.into())
             })
             .function("notify", |arguments| {
                 let subtitle = arguments.string(0)?;
@@ -248,6 +282,75 @@ impl JsPlugin {
                 let args = arguments.get(1).map(json_value).unwrap_or(Value::Null);
                 in_app("run", |cx| crate::run(command, args, cx))?.map_err(HostError::new)?;
                 Ok(HostValue::Null)
+            })
+            .function("path_style", |arguments| {
+                let machine = machine_argument("path_style", arguments, 0)?;
+                let style = in_app("path_style", |cx| crate::host(cx).path_style(&machine, cx))?;
+                Ok(match style {
+                    crate::model::runtime_path::PathStyle::Posix => "posix",
+                    crate::model::runtime_path::PathStyle::Windows => "windows",
+                }
+                .into())
+            })
+            .function("open_file", |arguments| {
+                let machine = machine_argument("open_file", arguments, 0)?;
+                let path = arguments.string(1)?.to_string();
+                let line = match arguments.get(2) {
+                    None | Some(HostValue::Null) => None,
+                    Some(HostValue::Number(line)) if *line >= 1.0 && line.fract() == 0.0 => {
+                        Some(*line as usize)
+                    }
+                    Some(other) => {
+                        return Err(HostError::new(format!(
+                            "open_file：line 要是从 1 数的整数，收到 {}",
+                            other.describe()
+                        )));
+                    }
+                };
+                let location = crate::FileLocation {
+                    machine,
+                    path,
+                    line,
+                };
+                in_app("open_file", |cx| crate::open_file(location, cx))?
+                    .map_err(HostError::new)?;
+                Ok(HostValue::Null)
+            })
+            .function("register_file_opener", move |arguments| {
+                let name = arguments.string(0)?;
+                if opener_owner.is_empty() {
+                    return Err(HostError::new("插件没有命令来源身份"));
+                }
+                in_app("register_file_opener", |cx| {
+                    crate::register_file_opener(&opener_owner, name, cx)
+                })?;
+                Ok(HostValue::Null)
+            })
+            .async_function("store_query", move |arguments| {
+                let (sql, params) = sql_arguments("store_query", arguments)?;
+                let owner = query_owner.clone();
+                Ok(async move { store_query(&owner, &sql, params) })
+            })
+            .async_function("store_execute", move |arguments| {
+                let (sql, params) = sql_arguments("store_execute", arguments)?;
+                let owner = execute_owner.clone();
+                Ok(async move { store_execute(&owner, &sql, params) })
+            })
+            .async_function("open_view", |arguments| {
+                let id = arguments.string(0)?.to_string();
+                let args = arguments.get(1).map(json_value).unwrap_or(Value::Null);
+                in_main_window("open_view", move |window, cx| {
+                    Ok(crate::host(cx).open_view(&id, args, window, cx).into())
+                })
+            })
+            .async_function("send_to_session", |arguments| {
+                let text = arguments.string(0)?.to_string();
+                in_main_window("send_to_session", move |window, cx| {
+                    crate::host(cx)
+                        .send_to_session(&text, window, cx)
+                        .map(|()| HostValue::Null)
+                        .map_err(HostError::new)
+                })
             })
             .async_function("next_command", move |_| Ok(calls.next_command()))
             .async_function("pick_paths", pick_paths)
@@ -364,6 +467,131 @@ impl JsPlugin {
 fn in_app<R>(name: &str, f: impl FnOnce(&mut App) -> R) -> Result<R, HostError> {
     gpui_shell::with_current_app(f)
         .ok_or_else(|| HostError::new(format!("{name} 只能在视图的事件、任务或 init 里调用")))
+}
+
+/// 在主窗口里做 `f`，结果用 Promise 交回。脚本可能正嵌在主窗口自己的更新里调，进不了
+/// 窗口，所以推到这一轮之后。
+fn in_main_window<F>(
+    name: &'static str,
+    f: F,
+) -> Result<impl Future<Output = Result<HostValue, HostError>> + Send + use<F>, HostError>
+where
+    F: FnOnce(&mut gpui::Window, &mut App) -> Result<HostValue, HostError> + 'static,
+{
+    let (sender, receiver) = oneshot::channel::<Result<HostValue, HostError>>();
+    in_app(name, |cx| {
+        let Some(window) = crate::host(cx).main_window(cx) else {
+            let _ = sender.send(Err(HostError::new(format!("{name}：主窗口没有打开"))));
+            return;
+        };
+        cx.defer(move |cx| {
+            let result = window
+                .update(cx, |_, window, cx| f(window, cx))
+                .unwrap_or_else(|_| Err(HostError::new(format!("{name}：主窗口已经关了"))));
+            let _ = sender.send(result);
+        });
+    })?;
+    Ok(async move {
+        receiver
+            .await
+            .unwrap_or_else(|_| Err(HostError::new(format!("{name}：没有执行"))))
+    })
+}
+
+/// `store_query` / `store_execute` 的参数：SQL 和可选的参数数组。
+fn sql_arguments(
+    name: &str,
+    arguments: &HostArguments,
+) -> Result<(String, Vec<rusqlite::types::Value>), HostError> {
+    use rusqlite::types::Value as Sql;
+    let sql = arguments.string(0)?.to_string();
+    let params = match arguments.get(1) {
+        None | Some(HostValue::Null) => Vec::new(),
+        Some(HostValue::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                HostValue::Null => Ok(Sql::Null),
+                HostValue::Bool(value) => Ok(Sql::Integer(i64::from(*value))),
+                HostValue::Number(number)
+                    if number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER =>
+                {
+                    Ok(Sql::Integer(*number as i64))
+                }
+                HostValue::Number(number) => Ok(Sql::Real(*number)),
+                HostValue::Str(text) => Ok(Sql::Text(text.clone())),
+                other => Err(HostError::new(format!(
+                    "{name}：参数只能是字符串、数字、布尔或 null，收到 {}",
+                    other.describe()
+                ))),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(other) => {
+            return Err(HostError::new(format!(
+                "{name}：params 要是数组，收到 {}",
+                other.describe()
+            )));
+        }
+    };
+    Ok((sql, params))
+}
+
+/// JS 数字能精确表示的最大整数，`Number.MAX_SAFE_INTEGER`。
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+fn plugin_store(owner: &str) -> Result<std::sync::Arc<crate::PluginStore>, HostError> {
+    if owner.is_empty() {
+        return Err(HostError::new("插件没有来源身份，不能用库"));
+    }
+    crate::plugin_store(owner).map_err(|error| HostError::new(error.to_string()))
+}
+
+fn store_query(owner: &str, sql: &str, params: Vec<rusqlite::types::Value>) -> HostResult {
+    use rusqlite::types::ValueRef;
+    let store = plugin_store(owner)?;
+    let rows = store
+        .read(|db| {
+            let mut statement = db.prepare(sql)?;
+            let columns: Vec<String> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let mut rows = statement.query(rusqlite::params_from_iter(params))?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let mut object = HostObject::new();
+                for (index, column) in columns.iter().enumerate() {
+                    let value = match row.get_ref(index)? {
+                        ValueRef::Null => HostValue::Null,
+                        ValueRef::Integer(value) => HostValue::from(value),
+                        ValueRef::Real(value) => HostValue::from(value),
+                        ValueRef::Text(text) => {
+                            HostValue::from(String::from_utf8_lossy(text).into_owned())
+                        }
+                        ValueRef::Blob(_) => {
+                            return Err(rusqlite::Error::InvalidColumnType(
+                                index,
+                                column.clone(),
+                                rusqlite::types::Type::Blob,
+                            ));
+                        }
+                    };
+                    object = object.field(column.as_str(), value);
+                }
+                out.push(HostValue::from(object));
+            }
+            Ok(out)
+        })
+        .map_err(|error| HostError::new(format!("store_query：{error}")))?;
+    Ok(HostValue::Array(rows))
+}
+
+fn store_execute(owner: &str, sql: &str, params: Vec<rusqlite::types::Value>) -> HostResult {
+    let store = plugin_store(owner)?;
+    let changed = store
+        .read(|db| db.execute(sql, rusqlite::params_from_iter(params)))
+        .map_err(|error| HostError::new(format!("store_execute：{error}")))?;
+    Ok(HostValue::from(changed))
 }
 
 /// `register_layouts` 的参数：每项的名字、标题、布局原文。
@@ -564,6 +792,12 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::Reconnected(key) => HostObject::new()
             .field("type", "reconnected")
             .field("machine", machine(key)),
+        HostEvent::ProjectChanged { machine: key, root } => HostObject::new()
+            .field("type", "project_changed")
+            .field("machine", machine(key))
+            .field("root", root.as_str()),
+        HostEvent::WindowActivated => HostObject::new().field("type", "window_activated"),
+        HostEvent::OverlayChanged => HostObject::new().field("type", "overlay_changed"),
         HostEvent::MachinesChanged => HostObject::new().field("type", "machines_changed"),
         HostEvent::ActiveProjectChanged => {
             HostObject::new().field("type", "active_project_changed")
@@ -808,5 +1042,56 @@ mod tests {
             Some("machines_changed")
         );
         assert!(plugin.0.borrow().queue.is_empty());
+    }
+
+    #[test]
+    fn store_functions_round_trip_in_the_plugins_own_database() {
+        let owner = format!("js-store-test-{}", std::process::id());
+        let module = JsPlugin::for_plugin(&owner, "库").module();
+        let run = |name: &str, values: Vec<HostValue>| {
+            smol::block_on(module.begin(name, &HostArguments::new(values)).unwrap())
+        };
+        run(
+            "store_execute",
+            vec!["CREATE TABLE IF NOT EXISTS note (id INTEGER, body TEXT, score REAL, done INTEGER)".into()],
+        )
+        .unwrap();
+        let inserted = run(
+            "store_execute",
+            vec![
+                "INSERT INTO note VALUES (?1, ?2, ?3, ?4)".into(),
+                HostValue::Array(vec![
+                    HostValue::from(7),
+                    HostValue::from("你好"),
+                    HostValue::from(1.5),
+                    HostValue::Bool(true),
+                ]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(inserted, HostValue::from(1));
+        let rows = run("store_query", vec!["SELECT * FROM note".into()]).unwrap();
+        let expected: HostValue = HostObject::new()
+            .field("id", 7)
+            .field("body", "你好")
+            .field("score", 1.5)
+            .field("done", 1)
+            .into();
+        assert_eq!(rows, HostValue::Array(vec![expected]));
+
+        // 参数形状不对在主线程上就报，不进库。
+        let nested = HostArguments::new([
+            "SELECT ?1".into(),
+            HostValue::Array(vec![HostValue::Array(Vec::new())]),
+        ]);
+        assert!(module.begin("store_query", &nested).is_err());
+        let blob = run("store_query", vec!["SELECT x'00' AS b".into()]);
+        assert!(blob.is_err(), "BLOB 列取不出来");
+        // 没有来源身份的不给库。
+        let anonymous = JsPlugin::new().module();
+        let begun = anonymous
+            .begin("store_query", &HostArguments::new(["SELECT 1".into()]))
+            .unwrap();
+        assert!(smol::block_on(begun).is_err());
     }
 }

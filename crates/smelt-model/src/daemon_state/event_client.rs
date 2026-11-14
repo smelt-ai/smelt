@@ -699,6 +699,7 @@ fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
         conversation_id: state.conversation_id,
         custom_title: state.custom_title,
         cwd: state.cwd,
+        branch: state.branch,
         phase_since: state.phase_since_unix_seconds,
         turn_started_at: state.turn_started_at_unix_seconds,
         updated_at: state.updated_at_unix_seconds,
@@ -1109,6 +1110,15 @@ mod tests {
             Some(DaemonStateEvent::Update(state))
                 if state.custom_title.as_deref() == Some("改过的名")
         ));
+    }
+
+    /// 分支名由运行时维护在会话状态里，侧栏直接读它。
+    #[test]
+    fn session_state_carries_the_branch() {
+        let mut dto = session_dto("a", 1, 1);
+        dto.branch = Some("feat/x".to_string());
+        assert_eq!(daemon_session_state(dto).branch.as_deref(), Some("feat/x"));
+        assert_eq!(daemon_session_state(session_dto("b", 1, 1)).branch, None);
     }
 
     #[test]

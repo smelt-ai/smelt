@@ -626,10 +626,6 @@ git_calls! {
     GitDiscoverCall => GitDiscover(GitRootParams) -> Discovery;
     /// 仓库身份：当前分支。非 git 目录返回 `None`。
     GitRepoInfoCall => GitRepoInfo(GitRootParams) -> GitRepoInfoResult;
-    /// 关注 `root` 所在仓库的 HEAD：切分支、detach 时运行时发 `project.changed{root}`。
-    /// 只看 HEAD 一个文件，比 `project.watch` 轻得多，侧栏每个项目的分支名靠它。幂等；
-    /// 不在 git 仓库里报错。
-    GitWatchHeadCall => GitWatchHead(GitRootParams) -> EmptyParams;
     GitStatusCall => GitStatus(GitRootParams) -> GitStatusData;
     GitBranchesCall => GitBranches(GitRootParams) -> BranchList;
     GitCheckoutCall => GitCheckout(GitBranchParams) -> EmptyParams;

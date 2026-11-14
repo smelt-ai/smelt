@@ -1,0 +1,25 @@
+# 内置插件「变更」：当前项目各仓库的改动、暂存、提交、推送、分支和提交历史。git 命令由
+# 项目所在机器的运行时执行。只依赖插件接口和 gpui 组件库，宿主里没有它的类型。
+#
+# 包名不叫 smelt-git：那是 git 领域层（运行时用）。
+[package]
+name = "smelt-git-ui"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
+# 面板组的分隔条换成发丝（见 lib.rs 的 h_resizable）。
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+# 视图图标：完整的 lucide 图标表。
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+# 日志页的提交时间。
+chrono = "0.4"
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

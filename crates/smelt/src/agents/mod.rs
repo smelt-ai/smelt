@@ -3,7 +3,7 @@
 //! 智能体是持久化产品对象，当前只注册 Pi 执行引擎。它本身不是进程或对话；
 //! 自动化通过独立一级入口引用智能体，并在触发时创建 Run。
 //!
-//! 跟 `git_panel` / `settings` 同一套路：`impl Workspace` 方法从本模块拆出，
+//! 跟 `settings` 同一套路：`impl Workspace` 方法从本模块拆出，
 //! 字段仍声明在 `main.rs` 的 `Workspace` 里。数据修改在 `workspace.rs`，
 //! 智能体页面在 `view.rs`，自动化页面在 `automation_view.rs`。
 

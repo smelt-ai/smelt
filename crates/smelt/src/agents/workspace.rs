@@ -1214,7 +1214,7 @@ impl Workspace {
         self.agent_surface.editor = None;
         self.agent_surface.error = None;
         self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
-        self.sync_session_ui(window, cx);
+        self.sync_session_ui(cx);
         if let Some(view) = view {
             view.update(cx, |view, cx| {
                 view.maybe_auto_resume(window, cx);

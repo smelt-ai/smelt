@@ -140,13 +140,6 @@ pub(crate) fn app_key_bindings(bound: &[Bound], cx: &App) -> Vec<KeyBinding> {
         KeyBinding::new("cmd-w", CloseSettingsWindow, Some("SettingsWindow")),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-w", CloseSettingsWindow, Some("SettingsWindow")),
-        // 文件树只在自己的宿主上挂 FileTree。树没挂载（文件页不可见、树收起、
-        // 搜索框有内容）时这条 context 不在焦点路径上。
-        KeyBinding::new("up", FileTreeMoveUp, Some("FileTree")),
-        KeyBinding::new("down", FileTreeMoveDown, Some("FileTree")),
-        KeyBinding::new("left", FileTreeMoveLeft, Some("FileTree")),
-        KeyBinding::new("right", FileTreeMoveRight, Some("FileTree")),
-        KeyBinding::new("enter", FileTreeActivate, Some("FileTree")),
         KeyBinding::new("up", SidebarUp, Some("Sidebar")),
         KeyBinding::new("down", SidebarDown, Some("Sidebar")),
         KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),

@@ -1,4 +1,4 @@
-//! 宿主自带的视图：会话列表、舞台、文件、变更。
+//! 宿主自带的视图：会话列表、舞台。
 //!
 //! 过渡期的适配层：这几块的状态和画法还在 `Workspace` 上，没搬进各自的插件 crate（迁移
 //! 顺序见 `docs/app-plugins.md`）。这里把每一块包成一个视图，登记进和插件同一张视图注册表，
@@ -19,20 +19,16 @@ use crate::Workspace;
 pub(crate) enum Builtin {
     Sessions,
     Stage,
-    Files,
-    Git,
 }
 
 impl Builtin {
-    pub(crate) const ALL: [Self; 4] = [Self::Sessions, Self::Stage, Self::Files, Self::Git];
+    pub(crate) const ALL: [Self; 2] = [Self::Sessions, Self::Stage];
 
     /// 视图 id，布局文件里引用的就是它。
     pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Sessions => "sessions",
             Self::Stage => "stage",
-            Self::Files => "files",
-            Self::Git => "git",
         }
     }
 
@@ -40,8 +36,6 @@ impl Builtin {
         match self {
             Self::Sessions => "会话",
             Self::Stage => "舞台",
-            Self::Files => "文件",
-            Self::Git => "变更",
         }
     }
 
@@ -49,8 +43,6 @@ impl Builtin {
         match self {
             Self::Sessions => IconName::MessagesSquare,
             Self::Stage => IconName::AppWindow,
-            Self::Files => IconName::FolderTree,
-            Self::Git => IconName::GitBranch,
         }
         .path()
     }
@@ -93,8 +85,6 @@ impl Render for BuiltinView {
         let content = self.workspace.update(cx, |workspace, cx| match kind {
             Builtin::Sessions => workspace.render_sidebar_dock(window, cx),
             Builtin::Stage => workspace.render_stage_dock(window, cx),
-            Builtin::Files => workspace.render_tool_panel_files(window, cx),
-            Builtin::Git => workspace.git_narrow_panel(window, cx),
         });
         div()
             .size_full()
@@ -108,15 +98,6 @@ impl Render for BuiltinView {
 impl PluginView for BuiltinView {
     /// 打开时要看的东西由工作台定（当前会话、当前项目），参数没有用处。
     fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
-
-    /// 变更：当前项目里所有仓库的改动文件数。
-    fn badge(&self, cx: &App) -> Option<SharedString> {
-        if self.kind != Builtin::Git {
-            return None;
-        }
-        let count = crate::tool_panel::git_changes_badge(self.workspace.upgrade()?.read(cx), cx);
-        (count > 0).then(|| count.to_string().into())
-    }
 }
 
 /// 把自带视图登记进视图注册表。工作台建好时调；窗口重开时新工作台再登记一遍，替换掉

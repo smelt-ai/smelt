@@ -161,6 +161,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
     for panel in &previous {
         api::unregister_layouts(&panel.id, cx);
         api::unregister_commands(&panel.id, cx);
+        api::unregister_file_opener(&panel.id, cx);
     }
 
     // 视图出生时定下权限，所以每次挂载前按这一批插件的声明重新装一遍。
@@ -219,6 +220,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                         smelt_ui::theme_catalog::unregister_themes(&format!("script:{id}"), cx);
                         api::unregister_layouts(&id, cx);
                         api::unregister_commands(&id, cx);
+                        api::unregister_file_opener(&id, cx);
                         eprintln!("[plugins] {id} 加载失败：{error}");
                     }
                 }
@@ -253,6 +255,7 @@ pub(crate) fn mount_all(window: &mut Window, cx: &mut App) {
                     eprintln!("[plugins] {} 登记失败：{error}", panel.id);
                     api::unregister_layouts(&panel.id, cx);
                     api::unregister_commands(&panel.id, cx);
+                    api::unregister_file_opener(&panel.id, cx);
                     return None;
                 }
                 Some(panel)

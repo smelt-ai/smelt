@@ -4,7 +4,7 @@ use gpui::{
 };
 use gpui_component::resizable::{ResizableState, resizable_panel};
 
-use crate::resizable_split::h_resizable;
+use crate::h_resizable;
 
 struct SplitHarness {
     state: gpui::Entity<ResizableState>,

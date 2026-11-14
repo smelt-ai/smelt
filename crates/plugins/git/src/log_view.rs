@@ -1,11 +1,11 @@
 //! 「日志」页的 GPUI 渲染：左侧分支树 + 分支图 + 提交列表 + 右侧提交详情。
 //!
-//! 布局算法在 [`crate::git_log`]，本文件只负责把算好的 [`GraphRow`] 画出来。
+//! 布局算法在 [`crate::log`]，本文件只负责把算好的 [`GraphRow`] 画出来。
 //! 分支图走 `canvas` + `PathBuilder`：竖线和斜线都是真实路径，缩放不会糊，也不用
 //! 像解析 `git log --graph` 的字符画那样跟行高较劲。
 //!
 //! **本文件的所有渲染函数都必须靠参数拿状态，绝不能 `cx.entity().read(cx)`**：
-//! render 期间 Workspace 正被可变借用，再 read 一次就是重入借用，而 GPUI 的 render
+//! render 期间 GitPanel 正被可变借用，再 read 一次就是重入借用，而 GPUI 的 render
 //! 跑在 FFI 边界上不可 unwind，panic 会直接 abort——表现为「点一下标签整个 App 闪退」，
 //! 且崩溃报告里只有 `panic_cannot_unwind`，看不到真正的 panic 消息，极难查。
 //! `cx.entity()` 本身只是拿句柄，安全；危险的是紧跟着的 `.read(cx)`。
@@ -20,12 +20,12 @@ use gpui_component::diff::Diff;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Sizable as _, h_flex, v_flex};
-use smelt_ui::truncated_line::truncated_line;
-pub(crate) use smelt_ui::Button;
+pub(crate) use smelt_plugin_api::ui::Button;
+use smelt_plugin_api::ui::truncated_line::truncated_line;
 
-use crate::git_log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
+use crate::log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
 use crate::ui_theme;
-use crate::{Workspace, placeholder_view};
+use crate::{GitPanel, placeholder_view};
 
 /// 每行高度。与提交列表逐行对齐，图和文字必须共用同一个值。
 pub const ROW_H: f32 = 24.0;
@@ -174,7 +174,7 @@ fn commit_row(
     commit: &CommitNode,
     gw: f32,
     is_sel: bool,
-    ws: &Entity<Workspace>,
+    ws: &Entity<GitPanel>,
     root: &Rc<crate::ProjectRef>,
     fg: Hsla,
     muted: Hsla,
@@ -249,7 +249,7 @@ pub fn git_log_view(
     root: Option<crate::ProjectRef>,
     state: &GitLogState,
     head_branch: Option<String>,
-    cx: &mut Context<Workspace>,
+    cx: &mut Context<GitPanel>,
 ) -> Div {
     let (muted, fg, accent) = {
         let t = cx.theme();
@@ -352,9 +352,8 @@ pub fn git_log_view(
                         .icon_size()
                         .label("刷新")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let root = this.current_cwd(cx);
-                            if let Some(r) = root {
-                                this.reload_git_log(r, cx);
+                            if let Some(root) = this.git_log.loaded_root.clone() {
+                                this.reload_git_log(root, cx);
                             }
                         })),
                 ),
@@ -394,7 +393,7 @@ fn fmt_time(ts: i64) -> String {
 pub fn commit_detail_pane(
     root: Option<crate::ProjectRef>,
     state: &GitLogState,
-    cx: &mut Context<Workspace>,
+    cx: &mut Context<GitPanel>,
 ) -> Div {
     let (muted, fg) = {
         let t = cx.theme();
@@ -444,7 +443,7 @@ pub fn commit_detail_pane(
                         .child(
                             div()
                                 .flex_none()
-                                .font_family(crate::terminal_view::font_family())
+                                .font_family(crate::mono_font())
                                 .child(c.short.clone()),
                         ),
                 ),
@@ -463,8 +462,8 @@ pub fn commit_detail_pane(
         )
 }
 
-/// 日志页的单文件 diff。提交列表滚动通知的是 Workspace。
-/// 渲染只读自己持有的 `DiffState`，不能再去读 Workspace。
+/// 日志页的单文件 diff。提交列表滚动通知的是 GitPanel。
+/// 渲染只读自己持有的 `DiffState`，不能再去读 GitPanel。
 pub struct GitLogDiffBody {
     view: Option<Entity<gpui_component::diff::DiffState>>,
 }
@@ -497,7 +496,7 @@ impl Render for GitLogDiffBody {
         let Some(view) = self.view.clone() else {
             return div().size_full().into_any_element();
         };
-        // 订上 DiffState 的刷新。不读 Workspace，提交列表滚动不会把这份正文再排一遍。
+        // 订上 DiffState 的刷新。不读 GitPanel，提交列表滚动不会把这份正文再排一遍。
         let _ = view.read(cx);
         // 缓存视图按给定边界做根布局。
         div()
@@ -513,7 +512,7 @@ impl Render for GitLogDiffBody {
 fn commit_diff_list(
     root: Option<crate::ProjectRef>,
     state: &GitLogState,
-    cx: &mut Context<Workspace>,
+    cx: &mut Context<GitPanel>,
 ) -> Div {
     let (muted, fg, accent) = {
         let t = cx.theme();
@@ -612,11 +611,11 @@ fn commit_diff_list(
 /// 出自己站在哪条线上。
 pub fn branch_tree(
     root: Option<crate::ProjectRef>,
-    branches: Option<&crate::git_panel::BranchList>,
+    branches: Option<&crate::panel::BranchList>,
     scope: &LogScope,
     // head_branch：当前检出的分支名，用于打 ● 标记。
     head_branch: Option<String>,
-    cx: &mut Context<Workspace>,
+    cx: &mut Context<GitPanel>,
 ) -> Div {
     let (muted, fg, accent) = {
         let t = cx.theme();
@@ -633,7 +632,7 @@ pub fn branch_tree(
                  label: String,
                  target: LogScope,
                  on: bool,
-                 ws: Entity<Workspace>,
+                 ws: Entity<GitPanel>,
                  root: Option<crate::ProjectRef>| {
         h_flex()
             .id(id)
@@ -659,7 +658,7 @@ pub fn branch_tree(
                  names: Vec<String>,
                  scope: LogScope,
                  head: Option<String>,
-                 ws: Entity<Workspace>,
+                 ws: Entity<GitPanel>,
                  root: Option<crate::ProjectRef>,
                  is_remote: bool| {
         v_flex()
@@ -784,11 +783,13 @@ pub fn branch_tree(
                                         "删除分支…"
                                     })
                                     .on_click(
-                                        move |_ev, _window, cx| {
+                                        move |_ev, window, cx| {
                                             let (r, n) = (r_del.clone(), n_del.clone());
                                             ws_del.update(cx, |this, cx| {
                                                 if let Some(r) = r {
-                                                    this.start_delete_branch(r, n, remote, cx);
+                                                    this.start_delete_branch(
+                                                        r, n, remote, window, cx,
+                                                    );
                                                 }
                                             });
                                         },

@@ -6,7 +6,7 @@
 //! 对话里最近一问整条滚出视口后，胶囊换成那一问，按下滚回去。
 //! 智能体/自动化目录和钻取已有页头，铬不重复写，也不回落到上一会话。
 //!
-//! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
+//! `impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::StatefulInteractiveElement;
 use gpui::*;

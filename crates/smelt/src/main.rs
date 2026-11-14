@@ -26,10 +26,6 @@ mod daemon_restart_prompt;
 mod desktop_view;
 mod dir_picker;
 mod dock;
-mod file_tree;
-mod git_log;
-mod git_log_view;
-mod git_panel;
 mod ide;
 mod keymap;
 mod liquid_glass;
@@ -38,13 +34,11 @@ mod overlay;
 mod plugin_host;
 mod plugins;
 mod provider_quota;
-mod resizable_split;
 mod resource_monitor;
 mod runtime_call;
 mod runtime_events;
 mod runtime_space;
 mod runtimes;
-mod tool_panel;
 pub(crate) use runtime_space::ProjectRef;
 pub(crate) use runtimes::RuntimeKey;
 mod session_commands;
@@ -92,14 +86,11 @@ use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
 use gpui::*;
 use gpui_component::color_picker::ColorPickerState;
-use gpui_component::resizable::ResizableState;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
 use smelt_model::workspace_directory::{project_labels, project_root_of};
 use terminal_view::TerminalView;
 
-use file_tree::{DeleteFileTarget, OpenFile, SearchState};
-use git_panel::{BranchList, GitDiff, GitStatusData, RepoInfo};
 use settings::{Appearance, active_launch_entries, default_launch_entries, load_appearance};
 
 /// 文件事件里有没有名叫 `name` 的文件。
@@ -214,11 +205,6 @@ gpui::actions!(
     smelt,
     [
         DismissWorkspace,
-        FileTreeMoveUp,
-        FileTreeMoveDown,
-        FileTreeMoveLeft,
-        FileTreeMoveRight,
-        FileTreeActivate,
         SidebarUp,
         SidebarDown,
         SidebarCollapse,
@@ -384,364 +370,6 @@ fn apply_automation_projection(
     if let Some(workspace) = current_workspace(current_ws) {
         let _ = workspace.update(cx, |_, cx| cx.notify());
     }
-}
-
-/// 一个长期存活的右侧路由实例。左侧 session 路由器只整体交换这个对象，不读取其中
-/// 任何实现字段；缓存实体（例如文件编辑器、diff 状态）而不只缓存描述，切回来才能停在原来的
-/// 进程、页面和尺寸上。
-struct SessionUiState {
-    restored_from_archive: bool,
-    /// 冷恢复后首次激活 route 时重新打开；运行期打开完成后即清空。
-    pending_restore_file: Option<String>,
-    expanded: HashSet<String>,
-    file_tree_selected: Option<String>,
-    open_file: Option<OpenFile>,
-    /// 当前打开文件编辑器的变更订阅；输入变化时让 Workspace 重渲染预览和脏标记。
-    _file_editor_sub: Option<Subscription>,
-    file_tree_w: f32,
-    /// Files 内容区右上角的文件树显隐状态。
-    file_tree_open: bool,
-    pinned_roots: Vec<String>,
-    collapsed_roots: HashSet<String>,
-    git_tab: GitTab,
-    git_diff: Option<GitDiff>,
-    /// 打开 diff 的自增序号（独立于 file_gen，避免和文件高亮任务互相取消）。
-    /// 异步 diff 回调用它判断结果是否已过期（换文件/切仓库/关视图都会 +1）。
-    /// 与 `git_diff` 同属抽屉现场，跟随选中的项目，不跟每条会话。
-    diff_gen: u64,
-    /// 右侧 Git 文件树点击后，等待聚合 diff 加载完成再定位的文件。
-    pending_diff_file: Option<String>,
-    /// 点「+」之后才展开评论。拖选期间不往 Diff 里加注释，列表高度不变。
-    diff_comment_open: bool,
-    /// 「全部更改」里用户收起过的文件。其余文件默认展开。
-    git_collapsed_diff_files: HashSet<String>,
-    diff_split: bool,
-    /// 变更栏正文。补丁原文没变时不调用 `set_files`，滚动和折叠才留得住。
-    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
-    /// 当前装进 `diff_view` 的补丁原文。
-    diff_view_patch: String,
-    /// 评论卡锚在这个源码范围的末行。
-    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
-    _diff_view_sub: Option<Subscription>,
-    /// `DiffFile::parse` 失败时的说明。git 报错、只有子模块这类非 diff 文本走这里。
-    diff_parse_error: Option<String>,
-    git_tree_collapsed: HashSet<String>,
-    diff_scope: git_panel::DiffScope,
-}
-
-impl Default for SessionUiState {
-    fn default() -> Self {
-        Self {
-            restored_from_archive: false,
-            pending_restore_file: None,
-            expanded: HashSet::new(),
-            file_tree_selected: None,
-            open_file: None,
-            _file_editor_sub: None,
-            file_tree_w: tool_panel::MIN_FILE_TREE_WIDTH,
-            file_tree_open: true,
-            pinned_roots: Vec::new(),
-            collapsed_roots: HashSet::new(),
-            git_tab: GitTab::Changes,
-            git_diff: None,
-            diff_gen: 0,
-            pending_diff_file: None,
-            diff_comment_open: false,
-            git_collapsed_diff_files: HashSet::new(),
-            diff_split: false,
-            diff_view: None,
-            diff_view_patch: String::new(),
-            diff_comment_range: None,
-            _diff_view_sub: None,
-            diff_parse_error: None,
-            git_tree_collapsed: HashSet::new(),
-            diff_scope: git_panel::DiffScope::All,
-        }
-    }
-}
-
-/// `SessionUiState` 的跨进程镜像。这里没有 GPUI Entity；route 自己负责把路径、tab
-/// 描述和尺寸重建成运行时对象，Workspace 只把这块不透明数据随 session 存取。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-struct SessionRouteArchive {
-    version: u32,
-    expanded: HashSet<String>,
-    file_tree_selected: Option<String>,
-    open_file_path: Option<String>,
-    file_tree_w: f32,
-    file_tree_open: bool,
-    pinned_roots: Vec<String>,
-    collapsed_roots: HashSet<String>,
-    git_tab: GitTab,
-    diff_split: bool,
-    git_tree_collapsed: HashSet<String>,
-    diff_scope: git_panel::DiffScope,
-}
-
-impl Default for SessionRouteArchive {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            expanded: HashSet::new(),
-            file_tree_selected: None,
-            open_file_path: None,
-            file_tree_w: tool_panel::MIN_FILE_TREE_WIDTH,
-            file_tree_open: true,
-            pinned_roots: Vec::new(),
-            collapsed_roots: HashSet::new(),
-            git_tab: GitTab::Changes,
-            diff_split: false,
-            git_tree_collapsed: HashSet::new(),
-            diff_scope: git_panel::DiffScope::All,
-        }
-    }
-}
-
-impl SessionUiState {
-    fn archive(&self) -> SessionRouteArchive {
-        SessionRouteArchive {
-            expanded: self.expanded.clone(),
-            file_tree_selected: self.file_tree_selected.clone(),
-            open_file_path: self
-                .open_file
-                .as_ref()
-                .map(|file| file.path.clone())
-                .or_else(|| self.pending_restore_file.clone()),
-            file_tree_w: self.file_tree_w,
-            file_tree_open: self.file_tree_open,
-            pinned_roots: self.pinned_roots.clone(),
-            collapsed_roots: self.collapsed_roots.clone(),
-            git_tab: self.git_tab,
-            diff_split: self.diff_split,
-            git_tree_collapsed: self.git_tree_collapsed.clone(),
-            diff_scope: self.diff_scope,
-            ..Default::default()
-        }
-    }
-
-    fn restore(archive: SessionRouteArchive) -> Self {
-        Self {
-            restored_from_archive: true,
-            pending_restore_file: archive.open_file_path,
-            expanded: archive.expanded,
-            file_tree_selected: archive.file_tree_selected,
-            open_file: None,
-            _file_editor_sub: None,
-            file_tree_w: archive.file_tree_w.clamp(
-                tool_panel::MIN_FILE_TREE_WIDTH,
-                tool_panel::MAX_FILE_TREE_WIDTH,
-            ),
-            file_tree_open: archive.file_tree_open,
-            pinned_roots: archive.pinned_roots,
-            collapsed_roots: archive.collapsed_roots,
-            git_tab: archive.git_tab,
-            git_diff: None,
-            diff_gen: 0,
-            pending_diff_file: None,
-            diff_comment_open: false,
-            git_collapsed_diff_files: HashSet::new(),
-            diff_split: archive.diff_split,
-            diff_view: None,
-            diff_view_patch: String::new(),
-            diff_comment_range: None,
-            _diff_view_sub: None,
-            diff_parse_error: None,
-            git_tree_collapsed: archive.git_tree_collapsed,
-            diff_scope: archive.diff_scope,
-        }
-    }
-}
-
-fn swap_session_ui_state(current: &mut SessionUiState, parked: &mut SessionUiState) {
-    std::mem::swap(current, parked);
-    current.file_tree_w = current.file_tree_w.clamp(
-        tool_panel::MIN_FILE_TREE_WIDTH,
-        tool_panel::MAX_FILE_TREE_WIDTH,
-    );
-    parked.file_tree_w = parked.file_tree_w.clamp(
-        tool_panel::MIN_FILE_TREE_WIDTH,
-        tool_panel::MAX_FILE_TREE_WIDTH,
-    );
-}
-
-/// 文件和变更的现场：文件树、打开的文件、Git。跟选中的项目走，不跟每条会话。
-struct ProjectUiState {
-    pending_restore_file: Option<String>,
-    expanded: HashSet<String>,
-    file_tree_selected: Option<String>,
-    open_file: Option<OpenFile>,
-    _file_editor_sub: Option<Subscription>,
-    file_tree_w: f32,
-    file_tree_open: bool,
-    pinned_roots: Vec<String>,
-    collapsed_roots: HashSet<String>,
-    git_tab: GitTab,
-    git_diff: Option<GitDiff>,
-    diff_gen: u64,
-    pending_diff_file: Option<String>,
-    diff_comment_open: bool,
-    git_collapsed_diff_files: HashSet<String>,
-    diff_split: bool,
-    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
-    diff_view_patch: String,
-    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
-    _diff_view_sub: Option<Subscription>,
-    diff_parse_error: Option<String>,
-    git_tree_collapsed: HashSet<String>,
-    diff_scope: git_panel::DiffScope,
-}
-
-impl Default for ProjectUiState {
-    fn default() -> Self {
-        SessionUiState::default().take_project_ui()
-    }
-}
-
-impl SessionUiState {
-    fn take_project_ui(&mut self) -> ProjectUiState {
-        let defaults = SessionUiState::default();
-        ProjectUiState {
-            pending_restore_file: std::mem::take(&mut self.pending_restore_file),
-            expanded: std::mem::take(&mut self.expanded),
-            file_tree_selected: self.file_tree_selected.take(),
-            open_file: self.open_file.take(),
-            _file_editor_sub: self._file_editor_sub.take(),
-            file_tree_w: std::mem::replace(&mut self.file_tree_w, defaults.file_tree_w),
-            file_tree_open: std::mem::replace(&mut self.file_tree_open, defaults.file_tree_open),
-            pinned_roots: std::mem::take(&mut self.pinned_roots),
-            collapsed_roots: std::mem::take(&mut self.collapsed_roots),
-            git_tab: std::mem::replace(&mut self.git_tab, defaults.git_tab),
-            git_diff: self.git_diff.take(),
-            diff_gen: std::mem::take(&mut self.diff_gen),
-            pending_diff_file: self.pending_diff_file.take(),
-            diff_comment_open: std::mem::take(&mut self.diff_comment_open),
-            git_collapsed_diff_files: std::mem::take(&mut self.git_collapsed_diff_files),
-            diff_split: std::mem::replace(&mut self.diff_split, defaults.diff_split),
-            diff_view: self.diff_view.take(),
-            diff_view_patch: std::mem::take(&mut self.diff_view_patch),
-            diff_comment_range: self.diff_comment_range.take(),
-            _diff_view_sub: self._diff_view_sub.take(),
-            diff_parse_error: self.diff_parse_error.take(),
-            git_tree_collapsed: std::mem::take(&mut self.git_tree_collapsed),
-            diff_scope: std::mem::replace(&mut self.diff_scope, defaults.diff_scope),
-        }
-    }
-
-    fn apply_project_ui(&mut self, ui: ProjectUiState) {
-        self.pending_restore_file = ui.pending_restore_file;
-        self.expanded = ui.expanded;
-        self.file_tree_selected = ui.file_tree_selected;
-        self.open_file = ui.open_file;
-        self._file_editor_sub = ui._file_editor_sub;
-        self.file_tree_w = ui.file_tree_w.clamp(
-            tool_panel::MIN_FILE_TREE_WIDTH,
-            tool_panel::MAX_FILE_TREE_WIDTH,
-        );
-        self.file_tree_open = ui.file_tree_open;
-        self.pinned_roots = ui.pinned_roots;
-        self.collapsed_roots = ui.collapsed_roots;
-        self.git_tab = ui.git_tab;
-        self.git_diff = ui.git_diff;
-        self.diff_gen = ui.diff_gen;
-        self.pending_diff_file = ui.pending_diff_file;
-        self.diff_comment_open = ui.diff_comment_open;
-        self.git_collapsed_diff_files = ui.git_collapsed_diff_files;
-        self.diff_split = ui.diff_split;
-        self.diff_view = ui.diff_view;
-        self.diff_view_patch = ui.diff_view_patch;
-        self.diff_comment_range = ui.diff_comment_range;
-        self._diff_view_sub = ui._diff_view_sub;
-        self.diff_parse_error = ui.diff_parse_error;
-        self.git_tree_collapsed = ui.git_tree_collapsed;
-        self.diff_scope = ui.diff_scope;
-    }
-}
-
-impl ProjectUiState {
-    /// 把可落盘的抽屉字段写回会话存档。打开的编辑器和 diff 缓存仍只停在热场。
-    fn copy_persistable_into(&self, dest: &mut SessionUiState) {
-        dest.pending_restore_file = self
-            .open_file
-            .as_ref()
-            .map(|file| file.path.clone())
-            .or_else(|| self.pending_restore_file.clone());
-        dest.expanded = self.expanded.clone();
-        dest.file_tree_selected = self.file_tree_selected.clone();
-        dest.file_tree_w = self.file_tree_w.clamp(
-            tool_panel::MIN_FILE_TREE_WIDTH,
-            tool_panel::MAX_FILE_TREE_WIDTH,
-        );
-        dest.file_tree_open = self.file_tree_open;
-        dest.pinned_roots = self.pinned_roots.clone();
-        dest.collapsed_roots = self.collapsed_roots.clone();
-        dest.git_tab = self.git_tab;
-        dest.diff_split = self.diff_split;
-        dest.git_tree_collapsed = self.git_tree_collapsed.clone();
-        dest.diff_scope = self.diff_scope;
-    }
-}
-
-/// 把当前热场抽屉按项目根停走。返回刚停放的 key，供写回被换出的会话存档。
-fn park_project_ui(
-    active: &mut SessionUiState,
-    project_ui: &mut HashMap<ProjectRef, ProjectUiState>,
-    active_key: &mut Option<ProjectRef>,
-) -> Option<ProjectRef> {
-    let key = active_key.take()?;
-    project_ui.insert(key.clone(), active.take_project_ui());
-    Some(key)
-}
-
-/// 把目标项目已停放的抽屉盖回热场；没有停放记录时保留刚换上来的会话抽屉。
-fn apply_project_ui_for_root(
-    active: &mut SessionUiState,
-    project_ui: &mut HashMap<ProjectRef, ProjectUiState>,
-    active_key: &mut Option<ProjectRef>,
-    new_key: Option<ProjectRef>,
-) {
-    if let Some(key) = new_key.as_ref()
-        && let Some(ui) = project_ui.remove(key)
-    {
-        active.apply_project_ui(ui);
-    }
-    *active_key = new_key;
-}
-
-/// 切会话时抽屉的正确顺序：先按项目根停走当前抽屉，再交换会话现场，再盖回目标项目。
-/// 先换会话再停放会把新会话里那份过期抽屉当成该项目的现场。
-#[cfg(test)]
-fn resync_session_with_project_ui(
-    active: &mut SessionUiState,
-    old_session: &mut SessionUiState,
-    new_session: &mut SessionUiState,
-    project_ui: &mut HashMap<ProjectRef, ProjectUiState>,
-    active_key: &mut Option<ProjectRef>,
-    new_key: Option<ProjectRef>,
-) {
-    let parked_key = park_project_ui(active, project_ui, active_key);
-    swap_session_ui_state(active, old_session);
-    if let Some(key) = parked_key.as_ref()
-        && let Some(ui) = project_ui.get(key)
-    {
-        ui.copy_persistable_into(old_session);
-    }
-    swap_session_ui_state(active, new_session);
-    apply_project_ui_for_root(active, project_ui, active_key, new_key);
-}
-
-/// Git 页内部的子页。对标 JetBrains 的 Git 工具窗口——「提交」和「日志」是同一个
-/// 窗口里的两个视图，不占两个顶层标签。
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-enum GitTab {
-    /// 提交历史 + 分支图。
-    Log,
-    /// 工作区改动：文件树 + diff + 暂存 / 提交。也是旧版已删除 tab 的迁移目标。
-    #[serde(other)]
-    #[default]
-    Changes,
 }
 
 // 会话里 agent 的状态（总览页状态徽章 / 侧栏状态点）：搬进 smelt-core（跟
@@ -979,8 +607,6 @@ struct Session {
     /// ACP 会话内容变化（AcpViewEvent::Changed）→ save_state 的订阅；Term 会话
     /// 没有（终端内容不经这条通道持久化，走 daemon session id 就够）。
     _acp_persist_sub: Option<gpui::Subscription>,
-    /// 此 session 离开舞台时保存的完整右侧工作区。
-    ui_state: SessionUiState,
 }
 
 impl Session {
@@ -1002,7 +628,6 @@ impl Session {
             agent_definition_id: None,
             automation_id: None,
             _acp_persist_sub: None,
-            ui_state: SessionUiState::default(),
         }
     }
 
@@ -1230,6 +855,18 @@ impl Session {
         match &self.kind {
             SessionKind::Term { active, .. } => active.read(cx).cwd(),
             SessionKind::Conversation(view) => view.read(cx).cwd(),
+        }
+    }
+
+    /// 会话目录所在仓库的当前分支，运行时维护在会话状态里。终端会话取当前 pane 的，和
+    /// [`Self::cwd`] 对应。
+    fn branch(&self, cx: &App) -> Option<String> {
+        match &self.kind {
+            SessionKind::Term { active, .. } => daemon_state_for(active, cx)?.branch,
+            SessionKind::Conversation(view) => {
+                let view = view.read(cx);
+                daemon_state_for_session_id(view.runtime().key(), view.session_id(), cx)?.branch
+            }
         }
     }
 
@@ -1560,8 +1197,6 @@ pub(crate) struct SessionState {
     /// Some = ACP 消息流会话（layout 只是占位叶子）。恢复时建占位视图（会话进程不持久化，
     /// 见方案「已知不做」）。
     acp: Option<AcpSaved>,
-    /// 右侧 route，存在客户端库。
-    route: Option<SessionRouteArchive>,
 }
 
 /// ACP 会话的存档元数据。agent session store 是消息历史的唯一持久化来源；Smelt
@@ -2097,55 +1732,11 @@ struct Workspace {
     /// 当前 Workspace 热字段属于哪个 session。每帧渲染前与 active session 对齐，
     /// 因而所有切换入口（点击、快捷键、任务跳转、恢复）都走同一套快照交换。
     ui_session_id: Option<u64>,
-    /// 当前会话的 UI 状态。Workspace 只切换这一整个对象，不理解其中有哪些页面或控件。
-    active_session_ui: SessionUiState,
-    /// 各项目的抽屉现场。切会话时覆盖回当前项目，避免每个对话各带一份文件树/Git。
-    project_ui: HashMap<ProjectRef, ProjectUiState>,
-    /// `project_ui` 里正在热场的那个项目。
-    active_project_ui_key: Option<ProjectRef>,
-    /// 文件树里已展开的文件夹绝对路径。
-    /// 目录列表缓存（绝对路径 → 已排序过滤的直接子项 (名, 是否目录)）。后台读盘填充，
-    /// render 只读；此前 file_tree 在 render 里同步 fs::read_dir，大目录会像 git
-    /// status 那样掉帧，这里改用同款「后台刷新 + 缓存 + render 只读」模式修复。
-    dir_cache: HashMap<RuntimeKey, file_tree::DirCache>,
-    /// 正在后台读取的目录（防重复并发 spawn）。
-    dir_inflight: HashSet<ProjectRef>,
-    /// 目录列表失效代数。删除发生在读取期间时，旧回包不得再把缓存标成新鲜。
-    dir_generation: HashMap<ProjectRef, u64>,
-    /// 文件树键盘选中的条目绝对路径（↑↓ 导航用）。
-    /// 打开文件后要 reveal 的路径：祖先目录缓存齐了再 scroll_to_item。
-    file_tree_pending_reveal: Option<String>,
-    /// 当前在文件树里打开查看的文件（含预高亮的行数据）。
     /// ACP 消息图片的窗口级预览。放在 Workspace 而非 AcpView，遮罩才能覆盖 Session
     /// Panel、Tool Panel 和输入区，且不受会话面板裁剪。解码/降采样走
     /// `smelt_ui::image` 按图片 id 缓存：渲染时查 `cached()` 取当前这张图的结果，
     /// 不用再单独持有解码后的 RenderImage 字段。
     acp_image_preview: Option<Arc<gpui::Image>>,
-    /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
-    file_gen: u64,
-    /// 文件预览（Markdown / HTML）刷新世代。连续按键只保留最后一次，停手后再更新。
-    preview_epoch: u64,
-    /// 当前文件有未保存改动时，用户又点了别的文件——先记下目标路径弹确认弹窗，
-    /// 等用户选了"不保存"/"保存并切换"才真正打开，见 render_unsaved_file_confirm。
-    pending_file_switch: Option<file_tree::FileRef>,
-    /// 文件树右键「删除文件」的二次确认目标（None = 没在删）。
-    delete_file_target: Option<DeleteFileTarget>,
-    /// 「保存并切换」选择后，等这次 save_open_file 存盘成功再打开的目标路径；
-    /// 存盘失败/冲突则放弃切换，留在当前文件上让用户处理。
-    pending_switch_after_save: Option<file_tree::FileRef>,
-    /// diff 是否用并排（split）视图；false 为统一（unified）视图。
-    /// F7/Shift+F7 当前跳到第几个改动块（None = 还没跳过）。换文件重开 diff 时清空。
-    /// Git 页变更文件树里被折叠的目录（存相对仓库根的路径）。默认全展开——改动
-    /// 文件通常没几个，一进来就全看见比让人挨个点开更顺手。
-    /// diff 看哪一层改动（全部 / 已暂存 / 未暂存）。默认全部，保持既有观感。
-    /// 「日志」页（git 提交历史 + 分支图）的全部状态。
-    git_log: git_log::GitLogState,
-    /// Git 页当前在看哪个子页（改动 / 日志）。
-
-    /// 正在确认删除的分支：(仓库根, 分支名, 是否远端分支)。
-    delete_branch_target: Option<(ProjectRef, String, bool)>,
-    /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
-    git_log_resize: Entity<ResizableState>,
     /// 各分段正文的高度分配缓存。
     pub(crate) sidebar_section_heights:
         std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
@@ -2163,24 +1754,6 @@ struct Workspace {
     /// 上次写进库的布局存档原文。一样就不再写。
     layout_state_written: Option<String>,
     _shell_dock_subs: Vec<Subscription>,
-    /// 交互式 diff：选中待评论的行号集合（对应 GitDiff.lines 下标），换文件/重开 diff 时清空。
-    /// 交互式 diff 的评论输入框（懒创建，随 Git 视图渲染出待发送的 diff 时创建）。
-    diff_comment_input: Option<Entity<gpui_component::input::TextareaState>>,
-    /// 变更栏 diff 正文。和右侧文件列表分开缓存：列表滚动不再重排整份 diff。
-    diff_body: Option<Entity<git_panel::GitDiffBody>>,
-    /// Git 视图的 commit message 输入框，按**仓库根**分开。
-    ///
-    /// 多仓工作区里提交信息天然属于某一个仓库：共用一个框会把写给子仓的
-    /// 描述带到父仓去。懒建，仓库从发现结果里消失时跟着回收。
-    commit_msg_inputs: HashMap<ProjectRef, Entity<gpui_component::input::TextareaState>>,
-    /// 提交/推送失败的原因，按**仓库根**分开，直接显示在该仓库的提交框下方。
-    ///
-    /// 提交失败必须在用户正盯着的地方说清楚：它是对一次明确点击的直接回应。
-    /// 走系统通知只会弹一条，通知被静音或错过时，界面上
-    /// 「文件还在暂存区、什么都没发生」和成功毫无区别——pre-commit hook 因
-    /// PATH 缺失而失败正是这样被当成「按钮没反应」。
-    /// 下次对同一仓库发起提交/推送时清掉，不留过期错误。
-    commit_errors: HashMap<ProjectRef, String>,
     /// 关闭前的二次确认弹窗。Some = 弹窗开着。
     close_confirm: Option<CloseConfirm>,
     /// 远程桌面页正在看的那台运行时（`WorkspaceRoute::Desktop`）。离开这一页就丢掉，
@@ -2240,29 +1813,6 @@ struct Workspace {
     ide_popup_waiters: Vec<stage::IdePopupWaiter>,
     /// 命令面板（Cmd+K）；None 表示未打开。查询和选中在 CommandState 里。
     palette: Option<Entity<gpui_component::command::CommandState>>,
-    /// 变更列表的滚动位置。列表里混着仓库行、提交框和文件行，高度不一，
-    /// 用不了等高虚拟列表，所以是常规滚动容器。
-    git_list_scroll: VirtualListScrollHandle,
-    /// 文件树虚拟列表的滚动句柄。行高由文件树自己给定，见 file_tree。
-    file_tree_scroll: VirtualListScrollHandle,
-    /// Files / Git 右侧树列正在拖拽时的起点：(鼠标 x，树列宽)。树列不能使用
-    /// `ResizableState`：那个组件会在父容器变宽/变窄时保持百分比，违反“只在拖
-    /// 自己分隔条时改宽”的约定。这个瞬态状态只驱动固定像素宽度的分隔条。
-    file_tree_drag_start: Option<(f32, f32)>,
-    /// 文件树顶部的过滤输入框；首次渲染文件树时懒创建（需要 window）。
-    file_filter: Option<Entity<gpui_component::input::InputState>>,
-    /// 过滤框的变更订阅（键入即重渲染）；随视图存活。
-    _file_filter_sub: Option<Subscription>,
-    /// 文件树搜索结果（文件名 + 文件内容）：后台遍历项目填充，render 只读。
-    /// query 非空时左栏由树形切换为扁平命中列表。
-    search_results: Option<SearchState>,
-    /// 搜索任务自增序号：后台遍历完成时用它丢弃过期结果（期间又改了查询）。
-    search_gen: u64,
-    /// 进行中的文件搜索。换查询或清空输入时替换它，取消还没 poll 到的那一轮。
-    search_task: Option<Task<()>>,
-    /// 正在跑的搜索在每个文件边界读这个标志。drop `search_task` 停不掉已经进入
-    /// 同步遍历的那一次。
-    search_cancel: Option<Arc<AtomicBool>>,
 
     /// 启动项列表编辑器（设置页「会话与 Agent」分组懒创建）。
     launch_inputs: Option<settings::LaunchInputs>,
@@ -2293,49 +1843,6 @@ struct Workspace {
     visible_refresh_scheduled: bool,
     /// 正在刷新可见数据。这段里的切会话不再排队第二次。
     visible_refresh_running: bool,
-    /// git status 缓存。事件标旧、看得见时后台重取（见 `git_panel::Cached`），render 只读，
-    /// 避免每帧同步跑 git status（大仓要 ~90ms，是掉帧元凶）。
-    ///
-    /// key 是**仓库**根而不是项目根：一个项目里可能有多个仓库（submodule、
-    /// vendor 里的独立仓库、被 .gitignore 忽略的仓库），每个都独立跑自己的 status。
-    git_status: HashMap<ProjectRef, git_panel::Cached<GitStatusData>>,
-    /// 项目根 → 该项目里发现的仓库列表（含发现是否被上限截断）。
-    /// 发现本身要跑 git，所以跟 status 一样走缓存 + 后台刷新。
-    git_repos: HashMap<ProjectRef, git_panel::Cached<git_panel::RepoSet>>,
-    /// 正在后台做仓库发现（或在限频里等着）的项目根 → 这期间有没有来过变化。
-    git_repos_inflight: HashMap<ProjectRef, bool>,
-    /// 当前提交操作的目标仓库（仓库根）。多仓工作区里，提交框、推送、分支菜单
-    /// 都作用于它；None = 跟随项目根。
-    ///
-    /// 没有它的话写操作只能落回项目根，于是子仓的改动能暂存却永远提交不出去。
-    active_git_repo: Option<ProjectRef>,
-    /// 变更栏里被折起来的仓库根。多仓工作区里不折叠就是一面墙的文件。
-    git_repo_collapsed: HashSet<ProjectRef>,
-    /// root → status 失效代数。请求只可提交与当前代数一致的结果；操作过程中迟到的
-    /// 旧回包会被丢弃并自动补拉，不能把新索引状态覆盖回去。
-    git_status_generation: HashMap<ProjectRef, u64>,
-    /// 正在后台刷新 status 的 root（防重复并发 spawn）。
-    git_status_inflight: HashSet<ProjectRef>,
-    /// root → 连续读取失败次数。失败数据不能冒充“工作区干净”；前三次按短退避
-    /// 自动重试，持续失败则等下一次事件再尝试。
-    git_status_failures: HashMap<ProjectRef, u8>,
-    /// 单文件 git add/reset 的即时 UI 状态。进程是否在跑看 `git_writes`，
-    /// 这里只在进程返回后保留到权威 status 回包，避免复选框先回弹再延迟移动分组。
-    git_index_pending: HashMap<(ProjectRef, String), git_panel::PendingGitIndexOp>,
-    /// 分支列表缓存，Git 页头部分支切换下拉用；同 git_status 一样事件标旧，只在 Git 页
-    /// 打开时后台重取。
-    branches: HashMap<ProjectRef, git_panel::Cached<BranchList>>,
-    /// 分支列表失效代数。标旧发生在 `for-each-ref` 期间时，旧回包不得再写回。
-    branches_generation: HashMap<ProjectRef, u64>,
-    /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
-    branches_inflight: HashSet<ProjectRef>,
-    /// 请运行时建过的监听，见 `ensure_watch`。那台机器重新订阅上时清掉重新登记。
-    watches: HashSet<(git_panel::WatchKind, ProjectRef)>,
-    /// 每个项目上次自动 fetch 的时刻。Git 页开着、窗口在前台时同一项目 60 秒 fetch 一次，
-    /// 来回切页不会每次都发。
-    git_autofetch_at: HashMap<ProjectRef, Instant>,
-    /// 自动 fetch 的定时任务在跑。见 `ensure_git_autofetch`。
-    git_autofetch_running: bool,
     /// 调试 HUD 开关（Cmd+Shift+F 切换），见 `overlay::debug_hud`。
     debug_hud: bool,
     /// 退出确认拦截弹窗开关
@@ -2372,8 +1879,11 @@ struct Workspace {
     settings_page_nonce: usize,
     /// 上次告诉插件的当前项目（见 `note_active_project`），只用来判断变没变。
     plugin_project: Option<ProjectRef>,
-    /// 上次告诉插件的看得见的视图（见 `note_shown_views`），只用来判断变没变。
+    /// 看得见的视图：布局里露着的，加上舞台上开着的那页（见 `note_shown_views`）。插件
+    /// 问的 `view_shown` 和自带的文件、变更视图都按这份。
     plugin_shown_views: HashSet<String>,
+    /// 上次告诉插件的遮罩层开关（见 `note_overlay`），只用来判断变没变。
+    plugin_overlay_open: bool,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
     ///
     /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
@@ -2398,27 +1908,8 @@ struct Workspace {
     _rename_sub: Option<Subscription>,
     /// 「中继…」弹窗（None = 没开）。见 `start_relay_edit`。
     relay_edit: Option<workspace_sessions::RelayEdit>,
-    /// 仓库身份缓存（cwd → 当前分支）：侧栏项目行和会话行显示分支名靠它。None = 探测过
-    /// 但不是 git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
-    repo_info: HashMap<ProjectRef, git_panel::Cached<Option<RepoInfo>>>,
-    /// 正在后台探测仓库身份的 cwd → 这期间 HEAD 有没有变过。
-    repo_info_inflight: HashMap<ProjectRef, bool>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
-    /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
-    /// reflog，找不回来，所以必须过一道确认。
-    discard_hunk_target: Option<(ProjectRef, usize)>,
-    /// 正在确认丢弃整个文件的改动：(仓库根, 用户点丢弃时看到的那条改动)。未跟踪
-    /// 文件是直接删盘，比 restore 更狠，文案要分开写。
-    discard_file_target: Option<(ProjectRef, git_panel::GitSeenChange)>,
-    /// 「丢弃全部改动」确认弹窗（Some = 弹窗开着）：(仓库根, 用户点丢弃时看到的整份
-    /// 改动列表)。见 git_panel 模块。
-    discard_all_target: Option<(ProjectRef, Vec<git_panel::GitSeenChange>)>,
-    /// 每个仓库正在跑的 git 写入。键是这次命令的仓库根。
-    ///
-    /// `index.lock` 属于这一个仓库，所以另一个仓库可以同时写。同一个根上的
-    /// 提交、推送、获取、暂存都进这一张表，由 `spawn_git` 占用和释放。
-    git_writes: HashMap<ProjectRef, git_panel::GitWrite>,
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
@@ -2460,6 +1951,8 @@ struct Workspace {
     _runtime_hub_sub: Option<Subscription>,
     /// 宿主转给插件的事件里，工作台自己要管的（见 `subscribe_host_events`）。
     _host_events_sub: Option<Subscription>,
+    /// 每次重画前看遮罩层开关变没变（见 `note_overlay`）。
+    _overlay_sub: Option<Subscription>,
     /// 自动化目录读 AgentHostState；不观察的话，投影写进 global 后当前页不会重绘。
     _agent_host_sub: Option<Subscription>,
     /// 智能体页、侧栏读各台机器的智能体配置（`AgentHosts`），理由同上。
@@ -2490,16 +1983,13 @@ struct Workspace {
     session_list_revision: u64,
     /// 活动会话被用户切换的版本号。后台恢复只在版本未变化时恢复存档中的活动项。
     active_session_revision: u64,
-    /// 根节点自己的焦点句柄：总览/文件树/Git/历史会话这些页面自身没有可
+    /// 根节点自己的焦点句柄：总览/历史会话这些页面自身没有可
     /// 聚焦的元素，切过去后如果谁都不 focus，窗口的 focus 仍停在切走前那个（可能
     /// 已经不在当前渲染树里的）终端上——GPUI 找不到就把 focus 兜底纠正到 window 的
     /// 真正根节点，而 Workspace 的键位 context 挂在 Root 组件之下、并非那个根节点，
     /// 于是匹配不到，表现为"切到别的页面后快捷键全部失灵"。切到非终端页面时把
     /// focus 显式认领到这个句柄上，保证 Workspace context 始终在 dispatch 路径上。
     focus_handle: FocusHandle,
-    /// 文件树的专属键盘焦点。文件树的方向键导航只在这个焦点生效，不能让终端、
-    /// ACP 输入框或其它控件冒泡出来的按键误操作右侧面板。
-    file_tree_focus_handle: FocusHandle,
     /// 确认弹窗共用的焦点陷阱。`Dialog::new` 每次都会新造一个句柄，不能用那个。
     modal_focus: FocusHandle,
     /// 主窗口弹窗已经记下打开前的焦点。嵌套弹窗不再覆盖。
@@ -2563,35 +2053,7 @@ fn daemon_owns_acp_delivery_session(delivery_id: Option<&str>) -> bool {
     delivery_id.is_some()
 }
 
-/// 字段归属约定（写新代码前先读）：
-/// - 文件、变更这些视图的现场（文件树、打开的文件、Git）跟**选中的项目**走，热场在
-///   `active_session_ui` 里，按项目根停到 `project_ui`。
-/// - `Workspace` 放跨会话共享的缓存与后台任务：git status、watcher、目录缓存。
-impl std::ops::Deref for Workspace {
-    type Target = SessionUiState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.active_session_ui
-    }
-}
-
-impl std::ops::DerefMut for Workspace {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.active_session_ui
-    }
-}
-
 impl Workspace {
-    /// 文件视图此刻看得见。
-    fn files_view_visible(&self) -> bool {
-        self.view_shown(builtin_views::Builtin::Files.id())
-    }
-
-    /// Git「改动」页正在显示。F7 的键位 context 只在这时挂上。
-    fn git_changes_shown(&self) -> bool {
-        self.view_shown(builtin_views::Builtin::Git.id()) && self.git_tab == GitTab::Changes
-    }
-
     /// 某个终端网格自己的焦点句柄正被聚焦（搜索框等子元素不算）。
     /// F7 / Esc 这类终端会编码进 PTY 的键，网格聚焦时必须让回去。
     fn terminal_grid_focused(&self, window: &Window, cx: &App) -> bool {
@@ -2635,9 +2097,6 @@ impl Workspace {
         let saved_active_session_id = ui.active_session_id.clone().filter(|id| !id.is_empty());
         let sessions: Vec<Session> = Vec::new();
         // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
-        let git_log_resize = cx.new(|_| ResizableState::default());
-        // 没有会话时右侧不继承全局偏好；新会话使用 SessionUiState 的默认收起状态。
-        let initial_session_ui = SessionUiState::default();
 
         let mut ws = Self {
             sessions,
@@ -2646,22 +2105,7 @@ impl Workspace {
             agent_surface: agents::AgentsSurface::from_persisted(ui.selected_agent_id.clone()),
             automation_surface: agents::AutomationsSurface::default(),
             ui_session_id: None,
-            active_session_ui: initial_session_ui,
-            project_ui: HashMap::new(),
-            active_project_ui_key: None,
-            dir_cache: HashMap::new(),
-            dir_inflight: HashSet::new(),
-            dir_generation: HashMap::new(),
-            file_tree_pending_reveal: None,
             acp_image_preview: None,
-            file_gen: 0,
-            preview_epoch: 0,
-            pending_file_switch: None,
-            delete_file_target: None,
-            pending_switch_after_save: None,
-            git_log: git_log::GitLogState::default(),
-            delete_branch_target: None,
-            git_log_resize,
             sidebar_section_heights: Default::default(),
             sidebar_section_weights: Default::default(),
             sidebar_split_drag: None,
@@ -2670,10 +2114,6 @@ impl Workspace {
             layout: Default::default(),
             layout_state_written: None,
             _shell_dock_subs: Vec::new(),
-            diff_comment_input: None,
-            diff_body: None,
-            commit_msg_inputs: HashMap::new(),
-            commit_errors: HashMap::new(),
             pending_notification_session_id: None,
             pending_conversation_wakes: Vec::new(),
             restored_agent_conversation_route: false,
@@ -2716,31 +2156,6 @@ impl Workspace {
             ide_catalog: ide::IdeCatalog::default(),
             ide_popup_waiters: Vec::new(),
             palette: None,
-            git_list_scroll: VirtualListScrollHandle::new(),
-            file_tree_scroll: VirtualListScrollHandle::new(),
-            file_tree_drag_start: None,
-            file_filter: None,
-            _file_filter_sub: None,
-            search_results: None,
-            search_gen: 0,
-            search_task: None,
-            search_cancel: None,
-
-            git_status: HashMap::new(),
-            git_repos: HashMap::new(),
-            git_repos_inflight: HashMap::new(),
-            active_git_repo: None,
-            git_repo_collapsed: HashSet::new(),
-            git_status_generation: HashMap::new(),
-            git_status_inflight: HashSet::new(),
-            git_status_failures: HashMap::new(),
-            git_index_pending: HashMap::new(),
-            branches: HashMap::new(),
-            branches_generation: HashMap::new(),
-            branches_inflight: HashSet::new(),
-            watches: HashSet::new(),
-            git_autofetch_at: HashMap::new(),
-            git_autofetch_running: false,
             launch_inputs: None,
             profile_inputs: None,
             panel_plugins: Default::default(),
@@ -2776,6 +2191,7 @@ impl Workspace {
             settings_page_nonce: 0,
             plugin_project: None,
             plugin_shown_views: HashSet::new(),
+            plugin_overlay_open: false,
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_running_count: None,
@@ -2785,13 +2201,7 @@ impl Workspace {
             rename_initial: None,
             _rename_sub: None,
             relay_edit: None,
-            repo_info: HashMap::new(),
-            repo_info_inflight: HashMap::new(),
             dir_picker: None,
-            discard_hunk_target: None,
-            discard_file_target: None,
-            discard_all_target: None,
-            git_writes: HashMap::new(),
             provider_quota_refresh_tx: None,
             resource_monitor: Default::default(),
 
@@ -2812,6 +2222,7 @@ impl Workspace {
             _workspace_directories_sub: None,
             _runtime_hub_sub: None,
             _host_events_sub: None,
+            _overlay_sub: None,
             _agent_host_sub: None,
             _agent_hosts_sub: None,
             _provider_status_sub: None,
@@ -2828,7 +2239,6 @@ impl Workspace {
             session_list_revision: 0,
             active_session_revision: 0,
             focus_handle: cx.focus_handle(),
-            file_tree_focus_handle: cx.focus_handle(),
             modal_focus: cx.focus_handle(),
             main_modal_guard: false,
             main_modal_restore: None,
@@ -2879,6 +2289,8 @@ impl Workspace {
         // 这几次登记不用重装布局，布局本来就还没装。
         builtin_views::register(cx.weak_entity(), cx);
         ws._host_events_sub = Some(ws.subscribe_host_events(window, cx));
+        // 遮罩层的开关散在各处（确认框、命令面板、大图预览），开关时都会通知工作台。
+        ws._overlay_sub = Some(cx.observe_self(|this, cx| this.note_overlay(cx)));
         ws._shell_dock_subs = workspace_layout::watch_shell_dock(&ws.shell_dock, window, cx);
         // 装布局要用 `cx.entity()` 背后的工作台（自带视图画它），等它建好。
         cx.defer_in(window, |this, window, cx| {
@@ -3165,12 +2577,8 @@ impl Render for Workspace {
             // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
             // window 的 focus 兜底钉在这层，保证 Workspace 键位 context 在 dispatch 路径上。
             .track_focus(&self.focus_handle)
-            // 挂在这一层才浅于 Terminal / Input。Files、GitChanges 是同一节点上的
-            // 条件标识，谓词只看焦点路径上的 context，看不到任意 Rust 状态。
-            .key_context(workspace_key_context(
-                self.files_view_visible(),
-                self.git_changes_shown(),
-            ))
+            // 挂在这一层才浅于 Terminal / Input。
+            .key_context("Workspace")
             // 快捷键、应用菜单、右键菜单执行命令都走这里，见 `workspace_commands`。
             // 命令眼下不适用（`Pass`）就交给下一条绑定。
             .on_action(|action: &smelt_plugin_api::RunCommand, window, cx| {
@@ -3206,26 +2614,6 @@ impl Render for Workspace {
             // 确认框、命令面板和图片预览都留在当前 Workspace 的 GPUI 树内。
             .child(self.render_overlay_layers(window, cx))
     }
-}
-
-/// 居中空状态/加载中占位视图（供文件树、Git 提交列表、历史会话等在无数据或加载时复用）。
-fn placeholder_view(text: &str, muted: Hsla) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px_4()
-        .child(
-            div()
-                .text_sm()
-                .font_medium()
-                .text_center()
-                .text_color(muted)
-                .child(text.to_string()),
-        )
 }
 
 /// 旧存档没记 agent 种类时，从启动命令反推一把（命令里出现过 copilot / codex
@@ -3522,17 +2910,6 @@ fn schedule_obsolete_file_cleanup() {
     });
 }
 
-/// Workspace 根节点的键位 context。Files / GitChanges 只在对应面板显示时出现，
-/// 而且和 Workspace 写在同一个节点上：谓词匹配的是焦点路径上的标识，不是任意状态。
-fn workspace_key_context(files_visible: bool, git_changes_shown: bool) -> &'static str {
-    match (files_visible, git_changes_shown) {
-        (false, false) => "Workspace",
-        (true, false) => "Workspace Files",
-        (false, true) => "Workspace GitChanges",
-        (true, true) => "Workspace Files GitChanges",
-    }
-}
-
 fn main() {
     #[cfg(target_os = "macos")]
     if let Some(code) = local_daemon::maybe_run_install_app(std::env::args()) {
@@ -3793,13 +3170,11 @@ fn main() {
                 }
                 // 项目文件在报事件的那台机器上。
                 if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
-                    if let Some(ws) = current_workspace(&current_ws_for_events) {
-                        let project = ProjectRef {
-                            runtime: runtime.clone(),
-                            root: root.clone(),
-                        };
-                        let _ = ws.update(cx, |ws, cx| ws.on_project_changed(project, cx));
-                    }
+                    let event = smelt_plugin_api::HostEvent::ProjectChanged {
+                        machine: runtime.clone(),
+                        root: root.clone(),
+                    };
+                    cx.update(|cx| smelt_plugin_api::emit(event, cx));
                     continue;
                 }
                 // 记忆在智能体那台机器上，哪台运行时报的就是哪台的。
@@ -3820,8 +3195,6 @@ fn main() {
                         terminal::DaemonStateEvent::Snapshot { .. } => {
                             let _ = ws.update(cx, |ws, cx| {
                                 ws.on_runtime_resubscribed(&runtime, cx);
-                                // 项目监听同理；断开期间的文件、分支变化也收不到，缓存全部标旧。
-                                ws.on_runtime_resubscribed_git(&runtime, cx);
                                 // 断开期间 Pi 配置可能变过，单独订阅的事件补不回来。
                                 ws.on_agent_pi_config_changed(&runtime, cx);
                                 settings::reload_agent_host(&runtime, cx);
@@ -4086,25 +3459,26 @@ fn main() {
                 if paths.is_empty() && internal_files.is_empty() {
                     continue;
                 }
-                let workspace = cx.update(|cx| {
+                cx.update(|cx| {
                     let main = ensure_main_window(&current_ws, cx);
                     if !paths.is_empty() {
                         let _ = main
                             .workspace
                             .update(cx, |ws, cx| ws.open_paths(&paths, cx));
                     }
-                    main.workspace
+                    for link in internal_files {
+                        // 链接带着文件所在的机器：远程的就去那台机器读，不能打开本机同路径的
+                        // 文件。谁来打开由登记的文件打开者定。
+                        let location = smelt_plugin_api::FileLocation {
+                            machine: link.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
+                            path: link.path,
+                            line: link.line,
+                        };
+                        if let Err(error) = smelt_plugin_api::open_file(location, cx) {
+                            status_item::notify_error(error);
+                        }
+                    }
                 });
-                for link in internal_files {
-                    // 链接带着文件所在的机器：远程的就去那台机器读，不能打开本机同路径的文件。
-                    let file = file_tree::FileRef {
-                        runtime: link.runtime.map_or(RuntimeKey::Local, RuntimeKey::Remote),
-                        path: link.path,
-                    };
-                    let _ = workspace.update_in(cx, |ws, window, cx| {
-                        ws.view_file_on(file, link.line, window, cx)
-                    });
-                }
             }
         })
         .detach();

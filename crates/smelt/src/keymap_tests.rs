@@ -297,7 +297,7 @@ fn escape_cancels_and_backspace_clears() {
     assert_eq!(judge(PALETTE, "escape", &none), Recorded::Cancel);
     assert_eq!(judge(PALETTE, "backspace", &none), Recorded::Set(None));
     assert_set(judge(PALETTE, "cmd-shift-p", &none), "cmd-shift-p");
-    assert_set(judge("smelt.git/next-hunk", "f8", &none), "f8");
+    assert_set(judge("smelt.stage/split-right", "f8", &none), "f8");
 }
 
 #[test]
