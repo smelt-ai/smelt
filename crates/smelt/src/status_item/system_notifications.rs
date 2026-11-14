@@ -4,18 +4,23 @@
 //! authorization requests, and request submission. This module owns notifications after the
 //! attention coordinator hands them off, and only retires them after the completion handler.
 
-use super::{StatusItemEvent, SystemNotificationAuthorization, SystemNotificationStatus};
+use super::{
+    StatusItemEvent, SystemNotificationAuthorization, SystemNotificationDelivery,
+    SystemNotificationStatus,
+};
 use crate::RuntimeKey;
 use block2::{DynBlock, RcBlock};
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
-use objc2_foundation::{NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{
+    NSArray, NSBundle, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString,
+};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
-    UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-    UNNotificationSetting, UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
-    UNUserNotificationCenterDelegate,
+    UNAlertStyle, UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+    UNNotification, UNNotificationPresentationOptions, UNNotificationRequest,
+    UNNotificationResponse, UNNotificationSetting, UNNotificationSettings, UNNotificationSound,
+    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr::NonNull;
@@ -312,6 +317,8 @@ struct BridgeState {
     /// 这次运行里补要过了：系统照旧不给也不再要，免得来回重查。
     badge_requested: bool,
     denial_reported: bool,
+    /// 上一次从系统读到的（[`SystemNotificationStatus::last_read`]）。
+    last_read: Option<(SystemNotificationAuthorization, SystemNotificationDelivery)>,
     queue: NotificationQueue,
     last_error: Option<String>,
     errors: VecDeque<String>,
@@ -497,11 +504,18 @@ fn read_settings() {
             // for the duration of the callback.
             let settings = unsafe { settings.as_ref() };
             let authorization = authorization_from_settings(settings.authorizationStatus());
+            let delivery = SystemNotificationDelivery {
+                banners: settings.alertSetting() == UNNotificationSetting::Enabled
+                    && settings.alertStyle() != UNAlertStyle::None,
+                sound: settings.soundSetting() == UNNotificationSetting::Enabled,
+                badge: settings.badgeSetting() == UNNotificationSetting::Enabled,
+            };
             let mut state = state()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.settings_check_in_flight = false;
             state.authorization = authorization;
+            state.last_read = Some((authorization, delivery));
             state.badge_missing = authorization == SystemNotificationAuthorization::Authorized
                 && settings.badgeSetting() == UNNotificationSetting::NotSupported
                 && !state.badge_requested;
@@ -788,6 +802,33 @@ pub fn remove_automation_notification(runtime: &RuntimeKey, run_id: &str) {
     sync_system_notifications();
 }
 
+/// 还没问过用户时请系统问一次（设置页上的按钮），不等第一条通知。问过了什么都不做。
+pub fn request_system_notification_authorization() {
+    {
+        let mut state = state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.initialized
+            || state.authorization_request_in_flight
+            || state.authorization != SystemNotificationAuthorization::NotDetermined
+        {
+            return;
+        }
+        state.authorization_request_in_flight = true;
+        state.badge_requested = true;
+    }
+    request_authorization();
+}
+
+/// 系统设置里本应用的通知设置：带上 bundle id 直接落到这个应用那一页。
+pub fn system_notification_settings_url() -> Option<String> {
+    const PANE: &str = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
+    Some(match NSBundle::mainBundle().bundleIdentifier() {
+        Some(id) => format!("{PANE}?id={id}"),
+        None => PANE.to_string(),
+    })
+}
+
 /// Rechecks authorization and unlocks one retry after returning from System Settings.
 pub fn refresh_system_notification_authorization() {
     {
@@ -812,6 +853,7 @@ pub fn system_notification_status() -> SystemNotificationStatus {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     SystemNotificationStatus {
         authorization: state.authorization,
+        last_read: state.last_read,
         pending_count: state.queue.pending_count(),
         last_error: state.last_error.clone(),
     }

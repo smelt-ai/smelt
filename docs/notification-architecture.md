@@ -155,8 +155,10 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   （后台对话的终端通知等）发一次性的。
 - 哪类提醒发系统通知是这台设备自己的偏好，存在插件库里，设置窗口「通知」页由插件登记
   （`register_settings_pages`）。终端通知、智能体的消息没有开关。页面标题旁显示系统授权
-  （`Host::notification_permission`，变了发 `NotificationPermissionChanged`），被禁止时给
-  按钮执行 `OPEN_NOTIFICATION_SETTINGS`。
+  （`Host::notification_permission`，变了发 `NotificationPermissionChanged`），一直显示：还没
+  问过的给「请求授权」（`REQUEST_NOTIFICATION_PERMISSION`）；其余都给按钮执行
+  `OPEN_NOTIFICATION_SETTINGS`，直接落到系统设置里本应用那一页。被禁止，或允许了但横幅（提醒
+  样式是「无」）、Dock 角标被关掉的，写明是哪项；声音关了不算问题。
 - Dock 角标和菜单栏也由这个插件画：读镜像和 `session_states`、`workspace_directory`，用
   `SET_DOCK_BADGE`、`SET_STATUS_MENU` 交给宿主。宿主只提供菜单栏图标和 Dock 的机制，不知道
   菜单里是什么；菜单项点了执行插件给的命令。
@@ -168,7 +170,8 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   首次确有待投递项时才请求授权（横幅、声音、角标；没有角标授权，Dock 角标设了也不显示）。
   早先只要了横幅和声音的，读设置时发现已授权但角标是 NotSupported，就补要一次：系统不再弹框，
   只在通知设置里加出角标开关，每次运行最多补一次。请求返回后一律重读设置，给了哪几项以设置
-  为准；授权、请求错误和 `addNotificationRequest` completion 都写回
+  为准。读到的授权和横幅、声音、角标各项原样带给插件（`NotificationPermission::Granted`）；
+  回到前台重查期间报上一次读到的，提示不闪。授权、请求错误和 `addNotificationRequest` completion 都写回
   桥状态，不把「调用了 API」当作系统已接收。权限未定、被拒或提交失败时按 id 合并保留最新
   一条；提交错误暂停自动重试，应用重新激活后重读系统设置再试一次，不形成失败自旋。
 - 跳转按稳定的会话 id。主窗口还在恢复时先挂起，目标会话一恢复就消费；不使用已经失效的

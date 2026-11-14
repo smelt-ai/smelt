@@ -201,14 +201,26 @@ pub struct StatusIcon {
 pub const OPEN_NOTIFICATION_SETTINGS: Command<(), ()> =
     Command::new("smelt.app/open-notification-settings");
 
+/// 还没问过用户（[`NotificationPermission::NotRequested`]）时请系统问一次，不必等第一条通知。
+/// 问过了、别的系统上什么都不做；结果从 [`HostEvent::NotificationPermissionChanged`] 来。
+pub const REQUEST_NOTIFICATION_PERMISSION: Command<(), ()> =
+    Command::new("smelt.app/request-notification-permission");
+
 /// 系统通知的授权（[`Host::notification_permission`]）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotificationPermission {
     /// 正在读系统设置。
     Checking,
-    /// 还没问过用户；第一次发通知时系统会问。
+    /// 还没问过用户；第一次发通知时系统会问，也可以用 [`REQUEST_NOTIFICATION_PERMISSION`] 先问。
     NotRequested,
-    Granted,
+    /// 允许了。各项是用户在系统设置里给这个应用开着的，关掉的那项系统不做。
+    Granted {
+        /// 弹横幅或提醒（提醒样式不是「无」）。关了只进通知中心。
+        banners: bool,
+        sound: bool,
+        /// Dock 图标上的角标（[`SET_DOCK_BADGE`]）。
+        badge: bool,
+    },
     /// 用户在系统设置里关了，用 [`OPEN_NOTIFICATION_SETTINGS`] 带他去开。
     Denied,
     /// 系统报错，读不到；带给人看的原因。

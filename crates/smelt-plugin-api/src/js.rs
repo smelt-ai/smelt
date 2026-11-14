@@ -63,12 +63,15 @@ export function session_states(machine: Machine): unknown[];
 /** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
 export function workspace_directory(machine: Machine): unknown | null;
 /**
- * 系统通知的授权：checking 正在读系统设置，not_requested 还没问过用户（第一次发通知时系统会问），
- * denied 用户在系统设置里关了（用 "smelt.app/open-notification-settings" 带他去开），unavailable 系统报错
- * （error 是原因），unsupported 这个系统上没有系统通知。应用回到前台时重查；变了发 notification_permission_changed。
+ * 系统通知的授权：checking 正在读系统设置，not_requested 还没问过用户（第一次发通知时系统会问，也可以用
+ * "smelt.app/request-notification-permission" 先问），granted 允许了（banners 弹横幅、sound 声音、badge Dock
+ * 角标是用户给这个应用开着的几项，关掉的系统不做），denied 用户在系统设置里关了（用
+ * "smelt.app/open-notification-settings" 带他去开），unavailable 系统报错（error 是原因），unsupported 这个系统上
+ * 没有系统通知。应用回到前台时重查；变了发 notification_permission_changed。
  */
 export function notification_permission():
-  | { state: "checking" | "not_requested" | "granted" | "denied" | "unsupported" }
+  | { state: "checking" | "not_requested" | "denied" | "unsupported" }
+  | { state: "granted"; banners: boolean; sound: boolean; badge: boolean }
   | { state: "unavailable"; error: string };
 /** 菜单栏菜单里的一项。icon 只取 PNG（字节数组）的透明度当形状，涂成 color（0xRRGGBB）。 */
 export type StatusMenuItem =
@@ -131,6 +134,8 @@ export function next_command(): Promise<CommandCall>;
  *   不给就只是把应用拿到前面来。
  * - "smelt.app/withdraw-notification" { id: string }：撤回给了 id 的通知；没有这条也不算错。
  * - "smelt.app/open-notification-settings"：打开系统设置里本应用的通知设置；只有 macOS 有。
+ * - "smelt.app/request-notification-permission"：还没问过用户时请系统问一次通知授权；问过了什么都不做，结果看
+ *   notification_permission_changed。
  * - "smelt.app/open-in-text-editor" { path: string }：用系统文本编辑器打开这台电脑上的文件。
  * - "smelt.app/pick-paths" { machine: Machine, title: string, confirm: string, files?: boolean, multiple?: boolean }
  *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
@@ -970,7 +975,18 @@ fn permission_value(permission: &NotificationPermission) -> HostValue {
     let state = match permission {
         NotificationPermission::Checking => "checking",
         NotificationPermission::NotRequested => "not_requested",
-        NotificationPermission::Granted => "granted",
+        NotificationPermission::Granted {
+            banners,
+            sound,
+            badge,
+        } => {
+            return HostObject::new()
+                .field("state", "granted")
+                .field("banners", *banners)
+                .field("sound", *sound)
+                .field("badge", *badge)
+                .into();
+        }
         NotificationPermission::Denied => "denied",
         NotificationPermission::Unsupported => "unsupported",
         NotificationPermission::Unavailable(error) => {

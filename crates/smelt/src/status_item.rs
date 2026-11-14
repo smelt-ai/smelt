@@ -39,16 +39,24 @@ pub enum SystemNotificationAuthorization {
     Unavailable,
 }
 
+/// 允许通知时，用户在系统设置里给这个应用开着的几项。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SystemNotificationDelivery {
+    pub banners: bool,
+    pub sound: bool,
+    pub badge: bool,
+}
+
 /// 系统通知桥的可观测状态：插件读授权，日志记积压。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemNotificationStatus {
     pub authorization: SystemNotificationAuthorization,
+    /// 上一次从系统读到的授权和各项。回到前台重查时 `authorization` 先变回 `Unknown`，
+    /// 给人看的用这份，免得每次切回来提示都闪一下。
+    pub last_read: Option<(SystemNotificationAuthorization, SystemNotificationDelivery)>,
     pub pending_count: usize,
     pub last_error: Option<String>,
 }
-
-pub(crate) const SYSTEM_NOTIFICATION_SETTINGS_URL: &str =
-    "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
 
 /// 给插件看的系统通知授权（`Host::notification_permission`）。
 pub(crate) fn notification_permission() -> smelt_plugin_api::NotificationPermission {
@@ -56,17 +64,35 @@ pub(crate) fn notification_permission() -> smelt_plugin_api::NotificationPermiss
     if cfg!(not(target_os = "macos")) {
         return Permission::Unsupported;
     }
-    let status = system_notification_status();
-    match status.authorization {
-        SystemNotificationAuthorization::Unknown => Permission::Checking,
+    permission_from_status(system_notification_status())
+}
+
+fn permission_from_status(
+    status: SystemNotificationStatus,
+) -> smelt_plugin_api::NotificationPermission {
+    use smelt_plugin_api::NotificationPermission as Permission;
+    let (authorization, delivery) = match (status.authorization, status.last_read) {
+        (SystemNotificationAuthorization::Unavailable, _) => {
+            return Permission::Unavailable(
+                status
+                    .last_error
+                    .unwrap_or_else(|| "暂时读不到授权状态".to_string()),
+            );
+        }
+        (_, Some(last_read)) => last_read,
+        (_, None) => return Permission::Checking,
+    };
+    match authorization {
         SystemNotificationAuthorization::NotDetermined => Permission::NotRequested,
-        SystemNotificationAuthorization::Authorized => Permission::Granted,
         SystemNotificationAuthorization::Denied => Permission::Denied,
-        SystemNotificationAuthorization::Unavailable => Permission::Unavailable(
-            status
-                .last_error
-                .unwrap_or_else(|| "暂时读不到授权状态".to_string()),
-        ),
+        SystemNotificationAuthorization::Authorized => Permission::Granted {
+            banners: delivery.banners,
+            sound: delivery.sound,
+            badge: delivery.badge,
+        },
+        SystemNotificationAuthorization::Unknown | SystemNotificationAuthorization::Unavailable => {
+            Permission::Checking
+        }
     }
 }
 
@@ -362,10 +388,15 @@ mod imp {
     pub fn retain_automation_notifications(_runtime: &crate::RuntimeKey, _run_ids: &[String]) {}
     pub fn remove_automation_notification(_runtime: &crate::RuntimeKey, _run_id: &str) {}
     pub fn refresh_system_notification_authorization() {}
+    pub fn request_system_notification_authorization() {}
+    pub fn system_notification_settings_url() -> Option<String> {
+        None
+    }
     pub fn sync_system_notifications() {}
     pub fn system_notification_status() -> SystemNotificationStatus {
         SystemNotificationStatus {
             authorization: SystemNotificationAuthorization::Unavailable,
+            last_read: None,
             pending_count: 0,
             last_error: Some("system notifications are only available on macOS".to_string()),
         }
@@ -381,7 +412,8 @@ pub use imp::{activate_app, is_app_active, set_menu, setup};
 pub use system_notifications::{
     deliver_automation_notification, deliver_plugin_notification, notify_error, notify_success,
     refresh_system_notification_authorization, remove_automation_notification,
-    retain_automation_notifications, sync_system_notifications, system_notification_status,
+    request_system_notification_authorization, retain_automation_notifications,
+    sync_system_notifications, system_notification_settings_url, system_notification_status,
     take_system_notification_errors, withdraw_plugin_notification,
 };
 
@@ -389,13 +421,70 @@ pub use system_notifications::{
 pub use imp::{
     deliver_automation_notification, deliver_plugin_notification, notify_error, notify_success,
     refresh_system_notification_authorization, remove_automation_notification,
-    retain_automation_notifications, sync_system_notifications, system_notification_status,
+    request_system_notification_authorization, retain_automation_notifications,
+    sync_system_notifications, system_notification_settings_url, system_notification_status,
     take_system_notification_errors, withdraw_plugin_notification,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::tint_png;
+    use super::{
+        SystemNotificationAuthorization as Authorization, SystemNotificationDelivery,
+        SystemNotificationStatus, permission_from_status, tint_png,
+    };
+    use smelt_plugin_api::NotificationPermission as Permission;
+
+    fn status(
+        authorization: Authorization,
+        last_read: Option<(Authorization, SystemNotificationDelivery)>,
+    ) -> SystemNotificationStatus {
+        SystemNotificationStatus {
+            authorization,
+            last_read,
+            pending_count: 0,
+            last_error: None,
+        }
+    }
+
+    /// 回到前台重查时报上一次读到的，不在「读取中」和原状态之间来回闪；各项原样带给插件。
+    #[test]
+    fn rechecking_keeps_reporting_the_last_read_settings() {
+        let delivery = SystemNotificationDelivery {
+            banners: true,
+            sound: false,
+            badge: false,
+        };
+        let granted = Permission::Granted {
+            banners: true,
+            sound: false,
+            badge: false,
+        };
+        let read = Some((Authorization::Authorized, delivery));
+        assert_eq!(
+            permission_from_status(status(Authorization::Authorized, read)),
+            granted
+        );
+        assert_eq!(
+            permission_from_status(status(Authorization::Unknown, read)),
+            granted
+        );
+        assert_eq!(
+            permission_from_status(status(Authorization::Unknown, None)),
+            Permission::Checking
+        );
+        assert_eq!(
+            permission_from_status(status(
+                Authorization::Unknown,
+                Some((Authorization::Denied, SystemNotificationDelivery::default()))
+            )),
+            Permission::Denied
+        );
+        // 申请授权报错：不管上次读到什么，报错误。
+        assert!(matches!(
+            permission_from_status(status(Authorization::Unavailable, read)),
+            Permission::Unavailable(_)
+        ));
+    }
 
     /// 上色只换颜色，形状（透明度）不动。
     #[test]

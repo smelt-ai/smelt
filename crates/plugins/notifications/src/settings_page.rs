@@ -1,4 +1,4 @@
-//! 设置页「通知」：哪类提醒发系统通知。系统授权是整页的前提，出问题时挂在页面标题旁。
+//! 设置页「通知」：哪类提醒发系统通知。系统授权是整页的前提，状态挂在页面标题旁。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -112,41 +112,180 @@ impl Render for NotifySettings {
     }
 }
 
-/// 系统授权不正常时，页面标题旁写明是什么情况；被关掉的给个按钮去系统设置里开。已授权、
-/// 还在读、这个系统没有通知时不出。
+/// 页面标题旁一直写着系统通知的状态，并给出按钮：没问过的先问，别的都能一键去系统设置里
+/// 本应用那一页。有挡着提醒的写明是哪项。还在读、这个系统没有通知时不出。
 fn permission_status(cx: &mut App) -> AnyElement {
-    // 被禁止的能去系统设置里开；读不到的是系统报错，回到应用时宿主会重查。
-    let (text, is_error, denied) = match api::host(cx).notification_permission(cx) {
-        NotificationPermission::Checking
-        | NotificationPermission::Granted
-        | NotificationPermission::Unsupported => return div().into_any_element(),
-        NotificationPermission::NotRequested => ("尚未请求系统授权".to_string(), false, false),
-        NotificationPermission::Denied => ("已被系统禁止".to_string(), true, true),
-        NotificationPermission::Unavailable(reason) => (reason, true, false),
+    let Some(line) = permission_line(&api::host(cx).notification_permission(cx)) else {
+        return div().into_any_element();
     };
-    let color = if is_error {
-        cx.theme().danger
-    } else {
-        cx.theme().muted_foreground
+    let color = match line.severity {
+        Severity::Ok => cx.theme().success,
+        Severity::Error => cx.theme().danger,
+        Severity::Warning => cx.theme().warning,
+        Severity::Info => cx.theme().muted_foreground,
     };
+    let fix = line.fix.map(|fix| {
+        let (id, label, command) = match fix {
+            Fix::Request => (
+                "request-notification-permission",
+                "请求授权",
+                api::REQUEST_NOTIFICATION_PERMISSION,
+            ),
+            Fix::OpenSettings => (
+                "open-system-notification-settings",
+                "打开系统设置 ↗",
+                api::OPEN_NOTIFICATION_SETTINGS,
+            ),
+        };
+        Button::new(id)
+            .compact()
+            .label(label)
+            .on_click(move |_, _, cx| {
+                let task = command.run(&(), cx);
+                cx.spawn(async move |_| {
+                    if let Err(error) = task.await {
+                        eprintln!("[notifications] {label}失败：{error}");
+                    }
+                })
+                .detach();
+            })
+    });
     h_flex()
         .items_center()
         .gap_2()
         .child(div().size(px(6.)).rounded_full().bg(color))
-        .child(div().text_xs().text_color(color).child(text))
-        .children(denied.then(|| {
-            Button::new("open-system-notification-settings")
-                .compact()
-                .label("打开系统设置 ↗")
-                .on_click(|_, _, cx| {
-                    let task = api::OPEN_NOTIFICATION_SETTINGS.run(&(), cx);
-                    cx.spawn(async move |_| {
-                        if let Err(error) = task.await {
-                            eprintln!("[notifications] 打不开系统设置：{error}");
-                        }
-                    })
-                    .detach();
-                })
-        }))
+        .child(div().text_xs().text_color(color).child(line.text))
+        .children(fix)
         .into_any_element()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PermissionLine {
+    text: String,
+    severity: Severity,
+    fix: Option<Fix>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Severity {
+    Ok,
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fix {
+    Request,
+    OpenSettings,
+}
+
+/// 标题旁那一行。声音关了不算问题：那是用户自己选的安静，提醒照样到；横幅和角标关了，
+/// 人就看不见提醒。
+fn permission_line(permission: &NotificationPermission) -> Option<PermissionLine> {
+    let line = |text: &str, severity, fix| PermissionLine {
+        text: text.to_string(),
+        severity,
+        fix,
+    };
+    match permission {
+        NotificationPermission::Checking | NotificationPermission::Unsupported => None,
+        NotificationPermission::Granted { banners, badge, .. } => match (banners, badge) {
+            (true, true) => Some(line(
+                "系统通知已允许",
+                Severity::Ok,
+                Some(Fix::OpenSettings),
+            )),
+            (false, true) => Some(line(
+                "提醒样式是「无」，只进通知中心，不弹横幅",
+                Severity::Warning,
+                Some(Fix::OpenSettings),
+            )),
+            (true, false) => Some(line(
+                "Dock 角标被系统关了，看不到未读数",
+                Severity::Warning,
+                Some(Fix::OpenSettings),
+            )),
+            (false, false) => Some(line(
+                "不弹横幅，Dock 也不显示未读数",
+                Severity::Warning,
+                Some(Fix::OpenSettings),
+            )),
+        },
+        NotificationPermission::NotRequested => {
+            Some(line("尚未请求系统授权", Severity::Info, Some(Fix::Request)))
+        }
+        NotificationPermission::Denied => Some(line(
+            "已被系统禁止",
+            Severity::Error,
+            Some(Fix::OpenSettings),
+        )),
+        // 系统报错：回到应用时宿主会重查。
+        NotificationPermission::Unavailable(reason) => Some(line(reason, Severity::Error, None)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn granted(banners: bool, badge: bool) -> NotificationPermission {
+        NotificationPermission::Granted {
+            banners,
+            sound: false,
+            badge,
+        }
+    }
+
+    #[test]
+    fn everything_on_still_shows_the_way_to_settings() {
+        // 声音关着也算正常。
+        let ok = permission_line(&granted(true, true)).unwrap();
+        assert_eq!(ok.severity, Severity::Ok);
+        assert_eq!(ok.fix, Some(Fix::OpenSettings));
+        // 还在读、没有系统通知：不出。
+        assert_eq!(permission_line(&NotificationPermission::Checking), None);
+        assert_eq!(permission_line(&NotificationPermission::Unsupported), None);
+    }
+
+    #[test]
+    fn switched_off_items_point_to_system_settings() {
+        for permission in [
+            granted(false, true),
+            granted(true, false),
+            granted(false, false),
+        ] {
+            let line = permission_line(&permission).unwrap();
+            assert_eq!(line.severity, Severity::Warning);
+            assert_eq!(line.fix, Some(Fix::OpenSettings));
+        }
+        assert!(
+            permission_line(&granted(true, false))
+                .unwrap()
+                .text
+                .contains("角标")
+        );
+        assert_eq!(
+            permission_line(&NotificationPermission::Denied)
+                .unwrap()
+                .fix,
+            Some(Fix::OpenSettings)
+        );
+    }
+
+    #[test]
+    fn not_asked_yet_offers_to_ask() {
+        assert_eq!(
+            permission_line(&NotificationPermission::NotRequested)
+                .unwrap()
+                .fix,
+            Some(Fix::Request)
+        );
+        assert_eq!(
+            permission_line(&NotificationPermission::Unavailable("坏了".into()))
+                .unwrap()
+                .fix,
+            None
+        );
+    }
 }

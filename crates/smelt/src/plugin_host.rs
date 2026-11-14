@@ -220,10 +220,13 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             Ok(())
         }),
         api::OPEN_NOTIFICATION_SETTINGS.spec("打开系统通知设置", |_, _, cx| {
-            #[cfg(target_os = "macos")]
-            cx.open_url(crate::status_item::SYSTEM_NOTIFICATION_SETTINGS_URL);
-            #[cfg(not(target_os = "macos"))]
-            let _ = cx;
+            if let Some(url) = crate::status_item::system_notification_settings_url() {
+                cx.open_url(&url);
+            }
+            Ok(())
+        }),
+        api::REQUEST_NOTIFICATION_PERMISSION.spec("请求系统通知授权", |_, _, _| {
+            crate::status_item::request_system_notification_authorization();
             Ok(())
         }),
         api::OPEN_IN_TEXT_EDITOR.spec("用系统文本编辑器打开", |args, _, _| {
