@@ -1,13 +1,9 @@
-//! 菜单栏：右上角图标旁显示要你看的会话数和运行中的会话数（`N@·M`），点开列出这些会话，
-//! 点一条跳过去；Dock 图标的角标是要你看的会话数。
+//! 菜单栏和 Dock：右上角图标旁显示要你看的会话数和运行中的会话数（`N@·M`），点开列出这些
+//! 会话，点一条跳过去；Dock 图标的角标是要你看的会话数。
 //!
-//! 内置插件，只经 [`smelt_plugin_api`] 和宿主打交道：会话名册（各台机器的工作区目录）、
-//! 会话状态、要人看的会话都读宿主的，菜单和角标经 `smelt.app/set-status-menu`、
-//! `smelt.app/set-dock-badge` 交给宿主画，点菜单项执行 `smelt.sessions/activate`。主窗口
-//! 关着也照常更新。
-//!
-//! 什么时候重算全靠事件：会话、提醒、机器变了；宿主命令登记好了（启动时命令要等主窗口
-//! 建好才有）。算出来和上次交给宿主的一样就不再交。
+//! 会话名册（各台机器的工作区目录）、会话状态读宿主的，要你看的会话读本插件的提醒镜像；
+//! 菜单和角标经 `smelt.app/set-status-menu`、`smelt.app/set-dock-badge` 交给宿主画，点菜单项
+//! 执行 `smelt.sessions/activate`。主窗口关着也照常更新。算出来和上次交给宿主的一样就不再交。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,7 +16,7 @@ use api::model::session_title::{TerminalTitle, acp_display_title, display_title}
 use api::model::workspace_directory::WorkspaceConversation;
 use api::sessions::{self, Activate};
 use api::ui::ui_theme::agent_status_u32;
-use api::{DockBadge, HostEvent, RuntimeKey, StatusIcon, StatusMenu, StatusMenuItem};
+use api::{DockBadge, RuntimeKey, StatusIcon, StatusMenu, StatusMenuItem};
 use gpui::{App, Task};
 use smelt_plugin_api as api;
 
@@ -62,34 +58,16 @@ const AGENT_LOGO_PNG: &[(&str, &[u8])] = &[
 /// 认不出 agent 的会话（裸终端、自定义 agent）用的方框终端图标。
 const TERMINAL_PNG: &[u8] = include_bytes!("../assets/terminal.png");
 
-/// 宿主启动时调一次。
-pub fn register(cx: &mut App) {
-    let sent = Rc::new(RefCell::new(Sent::default()));
-    let on_event = sent.clone();
-    let events = api::events(cx);
-    cx.subscribe(&events, move |_, event: &HostEvent, cx| {
-        if matches!(
-            event,
-            HostEvent::SessionsChanged
-                | HostEvent::AttentionChanged
-                | HostEvent::MachinesChanged
-                | HostEvent::CommandsChanged
-        ) {
-            refresh(&on_event, cx);
-        }
-    })
-    .detach();
-    refresh(&sent, cx);
-}
-
 /// 上次交给宿主的。交失败了清掉，下次事件重交。
 #[derive(Default)]
-struct Sent {
+pub(crate) struct Sent {
     menu: Option<Menu>,
     badge: Option<DockBadge>,
 }
 
-fn refresh(sent: &Rc<RefCell<Sent>>, cx: &mut App) {
+/// 重算菜单和角标，变了才交给宿主。`attention` 是要你看的会话（所有机器的）：会话 id 到
+/// 还等不等你处理。
+pub(crate) fn refresh(sent: &Rc<RefCell<Sent>>, attention: &HashMap<String, bool>, cx: &mut App) {
     // 宿主命令跟着主窗口的工作台登记，启动时还没有；登记好了会发 CommandsChanged。
     if api::command(api::SET_STATUS_MENU.id(), cx).is_none() {
         return;
@@ -97,29 +75,9 @@ fn refresh(sent: &Rc<RefCell<Sent>>, cx: &mut App) {
     let host = api::host(cx);
     let mut conversations = Vec::new();
     for machine in host.machines(cx) {
-        let Some(directory) = host.workspace_directory(&machine.key, cx) else {
-            continue;
-        };
-        let states: HashMap<String, DaemonSessionState> = host
-            .session_states(&machine.key, cx)
-            .into_iter()
-            .map(|state| (state.id.clone(), state))
-            .collect();
-        let remote = (machine.key != RuntimeKey::Local).then_some(machine.name.as_str());
-        conversations.extend(
-            directory
-                .conversations
-                .iter()
-                .filter(|conversation| conversation.archived_at.is_none())
-                .filter_map(|conversation| conversation_row(conversation, &states, remote)),
-        );
+        conversations.extend(machine_rows(&machine, cx));
     }
-    let attention: HashMap<String, bool> = host
-        .attention(cx)
-        .into_iter()
-        .map(|item| (item.session_id, item.requires_action))
-        .collect();
-    let menu = menu(conversations, &attention);
+    let menu = menu(conversations, attention);
     let badge = DockBadge {
         label: (!attention.is_empty()).then(|| attention.len().to_string()),
     };
@@ -137,6 +95,38 @@ fn refresh(sent: &Rc<RefCell<Sent>>, cx: &mut App) {
     }
 }
 
+/// 一台机器上没归档的对话。
+fn machine_rows(machine: &api::Machine, cx: &App) -> Vec<Row> {
+    let host = api::host(cx);
+    let Some(directory) = host.workspace_directory(&machine.key, cx) else {
+        return Vec::new();
+    };
+    let states: HashMap<String, DaemonSessionState> = host
+        .session_states(&machine.key, cx)
+        .into_iter()
+        .map(|state| (state.id.clone(), state))
+        .collect();
+    let remote = (machine.key != RuntimeKey::Local).then_some(machine.name.as_str());
+    directory
+        .conversations
+        .iter()
+        .filter(|conversation| conversation.archived_at.is_none())
+        .filter_map(|conversation| conversation_row(conversation, &states, remote))
+        .collect()
+}
+
+/// 那台机器上含这个守护会话的对话叫什么，和菜单里同一个名字（远程的带机器名）。
+pub(crate) fn session_title(machine: &RuntimeKey, session_id: &str, cx: &App) -> Option<String> {
+    let machine = api::host(cx)
+        .machines(cx)
+        .into_iter()
+        .find(|known| known.key == *machine)?;
+    machine_rows(&machine, cx)
+        .into_iter()
+        .find(|row| row.ids.iter().any(|id| id == session_id))
+        .map(|row| row.title)
+}
+
 fn forget_on_failure(
     task: Task<Result<(), String>>,
     sent: Rc<RefCell<Sent>>,
@@ -145,7 +135,7 @@ fn forget_on_failure(
 ) {
     cx.spawn(async move |_| {
         if let Err(error) = task.await {
-            eprintln!("[menubar] 交给宿主失败：{error}");
+            eprintln!("[notifications] 菜单栏交给宿主失败：{error}");
             forget(&mut sent.borrow_mut());
         }
     })
@@ -252,7 +242,7 @@ struct Entry {
 }
 
 /// 列出运行中、要你处理、有没看提醒的对话，要你处理的排前面；运行数按所有对话算，要你看
-/// 的数按所有提醒算（对话已经关了的提醒也算，宿主的系统通知还在）。
+/// 的数按所有提醒算（对话已经关了的提醒也算，系统通知还在）。
 fn menu(rows: Vec<Row>, attention: &HashMap<String, bool>) -> Menu {
     let running = rows
         .iter()

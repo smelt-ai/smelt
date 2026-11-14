@@ -29,7 +29,6 @@ use smelt_ui::ListRow;
 
 use agent_client_protocol::v1::schema::SessionId;
 
-use smelt_app_state::daemon_states_global::AttentionGlobal;
 use smelt_app_state::provider_status_global::ProviderStatus;
 use smelt_client::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientHandle, ConversationClientLaunch, load_acp_history,
@@ -3463,13 +3462,6 @@ impl AcpView {
         });
         cx.notify();
         true
-    }
-
-    /// 会话被激活查看后清「有结果可看」。
-    pub fn mark_read(&mut self, cx: &mut Context<Self>) {
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            AttentionGlobal::mark_read(&self.sid, cx);
-        }
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {

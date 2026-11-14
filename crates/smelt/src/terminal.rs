@@ -438,9 +438,6 @@ impl Dimensions for TermSize {
     }
 }
 
-/// BEL 普通提醒槽；UI 侧轮询后用于通知记录，不参与 Agent 状态。
-type NotifySlot = Arc<Mutex<Option<String>>>;
-
 /// 网格行列 + 单元格像素尺寸，给 OSC/CSI 查询（TextAreaSizeRequest）和 PTY resize 用。
 #[derive(Clone, Copy)]
 struct TermMetrics {
@@ -681,14 +678,13 @@ impl TerminalWriter {
     }
 }
 
-/// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态。
+/// 事件代理：alacritty 的 EventListener。BEL 不管：响铃提醒由运行时扫输出时判定。
 /// OSC 0/2 标题直接忽略：它不是会话名，这里也不保存。
 /// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板。程序的查询由新守护
 /// 答，旧守护没声明的那类才由客户端兜底（见 [`DaemonAnswers`]）。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
 struct EventProxy {
-    bell_notify: NotifySlot,
     /// 守护连接写队列，跟 [`Terminal`] 自己发键盘输入共用同一个单消费者，保证帧不会
     /// 交叉，同时调用方不直接执行 socket I/O。
     writer: TerminalWriter,
@@ -729,11 +725,6 @@ impl EventProxy {
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
-            Event::Bell => {
-                if let Ok(mut bell) = self.bell_notify.lock() {
-                    *bell = Some("🔔 响铃".to_string());
-                }
-            }
             // 光标位置 / 设备属性等查询-应答协议：不回应会让依赖精确光标位置渲染
             // 的 TUI（如 Claude Code 的输入框 ghost-text 补全）拿不到定位信息。
             Event::PtyWrite(text) if !self.daemon_answers.queries => {
@@ -809,7 +800,7 @@ pub(crate) fn kill_remote_in_background(runtime: &crate::runtimes::Runtime, id: 
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
 // 视图独立成 crate 后也要用同一份），这里重导出成原来的裸名字。
 pub(crate) use smelt_client::daemon_state::{
-    DaemonPhase, DaemonSessionState, DaemonStateEvent, daemon_reconnect_backoff,
+    DaemonSessionState, DaemonStateEvent, daemon_reconnect_backoff,
     subscribe_daemon_states_blocking,
 };
 
@@ -1039,8 +1030,6 @@ pub struct Terminal {
     daemon_geometry: Arc<Mutex<DaemonGeometrySignal>>,
     daemon_geometry_generation: u64,
     remote_geometry_locked: bool,
-    /// BEL 普通提醒槽，结构化 agent 激活后仍可独立提醒。
-    bell_notify: NotifySlot,
     /// `take_damage` 用来识别「光标真的动了」——alacritty 每帧都会把当前光标格标脏，
     /// 静止时要滤掉；但光标移动后若只标了新位置那一格，也得算变化（见 take_damage）。
     last_damage_cursor: Mutex<Option<(i32, usize)>>,
@@ -1260,7 +1249,6 @@ impl Terminal {
 
         // 2) alacritty 终端状态机。EventProxy 把 PTY 自动应答写回共享写端。
         //    OSC 0/2 不保存。
-        let bell_notify: NotifySlot = Arc::new(Mutex::new(None));
         let metrics = Arc::new(Mutex::new(TermMetrics {
             rows: size.rows as u16,
             cols: size.cols as u16,
@@ -1272,7 +1260,6 @@ impl Terminal {
             term_config(),
             &size,
             EventProxy {
-                bell_notify: bell_notify.clone(),
                 writer: writer.clone(),
                 metrics: metrics.clone(),
                 daemon_answers,
@@ -1418,7 +1405,6 @@ impl Terminal {
             daemon_geometry,
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            bell_notify,
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
@@ -1512,11 +1498,6 @@ impl Terminal {
             geometry_token,
             daemon_answers,
         )))
-    }
-
-    /// 取走一次普通终端 BEL 提醒；它不携带 Agent 状态语义。
-    pub fn take_bell_notification(&self) -> Option<String> {
-        self.bell_notify.lock().ok()?.take()
     }
 
     /// 自上次调用以来，终端网格内容是否真的变化了（读并清 alacritty 自带的
@@ -2916,7 +2897,6 @@ mod event_proxy_answers_tests {
             .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
         let proxy = EventProxy {
-            bell_notify: Arc::new(Mutex::new(None)),
             writer: TerminalWriter::start(sock).expect("writer 启动失败"),
             metrics: Arc::new(Mutex::new(TermMetrics {
                 rows: 24,
@@ -3128,35 +3108,6 @@ mod event_proxy_answers_tests {
 }
 
 #[cfg(test)]
-mod bell_notification_tests {
-    use super::*;
-
-    #[test]
-    fn bell_uses_its_own_notification_slot() {
-        let (sock, _peer) = RuntimeStream::pair().expect("创建 socket pair");
-        let bell_notify = Arc::new(Mutex::new(None));
-        let proxy = EventProxy {
-            bell_notify: Arc::clone(&bell_notify),
-            writer: TerminalWriter::start(sock).expect("writer 启动失败"),
-            metrics: Arc::new(Mutex::new(TermMetrics {
-                rows: 24,
-                cols: 80,
-                cell_w: 8,
-                cell_h: 16,
-            })),
-            daemon_answers: DaemonAnswers::default(),
-        };
-
-        proxy.send_event(Event::Bell);
-
-        assert_eq!(
-            bell_notify.lock().unwrap().take().as_deref(),
-            Some("🔔 响铃")
-        );
-    }
-}
-
-#[cfg(test)]
 mod resize_tests {
     use super::*;
     use std::io::{ErrorKind, Read};
@@ -3173,7 +3124,6 @@ mod resize_tests {
             cell_h: 16,
         }));
         let proxy = EventProxy {
-            bell_notify: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
             daemon_answers: DaemonAnswers::default(),
@@ -3191,7 +3141,6 @@ mod resize_tests {
                 daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
                 daemon_geometry_generation: 0,
                 remote_geometry_locked: false,
-                bell_notify: Arc::new(Mutex::new(None)),
                 last_damage_cursor: Mutex::new(None),
                 search_query: Mutex::new(String::new()),
                 search_matches: Mutex::new(Vec::new()),
@@ -3404,7 +3353,6 @@ mod search_resync_tests {
             cell_h: 16,
         }));
         let proxy = EventProxy {
-            bell_notify: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
             daemon_answers: DaemonAnswers::default(),
@@ -3418,7 +3366,6 @@ mod search_resync_tests {
             daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            bell_notify: Arc::new(Mutex::new(None)),
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),

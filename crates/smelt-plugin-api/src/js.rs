@@ -26,8 +26,8 @@ use gpui_shell::{
 use serde_json::Value;
 
 use crate::{
-    CommandSpec, Handled, HostEvent, RuntimeKey, SettingsGroup, SettingsPageBuilder,
-    SettingsPageSpec, TopicMessage, rusqlite,
+    CommandSpec, Handled, HostEvent, NotificationPermission, RuntimeKey, SettingsGroup,
+    SettingsPageBuilder, SettingsPageSpec, TopicMessage, rusqlite,
 };
 
 /// 模块名，和 Rust 这边的 crate 同名。
@@ -62,14 +62,14 @@ export function active_context(): ActiveContext;
 export function session_states(machine: Machine): unknown[];
 /** 那台机器的工作区目录：开着的项目和对话，是会话的名册（形状同运行时的 workspace 目录）；还没收到时为 null。变了发 sessions_changed。 */
 export function workspace_directory(machine: Machine): unknown | null;
-export interface Attention {
-  /** 守护会话 id。 */
-  session_id: string;
-  /** 还等人处理（批准、输入、失败），看过也留着；false 是看过就消的提醒。 */
-  requires_action: boolean;
-}
-/** 要人看一眼的会话，所有机器的。变了发 attention_changed。 */
-export function attention(): Attention[];
+/**
+ * 系统通知的授权：checking 正在读系统设置，not_requested 还没问过用户（第一次发通知时系统会问），
+ * denied 用户在系统设置里关了（用 "smelt.app/open-notification-settings" 带他去开），unavailable 系统报错
+ * （error 是原因），unsupported 这个系统上没有系统通知。应用回到前台时重查；变了发 notification_permission_changed。
+ */
+export function notification_permission():
+  | { state: "checking" | "not_requested" | "granted" | "denied" | "unsupported" }
+  | { state: "unavailable"; error: string };
 /** 菜单栏菜单里的一项。icon 只取 PNG（字节数组）的透明度当形状，涂成 color（0xRRGGBB）。 */
 export type StatusMenuItem =
   | { type: "action"; label: string; icon?: { png: number[]; color: number } | null; command: string; args?: unknown }
@@ -130,6 +130,7 @@ export function next_command(): Promise<CommandCall>;
  *   同一个 id 再发换掉上一条，可以撤回，应用重启后也认得；不给是一次性的提示。on_click 是点它时执行的命令，
  *   不给就只是把应用拿到前面来。
  * - "smelt.app/withdraw-notification" { id: string }：撤回给了 id 的通知；没有这条也不算错。
+ * - "smelt.app/open-notification-settings"：打开系统设置里本应用的通知设置；只有 macOS 有。
  * - "smelt.app/open-in-text-editor" { path: string }：用系统文本编辑器打开这台电脑上的文件。
  * - "smelt.app/pick-paths" { machine: Machine, title: string, confirm: string, files?: boolean, multiple?: boolean }
  *   → string[] | null：在那台机器上选路径，title 是选择框标题，confirm 是确认按钮上的动词；取消时为 null。
@@ -185,7 +186,7 @@ export type HostEvent =
   | { type: "machines_changed" }
   | { type: "active_context_changed" }
   | { type: "sessions_changed" }
-  | { type: "attention_changed" }
+  | { type: "notification_permission_changed" }
   | { type: "agent_settings_changed" }
   | { type: "shown_views_changed" }
   | { type: "views_changed" }
@@ -352,9 +353,11 @@ impl JsPlugin {
                 })?;
                 serialized("workspace_directory", &directory)
             })
-            .function("attention", |_| {
-                let attention = in_app("attention", |cx| crate::host(cx).attention(cx))?;
-                serialized("attention", &attention)
+            .function("notification_permission", |_| {
+                let permission = in_app("notification_permission", |cx| {
+                    crate::host(cx).notification_permission(cx)
+                })?;
+                Ok(permission_value(&permission))
             })
             .function("view_shown", |arguments| {
                 let id = arguments.string(0)?;
@@ -963,6 +966,23 @@ fn machine_value(key: &RuntimeKey) -> HostValue {
     }
 }
 
+fn permission_value(permission: &NotificationPermission) -> HostValue {
+    let state = match permission {
+        NotificationPermission::Checking => "checking",
+        NotificationPermission::NotRequested => "not_requested",
+        NotificationPermission::Granted => "granted",
+        NotificationPermission::Denied => "denied",
+        NotificationPermission::Unsupported => "unsupported",
+        NotificationPermission::Unavailable(error) => {
+            return HostObject::new()
+                .field("state", "unavailable")
+                .field("error", error.as_str())
+                .into();
+        }
+    };
+    HostObject::new().field("state", state).into()
+}
+
 // ---------------------------------------------------------------- 事件
 
 fn event_value(event: &HostEvent) -> HostValue {
@@ -1002,7 +1022,9 @@ fn event_value(event: &HostEvent) -> HostValue {
             HostObject::new().field("type", "active_context_changed")
         }
         HostEvent::SessionsChanged => HostObject::new().field("type", "sessions_changed"),
-        HostEvent::AttentionChanged => HostObject::new().field("type", "attention_changed"),
+        HostEvent::NotificationPermissionChanged => {
+            HostObject::new().field("type", "notification_permission_changed")
+        }
         HostEvent::AgentSettingsChanged => {
             HostObject::new().field("type", "agent_settings_changed")
         }

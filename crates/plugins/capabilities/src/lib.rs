@@ -170,7 +170,7 @@ impl CapabilitiesPage {
             | HostEvent::WindowActivated
             | HostEvent::OverlayChanged
             | HostEvent::SessionsChanged
-            | HostEvent::AttentionChanged => {}
+            | HostEvent::NotificationPermissionChanged => {}
             HostEvent::MachinesChanged => {
                 // 在配的那台远程机器已经移除时，回到本机。
                 if api::host(cx).client(&self.machine, cx).is_none() {

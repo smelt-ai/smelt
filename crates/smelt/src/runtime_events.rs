@@ -260,7 +260,7 @@ pub(crate) fn start(cx: &mut App) -> RuntimeEventReceivers {
                 if matches!(status, RuntimeStatus::Incompatible { .. })
                     && !crate::runtimes::runtime_incompatible(&key, cx)
                 {
-                    forget_states(&key, cx);
+                    crate::DaemonStates::forget_runtime(&key, cx);
                 }
                 crate::runtimes::set_status(&key, status, cx);
             });
@@ -766,14 +766,7 @@ fn sync_remote_subscriptions(cx: &mut App) {
         subscriptions.remotes.insert(key, handle);
     }
     for key in removed {
-        forget_states(&key, cx);
-    }
-}
-
-/// 丢掉一个运行时的会话状态镜像，连同上面会话的提醒。
-fn forget_states(key: &RuntimeKey, cx: &mut App) {
-    for id in crate::DaemonStates::forget_runtime(key, cx) {
-        crate::AttentionGlobal::remove_session(&id, cx);
+        crate::DaemonStates::forget_runtime(&key, cx);
     }
 }
 

@@ -995,11 +995,8 @@ impl Workspace {
                     // 保留视图自身的快照更新。
                 }
                 acp_view::AcpViewEvent::ViewingHistoryChanged => {
+                    // 往上翻着看时到的完成不算看过；滚回最新位置时通知插件据此补标已读。
                     this.note_active_context(cx);
-                    // 往上翻着看时到的完成没算已读；滚回最新位置才补上。
-                    if this.workspace_window_active {
-                        this.mark_visible_session_read(cx);
-                    }
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: false } => {
                     this.open_capabilities("plugins", window, cx);
@@ -1999,14 +1996,6 @@ impl Workspace {
             let project_root = group.map(|g| g.root);
             self.remember_session_project(&runtime, project_root.as_deref(), cx);
         }
-        let attention_ids: Vec<String> = match &self.sessions[ix].kind {
-            SessionKind::Term { .. } => self.sessions[ix]
-                .term_leaves()
-                .iter()
-                .map(|t| t.read(cx).session_id().to_string())
-                .collect(),
-            SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
-        };
         if kill_runtime {
             // 用户关掉的：运行时目录里也关掉它，别的设备随之摘掉。只摘本地的（运行时被
             // 移除、别处已经关掉）不走这里。
@@ -2028,11 +2017,6 @@ impl Workspace {
             }
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| v.shutdown(cx));
-            }
-        }
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            for id in attention_ids {
-                AttentionGlobal::remove_session(&id, cx);
             }
         }
         let closed_conversation_sid = match &self.sessions[ix].kind {
@@ -2119,9 +2103,6 @@ impl Workspace {
         // 用户主动关 pane → 守护真正杀掉该 shell（区别于退出 GUI：那时保活）。
         let closed_session_id = view.read(cx).session_id().to_string();
         terminal::kill_remote_in_background(view.read(cx).runtime(), &closed_session_id);
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            AttentionGlobal::remove_session(&closed_session_id, cx);
-        }
         let sess = &mut self.sessions[ix];
         if let Some(dock) = sess.term_dock_mut() {
             dock.remove(&view, window, cx);
@@ -2156,7 +2137,6 @@ impl Workspace {
             sess.set_active_term(e.clone());
         }
         self.note_active_context(cx);
-        e.update(cx, |terminal, cx| terminal.mark_read(cx));
         let h = e.read(cx).focus_handle();
         window.focus(&h, cx);
         self.save_state(cx);
@@ -2244,22 +2224,6 @@ impl Workspace {
         })
     }
 
-    pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
-        self.viewed_session(cx).map(|session| session.id)
-    }
-
-    /// 用户正在看的会话标已读。切会话、窗口回到前台、或正在看时新关注到达。
-    /// 对话正往上翻着看历史时，最新结果不在眼前，不算看过；滚回最新位置时再标。
-    pub(crate) fn mark_visible_session_read(&mut self, cx: &mut Context<Self>) {
-        if cx.try_global::<AttentionGlobal>().is_none() {
-            return;
-        }
-        if let Some(session) = self.viewed_session(cx).filter(|session| session.at_latest) {
-            status_item::remove_system_notification(&session.id);
-            AttentionGlobal::mark_read(&session.id, cx);
-        }
-    }
-
     pub(crate) fn note_window_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
         let application_active = status_item::is_app_active();
         smelt_ui::motion::set_ambient_application_active(cx, application_active);
@@ -2269,7 +2233,6 @@ impl Workspace {
         self.workspace_window_active = active;
         if became_active {
             status_item::refresh_system_notification_authorization();
-            self.mark_visible_session_read(cx);
             // 离线的远程机器隔几分钟才探一次；人回到这里时多半要用，立刻探一次。
             crate::runtime_events::probe_remotes(cx);
             // 监听收不到的变化（监听登记失败、旧运行时）由插件在人回来时补上。这里在绘制
@@ -2316,7 +2279,6 @@ impl Workspace {
             // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
             // 视图更新期间再读它会 panic。
             let restore_settled = self.session_restore_settled(ix, cx);
-            // 切到会话即视为看过一次性通知；结构化等待状态仍由 daemon phase 保留。
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
                     // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
@@ -2324,17 +2286,11 @@ impl Workspace {
                         v.maybe_auto_resume(window, cx);
                     }
                     if !route_has_overlay {
-                        v.mark_read(cx);
                         v.focus_input(window, cx);
                     }
                 });
-            } else {
-                if !route_has_overlay && let Some(view) = self.sessions[ix].active_term().cloned() {
-                    view.update(cx, |terminal, cx| terminal.mark_read(cx));
-                }
-                if !route_has_overlay {
-                    self.focus_active(window, cx);
-                }
+            } else if !route_has_overlay {
+                self.focus_active(window, cx);
             }
             if route_has_overlay {
                 window.focus(&self.focus_handle, cx);

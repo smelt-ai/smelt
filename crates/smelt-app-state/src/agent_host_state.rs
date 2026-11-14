@@ -1,5 +1,5 @@
 //! 智能体宿主状态：每台机器上运行时那部分配置（启动命令、env、profile、智能体定义、
-//! hook 开关），加上客户端自己的通知偏好和自动化投影。
+//! hook 开关），加上各台机器推来的自动化投影。
 //!
 //! 需要 `gpui::Global`，所以不能进不许引 GPUI 的 smelt-core。设置页怎么渲染
 //! 这些字段仍在主 crate 的 settings 模块。
@@ -18,19 +18,11 @@ use smelt_runtime_client::protocol::control::EmptyParams;
 /// 读写运行时配置的上限。一次合并写库，正常是毫秒级。
 const RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// 客户端自己的那部分：通知偏好（每台设备可以不同）和各台机器推来的自动化投影。运行时
-/// 那部分按机器放在 [`AgentHosts`]。
-#[derive(Clone)]
+/// 客户端这边的：各台机器推来的自动化投影。运行时那部分按机器放在 [`AgentHosts`]。
+#[derive(Clone, Default)]
 pub struct AgentHostState {
-    pub notify_approval: bool,
-    pub notify_input: bool,
-    pub notify_success: bool,
-    pub notify_failure: bool,
-    pub notify_terminal_bell: bool,
     /// 每台机器的自动化投影。每台运行时有自己的自动化库，两台上同 id 的自动化是两回事。
     pub automations: BTreeMap<RuntimeKey, MachineAutomations>,
-    /// 通知偏好写不进客户端库时的原因。
-    pub persistence_error: Option<String>,
 }
 
 impl AgentHostState {
@@ -65,38 +57,6 @@ impl AgentHostState {
     /// 机器被移除：它的自动化不再显示。
     pub fn forget_automations(&mut self, runtime: &RuntimeKey) -> bool {
         self.automations.remove(runtime).is_some()
-    }
-
-    fn notify_prefs(&self) -> NotifyPrefs {
-        NotifyPrefs {
-            approval: self.notify_approval,
-            input: self.notify_input,
-            success: self.notify_success,
-            failure: self.notify_failure,
-            terminal_bell: self.notify_terminal_bell,
-        }
-    }
-
-    fn set_notify_prefs(&mut self, prefs: NotifyPrefs) {
-        self.notify_approval = prefs.approval;
-        self.notify_input = prefs.input;
-        self.notify_success = prefs.success;
-        self.notify_failure = prefs.failure;
-        self.notify_terminal_bell = prefs.terminal_bell;
-    }
-}
-
-impl Default for AgentHostState {
-    fn default() -> Self {
-        Self {
-            notify_approval: true,
-            notify_input: true,
-            notify_success: true,
-            notify_failure: true,
-            notify_terminal_bell: true,
-            automations: BTreeMap::new(),
-            persistence_error: None,
-        }
     }
 }
 
@@ -196,74 +156,6 @@ impl MachineAutomations {
         self.webhook_base_url = snapshot.webhook_base_url;
         true
     }
-}
-
-/// 通知怎么提醒是客户端自己的事（设计文档 D1），每台设备可以不同，不交给运行时。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct NotifyPrefs {
-    approval: bool,
-    input: bool,
-    success: bool,
-    failure: bool,
-    terminal_bell: bool,
-}
-
-/// 读客户端库里的通知偏好；没有时用出厂值。
-fn load_notify_prefs() -> NotifyPrefs {
-    match smelt_client_store::client_store().and_then(|store| store.notify_prefs()) {
-        Ok(Some(record)) => NotifyPrefs {
-            approval: record.approval,
-            input: record.input,
-            success: record.success,
-            failure: record.failure,
-            terminal_bell: record.terminal_bell,
-        },
-        Ok(None) => AgentHostState::default().notify_prefs(),
-        Err(error) => {
-            eprintln!("[settings] 读取通知偏好失败，使用默认值：{error}");
-            AgentHostState::default().notify_prefs()
-        }
-    }
-}
-
-fn save_notify_prefs(prefs: NotifyPrefs) -> Result<(), String> {
-    smelt_client_store::client_store()
-        .and_then(|store| {
-            store.put_notify_prefs(&smelt_client_store::NotifyPrefsRecord {
-                approval: prefs.approval,
-                input: prefs.input,
-                success: prefs.success,
-                failure: prefs.failure,
-                terminal_bell: prefs.terminal_bell,
-            })
-        })
-        .map_err(|error| error.to_string())
-}
-
-/// 启动时的初始状态：客户端的通知偏好立刻可用。
-pub fn initial_agent_host_state() -> AgentHostState {
-    let mut state = AgentHostState::default();
-    state.set_notify_prefs(load_notify_prefs());
-    state
-}
-
-/// 改通知偏好：先写客户端库，写成了才换上。
-pub fn apply_notify_prefs(f: impl FnOnce(&mut AgentHostState), cx: &mut App) {
-    let current = cx.global::<AgentHostState>().clone();
-    let mut candidate = current.clone();
-    f(&mut candidate);
-    if candidate.notify_prefs() == current.notify_prefs() {
-        return;
-    }
-    match save_notify_prefs(candidate.notify_prefs()) {
-        Ok(()) => candidate.persistence_error = None,
-        Err(error) => {
-            eprintln!("[agent-ui] 保存通知偏好失败: {error}");
-            candidate = current;
-            candidate.persistence_error = Some(format!("保存通知偏好失败：{error}"));
-        }
-    }
-    cx.set_global(candidate);
 }
 
 // ===================== 运行时那部分：按机器缓存 + 异步提交 =====================

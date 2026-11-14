@@ -17,9 +17,6 @@ pub enum StatusItemEvent {
         command: String,
         args: serde_json::Value,
     },
-    /// 点了一条会话的系统通知。通知只带守护会话 id：主窗口可能已经关了、会话可能重排，
-    /// 到点击时再按 id 找当前位置。
-    JumpToDaemonSession(String),
     /// 跳到某台机器上某条自动化的一次运行。
     JumpToAutomationRun {
         runtime: crate::RuntimeKey,
@@ -42,7 +39,7 @@ pub enum SystemNotificationAuthorization {
     Unavailable,
 }
 
-/// 系统通知桥的可观测状态，供设置页或诊断 UI 使用。
+/// 系统通知桥的可观测状态：插件读授权，日志记积压。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemNotificationStatus {
     pub authorization: SystemNotificationAuthorization,
@@ -53,39 +50,23 @@ pub struct SystemNotificationStatus {
 pub(crate) const SYSTEM_NOTIFICATION_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SystemNotificationStatusPresentation {
-    pub text: String,
-    pub is_error: bool,
-    pub can_open_settings: bool,
-}
-
-pub(crate) fn system_notification_status_presentation(
-    status: &SystemNotificationStatus,
-) -> SystemNotificationStatusPresentation {
-    let (mut text, is_error, can_open_settings) = match status.authorization {
-        SystemNotificationAuthorization::Unknown => ("正在读取…".to_string(), false, false),
-        SystemNotificationAuthorization::NotDetermined => {
-            ("尚未请求系统授权".to_string(), false, false)
-        }
-        SystemNotificationAuthorization::Denied => ("已被 macOS 禁止".to_string(), true, true),
-        SystemNotificationAuthorization::Authorized => ("已授权".to_string(), false, false),
-        SystemNotificationAuthorization::Unavailable => (
+/// 给插件看的系统通知授权（`Host::notification_permission`）。
+pub(crate) fn notification_permission() -> smelt_plugin_api::NotificationPermission {
+    use smelt_plugin_api::NotificationPermission as Permission;
+    if cfg!(not(target_os = "macos")) {
+        return Permission::Unsupported;
+    }
+    let status = system_notification_status();
+    match status.authorization {
+        SystemNotificationAuthorization::Unknown => Permission::Checking,
+        SystemNotificationAuthorization::NotDetermined => Permission::NotRequested,
+        SystemNotificationAuthorization::Authorized => Permission::Granted,
+        SystemNotificationAuthorization::Denied => Permission::Denied,
+        SystemNotificationAuthorization::Unavailable => Permission::Unavailable(
             status
                 .last_error
-                .clone()
-                .unwrap_or_else(|| "暂时无法读取授权状态".to_string()),
-            true,
-            false,
+                .unwrap_or_else(|| "暂时读不到授权状态".to_string()),
         ),
-    };
-    if status.pending_count > 0 {
-        text.push_str(&format!(" · {} 条提醒待发送", status.pending_count));
-    }
-    SystemNotificationStatusPresentation {
-        text,
-        is_error,
-        can_open_settings,
     }
 }
 
@@ -361,8 +342,7 @@ mod imp {
     pub fn is_app_active() -> bool {
         true
     }
-    pub fn deliver_notification(_session_id: &str, _subtitle: &str, _body: &str) {}
-    pub fn deliver_app_notification(_subtitle: &str, _body: &str) {}
+    fn deliver_app_notification(_subtitle: &str, _body: &str) {}
     pub fn deliver_plugin_notification(_notify: &smelt_plugin_api::Notify) {}
     pub fn withdraw_plugin_notification(_id: &str) {}
     pub fn notify_error(message: impl AsRef<str>) {
@@ -379,9 +359,7 @@ mod imp {
         _body: &str,
     ) {
     }
-    pub fn retain_system_notifications(_session_ids: &[String]) {}
     pub fn retain_automation_notifications(_runtime: &crate::RuntimeKey, _run_ids: &[String]) {}
-    pub fn remove_system_notification(_session_id: &str) {}
     pub fn remove_automation_notification(_runtime: &crate::RuntimeKey, _run_id: &str) {}
     pub fn refresh_system_notification_authorization() {}
     pub fn sync_system_notifications() {}
@@ -401,30 +379,23 @@ pub use imp::{activate_app, is_app_active, set_menu, setup};
 
 #[cfg(target_os = "macos")]
 pub use system_notifications::{
-    deliver_app_notification, deliver_automation_notification, deliver_notification,
-    deliver_plugin_notification, notify_error, notify_success,
+    deliver_automation_notification, deliver_plugin_notification, notify_error, notify_success,
     refresh_system_notification_authorization, remove_automation_notification,
-    remove_system_notification, retain_automation_notifications, retain_system_notifications,
-    sync_system_notifications, system_notification_status, take_system_notification_errors,
-    withdraw_plugin_notification,
+    retain_automation_notifications, sync_system_notifications, system_notification_status,
+    take_system_notification_errors, withdraw_plugin_notification,
 };
 
 #[cfg(not(target_os = "macos"))]
 pub use imp::{
-    deliver_app_notification, deliver_automation_notification, deliver_notification,
-    deliver_plugin_notification, notify_error, notify_success,
+    deliver_automation_notification, deliver_plugin_notification, notify_error, notify_success,
     refresh_system_notification_authorization, remove_automation_notification,
-    remove_system_notification, retain_automation_notifications, retain_system_notifications,
-    sync_system_notifications, system_notification_status, take_system_notification_errors,
-    withdraw_plugin_notification,
+    retain_automation_notifications, sync_system_notifications, system_notification_status,
+    take_system_notification_errors, withdraw_plugin_notification,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SystemNotificationAuthorization, SystemNotificationStatus,
-        system_notification_status_presentation, tint_png,
-    };
+    use super::tint_png;
 
     /// 上色只换颜色，形状（透明度）不动。
     #[test]
@@ -441,26 +412,5 @@ mod tests {
         assert_eq!(tinted.get_pixel(0, 0).0, [0x11, 0x22, 0x33, 255]);
         assert_eq!(tinted.get_pixel(1, 0).0[3], 0);
         assert_eq!(tint_png(b"not a png", 0), None);
-    }
-
-    #[test]
-    fn notification_permission_presentation_exposes_denial_and_pending_delivery() {
-        let denied = system_notification_status_presentation(&SystemNotificationStatus {
-            authorization: SystemNotificationAuthorization::Denied,
-            pending_count: 2,
-            last_error: Some("permission denied".into()),
-        });
-        assert_eq!(denied.text, "已被 macOS 禁止 · 2 条提醒待发送");
-        assert!(denied.is_error);
-        assert!(denied.can_open_settings);
-
-        let authorized = system_notification_status_presentation(&SystemNotificationStatus {
-            authorization: SystemNotificationAuthorization::Authorized,
-            pending_count: 0,
-            last_error: None,
-        });
-        assert_eq!(authorized.text, "已授权");
-        assert!(!authorized.is_error);
-        assert!(!authorized.can_open_settings);
     }
 }

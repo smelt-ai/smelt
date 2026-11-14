@@ -14,7 +14,6 @@ mod agent;
 mod appearance;
 mod collaboration;
 mod maintenance;
-mod notify;
 mod panel_plugin;
 mod shortcuts;
 
@@ -187,7 +186,6 @@ fn section_page(
 ) -> Option<SettingPage> {
     Some(match selected {
         SettingsSection::Appearance => appearance::appearance_page(entity, snapshot, cx),
-        SettingsSection::Notifications => notify::notify_page(),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
         SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
         SettingsSection::Agents => {

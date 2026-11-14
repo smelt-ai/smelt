@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr::NonNull;
 use std::sync::{Mutex, OnceLock};
 
-const SESSION_IDENTIFIER_PREFIX: &str = "smelt.session.";
 const AUTOMATION_RUN_IDENTIFIER_PREFIX: &str = "smelt.automation.run.";
 /// 远程机器上的运行：前缀后面是 `运行时 id.运行 id`。本机的沿用老格式，已经挂在通知中心
 /// 里的旧通知点了照样能跳。
@@ -39,10 +38,6 @@ fn plugin_notification_identifier(id: &str) -> String {
     format!("{PLUGIN_IDENTIFIER_PREFIX}{id}")
 }
 
-fn notification_identifier(session_id: &str) -> String {
-    format!("{SESSION_IDENTIFIER_PREFIX}{session_id}")
-}
-
 fn automation_notification_identifier(runtime: &RuntimeKey, run_id: &str) -> String {
     match runtime {
         RuntimeKey::Local => format!("{AUTOMATION_RUN_IDENTIFIER_PREFIX}{run_id}"),
@@ -56,12 +51,6 @@ fn automation_thread_identifier(runtime: &RuntimeKey, automation_id: &str) -> St
         RuntimeKey::Local => format!("{AUTOMATION_THREAD_PREFIX}{automation_id}"),
         RuntimeKey::Remote(id) => format!("{REMOTE_AUTOMATION_THREAD_PREFIX}{id}:{automation_id}"),
     }
-}
-
-fn session_id_from_identifier(identifier: &str) -> Option<&str> {
-    identifier
-        .strip_prefix(SESSION_IDENTIFIER_PREFIX)
-        .filter(|session_id| !session_id.is_empty())
 }
 
 /// 运行时 id 是 UUID，不含 `.` 和 `:`，从第一个分隔符切开就是机器和后半段。
@@ -103,7 +92,7 @@ struct QueuedNotification {
 }
 
 /// Owns requests until UserNotifications confirms that it accepted them. Pending requests are
-/// coalesced by stable session identifier, while generations serialize updates racing a callback.
+/// coalesced by stable identifier, while generations serialize updates racing a callback.
 #[derive(Default)]
 struct NotificationQueue {
     next_generation: u64,
@@ -116,16 +105,6 @@ struct NotificationQueue {
 }
 
 impl NotificationQueue {
-    fn enqueue(&mut self, session_id: &str, subtitle: &str, body: &str) {
-        self.enqueue_with_identifier(
-            notification_identifier(session_id),
-            session_id.to_string(),
-            subtitle,
-            body,
-            None,
-        );
-    }
-
     fn enqueue_automation_run(
         &mut self,
         runtime: &RuntimeKey,
@@ -267,16 +246,6 @@ impl NotificationQueue {
         }
     }
 
-    fn retain_sessions(&mut self, session_ids: &[String]) {
-        let retained = session_ids
-            .iter()
-            .map(|session_id| notification_identifier(session_id))
-            .collect::<HashSet<_>>();
-        self.retain_scope(&retained, |identifier| {
-            session_id_from_identifier(identifier).is_some()
-        });
-    }
-
     /// 只动这台机器的运行通知：别的机器上的运行不在这份快照里，不能当成已删除。
     fn retain_automation_runs(&mut self, runtime: &RuntimeKey, run_ids: &[String]) {
         let retained = run_ids
@@ -288,8 +257,8 @@ impl NotificationQueue {
         });
     }
 
-    /// A retention pass owns one identifier namespace only. Session unread updates must never
-    /// retract automation results, and automation history pruning must not touch session alerts.
+    /// A retention pass owns one identifier namespace only: automation history pruning must not
+    /// touch other notifications.
     fn retain_scope(&mut self, retained: &HashSet<String>, in_scope: impl Fn(&str) -> bool) {
         let stale = self
             .active_identifiers
@@ -300,10 +269,6 @@ impl NotificationQueue {
         for identifier in stale {
             self.remove_identifier(&identifier);
         }
-    }
-
-    fn remove_session(&mut self, session_id: &str) {
-        self.remove_identifier(&notification_identifier(session_id));
     }
 
     fn remove_automation_run(&mut self, runtime: &RuntimeKey, run_id: &str) {
@@ -410,16 +375,7 @@ objc2::define_class!(
             completion_handler: &DynBlock<dyn Fn()>,
         ) {
             let identifier = response.notification().request().identifier().to_string();
-            let event = if let Some(session_id) =
-                session_id_from_identifier(&identifier).map(str::to_string)
-            {
-                state()
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .queue
-                    .remove_session(&session_id);
-                Some(StatusItemEvent::JumpToDaemonSession(session_id))
-            } else if let Some((runtime, run_id)) = automation_run_from_identifier(&identifier)
+            let event = if let Some((runtime, run_id)) = automation_run_from_identifier(&identifier)
                 .map(|(runtime, run_id)| (runtime, run_id.to_string()))
             {
                 state()
@@ -728,19 +684,7 @@ fn prepare_queued_notification(state: &mut BridgeState) {
     }
 }
 
-/// Queues synchronously; authorization and native submission continue asynchronously.
-pub fn deliver_notification(session_id: &str, subtitle: &str, body: &str) {
-    {
-        let mut state = state()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.queue.enqueue(session_id, subtitle, body);
-        prepare_queued_notification(&mut state);
-    }
-    sync_system_notifications();
-}
-
-pub fn deliver_app_notification(subtitle: &str, body: &str) {
+fn deliver_app_notification(subtitle: &str, body: &str) {
     {
         let mut state = state()
             .lock()
@@ -814,31 +758,12 @@ pub fn deliver_automation_notification(
     sync_system_notifications();
 }
 
-/// Retires system-channel intent for sessions that are no longer unread.
-pub fn retain_system_notifications(session_ids: &[String]) {
-    state()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .queue
-        .retain_sessions(session_ids);
-    sync_system_notifications();
-}
-
 pub fn retain_automation_notifications(runtime: &RuntimeKey, run_ids: &[String]) {
     state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .queue
         .retain_automation_runs(runtime, run_ids);
-    sync_system_notifications();
-}
-
-pub fn remove_system_notification(session_id: &str) {
-    state()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .queue
-        .remove_session(session_id);
     sync_system_notifications();
 }
 
@@ -894,8 +819,8 @@ mod tests {
     use super::{
         APP_IDENTIFIER, NotificationQueue, authorization_from_settings,
         automation_from_thread_identifier, automation_notification_identifier,
-        automation_run_from_identifier, automation_thread_identifier, notification_identifier,
-        plugin_notification_identifier, prepare_queued_notification, session_id_from_identifier,
+        automation_run_from_identifier, automation_thread_identifier,
+        plugin_notification_identifier, prepare_queued_notification,
     };
     use crate::RuntimeKey;
     use crate::status_item::SystemNotificationAuthorization;
@@ -951,15 +876,6 @@ mod tests {
 
     #[test]
     fn identifier_is_stable_and_reversible() {
-        let identifier = notification_identifier("daemon/session 42");
-        assert_eq!(identifier, "smelt.session.daemon/session 42");
-        assert_eq!(
-            session_id_from_identifier(&identifier),
-            Some("daemon/session 42")
-        );
-        assert_eq!(session_id_from_identifier("unrelated"), None);
-        assert_eq!(session_id_from_identifier("smelt.session."), None);
-
         // 本机沿用老格式：升级前发出的通知点了照样能跳。
         let automation =
             automation_notification_identifier(&RuntimeKey::Local, "event:auto-1:evt-9");
@@ -999,7 +915,7 @@ mod tests {
     #[test]
     fn app_notifications_are_independent_and_retire_after_delivery() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "done", "session body");
+        queue.enqueue_plugin("session-1", "done", "session body", None);
         queue.enqueue_app("错误", "模型 ID 不能为空", None);
         queue.enqueue_app("完成", "已保存", None);
 
@@ -1021,7 +937,7 @@ mod tests {
         );
         assert!(apps.iter().all(|request| request.thread_identifier == "app"));
 
-        queue.retain_sessions(&[]);
+        queue.remove_plugin("session-1");
         assert!(
             queue
                 .take_retractions()
@@ -1033,7 +949,7 @@ mod tests {
             assert!(!queue.active_identifiers.contains(&app.identifier));
             assert!(!queue.submitted.contains(&app.identifier));
         }
-        assert_eq!(queue.pending_count(), 1); // 会话通知仍在等待投递回执
+        assert_eq!(queue.pending_count(), 1); // 撤掉的插件通知仍在等待投递回执
     }
 
     #[test]
@@ -1049,15 +965,18 @@ mod tests {
     }
 
     #[test]
-    fn discarding_undeliverable_app_notifications_keeps_session_alerts() {
+    fn discarding_undeliverable_app_notifications_keeps_plugin_notifications() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "done", "session body");
+        queue.enqueue_plugin("session-1", "done", "session body", None);
         queue.enqueue_app("提示", "第一条", None);
         queue.enqueue_app("提示", "第二条", None);
         queue.discard_pending_app_notifications();
         let ready = queue.take_ready();
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].identifier, notification_identifier("session-1"));
+        assert_eq!(
+            ready[0].identifier,
+            plugin_notification_identifier("session-1")
+        );
         assert!(
             queue
                 .active_identifiers
@@ -1085,8 +1004,8 @@ mod tests {
     #[test]
     fn queue_coalesces_and_retains_failed_delivery() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "first", "old body");
-        queue.enqueue("session-1", "second", "new body");
+        queue.enqueue_plugin("session-1", "first", "old body", None);
+        queue.enqueue_plugin("session-1", "second", "new body", None);
 
         let mut ready = queue.take_ready();
         assert_eq!(ready.len(), 1);
@@ -1106,9 +1025,9 @@ mod tests {
     #[test]
     fn failed_old_generation_does_not_block_a_newer_request() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "old", "old body");
+        queue.enqueue_plugin("session-1", "old", "old body", None);
         let old = queue.take_ready().pop().unwrap();
-        queue.enqueue("session-1", "new", "new body");
+        queue.enqueue_plugin("session-1", "new", "new body", None);
 
         queue.complete(&old.identifier, old.generation, Some("rejected"));
 
@@ -1120,12 +1039,12 @@ mod tests {
     #[test]
     fn newer_notification_waits_for_retracted_in_flight_generation() {
         let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "old", "old body");
+        queue.enqueue_plugin("session-1", "old", "old body", None);
         let old = queue.take_ready().pop().unwrap();
 
-        queue.remove_session("session-1");
+        queue.remove_plugin("session-1");
         assert_eq!(queue.take_retractions(), vec![old.identifier.clone()]);
-        queue.enqueue("session-1", "new", "new body");
+        queue.enqueue_plugin("session-1", "new", "new body", None);
         assert!(queue.take_ready().is_empty());
 
         queue.complete(&old.identifier, old.generation, None);
@@ -1136,39 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn unread_state_does_not_reactivate_a_non_system_channel() {
-        let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "old", "body");
-        let request = queue.take_ready().pop().unwrap();
-
-        queue.remove_session("session-1");
-        queue.take_retractions();
-        queue.retain_sessions(&["session-1".to_string()]);
-        queue.complete(&request.identifier, request.generation, None);
-
-        assert_eq!(
-            queue.take_retractions(),
-            vec![notification_identifier("session-1")]
-        );
-    }
-
-    #[test]
-    fn queue_retracts_read_or_resolved_sessions() {
-        let mut queue = NotificationQueue::default();
-        queue.enqueue("session-1", "done", "body");
-        let request = queue.take_ready().pop().unwrap();
-        queue.complete(&request.identifier, request.generation, None);
-
-        queue.retain_sessions(&[]);
-        assert_eq!(
-            queue.take_retractions(),
-            vec![notification_identifier("session-1")]
-        );
-        assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[test]
-    fn session_and_automation_retention_are_isolated() {
+    fn automation_retention_is_isolated() {
         let mut automation_queue = NotificationQueue::default();
         automation_queue.enqueue_automation_run(
             &RuntimeKey::Local,
@@ -1185,8 +1072,6 @@ mod tests {
         assert_eq!(request.thread_identifier, "automation:automation-1");
         automation_queue.complete(&request.identifier, request.generation, None);
 
-        automation_queue.retain_sessions(&[]);
-        assert!(automation_queue.take_retractions().is_empty());
         // 别的机器的快照不撤本机的运行通知。
         automation_queue.retain_automation_runs(&RuntimeKey::Remote("box".into()), &[]);
         assert!(automation_queue.take_retractions().is_empty());
@@ -1199,17 +1084,12 @@ mod tests {
             )]
         );
 
-        let mut session_queue = NotificationQueue::default();
-        session_queue.enqueue("session-1", "done", "body");
-        let request = session_queue.take_ready().pop().unwrap();
-        session_queue.complete(&request.identifier, request.generation, None);
+        let mut plugin_queue = NotificationQueue::default();
+        plugin_queue.enqueue_plugin("session-1", "done", "body", None);
+        let request = plugin_queue.take_ready().pop().unwrap();
+        plugin_queue.complete(&request.identifier, request.generation, None);
 
-        session_queue.retain_automation_runs(&RuntimeKey::Local, &[]);
-        assert!(session_queue.take_retractions().is_empty());
-        session_queue.retain_sessions(&[]);
-        assert_eq!(
-            session_queue.take_retractions(),
-            vec![notification_identifier("session-1")]
-        );
+        plugin_queue.retain_automation_runs(&RuntimeKey::Local, &[]);
+        assert!(plugin_queue.take_retractions().is_empty());
     }
 }

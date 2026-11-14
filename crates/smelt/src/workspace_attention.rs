@@ -14,7 +14,7 @@ impl Workspace {
         if let Some(pane) = pane
             && let Some(session) = self.sessions.get_mut(session_ix)
         {
-            // 同一会话有分屏时先换锚点，避免 activate 把旧活动 pane 的通知标已读。
+            // 同一会话有分屏时先换锚点，露出来的是响了的那个 pane。
             session.set_active_term(pane.clone());
         }
         self.activate(session_ix, window, cx);
@@ -81,32 +81,5 @@ impl Workspace {
         if should_defer_notification_session_jump(self.sessions_restore_settled(), target_found) {
             self.pending_notification_session_id = Some(session_id);
         }
-    }
-
-    /// 返回该通知对应的会话标题，以及它是否正显示在主舞台上。非会话路由、舞台被布局
-    /// 里别的视图挡住都看不到活动会话，不能只看 active_session 就判定已在看。
-    pub(crate) fn attention_context(
-        &self,
-        notification: &AttentionItem,
-        cx: &App,
-    ) -> (bool, Option<String>) {
-        let is_current_view =
-            self.viewed_session_id(cx).as_deref() == Some(notification.session_id.as_str());
-        let mut session_title = None;
-        for session in &self.sessions {
-            let matches_acp = matches!(
-                &session.kind,
-                SessionKind::Conversation(view) if view.read(cx).session_id() == notification.session_id
-            );
-            if matches_acp {
-                session_title = Some(Self::title_with_runtime(session, cx));
-            }
-            for leaf in session.term_leaves() {
-                if leaf.read(cx).session_id() == notification.session_id {
-                    session_title = Some(Self::title_with_runtime(session, cx));
-                }
-            }
-        }
-        (is_current_view, session_title)
     }
 }

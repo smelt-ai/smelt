@@ -14,7 +14,6 @@ pub enum SettingsSection {
     /// 主题、字号与字体、窗口与背景。
     #[default]
     Appearance,
-    Notifications,
     Shortcuts,
     PanelPlugins,
     /// 本机 Agent CLI、Hooks 接入、启动项、对话命令与多工作区。都只作用于本机运行时。
@@ -45,7 +44,6 @@ impl SettingsSection {
     pub fn element_key(&self) -> SharedString {
         match self {
             Self::Appearance => "appearance".into(),
-            Self::Notifications => "notifications".into(),
             Self::Shortcuts => "shortcuts".into(),
             Self::PanelPlugins => "panel-plugins".into(),
             Self::Agents => "agents".into(),
@@ -151,30 +149,6 @@ fn host_nav() -> Vec<SettingsNavCategory> {
                         "玻璃",
                         "液态玻璃",
                         "毛玻璃",
-                    ],
-                ),
-                leaf(
-                    "通知",
-                    IconName::Bell,
-                    SettingsSection::Notifications,
-                    &[
-                        "Agent",
-                        "Agent通知",
-                        "提醒",
-                        "notification",
-                        "系统通知",
-                        "等待批准通知",
-                        "等待输入通知",
-                        "任务完成通知",
-                        "任务失败通知",
-                        "终端响铃通知",
-                        "审批",
-                        "批准",
-                        "输入",
-                        "完成",
-                        "失败",
-                        "响铃",
-                        "bell",
                     ],
                 ),
                 leaf(
@@ -521,10 +495,7 @@ mod tests {
     fn nav_is_two_groups_of_pages() {
         let nav = settings_nav(&[]);
         assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统"]);
-        assert_eq!(
-            child_titles(&nav, "通用"),
-            ["外观", "通知", "快捷键", "面板插件"]
-        );
+        assert_eq!(child_titles(&nav, "通用"), ["外观", "快捷键", "面板插件"]);
         assert_eq!(child_titles(&nav, "Agent 与远程"), ["Agent", "远程"]);
         assert_eq!(child_titles(&nav, "系统"), ["资源占用", "维护", "关于"]);
         let sections = nav
@@ -536,7 +507,6 @@ mod tests {
             sections,
             [
                 SettingsSection::Appearance,
-                SettingsSection::Notifications,
                 SettingsSection::Shortcuts,
                 SettingsSection::PanelPlugins,
                 SettingsSection::Agents,
@@ -556,23 +526,18 @@ mod tests {
         assert_eq!(child_titles(&filtered, "系统"), ["维护"]);
 
         let by_group = filter_settings_nav(&nav, "通用");
-        assert_eq!(child_titles(&by_group, "通用").len(), 4);
+        assert_eq!(child_titles(&by_group, "通用").len(), 3);
     }
 
     #[test]
     fn search_understands_user_tasks_and_multiple_terms() {
         let nav = settings_nav(&[]);
         assert_eq!(
-            matching_sections(&nav, "agent通知"),
-            [SettingsSection::Notifications]
-        );
-        assert_eq!(
             matching_sections(&nav, "后台服务"),
             [SettingsSection::Maintenance]
         );
 
         for (query, expected) in [
-            ("任务完成通知", SettingsSection::Notifications),
             ("Relay 地址", SettingsSection::Remote),
             ("添加机器", SettingsSection::Remote),
             ("内存占用", SettingsSection::Resources),
@@ -617,7 +582,7 @@ mod tests {
         assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统", "插件"]);
         assert_eq!(
             child_titles(&nav, "通用"),
-            ["外观", "通知", "快捷键", "面板插件", "提醒"]
+            ["外观", "快捷键", "面板插件", "提醒"]
         );
         assert_eq!(
             child_titles(&nav, "系统"),

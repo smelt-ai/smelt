@@ -196,6 +196,27 @@ pub struct StatusIcon {
     pub color: u32,
 }
 
+/// 打开系统设置里本应用的通知设置，用户在那里开关通知权限。只有 macOS 有，别的系统什么
+/// 都不做。
+pub const OPEN_NOTIFICATION_SETTINGS: Command<(), ()> =
+    Command::new("smelt.app/open-notification-settings");
+
+/// 系统通知的授权（[`Host::notification_permission`]）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotificationPermission {
+    /// 正在读系统设置。
+    Checking,
+    /// 还没问过用户；第一次发通知时系统会问。
+    NotRequested,
+    Granted,
+    /// 用户在系统设置里关了，用 [`OPEN_NOTIFICATION_SETTINGS`] 带他去开。
+    Denied,
+    /// 系统报错，读不到；带给人看的原因。
+    Unavailable(String),
+    /// 这个系统上没有系统通知。
+    Unsupported,
+}
+
 /// 设置 Dock 图标上的角标。只有 macOS 有，别的系统什么都不做。
 pub const SET_DOCK_BADGE: Command<DockBadge, ()> = Command::new("smelt.app/set-dock-badge");
 
@@ -204,15 +225,6 @@ pub struct DockBadge {
     /// 角标上的字；`None` 清掉。
     #[serde(default)]
     pub label: Option<String>,
-}
-
-/// 一个要人看一眼的会话：有没看的提醒，或者还等人处理（批准、输入、失败）。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Attention {
-    /// 守护会话 id（终端是一格终端，对话是整段对话）。
-    pub session_id: String,
-    /// 还等人处理：看过也留着，到 agent 接着跑才消。`false` 是看过就消的提醒。
-    pub requires_action: bool,
 }
 
 /// 宿主转给插件的事。
@@ -243,8 +255,8 @@ pub enum HostEvent {
     /// 有机器的会话状态或工作区目录变了（读 [`Host::session_states`]、
     /// [`Host::workspace_directory`]）。
     SessionsChanged,
-    /// 要人看一眼的会话变了（读 [`Host::attention`]）。
-    AttentionChanged,
+    /// 系统通知的授权变了（读 [`Host::notification_permission`]）。
+    NotificationPermissionChanged,
     /// 某台机器的智能体配置变了（读 [`Host::agent_settings`]）。
     AgentSettingsChanged,
     /// 看得见的视图变了：有的露出来、有的被挡住或收起（读 [`Host::view_shown`]）。
@@ -323,8 +335,9 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &App,
     ) -> Option<model::workspace_directory::WorkspaceDirectory>;
-    /// 要人看一眼的会话，所有机器的，按会话 id 排。变了发 [`HostEvent::AttentionChanged`]。
-    fn attention(&self, cx: &App) -> Vec<Attention>;
+    /// 系统通知的授权。应用回到前台时重查；变了发
+    /// [`HostEvent::NotificationPermissionChanged`]。
+    fn notification_permission(&self, cx: &App) -> NotificationPermission;
 }
 
 struct HostGlobal {

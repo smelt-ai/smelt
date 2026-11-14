@@ -10928,8 +10928,8 @@ dependencies = [
  "smelt-history",
  "smelt-iroh",
  "smelt-layouts",
- "smelt-menubar",
  "smelt-model",
+ "smelt-notifications",
  "smelt-pairing",
  "smelt-paths",
  "smelt-plugin-api",
@@ -11182,14 +11182,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-menubar"
-version = "0.0.0"
-dependencies = [
- "gpui-pre",
- "smelt-plugin-api",
-]
-
-[[package]]
 name = "smelt-model"
 version = "0.0.0"
 dependencies = [
@@ -11210,6 +11202,16 @@ dependencies = [
  "tempfile",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "smelt-notifications"
+version = "0.0.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "smelt-plugin-api",
+ "tempfile",
 ]
 
 [[package]]

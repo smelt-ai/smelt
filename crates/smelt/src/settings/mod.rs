@@ -810,8 +810,8 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
 pub use smelt_app_state::agent_host_state::{
     AgentDefinition, AgentHostState, AgentHosts, MachineAutomations, agent_host_loaded,
-    agent_host_settled, agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host,
-    initial_agent_host_state, reload_agent_host, reload_agent_hosts, try_apply_agent_host,
+    agent_host_settled, agent_hosts, apply_agent_host, detach_agent_host, reload_agent_host,
+    reload_agent_hosts, try_apply_agent_host,
 };
 pub use smelt_model::agent_host::AgentHostSettings;
 pub use smelt_model::agent_kind::{

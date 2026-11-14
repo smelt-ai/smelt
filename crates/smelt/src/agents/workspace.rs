@@ -1218,7 +1218,6 @@ impl Workspace {
         if let Some(view) = view {
             view.update(cx, |view, cx| {
                 view.maybe_auto_resume(window, cx);
-                view.mark_read(cx);
                 view.focus_input(window, cx);
             });
         }

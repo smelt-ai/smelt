@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::*;
-use smelt_app_state::daemon_states_global::{AttentionGlobal, DaemonStates};
+use smelt_app_state::daemon_states_global::DaemonStates;
 use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, Project, RuntimeKey};
 use smelt_runtime_client::RuntimeClient;
 
@@ -124,18 +124,8 @@ impl api::Host for SmeltHost {
             .cloned()
     }
 
-    fn attention(&self, cx: &App) -> Vec<api::Attention> {
-        let Some(store) = cx.try_global::<AttentionGlobal>() else {
-            return Vec::new();
-        };
-        let sessions = store.0.lock().unwrap().badge_sessions();
-        sessions
-            .into_iter()
-            .map(|(session_id, requires_action)| api::Attention {
-                session_id,
-                requires_action,
-            })
-            .collect()
+    fn notification_permission(&self, _cx: &App) -> api::NotificationPermission {
+        status_item::notification_permission()
     }
 }
 
@@ -229,6 +219,13 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             crate::status_item::withdraw_plugin_notification(&args.id);
             Ok(())
         }),
+        api::OPEN_NOTIFICATION_SETTINGS.spec("打开系统通知设置", |_, _, cx| {
+            #[cfg(target_os = "macos")]
+            cx.open_url(crate::status_item::SYSTEM_NOTIFICATION_SETTINGS_URL);
+            #[cfg(not(target_os = "macos"))]
+            let _ = cx;
+            Ok(())
+        }),
         api::OPEN_IN_TEXT_EDITOR.spec("用系统文本编辑器打开", |args, _, _| {
             crate::ide::open_in_system_text_editor(&args.path)
         }),
@@ -281,14 +278,12 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::SessionsChanged, cx)
     })
     .detach();
-    cx.observe_global::<AttentionGlobal>(|cx| api::emit(HostEvent::AttentionChanged, cx))
-        .detach();
     smelt_capabilities::register(cx);
     smelt_files_ui::register(cx);
     smelt_git_ui::register(cx);
     smelt_history::register(cx);
     smelt_layouts::register(cx);
-    smelt_menubar::register(cx);
+    smelt_notifications::register(cx);
 }
 
 impl Workspace {
