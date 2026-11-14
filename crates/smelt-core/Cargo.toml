@@ -68,7 +68,7 @@ system-configuration = "0.7"
 # Windows 上等 auth 锁目录被删：在父目录挂目录变化通知（pi_model_settings）。
 # 读注册表里的系统代理（system_proxy）。
 [target.'cfg(windows)'.dependencies]
-windows-registry = "0.6"
+windows-registry = "0.100"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
