@@ -14,7 +14,7 @@ use objc2_foundation::{NSArray, NSDictionary, NSError, NSObject, NSObjectProtoco
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-    UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
+    UNNotificationSetting, UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
     UNUserNotificationCenterDelegate,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -306,6 +306,11 @@ struct BridgeState {
     authorization: SystemNotificationAuthorization,
     settings_check_in_flight: bool,
     authorization_request_in_flight: bool,
+    /// 已授权但当初没要角标（早先的版本只要了横幅和声音）：补要一次。系统不会再弹框，只是
+    /// 在通知设置里加出角标开关；没有这项，Dock 角标设了也不显示。
+    badge_missing: bool,
+    /// 这次运行里补要过了：系统照旧不给也不再要，免得来回重查。
+    badge_requested: bool,
     denial_reported: bool,
     queue: NotificationQueue,
     last_error: Option<String>,
@@ -490,13 +495,16 @@ fn read_settings() {
         RcBlock::new(|settings: NonNull<UNNotificationSettings>| {
             // SAFETY: The binding models this callback argument as NonNull and it remains valid
             // for the duration of the callback.
-            let authorization =
-                authorization_from_settings(unsafe { settings.as_ref() }.authorizationStatus());
+            let settings = unsafe { settings.as_ref() };
+            let authorization = authorization_from_settings(settings.authorizationStatus());
             let mut state = state()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.settings_check_in_flight = false;
             state.authorization = authorization;
+            state.badge_missing = authorization == SystemNotificationAuthorization::Authorized
+                && settings.badgeSetting() == UNNotificationSetting::NotSupported
+                && !state.badge_requested;
             let had_pending = state.queue.pending_count() > 0;
             if matches!(
                 authorization,
@@ -526,7 +534,7 @@ fn read_settings() {
 fn request_authorization() {
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let completion: RcBlock<dyn Fn(Bool, *mut NSError)> =
-        RcBlock::new(|granted: Bool, error: *mut NSError| {
+        RcBlock::new(|_granted: Bool, error: *mut NSError| {
             let error = error_description(error);
             let mut state = state()
                 .lock()
@@ -538,23 +546,18 @@ fn request_authorization() {
                 state.record_error(format!(
                     "failed to request macOS notification permission: {error}"
                 ));
-            } else if granted.as_bool() {
-                // Query settings again so provisional/authorized details come from one source.
-                state.authorization = SystemNotificationAuthorization::Unknown;
-                state.denial_reported = false;
             } else {
-                state.authorization = SystemNotificationAuthorization::Denied;
-                state.queue.discard_pending_app_notifications();
-                if !state.denial_reported {
-                    state.denial_reported = true;
-                    state.record_error("macOS notification permission was denied".to_string());
-                }
+                // 给没给、给了哪几项都以设置为准，重查一次（拒绝也在那里报）。`granted` 只说横幅
+                // 那几项整体，已授权的 App 补要角标时它说明不了什么。
+                state.authorization = SystemNotificationAuthorization::Unknown;
             }
             drop(state);
             send_state_changed();
         });
     center.requestAuthorizationWithOptions_completionHandler(
-        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+        UNAuthorizationOptions::Alert
+            | UNAuthorizationOptions::Sound
+            | UNAuthorizationOptions::Badge,
         &completion,
     );
 }
@@ -644,6 +647,15 @@ pub fn sync_system_notifications() {
                         && !state.authorization_request_in_flight =>
                 {
                     state.authorization_request_in_flight = true;
+                    state.badge_requested = true;
+                    BridgeAction::RequestAuthorization
+                }
+                SystemNotificationAuthorization::Authorized
+                    if state.badge_missing && !state.authorization_request_in_flight =>
+                {
+                    state.authorization_request_in_flight = true;
+                    state.badge_missing = false;
+                    state.badge_requested = true;
                     BridgeAction::RequestAuthorization
                 }
                 SystemNotificationAuthorization::Authorized => {
