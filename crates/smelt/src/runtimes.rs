@@ -1787,17 +1787,30 @@ mod tests {
         ));
     }
 
-    /// 旧运行时少了桌面要用的方法：标成不兼容并说要升级运行时，而不是显示在线、
-    /// 之后各处零散地报 MethodNotFound。
+    /// 控制协议比桌面旧的运行时回的 describe。
+    fn older_runtime() -> smelt_runtime_client::protocol::control::SystemDescribeResult {
+        use smelt_runtime_client::protocol::control::CONTROL_API_VERSION;
+        let mut described = described_without("no.such.method");
+        described.control.min_supported_version = CONTROL_API_VERSION - 1;
+        described.control.max_supported_version = CONTROL_API_VERSION - 1;
+        described
+    }
+
+    /// 控制协议比桌面旧：标成不兼容并说要升级运行时。
     #[test]
     fn older_runtime_is_incompatible() {
+        use smelt_runtime_client::protocol::control::ControlResponse;
+        let client = runtime_answering(|request| {
+            let request_id = request["request_id"].as_str().unwrap();
+            serde_json::to_value(ControlResponse::ok(request_id, older_runtime())).unwrap()
+        });
         let RuntimeStatus::Incompatible {
             version,
             detail,
             fix,
-        } = status_of(&describe_without("workspace.conversation.create"))
+        } = status_of(&client)
         else {
-            panic!("缺方法的运行时应判为不兼容");
+            panic!("控制协议旧的运行时应判为不兼容");
         };
         assert_eq!(
             fix,
@@ -1807,7 +1820,7 @@ mod tests {
         assert_eq!(version, "0.0.1");
         assert!(detail.contains("0.0.1"), "{detail}");
         assert!(detail.contains("需要升级运行时"), "{detail}");
-        assert!(detail.contains("workspace.conversation.create"), "{detail}");
+        assert!(detail.contains("控制协议"), "{detail}");
     }
 
     /// Windows 上的运行时随那台机器上的 Smelt 一起更新：旧了也不请它远程升级。
@@ -1816,27 +1829,22 @@ mod tests {
         use smelt_runtime_client::protocol::control::ControlResponse;
         let client = runtime_answering(|request| {
             let request_id = request["request_id"].as_str().unwrap();
-            let mut described = described_without("workspace.conversation.create");
+            let mut described = older_runtime();
             described.daemon.os = Some("windows".to_string());
             serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
         });
         let RuntimeStatus::Incompatible { fix, .. } = status_of(&client) else {
-            panic!("缺必需方法的运行时应判为不兼容");
+            panic!("控制协议旧的运行时应判为不兼容");
         };
         assert_eq!(fix, IncompatibleFix::UpdateSmeltThere);
         assert!(fix.runtime_outdated());
     }
 
-    /// 只缺最低协议版本之后才加的方法：照常在线，那一项功能自己降级。
+    /// 缺方法照常在线：只是那一项功能用不了，用到时报错。
     #[test]
-    fn runtime_missing_only_optional_methods_is_online() {
-        use smelt_runtime_client::protocol::control::ControlMethod;
-        let optional = ControlMethod::OPTIONAL
-            .first()
-            .expect("至少有一个可选方法")
-            .as_str();
+    fn runtime_missing_a_method_is_online() {
         assert!(matches!(
-            status_of(&describe_without(optional)),
+            status_of(&describe_without("pi.mcp.login_start")),
             RuntimeStatus::Online { .. }
         ));
     }

@@ -1,14 +1,18 @@
 //! 客户端（桌面、手机）和运行时的版本协商（设计文档 D7）。连上运行时先读
-//! `system.describe`，对照客户端要用的控制方法和事件协议版本，对不上就是不兼容，并说清
-//! 该升级哪一边。不对的话，订阅被拒或解不出投影，重订没有尽头，会话目录永远到不了，界面
-//! 只能一直「同步中」；控制方法缺了则各处零散地报 MethodNotFound。说明里带着运行时的
-//! 版本，看得出它是哪个版本。
+//! `system.describe`，对照控制协议和事件协议的版本，对不上就是不兼容，并说清该升级哪一边。
+//! 不对的话，订阅被拒或解不出投影，重订没有尽头，会话目录永远到不了，界面只能一直
+//! 「同步中」。说明里带着运行时的版本，看得出它是哪个版本。
+//!
+//! 不看方法清单：方法只增不改，运行时缺某个方法只是那项功能还没有，用到时调到
+//! MethodNotFound 就报「运行时较旧」，不为此把整台机器拦在外面。客户端离了就没法用的方法
+//! 靠版本下限保证：事件协议 v6 起的运行时都有工作区目录那几个方法；以后再有这种方法，抬
+//! 控制协议的最低版本，不另列必需方法。
 
 use std::fmt;
 
 use smelt_event_protocol::{EVENT_BUS_PROTOCOL_VERSION, MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION};
 
-use crate::protocol::control::{CONTROL_API_VERSION, ControlMethod, SystemDescribeResult};
+use crate::protocol::control::{CONTROL_API_VERSION, SystemDescribeResult};
 
 /// 该升级的一边。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,11 +47,8 @@ impl fmt::Display for Incompatibility {
     }
 }
 
-/// 桌面能不能用这个运行时：控制方法加事件（[`check_events`]）。
-///
-/// 控制方法：运行时支持的协议版本区间要包含客户端的，还要有全部必需方法（方法只增不改，
-/// 缺了就是运行时旧）。可选方法（[`ControlMethod::OPTIONAL`]）缺了不算：只有那一项功能
-/// 用不了，由用它的地方降级，不能为此把整台机器的终端和对话都拦在外面。
+/// 桌面能不能用这个运行时：控制协议加事件（[`check_events`]）。运行时支持的控制协议
+/// 版本区间要包含客户端的：版本只在已有方法换了形状时升，对不上就是同名方法读不懂。
 pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
     with_runtime_version(
         described,
@@ -59,8 +60,7 @@ pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
 /// 宽容读取，推送加字段不升版本，所以这类改动下运行时比客户端新、旧都照常连（见
 /// `smelt_event_protocol` 的模块文档）。
 ///
-/// 手机只对这一项：[`ControlMethod`] 的必需方法是按桌面的用法列的，手机只用其中一部分，
-/// 缺的方法由用到的地方报 MethodNotFound。
+/// 手机只对这一项：它只用少数几个控制方法，调不通由用到的地方报错。
 pub fn check_events(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
     with_runtime_version(described, event_versions(described))
 }
@@ -89,15 +89,6 @@ fn check_control(described: &SystemDescribeResult) -> Result<(), (Outdated, Stri
             "控制协议 v{}，客户端要 v{CONTROL_API_VERSION}",
             control.max_supported_version
         )));
-    }
-    let missing: Vec<&str> = ControlMethod::ALL
-        .iter()
-        .filter(|method| method.required())
-        .map(|method| method.as_str())
-        .filter(|name| !control.methods.iter().any(|known| known == name))
-        .collect();
-    if !missing.is_empty() {
-        return Err(runtime(missing_methods(&missing)));
     }
     Ok(())
 }
@@ -128,16 +119,6 @@ fn client(reason: String) -> (Outdated, String) {
     (Outdated::Client, reason)
 }
 
-fn missing_methods(missing: &[&str]) -> String {
-    const SHOWN: usize = 3;
-    let shown = missing[..missing.len().min(SHOWN)].join("、");
-    if missing.len() > SHOWN {
-        format!("缺少 {} 个方法：{shown} 等", missing.len())
-    } else {
-        format!("缺少方法：{shown}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use smelt_event_protocol::{
@@ -145,8 +126,8 @@ mod tests {
     };
 
     use crate::protocol::control::{
-        CONTROL_API_MIN_SUPPORTED_VERSION, ControlProtocolDescription, DaemonRuntimeInfo,
-        EventProtocolDescription,
+        CONTROL_API_MIN_SUPPORTED_VERSION, ControlMethod, ControlProtocolDescription,
+        DaemonRuntimeInfo, EventProtocolDescription,
     };
 
     use super::*;
@@ -203,29 +184,18 @@ mod tests {
         assert_eq!(check(&described), Ok(()));
     }
 
+    /// 缺方法不拦：2026.1031.0 缺后来加的 `pi.mcp.login_start`，整台机器被判成不兼容，终端和
+    /// 对话都用不了，其实只是 MCP 登录还没有。缺的方法由用到的地方报错。
     #[test]
-    fn missing_method_means_the_runtime_is_older() {
+    fn missing_methods_never_make_the_runtime_incompatible() {
         let mut described = current();
         described
             .control
             .methods
-            .retain(|method| method != "conversation.create_for_agent");
-        let error = check(&described).unwrap_err();
-        assert_eq!(error.outdated, Outdated::Runtime);
-        assert!(error.reason.contains("conversation.create_for_agent"));
-    }
+            .retain(|method| method != "pi.mcp.login_start");
+        assert_eq!(check(&described), Ok(()));
 
-    /// 最低协议版本之后才加的方法，旧运行时没有也照常连：只是那一项功能用不了。
-    #[test]
-    fn missing_optional_methods_are_still_compatible() {
-        let mut described = current();
-        described.control.methods.retain(|method| {
-            ControlMethod::from_wire_name(method).is_none_or(ControlMethod::required)
-        });
-        assert!(
-            !ControlMethod::OPTIONAL.is_empty(),
-            "这条测试要真的去掉了可选方法才有意义"
-        );
+        described.control.methods.clear();
         assert_eq!(check(&described), Ok(()));
     }
 
@@ -284,15 +254,15 @@ mod tests {
         );
     }
 
-    /// 手机只对事件：桌面的必需方法缺了不拦，事件协议对不上照样拦。
-    /// 没升级的运行时读得了就照常连：这里写死已发布的 2026.1031.0（控制 v3、事件 v6，没有
-    /// 可选方法），谁抬最低版本或把可选方法改成必需，这条就失败，得想清楚是不是真读不了。
+    /// 没升级的运行时读得了就照常连：这里写死已发布的 2026.1031.0（控制 v3、事件 v6），谁抬
+    /// 最低版本，这条就失败，得想清楚是不是真读不了。
     #[test]
     fn the_released_runtime_baseline_stays_compatible() {
         let mut baseline = current();
-        baseline.control.methods.retain(|method| {
-            ControlMethod::from_wire_name(method).is_none_or(ControlMethod::required)
-        });
+        baseline
+            .control
+            .methods
+            .retain(|method| method != ControlMethod::PiMcpLoginStart.as_str());
         baseline.control.current_version = 3;
         baseline.control.min_supported_version = 3;
         baseline.control.max_supported_version = 3;
@@ -301,10 +271,13 @@ mod tests {
         assert_eq!(check(&baseline), Ok(()));
     }
 
+    /// 手机只对事件：控制协议对不上不拦，事件协议对不上照样拦。
     #[test]
-    fn check_events_ignores_control_methods_but_not_event_versions() {
+    fn check_events_ignores_the_control_version_but_not_event_versions() {
         let mut described = current();
-        described.control.methods.clear();
+        described.control.min_supported_version = CONTROL_API_VERSION + 1;
+        described.control.max_supported_version = CONTROL_API_VERSION + 1;
+        assert!(check(&described).is_err());
         assert_eq!(check_events(&described), Ok(()));
 
         let mut older = current();

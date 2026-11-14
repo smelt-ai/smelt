@@ -137,7 +137,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | `automation.set_enabled` | 有副作用 | 幂等设值，不是 toggle |
 | `automation.run_once` | 有副作用 | 立即跑一次，不推进定时游标 |
 
-上表是最早一批仍在用的方法，不是全集。同一份 `define_control_methods!` 里还有这些组（只加方法不升 `control_version`，客户端用 `system.describe` 的方法清单判断运行时有没有）：
+上表是最早一批仍在用的方法，不是全集。同一份 `define_control_methods!` 里还有这些组（只加方法不升 `control_version`；运行时缺某个方法，客户端用到时收到 `MethodNotFound` 再报错）：
 
 | 组 | 方法 |
 |---|---|
@@ -175,11 +175,10 @@ CLI：`smelt agent` / `smelt conversation` / `smelt automation` / `smelt mcp` / 
    同一支持范围内的版本必须保持 method payload 可加性兼容；破坏性变更应新增 method，
    或在提升版本的同时提升 `min_supported_version`，不能假装继续兼容旧 DTO。2026-10-18
    移除 worktree 功能时删掉了 `git.worktree.*`、`git.is_dirty`，`git.repo_info` 只回当前
-   分支，版本仍是 1：客户端按 `system.describe` 的方法清单判断运行时有没有要用的方法，
-   旧桌面连新运行时的 Git 面板需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
+   分支，版本仍是 1：旧桌面连新运行时，Git 面板调到已删的方法时报错，需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
    的文档形状，同时删掉跨 Agent 消息的 `agent.list` / `agent.send`，两边最低版本都抬到 2。
    v2 → v3：删掉 DeepSeek Harness 之后，`agent.host.get` / `agent.host.apply_edit` 的智能体配置去掉 `native_dsh_profiles`。旧运行时缺这个字段会拒收修改，所以最低版本抬到 3。同一版 `system.describe` 的 daemon 信息增加 `smelt_home`。
-   删方法不升版本：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，这几条是必需方法，旧运行时没有就判为需要升级运行时。同月删掉桌面发布的侧栏菜单（`workspace_menu` 这条守护命令和 `workspace_menu.changed` 话题），手机和守护都改读工作区目录。订阅里带着运行时不认识的话题会被整条拒掉，所以事件总线协议升到 v3（`EVENT_BUS_PROTOCOL_VERSION`），新旧两边在订阅握手时就拿到版本不兼容。之后又删掉远程会话目录：守护命令 `remote_sessions`、`remote_rename_resume`、`acp_create`（后两条早已没人发）和 `remote_sessions.changed` 话题都下线，手机等新建的对话由运行时直接写进工作区目录，事件总线协议升到 v4。命令行这类不订推送的客户端用新增的 `workspace.directory` 读整份目录。再之后会话状态加了 `custom_title`（终端当前那段对话的名字，守护按身份查好推来，取代桌面轮询的 `history.titles`，后者删掉），会话状态严格解码，事件总线协议升到 v5。会话状态又加了 `pending_request`（对话会话正在等的那个审批或选择题的身份，手机指挥台按它判断单据详情还是不是同一个请求），事件总线协议升到 v6。v7 起推送载荷改成宽容读取（规则见 `smelt-event-protocol` 的模块文档），推送加字段不再升版本；相位这类枚举加值和核心订阅加话题会破坏兼容，新增功能的话题应单独订阅；客户端只看 `system.describe` 里 `events.protocol_version` 是否落在自己支持的区间，`projection_version`、`session_projection_version`、`session_state_schema_version` 冻结、不再检查，只为 v6 及更早的客户端照旧报出。按 agent 改启动命令的设置删掉时没有升版：`agent.host.*` 的配置在线上仍带一个恒为空的 `commands`，v3 运行时照常解析，合并时什么都不改。没升级的运行时读得了就照常连：客户端接受事件协议 v6 起的运行时，后加的、缺了只是某项功能用不了的控制方法（`ControlMethod::OPTIONAL`）缺了不拦，用到时照常报错，不为旧运行时另写降级。
+   删方法不升版本：只有还在调它的旧客户端受影响，调到时报错，不调它的客户端（手机、Pi）照常连。2026-10 删掉整份读写的 `workspace.load` / `workspace.save` 时版本仍是 3；工作区目录改由 `workspace.conversation.*` / `workspace.project.*` 单条改动、`workspace.changed` 推送整份目录，桌面离了它们读不到目录，靠事件协议的下限（v6 起的运行时都有）保证。同月删掉桌面发布的侧栏菜单（`workspace_menu` 这条守护命令和 `workspace_menu.changed` 话题），手机和守护都改读工作区目录。订阅里带着运行时不认识的话题会被整条拒掉，所以事件总线协议升到 v3（`EVENT_BUS_PROTOCOL_VERSION`），新旧两边在订阅握手时就拿到版本不兼容。之后又删掉远程会话目录：守护命令 `remote_sessions`、`remote_rename_resume`、`acp_create`（后两条早已没人发）和 `remote_sessions.changed` 话题都下线，手机等新建的对话由运行时直接写进工作区目录，事件总线协议升到 v4。命令行这类不订推送的客户端用新增的 `workspace.directory` 读整份目录。再之后会话状态加了 `custom_title`（终端当前那段对话的名字，守护按身份查好推来，取代桌面轮询的 `history.titles`，后者删掉），会话状态严格解码，事件总线协议升到 v5。会话状态又加了 `pending_request`（对话会话正在等的那个审批或选择题的身份，手机指挥台按它判断单据详情还是不是同一个请求），事件总线协议升到 v6。v7 起推送载荷改成宽容读取（规则见 `smelt-event-protocol` 的模块文档），推送加字段不再升版本；相位这类枚举加值和核心订阅加话题会破坏兼容，新增功能的话题应单独订阅；客户端只看 `system.describe` 里 `events.protocol_version` 是否落在自己支持的区间，`projection_version`、`session_projection_version`、`session_state_schema_version` 冻结、不再检查，只为 v6 及更早的客户端照旧报出。按 agent 改启动命令的设置删掉时没有升版：`agent.host.*` 的配置在线上仍带一个恒为空的 `commands`，v3 运行时照常解析，合并时什么都不改。没升级的运行时读得了就照常连：客户端接受事件协议 v6 起的运行时，客户端不看 `system.describe` 的方法清单：运行时缺哪个方法都不拦，用到时照常报错，不为旧运行时另写降级（11-14 起；之前缺任何未登记为可选的方法都判不兼容，2026.1031.0 因缺 `pi.mcp.login_start` 整台被拦）。客户端离了就没法用的新方法，抬控制协议最低版本，不另列必需方法。
 2. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
    条件、冲突、忙碌和临时不可用分别返回 `invalid_params`、`permission_denied`、
    `not_found`、`failed_precondition`、`conflict`、`busy`、
