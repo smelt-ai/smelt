@@ -975,12 +975,14 @@ fn a_watch_the_runtime_keeps_refusing_reports_one_error_and_retries() {
     let (runtime, _source, conversations) = setup();
     // 运行时读完 watch 请求就关：每次都没有帧。
     let events = watch(&conversations);
-    let first = runtime.watcher(1);
-    first.close();
+    runtime.watcher(1).close();
+    let second = runtime.watcher(2);
+    assert!(events.quiet().is_empty(), "只失败一次不报");
+    second.close();
     let error = events.next();
     assert_eq!(error.kind, ConversationEventKind::Error);
-    runtime.watcher(2).close();
-    runtime.watcher(3);
+    runtime.watcher(3).close();
+    runtime.watcher(4);
     assert!(
         events
             .quiet()
@@ -988,6 +990,35 @@ fn a_watch_the_runtime_keeps_refusing_reports_one_error_and_retries() {
             .all(|event| event.kind != ConversationEventKind::Error),
         "同一段失败只报一次"
     );
+}
+
+/// 回前台时旧链路已经僵死：订阅先读到 EOF，状态机稍后才报重连。这是掉线，不是订不上，
+/// 不能弹「订阅连接断开」，重新连上后续订即可。
+#[test]
+fn a_stream_lost_just_before_the_link_is_not_reported() {
+    let runtime = FakeRuntime::new();
+    let source = FakeSource::connected(&runtime, None);
+    // 退避设得很长：只有重新连上才会续订。
+    let conversations = Conversations::new(
+        source.clone(),
+        Timing {
+            backoff_base: Duration::from_secs(3600),
+            backoff_max: Duration::from_secs(3600),
+            ..FAST
+        },
+    );
+    let events = watch(&conversations);
+    runtime.watcher(1).close();
+    // 订阅先读到 EOF（这时状态机还说连着）。
+    std::thread::sleep(Duration::from_millis(50));
+    source.publish(1, ConnectionState::Reconnecting);
+    std::thread::sleep(Duration::from_millis(50));
+    source.publish(1, ConnectionState::Connected);
+    let watcher = runtime.watcher(2);
+    watcher.full(snapshot_json(0, 1, 1, &[assistant("a")]));
+    let snapshot = events.next();
+    assert_eq!(snapshot.kind, ConversationEventKind::Snapshot, "没有先报错");
+    assert_eq!(texts(&snapshot), ["a"]);
 }
 
 // ---------------------------------------------------------------------------

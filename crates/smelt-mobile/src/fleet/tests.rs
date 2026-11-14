@@ -277,6 +277,7 @@ impl Route for FakeRoute {
                 }
                 Box::new(())
             }),
+            close: Arc::new(|| {}),
         }
     }
 }
