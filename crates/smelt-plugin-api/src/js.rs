@@ -214,8 +214,11 @@ pub struct SettingsPageLoader {
     /// JS 设置页在侧栏上一律用这个图标。
     pub icon: SharedString,
     /// 校验入口（插件目录里的相对路径），给出建页的函数。
-    pub load: Rc<dyn Fn(&str) -> Result<SettingsPageBuilder, String>>,
+    pub load: LoadSettingsPage,
 }
+
+/// 校验 JS 设置页入口、给出建页函数的宿主函数。
+pub type LoadSettingsPage = Rc<dyn Fn(&str) -> Result<SettingsPageBuilder, String>>;
 
 /// 一个 JS 插件在宿主这边的身份。
 #[derive(Clone, Default)]
