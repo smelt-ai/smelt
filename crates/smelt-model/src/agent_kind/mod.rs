@@ -920,6 +920,14 @@ impl ConversationAgentKind {
     }
 }
 
+/// 从启动命令认 agent 的 id：先查对话表，再查终端表（Antigravity 等只有终端）。认不出
+/// 是 `None`。桌面菜单栏、手机会话列表给没有 hook 身份的终端认 agent 用。
+pub fn agent_id_from_launch(launch: &str) -> Option<&'static str> {
+    ConversationAgentKind::from_command_loose(launch)
+        .map(ConversationAgentKind::id)
+        .or_else(|| TerminalAgentKind::from_command_prefix(launch).map(TerminalAgentKind::id))
+}
+
 /// 历史页能列出的「会话来源」。它是 [`ConversationAgentKind`] 的**超集**：一个
 /// agent 能不能被读历史，取决于它有没有在本机落盘 transcript，跟它有没有 ACP
 /// stdio 服务是两件独立的事。

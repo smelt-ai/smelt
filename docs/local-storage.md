@@ -37,23 +37,30 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，`SCHEMA_VERSION = 10`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。v7 → v8：`workspace_ui` 增加 `archive_expanded`。v8 → v9：整个工作台换成一块 Dock，`workspace_ui` 去掉侧栏宽度和开合，`appearance` 增加 `layout_id`，`conversation_route` 去掉舞台覆盖页和工具面板的开合、页签、宽度，新建 `workspace_layout_state`。v9 → v10：快捷键改绑命令，`key_binding.action_id` 改名 `command`，旧动作名换成对应的命令 id（如 `command_palette` → `smelt.palette/toggle`），早已下线的动作名那几行删掉。
+只属于这台桌面，`SCHEMA_VERSION = 12`（`crates/smelt-client-store/src/schema.rs`）。v3 → v4：`runtime_connection` 增加 `smelt_home`，缓存远程机器的 `~/.smelt` 路径（`system.describe` 报上来的）。旧行先空着，连上一次就有。v4 → v5：`runtime_connection` 增加 `os`。v5 → v6：侧栏顺序从运行时搬到客户端，新建 `sidebar_project_order` / `sidebar_conversation_order`；升级后第一次按运行时目录的先后排，之后按这台桌面自己拖出来的顺序。v6 → v7：新建 `key_binding`，存用户改过的快捷键。v7 → v8：`workspace_ui` 增加 `archive_expanded`。v8 → v9：整个工作台换成一块 Dock，`workspace_ui` 去掉侧栏宽度和开合，`appearance` 增加 `layout_id`，`conversation_route` 去掉舞台覆盖页和工具面板的开合、页签、宽度，新建 `workspace_layout_state`。v9 → v10：快捷键改绑命令，`key_binding.action_id` 改名 `command`，旧动作名换成对应的命令 id（如 `command_palette` → `smelt.palette/toggle`），早已下线的动作名那几行删掉。v10 → v11：对话界面状态只留终端的分屏和当前终端，`conversation_route` 去掉文件树、Git 页的列，删掉 `conversation_route_path`。v11 → v12：删掉 `notify_prefs`，通知开关归通知插件，存在它自己的库里；旧值不搬，插件的开关默认都开。
 
 | 表 | 内容 |
 | --- | --- |
 | `appearance` | 主题、界面字号、终端字体、背景、透明度、玻璃，选的布局（`layout_id`，空是没选过，用第一个登记的布局；选的布局暂时没登记时照样留着） |
 | `update_settings` / `update_state` / `staged_update` / `installer_attempt` | 这台 App 的更新 |
-| `notify_prefs` | 通知开关 |
 | `key_binding` | 用户改过的快捷键：命令 id（`<来源>/<名字>`）→ 按键，按键为空是用户清掉了。没有行的命令用出厂键位；命令还没登记（插件没加载）的行照样留着 |
 | `workspace_ui` | 当前路由、归档分段展开 |
 | `workspace_layout_state` | 每份布局被用户拖成的样子：gpui-base 的 `DockAreaState` 原文。版本对得上就用，布局文件后来改了也照用；要回到布局文件就删掉这份存档 |
 | `collapsed_project` / `pinned_project` / `collapsed_agent` | 按 `runtime_id` 记住折叠和置顶 |
 | `sidebar_project_order` / `sidebar_conversation_order` | 按 `runtime_id` 记住侧栏里项目、对话从上到下的顺序。每台设备各记各的，运行时目录里只有新建的先后 |
-| `conversation_route` / `conversation_route_path` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端、打开的文件、Git 视图 |
+| `conversation_route` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端 |
 | `runtime_connection` | 这台桌面连过哪些运行时（endpoint、relay、名字、`smelt_home`） |
 | `runtime_migration` | 客户端数据迁出运行时库的标记 |
 
 从旧版本迁移前，旧库整份留成 `client.sqlite3.bak-v<旧版本>`。
+
+## 插件库
+
+```text
+~/.smelt/plugin-data/<插件 id>.sqlite3
+```
+
+每个插件一份，表和版本由插件自己管（`crates/smelt-client-store/src/plugin_store.rs`），宿主不认识里面的表。内置插件也一样：通知插件的开关和发过的通知在 `smelt.notifications.sqlite3`，文件视图的在 `smelt.files.sqlite3`。
 
 ## 手机缓存
 
@@ -62,6 +69,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ## 继续留在文件系统上的
 
 - 日志、socket（`~/.smelt/smeltd.sock`）、lock、skills
+- `~/.smelt/cache/bun-x/<包@版本>`：MCP 预设经 `smelt-agent x` 跑的包，一个钉死的版本一个目录，不进用户的 `~/.bun`。同一个包别的版本一天没用过，下次启动它时在后台整份删掉（`agent/src/pi-mcp-runtime.ts`）。预设换了钉的版本，守护启动时把 `~/.pi/agent/mcp.json` 里按预设登记的条目跟着换（`smelt_core::pi_mcp::upgrade_preset_pins`）
 - `~/.smelt/iroh-secret`：这台运行时的 iroh 身份，重启不变。没有 `remote-token`
 - 手机上的 `client-iroh-secret`：那台设备的身份，在 App 数据目录
 - `.claude/settings.json`、`.codex/hooks.json` 等外部产品自己的配置

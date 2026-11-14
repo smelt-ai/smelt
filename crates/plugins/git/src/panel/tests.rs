@@ -4,7 +4,7 @@
 // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩。只导入真正
 // 用到的名字。
 use super::RepoSet;
-use super::workspace::apply_collapsed_files;
+use super::ops::apply_collapsed_files;
 use super::{Cached, GIT_DISCOVERY_MIN_INTERVAL, git_discovery_wait, needs_fetch};
 use super::{
     DiffScope, GitDiff, GitStatusData, GitStatusResponseAction, GitWrite, PendingGitIndexOp,
@@ -15,7 +15,7 @@ use super::{
     release_git_write, repo_needs_attention, reserve_git_write, resolve_git_write_target,
     should_close_aggregate_diff, split_staged_and_changed,
 };
-use smelt_runtime_client::protocol::git::{DiffKind, DiscoveredRepo, RepoKind};
+use smelt_plugin_api::client::protocol::git::{DiffKind, DiscoveredRepo, RepoKind};
 
 fn files(paths: &[&str]) -> Vec<(String, String)> {
     paths
@@ -160,7 +160,7 @@ fn stale_aggregate_is_not_ready_for_a_missing_navigation_target() {
     let raw = "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n";
     let parsed = parse_diff_with_file_headers(raw);
     let repo = crate::ProjectRef {
-        runtime: crate::RuntimeKey::Local,
+        runtime: smelt_plugin_api::RuntimeKey::Local,
         root: "/repo".into(),
     };
     let diff = GitDiff {

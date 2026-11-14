@@ -156,7 +156,7 @@ impl CapabilitiesPage {
 
     fn on_host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
         match event {
-            HostEvent::RuntimeTopic { machine, topic }
+            HostEvent::RuntimeTopic { machine, topic, .. }
                 if *machine == self.machine && topic == CORE_TOPIC_PI_CONFIG_CHANGED =>
             {
                 self.on_pi_config_changed(cx);
@@ -164,7 +164,13 @@ impl CapabilitiesPage {
             HostEvent::Reconnected(machine) if *machine == self.machine => {
                 self.on_pi_config_changed(cx);
             }
-            HostEvent::RuntimeTopic { .. } | HostEvent::Reconnected(_) => {}
+            HostEvent::RuntimeTopic { .. }
+            | HostEvent::Reconnected(_)
+            | HostEvent::ProjectChanged { .. }
+            | HostEvent::WindowActivated
+            | HostEvent::OverlayChanged
+            | HostEvent::SessionsChanged
+            | HostEvent::NotificationPermissionChanged => {}
             HostEvent::MachinesChanged => {
                 // 在配的那台远程机器已经移除时，回到本机。
                 if api::host(cx).client(&self.machine, cx).is_none() {
@@ -172,13 +178,14 @@ impl CapabilitiesPage {
                 }
                 cx.notify();
             }
-            HostEvent::ActiveProjectChanged
+            HostEvent::ActiveContextChanged
             | HostEvent::AgentSettingsChanged
             | HostEvent::ShownViewsChanged
             | HostEvent::ViewsChanged
             | HostEvent::ThemesChanged
             | HostEvent::LayoutsChanged
-            | HostEvent::CommandsChanged => {}
+            | HostEvent::CommandsChanged
+            | HostEvent::SettingsPagesChanged => {}
         }
     }
 
@@ -358,10 +365,19 @@ impl Render for CapabilitiesPage {
     }
 }
 
-fn notify_success(message: impl AsRef<str>, cx: &App) {
-    api::host(cx).notify("完成", message.as_ref());
+fn notify_success(message: impl AsRef<str>, cx: &mut App) {
+    notify("完成", message.as_ref(), cx);
 }
 
-fn notify_error(message: impl AsRef<str>, cx: &App) {
-    api::host(cx).notify("错误", message.as_ref());
+fn notify_error(message: impl AsRef<str>, cx: &mut App) {
+    notify("错误", message.as_ref(), cx);
+}
+
+fn notify(subtitle: &str, body: &str, cx: &mut App) {
+    let notify = api::Notify {
+        subtitle: subtitle.to_string(),
+        body: body.to_string(),
+        ..Default::default()
+    };
+    api::NOTIFY.run(&notify, cx).detach();
 }

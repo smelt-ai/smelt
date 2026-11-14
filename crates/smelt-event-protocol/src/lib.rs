@@ -74,8 +74,7 @@ pub const CORE_TOPIC_AUTOMATIONS_CHANGED: &str = "automations.changed";
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
 pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requested";
 /// 项目目录里的文件变了（已滤掉构建产物、依赖目录）。只在客户端用 `project.watch`
-/// 关注过的项目上发；客户端据此重取 git 状态、文件树。用 `git.watch_head` 关注过的
-/// 目录，所在仓库切了分支时也发，`root` 是当初登记的那个目录。
+/// 关注过的项目上发；客户端据此重取 git 状态、文件树。
 pub const CORE_TOPIC_PROJECT_CHANGED: &str = "project.changed";
 /// 智能体的记忆目录里有文件变了。只在客户端用 `agent.memory.watch` 关注过的智能体上发；
 /// 客户端据此重取记忆列表。
@@ -96,6 +95,11 @@ pub const CORE_TOPIC_APPEARANCE_APPLY_REQUESTED: &str = "appearance.apply_reques
 /// 终端里的程序用 OSC 9 / 99 / 777 发了一条通知。运行时在 PTY 字节流上扫一次，
 /// 会话已有结构化 hook 事件时不发；没人连着时发生的就丢了，不补。
 pub const CORE_TOPIC_TERMINAL_NOTIFICATION: &str = "terminal.notification";
+/// 一段会话的提醒变了（[`AttentionChanged`]），带快照 [`CORE_SNAPSHOT_ATTENTION`]。
+///
+/// 加在事件协议 v7 之后、没有升版本，所以只放在单独的一条订阅里，v7 的运行时会拒掉那一条，
+/// 那台机器上就没有提醒。
+pub const CORE_TOPIC_ATTENTION_CHANGED: &str = "attention.changed";
 /// 终端里的程序用 OSC 9;4（ConEmu 进度）报的进度变了。运行时变了就发，进度条还在时
 /// 每 5 秒重发一次（后连上的客户端据此补齐），15 秒没新报告就清掉。不进会话投影。
 pub const CORE_TOPIC_TERMINAL_PROGRESS: &str = "terminal.progress";
@@ -112,6 +116,7 @@ pub const CORE_CAPABILITY_APPEARANCE_CONTROL: &str = "appearance.control";
 pub const CORE_SNAPSHOT_SESSIONS: &str = "core.sessions.v1";
 pub const CORE_SNAPSHOT_WORKSPACE: &str = "core.workspace.v1";
 pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
+pub const CORE_SNAPSHOT_ATTENTION: &str = "core.attention.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
 
@@ -456,6 +461,8 @@ pub struct SessionStateChanged {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_request: Option<String>,
     pub tokens_used: Option<u64>,
+    /// 会话目录所在仓库的当前分支，运行时监听 HEAD 维护，切了分支会再推一次。不是 git
+    /// 仓库、仓库还没有提交是 None，分离头指针是 `HEAD`。旧运行时不报。
     pub branch: Option<String>,
     pub dirty_files: Vec<String>,
     #[serde(rename = "updated_at")]
@@ -530,6 +537,83 @@ pub struct TerminalNotification {
     pub title: Option<String>,
     /// 通知正文，已从 OSC 载荷里取出（777 取最后一段，99 已解 base64），或智能体写的消息。
     pub message: String,
+}
+
+/// 要告诉用户的一件事是什么。会增长：认不出的值读成 [`Self::Unknown`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionKind {
+    /// 等你批准。
+    Approval,
+    /// 等你回答或继续。
+    Input,
+    /// 这一轮做完了。
+    Success,
+    /// 这一轮失败了。
+    Failure,
+    /// 终端响铃。
+    Bell,
+    /// 终端程序的 OSC 通知，或智能体主动发的消息。
+    Notice,
+    /// 比这个客户端新的运行时报的类型。按 [`Self::Notice`] 对待。
+    #[serde(other)]
+    Unknown,
+}
+
+impl AttentionKind {
+    /// 等用户处理的事：等批准、等输入、失败。看过也不算完，会话往下走了才算。
+    pub fn requires_action(self) -> bool {
+        matches!(self, Self::Approval | Self::Input | Self::Failure)
+    }
+}
+
+/// 一条提醒。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionItem {
+    pub kind: AttentionKind,
+    /// 短标题：相位名（「等待批准」）、智能体给的标题、「终端通知」。
+    pub title: String,
+    /// 一行内容：等批准的命令、等回答的问题、失败原因、通知正文。
+    pub message: String,
+}
+
+/// 一段会话此刻的提醒。两样都没有的会话不在快照里。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAttention {
+    pub session_id: String,
+    /// 等你处理的事（等批准、等输入、失败）。看过也留着，会话往下走了才清掉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<AttentionItem>,
+    /// 最近一条还没看过的提醒，可能就是上面那件事。哪台设备上看过、在终端里打字、在对话里
+    /// 回复，都算看过。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<AttentionItem>,
+}
+
+impl SessionAttention {
+    pub fn is_empty(&self) -> bool {
+        self.action.is_none() && self.unread.is_none()
+    }
+}
+
+/// [`CORE_SNAPSHOT_ATTENTION`] 的载荷：所有有提醒的会话。只在内存里：运行时重启后从空开始，
+/// 重启前的提醒不补。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionSnapshot {
+    pub revision: u64,
+    pub sessions: Vec<SessionAttention>,
+}
+
+/// [`CORE_TOPIC_ATTENTION_CHANGED`] 的载荷。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionChanged {
+    pub revision: u64,
+    /// 这段会话现在的提醒，整份替换。空的就是没有了（看过、处理掉、会话删了）。
+    pub session: SessionAttention,
+    /// 刚来、该响一下的那条（系统通知、推送）。快照里没有：后连上的客户端不补响。同一段会话
+    /// 同样的提醒 60 秒内只响一次。自动化运行的会话、命令行发的消息不进会话提醒，只有这一项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<AttentionItem>,
 }
 
 /// 会增长：认不出的值读成 [`Self::Unknown`]。
@@ -684,6 +768,13 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_CAPABILITY_SESSION_READ,
             None,
             4 * 1024,
+        )?,
+        // 两条提醒，各自的正文最多 4096 字节（扫描器上限），JSON 转义后可能翻倍。
+        descriptor(
+            CORE_TOPIC_ATTENTION_CHANGED,
+            CORE_CAPABILITY_SESSION_READ,
+            Some(CORE_SNAPSHOT_ATTENTION),
+            48 * 1024,
         )?,
     ])
 }
@@ -980,6 +1071,11 @@ mod tests {
             (CORE_TOPIC_HISTORY_CHANGED, None, 1),
             (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
             (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
+            (
+                CORE_TOPIC_ATTENTION_CHANGED,
+                Some(CORE_SNAPSHOT_ATTENTION),
+                1,
+            ),
         ];
         assert_eq!(descriptors.len(), expected.len());
         for (topic, snapshot, schema_version) in expected {

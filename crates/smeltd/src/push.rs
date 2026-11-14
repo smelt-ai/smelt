@@ -1,47 +1,36 @@
-//! 手机推送：关注事件经推送中继（APNs）发给登记过的手机。
+//! 手机推送：提醒经推送中继（APNs）发给登记过的手机。
 //!
-//! 判定和桌面、手机同源：进程内订阅自己的会话状态，用客户端同一个解码器和
-//! `smelt_model::attention` 算提醒边沿，不重新解释 phase。推等批准、等输入、失败、完成四种，
-//! 每台手机按自己登记的类型过滤（`push_registration` 表）。推送带会话名、项目名和一行摘要，
-//! 摘要就是会话状态里的 `pending_question`（桌面通知、手机会话列表读的同一份）。
+//! 推什么由 `crate::attention` 定（和桌面、手机读的同一份提醒）：等批准、等输入、失败、完成
+//! 四种响一下时推，待办处理掉、会话删掉时撤（[`apply`]）。每台手机按自己登记的类型过滤
+//! （`push_registration` 表）。推送带会话名、项目名和一行摘要，摘要就是会话状态里的
+//! `pending_question`（桌面通知、手机会话列表读的同一份）。
 //!
 //! 提醒一产生就进内存 outbox。发之前看人在不在这台 Mac 前（`crate::presence`）：
 //! - 不在：立刻发。
 //! - 在：Mac 上已经弹了系统通知，手机不响。等批准、等回复先扣着，人一离开（锁屏、本机桌面
 //!   App 断开、键鼠闲置满 `presence::AWAY_AFTER`）还没处理就补推；完成、失败不推。
 //!
-//! 智能体主动发的消息（[`send_message`]，见 `crate::agent_notify`）不来自会话状态：不看人在
-//! 不在、立刻发；每条各占一个位置，不被同一会话后来的提醒替换，会话结束、被删也不撤。
+//! 智能体主动发的消息（[`send_message`]，见 `crate::agent_notify`）不看人在不在、立刻发；每条
+//! 各占一个位置，不被同一会话后来的提醒替换，会话结束、被删也不撤。
 //!
-//! 发送失败按退避重试，超过 [`TTL`] 丢弃；重试期间事情已经处理掉（行动项解决、会话删除）就
-//! 不再重试。outbox 不落盘：smeltd 重启后首份快照只建基线，不补发重启前的提醒。
+//! 发送失败按退避重试，超过 [`TTL`] 丢弃；重试期间事情已经处理掉（待办解决、会话删除）就
+//! 不再重试。outbox 不落盘：smeltd 重启后不补发重启前的提醒。
 //!
-//! 两条线程：`smelt-push-watch` 阻塞在事件总线上，`smelt-push-send` 阻塞在 outbox 的 Condvar
-//! 上，只在有提醒要发、重试到点、扣着的提醒该复查、或人离开时醒来。没有待发的提醒时两条线程
-//! 都不醒。
+//! 发送线程 `smelt-push-send` 阻塞在 outbox 的 Condvar 上，只在有提醒要发、重试到点、扣着的
+//! 提醒该复查、或人离开时醒来。没有待发的提醒时不醒。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::presence::Presence;
-use smelt_core::attention::{self, AttentionKind, AttentionStore};
-use smelt_core::daemon_state::{
-    DaemonSessionState, DaemonStateEvent, DaemonStateEventClient, SubscriptionShape,
-};
+use smelt_core::daemon_state::DaemonSessionState;
 use smelt_core::remote_config::PUSH_PAYLOAD_VERSION;
-use smelt_event_bus::Delivery;
-use smelt_event_protocol::{
-    CORE_CAPABILITY_SESSION_READ, CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED,
-    Capability, PluginId, SubscribeMessage, SubscriptionId, Topic,
-};
 use smelt_push::{
     DETAIL_MAX_CHARS, MESSAGE_MAX_CHARS, PushKind, RELAY_SEND_PATH, SUBTITLE_MAX_CHARS,
     SendRequest, TITLE_MAX_CHARS, excerpt,
 };
-
-use crate::event_hub::{self, EventHubHandle};
 
 /// 从提醒产生算起，超过这么久还没送出去就丢掉：过时的「等你批准」不如不推。
 const TTL: Duration = Duration::from_secs(10 * 60);
@@ -54,22 +43,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 /// 发送线程起来之后才有：测试进程、没有运行时库时为空，智能体消息只弹桌面。
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
 
-const PLUGIN_ID: &str = "core.push";
-const SUBSCRIPTION_ID: &str = "push";
-
-/// 只订会话状态：工作区、自动化、请求类 topic 都用不上。
-const SUBSCRIPTION: SubscriptionShape = SubscriptionShape {
-    workspace: false,
-    automations: false,
-    conversation_wake: false,
-    appearance_requests: false,
-    project_changes: false,
-    agent_memory_changes: false,
-    terminal_notifications: false,
-    terminal_progress: false,
-};
-
-pub(crate) fn spawn(event_hub: &EventHubHandle) {
+pub(crate) fn spawn() {
     // 测试进程没有运行时库，也就没有登记，不必起线程。
     if !smelt_core::sqlite_state::is_sqlite_state_enabled() {
         return;
@@ -78,20 +52,18 @@ pub(crate) fn spawn(event_hub: &EventHubHandle) {
     let _ = SHARED.set(Arc::clone(&shared));
     let away_shared = Arc::clone(&shared);
     crate::presence::on_away(move || away_shared.release_held());
-    let watcher_hub = Arc::clone(event_hub);
-    let watcher_shared = Arc::clone(&shared);
-    if let Err(error) = std::thread::Builder::new()
-        .name("smelt-push-watch".to_string())
-        .spawn(move || run_watcher(&watcher_hub, &watcher_shared))
-    {
-        crate::dlog(&format!("推送：起不了订阅线程：{error}"));
-        return;
-    }
     if let Err(error) = std::thread::Builder::new()
         .name("smelt-push-send".to_string())
         .spawn(move || run_sender(&shared))
     {
         crate::dlog(&format!("推送：起不了发送线程：{error}"));
+    }
+}
+
+/// 提醒响了、处理掉了：交给 outbox。推送没在跑（测试进程、没有运行时库）时什么都不做。
+pub(crate) fn apply(command: Command) {
+    if let Some(shared) = SHARED.get() {
+        shared.apply(vec![command]);
     }
 }
 
@@ -130,12 +102,8 @@ pub(crate) fn send_message(
     phones
 }
 
-// ---------------------------------------------------------------------------
-// 判定：会话状态 → 要推 / 不用推了
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, PartialEq, Eq)]
-enum Command {
+pub(crate) enum Command {
     /// 这段会话有了一条要推的提醒，替换它之前还没推出去的那条。
     Notify {
         session_id: String,
@@ -153,7 +121,7 @@ enum Command {
 
 /// 推送里显示的文字，取自提醒产生那一刻的会话状态，已按 `smelt_push` 的上限截好。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Content {
+pub(crate) struct Content {
     /// 会话名：用户起的名字优先，其次是智能体报的标题。
     title: Option<String>,
     /// 项目名：工作目录的最后一级。
@@ -163,7 +131,7 @@ struct Content {
 }
 
 impl Content {
-    fn of(state: &DaemonSessionState) -> Self {
+    pub(crate) fn of(state: &DaemonSessionState) -> Self {
         let title = [state.custom_title.as_deref(), state.title.as_deref()]
             .into_iter()
             .flatten()
@@ -182,169 +150,6 @@ impl Content {
             title,
             subtitle,
             detail,
-        }
-    }
-}
-
-fn push_kind(kind: AttentionKind) -> Option<PushKind> {
-    match kind {
-        AttentionKind::Approval => Some(PushKind::Approval),
-        AttentionKind::Input => Some(PushKind::Input),
-        AttentionKind::Failure => Some(PushKind::Failure),
-        AttentionKind::Success => Some(PushKind::Success),
-        AttentionKind::Bell | AttentionKind::Notice => None,
-    }
-}
-
-/// 和手机会话目录（`smelt-mobile` 的 `CatalogState`）同样的边沿判定，只留推送要的部分。
-#[derive(Default)]
-struct Tracker {
-    /// 收到过首份快照。首份只建基线：smeltd 启动前就在等批准的会话不算新提醒。
-    primed: bool,
-    sessions: HashMap<String, DaemonSessionState>,
-    attention: AttentionStore,
-}
-
-impl Tracker {
-    fn apply(&mut self, event: DaemonStateEvent, now: Instant) -> Vec<Command> {
-        let mut commands = Vec::new();
-        match event {
-            DaemonStateEvent::Snapshot { sessions, .. } => {
-                let baseline = !self.primed;
-                for state in &sessions {
-                    let had_action = self.attention.has_unresolved_action(&state.id);
-                    if baseline {
-                        attention::apply_daemon_baseline(&mut self.attention, state);
-                    } else {
-                        attention::apply_daemon_transition(
-                            &mut self.attention,
-                            self.sessions.get(&state.id),
-                            state,
-                            now,
-                        );
-                    }
-                    if had_action && !self.attention.has_unresolved_action(&state.id) {
-                        commands.push(Command::Cancel {
-                            session_id: state.id.clone(),
-                        });
-                    }
-                }
-                let ids: HashSet<&str> = sessions.iter().map(|state| state.id.as_str()).collect();
-                let stale: Vec<String> = self
-                    .sessions
-                    .keys()
-                    .filter(|id| !ids.contains(id.as_str()))
-                    .cloned()
-                    .collect();
-                for id in stale {
-                    self.attention.remove_session(&id);
-                    commands.push(Command::Cancel { session_id: id });
-                }
-                self.sessions = sessions
-                    .into_iter()
-                    .map(|state| (state.id.clone(), state))
-                    .collect();
-                self.primed = true;
-            }
-            DaemonStateEvent::Update(state) => {
-                let had_action = self.attention.has_unresolved_action(&state.id);
-                attention::apply_daemon_transition(
-                    &mut self.attention,
-                    self.sessions.get(&state.id),
-                    &state,
-                    now,
-                );
-                if had_action && !self.attention.has_unresolved_action(&state.id) {
-                    commands.push(Command::Cancel {
-                        session_id: state.id.clone(),
-                    });
-                }
-                self.sessions.insert(state.id.clone(), state);
-            }
-            DaemonStateEvent::Removed { id } => {
-                self.attention.remove_session(&id);
-                self.sessions.remove(&id);
-                commands.push(Command::Cancel { session_id: id });
-            }
-            _ => {}
-        }
-        for item in self.attention.drain_deliveries() {
-            if let Some(kind) = push_kind(item.kind) {
-                let content = self
-                    .sessions
-                    .get(&item.session_id)
-                    .map(Content::of)
-                    .unwrap_or_default();
-                commands.push(Command::Notify {
-                    session_id: item.session_id,
-                    kind,
-                    content,
-                });
-            }
-        }
-        commands
-    }
-}
-
-fn run_watcher(event_hub: &EventHubHandle, shared: &Shared) {
-    let plugin_id = PluginId::new(PLUGIN_ID).expect("push plugin id is valid");
-    let subscription_id = SubscriptionId::new(SUBSCRIPTION_ID).expect("push subscription id");
-    let topics: BTreeSet<Topic> = [CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_SESSION_REMOVED]
-        .into_iter()
-        .map(|topic| Topic::new(topic).expect("core topic is valid"))
-        .collect();
-    let capabilities = BTreeSet::from([
-        Capability::new(CORE_CAPABILITY_SESSION_READ).expect("core capability is valid")
-    ]);
-    let subscription = match event_hub.subscribe(
-        plugin_id.clone(),
-        subscription_id.clone(),
-        topics,
-        &capabilities,
-    ) {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            crate::dlog(&format!("推送：订阅会话状态失败，不推送：{error}"));
-            return;
-        }
-    };
-    let mut decoder = DaemonStateEventClient::new(SUBSCRIPTION);
-    let mut tracker = Tracker::default();
-    // 总线关掉（守护停机）时 recv 出错，线程随之结束。
-    while let Ok(delivery) = subscription.recv() {
-        let mut messages: Vec<SubscribeMessage> = Vec::new();
-        if let Delivery::Lag {
-            dropped,
-            resume_after,
-        } = delivery
-        {
-            // 落后了：丢掉通道里剩下的旧增量，按快照重新对齐。快照之后的变化照常比较边沿。
-            subscription.discard_pending();
-            messages.push(SubscribeMessage::Lag {
-                dropped,
-                resume_after,
-            });
-            match event_hub
-                .runtime()
-                .recover_snapshots(&plugin_id, &subscription_id)
-            {
-                Ok(snapshots) => messages.extend(snapshots.into_iter().map(|snapshot| {
-                    event_hub::delivery_to_subscribe_message(Delivery::Snapshot(snapshot))
-                })),
-                Err(error) => {
-                    crate::dlog(&format!("推送：落后后重取快照失败，停止推送：{error}"));
-                    return;
-                }
-            }
-        } else {
-            messages.push(event_hub::delivery_to_subscribe_message(delivery));
-        }
-        for message in messages {
-            match decoder.decode_message(message) {
-                Ok(Some(event)) => shared.apply(tracker.apply(event, Instant::now())),
-                Ok(None) => {}
-                Err(error) => crate::dlog(&format!("推送：解不开会话状态：{error}")),
-            }
         }
     }
 }
@@ -833,112 +638,21 @@ mod tests {
         }
     }
 
-    fn snapshot(sessions: Vec<DaemonSessionState>) -> DaemonStateEvent {
-        DaemonStateEvent::Snapshot {
-            sessions,
-            workspace: None,
-            automations: None,
-        }
-    }
-
-    fn notify(id: &str, kind: PushKind) -> Command {
-        Command::Notify {
-            session_id: id.into(),
-            kind,
-            content: Content::default(),
-        }
-    }
-
-    fn cancel(id: &str) -> Command {
-        Command::Cancel {
-            session_id: id.into(),
-        }
-    }
-
-    /// 启动前就在等批准的会话只是基线，不推；之后新进入的等待才推。
-    #[test]
-    fn first_snapshot_is_a_baseline() {
-        let mut tracker = Tracker::default();
-        let now = Instant::now();
-        let commands = tracker.apply(
-            snapshot(vec![state("a", DaemonPhase::AwaitingApproval)]),
-            now,
-        );
-        assert!(commands.is_empty(), "{commands:?}");
-
-        let commands = tracker.apply(
-            DaemonStateEvent::Update(state("b", DaemonPhase::WaitingForUser)),
-            now,
-        );
-        assert_eq!(commands, vec![notify("b", PushKind::Input)]);
-    }
-
-    #[test]
-    fn approval_is_pushed_and_cancelled_once_resolved() {
-        let mut tracker = Tracker::default();
-        let now = Instant::now();
-        tracker.apply(snapshot(vec![state("a", DaemonPhase::Thinking)]), now);
-
-        let commands = tracker.apply(
-            DaemonStateEvent::Update(state("a", DaemonPhase::AwaitingApproval)),
-            now,
-        );
-        assert_eq!(commands, vec![notify("a", PushKind::Approval)]);
-
-        let commands = tracker.apply(
-            DaemonStateEvent::Update(state("a", DaemonPhase::ExecutingTool)),
-            now,
-        );
-        assert_eq!(commands, vec![cancel("a")]);
-    }
-
-    /// 完成、失败都推；会话删掉就取消。
-    #[test]
-    fn success_and_failure_are_pushed_and_removal_cancels() {
-        let mut tracker = Tracker::default();
-        let now = Instant::now();
-        tracker.apply(snapshot(vec![state("a", DaemonPhase::Thinking)]), now);
-
-        let commands = tracker.apply(
-            DaemonStateEvent::Update(state("a", DaemonPhase::Succeeded)),
-            now,
-        );
-        assert_eq!(commands, vec![notify("a", PushKind::Success)]);
-
-        let commands = tracker.apply(
-            DaemonStateEvent::Update(state("a", DaemonPhase::Failed)),
-            now,
-        );
-        assert_eq!(commands, vec![notify("a", PushKind::Failure)]);
-
-        let commands = tracker.apply(DaemonStateEvent::Removed { id: "a".into() }, now);
-        assert_eq!(commands, vec![cancel("a")]);
-    }
-
     /// 文字取提醒产生那一刻的会话状态：会话名优先用户起的，项目名取目录末段，摘要是问句。
     #[test]
     fn content_comes_from_the_session_state() {
-        let mut tracker = Tracker::default();
-        let now = Instant::now();
-        tracker.apply(snapshot(vec![state("a", DaemonPhase::Thinking)]), now);
-
         let mut waiting = state("a", DaemonPhase::AwaitingApproval);
         waiting.title = Some("智能体起的名".into());
         waiting.custom_title = Some("修推送".into());
         waiting.cwd = Some("/Users/cc/wawa/smelt/".into());
         waiting.pending_question = Some("rm -rf\n  build".into());
-        let commands = tracker.apply(DaemonStateEvent::Update(waiting), now);
         assert_eq!(
-            commands,
-            vec![Command::Notify {
-                session_id: "a".into(),
-                kind: PushKind::Approval,
-                content: Content {
-                    title: Some("修推送".into()),
-                    subtitle: Some("smelt".into()),
-                    detail: Some("rm -rf build".into()),
-                },
-            }]
+            Content::of(&waiting),
+            Content {
+                title: Some("修推送".into()),
+                subtitle: Some("smelt".into()),
+                detail: Some("rm -rf build".into()),
+            }
         );
     }
 
@@ -960,25 +674,6 @@ mod tests {
         session.turn_events = false;
         session.pending_question = Some("猜出来的问句".into());
         assert_eq!(Content::of(&session).detail, None, "相位不权威时不带摘要");
-    }
-
-    /// 断线重收的快照照常比较边沿：期间进入等待的会话要推，消失的会话要取消。
-    #[test]
-    fn later_snapshots_compare_edges() {
-        let mut tracker = Tracker::default();
-        let now = Instant::now();
-        tracker.apply(
-            snapshot(vec![
-                state("a", DaemonPhase::Thinking),
-                state("b", DaemonPhase::Thinking),
-            ]),
-            now,
-        );
-        let commands = tracker.apply(
-            snapshot(vec![state("a", DaemonPhase::AwaitingApproval)]),
-            now,
-        );
-        assert_eq!(commands, vec![cancel("b"), notify("a", PushKind::Approval)]);
     }
 
     fn target(device: &str) -> Target {

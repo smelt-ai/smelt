@@ -16,10 +16,10 @@ fn temp_store() -> (ClientStore, PathBuf) {
 // 带进旧版本迁移夹具。
 fn create_v7_schema(connection: &Connection) {
     connection.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    restore_v11_notify_prefs(connection);
     connection
         .execute_batch(
-            "DROP TABLE pinned_workset;
-             ALTER TABLE key_binding RENAME COLUMN command TO action_id;
+            "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
              DROP TABLE workspace_layout_state;
              ALTER TABLE appearance DROP COLUMN layout_id;
              DROP TABLE conversation_route;
@@ -41,6 +41,15 @@ fn create_v7_schema(connection: &Connection) {
                diff_scope TEXT NOT NULL,
                PRIMARY KEY (runtime_id, conversation_id)
              ) WITHOUT ROWID;
+             CREATE TABLE conversation_route_path (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               kind TEXT NOT NULL
+                 CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
+               path TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id, kind, path)
+             ) WITHOUT ROWID;
              DROP TABLE workspace_ui;
              CREATE TABLE workspace_ui (
                id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -54,6 +63,73 @@ fn create_v7_schema(connection: &Connection) {
                sidebar_hide_empty_projects INTEGER NOT NULL
                  CHECK (sidebar_hide_empty_projects IN (0, 1))
              );",
+        )
+        .unwrap();
+}
+
+/// v11 及以前客户端库里还有通知偏好表。
+/// v12 及更早没有固定工作树的表。
+fn restore_v12_without_pinned_worksets(connection: &Connection) {
+    connection
+        .execute_batch("DROP TABLE pinned_workset;")
+        .unwrap();
+}
+
+fn restore_v11_notify_prefs(connection: &Connection) {
+    restore_v12_without_pinned_worksets(connection);
+    connection
+        .execute_batch(
+            "CREATE TABLE notify_prefs (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               approval INTEGER NOT NULL CHECK (approval IN (0, 1)),
+               input INTEGER NOT NULL CHECK (input IN (0, 1)),
+               success INTEGER NOT NULL CHECK (success IN (0, 1)),
+               failure INTEGER NOT NULL CHECK (failure IN (0, 1)),
+               terminal_bell INTEGER NOT NULL CHECK (terminal_bell IN (0, 1))
+             );",
+        )
+        .unwrap();
+}
+
+fn has_table(connection: &Connection, name: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// 把当前结构的对话界面状态退回 v10 的形状：文件树、Git 页的列还在，路径单独一张表。
+fn restore_v10_conversation_route(connection: &Connection) {
+    restore_v11_notify_prefs(connection);
+    connection
+        .execute_batch(
+            "DROP TABLE conversation_route;
+             CREATE TABLE conversation_route (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               active_terminal_id TEXT,
+               dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
+               file_tree_selected TEXT,
+               open_file_path TEXT,
+               file_tree_w REAL NOT NULL,
+               file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+               git_tab TEXT NOT NULL,
+               diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+               diff_scope TEXT NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE conversation_route_path (
+               runtime_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               kind TEXT NOT NULL
+                 CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
+               path TEXT NOT NULL,
+               position INTEGER NOT NULL,
+               PRIMARY KEY (runtime_id, conversation_id, kind, path)
+             ) WITHOUT ROWID;",
         )
         .unwrap();
 }
@@ -154,50 +230,17 @@ fn v8_migrates_worktree_pins_without_losing_workspace_state() {
 }
 
 #[test]
-fn branch_v9_preserves_pins_while_migrating_layout_and_shortcuts() {
-    let path = temp_path();
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let connection = Connection::open(&path).unwrap();
-    create_v7_schema(&connection);
-    connection
-        .execute_batch(
-            "ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0;
-             CREATE TABLE pinned_workset (
-               runtime_id TEXT NOT NULL, workset_id TEXT NOT NULL,
-               PRIMARY KEY (runtime_id, workset_id)
-             ) WITHOUT ROWID;
-             INSERT INTO pinned_workset VALUES ('', 'task');
-             INSERT INTO key_binding VALUES ('command_palette', 'cmd-j');
-             PRAGMA user_version = 9;",
-        )
-        .unwrap();
-    drop(connection);
-    let store = ClientStore::open(&path).unwrap();
-    assert_eq!(store.pinned_worksets(None).unwrap(), vec!["task"]);
-    assert!(
-        store
-            .key_bindings()
-            .unwrap()
-            .iter()
-            .any(|binding| binding.command == "smelt.palette/toggle")
-    );
-    assert!(store.workspace_layout_state("default").unwrap().is_none());
-    drop(store);
-    cleanup(&path);
-}
-
-#[test]
-fn upstream_v10_gains_worktree_pins_without_losing_layout() {
+fn v12_gains_worktree_pins_without_losing_layout() {
     let (store, path) = temp_store();
     drop(store);
-    Connection::open(&path)
-        .unwrap()
-        .execute_batch(
-            "DROP TABLE pinned_workset;
-             INSERT INTO workspace_layout_state VALUES ('default', '{\"version\":1}');
-             PRAGMA user_version = 10;",
-        )
-        .unwrap();
+    let v12 = Connection::open(&path).unwrap();
+    restore_v12_without_pinned_worksets(&v12);
+    v12.execute_batch(
+        "INSERT INTO workspace_layout_state VALUES ('default', '{\"version\":1}');
+         PRAGMA user_version = 12;",
+    )
+    .unwrap();
+    drop(v12);
     let store = ClientStore::open(&path).unwrap();
     assert!(store.pinned_worksets(None).unwrap().is_empty());
     assert!(store.workspace_layout_state("default").unwrap().is_some());
@@ -283,8 +326,7 @@ fn v8_drops_the_shell_columns_and_gains_an_empty_layout_state_table() {
     );
     let routes = store.conversation_routes().unwrap();
     assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].file_tree_selected.as_deref(), Some("/repo/a.rs"));
-    assert_eq!(routes[0].git_tab, "log");
+    assert_eq!(routes[0].active_terminal_id.as_deref(), Some("term-2"));
     assert_eq!(store.appearance().unwrap(), Some(appearance()));
     assert_eq!(store.workspace_layout_state("default").unwrap(), None);
     drop(store);
@@ -354,16 +396,6 @@ fn records_round_trip_and_start_empty() {
     store.put_update_settings(&settings).unwrap();
     assert_eq!(store.update_settings().unwrap(), Some(settings));
 
-    let prefs = NotifyPrefsRecord {
-        approval: true,
-        input: false,
-        success: true,
-        failure: true,
-        terminal_bell: false,
-    };
-    store.put_notify_prefs(&prefs).unwrap();
-    assert_eq!(store.notify_prefs().unwrap(), Some(prefs));
-
     store.put_workspace_ui(&workspace_ui()).unwrap();
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
     let shrunk = WorkspaceUiRecord {
@@ -399,17 +431,6 @@ fn route(runtime_id: Option<&str>, conversation_id: &str) -> ConversationRouteRe
         conversation_id: conversation_id.to_string(),
         active_terminal_id: Some("term-2".to_string()),
         dock_layout: Some(r#"{"v":1,"center":{"terminal":"term-2"}}"#.to_string()),
-        expanded: vec!["/repo/src".to_string(), "/repo/docs".to_string()],
-        file_tree_selected: Some("/repo/src/main.rs".to_string()),
-        open_file_path: None,
-        file_tree_w: 240.0,
-        file_tree_open: false,
-        pinned_roots: vec!["/repo".to_string()],
-        collapsed_roots: Vec::new(),
-        git_tab: "log".to_string(),
-        diff_split: true,
-        git_tree_collapsed: vec!["src".to_string()],
-        diff_scope: "unstaged".to_string(),
     }
 }
 
@@ -425,7 +446,6 @@ fn conversation_routes_are_replaced_as_a_whole() {
         ConversationRouteRecord {
             active_terminal_id: None,
             dock_layout: None,
-            expanded: Vec::new(),
             ..route(None, "conv-2")
         },
     ];
@@ -674,27 +694,19 @@ fn legacy_preference_rows_move_into_tables_once() {
     let store = ClientStore::open(&path).unwrap();
     assert_eq!(store.appearance().unwrap(), Some(appearance()));
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
-    assert_eq!(
-        store.notify_prefs().unwrap(),
-        None,
-        "解析不了的旧值用出厂值重来"
-    );
     assert!(store.runtime_migrated().unwrap());
     drop(store);
 
     let connection = Connection::open(&path).unwrap();
+    assert!(
+        !has_table(&connection, "notify_prefs"),
+        "通知偏好不搬，归通知插件"
+    );
     let version: u32 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, schema::SCHEMA_VERSION);
-    let leftover: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'client_pref')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!leftover);
+    assert!(!has_table(&connection, "client_pref"));
     drop(connection);
     cleanup(&path);
 }
@@ -1013,17 +1025,18 @@ fn key_bindings_override_and_reset_per_command() {
 fn v9_key_bindings_move_to_command_ids() {
     let (store, path) = temp_store();
     drop(store);
-    // v9 和 v10 只差这一列的名字。
-    Connection::open(&path)
-        .unwrap()
-        .execute_batch(
-            "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
-             INSERT INTO key_binding VALUES
-               ('command_palette', 'cmd-j'), ('next_hunk', NULL), ('split_beside', 'cmd-e'),
-               ('toggle_sidebar', 'cmd-b');
-             PRAGMA user_version = 9;",
-        )
-        .unwrap();
+    // v9 比 v10 只差快捷键表这一列的名字；对话界面状态先退回 v10 的形状。
+    let v9 = Connection::open(&path).unwrap();
+    restore_v10_conversation_route(&v9);
+    v9.execute_batch(
+        "ALTER TABLE key_binding RENAME COLUMN command TO action_id;
+         INSERT INTO key_binding VALUES
+           ('command_palette', 'cmd-j'), ('next_hunk', NULL), ('split_beside', 'cmd-e'),
+           ('toggle_sidebar', 'cmd-b');
+         PRAGMA user_version = 9;",
+    )
+    .unwrap();
+    drop(v9);
 
     let store = ClientStore::open(&path).unwrap();
     let record = |command: &str, keystroke: Option<&str>| KeyBindingRecord {
@@ -1041,6 +1054,82 @@ fn v9_key_bindings_move_to_command_ids() {
     drop(store);
     assert!(
         path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v9"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+/// v10 的对话界面状态带着文件树、Git 页的状态：升到 v11 时这些列和路径表删掉，终端的
+/// 分屏和当前终端留着；迁移前留了备份。
+#[test]
+fn v10_conversation_routes_keep_only_terminal_state() {
+    let (store, path) = temp_store();
+    drop(store);
+    let v10 = Connection::open(&path).unwrap();
+    restore_v10_conversation_route(&v10);
+    v10.execute_batch(
+        "INSERT INTO conversation_route VALUES
+           ('', 'conv-1', 'term-2', '{\"v\":1}', '/repo/a.rs', '/repo/a.rs', 240.0, 1,
+            'log', 1, 'unstaged');
+         INSERT INTO conversation_route_path VALUES ('', 'conv-1', 'expanded', '/repo/src', 0);
+         PRAGMA user_version = 10;",
+    )
+    .unwrap();
+    drop(v10);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(
+        store.conversation_routes().unwrap(),
+        vec![ConversationRouteRecord {
+            runtime_id: None,
+            conversation_id: "conv-1".to_string(),
+            active_terminal_id: Some("term-2".to_string()),
+            dock_layout: Some(r#"{"v":1}"#.to_string()),
+        }]
+    );
+    drop(store);
+    let connection = Connection::open(&path).unwrap();
+    let path_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'conversation_route_path'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(path_tables, 0);
+    drop(connection);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v10"))
+            .exists(),
+        "迁移前必须留下备份"
+    );
+    cleanup(&path);
+}
+
+/// v11 的通知偏好归了通知插件：升到 v12 时这张表删掉，别的数据原样留下；迁移前留了备份。
+#[test]
+fn v11_drops_notify_prefs() {
+    let (store, path) = temp_store();
+    store.put_appearance(&appearance()).unwrap();
+    drop(store);
+    let v11 = Connection::open(&path).unwrap();
+    restore_v11_notify_prefs(&v11);
+    v11.execute_batch(
+        "INSERT INTO notify_prefs VALUES (1, 1, 0, 1, 1, 0);
+         PRAGMA user_version = 11;",
+    )
+    .unwrap();
+    drop(v11);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(store.appearance().unwrap(), Some(appearance()));
+    drop(store);
+    let connection = Connection::open(&path).unwrap();
+    assert!(!has_table(&connection, "notify_prefs"));
+    drop(connection);
+    assert!(
+        path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v11"))
             .exists(),
         "迁移前必须留下备份"
     );

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use smelt_model::agent_definition::AgentDefinition;
-use smelt_model::agent_kind::{ConversationAgentKind, HistorySourceKind, TerminalAgentKind};
+use smelt_model::agent_kind::{ConversationAgentKind, HistorySourceKind, agent_id_from_launch};
 use smelt_model::agent_status::AgentStatus;
 use smelt_model::attention::{
     self, AttentionItem as ModelAttention, AttentionKind as ModelAttentionKind, AttentionStore,
@@ -600,12 +600,9 @@ pub(crate) fn session_status(state: &DaemonSessionState) -> view::SessionStatus 
     }
 }
 
-/// 从启动命令认 agent：先查对话表，再查终端表（Antigravity 等只有终端）。
+/// 从启动命令认 agent；认不出的算 `other`。
 fn agent_from_launch(launch: &str) -> &'static str {
-    ConversationAgentKind::from_command_loose(launch)
-        .map(ConversationAgentKind::id)
-        .or_else(|| TerminalAgentKind::from_command_prefix(launch).map(TerminalAgentKind::id))
-        .unwrap_or("other")
+    agent_id_from_launch(launch).unwrap_or("other")
 }
 
 pub(crate) fn attention_item(item: &ModelAttention) -> view::AttentionItem {

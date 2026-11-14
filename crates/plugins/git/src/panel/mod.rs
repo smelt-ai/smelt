@@ -1,7 +1,7 @@
 //! Git 面板：状态/分支/diff 查看、暂存/提交/推送。
 //!
-//! 从 main.rs 拆出来的 `impl Workspace` 方法 + 独立渲染/解析/git 子进程调用函数，
-//! 字段仍然声明在 main.rs 的 `Workspace` struct 里（没有挪成子结构体）。
+//! 从 main.rs 拆出来的 `impl GitPanel` 方法 + 独立渲染/解析/git 子进程调用函数，
+//! 字段仍然声明在 main.rs 的 `GitPanel` struct 里（没有挪成子结构体）。
 //! 数据修改在 `workspace.rs`，页面在 `view.rs`。
 
 use std::collections::{HashMap, HashSet};
@@ -15,25 +15,25 @@ use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::resizable::resizable_panel;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
-pub(crate) use smelt_ui::Button;
+pub(crate) use smelt_plugin_api::ui::Button;
 
-use crate::{GitTab, ProjectRef, Workspace, placeholder_view, resizable_split::h_resizable};
-use smelt_runtime_client::RuntimeClient;
-use smelt_runtime_client::protocol::control::ControlCall;
-use smelt_runtime_client::protocol::git::*;
-pub use smelt_runtime_client::protocol::git::{
-    BranchList, DiffLine, DiffScope, GitSeenChange, GitStatusData, GitTreeRow, RepoInfo,
+use crate::{GitPanel, GitTab, ProjectRef, h_resizable, placeholder_view};
+use smelt_plugin_api::client::RuntimeClient;
+use smelt_plugin_api::client::protocol::control::ControlCall;
+use smelt_plugin_api::client::protocol::git::*;
+pub use smelt_plugin_api::client::protocol::git::{
+    BranchList, DiffLine, DiffScope, GitSeenChange, GitStatusData, GitTreeRow,
     build_git_tree, full_file_path, parse_diff,
 };
-use smelt_ui::IconAction as _;
-use smelt_ui::truncated_line::truncated_line;
+use smelt_plugin_api::ui::IconAction as _;
+use smelt_plugin_api::ui::truncated_line::truncated_line;
 
 mod diff;
 pub(crate) use diff::*;
 #[cfg(test)]
 mod tests;
 mod view;
-mod workspace;
+mod ops;
 
 // ===================== 运行时调用 =====================
 
@@ -41,22 +41,22 @@ mod workspace;
 const GIT_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// git 由仓库所在那台机器的运行时执行，面板只发请求。客户端在主线程用
-/// [`crate::runtime_call::target`] 取，必须在后台线程调用。失败给人看的原因：git 的
+/// [`crate::rt::target`] 取，必须在后台线程调用。失败给人看的原因：git 的
 /// stderr 原样带回来，连不上运行时则是传输错误。
 pub(crate) fn git_call<C: ControlCall>(
     client: &RuntimeClient,
     params: C::Params,
 ) -> Result<C::Result, String> {
-    crate::runtime_call::call_on::<C>(client, params, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
-        .map_err(crate::runtime_call::error_text)
+    crate::rt::call_on::<C>(client, params, crate::rt::RUNTIME_CALL_TIMEOUT)
+        .map_err(crate::rt::error_text)
 }
 
 pub(crate) fn git_network_call<C: ControlCall>(
     client: &RuntimeClient,
     params: C::Params,
 ) -> Result<C::Result, String> {
-    crate::runtime_call::call_on::<C>(client, params, GIT_NETWORK_TIMEOUT)
-        .map_err(crate::runtime_call::error_text)
+    crate::rt::call_on::<C>(client, params, GIT_NETWORK_TIMEOUT)
+        .map_err(crate::rt::error_text)
 }
 
 fn root_params(root: &ProjectRef) -> GitRootParams {
@@ -144,16 +144,6 @@ pub(crate) fn git_discovery_wait<T>(
                 .saturating_sub(now.saturating_duration_since(cached.fetched_at)),
         ),
     }
-}
-
-/// 请运行时建的监听。建过的（不管成没成功）记在 `Workspace::watched`，那台机器重新订阅上
-/// 之前不再登记第二次。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum WatchKind {
-    /// `project.watch`：整个项目的文件变化。Git 页、文件树、变更角标用。
-    Project,
-    /// `git.watch_head`：只看所在仓库的 HEAD。侧栏每个项目的分支名用。
-    Head,
 }
 
 /// 当前视图下 hunk 该给哪些按钮。
@@ -389,6 +379,7 @@ fn clear_confirmed_git_index_ops<K, Q>(
 /// `fallback` 是用户没选过时的默认落点（调用方给的是"第一个有改动的仓库"）。
 /// 没有它就只能死认项目根，而项目根常常自己是干净的——改动全在子仓，或者
 /// submodule 配了 `ignore`——于是面板会判定"没有改动"，连 diff 预览都不开。
+/// 都没有时，项目根本身不是仓库（多仓库工作树的任务目录）就落到发现的第一个仓库。
 fn resolve_git_write_target(
     project_root: &str,
     selected: Option<&str>,
@@ -645,14 +636,15 @@ pub(crate) fn commit_button_label(op: Option<GitWrite>) -> &'static str {
 
 fn render_narrow_git_row(
     entry: &NarrowGitRow,
-    ws: &Entity<Workspace>,
+    ws: &Entity<GitPanel>,
     collapsed: &HashSet<String>,
     index_pending: &HashMap<String, HashMap<String, PendingGitIndexOp>>,
-    runtime: &crate::RuntimeKey,
+    runtime: &smelt_plugin_api::RuntimeKey,
 ) -> AnyElement {
     use crate::ui_theme;
 
-    // 行里只存仓库根的路径；交给 Workspace 时带上它在哪台机器上。
+    let local = *runtime == smelt_plugin_api::RuntimeKey::Local;
+    // 行里只存仓库根的路径；交给 GitPanel 时带上它在哪台机器上。
     let at = |root: &str| ProjectRef {
         runtime: runtime.clone(),
         root: root.to_string(),
@@ -760,7 +752,7 @@ fn render_narrow_git_row(
                             .quiet()
                             .icon_size()
                             .label(sync_label)
-                            .font_family(crate::terminal_view::font_family())
+                            .font_family(crate::mono_font())
                             .text_color(rgb(if ahead + behind > 0 {
                                 ui_theme::green()
                             } else {
@@ -885,7 +877,7 @@ fn render_narrow_git_row(
                         .rounded(ui_theme::row_radius())
                         .bg(rgb(ui_theme::bg_card()))
                         .text_xs()
-                        .font_family(crate::terminal_view::font_family())
+                        .font_family(crate::mono_font())
                         .text_color(rgb(ui_theme::red()))
                         .child(err)
                 }))
@@ -991,7 +983,7 @@ fn render_narrow_git_row(
                         .pl(indent)
                         .pr_3()
                         .text_xs()
-                        .font_family(crate::terminal_view::font_family())
+                        .font_family(crate::mono_font())
                         .text_color(rgb(ui_theme::text_muted()))
                         .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
                         .child(
@@ -1071,7 +1063,7 @@ fn render_narrow_git_row(
                     let root_menu = at(root);
                     let path_menu = row.path.clone();
                     let file_path =
-                        smelt_model::runtime_path::PathStyle::LOCAL.join(root, &row.path);
+                        smelt_plugin_api::model::runtime_path::PathStyle::LOCAL.join(root, &row.path);
                     let file_path_copy = file_path.clone();
                     let file_path_finder = file_path;
                     let row_el = div()
@@ -1085,7 +1077,7 @@ fn render_narrow_git_row(
                         .pl(indent)
                         .pr_3()
                         .text_xs()
-                        .font_family(crate::terminal_view::font_family())
+                        .font_family(crate::mono_font())
                         .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
                         // 子模块指针：改的不是文件内容，而是"父仓记录子仓的哪个 commit"。
                         // 用跟仓库行同一个 ◇ 标记，免得它看上去只是个带 M 的目录。
@@ -1137,8 +1129,6 @@ fn render_narrow_git_row(
                             let ws_diff = ws_menu.clone();
                             let root_diff = root_menu.clone();
                             let path_diff = path_menu.clone();
-                            let ws_copy = ws_menu.clone();
-                            let ws_finder = ws_menu.clone();
                             menu.item(
                                 PopupMenuItem::new(if untracked {
                                     "删除文件"
@@ -1146,11 +1136,12 @@ fn render_narrow_git_row(
                                     "丢弃更改"
                                 })
                                 .on_click(
-                                    move |_ev, _window, cx| {
+                                    move |_ev, window, cx| {
                                         ws_discard.update(cx, |workspace, cx| {
                                             workspace.start_discard_file(
                                                 root_discard.clone(),
                                                 path_discard.clone(),
+                                                window,
                                                 cx,
                                             )
                                         });
@@ -1173,21 +1164,16 @@ fn render_narrow_git_row(
                             .item(PopupMenuItem::new("复制文件路径").on_click({
                                 let path = file_path_copy.clone();
                                 move |_ev, _window, cx| {
-                                    ws_copy.update(cx, |workspace, cx| {
-                                        workspace.copy_file_path_to_clipboard(path.clone(), cx)
-                                    });
+                                    cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
                                 }
                             }))
-                            .item(
-                                PopupMenuItem::new("在 Finder 中显示").on_click({
+                            // 远程机器上的路径在本机 Finder 里没有。
+                            .when(local, |menu| {
+                                menu.item(PopupMenuItem::new("在 Finder 中显示").on_click({
                                     let path = file_path_finder.clone();
-                                    move |_ev, _window, cx| {
-                                        ws_finder.update(cx, |workspace, cx| {
-                                            workspace.reveal_path_in_finder(path.clone(), cx)
-                                        });
-                                    }
-                                }),
-                            )
+                                    move |_ev, _window, _cx| crate::reveal_in_finder(&path)
+                                }))
+                            })
                         })
                         .into_any_element()
                 }
@@ -1210,7 +1196,7 @@ fn render_narrow_git_row(
 /// 撞在一起时用户分不清「暂存改动」到底进的是索引还是 stash 栈。
 fn git_ops_menu_items(
     mut menu: gpui_component::menu::PopupMenu,
-    ws: Entity<Workspace>,
+    ws: Entity<GitPanel>,
     root: ProjectRef,
     ahead: u32,
     behind: u32,
@@ -1219,10 +1205,10 @@ fn git_ops_menu_items(
 ) -> gpui_component::menu::PopupMenu {
     /// 菜单项统一入口：先认仓库，再干活。
     fn item(
-        ws: &Entity<Workspace>,
+        ws: &Entity<GitPanel>,
         root: &ProjectRef,
         label: impl Into<gpui::SharedString>,
-        run: fn(&mut Workspace, &mut Context<Workspace>),
+        run: fn(&mut GitPanel, &mut Context<GitPanel>),
     ) -> PopupMenuItem {
         let ws = ws.clone();
         let root = root.clone();
@@ -1273,11 +1259,11 @@ fn git_ops_menu_items(
         menu = menu
             .separator()
             .item(
-                PopupMenuItem::new("丢弃全部更改").on_click(move |_ev, _window, cx| {
+                PopupMenuItem::new("丢弃全部更改").on_click(move |_ev, window, cx| {
                     let root = root_discard.clone();
                     ws_discard.update(cx, |w, cx| {
                         w.set_active_git_repo(root.clone(), cx);
-                        w.start_discard_all(root, cx);
+                        w.start_discard_all(root, window, cx);
                     });
                 }),
             );

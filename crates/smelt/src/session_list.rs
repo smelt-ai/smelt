@@ -12,7 +12,7 @@
 //! 按项目分组时可整组/整行拖拽排序：项目改 `projects`，组内会话改 `sessions`，
 //! 都通过 `save_state` 落盘。
 //!
-//! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
+//! `impl Workspace` 方法，字段仍在 main.rs。
 
 use crate::{ProjectRef, RuntimeKey};
 use chrono::Local;
@@ -593,6 +593,17 @@ pub(crate) fn tool_panel_context_root(
 }
 
 impl Workspace {
+    /// 项目行的分支名：目录就是项目根的会话所报的分支（运行时维护在会话状态里）。
+    pub(crate) fn project_branch(&self, project: &ProjectRef, cx: &App) -> Option<String> {
+        self.sessions.iter().find_map(|session| {
+            let here = session.runtime(cx).key() == &project.runtime
+                && session.cwd(cx).is_some_and(|cwd| {
+                    crate::sidebar_order::same_project_root(&cwd, &project.root)
+                });
+            here.then(|| session.branch(cx)).flatten()
+        })
+    }
+
     /// 侧栏要画的分组：各机器依次铺开，每段内按当前分组方式分组，按项目分组时置顶的在前。
     /// render 和键盘导航共用这一份，两边的顺序才对得上。`each_project` 在分组前看一眼每台
     /// 机器的项目分组（render 要记下每个会话来自哪个项目）。
@@ -806,14 +817,13 @@ impl Workspace {
         let groups =
             self.sidebar_display_groups(statuses, &last_updated_at, cx, |key, project_groups| {
                 for group in project_groups {
-                    let branch = self
-                        .repo_info
-                        .get(&ProjectRef {
+                    let branch = self.project_branch(
+                        &ProjectRef {
                             runtime: key.clone(),
                             root: group.root.clone(),
-                        })
-                        .and_then(|cached| cached.value.as_ref())
-                        .map(|info| info.branch.clone());
+                        },
+                        cx,
+                    );
                     for &ix in &group.sessions {
                         session_projects[ix] = Some((group.label.clone(), branch.clone()));
                     }
@@ -1159,11 +1169,7 @@ impl Workspace {
                 .unwrap_or(AgentStatus::Idle);
 
             // 分支名：git 仓库都显示，跟项目名并排（淡色）。
-            let branch_label = self
-                .repo_info
-                .get(&project)
-                .and_then(|cached| cached.value.as_ref())
-                .map(|info| info.branch.clone());
+            let branch_label = self.project_branch(&project, cx);
             let repository_count = self
                 .space(&group.runtime)
                 .map(|space| {
@@ -1395,14 +1401,14 @@ impl Workspace {
                                 this.clone(),
                             )
                         })
-                        .on_mouse_up(MouseButton::Left, move |_ev, window, cx| {
+                        .on_mouse_up(MouseButton::Left, move |_ev, _window, cx| {
                             let project = toggle_project.clone();
                             e_toggle.update(cx, |ws, cx| {
                                 // 整行也挂了 on_drag：超过阈值起拖后不要再当成点选。
                                 if ws.sidebar_drag.is_some() {
                                     return;
                                 }
-                                ws.select_project(project.clone(), window, cx);
+                                ws.select_project(project.clone(), cx);
                                 if crate::sidebar_order::project_header_click_toggles_collapse(
                                     !empty_group,
                                 ) {
@@ -1411,7 +1417,6 @@ impl Workspace {
                             });
                         })
                         .context_menu({
-                            let e_pin = e_menu.clone();
                             let e_sidebar_pin = e_menu.clone();
                             let e_close_proj = e_menu.clone();
                             let path = cwd.clone();
@@ -1423,8 +1428,8 @@ impl Workspace {
                                 if !is_project_group {
                                     return menu;
                                 }
-                                // 远程项目的文件不在这台机器上：用本机程序打开、钉进文件树
-                                // 都做不了，只给通用的几项。
+                                // 远程项目的文件不在这台机器上，用本机程序打开做不了，只给
+                                // 通用的几项。
                                 if !is_local_group {
                                     return remote_project_menu(
                                         menu,
@@ -1435,21 +1440,11 @@ impl Workspace {
                                     );
                                 }
                                 let copy_path = path.clone();
-                                let pin_path = path.clone();
                                 let sidebar_pin_project = close_project.clone();
-                                let e_pin = e_pin.clone();
                                 let e_sidebar_pin = e_sidebar_pin.clone();
                                 let e_close_proj = e_close_proj.clone();
                                 let close_project = close_project.clone();
                                 let copy_branch = copy_branch.clone();
-                                // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
-                                // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
-                                let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
-                                let pin_label = if pinned {
-                                    "从文件树移除"
-                                } else {
-                                    "加到文件树"
-                                };
                                 let sidebar_pinned =
                                     e_sidebar_pin.read(cx).is_project_pinned(&sidebar_pin_project);
                                 let sidebar_pin_label = if sidebar_pinned {
@@ -1511,16 +1506,6 @@ impl Workspace {
                                                 let project = sidebar_pin_project.clone();
                                                 e_sidebar_pin.update(cx, |ws, cx| {
                                                     ws.toggle_project_pinned(project, cx)
-                                                });
-                                            }),
-                                    )
-                                    .item(
-                                        PopupMenuItem::new(pin_label)
-                                            .icon(IconName::Folder)
-                                            .on_click(move |_ev, _window, cx| {
-                                                let pin_path = pin_path.clone();
-                                                e_pin.update(cx, |ws, cx| {
-                                                    ws.toggle_file_tree_root(pin_path, cx)
                                                 });
                                             }),
                                     )
@@ -1727,13 +1712,11 @@ impl Workspace {
                                 .map(|workset| (workset.task.clone(), workset.branch.clone()))
                         })
                 });
-                let is_acp = matches!(self.sessions[ix].kind, SessionKind::Conversation(_));
                 // 终端会话取当前活动 pane，ACP 会话取自身。分屏子行会在各自的菜单中复制自己的 ID。
                 let copy_id_source = crate::CopySessionIdSource::of(&self.sessions[ix].kind);
                 let e_act = this.clone();
                 let e_close = this.clone();
                 let e_rename = this.clone();
-                let e_restart = this.clone();
                 let e_organization = this.clone();
                 let ui_id = self.sessions[ix].ui_id;
                 let is_pinned =
@@ -1995,10 +1978,8 @@ impl Workspace {
                     .context_menu(move |menu, _window, cx| {
                         let menu = archive::organization_menu(menu, e_organization.clone(), ui_id, cx);
                         let e_rename = e_rename.clone();
-                        let e_restart = e_restart.clone();
                         let copy_id_source = copy_id_source.clone();
-                        let sess_ix = ix;
-                        let mut menu = menu
+                        menu
                             .item(
                                 PopupMenuItem::new("重命名")
                                     .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
@@ -2016,21 +1997,7 @@ impl Workspace {
                                             copy_id_source.session_id(cx),
                                         ));
                                     }),
-                            );
-                        // 只有 ACP 对话会话才需要「强制重启」：卡在工具调用里、
-                        // 「停止」按钮打不断时的兜底，见 `force_restart_acp_session`。
-                        if is_acp {
-                            menu = menu.item(
-                                PopupMenuItem::new("强制重启")
-                                    .icon(gpui_component::Icon::new(gpui_kit_assets::IconName::RotateCw))
-                                    .on_click(move |_ev, _window, cx| {
-                                        e_restart.update(cx, |ws, cx| {
-                                            ws.force_restart_acp_session(sess_ix, cx)
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
+                            )
                     })
                     .when(can_drag && dragging, |row| {
                         attach_session_drop_layers(

@@ -18,13 +18,9 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
         instance,
         ..Default::default()
     }));
-    let subscribers = new_event_hub();
     let replies = Arc::new(Mutex::new(VecDeque::new()));
-    let listener = StateListener::with_replies(
-        Arc::clone(&state),
-        subscribers,
-        Arc::clone(&replies),
-    );
+    let bell = Arc::new(AtomicBool::new(false));
+    let listener = StateListener::new(Arc::clone(&replies), Arc::clone(&bell));
     Arc::new(Session {
         instance,
         geometry_token: uuid::Uuid::new_v4().simple().to_string(),
@@ -47,6 +43,7 @@ pub(crate) fn make_dummy_session(rows: u16, cols: u16) -> Arc<Session> {
         }),
         output_gate: Mutex::new(()),
         replies,
+        bell,
         term: Mutex::new(new_daemon_term(rows, cols, listener)),
         graphics: Mutex::default(),
         state,

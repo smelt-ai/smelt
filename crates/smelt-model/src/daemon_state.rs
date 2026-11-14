@@ -7,8 +7,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 pub use smelt_event_protocol::{
-    CORE_TOPIC_HISTORY_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED, TerminalProgress,
-    TerminalProgressState,
+    AttentionChanged, AttentionItem, AttentionKind, AttentionSnapshot,
+    CORE_TOPIC_ATTENTION_CHANGED, CORE_TOPIC_HISTORY_CHANGED, CORE_TOPIC_PI_CONFIG_CHANGED,
+    SessionAttention, TerminalProgress, TerminalProgressState,
 };
 
 use crate::automation::AutomationFile;
@@ -49,7 +50,7 @@ pub enum RuntimePresence {
 
 /// GUI 侧订阅状态通道的镜像（serde 反序列化；多出来的 JSON 字段自动忽略）。
 /// 字段对齐 smeltd `SessionState` 广播——B 路线「语义面板」的数据源。
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DaemonSessionState {
     pub id: String,
     /// daemon runtime generation. A recreated session may restart its revision at a lower value.
@@ -85,6 +86,9 @@ pub struct DaemonSessionState {
     pub custom_title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// `cwd` 所在仓库的当前分支，运行时监听 HEAD 维护。不是 git 仓库、旧运行时不报是 None。
+    #[serde(default)]
+    pub branch: Option<String>,
     /// unix 秒，进入当前 phase 的时刻。
     #[serde(default)]
     pub phase_since: u64,
@@ -144,6 +148,7 @@ impl Default for DaemonSessionState {
             conversation_id: None,
             custom_title: None,
             cwd: None,
+            branch: None,
             phase_since: 0,
             turn_started_at: 0,
             updated_at: 0,

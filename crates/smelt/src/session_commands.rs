@@ -1,37 +1,64 @@
-//! 插件开会话用的命令（`smelt.sessions/resume` 等，参数见 `smelt_plugin_api::sessions`）。
+//! 会话的命令（`smelt.sessions/resume` 等，参数见 `smelt_plugin_api::sessions`）。
 //!
 //! 会话归工作台管，插件只说开什么；启动命令、环境变量、初始配置在这里按那台机器的
 //! 智能体配置现算。
 
-use serde::de::DeserializeOwned;
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind};
+use smelt_plugin_api::CommandSpec;
 use smelt_plugin_api::sessions::{self, Handoff, Resume};
 
 use super::*;
+use crate::plugin_host::{WorkspaceRef, in_main_window, main_window, update_workspace};
+
+/// 宿主登记的会话命令，跟 `smelt.sessions` 的自带命令一起登记。
+pub(crate) fn commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
+    let resume = workspace.clone();
+    let in_terminal = workspace.clone();
+    let handoff = workspace.clone();
+    let send = workspace.clone();
+    let activate = workspace.clone();
+    vec![
+        sessions::ACTIVATE.spec("跳到会话", move |args, window, cx| {
+            in_main_window(window, &activate, cx, |this, window, cx| {
+                this.request_notification_session_jump(args.session_id, window, cx)
+            })
+        }),
+        sessions::RESUME.spec("续接历史会话", move |args, window, cx| {
+            let window = main_window(window)?;
+            update_workspace(&resume, cx, |this, cx| {
+                this.resume_from_history(args, window, cx)
+            })
+        }),
+        sessions::RESUME_IN_TERMINAL.spec("在终端里续接历史会话", move |args, _, cx| {
+            update_workspace(&in_terminal, cx, |this, cx| {
+                this.resume_from_history_in_terminal(args, cx)
+            })
+        }),
+        sessions::HANDOFF.spec("交接给另一家 agent", move |args, window, cx| {
+            let window = main_window(window)?;
+            update_workspace(&handoff, cx, |this, cx| this.hand_off(args, window, cx))
+        }),
+        sessions::SEND_TEXT.spec("交给当前会话", move |args, window, cx| {
+            let window = main_window(window)?;
+            update_workspace(&send, cx, |this, cx| {
+                this.send_to_session(&args.text, window, cx)
+            })
+        }),
+    ]
+}
 
 impl Workspace {
-    pub(crate) fn run_resume_command(
+    fn resume_from_history(
         &mut self,
-        args: &serde_json::Value,
+        args: Resume,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(args) = self.command_args::<Resume>(sessions::RESUME, args) else {
-            return;
-        };
-        let runtime = sessions::machine_key(&args.machine);
-        let Some(agent) = HistorySourceKind::from_id(&args.agent).and_then(HistorySourceKind::acp)
-        else {
-            self.report_background_error(format!("「{}」不支持 ACP 续接", args.agent));
-            return;
-        };
-        let launch_override = match profile_launch(&runtime, args.profile_id.as_deref(), cx) {
-            Ok(launch) => launch,
-            Err(error) => {
-                self.report_background_error(error);
-                return;
-            }
-        };
+    ) -> Result<(), String> {
+        let runtime = args.machine;
+        let agent = HistorySourceKind::from_id(&args.agent)
+            .and_then(HistorySourceKind::acp)
+            .ok_or_else(|| format!("「{}」不支持 ACP 续接", args.agent))?;
+        let launch_override = profile_launch(&runtime, args.profile_id.as_deref(), cx)?;
         self.resume_acp_session(
             crate::workspace_sessions::AcpResumeRequest {
                 runtime,
@@ -45,28 +72,18 @@ impl Workspace {
             window,
             cx,
         );
+        Ok(())
     }
 
-    pub(crate) fn run_resume_in_terminal_command(
+    fn resume_from_history_in_terminal(
         &mut self,
-        args: &serde_json::Value,
+        args: Resume,
         cx: &mut Context<Self>,
-    ) {
-        let Some(args) = self.command_args::<Resume>(sessions::RESUME_IN_TERMINAL, args) else {
-            return;
-        };
-        let runtime = sessions::machine_key(&args.machine);
-        let Some(agent) = HistorySourceKind::from_id(&args.agent) else {
-            self.report_background_error(format!("认不出历史来源「{}」", args.agent));
-            return;
-        };
-        let launch_override = match profile_launch(&runtime, args.profile_id.as_deref(), cx) {
-            Ok(launch) => launch,
-            Err(error) => {
-                self.report_background_error(error);
-                return;
-            }
-        };
+    ) -> Result<(), String> {
+        let runtime = args.machine;
+        let agent = HistorySourceKind::from_id(&args.agent)
+            .ok_or_else(|| format!("认不出历史来源「{}」", args.agent))?;
+        let launch_override = profile_launch(&runtime, args.profile_id.as_deref(), cx)?;
         self.resume_cli_session(
             runtime,
             agent,
@@ -75,51 +92,26 @@ impl Workspace {
             args.resume_id,
             cx,
         );
+        Ok(())
     }
 
-    pub(crate) fn run_handoff_command(
+    fn hand_off(
         &mut self,
-        args: &serde_json::Value,
+        args: Handoff,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(args) = self.command_args::<Handoff>(sessions::HANDOFF, args) else {
-            return;
-        };
-        let machine = sessions::machine_key(&args.machine);
-        let Some(agent) = ConversationAgentKind::from_id(&args.agent) else {
-            self.report_background_error(format!("认不出 agent「{}」，交接取消", args.agent));
-            return;
-        };
+    ) -> Result<(), String> {
+        let agent = ConversationAgentKind::from_id(&args.agent)
+            .ok_or_else(|| format!("认不出 agent「{}」，交接取消", args.agent))?;
         // 交接会话开在源存档所在的那台机器上，用那台机器的启动命令。
-        let Some(runtime) = crate::runtimes::runtime(&machine, cx) else {
-            self.report_background_error("这台机器已经移除，交接取消");
-            return;
-        };
-        let launch = match profile_launch(&machine, args.profile_id.as_deref(), cx) {
-            Ok(Some(launch)) => launch,
-            Ok(None) => settings::acp_launch_for(&machine, agent, cx),
-            Err(error) => {
-                self.report_background_error(error);
-                return;
-            }
+        let runtime = crate::runtimes::runtime(&args.machine, cx)
+            .ok_or_else(|| "这台机器已经移除，交接取消".to_string())?;
+        let launch = match profile_launch(&args.machine, args.profile_id.as_deref(), cx)? {
+            Some(launch) => launch,
+            None => settings::acp_launch_for(&args.machine, agent, cx),
         };
         self.add_acp_handoff_session(handoff_request(runtime, agent, launch, args), window, cx);
-    }
-
-    /// 参数解析不了是插件写错了：报出来，不开会话。
-    fn command_args<T: DeserializeOwned>(
-        &mut self,
-        command: &str,
-        args: &serde_json::Value,
-    ) -> Option<T> {
-        match serde_json::from_value(args.clone()) {
-            Ok(args) => Some(args),
-            Err(error) => {
-                self.report_background_error(format!("命令 {command} 的参数不对：{error}"));
-                None
-            }
-        }
+        Ok(())
     }
 }
 
@@ -180,7 +172,7 @@ mod tests {
     #[test]
     fn handoff_records_the_history_source_and_carries_no_private_config() {
         let args = Handoff {
-            machine: None,
+            machine: smelt_plugin_api::RuntimeKey::Local,
             cwd: "/repo".into(),
             agent: "claude".into(),
             profile_id: None,

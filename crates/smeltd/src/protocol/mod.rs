@@ -209,8 +209,8 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         }
         DaemonOperation::Shutdown => handle_shutdown(conn),
         DaemonOperation::AgentEvent => handle_agent_event_op(conn, &v, &sessions, &event_hub),
-        DaemonOperation::Action => handle_action(conn, &v, &sessions),
-        DaemonOperation::Input => handle_raw_input(conn, &v, &sessions),
+        DaemonOperation::Action => handle_action(conn, &v, &sessions, &event_hub),
+        DaemonOperation::Input => handle_raw_input(conn, &v, &sessions, &event_hub),
         DaemonOperation::Resize => handle_resize(conn, &v, &sessions),
         DaemonOperation::DesktopAttach => {
             crate::desktop::handle_desktop_attach(conn, reader, &crate::desktop::vnc_endpoint())

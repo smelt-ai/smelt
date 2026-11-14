@@ -9,9 +9,15 @@
 //! 视图变，由视图自己的 gpui action 管（JS 插件用 gpui-shell 的 `ShellAction`），不能
 //! 改键，也不进命令面板。
 
+use std::marker::PhantomData;
 use std::rc::Rc;
 
-use gpui::{App, Global, KeyBindingContextPredicate, Keystroke, SharedString, Window};
+use futures_channel::oneshot;
+use gpui::{
+    AnyWindowHandle, App, Global, KeyBindingContextPredicate, Keystroke, SharedString, Task, Window,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::HostEvent;
 
@@ -34,17 +40,155 @@ impl RunCommand {
     }
 }
 
+/// 命令的结果：成功时可以带一个值交回调用方（没有就是 `null`），失败是可以直接给人看
+/// 的原因。
+pub type CommandResult = Result<serde_json::Value, String>;
+
 /// 命令处理了没有。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handled {
-    Done,
+    /// 接了。结果可能要等一会儿才有（等人在选择框里选），所以是个任务；马上就有的用
+    /// [`Handled::ok`]、[`Handled::err`]、[`Handled::result`]。任务被扔掉就是撤销，执行
+    /// 的一方要等它完（[`run`] 会等，宿主执行键位、菜单、命令面板时也会等，失败由宿主统一
+    /// 报给用户）。
+    Done(Task<CommandResult>),
     /// 眼下不适用（比如焦点在终端网格上，F7 该给终端）：按键交给下一条绑定，最后落到
-    /// 视图自己的按键处理。
+    /// 视图自己的按键处理；用 [`run`] 执行时算失败。
     Pass,
 }
 
-/// 命令的处理函数。`window` 是主窗口；参数认不出的字段忽略。出错由命令自己报给用户。
-pub type CommandHandler = Rc<dyn Fn(&serde_json::Value, &mut Window, &mut App) -> Handled>;
+impl Handled {
+    /// 做完了，没有值要交回。
+    pub fn ok() -> Self {
+        Self::Done(Task::ready(Ok(serde_json::Value::Null)))
+    }
+
+    /// 没做成，`message` 是给人看的原因。
+    pub fn err(message: impl Into<String>) -> Self {
+        Self::Done(Task::ready(Err(message.into())))
+    }
+
+    /// 马上就有的结果；值转成 JSON 交回。
+    pub fn result<T: Serialize>(result: Result<T, String>) -> Self {
+        Self::Done(Task::ready(result.and_then(to_json)))
+    }
+
+    pub fn is_pass(&self) -> bool {
+        matches!(self, Self::Pass)
+    }
+}
+
+/// 命令的处理函数。`window` 是主窗口，主窗口没开时是 `None`：用不到窗口的命令（发通知、
+/// 打开文件）照样做，用得到的交回 [`NO_MAIN_WINDOW`]。参数认不出的字段忽略。出错放进结果
+/// 交回，不自己报。
+pub type CommandHandler = Rc<dyn Fn(&serde_json::Value, Option<&mut Window>, &mut App) -> Handled>;
+
+/// 命令要主窗口、主窗口却没开时交回的原因。
+pub const NO_MAIN_WINDOW: &str = "主窗口没有打开";
+
+/// 一条带类型的命令：id，以及参数 `A`、结果 `R` 的形状。宿主和插件之间互调时两头都用它，
+/// 参数和结果由编译器查；JS 插件按同样形状的 JSON 调。
+pub struct Command<A, R> {
+    id: &'static str,
+    types: PhantomData<fn(A) -> R>,
+}
+
+impl<A, R> Clone for Command<A, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A, R> Copy for Command<A, R> {}
+
+impl<A, R> Command<A, R> {
+    /// `id` 是 `<来源>/<名字>`。
+    pub const fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            types: PhantomData,
+        }
+    }
+
+    pub const fn id(&self) -> &'static str {
+        self.id
+    }
+
+    /// 来源内的名字，登记时用。
+    pub fn name(&self) -> &'static str {
+        self.id.split_once('/').map_or(self.id, |(_, name)| name)
+    }
+}
+
+impl<A: Serialize, R: DeserializeOwned + 'static> Command<A, R> {
+    /// 执行，见 [`run`]。结果转回 `R`。
+    pub fn run(&self, args: &A, cx: &mut App) -> Task<Result<R, String>> {
+        let id = self.id;
+        let args = match serde_json::to_value(args) {
+            Ok(args) => args,
+            Err(error) => {
+                return Task::ready(Err(format!("命令「{id}」的参数转不成 JSON：{error}")));
+            }
+        };
+        let result = run(id, args, cx);
+        cx.spawn(async move |_| {
+            let value = result.await?;
+            serde_json::from_value(value)
+                .map_err(|error| format!("命令「{id}」交回的结果认不出：{error}"))
+        })
+    }
+}
+
+impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
+    /// 登记这条命令用的 [`CommandSpec`]：要带参数（不进命令面板、不绑键）。参数解析不了时
+    /// 把原因交回调用方，`handler` 不会被调。
+    pub fn spec(
+        &self,
+        title: impl Into<String>,
+        handler: impl Fn(A, Option<&mut Window>, &mut App) -> Result<R, String> + 'static,
+    ) -> CommandSpec {
+        self.spec_with(title, move |args, window, cx| {
+            Handled::result(handler(args, window, cx))
+        })
+    }
+
+    /// 同 [`Self::spec`]，结果要等一会儿才有（比如等人在选择框里选）。
+    pub fn spec_async(
+        &self,
+        title: impl Into<String>,
+        handler: impl Fn(A, Option<&mut Window>, &mut App) -> Task<Result<R, String>> + 'static,
+    ) -> CommandSpec {
+        self.spec_with(title, move |args, window, cx| {
+            let result = handler(args, window, cx);
+            Handled::Done(cx.spawn(async move |_| result.await.and_then(to_json)))
+        })
+    }
+
+    fn spec_with(
+        &self,
+        title: impl Into<String>,
+        handler: impl Fn(A, Option<&mut Window>, &mut App) -> Handled + 'static,
+    ) -> CommandSpec {
+        let id = self.id;
+        CommandSpec {
+            name: self.name().to_string(),
+            title: title.into(),
+            key: None,
+            context: "Workspace".to_string(),
+            palette: false,
+            requires_args: true,
+            handler: Rc::new(move |args, window, cx| {
+                match serde_json::from_value::<A>(args.clone()) {
+                    Ok(args) => handler(args, window, cx),
+                    Err(error) => Handled::err(format!("命令「{id}」的参数不对：{error}")),
+                }
+            }),
+        }
+    }
+}
+
+fn to_json<T: Serialize>(value: T) -> CommandResult {
+    serde_json::to_value(value).map_err(|error| format!("命令的结果转不成 JSON：{error}"))
+}
 
 /// 登记一条命令要给的东西。
 pub struct CommandSpec {
@@ -203,9 +347,14 @@ pub fn command(id: &str, cx: &App) -> Option<CommandInfo> {
         .map(|entry| entry.info.clone())
 }
 
-/// 在主窗口里执行一条命令。宿主收到 [`RunCommand`] 时调；别处要执行命令用 [`run`]。
-/// 没登记的命令（键表还没跟上注册表）算 [`Handled::Pass`]。
-pub fn invoke(id: &str, args: &serde_json::Value, window: &mut Window, cx: &mut App) -> Handled {
+/// 执行一条命令，`window` 是主窗口（没开时 `None`）。宿主收到 [`RunCommand`] 时调；别处
+/// 要执行命令用 [`run`]。没登记的命令（键表还没跟上注册表）算 [`Handled::Pass`]。
+pub fn invoke(
+    id: &str,
+    args: &serde_json::Value,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) -> Handled {
     // 先把处理函数拿出来再调：处理函数里可能再登记命令。
     let handler = cx.try_global::<CommandRegistry>().and_then(|registry| {
         registry
@@ -223,22 +372,49 @@ pub fn invoke(id: &str, args: &serde_json::Value, window: &mut Window, cx: &mut 
     }
 }
 
-/// 执行一条命令，排到这一轮更新之后、在主窗口里跑：调用方可能正嵌在宿主别的更新里。
-/// 命令没登记、主窗口没开时报错。
-pub fn run(id: &str, args: serde_json::Value, cx: &mut App) -> Result<(), String> {
+/// 执行一条命令，结果用任务交回。排到这一轮更新之后跑：调用方可能正嵌在宿主别的更新
+/// 里。主窗口开着就在它里面跑，没开也照样执行（见 [`CommandHandler`]）。命令照样跑完，
+/// 不管调用方要不要结果（返回的任务扔掉也不撤销）。命令没登记、眼下不适用
+/// （[`Handled::Pass`]）都算失败。
+pub fn run(id: &str, args: serde_json::Value, cx: &mut App) -> Task<CommandResult> {
+    let window = crate::host(cx).main_window(cx);
+    run_in(window, id, args, cx)
+}
+
+fn run_in(
+    window: Option<AnyWindowHandle>,
+    id: &str,
+    args: serde_json::Value,
+    cx: &mut App,
+) -> Task<CommandResult> {
     if command(id, cx).is_none() {
-        return Err(format!("没有命令「{id}」"));
+        return Task::ready(Err(format!("没有命令「{id}」")));
     }
-    let window = crate::host(cx)
-        .main_window(cx)
-        .ok_or_else(|| "主窗口没有打开".to_string())?;
+    let (sender, receiver) = oneshot::channel();
     let id = id.to_string();
-    cx.defer(move |cx| {
-        if let Err(error) = window.update(cx, |_, window, cx| invoke(&id, &args, window, cx)) {
-            eprintln!("[commands] {id} 没执行：主窗口已关闭（{error}）");
-        }
-    });
-    Ok(())
+    cx.spawn(async move |cx| {
+        let handled = cx.update(|cx| {
+            // 排队期间主窗口关了，就当没开。
+            window
+                .and_then(|window| {
+                    window
+                        .update(cx, |_, window, cx| invoke(&id, &args, Some(window), cx))
+                        .ok()
+                })
+                .unwrap_or_else(|| invoke(&id, &args, None, cx))
+        });
+        let result = match handled {
+            Handled::Pass => Err(format!("命令「{id}」眼下不适用")),
+            Handled::Done(task) => task.await,
+        };
+        let _ = sender.send(result);
+    })
+    .detach();
+    cx.spawn(async move |_| {
+        receiver
+            .await
+            .unwrap_or_else(|_| Err("命令没有执行完".to_string()))
+    })
 }
 
 #[cfg(test)]
@@ -253,7 +429,7 @@ mod tests {
             context: "Workspace".to_string(),
             palette: true,
             requires_args: false,
-            handler: Rc::new(|_, _, _| Handled::Done),
+            handler: Rc::new(|_, _, _| Handled::ok()),
         }
     }
 
@@ -321,30 +497,137 @@ mod tests {
         });
     }
 
+    /// 执行一条命令，等它的结果；`Pass` 是 `None`。
+    async fn invoke_and_wait(
+        window: &mut gpui::VisualTestContext,
+        id: &str,
+        args: serde_json::Value,
+    ) -> Option<CommandResult> {
+        let handled = window.update(|window, cx| invoke(id, &args, Some(window), cx));
+        match handled {
+            Handled::Done(task) => Some(task.await),
+            Handled::Pass => None,
+        }
+    }
+
     #[gpui::test]
-    fn invoking_runs_the_handler_and_unknown_commands_pass(cx: &mut gpui::TestAppContext) {
+    async fn invoking_runs_the_handler_and_unknown_commands_pass(cx: &mut gpui::TestAppContext) {
         let window = cx.add_empty_window();
-        window.update(|window, cx| {
-            let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
-            let seen = calls.clone();
+        let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = calls.clone();
+        window.update(|_, cx| {
             register_commands(
                 "trader",
                 "交易",
                 vec![CommandSpec {
                     handler: Rc::new(move |args, _, _| {
                         seen.borrow_mut().push(args.clone());
-                        Handled::Done
+                        Handled::result(Ok(7))
                     }),
                     ..spec("buy", None)
                 }],
                 cx,
             )
             .unwrap();
-            let args = serde_json::json!({ "qty": 2 });
-            assert_eq!(invoke("trader/buy", &args, window, cx), Handled::Done);
-            assert_eq!(invoke("trader/sell", &args, window, cx), Handled::Pass);
-            assert_eq!(*calls.borrow(), [args]);
         });
+        let args = serde_json::json!({ "qty": 2 });
+        assert_eq!(
+            invoke_and_wait(window, "trader/buy", args.clone()).await,
+            Some(Ok(serde_json::json!(7)))
+        );
+        assert_eq!(
+            invoke_and_wait(window, "trader/sell", args.clone()).await,
+            None
+        );
+        assert_eq!(*calls.borrow(), [args]);
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Order {
+        qty: u32,
+    }
+
+    const BUY: Command<Order, u32> = Command::new("trader/buy");
+    const QUOTE: Command<Order, Option<u32>> = Command::new("trader/quote");
+
+    #[gpui::test]
+    async fn typed_commands_check_args_and_hand_back_results(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        window.update(|_, cx| {
+            register_commands(
+                "trader",
+                "交易",
+                vec![
+                    BUY.spec("买", |order, _, _| match order.qty {
+                        0 => Err("买不了 0 股".to_string()),
+                        qty => Ok(qty * 10),
+                    }),
+                    QUOTE.spec_async("报价", |order, _, cx| {
+                        cx.spawn(async move |_| Ok((order.qty > 1).then_some(order.qty)))
+                    }),
+                ],
+                cx,
+            )
+            .unwrap();
+            let info = command(BUY.id(), cx).unwrap();
+            assert!(info.requires_args && !info.palette && info.key.is_none());
+        });
+        assert_eq!(BUY.name(), "buy");
+        assert_eq!(
+            invoke_and_wait(window, BUY.id(), serde_json::json!({ "qty": 3 })).await,
+            Some(Ok(serde_json::json!(30)))
+        );
+        assert_eq!(
+            invoke_and_wait(window, BUY.id(), serde_json::json!({ "qty": 0 })).await,
+            Some(Err("买不了 0 股".to_string()))
+        );
+        // 参数形状不对：原因交回调用方，处理函数不会被调。
+        let Some(Err(error)) =
+            invoke_and_wait(window, BUY.id(), serde_json::json!({ "qty": "many" })).await
+        else {
+            panic!("参数不对应该失败");
+        };
+        assert!(error.contains("trader/buy"), "{error}");
+        assert_eq!(
+            invoke_and_wait(window, QUOTE.id(), serde_json::json!({ "qty": 1 })).await,
+            Some(Ok(serde_json::Value::Null))
+        );
+    }
+
+    const NOTE: Command<Order, ()> = Command::new("desk/note");
+    const SHOW: Command<Order, ()> = Command::new("desk/show");
+
+    /// 主窗口没开时命令照样执行：用不到窗口的做成，用得到的自己说缺主窗口。
+    #[gpui::test]
+    async fn commands_run_without_a_main_window(cx: &mut gpui::TestAppContext) {
+        let noted = Rc::new(std::cell::Cell::new(0));
+        let seen = noted.clone();
+        let (note, show) = cx.update(|cx| {
+            register_commands(
+                "desk",
+                "桌面",
+                vec![
+                    NOTE.spec("记一笔", move |order, _, _| {
+                        seen.set(order.qty);
+                        Ok(())
+                    }),
+                    SHOW.spec("显示", |_, window, _| {
+                        window.ok_or_else(|| NO_MAIN_WINDOW.to_string())?;
+                        Ok(())
+                    }),
+                ],
+                cx,
+            )
+            .unwrap();
+            let args = serde_json::json!({ "qty": 4 });
+            (
+                run_in(None, NOTE.id(), args.clone(), cx),
+                run_in(None, SHOW.id(), args, cx),
+            )
+        });
+        assert_eq!(note.await, Ok(serde_json::Value::Null));
+        assert_eq!(noted.get(), 4);
+        assert_eq!(show.await, Err(NO_MAIN_WINDOW.to_string()));
     }
 
     #[test]

@@ -2,28 +2,14 @@
 //! （运行时的 `project.changed`、自己做完的操作、重连、窗口回到前台），这里只取看得见
 //! 又被标旧了的那些。
 //!
-//! `Workspace::render` 每帧都会整段重跑。目录列表、git、历史扫描和窗口材质
+//! `Workspace::render` 每帧都会整段重跑。目录列表、git 标记、历史扫描和窗口材质
 //! 不能挂在那里——侧栏一个转圈就会让这些活儿跟着每秒跑很多次。真正开销在
 //! `refresh_visible_caches`：事件里排队，绘制前跑完，render 只读已经放好的缓存。
 
-use std::collections::HashSet;
-use std::time::{Duration, Instant};
-
 use gpui::*;
 
-use crate::git_panel::WatchKind;
 use crate::settings::Appearance;
 use crate::{SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp};
-
-/// 同一项目两次自动 fetch 至少隔这么久。
-const GIT_AUTOFETCH_INTERVAL: Duration = Duration::from_secs(60);
-
-/// 离下一次自动 fetch 还有多久；`ZERO` 是现在就该 fetch。
-pub(crate) fn git_autofetch_wait(last: Option<Instant>, now: Instant) -> Duration {
-    last.map_or(Duration::ZERO, |at| {
-        GIT_AUTOFETCH_INTERVAL.saturating_sub(now.saturating_duration_since(at))
-    })
-}
 
 impl Workspace {
     /// 绘制前唯一还留在帧上的准备。
@@ -31,7 +17,7 @@ impl Workspace {
     /// 拖拽是否还活着，只有这一帧的 `has_active_drag` 知道，侧栏渲染又要求
     /// 进来时瞬态状态已经清干净。窗口是否在前台同样只有每帧问一次系统才准：
     /// 全屏切 Space 时窗口自己的激活位会撒谎。这两件事都不碰 SQLite、文件或进程。
-    /// 目录、git、历史、窗口材质和路由修正都在 `refresh_visible_caches`。
+    /// 目录、git 标记、历史、窗口材质和路由修正都在 `refresh_visible_caches`。
     pub(crate) fn prepare_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.note_window_activation(window, cx);
 
@@ -88,119 +74,15 @@ impl Workspace {
         self.visible_refresh_scheduled = false;
         self.visible_refresh_running = true;
 
-        // 先把活动和路由对齐，后面的 git / 文件树才看得到这一次切换的结果。
+        // 先把活动和路由对齐，后面的文件树才看得到这一次切换的结果。
         // 对齐里的 activate 会再请求刷新；running 让那次请求直接丢掉，
         // 因为这次刷新还会继续往下走。
-        self.sync_session_ui(window, cx);
+        self.sync_session_ui(cx);
         self.align_visible_route(window, cx);
-        self.sync_notification_surfaces(cx);
         self.prewarm_ide_catalog_after_idle(window, cx);
 
-        if let Some(project) = self.active_project_ref(cx) {
-            self.ensure_watch(WatchKind::Project, project.clone(), cx);
-            // 变更角标在任何页面都显示，活动项目各仓库的 status 一直备着。
-            self.ensure_git_repos(project, cx);
-        }
-        let worktree_roots = self
-            .spaces
-            .iter()
-            .flat_map(|space| {
-                space.worksets.iter().flat_map(|workset| {
-                    workset
-                        .repositories
-                        .iter()
-                        .map(|repository| crate::ProjectRef {
-                            runtime: space.runtime.key().clone(),
-                            root: repository.worktree.clone(),
-                        })
-                })
-            })
-            .collect::<Vec<_>>();
-        for root in worktree_roots {
-            self.ensure_watch(WatchKind::Project, root.clone(), cx);
-            self.ensure_git_status(root, cx);
-        }
-        self.note_active_project(cx);
+        self.note_active_context(cx);
         self.note_shown_views(cx);
-
-        // 仓库信息发给会话所在的那台机器。
-        let repo_cwds: HashSet<crate::ProjectRef> = self
-            .sessions
-            .iter()
-            .filter_map(|s| {
-                Some(crate::ProjectRef {
-                    runtime: s.runtime(cx).key().clone(),
-                    root: s.cwd(cx)?,
-                })
-            })
-            .collect();
-        for cwd in repo_cwds {
-            self.ensure_repo_info(cwd, cx);
-        }
-
-        if self.git_page_visible()
-            && let Some(root) = self.active_project_ref(cx)
-        {
-            if self.workspace_window_active {
-                self.ensure_git_autofetch(cx);
-            }
-            let git_repo = self.active_git_repo_root(&root, cx);
-            self.ensure_branches(git_repo, cx);
-            self.prepare_git_panel(window, cx);
-        }
-
-        if self.files_view_visible() {
-            if self.file_filter.is_none() {
-                use gpui_component::input::{InputEvent, InputState};
-                let state =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
-                self._file_filter_sub =
-                    Some(cx.subscribe(&state, |this, _, ev: &InputEvent, cx| {
-                        if matches!(ev, InputEvent::Change) {
-                            this.schedule_visible_refresh(cx);
-                            cx.notify();
-                        }
-                    }));
-                self.file_filter = Some(state);
-            }
-            let query = self
-                .file_filter
-                .as_ref()
-                .map(|s| s.read(cx).value().trim().to_string())
-                .unwrap_or_default();
-            let runtime = self.file_tree_runtime(cx);
-            let roots: Vec<crate::ProjectRef> = self
-                .workspace_roots(cx)
-                .into_iter()
-                .map(|root| crate::ProjectRef {
-                    runtime: runtime.clone(),
-                    root,
-                })
-                .collect();
-            if query.is_empty() {
-                self.search_results = None;
-                self.cancel_file_search();
-                for root in &roots {
-                    // 目录列表靠运行时的变化通知失效，每个挂出来的根都要有监听。
-                    self.ensure_watch(WatchKind::Project, root.clone(), cx);
-                    self.ensure_git_status(root.clone(), cx);
-                    self.ensure_dir_listing(root.clone(), cx);
-                }
-                for dir in self.expanded.clone() {
-                    self.ensure_dir_listing(
-                        crate::ProjectRef {
-                            runtime: runtime.clone(),
-                            root: dir,
-                        },
-                        cx,
-                    );
-                }
-                self.try_flush_file_tree_reveal(cx);
-            } else if let Some(root) = self.active_project_ref(cx) {
-                self.ensure_git_status(root.clone(), cx);
-                self.ensure_search(root, query, cx);
-            }
-        }
 
         let want_bg = cx.global::<Appearance>().window_bg();
         let glass_style = cx.global::<Appearance>().glass_style;
@@ -261,75 +143,5 @@ impl Workspace {
         ) {
             self.activate(self.active_session, window, cx);
         }
-    }
-
-    fn git_page_visible(&self) -> bool {
-        self.view_shown(crate::builtin_views::Builtin::Git.id())
-    }
-
-    /// Git 页开着、窗口在前台时，活动项目每 60 秒自动 fetch 一次，刷新 ahead/behind。
-    ///
-    /// 一个任务按到期时刻睡，醒来时页关了、窗口到后台了就结束，可见刷新下次再起。
-    fn ensure_git_autofetch(&mut self, cx: &mut Context<Self>) {
-        if self.git_autofetch_running {
-            return;
-        }
-        self.git_autofetch_running = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                let wait = this
-                    .update(cx, |this, cx| this.git_autofetch_tick(cx))
-                    .ok()
-                    .flatten();
-                let Some(wait) = wait else {
-                    break;
-                };
-                // 轮询例外：远端仓库变了没有事件可等；周期 60 秒，上限是 Git 页开着且窗口在
-                // 前台的这段时间，离开后最多再醒一次就结束。
-                cx.background_executor().timer(wait).await;
-            }
-            let _ = this.update(cx, |this, _| this.git_autofetch_running = false);
-        })
-        .detach();
-    }
-
-    /// 到期就 fetch，返回离下一次还有多久；不该再跑了返回 None。
-    fn git_autofetch_tick(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
-        if !self.git_page_visible() || !self.workspace_window_active {
-            return None;
-        }
-        let root = self.active_project_ref(cx)?;
-        let now = Instant::now();
-        let wait = git_autofetch_wait(self.git_autofetch_at.get(&root).copied(), now);
-        if !wait.is_zero() {
-            return Some(wait);
-        }
-        self.git_autofetch_at.insert(root, now);
-        self.git_fetch_silent(cx);
-        Some(GIT_AUTOFETCH_INTERVAL)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::git_autofetch_wait;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn git_autofetch_runs_at_once_the_first_time_then_every_sixty_seconds() {
-        let now = Instant::now();
-        assert_eq!(git_autofetch_wait(None, now), Duration::ZERO);
-        assert_eq!(git_autofetch_wait(Some(now), now), Duration::from_secs(60));
-        let recent = now
-            .checked_sub(Duration::from_secs(59))
-            .expect("test clock");
-        assert_eq!(
-            git_autofetch_wait(Some(recent), now),
-            Duration::from_secs(1)
-        );
-        let due = now
-            .checked_sub(Duration::from_secs(61))
-            .expect("test clock");
-        assert_eq!(git_autofetch_wait(Some(due), now), Duration::ZERO);
     }
 }

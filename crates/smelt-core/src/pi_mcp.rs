@@ -195,6 +195,72 @@ fn retire_managed_bun_entries_at(agent_dir: &Path) -> Result<(), String> {
     })
 }
 
+/// 预设换了钉的版本，按预设登记过的条目跟着换：不然只有新加的用新版本，已经加过的永远停在
+/// 旧版本。认条目看名字和预设一样、命令是 smelt-agent、参数里有同一个包的别的版本；只换那一个
+/// 参数，用户改过的别的参数、`env` 照旧。没有要改的就不碰文件。守护启动时调，排在
+/// [`retire_managed_bun_entries`] 后面（旧 Bun 的条目先换成 smelt-agent）。
+pub fn upgrade_preset_pins() {
+    if let Err(error) =
+        upgrade_preset_pins_at(&pi_agent_dir(), smelt_paths::remote_desktop_installed())
+    {
+        crate::app_log::error(
+            "pi-mcp",
+            &format!("升级 mcp.json 里预设的版本失败：{error}"),
+        );
+    }
+}
+
+fn upgrade_preset_pins_at(agent_dir: &Path, remote_desktop: bool) -> Result<(), String> {
+    // 条目里要换成钉的版本的那个参数的位置。
+    let stale = |name: &str, entry: &Value| -> Option<(usize, &'static str)> {
+        let (package, pinned) = find_preset(name)?
+            .for_machine(remote_desktop)
+            .pinned_package()?;
+        let command = entry.get("command").and_then(Value::as_str)?;
+        if command.trim() != smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH {
+            return None;
+        }
+        let args = entry.get("args").and_then(Value::as_array)?;
+        args.iter()
+            .position(|arg| {
+                arg.as_str().is_some_and(|arg| {
+                    arg != pinned
+                        && arg
+                            .strip_prefix(package)
+                            .is_some_and(|version| version.starts_with('@'))
+                })
+            })
+            .map(|index| (index, pinned))
+    };
+    let Ok(text) = std::fs::read_to_string(agent_dir.join("mcp.json")) else {
+        return Ok(());
+    };
+    let doc: Value =
+        serde_json::from_str(&text).map_err(|error| format!("mcp.json 不是合法 JSON：{error}"))?;
+    let needs = doc
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| {
+            servers
+                .iter()
+                .any(|(name, entry)| stale(name, entry).is_some())
+        });
+    if !needs {
+        return Ok(());
+    }
+    edit_servers(agent_dir, |servers| {
+        for (name, entry) in servers.iter_mut() {
+            let Some((index, pinned)) = stale(name, entry) else {
+                continue;
+            };
+            if let Some(args) = entry.get_mut("args").and_then(Value::as_array_mut) {
+                args[index] = Value::String(pinned.into());
+            }
+        }
+        Ok(())
+    })
+}
+
 /// `mcp-auth.json` 的键是 `<命名空间>|<URL>`（旧版只有 URL），值里有 `tokens` 才算登录过。
 /// 只按 URL 认：命名空间的写法是 Pi 的内部细节，这里不跟。
 fn signed_in_urls(auth: &Value) -> HashSet<String> {
@@ -459,6 +525,84 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// 预设换了版本：按预设登记的条目只换钉的那个参数；用户自己的条目、同名但不是 smelt-agent
+    /// 跑的、已经是新版本的都不动。
+    #[test]
+    fn registered_presets_follow_the_pinned_version() {
+        let dir = temp_dir();
+        let launcher = smelt_model::agent_paths::SMELT_AGENT_LAUNCHER_HOME_PATH;
+        let doc = serde_json::json!({
+            "mcpServers": {
+                "rea": {
+                    "command": launcher,
+                    "args": ["x", "--bun", "rea-agents@6.5.0", "mcp"],
+                    "env": {"BUN_BE_BUN": "1", "GHIDRA_INSTALL_DIR": "/opt/ghidra"},
+                    "timeout": 120,
+                },
+                "playwright": {
+                    "command": launcher,
+                    "args": ["x", "--bun", "@playwright/mcp@0.0.70", "--extension", "--mine"],
+                },
+                "browser-mcp": {"command": "npx", "args": ["-y", "@agent360/browser-mcp@1.0.0"]},
+                "mine": {"command": launcher, "args": ["x", "--bun", "rea-agents@6.5.0", "mcp"]},
+            },
+            "settings": {"keep": true},
+        });
+        std::fs::write(dir.join("mcp.json"), doc.to_string()).unwrap();
+
+        upgrade_preset_pins_at(&dir, false).unwrap();
+
+        let rea_pin = find_preset("rea").unwrap().pinned_package().unwrap().1;
+        let playwright_pin = find_preset("playwright")
+            .unwrap()
+            .pinned_package()
+            .unwrap()
+            .1;
+        let mut expected = doc;
+        expected["mcpServers"]["rea"]["args"][2] = rea_pin.into();
+        expected["mcpServers"]["playwright"]["args"][2] = playwright_pin.into();
+        assert_eq!(read(&dir), expected);
+
+        // 已经是新版本：不再碰文件。
+        let before = std::fs::metadata(dir.join("mcp.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        upgrade_preset_pins_at(&dir, false).unwrap();
+        let after = std::fs::metadata(dir.join("mcp.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn bun_presets_name_their_pinned_package() {
+        assert_eq!(
+            find_preset("rea")
+                .unwrap()
+                .pinned_package()
+                .map(|(package, _)| package),
+            Some("rea-agents")
+        );
+        assert_eq!(
+            find_preset("playwright")
+                .unwrap()
+                .pinned_package()
+                .map(|(package, _)| package),
+            Some("@playwright/mcp")
+        );
+        for preset in PI_MCP_PRESETS {
+            if let PiMcpPresetTransport::Bun { .. } = preset.for_machine(true).transport {
+                assert!(
+                    preset.for_machine(true).pinned_package().is_some(),
+                    "{}",
+                    preset.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn adding_rea_writes_a_pinned_stdio_entry() {
         let dir = temp_dir();
@@ -471,7 +615,7 @@ mod tests {
         );
         assert_eq!(
             rea["args"],
-            serde_json::json!(["x", "--bun", "rea-agents@6.5.0", "mcp"]),
+            serde_json::json!(["x", "--bun", "rea-agents@6.9.0", "mcp"]),
             "持久注册必须钉死版本，不能用 @latest；--bun 防止转交给系统 node"
         );
         assert_eq!(
@@ -493,7 +637,7 @@ mod tests {
                 args: vec![
                     "x".into(),
                     "--bun".into(),
-                    "rea-agents@6.5.0".into(),
+                    "rea-agents@6.9.0".into(),
                     "mcp".into(),
                 ],
             }

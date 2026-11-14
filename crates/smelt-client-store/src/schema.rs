@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 11;
+pub(crate) const SCHEMA_VERSION: u32 = 13;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -33,14 +33,6 @@ CREATE TABLE update_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   channel TEXT NOT NULL,
   auto_install INTEGER NOT NULL CHECK (auto_install IN (0, 1))
-);
-CREATE TABLE notify_prefs (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  approval INTEGER NOT NULL CHECK (approval IN (0, 1)),
-  input INTEGER NOT NULL CHECK (input IN (0, 1)),
-  success INTEGER NOT NULL CHECK (success IN (0, 1)),
-  failure INTEGER NOT NULL CHECK (failure IN (0, 1)),
-  terminal_bell INTEGER NOT NULL CHECK (terminal_bell IN (0, 1))
 );
 CREATE TABLE workspace_ui (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -82,22 +74,7 @@ CREATE TABLE conversation_route (
   conversation_id TEXT NOT NULL,
   active_terminal_id TEXT,
   dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
-  file_tree_selected TEXT,
-  open_file_path TEXT,
-  file_tree_w REAL NOT NULL,
-  file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
-  git_tab TEXT NOT NULL,
-  diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
-  diff_scope TEXT NOT NULL,
   PRIMARY KEY (runtime_id, conversation_id)
-) WITHOUT ROWID;
-CREATE TABLE conversation_route_path (
-  runtime_id TEXT NOT NULL,
-  conversation_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
-  path TEXT NOT NULL,
-  position INTEGER NOT NULL,
-  PRIMARY KEY (runtime_id, conversation_id, kind, path)
 ) WITHOUT ROWID;
 CREATE TABLE update_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -280,14 +257,6 @@ ALTER TABLE workspace_ui ADD COLUMN archive_expanded INTEGER NOT NULL DEFAULT 0
   CHECK (archive_expanded IN (0, 1));
 ";
 
-const MIGRATE_V10_TO_V11: &str = "
-CREATE TABLE IF NOT EXISTS pinned_workset (
-  runtime_id TEXT NOT NULL,
-  workset_id TEXT NOT NULL,
-  PRIMARY KEY (runtime_id, workset_id)
-) WITHOUT ROWID;
-";
-
 /// v9：整个工作台换成一块 Dock。三栏的宽度、开合和每段对话的工具面板状态都没了；外观里
 /// 记选的是哪份布局（空 = 没选过），每份布局被用户拖成的样子按布局 id 各存一份。
 const MIGRATE_V8_TO_V9: &str = "
@@ -329,6 +298,34 @@ UPDATE key_binding SET command = CASE command
   WHEN 'prev_hunk' THEN 'smelt.git/prev-hunk'
   WHEN 'next_hunk' THEN 'smelt.git/next-hunk'
 END;
+";
+
+/// v11：文件树和变更页拆成了插件，各自的界面状态存在插件自己的库里。对话界面状态只剩
+/// 终端的分屏和当前终端；文件树、Git 页的列和路径表删掉，旧的选中、展开不搬。
+const MIGRATE_V10_TO_V11: &str = "
+ALTER TABLE conversation_route DROP COLUMN file_tree_selected;
+ALTER TABLE conversation_route DROP COLUMN open_file_path;
+ALTER TABLE conversation_route DROP COLUMN file_tree_w;
+ALTER TABLE conversation_route DROP COLUMN file_tree_open;
+ALTER TABLE conversation_route DROP COLUMN git_tab;
+ALTER TABLE conversation_route DROP COLUMN diff_split;
+ALTER TABLE conversation_route DROP COLUMN diff_scope;
+DROP TABLE conversation_route_path;
+";
+
+/// 通知偏好归通知插件（存在它自己的库里），客户端库不再留一份。旧值不搬：宿主不认识插件
+/// 的表，插件的开关默认都开。
+const MIGRATE_V11_TO_V12: &str = "
+DROP TABLE notify_prefs;
+";
+
+/// v13：侧栏里固定的工作树，按运行时分开记。
+const MIGRATE_V12_TO_V13: &str = "
+CREATE TABLE pinned_workset (
+  runtime_id TEXT NOT NULL,
+  workset_id TEXT NOT NULL,
+  PRIMARY KEY (runtime_id, workset_id)
+) WITHOUT ROWID;
 ";
 
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
@@ -384,7 +381,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7..=10 => {}
+        7..=12 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
@@ -392,7 +389,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
             .execute_batch(MIGRATE_V7_TO_V8)
             .map_err(|error| error.to_string())?;
     }
-    if (1..=9).contains(&version) && !has_table(&transaction, "workspace_layout_state")? {
+    if (1..=8).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V8_TO_V9)
             .map_err(|error| error.to_string())?;
@@ -405,6 +402,16 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=10).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V10_TO_V11)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=11).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V11_TO_V12)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=12).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V12_TO_V13)
             .map_err(|error| error.to_string())?;
     }
     transaction
@@ -446,14 +453,15 @@ fn has_table(connection: &Connection, name: &str) -> Result<bool, String> {
 }
 
 /// 第一版客户端库是一张「作用域 + 键 → JSON 值」的偏好表。打开时一次性搬进正式的表，
-/// 然后删掉它。字段缺省按当时的出厂值补；某一项解析不了就丢掉这一项，用出厂值重来。
+/// 然后删掉它。字段缺省按当时的出厂值补；某一项解析不了就丢掉这一项，用出厂值重来。通知
+/// 偏好不搬：它归通知插件了。
 mod legacy {
     use serde::Deserialize;
 
     use super::Transaction;
     use crate::{
-        AppearanceRecord, InstallerAttemptRecord, NotifyPrefsRecord, StagedUpdateRecord,
-        UpdateSettingsRecord, UpdateStateRecord, WorkspaceUiRecord,
+        AppearanceRecord, InstallerAttemptRecord, StagedUpdateRecord, UpdateSettingsRecord,
+        UpdateStateRecord, WorkspaceUiRecord,
     };
 
     #[derive(Deserialize)]
@@ -512,15 +520,6 @@ mod legacy {
 
     fn default_channel() -> String {
         "prod".to_string()
-    }
-
-    #[derive(Deserialize)]
-    struct NotifyPrefs {
-        approval: bool,
-        input: bool,
-        success: bool,
-        failure: bool,
-        terminal_bell: bool,
     }
 
     #[derive(Deserialize)]
@@ -640,18 +639,6 @@ mod legacy {
                 &UpdateSettingsRecord {
                     channel: old.channel,
                     auto_install: old.auto_install,
-                },
-            )?;
-        }
-        if let Some(old) = value::<NotifyPrefs>(transaction, "notify", "prefs")? {
-            crate::write_notify_prefs(
-                transaction,
-                &NotifyPrefsRecord {
-                    approval: old.approval,
-                    input: old.input,
-                    success: old.success,
-                    failure: old.failure,
-                    terminal_bell: old.terminal_bell,
                 },
             )?;
         }

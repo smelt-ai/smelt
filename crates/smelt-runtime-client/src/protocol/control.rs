@@ -12,14 +12,14 @@ use serde_json::Value;
 
 use super::daemon::DaemonOperation;
 
-/// 控制协议版本。加方法、删方法都不升它：客户端按 `system.describe` 的方法清单看运行时有没有
-/// 自己要的方法，缺了必需的就判运行时太旧。新方法缺了只是某项功能用不了的，记进
-/// [`ControlMethod::OPTIONAL`]；客户端离了它就用不了的，直接是必需方法。改已有方法的参数或
-/// 结果才升，同时抬 [`CONTROL_API_MIN_SUPPORTED_VERSION`]：同名方法换了形状，方法清单看不
-/// 出来，只能靠版本拦住。升了版，没升级的运行时整台连不上：优先让改动新旧两边都读得了，不升。
+/// 控制协议版本。加方法、删方法都不升它：客户端不看方法清单，运行时缺某个方法，用到时调到
+/// MethodNotFound 就报运行时较旧，只是那一项功能用不了。改已有方法的参数或结果才升，同时抬
+/// [`CONTROL_API_MIN_SUPPORTED_VERSION`]：同名方法换了形状，调用方读不懂，只能靠版本拦住。
+/// 客户端离了就没法用的新方法（像工作区目录那几个）也靠抬最低版本保证有，不另列必需方法。
+/// 升了版，没升级的运行时整台连不上：优先让改动新旧两边都读得了，不升。
 ///
-/// 删方法不升：只有还在调它的旧客户端受影响，它自己的方法清单检查会拦下；不调它的客户端
-/// （手机、Pi）照常连。2026-10 删整份读写的 `workspace.load` / `workspace.save` 就是这样。
+/// 删方法不升：只有还在调它的旧客户端受影响，调到时报错；不调它的客户端（手机、Pi）照常
+/// 连。2026-10 删整份读写的 `workspace.load` / `workspace.save` 就是这样。
 ///
 /// v2：`workspace.load` / `workspace.save` 的文档改了形状（对话带稳定 id，终端平铺，
 /// 分屏归客户端）。旧桌面读写新文档、新桌面读写旧文档都会把终端对话存坏，两边都得拦住。
@@ -95,7 +95,6 @@ define_control_methods! {
     AutomationRunOnce => (AUTOMATION_RUN_ONCE_METHOD, "automation.run_once"),
     GitDiscover => (GIT_DISCOVER_METHOD, "git.discover"),
     GitRepoInfo => (GIT_REPO_INFO_METHOD, "git.repo_info"),
-    GitWatchHead => (GIT_WATCH_HEAD_METHOD, "git.watch_head"),
     GitStatus => (GIT_STATUS_METHOD, "git.status"),
     GitBranches => (GIT_BRANCHES_METHOD, "git.branches"),
     GitCheckout => (GIT_CHECKOUT_METHOD, "git.checkout"),
@@ -190,6 +189,7 @@ define_control_methods! {
     PushRegister => (PUSH_REGISTER_METHOD, "push.register"),
     PushUnregister => (PUSH_UNREGISTER_METHOD, "push.unregister"),
     NotifySend => (NOTIFY_SEND_METHOD, "notify.send"),
+    AttentionMarkRead => (ATTENTION_MARK_READ_METHOD, "attention.mark_read"),
     NewSessionPinsGet => (NEW_SESSION_PINS_GET_METHOD, "new_session.pins.get"),
     NewSessionPinsToggle => (NEW_SESSION_PINS_TOGGLE_METHOD, "new_session.pins.toggle"),
     TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
@@ -208,40 +208,6 @@ define_control_methods! {
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
-}
-
-impl ControlMethod {
-    /// 最低协议版本（[`CONTROL_API_MIN_SUPPORTED_VERSION`]）之后才加、缺了只是某项功能
-    /// 用不了的方法。运行时可以没有：客户端不因缺它们判不兼容，用到它们的功能调到
-    /// MethodNotFound 就照常报错，不为旧运行时另写降级。客户端离了就用不了的新方法不放这里（工作区目录的
-    /// `workspace.conversation.create/update/delete` / `workspace.project.*`：桌面没有它们读不到目录）。
-    /// 抬最低版本时清空，它们成了新基线里的必需方法。
-    pub const OPTIONAL: &'static [Self] = &[
-        Self::WorkspaceConversationArchive,
-        Self::WorkspaceConversationPin,
-        Self::WorkspaceProjectRepositoryAction,
-        Self::WorkspaceWorksetCreate,
-        Self::WorkspaceWorksetRename,
-        Self::WorkspaceWorksetFinish,
-        Self::AgentMemoryWatch,
-        Self::RemoteStatusWait,
-        Self::ResourceUsage,
-        // 手机推送：旧运行时没有，手机提示「升级后才能推送」。
-        Self::PushRegister,
-        Self::PushUnregister,
-        // 智能体通知：旧运行时没有，`smelt notify` 报错。
-        Self::NotifySend,
-        // 额度开关：旧运行时没有，设置页显示读取失败，侧栏额度照常。
-        Self::QuotaSettingsGet,
-        Self::QuotaSetEnabled,
-        // 侧栏分支名跟着 HEAD 变：旧运行时没有，分支名只在窗口回到前台、重连时更新。
-        Self::GitWatchHead,
-    ];
-
-    /// 运行时必须有这个方法：缺了就是运行时比客户端旧。
-    pub fn required(self) -> bool {
-        !Self::OPTIONAL.contains(&self)
-    }
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;

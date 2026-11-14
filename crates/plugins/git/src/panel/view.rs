@@ -1,237 +1,110 @@
-//! Git 面板页面：确认弹窗、窄版 SOURCE CONTROL、日志页。
+//! Git 面板页面：确认框、窄版 SOURCE CONTROL、日志页。
 //!
-//! 只组 UI。写缓存、跑 git、改 Workspace 字段的方法留在 `workspace.rs`，
-//! 由按钮 listener 调用。
+//! 只组 UI。写缓存、跑 git、改面板字段的方法留在 `ops.rs`，由按钮 listener 调用。
 
 use super::*;
+use gpui_component::button::ButtonVariant;
 use gpui_component::tab::{Tab, TabBar};
 
-impl Workspace {
-    /// 「丢弃文件改动」确认弹窗。未跟踪文件是直接删盘，措辞要比 restore 更重。
-    pub fn render_discard_file_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
-        let Some((_, seen)) = self.discard_file_target.as_ref() else {
-            return div().into_any_element();
-        };
+/// 一个会丢东西的操作的确认框写什么。
+pub(super) struct DangerConfirm {
+    pub(super) title: &'static str,
+    pub(super) body: String,
+    /// 红字的后果说明。
+    pub(super) warning: &'static str,
+    pub(super) ok: &'static str,
+}
+
+impl GitPanel {
+    /// 弹确认框。点确定调 `confirm`，它返回 false（这个仓库还在跑别的写入）就不关；
+    /// 关掉时（取消、Esc、确定之后）调 `close`，清掉待确认的目标。
+    pub(super) fn open_danger_confirm(
+        &self,
+        text: DangerConfirm,
+        confirm: fn(&mut GitPanel, &mut Context<GitPanel>) -> bool,
+        close: fn(&mut GitPanel, &mut Context<GitPanel>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = cx.entity();
+        let text = Rc::new(text);
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let danger = cx.theme().danger;
+            let ok_panel = panel.clone();
+            let close_panel = panel.clone();
+            alert
+                .confirm()
+                .title(text.title)
+                .description(
+                    v_flex()
+                        .gap_2()
+                        .child(text.body.clone())
+                        .child(div().text_color(danger).child(text.warning)),
+                )
+                .ok_text(text.ok)
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| ok_panel.update(cx, |panel, cx| confirm(panel, cx)))
+                .on_close(move |_, _, cx| close_panel.update(cx, |panel, cx| close(panel, cx)))
+        });
+    }
+
+    /// 「丢弃文件改动」。未跟踪文件是直接删盘，措辞要比 restore 更重。
+    pub(super) fn discard_file_confirm(seen: &GitSeenChange) -> DangerConfirm {
         let path = &seen.path;
-        let untracked = seen.untracked();
-        let (title, body) = if untracked {
-            (
-                "确定删除这个新文件吗？",
-                format!("{path} 从未被 git 跟踪过，删了就是彻底删除。"),
-            )
+        if seen.untracked() {
+            DangerConfirm {
+                title: "确定删除这个新文件吗？",
+                body: format!("{path} 从未被 git 跟踪过，删了就是彻底删除。"),
+                warning: "不进 reflog，找不回来。",
+                ok: "删除文件",
+            }
         } else {
-            (
-                "确定丢弃这个文件的更改吗？",
-                format!("{path} 会被还原成 HEAD 的样子，已暂存的部分一并还原。"),
-            )
-        };
-
-        let content = v_flex()
-            .child(Self::modal_title(fg, title))
-            .child(div().text_sm().text_color(muted).child(body))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child("不进 reflog，找不回来。"),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_normal_button(
-                        "cancel-discard-file",
-                        "取消",
-                        |this, _, _, cx| this.cancel_discard_file(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_danger_button(
-                        "confirm-discard-file",
-                        if untracked {
-                            "删除文件"
-                        } else {
-                            "丢弃更改"
-                        },
-                        |this, _, _, cx| this.confirm_discard_file(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(
-            380.,
-            true,
-            content,
-            crate::overlay::ModalLayer::DiscardFile,
-            cx,
-        )
-    }
-
-    /// 「丢弃这一块」确认弹窗。用危险配色，文案点明不可恢复——这个操作直接覆写
-    /// 工作区文件，既不进索引也不进 reflog，点完就真没了。
-    pub fn render_discard_hunk_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
-        let Some((_, idx)) = self.discard_hunk_target.as_ref() else {
-            return div().into_any_element();
-        };
-        let file = self
-            .git_diff
-            .as_ref()
-            .map(|d| d.path.clone())
-            .unwrap_or_default();
-
-        let content = v_flex()
-            .child(Self::modal_title(fg, "确定丢弃这一块更改吗？"))
-            .child(div().text_sm().text_color(muted).child(format!(
-                "{file} 的第 {} 块更改会被还原成更改前的样子。",
-                idx + 1
-            )))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child("直接改工作区文件，不进暂存区也不进 reflog——丢了就找不回来。"),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_normal_button(
-                        "cancel-discard-hunk",
-                        "取消",
-                        |this, _, _, cx| this.cancel_discard_hunk(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_danger_button(
-                        "confirm-discard-hunk",
-                        "丢弃这一块",
-                        |this, _, _, cx| this.confirm_discard_hunk(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(
-            380.,
-            true,
-            content,
-            crate::overlay::ModalLayer::DiscardHunk,
-            cx,
-        )
-    }
-
-    /// 「删除分支」确认弹窗。
-    pub fn render_delete_branch_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
-        let Some((_, branch, remote)) = self.delete_branch_target.as_ref() else {
-            return div().into_any_element();
-        };
-        let remote = *remote;
-
-        let content = v_flex()
-            .child(Self::modal_title(
-                fg,
-                if remote {
-                    "确定删除这个远端分支吗？"
-                } else {
-                    "确定删除这个分支吗？"
-                },
-            ))
-            .child(div().text_sm().text_color(muted).child(if remote {
-                format!("{branch} 会从远端仓库删除，其他人拉取后本地也会跟着消失。")
-            } else {
-                format!("{branch} 只删本地引用，工作区文件不受影响。")
-            }))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(if remote {
-                        "影响所有协作者，删之前确认没人在用。"
-                    } else {
-                        "有未合并的提交时 git 会拒绝删除，不会强删。"
-                    }),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_normal_button(
-                        "cancel-delete-branch",
-                        "取消",
-                        |this, _, _, cx| this.cancel_delete_branch(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_danger_button(
-                        "confirm-delete-branch",
-                        "删除",
-                        |this, _, _, cx| this.confirm_delete_branch(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(
-            380.,
-            true,
-            content,
-            crate::overlay::ModalLayer::DeleteBranch,
-            cx,
-        )
-    }
-
-    /// 「丢弃全部改动」确认弹窗（照 render_discard_file_confirm，措辞更重——连未
-    /// 跟踪文件一起删）。
-    pub fn render_discard_all_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
-        if self.discard_all_target.is_none() {
-            return div().into_any_element();
+            DangerConfirm {
+                title: "确定丢弃这个文件的更改吗？",
+                body: format!("{path} 会被还原成 HEAD 的样子，已暂存的部分一并还原。"),
+                warning: "不进 reflog，找不回来。",
+                ok: "丢弃更改",
+            }
         }
-        let content = v_flex()
-            .child(Self::modal_title(fg, "丢弃工作区全部更改？"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("已跟踪文件还原成 HEAD，未暂存 / 未跟踪的新文件会被删除。"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child("不进 reflog，找不回来。"),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_normal_button(
-                        "cancel-discard-all",
-                        "取消",
-                        |this, _, _, cx| this.cancel_discard_all(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_danger_button(
-                        "confirm-discard-all",
-                        "全部丢弃",
-                        |this, _, _, cx| this.confirm_discard_all(cx),
-                        cx,
-                    )),
-            );
-        self.modal_shell(
-            400.,
-            true,
-            content,
-            crate::overlay::ModalLayer::DiscardAll,
-            cx,
-        )
+    }
+
+    /// 「丢弃这一块」。这个操作直接覆写工作区文件，既不进索引也不进 reflog。
+    pub(super) fn discard_hunk_confirm(file: &str, idx: usize) -> DangerConfirm {
+        DangerConfirm {
+            title: "确定丢弃这一块更改吗？",
+            body: format!("{file} 的第 {} 块更改会被还原成更改前的样子。", idx + 1),
+            warning: "直接改工作区文件，不进暂存区也不进 reflog——丢了就找不回来。",
+            ok: "丢弃这一块",
+        }
+    }
+
+    /// 「删除分支」。远端分支影响别人，文案分开写。
+    pub(super) fn delete_branch_confirm(branch: &str, remote: bool) -> DangerConfirm {
+        if remote {
+            DangerConfirm {
+                title: "确定删除这个远端分支吗？",
+                body: format!("{branch} 会从远端仓库删除，其他人拉取后本地也会跟着消失。"),
+                warning: "影响所有协作者，删之前确认没人在用。",
+                ok: "删除",
+            }
+        } else {
+            DangerConfirm {
+                title: "确定删除这个分支吗？",
+                body: format!("{branch} 只删本地引用，工作区文件不受影响。"),
+                warning: "有未合并的提交时 git 会拒绝删除，不会强删。",
+                ok: "删除",
+            }
+        }
+    }
+
+    /// 「丢弃全部改动」：连未跟踪文件一起删。
+    pub(super) fn discard_all_confirm() -> DangerConfirm {
+        DangerConfirm {
+            title: "丢弃工作区全部更改？",
+            body: "已跟踪文件还原成 HEAD，未暂存 / 未跟踪的新文件会被删除。".to_string(),
+            warning: "不进 reflog，找不回来。",
+            ok: "全部丢弃",
+        }
     }
 
     /// Tool Panel 的窄版 GIT 面板：变更（STAGED / CHANGES）+ 操作
@@ -240,7 +113,7 @@ impl Workspace {
     pub(crate) fn git_narrow_panel(
         &mut self,
         _window: &mut Window,
-        cx: &mut Context<Workspace>,
+        cx: &mut Context<GitPanel>,
     ) -> AnyElement {
         use crate::ui_theme;
 
@@ -278,8 +151,8 @@ impl Workspace {
         // 头部（分支、↑N↓M、stash、同步菜单）展示的是**当前提交目标仓库**的状态，
         // 不是项目根的。否则在子仓上提交时，头部会显示另一个仓库的分支与领先/落后。
         let root = project.root.clone();
-        let style = crate::runtimes::path_style(&project.runtime, cx);
-        let active_repo = self.active_git_repo_root(&project, cx);
+        let style = crate::path_style(&project.runtime, cx);
+        let active_repo = self.active_git_repo_root(&project);
         let status = self
             .git_status
             .get(&active_repo)
@@ -438,7 +311,7 @@ impl Workspace {
                         .icon_size()
                         .label(sync_label)
                         .dropdown_caret(busy.is_none())
-                        .font_family(crate::terminal_view::font_family())
+                        .font_family(crate::mono_font())
                         .text_color(sync_color)
                         .dropdown_menu(move |menu, _window, _cx| {
                             git_ops_menu_items(
@@ -741,10 +614,7 @@ impl Workspace {
         // 提升到舞台另开一页（见 open_diff 的改动）。
         // Git 改动树和 Files 文件树共用一份已持久化的侧树宽度。拖外层 Tool Panel
         // 不能按比例重算它；只有拖这份树自身的分隔线时才会改变。
-        let list_w = self.file_tree_w.clamp(
-            crate::tool_panel::MIN_FILE_TREE_WIDTH,
-            crate::tool_panel::MAX_FILE_TREE_WIDTH,
-        );
+        let list_w = self.tree_w;
         // diff 栏恒在：选中干净仓库时把它整块撤掉，会让面板布局在切仓库时跳来跳去，
         // 还让人以为预览功能坏了。没有可显示的 diff 就画成空态。
         let changes_body: AnyElement = {
@@ -759,14 +629,14 @@ impl Workspace {
                 .relative()
                 .min_h_0()
                 .overflow_hidden()
-                .child(self.file_tree_resize_listener(cx))
+                .child(self.tree_resize_listener(cx))
                 .flex()
                 .child(
                     div()
                         .size_full()
                         .flex()
                         .child(div().flex_1().min_w_0().min_h_0().flex().child(diff_pane))
-                        .child(self.file_tree_resize_handle("git-narrow-diff-split", cx))
+                        .child(self.tree_resize_handle("git-narrow-diff-split", cx))
                         .child(
                             div()
                                 .w(px(list_w))
@@ -800,7 +670,7 @@ impl Workspace {
     pub(crate) fn render_git_log_tab(
         &mut self,
         root: ProjectRef,
-        cx: &mut Context<Workspace>,
+        cx: &mut Context<GitPanel>,
     ) -> AnyElement {
         // `root` 现在是当前选中的仓库根（不是项目根），分支与 HEAD 都读它自己的缓存。
         let branches = self.branches.get(&root).map(|cached| &cached.value);
@@ -829,7 +699,7 @@ impl Workspace {
                                 div()
                                     .size_full()
                                     .min_h_0()
-                                    .child(crate::git_log_view::branch_tree(
+                                    .child(crate::log_view::branch_tree(
                                         Some(root.clone()),
                                         branches,
                                         &self.git_log.scope,
@@ -848,7 +718,7 @@ impl Workspace {
                                 .flex()
                                 .min_w_0()
                                 .min_h_0()
-                                .child(crate::git_log_view::git_log_view(
+                                .child(crate::log_view::git_log_view(
                                     Some(root.clone()),
                                     &self.git_log,
                                     head_branch,
@@ -862,7 +732,7 @@ impl Workspace {
                             .size(px(380.))
                             .size_range(px(240.)..Pixels::MAX)
                             .child(div().size_full().flex().min_w_0().min_h_0().child(
-                                crate::git_log_view::commit_detail_pane(
+                                crate::log_view::commit_detail_pane(
                                     Some(root),
                                     &self.git_log,
                                     cx,

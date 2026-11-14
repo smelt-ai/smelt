@@ -107,6 +107,7 @@ mod acp_idle;
 mod acp_registry;
 mod agent_memory_control;
 mod agent_notify;
+mod attention;
 mod automation_runtime;
 mod client_conn;
 mod control;
@@ -135,6 +136,7 @@ mod remote;
 mod runtime_identity;
 mod runtime_upgrade;
 mod service;
+mod session_branch;
 mod session_catalog;
 mod session_control;
 mod session_directory;
@@ -1122,6 +1124,7 @@ fn broadcast_state(event_hub: &EventHubHandle, state: &SessionState) {
     match event_hub.publish_session(state) {
         Ok(true) => {
             with_session_directory(|directory| directory.upsert(state));
+            session_branch::observe(state);
         }
         Ok(false) => {}
         Err(error) => eprintln!("[event-hub] session state publish failed: {error}"),
@@ -1135,6 +1138,7 @@ fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
     match event_hub.remove_session(id, instance) {
         Ok(true) => {
             with_session_directory(|directory| directory.remove_instance(id, instance));
+            session_branch::forget(id);
         }
         Ok(false) => {}
         Err(error) => eprintln!("[event-hub] session removal publish failed: {error}"),
@@ -1152,6 +1156,7 @@ fn suspend_terminal_identity(
     {
         return Err("终端实例已替换，不能归档旧实例".to_string());
     }
+    session_branch::forget(&state.id);
     with_session_directory(|directory| directory.suspend_instance(state))
         .unwrap_or_else(|| Err("终端身份目录尚未初始化".to_string()))
 }
@@ -1328,15 +1333,15 @@ fn handle_event_publish<C: ClientSocket>(
 }
 
 /// 常驻 Term 的事件监听。OSC 标题留在终端网格自己的标题栏，这里直接丢掉。
-/// Bell 只刷新活动时间并广播。程序的查询（颜色、设备属性、光标位置、尺寸）在网格锁内入队，
-/// 泵释放锁后再写回。
+/// 响铃只记一下，泵在这批输出处理完后交给提醒（见 [`take_terminal_bell`]）。程序的查询（颜色、
+/// 设备属性、光标位置、尺寸）在网格锁内入队，泵释放锁后再写回。
 #[derive(Clone)]
 struct StateListener {
-    state: Arc<Mutex<SessionState>>,
-    event_hub: EventHubHandle,
     /// 查询在 `Term` 网格锁内回调。这里只入队，等 PTY 泵释放网格锁后再经 `Ctl.master`
     /// 写入，避免与 resize 的 ctl -> term 锁序相反而死锁。
     replies: PendingTermReplies,
+    /// 网格上响过铃。和 [`Session::bell`] 是同一个。
+    bell: Arc<AtomicBool>,
 }
 
 /// 常驻 Term 对程序查询的一条应答。守护的网格是这个会话唯一的权威画面，查询都由它答（同
@@ -1355,21 +1360,8 @@ enum TermReply {
 type PendingTermReplies = Arc<Mutex<VecDeque<TermReply>>>;
 
 impl StateListener {
-    #[cfg(test)]
-    fn new(state: Arc<Mutex<SessionState>>, event_hub: EventHubHandle) -> Self {
-        Self::with_replies(state, event_hub, Arc::new(Mutex::new(VecDeque::new())))
-    }
-
-    fn with_replies(
-        state: Arc<Mutex<SessionState>>,
-        event_hub: EventHubHandle,
-        replies: PendingTermReplies,
-    ) -> Self {
-        Self {
-            state,
-            event_hub,
-            replies,
-        }
+    fn new(replies: PendingTermReplies, bell: Arc<AtomicBool>) -> Self {
+        Self { replies, bell }
     }
 }
 
@@ -1392,19 +1384,9 @@ impl EventListener for StateListener {
             return;
         }
         // OSC 0/2 不是会话名，也不广播。
-        let Event::Bell = event else {
-            return;
-        };
-
-        let snapshot = {
-            let Ok(mut st) = self.state.lock() else {
-                return;
-            };
-            st.updated_at = now_unix();
-            bump_state_revision(&mut st);
-            st.clone()
-        };
-        broadcast_state(&self.event_hub, &snapshot);
+        if let Event::Bell = event {
+            self.bell.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -2128,8 +2110,10 @@ struct Session {
     output_gate: Mutex<()>,
     /// 守护 Term 收到的查询要回的应答；由 PTY 泵在网格锁释放后串行写回 child。
     replies: PendingTermReplies,
+    /// 网格上响过铃，PTY 泵取走（见 [`take_terminal_bell`]）。
+    bell: Arc<AtomicBool>,
     /// 常驻网格：PTY 输出持续 advance；attach 时序列化成 ANSI 快照。挂的是
-    /// `StateListener`（不再是 `VoidListener`）——守护自己也要看得见 Title/Bell。
+    /// `StateListener`（不再是 `VoidListener`）——守护自己也要看得见查询和响铃。
     term: Mutex<Term<StateListener>>,
     /// kitty 图形的图片和放置（见 terminal_graphics）。加锁顺序在 `term` 之后。
     graphics: Mutex<TerminalGraphics>,
@@ -2588,6 +2572,11 @@ fn main() {
     *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(directory);
     let sessions = new_sessions();
     let acp_sessions = new_acp_sessions();
+    session_branch::spawn(
+        Arc::clone(&sessions),
+        Arc::clone(&acp_sessions),
+        Arc::clone(&event_hub),
+    );
 
     let automations = new_automation_store();
 
@@ -2604,7 +2593,7 @@ fn main() {
         Arc::clone(&event_hub),
     );
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
-    push::spawn(&event_hub);
+    push::spawn();
 
     run_serve_loop(
         listener,
@@ -2852,7 +2841,10 @@ fn run_serve_loop(
     let exe_mtime = exe_mtime_secs();
     // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
     let _ = runtime_identity::runtime_id();
-    thread::spawn(smelt_core::managed_runtime::retire_managed_bun);
+    thread::spawn(|| {
+        smelt_core::managed_runtime::retire_managed_bun();
+        smelt_core::pi_mcp::upgrade_preset_pins();
+    });
     thread::spawn(smelt_core::control_skill::remove_legacy_copy);
     thread::spawn(smelt_core::managed_runtime::reap_legacy_smelt_pi);
     #[cfg(target_os = "linux")]
@@ -3192,7 +3184,6 @@ fn spawn_session(
     cols: u16,
     cwd: Option<&str>,
     launch: TerminalLaunch<'_>,
-    event_hub: &EventHubHandle,
 ) -> anyhow::Result<(Session, Box<dyn PtyReader>)> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
@@ -3275,6 +3266,7 @@ fn spawn_session(
         ..Default::default()
     }));
     let replies = Arc::new(Mutex::new(VecDeque::new()));
+    let bell = Arc::new(AtomicBool::new(false));
     let sess = Session {
         instance,
         geometry_token: uuid::Uuid::new_v4().simple().to_string(),
@@ -3299,11 +3291,8 @@ fn spawn_session(
         }),
         output_gate: Mutex::new(()),
         replies: Arc::clone(&replies),
-        term: Mutex::new(new_daemon_term(
-            rows,
-            cols,
-            StateListener::with_replies(Arc::clone(&state), Arc::clone(event_hub), replies),
-        )),
+        bell: Arc::clone(&bell),
+        term: Mutex::new(new_daemon_term(rows, cols, StateListener::new(replies, bell))),
         graphics: Mutex::default(),
         state,
     };
@@ -3351,15 +3340,16 @@ fn flush_terminal_replies(sess: &Session) {
     write_terminal_replies(sess);
 }
 
-/// 把一批输出里扫到的 OSC 通知发给订阅的客户端。会话已有结构化 hook 事件时不发：
-/// 那之后 agent 的状态和通知都以 hook 为准，终端通知只会重复。
+/// 把一批输出里扫到的 OSC 通知和响铃交给提醒。会话已有结构化 hook 事件时不记：那之后 agent
+/// 的状态和通知都以 hook 为准，终端通知和响铃只会重复。
 fn publish_terminal_notifications(
     state: &Mutex<SessionState>,
     id: &str,
     event_hub: &EventHubHandle,
     messages: Vec<String>,
+    bell: bool,
 ) {
-    if messages.is_empty() {
+    if messages.is_empty() && !bell {
         return;
     }
     let structured = state
@@ -3370,10 +3360,29 @@ fn publish_terminal_notifications(
         return;
     }
     for message in messages {
+        event_hub.notify_attention(
+            id,
+            smelt_event_protocol::AttentionKind::Notice,
+            attention::NOTICE_TITLE,
+            &message,
+        );
         if let Err(error) = event_hub.publish_terminal_notification(id, None, &message) {
             eprintln!("[event-hub] terminal notification publish failed: {error}");
         }
     }
+    if bell {
+        event_hub.notify_attention(
+            id,
+            smelt_event_protocol::AttentionKind::Bell,
+            attention::BELL_TITLE,
+            "",
+        );
+    }
+}
+
+/// 这批输出里响过铃没有，顺手清掉。
+fn take_terminal_bell(sess: &Session) -> bool {
+    sess.bell.swap(false, Ordering::AcqRel)
 }
 
 fn publish_terminal_progress(
@@ -3416,6 +3425,8 @@ fn start_pty_pump(
         let mut progress = ProgressTracker::default();
         // resume 的旧 keyframe 理论上不含查询序列；即便有，也要在首次 read 前答复。
         flush_terminal_replies(&sess);
+        // 旧 keyframe 里的响铃不是现在响的。
+        take_terminal_bell(&sess);
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
@@ -3545,7 +3556,13 @@ fn start_pty_pump(
                     if let Some(snapshot) = program_status {
                         broadcast_state(&event_hub, &snapshot);
                     }
-                    publish_terminal_notifications(&sess.state, &id, &event_hub, notifications);
+                    publish_terminal_notifications(
+                        &sess.state,
+                        &id,
+                        &event_hub,
+                        notifications,
+                        take_terminal_bell(&sess),
+                    );
                     publish_terminal_progress(&mut progress, &id, sess.instance, &event_hub);
                 }
             }

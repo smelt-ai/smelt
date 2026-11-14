@@ -29,7 +29,6 @@ use smelt_ui::ListRow;
 
 use agent_client_protocol::v1::schema::SessionId;
 
-use smelt_app_state::daemon_states_global::AttentionGlobal;
 use smelt_app_state::provider_status_global::ProviderStatus;
 use smelt_client::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientHandle, ConversationClientLaunch, load_acp_history,
@@ -1251,8 +1250,9 @@ pub enum AcpViewEvent {
     /// 会话从 Ended 恢复（自动重连 / 用户手动重启 / GUI 重开 attach）的上升沿。
     /// 只用于刷新视图；Task 状态由 smeltd 直接观察同一 ACP 快照归约。
     Recovered,
-    /// 用户从往上翻的历史滚回了最新位置。这时才算看到了最新结果，上层据此补标已读。
-    ReturnedToLatest,
+    /// 用户开始往上翻历史，或回到了最新位置（读 [`AcpView::is_viewing_history`]）。翻着看时
+    /// 最新结果不在眼前，回到最新那一下才算看到。
+    ViewingHistoryChanged,
     /// 用户点了另一个 Pi 对话的标题（互发消息的事件行）。上层切过去。
     OpenConversation {
         sid: String,
@@ -1381,11 +1381,6 @@ fn notice_to_show(
     dismissed_id: Option<u64>,
 ) -> Option<&smelt_model::acp_session::AcpNoticeView> {
     notice.filter(|notice| Some(notice.id) != dismissed_id)
-}
-
-/// 这次滚动是不是从往上翻的历史回到了最新位置。只有这一下才补标已读。
-fn returned_to_latest(was_viewing_history: bool, viewing_history: bool) -> bool {
-    was_viewing_history && !viewing_history
 }
 
 fn task_body_from_selection(selection: String) -> Option<String> {
@@ -1823,7 +1818,7 @@ pub struct AcpView {
     /// 从舞台胶囊跳回的提问（entries 索引）。它头上临时让出标题胶囊的高度，
     /// 不必靠前一条回答的高度定位。
     revealed_prompt: Option<usize>,
-    /// 「强制重启」请求正在路上：用于阻止侧栏菜单重复触发。跟
+    /// 「强制重启」请求正在路上：用于阻止「停止」按钮重复触发。跟
     /// `DaemonPhase::Connecting` 不是一回事——那是新进程握手阶段，这个是"旧进程
     /// 还没确认死透"的过渡态，两者可能重叠（发出 acp_restart 到收到新一份
     /// Connecting 快照之间有个网络往返）。
@@ -2097,14 +2092,7 @@ impl AcpView {
             // list 正在可变借用自己的状态，延后通知外层重新判断吸顶提问。
             cx.defer(move |cx| {
                 let _ = view.update(cx, |this, cx| {
-                    if this.viewing_history != viewing_history {
-                        let returned = returned_to_latest(this.viewing_history, viewing_history);
-                        this.viewing_history = viewing_history;
-                        if returned {
-                            cx.emit(AcpViewEvent::ReturnedToLatest);
-                        }
-                        cx.notify();
-                    }
+                    this.set_viewing_history(viewing_history, cx);
                     if near_loaded_top {
                         this.load_older_history(cx);
                     }
@@ -3476,13 +3464,6 @@ impl AcpView {
         true
     }
 
-    /// 会话被激活查看后清「有结果可看」。
-    pub fn mark_read(&mut self, cx: &mut Context<Self>) {
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            AttentionGlobal::mark_read(&self.sid, cx);
-        }
-    }
-
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         if let Some(input) = &self.input {
             input.update(cx, |s, cx| s.focus(window, cx));
@@ -3524,6 +3505,16 @@ impl AcpView {
     /// 用户是否正往上翻着看历史。这时最新结果不在眼前，不能算已读。
     pub fn is_viewing_history(&self) -> bool {
         self.viewing_history
+    }
+
+    /// 改「往上翻着看历史」，变了发 [`AcpViewEvent::ViewingHistoryChanged`]。
+    pub(crate) fn set_viewing_history(&mut self, viewing_history: bool, cx: &mut Context<Self>) {
+        if self.viewing_history == viewing_history {
+            return;
+        }
+        self.viewing_history = viewing_history;
+        cx.emit(AcpViewEvent::ViewingHistoryChanged);
+        cx.notify();
     }
 
     /// 把一段文本塞进输入框并聚焦（SKILLS 面板点一条 skill 用）。
@@ -5111,8 +5102,7 @@ impl AcpView {
             item_ix: ix,
             offset_in_item: px(0.),
         });
-        self.viewing_history = true;
-        cx.notify();
+        self.set_viewing_history(true, cx);
     }
 
     fn pinned_prompt_ix(&self) -> Option<usize> {

@@ -26,7 +26,7 @@ use super::{
     pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
     process_group_label, progress_has_details, progress_summary, provider_menu_label,
     provider_retry_label, provider_switch_value, reconcile_pending_config_values,
-    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt, returned_to_latest,
+    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt,
     rows_with_changed_shape, running_background_tasks, running_subagents, search_summary_text,
     selected_provider_group, session_trajectory_events, settled_thought_elapsed,
     settled_thought_label, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
@@ -3056,14 +3056,6 @@ fn provider_retry_label_counts_down_then_reports_the_wait() {
     );
 }
 
-/// 往上翻着看历史时到的完成不算已读；滚回最新位置那一下才补标。
-#[test]
-fn only_scrolling_back_to_the_latest_counts_as_seeing_it() {
-    assert!(returned_to_latest(true, false));
-    assert!(!returned_to_latest(false, true), "往上翻不是看到最新");
-    assert!(!returned_to_latest(false, false));
-    assert!(!returned_to_latest(true, true));
-}
 
 #[test]
 fn background_task_elapsed_counts_from_the_start() {

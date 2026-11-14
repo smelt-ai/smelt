@@ -372,6 +372,15 @@ fn dispatch_control(
                 ),
             }
         }
+        ControlMethod::AttentionMarkRead => {
+            let params: smelt_core::control_api::AttentionMarkReadParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            event_hub.mark_attention_read(&params.session_id);
+            success_value(control_version, &request_id, EmptyParams::default())
+        }
         device @ (ControlMethod::DevicePairBegin
         | ControlMethod::DevicePair
         | ControlMethod::DeviceList
@@ -643,21 +652,6 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             match super::project_watch::watch(&params.root, event_hub) {
-                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
-                Err(error) => error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, error),
-                ),
-            }
-        }
-        ControlMethod::GitWatchHead => {
-            let params: smelt_runtime_client::protocol::git::GitRootParams =
-                match params_or_error(control_version, &request_id, params) {
-                    Ok(params) => params,
-                    Err(response) => return response,
-                };
-            match super::project_watch::watch_head(&params.root, event_hub) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(
                     control_version,

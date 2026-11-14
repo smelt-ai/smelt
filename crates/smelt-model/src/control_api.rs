@@ -39,6 +39,22 @@ pub struct NotifySendResult {
     pub phones: usize,
 }
 
+/// 用户看过了这个会话：清掉它在运行时提醒里的未读（`attention.changed`）。还在等批准、
+/// 等回答的不清，那要用户真去回。会话不存在或本来就没有未读，照常成功。
+pub enum AttentionMarkRead {}
+
+impl ControlCall for AttentionMarkRead {
+    type Params = AttentionMarkReadParams;
+    type Result = EmptyParams;
+
+    const METHOD: ControlMethod = ControlMethod::AttentionMarkRead;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttentionMarkReadParams {
+    pub session_id: String,
+}
+
 /// 运行时的智能体宿主配置（各家 CLI 命令、环境变量、profile、开关、智能体定义）。
 pub enum AgentHostGet {}
 

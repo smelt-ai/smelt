@@ -460,9 +460,8 @@ impl AcpView {
                         )
                         .child(div().text_sm().text_color(muted).child("↓"))
                         .on_click(cx.listener(|this, _event, _window, cx| {
-                            this.viewing_history = false;
+                            this.set_viewing_history(false, cx);
                             this.list_state.set_follow_mode(FollowMode::Tail);
-                            cx.notify();
                         }))
                         .with_animation(
                             "acp-jump-to-latest-enter",

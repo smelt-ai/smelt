@@ -217,7 +217,13 @@ fn terminal_notifications_reach_subscribers_until_hooks_take_over() {
         ..Default::default()
     });
 
-    publish_terminal_notifications(&state, "term", &event_hub, vec!["构建完成".to_string()]);
+    publish_terminal_notifications(
+        &state,
+        "term",
+        &event_hub,
+        vec!["构建完成".to_string()],
+        false,
+    );
     let event = recv_event(&subscription);
     assert_eq!(
         event.envelope.topic.as_str(),
@@ -227,7 +233,13 @@ fn terminal_notifications_reach_subscribers_until_hooks_take_over() {
     assert_eq!(event.envelope.payload["message"], "构建完成");
 
     state.lock().unwrap().structured_events = true;
-    publish_terminal_notifications(&state, "term", &event_hub, vec!["已完成".to_string()]);
+    publish_terminal_notifications(
+        &state,
+        "term",
+        &event_hub,
+        vec!["已完成".to_string()],
+        false,
+    );
     assert!(
         matches!(
             subscription.try_recv(),

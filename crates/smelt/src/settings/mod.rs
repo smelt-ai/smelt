@@ -1,7 +1,7 @@
 //! 设置面板：「通用」「Agent 与运行」两组共 8 页，含独立设置窗口的渲染逻辑。
 //! 左侧按分组列出各页，每页对应独立内容页，页内再分节。
 //!
-//! 跟 git_panel / file_tree 同一个套路：从 main.rs 拆出来的 `impl Workspace`
+//! 跟 agents 同一个套路：从 main.rs 拆出来的 `impl Workspace`
 //! 方法 + 独立类型/函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
 //!
 //! 自动更新（`update_status`/`check_for_update`/`request_daemon_restart` 等）**不在
@@ -17,7 +17,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerSta
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 #[cfg(any(target_os = "macos", windows))]
 use gpui_component::progress::Progress;
-use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::switch::Switch;
 use gpui_component::*;
@@ -810,8 +810,8 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // 哪台机器。会话按它所在的运行时取，设置页眼下只配本机。
 pub use smelt_app_state::agent_host_state::{
     AgentDefinition, AgentHostState, AgentHosts, MachineAutomations, agent_host_loaded,
-    agent_host_settled, agent_hosts, apply_agent_host, apply_notify_prefs, detach_agent_host,
-    initial_agent_host_state, reload_agent_host, reload_agent_hosts, try_apply_agent_host,
+    agent_host_settled, agent_hosts, apply_agent_host, detach_agent_host, reload_agent_host,
+    reload_agent_hosts, try_apply_agent_host,
 };
 pub use smelt_model::agent_host::AgentHostSettings;
 pub use smelt_model::agent_kind::{
@@ -1174,11 +1174,22 @@ struct SettingsRenderSnapshot {
 pub struct SettingsContentView {
     workspace: Entity<Workspace>,
     snapshot: SettingsRenderSnapshot,
+    /// 这扇设置窗口里点开过的插件设置页。第一次点开时建（在事件里，不在 render 里），
+    /// 之后切走再回来还是这一份，窗口关了随本视图放掉。登记换过或撤下的跟着放掉。
+    plugin_pages: Vec<BuiltSettingsPage>,
     _observe_workspace: Subscription,
+    _settings_pages: Subscription,
     _observe_settings_globals: Vec<Subscription>,
     last_refresh: Option<Instant>,
     refresh_pending: bool,
     refresh_generation: u64,
+}
+
+/// 建好的一页插件设置页，`build` 认出登记有没有换过。
+struct BuiltSettingsPage {
+    id: SharedString,
+    build: smelt_plugin_api::SettingsPageBuilder,
+    view: AnyView,
 }
 
 impl SettingsContentView {
@@ -1189,7 +1200,18 @@ impl SettingsContentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let mut this = Self {
+            plugin_pages: Vec::new(),
+            _settings_pages: cx.subscribe_in(
+                &smelt_plugin_api::events(cx),
+                window,
+                |this: &mut SettingsContentView, _, event, window, cx| {
+                    if matches!(event, smelt_plugin_api::HostEvent::SettingsPagesChanged) {
+                        this.sync_plugin_pages(window, cx);
+                        cx.notify();
+                    }
+                },
+            ),
             _observe_workspace: cx.observe_in(
                 &workspace,
                 window,
@@ -1221,7 +1243,44 @@ impl SettingsContentView {
             last_refresh: Some(Instant::now()),
             refresh_pending: false,
             refresh_generation: 0,
+        };
+        this.sync_plugin_pages(window, cx);
+        this
+    }
+
+    /// 放掉登记已经换过或撤下的页，当前停在插件的页上而它还没建就建。快照换了、设置页
+    /// 登记变了时调。
+    fn sync_plugin_pages(&mut self, window: &mut Window, cx: &mut App) {
+        self.plugin_pages.retain(|built| {
+            smelt_plugin_api::settings_page(&built.id, cx)
+                .is_some_and(|page| std::rc::Rc::ptr_eq(&page.build, &built.build))
+        });
+        let SettingsSection::Plugin(id) = &self.snapshot.settings_section else {
+            return;
+        };
+        if self.plugin_pages.iter().any(|built| &built.id == id) {
+            return;
         }
+        let Some(page) = smelt_plugin_api::settings_page(id, cx) else {
+            return;
+        };
+        let view = (page.build)(window, cx);
+        self.plugin_pages.push(BuiltSettingsPage {
+            id: page.id,
+            build: page.build,
+            view,
+        });
+    }
+
+    /// 当前停着的插件设置页，建好了才有。只读内存。
+    fn plugin_page(&self) -> Option<AnyView> {
+        let SettingsSection::Plugin(id) = &self.snapshot.settings_section else {
+            return None;
+        };
+        self.plugin_pages
+            .iter()
+            .find(|built| &built.id == id)
+            .map(|built| built.view.clone())
     }
 
     fn observe_settings_global<G: Global + 'static>(
@@ -1237,6 +1296,7 @@ impl SettingsContentView {
             workspace.ensure_profile_inputs(window, cx);
             workspace.settings_render_snapshot(cx)
         });
+        self.sync_plugin_pages(window, cx);
         self.last_refresh = Some(Instant::now());
         self.refresh_pending = false;
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
@@ -1304,6 +1364,7 @@ impl Render for SettingsContentView {
             .child(Workspace::render_settings_content(
                 workspace.clone(),
                 &snapshot,
+                self.plugin_page(),
                 cx,
             ))
             // 弹层开启期间才需要读它的动态会话数据；正常浏览设置页不会因此订阅整个
@@ -1387,11 +1448,8 @@ impl Render for SettingsWindow {
             .on_action(|_: &crate::CloseSettingsWindow, window, _| window.remove_window())
             // 设置窗口里按的命令键（⌘, ⌘Q）、点的应用菜单交给主窗口执行，见 `workspace_commands`。
             .on_action(|action: &smelt_plugin_api::RunCommand, _, cx| {
-                if let Err(error) =
-                    smelt_plugin_api::run(&action.command, action.args.clone(), cx)
-                {
-                    eprintln!("[commands] {} 没执行：{error}", action.command);
-                }
+                let result = smelt_plugin_api::run(&action.command, action.args.clone(), cx);
+                crate::workspace_commands::report_failure(result, cx);
             })
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;

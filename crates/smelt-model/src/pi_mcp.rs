@@ -58,7 +58,8 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         on_remote_desktop: None,
     },
     // REA（github.com/morluto/rea）本机逆向分析。用 Smelt 自带的 Bun 跑它的 package
-    // runner（`bun x`），不要求用户装 Node、也不全局安装：包只进 Bun 的下载缓存。
+    // runner（`bun x`），不要求用户装 Node、也不全局安装：包只进 Smelt 自己按版本分开的缓存
+    // （`~/.smelt/cache/bun-x/<包@版本>`，见 `agent/src/pi-mcp-runtime.ts`），不碰用户的 `~/.bun`。
     // `--bun` 必不可少：rea 的入口脚本是 node shebang，不加 Bun 会转交给系统 node。
     // 持久注册必须钉死版本号。207 个工具、3MB 多的 schema，绝不能直接声明给模型，
     // 留在默认的 codemode 里按需发现。分析可能跑很久，超时放宽到它给 Kimi Code 配的 120 秒。
@@ -68,7 +69,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         summary: "在本机拆解应用、二进制、网页和抓包，带证据讲清某个功能是怎么实现的。用 Smelt 自带的 Bun 运行，不用装 Node。",
         description: "REA (Reverse Engineer Anything): local, evidence-backed reverse engineering of desktop apps, binaries, Electron/JavaScript bundles, websites and traffic captures",
         transport: PiMcpPresetTransport::Bun {
-            args: &["x", "--bun", "rea-agents@6.5.0", "mcp"],
+            args: &["x", "--bun", "rea-agents@6.9.0", "mcp"],
         },
         exposure: None,
         timeout_secs: Some(120),
@@ -151,6 +152,16 @@ impl PiMcpPreset {
             Some(variant) if remote_desktop => variant,
             _ => self,
         }
+    }
+
+    /// `bun x` 跑的预设钉的那个包：`(包名, 包@版本)`。
+    pub fn pinned_package(&self) -> Option<(&'static str, &'static str)> {
+        let PiMcpPresetTransport::Bun { args } = self.transport else {
+            return None;
+        };
+        let spec = *args.iter().skip(1).find(|arg| !arg.starts_with('-'))?;
+        let at = spec.rfind('@').filter(|&at| at > 0)?;
+        Some((&spec[..at], spec))
     }
 
     pub fn config(&self) -> Value {

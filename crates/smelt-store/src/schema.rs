@@ -1828,16 +1828,34 @@ pub const MIGRATE_V35_TO_V36: &str = "
 ALTER TABLE push_registration ADD COLUMN notify_message INTEGER NOT NULL DEFAULT 1 CHECK (notify_message IN (0, 1));
 ";
 
-/// v37：项目可管理仓库，工作集和会话绑定关系由运行时目录持久化。
+/// v37：不改结构，只补数据。以前「存档属于哪个智能体」由桌面端另发一次控制调用记下，发不出去
+/// 就漏；从 v37 起由库在写对话细节时自己记。这里把现有对话上已经有的补进来，以对话上的为准。
 pub const MIGRATE_V36_TO_V37: &str = "
+INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
+SELECT agent, COALESCE(profile_id, ''), TRIM(history_session_id), TRIM(agent_definition_id)
+FROM acp_detail
+WHERE TRIM(COALESCE(history_session_id, '')) != ''
+  AND TRIM(COALESCE(agent_definition_id, '')) != ''
+ON CONFLICT(agent, profile_id, resume_id) DO UPDATE SET
+  agent_definition_id = excluded.agent_definition_id;
+";
+
+/// v38：项目可以挂多个仓库，按仓库建一组工作树（workset），对话可以绑在工作树上。
+/// `project_repository_catalog` 记哪些项目的仓库列表已经初始化过；对话的工作树被关闭后，
+/// `closed_workset_root` 记原来的任务目录，恢复时据此限定只能选同一项目下的工作树。
+pub const MIGRATE_V37_TO_V38: &str = "
 CREATE TABLE project_repository (
   project_root TEXT NOT NULL,
   name TEXT NOT NULL,
   root TEXT NOT NULL,
   position INTEGER NOT NULL CHECK (position >= 0),
+  managed_link TEXT,
   PRIMARY KEY (project_root, name),
   UNIQUE (project_root, root),
   UNIQUE (project_root, position)
+) WITHOUT ROWID;
+CREATE TABLE project_repository_catalog (
+  project_root TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE workset (
   id TEXT PRIMARY KEY,
@@ -1861,42 +1879,7 @@ CREATE TABLE workset_repository (
   UNIQUE (workset_id, position)
 ) WITHOUT ROWID;
 ALTER TABLE session_group ADD COLUMN workset_id TEXT REFERENCES workset(id) ON DELETE SET NULL;
-";
-
-pub const MIGRATE_V37_TO_V38: &str = "
-ALTER TABLE project_repository RENAME TO project_repository_v37;
-CREATE TABLE project_repository (
-  project_root TEXT NOT NULL,
-  name TEXT NOT NULL,
-  root TEXT NOT NULL,
-  position INTEGER NOT NULL CHECK (position >= 0),
-  managed_link TEXT,
-  PRIMARY KEY (project_root, name),
-  UNIQUE (project_root, root),
-  UNIQUE (project_root, position)
-) WITHOUT ROWID;
-INSERT INTO project_repository(project_root, name, root, position)
-SELECT project_root, name, root, position FROM project_repository_v37;
-DROP TABLE project_repository_v37;
-CREATE TABLE project_repository_catalog (
-  project_root TEXT PRIMARY KEY
-) WITHOUT ROWID;
-INSERT INTO project_repository_catalog SELECT DISTINCT project_root FROM project_repository;
-";
-
-pub const MIGRATE_V38_TO_V39: &str = "
 ALTER TABLE session_group ADD COLUMN closed_workset_root TEXT;
-";
-
-/// v40：补齐由运行时维护的历史智能体归属。
-pub const MIGRATE_V39_TO_V40: &str = "
-INSERT INTO history_agent_binding(agent, profile_id, resume_id, agent_definition_id)
-SELECT agent, COALESCE(profile_id, ''), TRIM(history_session_id), TRIM(agent_definition_id)
-FROM acp_detail
-WHERE TRIM(COALESCE(history_session_id, '')) != ''
-  AND TRIM(COALESCE(agent_definition_id, '')) != ''
-ON CONFLICT(agent, profile_id, resume_id) DO UPDATE SET
-  agent_definition_id = excluded.agent_definition_id;
 ";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。

@@ -1,0 +1,27 @@
+# 内置插件「文件」：当前项目的文件树、项目内搜索，和打开的文件（查看、编辑、保存、预览）。
+# 读写都由文件所在机器的运行时执行。只依赖插件接口和 gpui 组件库，宿主里没有它的类型。
+[package]
+name = "smelt-files-ui"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
+# 视图图标：完整的 lucide 图标表。
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+# HTML 预览：原生网页视图。gpui-webview 和组件库同一个 rev，wry 必须和它用同一份。
+gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+wry = { package = "lb-wry", version = "0.53.3" }
+# 预览里点的链接从网页视图的回调线程送回 UI 线程。
+smol = "2"
+# 「浏览器打开」：本机路径转成 file:// 地址。
+url = "2"
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+tempfile = "3"

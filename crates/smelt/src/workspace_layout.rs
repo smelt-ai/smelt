@@ -271,21 +271,11 @@ impl Workspace {
             .difference(&self.shell_view.shown)
             .next()
             .is_some();
-        let stage_revealed = next
-            .shown
-            .contains(crate::builtin_views::Builtin::Stage.id())
-            && !self
-                .shell_view
-                .shown
-                .contains(crate::builtin_views::Builtin::Stage.id());
         self.shell_view = next;
         self.note_shown_views(cx);
+        self.note_active_context(cx);
         if revealed {
             self.schedule_visible_refresh(cx);
-        }
-        // 舞台被挡着时正在看的会话不算看过，露出来这一刻补标。
-        if stage_revealed {
-            self.mark_visible_session_read(cx);
         }
         cx.notify();
     }

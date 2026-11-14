@@ -302,11 +302,6 @@ impl Workspace {
                                 agent_definition_id,
                                 automation_id,
                                 _acp_persist_sub,
-                                ui_state: ss
-                                    .route
-                                    .clone()
-                                    .map(SessionUiState::restore)
-                                    .unwrap_or_default(),
                             },
                         );
                         record_restored_index(
@@ -384,11 +379,6 @@ impl Workspace {
                             agent_definition_id: None,
                             automation_id: None,
                             _acp_persist_sub: None,
-                            ui_state: ss
-                                .route
-                                .clone()
-                                .map(SessionUiState::restore)
-                                .unwrap_or_default(),
                         },
                     );
                     record_restored_index(
@@ -442,7 +432,7 @@ impl Workspace {
                         this.active_session_revision != restore_active_revision,
                         this.active_session,
                     );
-                    this.sync_session_ui(window, cx);
+                    this.sync_session_ui(cx);
                     this.consume_pending_notification_session_jump(window, cx);
                     this.consume_pending_conversation_wakes(window, cx);
                     if let Some(Session {
@@ -542,16 +532,6 @@ impl Workspace {
         self.sessions.get(self.active_session)
     }
 
-    /// 当前会话的工作目录，连同它在哪台机器上。git、文件这些查询要发给那台机器：
-    /// 远程会话的路径拿去问本机，要么查不到，要么查到同名的另一个目录。
-    pub(crate) fn current_cwd(&self, cx: &App) -> Option<ProjectRef> {
-        let session = self.cur()?;
-        Some(ProjectRef {
-            runtime: session.runtime(cx).key().clone(),
-            root: session.cwd(cx)?,
-        })
-    }
-
     /// 会话标题，远程会话后面跟上运行时名字。舞台、命令面板、通知这些地方没有侧栏那样
     /// 的运行时分段，本机和远程有同名会话时要分得清。
     pub(crate) fn title_with_runtime(session: &Session, cx: &App) -> String {
@@ -566,15 +546,14 @@ impl Workspace {
         )
     }
 
-    /// 把工具面板（变更、文件树）里的文字交给当前会话：终端写进 PTY，对话放进输入框。
-    /// 都不带回车，发不发由人定。面板跟着选中的项目走，舞台上的会话不一定是这个项目的；
-    /// 不是时不发，不能把 B 项目的评论写进 A 的会话。没送到时告诉用户原因，返回 false。
-    pub(crate) fn send_to_panel_session(
+    /// 把文字交给当前会话：终端打进输入，对话填进输入框，都不替用户发出。插件经
+    /// [`smelt_plugin_api::sessions::SEND_TEXT`] 调到这里。
+    pub(crate) fn send_to_session(
         &mut self,
         text: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Result<(), String> {
         let group = self
             .active_project_ref(cx)
             .and_then(|project| self.find_project_group(&project, cx));
@@ -584,13 +563,7 @@ impl Workspace {
                 .as_ref()
                 .map(|group| (group.label.as_str(), group.sessions.as_slice())),
         );
-        let index = match target {
-            Ok(index) => index,
-            Err(reason) => {
-                self.report_background_error(reason);
-                return false;
-            }
-        };
+        let index = target?;
         match &self.sessions[index].kind {
             SessionKind::Term { active, .. } => {
                 active.update(cx, |terminal, cx| terminal.send_text(text, cx));
@@ -599,100 +572,16 @@ impl Workspace {
                 view.update(cx, |view, cx| view.insert_prompt_text(text, window, cx));
             }
         }
-        true
+        Ok(())
     }
 
-    /// 活动 session 变化时，完整交换右侧工作区。用 session 自己的稳定 ui_id 判断，
-    /// 不依赖数组下标，所以拖拽排序、关闭前面的 session 都不会把快照串给别人。
-    pub(crate) fn sync_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(new_id) = self.cur().map(|session| session.ui_id) else {
-            let changed = self.ui_session_id.is_some();
-            self.park_active_project_ui();
-            self.ui_session_id = None;
-            if changed {
-                self.schedule_visible_refresh(cx);
-            }
-            return;
-        };
-        if self.ui_session_id == Some(new_id) {
-            return;
-        }
-        // 抽屉跟项目走：必须在会话交换之前停放，否则同项目切会话会把新会话
-        // 存档里那份过期抽屉当成该项目的现场。
-        let parked_key = self.park_active_project_ui();
-        if let Some(old_id) = self.ui_session_id {
-            if let Some(old_ix) = self.sessions.iter().position(|s| s.ui_id == old_id) {
-                swap_session_ui_state(
-                    &mut self.active_session_ui,
-                    &mut self.sessions[old_ix].ui_state,
-                );
-                if let Some(key) = parked_key.as_ref()
-                    && let Some(ui) = self.project_ui.get(key)
-                {
-                    ui.copy_persistable_into(&mut self.sessions[old_ix].ui_state);
-                }
-            }
-            if let Some(new_ix) = self.sessions.iter().position(|s| s.ui_id == new_id) {
-                swap_session_ui_state(
-                    &mut self.active_session_ui,
-                    &mut self.sessions[new_ix].ui_state,
-                );
-            }
-        } else if let Some(new_ix) = self.sessions.iter().position(|s| s.ui_id == new_id) {
-            // 空工作台没有任何会话可归属。首次挂载直接接管新会话的 UI 状态，
-            // 不能把空态期间临时点开的面板存回第一条新会话。
-            self.active_session_ui = std::mem::take(&mut self.sessions[new_ix].ui_state);
-        }
-        self.ui_session_id = Some(new_id);
-        self.apply_active_project_ui(window, cx);
-        self.schedule_visible_refresh(cx);
-    }
-
-    fn project_ui_key(&self, cx: &App) -> Option<ProjectRef> {
-        self.active_project_ref(cx)
-            .map(|project| project.at(crate::sidebar_order::normalize_project_root(&project.root)))
-            .filter(|project| !project.root.is_empty())
-    }
-
-    fn park_active_project_ui(&mut self) -> Option<ProjectRef> {
-        park_project_ui(
-            &mut self.active_session_ui,
-            &mut self.project_ui,
-            &mut self.active_project_ui_key,
-        )
-    }
-
-    fn apply_active_project_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let new_key = self.project_ui_key(cx);
-        apply_project_ui_for_root(
-            &mut self.active_session_ui,
-            &mut self.project_ui,
-            &mut self.active_project_ui_key,
-            new_key,
-        );
-        self.restore_active_route_runtime(window, cx);
-    }
-
-    /// 抽屉现场按项目根停放。会话没变、只换了选中项目时走这里。
-    pub(crate) fn sync_project_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let new_key = self.project_ui_key(cx);
-        if self.active_project_ui_key == new_key {
-            return;
-        }
-        self.park_active_project_ui();
-        self.apply_active_project_ui(window, cx);
-        self.schedule_visible_refresh(cx);
-    }
-
-    pub(crate) fn restore_active_route_runtime(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.active_session_ui.restored_from_archive = false;
-        self.file_tree_drag_start = None;
-        if let Some(path) = self.pending_restore_file.take() {
-            self.view_file(path, window, cx);
+    /// 活动会话变了就排一次可见数据刷新。用会话自己的稳定 ui_id 判断，不依赖数组下标，
+    /// 拖拽排序、关掉前面的会话都不会误判。
+    pub(crate) fn sync_session_ui(&mut self, cx: &mut Context<Self>) {
+        let new_id = self.cur().map(|session| session.ui_id);
+        if self.ui_session_id != new_id {
+            self.ui_session_id = new_id;
+            self.schedule_visible_refresh(cx);
         }
     }
 
@@ -963,7 +852,6 @@ impl Workspace {
                 acp_view::AcpViewEvent::Changed => {
                     this.touch_acp_session(_view);
                     this.save_state(cx);
-                    this.sync_notification_surfaces(cx);
                     // save_state 只排队写盘，不会重绘。正文增量只归 AcpView 重画；
                     // 侧栏「运行中」读的是 Session::status，相位一变事实就变，
                     // 这里立刻通知。
@@ -987,7 +875,6 @@ impl Workspace {
                     // 后者在冷恢复时拥有更高优先级。
                     this.touch_acp_session(_view);
                     this.save_state(cx);
-                    this.sync_notification_surfaces(cx);
                     cx.notify();
                 }
                 acp_view::AcpViewEvent::PreviewImage(image) => {
@@ -1153,11 +1040,9 @@ impl Workspace {
                 acp_view::AcpViewEvent::Recovered => {
                     // 保留视图自身的快照更新。
                 }
-                acp_view::AcpViewEvent::ReturnedToLatest => {
-                    // 往上翻着看时到的完成没算已读；滚回最新位置才补上。
-                    if this.workspace_window_active {
-                        this.mark_visible_session_read(cx);
-                    }
+                acp_view::AcpViewEvent::ViewingHistoryChanged => {
+                    // 往上翻着看时到的完成不算看过；滚回最新位置时通知插件据此补标已读。
+                    this.note_active_context(cx);
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: false } => {
                     this.open_capabilities("plugins", window, cx);
@@ -1285,11 +1170,10 @@ impl Workspace {
             agent_definition_id,
             automation_id: None,
             _acp_persist_sub,
-            ui_state: SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
-        self.sync_session_ui(window, cx);
+        self.sync_session_ui(cx);
         view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
@@ -1397,7 +1281,6 @@ impl Workspace {
             agent_definition_id,
             automation_id,
             _acp_persist_sub,
-            ui_state: SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         let ix = self.sessions.len() - 1;
@@ -1526,7 +1409,6 @@ impl Workspace {
             agent_definition_id,
             automation_id: None,
             _acp_persist_sub,
-            ui_state: SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         let ix = self.sessions.len() - 1;
@@ -1749,6 +1631,7 @@ impl Workspace {
                         return;
                     }
                     sess.set_active_term(view);
+                    this.note_active_context(cx);
                     this.save_state(cx);
                     cx.notify();
                 })
@@ -2056,12 +1939,6 @@ impl Workspace {
         }) {
             self.active_project = None;
         }
-        let project_key = project.at(crate::sidebar_order::normalize_project_root(&root));
-        self.project_ui.remove(&project_key);
-        if self.active_project_ui_key.as_ref() == Some(&project_key) {
-            self.active_project_ui_key = None;
-            let _ = self.active_session_ui.take_project_ui();
-        }
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -2070,21 +1947,12 @@ impl Workspace {
     /// 点选侧栏项目行：抽屉立刻绑到这个项目。此方法只更新项目上下文，不隐式改折叠
     /// 状态；标题事件会在同一次点击里显式调用 `toggle_project_collapsed`。不切舞台会话
     /// ——点项目只换项目上下文（文件树等），会话要点会话行才切。
-    pub(crate) fn select_project(
-        &mut self,
-        project: ProjectRef,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn select_project(&mut self, project: ProjectRef, cx: &mut Context<Self>) {
         let project = ProjectRef {
             root: project.root.trim_end_matches('/').to_string(),
             ..project
         };
-        let exists = self.find_project_group(&project, cx).is_some();
         self.active_project = Some(project);
-        if exists {
-            self.sync_project_ui(window, cx);
-        }
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();
@@ -2304,14 +2172,6 @@ impl Workspace {
             let project_root = group.map(|g| g.root);
             self.remember_session_project(&runtime, project_root.as_deref(), cx);
         }
-        let attention_ids: Vec<String> = match &self.sessions[ix].kind {
-            SessionKind::Term { .. } => self.sessions[ix]
-                .term_leaves()
-                .iter()
-                .map(|t| t.read(cx).session_id().to_string())
-                .collect(),
-            SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
-        };
         if kill_runtime {
             // 用户关掉的：运行时目录里也关掉它，别的设备随之摘掉。只摘本地的（运行时被
             // 移除、别处已经关掉）不走这里。
@@ -2333,11 +2193,6 @@ impl Workspace {
             }
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| v.shutdown(cx));
-            }
-        }
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            for id in attention_ids {
-                AttentionGlobal::remove_session(&id, cx);
             }
         }
         let closed_conversation_sid = match &self.sessions[ix].kind {
@@ -2424,9 +2279,6 @@ impl Workspace {
         // 用户主动关 pane → 守护真正杀掉该 shell（区别于退出 GUI：那时保活）。
         let closed_session_id = view.read(cx).session_id().to_string();
         terminal::kill_remote_in_background(view.read(cx).runtime(), &closed_session_id);
-        if cx.try_global::<AttentionGlobal>().is_some() {
-            AttentionGlobal::remove_session(&closed_session_id, cx);
-        }
         let sess = &mut self.sessions[ix];
         if let Some(dock) = sess.term_dock_mut() {
             dock.remove(&view, window, cx);
@@ -2435,6 +2287,7 @@ impl Workspace {
         if was_active && let Some(first) = sess.term_leaves().first().cloned() {
             sess.set_active_term(first);
         }
+        self.note_active_context(cx);
         self.focus_active(window, cx);
         self.save_state(cx);
         cx.notify();
@@ -2459,7 +2312,7 @@ impl Workspace {
         if let Some(sess) = self.sessions.get_mut(self.active_session) {
             sess.set_active_term(e.clone());
         }
-        e.update(cx, |terminal, cx| terminal.mark_read(cx));
+        self.note_active_context(cx);
         let h = e.read(cx).focus_handle();
         window.focus(&h, cx);
         self.save_state(cx);
@@ -2523,54 +2376,45 @@ impl Workspace {
         self.activate(order[next], window, cx);
     }
 
-    pub(crate) fn viewed_session_id(&self, cx: &App) -> Option<String> {
+    /// 舞台上露着的会话：舞台显示着、路由在看会话时才有。插件经活动上下文读它（见
+    /// `note_active_context`）。
+    pub(crate) fn viewed_session(&self, cx: &App) -> Option<smelt_plugin_api::ViewedSession> {
         if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
             return None;
         }
         if !route_views_session(self.active_tab(), self.nav.agents().conversation_sid()) {
             return None;
         }
-        match &self.sessions.get(self.active_session)?.kind {
-            SessionKind::Term { active, .. } => Some(active.read(cx).session_id().to_string()),
-            SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
-        }
-    }
-
-    /// 用户正在看的会话标已读。切会话、窗口回到前台、或正在看时新关注到达。
-    /// 对话正往上翻着看历史时，最新结果不在眼前，不算看过；滚回最新位置时再标。
-    pub(crate) fn mark_visible_session_read(&mut self, cx: &mut Context<Self>) {
-        if cx.try_global::<AttentionGlobal>().is_none() {
-            return;
-        }
-        let scrolled_away = self.cur().is_some_and(|session| match &session.kind {
-            SessionKind::Conversation(view) => view.read(cx).is_viewing_history(),
-            SessionKind::Term { .. } => false,
-        });
-        if scrolled_away {
-            return;
-        }
-        if let Some(sid) = self.viewed_session_id(cx) {
-            status_item::remove_system_notification(&sid);
-            AttentionGlobal::mark_read(&sid, cx);
-        }
+        let session = self.sessions.get(self.active_session)?;
+        let (id, at_latest) = match &session.kind {
+            SessionKind::Term { active, .. } => (active.read(cx).session_id().to_string(), true),
+            SessionKind::Conversation(view) => {
+                let view = view.read(cx);
+                (view.session_id().to_string(), !view.is_viewing_history())
+            }
+        };
+        Some(smelt_plugin_api::ViewedSession {
+            machine: session.runtime(cx).key().clone(),
+            id,
+            at_latest,
+        })
     }
 
     pub(crate) fn note_window_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
         let application_active = status_item::is_app_active();
         smelt_ui::motion::set_ambient_application_active(cx, application_active);
-        let active = application_active && window.is_window_active();
+        self.main_window_key = window.is_window_active();
+        let active = application_active && self.main_window_key;
         let became_active = active && !self.workspace_window_active;
         self.workspace_window_active = active;
         if became_active {
             status_item::refresh_system_notification_authorization();
-            self.mark_visible_session_read(cx);
             // 离线的远程机器隔几分钟才探一次；人回到这里时多半要用，立刻探一次。
             crate::runtime_events::probe_remotes(cx);
-            // 监听收不到的变化（监听登记失败、旧运行时）在人回来时补上。这里在绘制路径上，
-            // 标旧和排刷新挪到这一帧之后。
-            let view = cx.weak_entity();
-            cx.defer(move |cx| {
-                let _ = view.update(cx, |this, cx| this.on_window_refocused(cx));
+            // 监听收不到的变化（监听登记失败、旧运行时）由插件在人回来时补上。这里在绘制
+            // 路径上，事件挪到这一帧之后发。
+            cx.defer(|cx| {
+                smelt_plugin_api::emit(smelt_plugin_api::HostEvent::WindowActivated, cx);
             });
         }
     }
@@ -2612,14 +2456,13 @@ impl Workspace {
                     root,
                 });
             }
-            self.sync_session_ui(window, cx);
+            self.sync_session_ui(cx);
             self.desktop = None;
             self.nav.set_active(WorkspaceRoute::Session);
             let route_has_overlay = stage_hidden;
             // 要读会话视图（取运行时），必须在下面 update 这个视图之前算好：
             // 视图更新期间再读它会 panic。
             let restore_settled = self.session_restore_settled(ix, cx);
-            // 切到会话即视为看过一次性通知；结构化等待状态仍由 daemon phase 保留。
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
                     // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
@@ -2627,17 +2470,11 @@ impl Workspace {
                         v.maybe_auto_resume(window, cx);
                     }
                     if !route_has_overlay {
-                        v.mark_read(cx);
                         v.focus_input(window, cx);
                     }
                 });
-            } else {
-                if !route_has_overlay && let Some(view) = self.sessions[ix].active_term().cloned() {
-                    view.update(cx, |terminal, cx| terminal.mark_read(cx));
-                }
-                if !route_has_overlay {
-                    self.focus_active(window, cx);
-                }
+            } else if !route_has_overlay {
+                self.focus_active(window, cx);
             }
             if route_has_overlay {
                 window.focus(&self.focus_handle, cx);
@@ -2645,16 +2482,6 @@ impl Workspace {
             self.save_state(cx);
             self.schedule_visible_refresh(cx);
             cx.notify();
-        }
-    }
-
-    /// 侧栏右键「强制重启」：ACP 会话卡死（`session/cancel` 打不断正在跑的
-    /// 工具调用）时的兜底，见 `AcpView::force_restart` 注释。非 ACP 会话
-    /// （`active_acp` 返回 None）是 no-op，调用方（右键菜单）也只在 ACP
-    /// 会话上才显示这一项。
-    pub(crate) fn force_restart_acp_session(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(view) = self.sessions.get(ix).and_then(|s| s.active_acp()).cloned() {
-            view.update(cx, |v, cx| v.force_restart(cx));
         }
     }
 

@@ -675,6 +675,13 @@ fn decode_projection_event<T: serde::de::DeserializeOwned>(
     decode_payload(projection.data, label)
 }
 
+/// 线上的会话状态转成客户端的。运行时自己算提醒时也用这一份，和各端读到的相位、摘要一致。
+impl From<SessionStateChanged> for DaemonSessionState {
+    fn from(state: SessionStateChanged) -> Self {
+        daemon_session_state(state)
+    }
+}
+
 fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
     DaemonSessionState {
         id: state.session_id,
@@ -699,6 +706,7 @@ fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
         conversation_id: state.conversation_id,
         custom_title: state.custom_title,
         cwd: state.cwd,
+        branch: state.branch,
         phase_since: state.phase_since_unix_seconds,
         turn_started_at: state.turn_started_at_unix_seconds,
         updated_at: state.updated_at_unix_seconds,
@@ -1109,6 +1117,15 @@ mod tests {
             Some(DaemonStateEvent::Update(state))
                 if state.custom_title.as_deref() == Some("改过的名")
         ));
+    }
+
+    /// 分支名由运行时维护在会话状态里，侧栏直接读它。
+    #[test]
+    fn session_state_carries_the_branch() {
+        let mut dto = session_dto("a", 1, 1);
+        dto.branch = Some("feat/x".to_string());
+        assert_eq!(daemon_session_state(dto).branch.as_deref(), Some("feat/x"));
+        assert_eq!(daemon_session_state(session_dto("b", 1, 1)).branch, None);
     }
 
     #[test]

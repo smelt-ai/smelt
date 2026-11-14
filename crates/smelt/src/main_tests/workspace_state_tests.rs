@@ -175,7 +175,6 @@ mod restore_order_tests {
                 automation_id: None,
                 session_title: None,
             }),
-            route: None,
         }
     }
 

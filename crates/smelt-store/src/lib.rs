@@ -61,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 40;
+pub const STORE_SCHEMA_VERSION: u32 = 38;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -2109,8 +2109,8 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
-        if current == 38 || current == 39 {
-            apply_v39_closed_worksets(&transaction)?;
+        if current == 37 {
+            apply_v38_worksets(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -2118,8 +2118,8 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
-        if current == 36 || current == 37 {
-            apply_v37_worksets(&transaction)?;
+        if current == 36 {
+            apply_v37_bind_history_agents(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -2440,18 +2440,6 @@ mod imp {
             return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
         }
         Ok(())
-    }
-
-    fn apply_v39_closed_worksets(
-        transaction: &rusqlite::Transaction<'_>,
-    ) -> Result<(), StoreError> {
-        if !table_columns(transaction, "session_group")?
-            .iter()
-            .any(|column| column == "closed_workset_root")
-        {
-            transaction.execute_batch(crate::schema::MIGRATE_V38_TO_V39)?;
-        }
-        apply_v40_bind_history_agents(transaction)
     }
 
     fn apply_v9_automation_domain(
@@ -2815,36 +2803,24 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V35_TO_V36)?;
         }
-        apply_v37_worksets(transaction)
+        apply_v37_bind_history_agents(transaction)
     }
 
-    fn apply_v37_worksets(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+    fn apply_v37_bind_history_agents(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::MIGRATE_V36_TO_V37)?;
+        apply_v38_worksets(transaction)
+    }
+
+    /// v38：项目仓库、工作树和对话的绑定。已经有 `workset` 表的库（用当前结构造的夹具）跳过。
+    fn apply_v38_worksets(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
         if !table_names(transaction)?
             .iter()
             .any(|table| table == "workset")
         {
-            transaction.execute_batch(crate::schema::MIGRATE_V36_TO_V37)?;
-        }
-        apply_v38_repository_links(transaction)
-    }
-
-    fn apply_v38_repository_links(
-        transaction: &rusqlite::Transaction<'_>,
-    ) -> Result<(), StoreError> {
-        if !table_columns(transaction, "project_repository")?
-            .iter()
-            .any(|column| column == "managed_link")
-        {
             transaction.execute_batch(crate::schema::MIGRATE_V37_TO_V38)?;
         }
-        apply_v39_closed_worksets(transaction)
-    }
-
-    /// 历史对话的智能体归属回填，重跑无害。
-    fn apply_v40_bind_history_agents(
-        transaction: &rusqlite::Transaction<'_>,
-    ) -> Result<(), StoreError> {
-        transaction.execute_batch(crate::schema::MIGRATE_V39_TO_V40)?;
         Ok(())
     }
 
@@ -5838,7 +5814,7 @@ CREATE TABLE published_session (
         connection.execute_batch(V30_AGENT_PROFILE).unwrap();
         connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
         connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
-        connection.execute_batch(V36_WITHOUT_WORKSETS).unwrap();
+        connection.execute_batch(V37_WITHOUT_WORKSETS).unwrap();
         connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
         connection
             .execute_batch(V25_WORKSPACE_CATALOG_WRITER)
@@ -7689,7 +7665,7 @@ CREATE TABLE published_session (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V36_WITHOUT_WORKSETS}
+                "{V37_WITHOUT_WORKSETS}
              ALTER TABLE session_group DROP COLUMN archived_at;
              ALTER TABLE session_group DROP COLUMN pinned_at;
              PRAGMA user_version = 33;"
@@ -7996,71 +7972,13 @@ CREATE TABLE published_session (
     }
 
     #[test]
-    fn migrates_v38_and_preserves_archived_conversations() {
-        let dir = temp_dir("migrate-v38-archived");
-        let path = dir.join(DATABASE_FILE_NAME);
-        let store = Store::open_or_create(&path).unwrap();
-        let conversation = terminal_conversation("archived", "terminal", "/project");
-        store.create_workspace_conversation(&conversation).unwrap();
-        store
-            .set_workspace_conversation_archived("archived", Some(42))
-            .unwrap();
-        drop(store);
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection.execute_batch(
-            "ALTER TABLE session_group DROP COLUMN closed_workset_root; PRAGMA user_version = 38;"
-        ).unwrap();
-        drop(connection);
-        let store = Store::open(&path).unwrap();
-        let snapshot = store.workspace_directory().unwrap().1;
-        assert_eq!(snapshot.sessions[0].archived_at, Some(42));
-        assert_eq!(snapshot.sessions[0].closed_workset_root, None);
-        drop(store);
-    }
-
-    #[test]
-    fn migrates_v37_repositories_and_preserves_explicit_configuration() {
-        let dir = temp_dir("migrate-v37-repositories");
-        let path = dir.join(DATABASE_FILE_NAME);
-        let store = Store::open_or_create(&path).unwrap();
-        store
-            .set_workspace_project_repositories(
-                "/project",
-                &[WorkspaceProjectRepositoryRecord {
-                    project_root: "/project".into(),
-                    name: "api".into(),
-                    root: "/source/api".into(),
-                    position: 0,
-                    managed_link: None,
-                }],
-            )
-            .unwrap();
-        drop(store);
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "DROP TABLE project_repository_catalog;
-             ALTER TABLE project_repository DROP COLUMN managed_link;
-             PRAGMA user_version = 37;",
-            )
-            .unwrap();
-        drop(connection);
-        let store = Store::open(&path).unwrap();
-        assert!(store.project_repositories_initialized("/project").unwrap());
-        let repositories = store.workspace_directory().unwrap().1.repositories;
-        assert_eq!(repositories[0].root, "/source/api");
-        assert_eq!(repositories[0].managed_link, None);
-        drop(store);
-    }
-
-    #[test]
     fn migrates_v36_without_workset_tables() {
         let dir = temp_dir("migrate-v36-worksets");
         let path = dir.join(DATABASE_FILE_NAME);
         drop(Store::open_or_create(&path).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
-            .execute_batch(&format!("{V36_WITHOUT_WORKSETS} PRAGMA user_version = 36;"))
+            .execute_batch(&format!("{V37_WITHOUT_WORKSETS} PRAGMA user_version = 36;"))
             .unwrap();
         drop(connection);
         let store = Store::open(&path).unwrap();
@@ -8070,13 +7988,13 @@ CREATE TABLE published_session (
     }
 
     #[test]
-    fn migrates_upstream_v37_without_workset_tables() {
-        let dir = temp_dir("migrate-upstream-v37-worksets");
+    fn migrates_v37_without_workset_tables() {
+        let dir = temp_dir("migrate-v37-worksets");
         let path = dir.join(DATABASE_FILE_NAME);
         drop(Store::open_or_create(&path).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
-            .execute_batch(&format!("{V36_WITHOUT_WORKSETS} PRAGMA user_version = 37;"))
+            .execute_batch(&format!("{V37_WITHOUT_WORKSETS} PRAGMA user_version = 37;"))
             .unwrap();
         drop(connection);
         let store = Store::open(&path).unwrap();
@@ -8084,35 +8002,8 @@ CREATE TABLE published_session (
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
     }
 
-    #[test]
-    fn migrates_branch_v39_and_backfills_history_agent_bindings() {
-        let dir = temp_dir("migrate-branch-v39-history");
-        let path = dir.join(DATABASE_FILE_NAME);
-        let store = Store::open_or_create(&path).unwrap();
-        store
-            .create_workspace_conversation(&with_definition(
-                acp_conversation("c1", Some("acp-1"), Some("h1")),
-                Some("writer"),
-            ))
-            .unwrap();
-        drop(store);
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch("DELETE FROM history_agent_binding; PRAGMA user_version = 39;")
-            .unwrap();
-        drop(connection);
-        let store = Store::open(&path).unwrap();
-        assert_eq!(
-            store
-                .history_agent_binding("claude", "", "h1")
-                .unwrap()
-                .as_deref(),
-            Some("writer")
-        );
-        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-    }
-
-    const V36_WITHOUT_WORKSETS: &str = "
+    /// v37 及更早还没有、v38 加上的项目仓库和工作树。用当前结构的库退回旧版本做夹具时删掉。
+    const V37_WITHOUT_WORKSETS: &str = "
 ALTER TABLE session_group DROP COLUMN closed_workset_root;
 ALTER TABLE session_group DROP COLUMN workset_id;
 DROP TABLE workset_repository;
@@ -8646,7 +8537,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             .execute_batch(&format!(
                 "{V28_WORKSPACE_EPOCH}
                  {V27_REMOTE_SESSION_TABLES}
-                 {V36_WITHOUT_WORKSETS}
+                 {V37_WITHOUT_WORKSETS}
                  {V26_PROJECT_ROOT_AND_MENU}
                  INSERT INTO project(root, position) VALUES ('/repo', 0);
                  INSERT INTO session_group(id, position, custom_title, last_updated_at, project_root)
@@ -8981,7 +8872,7 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
                 .execute_batch(&format!(
                     "{V28_WORKSPACE_EPOCH}
                  {V27_REMOTE_SESSION_TABLES}
-                     {V36_WITHOUT_WORKSETS}
+                     {V37_WITHOUT_WORKSETS}
                      {V26_PROJECT_ROOT_AND_MENU}
                      {V21_SESSION_TABLES}
                      {layout_node_table}
