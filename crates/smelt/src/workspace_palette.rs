@@ -63,5 +63,6 @@ pub(crate) fn run_palette_command(
     cx: &mut App,
 ) {
     workspace.update(cx, |this, cx| this.close_palette(window, cx));
-    smelt_plugin_api::invoke(command, &serde_json::Value::Null, window, cx);
+    let handled = smelt_plugin_api::invoke(command, &serde_json::Value::Null, Some(window), cx);
+    crate::workspace_commands::finish(handled, cx);
 }

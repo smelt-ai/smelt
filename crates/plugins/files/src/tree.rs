@@ -16,7 +16,7 @@ use smelt_plugin_api::client::protocol::files::{
     ProjectSearchCall, ProjectSearchParams, ProjectTreeCall, ProjectWatchCall,
 };
 use smelt_plugin_api::client::protocol::git::{GitRootParams, GitStatusCall};
-use smelt_plugin_api::{PathRequest, RuntimeKey};
+use smelt_plugin_api::{self as api, PathRequest, RuntimeKey, sessions};
 
 use crate::model::{
     DirCache, DirListing, FileTreeRow, GitMarks, SearchHit, SearchState, TreeRoots,
@@ -403,29 +403,36 @@ impl FilesPanel {
 
     /// 选本机目录钉进树里：切到别的本机项目也一直挂着。
     pub(crate) fn pick_pinned_roots(&mut self, cx: &mut Context<Self>) {
-        let panel = cx.weak_entity();
-        self.host.pick_paths(
-            &RuntimeKey::Local,
-            PathRequest {
+        let picked = api::PICK_PATHS.run(
+            &PathRequest {
+                machine: RuntimeKey::Local,
                 title: "选择要加到文件树的目录".into(),
                 confirm: "加入".into(),
                 files: false,
                 multiple: true,
             },
-            Box::new(move |paths, cx| {
-                let _ = panel.update(cx, |this, cx| {
-                    for path in paths {
-                        if !path.is_empty() && !this.pinned_roots.contains(&path) {
-                            this.pinned_roots.push(path);
-                        }
-                    }
-                    this.persist_pinned();
-                    this.schedule_visible_refresh(cx);
-                    cx.notify();
-                });
-            }),
             cx,
         );
+        cx.spawn(async move |panel, cx| {
+            let paths = match picked.await {
+                Ok(paths) => paths.unwrap_or_default(),
+                Err(error) => {
+                    cx.update(|cx| crate::notify_error(error, cx));
+                    return;
+                }
+            };
+            let _ = panel.update(cx, |this, cx| {
+                for path in paths {
+                    if !path.is_empty() && !this.pinned_roots.contains(&path) {
+                        this.pinned_roots.push(path);
+                    }
+                }
+                this.persist_pinned();
+                this.schedule_visible_refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 根标题行菜单「从文件树移除」。
@@ -654,25 +661,24 @@ impl FilesPanel {
     }
 
     /// 「发送到会话」：路径转成相对它所在根的 @提及，交给当前会话（不替用户发出）。
-    pub(crate) fn send_path_to_session(
-        &mut self,
-        path: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn send_path_to_session(&mut self, path: &str, cx: &mut Context<Self>) {
         let style = self.path_style(&self.tree_runtime(), cx);
         let rel = self
             .tree_root_for(&self.tree_dir(path), cx)
             .and_then(|root| style.strip_prefix(path, &root))
             .filter(|rel| !rel.is_empty())
             .unwrap_or_else(|| path.to_string());
-        self.send_to_session(&format!("@{rel} "), window, cx);
+        self.send_to_session(format!("@{rel} "), cx);
     }
 
-    pub(crate) fn send_to_session(&self, text: &str, window: &mut Window, cx: &mut App) {
-        if let Err(error) = self.host.send_to_session(text, window, cx) {
-            self.report_background_error(format!("发送到会话失败：{error}"));
-        }
+    pub(crate) fn send_to_session(&self, text: String, cx: &mut App) {
+        let sent = sessions::SEND_TEXT.run(&sessions::SendText { text }, cx);
+        cx.spawn(async move |cx| {
+            if let Err(error) = sent.await {
+                cx.update(|cx| crate::notify_error(format!("发送到会话失败：{error}"), cx));
+            }
+        })
+        .detach();
     }
 
     /// 「删除」：先确认，确定了才交给运行时删。
@@ -729,7 +735,7 @@ impl FilesPanel {
         let client = match target(&entry.runtime, cx) {
             Ok(client) => client,
             Err(error) => {
-                self.report_background_error(format!("删除失败：{error}"));
+                self.report_background_error(format!("删除失败：{error}"), cx);
                 return;
             }
         };
@@ -751,7 +757,7 @@ impl FilesPanel {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(_) => this.forget_deleted_entry(entry, is_dir, cx),
                 Err(error) => {
-                    this.report_background_error(format!("删除失败：{}", error_text(error)));
+                    this.report_background_error(format!("删除失败：{}", error_text(error)), cx);
                     cx.notify();
                 }
             });

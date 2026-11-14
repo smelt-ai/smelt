@@ -2580,11 +2580,10 @@ impl Render for Workspace {
             // 挂在这一层才浅于 Terminal / Input。
             .key_context("Workspace")
             // 快捷键、应用菜单、右键菜单执行命令都走这里，见 `workspace_commands`。
-            // 命令眼下不适用（`Pass`）就交给下一条绑定。
+            // 命令眼下不适用（`Pass`）就交给下一条绑定，失败了报出来。
             .on_action(|action: &smelt_plugin_api::RunCommand, window, cx| {
-                if smelt_plugin_api::invoke(&action.command, &action.args, window, cx)
-                    == smelt_plugin_api::Handled::Pass
-                {
+                let handled = smelt_plugin_api::invoke(&action.command, &action.args, Some(window), cx);
+                if workspace_commands::finish(handled, cx) {
                     cx.propagate();
                 }
             })
@@ -3474,9 +3473,8 @@ fn main() {
                             path: link.path,
                             line: link.line,
                         };
-                        if let Err(error) = smelt_plugin_api::open_file(location, cx) {
-                            status_item::notify_error(error);
-                        }
+                        let opened = smelt_plugin_api::open_file(location, cx);
+                        workspace_commands::report_failure(opened, cx);
                     }
                 });
             }

@@ -46,7 +46,7 @@ impl GitPanel {
             .get(&root)
             .and_then(|cached| cached.value.seen_change(&path))
         else {
-            self.report_background_error(format!("{path} 已不在改动列表里，请刷新后再丢弃。"));
+            self.report_background_error(format!("{path} 已不在改动列表里，请刷新后再丢弃。"), cx);
             return;
         };
         let text = Self::discard_file_confirm(&seen);
@@ -114,7 +114,7 @@ impl GitPanel {
                             this.reset_git_diff_view();
                         }
                     }
-                    Err(err) => this.report_background_error(err),
+                    Err(err) => this.report_background_error(err, cx),
                 }
             },
             cx,
@@ -750,7 +750,7 @@ impl GitPanel {
                 // 切分支后文件列表、ahead/behind 都变了，标脏再刷新；
                 // 分支列表本身（有哪些分支）不受切换影响，不用跟着失效。
                 Ok(()) => this.invalidate_git_repo(&status_root, cx),
-                Err(err) => this.report_background_error(err),
+                Err(err) => this.report_background_error(err, cx),
             },
             cx,
         );
@@ -830,7 +830,7 @@ impl GitPanel {
                     this.invalidate_git_repo(&done_root, cx);
                     this.reload_git_log(done_root, cx);
                 }
-                Err(err) => this.report_background_error(err),
+                Err(err) => this.report_background_error(err, cx),
             },
             cx,
         );
@@ -865,7 +865,7 @@ impl GitPanel {
                     this.invalidate_git_repo(&done_root, cx);
                     this.reload_git_log(done_root, cx);
                 }
-                Err(err) => this.report_background_error(err),
+                Err(err) => this.report_background_error(err, cx),
             },
             cx,
         );
@@ -910,7 +910,7 @@ impl GitPanel {
             move |client: &RuntimeClient| stage_or_unstage(client, root.root, paths, stage),
             move |this, result, cx| {
                 if let Err(err) = result {
-                    this.report_background_error(format!("{failure}失败：{err}"));
+                    this.report_background_error(format!("{failure}失败：{err}"), cx);
                 }
                 // 批量操作会一口气改掉一片文件的暂存状态，之前留下的单文件乐观状态
                 // 全部作废；留着它们只会让复选标记跟真实 status 对不上。
@@ -955,7 +955,7 @@ impl GitPanel {
                 }
                 Err(err) => {
                     this.git_index_pending.remove(&done_key);
-                    this.report_background_error(err);
+                    this.report_background_error(err, cx);
                 }
             },
             cx,
@@ -1186,6 +1186,7 @@ impl GitPanel {
             if !d.patchable {
                 self.report_background_error(
                     "这个 diff 不支持按块操作（子模块 / 未跟踪文件），请用整文件的勾选框",
+                    cx,
                 );
                 cx.notify();
                 return false;
@@ -1227,7 +1228,7 @@ impl GitPanel {
                     // 行号已变，重新解析一份，避免下一次点击打在错的位置上。
                     this.open_diff(done_root, path, false, cx);
                 }
-                Err(err) => this.report_background_error(err),
+                Err(err) => this.report_background_error(err, cx),
             },
             cx,
         )
@@ -1514,10 +1515,16 @@ impl GitPanel {
         // 选区带的是文件路径。聚合 diff 的 `git_diff.path` 是「全部更改」。
         let path = range.path().to_string();
         let msg = diff_feedback_text(&path, range.start(), range.end(), &selected, &comment);
-        match smelt_plugin_api::host(cx).send_to_session(&msg, window, cx) {
-            Ok(()) => self.clear_diff_comment_selection(window, cx),
-            Err(reason) => self.report_background_error(reason),
-        }
+        let sent = smelt_plugin_api::sessions::SEND_TEXT
+            .run(&smelt_plugin_api::sessions::SendText { text: msg }, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let sent = sent.await;
+            let _ = this.update_in(cx, |this, window, cx| match sent {
+                Ok(()) => this.clear_diff_comment_selection(window, cx),
+                Err(reason) => this.report_background_error(reason, cx),
+            });
+        })
+        .detach();
     }
 
     /// 在 `root` 上跑一条 git 写入，回来在 UI 线程收尾。
@@ -1540,7 +1547,7 @@ impl GitPanel {
         let client = match crate::rt::target(&root.runtime, cx) {
             Ok(client) => client,
             Err(error) => {
-                self.report_background_error(error);
+                self.report_background_error(error, cx);
                 return false;
             }
         };
@@ -1582,7 +1589,7 @@ impl GitPanel {
         let client = match crate::rt::target(&root.runtime, cx) {
             Ok(client) => client,
             Err(error) => {
-                self.report_background_error(error);
+                self.report_background_error(error, cx);
                 return false;
             }
         };
@@ -1679,7 +1686,7 @@ impl GitPanel {
                 // 每次进 Git 页刷屏；只有手动操作失败才提示。
                 Err(err) => {
                     if !silent {
-                        this.report_background_error(err);
+                        this.report_background_error(err, cx);
                     }
                 }
             },
@@ -1730,7 +1737,7 @@ impl GitPanel {
             .get(&root)
             .map(|cached| cached.value.seen_changes())
         else {
-            self.report_background_error("改动列表还没加载出来，请刷新后再丢弃。");
+            self.report_background_error("改动列表还没加载出来，请刷新后再丢弃。", cx);
             return;
         };
         self.discard_all_target = Some((root, seen));
@@ -1782,7 +1789,7 @@ impl GitPanel {
                         // 丢弃后当前打开的 diff 大概率没了，关掉免得看空。
                         this.reset_git_diff_view();
                     }
-                    Err(err) => this.report_background_error(err),
+                    Err(err) => this.report_background_error(err, cx),
                 }
             },
             cx,
