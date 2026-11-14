@@ -35,6 +35,7 @@ mod command;
 mod file;
 mod layout;
 pub mod sessions;
+mod settings;
 mod view;
 
 #[cfg(feature = "js")]
@@ -48,6 +49,10 @@ pub use file::{FileLocation, open_file, register_file_opener, unregister_file_op
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutSource, layout, layouts, parse_layout,
     register_layouts, unregister_layouts,
+};
+pub use settings::{
+    SettingsGroup, SettingsPage, SettingsPageBuilder, SettingsPageSpec, register_settings_pages,
+    settings_page, settings_pages, settings_pane, unregister_settings_pages,
 };
 pub use view::{
     OPEN_VIEW, OpenView, PluginView, RESERVED_VIEW_IDS, ViewBuilder, ViewHandle, ViewSpec,
@@ -220,6 +225,8 @@ pub enum HostEvent {
     LayoutsChanged,
     /// 命令登记变了（见 [`register_commands`]）：快捷键、菜单、命令面板要跟着变。
     CommandsChanged,
+    /// 设置页登记变了（见 [`register_settings_pages`]）：设置侧栏要跟着变。
+    SettingsPagesChanged,
 }
 
 /// [`HostEvent`] 的发送方。宿主装好，插件订阅。

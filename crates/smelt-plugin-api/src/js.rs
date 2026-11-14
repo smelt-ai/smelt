@@ -19,13 +19,16 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
-use gpui::{App, Entity, Subscription};
+use gpui::{App, Entity, SharedString, Subscription};
 use gpui_shell::{
     HostArguments, HostError, HostModule, HostObject, HostResult, HostValue, ScriptView,
 };
 use serde_json::Value;
 
-use crate::{CommandSpec, Handled, HostEvent, RuntimeKey, rusqlite};
+use crate::{
+    CommandSpec, Handled, HostEvent, RuntimeKey, SettingsGroup, SettingsPageBuilder,
+    SettingsPageSpec, rusqlite,
+};
 
 /// 模块名，和 Rust 这边的 crate 同名。
 pub const MODULE: &str = "smelt-plugin-api";
@@ -127,6 +130,25 @@ export function run(command: string, args?: unknown): Promise<unknown>;
 export function path_style(machine: Machine): "posix" | "windows";
 /** 打开文件，交给登记的文件打开者；没有打开者时本机文件用系统文本编辑器打开，远程的 reject。line 从 1 数。 */
 export function open_file(machine: Machine, path: string, line?: number): Promise<null>;
+export interface SettingsPage {
+  /** 本插件内的名字，不含 "/"；设置页 id 是 "<插件 id>/<name>"。 */
+  name: string;
+  /** 设置侧栏上的名字。 */
+  title: string;
+  /**
+   * 页面的入口脚本，插件目录里的相对路径，如 "settings.tsx"。设置窗口里点开这一页时单独加载、挂载它，
+   * 和主入口是两份脚本实例，不共享内存：值存在插件自己的库里（store_query / store_execute），
+   * 要主入口跟着变就 run 一条它登记的命令。设置窗口关了这一份就放掉。
+   * 入口脚本里不能调 register_* 登记东西，登记都在主入口里做。
+   */
+  entry: string;
+  /** 放进设置侧栏的哪一组，默认 "plugins"。 */
+  group?: "general" | "agents" | "system" | "plugins";
+  /** 搜索时除了标题还能按这些词找到这一页。 */
+  keywords?: string[];
+}
+/** 替换本插件登记的设置页。空数组撤下全部；一页不合法整组不登记。 */
+export function register_settings_pages(pages: SettingsPage[]): null;
 /** 让本插件的命令 name 当文件打开者（它要另外登记，requires_args）；执行时参数是 { machine, path, line }。只认最后登记的打开者。 */
 export function register_file_opener(name: string): null;
 /** SQL 参数。true / false 存成 1 / 0。 */
@@ -150,10 +172,20 @@ export type HostEvent =
   | { type: "views_changed" }
   | { type: "themes_changed" }
   | { type: "layouts_changed" }
-  | { type: "commands_changed" };
+  | { type: "commands_changed" }
+  | { type: "settings_pages_changed" };
 /** 等宿主的下一条事件。从插件挂载完起开始记，没取走的同样一条只留一份。同时只能有一个在等。 */
 export function next_event(): Promise<HostEvent>;
 "#;
+
+/// 宿主怎么把插件目录里的一个入口建成设置页（见 `register_settings_pages`）。
+#[derive(Clone)]
+pub struct SettingsPageLoader {
+    /// JS 设置页在侧栏上一律用这个图标。
+    pub icon: SharedString,
+    /// 校验入口（插件目录里的相对路径），给出建页的函数。
+    pub load: Rc<dyn Fn(&str) -> Result<SettingsPageBuilder, String>>,
+}
 
 /// 一个 JS 插件在宿主这边的身份。
 #[derive(Clone, Default)]
@@ -173,6 +205,9 @@ struct PluginState {
     call_waiter: Option<oneshot::Sender<(String, Value)>>,
     /// 视图已经释放：它登记的命令不再接。
     released: bool,
+    /// 设置页那份脚本：和主入口同一个身份，但不能登记，登记会顶掉主入口登记的那组。
+    settings_page: bool,
+    settings_loader: Option<SettingsPageLoader>,
     _events: Option<Subscription>,
     _release: Option<Subscription>,
 }
@@ -195,6 +230,30 @@ impl JsPlugin {
         plugin
     }
 
+    /// 主入口登记设置页时，入口怎么建成页。没给就不能登记设置页。
+    pub fn with_settings_loader(self, loader: SettingsPageLoader) -> Self {
+        self.0.borrow_mut().settings_loader = Some(loader);
+        self
+    }
+
+    /// 设置页那份脚本的身份：读写的是同一个插件的库、执行的是同样的命令，但 `register_*`
+    /// 一律报错。
+    pub fn for_settings_page(id: &str, name: &str) -> Self {
+        let plugin = Self::for_plugin(id, name);
+        plugin.0.borrow_mut().settings_page = true;
+        plugin
+    }
+
+    /// 登记前先过这一关：设置页那份脚本不能登记。
+    fn may_register(&self, name: &str) -> Result<(), HostError> {
+        if self.0.borrow().settings_page {
+            return Err(HostError::new(format!(
+                "{name}：设置页入口里不能登记，登记放在插件主入口里"
+            )));
+        }
+        Ok(())
+    }
+
     /// 这个插件的 `smelt-plugin-api` 模块，装进它自己的 Policy。
     pub fn module(&self) -> HostModule {
         let events = self.clone();
@@ -205,6 +264,10 @@ impl JsPlugin {
         let opener_owner = self.0.borrow().id.clone();
         let query_owner = self.0.borrow().id.clone();
         let execute_owner = query_owner.clone();
+        let themes = self.clone();
+        let layouts = self.clone();
+        let openers = self.clone();
+        let settings = self.clone();
         HostModule::new(MODULE)
             .declarations(DECLARATIONS)
             .function("active_project", |_| {
@@ -260,6 +323,7 @@ impl JsPlugin {
                 Ok(in_app("overlay_open", |cx| crate::host(cx).overlay_open(cx))?.into())
             })
             .function("register_themes", move |arguments| {
+                themes.may_register("register_themes")?;
                 let values = arguments
                     .value(0)?
                     .as_array()
@@ -282,6 +346,7 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_layouts", move |arguments| {
+                layouts.may_register("register_layouts")?;
                 let layouts = layout_arguments(arguments)?;
                 if layout_owner.is_empty() {
                     return Err(HostError::new("插件没有布局来源身份"));
@@ -297,6 +362,7 @@ impl JsPlugin {
                 Ok(HostValue::Null)
             })
             .function("register_commands", move |arguments| {
+                commands.may_register("register_commands")?;
                 let specs = command_arguments(arguments, &commands)?;
                 let (owner, group) = {
                     let state = commands.0.borrow();
@@ -356,6 +422,7 @@ impl JsPlugin {
                 )
             })
             .function("register_file_opener", move |arguments| {
+                openers.may_register("register_file_opener")?;
                 let name = arguments.string(0)?;
                 if opener_owner.is_empty() {
                     return Err(HostError::new("插件没有命令来源身份"));
@@ -363,6 +430,25 @@ impl JsPlugin {
                 in_app("register_file_opener", |cx| {
                     crate::register_file_opener(&opener_owner, name, cx)
                 })?;
+                Ok(HostValue::Null)
+            })
+            .function("register_settings_pages", move |arguments| {
+                settings.may_register("register_settings_pages")?;
+                let (owner, loader) = {
+                    let state = settings.0.borrow();
+                    (state.id.clone(), state.settings_loader.clone())
+                };
+                if owner.is_empty() {
+                    return Err(HostError::new("插件没有设置页来源身份"));
+                }
+                let loader = loader.ok_or_else(|| {
+                    HostError::new("register_settings_pages：这个插件不能登记设置页")
+                })?;
+                let specs = settings_page_arguments(arguments, &loader)?;
+                in_app("register_settings_pages", |cx| {
+                    crate::register_settings_pages(&owner, specs, cx)
+                })?
+                .map_err(HostError::new)?;
                 Ok(HostValue::Null)
             })
             .async_function("store_query", move |arguments| {
@@ -632,6 +718,71 @@ fn layout_arguments(arguments: &HostArguments) -> Result<Vec<(String, String, St
         .collect()
 }
 
+/// `register_settings_pages` 的参数。入口交给宿主的加载器校验、变成建页函数。
+fn settings_page_arguments(
+    arguments: &HostArguments,
+    loader: &SettingsPageLoader,
+) -> Result<Vec<SettingsPageSpec>, HostError> {
+    let invalid = |what: &str| HostError::new(format!("register_settings_pages：{what}"));
+    arguments
+        .value(0)?
+        .as_array()
+        .ok_or_else(|| invalid("参数要是设置页对象的数组"))?
+        .iter()
+        .map(|page| {
+            let text = |name: &str| match page.get(name) {
+                None | Some(HostValue::Null) => Ok(None),
+                Some(HostValue::Str(text)) => Ok(Some(text.clone())),
+                Some(other) => Err(invalid(&format!(
+                    "{name} 要是字符串，收到 {}",
+                    other.describe()
+                ))),
+            };
+            let name = text("name")?.ok_or_else(|| invalid("每一页都要有 name"))?;
+            let title = text("title")?.ok_or_else(|| invalid("每一页都要有 title"))?;
+            let entry = text("entry")?.ok_or_else(|| invalid("每一页都要有 entry"))?;
+            let group = match text("group")?.as_deref() {
+                None | Some("plugins") => SettingsGroup::Plugins,
+                Some("general") => SettingsGroup::General,
+                Some("agents") => SettingsGroup::Agents,
+                Some("system") => SettingsGroup::System,
+                Some(other) => {
+                    return Err(invalid(&format!(
+                        "group 只能是 general、agents、system、plugins，收到「{other}」"
+                    )));
+                }
+            };
+            let keywords = match page.get("keywords") {
+                None | Some(HostValue::Null) => Vec::new(),
+                Some(HostValue::Array(words)) => words
+                    .iter()
+                    .map(|word| {
+                        word.as_str()
+                            .map(|word| SharedString::from(word.to_string()))
+                            .ok_or_else(|| invalid("keywords 要是字符串数组"))
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(other) => {
+                    return Err(invalid(&format!(
+                        "keywords 要是字符串数组，收到 {}",
+                        other.describe()
+                    )));
+                }
+            };
+            let build = (loader.load)(&entry)
+                .map_err(|error| invalid(&format!("「{name}」的 entry：{error}")))?;
+            Ok(SettingsPageSpec {
+                name: name.into(),
+                title: title.into(),
+                icon: loader.icon.clone(),
+                group,
+                keywords,
+                build,
+            })
+        })
+        .collect()
+}
+
 /// `register_commands` 的参数。处理函数把执行记进插件的命令队列。
 fn command_arguments(
     arguments: &HostArguments,
@@ -790,6 +941,9 @@ fn event_value(event: &HostEvent) -> HostValue {
         HostEvent::ThemesChanged => HostObject::new().field("type", "themes_changed"),
         HostEvent::LayoutsChanged => HostObject::new().field("type", "layouts_changed"),
         HostEvent::CommandsChanged => HostObject::new().field("type", "commands_changed"),
+        HostEvent::SettingsPagesChanged => {
+            HostObject::new().field("type", "settings_pages_changed")
+        }
     };
     object.into()
 }
@@ -955,6 +1109,129 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.message().contains("只能在视图"));
+    }
+
+    fn object(fields: &[(&str, HostValue)]) -> HostValue {
+        let mut object = HostObject::new();
+        for (name, value) in fields {
+            object = object.field(*name, value.clone());
+        }
+        object.into()
+    }
+
+    /// 只认 `settings.tsx`，记下问过哪些入口。
+    fn loader(asked: Rc<RefCell<Vec<String>>>) -> SettingsPageLoader {
+        SettingsPageLoader {
+            icon: "icons/puzzle.svg".into(),
+            load: Rc::new(move |entry| {
+                asked.borrow_mut().push(entry.to_string());
+                if entry == "settings.tsx" {
+                    Ok(Rc::new(|_, _| unreachable!("登记时不建页")))
+                } else {
+                    Err(format!("插件目录里没有 {entry}"))
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn settings_page_registration_rejects_invalid_arguments_before_entering_app() {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let module = JsPlugin::for_plugin("example", "示例")
+            .with_settings_loader(loader(asked.clone()))
+            .module();
+        let page = |fields: &[(&str, HostValue)]| HostValue::Array(vec![object(fields)]);
+        let valid = [
+            ("name", HostValue::from("prefs")),
+            ("title", "偏好".into()),
+            ("entry", "settings.tsx".into()),
+        ];
+        let with = |extra: (&str, HostValue)| {
+            let mut fields = valid.to_vec();
+            fields.push(extra);
+            page(&fields)
+        };
+        for arguments in [
+            HostArguments::default(),
+            HostArguments::new([HostValue::Null]),
+            HostArguments::new([HostValue::Array(vec![HostValue::Null])]),
+            HostArguments::new([page(&valid[..2])]),
+            HostArguments::new([page(&[valid[0].clone(), valid[2].clone()])]),
+            HostArguments::new([with(("group", "sidebar".into()))]),
+            HostArguments::new([with(("keywords", "通知".into()))]),
+            HostArguments::new([with((
+                "keywords",
+                HostValue::Array(vec![HostValue::Number(1.0)]),
+            ))]),
+            HostArguments::new([page(&[
+                valid[0].clone(),
+                valid[1].clone(),
+                ("entry", "missing.tsx".into()),
+            ])]),
+        ] {
+            let error = module
+                .call("register_settings_pages", &arguments)
+                .unwrap_err();
+            assert!(
+                !error.message().contains("只能在视图"),
+                "{}",
+                error.message()
+            );
+        }
+        // 参数对了才进 App；测试里没有 App。入口在进 App 前就交给加载器校验过。
+        let error = module
+            .call(
+                "register_settings_pages",
+                &HostArguments::new([with(("group", "general".into()))]),
+            )
+            .unwrap_err();
+        assert!(
+            error.message().contains("只能在视图"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(
+            asked.borrow().last().map(String::as_str),
+            Some("settings.tsx")
+        );
+    }
+
+    #[test]
+    fn settings_pages_need_a_loader() {
+        let module = JsPlugin::for_plugin("example", "示例").module();
+        let error = module
+            .call(
+                "register_settings_pages",
+                &HostArguments::new([HostValue::Array(Vec::new())]),
+            )
+            .unwrap_err();
+        assert!(
+            error.message().contains("不能登记设置页"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn a_settings_page_script_cannot_register_anything() {
+        let module = JsPlugin::for_settings_page("example", "示例")
+            .with_settings_loader(loader(Rc::default()))
+            .module();
+        for name in [
+            "register_themes",
+            "register_layouts",
+            "register_commands",
+            "register_settings_pages",
+        ] {
+            let error = module
+                .call(name, &HostArguments::new([HostValue::Array(Vec::new())]))
+                .unwrap_err();
+            assert!(error.message().contains("设置页入口里不能登记"), "{name}");
+        }
+        let error = module
+            .call("register_file_opener", &HostArguments::new(["open".into()]))
+            .unwrap_err();
+        assert!(error.message().contains("设置页入口里不能登记"));
     }
 
     #[test]

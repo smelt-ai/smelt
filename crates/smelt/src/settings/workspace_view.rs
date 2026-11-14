@@ -72,9 +72,10 @@ impl Workspace {
     pub(super) fn render_settings_content(
         entity: Entity<Workspace>,
         snapshot: &SettingsRenderSnapshot,
+        plugin_page: Option<AnyView>,
         cx: &App,
     ) -> Div {
-        render::render_settings_content(entity, snapshot, cx)
+        render::render_settings_content(entity, snapshot, plugin_page, cx)
     }
 
     /// 设置里有没有要你处理的事，有的话落在哪一页：有新版本、后台服务旧了 → 系统；有机器

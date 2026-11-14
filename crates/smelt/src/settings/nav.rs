@@ -4,7 +4,9 @@
 //! 滚动到分组，右侧仍是整页。这里把每一页做成独立 `SettingsSection`，由壳层只渲染
 //! 当前这一页；页内再用 `SettingGroup` 分节。
 
+use gpui::SharedString;
 use gpui_component::{Icon, IconName};
+use smelt_plugin_api::{SettingsGroup, SettingsPage};
 
 /// 设置窗口当前选中的内容页。深链接（检查更新、外观、机器、资源）也走这里。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -25,6 +27,8 @@ pub enum SettingsSection {
     Maintenance,
     /// 版本、应用更新（macOS、Windows）、帮助与反馈。
     About,
+    /// 插件登记的页（见 `smelt_plugin_api::register_settings_pages`），带登记的 id。
+    Plugin(SharedString),
 }
 
 impl SettingsSection {
@@ -38,7 +42,7 @@ impl SettingsSection {
         Self::About
     }
 
-    pub fn element_key(&self) -> gpui::SharedString {
+    pub fn element_key(&self) -> SharedString {
         match self {
             Self::Appearance => "appearance".into(),
             Self::Notifications => "notifications".into(),
@@ -49,6 +53,7 @@ impl SettingsSection {
             Self::Resources => "resources".into(),
             Self::Maintenance => "maintenance".into(),
             Self::About => "about".into(),
+            Self::Plugin(id) => format!("plugin:{id}").into(),
         }
     }
 }
@@ -68,8 +73,38 @@ pub struct SettingsNavCategory {
     pub children: Vec<SettingsNavLeaf>,
 }
 
-/// 设置侧栏：三组，每组一行小标题加若干页。
-pub fn settings_nav() -> Vec<SettingsNavCategory> {
+/// 设置侧栏：宿主的三组，每组一行小标题加若干页；插件的页按它挑的组排在宿主的页后面，
+/// 挑「插件」组的单独成一组放在最后。
+pub fn settings_nav(plugin_pages: &[SettingsPage]) -> Vec<SettingsNavCategory> {
+    let mut nav = host_nav();
+    let mut plugins = SettingsNavCategory {
+        title: "插件",
+        keywords: &["扩展", "plugin"],
+        children: Vec::new(),
+    };
+    for page in plugin_pages {
+        let leaf = SettingsNavLeaf {
+            title: page.title.to_string(),
+            icon: Icon::empty().path(page.icon.clone()),
+            section: SettingsSection::Plugin(page.id.clone()),
+            keywords: page.keywords.iter().map(ToString::to_string).collect(),
+        };
+        let category = match page.group {
+            SettingsGroup::General => &mut nav[0],
+            SettingsGroup::Agents => &mut nav[1],
+            SettingsGroup::System => &mut nav[2],
+            SettingsGroup::Plugins => &mut plugins,
+        };
+        category.children.push(leaf);
+    }
+    if !plugins.children.is_empty() {
+        nav.push(plugins);
+    }
+    nav
+}
+
+/// 宿主自己的页：通用、Agent 与远程、系统三组，次序和 [`settings_nav`] 里按组放插件页对应。
+fn host_nav() -> Vec<SettingsNavCategory> {
     vec![
         SettingsNavCategory {
             title: "通用",
@@ -484,7 +519,7 @@ mod tests {
 
     #[test]
     fn nav_is_two_groups_of_pages() {
-        let nav = settings_nav();
+        let nav = settings_nav(&[]);
         assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统"]);
         assert_eq!(
             child_titles(&nav, "通用"),
@@ -515,7 +550,7 @@ mod tests {
 
     #[test]
     fn search_keeps_only_matching_pages_under_their_group() {
-        let nav = settings_nav();
+        let nav = settings_nav(&[]);
         let filtered = filter_settings_nav(&nav, "守护");
         assert_eq!(titles(&filtered), ["系统"]);
         assert_eq!(child_titles(&filtered, "系统"), ["维护"]);
@@ -526,7 +561,7 @@ mod tests {
 
     #[test]
     fn search_understands_user_tasks_and_multiple_terms() {
-        let nav = settings_nav();
+        let nav = settings_nav(&[]);
         assert_eq!(
             matching_sections(&nav, "agent通知"),
             [SettingsSection::Notifications]
@@ -557,9 +592,53 @@ mod tests {
         }
     }
 
+    fn plugin_page(id: &str, title: &str, group: SettingsGroup, keywords: &[&str]) -> SettingsPage {
+        SettingsPage {
+            id: id.to_string().into(),
+            title: title.to_string().into(),
+            icon: "icons/bell.svg".into(),
+            group,
+            keywords: keywords
+                .iter()
+                .map(|word| SharedString::from(word.to_string()))
+                .collect(),
+            build: std::rc::Rc::new(|_, _| unreachable!("侧栏不建页")),
+        }
+    }
+
+    #[test]
+    fn plugin_pages_go_after_the_host_pages_of_their_group() {
+        let pages = [
+            plugin_page("notify/main", "提醒", SettingsGroup::General, &["系统通知"]),
+            plugin_page("trader/prefs", "行情", SettingsGroup::Plugins, &["股票"]),
+            plugin_page("probe/disk", "磁盘", SettingsGroup::System, &[]),
+        ];
+        let nav = settings_nav(&pages);
+        assert_eq!(titles(&nav), ["通用", "Agent 与远程", "系统", "插件"]);
+        assert_eq!(
+            child_titles(&nav, "通用"),
+            ["外观", "通知", "快捷键", "面板插件", "提醒"]
+        );
+        assert_eq!(
+            child_titles(&nav, "系统"),
+            ["资源占用", "维护", "关于", "磁盘"]
+        );
+        assert_eq!(child_titles(&nav, "插件"), ["行情"]);
+        // 没有挑「插件」组的页就没有这一组。
+        assert_eq!(
+            titles(&settings_nav(&pages[..1])),
+            ["通用", "Agent 与远程", "系统"]
+        );
+
+        assert_eq!(
+            matching_sections(&nav, "股票"),
+            [SettingsSection::Plugin("trader/prefs".into())]
+        );
+    }
+
     #[test]
     fn element_keys_are_unique() {
-        let keys = settings_nav()
+        let keys = settings_nav(&[])
             .into_iter()
             .flat_map(|category| category.children)
             .map(|child| child.section.element_key())
