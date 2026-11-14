@@ -2,7 +2,8 @@
 //!
 //! 会话状态产生的提醒（等批准、完成……）由运行时判定；这里是智能体自己判断「这件事值得打扰
 //! 用户」时发的一条消息，内容由它写。两头都发：
-//! - 桌面：经 `terminal.notification` 带标题发给连着的客户端，和终端 OSC 通知进同一个关注队列；
+//! - 提醒（`crate::attention`）：记成这段会话的未读、响一下；命令行发的只响。旧桌面还读
+//!   `terminal.notification`，也照发一份；
 //! - 手机：交给 [`crate::push::send_message`]，推给登记了「智能体消息」的手机，人在不在 Mac 前
 //!   都推。
 //!
@@ -86,6 +87,12 @@ fn deliver(
             false
         }
     };
+    event_hub.notify_attention(
+        session_id,
+        smelt_event_protocol::AttentionKind::Notice,
+        &display.desktop_title,
+        message,
+    );
     let phones = crate::push::send_message(
         push_session,
         display.push_title.as_deref(),

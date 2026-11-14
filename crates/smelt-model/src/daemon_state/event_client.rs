@@ -675,6 +675,13 @@ fn decode_projection_event<T: serde::de::DeserializeOwned>(
     decode_payload(projection.data, label)
 }
 
+/// 线上的会话状态转成客户端的。运行时自己算提醒时也用这一份，和各端读到的相位、摘要一致。
+impl From<SessionStateChanged> for DaemonSessionState {
+    fn from(state: SessionStateChanged) -> Self {
+        daemon_session_state(state)
+    }
+}
+
 fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
     DaemonSessionState {
         id: state.session_id,

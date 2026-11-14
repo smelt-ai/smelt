@@ -185,6 +185,7 @@ define_control_methods! {
     PushRegister => (PUSH_REGISTER_METHOD, "push.register"),
     PushUnregister => (PUSH_UNREGISTER_METHOD, "push.unregister"),
     NotifySend => (NOTIFY_SEND_METHOD, "notify.send"),
+    AttentionMarkRead => (ATTENTION_MARK_READ_METHOD, "attention.mark_read"),
     NewSessionPinsGet => (NEW_SESSION_PINS_GET_METHOD, "new_session.pins.get"),
     NewSessionPinsToggle => (NEW_SESSION_PINS_TOGGLE_METHOD, "new_session.pins.toggle"),
     TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
@@ -222,6 +223,8 @@ impl ControlMethod {
         Self::PushUnregister,
         // 智能体通知：旧运行时没有，`smelt notify` 报错。
         Self::NotifySend,
+        // 提醒已读：旧运行时没有提醒，也就没有可清的。
+        Self::AttentionMarkRead,
         // 额度开关：旧运行时没有，设置页显示读取失败，侧栏额度照常。
         Self::QuotaSettingsGet,
         Self::QuotaSetEnabled,

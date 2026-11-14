@@ -12,9 +12,9 @@
 OSC 7501 程序状态根记录（smeltd 扫）──┐
                                       ↓
                                smeltd reducer → DaemonPhase + 会话名 → AgentStatus + AttentionItem
-OSC 9/99/777（smeltd 扫）/ BEL（TerminalView）──→ Informational AttentionItem
+OSC 9/99/777 / BEL（smeltd 扫）──────→ Informational AttentionItem
                                                        ↓
-                                            铃铛 / 系统通知 / Dock / 菜单栏
+                         smeltd 提醒台账（attention.changed）→ 手机推送 / 桌面 / 手机
 ```
 
 ## 领域模型
@@ -90,9 +90,10 @@ provider 工具名只在适配层用于把原始 hook 判定为这些稳定语�
 OSC 9/99/777 由 smeltd 在 PTY 输出泵里扫（alacritty 不解析），会话没有结构化事件时发
 `terminal.notification`，桌面收到后进同一个 store。只扫实时输出：reattach / resume 的
 keyframe 不经过这里，历史通知不会被当成新的再弹。这样通知不依赖终端 pane 是否打开、
-终端连接是否 attach、慢客户端是否被流控合并跳过了这段输出。没有任何桌面订阅（应用
-没开）时发生的通知直接丢弃，不补发。BEL 仍由 `TerminalView` 处理（有宽限期，受设置
-开关控制）。
+终端连接是否 attach、慢客户端是否被流控合并跳过了这段输出。BEL 在同一处由终端模拟器的
+响铃事件记下，每批输出喂完取一次，一批里响几次都只算一次；reattach 前的 keyframe 里的
+响铃先丢掉。两者都进运行时提醒台账（见下），`terminal.notification` 只是给还没改订阅
+`attention.changed` 的桌面留的。
 
 OSC 7501（[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)）
 在同一处扫。smeltd 回应 `OSC 7501 ; ?` 探测（在把这批输出交给客户端之前写回 PTY，保证
@@ -118,6 +119,25 @@ shell 提示符（OSC 133 `A`）出现时作废，smelt 目前没有 shell 集�
 hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在会话状态中，不改写不可变
 的启动命令 `launch`；它与标题通过 `session.state_changed` 下发。会话状态宽容读取，旧 daemon
 没带的字段读成缺省。
+
+### 运行时提醒台账
+
+提醒（要处理的事、没看过的事）由 smeltd 判定，各端只显示：`crates/smeltd/src/attention.rs`
+的 `AttentionLedger` 挂在事件中枢上，每次发 `session.state_changed` 时用同一份状态比较
+相位边沿，会话删除时清掉。每个会话最多两项：
+
+- `action`：等批准、等输入、失败。会话离开这个相位才清，用户看过不清。
+- `unread`：最近一条没看过的提醒（审批、输入、成功、失败、终端通知、响铃）。用户在这个
+  会话里有动作就清：终端里打字、手机上批准 / 回复、对话里发消息、批准、回答、停下、重试，
+  或任何一端调 Control API `attention.mark_read`。任务、自动化投递进来的消息不算。
+
+第一次见到一个会话（smeltd 启动、恢复会话）只建基线：已经在等的记成 `action`，不记未读、
+不响。只认结构化、权威的相位；猜出来的不算。自动化运行的会话完成、失败不提醒（结果走
+`automations.changed`），后台对话的终端通知只响不记未读。每条要「响」的提醒（`alert`）
+同一会话同样的内容 60 秒内只响一次。
+
+台账以快照 `core.attention.v1` + 事件 `attention.changed`（带 revision、该会话的新状态、
+要响的那条）发布，单独一条订阅：v7 运行时不认这个话题。没有订阅者时不编码事件。
 
 所有出口读取同一个 store：
 
@@ -213,11 +233,9 @@ iOS 把 App 挂起后 iroh 连接就断了，等批准、等输入、运行失�
 smeltd 自己产生，不依赖手机连着，也不依赖桌面 GUI 在线；APNs 的 `.p8` 私钥在推送中继
 （`smelt-push-relay`）上，部署见 [`push-relay-deployment.md`](push-relay-deployment.md)。
 
-- **同源判定**：smeltd 在进程内订阅自己的 `session.state_changed` / `session.removed`，用
-  客户端同一个 `DaemonStateEventClient` 解码，再用同一套 `apply_daemon_baseline` /
-  `apply_daemon_transition` 算边沿（`crates/smeltd/src/push.rs`）。首份快照只建基线；落后时
-  按快照重新对齐，之后照常比较边沿。推审批、输入、失败、成功四种，响铃和普通提示不推；
-  另有智能体主动发的消息，见上一节。
+- **同源判定**：推送直接由运行时提醒台账驱动（见上），和桌面、手机看到的是同一次判定。
+  要响的审批、输入、失败、成功推出去，响铃和终端通知不推；`action` 清掉（处理了、会话没了）
+  就撤掉还没送出的那条。另有智能体主动发的消息，见上一节。
 - **登记**：手机先找中继用 APNs 令牌换**句柄**（中继用自己的密钥加密过的令牌，中继不存
   设备表），再经 iroh 调 `push.register` 把句柄、中继地址和要推的类型登记到每台机器。
   smeltd 按连接的设备身份写 `push_registration` 表（外键挂在 `paired_device` 上，撤销设备

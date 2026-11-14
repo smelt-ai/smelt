@@ -6,10 +6,6 @@ use smelt_event_protocol::{
 };
 use std::collections::BTreeSet;
 
-fn no_subscribers() -> EventHubHandle {
-    new_event_hub()
-}
-
 fn session_events(event_hub: &EventHubHandle) -> smelt_event_bus::Subscription {
     event_hub
         .subscribe(
@@ -45,11 +41,8 @@ fn session_for(script: &[u8], cell: (u16, u16)) -> (Session, std::fs::File) {
     let master = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     let state = Arc::new(Mutex::new(SessionState::default()));
     let replies = Arc::new(Mutex::new(VecDeque::new()));
-    let listener = StateListener::with_replies(
-        Arc::clone(&state),
-        no_subscribers(),
-        Arc::clone(&replies),
-    );
+    let bell = Arc::new(AtomicBool::new(false));
+    let listener = StateListener::new(Arc::clone(&replies), Arc::clone(&bell));
     let mut term = new_daemon_term(24, 80, listener);
     let mut parser: Processor = Processor::new();
 
@@ -77,6 +70,7 @@ fn session_for(script: &[u8], cell: (u16, u16)) -> (Session, std::fs::File) {
         }),
         output_gate: Mutex::new(()),
         replies,
+        bell,
         term: Mutex::new(term),
         graphics: Mutex::default(),
         state,
@@ -209,171 +203,56 @@ fn osc_title_parser_preserves_the_complete_visible_payload() {
             "✳ 审查权限门闩".to_string(),
         ]
     );
+}
 
-    let state = Arc::new(Mutex::new(SessionState::default()));
-    let listener = StateListener::new(Arc::clone(&state), no_subscribers());
-    let mut term = new_daemon_term(24, 80, listener);
+/// 监听器只记响铃，留给泵交给提醒。标题的 BEL 结束符不算响铃。
+#[test]
+fn bell_is_recorded_for_the_pump() {
+    let replies = Arc::new(Mutex::new(VecDeque::new()));
+    let bell = Arc::new(AtomicBool::new(false));
+    let mut term = new_daemon_term(24, 80, StateListener::new(replies, Arc::clone(&bell)));
     let mut parser: Processor = Processor::new();
-    parser.advance(
-        &mut term,
-        "\x1b]0;⠼ - Preparing read_file... - grok\x07".as_bytes(),
-    );
-    parser.advance(&mut term, "\x1b]2;✳ 审查权限门闩\x1b\\".as_bytes());
-    let st = state.lock().unwrap();
-    assert_eq!(st.title, None, "OSC 原文不是会话名");
-    assert_eq!(st.revision, 0);
-    assert_eq!(st.updated_at, 0);
+    parser.advance(&mut term, b"\x1b]0;title\x07");
+    assert!(!bell.load(Ordering::Acquire));
+    parser.advance(&mut term, b"done\x07");
+    assert!(bell.load(Ordering::Acquire));
 }
 
-/// OSC 标题不进会话状态：不改 phase、活动时间、revision，也不写会话名。
+/// 终端通知和响铃只在没有 hook 的会话上进提醒：有 hook 的智能体自己也会响铃、发 OSC。
 #[test]
-fn terminal_titles_never_change_phase_or_phase_since() {
-    for phase in [
-        Phase::Idle,
-        Phase::Thinking,
-        Phase::ExecutingTool,
-        Phase::AwaitingApproval,
-        Phase::WaitingForUser,
-        Phase::Succeeded,
-        Phase::Failed,
-        Phase::Dead,
-    ] {
-        let state = Arc::new(Mutex::new(SessionState {
-            phase,
-            phase_since: 1,
-            updated_at: 9,
+fn terminal_notices_become_attention_only_without_hooks() {
+    let event_hub = new_event_hub();
+    for (id, structured) in [("plain", false), ("hooked", true)] {
+        let state = SessionState {
+            id: id.into(),
+            instance: 1,
+            revision: 1,
+            structured_events: structured,
             ..Default::default()
-        }));
-        let listener = StateListener::new(Arc::clone(&state), no_subscribers());
-        listener.send_event(Event::Title(
-            "Thinking - TSLA 趋势且入场与 put 判断 - grok".to_string(),
-        ));
-        listener.send_event(Event::Title("⠋ doing work".to_string()));
-
-        let st = state.lock().unwrap();
-        assert_eq!(st.phase, phase, "标题不该改变 {phase:?}");
-        assert_eq!(st.phase_since, 1, "标题不该刷新 {phase:?} 的开始时间");
-        assert_eq!(st.updated_at, 9, "标题帧不是会话活动");
-        assert_eq!(st.title, None, "OSC 不写入会话名");
-        assert_eq!(st.revision, 0);
+        };
+        event_hub.publish_session(&state).unwrap();
+        publish_terminal_notifications(
+            &Mutex::new(state),
+            id,
+            &event_hub,
+            vec!["构建完成".into()],
+            true,
+        );
     }
-}
-
-#[test]
-fn terminal_title_does_not_replace_the_session_name() {
-    let state = Arc::new(Mutex::new(SessionState {
-        cwd: Some("/Users/me/code/smelt".into()),
-        launch: Some("codex --dangerously-bypass-approvals-and-sandbox".into()),
-        title: Some("修复 Codex 标题".into()),
-        phase: Phase::Thinking,
-        phase_since: 1,
-        revision: 7,
-        updated_at: 9,
-        structured_events: true,
-        turn_events: true,
-        ..Default::default()
-    }));
-    let listener = StateListener::new(Arc::clone(&state), no_subscribers());
-    listener.send_event(Event::Title("⠙ smelt".to_string()));
-
-    let st = state.lock().unwrap();
-    assert_eq!(st.title.as_deref(), Some("修复 Codex 标题"));
-    assert_eq!(st.revision, 7, "OSC 不发布新会话名");
-    assert_eq!(st.updated_at, 9, "OSC 标题帧不应刷新会话活动时间");
-}
-
-#[test]
-fn terminal_title_does_not_rename_any_provider() {
-    for provider in ["grok", "codex", "claude", "copilot", "opencode"] {
-        let state = Arc::new(Mutex::new(SessionState {
-            provider: Some(provider.into()),
-            title: Some("UAT 问题修复".into()),
-            revision: 3,
-            updated_at: 9,
-            ..Default::default()
-        }));
-        let listener = StateListener::new(Arc::clone(&state), no_subscribers());
-        listener.send_event(Event::Title(
-            "Action Required - 等你批准 - grok".to_string(),
-        ));
-        listener.send_event(Event::Title(
-            "⠼ - Thinking - CPXM-1479 DVP UAT 前端修复并撤回后端 - grok".to_string(),
-        ));
-
-        let st = state.lock().unwrap();
-        assert_eq!(st.title.as_deref(), Some("UAT 问题修复"));
-        assert_eq!(st.revision, 3, "{provider} 的终端标题不是会话名");
-        assert_eq!(st.updated_at, 9);
-    }
-}
-
-/// Bell 只更新时间戳，不改 phase——单独响铃太不可靠，只能当辅助信号。
-#[test]
-fn bell_touches_timestamp_without_changing_phase() {
-    let state = Arc::new(Mutex::new(SessionState {
-        phase: Phase::Idle,
-        ..Default::default()
-    }));
-    let listener = StateListener::new(Arc::clone(&state), no_subscribers());
-    listener.send_event(Event::Bell);
-
-    let st = state.lock().unwrap();
-    assert_eq!(st.phase, Phase::Idle);
-    assert!(st.updated_at > 0);
-}
-
-/// 广播：state 变化后，所有订阅者都该收到一行 `{"session": ...}`。
-#[test]
-fn send_event_broadcasts_to_subscribers() {
-    let subscribers = new_event_hub();
-    let events = session_events(&subscribers);
-    let state = Arc::new(Mutex::new(SessionState {
-        id: "t".into(),
-        ..Default::default()
-    }));
-    let listener = StateListener::new(state, subscribers);
-    listener.send_event(Event::Bell);
-
-    let event = next_session_event(&events);
-    let state: SessionStateChanged =
-        serde_json::from_value(event.envelope.payload.clone()).unwrap();
-    assert_eq!(state.session_id, "t");
-    assert_eq!(state.phase, smelt_event_protocol::CoreSessionPhase::Idle);
-    assert_eq!(state.title, None);
-    assert!(state.updated_at_unix_seconds > 0);
-}
-
-#[test]
-fn osc_title_broadcast_is_not_persisted_in_identity_directory() {
-    let _guard = session_directory::DIRECTORY_TEST_LOCK.lock().unwrap();
-    let temp =
-        std::env::temp_dir().join(format!("smelt-title-transient-test-{}", std::process::id()));
-    let previous_dir = std::env::var_os("SMELT_GHOST_SESSIONS_DIR");
-    let _ = std::fs::remove_dir_all(&temp);
-    std::fs::create_dir_all(&temp).unwrap();
-    unsafe { std::env::set_var("SMELT_GHOST_SESSIONS_DIR", &temp) };
-    set_session_directory_for_test(session_directory::SessionDirectory::new());
-
-    let state = Arc::new(Mutex::new(SessionState {
-        id: "title-only".into(),
-        instance: 1,
-        ..Default::default()
-    }));
-    let listener = StateListener::new(state, new_event_hub());
-    listener.send_event(Event::Title("⠙ exact OSC title".to_string()));
-    let directory_snapshot =
-        with_session_directory(|directory| directory.snapshot()).unwrap_or_default();
-
-    clear_session_directory_for_test();
-    match previous_dir {
-        Some(path) => unsafe { std::env::set_var("SMELT_GHOST_SESSIONS_DIR", path) },
-        None => unsafe { std::env::remove_var("SMELT_GHOST_SESSIONS_DIR") },
-    }
-    let _ = std::fs::remove_dir_all(&temp);
-
-    assert!(
-        directory_snapshot.is_empty(),
-        "OSC 标题不进会话状态，也不进崩溃恢复目录"
+    let snapshot = event_hub
+        .runtime()
+        .snapshot(&smelt_event_protocol::SnapshotKind(
+            smelt_event_protocol::CORE_SNAPSHOT_ATTENTION.into(),
+        ))
+        .unwrap();
+    let snapshot: smelt_event_protocol::AttentionSnapshot =
+        serde_json::from_value(snapshot.payload).unwrap();
+    assert_eq!(snapshot.sessions.len(), 1);
+    assert_eq!(snapshot.sessions[0].session_id, "plain");
+    assert_eq!(
+        snapshot.sessions[0].unread.as_ref().map(|item| item.kind),
+        Some(smelt_event_protocol::AttentionKind::Bell),
+        "同一批里的通知先记，响铃后记"
     );
 }
 
