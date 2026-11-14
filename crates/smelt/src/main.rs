@@ -795,15 +795,19 @@ impl Session {
     fn title(&self, cx: &App) -> String {
         match &self.kind {
             SessionKind::Term { active, .. } => {
-                let pane_custom = active.read(cx).custom_title().map(str::to_string);
-                let conversation_custom = pane_conversation_custom_title(active, cx);
-                terminal_session_display_title(
-                    conversation_custom.as_deref(),
-                    self.custom_title.as_deref(),
-                    self.pane_count(),
-                    pane_custom.as_deref(),
-                    pane_auto_title(active, cx),
-                )
+                let view = active.read(cx);
+                let state = daemon_state_for(active, cx);
+                let state = state.as_ref();
+                smelt_model::session_title::TerminalTitle {
+                    conversation_custom: state.and_then(|state| state.custom_title.as_deref()),
+                    session_custom: self.custom_title.as_deref(),
+                    pane_count: self.pane_count(),
+                    pane_custom: view.custom_title(),
+                    session_title: state.and_then(|state| state.title.as_deref()),
+                    launch_label: view.launch_label(),
+                    fallback: Some(view.title()),
+                }
+                .display()
             }
             SessionKind::Conversation(view) => self.custom_title.clone().unwrap_or_else(|| {
                 let view = view.read(cx);
@@ -1025,33 +1029,6 @@ fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
         t.launch_label(),
         Some(t.title()),
     )
-}
-
-/// 侧栏会话行显示名。
-///
-/// 「当前对话的用户命名」排在最前：终端里的 agent 换一段对话，这一行就该跟着
-/// 换名字，而不是继续顶着上一段对话的标题。会话级/pane 级的 pin 只服务于没有
-/// 对话身份的终端（裸 shell、hook 不带 id 的 provider）。
-fn terminal_session_display_title(
-    conversation_custom: Option<&str>,
-    session_custom: Option<&str>,
-    pane_count: usize,
-    pane_custom: Option<&str>,
-    auto_title: String,
-) -> String {
-    nonempty_title(conversation_custom)
-        .or_else(|| nonempty_title(session_custom))
-        .or_else(|| {
-            (pane_count == 1)
-                .then(|| nonempty_title(pane_custom))
-                .flatten()
-        })
-        .map(str::to_string)
-        .unwrap_or(auto_title)
-}
-
-fn nonempty_title(title: Option<&str>) -> Option<&str> {
-    title.map(str::trim).filter(|title| !title.is_empty())
 }
 
 fn resolve_terminal_provider(

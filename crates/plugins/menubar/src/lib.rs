@@ -16,7 +16,7 @@ use std::rc::Rc;
 use api::model::agent_kind::{ConversationAgentKind, agent_id_from_launch};
 use api::model::agent_status::{AgentStatus, terminal_agent_status};
 use api::model::daemon_state::DaemonSessionState;
-use api::model::session_title::{acp_display_title, display_title};
+use api::model::session_title::{TerminalTitle, acp_display_title, display_title};
 use api::model::workspace_directory::WorkspaceConversation;
 use api::sessions::{self, Activate};
 use api::ui::ui_theme::agent_status_u32;
@@ -197,26 +197,19 @@ fn conversation_row(
             .iter()
             .filter_map(|terminal| Some((terminal.id.clone()?, terminal)))
             .collect();
-        // 名字和 agent 取第一格：只有一格时就是它；多格时对话的名字是用户给整段起的。
+        // 菜单栏不知道哪格是活动的，名字和 agent 取第一格；规则和侧栏是同一条。
         let (first_id, first) = started.first()?;
         let state = states.get(first_id);
-        let custom = if conversation.terminals.len() == 1 {
-            first
-                .custom_title
-                .as_deref()
-                .or(conversation.custom_title.as_deref())
-        } else {
-            conversation
-                .custom_title
-                .as_deref()
-                .or(first.custom_title.as_deref())
-        };
-        let title = display_title(
-            custom.or(state.and_then(|state| state.custom_title.as_deref())),
-            state.and_then(|state| state.title.as_deref()),
-            first.launch_label.as_deref(),
-            None,
-        );
+        let title = TerminalTitle {
+            conversation_custom: state.and_then(|state| state.custom_title.as_deref()),
+            session_custom: conversation.custom_title.as_deref(),
+            pane_count: conversation.terminals.len(),
+            pane_custom: first.custom_title.as_deref(),
+            session_title: state.and_then(|state| state.title.as_deref()),
+            launch_label: first.launch_label.as_deref(),
+            fallback: None,
+        }
+        .display();
         // 明确的启动命令优先；裸终端里手动起的 agent 认 hook 报的。
         let agent = first
             .launch_cmd

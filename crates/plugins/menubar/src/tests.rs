@@ -103,15 +103,25 @@ fn terminal_status_name_and_agent() {
     assert!(agent_id_from_launch("claude").is_some());
     assert_eq!(row.agent.as_deref(), agent_id_from_launch("claude"));
 
-    // 只有一格时格子自己的名字优先；没有启动命令就认 hook 报的。
+    // 和侧栏同一条规则：对话的用户命名 > 会话名 > 只有一格时的格子名。
     let mut single = terminals(&[Some("a")]);
-    single.custom_title = Some("对话名".into());
     single.terminals[0].custom_title = Some("格子名".into());
     let mut reported = states(&[("a", DaemonPhase::Idle)]);
     reported.get_mut("a").unwrap().provider = Some("codex".into());
     let row = conversation_row(&single, &reported, None).unwrap();
     assert_eq!(row.title, "格子名");
+    // 没有启动命令就认 hook 报的。
     assert_eq!(row.agent.as_deref(), Some("codex"));
+    single.custom_title = Some("会话名".into());
+    assert_eq!(
+        conversation_row(&single, &reported, None).unwrap().title,
+        "会话名"
+    );
+    reported.get_mut("a").unwrap().custom_title = Some("对话名".into());
+    assert_eq!(
+        conversation_row(&single, &reported, None).unwrap().title,
+        "对话名"
+    );
 }
 
 #[test]
