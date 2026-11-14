@@ -679,16 +679,24 @@ impl Workspace {
 
 /// 侧栏最顶的「新对话」。开哪个智能体、没有时去哪选由智能体插件定；插件没装就没有这个
 /// 按钮。悬停提示带上命令现在的快捷键。
+/// 标题是命令的：智能体插件把默认智能体写在里面（「新对话 · 写作助手」）。
 fn new_conversation_button(cx: &App) -> Option<AnyElement> {
-    smelt_plugin_api::command(NEW_CONVERSATION, cx)?;
+    let title = smelt_plugin_api::command(NEW_CONVERSATION, cx)?.title;
     Some(
         Button::new("workbench-chat")
             .normal()
             .w_full()
+            .min_w_0()
             .icon(IconName::Plus)
-            .label("新对话")
+            .accessibility_label(title.clone())
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(truncated_line(title.clone())),
+            )
             .tooltip_with_action(
-                "新对话",
+                title,
                 &smelt_plugin_api::RunCommand::new(NEW_CONVERSATION),
                 None,
             )

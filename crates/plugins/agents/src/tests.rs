@@ -8,8 +8,8 @@ use smelt_plugin_api::model::daemon_state::DaemonPhase;
 // 不用 `use super::*;`：父模块有 gpui 的 glob 导入，`gpui::test` 会顶掉 `#[test]`，
 // 也让 trait 解析变慢。只导入用到的名字。
 use super::model::{
-    MemoryFilter, agent_catalog_monogram, memory_summary_text, session_phase_settled,
-    visible_memories,
+    MemoryFilter, agent_catalog_monogram, memory_summary_text, new_conversation_title,
+    session_phase_settled, visible_memories,
 };
 
 fn memory(name: &str, kind: Option<&str>) -> MemoryEntry {
@@ -205,4 +205,19 @@ mod agent_definition_ui_tests {
         assert_eq!(agent_usage_summary(0, 1), "1 条自动化");
         assert_eq!(agent_usage_summary(2, 1), "2 段对话 · 1 条自动化");
     }
+}
+
+/// 「新对话」命令的标题带上默认智能体，侧栏按钮、命令面板、菜单看到的都是它。
+#[test]
+fn new_conversation_title_names_the_default_agent() {
+    assert_eq!(new_conversation_title(None), "新对话");
+    assert_eq!(
+        new_conversation_title(Some("写作助手")),
+        "新对话 · 写作助手"
+    );
+    assert_eq!(
+        new_conversation_title(Some("  写作助手 ")),
+        "新对话 · 写作助手"
+    );
+    assert_eq!(new_conversation_title(Some("  ")), "新对话 · 未命名");
 }

@@ -381,6 +381,14 @@ pub(crate) fn agent_display_name(name: &str) -> String {
     }
 }
 
+/// 「新对话」命令的标题：有默认智能体就带上它的名字，侧栏按钮、命令面板、菜单都显示它。
+pub(crate) fn new_conversation_title(default_name: Option<&str>) -> String {
+    match default_name {
+        Some(name) => format!("新对话 · {}", agent_display_name(name)),
+        None => "新对话".to_string(),
+    }
+}
+
 /// 卡片正文大约两行，窄窗口也不会把省略号裁掉。
 pub(crate) fn agent_card_prompt(prompt: &str) -> Option<String> {
     let compact = excerpt_text(prompt, 64);

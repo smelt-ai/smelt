@@ -78,12 +78,27 @@ pub fn register(cx: &mut App) {
         cx,
     )
     .expect("智能体的视图 id 不是宿主保留的");
+    register_commands(new_conversation_title(None), cx);
+    sync_new_conversation_title(cx);
+    let events = api::events(cx);
+    cx.subscribe(&events, |_, event, cx| {
+        if matches!(
+            event,
+            HostEvent::AgentSettingsChanged | HostEvent::MachinesChanged
+        ) {
+            sync_new_conversation_title(cx);
+        }
+    })
+    .detach();
+}
+
+fn register_commands(new_conversation_title: String, cx: &mut App) {
     api::register_commands(
         COMMAND_OWNER,
         "智能体",
         vec![CommandSpec {
             name: "new-conversation".to_string(),
-            title: "新对话".to_string(),
+            title: new_conversation_title,
             key: Some("cmd-n".to_string()),
             context: "Workspace".to_string(),
             palette: true,
@@ -93,6 +108,17 @@ pub fn register(cx: &mut App) {
         cx,
     )
     .expect("智能体的命令登记不上");
+}
+
+/// 默认智能体换了、改名了、配置读到了，「新对话」的标题跟着换。标题没变不重新登记：
+/// 登记一变宿主就重装键表和菜单。
+fn sync_new_conversation_title(cx: &mut App) {
+    let draft = built_page(cx).and_then(|page| page.read(cx).conversation_draft.clone());
+    let plan = plan_new_conversation(draft.as_ref(), cx);
+    let title = new_conversation_title(plan.default_name.as_deref());
+    if api::command(NEW_CONVERSATION, cx).is_some_and(|command| command.title != title) {
+        register_commands(title, cx);
+    }
 }
 
 /// 「新对话」：有默认就开；没有默认去智能体页选；一个都没有去建，建好的先当草稿，点
