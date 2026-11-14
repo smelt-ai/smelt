@@ -471,7 +471,7 @@ mod tests {
         );
         assert_eq!(
             rea["args"],
-            serde_json::json!(["x", "--bun", "rea-agents@6.5.0", "mcp"]),
+            serde_json::json!(["x", "--bun", "rea-agents@6.9.0", "mcp"]),
             "持久注册必须钉死版本，不能用 @latest；--bun 防止转交给系统 node"
         );
         assert_eq!(
@@ -493,7 +493,7 @@ mod tests {
                 args: vec![
                     "x".into(),
                     "--bun".into(),
-                    "rea-agents@6.5.0".into(),
+                    "rea-agents@6.9.0".into(),
                     "mcp".into(),
                 ],
             }
