@@ -62,6 +62,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ## 继续留在文件系统上的
 
 - 日志、socket（`~/.smelt/smeltd.sock`）、lock、skills
+- `~/.smelt/cache/bun-x/<包@版本>`：MCP 预设经 `smelt-agent x` 跑的包，一个钉死的版本一个目录，不进用户的 `~/.bun`。同一个包别的版本一天没用过，下次启动它时整份删掉（`agent/src/pi-mcp-runtime.ts`）
 - `~/.smelt/iroh-secret`：这台运行时的 iroh 身份，重启不变。没有 `remote-token`
 - 手机上的 `client-iroh-secret`：那台设备的身份，在 App 数据目录
 - `.claude/settings.json`、`.codex/hooks.json` 等外部产品自己的配置
