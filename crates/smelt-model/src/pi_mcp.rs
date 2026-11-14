@@ -154,6 +154,16 @@ impl PiMcpPreset {
         }
     }
 
+    /// `bun x` 跑的预设钉的那个包：`(包名, 包@版本)`。
+    pub fn pinned_package(&self) -> Option<(&'static str, &'static str)> {
+        let PiMcpPresetTransport::Bun { args } = self.transport else {
+            return None;
+        };
+        let spec = *args.iter().skip(1).find(|arg| !arg.starts_with('-'))?;
+        let at = spec.rfind('@').filter(|&at| at > 0)?;
+        Some((&spec[..at], spec))
+    }
+
     pub fn config(&self) -> Value {
         let mut entry = Map::new();
         match self.transport {

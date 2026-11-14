@@ -5,7 +5,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { DefaultResourceLoader, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import { builtInExtensions } from "../node_modules/@earendil-works/pi-coding-agent/dist/extensions/index.js";
 import { StdioTransport } from "@earendil-works/pi-mcp";
-import { bunCacheFor, createPiDefaultTransport, createSmeltMcpTransport } from "../src/pi-mcp-runtime.ts";
+import {
+	bunCacheFor,
+	createPiDefaultTransport,
+	createSmeltMcpTransport,
+	pruneOtherVersions,
+} from "../src/pi-mcp-runtime.ts";
 import { SMELT_BUILTIN_MCP_EXTENSION, smeltExtensionFactories } from "../src/runtime-extensions.ts";
 
 /** daemon 写进 Pi 进程环境的会话控制变量（见 `pi_rpc.rs` 的 `spawn_process`）。 */
@@ -118,7 +123,7 @@ describe("MCP server environment", () => {
 		expect(bunCacheFor(["x", "--bun"], env)).toBeUndefined();
 	});
 
-	test("other versions of the same package go once nobody has used them for a day", () => {
+	test("other versions of the same package go once nobody has used them for a day", async () => {
 		const home = temporaryDir();
 		const env = { SMELT_HOME: home };
 		const root = join(home, "cache", "bun-x");
@@ -134,14 +139,15 @@ describe("MCP server environment", () => {
 		make("rea-agents-extra@1.0.0", 2 * day);
 		make("@playwright+mcp@0.0.80", 2 * day);
 
-		bunCacheFor(["x", "--bun", "rea-agents@6.9.0", "mcp"], env, now);
+		expect(bunCacheFor(["x", "--bun", "rea-agents@6.9.0", "mcp"], env, now)).toBe(join(root, "rea-agents@6.9.0"));
+		await pruneOtherVersions(root, "rea-agents@6.9.0", now);
 
 		expect(existsSync(join(root, "rea-agents@6.5.0"))).toBe(false);
 		expect(existsSync(join(root, "rea-agents@6.8.0"))).toBe(true);
 		expect(existsSync(join(root, "rea-agents-extra@1.0.0"))).toBe(true);
 		expect(existsSync(join(root, "@playwright+mcp@0.0.80"))).toBe(true);
 		// 自己这份刚用过，不会被别的版本当成没人用。
-		bunCacheFor(["x", "--bun", "rea-agents@6.5.0", "mcp"], env, now + 2 * day);
+		await pruneOtherVersions(root, "rea-agents@6.5.0", now + 2 * day);
 		expect(existsSync(join(root, "rea-agents@6.9.0"))).toBe(false);
 	});
 

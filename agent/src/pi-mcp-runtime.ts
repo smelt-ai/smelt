@@ -1,4 +1,5 @@
-import { mkdirSync, readdirSync, rmSync, statSync, utimesSync } from "node:fs";
+import { mkdirSync, utimesSync } from "node:fs";
+import { readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { McpTransportFactory } from "@earendil-works/pi-coding-agent";
@@ -72,22 +73,25 @@ export function bunCacheFor(
 	try {
 		mkdirSync(dir, { recursive: true });
 		utimesSync(dir, now / 1000, now / 1000);
-		pruneOtherVersions(root, name, now);
 	} catch {
-		// 建不了目录就让 Bun 自己报；清不掉旧版本下次再说。
+		// 建不了目录就让 Bun 自己报。
+		return dir;
 	}
+	// 一份上百兆，不挡着起 server：后台删，删不掉下次启动再说。
+	pruneOtherVersions(root, name, now).catch(() => {});
 	return dir;
 }
 
-function pruneOtherVersions(root: string, name: string, now: number): void {
+/** 删掉 `root` 下同一个包别的版本里一天没用过的。 */
+export async function pruneOtherVersions(root: string, name: string, now: number): Promise<void> {
 	const at = name.lastIndexOf("@");
 	if (at <= 0) return;
 	const prefix = name.slice(0, at + 1);
-	for (const other of readdirSync(root)) {
+	for (const other of await readdir(root)) {
 		if (other === name || !other.startsWith(prefix) || other.slice(prefix.length).includes("@")) continue;
 		const dir = join(root, other);
-		if (now - statSync(dir).mtimeMs < BUN_CACHE_GRACE_MS) continue;
-		rmSync(dir, { recursive: true, force: true });
+		if (now - (await stat(dir)).mtimeMs < BUN_CACHE_GRACE_MS) continue;
+		await rm(dir, { recursive: true, force: true });
 	}
 }
 
