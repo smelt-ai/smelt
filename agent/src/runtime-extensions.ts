@@ -5,6 +5,7 @@ import {
 } from "./background-task.ts";
 import smeltCodemodeExtension from "./codemode.ts";
 import smeltContextUsageExtension from "./context-usage.ts";
+import smeltImageLimitExtension from "./image-limit.ts";
 import {
 	SMELT_ELICITATION_EXTENSION_NAME,
 	smeltElicitationExtension,
@@ -23,6 +24,8 @@ import smeltSubagentExtension, { SMELT_SUBAGENT_EXTENSION_NAME } from "./subagen
 // memory sits right before it so its validation and approval hint also see the final arguments.
 export const SMELT_EXTENSION_FACTORIES = [
 	{ name: SMELT_ELICITATION_EXTENSION_NAME, factory: smeltElicitationExtension, hidden: true },
+	// 放在 context-usage 前面：用量面板看到的就是裁过图片、真正发出去的内容
+	{ name: "smelt-image-limit", factory: smeltImageLimitExtension, hidden: true },
 	{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
 	{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 	{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },

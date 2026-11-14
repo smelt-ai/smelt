@@ -17,6 +17,7 @@ import smeltBackgroundTaskExtension, {
 import smeltCodemodeExtension from "../src/codemode.ts";
 import smeltModelRefreshExtension from "../src/model-refresh.ts";
 import smeltContextUsageExtension from "../src/context-usage.ts";
+import smeltImageLimitExtension from "../src/image-limit.ts";
 import {
 	SMELT_ELICITATION_TOOL_NAME,
 	smeltElicitationExtension,
@@ -68,6 +69,7 @@ describe("Smelt Pi extension ordering", () => {
 	test("host ships named extensions and keeps permission last", () => {
 		expect(SMELT_EXTENSION_FACTORIES).toEqual([
 			{ name: "smelt-elicitation", factory: smeltElicitationExtension, hidden: true },
+			{ name: "smelt-image-limit", factory: smeltImageLimitExtension, hidden: true },
 			{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
 			{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 			{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },

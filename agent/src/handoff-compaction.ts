@@ -1,6 +1,10 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	compact,
+	convertToLlm,
 	type ExtensionContext,
+	serializeConversation,
 	type SessionBeforeCompactEvent,
 	type SessionBeforeCompactResult,
 } from "@earendil-works/pi-coding-agent";
@@ -44,8 +48,19 @@ export function buildHandoffInstructions(customInstructions?: string): string {
 	return `${DEFAULT_HANDOFF_INSTRUCTIONS}\n\n### 用户附加交接要求 (User Focus):\n${customInstructions.trim()}`;
 }
 
+/** 摘要输出上限。预留量已按窗口比例放大，不能再跟着它涨，否则「输入 + max_tokens」更容易超窗。 */
+export const SUMMARY_MAX_TOKENS = 16_000;
+
+/** 摘要请求超窗后最多丢几次最老的历史再重试（同 Claude Code）。 */
+export const MAX_OVERFLOW_RETRIES = 3;
+
+/** 每次重试丢掉的待摘要消息比例。 */
+const DROP_RATIO = 0.2;
+
+export const TRUNCATED_FOR_RETRY_MARKER = "[earlier conversation truncated for compaction retry]";
+
 /**
- * 摘要请求用的模型：输出上限收到 `0.8 × reserveTokens`。
+ * 摘要请求用的模型：输出上限收到 `min(0.8 × reserveTokens, SUMMARY_MAX_TOKENS)`。
  *
  * Pi 的摘要请求不带 max_tokens（`generateSummary` 的 reserveTokens 参数没用上），
  * 于是落到模型自身上限。
@@ -56,22 +71,94 @@ export function summarizationModel<M extends { maxTokens: number }>(
 	model: M,
 	settings: CompactionPreparation["settings"],
 ): M {
-	const budget = Math.floor(0.8 * settings.reserveTokens);
+	const budget = Math.min(Math.floor(0.8 * settings.reserveTokens), SUMMARY_MAX_TOKENS);
 	if (model.maxTokens > 0 && model.maxTokens <= budget) {
 		return model;
 	}
 	return { ...model, maxTokens: budget };
 }
 
+/** Pi 把摘要失败包成 `Summarization failed: <provider 错误>`，用 pi-ai 的同一套规则判断是否超窗。 */
+export function isOverflowError(error: unknown): boolean {
+	const errorMessage = error instanceof Error ? error.message : String(error);
+	return isContextOverflow({ stopReason: "error", errorMessage } as AssistantMessage);
+}
+
+function dropOldest(messages: AgentMessage[]): AgentMessage[] | undefined {
+	// 开头可能是上一次重试留下的标记，不算历史
+	const start = isRetryMarker(messages[0]) ? 1 : 0;
+	const rest = messages.slice(start);
+	if (rest.length < 2) return undefined;
+	let cut = Math.max(1, Math.floor(rest.length * DROP_RATIO));
+	// 不让工具结果脱离它的调用单独留下
+	while (cut < rest.length && rest[cut]?.role === "toolResult") cut += 1;
+	if (cut >= rest.length) return undefined;
+	const marker: AgentMessage = { role: "user", content: TRUNCATED_FOR_RETRY_MARKER, timestamp: Date.now() };
+	return [marker, ...rest.slice(cut)];
+}
+
+function isRetryMarker(message: AgentMessage | undefined): boolean {
+	return message?.role === "user" && message.content === TRUNCATED_FOR_RETRY_MARKER;
+}
+
+/**
+ * 摘要请求超窗时，丢掉最老的一段待摘要历史，换一个更小的 preparation。
+ * 先丢 `messagesToSummarize`；那部分丢不动了（拆分轮次时整段都在 `turnPrefixMessages`）再丢后者。
+ * 都丢不动返回 undefined。
+ */
+export function shrinkPreparation(preparation: CompactionPreparation): CompactionPreparation | undefined {
+	const history = dropOldest(preparation.messagesToSummarize);
+	if (history) return { ...preparation, messagesToSummarize: history };
+	if (preparation.isSplitTurn) {
+		const prefix = dropOldest(preparation.turnPrefixMessages);
+		if (prefix) return { ...preparation, turnPrefixMessages: prefix };
+	}
+	return undefined;
+}
+
+/** 中文多，按 3 个字符一个 token 偏保守地估。 */
+const CHARS_PER_TOKEN = 3;
+/** 系统提示、交接指令、上一次摘要之外的余量。 */
+const PROMPT_MARGIN_TOKENS = 8_000;
+
+/** 估算摘要请求的输入大小，口径与 Pi 一致：先 `convertToLlm` 再 `serializeConversation`。 */
+export function estimateSummaryInputTokens(preparation: CompactionPreparation): number {
+	const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+	const text = serializeConversation(convertToLlm(messages));
+	return Math.ceil((text.length + (preparation.previousSummary?.length ?? 0)) / CHARS_PER_TOKEN);
+}
+
+/**
+ * 发请求前先按窗口估一下，放不下就从最老的历史丢起。
+ * 典型场景：在 1M 窗口的模型上聊到 50 万，切到 256K 的模型再压缩。
+ */
+export function fitPreparationToWindow(
+	preparation: CompactionPreparation,
+	model: { contextWindow?: number; maxTokens?: number },
+): CompactionPreparation {
+	if (!model.contextWindow) return preparation;
+	const budget = model.contextWindow - (model.maxTokens ?? 0) - PROMPT_MARGIN_TOKENS;
+	let current = preparation;
+	while (estimateSummaryInputTokens(current) > budget) {
+		const smaller = shrinkPreparation(current);
+		if (!smaller) break;
+		current = smaller;
+	}
+	return current;
+}
+
 /**
  * 执行结构化 Handoff 压缩。
  * 如果缺少模型或凭据，返回 undefined 自动回退到 Pi 默认压缩实现。
+ * 发请求前先按窗口裁掉放不下的最老历史；估算不准仍超窗时，再丢最老的历史重试，
+ * 最多 {@link MAX_OVERFLOW_RETRIES} 次。
  */
 export async function runHandoffCompaction(
 	preparation: CompactionPreparation,
 	ctx: ExtensionContext,
 	customInstructions?: string,
 	signal?: AbortSignal,
+	compactFn: typeof compact = compact,
 ): Promise<CompactionResult | undefined> {
 	if (!ctx.model || !ctx.modelRegistry) {
 		return undefined;
@@ -82,15 +169,26 @@ export async function runHandoffCompaction(
 			return undefined;
 		}
 		const instructions = buildHandoffInstructions(customInstructions);
-		return await compact(
-			preparation,
-			summarizationModel(ctx.model, preparation.settings),
-			auth.apiKey,
-			auth.headers as Record<string, string> | undefined,
-			instructions,
-			signal ?? ctx.signal,
-			ctx.thinkingLevel,
-		);
+		const model = summarizationModel(ctx.model, preparation.settings);
+		let current = fitPreparationToWindow(preparation, model);
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				return await compactFn(
+					current,
+					model,
+					auth.apiKey,
+					auth.headers as Record<string, string> | undefined,
+					instructions,
+					signal ?? ctx.signal,
+					ctx.thinkingLevel,
+				);
+			} catch (error) {
+				if (attempt >= MAX_OVERFLOW_RETRIES || !isOverflowError(error)) throw error;
+				const smaller = shrinkPreparation(current);
+				if (!smaller) throw error;
+				current = smaller;
+			}
+		}
 	} catch {
 		// 任何异常回退到 Pi 原生默认流程，确保鲁棒性
 		return undefined;
