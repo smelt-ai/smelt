@@ -49,6 +49,8 @@ pub(crate) const SEPARATE_TOPICS: &[&str] = &[
     smelt_client::daemon_state::CORE_TOPIC_PI_CONFIG_CHANGED,
     smelt_client::daemon_state::CORE_TOPIC_HISTORY_CHANGED,
     smelt_client::daemon_state::CORE_TOPIC_ATTENTION_CHANGED,
+    smelt_event_protocol::CORE_TOPIC_AUTOMATIONS_CHANGED,
+    smelt_event_protocol::CORE_TOPIC_AGENT_MEMORY_CHANGED,
 ];
 
 /// 事件的接收端：核心订阅的，和单独订阅的。

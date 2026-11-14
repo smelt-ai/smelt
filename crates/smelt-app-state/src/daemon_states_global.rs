@@ -19,7 +19,6 @@ use smelt_client::runtime::RuntimeKey;
 #[derive(Clone, Default)]
 pub struct DaemonStates {
     runtimes: Arc<Mutex<HashMap<RuntimeKey, RuntimeMirror>>>,
-    pending: Arc<Mutex<Vec<(RuntimeKey, DaemonSessionState)>>>,
     revision: u64,
 }
 
@@ -51,33 +50,23 @@ impl DaemonStates {
     /// 一个运行时的完整快照：换掉它那份镜像。
     pub fn replace_all(runtime: &RuntimeKey, list: Vec<DaemonSessionState>, cx: &mut App) {
         let runtimes = cx.global::<Self>().runtimes.clone();
-        let pending = cx.global::<Self>().pending.clone();
         {
             let mut runtimes = runtimes.lock().unwrap();
             let mirror = runtimes.entry(runtime.clone()).or_default();
-            let live_ids: std::collections::HashSet<&str> =
-                list.iter().map(|state| state.id.as_str()).collect();
             mirror.sessions = list
-                .iter()
-                .map(|state| (state.id.clone(), state.clone()))
+                .into_iter()
+                .map(|state| (state.id.clone(), state))
                 .collect();
-            mirror
-                .progress
-                .retain(|id, _| live_ids.contains(id.as_str()));
+            let sessions = &mirror.sessions;
+            mirror.progress.retain(|id, _| sessions.contains_key(id));
             mirror.primed = true;
             mirror.subscription_live = true;
-        }
-        {
-            let mut pending = pending.lock().unwrap();
-            pending.retain(|(key, _)| key != runtime);
-            pending.extend(list.into_iter().map(|state| (runtime.clone(), state)));
         }
         Self::signal(cx);
     }
 
     pub fn remove(runtime: &RuntimeKey, id: &str, cx: &mut App) -> bool {
         let runtimes = cx.global::<Self>().runtimes.clone();
-        let pending = cx.global::<Self>().pending.clone();
         let removed = runtimes
             .lock()
             .unwrap()
@@ -86,10 +75,6 @@ impl DaemonStates {
                 mirror.progress.remove(id);
                 mirror.sessions.remove(id).is_some()
             });
-        pending
-            .lock()
-            .unwrap()
-            .retain(|(key, state)| key != runtime || state.id != id);
         if removed {
             Self::signal(cx);
         }
@@ -98,15 +83,13 @@ impl DaemonStates {
 
     pub fn upsert(runtime: &RuntimeKey, state: DaemonSessionState, cx: &mut App) {
         let runtimes = cx.global::<Self>().runtimes.clone();
-        let pending = cx.global::<Self>().pending.clone();
         runtimes
             .lock()
             .unwrap()
             .entry(runtime.clone())
             .or_default()
             .sessions
-            .insert(state.id.clone(), state.clone());
-        pending.lock().unwrap().push((runtime.clone(), state));
+            .insert(state.id.clone(), state);
         Self::signal(cx);
     }
 
@@ -116,14 +99,8 @@ impl DaemonStates {
             return;
         };
         let runtimes = global.runtimes.clone();
-        let pending = global.pending.clone();
         runtimes.lock().unwrap().remove(runtime);
-        pending.lock().unwrap().retain(|(key, _)| key != runtime);
         Self::signal(cx);
-    }
-
-    pub fn drain_pending(cx: &mut App) -> Vec<(RuntimeKey, DaemonSessionState)> {
-        std::mem::take(&mut *cx.global::<Self>().pending.lock().unwrap())
     }
 
     pub fn get(runtime: &RuntimeKey, session_id: &str, cx: &App) -> Option<DaemonSessionState> {
@@ -266,8 +243,6 @@ mod tests {
                 None
             );
 
-            let drained = DaemonStates::drain_pending(cx);
-            assert_eq!(drained.len(), 2);
             DaemonStates::forget_runtime(&remote, cx);
             assert!(DaemonStates::snapshot(&remote, cx).is_empty());
             assert_eq!(DaemonStates::snapshot(&RuntimeKey::Local, cx).len(), 1);

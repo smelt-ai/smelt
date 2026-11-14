@@ -119,6 +119,28 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
     )
 }
 
+/// 舞台上一页的页头底子：插件页面、远程桌面共用。这些面不画标题胶囊。
+///
+/// `left_guard` 见 `Workspace::chrome_left_guard`。页面贴着窗口顶（`Some`）时，最上
+/// `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐，标题和按钮放在这条下面，
+/// 左侧再让出给的宽度；在标签条下面（`None`）时顶上那条归标签条，这里只留常规内边距。
+/// 底边是发丝。按钮自己拦住点击。
+pub(crate) fn page_chrome(left_guard: Option<Pixels>) -> Div {
+    let header = div()
+        .w_full()
+        .flex_shrink_0()
+        .pb(px(8.))
+        .px(px(20.))
+        .border_b_1()
+        .border_color(crate::ui_theme::hairline())
+        .flex()
+        .items_center();
+    match left_guard {
+        Some(left) => with_window_drag(header.pt(TOP_BAR_HEIGHT).pl(left + px(20.))),
+        None => header.pt(px(8.)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TitlebarMouseAction, titlebar_mouse_action, workspace_window_options};

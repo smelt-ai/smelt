@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 13;
+pub(crate) const SCHEMA_VERSION: u32 = 14;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -39,7 +39,6 @@ CREATE TABLE workspace_ui (
   active_session INTEGER NOT NULL CHECK (active_session >= 0),
   active_session_id TEXT,
   route TEXT NOT NULL,
-  selected_agent_id TEXT,
   sidebar_grouping TEXT NOT NULL,
   sidebar_hide_empty_projects INTEGER NOT NULL CHECK (sidebar_hide_empty_projects IN (0, 1)),
   archive_expanded INTEGER NOT NULL DEFAULT 0 CHECK (archive_expanded IN (0, 1))
@@ -328,6 +327,14 @@ CREATE TABLE pinned_workset (
 ) WITHOUT ROWID;
 ";
 
+/// v14：智能体页拆成了插件，选中哪个智能体由插件自己记，客户端库不留。「新对话」命令跟着
+/// 归了智能体插件，改过的快捷键搬到新 id 上。
+const MIGRATE_V13_TO_V14: &str = "
+ALTER TABLE workspace_ui DROP COLUMN selected_agent_id;
+UPDATE key_binding SET command = 'smelt.agents/new-conversation'
+  WHERE command = 'smelt.sessions/new-conversation';
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -381,7 +388,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7..=12 => {}
+        7..=13 => {}
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     if (1..=7).contains(&version) {
@@ -412,6 +419,11 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=12).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V12_TO_V13)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=13).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V13_TO_V14)
             .map_err(|error| error.to_string())?;
     }
     transaction
@@ -531,8 +543,6 @@ mod legacy {
         #[serde(default = "default_route")]
         route: String,
         #[serde(default)]
-        selected_agent_id: Option<String>,
-        #[serde(default)]
         collapsed_projects: Vec<String>,
         #[serde(default)]
         collapsed_agents: Vec<String>,
@@ -649,7 +659,6 @@ mod legacy {
                     active_session: old.active_session,
                     active_session_id: old.active_session_id,
                     route: old.route,
-                    selected_agent_id: old.selected_agent_id,
                     collapsed_projects: old
                         .collapsed_projects
                         .into_iter()

@@ -1,0 +1,21 @@
+# 内置插件「智能体」：每台机器上的智能体定义（指令、引擎与模型、Pi 能力、上下文、记忆），
+# 和跟智能体开新对话的入口。
+# 只依赖插件接口和 gpui 组件库，宿主里没有它的类型（见 docs/app-plugins.md）。
+[package]
+name = "smelt-agents"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../../smelt-plugin-api" }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6", features = ["tree-sitter-languages"] }
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "0ebd729f4441ee57d630bcde4a3743bd1284edd6" }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }

@@ -25,8 +25,6 @@ pub(crate) enum DirPickerPurpose {
     ProjectRepository {
         id: u64,
     },
-    /// 给智能体绑定参考目录：可以多选。
-    AgentContextFolders { agent_id: String },
     /// 插件要的路径（[`smelt_plugin_api::PICK_PATHS`]）：怎么选由插件说，选好从 `done`
     /// 交回；取消时它随选择框扔掉。
     Plugin {
@@ -40,7 +38,6 @@ impl DirPickerPurpose {
         match self {
             Self::OpenProject => "选择项目目录",
             Self::ProjectRepository { .. } => "选择已有 Git 仓库根目录",
-            Self::AgentContextFolders { .. } => "选择要绑定的目录",
             Self::Plugin { request, .. } => &request.title,
         }
     }
@@ -49,7 +46,6 @@ impl DirPickerPurpose {
         match self {
             Self::OpenProject => false,
             Self::ProjectRepository { .. } => false,
-            Self::AgentContextFolders { .. } => true,
             Self::Plugin { request, .. } => request.multiple,
         }
     }
@@ -59,7 +55,6 @@ impl DirPickerPurpose {
         match self {
             Self::OpenProject => "打开",
             Self::ProjectRepository { .. } => "选择仓库",
-            Self::AgentContextFolders { .. } => "绑定",
             Self::Plugin { request, .. } => &request.confirm,
         }
     }
@@ -235,9 +230,6 @@ impl Workspace {
                     self.add_project(runtime.key().clone(), dir, cx);
                 }
             }
-            DirPickerPurpose::AgentContextFolders { agent_id } => {
-                self.add_agent_context_folders(agent_id, chosen, cx);
-            }
             DirPickerPurpose::Plugin { done, .. } => {
                 let _ = done.try_send(chosen);
             }
@@ -388,8 +380,6 @@ impl Workspace {
         };
 
         let confirm_label: SharedString = match (&picker.purpose, picker.selected.len()) {
-            (DirPickerPurpose::AgentContextFolders { .. }, 0) => "绑定当前目录".into(),
-            (DirPickerPurpose::AgentContextFolders { .. }, _) => "绑定所选目录".into(),
             (DirPickerPurpose::Plugin { request, .. }, 0) => {
                 format!("{}当前目录", request.confirm).into()
             }
@@ -500,11 +490,6 @@ mod tests {
     fn system_prompt_options_follow_the_purpose() {
         let project = system_prompt_options(&DirPickerPurpose::OpenProject);
         assert!(project.directories && !project.files && !project.multiple);
-
-        let folders = system_prompt_options(&DirPickerPurpose::AgentContextFolders {
-            agent_id: "writer".to_string(),
-        });
-        assert!(folders.directories && !folders.files && folders.multiple);
 
         let plugin = |files, multiple| DirPickerPurpose::Plugin {
             request: smelt_plugin_api::PathRequest {

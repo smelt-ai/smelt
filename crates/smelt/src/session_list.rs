@@ -1648,7 +1648,7 @@ impl Workspace {
                 // 绑了智能体的会话画名字首字；自定义 Agent 一律画通用机器人图标（基于 Claude 的
                 // 画成 Claude 会被当成 Claude，画首字又会被当成产品智能体）。两者悬停都显示名字。
                 let custom_agent = self.sessions[ix].custom_agent_label(cx);
-                let (agent_mark, identity_label) = match crate::agents::bound_agent_identity(
+                let (agent_mark, identity_label) = match crate::conversations::bound_agent_identity(
                     self.sessions[ix].agent_definition_id.as_deref(),
                     self.sessions[ix].automation_id.as_deref(),
                     crate::settings::agents_on(self.sessions[ix].runtime(cx).key(), cx),
@@ -2971,7 +2971,7 @@ impl Workspace {
             // 顶部固定的只有几个入口；「对话」和项目都在下面的滚动区里。列表滚动过以后
             // 固定区下沿才出一条细线，平时不画（线一直占着 1px，出现时不跳）。
             .child(
-                self.render_automation_navigation(this.clone(), statuses, cx)
+                self.render_sidebar_navigation(this.clone(), cx)
                     .border_b_1()
                     .border_color(if self.sidebar_scroll.offset().y < px(0.) {
                         Hsla::from(ui_theme::hairline())

@@ -1023,15 +1023,14 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 舞台：当前会话，或宿主自己的页面（智能体、自动化、远程桌面），或没摆进布局的插件视图。
+    /// 舞台：当前会话，或侧栏选中的对话、远程桌面，或没摆进布局的插件视图。
     pub(crate) fn render_stage_dock(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let stage_content: AnyElement = match self.active_tab().clone() {
-            WorkspaceRoute::Agents => self.render_agents_page(window, cx),
-            WorkspaceRoute::Automations => self.render_automations_page(window, cx),
+            WorkspaceRoute::Conversation => self.render_conversation_stage(cx),
             // 摆进布局的视图画在它自己的面板里，一个视图不能画两处。
             WorkspaceRoute::Page(id) if self.shell_view.laid_out.contains(id.as_str()) => {
                 div().flex_1().into_any_element()

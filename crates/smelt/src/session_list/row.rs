@@ -105,7 +105,28 @@ pub(crate) fn session_updated_at_text(timestamp: u64, now: &DateTime<Local>) -> 
     if timestamp == 0 {
         return "未知".to_string();
     }
-    crate::agents::format_relative_since(timestamp.min(i64::MAX as u64) as i64, now.timestamp())
+    format_relative_since(timestamp.min(i64::MAX as u64) as i64, now.timestamp())
+}
+
+/// 「N 分钟前」。`ts` 比 `now` 还晚（远程机器的时钟比本机快）时写「刚刚」，不写成负数。
+fn format_relative_since(ts: i64, now: i64) -> String {
+    let delta = now - ts;
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    if delta < MINUTE {
+        "刚刚".to_string()
+    } else if delta < HOUR {
+        format!("{} 分钟前", delta / MINUTE)
+    } else if delta < DAY {
+        format!("{} 小时前", delta / HOUR)
+    } else if delta < 30 * DAY {
+        format!("{} 天前", delta / DAY)
+    } else if delta < 365 * DAY {
+        format!("{} 个月前", delta / (30 * DAY))
+    } else {
+        format!("{} 年前", delta / (365 * DAY))
+    }
 }
 
 /// 在跑的会话行尾写「本轮已运行」多久，到分钟（侧栏不为它每秒重画）；手机上同一个
@@ -426,8 +447,8 @@ pub(super) fn provider_quota_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_pane_updated_at, progress_fraction, provider_quota_row, session_turn_text,
-        session_updated_at_text,
+        effective_pane_updated_at, format_relative_since, progress_fraction, provider_quota_row,
+        session_turn_text, session_updated_at_text,
     };
     use crate::provider_quota::{ProviderQuotaData, QuotaStatus, QuotaTarget};
     use crate::settings::ConversationAgentKind;
@@ -436,6 +457,19 @@ mod tests {
     use smelt_client::daemon_state::{TerminalProgress, TerminalProgressState};
     use smelt_model::copilot_quota::{CopilotQuota, CopilotQuotaUnit};
     use smelt_model::provider_quota::{ProviderQuota, ProviderQuotaWindow};
+
+    #[test]
+    fn relative_time_counts_back_from_now() {
+        assert_eq!(format_relative_since(100, 100), "刚刚");
+        assert_eq!(format_relative_since(100, 130), "刚刚");
+        assert_eq!(format_relative_since(100, 100 + 3 * 60), "3 分钟前");
+        assert_eq!(format_relative_since(100, 100 + 5 * 3600), "5 小时前");
+        assert_eq!(format_relative_since(100, 100 + 2 * 86400), "2 天前");
+        assert_eq!(format_relative_since(100, 100 + 40 * 86400), "1 个月前");
+        assert_eq!(format_relative_since(100, 100 + 400 * 86400), "1 年前");
+        // 远程机器的时钟可能比本机快，不写成负数。
+        assert_eq!(format_relative_since(100 + 3600, 100), "刚刚");
+    }
 
     #[test]
     fn window_quota_row_keeps_the_worst_window_summary() {

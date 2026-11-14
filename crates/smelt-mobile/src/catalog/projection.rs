@@ -148,7 +148,6 @@ impl CatalogState {
             // 目录订阅不订这些 topic（见 `SubscriptionShape::CATALOG`）。
             DaemonStateEvent::ConversationWakeRequested { .. }
             | DaemonStateEvent::ProjectChanged { .. }
-            | DaemonStateEvent::AgentMemoryChanged { .. }
             | DaemonStateEvent::TerminalNotification { .. }
             | DaemonStateEvent::TerminalProgress { .. }
             | DaemonStateEvent::AppearanceChangeRequested { .. }

@@ -1045,26 +1045,22 @@ impl Workspace {
                     this.note_active_context(cx);
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: false } => {
-                    this.open_capabilities("plugins", window, cx);
+                    this.open_conversation_capabilities(window, cx);
                 }
                 acp_view::AcpViewEvent::ManageCapabilities { by_agent: true } => {
-                    // 智能体定义已经删了就停在智能体列表。
-                    let agent = this.sessions.iter().find_map(|session| {
-                        let SessionKind::Conversation(existing) = &session.kind else {
-                            return None;
-                        };
-                        if existing.entity_id() != _view.entity_id() {
-                            return None;
-                        }
-                        let id = session.agent_definition_id.as_deref()?;
-                        let runtime = existing.read(cx).runtime().key().clone();
-                        settings::agent_definition(&runtime, id, cx)
-                            .map(|_| crate::agents::AgentRef::new(runtime, id.to_string()))
-                    });
-                    this.open_agents_route(window, cx);
-                    if let Some(agent) = agent {
-                        this.open_agent_definition(agent, window, cx);
-                    }
+                    let runtime = _view.read(cx).runtime().key().clone();
+                    let agent = this
+                        .sessions
+                        .iter()
+                        .find_map(|session| match &session.kind {
+                            SessionKind::Conversation(existing)
+                                if existing.entity_id() == _view.entity_id() =>
+                            {
+                                session.agent_definition_id.clone()
+                            }
+                            _ => None,
+                        });
+                    this.open_conversation_agent(&runtime, agent.as_deref(), None, window, cx);
                 }
                 acp_view::AcpViewEvent::MemoryAction(action) => {
                     let runtime = _view.read(cx).runtime().key().clone();
@@ -1072,14 +1068,13 @@ impl Workspace {
                 }
                 acp_view::AcpViewEvent::OpenAgentMemory { agent_id } => {
                     let runtime = _view.read(cx).runtime().key().clone();
-                    this.open_agents_route(window, cx);
-                    if settings::agent_definition(&runtime, agent_id, cx).is_some() {
-                        this.open_agent_memory(
-                            crate::agents::AgentRef::new(runtime, agent_id.clone()),
-                            window,
-                            cx,
-                        );
-                    }
+                    this.open_conversation_agent(
+                        &runtime,
+                        Some(agent_id),
+                        Some("memory"),
+                        window,
+                        cx,
+                    );
                 }
                 acp_view::AcpViewEvent::OpenConversation { sid } => {
                     // 互发消息的事件行上点了对方的标题。不在侧栏里的（别处托管的）不动。
@@ -2199,8 +2194,9 @@ impl Workspace {
             SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
             SessionKind::Term { .. } => None,
         };
-        let closed_current_conversation =
-            closed_conversation_sid.as_deref() == self.nav.agents().conversation_sid();
+        let closed_current_conversation = closed_conversation_sid
+            .as_deref()
+            .is_some_and(|sid| self.nav.conversation_sid() == Some(sid));
         // 关的是正在看的对话：回到上一个看过的对话，没有就落到最后一段。
         let next_conversation_ix = if closed_current_conversation {
             self.previous_viewed_session(closed_ui_id, |session| session.is_agent_conversation(cx))
@@ -2228,13 +2224,14 @@ impl Workspace {
                     .active_acp()
                     .map(|view| view.read(cx).session_id().to_string())
             }) {
-                self.nav.agents_mut().open_conversation(sid);
+                self.nav.open_conversation(sid);
             } else {
-                self.nav.agents_mut().pop_to_root();
+                self.nav.set_active(WorkspaceRoute::Session);
             }
         } else {
+            // 没有别的对话可看：回到会话。
             if closed_current_conversation {
-                self.nav.agents_mut().pop_to_root();
+                self.nav.set_active(WorkspaceRoute::Session);
             }
             // 空列表时 active_session 归 0（各处都是 sessions.get(ix) 取，取不到就是无会话态）。
             if let Some(next) = project_next {
@@ -2382,7 +2379,7 @@ impl Workspace {
         if !self.view_shown(crate::builtin_views::Builtin::Stage.id()) {
             return None;
         }
-        if !route_views_session(self.active_tab(), self.nav.agents().conversation_sid()) {
+        if !route_views_session(self.active_tab(), self.nav.conversation_sid()) {
             return None;
         }
         let session = self.sessions.get(self.active_session)?;

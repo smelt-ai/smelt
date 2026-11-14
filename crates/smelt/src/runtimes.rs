@@ -1481,11 +1481,6 @@ pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
             if removed.is_ok() {
                 remote.route.unwatch();
                 crate::settings::detach_agent_host(remote.runtime.key(), cx);
-                // 它的自动化不再显示，也不再从它那里收通知。
-                use gpui::BorrowAppContext as _;
-                cx.update_global::<crate::settings::AgentHostState, _>(|state, _| {
-                    state.forget_automations(remote.runtime.key());
-                });
             }
         });
         if deleted && revoke {

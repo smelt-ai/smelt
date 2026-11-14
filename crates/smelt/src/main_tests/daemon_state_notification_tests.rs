@@ -3,12 +3,15 @@ use super::{WorkspaceRoute, route_views_session, should_defer_notification_sessi
 #[test]
 fn agent_conversation_is_a_visible_session_for_notification_suppression() {
     assert!(route_views_session(
-        &WorkspaceRoute::Agents,
+        &WorkspaceRoute::Conversation,
         Some("acp-session-1"),
     ));
-    assert!(!route_views_session(&WorkspaceRoute::Agents, None));
+    assert!(!route_views_session(&WorkspaceRoute::Conversation, None));
     assert!(route_views_session(&WorkspaceRoute::Session, None));
-    assert!(!route_views_session(&WorkspaceRoute::Automations, None));
+    assert!(!route_views_session(
+        &WorkspaceRoute::Page("automations".into()),
+        None
+    ));
 }
 
 #[test]

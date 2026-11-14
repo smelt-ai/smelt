@@ -41,7 +41,6 @@ url = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
 
 # 截断宽度的问题只在真实字形下才有，测试默认的 Noop 字体系统是等宽假字。特性与

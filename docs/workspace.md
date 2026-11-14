@@ -186,7 +186,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 ### 全局（命令登记在 `workspace_commands.rs`，键表在 `keymap.rs`）
 
 工作台级的动作都是登记过的命令（`smelt_plugin_api::register_commands`，id 是
-`<来源>/<名字>`，如 `smelt.sessions/new-conversation`）：快捷键、应用菜单、命令面板执行的都是
+`<来源>/<名字>`，如 `smelt.sessions/focus-list`）：快捷键、应用菜单、命令面板执行的都是
 命令，插件登记的命令和自带的同一张表。出厂键撞车时先登记的留着，自带命令先于插件登记。
 
 下表是出厂键位。命令的键都能在设置 →「快捷键」里点键帽录新键：Esc 取消，⌫ 清掉；要带 ⌘

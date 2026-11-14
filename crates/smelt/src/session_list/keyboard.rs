@@ -228,7 +228,7 @@ impl Workspace {
             .iter()
             .map(|&ix| self.sessions[ix].effective_updated_at(cx))
             .collect();
-        crate::agents::recent_conversation_order(&updated)
+        crate::conversations::recent_conversation_order(&updated)
             .into_iter()
             .map(|order| product[order])
             .collect()

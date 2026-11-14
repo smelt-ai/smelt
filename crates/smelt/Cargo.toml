@@ -25,6 +25,8 @@ smelt-client-store = { path = "../smelt-client-store" }
 smelt-ui = { path = "../smelt-ui" }
 smelt-app-state = { path = "../smelt-app-state" }
 smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
+smelt-agents = { path = "../plugins/agents" }
+smelt-automations = { path = "../plugins/automations" }
 smelt-capabilities = { path = "../plugins/capabilities" }
 smelt-files-ui = { path = "../plugins/files" }
 smelt-git-ui = { path = "../plugins/git" }

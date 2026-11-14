@@ -9,7 +9,9 @@
 use gpui::*;
 
 use crate::settings::Appearance;
-use crate::{SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp};
+use crate::{
+    SessionKind, Workspace, WorkspaceRoute, liquid_glass, settings, should_auto_resume_active_acp,
+};
 
 impl Workspace {
     /// 绘制前唯一还留在帧上的准备。
@@ -115,29 +117,32 @@ impl Workspace {
         self.visible_refresh_running = false;
     }
 
-    /// 冷恢复后把智能体对话带回对话页，并守住「对话不能占项目舞台」。
+    /// 「对话」路由对上一段对话，并守住「对话不能占项目舞台」。
     ///
-    /// 补位只做一次：每帧都做会把用户点侧栏「智能体」返回目录的动作顶回来。
-    /// 项目舞台上的对话则是不变量，恢复完成后一直守着。
+    /// 冷启动恢复出来的「对话」路由不知道看哪段：会话恢复完按当前会话补上，当前会话
+    /// 不是侧栏对话就回项目舞台。项目舞台上的对话是不变量，恢复完成后一直守着。
     fn align_visible_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let restored = self.session_restore_settled(self.active_session, cx);
         let active_is_agent_conversation = self
             .sessions
             .get(self.active_session)
             .is_some_and(|session| session.is_agent_conversation(cx));
-        if crate::should_open_restored_agent_conversation(
-            self.session_restore_settled(self.active_session, cx),
-            self.restored_agent_conversation_route,
-            active_is_agent_conversation,
+        if crate::conversation_route_needs_target(
+            restored,
             self.active_tab(),
+            self.selected_conversation_view(cx).is_some(),
         ) {
-            self.restored_agent_conversation_route = true;
-            self.activate(self.active_session, window, cx);
-        } else if self.session_restore_settled(self.active_session, cx) {
-            self.restored_agent_conversation_route = true;
+            if active_is_agent_conversation {
+                self.open_agent_conversation(self.active_session, window, cx);
+            } else {
+                self.nav.set_active(WorkspaceRoute::Session);
+                self.save_state(cx);
+                cx.notify();
+            }
         }
 
         if crate::should_correct_agent_conversation_on_project_stage(
-            self.session_restore_settled(self.active_session, cx),
+            restored,
             self.active_tab(),
             active_is_agent_conversation,
         ) {

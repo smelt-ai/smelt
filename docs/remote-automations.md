@@ -1,6 +1,7 @@
 # 远程机器与手机端的自动化
 
-状态：已实现（#79）。对应 issue #79（跟踪 issue #76）。
+状态：已实现（#79）。对应 issue #79（跟踪 issue #76）。后来智能体、自动化拆成了内置插件（`crates/plugins/agents`、`crates/plugins/automations`），
+自动化投影存在插件自己那里、按机器分；文中宿主里的路径和 `AgentHostState` 是当时的位置，已经不在了。
 
 两件事：
 

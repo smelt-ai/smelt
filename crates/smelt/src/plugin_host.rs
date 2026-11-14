@@ -77,7 +77,7 @@ impl api::Host for SmeltHost {
                 .then(|| workspace.chrome_left_guard(window))
                 .flatten()
         });
-        crate::agents::product_page_chrome(left_guard)
+        crate::workspace_frame::page_chrome(left_guard)
     }
 
     fn window_active(&self, cx: &App) -> bool {
@@ -337,6 +337,8 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::SessionsChanged, cx)
     })
     .detach();
+    smelt_agents::register(cx);
+    smelt_automations::register(cx);
     smelt_capabilities::register(cx);
     smelt_files_ui::register(cx);
     smelt_git_ui::register(cx);

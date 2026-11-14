@@ -1,31 +1,30 @@
 //! 自动化目录：任务表、模板卡、全局 Run 列表。
 //!
-//! 版式跟 Grok Bot 自动化页：顶栏分段 + 已有任务表 + 模板画廊。
+//! 版式：顶栏分段 + 已有任务表 + 模板画廊。
 
-use super::automation_templates::{
+use crate::prelude::*;
+use crate::templates::{
     AutomationTemplate, AutomationTemplateCategory, AutomationTemplateGlyph, filtered_templates,
 };
-use super::*;
-use smelt_ui::truncated_line::truncated_line;
 
-const CATALOG_MAX_WIDTH: f32 = 960.;
-const TEMPLATE_COLUMNS: usize = 3;
+pub(crate) const CATALOG_MAX_WIDTH: f32 = 960.;
+pub(crate) const TEMPLATE_COLUMNS: usize = 3;
 
-impl Workspace {
-    pub(super) fn render_automations_catalog_header(
+impl AutomationsPage {
+    pub(crate) fn render_automations_catalog_header(
         &self,
-        entity: Entity<Workspace>,
-        left_guard: Option<Pixels>,
+        header: Div,
+        entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> AnyElement {
         const TABS: [(AutomationCatalogTab, &str); 2] = [
             (AutomationCatalogTab::Tasks, "自动化"),
             (AutomationCatalogTab::Runs, "运行"),
         ];
-        let current = self.automation_surface.catalog_tab;
+        let current = self.catalog_tab;
         let tab_entity = entity.clone();
         let add_entity = entity;
-        product_page_chrome(left_guard)
+        header
             .justify_between()
             .gap_3()
             .child(choice_tabs(
@@ -34,8 +33,8 @@ impl Workspace {
                 TABS.map(|(_, label)| Tab::new().label(label)),
                 move |ix, cx| {
                     if let Some((tab, _)) = TABS.get(ix).copied() {
-                        tab_entity.update(cx, |workspace, cx| {
-                            workspace.set_automation_catalog_tab(tab, cx);
+                        tab_entity.update(cx, |page, cx| {
+                            page.set_automation_catalog_tab(tab, cx);
                         });
                     }
                 },
@@ -46,19 +45,19 @@ impl Workspace {
                     .icon(IconName::Plus)
                     .label("新建自动化"),
                 add_entity,
-                |workspace, runtime, window, cx| workspace.add_automation(runtime, window, cx),
+                |page, runtime, window, cx| page.add_automation(runtime, window, cx),
                 cx,
             ))
             .into_any_element()
     }
 
-    pub(super) fn render_automations_catalog(
+    pub(crate) fn render_automations_catalog(
         &self,
         error: Option<String>,
-        entity: Entity<Workspace>,
+        entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> AnyElement {
-        let body = match self.automation_surface.catalog_tab {
+        let body = match self.catalog_tab {
             AutomationCatalogTab::Tasks => self.render_automation_tasks_catalog(error, entity, cx),
             AutomationCatalogTab::Runs => self.render_automation_runs_catalog(error, entity, cx),
         };
@@ -71,10 +70,10 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_automation_tasks_catalog(
+    pub(crate) fn render_automation_tasks_catalog(
         &self,
         error: Option<String>,
-        entity: Entity<Workspace>,
+        entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> Div {
         // 每台机器有自己的自动化库。不止一台时按机器分组，每组标出机器和它的状态。
@@ -104,29 +103,29 @@ impl Workspace {
                 column.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::text_muted()))
                         .child("还没有自动化，可从下面的模板添加。"),
                 )
             })
             .child(self.render_automation_templates(entity, cx))
     }
 
-    fn render_automation_runs_catalog(
+    pub(crate) fn render_automation_runs_catalog(
         &self,
         error: Option<String>,
-        entity: Entity<Workspace>,
+        entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> Div {
-        let config = cx.global::<settings::AgentHostState>();
+        let config = automations(cx);
         // 各台机器的运行合在一起按时间排。借引用排序：整份克隆会把每条运行的输出在每帧
         // 重绘里复制一遍。
         let mut runs = config
-            .automations
+            .machines
             .iter()
             .flat_map(|(runtime, machine)| machine.runs.iter().map(move |run| (runtime, run)))
             .collect::<Vec<_>>();
         runs.sort_by(|(_, a), (_, b)| (b.created_at, &b.id).cmp(&(a.created_at, &a.id)));
-        let show_machine = config.automations.len() > 1;
+        let show_machine = config.machines.len() > 1;
         automation_catalog_column()
             .flex()
             .flex_col()
@@ -140,7 +139,7 @@ impl Workspace {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(crate::ui_theme::text_muted()))
+                            .text_color(rgb(ui_theme::text_muted()))
                             .child("暂无运行记录"),
                     )
                     .into_any_element()
@@ -156,15 +155,15 @@ impl Workspace {
             })
     }
 
-    fn render_automation_table(
+    pub(crate) fn render_automation_table(
         &self,
-        runtime: &crate::RuntimeKey,
-        automations: &[settings::Automation],
-        entity: Entity<Workspace>,
+        runtime: &RuntimeKey,
+        automations: &[Automation],
+        entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> AnyElement {
         // 引用的智能体按自动化所在的那台机器认。
-        let agents = settings::agents_on(runtime, cx);
+        let agents = agents_on(runtime, cx);
         agent_surface_card()
             .overflow_hidden()
             .flex()
@@ -180,25 +179,22 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_automation_table_row(
+    pub(crate) fn render_automation_table_row(
         &self,
-        runtime: &crate::RuntimeKey,
-        automation: settings::Automation,
-        agent: Option<settings::AgentDefinition>,
-        entity: Entity<Workspace>,
+        runtime: &RuntimeKey,
+        automation: Automation,
+        agent: Option<AgentDefinition>,
+        entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> AnyElement {
-        let empty = settings::MachineAutomations::default();
-        let machine = cx
-            .global::<settings::AgentHostState>()
-            .automations_on(runtime)
-            .unwrap_or(&empty);
+        let empty = MachineAutomations::default();
+        let machine = automations(cx).on(runtime).unwrap_or(&empty);
         let target = AutomationRef::new(runtime.clone(), automation.id.clone());
         let enabled = automation.enabled;
         let active_run = machine.active_run(&automation.id).cloned();
         let action_ready = match &automation.action {
-            settings::AutomationAction::Agent { .. } => agent.is_some(),
-            settings::AutomationAction::Shell { .. } => true,
+            AutomationAction::Agent { .. } => agent.is_some(),
+            AutomationAction::Shell { .. } => true,
         };
         let can_run = automation.is_ready() && action_ready && active_run.is_none();
         let cancel_run_id = active_run
@@ -206,8 +202,8 @@ impl Workspace {
             .filter(|run| run.status.is_active())
             .map(|run| run.id.clone());
         let running = cancel_run_id.is_some();
-        let agent_missing = matches!(automation.action, settings::AutomationAction::Agent { .. })
-            && agent.is_none();
+        let agent_missing =
+            matches!(automation.action, AutomationAction::Agent { .. }) && agent.is_none();
         let status = automation_row_status(
             enabled,
             machine.store_error.is_some(),
@@ -229,13 +225,13 @@ impl Workspace {
             now,
         );
         let last_run_failed = latest_run
-            .is_some_and(|run| run.status == smelt_model::automation::AutomationRunStatus::Failed);
+            .is_some_and(|run| run.status == api::model::automation::AutomationRunStatus::Failed);
         let action_summary = match &automation.action {
-            settings::AutomationAction::Agent { .. } => agent
+            AutomationAction::Agent { .. } => agent
                 .as_ref()
                 .map(|agent| agent.name.clone())
                 .unwrap_or_else(|| "智能体已删除".to_string()),
-            settings::AutomationAction::Shell { command, .. } => {
+            AutomationAction::Shell { command, .. } => {
                 let line = compact_instructions(command);
                 if line.is_empty() {
                     "Shell".to_string()
@@ -295,14 +291,14 @@ impl Workspace {
                             div()
                                 .text_sm()
                                 .font_semibold()
-                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text_bright()))
                                 .overflow_hidden()
                                 .child(truncated_line(display_name)),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(crate::ui_theme::text_faint()))
+                                .text_color(rgb(ui_theme::text_faint()))
                                 .overflow_hidden()
                                 .child(truncated_line(action_summary)),
                         ),
@@ -311,7 +307,7 @@ impl Workspace {
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::text_muted()))
                 .overflow_hidden()
                 .child(truncated_line(schedule)),
         )
@@ -326,14 +322,14 @@ impl Workspace {
                             .flex_shrink_0()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(rgb(crate::ui_theme::red())),
+                            .bg(rgb(ui_theme::red())),
                     )
                 })
                 .child(
                     div()
                         .min_w_0()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::text_muted()))
                         .overflow_hidden()
                         .child(truncated_line(last_run)),
                 ),
@@ -341,7 +337,7 @@ impl Workspace {
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::text_muted()))
                 .overflow_hidden()
                 .child(truncated_line(next_run)),
         )
@@ -354,19 +350,17 @@ impl Workspace {
         )
         .on_click(move |_, window, cx| {
             let id = open_id.clone();
-            open_entity.update(cx, |workspace, cx| {
-                workspace.open_automation_editor(id, window, cx)
-            });
+            open_entity.update(cx, |page, cx| page.open_automation_editor(id, window, cx));
         })
         .into_any_element()
     }
 
-    fn render_catalog_run_row(
+    pub(crate) fn render_catalog_run_row(
         &self,
-        runtime: &crate::RuntimeKey,
-        run: &smelt_model::automation::AutomationRun,
+        runtime: &RuntimeKey,
+        run: &api::model::automation::AutomationRun,
         show_machine: bool,
-        entity: Entity<Workspace>,
+        entity: Entity<AutomationsPage>,
         cx: &App,
     ) -> AnyElement {
         let at = run.finished_at.unwrap_or(run.created_at);
@@ -380,14 +374,14 @@ impl Workspace {
         let error = run
             .error
             .as_deref()
-            .filter(|_| run.status == smelt_model::automation::AutomationRunStatus::Failed)
+            .filter(|_| run.status == api::model::automation::AutomationRunStatus::Failed)
             .map(compact_instructions);
         let open_entity = entity;
         let run_id = run.id.clone();
         let open_runtime = runtime.clone();
         // 多台机器的运行混在一起时，标出是哪台机器上跑的。
         let machine = if show_machine {
-            format!("{} · ", crate::runtimes::runtime_name(runtime, cx))
+            format!("{} · ", machine_name(runtime, cx))
         } else {
             String::new()
         };
@@ -402,7 +396,7 @@ impl Workspace {
         .flex()
         .items_center()
         .gap_3()
-        .child(automation_run_detail::run_status_dot(run.status))
+        .child(crate::run_detail::run_status_dot(run.status))
         .child(
             automation_run_lines(
                 name,
@@ -414,15 +408,19 @@ impl Workspace {
         .on_click(move |_, window, cx| {
             let run_id = run_id.clone();
             let runtime = open_runtime.clone();
-            open_entity.update(cx, |workspace, cx| {
-                workspace.open_catalog_automation_run(runtime, run_id, window, cx)
+            open_entity.update(cx, |page, cx| {
+                page.open_catalog_automation_run(runtime, run_id, window, cx)
             });
         })
         .into_any_element()
     }
 
-    fn render_automation_templates(&self, entity: Entity<Workspace>, cx: &App) -> AnyElement {
-        let filter = self.automation_surface.template_filter;
+    pub(crate) fn render_automation_templates(
+        &self,
+        entity: Entity<AutomationsPage>,
+        cx: &App,
+    ) -> AnyElement {
+        let filter = self.template_filter;
         let templates = filtered_templates(filter).collect::<Vec<_>>();
         div()
             .flex()
@@ -438,7 +436,7 @@ impl Workspace {
                         div()
                             .text_sm()
                             .font_medium()
-                            .text_color(rgb(crate::ui_theme::text_bright()))
+                            .text_color(rgb(ui_theme::text_bright()))
                             .child("模板"),
                     )
                     .child(self.render_template_filters(entity.clone())),
@@ -447,8 +445,8 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_template_filters(&self, entity: Entity<Workspace>) -> AnyElement {
-        let selected = self.automation_surface.template_filter;
+    pub(crate) fn render_template_filters(&self, entity: Entity<AutomationsPage>) -> AnyElement {
+        let selected = self.template_filter;
         let mut filters = vec![(None, "全部")];
         filters.extend(
             AutomationTemplateCategory::ALL
@@ -466,8 +464,8 @@ impl Workspace {
             tabs,
             move |ix, cx| {
                 if let Some((filter, _)) = filters.get(ix).copied() {
-                    entity.update(cx, |workspace, cx| {
-                        workspace.set_automation_template_filter(filter, cx);
+                    entity.update(cx, |page, cx| {
+                        page.set_automation_template_filter(filter, cx);
                     });
                 }
             },
@@ -475,10 +473,10 @@ impl Workspace {
         .into_any_element()
     }
 
-    fn render_template_grid(
+    pub(crate) fn render_template_grid(
         &self,
         templates: &[&AutomationTemplate],
-        entity: Entity<Workspace>,
+        entity: Entity<AutomationsPage>,
         _cx: &App,
     ) -> AnyElement {
         div()
@@ -503,7 +501,7 @@ impl Workspace {
     }
 }
 
-fn automation_catalog_column() -> Div {
+pub(crate) fn automation_catalog_column() -> Div {
     div()
         .w_full()
         .max_w(px(CATALOG_MAX_WIDTH))
@@ -513,17 +511,17 @@ fn automation_catalog_column() -> Div {
         .pb_8()
 }
 
-const AUTOMATION_COL_SCHEDULE: f32 = 168.;
-const AUTOMATION_COL_LAST: f32 = 120.;
-const AUTOMATION_COL_NEXT: f32 = 96.;
-const AUTOMATION_COL_STATUS: f32 = 108.;
-const AUTOMATION_COL_MENU: f32 = 32.;
+pub(crate) const AUTOMATION_COL_SCHEDULE: f32 = 168.;
+pub(crate) const AUTOMATION_COL_LAST: f32 = 120.;
+pub(crate) const AUTOMATION_COL_NEXT: f32 = 96.;
+pub(crate) const AUTOMATION_COL_STATUS: f32 = 108.;
+pub(crate) const AUTOMATION_COL_MENU: f32 = 32.;
 
-fn automation_fixed_col(width: f32) -> Div {
+pub(crate) fn automation_fixed_col(width: f32) -> Div {
     div().w(px(width)).flex_shrink_0()
 }
 
-fn automation_table_header() -> AnyElement {
+pub(crate) fn automation_table_header() -> AnyElement {
     div()
         .w_full()
         .px_4()
@@ -537,44 +535,44 @@ fn automation_table_header() -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("自动化"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("日程"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_LAST)
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("上次运行"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("下次运行"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_STATUS)
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child("状态"),
         )
         .child(automation_fixed_col(AUTOMATION_COL_MENU))
         .into_any_element()
 }
 
-fn render_automation_row_menu(
+pub(crate) fn render_automation_row_menu(
     target: &AutomationRef,
     enabled: bool,
     can_run: bool,
     cancel_run_id: Option<String>,
     latest_run_id: Option<String>,
-    entity: Entity<Workspace>,
+    entity: Entity<AutomationsPage>,
 ) -> AnyElement {
     let run_id = target.clone();
     let toggle_id = target.clone();
@@ -601,8 +599,8 @@ fn render_automation_row_menu(
             menu = menu.item(PopupMenuItem::new("停止").icon(IconName::Close).on_click(
                 move |_, _, cx| {
                     let run_id = active_run_id.clone();
-                    entity.update(cx, |workspace, cx| {
-                        workspace.cancel_automation_run(&runtime, run_id, cx);
+                    entity.update(cx, |page, cx| {
+                        page.cancel_automation_run(&runtime, run_id, cx);
                     });
                 },
             ));
@@ -615,8 +613,8 @@ fn render_automation_row_menu(
                     .disabled(!can_run)
                     .on_click(move |_, _, cx| {
                         let id = id.clone();
-                        entity.update(cx, |workspace, cx| {
-                            workspace.run_automation_once(id, cx);
+                        entity.update(cx, |page, cx| {
+                            page.run_automation_once(id, cx);
                         });
                     }),
             );
@@ -628,8 +626,8 @@ fn render_automation_row_menu(
                 move |_, window, cx| {
                     let run_id = latest_run_id.clone();
                     let runtime = runtime.clone();
-                    entity.update(cx, |workspace, cx| {
-                        workspace.open_catalog_automation_run(runtime, run_id, window, cx);
+                    entity.update(cx, |page, cx| {
+                        page.open_catalog_automation_run(runtime, run_id, window, cx);
                     });
                 },
             ));
@@ -639,8 +637,8 @@ fn render_automation_row_menu(
         menu = menu.item(
             automation_enabled_toggle_item(enabled).on_click(move |_, _, cx| {
                 let id = toggle_id.clone();
-                toggle_entity.update(cx, |workspace, cx| {
-                    workspace.set_automation_enabled(id, !enabled, cx);
+                toggle_entity.update(cx, |page, cx| {
+                    page.set_automation_enabled(id, !enabled, cx);
                 });
             }),
         );
@@ -648,11 +646,11 @@ fn render_automation_row_menu(
         let delete_id = delete_id.clone();
         menu.item(
             PopupMenuItem::new("删除自动化")
-                .icon(smelt_ui::trash_icon())
-                .on_click(move |_, _, cx| {
+                .icon(api::ui::trash_icon())
+                .on_click(move |_, window, cx| {
                     let id = delete_id.clone();
-                    delete_entity.update(cx, |workspace, cx| {
-                        workspace.start_delete_automation(id, cx);
+                    delete_entity.update(cx, |page, cx| {
+                        page.start_delete_automation(id, window, cx);
                     });
                 }),
         )
@@ -660,9 +658,9 @@ fn render_automation_row_menu(
     .into_any_element()
 }
 
-fn render_template_card(
+pub(crate) fn render_template_card(
     template: &AutomationTemplate,
-    entity: Entity<Workspace>,
+    entity: Entity<AutomationsPage>,
     cx: &App,
 ) -> AnyElement {
     let id = template.id;
@@ -689,8 +687,8 @@ fn render_template_card(
                         .compact()
                         .label("添加"),
                     add_entity,
-                    move |workspace, runtime, window, cx| {
-                        workspace.add_automation_from_template(runtime, id, window, cx)
+                    move |page, runtime, window, cx| {
+                        page.add_automation_from_template(runtime, id, window, cx)
                     },
                     cx,
                 )),
@@ -705,13 +703,13 @@ fn render_template_card(
                     div()
                         .text_sm()
                         .font_semibold()
-                        .text_color(rgb(crate::ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text_bright()))
                         .child(template.name),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::text_muted()))
                         .child(template.description),
                 ),
         )
@@ -723,12 +721,12 @@ fn render_template_card(
                 .child(
                     Icon::new(IconName::Calendar)
                         .size(px(12.))
-                        .text_color(rgb(crate::ui_theme::text_faint())),
+                        .text_color(rgb(ui_theme::text_faint())),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::text_faint()))
                         .child(template.schedule.summary()),
                 ),
         )
@@ -736,36 +734,36 @@ fn render_template_card(
 }
 
 /// 元素 id 里区分机器的那一段。
-fn runtime_element_key(runtime: &crate::RuntimeKey) -> &str {
+pub(crate) fn runtime_element_key(runtime: &RuntimeKey) -> &str {
     match runtime {
-        crate::RuntimeKey::Local => "local",
-        crate::RuntimeKey::Remote(id) => id.as_str(),
+        RuntimeKey::Local => "local",
+        RuntimeKey::Remote(id) => id.as_str(),
     }
 }
 
 /// 能建自动化的机器：挂着的机器里自动化库读到了、可用的，本机在前。一台都没有时给本机。
-fn automation_creation_machines(cx: &App) -> Vec<crate::RuntimeKey> {
-    let config = cx.global::<settings::AgentHostState>();
-    let machines = attached_agent_machines(cx)
+pub(crate) fn automation_creation_machines(cx: &App) -> Vec<RuntimeKey> {
+    let config = automations(cx);
+    let machines = machine_keys(cx)
         .into_iter()
         .filter(|runtime| {
-            config.automations_on(runtime).is_some_and(|machine| {
+            config.on(runtime).is_some_and(|machine| {
                 !machine.store_id.is_empty() && machine.store_error.is_none()
             })
         })
         .collect::<Vec<_>>();
     if machines.is_empty() {
-        vec![crate::RuntimeKey::Local]
+        vec![RuntimeKey::Local]
     } else {
         machines
     }
 }
 
 /// 「在某台机器上新建」的按钮：只有一台机器时直接建，多台时点开先选机器。
-fn machine_picking_button(
+pub(crate) fn machine_picking_button(
     button: Button,
-    entity: Entity<Workspace>,
-    action: impl Fn(&mut Workspace, crate::RuntimeKey, &mut Window, &mut Context<Workspace>)
+    entity: Entity<AutomationsPage>,
+    action: impl Fn(&mut AutomationsPage, RuntimeKey, &mut Window, &mut Context<AutomationsPage>)
     + Clone
     + 'static,
     cx: &App,
@@ -777,13 +775,13 @@ fn machine_picking_button(
             .on_click(move |_, window, cx| {
                 let runtime = only.clone();
                 let action = action.clone();
-                entity.update(cx, |workspace, cx| action(workspace, runtime, window, cx));
+                entity.update(cx, |page, cx| action(page, runtime, window, cx));
             })
             .into_any_element();
     }
     let names = machines
         .iter()
-        .map(|runtime| (runtime.clone(), crate::runtimes::runtime_name(runtime, cx)))
+        .map(|runtime| (runtime.clone(), machine_name(runtime, cx)))
         .collect::<Vec<_>>();
     button
         .dropdown_caret(true)
@@ -797,7 +795,7 @@ fn machine_picking_button(
                     move |_, window, cx| {
                         let runtime = runtime.clone();
                         let action = action.clone();
-                        entity.update(cx, |workspace, cx| action(workspace, runtime, window, cx));
+                        entity.update(cx, |page, cx| action(page, runtime, window, cx));
                     },
                 ));
             }
@@ -807,25 +805,24 @@ fn machine_picking_button(
 }
 
 /// 自动化列表里的一台机器。
-struct AutomationMachineGroup {
-    runtime: crate::RuntimeKey,
-    automations: Vec<settings::Automation>,
+pub(crate) struct AutomationMachineGroup {
+    pub(crate) runtime: RuntimeKey,
+    pub(crate) automations: Vec<Automation>,
     /// 机器连不上、库还没读到或读失败时给人看的话。
-    status: Option<String>,
+    pub(crate) status: Option<String>,
 }
 
 /// 挂着的每台机器一组，本机在前。还没收到快照的机器也列出来，说明在读。
-fn automation_machine_groups(cx: &App) -> Vec<AutomationMachineGroup> {
-    let config = cx.global::<settings::AgentHostState>();
-    let mut keys = attached_agent_machines(cx);
+pub(crate) fn automation_machine_groups(cx: &App) -> Vec<AutomationMachineGroup> {
+    let config = automations(cx);
+    let mut keys = machine_keys(cx);
     if keys.is_empty() {
-        keys.push(crate::RuntimeKey::Local);
+        keys.push(RuntimeKey::Local);
     }
     keys.into_iter()
         .map(|runtime| {
-            let machine = config.automations_on(&runtime);
-            let status = crate::runtimes::runtime_unavailable_label(&runtime, cx)
-                .map(str::to_string)
+            let machine = config.on(&runtime);
+            let status = machine_unavailable(&runtime, cx)
                 .or_else(|| {
                     machine
                         .and_then(|machine| machine.store_error.clone())
@@ -847,7 +844,10 @@ fn automation_machine_groups(cx: &App) -> Vec<AutomationMachineGroup> {
         .collect()
 }
 
-fn render_automation_machine_header(group: &AutomationMachineGroup, cx: &App) -> AnyElement {
+pub(crate) fn render_automation_machine_header(
+    group: &AutomationMachineGroup,
+    cx: &App,
+) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -856,13 +856,13 @@ fn render_automation_machine_header(group: &AutomationMachineGroup, cx: &App) ->
             div()
                 .text_xs()
                 .font_medium()
-                .text_color(rgb(crate::ui_theme::text_muted()))
-                .child(crate::runtimes::runtime_name(&group.runtime, cx)),
+                .text_color(rgb(ui_theme::text_muted()))
+                .child(machine_name(&group.runtime, cx)),
         )
         .children(group.status.clone().map(|status| {
             div()
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::text_faint()))
                 .child(status)
         }))
         .when(
@@ -871,7 +871,7 @@ fn render_automation_machine_header(group: &AutomationMachineGroup, cx: &App) ->
                 row.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::text_faint()))
                         .child("还没有自动化"),
                 )
             },
@@ -879,13 +879,13 @@ fn render_automation_machine_header(group: &AutomationMachineGroup, cx: &App) ->
         .into_any_element()
 }
 
-fn automation_status_cell(status: AutomationRowStatus) -> AnyElement {
+pub(crate) fn automation_status_cell(status: AutomationRowStatus) -> AnyElement {
     let dot = match status {
-        AutomationRowStatus::Running => Some(crate::ui_theme::blue()),
+        AutomationRowStatus::Running => Some(ui_theme::blue()),
         AutomationRowStatus::AgentMissing | AutomationRowStatus::Unavailable => {
-            Some(crate::ui_theme::red())
+            Some(ui_theme::red())
         }
-        AutomationRowStatus::Paused => Some(crate::ui_theme::text_faint()),
+        AutomationRowStatus::Paused => Some(ui_theme::text_faint()),
         AutomationRowStatus::Active => None,
     };
     div()
@@ -896,13 +896,13 @@ fn automation_status_cell(status: AutomationRowStatus) -> AnyElement {
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(crate::ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::text_muted()))
                 .child(automation_row_status_label(status)),
         )
         .into_any_element()
 }
 
-fn template_icon(glyph: AutomationTemplateGlyph) -> IconName {
+pub(crate) fn template_icon(glyph: AutomationTemplateGlyph) -> IconName {
     match glyph {
         AutomationTemplateGlyph::Sun => IconName::Sun,
         AutomationTemplateGlyph::Calendar => IconName::Calendar,

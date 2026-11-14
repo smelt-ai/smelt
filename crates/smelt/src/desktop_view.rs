@@ -381,7 +381,7 @@ impl crate::Workspace {
             return div().into_any_element();
         };
         let name = crate::runtimes::runtime_name(view.read(cx).runtime().key(), cx);
-        let header = crate::agents::product_page_chrome(self.chrome_left_guard(window))
+        let header = crate::workspace_frame::page_chrome(self.chrome_left_guard(window))
             .gap_3()
             .child(
                 div()

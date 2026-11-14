@@ -21,9 +21,6 @@ pub(crate) enum ModalLayer {
     #[cfg(target_os = "macos")]
     MoveApp,
     CloseConfirm,
-    DeleteAgentMemory,
-    DeleteAgent,
-    DeleteAutomation,
     SessionManager,
     DaemonRestart,
     UpdateInstall,
@@ -40,9 +37,6 @@ impl ModalLayer {
             #[cfg(target_os = "macos")]
             Self::MoveApp => 14,
             Self::CloseConfirm => 3,
-            Self::DeleteAgentMemory => 10,
-            Self::DeleteAgent => 11,
-            Self::DeleteAutomation => 12,
             Self::SessionManager => 1,
             Self::DaemonRestart => 2,
             Self::UpdateInstall => 3,
@@ -99,21 +93,6 @@ impl Workspace {
             &mut rank,
             self.close_confirm.is_some(),
             ModalLayer::CloseConfirm.rank(),
-        );
-        raise(
-            &mut rank,
-            self.agent_surface.pending_memory_delete.is_some(),
-            ModalLayer::DeleteAgentMemory.rank(),
-        );
-        raise(
-            &mut rank,
-            self.agent_surface.pending_delete.is_some(),
-            ModalLayer::DeleteAgent.rank(),
-        );
-        raise(
-            &mut rank,
-            self.automation_surface.pending_delete.is_some(),
-            ModalLayer::DeleteAutomation.rank(),
         );
         rank
     }
@@ -296,11 +275,7 @@ impl Workspace {
                 cx.notify();
             }
             true
-        } else if self.close_confirm.is_some()
-            || self.agent_surface.pending_delete.is_some()
-            || self.agent_surface.pending_memory_delete.is_some()
-            || self.automation_surface.pending_delete.is_some()
-        {
+        } else if self.close_confirm.is_some() {
             if matches!(
                 self.close_confirm,
                 Some(
@@ -311,9 +286,6 @@ impl Workspace {
                 return true;
             }
             self.close_confirm = None;
-            self.agent_surface.pending_delete = None;
-            self.agent_surface.pending_memory_delete = None;
-            self.automation_surface.pending_delete = None;
             cx.notify();
             true
         } else {
@@ -503,24 +475,6 @@ impl Workspace {
                 self.close_confirm
                     .is_some()
                     .then(|| self.render_close_confirm(cx)),
-            )
-            .children(
-                self.agent_surface
-                    .pending_delete
-                    .is_some()
-                    .then(|| self.render_delete_agent_confirm(cx)),
-            )
-            .children(
-                self.agent_surface
-                    .pending_memory_delete
-                    .is_some()
-                    .then(|| self.render_delete_agent_memory_confirm(cx)),
-            )
-            .children(
-                self.automation_surface
-                    .pending_delete
-                    .is_some()
-                    .then(|| self.render_delete_automation_confirm(cx)),
             )
             .children(self.debug_hud.then(|| debug_hud(window, cx)))
             .children(image_preview_overlay)
