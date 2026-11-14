@@ -198,8 +198,7 @@ pub(crate) fn render_model_discovery_section(
                 let taken = adopted.iter().any(|id| id == &model.id);
                 let label = model.label().to_string();
                 Button::new(format!("{id_prefix}-discovered-{}", model.id))
-                    .choice()
-                    .compact()
+                    .small()
                     .selected(taken)
                     .label(label)
                     .disabled(taken)

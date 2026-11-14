@@ -2253,7 +2253,7 @@ impl Render for Workspace {
 
         // 主题色 token（跟随 gpui-component 主题，替代硬编码）
         // 内容区按 Grok Bot 画不透明实底。顶部导航的系统玻璃是窗口铬，不往分栏上叠透明度。
-        let shell_surface: Hsla = rgb(ui_theme::bg_rail()).into();
+        let shell_surface: Hsla = rgb(ui_theme::bg()).into();
         let shell_padding = ui_theme::shell_padding();
 
         // 壳层走界面字体（默认系统 UI）；终端/diff/代码块各自绑代码字体。

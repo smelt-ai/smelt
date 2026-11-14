@@ -337,7 +337,7 @@ pub fn git_log_view(
                 .px_3()
                 .py_1()
                 .border_b_1()
-                .border_color(ui_theme::hairline())
+                .border_color(ui_theme::hair())
                 .text_sm()
                 .text_color(muted)
                 .child(
@@ -348,8 +348,7 @@ pub fn git_log_view(
                 )
                 .child(
                     Button::new("git-log-reload")
-                        .normal()
-                        .icon_size()
+                        .small()
                         .label("刷新")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(root) = this.git_log.loaded_root.clone() {
@@ -420,7 +419,7 @@ pub fn commit_detail_pane(
                 .px_3()
                 .py_2()
                 .border_b_1()
-                .border_color(ui_theme::hairline())
+                .border_color(ui_theme::hair())
                 // 提交标题常常很长，这一栏只有 380px，必须截断。
                 .child(
                     div()
@@ -706,7 +705,7 @@ pub fn branch_tree(
                             .w(px(6.))
                             .flex_none()
                             .text_xs()
-                            .text_color(rgb(ui_theme::green()))
+                            .text_color(rgb(ui_theme::ok()))
                             .child(if is_head { "●" } else { "" }),
                     )
                     // 分支名常常比这一栏宽（feature/xxx-yyy 之类），截断后挂

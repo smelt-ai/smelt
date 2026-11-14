@@ -132,7 +132,7 @@ pub(crate) fn page_chrome(left_guard: Option<Pixels>) -> Div {
         .pb(px(8.))
         .px(px(20.))
         .border_b_1()
-        .border_color(crate::ui_theme::hairline())
+        .border_color(crate::ui_theme::hair())
         .flex()
         .items_center();
     match left_guard {

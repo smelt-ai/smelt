@@ -132,7 +132,7 @@ pub struct Appearance {
     /// 明暗。跟着 `theme_name` 走，CLI 的 `appearance.theme_mode` 会把主题拨到同一族的另一侧。
     #[serde(default = "default_theme_mode")]
     pub theme_mode: ThemeMode,
-    /// 主题名，对应注册表里的 `name`，例如 `Default Dark`、`Ayu Light`。
+    /// 主题名，对应注册表里的 `name`，例如 `smelt Dark`、`Ayu Light`。
     #[serde(default = "default_theme_name")]
     pub theme_name: String,
     /// 界面字号（基准 rem，px）。控制侧边栏、Agent 会话、设置页等全局 UI 元素的排版缩放。

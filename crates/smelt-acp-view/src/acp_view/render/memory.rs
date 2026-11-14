@@ -29,7 +29,7 @@ impl AcpView {
                 Icon::new(IconName::BookOpen)
                     .size_3p5()
                     .flex_shrink_0()
-                    .text_color(gpui::rgb(ui_theme::accent())),
+                    .text_color(gpui::rgb(ui_theme::muted())),
             )
             .child(
                 div()
@@ -37,15 +37,14 @@ impl AcpView {
                     .min_w(px(0.))
                     .truncate()
                     .text_xs()
-                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .text_color(gpui::rgb(ui_theme::muted()))
                     .child(memory_changes_summary(&changes.entries)),
             )
             .child(
                 Button::new("acp-memory-open-page")
                     .quiet()
-                    .compact()
+                    .small()
                     .label("记忆页")
-                    .text_color(gpui::rgb(ui_theme::text_muted()))
                     .tooltip("去这个智能体的记忆页，管理全部记忆")
                     .on_click(cx.listener(move |_this, _ev, _window, cx| {
                         cx.emit(AcpViewEvent::OpenAgentMemory {
@@ -83,13 +82,13 @@ impl AcpView {
                 .gap_1p5()
                 .border_t_1()
                 .border_color(border)
-                .bg(ui_theme::tint(ui_theme::accent(), 0x0c))
+                .bg(gpui::rgb(ui_theme::side()))
                 .child(header)
                 .child(rows)
                 .children(self.memory_error.as_ref().map(|error| {
                     div()
                         .text_xs()
-                        .text_color(gpui::rgb(ui_theme::red()))
+                        .text_color(gpui::rgb(ui_theme::bad()))
                         .child(error.clone())
                 }))
                 .into_any_element(),
@@ -108,22 +107,22 @@ impl AcpView {
         let busy = self.memory_busy.as_ref() == Some(&key);
         let any_busy = self.memory_busy.is_some();
         let pending = entry.pending_reason.is_some();
-        let faint = gpui::rgb(ui_theme::text_faint());
+        let faint = gpui::rgb(ui_theme::faint());
         let row_id = format!("{}-{}", layer_key(entry.layer), entry.file_name);
 
         let mut badges = h_flex().flex_shrink_0().gap_1().items_center();
         badges = badges.child(memory_badge(
             if entry.created { "新" } else { "改" },
-            ui_theme::text_muted(),
+            ui_theme::muted(),
         ));
         if entry.layer == AgentMemoryLayer::User {
             // 全局记忆所有智能体共用，删除时影响面不同，标出来。
-            badges = badges.child(memory_badge("全局", ui_theme::blue()));
+            badges = badges.child(memory_badge("全局", ui_theme::run()));
         }
         badges = badges.child(if pending {
-            memory_badge("待确认", ui_theme::yellow())
+            memory_badge("待确认", ui_theme::need())
         } else {
-            memory_badge("已生效", ui_theme::green())
+            memory_badge("已生效", ui_theme::ok())
         });
 
         let subtitle = match &entry.pending_reason {
@@ -167,7 +166,7 @@ impl AcpView {
                                     .min_w(px(0.))
                                     .truncate()
                                     .text_xs()
-                                    .text_color(gpui::rgb(ui_theme::text_bright()))
+                                    .text_color(gpui::rgb(ui_theme::text()))
                                     .child(entry.name.clone()),
                             )
                             .child(badges),
@@ -191,8 +190,8 @@ impl AcpView {
                 let approve_key = key.clone();
                 actions = actions.child(
                     Button::new(SharedString::from(format!("acp-memory-approve-{row_id}")))
-                        .commit()
-                        .compact()
+                        .primary()
+                        .small()
                         .label("采纳")
                         .disabled(any_busy)
                         .tooltip("采纳：之后的对话会用到这条记忆")
@@ -207,7 +206,7 @@ impl AcpView {
             }
             let delete_key = key.clone();
             let delete = Button::new(SharedString::from(format!("acp-memory-delete-{row_id}")))
-                .compact()
+                .small()
                 .disabled(any_busy);
             let delete = if armed {
                 delete.danger().label("确认删除").tooltip(
@@ -218,7 +217,7 @@ impl AcpView {
                     },
                 )
             } else {
-                delete.outline().label("删除")
+                delete.danger_quiet().label("删除")
             };
             actions = actions.child(delete.on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.request_memory_action(delete_key.clone(), AcpMemoryActionKind::Delete, cx);
@@ -231,7 +230,7 @@ impl AcpView {
             .px_2()
             .py_1()
             .rounded(ui_theme::row_radius())
-            .hover(|row| row.bg(gpui::rgb(ui_theme::bg_row_hover())))
+            .hover(|row| row.bg(gpui::rgb(ui_theme::soft())))
             .child(
                 h_flex()
                     .w_full()
@@ -254,7 +253,7 @@ impl AcpView {
                         .bg(ui_theme::overlay(0x10))
                         .text_xs()
                         .whitespace_normal()
-                        .text_color(gpui::rgb(ui_theme::text_mid()))
+                        .text_color(gpui::rgb(ui_theme::muted()))
                         .child(if entry.body.is_empty() {
                             "（正文为空）".to_string()
                         } else {

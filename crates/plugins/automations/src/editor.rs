@@ -604,7 +604,7 @@ pub(crate) fn render_add_trigger_button(entity: Entity<AutomationsPage>) -> AnyE
         .rounded_full()
         .border_1()
         .border_dashed()
-        .border_color(ui_theme::card_stroke())
+        .border_color(ui_theme::hair())
         .flex()
         .items_center()
         .child(
@@ -697,14 +697,14 @@ pub(crate) fn render_trigger_entry(
                             div()
                                 .text_sm()
                                 .font_medium()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child(title),
                         )
                         .when(show_hint, |col| {
                             col.child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(ui_theme::text_muted()))
+                                    .text_color(rgb(ui_theme::muted()))
                                     .child(hint),
                             )
                         }),
@@ -733,11 +733,11 @@ pub(crate) fn neutral_icon_mark(icon: impl Into<Icon>, size: f32) -> AnyElement 
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgb(ui_theme::bg_hover()))
+        .bg(rgb(ui_theme::soft()))
         .child(
             Icon::new(icon)
                 .size(px((size * 0.5).round()))
-                .text_color(rgb(ui_theme::text_mid())),
+                .text_color(rgb(ui_theme::muted())),
         )
         .into_any_element()
 }
@@ -839,13 +839,13 @@ pub(crate) fn render_automation_access_note(is_agent: bool) -> AnyElement {
             div()
                 .text_xs()
                 .font_medium()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .child("无人值守 · 完全访问"),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_muted()))
+                .text_color(rgb(ui_theme::muted()))
                 .child(automation_access_note(is_agent)),
         )
         .into_any_element()
@@ -904,7 +904,7 @@ pub(crate) fn render_webhook_entry(
             body.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(ui_theme::text_muted()))
+                    .text_color(rgb(ui_theme::muted()))
                     .child("自动化已暂停，启用后可继续接收请求。"),
             )
         })
@@ -926,10 +926,10 @@ pub(crate) fn render_webhook_entry(
                             .py_2()
                             .rounded(px(8.))
                             .border_1()
-                            .border_color(rgb(ui_theme::border_loud()))
-                            .bg(rgb(ui_theme::bg_column()))
+                            .border_color(ui_theme::hair_strong())
+                            .bg(rgb(ui_theme::side()))
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_bright()))
+                            .text_color(rgb(ui_theme::text()))
                             .child(url),
                     )
                     .child(
@@ -1220,7 +1220,7 @@ pub(crate) fn render_schedule_rule(
         body.p_3()
             .rounded(px(8.))
             .border_1()
-            .border_color(rgb(ui_theme::border()))
+            .border_color(ui_theme::hair())
             .into_any_element()
     } else {
         body.into_any_element()

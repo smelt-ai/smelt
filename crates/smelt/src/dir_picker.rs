@@ -255,7 +255,7 @@ impl Workspace {
             .child(
                 smelt_ui::Button::new("dir-picker-up")
                     .quiet()
-                    .compact()
+                    .small()
                     .icon(IconName::ArrowUp)
                     .tooltip("上一级")
                     .disabled(current.is_none_or(|listing| listing.parent.is_none()))
@@ -274,7 +274,7 @@ impl Workspace {
             .child(
                 smelt_ui::Button::new("dir-picker-home")
                     .quiet()
-                    .compact()
+                    .small()
                     .label("主目录")
                     .on_click(cx.listener(|this, _, _, cx| this.dir_picker_navigate(None, cx))),
             )
@@ -302,7 +302,7 @@ impl Workspace {
             Some(Err(error)) => div()
                 .py_6()
                 .text_sm()
-                .text_color(rgb(ui_theme::red()))
+                .text_color(rgb(ui_theme::bad()))
                 .child(error.clone())
                 .into_any_element(),
             Some(Ok(listing)) if listing.entries.is_empty() => div()
@@ -324,7 +324,6 @@ impl Workspace {
                     let is_dir = entry.is_dir;
                     let toggle_path = entry.path.clone();
                     smelt_ui::ListRow::new(("dir-picker-entry", ix))
-                        .card()
                         .selected(selected)
                         .flex()
                         .px_3()
@@ -354,7 +353,7 @@ impl Workspace {
                             row.child(
                                 smelt_ui::Button::new(("dir-picker-pick", ix))
                                     .quiet()
-                                    .icon_size()
+                                    .small()
                                     .icon(if selected {
                                         IconName::Check
                                     } else {
@@ -416,14 +415,14 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_cancel_button(
                         "cancel-dir-picker",
                         "取消",
                         |this, _, _, cx| this.cancel_dir_picker(cx),
                         cx,
                     ))
                     .child(
-                        Self::modal_commit_button(
+                        Self::modal_primary_button(
                             "confirm-dir-picker",
                             confirm_label,
                             |this, _, _, cx| this.dir_picker_confirm(cx),
@@ -432,13 +431,7 @@ impl Workspace {
                         .disabled(current.is_none() || picker.loading),
                     ),
             );
-        self.modal_shell(
-            520.,
-            false,
-            content,
-            crate::overlay::ModalLayer::DirPicker,
-            cx,
-        )
+        self.modal_shell(520., content, crate::overlay::ModalLayer::DirPicker, cx)
     }
 }
 

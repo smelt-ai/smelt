@@ -74,7 +74,10 @@ mod appearance_tests {
             ThemeEntry::new("First Dark", "dark", family(Some("first"))),
             ThemeEntry::new("Second Light", "light", family(Some("second"))),
         ];
-        assert_eq!(sibling_in(&entries, "First Dark", "light"), "Default Light");
+        assert_eq!(
+            sibling_in(&entries, "First Dark", "light"),
+            smelt_model::theme_index::DEFAULT_LIGHT
+        );
         assert_ne!(family(None), family(Some("")));
     }
 
@@ -384,7 +387,7 @@ mod terminal_theme_tests {
         terminal::set_bg_override(None);
         let light = current_terminal_theme();
         assert!(!light.dark);
-        assert_eq!(light.background, crate::ui_theme::bg_stage());
+        assert_eq!(light.background, crate::ui_theme::bg());
         assert_ne!(
             light.palette,
             TerminalThemeSnapshot::default().palette,

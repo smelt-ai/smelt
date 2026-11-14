@@ -1,8 +1,9 @@
 //! 界面主题目录：内存里的一张「名字 → 主题配置」表，按名字 `apply`。
 //!
-//! gpui-kit 的 [`ThemeRegistry`] 只能加不能删，所以除了库自带的 Default Light /
-//! Default Dark（`gpui_component::init` 装好，名字保留），其它主题都登记在这里的
-//! [`ThemeCatalog`] 上，不再往 [`ThemeRegistry`] 里装。内置主题和第三方主题走同一套
+//! 组件库自带 smelt Light / smelt Dark（`themes/smelt.json`，名字保留），删掉主题插件
+//! 也还在。gpui-kit 的 [`ThemeRegistry`] 只能加不能删，它自带的 Default 那对是 shadcn
+//! 外观，smelt 不列出也不用；别的主题都登记在这里的 [`ThemeCatalog`] 上，不往
+//! [`ThemeRegistry`] 里装。内置主题和第三方主题走同一套
 //! 接口：按「来源」（owner，通常是插件 id）整组登记 [`register_theme_sets`]，整组换掉
 //! 或 [`unregister_themes`] 卸下。登记是原子的：任何一份解析失败、名字为空、同组重名、
 //! 和保留名或别的来源重名，整组都不生效，原来的登记原样保留。
@@ -32,7 +33,7 @@ pub struct ThemeInfo {
     pub name: SharedString,
     pub mode: ThemeMode,
     pub family: SharedString,
-    /// 登记它的来源；库自带的 Default 是 `None`。
+    /// 登记它的来源；库自带的 smelt 主题是 `None`。
     pub owner: Option<SharedString>,
 }
 
@@ -49,7 +50,7 @@ pub enum ThemeRegisterError {
     EmptyName,
     /// 这一组里有两份同名主题。
     DuplicateInSet(SharedString),
-    /// 和库自带的保留名重名（Default Light / Default Dark）。
+    /// 和库自带的保留名重名（smelt Light / smelt Dark）。
     Reserved(SharedString),
     /// 名字已被另一个来源登记。
     Taken {
@@ -199,49 +200,38 @@ impl ThemeCatalog {
     }
 }
 
-/// 库自带的 Default 主题（只读，不登记在目录里）。
-fn builtin_default(name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
-    if !cx.has_global::<ThemeRegistry>() {
-        return None;
-    }
-    ThemeRegistry::global(cx)
-        .default_themes()
-        .values()
-        .find(|config| config.name == name)
-        .cloned()
+/// 库自带的 smelt Light / smelt Dark。只在第一次用到时解析一次。
+const BUILTIN_SOURCE: &str = include_str!("../themes/smelt.json");
+
+thread_local! {
+    static BUILTIN: (SharedString, Vec<Rc<ThemeConfig>>) = {
+        let set = serde_json::from_str::<ThemeSet>(BUILTIN_SOURCE)
+            .expect("themes/smelt.json 必须是合法的主题集");
+        (set.name, set.themes.into_iter().map(Rc::new).collect())
+    };
+}
+
+fn builtin(name: &str) -> Option<Rc<ThemeConfig>> {
+    BUILTIN.with(|(_, themes)| themes.iter().find(|config| config.name == name).cloned())
 }
 
 fn lookup(name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
-    if let Some(config) = builtin_default(name, cx) {
+    if let Some(config) = builtin(name) {
         return Some(config);
     }
     cx.try_global::<ThemeCatalog>()?.get(name).cloned()
 }
 
-/// 按来源整组登记主题，语义见 [`ThemeCatalog::register`]。保留名是 gpui-kit 自带的
-/// Default 主题。不会改当前在用的主题：换掉的组里有当前主题时，界面保持原样，
-/// 要不要换由调用方再 [`apply`]。
+/// 按来源整组登记主题，语义见 [`ThemeCatalog::register`]。保留名是库自带的 smelt 主题。
+/// 不会改当前在用的主题：换掉的组里有当前主题时，界面保持原样，要不要换由调用方再
+/// [`apply`]。
 pub fn register_theme_sets(
     owner: &str,
     sources: &[&str],
     cx: &mut App,
 ) -> Result<Vec<SharedString>, ThemeRegisterError> {
-    let defaults: Vec<SharedString> = if cx.has_global::<ThemeRegistry>() {
-        ThemeRegistry::global(cx)
-            .default_themes()
-            .values()
-            .map(|config| config.name.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let is_reserved = |name: &str| {
-        name == smelt_model::theme_index::DEFAULT_DARK
-            || name == smelt_model::theme_index::DEFAULT_LIGHT
-            || defaults.iter().any(|default| *default == name)
-    };
     cx.default_global::<ThemeCatalog>()
-        .register(owner, sources, is_reserved)
+        .register(owner, sources, |name| builtin(name).is_some())
 }
 
 /// 卸下来源 `owner` 的全部主题，返回卸下的名字。同 [`register_theme_sets`]，不动当前主题。
@@ -252,23 +242,21 @@ pub fn unregister_themes(owner: &str, cx: &mut App) -> Vec<SharedString> {
     cx.global_mut::<ThemeCatalog>().unregister(owner)
 }
 
-/// 目录里能选的全部主题：先是库自带的 Default（浅色在前），再是登记的主题（按名字）。
+/// 目录里能选的全部主题：先是库自带的 smelt（浅色在前），再是登记的主题（按名字）。
 pub fn themes(cx: &App) -> Vec<ThemeInfo> {
-    let mut list: Vec<ThemeInfo> = Vec::new();
-    if cx.has_global::<ThemeRegistry>() {
-        let mut defaults: Vec<_> = ThemeRegistry::global(cx)
-            .default_themes()
-            .values()
+    let mut list: Vec<ThemeInfo> = BUILTIN.with(|(family, themes)| {
+        let mut builtin: Vec<_> = themes
+            .iter()
             .map(|config| ThemeInfo {
                 name: config.name.clone(),
                 mode: config.mode,
-                family: "Default".into(),
+                family: family.clone(),
                 owner: None,
             })
             .collect();
-        defaults.sort_by_key(|info| info.mode.is_dark());
-        list.extend(defaults);
-    }
+        builtin.sort_by_key(|info| info.mode.is_dark());
+        builtin
+    });
     if let Some(catalog) = cx.try_global::<ThemeCatalog>() {
         list.extend(catalog.themes());
     }
@@ -281,7 +269,7 @@ pub fn generation(cx: &App) -> u64 {
         .map_or(0, |catalog| catalog.generation)
 }
 
-/// 名字现在能不能选（库自带的 Default 或已登记）。
+/// 名字现在能不能选（库自带的 smelt 主题或已登记）。
 pub fn contains(name: &str, cx: &App) -> bool {
     lookup(name, cx).is_some()
 }
@@ -489,10 +477,12 @@ mod tests {
     fn apply_follows_registration(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         cx.update(|cx| {
-            // 库自带的 Default 不用登记就能选，也不能被抢名。
-            assert!(apply("Default Light", cx));
-            assert!(apply("Default Dark", cx));
-            let clash = set(&[("Default Dark", "#000000")]);
+            // 库自带的 smelt 主题不用登记就能选，也不能被抢名；gpui-kit 的 Default 不列出。
+            assert!(apply(smelt_model::theme_index::DEFAULT_LIGHT, cx));
+            assert!(apply(smelt_model::theme_index::DEFAULT_DARK, cx));
+            assert!(!apply("Default Dark", cx));
+            assert!(themes(cx).iter().all(|info| info.family != "Default"));
+            let clash = set(&[(smelt_model::theme_index::DEFAULT_DARK, "#000000")]);
             assert!(matches!(
                 register_theme_sets("third", &[&clash], cx),
                 Err(ThemeRegisterError::Reserved(_))

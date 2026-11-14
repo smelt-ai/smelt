@@ -76,7 +76,7 @@ fn quota_setting_item(
                     row.child(
                         Button::new(SharedString::from(format!("quota-retry-{id}")))
                             .quiet()
-                            .compact()
+                            .small()
                             .label("重试")
                             .on_click(move |_, _, cx| {
                                 retry_workspace.update(cx, |ws, _| {
@@ -190,7 +190,7 @@ fn agent_groups(
             let delete_slot = if *removable {
                 Button::new(("del-launch", row_key))
                     .quiet()
-                    .compact()
+                    .small()
                     .icon(IconName::Close)
                     .icon_action("删除启动项")
                     .w(del_w)
@@ -226,7 +226,6 @@ fn agent_groups(
         let add_entity = launch_editor_entity.clone();
         col.child(
             Button::new("add-launch")
-                .outline()
                 .icon(IconName::Plus)
                 .label("添加启动项")
                 .w(field_w)
@@ -253,11 +252,10 @@ fn agent_groups(
                 let refresh_entity = runtime_entity.clone();
                 let refresh = Button::new("refresh-acp-runtime")
                     .quiet()
-                    .compact()
+                    .small()
                     .icon(gpui_component::Icon::new(
                         gpui_kit_assets::IconName::RefreshCw,
                     ))
-                    .loading_icon(IconName::LoaderCircle)
                     .loading(runtime.refreshing)
                     .disabled(runtime.refreshing || runtime.installing.is_some())
                     .icon_action("刷新运行环境检测")
@@ -300,11 +298,11 @@ fn agent_groups(
                     |agent: ConversationAgentKind,
                      executable: &smelt_model::acp_conn::RuntimeExecutable| {
                         let (status, color): (String, Hsla) = if !executable.is_available() {
-                            ("未安装".to_string(), rgb(crate::ui_theme::red()).into())
+                            ("未安装".to_string(), rgb(crate::ui_theme::bad()).into())
                         } else if let Some(error) = &executable.error {
                             (
                                 format!("检测失败：{error}"),
-                                rgb(crate::ui_theme::yellow()).into(),
+                                rgb(crate::ui_theme::need()).into(),
                             )
                         } else {
                             (
@@ -312,7 +310,7 @@ fn agent_groups(
                                     .version
                                     .clone()
                                     .unwrap_or_else(|| "已安装（未返回版本）".to_string()),
-                                rgb(crate::ui_theme::green()).into(),
+                                rgb(crate::ui_theme::ok()).into(),
                             )
                         };
                         let path = executable
@@ -323,15 +321,13 @@ fn agent_groups(
                             let install_entity = runtime_entity.clone();
                             let installing_this = runtime.installing == Some(agent);
                             Button::new(format!("install-acp-cli-{}", agent.id()))
-                                .normal()
-                                .compact()
+                                .small()
                                 .icon(IconName::Plus)
                                 .label(if installing_this {
                                     "安装中…"
                                 } else {
                                     "安装"
                                 })
-                                .loading_icon(IconName::LoaderCircle)
                                 .loading(installing_this)
                                 .disabled(runtime.refreshing || runtime.installing.is_some())
                                 .tooltip(format!("安装 {}", agent.label()))
@@ -375,9 +371,9 @@ fn agent_groups(
                     div()
                         .text_xs()
                         .text_color(if runtime.install_failed {
-                            rgb(crate::ui_theme::red())
+                            rgb(crate::ui_theme::bad())
                         } else {
-                            rgb(crate::ui_theme::green())
+                            rgb(crate::ui_theme::ok())
                         })
                         .child(message)
                 });
@@ -471,8 +467,7 @@ fn agent_groups(
                                 .items_center()
                                 .child(
                                     Button::new(("profile-kind", row_key))
-                                        .outline()
-                                        .compact()
+                                        .small()
                                         .w(kind_w)
                                         .flex_none()
                                         .label(kind_label)
@@ -509,7 +504,7 @@ fn agent_groups(
                                 .child(
                                     Button::new(("del-profile", row_key))
                                         .quiet()
-                                        .compact()
+                                        .small()
                                         .icon(IconName::Close)
                                         .icon_action("删除这个自定义 Agent")
                                         .w(del_w)
@@ -567,7 +562,6 @@ fn agent_groups(
                 let add_entity = profile_editor_entity.clone();
                 col.child(
                     Button::new("add-profile")
-                        .outline()
                         .icon(IconName::Plus)
                         .label("添加自定义 Agent")
                         .w(field_w)
@@ -602,7 +596,7 @@ fn agent_groups(
                 .as_ref()
                 .is_some_and(|providers| providers.iter().all(|provider| provider.installed));
             let muted = cx.theme().muted_foreground;
-            let success: Hsla = rgb(crate::ui_theme::green()).into();
+            let success: Hsla = rgb(crate::ui_theme::ok()).into();
             // 接入项照运行时报的原样列：它们不是一家 Agent 一项（「Claude / Grok」共用
             // 一份配置，Pi 没有 hooks），硬对到上面的 CLI 表反而对不齐。
             let providers =
@@ -660,7 +654,7 @@ fn agent_groups(
                                 .child(
                                     Button::new("uninstall-agent-hooks")
                                         .quiet()
-                                        .compact()
+                                        .small()
                                         .label("移除")
                                         .disabled(busy)
                                         .on_click(move |_, _window, cx: &mut App| {
@@ -675,7 +669,7 @@ fn agent_groups(
                                 )
                                 .child(
                                     Button::new("install-agent-hooks")
-                                        .compact()
+                                        .small()
                                         .label(if installed {
                                             "重新安装"
                                         } else {

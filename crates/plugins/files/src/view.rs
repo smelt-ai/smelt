@@ -43,10 +43,10 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
 
 fn git_mark_color(mark: char) -> Hsla {
     match mark {
-        'D' => rgb(ui_theme::red()).into(),
-        'A' => rgb(ui_theme::green()).into(),
-        'U' => rgb(ui_theme::blue()).into(),
-        _ => rgb(ui_theme::yellow()).into(),
+        'D' => rgb(ui_theme::bad()).into(),
+        'A' => rgb(ui_theme::ok()).into(),
+        'U' => rgb(ui_theme::run()).into(),
+        _ => rgb(ui_theme::need()).into(),
     }
 }
 
@@ -72,14 +72,14 @@ impl FilesPanel {
             .px_2()
             .py(px(6.))
             .border_b_1()
-            .border_color(rgb(ui_theme::border_dim()))
+            .border_color(ui_theme::hair())
             .child(div().flex_1().min_w_0().child(Input::new(&self.filter).small()))
             // 只能钉本机目录：远程项目的树里不混进本机目录。
             .when(local, |el| {
                 el.child(
                     Button::new("files-pin-root")
                         .quiet()
-                        .compact()
+                        .small()
                         .flex_shrink_0()
                         .icon(IconName::Plus)
                         .icon_action("把目录加到文件树")
@@ -110,7 +110,7 @@ impl FilesPanel {
                         .min_h_0()
                         .overflow_hidden()
                         .flex()
-                        .bg(rgb(ui_theme::bg_stage()))
+                        .bg(rgb(ui_theme::bg()))
                         .child(div().size_full().min_h_0().flex().flex_col().child(tree)),
                 )
         });
@@ -401,7 +401,7 @@ impl FilesPanel {
                     el.child(
                         Button::new("file-open-in-browser")
                             .quiet()
-                            .icon_size()
+                            .small()
                             .flex_shrink_0()
                             .label("浏览器打开")
                             .on_click(cx.listener(|this, _, _, cx| this.open_file_in_browser(cx))),
@@ -412,7 +412,7 @@ impl FilesPanel {
                 el.child(
                     Button::new("file-preview-toggle")
                         .quiet()
-                        .icon_size()
+                        .small()
                         .flex_shrink_0()
                         .label(if preview { "查看原始码" } else { "查看预览" })
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -423,7 +423,7 @@ impl FilesPanel {
             .child(
                 Button::new("file-tree-toggle")
                     .quiet()
-                    .compact()
+                    .small()
                     .flex_shrink_0()
                     .icon(if tree_open {
                         IconName::PanelRight
@@ -456,7 +456,7 @@ impl FilesPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(ui_theme::bg_stage()))
+                .bg(rgb(ui_theme::bg()))
                 .child(smelt_plugin_api::ui::image::image_surface(image))
                 .into_any_element();
         }
@@ -540,8 +540,8 @@ impl FilesPanel {
                     .left(px(3.))
                     .w(px(1.))
                     .h_full()
-                    .bg(rgb(ui_theme::border_dim()))
-                    .group_hover(id, |line| line.bg(rgb(ui_theme::text_faint()))),
+                    .bg(ui_theme::hair())
+                    .group_hover(id, |line| line.bg(rgb(ui_theme::faint()))),
             )
             .on_mouse_down(
                 MouseButton::Left,

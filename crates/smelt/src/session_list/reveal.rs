@@ -140,8 +140,8 @@ pub(crate) fn attention_pill(
             } else {
                 "sidebar-attention-below"
             })
-            .surface()
-            .compact()
+            .floating()
+            .small()
             .icon(if above {
                 IconName::ArrowUp
             } else {

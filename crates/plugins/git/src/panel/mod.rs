@@ -613,7 +613,7 @@ where
 fn stage_toggle_button(id: ElementId, staged: bool) -> Button {
     Button::new(id)
         .quiet()
-        .icon_size()
+        .small()
         .flex_shrink_0()
         .icon(if staged {
             IconName::Minus
@@ -685,13 +685,13 @@ fn render_narrow_git_row(
                 .pr(px(2.))
                 .rounded(ui_theme::row_radius())
                 .text_xs()
-                .when(*active, |d| d.bg(rgb(ui_theme::bg_hover())))
-                .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
+                .when(*active, |d| d.bg(rgb(ui_theme::soft())))
+                .hover(|d| d.bg(rgb(ui_theme::soft())))
                 // 折叠箭头：未初始化的仓库没有内容可折，留空位保持对齐。
                 .child(
                     Button::new(git_repo_id("git-repo-caret", root))
                         .quiet()
-                        .icon_size()
+                        .small()
                         .flex_shrink_0()
                         .icon(if *collapsed {
                             IconName::ChevronRight
@@ -713,9 +713,9 @@ fn render_narrow_git_row(
                     div()
                         .flex_shrink_0()
                         .text_color(rgb(if *active {
-                            ui_theme::accent()
+                            ui_theme::text()
                         } else {
-                            ui_theme::text_faint()
+                            ui_theme::faint()
                         }))
                         .child(repo_kind_glyph(*kind)),
                 )
@@ -725,7 +725,7 @@ fn render_narrow_git_row(
                         .min_w_0()
                         .overflow_hidden()
                         .font_semibold()
-                        .text_color(rgb(ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text()))
                         .child(truncated_line(label.clone())),
                 )
                 .child(
@@ -735,7 +735,7 @@ fn render_narrow_git_row(
                         .max_w(px(96.))
                         .overflow_hidden()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child(truncated_line(branch.clone()))
                         .tooltip({
                             let b = branch.clone();
@@ -750,13 +750,13 @@ fn render_narrow_git_row(
                 .child(
                     Button::new(git_repo_id("git-repo-ops", root))
                             .quiet()
-                            .icon_size()
+                            .small()
                             .label(sync_label)
                             .font_family(crate::mono_font())
                             .text_color(rgb(if ahead + behind > 0 {
-                                ui_theme::green()
+                                ui_theme::ok()
                             } else {
-                                ui_theme::text_faint()
+                                ui_theme::faint()
                             }))
                         .dropdown_menu(move |menu, _window, _cx| {
                             git_ops_menu_items(
@@ -812,8 +812,8 @@ fn render_narrow_git_row(
                         .gap_1p5()
                         .child(
                             Button::new(git_repo_id("git-commit-push", root))
-                                .commit()
-                                .compact()
+                                .primary()
+                                .small()
                                 .flex_1()
                                 .label(commit_label)
                                 .disabled(!can_commit)
@@ -829,7 +829,7 @@ fn render_narrow_git_row(
                         .child(
                             Button::new(git_repo_id("git-commit-only", root))
                                 .quiet()
-                                .compact()
+                                .small()
                                 .label("仅提交")
                                 .disabled(!can_commit)
                                 .on_click(move |_ev, window, cx| {
@@ -843,7 +843,7 @@ fn render_narrow_git_row(
                         .child(
                             Button::new(git_repo_id("git-push-only", root))
                                 .quiet()
-                                .compact()
+                                .small()
                                 .label(format!("↑{ahead}"))
                                 // 点击跟可用态同一个条件：↑0 时点了就是一次毫无意义的
                                 // push（失败时还会贴出一条报错）。
@@ -861,7 +861,7 @@ fn render_narrow_git_row(
                     col.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_faint()))
+                            .text_color(rgb(ui_theme::faint()))
                             .child("先暂存要提交的更改"),
                     )
                 })
@@ -875,10 +875,10 @@ fn render_narrow_git_row(
                         .px_1p5()
                         .py_1()
                         .rounded(ui_theme::row_radius())
-                        .bg(rgb(ui_theme::bg_card()))
+                        .bg(rgb(ui_theme::surface()))
                         .text_xs()
                         .font_family(crate::mono_font())
-                        .text_color(rgb(ui_theme::red()))
+                        .text_color(rgb(ui_theme::bad()))
                         .child(err)
                 }))
                 .into_any_element()
@@ -902,7 +902,7 @@ fn render_narrow_git_row(
                 .pr_3()
                 .text_xs()
                 .font_semibold()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(
                     div()
                         .flex_1()
@@ -984,8 +984,8 @@ fn render_narrow_git_row(
                         .pr_3()
                         .text_xs()
                         .font_family(crate::mono_font())
-                        .text_color(rgb(ui_theme::text_muted()))
-                        .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
+                        .text_color(rgb(ui_theme::muted()))
+                        .hover(|d| d.bg(rgb(ui_theme::soft())))
                         .child(
                             Icon::new(if is_collapsed {
                                 IconName::ChevronRight
@@ -1018,11 +1018,11 @@ fn render_narrow_git_row(
                     let untracked = code == "??";
                     let letter = code.trim().chars().next().unwrap_or('M').to_string();
                     let letter_color = if untracked || letter == "A" {
-                        rgb(ui_theme::green())
+                        rgb(ui_theme::ok())
                     } else if letter == "D" {
-                        rgb(ui_theme::red())
+                        rgb(ui_theme::bad())
                     } else {
-                        rgb(ui_theme::accent())
+                        rgb(ui_theme::need())
                     };
                     // 方向由分组决定：「暂存的更改」里只能撤出，「更改」里只能加入。
                     let staged = *is_staged_group;
@@ -1078,7 +1078,7 @@ fn render_narrow_git_row(
                         .pr_3()
                         .text_xs()
                         .font_family(crate::mono_font())
-                        .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
+                        .hover(|d| d.bg(rgb(ui_theme::soft())))
                         // 子模块指针：改的不是文件内容，而是"父仓记录子仓的哪个 commit"。
                         // 用跟仓库行同一个 ◇ 标记，免得它看上去只是个带 M 的目录。
                         .when(*gitlink, |line| {
@@ -1086,7 +1086,7 @@ fn render_narrow_git_row(
                                 div()
                                     .flex_shrink_0()
                                     .text_xs()
-                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .text_color(rgb(ui_theme::faint()))
                                     .child(repo_kind_glyph(
                                         RepoKind::Submodule,
                                     )),
@@ -1105,7 +1105,7 @@ fn render_narrow_git_row(
                                 div()
                                     .flex_shrink_0()
                                     .text_xs()
-                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .text_color(rgb(ui_theme::faint()))
                                     .child("子模块指针"),
                             )
                         })

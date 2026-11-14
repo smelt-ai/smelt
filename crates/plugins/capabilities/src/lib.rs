@@ -262,7 +262,7 @@ impl CapabilitiesPage {
         let entity = cx.entity();
         Button::new("capabilities-runtime")
             .quiet()
-            .compact()
+            .small()
             .label(format!("机器：{current}"))
             .icon(IconName::ChevronDown)
             .dropdown_menu(move |menu, _window, _cx| {
@@ -341,7 +341,7 @@ impl Render for CapabilitiesPage {
                 div()
                     .text_sm()
                     .font_medium()
-                    .text_color(rgb(api::ui::ui_theme::text_bright()))
+                    .text_color(rgb(api::ui::ui_theme::text()))
                     .child("能力库"),
             )
             .child(tabs)
@@ -353,7 +353,7 @@ impl Render for CapabilitiesPage {
 
         v_flex()
             .size_full()
-            .bg(rgb(api::ui::ui_theme::bg_stage()))
+            .bg(rgb(api::ui::ui_theme::bg()))
             .child(header)
             .child(
                 div()

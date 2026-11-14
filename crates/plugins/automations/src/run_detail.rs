@@ -177,7 +177,7 @@ impl AutomationsPage {
         else {
             return div()
                 .text_sm()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("正在读取运行记录…")
                 .into_any_element();
         };
@@ -250,16 +250,16 @@ impl AutomationsPage {
 
 pub(crate) fn run_status_color(status: AutomationRunStatus) -> u32 {
     match status {
-        AutomationRunStatus::Completed => ui_theme::green(),
-        AutomationRunStatus::Failed => ui_theme::red(),
-        AutomationRunStatus::Cancelled | AutomationRunStatus::Skipped => ui_theme::text_faint(),
+        AutomationRunStatus::Completed => ui_theme::ok(),
+        AutomationRunStatus::Failed => ui_theme::bad(),
+        AutomationRunStatus::Cancelled | AutomationRunStatus::Skipped => ui_theme::faint(),
         AutomationRunStatus::AwaitingApproval | AutomationRunStatus::WaitingForUser => {
-            ui_theme::yellow()
+            ui_theme::need()
         }
         AutomationRunStatus::Starting
         | AutomationRunStatus::Queued
         | AutomationRunStatus::Dispatching
-        | AutomationRunStatus::Running => ui_theme::blue(),
+        | AutomationRunStatus::Running => ui_theme::run(),
     }
 }
 
@@ -289,20 +289,20 @@ pub(crate) fn run_summary_line(run: &AutomationRun) -> AnyElement {
         .items_center()
         .gap_2()
         .text_xs()
-        .text_color(rgb(ui_theme::text_muted()))
+        .text_color(rgb(ui_theme::muted()))
         .child(
             Icon::new(IconName::Bot)
                 .size(px(13.))
-                .text_color(rgb(ui_theme::text_muted())),
+                .text_color(rgb(ui_theme::muted())),
         )
-        .child(div().text_color(rgb(ui_theme::text_mid())).child(agent))
-        .child(div().text_color(rgb(ui_theme::text_faint())).child("·"))
+        .child(div().text_color(rgb(ui_theme::muted())).child(agent))
+        .child(div().text_color(rgb(ui_theme::faint())).child("·"))
         .child(div().child(parts.join(" · ")))
         .into_any_element()
 }
 
 pub(crate) fn run_error_card(error: String) -> AnyElement {
-    let red = ui_theme::red();
+    let red = ui_theme::bad();
     div()
         .w_full()
         .flex()
@@ -360,7 +360,7 @@ pub(crate) fn run_result_section(run: &AutomationRun, detail: &AutomationRunDeta
             };
             div()
                 .text_sm()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(hint)
                 .into_any_element()
         }
@@ -374,7 +374,7 @@ pub(crate) fn run_result_section(run: &AutomationRun, detail: &AutomationRunDeta
             div()
                 .text_sm()
                 .font_medium()
-                .text_color(rgb(ui_theme::text_bright()))
+                .text_color(rgb(ui_theme::text()))
                 .child("运行结果"),
         )
         .child(body)
@@ -421,13 +421,13 @@ pub(crate) fn run_detail_disclosure(
                     div()
                         .text_sm()
                         .font_medium()
-                        .text_color(rgb(ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text()))
                         .child(title),
                 )
                 .children(meta.map(|meta| {
                     div()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child(meta)
                 }))
                 .on_click(move |_, _, cx| {
@@ -447,7 +447,7 @@ pub(crate) fn disclosure_chevron(expanded: bool) -> Icon {
         IconName::ChevronRight
     })
     .size(px(12.))
-    .text_color(rgb(ui_theme::text_faint()))
+    .text_color(rgb(ui_theme::faint()))
 }
 
 pub(crate) fn transcript_summary(entries: &[AcpEntry]) -> String {
@@ -494,7 +494,7 @@ pub(crate) fn render_transcript(
             AcpEntry::Assistant { thought: false, .. } if final_reply == Some(ix) => div()
                 .py_1()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("最终回复，见上方运行结果")
                 .into_any_element(),
             AcpEntry::Assistant {
@@ -532,7 +532,7 @@ pub(crate) fn render_transcript(
                     Some(|| {
                         div()
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_muted()))
+                            .text_color(rgb(ui_theme::muted()))
                             .child(text.to_string())
                             .into_any_element()
                     }),
@@ -591,15 +591,15 @@ pub(crate) fn render_transcript(
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().flex_1().h(px(1.)).bg(ui_theme::hairline()))
+                .child(div().flex_1().h(px(1.)).bg(ui_theme::hair()))
                 .when(!label.trim().is_empty(), |row| {
                     row.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_faint()))
+                            .text_color(rgb(ui_theme::faint()))
                             .child(label.trim().to_string()),
                     )
-                    .child(div().flex_1().h(px(1.)).bg(ui_theme::hairline()))
+                    .child(div().flex_1().h(px(1.)).bg(ui_theme::hair()))
                 })
                 .into_any_element(),
             AcpEntry::TaskNote(note) => {
@@ -639,7 +639,7 @@ pub(crate) fn transcript_user(key: &str, run_id: &str, text: &str, images: usize
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("输入"),
         )
         .child(detail_card(markdown_mermaid::markdown_view(
@@ -666,8 +666,8 @@ impl StepFlag {
 
     pub(crate) fn color(self) -> u32 {
         match self {
-            Self::Failed => ui_theme::red(),
-            Self::Unfinished => ui_theme::text_faint(),
+            Self::Failed => ui_theme::bad(),
+            Self::Unfinished => ui_theme::faint(),
         }
     }
 }
@@ -685,9 +685,9 @@ pub(crate) fn transcript_step(
     let expandable = body.is_some();
     let expanded = expandable && detail.is_expanded(key);
     let ink = if flag == Some(StepFlag::Failed) {
-        ui_theme::red()
+        ui_theme::bad()
     } else {
-        ui_theme::text_muted()
+        ui_theme::muted()
     };
     let toggle_key = key.to_string();
     let toggle_entity = entity.clone();
@@ -801,7 +801,7 @@ pub(crate) fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyEleme
     if blocks.is_empty() {
         return div()
             .text_xs()
-            .text_color(rgb(ui_theme::text_faint()))
+            .text_color(rgb(ui_theme::faint()))
             .child("（无输出）")
             .into_any_element();
     }
@@ -906,14 +906,14 @@ pub(crate) fn run_metadata(run: &AutomationRun) -> AnyElement {
                     div()
                         .w(px(96.))
                         .flex_shrink_0()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child(label),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_color(rgb(ui_theme::text_mid()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child(value),
                 )
         }))

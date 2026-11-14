@@ -482,7 +482,7 @@ impl Workspace {
                     row = row.child(
                         smelt_ui::Button::new(SharedString::from(format!("repo-remove-{name}")))
                             .quiet()
-                            .compact()
+                            .small()
                             .label("移除")
                             .disabled(busy || !referenced.is_empty())
                             .tooltip(if referenced.is_empty() {
@@ -508,7 +508,7 @@ impl Workspace {
                 h_flex()
                     .gap_2()
                     .child(
-                        Self::modal_normal_button(
+                        Self::modal_secondary_button(
                             "repo-bind-entry",
                             "选择已有仓库…",
                             |this, _, window, cx| {
@@ -532,7 +532,7 @@ impl Workspace {
                         .disabled(busy),
                     )
                     .child(
-                        Self::modal_normal_button(
+                        Self::modal_secondary_button(
                             "repo-clone-entry",
                             "从 Git URL 克隆…",
                             |this, _, window, cx| {
@@ -562,7 +562,7 @@ impl Workspace {
             if mode == Mode::Bind {
                 content = content.child(div().text_sm().text_color(muted).child(
                     "选择已有 Git 仓库的根目录。项目外的仓库只在 repos/ 下建软链接，原目录不会移动。",
-                )).child(Self::modal_normal_button("repo-choose-folder", "选择文件夹…", |this, _, _, cx| {
+                )).child(Self::modal_secondary_button("repo-choose-folder", "选择文件夹…", |this, _, _, cx| {
                     let Some(state) = this.project_repositories.as_ref().filter(|state| !state.busy) else { return };
                     this.open_dir_picker(state.runtime.clone(), crate::dir_picker::DirPickerPurpose::ProjectRepository { id: state.id }, cx);
                 }, cx).disabled(busy)).child(div().text_sm().child(state.source.clone().unwrap_or_else(|| "尚未选择目录".into())));
@@ -610,7 +610,7 @@ impl Workspace {
                         h_flex()
                             .gap_2()
                             .child(
-                                Self::modal_normal_button(
+                                Self::modal_cancel_button(
                                     "repo-remove-cancel",
                                     "保留关联",
                                     |this, _, _, cx| {
@@ -669,7 +669,7 @@ impl Workspace {
                 .gap_2()
                 .when(matches!(mode, Mode::Bind | Mode::Clone), |row| {
                     row.child(
-                        Self::modal_normal_button(
+                        Self::modal_cancel_button(
                             "repo-form-back",
                             "返回",
                             |this, _, _, cx| {
@@ -689,7 +689,7 @@ impl Workspace {
                     )
                 })
                 .child(
-                    Self::modal_normal_button(
+                    Self::modal_cancel_button(
                         "repo-modal-close",
                         "关闭",
                         |this, _, _, cx| this.close_project_repositories(cx),
@@ -698,7 +698,7 @@ impl Workspace {
                     .disabled(busy),
                 )
                 .child(
-                    Self::modal_commit_button(
+                    Self::modal_primary_button(
                         "repo-modal-submit",
                         label,
                         |this, _, _, cx| this.submit_project_repositories(cx),
@@ -709,7 +709,6 @@ impl Workspace {
         );
         self.modal_shell(
             620.,
-            false,
             content,
             crate::overlay::ModalLayer::ProjectRepositories,
             cx,

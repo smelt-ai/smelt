@@ -358,7 +358,7 @@ impl HistoryPage {
             .child(
                 Button::new("history-refresh")
                     .quiet()
-                    .icon_size()
+                    .small()
                     .icon(Icon::new(IconName::RefreshCw))
                     .tooltip("刷新")
                     .on_click(move |_, _, cx| {

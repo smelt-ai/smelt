@@ -452,19 +452,19 @@ pub fn composer_lift_alpha(t: f32) -> f32 {
     0.06 + 0.08 * t.clamp(0.0, 1.0)
 }
 
-/// 聚焦时的强调色外环。静息为 0，结构仍保留这一层。
+/// 聚焦时的焦点色外环。静息为 0，结构仍保留这一层。
 pub fn composer_ring_alpha(t: f32) -> f32 {
     0.28 * t.clamp(0.0, 1.0)
 }
 
-/// 抬起阴影加一圈强调色。两层始终都在，避免聚焦时阴影数组换形状。
-pub fn composer_shadows(t: f32, accent: Rgba) -> Vec<BoxShadow> {
+/// 抬起阴影加一圈焦点色。两层始终都在，避免聚焦时阴影数组换形状。
+pub fn composer_shadows(t: f32, ring: Rgba) -> Vec<BoxShadow> {
     let t = t.clamp(0.0, 1.0);
-    let accent = Hsla::from(accent).alpha(composer_ring_alpha(t));
+    let ring = Hsla::from(ring).alpha(composer_ring_alpha(t));
     vec![
         BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., composer_lift_alpha(t)))
             .blur_radius(px(3.)),
-        BoxShadow::new(px(0.), px(0.), accent).spread_radius(px(3.)),
+        BoxShadow::new(px(0.), px(0.), ring).spread_radius(px(3.)),
     ]
 }
 
@@ -913,9 +913,9 @@ mod tests {
 
     #[test]
     fn composer_focus_raises_the_shadow_without_changing_its_shape() {
-        let accent = gpui::rgb(0x1084fe);
-        assert_eq!(composer_shadows(0.0, accent).len(), 2);
-        assert_eq!(composer_shadows(1.0, accent).len(), 2);
+        let ring = gpui::rgb(0x1084fe);
+        assert_eq!(composer_shadows(0.0, ring).len(), 2);
+        assert_eq!(composer_shadows(1.0, ring).len(), 2);
         assert!(composer_lift_alpha(1.0) > composer_lift_alpha(0.0));
         assert_eq!(composer_ring_alpha(0.0), 0.0);
         assert!((composer_ring_alpha(1.0) - 0.28).abs() < 1e-5);

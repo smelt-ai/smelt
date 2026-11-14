@@ -71,7 +71,10 @@ mod tests {
             assert!(api::apply_theme("Ayu Dark", cx));
             unregister(cx);
             assert!(!api::theme_contains("Ayu Dark", cx));
-            assert!(api::apply_theme("Default Dark", cx));
+            assert!(
+                api::apply_theme("smelt Dark", cx),
+                "库自带的 smelt 主题不随插件卸下"
+            );
         });
     }
 }

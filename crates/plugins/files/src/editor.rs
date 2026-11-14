@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use gpui::*;
 use gpui_component::WindowExt as _;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{EditorState, InputEvent, Position};
 use smelt_plugin_api::RuntimeKey;
@@ -18,6 +17,7 @@ use smelt_plugin_api::client::protocol::files::{
     FileContent, FileOpenCall, FileOpenResult, FilePathParams, FileSaveCall, FileSaveParams,
     is_previewable_image,
 };
+use smelt_plugin_api::ui::Button;
 
 use crate::html_preview::HtmlPreview;
 use crate::model::{FileRef, OpenFile, PreviewKind, editor_language_for_path};
@@ -197,14 +197,15 @@ impl FilesPanel {
                     DialogFooter::new()
                         .child(
                             Button::new("unsaved-cancel")
+                                .quiet()
+                                .large()
                                 .label("取消")
-                                .outline()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("unsaved-discard")
+                                .large()
                                 .label("不保存，直接切换")
-                                .outline()
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     discard_panel.update(cx, |this, cx| {
@@ -219,8 +220,9 @@ impl FilesPanel {
                         )
                         .child(
                             Button::new("unsaved-save-switch")
-                                .label("保存并切换")
                                 .primary()
+                                .large()
+                                .label("保存并切换")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     save_panel.update(cx, |this, cx| {

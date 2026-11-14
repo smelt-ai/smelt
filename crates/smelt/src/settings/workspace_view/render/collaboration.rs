@@ -62,7 +62,7 @@ fn outgoing_group() -> SettingGroup {
             let muted = cx.theme().muted_foreground;
             let danger = cx.theme().danger;
             let fg = cx.theme().foreground;
-            let online = gpui::rgb(crate::ui_theme::green());
+            let online = gpui::rgb(crate::ui_theme::ok());
             let warning = cx.theme().warning;
 
             let mut list = v_flex().gap_2();
@@ -141,7 +141,7 @@ fn outgoing_group() -> SettingGroup {
                         .when(can_upgrade, |row| {
                             row.child(
                                 Button::new(("upgrade-runtime", index))
-                                    .compact()
+                                    .small()
                                     .label("升级")
                                     .tooltip(format!(
                                         "请这台机器升到 v{}",
@@ -154,7 +154,7 @@ fn outgoing_group() -> SettingGroup {
                         })
                         .child(
                             Button::new(("remove-runtime", index))
-                                .compact()
+                                .small()
                                 .label("移除")
                                 .on_click(move |_, _window, cx: &mut App| {
                                     crate::runtimes::remove_runtime(runtime_id.clone(), cx);
@@ -191,7 +191,7 @@ fn outgoing_group() -> SettingGroup {
                         .child(div().w(px(260.)).child(Input::new(&input)))
                         .child(
                             Button::new("add-runtime")
-                                .compact()
+                                .small()
                                 .label(if hub.adding { "正在配对…" } else { "添加" })
                                 .loading(hub.adding)
                                 .disabled(hub.adding)
@@ -255,7 +255,7 @@ fn incoming_group() -> SettingGroup {
                                 relay.as_deref().unwrap_or("公共 relay"),
                                 short_id(endpoint_id)
                             ),
-                            rgb(crate::ui_theme::green()).into(),
+                            rgb(crate::ui_theme::ok()).into(),
                         ),
                         RemoteAccessState::Failed { error } => {
                             (format!("开不起来，正在重试：{error}"), cx.theme().danger)
@@ -301,7 +301,7 @@ fn incoming_group() -> SettingGroup {
                         .unwrap_or_default();
                     let running = matches!(state.status, RemoteAccessState::Running { .. });
                     Button::new("begin-pairing")
-                        .compact()
+                        .small()
                         .label("配对新设备…")
                         .disabled(!running)
                         .when(!running, |button| button.tooltip("先开启远程访问"))
@@ -320,7 +320,7 @@ fn incoming_group() -> SettingGroup {
                 .unwrap_or_default();
             let muted = cx.theme().muted_foreground;
             let fg = cx.theme().foreground;
-            let online = gpui::rgb(crate::ui_theme::green());
+            let online = gpui::rgb(crate::ui_theme::ok());
 
             if state.devices.is_empty() {
                 return div()
@@ -355,7 +355,7 @@ fn incoming_group() -> SettingGroup {
                         )
                         .child(
                             Button::new(("revoke-device", index))
-                                .compact()
+                                .small()
                                 .label("撤销")
                                 .on_click(move |_, _window, cx: &mut App| {
                                     revoke_device(endpoint_id.clone(), cx);
@@ -445,7 +445,7 @@ fn pairing_dialog(dialog: Dialog, cx: &mut App) -> Dialog {
                             .child(
                                 h_flex().gap_2().child(
                                     Button::new("copy-pairing-uri")
-                                        .compact()
+                                        .small()
                                         .label(copy_btn_label("copy-pairing-uri", "复制配对串", cx))
                                         .on_click(move |_, _window, cx: &mut App| {
                                             copy_with_feedback(uri.clone(), "copy-pairing-uri", cx);
@@ -464,14 +464,14 @@ fn pairing_dialog(dialog: Dialog, cx: &mut App) -> Dialog {
             .child(
                 Button::new("regenerate-pairing")
                     .quiet()
-                    .compact()
+                    .small()
                     .label("换一个配对串")
                     .disabled(state.generating_offer)
                     .on_click(|_, _window, cx: &mut App| begin_pairing(cx)),
             )
             .child(
                 Button::new("close-pairing")
-                    .compact()
+                    .small()
                     .label("完成")
                     .on_click(|_, window, cx: &mut App| window.close_dialog(cx)),
             ),

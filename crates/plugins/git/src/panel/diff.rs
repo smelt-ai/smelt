@@ -285,10 +285,9 @@ impl GitDiffBody {
         let open_full_file = chrome.worktree_file.clone().map(|full_path| {
             Button::new("diff-view-full-file")
                 .quiet()
-                .icon_size()
+                .small()
                 .flex_none()
                 .label("在文件里打开")
-                .text_color(muted)
                 .on_click(move |_ev, _window, cx| {
                     open_file(file_machine.clone(), full_path.clone(), cx);
                 })
@@ -297,7 +296,7 @@ impl GitDiffBody {
             let host = host.clone();
             Button::new("diff-collapse-all")
                 .quiet()
-                .icon_size()
+                .small()
                 .flex_none()
                 .label(if all_collapsed {
                     "全部展开"
@@ -496,7 +495,7 @@ fn diff_header_suffix(
             row = row.child(
                 Button::new("diff-stage-file")
                     .quiet()
-                    .icon_size()
+                    .small()
                     .label(label)
                     .on_click(move |_ev, _window, cx| {
                         let Some(host) = host.upgrade() else {
@@ -519,7 +518,7 @@ fn diff_header_suffix(
         row = row.child(
             Button::new((ElementId::from("diff-open-header"), rel.clone()))
                 .quiet()
-                .icon_size()
+                .small()
                 .label("打开")
                 .on_click(move |_ev, _window, cx| {
                     open_file(runtime.clone(), full.clone(), cx);
@@ -575,11 +574,10 @@ fn hunk_ops_row(
     host: WeakEntity<GitPanel>,
     _cx: &App,
 ) -> Div {
-    let quiet = |id: &'static str, label: &'static str| {
-        Button::new((id, idx)).quiet().icon_size().label(label)
-    };
+    let quiet =
+        |id: &'static str, label: &'static str| Button::new((id, idx)).quiet().small().label(label);
     let danger = |id: &'static str, label: &'static str| {
-        Button::new((id, idx)).danger().icon_size().label(label)
+        Button::new((id, idx)).danger_quiet().small().label(label)
     };
     let row = div().flex().items_center().gap_2();
     match ops {
@@ -647,7 +645,7 @@ fn diff_comment_composer(
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
-                                .bg(rgb(crate::ui_theme::bg_hover()))
+                                .bg(rgb(crate::ui_theme::soft()))
                                 .child(Icon::new(IconName::Bot).size(px(15.))),
                         )
                         .child(div().text_sm().font_semibold().child("本机留言")),
@@ -671,7 +669,7 @@ fn diff_comment_composer(
                 .gap_2()
                 .child(
                     Button::new("diff-comment-cancel")
-                        .compact()
+                        .small()
                         .label("取消")
                         .on_click(move |_ev, window, cx| {
                             let Some(host) = clear_host.upgrade() else {
@@ -682,17 +680,14 @@ fn diff_comment_composer(
                             });
                         }),
                 )
-                .child(
-                    Button::new("diff-send")
-                        .compact()
-                        .label("发送评论")
-                        .on_click(move |_ev, window, cx| {
-                            let Some(host) = host.upgrade() else {
-                                return;
-                            };
-                            host.update(cx, |this, cx| this.send_diff_comments(window, cx));
-                        }),
-                ),
+                .child(Button::new("diff-send").small().label("发送评论").on_click(
+                    move |_ev, window, cx| {
+                        let Some(host) = host.upgrade() else {
+                            return;
+                        };
+                        host.update(cx, |this, cx| this.send_diff_comments(window, cx));
+                    },
+                )),
         )
         .border_color(border)
 }

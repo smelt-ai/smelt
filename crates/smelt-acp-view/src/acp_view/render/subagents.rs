@@ -16,8 +16,7 @@ impl AcpView {
         Some(
             Button::new("acp-subagents")
                 .quiet()
-                .compact()
-                .capsule()
+                .small()
                 .selected(self.subagents_open)
                 .accessibility_label(summary.clone())
                 .child(Icon::new(IconName::Bot).size(px(12.)))
@@ -42,7 +41,7 @@ impl AcpView {
             return None;
         }
         let muted = cx.theme().muted_foreground;
-        let faint = gpui::rgb(ui_theme::text_faint());
+        let faint = gpui::rgb(ui_theme::faint());
         let now = now_unix_ms();
         let mut rows = v_flex()
             .id("acp-subagent-list")
@@ -72,7 +71,7 @@ impl AcpView {
                             div()
                                 .overflow_hidden()
                                 .text_sm()
-                                .text_color(gpui::rgb(ui_theme::text_bright()))
+                                .text_color(gpui::rgb(ui_theme::text()))
                                 .child(truncated_line(title.clone())),
                         )
                         .child(
@@ -94,19 +93,22 @@ impl AcpView {
                     div()
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .text_color(gpui::rgb(ui_theme::muted()))
                         .child("正在停止…")
                         .into_any_element()
                 } else {
-                    Button::new((gpui::ElementId::from("acp-subagent-popover-stop"), stop_id.clone()))
-                        .danger()
-                        .icon_size()
-                        .label("停止")
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            cx.stop_propagation();
-                            this.stop_subagent(stop_id.clone(), cx);
-                        }))
-                        .into_any_element()
+                    Button::new((
+                        gpui::ElementId::from("acp-subagent-popover-stop"),
+                        stop_id.clone(),
+                    ))
+                    .danger_quiet()
+                    .small()
+                    .label("停止")
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.stop_subagent(stop_id.clone(), cx);
+                    }))
+                    .into_any_element()
                 });
             rows = rows.child(
                 Button::new((gpui::ElementId::from("acp-subagent-popover-row"), id.clone()))
@@ -130,8 +132,8 @@ impl AcpView {
             .gap_2()
             .rounded(ui_theme::card_radius())
             .border_1()
-            .border_color(ui_theme::card_stroke())
-            .bg(ui_theme::glass_floating())
+            .border_color(ui_theme::hair())
+            .bg(gpui::rgb(ui_theme::surface()))
             .shadow_lg()
             .child(
                 h_flex()
@@ -142,14 +144,14 @@ impl AcpView {
                         div()
                             .text_sm()
                             .font_medium()
-                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .text_color(gpui::rgb(ui_theme::muted()))
                             .child("子智能体"),
                     )
                     .child(div().flex_1())
                     .child(
                         Button::new("acp-subagent-stop-all")
-                            .danger()
-                            .icon_size()
+                            .danger_quiet()
+                            .small()
                             .label("全部停止")
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.stop_all_subagents(cx);
@@ -188,7 +190,7 @@ impl AcpView {
         let inspector = self.subagent_inspector.as_ref()?;
         let t = cx.theme();
         let muted = t.muted_foreground;
-        let faint = gpui::rgb(ui_theme::text_faint());
+        let faint = gpui::rgb(ui_theme::faint());
         let view = self.subagents.iter().find(|view| view.id == inspector.id);
         let status_line = match view {
             Some(view) => {
@@ -204,7 +206,7 @@ impl AcpView {
         let body: gpui::AnyElement = if let Some(error) = inspector.error.as_ref() {
             div()
                 .text_sm()
-                .text_color(gpui::rgb(ui_theme::red()))
+                .text_color(gpui::rgb(ui_theme::bad()))
                 .child(format!("读不到这个子智能体的过程：{error}"))
                 .into_any_element()
         } else if inspector.entries.is_empty() {
@@ -228,13 +230,13 @@ impl AcpView {
             Some(if self.stopping_subagents.contains(&view.id) {
                 div()
                     .text_xs()
-                    .text_color(gpui::rgb(ui_theme::text_muted()))
+                    .text_color(gpui::rgb(ui_theme::muted()))
                     .child("正在停止…")
                     .into_any_element()
             } else {
                 Button::new("acp-subagent-inspector-stop")
-                    .danger_outline()
-                    .compact()
+                    .danger_quiet()
+                    .small()
                     .label("停止")
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.stop_subagent(stop_id.clone(), cx);
@@ -250,7 +252,7 @@ impl AcpView {
                 .h_full()
                 .border_l_1()
                 .border_color(t.border)
-                .bg(gpui::rgb(ui_theme::bg_bar()))
+                .bg(gpui::rgb(ui_theme::side()))
                 .child(
                     h_flex()
                         .w_full()
@@ -271,7 +273,7 @@ impl AcpView {
                                         .overflow_hidden()
                                         .text_sm()
                                         .font_medium()
-                                        .text_color(gpui::rgb(ui_theme::text_bright()))
+                                        .text_color(gpui::rgb(ui_theme::text()))
                                         .child(truncated_line(inspector.title.clone())),
                                 )
                                 .child(div().overflow_hidden().text_xs().text_color(faint).child(truncated_line(status_line))),

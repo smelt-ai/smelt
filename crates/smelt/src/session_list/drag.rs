@@ -66,7 +66,7 @@ fn lifted_preview() -> Div {
         .shadow_md()
         .opacity(0.88)
         .border_1()
-        .border_color(ui_theme::card_stroke())
+        .border_color(ui_theme::hair())
 }
 
 /// 浮层左上角相对指针的偏移。
@@ -98,7 +98,7 @@ fn session_drag_preview(drag: &SessionDrag) -> Div {
         .px_2()
         .py(px(7.))
         .rounded(px(10.))
-        .bg(rgb(ui_theme::bg_selected()))
+        .bg(rgb(ui_theme::soft_hover()))
         .child(
             div()
                 .flex_shrink_0()
@@ -119,7 +119,7 @@ fn session_drag_preview(drag: &SessionDrag) -> Div {
                 .flex_1()
                 .min_w_0()
                 .text_size(px(13.))
-                .text_color(rgb(ui_theme::text_bright()))
+                .text_color(rgb(ui_theme::text()))
                 .overflow_hidden()
                 .child(truncated_line(drag.title.clone())),
         )
@@ -128,7 +128,7 @@ fn session_drag_preview(drag: &SessionDrag) -> Div {
                 .flex_shrink_0()
                 .text_size(px(11.))
                 .font_family(crate::terminal_view::font_family())
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(subtitle)
         }))
         .children(drag.status_label.clone().map(|label| {
@@ -144,7 +144,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
     lifted_preview()
         .w(px(248.))
         .rounded(ui_theme::card_radius())
-        .bg(ui_theme::glass_card())
+        .bg(gpui::rgb(ui_theme::surface()))
         .py_1()
         .child(
             div()
@@ -159,7 +159,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                         .flex_shrink_0()
                         .flex()
                         .justify_center()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child(
                             Icon::new(project_disclosure_icon(drag.collapsed || drag.empty))
                                 .size(px(PROJECT_DISCLOSURE_ICON_SIZE)),
@@ -179,9 +179,9 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                 .text_size(px(12.))
                                 .font_semibold()
                                 .text_color(rgb(if drag.empty {
-                                    ui_theme::text_muted()
+                                    ui_theme::muted()
                                 } else {
-                                    ui_theme::text_bright()
+                                    ui_theme::text()
                                 }))
                                 .child(drag.label.clone()),
                         )
@@ -200,7 +200,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                 .overflow_hidden()
                                 .text_size(px(11.))
                                 .font_family(crate::terminal_view::font_family())
-                                .text_color(rgb(ui_theme::text_faint()))
+                                .text_color(rgb(ui_theme::faint()))
                                 .child(truncated_line(branch))
                         })),
                 )
@@ -208,7 +208,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                     div()
                         .flex_shrink_0()
                         .text_size(px(11.))
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child(drag.session_count.to_string()),
                 ),
         )
@@ -216,7 +216,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
 
 /// 叠在行缝上的插入记号：绝对定位，不撑开布局，下面的内容才不会跟着跳。
 fn sidebar_drop_indicator(at_top: bool) -> Div {
-    let color = rgb(ui_theme::accent());
+    let color = rgb(ui_theme::ink());
     div()
         .absolute()
         .left(px(8.))

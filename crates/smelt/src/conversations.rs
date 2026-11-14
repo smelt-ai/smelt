@@ -78,9 +78,9 @@ impl Workspace {
             .gap_2()
             .rounded(crate::ui_theme::row_radius())
             .child(Icon::new(icon).size(px(16.)).text_color(rgb(if selected {
-                crate::ui_theme::text_mid()
+                crate::ui_theme::muted()
             } else {
-                crate::ui_theme::text_muted()
+                crate::ui_theme::muted()
             })))
             .child(
                 div()
@@ -88,9 +88,9 @@ impl Workspace {
                     .text_sm()
                     .font_medium()
                     .text_color(rgb(if selected {
-                        crate::ui_theme::text_selected()
+                        crate::ui_theme::text()
                     } else {
-                        crate::ui_theme::text_mid()
+                        crate::ui_theme::muted()
                     }))
                     .child(label.into()),
             )
@@ -100,7 +100,7 @@ impl Workspace {
                         .flex_shrink_0()
                         .size(px(6.))
                         .rounded_full()
-                        .bg(rgb(crate::ui_theme::red())),
+                        .bg(rgb(crate::ui_theme::bad())),
                 )
             })
             .on_click(move |_, window, cx| {
@@ -190,7 +190,7 @@ impl Workspace {
                                 .child(
                                     Icon::new(IconName::ChevronRight)
                                         .size(px(12.))
-                                        .text_color(rgb(crate::ui_theme::text_muted()))
+                                        .text_color(rgb(crate::ui_theme::muted()))
                                         .transform(Transformation::rotate(radians(
                                             deg.to_radians(),
                                         ))),
@@ -199,7 +199,7 @@ impl Workspace {
                         .child(
                             Icon::new(gpui_kit_assets::IconName::MessageSquare)
                                 .size(px(15.))
-                                .text_color(rgb(crate::ui_theme::text_muted())),
+                                .text_color(rgb(crate::ui_theme::muted())),
                         )
                         .into_any_element()
                 } else {
@@ -219,7 +219,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .text_sm()
-                    .text_color(rgb(crate::ui_theme::text_mid()))
+                    .text_color(rgb(crate::ui_theme::muted()))
                     .child("对话"),
             )
             .when(collapsed && agg != AgentStatus::Idle, |row| {
@@ -236,7 +236,7 @@ impl Workspace {
                     div()
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .text_color(rgb(crate::ui_theme::muted()))
                         .child(product.len().to_string()),
                 )
             })
@@ -285,7 +285,7 @@ impl Workspace {
                             cx,
                         )
                         .into(),
-                        rgb(crate::ui_theme::text_muted()).into(),
+                        rgb(crate::ui_theme::muted()).into(),
                     ),
                 };
             let tooltip = conversation_row_tooltip(&title, &runtime, cx);
@@ -344,7 +344,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .size(px(18.))
                             .rounded_full()
-                            .bg(rgb(crate::ui_theme::bg_selected()))
+                            .bg(rgb(crate::ui_theme::soft_hover()))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -366,7 +366,7 @@ impl Workspace {
                             .text_sm()
                             .when(selected, |title| title.font_medium())
                             .text_color(rgb(if selected {
-                                crate::ui_theme::text_selected()
+                                crate::ui_theme::text()
                             } else {
                                 crate::ui_theme::text()
                             }))
@@ -440,7 +440,7 @@ impl Workspace {
                     .top_0()
                     .bottom(px(4.))
                     .w(px(1.))
-                    .bg(crate::ui_theme::hairline()),
+                    .bg(crate::ui_theme::hair()),
             )
             .children(rows)
             .into_any_element();
@@ -482,7 +482,7 @@ impl Workspace {
         let Some((_, view)) = self.selected_conversation_view(cx) else {
             return div()
                 .flex_1()
-                .bg(rgb(crate::ui_theme::bg_stage()))
+                .bg(rgb(crate::ui_theme::bg()))
                 .into_any_element();
         };
         let appearance = cx.try_global::<settings::Appearance>();
@@ -496,7 +496,7 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .flex()
-            .bg(rgb(crate::ui_theme::bg_stage()))
+            .bg(rgb(crate::ui_theme::bg()))
             .children(background_image.as_deref().map(|path| {
                 crate::workspace_frame::background_image_layer(path, bg_image_opacity, cx)
             }))
@@ -684,7 +684,6 @@ fn new_conversation_button(cx: &App) -> Option<AnyElement> {
     let title = smelt_plugin_api::command(NEW_CONVERSATION, cx)?.title;
     Some(
         Button::new("workbench-chat")
-            .normal()
             .w_full()
             .min_w_0()
             .icon(IconName::Plus)
@@ -874,14 +873,9 @@ mod tests {
 
     #[test]
     fn selected_idle_conversation_icon_does_not_look_like_running() {
-        // 选中由行底色表达。图标如果因为选中而走强调色，就会和运行中撞色。
+        // 选中由行底色表达。图标如果因为选中而换色，就会和运行中撞色。
         let idle = Workspace::session_icon_color(AgentStatus::Idle, None);
         let running = Workspace::session_icon_color(AgentStatus::Running, None);
         assert_ne!(idle, running, "空闲不能和运行中撞色");
-        assert_ne!(
-            idle,
-            rgb(crate::ui_theme::accent()),
-            "空闲不能走强调色，否则选中行看起来像带了状态色"
-        );
     }
 }

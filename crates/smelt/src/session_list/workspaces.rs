@@ -261,18 +261,18 @@ pub(super) fn worktree_row(
             .flex_1()
             .min_w_0()
             .text_sm()
-            .text_color(rgb(ui_theme::text_muted()))
+            .text_color(rgb(ui_theme::muted()))
             .child(truncated_line(workset.task.clone())),
     )
     .children(pinned.then(|| {
         Icon::new(gpui_kit_assets::IconName::Pin)
             .size(px(12.))
-            .text_color(rgb(ui_theme::text_faint()))
+            .text_color(rgb(ui_theme::faint()))
     }))
     .child(
         div()
             .text_xs()
-            .text_color(rgb(ui_theme::text_faint()))
+            .text_color(rgb(ui_theme::faint()))
             .child(count.to_string()),
     )
     .children(runtime.map(|runtime| {
@@ -571,16 +571,14 @@ impl Render for WorkspaceOverview {
             .on_action(cx.listener(|this, _: &Cancel, window, cx| this.dismiss(window, cx)))
             .child(
                 Button::new("workspace-count")
-                    .normal()
-                    .compact()
-                    .capsule()
+                    .small()
                     .tab_stop(false)
                     .accessibility_label(label.clone())
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::NORMAL)
-                            .text_color(rgb(ui_theme::text_faint()))
+                            .text_color(rgb(ui_theme::faint()))
                             .child(label),
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -613,9 +611,9 @@ impl Render for WorkspaceOverview {
                     .flex_col()
                     .gap_2()
                     .rounded(ui_theme::row_radius())
-                    .bg(ui_theme::glass_floating())
+                    .bg(gpui::rgb(ui_theme::surface()))
                     .border_1()
-                    .border_color(ui_theme::card_stroke())
+                    .border_color(ui_theme::hair())
                     .text_color(rgb(ui_theme::text()))
                     .on_hover(cx.listener(|this, hovered, window, cx| {
                         this.hover(false, *hovered, window, cx)
@@ -652,7 +650,7 @@ impl Render for WorkspaceOverview {
                             .child(
                                 Button::new("close-workspace-overview")
                                     .quiet()
-                                    .icon_size()
+                                    .small()
                                     .tab_stop(true)
                                     .icon(IconName::Close)
                                     .icon_action("关闭工作树总览")
@@ -665,7 +663,7 @@ impl Render for WorkspaceOverview {
                 content = content.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child(format!("{label}，显示最后已知信息，操作暂不可用")),
                 );
             }
@@ -686,7 +684,7 @@ impl Render for WorkspaceOverview {
                     &workset.id,
                 ))
                 .quiet()
-                .icon_size()
+                .small()
                 .tab_stop(true)
                 .icon(Icon::empty().path("smelt-icons/trash.svg"))
                 .icon_action("关闭工作树")
@@ -710,7 +708,7 @@ impl Render for WorkspaceOverview {
                         .gap_1()
                         .p_2()
                         .border_1()
-                        .border_color(ui_theme::hairline())
+                        .border_color(ui_theme::hair())
                         .rounded(ui_theme::row_radius())
                         .child(
                             div()
@@ -725,7 +723,7 @@ impl Render for WorkspaceOverview {
                             div()
                                 .id("workspace-repository-summary")
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .tooltip(move |window, cx| {
                                     gpui_component::tooltip::Tooltip::new(full_summary.clone())
                                         .build(window, cx)
@@ -739,7 +737,7 @@ impl Render for WorkspaceOverview {
                                 .items_center()
                                 .gap_1()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .child(
                                     Icon::empty()
                                         .path("smelt-icons/git-branch.svg")

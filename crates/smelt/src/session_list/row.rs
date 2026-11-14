@@ -24,7 +24,7 @@ pub(super) fn pinned_marker(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .flex_shrink_0()
-        .text_color(rgb(ui_theme::text_faint()))
+        .text_color(rgb(ui_theme::faint()))
         .child(Icon::new(gpui_kit_assets::IconName::Pin).size(px(11.)))
 }
 
@@ -86,8 +86,8 @@ pub(super) fn session_progress_bar(ui_id: u64, progress: TerminalProgress) -> Op
         TerminalProgressState::Normal
         | TerminalProgressState::Indeterminate
         | TerminalProgressState::Unknown => bar,
-        TerminalProgressState::Error => bar.color(rgb(ui_theme::red())),
-        TerminalProgressState::Paused => bar.color(rgb(ui_theme::yellow())),
+        TerminalProgressState::Error => bar.color(rgb(ui_theme::bad())),
+        TerminalProgressState::Paused => bar.color(rgb(ui_theme::need())),
     };
     Some(
         div()
@@ -150,22 +150,22 @@ pub(crate) fn focus_ring() -> Div {
         .inset_0()
         .rounded(ui_theme::row_radius())
         .border_2()
-        .border_color(rgb(ui_theme::border_focus()))
+        .border_color(ui_theme::focus())
 }
 
 /// 刚新建那一行闪多久。
 const NEW_ROW_FLASH_MS: u64 = 600;
 
-/// 刚新建的那一行：铺一层强调色再淡回，让人看见新东西落在了哪。只播一次，播完是
-/// 透明的；放在行的第一个子元素，压在图标和文字下面。
+/// 刚新建的那一行：铺一层淡墨再淡回，让人看见新东西落在了哪。只播一次，播完是
+/// 透明的；放在行的第一个子元素，压在图标和文字下面。界面不拿彩色做提示，所以用 `ink`。
 pub(crate) fn new_row_flash(id: impl Into<ElementId>) -> impl IntoElement {
     ambient_animation(id, Duration::from_millis(NEW_ROW_FLASH_MS), true, |phase| {
         div()
             .absolute()
             .inset_0()
             .rounded(ui_theme::row_radius())
-            .bg(rgb(ui_theme::accent()))
-            .opacity(0.28 * (1.0 - phase))
+            .bg(rgb(ui_theme::ink()))
+            .opacity(0.12 * (1.0 - phase))
     })
 }
 
@@ -217,10 +217,8 @@ pub(crate) fn group_disclosure(
         .flex()
         .items_center()
         .justify_center()
-        .text_color(rgb(ui_theme::text_muted()))
-        .group_hover(group, |style| {
-            style.text_color(rgb(ui_theme::text_bright()))
-        })
+        .text_color(rgb(ui_theme::muted()))
+        .group_hover(group, |style| style.text_color(rgb(ui_theme::text())))
         .child(
             div()
                 .flex()
@@ -324,11 +322,11 @@ pub(super) const QUOTA_WARN_PERCENT: f64 = 75.0;
 /// 按已用百分比取行内颜色：>=90% 红、>=75% 黄、否则灰（额度充足，默认不抢眼）。
 pub(super) fn quota_color(used_percent: f64) -> u32 {
     if used_percent >= 90.0 {
-        ui_theme::red()
+        ui_theme::bad()
     } else if used_percent >= QUOTA_WARN_PERCENT {
-        ui_theme::yellow()
+        ui_theme::need()
     } else {
-        ui_theme::text_muted()
+        ui_theme::muted()
     }
 }
 
@@ -498,7 +496,7 @@ mod tests {
             provider_quota_row(QuotaTarget::agent(ConversationAgentKind::Claude), &status).unwrap();
 
         assert_eq!(row.text, "91%");
-        assert_eq!(row.color, ui_theme::red());
+        assert_eq!(row.color, ui_theme::bad());
         assert_eq!(row.hint, "Claude 5h 76%（1小时后重置） · 7d 91%");
     }
 
@@ -519,7 +517,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(row.text, "25%");
-        assert_eq!(row.color, ui_theme::text_muted());
+        assert_eq!(row.color, ui_theme::muted());
         assert_eq!(row.hint, "Copilot 本周期 25 / 100 premium requests（25%）");
     }
 

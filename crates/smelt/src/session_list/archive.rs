@@ -208,7 +208,7 @@ impl Workspace {
                             .child(
                                 Icon::new(IconName::ChevronRight)
                                     .size(px(12.))
-                                    .text_color(rgb(ui_theme::text_muted()))
+                                    .text_color(rgb(ui_theme::muted()))
                                     .transform(Transformation::rotate(radians(
                                         chevron_degrees.to_radians(),
                                     ))),
@@ -217,7 +217,7 @@ impl Workspace {
                     .child(
                         Icon::new(gpui_kit_assets::IconName::Archive)
                             .size(px(15.))
-                            .text_color(rgb(ui_theme::text_muted())),
+                            .text_color(rgb(ui_theme::muted())),
                     ),
             )
             .child(
@@ -226,14 +226,14 @@ impl Workspace {
                     .min_w_0()
                     .overflow_hidden()
                     .text_sm()
-                    .text_color(rgb(ui_theme::text_mid()))
+                    .text_color(rgb(ui_theme::muted()))
                     .child("归档"),
             )
             .child(
                 div()
                     .flex_shrink_0()
                     .text_xs()
-                    .text_color(rgb(ui_theme::text_muted()))
+                    .text_color(rgb(ui_theme::muted()))
                     .child(count.to_string()),
             );
 
@@ -285,17 +285,15 @@ impl Workspace {
                 .items_center()
                 .gap_2()
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .child(
-                            (if is_acp {
-                                Icon::new(gpui_kit_assets::IconName::MessageSquare)
-                            } else {
-                                Icon::new(IconName::SquareTerminal)
-                            })
-                            .size(px(15.))
-                            .text_color(rgb(ui_theme::text_muted())),
-                        ),
+                    div().flex_shrink_0().child(
+                        (if is_acp {
+                            Icon::new(gpui_kit_assets::IconName::MessageSquare)
+                        } else {
+                            Icon::new(IconName::SquareTerminal)
+                        })
+                        .size(px(15.))
+                        .text_color(rgb(ui_theme::muted())),
+                    ),
                 )
                 .child(
                     div()
@@ -305,7 +303,7 @@ impl Workspace {
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(ui_theme::text_mid()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .group_hover(ARCHIVE_ROW_GROUP, |style| {
                                     style.text_color(rgb(ui_theme::text()))
                                 })
@@ -314,7 +312,7 @@ impl Workspace {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .child(truncated_line(label)),
                         ),
                 )
@@ -329,7 +327,7 @@ impl Workspace {
                         .child(
                             Button::new(SharedString::from(format!("{element_id}-restore")))
                                 .quiet()
-                                .icon_size()
+                                .small()
                                 .icon(Icon::new(gpui_kit_assets::IconName::RotateCw))
                                 .icon_action("恢复")
                                 .on_click(move |_, _, cx| {
@@ -402,7 +400,7 @@ impl Workspace {
                     .top_0()
                     .bottom(px(4.))
                     .w(px(1.))
-                    .bg(ui_theme::hairline()),
+                    .bg(ui_theme::hair()),
             )
             .children(rows);
 

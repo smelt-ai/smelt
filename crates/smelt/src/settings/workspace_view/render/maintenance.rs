@@ -2,6 +2,7 @@
 
 use super::*;
 #[cfg(any(target_os = "macos", windows))]
+use gpui_component::link::Link;
 use gpui_component::tab::{Tab, TabBar};
 
 pub(super) fn maintenance_page(
@@ -48,7 +49,7 @@ fn cli_command_group(cx: &App) -> SettingGroup {
             "终端里的 smelt 命令",
             SettingField::render(move |_, _, _| {
                 Button::new("install-cli-command")
-                    .compact()
+                    .small()
                     .label(if installing { "安装中…" } else { label })
                     .loading(installing)
                     .disabled(disabled)
@@ -129,12 +130,12 @@ fn update_group(
             updater::UpdateStatus::Checking => (
                 "正在检查更新".to_string(),
                 format!("正在获取{}的最新版本信息…", channel.label()),
-                Some(crate::ui_theme::blue()),
+                Some(crate::ui_theme::run()),
             ),
             updater::UpdateStatus::UpToDate => (
                 "当前已是最新".to_string(),
                 format!("{}暂无可用更新", channel.label()),
-                Some(crate::ui_theme::green()),
+                Some(crate::ui_theme::ok()),
             ),
             updater::UpdateStatus::Available { version, .. } => (
                 "发现新版本".to_string(),
@@ -142,7 +143,7 @@ fn update_group(
                     "{}已发布 {version}，点击“下载并更新”获取安装包",
                     channel.label()
                 ),
-                Some(crate::ui_theme::blue()),
+                Some(crate::ui_theme::run()),
             ),
             updater::UpdateStatus::Downloading {
                 version,
@@ -164,18 +165,18 @@ fn update_group(
                 (
                     "正在下载更新".to_string(),
                     detail,
-                    Some(crate::ui_theme::blue()),
+                    Some(crate::ui_theme::run()),
                 )
             }
             updater::UpdateStatus::Installing { version } => (
                 "正在准备更新".to_string(),
                 format!("正在校验并准备更新包 {version}…"),
-                Some(crate::ui_theme::blue()),
+                Some(crate::ui_theme::run()),
             ),
             updater::UpdateStatus::Applying { version } => (
                 "正在启动更新安装器".to_string(),
                 format!("正在为更新包 {version} 启动安装程序；启动成功后 App 才会退出"),
-                Some(crate::ui_theme::blue()),
+                Some(crate::ui_theme::run()),
             ),
             updater::UpdateStatus::ReadyToInstall(update) => (
                 "更新已准备就绪".to_string(),
@@ -183,7 +184,7 @@ fn update_group(
                     "更新包 {} 已下载完成，点击“立即重启更新”生效",
                     update.version
                 ),
-                Some(crate::ui_theme::green()),
+                Some(crate::ui_theme::ok()),
             ),
             updater::UpdateStatus::InstallFailed(update) => (
                 "安装更新失败".to_string(),
@@ -191,7 +192,7 @@ fn update_group(
                     "更新包 {} 仍已安全保留；可直接重试，或检查是否已有替代版本",
                     update.version
                 ),
-                Some(crate::ui_theme::red()),
+                Some(crate::ui_theme::bad()),
             ),
             updater::UpdateStatus::Failed(failure) => (
                 failure.title().to_string(),
@@ -199,7 +200,7 @@ fn update_group(
                     (updater::UpdateFailure::Location, Some(error)) => error.to_string(),
                     _ => failure.detail().to_string(),
                 },
-                Some(crate::ui_theme::red()),
+                Some(crate::ui_theme::bad()),
             ),
         };
         let status_color = status_rgb
@@ -268,8 +269,7 @@ fn update_group(
 
         let check_entity = update_entity.clone();
         let check_btn = Button::new("check-update")
-            .normal()
-            .compact()
+            .small()
             .label(check_label)
             .disabled(!can_request_check)
             .on_click(move |_, _window, cx: &mut App| {
@@ -290,8 +290,8 @@ fn update_group(
                 };
                 Some(
                     Button::new("download-update")
-                        .commit()
-                        .compact()
+                        .primary()
+                        .small()
                         .label("下载并更新")
                         .on_click(move |_, _window, cx: &mut App| {
                             let candidate = candidate.clone();
@@ -307,8 +307,8 @@ fn update_group(
         let restart_entity = update_entity.clone();
         let restart_btn = ready.then(|| {
             Button::new("restart-update")
-                .commit()
-                .compact()
+                .primary()
+                .small()
                 .label(
                     if matches!(&status, updater::UpdateStatus::InstallFailed(_)) {
                         "重试重启更新"
@@ -332,8 +332,8 @@ fn update_group(
         .then(|| {
             let move_entity = update_entity.clone();
             Button::new("move-app-to-applications")
-                .commit()
-                .compact()
+                .primary()
+                .small()
                 .label(if moving_app {
                     "正在移动…"
                 } else {
@@ -471,11 +471,10 @@ fn help_group() -> SettingGroup {
         SettingItem::new(
             "使用文档",
             SettingField::render(|_, _, _| {
-                Button::new("settings-help-link")
-                    .link()
-                    .icon_size()
-                    .label("帮助文档 ↗")
-                    .on_click(|_, _window, cx| cx.open_url(DOCS_URL))
+                Link::new("settings-help-link")
+                    .href(DOCS_URL)
+                    .text_sm()
+                    .child("帮助文档 ↗")
             }),
         ),
         SettingItem::new(
@@ -487,19 +486,16 @@ fn help_group() -> SettingGroup {
                     .child(
                         Button::new("settings-open-log-link")
                             .quiet()
-                            .icon_size()
+                            .small()
                             .label("打开日志")
                             .on_click(|_, _window, _cx| reveal_app_log()),
                     )
                     .child(
-                        Button::new("settings-report-issue-link")
-                            .link()
-                            .icon_size()
-                            .label("反馈问题 ↗")
-                            .on_click(|_, _window, cx| {
-                                reveal_app_log();
-                                cx.open_url(FEEDBACK_URL);
-                            }),
+                        Link::new("settings-report-issue-link")
+                            .href(FEEDBACK_URL)
+                            .text_sm()
+                            .child("反馈问题 ↗")
+                            .on_click(|_, _window, _cx| reveal_app_log()),
                     )
             }),
         )
@@ -507,13 +503,10 @@ fn help_group() -> SettingGroup {
         SettingItem::new(
             "源码",
             SettingField::render(|_, _, _| {
-                Button::new("settings-github-link")
-                    .link()
-                    .icon_size()
-                    .label("GitHub ↗")
-                    .on_click(|_, _window, cx| {
-                        cx.open_url("https://github.com/smelt-ai/smelt");
-                    })
+                Link::new("settings-github-link")
+                    .href("https://github.com/smelt-ai/smelt")
+                    .text_sm()
+                    .child("GitHub ↗")
             }),
         ),
     ])
@@ -553,7 +546,7 @@ fn daemon_group(entity: Entity<Workspace>, snapshot: &SettingsRenderSnapshot) ->
                 SettingField::render(move |_, _, _| {
                     let upgrade_entity = upgrade_entity.clone();
                     Button::new("upgrade-daemon")
-                        .compact()
+                        .small()
                         .label(if daemon_upgrading {
                             "升级中…"
                         } else {
@@ -598,7 +591,7 @@ fn daemon_group(entity: Entity<Workspace>, snapshot: &SettingsRenderSnapshot) ->
                     .children(has_info.then(|| {
                         Button::new("settings-manage-daemon-sessions")
                             .quiet()
-                            .compact()
+                            .small()
                             .label("查看会话 ›")
                             .on_click(move |_, _window, cx| {
                                 sessions_entity.update(cx, |ws, cx| ws.open_session_manager(cx));
@@ -608,7 +601,7 @@ fn daemon_group(entity: Entity<Workspace>, snapshot: &SettingsRenderSnapshot) ->
                     .child(
                         Button::new("restart-daemon")
                             .quiet()
-                            .compact()
+                            .small()
                             .label("重启")
                             .on_click(move |_, _window, cx: &mut App| {
                                 restart_entity.update(cx, |this, cx| this.request_daemon_restart(cx));
@@ -648,7 +641,7 @@ fn storage_group(cx: &App) -> SettingGroup {
                 let has_findings = state.scan.as_ref().is_some_and(|scan| !scan.is_empty());
                 let scan_btn = Button::new("storage-scan")
                     .quiet()
-                    .compact()
+                    .small()
                     .label(if state.scan.is_some() {
                         "重新扫描"
                     } else {
@@ -666,14 +659,14 @@ fn storage_group(cx: &App) -> SettingGroup {
                         .child(
                             Button::new("storage-clean-cancel")
                                 .quiet()
-                                .compact()
+                                .small()
                                 .label("取消")
                                 .on_click(|_, _window, cx: &mut App| set_confirming(false, cx)),
                         )
                         .child(
                             Button::new("storage-clean-confirm")
                                 .danger()
-                                .compact()
+                                .small()
                                 .label("确认清理")
                                 .on_click(|_, _window, cx: &mut App| {
                                     let Some(scan) = cx
@@ -693,8 +686,8 @@ fn storage_group(cx: &App) -> SettingGroup {
                 } else if has_findings {
                     row = row.child(
                         Button::new("storage-clean")
-                            .danger_outline()
-                            .compact()
+                            .danger_quiet()
+                            .small()
                             .label("清理…")
                             .on_click(|_, _window, cx: &mut App| set_confirming(true, cx)),
                     );

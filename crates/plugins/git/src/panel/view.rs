@@ -134,13 +134,13 @@ impl GitPanel {
                             div()
                                 .text_lg()
                                 .font_semibold()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child(title),
                         )
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(ui_theme::text_faint()))
+                                .text_color(rgb(ui_theme::faint()))
                                 .child(hint),
                         ),
                 )
@@ -181,11 +181,11 @@ impl GitPanel {
             None => format!("↑{ahead} ↓{behind}"),
         };
         let sync_color = if busy.is_some() {
-            rgb(ui_theme::yellow())
+            rgb(ui_theme::need())
         } else if ahead + behind > 0 {
-            rgb(ui_theme::green())
+            rgb(ui_theme::ok())
         } else {
-            rgb(ui_theme::text_faint())
+            rgb(ui_theme::faint())
         };
         let tab_view = cx.entity();
         // 仓库集合要在头部之前算好：历史页的仓库选择器和改动页的分组都用它。
@@ -251,10 +251,9 @@ impl GitPanel {
         let scope_view = cx.entity();
         let scope_control = Button::new("git-diff-scope")
             .quiet()
-            .icon_size()
+            .small()
             .label(self.diff_scope.label())
             .dropdown_caret(true)
-            .text_color(rgb(ui_theme::text_muted()))
             .dropdown_menu(move |mut menu, _window, _cx| {
                 for scope in [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged] {
                     let view = scope_view.clone();
@@ -282,10 +281,9 @@ impl GitPanel {
                 bar.child(
                     Button::new("git-log-repo")
                         .quiet()
-                        .icon_size()
+                        .small()
                         .label(active_repo_label)
                         .dropdown_caret(true)
-                        .text_color(rgb(ui_theme::text_muted()))
                         .dropdown_menu(move |mut menu, _window, _cx| {
                             for (label, repo_root) in repo_choices.clone() {
                                 let ws = ws_log_repo.clone();
@@ -308,7 +306,7 @@ impl GitPanel {
                 bar.child(
                     Button::new("git-sync-menu")
                         .quiet()
-                        .icon_size()
+                        .small()
                         .label(sync_label)
                         .dropdown_caret(busy.is_none())
                         .font_family(crate::mono_font())
@@ -504,12 +502,12 @@ impl GitPanel {
                 .justify_center()
                 .gap_1()
                 .text_sm()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(
                     div()
                         .text_lg()
                         .font_semibold()
-                        .text_color(rgb(ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text()))
                         .child(if message == "工作区干净" {
                             "工作区干净"
                         } else {
@@ -520,7 +518,7 @@ impl GitPanel {
                     col.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ui_theme::text_faint()))
+                            .text_color(rgb(ui_theme::faint()))
                             .child("没有要提交的更改"),
                     )
                 })
@@ -587,7 +585,7 @@ impl GitPanel {
                         .px_3()
                         .py_1()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .child("仓库太多，只列出了一部分"),
                 )
                 .into_any_element()
@@ -605,7 +603,7 @@ impl GitPanel {
                     .pb_1()
                     .text_xs()
                     .font_semibold()
-                    .text_color(rgb(ui_theme::text_faint()))
+                    .text_color(rgb(ui_theme::faint()))
                     .child("变更"),
             )
             .child(list);

@@ -13,8 +13,9 @@ use crate::{CloseConfirm, RenameTarget, Workspace, request_app_quit, ui_theme};
 use crate::{UpdateInstallTrigger, updater};
 
 enum ModalRole {
-    Normal,
-    Commit,
+    Quiet,
+    Secondary,
+    Primary,
     Danger,
 }
 
@@ -65,7 +66,6 @@ impl Workspace {
                     "restore-workset-{}",
                     workset.id
                 )))
-                .normal()
                 .label(label)
                 .disabled(pending)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -88,7 +88,7 @@ impl Workspace {
                 .justify_end()
                 .gap_2()
                 .child(
-                    Self::modal_normal_button(
+                    Self::modal_cancel_button(
                         "restore-workset-cancel",
                         "取消",
                         |this, _, _, cx| this.cancel_close_confirm(cx),
@@ -97,7 +97,7 @@ impl Workspace {
                     .disabled(pending),
                 )
                 .child(
-                    Self::modal_normal_button(
+                    Self::modal_secondary_button(
                         "restore-workset-create",
                         "新建工作树…",
                         move |this, _, window, cx| {
@@ -135,13 +135,7 @@ impl Workspace {
                 .text_color(cx.theme().muted_foreground)
                 .child("新建完成后，请再次点击归档会话的恢复按钮。"),
         );
-        self.modal_shell(
-            460.,
-            true,
-            content,
-            crate::overlay::ModalLayer::CloseConfirm,
-            cx,
-        )
+        self.modal_shell(460., content, crate::overlay::ModalLayer::CloseConfirm, cx)
     }
 
     /// 关闭确认弹窗：关项目说清会连带关掉几个会话；关正在跑的会话说清这一轮会被终止。
@@ -243,7 +237,7 @@ impl Workspace {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Self::modal_normal_button(
+                        Self::modal_cancel_button(
                             "cancel-close-confirm",
                             "取消",
                             |this, _, _, cx| this.cancel_close_confirm(cx),
@@ -265,13 +259,7 @@ impl Workspace {
                         .disabled(target.confirmation_blocked()),
                     ),
             );
-        self.modal_shell(
-            380.,
-            true,
-            content,
-            crate::overlay::ModalLayer::CloseConfirm,
-            cx,
-        )
+        self.modal_shell(380., content, crate::overlay::ModalLayer::CloseConfirm, cx)
     }
 
     /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
@@ -323,9 +311,9 @@ impl Workspace {
                                     .items_center()
                                     .min_w_0()
                                     .child(div().size_2().rounded_full().bg(if is_detached {
-                                        rgb(ui_theme::red())
+                                        rgb(ui_theme::bad())
                                     } else {
-                                        rgb(ui_theme::green())
+                                        rgb(ui_theme::ok())
                                     }))
                                     .child(
                                         div()
@@ -360,11 +348,11 @@ impl Workspace {
                                         div()
                                             .text_xs()
                                             .flex_shrink_0()
-                                            .text_color(rgb(ui_theme::red()))
+                                            .text_color(rgb(ui_theme::bad()))
                                             .child("游离会话（无侧栏追踪）")
                                     })),
                             )
-                            .child(Self::modal_normal_button(
+                            .child(Self::modal_secondary_button(
                                 "kill-session-in-manager",
                                 "关闭",
                                 move |this, _, _, cx| {
@@ -406,7 +394,7 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_cancel_button(
                         "close-session-manager",
                         "关闭",
                         |this, _, _, cx| {
@@ -429,7 +417,6 @@ impl Workspace {
             );
         self.modal_shell(
             420.,
-            true,
             content,
             crate::overlay::ModalLayer::SessionManager,
             cx,
@@ -447,12 +434,9 @@ impl Workspace {
     /// Esc 仍由 Workspace 捕获关掉。Dialog 的 Enter=Confirm 会无视当前按钮直接
     /// 跑确定，危险操作不能这样，所以键盘上下文关掉。Tab 到按钮后，按钮自己的
     /// Enter / Space 才生效。点遮罩不关闭。
-    ///
-    /// `heavy` 只比轻遮罩深一档（退出/删除仍用 true），不要把舞台压成纯黑。
     pub(crate) fn modal_shell(
         &self,
         width: f32,
-        heavy: bool,
         content: Div,
         layer: crate::overlay::ModalLayer,
         cx: &mut Context<Self>,
@@ -461,7 +445,7 @@ impl Workspace {
             .occlude()
             .w(px(width))
             .p_5()
-            .bg(ui_theme::glass_floating())
+            .bg(gpui::rgb(ui_theme::surface()))
             .border_1()
             .border_color(ui_theme::overlay(0x22))
             .rounded(ui_theme::card_radius())
@@ -473,7 +457,7 @@ impl Workspace {
             return div()
                 .absolute()
                 .inset_0()
-                .bg(ui_theme::glass_scrim(heavy))
+                .bg(ui_theme::scrim())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -481,7 +465,7 @@ impl Workspace {
                 .child(card)
                 .into_any_element();
         }
-        let backdrop = ui_theme::glass_scrim(heavy);
+        let backdrop = ui_theme::scrim();
         gpui_base::Dialog::new(cx)
             .focus_handle(self.modal_focus.clone())
             .close_on_escape(false)
@@ -497,24 +481,34 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 弹窗里的普通按钮（取消）。
-    pub(crate) fn modal_normal_button(
+    /// 弹窗里退出这一步的按钮：取消、返回、关闭、以后再说。
+    pub(crate) fn modal_cancel_button(
         id: &'static str,
         label: impl Into<SharedString>,
         on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> smelt_ui::Button {
-        Self::modal_role_button(id, label, ModalRole::Normal, on_click, cx)
+        Self::modal_role_button(id, label, ModalRole::Quiet, on_click, cx)
+    }
+
+    /// 弹窗里和主操作并列的其它选择。
+    pub(crate) fn modal_secondary_button(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> smelt_ui::Button {
+        Self::modal_role_button(id, label, ModalRole::Secondary, on_click, cx)
     }
 
     /// 这块确认里唯一的默认提交（退出、改名、未保存、选目录）。
-    pub(crate) fn modal_commit_button(
+    pub(crate) fn modal_primary_button(
         id: &'static str,
         label: impl Into<SharedString>,
         on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> smelt_ui::Button {
-        Self::modal_role_button(id, label, ModalRole::Commit, on_click, cx)
+        Self::modal_role_button(id, label, ModalRole::Primary, on_click, cx)
     }
 
     /// 不可逆确认：丢弃、删除、重启守护、关闭仍在跑的会话。
@@ -537,11 +531,13 @@ impl Workspace {
         let host = cx.entity().downgrade();
         let label = label.into();
         let button = smelt_ui::Button::new(id)
+            .large()
             .label(label.clone())
             .accessibility_label(label);
         let button = match role {
-            ModalRole::Normal => button.normal(),
-            ModalRole::Commit => button.commit(),
+            ModalRole::Quiet => button.quiet(),
+            ModalRole::Secondary => button.secondary(),
+            ModalRole::Primary => button.primary(),
             ModalRole::Danger => button.danger(),
         };
         button.on_click(move |event, window, cx| {
@@ -621,7 +617,7 @@ impl Workspace {
         let confirm = if installing && prompt.danger {
             Self::modal_danger_button("confirm-quit", confirm_label, on_confirm, cx)
         } else {
-            Self::modal_commit_button("confirm-quit", confirm_label, on_confirm, cx)
+            Self::modal_primary_button("confirm-quit", confirm_label, on_confirm, cx)
         };
 
         let content = v_flex()
@@ -631,7 +627,7 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_cancel_button(
                         "cancel-quit",
                         "取消",
                         |this, _, _, cx| {
@@ -647,7 +643,6 @@ impl Workspace {
             );
         self.modal_shell(
             if installing { 420. } else { 320. },
-            true,
             content,
             crate::overlay::ModalLayer::Quit,
             cx,
@@ -681,7 +676,7 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_cancel_button(
                         "move-app-later",
                         "以后再说",
                         |this, _, _, cx| {
@@ -693,7 +688,7 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .child(Self::modal_commit_button(
+                    .child(Self::modal_primary_button(
                         "move-app-confirm",
                         if self.moving_app {
                             "正在移动…"
@@ -704,7 +699,7 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(380., true, content, crate::overlay::ModalLayer::MoveApp, cx)
+        self.modal_shell(380., content, crate::overlay::ModalLayer::MoveApp, cx)
     }
 
     /// 侧栏「重命名」弹层：与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩），
@@ -739,20 +734,20 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_cancel_button(
                         "cancel-rename",
                         "取消",
                         |this, _, _, cx| this.cancel_rename(cx),
                         cx,
                     ))
-                    .child(Self::modal_commit_button(
+                    .child(Self::modal_primary_button(
                         "confirm-rename",
                         "确定",
                         |this, _, window, cx| this.confirm_rename(window, cx),
                         cx,
                     )),
             );
-        self.modal_shell(320., false, content, crate::overlay::ModalLayer::Rename, cx)
+        self.modal_shell(320., content, crate::overlay::ModalLayer::Rename, cx)
     }
 
     /// 机器菜单「中继…」弹层：和改名同款，多一行没改成的原因。在线和离线改的东西不一样，
@@ -788,13 +783,13 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_cancel_button(
                         "cancel-relay-edit",
                         "取消",
                         |this, _, _, cx| this.cancel_relay_edit(cx),
                         cx,
                     ))
-                    .child(Self::modal_commit_button(
+                    .child(Self::modal_primary_button(
                         "confirm-relay-edit",
                         if edit.saving {
                             "正在保存…"
@@ -805,13 +800,7 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(
-            380.,
-            false,
-            content,
-            crate::overlay::ModalLayer::RelayEdit,
-            cx,
-        )
+        self.modal_shell(380., content, crate::overlay::ModalLayer::RelayEdit, cx)
     }
 
     /// 「重启守护进程」确认。只在有进行中的会话时打开，挂在设置窗上。
@@ -832,7 +821,7 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_secondary_button(
                         "cancel-daemon-restart",
                         "取消",
                         |this, _, _, cx| {
@@ -848,13 +837,7 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(
-            420.,
-            true,
-            content,
-            crate::overlay::ModalLayer::DaemonRestart,
-            cx,
-        )
+        self.modal_shell(420., content, crate::overlay::ModalLayer::DaemonRestart, cx)
     }
 
     /// 「立即重启更新」确认。有进行中的会话时挂在设置窗上。
@@ -874,7 +857,7 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_normal_button(
+                    .child(Self::modal_secondary_button(
                         "cancel-update-install",
                         "取消",
                         |this, _, _, cx| {
@@ -890,13 +873,7 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(
-            420.,
-            true,
-            content,
-            crate::overlay::ModalLayer::UpdateInstall,
-            cx,
-        )
+        self.modal_shell(420., content, crate::overlay::ModalLayer::UpdateInstall, cx)
     }
 }
 

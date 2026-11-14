@@ -30,8 +30,8 @@ pub(crate) fn content_card_style<E: Styled>(element: E) -> E {
     element
         .rounded(ui_theme::card_radius())
         .border_1()
-        .border_color(ui_theme::card_stroke())
-        .bg(rgb(ui_theme::bg_card()))
+        .border_color(ui_theme::hair())
+        .bg(rgb(ui_theme::surface()))
 }
 
 pub(crate) fn content_card() -> Div {
@@ -51,10 +51,10 @@ pub(crate) fn render_engine_mark(kind: Option<ConversationAgentKind>, size: f32)
         Some(kind) => Icon::empty()
             .path(kind.icon_asset())
             .size(px(size))
-            .text_color(rgb(ui_theme::text_mid())),
+            .text_color(rgb(ui_theme::muted())),
         None => Icon::new(IconName::Bot)
             .size(px(size))
-            .text_color(rgb(ui_theme::text_mid())),
+            .text_color(rgb(ui_theme::muted())),
     }
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn render_agent_engine_control(
     if agent_engine_kinds().len() > 1 {
         Button::new("agent-engine")
             .quiet()
-            .compact()
+            .small()
             .icon(icon)
             .label(label)
             .tooltip("执行这个智能体的运行时。后续 skill 和插件会挂在这个引擎上。")
@@ -103,7 +103,7 @@ pub(crate) fn render_agent_model_control(
     };
     Button::new("agent-model")
         .quiet()
-        .compact()
+        .small()
         .label(label)
         .tooltip("这个智能体的新对话和自动化用这套模型。对话里仍可再改。")
         .dropdown_menu(move |mut menu, window, cx| {
@@ -217,13 +217,13 @@ pub(crate) fn product_page_header(
                     div()
                         .text_sm()
                         .font_medium()
-                        .text_color(rgb(ui_theme::text_bright()))
+                        .text_color(rgb(ui_theme::text()))
                         .child(title),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child(format!("{count} {count_unit}")),
                 ),
         )
@@ -311,7 +311,7 @@ pub(crate) fn render_agent_plugin_card(
             .px_5()
             .py_4()
             .text_xs()
-            .text_color(rgb(ui_theme::text_faint()))
+            .text_color(rgb(ui_theme::faint()))
             .child(pending.unwrap_or_else(|| {
                 "还没有装任何插件。点「管理」去能力库导入技能或扩展。".to_string()
             }))
@@ -348,13 +348,13 @@ pub(crate) fn render_agent_plugin_card(
                             div()
                                 .text_sm()
                                 .font_medium()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child("技能"),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .child(format!(
                                     "已勾选 {selected_count} 个。对话只加载勾选的技能和扩展，没勾的一律不加载。改动对新开的对话生效。"
                                 )),
@@ -440,7 +440,7 @@ pub(crate) fn render_agent_context_card(
             .px_5()
             .py_4()
             .text_xs()
-            .text_color(rgb(ui_theme::text_faint()))
+            .text_color(rgb(ui_theme::faint()))
             .child("还没绑定任何上下文。绑定后智能体就知道去哪儿找素材。")
             .into_any_element()
     } else {
@@ -475,13 +475,13 @@ pub(crate) fn render_agent_context_card(
                             div()
                                 .text_sm()
                                 .font_medium()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child("绑定的上下文"),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .child("目录和链接会写进 system prompt。改动对新开的对话生效。"),
                         ),
                 )
@@ -507,7 +507,7 @@ pub(crate) fn render_agent_context_card(
                 .px_5()
                 .pb_3()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(format!(
                     "{space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
                     api::model::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
@@ -590,7 +590,7 @@ pub(crate) fn render_agent_memory_summary(
                 .flex_shrink_0()
                 .text_sm()
                 .font_medium()
-                .text_color(rgb(ui_theme::text_bright()))
+                .text_color(rgb(ui_theme::text()))
                 .child("记忆"),
         )
         .child(agent_memory_switch(
@@ -610,7 +610,7 @@ pub(crate) fn render_agent_memory_summary(
                     div()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child(truncated_line(if agent.memory_enabled {
                             memory_summary_text(
                                 editor.memories.agent.entries.len(),
@@ -624,7 +624,7 @@ pub(crate) fn render_agent_memory_summary(
                     row.child(
                         div()
                             .flex_shrink_0()
-                            .text_color(rgb(ui_theme::red()))
+                            .text_color(rgb(ui_theme::bad()))
                             .child(format!("{pending} 条待确认")),
                     )
                 }),
@@ -693,19 +693,16 @@ pub(crate) fn render_agent_memory_card(
                             div()
                                 .text_sm()
                                 .font_medium()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child("记忆"),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(ui_theme::text_muted()))
-                                .child(if memory_enabled {
-                                    "智能体在对话和自动化里记下的长期信息。改动从下一轮对话起生效。"
-                                } else {
-                                    "记忆已关闭：不注入、不写入。下面的记忆保留着，重新打开后照常使用。"
-                                }),
-                        ),
+                        .child(div().text_xs().text_color(rgb(ui_theme::muted())).child(
+                            if memory_enabled {
+                                "智能体在对话和自动化里记下的长期信息。改动从下一轮对话起生效。"
+                            } else {
+                                "记忆已关闭：不注入、不写入。下面的记忆保留着，重新打开后照常使用。"
+                            },
+                        )),
                 )
                 .child(
                     div()
@@ -797,7 +794,6 @@ pub(crate) fn agent_memory_section(
     let folder_agent = agent_id.to_string();
     let folder_entity = entity.clone();
     let open_folder = compact_chip(format!("agent-memory-folder-{layer_key}"))
-        .icon_size()
         .icon(IconName::FolderOpen)
         .icon_action("打开记忆文件夹")
         .on_click(move |_, _, cx| {
@@ -822,7 +818,7 @@ pub(crate) fn agent_memory_section(
             .px_3()
             .py_1p5()
             .text_xs()
-            .text_color(rgb(ui_theme::text_faint()))
+            .text_color(rgb(ui_theme::faint()))
             .child(if narrowed && !listing.entries.is_empty() {
                 "没有匹配的记忆"
             } else {
@@ -850,7 +846,7 @@ pub(crate) fn agent_memory_section(
                         .flex_1()
                         .text_xs()
                         .font_medium()
-                        .text_color(rgb(ui_theme::text_muted()))
+                        .text_color(rgb(ui_theme::muted()))
                         .child(memory_section_title(title, listing, narrowed.then_some(shown))),
                 )
                 .child(open_folder),
@@ -861,7 +857,7 @@ pub(crate) fn agent_memory_section(
                     .px_3()
                     .py_1()
                     .text_xs()
-                    .text_color(rgb(ui_theme::red()))
+                    .text_color(rgb(ui_theme::bad()))
                     .child(format!(
                         "规则类记忆正文超过 {}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。",
                         api::model::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
@@ -953,7 +949,7 @@ pub(crate) fn agent_memory_row(
                 .flex_shrink_0()
                 .w(px(44.))
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(memory_kind_label(entry.kind.as_deref())),
         )
         .child(
@@ -985,13 +981,13 @@ pub(crate) fn agent_memory_row(
                             })
                             .size(px(12.))
                             .flex_shrink_0()
-                            .text_color(rgb(ui_theme::text_faint())),
+                            .text_color(rgb(ui_theme::faint())),
                         )
                         .child(
                             div()
                                 .min_w_0()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .overflow_hidden()
                                 .child(truncated_line(entry.name.clone())),
                         ),
@@ -1000,7 +996,7 @@ pub(crate) fn agent_memory_row(
                     // 待确认时前面挂着原因，一行放不下就把描述挤没了；给两行再省略。
                     div()
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
+                        .text_color(rgb(ui_theme::faint()))
                         .text_ellipsis()
                         .line_clamp(2)
                         .child(subtitle),
@@ -1012,16 +1008,15 @@ pub(crate) fn agent_memory_row(
                     .flex_shrink_0()
                     .text_xs()
                     .text_color(rgb(if stale {
-                        ui_theme::red()
+                        ui_theme::bad()
                     } else {
-                        ui_theme::text_faint()
+                        ui_theme::faint()
                     }))
                     .child(label),
             )
         })
         .child(
             compact_chip(format!("agent-memory-open-{layer_key}-{}", entry.file_name))
-                .icon_size()
                 .icon(IconName::ExternalLink)
                 .icon_action("用文本编辑器打开")
                 .on_click(move |_, _, cx| {
@@ -1035,7 +1030,6 @@ pub(crate) fn agent_memory_row(
                     "agent-memory-approve-{layer_key}-{}",
                     entry.file_name
                 ))
-                .icon_size()
                 .icon(IconName::Check)
                 .accessibility_label("采纳")
                 .tooltip("采纳：之后的对话会用到这条记忆")
@@ -1053,7 +1047,6 @@ pub(crate) fn agent_memory_row(
                 "agent-memory-remove-{layer_key}-{}",
                 entry.file_name
             ))
-            .icon_size()
             .icon(IconName::Close)
             .icon_action("删除这条记忆")
             .on_click(move |_, window, cx| {
@@ -1083,7 +1076,7 @@ pub(crate) fn agent_memory_body(id: String, body: &str) -> AnyElement {
     let lines: Vec<AnyElement> = if body.is_empty() {
         vec![
             div()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child("（正文为空）")
                 .into_any_element(),
         ]
@@ -1107,9 +1100,9 @@ pub(crate) fn agent_memory_body(id: String, body: &str) -> AnyElement {
         .max_h(px(240.))
         .overflow_y_scroll()
         .rounded(px(6.))
-        .bg(rgb(ui_theme::bg_column()))
+        .bg(rgb(ui_theme::side()))
         .text_xs()
-        .text_color(rgb(ui_theme::text_muted()))
+        .text_color(rgb(ui_theme::muted()))
         .children(lines)
         .into_any_element()
 }
@@ -1133,7 +1126,7 @@ pub(crate) fn agent_context_row(
             div()
                 .flex_shrink_0()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(kind_label.to_string()),
         )
         .child(
@@ -1141,13 +1134,12 @@ pub(crate) fn agent_context_row(
                 .flex_1()
                 .min_w_0()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_bright()))
+                .text_color(rgb(ui_theme::text()))
                 .overflow_hidden()
                 .child(truncated_line(value.to_string())),
         )
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
-                .icon_size()
                 .icon(api::ui::trash_icon())
                 .icon_action(if is_folder {
                     "解除这个目录的绑定"
@@ -1257,7 +1249,7 @@ pub(crate) fn render_agent_mcp_card(
                 .px_5()
                 .py_4()
                 .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
+                .text_color(rgb(ui_theme::faint()))
                 .child(pending.unwrap_or_else(|| {
                     "还没有配置 MCP 服务器。点「管理」去能力库添加。".to_string()
                 }))
@@ -1294,13 +1286,13 @@ pub(crate) fn render_agent_mcp_card(
                             div()
                                 .text_sm()
                                 .font_medium()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child("MCP"),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_muted()))
+                                .text_color(rgb(ui_theme::muted()))
                                 .child(format!(
                                     "已勾选 {selected_count} 个。对话只连勾选的服务器，没勾的不启动。改动对新开的对话生效。"
                                 )),
@@ -1353,7 +1345,7 @@ pub(crate) fn agent_plugin_row(
         None => origin.to_string(),
     };
     let subtitle_color = if usable {
-        rgb(ui_theme::text_faint())
+        rgb(ui_theme::faint())
     } else {
         cx.theme().danger.into()
     };
@@ -1396,16 +1388,16 @@ pub(crate) fn agent_plugin_row(
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_bright()))
+                                .text_color(rgb(ui_theme::text()))
                                 .child(name.to_string()),
                         )
                         .child(
                             div()
                                 .px_1p5()
                                 .rounded(px(4.))
-                                .bg(rgb(ui_theme::bg_stage()))
+                                .bg(rgb(ui_theme::bg()))
                                 .text_xs()
-                                .text_color(rgb(ui_theme::text_faint()))
+                                .text_color(rgb(ui_theme::faint()))
                                 .child(kind_label.to_string()),
                         ),
                 )
@@ -1430,9 +1422,9 @@ pub(crate) fn editor_field_frame() -> Div {
         .h(ui_theme::height::sm())
         .overflow_hidden()
         .border_1()
-        .border_color(rgb(ui_theme::border_loud()))
+        .border_color(ui_theme::hair_strong())
         .rounded(px(8.))
-        .bg(rgb(ui_theme::bg_column()))
+        .bg(rgb(ui_theme::side()))
 }
 
 pub(crate) fn framed_text_input(input: &Entity<InputState>, aria: &'static str) -> Div {
@@ -1450,14 +1442,14 @@ pub(crate) fn framed_text_input(input: &Entity<InputState>, aria: &'static str) 
 pub(crate) fn framed_textarea(textarea: Textarea) -> AnyElement {
     div()
         .border_1()
-        .border_color(rgb(ui_theme::border_loud()))
+        .border_color(ui_theme::hair_strong())
         .rounded(px(8.))
-        .bg(rgb(ui_theme::bg_column()))
+        .bg(rgb(ui_theme::side()))
         .child(textarea.appearance(false))
         .into_any_element()
 }
 pub(crate) fn compact_chip(id: impl Into<ElementId>) -> Button {
-    Button::new(id).quiet().compact()
+    Button::new(id).quiet().small()
 }
 
 /// 几个互斥选项的分段开关，选中块在选项之间滑动。`on_select` 拿到被点的下标。

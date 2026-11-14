@@ -384,7 +384,7 @@ impl Render for TrajectoryWindow {
             .size_full()
             .min_h_0()
             .overflow_hidden()
-            .bg(gpui::rgb(ui_theme::bg_stage()))
+            .bg(gpui::rgb(ui_theme::bg()))
             .child(render_trajectory_toolbar(
                 self.cached_turns,
                 self.cached_calls,
@@ -448,7 +448,7 @@ fn render_trajectory_toolbar(
         .gap_3()
         .items_center()
         .border_b_1()
-        .border_color(ui_theme::card_stroke())
+        .border_color(ui_theme::hair())
         .child(
             h_flex()
                 .gap_2()
@@ -456,21 +456,17 @@ fn render_trajectory_toolbar(
                 .child(
                     Icon::new(IconName::Inspector)
                         .size(px(14.))
-                        .text_color(gpui::rgb(ui_theme::text_mid())),
+                        .text_color(gpui::rgb(ui_theme::muted())),
                 )
                 .child(
                     div()
                         .text_sm()
                         .font_semibold()
-                        .text_color(gpui::rgb(ui_theme::text_bright()))
+                        .text_color(gpui::rgb(ui_theme::text()))
                         .child("会话追踪"),
                 ),
         )
-        .child(
-            Separator::vertical()
-                .h(px(14.))
-                .color(ui_theme::card_stroke()),
-        )
+        .child(Separator::vertical().h(px(14.)).color(ui_theme::hair()))
         .child(
             h_flex()
                 .gap_3()
@@ -488,15 +484,11 @@ fn render_trajectory_toolbar(
 fn stat_text(label: &'static str, value: String) -> gpui::Div {
     h_flex()
         .gap_1()
-        .child(
-            div()
-                .text_color(gpui::rgb(ui_theme::text_muted()))
-                .child(label),
-        )
+        .child(div().text_color(gpui::rgb(ui_theme::muted())).child(label))
         .child(
             div()
                 .font_medium()
-                .text_color(gpui::rgb(ui_theme::text_mid()))
+                .text_color(gpui::rgb(ui_theme::muted()))
                 .child(value),
         )
 }
@@ -508,7 +500,7 @@ fn render_ledger_header(muted: gpui::Hsla) -> gpui::Div {
         .w_full()
         .px_3()
         .border_b_1()
-        .border_color(ui_theme::card_stroke())
+        .border_color(ui_theme::hair())
         .bg(ui_theme::overlay(0x0a))
         .text_xs()
         .font_medium()
@@ -625,7 +617,7 @@ fn render_ledger_row(
                     .top_0()
                     .bottom_0()
                     .w(px(2.))
-                    .bg(gpui::rgb(ui_theme::accent())),
+                    .bg(gpui::rgb(ui_theme::ink())),
             )
         })
         .child(
@@ -653,7 +645,7 @@ fn render_ledger_row(
                         .font_medium()
                         .text_color(muted)
                         .when(begins_group, |label| {
-                            label.text_color(gpui::rgb(ui_theme::text_mid()))
+                            label.text_color(gpui::rgb(ui_theme::muted()))
                         })
                         .child(if begins_group {
                             turn_label
@@ -693,7 +685,7 @@ fn render_ledger_row(
                         .min_w_0()
                         .overflow_hidden()
                         .text_sm()
-                        .text_color(gpui::rgb(ui_theme::text_mid()))
+                        .text_color(gpui::rgb(ui_theme::muted()))
                         .child(truncated_line(event.text.clone())),
                 ),
         )
@@ -754,8 +746,8 @@ fn render_inspector(
         .flex_shrink_0()
         .overflow_hidden()
         .border_l_1()
-        .border_color(ui_theme::card_stroke())
-        .bg(gpui::rgb(ui_theme::bg_stage()))
+        .border_color(ui_theme::hair())
+        .bg(gpui::rgb(ui_theme::bg()))
         .child(
             v_flex()
                 .flex_shrink_0()
@@ -764,7 +756,7 @@ fn render_inspector(
                 .pb_2()
                 .gap_2()
                 .border_b_1()
-                .border_color(ui_theme::card_stroke())
+                .border_color(ui_theme::hair())
                 .child(
                     h_flex()
                         .gap_2()
@@ -798,7 +790,7 @@ fn render_inspector(
                     div()
                         .text_base()
                         .font_semibold()
-                        .text_color(gpui::rgb(ui_theme::text_bright()))
+                        .text_color(gpui::rgb(ui_theme::text()))
                         .child(event.text.clone()),
                 )
                 .child(div().text_xs().text_color(muted).child(kind_zh)),
@@ -811,7 +803,7 @@ fn render_inspector(
                 .gap_5()
                 .items_center()
                 .border_b_1()
-                .border_color(ui_theme::card_stroke())
+                .border_color(ui_theme::hair())
                 .text_xs()
                 .child(inspector_meta(
                     "SEQ",
@@ -863,7 +855,7 @@ fn render_inspector(
                         .p_4()
                         .text_sm()
                         .line_height(px(20.))
-                        .text_color(gpui::rgb(ui_theme::text_mid()))
+                        .text_color(gpui::rgb(ui_theme::muted()))
                         .when(!preview, |source| {
                             source
                                 .font_family(smelt_model::font_config::font_family())
@@ -881,7 +873,7 @@ fn inspector_meta(label: &'static str, value: String, muted: gpui::Hsla) -> gpui
         .child(
             div()
                 .font_medium()
-                .text_color(gpui::rgb(ui_theme::text_mid()))
+                .text_color(gpui::rgb(ui_theme::muted()))
                 .child(value),
         )
 }
@@ -894,7 +886,7 @@ fn render_sequence_overview(overview: &TrajectoryOverview, muted: gpui::Hsla) ->
         .py_2()
         .gap_1()
         .border_b_1()
-        .border_color(ui_theme::card_stroke())
+        .border_color(ui_theme::hair())
         .bg(ui_theme::overlay(0x06))
         .child(
             h_flex()
@@ -904,7 +896,7 @@ fn render_sequence_overview(overview: &TrajectoryOverview, muted: gpui::Hsla) ->
                     div()
                         .text_xs()
                         .font_semibold()
-                        .text_color(gpui::rgb(ui_theme::text_mid()))
+                        .text_color(gpui::rgb(ui_theme::muted()))
                         .child("SEQUENCE OVERVIEW"),
                 )
                 .child(div().flex_1())
@@ -917,19 +909,19 @@ fn render_sequence_overview(overview: &TrajectoryOverview, muted: gpui::Hsla) ->
         )
         .child(overview_lane(
             "INPUT",
-            ui_theme::blue(),
+            ui_theme::chart(0),
             &overview.bins,
             |bin| bin.input,
         ))
         .child(overview_lane(
             "MODEL",
-            ui_theme::purple(),
+            ui_theme::chart(3),
             &overview.bins,
             |bin| bin.model,
         ))
         .child(overview_lane(
             "TOOLS",
-            ui_theme::green(),
+            ui_theme::chart(1),
             &overview.bins,
             |bin| bin.tools,
         ))

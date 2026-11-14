@@ -338,7 +338,7 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
-                        .bg(ui_theme::glass_floating())
+                        .bg(gpui::rgb(ui_theme::surface()))
                         .border_1()
                         .border_color(ui_theme::overlay(0x22))
                         .rounded(ui_theme::composer_radius())
@@ -423,8 +423,7 @@ impl Workspace {
                 )
                 .child(
                     Button::new("workspace-image-preview-close")
-                        .surface()
-                        .circle()
+                        .floating()
                         .icon(IconName::Close)
                         .icon_action("关闭预览")
                         .absolute()
