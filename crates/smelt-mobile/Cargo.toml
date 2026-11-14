@@ -45,7 +45,7 @@ log = "0.4"
 # 而 logcat 是排查真机问题的唯一手段。Apple 侧不需要（暂时也没接），所以按
 # target 条件依赖，避免给 iOS 构建平白拉进 JNI 相关的代码。
 [target.'cfg(target_os = "android")'.dependencies]
-android_logger = "0.14"
+android_logger = "0.15"
 
 # 不直接用 libc，只给它封顶：libc 0.2.190 起 `in6_ifreq`、`RTM_GET2`、`RTF_IFSCOPE` 等只在
 # macOS 上导出，netwatch 0.19/0.20（iroh 引入）在所有 Apple 平台都用它们，iOS 上编不过。
